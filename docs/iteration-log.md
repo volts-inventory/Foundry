@@ -111,22 +111,82 @@ One **MINOR** was raised and fixed for completeness:
 |---|---|---|---|---|
 | 1 | MINOR | architecture | Spec-gate `fail` edge returned unconditionally to `PROD`, but bugfix enters Spec from `MINSPEC` | Fail edge is now route-discriminated: `greenfield/evolution: fail → PROD`, `bugfix: fail → MINSPEC`; added a prose rule that gate failures return to the route's producer. [architecture §1](./architecture.md) |
 
+## Round 7 — HIGHER BAR: three specialist critics in parallel (30 findings: 7 BLOCKER, 16 MAJOR, 7 MINOR)
+
+Rounds 1–6 used generalist design-doc critics. Round 7 raised the bar to
+**implementation-readiness**, running three specialists concurrently —
+distributed-systems/correctness, offensive-security/AI-safety, and
+AI-agents/LLM-systems — each empowered to challenge core assumptions. They found
+deep, real defects the generalist rounds structurally could not.
+
+### Distributed-systems (10): correctness/concurrency/atomicity
+
+| # | Sev | Problem | Resolution |
+|---|---|---|---|
+| DS1 | BLOCKER | `merge_gates` "latest-wins" relied on dict-iteration order, not causality | Added monotonic `seq`; reducer is **max-by-`seq`** per `(name, run_against)`. [arch §3](./architecture.md) |
+| DS2 | BLOCKER | Checkpoint↔external dual-write; idempotency key not stored by external system → can't disambiguate on resume | Key **stored by the external system**; protocol intent-log→act→confirm-log; resume **re-queries by key**, fail-to-human if unknown. [arch §5](./architecture.md) |
+| DS3 | MAJOR | Checkpoint / ledger / WORM could diverge on crash | **Transactional outbox**: checkpoint+ledgers+outbox in one txn; relay drains to externals + WORM. [arch §5](./architecture.md) |
+| DS4 | BLOCKER | `tree_sha` undefined → collisions (stale PASS) or spurious diffs (cascade) | Precise definition: normalized tracked source + lockfile hash + toolchain digest; build artifacts/timestamps excluded; cross-machine invariant test. [arch §4](./architecture.md) |
+| DS5 | MAJOR | Cross-gate fix cascade never converges; loop-detector keyed on ever-changing diff hash | **Global `fix_attempts_since_all_green` bound** (escalates as *non-convergence*) + **semantic loop signature**. [arch §7](./architecture.md) |
+| DS6 | MAJOR | "Pause in-flight branches mid-superstep" is impossible in LangGraph | Budget enforced at **superstep boundaries**; cooperative-cancellation token; `Send` per-item commit. [arch §6](./architecture.md) |
+| DS7 | MAJOR | Assurance join undefined under partial failure / hang | `GateResult.status="error"`; `Send` independent branches; per-branch deadline; bounded retry → escalate. [arch §5](./architecture.md) |
+| DS8 | MINOR | `operator.add` reducers not commutative under fan-in | All channels keyed set-unions; order read from `seq`. [arch §3](./architecture.md) |
+| DS9 | MINOR | Checkpoint write amplification on long runs | `history`/large artifacts **out-of-band by handle**; bounded checkpoint. [arch §3](./architecture.md) |
+| DS10 | MINOR | Loop signature defeated by cosmetic diff changes | Signature keyed on `(criterion_id, gate, failure_signature)`. [gov §3](./governance.md) |
+
+### Offensive-security / AI-safety (10): the agent-authored trust surface
+
+| # | Sev | Problem | Resolution |
+|---|---|---|---|
+| SEC1 | BLOCKER | Trusted builder executes **agent-authored** build/CI/IaC config → signs a backdoor | Build config = high-privilege artifact behind a **Supply-chain gate**; strongly-hermetic **no-egress** builder; no build hooks; SAST over build/IaC. [gov §4](./governance.md) |
+| SEC2 | BLOCKER | Agents can pass the Security gate by editing scanner config/suppressions | Scanner config **run-immutable, repo-external**; any suppression/floor edit = first-class finding + deterministic monitor. [gov §2](./governance.md) |
+| SEC3 | MAJOR | Analyzer injectable via untrusted trace content | Load-bearing detections **deterministic**; analyzer toolless, event-triggered, fed **structured features** (prose as data); injection in its eval set. [gov §3](./governance.md) |
+| SEC4 | MAJOR | Exfil over **allowlisted** egress; install/build not mocked | Credentialed phase separated from untrusted-code exec; internal hash-pinned dep mirror; anomaly-detecting egress proxies. [gov §2](./governance.md) |
+| SEC5 | MAJOR | Agent-authored IaC escalates the deployed system's privileges | Policy-as-code on IaC `plan`; OIDC/trust changes → HITL; **non-agent deployer**. [gov §2/§5](./governance.md) |
+| SEC6 | MAJOR | HITL is a rubber stamp over agent-curated framing | Independent non-agent **evidence pack**; two-person sign-off on trust-root. [gov §6](./governance.md) |
+| SEC7 | MAJOR | Signature ≠ "passed gates"; no deploy-time admission | **Gate-state bound into the SLSA predicate** + **deploy-time admission controller**. [gov §4/§5](./governance.md) |
+| SEC8 | MAJOR | Criterion-coverage gameable via weak/omitted criteria | **Independent criteria-completeness critic** (security/abuse required; omission fails Spec). [gov §1b](./governance.md) |
+| SEC9 | MINOR | WORM written by agents → tamper risk | **Non-agent appender**; external chain anchoring; no agent can truncate/rotate. [gov §8](./governance.md) |
+| SEC10 | MINOR | PII/PHI egress to model/trace providers unspecified | Redaction **before provider egress** (fail-closed); zero-retention terms; PHI/PCI never leaves boundary. [gov §2](./governance.md) |
+
+### AI-agents / LLM-systems (10): the core bet and eval validity
+
+| # | Sev | Problem | Resolution |
+|---|---|---|---|
+| AI1 | BLOCKER | The decisive A/B was under-specified and rigged toward Foundry | **Pre-registration**: 3 arms (incl. strong agentic baseline + gates-only arm), USD equalizer, `n`/`k`/power/test frozen & hashed. [eval §2](./evaluation.md) |
+| AI2 | BLOCKER | Context-assembly silently drops plan-critical state | Never-summarized **`pinned_constraints`**; call/def-graph retrieval with a **recall floor**; **`need-context` escape**. [arch §8](./architecture.md) |
+| AI3 | MAJOR | Judges correlate with implementer; self-preference bias | Measured error-correlation + self-preference evals; **different model *family*** on high-risk review/QA. [eval §4](./evaluation.md) |
+| AI4 | MAJOR | "Monitor overhead ≤5%" + cost/latency unvalidated | **Per-feature cost+wall-clock model**; **event-triggered** analyzer with input cap. [eval §8](./evaluation.md) |
+| AI5 | MAJOR | LLM nondeterminism contradicts the audit/replay claim | Temp-0 for gates/judges; record seeds/model-fingerprint; **pinned-ID-drift alert**; audit = record, not bitwise replay. [arch §8](./architecture.md) |
+| AI6 | MAJOR | Telephone-game intent loss; coverage ≠ fidelity | **Criterion fidelity** (negative oracle per high-risk criterion) + **handoff-fidelity eval**. [eval §4](./evaluation.md) |
+| AI7 | MAJOR | Tiering by intuition (impl < review is questionable) | Tiering = **validated optimization output**; high-risk impl + oracle-authoring default **T1**; escaped-defects tracked **by producing tier**. [agents](./agents.md), [eval §9](./evaluation.md) |
+| AI8 | MAJOR | "Hidden" tests reachable at runtime; benchmark contamination | Hidden tests in an **unreachable scoring harness**; **post-cutoff in-house novel suite** + contamination probes. [eval §6](./evaluation.md) |
+| AI9 | MINOR | Same-tier failover illusory within one family | Stated honestly: intra-family = retry/pause-escalate; cross-family carries per-model calibration. [arch §8](./architecture.md) |
+| AI10 | MINOR | Analyzer-as-injectable-judge (≈SEC3) | Oracle/gate/criteria edits are **deterministic** trips; analyzer advisory only. [gov §3](./governance.md) |
+
+**Round 7 verdict (solutioner):** all 30 addressed via full rewrites of
+architecture.md, governance.md, evaluation.md and targeted updates to agents.md /
+PLAN.md. Re-submitted to a fresh specialist panel for Round 8.
+
 ## Loop summary
 
-| Round | Findings | BLOCKER | MAJOR | MINOR | Verdict |
-|---|---|---|---|---|---|
-| 1 | 16 | 2 | 9 | 5 | material findings remain |
-| 2 | 10 | 1 | 5 | 4 | material findings remain |
-| 3 | 5 | 0 | 2 | 3 | material findings remain |
-| 4 | 3 | 0 | 3 | 0 | material findings remain |
-| 5 | 2 | 0 | 1 | 1 | material findings remain |
-| 6 | 1 | 0 | 0 | 1 | **NO MATERIAL FINDINGS** |
+| Round | Bar | Findings | BLOCKER | MAJOR | MINOR | Verdict |
+|---|---|---|---|---|---|---|
+| 1 | design-doc | 16 | 2 | 9 | 5 | material remain |
+| 2 | design-doc | 10 | 1 | 5 | 4 | material remain |
+| 3 | design-doc | 5 | 0 | 2 | 3 | material remain |
+| 4 | design-doc | 3 | 0 | 3 | 0 | material remain |
+| 5 | design-doc | 2 | 0 | 1 | 1 | material remain |
+| 6 | design-doc | 1 | 0 | 0 | 1 | **no material** |
+| 7 | **implementation-ready (3 specialists)** | 30 | 7 | 16 | 7 | material remain |
+| 8 | implementation-ready (3 specialists) | _running_ | | | | _pending_ |
 
-Total: **37 findings raised and resolved** over six critic→solutioner→rewrite
-rounds. The loop terminated when an independent critic, calibrated to a
-design-doc standard, returned no BLOCKER or MAJOR findings; the single residual
-MINOR was also fixed. This log is the honest record the process produced — not a
-marketing artifact.
+Total so far: **67 findings raised and resolved** across two bars. The
+design-doc loop converged at Round 6; raising the bar to implementation-readiness
+with specialist critics immediately surfaced 30 deeper defects (7 of them
+blockers), which is the expected behavior of a genuinely higher standard — and
+the reason the bar was raised. This log is the honest record the process
+produced, not a marketing artifact.
 
 ## Conformance mapping — plan vs. industry practice (2024–2026)
 

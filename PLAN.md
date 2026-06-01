@@ -56,13 +56,17 @@ contracts in [docs/agents.md](./docs/agents.md).
 
 | Layer | Roles (agents) | Primary artifacts produced |
 |---|---|---|
-| **1. Product & Planning** | Stakeholder/Client Proxy, Product Manager, Engineering/Program Manager | Intent brief, PRD + user stories, acceptance criteria, sprint plan, budget & risk register |
-| **2. Architecture & Design** | Principal Architect / Eng Lead, Domain Specialist *(conditional)*, UX/Design *(conditional)* | System design, ADRs, interface/API contracts, data model, ownership map, UX spec |
+| **1. Product & Planning** | Stakeholder/Client Proxy, Product Manager, Criteria-Completeness Critic *(independent)*, Engineering/Program Manager | Intent brief, PRD + user stories, acceptance criteria (+ completeness critique), sprint plan, budget & risk register |
+| **2. Architecture & Design** | Principal Architect / Eng Lead, Domain Specialist *(conditional)*, UX/Design *(conditional)* | System design, ADRs, interfaces, data model, ownership map, `pinned_constraints`, UX spec |
 | **3. Implementation** | Senior Engineer(s), Junior Engineer(s) | Task breakdown, branch-per-task scaffolding, feature diffs, PRs, code review, conflict resolutions |
-| **4. Quality & Verification** | QA Engineer, SDET, Reviewer/Critic (+ CI runner) | Test plan, criterion-traceable tests, e2e suite, build/test results, review verdicts |
-| **5. Security & Compliance** | Security/AppSec Engineer, Audit/Compliance | Threat model, SAST/DAST/secret/dep findings, SBOM, license & control mapping |
-| **6. Operations** | DevOps/SRE, Release Manager (+ trusted CI builder) | CI/CD pipeline, IaC, observability config, deploy/rollback, SLSA-attested signed release |
-| **7. Governance / Meta** | Orchestrator/Supervisor, Guardian (monitors + analyzer), Budget Controller, Human Liaison | Routing, policy enforcement, cost ledger, escalations |
+| **4. Quality & Verification** | QA Engineer (cross-family on high-risk), SDET, Reviewer/Critic (+ CI runner) | Test plan, criterion-*fidelity* tests, e2e suite, build/test results, review verdicts |
+| **5. Security & Compliance** | Security/AppSec Engineer, Audit/Compliance, Supply-Chain Reviewer | Threat model, SAST (incl. build/IaC) findings, SBOM, license & control mapping, supply-chain report |
+| **6. Operations** | DevOps/SRE, Release Manager *(+ non-agent: trusted builder, admission controller, deployer)* | CI/CD pipeline, IaC *proposal*, observability config, deploy/rollback, SLSA-attested signed release (gate-state bound) |
+| **7. Governance / Meta** | Orchestrator/Supervisor, Guardian (deterministic monitors + event-triggered analyzer), Budget Controller, Human Liaison | Routing, policy enforcement, cost ledger, convergence bound, escalations |
+
+> **Non-agent components** (trusted builder, deploy-time admission controller,
+> least-privileged deployer, WORM audit appender) are deliberately *outside*
+> agent control — agents propose their inputs but never are these components.
 
 Why both **senior and junior** engineers? Seniors do decomposition, scaffolding,
 the hard parts, *review*, and *integration/conflict resolution* — juniors
@@ -118,10 +122,16 @@ mapped to locations in [docs/architecture.md §8](./docs/architecture.md).
   then a deterministic **integration node** with conflict resolution, then an
   authoritative integrated Build+Test gate
   ([docs/architecture.md §4](./docs/architecture.md)).
-- **Durable checkpoints + side-effect ledger** — Postgres checkpointer for
-  resume/time-travel of *internal* state; an **external-action ledger** with
-  idempotency keys so resume/replay never double-commits, double-PRs,
-  double-tags, or re-deploys ([docs/architecture.md §5](./docs/architecture.md)).
+- **Durable checkpoints + transactional outbox** — one Postgres transaction
+  commits the checkpoint, budget/action ledgers, **and** an outbox per superstep,
+  so internal state, governance records, and audit never diverge; a relay drains
+  the outbox to git/PR/deploy and the WORM store. Idempotency keys are **stored
+  by the external system**, and resume **re-queries by key** (fail-to-human if
+  unknown) — so replay never double-commits, double-tags, or re-deploys
+  ([docs/architecture.md §5](./docs/architecture.md)).
+- **Bounded checkpoints** — `history` and large artifact bodies live out-of-band
+  by content-addressed handle, so checkpoint size doesn't grow with trajectory
+  length (no quadratic write amplification on long-horizon runs).
 - **Bounded context, not the full history** — each node has a context-assembly
   contract (task + relevant interfaces + retrieved code spans + *summarized*
   history); repo grounding uses a symbol index + embeddings, not raw reading
@@ -154,24 +164,35 @@ escalate. Each gate records whether its **decision rule** and its **execution**
 were deterministic. Full definitions, flake handling, and anti-gaming in
 [docs/governance.md §1](./docs/governance.md).
 
-1. **Spec** — acceptance criteria exist, are testable, and carry `criterion_id`s (bugfixes: a repro + expected-behavior brief).
-2. **Design** — ADRs approved; interfaces, data model, ownership map defined (HITL for significant designs).
+1. **Spec** — acceptance criteria exist, are testable, carry `criterion_id`s, and pass an **independent completeness critique** (security/abuse criteria required; omission fails) (bugfixes: a repro + expected-behavior brief).
+2. **Design** — ADRs approved; interfaces, data model, ownership map, and `pinned_constraints` defined (HITL for significant designs).
 3. **Build** *(per-branch + integrated)* — compiles, lints, type-checks (CI runner).
-4. **Test** *(per-branch + integrated)* — green; **every acceptance criterion exercised** (criterion-coverage); coverage ≥ threshold; flakes quarantined, not retried-to-green (QA, with authorship separated from implementation).
-5. **Security** — SAST + secret scan + dependency audit clean; threat-model items addressed.
-6. **Audit** — SBOM clean (no critical CVEs / disallowed licenses); SBOM mapped to controls (signing & SLSA provenance are produced later by the trusted builder).
-7. **E2E** — end-to-end scenarios green on the integrated tree (SDET; flake policy applies).
-8. **Release** — human sign-off on an already-attested artifact; signature + provenance + changelog + version + rollback plan present.
+4. **Test** *(per-branch + integrated)* — green; **criterion *fidelity*** (each high-risk criterion's test fails against a known-bad reference), not just coverage; threshold met; flakes quarantined (QA, authorship separated + cross-family on high-risk).
+5. **Security** — SAST (incl. build scripts + IaC) + secret + dependency audit clean; threat-model items addressed.
+6. **Audit** — SBOM clean (no critical CVEs / disallowed licenses); mapped to controls.
+7. **Supply-chain** — agent-authored build/CI/IaC/lockfile/scanner-config changes conform to policy (no build-time network/hooks, no privilege/egress widening, no signing/OIDC-trust changes without HITL).
+8. **E2E** — end-to-end scenarios green on the integrated tree (SDET; flake policy applies).
+9. **Release** — evidence-backed human sign-off (two-person on trust-root changes) on an artifact already attested with **gate-state bound into the SLSA predicate**.
+
+Plus a non-graph **deploy-time admission** control: a non-agent controller
+re-verifies the signature *and* that all gates PASS for the exact digest before a
+non-agent deployer ships. Integrated gates re-run on every `tree_sha` change.
 
 ## 8. Guardrails & governance (five planes)
 
 The enterprise-standard five-plane model, applied to a coding factory
-([docs/governance.md §2](./docs/governance.md)): **policy** (OPA, least
-privilege, signing reachable only by the trusted builder), **execution**
-(sandboxes/microVMs, default-deny egress, mocked network in tests), **data**
-(scoped short-lived creds, keys air-gapped from sandboxes, PII redaction),
-**observability** (OpenTelemetry traces feeding monitors and evals), and
-**assurance** (SBOM, SLSA L3, signing, red-teaming, evals in CI).
+([docs/governance.md §2](./docs/governance.md)): **policy** (OPA on tool calls
+*and on IaC `plan` outputs*; scanner config run-immutable and repo-external;
+signing reachable only by the trusted builder), **execution** (sandboxes/microVMs;
+credentialed phase separated from untrusted-code execution; egress through
+anomaly-detecting proxies and an internal hash-pinned dependency mirror, since
+allowlisting alone doesn't stop exfil), **data** (scoped short-lived creds, keys
+air-gapped, **redaction before provider egress**, zero-retention/no-train terms,
+PHI/PCI never leaves the boundary), **observability** (OpenTelemetry traces +
+serving-model fingerprints feeding monitors and evals), and **assurance** (SBOM,
+**strongly-hermetic** build with no egress, SLSA L3 with gate-state in the
+predicate, deploy-time admission, red-teaming incl. build-hook injection and
+exfil-over-allowlist, evals in CI).
 
 ## 9. Pluggable domain specialists
 
@@ -211,14 +232,19 @@ Each phase has explicit exit criteria ([docs/roadmap.md](./docs/roadmap.md)):
 
 ## 12. Known limitations & risks (eyes open)
 
-- **Long-horizon reliability** — unsolved industry-wide (~21% on SWE-EVO). Mitigation: durable checkpoints, bounded retries, decomposition, HITL on large changes — *and the A/B that tells us whether our structure actually helps.*
-- **Reward hacking / spec-gaming** — Mitigation: separated test authorship, immutable+criterion-traceable acceptance tests, test-diff review, mutation testing, and the deterministic retry-until-green monitor.
-- **LLM-judge unreliability** — Mitigation: prefer deterministic oracles; audit and human-calibrate judges; the Guardian analyzer has its own precision/recall evals.
-- **Cost & latency blow-ups** — Mitigation: per-phase/per-loop sub-budgets with graceful checkpoint-and-pause, model tiering, prompt caching, metered monitor overhead; **no T1 downgrade**.
-- **Parallel git conflicts / non-reproducible builds** — Mitigation: branch isolation + deterministic integration + flake quarantine; integrated gate is authoritative.
-- **Non-idempotent side effects on resume** — Mitigation: external-action ledger + idempotency keys; time-travel rewinds internal state only.
-- **Supply-chain theater** — Mitigation: attestation/signing by a trusted hermetic builder, not agents; keys air-gapped.
-- **Prompt injection via untrusted content** — Mitigation: policy plane, untrusted-content handling, least-privilege tools, sandboxed (toolless) analyzer that doesn't share the acting agents' surface.
+- **Long-horizon reliability** — unsolved industry-wide (~21% on SWE-EVO). Mitigation: durable checkpoints, bounded retries, decomposition, HITL — *and the pre-registered, fairly-baselined A/B that tells us whether structure actually helps* ([docs/evaluation.md §2](./docs/evaluation.md)).
+- **Context loss across hand-offs (the real long-horizon killer)** — Mitigation: a never-summarized `pinned_constraints` channel, retrieval over the call/def graph (not similarity alone) with a measured recall floor, a `need-context` escape, and a handoff-fidelity eval.
+- **Reward hacking / gate-gaming** — Mitigation: separated + cross-family test authorship, **criterion *fidelity* (negative oracles)**, **run-immutable repo-external scanner config**, deterministic oracle/config-edit monitors, mutation testing, semantic loop signature.
+- **Correlated LLM judges / self-preference** — Mitigation: measured judge↔implementer error correlation + self-preference probes; different model *family* on high-risk review/QA; deterministic oracles where possible.
+- **Concurrency correctness** — Mitigation: commutative, `None`-safe, `seq`-ordered reducers (gates max-by-`seq`); precise `tree_sha`; `Send` fan-out with per-branch `error` status + deadlines; superstep-boundary budget enforcement.
+- **Dual-write / idempotency on resume** — Mitigation: transactional outbox (checkpoint+ledger+audit in one txn); idempotency keys **stored by the external system**; re-query-by-key on resume, fail-to-human if unknown.
+- **Supply-chain (agent-authored build) & deploy** — Mitigation: build config as a high-privilege artifact behind the Supply-chain gate; strongly-hermetic no-egress builder; gate-state bound in the SLSA predicate; deploy-time admission + non-agent deployer; IaC policy-as-code.
+- **HITL rubber-stamp** — Mitigation: independent, non-agent evidence pack; two-person sign-off on trust-root changes.
+- **Non-convergent cross-gate cascade** — Mitigation: global `fix_attempts_since_all_green` bound escalating as *non-convergence*, not a late budget breach.
+- **Cost/latency realism** — Mitigation: a concrete per-feature cost+wall-clock model; event-triggered analyzer; honest monitor-overhead target.
+- **LLM nondeterminism vs audit** — Mitigation: temp-0 for gates/judges, recorded seeds/model-fingerprints, pinned-ID-drift alerts; audit framed as immutable *record*, not bitwise replay.
+- **Audit-store & data-boundary integrity** — Mitigation: WORM written by a non-agent appender with external anchoring; redaction before provider egress; PHI/PCI never leaves the boundary.
+- **Prompt injection (incl. of the monitor)** — Mitigation: load-bearing detections are deterministic; the analyzer is toolless, event-triggered, fed structured features with untrusted prose as data, and evaluated against injection.
 
 ## 13. How this plan was hardened
 

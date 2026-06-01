@@ -1,111 +1,159 @@
 # Evaluation — proving the factory works
 
 A multi-agent factory is only credible if we can measure it, **set thresholds it
-can fail**, and test its central claim against a baseline. We evaluate the
-**outcome** and the **trajectory**, run regression evals in CI, and — crucially —
-run a **controlled comparison against a strong single-agent baseline**, because
-"build the org, not the coder" is an empirical claim the industry has not
-settled.
+can fail**, test its central claim against a **fair, powered baseline**, and
+guard the eval itself against the standard ways agent evals silently lie
+(contamination, observable "hidden" tests, gameable coverage, correlated judges,
+nondeterminism). This document specifies the experiments, their pre-registration,
+and the cost model.
 
-## 1. The central hypothesis and its test (the A/B)
+## 1. The central hypothesis
 
 **Hypothesis:** the org/graph structure (planning, decomposition, gates,
 checkpoints, HITL) improves **long-horizon** outcomes over a single strong agent
-given the same model budget.
+at equal cost. This is tested by a pre-registered A/B (§2), run as a Phase-1
+smoke test and a Phase-5 decisive exit criterion. If structure doesn't help, that
+is a finding that forces a redesign — the bet is falsifiable.
 
-This is not assumed — it is measured:
+## 2. A/B pre-registration (frozen before any Phase-5 run, hashed into the manifest)
 
-- **Controlled comparison:** Foundry vs. a strong single-agent baseline (same
-  underlying model, comparable total token budget) on an **identical held-out
-  subset** of SWE-EVO-style long-horizon tasks and the golden suite.
-- **Pre-registered success criterion:** Foundry must beat the baseline on
-  resolution rate by a pre-registered delta **at equal or lower cost**, or the
-  structure is not earning its keep and the design must change. This A/B is a
-  **Phase-1 smoke test and a Phase-5 exit criterion** (see [roadmap.md](./roadmap.md)).
+A vague A/B rigs itself; this one is specified so it can actually fail. *(AI1)*
 
-If the org structure does *not* help, that is a finding, not something to paper
-over — the plan is falsifiable by design.
+- **Arms (three, to isolate what does the work):**
+  1. **Foundry** — the full org.
+  2. **Strong single-agent baseline** — a *named, strong agentic loop*
+     (SWE-agent/OpenHands-class) with **identical tool, retrieval, sandbox, and
+     model-tier access**, differing *only* in the absence of role-decomposition,
+     gates, and hand-offs, with unlimited self-iteration until the budget. **Not**
+     a single no-tools Opus call.
+  3. **Single agent + same gates, no role split** — isolates whether the gain
+     (if any) comes from *roles* or merely from *verification/gates*.
+- **Equalizer:** **equal USD** is the primary, economically-honest equalizer
+  (reported headline); equal tokens is secondary. The arms have the *same tier
+  mix available* so Foundry can't win merely by using a stronger model than the
+  baseline.
+- **Power:** stated sample size `n` on the task pool, `k` repeated runs per task
+  (to average LLM nondeterminism — §7), a **paired** test (bootstrap), the
+  **minimum detectable effect**, and the target power (e.g., 0.8). The exit
+  threshold (Foundry > baseline by ≥ a pre-registered margin at ≤ equal cost) is
+  only meaningful with `n`/`k` sized to detect it at the ~21% base rate.
+- **Pre-registration:** baseline config, tier mix, equalizer, `n`, `k`, the
+  statistical test, seeds, and the stopping rule are **frozen and content-hashed
+  into the run manifest** before any scored run.
 
-## 2. Outcome evals
+## 3. Outcome evals
 
-- **Golden task suite** — curated build requests (greenfield small app, bugfix,
-  feature addition, refactor) with **hidden** known-good acceptance tests. Output
-  must pass *its own* generated tests **and** the hidden tests (guards against
-  the test-authoring agent writing weak oracles — [governance.md §1b](./governance.md)).
-- **SWE-bench Verified-style** — isolated single-issue tasks to baseline raw
-  coding capability against published numbers (~65–75% frontier).
-- **SWE-EVO-style long-horizon** — multi-commit *evolution* tasks; the honest
-  bar (~21% frontier today). This is where the A/B in §1 is decided.
+- **Golden task suite** — curated greenfield/feature/refactor/bugfix requests
+  with **hidden** known-good acceptance tests (isolation in §6).
+- **In-house novel suite (headline)** — tasks authored **after** the pinned
+  model's training cutoff, rotated and regenerated, used for the headline
+  generalization claims because public benchmarks are contamination-suspect (§6).
+- **SWE-bench-Verified-style** — public, used only for *relative* baselining;
+  absolute numbers treated as contamination-inflated.
+- **SWE-EVO-style long-horizon** — multi-commit evolution; the honest bar and the
+  arena for the §2 A/B.
 
-## 3. Trajectory evals
+## 4. Agent-specific validity evals (the things generalist evals miss)
 
-Scored from OpenTelemetry traces. **Deterministic tool mocks in CI** make the
-*evaluation* reproducible even though real runs are not; LLM-as-judge is used
-only where no oracle exists, always recorded with the judged content and
-calibrated against a human-labeled sample.
+- **Judge decorrelation:** measure **error correlation** between each judge
+  (Reviewer/QA/Security-triage) and the implementer on a labeled defect set, and a
+  **self-preference probe** (does a judge favor diffs from its own model family?).
+  Self-preference is a first-class scorecard metric, not a footnote. High-risk
+  criteria require a **different model family** judge or cross-family disagreement
+  triggers. *(AI3)*
+- **Handoff fidelity:** inject known requirements at intent and measure how many
+  **survive** as faithful tests at the Test gate — a direct measure of the
+  telephone-game loss the artifact-passing architecture is meant to prevent. *(AI6)*
+- **Criterion fidelity:** for each high-risk criterion, the bound test must
+  **fail against a known-bad reference implementation** (per-criterion negative
+  oracle), proving the test captures intent, not just the tag. *(AI6, SEC8)*
+- **Retrieval recall:** the symbol+graph retriever is scored against labeled
+  known-relevant spans (incl. cross-file coupling); a recall floor gates it. *(AI2)*
+- **Analyzer evals:** precision/recall of the Guardian analyzer's advisory flags
+  against labeled reward-hacking / scope-creep trajectories **and** against
+  **prompt-injection-of-the-monitor** cases. *(SEC3, AI10)*
+- **Per-node decision variance:** `k` repeated runs quantify run-to-run variance
+  per node; feeds both the A/B power calc and the optimization search. *(AI5)*
 
-- Tool-choice correctness and argument validity
-- Step/loop count (detect thrashing and retry-until-green)
-- Gate pass-rate and **first-pass yield**
-- Rework loops per feature
-- Policy-compliance rate (zero unauthorized tool calls)
-- Cost (USD, tokens, **including monitor overhead**) and wall-clock per feature
-- **Side-effect idempotency:** replay/resume produces no duplicate PRs/tags/deploys
+## 5. Trajectory evals
 
-The **Guardian analyzer** has its own evals: precision/recall of its advisory
-flags against a labeled set of injected reward-hacking / scope-creep trajectories.
+Scored from OpenTelemetry traces; deterministic tool mocks in CI make the
+*evaluation* reproducible. LLM-as-judge only where no oracle exists, recorded
+with the judged content and calibrated **per judge model** against human labels.
 
-## 4. Headline scorecard — with concrete thresholds
+- Tool-choice correctness, argument validity
+- Step/loop count; first-pass yield; rework loops/feature
+- Policy-compliance rate (zero unauthorized tool calls; zero un-reviewed
+  suppression/IaC-privilege edits)
+- Cost (USD, tokens, **incl. monitor overhead**) and wall-clock per feature
+- Side-effect idempotency (replay/resume → no duplicate PR/tag/deploy)
+- Escaped-defect rate **cut by the tier that produced the defect** (so the
+  tiering hypothesis is empirical, not intuition — feeds §8). *(AI7)*
 
-Direction-only targets can never fail, so each metric has a **release threshold**
-(initial values; recalibrated in Phase 5). A change that regresses any threshold
-**blocks**.
+## 6. Eval-integrity mechanisms
+
+- **Hidden tests are unreachable at runtime:** they live in a **scoring harness
+  the agent sandbox cannot read or reach** (no shared FS, no returned logs),
+  applied **only after the run terminates**. The policy plane asserts this
+  isolation. "Passes its own tests AND hidden tests" therefore measures
+  generalization, not overfitting. *(AI8)*
+- **Contamination probes:** canary/quote-completion checks plus reliance on the
+  post-cutoff in-house novel suite; public-benchmark absolutes are flagged
+  contamination-suspect. *(AI8)*
+- **Coverage is not fidelity:** criterion→test tags are sample-audited; high-risk
+  criteria use negative oracles (§4). *(AI6, SEC8)*
+
+## 7. Headline scorecard — concrete thresholds
+
+Direction-only targets can't fail, so each metric has a release threshold
+(initial; recalibrated in Phase 5). A change regressing any threshold **blocks**.
 
 | Metric | Tells us | Initial threshold |
 |---|---|---|
-| Golden-suite resolution rate | Does it build working software? | ≥ 90% greenfield-small, ≥ 70% feature/refactor |
-| Hidden-test pass rate (of self-passing runs) | Are generated oracles real? | ≥ 95% |
-| SWE-EVO subset resolution (vs baseline) | Does structure help long-horizon? | **> single-agent baseline by ≥ 10 pts at ≤ equal cost** |
+| Novel-suite resolution | Working software, uncontaminated | ≥ 85% small, ≥ 65% feature/refactor |
+| Hidden-test pass rate (of self-passing runs) | Real oracles, not overfit | ≥ 95% |
+| SWE-EVO resolution vs baseline (USD-equal) | Does structure help long-horizon? | **> baseline by ≥ pre-registered margin at ≤ equal cost** |
+| Judge↔implementer error correlation | Are LLM gates independent? | below a set ceiling; self-preference within calibration |
+| Handoff fidelity | Intent survives hand-offs | ≥ 90% of injected requirements survive to tests |
 | First-pass yield | Initial quality | ≥ 60% |
-| Escaped-defect rate | Bugs past all gates | ≤ 1 per 10 features (golden hidden tests) |
-| Rework loops / feature | Loop efficiency | ≤ 3 median |
-| Cost per feature (USD) | Economic viability | within Phase-5 budget envelope; monitor overhead ≤ 5% |
-| Human-intervention rate | Autonomy | tracked; may not rise while escaped-defects fall |
-| Criterion-coverage | Tests trace to spec | 100% of acceptance criteria exercised |
+| Escaped-defect rate (by producing tier) | Bugs past all gates | ≤ 1 per 10 features |
+| Cost per feature (USD) + wall-clock | Economic viability | within the §8 envelope; monitor overhead ≤ modeled bound |
+| Criterion fidelity | Tests capture intent | 100% high-risk criteria fail vs known-bad ref |
 
-Cost-per-feature, human-intervention-rate, and escaped-defect-rate are evaluated
-**together** so the system can't "win" by cutting corners.
+Cost, wall-clock, human-intervention, and escaped-defects are read **together**
+so the system can't "win" by cutting corners.
 
-## 5. CI integration
+## 8. Per-feature cost & wall-clock model (so "viability" and "≤5%" are falsifiable)
 
-- Every PR that changes prompts, the graph, tools, or gate logic runs the golden
-  suite with deterministic tool mocks (fast, reproducible).
-- LLM-judge scores are stored with the judged content; thresholds are calibrated
-  against human labels and re-checked periodically (judge-drift guard).
-- Regression on any §4 threshold blocks the change.
+A concrete model — not an assertion — for one representative feature: enumerate
+`nodes × expected loop iterations × tokens/node (assembled-context input +
+output) × tier price`, **plus** the analyzer's **event-triggered** invocation
+count × per-call input cap, **plus** prompt-cache hit assumptions (high on actor
+SOP prefixes, low on the analyzer's changing trajectory). This yields (a) the
+cost-per-feature envelope, (b) the realistic monitor-overhead %, and (c) a
+**wall-clock budget per feature** placed on the scorecard. If the modeled
+overhead exceeds 5%, the target is raised honestly rather than throttling the
+analyzer blind. *(AI4)*
 
-## 6. Workflow optimization (Phase 5) — concrete, not hand-wavy
+## 9. Optimization (Phase 5) — search space, objective, method
 
-Treating the workflow as searchable (à la MetaGPT's AFlow) requires a defined
-search space, objective, and method — not just "tune it":
+- **Search space:** prompt/SOP variants per role, **model-tier assignment per
+  node (tiering is an *output*, validated, not an intuition — incl. defaulting
+  high-risk implementation and oracle-authoring to T1 until data says otherwise)**,
+  graph-topology toggles, retry/convergence caps. *(AI7)*
+- **Objective:** maximize novel-suite + SWE-EVO resolution **subject to** no
+  regression in escaped defects, cost, wall-clock, or policy compliance.
+- **Method:** evaluate candidates on novel + SWE-EVO held-out rotations; promote
+  only Pareto-improving configs; record the winner in the manifest. The
+  optimization is itself budgeted and run offline.
 
-- **Search space:** prompt/SOP variants per role, model-tier assignment per node,
-  graph-topology toggles (e.g., extra review pass on/off, parallel width), retry
-  caps.
-- **Objective:** the §4 scorecard as a constrained objective — maximize
-  resolution and first-pass yield **subject to** no regression in escaped
-  defects, cost, or policy compliance.
-- **Method:** evaluate candidates on the golden + SWE-EVO subsets with held-out
-  rotation; promote only Pareto-improving configurations; record the winning
-  config in the run manifest.
-- **Cost of search:** the optimization itself is budgeted and run offline, not on
-  production traffic.
+## 10. What we explicitly watch for
 
-## 7. What we explicitly watch for
-
-- **Reward hacking** — passing gates by weakening oracles. Caught by separated
-  test authorship, criterion-coverage, test-diff review, mutation testing, and
-  the retry-until-green deterministic monitor.
-- **Judge drift** — caught by periodic recalibration against human labels.
-- **Benchmark overfitting** — caught by a rotating hidden hold-out set and the
-  baseline A/B (overfitting the suite would not improve the relative delta).
+- **Reward hacking** — weakened oracles/scanner config/criteria → caught by
+  separated+cross-family authorship, criterion fidelity, deterministic
+  oracle/config-edit monitors, mutation testing.
+- **Correlated-judge failure** — caught by the §4 correlation/self-preference evals.
+- **Eval lies** — contamination probes, runtime-unreachable hidden tests,
+  per-node variance, and the relative (not absolute) A/B framing.
+- **Nondeterminism** — `k`-run averaging, recorded seeds/model-fingerprints,
+  pinned-ID-drift alerts.

@@ -1,199 +1,237 @@
 # Governance — gates, guardrails, security & compliance
 
-Foundry's reliability comes from putting **a deterministic decision rule at the
-seams**: LLMs do judgment *inside* nodes, but the PASS/FAIL *rule* between nodes
-is a deterministic function of observed outputs wherever an oracle exists. This
-document defines the quality gates (and an honest account of where execution is
-*not* deterministic), the five-plane guardrail model, the monitor design, the
-supply-chain trust root, the budget controls, and the domain-pack mechanism.
+Foundry's reliability comes from **a deterministic decision rule at the seams**
+and from defending not just the control plane we built (gates, reducers,
+monitors, ledger) but the **artifacts the agents author that become trusted
+inputs to non-agent systems** — build/CI/IaC config, scanner config, and
+acceptance criteria — plus the **verification/admission steps** that bind a
+signature to "actually passed the gates." This document defines the gates, the
+five-plane guardrail model, the monitor design, the supply-chain trust root and
+deploy-time admission, the budget/convergence controls, and the domain-pack
+mechanism.
 
 ## 1. Quality gates
 
-A gate is a node that returns `pass | fail | escalate` and writes a `GateResult`
-recording **both** whether the *decision rule* was deterministic and whether the
-underlying *execution* was reproducible (see [architecture.md §3](./architecture.md)).
-Failures route back to the responsible role with a bounded retry counter;
-exceeding the cap escalates to the Human Liaison. Per the re-verification rule,
-any code change re-enters the Build and Test gates before any downstream gate.
+A gate returns `pass | fail | error` and writes a `GateResult` (with a monotonic
+`seq`; latest-by-`seq` wins — see [architecture.md §3](./architecture.md)).
+`error` is an infrastructure failure, retried per-branch, not a verdict.
+Per the re-verification rule, any code change re-keys integrated gates on a new
+`tree_sha` and re-runs **all** integrated gates.
 
 | Gate | Owner | Runs against | Decision rule | Pass condition |
 |---|---|---|---|---|
-| **Spec** | Product Manager | PRD | deterministic (structural) + LLM check | Every story has testable Given/When/Then criteria (bugfixes: a repro + expected behavior) |
-| **Design** | Architect (+HITL) | design artifacts | LLM + human | ADRs present; interfaces & data model defined; human sign-off for significant designs |
-| **Build (per-branch + integrated)** | CI runner | task branch, then merged tree | deterministic | Compiles, lints, type-checks: zero errors |
-| **Test (per-branch + integrated)** | QA | task branch, then merged tree | deterministic decision over possibly-flaky execution | All tests green; **every acceptance criterion exercised** (criterion-coverage); line coverage ≥ threshold; no quarantined test covering a high-risk `criterion_id`, and any other quarantine has recorded QA acceptance + rationale |
-| **Security** | AppSec | merged tree | deterministic scans + LLM triage | No unresolved high/critical (SAST, secret, SCA); threat-model items resolved |
-| **Audit** | Compliance | merged tree | deterministic | SBOM has no disallowed-license or critical-CVE deps; license compatibility confirmed |
-| **E2E** | SDET | integrated tree | deterministic decision over possibly-flaky execution | End-to-end scenarios green (flake policy of §1a applies) |
-| **Release** | Release Manager (HITL) | **already-attested artifact** | human | All prior gates green; SLSA provenance + signature present (produced by the trusted builder *before* this gate); changelog + version + rollback plan present |
+| **Spec** | Product Manager (+ independent criteria critique) | PRD | structural + LLM | Every story has testable Given/When/Then criteria; **security/abuse criteria present where applicable** (omission fails the gate); bugfix = repro + expected behavior |
+| **Design** | Architect (+HITL) | design artifacts | LLM + human | ADRs, interfaces, data model, `ownership_map`, `pinned_constraints` defined; human sign-off for significant designs |
+| **Build (per-branch + integrated)** | CI runner | task branch, then `tree_sha` | deterministic | Compiles, lints, type-checks: zero errors |
+| **Test (per-branch + integrated)** | QA (oracle authored separately from implementer; cross-family on high-risk) | task branch, then `tree_sha` | deterministic over possibly-flaky execution | All green; **every acceptance criterion exercised by a test that *fails against a known-bad reference* (criterion fidelity, not just coverage)**; line coverage ≥ threshold; quarantine rule (§1a) |
+| **Security** | AppSec | `tree_sha` | deterministic scans + LLM triage | No unresolved high/critical (SAST, secret, SCA), **scans include build scripts + IaC**; threat-model items resolved |
+| **Audit** | Compliance | `tree_sha` | deterministic | SBOM: no disallowed-license/critical-CVE deps; license compatibility; mapped to controls |
+| **Supply-chain** | AppSec + DevOps | `tree_sha` | deterministic policy | Build/CI/IaC/Dockerfile/lockfile/scanner-config changes conform to policy (§4); no new build-time network/hooks, no privilege/egress widening, no signing/OIDC-trust changes without HITL |
+| **E2E** | SDET | `tree_sha` | deterministic over possibly-flaky execution | End-to-end scenarios green (flake policy §1a) |
+| **Release** | Release Manager (HITL) | already-attested artifact | human + evidence pack (§6) | All gates green; SLSA provenance + signature present with **gate-state bound in the predicate**; changelog + version + rollback plan present |
+| **(Admission — not a graph gate)** | Non-agent admission controller | deployed digest | deterministic policy | At deploy: signature verifies **and** all required gates PASS for *this exact digest/commit/builder* (§5) |
 
-Note the split into distinct **Build** and **Test** gates (reconciling the
-earlier inconsistency), each run **twice**: once per task branch (fast,
-attributable) and once on the integrated tree (authoritative for release).
+Nine in-graph gates (Spec, Design, Build, Test, Security, Audit, Supply-chain,
+E2E, Release) plus a deploy-time **admission** control.
 
 ### 1a. Execution is not always deterministic — and that's handled
 
-"Deterministic gate" means the **decision rule** is a deterministic function of
-outputs. The **outputs** (real builds/tests in sandboxes) often are not:
+- **Flake policy:** tests run with pinned seeds, frozen clock, mocked network.
+  Fail-then-pass within a retry budget of *N=2* → **flaky → quarantined**. A
+  quarantined test covering a high-risk `criterion_id` **blocks**; any other
+  quarantine needs **recorded QA acceptance + rationale**.
+- **Anti-"retry-until-green":** the Guardian keys on oscillating verdicts for the
+  same semantic objective (§3), not on byte-identical diffs.
+- **Mutation testing** runs at the integrated gate / on a schedule (off the hot
+  path); it validates test *sensitivity*. **Criterion fidelity** (each high-risk
+  criterion's test must fail against a known-bad reference implementation) is the
+  per-criterion check that coverage alone can't give.
 
-- **Flake policy:** tests run with pinned seeds, frozen clock, and no live
-  network (mocked). A test that fails then passes within a retry budget of *N=2*
-  is marked **flaky → quarantined** (not silently re-run to green). A quarantined
-  test covering a **high-risk `criterion_id` blocks the gate** until QA fixes it;
-  any other quarantine requires **recorded QA acceptance with rationale** to pass
-  (identical rule to the §1 Test-gate pass condition).
-- **Anti-"retry-until-green":** the Guardian (§3) keys on repeated identical
-  gate invocations with differing results and flags it as a reward-hacking
-  signal; flake retries are metered against the loop budget.
-- **Mutation testing is off the hot path:** it runs on a schedule / at the
-  integrated gate only (not on every per-branch build), because it is expensive
-  and itself timeout-sensitive. It validates test *sensitivity*, not criterion
-  coverage.
+### 1b. Test- and criteria-integrity (breaking the LLM-judges-itself loop)
 
-### 1b. Test-authoring trust (breaking the LLM-judges-itself loop)
-
-Letting one LLM both write and bless the tests is circular. Controls:
-
-- **Separation of authorship:** the agent/model that **authors acceptance
-  tests is different** from the one that implements the code (different role,
-  and a different model instance/tier), reducing collusion.
-- **Criterion traceability:** every acceptance criterion maps to ≥1 test
-  (`criterion_id` tag); the Test gate enforces **criterion-coverage** (all
-  criteria exercised) in addition to line coverage. Untraceable tests don't
-  count toward the gate.
-- **Stronger oracles for high-stakes criteria:** property-based tests and/or
-  human-seeded golden oracles for criteria the PRD marks high-risk.
-- **Review of test diffs:** the Reviewer inspects test changes for weakened
-  assertions; mutation testing (§1a) backs this up.
+- **Separation of authorship:** the model that authors acceptance tests differs
+  from the implementer; for high-risk criteria the reviewer/QA run a **different
+  model family** (not just tier) to decorrelate blind spots
+  ([evaluation.md §4](./evaluation.md)). *(AI3)*
+- **Criteria completeness is independently critiqued** before the Spec gate (a
+  different role/family critiques the PM's criteria for completeness, especially
+  security/abuse cases). Weak/omitted criteria fail the Spec gate — so "100%
+  criterion-coverage" cannot be satisfied by under-specifying. *(SEC8)*
+- **Fidelity over coverage:** criterion→test linkage is sample-audited for genuine
+  semantic coverage; tags are not trusted blindly. *(AI6, SEC8)*
+- **Review of test *and oracle-config* diffs** (see §3 deterministic monitors).
 
 ## 2. The five-plane guardrail model
 
 ### Policy plane
-- Policy-as-code (OPA) authorizes every tool call: *which* role may call *which*
-  tool with *which* arguments. Least privilege per role (a Junior Engineer's git
-  scope ≠ a Release Manager's; only the trusted CI builder can reach signing).
-- Denials are logged and counted; the count is a deterministic Guardian signal.
+- OPA authorizes every tool call (least privilege per role; only the trusted
+  builder reaches signing; only the non-agent deployer deploys).
+- **Policy applies to artifact *outputs*, not just tool calls:** IaC `plan`
+  diffs are gated by Conftest/Checkov (no privilege grants, new IAM principals,
+  egress widening, or OIDC-trust/signing-identity changes beyond a declared
+  baseline; such changes require HITL). Writing a Terraform file is an allowed FS
+  call, but applying its effect is not. *(SEC5)*
+- Scanner configuration and suppression files (`.semgrepignore`, `# nosec`,
+  `.trivyignore`, `.gitleaks.toml`, severity floors, license allowlists) live in
+  a **protected, repo-external, run-immutable** path agents cannot write; any new
+  suppression/floor/allowlist edit is a **first-class finding** routed to HITL and
+  counted by a deterministic monitor. Scanners run from the pinned external
+  config, so agent diffs cannot weaken them. *(SEC2)*
 
 ### Execution plane
-- **All agent-written code runs in sandboxes** — containers by default,
-  Firecracker/gVisor microVMs for stronger isolation. Never on the host.
-- Egress is default-deny with an allowlist; tests run with network mocked.
-- Sandboxes are ephemeral and reset between tasks and between fix retries.
+- All agent-written code runs in sandboxes (containers; Firecracker/gVisor for
+  stronger isolation); never on the host.
+- **Credentialed phase is separated from untrusted-code execution:** no
+  agent-authored code or third-party install/`postinstall` script runs while task
+  credentials are present. Dependencies are pulled through an **internal mirror
+  of pre-vetted, hash-pinned artifacts**, so builds need no open egress. *(SEC4)*
+- Egress is default-deny **through per-destination proxies with payload/size
+  anomaly detection** — host allowlisting alone does not stop exfil over
+  allowed channels (registry, git remote, model provider). The sandbox is treated
+  as hostile. *(SEC4)*
 
 ### Data plane
-- Scoped, short-lived credentials injected per task; **never in prompts or
-  state**. Signing keys are *not* reachable from any agent sandbox (§4).
-- PII/secret redaction on inputs and traces.
-- The content-addressed artifact store enforces access scoping by role.
+- Scoped, short-lived credentials per task; **never in prompts or state**;
+  signing keys unreachable from any agent sandbox.
+- **Data boundary to providers/trace tooling is explicit:** zero-retention /
+  no-train provider terms; a self-hosted or scrubbed trace backend for regulated
+  runs; **redaction runs *before* provider egress** (not only on stored traces),
+  with a tested, **fail-closed** redaction component. Per-domain-pack rules apply
+  (PHI/PCI data never leaves the boundary). *(SEC10)*
 
 ### Observability plane
-- **OpenTelemetry** traces every super-step: node, tool, arguments, tokens, USD,
-  latency, gate results, and policy denials.
-- Traces feed (a) the deterministic monitors and analyzer in real time and
-  (b) the eval harness offline. Every run is replayable from the checkpointer.
+- OpenTelemetry traces every superstep (node, tool, args, tokens, USD, latency,
+  gate results, policy denials, serving-model fingerprint). Feeds the monitors
+  and the eval harness; runs are replayable for *control state* (not bitwise LLM
+  output — [architecture.md §8](./architecture.md)).
 
 ### Assurance plane
-- **SBOM** per build; **SLSA** provenance; artifact **signing** — all produced
-  by a *trusted builder*, not the agents (§4).
-- **Red-teaming** of the factory (prompt injection, tool abuse, sandbox escape).
-- **Evals run in CI** on every change to prompts, graph, or tools (see
-  [evaluation.md](./evaluation.md)).
+- SBOM, SLSA L3 provenance, signing — produced by the trusted hermetic builder
+  with **gate-state bound into the predicate** (§5).
+- Red-teaming (prompt injection, tool abuse, sandbox escape, **build-hook
+  injection**, **exfil-over-allowlist**).
+- Evals run in CI on every change to prompts, graph, tools, gates, or scanner
+  config ([evaluation.md](./evaluation.md)).
 
-## 3. Monitor design (deterministic monitors + sandboxed analyzer)
+## 3. Monitor design (deterministic monitors + event-triggered analyzer)
 
-"Guardian" is not one vague LLM. It is split:
+- **Deterministic monitors (no LLM, not prompt-injectable) carry the load-bearing
+  detections:**
+  - *Loop / non-convergence* — semantic signature `(criterion_id/task, gate,
+    failure_signature)`; plus the global `fix_attempts_since_all_green` bound
+    ([architecture.md §7](./architecture.md)). Diff bytes are never the signature.
+  - *Oracle / gate / criteria / scanner-config edits* — **any diff touching tests
+    treated as oracles, gate logic, acceptance criteria, or scanner config is a
+    *deterministic* trip** forcing HITL review (not an analyzer judgment). *(SEC3, AI10, SEC2)*
+  - *Cost* — `BudgetLedger` thresholds; *Policy* — OPA deny-count;
+    *Retry-until-green* — verdict oscillation.
+- **Sandboxed LLM analyzer (semantic color only, event-triggered):** runs
+  read-only in its **own toolless sandbox**, **triggered by a deterministic-monitor
+  signal or a write to oracle/gate/criteria/config paths** — *not* per node — and
+  reads a **capped** slice. It consumes **deterministically-extracted structured
+  features**, with any untrusted trace prose clearly delimited as *data, never
+  instructions*; it emits **advisory** flags only and cannot approve work or
+  override a deterministic trip. Its precision/recall — **including against
+  prompt-injection-of-the-monitor** — is evaluated ([evaluation.md §4](./evaluation.md)),
+  and its token cost is metered as `monitor_overhead_usd`. Event-triggering is
+  what keeps overhead bounded *and* keeps it reading at the right moments. *(SEC3, AI4, AI10)*
 
-- **Deterministic monitors (no LLM, cannot be prompt-injected):**
-  - *Loop detection* — a repeated **state signature** (hash of phase + open
-    task + gate name + diff hash) over a window ⇒ loop ⇒ pause + escalate.
-  - *Cost* — `BudgetLedger` threshold crossings (§7) ⇒ pause/escalate.
-  - *Policy* — OPA deny-count threshold ⇒ halt.
-  - *Retry-until-green* — same gate, same input signature, oscillating result.
-- **Sandboxed LLM analyzer (semantic concerns only):** runs read-only over
-  redacted traces in its **own sandbox with no tools**, so it does not share the
-  acting agents' injection/tool surface. It keys on explicit features
-  (unexpected scope change, edits to test oracles or gate logic, acquiring new
-  capabilities mid-task) and emits *advisory* flags to the Human Liaison; it
-  **cannot** itself approve work. The analyzer has its own evals
-  ([evaluation.md](./evaluation.md)) and its token cost is metered as
-  `monitor_overhead_usd`.
+## 4. Supply-chain trust root (build, sign, attest)
 
-This removes the false assurance of a single mid-tier LLM "watching for
-reward-hacking": the cheap, reliable detections are deterministic; the LLM does
-only what requires judgment, in isolation.
+The builder is trusted but **what it executes is agent-authored**, so the trust
+boundary is enforced on the build *inputs*, not just the build *environment*:
 
-## 4. Supply-chain trust root (signing & provenance)
+- **Strong hermeticity:** the release build runs on a pinned base image with
+  **no network egress**, vendored/hash-pinned dependencies, and **no arbitrary
+  build hooks** (`postinstall` network, `RUN curl | sh`, unreviewed custom CI
+  Actions are disallowed by the Supply-chain gate). *(SEC1)*
+- **Build config is a high-privilege artifact:** changes to CI/IaC/Dockerfile/
+  lockfile/manifest/scanner-config are diffed against a baseline and routed
+  through the **Supply-chain gate** (and HITL for trust-root-touching changes),
+  separately from the application Security gate. The Security gate's SAST also
+  scans build scripts and IaC. *(SEC1)*
+- **Keyless signing (OIDC/sigstore):** no long-lived keys to exfiltrate; identity
+  is the CI workload's OIDC token. OIDC trust/federation policy is itself IaC and
+  is in the policy-plane's HITL-required set (§2). *(SEC5)*
+- **Provenance predicate binds gate-state:** the signed in-toto/SLSA predicate
+  records source commit, builder identity, hermetic inputs, materials, **and the
+  WORM-anchored, hash-chained gate results keyed to this `tree_sha`** — so the
+  signature attests *both* provenance *and* "passed all required Foundry gates."
+  Target **SLSA Build L3**. *(SEC7)*
+- **SBOM pass criteria:** no critical/high-CVE dependency (configurable floor),
+  no disallowed license, full resolution (no unpinned components).
 
-An attestation produced inside an agent-controlled sandbox attests nothing.
-Therefore:
+## 5. Deploy-time admission (signature ≠ safety, so verify on admission)
 
-- **Release builds are produced by a trusted, hermetic CI builder** outside any
-  agent's control (the `ATTEST` node in [architecture.md §1](./architecture.md)),
-  on a pinned base image with locked dependencies — not by the implementing
-  agent's sandbox.
-- **Keyless signing (OIDC / sigstore):** no long-lived signing keys exist for an
-  agent to exfiltrate; identity comes from the CI workload's OIDC token. If
-  long-lived keys are unavoidable, they live in an HSM/KMS the policy plane
-  forbids any agent sandbox from reaching.
-- **Provenance predicate:** SLSA provenance records the source commit, the
-  builder identity, the hermetic build inputs, and the materials. Target:
-  **SLSA Build L3** (hardened, non-falsifiable provenance).
-- **SBOM pass criteria (concrete):** no dependency with a known critical/high
-  CVE (configurable severity floor), no dependency under a disallowed license,
-  full dependency resolution (no unpinned/unknown components).
+A signature proves provenance, not that deployment is authorized. Therefore:
 
-## 5. Domain packs
+- After the human Release sign-off, a **non-agent admission controller**
+  cosign-verifies the signature **and** evaluates a policy: *this exact digest was
+  built by the trusted builder, from this commit, and all required gates PASS for
+  it in the WORM store*. Only then does a **separate, least-privileged, non-agent
+  deployer** ship. An agent that somehow gets an unverified or non-gate-passing
+  tree built cannot reach production. *(SEC7, SEC5)*
 
-A **domain pack** extends governance without touching the core. A Specialist is
-a graph node implementing the interface `{capabilities, tools, prompts/SOP,
-gates, evals}`. A **registry** maps required capabilities to specialists; the
-supervisor routes via the conditional edge in [architecture.md §7](./architecture.md).
+## 6. Human-in-the-loop is evidence-backed, not a rubber stamp
+
+HITL is load-bearing (Design, Release, escalations), so the human is given an
+**independent, non-agent-generated evidence pack**: a deterministic diff of
+**security-relevant paths** (build/CI/IaC, scanner config, deps/lockfile,
+signing/OIDC policy), the **raw** Guardian flags (not agent-summarized), the list
+of any **new suppressions/severity-floor changes**, the actual provenance
+predicate and gate-state, and the convergence/cost status. High-risk change
+classes require explicit per-class acknowledgment; releases touching the
+trust-root surface require **two-person sign-off** with break-glass logging.
+Minimum review affordances guard against automation bias. *(SEC6)*
+
+## 7. Budget & convergence controls (concrete)
+
+- **Enforced at superstep boundaries** (LangGraph cannot checkpoint mid-node);
+  long node bodies poll a cooperative-cancellation token and persist partial
+  progress before yielding ([architecture.md §6](./architecture.md)). *(DS6)*
+- **Per-phase sub-budgets** (defaults, tuned in Phase 5): Product 5%,
+  Architecture 15%, Implementation 35%, Verification 15%, Assurance 10%, Release
+  5%, **Rework reserve 10%**, monitor overhead ≤ 5% — 100% *with* contingency.
+  **Triage seeds a default per-route cap**; PLAN refines it on greenfield/evolution.
+- **Per-loop caps draw from the Rework reserve**, not the owning phase, so
+  designed-in rework doesn't auto-breach a phase cap. A **global non-convergence
+  bound** ([architecture.md §7](./architecture.md)) escalates a non-converging
+  cross-gate cascade as *non-convergence*, not as a late budget breach. *(DS5)*
+- **Monitor overhead is modeled, not asserted:** a per-feature cost model
+  ([evaluation.md §4](./evaluation.md)) derives the analyzer's event-triggered
+  invocation count and per-call input cap; if 5% proves infeasible the target is
+  raised honestly rather than throttling detection blindly. *(AI4)*
+- **No tier downgrade on T1 nodes** — breach escalates.
+- **Caching:** stable SOP/system prefixes use prompt-cache breakpoints.
+
+## 8. Audit-store integrity
+
+- Audit/compliance events are written to an **append-only WORM / hash-chained
+  store via a non-agent appender** holding a credential **no agent role
+  possesses**; no agent can rotate, truncate, or re-initialize the chain. *(SEC9)*
+- The chain **head is periodically anchored externally** (transparency
+  log / external timestamp) so truncation or rewrite is detectable. *(SEC9)*
+- Events reach the store via the transactional outbox ([architecture.md §5](./architecture.md)),
+  so checkpoint and audit cannot diverge.
+
+## 9. Domain packs
+
+A Specialist is a conditional node implementing `{capabilities, tools,
+prompts/SOP, gates, evals}`; a registry maps required capabilities to specialists.
 
 | Pack | Adds specialist | Adds gates / controls |
 |---|---|---|
-| Fintech | Compliance specialist | PCI-DSS / SOX checks in Audit gate; stricter crypto review |
-| Healthcare | Privacy specialist | HIPAA mapping; PHI data-plane rules |
+| Fintech | Compliance specialist | PCI-DSS/SOX in Audit; stricter crypto review; data never leaves boundary |
+| Healthcare | Privacy specialist | HIPAA mapping; PHI data-plane rules (no PHI to providers) |
 | ML / Data | ML engineer | Data-validation + model-eval gate; dataset license checks |
 | Mobile / Embedded | Platform specialist | Platform build/sign gates; resource budgets |
 
-## 6. Failure & escalation policy
+## 10. Failure & escalation policy
 
-1. Gate fails → route to responsible role, increment retry counter.
-2. Code changed during a fix → re-enter Build + Test gates before any downstream
-   gate (re-verification rule).
-3. Retry cap reached → Human Liaison escalation with full context.
-4. Monitor trip (loop / policy / cost / retry-until-green) → pause + escalate;
-   analyzer flags are advisory to the human.
-5. Budget cap breach → see §7 (T1 escalates, never downgrades).
-6. All escalations resume from the last checkpoint after a human decision is
-   recorded; effectful actions are not re-fired (external-action ledger).
-
-## 7. Budget controls (concrete)
-
-A single whole-run cap is not a control. The `BudgetLedger`
-([architecture.md §3](./architecture.md)) carries:
-
-- **Per-phase sub-budgets** with defaults (illustrative, tuned in Phase 5):
-  Product 5% (Triage/Planning are negligible T2/T3 calls counted here),
-  Architecture 15%, Implementation 35%, Verification 15%, Assurance 10%, Release
-  5%, **Rework reserve 10%**, monitor overhead ≤ 5% — summing to 100% *with* a
-  contingency line. The Eng/Program Manager's estimate sets the absolute cap; the
-  percentages bound distribution. **Triage seeds a default per-route cap** so
-  every route is bounded even before PLAN runs; PLAN refines it on the routes it
-  visits (greenfield/evolution).
-- **Per-loop caps:** each evaluator-optimizer loop and each fix loop has a max
-  spend/iteration count and **draws from the Rework reserve**, not the owning
-  phase's budget — so the designed-in rework path does not automatically breach a
-  phase cap. Exhausting the reserve escalates rather than looping.
-- **Mid-flight behavior:** on cap approach the controller **gracefully
-  checkpoints and pauses** in-flight branches (sandbox jobs are signaled to
-  checkpoint, not hard-killed mid-write); on hard breach it pauses the whole run
-  and escalates. Partial work is preserved on branches.
-- **No tier downgrade on T1 nodes:** architecture, security, and review never
-  auto-downgrade to save money; a breach there escalates to a human decision.
-  Downgrade is permitted only on T2/T3 implementation/routing nodes.
-- **Monitor overhead is metered** as its own ledger line so the cost of
-  observability is visible and bounded (≤ 5% target).
-- **Caching:** stable system prompts/SOPs and pinned reference artifacts use
-  prompt-cache breakpoints; expected reuse across a run's many node calls is the
-  primary token-cost reduction lever.
+1. Gate `fail` → responsible role, increment retry counter.
+2. Gate `error` (infra) → bounded per-branch retry → else escalate (no sibling loss).
+3. Code change → new `tree_sha` → re-run *all* integrated gates.
+4. Retry cap or **non-convergence bound** reached → Human Liaison (right diagnosis, not a budget breach).
+5. Deterministic-monitor trip (loop / oracle-or-config edit / policy / cost) → pause + HITL; analyzer flags are advisory.
+6. Budget breach → escalate (T1 never downgrades).
+7. All escalations resume from the last checkpoint; effectful actions re-verify by idempotency key and never re-fire.

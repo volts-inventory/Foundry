@@ -3,7 +3,9 @@
 This document specifies *how* the Foundry pipeline is wired as a LangGraph
 `StateGraph`: the node/subgraph layout, the typed state **and its concurrency
 semantics**, the source-control isolation model, durability and side-effect
-handling, and the control flow (gates, loops, joins, interrupts).
+handling (including the dual-write / atomicity protocol), the context-assembly
+contract, model-determinism policy, and the control flow (gates, loops, joins,
+interrupts).
 
 ## 1. Top-level graph
 
@@ -15,14 +17,15 @@ flowchart TD
     TRIAGE -->|spike| SPIKE[Architect: timeboxed research]
     SPIKE --> SPIKEOUT([Spike report · not released])
 
-    PROD --> SPECGATE{{Spec gate}}
+    PROD --> CRITERIA[Criteria-completeness critique · independent role/family]
+    CRITERIA --> SPECGATE{{Spec gate}}
     MINSPEC --> SPECGATE
     SPECGATE -->|greenfield/evolution: fail| PROD
     SPECGATE -->|bugfix: fail| MINSPEC
     SPECGATE -->|greenfield/evolution: pass| PLAN[Eng/Program Mgr: sprint plan + budget + risk]
 
     PLAN --> ARCH
-    ARCH[Principal Architect: system design + ADRs + interfaces + ownership_map]
+    ARCH[Principal Architect: system design + ADRs + interfaces + ownership_map + pinned constraints]
     ARCH -->|capability match| SPECIALIST[Domain Specialist]
     ARCH -->|UI project| UX[UX/Design]
     ARCH --> DESIGNGATE{{Design gate + HITL}}
@@ -35,112 +38,90 @@ flowchart TD
     DECOMP --> IMPL[Eng implements task on its own branch]
     IMPL --> PBUILD{{Per-branch Build gate}}
     PBUILD -->|fail| IMPL
-    PBUILD -->|pass| REVIEW[Reviewer reviews diff · QA authors/runs tests · separate models]
+    PBUILD -->|pass| REVIEW[Reviewer reviews diff · QA authors/runs tests · cross-family on high-risk]
     REVIEW -->|changes requested| IMPL
-    REVIEW -->|approve| PTEST{{Per-branch Test gate}}
+    REVIEW -->|approve| PTEST{{Per-branch Test gate · criterion fidelity}}
     PTEST -->|fail| IMPL
     PTEST -->|tasks > 1: all branches pass| INTEG[Integration node: merge branches, resolve conflicts]
     PTEST -->|tasks == 1: single branch| IBUILD
+
     INTEG --> IBUILD{{Integrated Build+Test gate}}
     IBUILD -->|fail / merge conflict| FIX[Targeted fix on branch]
     IBUILD -->|integration reveals structural design defect| DECOMP
 
-    IBUILD -->|pass| PAR{{Assurance fan-out}}
+    IBUILD -->|pass| PAR{{Assurance fan-out · Send, per-branch deadline}}
     PAR --> SEC[Security/AppSec: threat model + SAST/DAST/deps]
     PAR --> AUD[Audit/Compliance: SBOM + license scan]
-    SEC --> AJOIN[Assurance join]
+    PAR --> SUPPLY[Supply-chain gate: build/CI/IaC/scanner-config policy]
+    SEC --> AJOIN[Assurance join · tolerates per-branch error]
     AUD --> AJOIN
+    SUPPLY --> AJOIN
     AJOIN -->|any high/critical finding| FIX
-    AJOIN -->|both clean| E2E[SDET: integration + e2e]
+    AJOIN -->|branch error / timeout| RETRYB[Bounded per-branch retry → else escalate]
+    AJOIN -->|all clean| E2E[SDET: integration + e2e]
     E2E --> E2EGATE{{E2E gate}}
-    E2EGATE -->|fail| FIX
-    E2EGATE -->|pass| ATTEST[[Trusted CI builder: hermetic build + SBOM + SLSA + keyless sign]]
-    ATTEST --> RELGATE{{Release gate · HITL sign-off on attested artifact}}
+    E2EGATE -->|fail / error| FIX
+    E2EGATE -->|pass| ATTEST[[Trusted hermetic CI builder · no egress · SBOM + SLSA + sign · gate-state in predicate]]
+    ATTEST --> RELGATE{{Release gate · HITL on attested artifact + evidence pack}}
     RELGATE -->|rejected w/ reason| FIX
-    RELGATE -->|approved| OPS[DevOps/SRE + Release Mgr: deploy + changelog + rollback]
+    RELGATE -->|approved| ADMIT[[Deploy-time admission controller · verify signature + gate-state for this digest]]
+    ADMIT -->|verify fail| FIX
+    ADMIT -->|verified| OPS[Non-agent deployer: deploy + changelog + rollback]
     OPS --> DONE([Released])
 
     FIX -->|tasks > 1: re-merge| INTEG
     FIX -->|tasks == 1| IBUILD
 
-    MON[[Guardian + Budget Controller: deterministic monitors + sandboxed analyzer]] -. halt/pause/escalate .- TRIAGE
+    MON[[Guardian: deterministic monitors + event-triggered sandboxed analyzer + convergence bound]] -. halt/pause/escalate .- TRIAGE
 ```
 
-Control-flow rules made explicit (resolving the fan-in/loop hazards):
+Load-bearing control rules:
 
-- **Single-entry / single-exit subgraphs.** Each layer subgraph has exactly one
-  entry and one exit node, so loops re-enter at a defined point.
-- **Every non-bugfix route is fully specced and budgeted.** Greenfield *and*
-  evolution both enter `PROD` (evolution via a *change brief / PRD delta*),
-  pass the Spec gate (producing `acceptance_criteria` the Test gate can verify),
-  and pass `PLAN` (which sets the budget) before reaching the Architect. **Triage
-  seeds a default per-route budget cap** so even the bugfix route (which skips
-  `PLAN`) is bounded; `PLAN` refines the cap on the routes it visits.
-- **Spikes are throwaway.** A spike routes to a timeboxed Architect research node
-  and terminates in a *spike report* — it never enters the implementation/release
-  pipeline, so it produces no released artifact.
-- **Gate failures return to the producer for that route.** A Spec-gate failure
-  routes back to whichever node produced the spec — `PROD` for
-  greenfield/evolution, `MINSPEC` for bugfix — preserving the
-  single-entry/single-exit loop invariant.
-- **Integration is task-count-based, not route-based.** Whenever a run has **more
-  than one task branch** it goes through `integration_node`; whenever it has
-  **exactly one task** (a bugfix *or* a single-task greenfield/evolution) that
-  lone branch *is* the integrated tree and integration is bypassed. The
-  predicate on every PTEST/FIX edge is `tasks > 1` vs `tasks == 1`, so no
-  legitimate run is left without a defined edge.
-- **One re-verification funnel.** *Every* fix — per-task, integration, assurance,
-  E2E, or release-rejection — routes through `FIX`. For a **multi-task** run the
-  fix is **re-merged through `integration_node`** (producing a new integrated
-  tree and `tree_sha`) before the **Integrated Build+Test gate**; for a
-  **single-task** run the branch *is* the integrated tree, so `FIX` flows
-  straight to the integrated gate. No path skips build/test after a code change.
-- **Targeted fixes, not restarts.** Integrated-gate failures, assurance findings,
-  E2E failures, and release rejections all route to a *targeted* `FIX`.
-  Full re-decomposition (`→ DECOMP`) happens **only** when integration reveals a
-  *structural design defect* (that one edge is explicitly labeled).
-- **Assurance join.** Security and Audit run in parallel and rejoin at one node;
-  the run proceeds only when *both* are clean.
-- **E2E is gated.** SDET's end-to-end run is guarded by an **E2E gate** with a
-  `fail → FIX` edge, so a failing e2e suite cannot reach release.
-- **Attest-then-release.** The trusted builder produces the signature + SLSA
-  provenance *before* the Release gate, so the human signs off on an already
-  **attested artifact** (the Release gate checks provenance/signature presence).
-- **Any single-task run bypasses integration.** A bugfix is the canonical case:
-  it produces a reproduction + expected-behavior brief (its acceptance criterion)
-  through the Spec gate, then enters `DECOMP`, which provisions **exactly one
-  task** (and thus the `task/<id>` branch and `task_id` that the per-branch gates,
-  artifacts, and side-effect ledger key on). A single-task greenfield/evolution
-  run is handled identically. With one branch, integration is skipped and the
-  per-branch result flows straight into the Integrated Build+Test gate.
-- **A fix invalidates downstream integrated verdicts.** Because integrated gates
-  are keyed on the integrated-tree content hash (§3), and a `FIX` is re-merged
-  (multi-task) or directly produces (bugfix) a new tree, the `tree_sha` changes
-  and yields a new key — the prior `Security`/`Audit`/`E2E` PASS no longer matches
-  the *current* tree, so re-verification re-runs **all** integrated gates
-  (Build+Test *and* Security/Audit/E2E), never just Build+Test.
+- **Single-entry / single-exit subgraphs; gate failures return to the route's
+  producer** (Spec fail → `PROD` for greenfield/evolution, `MINSPEC` for bugfix).
+- **Integration is task-count-based** (`tasks > 1` → `INTEG`; `tasks == 1` →
+  `IBUILD`), so bugfix *and* single-task greenfield/evolution are both covered.
+- **One re-verification funnel with a convergence bound.** Every fix routes
+  through `FIX`; multi-task fixes re-merge through `INTEG` (new tree → new
+  `tree_sha`), single-task fixes go straight to `IBUILD`. A changed tree
+  invalidates *all* integrated verdicts (§4), so re-verification re-runs
+  Build+Test **and** Security/Audit/Supply-chain/E2E. A **global convergence
+  bound** (§7) stops the cross-gate "whack-a-mole" cascade that per-loop counters
+  cannot (the loop-detector keys on a semantic signature, not the diff bytes —
+  see [governance.md §3](./governance.md)).
+- **Assurance fan-out uses `Send` with per-branch deadlines and an `error`
+  status**, so one crashed/timed-out branch neither voids its siblings' committed
+  results nor wedges the join (§5, [governance.md §3](./governance.md)).
+- **Supply-chain gate** runs in the assurance fan-out: build/CI/IaC/Dockerfile/
+  lockfile/scanner-config changes are high-privilege artifacts reviewed
+  separately from application code ([governance.md §4](./governance.md)).
+- **Attest-then-release-then-admit.** The trusted hermetic builder (no egress)
+  produces the signature + SLSA provenance **with the gate-state bound into the
+  predicate** *before* the Release gate; after human sign-off, a **deploy-time
+  admission controller** re-verifies the signature *and* that all required gates
+  PASS for this exact digest before a **non-agent deployer** ships
+  ([governance.md §5](./governance.md)).
+- **Independent criteria critique.** Greenfield/evolution criteria pass an
+  independent completeness critique (esp. security/abuse criteria) before the
+  Spec gate, so "100% criterion-coverage" can't be satisfied by weak criteria
+  ([governance.md §6](./governance.md)).
 
 ## 2. Subgraphs
 
-Each layer is a self-contained subgraph with a single typed input and output:
-
-- `product_subgraph(intent) -> PRD`
-- `architecture_subgraph(PRD) -> Design` (conditionally invokes UX / Domain Specialist — see §7)
+- `product_subgraph(intent) -> {PRD, acceptance_criteria}` (+ criteria critique)
+- `architecture_subgraph(PRD) -> Design` (conditionally invokes UX / Domain Specialist; emits `pinned_constraints`)
 - `implementation_subgraph(Design, task) -> branch` (per-task; evaluator-optimizer loop + per-branch Build/Test gates)
-- `integration_node(branches[]) -> IntegratedTree` (runs only when `tasks > 1`; merge + conflict resolution)
-- `assurance_subgraph(IntegratedTree) -> {SecurityReport, AuditReport}` (parallel fan-out + join)
-- `release_subgraph(attested tree) -> Release`
+- `integration_node(branches[]) -> IntegratedTree` (runs only when `tasks > 1`)
+- `assurance_subgraph(IntegratedTree) -> {SecurityReport, AuditReport, SupplyChainReport}` (`Send` fan-out + join)
+- `release_subgraph(attested tree) -> Release` (admission controller + non-agent deployer)
 
 ## 3. Typed state and concurrency semantics
 
-LangGraph merges state updates **per channel** at every super-step. Any channel
-written by more than one concurrent node **must** declare a reducer, or the run
-raises `InvalidUpdateError` (or silently drops a branch). We use a `TypedDict`
-state with explicit `Annotated[..., reducer]` channels, and Pydantic models only
-for the *values* (artifact contracts). Each channel is labeled **single-writer**
-or **fan-in** (reducer required). Custom reducers **must tolerate a `None` left
-operand** (the channel's pre-initialization value) and must be **identity-keyed**
-so concurrent same-kind writes do not clobber.
+LangGraph merges updates **per channel** at each superstep, folding the pending
+writes as an **unordered set**. Reducers must therefore be **associative *and*
+commutative**, **`None`-safe**, and must establish ordering from data (a
+monotonic field) rather than iteration order. Large/append-only data is held
+**out-of-band by content-addressed handle** to bound checkpoint size.
 
 ```python
 import operator
@@ -148,191 +129,225 @@ from typing import Annotated, TypedDict
 from pydantic import BaseModel
 from enum import Enum
 
-# ---- value contracts (Pydantic) ----
-class Phase(str, Enum):
-    TRIAGE="triage"; PRODUCT="product"; ARCHITECTURE="architecture"
-    PLANNING="planning"; IMPLEMENTATION="implementation"; INTEGRATION="integration"
-    ASSURANCE="assurance"; RELEASE="release"; DONE="done"
-
 class Artifact(BaseModel):
-    kind: str                      # "prd"|"adr"|"interface"|"diff"|"test_report"|...
+    kind: str
     uri: str                       # content-addressed store ref — GLOBALLY UNIQUE identity
-    produced_by: str               # role/agent id
-    task_id: str | None = None     # branch/task this artifact belongs to (parallel-safe)
-    version: int = 1               # artifacts are versioned, never mutated in place
-    supersedes: str | None = None  # uri of the version this replaces
+    produced_by: str
+    task_id: str | None = None
+    version: int = 1
+    supersedes: str | None = None
+    seq: int                       # monotonic logical clock (see below)
 
 class GateResult(BaseModel):
     name: str
-    passed: bool
-    decision_deterministic: bool   # was the PASS/FAIL *rule* deterministic?
-    execution_deterministic: bool  # were the underlying outputs reproducible?
+    status: str                    # "pass" | "fail" | "error"  (error = infra failure, not a verdict)
+    decision_deterministic: bool
+    execution_deterministic: bool
     findings: list[str] = []
     retries: int = 0
-    run_against: str               # per-branch: "task/<id>"; integrated: the integrated-tree content hash (tree_sha)
+    run_against: str               # per-branch: "task/<id>"; integrated: tree_sha (see §4)
+    seq: int                       # monotonic; resolves latest-wins by CAUSALITY, not iteration order
 
-class BudgetLedger(BaseModel):
-    usd_cap: float
-    per_phase_caps: dict[str, float]   # concrete sub-budgets incl. a rework reserve, governance §7
-    per_loop_caps: dict[str, float]
-    usd_spent: float = 0.0
-    tokens_spent: int = 0
-    wallclock_s: float = 0.0
-    monitor_overhead_usd: float = 0.0  # Guardian/Budget cost is itself metered
+class LogRef(BaseModel):           # handle to out-of-band data (history/large artifacts)
+    uri: str                       # append-only store / object store
+    count: int                     # number of records, for cheap reads
+    head_seq: int
 
-class ExternalAction(BaseModel):       # the side-effect ledger (see §5)
-    idempotency_key: str               # stable hash of (task, action, target)
-    kind: str                          # "commit"|"push"|"open_pr"|"tag"|"deploy"
-    status: str                        # "pending"|"done"
-    external_ref: str | None = None    # PR#, sha, tag, deployment id
-
-# ---- merge reducers (None-safe, identity-keyed) ----
-def merge_artifacts(a, b):
-    a = a or []
-    by_uri = {x.uri: x for x in a}          # uri is content-addressed => unique identity
-    for x in (b or []):
-        by_uri[x.uri] = x                   # set-union by identity; no parallel clobber
-    return list(by_uri.values())
-
-def merge_gates(a, b):
-    a = a or []
-    latest = {(g.name, g.run_against): g for g in a}
-    for g in (b or []):
-        latest[(g.name, g.run_against)] = g  # LATEST verdict per (gate, target) wins
-    return list(latest.values())
-
-def union_strs(a, b):
-    return sorted(set(a or []) | set(b or []))  # dedup capabilities
-
-# ---- graph state (TypedDict + reducers) ----
 class FactoryState(TypedDict):
     request: str                                              # single-writer
     route: str | None                                         # single-writer (triage)
-    phase: Phase                                              # single-writer (supervisor)
-    required_capabilities: Annotated[list[str], union_strs]   # fan-in, deduped
-    artifacts: Annotated[list[Artifact], merge_artifacts]     # fan-in, set-union by uri
-    gates: Annotated[list[GateResult], merge_gates]           # fan-in, latest-per-(name,target)
-    tasks: Annotated[list[dict], operator.add]                # fan-in (decomp/parallel)
-    history: Annotated[list[dict], operator.add]              # fan-in, append-only
-    human_decisions: Annotated[list[dict], operator.add]      # fan-in
+    phase: str                                                # single-writer (supervisor)
+    seq_clock: int                                            # single-writer; monotonic source for seq
+    required_capabilities: Annotated[list[str], _union]       # fan-in, deduped, commutative
+    pinned_constraints: Annotated[list[dict], _union_by_id]   # fan-in; NEVER summarized (see §8)
+    artifacts: Annotated[list[Artifact], _merge_by_uri]       # fan-in, set-union by uri (commutative)
+    gates: Annotated[list[GateResult], _merge_gates]          # fan-in, max-by-seq per (name, run_against)
+    tasks: Annotated[list[dict], _union_by_id]                # fan-in, keyed (commutative)
     budget: BudgetLedger                                      # single-writer (Budget Ctrl)
-    actions: Annotated[list[ExternalAction], operator.add]    # fan-in side-effect ledger
+    actions: Annotated[list[ExternalAction], _union_by_key]   # fan-in, keyed by idempotency_key
+    history_ref: LogRef                                       # handle; raw events live out-of-band
 ```
 
-Key correctness notes:
+Reducer rules (all `None`-safe, commutative, identity-keyed):
 
-- **Artifacts are set-unioned by their content-addressed `uri`**, so two parallel
-  task branches each emitting (say) a `diff` or `test_report` never collide — the
-  earlier bug of keying on `(kind, produced_by, version)` is gone. `task_id`
-  attributes each artifact to its branch.
-- **`gates` uses a latest-wins keyed reducer** on `(name, run_against)`, so the
-  supervisor reads a well-defined *current* verdict. Per-branch runs key on the
-  stable `task/<id>` (so retries on the same branch overwrite correctly);
-  **integrated runs key on the integrated-tree content hash (`tree_sha`)**, so a
-  `FIX` that changes the tree yields a *new* key — prior `Security`/`Audit`/`E2E`
-  PASS verdicts no longer match the current tree and cannot be read as current,
-  forcing their re-run during re-verification. Append-only verdict history is
-  preserved separately in `history` for audit.
-- `operator.add` channels (`tasks`, `history`, `human_decisions`, `actions`) are
-  LangGraph-initialized to `[]`; the hand-written reducers above are explicitly
-  `None`-safe.
-- `TypedDict` is chosen for the *graph state* because reducer annotations compose
-  cleanly with LangGraph's channel model; Pydantic still validates every value.
+```python
+def _merge_by_uri(a, b):                      # artifacts: set-union by content address
+    m = {x.uri: x for x in (a or [])}
+    for x in (b or []): m[x.uri] = x
+    return list(m.values())
 
-## 4. Source-control isolation and integration
+def _merge_gates(a, b):                        # gates: LATEST BY seq per (name, run_against)
+    m = {}
+    for g in (a or []) + (b or []):
+        k = (g.name, g.run_against)
+        if k not in m or g.seq > m[k].seq:     # causal latest, NOT iteration order
+            m[k] = g
+    return list(m.values())
+```
 
-- **Branch-per-task / worktree isolation.** Each task gets a branch (`task/<id>`)
-  and an isolated worktree in its sandbox. Parallel agents never share a tree.
-- **Per-branch gates first.** Build and Test gates run *per task branch* in its
-  own sandbox — reproducible and attributable.
-- **Explicit integration node (runs when `tasks > 1`).** When all task branches
-  pass, `integration_node` merges them in a **deterministic order** driven by the
-  Architect's `ownership_map` (topological by declared file/interface ownership,
-  then lexical by `task_id` as a tiebreak). Conflicts route to a
-  conflict-resolution step (Senior Engineer) with the conflicting hunks as input.
-  A multi-task `FIX` re-enters `integration_node` (re-merge), so the integrated
-  tree always reflects the fix and its `tree_sha` changes accordingly.
-- **Single-task fallback.** Any run with exactly one task (a bugfix or a
-  single-task greenfield/evolution) bypasses `integration_node` entirely and its
-  lone branch *is* the integrated tree. For multi-task runs that somehow lack an
-  `ownership_map`, merge order falls back to lexical `task_id` ordering and is
-  flagged for the Architect.
-- **Integrated gate is authoritative for release.** Per-branch green does not
-  imply integrated green.
-- **Retry idempotency.** A branch is reset to a known base before re-running a
-  fix, so re-execution never double-applies a diff.
+Why each fix matters (maps to Round-7 findings):
 
-## 5. Durability, resume, and external side effects
+- **`gates` is max-by-`seq`, not last-iterated** — concurrent or batched gate
+  writes resolve to the causally-newest verdict, so a real PASS can't be masked
+  by a stale FAIL (or vice-versa) due to fold order. `seq` is drawn from the
+  single-writer `seq_clock`. *(DS1, DS8)*
+- **`status` distinguishes `error` from `fail`** — an infra crash is not a
+  verdict; the join handles it separately (§5). *(DS7)*
+- **All list channels are keyed set-unions** (`tasks` by id, `actions` by
+  idempotency key), so no channel relies on `operator.add` concatenation order
+  for meaning; anything order-sensitive reads by `seq` and sorts. *(DS8)*
+- **`history` and large artifact bodies live out-of-band** (`history_ref` +
+  object store); the checkpoint holds bounded handles, so checkpoint size doesn't
+  grow with trajectory length and Postgres write-amplification stays linear in
+  *new* data, not total. *(DS9)*
+- **`pinned_constraints`** is a first-class, never-summarized channel (§8). *(AI2)*
 
-LangGraph's checkpointer makes *internal* state resumable — it does **not** undo
-external side effects. We separate node types and add a ledger:
+## 4. `tree_sha` — precise, behavior-stable definition
 
-- **Pure-compute nodes** (reasoning, producing artifacts) are freely
-  re-executable; resume/replay is safe.
-- **Effectful nodes** (git commit/push, PR open, package install, tag, deploy)
-  are guarded by the **external-action ledger** (`actions` channel). Every
-  effectful tool call carries an `idempotency_key`; the node first checks the
-  ledger / the external system and is a **check-then-act** no-op if the action is
-  already `done`.
-- **Checkpointer:** `PostgresSaver` (prod) / `SqliteSaver` (dev) persists every
-  super-step → crash recovery and resume.
-- **Time-travel** rewinds *internal state only*. Forking from an earlier
-  checkpoint creates a **new run ID**; it never mutates the original run's audit
-  record (see [governance.md §4](./governance.md)) and never "un-deploys" the
-  outside world. Replaying past an effectful node hits the ledger and skips.
+The integrated-gate keying and invalidation correctness depend on `tree_sha`
+being a deterministic hash of *logical state that affects behavior* and nothing
+volatile. It is defined as:
 
-## 6. Context assembly, retrieval, and model management
+```
+tree_sha = H( normalized_source_tree   # git tree of TRACKED SOURCE only,
+                                        #   build outputs excluded via .gitattributes/.gitignore,
+                                        #   canonical path ordering, no embedded timestamps
+            ⧺ resolved_lockfile_hash    # exact dependency versions (all ecosystems)
+            ⧺ toolchain_digest          # pinned builder image + tool versions
+          )
+```
 
-Long-horizon runs accumulate state that exceeds any context window, so each node
-has a **context-assembly contract** rather than "dump everything":
+- **Excludes** build artifacts, caches, and any codegen-embedded timestamps, so
+  the *same logical state hashes identically across clean checkouts on different
+  machines* (a CI invariant test enforces this). This kills spurious
+  invalidation → the cascade in §7. *(DS4)*
+- **Includes** the resolved lockfile and toolchain digest, so a dependency or
+  toolchain change *does* change the hash — two different logical states cannot
+  collide into a stale "already verified" PASS. *(DS4, ties to supply-chain §SEC1)*
+- Integrated `GateResult.run_against = tree_sha`. A `FIX` (re-merged for
+  multi-task) yields a new `tree_sha`, so prior Security/Audit/Supply-chain/E2E
+  verdicts no longer match the current key and are re-run. Per-branch verdicts
+  key on the stable `task/<id>` and are invalidated when that branch's base moves
+  (rebase resets the branch; its verdicts are re-emitted with a higher `seq`).
 
-- **Per-node window budget.** A node receives: its task/SOP, the *relevant*
-  interface contracts, retrieved code spans, and a **summarized** rolling
-  history — never the full append-only `history`.
-- **History compaction.** `history` is append-only for audit, but nodes consume a
-  compacted view: periodic LLM summarization into checkpointed summaries, with
-  raw events retained in the store (not the window).
-- **Repo retrieval (concretely).** A **symbol index** (tree-sitter/LSP) +
-  chunk-level embeddings + lexical search, ranked and reranked, returning bounded
-  spans with file/line provenance. The Architect's "survey existing code" is this
-  retrieval contract, not free reading.
-- **Model pinning & tiers.** Model IDs are pinned per tier (T1=Opus-class,
-  T2=Sonnet-class, T3=Haiku-class) and recorded in the run manifest. **Tier
-  downgrade is forbidden on T1 judgment nodes** (architecture, security, review);
-  a budget breach there **escalates** ([governance.md §7](./governance.md)).
-- **Failover.** On rate-limit/unavailability, retry with backoff then fail over
-  to the same-tier alternate; never cross-tier-down on T1.
-- **Prompt caching.** Stable system prompts/SOPs and pinned reference artifacts
-  are sent with cache breakpoints so repeated node invocations reuse cached
-  prefixes (a primary token-cost lever alongside tiering).
+## 5. Durability, atomicity, and external side effects
 
-## 7. Conditional and optional roles
+Resume restores *internal* state; it does not undo external effects. The dual
+-write between the checkpoint DB and the outside world (git, GitHub, deploys,
+WORM audit) is handled by a **transactional outbox**, not by hope.
 
-Optional roles are modeled as **conditional edges**, not always-present nodes:
+- **One Postgres transaction** commits, per superstep: the LangGraph checkpoint,
+  the `budget` ledger, the `actions` ledger update, **and** an **outbox** row for
+  every external effect and every audit event. The checkpoint and the ledgers
+  can never diverge. *(DS3)*
+- **A separate relay** drains the outbox to external systems (git/PR/tag/deploy)
+  and to the **append-only WORM audit store**, at-least-once, each carrying its
+  `idempotency_key`. *(DS3)*
+- **Effectful tools are idempotent at the external boundary.** The
+  `idempotency_key` is **transmitted to and stored by the external system**
+  (GitHub: embedded in branch/tag name, PR marker, or client idempotency token;
+  deploys: server-side idempotency token). The protocol is **intent-log → act →
+  confirm-log**. On resume the node **re-queries the external system *by
+  idempotency key***; if the system cannot answer authoritatively, the node
+  **fails to the human** (never assumes done or not-done). This closes the
+  two-generals window to a single, human-mediated boundary. *(DS2)*
+- **Checkpointer:** `PostgresSaver` (prod) / `SqliteSaver` (dev).
+- **Time-travel** rewinds *internal state only*; forking creates a **new run ID**,
+  never mutates the original WORM record, and replaying past an effectful node
+  hits the external idempotency check and skips.
+- **Partial-failure of a parallel branch:** assurance/impl branches are
+  dispatched with `Send` so each commits independently; a branch that raises
+  records a `GateResult{status:"error"}` and is retried *alone* (bounded) rather
+  than failing the whole superstep and discarding sibling work. A per-branch
+  **deadline** prevents a hung branch from wedging the join → escalate on timeout.
+  *(DS6, DS7)*
 
-- **UX/Design** is entered only when `required_capabilities` contains `ui`.
-- **Domain Specialist** is entered only when `required_capabilities` intersect
-  the registry (see [governance.md §5](./governance.md)).
-- **Consumers tolerate absence.** Downstream nodes treat optional artifacts
-  (`ux_spec`, domain addenda) as optional inputs and use presence checks. The one
-  load-bearing exception — integration's dependence on `ownership_map` — has the
-  explicit bugfix bypass and lexical fallback defined in §4.
+## 6. Budget enforcement under the execution model
 
-## 8. Orchestration patterns → where they appear
+LangGraph supersteps are atomic: a node cannot be checkpointed mid-execution.
+Budget control is therefore defined against that reality:
 
-| Pattern (Anthropic) | Location in Foundry |
+- **Enforcement at superstep boundaries:** the Budget Controller checks caps
+  **before dispatching the next superstep**, not inside a running node. *(DS6)*
+- **Cooperative cancellation for long node bodies:** a node polls a
+  cancellation token and persists its own partial progress to git (external
+  store) plus a resumable marker to state *before yielding*; there is no
+  mid-write kill. *(DS6)*
+- **`Send`/map-reduce per-item commit:** parallel work uses independent branches
+  so an aborted branch fails only itself and siblings' committed work survives;
+  re-executed branches are idempotent. *(DS6)*
+
+## 7. Convergence — stopping the cross-gate cascade
+
+Per-loop retry caps bound a *single* gate's rework, but a fix can satisfy one
+gate while breaking another across a *new* `tree_sha`, and the loop-detector's
+diff-hash signature never repeats across such progressing-but-non-converging
+fixes. Two additional, finding-driven controls:
+
+- **Global convergence bound:** a `fix_attempts_since_all_green` counter
+  (distinct `tree_sha`s produced without reaching all-integrated-green). Crossing
+  it escalates as a **non-convergence** event — *not* a budget breach — so
+  operators get the right diagnosis before maximum spend. *(DS5)*
+- **Semantic loop signature:** the Guardian loop-detector keys on
+  `(criterion_id/task, gate, failure_signature)` — failing test ids / error
+  classes — *not* on diff bytes, so cosmetically-different regenerations of the
+  same stuck attempt are detected; a separate normalized-diff *similarity* check
+  is a secondary signal. *(DS5, DS10)*
+
+## 8. Context assembly, retrieval, and model determinism
+
+Long-horizon success lives or dies here, so the contract is mechanistic, not
+"summarize history + embed code":
+
+- **Pinned, never-summarized state.** ADR decisions, rejected alternatives,
+  invariants/constraints, high-risk acceptance criteria, and ownership
+  constraints live in the `pinned_constraints` channel and are injected
+  **verbatim** into every node that could violate them. Only narrative/event
+  history is summarized. *(AI2)*
+- **Retrieval is a measured contract, not vibes.** Symbol index (tree-sitter/LSP)
+  **plus the call/def + dependency graph** (impact analysis) — not embedding
+  similarity alone — so cross-file/implicit coupling is surfaced. A
+  **retrieval-recall eval** against labeled known-relevant spans gates the
+  retriever ([evaluation.md §5](./evaluation.md)). *(AI2)*
+- **Explicit "insufficient context" escape.** A node may return
+  `need-context(query)` to re-retrieve or escalate rather than hallucinate over a
+  partial view; retrieval failures are detected, not silently tolerated. *(AI2)*
+- **History compaction** summarizes only events, with raw events retained
+  out-of-band (`history_ref`); summaries are themselves checkpointed.
+- **Sampling & determinism policy.** Temperature 0 (low top-p) for gates,
+  routing, and all judge/review nodes; higher only where exploration helps
+  (architecture ideation). The run manifest **and** WORM store record, per node,
+  the temperature/seed, the pinned model ID, **and the provider's
+  model-version/system-fingerprint**; a change in that fingerprint raises a
+  **pinned-ID-drift** alert (it invalidates prior calibration/eval baselines).
+  Audit is honestly framed as an **immutable record of actual decisions and
+  inputs**, and replay reproduces *internal control state*, not bitwise-identical
+  LLM outputs. *(AI5)*
+- **Model pinning, tiers, failover.** Tiers T1/T2/T3 with pinned IDs;
+  **T1 judgment nodes never auto-downgrade** (breach escalates). Failover is
+  stated honestly: **intra-family** outage handling is retry/backoff/queue then
+  **pause-and-escalate** (a same-weights "alternate" is not real redundancy);
+  **cross-family** failover, where used, carries **per-model judge calibration**
+  and records the serving model per node in the manifest. *(AI9)*
+- **Prompt caching** of stable SOP/system prefixes and pinned reference
+  artifacts is the primary token-cost lever (low cache benefit for the analyzer,
+  which is therefore event-triggered — [governance.md §3](./governance.md)).
+
+## 9. Orchestration patterns → where they appear
+
+| Pattern (Anthropic) | Location |
 |---|---|
-| Routing | `Triage & Route` node |
-| Orchestrator-workers | Supervisor delegating to layer subgraphs |
-| Evaluator-optimizer | Per-task Implementation ⇄ Review/QA loop |
-| Parallelization (scatter-gather) | Branch-per-task impl; assurance fan-out + join |
-| Prompt chaining | SOP step sequence inside each role node |
-| Reflection | Each role self-critiques output before hand-off |
-| Human-in-the-loop | Design gate + Release gate interrupts |
+| Routing | `Triage & Route` |
+| Orchestrator-workers | Supervisor → layer subgraphs |
+| Evaluator-optimizer | Per-task Implementation ⇄ Review/QA |
+| Parallelization (scatter-gather) | Branch-per-task impl; `Send` assurance fan-out + join |
+| Prompt chaining | SOP steps inside each role node |
+| Reflection | Role self-critique before hand-off |
+| Human-in-the-loop | Design gate, Release gate (with evidence pack), error/non-convergence escalations |
 
-## 9. Why structured artifacts (not chat)
+## 10. Why structured artifacts (not chat)
 
-Agents communicate by reading/writing **content-addressed, versioned** artifacts
-(PRD, ADR, interface contract, test report, diff), following MetaGPT's finding
-that structured communication reduces error propagation versus free-form
-dialogue. Chat is used only for in-loop critique, never as the system of record.
+Agents communicate via content-addressed, versioned artifacts (MetaGPT's
+error-reducing structured communication). Structured ≠ lossless, so intent
+fidelity across hand-offs is independently checked
+([evaluation.md §6](./evaluation.md)); chat is only for in-loop critique.

@@ -150,6 +150,42 @@ remediation notes), never the resolved/unresolved bit. Threat-model items that
 Spec/Design) and are **not** bound into the runner-signed Security verdict — so
 the runner-signed gate stays honestly deterministic. *(DS-R10-F2)*
 
+### 1e. Change-risk tiering — assurance depth and HITL scale with risk
+
+Not every change warrants the full nine-gate + signing + human-Release + admission
+tax; making a one-line fix pay a major-feature's assurance cost is both
+uneconomic and a HITL-throughput killer. Triage emits a **change-risk tier** (a
+first-class, validated output — mis-tiering is caught the same way criteria/config
+edits are, by deterministic pattern checks + HITL):
+
+| Tier | Trigger (deterministic classifier) | Assurance depth | HITL |
+|---|---|---|---|
+| **Low** | No security-relevant path touched (no build/CI/IaC, deps/lockfile, scanner-config, auth/crypto, trust-root); bounded diff size | Reduced set (Build, Test on impacted criteria, scoped Security); **admission still fail-closed** | **Auto-approve Release**; spot-audited |
+| **Standard** | Ordinary app-code feature/evolution | Full integrated gate set | Design + Release HITL |
+| **High** | Touches build/CI/IaC, deps, scanner-config, auth/crypto, **or the trust root** | Full chain + Supply-chain + Threat-review | Design + **two-person** Release |
+
+Any touch of a security-relevant or trust-root path forces **High** regardless of
+size. The tier scales *assurance depth and human load*, never the *integrity*
+guarantees (admission is always fail-closed; verdicts always runner-signed). The
+**human-decisions-per-feature** metric ([evaluation.md §7](./evaluation.md)) keeps
+tiering honest. *(COST-F2, SRE-F7)*
+
+### 1f. Re-verification is dependency-scoped, not total
+
+A code change need not re-run *every* integrated gate from scratch. The
+re-verification engine derives from the `tree_sha` delta **which gates the change
+can affect** and re-runs only those; verdicts for unaffected inputs are **reused
+from cache, keyed on the unchanged input sub-hash** (a cached PASS keyed on an
+unchanged sub-tree/lockfile/config hash is still a *real* runner-attested verdict,
+so the final attested gate-state still covers the whole tree). E.g. a pure
+app-code change re-runs Test/E2E for the *impacted* criteria + SAST on changed
+files but reuses the Audit/SBOM verdict if deps are unchanged; a lockfile change
+re-runs Supply-chain + Audit but not unaffected app tests. This turns the
+worst-case re-verification *multiplier* (COST-F1) into a bounded,
+change-proportional cost while preserving the whole-tree guarantee. A hard
+**per-feature re-verification sub-budget** caps pathological cascades, with the
+non-convergence bound as backstop. *(COST-F1)*
+
 ## 2. The five-plane guardrail model
 
 ### Policy plane
@@ -221,6 +257,11 @@ the runner-signed gate stays honestly deterministic. *(DS-R10-F2)*
 ### Assurance plane
 - SBOM, SLSA L3 provenance, signing — produced by the trusted hermetic builder
   with **gate-state bound into the predicate** (§5).
+- **Generated-code provenance:** a runner-computed similarity check flags
+  verbatim/near-verbatim regurgitation of training data and copyleft-snippet
+  contamination in the *generated code itself* (not just dependencies); matches
+  route to HITL. AI contribution is recorded in the provenance/SLSA metadata. See
+  [lifecycle.md §5](./lifecycle.md) for the licensing/liability posture. *(P-F5)*
 - Red-teaming (prompt injection, tool abuse, sandbox escape, **build-hook
   injection**, **exfil-over-allowlist**).
 - Evals run in CI on every change to prompts, graph, tools, gates, or scanner
@@ -391,7 +432,9 @@ prompts/SOP, gates, evals}`; a registry maps required capabilities to specialist
 
 1. Gate `fail` → responsible role, increment retry counter.
 2. Gate `error` (infra) → bounded per-branch retry → else escalate (no sibling loss).
-3. Code change → new `tree_sha` → re-run *all* integrated gates.
+3. Code change → new `tree_sha` → **dependency-scoped** re-verification: re-run the
+   integrated gates the change can affect; reuse cached runner-attested verdicts
+   for unaffected inputs (§1f).
 4. Retry cap or **non-convergence bound** reached → Human Liaison (right diagnosis, not a budget breach).
 5. Deterministic-monitor trip (loop / oracle-or-config edit / policy / cost) → pause + HITL; analyzer flags are advisory.
 6. Budget breach → escalate (T1 never downgrades).

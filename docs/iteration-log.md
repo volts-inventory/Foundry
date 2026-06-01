@@ -270,9 +270,53 @@ bar and each lens declared convergence:
   a rig). Every seam resolved to a specified mechanism with a non-circular backstop.
   **NO MATERIAL FINDINGS.**
 
-**The critic → solutioner → full-rewrite loop terminates here:** an independent,
-three-lens specialist panel at the implementation-readiness bar found no BLOCKER,
-MAJOR, or MINOR defect.
+**The implementation-readiness loop converged here:** the three technical lenses
+(security, distributed-systems, AI-agents) found no defect. But convergence at one
+bar is not fitness-for-purpose — so Round 13 deliberately changed the lenses.
+
+## Round 13 — FRESH LENSES (fitness-for-purpose bar): 17 findings (0 BLOCKER, 14 MAJOR, 3 MINOR)
+
+The technical panel had converged, so Round 13 brought in three perspectives it
+structurally could not provide — **SRE/operability**, **cost/scale (FinOps)**, and
+a **premise-skeptic** — to test the *shape and viability* of the design, not its
+internal correctness. They immediately surfaced 17 material findings, validating
+that "internally sound" ≠ "the right, runnable, adoptable thing." *(This itself
+resolves P-F6: the Round-12 convergence claim is now explicitly bounded to internal
+soundness.)*
+
+### Premise-skeptic (6: shape, sequencing, lifecycle)
+| # | Sev | Problem | Resolution |
+|---|---|---|---|
+| P-F1 | MAJOR | The falsifying A/B was sequenced *last* — full build cost sunk before the bet is decided | **Phase-1.5 decision gate**: powered A/B with a real kill/redesign branch before the expensive machinery. [roadmap](./roadmap.md) |
+| P-F2 | MAJOR | 16-role pantheon not evidence-grounded (cited work validates ~5) | Role-count is an **early ablation**; start with the 4-role core, earn each role. [roadmap](./roadmap.md), [eval §9](./evaluation.md) |
+| P-F3 | MAJOR | No effort/team/timeline or maintainability realism | Per-phase team-quarter estimates + a stated **smallest-useful milestone**. [roadmap](./roadmap.md) |
+| P-F4 | MAJOR | Trust-root machinery front-loaded for an autonomy not yet earned | **Deployment-trust modes** (Assistant→Gated→Autonomous); trust root **deferred** to Phase 4. [lifecycle §4](./lifecycle.md), [roadmap](./roadmap.md) |
+| P-F5 | MAJOR | Missing lifecycle: maintenance, human steering/taste, feedback loop, AI-code licensing/liability | New **[lifecycle.md](./lifecycle.md)** + generated-code provenance in the assurance plane. |
+| P-F6 | MINOR | "Converged" risked being read as fitness-for-purpose | Claim explicitly bounded to internal soundness ([PLAN §13](../PLAN.md)). |
+
+### Cost/scale (3: viability)
+| # | Sev | Problem | Resolution |
+|---|---|---|---|
+| C-F1 | MAJOR | Unconditional **total** re-verification → a cost *multiplier* | **Dependency-scoped re-verification** + verdict caching on unchanged sub-hashes; cost reported converged *and* worst-case. [gov §1f](./governance.md) |
+| C-F2 | MAJOR | No pipeline risk-tiering; **unbounded HITL volume** | **Change-risk tiering** (Low/Standard/High) scaling assurance + HITL; **human-decisions-per-feature** scorecard metric. [gov §1e](./governance.md), [eval §7](./evaluation.md) |
+| C-F3 | MINOR | A/B de-scope authority unstated; trusted-runner/builder serialization; checkpoint txn budget | De-scope **ladder with authority note**; replicas + queue model; superstep/txn budget. [eval §8](./evaluation.md), [operations §4/§6](./operations.md) |
+
+### SRE/operability (8: Day-2 — entirely new dimension)
+| # | Sev | Problem | Resolution |
+|---|---|---|---|
+| S-F1 | MAJOR | No operator role, runbooks, SLOs, alerting, dashboards | [operations §1](./operations.md) |
+| S-F2 | MAJOR | Can't distinguish *paused* from *wedged* | First-class **run-status model + watchdog**. [operations §2](./operations.md) |
+| S-F3 | MAJOR | No store HA/backup/restore or poisoned-checkpoint recovery | RPO/RTO + block-and-pause + fork-to-good + integrity sweep. [operations §3](./operations.md) |
+| S-F4 | MAJOR | Trusted-component *outage* blast radius unanalyzed (mandatory chokepoints) | Degrade-to-paused + HA replicas + queue-and-drain. [operations §4](./operations.md) |
+| S-F5 | MAJOR | No upgrade/migration with runs in flight (schema/graph/prompt/model drift) | Version-stamped checkpoints + migration/drain policy + drift response. [operations §5](./operations.md) |
+| S-F6 | MAJOR | No multi-tenancy/capacity/queueing/fairness | Run-admission layer + fleet cost-rate cap + noisy-neighbor guard. [operations §6](./operations.md) |
+| S-F7 | MAJOR | Cumulative HITL load never tallied/bounded | HITL-load model + reviewer queue/SLA + release-compute-release + staffing fallback. [operations §7](./operations.md) |
+| S-F8 | MINOR | Trusted-component lifecycle/rotation + bootstrap-trust unspecified | Rotation cadence/procedure + named ownership + bootstrap posture (humans build the trust root). [operations §8](./operations.md) |
+
+**Round 13 verdict (solutioner):** all 17 addressed via two new docs
+(operations.md, lifecycle.md), a reworked roadmap, change-risk tiering +
+dependency-scoped re-verification in governance, and threaded updates to
+PLAN/evaluation/architecture/README.
 
 ## Loop summary
 
@@ -289,19 +333,21 @@ MAJOR, or MINOR defect.
 | 9 | implementation-ready (3 specialists) | 9 | 0 | 3 | 6 | material remain |
 | 10 | implementation-ready (3 specialists) | 8 | 1 | 2 | 5 | material remain |
 | 11 | implementation-ready (3 specialists) | 3 | 0 | 1 | 2 | material remain |
-| 12 | implementation-ready (3 specialists) | 0 | 0 | 0 | 0 | **NO MATERIAL — converged** |
+| 12 | implementation-ready (3 specialists) | 0 | 0 | 0 | 0 | **no material — internal soundness converged** |
+| 13 | **fitness-for-purpose (3 FRESH lenses)** | 17 | 0 | 14 | 3 | material remain |
+| 14 | fitness-for-purpose (3 fresh lenses) | _running_ | | | | _pending_ |
 
-Total: **100 findings raised and resolved** across two bars over twelve rounds,
-terminating when an independent three-lens specialist panel (security,
-distributed-systems, AI-agents) returned **no findings at all** at the
-implementation-readiness bar.
+Total: **117 findings raised and resolved** across three bars over thirteen rounds.
 
-Convergence trajectory at the higher bar: findings 30 → 13 → 9 → 8 → 3 → 0;
-blockers 7 → 1 → 0 → 1 → 0 → 0; majors 16 → 7 → 3 → 2 → 1 → 0. The brief blocker
-re-appearances in Rounds 8 and 10 were the *deeper* trust-root seams each fix
-exposed (racy seq-assignment; results-stream forgery) — characteristic of
-genuinely hardening a hard problem, not backsliding. This log is the honest
-record the process produced, not a marketing artifact.
+The key lesson of Round 13: **convergence at one bar is not convergence at
+another.** The technical panel (security/DS/AI) genuinely converged to zero at the
+implementation-readiness bar — and then three *fresh* lenses (SRE/operability,
+cost/scale, premise) immediately found 14 MAJORs about *shape, sequencing,
+viability, and lifecycle* that the technical lenses structurally could not see.
+"Internally sound" ≠ "the right, runnable, adoptable thing." Each new lens is a new
+axis of scrutiny; a clean verdict only ever bounds the axes that were actually
+looked at. This log is the honest record the process produced, not a marketing
+artifact.
 
 ## Conformance mapping — plan vs. industry practice (2024–2026)
 

@@ -81,14 +81,17 @@ Load-bearing control rules:
   producer** (Spec fail → `PROD` for greenfield/evolution, `MINSPEC` for bugfix).
 - **Integration is task-count-based** (`tasks > 1` → `INTEG`; `tasks == 1` →
   `IBUILD`), so bugfix *and* single-task greenfield/evolution are both covered.
-- **One re-verification funnel with a convergence bound.** Every fix routes
-  through `FIX`; multi-task fixes re-merge through `INTEG` (new tree → new
-  `tree_sha`), single-task fixes go straight to `IBUILD`. A changed tree
-  invalidates *all* integrated verdicts (§4), so re-verification re-runs
-  Build+Test **and** Security/Audit/Supply-chain/E2E. A **global convergence
-  bound** (§7) stops the cross-gate "whack-a-mole" cascade that per-loop counters
-  cannot (the loop-detector keys on a semantic signature, not the diff bytes —
-  see [governance.md §3](./governance.md)).
+- **One re-verification funnel, dependency-scoped, with a convergence bound.**
+  Every fix routes through `FIX`; multi-task fixes re-merge through `INTEG` (new
+  tree → new `tree_sha`), single-task fixes go straight to `IBUILD`. A changed
+  tree invalidates the integrated verdicts the change can affect; re-verification
+  re-runs **only those** gates and **reuses cached runner-attested verdicts** for
+  unaffected inputs (keyed on the unchanged input sub-hash), so the final attested
+  gate-state still covers the whole tree at change-proportional cost
+  ([governance.md §1f](./governance.md)). A **global convergence bound** (§7) stops
+  the cross-gate "whack-a-mole" cascade that per-loop counters cannot (the
+  loop-detector keys on a semantic signature, not the diff bytes — see
+  [governance.md §3](./governance.md)).
 - **Assurance fan-out uses `Send` with per-branch deadlines and an `error`
   status**, so one crashed/timed-out branch neither voids its siblings' committed
   results nor wedges the join (§5, [governance.md §3](./governance.md)).

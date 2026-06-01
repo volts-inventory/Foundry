@@ -77,6 +77,14 @@ expensive models on architecture/review, cheaper on well-scoped implementation,
 cheapest on routing. The senior→junior review relationship *is* the
 evaluator-optimizer pattern.
 
+> **This 16-role org is a ceiling to grow into, not a starting assumption.** The
+> cited evidence (MetaGPT/ChatDev) validates ~5 roles; whether more roles beat
+> fewer is an open question. So Foundry **starts** with the PM→Architect→Senior→QA
+> core and **earns each additional role by ablation** — a role is added only when
+> it measurably improves the scorecard ([roadmap.md Phase 1.5](./docs/roadmap.md),
+> [evaluation.md §9](./docs/evaluation.md)). Role multiplicity is coordination,
+> context-handoff, and cost overhead; it must pay for itself.
+
 The **Guardian** is *not* one vague LLM: deterministic monitors handle loops,
 cost, and policy (no LLM, no injection surface), and a separately-sandboxed,
 toolless analyzer raises *advisory* flags for semantic concerns
@@ -197,6 +205,27 @@ serving-model fingerprints feeding monitors and evals), and **assurance** (SBOM,
 predicate, deploy-time admission, red-teaming incl. build-hook injection and
 exfil-over-allowlist, evals in CI).
 
+## 8a. Earned autonomy & change-risk tiering
+
+Adoption does not begin at "AI autonomously deploys to prod," and not every change
+warrants the full assurance tax:
+
+- **Deployment-trust modes** ([docs/lifecycle.md §4](./docs/lifecycle.md)):
+  **Assistant** (Foundry opens a PR a human merges — ordinary CI, *no* trust-root
+  machinery), **Gated** (full gate set, human approves), **Autonomous** (hands-off
+  build/attest/deploy — requires the full two-zone runner, SLSA-L3, admission,
+  deployer). Most adopters start in Assistant; the expensive trust root is **built
+  only for Autonomous** and therefore **deferred** in the roadmap.
+- **Change-risk tiering** ([docs/governance.md §1e](./docs/governance.md)): Triage
+  emits a validated risk tier so a one-line fix doesn't pay a major-feature's
+  9-gate + human-Release tax. Low-risk (no security/trust-root path) → reduced
+  gates + auto-approve (admission still fail-closed); High-risk (build/IaC/deps/
+  auth/trust-root) → full chain + two-person sign-off. Tiering scales *assurance
+  depth and human load*, never the integrity guarantees.
+- **Dependency-scoped re-verification** ([docs/governance.md §1f](./docs/governance.md)):
+  a change re-runs only the gates it can affect and reuses cached runner-attested
+  verdicts for unaffected inputs — bounding the re-verification cost multiplier.
+
 ## 9. Pluggable domain specialists
 
 A **Specialist** is a conditional graph node implementing `{capabilities, tools,
@@ -224,14 +253,20 @@ and run the single-agent A/B that tests the central hypothesis
 
 ## 11. Roadmap (phased)
 
-Each phase has explicit exit criteria ([docs/roadmap.md](./docs/roadmap.md)):
+Sequenced to **falsify the core bet early** and **earn autonomy incrementally**
+([docs/roadmap.md](./docs/roadmap.md)):
 
-- **Phase 0 — Foundations:** repo, reducer-annotated `FactoryState`, supervisor + single agent loop, sandbox runner, side-effect ledger, tracing, policy-plane stub.
-- **Phase 1 — Core vertical slice:** PM → Architect → Senior Eng → QA builds a small *real* app behind Spec/Build/Test gates; first single-agent A/B smoke test.
-- **Phase 2 — Review & assurance:** Reviewer, Security, Audit; evaluator-optimizer loops; HITL interrupts; trusted-builder signing/SLSA.
-- **Phase 3 — Operations & scale:** branch-per-task parallelism + integration, DevOps/SRE, Release Manager, full gate set, five guardrail planes, deterministic monitors + analyzer.
-- **Phase 4 — Specialist plugin system:** registry, capability routing, first two domain packs.
-- **Phase 5 — Eval & optimization:** full eval harness + the decisive A/B; constrained workflow optimization; cost/latency hardening; red-team.
+- **Phase 0 — Foundations:** reducer-annotated `FactoryState`, transactional outbox + ledger, sandbox, tracing, run-status, policy-plane stub.
+- **Phase 1 — Core vertical slice (Assistant mode):** PM → Architect → Senior → QA produces a useful, human-merged PR behind Spec/Build/Test gates. *(smallest version that delivers value)*
+- **Phase 1.5 — DECISION GATE:** a powered, pre-registered A/B + role ablation **with a real kill/redesign branch**, *before* the expensive machinery. If structure doesn't beat a strong single agent, redesign at the cost of Phases 0–1.
+- **Phase 2 — Review & assurance (Gated mode):** Reviewer, Security, Audit; evaluator-optimizer loops; **risk-tiering**; dependency-scoped re-verification; HITL.
+- **Phase 3 — Operability & scale:** operator dashboard/SLOs/runbooks, run-status liveness, store HA + recovery, multi-tenancy/queueing, HITL-load model ([docs/operations.md](./docs/operations.md)).
+- **Phase 4 — Trust root & Autonomous mode:** two-zone runner, SLSA-L3, admission, deployer — *built only because Phases 1.5–3 proved value and demand.*
+- **Phase 5 — Specialist plugin system:** registry, capability routing, first two domain packs.
+- **Phase 6 — Eval, optimization & lifecycle:** full harness + confirmatory A/B; workflow optimization; product-feedback loop + generated-code maintenance ([docs/lifecycle.md](./docs/lifecycle.md)).
+
+Rough total: ~8–11 team-quarters to Autonomous + specialists; the smallest-useful
+milestone (Assistant mode) is ~2–3 quarters.
 
 ## 12. Known limitations & risks (eyes open)
 
@@ -252,17 +287,32 @@ Each phase has explicit exit criteria ([docs/roadmap.md](./docs/roadmap.md)):
 - **LLM nondeterminism vs audit** — Mitigation: temp-0 for gates/judges, recorded seeds/model-fingerprints, pinned-ID-drift alerts; audit framed as immutable *record*, not bitwise replay.
 - **Audit-store & data-boundary integrity** — Mitigation: WORM written by a non-agent appender with external anchoring; redaction before provider egress; PHI/PCI never leaves the boundary.
 - **Prompt injection (incl. of the monitor)** — Mitigation: load-bearing detections are deterministic; the analyzer is toolless, event-triggered, fed structured features with untrusted prose as data, and evaluated against injection.
+- **Over-engineering / mis-sequencing** — the iterative hardening *added* complexity; risk that the artifact is too complex to build or is built in the wrong order. Mitigation: the falsifying A/B + role ablation move to a **Phase-1.5 decision gate** with a kill branch; the trust root is **deferred** to Autonomous mode; a **smallest-useful milestone** (Assistant mode) ships first; effort is estimated per phase.
+- **Operability / Day-2** — Mitigation: a dedicated [operations.md](./docs/operations.md): run-status liveness (paused vs wedged), store HA + poisoned-checkpoint recovery, trusted-component availability/blast-radius, upgrade/migration with runs in flight, multi-tenancy/capacity/queueing, trusted-component lifecycle.
+- **Cost/latency at scale & HITL volume** — Mitigation: **change-risk tiering** + **dependency-scoped re-verification**; cost reported converged *and* worst-case *and* weighted over the change-size distribution; **human-decisions-per-feature** is a scorecard threshold, not an unbounded externality.
+- **Product lifecycle** — Mitigation: [lifecycle.md](./docs/lifecycle.md) covers maintenance of generated code, human **steering/taste** (not just gatekeeping), a **product-feedback loop**, deployment-trust modes, and **AI-code licensing/liability**.
 
 ## 13. How this plan was hardened
 
 This plan was red-teamed in a **critic → solutioner → full-rewrite loop across
-twelve rounds at two bars**: a generalist *design-doc* bar (Rounds 1–6, converged
-at Round 6) and a harder *implementation-readiness* bar driven by a three-lens
-specialist panel — distributed-systems/correctness, offensive-security/AI-safety,
-and AI-agents/LLM-systems (Rounds 7–12). **100 findings were raised and resolved**;
-the loop terminated when an independent specialist panel returned **no findings at
-all**. The full per-finding record, the conformance mapping to current industry
-practice, and a maturity assessment are in
+thirteen rounds at three bars**: a generalist *design-doc* bar (Rounds 1–6), an
+*implementation-readiness* bar driven by a three-lens technical panel
+(distributed-systems, offensive-security, AI-agents — Rounds 7–12, which converged
+to a no-findings verdict), and a *fitness-for-purpose* bar with three **fresh
+lenses** (SRE/operability, cost/scale, premise-skeptic — Round 13) that the
+technical panel structurally could not see. **117 findings were raised and
+resolved.**
+
+An honest bound on the claim: the Round-12 convergence established **internal
+soundness / implementation-readiness**, *not* fitness-for-purpose — which is
+exactly why Round 13's fresh lenses immediately surfaced 17 more findings about
+sequencing, operability, cost-at-scale, and lifecycle. "Converged" means an
+independent panel found no further defects *at the bar it was reviewing*; it does
+**not** mean the system is proven correct, viable, or the right thing to build.
+The genuine open questions — does structure beat a strong single agent
+(Phase-1.5 A/B), does it pencil out at scale, will it be adopted — are settled by
+evidence and real use, not by this loop. The full per-finding record, the
+conformance mapping, and a maturity assessment are in
 [docs/iteration-log.md](./docs/iteration-log.md).
 
 ---

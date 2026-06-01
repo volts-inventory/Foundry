@@ -11,9 +11,12 @@ and the cost model.
 
 **Hypothesis:** the org/graph structure (planning, decomposition, gates,
 checkpoints, HITL) improves **long-horizon** outcomes over a single strong agent
-at equal cost. This is tested by a pre-registered A/B (§2), run as a Phase-1
-smoke test and a Phase-5 decisive exit criterion. If structure doesn't help, that
-is a finding that forces a redesign — the bet is falsifiable.
+at equal cost. This is tested by a pre-registered A/B (§2), run as a
+**decision-grade gate at Phase 1.5 — before the expensive machinery is built —
+with a real kill/redesign branch**, and again as a confirmatory Phase-6 exit
+criterion ([roadmap.md](./roadmap.md)). If structure doesn't help, that forces a
+redesign at the cost of Phases 0–1, not 0–5. The bet is falsifiable *and*
+sequenced to be falsified cheaply.
 
 ## 2. A/B pre-registration (frozen before any Phase-5 run, hashed into the manifest)
 
@@ -144,6 +147,8 @@ Direction-only targets can't fail, so each metric has a release threshold
 | Escaped-defect rate (by producing tier) | Bugs past all gates | ≤ 1 per 10 features |
 | Cost per feature (USD) + wall-clock | Economic viability | within the §8 envelope; monitor overhead ≤ modeled bound |
 | Criterion fidelity | Necessary evidence tests capture intent | 100% high-risk criteria fail a *family* of non-trivial mutants (necessary, not sufficient) |
+| **Human-decisions per feature** | HITL volume / throughput risk | within a per-tier budget; trending down via risk-tiering — **not** an unbounded externality ([operations.md §7](./operations.md)) |
+| **Wall-clock per feature (by tier)** | lead-time competitiveness | within the §8 envelope; Low-tier changes not gated on human availability |
 
 Cost, wall-clock, human-intervention, and escaped-defects are read **together**
 so the system can't "win" by cutting corners.
@@ -159,24 +164,38 @@ yields (a) the cost-per-feature envelope, (b) the realistic monitor-overhead %,
 and (c) a **wall-clock budget per feature** on the scorecard. If modeled overhead
 exceeds 5%, the target is raised honestly rather than throttling detection. *(AI4)*
 
+The per-feature figure is reported **two ways**: a **converged cost** (no rework)
+and a **worst-case-cascade cost** (re-verification cascades to the convergence
+bound), since dependency-scoped re-verification ([governance.md §1f](./governance.md))
+bounds but does not eliminate cascade cost. It is also reported **weighted over a
+realistic change-size distribution** (most changes are small) against the
+risk-tiered pipeline ([governance.md §1e](./governance.md)) — a single
+"representative feature" understates fleet cost when a fixed assurance floor meets
+many small changes. *(COST-F1, COST-F2)*
+
 **A/B-scale roll-up (the decisive run must be shown affordable, not just the
 feature).** The per-feature model is multiplied through the pre-registered design:
 `3 arms × n tasks × k repeats × per-task cost of a long-horizon SWE-EVO run`
-(the most expensive task class, and Foundry's per-task cost is *higher* than the
-baseline's because it pays coordination + monitor overhead). `n` follows from the
-MDE + ~21% base rate + target power; `k` from the per-node variance measured in
-§4. The roll-up reports total USD and wall-clock for the decisive run **and the
-budget that funds it**. If the powered run is unaffordable, the design is
-**honestly de-scoped** (smaller detectable margin, or a sequential/stratified
-test) rather than leaving `n`/`k` unstated — under-powering silently would make
-the falsifiability theatre. *(AI-R8-F4)*
+(Foundry's per-task cost is *higher* — it pays coordination + monitor overhead).
+`n` follows from the MDE + ~21% base rate + target power; `k` from §4 variance.
+The roll-up reports total USD/wall-clock **and the budget that funds it**. If the
+powered run is unaffordable, the design is **honestly de-scoped along a stated
+ladder** (smaller detectable margin → sequential/stratified test → fractional
+pilot), **with the explicit note that each rung trades away statistical
+authority** — so reviewers know exactly what claim survives. Under-powering
+silently would make the falsifiability theatre. The trusted gate runner and
+builder are **replicable, non-agent** components, so A/B throughput is a sizing
+problem (replicas + queue), not a redesign — see [operations.md §4/§6](./operations.md). *(AI-R8-F4, COST-F3)*
 
 ## 9. Optimization (Phase 5) — search space, objective, method
 
 - **Search space:** prompt/SOP variants per role, **model-tier assignment per
   node (tiering is an *output*, validated, not an intuition — incl. defaulting
   high-risk implementation and oracle-authoring to T1 until data says otherwise)**,
-  graph-topology toggles, retry/convergence caps. *(AI7)*
+  graph-topology toggles, retry/convergence caps, **and the role set itself** —
+  role-count is an explicit *ablation variable*, not a given: each role past the
+  PM→Architect→Senior→QA core must show it improves the scorecard before it is
+  added (the Phase-1.5 ablation, [roadmap.md](./roadmap.md)). *(AI7, P-F2)*
 - **Objective:** maximize novel-suite + SWE-EVO resolution **subject to** no
   regression in escaped defects, cost, wall-clock, or policy compliance.
 - **Method:** evaluate candidates on novel + SWE-EVO held-out rotations; promote

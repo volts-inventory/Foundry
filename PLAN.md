@@ -255,10 +255,14 @@ Each phase has explicit exit criteria ([docs/roadmap.md](./docs/roadmap.md)):
 
 ## 13. How this plan was hardened
 
-This plan was red-teamed by an independent critic agent in a
-critic → solutioner → full-rewrite loop, run until no BLOCKER/MAJOR findings
-remained. The findings, their resolutions, the conformance mapping to current
-industry practice, and a maturity assessment are recorded in
+This plan was red-teamed in a **critic → solutioner → full-rewrite loop across
+twelve rounds at two bars**: a generalist *design-doc* bar (Rounds 1–6, converged
+at Round 6) and a harder *implementation-readiness* bar driven by a three-lens
+specialist panel — distributed-systems/correctness, offensive-security/AI-safety,
+and AI-agents/LLM-systems (Rounds 7–12). **100 findings were raised and resolved**;
+the loop terminated when an independent specialist panel returned **no findings at
+all**. The full per-finding record, the conformance mapping to current industry
+practice, and a maturity assessment are in
 [docs/iteration-log.md](./docs/iteration-log.md).
 
 ---

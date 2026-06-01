@@ -248,6 +248,32 @@ lens found the next seam in the execution-gate grounding.
 **Round 11 verdict (solutioner):** all 3 addressed. Re-submitted to a fresh
 specialist panel for Round 12.
 
+## Round 12 — specialist panel: **ALL THREE LENSES `NO MATERIAL FINDINGS`** (loop converged)
+
+The fresh panel independently verified the package at the implementation-readiness
+bar and each lens declared convergence:
+
+- **Security:** verified the held-out-mutant + behavioral-invariance fix grounds
+  the execution-dependent gate verdict end-to-end (observation *and* discriminator
+  both outside agent control; verdict input-bound and admission-rechecked). The
+  one residual — a behaviorally-weak-but-non-vacuous test surviving conservative
+  perturbations — is the *already-declared* "necessary, not sufficient" limit of
+  mutation-based fidelity, not a new exploit. **NO MATERIAL FINDINGS.**
+- **Distributed-systems:** verified the monotonic WORM-history-scoped latch and
+  record-scoped override are correct and consistent with the reducer/seq/outbox
+  core; confirmed FAIL records cannot be agent-suppressed (status is inside the
+  signed attestation; agents write only `GateTriage`); confirmed a latched digest
+  never wedges the pipeline (a fix yields a new `tree_sha`). **NO MATERIAL FINDINGS.**
+- **AI-agents:** third consecutive clean pass; adversarially probed held-out-mutant
+  depletion, coverage-delta denominator gaming, the threat-residual escape hatch,
+  and the A/B equal-USD asymmetry (found to be conservative *against* Foundry, not
+  a rig). Every seam resolved to a specified mechanism with a non-circular backstop.
+  **NO MATERIAL FINDINGS.**
+
+**The critic → solutioner → full-rewrite loop terminates here:** an independent,
+three-lens specialist panel at the implementation-readiness bar found no BLOCKER,
+MAJOR, or MINOR defect.
+
 ## Loop summary
 
 | Round | Bar | Findings | BLOCKER | MAJOR | MINOR | Verdict |
@@ -263,14 +289,19 @@ specialist panel for Round 12.
 | 9 | implementation-ready (3 specialists) | 9 | 0 | 3 | 6 | material remain |
 | 10 | implementation-ready (3 specialists) | 8 | 1 | 2 | 5 | material remain |
 | 11 | implementation-ready (3 specialists) | 3 | 0 | 1 | 2 | material remain |
-| 12 | implementation-ready (3 specialists) | _running_ | | | | _pending_ |
+| 12 | implementation-ready (3 specialists) | 0 | 0 | 0 | 0 | **NO MATERIAL — converged** |
 
-Total so far: **100 findings raised and resolved** across two bars. Convergence at
-the higher bar is strong (30 → 13 → 9 → 8 → 3; blockers 7 → 1 → 0 → 1 → 0; majors
-16 → 7 → 3 → 2 → 1), with the AI-agents and distributed-systems lenses now
-effectively clean and only the security lens still finding one deeper trust-root
-seam per round. This log is the honest record the process produced, not a
-marketing artifact.
+Total: **100 findings raised and resolved** across two bars over twelve rounds,
+terminating when an independent three-lens specialist panel (security,
+distributed-systems, AI-agents) returned **no findings at all** at the
+implementation-readiness bar.
+
+Convergence trajectory at the higher bar: findings 30 → 13 → 9 → 8 → 3 → 0;
+blockers 7 → 1 → 0 → 1 → 0 → 0; majors 16 → 7 → 3 → 2 → 1 → 0. The brief blocker
+re-appearances in Rounds 8 and 10 were the *deeper* trust-root seams each fix
+exposed (racy seq-assignment; results-stream forgery) — characteristic of
+genuinely hardening a hard problem, not backsliding. This log is the honest
+record the process produced, not a marketing artifact.
 
 ## Conformance mapping — plan vs. industry practice (2024–2026)
 

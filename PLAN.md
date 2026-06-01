@@ -274,7 +274,7 @@ milestone (Assistant mode) is ~2–3 quarters.
 - **Context loss across hand-offs (the real long-horizon killer)** — Mitigation: a never-summarized `pinned_constraints` channel, retrieval over the call/def graph (not similarity alone) with a measured recall floor, a `need-context` escape, and a handoff-fidelity eval.
 - **Reward hacking / gate-gaming** — Mitigation: separated + cross-family test authorship, **criterion *fidelity* (negative oracles)**, **run-immutable repo-external scanner config**, deterministic oracle/config-edit monitors, mutation testing, semantic loop signature.
 - **Correlated LLM judges / self-preference** — Mitigation: measured judge↔implementer error correlation + self-preference probes; different model *family* on high-risk review/QA; deterministic oracles where possible.
-- **Concurrency correctness** — Mitigation: commutative, `None`-safe reducers with a **total `seq` order** `(run_epoch, superstep_index, node_id, local)` — total across runs *and* forks — so gate verdicts resolve by causality, never fold order; precise `tree_sha`; `Send` fan-out with per-branch `error` status + deadlines; superstep-boundary budget enforcement.
+- **Concurrency correctness** — Mitigation: commutative, `None`-safe reducers with a **total `seq` order** `(run_id, superstep_index, node_id, local)` — total within a run, globally unique across forks (cross-fork resolution is fail-closed, not seq-ordered) — so gate verdicts resolve by causality, never fold order; precise `tree_sha`; `Send` fan-out with per-branch `error` status + deadlines; superstep-boundary budget enforcement.
 - **Forged gate verdicts / agent-forged results stream** — Mitigation: deterministic-gate verdicts computed & signed by a **two-zone trusted runner** (zone A runs agent code with no signing creds; zone B signs, runs no agent code). Because a malicious test/scanner could *forge the results stream*, the verdict is grounded by class: **config-evaluable gates (SBOM/CVE/license/IaC) are re-derived by zone B** from the tree; **execution-dependent gates (Test/E2E/SAST) are observed by pinned trusted infra** over a sealed channel (agents supply test *sources*, not the harness), with zone B independently verifying pass-on-real/fail-on-known-bad. Input-bound signatures; agents write only `GateTriage`; admission verifies per-record and is **fail-closed on stable FAILs** (with a bounded HITL recovery for flakes); the **Security "threat-model addressed" residual** that can't be reduced to an oracle is a judgment sub-gate, not in the signed verdict.
 - **Context channel overflow** — Mitigation: `pinned_constraints` is relevance-scoped + supersedable + cardinality-monitored (escalate, never silently truncate), not an unbounded union.
 - **Single-provider fragility / correlated judges** — Mitigation: a **second provider family** for high-risk judging and real failover.
@@ -299,9 +299,10 @@ thirteen rounds at three bars**: a generalist *design-doc* bar (Rounds 1–6), a
 *implementation-readiness* bar driven by a three-lens technical panel
 (distributed-systems, offensive-security, AI-agents — Rounds 7–12, which converged
 to a no-findings verdict), and a *fitness-for-purpose* bar with three **fresh
-lenses** (SRE/operability, cost/scale, premise-skeptic — Round 13) that the
+lenses** (SRE/operability, cost/scale, premise-skeptic — Rounds 13–14) that the
 technical panel structurally could not see. **117 findings were raised and
-resolved.**
+resolved**, and **both** panels converged to no-material-findings verdicts (the
+technical panel at Round 12, the fitness-for-purpose panel at Round 14).
 
 An honest bound on the claim: the Round-12 convergence established **internal
 soundness / implementation-readiness**, *not* fitness-for-purpose — which is

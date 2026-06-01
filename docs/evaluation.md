@@ -18,7 +18,7 @@ criterion ([roadmap.md](./roadmap.md)). If structure doesn't help, that forces a
 redesign at the cost of Phases 0–1, not 0–5. The bet is falsifiable *and*
 sequenced to be falsified cheaply.
 
-## 2. A/B pre-registration (frozen before any Phase-5 run, hashed into the manifest)
+## 2. A/B pre-registration (frozen before the Phase-1.5 decision run, hashed into the manifest)
 
 A vague A/B rigs itself; this one is specified so it can actually fail. *(AI1)*
 
@@ -134,11 +134,11 @@ with the judged content and calibrated **per judge model** against human labels.
 ## 7. Headline scorecard — concrete thresholds
 
 Direction-only targets can't fail, so each metric has a release threshold
-(initial; recalibrated in Phase 5). A change regressing any threshold **blocks**.
+(initial; recalibrated in Phase 6). A change regressing any threshold **blocks**.
 
 | Metric | Tells us | Initial threshold |
 |---|---|---|
-| Novel-suite resolution | Working software, uncontaminated | **≥ measured baseline + margin** on the *same* novel suite (anchored, not an absolute; e.g. small-task ≈70–85% tracking frontier, recalibrated Phase 5) |
+| Novel-suite resolution | Working software, uncontaminated | **≥ measured baseline + margin** on the *same* novel suite (anchored, not an absolute; e.g. small-task ≈70–85% tracking frontier, recalibrated Phase 6) |
 | Hidden-test pass rate (of self-passing runs) | Real oracles, not overfit | ≥ 95% |
 | SWE-EVO resolution vs baseline (USD-equal) | Does structure help long-horizon? | **> baseline by ≥ pre-registered margin at ≤ equal cost** |
 | Judge↔implementer error correlation | Are LLM gates independent? | below a set ceiling; self-preference within calibration |
@@ -187,7 +187,7 @@ silently would make the falsifiability theatre. The trusted gate runner and
 builder are **replicable, non-agent** components, so A/B throughput is a sizing
 problem (replicas + queue), not a redesign — see [operations.md §4/§6](./operations.md). *(AI-R8-F4, COST-F3)*
 
-## 9. Optimization (Phase 5) — search space, objective, method
+## 9. Optimization (Phase 6) — search space, objective, method
 
 - **Search space:** prompt/SOP variants per role, **model-tier assignment per
   node (tiering is an *output*, validated, not an intuition — incl. defaulting

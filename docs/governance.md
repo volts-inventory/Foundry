@@ -16,7 +16,9 @@ A gate returns `pass | fail | error` and writes a `GateResult` (with a monotonic
 `seq`; latest-by-`seq` wins — see [architecture.md §3](./architecture.md)).
 `error` is an infrastructure failure, retried per-branch, not a verdict.
 Per the re-verification rule, any code change re-keys integrated gates on a new
-`tree_sha` and re-runs **all** integrated gates.
+`tree_sha`; re-verification is **dependency-scoped (§1f)** — the gates the change
+can affect re-run, while unaffected inputs reuse their cached runner-attested
+verdict, so the attested gate-state still covers the whole tree.
 
 | Gate | Owner | Runs against | Decision rule | Pass condition |
 |---|---|---|---|---|

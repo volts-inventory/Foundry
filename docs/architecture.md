@@ -129,7 +129,7 @@ from typing import Annotated, TypedDict
 from pydantic import BaseModel
 from enum import Enum
 
-Seq = tuple[int, int, str, int]    # (run_epoch, superstep_index, node_id, local) — see "Seq" below
+Seq = tuple[str, int, str, int]    # (run_id, superstep_index, node_id, local) — see "Seq" below
 
 class Artifact(BaseModel):
     kind: str
@@ -202,16 +202,19 @@ def _merge_gates(a, b):                        # gates: LATEST BY seq per (name,
     return list(m.values())
 ```
 
-**Seq — a total, race-free causal order, across runs and forks.** `seq` is **not**
-a shared mutable counter (parallel branches share one immutable input snapshot and
-could not read-increment one without a race). It is the lexicographic tuple
-`(run_epoch, superstep_index, node_id, local)`:
+**Seq — a total, race-free causal order *within* a run; globally unique across
+runs.** `seq` is **not** a shared mutable counter (parallel branches share one
+immutable input snapshot and could not read-increment one without a race). It is
+the lexicographic tuple `(run_id, superstep_index, node_id, local)`:
 
-- `run_epoch` — a strictly-increasing per-thread epoch persisted at run/fork
-  creation (`parent_epoch + 1`), recorded in the WORM record. **This makes `seq`
-  total *across forks*:** two forks that re-run the same gate at the same logical
-  point (same `superstep_index`/`node_id` after a step-counter reset) no longer
-  collide — the later fork's higher `run_epoch` orders them. *(DS-R9-F1)*
+- `run_id` — a **globally-unique** run/fork identifier (e.g. a ULID allocated at
+  run/fork creation), recorded in the WORM record. It is **not** monotonic across
+  concurrent forks, and that is fine: **cross-fork verdict resolution does not
+  depend on `seq` order at all** — `_merge_gates` runs per-run (it never sees two
+  forks' channels), and *across* runs the admission controller is **fail-closed**
+  ([governance.md §5](./governance.md)), not seq-ordered. `run_id` is present
+  purely so two forks' records for the same `tree_sha` are *distinct identities*
+  in the WORM/predicate stores, never colliding. *(DS-R9-F1, DS-R10-F3)*
 - `superstep_index` — read from LangGraph **run config metadata at emit time**
   (`config["metadata"]["langgraph_step"]`); monotonic across the run, **constant
   across all branches of one `Send` fan-out** (hence the tie-breakers below), and
@@ -221,9 +224,10 @@ could not read-increment one without a race). It is the lexicographic tuple
   from the channel **key** (`run_against`), not `seq`.
 - `local` — per-node monotonic counter for multiple emissions by one node.
 
-The tuple is unique per emission, so `_merge_gates`'s comparison is **total** —
-no equal-`seq` fallthrough to fold order. A reducer invariant test asserts
-order-independence per key. *(DS1, DS2, DS8, DS-R9-F1, DS-R9-F3)*
+Within a run `run_id` is constant, so `(superstep_index, node_id, local)` gives a
+**total** order — no equal-`seq` fallthrough to fold order — which is all
+`_merge_gates` needs (it only ever folds writes of one run). A reducer invariant
+test asserts order-independence per key. *(DS1, DS2, DS8, DS-R9-F1, DS-R9-F3, DS-R10-F3)*
 
 Why each fix matters:
 
@@ -364,9 +368,14 @@ Long-horizon success lives or dies here, so the contract is mechanistic, not
     security/abuse constraints, and trust-root constraints are flagged
     `scope: global` and injected **verbatim into every node regardless of
     relevance scoring** — these have the weakest call/def-graph signal, so they
-    are never subject to a scoping miss. This bounds the blast radius of any
-    scoping error to *narrowly-local* constraints (module-specific ownership
-    limits, local rejected-alternatives) whose omission is low-stakes.
+    are never subject to a scoping miss. **The classification is validated, not
+    trusted to the Architect:** a deterministic check flags any constraint whose
+    text matches cross-cutting/security patterns (money, PII, logging, auth,
+    crypto) that is *not* marked `global`, routing the mismatch to HITL the same
+    way criteria/config edits trip. This bounds the blast radius of any scoping
+    error to *narrowly-local* constraints (module-specific ownership limits, local
+    rejected-alternatives) whose omission is low-stakes — and even those are
+    backstopped by the local-scoper recall floor. *(AI-R10-F1)*
   - **Relevance scoping (local subclass only):** local constraints are scoped to a
     node's active task/module (via `ownership_map` + retrieval graph) under a
     **per-node injection token budget**. Because scoping is itself a retrieval

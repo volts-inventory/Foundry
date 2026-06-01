@@ -214,6 +214,26 @@ the value of repeated specialist review.
 **Round 9 verdict (solutioner):** all 9 addressed. Re-submitted to a fresh
 specialist panel for Round 10.
 
+## Round 10 — specialist panel re-review (8 findings: 1 BLOCKER, 2 MAJOR, 5 MINOR)
+
+The AI-agents specialist returned **NO MATERIAL**; the security and DS specialists
+probed deeper into the just-added two-zone runner and fail-closed model and found
+that closing one trust seam exposed the next one in.
+
+| # | Sev | Problem | Resolution |
+|---|---|---|---|
+| SEC-F1 | BLOCKER | Two-zone runner closed RCE-to-signature but **not results-stream forgery** — a malicious test/scanner in zone A self-reports "all passed" and zone B faithfully signs it (trust relocated, not grounded) | **Gate-class split:** config-evaluable gates (SBOM/CVE/license/IaC) are **re-derived by zone B**; execution-dependent gates (Test/E2E/SAST) are **observed by pinned trusted infra** over a sealed channel (agents supply test *sources*, not the harness), with zone B independently verifying pass-on-real/fail-on-known-bad. [gov §1c](./governance.md) |
+| DS-F1 | MAJOR | Unconditional fail-closed **permanently bricks a correct digest** when a flake exceeds the N=2 quarantine (a flaky FAIL then a real PASS on the same `tree_sha`) | Fail-closed latches only **stable, input-relevant FAILs**; **transient-execution divergence** gets a bounded recovery (quorum of trusted re-runs all PASS + two-person WORM-logged override); `error` never latches. [gov §5](./governance.md) |
+| DS-F2 | MAJOR | Security gate's "threat-model items addressed" isn't a deterministic function, yet was classified as a fully runner-computed gate — agent judgment leaks into the signed verdict | **§1d:** each threat-model item is **bound to a concrete runner-evaluable oracle**; irreducible residual → a **Threat-review judgment sub-gate** (critic+HITL), **not** in the signed verdict. [gov §1c/§1d](./governance.md) |
+| DS-F3 | MINOR | `run_epoch = parent_epoch+1` collides among concurrent sibling forks; "total across forks" was unachievable *and* not load-bearing | `seq` uses a **globally-unique `run_id`** for cross-run identity; "total across forks" claim dropped (cross-fork resolution is **fail-closed**, not seq-ordered). [arch §3](./architecture.md) |
+| SEC-F2 | MINOR | Mandatory mirror source-diff doesn't bound **volume** → rubber-stamp at scale | Reachability-weighted prioritization, diff-against-prior-vetted, per-feature new-dep budget, reject obfuscated artifacts lacking buildable source. [gov §2](./governance.md) |
+| AI-F1 | MINOR | Global-vs-local constraint classification is an **unvalidated Architect judgment** → a mislabeled cross-cutting invariant is droppable | Deterministic pattern check (money/PII/logging/auth/crypto) forces `global` or trips HITL; local-scoper recall floor backstops. [arch §8](./architecture.md) |
+| AI-F2 | MINOR | Cardinality monitor wording inconsistent (governance "relevant" vs architecture "injected"); global subset could overflow unwatched | Reconciled to **total injected set**; global-only overflow escalates to retire/consolidate globals. [gov §3](./governance.md) |
+| AI-F3 | MINOR | High-risk flag freezing implied but not stated → denominator re-labeling risk | Stated: high-risk flag is an **immutable attribute of the frozen criterion**. [gov §3](./governance.md) |
+
+**Round 10 verdict (solutioner):** all 8 addressed. Re-submitted to a fresh
+specialist panel for Round 11.
+
 ## Loop summary
 
 | Round | Bar | Findings | BLOCKER | MAJOR | MINOR | Verdict |
@@ -227,12 +247,14 @@ specialist panel for Round 10.
 | 7 | **implementation-ready (3 specialists)** | 30 | 7 | 16 | 7 | material remain |
 | 8 | implementation-ready (3 specialists) | 13 | 1 | 7 | 5 | material remain |
 | 9 | implementation-ready (3 specialists) | 9 | 0 | 3 | 6 | material remain |
-| 10 | implementation-ready (3 specialists) | _running_ | | | | _pending_ |
+| 10 | implementation-ready (3 specialists) | 8 | 1 | 2 | 5 | material remain |
+| 11 | implementation-ready (3 specialists) | _running_ | | | | _pending_ |
 
-Total so far: **89 findings raised and resolved** across two bars. The design-doc
-loop converged at Round 6; the implementation-readiness loop is converging
-strongly (30 → 13 → 9; blockers 7 → 1 → 0; majors 16 → 7 → 3). This log is the
-honest record the process produced, not a marketing artifact.
+Total so far: **97 findings raised and resolved** across two bars. The deeper the
+specialists probe the trust root, the more each fix exposes the next seam in
+(RCE→signature → results-stream forgery → …) — characteristic of hardening a hard
+problem. One specialist returned NO MATERIAL this round. This log is the honest
+record the process produced, not a marketing artifact.
 
 ## Conformance mapping — plan vs. industry practice (2024–2026)
 

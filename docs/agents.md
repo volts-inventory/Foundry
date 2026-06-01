@@ -124,9 +124,9 @@ content-addressed, versioned artifacts, not chat.
 ## Layer 5 — Security & Compliance
 
 ### Security / AppSec Engineer — T1
-- **SOP:** threat model (STRIDE) → run SAST + secret scan + dependency/SCA audit → manual review of auth/crypto/input handling → file findings with severity.
-- **In:** integrated tree, design. **Out:** `threat_model`, `security_findings`.
-- **Gate produced:** Security gate (no unresolved high/critical; threat-model items addressed).
+- **SOP:** threat model (STRIDE) → **bind each threat-model item to a concrete runner-evaluable oracle** (a test, SAST/Semgrep rule, or negative-oracle) at the Design seam → trigger the trusted runner's scans → manual review of auth/crypto/input handling, filing `GateTriage` (which items to add, severity, remediation) — **never the verdict bit**.
+- **In:** integrated tree, design. **Out:** `threat_model` (with per-item oracle bindings), `security_triage`.
+- **Gate produced:** the **Security verdict is computed & signed by the trusted runner** (each item's bound oracle passes; SAST/secret/SCA clean). Threat-model items that can't be reduced to an oracle go to the **Threat-review judgment sub-gate** (independent review + HITL), not the runner-signed verdict ([governance.md §1c/§1d](./governance.md)).
 
 ### Audit / Compliance — T2
 - **SOP:** generate **SBOM** → check license compatibility + critical-CVE floor → map to applicable controls (domain-pack dependent) → **emit audit events via the transactional outbox to the non-agent WORM appender** (this role does *not* hold the WORM write credential and cannot truncate/rotate the chain — [governance.md §8](./governance.md)). **Signing/SLSA attestation is performed by the trusted CI builder, not this agent.**

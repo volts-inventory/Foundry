@@ -24,7 +24,8 @@ Per the re-verification rule, any code change re-keys integrated gates on a new
 | **Design** | Architect (+HITL) | design artifacts | LLM + human | ADRs, interfaces, data model, `ownership_map`, `pinned_constraints` defined; human sign-off for significant designs |
 | **Build (per-branch + integrated)** | CI runner | task branch, then `tree_sha` | deterministic | Compiles, lints, type-checks: zero errors |
 | **Test (per-branch + integrated)** | QA (oracle authored separately from implementer; cross-family on high-risk) | task branch, then `tree_sha` | deterministic over possibly-flaky execution | All green; **every acceptance criterion exercised by a test that *fails against a known-bad reference* (criterion fidelity, not just coverage)**; line coverage ≥ threshold; quarantine rule (§1a) |
-| **Security** | AppSec | `tree_sha` | deterministic scans + LLM triage | No unresolved high/critical (SAST, secret, SCA), **scans include build scripts + IaC**; threat-model items resolved |
+| **Security (deterministic part)** | trusted runner (AppSec triages) | `tree_sha` | deterministic scans | No unresolved high/critical (SAST, secret, SCA), **scans include build scripts + IaC**; each threat-model item's **bound deterministic oracle passes** (§1d) |
+| **Threat-review (judgment residual)** | AppSec + HITL | design + diff | LLM + human | Threat-model items that *cannot* be reduced to an oracle are resolved by independent review (like Spec/Design), **not** bound into the runner-signed verdict (§1d) |
 | **Audit** | Compliance | `tree_sha` | deterministic | SBOM: no disallowed-license/critical-CVE deps; license compatibility; mapped to controls |
 | **Supply-chain** | AppSec + DevOps | `tree_sha` | deterministic policy | Build/CI/IaC/Dockerfile/lockfile/scanner-config changes conform to policy (§4); no new build-time network/hooks, no privilege/egress widening, no signing/OIDC-trust changes without HITL |
 | **E2E** | SDET | `tree_sha` | deterministic over possibly-flaky execution | End-to-end scenarios green (flake policy §1a) |
@@ -73,16 +74,36 @@ verdict bit cannot be an agent claim. For every **deterministic** gate — Build
 **The runner is two-zone** (mirroring the builder's input/environment split),
 because it must *execute agent-authored test/build/scan code* yet *sign a verdict*
 — and those two must not happen in one process: *(SEC-R9-F1)*
-- **Zone A — untrusted executor:** runs the agent-authored tests, build steps, and
-  any agent-supplied scanner rules/plugins in a sandbox with **no access to any
-  signing credential or OIDC token**, emitting only a one-way **raw results
-  stream** (exit codes, per-test outcomes, scanner SARIF).
+- **Zone A — untrusted executor:** runs the agent-authored tests/build steps in a
+  sandbox with **no access to any signing credential or OIDC token**.
 - **Zone B — trusted attestor:** holds the signing identity, **executes no agent
-  code**, and computes/signs the verdict as a deterministic function of zone-A's
-  results stream evaluated against the **pinned external config**. The signing
-  identity is **unreachable from zone A** (same property the builder already
-  asserts for sandboxes). RCE-from-a-malicious-test-to-runner-signature is in the
-  red-team set.
+  code**, and computes/signs the verdict. The signing identity is **unreachable
+  from zone A**. RCE-from-a-malicious-test-to-runner-signature is in the red-team
+  set.
+
+But zone A holding no credentials is **not sufficient**: the verdict must not be a
+deterministic function of an *agent-forged input*. A malicious test harness or
+scanner plugin in zone A could self-report "all passed" / zero findings, which
+zone B would faithfully sign — trust *relocated to the results stream*, not
+grounded. So the verdict is grounded by gate class: *(SEC-R10-F1)*
+- **Config-evaluable gates** (Build dependency/lockfile policy, Audit SBOM/CVE/
+  license, Supply-chain, IaC-plan): **zone B re-derives the result itself** from
+  the tree + pinned data — it never trusts a zone-A-emitted SBOM/SARIF/lockfile
+  report.
+- **Execution-dependent gates** (Test, E2E, and the SAST portion of Security):
+  the **outcome observation is performed by trusted, pinned infrastructure**, not
+  self-reported by agent code. Agents supply **test *sources*, never the scoring
+  harness**; the test-runner/reporter binary and invocation, and the SAST scanner
+  binary + rules (from the run-immutable external config — no agent-supplied
+  plugins), are **pinned trusted components**. Zone B (or a trusted harness it
+  controls) orchestrates execution and collects outcomes over a **sealed result
+  channel in a separate FS namespace the agent code cannot intercept** (exit
+  codes / JUnit XML emitted *inside* the agent process are treated as untrusted).
+  Zone B **independently substitutes the known-bad/mutant references and verifies
+  the result digest differs** (pass-on-real, fail-on-known-bad), so the harness
+  cannot fake the discrimination. Until the *observation* is grounded outside
+  agent-controlled code, the attestation rests on a forgeable input — so this is a
+  hard requirement, not an option.
 
 The signature is **bound to its inputs** — `runner_attestation` signs
 `(gate_name, tree_sha, scanner_config_revision_hash, status, results_digest)` —
@@ -95,8 +116,21 @@ deterministic gates — [architecture.md §3](./architecture.md)); the `gates`
 reducer **rejects any unsigned deterministic-gate write**, so an agent cannot
 supersede the runner's verdict even in the live channel that in-graph routing and
 the evidence pack read. The WORM appender and builder accept a deterministic
-verdict only with a valid attestation. Only the LLM-judgment gates (Spec, Design)
-are agent/human verdicts, defended by the independent critic + HITL. *(SEC-R8-F1, DS-R9-F2)*
+verdict only with a valid attestation. Only the LLM-judgment gates (Spec, Design,
+Threat-review) are agent/human verdicts, defended by the independent critic + HITL. *(SEC-R8-F1, DS-R9-F2)*
+
+### 1d. "Threat-model items addressed" is not magically deterministic
+
+"Addressed" cannot be a runner-computed bit by fiat. At the Design/Spec seam,
+**each threat-model item is bound to a concrete, runner-evaluable artifact** — a
+test, a SAST/Semgrep rule, or a criterion-fidelity negative oracle — so that
+"addressed" = "its bound deterministic check passes," computed by zone B. The
+AppSec agent's manual review produces only `GateTriage` (which items to add,
+remediation notes), never the resolved/unresolved bit. Threat-model items that
+**genuinely cannot** be reduced to a deterministic oracle are split out into the
+**Threat-review judgment sub-gate** (defended by independent review + HITL, like
+Spec/Design) and are **not** bound into the runner-signed Security verdict — so
+the runner-signed gate stays honestly deterministic. *(DS-R10-F2)*
 
 ## 2. The five-plane guardrail model
 
@@ -139,6 +173,13 @@ are agent/human verdicts, defended by the independent critic + HITL. *(SEC-R8-F1
   provenance, maintainer/namespace history, diff-from-prior-version, and the
   transitive-closure delta — paralleling the release evidence pack — not a
   lockfile line the Supply-chain gate waves through. *(SEC-R8-F2, SEC-R9-F2)*
+  **Human-review volume is bounded** so mandatory diffs don't become a
+  rubber-stamp: reachability-weighted prioritization (diff only what is actually
+  imported/transitively reached), **diff-against-prior-vetted-version** rather than
+  from-scratch where a prior version was vetted, a **per-feature new-dependency
+  budget** that escalates as a design smell when exceeded, and an explicit policy
+  that **obfuscated/minified/generated artifacts lacking buildable source are
+  rejected, not hand-diffed**. *(SEC-R10-F2)*
 - Egress is default-deny **through per-destination proxies with payload/size
   anomaly detection** — host allowlisting alone does not stop exfil over
   allowed channels (registry, git remote, model provider). The sandbox is treated
@@ -179,9 +220,11 @@ are agent/human verdicts, defended by the independent critic + HITL. *(SEC-R8-F1
     *deterministic* trip** forcing HITL review (not an analyzer judgment). *(SEC3, AI10, SEC2)*
   - *Cost* — `BudgetLedger` thresholds; *Policy* — OPA deny-count;
     *Retry-until-green* — verdict oscillation.
-  - *Pinned-constraint pressure* — the relevant `pinned_constraints` set for a
-    node approaching its injection budget escalates to HITL (never silent
-    truncation, [architecture.md §8](./architecture.md)). *(AI-R8-F2)*
+  - *Pinned-constraint pressure* — the **total injected `pinned_constraints` set
+    (global + scoped-local)** for a node approaching its injection budget escalates
+    to HITL (never silent truncation). When the **global subset alone** approaches
+    budget the condition is unfixable-by-scoping and escalates to governance/HITL
+    to **retire or consolidate globals** ([architecture.md §8](./architecture.md)). *(AI-R8-F2, AI-R10-F2)*
   - *Criterion-coverage delta* — computed against signals the implementing agent
     does **not** solely control: the baseline is the **Spec-gate-frozen
     (immutable) criterion set**, and the satisfied side is the **count of
@@ -189,7 +232,9 @@ are agent/human verdicts, defended by the independent critic + HITL. *(SEC-R8-F1
     passes** (computed by the trusted runner, §1c) — **not** the agent-authored
     test-tag count (which a coordinated scope-reduction could co-shrink). A drop
     in that runner-attested count against the frozen baseline trips deterministically.
-    *(AI-R8-F3, AI-R9-F2)*
+    The **high-risk flag is an immutable attribute of each frozen criterion**, so
+    the denominator cannot be shrunk by re-labeling (that would be an
+    acceptance-criteria edit → a deterministic HITL trip). *(AI-R8-F3, AI-R9-F2, AI-R10-F3)*
 - **Sandboxed LLM analyzer (semantic color only):** runs read-only in its **own
   toolless sandbox**, fired by (a) a deterministic-monitor signal, (b) a write to
   oracle/gate/criteria/config paths, **and (c) a low-rate *sampled* pass over a
@@ -241,12 +286,19 @@ A signature proves provenance, not that deployment is authorized. Therefore:
   in the WORM store **with valid input-bound trusted-runner attestations (§1c)**;
   and the scanner-config revision matches the pinned hash*. Only then does a
   **separate, least-privileged, non-agent deployer** ship.
-- **Fail-closed across runs/forks:** admission treats **any FAIL for a `tree_sha`
-  as disqualifying, regardless of a later PASS** — so two forks that produce the
-  same digest with opposite verdicts (e.g., a newly-admitted CVE flips Security)
-  can never ship the green one. This removes any dependence on cross-run verdict
-  ordering. An agent that gets an unverified, forged-verdict, or non-gate-passing
-  tree built cannot reach production. *(SEC7, SEC5, SEC-R8-F1, DS-R9-F1)*
+- **Fail-closed on *stable* FAILs, with a bounded recovery for transient ones.**
+  Admission latches a digest as disqualified on a FAIL whose `results_digest`
+  reflects a **stable, verdict-relevant input** (a config/scan-driven outcome — a
+  newly-admitted CVE, a policy change, a deterministic re-derivation) — so two
+  forks that legitimately diverge on the same digest can never ship the green one.
+  A FAIL from **transient-execution divergence on an unchanged tree** (a flake
+  exceeding the §1a N=2 quarantine budget) is **not** latched the same way: because
+  the tree is genuinely correct, there is an explicit bounded recovery — a
+  **quorum of trusted-runner re-runs that all PASS on the identical
+  `tree_sha`+config**, **two-person admission override, WORM-logged** — so a flake
+  cannot *permanently* brick a correct digest. `error`-status records (infra
+  failure) never latch at all. This keeps the security guarantee for
+  input-relevant FAILs while preserving liveness. *(SEC7, SEC5, SEC-R8-F1, DS-R9-F1, DS-R10-F1)*
 
 ## 6. Human-in-the-loop is evidence-backed, not a rubber stamp
 

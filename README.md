@@ -19,7 +19,8 @@ This repository currently contains **the plan only** — no application code yet
 6. **[docs/roadmap.md](./docs/roadmap.md)** — phased delivery, sequenced to falsify the core bet early and earn autonomy incrementally.
 7. **[docs/operations.md](./docs/operations.md)** — Day-2 operability: run-status, store recovery, trusted-component availability, multi-tenancy, HITL-load, upgrades.
 8. **[docs/lifecycle.md](./docs/lifecycle.md)** — product lifecycle: maintenance of generated code, human steering, feedback loop, deployment-trust modes, AI-code licensing/liability.
-9. **[docs/iteration-log.md](./docs/iteration-log.md)** — the full multi-round critique record and conformance check against today's state of the art.
+9. **[docs/domains.md](./docs/domains.md)** — the verdict-class taxonomy, the domain-pack contract, and per-domain specs (regulated, ML/data, frontend) — because *correctness is not one shape*.
+10. **[docs/iteration-log.md](./docs/iteration-log.md)** — the full multi-round critique record and conformance check against today's state of the art.
 
 ## Design foundations (state of the art, 2024–2026)
 

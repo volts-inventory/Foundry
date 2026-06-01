@@ -67,10 +67,12 @@ merges — and the substrate for the Phase-1.5 A/B. Everything after is earned.
 - **Two-zone trusted gate runner** (config re-derivation; sealed-channel execution observation; held-out-mutant + behavioral-invariance discriminator); strongly-hermetic **SLSA-L3** build; **deploy-time admission** + non-agent deployer; input-bound attestations; trusted-component HA + lifecycle/rotation ([operations.md §4/§8](./operations.md)).
 **Exit:** a malicious-test / forged-results / forged-verdict / fork-divergence attempt cannot reach production; trusted-component outage degrades to *paused*, not *wedged*.
 
-## Phase 5 — Specialist plugin system  · ~1 team-quarter
-**Goal:** general core, expert on demand.
-- Specialist interface + registry; capability routing; first two domain packs (with their extra gates + data-plane rules).
-**Exit:** a domain request auto-activates the right specialist + gates without core changes; non-domain requests ignore them.
+## Phase 5 — Specialist plugin system + domain core hooks  · ~1–2 team-quarters
+**Goal:** general core, expert on demand — *honest about each domain's correctness signal.*
+- Specialist interface + registry + capability routing; **the core pack hooks** ([domains.md §4](./domains.md)): the **verdict-class taxonomy** (statistical / human-witnessed / perceptual, with the discriminator made gate-class-aware), **`state_sha`** (data/weight refs), the **compute-cost budget** dimension, **mode/tier veto + regulatory-significance axis**, **per-artifact approver-of-record**, **data-egress profiles**, and **mandatory perceptual HITL + rendered evidence**.
+- First domain packs against those hooks: **regulated** (fintech/healthcare), **ML/data**, **frontend/UX**.
+**Exit:** a regulated request makes Autonomous/auto-approve unreachable and binds human approver-of-record records; an ML request keys verdicts on `state_sha` (data) with a statistical model-eval gate and compute budget; a UI request forces a visual HITL over a rendered bundle — all without core changes *to add the next pack*.
+*(Note: the verdict-class taxonomy and `state_sha` are **core** generalizations; the statistical/human-witnessed/perceptual classes are designed in alongside Phase 2's gates and Phase 4's trust root, not bolted on here.)*
 
 ## Phase 6 — Eval, optimization & lifecycle  · ongoing
 **Goal:** measured, tuned, and owning software over time.

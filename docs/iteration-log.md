@@ -346,6 +346,48 @@ Phase-5 references updated to the reordered Phase-1.5 (decision A/B) / Phase-6
 **Both bars have now converged:** the technical panel at Round 12, the
 fitness-for-purpose panel at Round 14.
 
+## Round 15 — DOMAIN-EXPERT lenses (type-of-software bar): 18 findings (0 BLOCKER, 15 MAJOR, 3 MINOR)
+
+A user prompt — *"type of software can be key"* — motivated a third fresh axis:
+three domain experts (**regulated/safety-critical**, **ML/data**, **frontend/UX**)
+asked whether *specific kinds of software* break core assumptions the pluggable
+"domain pack" mechanism can't reach. They **independently converged on one deep
+finding**: Foundry's core defines correctness as a *deterministic behavioral
+oracle*, but the **primary correctness signal of three major domains isn't that
+shape** — and a pack can't fix it because it can't change what a *verdict* means.
+
+**Unifying resolution (core, not pack):** a **verdict-class taxonomy**
+([domains.md §1](./domains.md)) generalizing the existing "deterministic oracle +
+judgment residual" into five classes (config-evaluable, execution-deterministic,
+**statistical**, **human-witnessed**, **perceptual**), with the behavioral-
+invariance discriminator made **gate-class-aware**; a **`state_sha`** that
+includes data/weight refs; a **compute-cost budget** dimension; and an **expanded
+pack contract** with real core hooks. Per-finding:
+
+| Lens | # | Sev | Problem | Resolution (core unless noted) |
+|---|---|---|---|---|
+| Regulated | F1 | MAJOR | Autonomous/auto-approve is often *unlawful*; risk ≠ diff size | Pack **mode/tier veto** (force human approver, make Autonomous unreachable); **regulatory-significance** tiering axis. [gov §1e](./governance.md), [domains §4](./domains.md) |
+| Regulated | F2 | MAJOR | Records must be attributable to a *named qualified human*, not an agent | **Per-artifact approver-of-record** (class 4) bound into WORM/predicate. [domains §1/§5](./domains.md) |
+| Regulated | F3 | MAJOR | Regulated verification is traceability + human-witnessed protocols, not an oracle | **Human-witnessed verdict class**; requirement→design→risk→evidence **traceability matrix** as a predicate artifact. [domains §1/§5](./domains.md) |
+| Regulated | F4 | MAJOR | Redaction isn't a PHI/PAN control; second model family may be unavailable | **No-third-party-egress data profile** + judge-decorrelation fallback; **no-real-PHI/PAN** (synthetic data). [gov §2](./governance.md) |
+| Regulated | F5/F6 | MAJOR/MINOR | Reg-significance tiering; identity-bound WORM + retention | Tiering axis; **authenticated approver identity** + **retention floor** in WORM. [domains §5](./domains.md) |
+| ML/data | F1 | MAJOR | Correctness is a thresholded random variable, not a digest-flip | **Statistical verdict class** (metric + CI + pinned eval set/seed); latch on the *decision*. [domains §1](./domains.md) |
+| ML/data | F2 | MAJOR | `tree_sha` excludes data/weights → unsound cache reuse + attestation | **`state_sha`** (source ⧺ lockfile ⧺ toolchain ⧺ data/feature/weight refs). [arch §4](./architecture.md), [domains §2](./domains.md) |
+| ML/data | F3 | MAJOR | Budget/re-verify assume cheap gates; a retrain costs >1 feature | **Compute-cost budget** + expensive-gate proxy + retrain-confirm escalation. [arch §3](./architecture.md), [domains §3](./domains.md) |
+| ML/data | F4/F5 | MAJOR/MINOR | "Factory eval" vs "product eval" conflated; model-vs-code rollback | Product eval/monitoring a **shipped artifact**; drift/decay triggers; **state-based rollback**. [eval](./evaluation.md), [lifecycle §3](./lifecycle.md) |
+| Frontend | F1 | MAJOR | Look/feel is behavior-preserving-*variant* — the discriminator rejects visual tests | **Perceptual verdict class** (excluded from signed predicate, still gated); discriminator gate-class-aware. [domains §1/§5](./domains.md) |
+| Frontend | F2 | MAJOR | "Taste not delegated to a model" was unimplemented — no human sees a rendered screen | **Mandatory non-auto-approvable visual HITL** + **rendered-artifact evidence bundle** for `ui`. [domains §5](./domains.md) |
+| Frontend | F3 | MAJOR | No real user pre-release; LLM Proxy isn't a substitute | Stated honestly: **pre-release UX is bounded**; usability-test HITL artifact. [lifecycle §3](./lifecycle.md) |
+| Frontend | F4 | MAJOR | Visual flakiness ≠ seed/clock; binary verdict has no tolerance band | **Tolerance-band / device-matrix statistical gate** + perceptual flake carve-out. [domains §5](./domains.md) |
+| Frontend | F5/F6 | MINOR | A11y/CWV/design-system/i18n unmodeled (but fit cleanly) | Pack: deterministic a11y + judgment a11y sub-gate; CWV/bundle/token/i18n runner gates; Figma input + handoff-fidelity. [domains §5](./domains.md) |
+
+**Round 15 verdict (solutioner):** all 18 addressed via a new **[domains.md](./domains.md)**
+(verdict-class taxonomy + pack contract + three domain specs) and threaded core
+changes to governance/architecture/PLAN/evaluation/lifecycle/roadmap. The biggest
+lesson yet: the design's *thesis* ("a deterministic decision rule at the seams")
+was **domain-specific** — true for backend/logic, false as a universal — and only a
+*domain-expert* lens could see it. **"Type of software is key"** was exactly right.
+
 ## Loop summary
 
 | Round | Bar | Findings | BLOCKER | MAJOR | MINOR | Verdict |
@@ -363,13 +405,20 @@ fitness-for-purpose panel at Round 14.
 | 11 | implementation-ready (3 specialists) | 3 | 0 | 1 | 2 | material remain |
 | 12 | implementation-ready (3 specialists) | 0 | 0 | 0 | 0 | **no material — internal soundness converged** |
 | 13 | **fitness-for-purpose (3 FRESH lenses)** | 17 | 0 | 14 | 3 | material remain |
-| 14 | fitness-for-purpose (3 fresh lenses) | 0* | 0 | 0 | 0 | **NO MATERIAL — converged** |
+| 14 | fitness-for-purpose (3 fresh lenses) | 0* | 0 | 0 | 0 | **no material — converged** |
+| 15 | **type-of-software (3 DOMAIN experts)** | 18 | 0 | 15 | 3 | material remain |
 
 \* plus a few editorial-consistency nits fixed in passing (no material findings).
 
-Total: **117 findings raised and resolved** across three review bars over fourteen
-rounds, with **both** the technical (Round 12) and fitness-for-purpose (Round 14)
-panels converging to no-material-findings verdicts.
+Total: **135 findings raised and resolved** across **four** review bars over
+fifteen rounds. The progression is the real lesson: **design-doc** → no findings
+(R6); **implementation-readiness** (3 technical lenses) → no findings (R12);
+**fitness-for-purpose** (operability/cost/premise) → no findings (R14);
+**type-of-software** (regulated/ML/UX domain experts) → 18 findings (R15). *Each
+genuinely new axis of scrutiny re-opens the problem* — a clean verdict only ever
+bounds the axes that were looked at, and the domain lens revealed that a thesis the
+three technical specialists had signed off on was, in fact, domain-specific. This
+log is the honest record the process produced, not a marketing artifact.
 
 The key lesson of Round 13: **convergence at one bar is not convergence at
 another.** The technical panel (security/DS/AI) genuinely converged to zero at the

@@ -152,6 +152,21 @@ remediation notes), never the resolved/unresolved bit. Threat-model items that
 Spec/Design) and are **not** bound into the runner-signed Security verdict — so
 the runner-signed gate stays honestly deterministic. *(DS-R10-F2)*
 
+> **Verdict classes (core generalization).** The "deterministic oracle + judgment
+> residual" split above is the *backend/logic* case of a general **verdict-class
+> taxonomy** ([domains.md §1](./domains.md)): config-evaluable, execution-
+> deterministic, **statistical/tolerance-band** (ML metrics, perceptual distance,
+> performance budgets — a thresholded random variable the runner re-derives from a
+> pinned eval set+seed), **human-witnessed/attested** (validation protocols,
+> per-artifact approver-of-record — signed by a named credentialed human), and
+> **perceptual/judgment** (look/feel, a11y-judgment, safety cases — mandatory HITL
+> over a rendered/evidence bundle, *excluded from the signed predicate but still
+> first-class and gated*). The held-out-mutant + behavioral-invariance
+> discriminator and the `results_digest`-stable assumption are **gate-class-aware**:
+> they apply only to the execution-deterministic class, so they no longer reject a
+> legitimate statistical (visual-regression) or perceptual test. "Correctness is
+> not one shape" — the deterministic oracle is one class, not the universal one.
+
 ### 1e. Change-risk tiering — assurance depth and HITL scale with risk
 
 Not every change warrants the full nine-gate + signing + human-Release + admission
@@ -171,6 +186,16 @@ size. The tier scales *assurance depth and human load*, never the *integrity*
 guarantees (admission is always fail-closed; verdicts always runner-signed). The
 **human-decisions-per-feature** metric ([evaluation.md §7](./evaluation.md)) keeps
 tiering honest. *(COST-F2, SRE-F7)*
+
+> **Risk ≠ engineering blast radius in some domains.** A change's *regulatory
+> significance* is orthogonal to its diff size — a one-line APR, dosing, or AML-
+> threshold change is tiny but **reportable and re-validation-triggering**. A
+> domain pack contributes a **regulatory-significance axis** that can
+> **force-escalate** the tier and **force-on** human Release **independent of diff
+> size**, and a pack may make **Autonomous mode and Low-tier auto-approve
+> unreachable** entirely ([domains.md §4](./domains.md)) — enforced in core,
+> fail-closed, so "Low risk → fewer humans" can never apply where the law requires
+> a named accountable approver. *(Regulated-F1/F5, P-F4)*
 
 ### 1f. Re-verification is dependency-scoped, not total
 
@@ -244,6 +269,14 @@ non-convergence bound as backstop. *(COST-F1)*
 ### Data plane
 - Scoped, short-lived credentials per task; **never in prompts or state**;
   signing keys unreachable from any agent sandbox.
+- **Deployment data-egress profiles (pack-set).** Redaction-before-egress is
+  best-effort and **not** an acceptable PHI/PAN control on its own. A pack may
+  select a **"no third-party model/trace egress"** profile (in-boundary/self-hosted
+  models + trace backend) — with a **defined judge-decorrelation fallback** when
+  only one approved model family is permitted (separated-context same-family +
+  stronger oracle reliance + human review) — and a **"no real PHI/PAN in the
+  pipeline"** posture enforced *upstream* via synthetic/de-identified test data,
+  rather than redacting real regulated data at egress. *(Regulated-F4)*
 - **Data boundary to providers/trace tooling is explicit:** zero-retention /
   no-train provider terms; a self-hosted or scrubbed trace backend for regulated
   runs; **redaction runs *before* provider egress** (not only on stored traces),
@@ -422,6 +455,13 @@ Minimum review affordances guard against automation bias. *(SEC6)*
 
 A Specialist is a conditional node implementing `{capabilities, tools,
 prompts/SOP, gates, evals}`; a registry maps required capabilities to specialists.
+**A pack is more than "a specialist + Audit checks"** — it may use the **core
+hooks** in [domains.md §4](./domains.md) (verdict-class assignment, mode/tier veto,
+regulatory-significance axis, per-artifact approver-of-record, data-egress profile,
+rendered-evidence + perceptual HITL, `state_sha` inputs, expensive-gate
+declaration, retention/identity policy). The table below is the *control-mapping*
+slice only; the full per-domain specs (regulated, ML/data, frontend) are in
+[domains.md §5](./domains.md).
 
 | Pack | Adds specialist | Adds gates / controls |
 |---|---|---|

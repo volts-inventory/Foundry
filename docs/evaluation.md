@@ -7,6 +7,11 @@ guard the eval itself against the standard ways agent evals silently lie
 nondeterminism). This document specifies the experiments, their pre-registration,
 and the cost model.
 
+> **This is "factory eval" — Foundry's eval of *itself*, not the *product's* eval.**
+> A delivered product (especially ML) needs its **own** eval/monitoring suite as a
+> *shipped artifact* with its own acceptance criteria, produced by the pipeline —
+> never conflated with the factory self-eval here ([domains.md §6](./domains.md)).
+
 ## 1. The central hypothesis
 
 **Hypothesis:** the org/graph structure (planning, decomposition, gates,

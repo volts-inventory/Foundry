@@ -46,7 +46,17 @@ The pipeline currently ends at "Released." Real products iterate on user reality
 - **Close the loop from production telemetry:** shipped software emits usage/error
   telemetry that feeds *new* evolution-route requests (regressions, unused
   features, performance hotspots) — Foundry's input is not only human tickets but
-  observed product behavior.
+  observed product behavior. For **ML products** the trigger taxonomy includes
+  **data drift, metric decay, and retraining triggers** as first-class evolution
+  inputs, and **rollback can be model-vs-code** (revert a *weight ref* behind an
+  unchanged code digest — "rollback" means a prior attested *state*, not a prior
+  code digest; [domains.md §5](./domains.md)).
+- **Pre-release UX correctness is bounded.** For user-facing work, the LLM
+  Stakeholder Proxy is **not** a substitute for real users; pre-release signals are
+  limited to heuristic/automatable checks + human design review. Genuine usability
+  validation requires a **real-user step Foundry schedules and incorporates** (a
+  usability-test HITL artifact) but cannot internally generate — stated honestly,
+  not assumed away ([domains.md §5](./domains.md)).
 - **Product-level evaluation** (distinct from pipeline evals): did the change move
   the user/business metric? This is the outer loop around the inner build loop and
   is owned by humans, with Foundry as the executor.

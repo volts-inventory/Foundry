@@ -43,11 +43,17 @@ Three ideas, combined:
    progress is gated by *conditional* edges; rework is *bounded loops*; oversight
    is *interrupts*. State is typed, durable, and replayable — with explicit
    concurrency semantics (reducers) and side-effect idempotency.
-3. **A deterministic decision rule at the seams.** LLMs do judgment *inside*
-   nodes; the PASS/FAIL *rule* between nodes is a deterministic function of
-   observed outputs wherever an oracle exists. We are honest that the *outputs*
-   (real builds/tests) are often non-deterministic, and handle flakiness
-   explicitly. LLM-as-judge is used only where no oracle exists, always audited.
+3. **The right verdict class at each seam.** LLMs do judgment *inside* nodes; the
+   verdict *between* nodes is grounded by the appropriate **verdict class**, not
+   one universal rule. A deterministic oracle is the right class for backend/logic
+   code (and we handle its execution flakiness explicitly). But **correctness is
+   not one shape**: ML correctness is a *thresholded random variable* on versioned
+   data (statistical class), regulated correctness is *traceable evidence +
+   human-witnessed validation* (human-witnessed class), and UX correctness is
+   *perceptual/usability judgment* (perceptual class, mandatory HITL). The core
+   carries a verdict-class taxonomy and a domain-pack contract that reaches it
+   ([docs/domains.md](./docs/domains.md)) — so the factory is genuinely general,
+   not silently backend-only.
 
 ## 3. The organization, as agents
 
@@ -232,10 +238,20 @@ A **Specialist** is a conditional graph node implementing `{capabilities, tools,
 prompts/SOP, gates, evals}`. A **registry** maps required capabilities (declared
 by PM/Architect) to specialists; the supervisor routes via a conditional edge,
 and downstream consumers tolerate absent optional artifacts
-([docs/architecture.md §7](./docs/architecture.md)). Specialists ship as **domain
-packs** (fintech → PCI/SOX; healthcare → HIPAA/PHI; ML/data → data-validation +
-model-eval gates; mobile/embedded → platform gates), keeping the core general
-while it becomes genuinely expert on demand.
+([docs/architecture.md §7](./docs/architecture.md)).
+
+But a domain pack is **more than "a specialist + Audit checks"**: some software
+*breaks core assumptions* a plugin can't reach (an LLM can't change what a verdict
+*means*). So the core exposes a **pack contract**
+([docs/domains.md](./docs/domains.md)) — verdict-class assignment (statistical /
+human-witnessed / perceptual), mode/tier veto (force a human accountable approver;
+make autonomous deploy unreachable), a regulatory-significance tiering axis,
+per-artifact human approver-of-record, a `state_sha` that includes data/weights, a
+compute-cost budget for expensive gates, a no-third-party-egress data profile, and
+mandatory perceptual HITL with rendered evidence. Domain packs (regulated fintech/
+healthcare, ML/data, frontend/UX) are specified against these hooks, keeping the
+core genuinely general while it becomes expert — and *honest* about each domain's
+real correctness signal.
 
 ## 10. Evaluation — does the factory work?
 
@@ -291,28 +307,29 @@ milestone (Assistant mode) is ~2–3 quarters.
 - **Operability / Day-2** — Mitigation: a dedicated [operations.md](./docs/operations.md): run-status liveness (paused vs wedged), store HA + poisoned-checkpoint recovery, trusted-component availability/blast-radius, upgrade/migration with runs in flight, multi-tenancy/capacity/queueing, trusted-component lifecycle.
 - **Cost/latency at scale & HITL volume** — Mitigation: **change-risk tiering** + **dependency-scoped re-verification**; cost reported converged *and* worst-case *and* weighted over the change-size distribution; **human-decisions-per-feature** is a scorecard threshold, not an unbounded externality.
 - **Product lifecycle** — Mitigation: [lifecycle.md](./docs/lifecycle.md) covers maintenance of generated code, human **steering/taste** (not just gatekeeping), a **product-feedback loop**, deployment-trust modes, and **AI-code licensing/liability**.
+- **Domain mismatch (correctness is not one shape)** — the deterministic-oracle verdict model fits backend/logic but breaks for regulated (evidence + human-witnessed validation), ML/data (statistical metrics + versioned data), and UX (perceptual judgment) software. Mitigation: a core **verdict-class taxonomy** + an **expanded domain-pack contract** ([docs/domains.md](./docs/domains.md)) — statistical/human-witnessed/perceptual verdict classes, `state_sha` for data/weights, compute-cost budgeting, mode/tier veto, and mandatory perceptual HITL — with the honest caveat that *pre-release UX correctness is bounded* (real users aren't in the pre-release loop) and *autonomous deploy is often unavailable* in regulated domains.
 
 ## 13. How this plan was hardened
 
 This plan was red-teamed in a **critic → solutioner → full-rewrite loop across
-thirteen rounds at three bars**: a generalist *design-doc* bar (Rounds 1–6), an
-*implementation-readiness* bar driven by a three-lens technical panel
-(distributed-systems, offensive-security, AI-agents — Rounds 7–12, which converged
-to a no-findings verdict), and a *fitness-for-purpose* bar with three **fresh
-lenses** (SRE/operability, cost/scale, premise-skeptic — Rounds 13–14) that the
-technical panel structurally could not see. **117 findings were raised and
-resolved**, and **both** panels converged to no-material-findings verdicts (the
-technical panel at Round 12, the fitness-for-purpose panel at Round 14).
+fifteen rounds at four bars**: a generalist *design-doc* bar (Rounds 1–6), an
+*implementation-readiness* bar (three-lens technical panel — distributed-systems,
+offensive-security, AI-agents — Rounds 7–12, converged), a *fitness-for-purpose*
+bar (SRE/operability, cost/scale, premise-skeptic — Rounds 13–14, converged), and
+a *type-of-software* bar (regulated, ML/data, frontend/UX domain experts — Round
+15). **135 findings were raised and resolved.**
 
-An honest bound on the claim: the Round-12 convergence established **internal
-soundness / implementation-readiness**, *not* fitness-for-purpose — which is
-exactly why Round 13's fresh lenses immediately surfaced 17 more findings about
-sequencing, operability, cost-at-scale, and lifecycle. "Converged" means an
-independent panel found no further defects *at the bar it was reviewing*; it does
-**not** mean the system is proven correct, viable, or the right thing to build.
-The genuine open questions — does structure beat a strong single agent
-(Phase-1.5 A/B), does it pencil out at scale, will it be adopted — are settled by
-evidence and real use, not by this loop. The full per-finding record, the
+The defining lesson is the progression: **each genuinely new axis of scrutiny
+re-opened a problem the prior axes had signed off on.** The fitness-for-purpose
+lenses surfaced 17 findings about sequencing/operability/cost the technical panel
+couldn't see; the domain experts then found that the plan's own thesis — "a
+deterministic decision rule at the seams" — was *domain-specific* (true for
+backend/logic, false as a universal). "Converged" means an independent panel found
+no further defects *at the bar it was reviewing*; it does **not** mean the system
+is proven correct, complete, viable, or the right thing to build. The genuine open
+questions — does structure beat a strong single agent (Phase-1.5 A/B), does it
+pencil out at scale, will it be adopted, do the domain packs work in practice —
+are settled by evidence and real use, not by this loop. The full per-finding record, the
 conformance mapping, and a maturity assessment are in
 [docs/iteration-log.md](./docs/iteration-log.md).
 

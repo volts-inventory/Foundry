@@ -150,11 +150,12 @@ class GateResult(BaseModel):
     execution_deterministic: bool
     # For deterministic gates the verdict is WRITTEN ONLY by the trusted attestor (zone B,
     # governance §1c); the signature binds the verdict to its inputs so it can't be replayed:
-    runner_attestation: str | None # sig over (name, tree_sha, scanner_config_rev, status, results_digest)
-    results_digest: str | None     # hash of the raw zone-A results the verdict is a function of
+    verdict_class: str             # config-evaluable | execution-deterministic | statistical | human-witnessed | perceptual (domains.md §1)
+    runner_attestation: str | None # sig over (name, state_sha, scanner_config_rev, status, results_digest); human sig for class "human-witnessed"
+    results_digest: str | None     # class 1/2: hash of raw zone-A results; class 3: (metric, dataset_hash, seed, n, estimate, ci, decision)
     findings: list[str] = []
     retries: int = 0
-    run_against: str               # per-branch: "task/<id>"; integrated: tree_sha (see §4)
+    run_against: str               # per-branch: "task/<id>"; integrated: state_sha (tree_sha + data/weight refs, see §4 + domains.md §2)
     seq: Seq                       # TOTAL causal order across runs AND forks; never iteration order
 
 class GateTriage(BaseModel):       # agents write THIS, never GateResult, for deterministic gates
@@ -179,7 +180,7 @@ class FactoryState(TypedDict):
     gates: Annotated[list[GateResult], _merge_gates]          # fan-in, max-by-seq per (name, run_against); deterministic-gate writes require valid attestation
     gate_triage: Annotated[list[GateTriage], _union_by_key]   # fan-in; agent triage notes (never verdicts)
     tasks: Annotated[list[dict], _union_by_id]                # fan-in, keyed (commutative)
-    budget: BudgetLedger                                      # single-writer (Budget Ctrl)
+    budget: BudgetLedger                                      # single-writer (Budget Ctrl); meters token AND compute (GPU/external-job) cost — domains.md §3
     actions: Annotated[list[ExternalAction], _union_by_key]   # fan-in, keyed by idempotency_key
     history_ref: LogRef                                       # handle; raw events live out-of-band
 ```
@@ -275,7 +276,15 @@ tree_sha = H( normalized_source_tree   # git tree of TRACKED SOURCE only,
   collide into a stale "already verified" PASS. *(DS4, ties to supply-chain §SEC1)*
 - Integrated `GateResult.run_against = tree_sha`. A `FIX` (re-merged for
   multi-task) yields a new `tree_sha`, so prior Security/Audit/Supply-chain/E2E
-  verdicts no longer match the current key and are re-run. Per-branch verdicts
+  verdicts no longer match the current key and are re-run.
+- **`state_sha` generalization (data/ML domains).** For software whose behavior
+  depends on data or model weights, `tree_sha` is the source-only special case of
+  `state_sha = H(source ⧺ lockfile ⧺ toolchain ⧺ data_refs ⧺ feature_defs ⧺
+  weight_refs)`, where data/weight **content identities** (manifest hashes) enter
+  the key while the bytes stay in their external versioned stores. This makes
+  dependency-scoped re-verification *sound* for ML — a dataset/label/weight change
+  dirties the data-dependent gates instead of reusing a stale cached PASS
+  ([domains.md §2](./domains.md)). A pack declares which refs are data vs weights. Per-branch verdicts
   key on the stable `task/<id>` and are invalidated when that branch's base moves
   (rebase resets the branch; its verdicts are re-emitted with a higher `seq`).
 

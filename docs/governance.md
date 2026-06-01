@@ -68,17 +68,35 @@ deterministic gate is the agent that *triages* findings; the authoritative
 The attest→admit chain (§4–§5) treats "all gates PASS" as ground truth, so the
 verdict bit cannot be an agent claim. For every **deterministic** gate — Build,
 **Test, Security, Audit, Supply-chain, E2E** — the authoritative
-`GateResult.status` is **computed by the same trusted runner that executes the
-scan/test against the pinned external config, and signed with that runner's
-identity** (`runner_attestation`, [architecture.md §3](./architecture.md)). The
-gate-owning agent only *triages and explains* findings; it does **not** emit the
-verdict. The WORM appender and the builder accept a deterministic-gate verdict
-into the outbox/predicate **only** when it carries a valid runner attestation,
-and the admission controller (§5) **verifies the runner identity on each gate
-record**, not merely that a `pass` row exists. This closes the circularity where
-a compromised/colluding agent could forge a `pass` that the predicate then
-truthfully signs. Only the LLM-judgment gates (Spec, Design) are agent/human
-verdicts by nature — and those are defended by the independent critic + HITL. *(SEC-R8-F1)*
+`GateResult.status` is computed by a **trusted gate runner**, never by the agent.
+
+**The runner is two-zone** (mirroring the builder's input/environment split),
+because it must *execute agent-authored test/build/scan code* yet *sign a verdict*
+— and those two must not happen in one process: *(SEC-R9-F1)*
+- **Zone A — untrusted executor:** runs the agent-authored tests, build steps, and
+  any agent-supplied scanner rules/plugins in a sandbox with **no access to any
+  signing credential or OIDC token**, emitting only a one-way **raw results
+  stream** (exit codes, per-test outcomes, scanner SARIF).
+- **Zone B — trusted attestor:** holds the signing identity, **executes no agent
+  code**, and computes/signs the verdict as a deterministic function of zone-A's
+  results stream evaluated against the **pinned external config**. The signing
+  identity is **unreachable from zone A** (same property the builder already
+  asserts for sandboxes). RCE-from-a-malicious-test-to-runner-signature is in the
+  red-team set.
+
+The signature is **bound to its inputs** — `runner_attestation` signs
+`(gate_name, tree_sha, scanner_config_revision_hash, status, results_digest)` —
+so a valid attestation cannot be replayed onto a different tree/config/predicate;
+admission re-checks **all** of these per record, not just the runner identity.
+*(SEC-R9-F3)*
+
+Agents only *triage and explain* (writing `GateTriage`, never `GateResult`, for
+deterministic gates — [architecture.md §3](./architecture.md)); the `gates`
+reducer **rejects any unsigned deterministic-gate write**, so an agent cannot
+supersede the runner's verdict even in the live channel that in-graph routing and
+the evidence pack read. The WORM appender and builder accept a deterministic
+verdict only with a valid attestation. Only the LLM-judgment gates (Spec, Design)
+are agent/human verdicts, defended by the independent critic + HITL. *(SEC-R8-F1, DS-R9-F2)*
 
 ## 2. The five-plane guardrail model
 
@@ -112,10 +130,15 @@ verdicts by nature — and those are defended by the independent critic + HITL. 
   reproducibility, not trustworthiness, of a *newly* admitted package). Any new
   package or version entering the mirror passes a vetting step **distinct from the
   in-repo lockfile policy check**: provenance/signature verification,
-  **namespace reservation against dependency-confusion / typosquat**, and an
-  optional source-build-and-diff against upstream. A **new-dependency request is a
-  first-class, HITL-acknowledged change class** surfaced in the evidence pack —
-  not a lockfile line the Supply-chain gate waves through. *(SEC-R8-F2)*
+  **namespace reservation against dependency-confusion / typosquat**, and — for
+  any package lacking an existing trusted attestation (e.g. an upstream SLSA
+  predicate / reproducible-build proof) — a **mandatory** source-build-and-diff
+  against upstream (*not* optional, since a human cannot adjudicate "is this
+  source benign" from nothing). A **new-dependency request is a first-class,
+  HITL-acknowledged change class** whose evidence pack surfaces upstream
+  provenance, maintainer/namespace history, diff-from-prior-version, and the
+  transitive-closure delta — paralleling the release evidence pack — not a
+  lockfile line the Supply-chain gate waves through. *(SEC-R8-F2, SEC-R9-F2)*
 - Egress is default-deny **through per-destination proxies with payload/size
   anomaly detection** — host allowlisting alone does not stop exfil over
   allowed channels (registry, git remote, model provider). The sandbox is treated
@@ -159,9 +182,14 @@ verdicts by nature — and those are defended by the independent critic + HITL. 
   - *Pinned-constraint pressure* — the relevant `pinned_constraints` set for a
     node approaching its injection budget escalates to HITL (never silent
     truncation, [architecture.md §8](./architecture.md)). *(AI-R8-F2)*
-  - *Criterion-coverage delta* — a feature's implemented scope **shrinking**
-    relative to its acceptance criteria is a deterministic trigger (catches quiet
-    scope-reduction that touches no protected path). *(AI-R8-F3)*
+  - *Criterion-coverage delta* — computed against signals the implementing agent
+    does **not** solely control: the baseline is the **Spec-gate-frozen
+    (immutable) criterion set**, and the satisfied side is the **count of
+    high-risk `criterion_id`s whose runner-attested negative-oracle/mutant family
+    passes** (computed by the trusted runner, §1c) — **not** the agent-authored
+    test-tag count (which a coordinated scope-reduction could co-shrink). A drop
+    in that runner-attested count against the frozen baseline trips deterministically.
+    *(AI-R8-F3, AI-R9-F2)*
 - **Sandboxed LLM analyzer (semantic color only):** runs read-only in its **own
   toolless sandbox**, fired by (a) a deterministic-monitor signal, (b) a write to
   oracle/gate/criteria/config paths, **and (c) a low-rate *sampled* pass over a
@@ -210,10 +238,15 @@ A signature proves provenance, not that deployment is authorized. Therefore:
 - After the human Release sign-off, a **non-agent admission controller**
   cosign-verifies the signature **and** evaluates a policy: *this exact digest was
   built by the trusted builder, from this commit; all required gates PASS for it
-  in the WORM store **with valid trusted-runner attestations (§1c)**; and the
-  scanner-config revision matches the pinned hash*. Only then does a **separate,
-  least-privileged, non-agent deployer** ship. An agent that gets an unverified,
-  forged-verdict, or non-gate-passing tree built cannot reach production. *(SEC7, SEC5, SEC-R8-F1)*
+  in the WORM store **with valid input-bound trusted-runner attestations (§1c)**;
+  and the scanner-config revision matches the pinned hash*. Only then does a
+  **separate, least-privileged, non-agent deployer** ship.
+- **Fail-closed across runs/forks:** admission treats **any FAIL for a `tree_sha`
+  as disqualifying, regardless of a later PASS** — so two forks that produce the
+  same digest with opposite verdicts (e.g., a newly-admitted CVE flips Security)
+  can never ship the green one. This removes any dependence on cross-run verdict
+  ordering. An agent that gets an unverified, forged-verdict, or non-gate-passing
+  tree built cannot reach production. *(SEC7, SEC5, SEC-R8-F1, DS-R9-F1)*
 
 ## 6. Human-in-the-loop is evidence-backed, not a rubber stamp
 

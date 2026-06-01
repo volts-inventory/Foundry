@@ -23,12 +23,14 @@ content-addressed, versioned artifacts, not chat.
 > decorrelate blind spots.
 >
 > **Non-agent components** (not LLM roles, listed for completeness): the trusted
-> hermetic CI builder, the **trusted gate runner** (computes & signs the
-> *authoritative verdict* for every deterministic gate — Build/Test/Security/
-> Audit/Supply-chain/E2E — so agents only triage, never bless;
-> [governance.md §1c](./governance.md)), the deploy-time admission controller, the
-> least-privileged deployer, and the WORM audit appender. Agents can *propose*
-> their inputs but never *are* these components ([governance.md §4–§8](./governance.md)).
+> hermetic CI builder, the **two-zone trusted gate runner** — *zone A* runs the
+> agent-authored tests/build/scans with no signing creds and emits a raw results
+> stream; *zone B* (runs no agent code) computes & **signs** the authoritative
+> verdict (bound to `tree_sha`+config) for every deterministic gate —
+> Build/Test/Security/Audit/Supply-chain/E2E — so agents only triage
+> (`GateTriage`), never bless ([governance.md §1c](./governance.md)) — the
+> deploy-time admission controller, the least-privileged deployer, and the WORM
+> audit appender. Agents can *propose* inputs but never *are* these components.
 
 ---
 
@@ -183,7 +185,7 @@ content-addressed, versioned artifacts, not chat.
 | Senior Engineer | design, interfaces, ownership_map | tasks, scaffolding, reviews, conflict resolutions | T1/T2 | — |
 | Junior Engineer | task | diff/PR (own branch) | T2/T3 | — |
 | Reviewer/Critic | diff | verdict | T1 | — |
-| Trusted gate runner *(non-agent)* | branch / tree_sha + pinned config | signed verdicts | n/a | **Build, Test, Security, Audit, Supply-chain, E2E verdicts** (agents triage only) |
+| Trusted gate runner *(non-agent, 2-zone)* | raw results (zone A) + pinned config | input-bound signed verdicts (zone B) | n/a | **Build, Test, Security, Audit, Supply-chain, E2E verdicts** (agents write `GateTriage` only) |
 | QA Engineer | acceptance_criteria, pinned_constraints | test_plan, test_report | T2 (T1 high-risk oracle) | **Test** |
 | SDET | integrated tree | e2e_suite | T2 | E2E |
 | Security/AppSec | tree_sha | threat_model, security_findings | T1 | Security |

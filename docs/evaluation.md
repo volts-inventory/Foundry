@@ -80,6 +80,12 @@ A vague A/B rigs itself; this one is specified so it can actually fail. *(AI1)*
   (objective, cheap — a concrete floor is set); (b) a smaller **human-labeled**
   task-relevance set with a stated labeling protocol and inter-annotator
   agreement, reported with its own floor. The retriever is gated on both. *(AI2, AI-R8-F6)*
+- **Constraint-scoping recall:** because relevance-scoping `pinned_constraints` is
+  itself a retrieval problem, the *local-constraint scoper* has its own recall
+  floor over a labeled `(task, relevant-constraint)` set with **cross-cutting
+  invariants over-represented**. (Global/security/trust-root constraints are
+  non-scopable and always injected, so a scoping miss can only affect low-stakes
+  local constraints — [architecture.md §8](./architecture.md).) *(AI-R9-F1)*
 - **Analyzer evals:** precision/recall of the Guardian analyzer's advisory flags
   against labeled reward-hacking / scope-creep trajectories, against
   **prompt-injection-of-the-monitor** cases, **and crucially on an *untriggered*

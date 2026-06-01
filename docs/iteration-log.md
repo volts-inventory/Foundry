@@ -193,6 +193,27 @@ findings are bugs the Round-7 fixes themselves created — the value of re-revie
 **Round 8 verdict (solutioner):** all 13 addressed. Re-submitted to a fresh
 specialist panel for Round 9.
 
+## Round 9 — specialist panel re-review (9 findings: 0 BLOCKER, 3 MAJOR, 6 MINOR)
+
+Blockers eliminated; the panel acknowledged most Round-8 mechanisms as sound. The
+three MAJORs all stem from the trust/ordering machinery the prior rounds added —
+the value of repeated specialist review.
+
+| # | Sev | Problem | Resolution |
+|---|---|---|---|
+| DS-F1 | MAJOR | `seq` total within a run but **not across forks**; WORM/admission key on `tree_sha` (not run id), so two forks with the same digest + opposite verdicts collide with equal `seq` | Added **`run_epoch`** to the `seq` tuple (total across forks) **and** made admission **fail-closed**: any digest FAIL disqualifies regardless of a later PASS. [arch §3](./architecture.md), [gov §5](./governance.md) |
+| DS-F2 | MAJOR | Max-by-`seq` reducer trusted ordinal position, not attestation → a triaging agent (later superstep) could supersede the runner's signed verdict in the *live* channel that in-graph routing + the evidence pack read | Agents write `GateTriage`, **never** `GateResult`, for deterministic gates; reducer **rejects unsigned deterministic-gate writes**. [arch §3](./architecture.md), [gov §1c](./governance.md) |
+| DS-F3 | MINOR | `superstep_index` exposure/semantics stated loosely | Specified: read from run-config metadata at emit time; constant across a `Send` fan-out; same-node-id siblings separated by the channel key. [arch §3](./architecture.md) |
+| DS-F4 | MINOR | Path-3 dedup's "effectively-once" overstated for crash-in-window | Path-3 **reserved for tolerable (notification) effects**, never gate/release/deploy-load-bearing; crash-window → fail-to-human. [arch §5](./architecture.md) |
+| SEC-F1 | MAJOR | The gate runner executes **agent-authored** test/build code in the same process holding its **signing identity** → RCE-to-signature | **Two-zone runner**: zone A (untrusted executor, no creds) emits a raw results stream; zone B (no agent code) signs the verdict from that stream against pinned config; added to red-team. [gov §1c](./governance.md) |
+| SEC-F2 | MINOR | Human couldn't realistically adjudicate a new-dependency mirror admission | Source-build-and-diff **mandatory** absent a trusted upstream attestation; concrete evidence-pack surface for new-dep change class. [gov §2](./governance.md) |
+| SEC-F3 | MINOR | `runner_attestation` bound only runner identity, not the verdict's inputs → replay/substitution seam | Attestation now signs `(gate, tree_sha, config_rev, status, results_digest)`; admission re-checks all per record. [arch §3](./architecture.md), [gov §1c/§5](./governance.md) |
+| AI-F1 | MINOR | Relevance-scoping `pinned_constraints` is itself a retrieval problem → a relevant (esp. cross-cutting) constraint could be silently dropped | **Global/non-scopable subclass** (cross-cutting invariants, security/abuse, trust-root) always injected; local-constraint scoper gets its **own measured recall floor**. [arch §8](./architecture.md), [eval §4](./evaluation.md) |
+| AI-F2 | MINOR | Criterion-coverage-delta trigger's measurand undefined and reducible to an agent-controlled tag count | Anchored to the **Spec-gate-frozen criterion set** + **runner-attested negative-oracle count** (not test tags); baseline + threshold specified. [gov §3](./governance.md) |
+
+**Round 9 verdict (solutioner):** all 9 addressed. Re-submitted to a fresh
+specialist panel for Round 10.
+
 ## Loop summary
 
 | Round | Bar | Findings | BLOCKER | MAJOR | MINOR | Verdict |
@@ -205,12 +226,13 @@ specialist panel for Round 9.
 | 6 | design-doc | 1 | 0 | 0 | 1 | **no material** |
 | 7 | **implementation-ready (3 specialists)** | 30 | 7 | 16 | 7 | material remain |
 | 8 | implementation-ready (3 specialists) | 13 | 1 | 7 | 5 | material remain |
-| 9 | implementation-ready (3 specialists) | _running_ | | | | _pending_ |
+| 9 | implementation-ready (3 specialists) | 9 | 0 | 3 | 6 | material remain |
+| 10 | implementation-ready (3 specialists) | _running_ | | | | _pending_ |
 
-Total so far: **80 findings raised and resolved** across two bars. The design-doc
+Total so far: **89 findings raised and resolved** across two bars. The design-doc
 loop converged at Round 6; the implementation-readiness loop is converging
-(30 → 13, blockers 7 → 1). This log is the honest record the process produced,
-not a marketing artifact.
+strongly (30 → 13 → 9; blockers 7 → 1 → 0; majors 16 → 7 → 3). This log is the
+honest record the process produced, not a marketing artifact.
 
 ## Conformance mapping — plan vs. industry practice (2024–2026)
 

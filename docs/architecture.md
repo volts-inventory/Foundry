@@ -129,7 +129,7 @@ from typing import Annotated, TypedDict
 from pydantic import BaseModel
 from enum import Enum
 
-Seq = tuple[int, str, int]         # (superstep_index, node_id, local) — see "Seq" below
+Seq = tuple[int, int, str, int]    # (run_epoch, superstep_index, node_id, local) — see "Seq" below
 
 class Artifact(BaseModel):
     kind: str
@@ -145,11 +145,21 @@ class GateResult(BaseModel):
     status: str                    # "pass" | "fail" | "error"  (error = infra failure, not a verdict)
     decision_deterministic: bool
     execution_deterministic: bool
-    runner_attestation: str | None # for deterministic gates: signed by the trusted runner, not the agent (§ governance §1c)
+    # For deterministic gates the verdict is WRITTEN ONLY by the trusted attestor (zone B,
+    # governance §1c); the signature binds the verdict to its inputs so it can't be replayed:
+    runner_attestation: str | None # sig over (name, tree_sha, scanner_config_rev, status, results_digest)
+    results_digest: str | None     # hash of the raw zone-A results the verdict is a function of
     findings: list[str] = []
     retries: int = 0
     run_against: str               # per-branch: "task/<id>"; integrated: tree_sha (see §4)
-    seq: Seq                       # TOTAL causal order; resolves latest-wins by CAUSALITY, never iteration order
+    seq: Seq                       # TOTAL causal order across runs AND forks; never iteration order
+
+class GateTriage(BaseModel):       # agents write THIS, never GateResult, for deterministic gates
+    name: str
+    run_against: str
+    explanation: str               # triage/remediation notes; advisory, never a verdict
+    produced_by: str
+    seq: Seq
 
 class LogRef(BaseModel):           # handle to out-of-band data (history/large artifacts)
     uri: str                       # append-only store / object store
@@ -163,7 +173,8 @@ class FactoryState(TypedDict):
     required_capabilities: Annotated[list[str], _union]       # fan-in, deduped, commutative
     pinned_constraints: Annotated[list[dict], _merge_constraints]  # fan-in; relevance-scoped, supersedable (§8)
     artifacts: Annotated[list[Artifact], _merge_by_uri]       # fan-in, set-union by uri (commutative)
-    gates: Annotated[list[GateResult], _merge_gates]          # fan-in, max-by-seq per (name, run_against)
+    gates: Annotated[list[GateResult], _merge_gates]          # fan-in, max-by-seq per (name, run_against); deterministic-gate writes require valid attestation
+    gate_triage: Annotated[list[GateTriage], _union_by_key]   # fan-in; agent triage notes (never verdicts)
     tasks: Annotated[list[dict], _union_by_id]                # fan-in, keyed (commutative)
     budget: BudgetLedger                                      # single-writer (Budget Ctrl)
     actions: Annotated[list[ExternalAction], _union_by_key]   # fan-in, keyed by idempotency_key
@@ -181,35 +192,47 @@ def _merge_by_uri(a, b):                      # artifacts: set-union by content 
 def _merge_gates(a, b):                        # gates: LATEST BY seq per (name, run_against)
     m = {}
     for g in (a or []) + (b or []):
+        # Deterministic-gate verdicts are accepted ONLY with a valid runner attestation,
+        # so an unsigned agent write can never supersede the trusted runner's verdict:
+        if g.name in DETERMINISTIC_GATES and not verify_attestation(g):
+            continue
         k = (g.name, g.run_against)
         if k not in m or g.seq > m[k].seq:     # TOTAL tuple order — ties are impossible
             m[k] = g
     return list(m.values())
 ```
 
-**Seq — a total, race-free causal order.** `seq` is **not** a shared mutable
-counter (which parallel branches, sharing one immutable input snapshot, could not
-read-increment without a race). It is the lexicographic tuple
-`(superstep_index, node_id, local)`:
+**Seq — a total, race-free causal order, across runs and forks.** `seq` is **not**
+a shared mutable counter (parallel branches share one immutable input snapshot and
+could not read-increment one without a race). It is the lexicographic tuple
+`(run_epoch, superstep_index, node_id, local)`:
 
-- `superstep_index` — provided by the LangGraph runtime, monotonic across the
-  run and **strictly greater in any later superstep** (so a retry or rebase
-  re-emission, which happens in a later superstep, always outranks the prior
-  write to the same key);
-- `node_id` — the deterministic id of the emitting node, breaking ties between
-  *siblings* in the *same* superstep;
-- `local` — a per-node monotonic counter for multiple emissions by one node.
+- `run_epoch` — a strictly-increasing per-thread epoch persisted at run/fork
+  creation (`parent_epoch + 1`), recorded in the WORM record. **This makes `seq`
+  total *across forks*:** two forks that re-run the same gate at the same logical
+  point (same `superstep_index`/`node_id` after a step-counter reset) no longer
+  collide — the later fork's higher `run_epoch` orders them. *(DS-R9-F1)*
+- `superstep_index` — read from LangGraph **run config metadata at emit time**
+  (`config["metadata"]["langgraph_step"]`); monotonic across the run, **constant
+  across all branches of one `Send` fan-out** (hence the tie-breakers below), and
+  strictly greater in any later superstep (so retries/rebases outrank prior writes).
+- `node_id` — deterministic id of the emitting node, separating distinct siblings
+  in one fan-out. For *same-node-id* branches (branch-per-task), separation comes
+  from the channel **key** (`run_against`), not `seq`.
+- `local` — per-node monotonic counter for multiple emissions by one node.
 
-Because the triple is unique per emission, `_merge_gates`'s comparison is
-**total**: there is no equal-`seq` case and therefore no fallthrough to fold
-order. A reducer invariant test asserts that, for any fixed key, the surviving
-element is independent of input order. *(DS1, DS2, DS8 — closes the residual seq race)*
+The tuple is unique per emission, so `_merge_gates`'s comparison is **total** —
+no equal-`seq` fallthrough to fold order. A reducer invariant test asserts
+order-independence per key. *(DS1, DS2, DS8, DS-R9-F1, DS-R9-F3)*
 
 Why each fix matters:
 
-- **`gates` is max-by-`seq` over a total order**, so concurrent/batched/retried
-  gate writes resolve to the causally-newest verdict; a real PASS can't be masked
-  by a stale FAIL (or vice-versa) regardless of fold order. *(DS1, DS2, DS8)*
+- **`gates` is max-by-`seq` over a total order *and* attestation-gated**, so a
+  real PASS can't be masked by a stale FAIL regardless of fold order, **and an
+  unsigned agent write can never supersede the trusted runner's deterministic-gate
+  verdict in the live channel** — agents write only `GateTriage`
+  ([governance.md §1c](./governance.md)). In-graph routing and the HITL evidence
+  pack read the attested record. *(DS1, DS2, DS8, DS-R9-F2)*
 - **`status` distinguishes `error` from `fail`** — an infra crash is not a
   verdict; the join handles it separately (§5). *(DS7)*
 - **All list channels are keyed set-unions** (`tasks` by id, `actions` by
@@ -274,7 +297,11 @@ WORM audit) is handled by a **transactional outbox**, not by hope.
      (fire-and-forget webhooks, notifications, registries with no by-key lookup),
      the relay writes a **local dedup row in the same outbox transaction** and
      consults it before emitting, giving effectively-once delivery (true
-     exactly-once being impossible). The local record is the dedup authority.
+     exactly-once being impossible). **Path 3 is reserved for effects whose
+     duplicate-or-omission is tolerable (notifications) — never for anything a
+     gate, release, or deploy depends on** — because a crash between *act* and
+     *confirm-log* on a non-queryable effect resolves to **fail-to-human**, not
+     autonomous dedup. *(DS-R9-F4)*
 
   The protocol is **intent-log → act → confirm-log**; if none of the three can
   establish state on resume, the node **fails to the human** (never assumes). *(DS2, DS3-F3)*
@@ -330,18 +357,26 @@ Long-horizon success lives or dies here, so the contract is mechanistic, not
   alternatives, invariants, high-risk acceptance criteria, and ownership
   constraints live in `pinned_constraints` and are injected **verbatim** (never
   summarized) — but the set is **not** an unbounded monotonic union (which would
-  overflow context on exactly the long-horizon runs it protects). Three controls
-  keep it bounded: *(AI2, AI-R8-F2)*
-  - **Relevance scoping:** each node receives only the constraints relevant to
-    its active task/module (resolved via the `ownership_map` + retrieval graph),
-    not the global set, under an explicit **per-node injection token budget**.
-  - **Supersession:** `_merge_constraints` retires a constraint by id when a
-    later ADR reverses it (`supersedes`), so the set reflects current truth, not
-    full history.
-  - **Cardinality monitor:** a deterministic monitor escalates to HITL when the
-    *relevant* pinned set for a node approaches its injection budget — the set is
-    **never silently truncated** (silent truncation is indistinguishable from the
-    summarization this channel forbids).
+  overflow context on exactly the long-horizon runs it protects). Four controls
+  keep it bounded *without* silently dropping a relevant constraint: *(AI2, AI-R8-F2, AI-R9-F1)*
+  - **Global (non-scopable) subclass — always injected.** Cross-cutting
+    invariants ("monetary values in integer cents," "no PII in logs"),
+    security/abuse constraints, and trust-root constraints are flagged
+    `scope: global` and injected **verbatim into every node regardless of
+    relevance scoring** — these have the weakest call/def-graph signal, so they
+    are never subject to a scoping miss. This bounds the blast radius of any
+    scoping error to *narrowly-local* constraints (module-specific ownership
+    limits, local rejected-alternatives) whose omission is low-stakes.
+  - **Relevance scoping (local subclass only):** local constraints are scoped to a
+    node's active task/module (via `ownership_map` + retrieval graph) under a
+    **per-node injection token budget**. Because scoping is itself a retrieval
+    problem, the scoper has its **own measured recall floor** over a labeled
+    `(task, relevant-constraint)` set ([evaluation.md §4](./evaluation.md)) — gated,
+    not assumed.
+  - **Supersession:** `_merge_constraints` retires a constraint by id when a later
+    ADR reverses it (`supersedes`), so the set reflects current truth.
+  - **Cardinality monitor:** escalates to HITL when the injected set approaches the
+    budget — **never silently truncated**.
 - **Retrieval is a measured contract, not vibes.** Symbol index (tree-sitter/LSP)
   **plus the call/def + dependency graph** (impact analysis) — not embedding
   similarity alone — so cross-file/implicit coupling is surfaced. A

@@ -17,13 +17,18 @@ content-addressed, versioned artifacts, not chat.
 > *implementation* and high-risk *oracle authoring* default to T1** (defects are
 > born in implementation, and a weak oracle defeats every downstream gate);
 > escaped-defects are tracked *by the producing tier* to keep the assignment
-> honest. On high-risk criteria, review/QA run a **different model family** (not
-> just tier) to decorrelate blind spots.
+> honest. On high-risk criteria, review/QA run a model from the **second provider
+> family** (Claude tiers are *not* different families; a genuinely different
+> lineage is provisioned — [architecture.md §8](./architecture.md)) to
+> decorrelate blind spots.
 >
 > **Non-agent components** (not LLM roles, listed for completeness): the trusted
-> hermetic CI builder, the deploy-time admission controller, the least-privileged
-> deployer, and the WORM audit appender. Agents can *propose* their inputs but
-> never *are* these components ([governance.md §4–§8](./governance.md)).
+> hermetic CI builder, the **trusted gate runner** (computes & signs the
+> *authoritative verdict* for every deterministic gate — Build/Test/Security/
+> Audit/Supply-chain/E2E — so agents only triage, never bless;
+> [governance.md §1c](./governance.md)), the deploy-time admission controller, the
+> least-privileged deployer, and the WORM audit appender. Agents can *propose*
+> their inputs but never *are* these components ([governance.md §4–§8](./governance.md)).
 
 ---
 
@@ -178,7 +183,7 @@ content-addressed, versioned artifacts, not chat.
 | Senior Engineer | design, interfaces, ownership_map | tasks, scaffolding, reviews, conflict resolutions | T1/T2 | — |
 | Junior Engineer | task | diff/PR (own branch) | T2/T3 | — |
 | Reviewer/Critic | diff | verdict | T1 | — |
-| CI runner | branch / integrated tree | build result | n/a | **Build** |
+| Trusted gate runner *(non-agent)* | branch / tree_sha + pinned config | signed verdicts | n/a | **Build, Test, Security, Audit, Supply-chain, E2E verdicts** (agents triage only) |
 | QA Engineer | acceptance_criteria, pinned_constraints | test_plan, test_report | T2 (T1 high-risk oracle) | **Test** |
 | SDET | integrated tree | e2e_suite | T2 | E2E |
 | Security/AppSec | tree_sha | threat_model, security_findings | T1 | Security |

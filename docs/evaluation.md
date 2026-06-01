@@ -25,7 +25,10 @@ A vague A/B rigs itself; this one is specified so it can actually fail. *(AI1)*
      (SWE-agent/OpenHands-class) with **identical tool, retrieval, sandbox, and
      model-tier access**, differing *only* in the absence of role-decomposition,
      gates, and hand-offs, with unlimited self-iteration until the budget. **Not**
-     a single no-tools Opus call.
+     a single no-tools Opus call. **Parity is a CI-checked invariant:** the
+     baseline's tool/retrieval/sandbox substrate is **re-pinned to Foundry's at
+     every scored run and hashed into the same manifest**, so the comparison
+     cannot silently rot in Foundry's favor as its substrate evolves. *(AI-R8-F7)*
   3. **Single agent + same gates, no role split** — isolates whether the gain
      (if any) comes from *roles* or merely from *verification/gates*.
 - **Equalizer:** **equal USD** is the primary, economically-honest equalizer
@@ -58,20 +61,31 @@ A vague A/B rigs itself; this one is specified so it can actually fail. *(AI1)*
 - **Judge decorrelation:** measure **error correlation** between each judge
   (Reviewer/QA/Security-triage) and the implementer on a labeled defect set, and a
   **self-preference probe** (does a judge favor diffs from its own model family?).
-  Self-preference is a first-class scorecard metric, not a footnote. High-risk
-  criteria require a **different model family** judge or cross-family disagreement
-  triggers. *(AI3)*
+  Self-preference is a first-class scorecard metric. High-risk criteria require a
+  judge from the **second model family** (a genuinely different provider/lineage,
+  provisioned in the stack — [architecture.md §8](./architecture.md); Claude
+  tiers are *not* different families), or cross-family disagreement triggers. *(AI3, AI-R8-F1)*
+- **Criterion fidelity (necessary, not sufficient):** for each high-risk
+  criterion, the bound test is run against a **family of independently-authored,
+  non-trivial known-bad variants** (tied to the mutation-testing apparatus, and
+  authored **cross-family** from the test author). A variant counts only if it
+  **passes the build and the criterion's happy-path test but fails the intent
+  assertion** (guards against strawman known-bads). This is necessary evidence of
+  intent fidelity, **not proof** — a single mutant never proves intent capture. *(AI6, SEC8, AI-R8-F5)*
 - **Handoff fidelity:** inject known requirements at intent and measure how many
   **survive** as faithful tests at the Test gate — a direct measure of the
   telephone-game loss the artifact-passing architecture is meant to prevent. *(AI6)*
-- **Criterion fidelity:** for each high-risk criterion, the bound test must
-  **fail against a known-bad reference implementation** (per-criterion negative
-  oracle), proving the test captures intent, not just the tag. *(AI6, SEC8)*
-- **Retrieval recall:** the symbol+graph retriever is scored against labeled
-  known-relevant spans (incl. cross-file coupling); a recall floor gates it. *(AI2)*
+- **Retrieval recall (split by ground-truth obtainability):** (a) a **mechanical**
+  recall target on statically-derivable call/def + dependency coupling edges
+  (objective, cheap — a concrete floor is set); (b) a smaller **human-labeled**
+  task-relevance set with a stated labeling protocol and inter-annotator
+  agreement, reported with its own floor. The retriever is gated on both. *(AI2, AI-R8-F6)*
 - **Analyzer evals:** precision/recall of the Guardian analyzer's advisory flags
-  against labeled reward-hacking / scope-creep trajectories **and** against
-  **prompt-injection-of-the-monitor** cases. *(SEC3, AI10)*
+  against labeled reward-hacking / scope-creep trajectories, against
+  **prompt-injection-of-the-monitor** cases, **and crucially on an *untriggered*
+  held-out set** (trajectories that cross no deterministic trigger and touch no
+  protected path) — so the sampled-pass coverage ([governance.md §3](./governance.md))
+  is measured, not assumed. *(SEC3, AI10, AI-R8-F3)*
 - **Per-node decision variance:** `k` repeated runs quantify run-to-run variance
   per node; feeds both the A/B power calc and the optimization search. *(AI5)*
 
@@ -110,7 +124,7 @@ Direction-only targets can't fail, so each metric has a release threshold
 
 | Metric | Tells us | Initial threshold |
 |---|---|---|
-| Novel-suite resolution | Working software, uncontaminated | ≥ 85% small, ≥ 65% feature/refactor |
+| Novel-suite resolution | Working software, uncontaminated | **≥ measured baseline + margin** on the *same* novel suite (anchored, not an absolute; e.g. small-task ≈70–85% tracking frontier, recalibrated Phase 5) |
 | Hidden-test pass rate (of self-passing runs) | Real oracles, not overfit | ≥ 95% |
 | SWE-EVO resolution vs baseline (USD-equal) | Does structure help long-horizon? | **> baseline by ≥ pre-registered margin at ≤ equal cost** |
 | Judge↔implementer error correlation | Are LLM gates independent? | below a set ceiling; self-preference within calibration |
@@ -118,7 +132,7 @@ Direction-only targets can't fail, so each metric has a release threshold
 | First-pass yield | Initial quality | ≥ 60% |
 | Escaped-defect rate (by producing tier) | Bugs past all gates | ≤ 1 per 10 features |
 | Cost per feature (USD) + wall-clock | Economic viability | within the §8 envelope; monitor overhead ≤ modeled bound |
-| Criterion fidelity | Tests capture intent | 100% high-risk criteria fail vs known-bad ref |
+| Criterion fidelity | Necessary evidence tests capture intent | 100% high-risk criteria fail a *family* of non-trivial mutants (necessary, not sufficient) |
 
 Cost, wall-clock, human-intervention, and escaped-defects are read **together**
 so the system can't "win" by cutting corners.
@@ -127,13 +141,24 @@ so the system can't "win" by cutting corners.
 
 A concrete model — not an assertion — for one representative feature: enumerate
 `nodes × expected loop iterations × tokens/node (assembled-context input +
-output) × tier price`, **plus** the analyzer's **event-triggered** invocation
-count × per-call input cap, **plus** prompt-cache hit assumptions (high on actor
-SOP prefixes, low on the analyzer's changing trajectory). This yields (a) the
-cost-per-feature envelope, (b) the realistic monitor-overhead %, and (c) a
-**wall-clock budget per feature** placed on the scorecard. If the modeled
-overhead exceeds 5%, the target is raised honestly rather than throttling the
-analyzer blind. *(AI4)*
+output) × tier price`, **plus** the analyzer's (sampled + event-triggered)
+invocation count × per-call input cap, **plus** prompt-cache hit assumptions
+(high on actor SOP prefixes, low on the analyzer's changing trajectory). This
+yields (a) the cost-per-feature envelope, (b) the realistic monitor-overhead %,
+and (c) a **wall-clock budget per feature** on the scorecard. If modeled overhead
+exceeds 5%, the target is raised honestly rather than throttling detection. *(AI4)*
+
+**A/B-scale roll-up (the decisive run must be shown affordable, not just the
+feature).** The per-feature model is multiplied through the pre-registered design:
+`3 arms × n tasks × k repeats × per-task cost of a long-horizon SWE-EVO run`
+(the most expensive task class, and Foundry's per-task cost is *higher* than the
+baseline's because it pays coordination + monitor overhead). `n` follows from the
+MDE + ~21% base rate + target power; `k` from the per-node variance measured in
+§4. The roll-up reports total USD and wall-clock for the decisive run **and the
+budget that funds it**. If the powered run is unaffordable, the design is
+**honestly de-scoped** (smaller detectable margin, or a sequential/stratified
+test) rather than leaving `n`/`k` unstated — under-powering silently would make
+the falsifiability theatre. *(AI-R8-F4)*
 
 ## 9. Optimization (Phase 5) — search space, objective, method
 

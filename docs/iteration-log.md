@@ -168,6 +168,31 @@ deep, real defects the generalist rounds structurally could not.
 architecture.md, governance.md, evaluation.md and targeted updates to agents.md /
 PLAN.md. Re-submitted to a fresh specialist panel for Round 8.
 
+## Round 8 — specialist panel re-review (13 findings: 1 BLOCKER, 7 MAJOR, 5 MINOR)
+
+The three specialists re-reviewed the Round-7 rewrites, hunting for defects the
+fixes *introduced*. Convergence is visible (30 → 13; blockers 7 → 1). Several
+findings are bugs the Round-7 fixes themselves created — the value of re-review.
+
+| # | Sev | Problem | Resolution |
+|---|---|---|---|
+| DS-F1 | BLOCKER | `seq` *assignment* was racy/unspecified (parallel branches share one snapshot; a single-writer `seq_clock` can't be read-incremented concurrently) → equal `seq` falls back to iteration order, reintroducing DS1 | `seq` is now a **total lexicographic tuple** `(superstep_index, node_id, local)`; reducer compares tuples, ties impossible, invariant test. [arch §3](./architecture.md) |
+| DS-F2 | MAJOR | Retry/rebase re-emit could carry equal `seq` → lost update (stale `error`/PASS survives) | Total order from DS-F1: a later-superstep re-emit always outranks the prior write to the same key. [arch §3/§4](./architecture.md) |
+| DS-F3 | MINOR | Idempotency protocol assumed external client-key/requery support universally | Added a **Foundry-side dedup record** (written in the outbox txn) for systems supporting neither. [arch §5](./architecture.md) |
+| SEC-F1 | MAJOR | Deterministic-gate **verdicts** were agent-*claimed* → predicate/admission chain circular against a forged PASS | Verdicts **computed & signed by a trusted gate runner** (agents triage only); WORM/builder accept only attested verdicts; admission verifies runner identity. [gov §1c/§4/§5](./governance.md) |
+| SEC-F2 | MAJOR | Dependency-mirror **vetting authority** unspecified → backdoor via new dependency + dependency-confusion | **Non-agent/HITL mirror-admission** (provenance, namespace reservation, source-build diff); new-dep = HITL change class. [gov §2](./governance.md) |
+| SEC-F3 | MINOR | External scanner-config repo's own change-authority unstated | Separate trust boundary, no agent write/PR path, two-person sign-off, **revision hash in the predicate**. [gov §2/§4](./governance.md) |
+| AI-F1 | MAJOR | Claude-only stack contradicts the "different *family*" judge requirement (tiers ≠ families) | Stack provisions a **second provider family** for high-risk judging + cross-family failover; all docs reconciled. [arch §8](./architecture.md), [PLAN §6](../PLAN.md) |
+| AI-F2 | MAJOR | `pinned_constraints` (never-summarized, pure union) grows unboundedly → overflows the long-horizon runs it protects | **Relevance-scoped + supersedable + cardinality-monitored** (escalate, never silently truncate); per-node injection budget. [arch §8](./architecture.md) |
+| AI-F3 | MAJOR | Event-triggered analyzer can't see under-threshold scope-creep that touches no protected path (yet is eval'd on scope-creep) | Added **sampled passes** + a deterministic **criterion-coverage-delta** trigger; eval now includes an **untriggered held-out set**. [gov §3](./governance.md), [eval §4](./evaluation.md) |
+| AI-F4 | MAJOR | A/B feasibility shown per-feature but never **costed at experiment scale** | Added a full **A/B-scale cost roll-up** (3 arms × n × k × SWE-EVO cost) + honest de-scope rule. [eval §8](./evaluation.md) |
+| AI-F5 | MINOR | "Single known-bad ref proves intent" — overclaim + strawman risk | Criterion fidelity = a **family of non-trivial mutants** (cross-family authored, must pass happy-path); reframed **necessary, not sufficient**. [eval §4](./evaluation.md) |
+| AI-F6 | MINOR | Retrieval-recall ground truth uneven / floor unstated | Split into **mechanical** (static coupling edges) + **human-labeled** (task-relevance, IAA), each with a floor. [eval §4](./evaluation.md) |
+| AI-F7 | MINOR | Baseline parity is a maintenance obligation; the ≥85% threshold was unanchored | Parity is a **CI-checked, manifest-hashed invariant**; thresholds **anchored to measured baseline + margin**. [eval §2/§7](./evaluation.md) |
+
+**Round 8 verdict (solutioner):** all 13 addressed. Re-submitted to a fresh
+specialist panel for Round 9.
+
 ## Loop summary
 
 | Round | Bar | Findings | BLOCKER | MAJOR | MINOR | Verdict |
@@ -179,14 +204,13 @@ PLAN.md. Re-submitted to a fresh specialist panel for Round 8.
 | 5 | design-doc | 2 | 0 | 1 | 1 | material remain |
 | 6 | design-doc | 1 | 0 | 0 | 1 | **no material** |
 | 7 | **implementation-ready (3 specialists)** | 30 | 7 | 16 | 7 | material remain |
-| 8 | implementation-ready (3 specialists) | _running_ | | | | _pending_ |
+| 8 | implementation-ready (3 specialists) | 13 | 1 | 7 | 5 | material remain |
+| 9 | implementation-ready (3 specialists) | _running_ | | | | _pending_ |
 
-Total so far: **67 findings raised and resolved** across two bars. The
-design-doc loop converged at Round 6; raising the bar to implementation-readiness
-with specialist critics immediately surfaced 30 deeper defects (7 of them
-blockers), which is the expected behavior of a genuinely higher standard — and
-the reason the bar was raised. This log is the honest record the process
-produced, not a marketing artifact.
+Total so far: **80 findings raised and resolved** across two bars. The design-doc
+loop converged at Round 6; the implementation-readiness loop is converging
+(30 → 13, blockers 7 → 1). This log is the honest record the process produced,
+not a marketing artifact.
 
 ## Conformance mapping — plan vs. industry practice (2024–2026)
 

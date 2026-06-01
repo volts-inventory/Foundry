@@ -129,6 +129,8 @@ from typing import Annotated, TypedDict
 from pydantic import BaseModel
 from enum import Enum
 
+Seq = tuple[int, str, int]         # (superstep_index, node_id, local) — see "Seq" below
+
 class Artifact(BaseModel):
     kind: str
     uri: str                       # content-addressed store ref — GLOBALLY UNIQUE identity
@@ -136,17 +138,18 @@ class Artifact(BaseModel):
     task_id: str | None = None
     version: int = 1
     supersedes: str | None = None
-    seq: int                       # monotonic logical clock (see below)
+    seq: Seq                       # TOTAL causal order (no ties) — see "Seq"
 
 class GateResult(BaseModel):
     name: str
     status: str                    # "pass" | "fail" | "error"  (error = infra failure, not a verdict)
     decision_deterministic: bool
     execution_deterministic: bool
+    runner_attestation: str | None # for deterministic gates: signed by the trusted runner, not the agent (§ governance §1c)
     findings: list[str] = []
     retries: int = 0
     run_against: str               # per-branch: "task/<id>"; integrated: tree_sha (see §4)
-    seq: int                       # monotonic; resolves latest-wins by CAUSALITY, not iteration order
+    seq: Seq                       # TOTAL causal order; resolves latest-wins by CAUSALITY, never iteration order
 
 class LogRef(BaseModel):           # handle to out-of-band data (history/large artifacts)
     uri: str                       # append-only store / object store
@@ -157,9 +160,8 @@ class FactoryState(TypedDict):
     request: str                                              # single-writer
     route: str | None                                         # single-writer (triage)
     phase: str                                                # single-writer (supervisor)
-    seq_clock: int                                            # single-writer; monotonic source for seq
     required_capabilities: Annotated[list[str], _union]       # fan-in, deduped, commutative
-    pinned_constraints: Annotated[list[dict], _union_by_id]   # fan-in; NEVER summarized (see §8)
+    pinned_constraints: Annotated[list[dict], _merge_constraints]  # fan-in; relevance-scoped, supersedable (§8)
     artifacts: Annotated[list[Artifact], _merge_by_uri]       # fan-in, set-union by uri (commutative)
     gates: Annotated[list[GateResult], _merge_gates]          # fan-in, max-by-seq per (name, run_against)
     tasks: Annotated[list[dict], _union_by_id]                # fan-in, keyed (commutative)
@@ -180,17 +182,34 @@ def _merge_gates(a, b):                        # gates: LATEST BY seq per (name,
     m = {}
     for g in (a or []) + (b or []):
         k = (g.name, g.run_against)
-        if k not in m or g.seq > m[k].seq:     # causal latest, NOT iteration order
+        if k not in m or g.seq > m[k].seq:     # TOTAL tuple order — ties are impossible
             m[k] = g
     return list(m.values())
 ```
 
-Why each fix matters (maps to Round-7 findings):
+**Seq — a total, race-free causal order.** `seq` is **not** a shared mutable
+counter (which parallel branches, sharing one immutable input snapshot, could not
+read-increment without a race). It is the lexicographic tuple
+`(superstep_index, node_id, local)`:
 
-- **`gates` is max-by-`seq`, not last-iterated** — concurrent or batched gate
-  writes resolve to the causally-newest verdict, so a real PASS can't be masked
-  by a stale FAIL (or vice-versa) due to fold order. `seq` is drawn from the
-  single-writer `seq_clock`. *(DS1, DS8)*
+- `superstep_index` — provided by the LangGraph runtime, monotonic across the
+  run and **strictly greater in any later superstep** (so a retry or rebase
+  re-emission, which happens in a later superstep, always outranks the prior
+  write to the same key);
+- `node_id` — the deterministic id of the emitting node, breaking ties between
+  *siblings* in the *same* superstep;
+- `local` — a per-node monotonic counter for multiple emissions by one node.
+
+Because the triple is unique per emission, `_merge_gates`'s comparison is
+**total**: there is no equal-`seq` case and therefore no fallthrough to fold
+order. A reducer invariant test asserts that, for any fixed key, the surviving
+element is independent of input order. *(DS1, DS2, DS8 — closes the residual seq race)*
+
+Why each fix matters:
+
+- **`gates` is max-by-`seq` over a total order**, so concurrent/batched/retried
+  gate writes resolve to the causally-newest verdict; a real PASS can't be masked
+  by a stale FAIL (or vice-versa) regardless of fold order. *(DS1, DS2, DS8)*
 - **`status` distinguishes `error` from `fail`** — an infra crash is not a
   verdict; the join handles it separately (§5). *(DS7)*
 - **All list channels are keyed set-unions** (`tasks` by id, `actions` by
@@ -243,14 +262,22 @@ WORM audit) is handled by a **transactional outbox**, not by hope.
 - **A separate relay** drains the outbox to external systems (git/PR/tag/deploy)
   and to the **append-only WORM audit store**, at-least-once, each carrying its
   `idempotency_key`. *(DS3)*
-- **Effectful tools are idempotent at the external boundary.** The
-  `idempotency_key` is **transmitted to and stored by the external system**
-  (GitHub: embedded in branch/tag name, PR marker, or client idempotency token;
-  deploys: server-side idempotency token). The protocol is **intent-log → act →
-  confirm-log**. On resume the node **re-queries the external system *by
-  idempotency key***; if the system cannot answer authoritatively, the node
-  **fails to the human** (never assumes done or not-done). This closes the
-  two-generals window to a single, human-mediated boundary. *(DS2)*
+- **Effectful tools are idempotent at the external boundary**, via one of three
+  paths in priority order: *(DS2)*
+  1. **External client key** — the `idempotency_key` is transmitted to and
+     stored by the external system (deploy idempotency token; GitHub client
+     token); resume **re-queries by key**.
+  2. **Embedded marker** — where no client key exists but the effect is
+     queryable, the key is embedded (branch/tag name, PR marker commit) and
+     resume re-derives existence.
+  3. **Foundry-side dedup record** — for effects whose system supports *neither*
+     (fire-and-forget webhooks, notifications, registries with no by-key lookup),
+     the relay writes a **local dedup row in the same outbox transaction** and
+     consults it before emitting, giving effectively-once delivery (true
+     exactly-once being impossible). The local record is the dedup authority.
+
+  The protocol is **intent-log → act → confirm-log**; if none of the three can
+  establish state on resume, the node **fails to the human** (never assumes). *(DS2, DS3-F3)*
 - **Checkpointer:** `PostgresSaver` (prod) / `SqliteSaver` (dev).
 - **Time-travel** rewinds *internal state only*; forking creates a **new run ID**,
   never mutates the original WORM record, and replaying past an effectful node
@@ -299,11 +326,22 @@ fixes. Two additional, finding-driven controls:
 Long-horizon success lives or dies here, so the contract is mechanistic, not
 "summarize history + embed code":
 
-- **Pinned, never-summarized state.** ADR decisions, rejected alternatives,
-  invariants/constraints, high-risk acceptance criteria, and ownership
-  constraints live in the `pinned_constraints` channel and are injected
-  **verbatim** into every node that could violate them. Only narrative/event
-  history is summarized. *(AI2)*
+- **Pinned, never-summarized — but bounded and scoped.** ADR decisions, rejected
+  alternatives, invariants, high-risk acceptance criteria, and ownership
+  constraints live in `pinned_constraints` and are injected **verbatim** (never
+  summarized) — but the set is **not** an unbounded monotonic union (which would
+  overflow context on exactly the long-horizon runs it protects). Three controls
+  keep it bounded: *(AI2, AI-R8-F2)*
+  - **Relevance scoping:** each node receives only the constraints relevant to
+    its active task/module (resolved via the `ownership_map` + retrieval graph),
+    not the global set, under an explicit **per-node injection token budget**.
+  - **Supersession:** `_merge_constraints` retires a constraint by id when a
+    later ADR reverses it (`supersedes`), so the set reflects current truth, not
+    full history.
+  - **Cardinality monitor:** a deterministic monitor escalates to HITL when the
+    *relevant* pinned set for a node approaches its injection budget — the set is
+    **never silently truncated** (silent truncation is indistinguishable from the
+    summarization this channel forbids).
 - **Retrieval is a measured contract, not vibes.** Symbol index (tree-sitter/LSP)
   **plus the call/def + dependency graph** (impact analysis) — not embedding
   similarity alone — so cross-file/implicit coupling is surfaced. A
@@ -323,12 +361,19 @@ Long-horizon success lives or dies here, so the contract is mechanistic, not
   Audit is honestly framed as an **immutable record of actual decisions and
   inputs**, and replay reproduces *internal control state*, not bitwise-identical
   LLM outputs. *(AI5)*
-- **Model pinning, tiers, failover.** Tiers T1/T2/T3 with pinned IDs;
-  **T1 judgment nodes never auto-downgrade** (breach escalates). Failover is
-  stated honestly: **intra-family** outage handling is retry/backoff/queue then
-  **pause-and-escalate** (a same-weights "alternate" is not real redundancy);
-  **cross-family** failover, where used, carries **per-model judge calibration**
-  and records the serving model per node in the manifest. *(AI9)*
+- **Model families vs tiers, pinning, failover.** Tiers T1/T2/T3 are *capability
+  levels within the primary family* (Claude Opus/Sonnet/Haiku) — they are **not**
+  different families. Because decorrelating judge blind spots requires a genuinely
+  **different family** (shared training lineage shares blind spots), the stack
+  provisions a **second model family from a second provider**, used specifically
+  for (a) **high-risk review/QA judging** and cross-family disagreement triggers
+  ([evaluation.md §4](./evaluation.md)) and (b) **cross-family failover** of T1
+  nodes on a primary-provider outage. The serving family+model is recorded per
+  node in the manifest, and **each judge model is calibrated independently**.
+  Pinned IDs; **T1 judgment nodes never auto-downgrade in tier** (breach
+  escalates); intra-family there is no real same-weights alternate, so a
+  single-provider outage without the second family is retry/backoff then
+  **pause-and-escalate**. *(AI-R8-F1, AI3, AI9)*
 - **Prompt caching** of stable SOP/system prefixes and pinned reference
   artifacts is the primary token-cost lever (low cache benefit for the analyzer,
   which is therefore event-triggered — [governance.md §3](./governance.md)).

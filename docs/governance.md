@@ -32,7 +32,9 @@ Per the re-verification rule, any code change re-keys integrated gates on a new
 | **(Admission — not a graph gate)** | Non-agent admission controller | deployed digest | deterministic policy | At deploy: signature verifies **and** all required gates PASS for *this exact digest/commit/builder* (§5) |
 
 Nine in-graph gates (Spec, Design, Build, Test, Security, Audit, Supply-chain,
-E2E, Release) plus a deploy-time **admission** control.
+E2E, Release) plus a deploy-time **admission** control. The "Owner" of a
+deterministic gate is the agent that *triages* findings; the authoritative
+**verdict** is computed and signed by the trusted runner, not the agent (§1c).
 
 ### 1a. Execution is not always deterministic — and that's handled
 
@@ -61,6 +63,23 @@ E2E, Release) plus a deploy-time **admission** control.
   semantic coverage; tags are not trusted blindly. *(AI6, SEC8)*
 - **Review of test *and oracle-config* diffs** (see §3 deterministic monitors).
 
+### 1c. Deterministic gate *verdicts* are computed by trusted infra, not claimed by agents
+
+The attest→admit chain (§4–§5) treats "all gates PASS" as ground truth, so the
+verdict bit cannot be an agent claim. For every **deterministic** gate — Build,
+**Test, Security, Audit, Supply-chain, E2E** — the authoritative
+`GateResult.status` is **computed by the same trusted runner that executes the
+scan/test against the pinned external config, and signed with that runner's
+identity** (`runner_attestation`, [architecture.md §3](./architecture.md)). The
+gate-owning agent only *triages and explains* findings; it does **not** emit the
+verdict. The WORM appender and the builder accept a deterministic-gate verdict
+into the outbox/predicate **only** when it carries a valid runner attestation,
+and the admission controller (§5) **verifies the runner identity on each gate
+record**, not merely that a `pass` row exists. This closes the circularity where
+a compromised/colluding agent could forge a `pass` that the predicate then
+truthfully signs. Only the LLM-judgment gates (Spec, Design) are agent/human
+verdicts by nature — and those are defended by the independent critic + HITL. *(SEC-R8-F1)*
+
 ## 2. The five-plane guardrail model
 
 ### Policy plane
@@ -76,7 +95,11 @@ E2E, Release) plus a deploy-time **admission** control.
   a **protected, repo-external, run-immutable** path agents cannot write; any new
   suppression/floor/allowlist edit is a **first-class finding** routed to HITL and
   counted by a deterministic monitor. Scanners run from the pinned external
-  config, so agent diffs cannot weaken them. *(SEC2)*
+  config, so agent diffs cannot weaken them. *(SEC2)* **The external
+  scanner-config repository is under a separate trust boundary with no agent write
+  or PR path** (human-only / distinct credentialed owner); changes require
+  two-person sign-off, and its **current pinned revision hash is recorded in the
+  evidence pack and the SLSA predicate**, so a config swap is detectable. *(SEC-R8-F3)*
 
 ### Execution plane
 - All agent-written code runs in sandboxes (containers; Firecracker/gVisor for
@@ -85,6 +108,14 @@ E2E, Release) plus a deploy-time **admission** control.
   agent-authored code or third-party install/`postinstall` script runs while task
   credentials are present. Dependencies are pulled through an **internal mirror
   of pre-vetted, hash-pinned artifacts**, so builds need no open egress. *(SEC4)*
+- **Mirror admission is a non-agent / HITL-gated control** (hash-pinning gives
+  reproducibility, not trustworthiness, of a *newly* admitted package). Any new
+  package or version entering the mirror passes a vetting step **distinct from the
+  in-repo lockfile policy check**: provenance/signature verification,
+  **namespace reservation against dependency-confusion / typosquat**, and an
+  optional source-build-and-diff against upstream. A **new-dependency request is a
+  first-class, HITL-acknowledged change class** surfaced in the evidence pack —
+  not a lockfile line the Supply-chain gate waves through. *(SEC-R8-F2)*
 - Egress is default-deny **through per-destination proxies with payload/size
   anomaly detection** — host allowlisting alone does not stop exfil over
   allowed channels (registry, git remote, model provider). The sandbox is treated
@@ -125,16 +156,25 @@ E2E, Release) plus a deploy-time **admission** control.
     *deterministic* trip** forcing HITL review (not an analyzer judgment). *(SEC3, AI10, SEC2)*
   - *Cost* — `BudgetLedger` thresholds; *Policy* — OPA deny-count;
     *Retry-until-green* — verdict oscillation.
-- **Sandboxed LLM analyzer (semantic color only, event-triggered):** runs
-  read-only in its **own toolless sandbox**, **triggered by a deterministic-monitor
-  signal or a write to oracle/gate/criteria/config paths** — *not* per node — and
-  reads a **capped** slice. It consumes **deterministically-extracted structured
-  features**, with any untrusted trace prose clearly delimited as *data, never
+  - *Pinned-constraint pressure* — the relevant `pinned_constraints` set for a
+    node approaching its injection budget escalates to HITL (never silent
+    truncation, [architecture.md §8](./architecture.md)). *(AI-R8-F2)*
+  - *Criterion-coverage delta* — a feature's implemented scope **shrinking**
+    relative to its acceptance criteria is a deterministic trigger (catches quiet
+    scope-reduction that touches no protected path). *(AI-R8-F3)*
+- **Sandboxed LLM analyzer (semantic color only):** runs read-only in its **own
+  toolless sandbox**, fired by (a) a deterministic-monitor signal, (b) a write to
+  oracle/gate/criteria/config paths, **and (c) a low-rate *sampled* pass over a
+  random subset of ordinary supersteps** — so semantic reward-hacking that stays
+  under every deterministic bound and touches no protected path is still
+  observed. It reads a **capped** slice of **deterministically-extracted
+  structured features**, with untrusted trace prose delimited as *data, never
   instructions*; it emits **advisory** flags only and cannot approve work or
-  override a deterministic trip. Its precision/recall — **including against
-  prompt-injection-of-the-monitor** — is evaluated ([evaluation.md §4](./evaluation.md)),
-  and its token cost is metered as `monitor_overhead_usd`. Event-triggering is
-  what keeps overhead bounded *and* keeps it reading at the right moments. *(SEC3, AI4, AI10)*
+  override a deterministic trip. Precision/recall — **including against
+  prompt-injection-of-the-monitor and on an *untriggered* held-out set** — is
+  evaluated ([evaluation.md §4](./evaluation.md)); its sampled+triggered
+  invocation count and token cost are sized into the per-feature cost model
+  ([evaluation.md §8](./evaluation.md)) and metered as `monitor_overhead_usd`. *(SEC3, AI4, AI10, AI-R8-F3)*
 
 ## 4. Supply-chain trust root (build, sign, attest)
 
@@ -154,10 +194,12 @@ boundary is enforced on the build *inputs*, not just the build *environment*:
   is the CI workload's OIDC token. OIDC trust/federation policy is itself IaC and
   is in the policy-plane's HITL-required set (§2). *(SEC5)*
 - **Provenance predicate binds gate-state:** the signed in-toto/SLSA predicate
-  records source commit, builder identity, hermetic inputs, materials, **and the
-  WORM-anchored, hash-chained gate results keyed to this `tree_sha`** — so the
-  signature attests *both* provenance *and* "passed all required Foundry gates."
-  Target **SLSA Build L3**. *(SEC7)*
+  records source commit, builder identity, hermetic inputs, materials, the
+  **pinned external scanner-config revision hash**, **and the WORM-anchored,
+  hash-chained gate results keyed to this `tree_sha` — each carrying the trusted
+  runner's attestation (§1c)** — so the signature attests *both* provenance *and*
+  "passed all required Foundry gates, as computed by trusted infra." Target
+  **SLSA Build L3**. *(SEC7, SEC-R8-F1, SEC-R8-F3)*
 - **SBOM pass criteria:** no critical/high-CVE dependency (configurable floor),
   no disallowed license, full resolution (no unpinned components).
 
@@ -167,10 +209,11 @@ A signature proves provenance, not that deployment is authorized. Therefore:
 
 - After the human Release sign-off, a **non-agent admission controller**
   cosign-verifies the signature **and** evaluates a policy: *this exact digest was
-  built by the trusted builder, from this commit, and all required gates PASS for
-  it in the WORM store*. Only then does a **separate, least-privileged, non-agent
-  deployer** ship. An agent that somehow gets an unverified or non-gate-passing
-  tree built cannot reach production. *(SEC7, SEC5)*
+  built by the trusted builder, from this commit; all required gates PASS for it
+  in the WORM store **with valid trusted-runner attestations (§1c)**; and the
+  scanner-config revision matches the pinned hash*. Only then does a **separate,
+  least-privileged, non-agent deployer** ship. An agent that gets an unverified,
+  forged-verdict, or non-gate-passing tree built cannot reach production. *(SEC7, SEC5, SEC-R8-F1)*
 
 ## 6. Human-in-the-loop is evidence-backed, not a rubber stamp
 

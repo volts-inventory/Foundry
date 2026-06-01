@@ -64,9 +64,11 @@ contracts in [docs/agents.md](./docs/agents.md).
 | **6. Operations** | DevOps/SRE, Release Manager *(+ non-agent: trusted builder, admission controller, deployer)* | CI/CD pipeline, IaC *proposal*, observability config, deploy/rollback, SLSA-attested signed release (gate-state bound) |
 | **7. Governance / Meta** | Orchestrator/Supervisor, Guardian (deterministic monitors + event-triggered analyzer), Budget Controller, Human Liaison | Routing, policy enforcement, cost ledger, convergence bound, escalations |
 
-> **Non-agent components** (trusted builder, deploy-time admission controller,
-> least-privileged deployer, WORM audit appender) are deliberately *outside*
-> agent control — agents propose their inputs but never are these components.
+> **Non-agent components** (trusted builder, **trusted gate runner** that computes
+> & signs deterministic-gate verdicts, deploy-time admission controller,
+> least-privileged deployer, WORM audit appender) are deliberately *outside* agent
+> control — agents propose inputs and triage findings but never are these
+> components, and never bless their own verdicts.
 
 Why both **senior and junior** engineers? Seniors do decomposition, scaffolding,
 the hard parts, *review*, and *integration/conflict resolution* — juniors
@@ -147,8 +149,9 @@ mapped to locations in [docs/architecture.md §8](./docs/architecture.md).
 | Language | Python 3.12+ | Ecosystem fit for LangGraph/LangChain |
 | Orchestration | **LangGraph** (`StateGraph`, reducer channels, checkpointers, interrupts) | Graph-native; durable state; HITL; production-proven |
 | State schema | `TypedDict` + reducers for the graph; Pydantic v2 for artifact values | Reducers compose with LangGraph's channel model; values stay validated |
-| Models | Claude, **pinned IDs, tiered by role** — T1 (Opus-class) architecture/review/security, T2 (Sonnet-class) implementation, T3 (Haiku-class) routing | Cost/quality match; **T1 never auto-downgrades** — a budget breach there escalates |
-| Model resilience | Same-tier failover on rate-limit/unavailability; backoff | No silent cross-tier-down on high-stakes nodes |
+| Models | Claude, **pinned IDs, tiered by role** — T1 (Opus-class) architecture/review/security, T2 (Sonnet-class) implementation, T3 (Haiku-class) routing — **plus a second provider family** for high-risk judging and cross-family failover | Cost/quality match; **T1 never auto-downgrades**; Claude tiers aren't different *families*, so judge decorrelation needs a genuinely different lineage |
+| Model resilience | Same-tier retry/backoff; **cross-family failover** of T1 on a primary-provider outage (per-model calibration) | No silent cross-tier-down on high-stakes nodes; real redundancy needs a second family |
+| Gate verdicts | **Trusted gate runner (non-agent)** computes & signs deterministic-gate verdicts | Agents triage; they cannot forge a PASS into the predicate ([docs/governance.md §1c](./docs/governance.md)) |
 | Tools | MCP servers for filesystem, git, test runners, CI, package audit | Standard interface; least-privilege per role via OPA |
 | Code execution | Sandboxed runners (containers; Firecracker/gVisor) | Never run agent-written code on the host |
 | Supply chain | **Trusted hermetic CI builder** (outside agent control) + keyless OIDC/sigstore signing + SLSA L3 provenance | Attestation from an agent-controlled sandbox is worthless; keys air-gapped from sandboxes |
@@ -236,7 +239,11 @@ Each phase has explicit exit criteria ([docs/roadmap.md](./docs/roadmap.md)):
 - **Context loss across hand-offs (the real long-horizon killer)** — Mitigation: a never-summarized `pinned_constraints` channel, retrieval over the call/def graph (not similarity alone) with a measured recall floor, a `need-context` escape, and a handoff-fidelity eval.
 - **Reward hacking / gate-gaming** — Mitigation: separated + cross-family test authorship, **criterion *fidelity* (negative oracles)**, **run-immutable repo-external scanner config**, deterministic oracle/config-edit monitors, mutation testing, semantic loop signature.
 - **Correlated LLM judges / self-preference** — Mitigation: measured judge↔implementer error correlation + self-preference probes; different model *family* on high-risk review/QA; deterministic oracles where possible.
-- **Concurrency correctness** — Mitigation: commutative, `None`-safe, `seq`-ordered reducers (gates max-by-`seq`); precise `tree_sha`; `Send` fan-out with per-branch `error` status + deadlines; superstep-boundary budget enforcement.
+- **Concurrency correctness** — Mitigation: commutative, `None`-safe reducers with a **total `seq` order** `(superstep_index, node_id, local)` so gate verdicts resolve by causality, never fold order; precise `tree_sha`; `Send` fan-out with per-branch `error` status + deadlines; superstep-boundary budget enforcement.
+- **Forged gate verdicts / agent-authored trust inputs** — Mitigation: deterministic-gate **verdicts computed & signed by a trusted runner** (agents triage only) and verified at admission; dependency-mirror **admission vetting** (namespace reservation vs dependency-confusion); external scanner-config repo under a **separate trust boundary** with its revision hash in the predicate.
+- **Context channel overflow** — Mitigation: `pinned_constraints` is relevance-scoped + supersedable + cardinality-monitored (escalate, never silently truncate), not an unbounded union.
+- **Single-provider fragility / correlated judges** — Mitigation: a **second provider family** for high-risk judging and real failover.
+- **A/B feasibility** — Mitigation: the decisive A/B is **costed at experiment scale** (3 arms × n × k × SWE-EVO cost) and honestly de-scoped if the powered run is unaffordable, never silently under-powered.
 - **Dual-write / idempotency on resume** — Mitigation: transactional outbox (checkpoint+ledger+audit in one txn); idempotency keys **stored by the external system**; re-query-by-key on resume, fail-to-human if unknown.
 - **Supply-chain (agent-authored build) & deploy** — Mitigation: build config as a high-privilege artifact behind the Supply-chain gate; strongly-hermetic no-egress builder; gate-state bound in the SLSA predicate; deploy-time admission + non-agent deployer; IaC policy-as-code.
 - **HITL rubber-stamp** — Mitigation: independent, non-agent evidence pack; two-person sign-off on trust-root changes.

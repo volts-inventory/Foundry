@@ -99,11 +99,29 @@ grounded. So the verdict is grounded by gate class: *(SEC-R10-F1)*
   controls) orchestrates execution and collects outcomes over a **sealed result
   channel in a separate FS namespace the agent code cannot intercept** (exit
   codes / JUnit XML emitted *inside* the agent process are treated as untrusted).
-  Zone B **independently substitutes the known-bad/mutant references and verifies
-  the result digest differs** (pass-on-real, fail-on-known-bad), so the harness
-  cannot fake the discrimination. Until the *observation* is grounded outside
-  agent-controlled code, the attestation rests on a forgeable input — so this is a
-  hard requirement, not an option.
+  Zone B **independently substitutes known-bad/mutant references and verifies the
+  result digest differs** (pass-on-real, fail-on-known-bad). But the test is still
+  agent-authored, so it could pass-on-real / fail-on-known-bad by **fingerprinting
+  the mutant's *identity*** (a file/symbol hash, or the syntactic presence of the
+  fix) rather than exercising *behavior* — testing nothing while satisfying the
+  flip. Two reinforcing controls close this: *(SEC-R11-F1)*
+  - **Held-out mutants:** zone B's grounding substitution is drawn from a
+    **rotating held-out mutant family never exposed to the test-authoring model
+    family** (secret until after attestation), so a fingerprint cannot be
+    pre-baked against a known substitution.
+  - **Behavioral-invariance check:** zone B runs the test against a **family** of
+    independently-authored held-out behavioral mutants **and** against
+    **behavior-preserving perturbations of the real tree** (renames, path/hash
+    changes, equivalent refactors). The verdict is accepted only if PASS is
+    **invariant under behavior-preserving change** and FAIL holds **across the
+    mutant family** — a test that keys on identity rather than behavior flips on a
+    behavior-preserving perturbation and is **rejected**.
+
+  This restores the needed property: the verdict is a function of *behavior
+  observed by trusted infra*, not of agent-controllable environment identity.
+  Until the *observation and the discriminator* are both grounded outside
+  agent-controlled code, the attestation rests on a forgeable input — so these are
+  hard requirements, not options.
 
 The signature is **bound to its inputs** — `runner_attestation` signs
 `(gate_name, tree_sha, scanner_config_revision_hash, status, results_digest)` —
@@ -295,10 +313,25 @@ A signature proves provenance, not that deployment is authorized. Therefore:
   exceeding the §1a N=2 quarantine budget) is **not** latched the same way: because
   the tree is genuinely correct, there is an explicit bounded recovery — a
   **quorum of trusted-runner re-runs that all PASS on the identical
-  `tree_sha`+config**, **two-person admission override, WORM-logged** — so a flake
-  cannot *permanently* brick a correct digest. `error`-status records (infra
-  failure) never latch at all. This keeps the security guarantee for
-  input-relevant FAILs while preserving liveness. *(SEC7, SEC5, SEC-R8-F1, DS-R9-F1, DS-R10-F1)*
+  `tree_sha`+config**, **two-person admission override, WORM-logged**. `error`-status
+  records (infra failure) never latch at all.
+- **The latch is monotonic and WORM-history-scoped, not latest-record.** Admission
+  evaluates the **full WORM history** for a digest: once a **stable FAIL** record
+  exists for `D`, `D` is disqualified **until an explicit override**, regardless of
+  any later PASS. A later recovery-quorum (or flaky) PASS **never auto-clears** a
+  latched digest — note the live `gates` reducer (latest-by-`seq`) will legitimately
+  show PASS and let in-graph routing proceed toward Release again, but **admission
+  holds `D` latched** until the override; that store-level disagreement (routing
+  liveness vs admission safety) is intentional. So the core policy reads: *all
+  required gates PASS for `D` in WORM **and no un-overridden stable FAIL exists for
+  `D`***. *(DS-R11-F1)*
+- **Overrides are record-scoped, not digest-scoped.** A two-person override targets
+  a **specific transient `(gate_name, tree_sha, results_digest)`** record (justified
+  by its recovery quorum); admission then **re-evaluates the full gate set**, so a
+  **co-resident stable FAIL** (e.g. an Audit/CVE FAIL on the same digest) remains
+  latched. Clearing a flake can never inadvertently clear a genuine stable FAIL.
+  This keeps the security guarantee for input-relevant FAILs while preserving
+  liveness. *(SEC7, SEC5, SEC-R8-F1, DS-R9-F1, DS-R10-F1, DS-R11-F1, DS-R11-F2)*
 
 ## 6. Human-in-the-loop is evidence-backed, not a rubber stamp
 

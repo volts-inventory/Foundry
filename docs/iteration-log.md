@@ -234,6 +234,20 @@ that closing one trust seam exposed the next one in.
 **Round 10 verdict (solutioner):** all 8 addressed. Re-submitted to a fresh
 specialist panel for Round 11.
 
+## Round 11 — specialist panel re-review (3 findings: 0 BLOCKER, 1 MAJOR, 2 MINOR)
+
+**Two of three lenses clean** (AI-agents NO MATERIAL; DS only MINOR). The security
+lens found the next seam in the execution-gate grounding.
+
+| # | Sev | Problem | Resolution |
+|---|---|---|---|
+| SEC-F1 | MAJOR | The execution-gate discriminator is still agent-influenceable: an agent-authored test can **fingerprint the substituted mutant by *identity*** (file hash, presence of the fix) rather than behavior, passing zone B's digest-flip while testing nothing | Zone B draws mutants from a **rotating held-out set unknown to the test-authoring family** **and** enforces a **behavioral-invariance check** (PASS invariant under behavior-preserving perturbation; FAIL across a mutant family) — a fingerprinting test is rejected. [gov §1c](./governance.md), [eval §4](./evaluation.md) |
+| DS-F1 | MINOR | The admission "all gates PASS in WORM" policy was silent on a coexisting stable FAIL + later flaky PASS for one digest | Latch made **monotonic + WORM-history-scoped**: a stable FAIL disqualifies until override; a later PASS never auto-clears (live-channel vs admission disagreement is intentional). [gov §5](./governance.md) |
+| DS-F2 | MINOR | Override scope unspecified → a digest-level override could clear a co-resident stable FAIL | Overrides are **record-scoped** to a specific transient `(gate, tree_sha, results_digest)`; admission re-evaluates the full set; co-resident stable FAILs stay latched. [gov §5](./governance.md) |
+
+**Round 11 verdict (solutioner):** all 3 addressed. Re-submitted to a fresh
+specialist panel for Round 12.
+
 ## Loop summary
 
 | Round | Bar | Findings | BLOCKER | MAJOR | MINOR | Verdict |
@@ -248,13 +262,15 @@ specialist panel for Round 11.
 | 8 | implementation-ready (3 specialists) | 13 | 1 | 7 | 5 | material remain |
 | 9 | implementation-ready (3 specialists) | 9 | 0 | 3 | 6 | material remain |
 | 10 | implementation-ready (3 specialists) | 8 | 1 | 2 | 5 | material remain |
-| 11 | implementation-ready (3 specialists) | _running_ | | | | _pending_ |
+| 11 | implementation-ready (3 specialists) | 3 | 0 | 1 | 2 | material remain |
+| 12 | implementation-ready (3 specialists) | _running_ | | | | _pending_ |
 
-Total so far: **97 findings raised and resolved** across two bars. The deeper the
-specialists probe the trust root, the more each fix exposes the next seam in
-(RCE→signature → results-stream forgery → …) — characteristic of hardening a hard
-problem. One specialist returned NO MATERIAL this round. This log is the honest
-record the process produced, not a marketing artifact.
+Total so far: **100 findings raised and resolved** across two bars. Convergence at
+the higher bar is strong (30 → 13 → 9 → 8 → 3; blockers 7 → 1 → 0 → 1 → 0; majors
+16 → 7 → 3 → 2 → 1), with the AI-agents and distributed-systems lenses now
+effectively clean and only the security lens still finding one deeper trust-root
+seam per round. This log is the honest record the process produced, not a
+marketing artifact.
 
 ## Conformance mapping — plan vs. industry practice (2024–2026)
 

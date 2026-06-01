@@ -67,11 +67,16 @@ A vague A/B rigs itself; this one is specified so it can actually fail. *(AI1)*
   tiers are *not* different families), or cross-family disagreement triggers. *(AI3, AI-R8-F1)*
 - **Criterion fidelity (necessary, not sufficient):** for each high-risk
   criterion, the bound test is run against a **family of independently-authored,
-  non-trivial known-bad variants** (tied to the mutation-testing apparatus, and
-  authored **cross-family** from the test author). A variant counts only if it
-  **passes the build and the criterion's happy-path test but fails the intent
-  assertion** (guards against strawman known-bads). This is necessary evidence of
-  intent fidelity, **not proof** — a single mutant never proves intent capture. *(AI6, SEC8, AI-R8-F5)*
+  non-trivial known-bad variants** (tied to the mutation-testing apparatus,
+  authored **cross-family** from the test author, and drawn from a **rotating
+  held-out set kept secret from the test-authoring family** until after
+  attestation). A variant counts only if it **passes the build and the criterion's
+  happy-path test but fails the intent assertion**. The discriminator also
+  enforces **behavioral invariance** — PASS must survive behavior-preserving
+  perturbations of the real tree (renames/path/hash changes) and FAIL across the
+  mutant family — so a test that keys on mutant *identity* rather than *behavior* is
+  rejected ([governance.md §1c](./governance.md)). This is necessary evidence of
+  intent fidelity, **not proof** — a single mutant never proves intent capture. *(AI6, SEC8, AI-R8-F5, SEC-R11-F1)*
 - **Handoff fidelity:** inject known requirements at intent and measure how many
   **survive** as faithful tests at the Test gate — a direct measure of the
   telephone-game loss the artifact-passing architecture is meant to prevent. *(AI6)*

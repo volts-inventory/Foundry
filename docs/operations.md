@@ -42,7 +42,8 @@ The design pauses constantly (HITL, budget, mirror admission, non-convergence), 
 RunStatus = {
   state: running | paused | wedged | failed | done,
   pause_reason: hitl_design | hitl_release | budget | mirror_admission |
-                non_convergence | monitor_trip | trusted_component_down | None,
+                non_convergence | monitor_trip | trusted_component_down |
+                latched_by_sibling_fork | None,
   awaiting: who/what (e.g. "two-person release sign-off"),
   last_progress: (seq, wall_clock_ts),
   expected_next_transition_deadline: ts
@@ -53,9 +54,23 @@ RunStatus = {
   by `expected_next_transition_deadline` and the state is not a legitimate
   `paused` reason — distinct from the per-branch deadlines in
   [architecture.md §5](./architecture.md), which catch a single hung branch.
+- **Deadline derivation (not a static constant).** A fixed deadline is either noisy
+  (false `wedged` on slow nodes) or slow (late detection on fast ones), because
+  adapter inner-loop latency, cross-family failover backoff (§4), and runner
+  queueing (§6) vary by node type. Derive it per node type from a maintained
+  latency distribution: `p99(node_type) + provider-backoff allowance + expected
+  queue-wait`, **refreshed when a node enters a known-slow state** (e.g. failover,
+  backpressure). Distinguish **"slow but progressing"** — an adapter heartbeat or
+  partial-progress marker advances `last_progress` even without a superstep — from
+  **"no heartbeat"**, so legitimate provider backoff is not misread as `wedged`.
+  Only the no-heartbeat case past the derived deadline escalates.
 - A legitimately-paused run (e.g. awaiting HITL) shows `$0/hr` and a clear
   `awaiting`; a wedged run is alerted. This is the most common Day-2 question and
-  it now has a machine-readable answer. *(SRE-F2.)*
+  it now has a machine-readable answer.
+- **`latched_by_sibling_fork`** is set when a run pauses because another fork of the
+  same work **stable-FAILed the shared digest**: the latch is then explained
+  operationally in run status, rather than surfacing only at deploy-admission.
+  *(SRE-F2.)*
 
 ## 3. Stateful-store availability, backup, and corruption recovery
 
@@ -98,6 +113,17 @@ their *availability* a fleet-wide concern:
   not redesign.
 - **Per-component availability target + runbook**; an outage alert; explicit
   "fleet paused, not failed" semantics so budget isn't burned during the outage.
+- **Second-family capacity reservation.** T1 failover and always-on high-risk
+  judging ([architecture.md §8](./architecture.md)) both shift load onto a *second*
+  provider family with its own rate limits and prices. Nothing currently reserves
+  that capacity, so a primary outage fleet-stalls on the secondary's `429`s.
+  **Reserve and price** secondary-family capacity for **(a)** steady-state
+  high-risk judging on every feature and **(b)** burst headroom sized to **peak
+  concurrent T1 load** (the worst-case failover fan-in). Secondary-provider
+  rate-limit/quota becomes a **capacity dimension in §6 backpressure**; behavior
+  when the **secondary is also saturated** is defined there (queue against reserved
+  capacity, noisy-neighbor guard covers provider quota — never an unbounded retry
+  storm).
 
 *(SRE-F4; also bounds the serialization concern in COST-F3.)*
 
@@ -118,9 +144,17 @@ land mid-run.
   routing on resume.
 - **Mid-flight model drift:** the pinned-ID-drift alert
   ([architecture.md §8](./architecture.md)) now has a defined **operator
-  response**: pause the affected runs; per run, **continue** (accept
-  recalibration), **fork**, or **abort** — never silently continue a T1 judgment
-  on drifted weights. New runs re-pin and re-calibrate.
+  response**: per run, **continue** (accept recalibration), **fork**, or **abort** —
+  never silently continue a T1 judgment on drifted weights. New runs re-pin and
+  re-calibrate.
+- **Fleet-wide drift is a correlated event, not a per-run one.** A provider
+  weight-rotation hits *all* in-flight runs simultaneously; a per-run HITL decision
+  then becomes a fleet-wide HITL thundering herd. A **fleet-level drift policy**
+  sets the default action by risk tier ([governance.md §3](./governance.md)):
+  **auto-continue Low/Standard with a recalibration flag** (recorded, surfaced on
+  the scorecard, not blocking); **pause only High / trust-root and human-witnessed
+  runs** for explicit decision. The §7 reviewer queue must be sized for these
+  **correlated spikes**, not just steady per-feature touchpoints.
 
 *(SRE-F5.)*
 
@@ -132,11 +166,34 @@ A/B alone is `3 arms × n × k`). A run-admission layer is required:
 - **Global concurrency cap and fleet cost-rate cap** (in addition to per-run
   budgets in [governance.md §7](./governance.md)) so the fleet cannot overspend in
   aggregate.
+- **Fleet cost-rate-cap enforcement is admission-side, not kill-side.** On
+  fleet-cap breach, **throttle admission** (queue new runs) rather than hard-stall
+  or kill in-flight work — killing wastes spend and starves long-horizon runs. The
+  global rate budget is allocated by **tenant fair-share** and fed into the fairness
+  scheduler below. Preemption, when unavoidable, follows a defined **priority
+  order** (low-tier/burst work first); **never preempt a run mid-trust-root
+  attestation**. **Fleet-budget-burn is a first-class SLO** with its own
+  burn-rate alert. (The A/B's `3 × n × k` is exactly this workload.)
 - **Queue + fairness scheduler** across runs/tenants; **per-tenant resource +
   credential + budget isolation**; **noisy-neighbor guard** = per-run cap on
-  concurrent `Send` branches so one fan-out can't starve others.
-- **Capacity limits + backpressure** for sandboxes and the trusted gate runner,
-  with queue-depth alerting; a heavy run queues rather than starving the fleet.
+  concurrent `Send` branches *and* per-run/per-tenant cap on secondary-provider
+  quota draw so one fan-out can't starve others.
+- **Capacity limits + backpressure** for sandboxes, the trusted gate runner, **and
+  provider rate-limits/quota** (primary *and* secondary family — see §4), with
+  queue-depth alerting; a heavy run queues rather than starving the fleet.
+  Secondary-family quota is a first-class backpressure dimension: when the secondary
+  is **also saturated** (T1 failover + always-on high-risk judging colliding),
+  the noisy-neighbor guard applies to provider quota too — runs queue against the
+  reserved secondary capacity (§4) instead of fleet-stalling on shared `429`s.
+- **Paused-run state footprint.** Releasing compute on HITL/store/trust pause (§7,
+  §3, §4) does **not** release state — worktrees, checkpoints, artifacts, indexes
+  persist and are **unbounded at fleet scale**. Each run carries a **state-footprint
+  estimate** (worktree + checkpoint + artifact + index bytes). A **fleet paused-run
+  storage cap with alerting** bounds the aggregate. **Long-paused runs hibernate:**
+  spill the worktree to the **content-addressed store** and reconstitute on resume.
+  **Worktree GC must be resume-safe** — it may reclaim a hibernated worktree only
+  because every handle is re-resolvable by `tree_sha`/content address on wake, so GC
+  cannot break resume.
 
 *(SRE-F6; bounds the trusted-runner serialization in COST-F3.)*
 
@@ -150,10 +207,34 @@ constraint, not an externality.
   dependency source-diff, flake-recovery override, oracle/gate/criteria/config-edit
   trips, monitor escalations.
 - **A HITL-blocked run releases its compute** (sandbox/runner slots) rather than
-  holding it — ties to capacity (§6).
+  holding it — ties to capacity (§6); its **state** is bounded/hibernated per §6.
 - **Reviewer queue with SLAs + backlog/age alerting**; a **staffing/escalation
   fallback** when two-person sign-off can't be staffed (a release **deadlocks
   safely** as `paused`, never auto-approves).
+- **Two-person reviewer-pool queueing model.** Every build / CI / IaC / deps /
+  scanner / auth / trust-root change is forced **High → two-person Release**
+  regardless of size ([governance.md §1e](./governance.md)). "Deadlocks safely as
+  `paused`" is correct but collapses High-tier throughput to **reviewer-PAIR
+  availability**, so it must be capacity-planned, not just alerted. Model it as a
+  queue: High-tier release **arrival rate × service time** vs the number of
+  **available reviewer-pairs**, with utilization kept below saturation. A
+  **staffing target is SLA-driven** (sized to the High-tier queue-age SLO below,
+  including the correlated drift spikes of §5 — not just steady per-feature
+  touchpoints). On **sustained backlog**, a defined policy applies in order:
+  **batch sign-off windows**, **delegated reviewer tiers**, then **admission-throttle
+  new High-tier runs** (§6) so the backlog cannot grow unbounded.
+- **High-tier release-queue age is a first-class SLO**, with **capacity-derived
+  alert thresholds** (warn/page tied to pair count and arrival rate, so the alert
+  fires before the queue is unrecoverable rather than at a fixed wall-clock).
+- **Flake-recovery quorum is bounded and counted.** The flake-recovery path
+  (multiple trusted-runner re-runs + two-person override,
+  [governance.md §5](./governance.md)) was unmodeled and unbounded per run, and
+  incentivizes mislabeling genuinely-broken behavior as "flake". Each run carries a
+  **flake-recovery counter**: quorum size is **bounded** per attempt, and crossing a
+  **per-run threshold escalates as a quality / non-convergence design smell** rather
+  than allowing unbounded per-incident overrides. Quorum re-runs are **counted in
+  the §6 / cost model** compute, and flake-override decisions are **counted in
+  human-decisions-per-feature** below.
 - **Scorecard threshold on human-decisions-per-feature** ([evaluation.md §7](./evaluation.md))
   so HITL volume is a falsifiable design constraint. If it trends up, that is a
   design smell to be driven down by **risk-tiering** ([governance.md §1e](./governance.md)),

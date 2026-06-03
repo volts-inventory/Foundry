@@ -388,6 +388,44 @@ lesson yet: the design's *thesis* ("a deterministic decision rule at the seams")
 was **domain-specific** — true for backend/logic, false as a universal — and only a
 *domain-expert* lens could see it. **"Type of software is key"** was exactly right.
 
+## Round 16 — FULL-DOMAIN expert panel (8 fresh lenses, vs the codebase): 62 findings (10 BLOCKER, 33 MAJOR, 19 MINOR)
+
+A user prompt — *"can this leverage `claude -p`"* — added a **pluggable
+coding-agent worker-substrate** (PLAN §6, [arch §2](./architecture.md)): the
+Implementation/QA inner loop became an adapter (Claude Code `claude -p`, Codex CLI
+`codex exec`, OpenHands, or a raw loop) behind a defined contract. The user then
+asked for a fresh **critic → fix → validate loop, run against the codebase** across
+**all domains it touches** — eight expert lenses in parallel (distributed systems,
+LLM/multi-agent orchestration, evaluation methodology, offensive-security/supply-
+chain, SRE/operability/cost, regulated-compliance, ML/data, frontend/UX). The new
+substrate drew the heaviest fire, and the deeper domain lenses re-opened the
+verdict-class and assurance machinery the prior rounds had signed off on.
+
+| Lens | # | Headline findings (sev) | Resolution locus |
+|---|---|---|---|
+| Distributed systems | 8 (1B,4M,3m) | Adapter inner loop runs inside one superstep → superstep-boundary budget/cancellation/checkpoint don't bind it **(B)**; `seq`/`local` replay-determinism; reuse staleness across mutant rotation; cross-fork latch invisible to routing | [arch §2/§3/§4/§5/§6](./architecture.md) |
+| Security / supply-chain | 6 (2B,3M,1m) | Agent-authored test reads the tree at runtime to defeat the held-out-mutant discriminator **(B)**; "worktree-only/no-verdict" unenforced for a bash-running adapter **(B)**; provider egress as a high-entropy exfil channel; analyzer feature-flooding | [gov §1c/§2/§3](./governance.md) |
+| Regulated / compliance | 9 (2B,5M,2m) | Class-4 human attestation forgeable by the pipeline **(B)**; no model-risk governance (SR 11-7/IEC 62304) **(B)**; audit content agent-authored; traceability cells unbound to runner verdicts; SoD unenforced; Assistant mode bypasses all controls | [gov §1c/§1e/§4/§8](./governance.md), [domains §1/§5](./domains.md), [lifecycle §4](./lifecycle.md) |
+| ML / data | 9 (2B,5M,2m) | No multiple-comparisons/adaptive-overfitting control **(B)**; leakage *detection* mechanism absent **(B)**; train- vs eval-variance; proxy-gate soundness; eval staleness; no criterion-fidelity analog; label-noise | [domains §1/§5](./domains.md), [gov §1c/§5](./governance.md) |
+| Evaluation methodology | 7 (2B,4M,1m) | Post-hoc power-rung selection defeats falsifiability **(B)**; no single primary endpoint / multiple-comparisons control **(B)**; equal-USD handicap; adaptive suite authoring; judge self-preference in the A/B; collider bias in conditional hidden-test rate | [evaluation §2/§3/§4/§6/§7/§8](./evaluation.md), [roadmap Phase 1.5](./roadmap.md) |
+| SRE / operability / cost | 10 (0B,5M,5m) | Cost model token-only — omits mutant×perturbation re-execution compute, adapter inner-loop turns, second-family capacity, paused-run storage; two-person reviewer-pool queueing; fleet-wide drift HITL spike; fleet cost-cap enforcement | [evaluation §8](./evaluation.md), [operations §2/§4/§5/§6/§7](./operations.md), [arch §8](./architecture.md) |
+| LLM / multi-agent | 6 (0B,3M,3m) | **Adapter ≠ model family** — decorrelation binds the *served lineage*, not the CLI brand; "never a verdict" overstated (judgment seams emit verdicts); held-out keying + failover must be decorrelation-aware | [arch §2/§8](./architecture.md), [PLAN §6](../PLAN.md) |
+| Frontend / UX | 7 (1B,4M,2m) | Visual-regression **baseline lifecycle** undefined → false-positive treadmill or loose tolerance **(B)**; perceptual-HITL load unbounded; a11y AT-user dependency unframed; no generative taste loop; product wedge unargued | [domains §5](./domains.md), [lifecycle §1/§2](./lifecycle.md), [PLAN §9/§10](../PLAN.md), [roadmap](./roadmap.md) |
+
+Cross-panel consensus (raised independently by ≥2 lenses, highest confidence):
+**adapter ≠ served model family** (decorrelation must bind the served lineage, not
+the adapter brand; failover must preserve it); **"never emits a verdict" was
+overstated** (split signed-deterministic-gate verdicts from LLM-judgment verdicts);
+**the adapter's worktree-only/no-side-effect property must be sandbox-*enforced*,
+not contractual** (it runs arbitrary bash); and **the cost model was token-only**,
+omitting the trusted-runner re-execution compute and adapter inner-loop turns that
+actually dominate.
+
+**Round 16 verdict (solutioner):** all 62 resolved via file-partitioned expert
+fixers across PLAN/architecture/governance/evaluation/operations/domains/lifecycle/
+roadmap, using a shared canonical-resolution set so independent edits stayed
+consistent. Re-submitted to a fresh full-domain panel for **Round 17**.
+
 ## Loop summary
 
 | Round | Bar | Findings | BLOCKER | MAJOR | MINOR | Verdict |

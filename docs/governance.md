@@ -118,6 +118,18 @@ grounded. So the verdict is grounded by gate class: *(SEC-R10-F1)*
     **invariant under behavior-preserving change** and FAIL holds **across the
     mutant family** — a test that keys on identity rather than behavior flips on a
     behavior-preserving perturbation and is **rejected**.
+  - **Substitutions are opaque at runtime:** behavioral-invariance still admits a
+    runtime-active test that *chooses behavior after inspecting the tree* — a
+    coding-agent adapter can emit test code that reads file hashes/AST/baseline
+    diff at runtime to detect the substitution and branch its verdict, so it never
+    flips on a perturbation it can see coming. So the substitution must be **opaque
+    to the test at runtime**: identical test bytecode runs against real vs mutant in
+    **indistinguishable environments** — a normalized tree with path/hash/identity
+    oracles stripped, the test **denied reads outside the unit under test** and
+    **denied any baseline to diff against**. **Runtime-environment-sensitive test
+    sources are barred from the execution-deterministic class** (they fall to a
+    judgment verdict), and a **trusted differential harness controls inputs and
+    outputs** so the test cannot observe which side it is running against. *(SEC-R12-F1)*
 
   This restores the needed property: the verdict is a function of *behavior
   observed by trusted infra*, not of agent-controllable environment identity.
@@ -126,10 +138,29 @@ grounded. So the verdict is grounded by gate class: *(SEC-R10-F1)*
   hard requirements, not options.
 
 The signature is **bound to its inputs** — `runner_attestation` signs
-`(gate_name, tree_sha, scanner_config_revision_hash, status, results_digest)` —
-so a valid attestation cannot be replayed onto a different tree/config/predicate;
-admission re-checks **all** of these per record, not just the runner identity.
-*(SEC-R9-F3)*
+`(gate_name, tree_sha, scanner_config_revision_hash, mutant_rotation_id,
+scanner_rule_version, status, results_digest)` — so a valid attestation cannot be
+replayed onto a different tree/config/predicate; admission re-checks **all** of
+these per record, not just the runner identity. Binding **mutant-rotation-id +
+scanner-rule-version** into the tuple (and into the dependency-scoped reuse key,
+§1f) means an execution-dependent verdict's anti-gaming grounding is pinned to the
+exact rotation/rule-version it was grounded under. *(SEC-R9-F3, SEC-R12-F2)*
+
+**Class-4 human-witnessed attestation is grounded with equal rigor.** *(SEC-R12-F5)*
+The grounding machinery above (two-zone runner, sealed channel, `verify_attestation`)
+covers only deterministic-gate verdicts; the **class-4 human-witnessed** verdict
+([domains.md §1](./domains.md) — validation protocols, per-artifact
+approver-of-record) carries an equal-rigor signature path so it cannot be minted or
+replayed by an agent/orchestrator:
+- The signature is produced **out-of-band against a federated IdP / hardware-backed
+  PKI key the pipeline never holds** — the agent/orchestrator has no path to mint it.
+- It **binds `(artifact_uri, state_sha, approver_identity, role, credential_ref,
+  timestamp, meaning-of-signing)`**, so a signature cannot be replayed onto a
+  different artifact/state or repurposed across meanings.
+- `verify_attestation` **validates class-4 signatures against the external IdP /
+  cert chain at reducer-time *and* at admission** (not just the runner's own keys).
+- A **class-4 write from any agent identity is rejected exactly like an unsigned
+  deterministic-gate write** — the agent can never supply the human verdict bit.
 
 Agents only *triage and explain* (writing `GateTriage`, never `GateResult`, for
 deterministic gates — [architecture.md §3](./architecture.md)); the `gates`
@@ -187,6 +218,16 @@ guarantees (admission is always fail-closed; verdicts always runner-signed). The
 **human-decisions-per-feature** metric ([evaluation.md §7](./evaluation.md)) keeps
 tiering honest. *(COST-F2, SRE-F7)*
 
+**Segregation of duties is an enforced predicate, not an assertion.** *(SEC-R12-F7)*
+"Author != approver" is only safe if enforced: the system **records the author
+identity(ies) per artifact**, and **admission/release REJECTS when an approver
+identity intersects the author set** or lacks the **required distinct role**. The
+**regulated pack** ([domains.md §4](./domains.md)) forces **two-person
+distinct-identity sign-off generally** — not only on trust-root changes. Signer
+**identities + roles are bound into the WORM record / admission predicate**, so the
+distinctness check is itself re-derivable at admission, not relayed from agent
+state.
+
 > **Risk ≠ engineering blast radius in some domains.** A change's *regulatory
 > significance* is orthogonal to its diff size — a one-line APR, dosing, or AML-
 > threshold change is tiny but **reportable and re-validation-triggering**. A
@@ -207,7 +248,12 @@ unchanged sub-tree/lockfile/config hash is still a *real* runner-attested verdic
 so the final attested gate-state still covers the whole tree). E.g. a pure
 app-code change re-runs Test/E2E for the *impacted* criteria + SAST on changed
 files but reuses the Audit/SBOM verdict if deps are unchanged; a lockfile change
-re-runs Supply-chain + Audit but not unaffected app tests. This turns the
+re-runs Supply-chain + Audit but not unaffected app tests. The reuse key for
+**execution-dependent (class-2) verdicts binds mutant-rotation-id +
+scanner-rule-version** (the same values in the attestation tuple, §1c), so a
+cached class-2 verdict is **invalidated across a rotation/rule-version boundary**
+and re-grounds under the new rotation — a stale verdict's anti-gaming grounding
+can never be laundered forward past a rotation. This turns the
 worst-case re-verification *multiplier* (COST-F1) into a bounded,
 change-proportional cost while preserving the whole-tree guarantee. A hard
 **per-feature re-verification sub-budget** caps pathological cascades, with the
@@ -265,6 +311,18 @@ non-convergence bound as backstop. *(COST-F1)*
   anomaly detection** — host allowlisting alone does not stop exfil over
   allowed channels (registry, git remote, model provider). The sandbox is treated
   as hostile. *(SEC4)*
+- **Provider egress is a first-class exfil channel, not an allowlisted
+  exception.** The adapter must reach its model provider over egress — a
+  bidirectional, high-entropy channel anomaly-detection is structurally bad at
+  policing — so **all adapter provider traffic routes through the mediating
+  model-provider proxy** behind the **enforced adapter boundary**. The proxy (a) is
+  the **only holder of the provider credential** (the adapter never holds it); (b)
+  **injects the system prompt/SOP/tools and strips/audits smuggled content**; (c)
+  **enforces that retrieved-context/secrets cannot appear in egressing request
+  bodies** (content-scan + structural schema validation); and (d) **meters per-call
+  entropy/size against the *task's* expected profile**, not a global baseline. The
+  proxy and its content/structural enforcement are a **first-class red-team
+  target**. *(SEC-R12-F3)*
 
 ### Data plane
 - Scoped, short-lived credentials per task; **never in prompts or state**;
@@ -336,12 +394,21 @@ non-convergence bound as backstop. *(COST-F1)*
   under every deterministic bound and touches no protected path is still
   observed. It reads a **capped** slice of **deterministically-extracted
   structured features**, with untrusted trace prose delimited as *data, never
-  instructions*; it emits **advisory** flags only and cannot approve work or
-  override a deterministic trip. Precision/recall — **including against
-  prompt-injection-of-the-monitor and on an *untriggered* held-out set** — is
-  evaluated ([evaluation.md §4](./evaluation.md)); its sampled+triggered
-  invocation count and token cost are sized into the per-feature cost model
-  ([evaluation.md §8](./evaluation.md)) and metered as `monitor_overhead_usd`. *(SEC3, AI4, AI10, AI-R8-F3)*
+  instructions*. But framing prose as data stops instruction-injection, **not
+  feature-flooding / cap-eviction** (flooding the capped slice so the suspicious
+  feature is truncated out) **or feature-shaping** — and with the agent controlling
+  the full transcript, every trace-derived feature is adversary-shaped. So analyzer
+  features are derived **primarily from trusted-infra observations** (zone-B
+  execution records, OPA decision logs, runner attestations), **not the
+  agent-emitted transcript**, and **capped-slice selection is adversary-robust** —
+  **priority-ranked by trusted signal, not recency/volume** — so flooding cannot
+  evict the suspicious feature. It emits **advisory** flags only and cannot approve
+  work or override a deterministic trip. Precision/recall — **including against
+  prompt-injection-of-the-monitor, feature-flooding / cap-eviction, and on an
+  *untriggered* held-out set** — is evaluated
+  ([evaluation.md §4](./evaluation.md)); its sampled+triggered invocation count and
+  token cost are sized into the per-feature cost model
+  ([evaluation.md §8](./evaluation.md)) and metered as `monitor_overhead_usd`. *(SEC3, AI4, AI10, AI-R8-F3, SEC-R12-F4)*
 
 ## 4. Supply-chain trust root (build, sign, attest)
 
@@ -401,6 +468,16 @@ A signature proves provenance, not that deployment is authorized. Therefore:
   liveness vs admission safety) is intentional. So the core policy reads: *all
   required gates PASS for `D` in WORM **and no un-overridden stable FAIL exists for
   `D`***. *(DS-R11-F1)*
+- **`inconclusive` is an explicit verdict state for class-3.** The latch above
+  distinguishes stable-FAIL from flake but has no state for **statistically
+  inconclusive** — a class-3 (statistical/tolerance-band) verdict whose CI
+  **straddles the threshold**, where two forks can legitimately land on opposite
+  sides. So class-3 verdicts admit an explicit **`inconclusive`** state
+  ([domains.md §1](./domains.md) owns the class-3 spec; this owns the
+  admission-latch semantics) with defined routing — **collect more eval n, or
+  HITL** — and **admission treats `inconclusive` fail-closed**, *not*
+  flake-recoverable: a straddling CI is not a transient-execution divergence, so the
+  bounded recovery-quorum path does **not** apply to it. *(SEC-R12-F8)*
 - **Overrides are record-scoped, not digest-scoped.** A two-person override targets
   a **specific transient `(gate_name, tree_sha, results_digest)`** record (justified
   by its recovery quorum); admission then **re-evaluates the full gate set**, so a
@@ -450,6 +527,16 @@ Minimum review affordances guard against automation bias. *(SEC6)*
   log / external timestamp) so truncation or rewrite is detectable. *(SEC9)*
 - Events reach the store via the transactional outbox ([architecture.md §5](./architecture.md)),
   so checkpoint and audit cannot diverge.
+- **Append-only/hash-chaining guarantees the container's *integrity*, not the
+  content's *faithfulness*** — an agent can author misleading prose, or omit an
+  event by simply not enqueuing it. So the store distinguishes **system-witnessed
+  events** (emitted by non-agent components: runner attestations, admission
+  decisions, policy denials, IdP-signed class-4 human attestations) from
+  **agent-authored prose** — the latter is **tagged untrusted/advisory** in the
+  record. **Critical audit events (verdicts, approvals, deploys, overrides) must be
+  emitted by the trusted component that performed the act, *not* relayed from agent
+  state**, so an agent can neither forge a system-witnessed event nor suppress one
+  by withholding it. *(SEC-R12-F6)*
 
 ## 9. Domain packs
 

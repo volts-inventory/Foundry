@@ -19,6 +19,11 @@ Software is owned for years, not shipped once.
 - **Constraint/ADR coherence is itself maintained:** a periodic
   architecture-review pass (an Architect agent + HITL) consolidates and prunes the
   pinned set so it doesn't drift into contradiction over a long-lived project.
+- **Frontend rot is its own maintainability dimension.** ADR coherence does not
+  catch UI decay, so the periodic architecture-review pass also inspects
+  **component duplication/complexity**, **styling-system/design-token adherence
+  drift**, and **markup/a11y-semantics quality** across evolution cycles — the
+  ways a generated frontend degrades even while its decision record stays clean.
 - **Human takeover must always be possible:** the output is ordinary source in
   ordinary VCS; a human team can fork, read, and modify it without Foundry. No
   lock-in to Foundry-only representations.
@@ -36,6 +41,16 @@ software needs humans *steering*, not just vetoing.
   stand-in* used to keep runs moving; it does **not** replace the real product
   owner. High-ambiguity or high-taste decisions route to a human, and the Proxy's
   assumptions are surfaced for correction.
+- **Design-iteration sub-loop (a first-class collaborative mode).** Coarse
+  text→re-plan steering is too blunt for UX, where taste is iterative and visual.
+  For user-facing work Foundry presents **multiple rendered variants** and lets the
+  human **select, annotate, and diff at the rendering level** (not at the
+  spec/plan level). Captured preferences become **durable design-system/taste
+  constraints** that **persist across evolution cycles** as part of the
+  `pinned_constraints`/design-token set — so they shape future builds rather than
+  being re-litigated as a one-off re-plan. This is a steering channel in its own
+  right, and over time it **reduces future perceptual-HITL load**
+  ([domains.md §5](./domains.md)) by encoding settled taste once.
 - **Collaborative, not fire-and-forget:** the default operating mode (§4) is a
   human partner reviewing and steering, with autonomy earned incrementally.
 
@@ -78,6 +93,18 @@ is moot) and graduate to **Gated**/**Autonomous** only as evidence accrues. This
 is why the trust-root build is **deferred** in the roadmap
 ([roadmap.md](./roadmap.md)) — it defends an autonomy that must be *earned*, not
 front-loaded.
+
+- **Regulated work is Gated-or-higher by construction.** Assistant mode bypasses
+  the entire compliance apparatus — approver-of-record, WORM attestation, SLSA
+  predicate, admission — because a human merges via normal CI. That is acceptable
+  only for *unregulated* artifacts. The regulated guarantees of
+  [domains.md §5](./domains.md) are therefore **scoped to Gated and above**: when
+  a domain pack flags a regulated capability (the **mode/tier veto +
+  regulatory-significance axis**), it forces a **minimum of Gated mode** — gates +
+  per-artifact approver-of-record + WORM — and **forbids Assistant-mode merge of
+  regulated artifacts**. Assistant mode is **non-compliant for regulated work**;
+  the "safe by construction" claim holds only at Gated+, where the controls are
+  actually engaged.
 
 ## 5. Licensing & liability of AI-generated code
 

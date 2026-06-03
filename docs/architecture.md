@@ -123,15 +123,61 @@ Load-bearing control rules:
 > their plan→edit→test→iterate loop through a **coding-agent substrate contract**:
 > **in** — a task packet (`pinned_constraints` + retrieved spans + a scoped
 > sandboxed worktree + least-privilege tools + a turn/cost budget); **out** — a
-> diff + test **sources** + `GateTriage`. The contract binds every adapter:
-> it runs **in-sandbox** (never the host), it **never emits a gate verdict**
-> (the forged-results-stream defense — [governance §1c](./governance.md)), and it
-> **writes the worktree only** (durable external effects go through the outbox,
-> §5). Adapters: Claude Code (`claude -p`), OpenAI Codex CLI (`codex exec`),
-> OpenHands/SWE-agent, or a raw multi-provider ReAct loop. Because the substrate is
-> a swappable seam, a high-risk review/QA node can be required to run a
-> **different-family** adapter than the implementer it checks — preserving the judge
-> decorrelation the model tiering depends on ([PLAN §6](../PLAN.md)).
+> diff + test **sources** + `GateTriage` + the `served_family`/`served_model_id`
+> the adapter actually drove (recorded per node in the run manifest). Adapters:
+> Claude Code (`claude -p`), OpenAI Codex CLI (`codex exec`), OpenHands/SWE-agent,
+> or a raw multi-provider ReAct loop. Because the substrate is a swappable seam, a
+> high-risk review/QA node can be required to run a **different served family** than
+> the implementer it checks — preserving the judge decorrelation the model tiering
+> depends on ([PLAN §6](../PLAN.md)).
+>
+> **Two verdict kinds — adapters never sign a deterministic-gate verdict, but
+> judgment nodes do emit a judgment verdict.** For deterministic gates the adapter
+> emits only a diff + test **sources** + `GateTriage`; the *signed
+> deterministic-gate verdict* is computed and signed solely by the trusted
+> two-zone runner (the forged-results-stream defense — [governance §1c](./governance.md)).
+> But LLM-judgment seams (Review approve/request-changes, Threat-review residual,
+> perceptual class-5) legitimately emit a **judgment verdict** that routes the
+> evaluator-optimizer loop — there is no deterministic oracle to sign one. The
+> *only* integrity controls on a judgment verdict are **cross-family decorrelation**
+> (below) **+ HITL**; the blanket "never a verdict" does not apply to these nodes.
+>
+> **Decorrelation binds served lineage, not adapter brand.** OpenHands, the raw
+> loop, *and* Claude Code can each drive any model, so the brand carries no lineage
+> guarantee — every adapter must **declare** its `served_family`/`served_model_id`.
+> A deterministic, admission-/CI-checked invariant fails closed on high-risk
+> judgment criteria when `reviewer.served_family == implementer.served_family`,
+> independent of brand. Cross-family failover (§8) is **decorrelation-aware**: if
+> the only available family on a high-risk judgment node would violate the
+> invariant, the node **pauses-and-escalates** (consistent with "T1 never
+> auto-downgrades") — it never silently fails over into a correlated configuration.
+>
+> **The adapter boundary is ENFORCED by the sandbox, not asserted** — the adapter
+> runs arbitrary bash, so "writes worktree only / no external side-effect" must be
+> a property of the cage, not a promise: (a) the **only** writable mount is the
+> task worktree; (b) the **only** network route is a **mediating model-provider
+> proxy** that holds the provider credential, injects the system prompt/SOP/tools,
+> content-scans + schema-validates egress bodies against the task data profile, and
+> meters tokens/USD/entropy — no git remote, no registry except the hash-pinned
+> mirror reached *through* the proxy; (c) outbox, result-channel, and credential
+> endpoints live in namespaces the adapter process tree cannot address (separate
+> netns, no FD/socket inheritance, no shared mount); (d) the sandbox is destroyed
+> and rebuilt between the untrusted-execution phase and any credentialed phase — no
+> reuse.
+>
+> **Adapter vs superstep atomicity, budget, and cancellation.** The adapter runs a
+> long multi-turn loop *inside one superstep*, so superstep-boundary budget
+> enforcement and the cooperative-cancellation token (§6) — which a third-party CLI
+> does not poll — do **not** bind it, and a mid-loop crash would discard all
+> uncommitted work. The contract therefore requires: (a) **incremental resumable
+> progress** — each adapter turn persists to the worktree with a resumable marker,
+> the node is re-enterable mid-task, and budget/cancellation are enforced at
+> **adapter-turn boundaries** (a sub-superstep meter), not only at LangGraph
+> superstep boundaries; (b) the adapter is **metered and hard-killed from outside**
+> (proxy token/USD accounting + cgroup CPU/wall-clock + `SIGKILL` at cap) —
+> adapter-reported budget is **advisory only**; (c) an adapter that cannot meet the
+> incremental-progress + external-meter contract is **ineligible** for the
+> substrate. *Which adapters can meet it is an open integration question.*
 
 ## 3. Typed state and concurrency semantics
 
@@ -240,8 +286,19 @@ the lexicographic tuple `(run_id, superstep_index, node_id, local)`:
   strictly greater in any later superstep (so retries/rebases outrank prior writes).
 - `node_id` — deterministic id of the emitting node, separating distinct siblings
   in one fan-out. For *same-node-id* branches (branch-per-task), separation comes
-  from the channel **key** (`run_against`), not `seq`.
-- `local` — per-node monotonic counter for multiple emissions by one node.
+  from the channel **key** (`run_against`), not `seq`. For `Send` fan-out
+  emissions to a **non-keyed** channel (same `node_id`, same `superstep_index`),
+  the per-item **branch key** is folded into `seq` — otherwise siblings collide;
+  alternatively every fan-out-written channel must be **key-deduped/commutative and
+  never `seq`-ordered** (the reducer-invariant test asserts whichever discipline
+  the channel adopts).
+- `local` — per-node monotonic counter for multiple emissions by one node. It must
+  be a deterministic function of the emission's node-internal **logical position**,
+  **not wall-clock emission order** — OR all channel writes must be content/key
+  idempotent so a replayed write coalesces. Otherwise LLM-nondeterministic
+  re-execution assigns a different `seq`/key to a logically-identical write,
+  duplicating or mis-ordering gate records on replay. **This replay-determinism
+  requirement is mandatory.**
 
 Within a run `run_id` is constant, so `(superstep_index, node_id, local)` gives a
 **total** order — no equal-`seq` fallthrough to fold order — which is all
@@ -292,6 +349,13 @@ tree_sha = H( normalized_source_tree   # git tree of TRACKED SOURCE only,
 - Integrated `GateResult.run_against = tree_sha`. A `FIX` (re-merged for
   multi-task) yields a new `tree_sha`, so prior Security/Audit/Supply-chain/E2E
   verdicts no longer match the current key and are re-run.
+- **Execution-dependent verdicts depend on inputs *not* in `tree_sha`.** Cached
+  runner-attested Test/E2E/SAST verdicts also depend on the rotating held-out
+  **mutant family** and the **scanner rule-set version** — neither is in the source
+  tree. The **mutant-rotation-id + scanner-rule-version** are therefore bound into
+  the **attestation tuple** *and* the **dependency-scoped reuse key**, so a cached
+  class-2 (execution-dependent) verdict is invalidated across a rotation /
+  rule-version boundary and is **not** reused across it. *(ties to §SEC1)*
 - **`state_sha` generalization (data/ML domains).** For software whose behavior
   depends on data or model weights, `tree_sha` is the source-only special case of
   `state_sha = H(source ⧺ lockfile ⧺ toolchain ⧺ data_refs ⧺ feature_defs ⧺
@@ -308,6 +372,12 @@ tree_sha = H( normalized_source_tree   # git tree of TRACKED SOURCE only,
 Resume restores *internal* state; it does not undo external effects. The dual
 -write between the checkpoint DB and the outside world (git, GitHub, deploys,
 WORM audit) is handled by a **transactional outbox**, not by hope.
+
+- **The outbox is the *only* durable-effect surface.** Every external effect is
+  Foundry's explicit outbox enqueue, derived from the **validated worktree diff**.
+  Because the sandbox denies the adapter all network/git egress (§2(b,c)), the
+  adapter **cannot** produce an external effect directly — which is precisely what
+  makes "writes worktree only" an *enforced* property rather than an assertion.
 
 - **One Postgres transaction** commits, per superstep: the LangGraph checkpoint,
   the `budget` ledger, the `actions` ledger update, **and** an **outbox** row for
@@ -336,10 +406,25 @@ WORM audit) is handled by a **transactional outbox**, not by hope.
 
   The protocol is **intent-log → act → confirm-log**; if none of the three can
   establish state on resume, the node **fails to the human** (never assumes). *(DS2, DS3-F3)*
+- **All idempotency / dedup / marker records are GLOBAL** (run-independent): they
+  survive checkpoint forks, and fork-recovery replay re-queries them exactly as an
+  ordinary resume does. So a poisoned-checkpoint fork **never re-fires** a path-2 or
+  path-3 effect — the global record already reflects the prior emission regardless
+  of which run/fork produced it.
 - **Checkpointer:** `PostgresSaver` (prod) / `SqliteSaver` (dev).
 - **Time-travel** rewinds *internal state only*; forking creates a **new run ID**,
   never mutates the original WORM record, and replaying past an effectful node
   hits the external idempotency check and skips.
+- **Cross-fork stable-FAIL latch is queryable at the E2E/Release gate, not only at
+  deploy-admission.** The per-run `gates` reducer (§3) folds one run's channels and
+  cannot see a *sibling fork's* stable-FAIL latch on the same digest — so without
+  this a fork could consume the full human Release sign-off before deploy-admission
+  bounces it. The stable-FAIL latch on a digest is therefore surfaced from
+  **cross-fork WORM latch state at the E2E/Release gate**, so a latched digest
+  blocks **before** consuming human sign-off; the run is marked with run-status
+  reason **`latched_by_sibling_fork`** ([operations.md](./operations.md) owns the
+  status enum). This is the only cross-fork read in the gate path; live verdict
+  resolution stays per-run and admission stays fail-closed (§3).
 - **Partial-failure of a parallel branch:** assurance/impl branches are
   dispatched with `Send` so each commits independently; a branch that raises
   records a `GateResult{status:"error"}` and is retried *alone* (bounded) rather
@@ -444,7 +529,11 @@ Long-horizon success lives or dies here, so the contract is mechanistic, not
   Pinned IDs; **T1 judgment nodes never auto-downgrade in tier** (breach
   escalates); intra-family there is no real same-weights alternate, so a
   single-provider outage without the second family is retry/backoff then
-  **pause-and-escalate**. *(AI-R8-F1, AI3, AI9)*
+  **pause-and-escalate**. **Failover is decorrelation-aware:** on a high-risk
+  judgment node, if the only available family would make `reviewer.served_family ==
+  implementer.served_family` (violating the §2 invariant), the node
+  **pauses-and-escalates** rather than silently failing over into a correlated
+  configuration — same discipline as the no-auto-downgrade rule. *(AI-R8-F1, AI3, AI9)*
 - **Prompt caching** of stable SOP/system prefixes and pinned reference
   artifacts is the primary token-cost lever (low cache benefit for the analyzer,
   which is therefore event-triggered — [governance.md §3](./governance.md)).

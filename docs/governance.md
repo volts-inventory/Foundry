@@ -205,18 +205,10 @@ replayed by an agent/orchestrator:
 The judgment-verdict binding added `verdict_nonce` to stop a same-tree status-FLIP,
 but nothing consumes it, so a genuine still-valid `approve` binding could be
 REPLAYED at higher `seq` to mask a later `request-changes` (judgment verdicts are
-latest-by-`seq` with no latch). Two controls close this, verbatim-consistent with
-[architecture.md §3](./architecture.md):
-- **Single-use nonce:** `verdict_nonce` is a server/orchestrator-issued,
-  per-review-request challenge, single-use and freshness-verified at reducer-time
-  AND admission (mirroring the class-4 `server_nonce`); it is consumed on the first
-  accepted write for that review request, and any later write reusing or omitting a
-  live-issued nonce is rejected.
-- **Negative-verdict latch:** negative judgment verdicts LATCH monotonically — a
-  `request-changes` (or a trusted cross-check rejection) on a given
-  `(node_id, run_against)` cannot be superseded by re-emitting an older `approve`
-  for the same key, exactly as deterministic stable-FAILs latch; the latch is
-  released only by a fresh, nonce-bound re-review.
+latest-by-`seq` with no latch). The single-use nonce + negative-verdict latch close
+this, verbatim-consistent with [architecture.md §3](./architecture.md):
+
+Judgment-verdict nonce consumption and the negative-verdict latch live in the GLOBAL, cross-fork, transactionally-committed record set (alongside the class-3 look-ledger and the stable-FAIL latch) — NOT inside `_merge_gates`. The negative-verdict latch is keyed on cross-fork-stable identity `(node_id, subject_artifact_uri, state_sha)`, persisted to the WORM/global store so a sibling fork (new `run_id`) inherits it; it is surfaced cross-fork at the Review→loop routing point and re-checked at E2E/Release exactly like the digest stable-FAIL latch, and released only by a fresh server-issued nonce bound to a genuine re-review. `_merge_gates` stays a pure, commutative, replay-deterministic function that READS consumed/latched status as committed input and never mutates it; nonce consumption is keyed on the verdict's content identity so re-folding an already-accepted write is idempotent.
 
 Agents only *triage and explain* (writing `GateTriage`, never `GateResult`, for
 deterministic gates — [architecture.md §3](./architecture.md)); the `gates`
@@ -602,10 +594,7 @@ A signature proves provenance, not that deployment is authorized. Therefore:
       class-3 alpha.** Within-run hardening is not sufficient: a checkpoint fork
       mints a **new `run_id`**, and a per-run ledger would silently hand each fork a
       fresh alpha budget — optional-stopping by forking until one fork's CI clears.
-      So the class-3 alpha look-ledger is keyed on `(eval_set_identity,
-      decision_id)` — NOT on `state_sha` — so that every retrain/feature/label
-      variant scored against the same eval set debits ONE shared alpha budget;
-      `state_sha` is recorded per-look for audit but does not partition the budget.
+      The class-3 alpha look-ledger is keyed on `(eval_set_identity, decision_id)` — NOT on `state_sha`. `decision_id` is the pre-registered, content-derived identity of the *acceptance question* — `H(eval_set_lineage ⧺ threshold ⧺ metric_family ⧺ decision_rule)` — explicitly INVARIANT to `weight_refs`/`feature_defs`/`label_version`, so a new `decision_id` requires a genuinely new pre-registered objective, not a new candidate; `decision_id` minting is a deterministic, runner-/HITL-gated, WORM-logged event, never agent-self-issued. An eval-set rotation does NOT reset alpha: remaining alpha carries forward into the rotated set under a linked `decision_id` lineage, and the rotation is itself an alpha-spending, runner-/HITL-gated, WORM-logged event. The ledger is GLOBAL/cross-fork (survives `run_id` change); `state_sha` is recorded per-look for audit only.
       Fork-resistance is the special case (forks share `eval_set_identity`).
       Keying alpha on `state_sha` would defeat the purpose: `state_sha` changes on
       every retrain/feature-touch/relabel, so it would give each adaptive iteration
@@ -616,7 +605,8 @@ A signature proves provenance, not that deployment is authorized. Therefore:
       CROSS-FORK looks exceed the pre-registered group-sequential cap**, regardless
       of which `run_id` spent them. This places the class-3 look ledger in the same
       **GLOBAL / survive-forks** set as the other admission-latched records (the WORM
-      stable-FAIL latch, §5; the cross-fork digest disqualification) — forking can
+      stable-FAIL latch, §5; the cross-fork digest disqualification; the
+      judgment-verdict nonce-consumption + negative-verdict latch, §1c) — forking can
       never reset it, and admission re-checks cumulative looks per record.
 - **Overrides are record-scoped, not digest-scoped.** A two-person override targets
   a **specific transient `(gate_name, tree_sha, results_digest)`** record (justified

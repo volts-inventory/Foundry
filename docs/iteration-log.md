@@ -544,6 +544,7 @@ multi-agent editing process, not the architecture.
 | 17 | live-codebase (8 full-domain lenses) | 57 | 9 | 32 | 16 | material remain |
 | 19 | live-codebase (8 full-domain lenses) | 29 | 0 | 25 | 4 | material remain — **BLOCKERs→0** |
 | 21 | live-codebase (8 full-domain lenses) | 10 | 2 | 7 | 1 | material remain — **mostly edit-consistency bugs** |
+| 23 | live-codebase (8 full-domain lenses) | 9 | 1 | 7 | 1 | material remain — **regulated lens CLEAN; rest fix-hygiene** |
 
 \* plus a few editorial-consistency nits fixed in passing (no material findings).
 

@@ -336,7 +336,7 @@ milestone (Assistant mode) is ~2–3 quarters.
 ## 13. How this plan was hardened
 
 This plan was red-teamed in a **critic → solutioner → full-rewrite loop across
-twenty-one rounds at four bars** (plus a Round-22 fix pass): a generalist
+twenty-three rounds at four bars** (plus a Round-24 fix pass): a generalist
 *design-doc* bar (Rounds 1–6), an *implementation-readiness* bar (three-lens
 technical panel — distributed-systems, offensive-security, AI-agents — Rounds
 7–12, converged), a *fitness-for-purpose* bar (SRE/operability, cost/scale,
@@ -355,15 +355,26 @@ were almost entirely **consistency/reconciliation** bugs introduced by the
 multi-fixer method across rounds (the look-ledger key, the §9-vs-§12 adopter
 drift, "second family" vs ≥3 lineages, an unwired verdict-nonce), **not** new
 design flaws; **Round 22** resolved them with verbatim cross-doc definitions to
-stop the drift. **293 findings have now been raised and resolved** (283 prior +
-10 this round).
+stop the drift. **Round 23** ran a fresh full-domain validation panel returning
+**9 findings (1 BLOCKER, 7 MAJOR, 1 MINOR)** — with the regulated panel returning
+the loop's **first NO-MATERIAL-FINDINGS** sweep on the live codebase. Honestly,
+these were again dominated by **fix-hygiene of Round 22's own edits**, not new
+architecture: the look-ledger key change was never propagated to architecture.md (a
+dispatch omission), `decision_id` was left undefined, and the Round-22 verdict-nonce/latch
+was unsoundly placed inside the pure `_merge_gates` reducer and left per-run when it
+must be global/cross-fork like the stable-FAIL latch. **Round 24** resolved all 9 with
+verbatim cross-doc definitions. **302 findings have now been raised and resolved** (293
+prior + 9 this round).
 
 The defining lesson is the progression: **each genuinely new axis of scrutiny
 re-opened a problem the prior axes had signed off on** — and each new round
 re-opens prior sign-offs at the *seams its own fixes created*. The trajectory is
-now **converging** (findings 62→57→29→10; BLOCKERs 10→9→0→2): finding volume is
-collapsing, and the residual churn is now dominated by **edit-consistency** drift
-across the multi-fixer method, not whole-system design defects. **Convergence is
+now **converging** (findings 62→57→29→10→9; BLOCKERs 10→9→0→2→1): no new
+*architectural* defect has surfaced since Round 19, one domain now returns clean,
+and the residual is the multi-agent editing process **policing its own
+consistency/completeness**, not whole-system design risk — an absolute zero-finding
+sweep across all eight lenses is a receding horizon dominated by edit-hygiene rather
+than design. **Convergence is
 not proof of correctness** — a genuinely new axis of scrutiny could still re-open
 the design. The fitness-for-purpose
 lenses surfaced 17 findings about sequencing/operability/cost the technical panel

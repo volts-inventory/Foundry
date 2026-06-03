@@ -123,8 +123,19 @@ A vague A/B rigs itself; this one is specified so it can actually fail. *(AI1)*
   therefore **divided by its own per-resample bootstrap SE**, and the test statistic is
   the **max of the studentized values**; **subset-pivotality holds for these endpoints**
   (the joint null's sub-hypotheses impose no restriction on the un-tested ones), which is
-  what licenses the step-down. The choice is **frozen in the manifest** before any scored
-  run. *(AI-R9-F2, AI-R10-F5)*
+  what licenses the step-down. **Studentizing needs a variance floor**: the gating family
+  includes a **sparse COUNT endpoint** (escaped-defect count — §7's ≤1 per 10 features), and
+  on a rare-count endpoint **many paired cluster-bootstrap resamples are identical/all-zero**,
+  so that endpoint's **per-resample bootstrap SE collapses to ~0** and dividing by it **blows
+  up the studentized statistic** — making max-T **dominated by the lowest-SE sparse-count
+  endpoint**, the mirror image of the high-variance domination studentizing was meant to fix,
+  and **breaking FWER control** on a release-gating family. We therefore **pre-register a
+  variance regularization for studentization on low-count/rare-event endpoints** — a
+  **per-endpoint SE floor** (add-constant / pseudo-count, or a **pooled-null SE**), **or** a
+  **variance-stabilized scale** for count endpoints, **or** moving sparse-count endpoints to
+  the **Holm arm** — and **validate on pilot resamples that no endpoint's bootstrap SE
+  degenerates** before freezing the max-T choice. The choice is **frozen in the manifest**
+  before any scored run. *(AI-R9-F2, AI-R10-F5)*
 - **Power:** stated sample size `n` on the task pool, `k` repeated runs per task
   (to average LLM nondeterminism — §7), a **paired cluster-bootstrap that resamples
   *tasks* (the inferential unit), carrying each task's `k` runs together**, the

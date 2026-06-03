@@ -380,8 +380,8 @@ class GateResult(BaseModel):
     # governance §1c); the signature binds the verdict to its inputs so it can't be replayed:
     verdict_class: str             # config-evaluable | execution-deterministic | statistical | human-witnessed | perceptual (domains.md §1)
     runner_attestation: str | None # sig over (name, state_sha, scanner_config_rev, lineage_map_revision, status, results_digest); human sig for class "human-witnessed"
-    verdict_nonce: str | None      # judgment verdicts only: the single-use challenge bound into judgment_binding; surfaced as a field so the reducer can consume/latch it (see judgment_binding + _merge_gates)
-    judgment_binding: str | None   # judgment verdicts only: binding over (node_id, proxy-observed served_family SET, status, verdict_nonce, lineage_map_revision, state_sha, subject_artifact_uri), stamped OUTSIDE the implementing adapter; _merge_gates rejects writes whose binding doesn't validate (binding status defeats a same-tree verdict-flip replay). verdict_nonce is a server/orchestrator-issued, per-review-request challenge, single-use and freshness-verified at reducer-time AND admission (mirroring the class-4 server_nonce); consumed on the first accepted write for that review request; any later write reusing or omitting a live-issued nonce is rejected. Negative judgment verdicts LATCH monotonically — a request-changes (or trusted cross-check rejection) on a given (node_id, run_against) cannot be superseded by re-emitting an older approve for the same key, exactly as deterministic stable-FAILs latch; released only by a fresh, nonce-bound re-review (so _merge_gates is NOT pure max-by-seq for judgment verdicts)
+    verdict_nonce: str | None      # judgment verdicts only: the single-use server-issued challenge bound into judgment_binding; _merge_gates READS its consumed status from the global record set (it does NOT consume it) — see judgment_binding + _merge_gates
+    judgment_binding: str | None   # judgment verdicts only: binding over (node_id, proxy-observed served_family SET, status, verdict_nonce, lineage_map_revision, state_sha, subject_artifact_uri), stamped OUTSIDE the implementing adapter; _merge_gates rejects writes whose binding doesn't validate (binding status defeats a same-tree verdict-flip replay). verdict_nonce is a server/orchestrator-issued, per-review-request challenge, single-use and freshness-verified at reducer-time AND admission (mirroring the class-4 server_nonce); consumption + the negative-verdict latch live in the GLOBAL cross-fork transactionally-committed record set, NOT in _merge_gates, which only READS them. Consumption is keyed on the verdict's content identity so re-folding an already-accepted write is idempotent. Negative judgment verdicts LATCH monotonically, keyed on cross-fork-stable (node_id, subject_artifact_uri, state_sha) so a sibling fork inherits it — a request-changes (or trusted cross-check rejection) cannot be superseded by re-emitting an older approve for the same key, exactly as deterministic stable-FAILs latch; released only by a fresh, nonce-bound re-review (so _merge_gates is NOT pure max-by-seq for judgment verdicts)
     results_digest: str | None     # class 1/2: hash of raw zone-A results; class 3: (metric, dataset_hash, seed, n, estimate, ci, decision)
     findings: list[str] = []
     retries: int = 0
@@ -444,23 +444,40 @@ def _merge_gates(a, b):                        # gates: LATEST BY seq per (name,
                                                #            a flipped status fails verify_judgment_binding (§4)
             # verdict_nonce is a server/orchestrator-issued, per-review-request challenge,
             # single-use + freshness-verified at reducer-time AND admission (mirrors class-4
-            # server_nonce): CONSUMED on the first accepted write for that review request;
-            # any later write reusing or omitting a live-issued nonce is rejected.
-            if not consume_verdict_nonce(g):
+            # server_nonce). _merge_gates is PURE: it READS the GLOBAL, cross-fork,
+            # transactionally-committed consumed/latched record set (alongside the class-3
+            # look-ledger and stable-FAIL latch) and NEVER mutates it. Consumption is keyed on
+            # the verdict's CONTENT identity, so re-folding an already-accepted write is
+            # idempotent (no "consume on first write" side-effect inside the reducer):
+            if nonce_consumed_by_other_verdict(g):  # READ-only: consumed by a DIFFERENT content identity
                 continue
         k = (g.name, g.run_against)
-        if g.name in JUDGMENT_VERDICTS and k in m and is_negative(m[k]) \
-                and m[k].verdict_nonce == g.verdict_nonce:
+        if g.name in JUDGMENT_VERDICTS and negative_verdict_latched(g):
             continue                           # NEGATIVE-VERDICT LATCH (NOT pure max-by-seq for judgment
-                                               #   verdicts): a request-changes / trusted-cross-check rejection
-                                               #   on (node_id, run_against) cannot be superseded by re-emitting
+                                               #   verdicts), READ from the global cross-fork record set keyed
+                                               #   on (node_id, subject_artifact_uri, state_sha): a request-changes /
+                                               #   trusted-cross-check rejection cannot be superseded by re-emitting
                                                #   an OLDER approve for the same key — exactly as deterministic
-                                               #   stable-FAILs latch; released only by a FRESH, nonce-bound
-                                               #   re-review (a new verdict_nonce)
+                                               #   stable-FAILs latch; released only by a FRESH server-issued
+                                               #   nonce bound to a genuine re-review. The reducer only READS
+                                               #   this committed status; it never writes the latch.
         if k not in m or g.seq > m[k].seq:     # TOTAL tuple order — ties are impossible; emission_epoch
             m[k] = g                           #   (ahead of superstep_index) makes a re-execution outrank
     return list(m.values())                    #   the stale record it supersedes, never tie it
 ```
+
+Judgment-verdict nonce consumption and the negative-verdict latch live in the
+GLOBAL, cross-fork, transactionally-committed record set (alongside the class-3
+look-ledger and the stable-FAIL latch) — NOT inside `_merge_gates`. The
+negative-verdict latch is keyed on cross-fork-stable identity
+`(node_id, subject_artifact_uri, state_sha)`, persisted to the WORM/global store
+so a sibling fork (new `run_id`) inherits it; it is surfaced cross-fork at the
+Review→loop routing point and re-checked at E2E/Release exactly like the digest
+stable-FAIL latch, and released only by a fresh server-issued nonce bound to a
+genuine re-review. `_merge_gates` stays a pure, commutative, replay-deterministic
+function that READS consumed/latched status as committed input and never mutates
+it; nonce consumption is keyed on the verdict's content identity so re-folding an
+already-accepted write is idempotent. *(DS-R22-F1)*
 
 **Seq — a total, race-free causal order *within* a run; globally unique across
 runs.** `seq` is **not** a shared mutable counter (parallel branches share one
@@ -526,16 +543,23 @@ Why each fix matters:
   "approve" is rejected — the binding includes `status` (+ `verdict_nonce`), so a
   same-tree **verdict-flip** (copy a genuine binding, set `status="approve"`, re-emit
   higher-`seq`) fails validation, not just cross-tree replay. The `verdict_nonce` is
-  **single-use** (server/orchestrator-issued per review request, consumed on first
-  accepted write, freshness-verified at reducer-time AND admission like the class-4
-  `server_nonce`), so even a **genuine, still-valid `approve` binding cannot be
-  REPLAYED** at a higher `seq` to mask a later `request-changes`; and negative
-  judgment verdicts **LATCH monotonically** — `_merge_gates` is therefore **not pure
-  max-by-`seq` for judgment verdicts**: a `request-changes` (or trusted cross-check
-  rejection) on `(node_id, run_against)` cannot be superseded by an older `approve`,
-  exactly as deterministic stable-FAILs latch, released only by a fresh nonce-bound
-  re-review. In-graph routing and the HITL evidence pack read the attested record.
-  *(DS1, DS2, DS8, DS-R9-F2)*
+  **single-use** (server/orchestrator-issued per review request, freshness-verified
+  at reducer-time AND admission like the class-4 `server_nonce`); its **consumption
+  and the negative-verdict latch live in the GLOBAL, cross-fork,
+  transactionally-committed record set — NOT inside `_merge_gates`**, which only
+  **READS** that committed status and never mutates it (so the reducer stays pure,
+  commutative, and replay-deterministic, and a LangGraph re-fold on resume is
+  idempotent because consumption is keyed on the verdict's content identity). This
+  way even a **genuine, still-valid `approve` binding cannot be REPLAYED** at a
+  higher `seq` to mask a later `request-changes`; and negative judgment verdicts
+  **LATCH monotonically** — `_merge_gates` is therefore **not pure max-by-`seq` for
+  judgment verdicts**: a `request-changes` (or trusted cross-check rejection),
+  latched on cross-fork-stable `(node_id, subject_artifact_uri, state_sha)` so a
+  sibling fork (new `run_id`) inherits it, cannot be superseded by an older
+  `approve`, exactly as deterministic stable-FAILs latch, surfaced at the
+  Review→loop routing point and re-checked at E2E/Release, released only by a fresh
+  server-issued nonce bound to a genuine re-review. In-graph routing and the HITL
+  evidence pack read the attested record. *(DS1, DS2, DS8, DS-R9-F2, DS-R22-F1)*
 - **`status` distinguishes `error` from `fail`** — an infra crash is not a
   verdict; the join handles it separately (§5). *(DS7)*
 - **All list channels are keyed set-unions** (`tasks` by id, `actions` by
@@ -662,16 +686,15 @@ WORM audit) is handled by a **transactional outbox**, not by hope.
 
   The protocol is **intent-log → act → confirm-log**; if none of the three can
   establish state on resume, the node **fails to the human** (never assumes). *(DS2, DS3-F3)*
-- **All idempotency / dedup / marker records — *and the class-3 alpha-spending
-  look ledger* — are GLOBAL** (run-independent): they survive checkpoint forks, and
+- **All idempotency / dedup / marker records — *the class-3 alpha-spending
+  look ledger*, *judgment-verdict nonce consumption*, and *the negative-verdict
+  latch* (keyed on `(node_id, subject_artifact_uri, state_sha)`) — are GLOBAL**
+  (run-independent): they survive checkpoint forks, and
   fork-recovery replay re-queries them exactly as an ordinary resume does. So a
   poisoned-checkpoint fork **never re-fires** a path-2 or path-3 effect — the global
   record already reflects the prior emission regardless of which run/fork produced
   it. **Forking does NOT reset class-3 alpha:** governance owns the look-ledger
-  mechanics ([governance.md §3](./governance.md)); the wiring here is that forks of
-  the same class-3 decision **share one budget keyed on `(state_sha, decision-id,
-  eval-set identity)`**, so an operator/adversary cannot fork *before* a look and
-  re-draw a full alpha budget per fork (optional-stopping laundering).
+  mechanics ([governance.md §3](./governance.md)). The class-3 alpha look-ledger is keyed on `(eval_set_identity, decision_id)` — NOT on `state_sha`. `decision_id` is the pre-registered, content-derived identity of the *acceptance question* — `H(eval_set_lineage ⧺ threshold ⧺ metric_family ⧺ decision_rule)` — explicitly INVARIANT to `weight_refs`/`feature_defs`/`label_version`, so a new `decision_id` requires a genuinely new pre-registered objective, not a new candidate; `decision_id` minting is a deterministic, runner-/HITL-gated, WORM-logged event, never agent-self-issued. An eval-set rotation does NOT reset alpha: remaining alpha carries forward into the rotated set under a linked `decision_id` lineage, and the rotation is itself an alpha-spending, runner-/HITL-gated, WORM-logged event. The ledger is GLOBAL/cross-fork (survives `run_id` change); `state_sha` is recorded per-look for audit only.
 - **Checkpointer:** `PostgresSaver` (prod) / `SqliteSaver` (dev).
 - **Time-travel** rewinds *internal state only*; forking creates a **new run ID**,
   never mutates the original WORM record, and replaying past an effectful node

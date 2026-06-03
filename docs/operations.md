@@ -268,6 +268,20 @@ A/B alone is `3 arms × n × k`). A run-admission layer is required:
   **unlikely to resume soon** (long-tail HITL pauses), never runs about to wake.
   **Long-paused runs hibernate:**
   spill the worktree to the **content-addressed store** and reconstitute on resume.
+  Spilling alone is a *relocation* — by the byte-count argument above it moves bytes,
+  not reduces them — so hibernation earns byte-cap relief only through its **byte-reducing**
+  side: **content-addressed dedup/compaction against the shared base tree.** Forks and
+  siblings share a large common `tree_sha`, so a hibernated run pins only its
+  **incremental** blobs over that shared base — materially smaller than the live worktree —
+  and **only those incremental pinned bytes count against the cap**. That incremental delta
+  is **still counted** (there is **no uncounted CAS pool**): hibernation **shrinks** a run's
+  footprint, it does not move it off the books. Dedup is therefore a one-time
+  step-down, **not** a drain — beyond it the cap is relieved only by a run **reaching
+  terminal state** (the only byte-reducing drain, gated on saturated reviewer-pairs §7).
+  So the **explicit operator decision point** below is the **real backstop**, not a rare
+  exception: it must be **sized and SLO'd** (capacity, decision latency, escalation path),
+  because once every paused run is already hibernated/deduped and none can drain, it is the
+  only remaining lever.
   Hibernation makes the *whole* worktree depend on CAS durability for an unbounded
   HITL pause, so spilled artifacts carry an explicit **retention lease/pin** keyed to
   live paused-run state, **excluded from object-store lifecycle expiry and from

@@ -60,7 +60,10 @@ RunStatus = {
   queueing (§6) vary by node type. Derive it per node type from a maintained
   latency distribution: `p99(node_type) + provider-backoff allowance + expected
   queue-wait`, **refreshed when a node enters a known-slow state** (e.g. failover,
-  backpressure, **reconstituting-from-hibernation** §6). Distinguish **"slow but
+  backpressure, **reconstituting-from-hibernation** §6). For a hibernated run that was
+  **cold/archival-evicted** (§6 $/byte lever), reconstitution also adds a **cold-tier
+  first-byte-restore term** (minutes-to-hours) to that deadline — otherwise a rehydrating
+  run pages false `wedged` before its first byte returns. Distinguish **"slow but
   progressing"** — an adapter heartbeat or partial-progress marker advances
   `last_progress` even without a superstep, and reconstitution emits a
   partial-progress/heartbeat marker so a rehydrating run reads as slow-but-progressing,
@@ -130,8 +133,11 @@ their *availability* a fleet-wide concern:
   that capacity, so a primary outage fleet-stalls on the secondary's `429`s.
   **Reserve and price** secondary-family capacity for the **sum of concurrent
   second-family consumers**, not peak T1 alone: **(a)** always-on high-risk judging on
-  every feature, **(b)** burst headroom for the worst-case T1 **failover fan-in**, and
-  **(c)** flake-recovery cross-family re-judges (§7) — these can co-occur, so sizing to
+  every feature, **(b)** burst headroom for the worst-case T1 **failover fan-in**,
+  **(c)** flake-recovery cross-family re-judges (§7), and **(d)** the **held-out-mutant-
+  rotation re-grounding spike** (§5), which re-verifies high-risk criteria fleet-wide and
+  so re-fires the mandatory second-family cross-family judge per high-risk criterion
+  ([evaluation.md §4/§8](./evaluation.md)) — these can co-occur, so sizing to
   "peak T1 load" alone deadlocks. Secondary-provider rate-limit/quota becomes a
   **capacity dimension in §6 backpressure**; behavior when the **secondary is also
   saturated** is defined there (queue against reserved capacity, noisy-neighbor guard
@@ -213,8 +219,9 @@ A/B alone is `3 arms × n × k`). A run-admission layer is required:
   provider rate-limits/quota** (primary *and* secondary family — see §4), with
   queue-depth alerting; a heavy run queues rather than starving the fleet.
   Secondary-family quota is a first-class backpressure dimension: when the secondary
-  is **also saturated** (T1 failover + always-on high-risk judging colliding),
-  the noisy-neighbor guard applies to provider quota too — runs queue against the
+  is **also saturated** (T1 failover + always-on high-risk judging + **mutant-rotation
+  re-grounding** §5 colliding), the noisy-neighbor guard applies to provider quota too —
+  runs queue against the
   reserved secondary capacity (§4) instead of fleet-stalling on shared `429`s.
 - **Paused-run state footprint.** Releasing compute on HITL/store/trust pause (§7,
   §3, §4) does **not** release state — worktrees, checkpoints, artifacts, indexes
@@ -223,11 +230,15 @@ A/B alone is `3 arms × n × k`). A run-admission layer is required:
   storage cap with alerting** bounds the aggregate. **Cap-hit with no drainable
   consumer:** when the cap is reached but every consumer is a legitimately-paused,
   un-staffable High-tier run — admission is already throttled to zero, so nothing
-  drains it — alerting alone is insufficient. A defined policy applies: **tier-ordered
-  eviction to a cheaper CAS storage tier**, and **storage-pressure feedback that forces
-  the §7 reviewer-queue escalation (batch/delegate) sooner** to clear paused state, with
-  an **explicit operator decision point** if neither relieves pressure. **Long-paused
-  runs hibernate:**
+  drains it — alerting alone is insufficient. A defined policy applies. The cap is
+  **byte-denominated**, so tier-ordered eviction to a cheaper CAS storage tier changes
+  **$/byte, not byte count**, and cannot relieve it; only **reducing bytes** does. So the
+  byte-relief order is: **storage-pressure feedback that forces the §7 reviewer-queue
+  escalation (batch/delegate) sooner** to drive paused runs to terminal (the only
+  byte-reducing drain, itself gated on saturated reviewer-pairs §7), with an **explicit
+  operator decision point** if that does not relieve pressure. Tier-ordered cold/archival
+  eviction remains available as a **$/byte (cost-rate) lever** feeding the fleet cost-rate
+  cap above — not a byte-cap relief. **Long-paused runs hibernate:**
   spill the worktree to the **content-addressed store** and reconstitute on resume.
   Hibernation makes the *whole* worktree depend on CAS durability for an unbounded
   HITL pause, so spilled artifacts carry an explicit **retention lease/pin** keyed to
@@ -239,6 +250,10 @@ A/B alone is `3 arms × n × k`). A run-admission layer is required:
   worktree only because every handle is re-resolvable by `tree_sha`/content address
   on wake, so GC
   cannot break resume.
+  **Cold-tier restore latency feeds back to the §2 deadline.** A run hibernated to and
+  then cold/archival-evicted (the $/byte lever above) rehydrates with **minutes-to-hours
+  first-byte latency** on resume; the §2 reconstitution watchdog deadline must carry that
+  cold-tier-restore term (§2) or a resuming run pages false `wedged`.
 
 *(SRE-F6; bounds the trusted-runner serialization in COST-F3.)*
 

@@ -51,18 +51,30 @@ A vague A/B rigs itself; this one is specified so it can actually fail. *(AI1)*
   there cannot distinguish "no structural signal" from "signal swamped by
   overhead." So a pre-registered **equal-effective-task-token** secondary
   is reported alongside, **specifically so the kill/redesign branch (§1/§2.5) can
-  separate those two cases.** Naïve token-subtraction is **asymmetric** — Foundry's
+  separate those two cases.** Because that branch is **decision-grade** — the
+  token-secondary routes {USD-null, token-positive} into a funded redesign vs a hard
+  KILL (§2.5) — it **carries its own pre-registered MDE/alpha/power** defining what makes
+  it "Positive" vs "Null" (it is *not* covered by the USD-primary's alpha or the
+  gating-secondary family's FWER correction, which are separate endpoints). That
+  MDE/alpha/power is **frozen in the manifest** before any scored run; an under-specified
+  secondary would let the redesign-vs-KILL fork turn on an unpowered read. Naïve
+  token-subtraction is **asymmetric** — Foundry's
   overhead is cleanly subtractable (typed planning/gate/monitor nodes) but the
   single-agent baseline interleaves planning/reflection *inside the implementation
   turns*, so subtracting only Foundry's overhead biases the secondary *toward*
   Foundry. To remove the asymmetry, "implementation-directed tokens" is defined by an
-  **arm-neutral operational rule applied identically to both arms' traces:** tokens
-  count **only when the turn emits an implementation action** (a diff / file edit / test
-  edit), and deliberation-only turns (planning, reflection, gate reasoning) **do not**,
+  **arm-neutral operational rule applied identically to both arms' traces.** The rule is
+  **sub-turn, not turn-granular:** the interleaving it must neutralize happens *inside* a
+  turn — a single baseline turn that is 90% planning + one small edit is overwhelmingly
+  deliberation, yet a turn-level "did this turn emit an action?" classifier would count it
+  **100% implementation-directed**, now biasing *toward the baseline* (the mirror of the
+  asymmetry it was meant to fix). So the classifier measures **sub-turn token composition
+  — deliberation tokens vs action tokens *within* each turn** (planning/reflection/gate
+  reasoning vs the diff/file-edit/test-edit content) — and counts only the action tokens,
   regardless of which arm or node produced them. The classifier is **pre-registered and
-  validated on both arms' traces** before any scored run. (If validation fails to
-  classify symmetrically, we **fall back to total task tokens for both arms** — a
-  symmetric handicap — rather than ship a biased subtraction.) The arms have the
+  validated at *sub-turn* granularity on both arms' traces** before any scored run. (If
+  validation fails to classify symmetrically, we **fall back to total task tokens for both
+  arms** — a symmetric handicap — rather than ship a biased subtraction.) The arms have the
   *same tier mix available* so Foundry can't win merely by using a stronger model
   than the baseline. *(COST-F4)*
 - **Single confirmatory primary endpoint:** **SWE-EVO resolution vs baseline
@@ -72,7 +84,17 @@ A vague A/B rigs itself; this one is specified so it can actually fail. *(AI1)*
   escalation-without-resolution, or crash — scores as an unresolved task**, not a
   dropped sample. This ITT rule is pre-registered alongside the hidden-test ITT rule
   (§6): without it, **differential attrition inflates Foundry**, which has more
-  abort/escalate paths than the ungated baseline. *(AI-R10-F3)*
+  abort/escalate paths than the ungated baseline.
+  **The token-secondary uses a *different* ITT denominator** (also pre-registered):
+  applying the primary's "budget-exhaustion = unresolved" rule to the token-equalized
+  secondary would **re-import the very overhead penalty the secondary exists to remove**
+  — a task that burns its token budget on coordination/monitor overhead *before* emitting
+  any actions would score unresolved, smuggling the USD-primary's handicap back in. So
+  the secondary's denominator is **defined consistently with token-equalization**: it is
+  taken over **tasks that reached the implementation phase**, and exhaustion/non-completion
+  is measured **in effective-task-tokens** (action-token budget), so a task scores
+  unresolved only when it exhausts its *effective* budget, not when overhead consumes the
+  raw budget first. *(AI-R10-F3)*
   Every other scorecard threshold (§7) is **secondary/descriptive** and cannot, on
   its own, block the A/B verdict. Any secondary that *can* gate a release is placed
   in a stated **hierarchical gatekeeping** order with a pre-registered FWER
@@ -82,12 +104,19 @@ A vague A/B rigs itself; this one is specified so it can actually fail. *(AI1)*
   and false-negative rates and is retired. **The gating-secondary endpoints are
   correlated** (they are computed on the **same paired cluster-bootstrap task
   resamples**, pre-registered as such), so the correction must account for that
-  dependence. We pre-register **either** a **bootstrap step-down max-T procedure**
-  (uses the empirical between-endpoint dependence from the shared resamples,
+  dependence. We pre-register **either** a **studentized bootstrap step-down max-T
+  procedure** (uses the empirical between-endpoint dependence from the shared resamples,
   FWER-controlling and tighter) **or** plain **Holm–Bonferroni** with an explicit
   acknowledgment that, on positively-correlated endpoints, Holm is **conservative —
-  inflating the false-negative / KILL rate**. The choice is **frozen in the manifest**
-  before any scored run. *(AI-R9-F2, AI-R10-F5)*
+  inflating the false-negative / KILL rate**. **The max-T must be *studentized*** —
+  these endpoints have **heterogeneous variances** (a resolution rate, a fidelity %, a
+  defect count are not on a common scale), so an un-studentized max-T is **dominated by
+  the highest-variance endpoint and does not control FWER**. Each endpoint statistic is
+  therefore **divided by its own per-resample bootstrap SE**, and the test statistic is
+  the **max of the studentized values**; **subset-pivotality holds for these endpoints**
+  (the joint null's sub-hypotheses impose no restriction on the un-tested ones), which is
+  what licenses the step-down. The choice is **frozen in the manifest** before any scored
+  run. *(AI-R9-F2, AI-R10-F5)*
 - **Power:** stated sample size `n` on the task pool, `k` repeated runs per task
   (to average LLM nondeterminism — §7), a **paired cluster-bootstrap that resamples
   *tasks* (the inferential unit), carrying each task's `k` runs together**, the
@@ -96,17 +125,23 @@ A vague A/B rigs itself; this one is specified so it can actually fail. *(AI1)*
   independent draws overstates effective N. The exit threshold (Foundry > baseline
   by ≥ a pre-registered margin at ≤ equal cost) is only meaningful with `n`/`k`
   sized to detect it. *(AI-R9-F3)*
-- **Variance/base-rate pilot (BLOCKER — runs first, on disjoint tasks):** a correct
-  power calc needs **this study's** control-arm resolution rate and its task-level
-  effect-size variance, and **neither is known a priori** — the ~21% is a *borrowed
-  frontier figure*, not this strong baseline's rate. So `n`/`k`/MDE cannot be honestly
-  frozen from a guess. We **pre-register a separate, budgeted variance/base-rate pilot**
-  (a held-out slice / disjoint task set, **never scored as part of the A/B**) whose
-  *only* outputs are (i) the strong-baseline control resolution rate and (ii) the
-  within- vs between-task variance components. `n`/`k`/MDE are then **frozen off the
-  pilot** and hashed; the scored confirmatory A/B runs on **tasks disjoint from the
-  pilot's**. The pilot **consumes part of the funded budget** (§8 roll-up reserves it),
-  and its outputs are read-only into the power calc — it is *not* a rung to descend to. *(AI-R10-F1)*
+- **Variance/base-rate pilot (BLOCKER — runs first, on disjoint tasks drawn from the
+  same frame):** a correct power calc needs **this study's** control-arm resolution rate
+  and its task-level effect-size variance, and **neither is known a priori** — the ~21%
+  is a *borrowed frontier figure*, not this strong baseline's rate. So `n`/`k`/MDE cannot
+  be honestly frozen from a guess. We **pre-register a separate, budgeted
+  variance/base-rate pilot** (**never scored as part of the A/B**) whose *only* outputs
+  are (i) the strong-baseline control resolution rate and (ii) the within- vs
+  between-task variance components. **Both base rate and between-task variance are
+  properties of the task *distribution*, not of a particular task list, so they only
+  transfer if pilot and scored slice share that distribution:** we **pre-register one
+  common sampling frame + strata** and draw **both** the pilot slice and the scored slice
+  from it — **disjoint task sets, identical distribution** — rather than a free-floating
+  "disjoint" pilot that could silently differ in difficulty mix and mis-power the run.
+  `n`/`k`/MDE are then **frozen off the pilot** and hashed; the scored confirmatory A/B
+  runs on **tasks disjoint from the pilot's but sampled from the same frozen frame**. The
+  pilot **consumes part of the funded budget** (§8 roll-up reserves it), and its outputs
+  are read-only into the power calc — it is *not* a rung to descend to. *(AI-R10-F1)*
 - **`n`/`k` allocation is a constrained optimization, not two free numbers:** `n`
   (tasks) and `k` (repeats/task) are pre-registered as the **joint solution that
   minimizes the task-level effect-estimator variance under the funded budget**, using
@@ -145,7 +180,13 @@ pre-registered and hashed into the manifest:**
 
 The overhead-redesign branch's re-test (its endpoint, MDE, budget, and the single
 re-test it is allowed) is itself frozen in the manifest before the Phase-1.5 run, so it
-cannot become a fishing license after a null.
+cannot become a fishing license after a null. **What the redesign may change is frozen
+too, not just its statistics:** the redesign is **constrained to overhead-affecting
+components only** — coordination, monitoring, and context-assembly machinery — and that
+scope is hashed into the manifest. It **forbids changes to the role set, gate structure,
+or graph topology**; otherwise the re-test silently stops being a clean overhead-reduction
+re-run and becomes a **second confirmatory test of a *modified* structural hypothesis** —
+exactly the double-testing multiplicity the design forbids (§6.5).
 
 ## 3. Outcome evals
 
@@ -278,11 +319,16 @@ re-spend alpha as a second gate.
 
 What a **Phase-6 disconfirmation** triggers, given Phases 2–5 are already built: it
 **cannot un-spend the sunk cost** of the machinery that Phase 1.5 already licensed, and
-it does **not** retroactively invalidate the gated-mode product. But it **blocks the
-Phase-6 exit and the Autonomous-mode claim** — the published scorecard cannot be
-declared stable and the confirmatory-reproduction exit ([roadmap.md Phase 6](./roadmap.md))
-is **not met**, gating any "Autonomous" / hands-off claim until the discrepancy is
-reconciled. (Consistent with [roadmap.md](./roadmap.md), edited in parallel.)
+it does **not** retroactively invalidate the gated-mode product. **Resolving the
+estimation-vs-gating tension explicitly: Phase 6 does *not* gate.** Because it is
+estimation/replication only and spends no alpha, a Phase-6 effect estimate **cannot, on
+its own, block the Autonomous-mode claim** — that would make it a second confirmatory
+test through the back door, the very multiplicity this section retires. A Phase-6 result
+**materially inconsistent with the Phase-1.5 verdict** (e.g., a CI that excludes the
+Phase-1.5 effect) is therefore handled as an **investigation trigger** — it flags a
+reconciliation/audit obligation and is reported on the scorecard — **not** as an
+automatic gate on the Autonomous claim, which remains licensed by the Phase-1.5
+arbiter. (Consistent with [roadmap.md](./roadmap.md), edited in parallel.)
 
 ## 7. Headline scorecard — concrete thresholds
 

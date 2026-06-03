@@ -57,7 +57,14 @@ software needs humans *steering*, not just vetoing.
   constraints** that **persist across evolution cycles** as part of the
   `pinned_constraints`/design-token set — so they shape future builds rather than
   being re-litigated as a one-off re-plan. This is a steering channel in its own
-  right. Encoding settled taste **lowers the material-threshold / improves
+  right. **Taste authorship persists across runs.** Because a blessed taste
+  constraint encodes a human's substantive steering contribution, its
+  **authorship is carried into the author set** of any *later* artifact whose
+  approval is grounded in that constraint — so the constraint's author **cannot
+  serve as approver-of-record** on that later artifact (preparer/validator
+  independence across runs, not just within one run), enforced by the same
+  "approver ∉ author set" distinctness check ([domains.md §5](./domains.md),
+  [governance.md §1e](./governance.md)). Encoding settled taste **lowers the material-threshold / improves
   first-pass yield** (fewer iteration rounds per blessing), but it does **not**
   eliminate the terminal human blessing: perceptual verdicts are class-5 —
   mandatory, non-auto-approvable, never auto-approved
@@ -66,7 +73,12 @@ software needs humans *steering*, not just vetoing.
   narrow, audited class of changes fully covered by an already-blessed taste
   constraint, which may auto-skip *only* with that constraint reference recorded as
   the approval grounding — the human blessing is inherited from the constraint, not
-  waived.)
+  waived.) This "fully-covered-by-a-blessed-constraint" predicate and the
+  domains.md **UX-F2a** auto-skip (perceptual-distance floor **AND**
+  semantic-affordance classifier) are **two distinct predicates over the same
+  mandatory class-5 verdict**: an auto-skip requires satisfying **BOTH** (the
+  strictest AND), so neither weak path alone authorizes skipping the perceptual
+  verdict ([domains.md §5](./domains.md)).
 - **Collaborative, not fire-and-forget:** the default operating mode (§4) is a
   human partner reviewing and steering, with autonomy earned incrementally.
 

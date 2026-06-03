@@ -137,18 +137,29 @@ grounded. So the verdict is grounded by gate class: *(SEC-R10-F1)*
     sources are barred from the execution-deterministic class** (they fall to a
     judgment verdict), and a **trusted differential harness controls inputs and
     outputs** so the test cannot observe which side it is running against. *(SEC-R12-F1)*
-  - **Value-pinned vacuous tests survive the flip.** The adapter authors **both**
-    implementation and test, so it can hard-code the real output
-    (`assert f(x) == <real output>`) — a single pinned assertion passes pass-on-real,
-    fails across mutants, and is invariant under behavior-preserving perturbation
-    while exercising essentially nothing. Flip-direction alone does not catch it, so
-    the discriminator additionally requires **adequacy/diversity**: the test must
-    **fail across a held-out mutant family broad enough that no single pinned
-    assertion can cover it**, and the family uses **input-space mutants, not only
-    code mutants**. This **adequacy/diversity floor is bound into class-2 acceptance**
-    — not only checked at the scheduled mutation gate (§1a) — and **single-point /
-    value-pinned tests do NOT clear the execution-deterministic (class-2) class**.
-    *(SEC-R12-F1)*
+  - **Value-pinned vacuous tests survive the flip — and a *lookup table* of them
+    survives "more than one assertion."** The adapter authors **both** implementation
+    and test, so it can hard-code the real output (`assert f(x) == <real output>`) —
+    a single pinned assertion passes pass-on-real, fails across mutants, and is
+    invariant under behavior-preserving perturbation while exercising essentially
+    nothing. Flip-direction alone does not catch it, so the discriminator additionally
+    requires **adequacy/diversity**: the test must **fail across a held-out mutant
+    family broad enough that no single pinned assertion can cover it**, and the family
+    uses **input-space mutants, not only code mutants**. But a "broad enough family"
+    is **not** met by "more than one assertion": if the adapter can **enumerate or
+    derive the input set** the held-out mutants predictably perturb (boundary/partition
+    points), it can write a **finite TABLE of pinned assertions** `assert f(xᵢ) == rᵢ`
+    over exactly those inputs — passes-on-real, fails-across-the-mutant-family,
+    perturbation-invariant, yet still exercises nothing. So the floor is grounded on
+    inputs the test **cannot** itself choose: zone B **holds out the
+    input-sampling distribution** (secret and non-enumerable — not just the mutants,
+    so the perturbed input set is not derivable), **and/or requires differential
+    adequacy on TRUSTED-INFRA-FUZZED inputs the test did not select**. A **finite set
+    of pinned assertions over a derivable input set does NOT clear class-2** — the bar
+    is non-enumerable/fuzzed-input adequacy, not merely ">1 assertion." This
+    **adequacy/diversity floor is bound into class-2 acceptance** — not only checked at
+    the scheduled mutation gate (§1a) — and **single-point / value-pinned / lookup-table
+    tests do NOT clear the execution-deterministic (class-2) class**. *(SEC-R12-F1)*
 
   This restores the needed property: the verdict is a function of *behavior
   observed by trusted infra*, not of agent-controllable environment identity.
@@ -158,9 +169,12 @@ grounded. So the verdict is grounded by gate class: *(SEC-R10-F1)*
 
 The signature is **bound to its inputs** — `runner_attestation` signs
 `(gate_name, tree_sha, scanner_config_revision_hash, mutant_rotation_id,
-scanner_rule_version, status, results_digest)` — so a valid attestation cannot be
-replayed onto a different tree/config/predicate; admission re-checks **all** of
-these per record, not just the runner identity. Binding **mutant-rotation-id +
+scanner_rule_version, lineage_map_revision, status, results_digest)` — so a valid
+attestation cannot be replayed onto a different tree/config/predicate; admission
+re-checks **all** of these per record, not just the runner identity.
+(`lineage_map_revision` pins the criterion/threat-model→oracle binding the verdict
+was grounded under; [architecture.md §3](./architecture.md) owns the
+judgment-binding side — keep the term consistent.) Binding **mutant-rotation-id +
 scanner-rule-version** into the tuple (and into the dependency-scoped reuse key,
 §1f) means an execution-dependent verdict's anti-gaming grounding is pinned to the
 exact rotation/rule-version it was grounded under. *(SEC-R9-F3, SEC-R12-F2)*
@@ -512,6 +526,18 @@ A signature proves provenance, not that deployment is authorized. Therefore:
   **lapsed since signing** writes a **disqualifying WORM record + recall escalation**.
   This covers revocation specifically, beyond the expiry/withdrawal the signed
   `timestamp`/`meaning-of-signing` already capture. *(SEC-R12-F5)*
+  - **Revocation-status-UNREACHABLE is FAIL-CLOSED.** A naive revocation check
+    soft-fails when the responder is unreachable — the classic bypass: an attacker
+    holding a compromised class-4 credential **DoSes the OCSP/CRL/IdP responder** so
+    admission can't see the revocation, and "couldn't check" silently admits. So an
+    **unreachable/indeterminate revocation status is treated as FAIL-CLOSED**: admission
+    **does not admit**, and — to be unambiguous — this is **neither a gate `FAIL` nor an
+    `error` verdict** (an `error` would route to bounded retry / never latch, §5/§10),
+    but its **own admission-deny on indeterminate standing**. To avoid making admission
+    hostage to responder liveness, this is satisfied offline by **OCSP stapling /
+    short-lived signed standing assertions captured at sign-time and re-verified
+    offline at admission** (no live responder call on the admission path) — a stapled
+    proof that is missing or stale **also fails closed**. *(SEC-R12-F5)*
 - **Fail-closed on *stable* FAILs, with a bounded recovery for transient ones.**
   Admission latches a digest as disqualified on a FAIL whose `results_digest`
   reflects a **stable, verdict-relevant input** (a config/scan-driven outcome — a
@@ -555,6 +581,18 @@ A signature proves provenance, not that deployment is authorized. Therefore:
     tuple** (alongside the eval-set/seed the runner re-derives from, §1c) and
     **re-checked at admission**, so a verdict minted past its look budget — or with a
     laundered ledger — is rejected exactly as a stale rotation/config binding is.
+    - **The look ledger is a GLOBAL, cross-fork resource — forking does not reset
+      class-3 alpha.** Within-run hardening is not sufficient: a checkpoint fork
+      mints a **new `run_id`**, and a per-run ledger would silently hand each fork a
+      fresh alpha budget — optional-stopping by forking until one fork's CI clears.
+      So the ledger is **keyed on `(state_sha, metric/decision-id, eval-set
+      identity)`, not on `run_id`**: every fork of the same class-3 decision
+      **shares one alpha budget**, and a fork's look **debits the shared ledger**.
+      Admission **rejects a class-3 verdict whose CUMULATIVE CROSS-FORK looks exceed
+      the pre-registered group-sequential cap**, regardless of which `run_id`
+      spent them. This places the class-3 look ledger in the same **GLOBAL /
+      survive-forks** set as the other admission-latched records (the WORM stable-FAIL
+      latch, §5; the cross-fork digest disqualification) — forking can never reset it.
 - **Overrides are record-scoped, not digest-scoped.** A two-person override targets
   a **specific transient `(gate_name, tree_sha, results_digest)`** record (justified
   by its recovery quorum); admission then **re-evaluates the full gate set**, so a

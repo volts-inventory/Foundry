@@ -127,7 +127,9 @@ Load-bearing control rules:
 > **not** taken from the adapter's self-report: the mediating model-provider proxy
 > (§2b — the *only* credential holder) observes the actual provider/model each
 > request hits and stamps a **proxy-observed `served_family`/`served_model_id`** into
-> the run manifest per node. An adapter-declared family that **disagrees** with
+> the run manifest per node. `served_family` is a **SET of lineage ids** (a single
+> model maps to a one-element set; an ensemble maps to its full component-lineage
+> set), not a scalar — so decorrelation is set-disjointness, not `!=` (below). An adapter-declared family that **disagrees** with
 > proxy observation is **rejected**, and a node whose family the proxy cannot attest
 > is **INELIGIBLE for high-risk judgment**. Adapters: Claude Code (`claude -p`),
 > OpenAI Codex CLI (`codex exec`), OpenHands/SWE-agent, or a raw multi-provider ReAct
@@ -153,17 +155,29 @@ Load-bearing control rules:
 > optional)** for Review, and Review additionally carries a **sampled/triggered
 > trusted cross-check** (a cross-family independent re-judgment on a sampled or
 > risk-triggered fraction) so the decorrelation-only seam is not the sole control.
-> Do not claim HITL covers Review.
+> Do not claim HITL covers Review. **In decorrelation-relaxed degraded mode this
+> sampled cross-check is itself cross-family and therefore unsatisfiable in the same
+> outage that triggered degraded mode** — so in degraded mode the sampled trusted
+> cross-check is **REPLACED BY (not supplemented with) the mandatory HITL** of §2/§8;
+> it is **never silently run same-family**.
 >
 > **Judgment-verdict integrity binding.** Judgment verdicts are *not* in
 > `DETERMINISTIC_GATES`, so `_merge_gates` does not attestation-gate them (§3) — an
 > agent inside the implementing adapter could otherwise forge or replay an "approve"
 > into the live `gates` channel. Every judgment verdict must therefore carry a
-> **judgment-verdict binding** `(node_id, proxy-observed served_family, state_sha,
-> subject_artifact_uri)` produced **OUTSIDE the implementing adapter** (proxy- or
-> orchestrator-stamped, never adapter-self-signed). `_merge_gates` **rejects
-> judgment-verdict writes whose binding does not validate**; keying the binding on
-> `state_sha` prevents replaying a stale "approve" across trees/forks (§3, §4).
+> **judgment-verdict binding** `(node_id, proxy-observed served_family SET, status,
+> verdict_nonce, lineage_map_revision, state_sha, subject_artifact_uri)` produced
+> **OUTSIDE the implementing adapter** (proxy- or orchestrator-stamped, never
+> adapter-self-signed). `_merge_gates` **rejects judgment-verdict writes whose
+> binding does not validate**. Keying the binding on `state_sha` prevents replaying a
+> stale "approve" across trees/forks; **binding `status` (+ a per-verdict
+> `verdict_nonce`) prevents the same-tree verdict-FLIP** — without it an agent can
+> copy a genuine reviewer's binding (same `node_id`/`served_family`/`state_sha`/
+> `subject_artifact_uri`), set `status="approve"`, re-emit at a higher `seq`, and
+> have `_merge_gates` take the forged approve; since the per-task Review seam has **no
+> HITL** (below), that flip would defeat the only gate stopping injected code. A
+> flipped `status` no longer matches the stamped binding and fails
+> `verify_judgment_binding` (§3, §4).
 >
 > **Decorrelation binds proxy-observed served lineage, not adapter brand.**
 > OpenHands, the raw loop, *and* Claude Code can each drive any model, so the brand
@@ -174,18 +188,25 @@ Load-bearing control rules:
 > - **Generalized over all judge↔subject seams.** The deterministic, admission-/CI-
 >   checked invariant covers **every** judge↔subject seam — at minimum
 >   {reviewer↔implementer, test-author↔implementer, criteria-critic↔PM} — and fails
->   **closed** on high-risk judgment when the two sides share a proxy-observed
->   `served_family`, independent of brand. (Earlier drafts scoped this to
->   reviewer↔implementer only.)
-> - **`served_family` is a curated lineage-EQUIVALENCE CLASS.** It is a **versioned,
->   human-curated mapping keyed on base-model lineage** — explicitly **not** provider
->   brand and **not** the model-id string — held under the **scanner-config trust
->   boundary** (§SEC1 / [governance.md §4](./governance.md)). Fine-tunes and
->   distillations **inherit their base lineage**; ensembles **map to their component
->   lineages** (and decorrelate only if *no* component lineage is shared). A
->   **per-request router** (one model-id that may dispatch to differing lineages per
->   call) must be **pinned to a non-routing model-id**, or it is **ineligible for
->   high-risk judgment** (the proxy cannot attest a stable lineage for it).
+>   **closed** on high-risk judgment when the two sides' proxy-observed
+>   `served_family` **sets intersect**, independent of brand. (Earlier drafts scoped
+>   this to reviewer↔implementer only.)
+> - **`served_family` is a SET of curated lineage-EQUIVALENCE-CLASS ids, and the
+>   invariant is set-DISJOINTNESS.** Decorrelation holds iff
+>   `reviewer.served_family ∩ implementer.served_family == ∅`; a scalar `!=` is
+>   **wrong** — an ensemble/router judge can share *one* component lineage with the
+>   implementer yet pass a scalar `!=`, so the seam must compare sets and fail closed
+>   on any shared lineage. Each id is a **versioned, human-curated mapping keyed on
+>   base-model lineage** — explicitly **not** provider brand and **not** the model-id
+>   string — held under the **scanner-config trust boundary** (§SEC1 /
+>   [governance.md §4](./governance.md)) at a recorded `lineage_map_revision` (below).
+>   Fine-tunes and distillations **inherit their base lineage** (a one-element set);
+>   an **ensemble** has the proxy stamp its **full component-lineage set** and
+>   decorrelates only if that set is disjoint from the other side's. A **per-request
+>   router** (one model-id that may dispatch to differing lineages per call) must be
+>   **pinned to a non-routing model-id** so the proxy can stamp a stable set, or it is
+>   **ineligible for high-risk judgment** (the proxy cannot attest a stable lineage
+>   set for it).
 > - **Decorrelation-aware failover, degraded mode (the 2-family deadlock).** With
 >   only two provisioned families, decorrelation-aware failover (§8) can **deadlock
 >   both arms** (each needs the other's family) or be forced into a correlated
@@ -195,7 +216,9 @@ Load-bearing control rules:
 >   degraded mode the **subject side proceeds and the judge side pauses** for the
 >   mandatory human cross-check (the judge is the seam that loses its independence),
 >   consistent with "T1 never auto-downgrades." The node **never silently fails over
->   into a correlated configuration**.
+>   into a correlated configuration**. In this mode the Review seam's sampled trusted
+>   cross-check — itself cross-family, hence unsatisfiable in the same outage — is
+>   **replaced by** that mandatory HITL, **never run same-family** (above).
 >
 > **The adapter boundary is ENFORCED by the sandbox, not asserted** — the adapter
 > runs arbitrary bash, so "writes worktree only / no external side-effect" must be
@@ -255,6 +278,47 @@ Load-bearing control rules:
 > progress-signal contract is **ineligible** for the substrate. *Which adapters can
 > meet it is an open integration question.*
 
+### 2b. The mediating model-provider proxy
+
+The proxy is referenced throughout §2 as the **only credential holder**, the
+**enforced** network route out of the sandbox (§2(b)), the egress guard, **and** the
+stamper of proxy-observed `served_family`/`served_model_id` and judgment-verdict
+bindings (§3). It is therefore **the single most load-bearing trusted component for
+decorrelation** — every decorrelation guarantee reduces to trusting its lineage
+observation. Its mechanics:
+
+- **model-id → lineage observation/resolution.** The proxy does **not** trust the
+  adapter's declared model. It observes the **actual** provider endpoint + served
+  model-id each request hits (from the credentialed request it itself issues, plus
+  the provider's returned `model`/system-fingerprint, §8), then resolves that
+  observed model-id through the **curated lineage-equivalence map** (the
+  scanner-config-boundary artifact, §2/§4) at the current `lineage_map_revision` to a
+  **`served_family` SET of lineage ids** (one element for a single model, the full
+  component set for an ensemble, §2). A router whose served model-id is not pinned to
+  a stable lineage resolves to **no attestable set** → the node is ineligible for
+  high-risk judgment (§2). The resolved set + `served_model_id` +
+  `lineage_map_revision` are stamped into the run manifest per node and into the
+  judgment-verdict binding (§3).
+- **grounding / audit of the resolution.** The map itself is curated and versioned
+  under the scanner-config trust boundary ([governance.md §4](./governance.md)), so
+  the resolution is only as sound as that revision — which is why
+  `lineage_map_revision` is bound into the verdict and **re-checked at admission**
+  (§4): a CI-vs-admission map drift or a lineage-splitting edit is caught as a
+  superseded-revision alert rather than silently changing a verdict. The
+  provider-observed model-id + system-fingerprint are recorded in the WORM store, so
+  a stamped lineage is **auditable against what the provider actually served**, and a
+  fingerprint change raises the pinned-ID-drift alert (§8).
+- **trust + availability model.** The proxy is an acknowledged **trust SPOF** (one
+  mediating egress path, one credential holder, §2) **and** the only stamper of
+  proxy-observed lineage — a compromised or unavailable proxy collapses decorrelation
+  attestation, not just egress. It is operated as a **trusted component outside the
+  adapter blast radius** (separate netns/namespaces the adapter cannot address,
+  §2(c)); its availability is treated as a first-class dependency — on proxy
+  unavailability the affected high-risk-judgment nodes **pause-and-escalate** rather
+  than fall back to adapter self-report (same fail-closed discipline as the
+  no-auto-downgrade and degraded-mode rules, §8). The provider behind it is itself a
+  trusted component (§2, response-path SPOF).
+
 ## 3. Typed state and concurrency semantics
 
 LangGraph merges updates **per channel** at each superstep, folding the pending
@@ -291,8 +355,8 @@ class GateResult(BaseModel):
     # For deterministic gates the verdict is WRITTEN ONLY by the trusted attestor (zone B,
     # governance §1c); the signature binds the verdict to its inputs so it can't be replayed:
     verdict_class: str             # config-evaluable | execution-deterministic | statistical | human-witnessed | perceptual (domains.md §1)
-    runner_attestation: str | None # sig over (name, state_sha, scanner_config_rev, status, results_digest); human sig for class "human-witnessed"
-    judgment_binding: str | None   # judgment verdicts only: binding over (node_id, proxy-observed served_family, state_sha, subject_artifact_uri), stamped OUTSIDE the implementing adapter; _merge_gates rejects writes whose binding doesn't validate
+    runner_attestation: str | None # sig over (name, state_sha, scanner_config_rev, lineage_map_revision, status, results_digest); human sig for class "human-witnessed"
+    judgment_binding: str | None   # judgment verdicts only: binding over (node_id, proxy-observed served_family SET, status, verdict_nonce, lineage_map_revision, state_sha, subject_artifact_uri), stamped OUTSIDE the implementing adapter; _merge_gates rejects writes whose binding doesn't validate (binding status defeats a same-tree verdict-flip replay)
     results_digest: str | None     # class 1/2: hash of raw zone-A results; class 3: (metric, dataset_hash, seed, n, estimate, ci, decision)
     findings: list[str] = []
     retries: int = 0
@@ -345,9 +409,13 @@ def _merge_gates(a, b):                        # gates: LATEST BY seq per (name,
         # check above — instead they must carry a judgment-verdict binding stamped OUTSIDE
         # the implementing adapter; reject any whose binding doesn't validate (anti-forge/replay):
         if g.name in JUDGMENT_VERDICTS and not verify_judgment_binding(g):
-            continue                           # binding = (node_id, proxy-observed served_family,
-                                               #            state_sha, subject_artifact_uri); state_sha keying
-                                               #            blocks replay across trees/forks (§4)
+            continue                           # binding = (node_id, proxy-observed served_family SET, status,
+                                               #            verdict_nonce, lineage_map_revision, state_sha,
+                                               #            subject_artifact_uri). state_sha keying blocks
+                                               #            cross-tree/fork replay; binding STATUS (+ nonce)
+                                               #            blocks a same-tree verdict-FLIP (copy a genuine
+                                               #            reviewer's binding, set status="approve", re-emit) —
+                                               #            a flipped status fails verify_judgment_binding (§4)
         k = (g.name, g.run_against)
         if k not in m or g.seq > m[k].seq:     # TOTAL tuple order — ties are impossible; emission_epoch
             m[k] = g                           #   (ahead of superstep_index) makes a re-execution outrank
@@ -415,8 +483,10 @@ Why each fix matters:
   supersedes (a non-monotonic `langgraph_step` alone would tie it). **Judgment
   verdicts** (not in `DETERMINISTIC_GATES`) are instead gated on a valid
   **judgment-verdict binding** stamped outside the adapter, so a forged/replayed
-  "approve" is rejected. In-graph routing and the HITL evidence pack read the
-  attested record. *(DS1, DS2, DS8, DS-R9-F2)*
+  "approve" is rejected — the binding includes `status` (+ `verdict_nonce`), so a
+  same-tree **verdict-flip** (copy a genuine binding, set `status="approve"`, re-emit
+  higher-`seq`) fails validation, not just cross-tree replay. In-graph routing and the
+  HITL evidence pack read the attested record. *(DS1, DS2, DS8, DS-R9-F2)*
 - **`status` distinguishes `error` from `fail`** — an infra crash is not a
   verdict; the join handles it separately (§5). *(DS7)*
 - **All list channels are keyed set-unions** (`tasks` by id, `actions` by
@@ -460,6 +530,16 @@ tree_sha = H( normalized_source_tree   # git tree of TRACKED SOURCE only,
   the **attestation tuple** *and* the **dependency-scoped reuse key**, so a cached
   class-2 (execution-dependent) verdict is invalidated across a rotation /
   rule-version boundary and is **not** reused across it. *(ties to §SEC1)*
+- **`lineage_map_revision` is bound and re-checked at admission like
+  `scanner_config_revision_hash`.** The revision of the curated lineage-equivalence
+  map (the set that resolves `served_family`, §2) is bound into **both** the
+  judgment-verdict binding (§3) **and** the attestation tuple, and is
+  **RE-CHECKED at admission** exactly as `scanner_config_revision_hash` is. Without
+  this, a map edit that splits one real lineage into two labels makes a
+  genuinely-same-lineage pair compare **disjoint** — a **vacuous decorrelation** pass
+  with no detectable fingerprint — and CI-vs-admission map drift would **silently
+  change the verdict**. Admission **alerts on any verdict resolved under a superseded
+  `lineage_map_revision`** and fails closed. *(ties to §SEC1, §2, §3)*
 - **Mutant-rotation reuse vs forward-invalidation.** Bounded reuse (avoid
   re-grounding every cached verdict) is in tension with *forward-invalidating* an
   exposed rotation (a verdict grounded on a leaked mutant set must not be laundered
@@ -533,11 +613,16 @@ WORM audit) is handled by a **transactional outbox**, not by hope.
 
   The protocol is **intent-log → act → confirm-log**; if none of the three can
   establish state on resume, the node **fails to the human** (never assumes). *(DS2, DS3-F3)*
-- **All idempotency / dedup / marker records are GLOBAL** (run-independent): they
-  survive checkpoint forks, and fork-recovery replay re-queries them exactly as an
-  ordinary resume does. So a poisoned-checkpoint fork **never re-fires** a path-2 or
-  path-3 effect — the global record already reflects the prior emission regardless
-  of which run/fork produced it.
+- **All idempotency / dedup / marker records — *and the class-3 alpha-spending
+  look ledger* — are GLOBAL** (run-independent): they survive checkpoint forks, and
+  fork-recovery replay re-queries them exactly as an ordinary resume does. So a
+  poisoned-checkpoint fork **never re-fires** a path-2 or path-3 effect — the global
+  record already reflects the prior emission regardless of which run/fork produced
+  it. **Forking does NOT reset class-3 alpha:** governance owns the look-ledger
+  mechanics ([governance.md §3](./governance.md)); the wiring here is that forks of
+  the same class-3 decision **share one budget keyed on `(state_sha, decision-id,
+  eval-set identity)`**, so an operator/adversary cannot fork *before* a look and
+  re-draw a full alpha budget per fork (optional-stopping laundering).
 - **Checkpointer:** `PostgresSaver` (prod) / `SqliteSaver` (dev).
 - **Time-travel** rewinds *internal state only*; forking creates a **new run ID**,
   never mutates the original WORM record, and replaying past an effectful node
@@ -673,14 +758,16 @@ Long-horizon success lives or dies here, so the contract is mechanistic, not
   single-provider outage without the second family is retry/backoff then
   **pause-and-escalate**. **Failover is decorrelation-aware:** on a high-risk
   judgment node, if the only surviving lineage would make
-  `reviewer.served_family == implementer.served_family` (violating the §2
-  invariant, over proxy-observed family), the node **never silently fails over into
-  a correlated configuration**. With ≥3 lineages this is avoidable; if outages
+  `reviewer.served_family ∩ implementer.served_family != ∅` (violating the §2
+  set-disjointness invariant, over proxy-observed family sets), the node **never
+  silently fails over into a correlated configuration**. With ≥3 lineages this is avoidable; if outages
   collapse to a single shared surviving lineage, the node enters the explicit
   **"decorrelation-relaxed + mandatory HITL" degraded mode** (§2) — the **subject
   side proceeds and the judge side pauses** for the mandatory human cross-check (the
   judge is the seam that loses independence) — same discipline as the
-  no-auto-downgrade rule. *(AI-R8-F1, AI3, AI9)*
+  no-auto-downgrade rule. The Review seam's sampled cross-family cross-check is
+  **replaced by** this HITL in degraded mode (it is itself unsatisfiable in the
+  outage), **never silently run same-family** (§2). *(AI-R8-F1, AI3, AI9)*
 - **Prompt caching** of stable SOP/system prefixes and pinned reference
   artifacts is the primary token-cost lever (low cache benefit for the analyzer,
   which is therefore event-triggered — [governance.md §3](./governance.md)).

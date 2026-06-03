@@ -461,7 +461,45 @@ and the next panel finds new seams in it — the same "every new axis re-opens t
 problem" dynamic, now operating *within* a fixed axis set as the new substrate
 machinery stabilizes.
 
+## Round 19 — FULL-DOMAIN validation panel (8 fresh lenses, same domains): 29 findings (0 BLOCKER, 25 MAJOR, 4 MINOR)
+
+A third fresh panel of the same eight domains validated the Round-18 fixes. The
+**convergence signal arrived**: BLOCKERs fell to **zero** and the count nearly
+halved again (62 → 57 → 29). Every remaining finding was a *localized refinement*
+at the seams of the Round-18 mechanisms, not a fundamental flaw — and several were
+genuinely sharp:
+
+- The class-3 alpha look-ledger was **per-run, not cross-fork** — forking before a
+  look could re-draw the budget (optional-stopping laundering). → global ledger
+  keyed on `(state_sha, decision-id, eval-set)`.
+- The judgment-verdict binding **omitted `status`** — a same-tree request-changes→
+  approve flip passed the binding check on the no-HITL Review seam. → bind `status`
+  + a `verdict_nonce`.
+- `served_family` as a scalar `!=` couldn't express **ensembles** (one shared
+  component lineage passed). → a lineage *set* with disjointness; pin
+  `lineage_map_revision` into the attestation + admission re-check.
+- Eval: pilot/scored **distributional transfer** unguaranteed; the decision-grade
+  token-secondary had **no pre-registered MDE**; max-T needed **studentization**;
+  the token classifier was **turn-granular** (should be sub-turn).
+- Regulated: model-risk monitoring **named no trip/escalation**; product-model
+  post-deployment revalidation had **no firing component**; PHI-scanner recall floor
+  was **weaker than the class it borrows**.
+- ML: train-variance estimand (a) was a **best-of-unbounded-N** selection statistic;
+  rare-subgroup slice-MDE could be **a-priori infeasible** with no defined verdict.
+- Frontend: the auto-skip semantic-affordance classifier had **no recall floor**;
+  reference-cell tolerance envelopes silently **demoted most matrix cells** from
+  class-5 blessing.
+
+**Round 19 verdict (solutioner):** all 29 resolved in **Round 20** (a smaller,
+surgical fix pass). Re-submitted to a fresh panel for **Round 21**. The trajectory
+(BLOCKERs 10→9→0; findings 62→57→29) is the design **stabilizing** — the loop is
+approaching the convergence the earlier bars reached (R6, R12, R14).
+
 ## Loop summary
+
+> Rounds 16–20 are the post-`claude -p` "live codebase" loop: even rounds (16
+> critique, 18, 20) bundle the solutioner fix; odd rounds (17, 19, 21…) are fresh
+> full-domain validation panels. The table lists the findings-bearing panels.
 
 | Round | Bar | Findings | BLOCKER | MAJOR | MINOR | Verdict |
 |---|---|---|---|---|---|---|
@@ -480,6 +518,9 @@ machinery stabilizes.
 | 13 | **fitness-for-purpose (3 FRESH lenses)** | 17 | 0 | 14 | 3 | material remain |
 | 14 | fitness-for-purpose (3 fresh lenses) | 0* | 0 | 0 | 0 | **no material — converged** |
 | 15 | **type-of-software (3 DOMAIN experts)** | 18 | 0 | 15 | 3 | material remain |
+| 16 | **live-codebase (8 FULL-DOMAIN lenses)** | 62 | 10 | 33 | 19 | material remain |
+| 17 | live-codebase (8 full-domain lenses) | 57 | 9 | 32 | 16 | material remain |
+| 19 | live-codebase (8 full-domain lenses) | 29 | 0 | 25 | 4 | material remain — **BLOCKERs→0** |
 
 \* plus a few editorial-consistency nits fixed in passing (no material findings).
 

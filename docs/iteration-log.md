@@ -548,15 +548,41 @@ multi-agent editing process, not the architecture.
 
 \* plus a few editorial-consistency nits fixed in passing (no material findings).
 
-Total: **135 findings raised and resolved** across **four** review bars over
-fifteen rounds. The progression is the real lesson: **design-doc** → no findings
-(R6); **implementation-readiness** (3 technical lenses) → no findings (R12);
+Total: **302 findings raised and resolved** across **five** review bars over
+**twenty-three rounds** (with five interleaved solutioner fix passes). The
+progression is the real lesson: **design-doc** → no findings (R6);
+**implementation-readiness** (3 technical lenses) → no findings (R12);
 **fitness-for-purpose** (operability/cost/premise) → no findings (R14);
-**type-of-software** (regulated/ML/UX domain experts) → 18 findings (R15). *Each
-genuinely new axis of scrutiny re-opens the problem* — a clean verdict only ever
-bounds the axes that were looked at, and the domain lens revealed that a thesis the
-three technical specialists had signed off on was, in fact, domain-specific. This
-log is the honest record the process produced, not a marketing artifact.
+**type-of-software** (regulated/ML/UX domain experts) → 18 findings (R15); and the
+**live-codebase** bar (8 full-domain lenses, after the `claude -p` worker-substrate
+was added) → 62 → 57 → 29 → 10 → 9 (R16–R23). *Each genuinely new axis of scrutiny
+re-opens the problem* — a clean verdict only ever bounds the axes that were looked
+at, and the domain lens revealed that a thesis the three technical specialists had
+signed off on was, in fact, domain-specific. This log is the honest record the
+process produced, not a marketing artifact.
+
+## Live-codebase loop (Rounds 16–24): stopped at substantive convergence
+
+The post-`claude -p` loop was run **critic → fix → fresh-critic → repeat** at the
+operator's request. It was **stopped by decision at Round 24**, on an explicit
+convergence judgment rather than a zero-finding sweep — for reasons the trajectory
+makes plain:
+
+- **BLOCKERs 10 → 9 → 0 → 2 → 1; findings 62 → 57 → 29 → 10 → 9.** Volume collapsed
+  and one lens (regulated) returned its first clean sweep at R23.
+- **No new *architectural* defects after Round 19.** The R21/R23 findings were
+  **fix-hygiene** — cross-doc drift (a ledger-key change not propagated to one doc),
+  an undefined term (`decision_id`), a fix placed in the wrong layer (a nonce/latch
+  put inside the pure reducer) — i.e. the **parallel-fixer method policing its own
+  edits**, several of them orchestrator dispatch errors, not flaws in the design.
+- Consistent with this log's standing lesson, an **absolute zero across eight
+  adversarial lenses is a receding horizon**: a doc this dense will almost always
+  yield one more refinement, and each fix round adds a thin new seam. "Stopped at
+  substantive convergence" means the *design* is stable and internally consistent at
+  the live-codebase bar; it does **not** mean proven correct — the genuine open
+  questions (does structure beat a strong single agent; does it pencil out; will it
+  be adopted; do the domain packs work) are still settled by evidence and real use,
+  exactly as the master plan states.
 
 The key lesson of Round 13: **convergence at one bar is not convergence at
 another.** The technical panel (security/DS/AI) genuinely converged to zero at the

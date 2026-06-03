@@ -426,6 +426,41 @@ fixers across PLAN/architecture/governance/evaluation/operations/domains/lifecyc
 roadmap, using a shared canonical-resolution set so independent edits stayed
 consistent. Re-submitted to a fresh full-domain panel for **Round 17**.
 
+## Round 17 — FULL-DOMAIN validation panel (8 fresh lenses, same domains): 57 findings (9 BLOCKER, 32 MAJOR, 16 MINOR)
+
+A second fresh panel of the same eight domains validated the Round-16 fixes and
+hunted regressions. It did **not** converge — and characteristically, the findings
+clustered at the **interaction seams of the Round-16 mechanisms themselves**: the
+fixes worked, but each introduced new surface a fresh expert could attack. The
+sharpest were self-inflicted by Round 16:
+
+- **`served_family` was self-declared by the adapter** — the decorrelation fix
+  relocated trust to a forgeable field instead of grounding it (BLOCKER ×, raised by
+  LLM-orchestration *and* security). Resolution: proxy-observed served lineage, a
+  curated lineage-equivalence class, invariant spanning all judge↔subject seams.
+- **"decorrelation + HITL" was false for per-task Review** (no HITL on that seam) —
+  the most frequent judgment verdict was bound by decorrelation alone (BLOCKER).
+- **Incremental progress reintroduced the worktree dual-write divergence** §5 had
+  closed (BLOCKER) → content-addressed turn-snapshot in the outbox transaction.
+- **`superstep_index` is not monotonic across resume** → stale verdict outranks a
+  correction → added `emission_epoch` ahead of it in `seq`.
+- ML: **train-variance CI vs re-score-at-admission was internally inconsistent**;
+  **look-budget bypassable** via reuse + `inconclusive`→add-n alpha leak (BLOCKERs).
+- Eval: **power needs a pilot** (borrowed 21% ≠ this baseline); **equal-token
+  equalizer asymmetric**; **KILL vs redesign rule self-contradictory** (BLOCKERs).
+- Regulated: **PHI scanner unvalidated**; **model-risk lacked ongoing monitoring**;
+  **IdP/PKI trust store unpinned** (BLOCKERs).
+- Security: the provider-egress proxy **bounds but does not eliminate** the
+  high-entropy exfil channel; **response path unguarded**; **value-pinned vacuous
+  tests survive** the discriminator (adapter authors both impl and test).
+
+**Round 17 verdict (solutioner):** all 57 resolved in **Round 18** via the same
+file-partitioned-fixer method. Re-submitted to a fresh panel for **Round 19**. The
+finding count is decreasing only slowly (62 → 57): each fix round adds mechanism
+and the next panel finds new seams in it — the same "every new axis re-opens the
+problem" dynamic, now operating *within* a fixed axis set as the new substrate
+machinery stabilizes.
+
 ## Loop summary
 
 | Round | Bar | Findings | BLOCKER | MAJOR | MINOR | Verdict |

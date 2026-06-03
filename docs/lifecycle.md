@@ -37,6 +37,14 @@ software needs humans *steering*, not just vetoing.
   is technically passing but not what I meant," "prefer approach B," "descope X")
   that updates the PRD/`pinned_constraints` and re-plans — distinct from a binary
   gate approval.
+- **Steering is authorship, not approval.** A human who steers a run via the
+  steering channel makes a substantive content contribution and is therefore
+  recorded in the **author set** for that artifact, for segregation-of-duties
+  purposes. By the enforced "author != approver" predicate they **cannot also serve
+  as a release/admission approver** for the same artifact (preparer/validator
+  independence) — the distinctness check rejects an approver identity that
+  intersects the author set ([domains.md §5](./domains.md),
+  [governance.md §1e](./governance.md)).
 - **Taste is not delegated to a model.** The Stakeholder/Client Proxy is an *LLM
   stand-in* used to keep runs moving; it does **not** replace the real product
   owner. High-ambiguity or high-taste decisions route to a human, and the Proxy's
@@ -49,8 +57,16 @@ software needs humans *steering*, not just vetoing.
   constraints** that **persist across evolution cycles** as part of the
   `pinned_constraints`/design-token set — so they shape future builds rather than
   being re-litigated as a one-off re-plan. This is a steering channel in its own
-  right, and over time it **reduces future perceptual-HITL load**
-  ([domains.md §5](./domains.md)) by encoding settled taste once.
+  right. Encoding settled taste **lowers the material-threshold / improves
+  first-pass yield** (fewer iteration rounds per blessing), but it does **not**
+  eliminate the terminal human blessing: perceptual verdicts are class-5 —
+  mandatory, non-auto-approvable, never auto-approved
+  ([domains.md §5](./domains.md)). So the gain is fewer rounds to reach a blessing,
+  **not** a raw HITL-count reduction that would skip it. (The lone exception is a
+  narrow, audited class of changes fully covered by an already-blessed taste
+  constraint, which may auto-skip *only* with that constraint reference recorded as
+  the approval grounding — the human blessing is inherited from the constraint, not
+  waived.)
 - **Collaborative, not fire-and-forget:** the default operating mode (§4) is a
   human partner reviewing and steering, with autonomy earned incrementally.
 

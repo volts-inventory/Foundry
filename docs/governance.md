@@ -110,7 +110,14 @@ grounded. So the verdict is grounded by gate class: *(SEC-R10-F1)*
   - **Held-out mutants:** zone B's grounding substitution is drawn from a
     **rotating held-out mutant family never exposed to the test-authoring model
     family** (secret until after attestation), so a fingerprint cannot be
-    pre-baked against a known substitution.
+    pre-baked against a known substitution. **The mutant generator must itself be a
+    trusted, family-decorrelated component** — curated/non-LLM **plus** cross-family,
+    **not the implementer/QA lineage** (a generator sharing that lineage shares its
+    blind spots). The held-out family carries its **own adequacy/diversity floor**,
+    and the **`mutant_rotation_id` is an opaque handle** that reveals nothing about
+    set contents — even though it is bound into the public attestation/predicate +
+    reuse key (below), it must not be a profileable index. **Rotation occurs faster
+    than an adapter can profile the set across runs.**
   - **Behavioral-invariance check:** zone B runs the test against a **family** of
     independently-authored held-out behavioral mutants **and** against
     **behavior-preserving perturbations of the real tree** (renames, path/hash
@@ -130,6 +137,18 @@ grounded. So the verdict is grounded by gate class: *(SEC-R10-F1)*
     sources are barred from the execution-deterministic class** (they fall to a
     judgment verdict), and a **trusted differential harness controls inputs and
     outputs** so the test cannot observe which side it is running against. *(SEC-R12-F1)*
+  - **Value-pinned vacuous tests survive the flip.** The adapter authors **both**
+    implementation and test, so it can hard-code the real output
+    (`assert f(x) == <real output>`) — a single pinned assertion passes pass-on-real,
+    fails across mutants, and is invariant under behavior-preserving perturbation
+    while exercising essentially nothing. Flip-direction alone does not catch it, so
+    the discriminator additionally requires **adequacy/diversity**: the test must
+    **fail across a held-out mutant family broad enough that no single pinned
+    assertion can cover it**, and the family uses **input-space mutants, not only
+    code mutants**. This **adequacy/diversity floor is bound into class-2 acceptance**
+    — not only checked at the scheduled mutation gate (§1a) — and **single-point /
+    value-pinned tests do NOT clear the execution-deterministic (class-2) class**.
+    *(SEC-R12-F1)*
 
   This restores the needed property: the verdict is a function of *behavior
   observed by trusted infra*, not of agent-controllable environment identity.
@@ -155,8 +174,14 @@ replayed by an agent/orchestrator:
 - The signature is produced **out-of-band against a federated IdP / hardware-backed
   PKI key the pipeline never holds** — the agent/orchestrator has no path to mint it.
 - It **binds `(artifact_uri, state_sha, approver_identity, role, credential_ref,
-  timestamp, meaning-of-signing)`**, so a signature cannot be replayed onto a
-  different artifact/state or repurposed across meanings.
+  timestamp, server_nonce, presented_evidence_hash, meaning-of-signing)`**, so a
+  signature cannot be replayed onto a different artifact/state or repurposed across
+  meanings. The **`server_nonce` is a per-approval server-issued challenge**, verified
+  for freshness at **reducer-time *and* admission** — timestamp alone permits replay
+  within clock skew. The **`presented_evidence_hash` is the content hash of the exact
+  non-agent-assembled evidence pack / predicate snapshot shown to the signer**, so the
+  human signs over **what was presented** — closing the "what you see is not what you
+  sign" gap that `artifact_uri`+`state_sha` alone leaves open.
 - `verify_attestation` **validates class-4 signatures against the external IdP /
   cert chain at reducer-time *and* at admission** (not just the runner's own keys).
 - A **class-4 write from any agent identity is rejected exactly like an unsigned
@@ -279,6 +304,14 @@ non-convergence bound as backstop. *(COST-F1)*
   or PR path** (human-only / distinct credentialed owner); changes require
   two-person sign-off, and its **current pinned revision hash is recorded in the
   evidence pack and the SLSA predicate**, so a config swap is detectable. *(SEC-R8-F3)*
+- **The class-4 verification trust store is pinned under the same regime.** The
+  trust anchor that `verify_attestation` checks class-4 signatures against — the
+  **IdP-federation config + PKI trust roots / CA list** — sits under the **same
+  separate-trust-boundary, run-immutable, two-person-change-with-WORM-record** regime
+  as scanner config and OIDC trust (§4); otherwise an attacker who can swap the trust
+  store mints "valid" human attestations. Its **pinned trust-store revision hash is
+  recorded in the SLSA predicate and re-checked at admission**, exactly as
+  `scanner_config_revision_hash` is bound (§4–§5). *(SEC-R12-F5)*
 
 ### Execution plane
 - All agent-written code runs in sandboxes (containers; Firecracker/gVisor for
@@ -287,6 +320,11 @@ non-convergence bound as backstop. *(COST-F1)*
   agent-authored code or third-party install/`postinstall` script runs while task
   credentials are present. Dependencies are pulled through an **internal mirror
   of pre-vetted, hash-pinned artifacts**, so builds need no open egress. *(SEC4)*
+  **The mirror does NOT share the model-provider proxy** — routing a tarball fetch
+  through a proxy whose enforcement is model-schema/entropy-shaped is a confused
+  deputy (wrong protocol, wrong rules). The mirror gets its **own dedicated
+  per-destination proxy with its own enforcement** (hash-pin verification, no
+  arbitrary host), kept **separate from the model-provider proxy**. *(SEC-R12-F3)*
 - **Mirror admission is a non-agent / HITL-gated control** (hash-pinning gives
   reproducibility, not trustworthiness, of a *newly* admitted package). Any new
   package or version entering the mirror passes a vetting step **distinct from the
@@ -323,6 +361,20 @@ non-convergence bound as backstop. *(COST-F1)*
   entropy/size against the *task's* expected profile**, not a global baseline. The
   proxy and its content/structural enforcement are a **first-class red-team
   target**. *(SEC-R12-F3)*
+  - **The proxy bounds but does not eliminate the exfil channel — state this
+    honestly.** It is the same high-entropy bidirectional channel the plane concedes
+    anomaly-detection is structurally bad at: a colluding adapter can encode
+    secrets/context via lexical/ordering steganography inside legitimately-shaped
+    prompt/code that passes every content/schema/entropy check. So the metering in
+    (d) is a **detection signal feeding the deterministic monitor (§3), not a
+    preventive boundary**, and **residual exfil bandwidth within a normal
+    coding-task profile is an explicit open risk that must be quantified** (bits/call
+    against the task's expected profile), not assumed closed. What actually
+    *constrains* the channel are the **upstream data-plane controls**: scoped
+    short-lived creds **never placed in prompt/state**, and the **no-third-party-
+    model-egress profile for regulated data** — the proxy is defense-in-depth on top,
+    not the boundary. **Red-team specifically for semantic/steganographic exfil
+    within a normal coding-task profile**, not only for oversized/high-entropy bursts.
 
 ### Data plane
 - Scoped, short-lived credentials per task; **never in prompts or state**;
@@ -367,6 +419,11 @@ non-convergence bound as backstop. *(COST-F1)*
   - *Loop / non-convergence* — semantic signature `(criterion_id/task, gate,
     failure_signature)`; plus the global `fix_attempts_since_all_green` bound
     ([architecture.md §7](./architecture.md)). Diff bytes are never the signature.
+    **Within-adapter-loop scope (mirror of architecture §2):** the semantic
+    loop-signature + sampled analyzer extend to **adapter-TURN granularity**, keying
+    on **trusted-infra-observed per-turn progress signals** (not adapter-emitted
+    self-report), so **within-loop semantic non-convergence is detectable *before*
+    the hard kill** — not only surfaced after the fact as a budget breach.
   - *Oracle / gate / criteria / scanner-config edits* — **any diff touching tests
     treated as oracles, gate logic, acceptance criteria, or scanner config is a
     *deterministic* trip** forcing HITL review (not an analyzer judgment). *(SEC3, AI10, SEC2)*
@@ -447,6 +504,14 @@ A signature proves provenance, not that deployment is authorized. Therefore:
   in the WORM store **with valid input-bound trusted-runner attestations (§1c)**;
   and the scanner-config revision matches the pinned hash*. Only then does a
   **separate, least-privileged, non-agent deployer** ship.
+- **Class-4 credential revocation, not just expiry.** Admission performs a
+  **revocation-status check** (OCSP/CRL or IdP standing query) on **every class-4
+  credential it relies on, at admission time** — a credential valid-and-unexpired at
+  signing may have been **revoked** since. A **periodic re-validation sweep** re-checks
+  standing class-4 attestations against current credential status; any credential
+  **lapsed since signing** writes a **disqualifying WORM record + recall escalation**.
+  This covers revocation specifically, beyond the expiry/withdrawal the signed
+  `timestamp`/`meaning-of-signing` already capture. *(SEC-R12-F5)*
 - **Fail-closed on *stable* FAILs, with a bounded recovery for transient ones.**
   Admission latches a digest as disqualified on a FAIL whose `results_digest`
   reflects a **stable, verdict-relevant input** (a config/scan-driven outcome — a
@@ -474,10 +539,22 @@ A signature proves provenance, not that deployment is authorized. Therefore:
   **straddles the threshold**, where two forks can legitimately land on opposite
   sides. So class-3 verdicts admit an explicit **`inconclusive`** state
   ([domains.md §1](./domains.md) owns the class-3 spec; this owns the
-  admission-latch semantics) with defined routing — **collect more eval n, or
-  HITL** — and **admission treats `inconclusive` fail-closed**, *not*
+  admission-latch + look-ledger semantics) with defined routing — **collect more
+  eval n, or HITL** — and **admission treats `inconclusive` fail-closed**, *not*
   flake-recoverable: a straddling CI is not a transient-execution divergence, so the
   bounded recovery-quorum path does **not** apply to it. *(SEC-R12-F8)*
+  - **Repeated re-derivation is multiple testing — debit a look ledger.** A
+    **class-3 look = ANY re-derivation of the class-3 decision against an eval set**,
+    debited from a **look ledger** regardless of dependency-scoped reuse (§1f) — reuse
+    does not exempt a fresh re-derivation from the ledger. `inconclusive`→**"collect
+    more eval n"** is therefore an explicit **alpha-spending event** governed by a
+    **pre-registered group-sequential boundary** with a **hard cap** on looks; silently
+    re-running until the CI clears the threshold is exactly the optional-stopping attack
+    this closes. **At the cap, `inconclusive` is TERMINAL → HITL / redesign, never
+    auto-PASS.** The **look ledger + remaining alpha are bound into the signed class-3
+    tuple** (alongside the eval-set/seed the runner re-derives from, §1c) and
+    **re-checked at admission**, so a verdict minted past its look budget — or with a
+    laundered ledger — is rejected exactly as a stale rotation/config binding is.
 - **Overrides are record-scoped, not digest-scoped.** A two-person override targets
   a **specific transient `(gate_name, tree_sha, results_digest)`** record (justified
   by its recovery quorum); admission then **re-evaluates the full gate set**, so a

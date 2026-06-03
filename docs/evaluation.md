@@ -18,12 +18,15 @@ and the cost model.
 checkpoints, HITL) improves **long-horizon** outcomes over a single strong agent
 at equal cost. This is tested by a pre-registered A/B (§2), run as a
 **decision-grade gate at Phase 1.5 — before the expensive machinery is built —
-with a real kill/redesign branch**, and again as a confirmatory Phase-6 exit
-criterion ([roadmap.md](./roadmap.md)). If structure doesn't help, that forces a
-redesign at the cost of Phases 0–1, not 0–5. The bet is falsifiable *and*
-sequenced to be falsified cheaply. The **funded power rung is pre-registered with
-budget committed before the Phase-1.5 run (§2); a null at the funded MDE is a real
-KILL trigger**, not a cue to slide down the de-scoping ladder (§8).
+with a real kill/redesign branch (the §2.5 decision table)**. **The Phase-1.5 run
+is the designated confirmatory arbiter** and carries the pre-registered alpha; the
+Phase-6 A/B is **estimation/replication only — not a second gate with its own
+alpha** ([roadmap.md](./roadmap.md)), avoiding the double-test multiplicity of
+testing one hypothesis twice with inverted confirmatory roles (§6.5). If structure
+doesn't help, that forces a redesign at the cost of Phases 0–1, not 0–5. The bet is
+falsifiable *and* sequenced to be falsified cheaply. The **funded power rung is
+pre-registered with budget committed before the Phase-1.5 run (§2); a null at the
+funded MDE is a real KILL trigger**, not a cue to slide down the de-scoping ladder (§8).
 
 ## 2. A/B pre-registration (frozen before the Phase-1.5 decision run, hashed into the manifest)
 
@@ -47,20 +50,44 @@ A vague A/B rigs itself; this one is specified so it can actually fail. *(AI1)*
   on coordination + monitor overhead the baseline pours into the task — a null
   there cannot distinguish "no structural signal" from "signal swamped by
   overhead." So a pre-registered **equal-effective-task-token** secondary
-  (overhead-excluded: planning/gate/monitor tokens subtracted, only
-  implementation-directed tokens counted) is reported alongside, **specifically so
-  the kill/redesign branch (§1) can separate those two cases.** The arms have the
+  is reported alongside, **specifically so the kill/redesign branch (§1/§2.5) can
+  separate those two cases.** Naïve token-subtraction is **asymmetric** — Foundry's
+  overhead is cleanly subtractable (typed planning/gate/monitor nodes) but the
+  single-agent baseline interleaves planning/reflection *inside the implementation
+  turns*, so subtracting only Foundry's overhead biases the secondary *toward*
+  Foundry. To remove the asymmetry, "implementation-directed tokens" is defined by an
+  **arm-neutral operational rule applied identically to both arms' traces:** tokens
+  count **only when the turn emits an implementation action** (a diff / file edit / test
+  edit), and deliberation-only turns (planning, reflection, gate reasoning) **do not**,
+  regardless of which arm or node produced them. The classifier is **pre-registered and
+  validated on both arms' traces** before any scored run. (If validation fails to
+  classify symmetrically, we **fall back to total task tokens for both arms** — a
+  symmetric handicap — rather than ship a biased subtraction.) The arms have the
   *same tier mix available* so Foundry can't win merely by using a stronger model
   than the baseline. *(COST-F4)*
 - **Single confirmatory primary endpoint:** **SWE-EVO resolution vs baseline
   (§7)** is the *sole* confirmatory primary, with its own pre-registered alpha.
+  The primary is scored **intent-to-treat (ITT):** the **denominator is all
+  *initiated* tasks per arm**, and **any non-completion — abort, budget exhaustion,
+  escalation-without-resolution, or crash — scores as an unresolved task**, not a
+  dropped sample. This ITT rule is pre-registered alongside the hidden-test ITT rule
+  (§6): without it, **differential attrition inflates Foundry**, which has more
+  abort/escalate paths than the ungated baseline. *(AI-R10-F3)*
   Every other scorecard threshold (§7) is **secondary/descriptive** and cannot, on
   its own, block the A/B verdict. Any secondary that *can* gate a release is placed
-  in a stated **hierarchical gatekeeping** order with **Holm–Bonferroni**
+  in a stated **hierarchical gatekeeping** order with a pre-registered FWER
   correction over the gating family; the full hierarchy (primary → ordered
   secondaries → descriptive) is pre-registered in the manifest. The prior
   implicit-OR over ~12 thresholds (no alpha control) inflated both false-positive
-  and false-negative rates and is retired. *(AI-R9-F2)*
+  and false-negative rates and is retired. **The gating-secondary endpoints are
+  correlated** (they are computed on the **same paired cluster-bootstrap task
+  resamples**, pre-registered as such), so the correction must account for that
+  dependence. We pre-register **either** a **bootstrap step-down max-T procedure**
+  (uses the empirical between-endpoint dependence from the shared resamples,
+  FWER-controlling and tighter) **or** plain **Holm–Bonferroni** with an explicit
+  acknowledgment that, on positively-correlated endpoints, Holm is **conservative —
+  inflating the false-negative / KILL rate**. The choice is **frozen in the manifest**
+  before any scored run. *(AI-R9-F2, AI-R10-F5)*
 - **Power:** stated sample size `n` on the task pool, `k` repeated runs per task
   (to average LLM nondeterminism — §7), a **paired cluster-bootstrap that resamples
   *tasks* (the inferential unit), carrying each task's `k` runs together**, the
@@ -68,7 +95,25 @@ A vague A/B rigs itself; this one is specified so it can actually fail. *(AI1)*
   on **task-level effect-size variance, not run-level** — treating `n×k` as
   independent draws overstates effective N. The exit threshold (Foundry > baseline
   by ≥ a pre-registered margin at ≤ equal cost) is only meaningful with `n`/`k`
-  sized to detect it at the ~21% base rate. *(AI-R9-F3)*
+  sized to detect it. *(AI-R9-F3)*
+- **Variance/base-rate pilot (BLOCKER — runs first, on disjoint tasks):** a correct
+  power calc needs **this study's** control-arm resolution rate and its task-level
+  effect-size variance, and **neither is known a priori** — the ~21% is a *borrowed
+  frontier figure*, not this strong baseline's rate. So `n`/`k`/MDE cannot be honestly
+  frozen from a guess. We **pre-register a separate, budgeted variance/base-rate pilot**
+  (a held-out slice / disjoint task set, **never scored as part of the A/B**) whose
+  *only* outputs are (i) the strong-baseline control resolution rate and (ii) the
+  within- vs between-task variance components. `n`/`k`/MDE are then **frozen off the
+  pilot** and hashed; the scored confirmatory A/B runs on **tasks disjoint from the
+  pilot's**. The pilot **consumes part of the funded budget** (§8 roll-up reserves it),
+  and its outputs are read-only into the power calc — it is *not* a rung to descend to. *(AI-R10-F1)*
+- **`n`/`k` allocation is a constrained optimization, not two free numbers:** `n`
+  (tasks) and `k` (repeats/task) are pre-registered as the **joint solution that
+  minimizes the task-level effect-estimator variance under the funded budget**, using
+  the pilot's **within-task vs between-task variance components** (more `k` only pays
+  off while within-task nondeterminism dominates; otherwise spend the budget on `n`).
+  The chosen `(n, k)` and the variance components that justify it are stated in the
+  manifest. *(AI-R10-F8)*
 - **Pre-registered funded power rung (BLOCKER, before any scored run):** the
   de-scoping ladder (§8) must **not** be walked post-hoc to whichever rung happens
   to "pass" once cost is known. Before the first scored run we **pre-register the
@@ -84,6 +129,24 @@ A vague A/B rigs itself; this one is specified so it can actually fail. *(AI1)*
   rule are **frozen and content-hashed into the run manifest** before any scored
   run.
 
+## 2.5 Decision table (the {primary × secondary} cross-product, frozen in the manifest)
+
+A USD-primary null is framed (§1) as a hard KILL, **but** the equal-effective-compute
+secondary (§2) exists precisely to read a {USD-null, token-positive} result as a
+*redesign* signal, not a KILL — so the cross-product of the two verdicts must have an
+explicit rule, not be resolved ad hoc after the run. The **full decision table is
+pre-registered and hashed into the manifest:**
+
+| Primary (equal-USD, oracle-scored) | Secondary (equal-effective-token) | Verdict |
+|---|---|---|
+| **Positive** at funded MDE/alpha | (any) | **Proceed** — carry the ablation-justified roles |
+| **Null** at funded MDE | **Null** | **Hard KILL** — structure shows no signal even compute-equalized; stop/redesign per [roadmap.md Phase 1.5](./roadmap.md) |
+| **Null** at funded MDE | **Positive** | **Bounded "overhead-redesign" branch** — the structural signal exists but is swamped by coordination/monitor overhead; enter a **pre-committed** overhead-reduction redesign **with its own pre-registered re-test** (a fixed re-test on the same endpoint at a fixed MDE/budget — **not** an open-ended re-power or a license to keep re-running until something clears) |
+
+The overhead-redesign branch's re-test (its endpoint, MDE, budget, and the single
+re-test it is allowed) is itself frozen in the manifest before the Phase-1.5 run, so it
+cannot become a fishing license after a null.
+
 ## 3. Outcome evals
 
 - **Golden task suite** — curated greenfield/feature/refactor/bugfix requests
@@ -97,9 +160,12 @@ A vague A/B rigs itself; this one is specified so it can actually fail. *(AI1)*
   **firewalled (blind) from Foundry trajectory/failure data** so suites cannot
   drift toward Foundry's observed weak spots; **task-selection criteria + the
   target difficulty distribution are pre-committed before any Foundry run on that
-  rotation**; and successive rotations are **audited for difficulty drift against
-  the baseline** so a "harder/easier next suite" can't masquerade as a Foundry
-  delta. *(AI-R9-F5)*
+  rotation**; and successive rotations are **audited for difficulty drift against an
+  arm-independent anchor** — static task-complexity features and/or a **fixed
+  reference solver that is *not* one of the A/B arms** — with drift reported relative
+  to that anchor, **not** to the live baseline arm. (Anchoring drift to the baseline
+  comparator lets rotation noise *in the comparator itself* masquerade as a structural
+  delta; an arm-independent estimator removes that confound.) *(AI-R9-F5, AI-R10-F7)*
 - **SWE-bench-Verified-style** — public, used only for *relative* baselining;
   absolute numbers treated as contamination-inflated.
 - **SWE-EVO-style long-horizon** — multi-commit evolution; the honest bar and the
@@ -200,6 +266,24 @@ with the judged content and calibrated **per judge model** against human labels.
 - **Coverage is not fidelity:** criterion→test tags are sample-audited; high-risk
   criteria use negative oracles (§4). *(AI6, SEC8)*
 
+## 6.5 Phase-1.5 / Phase-6 multiplicity (one confirmatory arbiter, not two gates)
+
+The central hypothesis is run twice — once at Phase 1.5 (decision gate) and again at
+Phase 6 (confirmatory exit). Testing the *same* hypothesis at two gates, each with its
+own alpha and **inverted confirmatory roles**, is uncontrolled multiplicity. We resolve
+it by designation, not correction: **the Phase-1.5 run is the single confirmatory
+arbiter** and owns the pre-registered alpha (§1/§2). **The Phase-6 A/B is
+estimation/replication only** — it reports an effect estimate and CI, it does **not**
+re-spend alpha as a second gate.
+
+What a **Phase-6 disconfirmation** triggers, given Phases 2–5 are already built: it
+**cannot un-spend the sunk cost** of the machinery that Phase 1.5 already licensed, and
+it does **not** retroactively invalidate the gated-mode product. But it **blocks the
+Phase-6 exit and the Autonomous-mode claim** — the published scorecard cannot be
+declared stable and the confirmatory-reproduction exit ([roadmap.md Phase 6](./roadmap.md))
+is **not met**, gating any "Autonomous" / hands-off claim until the discrepancy is
+reconciled. (Consistent with [roadmap.md](./roadmap.md), edited in parallel.)
+
 ## 7. Headline scorecard — concrete thresholds
 
 Direction-only targets can't fail, so each metric has a release threshold
@@ -243,10 +327,17 @@ mandates; the model adds these **dominant non-token terms** (so a "≤5%" or
 
 - **(a) Trusted-runner compute for the behavioral-invariance discriminator (§4):**
   `Σ high-risk-criteria × (|mutant family| + |perturbation family|) ×
-  test-suite-wall-clock × $/hr × expected re-verification iterations`, **plus** the
-  analogous **ML eval-set re-run** term (eval-set size × per-run compute ×
+  test-suite-wall-clock × $/hr × expected re-verification iterations` — where the
+  **held-out mutant/perturbation family-size is an explicit multiplier** (the §4
+  adequacy/diversity floor *raises* it, so it must be carried, not assumed small) —
+  **plus** the analogous **ML eval-set re-run** term (eval-set size × per-run compute ×
   re-verification iterations). This is runner CPU/GPU time, not model tokens, and
   it scales with the mutant + perturbation families — not with feature size.
+  Additionally, a **fleet-wide mutant-rotation event** (rotating the held-out family
+  across the fleet — [governance.md §1c](./governance.md)) is a **correlated
+  re-grounding spike**: many criteria re-verify against the new family at once, so it
+  is costed as a **synchronized burst** (not amortized per-feature), feeding the
+  reserved-burst sizing in [operations.md §6](./operations.md).
 - **(b) Adapter inner-loop term:** `nodes × adapter-internal-turns × tokens/turn`
   using the **measured turns-per-node distribution** (the CLI adapter spends turns
   the orchestrator never sees), **plus per-node CLI cold-start / sandbox-provision
@@ -260,8 +351,12 @@ mandates; the model adds these **dominant non-token terms** (so a "≤5%" or
   the Anthropic-style SOP-prefix cache hit does **not** generalize across families
   or inside CLI adapters, so model the realized cache fraction per node-type and
   add **cache-TTL-eviction-on-pause re-warm cost** (HITL/queue pauses evict the
-  prefix; the next turn re-pays full input). Assuming uniform high cache hits is
-  the optimistic error this term removes.
+  prefix; the next turn re-pays full input). This re-warm is **multiplied by the
+  expected pause/resume cycles per tier**, *not* a single re-warm: High-tier
+  release-queued nodes re-pay **full input on every resume** (cache hit ≈ 0 for
+  pauses longer than the provider TTL), so the term is `Σ_tier (expected
+  pause/resume cycles × full-input re-pay)`. Assuming uniform high cache hits — or a
+  single re-warm — is the optimistic error this term removes.
 
 Together these make A/B-scale capacity sizing **derivable** rather than asserted —
 they are exactly the inputs [operations.md §6](./operations.md) needs to size
@@ -280,7 +375,9 @@ many small changes. *(COST-F1, COST-F2)*
 feature).** The per-feature model is multiplied through the pre-registered design:
 `3 arms × n tasks × k repeats × per-task cost of a long-horizon SWE-EVO run`
 (Foundry's per-task cost is *higher* — it pays coordination + monitor overhead).
-`n` follows from the MDE + ~21% base rate + target power; `k` from §4 variance.
+`n`/`k` follow from the **pilot-derived** control base rate + variance components +
+funded MDE/power (§2), **not** the borrowed ~21% frontier figure; the **pilot itself
+is a budgeted line item** in this roll-up (it runs first, on disjoint tasks).
 The roll-up reports total USD/wall-clock **and the budget that funds it**. If the
 powered run is unaffordable, the design is **honestly de-scoped along a stated
 ladder** (smaller detectable margin → sequential/stratified test → fractional

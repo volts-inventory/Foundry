@@ -60,8 +60,11 @@ RunStatus = {
   queueing (§6) vary by node type. Derive it per node type from a maintained
   latency distribution: `p99(node_type) + provider-backoff allowance + expected
   queue-wait`, **refreshed when a node enters a known-slow state** (e.g. failover,
-  backpressure). Distinguish **"slow but progressing"** — an adapter heartbeat or
-  partial-progress marker advances `last_progress` even without a superstep — from
+  backpressure, **reconstituting-from-hibernation** §6). Distinguish **"slow but
+  progressing"** — an adapter heartbeat or partial-progress marker advances
+  `last_progress` even without a superstep, and reconstitution emits a
+  partial-progress/heartbeat marker so a rehydrating run reads as slow-but-progressing,
+  not falsely `wedged` — from
   **"no heartbeat"**, so legitimate provider backoff is not misread as `wedged`.
   Only the no-heartbeat case past the derived deadline escalates.
 - A legitimately-paused run (e.g. awaiting HITL) shows `$0/hr` and a clear
@@ -69,7 +72,11 @@ RunStatus = {
   it now has a machine-readable answer.
 - **`latched_by_sibling_fork`** is set when a run pauses because another fork of the
   same work **stable-FAILed the shared digest**: the latch is then explained
-  operationally in run status, rather than surfacing only at deploy-admission.
+  operationally in run status, rather than surfacing only at deploy-admission. It also
+  covers the case where an in-flight **Release sign-off REQUEST is aborted** because a
+  sibling fork stable-FAILed the digest mid-sign-off (the TOCTOU re-read,
+  [architecture.md §5](./architecture.md)), so operators see why a sign-off was
+  cancelled rather than silently vanishing from the reviewer queue.
   *(SRE-F2.)*
 
 ## 3. Stateful-store availability, backup, and corruption recovery
@@ -92,6 +99,10 @@ store are up and uncorrupted. Operations makes that real:
   (object-store blob lost), is **quarantined**; recovery is **fork-to-prior-good
   checkpoint** (new run_id, per [architecture.md §5](./architecture.md)) with
   operator override, and a periodic **integrity sweep** detects dangling handles.
+  For a **hibernated worktree** (§6) the sweep treats a missing object as a **hard
+  alert before wake**, not a wake-time quarantine — a lost hibernation blob means
+  full re-run, so it must surface while the run is still paused-recoverable, not at
+  the moment an operator tries to resume.
 
 *(SRE-F3.)*
 
@@ -117,13 +128,22 @@ their *availability* a fleet-wide concern:
   judging ([architecture.md §8](./architecture.md)) both shift load onto a *second*
   provider family with its own rate limits and prices. Nothing currently reserves
   that capacity, so a primary outage fleet-stalls on the secondary's `429`s.
-  **Reserve and price** secondary-family capacity for **(a)** steady-state
-  high-risk judging on every feature and **(b)** burst headroom sized to **peak
-  concurrent T1 load** (the worst-case failover fan-in). Secondary-provider
-  rate-limit/quota becomes a **capacity dimension in §6 backpressure**; behavior
-  when the **secondary is also saturated** is defined there (queue against reserved
-  capacity, noisy-neighbor guard covers provider quota — never an unbounded retry
-  storm).
+  **Reserve and price** secondary-family capacity for the **sum of concurrent
+  second-family consumers**, not peak T1 alone: **(a)** always-on high-risk judging on
+  every feature, **(b)** burst headroom for the worst-case T1 **failover fan-in**, and
+  **(c)** flake-recovery cross-family re-judges (§7) — these can co-occur, so sizing to
+  "peak T1 load" alone deadlocks. Secondary-provider rate-limit/quota becomes a
+  **capacity dimension in §6 backpressure**; behavior when the **secondary is also
+  saturated** is defined there (queue against reserved capacity, noisy-neighbor guard
+  covers provider quota — never an unbounded retry storm).
+  **Non-preemptible demand vs reserved capacity.** Under a primary outage co-occurring
+  with a cost-cap breach, all T1 fails over to the pricier second family *and* in-flight
+  mid-attestation runs are non-preemptible by rule (§6), all contending for the
+  reservation. When non-preemptible mid-attestation demand would exceed reserved
+  capacity, **gate at admit-to-attestation** (do not start an attestation that cannot be
+  guaranteed second-family capacity) or hold it in a **bounded attestation queue** —
+  rather than leaving non-preemptible work to "queue against reserved capacity" and
+  deadlock.
 
 *(SRE-F4; also bounds the serialization concern in COST-F3.)*
 
@@ -155,6 +175,14 @@ land mid-run.
   the scorecard, not blocking); **pause only High / trust-root and human-witnessed
   runs** for explicit decision. The §7 reviewer queue must be sized for these
   **correlated spikes**, not just steady per-feature touchpoints.
+- **Held-out-mutant-rotation exposure is a second correlated spike.** When a held-out
+  mutant rotation is **exposed** ([architecture.md §4](./architecture.md)), every
+  in-flight run reusing that rotation must **re-ground / re-verify** at once — a
+  correlated load spike like fleet model-drift, not a per-run event. Treat it as
+  first-class: it **schedules** re-grounding as background re-verification work (it does
+  *not* drain or hard-stall in-flight runs), admitted through §6 backpressure, and
+  fleet capacity (compute + any High-tier decisions it raises) is **sized for the spike**
+  alongside the drift spike above.
 
 *(SRE-F5.)*
 
@@ -173,7 +201,10 @@ A/B alone is `3 arms × n × k`). A run-admission layer is required:
   scheduler below. Preemption, when unavoidable, follows a defined **priority
   order** (low-tier/burst work first); **never preempt a run mid-trust-root
   attestation**. **Fleet-budget-burn is a first-class SLO** with its own
-  burn-rate alert. (The A/B's `3 × n × k` is exactly this workload.)
+  burn-rate alert. (The A/B's `3 × n × k` is exactly this workload.) Admission-throttle
+  alone cannot reach **in-flight re-execution** spend, so the cost-rate cap also **gates
+  in-flight quorum re-runs** (§7 flake-recovery) — the one in-flight cost source large
+  enough to outrun an admission freeze.
 - **Queue + fairness scheduler** across runs/tenants; **per-tenant resource +
   credential + budget isolation**; **noisy-neighbor guard** = per-run cap on
   concurrent `Send` branches *and* per-run/per-tenant cap on secondary-provider
@@ -189,10 +220,24 @@ A/B alone is `3 arms × n × k`). A run-admission layer is required:
   §3, §4) does **not** release state — worktrees, checkpoints, artifacts, indexes
   persist and are **unbounded at fleet scale**. Each run carries a **state-footprint
   estimate** (worktree + checkpoint + artifact + index bytes). A **fleet paused-run
-  storage cap with alerting** bounds the aggregate. **Long-paused runs hibernate:**
+  storage cap with alerting** bounds the aggregate. **Cap-hit with no drainable
+  consumer:** when the cap is reached but every consumer is a legitimately-paused,
+  un-staffable High-tier run — admission is already throttled to zero, so nothing
+  drains it — alerting alone is insufficient. A defined policy applies: **tier-ordered
+  eviction to a cheaper CAS storage tier**, and **storage-pressure feedback that forces
+  the §7 reviewer-queue escalation (batch/delegate) sooner** to clear paused state, with
+  an **explicit operator decision point** if neither relieves pressure. **Long-paused
+  runs hibernate:**
   spill the worktree to the **content-addressed store** and reconstitute on resume.
-  **Worktree GC must be resume-safe** — it may reclaim a hibernated worktree only
-  because every handle is re-resolvable by `tree_sha`/content address on wake, so GC
+  Hibernation makes the *whole* worktree depend on CAS durability for an unbounded
+  HITL pause, so spilled artifacts carry an explicit **retention lease/pin** keyed to
+  live paused-run state, **excluded from object-store lifecycle expiry and from
+  worktree GC until the run reaches a terminal state** — a blob-loss/GC/TTL event must
+  not silently quarantine a paused run (recovery = full re-run; the integrity sweep
+  alerts on a missing hibernated object before wake, §3).
+  **Worktree GC must be resume-safe** — beyond the pin, it may reclaim a hibernated
+  worktree only because every handle is re-resolvable by `tree_sha`/content address
+  on wake, so GC
   cannot break resume.
 
 *(SRE-F6; bounds the trusted-runner serialization in COST-F3.)*
@@ -217,9 +262,18 @@ constraint, not an externality.
   `paused`" is correct but collapses High-tier throughput to **reviewer-PAIR
   availability**, so it must be capacity-planned, not just alerted. Model it as a
   queue: High-tier release **arrival rate × service time** vs the number of
-  **available reviewer-pairs**, with utilization kept below saturation. A
+  **available reviewer-pairs**, with utilization kept below saturation. The
+  steady-state (Poisson) model is **not sufficient on its own**: a fleet-wide model
+  rotation (§5) injects a near-simultaneous **batch of `B` High-tier drift decisions**
+  into the **same** reviewer-pair pool, so steady-state utilization understates the
+  **transient queue depth (~`B/c`** for `c` pairs). Size the **transient**, not just
+  steady-state utilization, modelling the drift spike as a **batch/bulk arrival
+  superimposed on the steady stream**. Because **drift decisions and release sign-offs
+  are different service-time classes sharing one pool**, give drift decisions a
+  **distinct decision-class/queue** (or cautiously extend the §5 auto-continue default)
+  so they don't **serialize behind routine release sign-offs**. A
   **staffing target is SLA-driven** (sized to the High-tier queue-age SLO below,
-  including the correlated drift spikes of §5 — not just steady per-feature
+  including these correlated drift spikes of §5 — not just steady per-feature
   touchpoints). On **sustained backlog**, a defined policy applies in order:
   **batch sign-off windows**, **delegated reviewer tiers**, then **admission-throttle
   new High-tier runs** (§6) so the backlog cannot grow unbounded.
@@ -235,6 +289,16 @@ constraint, not an externality.
   than allowing unbounded per-incident overrides. Quorum re-runs are **counted in
   the §6 / cost model** compute, and flake-override decisions are **counted in
   human-decisions-per-feature** below.
+  **Correlated flake is fleet-level, not per-run.** A shared trusted-infra fault under
+  load makes *every* in-flight High-tier run enter the quorum-re-run path at once — an
+  unbounded compute amplifier (`quorum_size × in-flight High runs`) plus a two-person-
+  override thundering herd — and the **admission-side** fleet cost-cap (§6) cannot stanch
+  it because the spend is **in-flight, not new**. So: the **flake-recovery counter +
+  quorum compute are a fleet-level rate-limited resource** (not just a per-run bound);
+  **many runs entering quorum on the same infra is detected as an INFRA INCIDENT that
+  pauses — not re-runs** (status `paused: trusted_component_down`, §4, queue-and-drain on
+  recovery) rather than amplifying a shared fault; and the **fleet cost-rate cap reaches
+  in-flight re-execution compute** (§6), not admission alone.
 - **Scorecard threshold on human-decisions-per-feature** ([evaluation.md §7](./evaluation.md))
   so HITL volume is a falsifiable design constraint. If it trends up, that is a
   design smell to be driven down by **risk-tiering** ([governance.md §1e](./governance.md)),

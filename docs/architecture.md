@@ -118,6 +118,21 @@ Load-bearing control rules:
 - `assurance_subgraph(IntegratedTree) -> {SecurityReport, AuditReport, SupplyChainReport}` (`Send` fan-out + join)
 - `release_subgraph(attested tree) -> Release` (admission controller + non-agent deployer)
 
+> **The per-node inner loop is a pluggable adapter, not a core dependency.**
+> `implementation_subgraph` (and, optionally, QA/Review/Security-triage nodes) run
+> their plan→edit→test→iterate loop through a **coding-agent substrate contract**:
+> **in** — a task packet (`pinned_constraints` + retrieved spans + a scoped
+> sandboxed worktree + least-privilege tools + a turn/cost budget); **out** — a
+> diff + test **sources** + `GateTriage`. The contract binds every adapter:
+> it runs **in-sandbox** (never the host), it **never emits a gate verdict**
+> (the forged-results-stream defense — [governance §1c](./governance.md)), and it
+> **writes the worktree only** (durable external effects go through the outbox,
+> §5). Adapters: Claude Code (`claude -p`), OpenAI Codex CLI (`codex exec`),
+> OpenHands/SWE-agent, or a raw multi-provider ReAct loop. Because the substrate is
+> a swappable seam, a high-risk review/QA node can be required to run a
+> **different-family** adapter than the implementer it checks — preserving the judge
+> decorrelation the model tiering depends on ([PLAN §6](../PLAN.md)).
+
 ## 3. Typed state and concurrency semantics
 
 LangGraph merges updates **per channel** at each superstep, folding the pending

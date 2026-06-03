@@ -27,5 +27,5 @@ This repository currently contains **the plan only** — no application code yet
 - **SOP-driven role agents** — MetaGPT's "Code = SOP(Team)" and ChatDev's communicative agents.
 - **Graph orchestration** — LangGraph `StateGraph`: nodes, conditional edges, durable checkpoints, interrupts.
 - **Composable workflow patterns** — Anthropic's orchestrator-workers, evaluator-optimizer, routing, parallelization, reflection, human-in-the-loop.
-- **Coding-agent execution** — lessons from SWE-agent (agent-computer interface) and OpenHands (multi-agent platform), benchmarked on SWE-bench Verified and long-horizon SWE-EVO-style tasks.
+- **Coding-agent execution** — a *pluggable worker-substrate contract* (the agent-computer interface) with provider adapters — Claude Code (`claude -p`), OpenAI Codex CLI (`codex exec`), OpenHands/SWE-agent, or a raw multi-provider loop — so the inner coding loop stays provider-agnostic and a *different-family* adapter can review the implementer's work. Benchmarked on SWE-bench Verified and long-horizon SWE-EVO-style tasks.
 - **Enterprise guardrails** — the five-plane model (policy / execution / data / observability / assurance) with SBOM, SLSA, and evals shipped in CI.

@@ -179,6 +179,20 @@ Load-bearing control rules:
 > flipped `status` no longer matches the stamped binding and fails
 > `verify_judgment_binding` (§3, §4).
 >
+> **The bound `status` must come from a TRUSTED verdict-derivation path, never the
+> implementing adapter's free-form output.** Signing `status` only defends the
+> verdict if the stamper obtains an *authentic* `status` — if the out-of-adapter
+> stamper simply takes the adapter's free-form result text, a compromised adapter
+> reports `status="approve"` and gets that **forged verdict faithfully signed** (the
+> binding would attest a lie). Therefore the high-risk Review judge runs through a
+> **trusted harness emitting a GRAMMAR-CONSTRAINED / structured verdict channel** that
+> the **§2b mediating proxy observes and binds INDEPENDENT of the adapter's
+> post-processing** — the proxy/orchestrator **owns verdict-extraction** from that
+> structured channel — **OR** the high-risk Review verdict is emitted by a node
+> **OUTSIDE the implementing adapter entirely**. A `status` taken from the
+> implementing adapter's free-form output **does NOT satisfy the binding** and is
+> rejected.
+>
 > **Decorrelation binds proxy-observed served lineage, not adapter brand.**
 > OpenHands, the raw loop, *and* Claude Code can each drive any model, so the brand
 > carries no lineage guarantee — and the adapter's *self-declared* family is
@@ -299,6 +313,16 @@ observation. Its mechanics:
   high-risk judgment (§2). The resolved set + `served_model_id` +
   `lineage_map_revision` are stamped into the run manifest per node and into the
   judgment-verdict binding (§3).
+- **trusted verdict-extraction (the bound `status` source).** For a high-risk Review
+  judgment the proxy does **not** take the verdict from the adapter's free-form output —
+  a compromised adapter would just report `status="approve"` and have it authentically
+  signed. The judge runs through a **trusted harness exposing a grammar-constrained /
+  structured verdict channel**; the proxy **observes and extracts `status` from that
+  channel independent of the adapter's post-processing** (the proxy/orchestrator owns
+  verdict-extraction) and binds *that* `status` into the judgment-verdict binding (§3),
+  OR the Review verdict is emitted by a node **outside the implementing adapter
+  entirely**. A `status` derived from the implementing adapter's free-form output does
+  **not** satisfy the binding.
 - **grounding / audit of the resolution.** The map itself is curated and versioned
   under the scanner-config trust boundary ([governance.md §4](./governance.md)), so
   the resolution is only as sound as that revision — which is why
@@ -356,7 +380,8 @@ class GateResult(BaseModel):
     # governance §1c); the signature binds the verdict to its inputs so it can't be replayed:
     verdict_class: str             # config-evaluable | execution-deterministic | statistical | human-witnessed | perceptual (domains.md §1)
     runner_attestation: str | None # sig over (name, state_sha, scanner_config_rev, lineage_map_revision, status, results_digest); human sig for class "human-witnessed"
-    judgment_binding: str | None   # judgment verdicts only: binding over (node_id, proxy-observed served_family SET, status, verdict_nonce, lineage_map_revision, state_sha, subject_artifact_uri), stamped OUTSIDE the implementing adapter; _merge_gates rejects writes whose binding doesn't validate (binding status defeats a same-tree verdict-flip replay)
+    verdict_nonce: str | None      # judgment verdicts only: the single-use challenge bound into judgment_binding; surfaced as a field so the reducer can consume/latch it (see judgment_binding + _merge_gates)
+    judgment_binding: str | None   # judgment verdicts only: binding over (node_id, proxy-observed served_family SET, status, verdict_nonce, lineage_map_revision, state_sha, subject_artifact_uri), stamped OUTSIDE the implementing adapter; _merge_gates rejects writes whose binding doesn't validate (binding status defeats a same-tree verdict-flip replay). verdict_nonce is a server/orchestrator-issued, per-review-request challenge, single-use and freshness-verified at reducer-time AND admission (mirroring the class-4 server_nonce); consumed on the first accepted write for that review request; any later write reusing or omitting a live-issued nonce is rejected. Negative judgment verdicts LATCH monotonically — a request-changes (or trusted cross-check rejection) on a given (node_id, run_against) cannot be superseded by re-emitting an older approve for the same key, exactly as deterministic stable-FAILs latch; released only by a fresh, nonce-bound re-review (so _merge_gates is NOT pure max-by-seq for judgment verdicts)
     results_digest: str | None     # class 1/2: hash of raw zone-A results; class 3: (metric, dataset_hash, seed, n, estimate, ci, decision)
     findings: list[str] = []
     retries: int = 0
@@ -408,15 +433,30 @@ def _merge_gates(a, b):                        # gates: LATEST BY seq per (name,
         # Judgment verdicts are NOT in DETERMINISTIC_GATES, so they bypass the attestation
         # check above — instead they must carry a judgment-verdict binding stamped OUTSIDE
         # the implementing adapter; reject any whose binding doesn't validate (anti-forge/replay):
-        if g.name in JUDGMENT_VERDICTS and not verify_judgment_binding(g):
-            continue                           # binding = (node_id, proxy-observed served_family SET, status,
+        if g.name in JUDGMENT_VERDICTS:
+            if not verify_judgment_binding(g):
+                continue                       # binding = (node_id, proxy-observed served_family SET, status,
                                                #            verdict_nonce, lineage_map_revision, state_sha,
                                                #            subject_artifact_uri). state_sha keying blocks
                                                #            cross-tree/fork replay; binding STATUS (+ nonce)
                                                #            blocks a same-tree verdict-FLIP (copy a genuine
                                                #            reviewer's binding, set status="approve", re-emit) —
                                                #            a flipped status fails verify_judgment_binding (§4)
+            # verdict_nonce is a server/orchestrator-issued, per-review-request challenge,
+            # single-use + freshness-verified at reducer-time AND admission (mirrors class-4
+            # server_nonce): CONSUMED on the first accepted write for that review request;
+            # any later write reusing or omitting a live-issued nonce is rejected.
+            if not consume_verdict_nonce(g):
+                continue
         k = (g.name, g.run_against)
+        if g.name in JUDGMENT_VERDICTS and k in m and is_negative(m[k]) \
+                and m[k].verdict_nonce == g.verdict_nonce:
+            continue                           # NEGATIVE-VERDICT LATCH (NOT pure max-by-seq for judgment
+                                               #   verdicts): a request-changes / trusted-cross-check rejection
+                                               #   on (node_id, run_against) cannot be superseded by re-emitting
+                                               #   an OLDER approve for the same key — exactly as deterministic
+                                               #   stable-FAILs latch; released only by a FRESH, nonce-bound
+                                               #   re-review (a new verdict_nonce)
         if k not in m or g.seq > m[k].seq:     # TOTAL tuple order — ties are impossible; emission_epoch
             m[k] = g                           #   (ahead of superstep_index) makes a re-execution outrank
     return list(m.values())                    #   the stale record it supersedes, never tie it
@@ -485,8 +525,17 @@ Why each fix matters:
   **judgment-verdict binding** stamped outside the adapter, so a forged/replayed
   "approve" is rejected — the binding includes `status` (+ `verdict_nonce`), so a
   same-tree **verdict-flip** (copy a genuine binding, set `status="approve"`, re-emit
-  higher-`seq`) fails validation, not just cross-tree replay. In-graph routing and the
-  HITL evidence pack read the attested record. *(DS1, DS2, DS8, DS-R9-F2)*
+  higher-`seq`) fails validation, not just cross-tree replay. The `verdict_nonce` is
+  **single-use** (server/orchestrator-issued per review request, consumed on first
+  accepted write, freshness-verified at reducer-time AND admission like the class-4
+  `server_nonce`), so even a **genuine, still-valid `approve` binding cannot be
+  REPLAYED** at a higher `seq` to mask a later `request-changes`; and negative
+  judgment verdicts **LATCH monotonically** — `_merge_gates` is therefore **not pure
+  max-by-`seq` for judgment verdicts**: a `request-changes` (or trusted cross-check
+  rejection) on `(node_id, run_against)` cannot be superseded by an older `approve`,
+  exactly as deterministic stable-FAILs latch, released only by a fresh nonce-bound
+  re-review. In-graph routing and the HITL evidence pack read the attested record.
+  *(DS1, DS2, DS8, DS-R9-F2)*
 - **`status` distinguishes `error` from `fail`** — an infra crash is not a
   verdict; the join handles it separately (§5). *(DS7)*
 - **All list channels are keyed set-unions** (`tasks` by id, `actions` by

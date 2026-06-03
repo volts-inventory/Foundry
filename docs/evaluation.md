@@ -85,16 +85,24 @@ A vague A/B rigs itself; this one is specified so it can actually fail. *(AI1)*
   dropped sample. This ITT rule is pre-registered alongside the hidden-test ITT rule
   (§6): without it, **differential attrition inflates Foundry**, which has more
   abort/escalate paths than the ungated baseline.
-  **The token-secondary uses a *different* ITT denominator** (also pre-registered):
-  applying the primary's "budget-exhaustion = unresolved" rule to the token-equalized
-  secondary would **re-import the very overhead penalty the secondary exists to remove**
-  — a task that burns its token budget on coordination/monitor overhead *before* emitting
-  any actions would score unresolved, smuggling the USD-primary's handicap back in. So
-  the secondary's denominator is **defined consistently with token-equalization**: it is
-  taken over **tasks that reached the implementation phase**, and exhaustion/non-completion
-  is measured **in effective-task-tokens** (action-token budget), so a task scores
-  unresolved only when it exhausts its *effective* budget, not when overhead consumes the
-  raw budget first. *(AI-R10-F3)*
+  **The token-secondary uses the *same* ITT denominator as the primary — all
+  *initiated* tasks** (also pre-registered) — and removes the overhead handicap **only
+  through the effective-token metric, never by conditioning the denominator.** An earlier
+  draft scored it over "tasks that reached the implementation phase," but **reaching
+  implementation is an arm-DEPENDENT, post-treatment event** — Foundry's Spec/Build gates
+  abort/escalate *before* implementation while the interleaved single-agent baseline
+  rarely does — so conditioning on it **re-introduces the exact collider / differential-
+  attrition bias the primary's ITT rule (and the hidden-test ITT rule, §6) forbid**, now
+  flattering whichever arm aborts pre-implementation most. The fix keeps **no sample
+  dropping**: every initiated task counts, and a **pre-implementation abort still scores
+  unresolved**. The overhead handicap is removed *only* by **measuring exhaustion/non-
+  completion in effective-task-tokens** (action-token budget) — a task scores unresolved
+  when it exhausts its *effective* budget, not when coordination/monitor overhead consumes
+  the raw budget first. So the secondary differs from the primary **on the budget scale,
+  not the denominator**: same all-initiated denominator, effective-token (not raw-token)
+  exhaustion. (This matters because the token-secondary is decision-grade — it routes
+  {USD-null, token-positive} into funded-redesign vs hard KILL (§2.5) — so a denominator
+  collider that inflates the secondary biases the fork toward "spend more.") *(AI-R10-F3)*
   Every other scorecard threshold (§7) is **secondary/descriptive** and cannot, on
   its own, block the A/B verdict. Any secondary that *can* gate a release is placed
   in a stated **hierarchical gatekeeping** order with a pre-registered FWER
@@ -132,7 +140,14 @@ A vague A/B rigs itself; this one is specified so it can actually fail. *(AI1)*
   be honestly frozen from a guess. We **pre-register a separate, budgeted
   variance/base-rate pilot** (**never scored as part of the A/B**) whose *only* outputs
   are (i) the strong-baseline control resolution rate and (ii) the within- vs
-  between-task variance components. **Both base rate and between-task variance are
+  between-task variance components — **on the USD-primary's resolution scale.** **But the
+  token-secondary carries its own pre-registered MDE/alpha/power on a *different* scale
+  (effective-token-budget exhaustion over the all-initiated denominator, §2), so a single
+  `(n,k)` cannot be the powered solution for both endpoints unless the secondary's
+  variance structure is also estimated.** The pilot therefore also pre-registers
+  **(iii) the strong-baseline control rate and (iv) the within- vs between-task variance
+  components for the token-secondary, on its own denominator + effective-token scale.**
+  **Both base rate and between-task variance are
   properties of the task *distribution*, not of a particular task list, so they only
   transfer if pilot and scored slice share that distribution:** we **pre-register one
   common sampling frame + strata** and draw **both** the pilot slice and the scored slice
@@ -147,8 +162,17 @@ A vague A/B rigs itself; this one is specified so it can actually fail. *(AI1)*
   minimizes the task-level effect-estimator variance under the funded budget**, using
   the pilot's **within-task vs between-task variance components** (more `k` only pays
   off while within-task nondeterminism dominates; otherwise spend the budget on `n`).
-  The chosen `(n, k)` and the variance components that justify it are stated in the
-  manifest. *(AI-R10-F8)*
+  **Because the USD-primary and the token-secondary have *different* variance structures
+  (above), the single `(n,k)` cannot silently be powered off the primary's alone.** We
+  pre-register **either** (a) a constrained optimization whose feasibility region is the
+  **intersection** — `(n,k)` is the joint solution that satisfies **both** endpoints'
+  funded MDE/power simultaneously — **or** (b) an explicit statement of **which endpoint
+  governs `(n,k)`**, accompanied by the **realized power of the *other* endpoint at that
+  `(n,k)`** computed from its pilot variance components. Without this, a token-secondary
+  "Null" could be a power failure rather than a true null, **mis-routing the
+  KILL/redesign fork (§2.5)**. The chosen `(n, k)`, the variance components for **both**
+  endpoints that justify it, and the governing-endpoint choice + realized cross-power
+  are stated in the manifest. *(AI-R10-F8)*
 - **Pre-registered funded power rung (BLOCKER, before any scored run):** the
   de-scoping ladder (§8) must **not** be walked post-hoc to whichever rung happens
   to "pass" once cost is known. Before the first scored run we **pre-register the

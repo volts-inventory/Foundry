@@ -201,6 +201,23 @@ replayed by an agent/orchestrator:
 - A **class-4 write from any agent identity is rejected exactly like an unsigned
   deterministic-gate write** — the agent can never supply the human verdict bit.
 
+**Judgment-verdict bindings are single-use and negative verdicts latch.** *(SEC-R12-F9)*
+The judgment-verdict binding added `verdict_nonce` to stop a same-tree status-FLIP,
+but nothing consumes it, so a genuine still-valid `approve` binding could be
+REPLAYED at higher `seq` to mask a later `request-changes` (judgment verdicts are
+latest-by-`seq` with no latch). Two controls close this, verbatim-consistent with
+[architecture.md §3](./architecture.md):
+- **Single-use nonce:** `verdict_nonce` is a server/orchestrator-issued,
+  per-review-request challenge, single-use and freshness-verified at reducer-time
+  AND admission (mirroring the class-4 `server_nonce`); it is consumed on the first
+  accepted write for that review request, and any later write reusing or omitting a
+  live-issued nonce is rejected.
+- **Negative-verdict latch:** negative judgment verdicts LATCH monotonically — a
+  `request-changes` (or a trusted cross-check rejection) on a given
+  `(node_id, run_against)` cannot be superseded by re-emitting an older `approve`
+  for the same key, exactly as deterministic stable-FAILs latch; the latch is
+  released only by a fresh, nonce-bound re-review.
+
 Agents only *triage and explain* (writing `GateTriage`, never `GateResult`, for
 deterministic gates — [architecture.md §3](./architecture.md)); the `gates`
 reducer **rejects any unsigned deterministic-gate write**, so an agent cannot
@@ -585,14 +602,22 @@ A signature proves provenance, not that deployment is authorized. Therefore:
       class-3 alpha.** Within-run hardening is not sufficient: a checkpoint fork
       mints a **new `run_id`**, and a per-run ledger would silently hand each fork a
       fresh alpha budget — optional-stopping by forking until one fork's CI clears.
-      So the ledger is **keyed on `(state_sha, metric/decision-id, eval-set
-      identity)`, not on `run_id`**: every fork of the same class-3 decision
-      **shares one alpha budget**, and a fork's look **debits the shared ledger**.
-      Admission **rejects a class-3 verdict whose CUMULATIVE CROSS-FORK looks exceed
-      the pre-registered group-sequential cap**, regardless of which `run_id`
-      spent them. This places the class-3 look ledger in the same **GLOBAL /
-      survive-forks** set as the other admission-latched records (the WORM stable-FAIL
-      latch, §5; the cross-fork digest disqualification) — forking can never reset it.
+      So the class-3 alpha look-ledger is keyed on `(eval_set_identity,
+      decision_id)` — NOT on `state_sha` — so that every retrain/feature/label
+      variant scored against the same eval set debits ONE shared alpha budget;
+      `state_sha` is recorded per-look for audit but does not partition the budget.
+      Fork-resistance is the special case (forks share `eval_set_identity`).
+      Keying alpha on `state_sha` would defeat the purpose: `state_sha` changes on
+      every retrain/feature-touch/relabel, so it would give each adaptive iteration
+      a fresh budget and defeat the anti-adaptive-overfitting purpose (and a per-run
+      ledger likewise hands each fork a fresh budget). Every fork of the same
+      class-3 decision **shares one alpha budget**, and a fork's look **debits the
+      shared ledger**. Admission **rejects a class-3 verdict whose CUMULATIVE
+      CROSS-FORK looks exceed the pre-registered group-sequential cap**, regardless
+      of which `run_id` spent them. This places the class-3 look ledger in the same
+      **GLOBAL / survive-forks** set as the other admission-latched records (the WORM
+      stable-FAIL latch, §5; the cross-fork digest disqualification) — forking can
+      never reset it, and admission re-checks cumulative looks per record.
 - **Overrides are record-scoped, not digest-scoped.** A two-person override targets
   a **specific transient `(gate_name, tree_sha, results_digest)`** record (justified
   by its recovery quorum); admission then **re-evaluates the full gate set**, so a

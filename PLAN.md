@@ -254,19 +254,25 @@ healthcare, ML/data, frontend/UX) are specified against these hooks, keeping the
 core genuinely general while it becomes expert — and *honest* about each domain's
 real correctness signal.
 
-**Wedge / who adopts, and why.** First adopter: a **regulated or audit-bound
-engineering team** (fintech/healthcare) already paying for review, evidence, and
-control-mapping by hand. What Foundry's *Assistant-mode* output does that a single
-strong agent + standard CI (or Chromatic/Percy/axe-CI/Storybook + ordinary CI)
-does **not**: it ships a PR with *structured, criterion-linked* artifacts — PRD →
-criteria → fidelity tests → threat-model items → control mapping — wired to a
+**Wedge / who adopts, and why.** First/early adopter: a **non-regulated
+engineering team** that values *criterion-linked structured PRs* + review/test
+discipline. What Foundry's *Assistant-mode* output does that a single strong
+agent + standard CI (or Chromatic/Percy/axe-CI/Storybook + ordinary CI) does
+**not**: it ships a PR with *structured, criterion-linked* artifacts — PRD →
+criteria → fidelity tests → threat-model items → review mapping — wired to a
 verdict-class taxonomy, so a reviewer sees *why* each gate passed, not just a
 green check. Honestly: in Assistant mode the differentiated value is thin — most
-of it is convenience over assembling point tools. The **attested, orchestrated**
-value (decorrelated judging, two-zone signing, gate-state-bound provenance,
-deploy-time admission) concentrates in **Gated/Autonomous** modes, which most
-adopters reach later — which is exactly why the trust root is deferred and
-sequenced behind the Phase-1.5 decision gate (§8a, §11).
+of it is convenience over assembling point tools — so value lands in **Assistant
+(Phases 0–1)** and deepens at **early Gated (Phase 2)** via distinct gates,
+risk-tiering, and recorded Design/Release sign-off. A **regulated or audit-bound
+team** (fintech/healthcare) is an explicitly **later** deepening adopter: its
+relevant value (decorrelated judging, two-zone signing, gate-state-bound
+provenance, deploy-time admission, attested control-mapping) concentrates in
+**Gated/Autonomous** modes and only gets real teeth at the **Phase-4** trust
+root — regulated work is Gated+ by construction, served later, never dressed up
+as an early wedge. This is exactly why the trust root is deferred and sequenced
+behind the Phase-1.5 decision gate, consistent with §12 and
+[docs/roadmap.md](./docs/roadmap.md) (§8a, §11).
 
 ## 10. Evaluation — does the factory work?
 
@@ -325,12 +331,12 @@ milestone (Assistant mode) is ~2–3 quarters.
 - **Operability / Day-2** — Mitigation: a dedicated [operations.md](./docs/operations.md): run-status liveness (paused vs wedged), store HA + poisoned-checkpoint recovery, trusted-component availability/blast-radius, upgrade/migration with runs in flight, multi-tenancy/capacity/queueing, trusted-component lifecycle.
 - **Cost/latency at scale & HITL volume** — Mitigation: **change-risk tiering** + **dependency-scoped re-verification**; cost reported converged *and* worst-case *and* weighted over the change-size distribution; **human-decisions-per-feature** is a scorecard threshold, not an unbounded externality. The dominant cost drivers — trusted-runner mutant/perturbation re-execution compute, adapter inner-loop turns, and second-family judging — are now explicitly modeled ([docs/evaluation.md §8](./docs/evaluation.md), [docs/operations.md §6](./docs/operations.md)).
 - **Product lifecycle** — Mitigation: [lifecycle.md](./docs/lifecycle.md) covers maintenance of generated code, human **steering/taste** (not just gatekeeping), a **product-feedback loop**, deployment-trust modes, and **AI-code licensing/liability**.
-- **Domain mismatch (correctness is not one shape)** — the deterministic-oracle verdict model fits backend/logic but breaks for regulated (evidence + human-witnessed validation), ML/data (statistical metrics + versioned data), and UX (perceptual judgment) software. Mitigation: a core **verdict-class taxonomy** + an **expanded domain-pack contract** ([docs/domains.md](./docs/domains.md)) — statistical/human-witnessed/perceptual verdict classes, `state_sha` for data/weights, compute-cost budgeting, mode/tier veto, and mandatory perceptual HITL — with the honest caveat that *pre-release UX correctness is bounded* (real users aren't in the pre-release loop) and *autonomous deploy is often unavailable* in regulated domains. Further caveats: the **statistical (class-3) verdict is scoped to batch/offline supervised eval** — online/RL/generative correctness need separate handling, and the class-3 **alpha look-ledger is global/cross-fork** so forking can't re-draw the budget ([docs/domains.md §1/§5](./docs/domains.md), [docs/governance.md §5](./docs/governance.md)); and **regulated controls have no teeth in Assistant mode** — without the trust root, evidence is advisory and a human can merge past it; teeth arrive only in Gated/Autonomous, so the **regulated wedge adopter is served only by the deferred Gated+ modes** and near-term value is **backend-first** ([docs/roadmap.md](./docs/roadmap.md), §9, [docs/lifecycle.md §4](./docs/lifecycle.md), [docs/domains.md §5](./docs/domains.md)).
+- **Domain mismatch (correctness is not one shape)** — the deterministic-oracle verdict model fits backend/logic but breaks for regulated (evidence + human-witnessed validation), ML/data (statistical metrics + versioned data), and UX (perceptual judgment) software. Mitigation: a core **verdict-class taxonomy** + an **expanded domain-pack contract** ([docs/domains.md](./docs/domains.md)) — statistical/human-witnessed/perceptual verdict classes, `state_sha` for data/weights, compute-cost budgeting, mode/tier veto, and mandatory perceptual HITL — with the honest caveat that *pre-release UX correctness is bounded* (real users aren't in the pre-release loop) and *autonomous deploy is often unavailable* in regulated domains. Further caveats: the **statistical (class-3) verdict is scoped to batch/offline supervised eval** — online/RL/generative correctness need separate handling, and the class-3 **alpha look-ledger is global/cross-fork** so forking can't re-draw the budget — **keyed on eval-set identity (`(eval_set_identity, decision_id)`), not `state_sha`**, so adaptive retrain/feature iteration against the same eval set debits ONE shared budget and can't re-draw it either ([docs/domains.md §1/§5](./docs/domains.md), [docs/governance.md §5](./docs/governance.md)); and **regulated controls have no teeth in Assistant mode** — without the trust root, evidence is advisory and a human can merge past it; teeth arrive only in Gated/Autonomous, so the **regulated wedge adopter is served only by the deferred Gated+ modes** and near-term value is **backend-first** ([docs/roadmap.md](./docs/roadmap.md), §9, [docs/lifecycle.md §4](./docs/lifecycle.md), [docs/domains.md §5](./docs/domains.md)).
 
 ## 13. How this plan was hardened
 
 This plan was red-teamed in a **critic → solutioner → full-rewrite loop across
-nineteen rounds at four bars** (plus a Round-20 fix pass): a generalist
+twenty-one rounds at four bars** (plus a Round-22 fix pass): a generalist
 *design-doc* bar (Rounds 1–6), an *implementation-readiness* bar (three-lens
 technical panel — distributed-systems, offensive-security, AI-agents — Rounds
 7–12, converged), a *fitness-for-purpose* bar (SRE/operability, cost/scale,
@@ -343,16 +349,23 @@ MAJOR, 16 MINOR)**, which **Round 18** resolved. **Round 19** ran a fresh full-d
 panel returning **29 findings (0 BLOCKER, 25 MAJOR, 4 MINOR)** — the BLOCKER
 count fell to **zero** and the finding count roughly halved (62→57→29), with the
 remainder being localized refinements at the new mechanisms' seams, which
-**Round 20** resolved. **283 findings have now been raised and resolved** (254
-prior + 29 this round).
+**Round 20** resolved. **Round 21** ran a fresh full-domain validation panel
+returning **10 findings (2 BLOCKER, 7 MAJOR, 1 MINOR)** — and honestly, these
+were almost entirely **consistency/reconciliation** bugs introduced by the
+multi-fixer method across rounds (the look-ledger key, the §9-vs-§12 adopter
+drift, "second family" vs ≥3 lineages, an unwired verdict-nonce), **not** new
+design flaws; **Round 22** resolved them with verbatim cross-doc definitions to
+stop the drift. **293 findings have now been raised and resolved** (283 prior +
+10 this round).
 
 The defining lesson is the progression: **each genuinely new axis of scrutiny
 re-opened a problem the prior axes had signed off on** — and each new round
 re-opens prior sign-offs at the *seams its own fixes created*. The trajectory is
-now **stabilizing** (BLOCKERs 10→9→0; findings 62→57→29): the remaining items
-are localized refinements at the new mechanisms' seams, not new whole-system
-defects. **Convergence is not proof of correctness** — a genuinely new axis of
-scrutiny could still re-open the design. The fitness-for-purpose
+now **converging** (findings 62→57→29→10; BLOCKERs 10→9→0→2): finding volume is
+collapsing, and the residual churn is now dominated by **edit-consistency** drift
+across the multi-fixer method, not whole-system design defects. **Convergence is
+not proof of correctness** — a genuinely new axis of scrutiny could still re-open
+the design. The fitness-for-purpose
 lenses surfaced 17 findings about sequencing/operability/cost the technical panel
 couldn't see; the domain experts then found that the plan's own thesis — "a
 deterministic decision rule at the seams" — was *domain-specific* (true for

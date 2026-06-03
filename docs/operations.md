@@ -127,29 +127,42 @@ their *availability* a fleet-wide concern:
   not redesign.
 - **Per-component availability target + runbook**; an outage alert; explicit
   "fleet paused, not failed" semantics so budget isn't burned during the outage.
-- **Second-family capacity reservation.** T1 failover and always-on high-risk
-  judging ([architecture.md §8](./architecture.md)) both shift load onto a *second*
-  provider family with its own rate limits and prices. Nothing currently reserves
-  that capacity, so a primary outage fleet-stalls on the secondary's `429`s.
-  **Reserve and price** secondary-family capacity for the **sum of concurrent
-  second-family consumers**, not peak T1 alone: **(a)** always-on high-risk judging on
-  every feature, **(b)** burst headroom for the worst-case T1 **failover fan-in**,
-  **(c)** flake-recovery cross-family re-judges (§7), and **(d)** the **held-out-mutant-
-  rotation re-grounding spike** (§5), which re-verifies high-risk criteria fleet-wide and
-  so re-fires the mandatory second-family cross-family judge per high-risk criterion
+- **Per-lineage capacity reservation across the ≥3 provisioned lineages.** T1
+  failover and always-on high-risk judging ([architecture.md §2/§8](./architecture.md))
+  shift load onto **non-primary lineages**, each with its own rate limits and prices.
+  The stack now provisions **≥3 model lineages** specifically so decorrelation-aware
+  failover survives a single-lineage outage (§2/§8) — which means failover does **not**
+  converge on one named "secondary": a judge that must stay cross-family vs a family-2
+  implementer fails over to family-3, so under a single-lineage outage the failover
+  fan-in **redistributes across whichever lineages survive**, and lands on lineages
+  that were not the failed one. Reserving headroom on a single named "secondary" leaves
+  the actual failover target with **no reserved headroom → a `429` wall in exactly the
+  single-lineage outage the ≥3-lineage policy was meant to survive.** Therefore
+  **reserve and price headroom on ALL non-primary lineages** that can absorb
+  decorrelation-preserving failover, **sized per-lineage for the worst-case
+  redistribution of any one failed lineage's high-risk judging across the SURVIVING
+  lineages** — not for "peak T1 on a secondary" alone. The reservation covers the
+  **sum of concurrent cross-family consumers** on each surviving lineage: **(a)**
+  always-on high-risk judging on every feature, **(b)** burst headroom for the
+  worst-case **failover fan-in redistributed onto that lineage** when another lineage is
+  out, **(c)** flake-recovery cross-family re-judges (§7), and **(d)** the **held-out-
+  mutant-rotation re-grounding spike** (§5), which re-verifies high-risk criteria
+  fleet-wide and so re-fires the mandatory cross-family judge per high-risk criterion
   ([evaluation.md §4/§8](./evaluation.md)) — these can co-occur, so sizing to
-  "peak T1 load" alone deadlocks. Secondary-provider rate-limit/quota becomes a
-  **capacity dimension in §6 backpressure**; behavior when the **secondary is also
-  saturated** is defined there (queue against reserved capacity, noisy-neighbor guard
-  covers provider quota — never an unbounded retry storm).
-  **Non-preemptible demand vs reserved capacity.** Under a primary outage co-occurring
-  with a cost-cap breach, all T1 fails over to the pricier second family *and* in-flight
-  mid-attestation runs are non-preemptible by rule (§6), all contending for the
-  reservation. When non-preemptible mid-attestation demand would exceed reserved
-  capacity, **gate at admit-to-attestation** (do not start an attestation that cannot be
-  guaranteed second-family capacity) or hold it in a **bounded attestation queue** —
-  rather than leaving non-preemptible work to "queue against reserved capacity" and
-  deadlock.
+  "peak T1 load" alone deadlocks. **Per-lineage** rate-limit/quota becomes a
+  **capacity dimension in §6 backpressure**; behavior when a **surviving lineage is also
+  saturated** is defined there (queue against that lineage's reserved capacity,
+  noisy-neighbor guard covers per-lineage provider quota — never an unbounded retry
+  storm).
+  **Non-preemptible demand vs reserved capacity.** Under a single-lineage outage
+  co-occurring with a cost-cap breach, T1 fails over (decorrelation-preserving) onto the
+  pricier surviving lineages *and* in-flight mid-attestation runs are non-preemptible by
+  rule (§6), all contending for the **per-lineage** reservation. When non-preemptible
+  mid-attestation demand would exceed a lineage's reserved capacity, **gate at
+  admit-to-attestation** (do not start an attestation that cannot be guaranteed capacity
+  on the lineage its decorrelation-preserving failover would target) or hold it in a
+  **bounded attestation queue** — rather than leaving non-preemptible work to "queue
+  against reserved capacity" and deadlock.
 
 *(SRE-F4; also bounds the serialization concern in COST-F3.)*
 
@@ -208,21 +221,27 @@ A/B alone is `3 arms × n × k`). A run-admission layer is required:
   order** (low-tier/burst work first); **never preempt a run mid-trust-root
   attestation**. **Fleet-budget-burn is a first-class SLO** with its own
   burn-rate alert. (The A/B's `3 × n × k` is exactly this workload.) Admission-throttle
-  alone cannot reach **in-flight re-execution** spend, so the cost-rate cap also **gates
-  in-flight quorum re-runs** (§7 flake-recovery) — the one in-flight cost source large
-  enough to outrun an admission freeze.
+  alone cannot reach **in-flight** spend (resume is not new-run admission), so the
+  cost-rate cap also **gates the in-flight cost sources** large enough to outrun an
+  admission freeze: **(i) in-flight quorum re-runs** (§7 flake-recovery) and **(ii)
+  cold-tier rehydration retrieval/egress** on resume of a cold/archival-evicted
+  hibernated run (§ paused-run state footprint below). A rehydration that would breach
+  the cost-rate cap is **queued/serialized at resume-admit** (mirroring the §4
+  admit-to-attestation gate) rather than allowed to spike the cost-rate uncapped.
 - **Queue + fairness scheduler** across runs/tenants; **per-tenant resource +
   credential + budget isolation**; **noisy-neighbor guard** = per-run cap on
   concurrent `Send` branches *and* per-run/per-tenant cap on secondary-provider
   quota draw so one fan-out can't starve others.
 - **Capacity limits + backpressure** for sandboxes, the trusted gate runner, **and
-  provider rate-limits/quota** (primary *and* secondary family — see §4), with
-  queue-depth alerting; a heavy run queues rather than starving the fleet.
-  Secondary-family quota is a first-class backpressure dimension: when the secondary
-  is **also saturated** (T1 failover + always-on high-risk judging + **mutant-rotation
-  re-grounding** §5 colliding), the noisy-neighbor guard applies to provider quota too —
-  runs queue against the
-  reserved secondary capacity (§4) instead of fleet-stalling on shared `429`s.
+  provider rate-limits/quota** (primary *and every non-primary lineage* — see §4),
+  with queue-depth alerting; a heavy run queues rather than starving the fleet.
+  **Per-lineage** quota is a first-class backpressure dimension, tracked separately
+  for each of the ≥3 provisioned lineages (§4): when a **surviving lineage is also
+  saturated** (decorrelation-preserving T1 failover redistributed onto it + always-on
+  high-risk judging + **mutant-rotation re-grounding** §5 colliding), the
+  noisy-neighbor guard applies to that lineage's provider quota too — runs queue
+  against **that lineage's reserved capacity** (§4) instead of fleet-stalling on its
+  shared `429`s.
 - **Paused-run state footprint.** Releasing compute on HITL/store/trust pause (§7,
   §3, §4) does **not** release state — worktrees, checkpoints, artifacts, indexes
   persist and are **unbounded at fleet scale**. Each run carries a **state-footprint
@@ -238,7 +257,16 @@ A/B alone is `3 arms × n × k`). A run-admission layer is required:
   byte-reducing drain, itself gated on saturated reviewer-pairs §7), with an **explicit
   operator decision point** if that does not relieve pressure. Tier-ordered cold/archival
   eviction remains available as a **$/byte (cost-rate) lever** feeding the fleet cost-rate
-  cap above — not a byte-cap relief. **Long-paused runs hibernate:**
+  cap above — not a byte-cap relief. **Cold/archival eviction is reckoned at ROUND-TRIP
+  cost, not storage saving alone.** Eviction trades a $/byte storage saving for an
+  uncapped **retrieval/egress cost on resume** (rehydration is in-flight spend, below),
+  so a naive "evict under pressure" rule is **self-amplifying**: cost pressure → longer
+  pauses → cold eviction → a retrieval/egress spike on resume → adds back to the
+  cost-rate the eviction was meant to relieve. Reckon each eviction at **net round-trip
+  cost = storage saving − (expected retrieval/egress cost × resume probability)**, and
+  evict to cold/archival **only when that net is cost-reducing** — i.e. for runs
+  **unlikely to resume soon** (long-tail HITL pauses), never runs about to wake.
+  **Long-paused runs hibernate:**
   spill the worktree to the **content-addressed store** and reconstitute on resume.
   Hibernation makes the *whole* worktree depend on CAS durability for an unbounded
   HITL pause, so spilled artifacts carry an explicit **retention lease/pin** keyed to
@@ -254,6 +282,14 @@ A/B alone is `3 arms × n × k`). A run-admission layer is required:
   then cold/archival-evicted (the $/byte lever above) rehydrates with **minutes-to-hours
   first-byte latency** on resume; the §2 reconstitution watchdog deadline must carry that
   cold-tier-restore term (§2) or a resuming run pages false `wedged`.
+  **Cold-tier restore COST feeds back to the fleet cost-rate cap.** That same rehydration
+  also incurs **retrieval/egress cost** — an in-flight cost source (resume is not new-run
+  admission), enumerated among the cost-rate cap's gated in-flight sources above. A
+  rehydration whose retrieval/egress would breach the cap is **queued/serialized at
+  resume-admit** (mirroring the §4 admit-to-attestation gate). This closes the
+  self-amplifying loop: eviction is already chosen only when **net round-trip
+  cost-reducing** (above), and the rehydration it does incur is **cap-gated**, not
+  uncapped.
 
 *(SRE-F6; bounds the trusted-runner serialization in COST-F3.)*
 
@@ -303,7 +339,11 @@ constraint, not an externality.
   **per-run threshold escalates as a quality / non-convergence design smell** rather
   than allowing unbounded per-incident overrides. Quorum re-runs are **counted in
   the §6 / cost model** compute, and flake-override decisions are **counted in
-  human-decisions-per-feature** below.
+  human-decisions-per-feature** below. Cross-family flake-recovery re-judges draw on
+  the **per-lineage** reserved capacity of §4 (a flake re-judge must stay cross-family
+  vs the implementer, so it lands on a surviving non-primary lineage); staffing and
+  capacity for them is tracked against **that lineage's** reservation, not a single
+  named "secondary".
   **Correlated flake is fleet-level, not per-run.** A shared trusted-infra fault under
   load makes *every* in-flight High-tier run enter the quorum-re-run path at once — an
   unbounded compute amplifier (`quorum_size × in-flight High runs`) plus a two-person-

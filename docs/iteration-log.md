@@ -497,9 +497,31 @@ approaching the convergence the earlier bars reached (R6, R12, R14).
 
 ## Loop summary
 
-> Rounds 16–20 are the post-`claude -p` "live codebase" loop: even rounds (16
-> critique, 18, 20) bundle the solutioner fix; odd rounds (17, 19, 21…) are fresh
-> full-domain validation panels. The table lists the findings-bearing panels.
+## Round 21 — FULL-DOMAIN validation panel (8 fresh lenses): 10 findings (2 BLOCKER, 7 MAJOR, 1 MINOR)
+
+The count fell again (62 → 57 → 29 → 10), but two BLOCKERs reappeared — and the
+defining observation of this round is that **nearly every finding was a
+consistency/reconciliation bug introduced by the parallel-fixer method itself, not
+a new design flaw**: the Round-20 global look-ledger was keyed on `state_sha`
+(which churns every retrain, defeating its anti-overfitting job — domains §1 vs
+governance §5 contradiction); PLAN §9 still named a *regulated* first adopter after
+the roadmap was reconciled to *non-regulated* (so PLAN contradicted its own §12);
+operations §4 still said "second family" after architecture moved to ≥3 lineages;
+the `verdict_nonce` was named but its single-use consumption left unwired (a genuine
+`approve` could be replayed over a later `request-changes`). Several were *my own*
+canonical-decision errors, not fixer drift.
+
+**Round 22 verdict (solutioner):** all 10 resolved — and crucially with **verbatim
+cross-doc definitions** (the look-ledger key, the nonce/latch) handed to the
+relevant fixers so the fix could not re-introduce drift; consistency re-verified by
+grep across files. Re-submitted to a fresh panel for **Round 23**. The honest read:
+the design has **converged in substance** (no new design defects since Round 19;
+blockers now arise from edit-consistency), and the residual loop is policing the
+multi-agent editing process, not the architecture.
+
+> Rounds 16–22 are the post-`claude -p` "live codebase" loop: even rounds (16
+> critique, 18, 20, 22) bundle the solutioner fix; odd rounds (17, 19, 21, 23…) are
+> fresh full-domain validation panels. The table lists the findings-bearing panels.
 
 | Round | Bar | Findings | BLOCKER | MAJOR | MINOR | Verdict |
 |---|---|---|---|---|---|---|
@@ -521,6 +543,7 @@ approaching the convergence the earlier bars reached (R6, R12, R14).
 | 16 | **live-codebase (8 FULL-DOMAIN lenses)** | 62 | 10 | 33 | 19 | material remain |
 | 17 | live-codebase (8 full-domain lenses) | 57 | 9 | 32 | 16 | material remain |
 | 19 | live-codebase (8 full-domain lenses) | 29 | 0 | 25 | 4 | material remain — **BLOCKERs→0** |
+| 21 | live-codebase (8 full-domain lenses) | 10 | 2 | 7 | 1 | material remain — **mostly edit-consistency bugs** |
 
 \* plus a few editorial-consistency nits fixed in passing (no material findings).
 

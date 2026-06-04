@@ -21,6 +21,7 @@ This repository currently contains **the plan only** — no application code yet
 8. **[docs/lifecycle.md](./docs/lifecycle.md)** — product lifecycle: maintenance of generated code, human steering, feedback loop, deployment-trust modes, AI-code licensing/liability.
 9. **[docs/domains.md](./docs/domains.md)** — the verdict-class taxonomy, the domain-pack contract, and per-domain specs (regulated, ML/data, frontend) — because *correctness is not one shape*.
 10. **[docs/iteration-log.md](./docs/iteration-log.md)** — the full multi-round critique record and conformance check against today's state of the art.
+11. **[docs/implementation-plan.md](./docs/implementation-plan.md)** — the build-ready implementation plan: pinned stack (Python + LangGraph + Anthropic), repo layout, schemas, per-component interfaces, and the phase-by-phase task backlog that turns the design into code.
 
 ## Design foundations (state of the art, 2024–2026)
 

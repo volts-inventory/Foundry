@@ -388,7 +388,140 @@ lesson yet: the design's *thesis* ("a deterministic decision rule at the seams")
 was **domain-specific** — true for backend/logic, false as a universal — and only a
 *domain-expert* lens could see it. **"Type of software is key"** was exactly right.
 
+## Round 16 — FULL-DOMAIN expert panel (8 fresh lenses, vs the codebase): 62 findings (10 BLOCKER, 33 MAJOR, 19 MINOR)
+
+A user prompt — *"can this leverage `claude -p`"* — added a **pluggable
+coding-agent worker-substrate** (PLAN §6, [arch §2](./architecture.md)): the
+Implementation/QA inner loop became an adapter (Claude Code `claude -p`, Codex CLI
+`codex exec`, OpenHands, or a raw loop) behind a defined contract. The user then
+asked for a fresh **critic → fix → validate loop, run against the codebase** across
+**all domains it touches** — eight expert lenses in parallel (distributed systems,
+LLM/multi-agent orchestration, evaluation methodology, offensive-security/supply-
+chain, SRE/operability/cost, regulated-compliance, ML/data, frontend/UX). The new
+substrate drew the heaviest fire, and the deeper domain lenses re-opened the
+verdict-class and assurance machinery the prior rounds had signed off on.
+
+| Lens | # | Headline findings (sev) | Resolution locus |
+|---|---|---|---|
+| Distributed systems | 8 (1B,4M,3m) | Adapter inner loop runs inside one superstep → superstep-boundary budget/cancellation/checkpoint don't bind it **(B)**; `seq`/`local` replay-determinism; reuse staleness across mutant rotation; cross-fork latch invisible to routing | [arch §2/§3/§4/§5/§6](./architecture.md) |
+| Security / supply-chain | 6 (2B,3M,1m) | Agent-authored test reads the tree at runtime to defeat the held-out-mutant discriminator **(B)**; "worktree-only/no-verdict" unenforced for a bash-running adapter **(B)**; provider egress as a high-entropy exfil channel; analyzer feature-flooding | [gov §1c/§2/§3](./governance.md) |
+| Regulated / compliance | 9 (2B,5M,2m) | Class-4 human attestation forgeable by the pipeline **(B)**; no model-risk governance (SR 11-7/IEC 62304) **(B)**; audit content agent-authored; traceability cells unbound to runner verdicts; SoD unenforced; Assistant mode bypasses all controls | [gov §1c/§1e/§4/§8](./governance.md), [domains §1/§5](./domains.md), [lifecycle §4](./lifecycle.md) |
+| ML / data | 9 (2B,5M,2m) | No multiple-comparisons/adaptive-overfitting control **(B)**; leakage *detection* mechanism absent **(B)**; train- vs eval-variance; proxy-gate soundness; eval staleness; no criterion-fidelity analog; label-noise | [domains §1/§5](./domains.md), [gov §1c/§5](./governance.md) |
+| Evaluation methodology | 7 (2B,4M,1m) | Post-hoc power-rung selection defeats falsifiability **(B)**; no single primary endpoint / multiple-comparisons control **(B)**; equal-USD handicap; adaptive suite authoring; judge self-preference in the A/B; collider bias in conditional hidden-test rate | [evaluation §2/§3/§4/§6/§7/§8](./evaluation.md), [roadmap Phase 1.5](./roadmap.md) |
+| SRE / operability / cost | 10 (0B,5M,5m) | Cost model token-only — omits mutant×perturbation re-execution compute, adapter inner-loop turns, second-family capacity, paused-run storage; two-person reviewer-pool queueing; fleet-wide drift HITL spike; fleet cost-cap enforcement | [evaluation §8](./evaluation.md), [operations §2/§4/§5/§6/§7](./operations.md), [arch §8](./architecture.md) |
+| LLM / multi-agent | 6 (0B,3M,3m) | **Adapter ≠ model family** — decorrelation binds the *served lineage*, not the CLI brand; "never a verdict" overstated (judgment seams emit verdicts); held-out keying + failover must be decorrelation-aware | [arch §2/§8](./architecture.md), [PLAN §6](../PLAN.md) |
+| Frontend / UX | 7 (1B,4M,2m) | Visual-regression **baseline lifecycle** undefined → false-positive treadmill or loose tolerance **(B)**; perceptual-HITL load unbounded; a11y AT-user dependency unframed; no generative taste loop; product wedge unargued | [domains §5](./domains.md), [lifecycle §1/§2](./lifecycle.md), [PLAN §9/§10](../PLAN.md), [roadmap](./roadmap.md) |
+
+Cross-panel consensus (raised independently by ≥2 lenses, highest confidence):
+**adapter ≠ served model family** (decorrelation must bind the served lineage, not
+the adapter brand; failover must preserve it); **"never emits a verdict" was
+overstated** (split signed-deterministic-gate verdicts from LLM-judgment verdicts);
+**the adapter's worktree-only/no-side-effect property must be sandbox-*enforced*,
+not contractual** (it runs arbitrary bash); and **the cost model was token-only**,
+omitting the trusted-runner re-execution compute and adapter inner-loop turns that
+actually dominate.
+
+**Round 16 verdict (solutioner):** all 62 resolved via file-partitioned expert
+fixers across PLAN/architecture/governance/evaluation/operations/domains/lifecycle/
+roadmap, using a shared canonical-resolution set so independent edits stayed
+consistent. Re-submitted to a fresh full-domain panel for **Round 17**.
+
+## Round 17 — FULL-DOMAIN validation panel (8 fresh lenses, same domains): 57 findings (9 BLOCKER, 32 MAJOR, 16 MINOR)
+
+A second fresh panel of the same eight domains validated the Round-16 fixes and
+hunted regressions. It did **not** converge — and characteristically, the findings
+clustered at the **interaction seams of the Round-16 mechanisms themselves**: the
+fixes worked, but each introduced new surface a fresh expert could attack. The
+sharpest were self-inflicted by Round 16:
+
+- **`served_family` was self-declared by the adapter** — the decorrelation fix
+  relocated trust to a forgeable field instead of grounding it (BLOCKER ×, raised by
+  LLM-orchestration *and* security). Resolution: proxy-observed served lineage, a
+  curated lineage-equivalence class, invariant spanning all judge↔subject seams.
+- **"decorrelation + HITL" was false for per-task Review** (no HITL on that seam) —
+  the most frequent judgment verdict was bound by decorrelation alone (BLOCKER).
+- **Incremental progress reintroduced the worktree dual-write divergence** §5 had
+  closed (BLOCKER) → content-addressed turn-snapshot in the outbox transaction.
+- **`superstep_index` is not monotonic across resume** → stale verdict outranks a
+  correction → added `emission_epoch` ahead of it in `seq`.
+- ML: **train-variance CI vs re-score-at-admission was internally inconsistent**;
+  **look-budget bypassable** via reuse + `inconclusive`→add-n alpha leak (BLOCKERs).
+- Eval: **power needs a pilot** (borrowed 21% ≠ this baseline); **equal-token
+  equalizer asymmetric**; **KILL vs redesign rule self-contradictory** (BLOCKERs).
+- Regulated: **PHI scanner unvalidated**; **model-risk lacked ongoing monitoring**;
+  **IdP/PKI trust store unpinned** (BLOCKERs).
+- Security: the provider-egress proxy **bounds but does not eliminate** the
+  high-entropy exfil channel; **response path unguarded**; **value-pinned vacuous
+  tests survive** the discriminator (adapter authors both impl and test).
+
+**Round 17 verdict (solutioner):** all 57 resolved in **Round 18** via the same
+file-partitioned-fixer method. Re-submitted to a fresh panel for **Round 19**. The
+finding count is decreasing only slowly (62 → 57): each fix round adds mechanism
+and the next panel finds new seams in it — the same "every new axis re-opens the
+problem" dynamic, now operating *within* a fixed axis set as the new substrate
+machinery stabilizes.
+
+## Round 19 — FULL-DOMAIN validation panel (8 fresh lenses, same domains): 29 findings (0 BLOCKER, 25 MAJOR, 4 MINOR)
+
+A third fresh panel of the same eight domains validated the Round-18 fixes. The
+**convergence signal arrived**: BLOCKERs fell to **zero** and the count nearly
+halved again (62 → 57 → 29). Every remaining finding was a *localized refinement*
+at the seams of the Round-18 mechanisms, not a fundamental flaw — and several were
+genuinely sharp:
+
+- The class-3 alpha look-ledger was **per-run, not cross-fork** — forking before a
+  look could re-draw the budget (optional-stopping laundering). → global ledger
+  keyed on `(state_sha, decision-id, eval-set)`.
+- The judgment-verdict binding **omitted `status`** — a same-tree request-changes→
+  approve flip passed the binding check on the no-HITL Review seam. → bind `status`
+  + a `verdict_nonce`.
+- `served_family` as a scalar `!=` couldn't express **ensembles** (one shared
+  component lineage passed). → a lineage *set* with disjointness; pin
+  `lineage_map_revision` into the attestation + admission re-check.
+- Eval: pilot/scored **distributional transfer** unguaranteed; the decision-grade
+  token-secondary had **no pre-registered MDE**; max-T needed **studentization**;
+  the token classifier was **turn-granular** (should be sub-turn).
+- Regulated: model-risk monitoring **named no trip/escalation**; product-model
+  post-deployment revalidation had **no firing component**; PHI-scanner recall floor
+  was **weaker than the class it borrows**.
+- ML: train-variance estimand (a) was a **best-of-unbounded-N** selection statistic;
+  rare-subgroup slice-MDE could be **a-priori infeasible** with no defined verdict.
+- Frontend: the auto-skip semantic-affordance classifier had **no recall floor**;
+  reference-cell tolerance envelopes silently **demoted most matrix cells** from
+  class-5 blessing.
+
+**Round 19 verdict (solutioner):** all 29 resolved in **Round 20** (a smaller,
+surgical fix pass). Re-submitted to a fresh panel for **Round 21**. The trajectory
+(BLOCKERs 10→9→0; findings 62→57→29) is the design **stabilizing** — the loop is
+approaching the convergence the earlier bars reached (R6, R12, R14).
+
 ## Loop summary
+
+## Round 21 — FULL-DOMAIN validation panel (8 fresh lenses): 10 findings (2 BLOCKER, 7 MAJOR, 1 MINOR)
+
+The count fell again (62 → 57 → 29 → 10), but two BLOCKERs reappeared — and the
+defining observation of this round is that **nearly every finding was a
+consistency/reconciliation bug introduced by the parallel-fixer method itself, not
+a new design flaw**: the Round-20 global look-ledger was keyed on `state_sha`
+(which churns every retrain, defeating its anti-overfitting job — domains §1 vs
+governance §5 contradiction); PLAN §9 still named a *regulated* first adopter after
+the roadmap was reconciled to *non-regulated* (so PLAN contradicted its own §12);
+operations §4 still said "second family" after architecture moved to ≥3 lineages;
+the `verdict_nonce` was named but its single-use consumption left unwired (a genuine
+`approve` could be replayed over a later `request-changes`). Several were *my own*
+canonical-decision errors, not fixer drift.
+
+**Round 22 verdict (solutioner):** all 10 resolved — and crucially with **verbatim
+cross-doc definitions** (the look-ledger key, the nonce/latch) handed to the
+relevant fixers so the fix could not re-introduce drift; consistency re-verified by
+grep across files. Re-submitted to a fresh panel for **Round 23**. The honest read:
+the design has **converged in substance** (no new design defects since Round 19;
+blockers now arise from edit-consistency), and the residual loop is policing the
+multi-agent editing process, not the architecture.
+
+> Rounds 16–22 are the post-`claude -p` "live codebase" loop: even rounds (16
+> critique, 18, 20, 22) bundle the solutioner fix; odd rounds (17, 19, 21, 23…) are
+> fresh full-domain validation panels. The table lists the findings-bearing panels.
 
 | Round | Bar | Findings | BLOCKER | MAJOR | MINOR | Verdict |
 |---|---|---|---|---|---|---|
@@ -407,18 +540,49 @@ was **domain-specific** — true for backend/logic, false as a universal — and
 | 13 | **fitness-for-purpose (3 FRESH lenses)** | 17 | 0 | 14 | 3 | material remain |
 | 14 | fitness-for-purpose (3 fresh lenses) | 0* | 0 | 0 | 0 | **no material — converged** |
 | 15 | **type-of-software (3 DOMAIN experts)** | 18 | 0 | 15 | 3 | material remain |
+| 16 | **live-codebase (8 FULL-DOMAIN lenses)** | 62 | 10 | 33 | 19 | material remain |
+| 17 | live-codebase (8 full-domain lenses) | 57 | 9 | 32 | 16 | material remain |
+| 19 | live-codebase (8 full-domain lenses) | 29 | 0 | 25 | 4 | material remain — **BLOCKERs→0** |
+| 21 | live-codebase (8 full-domain lenses) | 10 | 2 | 7 | 1 | material remain — **mostly edit-consistency bugs** |
+| 23 | live-codebase (8 full-domain lenses) | 9 | 1 | 7 | 1 | material remain — **regulated lens CLEAN; rest fix-hygiene** |
 
 \* plus a few editorial-consistency nits fixed in passing (no material findings).
 
-Total: **135 findings raised and resolved** across **four** review bars over
-fifteen rounds. The progression is the real lesson: **design-doc** → no findings
-(R6); **implementation-readiness** (3 technical lenses) → no findings (R12);
+Total: **302 findings raised and resolved** across **five** review bars over
+**twenty-three rounds** (with five interleaved solutioner fix passes). The
+progression is the real lesson: **design-doc** → no findings (R6);
+**implementation-readiness** (3 technical lenses) → no findings (R12);
 **fitness-for-purpose** (operability/cost/premise) → no findings (R14);
-**type-of-software** (regulated/ML/UX domain experts) → 18 findings (R15). *Each
-genuinely new axis of scrutiny re-opens the problem* — a clean verdict only ever
-bounds the axes that were looked at, and the domain lens revealed that a thesis the
-three technical specialists had signed off on was, in fact, domain-specific. This
-log is the honest record the process produced, not a marketing artifact.
+**type-of-software** (regulated/ML/UX domain experts) → 18 findings (R15); and the
+**live-codebase** bar (8 full-domain lenses, after the `claude -p` worker-substrate
+was added) → 62 → 57 → 29 → 10 → 9 (R16–R23). *Each genuinely new axis of scrutiny
+re-opens the problem* — a clean verdict only ever bounds the axes that were looked
+at, and the domain lens revealed that a thesis the three technical specialists had
+signed off on was, in fact, domain-specific. This log is the honest record the
+process produced, not a marketing artifact.
+
+## Live-codebase loop (Rounds 16–24): stopped at substantive convergence
+
+The post-`claude -p` loop was run **critic → fix → fresh-critic → repeat** at the
+operator's request. It was **stopped by decision at Round 24**, on an explicit
+convergence judgment rather than a zero-finding sweep — for reasons the trajectory
+makes plain:
+
+- **BLOCKERs 10 → 9 → 0 → 2 → 1; findings 62 → 57 → 29 → 10 → 9.** Volume collapsed
+  and one lens (regulated) returned its first clean sweep at R23.
+- **No new *architectural* defects after Round 19.** The R21/R23 findings were
+  **fix-hygiene** — cross-doc drift (a ledger-key change not propagated to one doc),
+  an undefined term (`decision_id`), a fix placed in the wrong layer (a nonce/latch
+  put inside the pure reducer) — i.e. the **parallel-fixer method policing its own
+  edits**, several of them orchestrator dispatch errors, not flaws in the design.
+- Consistent with this log's standing lesson, an **absolute zero across eight
+  adversarial lenses is a receding horizon**: a doc this dense will almost always
+  yield one more refinement, and each fix round adds a thin new seam. "Stopped at
+  substantive convergence" means the *design* is stable and internally consistent at
+  the live-codebase bar; it does **not** mean proven correct — the genuine open
+  questions (does structure beat a strong single agent; does it pencil out; will it
+  be adopted; do the domain packs work) are still settled by evidence and real use,
+  exactly as the master plan states.
 
 The key lesson of Round 13: **convergence at one bar is not convergence at
 another.** The technical panel (security/DS/AI) genuinely converged to zero at the

@@ -21,11 +21,12 @@ This repository currently contains **the plan only** — no application code yet
 8. **[docs/lifecycle.md](./docs/lifecycle.md)** — product lifecycle: maintenance of generated code, human steering, feedback loop, deployment-trust modes, AI-code licensing/liability.
 9. **[docs/domains.md](./docs/domains.md)** — the verdict-class taxonomy, the domain-pack contract, and per-domain specs (regulated, ML/data, frontend) — because *correctness is not one shape*.
 10. **[docs/iteration-log.md](./docs/iteration-log.md)** — the full multi-round critique record and conformance check against today's state of the art.
+11. **[docs/implementation-plan.md](./docs/implementation-plan.md)** — the build-ready implementation plan: pinned stack (Python + LangGraph + Anthropic), repo layout, schemas, per-component interfaces, and the phase-by-phase task backlog that turns the design into code.
 
 ## Design foundations (state of the art, 2024–2026)
 
 - **SOP-driven role agents** — MetaGPT's "Code = SOP(Team)" and ChatDev's communicative agents.
 - **Graph orchestration** — LangGraph `StateGraph`: nodes, conditional edges, durable checkpoints, interrupts.
 - **Composable workflow patterns** — Anthropic's orchestrator-workers, evaluator-optimizer, routing, parallelization, reflection, human-in-the-loop.
-- **Coding-agent execution** — lessons from SWE-agent (agent-computer interface) and OpenHands (multi-agent platform), benchmarked on SWE-bench Verified and long-horizon SWE-EVO-style tasks.
+- **Coding-agent execution** — a *pluggable worker-substrate contract* (the agent-computer interface) with provider adapters — Claude Code (`claude -p`), OpenAI Codex CLI (`codex exec`), OpenHands/SWE-agent, or a raw multi-provider loop — so the inner coding loop stays provider-agnostic and a *different-family* adapter can review the implementer's work. Benchmarked on SWE-bench Verified and long-horizon SWE-EVO-style tasks.
 - **Enterprise guardrails** — the five-plane model (policy / execution / data / observability / assurance) with SBOM, SLSA, and evals shipped in CI.

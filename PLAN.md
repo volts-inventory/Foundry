@@ -163,11 +163,12 @@ mapped to locations in [docs/architecture.md §8](./docs/architecture.md).
 | Language | Python 3.12+ | Ecosystem fit for LangGraph/LangChain |
 | Orchestration | **LangGraph** (`StateGraph`, reducer channels, checkpointers, interrupts) | Graph-native; durable state; HITL; production-proven |
 | State schema | `TypedDict` + reducers for the graph; Pydantic v2 for artifact values | Reducers compose with LangGraph's channel model; values stay validated |
-| Models | Claude, **pinned IDs, tiered by role** — T1 (Opus-class) architecture/review/security, T2 (Sonnet-class) implementation, T3 (Haiku-class) routing — **plus a second provider family** for high-risk judging and cross-family failover | Cost/quality match; **T1 never auto-downgrades**; Claude tiers aren't different *families*, so judge decorrelation needs a genuinely different lineage |
-| Model resilience | Same-tier retry/backoff; **cross-family failover** of T1 on a primary-provider outage (per-model calibration) | No silent cross-tier-down on high-stakes nodes; real redundancy needs a second family |
+| Models | Claude, **pinned IDs, tiered by role** — T1 (Opus-class) architecture/review/security, T2 (Sonnet-class) implementation, T3 (Haiku-class) routing — **plus ≥3 provider lineages** for high-risk judging and decorrelation-aware failover | Cost/quality match; **T1 never auto-downgrades**; Claude tiers aren't different *families*, so judge decorrelation needs genuinely different lineages, and **set-disjoint** decorrelation surviving a single-lineage outage needs **≥3** ([arch §8](./docs/architecture.md)) |
+| Model resilience | Same-tier retry/backoff; **decorrelation-aware cross-lineage failover** of T1 on a primary-provider outage (per-model calibration) | No silent cross-tier-down on high-stakes nodes; real redundancy + decorrelation-preserving failover needs **≥3 lineages** (a single second family deadlocks) |
 | Gate verdicts | **Trusted gate runner (non-agent)** computes & signs deterministic-gate verdicts | Agents triage; they cannot forge a PASS into the predicate ([docs/governance.md §1c](./docs/governance.md)) |
 | Tools | MCP servers for filesystem, git, test runners, CI, package audit | Standard interface; least-privilege per role via OPA |
-| Code execution | Sandboxed runners (containers; Firecracker/gVisor) | Never run agent-written code on the host |
+| Code execution | Sandboxed runners (containers; Firecracker/gVisor) | Never run agent-written code on the host. The substrate must be **sandbox-*enforced*** to writes-worktree-only + mediated provider egress (not merely contractual), and **externally metered/hard-killed** — its long inner loop runs inside one superstep, so superstep-boundary budget can't bound it ([docs/architecture.md §2/§6](./docs/architecture.md), [docs/governance.md §2](./docs/governance.md)) |
+| Coding-agent substrate | **Pluggable worker contract** (the ACI); adapters: Claude Code (`claude -p`), OpenAI Codex CLI (`codex exec`), OpenHands/SWE-agent, or a raw multi-provider loop | The Implementation/QA inner loop is an *adapter, not a core dependency* — keeps the factory **provider-agnostic**. Adapters are harnesses that can drive any model, so the `out` contract records `served_family`/`served_model_id` — **trusted-grounded** (stamped by the mediating model-provider proxy that observes the actual served model, **not** self-declared by the adapter); **decorrelation binds served model lineage, not adapter brand** — `served_family` is a curated **lineage-equivalence class** (keyed on base-model lineage, not provider brand or model-id string), so the deterministic, admission-/CI-checked **set-disjointness** `reviewer.served_family ∩ implementer.served_family == ∅` on high-risk criteria (served_family is a *set* of lineage ids, so ensembles/routers can't share a hidden component lineage) compares lineages, not CLI brands or opaque strings. Every adapter runs in-sandbox, emits diff + test **sources** + `GateTriage` (**never a signed deterministic-gate verdict** — the trusted runner signs; LLM-judgment seams may still emit a judgment verdict bound only by decorrelation + HITL), writes worktree-only (side-effects via the outbox) ([docs/architecture.md §2/§8](./docs/architecture.md), [docs/governance.md §1c](./docs/governance.md)) |
 | Supply chain | **Trusted hermetic CI builder** (outside agent control) + keyless OIDC/sigstore signing + SLSA L3 provenance | Attestation from an agent-controlled sandbox is worthless; keys air-gapped from sandboxes |
 | Source of truth | Git + GitHub (branch-per-task, PRs) | Real review workflow; diffable, versioned |
 | Persistence | Postgres (checkpoints + budget ledger), pgvector + symbol index (memory/retrieval), content-addressed object store (artifacts), WORM store (audit) | Durable, recoverable, tamper-evident where it must be |
@@ -228,6 +229,17 @@ warrants the full assurance tax:
   gates + auto-approve (admission still fail-closed); High-risk (build/IaC/deps/
   auth/trust-root) → full chain + two-person sign-off. Tiering scales *assurance
   depth and human load*, never the integrity guarantees.
+- **Solo-lineage autonomous (self-judge) profile** ([docs/governance.md §1e](./docs/governance.md)):
+  for operators who want **one provider, zero HITL, fully autonomous**. Keeps **all
+  machine grounding** (two-zone runner, deterministic-gate re-derivation, fail-closed
+  admission — so a single-lineage agent still can't ship code that fails its own
+  build/tests/scanners) and relaxes only **independent *judgment*** on the
+  oracle-irreducible subjective residual, where a **same-lineage judge** issues the
+  verdict, machine-stamped `judgment_provenance = self` (never claimed as
+  independently validated). Selectable (not default), tier-splittable, and
+  **force-disabled by the regulated pack**. The honest trade: full single-provider
+  autonomy on everything a machine can verify; self-preference / blind-spot risk
+  *owned and recorded* on the subjective residual.
 - **Dependency-scoped re-verification** ([docs/governance.md §1f](./docs/governance.md)):
   a change re-runs only the gates it can affect and reuses cached runner-attested
   verdicts for unaffected inputs — bounding the re-verification cost multiplier.
@@ -252,6 +264,26 @@ mandatory perceptual HITL with rendered evidence. Domain packs (regulated fintec
 healthcare, ML/data, frontend/UX) are specified against these hooks, keeping the
 core genuinely general while it becomes expert — and *honest* about each domain's
 real correctness signal.
+
+**Wedge / who adopts, and why.** First/early adopter: a **non-regulated
+engineering team** that values *criterion-linked structured PRs* + review/test
+discipline. What Foundry's *Assistant-mode* output does that a single strong
+agent + standard CI (or Chromatic/Percy/axe-CI/Storybook + ordinary CI) does
+**not**: it ships a PR with *structured, criterion-linked* artifacts — PRD →
+criteria → fidelity tests → threat-model items → review mapping — wired to a
+verdict-class taxonomy, so a reviewer sees *why* each gate passed, not just a
+green check. Honestly: in Assistant mode the differentiated value is thin — most
+of it is convenience over assembling point tools — so value lands in **Assistant
+(Phases 0–1)** and deepens at **early Gated (Phase 2)** via distinct gates,
+risk-tiering, and recorded Design/Release sign-off. A **regulated or audit-bound
+team** (fintech/healthcare) is an explicitly **later** deepening adopter: its
+relevant value (decorrelated judging, two-zone signing, gate-state-bound
+provenance, deploy-time admission, attested control-mapping) concentrates in
+**Gated/Autonomous** modes and only gets real teeth at the **Phase-4** trust
+root — regulated work is Gated+ by construction, served later, never dressed up
+as an early wedge. This is exactly why the trust root is deferred and sequenced
+behind the Phase-1.5 decision gate, consistent with §12 and
+[docs/roadmap.md](./docs/roadmap.md) (§8a, §11).
 
 ## 10. Evaluation — does the factory work?
 
@@ -290,10 +322,13 @@ milestone (Assistant mode) is ~2–3 quarters.
 - **Context loss across hand-offs (the real long-horizon killer)** — Mitigation: a never-summarized `pinned_constraints` channel, retrieval over the call/def graph (not similarity alone) with a measured recall floor, a `need-context` escape, and a handoff-fidelity eval.
 - **Reward hacking / gate-gaming** — Mitigation: separated + cross-family test authorship, **criterion *fidelity* (negative oracles)**, **run-immutable repo-external scanner config**, deterministic oracle/config-edit monitors, mutation testing, semantic loop signature.
 - **Correlated LLM judges / self-preference** — Mitigation: measured judge↔implementer error correlation + self-preference probes; different model *family* on high-risk review/QA; deterministic oracles where possible.
+- **Judge decorrelation silently evaporates** — adapter-brand confusion (a "different" harness driving the *same* served family) or an outage failover that quietly re-points the judge to the implementer's family. Mitigation: decorrelation binds *served lineage* via a **trusted-grounded** `served_family` — proxy-observed, a lineage-equivalence class, **not** a self-declared field — and a deterministic **set-disjointness** check `reviewer.served_family ∩ implementer.served_family == ∅` spanning **all judge↔subject seams** (reviewer/test-author/criteria-critic), enforced at admission/CI — binding the **set** of served lineages (so ensembles/routers can't share a hidden component lineage), with the lineage-map revision pinned into the attestation + judgment binding, and the judgment binding includes the verdict `status` (no same-tree approve-flip) ([docs/architecture.md §2/§3/§8](./docs/architecture.md)).
+- **Per-task Review bound by decorrelation alone** — there is *no* HITL on the per-task reviewer↔implementer seam, so the trusted-grounded served-family is load-bearing for that gate. Mitigation: decorrelation is the sole grounding and must be proxy-stamped, not self-declared ([docs/architecture.md §2/§9](./docs/architecture.md)).
+- **Adapter-substrate trust boundary** — Mitigation: substrate is **sandbox-*enforced*** to writes-worktree-only + mediated provider egress (not contractual), **externally metered/hard-killed** (inner loop unbounded by superstep budget), and decorrelation binds served lineage, not adapter brand ([docs/architecture.md §2/§6](./docs/architecture.md), [docs/governance.md §2](./docs/governance.md)).
 - **Concurrency correctness** — Mitigation: commutative, `None`-safe reducers with a **total `seq` order** `(run_id, superstep_index, node_id, local)` — total within a run, globally unique across forks (cross-fork resolution is fail-closed, not seq-ordered) — so gate verdicts resolve by causality, never fold order; precise `tree_sha`; `Send` fan-out with per-branch `error` status + deadlines; superstep-boundary budget enforcement.
 - **Forged gate verdicts / agent-forged results stream** — Mitigation: deterministic-gate verdicts computed & signed by a **two-zone trusted runner** (zone A runs agent code with no signing creds; zone B signs, runs no agent code). Because a malicious test/scanner could *forge the results stream*, the verdict is grounded by class: **config-evaluable gates (SBOM/CVE/license/IaC) are re-derived by zone B** from the tree; **execution-dependent gates (Test/E2E/SAST) are observed by pinned trusted infra** over a sealed channel (agents supply test *sources*, not the harness), with zone B independently verifying pass-on-real/fail-on-known-bad. Input-bound signatures; agents write only `GateTriage`; admission verifies per-record and is **fail-closed on stable FAILs** (with a bounded HITL recovery for flakes); the **Security "threat-model addressed" residual** that can't be reduced to an oracle is a judgment sub-gate, not in the signed verdict.
 - **Context channel overflow** — Mitigation: `pinned_constraints` is relevance-scoped + supersedable + cardinality-monitored (escalate, never silently truncate), not an unbounded union.
-- **Single-provider fragility / correlated judges** — Mitigation: a **second provider family** for high-risk judging and real failover.
+- **Single-provider fragility / correlated judges** — Mitigation: **≥3 provider lineages** for high-risk judging and decorrelation-aware failover (a single second family deadlocks on a single-lineage outage; [arch §8](./docs/architecture.md)).
 - **A/B feasibility** — Mitigation: the decisive A/B is **costed at experiment scale** (3 arms × n × k × SWE-EVO cost) and honestly de-scoped if the powered run is unaffordable, never silently under-powered.
 - **Dual-write / idempotency on resume** — Mitigation: transactional outbox (checkpoint+ledger+audit in one txn); idempotency keys **stored by the external system**; re-query-by-key on resume, fail-to-human if unknown.
 - **Supply-chain (agent-authored build) & deploy** — Mitigation: build config as a high-privilege artifact behind the Supply-chain gate; strongly-hermetic no-egress builder; gate-state bound in the SLSA predicate; deploy-time admission + non-agent deployer; IaC policy-as-code.
@@ -301,26 +336,58 @@ milestone (Assistant mode) is ~2–3 quarters.
 - **Non-convergent cross-gate cascade** — Mitigation: global `fix_attempts_since_all_green` bound escalating as *non-convergence*, not a late budget breach.
 - **Cost/latency realism** — Mitigation: a concrete per-feature cost+wall-clock model; event-triggered analyzer; honest monitor-overhead target.
 - **LLM nondeterminism vs audit** — Mitigation: temp-0 for gates/judges, recorded seeds/model-fingerprints, pinned-ID-drift alerts; audit framed as immutable *record*, not bitwise replay.
-- **Audit-store & data-boundary integrity** — Mitigation: WORM written by a non-agent appender with external anchoring; redaction before provider egress; PHI/PCI never leaves the boundary.
+- **Audit-store & data-boundary integrity** — Mitigation: WORM written by a non-agent appender with external anchoring; redaction before provider egress; PHI/PCI never leaves the boundary. The provider-egress proxy **bounds but does not eliminate** the high-entropy exfil channel, and the provider is now a **trusted component / SPOF** ([docs/governance.md §2](./docs/governance.md), [docs/architecture.md §2](./docs/architecture.md)).
 - **Prompt injection (incl. of the monitor)** — Mitigation: load-bearing detections are deterministic; the analyzer is toolless, event-triggered, fed structured features with untrusted prose as data, and evaluated against injection.
 - **Over-engineering / mis-sequencing** — the iterative hardening *added* complexity; risk that the artifact is too complex to build or is built in the wrong order. Mitigation: the falsifying A/B + role ablation move to a **Phase-1.5 decision gate** with a kill branch; the trust root is **deferred** to Autonomous mode; a **smallest-useful milestone** (Assistant mode) ships first; effort is estimated per phase.
 - **Operability / Day-2** — Mitigation: a dedicated [operations.md](./docs/operations.md): run-status liveness (paused vs wedged), store HA + poisoned-checkpoint recovery, trusted-component availability/blast-radius, upgrade/migration with runs in flight, multi-tenancy/capacity/queueing, trusted-component lifecycle.
-- **Cost/latency at scale & HITL volume** — Mitigation: **change-risk tiering** + **dependency-scoped re-verification**; cost reported converged *and* worst-case *and* weighted over the change-size distribution; **human-decisions-per-feature** is a scorecard threshold, not an unbounded externality.
+- **Cost/latency at scale & HITL volume** — Mitigation: **change-risk tiering** + **dependency-scoped re-verification**; cost reported converged *and* worst-case *and* weighted over the change-size distribution; **human-decisions-per-feature** is a scorecard threshold, not an unbounded externality. The dominant cost drivers — trusted-runner mutant/perturbation re-execution compute, adapter inner-loop turns, and second-family judging — are now explicitly modeled ([docs/evaluation.md §8](./docs/evaluation.md), [docs/operations.md §6](./docs/operations.md)).
 - **Product lifecycle** — Mitigation: [lifecycle.md](./docs/lifecycle.md) covers maintenance of generated code, human **steering/taste** (not just gatekeeping), a **product-feedback loop**, deployment-trust modes, and **AI-code licensing/liability**.
-- **Domain mismatch (correctness is not one shape)** — the deterministic-oracle verdict model fits backend/logic but breaks for regulated (evidence + human-witnessed validation), ML/data (statistical metrics + versioned data), and UX (perceptual judgment) software. Mitigation: a core **verdict-class taxonomy** + an **expanded domain-pack contract** ([docs/domains.md](./docs/domains.md)) — statistical/human-witnessed/perceptual verdict classes, `state_sha` for data/weights, compute-cost budgeting, mode/tier veto, and mandatory perceptual HITL — with the honest caveat that *pre-release UX correctness is bounded* (real users aren't in the pre-release loop) and *autonomous deploy is often unavailable* in regulated domains.
+- **Domain mismatch (correctness is not one shape)** — the deterministic-oracle verdict model fits backend/logic but breaks for regulated (evidence + human-witnessed validation), ML/data (statistical metrics + versioned data), and UX (perceptual judgment) software. Mitigation: a core **verdict-class taxonomy** + an **expanded domain-pack contract** ([docs/domains.md](./docs/domains.md)) — statistical/human-witnessed/perceptual verdict classes, `state_sha` for data/weights, compute-cost budgeting, mode/tier veto, and mandatory perceptual HITL — with the honest caveat that *pre-release UX correctness is bounded* (real users aren't in the pre-release loop) and *autonomous deploy is often unavailable* in regulated domains. Further caveats: the **statistical (class-3) verdict is scoped to batch/offline supervised eval** — online/RL/generative correctness need separate handling, and the class-3 **alpha look-ledger is global/cross-fork** so forking can't re-draw the budget — **keyed on eval-set identity (`(eval_set_identity, decision_id)`), not `state_sha`**, so adaptive retrain/feature iteration against the same eval set debits ONE shared budget and can't re-draw it either ([docs/domains.md §1/§5](./docs/domains.md), [docs/governance.md §5](./docs/governance.md)); and **regulated controls have no teeth in Assistant mode** — without the trust root, evidence is advisory and a human can merge past it; teeth arrive only in Gated/Autonomous, so the **regulated wedge adopter is served only by the deferred Gated+ modes** and near-term value is **backend-first** ([docs/roadmap.md](./docs/roadmap.md), §9, [docs/lifecycle.md §4](./docs/lifecycle.md), [docs/domains.md §5](./docs/domains.md)).
 
 ## 13. How this plan was hardened
 
 This plan was red-teamed in a **critic → solutioner → full-rewrite loop across
-fifteen rounds at four bars**: a generalist *design-doc* bar (Rounds 1–6), an
-*implementation-readiness* bar (three-lens technical panel — distributed-systems,
-offensive-security, AI-agents — Rounds 7–12, converged), a *fitness-for-purpose*
-bar (SRE/operability, cost/scale, premise-skeptic — Rounds 13–14, converged), and
-a *type-of-software* bar (regulated, ML/data, frontend/UX domain experts — Round
-15). **135 findings were raised and resolved.**
+twenty-three rounds at four bars** (plus a Round-24 fix pass): a generalist
+*design-doc* bar (Rounds 1–6), an *implementation-readiness* bar (three-lens
+technical panel — distributed-systems, offensive-security, AI-agents — Rounds
+7–12, converged), a *fitness-for-purpose* bar (SRE/operability, cost/scale,
+premise-skeptic — Rounds 13–14, converged), and a *type-of-software* bar
+(regulated, ML/data, frontend/UX domain experts — Round 15). **Round 16** ran a
+fresh full-domain expert panel raising **62 findings (10 BLOCKER, 33 MAJOR, 19
+MINOR)**; **Round 17** ran another fresh full-domain validation panel at the
+interaction seams of the Round-16 fixes, raising **57 findings (9 BLOCKER, 32
+MAJOR, 16 MINOR)**, which **Round 18** resolved. **Round 19** ran a fresh full-domain validation
+panel returning **29 findings (0 BLOCKER, 25 MAJOR, 4 MINOR)** — the BLOCKER
+count fell to **zero** and the finding count roughly halved (62→57→29), with the
+remainder being localized refinements at the new mechanisms' seams, which
+**Round 20** resolved. **Round 21** ran a fresh full-domain validation panel
+returning **10 findings (2 BLOCKER, 7 MAJOR, 1 MINOR)** — and honestly, these
+were almost entirely **consistency/reconciliation** bugs introduced by the
+multi-fixer method across rounds (the look-ledger key, the §9-vs-§12 adopter
+drift, "second family" vs ≥3 lineages, an unwired verdict-nonce), **not** new
+design flaws; **Round 22** resolved them with verbatim cross-doc definitions to
+stop the drift. **Round 23** ran a fresh full-domain validation panel returning
+**9 findings (1 BLOCKER, 7 MAJOR, 1 MINOR)** — with the regulated panel returning
+the loop's **first NO-MATERIAL-FINDINGS** sweep on the live codebase. Honestly,
+these were again dominated by **fix-hygiene of Round 22's own edits**, not new
+architecture: the look-ledger key change was never propagated to architecture.md (a
+dispatch omission), `decision_id` was left undefined, and the Round-22 verdict-nonce/latch
+was unsoundly placed inside the pure `_merge_gates` reducer and left per-run when it
+must be global/cross-fork like the stable-FAIL latch. **Round 24** resolved all 9 with
+verbatim cross-doc definitions. **302 findings have now been raised and resolved** (293
+prior + 9 this round).
 
 The defining lesson is the progression: **each genuinely new axis of scrutiny
-re-opened a problem the prior axes had signed off on.** The fitness-for-purpose
+re-opened a problem the prior axes had signed off on** — and each new round
+re-opens prior sign-offs at the *seams its own fixes created*. The trajectory is
+now **converging** (findings 62→57→29→10→9; BLOCKERs 10→9→0→2→1): no new
+*architectural* defect has surfaced since Round 19, one domain now returns clean,
+and the residual is the multi-agent editing process **policing its own
+consistency/completeness**, not whole-system design risk — an absolute zero-finding
+sweep across all eight lenses is a receding horizon dominated by edit-hygiene rather
+than design. **Convergence is
+not proof of correctness** — a genuinely new axis of scrutiny could still re-open
+the design. The fitness-for-purpose
 lenses surfaced 17 findings about sequencing/operability/cost the technical panel
 couldn't see; the domain experts then found that the plan's own thesis — "a
 deterministic decision rule at the seams" — was *domain-specific* (true for

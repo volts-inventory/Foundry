@@ -33,6 +33,18 @@ behind Spec/Build/Test gates, no trusted-runner attestation, no specialist syste
 single model family). That is the minimum that produces useful software a human
 merges — and the substrate for the Phase-1.5 A/B. Everything after is earned.
 
+**Adopter→mode→phase mapping (made explicit).** The first adopter is **not** a
+regulated/audit-bound team: regulated work is Gated-or-higher by construction and
+only gets real teeth at the Phase-4 trust root ([lifecycle.md §4](./lifecycle.md)),
+so it cannot draw value from the thin-differentiation Assistant mode that ships
+first. The honest early wedge is a **non-regulated team that values
+criterion-linked structured PRs + review/test discipline** — value lands in
+**Assistant (Phases 0–1)** and deepens at **early Gated (Phase 2)** via distinct
+gates, risk-tiering, and recorded Design/Release sign-off. Regulated pilots are
+deliberately **later** (Gated from Phase 2, full guarantees at Phase 4), not served
+by deferred modes dressed up as an early wedge — consistent with the
+incremental-autonomy sequencing and [PLAN.md §9](./PLAN.md)/[PLAN.md §10](./PLAN.md).
+
 ---
 
 ## Phase 0 — Foundations  · ~1 team-quarter
@@ -48,9 +60,11 @@ merges — and the substrate for the Phase-1.5 A/B. Everything after is earned.
 ## Phase 1.5 — DECISION GATE: powered A/B + role ablation  · ~1 team-quarter
 **Goal:** decide the central bet **before** expensive machinery. *(P-F1, P-F2)*
 - Run a **decision-grade, pre-registered A/B** (Foundry-slice vs strong agentic single-agent baseline vs single-agent+gates, equal-USD, sized `n`/`k`) on a SWE-EVO-style subset; run a **role ablation** (does adding each role past PM→Architect→Senior→QA help?).
+- **A separate variance/base-rate PILOT runs first** (on **disjoint tasks**, before the scored A/B): it establishes this study's control-arm resolution rate and task-level effect-size variance to **feed the power calc**, since neither is known a priori. The pilot **consumes part of the funded budget** and is read-only into the power calc — it is *not* a second scored arm or a rung to descend to ([evaluation.md §1](./evaluation.md), [evaluation.md §2](./evaluation.md)).
+- **Pre-registration is binding at the *funded* power rung.** The A/B is pre-registered with its **MDE committed before any scored run**, sized to the power rung the program is actually willing to fund — no post-hoc rung selection, no reaching for a smaller MDE after seeing data. A **null at the funded MDE is a real kill trigger**, not an invitation to re-power. (Consistent with [evaluation.md §2](./evaluation.md) and [evaluation.md §8](./evaluation.md).)
 **Exit (a real branch point):**
 - If structure **beats** baseline by the pre-registered margin at ≤ cost → proceed, carrying only the roles the ablation justified.
-- If it **does not** → **stop and redesign** (smaller role set, or gates-only, or abandon the org thesis). Sunk cost is Phases 0–1, not 0–5.
+- If it **does not** (a null at the funded MDE) → **stop and redesign** (smaller role set, or gates-only, or abandon the org thesis). Sunk cost is Phases 0–1, not 0–5.
 
 ## Phase 2 — Review & assurance (Gated mode)  · ~1–2 team-quarters
 **Goal:** quality/safety for a human-approved release candidate.
@@ -72,11 +86,29 @@ merges — and the substrate for the Phase-1.5 A/B. Everything after is earned.
 - Specialist interface + registry + capability routing; **the core pack hooks** ([domains.md §4](./domains.md)): the **verdict-class taxonomy** (statistical / human-witnessed / perceptual, with the discriminator made gate-class-aware), **`state_sha`** (data/weight refs), the **compute-cost budget** dimension, **mode/tier veto + regulatory-significance axis**, **per-artifact approver-of-record**, **data-egress profiles**, and **mandatory perceptual HITL + rendered evidence**.
 - First domain packs against those hooks: **regulated** (fintech/healthcare), **ML/data**, **frontend/UX**.
 **Exit:** a regulated request makes Autonomous/auto-approve unreachable and binds human approver-of-record records; an ML request keys verdicts on `state_sha` (data) with a statistical model-eval gate and compute budget; a UI request forces a visual HITL over a rendered bundle — all without core changes *to add the next pack*.
+
+**Wedge note (frontend/UX lands late — name it honestly).** The frontend/UX pack
+arrives here, in Phase 5 (~8–11 quarters in), while the smallest-useful milestone
+(Phases 0–1) is a **backend PR generator**. Rather than implicitly claiming
+"general-purpose" from day one, the near-term product is **honestly re-scoped as
+backend-logic-first, with UX as an explicit later bet** — consistent with earning
+autonomy (and pack breadth) incrementally rather than front-loading it. The
+adoption/wedge and competitive analysis behind this framing — and the option to
+pull a minimal UX-validation slice forward if the "general-purpose" claim needs
+earlier evidence — lives in [PLAN.md §9](./PLAN.md) and [PLAN.md §10](./PLAN.md).
 *(Note: the verdict-class taxonomy and `state_sha` are **core** generalizations; the statistical/human-witnessed/perceptual classes are designed in alongside Phase 2's gates and Phase 4's trust root, not bolted on here.)*
 
 ## Phase 6 — Eval, optimization & lifecycle  · ongoing
 **Goal:** measured, tuned, and owning software over time.
 - Full eval harness + the **decisive (confirmatory) A/B**; constrained workflow optimization (incl. tiering as a validated output); product-feedback loop + generated-code maintenance/provenance ([lifecycle.md](./lifecycle.md)); red-team; cost/latency hardening against the instantiated per-feature **and** A/B-scale cost model ([evaluation.md §8](./evaluation.md)).
+- **Confirmatory roles are asymmetric (not two independent gates).** Exactly **one**
+  A/B run is the designated confirmatory arbiter, spending its own pre-registered
+  alpha; the other is **estimation/replication only** — it informs but is **not** a
+  second gate ([evaluation.md §1](./evaluation.md), [evaluation.md §2](./evaluation.md)).
+  Phase 1.5 is the kill-cheap arbiter that gates Phases 2–5; Phase 6 is the
+  confirmatory arbiter for the **Autonomous** claim. A **Phase-6 disconfirmation
+  cannot un-spend the sunk Phases 2–5** (that cost is already committed), but it
+  **blocks the Phase-6 exit / Autonomous claim**.
 **Exit:** scorecard published and stable; confirmatory A/B reproduces the Phase-1.5 result; optimization Pareto-improves ≥1 headline metric with no regression in escaped-defects, cost, wall-clock, or policy compliance.
 
 ## Sequencing notes

@@ -159,7 +159,11 @@ Load-bearing control rules:
 > sampled cross-check is itself cross-family and therefore unsatisfiable in the same
 > outage that triggered degraded mode** — so in degraded mode the sampled trusted
 > cross-check is **REPLACED BY (not supplemented with) the mandatory HITL** of §2/§8;
-> it is **never silently run same-family**.
+> it is **never silently run same-family**. (The one exception is an *explicitly
+> selected* **solo-lineage self-judge profile** ([governance §1e](./governance.md)),
+> where same-family judging is permitted **openly and machine-stamped
+> `judgment_provenance = self`** — i.e. on the record, never silent — for operators
+> who choose single-provider / zero-HITL autonomy and accept the recorded residual.)
 >
 > **Judgment-verdict integrity binding.** Judgment verdicts are *not* in
 > `DETERMINISTIC_GATES`, so `_merge_gates` does not attestation-gate them (§3) — an

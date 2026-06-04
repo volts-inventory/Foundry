@@ -229,6 +229,17 @@ warrants the full assurance tax:
   gates + auto-approve (admission still fail-closed); High-risk (build/IaC/deps/
   auth/trust-root) → full chain + two-person sign-off. Tiering scales *assurance
   depth and human load*, never the integrity guarantees.
+- **Solo-lineage autonomous (self-judge) profile** ([docs/governance.md §1e](./docs/governance.md)):
+  for operators who want **one provider, zero HITL, fully autonomous**. Keeps **all
+  machine grounding** (two-zone runner, deterministic-gate re-derivation, fail-closed
+  admission — so a single-lineage agent still can't ship code that fails its own
+  build/tests/scanners) and relaxes only **independent *judgment*** on the
+  oracle-irreducible subjective residual, where a **same-lineage judge** issues the
+  verdict, machine-stamped `judgment_provenance = self` (never claimed as
+  independently validated). Selectable (not default), tier-splittable, and
+  **force-disabled by the regulated pack**. The honest trade: full single-provider
+  autonomy on everything a machine can verify; self-preference / blind-spot risk
+  *owned and recorded* on the subjective residual.
 - **Dependency-scoped re-verification** ([docs/governance.md §1f](./docs/governance.md)):
   a change re-runs only the gates it can affect and reuses cached runner-attested
   verdicts for unaffected inputs — bounding the re-verification cost multiplier.

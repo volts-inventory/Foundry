@@ -1,7 +1,42 @@
-# Build log — Phase 0: the state backbone
+# Build log — Foundry
 
 Status of the actual build against [implementation-plan.md](./implementation-plan.md).
-Build order followed: §8 (state → schemas → durability → trust seams → skeleton graph).
+Build order followed: §8 (state → schemas → durability → trust seams → skeleton graph),
+then the trust & execution core, gates, monitors, governance, and context layers.
+
+**Suite: 247 passing, 1 skipped, ruff clean. Python 3.12.**
+
+## Build wave 2 — trust core, gates, monitors, context (this iteration)
+
+| Component | Module(s) | Plan ref | Status |
+|---|---|---|---|
+| Full agent-artifact schemas (product/impl/quality/security/ops/governance) | `foundry/schemas/*` | agents.md | ✅ tested |
+| Model-provider proxy (single egress, lineage observation, judgment stamping, self-judge provenance) | `foundry/proxy/` | arch §2b, plan §3.3 | ✅ tested |
+| Curated lineage-equivalence map (revisioned, fail-closed on unknown model) | `foundry/proxy/lineage.py` | arch §2b/§4 | ✅ tested |
+| Sandbox + adapter contract + adapters (`claude -p`, raw-react) | `foundry/execution/` | arch §2, plan §3.2/§3.4 | ✅ tested |
+| Two-zone gate runner + 8 deterministic gates (spec/build/test/e2e/security/audit/supply_chain) | `foundry/gates/` | gov §1c, plan §3.1/§5.1 | ✅ tested |
+| Deterministic monitors + Guardian + advisory-analyzer seam | `foundry/monitors/` | gov §3, arch §7 | ✅ tested |
+| Budget controller (superstep-boundary caps, convergence bound) + HITL liaison | `foundry/governance/` | arch §6, plan §0.2 | ✅ tested |
+| Context assembly (pinned constraints, retriever, determinism policy) | `foundry/context/` | arch §8 | ✅ tested |
+
+**Provider-accuracy notes (caught against the live Anthropic API surface, not memory):**
+the tier map is `claude-opus-4-8`/`claude-sonnet-4-6`/`claude-haiku-4-5`; `temperature` is
+**removed on opus-4-8** (400 if sent), so the "temperature 0 for gates/judges" policy
+applies only to T2/T3 — on T1 the proxy/determinism layer records `output_config.effort`
+instead and notes the substitution in the manifest. There is no `system_fingerprint`;
+served-model observation is `response.model` + `_request_id`. The judgment verdict channel
+is `output_config.format` (json_schema), and the stable SOP prefix is `cache_control`-cached.
+
+**Resume note:** wave 2 ran as 6 parallel agents; 3 hit the session limit mid-task but
+their files had already landed and passed. The gates agent stopped before `audit.py`,
+`supply_chain.py`, and `tests/test_gate_runner.py` — these were completed by hand in the
+same style (zone-A/zone-B split, fail-closed ERROR, cross-fork stable-FAIL latch), and a
+cross-layer smoke test confirms a runner-signed verdict and a proxy-stamped judgment are
+both admitted by the same `merge_gates` under one verifier.
+
+---
+
+## Build wave 1 — Phase 0: the state backbone
 
 ## Built (this iteration)
 

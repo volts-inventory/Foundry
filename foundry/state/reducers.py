@@ -79,8 +79,17 @@ _REJECT_ALL = _RejectAll()
 
 
 def set_gate_write_verifier(v: GateWriteVerifier):
-    """Install the verifier for the current execution context (per superstep)."""
+    """Install the verifier for the current execution context (per superstep).
+
+    Returns the contextvar token; pass it to :func:`reset_gate_write_verifier`
+    to restore the previous verifier (e.g. test teardown).
+    """
     return _verifier.set(v)
+
+
+def reset_gate_write_verifier(token) -> None:
+    """Restore the verifier the matching :func:`set_gate_write_verifier` replaced."""
+    _verifier.reset(token)
 
 
 def _active_verifier() -> GateWriteVerifier:

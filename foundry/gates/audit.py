@@ -1,0 +1,110 @@
+"""Audit gate — class 1 (config-evaluable). (governance §1, plan §5.1)
+
+Zone-B-rederived dependency inventory: the verdict is grounded in an SBOM the
+trusted side reconstructs from the workdir's lockfiles — never an SBOM an
+agent hands in. Two pure checks over that inventory:
+
+- **Inventory derivable.** At least one recognized lockfile
+  (``uv.lock`` / ``requirements*.txt`` / ``poetry.lock`` / ``package-lock.json``)
+  must be present and readable; otherwise the inventory cannot be rederived and
+  the gate is ERROR (fail-closed — a missing grounding input is not a PASS, and
+  not a verdict about the tree either).
+- **License allowlist.** No dependency may carry a license marker outside the
+  pinned allowlist; a denied-license marker ⇒ FAIL.
+
+The SBOM stand-in here is the content digest of the concatenated, canonically
+ordered lockfile bytes (a stable per-tree identity); production swaps in a real
+Syft/Grype SBOM + pinned CVE snapshot behind the same zone-A/zone-B seam, with
+``scanner_config_rev`` (already in every attestation) pinning the CVE/license
+config (plan §0.3).
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+from foundry.canonical import content_digest
+from foundry.schemas.gates import GateStatus, VerdictClass
+
+from .runner import ZoneAObservation, observe
+
+__all__ = ["DEFAULT_LICENSE_ALLOWLIST", "AuditGate"]
+
+#: Pinned, permissive-license allowlist (SPDX-style identifiers, lowercased).
+DEFAULT_LICENSE_ALLOWLIST: frozenset[str] = frozenset(
+    {"mit", "bsd-2-clause", "bsd-3-clause", "apache-2.0", "isc", "psf", "python-2.0", "0bsd"}
+)
+
+#: Lockfiles the inventory is rederived from, in canonical order.
+_LOCKFILE_NAMES: tuple[str, ...] = (
+    "uv.lock",
+    "poetry.lock",
+    "package-lock.json",
+)
+_REQUIREMENTS_GLOB = "requirements*.txt"
+_MAX_LOCKFILE_BYTES = 5_000_000
+
+# A license marker line: "license: <id>" / "License-Expression: <id>" etc.
+_LICENSE_MARKER = re.compile(
+    r"(?i)\blicense(?:[-_ ]expression)?\b\s*[:=]\s*['\"]?([A-Za-z0-9.\- ]+)"
+)
+
+
+class AuditGate:
+    """Rederives a dependency inventory + checks licenses against a pinned allowlist."""
+
+    name = "audit"
+    verdict_class = VerdictClass.CONFIG_EVALUABLE
+    decision_deterministic = True
+    execution_deterministic = False  # pure read of pinned config artifacts
+
+    def __init__(
+        self,
+        *,
+        license_allowlist: frozenset[str] | None = None,
+    ) -> None:
+        self._allowlist = license_allowlist or DEFAULT_LICENSE_ALLOWLIST
+
+    # ---- zone A: collect lockfile bytes + raw license markers --------------
+
+    def execute(self, workdir: Path) -> ZoneAObservation:
+        lockfiles: list[str] = []
+        blobs: list[str] = []
+        denied: list[str] = []
+        for name in sorted(self._lockfile_paths(workdir)):
+            path = workdir / name
+            try:
+                if path.stat().st_size > _MAX_LOCKFILE_BYTES:
+                    continue
+                text = path.read_text(encoding="utf-8", errors="strict")
+            except (UnicodeDecodeError, OSError):
+                continue
+            lockfiles.append(name)
+            blobs.append(content_digest({"name": name, "body": text}))
+            for marker in _LICENSE_MARKER.findall(text):
+                license_id = marker.strip().lower()
+                if license_id and license_id not in self._allowlist:
+                    denied.append(f"{name}: {marker.strip()}")
+        sbom_digest = content_digest({"kind": "sbom", "lockfiles": sorted(blobs)}) if blobs else ""
+        return observe(
+            self.name,
+            findings=tuple(sorted(denied)),
+            structured={
+                "lockfiles": sorted(lockfiles),
+                "inventory_derivable": bool(lockfiles),
+                "sbom_digest": sbom_digest,
+            },
+        )
+
+    def _lockfile_paths(self, workdir: Path) -> list[str]:
+        names = [n for n in _LOCKFILE_NAMES if (workdir / n).is_file()]
+        names += [p.name for p in workdir.glob(_REQUIREMENTS_GLOB) if p.is_file()]
+        return names
+
+    # ---- zone B: derivable + no denied license ⇒ PASS ----------------------
+
+    def decide(self, obs: ZoneAObservation) -> GateStatus:
+        if not obs.structured.get("inventory_derivable"):
+            return GateStatus.ERROR  # no lockfile -> inventory not rederivable
+        return GateStatus.FAIL if obs.findings else GateStatus.PASS

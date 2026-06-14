@@ -27,6 +27,9 @@ packages = ["foundry"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+# Production classes named Test* (TestGate, TestPlan, TestReport) are domain
+# types, not test cases — only collect classes prefixed "Test_".
+python_classes = ["Test_*"]
 
 [tool.ruff]
 line-length = 100

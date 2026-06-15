@@ -10,3 +10,6 @@ dist/
 *.db-journal
 *.db-wal
 *.db-shm
+.coverage
+.coverage.*
+.mypy_cache/

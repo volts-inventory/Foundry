@@ -483,6 +483,43 @@
       "status": "done"
     },
     {
+      "id": "T-M1-14b",
+      "milestone": "M1",
+      "title": "ArtifactStore: content-addressed body store so emitted artifacts are resolvable end-to-end",
+      "job_to_be_done": "emit_artifact mints a cas:// handle but stores NO body; there is no global body store (only per-sandbox blobs), so a real cli run has nothing to resolve(). Add a content-addressed ArtifactStore (typed pydantic bodies via the existing serde + raw blobs), carried by AgentRuntime (rt.cas), written on emit (backward-compatible: no store -> mint-only, so existing synthetic-resolver tests stay green), and expose resolve/resolve_blob views the cli/factory_graph wire as the REAL resolvers.",
+      "files_owned": [
+        "foundry/durability/artifact_store.py",
+        "foundry/agents/_runtime.py",
+        "foundry/agents/_common.py",
+        "foundry/agents/product/stakeholder_proxy.py",
+        "foundry/agents/product/product_manager.py",
+        "foundry/agents/product/criteria_critic.py",
+        "foundry/agents/product/eng_program_mgr.py",
+        "foundry/agents/architecture/principal_architect.py",
+        "foundry/agents/quality/qa_engineer.py",
+        "foundry/agents/quality/sdet.py",
+        "foundry/agents/implementation/junior_engineer.py",
+        "tests/test_artifact_store.py"
+      ],
+      "dependencies": [
+        "T-M1-14"
+      ],
+      "role": "Durability engineer",
+      "required_experts": [
+        "E2",
+        "E1"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "ArtifactStore stores typed FrozenModel bodies (keyed by content_identity, via durability serde allowlist) + raw blobs (keyed by content_digest); get_body(uri)->model, get_blob(uri)->bytes; resolve/resolve_blob callable views",
+        "emit on rt.cas is backward-compatible: emit_artifact(..., store=rt.cas) writes body; store=None mints handle only (existing synthetic-resolver tests unaffected)",
+        "junior_engineer's FeatureDiff body + diff blob land in a store the gate_wiring resolve/resolve_blob can read end-to-end",
+        "round-trip test: emit via agents with a real ArtifactStore, resolve bodies back; full suite green; ruff+mypy clean"
+      ],
+      "retries_remaining": 3,
+      "status": "in_progress"
+    },
+    {
       "id": "T-M1-15",
       "milestone": "M1",
       "title": "cli.py \u2014 run a one-line request end-to-end (SPEC smoke-test core path)",
@@ -492,7 +529,8 @@
         "tests/test_cli_smoke.py"
       ],
       "dependencies": [
-        "T-M1-14"
+        "T-M1-14",
+        "T-M1-14b"
       ],
       "role": "LLM-application/agent engineer",
       "required_experts": [
@@ -507,7 +545,7 @@
         "import foundry / import foundry.cli smoke clean; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "pending"
     },
     {
       "id": "T-M1-16",

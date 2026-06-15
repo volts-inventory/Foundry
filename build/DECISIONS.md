@@ -31,3 +31,14 @@ contracts) rather than rewrites. Phases 0–6 of implementation-plan §7 are the
 stay fail-closed; judgment seams stamp `judgment_provenance="self"`. The decorrelation/HITL
 machinery is still built so the regulated pack can force HITL and operators can flip back.
 This matches the autonomous one-shot build mandate.
+
+## D6 — ArtifactStore: a real content-addressed body store for the emit/resolve seam
+**2026-06-15.** Wave-C/D established that typed artifact bodies live out-of-band behind cas:// handles
+(DS9/L4) and downstream layers read them via an injected `resolve`. But `emit_artifact` only MINTED the
+handle — no body was ever stored — so every layer/subgraph/supervisor/factory_graph test passed using a
+SYNTHETIC resolver, and a real cli run would resolve nothing (fail-closed). Decision: add
+`foundry/durability/artifact_store.py` (`ArtifactStore`) carried by `AgentRuntime.cas`, written on emit
+(backward-compatible: `store=None` ⇒ mint-only, so existing synthetic-resolver tests are untouched), with
+`resolve`/`resolve_blob` views the cli/factory_graph wire as the real resolvers. In-memory for dev/smoke
+(a durable filesystem/Postgres CAS is a prod ops concern, implementation-plan §0.3). This closes the gap
+that blocked an actually-runnable SPEC smoke path. Inserted as task T-M1-14b before cli (T-M1-15).

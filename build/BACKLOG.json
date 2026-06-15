@@ -480,7 +480,7 @@
         "Tests added compiling + running the graph with test doubles end to end; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M1-15",
@@ -507,7 +507,7 @@
         "import foundry / import foundry.cli smoke clean; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M1-16",

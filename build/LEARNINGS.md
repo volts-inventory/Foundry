@@ -430,8 +430,11 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   max_fix_attempts=...)` (GW3). SPEC: advance->implementation, fix->architecture (re-verify), halt->END.
   BUILD_TEST: advance->END, fix->implementation, halt->END. The path map MUST list every legal return
   (`advance`/`fix`/`halt`) or compile rejects it. `route_after_gates` needs the cross-fork
-  `GlobalRecordsView`; the supervisor signature carries no `records=`, so read it off the runner
-  (`runner._records`, `# noqa: SLF001`) — the runner is the records' owner.
+  `GlobalRecordsView`; the supervisor signature carries no `records=`, so read it off the runner.
+  (E-R1-02) The supervisor now reads it via the PUBLIC read-only `TwoZoneGateRunner.records`
+  property (returns `_records`; read-only — the runner stays the SOLE latch writer via `run`'s
+  `latch_stable_fail`), NOT the private `runner._records`. No `# noqa: SLF001` anymore — the runner
+  is still the records' owner, but the read goes through its public surface.
 - SUP4. **Fix-bound lives on `BudgetLedger.fix_attempts_since_all_green` (single-writer `budget`),
   bumped BY THE GATE NODE, not the fix node.** The gate node, after running the gates, re-evaluates its
   own boundary against the freshly-produced verdicts (`route_after_gates` over `{gates: out["gates"],
@@ -439,7 +442,15 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   the SAME superstep. The conditional edge then reads the POST-FOLD bumped counter, so it converges:
   fix N times then `halt`. The `*_fix` nodes only stamp `phase` + edge back to the responsible layer —
   if they bumped, the edge (same superstep as the gate) would read the stale pre-bump value and never
-  converge. No infinite loop.
+  converge. No infinite loop. (E-R1-01) The gate node's bump decision now derives from the SAME
+  post-fold `gates` view the edge routes on: `_bump_on_non_advance` folds `state["gates"]` with the
+  node's `out["gates"]` delta through the REAL `merge_gates` reducer (latest-by-Seq per
+  (name,run_against), trust-filtered) — NOT a hand-assembled `{"gates": out["gates"]}` subset. The
+  edge reads the full channel AFTER LangGraph folds the SAME delta through `merge_gates`, so the
+  in-node bump can never diverge from the edge's post-fold read by an unenforced invariant. Behavior
+  is identical for passing/converging cases (the run-scope `set_gate_write_verifier` contextvar is
+  active inside the node, so the in-node fold admits the freshly attested records exactly as the
+  edge's fold does; with no verifier installed BOTH folds drop them identically — still agreeing).
 - SUP5. **A hard FAIL on an integrated digest does NOT exercise the route-back loop — it LATCHES +
   halts AT ONCE (gov §5; latch check is first in `route_after_gates`).** Only an ERROR (infra/flake,
   DS7) or a missing verdict routes to bounded `fix`. So the end-to-end "routes back + terminates

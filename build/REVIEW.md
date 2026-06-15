@@ -173,3 +173,9 @@ No direct GitHub/network call (actions-channel/outbox only). Tests run the REAL 
   clarifying comment.
 
 Resolution: FG-M1/M3 applied directly (doc/comment); FG-M2 folded into T-M1-16 exit test. (open → pending)
+
+ACCEPTANCE (Wave E supervisor+factory_graph): supervisor E-R1-01/02 fixed (unified gates-view bump;
+public runner.records); factory_graph E-R1-04 (emit terminal-phase-writer doc) + E-R1-06 (_latest_by_name
+cross-run_against comment) applied directly; E-R1-05 (stable-FAIL no-PR) folded into T-M1-16 exit test;
+E-R1-03 (flake structured flag) deferred to Phase 2. Gates: ruff/mypy clean, 389 pass/1 skip. Convergence
++ attested-only advancement + emit trust-guard + resume-idempotency all SOUND. **supervisor + factory_graph ACCEPTED.**

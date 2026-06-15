@@ -205,6 +205,18 @@ class TwoZoneGateRunner:
         self._scanner_config_rev = scanner_config_rev
         self._lineage_map_revision = lineage_map_revision
 
+    @property
+    def records(self) -> GlobalRecords:
+        """The cross-fork :class:`GlobalRecords` (read-only view of the owner).
+
+        Exposed so callers that need the stable-FAIL latch view (e.g. the
+        supervisor's ``route_after_gates`` wiring) can read it WITHOUT reaching
+        through ``_records``. Read-only access only — the runner remains the
+        sole writer of the latch (``run`` calls ``latch_stable_fail``); this
+        property exposes no mutation seam of its own.
+        """
+        return self._records
+
     def run(self, gate: GateImpl, run_against: str, seq: Seq, workdir: Path | str) -> GateResult:
         """One gate run: zone-A grounding → zone-B verdict → sign → latch.
 

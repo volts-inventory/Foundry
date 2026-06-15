@@ -70,6 +70,7 @@ from foundry.graph.subgraphs.product import build_product_subgraph
 from foundry.graph.subgraphs.quality import build_quality_subgraph
 from foundry.schemas.base import BudgetLedger
 from foundry.state.factory_state import FactoryState
+from foundry.state.reducers import merge_gates
 
 if TYPE_CHECKING:
     from foundry.agents._runtime import AgentRuntime
@@ -250,18 +251,23 @@ def build_supervisor_graph(
     def _bump_on_non_advance(
         state: FactoryState, config: RunnableConfig, out: dict[str, Any], *, boundary: str
     ) -> None:
-        # route_after_gates reads only ``gates`` (the freshly attested verdicts in
-        # ``out``) + ``budget`` (the pre-bump ledger on ``state``); assemble just
-        # those so the in-node decision matches the conditional edge's.
+        # The in-node bump decision MUST be derived from the SAME post-fold
+        # ``gates`` view the conditional edge routes on. The edge reads the full
+        # ``gates`` channel AFTER LangGraph folds the node's ``out["gates"]``
+        # delta through ``merge_gates`` (latest-by-Seq per (name, run_against),
+        # trust-filtered). So fold the prior channel (``state["gates"]``) with
+        # the node's freshly attested delta through the REAL reducer here —
+        # never a hand-assembled subset — so the in-node bump can never diverge
+        # from the edge's post-fold read by an unenforced invariant (E-R1-01).
         post: FactoryState = {
-            "gates": out.get("gates", []),
+            "gates": merge_gates(state.get("gates"), out.get("gates")),
             "budget": state.get("budget") or BudgetLedger(),
         }
         decision = route_after_gates(
             post,
             config,
             boundary=boundary,
-            records=runner._records,
+            records=runner.records,
             max_fix_attempts=max_fix_attempts,
         )
         if decision == "fix":
@@ -322,7 +328,7 @@ def build_supervisor_graph(
             state,
             config,
             boundary=SPEC_BOUNDARY,
-            records=runner._records,
+            records=runner.records,
             max_fix_attempts=max_fix_attempts,
         )
 
@@ -331,7 +337,7 @@ def build_supervisor_graph(
             state,
             config,
             boundary=BUILD_TEST_BOUNDARY,
-            records=runner._records,
+            records=runner.records,
             max_fix_attempts=max_fix_attempts,
         )
 

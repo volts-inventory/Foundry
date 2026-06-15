@@ -84,6 +84,12 @@ def _latest_by_name(state: FactoryState) -> dict[str, Any]:
     ``gates`` is admitted only for runner-attested records (``merge_gates``); pick
     the latest by ``Seq`` per name so a re-verification run's verdict (bumped
     epoch) wins over the stale record it supersedes.
+
+    NB: this collapses by ``name`` ALONE and takes the global newest-by-``Seq``,
+    whereas ``merge_gates`` keys by ``(name, run_against)``. That is deliberate
+    release semantics: across a fix-loop the channel may hold same-name verdicts
+    for different ``run_against`` trees; the newest integrated tree's verdict is
+    the one that gates the release, so cross-``run_against`` newest-wins is correct.
     """
     latest: dict[str, Any] = {}
     for g in state.get("gates") or ():
@@ -196,6 +202,11 @@ def build_factory_graph(
         ``union_actions`` reducer coalesces the re-emission. No real GitHub/network
         call happens here: the action is a request on the ``actions`` channel; the
         outbox relay is the sole component that touches the outside world.
+
+        Phase ownership: the supervisor owns ``phase`` during its phases; this
+        emit node is the TERMINAL ``phase`` writer (``done``/``halted``). The two
+        run in distinct supersteps (supervisor subgraph node, then emit), so the
+        single-writer ``phase`` channel is never double-written within a superstep.
         """
         if not terminal_gates_pass(state):
             # Halted / failed run: do NOT open a PR. Mark the phase only.

@@ -318,8 +318,29 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   `acceptance_criterion` handles reconstituted through `resolve` (INFRA — CAS in prod, in-memory map
   in tests; `ArtifactResolver = Callable[[Artifact], FrozenModel]`, exported from `qa_engineer`).
   `resolve` is INFRA so it is a legit factory arg; the DATA (WHICH criteria) still comes from state.
-  `build_quality_subgraph(rt, *, resolve=None)` threads it into both author nodes — mirrors
+  `build_quality_subgraph(rt, *, resolve)` threads it into both author nodes — mirrors
   `build_implementation_subgraph`'s `resolve=`.
+- QS6. **(C-R1-01) `resolve` is REQUIRED on `build_quality_subgraph` — NOT `resolve=None`.** In the
+  chained factory_graph the product layer emits AcceptanceCriterion ONLY as `acceptance_criterion`
+  Artifact HANDLES, so a defaulted `resolve=None` reads ZERO criteria → empty `TestPlan`, no oracles,
+  no error → a VACUOUS Test-gate pass. The signature now requires it (mirrors
+  `build_implementation_subgraph`). DEFENSE IN DEPTH: `qa_engineer.read_criteria` (used by qa AND
+  sdet) is FAIL-CLOSED — if `acceptance_criterion` handles are present on `state["artifacts"]` but
+  `resolve is None`, it raises `MissingCriteriaResolverError` rather than silently returning `()`.
+- QS7. **(C-R1-04) The dead raw-criteria path was REMOVED.** `quality._common.criteria_from_state`
+  (the `isinstance(a, AcceptanceCriterion)` read) only fired for direct-call unit tests; in a folded
+  graph it is dead AND widened the surface masking C-R1-01 (raw bodies have no `.uri` and crash
+  `merge_by_uri` anyway, QS2). `read_criteria` now reads ONLY handles+`resolve` — production and unit
+  tests use the SAME path: seed criteria as `acceptance_criterion` handles + an in-memory resolver.
+- QS8. **(C-R1-03) Reviewer subject fallback selects by KIND, newest-by-`seq` — not `artifacts[-1]`.**
+  `artifacts` folds by `merge_by_uri` (insertion-order, not seq), so `artifacts[-1]` is not
+  deterministically the diff under review. `reviewer_critic._newest_feature_diff_uri` picks the
+  `feature_diff` handle with the max `Seq` (mirrors `senior_engineer._first_of_kind`); the
+  config-pinned `subject_artifact_uri` stays the PRIMARY source and the node still fails closed on an
+  empty subject.
+- QS9. **(C-R1-02) product.py + quality.py now use the concrete-`def` wrapper for `add_node`**
+  (SG2/IM5), not `cast("StateNode[...]", fn)`. All four layer subgraphs are consistent; the
+  `StateNode` TYPE_CHECKING import is gone.
 - QS4. **Quality subgraph SOP order (agents.md Layer 4): `START -> reviewer_critic -> qa_engineer ->
   sdet -> END`** (linear). Reviewer is the entry (it judges the diff); qa authors TestPlan +
   per-high-risk NEGATIVE OracleBinding + quarantining TestReport; sdet authors E2EReport.

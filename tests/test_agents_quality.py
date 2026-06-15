@@ -34,7 +34,10 @@ from foundry.agents.quality import (
     make_sdet_node,
 )
 from foundry.agents.quality._common import MissingVerdictNonceError
-from foundry.agents.quality.qa_engineer import ACCEPTANCE_CRITERION_KIND
+from foundry.agents.quality.qa_engineer import (
+    ACCEPTANCE_CRITERION_KIND,
+    MissingCriteriaResolverError,
+)
 from foundry.canonical import content_digest
 from foundry.gates.attestation import DevGateWriteVerifier, ZoneBSigner
 from foundry.proxy import ModelProviderProxy
@@ -98,16 +101,6 @@ CRITERIA = (
 )
 
 
-def qa_state(
-    criteria: tuple[AcceptanceCriterion, ...] = CRITERIA,
-) -> FactoryState:
-    """The state the QA/SDET nodes read criteria from (AR1-AR4: criteria are a
-    DATA input from ``state``, not a build-time kwarg). The product layer seeds
-    the typed ``AcceptanceCriterion`` records onto ``artifacts``; the nodes
-    recover them by TYPE via ``criteria_from_state``."""
-    return {"artifacts": list(criteria)}
-
-
 def criterion_handles(
     criteria: tuple[AcceptanceCriterion, ...] = CRITERIA,
 ) -> list[Artifact]:
@@ -116,8 +109,21 @@ def criterion_handles(
     Unlike raw bodies, a handle carries a ``.uri`` so it survives ``merge_by_uri``
     on the shared ``artifacts`` channel in a COMPILED graph (raw criteria would
     crash the fold). The QA / SDET nodes resolve each handle back to its body via
-    the injected ``resolve`` (the Senior Engineer's seam)."""
+    the injected ``resolve`` (the Senior Engineer's seam). C-R1-04: the raw-body
+    production path was REMOVED, so the unit tests seed criteria as handles + a
+    resolver — exactly as production does — never raw instances on the channel."""
     return [emit_artifact(c, ACCEPTANCE_CRITERION_KIND, "product_manager", c.seq) for c in criteria]
+
+
+def qa_state(
+    criteria: tuple[AcceptanceCriterion, ...] = CRITERIA,
+) -> FactoryState:
+    """The state the QA/SDET nodes read criteria from (AR1-AR4: criteria are a
+    DATA input from ``state``, not a build-time kwarg). Seeds the
+    ``acceptance_criterion`` HANDLES the product layer actually emits (C-R1-04:
+    the raw-body path is gone); pair with ``resolve=resolver()`` so the nodes
+    reconstitute the bodies — consistent with production."""
+    return {"artifacts": list(criterion_handles(criteria))}
 
 
 def resolver(
@@ -263,7 +269,7 @@ def _qa_payload() -> str:
 def test_qa_plan_traceability_and_negative_oracle_and_quarantine() -> None:
     transport = MockTransport(completions=[_qa_payload()])
     rt = make_runtime(transport)
-    node = make_qa_engineer_node(rt, run_against="task/qa-1")
+    node = make_qa_engineer_node(rt, resolve=resolver(), run_against="task/qa-1")
 
     writes = node(qa_state(), config_for("run-Q"))
     artifacts = writes["artifacts"]
@@ -320,7 +326,7 @@ def test_qa_report_quarantines_flaky_test() -> None:
     """
     transport = MockTransport(completions=[_qa_payload()])
     rt = make_runtime(transport)
-    node = make_qa_engineer_node(rt, run_against="task/qa-2")
+    node = make_qa_engineer_node(rt, resolve=resolver(), run_against="task/qa-2")
     artifacts = node(qa_state(), config_for("run-Q2", step=5))["artifacts"]
 
     emitted = next(a for a in artifacts if a.kind == "test_report")
@@ -345,7 +351,7 @@ def test_qa_writes_no_gate_result() -> None:
     # qa's complete() is a schema-constrained IDEATION call (not a verdict, AC3
     # resolved) — serve the plan on the natural completions= path.
     node = make_qa_engineer_node(
-        make_runtime(MockTransport(completions=[_qa_payload()]))
+        make_runtime(MockTransport(completions=[_qa_payload()])), resolve=resolver()
     )
     writes = node(qa_state(), config_for("run-Q3"))
     assert "gates" not in writes  # L5: QA never touches the gates channel
@@ -354,10 +360,30 @@ def test_qa_writes_no_gate_result() -> None:
 def test_qa_fail_closed_coverage_when_model_omits_criterion() -> None:
     """If the model omits a criterion, the node still guarantees full coverage."""
     thin = json.dumps({"tests": [{"test_id": "t-only-1", "criterion_ids": ["AC-001"]}]})
-    node = make_qa_engineer_node(make_runtime(MockTransport(completions=[thin])))
+    node = make_qa_engineer_node(
+        make_runtime(MockTransport(completions=[thin])), resolve=resolver()
+    )
     artifacts = node(qa_state(), config_for("run-Q4"))["artifacts"]
     # synthetic tests fill the gap -> still 3 covered criteria + 2 negative oracles.
     assert sum(1 for a in artifacts if a.kind == "oracle_binding") == 2
+
+
+def test_qa_fail_closed_when_handles_present_but_resolver_missing() -> None:
+    """C-R1-01: criterion HANDLES on state + no ``resolve`` must FAIL CLOSED.
+
+    Without a resolver the node would read zero criteria, author an empty
+    ``TestPlan`` with no oracles, and sail through the Test gate (a vacuous pass).
+    The node raises instead of silently returning ``()``."""
+    node = make_qa_engineer_node(make_runtime(MockTransport(completions=[_qa_payload()])))
+    with pytest.raises(MissingCriteriaResolverError):
+        node(qa_state(), config_for("run-Q5"))
+
+
+def test_sdet_fail_closed_when_handles_present_but_resolver_missing() -> None:
+    """C-R1-01: same fail-closed rule for the SDET node's criteria read."""
+    node = make_sdet_node(make_runtime(MockTransport(completions=[_sdet_payload()])))
+    with pytest.raises(MissingCriteriaResolverError):
+        node(qa_state(), config_for("run-S3"))
 
 
 # ---- 3. sdet: determinism notes + traceability + quarantine -----------------
@@ -388,7 +414,7 @@ def test_sdet_report_carries_determinism_and_quarantine() -> None:
 
     transport = MockTransport(completions=[_sdet_payload()])
     rt = make_runtime(transport)
-    node = make_sdet_node(rt, run_against="tree-sha-integrated")
+    node = make_sdet_node(rt, resolve=resolver(), run_against="tree-sha-integrated")
     [emitted] = node(qa_state(), config_for("run-S", step=6))["artifacts"]
     assert emitted.kind == "e2e_report"
 
@@ -429,7 +455,7 @@ def test_sdet_writes_no_gate_result() -> None:
     # sdet's complete() is a schema-constrained IDEATION call (not a verdict, AC3
     # resolved) — serve the scenarios on the natural completions= path.
     node = make_sdet_node(
-        make_runtime(MockTransport(completions=[_sdet_payload()]))
+        make_runtime(MockTransport(completions=[_sdet_payload()])), resolve=resolver()
     )
     assert "gates" not in node(qa_state(), config_for("run-S2"))
 
@@ -477,7 +503,7 @@ def test_artifact_handles_dedupe_under_merge_by_uri() -> None:
     """The artifacts channel folds by ``.uri`` — identical handles coalesce."""
     transport = MockTransport(completions=[_qa_payload()])
     rt = make_runtime(transport)
-    node = make_qa_engineer_node(rt)
+    node = make_qa_engineer_node(rt, resolve=resolver())
     a = node(qa_state(), config_for("run-R"))["artifacts"]
     # Re-folding the SAME emitted handles (a LangGraph resume re-fold) is
     # idempotent under merge_by_uri (keyed on the content-addressed uri).

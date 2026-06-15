@@ -35,6 +35,7 @@ import json
 from collections.abc import Callable
 from typing import Any
 
+import pytest
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph
 
@@ -177,6 +178,38 @@ def test_build_quality_subgraph_returns_uncompiled_state_graph() -> None:
     g = build_quality_subgraph(_runtime(), resolve=_resolver())
     assert isinstance(g, StateGraph)
     assert not hasattr(g, "invoke")  # compilation is the caller's job
+
+
+def test_build_quality_subgraph_requires_resolve() -> None:
+    """C-R1-01: ``resolve`` is a REQUIRED arg (mirrors build_implementation_
+    subgraph). A defaulted ``resolve=None`` was the vacuous-pass trap — in the
+    chained graph criteria arrive ONLY as handles, so a None resolver would read
+    zero criteria → an empty TestPlan → a vacuous Test gate pass."""
+    import inspect
+
+    sig = inspect.signature(build_quality_subgraph)
+    resolve = sig.parameters["resolve"]
+    assert resolve.default is inspect.Parameter.empty  # no default -> required
+
+
+def test_quality_subgraph_fail_closed_when_handles_present_but_no_resolver() -> None:
+    """End-to-end: if a (hypothetical) None resolver were wired while criterion
+    HANDLES are on state, the QA node fails closed rather than vacuous-passing."""
+    from foundry.agents.quality.qa_engineer import (
+        MissingCriteriaResolverError,
+        make_qa_engineer_node,
+    )
+
+    _records, token = _installed()
+    try:
+        # Build the QA node WITHOUT a resolver and run it directly over the seeded
+        # handle state — the production wiring path that C-R1-01 made impossible to
+        # reach via the builder (resolve is required) is still defended at the node.
+        node = make_qa_engineer_node(_runtime())
+        with pytest.raises(MissingCriteriaResolverError):
+            node(_seed_state(), _config())
+    finally:
+        token.var.reset(token)
 
 
 def test_quality_subgraph_produces_test_and_e2e_artifacts() -> None:

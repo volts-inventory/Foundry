@@ -23,8 +23,10 @@ Spec-gate verdict is computed + signed later by the two-zone gate runner.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
 from foundry.agents.product import (
@@ -36,30 +38,18 @@ from foundry.agents.product import (
 from foundry.state.factory_state import FactoryState
 
 if TYPE_CHECKING:
-    from langgraph.graph.state import StateNode
-
-    from foundry.agents._runtime import AgentRuntime, NodeFn
+    from foundry.agents._runtime import AgentRuntime
 
 __all__ = ["build_product_subgraph"]
+
+# The concrete LangGraph node signature (same shape as NodeFn).
+_Node = Callable[[FactoryState, RunnableConfig], dict[str, Any]]
 
 # Node ids match the agent node_ids (so Seq.node_id == the graph node name).
 _STAKEHOLDER_PROXY = "stakeholder_proxy"
 _PRODUCT_MANAGER = "product_manager"
 _CRITERIA_CRITIC = "criteria_completeness_critic"
 _ENG_PROGRAM_MGR = "eng_program_mgr"
-
-
-def _node(fn: NodeFn) -> StateNode[FactoryState, Any]:
-    """Adapt a ``NodeFn`` for ``StateGraph.add_node``.
-
-    A ``make_<agent>_node`` factory returns the ``NodeFn`` alias — a bare
-    ``Callable[[FactoryState, RunnableConfig], dict]`` whose positional-only
-    params don't unify with ``add_node``'s many overloads, so mypy can't pick the
-    ``_NodeWithConfig`` variant. The closure IS structurally a node (it has the
-    ``(state, config) -> writes`` shape ``add_node`` runs); cast it to the public
-    ``StateNode`` type ``add_node``'s own signature declares.
-    """
-    return cast("StateNode[FactoryState, Any]", fn)
 
 
 def build_product_subgraph(rt: AgentRuntime) -> StateGraph[FactoryState]:
@@ -72,10 +62,35 @@ def build_product_subgraph(rt: AgentRuntime) -> StateGraph[FactoryState]:
     checkpointer, or a test standalone). Do NOT compile with a checkpointer here.
     """
     g: StateGraph[FactoryState] = StateGraph(FactoryState)
-    g.add_node(_STAKEHOLDER_PROXY, _node(make_stakeholder_proxy_node(rt)))
-    g.add_node(_PRODUCT_MANAGER, _node(make_product_manager_node(rt)))
-    g.add_node(_CRITERIA_CRITIC, _node(make_criteria_completeness_critic_node(rt)))
-    g.add_node(_ENG_PROGRAM_MGR, _node(make_eng_program_mgr_node(rt)))
+
+    stakeholder: _Node = make_stakeholder_proxy_node(rt)
+    pm: _Node = make_product_manager_node(rt)
+    critic: _Node = make_criteria_completeness_critic_node(rt)
+    eng_pm: _Node = make_eng_program_mgr_node(rt)
+
+    # The factory closures are typed as the ``_Node`` alias; LangGraph's
+    # ``add_node`` resolves its node argument against the ``_NodeWithConfig``
+    # Protocol, and mypy cannot bind that Protocol's contravariant ``NodeInputT``
+    # TypeVar through an opaque ``Callable`` alias (only through a named, concrete
+    # ``def``). Re-express each as a thin concrete wrapper to restore structural
+    # matching WITHOUT a private import or ``cast`` (mirrors the architecture /
+    # implementation / quality subgraphs; full type-checking preserved — SG2/IM5).
+    def _stakeholder(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        return stakeholder(state, config)
+
+    def _pm(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        return pm(state, config)
+
+    def _critic(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        return critic(state, config)
+
+    def _eng_pm(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        return eng_pm(state, config)
+
+    g.add_node(_STAKEHOLDER_PROXY, _stakeholder)
+    g.add_node(_PRODUCT_MANAGER, _pm)
+    g.add_node(_CRITERIA_CRITIC, _critic)
+    g.add_node(_ENG_PROGRAM_MGR, _eng_pm)
     g.add_edge(START, _STAKEHOLDER_PROXY)
     g.add_edge(_STAKEHOLDER_PROXY, _PRODUCT_MANAGER)
     g.add_edge(_PRODUCT_MANAGER, _CRITERIA_CRITIC)

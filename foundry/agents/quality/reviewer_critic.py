@@ -32,13 +32,36 @@ from foundry.agents.quality._common import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from langchain_core.runnables import RunnableConfig
 
     from foundry.agents._runtime import AgentRuntime, NodeFn
+    from foundry.schemas.base import Artifact
     from foundry.state.factory_state import FactoryState
 
 _NODE_ID = "reviewer_critic"
 _GATE_NAME = "review"  # a JUDGMENT_VERDICTS gate (reducers.py)
+
+# The kind the Junior Engineer stamps on the diff handle it emits to ``artifacts``
+# (foundry/agents/implementation/junior_engineer.py) — the artifact this reviewer
+# judges when the runner has not pinned an explicit subject on the config.
+_FEATURE_DIFF_KIND = "feature_diff"
+
+
+def _newest_feature_diff_uri(artifacts: Sequence[Artifact]) -> str | None:
+    """The diff under review: the newest-by-``Seq`` ``feature_diff`` handle, if any.
+
+    C-R1-03: the channel folds by ``merge_by_uri`` (insertion-order, NOT seq), so
+    ``artifacts[-1]`` is not deterministically the diff under review. Select by
+    KIND and pick the latest by ``Seq`` (mirrors ``senior_engineer._first_of_kind``)
+    so a supersession (higher-``seq`` handle under a fresh uri, L4) deterministically
+    wins. Returns ``None`` when no diff handle is present (the config-pinned subject
+    is the primary source; the node fails closed if neither yields one)."""
+    candidates = [a for a in artifacts if getattr(a, "kind", None) == _FEATURE_DIFF_KIND]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda a: a.seq).uri
 
 _SOP = (
     "You are the Reviewer/Critic, the evaluator side of the evaluator-optimizer "
@@ -68,8 +91,10 @@ def make_reviewer_critic_node(rt: AgentRuntime) -> NodeFn:
         # fundamental trust input of a verdict).
         nonce = server_issued_nonce(config)
 
-        artifacts = state.get("artifacts") or []
-        state_subject = artifacts[-1].uri if artifacts else None
+        # Primary source is the config-pinned subject (the runner sets it); the
+        # state fallback selects the feature_diff by KIND, newest-by-seq (C-R1-03)
+        # — never insertion-order ``artifacts[-1]``.
+        state_subject = _newest_feature_diff_uri(state.get("artifacts") or [])
         subject_uri = subject_artifact_uri(config, state_subject)
         # DT2 / fail-closed: a verdict needs a concrete subject to bind to.
         # `subject_artifact_uri` falls back to "" when neither the config seam

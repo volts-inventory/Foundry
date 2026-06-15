@@ -22,7 +22,7 @@ import json
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from foundry.agents.quality._common import criteria_from_state, emit_artifact
+from foundry.agents.quality._common import emit_artifact
 from foundry.schemas.base import Artifact, FrozenModel
 from foundry.schemas.product import AcceptanceCriterion, Criticality
 from foundry.schemas.quality import OracleBinding, OracleKind, TestPlan, TestReport
@@ -46,6 +46,17 @@ ACCEPTANCE_CRITERION_KIND = "acceptance_criterion"
 ArtifactResolver = Callable[[Artifact], FrozenModel]
 
 
+class MissingCriteriaResolverError(RuntimeError):
+    """``acceptance_criterion`` handles are on state but no ``resolve`` is wired.
+
+    Fail-closed (C-R1-01): the product layer emits each criterion ONLY as a
+    content-addressed handle, so without a ``resolve`` to reconstitute the bodies
+    the QA / SDET nodes would read ZERO criteria, author an empty ``TestPlan``
+    with no oracles, and silently sail through the Test gate (a VACUOUS pass).
+    Raising here surfaces the wiring gap instead of masking it — ``resolve`` is
+    REQUIRED whenever criteria handles are present (the production case)."""
+
+
 def read_criteria(
     state: FactoryState, resolve: ArtifactResolver | None
 ) -> tuple[AcceptanceCriterion, ...]:
@@ -53,28 +64,38 @@ def read_criteria(
 
     The CRITERIA SET (not the model) is the source of truth for coverage (Q4) and
     is a DATA input, so it is read from ``state`` inside the closure, NOT a
-    build-time kwarg (AR1-AR4). Two seedings are accepted, deduped by ``id`` and
-    ordered by ``id`` (fold-order-independent, byte-identical across a resume):
-
-    * RAW ``AcceptanceCriterion`` instances on ``state['artifacts']`` (what
-      :func:`criteria_from_state` recovers by type — convenient for direct-call
-      unit tests where no channel fold runs); and
-    * ``acceptance_criterion`` Artifact HANDLES (what the product layer actually
-      emits, and what survives ``merge_by_uri`` in a compiled graph), each
-      reconstituted via the injected ``resolve`` — the same seam the Senior
-      Engineer reads SystemDesign / OwnershipMap through.
+    build-time kwarg (AR1-AR4). The product layer emits each criterion as a
+    content-addressed ``acceptance_criterion`` Artifact HANDLE (it has a ``.uri``
+    so it survives ``merge_by_uri`` on the shared ``artifacts`` channel; raw typed
+    bodies, which carry no ``.uri``, cannot ride that channel through a fan-in
+    fold — QS2). Each handle is reconstituted via the injected ``resolve`` — the
+    same seam the Senior Engineer reads SystemDesign / OwnershipMap through.
 
     ``resolve`` is INFRA (a dependency), so it may be a factory arg; the DATA
-    (WHICH criteria) still comes from state. Absent criteria -> ``()`` (the node
-    then authors an empty plan, surfacing the wiring gap at the Test gate).
+    (WHICH criteria) still comes from state. Records are deduped + ordered by
+    ``id`` (fold-order-independent, byte-identical across a resume re-fold).
+
+    Fail-closed (C-R1-01): if ``acceptance_criterion`` handles are present but no
+    ``resolve`` is wired, raise :class:`MissingCriteriaResolverError` rather than
+    silently returning ``()`` — an empty plan with no oracles is a VACUOUS Test
+    gate pass. With no handles at all (a layer that genuinely declared no criteria)
+    the result is ``()`` and the empty plan surfaces the gap at the Test gate.
     """
+    handles = [
+        h
+        for h in (state.get("artifacts") or ())
+        if getattr(h, "kind", None) == ACCEPTANCE_CRITERION_KIND
+    ]
+    if handles and resolve is None:
+        raise MissingCriteriaResolverError(
+            f"{len(handles)} {ACCEPTANCE_CRITERION_KIND!r} handle(s) on "
+            "state['artifacts'] but no resolve= was wired; without it the QA/SDET "
+            "nodes would read zero criteria and emit an empty TestPlan — a vacuous "
+            "Test-gate pass. Thread the CAS resolver into build_quality_subgraph."
+        )
     by_id: dict[str, AcceptanceCriterion] = {}
-    for c in criteria_from_state(state):
-        by_id[c.id] = c
     if resolve is not None:
-        for handle in state.get("artifacts") or ():
-            if getattr(handle, "kind", None) != ACCEPTANCE_CRITERION_KIND:
-                continue
+        for handle in handles:
             body = resolve(handle)
             if isinstance(body, AcceptanceCriterion):
                 by_id[body.id] = body

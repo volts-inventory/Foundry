@@ -35,8 +35,10 @@ composition avoids. Callers exercising the layer standalone call
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
 from foundry.agents.quality import (
@@ -47,12 +49,13 @@ from foundry.agents.quality import (
 from foundry.state.factory_state import FactoryState
 
 if TYPE_CHECKING:
-    from langgraph.graph.state import StateNode
-
-    from foundry.agents._runtime import AgentRuntime, NodeFn
+    from foundry.agents._runtime import AgentRuntime
     from foundry.agents.quality.qa_engineer import ArtifactResolver
 
 __all__ = ["build_quality_subgraph"]
+
+# The concrete LangGraph node signature (same shape as NodeFn).
+_Node = Callable[[FactoryState, RunnableConfig], dict[str, Any]]
 
 # Node ids match the agent node_ids (so Seq.node_id == the graph node name).
 _REVIEWER_CRITIC = "reviewer_critic"
@@ -60,20 +63,8 @@ _QA_ENGINEER = "qa_engineer"
 _SDET = "sdet"
 
 
-def _node(fn: NodeFn) -> StateNode[FactoryState, Any]:
-    """Adapt a ``NodeFn`` for ``StateGraph.add_node``.
-
-    A ``make_<agent>_node`` factory returns the ``NodeFn`` alias — a bare
-    ``Callable[[FactoryState, RunnableConfig], dict]`` whose positional-only
-    params don't unify with ``add_node``'s overloads, so mypy can't pick the
-    ``_NodeWithConfig`` variant. The closure IS structurally a node; cast it to
-    the public ``StateNode`` type ``add_node``'s signature declares.
-    """
-    return cast("StateNode[FactoryState, Any]", fn)
-
-
 def build_quality_subgraph(
-    rt: AgentRuntime, *, resolve: ArtifactResolver | None = None
+    rt: AgentRuntime, *, resolve: ArtifactResolver
 ) -> StateGraph[FactoryState]:
     """Build the Layer-4 quality subgraph (UNCOMPILED) over ``FactoryState``.
 
@@ -83,16 +74,41 @@ def build_quality_subgraph(
     ``StateGraph`` itself; the caller compiles it (the supervisor with the shared
     checkpointer, or a test standalone). Do NOT compile with a checkpointer here.
 
-    ``resolve`` is the INFRA seam (CAS in prod, an in-memory map in tests) the QA
-    / SDET nodes reconstitute each ``AcceptanceCriterion`` body from its
-    content-addressed ``acceptance_criterion`` handle with — the same dependency
-    the implementation subgraph threads for SystemDesign / OwnershipMap. The DATA
-    (WHICH criteria) is read from ``state['artifacts']`` inside the nodes.
+    ``resolve`` is a REQUIRED INFRA seam (CAS in prod, an in-memory map in tests):
+    the QA / SDET nodes reconstitute each ``AcceptanceCriterion`` body from its
+    content-addressed ``acceptance_criterion`` handle with it — the same dependency
+    ``build_implementation_subgraph`` requires for SystemDesign / OwnershipMap.
+    It is REQUIRED (not defaulted to ``None``, C-R1-01) because the product layer
+    emits criteria ONLY as handles in the chained graph; a ``None`` resolver would
+    read zero criteria → an empty ``TestPlan`` with no oracles → a VACUOUS Test
+    gate pass. The DATA (WHICH criteria) is read from ``state['artifacts']`` inside
+    the nodes.
     """
     g: StateGraph[FactoryState] = StateGraph(FactoryState)
-    g.add_node(_REVIEWER_CRITIC, _node(make_reviewer_critic_node(rt)))
-    g.add_node(_QA_ENGINEER, _node(make_qa_engineer_node(rt, resolve=resolve)))
-    g.add_node(_SDET, _node(make_sdet_node(rt, resolve=resolve)))
+
+    reviewer: _Node = make_reviewer_critic_node(rt)
+    qa: _Node = make_qa_engineer_node(rt, resolve=resolve)
+    sdet: _Node = make_sdet_node(rt, resolve=resolve)
+
+    # The factory closures are typed as the ``_Node`` alias; LangGraph's
+    # ``add_node`` resolves its node argument against the ``_NodeWithConfig``
+    # Protocol, and mypy cannot bind that Protocol's contravariant ``NodeInputT``
+    # TypeVar through an opaque ``Callable`` alias (only through a named, concrete
+    # ``def``). Re-express each as a thin concrete wrapper to restore structural
+    # matching WITHOUT a private import or ``cast`` (mirrors the architecture /
+    # implementation subgraphs; full type-checking preserved — SG2/IM5).
+    def _reviewer(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        return reviewer(state, config)
+
+    def _qa(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        return qa(state, config)
+
+    def _sdet(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        return sdet(state, config)
+
+    g.add_node(_REVIEWER_CRITIC, _reviewer)
+    g.add_node(_QA_ENGINEER, _qa)
+    g.add_node(_SDET, _sdet)
     g.add_edge(START, _REVIEWER_CRITIC)
     g.add_edge(_REVIEWER_CRITIC, _QA_ENGINEER)
     g.add_edge(_QA_ENGINEER, _SDET)

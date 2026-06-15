@@ -347,10 +347,13 @@
       "id": "T-M1-10",
       "milestone": "M1",
       "title": "Implementation subgraph (graph/subgraphs/implementation.py)",
-      "job_to_be_done": "Compose senior_engineer (decompose/scaffold/review) with a per-task junior_engineer execution path into a subgraph that produces FeatureDiffs on branch-per-task and a (stubbed) integration/conflict-resolution step. Returns a mountable subgraph builder.",
+      "job_to_be_done": "Compose senior_engineer (decompose/scaffold/review) with a per-task junior_engineer execution path into a subgraph that produces FeatureDiffs on branch-per-task and a (stubbed) integration/conflict-resolution step. Returns a mountable subgraph builder. Also normalize senior/junior factories to make_x_node(rt)->NodeFn reading design/ownership/tasks from state (infra deps like source_dir/snapshot_store may stay as factory args or read from config).",
       "files_owned": [
         "foundry/graph/subgraphs/implementation.py",
-        "tests/test_subgraph_implementation.py"
+        "foundry/agents/implementation/senior_engineer.py",
+        "foundry/agents/implementation/junior_engineer.py",
+        "tests/test_subgraph_implementation.py",
+        "tests/test_agents_implementation.py"
       ],
       "dependencies": [
         "T-M1-06"
@@ -372,10 +375,13 @@
       "id": "T-M1-11",
       "milestone": "M1",
       "title": "Quality subgraph (graph/subgraphs/quality.py)",
-      "job_to_be_done": "Compose reviewer_critic + qa_engineer + sdet into a subgraph that reviews diffs, authors criterion-traceable tests with oracle bindings, runs them (via test doubles), and emits TestPlan/TestReport/E2EReport with flake quarantine. Returns a mountable subgraph builder.",
+      "job_to_be_done": "Compose reviewer_critic + qa_engineer + sdet into a subgraph that reviews diffs, authors criterion-traceable tests with oracle bindings, runs them (via test doubles), and emits TestPlan/TestReport/E2EReport with flake quarantine. Returns a mountable subgraph builder. Also normalize qa/sdet factories to make_x_node(rt)->NodeFn reading criteria from state.",
       "files_owned": [
         "foundry/graph/subgraphs/quality.py",
-        "tests/test_subgraph_quality.py"
+        "foundry/agents/quality/qa_engineer.py",
+        "foundry/agents/quality/sdet.py",
+        "tests/test_subgraph_quality.py",
+        "tests/test_agents_quality.py"
       ],
       "dependencies": [
         "T-M1-07"

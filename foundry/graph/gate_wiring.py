@@ -39,7 +39,7 @@ What this module is careful about (the invariants the next waves reuse):
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from foundry.agents._common import as_text
@@ -53,7 +53,7 @@ from foundry.schemas.product import AcceptanceCriterion
 from foundry.state.tree_sha import tree_sha
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
 
     from langchain_core.runnables import RunnableConfig
 
@@ -62,17 +62,27 @@ if TYPE_CHECKING:
     from foundry.state.factory_state import FactoryState
 
     # The SAME resolver seam senior_engineer uses (LEARNINGS QS3 / IM4):
-    # reconstitute an out-of-band body from its content-addressed handle. Typed
-    # bodies (AcceptanceCriterion / FeatureDiff) resolve to their FrozenModel; a
-    # FeatureDiff's diff_uri resolves to its path->content mapping — so the
-    # return is ``Any`` (mirrors senior_engineer.ArtifactResolver).
+    # reconstitute a TYPED out-of-band body from its content-addressed Artifact
+    # handle (AcceptanceCriterion / FeatureDiff) -> its FrozenModel. The return
+    # is ``Any`` (mirrors senior_engineer.ArtifactResolver) but here we only ever
+    # resolve typed bodies through it — the raw diff BODY rides a SEPARATE seam.
     ArtifactResolver = Callable[[Artifact], Any]
+
+    # The DISTINCT blob-resolve seam keyed on the ``cas://`` diff_uri (LEARNINGS
+    # D-R1-01/02). A FeatureDiff's diff body is stored out-of-band as a raw blob
+    # via ``sandbox.put_blob`` (a UNIFIED-DIFF string) and read back via
+    # ``sandbox.get_blob(uri) -> bytes``. We resolve it through THIS seam — keyed
+    # on the uri, not the typed Artifact handle — so a kind-aware CAS resolver
+    # cannot mis-dispatch the diff body as a typed artifact. The factory_graph
+    # wave backs it with ``sandbox.get_blob``.
+    BlobResolver = Callable[[str], "bytes | str"]
 
 __all__ = [
     "CRITERION_KIND",
     "FEATURE_DIFF_KIND",
     "FeatureDiffBodyError",
     "MaterializationError",
+    "PathContainmentError",
     "flake_quarantined",
     "materialize_workdir",
     "route_after_gates",
@@ -102,13 +112,25 @@ class MaterializationError(RuntimeError):
 
 
 class FeatureDiffBodyError(MaterializationError):
-    """A resolved FeatureDiff body is not a path->content mapping.
+    """A resolved FeatureDiff diff body could not be applied to a worktree slice.
 
     The materialization contract: ``resolve(feature_diff_artifact)`` returns the
-    typed :class:`FeatureDiff`, whose ``diff_uri`` body — resolved through the
-    SAME ``resolve`` — is a ``Mapping[str, str]`` of relative POSIX path to file
-    content (the integrated worktree slice the diff contributes). A diff handle
-    present but unresolvable to that shape is fail-closed.
+    typed :class:`FeatureDiff`; its ``diff_uri`` body — fetched through the
+    SEPARATE :data:`BlobResolver` seam (``sandbox.get_blob``) — is a UNIFIED-DIFF
+    string (what the StubAdapter / raw_react / claude_code adapters emit via
+    ``sandbox.put_blob``). It is parsed into a relative-POSIX-path -> file-content
+    mapping by the Phase-1 additions-only applier. A body present but of a hunk
+    shape we don't support yet (modifications / deletions) is fail-closed here
+    rather than silently dropped.
+    """
+
+
+class PathContainmentError(MaterializationError):
+    """A diff body names a path that escapes the integrated worktree.
+
+    The diff body is agent-influenced content; a path like ``../x`` or ``/etc/x``
+    would write OUTSIDE ``dest``. Rejected fail-closed BEFORE any write so the
+    materialized tree the gates run against can only ever contain files inside it.
     """
 
 
@@ -160,49 +182,174 @@ def _criteria_payload(
     ]
 
 
-# ---- code + test sources from FeatureDiff handles ---------------------------
+# ---- code + test sources from FeatureDiff diff bodies -----------------------
+
+# Unified-diff line markers we recognise for the Phase-1 additions-only applier.
+_DEV_NULL = "/dev/null"
 
 
-def _diff_files(
-    diff: FeatureDiff, artifact: Artifact, resolve: ArtifactResolver
-) -> Mapping[str, str]:
+def _parse_addition_diff(diff_uri: str, body: str) -> dict[str, str]:
+    """Parse a UNIFIED-DIFF body into a relative-path -> file-content mapping.
+
+    Phase-1 scope: diffs are pure FILE ADDITIONS (the StubAdapter / raw_react /
+    claude_code adapters emit ``--- /dev/null`` / ``+++ b/<path>`` hunks). A
+    minimal applier handling additions is sufficient here; FULL patch application
+    (context-line matching, modifications, deletions, renames) is a LATER PHASE.
+    We therefore FAIL-CLOSED (raise :class:`FeatureDiffBodyError`) on any hunk
+    shape we don't support yet, rather than silently dropping content and letting
+    a partial tree clear the gate (governance §1b).
+
+    Recognised shape (one or more file sections):
+
+        --- /dev/null
+        +++ b/<relative/posix/path>
+        @@ ... @@                 # hunk header (ranges, if present, are ignored)
+        +<added line>             # every body line of an addition is '+'-prefixed
+        ...
+
+    The StubAdapter emits a single ``+``-prefixed first line followed by the
+    remaining file body verbatim (``@@\n+<body>``); we treat the bytes after the
+    leading ``+`` of the first hunk line as the file content so the genuine
+    producer->consumer contract round-trips.
+    """
+    files: dict[str, str] = {}
+    lines = body.splitlines(keepends=True)
+    i = 0
+    n = len(lines)
+    while i < n:
+        raw = lines[i]
+        stripped = raw.rstrip("\n")
+        if not stripped.startswith("--- "):
+            # Skip blank/preamble lines between file sections; anything else
+            # non-empty that isn't a recognised file header is unsupported.
+            if stripped == "":
+                i += 1
+                continue
+            raise FeatureDiffBodyError(
+                f"FeatureDiff body for {diff_uri!r}: unexpected line {stripped!r}; "
+                f"the Phase-1 applier handles pure file-ADDITION hunks only"
+            )
+        old = stripped[len("--- ") :].strip()
+        if old != _DEV_NULL:
+            raise FeatureDiffBodyError(
+                f"FeatureDiff body for {diff_uri!r}: '--- {old}' is a "
+                f"modification/deletion; the Phase-1 applier handles ADDITIONS "
+                f"('--- /dev/null') only"
+            )
+        i += 1
+        if i >= n or not lines[i].startswith("+++ "):
+            raise FeatureDiffBodyError(
+                f"FeatureDiff body for {diff_uri!r}: '--- /dev/null' not followed "
+                f"by a '+++ b/<path>' header"
+            )
+        new = lines[i].rstrip("\n")[len("+++ ") :].strip()
+        rel = new[2:] if new.startswith("b/") else new
+        if not rel:
+            raise FeatureDiffBodyError(
+                f"FeatureDiff body for {diff_uri!r}: empty target path in '+++' header"
+            )
+        i += 1
+        if i >= n or not lines[i].lstrip().startswith("@@"):
+            raise FeatureDiffBodyError(
+                f"FeatureDiff body for {diff_uri!r}: missing '@@' hunk header for {rel!r}"
+            )
+        i += 1
+        # Collect the added body up to the next file header (next '--- ').
+        content_lines: list[str] = []
+        first = True
+        while i < n and not lines[i].rstrip("\n").startswith("--- "):
+            line = lines[i]
+            if line.startswith("+"):
+                content_lines.append(line[1:])
+            elif first:
+                # Defensive: a hunk body should open with a '+' line.
+                raise FeatureDiffBodyError(
+                    f"FeatureDiff body for {diff_uri!r}: hunk for {rel!r} does not "
+                    f"begin with an added ('+') line — unsupported hunk shape"
+                )
+            else:
+                # The StubAdapter prefixes only the FIRST body line with '+' and
+                # appends the rest of the file content verbatim — take it as-is.
+                content_lines.append(line)
+            first = False
+            i += 1
+        files[rel] = "".join(content_lines)
+    if not files:
+        raise FeatureDiffBodyError(
+            f"FeatureDiff body for {diff_uri!r} parsed to no files — empty/invalid diff"
+        )
+    return files
+
+
+def _diff_files(diff: FeatureDiff, resolve_blob: BlobResolver) -> dict[str, str]:
     """The path->content slice a FeatureDiff contributes to the worktree.
 
-    The diff BODY lives out-of-band behind ``diff.diff_uri`` (DS9); resolve it
-    through the SAME seam. It must be a ``Mapping[str, str]`` (relative POSIX
-    path -> file content) so the gates have real sources to compile/run.
-    Fail-closed on any other shape — a present-but-unmaterializable diff must
-    not let a partial tree clear the gate.
+    The diff BODY lives out-of-band behind ``diff.diff_uri`` (DS9) as a raw blob
+    written by the adapter via ``sandbox.put_blob`` — a UNIFIED-DIFF string read
+    back through the :data:`BlobResolver` seam (``sandbox.get_blob``) as ``bytes``
+    (a ``str`` is also tolerated). We parse it into the relative-POSIX-path ->
+    file-content mapping the gates compile/run. Fail-closed on a body that is
+    neither bytes nor str, or an unsupported hunk shape.
     """
-    body = resolve(artifact.model_copy(update={"uri": diff.diff_uri}))
-    if not isinstance(body, dict) or not all(
-        isinstance(k, str) and isinstance(v, str) for k, v in body.items()
-    ):
+    body = resolve_blob(diff.diff_uri)
+    if isinstance(body, bytes):
+        text = body.decode("utf-8")
+    elif isinstance(body, str):
+        text = body
+    else:
         raise FeatureDiffBodyError(
-            f"FeatureDiff body for {diff.diff_uri!r} is not a path->content mapping "
-            f"(got {type(body).__name__})"
+            f"FeatureDiff body for {diff.diff_uri!r} resolved to "
+            f"{type(body).__name__}, expected the unified-diff blob (bytes|str)"
         )
-    return body
+    return _parse_addition_diff(diff.diff_uri, text)
 
 
-def _write_sources(dest: Path, state: FactoryState, resolve: ArtifactResolver) -> None:
+def _contained_target(dest: Path, rel: str) -> Path:
+    """Join ``rel`` under ``dest``, fail-closed on any traversal/escape.
+
+    The diff body path is agent-influenced (D-R1-03): an absolute path, a path
+    containing a ``..`` component, or one that otherwise resolves outside
+    ``dest`` would let a write escape the integrated tree. Reject BEFORE writing.
+    """
+    pure = PurePosixPath(rel)
+    if pure.is_absolute() or rel.startswith("/") or ".." in pure.parts:
+        raise PathContainmentError(
+            f"diff body path {rel!r} escapes the integrated tree "
+            f"(absolute or '..' traversal) — rejected fail-closed"
+        )
+    dest_root = dest.resolve()
+    target = (dest_root / pure).resolve()
+    # Defense-in-depth: the resolved path must stay under dest_root.
+    if target != dest_root and dest_root not in target.parents:
+        raise PathContainmentError(
+            f"diff body path {rel!r} resolves outside the integrated tree — "
+            f"rejected fail-closed"
+        )
+    return target
+
+
+def _write_sources(
+    dest: Path, state: FactoryState, resolve: ArtifactResolver, resolve_blob: BlobResolver
+) -> None:
     """Materialize every FeatureDiff's files into ``dest`` (later-by-Seq wins).
 
     Diffs are applied in ``Seq`` order so a retried diff (higher epoch, L4)
     overwrites the predecessor it supersedes — the worktree reflects the
-    integrated latest, deterministically and fold-order-independently.
+    integrated latest, deterministically and fold-order-independently. Each diff
+    body is resolved through the :data:`BlobResolver` seam and parsed; every
+    target path is containment-checked (D-R1-03) before any write.
     """
     diff_artifacts = sorted(_of_kind(state, FEATURE_DIFF_KIND), key=lambda a: a.seq)
     for artifact in diff_artifacts:
         diff = _resolve_typed(artifact, resolve, FeatureDiff, FEATURE_DIFF_KIND)
-        for rel, content in _diff_files(diff, artifact, resolve).items():
-            target = dest / rel
+        for rel, content in _diff_files(diff, resolve_blob).items():
+            target = _contained_target(dest, rel)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
 
 
 def materialize_workdir(
-    state: FactoryState, dest: Path, *, resolve: ArtifactResolver
+    state: FactoryState, dest: Path, *, resolve: ArtifactResolver, resolve_blob: BlobResolver
 ) -> str:
     """Write the integrated tree into ``dest`` and return its ``tree_sha``.
 
@@ -210,15 +357,24 @@ def materialize_workdir(
     content-addressed artifacts on ``state``:
 
     * ``criteria.json`` — from the AcceptanceCriterion handles, in the exact
-      shape SpecGate parses (``id`` / ``text`` / ``oracle`` / ``security_abuse``).
-    * code + test sources — from the FeatureDiff handles, each diff body
-      (a path->content mapping behind its ``diff_uri``) materialized through the
-      injected ``resolve`` (the SAME seam senior_engineer / qa use).
+      shape SpecGate parses (``id`` / ``text`` / ``oracle`` / ``security_abuse``),
+      resolved via the typed ``resolve`` (the SAME seam senior_engineer / qa use).
+    * code + test sources — from the FeatureDiff handles: ``resolve`` gives the
+      typed :class:`FeatureDiff`, and its ``diff_uri`` body — a UNIFIED-DIFF blob
+      (DS9) — is fetched through the SEPARATE :data:`BlobResolver` seam
+      (``sandbox.get_blob``) and applied by the Phase-1 additions-only applier.
+      Every target path is containment-checked (D-R1-03) before any write.
 
-    Fail-closed (governance §1b): a handle present on state but unresolvable
-    raises :class:`MaterializationError` — the boundary never runs against a
-    partial tree. Returns the integrated ``tree_sha`` (DS4) to use as the
-    verdict's ``run_against`` (the digest the FAIL latch keys on).
+    Two DISTINCT seams (D-R1-01/02): ``resolve`` reconstitutes TYPED artifacts
+    from their handles; ``resolve_blob`` fetches the raw diff BODY keyed on its
+    ``cas://`` uri — so a kind-aware CAS resolver cannot mis-dispatch the diff
+    body as a typed artifact.
+
+    Fail-closed (governance §1b): a handle present on state but unresolvable, or
+    a diff body of an unsupported hunk shape / escaping path, raises a
+    :class:`MaterializationError` — the boundary never runs against a partial
+    tree. Returns the integrated ``tree_sha`` (DS4) to use as the verdict's
+    ``run_against`` (the digest the FAIL latch keys on).
     """
     dest.mkdir(parents=True, exist_ok=True)
     # Spec gate input: the criteria document, byte-stable across folds.
@@ -226,7 +382,7 @@ def materialize_workdir(
         as_text(_criteria_payload(state, resolve)), encoding="utf-8"
     )
     # Build / Test gate inputs: the integrated code + test sources.
-    _write_sources(dest, state, resolve)
+    _write_sources(dest, state, resolve, resolve_blob)
     # prefer_git=False: dest is a fresh materialized tree, not a git worktree.
     return tree_sha(dest, toolchain_digest=_TOOLCHAIN_DIGEST, prefer_git=False)
 
@@ -267,6 +423,7 @@ def run_spec_gate(
     rt: AgentRuntime,
     runner: TwoZoneGateRunner,
     resolve: ArtifactResolver,
+    resolve_blob: BlobResolver,
     workdir: Path,
 ) -> dict[str, Any]:
     """Run the Spec gate at a product / architecture exit boundary.
@@ -277,7 +434,7 @@ def run_spec_gate(
     the ONLY thing that reaches the channel, and only because the runner
     attested it (an unsigned write would be dropped, L5).
     """
-    run_against = materialize_workdir(state, workdir, resolve=resolve)
+    run_against = materialize_workdir(state, workdir, resolve=resolve, resolve_blob=resolve_blob)
     result = _run_gate(
         SpecGate(),
         rt=rt,
@@ -297,6 +454,7 @@ def run_build_test_gates(
     rt: AgentRuntime,
     runner: TwoZoneGateRunner,
     resolve: ArtifactResolver,
+    resolve_blob: BlobResolver,
     workdir: Path,
     min_passed: int = 1,
 ) -> dict[str, Any]:
@@ -309,7 +467,7 @@ def run_build_test_gates(
     (0-test) suite is FAIL, never PASS (governance §1c). Returns
     ``{"gates": [<attested build>, <attested test>]}``.
     """
-    run_against = materialize_workdir(state, workdir, resolve=resolve)
+    run_against = materialize_workdir(state, workdir, resolve=resolve, resolve_blob=resolve_blob)
     build = _run_gate(
         BuildGate(),
         rt=rt,

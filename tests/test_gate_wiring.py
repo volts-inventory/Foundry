@@ -16,13 +16,17 @@ from seeded artifacts, run Spec / Build / Test through the runner, and assert
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 import pytest
 from langchain_core.runnables import RunnableConfig
 
 from foundry.agents import AgentRuntime
-from foundry.agents._common import cas_uri, emit_artifact
+from foundry.agents._common import emit_artifact
+from foundry.execution.adapter_contract import TaskPacket
+from foundry.execution.adapters.stub import StubAdapter
+from foundry.execution.sandbox import Sandbox
 from foundry.gates import DevGateWriteVerifier, TwoZoneGateRunner, ZoneBSigner
 from foundry.graph.gate_wiring import (
     BUILD_TEST_BOUNDARY,
@@ -30,6 +34,7 @@ from foundry.graph.gate_wiring import (
     FEATURE_DIFF_KIND,
     SPEC_BOUNDARY,
     FeatureDiffBodyError,
+    PathContainmentError,
     flake_quarantined,
     materialize_workdir,
     route_after_gates,
@@ -110,9 +115,27 @@ def _criterion(cid: str, *, security: bool = False) -> AcceptanceCriterion:
     )
 
 
-def _feature_diff(files: dict[str, str], *, task_id: str = "T1") -> tuple[FeatureDiff, str]:
-    """A FeatureDiff whose diff_uri body is the path->content mapping ``files``."""
-    diff_uri = cas_uri({"task_id": task_id, "files": files})
+def _addition_diff(files: dict[str, str]) -> str:
+    """A real unified-diff ADDITION blob — the body the adapters emit via put_blob.
+
+    Mirrors the producer contract: ``--- /dev/null`` / ``+++ b/<path>`` / ``@@``
+    with every added line ``+``-prefixed. This is the SAME shape gate_wiring's
+    Phase-1 applier consumes off ``sandbox.get_blob`` — NOT a {uri: dict} that no
+    emitter produces.
+    """
+    parts: list[str] = []
+    for path in sorted(files):
+        body = files[path]
+        lines = body.splitlines(keepends=True)
+        parts.append(f"--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{len(lines)} @@\n")
+        parts.extend(f"+{ln}" for ln in lines)
+    return "".join(parts)
+
+
+def _feature_diff(files: dict[str, str], *, task_id: str = "T1") -> tuple[FeatureDiff, str, bytes]:
+    """A FeatureDiff + its diff_uri + the unified-diff blob body stored behind it."""
+    blob = _addition_diff(files).encode("utf-8")
+    diff_uri = f"cas://sha256/{hashlib.sha256(blob).hexdigest()}"
     diff = FeatureDiff(
         diff_uri=diff_uri,
         task_id=task_id,
@@ -120,28 +143,30 @@ def _feature_diff(files: dict[str, str], *, task_id: str = "T1") -> tuple[Featur
         base_tree_sha="base-sha",
         seq=_seq("junior_engineer", f"diff:{task_id}"),
     )
-    return diff, diff_uri
+    return diff, diff_uri, blob
 
 
 def _seed(
     criteria: tuple[AcceptanceCriterion, ...],
-    diffs: tuple[tuple[FeatureDiff, str, dict[str, str]], ...] = (),
-) -> tuple[FactoryState, Any]:
-    """Seed state with criterion + feature_diff HANDLES and an in-memory resolver.
+    diffs: tuple[tuple[FeatureDiff, str, bytes], ...] = (),
+) -> tuple[FactoryState, Any, Any]:
+    """Seed state with criterion + feature_diff HANDLES, a typed resolver, and a BlobResolver.
 
-    The resolver reconstitutes: each criterion handle -> its AcceptanceCriterion;
-    each feature_diff handle -> its FeatureDiff; each diff_uri -> its path->content
-    body (the materialization contract gate_wiring's _diff_files relies on).
+    Two DISTINCT seams (D-R1-01/02): ``resolve`` reconstitutes a TYPED artifact
+    from its handle (criterion -> AcceptanceCriterion; feature_diff handle ->
+    FeatureDiff); ``resolve_blob`` fetches the raw unified-diff BODY keyed on its
+    ``cas://`` uri — exactly what ``sandbox.get_blob`` does in production.
     """
     artifacts: list[Artifact] = []
-    by_uri: dict[str, Any] = {}
+    by_handle: dict[str, Any] = {}
+    blobs: dict[str, bytes] = {}
 
     for c in criteria:
         handle = emit_artifact(c, CRITERION_KIND, "product_manager", c.seq)
         artifacts.append(handle)
-        by_uri[handle.uri] = c
+        by_handle[handle.uri] = c
 
-    for diff, diff_uri, files in diffs:
+    for diff, diff_uri, blob in diffs:
         handle = Artifact(
             kind=FEATURE_DIFF_KIND,
             uri=f"cas://feature_diff/{diff.task_id}",
@@ -150,14 +175,17 @@ def _seed(
             seq=diff.seq,
         )
         artifacts.append(handle)
-        by_uri[handle.uri] = diff
-        by_uri[diff_uri] = files
+        by_handle[handle.uri] = diff
+        blobs[diff_uri] = blob
 
     def _resolve(handle: Artifact) -> Any:
-        return by_uri[handle.uri]
+        return by_handle[handle.uri]
+
+    def _resolve_blob(uri: str) -> bytes:
+        return blobs[uri]
 
     state: FactoryState = {"artifacts": artifacts}
-    return state, _resolve
+    return state, _resolve, _resolve_blob
 
 
 _PASSING_TEST = "def test_ok():\n    assert 1 + 1 == 2\n"
@@ -170,14 +198,26 @@ _GOOD_MODULE = "VALUE = 42\n"
 def test_signed_pass_path_advances(tmp_path, rt, runner, records, verifier):
     criteria = (_criterion("c1"), _criterion("c2", security=True))
     files = {"app.py": _GOOD_MODULE, "test_app.py": _PASSING_TEST}
-    diff, uri = _feature_diff(files)
-    state, resolve = _seed(criteria, ((diff, uri, files),))
+    diff, uri, blob = _feature_diff(files)
+    state, resolve, resolve_blob = _seed(criteria, ((diff, uri, blob),))
 
     spec_out = run_spec_gate(
-        state, _config(), rt=rt, runner=runner, resolve=resolve, workdir=tmp_path / "spec"
+        state,
+        _config(),
+        rt=rt,
+        runner=runner,
+        resolve=resolve,
+        resolve_blob=resolve_blob,
+        workdir=tmp_path / "spec",
     )
     bt_out = run_build_test_gates(
-        state, _config(2), rt=rt, runner=runner, resolve=resolve, workdir=tmp_path / "bt"
+        state,
+        _config(2),
+        rt=rt,
+        runner=runner,
+        resolve=resolve,
+        resolve_blob=resolve_blob,
+        workdir=tmp_path / "bt",
     )
 
     spec = spec_out["gates"][0]
@@ -228,12 +268,14 @@ def test_unsigned_gateresult_dropped(verifier):
 def test_zone_a_error_retries_without_latch(tmp_path, rt, runner, records, verifier):
     # Build gate with a missing tool -> GroundingUnavailable in zone A -> ERROR.
     criteria = (_criterion("c1"), _criterion("c2", security=True))
-    diff, uri = _feature_diff({"app.py": _GOOD_MODULE})
-    state, resolve = _seed(criteria, ((diff, uri, {"app.py": _GOOD_MODULE}),))
+    diff, uri, blob = _feature_diff({"app.py": _GOOD_MODULE})
+    state, resolve, resolve_blob = _seed(criteria, ((diff, uri, blob),))
 
     from foundry.gates.build import BuildGate
 
-    run_against = materialize_workdir(state, tmp_path / "wd", resolve=resolve)
+    run_against = materialize_workdir(
+        state, tmp_path / "wd", resolve=resolve, resolve_blob=resolve_blob
+    )
     gate = BuildGate(cmd=("this-binary-does-not-exist-xyz",))
     result = runner.run(gate, run_against, _seq("build_gate", "verdict:build"), tmp_path / "wd")
 
@@ -257,9 +299,15 @@ def test_zone_a_error_retries_without_latch(tmp_path, rt, runner, records, verif
 
 def test_integrated_fail_latches_and_does_not_autoclear(tmp_path, rt, runner, records, verifier):
     # Criteria omit a security_abuse criterion -> Spec FAIL on the integrated digest.
-    bad_state, bad_resolve = _seed((_criterion("c1"),))  # no security criterion
+    bad_state, bad_resolve, bad_blob = _seed((_criterion("c1"),))  # no security criterion
     spec_out = run_spec_gate(
-        bad_state, _config(), rt=rt, runner=runner, resolve=bad_resolve, workdir=tmp_path / "bad"
+        bad_state,
+        _config(),
+        rt=rt,
+        runner=runner,
+        resolve=bad_resolve,
+        resolve_blob=bad_blob,
+        workdir=tmp_path / "bad",
     )
     fail = spec_out["gates"][0]
     assert fail.status is GateStatus.FAIL
@@ -288,8 +336,8 @@ def test_integrated_fail_latches_and_does_not_autoclear(tmp_path, rt, runner, re
 def test_adequacy_floor_zero_tests_is_fail(tmp_path, rt, runner, records, verifier):
     # A compiling module but NO test sources -> pytest collects 0 -> adequacy FAIL.
     criteria = (_criterion("c1"), _criterion("c2", security=True))
-    diff, uri = _feature_diff({"app.py": _GOOD_MODULE})
-    state, resolve = _seed(criteria, ((diff, uri, {"app.py": _GOOD_MODULE}),))
+    diff, uri, blob = _feature_diff({"app.py": _GOOD_MODULE})
+    state, resolve, resolve_blob = _seed(criteria, ((diff, uri, blob),))
 
     bt_out = run_build_test_gates(
         state,
@@ -297,6 +345,7 @@ def test_adequacy_floor_zero_tests_is_fail(tmp_path, rt, runner, records, verifi
         rt=rt,
         runner=runner,
         resolve=resolve,
+        resolve_blob=resolve_blob,
         workdir=tmp_path / "bt",
         min_passed=1,
     )
@@ -377,15 +426,112 @@ def test_flake_quarantine_does_not_fail_boundary(tmp_path, runner, records, veri
 
 def test_unresolvable_diff_body_fails_closed(tmp_path, verifier):
     criteria = (_criterion("c1"), _criterion("c2", security=True))
-    diff, uri = _feature_diff({"app.py": _GOOD_MODULE})
-    state, resolve = _seed(criteria, ((diff, uri, {"app.py": _GOOD_MODULE}),))
+    diff, uri, blob = _feature_diff({"app.py": _GOOD_MODULE})
+    state, resolve, _ = _seed(criteria, ((diff, uri, blob),))
 
-    # A resolver that returns a non-mapping body for the diff_uri -> fail-closed.
-    def _broken(handle: Artifact) -> Any:
-        body = resolve(handle)
-        if handle.uri == uri:
-            return "not a mapping"
-        return body
+    # A BlobResolver that returns neither bytes nor str for the diff_uri.
+    def _broken_blob(diff_uri: str) -> Any:
+        return {"not": "a diff blob"}
 
     with pytest.raises(FeatureDiffBodyError):
-        materialize_workdir(state, tmp_path / "wd", resolve=_broken)
+        materialize_workdir(state, tmp_path / "wd", resolve=resolve, resolve_blob=_broken_blob)
+
+
+def test_unsupported_hunk_shape_fails_closed(tmp_path, verifier):
+    """A modification/deletion hunk (not a pure addition) is fail-closed."""
+    criteria = (_criterion("c1"), _criterion("c2", security=True))
+    diff, uri, _ = _feature_diff({"app.py": _GOOD_MODULE})
+    # Replace the blob with a MODIFICATION diff the Phase-1 applier rejects.
+    mod = b"--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-OLD = 1\n+NEW = 2\n"
+    state, resolve, _ = _seed(criteria, ((diff, uri, mod),))
+
+    with pytest.raises(FeatureDiffBodyError):
+        materialize_workdir(
+            state, tmp_path / "wd", resolve=resolve, resolve_blob=lambda u: mod
+        )
+
+
+def test_path_traversal_rejected_before_write(tmp_path, verifier):
+    """An agent-influenced diff path escaping the integrated tree is fail-closed."""
+    criteria = (_criterion("c1"), _criterion("c2", security=True))
+    diff, uri, _ = _feature_diff({"app.py": _GOOD_MODULE})
+    # A diff body naming a traversal path -> rejected BEFORE any write.
+    evil = b"--- /dev/null\n+++ b/../escape.py\n@@ -0,0 +1,1 @@\n+PWNED = 1\n"
+    state, resolve, _ = _seed(criteria, ((diff, uri, evil),))
+
+    with pytest.raises(PathContainmentError):
+        materialize_workdir(
+            state, tmp_path / "wd", resolve=resolve, resolve_blob=lambda u: evil
+        )
+    # Nothing escaped the integrated tree.
+    assert not (tmp_path / "escape.py").exists()
+
+
+# ---- the GENUINE producer -> consumer contract: real StubAdapter diff --------
+
+
+def test_stub_adapter_diff_round_trips_through_get_blob(tmp_path, rt, runner, records, verifier):
+    """Drive a REAL StubAdapter.run, then resolve its diff_uri via sandbox.get_blob.
+
+    This exercises the genuine producer->consumer contract end to end: the
+    StubAdapter emits the FeatureDiff body as a UNIFIED-DIFF blob via
+    ``sandbox.put_blob``; gate_wiring's materializer fetches it back through a
+    BlobResolver backed by ``sandbox.get_blob`` and applies it — NOT a
+    hand-fabricated {uri: dict} no emitter produces.
+    """
+    source = tmp_path / "src"
+    source.mkdir()
+    store = tmp_path / "store"  # durable so get_blob survives (sibling of source)
+
+    sandbox = Sandbox(source, snapshot_store=store)
+    try:
+        adapter = StubAdapter(run_id=RUN_ID, node_id="junior_engineer", output_path="app.py")
+        packet = TaskPacket(
+            task={"id": "T1", "title": "T1"},
+            worktree_path=str(sandbox.worktree),
+            turn_budget=1,
+            cost_budget_microusd=1,
+        )
+        result = adapter.run(packet, sandbox)
+
+        # The genuine diff_uri + a BlobResolver backed by the REAL get_blob.
+        diff = FeatureDiff(
+            diff_uri=result.diff_uri,
+            task_id="T1",
+            branch="task/T1",
+            base_tree_sha="base-sha",
+            seq=_seq("junior_engineer", "diff:T1"),
+        )
+        handle = Artifact(
+            kind=FEATURE_DIFF_KIND,
+            uri="cas://feature_diff/T1",
+            produced_by="junior_engineer",
+            task_id="T1",
+            seq=diff.seq,
+        )
+
+        c1, c2 = _criterion("c1"), _criterion("c2", security=True)
+        crit_handles = [
+            emit_artifact(c1, CRITERION_KIND, "product_manager", c1.seq),
+            emit_artifact(c2, CRITERION_KIND, "product_manager", c2.seq),
+        ]
+        by_handle: dict[str, Any] = {handle.uri: diff}
+        for h, c in zip(crit_handles, (c1, c2), strict=True):
+            by_handle[h.uri] = c
+
+        def _resolve_all(h: Artifact) -> Any:
+            return by_handle[h.uri]
+
+        state: FactoryState = {"artifacts": [*crit_handles, handle]}
+        materialize_workdir(
+            state,
+            tmp_path / "wd",
+            resolve=_resolve_all,
+            resolve_blob=sandbox.get_blob,  # the REAL CAS read
+        )
+    finally:
+        sandbox.destroy()
+
+    # The StubAdapter's deterministic file body was materialized into the tree.
+    materialized = (tmp_path / "wd" / "app.py").read_text(encoding="utf-8")
+    assert materialized.startswith("stub change for task T1")

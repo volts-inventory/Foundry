@@ -355,22 +355,37 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   is admitted to `gates` by the REAL `merge_gates` (valid binding + fresh nonce + no latch).
 
 ## Graph-side gate wiring at phase boundaries (T-M1-12)
-- GW1. **`materialize_workdir(state, dest, *, resolve) -> tree_sha` is the boundary's trust-seam
-  contract.** It builds the integrated tree the deterministic gates run against, ENTIRELY from the
-  content-addressed handles on `state["artifacts"]` via the SAME `ArtifactResolver` seam
-  senior_engineer/qa use (NOT a parallel one): writes `criteria.json` from the `acceptance_criterion`
-  handles in the EXACT shape SpecGate parses — `{id, text, oracle, security_abuse}` (NB:
-  `AcceptanceCriterion.oracle_hint` maps to the `oracle` key SpecGate reads), ordered by `id` so the
-  file (and thus the digest) is byte-stable; and materializes code+test sources from the
-  `feature_diff` handles. The diff BODY contract: `resolve(feature_diff_handle)` -> the typed
-  `FeatureDiff`, then `resolve(handle.model_copy(update={"uri": diff.diff_uri}))` -> a
-  `Mapping[str,str]` of relative-POSIX-path -> file content. Diffs applied in `Seq` order
-  (later/retry wins, L4). FAIL-CLOSED: a handle present but unresolvable to its shape raises
-  (`MaterializationError`/`FeatureDiffBodyError`) — never run the gates against a partial tree (that
-  risks a vacuous PASS, gov §1b). Returns `tree_sha(dest, prefer_git=False)` (dest is a fresh tree,
-  not a git worktree) as the integrated `run_against`. The `ArtifactResolver` return is `Any` (it
-  yields both FrozenModel bodies AND raw path->content dicts), mirroring senior_engineer — NOT the
-  quality layer's `-> FrozenModel` narrowing.
+- GW1. **`materialize_workdir(state, dest, *, resolve, resolve_blob) -> tree_sha` is the boundary's
+  trust-seam contract.** It builds the integrated tree the gates run against, ENTIRELY from the
+  content-addressed handles on `state["artifacts"]`: writes `criteria.json` from the
+  `acceptance_criterion` handles (typed `resolve`) in the EXACT shape SpecGate parses —
+  `{id, text, oracle, security_abuse}` (NB: `AcceptanceCriterion.oracle_hint` -> the `oracle` key),
+  ordered by `id` so the file (and digest) is byte-stable; and materializes code+test sources from
+  the `feature_diff` handles. FAIL-CLOSED: a handle present but unresolvable raises
+  (`MaterializationError`/`FeatureDiffBodyError`/`PathContainmentError`) — never run the gates against
+  a partial tree (vacuous PASS risk, gov §1b). Returns `tree_sha(dest, prefer_git=False)` (dest is a
+  fresh tree, not a git worktree) as the integrated `run_against`.
+- GW1a. **(D-R1-01) The FeatureDiff body is a UNIFIED-DIFF blob, NOT a path->content dict.** The real
+  adapters (StubAdapter / raw_react / claude_code) store the diff body via `sandbox.put_blob(text)` as
+  a unified-diff STRING (`--- /dev/null\n+++ b/<path>\n@@ ...\n+<line>`) and it reads back as bytes via
+  `sandbox.get_blob(uri) -> bytes`. The earlier `resolve(diff_uri) -> Mapping[str,str]` contract
+  matched NO emitter (tests fabricated a `{uri: dict}` no producer makes) — the real end-to-end path
+  would have raised `FeatureDiffBodyError`. Two DISTINCT seams now (D-R1-02): typed `ArtifactResolver
+  = Callable[[Artifact], Any]` reconstitutes the typed `FeatureDiff`/`AcceptanceCriterion` from its
+  handle; a SEPARATE `BlobResolver = Callable[[str], bytes|str]` keyed on the `cas://` diff_uri
+  fetches the raw diff body (prod: `sandbox.get_blob`) — so a kind-aware CAS resolver can't
+  mis-dispatch the body as a typed artifact, and we never `model_copy(update={"uri": diff_uri})` a
+  handle. A minimal Phase-1 applier (`_parse_addition_diff`) handles pure file ADDITIONS only
+  (`--- /dev/null` hunks; it also tolerates the StubAdapter's single-`+`-prefixed-first-line shape)
+  and FAILS CLOSED on modifications/deletions — full patch application is a later phase.
+- GW1b. **(D-R1-03) Path containment is enforced before any write.** Diff-body paths are
+  agent-influenced; `_contained_target` rejects absolute paths, any `..` component, or anything that
+  resolves outside `dest` (raises `PathContainmentError`) BEFORE writing, so a body path like `../x`
+  or `/etc/x` can't escape the integrated tree.
+- GW1c. **Test the GENUINE producer->consumer contract.** The round-trip test drives a REAL
+  `StubAdapter.run(packet, sandbox)`, takes the resulting `diff_uri`, and resolves it with a
+  `BlobResolver` backed by `sandbox.get_blob` — exercising emit->materialize end to end, NOT a
+  hand-fabricated path->content dict. Diffs applied in `Seq` order (later/retry wins, L4).
 - GW2. **Verdicts come ONLY from the runner; the wiring NEVER constructs a `GateResult`.**
   `run_spec_gate(state, config, *, rt, runner, resolve, workdir) -> {"gates":[...]}` (Spec at
   product/architecture exit) and `run_build_test_gates(..., min_passed=1) -> {"gates":[build, test]}`

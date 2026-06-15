@@ -72,3 +72,29 @@ ACCEPTANCE (Wave B): all 7 MINOR resolved 1:1 (commit 20a6189), gates re-verifie
 clean, 349 pass/1 skip), narrowed-detection logic spot-verified correct, latent NameError in
 principal_architect fixed. CLEAN ROUND by orchestrator cross-check + spot-verification.
 **Wave B ACCEPTED.** (4 agent layers done; coverage 85%.)
+
+## Wave C (Phase 1: four subgraphs + node normalization) — Round 1 (2 fresh critics)
+Tool gates green before critics: ruff ✓, mypy foundry ✓ (83 files), full suite green, cov 85%.
+Verdicts: composition FINDINGS(3); domain/integration FINDINGS(2). 1 MAJOR + 4 MINOR (1 overlap).
+**CONFIRMED HOLD:** channel-record safety (no .uri-less record on artifacts), verdict integrity
+(reviewer relays only proxy.judge-stamped GateResult; real merge_gates admission, no bypass),
+cross-layer composability (each layer reads exactly the artifact kinds the prior writes).
+
+- C-R1-01 (CC) **MAJOR** | graph/subgraphs/quality.py:76 | build_quality_subgraph `resolve=None`
+  default → in the chained factory_graph the product layer emits criteria as HANDLES only, so
+  read_criteria skips the handle branch → empty TestPlan, zero oracles, NO error: a vacuous Test
+  gate pass. | FIX: make `resolve` REQUIRED (mirror build_implementation_subgraph) AND fail-closed/
+  log if criteria handles are present on artifacts but resolve is None.
+- C-R1-02 (CC) MINOR | subgraphs/product.py + quality.py | SG1 inconsistency: product+quality use
+  cast() for add_node; architecture+implementation use the concrete-def wrapper (the recommended
+  one per IM5/SG2). | FIX: standardize all four on the concrete-def wrapper; drop cast + StateNode import.
+- C-R1-03 (DI) MINOR | agents/quality/reviewer_critic.py:71 | subject fallback = artifacts[-1]
+  (insertion-order via merge_by_uri, NOT seq-order) → not deterministically the feature_diff under
+  review (masked today because the runner pins config subject). | FIX: select feature_diff by kind,
+  newest-by-seq (mirror senior_engineer._first_of_kind).
+- C-R1-04 (CC+DI) MINOR | agents/quality/{qa_engineer,_common}.py | dead raw-AcceptanceCriterion
+  path (isinstance branch) only fires in direct-call unit tests; widens the surface masking C-R1-01.
+  | FIX: drop the production raw path (have unit tests use handles+resolve) OR clearly mark test-only.
+
+Resolution: 1 MAJOR present → dispatch one coherent fresh fixer, then a MANDATORY fresh re-review
+round (cross-check acceptance reserved for all-MINOR). (open → pending fix)

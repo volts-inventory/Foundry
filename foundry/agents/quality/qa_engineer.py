@@ -200,8 +200,11 @@ def make_qa_engineer_node(
         content-addressed Artifact handle (CAS in prod, an in-memory map in
         tests) — the same seam the Senior Engineer reads its design/ownership
         through. The DATA (WHICH criteria) is read from ``state['artifacts']``.
-        ``None`` reads only RAW ``AcceptanceCriterion`` instances off the channel
-        (direct-call unit tests where no fold runs).
+        Criteria ride the channel as ``acceptance_criterion`` handles only, so a
+        resolver is required to read them: if handles are present but ``resolve``
+        is ``None``, :func:`read_criteria` FAILS CLOSED
+        (``MissingCriteriaResolverError``) rather than silently planning against an
+        empty set. ``build_quality_subgraph`` requires ``resolve`` for this reason.
     run_against:
         Branch then integrated ``tree_sha`` the report keys on.
     tier:

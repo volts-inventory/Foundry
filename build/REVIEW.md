@@ -98,3 +98,8 @@ cross-layer composability (each layer reads exactly the artifact kinds the prior
 
 Resolution: 1 MAJOR present → dispatch one coherent fresh fixer, then a MANDATORY fresh re-review
 round (cross-check acceptance reserved for all-MINOR). (open → pending fix)
+
+ACCEPTANCE (Wave C): Round-2 fresh verification critic: C-R1-01..04 all RESOLVED, no regression,
+verdict integrity intact. One MINOR stale-docstring nit fixed directly by orchestrator (qa/sdet
+resolve docstrings now describe handles-only + fail-closed). Gates: ruff/mypy clean, 372 pass/1 skip.
+**Wave C ACCEPTED.** (4 subgraphs + node normalization done; coverage 85%.)

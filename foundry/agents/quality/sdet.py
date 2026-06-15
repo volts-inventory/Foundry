@@ -105,8 +105,10 @@ def make_sdet_node(
     ----------
     resolve:
         INFRA dependency reconstituting an ``AcceptanceCriterion`` body from its
-        Artifact handle (the same seam as the QA node). ``None`` reads only raw
-        instances off the channel.
+        Artifact handle (the same seam as the QA node). Criteria ride the channel
+        as handles only, so when handles are present this FAILS CLOSED if
+        ``resolve`` is ``None`` (see :func:`read_criteria`); ``build_quality_subgraph``
+        requires it.
     run_against:
         The integrated ``tree_sha`` the e2e report keys on.
     """

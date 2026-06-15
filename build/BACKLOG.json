@@ -316,7 +316,7 @@
         "Tests added running the subgraph with test doubles to a product-phase artifact set; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M1-09",
@@ -341,7 +341,7 @@
         "Tests added for both the conditional-entered and conditional-skipped paths; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M1-10",
@@ -369,7 +369,7 @@
         "Tests added with StubAdapter producing >=1 FeatureDiff; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M1-11",
@@ -397,7 +397,7 @@
         "Tests added running the subgraph with test doubles; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M1-12",

@@ -29,3 +29,14 @@
   resolved), latent NameError fixed, test quality improved, shared helpers hoisted.
 - Baseline now: ruff/mypy clean, 349 pass/1 skip, coverage 85%.
 - NEXT: Wave C — subgraphs (T-M1-08 product first [owns subgraphs/__init__], then 09/10/11 parallel).
+
+## 2026-06-15 — Session 1: Phase 1 Wave C ACCEPTED
+- Wave C: four per-layer LangGraph subgraphs (product/architecture/implementation/quality,
+  T-M1-08..11) as 4 parallel implementers; implementation+quality also normalized their node
+  factories to read DATA from state (handle+resolve seam) — only infra deps stay factory args.
+- CRITIC LOOP: round 1 found 1 MAJOR (build_quality_subgraph resolve=None -> vacuous Test-gate
+  pass) + 4 MINOR; fixer resolved all; round-2 fresh critic confirmed RESOLVED + no regression.
+  Channel-record safety, verdict integrity, cross-layer composability all CONFIRMED HOLD.
+- Baseline: ruff/mypy clean, 372 pass/1 skip, coverage 85%.
+- NEXT: Wave D = T-M1-12 gate-wiring (Spec/Build/Test via two-zone runner at phase boundaries),
+  then Wave E = supervisor -> factory_graph -> cli -> Phase-1 exit test (T-M1-13..16).

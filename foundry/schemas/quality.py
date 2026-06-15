@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from enum import StrEnum
 
+from pydantic import Field
+
 from foundry.schemas.base import FrozenModel
 from foundry.state.seq import Seq
 
@@ -81,6 +83,14 @@ class E2EReport(FrozenModel):
     scenarios_passed: int
     scenarios_failed: int
     pinned_seeds_note: str  # records the pinned seeds / frozen clock / mocked network
+    # scenario -> criterion_ids exercised: criterion traceability on the integrated
+    # tree, so the E2E gate checks criterion coverage end-to-end, not just green
+    # scenarios (mirrors TestPlan.test_criteria; agents.md Layer 4 — SDET SOP):
+    scenario_criteria: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     flake_retry_budget: int = 2  # N=2 (governance.md §1a)
     quarantined: tuple[str, ...] = ()
     seq: Seq
+
+    def covered_criteria(self) -> frozenset[str]:
+        """All criterion_ids exercised by at least one e2e scenario."""
+        return frozenset(c for ids in self.scenario_criteria.values() for c in ids)

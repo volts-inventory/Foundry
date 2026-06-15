@@ -12,14 +12,20 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any, Protocol, runtime_checkable
 
 import pytest
 
-from foundry.execution.adapter_contract import AdapterResult, TaskPacket
+from foundry.execution.adapter_contract import (
+    AdapterResult,
+    TaskPacket,
+    WorkerAdapter,
+)
 from foundry.execution.adapters.stub import StubAdapter
 from foundry.execution.sandbox import Sandbox
 from foundry.gates.attestation import DevGateWriteVerifier, ZoneBSigner
 from foundry.proxy import ModelProviderProxy
+from foundry.proxy.model_provider_proxy import ProviderResponse
 from foundry.proxy.test_doubles import (
     DEFAULT_USAGE,
     MockTransport,
@@ -52,6 +58,27 @@ def installed_verifier():
         token.var.reset(token)
 
 
+# ---- 0. Structural Protocol conformance (catch renamed send/run) -------------
+
+
+@runtime_checkable
+class _SendProtocol(Protocol):
+    """Local runtime_checkable mirror of ProviderTransport's structural shape.
+
+    ProviderTransport itself is a plain (non-runtime_checkable) Protocol in the
+    proxy module, so isinstance() against it raises TypeError. This mirror has the
+    same `send` member name, so a renamed MockTransport.send fails the check.
+    """
+
+    def send(self, request: dict[str, Any]) -> ProviderResponse: ...
+
+
+def test_doubles_conform_to_their_runtime_checkable_protocols():
+    # Structural checks: a renamed send/run would break these.
+    assert isinstance(MockTransport(), _SendProtocol)  # mirrors ProviderTransport.send
+    assert isinstance(StubAdapter(), WorkerAdapter)  # runtime_checkable in adapter_contract
+
+
 # ---- 1. MockTransport drives proxy.complete ----------------------------------
 
 
@@ -66,12 +93,16 @@ def test_complete_resolves_family_and_populates_usage():
     assert result.text == "hello from the stub"
     assert result.usage == DEFAULT_USAGE
     assert result.stop_reason == "end_turn"
-    # served_model is a real TIER_MODELS value the LineageMap resolved.
-    assert result.served_model == "claude-opus-4-8"
+    # served_model mirrors the requested tier's pinned model (R1-02: no spurious
+    # drift) — a real TIER_MODELS value the LineageMap resolved.
+    assert result.served_model == "claude-sonnet-4-6"
 
 
-def test_request_id_is_stable_and_process_reproducible():
-    # Two transports, two proxies, same request -> identical synthetic id (L7).
+def test_request_id_is_stable_in_process():
+    # In-process stability smoke test: two transports, two proxies, same request
+    # -> identical synthetic id. L7's CROSS-process guarantee comes from deriving
+    # the id via content_digest (not builtin hash(), which is seed-randomized per
+    # process); this test only checks the within-process stability that follows.
     args = ("node-1", "T2", "SOP", [{"role": "user", "content": "x"}])
     a = make_proxy(MockTransport()).complete(*args, purpose="ideation")
     b = make_proxy(MockTransport()).complete(*args, purpose="ideation")
@@ -105,6 +136,26 @@ def test_completion_queue_consumed_fifo():
         proxy.complete("n", "T2", "SOP", msgs, purpose="ideation").text for _ in range(3)
     ]
     assert outs == ["first", "second", "default"]
+
+
+def test_served_model_mirrors_requested_tier_no_spurious_drift():
+    # R1-02: T2/T3 calls report the requested tier's model -> no pinned-ID drift.
+    proxy = make_proxy(MockTransport(default_text="x"))
+    for tier, model in (("T1", "claude-opus-4-8"), ("T2", "claude-sonnet-4-6"),
+                        ("T3", "claude-haiku-4-5")):
+        result = proxy.complete(
+            "n", tier, "SOP", [{"role": "user", "content": "x"}], purpose="ideation"
+        )
+        assert result.served_model == model
+    assert proxy.drift_events == ()
+
+
+def test_served_model_override_forces_drift():
+    # R1-02: an explicit override still forces a drift scenario for tests.
+    proxy = make_proxy(MockTransport(default_text="x", served_model="claude-opus-4-8"))
+    proxy.complete("n", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="ideation")
+    assert len(proxy.drift_events) == 1
+    assert proxy.drift_events[0]["served_model"] == "claude-opus-4-8"
 
 
 # ---- 2. MockTransport drives the trusted judgment path -----------------------
@@ -227,23 +278,17 @@ def test_stub_run_is_deterministic_same_inputs_same_digest(tmp_path):
 
 
 def test_stub_run_distinct_tasks_diverge(tmp_path):
-    source = tmp_path / "src"
-    source.mkdir()
-    (source / "README.md").write_text("seed\n", encoding="utf-8")
-    sandbox = Sandbox(source)
-    try:
-        a = StubAdapter().run(_packet(sandbox.worktree, "T-A"), sandbox)
-        sandbox.restore(a.snapshot_digest)  # discard delta so worktrees compare clean
-    finally:
-        pass
-    # A different task body produces a different deterministic diff.
-    source2 = tmp_path / "src2"
-    source2.mkdir()
-    (source2 / "README.md").write_text("seed\n", encoding="utf-8")
-    sandbox2 = Sandbox(source2)
-    try:
-        b = StubAdapter().run(_packet(sandbox2.worktree, "T-B"), sandbox2)
-    finally:
-        sandbox.destroy()
-        sandbox2.destroy()
-    assert a.diff_uri != b.diff_uri
+    # Symmetric two-sandbox comparison: distinct task bodies -> distinct diffs.
+    def run_task(name: str, task_id: str) -> str:
+        source = tmp_path / name
+        source.mkdir()
+        (source / "README.md").write_text("seed\n", encoding="utf-8")
+        sandbox = Sandbox(source)
+        try:
+            return StubAdapter().run(_packet(sandbox.worktree, task_id), sandbox).diff_uri
+        finally:
+            sandbox.destroy()
+
+    a_diff = run_task("src_a", "T-A")
+    b_diff = run_task("src_b", "T-B")
+    assert a_diff != b_diff

@@ -196,6 +196,17 @@ def _run_one_task(
             cost_budget_microusd=cost_budget_microusd,
         )
         result: AdapterResult = rt.adapter.run(packet, sandbox)
+        # Mirror the adapter's diff BLOB out of the per-task sandbox (which is
+        # destroyed below — arch §2(d): no reuse) into the run-scoped CAS so a
+        # store-backed resolve_blob can read it end to end. Both stores key by
+        # the RAW sha256 of the bytes, so the mirrored uri == result.diff_uri (we
+        # assert it). Skipped when rt.cas is None (the synthetic-resolver path).
+        if rt.cas is not None:
+            blob = sandbox.get_blob(result.diff_uri)
+            mirrored = rt.cas.put_blob(blob)
+            assert mirrored == result.diff_uri, (
+                f"mirrored diff uri {mirrored!r} != adapter uri {result.diff_uri!r}"
+            )
     finally:
         sandbox.destroy()
 
@@ -214,6 +225,11 @@ def _run_one_task(
         task_id=task.id,
         seq=rt.seq(config, NODE_ID, f"artifact:{key}"),
     )
+    # Store the TYPED FeatureDiff body keyed by the handle's OWN uri (which
+    # carries the idempotency key, not content_identity), so gate_wiring's
+    # resolve(feature_diff_handle) == get_body(artifact.uri) reconstitutes it.
+    if rt.cas is not None:
+        rt.cas.put_body_at(artifact.uri, diff)
     writes: dict[str, Any] = {
         "artifacts": [artifact],
         "tasks": [_task_done_marker(task, diff)],

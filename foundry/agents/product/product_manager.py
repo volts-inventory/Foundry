@@ -132,9 +132,9 @@ def make_product_manager_node(rt: AgentRuntime) -> NodeFn:
         )
 
         artifacts = [
-            emit_artifact(prd, "prd", _NODE_ID, prd_seq),
+            emit_artifact(prd, "prd", _NODE_ID, prd_seq, store=rt.cas),
             *(
-                emit_artifact(c, "acceptance_criterion", _NODE_ID, c.seq)
+                emit_artifact(c, "acceptance_criterion", _NODE_ID, c.seq, store=rt.cas)
                 for c in criteria
             ),
         ]

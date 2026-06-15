@@ -110,7 +110,7 @@ def make_criteria_completeness_critic_node(rt: AgentRuntime) -> NodeFn:
             seq=critique_seq,
         )
 
-        handle = emit_artifact(critique, "criteria_findings", _NODE_ID, critique_seq)
+        handle = emit_artifact(critique, "criteria_findings", _NODE_ID, critique_seq, store=rt.cas)
         triage = _triage(critique, prd_uri, triage_seq)
         # Agents write GateTriage (advisory), never a GateResult — the Spec gate
         # runner computes + signs the verdict from these findings (LEARNINGS L5).

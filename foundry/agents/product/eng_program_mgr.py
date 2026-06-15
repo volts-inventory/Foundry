@@ -104,7 +104,7 @@ def make_eng_program_mgr_node(rt: AgentRuntime) -> NodeFn:
             seq=seq,
         )
 
-        handle = emit_artifact(plan, "sprint_plan", _NODE_ID, seq)
+        handle = emit_artifact(plan, "sprint_plan", _NODE_ID, seq, store=rt.cas)
         return {"artifacts": [handle]}
 
     return _node

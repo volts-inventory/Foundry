@@ -476,6 +476,41 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   empty `default_text` -> a parse failure on the re-loop). Raise LangGraph's `recursion_limit` on the
   run config for multi-loop fix runs.
 
+## ArtifactStore — the real content-addressed body store (T-M1-14b, DECISIONS D6)
+- AS1. **`foundry/durability/artifact_store.py::ArtifactStore` closes the emit/resolve gap.**
+  `emit_artifact` MINTED a `cas://sha256/<content_identity>` handle but DISCARDED the body, so
+  every `resolve`/`resolve_blob` consumer (senior, qa, gate_wiring) only worked against a SYNTHETIC
+  resolver — a real run resolved NOTHING (fail-closed). API: `put_body(model)->uri` (uri ==
+  `cas://sha256/<model.content_identity()>`, IDENTICAL to the handle uri; serialized via the
+  allowlist `foundry_serde()`, never pickle — I5); `get_body(uri)->FrozenModel` (FAIL-CLOSED:
+  `UnknownArtifactError` on unknown uri AND if the payload didn't round-trip to a `FrozenModel` — a
+  non-allowlisted type degrades to a `dict` under the serde, rejected); `put_blob(bytes|str)->uri` /
+  `get_blob(uri)->bytes`; and callable VIEWS `resolve(artifact)->Any` (= `get_body(artifact.uri)`) +
+  `resolve_blob(uri)->bytes` (= `get_blob`) matching the seams gate_wiring/factory_graph expect.
+  In-memory dict-backed (dev/smoke); a durable filesystem/Postgres CAS is a prod ops concern (§0.3).
+- AS2. **`put_blob` keys by the RAW `hashlib.sha256` of the bytes — EXACTLY `Sandbox.put_blob`, NOT
+  `content_digest`.** `content_digest` rejects `bytes` (canonical-JSON only). So a diff blob mirrored
+  sandbox->store keeps the SAME `cas://sha256/` uri the FeatureDiff's `diff_uri` names, and a
+  store-backed `resolve_blob(diff.diff_uri)` reads it end to end (resolved the loose "<content_digest>"
+  wording in the task in favor of the round-trip-with-sandbox constraint).
+- AS3. **`emit_artifact(model, kind, produced_by, seq, *, store=None)` is backward-compatible.**
+  `store=None` ⇒ mint-only (EXACTLY the historical behavior — the synthetic-resolver tests are
+  untouched; the change is purely additive). `store=rt.cas` ⇒ ALSO `store.put_body(model)`; the handle
+  uri MUST equal the stored uri (both are the content identity — asserted). `AgentRuntime.cas:
+  ArtifactStore | None = None` carries it; all product/architecture/quality emit sites pass
+  `store=rt.cas` (`rt` is in scope in every node closure).
+- AS4. **The junior's FeatureDiff handle uri carries the idempotency KEY (`cas://feature_diff/<key>`),
+  NOT `content_identity` — so use `store.put_body_at(handle.uri, diff)`, not `put_body`.** Otherwise
+  `resolve(feature_diff_handle)` = `get_body(handle.uri)` would miss the body. The junior also mirrors
+  the adapter's diff BLOB out of the per-task sandbox into `rt.cas` BEFORE `sandbox.destroy()` (arch
+  §2(d): no reuse kills the sandbox blob store) via `cas.put_blob(sandbox.get_blob(result.diff_uri))`
+  — same raw sha256, so `mirrored == result.diff_uri` (asserted). Both store writes are guarded on
+  `rt.cas is not None` so the synthetic-resolver path is unchanged.
+- AS5. **Every typed BODY a node emits must be in `serde.FOUNDRY_MSGPACK_MODULES`** (plus the enums it
+  carries: Criticality/TaskStatus/OracleKind) or `get_body` fail-closes (the allowlist IS the trust
+  posture). The cli (T-M1-15) / factory_graph wire `rt.cas.resolve` / `rt.cas.resolve_blob` as the REAL
+  `resolve`/`resolve_blob` in place of the test synthetic (SUP7).
+
 ## Factory graph — top-level compile + assistant-mode emit (T-M1-14)
 - FG1. **`build_factory_graph(rt, *, runner, resolve, resolve_blob, source_dir, checkpointer=None,
   index=None, max_fix_attempts=3) -> CompiledStateGraph[FactoryState]`** mounts

@@ -358,6 +358,42 @@ def test_junior_emits_feature_diff_with_cas_handle(tmp_path: Any) -> None:
     assert marker["branch"] == f"task/{task.id}"
 
 
+def test_junior_feature_diff_body_and_blob_resolve_via_store(tmp_path: Any) -> None:
+    """With an AgentRuntime.cas set, the junior stores the TYPED FeatureDiff body
+    keyed by its handle uri AND mirrors the diff BLOB into the store — so
+    gate_wiring's resolve(feature_diff_handle) + resolve_blob(diff_uri) both
+    round-trip end to end (the gap T-M1-14b closes). Driven through a REAL
+    StubAdapter (the genuine producer of the unified-diff blob)."""
+    from foundry.durability.artifact_store import ArtifactStore
+    from foundry.schemas.implementation import FeatureDiff as _FeatureDiff
+
+    (tmp_path / "README.md").write_text("seed\n")
+    cas = ArtifactStore()
+    proxy = ModelProviderProxy(MockTransport(default_text="{}"), signer=ZoneBSigner(KEY, KEY_ID))
+    rt = AgentRuntime(proxy=proxy, adapter=StubAdapter(), cas=cas)
+    task = a_task()
+    node = make_junior_engineer_node(rt, source_dir=str(tmp_path))
+
+    writes = node(
+        {"tasks": tasks_state(task), "pinned_constraints": two_constraints()},
+        config_for("run-cas"),
+    )
+
+    handle = writes["artifacts"][0]
+    assert handle.kind == "feature_diff"
+    # resolve(handle) reconstitutes the TYPED FeatureDiff body keyed on the
+    # handle uri (which carries the idempotency key, not content_identity).
+    diff = cas.resolve(handle)
+    assert isinstance(diff, _FeatureDiff)
+    assert diff.task_id == task.id
+    assert diff.branch == f"task/{task.id}"
+    # resolve_blob(diff.diff_uri) reads the raw unified-diff blob the adapter
+    # wrote via sandbox.put_blob — mirrored into the store at the SAME uri.
+    blob = cas.resolve_blob(diff.diff_uri)
+    assert isinstance(blob, bytes)
+    assert b"+++ b/" in blob  # the StubAdapter's unified-diff addition hunk
+
+
 def test_junior_builds_each_ready_task_on_its_own_branch(tmp_path: Any) -> None:
     (tmp_path / "README.md").write_text("seed\n")
     rt = make_runtime(adapter=StubAdapter())

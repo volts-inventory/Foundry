@@ -54,7 +54,7 @@ def make_stakeholder_proxy_node(rt: AgentRuntime) -> NodeFn:
         )
         parsed = dict(result.parsed or {})
         brief = IntentBrief.model_validate({**parsed, "seq": seq})
-        handle = emit_artifact(brief, "intent_brief", _NODE_ID, seq)
+        handle = emit_artifact(brief, "intent_brief", _NODE_ID, seq, store=rt.cas)
         return {"artifacts": [handle]}
 
     return _node

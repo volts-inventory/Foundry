@@ -52,6 +52,7 @@ from foundry.state.seq import EpochCounter, Seq
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
 
+    from foundry.durability.artifact_store import ArtifactStore
     from foundry.execution.adapter_contract import WorkerAdapter
     from foundry.proxy.model_provider_proxy import ModelProviderProxy
     from foundry.state.factory_state import FactoryState
@@ -90,6 +91,12 @@ class AgentRuntime:
     proxy: ModelProviderProxy
     epochs: EpochCounter = field(default_factory=EpochCounter)
     adapter: WorkerAdapter | None = None
+    # The content-addressed body store written on emit (DECISIONS D6). When set,
+    # emit_artifact(..., store=rt.cas) ALSO stores the typed body so a real run's
+    # resolve/resolve_blob can reconstitute it; None ⇒ mint-only (backward-
+    # compatible with the synthetic-resolver tests). The cli / factory_graph wire
+    # rt.cas.resolve / rt.cas.resolve_blob as the real materialization seams.
+    cas: ArtifactStore | None = None
 
     def seq(
         self,

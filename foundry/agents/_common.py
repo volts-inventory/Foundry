@@ -22,11 +22,14 @@ JSON serialization used to build deterministic prompts / body digests.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from foundry.canonical import content_digest
 from foundry.schemas.base import Artifact, FrozenModel
 from foundry.state.seq import Seq
+
+if TYPE_CHECKING:
+    from foundry.durability.artifact_store import ArtifactStore
 
 
 def content_schema(model: type[FrozenModel], *, drop: tuple[str, ...] = ("seq",)) -> dict[str, Any]:
@@ -52,20 +55,35 @@ def cas_uri(body: Any) -> str:
     return f"cas://sha256/{content_digest(body)}"
 
 
-def emit_artifact(model: FrozenModel, kind: str, produced_by: str, seq: Seq) -> Artifact:
+def emit_artifact(
+    model: FrozenModel,
+    kind: str,
+    produced_by: str,
+    seq: Seq,
+    *,
+    store: ArtifactStore | None = None,
+) -> Artifact:
     """Wrap a typed frozen body as a content-addressed :class:`Artifact` handle.
 
     The body itself (the ``model``) lives out-of-band behind the returned
     handle's ``uri``; only the handle rides the ``artifacts`` channel (DS9 / L4).
     ``uri`` is the body's content identity, so DISTINCT records get distinct
     handles and identical re-emissions coalesce under ``merge_by_uri``.
+
+    When ``store`` is provided (``rt.cas`` is set), the body is ALSO persisted
+    via ``store.put_body`` so a real run's ``resolve`` can reconstitute it
+    (DECISIONS D6) — the stored uri is IDENTICAL to the handle's, since both are
+    ``cas://sha256/<model.content_identity()>``. When ``store`` is ``None`` this
+    is mint-only — EXACTLY the historical behavior, so the synthetic-resolver
+    tests are untouched (the change is purely additive / backward-compatible).
     """
-    return Artifact(
-        kind=kind,
-        uri=f"cas://sha256/{model.content_identity()}",
-        produced_by=produced_by,
-        seq=seq,
-    )
+    uri = f"cas://sha256/{model.content_identity()}"
+    if store is not None:
+        stored = store.put_body(model)
+        # Invariant: the handle uri MUST equal the stored uri (both are the
+        # body's content identity) — else a resolve would miss the body.
+        assert stored == uri, f"store uri {stored!r} != handle uri {uri!r}"
+    return Artifact(kind=kind, uri=uri, produced_by=produced_by, seq=seq)
 
 
 def as_text(obj: Any) -> str:

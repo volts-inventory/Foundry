@@ -155,6 +155,6 @@ def make_sdet_node(
             quarantined=quarantined,
             seq=seq,
         )
-        return {"artifacts": [emit_artifact(report, "e2e_report", _NODE_ID, seq)]}
+        return {"artifacts": [emit_artifact(report, "e2e_report", _NODE_ID, seq, store=rt.cas)]}
 
     return _node

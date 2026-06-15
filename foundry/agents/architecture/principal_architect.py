@@ -216,10 +216,13 @@ def make_principal_architect_node(
         # whole record so distinct ADRs get distinct handles (mirrors the
         # product/quality emit_artifact helpers).
         artifacts = [
-            emit_artifact(design, "system_design", NODE_ID, seqs["design"]),
-            *(emit_artifact(a, "adr", NODE_ID, a.seq) for a in adrs),
-            *(emit_artifact(i, "interface_contract", NODE_ID, i.seq) for i in interfaces),
-            emit_artifact(ownership, "ownership_map", NODE_ID, seqs["ownership"]),
+            emit_artifact(design, "system_design", NODE_ID, seqs["design"], store=rt.cas),
+            *(emit_artifact(a, "adr", NODE_ID, a.seq, store=rt.cas) for a in adrs),
+            *(
+                emit_artifact(i, "interface_contract", NODE_ID, i.seq, store=rt.cas)
+                for i in interfaces
+            ),
+            emit_artifact(ownership, "ownership_map", NODE_ID, seqs["ownership"], store=rt.cas),
         ]
 
         # pinned_constraints flow to their own channel (merge_constraints reducer:

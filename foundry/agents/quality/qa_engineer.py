@@ -269,12 +269,12 @@ def make_qa_engineer_node(
         )
 
         artifacts = [
-            emit_artifact(plan, "test_plan", _NODE_ID, plan_seq),
+            emit_artifact(plan, "test_plan", _NODE_ID, plan_seq, store=rt.cas),
             *(
-                emit_artifact(o, "oracle_binding", _NODE_ID, o.seq)
+                emit_artifact(o, "oracle_binding", _NODE_ID, o.seq, store=rt.cas)
                 for o in oracles
             ),
-            emit_artifact(report, "test_report", _NODE_ID, report_seq),
+            emit_artifact(report, "test_report", _NODE_ID, report_seq, store=rt.cas),
         ]
         return {"artifacts": artifacts}
 

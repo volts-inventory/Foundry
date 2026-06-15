@@ -132,3 +132,25 @@ ACCEPTANCE (Wave D): Round-2 fresh verification critic: D-R1-01/02/03 all RESOLV
 applier round-trips byte-exact + fail-closed on unsupported hunks, path-containment enforced,
 BlobResolver composable for factory_graph. Gates: ruff/mypy clean, 382 pass/1 skip.
 **Wave D ACCEPTED.** (gate-wiring done.)
+
+## Wave E / T-M1-13 supervisor — Round 1 (1 fresh critic)
+Tool gates green: ruff ✓, mypy ✓ (85 files), full suite green (386/1). Verdict: FINDINGS(3), all MINOR.
+**CONFIRMED SOUND:** (a) convergence/no-infinite-loop (fix counter bumped once per non-advancing
+boundary re-eval onto single-writer budget, read post-fold by the edge; halt at max_fix_attempts;
+forced-fail test terminates without hitting recursion_limit); (b) attested-only advancement (advance
+requires runner-attested PASS on every relevant gate; missing/unsigned → fix, never advance).
+End-to-end test runs REAL runner + real Spec/Build/Test (real compileall/pytest) + real merge_gates.
+
+- E-R1-01 MINOR | supervisor.py:250-273 (_bump_on_non_advance) | the in-node bump reads a
+  hand-assembled `post` while the conditional edge reads the full post-fold gates channel; they agree
+  only by an unenforced invariant (epoch-newest + no intervening gates write). | FIX: have the edge
+  re-derive from the same merged-gates view (fold state+out gates) so node and edge can't diverge.
+- E-R1-02 MINOR | supervisor.py:264,326,334 | `runner._records` private-attr reach-through. | FIX:
+  add a public read-only `records` property on TwoZoneGateRunner; use it.
+- E-R1-03 MINOR | gate_wiring.py:528-540 (_is_flake_quarantine) | flake/quarantine classified by
+  substring sniff over free-text findings; agent-influenced output could mis-route a real infra ERROR
+  as flake (bounded fix, never advance — NOT a trust break). | DEFER to Phase 2 (when the held-out-
+  mutant/flake machinery lands): have the runner stamp a STRUCTURED flake flag instead of free text.
+
+Resolution: E-R1-01/02 fixed in this wave's fix cycle (batched after factory_graph); E-R1-03 deferred
+to Phase 2 with rationale (bounded-safe, not a trust break). (open → pending fix)

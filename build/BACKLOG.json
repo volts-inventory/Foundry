@@ -299,7 +299,6 @@
       "title": "Product subgraph (graph/subgraphs/product.py)",
       "job_to_be_done": "Compose the Layer-1 product nodes into a LangGraph subgraph (stakeholder_proxy -> product_manager -> criteria_critic -> eng_program_mgr) over FactoryState, returning a subgraph builder the supervisor can mount. No factory_graph/supervisor edits here.",
       "files_owned": [
-        "foundry/graph/subgraphs/__init__.py",
         "foundry/graph/subgraphs/product.py",
         "tests/test_subgraph_product.py"
       ],
@@ -317,7 +316,7 @@
         "Tests added running the subgraph with test doubles to a product-phase artifact set; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M1-09",
@@ -329,8 +328,7 @@
         "tests/test_subgraph_architecture.py"
       ],
       "dependencies": [
-        "T-M1-05",
-        "T-M1-08"
+        "T-M1-05"
       ],
       "role": "LangGraph engineer",
       "required_experts": [
@@ -343,7 +341,7 @@
         "Tests added for both the conditional-entered and conditional-skipped paths; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M1-10",
@@ -355,8 +353,7 @@
         "tests/test_subgraph_implementation.py"
       ],
       "dependencies": [
-        "T-M1-06",
-        "T-M1-08"
+        "T-M1-06"
       ],
       "role": "LangGraph engineer",
       "required_experts": [
@@ -369,7 +366,7 @@
         "Tests added with StubAdapter producing >=1 FeatureDiff; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M1-11",
@@ -381,8 +378,7 @@
         "tests/test_subgraph_quality.py"
       ],
       "dependencies": [
-        "T-M1-07",
-        "T-M1-08"
+        "T-M1-07"
       ],
       "role": "LangGraph engineer",
       "required_experts": [
@@ -395,7 +391,7 @@
         "Tests added running the subgraph with test doubles; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M1-12",

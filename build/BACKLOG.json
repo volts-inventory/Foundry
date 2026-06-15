@@ -760,7 +760,7 @@
         "Tests added; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M15-07",
@@ -788,7 +788,7 @@
         "Tests added exercising a positive and a null synthetic effect; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M15-08",

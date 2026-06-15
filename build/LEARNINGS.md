@@ -616,6 +616,36 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   k-halving check (zero between-var ⇒ doubling k ≈ halves n); determinism (`content_identity()`
   stable). HONESTY: the pilot is synthetic/simulated, so a rung asserts NOTHING about real perf.
 
+## Evaluation — frozen pre-registration manifest + alpha-ledger binding (T-M15-06)
+- EV14. **`foundry/evaluation/preregistration.py::freeze_preregistration(hypothesis, funded_rung,
+  scored_eval_set_identity, *, decision_id, ledger, state_sha="preregistration",
+  run_id="preregistration") -> PreRegistration` is the integrity keystone: it freezes the BINDING
+  manifest BEFORE any scored run AND draws the alpha budget in one fail-closed step.** `PreRegistration`
+  is a frozen `FrozenModel` capturing the `CentralHypothesis`, committed `mde`+`alpha` (mirrored off
+  the rung), the `FundedPowerRung` (n,k from T-M15-05), the SCORED `scored_eval_set_identity` (EV7), the
+  `decision_id`, a `decision_table_ref`, and a provenance note; `registration_identity()` ==
+  `content_identity()` is what a SCORED RUN MUST CITE. THREE HARD GUARDS: (1) FUNDED-ONLY — raises
+  `UnderpoweredPreRegistrationError` if `rung.underpowered or not rung.funded` (or no concrete (n,k));
+  you cannot pre-register an underpowered study as if powered (§2 BLOCKER). (2) NO-RE-DRAW — checks
+  `ledger.alpha_looks_spent(eval_set_identity, decision_id) > 0` BEFORE recording and raises
+  `AlphaAlreadyDrawnError`, so a failed/rejected freeze never appends a look; a fork/retrain
+  re-presenting the SAME pair is rejected (ledger keyed on the PAIR, NOT `state_sha` — `state_sha`/
+  `run_id` are audit-only per-look). A different `decision_id` OR `eval_set_identity` draws its own
+  budget (allowed). (3) TAMPER-EVIDENT — content-addressed, so editing `mde`/`alpha`/the rung yields a
+  different `content_identity`; `assert_unmodified(prereg, *, expected_identity=None)` re-derives the
+  identity, fails closed on a cited-identity mismatch AND on a top-level `mde`/`alpha` mirror that
+  diverges from the rung's. The A/B runner + decision table (later tasks) CITE this frozen manifest.
+- EV15. **Build the funded rung from the REAL power calc, not by hand.** Tests construct
+  `FundedPowerRung` via `compute_power_rung(PilotResult(...), mde, alpha, target_power, big_budget,
+  per_task_repeat_cost)` (funded) and the same with a 1-microUSD budget (underpowered — can't fund one
+  task-repeat/arm). `freeze_preregistration` reads `rung.alpha`/`rung.mde` for the manifest mirror (the
+  base `PowerRung` has no `alpha`; the `FundedPowerRung` subclass adds it — EV12). DETERMINISM is
+  ledger-independent: the manifest is a pure function of its inputs, so two freezes against SEPARATE
+  fresh `GlobalRecords()` (to avoid the no-re-draw rejection) yield an identical `registration_identity`.
+  A SCORED-provenance hypothesis does NOT coalesce with its DRY_RUN rehearsal (provenance ∈ identity,
+  EV4). Tests: 14, all green; full suite unbroken (526 passed, 1 skipped). HONESTY: synthetic dry-run —
+  asserts NOTHING about real perf.
+
 ## ArtifactStore — the real content-addressed body store (T-M1-14b, DECISIONS D6)
 - AS1. **`foundry/durability/artifact_store.py::ArtifactStore` closes the emit/resolve gap.**
   `emit_artifact` MINTED a `cas://sha256/<content_identity>` handle but DISCARDED the body, so

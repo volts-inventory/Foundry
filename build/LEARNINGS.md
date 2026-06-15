@@ -534,3 +534,34 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   `idempotency_key`) coalesces => exactly one `open_pr` persists across both invokes. The resume test
   re-`invoke`s the SAME `thread_id` against a durable `FoundryCheckpointer().saver` and asserts
   `len(open_pr actions) == 1` with an unchanged key (cli T-M1-15 reuses this compile+emit path).
+
+## CLI smoke entry — the dev-wiring assembly (T-M1-15; exit test T-M1-16 reuses it)
+- CLI1. **`foundry/cli.py::run(request, *, thread_id="cli-run", resolve=None, resolve_blob=None,
+  diff_body=_PASSING_DIFF, max_fix_attempts=3) -> RunResult`** assembles the FULL dev wiring with the
+  test doubles (NO live API key, NO `claude -p`, NO network) and runs `build_factory_graph(...).invoke(
+  {"request": request}, config)`. `RunResult` (frozen dataclass) reports `passed`, `phase`,
+  `artifact_uri` (the reviewed FeatureDiff handle = PR subject), `open_pr_idempotency_key`,
+  `open_pr_payload_uri`, and `gate_statuses` (newest-by-name attested status per gate) — handles/ids
+  only, no bodies (L4). `main(argv=None)` joins argv into the request (so `python -m foundry.cli "build
+  a ..."` works), prints `RunResult.summary()`, returns exit 0 on clean PASS / 1 halted / 2 usage.
+- CLI2. **The wiring (mirror of test_factory_graph/test_supervisor; D1-D6/AS5/GW2/SUP7):** an in-memory
+  `ArtifactStore` on `rt.cas`; `AgentRuntime(proxy=ModelProviderProxy(MockTransport.scripted(SCRIPTS,
+  default_verdict="approve"), signer=ZoneBSigner(KEY,KEY_ID)), adapter=StubAdapter(), cas=store)`; a
+  real `TwoZoneGateRunner(ZoneBSigner, GlobalRecords, scanner_rev, lineage_rev)`; a
+  `DevGateWriteVerifier` installed via `set_gate_write_verifier(...)` with its token RESET in `finally`
+  (never leak the contextvar); a dev `FoundryCheckpointer().saver`; a `tempfile.TemporaryDirectory`
+  `source_dir`. The verdict_nonce/subject_artifact_uri/state_sha are RUN INPUTS on
+  `config["configurable"]` (Q1); `recursion_limit` raised (multi-loop fix runs, SUP7).
+- CLI3. **The StubAdapter authors a deterministic NO-OP blob, NOT a passing test suite — so a pure
+  `rt.cas`-resolved end-to-end run would yield NO Build/Test PASS.** To drive the SPEC core path to a
+  clean Spec/Build/Test PASS the CLI defaults `resolve`/`resolve_blob` to the proven SUP7 synthetic
+  KIND-dispatching doubles (faithful body per `handle.kind`; `acceptance_criterion` with
+  `security_abuse=True` for Spec coverage; FeatureDiff -> a fixed `_DIFF_BODY_URI`; passing unified-diff
+  blob). Both doubles FALL THROUGH to the real `store.resolve`/`store.resolve_blob` for any other kind,
+  so a future adapter that authors a real passing suite needs no CLI change. `rt.cas` IS the real store
+  (AS5) and is written on emit regardless.
+- CLI4. **mypy: `CompiledStateGraph.invoke(...)` returns `dict[str, Any]`, NOT the `FactoryState`
+  TypedDict — a plain dict is not assignable to a TypedDict, so `cast("FactoryState", final)` (string
+  form; the import is TYPE_CHECKING-only). Annotating the assignment target `final: FactoryState =
+  app.invoke(...)` fails [assignment]; cast at the `_result(...)` call site instead.** Same `import
+  foundry` / `import foundry.cli` smoke-clean as every module.

@@ -545,7 +545,7 @@
         "import foundry / import foundry.cli smoke clean; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M1-16",
@@ -570,7 +570,7 @@
         "PROGRESS.md / STATUS.md updated to mark M1 exit (orchestrator may do this); test added"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M1_5-PLAN",

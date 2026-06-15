@@ -529,6 +529,32 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   over `(eval_set_identity, name, task_ids)`, so a slice identity is bound to its parent frame (a
   like-named slice of a different frame differs even on coincidental membership overlap). The pilot,
   A/B, and preregistration tasks all build on this frame/slice API.
+- EV8. **`foundry/evaluation/harness.py` is the deterministic oracle-scored per-arm runner + ITT
+  ratio the pilot & A/B runner build on (T-M15-03).** API: `run_arm(arm, slice, fixtures, *,
+  k_repeats=1, seed=0, budget_usd_microusd=5_000_000, foundry_runner=default_foundry_runner)
+  -> ArmResult` (frozen). It runs every `slice.task_id` (SORTED -> order-independent) `k_repeats`
+  times, emits ONE `TaskOutcome` per attempt (`status` ∈ RESOLVED/UNRESOLVED/CRASHED/OVER_BUDGET,
+  `resolved`, `cost_microusd`), and oracle-scores by EXACT EQUALITY vs `fixture.oracle.expected_output`
+  (`_score`, no LLM judge — §4; a `None` produced output can never match). `ArmResult.resolved_count`
+  / `.total_cost_microusd` are derived; `make_run(result) -> Run` wraps it with a content-addressed
+  `run_id` (L7). FOUNDRY arm = REAL pipeline: `default_foundry_runner` wraps `foundry.cli.run(spec,
+  thread_id=...)` KEYLESS via the doubles (D1-D3; cli import is FUNCTION-LOCAL so harness stays
+  import-cheap), resolved iff `passed AND open_pr_idempotency_key is not None`; USD cost is SIMULATED
+  (RunResult carries no metered cost). BASELINE / +gates arms are SIMULATED stand-ins (`simulated=True`,
+  flagged) — a deterministic Bernoulli draw folded from `(base_resolution_seed, arm, repeat, seed)` via
+  `content_digest` (L7, never `hash()`) vs the arm-adjusted `control_base_rate`. All default
+  `provenance=DRY_RUN`.
+- EV9. **ITT DENOMINATOR RULE (load-bearing — §2): `itt_pass_rate = resolved / attempted` where
+  `attempted == len(slice) * k_repeats` (ALL initiated tasks).** Crashes, over-budget, and
+  escalation-without-resolution score `resolved=False` and are RETAINED in `outcomes` (NEVER dropped) —
+  differential attrition otherwise inflates whichever arm aborts more. TWO guards keep the denominator
+  from silently shrinking: `run_arm` asserts `len(outcomes) == attempted`, and `itt_pass_rate` asserts
+  `attempted == len(outcomes)` (a hand-built `ArmResult` with a dropped sample raises). A FOUNDRY-arm
+  exception is caught -> CRASHED/unresolved (not a drop); an attempt whose nominal cost exceeds
+  `budget_usd_microusd` is OVER_BUDGET/unresolved, charged the CAP (equal-USD honesty), not the overrun.
+  The crash test injects an always-raising `foundry_runner` and asserts every outcome is CRASHED,
+  `resolved_count==0`, and the denominator is unchanged. (Don't condition the rate on completed runs —
+  that is the collider bias §2/§6 forbid.)
 
 ## ArtifactStore — the real content-addressed body store (T-M1-14b, DECISIONS D6)
 - AS1. **`foundry/durability/artifact_store.py::ArtifactStore` closes the emit/resolve gap.**

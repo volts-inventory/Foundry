@@ -67,3 +67,8 @@ read fail-closed from config/ledger; junior_engineer injects pinned constraints 
 
 Resolution: dispatched ONE coherent fresh fixer (findings interlock: DT1 ripples into the test
 rewrites). New round verifies. (open → pending fix)
+
+ACCEPTANCE (Wave B): all 7 MINOR resolved 1:1 (commit 20a6189), gates re-verified (ruff/mypy
+clean, 349 pass/1 skip), narrowed-detection logic spot-verified correct, latent NameError in
+principal_architect fixed. CLEAN ROUND by orchestrator cross-check + spot-verification.
+**Wave B ACCEPTED.** (4 agent layers done; coverage 85%.)

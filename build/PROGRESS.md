@@ -17,3 +17,15 @@
 - Baseline now: ruff/mypy clean, 286 pass/1 skip, cov 83%.
 - Inserted T-M1-04a (agent-runtime scaffolding) before the agent layers; running now.
 - NEXT: accept scaffolding, then Wave B (T-M1-04..07 agent layers, 4 parallel).
+
+## 2026-06-15 — Session 1: Phase 1 Wave B ACCEPTED
+- Wave B: agent-runtime scaffolding (T-M1-04a) + four agent layers (product/architecture/
+  implementation/quality, T-M1-04..07) built as 4 parallel fresh implementers on the shared
+  AgentRuntime convention. Several layer files pre-existed from prior sessions; agents validated
+  + added full test coverage (11+14+15+15 tests).
+- CRITIC LOOP round 1: 2 fresh critics, 0 BLOCKER/MAJOR, 7 MINOR. Trust integrity (reviewer_critic
+  judge->gates admission, nonce fail-closed, negative latch) + pinned-constraint verbatim fidelity
+  CONFIRMED HOLD. All 7 fixed (commit 20a6189): MockTransport verdict-detection narrowed (AC3
+  resolved), latent NameError fixed, test quality improved, shared helpers hoisted.
+- Baseline now: ruff/mypy clean, 349 pass/1 skip, coverage 85%.
+- NEXT: Wave C — subgraphs (T-M1-08 product first [owns subgraphs/__init__], then 09/10/11 parallel).

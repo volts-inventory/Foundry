@@ -179,3 +179,31 @@ public runner.records); factory_graph E-R1-04 (emit terminal-phase-writer doc) +
 cross-run_against comment) applied directly; E-R1-05 (stable-FAIL no-PR) folded into T-M1-16 exit test;
 E-R1-03 (flake structured flag) deferred to Phase 2. Gates: ruff/mypy clean, 389 pass/1 skip. Convergence
 + attested-only advancement + emit trust-guard + resume-idempotency all SOUND. **supervisor + factory_graph ACCEPTED.**
+
+## M1.5 integrity trio (pilot/power/preregistration, T-M15-04/05/06) — Round 1 (1 fresh E5 critic)
+Tool gates green: ruff/mypy clean, 526 pass/1 skip. Verdict: FINDINGS(4) — 1 MAJOR + 3 MINOR.
+Per-question: pilot SOUND; power SOUND; **pre-registration FLAW (keystone)**; honesty SOUND; tests SOUND
+(rejection paths real). The alpha-ledger no-re-draw, disjoint pilot, task-as-unit, no-post-hoc-rung,
+tamper-evidence, dry-run-non-coalescence are all confirmed genuine.
+
+- M15-R1-01 **MAJOR** | preregistration.py:198-238 | freeze_preregistration mirrors mde/alpha from
+  funded_rung but NEVER reconciles them against the EMBEDDED CentralHypothesis (which carries its own
+  alpha/mde/PowerRung). A caller can freeze a manifest powered for rung A while the bound hypothesis
+  commits a different/smaller MDE or a non-funded rung — content-addressed (deterministic) but internally
+  incoherent, and assert_unmodified does NOT catch it (uncovered by tests). | FIX: in freeze assert
+  hypothesis.mde==funded_rung.mde and hypothesis.alpha==funded_rung.alpha (and hypothesis.funded_power_rung
+  ==funded_rung); add the same coherence check to assert_unmodified; add a mismatch test.
+- M15-R1-02 MINOR | power.py is_funded | on a degenerate-underpowered rung funded_budget_microusd=0 so
+  is_funded(rung, any>=0)→True despite funded=False/underpowered=True (freeze GUARD-1 catches it first, but
+  the public helper contradicts its own record). | FIX: is_funded short-circuits False when underpowered/
+  not funded.
+- M15-R1-03 MINOR | preregistration.py:220-229 | check-then-record TOCTOU on the alpha look (separate
+  lock acquisitions). In-process/GIL-bounded + DB PK has look_index so no lost write, but "at most one look"
+  isn't atomic. | FIX: atomic insert-if-absent in record_alpha_look (or document the single-threaded-harness
+  limitation if the core-ledger change is out of scope).
+- M15-R1-04 MINOR | pilot.py:276-279 | no-treatment-arm fallback sets effect_size_variance=
+  control_resolution_variance (silent base-rate-for-effect-size substitution; harmless given DEFAULT arms
+  include FOUNDRY). | FIX: comment/guard as a latent foot-gun.
+
+Resolution: 1 MAJOR (keystone) → fresh fixer after T-M15-07 commits (avoid racing its preregistration import),
+then MANDATORY fresh re-review. (open → pending fix)

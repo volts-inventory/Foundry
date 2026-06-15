@@ -17,14 +17,14 @@
     {
       "id": "M1",
       "phase": "Phase 1 \u2014 Core vertical slice (Assistant mode)",
-      "status": "in_progress",
+      "status": "done",
       "exit_criteria": "From a one-line request, produce a small working app passing its own + hidden tests, opened as a PR a human merges with minimal edits. Distinct Spec/Build/Test gates wired at phase boundaries; criterion-traceable tests; flake quarantine; content-addressed artifacts; PR-equivalent emit via the outbox (no real GitHub in tests). Phase-1 smoke: foundry/cli.py runs the compiled graph end-to-end with a mock/test model provider + stub worker substrate without live API keys.",
       "build_order_items": "9 (agents/) -> 10 (graph/subgraphs + supervisor + factory_graph) -> cli.py"
     },
     {
       "id": "M1_5",
       "phase": "Phase 1.5 \u2014 Decision gate: powered A/B + role ablation",
-      "status": "pending",
+      "status": "in_progress",
       "exit_criteria": "Variance/base-rate pilot (blocker, runs first); frozen pre-registration + decision table; powered A/B harness (3 arms, oracle-scored primary, ITT) + role ablation \u2014 built and exercised against local/synthetic task fixtures (not a funded live study). Decision: structure beats baseline by pre-registered margin at <= cost -> Proceed; null at MDE -> Hard KILL/redesign; {USD-null, token-positive} -> bounded overhead-redesign."
     },
     {
@@ -592,7 +592,7 @@
         "M1.5 decomposed into concrete tasks with disjoint files_owned and dependency ordering, derived from implementation-plan \u00a77 Phase 1.5 + evaluation.md"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M2-PLAN",

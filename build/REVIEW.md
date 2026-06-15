@@ -103,3 +103,27 @@ ACCEPTANCE (Wave C): Round-2 fresh verification critic: C-R1-01..04 all RESOLVED
 verdict integrity intact. One MINOR stale-docstring nit fixed directly by orchestrator (qa/sdet
 resolve docstrings now describe handles-only + fail-closed). Gates: ruff/mypy clean, 372 pass/1 skip.
 **Wave C ACCEPTED.** (4 subgraphs + node normalization done; coverage 85%.)
+
+## Wave D (Phase 1: gate-wiring T-M1-12) — Round 1 (1 fresh trust critic)
+Tool gates green before critic: ruff ✓, mypy ✓ (84 files), full suite green.
+Verdict: FINDINGS(3): 1 MAJOR + 2 MINOR. CONFIRMED CLEAN: (a) attested-only verdicts (gate_wiring
+never constructs a GateResult; unsigned-drop test runs the REAL DevGateWriteVerifier + merge_gates);
+(b) fail-closed materialization (missing/unresolvable handles RAISE; vacuous suite FAILs).
+
+- D-R1-01 **MAJOR** | graph/gate_wiring.py:166-185 (_diff_files) ↔ execution/adapters/*.py |
+  diff-body contract MISMATCH: gate_wiring expects resolve(diff_uri)->Mapping[str,str], but
+  StubAdapter/raw_react/claude_code all store the FeatureDiff body as a UNIFIED-DIFF STRING via
+  sandbox.put_blob (read back as bytes). No resolver bridges the shapes → the end-to-end
+  factory_graph/CLI smoke path raises FeatureDiffBodyError or materializes an empty tree. The
+  green gate_wiring tests fabricate a {uri: files_dict} resolver no emitter produces (vacuous).
+  | FIX: make _diff_files parse the adapter's actual unified-diff/bytes body into path->content
+  (Phase-1 diffs are /dev/null additions — minimal applier; fail-closed on unsupported hunks),
+  and seed the test from a REAL StubAdapter.run().diff_uri + sandbox.get_blob resolver.
+- D-R1-02 MINOR | gate_wiring.py:177 | resolves the diff body by mutating the typed FeatureDiff
+  handle's .uri — assumes a uri-only resolver; a kind-aware CAS resolver would mis-dispatch. | FIX:
+  use a dedicated blob-resolve seam keyed on the uri, not model_copy of the typed handle.
+- D-R1-03 MINOR | gate_wiring.py:188-201 (_write_sources) | no path containment — a diff body key
+  like `../x` or `/etc/x` writes outside dest (agent-influenced content → traversal). | FIX: reject
+  non-relative / `..` POSIX paths fail-closed before write.
+
+Resolution: 1 MAJOR → fresh fixer, then MANDATORY fresh re-review. (open → pending fix)

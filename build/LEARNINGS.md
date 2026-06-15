@@ -504,6 +504,32 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   dry-run rehearsal). Monetary fields stay integer micro-USD (base.py convention), never float;
   `mde`/`alpha`/`target_power` are floats (they are rates/effect sizes, not money).
 
+## Evaluation — synthetic task frame + disjoint pilot/scored slices (T-M15-02)
+- EV5. **`foundry/evaluation/task_fixtures.py` is the deterministic SYNTHETIC task frame the whole
+  M1.5 harness runs on with NO live model/benchmark.** API: `generate_synthetic_frame(*, n_tasks=24,
+  seed=0, pilot_fraction=0.4) -> TaskFrame` builds N frozen `TaskFixture`s (each: `task_id`, synthetic
+  `spec`, an `OracleDescriptor` oracle — deterministic equality target, NOT an LLM judge per §4 —
+  `difficulty`∈{EASY,MEDIUM,HARD}, per-stratum `control_base_rate`, and a `base_resolution_seed` the
+  NEXT task's per-arm runner folds with Arm+repeat to draw a deterministic resolved/unresolved
+  outcome). Difficulty is ROUND-ROBIN over the 3 strata so a spread is GUARANTEED (the pilot needs
+  between-task variance + base rate to estimate). HONESTY: every model defaults `synthetic=True`; the
+  frame asserts NOTHING about real Foundry-vs-baseline perf — it only fixes a stable contract to hash.
+- EV6. **Pilot/scored slices are DISJOINT + DETERMINISTIC by a seeded prefix-cut of a single
+  permutation (evaluation.md §2 — both drawn from ONE frame so base rate + variance transfer).**
+  `frame.pilot_slice` / `frame.scored_slice` (cached `@property`) sort task_ids FIRST (partition
+  independent of fixture insertion order), `random.Random(seed).shuffle`, then cut at
+  `round(n*pilot_fraction)` clamped to `[1, n-1]` (both sides non-empty for n>=2; `n_tasks<2` raises).
+  Prefix vs suffix of ONE permutation ⇒ disjoint AND exhaustive (`pilot | scored == all_ids`) by
+  construction. Same `(n_tasks, seed, pilot_fraction)` ⇒ identical split.
+- EV7. **`eval_set_identity` is `content_digest` (L7, never `hash()`) over the SORTED-BY-ID fixtures +
+  seed + pilot_fraction — it binds the alpha look-ledger `(eval_set_identity, decision_id)`
+  (`global_records.py`) and the preregistration.** It is stable across reconstruction of an equal
+  frame and FLIPS iff the tasks OR the partition (seed/pilot_fraction) change — so forking/retraining
+  cannot silently re-draw the alpha budget. Each `TaskSlice.identity` is a further `content_digest`
+  over `(eval_set_identity, name, task_ids)`, so a slice identity is bound to its parent frame (a
+  like-named slice of a different frame differs even on coincidental membership overlap). The pilot,
+  A/B, and preregistration tasks all build on this frame/slice API.
+
 ## ArtifactStore — the real content-addressed body store (T-M1-14b, DECISIONS D6)
 - AS1. **`foundry/durability/artifact_store.py::ArtifactStore` closes the emit/resolve gap.**
   `emit_artifact` MINTED a `cas://sha256/<content_identity>` handle but DISCARDED the body, so

@@ -19,9 +19,11 @@ on the ``artifacts`` channel (DS9 / L4). All model egress is through
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from foundry.agents.quality._common import emit_artifact
+from foundry.agents.quality._common import criteria_from_state, emit_artifact
+from foundry.schemas.base import Artifact, FrozenModel
 from foundry.schemas.product import AcceptanceCriterion, Criticality
 from foundry.schemas.quality import OracleBinding, OracleKind, TestPlan, TestReport
 
@@ -32,6 +34,51 @@ if TYPE_CHECKING:
     from foundry.state.factory_state import FactoryState
 
 _NODE_ID = "qa_engineer"
+
+# The product layer emits each AcceptanceCriterion as a content-addressed
+# Artifact HANDLE of this kind (it has a ``.uri`` so it survives ``merge_by_uri``
+# on the shared ``artifacts`` channel — raw typed bodies, which carry no ``.uri``,
+# cannot ride that channel through a fan-in fold).
+ACCEPTANCE_CRITERION_KIND = "acceptance_criterion"
+
+# INFRA dependency: reconstitutes a typed body from its Artifact handle (CAS in
+# prod, an in-memory map in tests) — exactly the Senior Engineer's seam.
+ArtifactResolver = Callable[[Artifact], FrozenModel]
+
+
+def read_criteria(
+    state: FactoryState, resolve: ArtifactResolver | None
+) -> tuple[AcceptanceCriterion, ...]:
+    """The acceptance criteria the QA / SDET nodes plan against — read from STATE.
+
+    The CRITERIA SET (not the model) is the source of truth for coverage (Q4) and
+    is a DATA input, so it is read from ``state`` inside the closure, NOT a
+    build-time kwarg (AR1-AR4). Two seedings are accepted, deduped by ``id`` and
+    ordered by ``id`` (fold-order-independent, byte-identical across a resume):
+
+    * RAW ``AcceptanceCriterion`` instances on ``state['artifacts']`` (what
+      :func:`criteria_from_state` recovers by type — convenient for direct-call
+      unit tests where no channel fold runs); and
+    * ``acceptance_criterion`` Artifact HANDLES (what the product layer actually
+      emits, and what survives ``merge_by_uri`` in a compiled graph), each
+      reconstituted via the injected ``resolve`` — the same seam the Senior
+      Engineer reads SystemDesign / OwnershipMap through.
+
+    ``resolve`` is INFRA (a dependency), so it may be a factory arg; the DATA
+    (WHICH criteria) still comes from state. Absent criteria -> ``()`` (the node
+    then authors an empty plan, surfacing the wiring gap at the Test gate).
+    """
+    by_id: dict[str, AcceptanceCriterion] = {}
+    for c in criteria_from_state(state):
+        by_id[c.id] = c
+    if resolve is not None:
+        for handle in state.get("artifacts") or ():
+            if getattr(handle, "kind", None) != ACCEPTANCE_CRITERION_KIND:
+                continue
+            body = resolve(handle)
+            if isinstance(body, AcceptanceCriterion):
+                by_id[body.id] = body
+    return tuple(sorted(by_id.values(), key=lambda c: c.id))
 
 _SOP = (
     "You are the QA Engineer (Layer 4). Author the oracle — the most "
@@ -113,18 +160,27 @@ def _test_criteria(
 def make_qa_engineer_node(
     rt: AgentRuntime,
     *,
-    criteria: tuple[AcceptanceCriterion, ...],
+    resolve: ArtifactResolver | None = None,
     run_against: str = "task/qa",
     tier: str = "T1",
 ) -> NodeFn:
     """Build the QA Engineer node (agents.md Layer 4).
 
+    The acceptance criteria are a **DATA input** read from ``state`` INSIDE the
+    closure (AR1-AR4: only infra deps/config are factory args) via
+    :func:`read_criteria` — NOT frozen in as a build-time kwarg. High-risk
+    criteria drive a NEGATIVE oracle each; the set is the source of truth for
+    coverage.
+
     Parameters
     ----------
-    criteria:
-        The acceptance criteria (resolved from their CAS handles by the
-        orchestrator). High-risk criteria drive a NEGATIVE oracle each; the set
-        is the source of truth for criterion coverage.
+    resolve:
+        INFRA dependency: reconstitutes an ``AcceptanceCriterion`` body from its
+        content-addressed Artifact handle (CAS in prod, an in-memory map in
+        tests) — the same seam the Senior Engineer reads its design/ownership
+        through. The DATA (WHICH criteria) is read from ``state['artifacts']``.
+        ``None`` reads only RAW ``AcceptanceCriterion`` instances off the channel
+        (direct-call unit tests where no fold runs).
     run_against:
         Branch then integrated ``tree_sha`` the report keys on.
     tier:
@@ -133,6 +189,7 @@ def make_qa_engineer_node(
     """
 
     def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        criteria = read_criteria(state, resolve)
         plan_seq = rt.seq(config, _NODE_ID, "artifact:test_plan")
         report_seq = rt.seq(config, _NODE_ID, "artifact:test_report")
 

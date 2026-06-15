@@ -153,6 +153,35 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   (dicts aren't models), so FIRST-keyed wins. Senior emits a Task dict and Junior emits a done-marker
   dict for the same id — in one graph run the Senior's wins. That's fine here (nodes tested in
   isolation); a real integration loop must supersede via a fresh id/version, not rely on later-wins.
+  Corollary (T-M1-10): in the WIRED subgraph the Senior's plain Task dict therefore survives on
+  `tasks`, so the produced `diff_uri`/`base_tree_sha` do NOT appear on the `tasks` channel — the
+  FeatureDiff lives on `artifacts` (assert the diff off `artifacts`, not off the done-marker).
+
+## Implementation layer normalization + subgraph (T-M1-10)
+- IM4. **Node DATA inputs come from `state`; only infra deps/config are factory args (AR1-AR4).** Both
+  implementation factories now follow it: `make_senior_engineer_node(rt, *, resolve, tier="T1")` reads
+  the SystemDesign+OwnershipMap off `state["artifacts"]` (found by `Artifact.kind` =
+  `DESIGN_KIND`/`OWNERSHIP_KIND`, newest-by-`seq`) and reconstitutes the bodies via the injected
+  `resolve` (INFRA: CAS in prod, an in-memory `{uri: body}` map in tests — the architecture layer
+  emits HANDLES, not bodies, DS9). `make_junior_engineer_node(rt, *, source_dir, snapshot_store=None,
+  turn_budget=…, cost_budget_microusd=…)` dropped its old `task=`/`base_snapshot=` build-time kwargs;
+  it reads the ready Task set off `state["tasks"]` (`ready_tasks`: reconstitute each dict — strip the
+  done-marker's extra `diff_uri`/`base_tree_sha` keys first since `FrozenModel` is `extra="forbid"` —
+  ordered by `seq`) and pinned constraints off `state["pinned_constraints"]`, processing the WHOLE
+  ready set in one node (branch-per-task preserved by the per-task `task/<id>` branch + per-task
+  fresh `Sandbox` + per-task FeatureDiff). The retry base is the recorded `base_tree_sha` read off the
+  re-presented done-marker (not a build-time arg) — supersession via state, not config.
+- IM5. **`StateGraph.add_node` won't bind its `_NodeWithConfig` Protocol through a `Callable` alias.**
+  A factory closure typed as `NodeFn`/`_Node = Callable[[FactoryState, RunnableConfig], dict]` trips
+  `add_node` overload resolution (mypy can't unify the contravariant `NodeInputT` TypeVar through an
+  opaque alias). Fix WITHOUT a private import or `cast`: wrap each node in a thin named concrete `def
+  _senior(state: FactoryState, config: RunnableConfig) -> dict[str, Any]: return senior(state, config)`
+  and add THAT (same trick the architecture subgraph uses; product.py instead `cast`s to `StateNode`).
+- IM6. **A nested `snapshot_store` inside `source_dir` corrupts the base snapshot (test gotcha).** If
+  the durable store path lives UNDER the cloned source tree, the second sandbox's `copytree(source)`
+  pulls the first run's `store/` into the worktree, so `normalized_source_tree` (covers on-disk state,
+  `prefer_git=False`) yields a DIFFERENT base digest run-to-run and the idempotency key drifts. Keep
+  `snapshot_store` in a SIBLING dir of `source_dir` (e.g. `tmp/src` + `tmp/store`).
 
 ## Product layer (T-M1-04)
 - PR1. The four Layer-1 factories live in `foundry/agents/product/`:
@@ -219,3 +248,87 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
 - O3. pytest collects production classes named `Test_*` only (pyproject) — domain types like
   `TestPlan`/`TestReport` are NOT test cases. Name real test classes `Test_*` or use functions.
 - O4. No CI of any kind (no `.github/workflows`). All verification is local via the gate chain.
+
+## Subgraph composition (T-M1-08, the per-layer `build_<layer>_subgraph` waves)
+- SG1. **`StateGraph.add_node` rejects the `NodeFn` alias under mypy — cast to the public
+  `StateNode`.** A `make_<agent>_node` factory returns `NodeFn` = a bare
+  `Callable[[FactoryState, RunnableConfig], dict]` whose params are POSITIONAL-ONLY, so mypy
+  can't unify it with `add_node`'s `_NodeWithConfig[NodeInputT]` overload and reports
+  `No overload variant ... matches` (an INLINE `def node(state, config)` matches structurally
+  and passes — that's why `skeleton.py` is clean but a factory-fed graph is not). Fix without a
+  bare `# type: ignore`: `cast("StateNode[FactoryState, Any]", fn)` (the public type `add_node`'s
+  own signature declares; `from langgraph.graph.state import StateNode` under TYPE_CHECKING).
+  Passing `input_schema=FactoryState` does NOT fix it. NB: `subgraphs/architecture.py` (Wave-B)
+  used a local `_Node` alias annotation and still trips this — the cast-to-`StateNode` is the one
+  that actually clears mypy.
+- SG2. **Builder returns the UNCOMPILED `StateGraph`; channel writes accumulate via FactoryState's
+  reducers, not the builder.** Wire `START -> ... -> END` linearly and `return g` (no `.compile`,
+  no checkpointer — the caller/supervisor owns that). Across the linear chain each node's deltas
+  fold through the per-channel reducers (`artifacts`->`merge_by_uri`, `gate_triage`->`union_triage`,
+  `required_capabilities`->`union`), so a standalone `build_product_subgraph(rt).compile().invoke(
+  {"request": ...}, {"configurable": {"thread_id": ...}, "metadata": {"langgraph_step": n}})` yields
+  the full PRD + AcceptanceCriterion[] + CriteriaCritique set on `artifacts` and the `spec`
+  GateTriage — with NO `gates` write (L5; verdicts come from the runner). `thread_id` is mandatory
+  in config (Seq/run_id, AR2).
+
+## Subgraph composition (T-M1-08/09)
+- SG1. **Conditional fan-out routes on a LIST, keyed by the agents' OWN `should_enter_*` predicates.**
+  `build_architecture_subgraph` wires `principal_architect` as the entry, then
+  `g.add_conditional_edges(ARCHITECT, _route, {DOMAIN: DOMAIN, UX: UX, END: END})`. The router
+  returns a LIST of branch targets (`[DOMAIN, UX]` for a regulated UI project) so LangGraph fans
+  out to BOTH conditional nodes in one superstep; the per-channel reducers (`merge_by_uri` /
+  `merge_constraints`) merge the fan-in. Empty caps -> router returns `[END]` and the conditional
+  nodes are NEVER scheduled (their internal no-op guard is then moot — defense in depth, not the
+  primary skip). Branch on the SAME `should_enter_domain_specialist` / `should_enter_ux_design`
+  predicates the nodes guard on (AC2) so edge and node never disagree. The path map MUST list every
+  legal return value (node ids + `END`) or compile rejects the route.
+- SG2. **mypy + `StateGraph.add_node`: a `Callable` ALIAS-typed node fails overload resolution; a
+  concrete `def` passes.** `add_node` matches its node arg against the `_NodeWithConfig`
+  `Protocol[NodeInputT_contra]`; mypy can solve that contravariant TypeVar against a NAMED `def`'s
+  signature (why `skeleton.py`, which defines nodes inline, is clean) but NOT through an opaque
+  `Callable[[FactoryState, RunnableConfig], dict[str, Any]]` alias (which `NodeFn` and the factory
+  returns are) — you get 4x `No overload variant of "add_node" ... matches [call-overload]`. Fix
+  WITHOUT a private import or `cast`: wrap each factory closure in a thin concrete local `def
+  _x(state, config) -> dict[str, Any]: return node(state, config)` and add THAT. Full type-checking
+  preserved. (Annotating the var as `StateGraph[FactoryState]` vs inferring it is NOT the trigger —
+  both pass for a concrete def; the alias is.)
+- SG3. **Docstring ASCII-art topology with `\--` trips `SyntaxWarning: invalid escape sequence`** at
+  import time (pytest surfaces it). Make the module docstring a raw string (`r"""..."""`).
+- SG4. Subgraph builders return the **UNCOMPILED** `StateGraph` (the supervisor owns compile +
+  the shared checkpointer; mirrors `skeleton.py`'s split). Tests compile standalone
+  (`build_*_subgraph(rt).compile()`), thread `thread_id` in `config["configurable"]`, and script
+  the architect's structured design payload on the FREE-TEXT `completions=` FIFO (schema-constrained
+  ideation is NOT the verdict channel — AC3/DT1), sized to the number of `complete` calls.
+
+## Quality subgraph + qa/sdet state-reading normalization (T-M1-11)
+- QS1. **qa/sdet are now `make_qa_engineer_node(rt, *, resolve=None, run_against, tier)` /
+  `make_sdet_node(rt, *, resolve=None, run_against, tier)` — criteria are a DATA input read from
+  `state` (AR1-AR4), never a build-time kwarg.** Reviewer/Critic stays `make_reviewer_critic_node(rt)`.
+- QS2. **A RAW typed body CANNOT ride the `artifacts` channel through a fan-in fold — `merge_by_uri`
+  does `m[x.uri] = x` and `AcceptanceCriterion` (a `FrozenModel`) has NO `.uri`.** So seeding raw
+  criteria into `artifacts` and then having ANY node write `artifacts` crashes with
+  `AttributeError: 'AcceptanceCriterion' object has no attribute 'uri'` IN A COMPILED GRAPH (it only
+  "works" in direct-call unit tests where no reducer runs). The sanctioned `quality._common.
+  criteria_from_state` (reads raw instances by `isinstance`) is therefore graph-UNSAFE on its own.
+- QS3. **Fix = the Senior Engineer's seam: read content-addressed HANDLES + an injected `resolve`.**
+  The product layer emits each criterion as an `Artifact(kind="acceptance_criterion", uri=...)`
+  HANDLE (has `.uri`, survives `merge_by_uri`). qa/sdet read criteria via a new
+  `qa_engineer.read_criteria(state, resolve)` that UNIONS (deduped+ordered by `id`): raw
+  `AcceptanceCriterion` from `criteria_from_state` (for direct-call unit tests) PLUS
+  `acceptance_criterion` handles reconstituted through `resolve` (INFRA — CAS in prod, in-memory map
+  in tests; `ArtifactResolver = Callable[[Artifact], FrozenModel]`, exported from `qa_engineer`).
+  `resolve` is INFRA so it is a legit factory arg; the DATA (WHICH criteria) still comes from state.
+  `build_quality_subgraph(rt, *, resolve=None)` threads it into both author nodes — mirrors
+  `build_implementation_subgraph`'s `resolve=`.
+- QS4. **Quality subgraph SOP order (agents.md Layer 4): `START -> reviewer_critic -> qa_engineer ->
+  sdet -> END`** (linear). Reviewer is the entry (it judges the diff); qa authors TestPlan +
+  per-high-risk NEGATIVE OracleBinding + quarantining TestReport; sdet authors E2EReport.
+- QS5. **Nonce/verdict path threading.** The reviewer is the ONLY quality node touching `gates`, and
+  only via `rt.proxy.judge` (proxy stamps the binding; agent holds no key, L5/Q2). The single-use
+  `verdict_nonce` is a RUN INPUT (Q1): seed it on `config["configurable"]["verdict_nonce"]`
+  (alongside `subject_artifact_uri` / `state_sha` / `thread_id`) — agents NEVER mint it; absent it
+  the node fails closed (`MissingVerdictNonceError`). The subgraph test installs a `DevGateWriteVerifier`
+  via `set_gate_write_verifier(...)` (reset the token in `finally`), seeds a `FeatureDiff` handle as
+  the subject + criterion handles + `resolve`, scripts `verdicts=["approve"]` for the reviewer and
+  `completions=[QA, SDET]` for the authors, and asserts the reviewer's proxy-stamped `GateResult`
+  is admitted to `gates` by the REAL `merge_gates` (valid binding + fresh nonce + no latch).

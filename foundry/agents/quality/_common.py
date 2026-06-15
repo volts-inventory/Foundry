@@ -37,18 +37,42 @@ from typing import TYPE_CHECKING, Any
 # ``foundry.agents._common``); re-exported here so the quality factories' import
 # path stays stable and there is no byte-duplicate to drift.
 from foundry.agents._common import emit_artifact
+from foundry.schemas.product import AcceptanceCriterion
 
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
 
+    from foundry.state.factory_state import FactoryState
+
 
 __all__ = [
     "MissingVerdictNonceError",
+    "criteria_from_state",
     "emit_artifact",
     "server_issued_nonce",
     "state_sha",
     "subject_artifact_uri",
 ]
+
+
+def criteria_from_state(state: FactoryState) -> tuple[AcceptanceCriterion, ...]:
+    """The acceptance criteria the QA / SDET nodes plan against — read from state.
+
+    The CRITERIA SET (not the model) is the source of truth for coverage (Q4), and
+    it is a **DATA input** — so per the node convention (AR1-AR4) it is read from
+    ``state`` inside the closure, NOT frozen in as a build-time factory kwarg. The
+    product layer authors :class:`AcceptanceCriterion` records and the orchestrator
+    resolves their CAS bodies and seeds the typed records onto the ``artifacts``
+    channel between the product and quality phases; this helper recovers them by
+    TYPE (``isinstance``), ordered by ``criterion_id`` so the planned coverage is
+    fold-order-independent (byte-identical across a resume re-fold). The small
+    ``Artifact`` HANDLES that also ride the channel (kind ``acceptance_criterion``)
+    are ignored — they carry no body to plan against. Absent criteria -> ``()``;
+    the QA node then has nothing to fail-close coverage to (an empty plan), which
+    surfaces the wiring gap at the Test gate rather than silently mis-planning.
+    """
+    found = [a for a in (state.get("artifacts") or []) if isinstance(a, AcceptanceCriterion)]
+    return tuple(sorted(found, key=lambda c: c.id))
 
 
 class MissingVerdictNonceError(RuntimeError):

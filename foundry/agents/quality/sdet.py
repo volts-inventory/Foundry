@@ -21,7 +21,7 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from foundry.agents.quality._common import emit_artifact
-from foundry.schemas.product import AcceptanceCriterion
+from foundry.agents.quality.qa_engineer import ArtifactResolver, read_criteria
 from foundry.schemas.quality import E2EReport
 
 if TYPE_CHECKING:
@@ -91,23 +91,29 @@ def _scenario_criteria(proposed: Any, known: frozenset[str]) -> dict[str, tuple[
 def make_sdet_node(
     rt: AgentRuntime,
     *,
-    criteria: tuple[AcceptanceCriterion, ...] = (),
+    resolve: ArtifactResolver | None = None,
     run_against: str = "integrated",
     tier: str = _TIER,
 ) -> NodeFn:
     """Build the SDET node (agents.md Layer 4 — E2E on the integrated tree).
 
+    The acceptance criteria (for end-to-end traceability) are a DATA input read
+    from ``state`` INSIDE the closure via :func:`read_criteria` (AR1-AR4), NOT a
+    build-time kwarg.
+
     Parameters
     ----------
-    criteria:
-        Acceptance criteria for end-to-end traceability (resolved from CAS).
+    resolve:
+        INFRA dependency reconstituting an ``AcceptanceCriterion`` body from its
+        Artifact handle (the same seam as the QA node). ``None`` reads only raw
+        instances off the channel.
     run_against:
         The integrated ``tree_sha`` the e2e report keys on.
     """
 
     def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         seq = rt.seq(config, _NODE_ID, "artifact:e2e_report")
-        known = frozenset(c.id for c in criteria)
+        known = frozenset(c.id for c in read_criteria(state, resolve))
 
         result = rt.proxy.complete(
             _NODE_ID,

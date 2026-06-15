@@ -19,6 +19,7 @@ D1/D4). Asserts:
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -26,16 +27,19 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
 from foundry.agents import AgentRuntime
+from foundry.agents._common import emit_artifact
 from foundry.agents.quality import (
     make_qa_engineer_node,
     make_reviewer_critic_node,
     make_sdet_node,
 )
 from foundry.agents.quality._common import MissingVerdictNonceError
+from foundry.agents.quality.qa_engineer import ACCEPTANCE_CRITERION_KIND
 from foundry.canonical import content_digest
 from foundry.gates.attestation import DevGateWriteVerifier, ZoneBSigner
 from foundry.proxy import ModelProviderProxy
 from foundry.proxy.test_doubles import MockTransport, verdict_json
+from foundry.schemas.base import Artifact, FrozenModel
 from foundry.schemas.gates import GateResult, GateStatus, JudgmentProvenance
 from foundry.schemas.product import AcceptanceCriterion, Criticality
 from foundry.schemas.quality import E2EReport, OracleBinding, OracleKind, TestPlan, TestReport
@@ -92,6 +96,43 @@ CRITERIA = (
     crit("AC-002"),
     crit("AC-003", Criticality.HIGH_RISK),
 )
+
+
+def qa_state(
+    criteria: tuple[AcceptanceCriterion, ...] = CRITERIA,
+) -> FactoryState:
+    """The state the QA/SDET nodes read criteria from (AR1-AR4: criteria are a
+    DATA input from ``state``, not a build-time kwarg). The product layer seeds
+    the typed ``AcceptanceCriterion`` records onto ``artifacts``; the nodes
+    recover them by TYPE via ``criteria_from_state``."""
+    return {"artifacts": list(criteria)}
+
+
+def criterion_handles(
+    criteria: tuple[AcceptanceCriterion, ...] = CRITERIA,
+) -> list[Artifact]:
+    """The ``acceptance_criterion`` HANDLES the product layer actually emits.
+
+    Unlike raw bodies, a handle carries a ``.uri`` so it survives ``merge_by_uri``
+    on the shared ``artifacts`` channel in a COMPILED graph (raw criteria would
+    crash the fold). The QA / SDET nodes resolve each handle back to its body via
+    the injected ``resolve`` (the Senior Engineer's seam)."""
+    return [emit_artifact(c, ACCEPTANCE_CRITERION_KIND, "product_manager", c.seq) for c in criteria]
+
+
+def resolver(
+    criteria: tuple[AcceptanceCriterion, ...] = CRITERIA,
+) -> Callable[[Artifact], FrozenModel]:
+    """An in-memory ``resolve`` over ``criterion_handles(criteria)`` (CAS in prod)."""
+    body_by_uri = {
+        emit_artifact(c, ACCEPTANCE_CRITERION_KIND, "product_manager", c.seq).uri: c
+        for c in criteria
+    }
+
+    def _resolve(handle: Artifact) -> FrozenModel:
+        return body_by_uri[handle.uri]
+
+    return _resolve
 
 
 @pytest.fixture
@@ -222,9 +263,9 @@ def _qa_payload() -> str:
 def test_qa_plan_traceability_and_negative_oracle_and_quarantine() -> None:
     transport = MockTransport(completions=[_qa_payload()])
     rt = make_runtime(transport)
-    node = make_qa_engineer_node(rt, criteria=CRITERIA, run_against="task/qa-1")
+    node = make_qa_engineer_node(rt, run_against="task/qa-1")
 
-    writes = node({}, config_for("run-Q"))
+    writes = node(qa_state(), config_for("run-Q"))
     artifacts = writes["artifacts"]
     kinds = sorted(a.kind for a in artifacts)
     # One plan + one report + a NEGATIVE oracle per HIGH-RISK criterion (2 of 3).
@@ -279,8 +320,8 @@ def test_qa_report_quarantines_flaky_test() -> None:
     """
     transport = MockTransport(completions=[_qa_payload()])
     rt = make_runtime(transport)
-    node = make_qa_engineer_node(rt, criteria=CRITERIA, run_against="task/qa-2")
-    artifacts = node({}, config_for("run-Q2", step=5))["artifacts"]
+    node = make_qa_engineer_node(rt, run_against="task/qa-2")
+    artifacts = node(qa_state(), config_for("run-Q2", step=5))["artifacts"]
 
     emitted = next(a for a in artifacts if a.kind == "test_report")
     # qa mints the report seq via rt.seq(..., "artifact:test_report"): first bump
@@ -304,17 +345,17 @@ def test_qa_writes_no_gate_result() -> None:
     # qa's complete() is a schema-constrained IDEATION call (not a verdict, AC3
     # resolved) — serve the plan on the natural completions= path.
     node = make_qa_engineer_node(
-        make_runtime(MockTransport(completions=[_qa_payload()])), criteria=CRITERIA
+        make_runtime(MockTransport(completions=[_qa_payload()]))
     )
-    writes = node({}, config_for("run-Q3"))
+    writes = node(qa_state(), config_for("run-Q3"))
     assert "gates" not in writes  # L5: QA never touches the gates channel
 
 
 def test_qa_fail_closed_coverage_when_model_omits_criterion() -> None:
     """If the model omits a criterion, the node still guarantees full coverage."""
     thin = json.dumps({"tests": [{"test_id": "t-only-1", "criterion_ids": ["AC-001"]}]})
-    node = make_qa_engineer_node(make_runtime(MockTransport(completions=[thin])), criteria=CRITERIA)
-    artifacts = node({}, config_for("run-Q4"))["artifacts"]
+    node = make_qa_engineer_node(make_runtime(MockTransport(completions=[thin])))
+    artifacts = node(qa_state(), config_for("run-Q4"))["artifacts"]
     # synthetic tests fill the gap -> still 3 covered criteria + 2 negative oracles.
     assert sum(1 for a in artifacts if a.kind == "oracle_binding") == 2
 
@@ -347,8 +388,8 @@ def test_sdet_report_carries_determinism_and_quarantine() -> None:
 
     transport = MockTransport(completions=[_sdet_payload()])
     rt = make_runtime(transport)
-    node = make_sdet_node(rt, criteria=CRITERIA, run_against="tree-sha-integrated")
-    [emitted] = node({}, config_for("run-S", step=6))["artifacts"]
+    node = make_sdet_node(rt, run_against="tree-sha-integrated")
+    [emitted] = node(qa_state(), config_for("run-S", step=6))["artifacts"]
     assert emitted.kind == "e2e_report"
 
     seq = Seq("run-S", 1, 6, "sdet", 0)
@@ -388,9 +429,9 @@ def test_sdet_writes_no_gate_result() -> None:
     # sdet's complete() is a schema-constrained IDEATION call (not a verdict, AC3
     # resolved) — serve the scenarios on the natural completions= path.
     node = make_sdet_node(
-        make_runtime(MockTransport(completions=[_sdet_payload()])), criteria=CRITERIA
+        make_runtime(MockTransport(completions=[_sdet_payload()]))
     )
-    assert "gates" not in node({}, config_for("run-S2"))
+    assert "gates" not in node(qa_state(), config_for("run-S2"))
 
 
 # ---- 4. graph compatibility -------------------------------------------------
@@ -404,8 +445,11 @@ def test_quality_nodes_run_inside_a_state_graph(installed: GlobalRecords) -> Non
     rt = make_runtime(transport)
 
     g: StateGraph = StateGraph(FactoryState)
-    g.add_node("qa", make_qa_engineer_node(rt, criteria=CRITERIA))
-    g.add_node("sdet", make_sdet_node(rt, criteria=CRITERIA))
+    # In a COMPILED graph the criteria ride ``artifacts`` as resolvable HANDLES
+    # (they survive merge_by_uri) and the nodes reconstitute bodies via resolve.
+    resolve = resolver()
+    g.add_node("qa", make_qa_engineer_node(rt, resolve=resolve))
+    g.add_node("sdet", make_sdet_node(rt, resolve=resolve))
     g.add_node("review", make_reviewer_critic_node(rt))
     g.add_edge(START, "qa")
     g.add_edge("qa", "sdet")
@@ -414,7 +458,7 @@ def test_quality_nodes_run_inside_a_state_graph(installed: GlobalRecords) -> Non
     app = g.compile()
 
     final = app.invoke(
-        {"request": "ship it"},
+        {"request": "ship it", "artifacts": criterion_handles()},
         config_for("run-graph", nonce="N-graph", subject="cas://diff/g", state_sha="sha-g"),
     )
 
@@ -433,8 +477,8 @@ def test_artifact_handles_dedupe_under_merge_by_uri() -> None:
     """The artifacts channel folds by ``.uri`` — identical handles coalesce."""
     transport = MockTransport(completions=[_qa_payload()])
     rt = make_runtime(transport)
-    node = make_qa_engineer_node(rt, criteria=CRITERIA)
-    a = node({}, config_for("run-R"))["artifacts"]
+    node = make_qa_engineer_node(rt)
+    a = node(qa_state(), config_for("run-R"))["artifacts"]
     # Re-folding the SAME emitted handles (a LangGraph resume re-fold) is
     # idempotent under merge_by_uri (keyed on the content-addressed uri).
     assert len(merge_by_uri(a, a)) == len(a)

@@ -261,28 +261,51 @@ def test_qa_plan_traceability_and_negative_oracle_and_quarantine() -> None:
         assert h.uri == f"cas://sha256/{ob.content_identity()}"
 
 
+def _served_request_id(transport: MockTransport, idx: int = 0) -> str:
+    """The deterministic request_id MockTransport served for request ``idx``
+    (mirrors ``test_doubles._respond``: ``req_mock_<content_digest[:16]>``)."""
+    return f"req_mock_{content_digest(transport.requests[idx])[:16]}"
+
+
 def test_qa_report_quarantines_flaky_test() -> None:
+    """Assert on the TestReport the node ACTUALLY emitted (not a hand-built one).
+
+    The report rides ``artifacts`` as a handle whose ``uri`` is the record's
+    ``content_identity()`` — which covers passed/failed/quarantined. We rebuild
+    the report the node MUST have produced (passed = #covered criteria, failed=0,
+    quarantined from the payload, results_uri keyed on the served request_id) and
+    confirm its handle matches the emitted one, so the quarantine/failed
+    accounting is genuinely exercised rather than restated.
+    """
     transport = MockTransport(completions=[_qa_payload()])
     rt = make_runtime(transport)
-    node = make_qa_engineer_node(rt, criteria=CRITERIA)
-    artifacts = node({}, config_for("run-Q2"))["artifacts"]
+    node = make_qa_engineer_node(rt, criteria=CRITERIA, run_against="task/qa-2")
+    artifacts = node({}, config_for("run-Q2", step=5))["artifacts"]
 
-    report_handle = next(a for a in artifacts if a.kind == "test_report")
-    report = TestReport(
-        results_uri="cas://test-results/x",
-        run_against="task/qa",
-        passed=3,
+    emitted = next(a for a in artifacts if a.kind == "test_report")
+    # qa mints the report seq via rt.seq(..., "artifact:test_report"): first bump
+    # for that key is epoch 1; superstep is the config's langgraph_step.
+    report_seq = Seq("run-Q2", 1, 5, "qa_engineer", 0)
+    expected = TestReport(
+        results_uri=f"cas://test-results/{_served_request_id(transport)}",
+        run_against="task/qa-2",
+        passed=3,  # all three criteria covered (one synthetic if model omits)
         failed=0,
         quarantined=("t-flaky-net",),
-        seq=report_handle.seq,
+        seq=report_seq,
     )
+    assert emitted.uri == f"cas://sha256/{expected.content_identity()}"
     # the flake-then-pass test sits in quarantine, not counted as a failure.
-    assert report.quarantined == ("t-flaky-net",)
-    assert report.failed == 0
+    assert expected.quarantined == ("t-flaky-net",)
+    assert expected.failed == 0
 
 
 def test_qa_writes_no_gate_result() -> None:
-    node = make_qa_engineer_node(make_runtime(MockTransport()), criteria=CRITERIA)
+    # qa's complete() is a schema-constrained IDEATION call (not a verdict, AC3
+    # resolved) — serve the plan on the natural completions= path.
+    node = make_qa_engineer_node(
+        make_runtime(MockTransport(completions=[_qa_payload()])), criteria=CRITERIA
+    )
     writes = node({}, config_for("run-Q3"))
     assert "gates" not in writes  # L5: QA never touches the gates channel
 
@@ -312,31 +335,42 @@ def _sdet_payload() -> str:
 
 
 def test_sdet_report_carries_determinism_and_quarantine() -> None:
+    """Assert on the E2EReport the node ACTUALLY emitted (not a hand-built one).
+
+    The report rides ``artifacts`` as a handle whose ``uri`` is the record's
+    ``content_identity()`` — covering scenario_criteria, the determinism note, the
+    flake budget, and quarantine. We reconstruct the report the node MUST have
+    produced (results_uri keyed on the served request_id, the real
+    ``_DETERMINISM_NOTE``) and confirm its handle matches the emitted one.
+    """
+    from foundry.agents.quality import sdet as sdet_mod
+
     transport = MockTransport(completions=[_sdet_payload()])
     rt = make_runtime(transport)
     node = make_sdet_node(rt, criteria=CRITERIA, run_against="tree-sha-integrated")
-    [handle] = node({}, config_for("run-S"))["artifacts"]
-    assert handle.kind == "e2e_report"
+    [emitted] = node({}, config_for("run-S", step=6))["artifacts"]
+    assert emitted.kind == "e2e_report"
 
-    report = E2EReport(
-        results_uri="cas://e2e-results/x",
+    seq = Seq("run-S", 1, 6, "sdet", 0)
+    expected = E2EReport(
+        results_uri=f"cas://e2e-results/{_served_request_id(transport)}",
         run_against="tree-sha-integrated",
         scenarios_passed=2,
         scenarios_failed=0,
-        pinned_seeds_note="anything",
+        pinned_seeds_note=sdet_mod._DETERMINISM_NOTE,
         scenario_criteria={
             "e2e-checkout": ("AC-001", "AC-002"),
             "e2e-login": ("AC-003",),
         },
         flake_retry_budget=2,
         quarantined=("e2e-flaky-timing",),
-        seq=handle.seq,
+        seq=seq,
     )
-    # determinism notes (pinned seeds / frozen clock / mocked network) recorded.
-    # (the real node's note is asserted in the graph test below.)
-    assert report.covered_criteria() == frozenset({"AC-001", "AC-002", "AC-003"})
-    assert report.flake_retry_budget == 2
-    assert report.quarantined == ("e2e-flaky-timing",)
+    assert emitted.uri == f"cas://sha256/{expected.content_identity()}"
+    # determinism notes + scenario→criterion traceability + quarantine recorded.
+    assert expected.covered_criteria() == frozenset({"AC-001", "AC-002", "AC-003"})
+    assert expected.flake_retry_budget == 2
+    assert expected.quarantined == ("e2e-flaky-timing",)
 
 
 def test_sdet_determinism_note_content() -> None:
@@ -351,7 +385,11 @@ def test_sdet_determinism_note_content() -> None:
 
 
 def test_sdet_writes_no_gate_result() -> None:
-    node = make_sdet_node(make_runtime(MockTransport()), criteria=CRITERIA)
+    # sdet's complete() is a schema-constrained IDEATION call (not a verdict, AC3
+    # resolved) — serve the scenarios on the natural completions= path.
+    node = make_sdet_node(
+        make_runtime(MockTransport(completions=[_sdet_payload()])), criteria=CRITERIA
+    )
     assert "gates" not in node({}, config_for("run-S2"))
 
 

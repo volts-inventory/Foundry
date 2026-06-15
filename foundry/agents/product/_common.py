@@ -24,46 +24,10 @@ stays a faithful SOP + a thin model-call body:
 
 from __future__ import annotations
 
-from typing import Any
+# CR5: the artifact-handle helpers are agents-level shared primitives. They live
+# in ``foundry.agents._common`` and are re-exported here so the product factories'
+# existing import path (``from foundry.agents.product._common import ...``) stays
+# stable; there is no second copy to drift.
+from foundry.agents._common import cas_uri, content_schema, emit_artifact
 
-from foundry.canonical import content_digest
-from foundry.schemas.base import Artifact, FrozenModel
-from foundry.state.seq import Seq
-
-
-def content_schema(model: type[FrozenModel], *, drop: tuple[str, ...] = ("seq",)) -> dict[str, Any]:
-    """JSON schema for a model's *content* fields, with node-owned fields dropped.
-
-    The node — not the model call — owns the causal-order ``seq`` (and any
-    content-addressed ``*_uri`` body handle), so those fields are removed from
-    the constrained-output schema the proxy enforces and injected after parsing.
-    """
-    schema = model.model_json_schema()
-    props = {k: v for k, v in schema.get("properties", {}).items() if k not in drop}
-    required = [r for r in schema.get("required", []) if r not in drop]
-    return {**schema, "properties": props, "required": required}
-
-
-def cas_uri(body: Any) -> str:
-    """Content-addressed ``cas://sha256/<hex>`` handle for an out-of-band body.
-
-    Process-stable (``content_digest``, never builtin ``hash()`` — LEARNINGS L7),
-    so the same body yields the same handle across a kill-then-resume and the
-    keyed channel union dedupes the re-emission.
-    """
-    return f"cas://sha256/{content_digest(body)}"
-
-
-def emit_artifact(model: FrozenModel, kind: str, produced_by: str, seq: Seq) -> Artifact:
-    """Wrap a typed product body as a content-addressed :class:`Artifact` handle.
-
-    The body itself (the ``model``) lives out-of-band behind the returned
-    handle's ``uri``; only the handle rides the ``artifacts`` channel (DS9 / L4).
-    ``uri`` is the body's content identity so identical re-emissions coalesce.
-    """
-    return Artifact(
-        kind=kind,
-        uri=f"cas://sha256/{model.content_identity()}",
-        produced_by=produced_by,
-        seq=seq,
-    )
+__all__ = ["cas_uri", "content_schema", "emit_artifact"]

@@ -96,18 +96,15 @@ DESIGN_PAYLOAD: dict[str, Any] = {
 def design_transport(n: int = 8) -> MockTransport:
     """A transport that serves the architect's design payload.
 
-    GOTCHA (LEARNINGS, appended): the architect calls ``complete(..., schema=...)``
-    with ``purpose="ideation"``, but ANY schema attaches
-    ``output_config.format.type == "json_schema"`` to the request — which
-    MockTransport treats as the *constrained verdict channel*, where the
-    ``verdicts=`` queue / ``default_verdict`` take PRIORITY over keyed scripts
-    (D6). A keyed ``ResponseScript`` is therefore SHADOWED by the default
-    ``approve`` verdict. The structured ideation payload must ride the
-    ``verdicts=`` FIFO queue: a queue item that parses to a JSON object is
-    passed through verbatim, so the architect's design JSON is returned intact.
+    The architect calls ``complete(..., schema=_DESIGN_SCHEMA, purpose="ideation")``.
+    That is a schema-constrained IDEATION call, NOT a verdict (AC3 is resolved —
+    MockTransport now routes to the verdict queue only when the schema IS the
+    verdict schema, DT1). So the structured design payload rides the natural
+    free-text completion path: the ``completions=`` FIFO queue returns each item
+    verbatim as ``text``, which the proxy ``json.loads`` under the design schema.
     The queue is sized for the number of architect calls a test makes.
     """
-    return MockTransport(verdicts=[json.dumps(DESIGN_PAYLOAD)] * n)
+    return MockTransport(completions=[json.dumps(DESIGN_PAYLOAD)] * n)
 
 
 def make_runtime(transport: MockTransport | None = None) -> AgentRuntime:
@@ -150,6 +147,11 @@ def test_architect_writes_design_adrs_interfaces_ownership_and_constraints() -> 
     # Every artifact is a content-addressed handle (bodies out-of-band, L4).
     assert all(a.uri.startswith("cas://") for a in artifacts)
     assert all(a.produced_by == ARCHITECT_NODE_ID for a in artifacts)
+    # CR4: the two ADRs have different id/title, so their handles — minted off
+    # the record's content_identity(), not the body digest — are DISTINCT and
+    # neither is dropped under merge_by_uri.
+    adr_uris = [a.uri for a in artifacts if a.kind == "adr"]
+    assert len(set(adr_uris)) == 2
 
 
 def test_pinned_constraints_flow_to_their_own_channel() -> None:

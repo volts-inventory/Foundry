@@ -100,17 +100,18 @@ SPRINT_PAYLOAD: dict[str, Any] = {
 
 
 def product_transport(critique: dict[str, Any] = CRITIQUE_CLEAN) -> MockTransport:
-    """Serve each node's payload via the constrained-channel verdict queue.
+    """Serve each node's payload via the free-text completion queue.
 
-    Every product node passes ``schema=`` to ``proxy.complete``, so the proxy
-    sets ``output_config.format.type == "json_schema"`` and MockTransport treats
-    it as the constrained channel where the verdict queue takes priority over
-    keyed scripts (LEARNINGS D6/R1-03). Verdict-queue items may be pre-serialized
-    JSON (D2), so we feed each node's content payload as a FIFO item — the four
-    product nodes run in SOP order, so the queue order matches that order.
+    Every product node passes ``schema=`` to ``proxy.complete`` with
+    ``purpose="ideation"`` — exploratory authoring, NOT a verdict (PR1). AC3 is
+    resolved (DT1): MockTransport routes to the verdict queue only when the
+    schema IS the verdict schema, so these schema-constrained ideation calls take
+    the natural ``completions=`` path and each FIFO item is returned verbatim as
+    ``text`` (the proxy ``json.loads`` it under the node's content schema). The
+    four product nodes run in SOP order, so the queue order matches that order.
     """
     return MockTransport(
-        verdicts=[
+        completions=[
             json.dumps(INTENT_PAYLOAD),
             json.dumps(PRD_PAYLOAD),
             json.dumps(critique),
@@ -128,9 +129,10 @@ def make_runtime(transport: MockTransport | None = None) -> AgentRuntime:
 
 
 def runtime_for(*payloads: dict[str, Any]) -> AgentRuntime:
-    """A runtime whose constrained-channel verdict queue yields ``payloads`` in
-    order — used to drive a single node (or a short sequence) in isolation."""
-    return make_runtime(MockTransport(verdicts=[json.dumps(p) for p in payloads]))
+    """A runtime whose free-text completion queue yields ``payloads`` in order —
+    used to drive a single node (or a short sequence) in isolation. These are
+    schema-constrained IDEATION calls, not verdicts (AC3 resolved, DT1)."""
+    return make_runtime(MockTransport(completions=[json.dumps(p) for p in payloads]))
 
 
 def config_for(run_id: str, step: int = 1) -> RunnableConfig:
@@ -202,21 +204,37 @@ def test_acceptance_criteria_carry_traceability_fields() -> None:
 
 
 def test_prd_declares_its_criterion_ids() -> None:
-    rt = make_runtime()
-    node = make_product_manager_node(rt)
-    node({"request": "x"}, config_for("run-A"))
-    # Rebuild the PRD path deterministically to assert the declared ids.
-    from foundry.schemas.product import PRD
+    """Assert on the PRD the node ACTUALLY emitted (not a hand-rebuilt one).
 
-    # The PRD's criterion_ids mirror the criteria the PM derived.
-    seq = rt.seq(config_for("run-A"), "product_manager", "artifact:prd")
-    prd = PRD(
-        title="t",
-        prd_uri="cas://sha256/deadbeef",
+    The PRD body rides ``artifacts`` as a content-addressed handle whose ``uri``
+    is the record's ``content_identity()``; ``criterion_ids`` is part of that
+    record. We reconstruct the PRD the node MUST have built from PRD_PAYLOAD and
+    confirm its handle matches the emitted ``prd`` handle — so if the node failed
+    to derive ``criterion_ids`` from the criteria it declared, the handles would
+    diverge and this fails.
+    """
+    from foundry.agents.product._common import cas_uri, emit_artifact
+    from foundry.schemas.product import PRD
+    from foundry.state.seq import Seq
+
+    rt = runtime_for(PRD_PAYLOAD)
+    node = make_product_manager_node(rt)
+    writes = node({"request": "x"}, config_for("run-A", step=4))
+
+    emitted = next(a for a in _artifacts_of(writes) if a.kind == "prd")
+    # The node mints the PRD seq via rt.seq(..., "artifact:prd"): first bump for
+    # that (run, node/key) is epoch 1; superstep is the config's langgraph_step.
+    prd_seq = Seq("run-A", 1, 4, "product_manager", 0)
+    expected = PRD(
+        title=PRD_PAYLOAD["title"],
+        prd_uri=cas_uri(PRD_PAYLOAD["prd_body"]),
+        required_capabilities=("ui",),
         criterion_ids=("AC-001", "AC-002"),
-        seq=seq,
+        seq=prd_seq,
     )
-    assert prd.criterion_ids == ("AC-001", "AC-002")
+    expected_handle = emit_artifact(expected, "prd", "product_manager", prd_seq)
+    assert emitted.uri == expected_handle.uri
+    assert expected.criterion_ids == ("AC-001", "AC-002")
 
 
 # ---- 3. criteria critic: advisory triage, security-omission blocking ---------
@@ -286,33 +304,40 @@ def test_eng_program_mgr_writes_sprint_plan_handle() -> None:
 
 
 def test_sprint_cap_is_clamped_into_route_envelope() -> None:
-    """A bugfix's tight envelope clamps the model's wider proposed cap; the cap
-    is an integer micro-USD value, never widened above the route seed."""
-    from foundry.agents.product.eng_program_mgr import (
-        _ROUTE_CAP_MICROUSD,
-        make_eng_program_mgr_node,
-    )
+    """Genuinely exercise the clamp by asserting on the EMITTED SprintPlan.
+
+    SPRINT_PAYLOAD proposes a 30M cap, but the bugfix route envelope is 5M, so
+    the node must clamp DOWN to 5M. The plan rides ``artifacts`` as a handle whose
+    ``uri`` is the record's ``content_identity()`` (which includes the cap). We
+    reconstruct the plan with the CLAMPED cap and confirm its handle matches the
+    emitted one; a control reconstruction with the UNCLAMPED 30M cap must NOT —
+    proving the clamp is actually running, not asserted on a hand-built object.
+    """
+    from foundry.agents.product._common import cas_uri, emit_artifact
+    from foundry.schemas.product import SprintPlan
+    from foundry.state.seq import Seq
 
     rt = runtime_for(SPRINT_PAYLOAD)
     node = make_eng_program_mgr_node(rt)
-    # SPRINT_PAYLOAD proposes 30M, but the bugfix envelope is 5M -> clamped.
-    writes = node({"request": "fix it", "route": "bugfix"}, config_for("run-A"))
-    handle = _artifacts_of(writes)[0]
-    assert handle.uri.startswith("cas://")
+    writes = node({"request": "fix it", "route": "bugfix"}, config_for("run-A", step=7))
+    emitted = _artifacts_of(writes)[0]
+    assert emitted.kind == "sprint_plan"
 
-    # Re-derive the plan body to assert the clamped, integer cap.
-    from foundry.schemas.product import SprintPlan
+    seq = Seq("run-A", 1, 7, "eng_program_mgr", 0)
 
-    seq = rt.seq(config_for("run-B"), "eng_program_mgr", "artifact:sprint_plan")
-    plan = SprintPlan(
-        milestones=("M1",),
-        usd_cap_microusd=min(30_000_000, _ROUTE_CAP_MICROUSD["bugfix"]),
-        risk_register_uri="cas://sha256/dead",
-        done_definition="d",
-        seq=seq,
-    )
-    assert plan.usd_cap_microusd == 5_000_000
-    assert isinstance(plan.usd_cap_microusd, int)
+    def _handle(cap: int) -> str:
+        plan = SprintPlan(
+            milestones=("M1 storage", "M2 API", "M3 UI"),
+            usd_cap_microusd=cap,
+            risk_register_uri=cas_uri(SPRINT_PAYLOAD["risk_register_body"]),
+            done_definition=SPRINT_PAYLOAD["done_definition"],
+            seq=seq,
+        )
+        assert isinstance(plan.usd_cap_microusd, int)
+        return emit_artifact(plan, "sprint_plan", "eng_program_mgr", seq).uri
+
+    assert emitted.uri == _handle(5_000_000)  # clamped to the bugfix envelope
+    assert emitted.uri != _handle(30_000_000)  # the unclamped proposal would differ
 
 
 # ---- 5. graph-compatibility: the four nodes run in SOP order -----------------

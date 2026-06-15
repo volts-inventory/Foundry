@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from foundry.agents._common import as_text
 from foundry.canonical import content_digest
 from foundry.schemas.base import Artifact
 
@@ -110,16 +111,10 @@ def _addendum(kind: str, matched: list[str], seq: Seq, produced_by: str) -> Arti
 
     The body digest is process-stable (LEARNINGS L7: ``content_digest``).
     """
-    body = _as_text({"kind": kind, "matched_capabilities": matched})
+    body = as_text({"kind": kind, "matched_capabilities": matched})
     return Artifact(
         kind=kind,
         uri=f"cas://{kind}/{content_digest(body)}",
         produced_by=produced_by,
         seq=seq,
     )
-
-
-def _as_text(obj: Any) -> str:
-    import json
-
-    return json.dumps(obj, sort_keys=True, ensure_ascii=False)

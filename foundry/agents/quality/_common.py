@@ -33,12 +33,22 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from foundry.schemas.base import Artifact, FrozenModel
+# CR5: ``emit_artifact`` is an agents-level shared primitive (one definition in
+# ``foundry.agents._common``); re-exported here so the quality factories' import
+# path stays stable and there is no byte-duplicate to drift.
+from foundry.agents._common import emit_artifact
 
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
 
-    from foundry.state.seq import Seq
+
+__all__ = [
+    "MissingVerdictNonceError",
+    "emit_artifact",
+    "server_issued_nonce",
+    "state_sha",
+    "subject_artifact_uri",
+]
 
 
 class MissingVerdictNonceError(RuntimeError):
@@ -49,22 +59,6 @@ class MissingVerdictNonceError(RuntimeError):
     would drop it. Raising here surfaces the wiring gap instead of silently
     emitting a dead verdict.
     """
-
-
-def emit_artifact(model: FrozenModel, kind: str, produced_by: str, seq: Seq) -> Artifact:
-    """Wrap a typed quality body as a content-addressed :class:`Artifact` handle.
-
-    The body itself (``model``) lives out-of-band behind the returned handle's
-    ``uri``; only the handle rides the ``artifacts`` channel (DS9 / L4). ``uri``
-    is the body's content identity so identical re-emissions coalesce under
-    ``merge_by_uri``.
-    """
-    return Artifact(
-        kind=kind,
-        uri=f"cas://sha256/{model.content_identity()}",
-        produced_by=produced_by,
-        seq=seq,
-    )
 
 
 def _configurable(config: RunnableConfig) -> dict[str, Any]:

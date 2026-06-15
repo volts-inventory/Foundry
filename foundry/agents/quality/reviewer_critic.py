@@ -63,12 +63,29 @@ def make_reviewer_critic_node(rt: AgentRuntime) -> NodeFn:
         # signs seq.node_id, so judge() rejects a mismatched record (proxy L5).
         seq = rt.seq(config, _NODE_ID, "verdict:review")
 
+        # Server-issued, single-use; the agent consumes but never mints it. Read
+        # first so a missing nonce fails closed before anything else (the most
+        # fundamental trust input of a verdict).
+        nonce = server_issued_nonce(config)
+
         artifacts = state.get("artifacts") or []
         state_subject = artifacts[-1].uri if artifacts else None
         subject_uri = subject_artifact_uri(config, state_subject)
+        # DT2 / fail-closed: a verdict needs a concrete subject to bind to.
+        # `subject_artifact_uri` falls back to "" when neither the config seam
+        # nor state names one — that yields a coherent-but-empty binding the gate
+        # runner can't meaningfully latch. The supervisor / gate-wiring wave
+        # (T-M1-13) MUST pin `config['configurable']['subject_artifact_uri']` for
+        # every judgment node (exactly like `verdict_nonce`/`state_sha`); until
+        # then we fail closed rather than emit a verdict over an empty subject.
+        if not subject_uri:
+            raise ValueError(
+                "reviewer_critic has no subject to judge: neither "
+                "config['configurable']['subject_artifact_uri'] nor a state "
+                "artifact is present. The supervisor/gate-wiring wave (T-M1-13) "
+                "must pin subject_artifact_uri on the run config for judgment nodes."
+            )
         run_against = state_sha(config, fallback=seq.run_id)
-        # Server-issued, single-use; the agent consumes but never mints it.
-        nonce = server_issued_nonce(config)
 
         result = rt.proxy.judge(
             _NODE_ID,

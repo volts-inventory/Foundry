@@ -116,10 +116,12 @@ def a_constraint(cid: str, text: str) -> PinnedConstraint:
 def scripted_decomposition(criteria_by_unit: dict[str, list[str]]) -> MockTransport:
     """A transport that answers the schema-constrained decomposition call.
 
-    The Senior's ``complete(..., schema=_DECOMPOSITION_SCHEMA)`` rides the
-    constrained ``json_schema`` channel, which :class:`MockTransport` routes
-    through its verdict queue (a pre-serialized JSON object is passed through
-    verbatim). So the decomposition payload is scripted as a verdict-queue item.
+    The Senior's ``complete(..., schema=_DECOMPOSITION_SCHEMA, purpose="ideation")``
+    is a schema-constrained IDEATION call, NOT a verdict. AC3 is resolved (DT1):
+    MockTransport routes to the verdict queue only when the schema IS the verdict
+    schema, so the decomposition payload rides the natural ``completions=`` path
+    and is returned verbatim as ``text`` (the proxy ``json.loads`` it under the
+    decomposition schema).
     """
     payload = {
         "tasks": [
@@ -127,7 +129,7 @@ def scripted_decomposition(criteria_by_unit: dict[str, list[str]]) -> MockTransp
             for unit, cids in criteria_by_unit.items()
         ]
     }
-    return MockTransport(verdicts=[json.dumps(payload)])
+    return MockTransport(completions=[json.dumps(payload)])
 
 
 # ---- senior_engineer ---------------------------------------------------------

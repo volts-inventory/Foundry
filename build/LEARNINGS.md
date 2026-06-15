@@ -67,17 +67,21 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   drift. Pass the optional `served_model=` ctor kwarg (or `ResponseScript.served_model`) to
   FORCE a drift scenario. `ProviderTransport` is a plain (non-runtime_checkable) Protocol, so
   structural conformance tests assert against a local runtime_checkable mirror of `send`.
-- D6. (R1-01/R1-03) On the constrained verdict channel
-  (`output_config.format.type == "json_schema"`) the verdict queue/`default_verdict` take
-  PRIORITY over keyed scripts, so `judge()` can never crash in `json.loads` on free-text that
-  matched a script; scripts still win on every other channel. Verdict-queue literal-vs-JSON
-  detection is whitespace-tolerant (`json.loads` probe, not `startswith("{")`).
+- D6. (R1-01/R1-03; narrowed by DT1) On the constrained VERDICT channel the verdict
+  queue/`default_verdict` take PRIORITY over keyed scripts, so `judge()` can never crash in
+  `json.loads` on free-text that matched a script; scripts/`completions=` still win on every other
+  channel — INCLUDING schema-constrained ideation. The verdict channel is now detected by SCHEMA
+  STRUCTURE, not by the mere presence of `output_config.format.type == "json_schema"` (DT1/AC3):
+  the schema must BE `VERDICT_SCHEMA` (`_is_verdict_schema`). Verdict-queue literal-vs-JSON detection
+  is whitespace-tolerant (`json.loads` probe, not `startswith("{")`).
 - D2. Scripting API (priority order): `MockTransport(responses=[ResponseScript(text, match)])`
   first-match-wins; `MockTransport.scripted({needle: text})` keys by substring of system SOP/messages;
   `verdicts=[...]` / `completions=[...]` are FIFO queues for the constrained-json-schema channel vs
   free-text channel; `default_verdict=`/`default_text=` are the per-channel fallbacks. Verdict items
   may be `"approve"`/`"request-changes"` or pre-serialized JSON; use `verdict_json(status, findings)`.
-  Constrained verdict channel is auto-detected via `output_config.format.type == "json_schema"`.
+  Verdict channel is auto-detected by SCHEMA STRUCTURE — the request schema must BE `VERDICT_SCHEMA`
+  (DT1/AC3), NOT merely carry a json_schema format. So a schema-constrained ideation payload rides
+  `completions=`/`scripted`/`default_text` (returned verbatim as `text`), not `verdicts=`.
 - D3. To run the substrate with NO `claude -p` binary, use `StubAdapter`
   (`foundry/execution/adapters/stub.py`): `supports_turn_snapshots=True`, holds no egress.
   Ctor kwargs: `run_id`, `node_id`, `output_path`, `triage_note`, `self_reported_model`.
@@ -116,14 +120,18 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   `should_enter_domain_specialist(state)` / `should_enter_ux_design(state)` — the SAME predicate the
   node's internal guard uses, so the subgraph's conditional edge and the node never disagree. On
   no-match they return `{}` (no writes); downstream tolerates absence.
-- AC3. **MockTransport channel gotcha (cost a debug pass).** ANY `complete(..., schema=...)` call —
-  even `purpose="ideation"` — attaches `output_config.format.type == "json_schema"`, which
-  MockTransport treats as the *constrained verdict channel*, where the `verdicts=` queue /
-  `default_verdict` take PRIORITY over keyed `ResponseScript`s (D6). So a scripted structured
-  ideation payload is SHADOWED by the default `approve` verdict. To return arbitrary structured JSON
-  on a schema-constrained ideation call, put the payload (a JSON object string) in the `verdicts=`
-  FIFO queue: `_normalize_verdict_item` passes a parsed JSON object through verbatim. Size the queue
-  to the number of `complete` calls the test makes (one per architect node invocation).
+- AC3. **RESOLVED (Wave-B DT1).** Was: ANY `complete(..., schema=...)` attaches
+  `output_config.format.type == "json_schema"`, which MockTransport treated as the verdict channel,
+  SHADOWING a scripted structured ideation payload (PRD/SystemDesign/TestPlan/decomposition) under
+  the default `approve` verdict — the workaround was to smuggle the payload through the `verdicts=`
+  FIFO. **New rule (DT1):** MockTransport routes to the verdict channel only when the json_schema
+  format is present AND the schema IS the verdict schema — detected by STRUCTURE
+  (`properties.status.enum == ["approve","request-changes"]`, or `required ⊇ {status, findings}`;
+  see `test_doubles._is_verdict_schema`, matching `VERDICT_SCHEMA`). `judge()` passes `VERDICT_SCHEMA`
+  so it still hits the verdict path; a schema-constrained *ideation* call does NOT — script its
+  payload on the natural free-text path (`completions=` FIFO / `scripted` / `default_text`), returned
+  verbatim as `text`. The `verdicts=` smuggling workaround is no longer needed and was removed from
+  the architecture/product/implementation agent tests.
 
 ## Implementation layer (T-M1-06)
 - IM1. **Idempotent-retry base snapshot needs a DURABLE store (cost a debug pass).** The Junior
@@ -137,9 +145,10 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
 - IM2. Pinned constraints reach the `TaskPacket` via `pinned_texts(live_constraints(...))` — read the
   LIVE (non-superseded) view, order by `id` (fold-order-independent so the packet is byte-identical
   across resume), drop straight into `TaskPacket.pinned_constraints`; `assemble_prompt` then renders
-  them FIRST + VERBATIM ahead of the TASK body. Re-confirms AC3: the Senior's `complete(..., schema=
-  _DECOMPOSITION_SCHEMA)` rides MockTransport's verdict channel, so script the decomposition JSON via
-  `verdicts=[json.dumps(payload)]`, not `default_text`.
+  them FIRST + VERBATIM ahead of the TASK body. NB (AC3 resolved, DT1): the Senior's `complete(...,
+  schema=_DECOMPOSITION_SCHEMA, purpose="ideation")` is NOT the verdict channel anymore — script the
+  decomposition JSON on the natural `completions=[json.dumps(payload)]` path (it is returned verbatim
+  as `text`), not `verdicts=`.
 - IM3. The `tasks` channel reducer (`union_by_id`) keys plain dicts by `id` with NO `.seq` tiebreak
   (dicts aren't models), so FIRST-keyed wins. Senior emits a Task dict and Junior emits a done-marker
   dict for the same id — in one graph run the Senior's wins. That's fine here (nodes tested in

@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from foundry.canonical import content_digest
+from foundry.agents._common import as_text, cas_uri, emit_artifact
 from foundry.context import SymbolIndex
 from foundry.schemas.architecture import (
     ADR,
@@ -40,7 +40,6 @@ from foundry.schemas.architecture import (
     PinnedConstraint,
     SystemDesign,
 )
-from foundry.schemas.base import Artifact
 
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
@@ -128,15 +127,6 @@ _SYSTEM_SOP = (
 )
 
 
-def _cas(prefix: str, body: str) -> str:
-    """Content-addressed handle for an out-of-band body (DS9 / LEARNINGS L4).
-
-    Bodies never live in state channels; only this handle does. The digest is
-    process-stable (LEARNINGS L7: ``content_digest``, never builtin ``hash()``).
-    """
-    return f"cas://{prefix}/{content_digest(body)}"
-
-
 def _query_symbols(state: FactoryState) -> tuple[str, ...]:
     """Symbols to retrieve impact for. ``required_capabilities`` seed the probe
     (recall-oriented); the retriever expands to one-hop call/def neighbours."""
@@ -194,7 +184,7 @@ def make_principal_architect_node(
             NODE_ID,
             TIER,
             _SYSTEM_SOP,
-            [{"role": "user", "content": _as_text(user_content)}],
+            [{"role": "user", "content": as_text(user_content)}],
             purpose="ideation",
             schema=_DESIGN_SCHEMA,
         )
@@ -209,7 +199,7 @@ def make_principal_architect_node(
         )
         design = SystemDesign(
             title=str(payload.get("title", "")),
-            design_uri=_cas("design", str(payload.get("design_body", ""))),
+            design_uri=cas_uri(str(payload.get("design_body", ""))),
             components=tuple(str(c) for c in payload.get("components", ())),
             adr_ids=tuple(a.id for a in adrs),
             interface_ids=tuple(i.name for i in interfaces),
@@ -219,12 +209,17 @@ def make_principal_architect_node(
             payload.get("pinned_constraints", []), seqs["constraint"]
         )
 
-        ownership_uri = _cas("ownership", _as_text(ownership.owners))
+        # Mint each artifact HANDLE off the record's content_identity() — NOT off
+        # the body digest (CR4). Two ADRs with an identical body but different
+        # id/title would otherwise collide on the same body-digest uri and lose
+        # one record's metadata under merge_by_uri; content_identity() spans the
+        # whole record so distinct ADRs get distinct handles (mirrors the
+        # product/quality emit_artifact helpers).
         artifacts = [
-            _artifact("system_design", design.design_uri, seqs["design"]),
-            *(_artifact("adr", a.body_uri, a.seq) for a in adrs),
-            *(_artifact("interface_contract", i.spec_uri, i.seq) for i in interfaces),
-            _artifact("ownership_map", ownership_uri, seqs["ownership"]),
+            emit_artifact(design, "system_design", NODE_ID, seqs["design"]),
+            *(emit_artifact(a, "adr", NODE_ID, a.seq) for a in adrs),
+            *(emit_artifact(i, "interface_contract", NODE_ID, i.seq) for i in interfaces),
+            emit_artifact(ownership, "ownership_map", NODE_ID, seqs["ownership"]),
         ]
 
         # pinned_constraints flow to their own channel (merge_constraints reducer:
@@ -238,10 +233,6 @@ def make_principal_architect_node(
     return _node
 
 
-def _artifact(kind: str, uri: str, seq: Seq) -> Artifact:
-    return Artifact(kind=kind, uri=uri, produced_by=NODE_ID, seq=seq)
-
-
 def _build_adrs(raw: Any, seq: Seq) -> list[ADR]:
     out: list[ADR] = []
     for i, item in enumerate(raw or ()):
@@ -250,7 +241,7 @@ def _build_adrs(raw: Any, seq: Seq) -> list[ADR]:
                 id=str(item.get("id", f"ADR-{i:03d}")),
                 title=str(item.get("title", "")),
                 decision=str(item.get("decision", "")),
-                body_uri=_cas("adr", str(item.get("body", ""))),
+                body_uri=cas_uri(str(item.get("body", ""))),
                 rejected_alternatives=tuple(
                     str(a) for a in item.get("rejected_alternatives", ())
                 ),
@@ -266,7 +257,7 @@ def _build_interfaces(raw: Any, seq: Seq) -> list[InterfaceContract]:
         out.append(
             InterfaceContract(
                 name=str(item.get("name", f"iface-{i}")),
-                spec_uri=_cas("interface", str(item.get("spec", ""))),
+                spec_uri=cas_uri(str(item.get("spec", ""))),
                 consumers=tuple(str(c) for c in item.get("consumers", ())),
                 seq=seq._replace(local=i),
             )
@@ -288,9 +279,3 @@ def _build_constraints(raw: Any, seq: Seq) -> list[PinnedConstraint]:
             )
         )
     return out
-
-
-def _as_text(obj: Any) -> str:
-    import json
-
-    return json.dumps(obj, sort_keys=True, ensure_ascii=False)

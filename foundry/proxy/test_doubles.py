@@ -32,19 +32,30 @@ Two scripting layers, in priority order:
    * the ``verdicts=``/``completions=`` ctor kwargs — ordered queues consumed
      FIFO on the verdict / free-text channels respectively.
 
-2. **Channel default**: when no script matches, a constrained verdict request
-   (``output_config.format.type == "json_schema"``) yields a valid verdict
-   JSON (default ``approve``, overridable via ``default_verdict``); any other
-   request yields ``default_text``.
+2. **Channel default**: when no script matches, a constrained VERDICT request
+   yields a valid verdict JSON (default ``approve``, overridable via
+   ``default_verdict``); any other request yields ``default_text``.
+
+Verdict-channel detection (AC3, RESOLVED — DT1): a request is the verdict
+channel only when it carries ``output_config.format.type == "json_schema"`` AND
+the schema IS the judgment verdict schema (``VERDICT_SCHEMA``), detected by
+STRUCTURE — a ``status`` enum of ``["approve","request-changes"]`` or a
+``required`` set covering both ``status`` and ``findings`` (see
+:func:`_is_verdict_schema`). The mere presence of a json_schema format is NOT
+enough: a schema-constrained *ideation* completion (PRD / SystemDesign /
+TestPlan / decomposition / ...) is NOT shadowed by the verdict FIFO/default — it
+falls through to the keyed-script / ``completions=`` / ``default_text`` path and
+a scripted JSON payload is returned verbatim as ``text``. ``judge()`` passes
+``VERDICT_SCHEMA``, so it still hits the verdict path.
 
 Channel/script priority (R1-01/R1-03): on the **constrained verdict channel**
-(``output_config.format.type == "json_schema"``) the verdict queue/default take
-priority over a keyed script, so a verdict is ALWAYS emitted there and
-``proxy.judge()`` can never crash in ``json.loads`` on free-text that happened
-to match a script. On every other channel, keyed scripts win as before. Verdict
-queue items are detected as literal-vs-JSON robustly (``json.loads`` probe,
-whitespace-tolerant), so leading whitespace no longer mis-classifies a status
-literal as JSON.
+the verdict queue/default take priority over a keyed script, so a verdict is
+ALWAYS emitted there and ``proxy.judge()`` can never crash in ``json.loads`` on
+free-text that happened to match a script. On every other channel (including
+schema-constrained ideation), keyed scripts / ``completions=`` win as before.
+Verdict queue items are detected as literal-vs-JSON robustly (``json.loads``
+probe, whitespace-tolerant), so leading whitespace no longer mis-classifies a
+status literal as JSON.
 """
 
 from __future__ import annotations
@@ -124,11 +135,47 @@ def _request_model(request: dict[str, Any]) -> str | None:
     return model if isinstance(model, str) else None
 
 
+def _is_verdict_schema(schema: Any) -> bool:
+    """True iff ``schema`` IS the judgment verdict schema (``VERDICT_SCHEMA``).
+
+    Detected by STRUCTURE, not by the mere presence of a json_schema format
+    (AC3, resolved): a ``status`` enum of exactly ``["approve","request-changes"]``,
+    OR a ``required`` set covering both ``status`` and ``findings``. Any OTHER
+    json_schema (a PRD, SystemDesign, TestPlan, ... ideation payload) is NOT the
+    verdict channel and falls through to the keyed-script / ``completions=`` /
+    ``default_text`` path, so a scripted structured payload is served verbatim.
+    """
+    if not isinstance(schema, dict):
+        return False
+    props = schema.get("properties")
+    if not isinstance(props, dict):
+        return False
+    status = props.get("status")
+    if isinstance(status, dict) and status.get("enum") == ["approve", "request-changes"]:
+        return True
+    required = schema.get("required")
+    return (
+        "findings" in props
+        and isinstance(required, (list, tuple))
+        and {"status", "findings"} <= set(required)
+    )
+
+
 def _request_is_verdict_channel(request: dict[str, Any]) -> bool:
-    """A constrained json_schema/verdict request carries an output_config
-    format of type ``json_schema`` (set by the proxy when a schema is passed)."""
+    """True iff this request is the judgment VERDICT channel.
+
+    The proxy attaches ``output_config.format.type == "json_schema"`` to EVERY
+    schema-constrained ``complete()`` — not just verdicts (AC3). So the json_schema
+    format alone is necessary but NOT sufficient: we additionally require the
+    schema to BE the verdict schema (``_is_verdict_schema``). ``judge()`` passes
+    ``VERDICT_SCHEMA``, so it still routes here; a scripted structured ideation
+    payload (PRD/SystemDesign/TestPlan/...) does NOT, and is served via the
+    keyed-script / ``completions=`` / ``default_text`` path instead.
+    """
     fmt = request.get("output_config", {}).get("format", {})
-    return isinstance(fmt, dict) and fmt.get("type") == "json_schema"
+    if not (isinstance(fmt, dict) and fmt.get("type") == "json_schema"):
+        return False
+    return _is_verdict_schema(fmt.get("schema"))
 
 
 def _serialized_prompt(request: dict[str, Any]) -> str:

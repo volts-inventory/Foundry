@@ -173,11 +173,16 @@ def make_qa_engineer_node(
         quarantined = tuple(
             str(q) for q in payload.get("quarantined", ()) if isinstance(q, str)
         )
+        # CR3: passed/failed are AUTHORING-ONLY placeholders. This node authors
+        # the plan/oracles; it does NOT execute tests. Until the gate-wiring wave
+        # (T-M1-12) feeds REAL execution results from the runner, `passed` is
+        # optimistically the covered-criteria count and `failed` is 0 — the Test
+        # gate, not this report, decides the verdict from real run output (L5).
         report = TestReport(
             results_uri=f"cas://test-results/{result.request_id}",
             run_against=run_against,
-            passed=len(test_criteria),
-            failed=0,
+            passed=len(test_criteria),  # placeholder until T-M1-12 wires execution
+            failed=0,  # placeholder until T-M1-12 wires execution
             quarantined=quarantined,
             seq=report_seq,
         )

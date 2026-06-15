@@ -556,6 +556,34 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   `resolved_count==0`, and the denominator is unchanged. (Don't condition the rate on completed runs —
   that is the collider bias §2/§6 forbid.)
 
+## Evaluation — variance/base-rate PILOT (T-M15-04)
+- EV10. **`foundry/evaluation/pilot.py::run_pilot(frame, *, arms=DEFAULT_PILOT_ARMS,
+  k_repeats=2, seed=0, budget_usd_microusd=...) -> PilotResult` (frozen) runs the arms over
+  `frame.pilot_slice` ONLY (via `run_arm`) and estimates the read-only summary the LATER power-calc
+  module CONSUMES.** `PilotResult` exposes EXACTLY: `control_base_rate` (= control arm's
+  `itt_pass_rate`, the §2 strong-baseline rate, NOT the borrowed ~21%), `effect_size_variance`
+  (between-task POPULATION variance of the per-task FOUNDRY−CONTROL difference — the cluster effect
+  the §2 paired bootstrap is powered on), `control_resolution_variance` (between-task variance of the
+  control's per-task resolution), `pilot_n`, `k_repeats`, `consumed_budget_microusd`,
+  `eval_set_identity` (the PILOT slice identity, EV7), `provenance=PILOT`, `scored=False`. The TASK is
+  the inferential unit (§2): collapse each task's `k_repeats` to ONE per-task rate BEFORE taking
+  variance (`n×k` as independent draws overstates effective N). `DEFAULT_PILOT_ARMS=(FOUNDRY,
+  BASELINE_SINGLE_AGENT)`; the control arm is REQUIRED (else `ValueError` — base rate undefined).
+- EV11. **THREE integrity guards (the pilot is read-only INTO the power calc, never a second scored
+  arm).** (1) DISJOINT-SLICE: `run_pilot` asserts `set(pilot.task_ids) & set(scored.task_ids) == {}`
+  and raises `ScoredSliceTouchedError` on overlap; it also hands `run_arm` ONLY the pilot fixtures
+  (filtered by `pilot_ids`) so a stray lookup can't touch a scored task. (2) NOT A SCORED ARM:
+  `provenance=PILOT` + `scored=False` + docstring; there is NO path from `run_pilot` to a scored
+  verdict, and `PilotResult` exposes only the read-only summary (no per-task outcomes leak). (3)
+  BUDGET RECORDED: `consumed_budget_microusd = Σ arm.total_cost_microusd` (§8 reserves it). RE-RUNNING
+  the pilot does NOT re-draw the scored A/B: the partition is a deterministic seed-fixed prefix-cut of
+  one frame permutation (EV6), so `frame.scored_slice.identity` is unchanged across pilot runs at any
+  seed — the pilot only re-estimates, it never selects scored tasks. Determinism: same `(frame, arms,
+  k, seed, budget)` ⇒ identical `PilotResult` (`content_identity()` stable). Tests: 18, all green; the
+  FOUNDRY-inclusive ones keep a SMALL frame (FOUNDRY wraps the shipped pipeline keyless via the
+  doubles, D1-D3; control-only runs are cheap simulated stand-ins). The overlap-raise test subclasses
+  `TaskFrame` to override `pilot_slice` to inject a scored id (frozen model, so `model_copy(update=)`).
+
 ## ArtifactStore — the real content-addressed body store (T-M1-14b, DECISIONS D6)
 - AS1. **`foundry/durability/artifact_store.py::ArtifactStore` closes the emit/resolve gap.**
   `emit_artifact` MINTED a `cas://sha256/<content_identity>` handle but DISCARDED the body, so

@@ -65,7 +65,7 @@ class _SuperstepConnection(sqlite3.Connection):
 
     _in_superstep: bool = False
 
-    def commit(self) -> None:  # type: ignore[override]
+    def commit(self) -> None:
         if self._in_superstep:
             return
         super().commit()

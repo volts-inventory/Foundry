@@ -166,13 +166,13 @@ class Guardian:
                     if trip is not None:
                         trips.append(trip)
                 case PolicyDenialEvent():
-                    trip = self.policy_monitor.record_denial(event.policy, event.subject)
-                    if trip is not None:
-                        trips.append(trip)
+                    denial_trip = self.policy_monitor.record_denial(event.policy, event.subject)
+                    if denial_trip is not None:
+                        trips.append(denial_trip)
                 case GateVerdictEvent():
-                    trip = self.policy_monitor.record_verdict(event.key, event.passed)
-                    if trip is not None:
-                        trips.append(trip)
+                    verdict_trip = self.policy_monitor.record_verdict(event.key, event.passed)
+                    if verdict_trip is not None:
+                        trips.append(verdict_trip)
 
         deterministic = GuardianAssessment(
             action=self._fold_action(trips),

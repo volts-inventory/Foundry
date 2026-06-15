@@ -32,6 +32,7 @@ from contextvars import ContextVar
 from typing import Protocol
 
 from foundry.schemas.architecture import PinnedConstraint
+from foundry.schemas.base import ExternalAction
 from foundry.schemas.gates import GateResult, GateTriage
 
 # Gate names whose verdicts MUST carry a valid zone-B runner attestation.
@@ -138,9 +139,17 @@ def make_union_by_key[T](
     return _merge
 
 
-union_by_id = make_union_by_key(lambda d: d["id"])  # tasks: list[dict] keyed by id
+def _task_key(d: dict[str, object]) -> object:  # tasks: list[dict] keyed by id
+    return d["id"]
+
+
+def _action_key(a: ExternalAction) -> object:
+    return a.idempotency_key
+
+
+union_by_id = make_union_by_key(_task_key)
 union_triage = make_union_by_key(GateTriage.union_key)
-union_actions = make_union_by_key(lambda a: a.idempotency_key)
+union_actions = make_union_by_key(_action_key)
 
 
 # ---- artifacts: set-union by content address --------------------------------

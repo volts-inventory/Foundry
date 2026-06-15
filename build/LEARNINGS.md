@@ -565,3 +565,50 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   form; the import is TYPE_CHECKING-only). Annotating the assignment target `final: FactoryState =
   app.invoke(...)` fails [assignment]; cast at the `_result(...)` call site instead.** Same `import
   foundry` / `import foundry.cli` smoke-clean as every module.
+
+## Phase-1 EXIT integration test — the honest audit map (T-M1-16)
+`tests/test_phase1_exit.py` (8 tests) is the milestone witness for the docs/roadmap.md Phase-1 exit
+criteria. It reuses the SHIPPED dev wiring directly — `foundry.cli.run(...)` for the end-to-end
+criteria and a thin `_run_factory` (mirror of test_factory_graph) that retains the `ArtifactStore`
+so the quality-layer bodies can be resolved. It imports the CLI's private `_SCRIPTS` /
+`_synthetic_resolve` / `_KEY` etc. ON PURPOSE (it is the witness FOR that assembly, not a parallel
+copy). Lessons / honesty map for the audit:
+- EX1. **What is GENUINELY end-to-end (no stand-in beyond mock-model + dev-HMAC roots):** the GATE
+  machinery — Spec/Build/Test run by the real `TwoZoneGateRunner`, signed in zone B, admitted ONLY by
+  the real `merge_gates` (assert `runner_attestation is not None` on each — distinct gate names, all
+  PASS, on the trust-filtered `gates` channel); the single `open_pr` ExternalAction + its
+  `content_digest` idempotency key; kill-then-resume coalescing across a durable
+  `FoundryCheckpointer` (same key, exactly one PR); the stable-FAIL latch on an integrated digest; the
+  flake-quarantine routing predicate; TestPlan criterion traceability.
+- EX2. **HIDDEN/held-out test (criterion 2) works via the materialization seam, NOT a real producer.**
+  The `diff_body` is a multi-FILE addition unified-diff carrying BOTH the agent's `test_app.py` AND a
+  separate `test_hidden.py`; `materialize_workdir` writes the whole tree and the Test gate's pinned
+  pytest runs ALL of it (passed count >= min_passed). The honesty: the StubAdapter is a no-op
+  codegen stand-in (CLI3), so the hidden file is INJECTED through `diff_body`/`resolve_blob` (SUP7/
+  GW1a), not authored by the producing (scripted) agent — this asserts the gate MACHINERY genuinely
+  materializes+runs a hidden oracle, NOT that the stub wrote good code. A CONTROL test
+  (`test_exit_2_hidden_suite_actually_gates_the_pass`) proves the hidden suite is load-bearing:
+  `app.py` with the wrong value → own test passes, HIDDEN test FAILs → Test FAIL → no PR.
+- EX3. **Stable-FAIL-no-PR (criterion 6) is forced with a SYNTAX-error diff, not a collection error.**
+  `+def broken( :` makes `app.py` fail `compileall` → Build FAIL on the INTEGRATED `tree_sha` (matches
+  `_DIGEST_RE`) → `runner` latches stable-FAIL → halt, NO `open_pr`, `records.stable_fail_latched(
+  build_digest,"build")` is True. (Contrast SUP5/cli-smoke: a `import missing_module` diff COMPILES
+  but errors pytest → Test ERROR → bounded `fix`, never latches — that is the *halted-not-latched*
+  path, already covered by the CLI smoke; do NOT conflate the two.)
+- EX4. **Criterion 3 (traceability) is asymmetric — be honest.** The QA node FAILS CLOSED, backfilling
+  a synthetic `test::<cid>` per uncovered criterion (Q4), so `TestPlan.test_criteria` /
+  `covered_criteria()` are genuinely NON-EMPTY against the resolved criterion ids → the authoritative,
+  non-vacuous traceability proof. The SDET node does NOT backfill: `sdet._scenario_criteria` keeps only
+  proposed criterion_ids that are KNOWN, and the synthetic resolver mints epoch-dependent ids
+  (`AC-001-<epoch>`) the scripted SDET payload cannot pre-name, so `E2EReport.scenario_criteria` is
+  present + scenario-keyed but its per-scenario coverage is mock-dependent. Assert the FIELD/shape is
+  present for E2E (structural exit criterion); per-scenario coverage FIDELITY is the worker-substrate's
+  job. (If you want E2E coverage non-empty too, give SDET the same fail-closed backfill as QA.)
+- EX5. **Flake-quarantine (criterion 4) is exercised on the genuine `gate_wiring` predicates, not via
+  a contrived pytest flake.** Construct a runner-ATTESTED Test ERROR whose findings carry a
+  "flake-quarantine ... (N=2 fail-then-pass split)" marker (signed via `ZoneBSigner.with_attestation`),
+  fold it with an attested Build PASS through the REAL `merge_gates` (a `DevGateWriteVerifier` MUST be
+  installed on the contextvar or both are dropped fail-closed — easy to miss), then assert
+  `flake_quarantined(...) is True`, the digest is NOT latched, and `route_after_gates(...) == "fix"`
+  (bounded retry, not a failure-halt). This is the same pattern as
+  test_gate_wiring::test_flake_quarantine_does_not_fail_boundary.

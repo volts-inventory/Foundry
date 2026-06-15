@@ -1,16 +1,14 @@
 # STATUS — resume pointer
 
 - **Session:** 1 (2026-06-15)
-- **Phase / milestone:** Phase 1 (M1) in progress. Phase 0 DONE.
-- **Done:** Wave A (schemas+doubles), scaffolding, Wave B (4 agent layers), Wave C (4 subgraphs),
-  Wave D (gate-wiring).
-- **Tasks:** M1 13/17 done (T-M1-01,02,03,04a,04,05,06,07,08,09,10,11,12).
-- **Last gate baseline:** ruff ✓, mypy foundry ✓ (84 files), pytest 382 pass / 1 skip, coverage ~85%.
-- **Last commit:** Wave D accepted.
+- **Phase / milestone:** Phase 1 (M1) implementation COMPLETE; milestone gate sweep PASSED; AUDIT LOOP in progress.
+- **Done:** Waves A-E. All 18 M1 implementation tasks done (T-M1-01..16 + 04a + 14b). T-TOOL-MUT deferred.
+- **Last gate baseline:** ruff ✓, mypy foundry ✓ (88 files), full suite green, coverage 86.6%. cli smoke exit 0.
+- **Last commit:** b767650 (milestone sweep + mutation deferral).
 
 ## NEXT-ACTION
-Wave E (SEQUENTIAL — single-owner collision files): T-M1-13 supervisor.py (phase routing across
-subgraphs using gate_wiring predicates) -> T-M1-14 factory_graph.py (build_factory_graph() ->
-Compiled[FactoryState]; checkpointer; assistant-mode emit node) -> T-M1-15 cli.py (one-line
-request end-to-end with MockTransport+StubAdapter) -> T-M1-16 Phase-1 exit integration test +
-milestone gate sweep (full suite, coverage>=80%, scoped mutation). T-M1-13 is in_progress.
+Await the fresh independent Auditor's report (briefed with design docs + code only). If FINDINGS:
+open backlog tasks, fix, dispatch ANOTHER fresh auditor (max 3 cycles). On CLEAN PASS: close M1,
+update PROGRESS/STATUS, then open M1.5 — dispatch the just-in-time planner (T-M1_5-PLAN) to
+decompose Phase 1.5 (variance/base-rate pilot, pre-registration + decision table, powered A/B
+harness + role ablation) into BACKLOG tasks, and begin the M1.5 build loop.

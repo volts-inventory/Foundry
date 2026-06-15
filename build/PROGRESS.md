@@ -52,3 +52,16 @@
 - Baseline: ruff/mypy clean, 382 pass/1 skip, coverage ~85%.
 - NEXT (Wave E, sequential single-owner files): T-M1-13 supervisor -> T-M1-14 factory_graph ->
   T-M1-15 cli -> T-M1-16 Phase-1 exit test + milestone gate sweep.
+
+## 2026-06-15 — Session 1: Phase 1 (M1) implementation COMPLETE; milestone gate sweep PASSED
+- Wave E (sequential): T-M1-13 supervisor, T-M1-14 factory_graph, T-M1-14b ArtifactStore (inserted
+  to close the emit/resolve body-store gap), T-M1-15 cli (SPEC smoke entry), T-M1-16 Phase-1 exit test.
+  Each fresh-implemented + fresh-critic reviewed; all findings resolved (supervisor 3 MINOR fixed,
+  factory_graph 3 MINOR fixed/folded, gate-wiring MAJOR diff-body fixed + round-2 verified).
+- MILESTONE GATE SWEEP: ruff clean, mypy clean (88 files), full suite green, coverage 86.6% (>=80 bar).
+  RUNTIME SMOKE: `python -m foundry.cli "build a tiny URL-shortener service"` runs the full SPEC core
+  path to exit 0 (distinct attested Spec/Build/Test PASS, one open_pr emitted). CODEMAP regenerated.
+- Mutation: quantified mutmut scoring DEFERRED (D7, tool-gap) with justification (property + adversarial
+  trust tests are the fault-injection evidence); tracked T-TOOL-MUT, re-attempt before EXIT.
+- AUDIT LOOP: fresh independent auditor dispatched (design-docs + code only).
+- NEXT: resolve audit findings (if any) -> close M1 -> open M1.5 (just-in-time decompose Phase 1.5).

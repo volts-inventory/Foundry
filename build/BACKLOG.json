@@ -82,7 +82,7 @@
         "mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M1-02",
@@ -108,7 +108,7 @@
         "mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M1-03",
@@ -134,7 +134,34 @@
         "mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
+    },
+    {
+      "id": "T-M1-04a",
+      "milestone": "M1",
+      "title": "Agent-runtime scaffolding (AgentRuntime + node convention)",
+      "job_to_be_done": "Establish the shared convention all Phase-1 agent nodes follow so subgraphs/factory_graph wire them uniformly: foundry/agents/__init__.py (package) + foundry/agents/_runtime.py defining AgentRuntime(proxy, epochs, adapter=None) with a .seq(config,node_id,key,local=0)->Seq helper (mirrors graph/skeleton.py epoch usage) and a NodeFn type alias. Node factories take an AgentRuntime and return a (state,config)->channel-writes callable.",
+      "files_owned": [
+        "foundry/agents/__init__.py",
+        "foundry/agents/_runtime.py",
+        "tests/test_agent_runtime.py"
+      ],
+      "dependencies": [
+        "T-M1-03"
+      ],
+      "role": "LangGraph engineer",
+      "required_experts": [
+        "E1"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "AgentRuntime holds one ModelProviderProxy + one EpochCounter (+ optional WorkerAdapter); .seq() builds a Seq from config thread_id + epochs.bump (matches graph/skeleton.py semantics)",
+        "NodeFn type alias = Callable[[FactoryState, RunnableConfig], dict[str, Any]]; documented node convention (factory make_x_node(rt)->NodeFn)",
+        "No model egress here; pure scaffolding. Tests: seq monotonic per (node,key), run_id propagation, AgentRuntime construction with test doubles",
+        "mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
     },
     {
       "id": "T-M1-04",
@@ -142,7 +169,6 @@
       "title": "Product layer agent nodes (stakeholder_proxy, product_manager, criteria_completeness_critic, eng_program_mgr)",
       "job_to_be_done": "Build the four Layer-1 LangGraph node functions under foundry/agents/product/. Each reads FactoryState, calls the proxy (proxy.complete; the critic uses proxy.judge with judgment_provenance stamp), assembles a bounded context window, and returns channel writes (artifacts: IntentBrief/PRD/AcceptanceCriterion[]/CriteriaCritique/SprintPlan; gate_triage advisory). Criteria critic feeds the Spec gate; security/abuse omission must surface as blocking.",
       "files_owned": [
-        "foundry/agents/__init__.py",
         "foundry/agents/product/__init__.py",
         "foundry/agents/product/stakeholder_proxy.py",
         "foundry/agents/product/product_manager.py",
@@ -152,7 +178,8 @@
       ],
       "dependencies": [
         "T-M1-02",
-        "T-M1-03"
+        "T-M1-03",
+        "T-M1-04a"
       ],
       "role": "LLM-application/agent engineer",
       "required_experts": [
@@ -183,7 +210,8 @@
       ],
       "dependencies": [
         "T-M1-01",
-        "T-M1-03"
+        "T-M1-03",
+        "T-M1-04a"
       ],
       "role": "LLM-application/agent engineer",
       "required_experts": [
@@ -214,7 +242,8 @@
       ],
       "dependencies": [
         "T-M1-02",
-        "T-M1-03"
+        "T-M1-03",
+        "T-M1-04a"
       ],
       "role": "LLM-application/agent engineer",
       "required_experts": [
@@ -246,7 +275,8 @@
       ],
       "dependencies": [
         "T-M1-02",
-        "T-M1-03"
+        "T-M1-03",
+        "T-M1-04a"
       ],
       "role": "LLM-application/agent engineer",
       "required_experts": [

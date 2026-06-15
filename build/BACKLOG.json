@@ -25,7 +25,8 @@
       "id": "M1_5",
       "phase": "Phase 1.5 \u2014 Decision gate: powered A/B + role ablation",
       "status": "in_progress",
-      "exit_criteria": "Variance/base-rate pilot (blocker, runs first); frozen pre-registration + decision table; powered A/B harness (3 arms, oracle-scored primary, ITT) + role ablation \u2014 built and exercised against local/synthetic task fixtures (not a funded live study). Decision: structure beats baseline by pre-registered margin at <= cost -> Proceed; null at MDE -> Hard KILL/redesign; {USD-null, token-positive} -> bounded overhead-redesign."
+      "exit_criteria": "Variance/base-rate pilot (blocker, runs first); frozen pre-registration + decision table; powered A/B harness (3 arms, oracle-scored primary, ITT) + role ablation \u2014 built and exercised against local/synthetic task fixtures (not a funded live study). Decision: structure beats baseline by pre-registered margin at <= cost -> Proceed; null at MDE -> Hard KILL/redesign; {USD-null, token-positive} -> bounded overhead-redesign.",
+      "note": "Decomposed by T-M1_5-PLAN into T-M15-01..T-M15-11 (all DECISION-GATE only; the confirmatory A/B + full scorecard/optimization are Phase 6 and NOT pulled in). New module: foundry/evaluation/ (hypothesis, task_fixtures, harness, pilot, power, preregistration, ab_runner, decision_table, ablation, scorecard) exercised on SYNTHETIC fixtures via the existing MockTransport/StubAdapter doubles + cli.run + build_factory_graph, binding to the EXISTING global_records alpha look-ledger (eval_set_identity, decision_id). Honest dry-run of the methodology, not real evidence. Each evaluation/*.py = single owner; collision hazards (factory_graph/supervisor/state/schemas/pyproject) untouched."
     },
     {
       "id": "M2",
@@ -592,7 +593,313 @@
         "M1.5 decomposed into concrete tasks with disjoint files_owned and dependency ordering, derived from implementation-plan \u00a77 Phase 1.5 + evaluation.md"
       ],
       "retries_remaining": 3,
+      "status": "done"
+    },
+    {
+      "id": "T-M15-01",
+      "milestone": "M1_5",
+      "title": "evaluation/ package scaffold + central-hypothesis schemas",
+      "job_to_be_done": "Create the foundry/evaluation/ package (__init__.py) and hypothesis.py: frozen pydantic v2 models for the central hypothesis (org-structure beats a strong single agent at equal cost), the three Arm identities (FOUNDRY / STRONG_SINGLE_AGENT / SINGLE_AGENT_PLUS_GATES), the Equalizer enum (EQUAL_USD primary, EQUAL_EFFECTIVE_TOKEN secondary), and the Endpoint identities (USD-primary SWE-EVO resolution; effective-token secondary; gating secondaries). These are the shared vocabulary every later evaluation/ module imports.",
+      "files_owned": [
+        "foundry/evaluation/__init__.py",
+        "foundry/evaluation/hypothesis.py",
+        "tests/test_eval_hypothesis.py"
+      ],
+      "dependencies": [
+        "T-M1_5-PLAN"
+      ],
+      "role": "Stats/eval engineer",
+      "required_experts": [
+        "E5",
+        "E6"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "Arm, Equalizer, Endpoint, and HypothesisSpec are FrozenModel/StrEnum (extra=forbid, content_identity stable), reusing schemas base models per LEARNINGS L3; no parallel artifact type invented",
+        "Three arms named exactly per evaluation.md \u00a72; EQUAL_USD marked primary/headline and EQUAL_EFFECTIVE_TOKEN secondary; SWE-EVO resolution is the SOLE confirmatory primary endpoint",
+        "HypothesisSpec records that this is a methodology DRY-RUN on synthetic fixtures (an honesty flag, e.g. evidence_class=\"dry_run_synthetic\"), not live evidence",
+        "Tests added: construction, frozenness, enum membership, content_identity stability",
+        "mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
       "status": "in_progress"
+    },
+    {
+      "id": "T-M15-02",
+      "milestone": "M1_5",
+      "title": "Task-fixture frame + synthetic SWE-EVO fixtures (shared sampling frame, disjoint slices)",
+      "job_to_be_done": "Build foundry/evaluation/task_fixtures.py: a frozen SamplingFrame (strata + target difficulty distribution) and a deterministic synthetic SWE-EVO-style task set (each fixture = a one-line request + hidden/held-out acceptance oracle + known control-arm outcome) authored so the pilot slice and the scored slice can be drawn DISJOINT but from the SAME frozen frame (evaluation.md \u00a72). Fixtures are local/deterministic (seeded), runnable through cli.run + the test doubles; they are explicitly synthetic, not real benchmark tasks.",
+      "files_owned": [
+        "foundry/evaluation/task_fixtures.py",
+        "tests/test_eval_task_fixtures.py"
+      ],
+      "dependencies": [
+        "T-M15-01"
+      ],
+      "role": "Stats/eval engineer",
+      "required_experts": [
+        "E5",
+        "E1"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "SamplingFrame is frozen + content-hashable; draw_disjoint(seed, n_pilot, n_scored) returns two DISJOINT task lists sampled from the SAME frame with matched strata/difficulty distribution",
+        "Each TaskFixture carries id, request string, hidden-oracle descriptor, and a deterministic synthetic outcome usable without a live model (drives cli.run with MockTransport/StubAdapter, D1/D3)",
+        "Determinism: same seed -> byte-identical task lists; pilot and scored slices provably disjoint (id intersection empty) yet same frame identity",
+        "Honesty: module + models record fixtures are SYNTHETIC dry-run inputs, not a curated/contamination-controlled real suite",
+        "Tests added; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M15-03",
+      "milestone": "M1_5",
+      "title": "Oracle-scored harness + ITT runner (per-arm, no LLM judge in primary)",
+      "job_to_be_done": "Build foundry/evaluation/harness.py: a deterministic per-arm task runner that invokes an arm callable (FOUNDRY arm = foundry.cli.run with the existing dev wiring; the two single-agent arms = thin StubAdapter-backed callables sharing the SAME tool/retrieval/sandbox/tier substrate as a CI-checked parity invariant) on a TaskFixture, scores resolution by the hidden ORACLE only (no LLM-judge component in the primary, evaluation.md \u00a74), and records the per-run RunRecord. ITT is enforced here: the denominator is ALL INITIATED tasks; any non-completion (abort/budget-exhaustion/escalation/crash) scores UNRESOLVED, never dropped.",
+      "files_owned": [
+        "foundry/evaluation/harness.py",
+        "tests/test_eval_harness.py"
+      ],
+      "dependencies": [
+        "T-M15-02"
+      ],
+      "role": "Stats/eval engineer",
+      "required_experts": [
+        "E5",
+        "E1"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "run_arm(arm, fixtures, k) returns RunRecords with k repeats/task carried together per task (the inferential unit is the task); FOUNDRY arm wraps foundry.cli.run, reusing its RunResult/gate_statuses (no duplicate graph wiring)",
+        "Primary resolution is scored from the hidden oracle ONLY; an explicit assertion/guard that no LLM-judge signal enters the primary verdict",
+        "ITT rule enforced + unit-tested: a crashed/aborted/budget-exhausted run scores UNRESOLVED and stays in the denominator (no sample dropping); differential-attrition test proves the denominator is all-initiated",
+        "Substrate-parity invariant recorded + checked across arms (same tool/retrieval/sandbox/tier mix) and hashed into the run record",
+        "Tests added; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M15-04",
+      "milestone": "M1_5",
+      "title": "Variance/base-rate PILOT (blocker, runs first, on disjoint tasks; read-only into power)",
+      "job_to_be_done": "Build foundry/evaluation/pilot.py: run the strong-single-agent control arm over the PILOT slice (disjoint from the scored slice, same frame) to estimate (i) control resolution rate + within/between-task variance components on the USD-primary scale and (iii/iv) the same on the token-secondary's effective-token-exhaustion scale (evaluation.md \u00a72). Outputs are a frozen PilotResult consumed READ-ONLY by the power calc. The pilot is NOT a scored A/B arm and NOT a rung to descend to; it consumes a recorded budget line.",
+      "files_owned": [
+        "foundry/evaluation/pilot.py",
+        "tests/test_eval_pilot.py"
+      ],
+      "dependencies": [
+        "T-M15-03"
+      ],
+      "role": "Stats/eval engineer",
+      "required_experts": [
+        "E5"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "PilotResult (frozen) carries control base rate + within-task vs between-task variance components for BOTH the USD-primary resolution scale AND the token-secondary effective-token-exhaustion scale",
+        "Pilot runs only on the disjoint pilot slice (asserts disjointness from the scored slice and same frame identity); it is explicitly flagged not-a-scored-arm and records its consumed budget",
+        "PilotResult is immutable/read-only into downstream power; no method mutates it post-construction",
+        "Tests added driving the pilot through the harness + synthetic fixtures; mypy foundry + ruff clean",
+        "ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M15-05",
+      "milestone": "M1_5",
+      "title": "Power calc + (n,k) constrained allocation off the pilot",
+      "job_to_be_done": "Build foundry/evaluation/power.py: given a PilotResult + a funded budget, compute the (n tasks, k repeats/task) allocation as a CONSTRAINED optimization minimizing the task-level effect-estimator variance under budget (more k only pays while within-task nondeterminism dominates), and the minimum detectable effect at the target power. Because the USD-primary and token-secondary have DIFFERENT variance structures, (n,k) must either satisfy BOTH endpoints' funded MDE/power (feasible-region intersection) OR state which endpoint governs and report the OTHER endpoint's realized cross-power at that (n,k) (evaluation.md \u00a72). Power is task-level (paired cluster-bootstrap unit = task), never n*k as independent draws.",
+      "files_owned": [
+        "foundry/evaluation/power.py",
+        "tests/test_eval_power.py"
+      ],
+      "dependencies": [
+        "T-M15-04"
+      ],
+      "role": "Stats/eval engineer",
+      "required_experts": [
+        "E5"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "power_allocation(pilot, budget, target_power, mde) returns a frozen PowerPlan with (n,k), the MDE, the variance components used, and the governing-endpoint choice + the other endpoint's realized power at that (n,k)",
+        "Effective N is task-level (carries each task's k together); a unit test proves treating n*k as independent overstates power and is NOT used",
+        "k allocation responds to the within/between variance ratio (more k only while within-task variance dominates), exercised by a test with two contrasting pilot variance profiles",
+        "Power is read-only off the PilotResult; the pilot is never re-used as a scored arm",
+        "Tests added; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M15-06",
+      "milestone": "M1_5",
+      "title": "Frozen pre-registration manifest bound to the funded power rung + alpha look-ledger",
+      "job_to_be_done": "Build foundry/evaluation/preregistration.py: assemble the PreregistrationManifest (arms, equalizers, the funded-rung n/k/MDE/power/alpha from the PowerPlan, endpoint hierarchy + FWER correction choice, cluster-bootstrap spec, seeds, stopping rule, sub-turn effective-token classifier spec), content-HASH it (content_digest, L7), and FREEZE it before any scored run. Bind the manifest to the global alpha look-ledger via global_records.record_alpha_look/alpha_looks_spent keyed on (eval_set_identity, decision_id) \u2014 reuse the EXISTING ledger, do not add a parallel one. A null at the funded MDE is recorded as a real KILL trigger; post-hoc rung selection is forbidden by construction (manifest is frozen + hashed).",
+      "files_owned": [
+        "foundry/evaluation/preregistration.py",
+        "tests/test_eval_preregistration.py"
+      ],
+      "dependencies": [
+        "T-M15-05"
+      ],
+      "role": "Stats/eval engineer",
+      "required_experts": [
+        "E5",
+        "E2"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "PreregistrationManifest is a FrozenModel carrying the funded rung (n/k/MDE/power/alpha), endpoint hierarchy + FWER-correction choice (Holm\u2013Bonferroni or studentized step-down max-T with the count-endpoint SE-floor noted), bootstrap spec, seeds, stopping rule, and the sub-turn effective-token classifier spec",
+        "manifest_hash = content_digest over the frozen manifest (L7, process-stable); freezing is one-shot \u2014 a second freeze with different inputs is rejected/yields a different hash, proving no post-hoc rung edit",
+        "Binds to the EXISTING global_records alpha look-ledger keyed on (eval_set_identity, decision_id) via record_alpha_look/alpha_looks_spent (no new ledger); a unit test shows a look is recorded and forking does not reset spend",
+        "Records that a null at the funded MDE is a KILL trigger and that the funded MDE is the test's authority ceiling",
+        "Tests added; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M15-07",
+      "milestone": "M1_5",
+      "title": "Powered 3-arm A/B runner over the scored slice (paired cluster-bootstrap, FWER)",
+      "job_to_be_done": "Build foundry/evaluation/ab_runner.py: drive all three arms over the SCORED slice (disjoint from the pilot, same frame) at the manifest's frozen (n,k), via the T-M15-03 harness. Compute the USD-primary effect (ITT resolution Foundry vs strong baseline) with a paired cluster-bootstrap that resamples TASKS carrying their k runs together, the effective-token secondary on the all-initiated denominator (effective-token-budget exhaustion, NOT a post-treatment 'reached-implementation' condition), and apply the manifest's pre-registered FWER correction over the gating-secondary family. Requires a frozen manifest (fail-closed if absent); records each look against the alpha ledger.",
+      "files_owned": [
+        "foundry/evaluation/ab_runner.py",
+        "tests/test_eval_ab_runner.py"
+      ],
+      "dependencies": [
+        "T-M15-06"
+      ],
+      "role": "Stats/eval engineer",
+      "required_experts": [
+        "E5",
+        "E1"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "run_ab(manifest, scored_slice) runs all 3 arms at the frozen (n,k) via the harness; fail-closed if the manifest is unfrozen/absent",
+        "USD-primary uses a paired cluster-bootstrap resampling TASKS (k runs carried together); a test proves the resample unit is the task, not the run",
+        "Token-secondary uses the SAME all-initiated ITT denominator as the primary, differing only on the effective-token (not raw-token) exhaustion scale; a test proves it does NOT condition on the post-treatment 'reached implementation' event (no collider)",
+        "FWER correction applied exactly as frozen in the manifest over the gating family; each scored look recorded via the alpha ledger",
+        "Tests added exercising a positive and a null synthetic effect; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M15-08",
+      "milestone": "M1_5",
+      "title": "Decision table (Proceed / Hard KILL / Bounded overhead-redesign)",
+      "job_to_be_done": "Build foundry/evaluation/decision_table.py: the frozen {primary x secondary} cross-product from evaluation.md \u00a72.5 \u2014 Positive primary -> Proceed; {USD-null, token-null} -> Hard KILL; {USD-null, token-positive} -> Bounded overhead-redesign (scope frozen to coordination/monitoring/context-assembly ONLY; forbids role-set/gate-structure/topology changes; a single pre-registered re-test). Reads the A/B result + the frozen manifest and emits a Verdict with the matched rule. The decision table itself is frozen + hashed into the manifest before the run.",
+      "files_owned": [
+        "foundry/evaluation/decision_table.py",
+        "tests/test_eval_decision_table.py"
+      ],
+      "dependencies": [
+        "T-M15-07"
+      ],
+      "role": "Stats/eval engineer",
+      "required_experts": [
+        "E5"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "decide(ab_result, manifest) -> Verdict implements exactly the three rows; {USD-null, token-positive} returns BOUNDED_OVERHEAD_REDESIGN carrying the frozen overhead-only scope + the single allowed re-test spec",
+        "The redesign scope is constrained to overhead-affecting components and explicitly forbids role-set/gate-structure/topology changes (asserted)",
+        "A null at the funded MDE with a token-null returns HARD_KILL (not a re-power invitation); a positive primary returns PROCEED regardless of the secondary",
+        "Decision table content is hashed into the manifest before the run (no post-hoc rule edit)",
+        "Tests added covering all three rows; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M15-09",
+      "milestone": "M1_5",
+      "title": "Role ablation harness (does each role past PM->Architect->Senior->QA earn its place?)",
+      "job_to_be_done": "Build foundry/evaluation/ablation.py: run the FOUNDRY arm with role-subset configurations (the PM->Architect->Senior->QA core vs core+each-additional-role) over the scored fixtures via the harness, and report whether each added role improves the scorecard slice. Reuses cli.run/build_factory_graph by toggling which subgraph nodes are active (a config knob, not a graph rewrite); honest that on synthetic dry-run fixtures the deltas are methodology-shaped, not real evidence.",
+      "files_owned": [
+        "foundry/evaluation/ablation.py",
+        "tests/test_eval_ablation.py"
+      ],
+      "dependencies": [
+        "T-M15-07"
+      ],
+      "role": "Stats/eval engineer",
+      "required_experts": [
+        "E5",
+        "E1"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "ablation(scored_slice) runs the core role set and core+each-added-role via the harness, returning a per-role scorecard-delta record",
+        "Role toggling is a configuration over the existing factory_graph/subgraphs (no parallel graph build); the core PM->Architect->Senior->QA is the baseline subset",
+        "Output records honestly that synthetic-fixture deltas are a methodology demonstration, not evidence a role helps",
+        "Tests added asserting the core baseline + at least one added-role comparison run; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M15-10",
+      "milestone": "M1_5",
+      "title": "Scorecard slice + ITT reporting (unconditional, honesty banner)",
+      "job_to_be_done": "Build foundry/evaluation/scorecard.py: assemble the Phase-1.5 headline scorecard SLICE from the A/B result + ablation \u2014 the confirmatory primary (SWE-EVO resolution vs baseline at equal USD, oracle-scored, its alpha), the unconditional ITT hidden-test pass rate (per attempt, all-initiated denominator; the conditional 'of self-passing runs' figure kept descriptive only), and the gating secondaries under the manifest's FWER correction. Every rendered scorecard carries a DRY-RUN honesty banner: synthetic fixtures + mock model + dev HMAC roots = methodology exercise, not real evidence.",
+      "files_owned": [
+        "foundry/evaluation/scorecard.py",
+        "tests/test_eval_scorecard.py"
+      ],
+      "dependencies": [
+        "T-M15-07",
+        "T-M15-08",
+        "T-M15-09"
+      ],
+      "role": "Stats/eval engineer",
+      "required_experts": [
+        "E5"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "Scorecard renders exactly one confirmatory primary row (SWE-EVO resolution, its own alpha) + secondary/descriptive rows that cannot independently gate except under the frozen FWER hierarchy",
+        "Hidden-test pass rate reported UNCONDITIONALLY per attempt over the all-initiated denominator (ITT); the conditional 'of self-passing runs' rate is present but marked descriptive-only (collider-bias note)",
+        "Every scorecard output carries a DRY-RUN honesty banner (synthetic fixtures / mock model / dev roots = not real evidence)",
+        "Tests added asserting the primary/secondary split, the ITT denominator, and the honesty banner presence; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M15-11",
+      "milestone": "M1_5",
+      "title": "End-to-end exercise: pilot -> prereg -> powered A/B -> decision + ablation on synthetic fixtures",
+      "job_to_be_done": "Add tests/test_eval_phase1_5_exit.py: the milestone witness wiring the whole decision gate end-to-end on the synthetic fixtures with the existing test doubles \u2014 draw disjoint pilot/scored slices from one frame, run the pilot, compute power, freeze the preregistration manifest (bound to the alpha ledger), run the powered 3-arm A/B + role ablation, render the scorecard, and emit a decision-table Verdict. Asserts the methodology honestly: pilot runs FIRST and is read-only into power, the manifest is frozen before the scored run, ITT is unconditional, and the run is recorded as a DRY-RUN (not real evidence). No feature code lives here \u2014 it is the integration/honesty audit only.",
+      "files_owned": [
+        "tests/test_eval_phase1_5_exit.py"
+      ],
+      "dependencies": [
+        "T-M15-08",
+        "T-M15-09",
+        "T-M15-10"
+      ],
+      "role": "QA / eval engineer",
+      "required_experts": [
+        "E5",
+        "E1"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "End-to-end test exercises pilot -> power -> frozen prereg -> 3-arm powered A/B (ITT) -> decision-table Verdict + role ablation -> scorecard on synthetic fixtures with MockTransport/StubAdapter (no live API key, no claude -p)",
+        "Asserts ordering invariants: the pilot runs FIRST on the disjoint slice and is read-only into power; the manifest is frozen + hashed BEFORE the scored run; each scored look is recorded against the (eval_set_identity, decision_id) alpha ledger",
+        "Asserts the decision-table cross-product (drives a synthetic positive -> Proceed and a synthetic {USD-null, token-positive} -> Bounded overhead-redesign, and {null,null} -> Hard KILL)",
+        "Asserts the DRY-RUN honesty banner is present and that the harness records it is a methodology exercise, not real evidence",
+        "Milestone gate sweep green: ruff, mypy foundry, full pytest, coverage >=80% overall (new evaluation/ code >=85%)"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
     },
     {
       "id": "T-M2-PLAN",

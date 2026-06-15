@@ -476,6 +476,34 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   empty `default_text` -> a parse failure on the re-loop). Raise LangGraph's `recursion_limit` on the
   run config for multi-loop fix runs.
 
+## Evaluation — Phase-1.5 central-hypothesis schemas (T-M15-01)
+- EV1. **`foundry/evaluation/hypothesis.py` is a PURE schema/enum layer — NO statistics.** Power
+  calcs, bootstrap, alpha-spending, scoring live in the later M1.5 modules
+  (preregistration.py/decision_table.py/scorecard.py/…). The next 10 tasks build on these frozen
+  types; do NOT add stats logic here. `foundry/evaluation/__init__.py` re-exports the types and is
+  import-cheap (pydantic + enums only).
+- EV2. **API.** `Arm` (FOUNDRY / BASELINE_SINGLE_AGENT / SINGLE_AGENT_PLUS_GATES),
+  `DecisionClass` (PROCEED / HARD_KILL / BOUNDED_OVERHEAD_REDESIGN), `Equalizer`
+  (EQUAL_USD primary / EQUAL_EFFECTIVE_TASK_TOKEN secondary), `Provenance`
+  (DRY_RUN / PILOT / SCORED). `PrimaryMetric` = SWE-EVO resolution rate, `higher_is_better`,
+  `oracle_scored` (§4: no LLM judge in primary), `equalizer=EQUAL_USD`, `intent_to_treat` (§2 ITT).
+  `PowerRung` = the funded rung (`mde>0`, `0<target_power<1`, optional `n_tasks/k_repeats/
+  funded_budget_microusd` frozen off the pilot). `CentralHypothesis` carries h0/h1, primary_metric,
+  treatment/control arms (FOUNDRY vs BASELINE at `at_most_equal_cost`), `alpha` (0<α<1), `mde`>0
+  (committed pre-run), `funded_power_rung`, `decision_classes`, `provenance`, `dry_run`.
+- EV3. **DRY-RUN HONESTY CONVENTION (load-bearing for the whole harness).** Every hypothesis model
+  defaults `provenance=Provenance.DRY_RUN` + `dry_run=True`: it is a METHODOLOGY DRY-RUN on synthetic
+  fixtures, asserting NOTHING about real Foundry-vs-baseline performance — it only fixes the
+  pre-registration SHAPE so it can be hashed into a manifest. Flip to `Provenance.SCORED`/`PILOT`
+  (+ `dry_run=False`) for the funded run/pilot. Keep this default and the no-real-evidence docstrings
+  on every model the later tasks add.
+- EV4. **Validation via `Field(gt=…/lt=…/ge=…)` (not `field_validator`)** — `0<alpha<1`, `mde>0`,
+  `0<target_power<1`, positive counts. `FrozenModel` (extra=forbid, frozen) + `content_identity()`
+  apply unchanged; `provenance`/`dry_run` are part of identity, so a dry-run and a scored hypothesis
+  with otherwise-equal fields have DIFFERENT content identities (don't coalesce a real run with its
+  dry-run rehearsal). Monetary fields stay integer micro-USD (base.py convention), never float;
+  `mde`/`alpha`/`target_power` are floats (they are rates/effect sizes, not money).
+
 ## ArtifactStore — the real content-addressed body store (T-M1-14b, DECISIONS D6)
 - AS1. **`foundry/durability/artifact_store.py::ArtifactStore` closes the emit/resolve gap.**
   `emit_artifact` MINTED a `cas://sha256/<content_identity>` handle but DISCARDED the body, so

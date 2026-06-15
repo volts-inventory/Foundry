@@ -584,6 +584,38 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   doubles, D1-D3; control-only runs are cheap simulated stand-ins). The overlap-raise test subclasses
   `TaskFrame` to override `pilot_slice` to inject a scored id (frozen model, so `model_copy(update=)`).
 
+## Evaluation — power calc + (n,k) constrained allocation (T-M15-05)
+- EV12. **`foundry/evaluation/power.py::compute_power_rung(pilot, *, mde, alpha, target_power,
+  budget_usd_microusd, per_task_repeat_cost_microusd, k_max=16) -> FundedPowerRung` (pure stats, NO
+  model calls) sizes the §2 funded rung off the read-only `PilotResult`.** FORMULA: the inferential
+  unit is the TASK (cluster); each task contributes ONE per-task resolution rate (its `k` repeats
+  collapsed — `n×k` as independent overstates effective N), and we power a **two-sample
+  difference-in-means z-test** on FOUNDRY vs BASELINE per-task rates:
+  `n_per_arm = ceil((z_{1-α/2}+z_{1-β})² · (var_T+var_C) / mde²)`. Per-arm per-task variance =
+  `σ²_between + p(1−p)/k` (`_per_arm_task_variance`): the pilot's `control_resolution_variance`
+  (between-task, does NOT shrink with k) PLUS the within-task Bernoulli term that AVERAGES DOWN with
+  k (so k only pays while within-task dominates). Control base rate = `pilot.control_base_rate`;
+  treatment rate = `control+mde` clamped `[0,1]`; treatment between-task var = `max(control_between,
+  pilot.effect_size_variance)` (conservative floor). `normal_ppf` is Acklam's probit (no scipy);
+  `normal_cdf` via `math.erf`. CLOSED-FORM PIN: base=0.2, treatment=0.3, zero between-var, mde=0.1,
+  α=0.05, power=0.8 ⇒ z_{.975}=1.95996, z_{.8}=0.84162 ⇒ **n=291/arm** (test asserts exact).
+- EV13. **(n,k) is a CONSTRAINED OPTIMIZATION, not two free numbers.** For each `k∈[1,k_max]` compute
+  the budget-unconstrained `required_n` and the equal-USD cost `2·n·k·per_task_repeat_cost_microusd`
+  (TWO arms); among candidates that fit budget AND reach `target_power`, pick the CHEAPEST (prefers
+  small k once between-task var dominates). INTEGRITY (load-bearing, §1/§2/§8): the rung is computed
+  from (pilot var/base-rate + the PRE-COMMITTED mde/alpha/target_power) ONLY — this module NEVER
+  chooses or relaxes them. If no `(n,k)` reaches `target_power` within budget, it returns
+  UNDERPOWERED at the funded budget (`funded=False`/`underpowered=True`, `achieved_power<target` of
+  the BEST budget-affordable allocation) with the COMMITTED `mde`/`alpha` UNCHANGED — it does NOT
+  shrink MDE or inflate alpha, and there is NO "re-pick a smaller MDE after data" path. Explicit
+  side-effect-free `is_funded(rung, budget) -> bool` (compares frozen `funded_budget_microusd` ≤
+  budget; raises if unset). `FundedPowerRung` SUBCLASSES the frozen `PowerRung` (same manifest
+  contract) + adds `alpha`, `required_n_tasks`, `achieved_power`, `funded`, `underpowered`. The caller
+  freezes the returned rung in the preregistration BEFORE scored runs. Tests: 17, all green; full
+  suite unbroken. Monotonicity covered (smaller MDE / higher power / higher variance → larger n);
+  k-halving check (zero between-var ⇒ doubling k ≈ halves n); determinism (`content_identity()`
+  stable). HONESTY: the pilot is synthetic/simulated, so a rung asserts NOTHING about real perf.
+
 ## ArtifactStore — the real content-addressed body store (T-M1-14b, DECISIONS D6)
 - AS1. **`foundry/durability/artifact_store.py::ArtifactStore` closes the emit/resolve gap.**
   `emit_artifact` MINTED a `cas://sha256/<content_identity>` handle but DISCARDED the body, so

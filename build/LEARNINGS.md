@@ -410,3 +410,57 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   boundary)` exposes the REASON (gate family + flake/quarantine finding marker) so the supervisor can
   quarantine-and-retry vs report a failure. The supervisor (next wave) calls these plain helpers at
   boundaries; gate_wiring does NOT edit supervisor.py/factory_graph.py (they don't exist yet).
+
+## Supervisor — phase routing + gate-wiring at boundaries (T-M1-13)
+- SUP1. **`build_supervisor_graph(rt, *, runner, resolve, resolve_blob, source_dir, index=None,
+  max_fix_attempts=3) -> StateGraph[FactoryState]`** returns the UNCOMPILED graph (SG4; factory_graph
+  T-M1-14 compiles + adds the checkpointer + emit node). Phase order:
+  `triage -> product -> architecture -> [spec_gate] -> implementation -> quality -> [build_test_gate]
+  -> END`. The four layer subgraphs are mounted as nodes via `build_<layer>_subgraph(...).compile()`
+  then `.invoke(state, config)` inside a thin concrete node `def` (SG2/IM5 — the `NodeFn` alias trips
+  `add_node` overload resolution; wrap, don't `cast`). The subgraph node also stamps the single-writer
+  `phase` channel.
+- SUP2. **Gate nodes call the gate-wiring helpers; verdicts ONLY from the runner (L5/GW2).** `spec_gate`
+  -> `run_spec_gate(...)`; `build_test_gate` -> `run_build_test_gates(...)`, each returning
+  `{"gates":[...]}` (forwarded attested records). Each gate node materializes into a FRESH
+  `tempfile.mkdtemp()` workdir (the integrated `tree_sha` is a pure function of the content-addressed
+  handles, so a per-run temp dir is fine).
+- SUP3. **Routing = `add_conditional_edges(gate_node, _route, {"advance": next, "fix": fix_node,
+  "halt": END})`** where `_route` calls `route_after_gates(state, config, boundary=..., records=...,
+  max_fix_attempts=...)` (GW3). SPEC: advance->implementation, fix->architecture (re-verify), halt->END.
+  BUILD_TEST: advance->END, fix->implementation, halt->END. The path map MUST list every legal return
+  (`advance`/`fix`/`halt`) or compile rejects it. `route_after_gates` needs the cross-fork
+  `GlobalRecordsView`; the supervisor signature carries no `records=`, so read it off the runner
+  (`runner._records`, `# noqa: SLF001`) — the runner is the records' owner.
+- SUP4. **Fix-bound lives on `BudgetLedger.fix_attempts_since_all_green` (single-writer `budget`),
+  bumped BY THE GATE NODE, not the fix node.** The gate node, after running the gates, re-evaluates its
+  own boundary against the freshly-produced verdicts (`route_after_gates` over `{gates: out["gates"],
+  budget: state-budget}`) and, iff the decision is `fix`, writes an incremented ledger onto `budget` in
+  the SAME superstep. The conditional edge then reads the POST-FOLD bumped counter, so it converges:
+  fix N times then `halt`. The `*_fix` nodes only stamp `phase` + edge back to the responsible layer —
+  if they bumped, the edge (same superstep as the gate) would read the stale pre-bump value and never
+  converge. No infinite loop.
+- SUP5. **A hard FAIL on an integrated digest does NOT exercise the route-back loop — it LATCHES +
+  halts AT ONCE (gov §5; latch check is first in `route_after_gates`).** Only an ERROR (infra/flake,
+  DS7) or a missing verdict routes to bounded `fix`. So the end-to-end "routes back + terminates
+  bounded" test must force an ERROR, NOT a FAIL: a `test_app.py` that IMPORTS a missing module compiles
+  (Build PASS via `compileall`) but FAILS pytest COLLECTION (exit 2) -> a signed Test ERROR -> `fix` ->
+  bounded -> `halt`. (A syntax error would instead trip `compileall` -> Build FAIL -> latch.)
+- SUP6. **Triage seeds `route` + `budget` (both single-writer).** `classify_request(request)` is a
+  deterministic substring classifier (bugfix/spike/evolution markers in order; default greenfield);
+  `_seed_budget(route)` runs the route's cap through `BudgetController(BudgetCaps(total_microusd=cap))`
+  and stamps `BudgetLedger(cap_microusd=...)` (zero spend, zero fix attempts).
+- SUP7. **End-to-end test seam = a KIND-dispatching synthetic `resolve` (not a uri-keyed map).** The
+  architecture/product agents mint content-addressed HANDLES mid-run whose uri encodes an
+  epoch-dependent `content_identity()` (so it can't be pre-keyed) and the body is NEVER persisted in a
+  test (`emit_artifact` only makes a handle). So the in-memory typed resolver synthesizes a faithful
+  body from `handle.kind` + `handle.seq` (SystemDesign/OwnershipMap for the Senior's decomposition;
+  AcceptanceCriterion with `security_abuse=True` for the Spec gate; FeatureDiff -> a fixed `diff_uri`).
+  `resolve_blob` returns the raw unified-diff body keyed on that fixed uri (mirrors `sandbox.get_blob`)
+  — the test controls whether it carries a passing test (Build+Test PASS) or a collection-erroring one.
+  The reviewer's `verdict_nonce`/`subject_artifact_uri`/`state_sha` are RUN INPUTS seeded on
+  `config["configurable"]` (Q1). Script per-node payloads with `MockTransport.scripted({SOP-marker:
+  payload}, default_verdict="approve")` — substring-keyed + COUNT-INDEPENDENT so the fix-loop can re-run
+  the implementation+quality phases without exhausting a FIFO `completions=` queue (an emptied queue ->
+  empty `default_text` -> a parse failure on the re-loop). Raise LangGraph's `recursion_limit` on the
+  run config for multi-loop fix runs.

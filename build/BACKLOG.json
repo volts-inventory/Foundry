@@ -428,7 +428,7 @@
         "mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M1-13",
@@ -453,7 +453,7 @@
         "Tests added asserting the full phase order and a gate-fail reroute; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M1-14",

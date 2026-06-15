@@ -127,3 +127,8 @@ never constructs a GateResult; unsigned-drop test runs the REAL DevGateWriteVeri
   non-relative / `..` POSIX paths fail-closed before write.
 
 Resolution: 1 MAJOR → fresh fixer, then MANDATORY fresh re-review. (open → pending fix)
+
+ACCEPTANCE (Wave D): Round-2 fresh verification critic: D-R1-01/02/03 all RESOLVED, no new issues,
+applier round-trips byte-exact + fail-closed on unsupported hunks, path-containment enforced,
+BlobResolver composable for factory_graph. Gates: ruff/mypy clean, 382 pass/1 skip.
+**Wave D ACCEPTED.** (gate-wiring done.)

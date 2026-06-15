@@ -40,3 +40,15 @@
 - Baseline: ruff/mypy clean, 372 pass/1 skip, coverage 85%.
 - NEXT: Wave D = T-M1-12 gate-wiring (Spec/Build/Test via two-zone runner at phase boundaries),
   then Wave E = supervisor -> factory_graph -> cli -> Phase-1 exit test (T-M1-13..16).
+
+## 2026-06-15 — Session 1: Phase 1 Wave D ACCEPTED
+- Wave D: graph-side gate-wiring (T-M1-12) — materialize_workdir(state) builds the integrated tree
+  from artifact handles (criteria.json + feature-diff unified-diff bodies via a BlobResolver/get_blob
+  seam, additions applier, path-contained), runs Spec/Build/Test via TwoZoneGateRunner, folds only
+  attested GateResults; route_after_gates (advance/fix/halt) honors stable-FAIL latch + bound + flake.
+- CRITIC LOOP: round 1 found 1 MAJOR (diff-body contract mismatch vs real adapter unified-diff blob)
+  + 2 MINOR (handle-mutation coupling; path traversal); fixer resolved all; round-2 fresh critic CLEAN.
+  Attested-only verdicts + fail-closed materialization confirmed.
+- Baseline: ruff/mypy clean, 382 pass/1 skip, coverage ~85%.
+- NEXT (Wave E, sequential single-owner files): T-M1-13 supervisor -> T-M1-14 factory_graph ->
+  T-M1-15 cli -> T-M1-16 Phase-1 exit test + milestone gate sweep.

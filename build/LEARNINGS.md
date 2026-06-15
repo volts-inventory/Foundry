@@ -62,6 +62,16 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   It is a real `ProviderTransport`: deterministic `ProviderResponse`, `served_model`
   defaults to a real `TIER_MODELS` value (`LineageMap` resolves it to `anthropic-claude`),
   stable `request_id` via `content_digest` (L7, never `hash()`), `DEFAULT_USAGE`, `stop_reason="end_turn"`.
+- D5. (R1-02) `MockTransport.served_model` now defaults to the **requested tier's own model**
+  (mirrors `request["model"]`), so a T2/T3 `complete()` no longer spuriously trips pinned-ID
+  drift. Pass the optional `served_model=` ctor kwarg (or `ResponseScript.served_model`) to
+  FORCE a drift scenario. `ProviderTransport` is a plain (non-runtime_checkable) Protocol, so
+  structural conformance tests assert against a local runtime_checkable mirror of `send`.
+- D6. (R1-01/R1-03) On the constrained verdict channel
+  (`output_config.format.type == "json_schema"`) the verdict queue/`default_verdict` take
+  PRIORITY over keyed scripts, so `judge()` can never crash in `json.loads` on free-text that
+  matched a script; scripts still win on every other channel. Verdict-queue literal-vs-JSON
+  detection is whitespace-tolerant (`json.loads` probe, not `startswith("{")`).
 - D2. Scripting API (priority order): `MockTransport(responses=[ResponseScript(text, match)])`
   first-match-wins; `MockTransport.scripted({needle: text})` keys by substring of system SOP/messages;
   `verdicts=[...]` / `completions=[...]` are FIFO queues for the constrained-json-schema channel vs
@@ -76,6 +86,22 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   Determinism: same task body -> same worktree -> same `snapshot_digest` (timestamp/perm-free).
 - D4. judge() requires the injected `ZoneBSigner`; verify bindings with `DevGateWriteVerifier`
   and admit via `merge_gates` under `set_gate_write_verifier(...)` (reset the contextvar token in teardown).
+
+## Agent runtime — the shared seam all four Phase-1 waves build against (T-M1-04a)
+- AR1. `from foundry.agents import AgentRuntime, NodeFn` (also `run_id_of`). `AgentRuntime`
+  is a `@dataclass`: fields `proxy: ModelProviderProxy`, `epochs: EpochCounter = field(default_factory=...)`,
+  `adapter: WorkerAdapter | None = None`. Inject one `rt` per run; thread it into every node factory.
+- AR2. `rt.seq(config, node_id, key, local=0) -> Seq` reproduces skeleton.py's `_seq` EXACTLY:
+  run_id = `config["configurable"]["thread_id"]`, emission_epoch = `epochs.bump(run_id, f"{node_id}/{key}")`
+  (resume-monotonic), superstep from `config["metadata"]["langgraph_step"]`. `key` names the
+  artifact/action emitted, so distinct emissions get independent epoch streams.
+- AR3. Node-factory convention: `def make_<agent>_node(rt: AgentRuntime, ...) -> NodeFn:` returning a
+  closure `(state: FactoryState, config: RunnableConfig) -> dict[str, Any]` of channel writes (never
+  mutate state). Drops straight into `StateGraph(FactoryState)`. `NodeFn` = that callable alias.
+- AR4. Agents call `rt.proxy.complete(...)`/`rt.proxy.judge(...)` (L6 single egress); implementation
+  agents use `rt.adapter`. Agents NEVER import the Anthropic SDK and NEVER write a `GateResult` to
+  `gates` — emit `GateTriage` to `gate_triage` instead (L5). `_runtime.py` holds NO agent logic and is
+  import-cheap (TYPE_CHECKING-only heavy imports).
 
 ## Orchestration / tooling
 - O1. mypy gate is `mypy foundry` (config in pyproject; `ignore_missing_imports=true`).

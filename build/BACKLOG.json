@@ -161,7 +161,7 @@
         "mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "done"
     },
     {
       "id": "T-M1-04",
@@ -195,7 +195,7 @@
         "mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M1-05",
@@ -227,7 +227,7 @@
         "mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M1-06",
@@ -259,7 +259,7 @@
         "Tests added with StubAdapter asserting diff handle + idempotent retry; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M1-07",
@@ -291,7 +291,7 @@
         "Tests added via MockTransport asserting criterion traceability, quarantine handling, and verdict-binding validity; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M1-08",

@@ -26,16 +26,24 @@ from foundry.agents.implementation.junior_engineer import (
     idempotency_key,
     make_junior_engineer_node,
     pinned_texts,
+    ready_tasks,
 )
 from foundry.agents.implementation.senior_engineer import (
+    DESIGN_KIND,
+    OWNERSHIP_KIND,
+    ArtifactResolverError,
     make_senior_engineer_node,
     stub_conflict_resolution,
 )
 
 __all__ = [
+    "DESIGN_KIND",
+    "OWNERSHIP_KIND",
+    "ArtifactResolverError",
     "idempotency_key",
     "make_junior_engineer_node",
     "make_senior_engineer_node",
     "pinned_texts",
+    "ready_tasks",
     "stub_conflict_resolution",
 ]

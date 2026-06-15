@@ -13,3 +13,5 @@ dist/
 .coverage
 .coverage.*
 .mypy_cache/
+.mutmut-cache
+mutants/

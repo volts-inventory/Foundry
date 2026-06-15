@@ -704,6 +704,28 @@
       ],
       "retries_remaining": 3,
       "status": "pending"
+    },
+    {
+      "id": "T-TOOL-MUT",
+      "milestone": "M1",
+      "title": "Mutation-testing harness (fix mutmut 3.x mutants-tree or switch to cosmic-ray)",
+      "job_to_be_done": "Make scoped mutation testing runnable (mutmut 3.x mutants/-tree fails to assemble importable foundry.agents under narrowed source_paths). Produce a quantified kill score >=70% on the trust-critical M1 modules (reducers, gate_wiring, factory_graph, attestation) or justify survivors. Re-attempt before EXIT.",
+      "files_owned": [
+        "pyproject.toml"
+      ],
+      "dependencies": [
+        "T-M1-16"
+      ],
+      "role": "Tooling engineer",
+      "required_experts": [
+        "E1"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "scoped mutation runs and reports a kill score on >=1 trust-critical module; >=70% or survivors justified in REVIEW.md"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
     }
   ]
 }

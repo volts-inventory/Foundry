@@ -42,6 +42,12 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
 - B3. The shared checkpointer connection's `commit()` is a no-op while `superstep_txn()` is
   open (one COMMIT at superstep exit) — else the checkpoint persists without its outbox rows.
 
+## Schema authoring
+- S1. A defaulted mutable field on a `FrozenModel` (`x: dict[...] = {}` / `= []`) trips ruff
+  RUF012 even though pydantic v2 deep-copies it safely. Use `Field(default_factory=dict)` /
+  `default_factory=tuple`. Required dict fields (no default) don't trip it — that's why most
+  schema dicts are fine. (T-M1-02: `E2EReport.scenario_criteria`.)
+
 ## Provider-accuracy notes (verified against the live Anthropic surface)
 - P1. Tier map: `claude-opus-4-8` (T1) / `claude-sonnet-4-6` (T2) / `claude-haiku-4-5` (T3).
 - P2. `temperature` is **removed on opus-4-8** (400 if sent) — the "temp 0 for gates/judges"
@@ -49,6 +55,27 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
 - P3. No `system_fingerprint`; served-model observation = `response.model` + `_request_id`.
 - P4. Judgment verdict channel = `output_config.format` (json_schema); stable SOP prefix is
   `cache_control`-cached.
+
+## Test doubles — the seam every later wave injects (T-M1-03)
+- D1. To run the graph/CLI with NO live API key, inject `MockTransport`
+  (`foundry/proxy/test_doubles.py`) into `ModelProviderProxy(transport=..., signer=ZoneBSigner(key,key_id))`.
+  It is a real `ProviderTransport`: deterministic `ProviderResponse`, `served_model`
+  defaults to a real `TIER_MODELS` value (`LineageMap` resolves it to `anthropic-claude`),
+  stable `request_id` via `content_digest` (L7, never `hash()`), `DEFAULT_USAGE`, `stop_reason="end_turn"`.
+- D2. Scripting API (priority order): `MockTransport(responses=[ResponseScript(text, match)])`
+  first-match-wins; `MockTransport.scripted({needle: text})` keys by substring of system SOP/messages;
+  `verdicts=[...]` / `completions=[...]` are FIFO queues for the constrained-json-schema channel vs
+  free-text channel; `default_verdict=`/`default_text=` are the per-channel fallbacks. Verdict items
+  may be `"approve"`/`"request-changes"` or pre-serialized JSON; use `verdict_json(status, findings)`.
+  Constrained verdict channel is auto-detected via `output_config.format.type == "json_schema"`.
+- D3. To run the substrate with NO `claude -p` binary, use `StubAdapter`
+  (`foundry/execution/adapters/stub.py`): `supports_turn_snapshots=True`, holds no egress.
+  Ctor kwargs: `run_id`, `node_id`, `output_path`, `triage_note`, `self_reported_model`.
+  `run(packet, sandbox)` writes a deterministic per-task file into the worktree, returns
+  `AdapterResult(diff_uri=cas://..., triage=GateTriage-only (L5), turns_used, snapshot_digest)`.
+  Determinism: same task body -> same worktree -> same `snapshot_digest` (timestamp/perm-free).
+- D4. judge() requires the injected `ZoneBSigner`; verify bindings with `DevGateWriteVerifier`
+  and admit via `merge_gates` under `set_gate_write_verifier(...)` (reset the contextvar token in teardown).
 
 ## Orchestration / tooling
 - O1. mypy gate is `mypy foundry` (config in pyproject; `ignore_missing_imports=true`).

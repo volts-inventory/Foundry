@@ -154,3 +154,22 @@ End-to-end test runs REAL runner + real Spec/Build/Test (real compileall/pytest)
 
 Resolution: E-R1-01/02 fixed in this wave's fix cycle (batched after factory_graph); E-R1-03 deferred
 to Phase 2 with rationale (bounded-safe, not a trust break). (open → pending fix)
+
+## Wave E / T-M1-14 factory_graph — Round 1 (1 fresh critic)
+Tool gates green: ruff/mypy clean (86 files), full suite green. Verdict: FINDINGS(3), all MINOR, 0 BLOCKER/MAJOR.
+**CONFIRMED SOUND:** (a) a HALTED/FAILED/ERROR/missing-gate run can NEVER open a PR (terminal_gates_pass
+fail-closes on Spec∧Build∧Test attested PASS, reads only the trust-filtered gates channel, review advisory);
+(b) kill-then-resume idempotency holds (content_digest key + union_actions coalesce to exactly one PR).
+No direct GitHub/network call (actions-channel/outbox only). Tests run the REAL supervisor+gates+merge_gates.
+
+- E-R1-04 (FG-M1) MINOR | factory_graph.py:222 / factory_state.py:22 | emit writes single-writer `phase`
+  channel (declared owner: supervisor) — works (distinct supersteps) but contradicts the documented
+  invariant. | FIX: document emit as the terminal phase writer.
+- E-R1-05 (FG-M2) MINOR | tests/test_factory_graph.py | halted-no-PR test covers only the ERROR path;
+  the stable-FAIL latch path to terminal_gates_pass=False is not covered E2E. | FIX: roll a stable-FAIL
+  (syntax-error diff → Build FAIL + latch → no PR) assertion into the T-M1-16 exit integration test.
+- E-R1-06 (FG-M3) MINOR | factory_graph.py:81-93 | `_latest_by_name` collapses by name only vs
+  merge_gates' (name, run_against); deliberate cross-tree newest-wins release semantics. | FIX: one-line
+  clarifying comment.
+
+Resolution: FG-M1/M3 applied directly (doc/comment); FG-M2 folded into T-M1-16 exit test. (open → pending)

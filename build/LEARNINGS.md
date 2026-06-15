@@ -464,3 +464,27 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   the implementation+quality phases without exhausting a FIFO `completions=` queue (an emptied queue ->
   empty `default_text` -> a parse failure on the re-loop). Raise LangGraph's `recursion_limit` on the
   run config for multi-loop fix runs.
+
+## Factory graph — top-level compile + assistant-mode emit (T-M1-14)
+- FG1. **`build_factory_graph(rt, *, runner, resolve, resolve_blob, source_dir, checkpointer=None,
+  index=None, max_fix_attempts=3) -> CompiledStateGraph[FactoryState]`** mounts
+  `build_supervisor_graph(...).compile()` as a single subgraph node `factory`, appends an
+  assistant-mode `emit` node, then END: `START -> factory -> emit -> END`, and compiles with the
+  injected `checkpointer`. A COMPILED subgraph is added to `add_node` DIRECTLY (no mypy seam); only the
+  plain `emit` closure needs the SG2/IM5 concrete-`def` — and a thin local `def` already IS concrete,
+  so no `cast` (mypy clean as-is). `CompiledStateGraph`/`BaseCheckpointSaver` imports stay
+  TYPE_CHECKING-only.
+- FG2. **The emit node is the SINGLE Phase-1 external EFFECT, expressed ONLY as an `actions` write
+  (skeleton.py mirror) — never a GitHub/network call.** Guard FIRST on terminal gate PASS
+  (`terminal_gates_pass`: newest-by-`Seq` per name on the trust-filtered `gates`; Spec AND Build AND
+  Test must each be PASS — `review` is advisory, the deterministic gates own the release bit, L5). A
+  halted/failed run (latch / ERROR / bound spent => any terminal gate non-PASS or missing) returns
+  `{"phase":"halted"}` and emits NOTHING. Reading only `gates` means an unattested status-flipped copy
+  can't trick the guard (merge_gates already dropped it).
+- FG3. **Idempotency key = `content_digest({"run_id":..., "artifact_uri":...})` (L7 — never `hash()`/wall
+  clock), prefixed `open_pr:`.** PR subject = the newest-by-`Seq` `feature_diff` handle (NOT
+  `artifacts[-1]`; `merge_by_uri` folds by insertion order, QS8). On kill-then-resume LangGraph re-folds
+  the committed `emit` write, the emit node re-derives the SAME key, and `union_actions` (keyed by
+  `idempotency_key`) coalesces => exactly one `open_pr` persists across both invokes. The resume test
+  re-`invoke`s the SAME `thread_id` against a durable `FoundryCheckpointer().saver` and asserts
+  `len(open_pr actions) == 1` with an unchanged key (cli T-M1-15 reuses this compile+emit path).

@@ -1,0 +1,639 @@
+{
+  "_meta": {
+    "owner": "planning-agent",
+    "generated": "2026-06-15",
+    "primary_source": "docs/implementation-plan.md \u00a71/\u00a74/\u00a77/\u00a78",
+    "note": "M1 fully decomposed. M1.5-M6 are placeholders only (just-in-time decomposition when the milestone opens, to avoid stale plans). Collision hazards (pyproject.toml, a given foundry/schemas/*.py module, foundry/state/factory_state.py, foundry/graph/factory_graph.py, foundry/graph/supervisor.py) are never parallel_safe when shared; each has a single owner per wave or is serialized via dependencies.",
+    "experts": "E1 LangGraph/orchestration; E2 durability; E3 security/trust-root; E4 LLM-app/agent (Anthropic); E5 stats/eval; E6 pydantic/typed-contracts (see build/EXPERTS.md)"
+  },
+  "milestones": [
+    {
+      "id": "M0",
+      "phase": "Phase 0 \u2014 Foundations",
+      "status": "done",
+      "exit_criteria": "A trivial task runs end-to-end, traced, checkpointed; kill-then-resume produces no duplicate commit/PR; reducer-purity + idempotency property tests pass.",
+      "note": "State backbone + build-order items 1-8 (state/, schemas/ base subset, durability/, proxy/, execution/, gates/, governance/+monitors/, context/, graph/skeleton.py) already implemented & tested. Baseline: ruff clean, mypy foundry clean, 247 pass/1 skip, coverage 82%."
+    },
+    {
+      "id": "M1",
+      "phase": "Phase 1 \u2014 Core vertical slice (Assistant mode)",
+      "status": "in_progress",
+      "exit_criteria": "From a one-line request, produce a small working app passing its own + hidden tests, opened as a PR a human merges with minimal edits. Distinct Spec/Build/Test gates wired at phase boundaries; criterion-traceable tests; flake quarantine; content-addressed artifacts; PR-equivalent emit via the outbox (no real GitHub in tests). Phase-1 smoke: foundry/cli.py runs the compiled graph end-to-end with a mock/test model provider + stub worker substrate without live API keys.",
+      "build_order_items": "9 (agents/) -> 10 (graph/subgraphs + supervisor + factory_graph) -> cli.py"
+    },
+    {
+      "id": "M1_5",
+      "phase": "Phase 1.5 \u2014 Decision gate: powered A/B + role ablation",
+      "status": "pending",
+      "exit_criteria": "Variance/base-rate pilot (blocker, runs first); frozen pre-registration + decision table; powered A/B harness (3 arms, oracle-scored primary, ITT) + role ablation \u2014 built and exercised against local/synthetic task fixtures (not a funded live study). Decision: structure beats baseline by pre-registered margin at <= cost -> Proceed; null at MDE -> Hard KILL/redesign; {USD-null, token-positive} -> bounded overhead-redesign."
+    },
+    {
+      "id": "M2",
+      "phase": "Phase 2 \u2014 Review & assurance (Gated mode)",
+      "status": "pending",
+      "exit_criteria": "A known-vulnerable change is caught; Design/Release require recorded sign-off; re-verification is change-proportional; rework loops terminate within caps and HITL volume is measured."
+    },
+    {
+      "id": "M3",
+      "phase": "Phase 3 \u2014 Operability & scale",
+      "status": "pending",
+      "exit_criteria": "An operator can diagnose a stuck run; a store outage pauses (not corrupts) in-flight runs and recovers; concurrent runs don't starve each other; HITL backlog is bounded and alerted."
+    },
+    {
+      "id": "M4",
+      "phase": "Phase 4 \u2014 Trust root & Autonomous mode",
+      "status": "pending",
+      "exit_criteria": "A malicious-test / forged-results / forged-verdict / fork-divergence attempt cannot reach production; trusted-component outage degrades to paused, not wedged. (Dev-grade roots per implementation-plan \u00a70.3.)"
+    },
+    {
+      "id": "M5",
+      "phase": "Phase 5 \u2014 Specialist plugins + domain packs",
+      "status": "pending",
+      "exit_criteria": "A regulated request makes Autonomous/auto-approve unreachable and binds approver-of-record; an ML request keys verdicts on state_sha with a class-3 gate + compute budget; a UI request forces visual HITL over a rendered bundle \u2014 all without core changes to add the next pack."
+    },
+    {
+      "id": "M6",
+      "phase": "Phase 6 \u2014 Eval, optimization & lifecycle",
+      "status": "pending",
+      "exit_criteria": "Scorecard published and stable; confirmatory A/B reproduces the Phase-1.5 result (estimation/replication only); optimization Pareto-improves >=1 headline metric with no regression in escaped-defects, cost, wall-clock, or policy compliance; product-feedback + maintenance/provenance loop."
+    }
+  ],
+  "tasks": [
+    {
+      "id": "T-M1-01",
+      "milestone": "M1",
+      "title": "Complete architecture-layer artifact schemas (SystemDesign, ADR, InterfaceContract, OwnershipMap)",
+      "job_to_be_done": "Append the Phase-1 architecture artifact models to foundry/schemas/architecture.py so the Principal Architect node has frozen pydantic v2 outputs (SystemDesign, ADR with rejected-alternatives, InterfaceContract, OwnershipMap). PinnedConstraint already exists; do not touch it. These complete the agents.md Layer-2 I/O contract.",
+      "files_owned": [
+        "foundry/schemas/architecture.py",
+        "tests/test_schemas_architecture.py"
+      ],
+      "dependencies": [],
+      "role": "Pydantic/typed-contracts engineer",
+      "required_experts": [
+        "E6"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "SystemDesign, ADR (with rejected_alternatives), InterfaceContract, OwnershipMap are FrozenModel subclasses with content-addressed *_uri handles for bodies (DS9), version/supersedes/seq fields matching the existing module conventions",
+        "OwnershipMap exposes file/interface ownership usable for deterministic merge order (agents.md Layer 2/3)",
+        "Append-only: existing PinnedConstraint/ConstraintScope unchanged",
+        "Tests added: construction, frozenness (extra=forbid), content_identity stability, supersession round-trip",
+        "mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "in_progress"
+    },
+    {
+      "id": "T-M1-02",
+      "milestone": "M1",
+      "title": "Audit & fill product/implementation/quality schema gaps for Phase-1 agents",
+      "job_to_be_done": "Cross-check agents.md Layer 1/3/4 I/O artifacts against existing foundry/schemas/product.py, implementation.py, quality.py and add only the missing append-only models the Phase-1 nodes require (e.g. risk_register handle, any review-finding record not already a GateResult). Most already exist; this task closes residual gaps without duplicating existing models.",
+      "files_owned": [
+        "foundry/schemas/product.py",
+        "foundry/schemas/implementation.py",
+        "foundry/schemas/quality.py",
+        "tests/test_schemas_phase1.py"
+      ],
+      "dependencies": [],
+      "role": "Pydantic/typed-contracts engineer",
+      "required_experts": [
+        "E6"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "Each Phase-1 agent in agents.md (Layers 1/3/4) has a frozen pydantic output model present; gaps filled append-only, no existing model edited destructively",
+        "Reviewer verdict remains a GateResult+judgment-binding (NOT a new artifact type) per LEARNINGS L5; no parallel artifact invented",
+        "Tests added for any new model; existing test_schemas.py still green",
+        "mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "in_progress"
+    },
+    {
+      "id": "T-M1-03",
+      "milestone": "M1",
+      "title": "Mock model provider + stub worker substrate test doubles",
+      "job_to_be_done": "Provide a deterministic in-memory ProviderTransport (drives ModelProviderProxy) and a stub WorkerAdapter (implements the adapter_contract Protocol: returns a content-addressed diff + test sources + GateTriage + snapshot) so the whole graph and cli.py run end-to-end with no live API keys and no claude -p binary. These are the seams cli.py and tests inject.",
+      "files_owned": [
+        "foundry/proxy/test_doubles.py",
+        "foundry/execution/adapters/stub.py",
+        "tests/test_test_doubles.py"
+      ],
+      "dependencies": [],
+      "role": "LLM-application/agent engineer",
+      "required_experts": [
+        "E4"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "MockTransport implements ProviderTransport.send returning a deterministic ProviderResponse (served_model from TIER_MODELS, valid usage dict) and supports scripted/keyed responses including the json_schema verdict channel",
+        "StubAdapter satisfies the WorkerAdapter Protocol (supports_turn_snapshots flag, run() returns AdapterResult with cas:// diff_uri + GateTriage advisory only); raises nothing requiring a real binary",
+        "Doubles route ALL model traffic through ModelProviderProxy (never the SDK) per LEARNINGS L6; idempotency keys use content_digest not hash() (L7)",
+        "Tests added exercising proxy.complete + proxy.judge through MockTransport and a full StubAdapter.run cycle",
+        "mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "in_progress"
+    },
+    {
+      "id": "T-M1-04",
+      "milestone": "M1",
+      "title": "Product layer agent nodes (stakeholder_proxy, product_manager, criteria_completeness_critic, eng_program_mgr)",
+      "job_to_be_done": "Build the four Layer-1 LangGraph node functions under foundry/agents/product/. Each reads FactoryState, calls the proxy (proxy.complete; the critic uses proxy.judge with judgment_provenance stamp), assembles a bounded context window, and returns channel writes (artifacts: IntentBrief/PRD/AcceptanceCriterion[]/CriteriaCritique/SprintPlan; gate_triage advisory). Criteria critic feeds the Spec gate; security/abuse omission must surface as blocking.",
+      "files_owned": [
+        "foundry/agents/__init__.py",
+        "foundry/agents/product/__init__.py",
+        "foundry/agents/product/stakeholder_proxy.py",
+        "foundry/agents/product/product_manager.py",
+        "foundry/agents/product/criteria_critic.py",
+        "foundry/agents/product/eng_program_mgr.py",
+        "tests/test_agents_product.py"
+      ],
+      "dependencies": [
+        "T-M1-02",
+        "T-M1-03"
+      ],
+      "role": "LLM-application/agent engineer",
+      "required_experts": [
+        "E4",
+        "E1"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "Each node is a pure-ish callable (state, config) -> dict channel writes; no SDK import (all egress via proxy, L6); no GateResult written by an agent (L5, emits GateTriage/artifacts only)",
+        "Acceptance criteria carry criterion_id, oracle_hint, security_abuse flag; criteria_critic stamps judgment_provenance and blocks on security/abuse omission",
+        "Artifacts carry deterministic Seq + content-addressed uris; bodies out-of-band",
+        "Tests added driving each node with MockTransport/StubAdapter, asserting channel writes + traceability",
+        "mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M1-05",
+      "milestone": "M1",
+      "title": "Architecture layer agent node (principal_architect; domain_specialist/ux deferred stubs)",
+      "job_to_be_done": "Build the principal_architect Layer-2 node under foundry/agents/architecture/: retrieve via the context retriever (not free reading), produce SystemDesign/ADRs/InterfaceContract/OwnershipMap and PinnedConstraints (injected verbatim downstream), return channel writes. Provide thin conditional stubs for domain_specialist and ux_design that downstream tolerates as absent (entered only on required_capabilities match).",
+      "files_owned": [
+        "foundry/agents/architecture/__init__.py",
+        "foundry/agents/architecture/principal_architect.py",
+        "foundry/agents/architecture/conditional.py",
+        "tests/test_agents_architecture.py"
+      ],
+      "dependencies": [
+        "T-M1-01",
+        "T-M1-03"
+      ],
+      "role": "LLM-application/agent engineer",
+      "required_experts": [
+        "E4",
+        "E1"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "principal_architect emits SystemDesign+ADRs+InterfaceContract+OwnershipMap+PinnedConstraint[] via proxy.complete (T1 tier); pinned constraints written to the pinned_constraints channel and flow verbatim",
+        "Uses foundry/context retriever for code spans rather than ad-hoc reading (agents.md Layer 2 SOP)",
+        "domain_specialist/ux stubs are conditional no-ops when required_capabilities don't match; absence tolerated downstream",
+        "Tests added covering the node + conditional gating; cross-cutting constraint misclassification path exercised",
+        "mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M1-06",
+      "milestone": "M1",
+      "title": "Implementation layer agent nodes (senior_engineer, junior_engineer)",
+      "job_to_be_done": "Build foundry/agents/implementation/: senior_engineer decomposes the design into branch-per-task Task[] (using ownership_map for merge order) and reviews; junior_engineer takes one Task, builds a TaskPacket (pinned constraints verbatim, FIRST), invokes the worker-substrate adapter inside a sandbox to produce a FeatureDiff on task/<id>, and self-checks against acceptance criteria. Re-runs reset the branch to base (idempotent retry).",
+      "files_owned": [
+        "foundry/agents/implementation/__init__.py",
+        "foundry/agents/implementation/senior_engineer.py",
+        "foundry/agents/implementation/junior_engineer.py",
+        "tests/test_agents_implementation.py"
+      ],
+      "dependencies": [
+        "T-M1-02",
+        "T-M1-03"
+      ],
+      "role": "LLM-application/agent engineer",
+      "required_experts": [
+        "E4",
+        "E1"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "junior_engineer assembles a TaskPacket and calls the WorkerAdapter (StubAdapter in tests) via the sandbox seam; pinned_constraints injected verbatim and first (adapter_contract.assemble_prompt contract)",
+        "FeatureDiff is a content-addressed handle on task/<id>; retry resets to base_tree_sha (idempotent, supersession not edit, L4)",
+        "senior_engineer produces Task[] with criterion_ids + ownership-ordered branches; conflict resolution path stubbed but typed",
+        "Adapter self-reported lineage is ignored; lineage is proxy-observed (adapter_contract)",
+        "Tests added with StubAdapter asserting diff handle + idempotent retry; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M1-07",
+      "milestone": "M1",
+      "title": "Quality layer agent nodes (reviewer_critic, qa_engineer, sdet)",
+      "job_to_be_done": "Build foundry/agents/quality/: reviewer_critic issues a judgment verdict via proxy.judge (consuming the server-issued verdict_nonce, stamping provenance); qa_engineer authors a TestPlan with criterion_id traceability + negative/property/golden OracleBindings for high-risk criteria and produces a TestReport with flake quarantine; sdet authors the E2E suite/report on the integrated tree. Agents emit triage/artifacts only \u2014 verdicts come from proxy/runner.",
+      "files_owned": [
+        "foundry/agents/quality/__init__.py",
+        "foundry/agents/quality/reviewer_critic.py",
+        "foundry/agents/quality/qa_engineer.py",
+        "foundry/agents/quality/sdet.py",
+        "tests/test_agents_quality.py"
+      ],
+      "dependencies": [
+        "T-M1-02",
+        "T-M1-03"
+      ],
+      "role": "LLM-application/agent engineer",
+      "required_experts": [
+        "E4",
+        "E1"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "reviewer_critic calls proxy.judge with a server-issued verdict_nonce; the returned GateResult carries a valid judgment binding + judgment_provenance (never an agent-minted verdict, L5)",
+        "qa_engineer emits TestPlan with test_id->criterion_ids traceability and at least one NEGATIVE oracle per high-risk criterion; TestReport records quarantined flaky tests (N=2 fail-then-pass)",
+        "sdet emits E2EReport with pinned seeds/frozen clock/mocked network note + flake quarantine",
+        "Tests added via MockTransport asserting criterion traceability, quarantine handling, and verdict-binding validity; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M1-08",
+      "milestone": "M1",
+      "title": "Product subgraph (graph/subgraphs/product.py)",
+      "job_to_be_done": "Compose the Layer-1 product nodes into a LangGraph subgraph (stakeholder_proxy -> product_manager -> criteria_critic -> eng_program_mgr) over FactoryState, returning a subgraph builder the supervisor can mount. No factory_graph/supervisor edits here.",
+      "files_owned": [
+        "foundry/graph/subgraphs/__init__.py",
+        "foundry/graph/subgraphs/product.py",
+        "tests/test_subgraph_product.py"
+      ],
+      "dependencies": [
+        "T-M1-04"
+      ],
+      "role": "LangGraph engineer",
+      "required_experts": [
+        "E1"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "build_product_subgraph() returns a StateGraph/compilable over FactoryState with the four nodes wired in SOP order",
+        "Subgraph produces PRD + AcceptanceCriterion[] + CriteriaCritique sufficient for the Spec gate",
+        "Tests added running the subgraph with test doubles to a product-phase artifact set; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M1-09",
+      "milestone": "M1",
+      "title": "Architecture subgraph (graph/subgraphs/architecture.py)",
+      "job_to_be_done": "Compose the architecture node(s) into a subgraph: principal_architect with conditional domain_specialist/ux routing on required_capabilities, emitting SystemDesign + pinned_constraints. Returns a mountable subgraph builder.",
+      "files_owned": [
+        "foundry/graph/subgraphs/architecture.py",
+        "tests/test_subgraph_architecture.py"
+      ],
+      "dependencies": [
+        "T-M1-05",
+        "T-M1-08"
+      ],
+      "role": "LangGraph engineer",
+      "required_experts": [
+        "E1"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "build_architecture_subgraph() wires principal_architect + conditional edges that skip domain/ux nodes when required_capabilities don't match",
+        "Pinned constraints land on the pinned_constraints channel for verbatim downstream injection",
+        "Tests added for both the conditional-entered and conditional-skipped paths; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M1-10",
+      "milestone": "M1",
+      "title": "Implementation subgraph (graph/subgraphs/implementation.py)",
+      "job_to_be_done": "Compose senior_engineer (decompose/scaffold/review) with a per-task junior_engineer execution path into a subgraph that produces FeatureDiffs on branch-per-task and a (stubbed) integration/conflict-resolution step. Returns a mountable subgraph builder.",
+      "files_owned": [
+        "foundry/graph/subgraphs/implementation.py",
+        "tests/test_subgraph_implementation.py"
+      ],
+      "dependencies": [
+        "T-M1-06",
+        "T-M1-08"
+      ],
+      "role": "LangGraph engineer",
+      "required_experts": [
+        "E1"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "build_implementation_subgraph() runs senior decomposition then junior execution per Task via the adapter seam, fanning the FeatureDiffs into the artifacts channel",
+        "Branch-per-task and idempotent retry preserved end to end",
+        "Tests added with StubAdapter producing >=1 FeatureDiff; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M1-11",
+      "milestone": "M1",
+      "title": "Quality subgraph (graph/subgraphs/quality.py)",
+      "job_to_be_done": "Compose reviewer_critic + qa_engineer + sdet into a subgraph that reviews diffs, authors criterion-traceable tests with oracle bindings, runs them (via test doubles), and emits TestPlan/TestReport/E2EReport with flake quarantine. Returns a mountable subgraph builder.",
+      "files_owned": [
+        "foundry/graph/subgraphs/quality.py",
+        "tests/test_subgraph_quality.py"
+      ],
+      "dependencies": [
+        "T-M1-07",
+        "T-M1-08"
+      ],
+      "role": "LangGraph engineer",
+      "required_experts": [
+        "E1"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "build_quality_subgraph() wires review -> QA -> E2E producing the quality artifacts feeding the Test/E2E gates",
+        "Criterion traceability and flake quarantine preserved through the subgraph",
+        "Tests added running the subgraph with test doubles; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M1-12",
+      "milestone": "M1",
+      "title": "Gate-wiring adapter: invoke Spec/Build/Test gates via the two-zone runner at phase boundaries",
+      "job_to_be_done": "Build a thin graph-side helper that materializes the integrated workdir from artifacts, constructs SpecGate/BuildGate/TestGate, runs them through TwoZoneGateRunner (zone-A exec / zone-B sign), and folds the attested GateResults onto the gates channel \u2014 plus a routing predicate (pass -> advance, fail/error -> targeted FIX/retry within caps, flake quarantine handling). This is the seam the supervisor uses; it does NOT edit factory_graph/supervisor.",
+      "files_owned": [
+        "foundry/graph/gate_wiring.py",
+        "tests/test_gate_wiring.py"
+      ],
+      "dependencies": [
+        "T-M1-08",
+        "T-M1-09",
+        "T-M1-10",
+        "T-M1-11"
+      ],
+      "role": "Security/trust-root engineer",
+      "required_experts": [
+        "E3",
+        "E1"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "Spec gate runs at product/architecture exit, Build+Test at implementation/quality exit; only runner-attested GateResults reach the gates channel (unsigned dropped by _merge_gates, L5)",
+        "FAIL/ERROR routes to bounded retry; flake quarantine (N=2) does not fail the Test gate; convergence bound (fix_attempts_since_all_green) respected",
+        "Criterion-fidelity/adequacy floor on the Test gate is exercised (vacuous suite cannot pass)",
+        "Tests added: signed-pass advances, unsigned write dropped, ERROR retries without latching, integrated FAIL latches",
+        "mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M1-13",
+      "milestone": "M1",
+      "title": "Supervisor \u2014 phase routing across subgraphs",
+      "job_to_be_done": "Build foundry/graph/supervisor.py: triage classifies the request (greenfield|evolution|bugfix|spike) and seeds a per-route budget; the supervisor sequences product -> architecture -> implementation -> quality with the gate-wiring predicates at boundaries, single-entry/single-exit + re-verification rules, and an emit handoff. Single owner of this file (collision hazard).",
+      "files_owned": [
+        "foundry/graph/supervisor.py",
+        "tests/test_supervisor.py"
+      ],
+      "dependencies": [
+        "T-M1-12"
+      ],
+      "role": "LangGraph engineer",
+      "required_experts": [
+        "E1"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "Triage routes greenfield/evolution -> product; sets a default per-route usd cap (refined by eng_program_mgr); single-writer route/phase channels respected",
+        "Supervisor advances only on attested gate PASS at each boundary; FAIL routes to the responsible layer within caps",
+        "Tests added asserting the full phase order and a gate-fail reroute; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M1-14",
+      "milestone": "M1",
+      "title": "factory_graph.build_factory_graph() \u2014 compile the full Phase-1 graph",
+      "job_to_be_done": "Build foundry/graph/factory_graph.py exposing build_factory_graph(...) -> Compiled[FactoryState]: mount the supervisor + subgraphs, attach the durable checkpointer, and terminate in an assistant-mode emit node that writes a content-addressed artifact + a PR-equivalent ExternalAction to the actions/outbox channel (deterministic idempotency key; no real GitHub). Single owner of this file (collision hazard).",
+      "files_owned": [
+        "foundry/graph/factory_graph.py",
+        "tests/test_factory_graph.py"
+      ],
+      "dependencies": [
+        "T-M1-13"
+      ],
+      "role": "LangGraph engineer",
+      "required_experts": [
+        "E1",
+        "E2"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "build_factory_graph() returns a compiled graph over FactoryState with a checkpointer; accepts injected proxy + adapter (so test doubles wire in)",
+        "Emit node produces a content-addressed reviewed artifact + an open_pr ExternalAction with a process-stable content_digest idempotency key (L7); external effects only via the actions channel/outbox (no SDK/GitHub calls)",
+        "Kill-then-resume produces no duplicate PR action (re-folds the same key)",
+        "Tests added compiling + running the graph with test doubles end to end; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M1-15",
+      "milestone": "M1",
+      "title": "cli.py \u2014 run a one-line request end-to-end (SPEC smoke-test core path)",
+      "job_to_be_done": "Build foundry/cli.py: take a one-line natural-language request, wire the mock model provider + stub worker substrate, build_factory_graph(), run intake -> product -> architecture -> implementation -> quality -> gates -> emit, and print the resulting reviewed artifact handle + the PR-equivalent action. Runs with no live API keys or claude -p binary.",
+      "files_owned": [
+        "foundry/cli.py",
+        "tests/test_cli_smoke.py"
+      ],
+      "dependencies": [
+        "T-M1-14"
+      ],
+      "role": "LLM-application/agent engineer",
+      "required_experts": [
+        "E4",
+        "E1"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "`foundry.cli` run() takes a request string and completes the SPEC core path with MockTransport + StubAdapter (no network, no API key)",
+        "Output reports the content-addressed artifact and the emitted PR-equivalent action behind passing Spec/Build/Test gates",
+        "Smoke test added asserting end-to-end completion + that gates are attested PASS and exactly one PR action emitted",
+        "import foundry / import foundry.cli smoke clean; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M1-16",
+      "milestone": "M1",
+      "title": "Phase-1 exit-criteria integration test + milestone gate sweep",
+      "job_to_be_done": "Add an integration test proving the Phase-1 exit criteria: from a one-line request the graph produces an artifact passing its own tests AND a held-out/hidden test set, emitted as a PR-equivalent; distinct Spec/Build/Test gates attested; criterion traceability present; flake quarantine exercised; kill-then-resume idempotent. Then run the milestone gate sweep (coverage >=80%, scoped mutation) and record results.",
+      "files_owned": [
+        "tests/test_phase1_exit.py"
+      ],
+      "dependencies": [
+        "T-M1-15"
+      ],
+      "role": "QA / eval engineer",
+      "required_experts": [
+        "E1",
+        "E5"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "Integration test exercises the full SPEC core path and asserts: hidden-test pass, three distinct attested gates, criterion-traceable tests, flake quarantine, and no duplicate PR on kill-then-resume",
+        "Milestone gate sweep green: ruff, mypy foundry, full pytest, coverage >=80% overall (new code >=85%), scoped mutation >=70% or survivors justified in build/REVIEW.md",
+        "PROGRESS.md / STATUS.md updated to mark M1 exit (orchestrator may do this); test added"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M1_5-PLAN",
+      "milestone": "M1_5",
+      "title": "Decompose Phase 1.5 into tasks (just-in-time when milestone opens)",
+      "job_to_be_done": "When M1 exits, fully decompose Phase 1.5 (variance/base-rate pilot, frozen pre-registration + decision table, powered 3-arm A/B harness with ITT + oracle-scored primary, role ablation) into tasks against the then-current code tree. Deferred now to avoid a stale plan.",
+      "files_owned": [
+        "build/BACKLOG.json"
+      ],
+      "dependencies": [
+        "T-M1-16"
+      ],
+      "role": "Planning agent",
+      "required_experts": [
+        "E5"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "M1.5 decomposed into concrete tasks with disjoint files_owned and dependency ordering, derived from implementation-plan \u00a77 Phase 1.5 + evaluation.md"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M2-PLAN",
+      "milestone": "M2",
+      "title": "Decompose Phase 2 into tasks (just-in-time when milestone opens)",
+      "job_to_be_done": "When M1.5 resolves Proceed, fully decompose Phase 2 (Reviewer + evaluator-optimizer loop, Security/Audit/Supply-chain agents + gates, change-risk tiering, dependency-scoped re-verification, HITL at Design/Release, WORM audit, Gated mode + evidence pack) into tasks. Deferred now.",
+      "files_owned": [
+        "build/BACKLOG.json"
+      ],
+      "dependencies": [
+        "T-M1_5-PLAN"
+      ],
+      "role": "Planning agent",
+      "required_experts": [
+        "E3"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "M2 decomposed into concrete tasks against the then-current tree, derived from implementation-plan \u00a77 Phase 2 + governance.md"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M3-PLAN",
+      "milestone": "M3",
+      "title": "Decompose Phase 3 into tasks (just-in-time when milestone opens)",
+      "job_to_be_done": "When M2 exits, fully decompose Phase 3 (operator dashboard/SLOs/alerts/runbooks, run-status liveness + watchdog, store HA + poisoned-checkpoint recovery, multi-tenancy/capacity/fairness + hibernation, HITL-load model, full monitors + sandboxed analyzer, five planes) into tasks. Deferred now.",
+      "files_owned": [
+        "build/BACKLOG.json"
+      ],
+      "dependencies": [
+        "T-M2-PLAN"
+      ],
+      "role": "Planning agent",
+      "required_experts": [
+        "E2"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "M3 decomposed into concrete tasks against the then-current tree, derived from implementation-plan \u00a77 Phase 3 + operations.md"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M4-PLAN",
+      "milestone": "M4",
+      "title": "Decompose Phase 4 into tasks (just-in-time when milestone opens)",
+      "job_to_be_done": "When M3 exits, fully decompose Phase 4 (two-zone trusted gate runner hardening, hermetic SLSA-L3 build, deploy-time admission, input-bound attestations, trusted-component HA + rotation; dev-grade roots per \u00a70.3) into tasks. Deferred now.",
+      "files_owned": [
+        "build/BACKLOG.json"
+      ],
+      "dependencies": [
+        "T-M3-PLAN"
+      ],
+      "role": "Planning agent",
+      "required_experts": [
+        "E3"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "M4 decomposed into concrete tasks against the then-current tree, derived from implementation-plan \u00a77 Phase 4 + governance.md \u00a74-5"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M5-PLAN",
+      "milestone": "M5",
+      "title": "Decompose Phase 5 into tasks (just-in-time when milestone opens)",
+      "job_to_be_done": "When M4 exits, fully decompose Phase 5 (specialist interface + registry + capability routing, core pack hooks, first packs: regulated, ml/data, frontend) into tasks. Deferred now.",
+      "files_owned": [
+        "build/BACKLOG.json"
+      ],
+      "dependencies": [
+        "T-M4-PLAN"
+      ],
+      "role": "Planning agent",
+      "required_experts": [
+        "E5",
+        "E3"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "M5 decomposed into concrete tasks against the then-current tree, derived from implementation-plan \u00a77 Phase 5 + domains.md"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M6-PLAN",
+      "milestone": "M6",
+      "title": "Decompose Phase 6 into tasks (just-in-time when milestone opens)",
+      "job_to_be_done": "When M5 exits, fully decompose Phase 6 (full eval harness, confirmatory A/B, constrained workflow optimization, product-feedback + maintenance/provenance loop, red-team, cost/latency hardening) into tasks. Deferred now.",
+      "files_owned": [
+        "build/BACKLOG.json"
+      ],
+      "dependencies": [
+        "T-M5-PLAN"
+      ],
+      "role": "Planning agent",
+      "required_experts": [
+        "E5"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "M6 decomposed into concrete tasks against the then-current tree, derived from implementation-plan \u00a77 Phase 6 + evaluation.md/lifecycle.md"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    }
+  ]
+}

@@ -5,7 +5,6 @@ __pycache__/
 .hypothesis/
 .ruff_cache/
 dist/
-build/
 *.egg-info/
 *.db
 *.db-journal

@@ -353,3 +353,45 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   the subject + criterion handles + `resolve`, scripts `verdicts=["approve"]` for the reviewer and
   `completions=[QA, SDET]` for the authors, and asserts the reviewer's proxy-stamped `GateResult`
   is admitted to `gates` by the REAL `merge_gates` (valid binding + fresh nonce + no latch).
+
+## Graph-side gate wiring at phase boundaries (T-M1-12)
+- GW1. **`materialize_workdir(state, dest, *, resolve) -> tree_sha` is the boundary's trust-seam
+  contract.** It builds the integrated tree the deterministic gates run against, ENTIRELY from the
+  content-addressed handles on `state["artifacts"]` via the SAME `ArtifactResolver` seam
+  senior_engineer/qa use (NOT a parallel one): writes `criteria.json` from the `acceptance_criterion`
+  handles in the EXACT shape SpecGate parses — `{id, text, oracle, security_abuse}` (NB:
+  `AcceptanceCriterion.oracle_hint` maps to the `oracle` key SpecGate reads), ordered by `id` so the
+  file (and thus the digest) is byte-stable; and materializes code+test sources from the
+  `feature_diff` handles. The diff BODY contract: `resolve(feature_diff_handle)` -> the typed
+  `FeatureDiff`, then `resolve(handle.model_copy(update={"uri": diff.diff_uri}))` -> a
+  `Mapping[str,str]` of relative-POSIX-path -> file content. Diffs applied in `Seq` order
+  (later/retry wins, L4). FAIL-CLOSED: a handle present but unresolvable to its shape raises
+  (`MaterializationError`/`FeatureDiffBodyError`) — never run the gates against a partial tree (that
+  risks a vacuous PASS, gov §1b). Returns `tree_sha(dest, prefer_git=False)` (dest is a fresh tree,
+  not a git worktree) as the integrated `run_against`. The `ArtifactResolver` return is `Any` (it
+  yields both FrozenModel bodies AND raw path->content dicts), mirroring senior_engineer — NOT the
+  quality layer's `-> FrozenModel` narrowing.
+- GW2. **Verdicts come ONLY from the runner; the wiring NEVER constructs a `GateResult`.**
+  `run_spec_gate(state, config, *, rt, runner, resolve, workdir) -> {"gates":[...]}` (Spec at
+  product/architecture exit) and `run_build_test_gates(..., min_passed=1) -> {"gates":[build, test]}`
+  (Build+Test at implementation/quality exit) materialize the workdir, mint each verdict's `Seq` via
+  `rt.seq(config, "<gate>_gate", "verdict:<name>")` (resume-monotonic epoch, AR2), and call
+  `runner.run(gate, run_against, seq, workdir)` — the runner attests; the helper just forwards the
+  attested record. Build+Test share ONE materialized `tree_sha` so both bind/latch to one integrated
+  state. The real `merge_gates` admits them iff attested (an unsigned `GateResult` is dropped — the
+  test proves this by constructing one and asserting `merge_gates([unsigned], None) == []`).
+- GW3. **`route_after_gates(state, config, *, boundary, records, max_fix_attempts=3) -> str` returns
+  `advance` / `fix` / `halt`, fail-closed.** Reads the newest-by-`Seq` verdict per relevant gate
+  (`_BOUNDARY_GATES`: spec -> {spec}; build_test -> {build,test}) off the already-trust-filtered
+  `gates` channel. Order: (1) a `records.stable_fail_latched(run_against, name)` on ANY relevant
+  verdict -> `halt` (terminal, cross-fork, monotonic — a later PASS never auto-clears; routing reads
+  the latch REGARDLESS of channel content, so a status-flipped copy can't sneak past); (2) any FAIL
+  or ERROR (infra OR flake) — and a MISSING relevant verdict (defense-in-depth: never advance on an
+  absent verdict) -> `fix` within the bound, `halt` once `fix_attempts >= max_fix_attempts`
+  (`fix_attempts` read from `budget.fix_attempts_since_all_green` else
+  `config["configurable"]["fix_attempts"]`); (3) all PASS, nothing latched -> `advance`. ERROR never
+  latches (DS7), so it always routes to bounded retry. Flake quarantine (N=2 split Test/E2E ERROR)
+  does NOT fail the boundary — it routes to `fix` like any ERROR; `flake_quarantined(state, *,
+  boundary)` exposes the REASON (gate family + flake/quarantine finding marker) so the supervisor can
+  quarantine-and-retry vs report a failure. The supervisor (next wave) calls these plain helpers at
+  boundaries; gate_wiring does NOT edit supervisor.py/factory_graph.py (they don't exist yet).

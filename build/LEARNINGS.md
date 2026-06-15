@@ -103,6 +103,105 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   `gates` — emit `GateTriage` to `gate_triage` instead (L5). `_runtime.py` holds NO agent logic and is
   import-cheap (TYPE_CHECKING-only heavy imports).
 
+## Architecture layer (T-M1-05)
+- AC1. `make_principal_architect_node(rt, index=None)` (T1) retrieves spans through the
+  `SymbolIndex` (`foundry.context`, impact-analysis contract), NEVER ad-hoc file reads; `index=None`
+  is greenfield (empty retrieval), distinct from a retrieval FAILURE (`retrieve_or_need_context`
+  raises `NeedContext`). It emits SystemDesign/ADR/InterfaceContract/OwnershipMap as
+  content-addressed `Artifact` handles on `artifacts`, and `PinnedConstraint[]` on the SEPARATE
+  `pinned_constraints` channel (reducer `merge_constraints`) — constraints are NOT artifacts; they
+  flow downstream verbatim into adapter task packets. Each constraint/ADR/interface gets a distinct
+  `seq` via `seq._replace(local=i)` off one per-key `Seq` (so records within a key stay distinct).
+- AC2. Conditional Layer-2 nodes (`make_domain_specialist_node` / `make_ux_design_node`) gate on
+  `should_enter_domain_specialist(state)` / `should_enter_ux_design(state)` — the SAME predicate the
+  node's internal guard uses, so the subgraph's conditional edge and the node never disagree. On
+  no-match they return `{}` (no writes); downstream tolerates absence.
+- AC3. **MockTransport channel gotcha (cost a debug pass).** ANY `complete(..., schema=...)` call —
+  even `purpose="ideation"` — attaches `output_config.format.type == "json_schema"`, which
+  MockTransport treats as the *constrained verdict channel*, where the `verdicts=` queue /
+  `default_verdict` take PRIORITY over keyed `ResponseScript`s (D6). So a scripted structured
+  ideation payload is SHADOWED by the default `approve` verdict. To return arbitrary structured JSON
+  on a schema-constrained ideation call, put the payload (a JSON object string) in the `verdicts=`
+  FIFO queue: `_normalize_verdict_item` passes a parsed JSON object through verbatim. Size the queue
+  to the number of `complete` calls the test makes (one per architect node invocation).
+
+## Implementation layer (T-M1-06)
+- IM1. **Idempotent-retry base snapshot needs a DURABLE store (cost a debug pass).** The Junior
+  (`make_junior_engineer_node`) builds a FRESH `Sandbox` per node invocation (arch §2(d): no reuse).
+  A `Sandbox`'s default `snapshot_store` is ephemeral and dies with `destroy()`, so the base
+  `snapshot()` digest recorded on run 1 CANNOT be `restore()`d by run 2's new sandbox — you get
+  `FileNotFoundError: no recorded snapshot`. Fix: thread a `snapshot_store=` path into the factory
+  and pass the SAME path on both the first run and the retry. Only then does L4 supersession-by-reset
+  work across the destroy/rebuild. The idempotency key itself (`idempotency_key`, content_digest over
+  task id + branch + verbatim pinned texts + base_tree_sha; L7) is process-stable regardless.
+- IM2. Pinned constraints reach the `TaskPacket` via `pinned_texts(live_constraints(...))` — read the
+  LIVE (non-superseded) view, order by `id` (fold-order-independent so the packet is byte-identical
+  across resume), drop straight into `TaskPacket.pinned_constraints`; `assemble_prompt` then renders
+  them FIRST + VERBATIM ahead of the TASK body. Re-confirms AC3: the Senior's `complete(..., schema=
+  _DECOMPOSITION_SCHEMA)` rides MockTransport's verdict channel, so script the decomposition JSON via
+  `verdicts=[json.dumps(payload)]`, not `default_text`.
+- IM3. The `tasks` channel reducer (`union_by_id`) keys plain dicts by `id` with NO `.seq` tiebreak
+  (dicts aren't models), so FIRST-keyed wins. Senior emits a Task dict and Junior emits a done-marker
+  dict for the same id — in one graph run the Senior's wins. That's fine here (nodes tested in
+  isolation); a real integration loop must supersede via a fresh id/version, not rely on later-wins.
+
+## Product layer (T-M1-04)
+- PR1. The four Layer-1 factories live in `foundry/agents/product/`:
+  `make_stakeholder_proxy_node`→IntentBrief (T2), `make_product_manager_node`→PRD +
+  AcceptanceCriterion[] (T2), `make_criteria_completeness_critic_node`→CriteriaCritique +
+  spec-gate GateTriage (T1), `make_eng_program_mgr_node`→SprintPlan (T2). All call
+  `rt.proxy.complete(..., purpose="ideation", schema=...)` — product output is exploratory
+  authoring, NOT a verdict, so even the critic uses `complete` (its CriteriaCritique is an
+  artifact + advisory triage), never `proxy.judge()` (that path mints a signed GateResult, L5).
+- PR2. **Seq/uri rebinding pattern** (the node-authoring gotcha). The typed product models
+  (IntentBrief/PRD/AcceptanceCriterion/CriteriaCritique/SprintPlan) are NOT `Artifact`s and carry
+  no `.uri`; the `artifacts` channel is `list[Artifact]` folded by `merge_by_uri`. So a node owns
+  the `seq` and any `*_uri`/CAS body handle, NOT the model: drop them from the constrained schema
+  (`_common.content_schema`, or omit from a hand-written schema), build the model with the node-minted
+  `seq`, mint body handles via `_common.cas_uri(body)`, then wrap the typed body as a
+  content-addressed `Artifact` via `_common.emit_artifact(model, kind, produced_by, seq)` whose
+  `uri = cas://sha256/<model.content_identity()>` so resume re-emissions coalesce under `merge_by_uri`.
+  Multiple records under one key (e.g. AcceptanceCriterion[]) each get `seq._replace(local=i)`.
+- PR3. CriteriaCritique requires a `judgment_provenance` field; the MODEL never supplies it — stamp it
+  from the proxy profile (`rt.proxy.profile == "self_judge"` → `JudgmentProvenance.SELF`, else
+  INDEPENDENT). The critic emits `GateTriage(name="spec", ...)` whose explanation is marked BLOCKING
+  iff `critique.spec_gate_blocking()` (any `security_abuse_omissions`); the Spec-gate runner still owns
+  the verdict bit (L5). MockTransport gotcha for these schema-bearing `complete` calls is AC3 — feed
+  payloads via the `verdicts=` FIFO queue, sized to the number of `complete` calls per test.
+
+## Quality layer (T-M1-07) — the judge/nonce wiring later waves reuse
+- Q1. **The verdict_nonce is a RUN INPUT, not agent-minted.** `make_reviewer_critic_node(rt)`
+  reads it off `config["configurable"]["verdict_nonce"]` (helper `quality._common.server_issued_nonce`,
+  fail-closed: raises `MissingVerdictNonceError` if absent). The orchestrator/runner issues it from
+  the cross-fork nonce ledger (`global_records.py`) and threads it onto the run config exactly like
+  `thread_id`/`state_sha`/`subject_artifact_uri`. An agent NEVER mints one — a verdict with no nonce
+  is dropped (`nonce_consumed_by_other_verdict` fail-closes on empty).
+- Q2. **judge() output is the ONLY thing an agent writes to `gates`, and it is admitted only because
+  the proxy (not the agent) stamped it.** Wire `seq = rt.seq(config, "<node>", "verdict:...")` with
+  `seq.node_id == node_id` (the binding signs seq.node_id; `judge()` raises on mismatch — see B2).
+  `rt.proxy.judge(node_id, subject_uri, state_sha, nonce, sop, msgs, seq=seq, gate_name="review")`
+  returns a `JudgmentResult.gate_result` already carrying a ZoneBSigner-stamped binding +
+  `judgment_provenance`. Write `{"gates": [result.gate_result]}`. `_merge_gates` admits it iff:
+  valid binding (signed status+nonce+state_sha+served_family+node_id) AND nonce not consumed by a
+  DIFFERENT content_identity AND no negative latch on `(node_id, subject_uri, run_against)`. This is
+  how L5 is honored while still touching `gates`: the agent emits a verdict it could never sign.
+- Q3. **Negative latch is terminal until released — including for the request-changes verdict itself.**
+  Once the runner calls `records.latch_negative_verdict(rc.latch_key())`, re-folding even `rc` returns
+  `[]` (the verdict that established the latch lives in committed records, not re-admitted); a
+  higher-seq approve on the same `latch_key` is also dropped. Only `release_negative_verdict(key,
+  fresh_nonce)` + a fresh re-review re-admits an approve. Test the override-block with
+  `merge_gates([approve],None)==[]`, NOT `==[rc]`.
+- Q4. **qa_engineer/sdet are pure `rt.proxy.complete` authors — never touch `gates` (L5).** Pass
+  `criteria: tuple[AcceptanceCriterion,...]` (resolved from CAS by the orchestrator) as a factory
+  kwarg: the CRITERIA SET is the source of truth for coverage, the model only enriches traceability.
+  qa fail-closes uncovered criteria to a synthetic `test::<cid>` so the Test gate's coverage check is
+  never starved; it binds one NEGATIVE `OracleBinding` per HIGH-RISK criterion (fidelity != coverage).
+  Bodies (`TestPlan`/`TestReport`/`OracleBinding`/`E2EReport`) ride `artifacts` as content-addressed
+  handles via `quality._common.emit_artifact` (DS9/L4) — NOT inline; they carry no `.uri` so they are
+  not `Artifact`s. NB: a typed body's `content_identity()` INCLUDES `seq`, so two emissions under
+  different epochs get different handle uris — don't assert cross-epoch handle equality; the resume
+  idempotency that `merge_by_uri` gives is re-folding the SAME handles, not re-emitting.
+
 ## Orchestration / tooling
 - O1. mypy gate is `mypy foundry` (config in pyproject; `ignore_missing_imports=true`).
   Don't add `# type: ignore` unless needed — `warn_unused_ignores` flags dead ignores.

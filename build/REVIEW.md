@@ -213,3 +213,22 @@ keystone holds (coherence + funded guards fail-closed strictly BEFORE the atomic
 no incoherent manifest; no alpha on a rejected freeze), atomic try_first_alpha_look verified, no Phase-0
 regression (nonce/latches untouched). Gates: ruff/mypy clean, 548 pass/1 skip. **Trio (pilot/power/prereg) ACCEPTED.**
 (INFO: legacy record_alpha_look now callerless — retained for future multi-look spending, not dead code.)
+
+## M1.5 harness/A-B modules (T-M15-01/02/03/07/08/09) — Round 1 (1 fresh E5 critic)
+Tool gates green: ruff/mypy clean (98 files), full suite green. Verdict: **CLEAN** — 3 MINOR notes, 0 BLOCKER/MAJOR.
+Per-area: harness-ITT SOUND (denominator double-guarded; crash/over-budget retained, never shrunk);
+bootstrap SOUND (resamples TASKS/clusters, k collapsed to per-task rate, paired within task, content_digest
+seed L7); Holm SOUND (monotone step-down, halts at first acceptance, FWER ok); decision SOUND
+(no-null-to-PROCEED enforced in model_post_init, cost-worse win -> null, assert_unmodified first); honesty
+SOUND (simulated baselines/ablation + dry-run inescapable; FOUNDRY arm genuinely wraps cli.run).
+- M15-R2-01 MINOR | ab_runner.py:266-279 _bootstrap_two_sided_p counts the m==0 boundary in BOTH tails ->
+  for asymmetric dists touching 0 the smaller tail is inflated (biases p UP = conservative/safe, anti-power);
+  achievable min p = 2/n (resample-grid floor). | FIX (cheap, on M1.5 close): strict wrong-side tail + half
+  boundary; document the grid floor.
+- M15-R2-02 MINOR | ab_runner.py:449 | significant_at_alpha two-sided (CI excludes 0) vs meets_mde one-sided
+  -> a significant-but-negative effect reports significant=True but correctly cannot PROCEED (meets_mde fails).
+  Defensible as-is (matches §2 two-sided alpha). | accept.
+- M15-R2-03 MINOR | ab_runner.py:482-493 | secondary point/raw_p stored by positional index vs Holm original
+  order — VERIFIED correct (no off-by-one). | accept (no action).
+ACCEPTANCE: all-MINOR, conservative/safe direction, no validity break -> CLEAN ROUND by cross-check.
+M15-R2-01 boundary-count to be fixed on M1.5 close (batched small edit). **01/02/03/07/08/09 reviewed CLEAN.**

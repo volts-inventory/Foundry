@@ -51,6 +51,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "AlphaAlreadyDrawnError",
+    "IncoherentPreRegistrationError",
     "PreRegistration",
     "PreRegistrationError",
     "TamperedPreRegistrationError",
@@ -87,6 +88,20 @@ class TamperedPreRegistrationError(PreRegistrationError):
     The content-addressed identity bound at freeze time no longer matches the
     re-derived identity (or the cited identity) — an mde/alpha/rung edit after
     the fact is detectable. Fail closed.
+    """
+
+
+class IncoherentPreRegistrationError(PreRegistrationError):
+    """Raised iff the EMBEDDED hypothesis disagrees with the funded rung.
+
+    The :class:`CentralHypothesis` carries its OWN ``alpha``/``mde`` (and an
+    optional ``funded_power_rung``). The manifest mirrors ``mde``/``alpha`` off
+    the funded rung, but content-addressing alone does NOT catch a manifest that
+    is internally INCOHERENT — frozen powered at one MDE/alpha/rung while the
+    bound hypothesis commits a DIFFERENT one. Such a manifest is content-addressed
+    yet self-contradictory: a scored verdict could cite the hypothesis's MDE while
+    the run was sized to the rung's. We assert coherence at freeze (BEFORE drawing
+    alpha — fail closed) and re-check it in :func:`assert_unmodified`.
     """
 
 
@@ -142,6 +157,33 @@ class PreRegistration(FrozenModel):
         return self.content_identity()
 
 
+def _assert_hypothesis_rung_coherent(
+    hypothesis: CentralHypothesis, funded_rung: FundedPowerRung
+) -> None:
+    """Assert the EMBEDDED hypothesis agrees with ``funded_rung`` (fail closed).
+
+    The :class:`CentralHypothesis` commits its OWN ``alpha``/``mde`` and an
+    optional ``funded_power_rung``. A manifest that mirrors mde/alpha off the
+    funded rung while the bound hypothesis commits a DIFFERENT mde/alpha/rung is
+    content-addressed yet internally INCOHERENT (a scored verdict could cite the
+    hypothesis's MDE while the run was sized to the rung's). Raise
+    :class:`IncoherentPreRegistrationError` on any disagreement.
+    """
+    if hypothesis.mde != funded_rung.mde or hypothesis.alpha != funded_rung.alpha:
+        raise IncoherentPreRegistrationError(
+            "embedded hypothesis disagrees with the funded rung "
+            f"(hypothesis mde={hypothesis.mde}/alpha={hypothesis.alpha} vs "
+            f"rung mde={funded_rung.mde}/alpha={funded_rung.alpha}) — the manifest would "
+            "be content-addressed but internally incoherent (evaluation.md §2/§8)"
+        )
+    # If the hypothesis pins its OWN funded rung, it MUST be the rung being frozen.
+    if hypothesis.funded_power_rung != funded_rung:
+        raise IncoherentPreRegistrationError(
+            "the hypothesis's funded_power_rung does not equal the funded_rung being frozen "
+            "— the manifest would commit a different rung than the hypothesis (evaluation.md §2/§8)"
+        )
+
+
 def freeze_preregistration(
     hypothesis: CentralHypothesis,
     funded_rung: FundedPowerRung,
@@ -191,6 +233,10 @@ def freeze_preregistration(
     ------
     UnderpoweredPreRegistrationError
         If ``funded_rung`` is not funded (or lacks a concrete (n,k) allocation).
+    IncoherentPreRegistrationError
+        If the embedded ``hypothesis`` disagrees with ``funded_rung`` (its own
+        ``mde``/``alpha``, or a pinned ``funded_power_rung``) — raised BEFORE any
+        alpha look is recorded (fail closed).
     AlphaAlreadyDrawnError
         If ``(scored_eval_set_identity, decision_id)`` was already drawn (a
         fork/retrain re-draw — rejected fail-closed).
@@ -212,21 +258,28 @@ def freeze_preregistration(
             f"got n_tasks={funded_rung.n_tasks}, k_repeats={funded_rung.k_repeats}"
         )
 
+    # GUARD 1b: the EMBEDDED hypothesis must agree with the funded rung (its own
+    # mde/alpha and, if pinned, its funded_power_rung). Fail closed BEFORE drawing
+    # alpha so an incoherent (hypothesis, rung) pair never spends the budget.
+    _assert_hypothesis_rung_coherent(hypothesis, funded_rung)
+
     # GUARD 2: the alpha budget for this (scored_eval_set_identity, decision_id)
-    # may be drawn ONCE. Fail closed BEFORE recording so a re-draw is rejected and
-    # never appended to the ledger (a fork/retrain cannot spend it twice). The
+    # may be drawn ONCE. Draw it ATOMICALLY (insert-if-absent in ONE lock
+    # acquisition) so the check and the record cannot interleave — this closes the
+    # check-then-record TOCTOU a separate alpha_looks_spent()+record_alpha_look()
+    # would have. try_first_alpha_look returns False iff the pair was ALREADY drawn
+    # (a fork/retrain re-draw); we reject fail-closed and never spend it twice. The
     # ledger key is the pair — NOT state_sha — so forking (new run_id) can't slip
-    # past (EV7 / global_records.py).
-    if ledger.alpha_looks_spent(scored_eval_set_identity, decision_id) > 0:
+    # past (EV7 / global_records.py). state_sha/run_id are audit-only (never the key).
+    if not ledger.try_first_alpha_look(
+        scored_eval_set_identity, decision_id, state_sha, run_id
+    ):
         raise AlphaAlreadyDrawnError(
             "alpha budget already drawn for "
             f"(eval_set_identity={scored_eval_set_identity!r}, decision_id={decision_id!r}); "
             "a fork/retrain cannot re-draw the budget (evaluation.md §2; ledger keyed on the "
             "pair, NOT state_sha) — reusing it would invalidate the confirmatory run"
         )
-
-    # Record the single look. state_sha/run_id are audit-only (never the key).
-    ledger.record_alpha_look(scored_eval_set_identity, decision_id, state_sha, run_id)
 
     return PreRegistration(
         hypothesis=hypothesis,
@@ -253,6 +306,12 @@ def assert_unmodified(prereg: PreRegistration, *, expected_identity: str | None 
     manifest whose top-level ``mde``/``alpha`` were edited away from the rung's is
     rejected (the rung is part of the content identity, so a divergent mirror is
     itself a tamper signal a scored verdict's cited identity would catch).
+
+    It ALSO re-checks hypothesis<->rung coherence (the same invariant
+    :func:`freeze_preregistration` enforces): the embedded
+    :class:`CentralHypothesis` must agree with the funded rung on ``mde``/``alpha``
+    (and its pinned ``funded_power_rung``, if any). An incoherent manifest is
+    rejected with :class:`IncoherentPreRegistrationError`.
     """
     identity = prereg.registration_identity()
 
@@ -266,6 +325,12 @@ def assert_unmodified(prereg: PreRegistration, *, expected_identity: str | None 
             f"rung mde={prereg.funded_rung.mde}/alpha={prereg.funded_rung.alpha}) — "
             "post-hoc edit detected"
         )
+
+    # Hypothesis<->rung coherence (same check enforced at freeze): the embedded
+    # hypothesis must agree with the funded rung. A manifest hand-built with an
+    # incoherent (hypothesis, funded_rung) pair is content-addressed but internally
+    # self-contradictory — flag it fail-closed even without an external identity.
+    _assert_hypothesis_rung_coherent(prereg.hypothesis, prereg.funded_rung)
 
     if expected_identity is not None and identity != expected_identity:
         raise TamperedPreRegistrationError(

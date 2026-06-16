@@ -226,7 +226,16 @@ def is_funded(rung: PowerRung, budget_usd_microusd: int) -> bool:
     has ``funded_budget_microusd`` set to the cost of the BUDGET-CAPPED allocation,
     which by construction is <= budget; the authoritative underpowered signal is
     then ``rung.achieved_power < rung.target_power`` (mirrored by ``.underpowered``).
+    A DEGENERATE underpowered rung (budget can't fund even one task-repeat/arm) has
+    ``funded_budget_microusd == 0``, which would otherwise compare ``0 <= budget``
+    as True — so we SHORT-CIRCUIT False whenever the rung itself reports it is
+    underpowered / not funded (the rung's own verdict is authoritative; a cost
+    comparison must never override it).
     """
+    # An underpowered / not-funded rung is NEVER funded regardless of budget — its
+    # own verdict is authoritative (esp. the degenerate funded_budget_microusd==0).
+    if getattr(rung, "underpowered", False) or not getattr(rung, "funded", True):
+        return False
     cost = rung.funded_budget_microusd
     if cost is None:
         raise ValueError("rung has no funded_budget_microusd — cannot check fundedness")

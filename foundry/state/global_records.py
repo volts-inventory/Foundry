@@ -167,6 +167,38 @@ class GlobalRecords:
             )
             return spent + 1
 
+    def try_first_alpha_look(
+        self, eval_set_identity: str, decision_id: str, state_sha: str, run_id: str
+    ) -> bool:
+        """ATOMICALLY draw the FIRST alpha look for ``(eval_set_identity, decision_id)``.
+
+        Inserts the look at ``look_index == 1`` IFF no look for the pair exists yet,
+        in ONE lock acquisition. Returns True iff THIS call recorded the first look;
+        False iff the pair was already drawn (a fork/retrain re-draw — caller must
+        reject fail-closed). This is insert-if-absent: the
+        ``INSERT ... WHERE NOT EXISTS`` plus the ``(eval_set_identity, decision_id,
+        look_index)`` PK make the draw atomic, closing the check-then-record TOCTOU
+        the pre-registration freeze would otherwise have between
+        :meth:`alpha_looks_spent` and :meth:`record_alpha_look`.
+        """
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO alpha_ledger (eval_set_identity, decision_id, look_index,"
+                " state_sha, run_id)"
+                " SELECT ?, ?, 1, ?, ? WHERE NOT EXISTS ("
+                "   SELECT 1 FROM alpha_ledger WHERE eval_set_identity=? AND decision_id=?"
+                " )",
+                (
+                    eval_set_identity,
+                    decision_id,
+                    state_sha,
+                    run_id,
+                    eval_set_identity,
+                    decision_id,
+                ),
+            )
+            return cur.rowcount == 1
+
     def alpha_looks_spent(self, eval_set_identity: str, decision_id: str) -> int:
         (spent,) = self._conn.execute(
             "SELECT COUNT(*) FROM alpha_ledger WHERE eval_set_identity=? AND decision_id=?",

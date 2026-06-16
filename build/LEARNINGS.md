@@ -645,6 +645,41 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   A SCORED-provenance hypothesis does NOT coalesce with its DRY_RUN rehearsal (provenance ∈ identity,
   EV4). Tests: 14, all green; full suite unbroken (526 passed, 1 skipped). HONESTY: synthetic dry-run —
   asserts NOTHING about real perf.
+- EV19. **HYPOTHESIS↔RUNG COHERENCE is a FOURTH hard guard (M15-R1-01 fix).** The manifest mirrors
+  `mde`/`alpha` off `funded_rung`, but the EMBEDDED `CentralHypothesis` carries its OWN
+  `alpha`/`mde`/`funded_power_rung` — content-addressing alone does NOT catch a manifest frozen powered
+  for rung A while the bound hypothesis commits a different MDE/alpha/rung (incoherent but well-hashed).
+  FIX: `_assert_hypothesis_rung_coherent(hypothesis, funded_rung)` asserts `hypothesis.mde ==
+  funded_rung.mde` AND `hypothesis.alpha == funded_rung.alpha` AND `hypothesis.funded_power_rung ==
+  funded_rung` (the field is required + pydantic preserves the `FundedPowerRung` subclass, so `==` is
+  exact). Wired into `freeze_preregistration` as GUARD 1b — runs AFTER the funded-rung guard but BEFORE
+  the alpha draw, so an incoherent pair fails closed (`IncoherentPreRegistrationError`) WITHOUT spending
+  alpha — AND re-checked in `assert_unmodified` (against the manifest's own `funded_rung`), so a
+  hand-built incoherent manifest is flagged even with a matching mde/alpha mirror + no external
+  identity. A COHERENT caller (ab_runner builds `CentralHypothesis(mde, funded_power_rung=rung)` then
+  freezes that same rung) is unaffected.
+- EV20. **`is_funded` short-circuits on the rung's OWN verdict (M15-R1-02 fix).** A degenerate
+  underpowered rung (budget can't fund one task-repeat/arm) carries `funded_budget_microusd == 0`, so
+  the naive `cost <= budget` read `0 <= budget` as funded. FIX: `is_funded` returns False immediately
+  when `rung.underpowered or not rung.funded` (read via `getattr` defaults so a base `PowerRung` w/o
+  those fields still hits the cost check / ValueError path). The rung's own verdict is authoritative.
+- EV21. **Alpha-look TOCTOU closed ATOMICALLY (M15-R1-03 decision: atomic, not documented).** Chose the
+  atomic-ledger fix over the documented-assumption fallback: it is low-risk (all `GlobalRecords` writes
+  already serialize through `self._lock`; no existing test calls `record_alpha_look`/keys on its return)
+  and removes the foot-gun entirely rather than relying on a single-threaded harness comment. Added
+  `GlobalRecords.try_first_alpha_look(...) -> bool`: an `INSERT ... SELECT ... WHERE NOT EXISTS` at
+  `look_index==1` under ONE lock acquisition (the `(eval_set_identity, decision_id, look_index)` PK +
+  the WHERE-NOT-EXISTS make it insert-if-absent), returning True iff THIS call recorded the first look.
+  `freeze` now keys the `AlphaAlreadyDrawnError` rejection on that boolean — the prior
+  `alpha_looks_spent()`-then-`record_alpha_look()` check-then-record (two acquisitions) is gone. Legacy
+  `record_alpha_look` (append + return total) is left intact for other callers.
+- EV22. **Pilot no-treatment-arm fallback is a BASE-RATE substitution, flagged (M15-R1-04 fix).** When
+  no treatment arm is supplied, `run_pilot` sets `effect_size_variance = control_resolution_variance`;
+  added a comment that this is a base-rate-for-effect-size substitution VALID ONLY when no treatment arm
+  is present, and is NEVER reached on `DEFAULT_PILOT_ARMS` (which includes FOUNDRY, the treatment arm —
+  the real per-task FOUNDRY−CONTROL difference variance is computed in the main branch).
+- EV23. **M15 integrity-trio fix roll-up: ruff + mypy clean; full suite 548 passed / 1 skipped (incl.
+  test_eval_ab_runner.py — a coherent prereg still freezes + validates end-to-end).**
 
 ## Evaluation — powered 3-arm A/B runner (T-M15-07)
 - EV16. **`foundry/evaluation/ab_runner.py::run_ab(frame, prereg: PreRegistration, *, seed=0) ->

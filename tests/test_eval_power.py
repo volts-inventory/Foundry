@@ -242,6 +242,29 @@ def test_is_funded_raises_without_budget_field() -> None:
         is_funded(rung, 1_000)
 
 
+def test_is_funded_false_on_degenerate_underpowered_rung() -> None:
+    # A budget that cannot fund even ONE task-repeat per arm yields a DEGENERATE
+    # underpowered rung with funded_budget_microusd == 0. A naive `cost <= budget`
+    # would read `0 <= budget` as funded; is_funded must short-circuit False on the
+    # rung's own underpowered/not-funded verdict (M15-R1-02).
+    pilot = _pilot(
+        control_base_rate=0.2, control_resolution_variance=0.01, effect_size_variance=0.01
+    )
+    rung = compute_power_rung(
+        pilot,
+        mde=0.1,
+        alpha=0.05,
+        target_power=0.8,
+        budget_usd_microusd=1,  # < cost of one task-repeat per arm
+        per_task_repeat_cost_microusd=_REPEAT_COST,
+    )
+    assert rung.underpowered is True and rung.funded is False
+    assert rung.funded_budget_microusd == 0  # degenerate
+    # Despite funded_budget_microusd == 0 <= any budget, the rung is NOT funded.
+    assert is_funded(rung, _BIG_BUDGET) is False
+    assert is_funded(rung, 0) is False
+
+
 def test_budget_just_below_required_is_underpowered() -> None:
     # Compute the funded cost, then offer one micro-USD less -> must be underpowered.
     pilot = _pilot(control_base_rate=0.2, control_resolution_variance=0.0, effect_size_variance=0.0)

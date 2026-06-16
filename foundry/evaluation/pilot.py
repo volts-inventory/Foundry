@@ -274,8 +274,14 @@ def run_pilot(
         ]
         effect_size_variance = _population_variance(diffs)
     else:
-        # No treatment arm supplied: fall back to the control's resolution
-        # variance as the effect-size dispersion (still a valid >= 0 estimate).
+        # No treatment arm supplied: substitute the CONTROL arm's between-task
+        # resolution variance as the effect-size dispersion. This is a BASE-RATE
+        # FALLBACK ONLY — it stands in the control's dispersion for the (absent)
+        # per-task FOUNDRY-CONTROL difference variance, valid solely because no
+        # treatment arm is present to measure the real difference. It is NEVER
+        # reached on the DEFAULT arms (DEFAULT_PILOT_ARMS includes FOUNDRY, the
+        # treatment arm), so the real per-task difference variance is computed
+        # above; this branch only guards a caller that drops the treatment arm.
         effect_size_variance = control_resolution_variance
 
     return PilotResult(

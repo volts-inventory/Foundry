@@ -27,6 +27,7 @@ from foundry.evaluation.pilot import PilotResult
 from foundry.evaluation.power import FundedPowerRung, compute_power_rung, is_funded
 from foundry.evaluation.preregistration import (
     AlphaAlreadyDrawnError,
+    IncoherentPreRegistrationError,
     PreRegistration,
     TamperedPreRegistrationError,
     UnderpoweredPreRegistrationError,
@@ -240,8 +241,16 @@ def test_assert_unmodified_fails_on_cited_identity_mismatch() -> None:
         _hypothesis(), rung, "scored-eval-set", decision_id="dec-1", ledger=ledger
     )
     cited = prereg.registration_identity()
+    # A COHERENT post-hoc edit (mde mirror + rung + embedded hypothesis all bumped
+    # together): the mirror/coherence invariants pass, but the manifest no longer
+    # re-derives to the originally cited identity -> caught by the identity check.
+    bumped_rung = rung.model_copy(update={"mde": 0.2})
     tampered = prereg.model_copy(
-        update={"mde": 0.2, "funded_rung": rung.model_copy(update={"mde": 0.2})}
+        update={
+            "mde": 0.2,
+            "funded_rung": bumped_rung,
+            "hypothesis": CentralHypothesis(mde=0.2, funded_power_rung=bumped_rung),
+        }
     )
     # The tampered manifest does not re-derive to the originally cited identity.
     with pytest.raises(TamperedPreRegistrationError):
@@ -258,6 +267,77 @@ def test_assert_unmodified_fails_on_mde_alpha_mirror_divergence() -> None:
     tampered = prereg.model_copy(update={"mde": 0.2})
     with pytest.raises(TamperedPreRegistrationError):
         assert_unmodified(tampered)
+
+
+# ---------------------------------------------------------------------------
+# HYPOTHESIS <-> RUNG COHERENCE (M15-R1-01)
+# ---------------------------------------------------------------------------
+
+
+def _rung_with(*, mde: float = _MDE, alpha: float = _ALPHA) -> FundedPowerRung:
+    return compute_power_rung(
+        _pilot(),
+        mde=mde,
+        alpha=alpha,
+        target_power=_TARGET_POWER,
+        budget_usd_microusd=_BIG_BUDGET,
+        per_task_repeat_cost_microusd=_REPEAT_COST,
+    )
+
+
+def test_freeze_raises_when_hypothesis_mde_disagrees_with_rung() -> None:
+    # The hypothesis commits a DIFFERENT mde than the funded rung being frozen.
+    rung = _funded_rung()  # mde == _MDE
+    hyp = CentralHypothesis(mde=0.2, funded_power_rung=_rung_with(mde=0.2))
+    ledger = GlobalRecords()
+    with pytest.raises(IncoherentPreRegistrationError):
+        freeze_preregistration(
+            hyp, rung, "scored-eval-set", decision_id="dec-1", ledger=ledger
+        )
+    # Fail closed BEFORE any alpha look is recorded.
+    assert ledger.alpha_looks_spent("scored-eval-set", "dec-1") == 0
+
+
+def test_freeze_raises_when_hypothesis_alpha_disagrees_with_rung() -> None:
+    rung = _funded_rung()  # alpha == _ALPHA == 0.05
+    # Hypothesis pins a coherent-WITH-ITSELF rung at alpha=0.01, but the rung being
+    # frozen is at alpha=0.05 -> incoherent against the frozen rung.
+    hyp = CentralHypothesis(
+        mde=_MDE, alpha=0.01, funded_power_rung=_rung_with(alpha=0.01)
+    )
+    ledger = GlobalRecords()
+    with pytest.raises(IncoherentPreRegistrationError):
+        freeze_preregistration(
+            hyp, rung, "scored-eval-set", decision_id="dec-1", ledger=ledger
+        )
+    assert ledger.alpha_looks_spent("scored-eval-set", "dec-1") == 0
+
+
+def test_freeze_raises_when_hypothesis_pins_a_different_rung() -> None:
+    rung = _funded_rung()
+    # Same mde/alpha but a DIFFERENT (n_tasks) rung pinned on the hypothesis.
+    other = rung.model_copy(update={"n_tasks": (rung.n_tasks or 0) + 1})
+    hyp = CentralHypothesis(mde=_MDE, funded_power_rung=other)
+    ledger = GlobalRecords()
+    with pytest.raises(IncoherentPreRegistrationError):
+        freeze_preregistration(
+            hyp, rung, "scored-eval-set", decision_id="dec-1", ledger=ledger
+        )
+    assert ledger.alpha_looks_spent("scored-eval-set", "dec-1") == 0
+
+
+def test_assert_unmodified_flags_an_incoherent_manifest() -> None:
+    # Build a coherent manifest, then hand-build an INCOHERENT one whose mde/alpha
+    # mirror still matches the rung (so the mirror check passes) but whose embedded
+    # hypothesis commits a different mde. assert_unmodified must flag it.
+    rung = _funded_rung()
+    prereg = freeze_preregistration(
+        _hypothesis(), rung, "scored-eval-set", decision_id="dec-1", ledger=GlobalRecords()
+    )
+    incoherent_hyp = CentralHypothesis(mde=0.2, funded_power_rung=_rung_with(mde=0.2))
+    incoherent = prereg.model_copy(update={"hypothesis": incoherent_hyp})
+    with pytest.raises(IncoherentPreRegistrationError):
+        assert_unmodified(incoherent)
 
 
 # ---------------------------------------------------------------------------

@@ -815,7 +815,7 @@
         "Tests added covering all three rows; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M15-09",
@@ -842,7 +842,7 @@
         "Tests added asserting the core baseline + at least one added-role comparison run; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M15-10",

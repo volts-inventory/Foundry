@@ -756,6 +756,41 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   Tests: 15, all green; full suite 578 passed/1 skipped (the `decision_table.py` ruff/mypy errors are a
   SEPARATE uncommitted task's WIP, untouched here). HONESTY: synthetic dry-run — asserts NOTHING real.
 
+## Evaluation — Phase-1.5 decision table (T-M15-08)
+- EV28. **`foundry/evaluation/decision_table.py::decide(ab: ABResult, prereg: PreRegistration, *,
+  token_reading: TokenSecondaryReading | None = None) -> DecisionRecord` is the §2.5 branch point — PURE
+  + DETERMINISTIC (no RNG/IO; same inputs ⇒ identical frozen record).** ORDER MATTERS — the
+  cite-frozen-prereg gate is FIRST: `decide` calls `assert_unmodified(prereg)` (EV14) BEFORE any verdict,
+  so a tampered manifest fails closed `TamperedPreRegistrationError`; the record binds the re-derived
+  `registration_identity`. `DecisionRecord` (frozen) carries: `decision: DecisionClass`, `rule` (cites the
+  §2.5 row + why), `primary_significant_at_alpha`/`primary_meets_mde`, `observed_effect`
+  (=`primary.point_estimate`), `committed_mde`/`committed_alpha` (from the MANIFEST, not the ABResult), a
+  `CostComparison` (FOUNDRY vs BASELINE `total_cost_microusd`, `at_most_equal`),
+  `token_axis_available`/`token_reading`, `registration_identity`, `provenance`/`dry_run`.
+- EV29. **THREE branch predicates (exact).** (1) PROCEED iff `primary.significant_at_alpha AND
+  primary.meets_mde AND cost.at_most_equal` (FOUNDRY cost <= BASELINE — the equal-USD frame is PART of
+  the predicate, so a SIGNIFICANT + meets-MDE win that costs MORE is NOT a PROCEED; it routes to the null
+  branch). Secondary is irrelevant once primary is positive (§2.5 row 1 "(any)"). (2) Else (a USD-null:
+  not sig, OR effect<MDE, OR cost-worse) BOUNDED_OVERHEAD_REDESIGN iff a SUPPLIED `token_reading.positive`.
+  (3) Else HARD_KILL (terminal).
+- EV30. **NO-NULL-TO-PROCEED + NO-SILENT-RE-POWER are STRUCTURAL invariants, not just branch order.**
+  `DecisionRecord.model_post_init` recomputes the PROCEED predicate from the recorded bits and raises
+  `ValueError` iff `(decision is PROCEED) != predicate` — even a HAND-FORGED record can't claim PROCEED on
+  a null. It ALSO rejects a BOUNDED_OVERHEAD_REDESIGN whose `token_reading` is absent/not `positive`.
+  HARD_KILL is TERMINAL: the record exposes NO re-test/re-power field (a test asserts no
+  `repower`/`re_test`/`retest` field exists).
+- EV31. **TOKEN AXIS — HONEST GAP (load-bearing).** §2.5's redesign fork turns on the
+  **equal-effective-task-token** secondary, which carries its OWN pre-registered MDE/alpha/power (§2).
+  That secondary is NOT in `ABResult` — its `secondaries` are the +gates *resolution* gating-secondary and
+  a *resolutions-per-USD efficiency* comparison, both USD-denominated. Inferring "token-positive" from the
+  USD efficiency secondary would FABRICATE the exact signal §2.5 says must be its own powered endpoint. So
+  `decide` does NOT manufacture a token reading: the redesign branch is gated behind an EXPLICIT optional
+  `TokenSecondaryReading` (its own `mde`/`alpha`/`significant_at_alpha`/`meets_mde` → `positive`); ABSENT
+  it, a USD-null is HARD_KILL (the conservative §1 default). `token_axis_available` makes the gap
+  auditable. Tests: 15, all green; full suite 578 passed / 1 skipped; ruff + mypy clean. HONESTY: synthetic
+  dry-run — `provenance`/`dry_run` flow from the cited manifest's hypothesis; the record asserts NOTHING
+  about real Foundry-vs-baseline performance.
+
 ## ArtifactStore — the real content-addressed body store (T-M1-14b, DECISIONS D6)
 - AS1. **`foundry/durability/artifact_store.py::ArtifactStore` closes the emit/resolve gap.**
   `emit_artifact` MINTED a `cas://sha256/<content_identity>` handle but DISCARDED the body, so

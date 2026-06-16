@@ -815,7 +815,7 @@
         "Tests added covering all three rows; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M15-09",
@@ -870,7 +870,7 @@
         "Tests added asserting the primary/secondary split, the ITT denominator, and the honesty banner presence; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M15-11",

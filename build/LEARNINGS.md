@@ -646,6 +646,51 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   EV4). Tests: 14, all green; full suite unbroken (526 passed, 1 skipped). HONESTY: synthetic dry-run —
   asserts NOTHING about real perf.
 
+## Evaluation — powered 3-arm A/B runner (T-M15-07)
+- EV16. **`foundry/evaluation/ab_runner.py::run_ab(frame, prereg: PreRegistration, *, seed=0) ->
+  ABResult` (frozen) is the confirmatory A/B the decision table consumes.** ORDER MATTERS — the
+  cite-frozen-prereg gate is FIRST: `run_ab` calls `assert_unmodified(prereg)` (EV14) BEFORE any slice
+  check or arm run, so a tampered manifest (mde/alpha mirror divergence, or a cited-identity drift)
+  fails closed `TamperedPreRegistrationError` before work begins. It reads the funded rung's
+  `(n_tasks, k_repeats)` + committed `alpha`/`mde` FROM the manifest, never the call site. SCORED-SLICE-
+  ONLY: runs `frame.scored_slice` via `run_arm` (EV8), asserts it is disjoint from `frame.pilot_slice`
+  AND `scored.identity == prereg.scored_eval_set_identity` (binds the run to the registered
+  frame/partition — EV7) else `ScoredSliceContaminationError`; fixtures handed to `run_arm` are
+  RESTRICTED to scored ids so a stray lookup can't touch a pilot task (mirrors `run_pilot`, EV11).
+  `ABResult` API: per-arm `ArmReport` (UNCONDITIONAL `itt_pass_rate` = `itt_pass_rate(result)`,
+  `resolved_count`, `attempted == n*k`, `total_cost_microusd`, `simulated`) for all THREE arms
+  (`AB_ARMS = (FOUNDRY, BASELINE_SINGLE_AGENT, SINGLE_AGENT_PLUS_GATES)`); a PRIMARY
+  `BootstrapComparison`; a Holm-corrected `secondaries` tuple; `provenance` carried (`dry_run =
+  provenance != SCORED`). NB ITT is reported on EVERY arm regardless of completion (no collider
+  conditioning, §2/§6).
+- EV17. **PAIRED CLUSTER BOOTSTRAP resamples TASKS, not runs (§2 — the TASK is the inferential unit).**
+  `_paired_diffs(treatment, control)` collapses each task's k repeats to ONE per-task resolution rate
+  (`_per_task_rates`) FIRST (so n×k is never mistaken for independent draws), pairs FOUNDRY−BASELINE
+  WITHIN each common task, ordered by task_id. `_bootstrap_diff_means` draws `len(diffs)` task-level
+  paired diffs WITH REPLACEMENT per resample (cluster == task) and takes the mean; the CI is the
+  `[alpha/2, 1-alpha/2]` percentiles (`BootstrapComparison.ci_low/ci_high`), `significant_at_alpha` iff
+  the CI EXCLUDES 0, `meets_mde` iff `point_estimate >= mde`. CONSTRUCTED-DATA behavior (tested via
+  hand-built `ArmResult`s of known per-task rates): all-tasks FOUNDRY=1/BASELINE=0 ⇒ every diff 1.0 ⇒
+  CI entirely > 0 ⇒ significant; identical per-task rates in both arms ⇒ every diff 0.0 ⇒ bootstrap is
+  a point mass at 0 ⇒ CI=[0,0] ⇒ NOT significant. DETERMINISM: the RNG is `_seeded_rng(seed, *labels)`
+  = `random.Random(int(content_digest({seed, labels})[:16],16))` — NOT `random.Random((seed,str))`
+  (Python `hash()` of a str-containing tuple is process-randomized, L7) — so same `(frame, prereg,
+  seed)` ⇒ identical CI + identical frozen `ABResult`.
+- EV18. **HOLM–BONFERRONI step-down over the SECONDARY family (`_holm_bonferroni(raw_ps, *, alpha)`
+  -> (adjusted, significant) in ORIGINAL order).** Sort p ascending; the rank-`i` p is rejected iff it
+  AND all smaller clear `alpha/(m-i)` — the FIRST acceptance halts ALL further rejections (true
+  step-down: a later tiny p after an early accept is NOT rejected). Adjusted-p is the cumulative-max of
+  `min(1,(m-i)*p)` (monotone non-decreasing in rank, the standard reporting form; `holm_adjusted_p >=
+  raw_p`). FWER-controlling (conservative on the positively-correlated bootstrap endpoints — §2 notes
+  the studentized max-T alternative; Holm is the shipped choice here). Secondary family =
+  {FOUNDRY-vs-+gates resolution, FOUNDRY-vs-BASELINE efficiency (resolutions-per-USD, paired by task)};
+  each gets its own seeded two-sided bootstrap p (`_bootstrap_two_sided_p` = 2·min tail mass either
+  side of 0). Worked-example test pins the classic `[0.005,0.01,0.03,0.04]`@α=.05 ⇒ reject the first
+  two, ACCEPT at 0.03, and 0.04 stays non-significant (blocked by the step-down even though
+  0.04<0.05). Tests: 17, all green; full suite 543 passed/1 skipped. HONESTY: simulated baseline arms —
+  a dry-run `ABResult` asserts NOTHING about real Foundry-vs-baseline perf; `provenance`/`dry_run`
+  carried so a consumer can tell a rehearsal from a funded run.
+
 ## ArtifactStore — the real content-addressed body store (T-M1-14b, DECISIONS D6)
 - AS1. **`foundry/durability/artifact_store.py::ArtifactStore` closes the emit/resolve gap.**
   `emit_artifact` MINTED a `cas://sha256/<content_identity>` handle but DISCARDED the body, so

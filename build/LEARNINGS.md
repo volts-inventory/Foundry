@@ -791,6 +791,51 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   dry-run — `provenance`/`dry_run` flow from the cited manifest's hypothesis; the record asserts NOTHING
   about real Foundry-vs-baseline performance.
 
+## Phase-1.5 EXIT integration test — the honest audit map (T-M15-11)
+`tests/test_eval_phase1_5_exit.py` (13 tests; full suite 604 passed/1 skipped, ruff+mypy clean) is the
+milestone witness for the docs/roadmap.md Phase-1.5 EXIT criteria. It drives the WHOLE decision gate
+end-to-end (`generate_synthetic_frame -> run_pilot -> compute_power_rung -> freeze_preregistration ->
+run_ab -> decide -> run_ablation -> build_scorecard`) on synthetic fixtures and asserts coherence +
+honesty. HONEST MAP of what is GENUINELY end-to-end vs a representative/simulated stand-in:
+- EV35. **Criterion->test map + which stages are real vs stand-in.** (1) FULL PIPELINE
+  `test_exit_1_*` runs every stage live and asserts a real `DecisionClass` falls out. (2) PILOT-FIRST +
+  DISJOINT + READ-ONLY `test_exit_2_*`: pilot/scored slices share no task and exhaust the frame; a
+  re-run leaves `scored_slice.identity` UNCHANGED + the `PilotResult` identical (deterministic prefix-cut
+  — pilot never re-draws/selects scored tasks). (3) ALPHA-ONCE `test_exit_3_*`: after one
+  `freeze_preregistration` the `(scored_eval_set_identity, decision_id)` look is spent
+  (`alpha_looks_spent==1`); a second freeze of the SAME pair against the SAME `GlobalRecords` raises
+  `AlphaAlreadyDrawnError` (still ==1); a different `decision_id` draws its own. (4) CITE-PREREG
+  `test_exit_4_*`: a tamper rebuilt via `prereg.model_construct(mde+=0.05)` (skips validation so the
+  diverged mirror survives) makes BOTH `run_ab` and `decide` raise `TamperedPreRegistrationError`; a
+  prereg bound to a DIFFERENT frame's scored slice raises `ScoredSliceContaminationError`. (5)
+  UNCONDITIONAL ITT `test_exit_5_*`: every `scorecard.arm_score(arm).attempted == n_scored_tasks *
+  rung.k_repeats == ArmReport.attempted` and `itt_pass_rate == resolved/attempted` (never
+  resolved/completed). (6) BOTH BRANCHES `test_exit_6_*` — see EV36. (7) HONESTY `test_exit_7_*`: the
+  DRY-RUN scorecard's `honesty_banner()` contains DRY-RUN + SYNTHETIC + SIMULATED + NOT/REAL and is
+  `render()`'s FIRST line; the SCORED-provenance banner is non-empty too (ORACLE-SCORED + UNCONDITIONAL),
+  also first; `ablation_simulated is True`.
+- EV36. **Reaching BOTH PROCEED and HARD_KILL deterministically — the load-bearing asymmetry.** The
+  harness's SIMULATED FOUNDRY arm costs MORE per attempt than the baseline stand-in
+  (`_SIMULATED_COST_MICROUSD`: FOUNDRY 1.2M vs BASELINE 0.8M), and the equal-USD cost test
+  (`FOUNDRY <= BASELINE`) is PART of the PROCEED predicate — so a naturally-run dry-run frame can NEVER
+  PROCEED. HARD_KILL is therefore reached via the GENUINE full pipeline (`_drive_full_gate` -> `decide`).
+  PROCEED is reached by driving the gate's REAL branch logic (`decide`) on a hand-built `ABResult` that
+  CITES a real frozen prereg (`registration_identity == prereg.registration_identity()` so
+  `assert_unmodified` still passes) with significant + meets_mde + FOUNDRY-cost<=BASELINE. Both verdicts
+  come from the same `decide`, proving the gate is a real branch (not hard-wired). A third test pins the
+  two as distinct classes (PROCEED via cost-ok; HARD_KILL via a cost-WORSE win — same logic).
+- EV37. **The pilot is REAL but its rung-sizing inputs are a representative stand-in (`_sizing_pilot`).**
+  `run_pilot` genuinely runs end-to-end (its provenance=PILOT/scored=False/disjointness/read-only are all
+  asserted), but on a TINY dry-run frame the simulated arms SATURATE (`control_base_rate==1.0`, zero
+  between-task variance), which drives `compute_power_rung`'s `required_n` to 0 -> an invalid `n_tasks=0`
+  rung (a synthetic-frame artifact, NOT a methodology bug; `power.py` is out of this task's scope). So the
+  power calc is fed a NON-DEGENERATE representative `PilotResult` (base_rate 0.2, var 0.01 — the same
+  values every shipped power/prereg test uses) carrying the LIVE pilot's bound `eval_set_identity`. The
+  sizing ARITHMETIC is genuinely exercised; only the variance/base-rate INPUTS are the representative
+  stand-in. The FOUNDRY arm wraps the shipped pipeline keyless (D1-D3), so frames are kept TINY
+  (`n_tasks<=12`, `k_repeats=1`) for runtime. HONESTY: synthetic dry-run — asserts NOTHING about real
+  Foundry-vs-baseline performance; the dry-run banner is the load-bearing disclosure (criterion 7).
+
 ## Evaluation — decision-gate scorecard slice + unconditional ITT reporting (T-M15-10)
 - EV32. **`foundry/evaluation/scorecard.py::build_scorecard(ab: ABResult, decision: DecisionRecord, *,
   ablation: AblationResult | None = None, prereg: PreRegistration | None = None) -> Scorecard` (frozen) is

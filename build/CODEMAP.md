@@ -1,6 +1,6 @@
 # CODEMAP — living index (regenerated each milestone)
 
-Regenerated 2026-06-15T19:16:30 — end of Phase 1 (M1).
+Regenerated 2026-06-15T20:37:23 — end of Phase 1.5 (M1.5).
 
 ## foundry/ package modules
 ```
@@ -36,6 +36,17 @@ Regenerated 2026-06-15T19:16:30 — end of Phase 1 (M1).
   foundry/durability/checkpointer.py
   foundry/durability/outbox.py
   foundry/durability/serde.py
+  foundry/evaluation/__init__.py
+  foundry/evaluation/ab_runner.py
+  foundry/evaluation/ablation.py
+  foundry/evaluation/decision_table.py
+  foundry/evaluation/harness.py
+  foundry/evaluation/hypothesis.py
+  foundry/evaluation/pilot.py
+  foundry/evaluation/power.py
+  foundry/evaluation/preregistration.py
+  foundry/evaluation/scorecard.py
+  foundry/evaluation/task_fixtures.py
   foundry/execution/__init__.py
   foundry/execution/adapter_contract.py
   foundry/execution/adapters/__init__.py
@@ -104,6 +115,17 @@ Regenerated 2026-06-15T19:16:30 — end of Phase 1 (M1).
   test_artifact_store.py
   test_cli_smoke.py
   test_context.py
+  test_eval_ab_runner.py
+  test_eval_ablation.py
+  test_eval_decision_table.py
+  test_eval_harness.py
+  test_eval_hypothesis.py
+  test_eval_phase1_5_exit.py
+  test_eval_pilot.py
+  test_eval_power.py
+  test_eval_preregistration.py
+  test_eval_scorecard.py
+  test_eval_task_fixtures.py
   test_execution.py
   test_factory_graph.py
   test_gate_runner.py
@@ -127,10 +149,13 @@ Regenerated 2026-06-15T19:16:30 — end of Phase 1 (M1).
   test_tree_sha.py
 ```
 
-## Phase-1 (M1) graph spine
-cli.run -> build_factory_graph -> [supervisor: triage -> product -> architecture -> (spec gate)
-  -> implementation -> quality -> (build+test gates)] -> emit(open_pr). Bodies via ArtifactStore;
-  gates via TwoZoneGateRunner (attested-only); resume-idempotent emit.
+## Phase-1 graph spine: cli.run -> build_factory_graph -> supervisor(product->architecture
+  ->[spec]->implementation->quality->[build+test]) -> emit(open_pr). ArtifactStore bodies;
+  TwoZoneGateRunner attested-only; resume-idempotent.
+## Phase-1.5 decision gate (foundry/evaluation/): hypothesis -> task_fixtures (disjoint pilot/
+  scored) -> harness (oracle ITT) -> pilot -> power -> preregistration (alpha ledger) -> ab_runner
+  (paired cluster bootstrap + Holm) -> decision_table -> ablation -> scorecard. DRY-RUN/synthetic;
+  FOUNDRY arm real (cli.run), baseline+ablation simulated+flagged.
 
 ## LOC
- 12126 total
+ 15684 total

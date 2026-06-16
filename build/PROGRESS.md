@@ -65,3 +65,20 @@
   trust tests are the fault-injection evidence); tracked T-TOOL-MUT, re-attempt before EXIT.
 - AUDIT LOOP: fresh independent auditor dispatched (design-docs + code only).
 - NEXT: resolve audit findings (if any) -> close M1 -> open M1.5 (just-in-time decompose Phase 1.5).
+
+## 2026-06-15 — Session 1: Phase 1.5 (M1.5) implementation COMPLETE; gate sweep PASSED
+- 11 decision-gate tasks (T-M15-01..11): hypothesis schemas, synthetic task-fixture frame (disjoint
+  pilot/scored), oracle ITT harness, variance/base-rate pilot, power+(n,k), frozen pre-registration +
+  alpha look-ledger binding, powered 3-arm A/B (paired cluster bootstrap + Holm), decision table,
+  role ablation, scorecard slice, end-to-end exit exercise.
+- CRITIC LOOP: integrity trio (pilot/power/prereg) round1 1 MAJOR (prereg hypothesis<->rung coherence)
+  + 3 MINOR -> fixed -> round2 CLEAN. Harness/A-B modules CLEAN (3 MINOR conservative notes; bootstrap
+  boundary double-count fixed). All statistical integrity (alpha-once, no-re-draw, no-post-hoc-rung,
+  unconditional ITT, no-null-to-PROCEED, tamper-evidence) CONFIRMED.
+- HONESTY: inescapable dry-run/synthetic; FOUNDRY arm real (cli.run), baseline+ablation simulated+flagged;
+  scorecard dry-run banner; self-judge never reported as independent validation.
+- MILESTONE SWEEP: ruff/mypy clean, 604 pass/1 skip, coverage 88.6%. Mutation deferred (T-TOOL-MUT, D7).
+  RUNTIME: the exit exercise runs the whole decision-gate pipeline; Phase-1 cli smoke still exit 0.
+- AUDIT LOOP: fresh independent auditor dispatched.
+- NEXT: resolve audit findings -> close M1.5 -> open M2 (just-in-time decompose Phase 2: Gated mode,
+  Reviewer+evaluator-optimizer, Security/Audit/Supply-chain gates, risk-tiering, WORM, evidence pack).

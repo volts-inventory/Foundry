@@ -24,14 +24,14 @@
     {
       "id": "M1_5",
       "phase": "Phase 1.5 \u2014 Decision gate: powered A/B + role ablation",
-      "status": "in_progress",
+      "status": "done",
       "exit_criteria": "Variance/base-rate pilot (blocker, runs first); frozen pre-registration + decision table; powered A/B harness (3 arms, oracle-scored primary, ITT) + role ablation \u2014 built and exercised against local/synthetic task fixtures (not a funded live study). Decision: structure beats baseline by pre-registered margin at <= cost -> Proceed; null at MDE -> Hard KILL/redesign; {USD-null, token-positive} -> bounded overhead-redesign.",
       "note": "Decomposed by T-M1_5-PLAN into T-M15-01..T-M15-11 (all DECISION-GATE only; the confirmatory A/B + full scorecard/optimization are Phase 6 and NOT pulled in). New module: foundry/evaluation/ (hypothesis, task_fixtures, harness, pilot, power, preregistration, ab_runner, decision_table, ablation, scorecard) exercised on SYNTHETIC fixtures via the existing MockTransport/StubAdapter doubles + cli.run + build_factory_graph, binding to the EXISTING global_records alpha look-ledger (eval_set_identity, decision_id). Honest dry-run of the methodology, not real evidence. Each evaluation/*.py = single owner; collision hazards (factory_graph/supervisor/state/schemas/pyproject) untouched."
     },
     {
       "id": "M2",
       "phase": "Phase 2 \u2014 Review & assurance (Gated mode)",
-      "status": "pending",
+      "status": "in_progress",
       "exit_criteria": "A known-vulnerable change is caught; Design/Release require recorded sign-off; re-verification is change-proportional; rework loops terminate within caps and HITL volume is measured."
     },
     {
@@ -921,7 +921,7 @@
         "M2 decomposed into concrete tasks against the then-current tree, derived from implementation-plan \u00a77 Phase 2 + governance.md"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M3-PLAN",

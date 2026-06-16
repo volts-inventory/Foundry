@@ -41,3 +41,23 @@ worker substrate, e.g. the claude_code adapter, exercised only with a live key+b
 (MockTransport in keyless runs); and the trust roots (dev HMAC, two zones in one process — production
 hardening is an ops task per §0.3). The GATE/TRUST machinery, state/durability, idempotency, and the
 self-judge profile are genuine and adversarially tested.
+
+## M1.5 (Phase 1.5 decision gate) — Cycle 1 (fresh independent auditor; design-docs + code only)
+Auditor re-ran gates (ruff/mypy clean, full suite pass/1 skip) + read all evaluation modules + the
+integration test. **Per-requirement: ALL DELIVERED** — (1) pilot first/disjoint/read-only/not-a-scored-arm
+(ScoredSliceTouchedError); (2) pre-registration immutable+coherent, ledger keyed on (eval_set_identity,
+decision_id), guards ordered underpowered→incoherent→atomic alpha-look so a rejected freeze spends ZERO
+alpha; (3) 3-arm equal-USD A/B, oracle primary, ITT denominator can't shrink (double-asserted), paired
+cluster bootstrap + Holm; (4) decision table PROCEED⟺(sig∧meets_mde∧cost≤) enforced in model_post_init,
+no null→PROCEED, no silent re-power; (5) role ablation present + honestly simulated; (6) HONESTY —
+FOUNDRY arm genuine cli.run, baselines simulated, mandatory dry-run banner first, self-judge never
+reported as independent validation; (7) no overclaim (token-axis gap disclosed, not faked).
+**Verdict: CLEAN PASS.** Findings: 3 MINOR informational (all disclosed, no integrity impact):
+- A-M15-01 MINOR | exit-test _sizing_pilot substitutes representative variance (tiny synthetic frames
+  saturate to base_rate=1.0 → degenerate required_n=0); power arithmetic genuinely exercised, inputs are
+  stand-ins. Documented in-test. No action (synthetic-fixture artifact).
+- A-M15-02 MINOR | PROCEED only reachable in tests via a hand-built ABResult (simulated FOUNDRY cost >
+  baseline always); real decide branch logic IS exercised. Acceptable for a dry-run. No action.
+- A-M15-03 MINOR (info) | the effective-token secondary endpoint is out of scope (Phase 6); redesign fork
+  gated behind an external reading. Disclosed gap, not an overclaim. No action.
+**M1.5 AUDIT: CLEAN PASS.**

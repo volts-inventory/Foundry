@@ -207,3 +207,9 @@ tamper-evidence, dry-run-non-coalescence are all confirmed genuine.
 
 Resolution: 1 MAJOR (keystone) → fresh fixer after T-M15-07 commits (avoid racing its preregistration import),
 then MANDATORY fresh re-review. (open → pending fix)
+
+ACCEPTANCE (M1.5 integrity trio): Round-2 fresh verification critic CLEAN — M15-R1-01..04 all RESOLVED,
+keystone holds (coherence + funded guards fail-closed strictly BEFORE the atomic single-draw alpha look;
+no incoherent manifest; no alpha on a rejected freeze), atomic try_first_alpha_look verified, no Phase-0
+regression (nonce/latches untouched). Gates: ruff/mypy clean, 548 pass/1 skip. **Trio (pilot/power/prereg) ACCEPTED.**
+(INFO: legacy record_alpha_look now callerless — retained for future multi-look spending, not dead code.)

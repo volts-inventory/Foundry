@@ -32,7 +32,8 @@
       "id": "M2",
       "phase": "Phase 2 \u2014 Review & assurance (Gated mode)",
       "status": "in_progress",
-      "exit_criteria": "A known-vulnerable change is caught; Design/Release require recorded sign-off; re-verification is change-proportional; rework loops terminate within caps and HITL volume is measured."
+      "exit_criteria": "A known-vulnerable change is caught; Design/Release require recorded sign-off; re-verification is change-proportional; rework loops terminate within caps and HITL volume is measured.",
+      "note": "Decomposed by T-M2-PLAN into T-M2-01..T-M2-11. WIRE+EXTEND, don't rebuild: the gate IMPLs (gates/security.py, audit.py, supply_chain.py, e2e.py), the TwoZoneGateRunner (+ its reuse_key for \u00a71f), reviewer_critic, the supervisor convergence loop (route_after_gates / fix_attempts_since_all_green / max_fix_attempts), HumanLiaison (self-judge deferred_log), the WORM hash chain (durability/outbox.append_audit/verify_audit_chain), and the existing security/governance schemas all EXIST. Phase 2 adds: the Security/Audit/Supply-chain AGENT nodes (agents/security/, triage-only), an assurance gate-wiring helper + subgraph wiring those impls in at the assurance boundary (a known-vulnerable change is CAUGHT), change-risk tiering in triage (governance/tiering.py, scales depth+HITL never integrity), dependency-scoped re-verification (graph/reverification.py off runner.reuse_key), the reviewer-driven evaluator-optimizer rework loop (reuses the existing convergence bound), HITL Design/Release sign-off + evidence pack appended to WORM (governance/sign_off.py + durability/evidence_pack.py, self-judge stamp recorded), and a Gated-mode emit (factory_graph.py). Collision hazards (factory_state.py / reducers.py / supervisor.py / factory_graph.py / a given schema module) = single owner per wave, serialized via dependencies."
     },
     {
       "id": "M3",
@@ -921,7 +922,323 @@
         "M2 decomposed into concrete tasks against the then-current tree, derived from implementation-plan \u00a77 Phase 2 + governance.md"
       ],
       "retries_remaining": 3,
+      "status": "done"
+    },
+    {
+      "id": "T-M2-01",
+      "milestone": "M2",
+      "title": "Assurance + governance schema additions (assurance gate-triage handles, change-risk tier inputs, sign-off / evidence-pack records)",
+      "job_to_be_done": "Append-only the frozen pydantic models Phase 2 needs, into the EXISTING schema modules so later waves build against stable typed contracts. In foundry/schemas/security.py add nothing destructive (ThreatModel/SecurityTriage/SupplyChainReport/SBOMRef already exist); add any missing assurance-triage record the Security/Audit/Supply-chain AGENT nodes must emit if not covered (e.g. AuditTriage if needed). In foundry/schemas/governance.py add: a RiskTierAssessment (the deterministic-classifier output binding tier + the security-relevant paths matched + bounded-diff flag, distinct from TriageDecision which already carries tier), a SignOffRecord wrapper around the existing HumanDecision (decision_class Design|Release, two_person flag, self-judge stamp / approver-of-record, evidence_pack_hash bound per gov \u00a76), and an EvidencePack manifest model (hash-chained handle set: security-relevant diff, raw Guardian flags, suppression/floor changes, provenance + gate-state, convergence/cost status). All FrozenModel, content-addressed handles for bodies (DS9/L4), Seq where emitted as artifacts. Do NOT touch factory_state.py (separate owner, T-M2-02) or any non-schema module.",
+      "files_owned": [
+        "foundry/schemas/security.py",
+        "foundry/schemas/governance.py",
+        "tests/test_schemas_assurance.py"
+      ],
+      "dependencies": [
+        "T-M2-PLAN"
+      ],
+      "role": "Pydantic/typed-contracts engineer",
+      "required_experts": [
+        "E6",
+        "E3"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "RiskTierAssessment, SignOffRecord, EvidencePack are FrozenModel subclasses (extra=forbid, content_identity stable) appended to schemas/governance.py; any missing assurance-triage record appended to schemas/security.py; existing models (ThreatModel/SecurityTriage/SupplyChainReport/SBOMRef/TriageDecision/HumanDecision/ChangeRiskTier) unchanged",
+        "SignOffRecord binds decision_class (Design|Release), approver-of-record, two_person flag, judgment_provenance / self-judge stamp, and the presented evidence_pack_hash (gov \u00a76) so 'what was presented is what was signed'; it WRAPS HumanDecision, does not duplicate its fields destructively",
+        "EvidencePack carries a hash-chained handle set (security-relevant diff, raw Guardian flags, new suppressions/floor changes, provenance predicate + gate-state, convergence/cost) and a content_identity usable as the bound evidence_pack_hash",
+        "Bodies are content-addressed handles (DS9); no GateResult/verdict type invented (L5); append-only, no parallel artifact type",
+        "Tests added: construction, frozenness, content_identity stability, supersession round-trip; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
       "status": "in_progress"
+    },
+    {
+      "id": "T-M2-02",
+      "milestone": "M2",
+      "title": "FactoryState channels for tiering, assurance-phase sign-off, and Gated-mode (append-only single-writer / keyed)",
+      "job_to_be_done": "Append-only the new channels Phase 2 needs to FactoryState (collision hazard: SINGLE OWNER of foundry/state/factory_state.py this wave). Add: `risk_tier` (single-writer, set by triage tiering); `human_decisions` (keyed fan-in of SignOffRecord via a keyed reducer, mirrors `actions`/union_by_key so resume re-folds idempotently); and `mode` (single-writer: 'assistant'|'gated'). Add the matching keyed reducer to foundry/state/reducers.py ONLY if union_by_key/union_actions cannot be reused as-is (prefer reuse). Channels are append-only additions per the ARCHITECTURE collision rule; do NOT edit existing channel reducers. Reducer-purity property test extended for any new reducer.",
+      "files_owned": [
+        "foundry/state/factory_state.py",
+        "foundry/state/reducers.py",
+        "tests/test_state_phase2_channels.py"
+      ],
+      "dependencies": [
+        "T-M2-01"
+      ],
+      "role": "Durability engineer",
+      "required_experts": [
+        "E2",
+        "E1"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "FactoryState gains `risk_tier` (single-writer), `mode` (single-writer), and `human_decisions` (keyed fan-in reducer, None-safe/commutative/associative/idempotent) append-only; existing channels + their reducers byte-unchanged",
+        "human_decisions reducer reuses an existing keyed reducer (union_by_key) or a new one that passes the reducer-purity + idempotency property suite (a LangGraph resume re-fold produces no duplicate sign-off record, L8)",
+        "import foundry smoke clean; existing reducer property tests still green",
+        "Tests added for the new channel folds (idempotent resume, None-safety); mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M2-03",
+      "milestone": "M2",
+      "title": "Change-risk tiering classifier in triage (Low/Standard/High; fail-closed force-escalation)",
+      "job_to_be_done": "Build foundry/governance/tiering.py: a DETERMINISTIC classifier (no LLM, mirrors classify_request) that emits a RiskTierAssessment from the request + the integrated/changed paths + diff size. Implements governance \u00a71e exactly: Low = no security-relevant path (build/CI/IaC, deps/lockfile, scanner-config, auth/crypto, trust-root) AND bounded diff; Standard = ordinary app-code; High = ANY touch of a security-relevant or trust-root path REGARDLESS of size (force-escalate). The tier scales assurance DEPTH + HITL only \u2014 NEVER the integrity guarantees (admission/verdicts stay fail-closed). Reuse the high-privilege path patterns already in gates/supply_chain.py (HIGH_PRIVILEGE_PATTERNS) rather than re-deriving them. This module is pure logic; the supervisor wave (T-M2-08) writes the resulting tier onto the `risk_tier` channel and uses it to select assurance depth.",
+      "files_owned": [
+        "foundry/governance/tiering.py",
+        "tests/test_governance_tiering.py"
+      ],
+      "dependencies": [
+        "T-M2-01",
+        "T-M2-02"
+      ],
+      "role": "Security/trust-root engineer",
+      "required_experts": [
+        "E3"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "classify_tier(request, changed_paths, diff_size) -> RiskTierAssessment is deterministic + pure; Low/Standard/High map exactly to governance \u00a71e triggers",
+        "ANY security-relevant or trust-root path (reusing gates/supply_chain HIGH_PRIVILEGE_PATTERNS + deps/lockfile/scanner-config/auth/crypto markers) forces High regardless of diff size (force-escalate test)",
+        "Tier scales assurance depth + HITL ONLY; an explicit assertion/test that it never relaxes admission or verdict integrity (no field flips a fail-closed bit)",
+        "Mis-tiering surfaces as a first-class finding (a deterministic check usable by the oracle/config-edit monitor) rather than silent",
+        "Tests added covering all three tiers + force-escalation + bounded-diff boundary; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M2-04",
+      "milestone": "M2",
+      "title": "Security / Audit / Supply-chain AGENT nodes (agents/security/) \u2014 triage only, never verdicts",
+      "job_to_be_done": "Build foundry/agents/security/: appsec_engineer (-> ThreatModel with per-item oracle bindings + SecurityTriage), audit_compliance (-> SBOMRef + audit triage), supply_chain_reviewer (-> SupplyChainReport). Each is a make_x_node(rt)->NodeFn closure (AR3) reading state, calling rt.proxy.complete (ideation; these are advisory authoring, never proxy.judge), emitting GateTriage(advisory)/artifacts ONLY \u2014 the runner-signed Security/Audit/Supply-chain verdicts come from the EXISTING gate impls via the runner (L5/gov \u00a71c/\u00a71d). AppSec splits oracle-reducible threat items (bound into the Security verdict) from the residual (-> Threat-review judgment sub-gate, NOT in the signed predicate, \u00a71d). Bodies are content-addressed handles via rt.cas (AS3).",
+      "files_owned": [
+        "foundry/agents/security/__init__.py",
+        "foundry/agents/security/appsec_engineer.py",
+        "foundry/agents/security/audit_compliance.py",
+        "foundry/agents/security/supply_chain_reviewer.py",
+        "tests/test_agents_security.py"
+      ],
+      "dependencies": [
+        "T-M2-01"
+      ],
+      "role": "Security/trust-root engineer",
+      "required_experts": [
+        "E3",
+        "E4"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "Each node is a pure-ish (state, config) -> dict closure (AR3); all egress via rt.proxy.complete (L6, no SDK); emits GateTriage(advisory)/artifacts ONLY, never a GateResult (L5) and never proxy.judge (these are authoring, not the judgment residual)",
+        "appsec_engineer emits a ThreatModel whose oracle_bindings cover reducible items and whose residual_item_ids route to Threat-review (\u00a71d); audit_compliance emits SBOMRef; supply_chain_reviewer emits SupplyChainReport flagging trust_root_touched",
+        "Artifact bodies are content-addressed handles via rt.cas (AS3/AS5); Seq minted per AR2; adapter/self-report lineage never trusted",
+        "Tests added via MockTransport asserting triage/artifact writes + the reducible/residual split; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M2-05",
+      "milestone": "M2",
+      "title": "Assurance gate-wiring helper: run Security/Audit/Supply-chain/E2E gates via the two-zone runner (a known-vulnerable change is CAUGHT)",
+      "job_to_be_done": "Extend the graph-side gate seam (a new foundry/graph/assurance_wiring.py, sibling to gate_wiring.py \u2014 NOT editing gate_wiring.py, which the M1 boundaries own) to materialize the integrated tree and run the EXISTING SecurityGate/AuditGate/SupplyChainGate/E2EGate impls through the injected TwoZoneGateRunner, folding ONLY runner-attested GateResults onto the gates channel. Reuse materialize_workdir from gate_wiring (write changes.diff for SupplyChainGate, lockfiles for AuditGate). Add run_assurance_gates(state, config, *, rt, runner, resolve, resolve_blob, workdir, tiers...) selecting WHICH gates by risk_tier (Low = scoped Security; Standard = full set; High = + Supply-chain + the threat-review residual surfaced). The exit-criterion proof lives here: a diff carrying a known-vulnerable pattern (a hardcoded secret / new-dep-source / high-privilege CI edit) materializes -> the corresponding gate FAILs -> the digest latches -> no advance.",
+      "files_owned": [
+        "foundry/graph/assurance_wiring.py",
+        "tests/test_assurance_wiring.py"
+      ],
+      "dependencies": [
+        "T-M2-03",
+        "T-M2-04"
+      ],
+      "role": "Security/trust-root engineer",
+      "required_experts": [
+        "E3",
+        "E1"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "run_assurance_gates runs SecurityGate/AuditGate/SupplyChainGate/E2EGate (existing impls) through the runner against the integrated tree_sha; ONLY runner-attested GateResults reach the gates channel (unsigned dropped by _merge_gates, L5); the helper never constructs a GateResult",
+        "A KNOWN-VULNERABLE CHANGE IS CAUGHT (Phase-2 exit): a materialized diff with a hardcoded secret -> Security FAIL; a new-dep-source / high-privilege CI edit -> Supply-chain FAIL; a denied-license lockfile -> Audit FAIL \u2014 each latches the integrated digest and routes to halt (tested end to end through the runner, not a hand-built verdict)",
+        "Gate SELECTION is risk-tier-scoped (Low scoped Security; Standard full; High adds Supply-chain + threat-review residual) but the SELECTED gates are always fail-closed (tiering scales depth, never integrity; gov \u00a71e)",
+        "Reuses materialize_workdir (writes changes.diff + lockfiles into the same integrated tree); a missing/partial materialization is fail-closed (no vacuous PASS, gov \u00a71b)",
+        "Tests added: each known-vulnerable class is caught + latched; a clean tree PASSes; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M2-06",
+      "milestone": "M2",
+      "title": "Dependency-scoped re-verification engine (\u00a71f) \u2014 re-verification is change-proportional",
+      "job_to_be_done": "Build foundry/graph/reverification.py: from a tree_sha delta (changed sub-paths between a prior integrated tree and the new one) derive WHICH gates the change can affect and re-run only those; verdicts for unaffected inputs are REUSED from a cache keyed on the unchanged input sub-hash (a cached PASS keyed on an unchanged sub-tree/lockfile/config hash is still a real runner-attested verdict, so the final attested gate-state still covers the whole tree). Reuse the EXISTING runner.reuse_key (binds mutant_rotation_id + scanner_rule_version for class-2, state_sha for class-1) so a rotation/rule-version boundary invalidates a cached class-2 verdict (\u00a71f, never laundered forward). E.g. a pure app-code change re-runs Test/E2E for impacted criteria + SAST on changed files but reuses Audit/SBOM if deps unchanged; a lockfile change re-runs Supply-chain + Audit but not unaffected app tests. A per-feature re-verification sub-budget caps cascades, with the convergence bound as backstop.",
+      "files_owned": [
+        "foundry/graph/reverification.py",
+        "tests/test_reverification.py"
+      ],
+      "dependencies": [
+        "T-M2-05"
+      ],
+      "role": "Security/trust-root engineer",
+      "required_experts": [
+        "E3",
+        "E2"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "affected_gates(prev_tree, new_tree, gates) returns the change-proportional gate subset from the path delta; a pure app-code change reuses the Audit/SBOM verdict (deps unchanged) and a lockfile change reuses unaffected app Test verdicts \u2014 each proven by a unit test",
+        "Cached verdicts are keyed via the EXISTING runner.reuse_key (class-2 binds mutant_rotation_id + scanner_rule_version; class-1 on state_sha); a rotation/rule-version bump INVALIDATES a cached class-2 verdict (no laundering forward, \u00a71f)",
+        "A reused verdict is a real runner-attested record keyed on the unchanged sub-hash; the final attested gate-state still covers the WHOLE tree (whole-tree guarantee preserved)",
+        "A per-feature re-verification sub-budget caps cascades; the convergence bound (fix_attempts_since_all_green) is the backstop",
+        "Tests added proving change-proportionality + the rotation-invalidation boundary; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M2-07",
+      "milestone": "M2",
+      "title": "HITL sign-off at Design/Release + evidence pack + WORM audit (recorded sign-off; self-judge stamp)",
+      "job_to_be_done": "Build foundry/governance/sign_off.py: package a Design and a Release sign-off through the EXISTING HumanLiaison (gov \u00a76), producing a SignOffRecord that binds approver-of-record + the presented evidence_pack_hash + two-person flag (High tier). In the chosen self-judge profile (plan \u00a70.2) this is the no-op deferred_log path but THE RECORD IS STILL MADE (judgment_provenance='self', stamped by the proxy/liaison); Gated mode = full gates, human approves (blocking). Build foundry/durability/evidence_pack.py: assemble the EvidencePack (deterministic, non-agent-generated: security-relevant diff, RAW Guardian flags, new suppressions/floor changes, the provenance predicate + gate-state, convergence/cost) and APPEND it + the sign-off to the EXISTING WORM hash chain (durability/outbox.append_audit / verify_audit_chain \u2014 reuse, do not rebuild). Segregation-of-duties: the recorded approver identity must not intersect the author set (re-derivable from the WORM record).",
+      "files_owned": [
+        "foundry/governance/sign_off.py",
+        "foundry/durability/evidence_pack.py",
+        "tests/test_sign_off.py",
+        "tests/test_evidence_pack.py"
+      ],
+      "dependencies": [
+        "T-M2-01",
+        "T-M2-02"
+      ],
+      "role": "Security/trust-root engineer",
+      "required_experts": [
+        "E3",
+        "E2"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "package_design_signoff / package_release_signoff route through the EXISTING HumanLiaison and emit a SignOffRecord binding approver-of-record + evidence_pack_hash + two_person (forced on High tier); Gated mode = blocking-and-recorded, self-judge profile = deferred_log but THE RECORD IS STILL MADE (judgment_provenance='self')",
+        "EvidencePack is assembled from non-agent / deterministic sources (security-relevant diff, raw Guardian flags, suppression/floor changes, provenance + gate-state, convergence/cost) and its content_identity equals the evidence_pack_hash the sign-off binds (what-was-presented == what-was-signed, gov \u00a76)",
+        "The evidence pack + sign-off are appended to the EXISTING WORM hash chain (durability/outbox.append_audit) and verify_audit_chain still passes; the chain is the only writer (no rebuild)",
+        "Segregation of duties: a sign-off whose approver intersects the author set is rejected (re-derivable from the WORM record, gov \u00a71e); two-person required on High tier",
+        "Tests added: Design+Release sign-off recorded in both profiles, evidence-pack hash binding, WORM append + chain verify, SoD rejection; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M2-08",
+      "milestone": "M2",
+      "title": "Assurance subgraph + reviewer-driven evaluator-optimizer rework loop (bounded)",
+      "job_to_be_done": "Build foundry/graph/subgraphs/assurance.py: compose the Security/Audit/Supply-chain agent nodes (T-M2-04) then the assurance gate-wiring (T-M2-05) into a mountable subgraph over FactoryState, AND wire the evaluator-optimizer rework loop \u2014 reviewer (the EXISTING reviewer_critic judgment path) + Security findings drive TARGETED fixes that route back to the responsible layer, REUSING the supervisor's existing convergence bound (fix_attempts_since_all_green / route_after_gates / max_fix_attempts). The loop terminates within caps; a request-changes verdict latches (negative-verdict latch, Q3) and a hard assurance FAIL latches + halts. Returns the UNCOMPILED subgraph builder (SG4). No supervisor/factory_graph edits here.",
+      "files_owned": [
+        "foundry/graph/subgraphs/assurance.py",
+        "tests/test_subgraph_assurance.py"
+      ],
+      "dependencies": [
+        "T-M2-04",
+        "T-M2-05",
+        "T-M2-06"
+      ],
+      "role": "LangGraph engineer",
+      "required_experts": [
+        "E1",
+        "E3"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "build_assurance_subgraph(rt, *, runner, resolve, resolve_blob, ...) returns an UNCOMPILED StateGraph wiring the security/audit/supply-chain agent nodes then the assurance gates; verdicts ONLY from the runner (L5)",
+        "Evaluator-optimizer loop: reviewer/Security findings route a bounded targeted FIX back to the responsible layer, REUSING route_after_gates + fix_attempts_since_all_green + max_fix_attempts (no parallel loop machinery); the loop TERMINATES WITHIN CAPS (Phase-2 exit) \u2014 tested with a persistently-failing finding halting at the bound",
+        "A negative review verdict latches (Q3, terminal until released) and a hard assurance FAIL latches the digest + halts; a flake-quarantine E2E ERROR routes to bounded retry, never fails the boundary",
+        "Tests added: clean pass advances, a finding drives a bounded fix loop that converges, a persistent finding halts at the cap; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M2-09",
+      "milestone": "M2",
+      "title": "Supervisor wiring: tiering at triage + assurance phase + Design/Release sign-off boundaries",
+      "job_to_be_done": "Edit foundry/graph/supervisor.py (SINGLE OWNER this wave, collision hazard) to wire Phase 2 into the spine: triage additionally classifies the change-risk tier (T-M2-03) onto the `risk_tier` channel and the `mode` channel; a Design sign-off boundary after architecture/spec (HITL via T-M2-07, recorded sign-off / self-judge stamp); the assurance subgraph (T-M2-08) mounted after quality/build-test; a Release sign-off boundary before emit. Assurance gate routing reuses route_after_gates with the assurance boundary; dependency-scoped re-verification (T-M2-06) selects which gates re-run on a fix-loop. Keep the M1 phase order intact; ADD the assurance + sign-off boundaries. The convergence loop is the existing one (no new loop).",
+      "files_owned": [
+        "foundry/graph/supervisor.py",
+        "tests/test_supervisor_phase2.py"
+      ],
+      "dependencies": [
+        "T-M2-06",
+        "T-M2-07",
+        "T-M2-08"
+      ],
+      "role": "LangGraph engineer",
+      "required_experts": [
+        "E1",
+        "E3"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "Triage writes `risk_tier` (T-M2-03 classifier) + `mode` (single-writer channels); phase order becomes triage -> product -> architecture -> spec_gate -> [design_signoff] -> implementation -> quality -> build_test_gate -> assurance -> [assurance gates] -> [release_signoff] -> END, M1 order preserved",
+        "Design + Release boundaries record a SignOffRecord via T-M2-07 (blocking in Gated mode; deferred_log + self-judge stamp in the chosen profile \u2014 the record is always made); assurance gate routing reuses route_after_gates (no new loop)",
+        "Dependency-scoped re-verification (T-M2-06) selects the change-proportional gate subset on a fix-loop re-entry; tiering scales WHICH assurance gates run (Low/Standard/High) but never integrity",
+        "Tests added asserting the new phase order, a tier-scoped assurance run, and a recorded Design/Release sign-off; existing M1 supervisor tests still green; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M2-10",
+      "milestone": "M2",
+      "title": "Gated-mode emit in factory_graph (distinct from Assistant mode; carries the evidence pack)",
+      "job_to_be_done": "Edit foundry/graph/factory_graph.py (SINGLE OWNER this wave, collision hazard) to add a GATED-MODE emit path distinct from the Assistant-mode emit: when `mode == 'gated'`, the released candidate is emitted ONLY after ALL gates green (Spec/Build/Test/Security/Audit/Supply-chain/E2E) AND the Release SignOffRecord is present, and the emitted ExternalAction carries the hash-chained EvidencePack handle (T-M2-07) + bound gate-state. Assistant-mode emit (M1) is preserved unchanged on `mode != 'gated'`. The emit guard stays fail-closed: a halted/failed/un-signed run emits NOTHING. Idempotency key stays the deterministic content_digest (L7); kill-then-resume coalesces (FG3).",
+      "files_owned": [
+        "foundry/graph/factory_graph.py",
+        "tests/test_factory_graph_gated.py"
+      ],
+      "dependencies": [
+        "T-M2-09"
+      ],
+      "role": "LangGraph engineer",
+      "required_experts": [
+        "E1",
+        "E2"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "build_factory_graph emits a GATED-mode release candidate on `mode=='gated'` ONLY when every assurance gate (Spec/Build/Test/Security/Audit/Supply-chain/E2E) is newest-by-Seq PASS AND a Release SignOffRecord is present; the emitted action carries the EvidencePack handle + bound gate-state",
+        "Assistant-mode emit (M1, terminal_gates_pass on Spec/Build/Test) is preserved unchanged on `mode!='gated'`; the two paths are distinct + selected by the `mode` channel",
+        "Fail-closed: a halted/failed/unsigned/un-attested run emits NOTHING (no release); the guard reads only the trust-filtered gates channel + the WORM-recorded sign-off, so an unattested status-flip can't trick it",
+        "Idempotency key is the deterministic content_digest (L7); kill-then-resume produces exactly one release action (FG3)",
+        "Tests added: gated emit on full-green+signed, no emit on missing assurance gate or missing sign-off, assistant-mode unchanged, idempotent resume; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M2-11",
+      "milestone": "M2",
+      "title": "Phase-2 exit-criteria integration test + milestone gate sweep + HITL-volume measurement",
+      "job_to_be_done": "Add tests/test_phase2_exit.py: the milestone witness for the docs/roadmap.md Phase-2 exit criteria, driving the full Gated-mode path end-to-end with the existing test doubles (MockTransport/StubAdapter, no live key). Asserts: (1) a KNOWN-VULNERABLE change is CAUGHT (a hardcoded-secret / new-dep-source / high-privilege-CI diff -> the corresponding assurance gate FAILs -> latched -> no release); (2) Design AND Release require a recorded sign-off (SignOffRecord present in the WORM chain, self-judge-stamped in the chosen profile); (3) re-verification is CHANGE-PROPORTIONAL (a scoped change re-runs only affected gates, reusing cached attested verdicts); (4) rework loops TERMINATE WITHIN CAPS (a persistent finding halts at max_fix_attempts) and HITL VOLUME IS MEASURED (human-decisions-per-feature counted from human_decisions / WORM). Then run the milestone gate sweep (ruff, mypy, full pytest, coverage >=80%, scoped mutation on the trust-critical new modules).",
+      "files_owned": [
+        "tests/test_phase2_exit.py"
+      ],
+      "dependencies": [
+        "T-M2-10"
+      ],
+      "role": "QA / eval engineer",
+      "required_experts": [
+        "E3",
+        "E1"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "End-to-end Gated-mode run on synthetic fixtures asserts: a known-vulnerable change is caught (gate FAIL + latch + no release) for >=1 vulnerability class through the REAL two-zone runner",
+        "Design AND Release each require a recorded sign-off (SignOffRecord in the WORM chain; verify_audit_chain passes; self-judge stamp present in the chosen profile)",
+        "Re-verification is change-proportional (a scoped change re-runs only affected gates and reuses cached runner-attested verdicts; the whole-tree guarantee still holds) and rework loops terminate within caps (persistent finding -> halt at the bound)",
+        "HITL volume is MEASURED: human-decisions-per-feature counted from the human_decisions channel / WORM records (the metric that keeps tiering honest, gov \u00a71e)",
+        "Milestone gate sweep green: ruff, mypy foundry, full pytest, coverage >=80% overall (new code >=85%), scoped mutation >=70% on trust-critical Phase-2 modules or survivors justified in build/REVIEW.md"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
     },
     {
       "id": "T-M3-PLAN",

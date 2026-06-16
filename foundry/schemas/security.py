@@ -77,3 +77,25 @@ class SBOMRef(FrozenModel):
     sbom_uri: str
     tree_sha: str  # the tree the SBOM was generated for
     seq: Seq
+
+
+class AuditFinding(FrozenModel):
+    """Audit/Compliance ADVISORY triage (agents.md Layer 5; gov §1c).
+
+    The Audit/Compliance agent's SOP emits findings (disallowed-license /
+    critical-CVE / control-mapping gaps), a license report, and a compliance
+    map — all ADVISORY. The authoritative Audit verdict (SBOM/CVE/license) is
+    re-derived and signed by the trusted runner, never claimed here. Bodies
+    (license report, compliance/control map) are content-addressed handles
+    (DS9); this record is the agent-side reference + triage severity.
+    """
+
+    run_against: str  # tree_sha the audit triaged
+    sbom_uri: str  # CAS handle to the agent-side SBOM reference (DS9)
+    severity: Severity  # highest severity among findings — advisory, not a verdict
+    findings: tuple[str, ...] = ()  # disallowed license / critical CVE / control gap
+    license_report_uri: str | None = None  # CAS handle (DS9)
+    compliance_map_uri: str | None = None  # control-mapping body (DS9)
+    version: int = 1
+    supersedes: str | None = None
+    seq: Seq

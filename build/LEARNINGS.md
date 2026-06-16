@@ -1003,3 +1003,51 @@ copy). Lessons / honesty map for the audit:
   `flake_quarantined(...) is True`, the digest is NOT latched, and `route_after_gates(...) == "fix"`
   (bounded retry, not a failure-halt). This is the same pattern as
   test_gate_wiring::test_flake_quarantine_does_not_fail_boundary.
+
+## Assurance / Gated mode — Phase-2 artifact schemas (T-M2-01)
+The Gated-mode assurance layer (next M2 waves: agents, tiering, sign-off, evidence-pack)
+builds on these frozen models. APPEND-ONLY additions to the existing modules; reused where
+adequate.
+- AS1. **security.py — REUSED, not duplicated:** AppSec already has `ThreatModel`
+  (per-item oracle bindings + `residual_item_ids`/`has_residual()`) + `SecurityTriage`
+  (advisory); Supply-Chain already has `SupplyChainReport` (`trust_root_touched` → HITL);
+  Audit already has `SBOMRef` (the SBOM handle). **ADDED `AuditFinding`** — the missing
+  Audit/Compliance ADVISORY triage (agents.md L5 emits findings + license_report +
+  compliance_map; only the SBOM handle existed): `run_against`/`sbom_uri`/`severity`
+  (reuses `Severity`)/`findings` + optional `license_report_uri`/`compliance_map_uri`
+  CAS handles, `version`/`supersedes`. Advisory ONLY — the Audit verdict (SBOM/CVE/
+  license) is runner-re-derived + signed (gov §1c, L5). No new GateResult/verdict type.
+- AS2. **governance.py — `RiskTier = ChangeRiskTier` (ALIAS, not a new enum):** the §1e
+  tier (LOW/STANDARD/HIGH) already existed as `ChangeRiskTier`; tiering + triage share ONE
+  enum (L3, no parallel type). Tests assert `RiskTier is ChangeRiskTier`.
+- AS3. **ADDED `TierDecision`** (gov §1e): `tier`/`rationale`/`run_against` + advisory
+  `gate_set` (scoped family) + `two_person_release`/`forced_high` flags + `version`/
+  `supersedes`. Carries `relaxes_integrity()` → ALWAYS False (an asserted invariant, not a
+  comment): tiering scales assurance DEPTH + HITL only, NEVER admission/integrity. It is a
+  TRIAGE record — mis-tiering is caught by deterministic pattern checks + HITL, not by this
+  record bypassing a gate. Distinct from `TriageDecision` (route + seeded budget); this is
+  the standalone tier record the tiering wave supersedes independently.
+- AS4. **ADDED `SignOffRecord`** (gov §1e/§6, class-4): approver-of-record sign-off.
+  `subject_artifact_uri`/`state_sha`/`approver`/`role`/`approved`/`server_nonce` (per-approval
+  challenge, gov §6)/`presented_evidence_hash` (hash of the EXACT pack shown — what-you-see-
+  is-what-you-sign) + `meaning_of_signing`. **`judgment_provenance: JudgmentProvenance`
+  (REQUIRED, never defaulted)** is the self-judge stamp for the chosen profile (gov §1e
+  solo-lineage) — SELF is recorded, never hidden; the MODEL never supplies it (proxy/runner
+  stamps from the active profile, mirrors PR3). It IS part of content_identity, so a SELF vs
+  INDEPENDENT sign-off are distinct records. NB this is a SEPARATE, richer record than the
+  existing `HumanDecision` (which stays the generic L7 HITL log — kept untouched); SignOffRecord
+  adds role/state_sha/presented_evidence_hash/judgment_provenance for the Gated release path.
+  Import note: governance.py now imports `JudgmentProvenance` from gates.py — gates.py imports
+  neither, so NO cycle (verified).
+- AS5. **ADDED `EvidencePack`** (gov §6): the independent non-agent-assembled release pack.
+  `pack_uri` (the pack's own CAS handle — what a `SignOffRecord.presented_evidence_hash` binds)
+  + `run_against` (integrated tree_sha) + `chain_head` (hash-chain head, tamper-evident) +
+  tuple handle sets `gate_result_uris`/`artifact_uris`/`sign_off_uris` (default empty tuple —
+  list coerces) + optional `scanner_config_rev`/`provenance_predicate_uri` + `version`/
+  `supersedes`. Bodies OUT-OF-BAND (DS9/L4); the record carries only content-addressed handles
+  + the chain head.
+- AS6. **No `Field(default_factory=...)` needed here (S1):** every mutable default is a `tuple`
+  literal `= ()`, which is IMMUTABLE, so RUF012 does not trip (S1 only bites on `= []`/`= {}`).
+  Tests live in `tests/test_schemas_assurance.py` (mirrors test_schemas.py's CASES table +
+  spot-check style); existing test_schemas.py stays green. Gate chain clean
+  (ruff/mypy/pytest full suite).

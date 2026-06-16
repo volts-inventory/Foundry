@@ -951,7 +951,7 @@
         "Tests added: construction, frozenness, content_identity stability, supersession round-trip; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M2-02",
@@ -979,7 +979,7 @@
         "Tests added for the new channel folds (idempotent resume, None-safety); mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M2-03",
@@ -1037,7 +1037,7 @@
         "Tests added via MockTransport asserting triage/artifact writes + the reducible/residual split; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M2-05",
@@ -1125,7 +1125,7 @@
         "Tests added: Design+Release sign-off recorded in both profiles, evidence-pack hash binding, WORM append + chain verify, SoD rejection; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M2-08",

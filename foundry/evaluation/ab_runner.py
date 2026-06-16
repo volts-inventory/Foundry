@@ -266,16 +266,25 @@ def _percentile(sorted_values: list[float], q: float) -> float:
 def _bootstrap_two_sided_p(boot_means: list[float]) -> float:
     """Two-sided bootstrap p-value for H0: mean per-task difference == 0.
 
-    The p-value is twice the smaller tail mass on the WRONG side of 0 (the
-    fraction of bootstrap means at/below 0 vs at/above 0), clamped to [0, 1]. A
-    distribution entirely on one side of 0 yields p ~= 0 (strong evidence of a
-    non-zero effect); one centered on 0 yields p ~= 1.
+    The p-value is twice the smaller tail mass on the WRONG side of 0, clamped to
+    [0, 1]. Ties at exactly 0 are split evenly between the two tails (half each)
+    rather than counted in BOTH (M15-R2-01) — counting the boundary on both sides
+    double-counts it and inflates the smaller tail for asymmetric distributions
+    touching 0. A distribution entirely on one side of 0 yields p ~= 0 (strong
+    evidence of a non-zero effect); one centered on 0 yields p ~= 1.
+
+    NOTE the achievable minimum p is bounded by the resample grid (~2/n): a true
+    zero-tail effect cannot produce a p below that floor — raise the resample
+    count if finer primary resolution is needed.
     """
     n = len(boot_means)
     if n == 0:
         return 1.0
-    below = sum(1 for m in boot_means if m <= 0.0) / n
-    above = sum(1 for m in boot_means if m >= 0.0) / n
+    strict_below = sum(1 for m in boot_means if m < 0.0)
+    strict_above = sum(1 for m in boot_means if m > 0.0)
+    at_zero = n - strict_below - strict_above
+    below = (strict_below + 0.5 * at_zero) / n
+    above = (strict_above + 0.5 * at_zero) / n
     return min(1.0, 2.0 * min(below, above))
 
 

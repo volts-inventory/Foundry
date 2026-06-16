@@ -232,3 +232,6 @@ SOUND (simulated baselines/ablation + dry-run inescapable; FOUNDRY arm genuinely
   order — VERIFIED correct (no off-by-one). | accept (no action).
 ACCEPTANCE: all-MINOR, conservative/safe direction, no validity break -> CLEAN ROUND by cross-check.
 M15-R2-01 boundary-count to be fixed on M1.5 close (batched small edit). **01/02/03/07/08/09 reviewed CLEAN.**
+
+UPDATE: M15-R2-01 RESOLVED (commit pending) — _bootstrap_two_sided_p now splits the m==0 boundary
+evenly between tails (no double-count); grid-floor documented. ab_runner tests + full suite green.

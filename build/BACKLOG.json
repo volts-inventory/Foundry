@@ -899,7 +899,7 @@
         "Milestone gate sweep green: ruff, mypy foundry, full pytest, coverage >=80% overall (new evaluation/ code >=85%)"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M2-PLAN",

@@ -842,7 +842,7 @@
         "Tests added asserting the core baseline + at least one added-role comparison run; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M15-10",

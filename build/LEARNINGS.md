@@ -726,6 +726,36 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   a dry-run `ABResult` asserts NOTHING about real Foundry-vs-baseline perf; `provenance`/`dry_run`
   carried so a consumer can tell a rehearsal from a funded run.
 
+## Evaluation — role-ablation harness (T-M15-09)
+- EV24. **`foundry/evaluation/ablation.py::run_ablation(frame, *, roles=DEFAULT_CORE_ROLES, seed=0,
+  k_repeats=2, threshold=0.02, contribution=None, cost=None, use_pilot_slice=False) -> AblationResult`
+  (frozen) answers roadmap P-F2 "do roles earn their place?".** For each `Role` in the core set
+  (PM→ARCHITECT→SENIOR→QA) it runs the eval over `frame.scored_slice` (or pilot) with the FULL core vs
+  that role ABLATED, emitting a per-role `RoleAblationDelta` (`full_rate`, `ablated_rate`, `delta =
+  full−ablated`, `full/ablated/cost_delta_microusd`, `earns_place_threshold`, `earns_place`).
+  `AblationResult.delta_for(role)` / `.non_earning_roles` are derived; `full_rate` is the shared core
+  baseline. EARNS_PLACE RULE: a role earns its place iff `delta >= threshold` (removing it MEASURABLY
+  hurts the resolution rate); a removal within the threshold flags it not-earning (`earns_place=False`).
+- EV25. **SIMULATED ablation, NOT a real bypass — flagged `simulated_ablation=True` (load-bearing
+  honesty).** The shipped Phase-1 graph (`build_supervisor_graph`) is a FIXED 4-role pipeline wired with
+  hard `add_edge` + NO node-bypass seam, and the FOUNDRY arm resolves on a single `passed AND open_pr`
+  binary that doesn't vary per-role — so a real architecture-less/QA-less run is out of scope here (would
+  touch the graph package; task scope is ablation.py + its test ONLY). So each role's contribution is
+  modeled as an additive resolution-rate LIFT over `control_base_rate` (DRY-RUN table; SENIOR 0.20 /
+  ARCHITECT 0.15 / PM 0.10 / QA **0.0** — a deliberately non-earning role) folded into a per-task
+  Bernoulli draw via `content_digest` (L7, never `hash()`). Ablating a role removes its lift AND its
+  per-attempt cost (so `cost_delta>0`: removal is cheaper). Swap for real ablated-run deltas behind the
+  SAME API + flip the flag when a per-role graph bypass exists (later phase). The conclusion is about the
+  METHOD, never a real org-design verdict; `provenance=DRY_RUN`.
+- EV26. **COMMON-RANDOM-NUMBERS (paired) draw is what makes the earns-place test crisp.** The uniform
+  draw folds `(base_resolution_seed, repeat, seed)` ONLY — INDEPENDENT of the role set — so the SAME
+  draw is compared against the full-core vs ablated rate target. A zero-contribution role (QA) therefore
+  has IDENTICAL full/ablated rates (`delta == 0` EXACTLY, no sampling noise) → reliably flagged
+  not-earning; a positive-contribution role's removal can only LOWER the rate. Determinism: same `(frame,
+  roles, seed, k, threshold, tables, slice)` ⇒ identical `AblationResult` (`content_identity()` stable).
+  Tests: 15, all green; full suite 578 passed/1 skipped (the `decision_table.py` ruff/mypy errors are a
+  SEPARATE uncommitted task's WIP, untouched here). HONESTY: synthetic dry-run — asserts NOTHING real.
+
 ## ArtifactStore — the real content-addressed body store (T-M1-14b, DECISIONS D6)
 - AS1. **`foundry/durability/artifact_store.py::ArtifactStore` closes the emit/resolve gap.**
   `emit_artifact` MINTED a `cas://sha256/<content_identity>` handle but DISCARDED the body, so

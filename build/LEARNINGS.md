@@ -791,6 +791,37 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   dry-run — `provenance`/`dry_run` flow from the cited manifest's hypothesis; the record asserts NOTHING
   about real Foundry-vs-baseline performance.
 
+## Evaluation — decision-gate scorecard slice + unconditional ITT reporting (T-M15-10)
+- EV32. **`foundry/evaluation/scorecard.py::build_scorecard(ab: ABResult, decision: DecisionRecord, *,
+  ablation: AblationResult | None = None, prereg: PreRegistration | None = None) -> Scorecard` (frozen) is
+  the PRESENTATION layer over the confirmatory artifacts — it RECOMPUTES NO statistics.** It assembles the
+  Phase-1.5 decision-gate slice (docs/evaluation.md §7): per-arm `ArmScore` (UNCONDITIONAL ITT), the ONE
+  confirmatory `PrimaryScore` (FOUNDRY vs BASELINE, equal-USD), the `DecisionClass` + `rule` carried
+  VERBATIM, and an optional role-ablation summary (`RoleAblationLine` tuple). `Scorecard.arm_score(arm)`,
+  `.honesty_banner()`, `.render()` are the API. NO `assert_unmodified` here — the integrity gate already
+  fired inside `run_ab`/`decide`; the scorecard only presents their verdict (it carries
+  `decision.registration_identity`). Pure/deterministic: same inputs ⇒ identical frozen `Scorecard` +
+  identical `render()` string.
+- EV33. **UNCONDITIONAL ITT is preserved by COPYING, never recomputing.** Each `ArmScore.itt_pass_rate`
+  and `.attempted` are copied STRAIGHT from the `ArmReport` (`itt_pass_rate`, `attempted` = n_tasks×k); the
+  scorecard never divides resolved/completed and never shrinks the denominator (the §2/§6 collider bias;
+  §7 reports ITT unconditionally). The equal-USD `PrimaryScore` costs + `cost_at_most_equal` are read from
+  the authoritative `decision.cost` (the SAME `CostComparison` bit the PROCEED predicate turned on), not
+  recomputed from arm costs — so the scorecard and the verdict can never disagree.
+- EV34. **Mandatory dry-run/honesty banner, rendered FIRST (load-bearing — §0/§4).**
+  `Scorecard.honesty_banner()` is NON-EMPTY for both provenances; for a dry-run it states this is a
+  METHODOLOGY DRY-RUN on synthetic fixtures with SIMULATED baseline/ablation arms — NOT real evidence —
+  and (per §0/§4) that the primary is oracle-scored so a self-judge seam is NEVER reported as independent
+  validation; `render()` prints the banner as its FIRST line. `provenance`/`dry_run` flow from the
+  `DecisionRecord` (which carries them from the cited manifest's hypothesis). SCOPE: decision-gate slice
+  ONLY — the Holm–Bonferroni secondary FAMILY as a published headline and the optimization Pareto front
+  are OUT of scope (Phase-6, not built here). A HARD_KILL scorecard renders the KILL verbatim (no
+  proceed-spin). AMBIGUITY RESOLVED: the brief's "§0.2" self-judge rule maps to the §0/§4 principle
+  (primary oracle-scored, no LLM/self-judge in the confirmatory verdict — there is no literal §0.2
+  heading); and the banner's dry-run-vs-scored text is driven by the DECISION's provenance (from the
+  prereg hypothesis), not the ABResult's. Tests: 13, all green; full suite 591 passed / 1 skipped; ruff +
+  mypy clean. HONESTY: synthetic dry-run — asserts NOTHING about real Foundry-vs-baseline performance.
+
 ## ArtifactStore — the real content-addressed body store (T-M1-14b, DECISIONS D6)
 - AS1. **`foundry/durability/artifact_store.py::ArtifactStore` closes the emit/resolve gap.**
   `emit_artifact` MINTED a `cas://sha256/<content_identity>` handle but DISCARDED the body, so

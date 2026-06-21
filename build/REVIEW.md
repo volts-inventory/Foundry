@@ -235,3 +235,25 @@ M15-R2-01 boundary-count to be fixed on M1.5 close (batched small edit). **01/02
 
 UPDATE: M15-R2-01 RESOLVED (commit pending) — _bootstrap_two_sided_p now splits the m==0 boundary
 evenly between tails (no double-count); grid-floor documented. ab_runner tests + full suite green.
+
+## M2 assurance/trust chain (T-M2-01..10) — Round 1 (1 fresh E3/E1/E2 critic)
+Tool gates green: ruff/mypy clean, 81 M2 tests pass, full suite green. Verdict: **overall CLEAN, 3 MINOR, 0 BLOCKER/MAJOR**.
+Per-question ALL SOUND: (1) known-vulnerable CAUGHT genuine (attested Security/Supply-chain FAIL + clean control;
+unsigned dropped; FAIL latches->halt; cannot reach gated open_pr); (2) sign-off ALWAYS recorded (provenance=SELF,
+model never supplies) + release_allowed fail-closes on missing/!approved/anchor-mismatch (+ emit independently
+re-checks); (3) evidence pack tamper-evident (WORM hash-chain over content identities; swap/drop/mutate break verify);
+(4) tiering relaxes_integrity()==False every tier, LOW catches the secret, force-escalation; (5) re-verification reuse
+only on exact scope/key + attested non-ERROR prior (fail-closed); (6) attested-only advancement + bounded rework loops
+terminate within caps; (7) coupling deliberate, no fail-OPEN, Assistant back-compat byte-identical.
+
+- M2-R1-01 MINOR | factory_graph.py:78-92 | imports 5 private supervisor _-helpers (anchor derivation) to avoid
+  release-anchor drift. | FIX: promote to PUBLIC anchor-derivation fns in a shared module (governance/sign_off.py)
+  so supervisor + factory_graph share one public source of truth (encapsulation without drift risk).
+- M2-R1-02 MINOR | factory_graph.py:~421 | EvidencePack.run_against = config "integrated-sha" label, not the actual
+  materialized tree_sha the gates ran against (integrity intact — chain folds over content identities — but the
+  label can diverge). | FIX: bind run_against to an attested verdict's run_against for honesty.
+- M2-R1-03 MINOR | reverification.py:239 (rework_scoped_gates) | passes empty file delta at the rework seam;
+  soundness preserved by the fail-closed "no passing prior -> re-run" fallback, so no stale reuse. | FIX: feed real
+  old/new file maps when available (comment is already honest).
+ACCEPTANCE: all-MINOR, trust SOUND -> CLEAN ROUND by cross-check; M2-R1-01/02 to be fixed on M2 close (batched after
+T-M2-11); M2-R1-03 left as a documented honest seam. **M2 assurance chain reviewed CLEAN.**

@@ -1782,3 +1782,9 @@ FoundryCheckpointer). Criterion->test + the genuine-E2E-vs-stand-in map for the 
   cases; full pytest green. Touched ONLY operator.py + test_operator.py.** Pitfall hit: a global `now_ms`
   past the deadline makes a "RUNNING" fixture read WEDGED via derive_status — a progressing run needs a
   RECENT `last_progress_ts_ms` (within the derived budget), mirroring real heartbeat advancement.
+
+## Operator reference doc (T-M3-12)
+- DOC1. **`build/RUNBOOKS.md` is THE operator reference** (Day-2): the SLO/alert catalog + one runbook
+  per scenario (wedged run, store outage, poisoned checkpoint, trusted-component outage, HITL backlog,
+  capacity/cost-rate, upgrade-in-flight, pinned-ID/cost drift, five planes). Each step cites the REAL
+  shipped module/function (operations/observability/policy) — keep it in sync when those APIs change.

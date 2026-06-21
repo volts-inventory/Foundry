@@ -518,6 +518,44 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   `from __future__ import annotations` the function-signature annotations are strings so runtime is
   fine and mypy still resolves them. Importing them at module top raises `ImportError` at collection.
 
+## Assurance subgraph + bounded evaluator-optimizer rework loop (T-M2-08)
+- AS1. **`build_assurance_subgraph(rt, *, runner, resolve, resolve_blob, source_dir=None, tier=None,
+  max_fix_attempts=3) -> StateGraph[FactoryState]` (UNCOMPILED; SG4).** Node order:
+  `START -> appsec_engineer -> audit_compliance -> supply_chain_reviewer -> reviewer_critic ->
+  assurance_gate -> {advance: END, fix: assurance_fix -> assurance_gate, halt: END}`. The three
+  Layer-5 security agents author advisory `GateTriage` only (L5/SEC1-4); the reviewer/critic is the
+  EVALUATOR (the only agent touching `gates`, via `rt.proxy.judge`, proxy-stamped; Q1/Q2); the
+  `assurance_gate` node forwards ONLY runner-attested verdicts via `run_assurance_gates` (AW1).
+  `source_dir` is parity-only (the gates materialize a fresh tree from handles). Wrap every node in a
+  concrete `def` for `add_node` (SG1/SG2/IM5 — never the `NodeFn` alias).
+- AS2. **The rework loop is bounded by the SUPERVISOR mechanism, re-used verbatim (SUP4).** The
+  `assurance_gate` node bumps `budget.fix_attempts_since_all_green` ONCE per non-advancing iteration
+  (decision derived from the SAME post-fold `merge_gates(state, out)` view the conditional edge reads
+  in the SAME superstep, E-R1-01) and the `assurance_fix` node only marks `phase` + edges back to the
+  gate. So the counter increases monotonically toward `max_fix_attempts`, after which the router
+  returns `halt` — the loop terminates, never hangs. Raise `recursion_limit` on the run config so the
+  bounded loop has room to converge; reaching a terminal state (vs `GraphRecursionError`) is the proof
+  it halts.
+- AS3. **The subgraph router composes BOTH evaluators.** `_route_assurance` calls
+  `route_after_assurance` (the deterministic gates: latch->halt; FAIL/ERROR/missing->bounded fix;
+  all-PASS->advance, AW4) AND the reviewer's verdict: a `request-changes` (review FAIL) forces a
+  bounded `fix` even when every machine gate PASSed — but never SHORTCUTS the bound (still `halt` once
+  spent). A request-changes verdict establishes a NEGATIVE LATCH (Q3) so it drops from the re-folded
+  `gates` view on the next iteration; `_review_requests_changes` is fail-closed (missing review ->
+  True), so the loop keeps routing `fix` until the bound -> still terminates.
+- AS4. **Re-verification scoping = `rework_scoped_gates(state, *, runner, tier)` (gov §1f / RV1-5).**
+  On a REWORK iteration (prior verdicts present on `gates`) the gate node re-runs ONLY the scoped
+  subset: it builds a `reverification_plan` over the tier's `_assurance_gates` and re-runs a gate iff
+  its scope intersects the change OR its newest prior verdict is not a PASS (fail-closed); unaffected
+  PASSing gates keep their prior attested verdict (change-proportional, never a blind full re-run).
+  The current scanner-config rev is read off a prior attested verdict's `scanner_config_rev` (the
+  runner stamps it on every `GateResult`) — NOT through the runner's private `_scanner_config_rev`.
+- AS5. **Post-run, a latched FAIL drops from a RE-fold.** After the graph run latches a stable-FAIL
+  (security caught a hardcoded secret), `merge_gates(final["gates"], None)` returns `[]` (the latch is
+  terminal, Q3) — so assert the attested FAIL is present on `final["gates"]` directly (+ check
+  `runner_attestation is not None` / `records.stable_fail_latched(...)`), NOT via a re-fold (that
+  passes only BEFORE the latch is set, as in test_assurance_wiring).
+
 ## Evaluation — Phase-1.5 central-hypothesis schemas (T-M15-01)
 - EV1. **`foundry/evaluation/hypothesis.py` is a PURE schema/enum layer — NO statistics.** Power
   calcs, bootstrap, alpha-spending, scoring live in the later M1.5 modules

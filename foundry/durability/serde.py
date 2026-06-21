@@ -49,6 +49,12 @@ FOUNDRY_MSGPACK_MODULES: list[tuple[str, str]] = [
     ("foundry.schemas.quality", "TestReport"),
     ("foundry.schemas.quality", "E2EReport"),
     ("foundry.schemas.quality", "OracleKind"),
+    ("foundry.schemas.security", "ThreatModel"),
+    ("foundry.schemas.security", "SecurityTriage"),
+    ("foundry.schemas.security", "SupplyChainReport"),
+    ("foundry.schemas.security", "SBOMRef"),
+    ("foundry.schemas.security", "AuditFinding"),
+    ("foundry.schemas.security", "Severity"),
 ]
 
 

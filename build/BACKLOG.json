@@ -1037,7 +1037,7 @@
         "Tests added via MockTransport asserting triage/artifact writes + the reducible/residual split; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M2-05",
@@ -1125,7 +1125,7 @@
         "Tests added: Design+Release sign-off recorded in both profiles, evidence-pack hash binding, WORM append + chain verify, SoD rejection; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M2-08",

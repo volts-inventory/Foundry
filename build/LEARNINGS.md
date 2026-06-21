@@ -1051,3 +1051,99 @@ adequate.
   Tests live in `tests/test_schemas_assurance.py` (mirrors test_schemas.py's CASES table +
   spot-check style); existing test_schemas.py stays green. Gate chain clean
   (ruff/mypy/pytest full suite).
+
+## FactoryState Phase-2 (Gated mode) channels (T-M2-02)
+The tiering/sign-off/supervisor M2 waves write these channels (APPEND-ONLY additions to
+`FactoryState`; existing channel semantics UNCHANGED — `factory_state.py`/`reducers.py` are
+single-owner, collision-hazardous).
+- ST1. **Three channels added.** `mode: str` — single-writer ("assistant" | "gated"), stamped
+  by the supervisor/factory_graph at run start (mirrors `phase`/`request`, no reducer →
+  last-writer-wins). `risk_tier: TierDecision | None` — single-writer (triage tiering, gov §1e);
+  the FULL `TierDecision` record rides it (not the bare `RiskTier` enum) so `forced_high`/
+  `two_person_release`/`gate_set` travel with the tier. `sign_offs: Annotated[list[SignOffRecord],
+  union_sign_offs]` — keyed-union, append-only.
+- ST2. **`union_sign_offs = make_union_by_key(_sign_off_key)` keys by `SignOffRecord.
+  content_identity()`** — the record carries NO natural domain key (unlike tasks=id /
+  actions=idempotency_key / triage=union_key). `content_identity` is a digest over the WHOLE
+  canonical record INCLUDING `seq` and `judgment_provenance` (AS4), so SELF vs INDEPENDENT and
+  any field difference are DISTINCT records that coexist; re-folding the SAME record coalesces
+  (key is a pure function of the record, per-key payload byte-identical). Pure/commutative/
+  associative/None-safe/re-fold-idempotent (L8) — proven in `tests/test_state_phase2_channels.py`
+  mirroring `test_reducers_properties.py`'s algebra suite. A sign-off is ALWAYS recorded
+  (recorded sign-off, no-op HITL in the self-judge profile); this channel has NO admission/trust
+  gate (unlike `gates`/`merge_gates`) — every record survives, none dropped.
+- ST3. **No import cycle:** `reducers.py`/`factory_state.py` now import from `schemas/governance.py`,
+  which imports only `schemas/base`+`schemas/gates`+`state/seq` (leaf) — no back-edge. Channel
+  presence/typing asserted via `get_type_hints(FactoryState, include_extras=True)` (keeps the
+  `Annotated` reducer metadata). Gate chain clean (ruff/mypy/pytest full suite, 667 passed).
+
+## Security layer (T-M2-04) — ADVISORY-only Layer-5 agent nodes
+- SEC1. **Three node factories in `foundry/agents/security/`, all ADVISORY (L5).**
+  `make_appsec_engineer_node(rt)` -> a `ThreatModel` handle (STRIDE, per-item `oracle_bindings`,
+  `residual_item_ids` -> Threat-review sub-gate) + an advisory `GateTriage(name="security")`;
+  `make_audit_compliance_node(rt)` -> an `AuditFinding` handle (SBOM/license/compliance, with
+  optional `license_report_uri`/`compliance_map_uri`) + `GateTriage(name="audit")`;
+  `make_supply_chain_reviewer_node(rt)` -> a `SupplyChainReport` handle (CI/IaC/lockfile policy
+  diff) + `GateTriage(name="supply_chain")`. Each follows AR1-AR4: `rt.proxy.complete(...,
+  purpose="ideation", schema=...)`, node-owned `Seq` via `rt.seq`, bodies content-addressed via
+  `cas_uri` + `emit_artifact(..., store=rt.cas)` (DS9/L4). NONE writes `gates`; NONE imports
+  `anthropic`. The trusted runner computes+signs the Security/Audit/Supply-chain verdicts later
+  in the assurance fan-out (gov §1c) — agents only triage (L5).
+- SEC2. **Blocking is a TRIAGE-EXPLANATION marker, not a verdict (mirrors criteria_critic).** AppSec
+  flags the advisory BLOCKING iff `severity in {HIGH, CRITICAL}` AND `findings` is non-empty (a
+  HIGH severity with zero findings has nothing to block on). Supply-chain flags BLOCKING on any
+  `policy_violations` OR `trust_root_touched` (the latter also escalates HITL, gov §1e). Audit
+  flags BLOCKING on HIGH/CRITICAL findings. The `severity`/`policy_violations`/`trust_root_touched`
+  come from the model schema; the node enums-coerce them. The runner still owns the verdict bit.
+- SEC3. **A store-resolvable body MUST be on the serde allowlist (D6/I5).** `rt.cas` (=
+  `ArtifactStore`) `put_body`/`get_body` round-trips through `foundry.durability.serde`'s
+  `FOUNDRY_MSGPACK_MODULES`; a type NOT listed degrades to `dict` on load and `get_body` rejects
+  it fail-closed (`UnknownArtifactError: ... did not deserialize to a frozen model`). So adding any
+  NEW typed artifact body (ThreatModel/AuditFinding/SupplyChainReport/SecurityTriage/SBOMRef +
+  `Severity`) requires appending it to that allowlist — the ONE file outside `agents/security/`
+  this task had to touch (the alternative, a synthetic uri->body resolver like the quality unit
+  tests, would not satisfy the "resolvable from the store" DoD). The assurance subgraph waves that
+  consume these advisories thread `rt.cas.resolve` as the real materialization seam.
+- SEC4. **MockTransport: schema-constrained ideation rides `completions=` (DT1/AC3), NOT `verdicts=`.**
+  These `complete(..., schema=...)` calls are NOT the verdict channel (their schema isn't
+  `VERDICT_SCHEMA`), so script each node's JSON payload on the FIFO `completions=` queue (returned
+  verbatim as `text`), sized to the number of `complete` calls. Graph-compat test: the three nodes
+  chain linearly in a `StateGraph(FactoryState)`, bodies fold on `artifacts` (merge_by_uri),
+  triages on `gate_triage` (union_triage), and `final.get("gates")` is empty (L5). 8 tests, full
+  gate chain clean (ruff/mypy/pytest full suite green).
+
+## HITL sign-off + WORM-backed evidence pack (T-M2-07)
+- GOV1. **The sign-off RECORD is ALWAYS made in the self-judge profile — the testable invariant.**
+  `foundry/governance/sign_off.py`: `record_sign_off(point, *, subject_artifact_uri, state_sha,
+  presented_evidence_hash, server_nonce, approver, role, profile, seq, approved=True, liaison=None,
+  ...)` (+ `record_design_sign_off`/`record_release_sign_off` wrappers) ALWAYS returns a
+  `SignOffRecord`. In `self_judge` the HumanLiaison path is no-op (`deferred_log`) but the record is
+  NEVER gated on delivery; provenance is stamped from the PROFILE (`provenance_for_profile`: SELF in
+  self_judge, INDEPENDENT otherwise — mirrors `proxy.judge()`'s stamp source, the model never
+  supplies it, gov §1e). The record binds the 4 what-you-sign anchors (subject/state_sha/
+  presented_evidence_hash/server_nonce, gov §6).
+- GOV2. **Fail-closed release: no record ⇒ not released.** `release_allowed(record, *, <4 anchors>)`
+  returns False on `record is None`, `not approved`, OR any anchor mismatch (a sign-off for a
+  different artifact/state/evidence/nonce can't advance THIS release). `require_release_sign_off(...)`
+  is the raising variant (`SignOffError`) for the path that must refuse, not branch. The record is
+  content-addressed (`SignOffRecord.content_identity()`) so any bound-field change (incl. the
+  provenance stamp) re-keys identity — tamper-evident, and what the evidence-pack chain folds over.
+- GOV3. **Evidence pack REUSES the outbox WORM link function — do not reinvent.**
+  `foundry/durability/evidence_pack.py` imports `_chain_hash` + `_GENESIS` from
+  `foundry/durability/outbox.py` and folds the ORDERED references (gate-result content-identities,
+  then artifact `.uri`s, then sign-off content-identities) via `chain_over(refs)` — each ref chained
+  as a canonical `{"index": i, "ref": uri}` event so head depends on content AND position.
+  `build_evidence_pack(*, run_against, gate_results, artifacts, sign_offs, seq, ...)` returns an
+  `EvidencePack` whose `chain_head` is that fold and `pack_uri = cas://sha256/<pack_evidence_hash>`
+  (content hash EXCLUDING pack_uri/seq — stable, re-derivable; this is what a sign-off's
+  `presented_evidence_hash` binds to, gov §6).
+- GOV4. **`verify_evidence_pack(pack, *, gate_results, artifacts, sign_offs, require_sign_off=True)`
+  detects tampering two ways (both fail-closed):** (1) the supplied members must reproduce the
+  recorded `*_uris` EXACTLY in order (a swapped/removed/reordered gate result, swapped artifact, or
+  missing sign-off mismatches), AND (2) the recomputed `chain_over(refs)` must equal `chain_head`
+  (out-of-band edit of head/refs breaks it), AND the recomputed `pack_uri` must match (forged
+  pack_uri). `require_sign_off` empty `sign_off_uris` ⇒ False. `assert_evidence_pack(...)` is the
+  raising variant (`EvidencePackError`). Determinism (L7): chain_head/pack_uri are pure functions of
+  `content_digest`/canonical bytes (never `hash()`). Consumed by the supervisor + Gated emit:
+  release admission must check BOTH `require_release_sign_off` AND `verify_evidence_pack` over the
+  attested gate set. 28 tests; full gate chain clean (ruff/mypy/pytest full suite green: 667 passed).

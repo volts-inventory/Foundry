@@ -1,14 +1,18 @@
 # STATUS — resume pointer
 
-- **Session:** 1 (2026-06-15)
-- **Phase / milestone:** Phase 1 (M1) implementation COMPLETE; milestone gate sweep PASSED; AUDIT LOOP in progress.
-- **Done:** Waves A-E. All 18 M1 implementation tasks done (T-M1-01..16 + 04a + 14b). T-TOOL-MUT deferred.
-- **Last gate baseline:** ruff ✓, mypy foundry ✓ (88 files), full suite green, coverage 86.6%. cli smoke exit 0.
-- **Last commit:** b767650 (milestone sweep + mutation deferral).
+- **Session:** 1 (multi-day; 2026-06-15..20)
+- **Milestones:** M0 done; M1 (Assistant slice) done + clean audit; M1.5 (decision gate) done + clean audit;
+  M2 (Gated mode) implementation COMPLETE + review CLEAN + gate sweep PASSED; AUDIT LOOP in progress.
+- **Tasks:** 42/47 done. M2 all 11 tasks done.
+- **Last gate baseline:** ruff ✓, mypy foundry ✓ (110 files), full suite 729 pass / 1 skip, coverage 89.8%.
+  Phase-1 Assistant cli smoke exit 0 (back-compat).
+- **Last commit:** 5deaa7a (M2 close prep).
 
 ## NEXT-ACTION
-Await the fresh independent Auditor's report (briefed with design docs + code only). If FINDINGS:
-open backlog tasks, fix, dispatch ANOTHER fresh auditor (max 3 cycles). On CLEAN PASS: close M1,
-update PROGRESS/STATUS, then open M1.5 — dispatch the just-in-time planner (T-M1_5-PLAN) to
-decompose Phase 1.5 (variance/base-rate pilot, pre-registration + decision table, powered A/B
-harness + role ablation) into BACKLOG tasks, and begin the M1.5 build loop.
+Await the fresh Phase-2 independent Auditor. If FINDINGS: open backlog tasks, fix, re-audit (max 3 cycles).
+On CLEAN PASS: close M2, then open M3 — dispatch the just-in-time planner (T-M3-PLAN) to decompose Phase 3
+(Operability & scale: operator role/SLOs/alerts/runbooks; run-status liveness paused-vs-wedged + watchdog;
+store HA/backup + poisoned-checkpoint recovery; multi-tenancy/capacity/queue/fairness + hibernation; HITL-load
+model + reviewer queue; full deterministic monitors + sandboxed analyzer; five planes sans full trust root)
+into BACKLOG tasks (reuse existing monitors/, governance/, durability/, operations/run_status if present),
+then run the M3 build loop.

@@ -82,3 +82,21 @@
 - AUDIT LOOP: fresh independent auditor dispatched.
 - NEXT: resolve audit findings -> close M1.5 -> open M2 (just-in-time decompose Phase 2: Gated mode,
   Reviewer+evaluator-optimizer, Security/Audit/Supply-chain gates, risk-tiering, WORM, evidence pack).
+
+## 2026-06-20 — Session 1: Phase 2 (M2, Gated mode) implementation COMPLETE; gate sweep PASSED
+- 11 tasks (T-M2-01..11): assurance/governance schemas (RiskTier/SignOffRecord/EvidencePack), Gated
+  state channels (mode/risk_tier/sign_offs), change-risk tiering, Security/Audit/Supply-chain advisory
+  agents, assurance gate-wiring (known-vulnerable CAUGHT), dependency-scoped re-verification, HITL
+  sign-off + WORM evidence pack, assurance subgraph + bounded evaluator-optimizer loop, supervisor
+  Gated wiring (tiering + design/release sign-off + assurance phase), Gated emit (evidence-pack-carrying),
+  Phase-2 exit test.
+- CRITIC LOOP: consolidated trust/integration critic -> overall CLEAN, 3 MINOR (all trust questions SOUND:
+  vulnerable change cannot reach gated release; release fail-closed without sign-off; evidence pack tamper-
+  evident; tiering never relaxes integrity; re-verify sound; bounded loops terminate; attested-only). 2
+  MINOR fixed (public release_anchors module; run_against honesty); 1 left as documented honest seam.
+- MILESTONE SWEEP: ruff/mypy clean (110 files), 729 pass/1 skip, coverage 89.8%; Assistant cli smoke exit 0
+  (back-compat). Mutation deferred (T-TOOL-MUT/D7). CODEMAP regenerated.
+- AUDIT LOOP: fresh independent auditor dispatched.
+- NEXT: resolve audit findings -> close M2 -> open M3 (Phase 3 Operability & scale: operator dashboard/SLOs/
+  runbooks, run-status liveness + watchdog, store HA/poisoned-checkpoint recovery, multi-tenancy/fairness,
+  HITL-load model, full monitors + sandboxed analyzer, five planes).

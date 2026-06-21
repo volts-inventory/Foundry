@@ -61,3 +61,22 @@ reported as independent validation; (7) no overclaim (token-axis gap disclosed, 
 - A-M15-03 MINOR (info) | the effective-token secondary endpoint is out of scope (Phase 6); redesign fork
   gated behind an external reading. Disclosed gap, not an overclaim. No action.
 **M1.5 AUDIT: CLEAN PASS.**
+
+## M2 (Phase 2, Gated mode) — Cycle 1 (fresh independent auditor; design-docs + code only)
+Auditor re-ran gates (ruff/mypy clean, full suite pass/1 skip) + inspected modules + load-bearing tests.
+**Per-requirement: ALL DELIVERED** — (1) known-vulnerable CAUGHT genuine (attested Security FAIL +
+stable-FAIL latch + clean control; agents advisory-only; merge_gates drops unsigned; no path to gated
+open_pr for a vuln change); (2) recorded sign-off + fail-closed release (provenance never model-supplied;
+release_allowed pure-AND over approved+4 anchors; emit re-derives via shared release_anchors, no drift);
+(3) change-proportional re-verification (reuse only on disjoint scope+exact key+attested non-ERROR prior);
+(4) bounded rework (terminal at max_fix_attempts, no GraphRecursionError); (5) tiering relaxes_integrity()
+==False, security floor at every tier incl LOW, force-HIGH on signals; (6) WORM evidence pack tamper-evident
+(swap/drop/mutate rejected); (7) self-judge provenance=SELF, machine gates fail-closed, HITL recorded-no-op;
+(8) honesty — explicit HONESTY MAP, dev stand-ins labeled per §0.3, no circular tests, Assistant back-compat.
+**Verdict: CLEAN PASS.** Findings: 2 MINOR observations (NOT gaps):
+- A-M2-01 MINOR | dev-grade trust roots (HMAC zone-B signer, single-process two-zone, dev secret rules,
+  no real semgrep/Syft) — honestly labeled §0.3; production hardening is the deferred Phase-4 ops task. No action.
+- A-M2-02 MINOR | rework_scoped_gates uses an empty file delta at the rework seam, compensating by
+  force-re-running any non-PASS prior (fail-closed, sound); true file-delta reuse on rework is a future refinement.
+  No action (documented honest seam, matches M2-R1-03).
+**M2 AUDIT: CLEAN PASS.**

@@ -1377,3 +1377,50 @@ single-owner, collision-hazardous).
   never reaches release_sign_off, so `gated_release_admitted` is False -> NO open_pr, NO pack release.
   5 tests; full chain clean (ruff/mypy/pytest 720 passed / 1 skipped). Touched ONLY factory_graph.py +
   the new test.
+
+## Phase-2 (Gated mode) EXIT integration test — the honest audit map (T-M2-11)
+`tests/test_phase2_exit.py` (9 tests; full suite 729 passed / 1 skipped, ruff+mypy clean) is the
+milestone witness for the docs/roadmap.md Phase-2 EXIT criteria. It drives the WHOLE Gated pipeline
+end-to-end over the SHIPPED dev wiring (mirror of test_factory_graph_gated: real ModelProviderProxy
++ MockTransport, dev ZoneBSigner, real TwoZoneGateRunner admitted by the real merge_gates via a
+DevGateWriteVerifier, StubAdapter, in-memory resolve/resolve_blob, ArtifactStore, durable
+FoundryCheckpointer). Criterion->test + the genuine-E2E-vs-stand-in map for the audit:
+- P2X1. **Criterion->test.** (a) known-vulnerable-CAUGHT = `test_exit_a_known_vulnerable_change_is_
+  caught_and_halts` (hardcoded secret -> runner-attested Security FAIL -> stable-FAIL latch -> halt ->
+  no PR/pack) + the LOAD-BEARING CONTROL `test_exit_a_clean_control_releases_...` (SAME pipeline+wiring,
+  only the diff body differs -> CLEAN diff RELEASES one gate-bearing PR -> the halt is the vuln, not a
+  hard-wired fail). (b) Design+Release recorded sign-off = `test_exit_b_clean_release_records_both_*`
+  (both records on `sign_offs`, provenance=SELF, design.seq < release.seq, release_allowed admits) +
+  `test_exit_b_release_allowed_fail_closes_*` (None/!approved/nonce-mismatch/evidence-mismatch all ->
+  False — the pure predicate gated_release_admitted re-derives). (c) change-proportional re-verify =
+  `test_exit_c_cosmetic_change_reverifies_a_strict_subset` (rerun ⊂ full; spec/audit REUSE the REAL
+  attested prior) + `test_exit_c_lockfile_change_invalidates_the_bound_gates` (audit+security re-run,
+  code gates reuse). (d) bounded rework = `test_exit_d_persistently_failing_run_halts_within_caps_no_pr`
+  (no-lockfile diff -> Audit ERROR -> bounded fix -> HALT at max_fix_attempts=1; invoke RETURNS a
+  terminal state, not GraphRecursionError; no PR). (e) HITL volume measured = `test_exit_e_hitl_volume_
+  is_observable_and_countable` (count SignOffRecords on `sign_offs`: clean=2 {design,release}, halted<2;
+  run-dependent, not a constant). (6) verifiable evidence pack = `test_exit_6_release_pack_verifies_and_
+  tampering_breaks_it` (rebuilt pack.pack_uri == pr.payload_uri; genuine members verify; swap-gate /
+  drop-sign-off / mutate-chain-head each break verify_evidence_pack).
+- P2X2. **GENUINELY end-to-end (no stand-in beyond mock-model + dev-HMAC roots):** the assurance GATE
+  machinery for (a) (runner-attested FAIL, `judgment_binding is None and runner_attestation is not None`,
+  stable-FAIL latch, fail-closed emit); the (b) fail-closed RELEASE admission (live `gated_release_
+  admitted` = terminal+assurance PASS AND `release_allowed` over the recorded Release sign-off); the (d)
+  bounded-rework loop (the SHIPPED supervisor/assurance bound, run live — terminates vs hangs); the (e)
+  HITL-volume count off the live `sign_offs` channel; the (6) evidence pack chained over the REAL
+  attested verdicts + FeatureDiff + Release sign-off. The (c) reverification_plan is fed REAL
+  runner-attested priors from the LIVE runner over a materialized tree (genuine producer->planner, RV5)
+  — pure planner, not a graph node, so it's exercised against real priors rather than inside the run.
+- P2X3. **DEV-MODE STAND-INS (declared, NOT overclaimed — plan §0.3).** (1) StubAdapter CODEGEN is a
+  no-op blob, so the integrated tree the gates run over is INJECTED via resolve/resolve_blob (SUP7
+  synthetic doubles), NOT authored by the (scripted) producing agents — (a) proves the gate MACHINERY
+  catches an injected vulnerable diff, and the clean-vs-vuln CONTROL is what makes that load-bearing.
+  (2) MockTransport + dev-HMAC trust roots (ZoneBSigner/DevGateWriteVerifier): the signing/attestation
+  DISCIPLINE is real, only key custody is dev-grade (real KMS/SLSA-L3 = the Phase-4 trust root, an ops
+  task). (3) SELF-JUDGE HITL (plan §0.2): sign-offs are RECORDED-but-no-op (provenance=SELF), so the
+  (e) "HITL volume" is the count of recorded-but-no-op self-judge sign-offs — the honest measurable in
+  this profile (flip to a real-HITL profile -> same channel, blocking delivery). (4) SIMULATED
+  single-agent A/B: N/A here (that's the Phase-1.5 decision gate, not the Phase-2 assurance pipeline).
+- P2X4. **Test-harness gotcha:** two Gated runs in one test (criterion e) need DISTINCT `tmp_path`
+  subdirs created BEFORE `_src` (which mkdir's `<dir>/src`) — a nested mkdir on a non-existent parent
+  raises FileNotFoundError. Touched ONLY tests/test_phase2_exit.py + this LEARNINGS note.

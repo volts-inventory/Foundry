@@ -1238,7 +1238,7 @@
         "Milestone gate sweep green: ruff, mypy foundry, full pytest, coverage >=80% overall (new code >=85%), scoped mutation >=70% on trust-critical Phase-2 modules or survivors justified in build/REVIEW.md"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M3-PLAN",

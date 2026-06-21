@@ -13,6 +13,7 @@ from typing import Annotated, TypedDict
 from foundry.schemas.architecture import PinnedConstraint
 from foundry.schemas.base import Artifact, BudgetLedger, ExternalAction, LogRef
 from foundry.schemas.gates import GateResult, GateTriage
+from foundry.schemas.governance import SignOffRecord, TierDecision
 from foundry.state import reducers
 
 
@@ -29,3 +30,7 @@ class FactoryState(TypedDict, total=False):
     budget: BudgetLedger  # single-writer (Budget Controller)
     actions: Annotated[list[ExternalAction], reducers.union_actions]
     history_ref: LogRef  # handle; raw events live out-of-band
+    # --- Phase-2 (Gated mode) channels (governance.md §1e/§2) -----------------
+    mode: str  # single-writer: "assistant" | "gated" (supervisor/factory_graph)
+    risk_tier: TierDecision | None  # single-writer (triage tiering, gov §1e)
+    sign_offs: Annotated[list[SignOffRecord], reducers.union_sign_offs]

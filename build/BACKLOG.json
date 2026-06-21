@@ -979,7 +979,7 @@
         "Tests added for the new channel folds (idempotent resume, None-safety); mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M2-03",

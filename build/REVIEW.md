@@ -262,3 +262,22 @@ UPDATE (M2 close): M2-R1-01 RESOLVED (public foundry/governance/release_anchors.
 factory_graph import the public anchor fns; private cross-module import gone) + M2-R1-02 RESOLVED
 (EvidencePack.run_against bound to an attested verdict's real tree_sha). Behavior unchanged; gated
 tests pass; ruff/mypy clean, 729 pass/1 skip, coverage 89.8%. **M2 review CLEAN-resolved.**
+
+## M3 operability modules (T-M3-02..11) — Round 1 (1 fresh E2/E1/E3 critic)
+Tool gates green: ruff/mypy clean (129 files), 154 phase-3 tests pass, full suite green. Verdict: FINDINGS(4), all MINOR, 0 BLOCKER/MAJOR.
+ALL 10 per-property verdicts SOUND (non-vacuous tests): stuck-run diagnosis, store-outage-pause-not-corrupt
+(real superstep_txn rollback, outbox holds only prior committed row), no-starvation (10-round, re-rank mid-round),
+HITL bounded+alerted, trusted-outage paused-not-wedged + per-lineage reservation, upgrade drain/migrate/fail-closed,
+monitors+analyzer (override-proof structural, malicious-analyzer test), five-plane+scanner-config+SoD, observability
+no-second-egress (read-only manifest Protocol) + drift fail-loud.
+- M3-R1-01 MINOR | operations/capacity.py | fleet_cost_rate_ok admission-side only; operations.md §6 wants the
+  cap to also gate in-flight resume/rehydration. | FIX: document the deferral (or add a resume-admit gate).
+- M3-R1-02 MINOR | operations/capacity.py:152 | _most_starved ranks held-slots-first; unequal-weight long-lived
+  multi-round starvation unproven. | FIX: add an unequal-weight no-release multi-round starvation test.
+- M3-R1-03 MINOR | operations/operator.py:265 | evaluate_slos reuses SLOTarget.objective_micro as a raw count/ms
+  for max_wedged_count/max_stuck_age_ms (overloads a _micro field) AND silently skips unknown SLO names (several
+  operations.md SLOs modeled but can't alert — also the runbooks gap). | FIX: distinct integer count/ms objective
+  field; don't silently skip a configured SLO (warn/raise on unrecognized).
+- M3-R1-04 MINOR | operations/store_resilience.py:306 | bare except folds a genuine bug into "dangling handle"
+  (fail-closed direction, but masks diagnostics). | FIX: narrow/log the non-(Unknown/KeyError) branch.
+Resolution: batch-fix after T-M3-13 lands (shares operator.py/capacity.py); then milestone sweep + audit. (open → pending)

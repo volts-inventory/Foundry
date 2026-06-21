@@ -1387,8 +1387,7 @@
       "title": "Run-status liveness model + supervisor watchdog (paused vs wedged) \u2014 EXIT: operator can diagnose a stuck run",
       "job_to_be_done": "Build foundry/operations/run_status.py (+ foundry/operations/__init__.py): derive a RunStatus (T-M3-01) for a run from its checkpoint/progress signals, and a deterministic WATCHDOG that distinguishes a legitimately-PAUSED run (clear pause_reason + awaiting + $0/hr) from a WEDGED one (no superstep advance past expected_next_transition_deadline AND no legitimate pause reason). Deadline is DERIVED per node-type (operations.md \u00a72): p99(node_type) + provider-backoff allowance + expected queue-wait, refreshed on known-slow states (failover/backpressure/reconstituting-from-hibernation incl. a cold-tier first-byte-restore term). Distinguish 'slow-but-progressing' (an adapter heartbeat / partial-progress marker advances last_progress without a superstep) from 'no-heartbeat' \u2014 only no-heartbeat past the derived deadline escalates wedged. Reads the global stable-fail latch to set latched_by_sibling_fork. Pure/deterministic functions over typed inputs (no live clock dependence beyond an injected now/ts); read global_records (never write, L8).",
       "files_owned": [
-        "foundry/operations/run_status.py",
-        "foundry/operations/__init__.py"
+        "foundry/operations/run_status.py"
       ],
       "dependencies": [
         "T-M3-01"
@@ -1409,7 +1408,7 @@
         "mypy foundry clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M3-03",
@@ -1467,7 +1466,7 @@
         "mypy foundry clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M3-05",
@@ -1496,7 +1495,7 @@
         "mypy foundry clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M3-06",
@@ -1525,7 +1524,7 @@
         "mypy foundry clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M3-07",
@@ -1554,7 +1553,7 @@
         "mypy foundry clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M3-08",
@@ -1583,7 +1582,7 @@
         "mypy foundry clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M3-09",
@@ -1748,6 +1747,28 @@
       ],
       "retries_remaining": 3,
       "status": "pending"
+    },
+    {
+      "id": "T-M3-FIX-TESTS",
+      "milestone": "M3",
+      "title": "Fix silently-uncollected TestX classes in test_monitors.py",
+      "job_to_be_done": "tests/test_monitors.py has 7 plain TestX classes that collect to ZERO under python_classes=['Test_*'] (O3) \u2014 they have never run. Rename to Test_* (or functions) so they execute; fix any real failures they reveal in the monitors (fix the monitor, not the assertion, if a genuine bug surfaces).",
+      "files_owned": [
+        "tests/test_monitors.py"
+      ],
+      "dependencies": [
+        "T-M3-PLAN"
+      ],
+      "role": "QA engineer",
+      "required_experts": [
+        "E1"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "all classes in test_monitors.py collect+run (Test_* named); any revealed failure fixed at root cause; full suite green; ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "in_progress"
     }
   ]
 }

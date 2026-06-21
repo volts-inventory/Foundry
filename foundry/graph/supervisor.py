@@ -45,6 +45,40 @@ defines NONE of that here.
 The ``add_node`` mypy seam (LEARNINGS SG2/IM5): a factory closure typed as the
 ``NodeFn`` ``Callable`` alias trips ``add_node``'s overload resolution, so every
 node is wrapped in a thin concrete ``def`` (no ``cast``, no private import).
+
+Phase-2 (Gated mode) extension (T-M2-09)
+----------------------------------------
+``mode="gated"`` selects the Phase-2 flow; ``mode="assistant"`` (the DEFAULT)
+keeps the Phase-1 topology byte-for-byte (back-compat). The Gated path ADDS three
+boundaries to the Phase-1 spine, never relaxing its convergence bound or
+attested-only advancement::
+
+    triage (classify_tier -> risk_tier + mode)
+      -> product
+      -> architecture
+      -> design_sign_off     # [Design gate] record a SignOffRecord (always)
+      -> spec_gate           # (unchanged integrity boundary)
+      -> implementation
+      -> quality
+      -> build_test_gate     # (unchanged integrity boundary)
+      -> assurance           # build_assurance_subgraph (sec/audit/supply + reviewer)
+         --(advance)--> release_sign_off  # [Release gate] record + release_allowed
+         --(halt)----> END                # vulnerable change caught -> NO release
+      -> release_sign_off
+         --(release_allowed)--> END        # fail-closed: no record => no emit
+         --(blocked)---------> END
+
+* TIERING (gov §1e): triage calls :func:`classify_tier`, writing the
+  ``risk_tier`` (``TierDecision``) single-writer channel + ``mode``. The tier
+  scales the assurance subgraph's DEPTH (passed through), NEVER integrity.
+* DESIGN / RELEASE SIGN-OFF (gov §1/§6): each boundary ALWAYS records a
+  ``SignOffRecord`` (self-judge stamp, bound to the artifact + ``state_sha`` +
+  a process-stable nonce) — the always-recorded invariant. Advancement past the
+  Release boundary to emit is gated by :func:`release_allowed` (fail-closed: no
+  recorded approved sign-off ⇒ no release).
+* ASSURANCE (AS1/AW1): the assurance subgraph routes ``advance``/``halt`` like
+  the other gate boundaries; a known-vulnerable change is caught there (attested
+  FAIL → latch → ``halt``), so there is NO release-sign-off path to emit.
 """
 
 from __future__ import annotations
@@ -56,7 +90,18 @@ from typing import TYPE_CHECKING, Any
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
+from foundry.agents.implementation.senior_engineer import DESIGN_KIND
+from foundry.canonical import content_digest
 from foundry.governance.budget_controller import BudgetCaps, BudgetController
+from foundry.governance.sign_off import (
+    record_design_sign_off,
+    record_release_sign_off,
+    release_allowed,
+)
+from foundry.governance.tiering import classify_tier
+from foundry.graph.assurance_wiring import ADVANCE as ASSURANCE_ADVANCE
+from foundry.graph.assurance_wiring import HALT as ASSURANCE_HALT
+from foundry.graph.assurance_wiring import route_after_assurance
 from foundry.graph.gate_wiring import (
     BUILD_TEST_BOUNDARY,
     SPEC_BOUNDARY,
@@ -65,6 +110,7 @@ from foundry.graph.gate_wiring import (
     run_spec_gate,
 )
 from foundry.graph.subgraphs.architecture import build_architecture_subgraph
+from foundry.graph.subgraphs.assurance import build_assurance_subgraph
 from foundry.graph.subgraphs.implementation import build_implementation_subgraph
 from foundry.graph.subgraphs.product import build_product_subgraph
 from foundry.graph.subgraphs.quality import build_quality_subgraph
@@ -78,13 +124,21 @@ if TYPE_CHECKING:
     from foundry.context import SymbolIndex
     from foundry.gates.runner import TwoZoneGateRunner
     from foundry.graph.gate_wiring import BlobResolver
+    from foundry.schemas.base import Artifact
 
 __all__ = [
     "DEFAULT_ROUTE_CAPS_MICROUSD",
+    "MODE_ASSISTANT",
+    "MODE_GATED",
     "ROUTES",
     "build_supervisor_graph",
     "classify_request",
 ]
+
+# ---- supervisor mode --------------------------------------------------------
+
+MODE_ASSISTANT = "assistant"  # Phase-1 flow (default; back-compat)
+MODE_GATED = "gated"  # Phase-2 flow: tiering + design/release sign-off + assurance
 
 # ---- supervisor node ids ----------------------------------------------------
 
@@ -99,6 +153,10 @@ _BUILD_TEST_GATE = "build_test_gate"
 # back to the responsible layer (the layer that must regenerate the tree).
 _SPEC_FIX = "spec_fix"
 _BUILD_TEST_FIX = "build_test_fix"
+# ---- Phase-2 (Gated mode) boundary node ids ---------------------------------
+_DESIGN_SIGN_OFF = "design_sign_off"
+_ASSURANCE = "assurance"
+_RELEASE_SIGN_OFF = "release_sign_off"
 
 # ---- triage classification (Phase-1 deterministic classifier) ---------------
 
@@ -152,6 +210,64 @@ def _seed_budget(route: str) -> BudgetLedger:
     return BudgetLedger(cap_microusd=controller.caps.total_microusd)
 
 
+# ---- Phase-2 sign-off helpers (always-recorded; gov §1/§6) ------------------
+
+
+def _newest_artifact_uri(state: FactoryState, kind: str) -> str:
+    """The newest-by-``Seq`` artifact uri of ``kind`` on the ``artifacts`` channel.
+
+    The Design / Release sign-off binds to the attested decision-point artifact
+    (gov §6). ``artifacts`` folds by ``merge_by_uri`` (insertion-order, not seq),
+    so we pick the max-``Seq`` handle of the requested kind (mirrors
+    ``senior_engineer._first_of_kind`` / QS8) rather than ``artifacts[-1]``.
+    Empty when no such artifact exists yet (the sign-off still records, bound to
+    an empty subject — the always-recorded invariant; admission is fail-closed).
+    """
+    best: Artifact | None = None
+    for a in state.get("artifacts") or ():
+        if a.kind != kind:
+            continue
+        if best is None or a.seq > best.seq:
+            best = a
+    return best.uri if best is not None else ""
+
+
+def _state_sha(config: RunnableConfig) -> str:
+    """The integrated ``state_sha`` the sign-off binds to (a RUN INPUT; Q1).
+
+    Threaded onto ``config['configurable']`` by the runtime exactly like
+    ``thread_id`` / ``verdict_nonce``; empty when absent (the record is still
+    made — admission via ``release_allowed`` then fail-closes the mismatch)."""
+    configurable = config.get("configurable") or {}
+    return str(configurable.get("state_sha") or "")
+
+
+def _sign_off_nonce(config: RunnableConfig, point: str, subject_uri: str, state_sha: str) -> str:
+    """A process-stable per-approval server nonce (L7: ``content_digest``, never
+    ``hash()`` — seed-randomized per process defeats resume idempotency).
+
+    The nonce binds the sign-off to the exact decision point (point + subject +
+    state) so it cannot be replayed across boundaries; it is stable across a
+    kill-then-resume because it is a pure function of those bound anchors + the
+    run's thread_id."""
+    configurable = config.get("configurable") or {}
+    thread_id = str(configurable.get("thread_id") or "")
+    return "nonce-" + content_digest(
+        {"point": point, "subject": subject_uri, "state_sha": state_sha, "thread_id": thread_id}
+    )
+
+
+def _evidence_hash(subject_uri: str, state_sha: str, gates: list[Any]) -> str:
+    """Content hash of the evidence presented to the signer (the what-you-see
+    anchor, gov §6): the subject + state + the ordered attested-gate identities.
+
+    Pure function of the bound inputs (L7 ``content_digest``), so the same
+    decision point yields the same hash on resume — the sign-off's
+    ``presented_evidence_hash`` and the ``release_allowed`` re-derivation agree."""
+    gate_ids = sorted(f"{g.name}:{g.status}:{g.run_against}" for g in gates)
+    return content_digest({"subject": subject_uri, "state_sha": state_sha, "gates": gate_ids})
+
+
 # ---- builder ----------------------------------------------------------------
 
 
@@ -164,6 +280,7 @@ def build_supervisor_graph(
     source_dir: str,
     index: SymbolIndex | None = None,
     max_fix_attempts: int = 3,
+    mode: str = MODE_ASSISTANT,
 ) -> StateGraph[FactoryState]:
     """Build the UNCOMPILED supervisor graph over :class:`FactoryState`.
 
@@ -196,20 +313,43 @@ def build_supervisor_graph(
         at most this many times before ``route_after_gates`` returns ``halt``.
         Tracked on ``budget.fix_attempts_since_all_green`` (bumped by the
         ``*_fix`` node), so the rework loop can never spin forever.
+    mode:
+        ``"assistant"`` (DEFAULT) builds the Phase-1 topology unchanged
+        (back-compat). ``"gated"`` builds the Phase-2 flow: triage tiering
+        (``classify_tier`` → ``risk_tier``), a Design sign-off boundary after
+        architecture, the assurance subgraph after build+test, and a Release
+        sign-off boundary (``release_allowed``-gated, fail-closed) before emit.
+        The Gated path only ADDS boundaries — the convergence bound + the
+        attested-only advancement are inherited unchanged (integrity is never
+        relaxed; gov §1e).
 
     Returns the ``StateGraph`` UNCOMPILED — ``factory_graph`` (T-M1-14) compiles
     it, attaches the shared checkpointer, and appends the emit node.
     """
+    gated = mode == MODE_GATED
     g: StateGraph[FactoryState] = StateGraph(FactoryState)
 
-    # -- triage: classify + seed route/budget (single-writer channels) --------
+    # -- triage: classify + seed route/budget; gated also tiers (gov §1e) -----
     def triage(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         route = classify_request(state.get("request", ""))
-        return {
+        out: dict[str, Any] = {
             "phase": _TRIAGE,
             "route": route,
             "budget": _seed_budget(route),
+            "mode": MODE_GATED if gated else MODE_ASSISTANT,
         }
+        if gated:
+            # Change-risk tiering (gov §1e): write the risk_tier single-writer
+            # channel; the tier scales assurance DEPTH (passed to the assurance
+            # subgraph at run time via state['risk_tier']), NEVER integrity.
+            tier_seq = rt.seq(config, _TRIAGE, "tier")
+            out["risk_tier"] = classify_tier(
+                state,
+                capabilities=state.get("required_capabilities"),
+                seq=tier_seq,
+                run_against=_state_sha(config),
+            )
+        return out
 
     # -- the four layer subgraphs, compiled + mounted as nodes ----------------
     # Each builder returns an UNCOMPILED StateGraph (SG4); we ``.compile()`` each
@@ -341,6 +481,107 @@ def build_supervisor_graph(
             max_fix_attempts=max_fix_attempts,
         )
 
+    # -- Phase-2 (Gated mode) boundary nodes ----------------------------------
+    # Built unconditionally (cheap) but wired ONLY when gated; the assistant
+    # topology stays byte-identical to Phase-1 (back-compat).
+
+    # The assurance subgraph (sec/audit/supply-chain + reviewer evaluator-
+    # optimizer loop, AS1). The tier scales its DEPTH at run time off
+    # state['risk_tier'] (set by triage tiering); reuses the SAME runner +
+    # materialization seams as the M1 gate nodes (verdicts ONLY from the runner).
+    assurance = build_assurance_subgraph(
+        rt,
+        runner=runner,
+        resolve=resolve,
+        resolve_blob=resolve_blob,
+        source_dir=source_dir,
+        max_fix_attempts=max_fix_attempts,
+    ).compile()
+
+    def assurance_node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        out: dict[str, Any] = dict(assurance.invoke(state, config))
+        out["phase"] = _ASSURANCE
+        return out
+
+    def _route_assurance(state: FactoryState, config: RunnableConfig) -> str:
+        # The subgraph already converged (advance) or latched/spent-bound (halt)
+        # internally; the supervisor reads its outcome off the post-fold gates +
+        # the cross-fork latch, exactly like the M1 boundaries (AS3/AW4). A
+        # halt (a known-vulnerable change caught, or the bound spent) routes to
+        # END — there is NO release-sign-off path to emit from a halted run.
+        decision = route_after_assurance(
+            state,
+            config,
+            records=runner.records,
+            tier=state.get("risk_tier"),
+            max_fix_attempts=max_fix_attempts,
+        )
+        return ASSURANCE_ADVANCE if decision == ASSURANCE_ADVANCE else ASSURANCE_HALT
+
+    # The Design sign-off boundary (gov §1 Design row): ALWAYS record a Design
+    # SignOffRecord (self-judge stamp, bound to the design artifact + state_sha +
+    # a process-stable nonce). In the self-judge profile this is the recorded-
+    # but-no-op HITL; the RECORD is always made (the testable invariant).
+    def design_sign_off(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        subject_uri = _newest_artifact_uri(state, DESIGN_KIND)
+        state_sha = _state_sha(config)
+        nonce = _sign_off_nonce(config, _DESIGN_SIGN_OFF, subject_uri, state_sha)
+        evidence_hash = _evidence_hash(subject_uri, state_sha, list(state.get("gates") or ()))
+        seq = rt.seq(config, _DESIGN_SIGN_OFF, "sign_off:design")
+        record = record_design_sign_off(
+            subject_artifact_uri=subject_uri,
+            state_sha=state_sha,
+            presented_evidence_hash=evidence_hash,
+            server_nonce=nonce,
+            approver="self-judge",
+            role="design-approver",
+            profile=rt.proxy.profile,
+            seq=seq,
+        )
+        return {"phase": _DESIGN_SIGN_OFF, "sign_offs": [record]}
+
+    # The Release sign-off boundary (gov §1 Release row, §6): ALWAYS record a
+    # Release SignOffRecord, then gate advancement to emit with release_allowed
+    # — fail-closed (no recorded approved sign-off binding THIS release ⇒ no
+    # release). The record is made regardless; only ADVANCEMENT is gated.
+    def release_sign_off(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        subject_uri = _newest_artifact_uri(state, DESIGN_KIND)
+        state_sha = _state_sha(config)
+        nonce = _sign_off_nonce(config, _RELEASE_SIGN_OFF, subject_uri, state_sha)
+        evidence_hash = _evidence_hash(subject_uri, state_sha, list(state.get("gates") or ()))
+        seq = rt.seq(config, _RELEASE_SIGN_OFF, "sign_off:release")
+        record = record_release_sign_off(
+            subject_artifact_uri=subject_uri,
+            state_sha=state_sha,
+            presented_evidence_hash=evidence_hash,
+            server_nonce=nonce,
+            approver="self-judge",
+            role="release-approver",
+            profile=rt.proxy.profile,
+            seq=seq,
+        )
+        return {"phase": _RELEASE_SIGN_OFF, "sign_offs": [record]}
+
+    def _route_release(state: FactoryState, config: RunnableConfig) -> str:
+        # Fail-closed release admission (gov §1/§5): advance to emit ONLY if a
+        # recorded, approved sign-off binds THIS exact release (subject +
+        # state_sha + evidence + nonce). The record is re-derived against the
+        # SAME anchors the node bound, so a missing/!approved/mismatched sign-off
+        # blocks emit. (No record ⇒ not released.)
+        subject_uri = _newest_artifact_uri(state, DESIGN_KIND)
+        state_sha = _state_sha(config)
+        nonce = _sign_off_nonce(config, _RELEASE_SIGN_OFF, subject_uri, state_sha)
+        evidence_hash = _evidence_hash(subject_uri, state_sha, list(state.get("gates") or ()))
+        record = _newest_release_sign_off(state)
+        ok = release_allowed(
+            record,
+            subject_artifact_uri=subject_uri,
+            state_sha=state_sha,
+            presented_evidence_hash=evidence_hash,
+            server_nonce=nonce,
+        )
+        return ASSURANCE_ADVANCE if ok else ASSURANCE_HALT
+
     # -- register nodes (concrete defs; SG2/IM5 mypy seam) --------------------
     g.add_node(_TRIAGE, triage)
     g.add_node(_PRODUCT, product_node)
@@ -356,7 +597,18 @@ def build_supervisor_graph(
     g.add_edge(START, _TRIAGE)
     g.add_edge(_TRIAGE, _PRODUCT)
     g.add_edge(_PRODUCT, _ARCHITECTURE)
-    g.add_edge(_ARCHITECTURE, _SPEC_GATE)
+
+    if gated:
+        # Design sign-off boundary AFTER architecture, BEFORE the spec gate
+        # (the integrity boundary is unchanged — the sign-off is an ADDED
+        # boundary, never a relaxation).
+        g.add_node(_DESIGN_SIGN_OFF, design_sign_off)
+        g.add_node(_ASSURANCE, assurance_node)
+        g.add_node(_RELEASE_SIGN_OFF, release_sign_off)
+        g.add_edge(_ARCHITECTURE, _DESIGN_SIGN_OFF)
+        g.add_edge(_DESIGN_SIGN_OFF, _SPEC_GATE)
+    else:
+        g.add_edge(_ARCHITECTURE, _SPEC_GATE)
 
     # SPEC boundary: advance -> implementation; fix -> back to architecture;
     # halt -> END. The path map lists every legal router return value.
@@ -370,13 +622,53 @@ def build_supervisor_graph(
     g.add_edge(_IMPLEMENTATION, _QUALITY)
     g.add_edge(_QUALITY, _BUILD_TEST_GATE)
 
-    # BUILD+TEST boundary: advance -> END; fix -> back to implementation;
-    # halt -> END.
-    g.add_conditional_edges(
-        _BUILD_TEST_GATE,
-        _route_build_test,
-        {"advance": END, "fix": _BUILD_TEST_FIX, "halt": END},
-    )
+    if gated:
+        # BUILD+TEST boundary: advance -> the assurance subgraph; fix -> back to
+        # implementation; halt -> END. Then assurance advance -> release sign-off
+        # (release_allowed-gated emit), assurance halt -> END (a vulnerable
+        # change caught -> NO release path).
+        g.add_conditional_edges(
+            _BUILD_TEST_GATE,
+            _route_build_test,
+            {"advance": _ASSURANCE, "fix": _BUILD_TEST_FIX, "halt": END},
+        )
+        g.add_conditional_edges(
+            _ASSURANCE,
+            _route_assurance,
+            {ASSURANCE_ADVANCE: _RELEASE_SIGN_OFF, ASSURANCE_HALT: END},
+        )
+        # Release boundary: release_allowed -> END (emit); blocked -> END
+        # (fail-closed). Both terminate the supervisor; factory_graph appends the
+        # emit node AFTER END only on a release-admitted run.
+        g.add_conditional_edges(
+            _RELEASE_SIGN_OFF,
+            _route_release,
+            {ASSURANCE_ADVANCE: END, ASSURANCE_HALT: END},
+        )
+    else:
+        # BUILD+TEST boundary: advance -> END; fix -> back to implementation;
+        # halt -> END.
+        g.add_conditional_edges(
+            _BUILD_TEST_GATE,
+            _route_build_test,
+            {"advance": END, "fix": _BUILD_TEST_FIX, "halt": END},
+        )
     g.add_edge(_BUILD_TEST_FIX, _IMPLEMENTATION)  # re-verify the responsible layer
 
     return g
+
+
+def _newest_release_sign_off(state: FactoryState) -> Any:
+    """The newest-by-``Seq`` Release ``SignOffRecord`` on the ``sign_offs`` channel.
+
+    ``sign_offs`` folds by ``union_sign_offs`` (dedup by content identity); a
+    Release record is identified by its ``role`` (``release-approver``). Newest
+    by ``Seq`` so a re-presented record on resume coalesces to one. Returns
+    ``None`` when none has been recorded — ``release_allowed`` then fail-closes."""
+    best: Any = None
+    for s in state.get("sign_offs") or ():
+        if s.role != "release-approver":
+            continue
+        if best is None or s.seq > best.seq:
+            best = s
+    return best

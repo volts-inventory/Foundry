@@ -1183,7 +1183,7 @@
         "Tests added asserting the new phase order, a tier-scoped assurance run, and a recorded Design/Release sign-off; existing M1 supervisor tests still green; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M2-10",
@@ -1211,7 +1211,7 @@
         "Tests added: gated emit on full-green+signed, no emit on missing assurance gate or missing sign-off, assistant-mode unchanged, idempotent resume; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M2-11",

@@ -1293,3 +1293,49 @@ single-owner, collision-hazardous).
   is still a real verdict, gov §1f). Cosmetic 1-file change → `rerun_gates < all` (STRICT subset proves
   proportionality); lockfile/toolchain bump → bound gates re-run; identical tree+matching priors → ALL
   reuse. 12 tests; full gate chain clean (ruff/mypy/pytest 703 passed).
+
+## Supervisor — Phase-2 (Gated mode) wiring (T-M2-09)
+- SP2-1. **`build_supervisor_graph(rt, *, runner, resolve, resolve_blob, source_dir, index=None,
+  max_fix_attempts=3, mode="assistant")` — `mode` is the ONLY new param; default keeps the Phase-1
+  topology BYTE-FOR-BYTE (back-compat).** `mode="gated"` selects the Phase-2 flow. No new deps: the
+  Gated path REUSES the SAME `runner`/`resolve`/`resolve_blob`/`source_dir` for `build_assurance_subgraph`
+  (the assurance subgraph needs exactly those). Gated phase order:
+  `triage -> product -> architecture -> [design_sign_off] -> spec_gate -> implementation -> quality ->
+  [build_test_gate] -> assurance -> [release_sign_off] -> END`. The spec/build+test integrity boundaries
+  are UNCHANGED — the sign-off/assurance boundaries are ADDED, never a relaxation (gov §1e). Exports
+  `MODE_ASSISTANT`/`MODE_GATED`.
+- SP2-2. **Triage tiers IN-LINE (no extra node): gated triage writes `mode` + `risk_tier` (single-writer
+  channels).** `classify_tier(state, capabilities=state['required_capabilities'], seq=rt.seq(config,
+  "triage","tier"), run_against=state_sha)` — the tier scales the assurance subgraph's DEPTH at run time
+  (the subgraph reads `state['risk_tier']`, AS1's `_state_tier`), NEVER integrity (`relaxes_integrity()`
+  is False). Assistant triage stamps `mode="assistant"` only.
+- SP2-3. **Design/Release sign-offs are ALWAYS-RECORDED (the testable invariant) — the RECORD is
+  unconditional; only ADVANCEMENT is gated.** Each boundary node calls `record_design_sign_off` /
+  `record_release_sign_off` (self-judge stamp from `rt.proxy.profile`, default `self_judge` ->
+  `JudgmentProvenance.SELF`) and writes `{"sign_offs": [record]}`. Anchors bound: subject =
+  newest-by-Seq `system_design` (DESIGN_KIND) artifact uri (mirror QS8, NOT `artifacts[-1]`); `state_sha`
+  = a RUN INPUT off `config["configurable"]` (Q1); a PROCESS-STABLE `server_nonce` =
+  `content_digest({point,subject,state_sha,thread_id})` (L7, never `hash()` — resume-stable);
+  `presented_evidence_hash` = `content_digest` over subject+state+sorted attested-gate ids. The Release
+  conditional edge `_route_release` RE-DERIVES the SAME anchors and calls `release_allowed(record, ...)`
+  — fail-closed: a missing/!approved/mismatched record routes to END WITHOUT emit (no record => no
+  release, gov §1/§5). `sign_offs` folds by `union_sign_offs` (dedup by content identity); the release
+  record is found by `role == "release-approver"`.
+- SP2-4. **The assurance boundary routes ADVANCE/HALT like an M1 gate — verdict from the subgraph's
+  internal convergence + the cross-fork latch.** `assurance_node` invokes the compiled
+  `build_assurance_subgraph(...)` (which runs its OWN bounded evaluator-optimizer loop internally), then
+  `_route_assurance` calls `route_after_assurance(state, config, records=runner.records,
+  tier=state['risk_tier'], max_fix_attempts=...)` and maps anything != ADVANCE to HALT->END. So a
+  KNOWN-VULNERABLE change (hardcoded secret -> attested Security FAIL -> stable-FAIL latch inside the
+  subgraph) makes the boundary HALT -> there is NO `release_sign_off` path to emit (the release node never
+  runs; assert `"release-approver" not in sign_offs`). The M1 build/test gates still PASS on that diff
+  (it compiles + the test passes) — the vuln is a SECURITY concern caught ONLY in the assurance phase.
+- SP2-5. **Test seam = the Phase-1 supervisor doubles (SUP7) PLUS the 3 Layer-5 security-agent scripts
+  (keyed by their `"You are the Security / AppSec Engineer"` / `Audit / Compliance` / `Supply-Chain
+  Reviewer` SOP markers, free-text completions; AC3/DT1) AND a `uv.lock` ADDITION in the diff body** (the
+  assurance Audit gate reads the lockfile inventory, AW2 — without it Audit ERRORs and the boundary never
+  advances). Build the gated graph with `mode=MODE_GATED`; assert mode/risk_tier, both sign-off records
+  (provenance SELF), the assurance verdicts present, and `release_allowed` admits the recorded release.
+  The vuln test swaps app.py for `API_KEY="..."`. Back-compat test: default mode -> no risk_tier, no
+  sign_offs, no security/audit/supply_chain verdicts. 5 tests; full chain clean (ruff/mypy/pytest 715
+  passed / 1 skipped).

@@ -1750,3 +1750,26 @@ FoundryCheckpointer). Criterion->test + the genuine-E2E-vs-stand-in map for the 
   → exactly ONE admitted, aggregate never exceeds cap, `REASON_FLEET_COST_RATE_CAP`. Hibernation: idle run
   hibernates → slot freed → waiting run now admitted → resumable; mid-attestation/terminal never
   hibernate. Determinism: identical inputs → identical decisions + admission order.
+
+## Operator surface — dashboard + SLOs + diagnose-stuck-run (T-M3-03)
+- OP1. **`foundry/operations/operator.py` COMPOSES `run_status.derive_status`; it NEVER re-derives the
+  PAUSED-vs-WEDGED classification.** `dashboard(records, *, now_ms) -> OperatorView` aggregates already-
+  derived `RunStatusRecord`s; `dashboard_from_signals(signals, *, now_ms)` is the convenience that maps
+  `derive_status` across the fleet first. `OperatorView` carries zero-filled `counts` by `RunStatus`
+  (every tile present), `total`, `healthy` (RUNNING+PAUSED), and the diagnosable `stuck` tuple.
+- OP2. **The EXIT deliverable ("operator can diagnose a stuck run") is `StuckRunSummary`**, built ONLY
+  for `record.is_alertable()` (WEDGED) runs: run_id + `current_phase` + last-progress heartbeat
+  (seq+ts) + DERIVED `deadline_ms` + `overdue_ms` (now − deadline) + live `cost_rate` + a `reason`
+  string spelling out *why WEDGED not PAUSED* (no heartbeat past derived deadline, no legitimate pause
+  reason). Ordered most-overdue-then-run_id (a total order → deterministic).
+- OP3. **SLOs are integer-millionths, no float.** `OperatorView.health_ratio_micro()` EXCLUDES terminal
+  runs (DONE/FAILED/QUARANTINED) from the denominator (vacuously 1.0 = `MICRO` when none non-terminal).
+  `evaluate_slos(view, slos, *, seq) -> tuple[Alert,...]` recognises 3 built-in SLO names: floor
+  `run_health_ratio` (breach→WARN), ceilings `max_wedged_count`/`max_stuck_age_ms` (breach→PAGE — a
+  wedge wastes spend + blocks delivery). Within SLO emits nothing; unknown names skipped (forward-
+  compatible); alerts are fleet-level (`run_id=None`), carry the target's `runbook_uri`, and each gets a
+  distinct `seq.local` (`seq._replace(local=seq.local+i)`) so records are distinct WORM identities.
+- OP4. **Gates: ruff+mypy clean on owned files (mypy clean across 129 files); test_operator.py = 17
+  cases; full pytest green. Touched ONLY operator.py + test_operator.py.** Pitfall hit: a global `now_ms`
+  past the deadline makes a "RUNNING" fixture read WEDGED via derive_status — a progressing run needs a
+  RECENT `last_progress_ts_ms` (within the derived budget), mirroring real heartbeat advancement.

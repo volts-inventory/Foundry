@@ -39,7 +39,8 @@
       "id": "M3",
       "phase": "Phase 3 \u2014 Operability & scale",
       "status": "in_progress",
-      "exit_criteria": "An operator can diagnose a stuck run; a store outage pauses (not corrupts) in-flight runs and recovers; concurrent runs don't starve each other; HITL backlog is bounded and alerted."
+      "exit_criteria": "An operator can diagnose a stuck run; a store outage pauses (not corrupts) in-flight runs and recovers; concurrent runs don't starve each other; HITL backlog is bounded and alerted.",
+      "note": "Decomposed by T-M3-PLAN into T-M3-01..T-M3-13. New packages: foundry/operations/ (run_status, operator, store_resilience, capacity, hitl, trusted_component, upgrade), foundry/policy/, foundry/observability/; monitors/ gap-filled (pinned-ID-drift, constraint-pressure, coverage-delta + hardened advisory analyzer) reusing the existing guardian/loop/cost/oracle/policy monitors; durability/ (checkpointer+outbox+WORM) and governance/ (budget_controller+human_liaison) + proxy/lineage are EXTENDED, never rebuilt. schemas/operations.py (T-M3-01) is the single-owner typed foundation all M3 modules share; monitors/__init__.py + guardian.py single-owner in T-M3-09. Collision hazards (factory_state/factory_graph/supervisor/pyproject) untouched \u2014 most ops/policy/observability modules are new-file disjoint and parallel_safe. Exercised on synthetic fixtures via the existing MockTransport/StubAdapter doubles; dev-grade backends (\u00a70.3)."
     },
     {
       "id": "M4",
@@ -1260,7 +1261,7 @@
         "M3 decomposed into concrete tasks against the then-current tree, derived from implementation-plan \u00a77 Phase 3 + operations.md"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M4-PLAN",
@@ -1347,6 +1348,403 @@
       "parallel_safe": false,
       "acceptance_criteria": [
         "scoped mutation runs and reports a kill score on >=1 trust-critical module; >=70% or survivors justified in REVIEW.md"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M3-01",
+      "milestone": "M3",
+      "title": "Operability schema foundation: RunStatus / pause-reason / SLO / alert / capacity / HITL-queue frozen models",
+      "job_to_be_done": "Extend foundry/schemas/operations.py (append-only; single owner) with the frozen pydantic v2 models the whole operations/ + observability/ + policy/ packages build against, so every later M3 module shares ONE typed contract instead of inventing parallel types (L3): RunStatus {state: running|paused|wedged|failed|done; pause_reason: hitl_design|hitl_release|budget|mirror_admission|non_convergence|monitor_trip|trusted_component_down|store_outage|latched_by_sibling_fork|None; awaiting; last_progress=(seq, wall_clock_ts); expected_next_transition_deadline} (operations.md \u00a72); RunStateEnum + PauseReason StrEnums; SLO + SLOReport; AlertCondition + Alert (taxonomy 1:1 with the deterministic monitors + infra alerts, operations.md \u00a71); a CapacityReservation / QueueEntry / FleetCostRate model (\u00a76); a ReviewerQueueItem / HitlBacklog model (\u00a77); a CheckpointVersionStamp {state_schema_ver, graph_ver, prompt_ver, model_pins} (\u00a75). All FrozenModel (extra=forbid, frozen, content_identity); StrEnums for closed sets; monetary fields integer micro-USD (base.py convention); RUF012-safe defaults (Field(default_factory=...), S1). NO logic here \u2014 pure schema layer (mirror EV1).",
+      "files_owned": [
+        "foundry/schemas/operations.py"
+      ],
+      "dependencies": [
+        "T-M3-PLAN"
+      ],
+      "role": "Schema / typed-contracts engineer",
+      "required_experts": [
+        "E6",
+        "E2"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "foundry/schemas/operations.py defines RunStatus, RunStateEnum, PauseReason, SLO, SLOReport, AlertCondition, Alert, CapacityReservation, QueueEntry, FleetCostRate, ReviewerQueueItem, HitlBacklog, CheckpointVersionStamp \u2014 all frozen FrozenModel/StrEnum, append-only (existing Pipeline/IaCProposal/DeployPlan/Release untouched)",
+        "PauseReason enumerates every legitimate pause cause from operations.md \u00a72 (incl. store_outage, trusted_component_down, latched_by_sibling_fork) so 'paused' is operator-distinguishable from 'wedged'",
+        "pure schema module: no I/O, no graph imports, import-cheap; `import foundry.schemas.operations` smoke-clean",
+        "RUF012-safe mutable defaults (Field(default_factory=...)); monetary fields integer micro-USD",
+        "tests added (unit + property where state/idempotency is involved)",
+        "ruff check foundry tests clean",
+        "mypy foundry clean"
+      ],
+      "retries_remaining": 3,
+      "status": "in_progress"
+    },
+    {
+      "id": "T-M3-02",
+      "milestone": "M3",
+      "title": "Run-status liveness model + supervisor watchdog (paused vs wedged) \u2014 EXIT: operator can diagnose a stuck run",
+      "job_to_be_done": "Build foundry/operations/run_status.py (+ foundry/operations/__init__.py): derive a RunStatus (T-M3-01) for a run from its checkpoint/progress signals, and a deterministic WATCHDOG that distinguishes a legitimately-PAUSED run (clear pause_reason + awaiting + $0/hr) from a WEDGED one (no superstep advance past expected_next_transition_deadline AND no legitimate pause reason). Deadline is DERIVED per node-type (operations.md \u00a72): p99(node_type) + provider-backoff allowance + expected queue-wait, refreshed on known-slow states (failover/backpressure/reconstituting-from-hibernation incl. a cold-tier first-byte-restore term). Distinguish 'slow-but-progressing' (an adapter heartbeat / partial-progress marker advances last_progress without a superstep) from 'no-heartbeat' \u2014 only no-heartbeat past the derived deadline escalates wedged. Reads the global stable-fail latch to set latched_by_sibling_fork. Pure/deterministic functions over typed inputs (no live clock dependence beyond an injected now/ts); read global_records (never write, L8).",
+      "files_owned": [
+        "foundry/operations/run_status.py",
+        "foundry/operations/__init__.py"
+      ],
+      "dependencies": [
+        "T-M3-01"
+      ],
+      "role": "Operability / orchestration engineer",
+      "required_experts": [
+        "E1",
+        "E2"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "An operator can DIAGNOSE A STUCK RUN: classify_run_status(...) returns wedged with a machine-readable reason for a run whose superstep has not advanced past the derived deadline with no heartbeat, AND returns paused (with pause_reason + awaiting) for a legitimately-paused run \u2014 the two are never confused (tested for both)",
+        "watchdog deadline is DERIVED per node-type (p99 + backoff + queue-wait), refreshed on failover/backpressure/hibernation-reconstitution incl. a cold-tier first-byte-restore term \u2014 NOT a static constant; a slow-but-progressing run (heartbeat advances last_progress) is NOT flagged wedged",
+        "latched_by_sibling_fork is set from the global stable-fail latch (read-only); reducers/records never written from here",
+        "deterministic: same inputs (incl. injected now) -> same RunStatus",
+        "tests added (unit + property where state/idempotency is involved)",
+        "ruff check foundry tests clean",
+        "mypy foundry clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M3-03",
+      "milestone": "M3",
+      "title": "Operator surface: dashboard aggregation + SLOs + alert taxonomy (golden signals)",
+      "job_to_be_done": "Build foundry/operations/operator.py: the operator-facing surface distinct from the eval/observability view (operations.md \u00a71). Aggregate per-run RunStatus (\u00a72, via run_status), fleet concurrency/queue depth (\u00a76, via capacity), budget burn, trusted-component health (\u00a74), and HITL backlog (\u00a77) into an OperatorDashboard view (golden signals: throughput, latency, error/escalation rate, saturation). Evaluate SLOs (run success rate, time-to-ack per escalation class, p95 wall-clock per feature class, budget burn-rate, trusted-component availability, HITL-queue age) into SLOReport. Build the ALERT TAXONOMY mapping 1:1 to the deterministic monitors (loop/cost/OPA-deny/retry/oracle-config-edit/pinned-ID-drift) plus infra + HITL-backlog alerts (T-M3-01 Alert/AlertCondition); every alert carries a runbook reference (\u00a712 docs). Pure aggregation over injected typed inputs from the other operations modules (depends on their public types but composes them read-only).",
+      "files_owned": [
+        "foundry/operations/operator.py"
+      ],
+      "dependencies": [
+        "T-M3-02"
+      ],
+      "role": "Operability / SRE engineer",
+      "required_experts": [
+        "E1",
+        "E2"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "build_operator_dashboard(...) returns golden-signal view (throughput, latency, error/escalation rate, saturation) aggregating per-run RunStatus + fleet queue depth + budget burn + trusted-component health + HITL backlog",
+        "evaluate_slos(...) returns an SLOReport over the operations.md \u00a71 SLO set; breaches surface as Alerts",
+        "alert taxonomy maps 1:1 to the deterministic monitors + infra + HITL-backlog conditions, each carrying a runbook reference",
+        "pure/deterministic aggregation; no hidden global writes",
+        "tests added (unit + property where state/idempotency is involved)",
+        "ruff check foundry tests clean",
+        "mypy foundry clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M3-04",
+      "milestone": "M3",
+      "title": "Store HA / outage pause + poisoned-checkpoint recovery \u2014 EXIT: store outage pauses (not corrupts) + recovers",
+      "job_to_be_done": "Build foundry/operations/store_resilience.py reusing the EXISTING durability/ (checkpointer + outbox/relay + WORM) \u2014 extend, never rebuild. (1) IN-FLIGHT OUTAGE: when the checkpoint/object/WORM store is unavailable a run BLOCKS-AND-PAUSES (RunStatus paused: store_outage) and NEVER proceeds on partial state; the outbox relay halts external effects (at-least-once + idempotent, so a halted relay is safe), with a relay-backlog bound + alert. (2) POISONED/CORRUPT CHECKPOINT RECOVERY: detect a checkpoint that deterministically crashes on resume OR whose out-of-band history_ref/artifact handle dangles; QUARANTINE it; recover by FORK-TO-PRIOR-GOOD checkpoint (new run_id) with operator override; a periodic INTEGRITY SWEEP detects dangling handles and, for a hibernated worktree, treats a missing object as a HARD ALERT BEFORE WAKE (operations.md \u00a73). Backups preserve the WORM hash chain. Dev-grade backends (\u00a70.3); the round-trip behavior is real and tested.",
+      "files_owned": [
+        "foundry/operations/store_resilience.py"
+      ],
+      "dependencies": [
+        "T-M3-01"
+      ],
+      "role": "Durability / SRE engineer",
+      "required_experts": [
+        "E2",
+        "E1"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "STORE OUTAGE PAUSES (NOT CORRUPTS) AND RECOVERS: with a simulated store outage the run transitions to paused: store_outage, performs ZERO partial-state writes, the relay halts external effects, and on recovery it resumes cleanly with no duplicate external effect (idempotency preserved) \u2014 asserted end-to-end against the real checkpointer/outbox doubles",
+        "a poisoned/crashing-on-resume checkpoint OR a dangling history_ref/artifact handle is detected + quarantined; recovery forks to the last clean checkpoint under a new run_id (operator override path present)",
+        "integrity sweep flags dangling/hibernated missing objects as a hard alert BEFORE wake; relay-backlog bound + alert present",
+        "reuses durability/ checkpointer+outbox+WORM (no rebuild); WORM hash chain preserved across backup",
+        "tests added (unit + property where state/idempotency is involved)",
+        "ruff check foundry tests clean",
+        "mypy foundry clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M3-05",
+      "milestone": "M3",
+      "title": "Multi-tenancy / capacity / queue / fairness + fleet cost-rate cap + hibernation \u2014 EXIT: concurrent runs don't starve",
+      "job_to_be_done": "Build foundry/operations/capacity.py: the run-admission + fairness layer (operations.md \u00a76). (a) Global concurrency cap + FLEET COST-RATE CAP (in addition to per-run budgets, reusing governance/budget_controller \u2014 extend, don't rebuild), enforced ADMISSION-SIDE (throttle/queue new runs on breach, never hard-stall/kill in-flight work; never preempt mid-trust-root attestation; defined preemption priority order). (b) Cost-rate cap also gates the large IN-FLIGHT sources admission can't reach (in-flight quorum re-runs; cold-tier rehydration egress) via a resume-admit gate. (c) Queue + tenant FAIR-SHARE scheduler; per-tenant resource+credential+budget isolation; noisy-neighbor guard (per-run cap on concurrent Send branches + per-tenant secondary-provider quota draw). (d) Capacity limits + backpressure for sandboxes/runner/provider rate-limits. (e) HIBERNATION of long-paused idle runs: spill worktree to the content-addressed store, byte-relief ONLY via content-addressed dedup/compaction against the shared base tree (incremental blobs counted; no uncounted CAS pool); retention lease/pin excluded from lifecycle expiry + worktree GC until terminal; resume-safe GC; paused-run storage cap (byte-denominated) with alerting. Fairness is the load-bearing test.",
+      "files_owned": [
+        "foundry/operations/capacity.py"
+      ],
+      "dependencies": [
+        "T-M3-01"
+      ],
+      "role": "Capacity / scheduling engineer",
+      "required_experts": [
+        "E1",
+        "E2"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "CONCURRENT RUNS DON'T STARVE EACH OTHER: a fair-share scheduler admits across tenants such that one heavy fan-out run cannot starve others (queue-depth bounded; noisy-neighbor per-run Send cap + per-tenant quota cap enforced) \u2014 asserted with multiple concurrent simulated runs/tenants",
+        "fleet cost-rate cap is ADMISSION-SIDE on breach (throttle/queue new runs, never kill in-flight; never preempt mid-attestation); the resume-admit gate also covers in-flight quorum re-runs + cold-tier rehydration egress",
+        "hibernation spills idle runs to CAS and earns byte-cap relief ONLY via dedup against the shared base tree (incremental delta still counted); retention pin survives lifecycle/GC until terminal; GC is resume-safe",
+        "paused-run storage cap is byte-denominated with alerting; deterministic scheduling decisions",
+        "tests added (unit + property where state/idempotency is involved)",
+        "ruff check foundry tests clean",
+        "mypy foundry clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M3-06",
+      "milestone": "M3",
+      "title": "HITL-load model + reviewer queue / SLA / backlog \u2014 EXIT: HITL backlog bounded and alerted",
+      "job_to_be_done": "Build foundry/operations/hitl.py reusing governance/human_liaison (the HITL packaging seam) \u2014 extend, don't rebuild. (operations.md \u00a77) Enumerate expected human touchpoints per feature/run with a per-class latency budget (Design approval, Release sign-off (two-person on trust-root), new-dependency source-diff, flake-recovery override, monitor/oracle/criteria/config trips). A HITL-blocked run RELEASES its compute (ties to capacity \u00a76) while its state is bounded/hibernated. Reviewer queue with SLAs + backlog/age alerting; a staffing/escalation FALLBACK when two-person sign-off can't be staffed (a release DEADLOCKS SAFELY as paused, NEVER auto-approves). Two-person reviewer-PAIR queueing model: size the TRANSIENT (batch/bulk arrival superimposed on the steady stream) for correlated fleet-drift spikes (\u00a75), with a distinct decision-class/queue for drift decisions; sustained-backlog policy in order: batch sign-off windows -> delegated reviewer tiers -> admission-throttle new High-tier runs. High-tier release-queue age is a first-class SLO with capacity-derived warn/page thresholds. Bounded+counted flake-recovery quorum (correlated flake = INFRA INCIDENT that pauses, not re-runs). MOSTLY DORMANT in the zero-HITL self-judge profile, LIVE for the regulated fallback \u2014 build it either way.",
+      "files_owned": [
+        "foundry/operations/hitl.py"
+      ],
+      "dependencies": [
+        "T-M3-01"
+      ],
+      "role": "HITL / governance engineer",
+      "required_experts": [
+        "E1",
+        "E3"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "HITL BACKLOG IS BOUNDED AND ALERTED: the reviewer queue tracks per-class backlog/age, age crosses capacity-derived warn/page thresholds, and the sustained-backlog policy (batch windows -> delegated tiers -> admission-throttle) caps growth \u2014 asserted with a simulated backlog incl. a correlated drift-spike batch arrival",
+        "two-person Release that can't be staffed DEADLOCKS SAFELY as paused and NEVER auto-approves; transient (batch) queue depth is modelled, not just steady-state utilization; drift decisions get a distinct queue class",
+        "flake-recovery quorum is bounded + counted; correlated cross-fleet flake is detected as an infra incident that PAUSES (not amplifies re-runs)",
+        "dormant under the zero-HITL self-judge profile yet fully built + live for the regulated fallback (both paths tested); reuses governance/human_liaison",
+        "tests added (unit + property where state/idempotency is involved)",
+        "ruff check foundry tests clean",
+        "mypy foundry clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M3-07",
+      "milestone": "M3",
+      "title": "Trusted-component availability + per-lineage capacity reservation (failure != compromise)",
+      "job_to_be_done": "Build foundry/operations/trusted_component.py (operations.md \u00a74). The trusted non-agent chokepoints (gate runner, builder, admission, deployer, WORM appender, mirror) are mandatory \u2014 so their OUTAGE (not compromise) must degrade to RunStatus paused: trusted_component_down (clear reason), NEVER wedged, with queue-and-drain on recovery and no budget burned during the outage. Per-component availability target + outage alert. PER-LINEAGE CAPACITY RESERVATION across the >=3 provisioned lineages: failover does NOT converge on one named 'secondary' \u2014 RESERVE+price headroom on ALL non-primary lineages, sized for the worst-case redistribution of any one failed lineage's high-risk judging across the SURVIVING lineages, covering the sum of concurrent cross-family consumers (always-on high-risk judging + failover fan-in + flake-recovery re-judges + held-out-mutant-rotation re-grounding spike). Per-lineage rate-limit/quota is a capacity dimension feeding \u00a76 backpressure. Non-preemptible mid-attestation demand exceeding a lineage's reserved capacity: gate at admit-to-attestation (or a bounded attestation queue) rather than deadlock. Reuses proxy/lineage (the LineageMap) read-only.",
+      "files_owned": [
+        "foundry/operations/trusted_component.py"
+      ],
+      "dependencies": [
+        "T-M3-01"
+      ],
+      "role": "Trust/availability engineer",
+      "required_experts": [
+        "E3",
+        "E2"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "a trusted-component (gate runner / admission / builder) OUTAGE degrades to paused: trusted_component_down (NEVER wedged), with queue-and-drain on recovery and no budget burned during the outage \u2014 asserted via a simulated component-down",
+        "per-lineage reservation is sized for worst-case redistribution of any ONE failed lineage's high-risk judging across the SURVIVING >=3 lineages (NOT 'peak T1 on a single secondary'); covers always-on judging + failover fan-in + flake re-judges + mutant-rotation spike",
+        "non-preemptible mid-attestation demand over a lineage's reservation is gated at admit-to-attestation (or bounded attestation queue), not allowed to deadlock; per-lineage quota feeds \u00a76 backpressure",
+        "reuses proxy/lineage read-only; deterministic sizing functions",
+        "tests added (unit + property where state/idempotency is involved)",
+        "ruff check foundry tests clean",
+        "mypy foundry clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M3-08",
+      "milestone": "M3",
+      "title": "Upgrade & migration with runs in flight: version-stamp, schema migration, pinned-graph resume, drift policy",
+      "job_to_be_done": "Build foundry/operations/upgrade.py (operations.md \u00a75). Version-stamp every checkpoint manifest {state_schema_ver, graph_ver, prompt_ver, model_pins} (CheckpointVersionStamp, T-M3-01). State-schema migration: additive channel changes ship MIGRATION FUNCTIONS; breaking changes require DRAIN-BEFORE-UPGRADE; a run NEVER resumes against an incompatible schema \u2014 it FAILS TO THE OPERATOR (fail-closed) rather than silently mis-resuming. Graph/prompt changes: a run RESUMES ON ITS PINNED graph/prompt version (new version applies only to new runs / an explicit operator-approved migration). Mid-flight MODEL DRIFT: the pinned-ID-drift alert gets a defined operator response per run (continue / fork / abort \u2014 never silently continue a T1 judgment on drifted weights). FLEET-WIDE drift policy by risk tier: auto-continue Low/Standard with a recorded recalibration flag; pause only High/trust-root/human-witnessed runs (avoid a HITL thundering herd; the \u00a77 reviewer queue is sized for the spike). Held-out-mutant-rotation exposure schedules background re-grounding/re-verification (does NOT drain in-flight runs), admitted through \u00a76 backpressure. Reuses context/determinism (the run-manifest seam) read/extend.",
+      "files_owned": [
+        "foundry/operations/upgrade.py"
+      ],
+      "dependencies": [
+        "T-M3-01"
+      ],
+      "role": "Migration / durability engineer",
+      "required_experts": [
+        "E2",
+        "E1"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "every checkpoint carries a version stamp; a run resuming against an INCOMPATIBLE state-schema FAILS TO THE OPERATOR (fail-closed), never silently mis-resumes; an additive change resumes via a migration function",
+        "a run resumes on its PINNED graph/prompt version (a new graph/prompt version does not alter an in-flight run's routing on resume)",
+        "mid-flight model drift yields a per-run continue/fork/abort decision (never silent continue of a T1 judgment); the fleet-wide drift policy auto-continues Low/Standard with a recorded recalibration flag and pauses only High/trust-root runs",
+        "mutant-rotation exposure schedules BACKGROUND re-grounding (does not drain in-flight runs); deterministic stamping/migration",
+        "tests added (unit + property where state/idempotency is involved)",
+        "ruff check foundry tests clean",
+        "mypy foundry clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M3-09",
+      "milestone": "M3",
+      "title": "Complete the deterministic monitor set + advisory sandboxed analyzer (gov \u00a73)",
+      "job_to_be_done": "Fill the gaps in foundry/monitors/ so the full deterministic monitor set + the advisory toolless analyzer seam are complete (governance.md \u00a73; loop/cost/oracle/policy + critical-diff trip + guardian already exist \u2014 EXTEND, don't rebuild). Add the missing deterministic monitors as their own modules: PINNED-ID-DRIFT monitor (proxy-observed served-model != pinned id, feeds \u00a75 upgrade), PINNED-CONSTRAINT-PRESSURE monitor (injected pinned_constraints set approaching the injection budget -> HITL; global-subset-alone approaching budget -> retire/consolidate globals), and CRITERION-COVERAGE-DELTA monitor (runner-attested high-risk negative-oracle/mutant pass count vs the Spec-gate-FROZEN immutable criterion set \u2014 NOT agent test-tag count; a drop trips deterministically). Harden the ADVISORY ANALYZER: features derived PRIMARILY from trusted-infra observations (zone-B execution records, OPA logs, runner attestations) not the agent transcript; capped-slice selection adversary-robust (priority-ranked by trusted signal, not recency/volume, so feature-flooding can't evict the suspicious feature); fired by (a) a deterministic signal, (b) a write to protected paths, and (c) a low-rate SAMPLED pass over ordinary supersteps. Analyzer stays advisory-only \u2014 cannot approve/override a deterministic trip (re-asserted, mirror guardian). New TripKind values appended to monitors/__init__; guardian.py extended to wire the new trips.",
+      "files_owned": [
+        "foundry/monitors/pinned_id_drift_monitor.py",
+        "foundry/monitors/constraint_pressure_monitor.py",
+        "foundry/monitors/coverage_delta_monitor.py",
+        "foundry/monitors/analyzer.py",
+        "foundry/monitors/__init__.py",
+        "foundry/monitors/guardian.py"
+      ],
+      "dependencies": [
+        "T-M3-PLAN"
+      ],
+      "role": "Monitors / safety engineer",
+      "required_experts": [
+        "E3",
+        "E1"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "the deterministic monitor set is COMPLETE: pinned-ID-drift, pinned-constraint-pressure, and criterion-coverage-delta monitors added alongside the existing loop/cost/oracle/policy + critical-diff; each trips deterministically (no LLM) on its condition",
+        "criterion-coverage-delta keys on the runner-attested high-risk pass count vs the FROZEN immutable criterion set (not agent test-tag count); the high-risk flag cannot be re-labeled to shrink the denominator without a critical-diff trip",
+        "the advisory analyzer derives features primarily from trusted-infra observations, uses adversary-robust priority-ranked capped-slice selection (flooding cannot evict a suspicious feature), fires on deterministic-signal + protected-path-write + a low-rate sampled pass, and CANNOT approve/override a deterministic trip (re-asserted)",
+        "guardian wires the new trips with the correct mandated actions; new TripKinds appended",
+        "tests added (unit + property where state/idempotency is involved)",
+        "ruff check foundry tests clean",
+        "mypy foundry clean"
+      ],
+      "retries_remaining": 3,
+      "status": "in_progress"
+    },
+    {
+      "id": "T-M3-10",
+      "milestone": "M3",
+      "title": "Policy plane: five-plane wiring + run-immutable scanner config + segregation of duties (gov \u00a72)",
+      "job_to_be_done": "Build the foundry/policy/ package (greenfield) wiring the POLICY plane of the five-plane model (governance.md \u00a72, sans the full Phase-4 trust root). A least-privilege OPA-style authorization seam over tool calls (only the trusted builder reaches signing; only the non-agent deployer deploys) AND over artifact OUTPUTS (IaC plan diffs gated by Conftest/Checkov-style policy: no privilege grants / new IAM principals / egress widening / OIDC-trust changes beyond a declared baseline -> HITL). Scanner-configuration + suppression files modeled as a PROTECTED, repo-external, RUN-IMMUTABLE path agents cannot write; any suppression/floor/allowlist edit is a first-class finding routed to HITL and counted by the deterministic critical-diff monitor (\u00a73). Record the pinned scanner-config revision hash (the seam admission/evidence-pack bind, already used by the runner). Dev-grade policy engine (\u00a70.3); the deny/allow + protected-path semantics are real and tested. Defines a PlaneRegistry / SegregationOfDuties contract the observability + operator surfaces reference.",
+      "files_owned": [
+        "foundry/policy/__init__.py",
+        "foundry/policy/planes.py",
+        "foundry/policy/authorization.py",
+        "foundry/policy/scanner_config.py"
+      ],
+      "dependencies": [
+        "T-M3-PLAN"
+      ],
+      "role": "Policy / security engineer",
+      "required_experts": [
+        "E3",
+        "E1"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "least-privilege authorization denies a non-builder reaching signing / a non-deployer deploying, and gates IaC plan-diff OUTPUTS (privilege grant / new IAM principal / egress widening / OIDC-trust change beyond baseline -> HITL), fail-closed",
+        "scanner-config + suppression files are a run-immutable, agent-unwritable protected path; any edit is a first-class finding routed to HITL and counted by the deterministic critical-diff monitor",
+        "the pinned scanner-config revision hash is recorded (the seam admission/evidence-pack bind); a PlaneRegistry/SegregationOfDuties contract is exported for the operator/observability surfaces",
+        "five planes (policy/execution/data/observability/assurance) are NAMED + wired sans the Phase-4 trust root; dev-grade engine, real semantics tested",
+        "tests added (unit + property where state/idempotency is involved)",
+        "ruff check foundry tests clean",
+        "mypy foundry clean"
+      ],
+      "retries_remaining": 3,
+      "status": "in_progress"
+    },
+    {
+      "id": "T-M3-11",
+      "milestone": "M3",
+      "title": "Observability plane: OTel-style structured run telemetry + fingerprints + drift alerts (gov \u00a72)",
+      "job_to_be_done": "Build the foundry/observability/ package (greenfield) wiring the OBSERVABILITY plane (governance.md \u00a72 / implementation-plan \u00a75.3). OTel-style structured telemetry over every superstep (node, tool, args, tokens, USD, latency, gate results, policy denials, serving-model fingerprint) as frozen records feeding the monitors (\u00a73) and the operator surface (NOT the eval/Langfuse view \u2014 distinct, operations.md \u00a71). DRIFT ALERTS: a pinned-ID-drift signal (served-model fingerprint != pinned id) surfaced as a telemetry-derived Alert (feeds the \u00a75 upgrade drift policy + the \u00a79 pinned-ID-drift monitor). Runs are replayable for CONTROL STATE (not bitwise LLM output). Dev-grade exporter (in-memory/structured sink, \u00a70.3); the record shape + drift-alert derivation are real and tested. Exports the telemetry record types the operator dashboard (T-M3-03) golden signals consume.",
+      "files_owned": [
+        "foundry/observability/__init__.py",
+        "foundry/observability/telemetry.py",
+        "foundry/observability/drift_alerts.py"
+      ],
+      "dependencies": [
+        "T-M3-PLAN"
+      ],
+      "role": "Observability / SRE engineer",
+      "required_experts": [
+        "E1",
+        "E2"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "structured per-superstep telemetry records carry node/tool/tokens/USD/latency/gate-results/policy-denials/serving-model-fingerprint and feed the monitors + the operator surface (distinct from the eval/Langfuse view)",
+        "a served-model-fingerprint != pinned-id condition derives a drift Alert that feeds the upgrade drift policy + the pinned-ID-drift monitor",
+        "runs are replayable for CONTROL STATE (not bitwise LLM output); dev-grade in-memory exporter, real record shape tested",
+        "telemetry record types are exported for the operator dashboard golden signals",
+        "tests added (unit + property where state/idempotency is involved)",
+        "ruff check foundry tests clean",
+        "mypy foundry clean"
+      ],
+      "retries_remaining": 3,
+      "status": "in_progress"
+    },
+    {
+      "id": "T-M3-12",
+      "milestone": "M3",
+      "title": "Operator SLOs + alert conditions + runbook docs (one runbook per escalation class)",
+      "job_to_be_done": "Author build/RUNBOOKS.md (the operator runbook set) documenting the SLO targets, the alert taxonomy + thresholds, and a runbook skeleton PER ESCALATION CLASS (operations.md \u00a71): non-convergence, budget breach, monitor trip, store outage, trusted-component down, poisoned checkpoint, mid-flight upgrade/drift, HITL backlog. Each runbook: trigger (which alert/monitor), diagnosis (which RunStatus/dashboard signal to read \u2014 paused vs wedged), and remediation steps, cross-linked to the operations/ module that implements the control + the docs/operations.md / docs/governance.md \u00a710 sections. Every alert condition defined in operator.py maps to exactly one runbook. Docs only \u2014 no feature code; depends on the operator/run_status surface existing so the diagnosis steps are concrete.",
+      "files_owned": [
+        "build/RUNBOOKS.md"
+      ],
+      "dependencies": [
+        "T-M3-03",
+        "T-M3-04",
+        "T-M3-06",
+        "T-M3-07",
+        "T-M3-08"
+      ],
+      "role": "SRE / docs engineer",
+      "required_experts": [
+        "E1",
+        "E2"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "build/RUNBOOKS.md documents SLO targets + the alert taxonomy + one runbook per escalation class (non-convergence, budget, monitor trip, store outage, trusted-component down, poisoned checkpoint, upgrade/drift, HITL backlog)",
+        "each runbook gives trigger -> diagnosis (which RunStatus/dashboard signal incl. paused-vs-wedged) -> remediation, cross-linked to the implementing operations/ module + the relevant docs section",
+        "every alert condition in operator.py maps to exactly one runbook (1:1 coverage check, even if manual)",
+        "docs only \u2014 no foundry/ code touched"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M3-13",
+      "milestone": "M3",
+      "title": "Phase-3 exit-criteria integration test + milestone gate sweep",
+      "job_to_be_done": "Add tests/test_phase3_exit.py: the milestone witness for the docs/roadmap.md Phase-3 exit criteria, driving the operations/ + monitors/ + policy/ + observability/ surfaces end-to-end on synthetic fixtures with the existing test doubles (MockTransport/StubAdapter, no live key). Asserts ALL FOUR exit criteria coherently: (1) an OPERATOR CAN DIAGNOSE A STUCK RUN (watchdog distinguishes paused-with-reason from wedged); (2) a STORE OUTAGE PAUSES (NOT CORRUPTS) in-flight runs AND RECOVERS (no partial state, no duplicate external effect on resume, poisoned-checkpoint fork-to-prior-good works); (3) CONCURRENT RUNS DON'T STARVE EACH OTHER (fair-share scheduler under multiple tenants; fleet cost-rate cap throttles admission not in-flight); (4) HITL BACKLOG IS BOUNDED AND ALERTED (reviewer queue age crosses threshold -> alert; sustained-backlog policy caps growth; two-person deadlock stays paused). Then run the milestone gate sweep (ruff, mypy foundry, full pytest, coverage >=80% overall / >=85% new, scoped mutation >=70% on the trust-critical new operations/monitors modules or survivors justified in build/REVIEW.md).",
+      "files_owned": [
+        "tests/test_phase3_exit.py"
+      ],
+      "dependencies": [
+        "T-M3-02",
+        "T-M3-03",
+        "T-M3-04",
+        "T-M3-05",
+        "T-M3-06",
+        "T-M3-07",
+        "T-M3-08",
+        "T-M3-09",
+        "T-M3-10",
+        "T-M3-11",
+        "T-M3-12"
+      ],
+      "role": "QA / eval engineer",
+      "required_experts": [
+        "E2",
+        "E1"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "OPERATOR CAN DIAGNOSE A STUCK RUN: the test drives a wedged run and a legitimately-paused run and asserts the watchdog/dashboard tells them apart with a machine-readable reason",
+        "STORE OUTAGE PAUSES (NOT CORRUPTS) + RECOVERS: simulated outage -> paused: store_outage, no partial state, clean resume with no duplicate external effect; poisoned checkpoint -> fork-to-prior-good recovery asserted",
+        "CONCURRENT RUNS DON'T STARVE: multi-tenant fair-share scheduling keeps each tenant progressing; fleet cost-rate cap throttles admission (not in-flight) on breach",
+        "HITL BACKLOG IS BOUNDED AND ALERTED: backlog age crosses the capacity-derived threshold -> alert; sustained-backlog policy caps growth; un-staffable two-person Release stays paused (never auto-approves)",
+        "Milestone gate sweep green: ruff, mypy foundry, full pytest, coverage >=80% overall (new code >=85%), scoped mutation >=70% on trust-critical new modules or survivors justified in build/REVIEW.md"
       ],
       "retries_remaining": 3,
       "status": "pending"

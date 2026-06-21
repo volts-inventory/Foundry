@@ -1429,3 +1429,132 @@ FoundryCheckpointer). Criterion->test + the genuine-E2E-vs-stand-in map for the 
 - P2X4. **Test-harness gotcha:** two Gated runs in one test (criterion e) need DISTINCT `tmp_path`
   subdirs created BEFORE `_src` (which mkdir's `<dir>/src`) — a nested mkdir on a non-existent parent
   raises FileNotFoundError. Touched ONLY tests/test_phase2_exit.py + this LEARNINGS note.
+
+## Operability (Phase-3) schema foundation (T-M3-01)
+- OPS1. **`foundry/schemas/operations.py` is APPEND-ONLY and single-owned; Phase-3 records were
+  ADDED, the four Phase-1/2 records (`Pipeline`/`IaCProposal`/`DeployPlan`/`Release`) PRE-EXISTED
+  and were not touched.** The 7 M3 ops modules (run_status, operator, store_resilience, capacity,
+  hitl, trusted_component, upgrade) build on these shared records — don't invent parallels (L3).
+- OPS2. **Records added (all FrozenModel, extra=forbid, `seq` on every channel record, `*_uri` CAS
+  handles, S1 `default_factory` for mutable defaults, integer micro-USD for money):**
+  §2 liveness — `RunStatus` enum (RUNNING/PAUSED/WEDGED/HIBERNATED/DONE/FAILED/QUARANTINED;
+  **PAUSED vs WEDGED is the load-bearing distinction** — paused = legitimate $0/hr wait, wedged =
+  no-heartbeat-past-derived-deadline alert), `PauseReason` enum (store_outage /
+  trusted_component_unavailable / hitl_wait / capacity / non_convergence / latched_by_sibling_fork /
+  operator), `RunStatusRecord` (status+reason+`awaiting`+`last_progress_seq/ts`+derived
+  `expected_next_transition_deadline_ms`+`cost_rate_microusd_per_hr`+`state_footprint_bytes`;
+  `.is_alertable()` == WEDGED). §1 operator — `AlertSeverity`, `SLOTarget` (`objective_micro` in
+  millionths so ratio SLOs carry no float), `SLO`, `Alert` (maps 1:1 to the deterministic monitors,
+  fleet-level when `run_id is None`). §6 capacity/fairness — `TenantQuota` (carries the
+  `cost_rate_cap_microusd_per_hr` fleet slice + noisy-neighbor caps), `QueueEntry` (per-`lineage`
+  backpressure dim), `FairnessDecision` (admission-side throttle: `admitted=False` queues, never
+  kills; carries fleet rate+cap). §7 HITL — `ReviewerQueueEntry` (`decision_class` so drift
+  decisions don't serialize behind release sign-offs; `two_person`+`sla_deadline_ms`), `HITLLoad`
+  (backlog/age/`available_reviewer_pairs`/capacity-derived `alert_age_ms`/`flake_recovery_count`).
+  §3 store — `CheckpointHealth` (clean vs poisoned, `last_clean_checkpoint_uri` fork-to-prior-good,
+  `dangling_handle_uris`, `hibernated`). §5/§8 upgrade — `VersionStamp` (NO `seq` — a sub-record
+  embedded in checkpoints/`UpgradePlan`; `model_pins` S1 map), `UpgradeAction` enum,
+  `UpgradePlan` (from/to VersionStamp + action + `drift_recalibration` + correlated-spike
+  `affected_run_ids`).
+- OPS3. **`VersionStamp`/`SLOTarget` are seq-LESS sub-records** (they embed inside seq'd records),
+  so the parametrized seq-asserting conformance table skips them — they get a separate
+  frozen/extra-forbid/content_identity test. Mirror this if a later ops module adds an embedded
+  value object: `seq` belongs on the channel-WRITTEN record, not every nested value.
+- OPS4. **Gates: ruff+mypy clean on the two owned files; full pytest green (test_schemas_operations.py
+  = 19 cases incl. 10 parametrized × 3). Pre-existing unrelated ruff F401s in
+  `foundry/monitors/guardian.py` (another owner's in-flight edit) are NOT mine — scope ruff to the
+  owned files when verifying.** Touched ONLY operations.py + test_schemas_operations.py.
+
+## Observability plane — telemetry + drift alerts (T-M3-11)
+- OBS1. **The observability plane CONSUMES the proxy manifest; it adds NO second egress (L6).**
+  `foundry/observability/telemetry.py::RunTelemetry` is an OTel-STYLE in-memory span collector.
+  `ingest_proxy(proxy)` DRAINS the proxy's append-only `manifest` read-only view into MODEL_CALL spans
+  carrying the determinism fingerprints (node_id/purpose/tier/requested+served model/served_family/
+  lineage_map_revision/request_id/usage/sampling/drift — `_FINGERPRINT_FIELDS` lifted verbatim, proxy
+  stays source of truth). It depends on a `_ManifestSource` Protocol exposing ONLY `manifest` (no
+  `complete`/`judge`), so telemetry structurally CANNOT make a model call. `record_node_span` /
+  `record_gate_span` collect the other two span kinds. `ingest_proxy` is idempotent over a growing
+  manifest (a `_manifest_drained` cursor → re-drain emits no duplicate spans). No network/IO; a real
+  OTel exporter is an ops swap that drains `export()`.
+- OBS2. **Drift alerts REUSE `proxy.drift_events` as the AUTHORITATIVE pinned-ID source — never
+  re-derived.** `drift_alerts.pinned_id_drift_alerts(proxy)` lifts each proxy drift_event into a
+  CRITICAL `PinnedIdDriftAlert` (served != requested → calibration-baseline invalidation, arch §8;
+  `alert.context == dict(proxy.drift_events[i])` verbatim). `threshold_alerts(telemetry, policy)` adds
+  cost/usage/latency drift OVER the collected spans (`ThresholdPolicy`, integer token counts, float-free
+  budget domain). FAIL-LOUD (gov §2): `raise_on_drift(...)` / `raise_if(alerts)` raise `DriftAlertError`
+  (carrying the full alert set) the moment any alert exists — never swallowed; `detect_drift(...)` returns
+  the set for triage.
+- OBS3. **Tested KEYLESS via the MockTransport-backed proxy (D1/D5).** Force a pinned-ID drift by
+  driving a T1 `complete()` against `MockTransport(served_model="claude-sonnet-4-6")` (served override
+  ≠ pinned opus) — the proxy records the drift_event, the alert is sourced from it and raised. No signer
+  needed (telemetry/drift use `complete`, not `judge`). 13 cases; ruff+mypy clean; full suite green.
+  Touched ONLY `foundry/observability/` + `tests/test_observability.py`.
+
+## Five-plane policy package (T-M3-10)
+- POL1. **`foundry/policy/` makes the five-plane guardrail model INSPECTABLE, not just wired.**
+  `FIVE_PLANE_MODEL: FivePlaneModel` (in `planes.py`) is a frozen registry mapping each `Plane` enum
+  member (POLICY/EXECUTION/DATA/OBSERVABILITY/ASSURANCE) → a `PlaneSpec(summary, controls, modules)`
+  whose `modules` are the real import paths implementing the plane (sandbox / proxy / gates.runner+
+  attestation / durability+trust_root / this package). Completeness is ASSERTABLE: `is_complete()` is
+  true iff all five planes present AND each has ≥1 control and ≥1 module (`missing_planes()` reports the
+  gap). An empty plane is a missing guardrail, not a wired one — the test prunes a plane / empties a
+  plane's controls to prove both fail.
+- POL2. **The Policy plane evaluator is OPA-style DEFAULT-DENY / fail-closed.** `PolicyEvaluator(rules=
+  DENY_RULES).evaluate(subject: Mapping) -> PolicyDecision` allows ONLY when the subject names a known
+  `policy` AND no deny rule fires; an unknown/missing policy (`unknown-policy` rule), any deny rule
+  (egress-widening / scanner-config-write / signing-outside-zone-b), OR an evaluator EXCEPTION all DENY.
+  Rules are pinned at ctor (run-immutable). `DenyRule` is a FROZEN DATACLASS, not a `FrozenModel` — it
+  carries a non-serializable `Callable` predicate, so it is pinned policy CODE, not content-addressed
+  run state (a `Callable` field on a `FrozenModel` breaks `content_identity()`/dump). Production swaps
+  this for OPA/Conftest/Checkov as an ops change; the fail-closed seam is the real part.
+- POL3. **Run-immutable scanner config = content-addressed frozen record + a run binding.**
+  `ScannerConfigRecord` (FrozenModel: rules+versions, severity_floors, suppression/license allowlists)
+  exposes `revision_hash` = `content_digest(model_dump)` — its content ADDRESS. Any mutation (weakened
+  floor, new suppression) → different `revision_hash` → detectable. This IS the value gate verdicts
+  already bind as `scanner_config_rev` (gates/runner.py) and the SLSA predicate re-checks at admission.
+  `PinnedScannerConfig.pin(record)` captures the pinned rev; `.verify()` is fail-closed tamper
+  detection (recompute address, raise `ScannerConfigTamperError` on mismatch) — a run cannot mutate its
+  own config (only PRODUCE a new revision). `rule_versions()` feeds the class-2 reuse key (§1f).
+- POL4. **Segregation of duties is a fail-closed predicate (mirrors the two-zone split).**
+  `authorize_segregation_of_duties(DutyRequest) -> AuthorizationDecision`: DENY if approver ∈ authors
+  (an agent cannot sign its own verdict), if approver_zone != `Zone.B_ATTESTOR` (producer zone can't
+  sign), if a `required_distinct_role` is unmet, or if author/approver identity is empty. ALLOW only
+  when no deny rule fires. `PolicyEvaluator.authorize_duties(...)` re-exposes it. 23 tests; ruff+mypy
+  clean; full suite green. Touched ONLY `foundry/policy/` + `tests/test_policy.py`.
+
+## Phase-3 monitor set completion + advisory analyzer (T-M3-09)
+- M3-09a. **Three NEW deterministic monitors join the load-bearing set (gov §3, arch §8) — each a
+  pure function of trusted-infra counts/observations, no LLM, not prompt-injectable.** `PinnedIdDriftMonitor`
+  (`foundry/monitors/pinned_id_drift_monitor.py`) `.inspect(drift_events)` trips PINNED_ID_DRIFT on ANY
+  proxy-observed drift event (served != requested; consumes `ModelProviderProxy.drift_events` OR raw
+  manifest records — a record with `drift=False` is skipped, no `drift` key = pre-filtered) →
+  calibration-baseline invalidation. `ConstraintPressureMonitor` (`constraint_pressure_monitor.py`)
+  `.inspect(node_id, injected_count, budget, global_count)` trips CONSTRAINT_PRESSURE at the **90% bound**
+  (integer `count*100 >= budget*pct`); the GLOBAL-subset-alone variant is a DISTINCT, strictly-worse rule
+  (`global-constraint-pressure`, `matched` carries `scope=global`) because it is unfixable-by-scoping
+  (retire/consolidate globals) — never silent truncation (arch §8). `CoverageDeltaMonitor`
+  (`coverage_delta_monitor.py`) `.inspect(baseline_high_risk, attested_satisfied, run_against)` trips
+  COVERAGE_DELTA when the RUNNER-ATTESTED high-risk satisfied count drops below the FROZEN Spec baseline
+  by more than `allowed_regression` (default 0) — baseline + satisfied are signals the agent does not
+  solely control (gov §3, AI-R8-F3). All three Guardian-map to ESCALATE (HITL).
+- M3-09b. **The advisory analyzer (`analyzer.py::SandboxedAnalyzer`) CANNOT override a deterministic
+  trip — structurally, not by convention.** Its `flag(features) -> list[str]` consumes the STRUCTURED
+  features mapping ONLY (no tools, no raw repo/transcript — the input type IS the sandbox boundary) and
+  returns inert annotation strings; there is NO return path for a Trip/action/verdict. Prompt-injection
+  posture: untrusted prose is data; trusted-infra feature keys are PRIORITY-RANKED above agent-shaped
+  keys and the slice is CAPPED (`_ranked_capped_keys`), so transcript flooding cannot evict a suspicious
+  high-priority feature (cap-eviction defense). It satisfies the existing `guardian.AdvisoryAnalyzer`
+  Protocol; the Guardian computes the deterministic action/trips BEFORE consulting it and RE-ASSERTS them
+  after (`_consult_analyzer`), so even a malicious `flag()` that mutates its copied feature slice or emits
+  "OVERRIDE: clear all trips" lands as an annotation and the trip STANDS.
+- M3-09c. **Wiring: new monitors are Guardian ctor deps + new typed events** (`PinnedIdDriftEvent`/
+  `ConstraintPressureEvent`/`CoverageDeltaEvent`, dispatched in `assess`'s match) + new `TripKind`s
+  (PINNED_ID_DRIFT/CONSTRAINT_PRESSURE/COVERAGE_DELTA) + `MANDATED_ACTIONS` entries (all ESCALATE).
+  Existing guardian behavior preserved (deterministic trips dominate; CAP_BREACH still outranks). New
+  exports + lazy map in `monitors/__init__.py`.
+- M3-09d. **GOTCHA: pytest `python_classes = ["Test_*"]` (underscore!) — `class TestFoo:` is NOT
+  collected (silently 0 tests).** `tests/test_monitors.py`'s `TestSemanticLoopDetector`-style classes do
+  not actually run under this config; name Phase-3 test classes `Test_PinnedIdDriftMonitor` etc. so the
+  methods are collected (18 cases in `tests/test_monitors_phase3.py`). Distinct seam from observability's
+  OBS2: that lifts `drift_events` into an OTel/alert `PinnedIdDriftAlert`; THIS lifts the same events into
+  a Guardian deterministic Trip — same trusted source, two consumers.

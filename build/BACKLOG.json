@@ -1649,7 +1649,7 @@
         "mypy foundry clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M3-11",

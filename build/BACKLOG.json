@@ -1709,7 +1709,7 @@
         "docs only \u2014 no foundry/ code touched"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M3-13",
@@ -1768,7 +1768,7 @@
         "all classes in test_monitors.py collect+run (Test_* named); any revealed failure fixed at root cause; full suite green; ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     }
   ]
 }

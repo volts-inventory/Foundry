@@ -247,6 +247,15 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   functions. Type the key callable via a named function with annotated params, not a lambda.
 - O3. pytest collects production classes named `Test_*` only (pyproject) — domain types like
   `TestPlan`/`TestReport` are NOT test cases. Name real test classes `Test_*` or use functions.
+- O3a. **The O3 underscore rule SILENTLY EATS plain `class TestX:` test classes (T-FIX).**
+  `tests/test_monitors.py` had 7 plain `TestX` classes (38 test methods) that collected to ZERO and
+  had NEVER run since written — pytest reports the file as passing because it sees no cases, not green
+  cases. Fix: rename `class TestX:` → `class Test_X:`. AUDIT: grep `^class Test[A-Z]` across `tests/`
+  after authoring; any hit (no underscore) is a dead suite. Reassuringly, once collected all 38 passed
+  against the EVOLVED monitors/governance code — no stale assertions, no genuine bug surfaced (the
+  monitor/governance contracts held). Watch for transient `ERROR collecting` during a full `pytest`
+  run: a CONCURRENT background agent committing/mutating the tree mid-collection causes it, not the
+  suite — re-run in isolation to confirm (it cleared to 962 passed / 1 skipped).
 - O4. No CI of any kind (no `.github/workflows`). All verification is local via the gate chain.
 
 ## Subgraph composition (T-M1-08, the per-layer `build_<layer>_subgraph` waves)

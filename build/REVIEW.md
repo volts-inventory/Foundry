@@ -257,3 +257,8 @@ terminate within caps; (7) coupling deliberate, no fail-OPEN, Assistant back-com
   old/new file maps when available (comment is already honest).
 ACCEPTANCE: all-MINOR, trust SOUND -> CLEAN ROUND by cross-check; M2-R1-01/02 to be fixed on M2 close (batched after
 T-M2-11); M2-R1-03 left as a documented honest seam. **M2 assurance chain reviewed CLEAN.**
+
+UPDATE (M2 close): M2-R1-01 RESOLVED (public foundry/governance/release_anchors.py — supervisor +
+factory_graph import the public anchor fns; private cross-module import gone) + M2-R1-02 RESOLVED
+(EvidencePack.run_against bound to an attested verdict's real tree_sha). Behavior unchanged; gated
+tests pass; ruff/mypy clean, 729 pass/1 skip, coverage 89.8%. **M2 review CLEAN-resolved.**

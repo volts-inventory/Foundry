@@ -702,9 +702,13 @@ def _carried_pack(final: FactoryState, pr_payload_uri: str) -> EvidencePack:
     """Rebuild the EvidencePack the gated emit carried, from the final state, and
     assert its handle == the PR payload (the release travels WITH its evidence; FG8)."""
     sentinel = Seq(run_id="x", emission_epoch=0, superstep_index=0, node_id="emit", local=0)
+    gate_results = _attested_terminal_results(final)
+    # ``run_against`` = the actual materialized tree the gates ran over, read off an
+    # attested verdict (mirrors the gated emit; M2-R1-02) — not a config label.
+    run_against = next((g.run_against for g in gate_results if g.run_against), "")
     pack = build_evidence_pack(
-        run_against="integrated-sha",
-        gate_results=_attested_terminal_results(final),
+        run_against=run_against,
+        gate_results=gate_results,
         artifacts=_released_artifacts(final),
         sign_offs=_release_sign_offs(final),
         scanner_config_rev=SCANNER_REV,

@@ -91,8 +91,14 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
 from foundry.agents.implementation.senior_engineer import DESIGN_KIND
-from foundry.canonical import content_digest
 from foundry.governance.budget_controller import BudgetCaps, BudgetController
+from foundry.governance.release_anchors import (
+    evidence_hash,
+    newest_artifact_uri,
+    newest_release_sign_off,
+    sign_off_nonce,
+    state_sha,
+)
 from foundry.governance.sign_off import (
     record_design_sign_off,
     record_release_sign_off,
@@ -124,7 +130,6 @@ if TYPE_CHECKING:
     from foundry.context import SymbolIndex
     from foundry.gates.runner import TwoZoneGateRunner
     from foundry.graph.gate_wiring import BlobResolver
-    from foundry.schemas.base import Artifact
 
 __all__ = [
     "DEFAULT_ROUTE_CAPS_MICROUSD",
@@ -210,62 +215,13 @@ def _seed_budget(route: str) -> BudgetLedger:
     return BudgetLedger(cap_microusd=controller.caps.total_microusd)
 
 
-# ---- Phase-2 sign-off helpers (always-recorded; gov §1/§6) ------------------
-
-
-def _newest_artifact_uri(state: FactoryState, kind: str) -> str:
-    """The newest-by-``Seq`` artifact uri of ``kind`` on the ``artifacts`` channel.
-
-    The Design / Release sign-off binds to the attested decision-point artifact
-    (gov §6). ``artifacts`` folds by ``merge_by_uri`` (insertion-order, not seq),
-    so we pick the max-``Seq`` handle of the requested kind (mirrors
-    ``senior_engineer._first_of_kind`` / QS8) rather than ``artifacts[-1]``.
-    Empty when no such artifact exists yet (the sign-off still records, bound to
-    an empty subject — the always-recorded invariant; admission is fail-closed).
-    """
-    best: Artifact | None = None
-    for a in state.get("artifacts") or ():
-        if a.kind != kind:
-            continue
-        if best is None or a.seq > best.seq:
-            best = a
-    return best.uri if best is not None else ""
-
-
-def _state_sha(config: RunnableConfig) -> str:
-    """The integrated ``state_sha`` the sign-off binds to (a RUN INPUT; Q1).
-
-    Threaded onto ``config['configurable']`` by the runtime exactly like
-    ``thread_id`` / ``verdict_nonce``; empty when absent (the record is still
-    made — admission via ``release_allowed`` then fail-closes the mismatch)."""
-    configurable = config.get("configurable") or {}
-    return str(configurable.get("state_sha") or "")
-
-
-def _sign_off_nonce(config: RunnableConfig, point: str, subject_uri: str, state_sha: str) -> str:
-    """A process-stable per-approval server nonce (L7: ``content_digest``, never
-    ``hash()`` — seed-randomized per process defeats resume idempotency).
-
-    The nonce binds the sign-off to the exact decision point (point + subject +
-    state) so it cannot be replayed across boundaries; it is stable across a
-    kill-then-resume because it is a pure function of those bound anchors + the
-    run's thread_id."""
-    configurable = config.get("configurable") or {}
-    thread_id = str(configurable.get("thread_id") or "")
-    return "nonce-" + content_digest(
-        {"point": point, "subject": subject_uri, "state_sha": state_sha, "thread_id": thread_id}
-    )
-
-
-def _evidence_hash(subject_uri: str, state_sha: str, gates: list[Any]) -> str:
-    """Content hash of the evidence presented to the signer (the what-you-see
-    anchor, gov §6): the subject + state + the ordered attested-gate identities.
-
-    Pure function of the bound inputs (L7 ``content_digest``), so the same
-    decision point yields the same hash on resume — the sign-off's
-    ``presented_evidence_hash`` and the ``release_allowed`` re-derivation agree."""
-    gate_ids = sorted(f"{g.name}:{g.status}:{g.run_against}" for g in gates)
-    return content_digest({"subject": subject_uri, "state_sha": state_sha, "gates": gate_ids})
+# ---- Phase-2 sign-off anchors (always-recorded; gov §1/§6) ------------------
+# The four what-you-sign anchor derivations + the newest-release-sign-off lookup
+# now live in the shared PUBLIC module ``foundry.governance.release_anchors`` —
+# a single source of truth imported by BOTH this supervisor and the gated emit's
+# release re-check (factory_graph), so the two can never drift (M2-R1-01). They
+# are imported above as ``newest_artifact_uri`` / ``state_sha`` / ``sign_off_nonce``
+# / ``evidence_hash`` / ``newest_release_sign_off``.
 
 
 # ---- builder ----------------------------------------------------------------
@@ -347,7 +303,7 @@ def build_supervisor_graph(
                 state,
                 capabilities=state.get("required_capabilities"),
                 seq=tier_seq,
-                run_against=_state_sha(config),
+                run_against=state_sha(config),
             )
         return out
 
@@ -523,15 +479,15 @@ def build_supervisor_graph(
     # a process-stable nonce). In the self-judge profile this is the recorded-
     # but-no-op HITL; the RECORD is always made (the testable invariant).
     def design_sign_off(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
-        subject_uri = _newest_artifact_uri(state, DESIGN_KIND)
-        state_sha = _state_sha(config)
-        nonce = _sign_off_nonce(config, _DESIGN_SIGN_OFF, subject_uri, state_sha)
-        evidence_hash = _evidence_hash(subject_uri, state_sha, list(state.get("gates") or ()))
+        subject_uri = newest_artifact_uri(state, DESIGN_KIND)
+        sha = state_sha(config)
+        nonce = sign_off_nonce(config, _DESIGN_SIGN_OFF, subject_uri, sha)
+        ev_hash = evidence_hash(subject_uri, sha, list(state.get("gates") or ()))
         seq = rt.seq(config, _DESIGN_SIGN_OFF, "sign_off:design")
         record = record_design_sign_off(
             subject_artifact_uri=subject_uri,
-            state_sha=state_sha,
-            presented_evidence_hash=evidence_hash,
+            state_sha=sha,
+            presented_evidence_hash=ev_hash,
             server_nonce=nonce,
             approver="self-judge",
             role="design-approver",
@@ -545,15 +501,15 @@ def build_supervisor_graph(
     # — fail-closed (no recorded approved sign-off binding THIS release ⇒ no
     # release). The record is made regardless; only ADVANCEMENT is gated.
     def release_sign_off(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
-        subject_uri = _newest_artifact_uri(state, DESIGN_KIND)
-        state_sha = _state_sha(config)
-        nonce = _sign_off_nonce(config, _RELEASE_SIGN_OFF, subject_uri, state_sha)
-        evidence_hash = _evidence_hash(subject_uri, state_sha, list(state.get("gates") or ()))
+        subject_uri = newest_artifact_uri(state, DESIGN_KIND)
+        sha = state_sha(config)
+        nonce = sign_off_nonce(config, _RELEASE_SIGN_OFF, subject_uri, sha)
+        ev_hash = evidence_hash(subject_uri, sha, list(state.get("gates") or ()))
         seq = rt.seq(config, _RELEASE_SIGN_OFF, "sign_off:release")
         record = record_release_sign_off(
             subject_artifact_uri=subject_uri,
-            state_sha=state_sha,
-            presented_evidence_hash=evidence_hash,
+            state_sha=sha,
+            presented_evidence_hash=ev_hash,
             server_nonce=nonce,
             approver="self-judge",
             role="release-approver",
@@ -568,16 +524,16 @@ def build_supervisor_graph(
         # state_sha + evidence + nonce). The record is re-derived against the
         # SAME anchors the node bound, so a missing/!approved/mismatched sign-off
         # blocks emit. (No record ⇒ not released.)
-        subject_uri = _newest_artifact_uri(state, DESIGN_KIND)
-        state_sha = _state_sha(config)
-        nonce = _sign_off_nonce(config, _RELEASE_SIGN_OFF, subject_uri, state_sha)
-        evidence_hash = _evidence_hash(subject_uri, state_sha, list(state.get("gates") or ()))
-        record = _newest_release_sign_off(state)
+        subject_uri = newest_artifact_uri(state, DESIGN_KIND)
+        sha = state_sha(config)
+        nonce = sign_off_nonce(config, _RELEASE_SIGN_OFF, subject_uri, sha)
+        ev_hash = evidence_hash(subject_uri, sha, list(state.get("gates") or ()))
+        record = newest_release_sign_off(state)
         ok = release_allowed(
             record,
             subject_artifact_uri=subject_uri,
-            state_sha=state_sha,
-            presented_evidence_hash=evidence_hash,
+            state_sha=sha,
+            presented_evidence_hash=ev_hash,
             server_nonce=nonce,
         )
         return ASSURANCE_ADVANCE if ok else ASSURANCE_HALT
@@ -656,19 +612,3 @@ def build_supervisor_graph(
     g.add_edge(_BUILD_TEST_FIX, _IMPLEMENTATION)  # re-verify the responsible layer
 
     return g
-
-
-def _newest_release_sign_off(state: FactoryState) -> Any:
-    """The newest-by-``Seq`` Release ``SignOffRecord`` on the ``sign_offs`` channel.
-
-    ``sign_offs`` folds by ``union_sign_offs`` (dedup by content identity); a
-    Release record is identified by its ``role`` (``release-approver``). Newest
-    by ``Seq`` so a re-presented record on resume coalesces to one. Returns
-    ``None`` when none has been recorded — ``release_allowed`` then fail-closes."""
-    best: Any = None
-    for s in state.get("sign_offs") or ():
-        if s.role != "release-approver":
-            continue
-        if best is None or s.seq > best.seq:
-            best = s
-    return best

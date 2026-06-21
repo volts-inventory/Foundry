@@ -1352,13 +1352,17 @@ single-owner, collision-hazardous).
   `assurance_gate_set(state["risk_tier"])` (gov §1e — Security+Audit floor always; STANDARD adds
   supply_chain; HIGH adds e2e — so a HIGH release that skipped depth can't be admitted). (2)
   `release_allowed(record, ...)` re-derived against the SAME anchors the supervisor's release boundary
-  bound (subject=newest DESIGN_KIND uri, state_sha, evidence_hash, nonce). To AVOID DRIFT, factory_graph
-  IMPORTS the supervisor's private helpers (`_newest_artifact_uri`/`_state_sha`/`_sign_off_nonce`/
-  `_evidence_hash`/`_newest_release_sign_off`) rather than re-implementing them — the re-derivation must
-  match `_route_release` exactly or a clean run would fail to admit.
+  bound (subject=newest DESIGN_KIND uri, state_sha, evidence_hash, nonce). To AVOID DRIFT, the anchor
+  derivations live in ONE shared PUBLIC module **`foundry.governance.release_anchors`**
+  (`newest_artifact_uri`/`state_sha`/`sign_off_nonce`/`evidence_hash`/`newest_release_sign_off`) imported
+  by BOTH `supervisor.py` (`_route_release`/`design_sign_off`/`release_sign_off`) AND `factory_graph.py`
+  (`gated_release_admitted`). (M2-R1-01: was a cross-module PRIVATE import from supervisor — promoted to
+  public, single source of truth; pure refactor, byte-identical anchors. No test imported the privates.)
 - FG6. **The evidence pack is built ONLY on admission, over the ATTESTED members, and TRAVELS as the PR
-  payload.** `build_evidence_pack(run_against=state_sha, gate_results=<newest attested per required
-  gate, sorted by name>, artifacts=(newest FeatureDiff,), sign_offs=(release-approver records, by Seq),
+  payload.** `build_evidence_pack(run_against=<read off an attested verdict's `run_against` — the ACTUAL
+  materialized tree_sha the gates ran over, NOT a config state_sha LABEL; M2-R1-02 honesty fix via
+  `_attested_run_against`>, gate_results=<newest attested per required gate, sorted by name>,
+  artifacts=(newest FeatureDiff,), sign_offs=(release-approver records, by Seq),
   scanner_config_rev=<read off an attested verdict, AS4 — NOT the runner's private attr>, seq=...)`. The
   `open_pr` action's `payload_uri` is the pack's `pack_uri` (`cas://sha256/...`) and `gate_bearing=True`
   — the release carries its evidence (gov §6), distinct from the assistant PR (payload = the diff uri).
@@ -1370,7 +1374,8 @@ single-owner, collision-hazardous).
   `union_actions` (keyed by `idempotency_key`, later-by-Seq) coalesces the two emissions to one.
 - FG8. **Tamper-evidence is verified end-to-end via `verify_evidence_pack`.** The test rebuilds the
   carried pack from final state (asserting `pack.pack_uri == pr.payload_uri` — the pack is a pure
-  function of its members + state_sha so it reproduces), then: a genuine-members verify passes; a
+  function of its members + the attested `run_against` so it reproduces; the rebuild reads `run_against`
+  off an attested verdict, mirroring the emit, M2-R1-02), then: a genuine-members verify passes; a
   `model_copy(status=FAIL)` on a gate result re-keys its content-identity -> verify False; dropping the
   sign-off (`sign_offs=()`) -> verify False; an out-of-band `chain_head` mutation -> verify False.
   Fail-closed: the vuln run (hardcoded secret -> attested Security FAIL -> latch -> assurance halt)

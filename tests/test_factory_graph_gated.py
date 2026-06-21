@@ -286,15 +286,18 @@ def _carried_pack(state: FactoryState, pr_payload_uri: str) -> EvidencePack:
     assert its handle == the PR payload (the release travels WITH its evidence).
 
     The pack is a pure function of the attested members + the integrated
-    state_sha, so reconstructing it here yields the SAME ``pack_uri`` the emit
-    embedded as the PR payload."""
+    tree_sha, so reconstructing it here yields the SAME ``pack_uri`` the emit
+    embedded as the PR payload. ``run_against`` is read off an attested verdict
+    (the ACTUAL materialized tree the gates ran over; M2-R1-02), mirroring the
+    gated emit — NOT a config state_sha label."""
     from foundry.durability.evidence_pack import build_evidence_pack
     from foundry.state.seq import Seq
 
     gate_results = _attested_terminal_results(state)
+    run_against = next((g.run_against for g in gate_results if g.run_against), "")
     sentinel = Seq(run_id="x", emission_epoch=0, superstep_index=0, node_id="emit", local=0)
     pack = build_evidence_pack(
-        run_against="integrated-sha",
+        run_against=run_against,
         gate_results=gate_results,
         artifacts=_released_artifacts(state),
         sign_offs=_release_sign_offs(state),

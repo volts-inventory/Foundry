@@ -67,6 +67,13 @@ from langgraph.graph import END, START, StateGraph
 from foundry.agents.implementation.senior_engineer import DESIGN_KIND
 from foundry.canonical import content_digest
 from foundry.durability.evidence_pack import build_evidence_pack
+from foundry.governance.release_anchors import (
+    evidence_hash,
+    newest_artifact_uri,
+    newest_release_sign_off,
+    sign_off_nonce,
+    state_sha,
+)
 from foundry.governance.sign_off import release_allowed
 from foundry.graph.assurance_wiring import assurance_gate_set
 from foundry.graph.gate_wiring import FEATURE_DIFF_KIND
@@ -74,21 +81,6 @@ from foundry.graph.supervisor import (
     MODE_ASSISTANT,
     MODE_GATED,
     build_supervisor_graph,
-)
-from foundry.graph.supervisor import (
-    _evidence_hash as _supervisor_evidence_hash,
-)
-from foundry.graph.supervisor import (
-    _newest_artifact_uri as _supervisor_newest_artifact_uri,
-)
-from foundry.graph.supervisor import (
-    _newest_release_sign_off as _supervisor_newest_release_sign_off,
-)
-from foundry.graph.supervisor import (
-    _sign_off_nonce as _supervisor_sign_off_nonce,
-)
-from foundry.graph.supervisor import (
-    _state_sha as _supervisor_state_sha,
 )
 from foundry.schemas.base import ExternalAction, IdempotencyPath
 from foundry.schemas.gates import GateStatus
@@ -196,7 +188,8 @@ def gated_release_admitted(state: FactoryState, config: RunnableConfig) -> bool:
     * ``release_allowed(...)`` — a recorded, approved Release sign-off that binds
       THIS exact decision point (subject / state_sha / evidence hash / nonce),
       re-derived against the SAME anchors the supervisor's release boundary bound
-      (no drift: we reuse the supervisor's own helpers). No record / not approved
+      (no drift: both import the PUBLIC anchor helpers from
+      ``foundry.governance.release_anchors``). No record / not approved
       / mismatched anchors ⇒ not released.
 
     A halted / failed / unsigned-release run is False here → the gated emit opens
@@ -204,18 +197,16 @@ def gated_release_admitted(state: FactoryState, config: RunnableConfig) -> bool:
     """
     if not _gates_all_pass(_latest_by_name(state), _required_gate_names(state)):
         return False
-    subject_uri = _supervisor_newest_artifact_uri(state, DESIGN_KIND)
-    state_sha = _supervisor_state_sha(config)
-    nonce = _supervisor_sign_off_nonce(config, "release_sign_off", subject_uri, state_sha)
-    evidence_hash = _supervisor_evidence_hash(
-        subject_uri, state_sha, list(state.get("gates") or ())
-    )
-    record = _supervisor_newest_release_sign_off(state)
+    subject_uri = newest_artifact_uri(state, DESIGN_KIND)
+    sha = state_sha(config)
+    nonce = sign_off_nonce(config, "release_sign_off", subject_uri, sha)
+    ev_hash = evidence_hash(subject_uri, sha, list(state.get("gates") or ()))
+    record = newest_release_sign_off(state)
     return release_allowed(
         record,
         subject_artifact_uri=subject_uri,
-        state_sha=state_sha,
-        presented_evidence_hash=evidence_hash,
+        state_sha=sha,
+        presented_evidence_hash=ev_hash,
         server_nonce=nonce,
     )
 
@@ -250,6 +241,24 @@ def _attested_terminal_results(state: FactoryState) -> tuple[GateResult, ...]:
     return tuple(
         latest[name] for name in sorted(required) if name in latest
     )
+
+
+def _attested_run_against(gate_results: tuple[GateResult, ...]) -> str | None:
+    """The actual materialized ``tree_sha`` the gates ran against — read off one of
+    the attested terminal/assurance GateResults the pack folds over (every
+    GateResult carries the TRUE ``run_against`` of the integrated tree it was
+    evaluated on).
+
+    Binding the pack's ``run_against`` to an attested verdict's ``run_against``
+    (rather than a config-supplied ``state_sha`` LABEL) makes the pack's stated
+    tree HONEST — it is the exact tree the gates were actually run over (M2-R1-02).
+    The required release gates all share ONE integrated ``tree_sha`` (GW2), so any
+    folded-over verdict gives the same value; ``None`` only when no verdict exists
+    (admission already fail-closed before this is reached)."""
+    for g in gate_results:
+        if g.run_against:
+            return g.run_against
+    return None
 
 
 def _scanner_config_rev(gate_results: tuple[GateResult, ...]) -> str | None:
@@ -416,9 +425,13 @@ def build_factory_graph(
         gate_results = _attested_terminal_results(state)
         artifacts = _released_artifacts(state)
         sign_offs = _release_sign_offs(state)
-        # The integrated state_sha the verdicts bound/latched against keys the pack
-        # to ONE integrated tree (gov §6).
-        run_against = _supervisor_state_sha(config)
+        # The pack's ``run_against`` is the ACTUAL materialized tree_sha the gates
+        # ran against — read off one of the attested verdicts the pack folds over
+        # (they carry the true integrated tree_sha; GW2 binds them all to ONE tree),
+        # NOT a config-supplied state_sha LABEL. So the pack's stated tree is HONEST:
+        # it matches exactly what was gated (M2-R1-02). Fall back to the config
+        # state_sha only if (impossibly, post-admission) no verdict carries one.
+        run_against = _attested_run_against(gate_results) or state_sha(config)
         pack = build_evidence_pack(
             run_against=run_against,
             gate_results=gate_results,

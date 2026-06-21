@@ -1007,7 +1007,7 @@
         "Tests added covering all three tiers + force-escalation + bounded-diff boundary; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M2-04",
@@ -1066,7 +1066,7 @@
         "Tests added: each known-vulnerable class is caught + latched; a clean tree PASSes; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M2-06",

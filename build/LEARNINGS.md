@@ -1147,3 +1147,30 @@ single-owner, collision-hazardous).
   `content_digest`/canonical bytes (never `hash()`). Consumed by the supervisor + Gated emit:
   release admission must check BOTH `require_release_sign_off` AND `verify_evidence_pack` over the
   attested gate set. 28 tests; full gate chain clean (ruff/mypy/pytest full suite green: 667 passed).
+
+## Change-risk tiering classifier (T-M2-03)
+- GOV5. **`foundry/governance/tiering.py::classify_tier(source, *, capabilities=None, seq,
+  run_against="") -> TierDecision` is the DETERMINISTIC triage tier classifier (gov §1e) — pure
+  rule-based substring/keyword matching, NO model call (auditable + resume-stable).** `source` is
+  EITHER the raw request `str` OR a state mapping (reads `request` + unions `required_capabilities`);
+  the explicit `capabilities=` arg unions with state caps (both lowercased). Rules in order: (1) ANY
+  security/trust-root/build-CI-IaC-deps/scanner-config/auth-crypto signal (`_SECURITY_TRUST_SIGNALS`),
+  ANY abuse/security-significant signal (`_ABUSE_SIGNALS`), OR ANY regulated/domain-pack capability
+  (`_REGULATED_CAPABILITIES` = regulated/fintech/healthcare/ml/data/privacy/pii/phi) → **FORCE HIGH**
+  (`forced_high=True`); (2) empty/blank request → STANDARD (NOT LOW — ambiguity never silent-
+  downgrades); (3) a trivial/low-blast-radius marker (`_TRIVIAL_SIGNALS`: typo/docstring/rename/…) →
+  LOW; (4) default → STANDARD.
+- GOV6. **Force-escalation is FAIL-CLOSED: when in doubt or on ANY security/regulated signal, HIGH —
+  never silently downgrade.** Security signals are checked BEFORE the trivial branch, so "just a typo
+  in the crypto helper" → HIGH (a trivial marker can't downgrade a security touch). `two_person_release`
+  is set on HIGH iff a REGULATED capability OR a trust-root/signer/gate-config/oracle/scanner-config
+  touch (`_TRUST_ROOT_SIGNALS` subset) — distinct-identity sign-off (gov §1e/domains §4), independent
+  of diff size. Signal vocabularies are deliberately BROAD (a false escalation costs one extra review;
+  a miss ships an un-reviewed trust-root change).
+- GOV7. **Tiering scales assurance DEPTH + HITL only — NEVER integrity (gov §1e).** The advisory
+  `gate_set` ALWAYS includes the integrity-critical floor `("build","test","security")` at EVERY tier
+  (`_INTEGRITY_GATES`); LOW just drops OPTIONAL depth (spec/review/e2e), HIGH adds supply_chain +
+  threat_review. `TierDecision.relaxes_integrity()` is `False` by construction; `_decide` ASSERTS it
+  before returning (defense in depth — a future schema edit can't silently emit an integrity-relaxing
+  tier). The supervisor wires this at triage (stamps the single-writer `risk_tier` channel). 14 tests;
+  full gate chain clean (ruff/mypy/pytest full suite green).

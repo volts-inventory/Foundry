@@ -1339,3 +1339,41 @@ single-owner, collision-hazardous).
   The vuln test swaps app.py for `API_KEY="..."`. Back-compat test: default mode -> no risk_tier, no
   sign_offs, no security/audit/supply_chain verdicts. 5 tests; full chain clean (ruff/mypy/pytest 715
   passed / 1 skipped).
+
+## Factory graph — Gated-mode emit: the WORM-evidence-carrying release (T-M2-10)
+- FG4. **`build_factory_graph(..., mode="assistant")` threads `mode` to `build_supervisor_graph(...,
+  mode=mode)` AND selects the emit node** (`gated_emit` when gated, else the Phase-1 `emit`). The
+  assistant path is byte-for-byte unchanged (back-compat: bare `open_pr` against the FeatureDiff,
+  `gate_bearing=False`, no pack). Same `START -> factory -> emit -> END` topology; only the emit closure
+  added to `add_node` differs.
+- FG5. **The Gated emit guard = `gated_release_admitted(state, config)` — TWO independent fail-closed
+  checks.** (1) EVERY required gate PASS, newest-by-Seq on the trust-filtered `gates` channel: the M1
+  terminal gates (spec+build+test) PLUS the tier-scaled assurance family from
+  `assurance_gate_set(state["risk_tier"])` (gov §1e — Security+Audit floor always; STANDARD adds
+  supply_chain; HIGH adds e2e — so a HIGH release that skipped depth can't be admitted). (2)
+  `release_allowed(record, ...)` re-derived against the SAME anchors the supervisor's release boundary
+  bound (subject=newest DESIGN_KIND uri, state_sha, evidence_hash, nonce). To AVOID DRIFT, factory_graph
+  IMPORTS the supervisor's private helpers (`_newest_artifact_uri`/`_state_sha`/`_sign_off_nonce`/
+  `_evidence_hash`/`_newest_release_sign_off`) rather than re-implementing them — the re-derivation must
+  match `_route_release` exactly or a clean run would fail to admit.
+- FG6. **The evidence pack is built ONLY on admission, over the ATTESTED members, and TRAVELS as the PR
+  payload.** `build_evidence_pack(run_against=state_sha, gate_results=<newest attested per required
+  gate, sorted by name>, artifacts=(newest FeatureDiff,), sign_offs=(release-approver records, by Seq),
+  scanner_config_rev=<read off an attested verdict, AS4 — NOT the runner's private attr>, seq=...)`. The
+  `open_pr` action's `payload_uri` is the pack's `pack_uri` (`cas://sha256/...`) and `gate_bearing=True`
+  — the release carries its evidence (gov §6), distinct from the assistant PR (payload = the diff uri).
+- FG7. **IDEMPOTENCY KEY MUST EXCLUDE the pack_uri (the resume-duplication trap).** The pack_uri folds
+  in the gate results' `content_identity()`, whose `Seq.emission_epoch` is BUMPED on a resume
+  re-attestation, so a pack_uri-keyed action does NOT coalesce -> DUPLICATE PR. Key on the SAME stable
+  inputs the assistant key uses (`content_digest({"run_id", "artifact_uri": subject.uri})`); the pack
+  still travels as the payload, the key only needs to be process-stable (L7). With the stable key,
+  `union_actions` (keyed by `idempotency_key`, later-by-Seq) coalesces the two emissions to one.
+- FG8. **Tamper-evidence is verified end-to-end via `verify_evidence_pack`.** The test rebuilds the
+  carried pack from final state (asserting `pack.pack_uri == pr.payload_uri` — the pack is a pure
+  function of its members + state_sha so it reproduces), then: a genuine-members verify passes; a
+  `model_copy(status=FAIL)` on a gate result re-keys its content-identity -> verify False; dropping the
+  sign-off (`sign_offs=()`) -> verify False; an out-of-band `chain_head` mutation -> verify False.
+  Fail-closed: the vuln run (hardcoded secret -> attested Security FAIL -> latch -> assurance halt)
+  never reaches release_sign_off, so `gated_release_admitted` is False -> NO open_pr, NO pack release.
+  5 tests; full chain clean (ruff/mypy/pytest 720 passed / 1 skipped). Touched ONLY factory_graph.py +
+  the new test.

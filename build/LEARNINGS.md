@@ -1216,3 +1216,42 @@ single-owner, collision-hazardous).
   before returning (defense in depth — a future schema edit can't silently emit an integrity-relaxing
   tier). The supervisor wires this at triage (stamps the single-writer `risk_tier` channel). 14 tests;
   full gate chain clean (ruff/mypy/pytest full suite green).
+
+## Dependency-scoped re-verification — change-proportional + reuse-soundness (T-M2-06)
+- RV1. **`foundry/graph/reverification.py` is a PURE planner — it decides WHICH gates re-run, runs
+  NONE.** Two steps: `changed_scope(old_files, new_files, *, old/new_toolchain_digest,
+  old/new_scanner_config_rev, ...) -> ChangedScope` (a frozen delta: `changed_files` = added∪removed∪
+  content-modified relative-POSIX paths — content, never mtime, drives it (DS4) — plus
+  `lockfile_changed`/`toolchain_changed`/`scanner_config_changed`); and `reverification_plan(
+  prior_verdicts, changed, *, gates, runner, new_state_sha, scanner_config_rev, scopes=None) ->
+  ReverificationPlan` (one `GateDecision{gate_name, rerun, reason, reuse_key, reused_verdict}` per gate;
+  `.rerun_gates`/`.reuse_gates`/`.reused_verdicts` views). The assurance subgraph/supervisor consume
+  the plan: re-run `rerun_gates` via the runner, fold `reused_verdicts` (real attested priors) forward.
+- RV2. **RE-RUN vs REUSE = scope-disjointness + valid attested prior + scanner-config match.** REUSE iff
+  (a) the gate's dependency SCOPE is disjoint from the change set AND (b) a prior attested NON-ERROR
+  verdict exists AND (c) — for a SCANNER-BOUND gate — its recorded `scanner_config_rev` equals the
+  current runner's. Else RE-RUN (fail-closed). A `GateScope` has `reads_sources`+a name-keyed
+  source selector (`_SOURCE_SELECTORS`; DEFAULT = generic code/test files, EXCLUDING the gate-grounding
+  files criteria.json/changes.diff/lockfiles) + `reads_lockfile`/`reads_toolchain`/`reads_scanner_config`
+  booleans. `DEFAULT_GATE_SCOPES`: spec=criteria-only, build/test/security=generic sources (security+
+  test also lockfile/scanner-bound), audit/supply_chain=lockfile+diff.
+- RV3. **THE KEY DESIGN CALL: the reuse key is the §1f "unchanged input SUB-HASH", NOT the whole-tree
+  `state_sha`.** Keying a config-evaluable gate (Spec) on the whole `tree_sha` would re-run it on EVERY
+  unrelated code edit (any file change → new tree_sha → key mismatch), DESTROYING change-proportionality.
+  So reuse keys on the gate's SCOPED inputs: scope-disjointness IS the scoped-sub-hash-equality test
+  (no scoped file/dep changed → that gate's scoped inputs are byte-identical). `runner.reuse_key(gate,
+  sha)` (state_sha for class-1; +mutant_rotation_id+scanner_rule_version for class-2) is folded into the
+  informational `reuse_key` but the decision is driven by the scope+scanner components directly.
+- RV4. **SOUNDNESS (no stale reuse) is structural: reuse requires scope-disjoint AND a valid prior.**
+  Impossible to carry a verdict whose inputs changed — a scoped change → in_scope=True → RE-RUN; an
+  absent/ERROR/scanner-mismatched prior → RE-RUN. ERROR is never reusable (DS7 infra, not a verdict).
+  The scanner guard is SCOPED to `reads_scanner_config` gates so a scanner bump re-runs only the
+  scanner-bound family (proportional), never the whole set. `scanner_config_rev` is a PLAIN PARAM (the
+  current runner's rev) — DON'T reach `runner._scanner_config_rev` (private; the runner has no public
+  scanner-rev property, only `.records`).
+- RV5. **Test the GENUINE contract: feed REAL runner-attested priors.** Materialize a tree, run the
+  real `TwoZoneGateRunner` over every gate to get signed `GateResult[]`, pass THOSE as `prior_verdicts`;
+  reused decisions then carry a verdict with `runner_attestation is not None` (a cached attested verdict
+  is still a real verdict, gov §1f). Cosmetic 1-file change → `rerun_gates < all` (STRICT subset proves
+  proportionality); lockfile/toolchain bump → bound gates re-run; identical tree+matching priors → ALL
+  reuse. 12 tests; full gate chain clean (ruff/mypy/pytest 703 passed).

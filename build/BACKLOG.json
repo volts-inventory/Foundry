@@ -1094,7 +1094,7 @@
         "Tests added proving change-proportionality + the rotation-invalidation boundary; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M2-07",
@@ -1154,7 +1154,7 @@
         "Tests added: clean pass advances, a finding drives a bounded fix loop that converges, a persistent finding halts at the cap; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M2-09",

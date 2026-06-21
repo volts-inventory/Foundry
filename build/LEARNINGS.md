@@ -476,6 +476,48 @@ Keep entries terse, root-caused, and actionable. Periodically consolidated.
   empty `default_text` -> a parse failure on the re-loop). Raise LangGraph's `recursion_limit` on the
   run config for multi-loop fix runs.
 
+## Assurance gate-wiring at the assurance boundary (T-M2-05)
+- AW1. **`foundry/graph/assurance_wiring.py` is the SIBLING of `gate_wiring.py` for the Phase-2
+  assurance boundary — it REUSES `gate_wiring.materialize_workdir` verbatim, never edits it.**
+  `run_assurance_gates(state, config, *, rt, runner, resolve, resolve_blob, workdir, tier=None,
+  allow_build_changes=False) -> {"gates":[...]}` materializes the integrated tree ONCE, runs the
+  tier-scaled Security/Audit/Supply-chain/E2E family via `runner.run(gate, run_against, seq, workdir)`
+  (seq = `rt.seq(config, "<gate>_gate", "verdict:<name>")`, AR2), and folds ONLY the attested verdicts.
+  Verdicts come ONLY from the runner (L5) — the helper NEVER constructs/signs a `GateResult`; the
+  REAL `merge_gates` drops an unsigned/agent verdict so it can never gate advancement (the test
+  proves `merge_gates([unsigned_security], None) == []`).
+- AW2. **The assurance gates need TWO grounding inputs the base materializer doesn't write —
+  `materialize_assurance_workdir` augments the tree, then RE-HASHES it.** Base `materialize_workdir`
+  writes criteria.json + code/test sources (Security scans those; E2E runs them). On top of that this
+  module writes `changes.diff` (= the concatenated FeatureDiff unified-diff bodies, in Seq order, via
+  the SAME `resolve`+`resolve_blob` seams) so SupplyChainGate (`diff_filename="changes.diff"`) has its
+  policy input; the Audit gate's lockfile inventory rides in as a normal source file the diff added
+  (`uv.lock`/`requirements*.txt`). Because the tree changed, the returned `tree_sha` is RE-COMPUTED
+  over the augmented tree — the integrated `run_against` the verdicts bind/latch against reflects the
+  EXACT tree the gates ran over. (`SecurityGate(use_semgrep=False)` pins the dev-grade secret scan so
+  the floor needs no external binary, plan §0.3.)
+- AW3. **KNOWN-VULNERABLE-CHANGE-CAUGHT (the exit criterion).** Materialize a source file with a
+  hardcoded secret (`API_KEY = "...token..."` trips SecurityGate's `hardcoded-password` dev rule) →
+  attested `security` FAIL → `route_after_assurance` returns NOT "advance" (it `halt`s: a FAIL on an
+  integrated hex digest latches stable-FAIL, terminal). A second proof: a `requirements.txt` line
+  `evil @ git+https://...` → attested `supply_chain` FAIL (`new-dep-source`) at STANDARD+. Both are
+  runner-attested, so the REAL `merge_gates` admits them and routing blocks — the vulnerable change
+  cannot ship.
+- AW4. **TIER SCALES DEPTH, NEVER INTEGRITY (gov §1e).** `assurance_gate_set(tier)`: floor = Security
+  + Audit ALWAYS (None/LOW = floor only); STANDARD adds supply_chain; HIGH adds e2e. No path removes a
+  floor gate — a LOW tier still runs the security floor fail-closed and still catches the secret
+  (tested at BOTH tiers). `route_after_assurance(state, config, *, records, tier=None,
+  max_fix_attempts=3)` mirrors `route_after_gates`: stable-FAIL latch → halt; FAIL/ERROR or a MISSING
+  tier-relevant verdict → bounded fix then halt; all-PASS → advance. It scopes the required verdict
+  set by the SAME tier-scaled `assurance_gate_set`, so LOW advances on Security+Audit PASS while HIGH
+  also requires supply_chain+e2e. ERROR (e.g. Audit with no lockfile → inventory not rederivable)
+  never latches → bounded retry. The assurance subgraph/supervisor call these plain helpers at the
+  boundary (mirrors SUP2/SUP3 for the M1 gate nodes).
+- AW5. **Gotcha: `gate_wiring.ArtifactResolver`/`BlobResolver` are TYPE_CHECKING-only — don't import
+  them at runtime.** Mirror the aliases under your own `if TYPE_CHECKING:` (`= gate_wiring.X`); with
+  `from __future__ import annotations` the function-signature annotations are strings so runtime is
+  fine and mypy still resolves them. Importing them at module top raises `ImportError` at collection.
+
 ## Evaluation — Phase-1.5 central-hypothesis schemas (T-M15-01)
 - EV1. **`foundry/evaluation/hypothesis.py` is a PURE schema/enum layer — NO statistics.** Power
   calcs, bootstrap, alpha-spending, scoring live in the later M1.5 modules

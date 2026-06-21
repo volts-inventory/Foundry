@@ -1558,3 +1558,195 @@ FoundryCheckpointer). Criterion->test + the genuine-E2E-vs-stand-in map for the 
   methods are collected (18 cases in `tests/test_monitors_phase3.py`). Distinct seam from observability's
   OBS2: that lifts `drift_events` into an OTel/alert `PinnedIdDriftAlert`; THIS lifts the same events into
   a Guardian deterministic Trip — same trusted source, two consumers.
+
+## Run-status liveness model + watchdog (T-M3-02)
+- M3-02a. `foundry/operations/run_status.py` is the DETERMINISTIC PAUSED-vs-WEDGED derivation (no LLM,
+  injected clock). API: `RunSignals` (frozen dataclass of observable signals — data only), `DeadlineModel`
+  (frozen dataclass: `p99_ms + provider_backoff_ms + queue_wait_ms (+ cold_tier_restore_ms ON rehydration)`,
+  `.derive(rehydrating=)`), `derive_deadline_ms(sig)` (absolute deadline = `last_progress_ts_ms + budget`),
+  `derive_status(sig, now_ms) -> RunStatusRecord`, `watchdog(sig, now_ms|callable) -> RunStatusRecord|None`,
+  `is_past_deadline(sig, now_ms)`. T-M3-03 operator surface COMPOSES `watchdog`/`derive_status`; it routes on
+  `RunStatusRecord.is_alertable()`, never re-derives.
+- M3-02b. **Classification ORDER is load-bearing** (operations.md §2): terminal (DONE/FAILED/QUARANTINED)
+  reported verbatim → legitimate `pause_reason` set ⇒ PAUSED (alive, `$0/hr`, carries `awaiting`) **even PAST
+  the deadline** (the wait is intentional — this half must NOT alert) → else no-heartbeat past DERIVED
+  deadline ⇒ WEDGED (alertable) → else RUNNING. The pause check precedes the deadline check, so a paused run
+  is never escalated to WEDGED regardless of how long it sits.
+- M3-02c. **The pause-reason flag is the ENTIRE PAUSED-vs-WEDGED hinge.** Same heartbeat + same derived
+  deadline + same clock: presence of a `PauseReason` ⇒ PAUSED (not alertable), absence ⇒ WEDGED (alertable).
+  The boundary is exact via strict `now_ms > deadline` (AT the deadline is still alive; one ms past is wedged).
+- M3-02d. `$0/hr` when paused is enforced at the SINGLE construction site (`_record`): a PAUSED record forces
+  `cost_rate_microusd_per_hr=0` (ignores the input rate) and `awaiting` is blanked unless status is PAUSED, so
+  the invariant "pause_reason set IFF status==PAUSED, paused⇒$0/hr" cannot drift across call sites.
+- M3-02e. **Deadline is DERIVED, never a constant.** Cold-tier first-byte-restore term is added ONLY when
+  `rehydrating=True` (a cold/archival-evicted hibernation resume, §6) — otherwise a rehydrating run pages a
+  false WEDGED before its first byte returns. `last_progress_*` is the slow-but-progressing heartbeat (adapter
+  /partial-progress marker advances it without a superstep), so legitimate provider backoff isn't misread.
+- M3-02f. `watchdog` returns the record IFF `is_alertable()` (WEDGED only), else `None` — flags exactly the
+  stuck case, ignores RUNNING/PAUSED/terminal. Accepts `now_ms` as int OR zero-arg callable (mirrors codebase
+  time injection); the callable is invoked exactly once. 13 tests in `tests/test_run_status.py` cover RUNNING,
+  PAUSED within+past deadline, WEDGED, both boundary sides, same-clock paused-vs-wedged, watchdog selectivity,
+  terminal passthrough, injected-clock callable, and determinism (`content_identity()` equality).
+
+## HITL-load model + reviewer queue/SLA (T-M3-06)
+- M3-06a. **`foundry/operations/hitl.py`: `ReviewerQueue(*, profile, max_backlog, available_reviewer_pairs)`
+  with `enqueue(entry, *, regulated=False) -> bool`, `assign(*, run_id, decision_class) -> entry|None`,
+  `load(*, now_ms, seq, arrival_rate_micro_per_hr=0) -> HITLLoad`, `alerts(*, now_ms, seq) -> list[Alert]`.**
+  Pure/deterministic — the clock (`now_ms`) and thresholds (`max_backlog`, per-entry `sla_deadline_ms`) are
+  INJECTED, never wall-clock; same inputs ⇒ same `HITLLoad` + same alert list (the EXIT proof is reproducible).
+- M3-06b. **BOUNDED + ALERTED is the control (the Phase-3 exit criterion).** `alerts()` returns: a PAGE
+  `hitl_backlog_exceeded` (monitor `hitl_backlog`) iff `backlog_depth > max_backlog` (`max_backlog<=0` disables
+  the bound), PLUS one WARN `hitl_sla_breach` (monitor `hitl_sla`) per entry with `now_ms > sla_deadline_ms`
+  (`sla_deadline_ms==0` ⇒ no SLA, never breaches). Within bound + within SLA ⇒ `[]`. So the backlog can never
+  grow unbounded SILENTLY — bound-crossing pages so the documented response (batch windows → delegated tiers →
+  admission-throttle new High-tier runs, operations.md §7) kicks in.
+- M3-06c. **Profile DORMANT-vs-LIVE = `HITLProfile` input (mirrors `HumanLiaison`/`sign_off`).** Under
+  `SELF_JUDGE` a non-regulated `enqueue` is DROPPED (returns False) — recorded-but-no-op sign-offs don't pile
+  HITL, queue stays empty, load model dormant, no alerts. A `regulated=True` touchpoint VETOES zero-HITL and is
+  always enqueued (the regulated pack force-disables zero-HITL, governance §1e); `REGULATED` profile enqueues
+  everything live + measured (`per_class_backlog` keyed by `decision_class` so drift batches don't serialize
+  behind release sign-offs, §5/§7).
+- M3-06d. **Two-person = safe deadlock, never auto-approve.** `assign` on a `two_person` entry returns None
+  when `available_reviewer_pairs<=0` (stays queued — the High-tier release deadlocks safely as paused, §7);
+  with a pair it dequeues the OLDEST matching entry (FIFO by `enqueued_ts_ms` then queue order) and decrements
+  the pair count.
+- M3-06e. **Alert seq de-collision gotcha.** `alerts()` mints the backlog alert at `seq` (local=0) and the SLA
+  alerts at `seq._replace(local=1)` + a running offset, so the per-record seqs in one alert list stay DISTINCT
+  (a property test asserts `len({a.seq}) == len(alerts)`). `sla_breach_alerts` advances `local` from its own
+  base by `len(alerts)` so far, not by enumerate index — the index-based variant collided the first SLA alert
+  (local override → 0) with the backlog alert. 16 tests in `tests/test_hitl.py`. NB: sibling M3 ops modules
+  (capacity/store_resilience/upgrade) were untracked WIP during this task — their ruff/collection failures are
+  not in scope; `ruff/mypy/pytest` on `hitl.py`+`test_hitl.py` are clean+green.
+- M3-08. **Upgrade-with-runs-in-flight = per-run DRAIN-or-MIGRATE, else FAIL-CLOSED PAUSE.**
+  `foundry/operations/upgrade.py` (pure/deterministic) plans an upgrade so NO in-flight run is corrupted or
+  stranded (operations.md §5/§8). API: `compatible(stamp, target)` (TRUE iff `schema_compatible` — same
+  `state_schema_ver` — AND no model-pin DRIFT, i.e. no role pinned to a DIFFERENT id on both sides; a graph/prompt
+  bump or a target-ADDED pin is NOT an incompatibility because a run resumes on its PINNED graph/prompt, §5);
+  `plan_upgrade(current, target, run: InFlightRun, *, migration_uri=None) -> RunUpgradeDecision`; fleet helper
+  `plan_fleet_upgrade(...)` maps it over the cohort + sorts by `seq` (order-independent, one decision per run, none
+  dropped). Decision order: (1) compatible ⇒ DRAIN (`UpgradeAction.DRAIN_BEFORE_UPGRADE`); (2) ADDITIVE schema bump
+  (target schema strictly newer) WITH a `migration_uri` AND a serde-loadable checkpoint ⇒ MIGRATE; (3) breaking
+  change that CAN complete on old (and is loadable) ⇒ DRAIN; (4) else (unloadable / downgrade / breaking-no-drain)
+  ⇒ PAUSE (`UpgradeAction.ABORT`, `stranded=True`, checkpoint LEFT INTACT on its pinned version, flagged for
+  operator) — never a silent lossy upgrade.
+- M3-08a. **Honor the serde allowlist as the orphan-checkpoint guard.** `serde_loadable(model_types)` checks every
+  frozen-model type the checkpoint carries is in `FOUNDRY_MSGPACK_MODULES` (a type NOT there degrades to `dict` on
+  load → store rejects fail-closed, serde.py). `migrate_checkpoint(stamp, target, *, model_types, migration_uri)` is
+  the DEV-GRADE seam: returns `target` iff loadable + forward-only + (strict bump ⇒ has `migration_uri`), else raises
+  `MigrationError` (planner catches → PAUSE). It PROVES round-trip under the target allowlist; it does NOT run a
+  concrete channel-rewriting migration — that's an ops task wiring a deterministic function behind `migration_uri`,
+  run by the trusted upgrade tooling, version-stamped per §8 (noted inline). 17 tests in `tests/test_upgrade.py`;
+  ruff/mypy/full-pytest clean+green. NB: sibling untracked WIP `tests/test_capacity.py` had pre-existing ruff E501s
+  (another agent's file) — not in my scope (touched ONLY upgrade.py + test_upgrade.py).
+
+## Trusted-component availability + per-lineage reservation (T-M3-07)
+- TC1. **Outage → PAUSED, never WEDGED (fail-closed, not stuck).** `foundry/operations/trusted_component.py`
+  models the trust-critical chokepoints (`TrustedComponent`: model_provider_proxy / zone_b_signer /
+  gate_runner). A trusted-component OUTAGE (≠ compromise, §4) degrades the affected run to
+  `RunStatusRecord(status=PAUSED, pause_reason=TRUSTED_COMPONENT_UNAVAILABLE, cost_rate=0)` — alive,
+  $0/hr, NOT alertable (`is_alertable()==False`). The dependent judgment/gate node does NOT proceed —
+  same discipline as `ProxyUnavailable` (proxy fail-closed). API: `AvailabilityModel.component_status`
+  / `.all_available(deps)` (the node's go/no-go precondition, fail-closed), `on_unavailable(...) ->
+  PAUSED`, `on_recovery(...) -> RUNNING`, `classify_for_dependencies(model, deps, ...)` (the
+  end-to-end derivation: any dep down → PAUSED on the first-in-enum-order outage, else RUNNING). EXIT
+  round-trip = outage→PAUSED→recovery→RUNNING. Reuses the §2 RunStatus/PauseReason vocab so the
+  operator surface reads ONE taxonomy; pure (no clock/IO/LLM).
+- TC2. **Per-lineage reservation protects each lineage's slice from starvation (§4).** `CapacityReservation`
+  holds a per-lineage `reserved` slice + an optional SHARED `burst` pool. `reserve(lineage, n)` declares
+  a slice (preserves in-flight `used` on re-declare — supersession not reset, L4); `admit_for_lineage(
+  lineage, amount) -> (new_table, admitted)` draws from the lineage's OWN reserved headroom FIRST then
+  spills onto the shared burst — and NEVER reaches into another lineage's reserved quota. So one lineage
+  saturating demand exhausts only its own slice + the shared pool; another lineage's reservation stays
+  fully intact (the anti-starvation invariant; §4 worst-case-failover-redistribution sizing). On refusal
+  the table is returned UNCHANGED (`after is before`) — queue against reserved capacity, never an
+  unbounded retry storm or a partial draw. Immutable + insertion-order-independent (per-lineage keyed) →
+  deterministic. 14 tests in `tests/test_trusted_component.py`; ruff+mypy clean, full suite green. NB:
+  sibling `tests/test_capacity.py` was untracked WIP with its OWN ruff E501s — not in scope.
+
+## Store HA / outage-pause + poisoned-checkpoint recovery (T-M3-04)
+- M3-04a. **`foundry/operations/store_resilience.py` is PURE wiring over the EXISTING durability surface
+  — it rebuilds nothing.** REUSES `FoundryCheckpointer.superstep_txn` (the one-txn/superstep atomic
+  commit, B3), `ArtifactStore.get_body`/`get_blob` (allowlist serde, fail-closed on unknown/non-frozen,
+  I5), `OutboxRelay.recover`/`drain` (at-least-once + idempotent, L7), and `verify_audit_chain` (the WORM
+  chain). API: `with_store_outage_handling(ckpt, *, run_id, current_phase, now_ms, seq, on_pause) ->`
+  ctx-mgr yielding the conn; `on_store_unavailable(...) -> RunStatusRecord`; `resume_after_outage(ckpt, *,
+  reconcile_relay) -> bool`; `check_checkpoint_health(*, run_id, checkpoint_uri, seq, resolve_body,
+  handle_uris, probe_handle, conn, last_clean_checkpoint_uri, hibernated) -> CheckpointHealth`;
+  `recover_to_last_clean(health, *, resolve_body) -> FrozenModel`. Exceptions `StoreUnavailable` /
+  `PoisonedCheckpointError`.
+- M3-04b. **Outage → pause-not-corrupt is enforced BY CONSTRUCTION, not by a new mechanism.** The seam
+  runs the superstep body inside `superstep_txn`; ANY exception rolls the whole txn back (checkpoint +
+  ledgers + outbox + WORM all-or-nothing, B3) so NO partial state ever persists. It then CLASSIFIES the
+  exception: a store-unavailability signal (`StoreUnavailable` OR `sqlite3.OperationalError` — the
+  Postgres connection-loss analogue) is SWALLOWED and turned into a `PAUSED(store_outage)` record via
+  `on_pause` ($0/hr, not alertable, §2); ANY OTHER exception is RE-RAISED (a real bug must never be
+  masked as a pause — fail-closed both directions). The resume point is the PRIOR committed checkpoint;
+  `resume_after_outage` probes the store inside a real txn (returns False, stays paused, if still down —
+  never declares recovery against an unreachable store) then calls `OutboxRelay.recover` to resolve the
+  intent-window idempotently — no duplicate external action (the relay is the only thing that re-fires,
+  and it dedups). NB: `on_store_unavailable` is a PURE fn (clock+seq injected) — deterministic record.
+- M3-04c. **Poisoned-checkpoint detection = three corruption classes, recovery = fork-to-prior-good,
+  fail-closed.** `check_checkpoint_health` marks `clean=False`+`quarantined=True` on ANY of: (a)
+  crash-on-resume — `resolve_body(uri)` raises (unknown uri) or returns a non-`FrozenModel` (a
+  non-allowlisted body degrades to `dict` under the serde, I5); (b) dangling handle — a uri in
+  `handle_uris` fails `probe_handle` (the integrity sweep; `hibernated=True` surfaces it as a hard alert
+  BEFORE wake, §3); (c) broken WORM chain — `verify_audit_chain(conn)` False. `recover_to_last_clean`
+  loads `last_clean_checkpoint_uri`, RE-verifies it round-trips to a frozen model, and returns THAT — the
+  poisoned checkpoint is NEVER returned as trusted state. It RAISES `PoisonedCheckpointError` when: the
+  checkpoint is actually clean (nothing to recover), there is no last-clean pointer (operator override
+  needed — never falls back to poisoned), or the last-clean itself won't load (no trusted recovery point).
+- M3-04d. **EXIT proof = `tests/test_store_resilience.py`, 12 tests.** Outage side: a clean prior
+  superstep commits one outbox row; the next superstep enqueues a row then raises `StoreUnavailable` —
+  asserts exactly one `PAUSED(store_outage,$0/hr)` record, the outbox still holds ONLY the prior row
+  (`push-B` rolled back), `verify_audit_chain` intact, then resume drains `push-A` EXACTLY once across
+  two `drain()` calls (idempotent, no dup external action). Plus: resume returns False while store down
+  (and never reconciles), a real `ValueError` is re-raised not masked, determinism of the pause record.
+  Poison side: clean reports healthy; bad-serde/unknown-uri, dangling-handle, broken-WORM-chain each
+  detected; recover returns the LAST CLEAN body; fail-closed on no-pointer / clean-checkpoint /
+  last-clean-also-poisoned / non-frozen body. NB (gotcha): a CLOSED sqlite conn raises
+  `ProgrammingError`, NOT `OperationalError` — to simulate Postgres connection-loss in the resume test,
+  monkeypatch `conn.execute` to raise `sqlite3.OperationalError`, don't just `.close()`.
+- M3-04e. **Sibling M3 ops modules (capacity/upgrade/monitors) were untracked WIP during this task** —
+  their ruff/mypy/collection failures (`capacity.py:230 _fair_share_order`, `test_capacity.py` E501,
+  `test_upgrade.py` MIGRATE-vs-DRAIN) are NOT in scope. `ruff`+`mypy`+`pytest` on `store_resilience.py` +
+  `test_store_resilience.py` are clean+green; the durability deps they ride (`test_outbox`,
+  `test_schemas_operations`) stay green.
+
+## Multi-tenancy / capacity / queue / fairness + fleet cost-rate cap + hibernation (T-M3-05)
+- M3-05a. **`foundry/operations/capacity.py` = a PURE/DETERMINISTIC weighted-fair admission scheduler
+  (operations.md §6); the clock (`now_ms`) and per-run usage are INJECTED, never wall-clock.** API:
+  `CapacityScheduler(capacity: FleetCapacity, quotas: Mapping[str, TenantQuota], hibernate_idle_ms=...)`.
+  `admit(entry, *, now_ms, seq) -> FairnessDecision` decides ONE queued run; `schedule(queue, *, now_ms,
+  seq) -> tuple[FairnessDecision, ...]` runs one fair round over the whole queue; `fleet_cost_rate_ok(
+  rate) -> bool` is the cap check; `register_running`/`release`/`active_runs`/`used_slots`/
+  `tenant_active_count`/`fleet_cost_rate_microusd_per_hr` are the in-flight bookkeeping. `FleetCapacity`
+  + `RunningRun` are local types (FleetCapacity is a FrozenModel; RunningRun a mutable @dataclass — it is
+  live in-flight state, not a persisted artifact). Reuses the schema records `TenantQuota`/`QueueEntry`/
+  `FairnessDecision` verbatim and mirrors `BudgetController`'s integer-µ$ projected-vs-cap accounting.
+- M3-05b. **No-starvation = deficit weighted round-robin with PER-STEP RE-RANKING.** Each round accrues
+  credit per tenant weight (`fair_share_micro`; an unset weight still earns 1 so it can't starve forever);
+  `schedule` then repeatedly picks the MOST-STARVED entry — ordered `(slots_held ASC, accrued_credit DESC,
+  enqueued_ts ASC, run_id)` — and RE-EVALUATES after each admission so a just-admitted tenant's now-held
+  slot pushes it down the order. A winner ZEROES its credit (`_spend_credit`); losers keep accruing. THE
+  GOTCHA: sorting the queue ONCE up front is NOT enough — a heavy tenant flooding the queue takes BOTH
+  slots in round 0 because the held-count only updates as you register. You MUST re-rank greedily mid-round
+  (pick-remove-admit-register loop), else `test_heavy_tenant_is_throttled` and the spread assertion fail.
+- M3-05c. **Admission-side ONLY, never kill-side.** `admit` checks in order: tenant-quota-exists → global
+  slots free (`REASON_NO_SLOTS`) → per-tenant `max_concurrent_runs` noisy-neighbor guard
+  (`REASON_TENANT_CONCURRENCY`) → fleet cost-rate cap (`REASON_FLEET_COST_RATE_CAP`). A throttled run stays
+  QUEUED (`admitted=False`); nothing is ever killed. `fleet_cost_rate_ok(rate)` = projected (current
+  in-flight aggregate + requested) ≤ cap — paused/hibernated runs contribute $0/hr so the aggregate is live
+  spend only. The decision carries the aggregate + cap it was made against.
+- M3-05d. **Hibernation is DISTINCT from PAUSED and is the slot-freeing lever.** `should_hibernate(run, *,
+  now_ms)` = idle ≥ `hibernate_idle_ms` AND not mid-trust-root-attestation (non-preemptible §4/§6) AND not
+  already terminal/hibernated. `hibernate(run_id, *, now_ms, seq, incremental_footprint_bytes=0) ->
+  RunStatusRecord(status=HIBERNATED, cost_rate=0, ...)` RELEASES the slot (so a contender is admittable) and
+  reports the incremental CAS footprint; resume = re-`register_running` on wake. A PAUSED run still holds
+  its slot; only hibernation frees it.
+- M3-05e. **EXIT proof = `tests/test_capacity.py`, 11 tests (all green; ruff+mypy clean; full suite green).**
+  No-starvation: 5 tenants contend for 2 slots over 10 rounds (release-after-admit), EVERY tenant makes
+  progress, spread ≤ 2 / max ≤ 6 (a monopolist would be ~10+); heavy-floods-queue still lets the light
+  tenant in; concurrency guard blocks monopoly with free slots. Fleet cap: cap=100µ$/hr, two 60µ$/hr runs
+  → exactly ONE admitted, aggregate never exceeds cap, `REASON_FLEET_COST_RATE_CAP`. Hibernation: idle run
+  hibernates → slot freed → waiting run now admitted → resumable; mid-attestation/terminal never
+  hibernate. Determinism: identical inputs → identical decisions + admission order.

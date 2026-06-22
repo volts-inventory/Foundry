@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from foundry.operations.operator import (
     ALERT_RUN_HEALTH,
+    ALERT_SLO_CONFIG,
     ALERT_STUCK_AGE,
     ALERT_WEDGED_COUNT,
     MICRO,
@@ -182,7 +183,8 @@ def test_wedged_count_slo_breach_pages() -> None:
         _record("w1", RunStatus.WEDGED),
         _record("w2", RunStatus.WEDGED),
     )
-    slo = SLOTarget(name=SLO_MAX_WEDGED, objective_micro=1, unit="count")
+    # the COUNT ceiling rides its DISTINCT integer field, not objective_micro.
+    slo = SLOTarget(name=SLO_MAX_WEDGED, objective_count=1, unit="count")
     alerts = evaluate_slos(view, [slo], seq=SEQ)
     assert len(alerts) == 1
     assert alerts[0].name == ALERT_WEDGED_COUNT
@@ -192,8 +194,18 @@ def test_wedged_count_slo_breach_pages() -> None:
 
 def test_wedged_count_within_slo_no_alert() -> None:
     view = _view(_record("w1", RunStatus.WEDGED))
-    slo = SLOTarget(name=SLO_MAX_WEDGED, objective_micro=1, unit="count")
+    slo = SLOTarget(name=SLO_MAX_WEDGED, objective_count=1, unit="count")
     assert evaluate_slos(view, [slo], seq=SEQ) == ()
+
+
+def test_wedged_count_legacy_micro_field_still_resolves() -> None:
+    """Back-compat: a ceiling SLO supplying only the legacy objective_micro is
+    still evaluated (the dedicated field is preferred, falls back to _micro)."""
+    view = _view(_record("w1", RunStatus.WEDGED), _record("w2", RunStatus.WEDGED))
+    slo = SLOTarget(name=SLO_MAX_WEDGED, objective_micro=1, unit="count")
+    alerts = evaluate_slos(view, [slo], seq=SEQ)
+    assert len(alerts) == 1
+    assert alerts[0].name == ALERT_WEDGED_COUNT
 
 
 def test_health_ratio_slo_breach_warns() -> None:
@@ -216,7 +228,7 @@ def test_health_ratio_within_slo_no_alert() -> None:
 
 def test_stuck_age_slo_breach_pages() -> None:
     view = _view(_record("w1", RunStatus.WEDGED))  # 1000ms overdue
-    slo = SLOTarget(name=SLO_MAX_STUCK_AGE, objective_micro=500, unit="ms")
+    slo = SLOTarget(name=SLO_MAX_STUCK_AGE, objective_ms=500, unit="ms")
     alerts = evaluate_slos(view, [slo], seq=SEQ)
     assert len(alerts) == 1
     assert alerts[0].name == ALERT_STUCK_AGE
@@ -226,14 +238,32 @@ def test_stuck_age_slo_breach_pages() -> None:
 
 def test_stuck_age_within_slo_no_alert() -> None:
     view = _view(_record("w1", RunStatus.WEDGED))  # 1000ms overdue
-    slo = SLOTarget(name=SLO_MAX_STUCK_AGE, objective_micro=5_000, unit="ms")
+    slo = SLOTarget(name=SLO_MAX_STUCK_AGE, objective_ms=5_000, unit="ms")
     assert evaluate_slos(view, [slo], seq=SEQ) == ()
 
 
-def test_unknown_slo_name_skipped() -> None:
+def test_unknown_slo_name_emits_config_warn_not_silently_skipped() -> None:
+    """M3-R1-03: an UNRECOGNISED SLO name is surfaced as a WARN config Alert,
+    never silently dropped — a modeled-but-unevaluable SLO must be visible."""
     view = _view(_record("w1", RunStatus.WEDGED))
     slo = SLOTarget(name="not_a_real_slo", objective_micro=0)
-    assert evaluate_slos(view, [slo], seq=SEQ) == ()
+    alerts = evaluate_slos(view, [slo], seq=SEQ)
+    assert len(alerts) == 1
+    assert alerts[0].name == ALERT_SLO_CONFIG
+    assert alerts[0].severity is AlertSeverity.WARN
+    assert "not_a_real_slo" in alerts[0].summary
+
+
+def test_misconfigured_ceiling_slo_emits_config_warn() -> None:
+    """M3-R1-03: a recognised ceiling SLO with NO objective field configured
+    fails loud as a config WARN rather than reading a silent 0 ceiling."""
+    view = _view(_record("w1", RunStatus.WEDGED))
+    slo = SLOTarget(name=SLO_MAX_WEDGED, unit="count")  # no objective set
+    alerts = evaluate_slos(view, [slo], seq=SEQ)
+    assert len(alerts) == 1
+    assert alerts[0].name == ALERT_SLO_CONFIG
+    assert alerts[0].severity is AlertSeverity.WARN
+    assert SLO_MAX_WEDGED in alerts[0].summary
 
 
 def test_multiple_breaches_distinct_seq_locals() -> None:
@@ -243,8 +273,8 @@ def test_multiple_breaches_distinct_seq_locals() -> None:
         _record("w2", RunStatus.WEDGED),
     )
     slos = [
-        SLOTarget(name=SLO_MAX_WEDGED, objective_micro=1, unit="count"),
-        SLOTarget(name=SLO_MAX_STUCK_AGE, objective_micro=0, unit="ms"),
+        SLOTarget(name=SLO_MAX_WEDGED, objective_count=1, unit="count"),
+        SLOTarget(name=SLO_MAX_STUCK_AGE, objective_ms=0, unit="ms"),
     ]
     alerts = evaluate_slos(view, slos, seq=SEQ)
     assert len(alerts) == 2
@@ -254,7 +284,7 @@ def test_multiple_breaches_distinct_seq_locals() -> None:
 
 def test_runbook_uri_propagated_to_alert() -> None:
     view = _view(_record("w1", RunStatus.WEDGED))
-    slo = SLOTarget(name=SLO_MAX_WEDGED, objective_micro=0, unit="count",
+    slo = SLOTarget(name=SLO_MAX_WEDGED, objective_count=0, unit="count",
                     runbook_uri="cas://runbook/wedged")
     alerts = evaluate_slos(view, [slo], seq=SEQ)
     assert alerts[0].runbook_uri == "cas://runbook/wedged"
@@ -280,7 +310,7 @@ def test_dashboard_is_deterministic() -> None:
 
 def test_evaluate_slos_is_deterministic() -> None:
     view = _view(_record("w1", RunStatus.WEDGED))
-    slo = SLOTarget(name=SLO_MAX_WEDGED, objective_micro=0, unit="count")
+    slo = SLOTarget(name=SLO_MAX_WEDGED, objective_count=0, unit="count")
     a1 = evaluate_slos(view, [slo], seq=SEQ)
     a2 = evaluate_slos(view, [slo], seq=SEQ)
     assert a1 == a2

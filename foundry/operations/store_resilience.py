@@ -42,6 +42,7 @@ yield byte-identical records.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
@@ -60,6 +61,8 @@ from foundry.schemas.operations import (
 if TYPE_CHECKING:
     from foundry.durability.checkpointer import FoundryCheckpointer
     from foundry.state.seq import Seq
+
+_LOG = logging.getLogger(__name__)
 
 __all__ = [
     "CheckpointBodyResolver",
@@ -297,13 +300,30 @@ def check_checkpoint_health(
             crash_on_resume = True
 
     # (b) Dangling content-addressed handles (integrity sweep).
+    #
+    # A genuinely-lost blob surfaces as UnknownArtifactError / KeyError — that is
+    # the EXPECTED "dangling handle" signal and is recorded as such. Any OTHER
+    # exception is NOT a clean dangle: it may be a real bug in the probe path
+    # (deserialization error, programming error, ...). We stay FAIL-CLOSED (still
+    # treat the handle as unresolvable → poisoned, so we never wake on a
+    # checkpoint we could not fully verify), but we LOG it at ERROR with the
+    # exception so a real bug is DIAGNOSED, not silently masked as a benign
+    # dangle (M3-R1-04).
     if probe_handle is not None:
         for uri in handle_uris:
             try:
                 probe_handle(uri)
             except (UnknownArtifactError, KeyError):
-                dangling.append(uri)
+                dangling.append(uri)  # expected: the blob is genuinely lost.
             except Exception:
+                _LOG.error(
+                    "checkpoint integrity probe for run %r raised an UNEXPECTED "
+                    "error on handle %r (not a clean unknown-handle) — treating "
+                    "fail-closed as poisoned, but this may mask a real bug",
+                    run_id,
+                    uri,
+                    exc_info=True,
+                )
                 dangling.append(uri)
 
     # (c) WORM chain integrity (the audit chain backing the checkpoint).

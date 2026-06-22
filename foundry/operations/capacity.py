@@ -24,6 +24,12 @@ Design (operations.md §6):
   rate (current in-flight rate + the candidate's requested rate) stays within the
   cap. This mirrors `governance.budget_controller.BudgetController` (the per-run
   budget) — the fleet cap is the cross-run analog, same integer-µ$ accounting.
+  Admission-throttle alone cannot reach IN-FLIGHT spend ("resume is not new-run
+  admission"), so `resume_admit` applies the SAME cap to the in-flight cost
+  sources large enough to outrun an admission freeze — cold-tier rehydration
+  retrieval/egress on resume of an archival-evicted hibernated run and in-flight
+  quorum re-runs (§7) — queueing/serializing a cap-breaching resume rather than
+  letting it spike the rate uncapped (operations.md §6, M3-R1-01).
 - **Hibernation.** A long-idle run hibernates: it frees its concurrency slot and
   its worktree spills to the CAS (resumable). This is DISTINCT from PAUSED — a
   paused run still holds its slot/state; a hibernated run has surrendered its
@@ -60,6 +66,10 @@ REASON_FLEET_COST_RATE_CAP = "fleet_cost_rate_cap"
 REASON_TENANT_CONCURRENCY = "tenant_concurrency"
 REASON_NO_SLOTS = "no_slots"
 REASON_NO_QUOTA = "no_tenant_quota"
+#: A resume/rehydration that would breach the fleet cost-rate cap is
+#: queued/serialized at resume-admit, NOT allowed to spike spend (§6 in-flight).
+REASON_RESUME_RATE_CAP = "resume_cost_rate_cap"
+REASON_RESUME_ADMITTED = "resume_admitted"
 
 
 class FleetCapacity(FrozenModel):
@@ -96,8 +106,9 @@ class CapacityScheduler:
 
     Capacity (slots + fleet cost-rate cap) and per-tenant quotas are injected;
     the clock is passed per call (`now_ms`) so the scheduler is pure. State is
-    the set of in-flight runs (`_running`) and the deficit-RR credit ledger
-    (`_credit`) — both mutated only through the public methods below.
+    the set of in-flight runs (`_running`), the deficit-RR credit ledger
+    (`_credit`), and the anti-starvation wait-age ledger (`_waited_rounds`) —
+    all mutated only through the public methods below.
     """
 
     capacity: FleetCapacity
@@ -106,6 +117,13 @@ class CapacityScheduler:
     _running: dict[str, RunningRun] = field(default_factory=dict)
     # deficit round-robin: accrued-but-unspent fair-share credit per tenant.
     _credit: dict[str, int] = field(default_factory=dict)
+    # Anti-starvation AGE: consecutive scheduling rounds a tenant has CONTENDED
+    # without being admitted. Reset to 0 on a win, bumped each round it loses.
+    # This is the DOMINANT fairness key (after the held-slots anti-monopoly
+    # guard) so even a tiny-weight tenant under extreme weight skew + held slots
+    # is eventually admitted — credit/weight only breaks ties among tenants of
+    # EQUAL wait age (M3-R1-02: no-starvation under unequal weights).
+    _waited_rounds: dict[str, int] = field(default_factory=dict)
 
     # -- in-flight bookkeeping --------------------------------------------
     def register_running(self, run: RunningRun) -> None:
@@ -143,6 +161,38 @@ class CapacityScheduler:
         projected = self.fleet_cost_rate_microusd_per_hr() + requested_rate_microusd_per_hr
         return projected <= self.capacity.fleet_cost_rate_cap_microusd_per_hr
 
+    def resume_admit(
+        self, entry: QueueEntry, *, now_ms: int, seq: Seq
+    ) -> FairnessDecision:
+        """Resume-admit gate for an IN-FLIGHT cost spike (operations.md §6).
+
+        Admission-throttle alone cannot reach in-flight spend ("resume is not
+        new-run admission"), so the fleet cost-rate cap ALSO gates the in-flight
+        cost sources large enough to outrun an admission freeze — chiefly
+        cold-tier rehydration retrieval/egress on resume of an
+        archival-evicted hibernated run, and in-flight quorum re-runs (§7
+        flake-recovery). This mirrors the §4 admit-to-attestation gate: a
+        rehydration/re-run whose `requested_cost_rate_microusd_per_hr` would
+        breach the cap is QUEUED/serialized at resume-admit
+        (``admitted=False``, ``reason=resume_cost_rate_cap``) rather than
+        allowed to spike the cost-rate uncapped — never killed (M3-R1-01).
+
+        Unlike :meth:`admit`, this does NOT consume a concurrency slot or the
+        tenant fan-out guard (a resuming run already holds its lineage/slot); it
+        gates ONLY on the fleet cost-rate dimension. The caller registers the
+        resumed run's live rate on success, exactly as for a fresh admission."""
+        cap = self.capacity.fleet_cost_rate_cap_microusd_per_hr
+        cur = self.fleet_cost_rate_microusd_per_hr()
+        ok = self.fleet_cost_rate_ok(entry.requested_cost_rate_microusd_per_hr)
+        return FairnessDecision(
+            run_id=entry.run_id,
+            admitted=ok,
+            reason=REASON_RESUME_ADMITTED if ok else REASON_RESUME_RATE_CAP,
+            fleet_cost_rate_microusd_per_hr=cur,
+            fleet_cost_rate_cap_microusd_per_hr=cap,
+            seq=seq,
+        )
+
     # -- fairness scheduling ----------------------------------------------
     def _accrue_round_credit(self, tenants: Iterable[str]) -> None:
         """Accrue this round's fair-share credit for every contending tenant."""
@@ -153,15 +203,20 @@ class CapacityScheduler:
         """The single most-deserving queued entry RIGHT NOW (re-evaluated each
         time an admission consumes capacity, so the ranking reflects slots just
         taken — that's what stops a heavy tenant sweeping every slot in one
-        round). Order: fewest slots already held (anti-monopoly), then most
-        accrued credit (no-starvation deficit), then FIFO, then run_id."""
+        round). Order: fewest slots already held (anti-monopoly), then LONGEST
+        unserved wait age (anti-starvation aging — the dominant fairness key so
+        no tenant is starved regardless of weight skew), then most accrued credit
+        (weighted-fair deficit, breaks ties among equally-aged tenants), then
+        FIFO, then run_id."""
         items = list(entries)
         if not items:
             return None
 
-        def rank(e: QueueEntry) -> tuple[int, int, int, str]:
+        def rank(e: QueueEntry) -> tuple[int, int, int, int, str]:
             held = self.tenant_active_count(e.tenant_id)
-            return (held, -self._credit.get(e.tenant_id, 0), e.enqueued_ts_ms, e.run_id)
+            waited = self._waited_rounds.get(e.tenant_id, 0)
+            credit = self._credit.get(e.tenant_id, 0)
+            return (held, -waited, -credit, e.enqueued_ts_ms, e.run_id)
 
         return min(items, key=rank)
 
@@ -173,9 +228,11 @@ class CapacityScheduler:
         return q.fair_share_micro if q.fair_share_micro > 0 else 1
 
     def _spend_credit(self, tenant_id: str) -> None:
-        """A tenant that WON a slot spends its accrued credit (deficit reset),
-        so the next round favors the tenants that lost (no-starvation)."""
+        """A tenant that WON a slot spends its accrued credit (deficit reset)
+        AND resets its anti-starvation wait age, so the next round favors the
+        tenants that lost (no-starvation)."""
         self._credit[tenant_id] = 0
+        self._waited_rounds[tenant_id] = 0
 
     def admit(self, entry: QueueEntry, *, now_ms: int, seq: Seq) -> FairnessDecision:
         """Decide admission for ONE queued run (admission-side throttle).
@@ -251,6 +308,15 @@ class CapacityScheduler:
                     )
                 )
                 self._spend_credit(entry.tenant_id)
+        # Anti-starvation aging: every tenant that CONTENDED this round but won
+        # NO slot ages by one round (a winner was already reset to 0 in
+        # _spend_credit). The next round's _most_starved then favors the
+        # longest-waiting tenant — so no tenant is starved across rounds even
+        # under extreme weight skew with slots held in flight (M3-R1-02).
+        admitted_tenants = {e.tenant_id for e in items if decisions[e.run_id].admitted}
+        for tid in {e.tenant_id for e in items}:
+            if tid not in admitted_tenants:
+                self._waited_rounds[tid] = self._waited_rounds.get(tid, 0) + 1
         # returned in original-queue order for caller stability.
         return tuple(decisions[e.run_id] for e in items)
 

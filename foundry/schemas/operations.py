@@ -171,16 +171,62 @@ class SLOTarget(FrozenModel):
     time-to-ack per escalation class, p95 wall-clock per feature class, budget
     burn-rate, trusted-component availability, HITL-queue age).
 
-    `objective_micro` is the target expressed in integer millionths so ratio
-    SLOs (e.g. 0.995 success) carry no float; `unit` names the dimension
-    (e.g. "ratio", "ms", "microusd_per_hr"). Burn-rate / threshold SLOs link a
-    runbook."""
+    `objective_micro` is the target for RATIO SLOs expressed in integer
+    millionths so ratio SLOs (e.g. 0.995 success) carry no float; `unit` names
+    the dimension (e.g. "ratio", "ms", "count", "microusd_per_hr"). Burn-rate /
+    threshold SLOs link a runbook.
+
+    COUNT/MS-dimensioned ceiling SLOs (e.g. `max_wedged_count`,
+    `max_stuck_age_ms`) carry their ceiling in a DISTINCT, clearly-named integer
+    field — `objective_count` / `objective_ms` — rather than overloading the
+    millionths `objective_micro` with a raw count/ms (M3-R1-03). `ceiling()`
+    resolves the right field for a ceiling SLO and FAILS CLOSED (raises) if the
+    expected field is unset, so a mis-configured ceiling SLO is never silently
+    read as 0. For backward compatibility a ceiling SLO that supplies only the
+    legacy `objective_micro` (the field is non-None) still resolves to it."""
 
     name: str  # SLO identifier (e.g. "run_success_rate", "hitl_queue_age")
-    objective_micro: int  # target in millionths (ratio/ms/etc per `unit`)
+    objective_micro: int | None = None  # RATIO target in millionths (no float)
+    objective_count: int | None = None  # COUNT ceiling (e.g. max WEDGED runs)
+    objective_ms: int | None = None  # MS ceiling (e.g. oldest stuck-run age)
     unit: str = "ratio"
     window_ms: int = 0  # measurement window (0 = instantaneous/point)
     runbook_uri: str | None = None  # CAS/doc handle to the runbook (§1)
+
+    def ratio_floor(self) -> int:
+        """The ratio FLOOR objective in millionths (fail-closed if unset)."""
+        if self.objective_micro is None:
+            raise SLOConfigError(
+                f"ratio SLO {self.name!r} has no objective_micro floor configured"
+            )
+        return self.objective_micro
+
+    def ceiling(self, *, field: str) -> int:
+        """Resolve a COUNT/MS CEILING objective from its dedicated field.
+
+        `field` is "objective_count" or "objective_ms". The dedicated field
+        wins; if it is unset we fall back to the legacy `objective_micro`
+        (back-compat for callers that pre-date the distinct fields). If NEITHER
+        is set we FAIL CLOSED (raise :class:`SLOConfigError`) rather than read a
+        silent 0 ceiling — a configured-but-unevaluable SLO must be visible
+        (M3-R1-03)."""
+        dedicated = getattr(self, field)
+        if dedicated is not None:
+            return dedicated
+        if self.objective_micro is not None:  # legacy: raw ceiling in _micro
+            return self.objective_micro
+        raise SLOConfigError(
+            f"ceiling SLO {self.name!r} has neither {field} nor a legacy "
+            "objective_micro configured"
+        )
+
+
+class SLOConfigError(ValueError):
+    """A configured SLO target is missing the objective field its kind needs.
+
+    Raised rather than silently reading a 0 objective, so a mis-configured SLO
+    fails loud at evaluation instead of becoming a dead (never-alerting) monitor
+    (operations.md §1; M3-R1-03)."""
 
 
 class SLO(FrozenModel):

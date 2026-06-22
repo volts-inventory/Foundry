@@ -281,3 +281,22 @@ no-second-egress (read-only manifest Protocol) + drift fail-loud.
 - M3-R1-04 MINOR | operations/store_resilience.py:306 | bare except folds a genuine bug into "dangling handle"
   (fail-closed direction, but masks diagnostics). | FIX: narrow/log the non-(Unknown/KeyError) branch.
 Resolution: batch-fix after T-M3-13 lands (shares operator.py/capacity.py); then milestone sweep + audit. (open → pending)
+
+ACCEPTANCE (M3-R1-01..04, fresh batched fixer): all four MINOR RESOLVED 1:1, no exit-property regression.
+- M3-R1-03 RESOLVED: `SLOTarget` gained DISTINCT kind-typed objectives (`objective_count`/`objective_ms`
+  ceilings + `objective_micro` ratio floor; `ratio_floor()`/`ceiling(field=...)` fail-closed via
+  `SLOConfigError`) — `_micro` no longer overloaded. `evaluate_slos` now emits a WARN `slo_config_error`
+  Alert for an unrecognised/mis-configured SLO instead of silently skipping (never a dead monitor).
+- M3-R1-01 RESOLVED: ADDED `CapacityScheduler.resume_admit(...)` (not deferred) — the fleet cost-rate cap
+  now gates in-flight resume/rehydration on the RATE dimension (queues a cap-breaching resume, never kills),
+  per operations.md §6 lines 224-230/299-303. Chosen over documenting because it's a small exact mirror of
+  the admission `fleet_cost_rate_ok` check.
+- M3-R1-02 RESOLVED: unequal-weight no-release multi-round starvation test added — and it surfaced a LATENT
+  starvation (reset-to-0 credit + full-weight accrual starves a weight-1 tenant under held slots). Fixed
+  with an anti-starvation wait-age ledger (`_waited_rounds`) as the dominant fairness key after the
+  held-slots guard; equal-weight behavior unchanged.
+- M3-R1-04 RESOLVED: `check_checkpoint_health` bare-except narrowed — expected `UnknownArtifactError`/
+  `KeyError` recorded as dangling; any other probe exception LOGs at ERROR (`exc_info`) while staying
+  fail-closed (still poisoned). No genuine bug masked as a benign dangle.
+Gates: ruff/mypy clean (129 files), 976 pass/1 skip (incl. test_phase3_exit). Touched ONLY the 4 modules +
+their 4 test files + LEARNINGS. **M3-R1 review CLEAN-resolved.**

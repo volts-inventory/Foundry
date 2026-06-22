@@ -1788,3 +1788,62 @@ FoundryCheckpointer). Criterion->test + the genuine-E2E-vs-stand-in map for the 
   per scenario (wedged run, store outage, poisoned checkpoint, trusted-component outage, HITL backlog,
   capacity/cost-rate, upgrade-in-flight, pinned-ID/cost drift, five planes). Each step cites the REAL
   shipped module/function (operations/observability/policy) — keep it in sync when those APIs change.
+
+## Phase-3 (Operability & scale) EXIT integration test — the honesty map (T-M3-13)
+- P3X1. **`tests/test_phase3_exit.py` is the Phase-3 EXIT proof; it COMPOSES the shipped M3 ops
+  modules, never re-derives their logic.** One test (or two) per roadmap criterion: (a) operator
+  diagnoses a stuck run — `dashboard_from_signals` over a mixed RUNNING/PAUSED/WEDGED fleet +
+  `watchdog` + `evaluate_slos`; (b) store outage pauses-not-corrupts + recovers, plus poisoned
+  checkpoint detect→recover; (c) no-starvation over 10 rounds + fleet cost-rate cap + hibernation;
+  (d) HITL backlog bounded+alerted + self-judge dormant. 9 tests, all green; ruff+mypy clean; full
+  suite unbroken. Touched ONLY this file + this LEARNINGS note.
+- P3X2. **GENUINE vs smoke — the two load-bearing criteria are exercised by reading STATE, not a
+  proxy.** (b) no-corrupt is proved by reading the real SQLite `outbox` back after the
+  `superstep_txn` rollback (only the prior committed `push-A` remains; `push-B` never landed) and by
+  draining a real `OutboxRelay` TWICE to show exactly-once (no duplicate external action) + an intact
+  WORM chain. (c) no-starvation is proved by COUNTING per-tenant admissions across rounds
+  (`all(count>0)` + a no-monopoly ceiling), not a single-round check. (a) the paused-vs-wedged
+  distinction is tested on the NOT-alert side too (a PAUSED run observed 100× past its deadline is
+  still not stuck).
+- P3X3. **Honesty note: the ONLY dev-mode stand-in is the outage SIGNAL.** The "store outage" is an
+  injected `StoreUnavailable` (the documented dev analogue of a Postgres/object-store connection
+  loss; `sqlite3.OperationalError` is the other recognised signal, operations.md §3) — the
+  rollback/pause/resume CODE under test is the real shipped durability path, and the persisted store
+  is read to confirm no partial write. (a)/(c)/(d) are pure deterministic compositions of real module
+  code over in-memory fleet/tenant/reviewer-queue FIXTURES; the classification/scheduling/alerting
+  logic is the unmodified shipped code, clocks + `Seq` injected for reproducibility.
+
+## Phase-3 review fixes (M3-R1-01..04, batched fixer)
+- M3F1. **SLOTarget objective fields are now KIND-TYPED — `_micro` is no longer overloaded.**
+  `SLOTarget` carries distinct integer objectives: `objective_micro` (RATIO floor, millionths),
+  `objective_count` (COUNT ceiling, e.g. max WEDGED), `objective_ms` (MS ceiling, e.g. oldest stuck
+  age). `ratio_floor()` / `ceiling(field=...)` resolve the right one and FAIL CLOSED
+  (`SLOConfigError`) if unset — a ceiling SLO falls back to legacy `objective_micro` only if the
+  dedicated field is None (back-compat). All three objective fields are now `int | None`.
+- M3F2. **`evaluate_slos` NEVER silently skips a configured SLO (M3-R1-03).** An unrecognised SLO
+  name OR a recognised-but-mis-configured objective emits a WARN `slo_config_error` Alert
+  (`ALERT_SLO_CONFIG`) instead of being dropped — a modeled-but-unevaluable SLO is visible on the
+  operator surface, never a dead monitor. Recognised set = `_RECOGNISED_SLO_NAMES`.
+- M3F3. **Resume-gate decision (M3-R1-01): ADDED `CapacityScheduler.resume_admit(...)`, not deferred.**
+  operations.md §6 is explicit (lines 224-230 / 299-303) that the fleet cost-rate cap must ALSO gate
+  IN-FLIGHT spend ("resume is not new-run admission") — cold-tier rehydration retrieval/egress + §7
+  in-flight quorum re-runs. `resume_admit` mirrors `admit` on the RATE dimension ONLY (no slot/fan-out
+  consume, since a resuming run already holds its lineage): a cap-breaching resume is queued
+  (`admitted=False`, `REASON_RESUME_RATE_CAP`), never killed/uncapped. Chose to implement (not just
+  document) because it is a small, exact mirror of the existing `fleet_cost_rate_ok` admission check.
+- M3F4. **No-starvation now holds under UNEQUAL weights + held slots (M3-R1-02 was a latent gap, not
+  just a test gap).** The deficit-RR `_credit` reset-to-0-on-win + accrue-full-weight-per-round meant a
+  tiny-weight tenant (weight 1 vs 1_000_000) could be starved forever when slots are HELD across rounds
+  (it never wins the `-credit` tiebreak). Fix: added an anti-starvation AGE ledger `_waited_rounds`
+  (consecutive contended-but-denied rounds, reset on win) as the DOMINANT fairness key AFTER the
+  held-slots anti-monopoly guard, BEFORE credit. `_most_starved` rank is now
+  `(held, -waited_rounds, -credit, ts, run_id)`. Credit/weight still orders ties among equally-aged
+  tenants; equal-weight behavior is unchanged (existing tests green). New unequal-weight no-release
+  multi-round test proves every tenant is admitted.
+- M3F5. **store_resilience `check_checkpoint_health` bare-except narrowed (M3-R1-04).** Expected
+  blob-loss (`UnknownArtifactError`/`KeyError`) → recorded as dangling silently; ANY OTHER probe
+  exception now LOGs at ERROR with `exc_info` (a real bug is diagnosed) while STAYING fail-closed
+  (still appended as dangling → poisoned, so we never wake on an unverified checkpoint).
+- M3F6. **Gates: ruff + mypy clean (129 files); full suite 976 passed / 1 skipped, incl.
+  test_phase3_exit. Touched ONLY operator.py, capacity.py, store_resilience.py, schemas/operations.py
+  + their 4 test files + this note. No exit-property behavior changed.**

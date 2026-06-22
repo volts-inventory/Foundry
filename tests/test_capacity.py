@@ -15,6 +15,8 @@ from foundry.operations.capacity import (
     REASON_ADMITTED,
     REASON_FLEET_COST_RATE_CAP,
     REASON_NO_SLOTS,
+    REASON_RESUME_ADMITTED,
+    REASON_RESUME_RATE_CAP,
     REASON_TENANT_CONCURRENCY,
     CapacityScheduler,
     FleetCapacity,
@@ -91,6 +93,52 @@ def test_no_starvation_every_tenant_makes_progress() -> None:
     assert spread <= 2, admitted_per_tenant
     # and no tenant ran away with the fleet (a monopolist would be ~10+).
     assert max(admitted_per_tenant.values()) <= 6
+
+
+def test_no_starvation_unequal_weights_long_lived_runs_hold_slots() -> None:
+    """M3-R1-02: unequal-weight, NO-release multi-round contention. Runs are
+    long-lived — once admitted they HOLD their slot across rounds (never
+    released), so admission only happens as slots trickle free. Even so, with
+    very unequal fair-share weights NO tenant starves: every tenant gets at
+    least one run in flight over the rounds, and the heavily-weighted tenant
+    does not monopolize every slot while a lighter tenant waits.
+
+    This stresses the ranking that the held-slots-first tie-break (anti-monopoly)
+    composes with the accrued-credit deficit (no-starvation) even when slots are
+    held rather than freed each round."""
+    tenants = ["heavy", "mid", "light"]
+    weights = {"heavy": 1_000_000, "mid": 100_000, "light": 1}
+    sched = CapacityScheduler(
+        capacity=FleetCapacity(
+            max_concurrent_runs=2, fleet_cost_rate_cap_microusd_per_hr=10**12
+        ),
+        quotas={t: _quota(t, weight=weights[t]) for t in tenants},
+    )
+
+    ever_admitted: set[str] = set()
+    # Each round every tenant offers a fresh run; admitted runs are NEVER
+    # released (long-lived). One in-flight run finishes only every 3rd round, so
+    # capacity trickles — the no-starvation property must hold under scarcity.
+    rounds = 30
+    for rnd in range(rounds):
+        # Re-offer only tenants without a currently in-flight run, plus everyone
+        # always re-contends so the queue is non-empty each round.
+        queue = [_entry(f"{t}-r{rnd}", t, ts=rnd) for t in tenants]
+        decisions = sched.schedule(queue, now_ms=rnd, seq=SEQ)
+        for d in decisions:
+            if d.admitted:
+                ever_admitted.add(d.run_id.split("-")[0])
+        # A single long-lived run drains every 3rd round (a slot trickles free),
+        # NOT a full per-round release — runs genuinely hold slots across rounds.
+        if rnd % 3 == 2 and sched.used_slots() > 0:
+            oldest = sched.active_runs()[0]
+            sched.release(oldest.run_id)
+
+    # NO tenant starved despite wildly unequal weights + held slots.
+    assert ever_admitted == set(tenants), ever_admitted
+    # The heaviest tenant did not run away with every slot ever granted — the
+    # lighter tenants collectively got in too (anti-monopoly holds under hold).
+    assert "light" in ever_admitted and "mid" in ever_admitted
 
 
 def test_heavy_tenant_is_throttled_not_allowed_to_monopolize() -> None:
@@ -170,6 +218,36 @@ def test_fleet_cost_rate_ok_projection() -> None:
         RunningRun(run_id="p", tenant_id="t1", cost_rate_microusd_per_hr=0, status=RunStatus.PAUSED)
     )
     assert sched.fleet_cost_rate_microusd_per_hr() == 70
+
+
+# --- (2b) resume-admit: the cost-rate cap also gates in-flight rehydration --
+
+
+def test_resume_admit_throttles_cap_breaching_rehydration() -> None:
+    """M3-R1-01: a cold-tier rehydration whose retrieval/egress rate would breach
+    the fleet cost-rate cap is QUEUED at resume-admit (not killed, not allowed to
+    spike uncapped), mirroring admission-side throttling on the rate dimension."""
+    sched = _fresh_scheduler(slots=10, tenants=["t1"], rate_cap=100)
+    sched.register_running(
+        RunningRun(run_id="inflight", tenant_id="t1", cost_rate_microusd_per_hr=70)
+    )
+    # a resume whose rehydration rate (40) would push the fleet to 110 > 100.
+    decision = sched.resume_admit(_entry("resuming", "t1", rate=40), now_ms=0, seq=SEQ)
+    assert decision.admitted is False
+    assert decision.reason == REASON_RESUME_RATE_CAP
+    assert decision.fleet_cost_rate_cap_microusd_per_hr == 100
+    # the in-flight run was NOT killed by the resume-admit check.
+    assert any(r.run_id == "inflight" for r in sched.active_runs())
+
+
+def test_resume_admit_allows_rehydration_within_cap() -> None:
+    sched = _fresh_scheduler(slots=10, tenants=["t1"], rate_cap=100)
+    sched.register_running(
+        RunningRun(run_id="inflight", tenant_id="t1", cost_rate_microusd_per_hr=70)
+    )
+    decision = sched.resume_admit(_entry("resuming", "t1", rate=30), now_ms=0, seq=SEQ)
+    assert decision.admitted is True  # 70 + 30 == 100, within cap
+    assert decision.reason == REASON_RESUME_ADMITTED
 
 
 # --- (3) hibernation: idle run frees its slot, resumable --------------------

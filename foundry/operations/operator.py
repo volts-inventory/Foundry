@@ -37,9 +37,15 @@ from foundry.schemas.operations import (
     AlertSeverity,
     RunStatus,
     RunStatusRecord,
+    SLOConfigError,
     SLOTarget,
 )
 from foundry.state.seq import Seq
+
+#: The set of SLO names the built-in monitors below KNOW how to evaluate. A
+#: configured SLO whose name is not in here is surfaced as a config WARN Alert
+#: (never silently skipped — M3-R1-03), so a modeled-but-unevaluable SLO is
+#: visible on the operator surface instead of being a dead monitor.
 
 #: One million — ratios are carried as integer millionths (no float in SLOs).
 MICRO = 1_000_000
@@ -50,10 +56,19 @@ SLO_RUN_HEALTH_RATIO = "run_health_ratio"  # fraction of non-terminal runs that 
 SLO_MAX_WEDGED = "max_wedged_count"  # ceiling on simultaneously WEDGED runs
 SLO_MAX_STUCK_AGE = "max_stuck_age_ms"  # ceiling on the oldest stuck run's lateness
 
+#: The SLO names the built-in monitors evaluate (recognised set).
+_RECOGNISED_SLO_NAMES: frozenset[str] = frozenset(
+    {SLO_RUN_HEALTH_RATIO, SLO_MAX_WEDGED, SLO_MAX_STUCK_AGE}
+)
+
 #: Alert names the operator monitors emit (1:1 with the SLO monitors, §1).
 ALERT_RUN_HEALTH = "run_health_slo_breach"
 ALERT_WEDGED_COUNT = "wedged_count_slo_breach"
 ALERT_STUCK_AGE = "stuck_run_age_slo_breach"
+
+#: A configured SLO the operator cannot evaluate (unknown name or mis-configured
+#: objective) → a WARN config Alert, so it is VISIBLE rather than silently dead.
+ALERT_SLO_CONFIG = "slo_config_error"
 
 #: The deterministic monitor this surface maps to in the §1 alert taxonomy.
 _MONITOR = "operator_dashboard"
@@ -218,12 +233,20 @@ def evaluate_slos(
     aggregate; a breach emits one :class:`Alert` at the taxonomy severity. The
     `run_health_ratio` SLO is a FLOOR (observed below objective breaches);
     `max_wedged_count` / `max_stuck_age_ms` are CEILINGS (observed above
-    objective breaches). A WEDGED-count or stuck-age breach pages (a stuck run
-    wastes spend and blocks delivery); a health-ratio dip below objective warns.
-    Within SLO emits nothing. Unknown SLO names are skipped (forward-compatible).
-    Deterministic: alerts are returned in the order the SLOs are supplied, each
-    carrying `seq` with a distinct `local` so the records are distinct
-    identities in the WORM/predicate stores."""
+    objective breaches), reading their DISTINCT integer objective
+    (`objective_count` / `objective_ms`) rather than the overloaded
+    `objective_micro` (M3-R1-03). A WEDGED-count or stuck-age breach pages (a
+    stuck run wastes spend and blocks delivery); a health-ratio dip below
+    objective warns. Within SLO emits nothing.
+
+    An UNRECOGNISED SLO name — or a recognised SLO whose objective field is
+    mis-configured (:class:`~foundry.schemas.operations.SLOConfigError`) — is
+    NOT silently skipped: it emits a WARN ``slo_config_error`` config Alert so a
+    modeled-but-unevaluable SLO is VISIBLE on the operator surface rather than a
+    dead monitor that can never alert (operations.md §1). Deterministic: alerts
+    are returned in the order the SLOs are supplied, each carrying `seq` with a
+    distinct `local` so the records are distinct identities in the
+    WORM/predicate stores."""
     alerts: list[Alert] = []
     local = 0
     for target in slos:
@@ -249,48 +272,67 @@ def evaluate_slos(
 def _evaluate_one(
     view: OperatorView, target: SLOTarget
 ) -> tuple[str, AlertSeverity, str] | None:
-    """Compare one SLO target against the view; return breach tuple or None."""
-    if target.name == SLO_RUN_HEALTH_RATIO:
-        observed = view.health_ratio_micro()
-        if observed < target.objective_micro:  # floor breached
-            return (
-                ALERT_RUN_HEALTH,
-                AlertSeverity.WARN,
-                f"run health {observed}µ below objective "
-                f"{target.objective_micro}µ ({view.wedged_count()} wedged "
-                f"of {view.total} runs)",
-            )
-        return None
+    """Compare one SLO target against the view; return breach tuple or None.
 
-    if target.name == SLO_MAX_WEDGED:
-        observed = view.wedged_count()
-        if observed > target.objective_micro:  # ceiling breached
-            return (
-                ALERT_WEDGED_COUNT,
-                AlertSeverity.PAGE,
-                f"{observed} runs WEDGED, over the max of "
-                f"{target.objective_micro}",
-            )
-        return None
+    Returns the breach tuple on an SLO breach OR a config-error tuple for an
+    unrecognised/mis-configured SLO (never silently None for those — M3-R1-03).
+    Returns None only when a recognised SLO is within objective."""
+    if target.name not in _RECOGNISED_SLO_NAMES:
+        return (
+            ALERT_SLO_CONFIG,
+            AlertSeverity.WARN,
+            f"configured SLO {target.name!r} is not recognised by the operator "
+            "monitors — it can never alert (config gap, operations.md §1)",
+        )
 
-    if target.name == SLO_MAX_STUCK_AGE:
+    try:
+        if target.name == SLO_RUN_HEALTH_RATIO:
+            floor = target.ratio_floor()
+            observed = view.health_ratio_micro()
+            if observed < floor:  # floor breached
+                return (
+                    ALERT_RUN_HEALTH,
+                    AlertSeverity.WARN,
+                    f"run health {observed}µ below objective {floor}µ "
+                    f"({view.wedged_count()} wedged of {view.total} runs)",
+                )
+            return None
+
+        if target.name == SLO_MAX_WEDGED:
+            wedged_ceiling = target.ceiling(field="objective_count")
+            observed = view.wedged_count()
+            if observed > wedged_ceiling:  # ceiling breached
+                return (
+                    ALERT_WEDGED_COUNT,
+                    AlertSeverity.PAGE,
+                    f"{observed} runs WEDGED, over the max of {wedged_ceiling}",
+                )
+            return None
+
+        # SLO_MAX_STUCK_AGE (the only remaining recognised name).
+        age_ceiling = target.ceiling(field="objective_ms")
         observed = view.oldest_stuck_overdue_ms()
-        if observed > target.objective_micro:  # ceiling breached
+        if observed > age_ceiling:  # ceiling breached
             worst = view.stuck[0]
             return (
                 ALERT_STUCK_AGE,
                 AlertSeverity.PAGE,
                 f"oldest stuck run {worst.run_id!r} is {observed}ms overdue, "
-                f"over the max of {target.objective_micro}ms "
-                f"(phase={worst.current_phase!r})",
+                f"over the max of {age_ceiling}ms (phase={worst.current_phase!r})",
             )
         return None
-
-    return None  # unknown SLO name — forward-compatible, skip.
+    except SLOConfigError as exc:  # recognised name, but objective unset
+        return (
+            ALERT_SLO_CONFIG,
+            AlertSeverity.WARN,
+            f"SLO {target.name!r} is mis-configured and cannot be evaluated: "
+            f"{exc}",
+        )
 
 
 __all__ = [
     "ALERT_RUN_HEALTH",
+    "ALERT_SLO_CONFIG",
     "ALERT_STUCK_AGE",
     "ALERT_WEDGED_COUNT",
     "MICRO",

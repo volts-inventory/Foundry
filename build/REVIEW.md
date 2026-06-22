@@ -300,3 +300,24 @@ ACCEPTANCE (M3-R1-01..04, fresh batched fixer): all four MINOR RESOLVED 1:1, no 
   fail-closed (still poisoned). No genuine bug masked as a benign dangle.
 Gates: ruff/mypy clean (129 files), 976 pass/1 skip (incl. test_phase3_exit). Touched ONLY the 4 modules +
 their 4 test files + LEARNINGS. **M3-R1 review CLEAN-resolved.**
+
+## M4 trust-root chain (T-M4-01..11) — Round 1 (1 fresh E3 trust critic)
+Tool gates green: ruff/mypy clean (135 files), 130 phase-4 tests pass, full suite green, cov 94%. Verdict:
+FINDINGS(3), all MINOR, 0 BLOCKER/MAJOR. ALL 7 per-question SOUND: malicious-test (discriminator real held-out
+mutant on copytree → Test FAIL), forged-results (zone-B config re-derive + sealed obs → ERROR/FAIL never PASS),
+forged-verdict (admission re-verify sig+gate-state for exact tree + input-bound attestation), fork-divergence
+(digest-disqualification monotonic/atomic, admission_look folds it → DENY despite valid sigs), autonomous
+(admission sole gate; DENY/halt deploys nothing; idempotent; deployer non-agent), outage→paused-not-wedged,
+honesty (dev-grade roots labeled; clean control proves blocks load-bearing). The 4 attacks GENUINELY can't deploy.
+- M4-R1-01 MINOR (substantive) | factory_graph.py autonomous emit | admission cryptographically re-verifies only
+  the largest run_against group (assurance-tree gates); terminal Spec/Build/Test run on a DISTINCT tree (AW2
+  re-hash) so admission does NOT re-verify them — they rest on the fail-closed merge_gates filter at the emit
+  guard (load-bearing, confirmed). | FIX: have admission re-verify ALL required gates across BOTH run_against trees
+  (group-aware required set), so the trust-root release decision cryptographically covers the terminal gates too.
+- M4-R1-02 MINOR | factory_graph.py _admission_tree_and_gates | required_gates is data-derived from the chosen
+  group; emit guard enforces the mandatory floor first (not exploitable in-path) but admission alone wouldn't.
+  | FIX: assert the Security+Audit (+terminal) floor ⊆ the admitted set before building.
+- M4-R1-03 MINOR | factory_graph.py:641 | gate_result_uris fed to builder = results_digest values, not WORM
+  gate-result handle URIs (semantically mislabeled vs gov §4). | FIX: feed actual handle uris or rename + document.
+Resolution: fix M4-R1-01/02 (strengthen the trust root to re-verify all required gates) + M4-R1-03 label; then
+re-verify + the independent audit. (open → pending fix)

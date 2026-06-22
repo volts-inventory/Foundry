@@ -38,14 +38,14 @@
     {
       "id": "M3",
       "phase": "Phase 3 \u2014 Operability & scale",
-      "status": "in_progress",
+      "status": "done",
       "exit_criteria": "An operator can diagnose a stuck run; a store outage pauses (not corrupts) in-flight runs and recovers; concurrent runs don't starve each other; HITL backlog is bounded and alerted.",
       "note": "Decomposed by T-M3-PLAN into T-M3-01..T-M3-13. New packages: foundry/operations/ (run_status, operator, store_resilience, capacity, hitl, trusted_component, upgrade), foundry/policy/, foundry/observability/; monitors/ gap-filled (pinned-ID-drift, constraint-pressure, coverage-delta + hardened advisory analyzer) reusing the existing guardian/loop/cost/oracle/policy monitors; durability/ (checkpointer+outbox+WORM) and governance/ (budget_controller+human_liaison) + proxy/lineage are EXTENDED, never rebuilt. schemas/operations.py (T-M3-01) is the single-owner typed foundation all M3 modules share; monitors/__init__.py + guardian.py single-owner in T-M3-09. Collision hazards (factory_state/factory_graph/supervisor/pyproject) untouched \u2014 most ops/policy/observability modules are new-file disjoint and parallel_safe. Exercised on synthetic fixtures via the existing MockTransport/StubAdapter doubles; dev-grade backends (\u00a70.3)."
     },
     {
       "id": "M4",
       "phase": "Phase 4 \u2014 Trust root & Autonomous mode",
-      "status": "pending",
+      "status": "in_progress",
       "exit_criteria": "A malicious-test / forged-results / forged-verdict / fork-divergence attempt cannot reach production; trusted-component outage degrades to paused, not wedged. (Dev-grade roots per implementation-plan \u00a70.3.)"
     },
     {
@@ -1283,7 +1283,7 @@
         "M4 decomposed into concrete tasks against the then-current tree, derived from implementation-plan \u00a77 Phase 4 + governance.md \u00a74-5"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M5-PLAN",

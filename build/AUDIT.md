@@ -80,3 +80,19 @@ release_allowed pure-AND over approved+4 anchors; emit re-derives via shared rel
   force-re-running any non-PASS prior (fail-closed, sound); true file-delta reuse on rework is a future refinement.
   No action (documented honest seam, matches M2-R1-03).
 **M2 AUDIT: CLEAN PASS.**
+
+## M3 (Phase 3, Operability & scale) — Cycle 1 (fresh independent auditor; design-docs + code only)
+Auditor re-ran gates (ruff/mypy clean, 168 phase-3 tests pass) + spot-checked the load-bearing tests for
+non-vacuity. **Per-requirement: ALL 8 DELIVERED** — (1) operator diagnoses stuck run (pause_reason checked
+before deadline; PAUSED-100x-past-deadline not alerted; StuckRunSummary diagnosable); (2) store outage
+PAUSES-not-corrupts E2E (real superstep_txn BEGIN IMMEDIATE/rollback; outbox read back proves only prior
+row survived + WORM intact + relay drains once; recover_to_last_clean fail-closed 4 ways); (3) no starvation
+(wait-age dominant fairness key; proven unequal-weight 1M:100K:1 held-slots 30 rounds; fleet cap admission +
+resume_admit never kills in-flight; hibernation frees+resumable); (4) HITL bounded+alerted (PAGE/WARN,
+two-person safe-deadlock never auto-approves, self-judge dormant vs regulated); (5) monitors trip +
+analyzer override STRUCTURALLY impossible (proven with mutating _OverrideAttemptAnalyzer, byte-identical
+verdict); (6) five-plane completeness + content-addressed scanner config tamper-evident + SoD + default-deny;
+(7) observability no-second-egress (read-only Protocol) + drift fail-loud; (8) honesty — explicit map,
+outage signal is the documented dev analogue, no overclaim.
+**Verdict: CLEAN PASS — NO findings at BLOCKER/MAJOR/MINOR.** All load-bearing tests non-vacuous.
+**M3 AUDIT: CLEAN PASS (zero findings).**

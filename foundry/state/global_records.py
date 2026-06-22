@@ -10,6 +10,14 @@ These survive forking (a new `run_id`) and persist across runs:
   `(node_id, subject_artifact_uri, state_sha)`; monotonic; released only by a
   fresh server-issued nonce bound to a genuine re-review.
 - **stable-FAIL latch** — deterministic gates, monotonic per digest.
+- **digest-disqualification latch** — once a specific build/tree digest is
+  DISQUALIFIED (a forged/divergent verdict, or a fork laundering a
+  stable-FAIL'd digest), that digest is permanently disqualified ACROSS forks;
+  keyed on the digest, monotonic (never un-disqualifies). A malicious fork
+  cannot escape a disqualification by minting a fresh `run_id`. This is the
+  fork-divergence defense (gov §5). The deploy-time admission controller asks
+  :meth:`GlobalRecords.admission_look` whether an exact digest is admissible —
+  the query folds disqualification + stable-FAIL and is fail-closed.
 - **class-3 alpha look-ledger** — keyed on `(eval_set_identity, decision_id)`,
   NOT `state_sha`, so forking/retraining cannot re-draw the budget;
   `state_sha` is recorded per-look for audit only.
@@ -21,11 +29,26 @@ stays pure, commutative, and replay-deterministic.
 
 from __future__ import annotations
 
+import enum
 import sqlite3
 import threading
 from typing import Protocol
 
 LatchKey = tuple[str, str, str]  # (node_id, subject_artifact_uri, state_sha)
+
+
+class AdmissionState(enum.Enum):
+    """Deploy-time admissibility of an exact build/tree digest (gov §5).
+
+    The admission controller (T-M4-07) treats anything but :data:`ADMISSIBLE`
+    as not-admissible (fail-closed). ``DISQUALIFIED`` covers BOTH an explicit
+    cross-fork digest-disqualification AND a stable-FAIL latch on the digest;
+    ``ADMISSIBLE`` means neither holds. The query reports the latch state
+    truthfully — the *not-admit-on-unknown* policy lives in the caller.
+    """
+
+    ADMISSIBLE = "admissible"
+    DISQUALIFIED = "disqualified"
 
 
 class GlobalRecordsView(Protocol):
@@ -36,6 +59,10 @@ class GlobalRecordsView(Protocol):
     def negative_verdict_latched(self, key: LatchKey) -> bool: ...
 
     def stable_fail_latched(self, digest: str, gate: str) -> bool: ...
+
+    def digest_disqualified(self, digest: str) -> bool: ...
+
+    def admission_look(self, digest: str) -> AdmissionState: ...
 
 
 class GlobalRecords:
@@ -68,6 +95,12 @@ class GlobalRecords:
                   gate TEXT NOT NULL,
                   run_id TEXT NOT NULL,
                   PRIMARY KEY (digest, gate)
+                );
+                CREATE TABLE IF NOT EXISTS digest_disqualification (
+                  digest TEXT PRIMARY KEY,
+                  reason TEXT NOT NULL,
+                  run_id TEXT NOT NULL,
+                  disqualified_at TEXT NOT NULL DEFAULT (datetime('now'))
                 );
                 CREATE TABLE IF NOT EXISTS alpha_ledger (
                   eval_set_identity TEXT NOT NULL,
@@ -105,6 +138,37 @@ class GlobalRecords:
             "SELECT 1 FROM stable_fail_latch WHERE digest=? AND gate=?", (digest, gate)
         ).fetchone()
         return row is not None
+
+    def _stable_fail_latched_any(self, digest: str) -> bool:
+        """True iff `digest` carries a stable-FAIL latch for ANY gate."""
+        row = self._conn.execute(
+            "SELECT 1 FROM stable_fail_latch WHERE digest=? LIMIT 1", (digest,)
+        ).fetchone()
+        return row is not None
+
+    def digest_disqualified(self, digest: str) -> bool:
+        """True iff `digest` is permanently cross-fork DISQUALIFIED (gov §5).
+
+        Monotonic and keyed on the digest, so a fork re-presenting the same
+        digest under a fresh `run_id` still reads disqualified.
+        """
+        row = self._conn.execute(
+            "SELECT 1 FROM digest_disqualification WHERE digest=?", (digest,)
+        ).fetchone()
+        return row is not None
+
+    def admission_look(self, digest: str) -> AdmissionState:
+        """Deploy-time admissibility view for the admission controller (T-M4-07).
+
+        Returns :data:`AdmissionState.DISQUALIFIED` iff the digest is explicitly
+        disqualified OR carries a stable-FAIL latch (for any gate); otherwise
+        :data:`AdmissionState.ADMISSIBLE`. The two disqualifying conditions are
+        folded here so the caller has ONE truthful latch-state read; the
+        *fail-closed-on-unknown* admission policy is the caller's (gov §5).
+        """
+        if self.digest_disqualified(digest) or self._stable_fail_latched_any(digest):
+            return AdmissionState.DISQUALIFIED
+        return AdmissionState.ADMISSIBLE
 
     # ---- transactional writes (orchestrator / trusted runner side) ---------
 
@@ -151,6 +215,30 @@ class GlobalRecords:
                 "INSERT OR IGNORE INTO stable_fail_latch (digest, gate, run_id) VALUES (?,?,?)",
                 (digest, gate, run_id),
             )
+
+    def disqualify_digest(self, digest: str, reason: str, run_id: str) -> bool:
+        """ATOMICALLY disqualify `digest` across forks (insert-if-absent, gov §5).
+
+        Inserts the disqualification IFF the digest is not already disqualified,
+        in ONE lock acquisition (mirrors :meth:`try_first_alpha_look`). The
+        ``digest`` PRIMARY KEY + ``INSERT OR IGNORE`` make the write monotonic
+        and idempotent: a later fork (fresh `run_id`) re-presenting the SAME
+        digest can never un-disqualify it, and the original ``reason``/``run_id``
+        are preserved (the FIRST disqualification wins — concurrent callers
+        collapse to one record). Returns True iff THIS call recorded the
+        disqualification; False iff it was already disqualified.
+
+        This is the fork-divergence defense: keyed on the digest (never the
+        `run_id`), so a malicious fork cannot launder a stable-FAIL'd /
+        forged-verdict digest by minting a new `run_id`.
+        """
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO digest_disqualification (digest, reason, run_id)"
+                " VALUES (?, ?, ?)",
+                (digest, reason, run_id),
+            )
+            return cur.rowcount == 1
 
     def record_alpha_look(
         self, eval_set_identity: str, decision_id: str, state_sha: str, run_id: str

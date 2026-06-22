@@ -2130,3 +2130,32 @@ is dev-grade — stamped in every new docstring.
 - AD5. 14 tests; ruff (foundry tests) + mypy (134 files) clean; full suite 1105 passed / 1 skipped.
   Touched ONLY `foundry/trust_root/admission.py`, `tests/test_admission.py`, the `AdmissionController`
   re-export in `foundry/trust_root/__init__.py`, and this note.
+
+## Trust root — the non-agent least-privilege deployer (T-M4-08)
+- DP1. **`from foundry.trust_root import Deployer, DeployRefused`. The deployer ships ONLY an
+  admitted artifact, idempotently, with rollback — and runs NO agent code (gov §4/§5).** It is the
+  LAST mile after build (`TrustedBuilder`) -> admit (`AdmissionController`) -> deploy (`Deployer`).
+  `Deployer(target="prod")` is a frozen dataclass whose SOLE field is the deploy `target`.
+  `deploy(decision, *, admission_decision_uri, seq, deploy_plan_uri=None) -> (DeployResult,
+  ExternalAction)`; `rollback(decision, *, from_digest, admission_decision_uri, seq, ...)` ditto.
+- DP2. **Admitted-only is fail-closed: `deploy`/`rollback` REFUSE (`raise DeployRefused`) when `not
+  decision.admitted()`** (DENY/INDETERMINATE never ship). The deploy is bound to the EXACT
+  `decision.subject_digest` the admission verified — read FROM the decision, NEVER a caller-supplied
+  digest (so a caller can't smuggle a different digest under an admit). A rollback's prior-good
+  target must ITSELF come from an admitted decision.
+- DP3. **Idempotency key = `content_digest({op, subject_digest, target, from_digest})`** (L7 — never
+  `hash()`/wall clock). So a kill-then-resume re-derives the SAME key and the keyed `union_actions`
+  reducer / outbox coalesces (mirrors the `open_pr` ExternalAction). `op` (`deploy`|`rollback`)
+  discriminates so a deploy and a rollback of the same digest never collide; `from_digest` keeps two
+  rollbacks landing on one digest from different priors distinct; `target` keeps the same digest to
+  two destinations as two distinct (non-coalescing) effects. The deploy rides `EMBEDDED_MARKER` +
+  `gate_bearing=True` (a deploy is gate-bearing, never path-3 dedup — DS-R9-F4).
+- DP4. **Non-agent / least-privilege = the deployer carries NO signer/verifier/records dependency for
+  the deploy.** It consumes a FINISHED `AdmissionDecision` (trusts admission's `admitted()` bit),
+  re-derives no verdicts, signs nothing, and its SOLE capability is to emit the deploy/rollback
+  `ExternalAction` REQUEST — the outbox relay is the only thing touching the world (NO real cloud
+  deploy here, §0.3). Tested by asserting `inspect.signature(Deployer).parameters == {"target"}` and
+  that neither method's signature takes a signer/verifier/key. Autonomous mode T-M4-10 deploys via this.
+- DP5. 18 tests; ruff (foundry tests) + mypy (135 files) clean; full suite 1121 passed / 1 skipped.
+  Touched ONLY `foundry/trust_root/deployer.py`, `tests/test_deployer.py`, the `Deployer`/`DeployRefused`
+  re-export in `foundry/trust_root/__init__.py`, and this note.

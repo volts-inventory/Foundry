@@ -1994,7 +1994,7 @@
         "Tests added: refuse-non-admitted, idempotent re-deploy, rollback; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M4-09",
@@ -2052,7 +2052,7 @@
         "Tests added: clean autonomous deploy control + each of the 4 attacks blocked pre-deploy; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M4-11",

@@ -22,6 +22,7 @@ local-dev stand-in for a real hardware/OIDC root + air-gapped builder.
 """
 
 from foundry.trust_root.admission import AdmissionController
+from foundry.trust_root.deployer import Deployer, DeployRefused
 from foundry.trust_root.trusted_builder import (
     BuildOutput,
     NonHermeticBuildError,
@@ -32,6 +33,8 @@ from foundry.trust_root.trusted_builder import (
 __all__ = [
     "AdmissionController",
     "BuildOutput",
+    "DeployRefused",
+    "Deployer",
     "NonHermeticBuildError",
     "TrustedBuilder",
     "is_pinned",

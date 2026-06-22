@@ -1948,3 +1948,65 @@ is dev-grade — stamped in every new docstring.
   tuple defaults. Tests in `tests/test_schemas_trust_root.py` (34 tests; mirrors the operations CASES
   table + spot-checks). Gate chain clean: ruff + mypy (130 files) clean; full suite 1038 passed /
   1 skipped. Touched ONLY `schemas/security.py`, `schemas/operations.py`, the new test, and this note.
+
+## Input-bound attestation + provenance binding — the forged-verdict/replay defense (T-M4-05)
+- TR5. **AUDIT: the deterministic-gate attestation was ALREADY fully input-bound — no replay gap to
+  close.** `_attestation_payload` signs the COMPLETE input tuple `(gate_name, run_against (=tree/
+  state_sha), scanner_config_rev, lineage_map_revision, status, results_digest)`. So a verdict signed
+  for (tree A, config X, PASS) does NOT verify when re-presented against tree B / config Y / a flipped
+  status / a swapped lineage or results digest — `model_copy`-ing any of those fields recomputes a
+  DIFFERENT expected HMAC and `verify_attestation` returns False (the `merge_gates` grounding suite
+  already proved status-flip; T-M4-05 adds the cross-tree / cross-config / lineage / results-digest
+  cases directly against the verifier). The verdict bit cannot be moved off its inputs.
+- TR6. **Build-artifact provenance binding mirrors the judgment-binding pattern but the PROVENANCE is
+  an ARGUMENT, not a `GateResult` field (you may NOT add fields — single-file ownership).**
+  `ZoneBSigner.with_provenance_binding(g, prov)` stores a signature over `_provenance_payload(g, prov)`
+  (= the base attestation tuple FOLDED with `prov.content_identity()` + spelled-out `subject_digest`/
+  `builder_id`/`tree_sha`) into the EXISTING `runner_attestation` field;
+  `DevGateWriteVerifier.verify_provenance_binding(g, prov)` recomputes with the RE-PRESENTED `prov`.
+  Re-presenting a TAMPERED provenance (different material/subject/builder digest → different
+  `content_identity()`, TR3) fails verification, so a build attestation can't be replayed onto a
+  different build/subject — and the base tuple still blocks cross-tree/config/status replay even with
+  the original provenance.
+- TR7. **A provenance-bound signature is NOT a valid PLAIN attestation (defense in depth).** Because
+  the provenance identity is folded in, `verify_attestation(g)` returns False for a provenance-bound
+  verdict — a build verdict can't masquerade as a generic deterministic verdict to dodge the provenance
+  re-check. Admission (T-M4-07) / builder (T-M4-06) must call `verify_provenance_binding` for build
+  artifacts. `canonical_bytes` can't encode `bytes`, so the folded base tuple is `.decode("utf-8")`'d
+  (it's already canonical JSON text) before nesting. Memo key = `(g.content_identity(),
+  prov.content_identity())` (separate `_provenance_cache`) — no stale-true leak across provenances.
+  Touched ONLY `gates/attestation.py` + `tests/test_attestation_provenance.py`; ruff + mypy (130 files)
+  clean; target trio + full suite green.
+
+## Two-zone runner hardening — config re-derivation + sealed observation (T-M4-03)
+- HR1. **Zone B RE-DERIVES the scanner-config rev; it never trusts the plain string nor an
+  agent-supplied config (forged-results defense, gov §1c/§4).** `TwoZoneGateRunner(... , *,
+  pinned_config: PinnedScannerConfig | None = None, seal_key: bytes | None = None)` — both ADDITIVE
+  kwargs (every existing caller passing only the plain `scanner_config_rev` string is unchanged). When
+  `pinned_config` is set, `run` re-derives the bound rev via `pinned_config.verify()` (fail-closed
+  content-address tamper check, `policy/scanner_config.py`) and binds THAT into the attestation
+  (`scanner_config_rev`), overriding the ctor string. Outcomes: pinned config fails to verify →
+  **ERROR** (tamper/infra, not a tree judgment, DS7 — never latches); zone A reports it ran under a
+  config rev != the re-derived pin (`obs.structured["ran_scanner_config_rev"]`, key
+  `runner.RAN_CONFIG_REV_KEY`) → **FAIL** (a judgment that the tree was scanned under the wrong/weakened
+  rules — a forged/weakened config can NEVER produce a PASS; on an integrated digest it LATCHES). The
+  mismatch check fires ONLY when `pinned_config` is present — with no pin there is nothing trustworthy
+  to compare against, so a zone-A config claim is ignored (legacy back-compat; this is why a plain-string
+  runner with a reported ran-rev still PASSes).
+- HR2. **Sealed observation channel: zone A stamps an integrity tag, zone B re-derives it.**
+  `seal_observation(obs, seal_key)` (also `observe(..., seal_key=...)`) HMAC-SHA256s the WHOLE
+  observation core (`_observation_core`: every raw field INCLUDING `results_digest`, excluding the seal
+  itself) → `obs.seal = "seal256:<tag>"`. On a sealed channel (`seal_key` on the runner), `run` calls
+  `_verify_observation` BEFORE `gate.decide`: an absent or non-matching seal raises `ObservationSealError`
+  → **ERROR, never PASS**. So a swapped FAIL→PASS observation between execution and decision is caught
+  (the attacker lacks zone A's sealing secret — re-sealing with a wrong key fails the constant-time
+  compare); rewriting any body field (or laundering `results_digest`) breaks the tag too. Seal is OPTIONAL
+  (empty default field) → unsealed channel is byte-identical to pre-T-M4-03 behavior.
+- HR3. **Check ORDER in `_verify_observation` (fail-closed, integrity before judgment):** (1) seal →
+  ERROR; (2) config-tamper → ERROR; (3) config-mismatch → FAIL. Implemented via private control-flow
+  exceptions (`_ConfigTamperError`/`_ConfigMismatchError`) caught in `run`'s zone-B block alongside
+  `ObservationSealError`, so each maps to its intended status while the existing generic-exception arm
+  still yields a signed zone-B-decision ERROR. Every emitted verdict (PASS/FAIL/ERROR) is still
+  zone-B-attested and admitted by the REAL `merge_gates`. The discriminator T-M4-04 builds on this
+  hardened runner. Touched ONLY `gates/runner.py` + `tests/test_runner_hardening.py` (10 tests); ruff +
+  mypy (130 files) clean; target quartet + full suite (1061 passed / 1 skipped) green.

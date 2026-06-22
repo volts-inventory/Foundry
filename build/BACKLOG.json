@@ -2020,7 +2020,7 @@
         "Tests added incl. the trusted-component-outage->paused-not-wedged EXIT property; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M4-10",

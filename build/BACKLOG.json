@@ -1796,7 +1796,7 @@
         "mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M4-02",
@@ -1849,7 +1849,7 @@
         "Tests added incl. forged-zone-A-report rejection; the 4 adversarial exit attacks each CANNOT reach production: (malicious-test, forged-results, forged-verdict, fork-divergence) (forged-results arm here); mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M4-04",
@@ -1906,7 +1906,7 @@
         "Tests added incl. cross-tree/config replay rejection (forged-verdict arm of the 4 adversarial exit attacks each CANNOT reach production: (malicious-test, forged-results, forged-verdict, fork-divergence)); mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M4-06",

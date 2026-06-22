@@ -1847,3 +1847,104 @@ FoundryCheckpointer). Criterion->test + the genuine-E2E-vs-stand-in map for the 
 - M3F6. **Gates: ruff + mypy clean (129 files); full suite 976 passed / 1 skipped, incl.
   test_phase3_exit. Touched ONLY operator.py, capacity.py, store_resilience.py, schemas/operations.py
   + their 4 test files + this note. No exit-property behavior changed.**
+
+## Cross-fork digest-disqualification + admission_look (T-M4-02; the fork-divergence defense)
+- M4D1. **`global_records.py` now carries a 5th cross-fork record: the digest-disqualification
+  latch (gov §5, plan §2.4) — the fork-divergence defense.** `disqualify_digest(digest, reason,
+  run_id) -> bool` ATOMICALLY disqualifies a build/tree digest insert-if-absent under the lock
+  (`INSERT OR IGNORE` + the `digest` PRIMARY KEY — mirrors `try_first_alpha_look`; rowcount==1 ⇒
+  THIS call recorded it). It is KEYED ON THE DIGEST, never the `run_id`, and MONOTONIC: a later
+  fork minting a fresh `run_id` and re-presenting the SAME digest reads still-disqualified and
+  cannot un-disqualify or overwrite the FIRST reason/run_id (concurrent callers collapse to one
+  record, FIRST wins). So a malicious fork cannot launder a stable-FAIL'd / forged-verdict digest
+  by forking. `digest_disqualified(digest) -> bool` is the read.
+- M4D2. **`admission_look(digest) -> AdmissionState` is the deploy-time admission controller's
+  (T-M4-07) one-shot read.** It FOLDS two disqualifying conditions into ONE truthful latch-state:
+  an EXPLICIT digest-disqualification OR a stable-FAIL latch on the digest FOR ANY GATE (new private
+  `_stable_fail_latched_any(digest)` — the public `stable_fail_latched(digest, gate)` needs a gate
+  arg, admission is digest-scoped). Returns `AdmissionState.DISQUALIFIED` if either holds, else
+  `ADMISSIBLE`. The query REPORTS state truthfully; the *not-admit-on-unknown* fail-closed policy is
+  the ADMISSION CALLER'S, not this query's (gov §5). `AdmissionState` is a 2-value `enum.Enum`
+  (ADMISSIBLE/DISQUALIFIED) added to `GlobalRecordsView` alongside the existing read methods. T-M4-07
+  consumes `admission_look`; do NOT re-derive admissibility from the live `gates` reducer (latest-by-
+  seq) — that legitimately shows PASS after a recovery while admission HOLDS the digest latched.
+- M4D3. **Additive only — no existing latch touched.** New table `digest_disqualification`; existing
+  stable_fail/negative/nonce/alpha latches and their callers (`gates/runner.py`) unchanged. Gates:
+  ruff + mypy clean (129 files); 8 new tests in `tests/test_global_records_admission.py` green; full
+  suite 984 passed / 1 skipped. Touched ONLY `global_records.py` + the new test + this note. NB there
+  is NO `tests/test_global_records.py` in the tree (the DoD referenced it but the existing latch
+  coverage lives in `test_gate_runner.py`/`test_gate_wiring.py` etc. — all still green).
+
+## Trusted-component lifecycle — key/component rotation + HA (T-M4-09)
+- M4L1. **`foundry/operations/trusted_lifecycle.py` is the SIBLING of `trusted_component.py`** for the
+  §8 lifecycle concerns (rotation, HA), REUSING `trusted_component`'s availability vocabulary verbatim
+  (`on_unavailable`/`on_recovery`/`TrustedComponent`) — never editing it. Pure/deterministic, clock
+  INJECTED (`now_ms` is always an arg, never read). Dev-grade roots honesty (§0.3): rotation LOGIC is
+  real, key CUSTODY is dev-grade (the HMAC keys live in `gates/attestation.py`).
+- M4L2. **Rotation WITH OVERLAP, not a hard cut-over.** `RotationState(component, versions, grace_ms)`
+  holds the monotonic `KeyVersion` history (last = active signer). `rotate_key(new_key_id, now_ms,
+  in_flight_key_ids=())` advances version by one and schedules the prior key to retire at
+  `now_ms + grace_ms` (it stays VERIFIABLE for the grace window so in-flight verdicts signed under it
+  drain). `verifiable_under(key_id, now_ms)` is the verifier's grace check — fail-closed: a verdict's
+  `key_id` (the `"{scheme}:{key_id}:{mac}"` middle field of `attestation.py`) is verifiable iff live OR
+  `now_ms < retired_ms` (strict — non-verifiable AT/after retirement); an UNKNOWN key_id is never
+  verifiable. Same model rotates `lineage_map_revision`/`scanner_config_rev` (any `TrustedComponent`).
+- M4L3. **FAIL-CLOSED on orphan — never silently break trust.** A rotation/`retire(...)` that would
+  invalidate an in-flight, still-valid attestation (zero-grace rotation away from a key still in flight,
+  or retiring a key with an in-flight verdict) RAISES `OrphanedVerdictError`; the caller calls
+  `pause_for_rotation(...)` which mints the SAME PAUSED(`trusted_component_unavailable`) record an outage
+  does (reuses `on_unavailable`) — never WEDGED, $0/hr, not alerted. A grace_ms>0 rotation keeps the
+  prior key verifiable, so a normal overlapped rotation NEVER orphans. Monotonicity: version only
+  advances; rotating to the active key_id or a non-monotonic version history is rejected; the active
+  signer can't be retired (there must always be a live signer).
+- M4L4. **HA = redundant instances sharing one signing identity (§4).** `HAComponent(component,
+  primary, instances)` + `failover() -> (new_component, serving | None)`: a healthy primary keeps
+  serving (no needless failover); an unhealthy primary fails over to a healthy instance (it becomes the
+  new primary); NO healthy instance returns `(self, None)`. `classify_ha(...)` wraps it: serving
+  instance → RUNNING (`on_recovery`); none healthy → PAUSED(`trusted_component_unavailable`), NOT WEDGED
+  (`on_unavailable`). So a single-instance outage degrades to PAUSED-then-resumes-on-the-replica, and a
+  TOTAL outage stays PAUSED fail-closed. `healthy_instance()` prefers the primary, deterministic order
+  otherwise. Gates: ruff + mypy clean (130 files); 24 new tests in `tests/test_trusted_lifecycle.py`
+  green; full suite 1038 passed / 1 skipped. Touched ONLY the new module + test + this note.
+
+## Trust root — Phase-4 artifact schemas (T-M4-01)
+The M4 runner/builder/admission/deployer waves build on these frozen records (APPEND-ONLY to the
+existing modules; reused where adequate). DEV-GRADE-ROOTS HONESTY (plan §0.3): the records, their
+input-binding, and the re-verification LOGIC are REAL + CORRECT; only the cryptographic ROOT (builder
+hardware/OIDC identity, signing-key custody, hermetic isolation, deployer least-privilege boundary)
+is dev-grade — stamped in every new docstring.
+- TR1. **security.py — REUSED, not duplicated:** `SBOMRef` (the agent-side SBOM *handle*),
+  `ThreatModel`/`SecurityTriage`/`SupplyChainReport` (`trust_root_touched`)/`AuditFinding`/`Severity`
+  pre-existed and are UNTOUCHED. `EvidencePack` (governance.py, AS5) already carries
+  `provenance_predicate_uri` + `scanner_config_rev` — the Phase-4 predicate is the body that handle
+  points at. **ADDED** `Material` (one pinned hash-addressed build input: `uri`+`digest`),
+  `SLSAProvenance` (the SLSA/in-toto predicate — `build_type`/`builder_id`/`invocation_uri`/source +
+  `tree_sha`/`subject_name`/`subject_digest` + `materials: tuple[Material,...]` + `gate_result_uris`
+  (WORM attested gate-state, gov §1c/§4) + `scanner_config_rev`/`trust_store_rev`/`hermetic`; helpers
+  `material_digests()`/`binds_subject()`), and the fuller `SBOM` (authoritative, distinct from
+  `SBOMRef`: inline `components: tuple[SBOMComponent,...]` of name+version+digest+license,
+  `fully_resolved`, `unpinned_components()`) + its `SBOMComponent` sub-record.
+- TR2. **operations.py — `DeployPlan` (the plan+rollback BODY the agent authors) is REUSED, untouched.**
+  It does NOT cover idempotent rollback-capable EXECUTION, so **ADDED** `DeployResult` (the non-agent
+  deployer's execution record: `deploy_id` + the exact admitted `subject_digest` + process-stable
+  `idempotency_key` (content_digest, never `hash()` — L7) + `admission_decision_uri` link +
+  `rollback_to_digest`/`rolled_back`). Also **ADDED** `BuildRequest`/`BuildResult` (hermetic inputs —
+  source/base-image/material digests — → produced `subject_digest` + `provenance_uri` handle) and the
+  `AdmissionDecision` (+ `AdmissionVerdict` enum ADMIT/DENY/INDETERMINATE) carrying the EXACT
+  `subject_digest`, the verified grounds (`signature_verified`, `all_required_gates_pass` +
+  `required_gates`, `gate_state_uri`, `scanner_config_rev` match, `stable_fail_latched`), and `reason`;
+  `admitted()` is True ONLY on ADMIT (fail-closed — DENY/INDETERMINATE never ship, gov §5). This is the
+  SCHEMA side; T-M4-02's `global_records.admission_look(digest)`/`disqualify_digest` are the cross-fork
+  LATCH the admission controller (T-M4-07) reads — the `AdmissionDecision` is the controller's emitted
+  record, distinct from that latch query.
+- TR3. **The provenance predicate is INPUT-BOUND (gov §4 — the load-bearing property).** Every field
+  naming an input (each material's `digest`, `source_digest`, `tree_sha`, `gate_result_uris`,
+  `scanner_config_rev`, `subject_digest`) is part of `content_identity()`, so changing ANY material
+  digest (or reordering materials — tuple order IS identity) changes the predicate the signature
+  attests over and admission re-checks. Tests prove material-digest / subject / gate-state / config
+  flips all re-key identity.
+- TR4. **No `Field(default_factory=...)` needed (S1):** every mutable default is a `tuple` literal
+  `= ()` (immutable → no RUF012); the `Field` import was REMOVED from security.py after switching to
+  tuple defaults. Tests in `tests/test_schemas_trust_root.py` (34 tests; mirrors the operations CASES
+  table + spot-checks). Gate chain clean: ruff + mypy (130 files) clean; full suite 1038 passed /
+  1 skipped. Touched ONLY `schemas/security.py`, `schemas/operations.py`, the new test, and this note.

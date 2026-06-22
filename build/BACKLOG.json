@@ -1879,7 +1879,7 @@
         "Tests added incl. the malicious-test arm of the 4 adversarial exit attacks each CANNOT reach production: (malicious-test, forged-results, forged-verdict, fork-divergence) (malicious-test CANNOT reach production); mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M4-05",
@@ -1965,7 +1965,7 @@
         "Tests added covering all 4 exit attacks + the clean-admit control; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M4-08",

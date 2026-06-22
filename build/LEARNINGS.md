@@ -2010,3 +2010,75 @@ is dev-grade — stamped in every new docstring.
   zone-B-attested and admitted by the REAL `merge_gates`. The discriminator T-M4-04 builds on this
   hardened runner. Touched ONLY `gates/runner.py` + `tests/test_runner_hardening.py` (10 tests); ruff +
   mypy (130 files) clean; target quartet + full suite (1061 passed / 1 skipped) green.
+
+## Trust root — the hermetic SLSA-L3 builder (T-M4-06)
+- TB1. **`foundry.trust_root.TrustedBuilder(signer, *, builder_id).build(request, *, components,
+  gate_result_uris=(), scanner_config_rev=None, trust_store_rev=None, seq=None) -> BuildOutput`.**
+  Turns a pinned `BuildRequest` (schemas/operations.py) into a `BuildOutput` dataclass carrying
+  `(result: BuildResult, provenance: SLSAProvenance, sbom: SBOM, signed_verdict: GateResult)`. The
+  bodies travel on `BuildOutput` (NOT inline on `BuildResult`) so admission T-M4-07 gets the EXACT
+  objects to re-present; `BuildResult` carries only the subject digest + `cas://provenance/` +
+  `cas://sbom/` handles + `signature` (= `signed_verdict.runner_attestation`).
+- TB2. **Hermeticity is STRUCTURAL, not a runtime guard. "No network" = pinned-inputs-only.** The
+  module has NO egress seam at all (no http/resolver/clock) — the ONLY way to pull in something
+  unnamed is an un-pinned input, and `_pinned_materials` refuses those fail-closed. The single
+  predicate `is_pinned(d)` = `^sha256:[0-9a-f]{64}$` (lowercase hex only — uppercase is NOT canonical
+  and is rejected). Refused inputs (raise `NonHermeticBuildError` BEFORE any work): un-pinned
+  source_digest / base_image_digest / any material_digest, any unpinned SBOM component
+  (`c.digest`), or `request.hermetic is False`. Materials = source + base image + declared
+  material_digests, all woven into the predicate's `materials` tuple.
+- TB3. **Reproducible subject digest is `content_digest` over the canonical sorted tuple of pinned
+  inputs** (`build_type, source_digest, tree_sha, base_image_digest, [material digests in order]`),
+  prefixed `sha256:`. Same pinned inputs ⇒ byte-identical subject ⇒ identical `SLSAProvenance`
+  identity ⇒ identical handles + signature (test asserts the WHOLE BuildOutput is reproducible).
+  Flipping ANY material digest re-keys subject AND provenance (security.py INPUT-BINDING).
+- TB4. **Sign by binding the provenance INTO the verdict.** `_sign_build` mints a PASS build
+  `GateResult` (`run_against=tree_sha`, `results_digest=subject_digest`) then
+  `ZoneBSigner.with_provenance_binding(verdict, provenance)`. Verify with
+  `DevGateWriteVerifier.verify_provenance_binding(signed_verdict, provenance)` (the attestation
+  provenance-binding seam, T-M4-05): True for the genuine provenance, False for any tampered one
+  (different material/subject digest → different `content_identity()` → different MAC). T-M4-07
+  admission re-verifies exactly this: signature + the predicate's gate-state for the produced digest.
+- TB5. **CAS handles are content-identity-keyed (DS9/L4) so re-deriving yields the same uri.**
+  provenance handle = `cas://provenance/<prov.content_identity()>`; SBOM handle is computed over the
+  SBOM with `sbom_uri=""` blanked (it's filled FROM the handle, so it can't be in its own identity) →
+  `cas://sbom/<keyed.content_identity()>`. Dev-grade HMAC root (plan §0.3) — logic real, root local.
+  16 tests; ruff (foundry tests) + mypy (133 files) clean; full suite green (1 skipped). Touched ONLY
+  `foundry/trust_root/__init__.py`, `foundry/trust_root/trusted_builder.py`,
+  `tests/test_trusted_builder.py`.
+
+## Held-out-mutant + behavioral-invariance discriminator — the malicious-test defense (T-M4-04)
+- DC1. **`foundry/gates/discriminator.py` is the machinery behind `mutant_rotation_id` — a green
+  pytest run is NECESSARY but NOT SUFFICIENT (gov §1c).** `TestSuiteDiscriminator(mutants,
+  invariants, verdict_class, mutant_rotation_id, kill_bar).evaluate(workdir) -> DiscriminatorReport`
+  is a PURE observation (no signing power). Two controls: (a) **held-out mutants** — each
+  `HeldOutMutant(mutant_id, target, find, replace)` is applied to a COPY of the tree and the agent
+  suite is re-run under the SAME pinned harness (`pinned_test_env`); the suite KILLS the mutant iff it
+  FAILS (pytest rc==1) on the mutated tree. A suite still GREEN on mutated code (rc 0 or 5) means the
+  mutant SURVIVED → the suite tested nothing real. `kill_score = killed/total`; (b) **behavioral
+  invariance** — each `BehavioralInvariant(module, call, args, expected)` is checked in a child
+  interpreter against the REAL tree (imports the unit, asserts the golden output). The report
+  `passed = (kill_score >= required_kill_ratio) AND no invariant violated`.
+- DC2. **Gate-class-aware (domains.md §1): `required_kill_ratio(verdict_class, bar)` is the class
+  knob.** Class-2 (EXECUTION_DETERMINISTIC) demands the full `bar` (default 1.0 — a single surviving
+  mutant is fatal); class-1 (CONFIG_EVALUABLE) + class-3 (STATISTICAL) get ratio 0.0 — the held-out-
+  mutant assumption is class-2-only, so the discriminator is vacuously satisfied and never rejects a
+  statistical/perceptual test. SAME gamed suite + surviving mutant: class-2 FAILs, class-3 passes.
+- DC3. **`TestGate(discriminator=...)` consults it: the discriminator runs in ZONE A (executor, no
+  key) ONLY when pytest is green** (a red/no-tests run is already FAIL/ERROR by exit code), folds its
+  `model_dump()` report onto the sealed observation under `DISCRIMINATOR_KEY` + surfaces `findings`.
+  Zone B `decide`: rc/exit-code semantics + `min_passed` adequacy floor UNCHANGED, then `green AND
+  adequate AND discriminator.passed` ⇒ PASS, else FAIL. `mutant_rotation_id` mirrors from the wired
+  discriminator so the reuse key + the substitution family agree. No discriminator wired → legacy
+  (green suffices). T-M4-11 (Phase-4 exit) drives the gamed-green-suite-CAUGHT path through this.
+- DC4. **GOTCHA (cost a flaky debug pass): do NOT `copytree` `__pycache__`/`.pytest_cache` into the
+  mutant copy.** The agent suite's own `execute()` run leaves a `calc.pyc` recording the ORIGINAL
+  source mtime; a same-second `write_text` of the mutated source can leave the mtime unchanged →
+  Python imports the STALE (unmutated) bytecode → the mutant spuriously "survives" → NON-DETERMINISTIC
+  kill score (flipped run-to-run). Fix: `shutil.copytree(..., ignore=ignore_patterns("__pycache__",
+  ".pytest_cache"))` forces a recompile of the mutated source. An inapplicable mutant (`find` absent)
+  is fail-closed: counted as survived, never as killed.
+- DC5. 14 tests; ruff (foundry tests) + mypy (133 files) clean; full suite green (1091 passed, 1
+  skipped). Touched ONLY `foundry/gates/discriminator.py`, `foundry/gates/test.py`,
+  `tests/test_discriminator.py`. The new public types are imported directly from
+  `foundry.gates.discriminator` (no `__init__.py` re-export needed this wave).

@@ -79,11 +79,13 @@ from foundry.graph.assurance_wiring import assurance_gate_set
 from foundry.graph.gate_wiring import FEATURE_DIFF_KIND
 from foundry.graph.supervisor import (
     MODE_ASSISTANT,
+    MODE_AUTONOMOUS,
     MODE_GATED,
     build_supervisor_graph,
 )
 from foundry.schemas.base import ExternalAction, IdempotencyPath
 from foundry.schemas.gates import GateStatus
+from foundry.schemas.operations import BuildRequest
 from foundry.state.factory_state import FactoryState
 
 if TYPE_CHECKING:
@@ -93,11 +95,13 @@ if TYPE_CHECKING:
     from foundry.agents._runtime import AgentRuntime
     from foundry.agents.implementation.senior_engineer import ArtifactResolver
     from foundry.context import SymbolIndex
+    from foundry.gates.attestation import DevGateWriteVerifier
     from foundry.gates.runner import TwoZoneGateRunner
     from foundry.graph.gate_wiring import BlobResolver
     from foundry.schemas.base import Artifact
     from foundry.schemas.gates import GateResult
     from foundry.schemas.governance import SignOffRecord
+    from foundry.trust_root import AdmissionController, Deployer, TrustedBuilder
 
 __all__ = [
     "TERMINAL_PASS_GATES",
@@ -105,6 +109,21 @@ __all__ = [
     "gated_release_admitted",
     "terminal_gates_pass",
 ]
+
+# The default deploy target an autonomous release ships to (folded into the
+# deploy idempotency key; a single-target dev default).
+_DEFAULT_DEPLOY_TARGET = "prod"
+# Pinned hermetic build inputs for the autonomous build of the integrated
+# subject. The trust root requires content-addressed (sha256:<64-hex>) inputs;
+# in the dev-grade root these are stable stand-ins (real KMS/OIDC + a real
+# source/base-image pin are an ops task, plan §0.3). They are CONSTANT so the
+# build is a pure function of (integrated tree_sha, subject identity), hence
+# resume-stable.
+_AUTONOMOUS_BUILD_TYPE = "foundry-autonomous-build"
+_AUTONOMOUS_SOURCE_URI = "git://foundry/integrated"
+_AUTONOMOUS_SOURCE_DIGEST = "sha256:" + "5" * 64
+_AUTONOMOUS_BASE_IMAGE_DIGEST = "sha256:" + "6" * 64
+_AUTONOMOUS_BUILD_CONFIG_URI = "cas://build-config/autonomous"
 
 # Supervisor subgraph node id + the emit node id.
 _FACTORY = "factory"
@@ -290,6 +309,74 @@ def _release_sign_offs(state: FactoryState) -> tuple[SignOffRecord, ...]:
     return tuple(records)
 
 
+# ---- Autonomous mode (T-M4-10) ----------------------------------------------
+# Autonomous mode runs the SAME trusted Gated assurance spine, but the RELEASE
+# boundary is the TRUST ROOT (build → admit → deploy, hands-off): there is NO
+# human/recorded sign-off gate. ADMISSION is the SOLE release gate — a DENY
+# emits NOTHING (fail-closed); a halted/failed/denied run deploys NOTHING.
+
+
+def _autonomous_attested_gates(state: FactoryState) -> tuple[GateResult, ...]:
+    """The newest-by-``Seq`` attested GateResult per required release gate — the
+    trust-filtered, runner-attested gate-state admission re-verifies. Reuses
+    :func:`_attested_terminal_results` (identical selection)."""
+    return _attested_terminal_results(state)
+
+
+def _admission_tree_and_gates(
+    gate_results: tuple[GateResult, ...],
+) -> tuple[str, tuple[GateResult, ...]] | None:
+    """The integrated ``tree_sha`` + the attested gate-state bound to it that the
+    autonomous build is keyed to and admission re-verifies.
+
+    Admission's gate-state check is INPUT-BOUND: every required gate's
+    ``run_against`` must equal the provenance's ``tree_sha`` (a verdict for a
+    DIFFERENT tree re-presented for this subject is rejected). Across the gated
+    spine the terminal gates (Spec/Build/Test) and the assurance gates
+    (Security/Audit/...) run on DISTINCT materialized trees (the assurance
+    materializer RE-HASHES the augmented tree, AW2), so the gate-state spans
+    >1 ``run_against``. We therefore pick the SINGLE ``run_against`` group
+    covering the MOST attested gates — the integrated tree the largest coherent
+    gate-state is keyed to — and build/admit against exactly THAT tree with
+    exactly the gates bound to it. So every gate admission re-verifies is
+    honestly bound to the provenance tree (no cross-tree laundering), and the
+    floor (Security+Audit) is always part of the largest assurance group.
+
+    Returns ``None`` when no attested verdict carries a ``run_against`` (the emit
+    then fail-closes — deploy nothing)."""
+    groups: dict[str, list[GateResult]] = {}
+    for g in gate_results:
+        if g.run_against:
+            groups.setdefault(g.run_against, []).append(g)
+    if not groups:
+        return None
+    # Largest group wins; ``run_against`` tiebreak keeps the choice deterministic
+    # (resume-stable) when two trees cover the same count.
+    tree_sha = max(groups, key=lambda t: (len(groups[t]), t))
+    return tree_sha, tuple(groups[tree_sha])
+
+
+def _autonomous_build_request(state: FactoryState, tree_sha: str, seq: Any) -> BuildRequest:
+    """The pinned :class:`BuildRequest` for the integrated subject (hands-off).
+
+    A PURE function of the integrated ``tree_sha`` + the constant pinned dev
+    inputs, so the produced ``subject_digest`` (and thus the whole build → admit
+    → deploy chain) is resume-stable (L7). Every input is content-addressed
+    (sha256:<hex>) so the hermetic builder accepts it; the integrated tree is
+    the ``tree_sha`` the assurance gate-state is keyed to, so the resulting
+    provenance binds the gates admission re-verifies."""
+    return BuildRequest(
+        build_type=_AUTONOMOUS_BUILD_TYPE,
+        source_uri=_AUTONOMOUS_SOURCE_URI,
+        source_digest=_AUTONOMOUS_SOURCE_DIGEST,
+        tree_sha=tree_sha,
+        base_image_digest=_AUTONOMOUS_BASE_IMAGE_DIGEST,
+        build_config_uri=_AUTONOMOUS_BUILD_CONFIG_URI,
+        hermetic=True,
+        seq=seq,
+    )
+
+
 def build_factory_graph(
     rt: AgentRuntime,
     *,
@@ -301,8 +388,12 @@ def build_factory_graph(
     index: SymbolIndex | None = None,
     max_fix_attempts: int = 3,
     mode: str = MODE_ASSISTANT,
+    builder: TrustedBuilder | None = None,
+    admission: AdmissionController | None = None,
+    deployer: Deployer | None = None,
+    gate_verifier: DevGateWriteVerifier | None = None,
 ) -> CompiledStateGraph[FactoryState]:
-    """Compile the full factory graph (Assistant-mode default; Gated mode opt-in).
+    """Compile the full factory graph (Assistant-mode default; Gated/Autonomous opt-in).
 
     Mounts :func:`build_supervisor_graph` (threaded the SAME ``mode``) as the
     ``factory`` subgraph node, then a MODE-SPECIFIC ``emit`` node, then ``END``
@@ -338,11 +429,32 @@ def build_factory_graph(
         ``"assistant"`` (DEFAULT) compiles the Phase-1 spine + the bare-PR emit
         (back-compat). ``"gated"`` threads the Gated supervisor (tiering +
         design/release sign-off + assurance) and the evidence-pack-carrying,
-        release-gated emit.
+        release-gated emit. ``"autonomous"`` (Phase-4, T-M4-10) threads the SAME
+        assurance spine but the emit is the hands-off TRUST-ROOT chain
+        (build → admit → deploy): admission is the SOLE release gate (no human
+        / recorded sign-off), and a DENY / halted run deploys NOTHING
+        (fail-closed).
+    builder / admission / deployer / gate_verifier:
+        The Phase-4 trust-root components the AUTONOMOUS emit wires hands-off
+        (injected so tests can pass doubles; INFRA): the hermetic
+        :class:`TrustedBuilder`, the fail-closed deploy-time
+        :class:`AdmissionController` (admission is the SOLE release gate), the
+        least-privileged :class:`Deployer`, and the :class:`DevGateWriteVerifier`
+        the controller re-verifies the build + gate signatures under (it shares
+        the runner's zone-B key + the runner's cross-fork records). Required for
+        ``mode="autonomous"``; ignored otherwise.
 
     Returns the COMPILED top-level graph.
     """
     gated = mode == MODE_GATED
+    autonomous = mode == MODE_AUTONOMOUS
+    if autonomous and (
+        builder is None or admission is None or deployer is None or gate_verifier is None
+    ):
+        raise ValueError(
+            "autonomous mode requires builder, admission, deployer, and "
+            "gate_verifier (the trust-root chain build → admit → deploy)"
+        )
 
     supervisor = build_supervisor_graph(
         rt,
@@ -352,7 +464,7 @@ def build_factory_graph(
         source_dir=source_dir,
         index=index,
         max_fix_attempts=max_fix_attempts,
-        mode=MODE_GATED if gated else MODE_ASSISTANT,
+        mode=mode,
     ).compile()
 
     def emit(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
@@ -465,9 +577,106 @@ def build_factory_graph(
         )
         return {"phase": "done", "actions": [action]}
 
+    def autonomous_emit(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        """Autonomous-mode emit: the hands-off TRUST-ROOT chain build → admit →
+        deploy. ADMISSION is the SOLE release gate (T-M4-10; governance §4/§5).
+
+        Runs AFTER the (gated-spine) supervisor completes. There is NO human /
+        recorded sign-off gate — the only release authority is the deploy-time
+        :class:`AdmissionController`:
+
+        1. **Guard** on the required gate-state (terminal Spec+Build+Test AND the
+           tier-scaled assurance family) all PASS, newest-by-Seq on the
+           trust-filtered ``gates`` channel (runner-attested only, L5). A halted /
+           failed run (a stable-FAIL latch, the convergence bound spent, a missing
+           verdict) fails this guard → emit NOTHING (no build, no admit, no deploy).
+        2. **Build** the integrated subject hands-off via :class:`TrustedBuilder`
+           over the pinned inputs keyed to the integrated ``tree_sha`` the gates
+           ran over → a signed, provenance-bound :class:`BuildOutput`.
+        3. **Admit** via :class:`AdmissionController` — re-verifying the build
+           signature + every required gate's attestation PASS-for-THIS-tree + the
+           cross-fork disqualification latch for the EXACT subject digest.
+           Admission is the SOLE release gate: on DENY emit NOTHING (fail-closed;
+           no deploy).
+        4. **Deploy** ONLY an admitted decision via :class:`Deployer` — emit the
+           deploy ``ExternalAction`` (idempotent; the outbox is the only
+           outside-world surface — no real deploy here).
+
+        The deploy idempotency key is the deployer's deterministic
+        ``content_digest`` over (subject_digest, target) — process-stable (L7), so
+        a kill-then-resume re-derives the SAME key and ``union_actions`` coalesces
+        it: NO duplicate deploy. A halted / DENY'd run produces NO deploy action.
+        """
+        assert builder is not None  # narrowed by the autonomous-mode ctor check
+        assert admission is not None
+        assert deployer is not None
+        assert gate_verifier is not None
+
+        # -- 1. Guard: every required gate PASS (fail-closed) ------------------
+        # A halted / failed run (latch, bound spent, missing verdict) fails here.
+        if not _gates_all_pass(_latest_by_name(state), _required_gate_names(state)):
+            return {"phase": "halted"}
+        subject = _pr_subject(state)
+        if subject is None:
+            return {"phase": "halted"}
+
+        all_gates = _autonomous_attested_gates(state)
+        bound = _admission_tree_and_gates(all_gates)
+        if bound is None:
+            # Impossibly (post-guard) no attested verdict carries the integrated
+            # tree — fail-closed, deploy nothing.
+            return {"phase": "halted"}
+        tree_sha, gate_results = bound
+        # The required gates admission re-verifies are exactly the attested gates
+        # bound to the chosen integrated tree (sorted for a deterministic,
+        # resume-stable tuple). Every one is honestly bound to the provenance
+        # tree — admission's input-binding holds.
+        required_gates = tuple(sorted(g.name for g in gate_results))
+
+        # -- 2. Build the integrated subject hands-off (signed provenance) -----
+        build_seq = rt.seq(config, _EMIT, "build:autonomous")
+        request = _autonomous_build_request(state, tree_sha, build_seq)
+        build_out = builder.build(
+            request,
+            gate_result_uris=tuple(g.results_digest for g in gate_results if g.results_digest),
+            scanner_config_rev=_scanner_config_rev(gate_results),
+            seq=build_seq,
+        )
+
+        # -- 3. Admit — the SOLE release gate (fail-closed on DENY) ------------
+        admit_seq = rt.seq(config, _EMIT, "admission:autonomous")
+        decision = admission.admit(
+            build_out.result.subject_digest,
+            provenance=build_out.provenance,
+            build_verdict=build_out.signed_verdict,
+            gate_results=gate_results,
+            required_gates=required_gates,
+            records=runner.records,
+            verifier=gate_verifier,
+            scanner_config_rev=_scanner_config_rev(gate_results),
+            seq=admit_seq,
+        )
+        if not decision.admitted():
+            # ADMISSION DENIED — emit NOTHING (no deploy). The trust root is the
+            # only release authority; a denied artifact ships nothing (gov §5).
+            return {"phase": "halted"}
+
+        # -- 4. Deploy ONLY the admitted decision (idempotent) ----------------
+        # A content-addressed handle for the admitting decision (DS9), a pure
+        # function of its content identity so resume re-derives the same handle.
+        decision_uri = f"cas://admission/{content_digest(decision.model_dump(mode='json'))}"
+        _result, action = deployer.deploy(
+            decision,
+            admission_decision_uri=decision_uri,
+            seq=rt.seq(config, _EMIT, "action:deploy"),
+        )
+        return {"phase": "done", "actions": [action]}
+
+    _emit_node = autonomous_emit if autonomous else (gated_emit if gated else emit)
+
     g: StateGraph[FactoryState] = StateGraph(FactoryState)
     g.add_node(_FACTORY, supervisor)
-    g.add_node(_EMIT, gated_emit if gated else emit)
+    g.add_node(_EMIT, _emit_node)
     g.add_edge(START, _FACTORY)
     g.add_edge(_FACTORY, _EMIT)
     g.add_edge(_EMIT, END)

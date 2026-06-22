@@ -2159,3 +2159,54 @@ is dev-grade — stamped in every new docstring.
 - DP5. 18 tests; ruff (foundry tests) + mypy (135 files) clean; full suite 1121 passed / 1 skipped.
   Touched ONLY `foundry/trust_root/deployer.py`, `tests/test_deployer.py`, the `Deployer`/`DeployRefused`
   re-export in `foundry/trust_root/__init__.py`, and this note.
+
+## Autonomous mode — trust-root admission as the SOLE release gate (T-M4-10)
+- AU1. **`MODE_AUTONOMOUS = "autonomous"` reuses the GATED supervisor spine VERBATIM.**
+  `build_supervisor_graph` now treats `gated = mode in (MODE_GATED, MODE_AUTONOMOUS)`, so the phase
+  topology (tiering + the Design sign-off boundary + the assurance subgraph + the convergence bound)
+  is BYTE-IDENTICAL to gated — only the triage `mode` channel records the exact mode (`mode if gated
+  else MODE_ASSISTANT`). The DIFFERENCE is entirely in the factory_graph emit node: the release gate
+  is the TRUST ROOT (build → admit → deploy), NOT a human/recorded sign-off. The supervisor still
+  RECORDS a release SignOffRecord (harmless), but autonomous emit IGNORES it — admission is the gate.
+- AU2. **Autonomous emit chain = guard → build → admit → deploy, fail-closed at each step.** (1) GUARD
+  on every required gate PASS (terminal Spec+Build+Test + tier-scaled assurance, `_required_gate_names`
+  / `_gates_all_pass` newest-by-Seq on the trust-filtered `gates` channel) — a halted/failed/latched
+  run fails here and emits NOTHING (no build). (2) BUILD the integrated subject hands-off via
+  `TrustedBuilder.build(BuildRequest)` keyed to the integrated `tree_sha` → signed provenance + SBOM.
+  (3) ADMIT via `AdmissionController.admit(...)` — **the SOLE release gate**; on `not decision.admitted()`
+  emit NOTHING (no deploy). (4) DEPLOY only the admitted decision via `Deployer.deploy(...)` → ONE
+  deploy `ExternalAction` (kind="deploy", gate_bearing, payload = `cas://admission/<decision id>`).
+  Inject `builder/admission/deployer/gate_verifier` as factory args (tests wire doubles); required
+  only for autonomous mode (ValueError if any is None). `gate_verifier` shares the runner's zone-B
+  KEY/KEY_ID + `runner.records` so it re-verifies the runner-attested gate-state + reads the
+  cross-fork disqualification latch.
+- AU3. **Admission's gate-state check is INPUT-BOUND to ONE tree, but the gated spine spans TWO.** The
+  terminal gates (Spec/Build/Test) and the assurance gates (Security/Audit/...) run on DISTINCT
+  materialized `run_against` trees (the assurance materializer RE-HASHES the augmented tree with
+  `changes.diff`, AW2). Admission rejects any required gate whose `run_against != provenance.tree_sha`
+  (`required_gate_wrong_tree`). FIX: `_admission_tree_and_gates` groups the attested gates by
+  `run_against`, picks the LARGEST group (the integrated tree the most gates share; deterministic
+  `(len, tree)` tiebreak), and builds+admits against EXACTLY that tree with EXACTLY the gates bound to
+  it (`required_gates = sorted(names in group)`). Every gate admission re-verifies is then honestly
+  bound to the provenance tree (no cross-tree laundering); the largest group is the assurance group, so
+  the always-on Security+Audit FLOOR is always covered.
+- AU4. **DENY deploys NOTHING (fail-closed) — the "denied artifact" test.** Force a DENY by
+  `records.disqualify_digest(subject_digest, ...)` so `admission_look(subject_digest)` reads
+  DISQUALIFIED — admission DENYs even though the live gate-state is all-PASS, and emit deploys nothing.
+  To pre-disqualify the EXACT digest, PROBE: run a clean autonomous build, recover its `tree_sha` via
+  `_admission_tree_and_gates`, re-derive the subject digest with `TrustedBuilder.build(_autonomous_
+  build_request(state, tree_sha, seq))` (subject_digest is a pure function of the PINNED inputs, NOT the
+  seq — so any seq works), then disqualify that digest before the real run. The build inputs are CONSTANT
+  dev stand-ins (`_AUTONOMOUS_*`), so the subject digest is a pure function of (integrated tree_sha) —
+  resume-stable.
+- AU5. **Idempotency holds via the deployer's key (DP3), NOT a graph-side key.** `Deployer.deploy`
+  derives `content_digest({op, subject_digest, target, from_digest})` — process-stable — so
+  kill-then-resume re-invoking the same `thread_id` re-runs the chain, re-derives the SAME subject digest
+  (pure-from-pinned-inputs) → SAME deploy key → `union_actions` coalesces: exactly ONE deploy. A
+  halted/DENY'd run produced no action to coalesce.
+- AU6. **Back-compat: assistant + gated emit paths are UNCHANGED.** Node selection is
+  `autonomous_emit if autonomous else (gated_emit if gated else emit)`; the supervisor's gated branch is
+  unchanged. 4 new autonomous tests; the existing factory_graph / factory_graph_gated / supervisor /
+  supervisor_phase2 suites pass untouched. Touched ONLY `foundry/graph/supervisor.py`,
+  `foundry/graph/factory_graph.py`, `tests/test_factory_graph_autonomous.py`. ruff (foundry tests) +
+  mypy (135 files) clean; full suite 1125 passed / 1 skipped.

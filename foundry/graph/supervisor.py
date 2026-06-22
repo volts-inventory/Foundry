@@ -134,6 +134,7 @@ if TYPE_CHECKING:
 __all__ = [
     "DEFAULT_ROUTE_CAPS_MICROUSD",
     "MODE_ASSISTANT",
+    "MODE_AUTONOMOUS",
     "MODE_GATED",
     "ROUTES",
     "build_supervisor_graph",
@@ -144,6 +145,15 @@ __all__ = [
 
 MODE_ASSISTANT = "assistant"  # Phase-1 flow (default; back-compat)
 MODE_GATED = "gated"  # Phase-2 flow: tiering + design/release sign-off + assurance
+# Phase-4 (Autonomous mode, T-M4-10): the SAME trusted Gated assurance spine
+# (tiering + assurance gates + the hardened runner + discriminator), but the
+# RELEASE boundary is NOT a human/recorded sign-off — it is the TRUST ROOT
+# (build → admit → deploy, hands-off). The deterministic gates + the assurance
+# family + the convergence bound are inherited UNCHANGED from Gated mode; the
+# only difference is the terminal release gate: deploy-time ADMISSION, not a
+# sign-off. So the supervisor phase spine is byte-identical to Gated; the
+# difference lives entirely in the factory_graph emit node.
+MODE_AUTONOMOUS = "autonomous"
 
 # ---- supervisor node ids ----------------------------------------------------
 
@@ -275,14 +285,25 @@ def build_supervisor_graph(
         (``classify_tier`` → ``risk_tier``), a Design sign-off boundary after
         architecture, the assurance subgraph after build+test, and a Release
         sign-off boundary (``release_allowed``-gated, fail-closed) before emit.
-        The Gated path only ADDS boundaries — the convergence bound + the
-        attested-only advancement are inherited unchanged (integrity is never
-        relaxed; gov §1e).
+        ``"autonomous"`` (Phase-4, T-M4-10) builds the SAME assurance spine as
+        Gated (tiering + the Design sign-off boundary + the assurance subgraph
+        + the convergence bound — integrity is never relaxed), so the phase
+        topology is byte-identical to Gated; the difference is the RELEASE
+        boundary, which is the TRUST ROOT (build → admit → deploy, hands-off)
+        rather than a human/recorded sign-off — and that lives entirely in the
+        factory_graph autonomous emit node, NOT here. The Gated/Autonomous paths
+        only ADD boundaries — the convergence bound + the attested-only
+        advancement are inherited unchanged (gov §1e).
 
     Returns the ``StateGraph`` UNCOMPILED — ``factory_graph`` (T-M1-14) compiles
     it, attaches the shared checkpointer, and appends the emit node.
     """
-    gated = mode == MODE_GATED
+    # Autonomous mode reuses the trusted Gated assurance spine verbatim (the
+    # phase order, the tiering, the assurance subgraph, the convergence bound).
+    # The ONLY difference is the terminal release gate (admission, not sign-off),
+    # which is the factory_graph emit node's concern — so the supervisor builds
+    # the same graph for both. (T-M4-10.)
+    gated = mode in (MODE_GATED, MODE_AUTONOMOUS)
     g: StateGraph[FactoryState] = StateGraph(FactoryState)
 
     # -- triage: classify + seed route/budget; gated also tiers (gov §1e) -----
@@ -292,7 +313,9 @@ def build_supervisor_graph(
             "phase": _TRIAGE,
             "route": route,
             "budget": _seed_budget(route),
-            "mode": MODE_GATED if gated else MODE_ASSISTANT,
+            # Record the EXACT mode on the single-writer channel (autonomous is
+            # distinct from gated even though it reuses the gated spine).
+            "mode": mode if gated else MODE_ASSISTANT,
         }
         if gated:
             # Change-risk tiering (gov §1e): write the risk_tier single-writer

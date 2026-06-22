@@ -2052,7 +2052,7 @@
         "Tests added: clean autonomous deploy control + each of the 4 attacks blocked pre-deploy; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M4-11",
@@ -2079,7 +2079,7 @@
         "Milestone gate sweep green: ruff, mypy foundry, full pytest, coverage >=80% overall (new code >=85%), scoped mutation >=70% or survivors justified in build/REVIEW.md; PROGRESS/STATUS updated to mark M4 exit (orchestrator may do this)"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     }
   ]
 }

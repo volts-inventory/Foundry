@@ -2210,3 +2210,42 @@ is dev-grade — stamped in every new docstring.
   supervisor_phase2 suites pass untouched. Touched ONLY `foundry/graph/supervisor.py`,
   `foundry/graph/factory_graph.py`, `tests/test_factory_graph_autonomous.py`. ruff (foundry tests) +
   mypy (135 files) clean; full suite 1125 passed / 1 skipped.
+
+## Phase-4 (Trust root & Autonomous) EXIT integration test — the honesty map (T-M4-11)
+`tests/test_phase4_exit.py` proves the four roadmap-named attacks CANNOT reach a deploy, each driven by
+the REAL component (non-vacuous) and each paired with a control that DOES deploy (load-bearing). 15 tests.
+- P4X1. **Each attack's BLOCKING verdict is produced by the real component, not a hand-flipped status.**
+  (1) Malicious-test: the real `TestGate(discriminator=TestSuiteDiscriminator(mutants=[ADD_MUTANT]))` over a
+  GAMED_SUITE attests FAIL (mutant SURVIVED); (2) forged-results: the real hardened `TwoZoneGateRunner`
+  with a `PinnedScannerConfig` re-derives the pin and attests FAIL on a weakened ran-rev (and ERROR on a
+  swapped sealed observation); (3) forged-verdict: the real `AdmissionController.admit` DENYs an unsigned
+  gate attestation (`required_gate_signature_invalid`) and a wrong-tree verdict (`required_gate_wrong_tree`);
+  (4) fork-divergence: real `GlobalRecords.disqualify_digest` / `latch_stable_fail` → real `admission_look`
+  DISQUALIFIED → admission DENYs despite valid signatures + all-PASS gate-state.
+- P4X2. **Propagation to "no deploy" reuses the REAL autonomous emit node, extracted via `app.nodes["emit"]`
+  off a compiled `build_factory_graph(..., mode=MODE_AUTONOMOUS)`.** Build the graph with the real
+  trust-root chain (TrustedBuilder/AdmissionController/Deployer/DevGateWriteVerifier), then `node.invoke(state,
+  config)` over a HAND-ASSEMBLED gate-state so the blocking verdict is the real component's output while the
+  build→admit→deploy chain runs verbatim. The emit closure reads only `state["gates"]` (admitted through the
+  REAL `merge_gates`) + a `feature_diff` subject handle + `risk_tier` (None → required gates
+  {spec,build,test,security,audit}). Attacks 1-2 splice the genuine FAIL/ERROR verdict into the gate-state →
+  guard halts (`{"phase": "halted"}`, no deploy); attacks 3-4 go through admission directly + assert the
+  `Deployer` REFUSES (`DeployRefused`) a non-admitted decision.
+- P4X3. **GENUINE-E2E vs DEV-GRADE-ROOT stand-ins (§0.3).** Genuine end-to-end: the discriminator, the
+  two-zone runner hardening, `merge_gates` admittance, admission re-verification, the cross-fork
+  `GlobalRecords`, the deployer's admitted-only `DeployRefused`, and the FULL compiled autonomous graph
+  (the clean control `test_clean_autonomous_run_deploys_exactly_once` reuses the T-M4-10 harness whole →
+  exactly ONE deploy). Dev-grade: the symmetric-HMAC `ZoneBSigner`/`DevGateWriteVerifier` (prod: air-gapped
+  signer / keyless OIDC), the constant pinned hermetic build inputs, and the SURROUNDING required-PASS
+  gate-state in the propagation tests — genuine `ZoneBSigner.with_attestation` records (mirrors
+  `test_admission.py`), not full materialized-tree gate runs. Only the BLOCKING verdict needs to be real.
+- P4X4. **Outage → PAUSED not WEDGED reuses `trusted_component` + `trusted_lifecycle` verbatim.**
+  `classify_for_dependencies` over an `AvailabilityModel` with the zone-B signer down → PAUSED(
+  TRUSTED_COMPONENT_UNAVAILABLE), $0/hr, not alertable; `on_recovery` → RUNNING (the round-trip). HA:
+  `classify_ha` fails a single-instance outage over to a healthy replica → RUNNING; all-down → STAYS PAUSED.
+  Never WEDGED in any branch.
+- P4X5. **Cross-test reuse without duplication.** Imports the autonomous harness helpers
+  (`_build_autonomous`, `_config`, `_deploy_actions`, `_gates_by_name`, `_src`, `KEY`, `KEY_ID`,
+  `BUILDER_ID`, `_CLEAN_DIFF`) from `tests/test_factory_graph_autonomous` rather than re-deriving them.
+  Touched ONLY `tests/test_phase4_exit.py` + this note. ruff (foundry tests) + mypy (135 files) clean;
+  full suite 1140 passed / 1 skipped.

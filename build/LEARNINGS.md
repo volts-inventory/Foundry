@@ -2082,3 +2082,51 @@ is dev-grade — stamped in every new docstring.
   skipped). Touched ONLY `foundry/gates/discriminator.py`, `foundry/gates/test.py`,
   `tests/test_discriminator.py`. The new public types are imported directly from
   `foundry.gates.discriminator` (no `__init__.py` re-export needed this wave).
+
+## Trust root — the fail-closed deploy-time admission controller (T-M4-07)
+- AD1. **`foundry.trust_root.AdmissionController(*, builder_id, require_hermetic=True)` is the
+  fail-closed deploy gate.** `admit(subject_digest, *, provenance: SLSAProvenance, build_verdict:
+  GateResult, gate_results: tuple[GateResult,...], required_gates: tuple[str,...], records:
+  GlobalRecordsView, verifier: DevGateWriteVerifier, seq, evidence_pack=None, scanner_config_rev=None,
+  gate_state_uri=None) -> AdmissionDecision`. Trusted infra (zone B): NO agent code, NO network, NO
+  clock — a PURE function of its re-presented evidence + the cross-fork records view + the verifier,
+  so the SAME inputs always yield the SAME `AdmissionDecision` (deterministic; tested incl.
+  order-independence). ADMIT iff ALL four checks hold for the EXACT digest; ANY miss ⇒ DENY.
+- AD2. **The 4 fail-closed checks, in order (short-circuit to DENY on first failure):**
+  (1) **Provenance bound (input-binding)** — `prov.binds_subject(subject_digest)` AND
+  `prov.builder_id == self.builder_id` AND (if `require_hermetic`) `prov.hermetic`. THIS is how
+  WRONG-DIGEST is denied: a verdict/provenance built for a DIFFERENT digest won't bind the requested
+  subject (`_R_PROVENANCE_UNBOUND`). Crucially the integrated `tree_sha` the gate-state keys to is
+  read FROM `prov.tree_sha`, NEVER a caller arg — so the gate-state check (#3) is bound to the tree the
+  provenance attests. (2) **Build signature re-verified** — `verifier.verify_provenance_binding(
+  build_verdict, prov)` re-presenting the EXACT prov; a forged/unsigned build sig OR a tampered
+  provenance (different `content_identity()`, even if it still binds the same subject) recomputes a
+  different MAC ⇒ DENY (`_R_SIG_INVALID`). (3) **Gate-state complete + for THIS tree** — every name in
+  `required_gates` must have a verdict that is `run_against == prov.tree_sha` (input-bound;
+  `_R_GATE_WRONG_TREE`), `status is PASS` (`_R_GATE_NOT_PASS`), and re-verifies under
+  `verify_attestation` (forged/unsigned ⇒ `_R_GATE_SIG_INVALID`); absent ⇒ `_R_GATE_MISSING`.
+  (4) **Not disqualified / fork-divergent** — `records.admission_look(subject_digest) is ADMISSIBLE`,
+  else DENY (`_R_DISQUALIFIED`, sets `stable_fail_latched=True`). A scanner-config pin (optional
+  `scanner_config_rev=`) is checked after #1: `prov.scanner_config_rev` must match
+  (`_R_SCANNER_CONFIG_MISMATCH`). FORGED-VERDICT ⇒ #2/#3; MISSING-GATE ⇒ #3; DISQUALIFIED/LAUNDERED-
+  FORK ⇒ #4 (cross-fork digest-disqualification OR stable-FAIL latch, T-M4-02 `admission_look`).
+- AD3. **Why admission re-reads `admission_look`, not the live `gates` reducer (M4D2).** The live
+  reducer is latest-by-`seq` and legitimately shows PASS after a recovery while WORM holds the digest
+  stable-FAIL latched; admission consumes the cross-fork latch query so a fork re-presenting a
+  disqualified digest under a fresh `run_id` STILL reads DISQUALIFIED. The gate-state check (#3) reads
+  the NEWEST-by-`Seq` per gate name (`_latest_by_name`, mirrors the reducer tiebreak) — sound BECAUSE
+  #4 is what holds a latched digest down regardless of any later PASS.
+- AD4. **Build verdict is a PROVENANCE-BINDING, not a plain attestation (TR7).** The build's
+  `signed_verdict` (from `TrustedBuilder`) carries a provenance-bound sig — re-verify it with
+  `verify_provenance_binding(g, prov)`, NOT `verify_attestation` (which returns False for it, TR7).
+  The REQUIRED gates (spec/test/security/...) carry plain attestations — re-verify with
+  `verify_attestation`. Tests build GENUINE evidence: real `TrustedBuilder.build` for the signed
+  provenance-bound build verdict + `ZoneBSigner.with_attestation` for each PASS gate; real
+  `DevGateWriteVerifier` + real `GlobalRecords` (`disqualify_digest`/`latch_stable_fail` for the
+  fork-divergence cases). `AdmissionDecision` records the EXACT digest + `tree_sha` + grounds
+  (`signature_verified`/`all_required_gates_pass`/`required_gates`/`stable_fail_latched`) + deny
+  `reason`. **The deployer T-M4-08 deploys ONLY an admitted decision (`decision.admitted()`);
+  Autonomous mode T-M4-10 uses admission as the SOLE release gate.**
+- AD5. 14 tests; ruff (foundry tests) + mypy (134 files) clean; full suite 1105 passed / 1 skipped.
+  Touched ONLY `foundry/trust_root/admission.py`, `tests/test_admission.py`, the `AdmissionController`
+  re-export in `foundry/trust_root/__init__.py`, and this note.

@@ -1965,7 +1965,7 @@
         "Tests added covering all 4 exit attacks + the clean-admit control; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M4-08",
@@ -1994,7 +1994,7 @@
         "Tests added: refuse-non-admitted, idempotent re-deploy, rollback; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M4-09",

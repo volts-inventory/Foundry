@@ -46,7 +46,8 @@
       "id": "M4",
       "phase": "Phase 4 \u2014 Trust root & Autonomous mode",
       "status": "in_progress",
-      "exit_criteria": "A malicious-test / forged-results / forged-verdict / fork-divergence attempt cannot reach production; trusted-component outage degrades to paused, not wedged. (Dev-grade roots per implementation-plan \u00a70.3.)"
+      "exit_criteria": "A malicious-test / forged-results / forged-verdict / fork-divergence attempt cannot reach production; trusted-component outage degrades to paused, not wedged. (Dev-grade roots per implementation-plan \u00a70.3.)",
+      "note": "Decomposed by T-M4-PLAN into T-M4-01..T-M4-11. EXTEND + HARDEN, don't rebuild: the two-zone TwoZoneGateRunner, attestation.py tuples, GlobalRecords stable-FAIL/nonce/alpha latches, policy/scanner_config (revision_hash) + authorization (segregation-of-duties, Zone.B_ATTESTOR), durability/evidence_pack (provenance_predicate_uri already present) + outbox, governance/sign_off + release_anchors + gated_release_admitted, operations/trusted_component (availability + per-lineage reservation), and the Test gate's mutant_rotation_id reuse-key binding all EXIST. M4 ADDS: trust-root schemas (SLSA ProvenancePredicate/SBOM/AdmissionDecision/DeployResult), cross-fork digest_disqualification + record-scoped two-person override in global_records, runner config-re-derivation + sealed observation channel, the held-out-mutant + behavioral-invariance discriminator (gate-class-aware, gates/discriminator.py), input-bound provenance attestation, the NEW foundry/trust_root/ package (trusted_builder/admission/deployer), operations/trusted_lifecycle (key+component rotation/HA, paused-not-wedged), and Autonomous mode (MODE_AUTONOMOUS: hands-off builder->admission->deployer gated ONLY by the trust root). Collision hazards (runner.py / test.py / attestation.py / supervisor.py / factory_graph.py / global_records.py / a given schema module) are single-owner-per-wave, serialized via dependencies. Most trust_root/* + operations/trusted_lifecycle modules are new-file disjoint and parallel_safe. Exercised on synthetic fixtures via the existing MockTransport/StubAdapter doubles + dev-HMAC roots; the SLSA-L3/admission/deployer LOGIC is real, the ROOTS are dev-grade (implementation-plan \u00a70.3) \u2014 production hardware/OIDC custody is an ops task, stamped honestly, never overclaimed. EXIT: malicious-test / forged-results / forged-verdict / fork-divergence cannot reach production; trusted-component outage degrades to paused, not wedged."
     },
     {
       "id": "M5",
@@ -1283,7 +1284,7 @@
         "M4 decomposed into concrete tasks against the then-current tree, derived from implementation-plan \u00a77 Phase 4 + governance.md \u00a74-5"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M5-PLAN",
@@ -1769,6 +1770,316 @@
       ],
       "retries_remaining": 3,
       "status": "done"
+    },
+    {
+      "id": "T-M4-01",
+      "milestone": "M4",
+      "title": "Trust-root schemas: SLSA provenance predicate, SBOM, build/admission/deploy records",
+      "job_to_be_done": "Add the frozen pydantic v2 trust-root artifact models the Phase-4 modules share, append-only across schemas/security.py (SBOM body model + provenance predicate) and schemas/operations.py (build-provenance / admission-decision / deploy-result records). The Release/DeployPlan/IaCProposal/SBOMRef models already EXIST and are NOT edited destructively; this fills the gaps the builder/admission/deployer need: a SLSA-style ProvenancePredicate (source_commit, builder_id, hermetic materials, scanner_config_revision_hash, the WORM-anchored gate-state refs, target SLSA-L3), an SBOM model (resolved components, licenses, CVE floor), an AdmissionDecision record (admit/deny + reason + the exact re-checked digest/config/attestation refs), and a DeployResult record (idempotency key, rollback ref). These are the typed vocabulary every later T-M4 module imports. evidence_pack already carries provenance_predicate_uri (durability/evidence_pack.py) \u2014 reuse that field, do not invent a parallel.",
+      "files_owned": [
+        "foundry/schemas/security.py",
+        "foundry/schemas/operations.py",
+        "tests/test_schemas_trust_root.py"
+      ],
+      "dependencies": [],
+      "role": "Pydantic/typed-contracts engineer",
+      "required_experts": [
+        "E6",
+        "E3"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "ProvenancePredicate, SBOM, AdmissionDecision, DeployResult are FrozenModel (extra=forbid) with content-addressed *_uri handles for bodies (DS9/L4), version/supersedes/seq matching the module conventions; integer micro-USD for any money; Field(default_factory=...) for mutable defaults (S1)",
+        "ProvenancePredicate binds source_commit + builder_id + hermetic materials digest + scanner_config_revision_hash + the WORM gate-state refs (the values admission re-checks, gov \u00a74-5); AdmissionDecision binds the exact (artifact_digest, scanner_config_rev, attestation refs) it re-verified so a deny is auditable",
+        "Append-only: existing Release/DeployPlan/IaCProposal/SBOMRef/SupplyChainReport and the evidence_pack provenance_predicate_uri field are unchanged; no parallel artifact invented (L3)",
+        "Tests added: construction, frozenness, content_identity stability, supersession round-trip",
+        "mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "in_progress"
+    },
+    {
+      "id": "T-M4-02",
+      "milestone": "M4",
+      "title": "Cross-fork digest-disqualification + admission-look query in global_records",
+      "job_to_be_done": "Extend foundry/state/global_records.py (and its GlobalRecordsView protocol) with the admission-side cross-fork query the deploy-time admission controller needs: a single digest_disqualified(digest) view that folds the EXISTING per-gate stable-FAIL latch over the full WORM history for a digest (gov \u00a75 'all required gates PASS for D AND no un-overridden stable FAIL exists for D'), plus a record-scoped two-person override (latch_override(record_key, approver_a, approver_b) WORM-logged) that clears a SPECIFIC transient (gate,tree_sha,results_digest) record but never a co-resident stable FAIL (override is record-scoped, not digest-scoped). REUSE the existing latch_stable_fail / stable_fail_latched / nonce ledger / alpha ledger primitives \u2014 do not rebuild them; this is the cross-fork read surface admission binds to. Single owner of this file.",
+      "files_owned": [
+        "foundry/state/global_records.py",
+        "tests/test_global_records_admission.py"
+      ],
+      "dependencies": [],
+      "role": "Security/trust-root engineer",
+      "required_experts": [
+        "E3",
+        "E2"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "digest_disqualified(digest) returns True iff any un-overridden stable-FAIL record exists for the digest in the FULL WORM history (monotonic, cross-fork: a sibling fork with a new run_id inherits it; a later PASS never auto-clears it) \u2014 the fork-divergence primitive",
+        "Override is RECORD-scoped + two-person + WORM-logged: clearing a transient flake record does NOT clear a co-resident stable FAIL on the same digest (admission re-evaluates the full set); an override with intersecting/empty approver identities is rejected",
+        "GlobalRecordsView gains the read-only query so the verifier/admission consume it without the writable store; reducers still only READ these records (L8), never write",
+        "Tests added: cross-fork inheritance, monotonicity (later PASS does not clear), record-scoped override leaves co-resident stable FAIL latched, fail-closed on unknown digest",
+        "mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "in_progress"
+    },
+    {
+      "id": "T-M4-03",
+      "milestone": "M4",
+      "title": "Two-zone runner hardening: zone-B config re-derivation + sealed observation channel",
+      "job_to_be_done": "Harden foundry/gates/runner.py so the verdict is never a deterministic function of an agent-forged input (gov \u00a71c, SEC-R10-F1). Add the config-evaluable re-derivation seam: for config-evaluable gates (Build dep/lockfile policy, Audit SBOM/CVE/license, Supply-chain, IaC-plan) zone B RE-DERIVES the result itself from the run-immutable source + pinned data and NEVER trusts a zone-A-emitted SBOM/SARIF/lockfile report; and a sealed result-channel contract for execution-dependent gates (the outcome observation is collected by trusted pinned infra over a channel in a separate FS namespace the agent code cannot intercept \u2014 exit codes/JUnit emitted INSIDE the agent process are untrusted). Keep the existing ZoneA/B split, signed-ERROR, and stable-FAIL latch verbatim; this adds the re-derivation + sealed-channel hooks the gates plug into. Single owner of runner.py.",
+      "files_owned": [
+        "foundry/gates/runner.py",
+        "tests/test_runner_hardening.py"
+      ],
+      "dependencies": [
+        "T-M4-01"
+      ],
+      "role": "Security/trust-root engineer",
+      "required_experts": [
+        "E3"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "Config-evaluable gates expose a zone-B redrive(source, pinned_data) seam the runner invokes; a zone-A-supplied SBOM/SARIF/lockfile report is IGNORED \u2014 a test forging a 'zero findings' zone-A report still yields the zone-B-re-derived verdict (forged-results CANNOT reach production)",
+        "Execution-dependent gates receive a sealed-channel observation seam: the outcome the verdict binds is the trusted-infra-collected one, not an agent-emitted in-process exit code/XML; the results_digest binds the sealed observation",
+        "No signing credential enters zone-A scope; signed-ERROR on infra failure, stable-FAIL latch, and the input-bound attestation tuple are unchanged (regression-tested)",
+        "Dev-grade roots per implementation-plan \u00a70.3: the LOGIC + interfaces are real (no signing key in zone A scope, sealed observation seam, input-bound attestation, fail-closed admission), but the ROOT of trust is dev-grade (HMAC ZoneBSigner / local hermetic builder / in-process zones); production hardware/OIDC root is an ops task. This honesty is stamped in code + acceptance, never overclaimed.",
+        "Tests added incl. forged-zone-A-report rejection; the 4 adversarial exit attacks each CANNOT reach production: (malicious-test, forged-results, forged-verdict, fork-divergence) (forged-results arm here); mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M4-04",
+      "milestone": "M4",
+      "title": "Held-out-mutant + behavioral-invariance discriminator for the Test gate (gate-class-aware)",
+      "job_to_be_done": "Build the class-2 anti-gaming discriminator the Test gate currently only stubs (foundry/gates/test.py says the full machinery is deferred; mutant_rotation_id is already bound into the reuse key). Add a new foundry/gates/discriminator.py: a trusted, family-decorrelated (curated/non-LLM, NOT the implementer/QA lineage) held-out-mutant generator + behavioral-invariance harness that zone B runs \u2014 PASS must be invariant under behavior-preserving perturbations of the real tree AND FAIL must hold across the held-out mutant family; substitutions are opaque at runtime (normalized tree, identity/hash oracles stripped, no baseline to diff). Enforce the adequacy/diversity floor on NON-ENUMERABLE / trusted-infra-fuzzed inputs the test cannot itself select (a finite lookup-table of pinned assertions does NOT clear class-2, SEC-R12-F1). It is GATE-CLASS-AWARE: applies ONLY to the execution-deterministic class, never to a legitimate statistical/perceptual test. Extend test.py to invoke it and to ROTATE mutant_rotation_id (opaque handle, faster than an adapter can profile the set).",
+      "files_owned": [
+        "foundry/gates/discriminator.py",
+        "foundry/gates/test.py",
+        "tests/test_discriminator.py"
+      ],
+      "dependencies": [
+        "T-M4-03"
+      ],
+      "role": "Security/trust-root engineer",
+      "required_experts": [
+        "E3",
+        "E5"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "A malicious/weak test suite is CAUGHT: a vacuous/single-pinned-assertion/derivable-lookup-table suite that passes-on-real and flips across code mutants is REJECTED because it fails the non-enumerable/fuzzed-input adequacy floor and/or flips under a behavior-preserving perturbation (identity-keyed, not behavior-keyed)",
+        "The mutant generator is trusted + family-decorrelated (curated/non-LLM, not implementer/QA lineage); held-out family carries its own adequacy/diversity floor; substitutions are opaque to the test at runtime (no identity/hash/baseline reads)",
+        "Gate-class-aware: discriminator runs ONLY for VerdictClass.EXECUTION_DETERMINISTIC; a statistical/perceptual gate is untouched (no false rejection)",
+        "mutant_rotation_id is an opaque handle, rotated, and bound into the attestation tuple + class-2 reuse key (already wired) so a stale verdict invalidates across a rotation boundary",
+        "Dev-grade roots per implementation-plan \u00a70.3: the LOGIC + interfaces are real (no signing key in zone A scope, sealed observation seam, input-bound attestation, fail-closed admission), but the ROOT of trust is dev-grade (HMAC ZoneBSigner / local hermetic builder / in-process zones); production hardware/OIDC root is an ops task. This honesty is stamped in code + acceptance, never overclaimed.",
+        "Tests added incl. the malicious-test arm of the 4 adversarial exit attacks each CANNOT reach production: (malicious-test, forged-results, forged-verdict, fork-divergence) (malicious-test CANNOT reach production); mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M4-05",
+      "milestone": "M4",
+      "title": "Input-bound attestation hardening (bind builder/config/tree, block cross-tree replay)",
+      "job_to_be_done": "Extend foundry/gates/attestation.py so an attestation can never be replayed onto another tree/config/predicate at the trust-root boundary (gov \u00a71c, SEC-R9-F3). The existing deterministic-gate tuple already binds (gate_name, run_against, scanner_config_rev, lineage_map_revision, status, results_digest) and the judgment binding its tuple \u2014 keep both verbatim. ADD the build-provenance attestation path the trusted builder uses: a ZoneBSigner method + verifier that signs/verifies the ProvenancePredicate tuple (source_commit + builder_id + hermetic-materials digest + scanner_config_revision_hash + gate-state refs + artifact_digest), so a forged or tree-mismatched predicate fails verification. Preserve the memoization discipline (I1/B2): signature checks memoized by content identity, mutable nonce/latch reads never cached. Single owner of attestation.py.",
+      "files_owned": [
+        "foundry/gates/attestation.py",
+        "tests/test_attestation_provenance.py"
+      ],
+      "dependencies": [
+        "T-M4-01"
+      ],
+      "role": "Security/trust-root engineer",
+      "required_experts": [
+        "E3"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "ZoneBSigner gains attest_provenance / verifier gains verify_provenance over the ProvenancePredicate tuple; a predicate with a swapped digest / mismatched scanner_config_rev / wrong builder_id / flipped gate-state ref FAILS verification (forged-verdict CANNOT be replayed onto another tree)",
+        "Existing deterministic-gate attestation + judgment-binding tuples and their verify paths are byte-unchanged (regression-tested); the dev-grade HMAC ZoneBSigner key never reaches zone A or any agent",
+        "Memoization sound: provenance signature checks memoized by content identity; nonce/latch reads remain uncached (I1/B2)",
+        "Dev-grade roots per implementation-plan \u00a70.3: the LOGIC + interfaces are real (no signing key in zone A scope, sealed observation seam, input-bound attestation, fail-closed admission), but the ROOT of trust is dev-grade (HMAC ZoneBSigner / local hermetic builder / in-process zones); production hardware/OIDC root is an ops task. This honesty is stamped in code + acceptance, never overclaimed.",
+        "Tests added incl. cross-tree/config replay rejection (forged-verdict arm of the 4 adversarial exit attacks each CANNOT reach production: (malicious-test, forged-results, forged-verdict, fork-divergence)); mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M4-06",
+      "milestone": "M4",
+      "title": "Strongly-hermetic SLSA-L3 trusted builder (trust_root/trusted_builder.py)",
+      "job_to_be_done": "Create the foundry/trust_root/ package (__init__.py) and trusted_builder.py: a hermetic build (no network egress, pinned/vendored hash-pinned inputs, no arbitrary build hooks) that produces the release artifact + SBOM + a signed SLSA-L3 ProvenancePredicate binding the WORM-anchored, hash-chained gate-state for this tree_sha (each verdict carrying the trusted runner's attestation) + the pinned scanner_config_revision_hash, signed via the dev-grade keyless/HMAC ZoneBSigner (T-M4-05 attest_provenance). It runs NO agent code itself and the trust boundary is enforced on build INPUTS, not just the environment. REUSE policy/scanner_config.py (revision_hash), durability/evidence_pack.py (provenance_predicate_uri), and the gate-state on the gates channel \u2014 do not rebuild them.",
+      "files_owned": [
+        "foundry/trust_root/__init__.py",
+        "foundry/trust_root/trusted_builder.py",
+        "tests/test_trusted_builder.py"
+      ],
+      "dependencies": [
+        "T-M4-01",
+        "T-M4-05"
+      ],
+      "role": "Security/trust-root engineer",
+      "required_experts": [
+        "E3",
+        "E2"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "build(tree_sha, gate_state, scanner_config_rev) runs hermetically (no network, pinned inputs, no build hooks \u2014 a network/hook attempt fails closed), emits artifact_digest + SBOM + a signed SLSA-L3 ProvenancePredicate that binds source_commit + hermetic materials + the WORM gate-state refs + scanner_config_revision_hash",
+        "The builder executes no agent code and holds the signing identity unreachable from any agent sandbox; SBOM pass criteria (no critical/high CVE on the floor, no disallowed license, full pinned resolution) are computed, not agent-claimed",
+        "Provenance is verifiable by T-M4-05 verify_provenance; the predicate re-derives so a tampered input changes the digest",
+        "Dev-grade roots per implementation-plan \u00a70.3: the LOGIC + interfaces are real (no signing key in zone A scope, sealed observation seam, input-bound attestation, fail-closed admission), but the ROOT of trust is dev-grade (HMAC ZoneBSigner / local hermetic builder / in-process zones); production hardware/OIDC root is an ops task. This honesty is stamped in code + acceptance, never overclaimed. (the SLSA-L3 LOGIC is real; air-gapped keys / real OIDC federation / isolated build infra are the labelled ops deployment task)",
+        "Tests added: hermeticity (network/hook denied), provenance round-trip verify, SBOM floor fail-closed; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M4-07",
+      "milestone": "M4",
+      "title": "Fail-closed deploy-time admission controller (trust_root/admission.py)",
+      "job_to_be_done": "Build foundry/trust_root/admission.py \u2014 the non-agent admission controller already REFERENCED by policy/planes.py + governance/tiering.py as foundry.trust_root.admission. At deploy it fail-closed re-verifies, for the EXACT artifact_digest: (1) the provenance signature (T-M4-05 verify_provenance) was built by the trusted builder from this commit; (2) ALL required gates PASS for this digest in the WORM store with valid input-bound runner attestations; (3) the scanner_config revision matches the pinned hash; (4) no un-overridden stable-FAIL exists for the digest (T-M4-02 digest_disqualified) \u2014 cross-fork, so two forks that diverge on the same digest can never ship the green one; (5) segregation-of-duties (policy/authorization.authorize_segregation_of_duties: approver \u2209 authors, zone-B). A forged-verdict / wrong-digest / unsigned / fork-diverged artifact is REJECTED, returning an AdmissionDecision record. Admission is ALWAYS fail-closed regardless of tier (gov \u00a71e).",
+      "files_owned": [
+        "foundry/trust_root/admission.py",
+        "tests/test_admission.py"
+      ],
+      "dependencies": [
+        "T-M4-01",
+        "T-M4-02",
+        "T-M4-05"
+      ],
+      "role": "Security/trust-root engineer",
+      "required_experts": [
+        "E3"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "admit(artifact_digest, provenance, gate_state, pinned_scanner_config, duty_request) -> AdmissionDecision is fail-closed: ADMIT only when signature verifies AND all required gates PASS for THIS exact digest with valid input-bound attestations AND scanner_config_rev matches the pin AND digest_disqualified is False AND segregation-of-duties ALLOWs",
+        "Each of the 4 adversarial exit attacks is REJECTED at admission: a forged-results / forged-verdict (bad attestation/predicate) -> deny; a wrong-digest/unsigned artifact -> deny; a fork-divergence (sibling fork's green PASS over a digest another fork stable-FAILed) -> deny via cross-fork digest_disqualified \u2014 the 4 adversarial exit attacks each CANNOT reach production: (malicious-test, forged-results, forged-verdict, fork-divergence)",
+        "Admission is fail-closed for EVERY tier (a Low-tier change still re-verifies signature + gate-state; tier scales depth/HITL, never integrity, gov \u00a71e); an admission-deny is its own state, neither a gate FAIL nor an ERROR",
+        "Dev-grade roots per implementation-plan \u00a70.3: the LOGIC + interfaces are real (no signing key in zone A scope, sealed observation seam, input-bound attestation, fail-closed admission), but the ROOT of trust is dev-grade (HMAC ZoneBSigner / local hermetic builder / in-process zones); production hardware/OIDC root is an ops task. This honesty is stamped in code + acceptance, never overclaimed.",
+        "Tests added covering all 4 exit attacks + the clean-admit control; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M4-08",
+      "milestone": "M4",
+      "title": "Non-agent least-privilege deployer (trust_root/deployer.py)",
+      "job_to_be_done": "Build foundry/trust_root/deployer.py: a separate, least-privileged, non-agent deployer that ships ONLY an already-admitted artifact (consumes a T-M4-07 ADMIT AdmissionDecision; refuses anything not admitted). It is idempotent (keyed deploy never double-fires on resume, L7 content_digest key) and rollback-capable (consumes the DeployPlan.rollback_plan_uri), runs NO agent code, and emits effects only through the durability outbox/external-action ledger (at-least-once, idempotency-keyed). REUSE schemas/operations DeployPlan + DeployResult (T-M4-01) and durability/outbox.py \u2014 do not invent a new effect path.",
+      "files_owned": [
+        "foundry/trust_root/deployer.py",
+        "tests/test_deployer.py"
+      ],
+      "dependencies": [
+        "T-M4-01",
+        "T-M4-07"
+      ],
+      "role": "Security/trust-root engineer",
+      "required_experts": [
+        "E3",
+        "E2"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "deploy(admission_decision, deploy_plan) refuses (raises/denies) unless the AdmissionDecision is ADMIT for the exact digest \u2014 a non-admitted or denied artifact NEVER deploys",
+        "Idempotent: a re-invoked deploy with the same content-stable key re-folds the same external action and never double-deploys on resume (L7); rollback path is exercised and reversible",
+        "Least-privilege + non-agent: holds no agent capability, executes no agent code, and emits effects only via the outbox external-action ledger (never a direct SDK/cloud call)",
+        "Dev-grade roots per implementation-plan \u00a70.3: the LOGIC + interfaces are real (no signing key in zone A scope, sealed observation seam, input-bound attestation, fail-closed admission), but the ROOT of trust is dev-grade (HMAC ZoneBSigner / local hermetic builder / in-process zones); production hardware/OIDC root is an ops task. This honesty is stamped in code + acceptance, never overclaimed.",
+        "Tests added: refuse-non-admitted, idempotent re-deploy, rollback; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M4-09",
+      "milestone": "M4",
+      "title": "Trusted-component lifecycle: key/component rotation + HA (operations/trusted_lifecycle.py)",
+      "job_to_be_done": "Build foundry/operations/trusted_lifecycle.py: key + trusted-component rotation and HA on top of the EXISTING operations/trusted_component.py (availability model, per-lineage reservation, on_unavailable->PAUSED / on_recovery->RUNNING). Add overlapping-validity key rotation for the ZoneBSigner / builder identity (a verifier trusts the current AND prior key during the overlap window so in-flight attestations stay verifiable across a rotation; a rotated-out key can no longer sign) and a component-rotation/standby model, such that a trusted-component outage degrades affected runs to PAUSED(trusted_component_unavailable), never WEDGED, and recovery resumes \u2014 the EXIT round-trip. REUSE trusted_component.py + the run-status vocabulary; do not rebuild the availability model. Extend (not edit-destroy) trusted_component.py only if a shared seam is needed; prefer the new module.",
+      "files_owned": [
+        "foundry/operations/trusted_lifecycle.py",
+        "tests/test_trusted_lifecycle.py"
+      ],
+      "dependencies": [],
+      "role": "Security/trust-root engineer",
+      "required_experts": [
+        "E3",
+        "E2"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "Key rotation has an overlapping-validity window: an attestation signed under the prior key still verifies during overlap, a new attestation signs under the current key, and a rotated-out key neither signs nor verifies after the window (no in-flight verdict is stranded across a rotation)",
+        "A trusted-component (proxy / zone-B signer / gate runner) outage degrades affected runs to PAUSED(reason=trusted_component_unavailable) at $0/hr, NEVER WEDGED; recovery resumes to RUNNING \u2014 the EXIT round-trip is unit-tested (outage->PAUSED->recovery->RUNNING)",
+        "Reuses operations/trusted_component.py availability + per-lineage reservation; pure + deterministic (injected clock, no real I/O/LLM); HA failover preserves the per-lineage reservation invariant (one lineage cannot starve another's reserved quota)",
+        "Dev-grade roots per implementation-plan \u00a70.3: the LOGIC + interfaces are real (no signing key in zone A scope, sealed observation seam, input-bound attestation, fail-closed admission), but the ROOT of trust is dev-grade (HMAC ZoneBSigner / local hermetic builder / in-process zones); production hardware/OIDC root is an ops task. This honesty is stamped in code + acceptance, never overclaimed. (rotation/HA logic is real; real KMS/HSM custody + true multi-region HA are the ops deployment task)",
+        "Tests added incl. the trusted-component-outage->paused-not-wedged EXIT property; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "in_progress"
+    },
+    {
+      "id": "T-M4-10",
+      "milestone": "M4",
+      "title": "Autonomous mode: trust-root-gated hands-off emit/deploy (supervisor + factory_graph)",
+      "job_to_be_done": "Wire Autonomous mode on top of the Gated machinery: the mode that deploys hands-off, gated ONLY by the trust root (no human), with admission as the sole release gate. Add MODE_AUTONOMOUS to foundry/graph/supervisor.py (mirrors MODE_ASSISTANT/MODE_GATED) reusing the SAME assurance/sign-off boundaries (sign-offs recorded-but-no-op in the self-judge profile, plan \u00a70.2), and an autonomous emit/deploy node in foundry/graph/factory_graph.py that, instead of opening a PR for a human, runs the trusted_builder -> admission -> deployer chain (T-M4-06/07/08) fail-closed: it deploys ONLY on a clean terminal+assurance gate state AND a successful AdmissionDecision; a halted/failed/forged/fork-diverged run deploys NOTHING. REUSE gated_release_admitted / release_anchors / build_evidence_pack. Single owner of supervisor.py and factory_graph.py for this wave (collision hazard); serialized after the trust-root modules exist. The regulated pack (Phase 5) force-disables Autonomous \u2014 leave the veto hook, do not implement the pack here.",
+      "files_owned": [
+        "foundry/graph/supervisor.py",
+        "foundry/graph/factory_graph.py",
+        "tests/test_factory_graph_autonomous.py"
+      ],
+      "dependencies": [
+        "T-M4-06",
+        "T-M4-07",
+        "T-M4-08",
+        "T-M4-09"
+      ],
+      "role": "LangGraph engineer",
+      "required_experts": [
+        "E1",
+        "E3"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "build_factory_graph(..., mode=MODE_AUTONOMOUS) compiles a hands-off graph whose terminal node runs builder->admission->deployer with NO human PR; it deploys ONLY on clean terminal + tier-scaled assurance PASS AND an ADMIT AdmissionDecision for the exact digest",
+        "Fail-closed end-to-end: a malicious-test / forged-results / forged-verdict / fork-divergence run is blocked BEFORE deploy (the discriminator/runner/attestation/admission chain) and deploys NOTHING \u2014 the 4 adversarial exit attacks each CANNOT reach production: (malicious-test, forged-results, forged-verdict, fork-divergence)",
+        "Assistant + Gated emit paths are byte-for-byte unchanged (back-compat); Autonomous reuses gated_release_admitted + release_anchors + the evidence pack; the regulated-pack veto hook is present (Autonomous unreachable when force-disabled) but the pack itself is Phase 5",
+        "Dev-grade roots per implementation-plan \u00a70.3: the LOGIC + interfaces are real (no signing key in zone A scope, sealed observation seam, input-bound attestation, fail-closed admission), but the ROOT of trust is dev-grade (HMAC ZoneBSigner / local hermetic builder / in-process zones); production hardware/OIDC root is an ops task. This honesty is stamped in code + acceptance, never overclaimed.",
+        "Tests added: clean autonomous deploy control + each of the 4 attacks blocked pre-deploy; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M4-11",
+      "milestone": "M4",
+      "title": "Phase-4 adversarial exit-criteria integration test + milestone gate sweep",
+      "job_to_be_done": "Add tests/test_phase4_exit.py: the milestone witness for the roadmap Phase-4 EXIT criteria, driving the WHOLE Autonomous pipeline over the SHIPPED dev wiring (real ModelProviderProxy + MockTransport, dev ZoneBSigner, real TwoZoneGateRunner + discriminator, trusted_builder -> admission -> deployer, GlobalRecords, durable checkpointer). Prove all four load-bearing adversarial attacks CANNOT reach production AND that a trusted-component outage degrades to paused-not-wedged, each with a clean control so the block is the attack, not a hard-wired fail. Map each criterion->test honestly (genuinely-end-to-end vs dev-mode stand-in, plan \u00a70.3), then run the milestone gate sweep and record results. Single owner of this test file.",
+      "files_owned": [
+        "tests/test_phase4_exit.py"
+      ],
+      "dependencies": [
+        "T-M4-04",
+        "T-M4-10"
+      ],
+      "role": "QA / security engineer",
+      "required_experts": [
+        "E3",
+        "E1"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "Four adversarial attacks each PROVEN un-shippable with a clean control: malicious-test (weak/vacuous suite caught by the discriminator), forged-results (zone-A report ignored, zone-B re-derives), forged-verdict (replayed/forged attestation rejected at admission), fork-divergence (cross-fork digest_disqualified blocks the green fork) \u2014 the 4 adversarial exit attacks each CANNOT reach production: (malicious-test, forged-results, forged-verdict, fork-divergence)",
+        "Trusted-component-outage EXIT proven: an outage degrades the run to PAUSED(trusted_component_unavailable), NOT WEDGED, and recovery resumes",
+        "Honest criterion->test audit map recorded (genuinely-end-to-end vs declared dev-mode stand-ins per \u00a70.3); no overclaim of production-grade roots",
+        "Milestone gate sweep green: ruff, mypy foundry, full pytest, coverage >=80% overall (new code >=85%), scoped mutation >=70% or survivors justified in build/REVIEW.md; PROGRESS/STATUS updated to mark M4 exit (orchestrator may do this)"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
     }
   ]
 }

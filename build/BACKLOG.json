@@ -52,14 +52,14 @@
     {
       "id": "M5",
       "phase": "Phase 5 \u2014 Specialist plugins + domain packs",
-      "status": "in_progress",
+      "status": "done",
       "exit_criteria": "A regulated request makes Autonomous/auto-approve unreachable and binds approver-of-record; an ML request keys verdicts on state_sha with a class-3 gate + compute budget; a UI request forces visual HITL over a rendered bundle \u2014 all without core changes to add the next pack.",
       "note": "Decomposed by T-M5-PLAN into T-M5-01..T-M5-09. NEW package foundry/domains/ (contract+registry+routing, verdict_class, state_sha, governance_hooks) + packs/{regulated,ml_data,frontend}. EXTEND existing seams (VerdictClass, state.tree_sha.state_sha, tiering, sign_off, alpha look-ledger, discriminator class-awareness, MODE_AUTONOMOUS) \u2014 do NOT rebuild. Foundation T-M5-01..04 are single-owner; the 3 packs (05/06/07) parallelize; T-M5-08 is the SOLE graph-core edit; T-M5-09 proves the 3 exit criteria + 'no core changes to add a pack'. Added expert E7 (frontend/UX/perceptual)."
     },
     {
       "id": "M6",
       "phase": "Phase 6 \u2014 Eval, optimization & lifecycle",
-      "status": "pending",
+      "status": "in_progress",
       "exit_criteria": "Scorecard published and stable; confirmatory A/B reproduces the Phase-1.5 result (estimation/replication only); optimization Pareto-improves >=1 headline metric with no regression in escaped-defects, cost, wall-clock, or policy compliance; product-feedback + maintenance/provenance loop."
     }
   ],
@@ -1330,7 +1330,7 @@
         "M6 decomposed into concrete tasks against the then-current tree, derived from implementation-plan \u00a77 Phase 6 + evaluation.md/lifecycle.md"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-TOOL-MUT",

@@ -125,3 +125,17 @@ E2E pair (gamed-green-mutant-survives -> compiled Test FAIL -> 0 deploys; genuin
 back-compat (factory None = legacy floor). (2)-(7) re-confirmed DELIVERED. No circular tests; clean controls pair
 every block. **Verdict: CLEAN PASS — no findings.** A-M4-01 RESOLVED.
 **M4 AUDIT: CLEAN PASS (cycle 2).** The four attacks genuinely cannot reach a deploy in the shipping path.
+
+## M5 (Phase 5, Specialist plugins + domain packs) — Cycle 1 (fresh independent auditor; design-docs + code only)
+Auditor re-ran gates (ruff/mypy clean 145 files, full suite pass/1 skip) + spot-checked load-bearing exit tests for
+flipping controls. **ALL 7 DELIVERED.** (1) regulated->autonomous/auto-approve unreachable + approver-of-record:
+autonomous_emit guard is a genuine OR (not pack_release_admitted OR not autonomous_pack_reachable) -> a pack binding
+an approver WITHOUT vetoing autonomous still halts (proven by _ApproverOnlyPack); self-judge rejected; two-person
+(distinct id+role); class-4 unsatisfiable by class-2. (2) ML class-3 state_sha+compute: assert_class3_binds_ledger
+fail-closed on undrawn look/missing state_sha; data/weight/feature change re-keys; compute overspend books nothing.
+(3) UI class-5 visual-HITL never auto-approved (self-judge blocked) + sub-pixel-only envelope + blocking WCAG. (4)
+tighten-only/strictest-wins (monotone joins + two-pass fold -> TightenError on relax; tested). (5) open/closed (4th
+_CryptoPack engages in-test, zero core edit; wiring reads ComposedPolicy generically). (6) back-compat (registry=None
+identity, prior paths byte-identical). (7) honesty (flipping controls; no circular tests; §0.3 dev-grade labeled).
+**Verdict: CLEAN PASS — no findings.** 3 exit criteria genuinely hold; no pack can relax integrity; new pack = zero core edits.
+**M5 AUDIT: CLEAN PASS.**

@@ -96,3 +96,22 @@ verdict); (6) five-plane completeness + content-addressed scanner config tamper-
 outage signal is the documented dev analogue, no overclaim.
 **Verdict: CLEAN PASS — NO findings at BLOCKER/MAJOR/MINOR.** All load-bearing tests non-vacuous.
 **M3 AUDIT: CLEAN PASS (zero findings).**
+
+## M4 (Phase 4, Trust root & Autonomous mode) — Cycle 1 (fresh independent auditor; design-docs + code only)
+Auditor re-ran gates (ruff/mypy clean 135 files, full suite pass/1 skip) + spot-checked the four-attack tests +
+clean control for non-vacuity. **Per-requirement:** (2) forged-results DELIVERED (zone-B config re-derive + sealed
+obs -> FAIL/ERROR never PASS), (3) forged-verdict DELIVERED (admission re-verifies provenance + every required gate
+sig+PASS+bound-to-expected-tree across BOTH trees, then disqualification; input-bound attestation), (4) fork-divergence
+DELIVERED (digest-keyed monotonic atomic disqualification; admission_look DENYs laundered fork w/ valid sigs), (5)
+autonomous DELIVERED (admission sole gate, no sign-off path; DENY/halt deploys nothing; idempotent; deployer non-agent;
+mandatory floor), (6) outage->paused-not-wedged DELIVERED (rotation grace + HA failover + fail-closed orphan), (7)
+honesty DELIVERED (dev-grade roots labeled; clean controls prove blocks load-bearing; no circular tests).
+(1) malicious-test PARTIAL: discriminator mechanism correct + proven in test_phase4_exit (real runner), but NOT
+plumbed into the compiled graph's Test-gate node (run_build_test_gates wires TestGate(min_passed) without the
+discriminator) -> the shipping autonomous spine relies on the adequacy floor alone for the gamed-green case.
+**Verdict: FINDINGS(1) MINOR.**
+- A-M4-01 MINOR | gate_wiring.run_build_test_gates / factory_graph autonomous spine | held-out-mutant discriminator
+  not wired into the COMPILED Test gate; only test_phase4_exit exercises it directly. | FIX: plumb a DiscriminatorFactory
+  into the Test-gate node so the compiled graph (not just the unit test) exercises the malicious-test block end-to-end.
+Resolution: fix (plumb the discriminator into the shipping gate node) + an end-to-end-through-the-compiled-graph test,
+then re-audit (cycle 2).

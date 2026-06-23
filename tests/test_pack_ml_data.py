@@ -233,7 +233,7 @@ def _budget_from_pack() -> ComputeBudget:
     assert policy.expensive_gates == frozenset({MODEL_EVAL_GATE, RETRAIN_GATE})
     assert policy.require_proxy is True
     assert policy.confirm_escalation is True
-    cap = policy.per_fix_compute_cap_microusd
+    cap = policy.per_fix_compute_cap_units
     assert cap is not None
     # Map the per-fix compute cap onto a ComputeBudget with a deliberate per-gate cost.
     return ComputeBudget(

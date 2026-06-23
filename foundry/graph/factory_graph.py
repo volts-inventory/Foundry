@@ -830,16 +830,27 @@ def build_factory_graph(
         if not _gates_all_pass(_latest_by_name(state), _required_gate_names(state)):
             return {"phase": "halted"}
 
-        # -- 1b. Domain-pack veto (T-M5-08): Autonomous UNREACHABLE for a -------
-        # regulated request. The composed mode/tier policy VETOES hands-off
-        # Autonomous, so the trust root may NOT deploy a regulated artifact without
-        # a recorded HUMAN approver-of-record. An Autonomous run carries no human
-        # sign-off, so when Autonomous is vetoed AND the pack requirements are unmet
-        # the emit fail-closes here: build NOTHING, admit NOTHING, deploy NOTHING.
+        # -- 1b. Domain-pack enforcement (T-M5-08 / M5-R1-01): the pack release ---
+        # requirements (approver-of-record, perceptual HITL) are enforced
+        # UNCONDITIONALLY on the autonomous path — exactly like the gated/assistant
+        # emit paths above call ``pack_release_admitted`` unconditionally. The
+        # autonomous path is the ONLY one with no human in the loop, so it must NEVER
+        # hands-off deploy a regulated/class-4/class-5 request whose human requirement
+        # is unmet. We halt if EITHER (a) the pack does not admit the release
+        # (``not pack_release_admitted`` — a missing recorded human approver-of-record
+        # / perceptual HITL) OR (b) hands-off Autonomous is unreachable under the
+        # composed veto (``not autonomous_pack_reachable`` — a regulated request).
+        # This is an OR, not the prior AND-coupling: a FUTURE pack that binds a
+        # class-4 approver WITHOUT vetoing Autonomous (so ``autonomous_pack_reachable``
+        # is True) still cannot short-circuit the approver check — the
+        # ``pack_release_admitted`` clause halts it. Build NOTHING, admit NOTHING,
+        # deploy NOTHING.
         veto_seq = rt.seq(config, _EMIT, "pack:autonomous_reachable")
-        if not autonomous_pack_reachable(
+        if not pack_release_admitted(
+            state, config, pack_registry, requested_mode=mode
+        ) or not autonomous_pack_reachable(
             state, pack_registry, requested_mode=mode, seq=veto_seq
-        ) and not pack_release_admitted(state, config, pack_registry, requested_mode=mode):
+        ):
             return {"phase": "halted"}
 
         subject = _pr_subject(state)

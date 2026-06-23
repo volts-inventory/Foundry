@@ -95,7 +95,7 @@ class MLPack(BaseDomainPack):
             expensive_gates=frozenset({"model_eval"}),
             require_proxy=True,
             confirm_escalation=True,
-            per_fix_compute_cap_microusd=5_000_000,
+            per_fix_compute_cap_units=5_000_000,
         )
 
 
@@ -171,11 +171,11 @@ def test_tighten_verdict_class_keeps_stricter_grounding() -> None:
 
 
 def test_tighten_compute_keeps_lower_cap_and_unions_gates() -> None:
-    a = ComputePolicy(expensive_gates=frozenset({"g1"}), per_fix_compute_cap_microusd=10)
-    b = ComputePolicy(expensive_gates=frozenset({"g2"}), per_fix_compute_cap_microusd=3)
+    a = ComputePolicy(expensive_gates=frozenset({"g1"}), per_fix_compute_cap_units=10)
+    b = ComputePolicy(expensive_gates=frozenset({"g2"}), per_fix_compute_cap_units=3)
     j = a.tighten(b)
     assert j.expensive_gates == frozenset({"g1", "g2"})
-    assert j.per_fix_compute_cap_microusd == 3  # tighter (lower) cap wins
+    assert j.per_fix_compute_cap_units == 3  # tighter (lower) cap wins
 
 
 def test_allowed_modes_drops_vetoed() -> None:
@@ -198,9 +198,9 @@ def test_relaxes_detects_tier_downgrade_on_displacing_axis() -> None:
 
 
 def test_relaxes_detects_raised_compute_cap_and_verdict_downgrade() -> None:
-    floor_c = ComputePolicy(per_fix_compute_cap_microusd=3)
-    assert ComputePolicy(per_fix_compute_cap_microusd=10).relaxes(floor_c) is True  # higher cap
-    assert ComputePolicy(per_fix_compute_cap_microusd=1).relaxes(floor_c) is False
+    floor_c = ComputePolicy(per_fix_compute_cap_units=3)
+    assert ComputePolicy(per_fix_compute_cap_units=10).relaxes(floor_c) is True  # higher cap
+    assert ComputePolicy(per_fix_compute_cap_units=1).relaxes(floor_c) is False
     floor_v = VerdictClassPolicy(classes={"k": VerdictClass.HUMAN_WITNESSED})
     weaker = VerdictClassPolicy(classes={"k": VerdictClass.EXECUTION_DETERMINISTIC})
     assert weaker.relaxes(floor_v) is True  # would downgrade the grounding

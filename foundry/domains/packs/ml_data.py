@@ -157,7 +157,7 @@ class MLDataPack(BaseDomainPack):
             expensive_gates=frozenset({MODEL_EVAL_GATE, RETRAIN_GATE}),
             require_proxy=True,
             confirm_escalation=True,
-            per_fix_compute_cap_microusd=_DEFAULT_PER_FIX_COMPUTE_CAP_UNITS,
+            per_fix_compute_cap_units=_DEFAULT_PER_FIX_COMPUTE_CAP_UNITS,
         )
 
     # --- Hook 6: data-egress profile HINT (domains.md §4(5)) -------------------

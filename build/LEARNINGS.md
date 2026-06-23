@@ -2471,8 +2471,9 @@ the REAL component (non-vacuous) and each paired with a control that DOES deploy
   Same refs → same key (cache hit, `ml_verdict_rebinds is False`). The `StateInputPolicy` join is a
   pure union (tighten-only).
 - ML4. **`compute_budget` declares `{model_eval, retrain}` as `expensive_gates` + `require_proxy` +
-  `confirm_escalation` + a per-fix compute cap** (compute UNITS, distinct from USD; the field is named
-  `per_fix_compute_cap_microusd` on `ComputePolicy` but the pack uses it as the compute-unit cap).
+  `confirm_escalation` + a per-fix compute cap** (compute UNITS, distinct from USD; the `ComputePolicy`
+  field is `per_fix_compute_cap_units` — renamed from the misleading `per_fix_compute_cap_microusd`
+  per M5-R1-03, since `state_sha.ComputeBudget` meters integer compute units, not micro-USD).
   Mapped onto a `ComputeBudget(cap_units=cap, per_gate_units={...})` the `ComputeBudgetController`
   fail-closes on overspend: `authorize` denies + `charge` raises `ComputeOverspendError` and books
   NOTHING past the cap (the expensive gate pauses/escalates rather than silently overspending).
@@ -2602,3 +2603,38 @@ the REAL component (non-vacuous) and each paired with a control that DOES deploy
   SAME code path the graph boundary reads (`pack_release_admitted`/`autonomous_pack_reachable` read exactly
   these facts), so there is no parallel logic. `ruff check foundry tests` clean; `mypy foundry` clean (145
   files); `pytest -q tests/test_phase5_exit.py` 12 passed; full suite unbroken.
+
+## M5 review fixes (M5-R1-01..03) — Phase-5 hardening
+- DM20. **M5-R1-01 (substantive) — the autonomous-emit approver/HITL check is now UNCONDITIONAL.** The
+  autonomous emit (`factory_graph.autonomous_emit`) previously halted only on the AND-coupling
+  `not autonomous_pack_reachable(...) AND not pack_release_admitted(...)`. That was safe for every CURRENT
+  pack (every approver-binding pack also vetoes Autonomous), but a FUTURE pack binding a class-4
+  approver-of-record WITHOUT vetoing Autonomous would keep `autonomous_pack_reachable is True` and
+  SHORT-CIRCUIT the approver check on the ONLY hands-off (no-human) deploy path. FIX: the guard is now an
+  OR — `if not pack_release_admitted(...) or not autonomous_pack_reachable(...): halt`. So the pack release
+  requirements (recorded human approver-of-record, perceptual HITL) are enforced UNCONDITIONALLY on the
+  autonomous path, EXACTLY like the gated/assistant emit paths already call `pack_release_admitted`
+  unconditionally. A regulated/class-4/class-5 request can NEVER hands-off deploy without its human
+  requirement met, regardless of whether the pack also vetoed Autonomous. The clean control (no pack) still
+  deploys once; the regulated request still halts (no human ⇒ no deploy). New test
+  `test_m5r101_approver_binding_pack_halts_autonomous_even_when_reachable` (test_phase5_exit.py) drives a
+  stub `_ApproverOnlyPack` (binds the `release` class-4 approver but does NOT veto Autonomous) through the
+  REAL autonomous factory graph: gates all PASS, `autonomous_pack_reachable is True`,
+  `pack_release_admitted is False` → emit HALTS, `_deploy_actions==[]`, `phase=="halted"` — the OLD
+  AND-coupling would have deployed.
+- DM21. **M5-R1-02 (MINOR) — strictness-ordering comment.** `contract._VERDICT_CLASS_STRICTNESS` ranks
+  PERCEPTUAL (class 5) at 3, BELOW HUMAN_WITNESSED (class 4) at 4, so for SATISFACTION a HUMAN_WITNESSED
+  sign-off satisfies a PERCEPTUAL-required key (a recorded human attestation is at least as strong as a
+  perceptual HITL; both non-auto-approvable, no integrity loss). Added a load-bearing comment that this is
+  INTENTIONAL and must NOT be "fixed" into class-5 > class-4 (that would regress the satisfaction lattice).
+  The ranking governs only the satisfaction/tighten JOIN; it does NOT make either class auto-approvable —
+  class 4 AND class 5 both remain never-auto-approvable (enforced elsewhere; unchanged).
+- DM22. **M5-R1-03 (MINOR) — field rename.** `ComputePolicy.per_fix_compute_cap_microusd` →
+  `per_fix_compute_cap_units` (it carries integer compute UNITS metered by `state_sha.ComputeBudget`, NOT
+  micro-USD). Updated the field, `tighten`, `relaxes` (contract.py), its sole producer (ml_data.py
+  `compute_budget`), and the test references (test_pack_ml_data.py, test_domains_contract.py). Behavior is
+  byte-identical; only the name + a clarifying inline comment changed.
+- DM23. **Gates:** `ruff check foundry tests` clean; `mypy foundry` clean (145 files); full suite
+  **1321 passed, 1 skipped** (incl. test_phase5_exit, test_factory_graph_autonomous, test_supervisor_packs,
+  test_pack_ml_data, test_domains_contract). Touched ONLY factory_graph.py, contract.py, packs/ml_data.py,
+  their test files (+ the new test in test_phase5_exit.py) + this LEARNINGS note.

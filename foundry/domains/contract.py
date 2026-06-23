@@ -101,12 +101,24 @@ _TIER_STRICTNESS: dict[RiskTier, int] = {
 # criterion to a STRICTER grounding (e.g. perceptual/human-witnessed instead of a
 # self-judge residual) but may never downgrade the grounding of an integrity
 # verdict. Higher rank = harder to forge / more human-bound.
+# NB (M5-R1-02): PERCEPTUAL (class 5) is ranked BELOW HUMAN_WITNESSED (class 4) ON
+# PURPOSE — this is NOT the literal class-5 > class-4 numbering. For *satisfaction*
+# (``tighten`` keeps the higher rank; ``satisfies(have, need)`` is True iff
+# ``rank[have] >= rank[need]``), a recorded HUMAN attestation (HUMAN_WITNESSED) is at
+# least as strong as a perceptual HITL: a named human signed, both are
+# non-auto-approvable, and neither loses integrity. So a HUMAN_WITNESSED sign-off
+# satisfies a key requiring PERCEPTUAL grounding. Do NOT "fix" this into
+# class-5 > class-4 — that would REGRESS the satisfaction lattice (a present human
+# attestation would stop satisfying a perceptual-required key). This ranking only
+# governs the satisfaction/tighten JOIN; it does NOT make either class
+# auto-approvable — class 4 AND class 5 both remain never-auto-approvable (enforced
+# by ``verdict_class`` / ``perceptual_hitl_required``, which this rank never relaxes).
 _VERDICT_CLASS_STRICTNESS: dict[VerdictClass, int] = {
     VerdictClass.CONFIG_EVALUABLE: 0,
     VerdictClass.EXECUTION_DETERMINISTIC: 1,
     VerdictClass.STATISTICAL: 2,
     VerdictClass.PERCEPTUAL: 3,
-    VerdictClass.HUMAN_WITNESSED: 4,  # strictest: a named human must attest
+    VerdictClass.HUMAN_WITNESSED: 4,  # strictest for satisfaction: a named human attested
 }
 
 
@@ -188,7 +200,10 @@ class ComputePolicy(FrozenModel):
     expensive_gates: frozenset[str] = frozenset()
     require_proxy: bool = False  # expensive gates gated behind a cheap proxy
     confirm_escalation: bool = False  # full run requires explicit budget confirm
-    per_fix_compute_cap_microusd: int | None = None
+    # Compute UNITS (NOT micro-USD) — a per-fix ceiling metered by
+    # ``state_sha.ComputeBudget`` (integer compute units; a GPU-minute / retrain
+    # slice / device-matrix cell), the dimension DISTINCT from USD spend (M5-R1-03).
+    per_fix_compute_cap_units: int | None = None
 
     @classmethod
     def identity(cls) -> ComputePolicy:
@@ -197,14 +212,14 @@ class ComputePolicy(FrozenModel):
     def tighten(self, other: ComputePolicy) -> ComputePolicy:
         caps = [
             c
-            for c in (self.per_fix_compute_cap_microusd, other.per_fix_compute_cap_microusd)
+            for c in (self.per_fix_compute_cap_units, other.per_fix_compute_cap_units)
             if c is not None
         ]
         return ComputePolicy(
             expensive_gates=self.expensive_gates | other.expensive_gates,
             require_proxy=self.require_proxy or other.require_proxy,
             confirm_escalation=self.confirm_escalation or other.confirm_escalation,
-            per_fix_compute_cap_microusd=min(caps) if caps else None,
+            per_fix_compute_cap_units=min(caps) if caps else None,
         )
 
     def relaxes(self, floor: ComputePolicy) -> bool:
@@ -213,7 +228,7 @@ class ComputePolicy(FrozenModel):
         the join can never weaken, so they need no check; the only displacing axis
         is the cap (``tighten`` keeps the LOWER), where a contribution SPECIFYING a
         higher cap than the floor is an attempted relaxation. (domains.md §3)"""
-        fc, sc = floor.per_fix_compute_cap_microusd, self.per_fix_compute_cap_microusd
+        fc, sc = floor.per_fix_compute_cap_units, self.per_fix_compute_cap_units
         return fc is not None and sc is not None and sc > fc
 
 

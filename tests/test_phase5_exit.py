@@ -820,3 +820,77 @@ def test_d_fresh_pack_composes_with_first_party_packs() -> None:
     assert eff.two_person_release is True
     # crypto's key-material ref folded into state_sha (the state_inputs union).
     assert "keymaterial@kms-v1" in policy.state_inputs.weight_refs
+
+
+# =====================================================================
+# M5-R1-01: the autonomous approver/HITL check is UNCONDITIONAL
+# =====================================================================
+
+
+class _ApproverOnlyPack(BaseDomainPack):
+    """A FUTURE-shaped pack that binds a class-4 ``release`` approver-of-record but
+    does NOT veto Autonomous (it leaves ``mode_tier_policy`` at the identity).
+
+    This is exactly the M5-R1-01 hazard: under the OLD AND-coupling the autonomous
+    emit halted only if (Autonomous vetoed) AND (pack reqs unmet). This pack keeps
+    Autonomous REACHABLE (``autonomous_pack_reachable`` is True) while binding a
+    human approver-of-record — so the AND would short-circuit and SKIP the approver
+    check on the hands-off deploy path. The fixed OR-coupling enforces the approver
+    check UNCONDITIONALLY, so the emit halts (no recorded human ⇒ no deploy)."""
+
+    name = "approver_only"
+    capabilities = frozenset({"approveronly"})
+
+    def approver_of_record(self, request: Any) -> Any:
+        from foundry.domains.contract import ApproverPolicy
+
+        return ApproverPolicy(bound_artifact_classes=frozenset({"release"}))
+
+
+def test_m5r101_approver_binding_pack_halts_autonomous_even_when_reachable(
+    tmp_path: Any,
+) -> None:
+    """M5-R1-01: a pack that binds a class-4 approver-of-record WITHOUT vetoing
+    Autonomous still HALTS the hands-off autonomous emit — the approver/HITL check
+    is enforced UNCONDITIONALLY (no recorded HUMAN approver ⇒ NO deploy), exactly as
+    the gated/assistant paths already do.
+
+    Proven non-vacuously: Autonomous IS reachable (the pack does not veto it) and the
+    integrity gates all PASS — the ONLY thing blocking deploy is the now-unconditional
+    approver-of-record check. Compare with the clean control (no pack), which deploys."""
+    records = GlobalRecords()
+    registry = PackRegistry()
+    registry.register(_ApproverOnlyPack())
+    config = _config("run-m5r101-approver")
+    token = set_gate_write_verifier(DevGateWriteVerifier(KEY, KEY_ID, records))
+    try:
+        app = _build_autonomous_factory(records, _src(tmp_path), registry=registry)
+        final: FactoryState = app.invoke(
+            {"request": "ship a release", "required_capabilities": ["approveronly"]},
+            config,
+        )
+    finally:
+        reset_gate_write_verifier(token)
+
+    # The integrity floor still passes — the change is fully assured...
+    statuses = _gates_by_name(final)
+    for name in ("spec", "build", "test", "security", "audit"):
+        assert statuses.get(name) is GateStatus.PASS, name
+
+    # ...and Autonomous IS reachable (the pack binds an approver but does NOT veto):
+    # so the OLD AND-coupling would have SHORT-CIRCUITED and deployed. The fixed
+    # unconditional check halts because no recorded HUMAN approver-of-record exists.
+    assert (
+        autonomous_pack_reachable(
+            final, registry, requested_mode=MODE_AUTONOMOUS, seq=_seq()
+        )
+        is True
+    )
+    assert (
+        pack_release_admitted(final, config, registry, requested_mode=MODE_AUTONOMOUS)
+        is False
+    )
+
+    # The hands-off deploy is HALTED — the approver check fired unconditionally.
+    assert _deploy_actions(final) == []
+    assert final["phase"] == "halted"

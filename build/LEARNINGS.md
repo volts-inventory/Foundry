@@ -2534,3 +2534,41 @@ the REAL component (non-vacuous) and each paired with a control that DOES deploy
   pack's hooks when its caps intersect the request); DM9's regulated pack instead leaves hooks
   unconditional. Both are fine. Touched ONLY `frontend.py` + `tests/test_pack_frontend.py` + this note.
   ruff (both files) + `mypy foundry` clean; 23 new tests green; full suite 1297 passed / 1 skipped.
+
+## Domain-pack engagement at triage + composed policy at release — the SINGLE graph-core seam (T-M5-08)
+- DM11. **`build_supervisor_graph(..., pack_registry=None)` + `build_factory_graph(..., pack_registry=None)`
+  are the ONE graph-core edit that makes the 3 packs take effect end-to-end. `None` (DEFAULT) engages
+  NO packs → EXACT prior behavior (back-compat; every Assistant/Gated/Autonomous test unchanged).** The
+  registry is the SEAM: this wiring reads the COMPOSED policy GENERICALLY, never pack-by-pack — so a 4th
+  pack is `registry.register(pack)` with ZERO wiring edit (proven by a `_StubPack` test the core never saw).
+- DM12. **TRIAGE engages the registry (only on the gated spine, `mode in {gated, autonomous}`).** When a
+  registry is passed, triage calls `pack_registry.compose(state)` (routes by `state['required_capabilities']`,
+  strictest-wins) → `resolve_effective_mode_tier(policy.mode_tier, requested_mode=mode, request=state, ...)`.
+  The EFFECTIVE mode (capped by the veto) is stamped on the `mode` single-writer channel; the `risk_tier`
+  is `classify_tier_at_floor(...)` (NEW in `tiering.py`: classify then TIGHTEN up to the policy floor +
+  OR the two-person flag — tighten-only, `relaxes_integrity()` still False). A regulated request requested
+  as Autonomous → `effective_mode == gated`, `autonomous_reachable is False`, tier HIGH, two-person on.
+- DM13. **RELEASE/emit RE-DERIVES the composed policy (a pure fn of caps) and enforces it fail-closed — no
+  new state channel needed.** `pack_release_admitted(state, config, registry, requested_mode=)` in
+  `factory_graph.py`: (1) approver-of-record — `release_admitted(policy.approver, sign_offs, artifact_class=
+  "release", ...)` rejects a self-judge/agent/autonomous approver (no recorded HUMAN ⇒ no release); (2)
+  perceptual HITL — if `perceptual_hitl_required(policy.perceptual_hitl, request=state)`, require a recorded
+  approved HUMAN visual sign-off via `class5_hitl_satisfied` (a self-judge clean run is BLOCKED — never
+  auto-approved). All 3 emit nodes (assistant/gated/autonomous) AND-in this guard. The autonomous emit ALSO
+  checks `autonomous_pack_reachable(...)`: when the veto makes Autonomous unreachable AND the human-approver
+  requirement is unmet, it builds/admits/deploys NOTHING (the regulated hands-off-deploy block, fail-closed).
+- DM14. **ML→class-3-state_sha and UI→perceptual-HITL flow through the composed `verdict_class` policy
+  GENERICALLY** (the boundary reads `gate_requirements_for(assigned).grounding`): MLDataPack assigns
+  `model_eval`→STATISTICAL (`grounding == ALPHA_STATE_SHA`, `requires_alpha_state_sha`); FrontendPack
+  assigns `frontend.perceptual`→PERCEPTUAL (`requires_hitl`, `auto_approvable is False`, and
+  `satisfies(PERCEPTUAL, EXECUTION_DETERMINISTIC) is False` — a green machine gate can't clear it).
+- DM15. **GOTCHA — the supervisor topology is fixed at BUILD time from the REQUESTED `mode`, but the veto
+  degrades the mode at RUNTIME (triage).** Since Autonomous reuses the Gated spine, a regulated-Autonomous
+  request already builds the gated boundaries (design/release sign-off), so degrading to Gated is consistent;
+  the Autonomous-vs-Gated difference lives entirely in the factory_graph EMIT node, which is where the veto
+  bites (no hands-off deploy). A pack that vetoes ONLY `autonomous` (not `assistant`) degrades to `assistant`,
+  not `gated` — drive packs that veto BOTH (like RegulatedPack) when a Gated effective mode is wanted.
+- DM16. Touched ONLY `foundry/graph/supervisor.py` + `foundry/graph/factory_graph.py` +
+  `foundry/governance/tiering.py` (added `classify_tier_at_floor` + `_TIER_STRICTNESS`) +
+  `tests/test_supervisor_packs.py` (11 new tests). `ruff check foundry tests` clean; `mypy foundry` clean;
+  full suite 1308 passed / 1 skipped.

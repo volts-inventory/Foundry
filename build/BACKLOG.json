@@ -2321,7 +2321,7 @@
         "uv run pytest -q green; changed-scope coverage >= 85% local"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M5-09",
@@ -2352,7 +2352,7 @@
         "uv run pytest -q green; changed-scope coverage >= 85% local"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     }
   ]
 }

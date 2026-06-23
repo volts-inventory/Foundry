@@ -91,6 +91,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
 from foundry.agents.implementation.senior_engineer import DESIGN_KIND
+from foundry.domains.governance_hooks import resolve_effective_mode_tier
 from foundry.governance.budget_controller import BudgetCaps, BudgetController
 from foundry.governance.release_anchors import (
     evidence_hash,
@@ -104,7 +105,7 @@ from foundry.governance.sign_off import (
     record_release_sign_off,
     release_allowed,
 )
-from foundry.governance.tiering import classify_tier
+from foundry.governance.tiering import classify_tier, classify_tier_at_floor
 from foundry.graph.assurance_wiring import ADVANCE as ASSURANCE_ADVANCE
 from foundry.graph.assurance_wiring import HALT as ASSURANCE_HALT
 from foundry.graph.assurance_wiring import route_after_assurance
@@ -128,6 +129,7 @@ if TYPE_CHECKING:
     from foundry.agents._runtime import AgentRuntime
     from foundry.agents.implementation.senior_engineer import ArtifactResolver
     from foundry.context import SymbolIndex
+    from foundry.domains.registry import PackRegistry
     from foundry.gates.discriminator import DiscriminatorFactory
     from foundry.gates.runner import TwoZoneGateRunner
     from foundry.graph.gate_wiring import BlobResolver
@@ -249,6 +251,7 @@ def build_supervisor_graph(
     max_fix_attempts: int = 3,
     mode: str = MODE_ASSISTANT,
     discriminator_factory: DiscriminatorFactory | None = None,
+    pack_registry: PackRegistry | None = None,
 ) -> StateGraph[FactoryState]:
     """Build the UNCOMPILED supervisor graph over :class:`FactoryState`.
 
@@ -306,6 +309,20 @@ def build_supervisor_graph(
         ``tests/test_phase4_exit.py``). ``None`` (the default) keeps the Phase-1/2
         behavior byte-for-byte (adequacy floor only; Assistant/Gated/Autonomous
         back-compat).
+    pack_registry:
+        OPTIONAL domain-pack registry (T-M5-08; the open/closed seam). ``None``
+        (the DEFAULT) engages NO packs → exact prior behavior (back-compat). When
+        provided, the TRIAGE node routes the request's ``required_capabilities``
+        through :meth:`PackRegistry.compose` → a strictest-wins ``ComposedPolicy``,
+        applies its ``mode_tier`` veto via :func:`resolve_effective_mode_tier` (a
+        regulated request CANNOT run Autonomous — the effective mode degrades to
+        Gated and the tier is raised tighten-only), and stamps the EFFECTIVE
+        mode/risk_tier on state. The composed policy is a PURE function of the
+        request capabilities + the registry, so the release boundaries
+        (factory_graph emit) RE-DERIVE it generically (verdict-class assignments /
+        approver-of-record / perceptual-HITL) — pack-by-pack wiring is never
+        needed, so adding a 4th pack is ``registry.register(pack)`` with NO edit
+        here.
 
     Returns the ``StateGraph`` UNCOMPILED — ``factory_graph`` (T-M1-14) compiles
     it, attaches the shared checkpointer, and appends the emit node.
@@ -321,25 +338,58 @@ def build_supervisor_graph(
     # -- triage: classify + seed route/budget; gated also tiers (gov §1e) -----
     def triage(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         route = classify_request(state.get("request", ""))
+        base_mode = mode if gated else MODE_ASSISTANT
         out: dict[str, Any] = {
             "phase": _TRIAGE,
             "route": route,
             "budget": _seed_budget(route),
             # Record the EXACT mode on the single-writer channel (autonomous is
             # distinct from gated even though it reuses the gated spine).
-            "mode": mode if gated else MODE_ASSISTANT,
+            "mode": base_mode,
         }
         if gated:
-            # Change-risk tiering (gov §1e): write the risk_tier single-writer
-            # channel; the tier scales assurance DEPTH (passed to the assurance
-            # subgraph at run time via state['risk_tier']), NEVER integrity.
             tier_seq = rt.seq(config, _TRIAGE, "tier")
-            out["risk_tier"] = classify_tier(
-                state,
-                capabilities=state.get("required_capabilities"),
-                seq=tier_seq,
-                run_against=state_sha(config),
-            )
+            caps = state.get("required_capabilities")
+            run_against = state_sha(config)
+            if pack_registry is not None:
+                # T-M5-08: engage the domain packs at TRIAGE. Route the request's
+                # capabilities through the registry → a strictest-wins composed
+                # policy, then APPLY the mode/tier veto: a vetoed mode (Autonomous
+                # for a regulated request) is UNREACHABLE, so the effective mode
+                # DEGRADES to the strictest still-allowed (Gated) and the tier is
+                # RAISED tighten-only (never relaxed). The composed policy is a pure
+                # function of the capabilities, so the release boundaries re-derive
+                # it generically — no pack-by-pack wiring (the registry is the seam).
+                policy = pack_registry.compose(state)
+                eff = resolve_effective_mode_tier(
+                    policy.mode_tier,
+                    requested_mode=mode,
+                    request=state,
+                    capabilities=caps,
+                    seq=tier_seq,
+                    run_against=run_against,
+                )
+                # The effective release mode is capped by the veto (Autonomous is
+                # unreachable for a regulated request → Gated). Stamp it on the
+                # single-writer channel so the emit boundary sees the degraded mode.
+                out["mode"] = eff.effective_mode
+                # The risk_tier is the deterministic classifier verdict TIGHTENED to
+                # the policy floor (a regulated pack force-escalates to HIGH); the
+                # two-person-Release flag rides through. Never relaxes integrity.
+                out["risk_tier"] = classify_tier_at_floor(
+                    state,
+                    floor=eff.effective_tier,
+                    capabilities=caps,
+                    two_person_release=eff.two_person_release,
+                    seq=tier_seq,
+                    run_against=run_against,
+                )
+            else:
+                # No registry → exact prior behavior (back-compat): the
+                # deterministic change-risk tier only, no pack policy.
+                out["risk_tier"] = classify_tier(
+                    state, capabilities=caps, seq=tier_seq, run_against=run_against
+                )
         return out
 
     # -- the four layer subgraphs, compiled + mounted as nodes ----------------

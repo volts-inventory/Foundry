@@ -66,6 +66,11 @@ from langgraph.graph import END, START, StateGraph
 
 from foundry.agents.implementation.senior_engineer import DESIGN_KIND
 from foundry.canonical import content_digest
+from foundry.domains.governance_hooks import (
+    perceptual_hitl_required,
+    release_admitted,
+    resolve_effective_mode_tier,
+)
 from foundry.durability.evidence_pack import build_evidence_pack
 from foundry.governance.release_anchors import (
     evidence_hash,
@@ -95,6 +100,7 @@ if TYPE_CHECKING:
     from foundry.agents._runtime import AgentRuntime
     from foundry.agents.implementation.senior_engineer import ArtifactResolver
     from foundry.context import SymbolIndex
+    from foundry.domains.registry import PackRegistry
     from foundry.gates.attestation import DevGateWriteVerifier
     from foundry.gates.discriminator import DiscriminatorFactory
     from foundry.gates.runner import TwoZoneGateRunner
@@ -107,8 +113,10 @@ if TYPE_CHECKING:
 __all__ = [
     "MANDATORY_ADMISSION_FLOOR",
     "TERMINAL_PASS_GATES",
+    "autonomous_pack_reachable",
     "build_factory_graph",
     "gated_release_admitted",
+    "pack_release_admitted",
     "terminal_gates_pass",
 ]
 
@@ -238,6 +246,144 @@ def gated_release_admitted(state: FactoryState, config: RunnableConfig) -> bool:
         presented_evidence_hash=ev_hash,
         server_nonce=nonce,
     )
+
+
+# ---- domain-pack release enforcement (T-M5-08) ------------------------------
+# The composed domain-pack policy is a PURE function of the request's capabilities
+# + the registry, so the release boundary RE-DERIVES it here (no new state channel,
+# no pack-by-pack wiring): a regulated/class-4 release requires a recorded human
+# approver-of-record, a frontend/class-5 release requires the perceptual HITL, and
+# the pack veto makes hands-off Autonomous UNREACHABLE for a regulated request. All
+# tighten-only + fail-closed: a pack can only make the release STRICTER, never relax
+# the integrity floor. The KEY invariant — adding a 4th pack is registry.register():
+# this reads the composed policy generically, never pack-by-pack.
+
+
+def _release_class() -> str:
+    """The artifact CLASS the release-boundary approver-of-record keys on.
+
+    The regulated pack binds the ``release`` class (and the design-control classes)
+    at class 4; the release decision is keyed on ``release`` (Regulated-F2)."""
+    return "release"
+
+
+def pack_release_admitted(
+    state: FactoryState,
+    config: RunnableConfig,
+    pack_registry: PackRegistry | None,
+    *,
+    requested_mode: str,
+) -> bool:
+    """Fail-closed: does the composed domain-pack policy ADMIT this release? (T-M5-08)
+
+    ``None`` registry → ``True`` (no packs engaged; exact prior behavior). Otherwise
+    the engaged packs' composed policy is RE-DERIVED (pure function of the request's
+    capabilities) and enforced at the release boundary, tighten-only:
+
+    * **Approver-of-record (regulated / class 4).** If the policy binds the
+      ``release`` artifact class, a release is admitted ONLY if a recorded, approved,
+      HUMAN sign-off binds THIS subject + ``state_sha``
+      (:func:`foundry.domains.governance_hooks.release_admitted`) — an
+      agent-identity / Autonomous / self-judge approver is rejected (no human
+      approver ⇒ no release). Two-person where the policy forces it.
+    * **Perceptual HITL (frontend / class 5).** If the policy requires a perceptual
+      HITL for this request's capabilities, the release is admitted ONLY if a
+      recorded, approved, HUMAN visual sign-off binds the exact decision anchors —
+      it is NEVER auto-approved (no machine path clears it).
+
+    A pack can only TIGHTEN: the verdict ANDs the pack requirements onto whatever the
+    base (Assistant/Gated/Autonomous) emit guard already required; it never relaxes.
+    """
+    if pack_registry is None:
+        return True
+    policy = pack_registry.compose(state)
+    subject_uri = newest_artifact_uri(state, DESIGN_KIND)
+    sha = state_sha(config)
+    sign_offs = list(state.get("sign_offs") or ())
+
+    # -- approver-of-record (regulated, class 4): no recorded human ⇒ no release --
+    if not release_admitted(
+        policy.approver,
+        sign_offs,
+        artifact_class=_release_class(),
+        subject_artifact_uri=subject_uri,
+        state_sha=sha,
+        require_two_person=policy.mode_tier.two_person_release,
+    ):
+        return False
+
+    # -- perceptual HITL (frontend, class 5): never auto-approved ----------------
+    hitl = perceptual_hitl_required(policy.perceptual_hitl, request=state)
+    if hitl.required:
+        nonce = sign_off_nonce(config, "release_sign_off", subject_uri, sha)
+        ev_hash = evidence_hash(subject_uri, sha, list(state.get("gates") or ()))
+        if not _perceptual_hitl_satisfied(
+            sign_offs,
+            subject_artifact_uri=subject_uri,
+            state_sha=sha,
+            presented_evidence_hash=ev_hash,
+            server_nonce=nonce,
+        ):
+            return False
+    return True
+
+
+def _perceptual_hitl_satisfied(
+    sign_offs: list[SignOffRecord],
+    *,
+    subject_artifact_uri: str,
+    state_sha: str,
+    presented_evidence_hash: str,
+    server_nonce: str,
+) -> bool:
+    """A class-5 perceptual gate is satisfied ONLY by a recorded, approved HUMAN
+    visual sign-off binding the exact decision anchors (UX-F1/F2, fail-closed).
+
+    Reuses :func:`foundry.domains.verdict_class.class5_hitl_satisfied` over the
+    newest matching record; a self-judge / agent / autonomous approver can never
+    satisfy it (taste is never delegated to a model — never auto-approved)."""
+    from foundry.domains.governance_hooks import _is_human_approver
+    from foundry.domains.verdict_class import class5_hitl_satisfied
+
+    for record in sign_offs:
+        if not _is_human_approver(record.approver):
+            continue
+        if class5_hitl_satisfied(
+            record,
+            subject_artifact_uri=subject_artifact_uri,
+            state_sha=state_sha,
+            presented_evidence_hash=presented_evidence_hash,
+            server_nonce=server_nonce,
+        ):
+            return True
+    return False
+
+
+def autonomous_pack_reachable(
+    state: FactoryState,
+    pack_registry: PackRegistry | None,
+    *,
+    requested_mode: str,
+    seq: Any,
+) -> bool:
+    """Is hands-off Autonomous still REACHABLE under the composed pack policy?
+
+    ``None`` registry → ``True`` (no veto). Otherwise the composed ``mode_tier``
+    policy's veto is applied via :func:`resolve_effective_mode_tier`: a regulated
+    request VETOES Autonomous, so this returns ``False`` and the autonomous emit
+    must fall back to the recorded-human approver-of-record path (it can NEVER
+    hands-off deploy a regulated artifact). Pure/deterministic."""
+    if pack_registry is None:
+        return True
+    policy = pack_registry.compose(state)
+    eff = resolve_effective_mode_tier(
+        policy.mode_tier,
+        requested_mode=requested_mode,
+        request=state,
+        capabilities=state.get("required_capabilities"),
+        seq=seq,
+    )
+    return eff.autonomous_reachable
 
 
 def _pr_subject(state: FactoryState) -> Artifact | None:
@@ -423,6 +569,7 @@ def build_factory_graph(
     deployer: Deployer | None = None,
     gate_verifier: DevGateWriteVerifier | None = None,
     discriminator_factory: DiscriminatorFactory | None = None,
+    pack_registry: PackRegistry | None = None,
 ) -> CompiledStateGraph[FactoryState]:
     """Compile the full factory graph (Assistant-mode default; Gated/Autonomous opt-in).
 
@@ -486,6 +633,17 @@ def build_factory_graph(
         The held-out mutant SET is a dev-grade CURATED set (a real mutation engine
         is heavier; plan §0.3). ``None`` (the default) keeps the adequacy-floor-only
         behavior byte-for-byte (back-compat for every existing caller).
+    pack_registry:
+        OPTIONAL domain-pack registry (T-M5-08), threaded to the supervisor (engages
+        the packs at triage) AND read by the emit boundary to enforce the composed
+        policy fail-closed: a regulated/class-4 release requires a recorded human
+        approver-of-record (an Autonomous emit can NOT hands-off deploy a regulated
+        artifact — the veto makes Autonomous unreachable), a frontend/class-5 release
+        requires the perceptual HITL (never auto-approved). Tighten-only: packs can
+        only make the release STRICTER, never relax the integrity floor. ``None`` (the
+        DEFAULT) engages NO packs → exact prior behavior (back-compat). The KEY
+        invariant: adding a 4th pack is ``registry.register(pack)`` — this wiring
+        reads the COMPOSED policy generically, never pack-by-pack.
 
     Returns the COMPILED top-level graph.
     """
@@ -509,6 +667,7 @@ def build_factory_graph(
         max_fix_attempts=max_fix_attempts,
         mode=mode,
         discriminator_factory=discriminator_factory,
+        pack_registry=pack_registry,
     ).compile()
 
     def emit(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
@@ -527,6 +686,11 @@ def build_factory_graph(
         """
         if not terminal_gates_pass(state):
             # Halted / failed run: do NOT open a PR. Mark the phase only.
+            return {"phase": "halted"}
+        if not pack_release_admitted(state, config, pack_registry, requested_mode=mode):
+            # An engaged domain pack TIGHTENS the release (a recorded human
+            # approver-of-record / perceptual HITL is required) and is unmet —
+            # fail-closed: open NOTHING (tighten-only; packs never relax).
             return {"phase": "halted"}
         subject = _pr_subject(state)
         if subject is None:
@@ -573,6 +737,11 @@ def build_factory_graph(
         if not gated_release_admitted(state, config):
             # Not released (halt / vulnerable change / unsigned release): emit
             # NOTHING — no PR, no evidence-pack release.
+            return {"phase": "halted"}
+        if not pack_release_admitted(state, config, pack_registry, requested_mode=mode):
+            # An engaged domain pack TIGHTENS the release beyond the self-judge
+            # Release sign-off (a recorded HUMAN approver-of-record / perceptual
+            # HITL is required) and is unmet — fail-closed: no PR, no pack release.
             return {"phase": "halted"}
         subject = _pr_subject(state)
         if subject is None:
@@ -660,6 +829,19 @@ def build_factory_graph(
         # A halted / failed run (latch, bound spent, missing verdict) fails here.
         if not _gates_all_pass(_latest_by_name(state), _required_gate_names(state)):
             return {"phase": "halted"}
+
+        # -- 1b. Domain-pack veto (T-M5-08): Autonomous UNREACHABLE for a -------
+        # regulated request. The composed mode/tier policy VETOES hands-off
+        # Autonomous, so the trust root may NOT deploy a regulated artifact without
+        # a recorded HUMAN approver-of-record. An Autonomous run carries no human
+        # sign-off, so when Autonomous is vetoed AND the pack requirements are unmet
+        # the emit fail-closes here: build NOTHING, admit NOTHING, deploy NOTHING.
+        veto_seq = rt.seq(config, _EMIT, "pack:autonomous_reachable")
+        if not autonomous_pack_reachable(
+            state, pack_registry, requested_mode=mode, seq=veto_seq
+        ) and not pack_release_admitted(state, config, pack_registry, requested_mode=mode):
+            return {"phase": "halted"}
+
         subject = _pr_subject(state)
         if subject is None:
             return {"phase": "halted"}

@@ -151,6 +151,14 @@ _TRIVIAL_SIGNALS: tuple[str, ...] = (
 # of the integrity-critical gates — those run at every tier; this only adds/removes
 # OPTIONAL depth (Supply-chain / Threat-review at HIGH; a reduced OPTIONAL set at
 # LOW). Build / Test / scoped Security run at ALL tiers, fail-closed.
+# Strictness order over risk tiers (governance.md §1e). HIGH is strictest. Used by
+# the tighten-only floor raise a domain-pack mode/tier veto applies.
+_TIER_STRICTNESS: dict[RiskTier, int] = {
+    RiskTier.LOW: 0,
+    RiskTier.STANDARD: 1,
+    RiskTier.HIGH: 2,
+}
+
 _INTEGRITY_GATES: tuple[str, ...] = ("build", "test", "security")
 _GATE_SETS: dict[RiskTier, tuple[str, ...]] = {
     RiskTier.LOW: _INTEGRITY_GATES,
@@ -164,6 +172,44 @@ _GATE_SETS: dict[RiskTier, tuple[str, ...]] = {
         "threat_review",
     ),
 }
+
+
+def classify_tier_at_floor(
+    source: str | Mapping[str, Any],
+    *,
+    floor: RiskTier,
+    capabilities: Iterable[str] | None = None,
+    two_person_release: bool = False,
+    seq: Seq,
+    run_against: str = "",
+) -> TierDecision:
+    """Classify ``source`` then TIGHTEN the result up to ``floor`` (tighten-only).
+
+    The domain-pack mode/tier veto can only RAISE the change-risk tier (a regulated
+    pack force-escalates to HIGH independent of diff size; governance.md §1e /
+    domains.md §4). This wraps :func:`classify_tier` and returns the STRICTER of the
+    deterministic verdict and ``floor`` — never the laxer (a pack can never relax the
+    classifier's own tier). ``two_person_release`` is OR-ed on (a pack-forced
+    segregation-of-duties Release). The returned decision still asserts
+    ``relaxes_integrity() is False``.
+    """
+    base = classify_tier(source, capabilities=capabilities, seq=seq, run_against=run_against)
+    if _TIER_STRICTNESS[floor] <= _TIER_STRICTNESS[base.tier] and not two_person_release:
+        return base
+    tier = base.tier if _TIER_STRICTNESS[base.tier] >= _TIER_STRICTNESS[floor] else floor
+    forced_high = base.forced_high or tier is RiskTier.HIGH
+    two_person = base.two_person_release or two_person_release
+    return _decide(
+        tier,
+        rationale=(
+            f"{base.rationale}; tightened to floor {floor.value} by an engaged "
+            "domain pack's mode/tier veto (tighten-only, domains.md §4)"
+        ),
+        seq=seq,
+        run_against=run_against,
+        forced_high=forced_high,
+        two_person_release=two_person,
+    )
 
 
 def _request_text(source: str | Mapping[str, Any]) -> str:

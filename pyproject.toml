@@ -64,11 +64,17 @@ branch = true
 show_missing = true
 exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", "raise NotImplementedError"]
 
-# Mutation testing (milestone gate, scoped to changed paths).
-# Mutation testing config (list-form for mutmut 3.x). NOTE: mutmut 3.x's mutants/-tree
-# execution model needs harness work to assemble the full importable package under narrowed
-# scope; quantified scoring is a tracked follow-up (see build/DECISIONS.md D7). Property +
-# adversarial tests are the primary fault-injection evidence at M1.
+# Mutation testing (milestone gate, scoped to changed paths). See build/DECISIONS.md D7.
+# mutmut 3.x copies source_paths into a mutants/ tree and runs the suite from there, so the
+# WHOLE foundry package must be present for imports (foundry.agents et al.) to resolve —
+# narrowing source_paths to one file (the original D7 failure) breaks the package import.
+# Fix: copy the full tree but scope which lines are MUTATED with only_mutate, and run only
+# the target module's targeted tests via pytest_add_cli_args_test_selection (a time-boxed,
+# per-module gate; flip only_mutate/test-selection to the module under change).
 [tool.mutmut]
-source_paths = ["foundry/"]
-tests_dir = ["tests/"]
+source_paths = ["foundry"]
+only_mutate = ["foundry/state/reducers.py"]
+pytest_add_cli_args_test_selection = [
+    "tests/test_reducers_properties.py",
+    "tests/test_merge_gates_grounding.py",
+]

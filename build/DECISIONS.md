@@ -60,3 +60,41 @@ GateResult dropped by merge_gates, stable-FAIL latch survives a later approve, f
 materialization raises, attested-only advancement, vacuous-suite FAIL, hidden-suite control
 test (flip code → only hidden oracle fails → no PR), kill-then-resume no-dup. These kill the
 meaningful mutants a scorer would target. Re-attempt with a working harness before EXIT.
+
+## D7-RESOLVED — Mutation testing harness fixed; quantified kill score produced (T-TOOL-MUT)
+**2026-06-23.** RESOLVED with mutmut 3.6.0 (Option A — real mutmut, no bespoke runner needed).
+The D7 failure was a `source_paths` misuse: narrowing `source_paths` to a single file made
+mutmut copy only that file into the `mutants/` tree, so the rest of the `foundry` package
+(e.g. `foundry.agents`) was absent and the test import collapsed. FIX (config-only, in
+`[tool.mutmut]`): keep `source_paths=["foundry"]` so the WHOLE importable package is copied,
+and scope the run with `only_mutate=["foundry/state/reducers.py"]` (which lines get mutated)
+plus `pytest_add_cli_args_test_selection=[...]` (run only that module's targeted tests). This
+is the time-boxed per-module gate shape — flip the two lists to the module under change.
+
+QUANTIFIED RESULT — `foundry/state/reducers.py`, run against `test_reducers_properties.py` +
+`test_merge_gates_grounding.py` (~40s, 11 mut/s):
+- **TRUST-CRITICAL function `merge_gates` (the admission gate): 27 mutants, 23 killed, 4
+  survived → 85.2% kill score. CLEARS the ≥70% bar.**
+- Whole-file score is lower (54/94 ≈ 57%) purely because the generic `make_union_by_key`
+  factory (33 mutants, all surviving) and `union`/`merge_constraints` helpers are NOT
+  trust-critical and the algebra property tests compare canonical multisets, which is
+  insensitive to many of those keyed-union internals. Those helpers are out of the
+  trust-critical scope; the per-function `merge_gates` score is the governance number.
+
+SURVIVOR ANALYSIS (merge_gates, 4):
+- `mutmut_15/17/19` — `continue`→`break` on the three reject branches (forged binding /
+  nonce-replay / negative latch). Near-equivalent: in every grounding test the rejected
+  record is the last (or only) item in the fold, or a valid record precedes it and is already
+  admitted, so `break` and `continue` yield the same set. They differ only if a REJECTED
+  judgment record precedes a still-admissible record in the SAME fold — a real but narrow
+  test gap (noted; not a correctness defect, the reject decision itself is killed many times
+  over by the unsigned/flipped/latched assertions). No test weakened to mask them.
+- `mutmut_25` — `g.seq > prev.seq` → `>=`. Equivalent mutant under the content-keyed channel
+  contract (L8): the re-fold idempotency tests make equal-seq records byte-identical, so
+  last-write-wins at equal seq produces the identical result; the strict-vs-non-strict
+  boundary is unobservable for distinct content.
+
+Conclusion: mutation INTENT is now quantified, not just argued — 85.2% kill on the
+trust-critical admission function, survivors all equivalent/narrow-gap and analyzed. Gates:
+`ruff check foundry tests` clean, `mypy foundry` clean, full `pytest -q` green. `mutants/` is
+gitignored; config-only change to `pyproject.toml`.

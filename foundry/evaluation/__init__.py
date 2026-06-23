@@ -7,6 +7,7 @@ pure pydantic models + enums, no statistics logic).
 
 from __future__ import annotations
 
+from foundry.evaluation.cost_model import CostBreakdown, CostModel, RunSignals
 from foundry.evaluation.hypothesis import (
     Arm,
     CentralHypothesis,
@@ -20,9 +21,12 @@ from foundry.evaluation.hypothesis import (
 __all__ = [
     "Arm",
     "CentralHypothesis",
+    "CostBreakdown",
+    "CostModel",
     "DecisionClass",
     "Equalizer",
     "PowerRung",
     "PrimaryMetric",
     "Provenance",
+    "RunSignals",
 ]

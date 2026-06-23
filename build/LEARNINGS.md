@@ -956,6 +956,51 @@ honesty. HONEST MAP of what is GENUINELY end-to-end vs a representative/simulate
   prereg hypothesis), not the ABResult's. Tests: 13, all green; full suite 591 passed / 1 skipped; ruff +
   mypy clean. HONESTY: synthetic dry-run — asserts NOTHING about real Foundry-vs-baseline performance.
 
+## Evaluation — eval safeties: reward-hacking / eval-lie / nondeterminism (T-M6-04)
+- EV40. **`foundry/evaluation/safeties.py` is the FAIL-CLOSED defense that protects the SCORECARD from
+  being gamed (docs/evaluation.md §10) — PURE/DETERMINISTIC over structured eval signals (no RNG/IO/
+  model calls; a flaky safety check could not be trusted to catch a flaky eval).** API: three detectors
+  + a combinator, all returning frozen records. `SafetyKind` (REWARD_HACKING / EVAL_LIE /
+  NONDETERMINISM); `SafetyFinding(kind, subject, detail)`; `EvalSafetyReport(subject, findings)` whose
+  `.clean` is the AND of every check (`clean == not findings`; `.invalidated` is its complement) — ANY
+  finding INVALIDATES the result so it can never be published clean. `check_arm_safeties(runs, *,
+  self_reports=None, discriminator=None) -> EvalSafetyReport` runs all three; omitted inputs contribute
+  NO findings but do NOT fabricate a pass (the present signals still fail closed).
+- EV41. **REWARD-HACKING = metric moved without the work — grounded on the ORACLE, never the suite's own
+  green bit.** `detect_reward_hacking(report: DiscriminatorReport, *, subject)` REUSES the gamed-suite
+  discriminator (`foundry/gates/discriminator.py`): `report.passed` ⇒ no finding; else one finding per
+  distinct evidence — SURVIVING held-out mutants (suite green but tested nothing real), a `kill_score <
+  required_kill_ratio` with no named survivor, OR violated behavioral invariants. A non-passing report
+  with NO itemized reason STILL emits one finding (fail-closed — a non-passing oracle signal never slips
+  through clean). A gamed suite passes its OWN tests by construction, so only the held-out-mutant +
+  invariant oracle (the agent can't see it coming) separates genuine work from metric-gaming — a lie
+  can't fool the oracle.
+- EV42. **EVAL-LIE = a SELF-REPORT of success the ORACLE contradicts; the oracle wins, the self-report
+  can NEVER set the score.** `detect_eval_lies(outcomes, *, self_reports: dict[(task_id,repeat), bool])`
+  re-derives the oracle verdict from ground-truth (`produced_output == expected_output`, a `None`
+  produced never matches — mirrors `harness._score`, §4) and flags iff the agent CLAIMED success the
+  oracle did NOT grant. ASYMMETRIC BY DESIGN: it guards ONLY the score-inflating direction — a false
+  SUCCESS claim is a lie; an under-claim (claimed fail, oracle resolved) is NOT (the oracle still wins
+  and sets the score). An absent self-report = no claim. The `self_reports` map IS the untrusted channel;
+  the assertion is that there is no path from it to the score.
+- EV43. **NONDETERMINISM = differs across SAME-seed/SAME-input re-runs (flaky).** `detect_nondeterminism(
+  runs: Sequence[ArmResult])` compares each later run to runs[0] per `(task_id, repeat)` on the
+  score-bearing fields (oracle `resolved` bit, terminal `status`, `produced_output`) — any disagreement
+  is flaky/untrustworthy (the §7 k-run averaging assumes per-run reproducibility GIVEN a fixed seed). A
+  MOVED attempt SET (a missing/extra unit — denominator moved) is itself a violation. <2 runs is
+  vacuously clean. GUARD: `_assert_comparable` RAISES `ValueError` unless the runs share `(arm,
+  slice_identity, seed, budget_usd_microusd)` — comparing different runs would manufacture a FALSE flake.
+- EV44. **CONSUMPTION + scope.** factory_eval (the A/B / pilot harness) and the scorecard consume these:
+  the arm's re-runs (the harness's `ArmResult`/`TaskOutcome`, EV8), the discriminator's
+  `DiscriminatorReport`, and the (untrusted) self-report map flow into `check_arm_safeties`; an
+  invalidated `EvalSafetyReport` blocks that arm result from reaching the scorecard as clean (it is the
+  pre-publication integrity gate, complementing the §6 collider/ITT rules the scorecard already honors).
+  Tests: 28, all green; full suite green (1 pre-existing skip). DoD ruff/mypy were clean on the two owned
+  files (concurrent untracked-WIP files `agent_validity.py`/`maintenance.py`/`test_eval_integrity.py`/
+  `test_eval_suites.py` carry their OWN unrelated ruff/mypy errors — NOT this task's). HONESTY: operates
+  over the DRY-RUN synthetic signals; asserts NOTHING about real Foundry-vs-baseline perf — it protects
+  the eval's INTEGRITY only.
+
 ## ArtifactStore — the real content-addressed body store (T-M1-14b, DECISIONS D6)
 - AS1. **`foundry/durability/artifact_store.py::ArtifactStore` closes the emit/resolve gap.**
   `emit_artifact` MINTED a `cas://sha256/<content_identity>` handle but DISCARDED the body, so
@@ -2638,3 +2683,169 @@ the REAL component (non-vacuous) and each paired with a control that DOES deploy
   **1321 passed, 1 skipped** (incl. test_phase5_exit, test_factory_graph_autonomous, test_supervisor_packs,
   test_pack_ml_data, test_domains_contract). Touched ONLY factory_graph.py, contract.py, packs/ml_data.py,
   their test files (+ the new test in test_phase5_exit.py) + this LEARNINGS note.
+
+## Evaluation — per-feature + A/B-scale cost & wall-clock model (T-M6-01)
+- EV44. **`foundry/evaluation/cost_model.py::CostModel` makes the §8 "viability" / "<=5% overhead" claims
+  FALSIFIABLE — a concrete accounting model, not an assertion.** API: `RunSignals` (frozen inputs) ->
+  `CostModel.feature_cost(run_signals) -> CostBreakdown` (per-feature) and
+  `ab_scale_cost(arms: Mapping[Arm, RunSignals], n, k) -> CostBreakdown` (the `Σ_arm per-task-cost x n x k`
+  roll-up — the decisive run shown affordable, §8 roll-up). PURE/DETERMINISTIC: same signals -> identical
+  frozen `CostBreakdown` (no RNG/IO/`time.time()` — wall-clock is an INPUT signal, never a live read).
+- EV45. **THE DOMINANT NON-TOKEN TERMS are the whole point (§8 / COST-F5).** The five §8 terms:
+  (1) model tokens — the CHEAP part §8 warns the token-only enumeration rests on; (2) trusted-runner
+  COMPUTE for the behavioral-invariance discriminator (mutant + perturbation families, ML eval-set
+  re-runs — §8a; CPU/GPU units, scales with the §4 adequacy floor, NOT feature size); (3) WALL-CLOCK
+  (§7 lead time, operations §6 queue/replica sizing); (4) HUMAN-REVIEW / HITL time (operations §7,
+  a BOUNDED per-tier budget, not an unbounded externality); (5) INFRA (replicas/queue/reserved burst).
+  `CostBreakdown.non_token_dominates()` surfaces that an arm CHEAPER ON TOKENS can be MORE EXPENSIVE
+  end-to-end — so the §7 scorecard / §9 optimization MUST consume `total_microusd`, never the token line
+  alone. The dominant-non-token test proves it both ways (a non-token-heavy feature trips the flag; a
+  token-heavy one does not) + an inversion test where the cheaper-tokens arm has the larger total.
+- EV46. **INTEGER-MONEY DISCIPLINE (the pinned global constraint — base.py / budget_controller.py).** All
+  money is integer micro-USD; compute is integer units, time is integer ms — `CostBreakdown` carries the
+  RAW ms/units alongside the priced USD (the §7 scorecard reports wall-clock-per-feature as a TIME budget,
+  not only its priced dollar). Pricing is `units x $/unit` / `ms x $/ms`, all integer — no float drift
+  (tested with awkward primes `n=137, k=11` reconstructed by exact integer arithmetic to the unit; a float
+  model would not survive). `token_fraction()` is a RATE (float OK, 0.0 on empty). HONESTY (load-bearing):
+  the FORMULA/accounting is REAL, the input NUMBERS are SYNTHETIC (no funded per-node tokens / $/hr / HITL
+  minutes at Phase 1.5) — `provenance` defaults DRY_RUN (+ `dry_run` mirror), part of content identity, so
+  a dry-run and a SCORED breakdown of the same shape do NOT coalesce.
+- EV47. **Gates:** `ruff check foundry tests` clean; `mypy foundry` clean (150 files); cost-model tests
+  **10 passed**. Full suite: my slice is green and broke nothing — 7 PRE-EXISTING failures in
+  `test_lifecycle_maintenance.py` (a different parallel M6 task's untracked files; fail identically with
+  my work stashed). Touched ONLY `cost_model.py`, `test_eval_cost_model.py` (+ `__init__.py` re-exports +
+  this note). HONESTY: synthetic dry-run — asserts NOTHING about real cost.
+
+## Evaluation — per-role AGENT-VALIDITY evals, distinct from outcome (T-M6-03)
+- EV48. **`foundry/evaluation/agent_validity.py` measures whether each ROLE agent's CONTRIBUTION is valid
+  (evaluation.md §4) — the generalist OUTCOME eval (`harness`/`ab_runner`) only asks "did the pipeline
+  resolve?". Contribution validity ⊥ outcome: a pipeline can resolve by luck while an agent is invalid,
+  and an agent can be valid on a task the pipeline never resolves.** API: `criteria_critic_validity` /
+  `reviewer_critic_validity` / `qa_engineer_validity` each `(*, catches=True) -> RoleValidity`, and
+  `agent_validity_report(*, catches=None, provenance=DRY_RUN) -> AgentValidityReport` aggregating the three
+  (`validity_score` = fraction valid, `all_valid`, `role_validity(role)`). `ValidityRole` enum names the
+  three roles with a directly-checkable planted-defect contract (critic/reviewer/qa; architect/senior are
+  measured by the §4 handoff/retrieval evals elsewhere).
+- EV49. **PLANTED-DEFECT-CAUGHT is the per-role measure — drive the REAL agent over the doubles (D1/D4, no
+  key) against a fixture with a KNOWN omission/defect and read validity off the agent's OWN contribution,
+  never a pipeline-resolution bit nor a signed gate verdict (L5).** (1) CRITIC: PRD with a known
+  security/abuse omission → valid iff its advisory `GateTriage(name="spec")` is BLOCKING
+  (`CriteriaCritique.spec_gate_blocking()`, read off `gate_triage`, NOT a `GateResult`). (2) REVIEWER:
+  planted diff defect → valid iff its proxy-stamped `GateResult.status is FAIL` (request-changes) — we
+  inspect the verdict the reviewer PRODUCED, not whether `merge_gates` admitted it. (3) QA: a HIGH-RISK
+  criterion → valid iff it authors a criterion-traceable NEGATIVE `OracleBinding` for it (FIDELITY, not
+  coverage — Q4); wire an in-process `ArtifactStore` as `rt.cas` so the emitted oracle BODIES persist and
+  `cas.get_body(handle.uri)` can check `criterion_id`+`oracle_kind` — the handle uri is the body's content
+  identity (`cas://sha256/...`), NOT the body's `oracle_uri` field, so you MUST resolve the body, not
+  string-match the handle uri.
+- EV50. **NON-VACUITY is the load-bearing property: the SAME check scores the catcher valid AND the misser
+  invalid (else a green validity score is a tautology).** The catch/miss is scripted via `catches`: critic
+  serves omission-vs-clean, reviewer serves request-changes-vs-approve, QA swaps the fixture's HIGH-RISK
+  criterion to NORMAL (a correct QA then authors NO negative oracle → invalid). MockTransport gotcha: the
+  critic/QA `complete(...,schema=)` ideation calls are NOT the verdict channel (AC3/DT1) — script them on
+  the free-text path via `MockTransport.scripted({}, default_text=json)`; the reviewer's `judge()` IS the
+  verdict channel — script `verdicts=[verdict_json("request-changes"|"approve", [...])]`.
+- EV51. **VALIDITY ⊥ OUTCOME is asserted directly, not by construction.** The orthogonality test pairs a
+  hand-built FOUNDRY `ArmResult` whose every `TaskOutcome` RESOLVED (`itt_pass_rate == 1.0`, a green
+  outcome eval) with `agent_validity_report(catches={REVIEWER: False})` (`all_valid is False`) — a resolved
+  pipeline coexisting with an invalid contribution proves the validity eval is a SEPARATE measurement, not
+  a re-derivation of the outcome. The mirror (valid contributions + an all-unresolved arm) covers the other
+  diagonal. Determinism: same `catches` map ⇒ identical `content_identity()`; the per-role verdict + the
+  report `provenance` are part of identity (EV4), so a flipped role or a SCORED-vs-DRY_RUN twin never
+  coalesce. Gates: `ruff check foundry tests` clean (my 2 files; 3 untracked parallel-M6 WIP files —
+  `test_eval_integrity.py`, `foundry/lifecycle/*` + their tests — carry PRE-EXISTING ruff/mypy/pytest
+  failures, NOT mine); `mypy foundry` clean (my file; the 2 `lifecycle/maintenance.py` mypy errors are that
+  untracked WIP); `pytest tests/test_eval_agent_validity.py` **19 passed**; full suite green excluding those
+  3 untracked WIP files. Touched ONLY `agent_validity.py` + its test + this note. HONESTY: synthetic
+  dry-run — hand-authored planted defects; asserts NOTHING about real agent quality, only that the per-role
+  check is real + non-vacuous + outcome-independent.
+
+## Evaluation — outcome SUITES + TRAJECTORY + eval-INTEGRITY (fail-closed) (T-M6-02)
+- EV52. **Three layered modules over the oracle harness.** `foundry/evaluation/suites.py`
+  (`OutcomeSuite`/`make_suite`, `run_suite`→`SuiteResult`): a §3 outcome suite is a NAMED
+  (`SuiteKind`: golden / in_house_novel / swe_bench_style / swe_evo_style) group of oracle-scored
+  tasks. `run_suite` REUSES `harness.run_arm` verbatim (suite = `TaskSlice` + §3 semantics via
+  `OutcomeSuite.as_slice()`, whose identity mirrors the suite so the arm result binds back), then rolls
+  the RETAINED per-(task,repeat) ITT outcomes into `resolution_rate` (over attempts) + per-task
+  `TaskResolution` + `task_resolution_rate` (over distinct tasks). No LLM judge — oracle equality only.
+- EV53. **ITT denominator is the harness denominator, re-asserted not recomputed.** `SuiteResult.attempted
+  == len(suite)*k == len(arm_result.outcomes)`; a `resolution_rate` guard re-asserts denom==retained
+  outcomes so a crash/over-budget attempt is RETAINED unresolved and the denom can NEVER silently shrink
+  (§2/§6 collider-bias forbidden). `suite_itt_pass_rate` delegates to `harness.itt_pass_rate` (one source
+  of truth). Tests inject a crashing/never/always `FoundryRunner` to pin the disposition.
+- EV54. **`trajectory.py` scores PROCESS, orthogonal to outcome (§5).** `score_trajectory(TrajectorySignals)
+  →ProcessScore` over structured §5 signals (rework_loops, gate_fail_then_fix, excess_steps=steps-ideal,
+  policy_violations, converged). Score∈[0,1], HIGHER-IS-BETTER; each axis is a BOUNDED + MONOTONE
+  saturating penalty (`weight*min(signal,sat)/sat`, weights sum≤1) so (a) a clean first-pass converged
+  path scores exactly 1.0, (b) a strictly-higher-churn run can NEVER out-score an otherwise-equal lower-
+  churn run (the property the tests pin), (c) saturating churn stays bounded in [0,1]. Deterministic:
+  same signals→identical `score`+content-addressed `score_id` (L7). Policy violations are zero-tolerance
+  (saturate at 1). NO LLM judge — §5 reserves judges for "no oracle exists"; a process score is a pure fn.
+- EV55. **`integrity.py` FAIL-CLOSES the eval — three §6 mechanisms, ANY violation INVALIDATES.**
+  `check_eval_integrity(oracles, surfaces, manifests, arm_results)→IntegrityReport` (`.clean` iff zero
+  violations); `require_clean` raises `EvalIntegrityError` at the reporting boundary. (1) `assert_held_out_
+  unreachable`: a hidden test (`oracle.hidden_test_id`/`expected_output`) intersecting the agent's recorded
+  `AgentRuntimeSurface.reachable_refs` ⇒ REACHABLE_HIDDEN_TEST violation; a MISSING surface fail-closes too
+  (unreachability UNPROVEN ≠ proven). (2) `assert_itt_unconditional`: denom==retained-outcomes (else
+  MISSING_OUTCOME) AND not conditioned-to-resolved-subset (else CONDITIONED_ITT — collider bias). (3)
+  `contamination_probe`: oracle `expected_output` (the ANSWER) or a canary token appearing as a SUBSTRING
+  of `TaskInputManifest.input_texts` ⇒ CONTAMINATED_TASK.
+- EV56. **DESIGN CALL (resolved): the contamination probe does NOT flag the hidden-test ID.** The synthetic
+  frame's `spec` legitimately NAMES the hidden test it's scored by (`task_fixtures.generate_synthetic_frame`
+  embeds `oracle.hidden_test_id` in the spec). Leaking a test's NAME ≠ leaking its EXPECTED OUTPUT — only
+  the answer token + canaries are contamination signals (probing the id flagged every real fixture, a false
+  positive). Runtime REACHABILITY of the test (Mechanism 1, against the sandbox read surface — NOT the spec
+  input) is the separate, real isolation check and still keys on `hidden_test_id`.
+- EV57. **Gates:** `ruff check`/`mypy foundry` clean for my 3 files; the 2 `lifecycle/maintenance.py` mypy
+  errors + `test_lifecycle_*` pytest failures are a CONCURRENT M6 agent's untracked WIP (confirmed by
+  stash), NOT mine. `pytest test_eval_suites/trajectory/integrity` **39 passed**; full suite green excluding
+  those untracked lifecycle files. Touched ONLY the 3 modules + 3 tests + this note. Forward ref: a future
+  `factory_eval` aggregates suite resolution + trajectory process-score + the fail-closed integrity gate.
+
+## Lifecycle — generated-code maintenance + released-artifact provenance (T-M6-09)
+- LC1. **`foundry/lifecycle/` (maintenance + provenance) REUSES the trust seams verbatim — it builds NO
+  parallel re-verify / chain / admission.** `__init__.py` is import-cheap (a doc + empty `__all__`); the two
+  modules carry the logic. The feedback loop (T-M6-10) + the exit test consume these.
+- LC2. **MAINTENANCE re-verifies CHANGE-PROPORTIONALLY then re-gates + re-admits — NO bypass (fail-closed).**
+  `plan_maintenance(prior_verdicts, changed_scope, *, prior_subject_uri, gates, runner, new_state_sha,
+  scanner_config_rev) -> MaintenancePlan` wraps `reverification.reverification_plan` (the EXISTING engine —
+  a one-file change re-runs only the touched scope, REUSEs the prior attested verdict for the rest; gov §1f)
+  + the maintenance-chain link. `maintain(plan, *, gates, runner, workdir, new_subject_digest, provenance,
+  build_verdict, admission, records, verifier, seq, ...) -> MaintenanceOutcome` then (a) RE-RUNs the plan's
+  rerun gates through the SAME `TwoZoneGateRunner` (zone-B-attested, keyed to `new_state_sha`) + folds the
+  REUSED prior verdicts, (b) requires EVERY required gate present + attested PASS, (c) RE-ADMITs via the
+  SAME `AdmissionController`. `released` iff all-PASS AND ADMIT; any non-PASS / DENY ⇒ NOT released (`flags`
+  name why; `strict=True` raises `MaintenanceRefused`). A maintained change adding a hardcoded secret →
+  Security FAIL → not released AND the runner stable-FAIL-latches the integrated digest so admission DENYs
+  too. A forged (unsigned) REUSED prior verdict can't launder a release — admission re-verifies every
+  required gate's attestation (`required_gate_signature_invalid`).
+- LC3. **A REUSED verdict legitimately keeps its OLD `run_against` — so the re-verified gate-state SPANS TWO
+  TREES (gov §1f).** `maintain` therefore DERIVES `expected_gate_trees` per gate from each verdict's own
+  `run_against` (re-run gates → `new_state_sha`, reused → their recorded old sub-tree) and passes it to
+  `admission.admit` (the AW2 multi-tree path). A caller-supplied mapping (a distinct assurance tree) is
+  merged on top. WITHOUT this, admission's whole-tree binding spuriously rejects every reused verdict as
+  `required_gate_wrong_tree`. The SOUNDNESS still lives in `reverification_plan` (reuse only when the gate's
+  scoped sub-hash is unchanged), NOT in admission's tree pin.
+- LC4. **PROVENANCE traces every released artifact + is TAMPER-EVIDENT via the EXISTING evidence-pack
+  hash-chain.** `ProvenanceRecord` links subject `Artifact` + `run_id` + `EvidencePack` + attested
+  `GateResult[]` + `SignOffRecord[]` + `SLSAProvenance` (+ `prior_uri` = the maintenance chain). `trace(rec,
+  *, require_sign_off=True, require_slsa=False) -> ProvenanceChain` re-verifies the pack chain over the
+  re-presented members (`evidence_pack.verify_evidence_pack` — a swapped/dropped gate verdict or sign-off
+  re-keys a content-addressed ref → chain breaks), checks the subject is IN the pack, every gate is an
+  attested PASS keyed to THIS tree, and every sign-off bound the pack AS PRESENTED. `complete` iff full +
+  intact; any flag ⇒ `trusted_as_released() is False` (fail-closed; `assert_released` raises
+  `IncompleteProvenanceError`).
+- LC5. **A sign-off's `presented_evidence_hash` binds the pack BUILT WITHOUT SIGN-OFFS (the evidence shown
+  BEFORE signing), not the final pack — else it's circular** (the final pack references the sign-off whose
+  hash references the final pack). `trace` rebuilds the pre-sign-off pack deterministically (same
+  run_against/seq/scanner_rev/version) and compares its `pack_evidence_hash`. Production already splits
+  these anchors: factory_graph's `evidence_hash(subject,sha,gates)` ≠ `pack_evidence_hash` — the sign-off
+  and the WORM pack are two distinct anchors. Mirror that in tests: build the no-sign-off pack, hash it,
+  stamp the sign-off, then build the final pack with the sign-off folded in.
+- LC6. **A pydantic FIELD type must be a RUNTIME import, not TYPE_CHECKING-only** (the model below has
+  `gate_results: tuple[GateResult,...]`, `evidence_pack: EvidencePack`, `subject_artifact: Artifact`, etc.).
+  A `from __future__ import annotations` + TYPE_CHECKING-only import leaves the forward ref unresolved →
+  `PydanticUserError: not fully defined; call model_rebuild()`. Import the schema classes at runtime (they
+  are import-cheap); keep only INFRA deps (runner/admission/verifier protocols) under TYPE_CHECKING.
+  Gates: `ruff check foundry tests` + `mypy foundry` clean; `pytest test_lifecycle_{maintenance,provenance}`
+  = 21 passed (9+12); full suite 1438 passed / 1 skipped.

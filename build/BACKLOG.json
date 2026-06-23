@@ -2204,7 +2204,6 @@
       "title": "Regulated pack (fintech/healthcare): force Gated+, approver-of-record, two-person, reg-significance veto",
       "job_to_be_done": "Implement foundry/domains/packs/regulated.py against the contract+hooks: force Gated+ / disable Autonomous + auto-approve, bind an approver-of-record (two-person where required, preparer/validator distinct functional roles, approver NOT in author set), regulatory-significance veto, requirement->risk->verification traceability-matrix predicate artifact (every frozen requirement + hazard bound to a runner-attested GateResult), no-third-party-egress + no-real-PHI/PAN profile, identity-bound WORM + retention floor. Deterministic non-agent engagement (classification label / tenant flag / boundary-scanner hit). Adds via the contract ONLY \u2014 no core edits.",
       "files_owned": [
-        "foundry/domains/packs/__init__.py",
         "foundry/domains/packs/regulated.py"
       ],
       "dependencies": [
@@ -2228,7 +2227,7 @@
         "uv run pytest -q green; changed-scope coverage >= 85% local"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M5-06",
@@ -2259,7 +2258,7 @@
         "uv run pytest -q green; changed-scope coverage >= 85% local"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M5-07",
@@ -2290,7 +2289,7 @@
         "uv run pytest -q green; changed-scope coverage >= 85% local"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M5-08",

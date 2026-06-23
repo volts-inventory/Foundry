@@ -2509,3 +2509,28 @@ the REAL component (non-vacuous) and each paired with a control that DOES deploy
   composed policy through the `governance_hooks`/`verdict_class` enforcers. Touched ONLY `regulated.py`
   + `tests/test_pack_regulated.py` + this note. ruff (both files) + `mypy foundry` clean; 18 new tests
   green; full suite green.
+
+- DM10. **`FrontendPack(BaseDomainPack)` (`foundry/domains/packs/frontend.py`) is the FRONTEND/UX
+  pack — caps `{ui, frontend, ux, web, mobile, visual}`; overrides ONLY 2 hooks (identity default on
+  the other 5), registers + routes via `PackRegistry.register(FrontendPack())`, NO core edit.** (1)
+  `perceptual_hitl` -> a class-5 mandatory NON-auto-approvable visual HITL over a zone-B-signed
+  RENDERED-EVIDENCE bundle (`hitl_required_capabilities=caps`, `require_rendered_evidence=True`),
+  consumed by the EXISTING `governance_hooks.perceptual_hitl_required`/`mark_perceptual_hitl` —
+  taste is never delegated to a model, so no machine path clears it; no recorded human sign-off ⇒
+  `mark_perceptual_hitl` RAISES `SignOffError` (fail-closed, never auto-approved). The class-5
+  `gate_requirements_for(PERCEPTUAL)` already carries `auto_approvable=False`,`requires_hitl=True`,
+  `in_signed_predicate=False` — assert those (don't rebuild). (2) `assign_verdict_class` maps THREE
+  gate keys: `frontend.perceptual`->class 5; `frontend.visual_regression`->class 3 (STATISTICAL,
+  device/breakpoint/locale matrix); `frontend.a11y.wcag`->class 1 (CONFIG_EVALUABLE, deterministic +
+  BLOCKING). The AT-user screen-reader step is a published OUT-OF-BAND human marker
+  (`AT_USER_OUT_OF_BAND`), not a gate — the WCAG class-1 gate is the machine floor. (3) The
+  visual-regression key is a RENDER `state_sha` (`render_state_sha`): matrix cells ride as
+  `data_refs`, the blessed baseline as a `feature_def` through the EXISTING `tree_sha.state_sha`
+  (sorted+deduped, so cell order can't perturb the key; ANY cell/baseline change re-keys -> re-draw).
+  (4) SUB-PIXEL-ONLY flake envelope (`envelope_absorbs(RenderDelta)`): absorbs `sub_pixel_diff` ONLY;
+  a `layout_delta`/`affordance_delta`/`locale_delta` is NEVER absorbed -> FAILS the cell (routes to
+  class-5 re-baseline) EVEN with a tiny pixel diff (no "perceptual-distance-alone" license, UX-F2a/F4a).
+  NB: a `_engaged` capability guard on the two hooks is belt-and-suspenders (the registry only calls a
+  pack's hooks when its caps intersect the request); DM9's regulated pack instead leaves hooks
+  unconditional. Both are fine. Touched ONLY `frontend.py` + `tests/test_pack_frontend.py` + this note.
+  ruff (both files) + `mypy foundry` clean; 23 new tests green; full suite 1297 passed / 1 skipped.

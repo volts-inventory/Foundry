@@ -321,3 +321,23 @@ honesty (dev-grade roots labeled; clean control proves blocks load-bearing). The
   gate-result handle URIs (semantically mislabeled vs gov §4). | FIX: feed actual handle uris or rename + document.
 Resolution: fix M4-R1-01/02 (strengthen the trust root to re-verify all required gates) + M4-R1-03 label; then
 re-verify + the independent audit. (open → pending fix)
+
+## M5 domains chain (T-M5-01..09) — Round 1 (1 fresh E3/E5/E7 critic)
+Tool gates green: ruff/mypy clean (145 files), 230 domain unit tests + 23 exit/pack tests pass, full suite green,
+cov 94%. Verdict: FINDINGS(3), all MINOR, 0 BLOCKER/MAJOR. ALL 7 per-question SOUND: (1) regulated->autonomous
+unreachable + human approver (veto unconditional, non-human rejected, two-person), (2) ML class-3 alpha+state_sha
+fail-closed + data/weight re-key + compute overspend, (3) UI class-5 visual-HITL never auto-approved + sub-pixel-
+only envelope + blocking WCAG, (4) tighten-only/strictest-wins (relaxing pack -> TightenError, tested), (5) open/closed
+(4th pack via register(), wiring reads compose() generically), (6) back-compat (registry=None identity), (7) tests
+non-vacuous (controls flip). The 3 exit criteria genuinely hold; no pack can relax integrity.
+- M5-R1-01 MINOR (substantive) | factory_graph.py:840 autonomous emit | the veto halt is AND-coupled
+  (autonomous-vetoed AND pack-reqs-unmet) -> safe for all current packs (every approver-binding pack also vetoes
+  autonomous) but a FUTURE pack binding a class-4 approver WITHOUT vetoing autonomous would skip the approver check
+  on the hands-off deploy path. Gated/assistant paths already call pack_release_admitted unconditionally. | FIX:
+  make the autonomous path halt if NOT pack_release_admitted OR NOT autonomous_pack_reachable (unconditional).
+- M5-R1-02 MINOR | contract.py:104 strictness | PERCEPTUAL(5) rank 3 < HUMAN_WITNESSED(4) rank 4 -> satisfies(
+  PERCEPTUAL, HUMAN_WITNESSED)==True (a human attestation satisfies a perceptual key). Defensible (no integrity loss)
+  but contradicts literal class-5>class-4. | FIX: document the intentional human-witnessed >= perceptual ordering.
+- M5-R1-03 MINOR | contract.py:191 / ml_data.py:160 | ComputePolicy field per_fix_compute_cap_microusd carries
+  compute UNITS not micro-USD (misleading at the USD/compute seam). | FIX: rename to per_fix_compute_cap_units.
+Resolution: fix M5-R1-01 (unconditional autonomous approver check) + M5-R1-02 doc + M5-R1-03 rename; re-verify + audit.

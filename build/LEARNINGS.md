@@ -2448,3 +2448,64 @@ the REAL component (non-vacuous) and each paired with a control that DOES deploy
   a non-matching request is a no-op `None`. Touched ONLY `governance_hooks.py` +
   `tests/test_domains_governance_hooks.py` + this note. ruff (foundry tests) + `mypy foundry` clean; 25
   new tests green; full suite green (1240 passed / 1 skipped). T-M5-08 wires these at triage/release.
+
+## ML/data domain pack (T-M5-06, domains.md §5 "ML / data systems")
+- ML1. **`foundry/domains/packs/ml_data.py` — `MLDataPack(BaseDomainPack)` engages on
+  `{ml, data, model, training, ai}` and tightens THREE hooks + an egress hint; it edits NO core and
+  REUSES the existing machinery verbatim (`ml_state_sha`/`ml_state_sha_from_policy`,
+  `assert_class3_binds_ledger` + `GlobalRecords` alpha ledger, `ComputeBudgetController`).** Registers
+  via `PackRegistry.register(MLDataPack())` and routes by capability — the open/closed seam, no
+  contract/registry/graph edit (proven by a fresh `PackRegistry` routing to it in the test).
+- ML2. **`assign_verdict_class` marks `MODEL_EVAL_GATE="model_eval"` class 3 (STATISTICAL) ONLY when the
+  request actually carries an ML capability** (`request_capabilities(request) & _ML_CAPABILITIES`),
+  else returns the identity — so a misrouted/non-ML request is never spuriously forced onto the
+  statistical class. `gate_requirements_for(STATISTICAL).grounding is ALPHA_STATE_SHA`
+  (`requires_alpha_state_sha=True`): a class-3 verdict is grounded ONLY if it binds a FROZEN alpha look
+  (`(eval_set_identity, decision_id)` ledger) AND a `state_sha` — both re-checked fail-closed by
+  `assert_class3_binds_ledger` (absent binding / empty `state_sha` / undrawn look all raise
+  `InvalidClass3BindingError`).
+- ML3. **`state_inputs` reads `data_refs`/`feature_defs`/`weight_refs` off the REQUEST view** (defensive:
+  absent/None → empty frozenset) and folds them into `state_sha` via `ml_state_sha_from_policy`, so the
+  model-eval verdict is BOUND to its data+weights: a data/feature/weight change RE-KEYS the verdict
+  (old key ≠ new key; `ml_verdict_rebinds(...) is True`) — a verdict for D/W can't be reused for D'/W'.
+  Same refs → same key (cache hit, `ml_verdict_rebinds is False`). The `StateInputPolicy` join is a
+  pure union (tighten-only).
+- ML4. **`compute_budget` declares `{model_eval, retrain}` as `expensive_gates` + `require_proxy` +
+  `confirm_escalation` + a per-fix compute cap** (compute UNITS, distinct from USD; the field is named
+  `per_fix_compute_cap_microusd` on `ComputePolicy` but the pack uses it as the compute-unit cap).
+  Mapped onto a `ComputeBudget(cap_units=cap, per_gate_units={...})` the `ComputeBudgetController`
+  fail-closes on overspend: `authorize` denies + `charge` raises `ComputeOverspendError` and books
+  NOTHING past the cap (the expensive gate pauses/escalates rather than silently overspending).
+- ML5. **Alpha-ledger REUSE proof:** `GlobalRecords.try_first_alpha_look(eval, dec, state, run_id)`
+  returns True on the first draw and False on a SECOND draw of the SAME `(eval_set_identity,
+  decision_id)` (forking/retraining can't re-draw; ledger reused, not rebuilt) — `alpha_looks_spent`
+  stays 1; a DISTINCT `decision_id` draws independently. The pack adds `egress_profile` →
+  `no_third_party_trace_egress=True` (training-data lineage hint, OR flag). ruff (`ml_data.py` +
+  test) + `mypy foundry` clean; 16 new tests green; full suite green (NB: sibling untracked packs
+  `frontend.py`/`regulated.py` carry their OWN pre-existing ruff nits — not in scope here).
+
+## The REGULATED domain pack — first first-party pack (T-M5-05)
+- DM9. **`RegulatedPack(BaseDomainPack)` (`foundry/domains/packs/regulated.py`) is the regulated/
+  safety-critical pack (domains.md §5); it OVERRIDES EXACTLY 4 of the 7 hooks and inherits the
+  identity default on the other 3 — registers + routes via `PackRegistry.register(RegulatedPack())`
+  with ZERO core edit (open/closed seam).** Serves caps `{regulated, fintech, healthcare, finance,
+  phi, pii}` (`REGULATED_CAPABILITIES`). The overrides (each TIGHTENS only — `relaxes(...)` is False):
+  (1) `mode_tier_policy` -> `vetoed_modes={autonomous, assistant}` (auto-approve vetoed too),
+  `min_tier=HIGH`, `force_human_release=True`, `two_person_release=True`. So
+  `resolve_effective_mode_tier(...).effective_mode == MODE_GATED`, `autonomous_reachable is False`,
+  `reachable_modes == {gated}` — Autonomous UNREACHABLE for a regulated request regardless of
+  requested mode. (2) `approver_of_record` -> binds class-4 classes
+  `{design, test_protocol, risk_analysis, validation_report, release}`; `release_admitted(...)` is
+  fail-closed (no recorded HUMAN sign-off => False; a non-human/`autonomous`/`agent`/`self-judge`/
+  `system` approver is rejected; two-person needs 2 distinct humans in 2 distinct roles). (3)
+  `assign_verdict_class` -> maps `{release, sign_off, validation, design_review, risk_analysis}` ->
+  `HUMAN_WITNESSED` (class 4): `gate_requirements_for(...)` has `requires_approver`/`requires_hitl`
+  True, `auto_approvable` False, and `satisfies(HUMAN_WITNESSED, EXECUTION_DETERMINISTIC) is False`
+  (a green machine gate never satisfies a class-4 key — self-judge unreachable). (4) `egress_profile`
+  -> all three OR flags True (no 3rd-party model/trace egress, no real PHI/PAN). The hooks are
+  UNCONDITIONAL (`del request`) — engagement is by CAPABILITY ROUTING, not a per-request branch (the
+  deterministic non-agent trigger lives upstream, Regulated-F4a; an agent can't self-scope out). Test
+  pattern: instantiate + register IN the test (`PackRegistry().register(RegulatedPack())`), drive the
+  composed policy through the `governance_hooks`/`verdict_class` enforcers. Touched ONLY `regulated.py`
+  + `tests/test_pack_regulated.py` + this note. ruff (both files) + `mypy foundry` clean; 18 new tests
+  green; full suite green.

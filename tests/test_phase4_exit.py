@@ -119,6 +119,9 @@ from tests.test_factory_graph_autonomous import (
     BUILDER_ID as AUTO_BUILDER_ID,
 )
 from tests.test_factory_graph_autonomous import (
+    DEPLOY_TARGET as AUTO_DEPLOY_TARGET,
+)
+from tests.test_factory_graph_autonomous import (
     KEY as AUTO_KEY,
 )
 from tests.test_factory_graph_autonomous import (
@@ -129,7 +132,15 @@ from tests.test_factory_graph_autonomous import (
     _config,
     _deploy_actions,
     _gates_by_name,
+    _resolve_blob_factory,
     _src,
+    _synthetic_resolve,
+)
+from tests.test_factory_graph_autonomous import (
+    _runner as _auto_runner,
+)
+from tests.test_factory_graph_autonomous import (
+    _runtime as _auto_runtime,
 )
 
 KEY = b"phase4-exit-zone-b-key-0123456789abcdef"
@@ -388,6 +399,157 @@ def test_malicious_test_cannot_reach_prod(tmp_path: Path) -> None:
     delta = _run_emit(records, verifier, gate_state, "tree-evil", "run-mt-evil")
     assert delta["phase"] == "halted"
     assert _deploys(delta) == []
+
+
+# ===========================================================================
+# Attack 1 (END-TO-END through the COMPILED autonomous graph) — the
+# discriminator is wired into the SHIPPING Test gate node, not just the unit test
+# ===========================================================================
+#
+# A-M4-01 fix proof: a DiscriminatorFactory threaded build_factory_graph ->
+# build_supervisor_graph -> the build_test_gate node -> run_build_test_gates ->
+# the COMPILED TestGate. We drive the FULL autonomous spine (triage -> ... ->
+# build_test_gate -> assurance -> autonomous emit) twice with the SAME factory:
+#
+#  * a GAMED-GREEN suite (clears the adequacy floor — one passing test — but does
+#    NOT kill the held-out mutant) -> the compiled Test gate attests FAIL -> the
+#    boundary routes fix/halt -> the autonomous emit deploys NOTHING; and
+#  * a GENUINE suite (kills the held-out mutant) with the SAME factory wired ->
+#    Test PASS -> build -> admit -> EXACTLY ONE deploy (the control).
+#
+# This proves the malicious-test block is in the SHIPPING path. The held-out
+# mutant set is the dev-grade CURATED set the factory supplies (plan §0.3).
+
+# ``app.py`` under test (the autonomous decomposition's single unit). The
+# genuine suite kills the held-out mutant; the gamed suite is green-but-vacuous.
+_E2E_APP = "def add(a, b):\n    return a + b\n"
+# The held-out mutant the factory injects: add -> sub. A genuine suite that
+# actually asserts on add() FAILs against the mutated tree (the mutant is killed);
+# a vacuous suite stays green (the mutant SURVIVES) -> the discriminator FAILs.
+_E2E_MUTANT = HeldOutMutant(
+    mutant_id="e2e-add->sub", target="app.py", find="a + b", replace="a - b"
+)
+
+
+def _e2e_discriminator_factory() -> TestSuiteDiscriminator:
+    """The injected DiscriminatorFactory — a dev-grade CURATED held-out mutant set
+    for the subject under test (``app.py``). Produces a fresh discriminator each
+    call (the gate constructs it per run); a real mutation engine is heavier
+    (plan §0.3)."""
+    return TestSuiteDiscriminator(mutants=[_E2E_MUTANT])
+
+
+# A clean unified-diff ADDITION: app.py + a GENUINE suite that kills the mutant +
+# a lockfile (so the assurance Security/Audit gates PASS). Mirrors the
+# StubAdapter hunk shape the autonomous harness uses (first body line '+', rest
+# verbatim) so gate_wiring's Phase-1 applier round-trips it.
+_GENUINE_E2E_DIFF = (
+    "--- /dev/null\n+++ b/app.py\n@@ -0,0 +1,2 @@\n+def add(a, b):\n    return a + b\n"
+    "--- /dev/null\n+++ b/test_app.py\n@@ -0,0 +1,3 @@\n"
+    "+import app\ndef test_add():\n    assert app.add(2, 3) == 5\n"
+    '--- /dev/null\n+++ b/uv.lock\n@@ -0,0 +1,2 @@\n+name = "pkg"\n    license = "MIT"\n'
+)
+# A GAMED-GREEN suite: it clears the adequacy floor (one passing test) but
+# exercises nothing real, so the add->sub mutant SURVIVES -> the discriminator
+# FAILs the Test gate in the compiled graph.
+_GAMED_E2E_DIFF = (
+    "--- /dev/null\n+++ b/app.py\n@@ -0,0 +1,2 @@\n+def add(a, b):\n    return a + b\n"
+    "--- /dev/null\n+++ b/test_app.py\n@@ -0,0 +1,2 @@\n"
+    "+import app\ndef test_vacuous():\n    assert app is not None\n"
+    '--- /dev/null\n+++ b/uv.lock\n@@ -0,0 +1,2 @@\n+name = "pkg"\n    license = "MIT"\n'
+)
+
+
+def _build_autonomous_with_discriminator(
+    records: GlobalRecords, source_dir: str, *, diff_body: str, checkpointer: Any
+) -> Any:
+    """Wire the autonomous factory graph with the SAME trust-root chain the E2E
+    harness uses, PLUS the held-out-mutant DiscriminatorFactory threaded through
+    ``build_factory_graph`` (the A-M4-01 seam). The compiled Test gate node then
+    consults the discriminator over the materialized integrated tree."""
+    signer = ZoneBSigner(AUTO_KEY, AUTO_KEY_ID)
+    return build_factory_graph(
+        _auto_runtime(),
+        runner=_auto_runner(records),
+        resolve=_synthetic_resolve,
+        resolve_blob=_resolve_blob_factory(diff_body),
+        source_dir=source_dir,
+        checkpointer=checkpointer,
+        max_fix_attempts=2,
+        mode=MODE_AUTONOMOUS,
+        builder=TrustedBuilder(signer, builder_id=AUTO_BUILDER_ID),
+        admission=AdmissionController(builder_id=AUTO_BUILDER_ID),
+        deployer=Deployer(target=AUTO_DEPLOY_TARGET),
+        gate_verifier=DevGateWriteVerifier(AUTO_KEY, AUTO_KEY_ID, records),
+        discriminator_factory=_e2e_discriminator_factory,
+    )
+
+
+def test_compiled_autonomous_graph_genuine_suite_deploys_once(tmp_path: Any) -> None:
+    """CONTROL (compiled-graph): a GENUINE suite that kills the held-out mutant,
+    with the DiscriminatorFactory wired into the SHIPPING Test gate node, drives
+    the full autonomous spine to EXACTLY ONE deploy. Proves the wired discriminator
+    does NOT block a genuine suite (the block below is load-bearing, not a pipeline
+    that never ships)."""
+    records = GlobalRecords()
+    ckpt = FoundryCheckpointer()
+    token = set_gate_write_verifier(DevGateWriteVerifier(AUTO_KEY, AUTO_KEY_ID, records))
+    try:
+        app = _build_autonomous_with_discriminator(
+            records, _src(tmp_path), diff_body=_GENUINE_E2E_DIFF, checkpointer=ckpt.saver
+        )
+        final: FactoryState = app.invoke(
+            {"request": "build a todo app"}, _config("run-disc-genuine")
+        )
+    finally:
+        reset_gate_write_verifier(token)
+        ckpt.close()
+
+    statuses = _gates_by_name(final)
+    # The compiled Test gate ran the discriminator (mutant killed) -> PASS.
+    assert statuses.get("test") is GateStatus.PASS
+    for name in ("spec", "build", "security", "audit"):
+        assert statuses.get(name) is GateStatus.PASS, name
+    assert final["phase"] == "done"
+    deploys = _deploy_actions(final)
+    assert len(deploys) == 1
+    assert deploys[0].kind == "deploy"
+
+
+def test_compiled_autonomous_graph_gamed_suite_deploys_nothing(tmp_path: Any) -> None:
+    """ATTACK (compiled-graph, A-M4-01): a GAMED-GREEN suite clears the adequacy
+    floor (one passing test) but does NOT kill the held-out mutant. With the SAME
+    DiscriminatorFactory wired into the SHIPPING Test gate node, the COMPILED Test
+    gate attests FAIL — the malicious-test defense fires in the autonomous spine,
+    not just in a unit test. The boundary halts and the autonomous emit deploys
+    NOTHING. WITHOUT the wiring (the A-M4-01 gap) this gamed-green suite would have
+    cleared the adequacy floor and shipped."""
+    records = GlobalRecords()
+    ckpt = FoundryCheckpointer()
+    token = set_gate_write_verifier(DevGateWriteVerifier(AUTO_KEY, AUTO_KEY_ID, records))
+    try:
+        app = _build_autonomous_with_discriminator(
+            records, _src(tmp_path), diff_body=_GAMED_E2E_DIFF, checkpointer=ckpt.saver
+        )
+        final: FactoryState = app.invoke(
+            {"request": "build a todo app"}, _config("run-disc-gamed")
+        )
+    finally:
+        reset_gate_write_verifier(token)
+        ckpt.close()
+
+    statuses = _gates_by_name(final)
+    # Build PASSes (it compiles) and pytest is GREEN (the adequacy floor is met),
+    # but the COMPILED Test gate's discriminator FAILs it: the mutant SURVIVED.
+    assert statuses.get("build") is GateStatus.PASS
+    assert statuses.get("test") is GateStatus.FAIL
+    test_verdict = next(g for g in final["gates"] if g.name == "test")
+    assert test_verdict.runner_attestation is not None  # a real attested FAIL
+    assert any("SURVIVED" in f for f in test_verdict.findings)
+
+    # Fail-closed: the Test FAIL halts the boundary -> autonomous emit deploys NOTHING.
+    assert _deploy_actions(final) == []
+    assert final["phase"] == "halted"
 
 
 # ===========================================================================

@@ -57,6 +57,7 @@ if TYPE_CHECKING:
 
     from langchain_core.runnables import RunnableConfig
 
+    from foundry.gates.discriminator import DiscriminatorFactory
     from foundry.gates.runner import GateImpl, TwoZoneGateRunner
     from foundry.schemas.base import Artifact
     from foundry.state.factory_state import FactoryState
@@ -457,6 +458,7 @@ def run_build_test_gates(
     resolve_blob: BlobResolver,
     workdir: Path,
     min_passed: int = 1,
+    discriminator_factory: DiscriminatorFactory | None = None,
 ) -> dict[str, Any]:
     """Run the Build + Test gates at an implementation / quality exit boundary.
 
@@ -466,6 +468,18 @@ def run_build_test_gates(
     one state). ``min_passed`` is the Test gate's adequacy floor — a vacuous
     (0-test) suite is FAIL, never PASS (governance §1c). Returns
     ``{"gates": [<attested build>, <attested test>]}``.
+
+    ``discriminator_factory`` is the OPTIONAL malicious-test defense seam (the
+    A-M4-01 fix). When provided, it produces a
+    :class:`~foundry.gates.discriminator.TestSuiteDiscriminator` (the curated
+    held-out mutants + behavioral invariants for the subject under test) that the
+    constructed :class:`TestGate` CONSULTS in zone A: a gamed-green suite that
+    clears the adequacy floor but does NOT kill a held-out mutant (or violates an
+    invariant) is FAILed by the COMPILED gate — not merely in the unit test (gov
+    §1c). The held-out mutant SET is a dev-grade CURATED set the factory supplies
+    (a real mutation engine is heavier; plan §0.3). When ``None`` (the default),
+    behavior is EXACTLY as before — the adequacy floor alone (back-compat): no
+    discriminator is wired and a green + adequate suite suffices.
     """
     run_against = materialize_workdir(state, workdir, resolve=resolve, resolve_blob=resolve_blob)
     build = _run_gate(
@@ -477,8 +491,14 @@ def run_build_test_gates(
         workdir=workdir,
         node_id=_BUILD_NODE,
     )
+    # Wire the held-out-mutant + behavioral-invariance discriminator into the
+    # COMPILED Test gate when a factory is injected (A-M4-01): a gamed-green suite
+    # that clears the floor but survives a held-out mutant FAILs here, not just in
+    # the unit test. Absent a factory the gate is the legacy adequacy-floor-only
+    # Test gate (back-compat).
+    discriminator = discriminator_factory() if discriminator_factory is not None else None
     test = _run_gate(
-        TestGate(min_passed=min_passed),
+        TestGate(min_passed=min_passed, discriminator=discriminator),
         rt=rt,
         runner=runner,
         config=config,

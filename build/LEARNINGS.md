@@ -2283,3 +2283,45 @@ the REAL component (non-vacuous) and each paired with a control that DOES deploy
   `BUILDER_ID`, `_CLEAN_DIFF`) from `tests/test_factory_graph_autonomous` rather than re-deriving them.
   Touched ONLY `tests/test_phase4_exit.py` + this note. ruff (foundry tests) + mypy (135 files) clean;
   full suite 1140 passed / 1 skipped.
+
+## Discriminator wired into the COMPILED Test gate via a DiscriminatorFactory (A-M4-01 fix)
+- DW1. **The gap A-M4-01 found: the discriminator was proven in `test_phase4_exit` but NOT plumbed into
+  the SHIPPING gate node.** `gate_wiring.run_build_test_gates` constructed `TestGate(min_passed=...)`
+  WITHOUT a discriminator, so the compiled autonomous/gated spine relied on the adequacy floor ALONE for
+  a gamed-green suite — only the unit test exercised the held-out-mutant block. Fix: thread an OPTIONAL
+  `DiscriminatorFactory` (`= Callable[[], TestSuiteDiscriminator]`, the alias already defined at the
+  bottom of `gates/discriminator.py`) end to end so the COMPILED Test gate consults it.
+- DW2. **The thread: `build_factory_graph(..., discriminator_factory=None)` -> `build_supervisor_graph(
+  ..., discriminator_factory=...)` -> the `build_test_gate` node -> `run_build_test_gates(...,
+  discriminator_factory=...)`.** In `run_build_test_gates`, `discriminator = discriminator_factory() if
+  discriminator_factory is not None else None`, then `TestGate(min_passed=min_passed,
+  discriminator=discriminator)`. The factory produces a FRESH `TestSuiteDiscriminator` per gate run (the
+  curated held-out mutants + behavioral invariants for the subject under test); the gate calls
+  `discriminator.evaluate(workdir)` in zone A over the materialized integrated tree (only when pytest is
+  green — DC3). So `green AND adequate AND discriminator.passed` ⇒ PASS in the SHIPPING graph; a
+  gamed-green suite that clears the floor but does not kill a held-out mutant ⇒ attested Test FAIL ⇒ the
+  boundary halts ⇒ the autonomous emit guard deploys NOTHING.
+- DW3. **BACK-COMPAT is the `None` default at EVERY hop.** The param is the LAST keyword-only argument on
+  all three functions with a `None` default; absent a factory the constructed gate is the legacy
+  `TestGate(min_passed=...)` (no discriminator) — byte-for-byte the prior behavior. Every existing
+  caller / test (Assistant / Gated / Autonomous, `test_gate_wiring`, `test_supervisor*`,
+  `test_factory_graph_*`) is unchanged and stays green. The `DiscriminatorFactory` type is imported under
+  `TYPE_CHECKING` in all three modules (no runtime import cycle; the alias lives in `gates/discriminator`).
+- DW4. **The END-TO-END proof through the COMPILED graph (`test_phase4_exit`, the A-M4-01 re-audit
+  evidence).** Two full autonomous-spine runs with the SAME `_e2e_discriminator_factory` (curated
+  `add->sub` held-out mutant on `app.py`) wired via `build_factory_graph(discriminator_factory=...)`:
+  (a) a GENUINE suite that kills the mutant -> compiled Test PASS -> build -> admit -> EXACTLY ONE deploy
+  (control); (b) a GAMED-GREEN suite that clears the adequacy floor (one passing test) but survives the
+  mutant -> the COMPILED Test gate attests FAIL (`runner_attestation is not None`, findings contain
+  `SURVIVED`) -> boundary halts -> `_deploy_actions(final) == []`, `phase == "halted"`. This proves the
+  malicious-test block is in the SHIPPING path, not just the unit test. GOTCHA: `test_phase4_exit`
+  defines its OWN keyless `_runtime()`; the autonomous spine needs the SCRIPTED `MockTransport`, so import
+  the harness's runtime/runner as `_auto_runtime` / `_auto_runner` (a bare `_runtime` import is shadowed
+  by the local def). The diff hunks mirror the StubAdapter shape (first body line `+`-prefixed, rest
+  verbatim) so `gate_wiring`'s Phase-1 applier round-trips them.
+- DW5. **HONESTY (§0.3): the held-out mutant SET is the dev-grade CURATED set the factory supplies** — a
+  real family-decorrelated mutation engine is heavier (the discriminator's own dev-grade scope, DC1). The
+  WIRING + the discriminator logic are real; only the mutant generator is the documented stand-in.
+  Touched ONLY `foundry/graph/gate_wiring.py`, `foundry/graph/factory_graph.py`,
+  `foundry/graph/supervisor.py`, `tests/test_phase4_exit.py`, this note. ruff (foundry tests) + mypy
+  (135 files) clean; full suite 1148 passed / 1 skipped.

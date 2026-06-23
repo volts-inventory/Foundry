@@ -96,6 +96,7 @@ if TYPE_CHECKING:
     from foundry.agents.implementation.senior_engineer import ArtifactResolver
     from foundry.context import SymbolIndex
     from foundry.gates.attestation import DevGateWriteVerifier
+    from foundry.gates.discriminator import DiscriminatorFactory
     from foundry.gates.runner import TwoZoneGateRunner
     from foundry.graph.gate_wiring import BlobResolver
     from foundry.schemas.base import Artifact
@@ -421,6 +422,7 @@ def build_factory_graph(
     admission: AdmissionController | None = None,
     deployer: Deployer | None = None,
     gate_verifier: DevGateWriteVerifier | None = None,
+    discriminator_factory: DiscriminatorFactory | None = None,
 ) -> CompiledStateGraph[FactoryState]:
     """Compile the full factory graph (Assistant-mode default; Gated/Autonomous opt-in).
 
@@ -472,6 +474,18 @@ def build_factory_graph(
         the controller re-verifies the build + gate signatures under (it shares
         the runner's zone-B key + the runner's cross-fork records). Required for
         ``mode="autonomous"``; ignored otherwise.
+    discriminator_factory:
+        OPTIONAL malicious-test defense (A-M4-01), threaded straight through to
+        :func:`build_supervisor_graph` and on to the ``build_test_gate`` node's
+        :func:`run_build_test_gates`. When provided, the COMPILED Test gate in the
+        Gated/Autonomous (and Assistant) spine CONSULTS the held-out-mutant +
+        behavioral-invariance discriminator the factory produces — so a gamed-green
+        suite that clears the adequacy floor but does NOT kill a held-out mutant is
+        FAILed by the SHIPPING graph (the attested FAIL then halts the autonomous
+        emit guard → deploy NOTHING), not only in ``tests/test_phase4_exit.py``.
+        The held-out mutant SET is a dev-grade CURATED set (a real mutation engine
+        is heavier; plan §0.3). ``None`` (the default) keeps the adequacy-floor-only
+        behavior byte-for-byte (back-compat for every existing caller).
 
     Returns the COMPILED top-level graph.
     """
@@ -494,6 +508,7 @@ def build_factory_graph(
         index=index,
         max_fix_attempts=max_fix_attempts,
         mode=mode,
+        discriminator_factory=discriminator_factory,
     ).compile()
 
     def emit(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:

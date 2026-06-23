@@ -128,6 +128,7 @@ if TYPE_CHECKING:
     from foundry.agents._runtime import AgentRuntime
     from foundry.agents.implementation.senior_engineer import ArtifactResolver
     from foundry.context import SymbolIndex
+    from foundry.gates.discriminator import DiscriminatorFactory
     from foundry.gates.runner import TwoZoneGateRunner
     from foundry.graph.gate_wiring import BlobResolver
 
@@ -247,6 +248,7 @@ def build_supervisor_graph(
     index: SymbolIndex | None = None,
     max_fix_attempts: int = 3,
     mode: str = MODE_ASSISTANT,
+    discriminator_factory: DiscriminatorFactory | None = None,
 ) -> StateGraph[FactoryState]:
     """Build the UNCOMPILED supervisor graph over :class:`FactoryState`.
 
@@ -294,6 +296,16 @@ def build_supervisor_graph(
         factory_graph autonomous emit node, NOT here. The Gated/Autonomous paths
         only ADD boundaries — the convergence bound + the attested-only
         advancement are inherited unchanged (gov §1e).
+    discriminator_factory:
+        OPTIONAL malicious-test defense (A-M4-01). When provided, the
+        ``build_test_gate`` node threads it into :func:`run_build_test_gates`, so
+        the COMPILED Test gate consults the held-out-mutant + behavioral-invariance
+        :class:`~foundry.gates.discriminator.TestSuiteDiscriminator` the factory
+        produces — a gamed-green suite that clears the adequacy floor but does not
+        kill a held-out mutant FAILs the gate in the SHIPPING graph (not only in
+        ``tests/test_phase4_exit.py``). ``None`` (the default) keeps the Phase-1/2
+        behavior byte-for-byte (adequacy floor only; Assistant/Gated/Autonomous
+        back-compat).
 
     Returns the ``StateGraph`` UNCOMPILED — ``factory_graph`` (T-M1-14) compiles
     it, attaches the shared checkpointer, and appends the emit node.
@@ -426,6 +438,7 @@ def build_supervisor_graph(
             resolve=resolve,
             resolve_blob=resolve_blob,
             workdir=_gate_workdir("build_test_gate"),
+            discriminator_factory=discriminator_factory,
         )
         out["phase"] = _BUILD_TEST_GATE
         _bump_on_non_advance(state, config, out, boundary=BUILD_TEST_BOUNDARY)

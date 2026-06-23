@@ -602,6 +602,96 @@ def test_forged_verdict_unsigned_attestation_cannot_reach_prod() -> None:
         pass
 
 
+def test_forged_terminal_gate_across_trees_cannot_reach_prod() -> None:
+    """ATTACK (M4-R1-01): the release spans TWO materialized trees — the terminal
+    Spec/Build/Test gates on the terminal tree, the assurance gates (security/
+    audit) on the provenance/assurance tree (AW2 re-hash). An agent forges the
+    TERMINAL ``build`` verdict (strips its attestation). Admission now
+    CRYPTOGRAPHICALLY re-verifies EVERY required gate across BOTH trees (pinned by
+    ``expected_gate_trees``), so the forged terminal gate fails the signature
+    re-check → DENY (previously the terminal gates rested only on the upstream
+    emit guard's merge_gates filter, NOT admission). The deployer then refuses the
+    non-admitted decision → no deploy."""
+    records, verifier = _records_verifier()
+    signer = ZoneBSigner(KEY, KEY_ID)
+    assurance_tree = "tree-assur"
+    terminal_tree = "tree-terminal"
+    # Provenance binds the assurance tree (the build is keyed to it).
+    build = _genuine_build(signer, assurance_tree)
+    digest = build.result.subject_digest
+
+    # Terminal gates on the terminal tree; assurance gates on the provenance tree.
+    terminal = {
+        name: _signed_pass(signer, name, terminal_tree, local=i)
+        for i, name in enumerate(("spec", "build", "test"))
+    }
+    assurance = {
+        name: _signed_pass(signer, name, assurance_tree, local=10 + i)
+        for i, name in enumerate(("security", "audit"))
+    }
+    expected = {n: terminal_tree for n in terminal} | {n: assurance_tree for n in assurance}
+    gate_state = {**terminal, **assurance}
+    # FORGE the terminal `build` gate (strip its attestation — agent-minted PASS).
+    gate_state["build"] = gate_state["build"].model_copy(update={"runner_attestation": None})
+
+    decision = AdmissionController(builder_id=BUILDER_ID).admit(
+        digest,
+        provenance=build.provenance,
+        build_verdict=build.signed_verdict,
+        gate_results=tuple(gate_state.values()),
+        required_gates=_REQUIRED_GATES,
+        records=records,
+        verifier=verifier,
+        expected_gate_trees=expected,
+        seq=_seq(),
+    )
+    assert decision.verdict is AdmissionVerdict.DENY
+    assert decision.reason == "required_gate_signature_invalid"
+    with_pytest_refuse(decision)
+
+
+def test_wrong_tree_terminal_gate_across_trees_cannot_reach_prod() -> None:
+    """ATTACK (M4-R1-01): a genuinely-signed TERMINAL ``test`` verdict re-presented
+    for the WRONG tree (not its expected terminal tree) across the two-tree
+    release → admission's input-binding rejects it against its expected terminal
+    tree → DENY → no deploy. Proves admission covers the terminal gates' DISTINCT
+    tree, not just the assurance group bound to the provenance."""
+    records, verifier = _records_verifier()
+    signer = ZoneBSigner(KEY, KEY_ID)
+    assurance_tree = "tree-assur-2"
+    terminal_tree = "tree-terminal-2"
+    build = _genuine_build(signer, assurance_tree)
+    digest = build.result.subject_digest
+
+    terminal = {
+        name: _signed_pass(signer, name, terminal_tree, local=i)
+        for i, name in enumerate(("spec", "build", "test"))
+    }
+    assurance = {
+        name: _signed_pass(signer, name, assurance_tree, local=10 + i)
+        for i, name in enumerate(("security", "audit"))
+    }
+    expected = {n: terminal_tree for n in terminal} | {n: assurance_tree for n in assurance}
+    gate_state = {**terminal, **assurance}
+    # The `test` verdict is genuinely signed — but for a THIRD tree.
+    gate_state["test"] = _signed_pass(signer, "test", "tree-elsewhere", local=99)
+
+    decision = AdmissionController(builder_id=BUILDER_ID).admit(
+        digest,
+        provenance=build.provenance,
+        build_verdict=build.signed_verdict,
+        gate_results=tuple(gate_state.values()),
+        required_gates=_REQUIRED_GATES,
+        records=records,
+        verifier=verifier,
+        expected_gate_trees=expected,
+        seq=_seq(),
+    )
+    assert decision.verdict is AdmissionVerdict.DENY
+    assert decision.reason == "required_gate_wrong_tree"
+    with_pytest_refuse(decision)
+
+
 def test_forged_verdict_wrong_tree_cannot_reach_prod() -> None:
     """ATTACK (replay from a DIFFERENT tree): a required gate verdict genuinely
     signed but for a DIFFERENT tree/digest → the REAL admission input-binding

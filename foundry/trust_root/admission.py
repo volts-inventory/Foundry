@@ -18,11 +18,24 @@ time, for the EXACT subject digest:
    (re-presenting the EXACT provenance), and every required gate verdict
    re-verifies via ``verify_attestation`` — a forged/unsigned verdict yields
    ``DENY``.
-3. **Gate-state complete + for THIS digest/tree.** Every gate in
-   ``required_gates`` is attested ``PASS`` AND bound to the provenance's exact
-   ``tree_sha`` (``run_against``). A missing required gate, a non-PASS gate, or a
-   gate whose verdict is bound to a DIFFERENT tree ⇒ ``DENY`` (fail-closed: never
-   advance on an absent verdict; never accept a verdict for another tree).
+3. **Gate-state complete + for THIS digest/tree (across BOTH trees).** Every
+   gate in ``required_gates`` is attested ``PASS`` AND bound to ITS expected
+   ``run_against`` tree. By default that expected tree is the provenance's exact
+   ``tree_sha``; but a release may span MULTIPLE materialized trees — the
+   terminal Spec/Build/Test gates ran on the terminal integrated tree while the
+   assurance gates (Security/Audit/...) ran on a DISTINCT re-hashed tree (the
+   assurance materializer augments + re-hashes the augmented tree, AW2). The
+   caller may therefore pass ``expected_gate_trees`` — a per-gate name→tree
+   mapping pinning EACH required gate to the tree it is supposed to have run on
+   (the terminal gates to the terminal tree, the assurance gates to the
+   assurance/provenance tree). Admission then CRYPTOGRAPHICALLY re-verifies EVERY
+   required gate (signature + PASS + bound-to-its-expected-tree), so the
+   trust-root release decision covers the terminal Spec/Build/Test gates too —
+   not just the assurance group. A missing required gate, a non-PASS gate, or a
+   gate whose verdict is bound to a DIFFERENT tree than expected ⇒ ``DENY``
+   (fail-closed: never advance on an absent verdict; never accept a verdict for
+   the wrong tree). With no mapping (single-tree caller) every gate is expected
+   on the provenance's ``tree_sha`` — the original behavior, unchanged.
 4. **Not disqualified / not fork-divergent.** ``records.admission_look(digest)``
    must be :data:`AdmissionState.ADMISSIBLE` — anything else (an explicit
    cross-fork digest-disqualification, or a stable-FAIL latch on the digest)
@@ -58,6 +71,8 @@ from foundry.schemas.operations import AdmissionDecision, AdmissionVerdict
 from foundry.state.global_records import AdmissionState
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from foundry.gates.attestation import DevGateWriteVerifier
     from foundry.schemas.governance import EvidencePack
     from foundry.schemas.security import SLSAProvenance
@@ -107,6 +122,7 @@ class AdmissionController:
         records: GlobalRecordsView,
         verifier: DevGateWriteVerifier,
         seq: Seq,
+        expected_gate_trees: Mapping[str, str] | None = None,
         evidence_pack: EvidencePack | None = None,
         scanner_config_rev: str | None = None,
         gate_state_uri: str | None = None,
@@ -125,6 +141,18 @@ class AdmissionController:
         the build :class:`GateResult` whose provenance-bound attestation grounds
         ``provenance``. ``records.admission_look`` is the cross-fork
         disqualification / stable-FAIL query (T-M4-02).
+
+        ``expected_gate_trees`` (optional) pins EACH required gate to the
+        ``run_against`` tree it is supposed to have run on. When a release spans
+        MULTIPLE materialized trees — terminal Spec/Build/Test on the terminal
+        integrated tree, assurance gates on a DISTINCT re-hashed tree (AW2) —
+        the caller maps each required gate to its tree so admission re-verifies
+        ALL of them (not just the assurance group) against the tree they belong
+        to. A gate absent from the mapping defaults to the provenance's
+        ``tree_sha`` (so a single-tree caller passes nothing and every gate is
+        checked against the provenance tree — original behavior). The provenance
+        still binds the final integrated subject; this only widens the gate-state
+        re-verification to honestly cover the terminal gates' distinct tree.
         """
         tree_sha = provenance.tree_sha
 
@@ -178,18 +206,25 @@ class AdmissionController:
             return deny(_R_SIG_INVALID)
         verified_signature = True
 
-        # -- 3. Gate-state: every required gate attested PASS for THIS tree ----
+        # -- 3. Gate-state: every required gate attested PASS for ITS tree -----
         # Index the presented gate-state by name. A required gate that is absent,
-        # not PASS, bound to a DIFFERENT tree, or whose attestation does not
-        # re-verify ⇒ DENY. Fail-closed: never advance on a missing/forged gate.
+        # not PASS, bound to a DIFFERENT tree than expected, or whose attestation
+        # does not re-verify ⇒ DENY. Fail-closed: never advance on a
+        # missing/forged gate. EACH gate's expected tree is the provenance's
+        # `tree_sha` by default, or the per-gate tree the caller pinned in
+        # `expected_gate_trees` (a release that spans the terminal + assurance
+        # trees; AW2). This is what makes admission cryptographically re-verify
+        # the TERMINAL Spec/Build/Test gates too — bound to their own tree —
+        # rather than resting them on the upstream emit guard.
+        trees = expected_gate_trees or {}
         by_name = self._latest_by_name(gate_results)
         for name in required_gates:
             g = by_name.get(name)
             if g is None:
                 return deny(_R_GATE_MISSING)
-            # input-bound: the verdict must attest THIS integrated tree, not a
-            # different tree re-presented for this subject.
-            if g.run_against != tree_sha:
+            # input-bound: the verdict must attest ITS expected integrated tree,
+            # not a different tree re-presented for this subject.
+            if g.run_against != trees.get(name, tree_sha):
                 return deny(_R_GATE_WRONG_TREE)
             if g.status is not GateStatus.PASS:
                 return deny(_R_GATE_NOT_PASS)

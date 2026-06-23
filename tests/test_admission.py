@@ -557,3 +557,166 @@ def test_gate_order_independent(
         seq=_seq(),
     )
     assert decision.verdict is AdmissionVerdict.ADMIT
+
+
+# ---------------------------------------------------------------------------
+# Multi-tree re-verification (M4-R1-01): the TERMINAL gates run on a DISTINCT
+# tree from the assurance gates (AW2 re-hash); admission must re-verify ALL of
+# them against THEIR expected tree, not rest the terminal gates on the upstream
+# emit guard. The provenance binds the assurance tree; the terminal gates
+# (spec/build/test) are pinned to the terminal tree via `expected_gate_trees`.
+# ---------------------------------------------------------------------------
+
+# The terminal gates ran on a DISTINCT materialized tree from the assurance gates.
+_TERMINAL_GATES = ("spec", "build", "test")
+_ASSURANCE_GATES = ("security",)
+
+
+def _two_tree_gate_state(
+    signer: ZoneBSigner, *, assurance_tree: str, terminal_tree: str
+) -> tuple[tuple[GateResult, ...], dict[str, str]]:
+    """Signed PASS verdicts split across two trees + the per-gate expected-tree
+    mapping (terminal gates on the terminal tree, assurance on the prov tree)."""
+    gates = [
+        _signed_gate(signer, name, terminal_tree, local=i)
+        for i, name in enumerate(_TERMINAL_GATES)
+    ]
+    gates += [
+        _signed_gate(signer, name, assurance_tree, local=10 + i)
+        for i, name in enumerate(_ASSURANCE_GATES)
+    ]
+    expected = {name: terminal_tree for name in _TERMINAL_GATES}
+    expected.update({name: assurance_tree for name in _ASSURANCE_GATES})
+    return tuple(gates), expected
+
+
+def test_multi_tree_clean_admit(
+    controller: AdmissionController,
+    build: BuildOutput,
+    signer: ZoneBSigner,
+    records: GlobalRecords,
+    verifier: DevGateWriteVerifier,
+) -> None:
+    """Terminal gates on a DISTINCT tree + assurance gates on the provenance tree
+    ⇒ ADMIT when each is bound to ITS expected tree (multi-tree path is additive;
+    the provenance still binds the integrated subject)."""
+    digest = build.result.subject_digest
+    prov_tree = build.provenance.tree_sha
+    terminal_tree = "sha256:" + "7" * 64
+    gates, expected = _two_tree_gate_state(
+        signer, assurance_tree=prov_tree, terminal_tree=terminal_tree
+    )
+    decision = controller.admit(
+        digest,
+        provenance=build.provenance,
+        build_verdict=build.signed_verdict,
+        gate_results=gates,
+        required_gates=(*_TERMINAL_GATES, *_ASSURANCE_GATES),
+        records=records,
+        verifier=verifier,
+        expected_gate_trees=expected,
+        seq=_seq(),
+    )
+    assert decision.verdict is AdmissionVerdict.ADMIT
+    assert decision.all_required_gates_pass
+
+
+def test_multi_tree_forged_terminal_gate_denied(
+    controller: AdmissionController,
+    build: BuildOutput,
+    signer: ZoneBSigner,
+    records: GlobalRecords,
+    verifier: DevGateWriteVerifier,
+) -> None:
+    """An agent-FORGED (unsigned) TERMINAL gate (build) ⇒ DENY. Previously the
+    terminal gates were NOT re-verified by admission (only the emit guard) — now
+    a forged terminal verdict fails admission's signature re-check."""
+    digest = build.result.subject_digest
+    prov_tree = build.provenance.tree_sha
+    terminal_tree = "sha256:" + "7" * 64
+    gates, expected = _two_tree_gate_state(
+        signer, assurance_tree=prov_tree, terminal_tree=terminal_tree
+    )
+    gates = list(gates)
+    # Strip the attestation off the `build` (terminal) verdict — agent-forged.
+    idx = next(i for i, g in enumerate(gates) if g.name == "build")
+    gates[idx] = gates[idx].model_copy(update={"runner_attestation": None})
+
+    decision = controller.admit(
+        digest,
+        provenance=build.provenance,
+        build_verdict=build.signed_verdict,
+        gate_results=tuple(gates),
+        required_gates=(*_TERMINAL_GATES, *_ASSURANCE_GATES),
+        records=records,
+        verifier=verifier,
+        expected_gate_trees=expected,
+        seq=_seq(),
+    )
+    assert decision.verdict is AdmissionVerdict.DENY
+    assert decision.reason == "required_gate_signature_invalid"
+
+
+def test_multi_tree_missing_terminal_gate_denied(
+    controller: AdmissionController,
+    build: BuildOutput,
+    signer: ZoneBSigner,
+    records: GlobalRecords,
+    verifier: DevGateWriteVerifier,
+) -> None:
+    """A TERMINAL gate (test) absent from the gate-state ⇒ DENY (fail-closed)."""
+    digest = build.result.subject_digest
+    prov_tree = build.provenance.tree_sha
+    terminal_tree = "sha256:" + "7" * 64
+    gates, expected = _two_tree_gate_state(
+        signer, assurance_tree=prov_tree, terminal_tree=terminal_tree
+    )
+    gates = tuple(g for g in gates if g.name != "test")  # drop the terminal `test`
+    decision = controller.admit(
+        digest,
+        provenance=build.provenance,
+        build_verdict=build.signed_verdict,
+        gate_results=gates,
+        required_gates=(*_TERMINAL_GATES, *_ASSURANCE_GATES),
+        records=records,
+        verifier=verifier,
+        expected_gate_trees=expected,
+        seq=_seq(),
+    )
+    assert decision.verdict is AdmissionVerdict.DENY
+    assert decision.reason == "required_gate_missing"
+
+
+def test_multi_tree_terminal_gate_wrong_tree_denied(
+    controller: AdmissionController,
+    build: BuildOutput,
+    signer: ZoneBSigner,
+    records: GlobalRecords,
+    verifier: DevGateWriteVerifier,
+) -> None:
+    """A genuinely-signed TERMINAL gate bound to the WRONG tree (not its expected
+    terminal tree) ⇒ DENY — admission's input-binding now covers the terminal
+    gates against their own tree, not just the assurance group."""
+    digest = build.result.subject_digest
+    prov_tree = build.provenance.tree_sha
+    terminal_tree = "sha256:" + "7" * 64
+    gates, expected = _two_tree_gate_state(
+        signer, assurance_tree=prov_tree, terminal_tree=terminal_tree
+    )
+    gates = list(gates)
+    # `spec` genuinely signed, but for a THIRD tree (not its expected terminal one).
+    idx = next(i for i, g in enumerate(gates) if g.name == "spec")
+    gates[idx] = _signed_gate(signer, "spec", "sha256:" + "9" * 64, local=99)
+    decision = controller.admit(
+        digest,
+        provenance=build.provenance,
+        build_verdict=build.signed_verdict,
+        gate_results=tuple(gates),
+        required_gates=(*_TERMINAL_GATES, *_ASSURANCE_GATES),
+        records=records,
+        verifier=verifier,
+        expected_gate_trees=expected,
+        seq=_seq(),
+    )
+    assert decision.verdict is AdmissionVerdict.DENY
+    assert decision.reason == "required_gate_wrong_tree"

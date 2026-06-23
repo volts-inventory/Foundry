@@ -104,6 +104,7 @@ if TYPE_CHECKING:
     from foundry.trust_root import AdmissionController, Deployer, TrustedBuilder
 
 __all__ = [
+    "MANDATORY_ADMISSION_FLOOR",
     "TERMINAL_PASS_GATES",
     "build_factory_graph",
     "gated_release_admitted",
@@ -134,6 +135,14 @@ _EMIT = "emit"
 # gates (implementation/quality boundary). The reviewer's ``review`` verdict is
 # advisory here — the deterministic gates own the release bit (LEARNINGS L5).
 TERMINAL_PASS_GATES: frozenset[str] = frozenset({"spec", "build", "test"})
+
+# The MANDATORY admission floor (governance §1c/§1e/§5): the terminal gates
+# (Spec+Build+Test) AND the always-on assurance integrity floor (Security+Audit)
+# must be present in the admitted required set — REGARDLESS of what gate-state
+# happened to land. Asserted before build/admit so admission ALONE enforces a
+# floor (not merely whatever verdicts the run materialized). The tier scales
+# DEPTH on top of this (supply_chain/e2e) but never removes a floor gate.
+MANDATORY_ADMISSION_FLOOR: frozenset[str] = TERMINAL_PASS_GATES | frozenset({"security", "audit"})
 
 # The release-evidence "released artifact" the pack carries + the PR opens against
 # — the integrated FeatureDiff handle (a release travels with its diff).
@@ -325,22 +334,26 @@ def _autonomous_attested_gates(state: FactoryState) -> tuple[GateResult, ...]:
 
 def _admission_tree_and_gates(
     gate_results: tuple[GateResult, ...],
-) -> tuple[str, tuple[GateResult, ...]] | None:
-    """The integrated ``tree_sha`` + the attested gate-state bound to it that the
-    autonomous build is keyed to and admission re-verifies.
+) -> tuple[str, tuple[GateResult, ...], dict[str, str]] | None:
+    """The integrated provenance ``tree_sha``, the FULL attested gate-state across
+    BOTH trees, and the per-gate name→tree mapping admission re-verifies against.
 
-    Admission's gate-state check is INPUT-BOUND: every required gate's
-    ``run_against`` must equal the provenance's ``tree_sha`` (a verdict for a
-    DIFFERENT tree re-presented for this subject is rejected). Across the gated
-    spine the terminal gates (Spec/Build/Test) and the assurance gates
-    (Security/Audit/...) run on DISTINCT materialized trees (the assurance
+    Across the gated spine the terminal gates (Spec/Build/Test) and the assurance
+    gates (Security/Audit/...) run on DISTINCT materialized trees (the assurance
     materializer RE-HASHES the augmented tree, AW2), so the gate-state spans
-    >1 ``run_against``. We therefore pick the SINGLE ``run_against`` group
-    covering the MOST attested gates — the integrated tree the largest coherent
-    gate-state is keyed to — and build/admit against exactly THAT tree with
-    exactly the gates bound to it. So every gate admission re-verifies is
-    honestly bound to the provenance tree (no cross-tree laundering), and the
-    floor (Security+Audit) is always part of the largest assurance group.
+    >1 ``run_against``. The autonomous build is keyed to the SINGLE ``run_against``
+    group covering the MOST attested gates — the integrated tree the largest
+    coherent gate-state is keyed to (the assurance group, which always carries the
+    Security+Audit floor) — so the provenance binds that tree.
+
+    But admission must CRYPTOGRAPHICALLY re-verify ALL required gates, not just the
+    assurance group (M4-R1-01): the terminal Spec/Build/Test gates ran on the
+    terminal tree, so we hand admission EVERY attested gate plus a per-gate
+    name→tree mapping pinning each to ITS actual ``run_against`` (terminal gates to
+    the terminal tree, assurance gates to the provenance tree). Admission's
+    input-bound check then covers the terminal gates against their own tree — no
+    cross-tree laundering, and the terminal gates no longer rest only on the emit
+    guard's fail-closed ``merge_gates`` filter.
 
     Returns ``None`` when no attested verdict carries a ``run_against`` (the emit
     then fail-closes — deploy nothing)."""
@@ -350,10 +363,26 @@ def _admission_tree_and_gates(
             groups.setdefault(g.run_against, []).append(g)
     if not groups:
         return None
-    # Largest group wins; ``run_against`` tiebreak keeps the choice deterministic
-    # (resume-stable) when two trees cover the same count.
+    # Largest group wins as the provenance/build tree; ``run_against`` tiebreak
+    # keeps the choice deterministic (resume-stable) when two trees tie.
     tree_sha = max(groups, key=lambda t: (len(groups[t]), t))
-    return tree_sha, tuple(groups[tree_sha])
+    # The FULL gate-state (every attested verdict carrying a run_against), ordered
+    # by (name, tree) for a deterministic, resume-stable tuple, plus the per-gate
+    # expected tree. A gate bound to the provenance tree maps to it; a terminal
+    # gate on the terminal tree maps to its own — admission re-verifies each
+    # against its tree. The expected tree per name is the NEWEST-by-Seq verdict's
+    # ``run_against`` (matching admission's own ``_latest_by_name`` selection), so
+    # a fix-loop's superseding verdict pins the tree admission actually checks.
+    all_bound = tuple(
+        sorted((g for gs in groups.values() for g in gs), key=lambda g: (g.name, g.run_against))
+    )
+    newest: dict[str, GateResult] = {}
+    for g in all_bound:
+        cur = newest.get(g.name)
+        if cur is None or g.seq > cur.seq:
+            newest[g.name] = g
+    expected_trees = {name: g.run_against for name, g in newest.items()}
+    return tree_sha, all_bound, expected_trees
 
 
 def _autonomous_build_request(state: FactoryState, tree_sha: str, seq: Any) -> BuildRequest:
@@ -626,24 +655,45 @@ def build_factory_graph(
             # Impossibly (post-guard) no attested verdict carries the integrated
             # tree — fail-closed, deploy nothing.
             return {"phase": "halted"}
-        tree_sha, gate_results = bound
-        # The required gates admission re-verifies are exactly the attested gates
-        # bound to the chosen integrated tree (sorted for a deterministic,
-        # resume-stable tuple). Every one is honestly bound to the provenance
-        # tree — admission's input-binding holds.
-        required_gates = tuple(sorted(g.name for g in gate_results))
+        tree_sha, gate_results, expected_gate_trees = bound
+        # The required gates admission re-verifies are the FULL attested gate-state
+        # across BOTH trees (terminal + assurance), sorted for a deterministic,
+        # resume-stable tuple. ``expected_gate_trees`` pins each to ITS run_against
+        # so admission's input-binding re-verifies the TERMINAL Spec/Build/Test
+        # gates against the terminal tree too (M4-R1-01), not just the assurance
+        # group bound to the provenance tree.
+        required_gates = tuple(sorted({g.name for g in gate_results}))
+
+        # -- Mandatory floor (M4-R1-02): admission ALONE enforces a floor ------
+        # The terminal gates (Spec+Build+Test) AND the assurance integrity floor
+        # (Security+Audit) MUST be in the admitted required set — fail-closed if
+        # any is absent, so admission never rests on a data-derived set that
+        # happened to omit a mandatory gate. (The pre-guard `_gates_all_pass`
+        # already required the tier set PASS; this asserts the floor is part of
+        # what admission cryptographically re-verifies, regardless of landed data.)
+        if not MANDATORY_ADMISSION_FLOOR.issubset(required_gates):
+            return {"phase": "halted"}
 
         # -- 2. Build the integrated subject hands-off (signed provenance) -----
         build_seq = rt.seq(config, _EMIT, "build:autonomous")
         request = _autonomous_build_request(state, tree_sha, build_seq)
         build_out = builder.build(
             request,
+            # NB (M4-R1-03): these are the attested verdicts' ``results_digest``
+            # content identities, NOT the WORM-anchored gate-result handle URIs
+            # (gov §4). The real WORM store wiring (the handle/identity URIs) lands
+            # with the WORM store (§0.3); the build provenance binding is intact
+            # either way (the digests are content-addressed inputs).
             gate_result_uris=tuple(g.results_digest for g in gate_results if g.results_digest),
             scanner_config_rev=_scanner_config_rev(gate_results),
             seq=build_seq,
         )
 
         # -- 3. Admit — the SOLE release gate (fail-closed on DENY) ------------
+        # Admission re-verifies EVERY required gate (signature + PASS + bound to
+        # its expected tree) across BOTH the terminal and assurance trees, so a
+        # forged / missing / wrong-tree TERMINAL gate now ALSO fails admission,
+        # not just the upstream emit guard.
         admit_seq = rt.seq(config, _EMIT, "admission:autonomous")
         decision = admission.admit(
             build_out.result.subject_digest,
@@ -653,6 +703,7 @@ def build_factory_graph(
             required_gates=required_gates,
             records=runner.records,
             verifier=gate_verifier,
+            expected_gate_trees=expected_gate_trees,
             scanner_config_rev=_scanner_config_rev(gate_results),
             seq=admit_seq,
         )

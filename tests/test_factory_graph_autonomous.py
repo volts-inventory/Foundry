@@ -331,10 +331,11 @@ def test_autonomous_clean_run_builds_admits_and_deploys_once(tmp_path: Any) -> N
     gate_results = _autonomous_attested_gates(final)
     bound = _admission_tree_and_gates(gate_results)
     assert bound is not None
-    _tree_sha, bound_gates = bound
-    # The bound tree carries the always-on assurance floor (Security + Audit).
+    _tree_sha, bound_gates, _expected_trees = bound
+    # The bound gate-state carries the always-on assurance floor AND the terminal
+    # gates across BOTH trees (admission re-verifies all of them; M4-R1-01).
     bound_names = {g.name for g in bound_gates}
-    assert {"security", "audit"} <= bound_names
+    assert {"spec", "build", "test", "security", "audit"} <= bound_names
 
 
 # ---- a DENIED artifact deploys NOTHING (fail-closed) ------------------------
@@ -374,7 +375,7 @@ def test_autonomous_denied_artifact_deploys_nothing(tmp_path: Any) -> None:
     probe_gates = _autonomous_attested_gates(probe_final)
     bound = _admission_tree_and_gates(probe_gates)
     assert bound is not None
-    tree_sha, _ = bound
+    tree_sha, _, _ = bound
     signer = ZoneBSigner(KEY, KEY_ID)
     builder = TrustedBuilder(signer, builder_id=BUILDER_ID)
     from foundry.graph.factory_graph import _autonomous_build_request

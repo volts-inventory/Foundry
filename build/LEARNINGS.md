@@ -2211,6 +2211,40 @@ is dev-grade — stamped in every new docstring.
   `foundry/graph/factory_graph.py`, `tests/test_factory_graph_autonomous.py`. ruff (foundry tests) +
   mypy (135 files) clean; full suite 1125 passed / 1 skipped.
 
+## M4 trust-root review fixes — admission re-verifies ALL gates across BOTH trees (M4-R1-01/02/03)
+- M4R1. **Admission now CRYPTOGRAPHICALLY re-verifies EVERY required gate across BOTH materialized
+  trees — SUPERSEDES AU3's largest-group-only approach.** AU3 built+admitted against ONLY the largest
+  `run_against` group (the assurance tree); the terminal Spec/Build/Test gates ran on a DISTINCT tree
+  (AW2 re-hash) and were NOT re-verified by admission — they rested on the upstream emit guard's
+  fail-closed `merge_gates` filter. FIX: `AdmissionController.admit` gained an optional
+  `expected_gate_trees: Mapping[str, str]` — a per-gate name→tree mapping pinning EACH required gate to
+  the `run_against` it is supposed to have run on. The gate-state loop now checks
+  `g.run_against != trees.get(name, tree_sha)` (defaults to `provenance.tree_sha` when a gate is absent
+  from the mapping — so single-tree callers pass NOTHING and every gate is checked against the prov tree,
+  ORIGINAL behavior unchanged + all existing single-tree tests still pass). `_admission_tree_and_gates`
+  now returns `(prov_tree, ALL_attested_gates_across_both_trees, expected_gate_trees)`: the build is still
+  keyed to the largest group (provenance binds that integrated tree), but admission gets the FULL gate-set
+  + the per-gate expected trees (each gate→its actual `run_against`, newest-by-Seq per name to match
+  admission's own `_latest_by_name` selection). So a forged / missing / WRONG-TREE TERMINAL gate now ALSO
+  fails admission (`required_gate_signature_invalid` / `_missing` / `_wrong_tree`), not just the emit guard.
+- M4R2. **Mandatory floor asserted before build/admit (M4-R1-02).** `MANDATORY_ADMISSION_FLOOR =
+  TERMINAL_PASS_GATES | {"security","audit"}` (the always-on integrity floor + terminals). The autonomous
+  emit fail-closes (`return {"phase":"halted"}`) if `not MANDATORY_ADMISSION_FLOOR.issubset(required_gates)`
+  — so admission ALONE enforces a floor, not merely whatever gate-state happened to land. (Use
+  `.issubset()` not `floor <= frozenset(...)` — ruff SIM300 flags the latter as a Yoda condition.)
+- M4R3. **gate_result_uris labeling fix (M4-R1-03).** The `gate_result_uris` fed to `builder.build` are
+  the attested verdicts' `results_digest` content identities, NOT WORM gate-result HANDLE uris (gov §4).
+  Left the values as-is (the digests are valid content-addressed build inputs; provenance binding intact)
+  but added a comment that the real WORM-anchored handle URIs wire in when the WORM store lands (§0.3).
+- M4R4. **New DENY tests for the TERMINAL gate across two trees.** `test_admission.py`: multi-tree clean
+  ADMIT + forged / missing / wrong-tree TERMINAL gate DENY (additive — single-tree tests untouched).
+  `test_phase4_exit.py`: `test_forged_terminal_gate_across_trees_cannot_reach_prod` +
+  `test_wrong_tree_terminal_gate_across_trees_cannot_reach_prod` (terminal gates on the terminal tree,
+  assurance on the prov tree; a forged/wrong-tree terminal verdict → admission DENY → deployer refuses →
+  no deploy). The four-attack defenses + clean control stay green; clean autonomous run still deploys once.
+  Touched ONLY admission.py + factory_graph.py + the 3 test files + LEARNINGS. ruff/mypy clean; full suite
+  1146 passed / 1 skipped.
+
 ## Phase-4 (Trust root & Autonomous) EXIT integration test — the honesty map (T-M4-11)
 `tests/test_phase4_exit.py` proves the four roadmap-named attacks CANNOT reach a deploy, each driven by
 the REAL component (non-vacuous) and each paired with a control that DOES deploy (load-bearing). 15 tests.

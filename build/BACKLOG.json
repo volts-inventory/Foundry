@@ -45,14 +45,14 @@
     {
       "id": "M4",
       "phase": "Phase 4 \u2014 Trust root & Autonomous mode",
-      "status": "in_progress",
+      "status": "done",
       "exit_criteria": "A malicious-test / forged-results / forged-verdict / fork-divergence attempt cannot reach production; trusted-component outage degrades to paused, not wedged. (Dev-grade roots per implementation-plan \u00a70.3.)",
       "note": "Decomposed by T-M4-PLAN into T-M4-01..T-M4-11. EXTEND + HARDEN, don't rebuild: the two-zone TwoZoneGateRunner, attestation.py tuples, GlobalRecords stable-FAIL/nonce/alpha latches, policy/scanner_config (revision_hash) + authorization (segregation-of-duties, Zone.B_ATTESTOR), durability/evidence_pack (provenance_predicate_uri already present) + outbox, governance/sign_off + release_anchors + gated_release_admitted, operations/trusted_component (availability + per-lineage reservation), and the Test gate's mutant_rotation_id reuse-key binding all EXIST. M4 ADDS: trust-root schemas (SLSA ProvenancePredicate/SBOM/AdmissionDecision/DeployResult), cross-fork digest_disqualification + record-scoped two-person override in global_records, runner config-re-derivation + sealed observation channel, the held-out-mutant + behavioral-invariance discriminator (gate-class-aware, gates/discriminator.py), input-bound provenance attestation, the NEW foundry/trust_root/ package (trusted_builder/admission/deployer), operations/trusted_lifecycle (key+component rotation/HA, paused-not-wedged), and Autonomous mode (MODE_AUTONOMOUS: hands-off builder->admission->deployer gated ONLY by the trust root). Collision hazards (runner.py / test.py / attestation.py / supervisor.py / factory_graph.py / global_records.py / a given schema module) are single-owner-per-wave, serialized via dependencies. Most trust_root/* + operations/trusted_lifecycle modules are new-file disjoint and parallel_safe. Exercised on synthetic fixtures via the existing MockTransport/StubAdapter doubles + dev-HMAC roots; the SLSA-L3/admission/deployer LOGIC is real, the ROOTS are dev-grade (implementation-plan \u00a70.3) \u2014 production hardware/OIDC custody is an ops task, stamped honestly, never overclaimed. EXIT: malicious-test / forged-results / forged-verdict / fork-divergence cannot reach production; trusted-component outage degrades to paused, not wedged."
     },
     {
       "id": "M5",
       "phase": "Phase 5 \u2014 Specialist plugins + domain packs",
-      "status": "pending",
+      "status": "in_progress",
       "exit_criteria": "A regulated request makes Autonomous/auto-approve unreachable and binds approver-of-record; an ML request keys verdicts on state_sha with a class-3 gate + compute budget; a UI request forces visual HITL over a rendered bundle \u2014 all without core changes to add the next pack."
     },
     {
@@ -1307,7 +1307,7 @@
         "M5 decomposed into concrete tasks against the then-current tree, derived from implementation-plan \u00a77 Phase 5 + domains.md"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M6-PLAN",

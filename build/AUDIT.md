@@ -115,3 +115,13 @@ discriminator) -> the shipping autonomous spine relies on the adequacy floor alo
   into the Test-gate node so the compiled graph (not just the unit test) exercises the malicious-test block end-to-end.
 Resolution: fix (plumb the discriminator into the shipping gate node) + an end-to-end-through-the-compiled-graph test,
 then re-audit (cycle 2).
+
+## M4 (Phase 4) — Cycle 2 (fresh independent auditor; re-verify A-M4-01)
+Auditor (fresh, did not see cycle 1) re-ran gates (ruff/mypy clean, full suite pass/1 skip) focusing on whether
+the malicious-test defense is now in the COMPILED shipping path. **ALL 7 DELIVERED.** (1) malicious-test now
+DELIVERED: DiscriminatorFactory threads build_factory_graph -> build_supervisor_graph -> build_test_gate ->
+run_build_test_gates -> TestGate(discriminator=...); the COMPILED Test gate evaluates held-out mutants; non-vacuous
+E2E pair (gamed-green-mutant-survives -> compiled Test FAIL -> 0 deploys; genuine same-factory -> 1 deploy);
+back-compat (factory None = legacy floor). (2)-(7) re-confirmed DELIVERED. No circular tests; clean controls pair
+every block. **Verdict: CLEAN PASS — no findings.** A-M4-01 RESOLVED.
+**M4 AUDIT: CLEAN PASS (cycle 2).** The four attacks genuinely cannot reach a deploy in the shipping path.

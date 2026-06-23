@@ -3005,3 +3005,35 @@ the REAL component (non-vacuous) and each paired with a control that DOES deploy
   changes-with-inputs; fail-closed on non-valid eval; banner-first; replication-only fallback primary;
   needs-a-1.5-read; provenance carried). Full suite 1511 passed/1 skipped. Touched ONLY
   `foundry/evaluation/scorecard.py` + `tests/test_eval_scorecard_headline.py` + this note.
+- EV73. **T-M6-08 — the §9 constrained workflow optimization is PARETO-IMPROVING ONLY (`foundry/evaluation/`
+  `optimization.py`).** `MetricVector` bundles the headline metrics with an EXPLICIT per-metric direction (the
+  SINGLE `MetricVector._directions()` table — never a blanket "bigger is better"): resolution-rate↑ (the
+  objective) + policy-compliance↑ are higher-is-better; escaped-defects↓ + cost↓ + wall-clock↓ are the
+  lower-is-better CONSTRAINTS. Money is integer micro-USD + time integer ms (no float drift on the
+  constrained metrics — the pinned global rule); rates are floats in [0,1], defects a non-neg int.
+  `pareto_improves(baseline, candidate)` = NO regression on ANY metric (each judged in its OWN direction via
+  the one table) AND >= 1 STRICT win. `evaluate_optimization(...) -> OptimizationDecision` (frozen) ADOPTS iff
+  `pareto_improves`, else REJECTS — naming `regressed_metrics` (the constrained metric(s) that regressed) and
+  recording `improved_metrics` (so the audit shows a resolution win was correctly NOT bought with a regression).
+- EV74. **Fail-closed: a win is NEVER traded for a constrained-metric regression, and a TIE is NOT a Pareto
+  improvement.** The §9 constraint is HARD, not a trade-off: a candidate that improves resolution but regresses
+  cost / wall-clock / escaped-defects / policy-compliance is REJECTED with that metric named (`_regressions`
+  short-circuits adoption even when `_improvements` is non-empty). A TIE (no strict improvement, no regression)
+  is REJECTED too — `regressed_metrics == ()` distinguishes a tie-reject from a regression-reject (a tie makes
+  no progress on the objective; only a strict Pareto win adopts). NON-VACUITY proven: the adopt↔reject verdict
+  flips on ONE metric (resolution 0.60 ADOPT vs 0.40 REJECT; the SAME win flips to reject the instant
+  cost regresses by 1 micro-USD).
+- EV75. **Tiering is a VALIDATED OUTPUT of optimization, not an intuition (§9).** `evaluate_tiering_change(...)`
+  feeds a proposed change-risk tiering through the SAME fail-closed Pareto gate (reuses `evaluate_optimization`
+  with `kind="tiering"` — no parallel laxer path): a retiering is adopted ONLY if its measured headline metrics
+  Pareto-improve, and rejected (metric named) if it regresses ANY constrained metric — a retiering can't be
+  adopted on "the diff is small" grounds if it costs a headline metric. Defense-in-depth: a `proposed_tiers`
+  entry whose `relaxes_integrity()` is True raises BEFORE the Pareto gate (governance.md §1e: tiering scales
+  depth/HITL only, never integrity). The optimization READS metrics, recomputes NO eval; pure/deterministic
+  (`content_identity()` identical across re-runs); honesty: DRY_RUN inputs synthetic, the LOGIC real.
+  **Gates:** `ruff check foundry tests` + `mypy foundry` clean (161 source files); `pytest`
+  `test_eval_optimization` = 16 passed (genuine + multi-metric Pareto adopt; better-resolution-worse-cost /
+  -worse-wall-clock / worse-escaped-defects / worse-policy-compliance rejects [named]; tie reject; both
+  directions; tiering adopt/reject/same-gate/integrity-relax-raises; determinism; non-vacuity; provenance).
+  Full suite 1527 passed/1 skipped. Touched ONLY `foundry/evaluation/optimization.py` +
+  `tests/test_eval_optimization.py` + this note.

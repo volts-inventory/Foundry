@@ -2470,7 +2470,7 @@
         "Tests added incl. a tripped-safety blocks-publish path; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M6-05",
@@ -2615,7 +2615,7 @@
         "Tests added (provenance-traces-everything, untraceable-artifact-rejected, re-gate-on-maintenance); mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M6-10",

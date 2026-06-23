@@ -2501,7 +2501,7 @@
         "Tests added; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M6-06",
@@ -2528,7 +2528,7 @@
         "Tests added incl. the alpha-unchanged + replication + inconsistency-flag paths; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M6-07",

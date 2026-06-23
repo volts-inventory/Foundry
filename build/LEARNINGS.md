@@ -2849,3 +2849,40 @@ the REAL component (non-vacuous) and each paired with a control that DOES deploy
   are import-cheap); keep only INFRA deps (runner/admission/verifier protocols) under TYPE_CHECKING.
   Gates: `ruff check foundry tests` + `mypy foundry` clean; `pytest test_lifecycle_{maintenance,provenance}`
   = 21 passed (9+12); full suite 1438 passed / 1 skipped.
+
+## Evaluation — factory_eval aggregator (fail-closed unified self-eval) (T-M6-05)
+- EV58. **`factory_eval.py` is the single ASSEMBLY layer — it COMPOSES the Wave-A layers verbatim, recomputes
+  no statistics.** `run_factory_eval(frame, *, arms=…, suites=…, seed=…, …)→FactoryEvalResult` (frozen)
+  runs, per arm (iterated in SORTED-arm order for determinism, not dict order): OUTCOME via `suites.run_suite`
+  (→`SuiteResult`, the existing `harness.run_arm` over MockTransport/StubAdapter — no live key), TRAJECTORY
+  via `trajectory.score_trajectory` (→`ProcessScore`), COST via `cost_model.CostModel.feature_cost`
+  (→`CostBreakdown`), SAFETIES via `safeties.check_arm_safeties` (→`EvalSafetyReport`), folded into a per-arm
+  `ArmEval`. Factory-wide: AGENT-VALIDITY via `agent_validity.agent_validity_report` (§4, one report),
+  EVAL-INTEGRITY via `integrity.check_eval_integrity` over every arm's headline `ArmResult` (§6), and the §8
+  A/B-scale roll-up via `CostModel.ab_scale_cost`.
+- EV59. **FAIL-CLOSED is the whole point: `valid = integrity.clean AND every arm's safety.clean`, computed
+  from the layer verdicts (`_compute_valid`), NEVER asserted separately.** A reachable hidden test /
+  contaminated input (integrity) or a reward-hack / eval-lie / nondeterminism finding (safeties) sets
+  `valid is False` — the WHOLE result is INVALIDATED. The layers still produce their values (so the failure
+  is auditable) but a non-`valid` result is NOT publishable: `publishable` aliases `valid`, and the scorecard
+  / confirmatory A/B consume ONLY a valid result. An EMPTY arm set is NOT vacuously valid (fails closed).
+- EV60. **The alpha look-ledger is bound READ-ONLY via a `LedgerView` Protocol that exposes ONLY
+  `alpha_looks_spent` (§6.5).** Phase 1.5 is the sole confirmatory arbiter; this Phase-6 aggregator is
+  estimation/replication only and re-spends NO alpha — it structurally CANNOT reach `record_alpha_look` /
+  `try_first_alpha_look` (not on the Protocol). It records the OBSERVED look-count for audit (`None` when no
+  ledger is bound — never a fabricated 0). A spy-ledger test asserts the write methods are never called.
+- EV61. **Clean-run defaults: an EMPTY `AgentRuntimeSurface` per task = PROVABLY isolated (passes §6); a
+  MISSING surface fails closed (EV55).** So `_isolated_surfaces` records an empty-reachable surface for every
+  scored task by default; a test injects a surface intersecting a held-out token to flip integrity. The
+  default suite is a SWE-EVO-style suite over `frame.scored_slice` (the §2 A/B arena, disjoint from pilot).
+  Honesty: `provenance` defaults DRY_RUN + `honesty_banner` states synthetic-fixtures/mock-model/dev-roots AND
+  that this is the FACTORY self-eval, explicitly NOT a delivered product's own shipped eval suite.
+- EV62. **`__init__.py` re-export SKIPPED (per the task's "if contested, skip").** `factory_eval` imports
+  `agent_validity` at module top → pulls in `foundry.agents`/proxy; re-exporting from the package `__init__`
+  would make the import-cheap pure-pydantic `foundry.evaluation` package heavy. The existing `__init__` only
+  re-exports cost_model + hypothesis (both pure). Left it untouched; import `factory_eval` directly.
+- EV63. **Gates:** `ruff check foundry tests` + `mypy foundry` clean (155 source files); `pytest
+  test_eval_factory_eval` = 11 passed (clean→valid; reachable-hidden-test + contamination flip integrity;
+  reward-hack + eval-lie + nondeterminism flip safeties; determinism via `content_identity`; non-vacuity;
+  read-only ledger; default real per-role validity path); full suite green. Touched ONLY
+  `foundry/evaluation/factory_eval.py` + `tests/test_eval_factory_eval.py` + this note.

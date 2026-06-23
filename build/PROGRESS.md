@@ -100,3 +100,13 @@
 - NEXT: resolve audit findings -> close M2 -> open M3 (Phase 3 Operability & scale: operator dashboard/SLOs/
   runbooks, run-status liveness + watchdog, store HA/poisoned-checkpoint recovery, multi-tenancy/fairness,
   HITL-load model, full monitors + sandboxed analyzer, five planes).
+
+## 2026-06-23 — EXIT: ALL 8 MILESTONES CLOSED; BUILD COMPLETE
+- Phases 0-6 (M0,M1,M1.5,M2,M3,M4,M5,M6) ALL implemented + closed with clean independent audits.
+- FINAL whole-system EXIT audit (fresh auditor, design-docs + code only): CLEAN PASS — all 8 areas
+  DELIVERED; dev-grade trust roots honestly scoped per §0.3; 3 MINOR deferred deployment concerns (no gaps).
+- Mutation bar MET: merge_gates (trust-critical admission) 85.2% kill (>=70 bar); T-TOOL-MUT RESOLVED (D7).
+- FINAL gate verification (clean): ruff clean, mypy clean (162 files), full suite green, coverage ~94.8%,
+  cli smoke `python -m foundry.cli` exit 0. Scale: 162 modules, 101 test files, ~34.9k LOC.
+- README + docs/usage.md (setup/run/deploy) written. 93/93 tasks done.
+- EXIT CONDITIONS MET.

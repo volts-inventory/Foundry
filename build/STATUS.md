@@ -1,21 +1,15 @@
-# STATUS — resume pointer (refreshed 2026-06-22)
+# STATUS — BUILD COMPLETE (EXIT)
 
-- **Milestones:** M0 done; M1 (Assistant slice), M1.5 (decision gate), M2 (Gated mode) — ALL closed
-  with CLEAN independent audits. M3 (Phase 3, Operability) implementation 12/13 done + reviewed CLEAN.
-- **Last gate baseline (committed HEAD 44f168e):** ruff ✓, mypy ✓ (129 files), full suite green,
-  coverage 94%, Assistant cli smoke exit 0. 129 modules / 63 test files / ~23.2k LOC.
-- **In flight:** T-M3-13 (Phase-3 exit integration test) — RE-DISPATCHED 06-22 after the prior agent
-  was lost to a container recycle (it writes ONLY tests/test_phase3_exit.py).
+- **ALL 8 milestones (Phases 0-6) closed with clean independent audits.** 93/93 tasks done.
+- **Final whole-system EXIT audit: CLEAN PASS** (3 MINOR deferred deployment concerns, no blocking gaps).
+- **Gates (clean checkout):** ruff ✓, mypy ✓ (162 files), full suite green, coverage ~94.8%, cli smoke exit 0.
+- **Mutation:** merge_gates 85.2% kill (>=70 bar met).
+- **Scale:** 162 foundry modules, 101 test files, ~34.9k LOC.
+- **Docs:** README + docs/usage.md (setup/run/deploy) written.
 
-## NEXT-ACTION (deterministic resume)
-1. If `tests/test_phase3_exit.py` is ABSENT and no T-M3-13 agent is live → RE-DISPATCH T-M3-13 (brief in REVIEW/PROGRESS).
-2. When it lands: commit it; then BATCH-FIX the 4 M3 MINORs (build/REVIEW.md M3-R1-01..04):
-   capacity.py (doc resume-gate deferral + unequal-weight starvation test), operator.py (distinct
-   count/ms SLO objective field + don't silently skip unknown SLO names), store_resilience.py (narrow
-   the bare except). One fresh fixer; re-verify.
-3. M3 milestone sweep (ruff/mypy/full suite/coverage>=80, scoped mutation deferred per D7), regenerate
-   CODEMAP, then dispatch the fresh Phase-3 independent AUDITOR (design-docs + code only). On CLEAN PASS close M3.
-4. Open M4 (Phase 4 Trust root & Autonomous mode): just-in-time planner (T-M4-PLAN) → two-zone trusted
-   runner hardening, hermetic SLSA-L3 build, deploy-time admission, input-bound attestations, trusted-
-   component HA+rotation; dev-grade roots per §0.3. Then M5 (specialists+domain packs), M6 (eval/opt/lifecycle).
-5. FINAL: full-system fresh audit + README/setup/run/deploy docs (Technical Writer) + EXIT report.
+## NEXT-ACTION
+NONE — the build is COMPLETE and the EXIT conditions are met. Remaining items are DISCLOSED, deferred
+PRODUCTION-DEPLOYMENT concerns (per implementation-plan §0.3), not build gaps:
+- in-memory dev persistence (HA Postgres/CAS is an ops task); proxy-egress content-redaction (data plane);
+  pinned-ID-drift live monitor wiring; real KMS/OIDC/hermetic-build/scanner(OPA/Semgrep/Syft)/OTel roots.
+- Optional nicety: expose Gated/Autonomous + pack selection as CLI flags (currently programmatic via build_factory_graph).

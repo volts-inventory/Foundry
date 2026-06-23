@@ -2886,3 +2886,33 @@ the REAL component (non-vacuous) and each paired with a control that DOES deploy
   reward-hack + eval-lie + nondeterminism flip safeties; determinism via `content_identity`; non-vacuity;
   read-only ledger; default real per-role validity path); full suite green. Touched ONLY
   `foundry/evaluation/factory_eval.py` + `tests/test_eval_factory_eval.py` + this note.
+- EV64. **`foundry/evaluation/replication_ab.py::run_replication_ab(frame, prereg, phase15_decision, *,
+  seed=0, ledger=None, estimation_core=None) -> ReplicationResult` (frozen) — the Phase-6 confirmatory A/B is
+  ESTIMATION/REPLICATION ONLY (§6.5).** Phase 1.5 is the SOLE arbiter that SPENT alpha; Phase 6 re-runs the
+  3-arm A/B on the scored slice to report an effect estimate + CI + whether it REPRODUCES the Phase-1.5
+  primary direction/decision — it is NOT a second gate and draws NO new alpha look. The cite-frozen-prereg
+  gate is FIRST (`assert_unmodified`, EV14), then the estimation core (defaults to `ab_runner.run_ab`,
+  reusing the paired-cluster-bootstrap machinery; `ab_runner.py` UNTOUCHED) produces the primary read.
+- EV65. **THE ALPHA-NOT-RE-SPENT INVARIANT (load-bearing) is enforced by a READ-ONLY `LedgerView` Protocol +
+  a before==after look-count assert.** Same pattern as EV60: `LedgerView` exposes ONLY `alpha_looks_spent`,
+  so `record_alpha_look`/`try_first_alpha_look` are STRUCTURALLY unreachable (not on the Protocol).
+  `run_replication_ab` reads `alpha_looks_spent((scored_eval_set_identity, decision_id))` (the SAME
+  Phase-1.5 ledger key, from the cited prereg) BEFORE and AFTER, and ASSERTS unchanged
+  (`AlphaReSpentError` fail-closed). `ReplicationResult` carries `is_estimation_only=True` +
+  `alpha_spent_delta=0` (both re-asserted in `model_post_init`); look counts are `None` without a ledger
+  (never a fabricated 0). Test: a spy ledger proves the write methods are never called; a ledger with the
+  Phase-1.5 look ALREADY drawn (freeze recorded it) stays at 1 across the replication.
+- EV66. **`reproduces_phase15(phase15_decision: DecisionRecord) -> bool` is a SELF-CONSISTENCY check vs the
+  Phase-1.5 `DecisionRecord`, not a fresh verdict (no alpha spent).** A PROCEED is reproduced iff the
+  replication is significant at the committed alpha in the SAME positive direction AND meets the committed
+  MDE; a non-PROCEED (HARD_KILL / a primary null) is reproduced iff the replication is likewise a null. A
+  Phase-6 DISCONFIRMATION (`reproduces=False`) is RECORDED but the Phase-1.5 decision object + ledger are
+  UNTOUCHED — it cannot un-spend the sunk cost of the machinery Phase 1.5 licensed (§6.5); a materially-
+  inconsistent read is an investigation trigger, not a back-door second gate. Exposed both as a method and a
+  module-level alias `reproduces_phase15(result, decision)`.
+- EV67. **Gates:** `ruff check foundry tests` + `mypy foundry` clean (156 source files); `pytest
+  test_eval_replication_ab` = 11 passed (winning reproduces PROCEED; null disconfirms PROCEED w/ Phase-1.5
+  unchanged; null reproduces KILL; winning disconfirms KILL; before==after look-count; spy-ledger no-write;
+  None look-counts; re-spend fails closed; tamper gate; determinism; default real `run_ab` path drives a
+  null→KILL reproduction with no alpha drawn); full suite 1460 passed/1 skipped. Touched ONLY
+  `foundry/evaluation/replication_ab.py` + `tests/test_eval_replication_ab.py` + this note.

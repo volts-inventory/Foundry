@@ -2325,3 +2325,49 @@ the REAL component (non-vacuous) and each paired with a control that DOES deploy
   Touched ONLY `foundry/graph/gate_wiring.py`, `foundry/graph/factory_graph.py`,
   `foundry/graph/supervisor.py`, `tests/test_phase4_exit.py`, this note. ruff (foundry tests) + mypy
   (135 files) clean; full suite 1148 passed / 1 skipped.
+
+## Domains — the DomainPackContract extension seam (T-M5-01)
+- DM1. **The seam lives in `foundry/domains/{contract,registry}.py` + `__init__.py` ONLY.** A domain
+  pack (regulated/ML/frontend — T-M5-05/06/07) is added with `registry.register(NewPack())` and routes
+  by capability — NO edit to contract.py/registry.py/core. That is the testable open/closed invariant:
+  the test defines a FRESH `BrandNewPack(BaseDomainPack)` class inline, registers it, and asserts it
+  routes + tightens with zero core change. T-M5-08 wires the registry into the graph.
+- DM2. **The 7 hooks are typed methods returning MONOTONE policy objects (frozen pydantic, L3), each
+  with a SAFE DEFAULT on `BaseDomainPack` (the no-op identity).** A pack overrides only what it tightens:
+  (1) `assign_verdict_class -> VerdictClassPolicy` (per-key class 1-5), (2) `state_inputs ->
+  StateInputPolicy` (data/feature/weight refs into `state_sha`), (3) `compute_budget -> ComputePolicy`
+  (expensive-gates + proxy/confirm + per-fix cap), (4) `mode_tier_policy -> ModeTierPolicy` (vetoed_modes
+  + min_tier + force_human/two_person Release), (5) `approver_of_record -> ApproverPolicy` (bound
+  artifact classes), (6) `egress_profile -> EgressPolicy` (no third-party model/trace egress / no PHI),
+  (7) `perceptual_hitl -> PerceptualHITLPolicy` (HITL-required caps + rendered evidence). All take an
+  advisory `request: Mapping` view; hooks are PURE (no I/O / state mutation). `DomainPackContract` is a
+  `@runtime_checkable Protocol`, so a pack need not subclass — but `BaseDomainPack` gives the defaults.
+- DM3. **Each policy is `tighten`/`relaxes`/`identity` — strictest-wins JOIN + a floor probe.** The
+  registry's `compose(request)` routes (intersect caps) then folds each hook through `tighten` (seeded
+  with identity, strictest-wins) into a `ComposedPolicy`. Two axis SHAPES: UNION/OR axes (vetoed_modes,
+  refs, gates, bound classes, egress flags, HITL caps) — the join only GROWS them, so they can NEVER
+  relax through composition (`relaxes` returns False; a relaxing override has NO EFFECT, the floor is
+  preserved); DISPLACING axes (min_tier picks stricter, per-fix cap picks lower, per-key verdict class
+  picks stricter) — a contribution SPECIFYING a strictly-weaker value than the composed floor is
+  REJECTED `TightenError` (`tighten_only`). So "a pack can only tighten" is enforced two ways: no-effect
+  on union axes, rejection on displacing axes.
+- DM4. **`_fold` is TWO-PASS for order-independence of BOTH the result AND the verdict.** Pass 1 joins
+  all contributions (commutative/associative/idempotent → order-free result). Pass 2 checks each
+  contribution against the FINAL composed floor (not a running one) — so a STANDARD-tier pack alongside a
+  HIGH-tier pack raises whichever registered first. **An identity contribution is a no-opinion no-op:
+  skipped without a relax check** (a pack tightening axis A while defaulting axis B must not trip B's
+  guard against a floor another pack raised on B). Corollary: the DISPLACING `relaxes` methods treat the
+  axis identity (min_tier=LOW, cap=None, empty verdict map) as no-opinion → never relaxes — needed so the
+  unit-level `identity().relaxes(strict_floor) is False` holds independent of the fold's skip.
+- DM5. **Mode veto = a permissiveness FLOOR, not a deletion.** `ModeTierPolicy.vetoed_modes` +
+  `allowed_modes(candidates)` make Autonomous/auto-approve-Assistant UNREACHABLE by union-growing the
+  veto set; the regulated pack pins min_tier=HIGH + force_human_release + two_person_release. Verdict
+  classes are ranked config<exec<statistical<perceptual<human-witnessed (strictest = a named human must
+  attest), so a pack reroutes a criterion to a STRICTER grounding but can never downgrade one.
+- DM6. **mypy: the strictest-wins fold needs PEP-695 self-bound generics.** `_fold[T: _Monotone[Any]]`
+  with `_Monotone[P](Protocol)` declaring `tighten(other: P) -> P` + `relaxes(floor: P) -> bool` types
+  the fold result as the concrete policy T (a plain `_Monotone[_P]` TypeVar made `compose` args
+  incompatible). Route input is `Mapping | Iterable[str]`; narrow with `isinstance(x, Mapping)` (a custom
+  `_is_mapping` helper does NOT narrow for mypy). Touched ONLY `foundry/domains/__init__.py`,
+  `contract.py`, `registry.py`, `tests/test_domains_contract.py`, this note. ruff (foundry tests) + mypy
+  (138 files) clean; suite 1172 passed / 1 skipped; 24 new tests.

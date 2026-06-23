@@ -1,6 +1,6 @@
 # CODEMAP — living index (regenerated each milestone)
 
-Regenerated 2026-06-22T21:24:34 — end of Phase 5 (M5, Specialist plugins + domain packs).
+Regenerated 2026-06-23T14:44:40 — end of Phase 6 (M6, Eval/optimization/lifecycle) — FINAL milestone.
 
 ## foundry/ packages
 ```
@@ -15,13 +15,14 @@ foundry/context/ (4 modules)
 foundry/domains/ (6 modules)
 foundry/domains/packs/ (4 modules)
 foundry/durability/ (6 modules)
-foundry/evaluation/ (11 modules)
+foundry/evaluation/ (21 modules)
 foundry/execution/ (3 modules)
 foundry/execution/adapters/ (4 modules)
 foundry/gates/ (11 modules)
 foundry/governance/ (6 modules)
 foundry/graph/ (7 modules)
 foundry/graph/subgraphs/ (6 modules)
+foundry/lifecycle/ (7 modules)
 foundry/monitors/ (10 modules)
 foundry/observability/ (3 modules)
 foundry/operations/ (9 modules)
@@ -31,10 +32,9 @@ foundry/schemas/ (10 modules)
 foundry/state/ (6 modules)
 foundry/trust_root/ (4 modules)
 ```
-## tests: 84 files | foundry: 145 modules, 28889 LOC | coverage 94%
-## Phase-5 domains (foundry/domains/): contract (7 tighten-only hooks) + registry (capability routing,
-   compose strictest-wins, open/closed register) + verdict_class (classes 1-5 fail-closed) + state_sha
-   (ML data/weight key + compute budget) + governance_hooks (mode/tier veto, approver, egress, perceptual
-   HITL); packs/{regulated (autonomous-vetoed+approver+class-4), ml_data (state_sha class-3+alpha+compute),
-   frontend (class-5 visual-HITL + sub-pixel envelope + WCAG)}. Engaged at triage via pack_registry; a new
-   pack adds via register() with zero core edits.
+## tests: 101 files | foundry: 162 modules, 34900 LOC | coverage 94.8%
+## Phase-6 (evaluation/ + lifecycle/): cost_model, suites/trajectory/integrity, agent_validity, safeties,
+   factory_eval (aggregator, fail-closed valid), replication_ab (confirmatory, alpha NOT re-spent),
+   scorecard (full headline, Holm secondaries, published+stable digest), optimization (Pareto-only);
+   lifecycle/{maintenance,provenance,feedback_loop,steering,modes,licensing}; red_team (probes real defenses).
+## Milestones M0-M6 (Phases 0-6) ALL implemented; M0-M5 closed with clean independent audits; M6 audit pending.

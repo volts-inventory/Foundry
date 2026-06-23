@@ -2501,7 +2501,7 @@
         "Tests added; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M6-06",

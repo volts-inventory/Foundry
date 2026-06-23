@@ -1353,7 +1353,7 @@
         "scoped mutation runs and reports a kill score on >=1 trust-critical module; >=70% or survivors justified in REVIEW.md"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "done"
     },
     {
       "id": "T-M3-01",
@@ -2197,7 +2197,7 @@
         "uv run pytest -q green; changed-scope coverage >= 85% local"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M5-05",

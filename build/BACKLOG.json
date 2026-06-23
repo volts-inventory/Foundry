@@ -2442,7 +2442,7 @@
         "FrozenModel outputs (L3); synthetic dry-run honesty flag; tests added; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M6-04",

@@ -2371,3 +2371,49 @@ the REAL component (non-vacuous) and each paired with a control that DOES deploy
   `_is_mapping` helper does NOT narrow for mypy). Touched ONLY `foundry/domains/__init__.py`,
   `contract.py`, `registry.py`, `tests/test_domains_contract.py`, this note. ruff (foundry tests) + mypy
   (138 files) clean; suite 1172 passed / 1 skipped; 24 new tests.
+- DM7. **ML state_sha data/weight binding + the compute budget (T-M5-03, domains.md §2-3).**
+  `foundry/domains/state_sha.py`: `ml_state_sha(base_tree_sha, *, data_refs, weight_refs, feature_defs,
+  require_binding=True)` folds a pack's content-identity refs onto the source-only `tree_sha` by REUSING
+  `foundry.state.tree_sha.state_sha` (base rides as `source_tree`; lockfile/toolchain are already in the
+  base so they pass fixed marker constants — the REF SETS are what re-key). A data/weight/feature change
+  → a different key → the cached class-3/ML verdict is invalidated (forced re-draw); same refs → same key
+  (deterministic; sort+dedup inherited from `state_sha`, so order/dup don't perturb). FAIL-CLOSED: a key
+  over ZERO refs IS the source-only tree_sha (reusable across a data change), so minting an *ML* key from
+  it raises `UnboundMLStateError` — an ML verdict must bind its data/weight. `ml_state_sha_from_policy(base,
+  StateInputPolicy)` keys off the composed `state_inputs` hook; `ml_verdict_rebinds(base, old=, new=)` is
+  the re-key-vs-cache-hit predicate (`require_binding=False` — it's a key COMPARISON, either side may be
+  empty). The compute-cost budget is the USD `BudgetController` ANALOGUE for an integer dimension DISTINCT
+  from micro-USD: `ComputeBudget(cap_units, per_gate_units, default_gate_units)` + `ComputeBudgetController`
+  with `authorize(gate)` (boundary decision, no commit — mirrors `authorize_superstep`) and `charge(gate)`
+  (books + FAILS CLOSED: raises `ComputeOverspendError` and books NOTHING when spent+charge>cap — the gate
+  pauses/escalates, no silent overspend). The ml/data pack (T-M5-06) keys its class-3 gate on `ml_state_sha`
+  and runs its expensive proxy/retrain gates under a `ComputeBudgetController`. Touched ONLY
+  `foundry/domains/state_sha.py` + `tests/test_domains_state_sha.py` + this note. ruff (foundry tests) clean;
+  `mypy foundry/domains/state_sha.py` clean (the `mypy foundry` error in the concurrently-authored sibling
+  `verdict_class.py` is not this task's file); 19 new tests green; full suite green (1 skipped).
+- DM8. **Verdict-class gate requirements — how a pack's assigned class 1-5 is ENFORCED (T-M5-02,
+  domains.md §1).** `foundry/domains/verdict_class.py`: `gate_requirements_for(VerdictClass) ->
+  GateRequirement` (pure, fixed per class) turns the composed `VerdictClassPolicy` assignment into the
+  gate-class-aware requirement the supervisor/gates enforce. Per class: **1/2 = MACHINE** (existing
+  zone-B re-derive / discriminator; pass-through, auto-approvable, in predicate); **3 = ALPHA_STATE_SHA**
+  (auto-approvable — runner re-derives, in predicate); **4 = APPROVER_OF_RECORD** (NOT auto-approvable,
+  HITL, in predicate); **5 = PERCEPTUAL_HITL** (NOT auto-approvable, HITL, EXCLUDED from the signed
+  predicate). `autonomous_reachable(vc)` is False ONLY for 4+5. **Class-3 fail-closed:**
+  `assert_class3_binds_ledger(Class3Binding|None, AlphaLedgerView)` REUSES the eval alpha-ledger
+  (`GlobalRecords.alpha_looks_spent` over `(eval_set_identity, decision_id)` — NOT state_sha) — raises
+  `InvalidClass3BindingError` unless the look is actually DRAWN in the ledger (frozen, not self-asserted)
+  AND a non-empty per-look `state_sha` is cited (a data/model change re-draws). I needed a local
+  `AlphaLedgerView` Protocol — `alpha_looks_spent` is on `GlobalRecords` but NOT the `GlobalRecordsView`
+  Protocol (which is the reducer-facing latch slice), so typing against the full view fails mypy. **Class 4
+  + 5** both REUSE `governance.sign_off.release_allowed` (same anchors: subject/state_sha/evidence_hash/
+  nonce): `class4_attested(...)` / `class5_hitl_satisfied(...)` are True ONLY with a recorded approved
+  sign-off binding the EXACT decision — a missing/None record is a BLOCK, never an auto-approve; a sign-off
+  over a different artifact/bundle/nonce never satisfies. **Higher-class-can't-be-satisfied-by-lower:**
+  `satisfies(required, gate_class)` is `_VERDICT_CLASS_STRICTNESS[gate] >= [required]` (reuses the
+  contract's SAME strictness order: config<execution<statistical<perceptual<human-witnessed) — a class-4
+  key is NOT satisfied by a green class-2 machine gate; a stricter gate satisfies a weaker requirement
+  (rerouting only tightens). The packs T-M5-05/06/07 ASSIGN classes via the contract; THIS enforces them
+  (T-M5-08 wires it at the gate seam). Touched ONLY `verdict_class.py` + `tests/test_domains_verdict_class.py`
+  + this note. ruff (foundry tests) clean; `mypy foundry/domains/verdict_class.py` clean; 24 new tests
+  green; full suite green (1240 passed / 1 skipped). NB: the pre-existing `mypy foundry` error is in the
+  concurrently-authored sibling `governance_hooks.py`, not this task's file.

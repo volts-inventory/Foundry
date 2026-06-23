@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
@@ -196,6 +196,7 @@ class ModelProviderProxy:
         signer: ZoneBSigner | None = None,
         *,
         profile: Literal["self_judge", "decorrelated"] = "self_judge",
+        tier_models: Mapping[str, str] | None = None,
         max_retries: int = 2,
         backoff_base_s: float = 0.5,
         sleeper: Callable[[float], None] = time.sleep,
@@ -207,6 +208,16 @@ class ModelProviderProxy:
         self._lineage = lineage_map or LineageMap()
         self._signer = signer
         self._profile = profile
+        # Tier -> pinned-model-id map. Defaults to the Anthropic lineage
+        # (TIER_MODELS) but is injectable so an alternative backend (Codex/
+        # Ollama-Gemma) can pin ITS real model ids — the flow is identical, the
+        # ids the proxy pins/observes/drift-checks against just change with the
+        # configured backend. Empty/unknown tiers still fail closed in complete().
+        self._tier_models: dict[str, str] = (
+            dict(tier_models) if tier_models is not None else dict(TIER_MODELS)
+        )
+        if not self._tier_models:
+            raise ValueError("tier_models must define at least one tier")
         self._retry = _RetryPolicy(max_retries, backoff_base_s, sleeper)
         self._max_tokens = max_tokens
         self._manifest: list[dict[str, Any]] = []  # append-only
@@ -221,6 +232,11 @@ class ModelProviderProxy:
     @property
     def lineage_map_revision(self) -> str:
         return self._lineage.revision
+
+    @property
+    def tier_models(self) -> dict[str, str]:
+        """The configured tier -> pinned-model-id map (read-only copy)."""
+        return dict(self._tier_models)
 
     @property
     def manifest(self) -> tuple[dict[str, Any], ...]:
@@ -270,9 +286,11 @@ class ModelProviderProxy:
         observe lineage → record manifest → return text/JSON + usage."""
         if purpose not in _PURPOSES:
             raise ValueError(f"unknown purpose: {purpose!r}")
-        if tier not in TIER_MODELS:
-            raise ValueError(f"unknown tier: {tier!r} (expected one of {sorted(TIER_MODELS)})")
-        requested_model = TIER_MODELS[tier]
+        if tier not in self._tier_models:
+            raise ValueError(
+                f"unknown tier: {tier!r} (expected one of {sorted(self._tier_models)})"
+            )
+        requested_model = self._tier_models[tier]
         request, sampling, sampling_note = self._build_request(
             requested_model, system_sop, messages, purpose, schema
         )

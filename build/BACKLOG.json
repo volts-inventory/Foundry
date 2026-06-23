@@ -2382,7 +2382,7 @@
         "Tests added (per-feature, non-token terms, A/B roll-up, cache-eviction re-warm); mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M6-02",

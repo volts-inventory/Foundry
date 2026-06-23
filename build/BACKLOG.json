@@ -60,7 +60,8 @@
       "id": "M6",
       "phase": "Phase 6 \u2014 Eval, optimization & lifecycle",
       "status": "in_progress",
-      "exit_criteria": "Scorecard published and stable; confirmatory A/B reproduces the Phase-1.5 result (estimation/replication only); optimization Pareto-improves >=1 headline metric with no regression in escaped-defects, cost, wall-clock, or policy compliance; product-feedback + maintenance/provenance loop."
+      "exit_criteria": "Scorecard published and stable; confirmatory A/B reproduces the Phase-1.5 result (estimation/replication only); optimization Pareto-improves >=1 headline metric with no regression in escaped-defects, cost, wall-clock, or policy compliance; product-feedback + maintenance/provenance loop.",
+      "note": "Decomposed by T-M6-PLAN into T-M6-01..T-M6-12 (the FINAL milestone). EXTEND the M1.5 evaluation/ slice + alpha look-ledger + cost/budget controllers \u2014 do NOT rebuild. Wave A (parallel foundation): cost_model (\u00a78 per-feature + A/B-scale, dominant non-token terms), suites/trajectory/integrity (\u00a73/\u00a75/\u00a76), agent_validity (\u00a74), safeties (\u00a710). Wave B: factory_eval aggregator \u2192 the Phase-6 confirmatory A/B (replication_ab, ESTIMATION/REPLICATION ONLY \u2014 asserts the Phase-1.5 alpha look-count is UNCHANGED, never calls record_alpha_look/try_first_alpha_look; Phase 1.5 is the sole arbiter) \u2192 full headline scorecard (scorecard.py extended, published+stable under FWER) \u2192 optimization (Pareto-improving ONLY, tiering a validated output, non-Pareto REJECTED). Wave C (new foundry/lifecycle/ package): maintenance+provenance (re-gate maintained change; provenance traces every released artifact to run/gates/evidence/WORM), feedback_loop+steering+modes+licensing (production signal\u2192backlog; steering-is-authorship; regulated forces Gated+; liability anchor). Wave D: red_team + cost/latency hardening, then the Phase-6 EXIT witness. Single-owner-per-wave: scorecard.py (T-M6-07), each new evaluation/* + lifecycle/* module disjoint; collision hazards (ab_runner/decision_table/supervisor/factory_graph/global_records/a given schema module) UNTOUCHED. Honest DRY-RUN on synthetic fixtures via MockTransport/StubAdapter + dev-grade roots \u2014 no real funded study; oracle-scored primary; self-judge never reported as independent validation."
     }
   ],
   "tasks": [
@@ -1330,7 +1331,7 @@
         "M6 decomposed into concrete tasks against the then-current tree, derived from implementation-plan \u00a77 Phase 6 + evaluation.md/lifecycle.md"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-TOOL-MUT",
@@ -2353,6 +2354,360 @@
       ],
       "retries_remaining": 3,
       "status": "done"
+    },
+    {
+      "id": "T-M6-01",
+      "milestone": "M6",
+      "title": "Per-feature + A/B-scale cost & wall-clock model (evaluation/cost_model.py)",
+      "job_to_be_done": "Build foundry/evaluation/cost_model.py (evaluation.md \u00a78): a frozen, deterministic cost model that enumerates per-feature cost (nodes \u00d7 loop iterations \u00d7 tokens/node \u00d7 tier price + analyzer sampled/event-triggered invocations + realized prompt-cache fraction PER NODE-TYPE incl. cache-TTL-eviction-on-pause re-warm) PLUS the dominant non-token terms (a) trusted-runner discriminator compute (mutant + perturbation family-size multiplier + ML eval-set re-run + synchronized mutant-rotation burst), (b) adapter inner-loop turns + CLI cold-start wall-clock, (c) mandatory second-family judging + reserved burst-failover, and rolls UP to the A/B scale (3 arms \u00d7 n \u00d7 k \u00d7 per-task long-horizon cost + the budgeted pilot line). Reports converged + worst-case-cascade cost, weighted over a change-size distribution against the risk-tiered pipeline. Reuses the existing cost_monitor/budget_controller signals \u2014 do NOT rebuild them; this is the MODEL, they are the runtime meters.",
+      "files_owned": [
+        "foundry/evaluation/cost_model.py",
+        "tests/test_eval_cost_model.py"
+      ],
+      "dependencies": [
+        "T-M6-PLAN"
+      ],
+      "role": "Stats/eval engineer",
+      "required_experts": [
+        "E5",
+        "E2"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "CostModel is a FrozenModel (extra=forbid, content_identity stable) reusing schemas base models per LEARNINGS L3; no parallel artifact type invented",
+        "Per-feature enumeration carries the four dominant non-token terms (a)-(d) of \u00a78 explicitly (discriminator runner-compute with the held-out mutant/perturbation family-size as an explicit multiplier; adapter inner-loop turns; mandatory second-family judging; per-node-type realized cache fraction + pause-eviction re-warm \u00d7 expected pause/resume cycles)",
+        "Reports BOTH a converged (no-rework) and a worst-case-cascade cost, weighted over a change-size distribution against the risk-tiered pipeline; monitor-overhead % is derived (if modeled >5% the target is raised, not detection throttled)",
+        "A/B-scale roll-up = 3 arms \u00d7 n \u00d7 k \u00d7 per-task cost (Foundry per-task higher) + the budgeted pilot line; n/k read from a pre-registration manifest, never hardcoded; reuses existing cost_monitor/budget_controller as inputs",
+        "Honesty: model records it is a DRY-RUN parameterization over synthetic fixtures, not a measured real study",
+        "Tests added (per-feature, non-token terms, A/B roll-up, cache-eviction re-warm); mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "in_progress"
+    },
+    {
+      "id": "T-M6-02",
+      "milestone": "M6",
+      "title": "Outcome-suite + trajectory + eval-integrity modules (evaluation/{suites,trajectory,integrity}.py)",
+      "job_to_be_done": "Build the deferred evaluation modules the M1.5 slice did not need: foundry/evaluation/suites.py (the golden / in-house-novel-headline / SWE-bench-relative / SWE-EVO suite identities + version-locking + the author-firewall + arm-independent difficulty-drift anchor of \u00a73), foundry/evaluation/trajectory.py (the \u00a75 trajectory metrics scored from OTel traces: tool-choice correctness, step/loop count, first-pass yield, rework loops/feature, policy-compliance rate, side-effect idempotency, escaped-defect rate cut by producing tier), and foundry/evaluation/integrity.py (the \u00a76 eval-integrity assertions: hidden-tests-unreachable, unconditional per-attempt ITT reporting, contamination/canary probes, coverage!=fidelity sample-audit). Deterministic over synthetic fixtures + the existing OTel/observability seam; no new statistics invented beyond \u00a73/\u00a75/\u00a76.",
+      "files_owned": [
+        "foundry/evaluation/suites.py",
+        "foundry/evaluation/trajectory.py",
+        "foundry/evaluation/integrity.py",
+        "tests/test_eval_suites.py",
+        "tests/test_eval_trajectory.py",
+        "tests/test_eval_integrity.py"
+      ],
+      "dependencies": [
+        "T-M6-PLAN"
+      ],
+      "role": "Stats/eval engineer",
+      "required_experts": [
+        "E5",
+        "E1"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "suites.py: suite identities are version-locked into a manifest hash (no live regeneration of a scored suite); difficulty-drift is anchored to an ARM-INDEPENDENT reference (static complexity features and/or a fixed non-arm reference solver), NEVER to the live baseline arm; author-firewall flag recorded",
+        "trajectory.py emits the \u00a75 metrics incl. escaped-defect rate CUT BY PRODUCING TIER and side-effect idempotency (replay/resume \u2192 no duplicate PR/tag/deploy), scored deterministically from the existing OTel/observability traces",
+        "integrity.py asserts hidden tests are runtime-unreachable, reports hidden-test pass rate UNCONDITIONALLY per attempt (ITT; the conditional 'of self-passing' figure is descriptive-only \u2014 collider bias forbidden), and runs contamination/canary probes",
+        "All FrozenModel outputs (L3); honesty flag records synthetic dry-run inputs",
+        "Tests added for each module; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "in_progress"
+    },
+    {
+      "id": "T-M6-03",
+      "milestone": "M6",
+      "title": "Agent-specific validity evals (evaluation/agent_validity.py)",
+      "job_to_be_done": "Build foundry/evaluation/agent_validity.py (evaluation.md \u00a74): the agent-specific validity metrics generalist evals miss \u2014 judge\u2194implementer error correlation + self-preference probe (does a judge favor its own model family?; a first-class scorecard metric, with high-risk criteria requiring a SECOND model family or cross-family disagreement trigger), criterion fidelity over an independently-authored cross-family mutant family that clears the \u00a74 adequacy/diversity floor + behavioral-invariance, handoff fidelity (injected requirements surviving to Test-gate tests), retrieval recall (mechanical + human-labeled floors), constraint-scoping recall, and analyzer precision/recall incl. the UNTRIGGERED held-out set. Reuses the existing discriminator/guardian/retriever seams over synthetic fixtures \u2014 measure, don't rebuild.",
+      "files_owned": [
+        "foundry/evaluation/agent_validity.py",
+        "tests/test_eval_agent_validity.py"
+      ],
+      "dependencies": [
+        "T-M6-PLAN"
+      ],
+      "role": "Stats/eval engineer",
+      "required_experts": [
+        "E5",
+        "E4"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "Self-preference is a first-class metric: an explicit probe for whether a judge favors its own model family; high-risk criteria require a genuinely-different-family judge (Claude tiers are NOT different families) or a cross-family-disagreement trigger",
+        "Criterion fidelity runs the bound test against a cross-family, independently-authored mutant FAMILY that clears the \u00a74 adequacy/diversity floor (>= a minimum number of distinct fault classes) AND enforces behavioral-invariance (PASS survives behavior-preserving perturbations, FAILs across the mutant family) \u2014 a single mutant never 'proves' intent",
+        "Handoff fidelity, retrieval recall (mechanical + human-labeled, each with its own floor), constraint-scoping recall, and analyzer precision/recall on an UNTRIGGERED held-out set are all reported",
+        "Reuses existing discriminator/guardian/retriever components; no LLM-judge signal is allowed to enter any A/B PRIMARY verdict (oracle-only, asserted)",
+        "FrozenModel outputs (L3); synthetic dry-run honesty flag; tests added; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "in_progress"
+    },
+    {
+      "id": "T-M6-04",
+      "milestone": "M6",
+      "title": "Eval safeties \u2014 reward-hacking / eval-lie / nondeterminism guards (evaluation/safeties.py)",
+      "job_to_be_done": "Build foundry/evaluation/safeties.py (evaluation.md \u00a710 'what we explicitly watch for'): the fail-closed safety checks over the eval itself \u2014 reward-hacking detection (weakened oracle/scanner-config/criteria edits caught by deterministic oracle/config-edit monitors + cross-family authorship separation + mutation testing), correlated-judge-failure detection (\u00a74 correlation/self-preference), eval-lie detection (contamination probes, runtime-unreachable hidden tests, relative-not-absolute A/B framing), and nondeterminism control (k-run averaging, recorded seeds/model-fingerprints, pinned-ID-drift). Reuses the existing oracle_monitor/policy_monitor/pinned_id_drift_monitor seams \u2014 compose them into eval-scope safeties, don't reimplement.",
+      "files_owned": [
+        "foundry/evaluation/safeties.py",
+        "tests/test_eval_safeties.py"
+      ],
+      "dependencies": [
+        "T-M6-PLAN"
+      ],
+      "role": "Security/trust-root engineer",
+      "required_experts": [
+        "E3",
+        "E5"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "Reward-hacking guard composes the existing deterministic oracle_monitor/policy_monitor (weakened-oracle / scanner-config / criteria edits) + cross-family-authorship separation + mutation-testing signal; a weakened-oracle edit is CAUGHT (fail-closed)",
+        "Correlated-judge-failure and eval-lie (contamination/canary, hidden-test-unreachable, relative-not-absolute framing) checks present and unit-tested",
+        "Nondeterminism control: k-run averaging + recorded seeds/model-fingerprints + pinned-ID-drift surfaced (reuses pinned_id_drift_monitor)",
+        "Safeties are fail-closed (a tripped safety BLOCKS the scorecard/optimization from publishing/promoting) and emit FrozenModel records (L3)",
+        "Tests added incl. a tripped-safety blocks-publish path; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "in_progress"
+    },
+    {
+      "id": "T-M6-05",
+      "milestone": "M6",
+      "title": "factory_eval orchestrator (evaluation/factory_eval.py) \u2014 the self-eval entry point",
+      "job_to_be_done": "Build foundry/evaluation/factory_eval.py: the single orchestrator that runs Foundry's eval OF ITSELF (the 'factory eval', explicitly NOT the product's own shipped eval) over synthetic fixtures \u2014 composing the suites/trajectory/integrity (T-M6-02), agent-validity (T-M6-03), safeties (T-M6-04), and cost model (T-M6-01) into one frozen FactoryEvalResult the headline scorecard + optimization consume. It runs the existing harness.run_arm over the existing test doubles, binds to the existing global_records ledger READ-ONLY, and never re-spends alpha. This is the assembly layer the M1.5 slice deferred; it CONSUMES the M1.5 ab_runner/decision artifacts, recomputing no statistics.",
+      "files_owned": [
+        "foundry/evaluation/factory_eval.py",
+        "tests/test_eval_factory_eval.py"
+      ],
+      "dependencies": [
+        "T-M6-01",
+        "T-M6-02",
+        "T-M6-03",
+        "T-M6-04"
+      ],
+      "role": "Stats/eval engineer",
+      "required_experts": [
+        "E5",
+        "E1"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "factory_eval composes cost_model + suites + trajectory + integrity + agent_validity + safeties into ONE frozen FactoryEvalResult; it runs the EXISTING harness.run_arm over MockTransport/StubAdapter (no live key, no claude -p)",
+        "It is the FACTORY self-eval, explicitly distinct from a delivered product's own shipped eval suite (documented; not conflated)",
+        "It binds the global_records alpha ledger READ-ONLY (calls alpha_looks_spent, NEVER record_alpha_look/try_first_alpha_look); a tripped safety blocks completion fail-closed",
+        "Recomputes no \u00a72 confirmatory statistic \u2014 consumes ABResult/DecisionRecord as authoritative; honesty banner states DRY-RUN-on-synthetic-fixtures",
+        "Tests added; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M6-06",
+      "milestone": "M6",
+      "title": "Phase-6 confirmatory A/B (estimation/replication ONLY \u2014 alpha NOT re-spent)",
+      "job_to_be_done": "Build foundry/evaluation/replication_ab.py: the Phase-6 confirmatory A/B that REPRODUCES the Phase-1.5 result as ESTIMATION/REPLICATION ONLY (evaluation.md \u00a76.5; roadmap Phase 6). It reuses the existing ab_runner over the scored slice but is HARD-WIRED so it cannot spend alpha: it asserts the Phase-1.5 (eval_set_identity, decision_id) ALREADY drew its single look (via alpha_looks_spent), runs under a DISTINCT replication decision_id that is NEVER recorded as an alpha look, reports an effect ESTIMATE + CI (no significant_at_alpha gate), and reproduces the Phase-1.5 verdict. A material inconsistency (CI excludes the Phase-1.5 effect) raises an INVESTIGATION/reconciliation flag \u2014 it does NOT gate the Autonomous claim. Single-owner new module; does NOT edit ab_runner.py/decision_table.py.",
+      "files_owned": [
+        "foundry/evaluation/replication_ab.py",
+        "tests/test_eval_replication_ab.py"
+      ],
+      "dependencies": [
+        "T-M6-05"
+      ],
+      "role": "Stats/eval engineer",
+      "required_experts": [
+        "E5"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "EXIT: the Phase-6 A/B reproduces the Phase-1.5 decision/effect on the synthetic fixtures and asserts replication (CI overlaps the Phase-1.5 effect)",
+        "ALPHA-NOT-RE-SPENT (load-bearing): the run calls alpha_looks_spent to confirm Phase 1.5 already drew, runs under a DISTINCT replication decision_id, and a test proves it NEVER calls record_alpha_look/try_first_alpha_look \u2014 the global alpha ledger look-count for the Phase-1.5 (eval_set_identity, decision_id) is UNCHANGED before vs after",
+        "It is estimation-only: it reports effect + CI and exposes NO significant_at_alpha / pass-fail gate; a material inconsistency raises an INVESTIGATION flag and does NOT block/gate the Autonomous claim (\u00a76.5)",
+        "Cites the frozen Phase-1.5 pre-registration via assert_unmodified and fails closed on tamper; reuses ab_runner (no duplicate graph wiring), edits neither ab_runner.py nor decision_table.py",
+        "Tests added incl. the alpha-unchanged + replication + inconsistency-flag paths; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M6-07",
+      "milestone": "M6",
+      "title": "Full headline scorecard \u2014 published + stable under Holm\u2013Bonferroni (extend scorecard.py)",
+      "job_to_be_done": "Extend foundry/evaluation/scorecard.py from the M1.5 decision-gate slice to the FULL headline scorecard (evaluation.md \u00a77): the one confirmatory primary PLUS the full secondary/descriptive family (novel-suite resolution, unconditional hidden-test ITT, judge\u2194implementer correlation/self-preference, handoff fidelity, first-pass yield, escaped-defect rate by tier, cost-per-feature + wall-clock vs the cost model, criterion fidelity, human-decisions per feature, wall-clock per tier) \u2014 each gating secondary carried under the pre-registered FWER correction (studentized step-down max-T with the \u00a72 sparse-count SE-floor, OR Holm\u2013Bonferroni stated conservative). It CONSUMES the FactoryEvalResult + cost model + replication estimate; recomputes no confirmatory statistic. 'Published + stable' = a content-addressed render that is byte-stable across re-render of the same inputs. Sole owner of scorecard.py.",
+      "files_owned": [
+        "foundry/evaluation/scorecard.py",
+        "tests/test_eval_scorecard_headline.py"
+      ],
+      "dependencies": [
+        "T-M6-05",
+        "T-M6-06"
+      ],
+      "role": "Stats/eval engineer",
+      "required_experts": [
+        "E5"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "EXIT: the full headline scorecard is PUBLISHED (content-addressed render of all \u00a77 rows) and STABLE (byte-identical re-render for identical inputs; a stability test asserts it)",
+        "Exactly ONE row is the confirmatory primary (carrying the Phase-1.5 alpha, not a new one); every gating secondary is corrected under the pre-registered FWER procedure (studentized step-down max-T with the sparse-count SE-floor, OR Holm\u2013Bonferroni with the conservative-on-correlated-endpoints note) \u2014 no implicit-OR over thresholds",
+        "Cost/wall-clock/human-intervention/escaped-defects are read TOGETHER (the system cannot 'win' by cutting corners); hidden-test rate is the UNCONDITIONAL ITT rate",
+        "Backward-compatible: the existing M1.5 decision-gate-slice rendering + tests stay green (append/extend, no destructive edit); the replication estimate is shown as estimation, not a second gate",
+        "Honesty banner retained (DRY-RUN on synthetic fixtures); tests added; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M6-08",
+      "milestone": "M6",
+      "title": "Constrained workflow optimization \u2014 Pareto-improving only (evaluation/optimization.py)",
+      "job_to_be_done": "Build foundry/evaluation/optimization.py (evaluation.md \u00a79): the offline, budgeted optimizer over the search space (prompt/SOP variants per role, model-tier assignment per node WITH TIERING AS A VALIDATED OUTPUT \u2014 high-risk implementation + oracle-authoring default to T1 until data says otherwise, graph-topology toggles, retry/convergence caps, and the role set itself as an ablation variable). Objective: maximize novel + SWE-EVO resolution SUBJECT TO no regression in escaped-defects / cost / wall-clock / policy-compliance. Method: evaluate candidates on held-out rotations via factory_eval, PROMOTE ONLY Pareto-improving configs, record the winner in the manifest. Fail-closed: a non-Pareto candidate (any regression in a constrained metric) is REJECTED. Reads the headline scorecard + cost model as the objective/constraint signals.",
+      "files_owned": [
+        "foundry/evaluation/optimization.py",
+        "tests/test_eval_optimization.py"
+      ],
+      "dependencies": [
+        "T-M6-07"
+      ],
+      "role": "Stats/eval engineer",
+      "required_experts": [
+        "E5",
+        "E1"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "EXIT: an optimization candidate that improves >=1 headline metric with NO regression in escaped-defects, cost, wall-clock, or policy-compliance is PROMOTED and recorded in the manifest as the winner",
+        "PARETO FAIL-CLOSED: a non-Pareto candidate (gains one metric but regresses any constrained metric) is REJECTED \u2014 a unit test proves the rejection",
+        "Tiering is a VALIDATED OUTPUT, not an intuition: per-node tier assignment is searched, with high-risk implementation + oracle-authoring defaulting to T1 until the data justifies otherwise; role-count is an explicit ablation variable",
+        "Candidates are scored on novel + SWE-EVO HELD-OUT rotations (not the training slice) via factory_eval; the search is itself budgeted and runs offline; objective/constraints read from the headline scorecard + cost model",
+        "FrozenModel manifest output (L3); honesty flag (synthetic dry-run); tests added; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M6-09",
+      "milestone": "M6",
+      "title": "Lifecycle: generated-code maintenance + provenance (lifecycle/{__init__,maintenance,provenance}.py)",
+      "job_to_be_done": "Create the foundry/lifecycle/ package and build maintenance.py + provenance.py (lifecycle.md \u00a71/\u00a75). maintenance.py: a maintained change is RE-VERIFIED + RE-GATED change-proportionally (reusing the existing dependency-scoped re-verification + tiering), and the periodic architecture-review pass consolidates/prunes the pinned_constraints/ADR set via supersession (incl. the frontend-rot dimension: component duplication/complexity, design-token drift, a11y) \u2014 plus 'human takeover always possible' (output is ordinary VCS source, no Foundry-only lock-in). provenance.py: EVERY released artifact traces to its run / gates / evidence pack / WORM chain, AI contribution is recorded in SLSA metadata, and the generated-code regurgitation/copyleft similarity scan (runner-computed, Security/Audit class) flags matches to HITL. Reuses durability/evidence_pack + outbox WORM + sign_off + reverification \u2014 EXTEND, don't rebuild.",
+      "files_owned": [
+        "foundry/lifecycle/__init__.py",
+        "foundry/lifecycle/maintenance.py",
+        "foundry/lifecycle/provenance.py",
+        "tests/test_lifecycle_maintenance.py",
+        "tests/test_lifecycle_provenance.py"
+      ],
+      "dependencies": [
+        "T-M6-PLAN"
+      ],
+      "role": "Durability engineer",
+      "required_experts": [
+        "E2",
+        "E3"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "EXIT: provenance traces EVERY released artifact back to its run, gates, evidence pack, and WORM hash chain; a released artifact with no traceable run/gates is REJECTED fail-closed",
+        "A maintained (evolution-route) change is RE-VERIFIED + RE-GATED change-proportionally via the EXISTING dependency-scoped re-verification + tiering (not a full re-run); supersession retires stale ADRs/pinned constraints rather than accreting",
+        "Generated-code provenance scan flags verbatim/near-verbatim regurgitation + copyleft-snippet contamination to HITL; AI contribution recorded in SLSA/provenance metadata; human-takeover guarantee asserted (ordinary VCS source, no Foundry-only representation)",
+        "Reuses durability/evidence_pack + outbox WORM + governance/sign_off + graph/reverification (extend, not rebuild); FrozenModel records (L3)",
+        "Tests added (provenance-traces-everything, untraceable-artifact-rejected, re-gate-on-maintenance); mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M6-10",
+      "milestone": "M6",
+      "title": "Lifecycle: product-feedback loop + steering + modes + licensing (lifecycle/{feedback_loop,steering,modes,licensing}.py)",
+      "job_to_be_done": "Build the remaining foundry/lifecycle/ modules (lifecycle.md \u00a72/\u00a73/\u00a74/\u00a75). feedback_loop.py: production telemetry (regressions, unused features, perf hotspots; ML data-drift/metric-decay/retraining triggers, model-vs-code rollback to a prior attested state) feeds NEW evolution-route requests \u2014 the production signal \u2192 backlog loop. steering.py: a first-class mid-run steering channel that updates PRD/pinned_constraints + re-plans (distinct from a binary gate), where STEERING IS AUTHORSHIP \u2014 a steerer enters the artifact author set and by 'author != approver' CANNOT be the release/admission approver (across runs, for blessed taste constraints too). modes.py: the Assistant/Gated/Autonomous deployment-trust table + 'regulated work is Gated-or-higher; Assistant-mode merge of a regulated artifact is FORBIDDEN'. licensing.py: output license hygiene + the Autonomous-mode liability/accountability anchor (Release/Admission human sign-off). Reuses sign_off/authorization segregation-of-duties + domains pack veto + MODE_* \u2014 extend, don't rebuild.",
+      "files_owned": [
+        "foundry/lifecycle/feedback_loop.py",
+        "foundry/lifecycle/steering.py",
+        "foundry/lifecycle/modes.py",
+        "foundry/lifecycle/licensing.py",
+        "tests/test_lifecycle_feedback_loop.py",
+        "tests/test_lifecycle_steering.py",
+        "tests/test_lifecycle_modes.py"
+      ],
+      "dependencies": [
+        "T-M6-09"
+      ],
+      "role": "LLM-application/agent engineer",
+      "required_experts": [
+        "E4",
+        "E3"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "EXIT: the product-feedback loop turns a production signal (regression/unused-feature/perf-hotspot; ML drift/decay/retrain trigger) into a NEW evolution-route backlog request; ML rollback is model-vs-code (revert a weight ref behind an unchanged code digest = a prior attested STATE)",
+        "Steering is AUTHORSHIP not approval: a mid-run steerer is recorded in the artifact author set and the 'approver \u2209 author set' distinctness check REJECTS that identity as release/admission approver \u2014 including a later artifact grounded in a blessed taste constraint (cross-run); reuses governance segregation-of-duties + sign_off",
+        "modes.py forbids Assistant-mode merge of a regulated artifact (forces Gated-or-higher via the existing mode/tier veto); perceptual class-5 verdicts remain mandatory/non-auto-approvable",
+        "licensing.py records output license hygiene + names the Release/Admission human sign-off as the Autonomous-mode accountability anchor",
+        "Reuses governance/sign_off + policy/authorization + domains veto + MODE_* (extend, not rebuild); FrozenModel records (L3); tests added; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M6-11",
+      "milestone": "M6",
+      "title": "Red-team harness + cost/latency hardening against the cost model",
+      "job_to_be_done": "Build foundry/evaluation/red_team.py: an adversarial-probe harness sweeping the system end-to-end (malicious test, forged results/verdict, fork-divergence, prompt-injection-of-the-monitor, reward-hacking/weakened-oracle, eval-contamination probes) asserting each is CAUGHT fail-closed \u2014 reusing the existing trust-root/discriminator/gate-runner/safeties seams as the things-under-test. Plus cost/latency hardening: measure realized per-feature + A/B-scale cost/wall-clock against T-M6-01's cost model and assert the realized figures fall within the modeled envelope (monitor overhead <= the modeled bound, else the target is raised honestly, detection not throttled). New single-owner module; exercises the wired graph via test doubles, does NOT edit trust_root/gates internals.",
+      "files_owned": [
+        "foundry/evaluation/red_team.py",
+        "tests/test_eval_red_team.py"
+      ],
+      "dependencies": [
+        "T-M6-08",
+        "T-M6-04"
+      ],
+      "role": "Security/trust-root engineer",
+      "required_experts": [
+        "E3",
+        "E5"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "Red-team sweep probes malicious-test / forged-results / forged-verdict / fork-divergence / prompt-injection-of-the-monitor / weakened-oracle / contamination and asserts EACH is CAUGHT fail-closed (reuses the existing trust-root/discriminator/gate-runner/safeties as the system-under-test, no rebuild)",
+        "Cost/latency hardening: realized per-feature + A/B-scale cost/wall-clock are measured against T-M6-01's cost model and asserted within the modeled envelope; modeled monitor overhead >5% raises the target honestly (detection never throttled)",
+        "Probes run over MockTransport/StubAdapter + dev-grade roots (no live key); honesty: dev-grade roots stamped, never overclaimed as production hardening",
+        "FrozenModel result records (L3); does not edit trust_root/* or gates/* internals; tests added; mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M6-12",
+      "milestone": "M6",
+      "title": "Phase-6 EXIT integration test \u2014 the FINAL milestone witness (honest audit map)",
+      "job_to_be_done": "Add tests/test_phase6_exit.py: the milestone witness wiring the whole Phase-6 surface end-to-end on synthetic fixtures with the existing test doubles, asserting ALL four roadmap exit criteria as concrete, testable invariants and the cross-cutting honesty discipline. No feature code lives here \u2014 it is the integration/honesty audit only, and it is the LAST task before program EXIT.",
+      "files_owned": [
+        "tests/test_phase6_exit.py"
+      ],
+      "dependencies": [
+        "T-M6-07",
+        "T-M6-08",
+        "T-M6-09",
+        "T-M6-10",
+        "T-M6-11"
+      ],
+      "role": "QA / eval engineer",
+      "required_experts": [
+        "E5",
+        "E1"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "EXIT-1: the full headline scorecard is PUBLISHED + STABLE (byte-identical re-render for identical inputs)",
+        "EXIT-2: the Phase-6 A/B REPRODUCES the Phase-1.5 result AND the global alpha ledger look-count for the Phase-1.5 (eval_set_identity, decision_id) is UNCHANGED across the Phase-6 run (alpha NOT re-spent; estimation/replication only)",
+        "EXIT-3: the optimization Pareto-IMPROVES >=1 headline metric with NO regression in escaped-defects/cost/wall-clock/policy-compliance, AND a non-Pareto candidate is REJECTED",
+        "EXIT-4: the product-feedback + maintenance/provenance loop works end-to-end \u2014 a production signal becomes an evolution request, a maintained change is re-gated, and provenance traces every released artifact to its run/gates/evidence",
+        "Asserts the honesty discipline throughout (DRY-RUN on synthetic fixtures, no real funded study; oracle-scored primary; self-judge never reported as independent validation); runs with MockTransport/StubAdapter (no live key, no claude -p); milestone gate sweep green (ruff, mypy foundry, full pytest, coverage); mypy foundry + ruff clean"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
     }
   ]
 }

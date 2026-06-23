@@ -55,6 +55,13 @@ FOUNDRY_MSGPACK_MODULES: list[tuple[str, str]] = [
     ("foundry.schemas.security", "SBOMRef"),
     ("foundry.schemas.security", "AuditFinding"),
     ("foundry.schemas.security", "Severity"),
+    # Agent-authored release-doc bodies (foundry/docs/writers.py), emitted as
+    # content-addressed artifacts like every other stage's output.
+    ("foundry.schemas.docs", "Runbook"),
+    ("foundry.schemas.docs", "KnownIssue"),
+    ("foundry.schemas.docs", "KnownIssues"),
+    ("foundry.schemas.docs", "UpgradeGuide"),
+    ("foundry.schemas.docs", "PerfCostReport"),
 ]
 
 

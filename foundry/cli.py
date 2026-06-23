@@ -165,6 +165,39 @@ _SDET_PAYLOAD: dict[str, Any] = {
     "quarantined": [],
 }
 
+_RUNBOOK_PAYLOAD: dict[str, Any] = {
+    "overview": "Operational guide for deploying and running the service.",
+    "prerequisites": ["provisioned runtime", "configured secrets"],
+    "deploy_steps": ["build artifact", "run gates", "promote to prod"],
+    "rollback_steps": ["re-point to previous artifact digest", "verify health"],
+    "health_checks": ["GET /healthz returns 200"],
+    "monitoring": ["error rate", "p99 latency"],
+    "oncall_escalation": ["page primary on-call after 5m of failing health checks"],
+}
+_KNOWN_ISSUES_PAYLOAD: dict[str, Any] = {
+    "issues": [
+        {
+            "summary": "Dev-grade in-memory persistence",
+            "impact": "State is lost on restart",
+            "workaround": "Wire a durable store before production",
+            "severity": "medium",
+        }
+    ],
+    "limitations": ["single-region deployment assumed"],
+}
+_UPGRADE_PAYLOAD: dict[str, Any] = {
+    "from_version": "0.0.0",
+    "to_version": "0.1.0",
+    "breaking_changes": [],
+    "migration_steps": ["no migration required for the initial release"],
+    "rollback_notes": "Re-deploy the previous artifact digest.",
+}
+_PERF_COST_PAYLOAD: dict[str, Any] = {
+    "summary": "Build completed within the configured budget.",
+    "observations": ["most tokens were spent in the architecture and quality stages"],
+    "recommendations": ["enable prompt caching on the stable SOP prefixes"],
+}
+
 _SCRIPTS: dict[str, str] = {
     "Stakeholder / Client Proxy": json.dumps(_INTENT_PAYLOAD),
     "Product Manager": json.dumps(_PRD_PAYLOAD),
@@ -174,6 +207,11 @@ _SCRIPTS: dict[str, str] = {
     "Senior Engineer": json.dumps(_DECOMPOSITION_PAYLOAD),
     "QA Engineer": json.dumps(_QA_PAYLOAD),
     "SDET": json.dumps(_SDET_PAYLOAD),
+    # Technical Writer (foundry/docs) authored docs.
+    "OPERATIONAL RUNBOOK": json.dumps(_RUNBOOK_PAYLOAD),
+    "KNOWN-ISSUES": json.dumps(_KNOWN_ISSUES_PAYLOAD),
+    "UPGRADE / MIGRATION GUIDE": json.dumps(_UPGRADE_PAYLOAD),
+    "PERFORMANCE & COST": json.dumps(_PERF_COST_PAYLOAD),
 }
 
 
@@ -263,6 +301,8 @@ class RunResult:
     open_pr_payload_uri: str | None
     gate_statuses: dict[str, GateStatus]
     """Newest-by-name attested status per gate (spec / build / test / review...)."""
+    doc_root: str | None = None
+    """Where the per-build documentation set was written (when ``docs_dir`` set)."""
 
     def summary(self) -> str:
         """A concise human-readable report of the run (printed by ``main``)."""
@@ -283,6 +323,8 @@ class RunResult:
             lines.append(f"  payload_uri:     {self.open_pr_payload_uri}")
         else:
             lines.append("no open_pr action emitted (gates did not all PASS).")
+        if self.doc_root:
+            lines.append(f"documentation set written to: {self.doc_root}")
         return "\n".join(lines)
 
 
@@ -297,6 +339,7 @@ def run(
     resolve_blob: BlobResolver | None = None,
     diff_body: str = _PASSING_DIFF,
     max_fix_attempts: int = 3,
+    docs_dir: str | None = None,
 ) -> RunResult:
     """Run ``request`` end-to-end through the compiled factory graph (smoke path).
 
@@ -366,7 +409,31 @@ def run(
             reset_gate_write_verifier(token)
             ckpt.close()
 
-    return _result(request, thread_id, cast("FactoryState", final))
+    final_state = cast("FactoryState", final)
+    result = _result(request, thread_id, final_state)
+    if docs_dir is not None:
+        # Assemble the company-shaped documentation set + BUILD-MANIFEST. The
+        # Technical Writer authors the runbook/known-issues/upgrade/perf-cost
+        # docs through the SAME proxy (backend-swappable); rt.cas resolves the
+        # upstream artifact bodies. Best-effort — never alters the gate verdict.
+        from dataclasses import replace
+
+        from foundry.docs import assemble_documentation
+
+        try:
+            assemble_documentation(
+                request=request,
+                thread_id=thread_id,
+                state=final_state,
+                rt=rt,
+                passed=result.passed,
+                phase=result.phase,
+                write_to=docs_dir,
+            )
+            result = replace(result, doc_root=docs_dir)
+        except Exception as exc:
+            print(f"warning: documentation assembly failed: {exc}", file=sys.stderr)
+    return result
 
 
 def _result(request: str, thread_id: str, final: FactoryState) -> RunResult:
@@ -404,15 +471,25 @@ def main(argv: list[str] | None = None) -> int:
     emitted), 1 on a halted/failed run, 2 on a usage error.
     """
     args = sys.argv[1:] if argv is None else argv
+    docs_dir: str | None = None
+    if "--docs" in args:
+        i = args.index("--docs")
+        if i + 1 >= len(args):
+            print("error: --docs requires a directory argument", file=sys.stderr)
+            return 2
+        docs_dir = args[i + 1]
+        args = args[:i] + args[i + 2 :]
     if not args:
-        print('usage: python -m foundry.cli "<one-line request>"', file=sys.stderr)
+        print(
+            'usage: python -m foundry.cli [--docs DIR] "<one-line request>"', file=sys.stderr
+        )
         return 2
     request = " ".join(args).strip()
     if not request:
         print("error: request must be non-empty", file=sys.stderr)
         return 2
 
-    result = run(request)
+    result = run(request, docs_dir=docs_dir)
     print(result.summary())
     return 0 if result.passed else 1
 

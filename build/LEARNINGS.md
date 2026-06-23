@@ -2850,6 +2850,53 @@ the REAL component (non-vacuous) and each paired with a control that DOES deploy
   Gates: `ruff check foundry tests` + `mypy foundry` clean; `pytest test_lifecycle_{maintenance,provenance}`
   = 21 passed (9+12); full suite 1438 passed / 1 skipped.
 
+## Lifecycle — feedback loop + steering + trust modes + licensing (T-M6-10)
+- LC7. **The product-feedback loop RE-ENTERS via the maintenance re-gate path — it never bypasses the gates.**
+  `feedback_to_backlog(ProductSignal) -> BacklogItem` (pure) links the signal to the affected released
+  artifact's provenance (`prior_subject_uri` = the maintenance-chain anchor consumed by
+  `maintenance.plan_maintenance`; `provenance_uri` = the `ProvenanceRecord` handle) and routes it to the
+  SINGLE `MAINTENANCE_ROUTE` with `re_gate_required=True` ALWAYS — a backlog item cannot opt out of the
+  re-gate. A `SignalKind.REGRESSION` additionally sets `is_regression` (the canonical "re-prove it" trigger),
+  but the re-gate requirement is universal across every kind. `reenters_via_regate()` is the loop-validity
+  self-check (route==maintenance AND re_gate_required). Closed loop: signal → backlog → maintain (re-verify
+  change-proportional + re-gate + re-admit) → re-gated release. NO new `BacklogItem` schema existed; I defined
+  my own frozen models (ambiguity resolved: `schemas/operations.py` "backlog" refers to the HITL reviewer
+  queue, unrelated).
+- LC8. **Steering is TIGHTEN-ONLY: human directives become PINNED CONSTRAINTS injected verbatim, never
+  relaxing the floor.** `steering_constraints(directives, *, existing=(), seq) -> tuple[PinnedConstraint,...]`
+  emits one `PinnedConstraint` per ADMITTED directive (`text` VERBATIM per arch §8; `source=f"human-steering:
+  {author}"` so taste authorship is legible — taste is a HUMAN input, never model-delegated). A directive is
+  REJECTED (no-op, produces no constraint) when it RELAXES: either an explicit relax shape (`_RELAX_VERBS`:
+  "remove constraint"/"unpin"/...) OR it `targets` an id already in `existing` (steering may not edit/remove
+  an architecture-pinned constraint — those are superseded by the Architect, not relaxed by steering). The
+  return is a NEW add-set layered ON TOP of `existing`; `existing` is never mutated/dropped. Conservative
+  default: ADMIT (tighten) — a false-tighten costs one extra constraint, a false-relax would silently lower
+  the floor.
+- LC9. **Mode graduation is EVIDENCE-GATED + fail-closed; one rung at a time; mirrors the supervisor
+  constants.** `modes.py` re-exports `MODE_{ASSISTANT,GATED,AUTONOMOUS}` from `graph.supervisor` (NOT a
+  parallel mode vocabulary). `can_graduate(DeploymentTrustMode, GraduationEvidence) -> bool` /
+  `graduate(...) -> DeploymentTrustMode` move ONE ladder rung up ONLY when the evidence justifies the NEXT
+  posture: GATED needs `gates_green AND human_approval_recorded`; AUTONOMOUS needs those PLUS
+  `trust_root_green` (two-zone runner + SLSA-L3 + admission + deployer) AND a named `accountable_party` (the
+  liability anchor, §5). Every evidence bit defaults to the WEAKEST value, so an empty `GraduationEvidence`
+  justifies NO graduation (no-evidence → no graduation). Can't skip a rung (Assistant+full-evidence → GATED,
+  not AUTONOMOUS); top rung can't graduate further. `strict=True` raises `GraduationRefused`; `strict=False`
+  is a no-op (stays put) — never an un-earned graduation.
+- LC10. **Licensing is PROVENANCE-BACKED + fail-closed: no clean license for un-provable code.**
+  `license_for(Artifact, ProvenanceRecord | None, *, license_id=DEFAULT_LICENSE, provenance_uri,
+  require_slsa=False, strict=False) -> LicenseRecord`. CLEAN iff: provenance present, its `subject_artifact`
+  IS the licensed artifact, AND it traces complete via the EXISTING `provenance.trace` (reuse, no parallel
+  check). On success: `license_id` set, `accountable_party` = first approved sign-off (the liability anchor),
+  `ai_generated=True` (stated honestly). On ANY failure: `clean=False`, `license_id=""`,
+  flags=`no_provenance` / `provenance_subject_mismatch` / `provenance:<underlying-flag>` (broken chain flags
+  carried through so remediation is legible). `strict=True` raises `UnlicensableArtifactError`.
+- LC11. **Left `lifecycle/__init__.py` UNTOUCHED (empty `__all__`).** T-M6-09 deliberately kept it import-cheap
+  with no re-exports (LC1); the four new modules export their own `__all__` and are imported by path. No
+  contested edit. Gates: `ruff check foundry tests` + `mypy foundry` clean (my 7 files; the
+  `tests/test_eval_scorecard_headline.py` E501s are a CONCURRENT agent's untracked WIP, not mine);
+  `pytest test_lifecycle_{feedback_loop,steering,modes}` = 37 passed (10+9+18, licensing folded into modes);
+  full suite 1511 passed / 1 skipped.
+
 ## Evaluation — factory_eval aggregator (fail-closed unified self-eval) (T-M6-05)
 - EV58. **`factory_eval.py` is the single ASSEMBLY layer — it COMPOSES the Wave-A layers verbatim, recomputes
   no statistics.** `run_factory_eval(frame, *, arms=…, suites=…, seed=…, …)→FactoryEvalResult` (frozen)
@@ -2916,3 +2963,45 @@ the REAL component (non-vacuous) and each paired with a control that DOES deploy
   None look-counts; re-spend fails closed; tamper gate; determinism; default real `run_ab` path drives a
   null→KILL reproduction with no alpha drawn); full suite 1460 passed/1 skipped. Touched ONLY
   `foundry/evaluation/replication_ab.py` + `tests/test_eval_replication_ab.py` + this note.
+- EV68. **`foundry/evaluation/scorecard.py::build_headline_scorecard(factory_eval, *, replication=None,
+  decision=None, secondaries=()) -> HeadlineScorecard` (frozen) is the FULL published headline (§7), built
+  IN-PLACE alongside the M1.5 `build_scorecard` slice (backward-compatible — the M1.5 API/tests are
+  untouched).** It assembles: the ONE confirmatory PRIMARY (`HeadlinePrimary`) — the Phase-1.5 arbiter read
+  [SPENT alpha] (from the `DecisionRecord`, or the replication's `phase15_*` read as fallback) PLUS the
+  Phase-6 `ReplicationResult`'s reproduction status [ESTIMATION only, NO alpha — §6.5], each clearly LABELED
+  (`alpha_source="phase_1.5_arbiter"` vs `estimation_source="phase_6_replication"`); the SECONDARY family
+  under Holm–Bonferroni; the per-feature wall-clock + cost line (`CostLine` off the §8 `CostBreakdown` —
+  full breakdown + raw wall-clock ms + `non_token_dominates`, NOT the token line alone); the
+  agent-validity/trajectory/integrity/safeties summary; and the UNCONDITIONAL per-arm ITT (`ArmScore`,
+  denominator = `outcome.attempted`, never shrunk — the same §2/§6/§7 rule). It PRESENTS — recomputes no
+  statistic EXCEPT the Holm adjustment (the one derivation).
+- EV69. **Holm keeps secondaries from becoming primaries two ways.** (1) It REUSES the ab_runner Holm helper
+  (`from foundry.evaluation.ab_runner import _holm_bonferroni`) over the family of supplied `SecondaryReading`
+  raw-p's to derive each `HeadlineSecondary.significant` (FWER-controlled) — the `raw_significant`
+  (`raw_p < alpha`) bit is kept DESCRIPTIVE only. A raw-significant-but-Holm-NON-significant endpoint is
+  reported NOT significant: a 3-endpoint family `[0.001, 0.04, 0.04]` at alpha=0.05 step-downs to reject only
+  rank0 (thr alpha/3) and STOPS at rank1 (0.04 > alpha/2=0.025), so both 0.04 endpoints are raw-sig but
+  Holm-killed. NOTE the corner case: with m<=2 the largest endpoint's Holm threshold is exactly alpha, so a
+  raw-sig endpoint can NEVER be Holm-killed — need m>=3 to witness it. (2) `HeadlineSecondary.is_primary` is
+  STRUCTURALLY False — `model_post_init` raises if anyone tries to construct a secondary as a primary claim.
+- EV70. **PUBLISHED + STABLE = a deterministic `stable_digest()` (canonical `content_digest` over the full
+  record — L7, never `hash()`) that re-derives IDENTICALLY across two builds from the same inputs (byte-
+  identical scorecard).** The digest is surfaced INSIDE `render()` (the published stable bit). Determinism is
+  free because every input layer (factory_eval / replication / decision) is itself deterministic and the only
+  derivation (Holm) is a pure function of the supplied p-values. FAIL-CLOSED-ON-INVALID: a non-valid
+  `FactoryEvalResult` (`valid is False` — reachable hidden test/contamination §6, or reward-hack/eval-lie/
+  nondeterminism §10) raises `NotPublishableError` as the FIRST thing `build_headline_scorecard` does — an
+  invalidated eval can never reach the headline as evidence. `HeadlineScorecard.model_post_init` re-asserts
+  `publishable` (a validated `publishable=False` fails closed), though note pydantic `model_copy(update=)`
+  BYPASSES validation, so the structural guarantee lives at construction/`model_validate`, not `model_copy`.
+- EV71. **The honesty banner is FIRST + mandatory (non-empty for both provenances).** It states (§0/§4) the
+  ONE primary is oracle-scored so a self-judge seam is NEVER reported as independent validation, AND (§6.5)
+  the Phase-6 replication is ESTIMATION only — a disconfirmation is an investigation trigger, NOT a second
+  gate. Provenance/dry_run flow from the `factory_eval`.
+- EV72. **Gates:** `ruff check foundry tests` + `mypy foundry` clean (161 source files incl. tests target);
+  `pytest test_eval_scorecard_headline test_eval_scorecard` = 27 passed (14 headline + 13 M1.5 slice: one
+  primary labeled 1.5+6; Holm-killed raw-sig secondary; secondary-can't-be-primary; cost/wall-clock line;
+  unconditional ITT; validity/trajectory/integrity/safeties summary; stable_digest identical across builds +
+  changes-with-inputs; fail-closed on non-valid eval; banner-first; replication-only fallback primary;
+  needs-a-1.5-read; provenance carried). Full suite 1511 passed/1 skipped. Touched ONLY
+  `foundry/evaluation/scorecard.py` + `tests/test_eval_scorecard_headline.py` + this note.

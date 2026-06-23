@@ -2556,7 +2556,7 @@
         "Honesty banner retained (DRY-RUN on synthetic fixtures); tests added; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M6-08",
@@ -2648,7 +2648,7 @@
         "Reuses governance/sign_off + policy/authorization + domains veto + MODE_* (extend, not rebuild); FrozenModel records (L3); tests added; mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "id": "T-M6-11",

@@ -2417,3 +2417,34 @@ the REAL component (non-vacuous) and each paired with a control that DOES deploy
   + this note. ruff (foundry tests) clean; `mypy foundry/domains/verdict_class.py` clean; 24 new tests
   green; full suite green (1240 passed / 1 skipped). NB: the pre-existing `mypy foundry` error is in the
   concurrently-authored sibling `governance_hooks.py`, not this task's file.
+- DM9. **The 4 core governance-hook ENFORCEMENT helpers — mode/tier veto + approver-of-record + egress +
+  perceptual-HITL (T-M5-04, domains.md §4(2-6)).** `foundry/domains/governance_hooks.py` is the CORE
+  machinery the composed `ModeTierPolicy`/`ApproverPolicy`/`EgressPolicy`/`PerceptualHITLPolicy` DRIVE
+  (the pack DECLARES via the contract + registry; THIS enforces, fail-closed + tighten-only). All four
+  are PURE/deterministic and REUSE tiering + sign_off (never rebuild them):
+  (d) `resolve_effective_mode_tier(policy, requested_mode, request, ..., regulatory_significant=None)
+  -> EffectiveModeTier`: the base tier is `tiering.classify_tier` (reused) then RAISED to the STRICTER of
+  it and `policy.min_tier` (`min_tier=LOW` can NEVER lower a HIGH classifier verdict); a vetoed mode is
+  removed from `RELEASE_MODES` (autonomous>assistant>gated permissiveness) — a fully-vetoed set degrades
+  to `{gated}`, NEVER "anything goes"; the resolver caps the effective mode at `requested_mode` so a Gated
+  request can't be widened to Autonomous (tighten-only); the **regulatory-significance axis** (explicit
+  override OR a `regulatory_significant`/`regulatory_significance` request-view flag) forces the strict
+  path independent of diff size — discards autonomous+assistant (→ `{gated}`), floors the tier at HIGH,
+  forces human + two-person.
+  (e) `bind_approver_of_record(...)` reuses `sign_off.record_sign_off` to RECORD a NAMED human approver
+  for a class in `policy.bound_artifact_classes`; `_is_human_approver` REJECTS the `autonomous`/`agent`/
+  `self-judge`/`system`/`""` sentinels (Regulated-F2: agent-identity class-4 write rejected), so an
+  Autonomous auto-approve is unreachable; two-person requires a SECOND distinct identity in a DISTINCT
+  role. `release_admitted(policy, records, ...)` is the fail-closed admission: no recorded approved HUMAN
+  sign-off binding THIS (subject, state_sha) ⇒ `False` (no approver ⇒ no release); an unbound class is a
+  no-op `True`.
+  (f) `egress_within_profile(policy, EgressRequest) -> EgressVerdict` (+ raising `assert_*`): a request
+  egress axis the profile FORBIDS (third-party model/trace egress, real PHI/PAN) is a fail-closed DENY
+  with violations enumerated; an identity profile forbids nothing (tighten-only).
+  (g) `perceptual_hitl_required(policy, request, capabilities) -> PerceptualHITLRequirement`: a request
+  capability ∩ `policy.hitl_required_capabilities` (e.g. `ui`) ⇒ `required=True`, `auto_approvable=False`
+  ALWAYS, `require_rendered_evidence=True`. `mark_perceptual_hitl(...)` RAISES `SignOffError` unless a
+  RECORDED, approved human sign-off is supplied — a class-5 visual HITL is NEVER auto-approved (UX-F1/F2);
+  a non-matching request is a no-op `None`. Touched ONLY `governance_hooks.py` +
+  `tests/test_domains_governance_hooks.py` + this note. ruff (foundry tests) + `mypy foundry` clean; 25
+  new tests green; full suite green (1240 passed / 1 skipped). T-M5-08 wires these at triage/release.

@@ -3069,3 +3069,59 @@ the REAL component (non-vacuous) and each paired with a control that DOES deploy
   **Gates:** `ruff check foundry tests` + `mypy foundry` clean (162 source files); `pytest test_eval_red_team`
   = 22 passed; full suite 1549 passed/1 skipped. Touched ONLY `foundry/evaluation/red_team.py` +
   `tests/test_eval_red_team.py` + this note.
+
+## Phase-6 EXIT integration test (T-M6-12) — the FINAL milestone witness + honesty map
+- P6X1. **`tests/test_phase6_exit.py` (19 tests) is the binding Phase-6 acceptance test.** It COMPOSES the
+  shipped M6 surface and adds NO core code — it OWNS only this file (+ this note). It REUSES the proven M6
+  fixture-assembly patterns verbatim: the synthetic `generate_synthetic_frame` + injected `_valid_validity`
+  + `run_factory_eval` (from `test_eval_factory_eval`/`test_eval_scorecard_headline`); the hand-built
+  `ABResult`/`decide` Phase-1.5 `DecisionRecord` + `run_replication_ab` estimation cores (from
+  `test_eval_replication_ab`); the `MetricVector` Pareto inputs (from `test_eval_optimization`); the REAL
+  `TwoZoneGateRunner`+`ZoneBSigner`+`DevGateWriteVerifier`+`AdmissionController`+`TrustedBuilder` over an
+  on-disk `tmp_path` workdir (from `test_lifecycle_maintenance`); the real evidence-pack provenance record
+  (from `test_lifecycle_provenance`); and `RedTeamHarness().run_red_team()` (from `test_eval_red_team`).
+- P6X2. **Criterion→mechanism map (each non-vacuous; every claim has a CONTROL that FLIPS):**
+  (1) **Scorecard published + STABLE:** `build_headline_scorecard` over a VALID `FactoryEvalResult` (+ the
+  Phase-1.5 arbiter `DecisionRecord` + the Phase-6 replication overlay) PUBLISHES; STABILITY is proven by
+  building TWICE from the same inputs and asserting `first == second` AND byte-identical
+  `stable_digest()`/`render()`, with the digest surfaced in the render. CONTROL: a `_dirty_eval` (reachable
+  hidden test → integrity not clean → `valid is False`) raises `NotPublishableError` (fail-closed; same
+  frame, only the invalidating surface added → the refusal is non-vacuous).
+  (2) **Replication reproduces Phase-1.5, alpha NOT re-spent:** `freeze_preregistration` draws exactly one
+  look (`looks_before == 1`); `decide` → PROCEED; `run_replication_ab(..., estimation_core=_winning_core)`
+  → `reproduces is True` (and the `reproduces_phase15` method + module alias agree) while
+  `alpha_looks_after == before == 1` and `alpha_spent_delta == 0` (`is_estimation_only`). CONTROL: the
+  `_null_core` replication → `reproduces is False` yet the decision object stays PROCEED and the look-count
+  is unchanged (delta still 0) — a Phase-6 disconfirmation can neither un-spend the sunk cost nor act as a
+  second gate (§6.5).
+  (3) **Pareto-or-reject:** a single-strict-win, no-regression candidate → `evaluate_optimization` ADOPTS
+  (`improved_metrics` has resolution, `regressed_metrics == ()`, "ADOPT" in rationale). CONTROLS: a
+  PARAMETRIZED quad regressing exactly ONE of {escaped-defects, cost, wall-clock, policy-compliance} (the
+  four the roadmap names) → REJECT with the metric NAMED in `regressed_metrics` AND the rationale; a TIE →
+  REJECT (no progress).
+  (4) **Feedback + maintenance/provenance loop (GENUINE E2E):** `feedback_to_backlog(REGRESSION signal)` →
+  a backlog item with `route == MAINTENANCE_ROUTE`, `re_gate_required`, `reenters_via_regate()`, linked to
+  the prior `prior_subject_uri`; that anchor drives `plan_maintenance` (change-proportional: rerun ⊂
+  required, spec/audit reuse) + `maintain` over the REAL runner+build+admission → released, admitted,
+  every gate PASS+attested, chain links to prior. CONTROL: a maintained change with a hardcoded secret
+  trips the REAL Security gate → `not released` + admission DENY (no gate bypass). Provenance: `trace` over
+  the intact record is `complete`+`tamper_evident`+`trusted_as_released()`; CONTROL (parametrized
+  tamper/drop of a gate verdict) breaks the hash-chain → not complete/tamper-evident/trusted. Licensing:
+  `license_for(art, record)` is `clean` with `accountable_party == "alice@org"` (the human-sign-off
+  liability anchor); CONTROLS: `provenance=None` → not clean + `no_provenance` flag (+ `strict=True` raises
+  `UnlicensableArtifactError`), and a tampered-chain record → not clean.
+  (5) **Red-team all-defended (bonus):** `run_red_team()` → `all_defended`, no critical findings, 7 probes
+  each defended+conclusive. CONTROL: `run_red_team(weaken=True)` → `not all_defended` with 7 critical
+  findings (every probe UNDEFENDED) — the DEFENDED verdict tracks the real defense, not a constant.
+- P6X3. **Honesty (genuine-E2E vs dev-grade stand-in), recorded in the module docstring:** the
+  eval/scorecard/replication/optimization/red-team layers are a METHODOLOGY DRY-RUN on SYNTHETIC fixtures
+  (`Provenance.DRY_RUN`; the BASELINE/+gates arms are SIMULATED stand-ins; the LOGIC — Pareto gate, Holm
+  correction, alpha-ledger read-only invariant, stable digest, red-team probes — is REAL, but the inputs
+  are synthetic and there is NO funded live study, so the scorecard asserts NOTHING about real
+  Foundry-vs-baseline performance). The maintenance/provenance/licensing loop is GENUINE E2E: it runs
+  against the REAL trust seams (the two-zone gate runner, the hermetic `TrustedBuilder`, the fail-closed
+  `AdmissionController`, the evidence-pack hash-chain) over a real on-disk workdir — the released/denied
+  verdicts and the tamper-evidence are produced by the shipped code paths, not a parallel re-implementation.
+  **Gates:** `ruff check foundry tests` + `mypy foundry` clean (162 source files);
+  `pytest -q tests/test_phase6_exit.py` = 19 passed; full suite 1568 passed/1 skipped. Touched ONLY
+  `tests/test_phase6_exit.py` + this note.

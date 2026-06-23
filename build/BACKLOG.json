@@ -2707,7 +2707,7 @@
         "Asserts the honesty discipline throughout (DRY-RUN on synthetic fixtures, no real funded study; oracle-scored primary; self-judge never reported as independent validation); runs with MockTransport/StubAdapter (no live key, no claude -p); milestone gate sweep green (ruff, mypy foundry, full pytest, coverage); mypy foundry + ruff clean"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     }
   ]
 }

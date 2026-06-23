@@ -3,8 +3,8 @@
     "owner": "planning-agent",
     "generated": "2026-06-15",
     "primary_source": "docs/implementation-plan.md \u00a71/\u00a74/\u00a77/\u00a78",
-    "note": "M1 fully decomposed. M1.5-M6 are placeholders only (just-in-time decomposition when the milestone opens, to avoid stale plans). Collision hazards (pyproject.toml, a given foundry/schemas/*.py module, foundry/state/factory_state.py, foundry/graph/factory_graph.py, foundry/graph/supervisor.py) are never parallel_safe when shared; each has a single owner per wave or is serialized via dependencies.",
-    "experts": "E1 LangGraph/orchestration; E2 durability; E3 security/trust-root; E4 LLM-app/agent (Anthropic); E5 stats/eval; E6 pydantic/typed-contracts (see build/EXPERTS.md)"
+    "note": "M1-M5 fully decomposed. M6 is a placeholder only (just-in-time decomposition when the milestone opens, to avoid stale plans). Collision hazards (pyproject.toml, a given foundry/schemas/*.py module, foundry/state/factory_state.py, foundry/graph/factory_graph.py, foundry/graph/supervisor.py) are never parallel_safe when shared; each has a single owner per wave or is serialized via dependencies.",
+    "experts": "E1 LangGraph/orchestration; E2 durability; E3 security/trust-root; E4 LLM-app/agent (Anthropic); E5 stats/eval; E6 pydantic/typed-contracts (see build/EXPERTS.md); E7 frontend/UX/perceptual"
   },
   "milestones": [
     {
@@ -53,7 +53,8 @@
       "id": "M5",
       "phase": "Phase 5 \u2014 Specialist plugins + domain packs",
       "status": "in_progress",
-      "exit_criteria": "A regulated request makes Autonomous/auto-approve unreachable and binds approver-of-record; an ML request keys verdicts on state_sha with a class-3 gate + compute budget; a UI request forces visual HITL over a rendered bundle \u2014 all without core changes to add the next pack."
+      "exit_criteria": "A regulated request makes Autonomous/auto-approve unreachable and binds approver-of-record; an ML request keys verdicts on state_sha with a class-3 gate + compute budget; a UI request forces visual HITL over a rendered bundle \u2014 all without core changes to add the next pack.",
+      "note": "Decomposed by T-M5-PLAN into T-M5-01..T-M5-09. NEW package foundry/domains/ (contract+registry+routing, verdict_class, state_sha, governance_hooks) + packs/{regulated,ml_data,frontend}. EXTEND existing seams (VerdictClass, state.tree_sha.state_sha, tiering, sign_off, alpha look-ledger, discriminator class-awareness, MODE_AUTONOMOUS) \u2014 do NOT rebuild. Foundation T-M5-01..04 are single-owner; the 3 packs (05/06/07) parallelize; T-M5-08 is the SOLE graph-core edit; T-M5-09 proves the 3 exit criteria + 'no core changes to add a pack'. Added expert E7 (frontend/UX/perceptual)."
     },
     {
       "id": "M6",
@@ -1304,10 +1305,10 @@
       ],
       "parallel_safe": false,
       "acceptance_criteria": [
-        "M5 decomposed into concrete tasks against the then-current tree, derived from implementation-plan \u00a77 Phase 5 + domains.md"
+        "M5 decomposed into T-M5-01..T-M5-09 (contract/registry + 4 core-hook foundations, 3 parallel packs, graph wiring, exit-criteria integration test) against the current tree, derived from implementation-plan \u00a77 Phase 5 + domains.md \u00a71-6"
       ],
       "retries_remaining": 3,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "T-M6-PLAN",
@@ -2080,6 +2081,279 @@
       ],
       "retries_remaining": 3,
       "status": "done"
+    },
+    {
+      "id": "T-M5-01",
+      "milestone": "M5",
+      "title": "DomainPackContract + pack registry + capability routing (the extension seam)",
+      "job_to_be_done": "Create foundry/domains/ with the DomainPackContract Protocol (the 9 core hooks of domains.md \u00a74 as typed methods/attrs: verdict-class assignment, state_sha components, compute budget, mode/tier veto + regulatory-significance axis, per-artifact approver-of-record, data-egress profile, mandatory perceptual HITL + rendered evidence, expensive-gate declaration, retention/identity policy) and a registry packs register into. Add capability routing that selects the pack(s) for a request by declared capability so a pack is added WITHOUT core changes. This is the single-owner foundation all packs build against; it only DEFINES the seam (no pack logic).",
+      "files_owned": [
+        "foundry/domains/__init__.py",
+        "foundry/domains/contract.py",
+        "foundry/domains/registry.py",
+        "foundry/domains/routing.py"
+      ],
+      "dependencies": [],
+      "role": "Specialist-interface engineer",
+      "required_experts": [
+        "E6",
+        "E3"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "DomainPackContract Protocol declares all 9 domains.md \u00a74 hooks with typed signatures",
+        "registry: a pack registers + is looked up by capability; duplicate-capability + unknown-capability are fail-closed errors",
+        "capability routing resolves request capabilities -> ordered pack set; a pack can only TIGHTEN (core-enforced) and is engaged deterministically (non-agent trigger), not agent-self-scoped",
+        "EXTENSION-SEAM PROVEN: a trivial in-test stub pack registers + routes via the contract with ZERO edits to contract.py/registry.py/routing.py/supervisor.py/factory_graph.py",
+        "tests added for every new behavior (unit + property where a reducer/identity is involved)",
+        "uv run mypy foundry clean; uv run ruff check foundry tests clean",
+        "uv run pytest -q green; changed-scope coverage >= 85% local"
+      ],
+      "retries_remaining": 3,
+      "status": "in_progress"
+    },
+    {
+      "id": "T-M5-02",
+      "milestone": "M5",
+      "title": "Verdict-class hooks: gate-class-aware discriminator + class-3/4/5 verdict plumbing",
+      "job_to_be_done": "Extend (do NOT rebuild) the existing VerdictClass enum (schemas/gates.py) + discriminator class-awareness into a foundry/domains/verdict_class.py hook layer: per-criterion/gate verdict-class assignment (classes 1-5), and make the gates/discriminator class-aware where not already so class-3 (statistical) and class-5 (perceptual) tests are no longer rejected by the class-2 behavioral-invariance discriminator. Reuse VerdictClass + required_kill_ratio; add only the per-class signed-tuple / predicate-membership routing (class 5 excluded from the signed predicate but still gated).",
+      "files_owned": [
+        "foundry/domains/verdict_class.py"
+      ],
+      "dependencies": [
+        "T-M5-01"
+      ],
+      "role": "Verdict-class engineer",
+      "required_experts": [
+        "E3",
+        "E5"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "per-criterion/gate verdict-class assignment hook resolves classes 1-5 from a pack declaration",
+        "discriminator is gate-class-aware: a class-3 or class-5 gate is NOT rejected by the class-2 held-out-mutant/behavioral-invariance check (regression test proves the prior reject is gone)",
+        "class-5 perceptual verdicts are EXCLUDED from the signed SLSA predicate yet remain first-class + gated (never advisory, never auto-approved)",
+        "reuses existing VerdictClass enum + discriminator.required_kill_ratio; no parallel enum invented",
+        "tests added for every new behavior (unit + property where a reducer/identity is involved)",
+        "uv run mypy foundry clean; uv run ruff check foundry tests clean",
+        "uv run pytest -q green; changed-scope coverage >= 85% local"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M5-03",
+      "milestone": "M5",
+      "title": "state_sha data/weight hooks + compute-cost budget dimension (the ML verification key)",
+      "job_to_be_done": "Wire the pack state_sha-components hook + the compute-cost gate-cost dimension into foundry/domains/state_sha.py: a pack declares which refs are data_refs/feature_defs/weight_refs/label_version that enter state_sha (reuse the existing state.tree_sha.state_sha which already takes data_refs/feature_defs/weight_refs), and add the compute_usd/gpu_hours BudgetLedger dimension (extend governance budget, append-only) + the expensive-gate declaration (cheap proxy + confirm-budget escalation; proxy gates ITERATION only, full gate before Release). Single-owner of domains/state_sha.py; budget edits append-only.",
+      "files_owned": [
+        "foundry/domains/state_sha.py"
+      ],
+      "dependencies": [
+        "T-M5-01"
+      ],
+      "role": "ML-verification-key engineer",
+      "required_experts": [
+        "E5",
+        "E4"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "a pack declares data_refs/feature_defs/weight_refs + a distinct label_version that enter state_sha; a data/feature/relabel change dirties the data-dependent gates via the existing dependency-scoped re-verification (re-derived, never trusted self-report)",
+        "state_sha hook reuses state.tree_sha.state_sha (no re-implementation of the hash)",
+        "compute_usd/gpu_hours budget dimension added append-only; an expensive gate is gated behind a cheap proxy + an explicit confirm-budget escalation; proxy CANNOT satisfy all-green convergence alone (full statistical gate runs before Release/admission)",
+        "tests added for every new behavior (unit + property where a reducer/identity is involved)",
+        "uv run mypy foundry clean; uv run ruff check foundry tests clean",
+        "uv run pytest -q green; changed-scope coverage >= 85% local"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M5-04",
+      "milestone": "M5",
+      "title": "Governance hooks: mode/tier veto + regulatory-significance + approver-of-record + egress + perceptual-HITL core",
+      "job_to_be_done": "Wire the remaining core pack hooks into foundry/domains/governance_hooks.py + thin append-only extensions: mode/tier veto (make Autonomous + Low-tier auto-approve UNREACHABLE, force-on a named accountable approver) reusing supervisor MODE_AUTONOMOUS + tiering classify_tier/_REGULATED_CAPABILITIES + sign_off; the regulatory-significance tiering axis (force-escalate tier + force human Release independent of diff size); per-artifact approver-of-record (class-4 human attestation bound into WORM+predicate, agent-identity class-4 write REJECTED) reusing sign_off two-person/approver; data-egress profile (no third-party model/trace egress; no real PHI/PAN upstream); and the mandatory perceptual-HITL + rendered-evidence-bundle core mechanism (reuse the zone-A-renders / zone-B-captures-and-signs pattern). Core hooks are fail-closed; a pack can only tighten.",
+      "files_owned": [
+        "foundry/domains/governance_hooks.py"
+      ],
+      "dependencies": [
+        "T-M5-01"
+      ],
+      "role": "Governance-hooks engineer",
+      "required_experts": [
+        "E3",
+        "E5"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "mode/tier veto makes MODE_AUTONOMOUS + Low-tier auto-approve-Release UNREACHABLE when a pack vetoes; auto-approve cannot override (core-enforced, fail-closed)",
+        "regulatory-significance axis force-escalates tier + forces human Release independent of diff size (reuses tiering.classify_tier forced_high/two_person; a one-line regulated change is NOT Low)",
+        "per-artifact approver-of-record binds a class-4 human attestation into WORM+predicate; an AGENT-IDENTITY class-4 write is REJECTED (test proves rejection)",
+        "data-egress profile + mandatory perceptual-HITL core mechanism present; reuses existing sign_off / human-liaison / zone-B signer seams, no rebuild",
+        "tests added for every new behavior (unit + property where a reducer/identity is involved)",
+        "uv run mypy foundry clean; uv run ruff check foundry tests clean",
+        "uv run pytest -q green; changed-scope coverage >= 85% local"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M5-05",
+      "milestone": "M5",
+      "title": "Regulated pack (fintech/healthcare): force Gated+, approver-of-record, two-person, reg-significance veto",
+      "job_to_be_done": "Implement foundry/domains/packs/regulated.py against the contract+hooks: force Gated+ / disable Autonomous + auto-approve, bind an approver-of-record (two-person where required, preparer/validator distinct functional roles, approver NOT in author set), regulatory-significance veto, requirement->risk->verification traceability-matrix predicate artifact (every frozen requirement + hazard bound to a runner-attested GateResult), no-third-party-egress + no-real-PHI/PAN profile, identity-bound WORM + retention floor. Deterministic non-agent engagement (classification label / tenant flag / boundary-scanner hit). Adds via the contract ONLY \u2014 no core edits.",
+      "files_owned": [
+        "foundry/domains/packs/__init__.py",
+        "foundry/domains/packs/regulated.py"
+      ],
+      "dependencies": [
+        "T-M5-02",
+        "T-M5-03",
+        "T-M5-04"
+      ],
+      "role": "Regulated-domain engineer",
+      "required_experts": [
+        "E3",
+        "E5"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "EXIT-1: a regulated request makes Autonomous + auto-approve UNREACHABLE and BINDS an approver-of-record record (named human; two-person where required; approver NOT in author set)",
+        "traceability-matrix predicate fails on an orphaned requirement / unmitigated hazard / unbound cell; agent-identity class-4 attestation rejected",
+        "regulatory-significance veto force-escalates tier independent of diff size; engagement is a deterministic non-agent trigger (label/tenant-flag/scanner-hit), not agent-self-scoped",
+        "PACK ADDS VIA THE CONTRACT ONLY: registered through the registry with ZERO edits to domains/contract.py, registry.py, routing.py, supervisor.py, factory_graph.py, tiering.py",
+        "tests added for every new behavior (unit + property where a reducer/identity is involved)",
+        "uv run mypy foundry clean; uv run ruff check foundry tests clean",
+        "uv run pytest -q green; changed-scope coverage >= 85% local"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M5-06",
+      "milestone": "M5",
+      "title": "ML/data pack: state_sha-keyed class-3 statistical gate + alpha look-ledger + compute budget",
+      "job_to_be_done": "Implement foundry/domains/packs/ml_data.py against the contract+hooks: key verdicts on state_sha (data/feature/weight refs + label_version), a class-3 statistical model-eval gate (metric + CI + pinned eval set/seed, multiple-testing correction or pre-registered composite, subgroup/slice MDE, calibration estimand) reusing the existing alpha look-ledger keyed on (eval_set_identity, decision_id) in state.global_records + evaluation/preregistration; a leakage gate (class 1, runner-re-derivable); the compute-cost budget + proxy/confirm-escalation; and required SHIPPED product-eval + monitoring/drift artifacts. Adds via the contract ONLY.",
+      "files_owned": [
+        "foundry/domains/packs/ml_data.py"
+      ],
+      "dependencies": [
+        "T-M5-02",
+        "T-M5-03",
+        "T-M5-04"
+      ],
+      "role": "ML/data-domain engineer",
+      "required_experts": [
+        "E5",
+        "E4"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "EXIT-2: an ML request keys verdicts on state_sha (data) with a class-3 statistical gate (metric + CI vs threshold over a pinned eval set/seed) and a compute budget",
+        "a look debits the EXISTING alpha look-ledger keyed on (eval_set_identity, decision_id) (NOT state_sha); forking/retraining does not re-draw alpha; cache-served looks still count",
+        "class-3 latches on the DECISION (estimate vs threshold +/- CI), not digest identity; admission RE-SCORES the shipped weight_ref (never retrains); leakage gate is class-1 runner-re-derivable; product-eval + monitoring are required shipped artifacts",
+        "PACK ADDS VIA THE CONTRACT ONLY: ZERO edits to domains core / supervisor / factory_graph / global_records / preregistration (reuse, don't modify)",
+        "tests added for every new behavior (unit + property where a reducer/identity is involved)",
+        "uv run mypy foundry clean; uv run ruff check foundry tests clean",
+        "uv run pytest -q green; changed-scope coverage >= 85% local"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M5-07",
+      "milestone": "M5",
+      "title": "Frontend/UX pack: class-5 perceptual HITL + class-3 visual-regression (sub-pixel-only envelopes) + dual a11y",
+      "job_to_be_done": "Implement foundry/domains/packs/frontend.py against the contract+hooks: a class-5 perceptual gate forcing a MANDATORY non-auto-approvable visual HITL over a zone-B-signed rendered bundle (key screens x breakpoints x states x locales); class-5 owns the blessed baseline; render-dependency scoping is conservative/fail-wide; a class-3 visual-regression gate with sub-pixel/font-hinting-ONLY tolerance envelopes (envelopes NEVER absorb layout/affordance/locale deltas; auto-skip needs BOTH a perceptual-distance floor AND a validated fail-closed semantic-affordance classifier); a dual a11y gate (deterministic BLOCKING WCAG floor + advisory remainder, AT-user step named out-of-band). Adds via the contract ONLY.",
+      "files_owned": [
+        "foundry/domains/packs/frontend.py"
+      ],
+      "dependencies": [
+        "T-M5-02",
+        "T-M5-03",
+        "T-M5-04"
+      ],
+      "role": "Frontend/UX-domain engineer",
+      "required_experts": [
+        "E7",
+        "E3"
+      ],
+      "parallel_safe": true,
+      "acceptance_criteria": [
+        "EXIT-3: a UI request FORCES a visual HITL (class-5) over a zone-B-signed rendered bundle; never auto-approved",
+        "class-3 visual-regression gate runs over a browser/device/locale matrix; tolerance envelopes absorb sub-pixel/font-hinting flake ONLY and a layout/affordance/locale delta routes to perceptual HITL re-baseline (test proves an envelope cannot absorb an affordance change)",
+        "auto-skip requires BOTH the perceptual-distance floor AND a validated fail-closed affordance classifier (distance alone never authorizes skip); deterministic WCAG a11y gate is BLOCKING; render-dependency scoping fails wide on shared tokens/global config",
+        "PACK ADDS VIA THE CONTRACT ONLY: registered with ZERO edits to domains core / supervisor / factory_graph",
+        "tests added for every new behavior (unit + property where a reducer/identity is involved)",
+        "uv run mypy foundry clean; uv run ruff check foundry tests clean",
+        "uv run pytest -q green; changed-scope coverage >= 85% local"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M5-08",
+      "milestone": "M5",
+      "title": "Wire pack engagement into the supervisor/factory_graph at triage (single-owner graph edit)",
+      "job_to_be_done": "Single-owner edit of supervisor.py + factory_graph.py: at triage, run capability routing (T-M5-01) to engage the resolved pack(s), apply their core-hook tightening (mode/tier veto, approver-of-record requirement, verdict-class assignment, state_sha components, compute budget, perceptual-HITL requirement) into the run BEFORE the gate/Release boundaries. Engagement is the deterministic non-agent trigger. This is the ONLY task that edits the graph core; the packs themselves never touch it.",
+      "files_owned": [
+        "foundry/graph/supervisor.py",
+        "foundry/graph/factory_graph.py"
+      ],
+      "dependencies": [
+        "T-M5-05",
+        "T-M5-06",
+        "T-M5-07"
+      ],
+      "role": "Graph-integration engineer",
+      "required_experts": [
+        "E1",
+        "E3"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "triage runs capability routing + engages the resolved pack(s) deterministically (non-agent trigger); engaged hooks apply BEFORE gate/Release boundaries",
+        "a regulated engagement removes MODE_AUTONOMOUS + auto-approve from the reachable graph and requires the approver-of-record at Release",
+        "an ML engagement attaches the class-3 gate keyed on state_sha + the compute budget; a UI engagement attaches the mandatory perceptual-HITL node",
+        "this is the SOLE graph-core edit; packs added later need no further supervisor/factory_graph change (proven by T-M5-09)",
+        "tests added for every new behavior (unit + property where a reducer/identity is involved)",
+        "uv run mypy foundry clean; uv run ruff check foundry tests clean",
+        "uv run pytest -q green; changed-scope coverage >= 85% local"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
+    },
+    {
+      "id": "T-M5-09",
+      "milestone": "M5",
+      "title": "Exit-criteria integration test: 3 packs end-to-end + 'no core changes to add a pack' proof",
+      "job_to_be_done": "End-to-end integration tests (with MockTransport + StubAdapter, no live key) proving the three Phase-5 exit criteria over the wired graph AND the extension-seam invariant: a regulated request, an ML request, and a UI request each drive the engaged pack's behavior; plus a FOURTH never-before-seen stub pack is added + routed + engaged purely via the registry/contract with a guard test asserting ZERO diff to the enumerated core files.",
+      "files_owned": [
+        "tests/test_domains_exit.py",
+        "tests/test_domain_extension_seam.py"
+      ],
+      "dependencies": [
+        "T-M5-08"
+      ],
+      "role": "Integration-test engineer",
+      "required_experts": [
+        "E1",
+        "E5"
+      ],
+      "parallel_safe": false,
+      "acceptance_criteria": [
+        "EXIT-1 e2e: regulated request -> Autonomous/auto-approve unreachable + approver-of-record bound",
+        "EXIT-2 e2e: ML request -> verdicts keyed on state_sha + class-3 gate + compute budget; a look debits the (eval_set_identity, decision_id) ledger",
+        "EXIT-3 e2e: UI request -> visual HITL forced over a zone-B-signed rendered bundle",
+        "NO-CORE-CHANGE PROOF: a fourth stub pack engages via registry/contract only; a guard test asserts the core file set (domains/contract.py, registry.py, routing.py, supervisor.py, factory_graph.py, tiering.py) is unchanged to add it",
+        "milestone gate: full uv run pytest green, coverage >= 80% overall, mypy + ruff clean",
+        "tests added for every new behavior (unit + property where a reducer/identity is involved)",
+        "uv run mypy foundry clean; uv run ruff check foundry tests clean",
+        "uv run pytest -q green; changed-scope coverage >= 85% local"
+      ],
+      "retries_remaining": 3,
+      "status": "pending"
     }
   ]
 }

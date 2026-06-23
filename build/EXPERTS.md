@@ -39,3 +39,14 @@ tasks are built by a fresh expert-implementer and critiqued by a DIFFERENT fresh
 - Scope: frozen pydantic v2 artifact models, versioning, validation, schema cohesion across layers.
 - Standards: every agent I/O is a validated frozen model; supersession not mutation.
 - Consulted: schemas/. Implementer + Critic (often paired with the domain owner).
+
+## E7 — Frontend / UX / perceptual engineer (added at Phase 5)
+- Scope: perceptual verdict class (class 5), mandatory visual/UX HITL over a rendered-artifact
+  bundle, visual-regression statistical gate (device/breakpoint/locale matrix), sub-pixel-only
+  flake envelopes, render-dependency scoping (fail-wide), semantic-affordance / a11y gating,
+  zone-A-renders / zone-B-captures-and-signs evidence capture.
+- Standards: taste is never delegated to a model — class 5 is gated, never auto-approved; an
+  envelope absorbs sub-pixel flake ONLY (never layout/affordance/locale deltas); auto-skip
+  requires BOTH the perceptual-distance floor AND a validated, fail-closed affordance classifier;
+  deterministic WCAG gate is BLOCKING, AT-user step is an out-of-band human dependency.
+- Consulted: domains/packs/frontend, perceptual gates, rendered-evidence bundles. Implementer + Critic.

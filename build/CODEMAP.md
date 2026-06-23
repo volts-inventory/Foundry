@@ -1,6 +1,6 @@
 # CODEMAP — living index (regenerated each milestone)
 
-Regenerated 2026-06-22T19:48:51 — end of Phase 4 (M4, Trust root & Autonomous mode).
+Regenerated 2026-06-22T21:24:34 — end of Phase 5 (M5, Specialist plugins + domain packs).
 
 ## foundry/ packages
 ```
@@ -12,6 +12,8 @@ foundry/agents/product/ (6 modules)
 foundry/agents/quality/ (5 modules)
 foundry/agents/security/ (4 modules)
 foundry/context/ (4 modules)
+foundry/domains/ (6 modules)
+foundry/domains/packs/ (4 modules)
 foundry/durability/ (6 modules)
 foundry/evaluation/ (11 modules)
 foundry/execution/ (3 modules)
@@ -29,10 +31,10 @@ foundry/schemas/ (10 modules)
 foundry/state/ (6 modules)
 foundry/trust_root/ (4 modules)
 ```
-## tests: 75 files | foundry: 135 modules, 25910 LOC | coverage 94%
-## Phase-4 trust root (foundry/trust_root/ + hardening): runner zone-B config re-derivation + sealed
-   observation (forged-results); attestation input-bound + provenance binding (forged-verdict/replay);
-   gates/discriminator held-out-mutant+behavioral-invariance (malicious-test); trusted_builder hermetic
-   SLSA-L3 (pinned-only, reproducible, signed provenance); admission fail-closed 4-check; deployer
-   non-agent idempotent rollback; global_records digest-disqualification (fork-divergence); operations/
-   trusted_lifecycle key-rotation+HA; supervisor/factory_graph MODE_AUTONOMOUS (admission = sole gate).
+## tests: 84 files | foundry: 145 modules, 28889 LOC | coverage 94%
+## Phase-5 domains (foundry/domains/): contract (7 tighten-only hooks) + registry (capability routing,
+   compose strictest-wins, open/closed register) + verdict_class (classes 1-5 fail-closed) + state_sha
+   (ML data/weight key + compute budget) + governance_hooks (mode/tier veto, approver, egress, perceptual
+   HITL); packs/{regulated (autonomous-vetoed+approver+class-4), ml_data (state_sha class-3+alpha+compute),
+   frontend (class-5 visual-HITL + sub-pixel envelope + WCAG)}. Engaged at triage via pack_registry; a new
+   pack adds via register() with zero core edits.

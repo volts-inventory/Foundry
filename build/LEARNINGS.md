@@ -2572,3 +2572,33 @@ the REAL component (non-vacuous) and each paired with a control that DOES deploy
   `foundry/governance/tiering.py` (added `classify_tier_at_floor` + `_TIER_STRICTNESS`) +
   `tests/test_supervisor_packs.py` (11 new tests). `ruff check foundry tests` clean; `mypy foundry` clean;
   full suite 1308 passed / 1 skipped.
+
+## Phase-5 EXIT integration test (T-M5-09) — what's genuine E2E vs dev-grade
+- DM17. **`tests/test_phase5_exit.py` (12 tests) is the binding Phase-5 acceptance test.** It REUSES the
+  `test_supervisor_packs.py` / `test_factory_graph_autonomous.py` harness verbatim (the SOP-keyed
+  `MockTransport.scripted` scripts, `_synthetic_resolve`/`_resolve_blob`, `_CLEAN_DIFF`, the REAL
+  `TwoZoneGateRunner`+`DevGateWriteVerifier`+`ZoneBSigner`, and the REAL trust root for the autonomous case).
+  No new core code — the test OWNS only this file (+ this note).
+- DM18. **Criterion→mechanism map (each non-vacuous):** (a) Regulated → `autonomous_pack_reachable(...) is
+  False` E2E AND the full autonomous factory graph deploys NOTHING (no recorded human approver ⇒ no release,
+  `_deploy_actions(final)==[]`, `phase=="halted"`); the non-vacuous twin records a NAMED HUMAN two-person
+  approver-of-record via `bind_approver_of_record` over the EXACT release anchors and shows
+  `pack_release_admitted` flips False→True (the ONLY delta is the human record). (b) ML → class-3
+  `ALPHA_STATE_SHA` grounding fail-closed over the REAL `GlobalRecords` alpha ledger
+  (`assert_class3_binds_ledger` rejects an UNDRAWN look, admits after `record_alpha_look`); a data OR weight
+  change RE-KEYS via `ml_state_sha`/`ml_verdict_rebinds` (identical refs = cache hit, non-vacuous); compute
+  budget fail-closes via `ComputeBudgetController.charge` → `ComputeOverspendError` (books nothing). (c) UI →
+  class-5 PERCEPTUAL `auto_approvable is False` + `satisfies(PERCEPTUAL, EXECUTION_DETERMINISTIC) is False`,
+  and an E2E self-judge clean run is BLOCKED at release (`pack_release_admitted ... is False`; non-vacuous:
+  `registry=None` admits the SAME state). (d) A brand-new `_CryptoPack` defined INSIDE the test, added via
+  `registry.register(...)`, engages E2E through `build_supervisor_graph` (caps Autonomous→Gated, raises tier
+  to HIGH, blocks self-judge release) AND composes strictest-wins with the 3 first-party packs — proving
+  add-a-pack is a contract registration, NOT a core edit.
+- DM19. **Honesty (genuine-E2E vs dev-grade stand-in), recorded in the module docstring:** the regulated
+  Autonomous-unreachable + no-hands-off-deploy proof, the human-approver admit, and all four pack
+  engagements run through the REAL wired graph + reducers + runner + trust root (GENUINE E2E). The class-3
+  `state_sha` re-key and the compute-overspend fail-close are proven at the UNIT level against the REAL core
+  machinery the MLDataPack composes (NOT yet a graph node in Phase 5) — a dev-grade stand-in, but over the
+  SAME code path the graph boundary reads (`pack_release_admitted`/`autonomous_pack_reachable` read exactly
+  these facts), so there is no parallel logic. `ruff check foundry tests` clean; `mypy foundry` clean (145
+  files); `pytest -q tests/test_phase5_exit.py` 12 passed; full suite unbroken.

@@ -3037,3 +3037,35 @@ the REAL component (non-vacuous) and each paired with a control that DOES deploy
   directions; tiering adopt/reject/same-gate/integrity-relax-raises; determinism; non-vacuity; provenance).
   Full suite 1527 passed/1 skipped. Touched ONLY `foundry/evaluation/optimization.py` +
   `tests/test_eval_optimization.py` + this note.
+- EV76. **T-M6-11 — the RED-TEAM harness probes the REAL defenses (`foundry/evaluation/red_team.py`).**
+  `RedTeamHarness(probes?, provenance).run_red_team(weaken=False) -> RedTeamReport`. `RedTeamProbe(name,
+  attack, run: (weaken:bool)->ProbeResult)` is a FROZEN DATACLASS (carries the bound callable; pydantic
+  can't). `ProbeResult(name, attack, defended, conclusive, detail)`: `defended` True IFF the defense HELD
+  (attack FAILED) AND `conclusive`. `RedTeamReport.all_defended` = suite non-empty AND every probe defended
+  (empty suite is NOT vacuously clean); `critical_findings` = the UNDEFENDED probes. The seven default probes
+  each EXERCISE THE REAL DEFENSE, never a re-mock: prompt-injection runs the REAL `Guardian` with a malicious
+  analyzer emitting "OVERRIDE/approve/clear all trips" on a real CAP_BREACH→HALT and asserts the deterministic
+  action/trips are byte-identical after the consult (gov §3 inert advisory); gate-evasion runs the REAL
+  `TestSuiteDiscriminator` on a gamed-green suite + held-out mutant and asserts FAIL (mutant survives);
+  forged-results runs the REAL `TwoZoneGateRunner` on a SEALED channel with a swapped FAIL→PASS observation
+  (sealed under a wrong key) and asserts ERROR not PASS; forged-verdict runs the REAL `AdmissionController`
+  with an unsigned required gate → DENY `required_gate_signature_invalid`; fork-divergence disqualifies a
+  digest then re-presents it under a FRESH run_id with genuine gate-state → still DENY
+  `stable_fail_latched_or_disqualified` (latch keyed on the digest, gov §5); reward-hacking/eval-lie run the
+  REAL `detect_reward_hacking`/`detect_eval_lies` safeties.
+- EV77. **FAIL-CLOSED + NON-VACUITY + cost/latency.** `_run_one` catches ANY probe exception → INCONCLUSIVE +
+  `defended=False` (a red-team probe that errors is NEVER a silent pass); an inconclusive ProbeResult also
+  blocks `all_defended`. NON-VACUITY: every probe takes `weaken`; weaken=True wires a DELIBERATELY-BYPASSED
+  defense (honored analyzer override, mutant-less discriminator, UNSEALED channel, laundered-genuine
+  signature, an `_AlwaysAdmissibleRecords` view that drops the disqualification look, a laundered green
+  discriminator report, a suppressed self-report claim) and the SAME suite reports UNDEFENDED — proving the
+  DEFENDED verdict tracks the real defense, not a constant (each probe flips real-DEFENDED↔weak-UNDEFENDED).
+  `cost_latency_report(run_signals, *, budget_microusd, budget_wall_clock_ms, cost_model?) -> CostLatencyReport`
+  REUSES the §8 `CostModel.feature_cost` (no re-implementation) and flags `overspend` (total USD > budget) +
+  `latency_regression` (wall-clock > budget); `within_budget` = NEITHER (the budget IS the bound, §8;
+  at-exact-bound is within). Integer micro-USD/ms throughout; deterministic (no RNG/clock — wall-clock is an
+  input signal). `_AlwaysAdmissibleRecords` explicitly implements `GlobalRecordsView` (delegates every read
+  but `admission_look`) so mypy sees the Protocol — a `__getattr__` shim does NOT satisfy a Protocol.
+  **Gates:** `ruff check foundry tests` + `mypy foundry` clean (162 source files); `pytest test_eval_red_team`
+  = 22 passed; full suite 1549 passed/1 skipped. Touched ONLY `foundry/evaluation/red_team.py` +
+  `tests/test_eval_red_team.py` + this note.

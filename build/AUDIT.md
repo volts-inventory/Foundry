@@ -139,3 +139,17 @@ _CryptoPack engages in-test, zero core edit; wiring reads ComposedPolicy generic
 identity, prior paths byte-identical). (7) honesty (flipping controls; no circular tests; §0.3 dev-grade labeled).
 **Verdict: CLEAN PASS — no findings.** 3 exit criteria genuinely hold; no pack can relax integrity; new pack = zero core edits.
 **M5 AUDIT: CLEAN PASS.**
+
+## M6 (Phase 6, Eval/optimization/lifecycle) — Cycle 1 (fresh independent auditor; design-docs + code only)
+Auditor re-ran gates (ruff/mypy clean 162 files; phase-6 subset 248 passed) + spot-checked flipping controls.
+**ALL 7 DELIVERED.** (1) scorecard published+stable (content_digest stable_digest byte-identical; NotPublishableError
+on dirty eval); (2) Phase-6 A/B reproduces Phase-1.5 WITHOUT re-spending alpha (read-only LedgerView, delta-0
+assertion, disconfirmation leaves decision/ledger untouched; 1.5 sole arbiter); (3) optimization Pareto-only (any
+regression or tie REJECT, named; tiering same gate, can't relax integrity); (4) feedback->maintenance re-gate (no
+side door) -> real gates+admission -> provenance trace tamper-evident -> licensing fail-closed; steering tighten-only;
+modes evidence-gated; (5) factory_eval valid = integrity AND safeties (fail-closed, empty-arms not vacuous); agent-
+validity distinct from outcome; (6) red-team 7 probes on REAL defenses, weaken-flips-all control; (7) honesty (DRY_RUN
+banner first, oracle-scored primary not self-judge, genuine-E2E loop distinguished). **Verdict: CLEAN PASS.** No findings
+(2 minor non-findings: steering relax-detection lexical-conservative but pins never removable; regulated-mode floor lives
+in the Phase-5 pack veto, correct placement). 4 exit criteria genuinely hold; alpha NOT re-spent.
+**M6 AUDIT: CLEAN PASS.**

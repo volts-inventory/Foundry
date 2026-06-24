@@ -783,6 +783,7 @@ def run(
     spec: str | list[str] | None = None,
     backend: str = _MOCK_BACKEND,
     thread_id: str = "cli-run",
+    state_dir: str | None = None,
     resolve: ArtifactResolver | None = None,
     resolve_blob: BlobResolver | None = None,
     diff_body: str | None = None,
@@ -898,9 +899,11 @@ def run(
     # the GlobalRecords trust ledgers and the CAS are all file-backed under that
     # dir so the run survives a process restart. UNSET (the DEFAULT) ⇒ in-memory
     # everywhere — byte-identical to the historical request-only run.
-    state_dir = state_dir_from_env()
+    # An explicit state_dir= (the --state-dir flag) OVERRIDES the env; otherwise
+    # fall back to FOUNDRY_STATE_DIR. None either way ⇒ in-memory (the default).
+    resolved_state_dir = state_dir if state_dir is not None else state_dir_from_env()
     durable: DurableBackends | None = (
-        durable_backends(state_dir) if state_dir is not None else None
+        durable_backends(resolved_state_dir) if resolved_state_dir is not None else None
     )
     if durable is not None:
         # FilesystemArtifactStore is a documented structural drop-in for the
@@ -1147,12 +1150,18 @@ def _evolve_main(args: list[str]) -> int:
     Returns 0 iff the maintained change was RELEASED, 1 if NOT released
     (fail-closed), 2 on a usage error.
     """
-    from foundry.lifecycle.evolve import evolve
+    from foundry.lifecycle.evolve import EvolveRefused, evolve
 
     guardian_approval = False
     if "--guardian-approve" in args:
         args = [a for a in args if a != "--guardian-approve"]
         guardian_approval = True
+    # --strict: a not-released re-gate RAISES (EvolveRefused) instead of returning a
+    # result — for scripts/CI that want a hard failure on any non-release.
+    strict = False
+    if "--strict" in args:
+        args = [a for a in args if a != "--strict"]
+        strict = True
     overlay_dir: str | None = None
     if "--apply" in args:
         i = args.index("--apply")
@@ -1164,13 +1173,14 @@ def _evolve_main(args: list[str]) -> int:
     if len(args) < 2:
         print(
             'usage: python -m foundry.cli evolve <prior-repo-dir> "<change>" '
-            "--apply OVERLAY_DIR [--guardian-approve]\n"
+            "--apply OVERLAY_DIR [--guardian-approve] [--strict]\n"
             "  re-enter an EXISTING released repo as a maintained change: re-verify\n"
             "  change-proportionally, re-gate (same runner), re-admit (fail-closed),\n"
             "  link provenance to the prior version. A failing re-gate => NOT released.\n"
             "  --apply OVERLAY_DIR: the changed/added files overlaid on the prior tree\n"
             "  --guardian-approve: record the HITL decision for a protected\n"
-            "    criterion/oracle/gate edit (otherwise it BLOCKS release)",
+            "    criterion/oracle/gate edit (otherwise it BLOCKS release)\n"
+            "  --strict: a not-released re-gate exits non-zero (raises) instead of reporting",
             file=sys.stderr,
         )
         return 2
@@ -1188,8 +1198,13 @@ def _evolve_main(args: list[str]) -> int:
     try:
         changes = _read_overlay(overlay_dir)
         result = evolve(
-            prior_dir, change, changes=changes, guardian_approval=guardian_approval
+            prior_dir, change, changes=changes,
+            guardian_approval=guardian_approval, strict=strict,
         )
+    except EvolveRefused as exc:
+        # --strict: the re-gate refused to release; report and exit non-zero.
+        print(f"evolve REFUSED (not released): {exc}", file=sys.stderr)
+        return 1
     except (FileNotFoundError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -1262,6 +1277,41 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
+    # --state-dir DIR: durable file/volume-backed state (overrides FOUNDRY_STATE_DIR);
+    # unset ⇒ in-memory (the default). --thread-id NAME: the run identity (also seeds
+    # the deterministic idempotency keys); --max-fix-attempts N: the gate fix-loop bound.
+    state_dir: str | None = None
+    if "--state-dir" in args:
+        i = args.index("--state-dir")
+        if i + 1 >= len(args):
+            print("error: --state-dir requires a directory argument", file=sys.stderr)
+            return 2
+        state_dir = args[i + 1]
+        args = args[:i] + args[i + 2 :]
+    thread_id = "cli-run"
+    if "--thread-id" in args:
+        i = args.index("--thread-id")
+        if i + 1 >= len(args):
+            print("error: --thread-id requires a value", file=sys.stderr)
+            return 2
+        thread_id = args[i + 1]
+        args = args[:i] + args[i + 2 :]
+    max_fix_attempts = 3
+    if "--max-fix-attempts" in args:
+        i = args.index("--max-fix-attempts")
+        if i + 1 >= len(args):
+            print("error: --max-fix-attempts requires an integer", file=sys.stderr)
+            return 2
+        try:
+            max_fix_attempts = int(args[i + 1])
+        except ValueError:
+            print(f"error: --max-fix-attempts must be an integer, got {args[i + 1]!r}",
+                  file=sys.stderr)
+            return 2
+        if max_fix_attempts < 1:
+            print("error: --max-fix-attempts must be >= 1", file=sys.stderr)
+            return 2
+        args = args[:i] + args[i + 2 :]
     # --packs name1,name2 (task [9]): the domain packs to engage (by name). A pack
     # may VETO the requested mode (enforced fail-closed in run()).
     packs: list[str] = []
@@ -1309,6 +1359,7 @@ def main(argv: list[str] | None = None) -> int:
             "[--backend {mock|anthropic|claude-cli|codex|ollama-gemma}] "
             "[--checkpoints [all|product,design,release]] "
             "[--docs DIR] [--out DIR] [--spec FILE|DIR ...] "
+            "[--state-dir DIR] [--thread-id NAME] [--max-fix-attempts N] "
             '"<one-line request>"\n'
             "  modes (lifecycle.md §4 deployment-trust):\n"
             f"    assistant  {_TRUST_POSTURE[MODE_ASSISTANT]}\n"
@@ -1354,6 +1405,9 @@ def main(argv: list[str] | None = None) -> int:
             packs=packs or None,
             spec=spec_text,
             backend=backend,
+            thread_id=thread_id,
+            state_dir=state_dir,
+            max_fix_attempts=max_fix_attempts,
             docs_dir=docs_dir,
             output_dir=output_dir,
             checkpoints=checkpoints,

@@ -1,0 +1,155 @@
+# Foundry deployment profile — EKS-portable by construction (TASK [14]).
+#
+# SCAFFOLDING: no docker daemon exists in the authoring environment, so this
+# file is NOT run/validated here. It is written so that every production concern
+# maps 1:1 to an EKS primitive (see docs/deploy-compose.md):
+#   * state lives behind interfaces on VOLUMES (CAS dir, postgres data) ->
+#     swap to S3 (CAS) / RDS (postgres) without touching app code;
+#   * config + secrets arrive via ENV (12-factor) -> K8s ConfigMap / Secret;
+#   * the proxy / signer / builder are SEPARATE services on an ISOLATED network
+#     -> K8s NetworkPolicy + per-service ServiceAccount/IRSA.
+#
+# Run:   docker compose up        (set the secrets in a .env file first)
+# Lint:  docker compose config    (validates this YAML without starting anything)
+#
+# IMAGE PINNING: external images are pinned by DIGEST (@sha256:...) for
+# supply-chain reproducibility. The digests below are PLACEHOLDERS — resolve the
+# real ones in your environment (`docker buildx imagetools inspect <image:tag>`)
+# and replace each `sha256:REPLACE_ME_*` before shipping.
+
+# Two networks enforce the isolation INTENT: the app talks to its datastore on a
+# private backend network; the privileged side-services (signer/builder) sit on
+# their own isolated network with no inbound app reachability except the proxy.
+# (In EKS this is a NetworkPolicy, not a bridge network — documented, not relied
+# on as a real security boundary here.)
+networks:
+  frontend: {}        # app <-> proxy (the ONLY egress path to model providers)
+  backend:
+    internal: true    # app <-> postgres; no external routing
+  isolated:
+    internal: true    # signer/builder; key material never leaves this net
+
+volumes:
+  # Durable filesystem CAS — the FilesystemArtifactStore root. EKS: a PVC, or
+  # swap the store backend to S3 (drop-in; same interface). This is the one
+  # production seam fully TESTED in this repo (tests/test_fs_artifact_store.py).
+  foundry_cas: {}
+  # Postgres data dir for checkpoints. EKS: RDS (managed) instead of this volume.
+  pg_data: {}
+  # SQLite checkpoint DB (default backend). Used unless FOUNDRY_CHECKPOINTER=postgres.
+  foundry_state: {}
+
+services:
+  # --- the Foundry app (the only service built from this repo) ---------------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: foundry:dev
+    restart: unless-stopped
+    # 12-factor config: every value comes from the environment, NO hardcoded
+    # localhost / paths. Secrets come from a .env file (gitignored) — never the
+    # image. `${VAR:?msg}` FAILS startup if a required secret is unset.
+    environment:
+      # Checkpoint backend switch (foundry.durability.checkpointer.make_checkpointer).
+      # Default sqlite (volume-backed). Set to "postgres" once the documented
+      # PostgresSaver swap is wired (see docs/deploy-compose.md).
+      FOUNDRY_CHECKPOINTER: "${FOUNDRY_CHECKPOINTER:-sqlite}"
+      FOUNDRY_CAS_ROOT: "/var/lib/foundry/cas"
+      FOUNDRY_CHECKPOINT_DB: "/var/lib/foundry/state/checkpoints.sqlite"
+      # Consumed only when FOUNDRY_CHECKPOINTER=postgres (assembled from parts so
+      # no credential is hardcoded). EKS: an RDS endpoint + a K8s Secret.
+      FOUNDRY_POSTGRES_DSN: "postgresql://foundry:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/foundry"
+      # The app reaches model providers ONLY through the proxy service (egress
+      # chokepoint). No provider base-url / api-key on the app itself.
+      FOUNDRY_PROXY_URL: "http://proxy:8080"
+      # Side-service endpoints (network-isolated; see comments below).
+      FOUNDRY_SIGNER_URL: "http://signer:8443"
+      FOUNDRY_BUILDER_URL: "http://builder:9000"
+    volumes:
+      - foundry_cas:/var/lib/foundry/cas
+      - foundry_state:/var/lib/foundry/state
+    networks: [frontend, backend]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # The real entrypoint is the cli (NOT touched by this task). Override here to
+    # run the factory once it is wired to read these env vars.
+    # command: ["foundry", "run", "--spec", "/work/spec.md"]
+
+  # --- postgres: durable checkpoint store (volume-backed) --------------------
+  # EKS: replace with RDS; the app keeps the same FOUNDRY_POSTGRES_DSN contract.
+  postgres:
+    image: postgres:16-bookworm@sha256:REPLACE_ME_POSTGRES
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: foundry
+      POSTGRES_DB: foundry
+      # Secret via env (compose reads it from .env). EKS: a K8s Secret.
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U foundry -d foundry"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # === network-isolated side services (STUBS) ================================
+  # These three run in SEPARATE containers ON ISOLATED NETWORKS by intent: the
+  # proxy is the sole egress chokepoint to model providers; the signer holds key
+  # material that must NEVER share a process/namespace with app code; the builder
+  # executes untrusted diffs sandboxed. In EKS each is its own Deployment with a
+  # NetworkPolicy + dedicated ServiceAccount (IRSA). The images below are STUBS
+  # (`command: ["true"]` placeholders) — this task does NOT build real proxy /
+  # signer / builder services; they are scaffolding to make the topology
+  # reviewable. Replace `image:`/`command:` when those services exist.
+
+  # Egress chokepoint to model providers. Only the app (frontend net) may reach
+  # it; it is the ONLY service with outbound provider connectivity.
+  proxy:
+    image: alpine:3.20@sha256:REPLACE_ME_PROXY_STUB
+    command: ["true"]   # STUB — replace with the real proxy service.
+    restart: "no"
+    networks: [frontend]
+    # EKS: NetworkPolicy allowing egress to provider CIDRs only; api key as a
+    # mounted K8s Secret, NOT an env var on the app.
+
+  # Attestation signer (Zone-B). Key material lives ONLY here, on the isolated
+  # network with no inbound app path except a tight request surface.
+  signer:
+    image: alpine:3.20@sha256:REPLACE_ME_SIGNER_STUB
+    command: ["true"]   # STUB — replace with the real signer service.
+    restart: "no"
+    networks: [isolated]
+    # EKS: signing key as a K8s Secret / KMS via IRSA; never in the image or app env.
+
+  # Builder/sandbox that executes untrusted feature diffs in isolation.
+  builder:
+    image: alpine:3.20@sha256:REPLACE_ME_BUILDER_STUB
+    command: ["true"]   # STUB — replace with the real builder service.
+    restart: "no"
+    networks: [isolated]
+    # EKS: gVisor/Kata runtimeClass + NetworkPolicy denying egress.
+
+  # === observability (PLACEHOLDER — intentionally not real infra) ============
+  # The accept criteria mention bundled OTel + Prometheus + Grafana + Loki. That
+  # stack is deliberately LEFT AS A COMMENTED PLACEHOLDER (do-not-over-build):
+  # wiring real collectors/dashboards is out of scope for this scaffolding wave
+  # and cannot be validated without a daemon. In EKS this is the
+  # OTel-Collector + kube-prometheus-stack + Loki Helm charts, scraping the app's
+  # /metrics and OTLP exporters.
+  #
+  # otel-collector:
+  #   image: otel/opentelemetry-collector:<pin-digest>
+  #   ...
+  # prometheus:
+  #   image: prom/prometheus:<pin-digest>
+  #   ...
+  # grafana:
+  #   image: grafana/grafana:<pin-digest>
+  #   ...
+  # loki:
+  #   image: grafana/loki:<pin-digest>
+  #   ...

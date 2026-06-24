@@ -161,7 +161,7 @@ Accept: interactive ideation loop (via rt.proxy) that co-generates a spec doc an
 hands it to [8]'s ingest seam; ideation output is advisory, never overrides the
 spec gate; tests.
 
-### [14] Docker-compose profile — #14 · deps: none · ☐
+### [14] Docker-compose profile — #14 · deps: none · ✓ (Wave 1; critic CLEAN; merged — testable parts; docker = scaffolding)
 Files: `docker-compose.yml`, Dockerfiles, `durability/artifact_store.py` (fs backend), `durability/checkpointer.py`, env config.
 Accept: volume-backed fs CAS + postgres checkpoints; proxy/signer/builder in
 isolated containers (network policy, key as secret); pinned scanner service
@@ -191,3 +191,7 @@ container spawning; bounded by provider quota + budget. Tests.
   `gpt-*` could over-match a hypothetical Ollama `gpt-oss`; legacy `claude-3-opus`
   id unmatched — both outside default tier maps, injectable escape hatch). Merged;
   full suite green. Injectable `SamplingPolicy` (effort vs temperature per model).
+- **[14] compose profile — DONE.** Critic CLEAN (path-traversal defeated, drop-in
+  parity confirmed). Merged. TESTED: `FilesystemArtifactStore` (durable drop-in) +
+  `make_checkpointer` env switch. Docker/compose/docs are marked scaffolding
+  (image digests = REPLACE_ME; isolated containers/observability = placeholders).

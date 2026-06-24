@@ -12,6 +12,7 @@ from typing import Annotated, TypedDict
 
 from foundry.schemas.architecture import PinnedConstraint
 from foundry.schemas.base import Artifact, BudgetLedger, ExternalAction, LogRef
+from foundry.schemas.checkpoint import CheckpointDecision
 from foundry.schemas.gates import GateResult, GateTriage
 from foundry.schemas.governance import SignOffRecord, TierDecision
 from foundry.schemas.journal import JournalEntry
@@ -52,3 +53,13 @@ class FactoryState(TypedDict, total=False):
     mode: str  # single-writer: "assistant" | "gated" (supervisor/factory_graph)
     risk_tier: TierDecision | None  # single-writer (triage tiering, gov §1e)
     sign_offs: Annotated[list[SignOffRecord], reducers.union_sign_offs]
+    # HUMAN-STEERING ONLY (plan [10]). A SEPARATE channel from gates/sign_offs:
+    # the human's per-stage-boundary checkpoint decision (approve/reject/needs-
+    # changes), folded additively by `union_checkpoint_decisions`. NEVER read by
+    # any gate, by `merge_gates`, by `route_after_gates`, by `release_allowed`, or
+    # by `admission` — a checkpoint approve can HALT or re-route a run but can
+    # NEVER turn a gate FAIL into a pass (the gates remain the sole trust
+    # authority, L5). Same posture as `agent_journal`, but it can halt/steer.
+    checkpoint_decisions: Annotated[
+        list[CheckpointDecision], reducers.union_checkpoint_decisions
+    ]

@@ -101,12 +101,13 @@ from foundry.graph.supervisor import (
     build_supervisor_graph,
 )
 from foundry.schemas.base import ExternalAction, IdempotencyPath
+from foundry.schemas.checkpoint import CheckpointBoundary
 from foundry.schemas.gates import GateStatus
 from foundry.schemas.operations import BuildRequest
 from foundry.state.factory_state import FactoryState
 
 if TYPE_CHECKING:
-    from collections.abc import MutableSequence
+    from collections.abc import MutableSequence, Sequence
 
     from langgraph.checkpoint.base import BaseCheckpointSaver
     from langgraph.graph.state import CompiledStateGraph
@@ -130,6 +131,7 @@ __all__ = [
     "TERMINAL_PASS_GATES",
     "autonomous_pack_reachable",
     "build_factory_graph",
+    "checkpoint_blocks_release",
     "gated_release_admitted",
     "pack_release_admitted",
     "terminal_gates_pass",
@@ -219,6 +221,32 @@ def terminal_gates_pass(state: FactoryState) -> bool:
     unattested status-flipped copy.
     """
     return _gates_all_pass(_latest_by_name(state), TERMINAL_PASS_GATES)
+
+
+def checkpoint_blocks_release(state: FactoryState) -> bool:
+    """True iff a RELEASE-boundary checkpoint decision HALTS the release (plan [10]).
+
+    The checkpoint/HITL mode lets a human REJECT (or send back for changes) at the
+    release stage boundary. That decision must HALT the emit even though the gates
+    already PASSED — so this guard is ANDed into every emit guard (a *not blocked*
+    is required to release). It reads only the steering-only ``checkpoint_decisions``
+    channel.
+
+    HARD TRUST DIRECTION (the whole point of [10]): this guard can only SUBTRACT a
+    release (a human reject halts a gate-PASS run) — it can NEVER ADD one. A human
+    *approve* makes ``proceeds()`` True so this returns False (does NOT block), but
+    the release still requires :func:`terminal_gates_pass` /
+    :func:`gated_release_admitted` to hold independently. So a checkpoint approve
+    can never turn a gate FAIL into a pass: the gates remain the sole trust
+    authority. Fail-closed: a recorded RELEASE decision that does not ``proceeds()``
+    blocks; no decision (checkpoints off, or the boundary not reached) does not."""
+    best: Any = None
+    for d in state.get("checkpoint_decisions") or ():
+        if d.boundary != CheckpointBoundary.RELEASE:
+            continue
+        if best is None or d.seq > best.seq:
+            best = d
+    return best is not None and not best.proceeds()
 
 
 def _required_gate_names(state: FactoryState) -> frozenset[str]:
@@ -591,6 +619,7 @@ def build_factory_graph(
     discriminator_factory: DiscriminatorFactory | None = None,
     pack_registry: PackRegistry | None = None,
     doc_sink: MutableSequence[DocumentationBundle] | None = None,
+    checkpoints: bool | Sequence[str | CheckpointBoundary] | None = None,
 ) -> CompiledStateGraph[FactoryState]:
     """Compile the full factory graph (Assistant-mode default; Gated/Autonomous opt-in).
 
@@ -674,6 +703,21 @@ def build_factory_graph(
         the doc artifacts the node emits onto the (checkpointed) ``artifacts``
         channel. ``None`` (the DEFAULT) still runs the docs node (its writer spend is
         budget-metered + its artifacts checkpointed) but discards the rendered bundle.
+    checkpoints:
+        OPTIONAL checkpoint/HITL mode (plan [10]), threaded straight to
+        :func:`build_supervisor_graph`. ``None``/``False`` (the DEFAULT) inserts NO
+        pause nodes — a non-checkpoint run is byte-identical to today (back-compat).
+        ``True`` pauses at all three stage boundaries; a sequence of boundary names
+        pauses at exactly those. At each pause the supervisor surfaces a READ-ONLY
+        inspection payload via LangGraph's ``interrupt()`` (resumable on the
+        ``checkpointer`` above) and awaits a human :class:`CheckpointDecision` fed
+        back via ``Command(resume=...)``. **Trust:** a checkpoint *approve* only
+        lets the run PROCEED to the (unchanged) gate boundary — the emit guards
+        below still require :func:`terminal_gates_pass` /
+        :func:`gated_release_admitted`, so a checkpoint approve can NEVER turn a
+        gate FAIL into a release. A RELEASE-boundary *reject* additionally HALTS the
+        emit via :func:`checkpoint_blocks_release` (it can only subtract a release,
+        never add one). The Design/Release sign-off is unchanged.
 
     Returns the COMPILED top-level graph.
     """
@@ -698,6 +742,7 @@ def build_factory_graph(
         mode=mode,
         discriminator_factory=discriminator_factory,
         pack_registry=pack_registry,
+        checkpoints=checkpoints,
     ).compile()
 
     def emit(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
@@ -716,6 +761,12 @@ def build_factory_graph(
         """
         if not terminal_gates_pass(state):
             # Halted / failed run: do NOT open a PR. Mark the phase only.
+            return {"phase": "halted"}
+        if checkpoint_blocks_release(state):
+            # A human REJECTED at the release checkpoint (plan [10]) — HALT even
+            # though the gates passed. This can only SUBTRACT a release; it can
+            # never make a FAILing gate pass (the terminal-gate guard above is
+            # independent and unchanged).
             return {"phase": "halted"}
         if not pack_release_admitted(state, config, pack_registry, requested_mode=mode):
             # An engaged domain pack TIGHTENS the release (a recorded human
@@ -767,6 +818,12 @@ def build_factory_graph(
         if not gated_release_admitted(state, config):
             # Not released (halt / vulnerable change / unsigned release): emit
             # NOTHING — no PR, no evidence-pack release.
+            return {"phase": "halted"}
+        if checkpoint_blocks_release(state):
+            # A human REJECTED at the release checkpoint (plan [10]) — HALT even
+            # though the gates + Release sign-off admitted. Subtractive only: it
+            # can never turn a gate FAIL into a release (gated_release_admitted is
+            # independent and unchanged).
             return {"phase": "halted"}
         if not pack_release_admitted(state, config, pack_registry, requested_mode=mode):
             # An engaged domain pack TIGHTENS the release beyond the self-judge
@@ -858,6 +915,12 @@ def build_factory_graph(
         # -- 1. Guard: every required gate PASS (fail-closed) ------------------
         # A halted / failed run (latch, bound spent, missing verdict) fails here.
         if not _gates_all_pass(_latest_by_name(state), _required_gate_names(state)):
+            return {"phase": "halted"}
+
+        # A human REJECT at the release checkpoint (plan [10]) HALTS the hands-off
+        # deploy even though admission would pass — subtractive only (it can never
+        # turn a gate FAIL into a deploy; the gate guard above is unchanged).
+        if checkpoint_blocks_release(state):
             return {"phase": "halted"}
 
         # -- 1b. Domain-pack enforcement (T-M5-08 / M5-R1-01): the pack release ---

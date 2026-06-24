@@ -54,6 +54,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from langgraph.types import Command
+
 from foundry.agents import AgentRuntime
 from foundry.docs import write_bundle
 from foundry.durability.artifact_store import ArtifactStore
@@ -61,11 +63,17 @@ from foundry.durability.checkpointer import FoundryCheckpointer
 from foundry.execution.adapters.stub import StubAdapter
 from foundry.gates import DevGateWriteVerifier, TwoZoneGateRunner, ZoneBSigner
 from foundry.graph.factory_graph import build_factory_graph, terminal_gates_pass
-from foundry.graph.supervisor import MODE_ASSISTANT, MODE_AUTONOMOUS, MODE_GATED
+from foundry.graph.supervisor import (
+    MODE_ASSISTANT,
+    MODE_AUTONOMOUS,
+    MODE_GATED,
+    normalize_checkpoints,
+)
 from foundry.proxy import ModelProviderProxy
 from foundry.proxy.test_doubles import MockTransport
 from foundry.schemas.architecture import OwnershipMap, SystemDesign
 from foundry.schemas.base import FrozenModel
+from foundry.schemas.checkpoint import CHECKPOINT_BOUNDARIES
 from foundry.schemas.gates import GateStatus
 from foundry.schemas.implementation import FeatureDiff
 from foundry.schemas.product import AcceptanceCriterion, Criticality
@@ -81,9 +89,16 @@ if TYPE_CHECKING:
     from foundry.domains.registry import PackRegistry
     from foundry.graph.gate_wiring import BlobResolver
     from foundry.schemas.base import Artifact, ExternalAction
+    from foundry.schemas.checkpoint import CheckpointBoundary
     from foundry.state.factory_state import FactoryState
 
-__all__ = ["MODES", "RunResult", "main", "run"]
+# A programmatic checkpoint responder (plan [10]): given the READ-ONLY inspection
+# payload surfaced at a pause, return the human decision (a verdict string, or a
+# mapping with ``verdict`` + optional ``steered_by``/``note``). Programmatic by
+# design — NO interactive stdin — so the checkpoint flow is fully testable.
+CheckpointResponder = Callable[[dict[str, Any]], "str | dict[str, Any]"]
+
+__all__ = ["MODES", "CheckpointResponder", "RunResult", "main", "run"]
 
 # Dev trust-root material (HMAC keys stand in for the production roots, §0.3).
 _KEY = b"dev-zone-b-cli-key-0123456789-abcdef"
@@ -613,6 +628,13 @@ class RunResult:
     output_root: str | None = None
     """Where the final accepted source tree was written (when ``output_dir`` is
     set AND the build passed); ``None`` on a halted run (no PASS, no write)."""
+    checkpoints: tuple[str, ...] = ()
+    """The checkpoint stage boundaries the run was driven with (plan [10]); empty
+    when checkpoints were OFF (the default)."""
+    paused_at: str | None = None
+    """The stage boundary the run is PAUSED at awaiting a human decision (plan
+    [10]) — set only when checkpoints are on and no responder drove past the pause.
+    ``None`` means the run completed (or was never checkpointed)."""
 
     def summary(self) -> str:
         """A concise human-readable report of the run (printed by ``main``)."""
@@ -624,6 +646,13 @@ class RunResult:
         ]
         if self.packs:
             lines.append(f"packs:     {', '.join(self.packs)}")
+        if self.checkpoints:
+            lines.append(f"checkpoints: {', '.join(self.checkpoints)}")
+        if self.paused_at is not None:
+            lines.append(
+                f"PAUSED at the {self.paused_at!r} checkpoint awaiting a human "
+                "decision (resume with a CheckpointDecision)."
+            )
         lines += [
             f"phase:     {self.phase}",
             f"result:    {'PASS' if self.passed else 'HALTED (no PR)'}",
@@ -646,6 +675,61 @@ class RunResult:
         return "\n".join(lines)
 
 
+# ---- checkpoint pause/resume driver (plan [10]) -----------------------------
+
+
+def _pending_interrupt(result: Any) -> Any:
+    """The pending LangGraph ``Interrupt`` on a paused invoke result, or ``None``.
+
+    A checkpointed run that hits a pause returns a dict carrying ``__interrupt__``
+    (the active interrupts); we read the first one's ``value`` (our read-only
+    inspection payload) to drive the responder. ``None`` means the run completed."""
+    if isinstance(result, dict):
+        interrupts = result.get("__interrupt__")
+        if interrupts:
+            return interrupts[0]
+    return None
+
+
+def _invoke_with_checkpoints(
+    app: Any,
+    seed: FactoryState,
+    config: RunnableConfig,
+    *,
+    checkpointed: bool,
+    responder: CheckpointResponder | None,
+) -> tuple[FactoryState, str | None]:
+    """Drive the compiled graph, pausing/resuming at the checkpoint boundaries.
+
+    Non-checkpointed runs (the default) invoke ONCE — byte-identical to today.
+    A checkpointed run invokes, and while the result carries a pending
+    ``__interrupt__`` it asks the ``responder`` for a decision and RESUMES via
+    ``Command(resume=...)`` (the run is durable on the checkpointer). With NO
+    responder, it stops at the first pause and returns ``(state, boundary)`` so the
+    caller can resume out-of-band. The bound on the resume loop is the number of
+    checkpoint boundaries (a responder that always rejects halts immediately)."""
+    result = app.invoke(seed, config)
+    if not checkpointed:
+        # Byte-identical to the historical single-invoke path: the invoke return
+        # IS the terminal channel state (no interrupts on a non-checkpointed run).
+        return cast("FactoryState", result), None
+
+    # Bound the loop: at most one pause per stage boundary (3) + slack.
+    for _ in range(len(CHECKPOINT_BOUNDARIES) + 1):
+        interrupt = _pending_interrupt(result)
+        if interrupt is None:
+            break
+        payload = dict(interrupt.value) if isinstance(interrupt.value, dict) else {}
+        if responder is None:
+            # No responder: surface the pause and stop (caller resumes out-of-band).
+            boundary = str(payload.get("boundary") or "")
+            return cast("FactoryState", app.get_state(config).values), boundary or None
+        decision = responder(payload)
+        result = app.invoke(Command(resume=decision), config)
+    # The authoritative terminal state is the checkpointed channel view.
+    return cast("FactoryState", app.get_state(config).values), None
+
+
 # ---- the smoke run ----------------------------------------------------------
 
 
@@ -662,6 +746,8 @@ def run(
     max_fix_attempts: int = 3,
     docs_dir: str | None = None,
     output_dir: str | None = None,
+    checkpoints: bool | list[str | CheckpointBoundary] | None = None,
+    checkpoint_responder: CheckpointResponder | None = None,
 ) -> RunResult:
     """Run ``request`` end-to-end through the compiled factory graph (smoke path).
 
@@ -731,9 +817,30 @@ def run(
         final accepted integrated source tree to this directory on disk; the
         written path is surfaced on ``RunResult.output_root``. On a halted run
         nothing is written (no accepted tree to emit).
+    checkpoints:
+        OPTIONAL checkpoint/HITL mode (plan [10]). ``None``/``False`` (the
+        DEFAULT) runs straight through with NO pauses (byte-identical to today).
+        ``True`` pauses at all three stage boundaries (after product/spec, after
+        architecture/design, after implementation+quality / before release); a
+        list of boundary names pauses at exactly those. The run is resumable on
+        the durable checkpointer. **Trust:** a checkpoint approve only lets the run
+        proceed to the (unchanged) gate boundary — it can NEVER turn a gate FAIL
+        into a release; a release reject HALTS even on a gate PASS.
+    checkpoint_responder:
+        OPTIONAL programmatic responder driving the pauses (plan [10]; NO
+        interactive stdin, so the flow is fully testable). Called with the
+        READ-ONLY inspection payload at each pause; returns the human decision (a
+        verdict string ``"approve"``/``"reject"``/``"needs_changes"``, or a mapping
+        with ``verdict`` + optional ``steered_by``/``note`` recording steering
+        authorship). When ``checkpoints`` are on but NO responder is supplied, the
+        run PAUSES at the first boundary and returns with ``RunResult.paused_at``
+        set (the caller resumes out-of-band on the same ``thread_id``).
     """
     if mode not in MODES:
         raise ValueError(f"unknown mode {mode!r}; choose one of {', '.join(MODES)}")
+    # Resolve the checkpoint boundary set up front (fail-closed on a typo'd name).
+    ckpt_set = normalize_checkpoints(checkpoints)
+    ckpt_names = tuple(sorted(b.value for b in ckpt_set))
     # The default passing diff is mode-specific: Assistant uses the Phase-1
     # _PASSING_DIFF (byte-identical to today); Gated/Autonomous use the
     # lockfile-bearing variant the assurance Audit gate needs. An explicit
@@ -820,6 +927,7 @@ def run(
                 gate_verifier=gate_verifier,
                 pack_registry=pack_registry,
                 doc_sink=doc_sink if docs_dir is not None else None,
+                checkpoints=sorted(ckpt_set) if ckpt_set else None,
             )
             # `spec` is additive and seeded ONLY when provided (request-only runs
             # keep the historical {"request": ...} seed exactly). The product
@@ -832,13 +940,27 @@ def run(
             # / HITL fires off required_capabilities). Default run: never set.
             if pack_capabilities:
                 seed["required_capabilities"] = sorted(pack_capabilities)
-            final = app.invoke(seed, config)
+            final, paused_at = _invoke_with_checkpoints(
+                app,
+                seed,
+                config,
+                checkpointed=bool(ckpt_set),
+                responder=checkpoint_responder,
+            )
         finally:
             reset_gate_write_verifier(token)
             ckpt.close()
 
-    final_state = cast("FactoryState", final)
-    result = _result(request, thread_id, final_state, mode=mode, packs=pack_names)
+    final_state = final
+    result = _result(
+        request,
+        thread_id,
+        final_state,
+        mode=mode,
+        packs=pack_names,
+        checkpoints=ckpt_names,
+        paused_at=paused_at,
+    )
     if output_dir is not None and result.passed:
         # On a PASSING build, materialize the FINAL accepted integrated tree
         # (reusing the SAME materialize_workdir + resolve/resolve_blob seams the
@@ -869,6 +991,8 @@ def _result(
     *,
     mode: str = MODE_ASSISTANT,
     packs: tuple[str, ...] = (),
+    checkpoints: tuple[str, ...] = (),
+    paused_at: str | None = None,
 ) -> RunResult:
     """Distill the terminal state into a :class:`RunResult` (no bodies, L4).
 
@@ -890,17 +1014,26 @@ def _result(
         (a for a in (final.get("actions") or ()) if a.kind in ("open_pr", "deploy")),
         None,
     )
+    # A run "passed" only if a release action was actually emitted (gates PASS AND
+    # not halted by a checkpoint reject / pause). On a non-checkpoint PASS a
+    # release is always emitted, so this is byte-identical to the prior
+    # ``terminal_gates_pass`` semantics; a checkpoint reject (gates PASS but no
+    # PR) or a paused run reports ``passed=False`` — the gates remain the trust
+    # authority, the checkpoint only subtracts the release.
+    passed = terminal_gates_pass(final) and release is not None
     return RunResult(
         request=request,
         thread_id=thread_id,
         mode=mode,
         packs=packs,
-        passed=terminal_gates_pass(final),
+        passed=passed,
         phase=str(final.get("phase") or "unknown"),
         artifact_uri=release.payload_uri if release is not None else None,
         open_pr_idempotency_key=release.idempotency_key if release is not None else None,
         open_pr_payload_uri=release.payload_uri if release is not None else None,
         gate_statuses=statuses,
+        checkpoints=checkpoints,
+        paused_at=paused_at,
     )
 
 
@@ -965,10 +1098,32 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         spec_paths.append(args[i + 1])
         args = args[:i] + args[i + 2 :]
+    # --checkpoints [all|name1,name2] (plan [10]): pause at the stage boundaries
+    # for human verification. ``--checkpoints`` alone (or ``all``) enables all
+    # three; a comma list selects specific boundaries. From the shell the CLI uses
+    # an APPROVE-ALL responder (a human partner would inspect + decide via the
+    # ``run(checkpoint_responder=...)`` API — programmatic, no interactive stdin);
+    # an approve still cannot turn a gate FAIL into a release (the gates decide).
+    checkpoints: bool | list[str] | None = None
+    if "--checkpoints" in args:
+        i = args.index("--checkpoints")
+        # An optional value follows ONLY if the next token isn't the request /
+        # another flag (heuristic: contains no spaces and isn't the last arg or a
+        # known sub-token). We accept "all" or a comma list; otherwise enable all.
+        nxt = args[i + 1] if i + 1 < len(args) else None
+        if nxt is not None and (nxt == "all" or ("," in nxt) or nxt in {
+            b.value for b in CHECKPOINT_BOUNDARIES
+        }):
+            checkpoints = True if nxt == "all" else [s.strip() for s in nxt.split(",") if s.strip()]
+            args = args[:i] + args[i + 2 :]
+        else:
+            checkpoints = True
+            args = args[:i] + args[i + 1 :]
     if not args:
         print(
             "usage: python -m foundry.cli "
             "[--mode {assistant|gated|autonomous}] [--packs name1,name2] "
+            "[--checkpoints [all|product,design,release]] "
             "[--docs DIR] [--out DIR] [--spec FILE|DIR ...] "
             '"<one-line request>"\n'
             "  modes (lifecycle.md §4 deployment-trust):\n"
@@ -976,7 +1131,9 @@ def main(argv: list[str] | None = None) -> int:
             f"    gated      {_TRUST_POSTURE[MODE_GATED]}\n"
             f"    autonomous {_TRUST_POSTURE[MODE_AUTONOMOUS]}\n"
             "  packs: regulated | ml_data | frontend "
-            "(a pack may VETO an unsafe mode — fail-closed)",
+            "(a pack may VETO an unsafe mode — fail-closed)\n"
+            "  checkpoints (plan [10]): pause at stage boundaries for human "
+            "verification; an approve can NEVER turn a gate FAIL into a release",
             file=sys.stderr,
         )
         return 2
@@ -994,6 +1151,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    # A shell --checkpoints run uses an APPROVE-ALL responder so it completes
+    # without interactive stdin (a human partner inspects + decides via the
+    # run(checkpoint_responder=...) API). The approve only proceeds to the gates;
+    # it can never make a FAILing gate release.
+    responder: CheckpointResponder | None = (
+        (lambda _payload: "approve") if checkpoints else None
+    )
+
     # An unknown pack name OR a pack VETO of the requested mode is a fail-closed
     # usage error (exit 2) — we never silently run a vetoed/empty configuration.
     try:
@@ -1004,6 +1169,8 @@ def main(argv: list[str] | None = None) -> int:
             spec=spec_text,
             docs_dir=docs_dir,
             output_dir=output_dir,
+            checkpoints=checkpoints,
+            checkpoint_responder=responder,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)

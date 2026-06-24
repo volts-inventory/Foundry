@@ -20,6 +20,9 @@ records on the SEPARATE ``pinned_constraints`` channel. Asserts:
 from __future__ import annotations
 
 import json
+import threading
+import time
+from pathlib import Path
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
@@ -28,7 +31,9 @@ from langgraph.checkpoint.memory import MemorySaver
 from foundry.agents import AgentRuntime
 from foundry.agents._common import emit_artifact
 from foundry.agents.implementation.senior_engineer import DESIGN_KIND, OWNERSHIP_KIND
+from foundry.execution.adapter_contract import AdapterResult, TaskPacket
 from foundry.execution.adapters.stub import StubAdapter
+from foundry.execution.sandbox import Sandbox
 from foundry.gates.attestation import ZoneBSigner
 from foundry.graph.subgraphs.implementation import build_implementation_subgraph
 from foundry.proxy import ModelProviderProxy
@@ -205,3 +210,87 @@ def test_subgraph_idempotent_rerun_same_key(tmp_path: Any) -> None:
     # Process-stable idempotency keys (content_digest, L7): re-run -> same uris.
     assert keys1 == keys2
     assert keys1  # and there was at least one
+
+
+# ---- Wave C: parallel IC pool (max_slots > 1) --------------------------------
+
+
+class _ConcurrencyProbe:
+    """A deterministic adapter that records the MAX simultaneous in-flight runs,
+    to prove the pool actually executes tasks in parallel (not serially)."""
+
+    supports_turn_snapshots = True
+    name = "concurrency-probe"
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.active = 0
+        self.max_active = 0
+
+    def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
+        with self._lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            time.sleep(0.08)  # widen the overlap window so concurrency is observable
+            tid = str(packet.task["id"])
+            (Path(sandbox.worktree) / "out.txt").write_text(tid)
+            diff_uri = sandbox.put_blob(f"diff:{tid}".encode())
+            return AdapterResult(diff_uri=diff_uri, snapshot_digest=sandbox.snapshot())
+        finally:
+            with self._lock:
+                self.active -= 1
+
+
+def test_pool_parallel_output_matches_serial(tmp_path: Any) -> None:
+    """max_slots>1 must produce the SAME feature diffs (task_id + idempotency uri)
+    as the serial path — the IC pool changes execution order, never the result."""
+    (tmp_path / "README.md").write_text("seed\n")
+
+    def run(max_slots: int, run_id: str) -> set[tuple[str | None, str]]:
+        app = build_implementation_subgraph(
+            _runtime(), source_dir=str(tmp_path), resolve=_resolve, max_slots=max_slots
+        ).compile()
+        final: FactoryState = app.invoke(_seed_state(), _config(run_id))
+        return {(a.task_id, a.uri) for a in _feature_diffs(final)}
+
+    serial = run(1, "run-serial")
+    parallel = run(4, "run-parallel")
+    assert parallel == serial
+    assert len(parallel) == 2  # both ownership units built
+
+
+def test_pool_runs_tasks_concurrently(tmp_path: Any) -> None:
+    (tmp_path / "README.md").write_text("seed\n")
+    probe = _ConcurrencyProbe()
+    body = _decomposition_payload()
+    proxy = ModelProviderProxy(
+        MockTransport(completions=[body], default_text=body), signer=ZoneBSigner(KEY, KEY_ID)
+    )
+    rt = AgentRuntime(proxy=proxy, adapter=probe)
+    app = build_implementation_subgraph(
+        rt, source_dir=str(tmp_path), resolve=_resolve, max_slots=2
+    ).compile()
+
+    final: FactoryState = app.invoke(_seed_state(), _config("run-conc"))
+
+    assert len(_feature_diffs(final)) == 2
+    assert probe.max_active == 2  # the two tasks were in flight at the same time
+
+
+def test_pool_fail_closed_when_over_budget(tmp_path: Any) -> None:
+    """A cost cap below the per-task estimate rejects every task at ADMIT
+    (fail-closed): nothing runs, no diff is produced, and the downstream gate has
+    nothing to pass — an approve can never ship what the pool refused to build."""
+    (tmp_path / "README.md").write_text("seed\n")
+    app = build_implementation_subgraph(
+        _runtime(),
+        source_dir=str(tmp_path),
+        resolve=_resolve,
+        max_slots=2,
+        cost_cap_microusd=10,  # << per-task est (cost_budget default 1_000_000)
+    ).compile()
+
+    final: FactoryState = app.invoke(_seed_state(), _config("run-budget"))
+
+    assert _feature_diffs(final) == []  # rejected at admit -> nothing built

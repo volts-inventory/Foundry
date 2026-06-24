@@ -51,7 +51,7 @@ from foundry.canonical import content_digest
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
 from foundry.execution.sandbox import Sandbox
 from foundry.schemas.architecture import PinnedConstraint
-from foundry.schemas.base import Artifact
+from foundry.schemas.base import Artifact, BudgetLedger
 from foundry.schemas.implementation import FeatureDiff, Task, TaskStatus
 from foundry.state.reducers import live_constraints
 
@@ -253,20 +253,41 @@ def _run_one_task(
             cost_budget_microusd=cost_budget_microusd,
         )
         result: AdapterResult = rt.adapter.run(packet, sandbox)
-        # Mirror the adapter's diff BLOB out of the per-task sandbox (which is
-        # destroyed below — arch §2(d): no reuse) into the run-scoped CAS so a
-        # store-backed resolve_blob can read it end to end. Both stores key by
-        # the RAW sha256 of the bytes, so the mirrored uri == result.diff_uri (we
-        # assert it). Skipped when rt.cas is None (the synthetic-resolver path).
-        if rt.cas is not None:
-            blob = sandbox.get_blob(result.diff_uri)
-            mirrored = rt.cas.put_blob(blob)
-            assert mirrored == result.diff_uri, (
-                f"mirrored diff uri {mirrored!r} != adapter uri {result.diff_uri!r}"
-            )
+        _mirror_diff_blob(rt, sandbox, result)  # while the sandbox is alive
     finally:
         sandbox.destroy()
 
+    return _finalize_diff(rt, task, constraints, base, result, config)
+
+
+def _mirror_diff_blob(rt: AgentRuntime, sandbox: Sandbox, result: AdapterResult) -> None:
+    """Mirror the adapter's diff BLOB out of the per-task sandbox (destroyed after
+    — arch §2(d): no reuse) into the run-scoped CAS so a store-backed resolve_blob
+    reads it end to end. Both stores key by the RAW sha256, so the mirrored uri ==
+    ``result.diff_uri`` (asserted). No-op when ``rt.cas`` is None (synthetic
+    resolver). Content-addressed + atomic, so it is safe to call from a pool worker
+    thread (the only shared-state touch the parallel path makes concurrently)."""
+    if rt.cas is None:
+        return
+    mirrored = rt.cas.put_blob(sandbox.get_blob(result.diff_uri))
+    assert mirrored == result.diff_uri, (
+        f"mirrored diff uri {mirrored!r} != adapter uri {result.diff_uri!r}"
+    )
+
+
+def _finalize_diff(
+    rt: AgentRuntime,
+    task: Task,
+    constraints: Sequence[PinnedConstraint],
+    base: str,
+    result: AdapterResult,
+    config: RunnableConfig,
+) -> dict[str, Any]:
+    """The SEQUENTIAL post-processing for one task's adapter result: key the diff
+    (``content_digest``, L7), mint the FeatureDiff + Artifact (``rt.seq``), persist
+    the typed body, and emit the done-marker + advisory triage. Shared by the serial
+    loop and the parallel pool path — ALWAYS called single-threaded from the node so
+    ``rt.seq`` (a non-thread-safe epoch counter) and ``rt.cas`` writes never race."""
     key = idempotency_key(task, constraints, base)
     diff = FeatureDiff(
         diff_uri=result.diff_uri,  # cas:// handle from the adapter (DS9)
@@ -296,6 +317,130 @@ def _run_one_task(
     return writes
 
 
+class _MirroringAdapter:
+    """Wraps ``rt.adapter`` to mirror the diff blob into ``rt.cas`` WHILE the
+    pool worker's sandbox is still alive (the pool destroys it immediately after
+    ``run``). This is the ONLY shared-state write a pool worker makes — and it is
+    content-addressed + atomic (``put_blob`` keys by sha256, ``os.replace``), so
+    concurrent workers are safe. All ``rt.seq``/``rt.cas`` body writes stay in the
+    node's SEQUENTIAL post-processing (``_finalize_diff``)."""
+
+    def __init__(self, rt: AgentRuntime) -> None:
+        assert rt.adapter is not None
+        self._rt = rt
+        self.supports_turn_snapshots = rt.adapter.supports_turn_snapshots
+
+    def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
+        result = self._rt.adapter.run(packet, sandbox)  # type: ignore[union-attr]
+        _mirror_diff_blob(self._rt, sandbox, result)
+        return result
+
+
+def _adapter_name(rt: AgentRuntime) -> str:
+    """Stable substrate id for the ExecutionTask (only an identity component —
+    the pool's adapter_factory returns the mirroring wrapper regardless)."""
+    return str(getattr(rt.adapter, "name", type(rt.adapter).__name__))
+
+
+def _run_tasks_pooled(
+    rt: AgentRuntime,
+    tasks: Sequence[Task],
+    constraints: Sequence[PinnedConstraint],
+    state: FactoryState,
+    config: RunnableConfig,
+    *,
+    source_dir: str,
+    snapshot_store: str | None,
+    turn_budget: int,
+    cost_budget_microusd: int,
+    max_slots: int,
+    cost_cap_microusd: int | None,
+) -> dict[str, Any]:
+    """Run the ready tasks' adapter work in PARALLEL through a bounded
+    :class:`LocalWorkPool` (``max_slots`` physical slots), then post-process the
+    results SEQUENTIALLY. Only the isolated adapter run (sandbox + adapter, no
+    ``rt.seq``) executes concurrently; the diff blob is mirrored to CAS in-worker
+    by :class:`_MirroringAdapter`, and the FeatureDiff/Artifact minting runs
+    single-threaded in ready order — so the output is identical to the serial
+    loop modulo execution order. Over-budget tasks are REJECTED at admit
+    (fail-closed): they never run, produce no diff, and the downstream gate fails
+    closed. ``lineage`` stays ``"default"`` here; the per-area budget tree is
+    Wave D."""
+    from foundry.execution.work_pool import (
+        BudgetExceededError,
+        LocalWorkPool,
+        QuotaPolicy,
+    )
+
+    if not tasks:
+        return {}
+
+    # base per task: the recorded base (a retry) or the fresh-clone snapshot (first
+    # run). All first-run tasks clone the SAME source_dir, and snapshot() is a
+    # content-only tree digest, so one computed base is correct for them all.
+    recorded: dict[str, str | None] = {t.id: _base_snapshot_of(t, state) for t in tasks}
+    base_first: str | None = None
+
+    def base_of(task: Task) -> str:
+        nonlocal base_first
+        if recorded[task.id] is not None:
+            return str(recorded[task.id])
+        if base_first is None:
+            probe = Sandbox(source_dir, snapshot_store=snapshot_store)
+            try:
+                base_first = probe.snapshot()
+            finally:
+                probe.destroy()
+        return base_first
+
+    def make_sandbox(etask: ExecutionTask) -> Sandbox:
+        sandbox = Sandbox(source_dir, snapshot_store=snapshot_store)
+        prior = recorded.get(str(etask.packet.task.get("id")))
+        if prior is not None:
+            sandbox.restore(prior)  # retry: reset to base so the diff supersedes (L4)
+        return sandbox
+
+    cap = 0 if cost_cap_microusd is None else cost_cap_microusd  # 0 == unlimited
+    quota = QuotaPolicy(ledger=BudgetLedger(cap_microusd=cap))
+    adapter_name = _adapter_name(rt)
+    merged: dict[str, Any] = {}
+
+    with LocalWorkPool(
+        sandbox_factory=make_sandbox,
+        adapter_factory=lambda _name: _MirroringAdapter(rt),
+        max_slots=max_slots,
+        quota=quota,
+    ) as pool:
+        submitted: dict[str, str | None] = {}
+        for task in tasks:
+            etask = execution_task_for(
+                task,
+                constraints,
+                adapter=adapter_name,
+                worktree_path=task.branch,  # stable placeholder; adapters use sandbox.worktree
+                turn_budget=turn_budget,
+                cost_budget_microusd=cost_budget_microusd,
+            )
+            try:
+                submitted[task.id] = pool.submit(etask)
+            except BudgetExceededError:
+                submitted[task.id] = None  # rejected at admit (fail-closed) — never run
+
+        # Collect + finalize SEQUENTIALLY in ready order: rt.seq (a non-thread-safe
+        # epoch counter) and rt.cas body writes stay single-threaded, so the seqs
+        # and artifacts are byte-identical to the serial path. A pool.result that
+        # FAILED propagates (parity with the serial loop's adapter exception).
+        for task in tasks:
+            tid = submitted[task.id]
+            if tid is None:
+                continue  # over budget -> no diff -> downstream gate fails closed
+            result = pool.result(tid)
+            writes = _finalize_diff(rt, task, constraints, base_of(task), result, config)
+            for channel, records in writes.items():
+                merged.setdefault(channel, []).extend(records)
+    return merged
+
+
 def make_junior_engineer_node(
     rt: AgentRuntime,
     *,
@@ -303,6 +448,8 @@ def make_junior_engineer_node(
     snapshot_store: str | None = None,
     turn_budget: int = _DEFAULT_TURN_BUDGET,
     cost_budget_microusd: int = _DEFAULT_COST_BUDGET_MICROUSD,
+    max_slots: int = 1,
+    cost_cap_microusd: int | None = None,
 ) -> NodeFn:
     """Build the Junior Engineer node.
 
@@ -324,6 +471,16 @@ def make_junior_engineer_node(
         (fine for a first run, where the freshly-cloned worktree IS the base).
     turn_budget / cost_budget_microusd:
         Per-task adapter budgets carried into the ``TaskPacket``.
+    max_slots:
+        IC-pool size — how many tasks build in PARALLEL (org_fanout_design.md,
+        Wave C). ``1`` (default) keeps the original serial loop, byte-identical to
+        before. ``>1`` dispatches the per-task adapter runs through a bounded
+        :class:`~foundry.execution.work_pool.LocalWorkPool`; the physical worker
+        count is this knob (infra owns it — nothing here spawns a container).
+    cost_cap_microusd:
+        Global micro-USD cap the pool admits against (fail-closed; only used when
+        ``max_slots > 1``). ``None`` (default) = unlimited (every task admits).
+        Wave D replaces this single cap with the per-area/per-domain budget tree.
     """
     if rt.adapter is None:
         raise ValueError(
@@ -334,8 +491,23 @@ def make_junior_engineer_node(
     def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         constraints: Sequence[PinnedConstraint] = state.get("pinned_constraints") or ()
         tasks = ready_tasks(state)
-        # Branch-per-task: process the whole ready set in one node, each task in
-        # its own fresh sandbox on its own task/<id> branch (Phase 1).
+        # Branch-per-task: each task builds in its own fresh sandbox on its own
+        # task/<id> branch. With max_slots>1 the adapter runs fan out across the
+        # IC pool (Wave C); otherwise they run serially (the original path).
+        if max_slots > 1:
+            return _run_tasks_pooled(
+                rt,
+                tasks,
+                constraints,
+                state,
+                config,
+                source_dir=source_dir,
+                snapshot_store=snapshot_store,
+                turn_budget=turn_budget,
+                cost_budget_microusd=cost_budget_microusd,
+                max_slots=max_slots,
+                cost_cap_microusd=cost_cap_microusd,
+            )
         merged: dict[str, Any] = {}
         for task in tasks:
             writes = _run_one_task(

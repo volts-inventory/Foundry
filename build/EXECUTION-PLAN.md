@@ -71,7 +71,7 @@ BLOCKER/MAJOR, the implementation is partial, or the full suite regressed.
 
 | Wave | Spine | Proxy | Gates / Authoring / Journal | Infra / Ideation | Status |
 |------|-------|-------|------------------------------|------------------|--------|
-| **1** | [1] Output dir | [5] Backend determinism | [4] Spec-gate critic · [2] Prose bodies | [14] Compose profile | ☐ |
+| **1** | [1] Output dir | [5] Backend determinism | [4] Spec-gate critic · [2] Prose bodies | [14] Compose profile | ✓ DONE |
 | **2** | [3] Doc-node *(needs [1])* | [6] CLI parser hardening | [11] Agent journal | [14] cont. | ☐ |
 | **3** | [8] Spec ingestion | [7] Drift actionable | — | [15] Worker pool *(needs [14])* | ☐ |
 | **4** | [9] `--mode`/`--packs` *(needs [8])* | proxy done | — | [13] ideation *module* *(needs [8])* | ☐ |
@@ -92,7 +92,7 @@ Files: `cli.py`, reuse `graph/gate_wiring.materialize_workdir`, `RunResult`.
 Accept: `run(..., output_dir=)` + `--out DIR` materializes the final accepted
 integrated tree to disk on a passing build; path surfaced on `RunResult`; tests.
 
-### [2] Persist prose bodies — #1 · deps: none · ☐
+### [2] Persist prose bodies — #1 · deps: none · ✓ (Wave 1; critic CLEAN; merged)
 Files: `agents/product/product_manager.py`, `agents/architecture/principal_architect.py`, `docs/render.py`.
 Accept: PM/architect `store.put_body_at(uri, prose)` the prd/design/ADR bodies
 they already generate; `render.py` inlines resolved prose instead of a dead
@@ -104,7 +104,7 @@ Accept: doc assembly runs as a terminal graph node (budget-metered, checkpointed
 outbox-governed); `GateRef.attested` also counts a valid judgment_binding; narrow
 the cli `except` around assembly; tests.
 
-### [4] Spec gate honors criteria-critic — #7 · deps: none · ☐
+### [4] Spec gate honors criteria-critic — #7 · deps: none · ✓ (Wave 1; critic CLEAN + 2 MINORs fixed; merged)
 Files: `gates/spec.py`, `agents/product/criteria_critic.py`.
 Accept: critic-flagged security/abuse omission (zone-B-re-derivable) FAILS the
 Spec gate; adversarial test: omission → Spec FAIL → no PR.
@@ -195,3 +195,12 @@ container spawning; bounded by provider quota + budget. Tests.
   parity confirmed). Merged. TESTED: `FilesystemArtifactStore` (durable drop-in) +
   `make_checkpointer` env switch. Docker/compose/docs are marked scaffolding
   (image digests = REPLACE_ME; isolated containers/observability = placeholders).
+- **[2] prose bodies — DONE.** Critic CLEAN. Merged. `ProseBody` round-trips PRD/
+  design/ADR narrative through the CAS under the same handle; docs inline it.
+- **[4] spec-gate critic — DONE.** Critic CLEAN (trust verified: no wrapper-
+  suppression path) + 2 MINORs fixed (blank-omission predicate alignment; tree-sha
+  identity test). Merged. Critic-flagged security omission now FAILS the Spec gate.
+- **WAVE 1 COMPLETE** — all 5 lanes merged, each critic-CLEAN, full suite green
+  after every merge. NEXT: Wave 2 — [3] doc-node (needs [1]) · [6] CLI parser
+  hardening · [11] agent journal. (Hold [7] drift for Wave 3: shares manifest.py
+  with [3].)

@@ -52,12 +52,16 @@ class PinnedIdDriftAlert(Alert):
     """Served model != pinned request — invalidates calibration baselines.
 
     Built directly from a proxy ``drift_events`` record; never re-derived.
+    ``drift_kind`` distinguishes a wholesale ``pinned-id`` drift from a
+    ``tier-mismatch`` (same lineage family, wrong/smaller tier id — a silent
+    capability degrade the family resolution alone would not surface).
     """
 
     node_id: str = ""
     requested_model: str = ""
     served_model: str = ""
     request_id: str = ""
+    drift_kind: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,20 +132,33 @@ def pinned_id_drift_alerts(source: _DriftEventSource) -> list[PinnedIdDriftAlert
         requested = str(event.get("requested_model", ""))
         served = str(event.get("served_model", ""))
         request_id = str(event.get("request_id", ""))
+        # kind may be absent on legacy events; default to the generic pinned-id.
+        drift_kind = str(event.get("kind") or "pinned-id")
+        # Both kinds invalidate calibration baselines; a tier-mismatch additionally
+        # notes it is a within-family (capability-degrade) drift the family check
+        # alone would pass.
+        qualifier = (
+            "served a smaller/other tier within the SAME lineage family — "
+            "capability silently degraded, and prior calibration/eval baselines "
+            "are invalidated (arch §8)"
+            if drift_kind == "tier-mismatch"
+            else "prior calibration/eval baselines are invalidated (arch §8)"
+        )
         alerts.append(
             PinnedIdDriftAlert(
                 kind="pinned-id-drift",
                 severity=AlertSeverity.CRITICAL,
                 detail=(
-                    f"node {node_id!r} pinned {requested!r} but was served {served!r} "
-                    f"(request_id={request_id!r}); prior calibration/eval baselines "
-                    "are invalidated (arch §8) — a T1 judgment must not continue silently"
+                    f"[{drift_kind}] node {node_id!r} pinned {requested!r} but was "
+                    f"served {served!r} (request_id={request_id!r}); {qualifier} — "
+                    "a T1 judgment must not continue silently"
                 ),
                 context=dict(event),
                 node_id=node_id,
                 requested_model=requested,
                 served_model=served,
                 request_id=request_id,
+                drift_kind=drift_kind,
             )
         )
     return alerts

@@ -65,6 +65,11 @@ class ModelUsageSummary(FrozenModel):
     served_families: tuple[str, ...] = ()
     served_models: tuple[str, ...] = ()
     drift_events: int = 0
+    # Pinned-ID drift broken down by kind (e.g. ``pinned-id``, ``tier-mismatch``)
+    # so the count is actionable, not opaque — a tier-mismatch is a silent
+    # within-family capability degrade (arch §8 / ops §5). Derived from the proxy
+    # per-call records; absent kinds simply don't appear.
+    drift_by_kind: dict[str, int] = {}  # noqa: RUF012 - pydantic deep-copies defaults
     calls_by_tier: dict[str, int] = {}  # noqa: RUF012 - pydantic deep-copies defaults
 
 
@@ -123,6 +128,7 @@ def _usage_summary(
     families: set[str] = set()
     models: set[str] = set()
     by_tier: dict[str, int] = {}
+    by_kind: dict[str, int] = {}
     for rec in proxy_manifest:
         usage = rec.get("usage") or {}
         tin += int(usage.get("input_tokens", 0))
@@ -134,6 +140,11 @@ def _usage_summary(
             models.add(str(rec["served_model"]))
         tier = str(rec.get("tier", "?"))
         by_tier[tier] = by_tier.get(tier, 0) + 1
+        # Drift breakdown by kind (tier-mismatch vs pinned-id) — the record only
+        # carries ``drift_kind`` when it drifted, so absent kinds never count.
+        if rec.get("drift"):
+            kind = str(rec.get("drift_kind") or "pinned-id")
+            by_kind[kind] = by_kind.get(kind, 0) + 1
     return ModelUsageSummary(
         model_calls=len(proxy_manifest),
         total_tokens_in=tin,
@@ -142,6 +153,7 @@ def _usage_summary(
         served_families=tuple(sorted(families)),
         served_models=tuple(sorted(models)),
         drift_events=drift_events,
+        drift_by_kind=dict(sorted(by_kind.items())),
         calls_by_tier=dict(sorted(by_tier.items())),
     )
 
@@ -219,7 +231,12 @@ def render_manifest_md(m: BuildManifest) -> str:
         f"- **Cache-read tokens:** {u.total_cache_read_tokens:,}",
         f"- **Served families:** {', '.join(u.served_families) or 'n/a'}",
         f"- **Served models:** {', '.join(u.served_models) or 'n/a'}",
-        f"- **Pinned-ID drift events:** {u.drift_events}",
+        f"- **Pinned-ID drift events:** {u.drift_events}"
+        + (
+            " (" + ", ".join(f"{k}={v}" for k, v in u.drift_by_kind.items()) + ")"
+            if u.drift_by_kind
+            else ""
+        ),
         "",
         "## Documents",
         "",

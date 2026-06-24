@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from foundry.agents.product._common import cas_uri, emit_artifact
+from foundry.agents.product._common import emit_artifact, persist_prose
 from foundry.schemas.product import PRD, AcceptanceCriterion, Criticality
 
 if TYPE_CHECKING:
@@ -121,9 +121,12 @@ def make_product_manager_node(rt: AgentRuntime) -> NodeFn:
         payload = result.parsed or {}
 
         criteria = _build_criteria(payload.get("acceptance_criteria", ()), criteria_seq)
+        # Persist the PRD narrative body behind its handle so the doc set can
+        # inline it (task [2]); store=None keeps the historical mint-only path.
+        prd_uri = persist_prose(str(payload.get("prd_body", "")), store=rt.cas)
         prd = PRD(
             title=str(payload.get("title", "")),
-            prd_uri=cas_uri(str(payload.get("prd_body", ""))),
+            prd_uri=prd_uri,
             required_capabilities=tuple(
                 str(c) for c in payload.get("required_capabilities", ())
             ),

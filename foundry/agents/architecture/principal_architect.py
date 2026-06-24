@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from foundry.agents._common import as_text, cas_uri, emit_artifact
+from foundry.agents._common import as_text, cas_uri, emit_artifact, persist_prose
 from foundry.context import SymbolIndex
 from foundry.schemas.architecture import (
     ADR,
@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 
     from foundry.agents._runtime import AgentRuntime, NodeFn
     from foundry.context.retriever import Span
+    from foundry.durability.artifact_store import ArtifactStore
     from foundry.state.factory_state import FactoryState
     from foundry.state.seq import Seq
 
@@ -191,7 +192,9 @@ def make_principal_architect_node(
         payload = completion.parsed or {}
         seqs = _seqs(rt, config)
 
-        adrs = _build_adrs(payload.get("adrs", []), seqs["adr"])
+        # Persist each ADR's prose rationale behind its body handle (task [2]);
+        # store=None keeps the historical mint-only path for synthetic resolvers.
+        adrs = _build_adrs(payload.get("adrs", []), seqs["adr"], store=rt.cas)
         interfaces = _build_interfaces(payload.get("interfaces", []), seqs["interface"])
         ownership = OwnershipMap(
             owners={str(k): str(v) for k, v in (payload.get("ownership") or {}).items()},
@@ -199,7 +202,7 @@ def make_principal_architect_node(
         )
         design = SystemDesign(
             title=str(payload.get("title", "")),
-            design_uri=cas_uri(str(payload.get("design_body", ""))),
+            design_uri=persist_prose(str(payload.get("design_body", "")), store=rt.cas),
             components=tuple(str(c) for c in payload.get("components", ())),
             adr_ids=tuple(a.id for a in adrs),
             interface_ids=tuple(i.name for i in interfaces),
@@ -236,7 +239,7 @@ def make_principal_architect_node(
     return _node
 
 
-def _build_adrs(raw: Any, seq: Seq) -> list[ADR]:
+def _build_adrs(raw: Any, seq: Seq, *, store: ArtifactStore | None = None) -> list[ADR]:
     out: list[ADR] = []
     for i, item in enumerate(raw or ()):
         out.append(
@@ -244,7 +247,7 @@ def _build_adrs(raw: Any, seq: Seq) -> list[ADR]:
                 id=str(item.get("id", f"ADR-{i:03d}")),
                 title=str(item.get("title", "")),
                 decision=str(item.get("decision", "")),
-                body_uri=cas_uri(str(item.get("body", ""))),
+                body_uri=persist_prose(str(item.get("body", "")), store=store),
                 rejected_alternatives=tuple(
                     str(a) for a in item.get("rejected_alternatives", ())
                 ),

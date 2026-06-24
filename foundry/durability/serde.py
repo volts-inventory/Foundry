@@ -55,6 +55,9 @@ FOUNDRY_MSGPACK_MODULES: list[tuple[str, str]] = [
     ("foundry.schemas.security", "SBOMRef"),
     ("foundry.schemas.security", "AuditFinding"),
     ("foundry.schemas.security", "Severity"),
+    # Upstream narrative body (PM/architect prose) persisted via put_body_at so
+    # the doc set can inline it instead of rendering a dead handle (task [2]).
+    ("foundry.schemas.docs", "ProseBody"),
     # Agent-authored release-doc bodies (foundry/docs/writers.py), emitted as
     # content-addressed artifacts like every other stage's output.
     ("foundry.schemas.docs", "Runbook"),

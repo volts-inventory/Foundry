@@ -28,6 +28,6 @@ from __future__ import annotations
 # in ``foundry.agents._common`` and are re-exported here so the product factories'
 # existing import path (``from foundry.agents.product._common import ...``) stays
 # stable; there is no second copy to drift.
-from foundry.agents._common import cas_uri, content_schema, emit_artifact
+from foundry.agents._common import cas_uri, content_schema, emit_artifact, persist_prose
 
-__all__ = ["cas_uri", "content_schema", "emit_artifact"]
+__all__ = ["cas_uri", "content_schema", "emit_artifact", "persist_prose"]

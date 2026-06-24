@@ -34,6 +34,7 @@ from foundry.docs.render import RenderedDoc
 from foundry.docs.writers import TechnicalWriter
 from foundry.schemas.architecture import ADR, InterfaceContract, OwnershipMap, SystemDesign
 from foundry.schemas.base import Artifact
+from foundry.schemas.docs import ProseBody
 from foundry.schemas.product import PRD, AcceptanceCriterion
 from foundry.schemas.quality import E2EReport, TestPlan, TestReport
 
@@ -75,6 +76,23 @@ def _resolve_bodies(
         except Exception:
             continue
     return bodies
+
+
+def _resolve_prose(uri: str, rt: AgentRuntime) -> str | None:
+    """Resolve a narrative ``ProseBody`` behind a ``*_uri`` handle, tolerantly.
+
+    The PM/architect persist the PRD/design/ADR prose as a ``ProseBody`` keyed on
+    its ``cas_uri(text)`` handle (task [2]); this reconstitutes the text so the
+    renderers can inline it. Returns ``None`` when there is no store, the handle
+    was never persisted (a synthetic / pre-task-[2] run), or the body is not a
+    ``ProseBody`` — the renderer then falls back to the dead-handle note."""
+    if rt.cas is None or not uri:
+        return None
+    try:
+        body = rt.cas.get_body(uri)
+    except Exception:
+        return None
+    return body.text if isinstance(body, ProseBody) else None
 
 
 def _first(bodies: list[FrozenModel], kind: type) -> Any:
@@ -131,16 +149,23 @@ def assemble_documentation(
         or "Service"
     )
 
-    # ---- render upstream artifacts ----
+    # ---- render upstream artifacts (inline resolved prose where persisted) ----
     rendered: list[RenderedDoc] = []
     if prd:
-        rendered.append(render.render_prd(prd, criteria))
+        rendered.append(render.render_prd(prd, criteria, prose=_resolve_prose(prd.prd_uri, rt)))
     if criteria:
         rendered.append(render.render_acceptance(criteria))
     if design:
-        rendered.append(render.render_design(design))
+        rendered.append(
+            render.render_design(design, prose=_resolve_prose(design.design_uri, rt))
+        )
     if adrs:
-        rendered.append(render.render_adrs(adrs))
+        adr_prose = {
+            a.id: text
+            for a in adrs
+            if (text := _resolve_prose(a.body_uri, rt)) is not None
+        }
+        rendered.append(render.render_adrs(adrs, prose=adr_prose))
     if interfaces:
         rendered.append(render.render_interfaces(interfaces))
     if ownership:

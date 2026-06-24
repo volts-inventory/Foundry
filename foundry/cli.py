@@ -49,7 +49,8 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
-from dataclasses import dataclass, replace
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -60,6 +61,7 @@ from foundry.durability.checkpointer import FoundryCheckpointer
 from foundry.execution.adapters.stub import StubAdapter
 from foundry.gates import DevGateWriteVerifier, TwoZoneGateRunner, ZoneBSigner
 from foundry.graph.factory_graph import build_factory_graph, terminal_gates_pass
+from foundry.graph.supervisor import MODE_ASSISTANT, MODE_AUTONOMOUS, MODE_GATED
 from foundry.proxy import ModelProviderProxy
 from foundry.proxy.test_doubles import MockTransport
 from foundry.schemas.architecture import OwnershipMap, SystemDesign
@@ -75,11 +77,13 @@ if TYPE_CHECKING:
 
     from foundry.agents.implementation.senior_engineer import ArtifactResolver
     from foundry.docs import DocumentationBundle
+    from foundry.domains.contract import DomainPackContract
+    from foundry.domains.registry import PackRegistry
     from foundry.graph.gate_wiring import BlobResolver
     from foundry.schemas.base import Artifact, ExternalAction
     from foundry.state.factory_state import FactoryState
 
-__all__ = ["RunResult", "main", "run"]
+__all__ = ["MODES", "RunResult", "main", "run"]
 
 # Dev trust-root material (HMAC keys stand in for the production roots, §0.3).
 _KEY = b"dev-zone-b-cli-key-0123456789-abcdef"
@@ -90,6 +94,104 @@ _LINEAGE_REV = "lineage-rev-cli-1"
 # The fixed diff_uri the synthetic FeatureDiff body points at; resolve_blob
 # returns the passing unified-diff body keyed on it (SUP7).
 _DIFF_BODY_URI = "cas://cli/diff-body"
+
+# The dev-grade trusted-builder identity + deploy target the AUTONOMOUS trust-root
+# chain (build → admit → deploy) wires hands-off. They stand in for the production
+# KMS/OIDC builder + deploy target (plan §0.3); the builder shares the run's zone-B
+# key so admission re-verifies the build signature under the SAME root.
+_BUILDER_ID = "dev-trusted-builder-cli"
+_DEPLOY_TARGET = "prod"
+
+# The release modes the CLI exposes (the supervisor mode constants; assistant is the
+# DEFAULT — byte-identical to the historical request-only run).
+MODES = (MODE_ASSISTANT, MODE_GATED, MODE_AUTONOMOUS)
+
+# The first-party domain packs selectable via ``--packs`` (T-M5-08). Mapped by the
+# stable pack NAME (``pack.name``); a NEW pack is added here AND via register() — but
+# the graph wiring stays open/closed (it reads the COMPOSED policy generically).
+_PACK_FACTORIES: dict[str, Callable[[], DomainPackContract]] = {}
+
+
+def _pack_factories() -> dict[str, Callable[[], DomainPackContract]]:
+    """The lazily-built ``name -> pack-factory`` map for ``--packs`` selection.
+
+    Imported lazily (the pack modules pull in the domain contract) so a plain
+    ``--mode assistant`` run never imports the domain layer (back-compat: no new
+    import cost / no new surface on the default path).
+    """
+    if not _PACK_FACTORIES:
+        from foundry.domains.packs.frontend import FrontendPack
+        from foundry.domains.packs.ml_data import MLDataPack
+        from foundry.domains.packs.regulated import RegulatedPack
+
+        for cls in (RegulatedPack, MLDataPack, FrontendPack):
+            _PACK_FACTORIES[cls().name] = cls
+    return _PACK_FACTORIES
+
+
+def _build_pack_registry(packs: list[str]) -> tuple[PackRegistry, frozenset[str]]:
+    """Build a :class:`PackRegistry` from selected pack NAMES + their capabilities.
+
+    Returns the registry (with each named pack registered) and the UNION of the
+    selected packs' declared capabilities. The capabilities are seeded onto the
+    request's ``required_capabilities`` channel so the COMPOSED policy actually
+    engages (a pack's veto / approver-of-record / HITL fires off the request
+    capabilities, not merely off registration — mirrors the supervisor-pack
+    tests). Raises :class:`ValueError` for an unknown pack name (fail-closed; a
+    typo never silently engages nothing)."""
+    from foundry.domains.registry import PackRegistry
+
+    factories = _pack_factories()
+    registry = PackRegistry()
+    capabilities: set[str] = set()
+    for name in packs:
+        factory = factories.get(name)
+        if factory is None:
+            raise ValueError(
+                f"unknown pack {name!r}; available: {', '.join(sorted(factories))}"
+            )
+        pack = factory()
+        registry.register(pack)
+        capabilities.update(pack.capabilities)
+    return registry, frozenset(capabilities)
+
+
+def _enforce_mode_veto(
+    rt: AgentRuntime,
+    config: RunnableConfig,
+    registry: PackRegistry,
+    capabilities: frozenset[str],
+    *,
+    requested_mode: str,
+) -> None:
+    """Fail-closed: refuse to run a mode an engaged domain pack VETOES (T-M5-08).
+
+    The composed ``mode_tier`` policy is a PURE function of the request's
+    capabilities; :func:`resolve_effective_mode_tier` resolves the EFFECTIVE mode
+    after the veto. If the requested mode is no longer reachable (e.g. a regulated
+    pack vetoes hands-off Autonomous, degrading it to Gated), we RAISE rather than
+    silently run the (now-vetoed) mode — the operator must re-issue with the
+    allowed mode. This mirrors the supervisor's at-triage degrade, surfaced as an
+    explicit CLI error so the trust posture the operator believes they ran is the
+    posture that actually ran."""
+    from foundry.domains.governance_hooks import resolve_effective_mode_tier
+
+    request_view = {"required_capabilities": sorted(capabilities)}
+    policy = registry.compose(request_view)
+    eff = resolve_effective_mode_tier(
+        policy.mode_tier,
+        requested_mode=requested_mode,
+        request=request_view,
+        capabilities=sorted(capabilities),
+        seq=rt.seq(config, "cli", "pack:mode_veto"),
+    )
+    if requested_mode not in eff.reachable_modes:
+        raise ValueError(
+            f"mode {requested_mode!r} is VETOED by the engaged pack(s) "
+            f"{', '.join(p.name for p in registry.packs())}; the strictest "
+            f"reachable mode is {eff.effective_mode!r} "
+            f"(re-run with --mode {eff.effective_mode})"
+        )
 
 # Spec ingestion (task [8]). A whole-run cap on the design-spec text seeded into
 # state: bounds checkpoint size + token cost on a large doc / directory; the
@@ -104,6 +206,18 @@ _PASSING_DIFF = (
     "--- /dev/null\n+++ b/app.py\n@@ -0,0 +1,1 @@\n+VALUE = 42\n"
     "--- /dev/null\n+++ b/test_app.py\n@@ -0,0 +1,2 @@\n"
     "+def test_ok():\n    assert 1 + 1 == 2\n"
+)
+
+# The Gated/Autonomous spine ADDS the assurance phase (Security/Audit/supply-chain
+# on the integrated tree). The Audit gate reads a lockfile inventory (AW2), so the
+# assurance-mode default diff carries a ``uv.lock`` alongside the passing test (no
+# hardcoded secret → Security PASS). Used as the run() default ONLY for
+# gated/autonomous (assistant stays byte-identical to the Phase-1 _PASSING_DIFF).
+_ASSURANCE_PASSING_DIFF = (
+    "--- /dev/null\n+++ b/app.py\n@@ -0,0 +1,1 @@\n+VALUE = 42\n"
+    "--- /dev/null\n+++ b/test_app.py\n@@ -0,0 +1,2 @@\n"
+    "+def test_ok():\n    assert 1 + 1 == 2\n"
+    '--- /dev/null\n+++ b/uv.lock\n@@ -0,0 +1,2 @@\n+name = "pkg"\n    license = "MIT"\n'
 )
 
 
@@ -208,6 +322,24 @@ _PERF_COST_PAYLOAD: dict[str, Any] = {
     "recommendations": ["enable prompt caching on the stable SOP prefixes"],
 }
 
+# The assurance-phase agents (Gated/Autonomous spine only). Mirrors the gated /
+# autonomous end-to-end test fixtures: a clean STRIDE model, a clean SBOM, and a
+# clean supply-chain review → Security/Audit/supply_chain PASS on the integrated
+# tree. Unused on the Assistant path (the assurance subgraph is never mounted).
+_APPSEC_PAYLOAD: dict[str, Any] = {
+    "threat_model_body": "STRIDE model",
+    "oracle_bindings": {"S1": "test_auth"},
+    "residual_item_ids": [],
+    "severity": "low",
+    "findings": [],
+}
+_AUDIT_PAYLOAD: dict[str, Any] = {"sbom_body": "sbom", "severity": "low", "findings": []}
+_SUPPLY_CHAIN_PAYLOAD: dict[str, Any] = {
+    "report_body": "supply-chain review",
+    "policy_violations": [],
+    "trust_root_touched": False,
+}
+
 _SCRIPTS: dict[str, str] = {
     "Stakeholder / Client Proxy": json.dumps(_INTENT_PAYLOAD),
     "Product Manager": json.dumps(_PRD_PAYLOAD),
@@ -217,6 +349,10 @@ _SCRIPTS: dict[str, str] = {
     "Senior Engineer": json.dumps(_DECOMPOSITION_PAYLOAD),
     "QA Engineer": json.dumps(_QA_PAYLOAD),
     "SDET": json.dumps(_SDET_PAYLOAD),
+    # Assurance phase (Gated / Autonomous spine).
+    "You are the Security / AppSec Engineer": json.dumps(_APPSEC_PAYLOAD),
+    "You are the Audit / Compliance agent": json.dumps(_AUDIT_PAYLOAD),
+    "You are the Supply-Chain Reviewer": json.dumps(_SUPPLY_CHAIN_PAYLOAD),
     # Technical Writer (foundry/docs) authored docs.
     "OPERATIONAL RUNBOOK": json.dumps(_RUNBOOK_PAYLOAD),
     "KNOWN-ISSUES": json.dumps(_KNOWN_ISSUES_PAYLOAD),
@@ -427,6 +563,26 @@ def _load_spec(spec: str | list[str] | None) -> str:
     return text
 
 
+# ---- per-mode trust posture (lifecycle.md §4 deployment-trust modes) --------
+# A one-line human summary of the trust root each mode engages, surfaced in the
+# run summary + --help so the operator sees WHAT authority releases the artifact.
+_TRUST_POSTURE: dict[str, str] = {
+    MODE_ASSISTANT: (
+        "advisory review, no trust root — produces a bare open_pr a human reviews "
+        "+ merges via normal CI (the reviewer's verdict is ADVISORY)"
+    ),
+    MODE_GATED: (
+        "full gate set + human sign-off — a release candidate behind Spec/Build/Test "
+        "+ the tier-scaled assurance family, carrying a WORM evidence pack, gated on "
+        "a recorded Design + Release sign-off"
+    ),
+    MODE_AUTONOMOUS: (
+        "full trust root — hands-off build -> admit -> deploy; deploy-time admission "
+        "is the SOLE release gate (no human sign-off)"
+    ),
+}
+
+
 # ---- result ----------------------------------------------------------------
 
 
@@ -442,11 +598,15 @@ class RunResult:
     thread_id: str
     passed: bool
     phase: str
-    artifact_uri: str | None
+    mode: str = MODE_ASSISTANT
+    """The release mode the run was driven in (assistant | gated | autonomous)."""
+    packs: tuple[str, ...] = ()
+    """The domain packs engaged (by name) — empty when no ``--packs`` were given."""
+    artifact_uri: str | None = None
     """The reviewed FeatureDiff handle uri the PR opens against (the PR subject)."""
-    open_pr_idempotency_key: str | None
-    open_pr_payload_uri: str | None
-    gate_statuses: dict[str, GateStatus]
+    open_pr_idempotency_key: str | None = None
+    open_pr_payload_uri: str | None = None
+    gate_statuses: dict[str, GateStatus] = field(default_factory=dict)
     """Newest-by-name attested status per gate (spec / build / test / review...)."""
     doc_root: str | None = None
     """Where the per-build documentation set was written (when ``docs_dir`` set)."""
@@ -459,6 +619,12 @@ class RunResult:
         lines = [
             f"request:   {self.request!r}",
             f"thread_id: {self.thread_id}",
+            f"mode:      {self.mode}",
+            f"  trust:   {_TRUST_POSTURE.get(self.mode, 'unknown')}",
+        ]
+        if self.packs:
+            lines.append(f"packs:     {', '.join(self.packs)}")
+        lines += [
             f"phase:     {self.phase}",
             f"result:    {'PASS' if self.passed else 'HALTED (no PR)'}",
             "gates:",
@@ -486,11 +652,13 @@ class RunResult:
 def run(
     request: str,
     *,
+    mode: str = MODE_ASSISTANT,
+    packs: list[str] | None = None,
     spec: str | list[str] | None = None,
     thread_id: str = "cli-run",
     resolve: ArtifactResolver | None = None,
     resolve_blob: BlobResolver | None = None,
-    diff_body: str = _PASSING_DIFF,
+    diff_body: str | None = None,
     max_fix_attempts: int = 3,
     docs_dir: str | None = None,
     output_dir: str | None = None,
@@ -507,6 +675,29 @@ def run(
     ----------
     request:
         The one-line natural-language request (e.g. ``"build a URL shortener"``).
+    mode:
+        The deployment-trust mode (lifecycle.md §4; default ``"assistant"`` — the
+        run is byte-identical to the historical request-only run). ``"gated"``
+        threads the Phase-2 supervisor (tiering + Design/Release sign-off +
+        assurance) and the evidence-pack-carrying, release-gated emit; the
+        reviewer's verdict is advisory in Assistant — the deterministic gates own
+        the release bit. ``"autonomous"`` (Phase-4) threads the SAME assurance
+        spine and additionally constructs the dev-grade TRUST ROOT (a hermetic
+        :class:`TrustedBuilder` + the fail-closed :class:`AdmissionController` +
+        the least-privileged :class:`Deployer` + a :class:`DevGateWriteVerifier`,
+        all sharing this run's zone-B key + cross-fork records), so the emit is
+        the hands-off build → admit → deploy chain (admission is the SOLE release
+        gate). Unknown modes are rejected fail-closed.
+    packs:
+        OPTIONAL domain packs to engage (by NAME — ``regulated`` / ``ml_data`` /
+        ``frontend``; T-M5-08). The selected packs are registered in a
+        :class:`PackRegistry` (passed to the graph) AND their declared
+        capabilities are seeded onto ``required_capabilities`` so the composed
+        policy actually engages at triage + the release boundary. A pack can only
+        TIGHTEN the release; crucially it may VETO an unsafe mode (a regulated pack
+        makes hands-off Autonomous UNREACHABLE / forces a human approver-of-record).
+        The veto is enforced FAIL-CLOSED up front: if the requested mode is vetoed
+        the run raises a clear error rather than silently running the vetoed mode.
     spec:
         OPTIONAL full design-spec document (task [8]). ADDITIVE to ``request``: a
         short request summarizes intent while the spec provides the detail. May be
@@ -525,8 +716,11 @@ def run(
         SPEC core path reaches a clean Spec/Build/Test PASS with the StubAdapter.
     diff_body:
         The unified-diff body the synthetic ``resolve_blob`` returns for the
-        FeatureDiff (default: a passing addition; pass an error/failing body to
-        exercise the halted-run path).
+        FeatureDiff. ``None`` (the default) selects a passing addition: the
+        Phase-1 ``_PASSING_DIFF`` for Assistant (byte-identical to today) or the
+        lockfile-bearing ``_ASSURANCE_PASSING_DIFF`` for Gated/Autonomous (the
+        assurance Audit gate reads a lockfile inventory). Pass an explicit
+        error/failing body to exercise the halted-run path.
     max_fix_attempts:
         Convergence bound for the gate fix-loop.
     docs_dir:
@@ -538,6 +732,14 @@ def run(
         written path is surfaced on ``RunResult.output_root``. On a halted run
         nothing is written (no accepted tree to emit).
     """
+    if mode not in MODES:
+        raise ValueError(f"unknown mode {mode!r}; choose one of {', '.join(MODES)}")
+    # The default passing diff is mode-specific: Assistant uses the Phase-1
+    # _PASSING_DIFF (byte-identical to today); Gated/Autonomous use the
+    # lockfile-bearing variant the assurance Audit gate needs. An explicit
+    # diff_body (e.g. a failing body) always wins.
+    if diff_body is None:
+        diff_body = _PASSING_DIFF if mode == MODE_ASSISTANT else _ASSURANCE_PASSING_DIFF
     spec_text = _load_spec(spec)
     store = ArtifactStore()
     tx = MockTransport.scripted(dict(_SCRIPTS), default_verdict="approve")
@@ -560,6 +762,33 @@ def run(
         "metadata": {"langgraph_step": 1},
         "recursion_limit": 200,
     }
+
+    # -- domain packs (T-M5-08) -----------------------------------------------
+    # Build the registry from the selected pack NAMES + collect their capabilities
+    # (seeded onto required_capabilities so the composed policy engages). Then
+    # ENFORCE the mode veto fail-closed BEFORE running: a regulated pack vetoes
+    # hands-off Autonomous (and auto-approve Assistant) — we refuse rather than
+    # silently downgrade, so the operator never believes a vetoed mode ran.
+    pack_names = tuple(packs or ())
+    pack_registry: PackRegistry | None = None
+    pack_capabilities: frozenset[str] = frozenset()
+    if pack_names:
+        pack_registry, pack_capabilities = _build_pack_registry(list(pack_names))
+        _enforce_mode_veto(rt, config, pack_registry, pack_capabilities, requested_mode=mode)
+
+    # -- trust-root chain for AUTONOMOUS (lifecycle.md §4) --------------------
+    # Construct the SAME dev-grade trust-root components the autonomous tests wire,
+    # all sharing THIS run's zone-B key + cross-fork records (so admission
+    # re-verifies the runner-attested gate-state + reads the disqualification
+    # latch). For gated/assistant these stay None (ignored by build_factory_graph).
+    builder = admission = deployer = gate_verifier = None
+    if mode == MODE_AUTONOMOUS:
+        from foundry.trust_root import AdmissionController, Deployer, TrustedBuilder
+
+        builder = TrustedBuilder(ZoneBSigner(_KEY, _KEY_ID), builder_id=_BUILDER_ID)
+        admission = AdmissionController(builder_id=_BUILDER_ID)
+        deployer = Deployer(target=_DEPLOY_TARGET)
+        gate_verifier = DevGateWriteVerifier(_KEY, _KEY_ID, records)
 
     # The terminal ``docs`` graph node assembles the company-shaped documentation
     # set + BUILD-MANIFEST IN-GRAPH (task [3]): the Technical Writer's model spend
@@ -584,6 +813,12 @@ def run(
                 source_dir=source_dir,
                 checkpointer=ckpt.saver,
                 max_fix_attempts=max_fix_attempts,
+                mode=mode,
+                builder=builder,
+                admission=admission,
+                deployer=deployer,
+                gate_verifier=gate_verifier,
+                pack_registry=pack_registry,
                 doc_sink=doc_sink if docs_dir is not None else None,
             )
             # `spec` is additive and seeded ONLY when provided (request-only runs
@@ -592,13 +827,18 @@ def run(
             seed: FactoryState = {"request": request}
             if spec_text:
                 seed["spec"] = spec_text
+            # Seed the selected packs' capabilities so the composed policy engages
+            # at triage + the release boundary (a pack's veto / approver-of-record
+            # / HITL fires off required_capabilities). Default run: never set.
+            if pack_capabilities:
+                seed["required_capabilities"] = sorted(pack_capabilities)
             final = app.invoke(seed, config)
         finally:
             reset_gate_write_verifier(token)
             ckpt.close()
 
     final_state = cast("FactoryState", final)
-    result = _result(request, thread_id, final_state)
+    result = _result(request, thread_id, final_state, mode=mode, packs=pack_names)
     if output_dir is not None and result.passed:
         # On a PASSING build, materialize the FINAL accepted integrated tree
         # (reusing the SAME materialize_workdir + resolve/resolve_blob seams the
@@ -622,8 +862,21 @@ def run(
     return result
 
 
-def _result(request: str, thread_id: str, final: FactoryState) -> RunResult:
-    """Distill the terminal state into a :class:`RunResult` (no bodies, L4)."""
+def _result(
+    request: str,
+    thread_id: str,
+    final: FactoryState,
+    *,
+    mode: str = MODE_ASSISTANT,
+    packs: tuple[str, ...] = (),
+) -> RunResult:
+    """Distill the terminal state into a :class:`RunResult` (no bodies, L4).
+
+    The release action is mode-specific: Assistant/Gated emit an ``open_pr``
+    (Gated's payload is the evidence-pack handle), Autonomous emits a ``deploy``
+    (payload is the admitting decision handle). We surface whichever was emitted
+    on the same ``open_pr_*`` fields so the summary reports the release uniformly.
+    """
     statuses: dict[str, GateStatus] = {}
     for g in final.get("gates") or ():
         prev = statuses.get(g.name)
@@ -631,18 +884,22 @@ def _result(request: str, thread_id: str, final: FactoryState) -> RunResult:
         if prev is None:
             statuses[g.name] = g.status
 
-    open_prs: list[ExternalAction] = [
-        a for a in (final.get("actions") or ()) if a.kind == "open_pr"
-    ]
-    pr = open_prs[0] if open_prs else None
+    # The mode-specific release action: open_pr (assistant/gated) or deploy
+    # (autonomous). At most one is emitted on a released run (fail-closed otherwise).
+    release: ExternalAction | None = next(
+        (a for a in (final.get("actions") or ()) if a.kind in ("open_pr", "deploy")),
+        None,
+    )
     return RunResult(
         request=request,
         thread_id=thread_id,
+        mode=mode,
+        packs=packs,
         passed=terminal_gates_pass(final),
         phase=str(final.get("phase") or "unknown"),
-        artifact_uri=pr.payload_uri if pr is not None else None,
-        open_pr_idempotency_key=pr.idempotency_key if pr is not None else None,
-        open_pr_payload_uri=pr.payload_uri if pr is not None else None,
+        artifact_uri=release.payload_uri if release is not None else None,
+        open_pr_idempotency_key=release.idempotency_key if release is not None else None,
+        open_pr_payload_uri=release.payload_uri if release is not None else None,
         gate_statuses=statuses,
     )
 
@@ -673,6 +930,32 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         output_dir = args[i + 1]
         args = args[:i] + args[i + 2 :]
+    # --mode {assistant|gated|autonomous} (default assistant; task [9]). The
+    # default keeps the run byte-identical to the historical request-only path.
+    mode = MODE_ASSISTANT
+    if "--mode" in args:
+        i = args.index("--mode")
+        if i + 1 >= len(args):
+            print("error: --mode requires a value", file=sys.stderr)
+            return 2
+        mode = args[i + 1]
+        args = args[:i] + args[i + 2 :]
+        if mode not in MODES:
+            print(
+                f"error: unknown --mode {mode!r}; choose one of {', '.join(MODES)}",
+                file=sys.stderr,
+            )
+            return 2
+    # --packs name1,name2 (task [9]): the domain packs to engage (by name). A pack
+    # may VETO the requested mode (enforced fail-closed in run()).
+    packs: list[str] = []
+    if "--packs" in args:
+        i = args.index("--packs")
+        if i + 1 >= len(args):
+            print("error: --packs requires a comma-separated list", file=sys.stderr)
+            return 2
+        packs = [p.strip() for p in args[i + 1].split(",") if p.strip()]
+        args = args[:i] + args[i + 2 :]
     # --spec FILE|DIR (task [8]): may REPEAT to ingest several spec files/dirs.
     spec_paths: list[str] = []
     while "--spec" in args:
@@ -684,8 +967,16 @@ def main(argv: list[str] | None = None) -> int:
         args = args[:i] + args[i + 2 :]
     if not args:
         print(
-            "usage: python -m foundry.cli [--docs DIR] [--out DIR] "
-            '[--spec FILE|DIR ...] "<one-line request>"',
+            "usage: python -m foundry.cli "
+            "[--mode {assistant|gated|autonomous}] [--packs name1,name2] "
+            "[--docs DIR] [--out DIR] [--spec FILE|DIR ...] "
+            '"<one-line request>"\n'
+            "  modes (lifecycle.md §4 deployment-trust):\n"
+            f"    assistant  {_TRUST_POSTURE[MODE_ASSISTANT]}\n"
+            f"    gated      {_TRUST_POSTURE[MODE_GATED]}\n"
+            f"    autonomous {_TRUST_POSTURE[MODE_AUTONOMOUS]}\n"
+            "  packs: regulated | ml_data | frontend "
+            "(a pack may VETO an unsafe mode — fail-closed)",
             file=sys.stderr,
         )
         return 2
@@ -703,7 +994,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    result = run(request, spec=spec_text, docs_dir=docs_dir, output_dir=output_dir)
+    # An unknown pack name OR a pack VETO of the requested mode is a fail-closed
+    # usage error (exit 2) — we never silently run a vetoed/empty configuration.
+    try:
+        result = run(
+            request,
+            mode=mode,
+            packs=packs or None,
+            spec=spec_text,
+            docs_dir=docs_dir,
+            output_dir=output_dir,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     print(result.summary())
     return 0 if result.passed else 1
 

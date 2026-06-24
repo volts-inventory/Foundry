@@ -12,8 +12,19 @@ Topology::
 
     START
       -> factory     # the supervisor subgraph (mode-selected: assistant | gated)
+      -> docs        # (PASS path only) terminal doc-assembly node (task [3])
       -> emit        # mode-selected emit of the PR-equivalent ExternalAction
       -> END
+
+On a clean terminal-gate PASS the run routes ``factory -> docs -> emit``; a
+halted / failed run skips ``docs`` (no writer spend, no doc artifacts) and goes
+``factory -> emit``. The terminal ``docs`` node (task [3]) assembles the
+company-shaped documentation set + BUILD-MANIFEST IN-GRAPH so the Technical
+Writer's model spend is BUDGET-METERED through the same proxy and the authored
+doc artifacts enter the CHECKPOINTED ``artifacts`` channel (rather than running
+out-of-graph after ``invoke``, which spent tokens outside the ledger and never
+checkpointed the doc handles). It is BEST-EFFORT — a docs failure is swallowed
+and never fails the build / blocks the PR.
 
 The ``emit`` node runs ONLY after the supervisor's phases complete. It is the
 ONLY place a Phase-1/Phase-2 external EFFECT (a PR) is requested, and it does so
@@ -66,6 +77,7 @@ from langgraph.graph import END, START, StateGraph
 
 from foundry.agents.implementation.senior_engineer import DESIGN_KIND
 from foundry.canonical import content_digest
+from foundry.docs.assemble import make_documentation_node
 from foundry.domains.governance_hooks import (
     perceptual_hitl_required,
     release_admitted,
@@ -94,12 +106,15 @@ from foundry.schemas.operations import BuildRequest
 from foundry.state.factory_state import FactoryState
 
 if TYPE_CHECKING:
+    from collections.abc import MutableSequence
+
     from langgraph.checkpoint.base import BaseCheckpointSaver
     from langgraph.graph.state import CompiledStateGraph
 
     from foundry.agents._runtime import AgentRuntime
     from foundry.agents.implementation.senior_engineer import ArtifactResolver
     from foundry.context import SymbolIndex
+    from foundry.docs.assemble import DocumentationBundle
     from foundry.domains.registry import PackRegistry
     from foundry.gates.attestation import DevGateWriteVerifier
     from foundry.gates.discriminator import DiscriminatorFactory
@@ -138,6 +153,11 @@ _AUTONOMOUS_BUILD_CONFIG_URI = "cas://build-config/autonomous"
 # Supervisor subgraph node id + the emit node id.
 _FACTORY = "factory"
 _EMIT = "emit"
+# The terminal documentation node id (task [3]). Runs on the PASS path, AFTER the
+# supervisor's terminal gates and BEFORE emit, so the Technical Writer's model
+# spend is budget-metered and the authored doc artifacts enter the checkpointed
+# ``artifacts`` channel.
+_DOCS = "docs"
 
 # The PR is opened only when EVERY terminal gate has a PASS verdict (governance
 # §1/§5): the Spec gate (product/architecture boundary) AND the Build + Test
@@ -570,6 +590,7 @@ def build_factory_graph(
     gate_verifier: DevGateWriteVerifier | None = None,
     discriminator_factory: DiscriminatorFactory | None = None,
     pack_registry: PackRegistry | None = None,
+    doc_sink: MutableSequence[DocumentationBundle] | None = None,
 ) -> CompiledStateGraph[FactoryState]:
     """Compile the full factory graph (Assistant-mode default; Gated/Autonomous opt-in).
 
@@ -644,6 +665,15 @@ def build_factory_graph(
         DEFAULT) engages NO packs → exact prior behavior (back-compat). The KEY
         invariant: adding a 4th pack is ``registry.register(pack)`` — this wiring
         reads the COMPOSED policy generically, never pack-by-pack.
+    doc_sink:
+        OPTIONAL in-process holder (task [3]) the terminal ``docs`` node appends the
+        assembled :class:`DocumentationBundle` to, so an in-process caller (the CLI)
+        can write the ALREADY-assembled tree to disk without re-authoring (no second
+        round of model spend). It is a plain in-memory list — NOT a state channel —
+        so it never rides the checkpoint; the durable record of the authored docs is
+        the doc artifacts the node emits onto the (checkpointed) ``artifacts``
+        channel. ``None`` (the DEFAULT) still runs the docs node (its writer spend is
+        budget-metered + its artifacts checkpointed) but discards the rendered bundle.
 
     Returns the COMPILED top-level graph.
     """
@@ -933,11 +963,39 @@ def build_factory_graph(
 
     _emit_node = autonomous_emit if autonomous else (gated_emit if gated else emit)
 
+    # The terminal documentation node (task [3]). Authors the company-shaped doc
+    # set + manifest IN-GRAPH against the terminal state, so the Technical Writer's
+    # model spend goes through the SAME budget-metered proxy seam and the authored
+    # doc artifacts land on the (checkpointed, outbox-governed) ``artifacts``
+    # channel — rather than out-of-graph after ``invoke`` (the audit finding).
+    # BEST-EFFORT: the node swallows any assembly failure (a docs failure must
+    # never fail the build / block the PR), so it can edge straight into emit.
+    _docs_node = make_documentation_node(rt, sink=doc_sink)
+
+    def docs(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        """Terminal documentation node — a thin concrete ``def`` (the SG2/IM5
+        ``add_node`` mypy seam: a closure typed as the ``NodeFn`` alias trips
+        ``add_node``'s overload resolution). Delegates to the factory-built docs
+        node, which assembles the bundle IN-GRAPH (best-effort) and returns the
+        authored doc artifacts on the ``artifacts`` channel."""
+        return _docs_node(state, config)
+
+    def _route_after_factory(state: FactoryState, config: RunnableConfig) -> str:
+        """Run the docs node only on the PASS path (governance: doc authoring is a
+        post-release deliverable). A halted / failed run skips authoring (no writer
+        spend, no doc artifacts) and goes straight to emit, which itself fail-closes
+        on the terminal-gate guard."""
+        return _DOCS if terminal_gates_pass(state) else _EMIT
+
     g: StateGraph[FactoryState] = StateGraph(FactoryState)
     g.add_node(_FACTORY, supervisor)
+    g.add_node(_DOCS, docs)
     g.add_node(_EMIT, _emit_node)
     g.add_edge(START, _FACTORY)
-    g.add_edge(_FACTORY, _EMIT)
+    # PASS -> docs -> emit; non-PASS -> emit (skip authoring). Both paths reach the
+    # emit node, whose own guard decides whether a PR/release is emitted.
+    g.add_conditional_edges(_FACTORY, _route_after_factory, {_DOCS: _DOCS, _EMIT: _EMIT})
+    g.add_edge(_DOCS, _EMIT)
     g.add_edge(_EMIT, END)
 
     return g.compile(checkpointer=checkpointer)

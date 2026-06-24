@@ -54,6 +54,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from foundry.agents import AgentRuntime
+from foundry.docs import write_bundle
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.durability.checkpointer import FoundryCheckpointer
 from foundry.execution.adapters.stub import StubAdapter
@@ -73,6 +74,7 @@ if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
 
     from foundry.agents.implementation.senior_engineer import ArtifactResolver
+    from foundry.docs import DocumentationBundle
     from foundry.graph.gate_wiring import BlobResolver
     from foundry.schemas.base import Artifact, ExternalAction
     from foundry.state.factory_state import FactoryState
@@ -462,6 +464,15 @@ def run(
         "recursion_limit": 200,
     }
 
+    # The terminal ``docs`` graph node assembles the company-shaped documentation
+    # set + BUILD-MANIFEST IN-GRAPH (task [3]): the Technical Writer's model spend
+    # is budget-metered through the SAME proxy and the authored doc artifacts land
+    # on the checkpointed ``artifacts`` channel. The node appends the assembled
+    # bundle to this in-process sink so the CLI can WRITE the already-assembled
+    # tree to disk without re-authoring (no second round of model spend). The sink
+    # is only wired when ``--docs DIR`` was requested.
+    doc_sink: list[DocumentationBundle] = []
+
     # Install the dev gate-write verifier so the REAL merge_gates admits the
     # runner-attested verdicts (D4); reset its token in finally so it never leaks.
     token = set_gate_write_verifier(DevGateWriteVerifier(_KEY, _KEY_ID, records))
@@ -476,6 +487,7 @@ def run(
                 source_dir=source_dir,
                 checkpointer=ckpt.saver,
                 max_fix_attempts=max_fix_attempts,
+                doc_sink=doc_sink if docs_dir is not None else None,
             )
             final = app.invoke({"request": request}, config)
         finally:
@@ -495,28 +507,19 @@ def run(
             final_state, output_dir, resolve=resolve, resolve_blob=resolve_blob
         )
         result = replace(result, output_root=output_root)
-    if docs_dir is not None:
-        # Assemble the company-shaped documentation set + BUILD-MANIFEST. The
-        # Technical Writer authors the runbook/known-issues/upgrade/perf-cost
-        # docs through the SAME proxy (backend-swappable); rt.cas resolves the
-        # upstream artifact bodies. Best-effort — never alters the gate verdict.
+    if docs_dir is not None and doc_sink:
+        # AUTHORING + the manifest already happened IN-GRAPH (budget-metered,
+        # checkpointed). The CLI only WRITES the already-assembled bundle to disk.
+        # The blanket ``except Exception`` is GONE: the bundle was assembled
+        # fail-safe inside the node, so a missing bundle means docs were skipped
+        # (halted run) or the node swallowed an authoring error — both leave
+        # ``doc_sink`` empty and we simply don't write. A FAILURE here is now only
+        # a disk-write fault, which we let surface (a narrow guard) rather than
+        # re-swallow wiring bugs the assembly deliberately would have raised.
         from dataclasses import replace
 
-        from foundry.docs import assemble_documentation
-
-        try:
-            assemble_documentation(
-                request=request,
-                thread_id=thread_id,
-                state=final_state,
-                rt=rt,
-                passed=result.passed,
-                phase=result.phase,
-                write_to=docs_dir,
-            )
-            result = replace(result, doc_root=docs_dir)
-        except Exception as exc:
-            print(f"warning: documentation assembly failed: {exc}", file=sys.stderr)
+        write_bundle(doc_sink[-1], docs_dir)
+        result = replace(result, doc_root=docs_dir)
     return result
 
 

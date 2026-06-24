@@ -11,6 +11,7 @@ model usage.
 from foundry.docs.assemble import (
     DocumentationBundle,
     assemble_documentation,
+    make_documentation_node,
     write_bundle,
 )
 from foundry.docs.manifest import BuildManifest, build_manifest, render_manifest_md
@@ -22,6 +23,7 @@ __all__ = [
     "RenderedDoc",
     "assemble_documentation",
     "build_manifest",
+    "make_documentation_node",
     "render_manifest_md",
     "write_bundle",
 ]

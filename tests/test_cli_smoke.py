@@ -16,6 +16,7 @@ failing diff body halts the run with NO PR (the PASS guard, governance §1/§5).
 from __future__ import annotations
 
 import importlib
+from pathlib import Path
 
 from foundry.cli import RunResult, run
 from foundry.schemas.gates import GateStatus
@@ -82,3 +83,22 @@ def test_halted_run_emits_no_pr() -> None:
     assert result.passed is False
     assert result.open_pr_idempotency_key is None
     assert result.artifact_uri is None
+
+
+def test_docs_dir_writes_bundle_assembled_in_graph(tmp_path: Path) -> None:
+    """``--docs DIR`` end-to-end: the AUTHORING + manifest happen IN-GRAPH (task
+    [3]); the CLI writes the already-assembled bundle to disk and surfaces the
+    path on ``doc_root``. The PR is still opened (docs never alter the verdict)."""
+    docs_dir = tmp_path / "docs-out"
+    result = run(
+        "build a tiny URL-shortener service",
+        thread_id="cli-smoke-docs",
+        docs_dir=str(docs_dir),
+    )
+    assert result.passed is True
+    assert result.open_pr_idempotency_key is not None  # PR still emitted
+    # The doc tree was written to disk and the path surfaced.
+    assert result.doc_root == str(docs_dir)
+    assert (docs_dir / "README.md").is_file()
+    assert (docs_dir / "BUILD-MANIFEST.json").is_file()
+    assert (docs_dir / "docs/ops/RUNBOOK.md").is_file()

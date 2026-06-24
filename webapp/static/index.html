@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Foundry Workshop</title>
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div id="app">
+    <header id="hud">
+      <div class="hud-left">
+        <span class="logo">🏭 FOUNDRY</span>
+        <span class="elevator" id="floor-tag">FLOOR —</span>
+        <span class="proj" id="proj-tag">no project</span>
+        <span class="mode" id="mode-tag"></span>
+      </div>
+      <div class="hud-right">
+        <span class="gates-mini" id="gates-mini"></span>
+        <button id="new-btn">▶ NEW PROJECT</button>
+      </div>
+    </header>
+
+    <main id="stage">
+      <canvas id="game" width="1280" height="620"></canvas>
+      <aside id="log-panel">
+        <div class="log-title">📜 QUEST LOG</div>
+        <ul id="log"></ul>
+      </aside>
+    </main>
+  </div>
+
+  <!-- New-project dialog -->
+  <div id="new-modal" class="overlay hidden">
+    <div class="dialog">
+      <h2>▶ START A BUILD</h2>
+      <label>What should the factory build?</label>
+      <input id="req-input" type="text" value="build a tiny URL-shortener service" />
+      <div class="row">
+        <label>Mode</label>
+        <select id="mode-select">
+          <option value="assistant">assistant — PR for a human</option>
+          <option value="gated">gated — sign-off + evidence pack</option>
+          <option value="autonomous">autonomous — build · admit · deploy</option>
+        </select>
+      </div>
+      <label class="check"><input type="checkbox" id="supervised" checked /> Supervised (CTO approves each checkpoint)</label>
+      <div class="dialog-actions">
+        <button id="start-btn" class="primary">🔨 BREAK GROUND</button>
+        <button id="cancel-btn">cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Checkpoint dialog (NES-style) -->
+  <div id="cp-modal" class="overlay hidden">
+    <div class="dialog cp">
+      <h2 id="cp-title">CHECKPOINT</h2>
+      <p id="cp-summary"></p>
+      <p class="cp-note">An approve only lets the build reach the gates — it can never ship a failing build.</p>
+      <div class="dialog-actions">
+        <button id="cp-approve" class="primary">✅ APPROVE</button>
+        <button id="cp-reject" class="danger">⛔ REJECT</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/game.js"></script>
+</body>
+</html>

@@ -421,6 +421,34 @@ def test_critic_no_omission_passes_spec(tmp_path, rt, runner, records, verifier)
     )
 
 
+def test_clean_empty_and_blank_critique_materialize_identical_tree(tmp_path):
+    """The conditional-wrapper rationale (gate_wiring writes the critique block
+    ONLY when blocking, so a flagged run's reshaped tree never perturbs the clean
+    path's tree_sha / deploy idempotency key): no-critique, empty-omissions, and
+    whitespace-only-omissions all materialize a BYTE-IDENTICAL criteria.json ->
+    identical tree_sha. Only a REAL (non-blank) omission reshapes the tree. This
+    pins the byte-identity the wrapper-gating depends on AND the materializer/gate
+    blank-omission alignment (spec_gate_blocking ignores whitespace-only entries)."""
+    criteria = (_criterion("c1"), _criterion("c2", security=True))
+    files = {"app.py": _GOOD_MODULE, "test_app.py": _PASSING_TEST}
+
+    def _materialized_sha(critique, sub):
+        diff, uri, blob = _feature_diff(files)
+        state, resolve, resolve_blob = _seed(criteria, ((diff, uri, blob),), critique=critique)
+        return materialize_workdir(
+            state, tmp_path / sub, resolve=resolve, resolve_blob=resolve_blob
+        )
+
+    sha_absent = _materialized_sha(None, "absent")
+    sha_empty = _materialized_sha(_critique(omissions=()), "empty")
+    sha_blank = _materialized_sha(_critique(omissions=("   ", "\t")), "blank")
+    assert sha_absent == sha_empty == sha_blank  # clean path is resume-stable
+
+    # A genuine omission DOES reshape the tree (the FAIL-input path).
+    sha_real = _materialized_sha(_critique(omissions=("no rate-limit abuse criterion",)), "real")
+    assert sha_real != sha_absent
+
+
 # ---- 5. adequacy floor: a vacuous (0-test) suite is FAIL, not PASS -----------
 
 

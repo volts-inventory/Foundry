@@ -169,7 +169,7 @@ containers; bundled OTel+Prometheus+Grafana+Loki. DoD: state behind interfaces,
 config/secrets via env, EKS-migration note. Retires multi-tenant + HA/cloud-KMS
 items for this profile.
 
-### [15] Execution-worker pool — #15 · deps: [14] · ☐
+### [15] Execution-worker pool — #15 · deps: [14] · ✓ (final lane; critic CLEAN; merged)
 Files: execution dispatch layer, worker entrypoint, queue/state.
 Accept: orchestrator emits sandboxed execution tasks to durable state; a pool of
 GENERIC sandbox workers (role from task, not container) claims+runs them with
@@ -269,9 +269,21 @@ container spawning; bounded by provider quota + budget. Tests.
   escalates -> HITL), + regression test. Merged. `foundry evolve <repo> "<change>"`
   re-verifies change-proportionally, re-gates via the same runner, re-admits
   fail-closed, chains provenance to prior, carries prior oracles as a regression suite.
-- **WAVE 6 COMPLETE — ALL 15 BACKLOG TASKS DONE.** Full suite green; every lane
-  passed a fresh-eyes (often adversarial) critic; every critic finding fixed before
-  close. Remaining = optional polish only: `--ideate` cli handoff for [13]; [15]
-  execution-worker pool (infra, deferred). Trust model intact end to end: gates
-  remain the sole authority — checkpoints, journals, ideation, and evolution all sit
-  on top of it without ever being able to release a failing build.
+- **WAVE 6 COMPLETE.** Full suite green; every lane passed a fresh-eyes (often
+  adversarial) critic; every critic finding fixed before close.
+- **[15] execution-worker pool — DONE.** Critic CLEAN (default in-process path
+  byte-identical + un-wired; NO in-app container spawn — two guards proven; budget/
+  per-lineage quota rejects over-cap at admit under a race-safe lock; bounded
+  concurrency; idempotent QUEUED->CLAIMED claim; deterministic). Merged. WorkPool +
+  testable LocalWorkPool drop-in; real container/K8s pool documented as scaffolding.
+  (Drift caught pre-merge: main worktree was on `wave7/workerpool` — switched back to
+  the feature branch before merging.)
+- **🏁 ALL 15 BACKLOG TASKS COMPLETE.** Final tip carries every lane; full suite
+  1745 passed / 1 skipped, ruff + mypy clean (178 modules). Every lane was
+  worktree-isolated → fresh-eyes critic → fixed → merged in order, full suite green
+  after each. Trust model intact end to end: the signed gates remain the SOLE
+  authority — backends, docs, drift policy, modes/packs, checkpoints, the agent
+  journal, ideation, evolution, and the worker pool ALL sit on top of the gates and
+  none can release a failing build. Optional non-backlog polish only: a `--ideate`
+  cli convenience (the two-command ideation→`--spec` handoff already works); real
+  container/K8s worker wiring (scaffolding documented).

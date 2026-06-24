@@ -287,3 +287,13 @@ container spawning; bounded by provider quota + budget. Tests.
   none can release a failing build. Optional non-backlog polish only: a `--ideate`
   cli convenience (the two-command ideation→`--spec` handoff already works); real
   container/K8s worker wiring (scaffolding documented).
+- **[durability] single-host persistence — DONE** (post-backlog, requested). Critic
+  CLEAN. One env seam `FOUNDRY_STATE_DIR`: when set, file/volume-backs the
+  checkpointer + outbox/audit (shared conn), the GlobalRecords TRUST ledgers
+  (stable-FAIL latch / nonces / alpha-look survive restart), and the CAS
+  (FilesystemArtifactStore) — so a single-host deployment survives a restart.
+  `durable_backends(state_dir)` is the one assembly point; cli honors the env.
+  UNSET => byte-identical `:memory:`/in-dict default (1748 tests unchanged).
+  Restart-survival test drops + reopens instances and proves the state persists.
+  Checkpoint+ledger cross-store atomicity = the documented Postgres/multi-host swap
+  point (deferred). Tip: f9d37b2.

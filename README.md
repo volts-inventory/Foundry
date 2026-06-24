@@ -16,6 +16,8 @@ Foundry models a *whole software organization* as a directed graph. A **Product*
 
 This repository is **both the design and a working build**: the design lives in [`PLAN.md`](./PLAN.md) + [`docs/`](./docs/); the implementation is `foundry/` (179 modules) with **1748 passing tests**. It runs end-to-end today from a one-line request on **dev-grade trust roots** (HMAC keys, in-memory stores) — honestly labeled below, behind the same interfaces a production deployment swaps for real ones.
 
+> 📖 **New here? The [Full Documentation Guide](./docs/guide.md)** is the complete how-to — install, concepts, every CLI command & flag, modes, packs, backends, checkpoints, evolution, deployment, the programmatic API, and troubleshooting.
+
 ---
 
 ## Quickstart

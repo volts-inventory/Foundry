@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Any
 # CR5: ``emit_artifact`` is an agents-level shared primitive (one definition in
 # ``foundry.agents._common``); re-exported here so the quality factories' import
 # path stays stable and there is no byte-duplicate to drift.
-from foundry.agents._common import emit_artifact
+from foundry.agents._common import emit_artifact, journal_entry
 
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
@@ -45,6 +45,7 @@ if TYPE_CHECKING:
 __all__ = [
     "MissingVerdictNonceError",
     "emit_artifact",
+    "journal_entry",
     "server_issued_nonce",
     "state_sha",
     "subject_artifact_uri",

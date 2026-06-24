@@ -35,6 +35,7 @@ from foundry.schemas.architecture import PinnedConstraint
 from foundry.schemas.base import ExternalAction
 from foundry.schemas.gates import GateResult, GateTriage
 from foundry.schemas.governance import SignOffRecord
+from foundry.schemas.journal import JournalEntry
 
 # Gate names whose verdicts MUST carry a valid zone-B runner attestation.
 DETERMINISTIC_GATES = frozenset(
@@ -168,6 +169,14 @@ union_by_id = make_union_by_key(_task_key)
 union_triage = make_union_by_key(GateTriage.union_key)
 union_actions = make_union_by_key(_action_key)
 union_sign_offs = make_union_by_key(_sign_off_key)
+
+# Advisory `agent_journal` channel (plan [11]). Mirrors `union_triage` EXACTLY:
+# an additive, order-independent, re-fold-idempotent keyed union. It is a SEPARATE
+# channel from gates/artifacts and is read by NO gate, by `merge_gates`, by
+# `route_after_gates`, or by `admission` — the journal can never be a trust input.
+# (`union_key` keys on content identity, so a resume re-fold of a byte-identical
+# entry coalesces; genuinely distinct notes coexist.)
+union_journal = make_union_by_key(JournalEntry.union_key)
 
 
 # ---- artifacts: set-union by content address --------------------------------

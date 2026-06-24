@@ -30,7 +30,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from foundry.agents._common import as_text, cas_uri, emit_artifact, persist_prose
+from foundry.agents._common import (
+    as_text,
+    cas_uri,
+    emit_artifact,
+    journal_entry,
+    persist_prose,
+)
 from foundry.context import SymbolIndex
 from foundry.schemas.architecture import (
     ADR,
@@ -228,12 +234,37 @@ def make_principal_architect_node(
             emit_artifact(ownership, "ownership_map", NODE_ID, seqs["ownership"], store=rt.cas),
         ]
 
+        # ADVISORY journal entry (plan [11]) — derived from data this node ALREADY
+        # produced (zero token cost, no extra model call). Rides the SEPARATE
+        # `agent_journal` channel; observability ONLY — never a trust input, read
+        # by no gate/router (rollout to remaining nodes is mechanical, see PM node).
+        journal_seq = rt.seq(config, NODE_ID, "journal")
+        note = journal_entry(
+            node_id=NODE_ID,
+            role="Principal Architect",
+            seq=journal_seq,
+            summary=(
+                f"Chose architecture {design.title!r}: {len(adrs)} ADRs, "
+                f"{len(interfaces)} interface contracts, {len(constraints)} "
+                "pinned constraints."
+            ),
+            assumptions=(
+                f"Retrieved {len(spans)} code span(s) for impact analysis.",
+            ),
+            concerns=(
+                ("No ADRs recorded — decisions lack rejected-alternative rationale.",)
+                if not adrs
+                else ()
+            ),
+        )
+
         # pinned_constraints flow to their own channel (merge_constraints reducer:
         # union by id, latest by seq) so they reach downstream task packets
         # VERBATIM (architecture.md §8). Artifacts ride the artifacts channel.
         return {
             "artifacts": artifacts,
             "pinned_constraints": constraints,
+            "agent_journal": [note],
         }
 
     return _node

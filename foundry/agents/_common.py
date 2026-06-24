@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 from foundry.canonical import content_digest
 from foundry.schemas.base import Artifact, FrozenModel
+from foundry.schemas.journal import JournalEntry
 from foundry.state.seq import Seq
 
 if TYPE_CHECKING:
@@ -114,3 +115,40 @@ def emit_artifact(
 def as_text(obj: Any) -> str:
     """Canonical, sort-stable JSON serialization (deterministic prompts/digests)."""
     return json.dumps(obj, sort_keys=True, ensure_ascii=False)
+
+
+def journal_entry(
+    *,
+    node_id: str,
+    role: str,
+    seq: Seq,
+    summary: str,
+    assumptions: tuple[str, ...] = (),
+    concerns: tuple[str, ...] = (),
+    confidence: float | None = None,
+) -> JournalEntry:
+    """Build one ADVISORY :class:`JournalEntry` for the ``agent_journal`` channel.
+
+    Reusable across every agent node: a node returns ``{"agent_journal": [entry]}``
+    on its OWN channel — never on ``gates``/``gate_triage`` — to record how its turn
+    went for the "interview the agent" affordance (:mod:`foundry.agents.interview`).
+
+    HARD CONSTRAINT (plan [11]): the journal is STRICTLY ADVISORY observability —
+    NEVER a trust input. No gate, ``merge_gates``, ``route_after_gates``, or
+    ``admission`` reads ``agent_journal``; an entry cannot influence whether a
+    build passes (agents propose, only signed gates decide, L5).
+
+    Token cost is zero by default: the caller derives ``summary``/``assumptions``/
+    ``concerns`` from data the node ALREADY has (the parsed completion, the
+    artifacts it just minted) — NOT from a new model call. A richer model-authored
+    narrative must be opt-in / cost-gated by the caller, default off.
+    """
+    return JournalEntry(
+        node_id=node_id,
+        role=role,
+        summary=summary,
+        assumptions=assumptions,
+        concerns=concerns,
+        confidence=confidence,
+        seq=seq,
+    )

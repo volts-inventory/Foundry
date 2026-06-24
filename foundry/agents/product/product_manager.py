@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from foundry.agents.product._common import emit_artifact, persist_prose
+from foundry.agents.product._common import emit_artifact, journal_entry, persist_prose
 from foundry.schemas.product import PRD, AcceptanceCriterion, Criticality
 
 if TYPE_CHECKING:
@@ -141,11 +141,36 @@ def make_product_manager_node(rt: AgentRuntime) -> NodeFn:
                 for c in criteria
             ),
         ]
+        # ADVISORY journal entry (plan [11]) — derived purely from data this node
+        # ALREADY produced (no extra model call ⇒ zero token cost). It rides the
+        # SEPARATE `agent_journal` channel and is observability ONLY: no gate or
+        # router reads it, so it can never affect whether the build passes.
+        # NOTE: full rollout to the remaining ~dozen nodes is MECHANICAL — same
+        # three lines (derive a summary, build a journal_entry, add the channel
+        # key). This node + principal_architect + reviewer_critic demonstrate the
+        # convention for the representative product / architecture / quality layers.
+        journal_seq = rt.seq(config, _NODE_ID, "journal")
+        high_risk = sum(1 for c in criteria if c.criticality is Criticality.HIGH_RISK)
+        note = journal_entry(
+            node_id=_NODE_ID,
+            role="Product Manager",
+            seq=journal_seq,
+            summary=(
+                f"Authored PRD {prd.title!r} with {len(criteria)} acceptance "
+                f"criteria ({high_risk} high-risk)."
+            ),
+            assumptions=(f"Built from request: {_intent_text(state)[:120]}",),
+            concerns=(
+                ("No acceptance criteria derived from the intent.",) if not criteria else ()
+            ),
+        )
+
         # required_capabilities flow to their own union channel so the
         # conditional UX/specialist routers can read them downstream (arch §7).
         return {
             "artifacts": artifacts,
             "required_capabilities": list(prd.required_capabilities),
+            "agent_journal": [note],
         }
 
     return _node

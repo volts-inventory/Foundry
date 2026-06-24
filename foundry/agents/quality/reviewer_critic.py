@@ -26,6 +26,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from foundry.agents.quality._common import (
+    journal_entry,
     server_issued_nonce,
     state_sha,
     subject_artifact_uri,
@@ -133,9 +134,29 @@ def make_reviewer_critic_node(rt: AgentRuntime) -> NodeFn:
             gate_name=_GATE_NAME,
         )
 
+        # ADVISORY journal entry (plan [11]). It merely ECHOES the verdict the
+        # proxy already stamped — derived from `result.gate_result` (zero extra
+        # cost, no new model call) — onto the SEPARATE `agent_journal` channel.
+        # CRITICAL: this is observability only. The TRUST path is the signed
+        # `gates` write below; `_merge_gates` reads ONLY that. The journal is
+        # read by no gate/router, so even if its text disagreed with the verdict
+        # it could not change the outcome (rollout to other nodes is mechanical).
+        journal_seq = rt.seq(config, _NODE_ID, "journal")
+        note = journal_entry(
+            node_id=_NODE_ID,
+            role="Reviewer / Critic",
+            seq=journal_seq,
+            summary=(
+                f"Reviewed {subject_uri} -> verdict "
+                f"{result.gate_result.status.value}."
+            ),
+            assumptions=(f"Judged against state {run_against}.",),
+            concerns=tuple(result.gate_result.findings),
+        )
+
         # The verdict the proxy stamped (binding + provenance) — the agent never
         # signed it. _merge_gates admits it on a valid binding + fresh nonce +
         # no latch; it is dropped fail-closed otherwise (L5).
-        return {"gates": [result.gate_result]}
+        return {"gates": [result.gate_result], "agent_journal": [note]}
 
     return _node

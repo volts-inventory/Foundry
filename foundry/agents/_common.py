@@ -55,6 +55,31 @@ def cas_uri(body: Any) -> str:
     return f"cas://sha256/{content_digest(body)}"
 
 
+def persist_prose(text: str, *, store: ArtifactStore | None = None) -> str:
+    """Mint the ``cas://`` handle for a narrative body AND persist the body.
+
+    The PM/architect author prose (PRD body, design body, ADR rationale) that the
+    doc set wants to inline. Historically the node only computed ``cas_uri(text)``
+    (the handle) and DISCARDED ``text``, so the assembler resolved nothing and
+    ``render.py`` emitted a dead handle (task [2]). This stores the body as an
+    allowlisted :class:`~foundry.schemas.docs.ProseBody` UNDER that exact handle
+    (``put_body_at``), so ``store.get_body(uri)`` round-trips the prose.
+
+    Returns the ``cas_uri(text)`` handle UNCHANGED — identical to the historical
+    ``*_uri`` value — so identity is byte-stable and the change is purely
+    additive. When ``store`` is ``None`` (synthetic-resolver tests) this is
+    mint-only: EXACTLY the historical behaviour.
+    """
+    uri = cas_uri(text)
+    if store is not None:
+        # Imported here (not at module top) so the agent-layer common helpers
+        # don't take a hard import dep on the docs schema package.
+        from foundry.schemas.docs import ProseBody
+
+        store.put_body_at(uri, ProseBody(text=text))
+    return uri
+
+
 def emit_artifact(
     model: FrozenModel,
     kind: str,

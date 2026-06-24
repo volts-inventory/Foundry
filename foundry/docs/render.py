@@ -4,10 +4,12 @@ Each function turns a typed artifact body (or a small collection of them) into a
 :class:`RenderedDoc` — a path + title + markdown body. No I/O, no model calls,
 no state: rendering is deterministic and unit-testable in isolation. The
 upstream artifacts (PRD, SystemDesign, ADRs, …) are rendered from their
-STRUCTURED fields — the upstream prose bodies behind ``prd_uri`` / ``design_uri``
-are content-addressed handles that the factory does not persist, so we render
-what is actually durable (title, components, criteria text, decisions) and note
-where a narrative body would live.
+STRUCTURED fields PLUS the narrative prose body behind ``prd_uri`` /
+``design_uri`` / ADR ``body_uri`` — the producing node now persists that prose
+into the CAS (task [2]), so the assembler resolves it and passes it in via the
+optional ``prose=`` arg, which the renderer INLINES. When prose is absent (a
+synthetic / unstored handle) the renderer falls back to noting the dead handle —
+the historical output — so rendering stays total.
 """
 
 from __future__ import annotations
@@ -66,10 +68,28 @@ def _cell(value: object) -> str:
 # ---- upstream artifacts (rendered from structured fields) -------------------
 
 
-def render_prd(prd: PRD, criteria: tuple[AcceptanceCriterion, ...]) -> RenderedDoc:
+def _prose_block(prose: str | None, uri: str, *, label: str) -> str:
+    """Inline the resolved narrative when present; otherwise note its handle.
+
+    Keeps the renderers pure: the assembler resolves the body from the store and
+    passes it in. ``prose=None`` (or empty) falls back to the dead-handle note —
+    EXACTLY the historical output, so a synthetic / unstored handle still renders.
+    """
+    text = (prose or "").strip()
+    if text:
+        return f"{text}\n"
+    return f"> {label}: `{uri}`\n"
+
+
+def render_prd(
+    prd: PRD,
+    criteria: tuple[AcceptanceCriterion, ...],
+    *,
+    prose: str | None = None,
+) -> RenderedDoc:
     parts = [
         _h(f"Product Requirements — {prd.title or 'Untitled'}"),
-        f"> Narrative body: `{prd.prd_uri}`\n",
+        _prose_block(prose, prd.prd_uri, label="Narrative body"),
         "## Required capabilities\n",
         _bullets(prd.required_capabilities),
         "\n## Acceptance criteria\n",
@@ -87,10 +107,10 @@ def render_prd(prd: PRD, criteria: tuple[AcceptanceCriterion, ...]) -> RenderedD
     return RenderedDoc("docs/PRD.md", "Product Requirements", "\n".join(parts) + "\n")
 
 
-def render_design(design: SystemDesign) -> RenderedDoc:
+def render_design(design: SystemDesign, *, prose: str | None = None) -> RenderedDoc:
     parts = [
         _h(f"System Design — {design.title or 'Untitled'}"),
-        f"> Narrative body: `{design.design_uri}`\n",
+        _prose_block(prose, design.design_uri, label="Narrative body"),
         "## Components\n",
         _bullets(design.components),
         "\n## Architecture Decision Records\n",
@@ -103,7 +123,10 @@ def render_design(design: SystemDesign) -> RenderedDoc:
     )
 
 
-def render_adrs(adrs: tuple[ADR, ...]) -> RenderedDoc:
+def render_adrs(
+    adrs: tuple[ADR, ...], *, prose: dict[str, str] | None = None
+) -> RenderedDoc:
+    prose = prose or {}
     parts = [_h("Architecture Decision Records")]
     if not adrs:
         parts.append("_No ADRs recorded._")
@@ -111,7 +134,8 @@ def render_adrs(adrs: tuple[ADR, ...]) -> RenderedDoc:
         parts.append(f"## {adr.id} — {adr.title}\n")
         parts.append(f"**Status:** {adr.status}\n")
         parts.append(f"**Decision:** {adr.decision}\n")
-        parts.append(f"> Full rationale: `{adr.body_uri}`\n")
+        parts.append("**Rationale:**\n")
+        parts.append(_prose_block(prose.get(adr.id), adr.body_uri, label="Full rationale"))
         parts.append("**Rejected alternatives:**\n")
         parts.append(_bullets(adr.rejected_alternatives, empty="_None recorded._"))
         parts.append("")

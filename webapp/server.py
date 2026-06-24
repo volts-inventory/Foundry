@@ -167,8 +167,14 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/stream/"):
             self._stream(path.rsplit("/", 1)[-1])
             return
-        if path == "/" or not path.startswith("/api"):
-            self._serve_static("index.html" if path == "/" else path)
+        if path == "/":
+            self._serve_static("index.html")
+            return
+        if path.startswith("/static/"):
+            self._serve_static(path[len("/static/"):])
+            return
+        if not path.startswith("/api"):
+            self._serve_static(path)  # e.g. /favicon.ico
             return
         self._json(404, {"error": "not found"})
 

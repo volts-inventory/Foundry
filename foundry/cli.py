@@ -74,7 +74,7 @@ from foundry.graph.supervisor import (
     MODE_GATED,
     normalize_checkpoints,
 )
-from foundry.proxy import ModelProviderProxy
+from foundry.proxy import ModelProviderProxy, build_backend
 from foundry.proxy.test_doubles import MockTransport
 from foundry.schemas.architecture import OwnershipMap, SystemDesign
 from foundry.schemas.base import FrozenModel
@@ -93,6 +93,7 @@ if TYPE_CHECKING:
     from foundry.domains.contract import DomainPackContract
     from foundry.domains.registry import PackRegistry
     from foundry.graph.gate_wiring import BlobResolver
+    from foundry.proxy.cli_transports import BackendName
     from foundry.schemas.base import Artifact, ExternalAction
     from foundry.schemas.checkpoint import CheckpointBoundary
     from foundry.state.factory_state import FactoryState
@@ -125,6 +126,37 @@ _DEPLOY_TARGET = "prod"
 # The release modes the CLI exposes (the supervisor mode constants; assistant is the
 # DEFAULT — byte-identical to the historical request-only run).
 MODES = (MODE_ASSISTANT, MODE_GATED, MODE_AUTONOMOUS)
+
+# The model backends selectable via ``--backend`` / run(backend=). "mock" (DEFAULT)
+# is the deterministic scripted MockTransport — keyless, no network, the historical
+# smoke behavior. The others route the factory's model egress through a REAL backend
+# via the single-egress proxy (foundry/proxy/cli_transports.build_backend): "anthropic"
+# (SDK; needs ANTHROPIC_API_KEY), "claude-cli" (`claude -p`), "codex" (`codex exec`),
+# "ollama-gemma" (local Ollama). Picking a real backend makes real, metered model
+# calls; the coding substrate + materialization in THIS smoke CLI stay dev-grade
+# (StubAdapter + synthetic resolver), so --backend exercises the proxy/lineage/
+# determinism/manifest path, not a real code-writing adapter (that is a separate seam).
+_MOCK_BACKEND = "mock"
+BACKENDS = (_MOCK_BACKEND, "anthropic", "claude-cli", "codex", "ollama-gemma")
+
+
+def _build_proxy(backend: str) -> ModelProviderProxy:
+    """Build the single-egress proxy for the chosen backend (the dev zone-B signer
+    is injected so the judgment path can stamp verdicts regardless of backend).
+
+    ``"mock"`` is the deterministic scripted transport (the default, keyless); any
+    other name is delegated to ``build_backend`` (a real egress). An unknown name
+    fails closed with a clear ``ValueError``."""
+    if backend not in BACKENDS:
+        raise ValueError(
+            f"unknown backend {backend!r}; choose one of {', '.join(BACKENDS)}"
+        )
+    signer = ZoneBSigner(_KEY, _KEY_ID)
+    if backend == _MOCK_BACKEND:
+        tx = MockTransport.scripted(dict(_SCRIPTS), default_verdict="approve")
+        return ModelProviderProxy(tx, signer=signer)
+    # Past the guard above, `backend` is one of the real BackendName literals.
+    return build_backend(cast("BackendName", backend), signer=signer)
 
 # The first-party domain packs selectable via ``--packs`` (T-M5-08). Mapped by the
 # stable pack NAME (``pack.name``); a NEW pack is added here AND via register() — but
@@ -620,6 +652,8 @@ class RunResult:
     phase: str
     mode: str = MODE_ASSISTANT
     """The release mode the run was driven in (assistant | gated | autonomous)."""
+    backend: str = _MOCK_BACKEND
+    """The model backend the proxy used (mock | anthropic | claude-cli | codex | ollama-gemma)."""
     packs: tuple[str, ...] = ()
     """The domain packs engaged (by name) — empty when no ``--packs`` were given."""
     artifact_uri: str | None = None
@@ -648,6 +682,9 @@ class RunResult:
             f"thread_id: {self.thread_id}",
             f"mode:      {self.mode}",
             f"  trust:   {_TRUST_POSTURE.get(self.mode, 'unknown')}",
+            f"backend:   {self.backend}  "
+            + ("(deterministic mock — no model call)"
+               if self.backend == _MOCK_BACKEND else "(real model egress)"),
         ]
         if self.packs:
             lines.append(f"packs:     {', '.join(self.packs)}")
@@ -744,6 +781,7 @@ def run(
     mode: str = MODE_ASSISTANT,
     packs: list[str] | None = None,
     spec: str | list[str] | None = None,
+    backend: str = _MOCK_BACKEND,
     thread_id: str = "cli-run",
     resolve: ArtifactResolver | None = None,
     resolve_blob: BlobResolver | None = None,
@@ -843,6 +881,8 @@ def run(
     """
     if mode not in MODES:
         raise ValueError(f"unknown mode {mode!r}; choose one of {', '.join(MODES)}")
+    if backend not in BACKENDS:
+        raise ValueError(f"unknown backend {backend!r}; choose one of {', '.join(BACKENDS)}")
     # Resolve the checkpoint boundary set up front (fail-closed on a typo'd name).
     ckpt_set = normalize_checkpoints(checkpoints)
     ckpt_names = tuple(sorted(b.value for b in ckpt_set))
@@ -874,8 +914,7 @@ def run(
         store = ArtifactStore()
         records = GlobalRecords()
         ckpt = FoundryCheckpointer()
-    tx = MockTransport.scripted(dict(_SCRIPTS), default_verdict="approve")
-    proxy = ModelProviderProxy(tx, signer=ZoneBSigner(_KEY, _KEY_ID))
+    proxy = _build_proxy(backend)
     rt = AgentRuntime(proxy=proxy, adapter=StubAdapter(), cas=store)
 
     runner = TwoZoneGateRunner(ZoneBSigner(_KEY, _KEY_ID), records, _SCANNER_REV, _LINEAGE_REV)
@@ -985,6 +1024,7 @@ def run(
         thread_id,
         final_state,
         mode=mode,
+        backend=backend,
         packs=pack_names,
         checkpoints=ckpt_names,
         paused_at=paused_at,
@@ -1018,6 +1058,7 @@ def _result(
     final: FactoryState,
     *,
     mode: str = MODE_ASSISTANT,
+    backend: str = _MOCK_BACKEND,
     packs: tuple[str, ...] = (),
     checkpoints: tuple[str, ...] = (),
     paused_at: str | None = None,
@@ -1053,6 +1094,7 @@ def _result(
         request=request,
         thread_id=thread_id,
         mode=mode,
+        backend=backend,
         packs=packs,
         passed=passed,
         phase=str(final.get("phase") or "unknown"),
@@ -1203,6 +1245,23 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
+    # --backend {mock|anthropic|claude-cli|codex|ollama-gemma} (default mock — the
+    # deterministic keyless transport, byte-identical to the historical run). A real
+    # backend routes model egress through the proxy and makes metered model calls.
+    backend = _MOCK_BACKEND
+    if "--backend" in args:
+        i = args.index("--backend")
+        if i + 1 >= len(args):
+            print("error: --backend requires a value", file=sys.stderr)
+            return 2
+        backend = args[i + 1]
+        args = args[:i] + args[i + 2 :]
+        if backend not in BACKENDS:
+            print(
+                f"error: unknown --backend {backend!r}; choose one of {', '.join(BACKENDS)}",
+                file=sys.stderr,
+            )
+            return 2
     # --packs name1,name2 (task [9]): the domain packs to engage (by name). A pack
     # may VETO the requested mode (enforced fail-closed in run()).
     packs: list[str] = []
@@ -1247,6 +1306,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "usage: python -m foundry.cli "
             "[--mode {assistant|gated|autonomous}] [--packs name1,name2] "
+            "[--backend {mock|anthropic|claude-cli|codex|ollama-gemma}] "
             "[--checkpoints [all|product,design,release]] "
             "[--docs DIR] [--out DIR] [--spec FILE|DIR ...] "
             '"<one-line request>"\n'
@@ -1254,6 +1314,8 @@ def main(argv: list[str] | None = None) -> int:
             f"    assistant  {_TRUST_POSTURE[MODE_ASSISTANT]}\n"
             f"    gated      {_TRUST_POSTURE[MODE_GATED]}\n"
             f"    autonomous {_TRUST_POSTURE[MODE_AUTONOMOUS]}\n"
+            "  backend: mock (default — keyless, deterministic) | anthropic | "
+            "claude-cli | codex | ollama-gemma (real model egress)\n"
             "  packs: regulated | ml_data | frontend "
             "(a pack may VETO an unsafe mode — fail-closed)\n"
             "  checkpoints (plan [10]): pause at stage boundaries for human "
@@ -1291,6 +1353,7 @@ def main(argv: list[str] | None = None) -> int:
             mode=mode,
             packs=packs or None,
             spec=spec_text,
+            backend=backend,
             docs_dir=docs_dir,
             output_dir=output_dir,
             checkpoints=checkpoints,

@@ -117,7 +117,11 @@ def _decomposition_payload() -> str:
 
 
 def _runtime() -> AgentRuntime:
-    transport = MockTransport(completions=[_decomposition_payload()])
+    # One decomposition call PER Tech-Lead now (Wave B fan-out): serve the full
+    # scripted payload on every call (default_text covers the 2nd..Nth lead) —
+    # each lead extracts the criteria for its own ownership units.
+    body = _decomposition_payload()
+    transport = MockTransport(completions=[body], default_text=body)
     proxy = ModelProviderProxy(transport, signer=ZoneBSigner(KEY, KEY_ID))
     return AgentRuntime(proxy=proxy, adapter=StubAdapter())
 

@@ -111,13 +111,29 @@ green → merge. No wave lands unless the trust/determinism invariants below hol
   false-fires on `tokenizer`/`interview`/`metadata`), erring toward precision
   with a `backend` fallback. Ships dark — nothing consumes it yet.
 
-- **Wave B — Tech-Lead fan-out (decomposition parallelism).**
-  Replace the single Senior node with a `Send`-per-owner fan-out: each Tech-Lead
-  decomposes only its owner's units into Tasks, tagging each Task with its
-  `area`/`domain` (for lineage). Fan-in merges on the existing keyed `tasks`
-  channel (union by id — unchanged). Behavior-equivalent to today when there's one
-  owner. *Critic focus: the merged task set is identical (same ids, same
-  merge_order) to the pre-fan-out output — proven by a tree-sha identity test.*
+- **Wave B — Tech-Lead per-domain decomposition. ✅ DONE.**
+  **Decisions (deviate from the original plan, both deliberate):**
+  (1) *In-node loop, not LangGraph `Send`.* There is no `Send` precedent in this
+  codebase (it uses `add_conditional_edges`), and `Send` interacts with the
+  resumable checkpointer / `interrupt()` boundaries in ways that aren't worth the
+  risk for *decomposition* — which is cheap reasoning the `work_pool` design
+  itself keeps "in-process." So the existing `senior_engineer` node loops over
+  `OwnershipMap.leads()`, one focused `proxy.complete` per lead. NODE_ID stays
+  `"senior_engineer"` (it's embedded in `Seq`; renaming would churn every task
+  seq). The real parallelism lives in **Wave C's `WorkPool`** (threads), which
+  needs no `Send`. (2) *No `area` tag stored on the `Task`.* Consistent with
+  Wave A: the Task record stays byte-identical, and lineage is **derived in
+  Wave C** by recomputing `_task_id(unit)` over the OwnershipMap and reading
+  `area_of(owner_of(unit))` — the owners map is frozen + content-addressed, so the
+  derived lineage is implicitly content-addressed too.
+  **Cost:** decomposition is now N model calls (one per owner) instead of one
+  global call — an intentional N× multiplier that buys per-domain focus and that
+  Wave D's budget tree meters. (§5.5's "fan-out multiplies callers, not egresses"
+  holds at the egress; the call *count* does rise.)
+  Implemented in `foundry/agents/implementation/senior_engineer.py` + per-lead
+  advisory journal entries. Identity **proven** by the critic: single-owner →
+  byte-identical (ids, branches, spec_uris, seq order, criteria, one call);
+  multi-owner → same ids + same `merge_order`, per-domain criteria only.
 
 - **Wave C — Parallel IC pool (execution parallelism).**
   Swap the Junior's sequential `for task in ready` loop for a `Send`-per-task

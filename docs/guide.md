@@ -158,11 +158,15 @@ proxy = backend_from_env()               # reads FOUNDRY_MODEL_BACKEND (default 
 | `--mode {assistant\|gated\|autonomous}` | release posture (default `assistant`) |
 | `--packs a,b` | engage domain packs (`regulated`, `ml_data`, `frontend`); may veto the mode |
 | `--spec FILE\|DIR` | seed a design doc (repeatable) |
+| `--backend {mock\|anthropic\|claude-cli\|codex\|ollama-gemma}` | model backend (default `mock`, keyless) |
 | `--out DIR` | write the source tree (on pass) |
 | `--docs DIR` | write the doc set + `BUILD-MANIFEST` |
 | `--checkpoints [all\|b1,b2]` | pause at stage boundaries |
+| `--state-dir DIR` | durable file/volume-backed state (overrides `FOUNDRY_STATE_DIR`) |
+| `--thread-id NAME` | run identity / resume key (default `cli-run`) |
+| `--max-fix-attempts N` | gate fix-loop bound (default 3) |
 
-**`python -m foundry.cli evolve <PRIOR_DIR> "<change>" --apply <OVERLAY_DIR> [--guardian-approve]`**
+**`python -m foundry.cli evolve <PRIOR_DIR> "<change>" --apply <OVERLAY_DIR> [--guardian-approve] [--strict]`** — `--strict` exits non-zero if the re-gate doesn't release.
 
 **`python -m foundry.ideation [--mock] [--rounds N] "<idea>"`** → prints spec markdown
 

@@ -121,7 +121,7 @@ Accept: Codex extraction handles current `item.completed`/`agent_message` shapes
 and raises `TransportError` on empty text at zero-exit; Claude handles
 modelUsage-absent envelopes; real-shape fixtures in the suite.
 
-### [7] Drift actionable — #10 · deps: [5] · ☐ (NOT concurrent with [3])
+### [7] Drift actionable — #10 · deps: [5] · ✓ (Wave 3; critic CLEAN; merged)
 Files: `proxy/model_provider_proxy.py`, `observability/drift_alerts.py`, `docs/manifest.py`.
 Accept: drift policy decided + implemented (fail-closed for gate/judgment or
 explicitly advisory + live monitor wired); Ollama tier-mismatch surfaced; tests.

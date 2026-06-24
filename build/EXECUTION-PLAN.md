@@ -75,7 +75,7 @@ BLOCKER/MAJOR, the implementation is partial, or the full suite regressed.
 | **2** | [3] Doc-node *(needs [1])* | [6] CLI parser hardening | [11] Agent journal | [14] cont. | ✓ DONE |
 | **3** | [8] Spec ingestion | [7] Drift actionable | — | ([15] deferred to a later wave) | ✓ DONE |
 | **4** | [9] `--mode`/`--packs` *(needs [8])* | proxy done | — | [13] ideation *module* *(needs [8])* | ✓ DONE |
-| **5** | [10] Checkpoint/HITL *(needs [9])* | — | — | [13] cli integration | ☐ |
+| **5** | [10] Checkpoint/HITL *(needs [9])* | — | — | [13] cli integration | ✓ DONE |
 | **6** | [12] Evolution route *(needs [1]+[8])* | — | — | — | ☐ |
 
 **Critical path:** [1]→[3]→[8]→[9]→[10]→[12] (~6 serial integrations). All other
@@ -136,7 +136,7 @@ Files: `cli.py`, `build_factory_graph` wiring (+ trust-root construction for gat
 Accept: `--mode {assistant|gated|autonomous}` + `--packs ...`; gated/autonomous
 construct the trust-root components; surface the per-mode trust posture; tests.
 
-### [10] Checkpoint/HITL mode — #3 · deps: [9] · ☐
+### [10] Checkpoint/HITL mode — #3 · deps: [9] · ✓ (Wave 5; adversarial critic CLEAN; merged)
 Files: `graph/supervisor.py`/`factory_graph.py`, governance sign-off wiring, `cli.py`, schemas.
 Accept: selectable mode that pauses at stage boundaries, surfaces stage
 artifacts/evidence, and resumes on human approve/reject (reuses existing Gated +
@@ -251,3 +251,13 @@ container spawning; bounded by provider quota + budget. Tests.
   Gated/Autonomous + domain packs now reachable from the CLI; ideation front-end
   ships a spec consumable by `--spec`. NEXT: Wave 5 — [10] checkpoint/HITL mode
   (+ the small [13] cli `--ideate` handoff). Then Wave 6: [12] evolution route.
+- **[10] checkpoint/HITL — DONE.** ADVERSARIAL critic CLEAN — a checkpoint approve
+  CANNOT release a failing build (isolated `checkpoint_decisions` channel read only
+  by its router + a purely-subtractive emit guard ANDed after the unchanged gate
+  predicates; reject halts; malformed→fail-closed REJECT; default-OFF byte-identical;
+  sign-off not bypassed; key test in assistant+gated). Merged. Pauses at stage
+  boundaries via LangGraph interrupt() on the resumable checkpointer; surfaces the
+  stage artifacts + agent journal for inspection.
+- **WAVE 5 COMPLETE** — [10] merged, adversarial critic CLEAN, full suite green
+  (1720). 14/15 done. NEXT: Wave 6 — [12] evolution route (final feature; needs
+  [1]+[8] ✓). Optional polish: the `--ideate` cli handoff for [13]; [15] worker pool.

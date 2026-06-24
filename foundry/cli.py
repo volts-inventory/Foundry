@@ -49,7 +49,7 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -501,8 +501,6 @@ def run(
         # (reusing the SAME materialize_workdir + resolve/resolve_blob seams the
         # terminal gates ran against) and write the real source files to disk.
         # Halted runs write nothing — there is no accepted tree to emit.
-        from dataclasses import replace
-
         output_root = _write_output_tree(
             final_state, output_dir, resolve=resolve, resolve_blob=resolve_blob
         )
@@ -516,8 +514,6 @@ def run(
         # ``doc_sink`` empty and we simply don't write. A FAILURE here is now only
         # a disk-write fault, which we let surface (a narrow guard) rather than
         # re-swallow wiring bugs the assembly deliberately would have raised.
-        from dataclasses import replace
-
         write_bundle(doc_sink[-1], docs_dir)
         result = replace(result, doc_root=docs_dir)
     return result

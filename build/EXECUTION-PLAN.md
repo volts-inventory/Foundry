@@ -72,7 +72,7 @@ BLOCKER/MAJOR, the implementation is partial, or the full suite regressed.
 | Wave | Spine | Proxy | Gates / Authoring / Journal | Infra / Ideation | Status |
 |------|-------|-------|------------------------------|------------------|--------|
 | **1** | [1] Output dir | [5] Backend determinism | [4] Spec-gate critic · [2] Prose bodies | [14] Compose profile | ✓ DONE |
-| **2** | [3] Doc-node *(needs [1])* | [6] CLI parser hardening | [11] Agent journal | [14] cont. | ☐ |
+| **2** | [3] Doc-node *(needs [1])* | [6] CLI parser hardening | [11] Agent journal | [14] cont. | ✓ DONE |
 | **3** | [8] Spec ingestion | [7] Drift actionable | — | [15] Worker pool *(needs [14])* | ☐ |
 | **4** | [9] `--mode`/`--packs` *(needs [8])* | proxy done | — | [13] ideation *module* *(needs [8])* | ☐ |
 | **5** | [10] Checkpoint/HITL *(needs [9])* | — | — | [13] cli integration | ☐ |
@@ -98,7 +98,7 @@ Accept: PM/architect `store.put_body_at(uri, prose)` the prd/design/ADR bodies
 they already generate; `render.py` inlines resolved prose instead of a dead
 handle; tests.
 
-### [3] Doc-assembly → graph node — #12 · deps: [1] · ☐
+### [3] Doc-assembly → graph node — #12 · deps: [1] · ✓ (Wave 2; critic CLEAN; merged)
 Files: `docs/assemble.py`, `cli.py`, `graph/factory_graph.py`, `docs/manifest.py`.
 Accept: doc assembly runs as a terminal graph node (budget-metered, checkpointed,
 outbox-governed); `GateRef.attested` also counts a valid judgment_binding; narrow
@@ -217,3 +217,11 @@ container spawning; bounded by provider quota + budget. Tests.
   Wired into product_manager/principal_architect/reviewer_critic (full rollout
   mechanical). Branch-name collision (work on `worktree-agent-aa8f2d99f3cb51476`)
   was harmless — merged the correct ref.
+- **[3] doc-node — DONE.** Critic CLEAN. Merged. Doc assembly is a terminal `docs`
+  graph node (PASS-path only, best-effort, budget-metered, artifacts on the
+  checkpointed channel); `GateRef.attested` counts judgment bindings; cli writes
+  the bundle via a per-run `doc_sink`. Trivial duplicate-import nit cleaned up.
+- **WAVE 2 COMPLETE** — [3]/[6]/[11] merged, each critic-CLEAN, full suite green
+  (1642+). 9/15 tasks done. NEXT: Wave 3 — [8] spec ingestion · [7] drift
+  actionable. (Then Wave 4: [9] modes + [13] ideation module; Wave 5: [10]
+  checkpoints; Wave 6: [12] evolution.)

@@ -92,7 +92,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     rt = AgentRuntime(proxy=_build_proxy(mock=mock))
-    result = ideate(rt, idea, rounds=rounds)
+    try:
+        result = ideate(rt, idea, rounds=rounds)
+    except Exception as exc:
+        # Ideation is a best-effort authoring aid (no trust path); a transport
+        # failure / unparseable reply prints a clean error + nonzero exit rather
+        # than crashing with a traceback.
+        print(f"error: ideation failed: {exc}", file=sys.stderr)
+        return 1
     print(result.spec_markdown)
     return 0
 

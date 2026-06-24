@@ -181,3 +181,17 @@ def test_render_is_pure_given_a_round() -> None:
     md = render_spec_markdown("an idea", rnd)
     assert md == render_spec_markdown("an idea", rnd)  # deterministic
     assert "Personal Todo Service" in md
+
+
+def test_main_degrades_gracefully_on_proxy_failure(monkeypatch, capsys) -> None:
+    """Standalone entry: a failure inside ideate() prints a clean error + exits 1,
+    never an uncaught traceback (advisory tool, no trust path)."""
+    import foundry.ideation.__main__ as ideation_cli
+
+    def _boom(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("backend down")
+
+    monkeypatch.setattr(ideation_cli, "ideate", _boom)
+    rc = ideation_cli.main(["--mock", "build a thing"])
+    assert rc == 1
+    assert "ideation failed" in capsys.readouterr().err

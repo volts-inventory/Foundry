@@ -74,7 +74,7 @@ BLOCKER/MAJOR, the implementation is partial, or the full suite regressed.
 | **1** | [1] Output dir | [5] Backend determinism | [4] Spec-gate critic · [2] Prose bodies | [14] Compose profile | ✓ DONE |
 | **2** | [3] Doc-node *(needs [1])* | [6] CLI parser hardening | [11] Agent journal | [14] cont. | ✓ DONE |
 | **3** | [8] Spec ingestion | [7] Drift actionable | — | ([15] deferred to a later wave) | ✓ DONE |
-| **4** | [9] `--mode`/`--packs` *(needs [8])* | proxy done | — | [13] ideation *module* *(needs [8])* | ☐ |
+| **4** | [9] `--mode`/`--packs` *(needs [8])* | proxy done | — | [13] ideation *module* *(needs [8])* | ✓ DONE |
 | **5** | [10] Checkpoint/HITL *(needs [9])* | — | — | [13] cli integration | ☐ |
 | **6** | [12] Evolution route *(needs [1]+[8])* | — | — | — | ☐ |
 
@@ -131,7 +131,7 @@ Files: `cli.py`, state init/intake, `agents/product/*`.
 Accept: `--spec FILE` / `run(spec=)` ingests full design-spec doc(s) seeding
 product/architecture (retrieved_spans / pre-seeded intent); tests. Unblocks [12][13].
 
-### [9] `--mode`/`--packs` — #11 · deps: [8] · ☐
+### [9] `--mode`/`--packs` — #11 · deps: [8] · ✓ (Wave 4; adversarial critic CLEAN; merged)
 Files: `cli.py`, `build_factory_graph` wiring (+ trust-root construction for gated/autonomous).
 Accept: `--mode {assistant|gated|autonomous}` + `--packs ...`; gated/autonomous
 construct the trust-root components; surface the per-mode trust posture; tests.
@@ -155,7 +155,7 @@ proportional re-verify, re-gate (same runner), re-admit fail-closed, provenance
 chain to prior version, prior criteria/oracles carried as regression suite,
 Guardian-gates edits to existing criteria; tests.
 
-### [13] Ideation front-end — #5 · deps: [8] · ☐
+### [13] Ideation front-end — #5 · deps: [8] · ✓ (Wave 4; critic CLEAN + 1 MINOR fixed; merged)
 Files: new `foundry/ideation/`, proxy, small `cli.py` integration.
 Accept: interactive ideation loop (via rt.proxy) that co-generates a spec doc and
 hands it to [8]'s ingest seam; ideation output is advisory, never overrides the
@@ -236,3 +236,18 @@ container spawning; bounded by provider quota + budget. Tests.
   NEXT: Wave 4 — [9] `--mode`/`--packs` + [13] ideation module (both unblocked by
   [8]). Then Wave 5: [10] checkpoints; Wave 6: [12] evolution. ([15] worker pool
   deferred to a final infra pass after [14].)
+- **BRANCH RECOVERY (between Wave 3 and 4):** the main worktree had drifted onto
+  `main`@3d6fe84 while the feature branch ref lagged at cda4f55 — all Wave 2-3
+  merges were reachable (linear at 8b6299d) but not on the feature ref, and pushes
+  were no-ops. Fixed: checked out `claude/...-43wylm`, `--ff-only 8b6299d` (clean,
+  cda4f55 is an ancestor), pushed cda4f55..8b6299d. No work lost; nothing wrongly
+  pushed to `main`. All subsequent work is on the feature branch.
+- **[9] `--mode`/`--packs` — DONE.** Adversarial critic CLEAN (assistant default
+  byte-identical; pack veto fail-closed + emit-boundary defense-in-depth; autonomous
+  admission genuinely re-verifies; assurance gates NOT faked; HITL preserved). Merged.
+- **[13] ideation — DONE.** Critic CLEAN (advisory, no channel-write surface,
+  bounded spend) + 1 MINOR fixed (standalone entry now degrades gracefully). Merged.
+- **WAVE 4 COMPLETE** — [9]/[13] merged, critic-CLEAN, full suite green. 13/15 done.
+  Gated/Autonomous + domain packs now reachable from the CLI; ideation front-end
+  ships a spec consumable by `--spec`. NEXT: Wave 5 — [10] checkpoint/HITL mode
+  (+ the small [13] cli `--ideate` handoff). Then Wave 6: [12] evolution route.

@@ -91,6 +91,13 @@ _LINEAGE_REV = "lineage-rev-cli-1"
 # returns the passing unified-diff body keyed on it (SUP7).
 _DIFF_BODY_URI = "cas://cli/diff-body"
 
+# Spec ingestion (task [8]). A whole-run cap on the design-spec text seeded into
+# state: bounds checkpoint size + token cost on a large doc / directory; the
+# product nodes truncate again for their prompts. Read as UTF-8, errors replaced
+# (a spec is plain input data, never executed — no new trust surface).
+_SPEC_MAX_BYTES = 512 * 1024
+_SPEC_SUFFIXES = (".md", ".txt")
+
 # A unified-diff ADDITION blob carrying a passing test, so the integrated tree
 # the gates run against yields Build PASS (compiles) + Test PASS (pytest green).
 _PASSING_DIFF = (
@@ -341,6 +348,79 @@ def _write_output_tree(
     return str(out_root)
 
 
+# ---- design-spec ingestion (task [8]) ---------------------------------------
+
+
+def _read_spec_path(path: str) -> str:
+    """Read a design-spec FILE or DIRECTORY of ``.md``/``.txt`` docs to text.
+
+    A directory is read recursively in sorted (deterministic) path order; only
+    ``.md``/``.txt`` files are included. Each file's text is prefixed with a
+    ``# === <relative-path> ===`` marker so a multi-file spec stays legible.
+    Raises :class:`FileNotFoundError` for a missing path and :class:`ValueError`
+    when a directory contains no spec files (a clean, actionable error).
+
+    The spec is INPUT DATA only: it is read as UTF-8 (decode errors replaced) and
+    never executed — no new egress, no new trust surface. The combined text is
+    capped at :data:`_SPEC_MAX_BYTES` to bound checkpoint size / token cost.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"spec path not found: {path}")
+    if p.is_dir():
+        files = sorted(
+            f for f in p.rglob("*") if f.is_file() and f.suffix.lower() in _SPEC_SUFFIXES
+        )
+        if not files:
+            raise ValueError(
+                f"spec directory has no {'/'.join(_SPEC_SUFFIXES)} files: {path}"
+            )
+        parts = [
+            f"# === {f.relative_to(p)} ===\n{f.read_text(encoding='utf-8', errors='replace')}"
+            for f in files
+        ]
+        return "\n\n".join(parts)
+    return p.read_text(encoding="utf-8", errors="replace")
+
+
+def _is_existing_path(value: str) -> bool:
+    """True iff ``value`` names an existing path. Guards ``Path.exists()`` against
+    an ``OSError`` (e.g. a long literal-spec string exceeding the OS name limit),
+    so literal spec text never crashes the path probe."""
+    try:
+        return Path(value).exists()
+    except OSError:
+        return False
+
+
+def _load_spec(spec: str | list[str] | None) -> str:
+    """Resolve the ``spec`` argument to the design-spec text seeded into state.
+
+    ``spec`` is additive (task [8]) and may be:
+
+    * ``None`` — no spec (request-only run, unchanged behavior);
+    * a single string that names an existing file/dir — its text is read;
+    * a single string that is NOT a path — treated as literal spec text;
+    * a list of file/dir paths — each read and concatenated (sorted by path
+      marker, deterministic).
+
+    The combined text is capped at :data:`_SPEC_MAX_BYTES`.
+    """
+    if spec is None:
+        return ""
+    if isinstance(spec, str):
+        text = _read_spec_path(spec) if _is_existing_path(spec) else spec
+    else:
+        text = "\n\n".join(_read_spec_path(s) for s in sorted(spec))
+    encoded = text.encode("utf-8")
+    if len(encoded) > _SPEC_MAX_BYTES:
+        # Cap on ENCODED BYTES (deterministic, truly bounds checkpoint size even
+        # for multibyte specs); decode back, dropping a partial trailing char.
+        # The product nodes truncate again for their prompts.
+        text = encoded[:_SPEC_MAX_BYTES].decode("utf-8", errors="ignore")
+    return text
+
+
 # ---- result ----------------------------------------------------------------
 
 
@@ -400,6 +480,7 @@ class RunResult:
 def run(
     request: str,
     *,
+    spec: str | list[str] | None = None,
     thread_id: str = "cli-run",
     resolve: ArtifactResolver | None = None,
     resolve_blob: BlobResolver | None = None,
@@ -420,6 +501,15 @@ def run(
     ----------
     request:
         The one-line natural-language request (e.g. ``"build a URL shortener"``).
+    spec:
+        OPTIONAL full design-spec document (task [8]). ADDITIVE to ``request``: a
+        short request summarizes intent while the spec provides the detail. May be
+        a path to a ``.md``/``.txt`` FILE, a path to a DIRECTORY of such files
+        (read recursively, sorted), a list of paths, or literal spec text. The
+        resolved text is seeded onto the ``spec`` state channel, where the
+        Stakeholder/Client Proxy and Product Manager GROUND the IntentBrief/PRD in
+        it. It is plain input data — it INFORMS the criteria but never bypasses the
+        acceptance-criteria derivation or any signed gate.
     thread_id:
         The run identity (LangGraph ``thread_id`` / ``Seq.run_id``); also seeds
         the deterministic idempotency keys (verdict nonce, PR key).
@@ -442,6 +532,7 @@ def run(
         written path is surfaced on ``RunResult.output_root``. On a halted run
         nothing is written (no accepted tree to emit).
     """
+    spec_text = _load_spec(spec)
     store = ArtifactStore()
     tx = MockTransport.scripted(dict(_SCRIPTS), default_verdict="approve")
     proxy = ModelProviderProxy(tx, signer=ZoneBSigner(_KEY, _KEY_ID))
@@ -489,7 +580,13 @@ def run(
                 max_fix_attempts=max_fix_attempts,
                 doc_sink=doc_sink if docs_dir is not None else None,
             )
-            final = app.invoke({"request": request}, config)
+            # `spec` is additive and seeded ONLY when provided (request-only runs
+            # keep the historical {"request": ...} seed exactly). The product
+            # nodes read it off the `spec` channel to ground the IntentBrief/PRD.
+            seed: FactoryState = {"request": request}
+            if spec_text:
+                seed["spec"] = spec_text
+            final = app.invoke(seed, config)
         finally:
             reset_gate_write_verifier(token)
             ckpt.close()
@@ -570,9 +667,19 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         output_dir = args[i + 1]
         args = args[:i] + args[i + 2 :]
+    # --spec FILE|DIR (task [8]): may REPEAT to ingest several spec files/dirs.
+    spec_paths: list[str] = []
+    while "--spec" in args:
+        i = args.index("--spec")
+        if i + 1 >= len(args):
+            print("error: --spec requires a file or directory argument", file=sys.stderr)
+            return 2
+        spec_paths.append(args[i + 1])
+        args = args[:i] + args[i + 2 :]
     if not args:
         print(
-            'usage: python -m foundry.cli [--docs DIR] [--out DIR] "<one-line request>"',
+            "usage: python -m foundry.cli [--docs DIR] [--out DIR] "
+            '[--spec FILE|DIR ...] "<one-line request>"',
             file=sys.stderr,
         )
         return 2
@@ -581,7 +688,16 @@ def main(argv: list[str] | None = None) -> int:
         print("error: request must be non-empty", file=sys.stderr)
         return 2
 
-    result = run(request, docs_dir=docs_dir, output_dir=output_dir)
+    # Resolve --spec paths to text HERE so a missing/empty path is reported as a
+    # clean usage error (exit 2) and a deep ValueError from the run itself is not
+    # masked. The resolved text is handed to run() (which seeds it onto `spec`).
+    try:
+        spec_text = _load_spec(spec_paths) if spec_paths else None
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    result = run(request, spec=spec_text, docs_dir=docs_dir, output_dir=output_dir)
     print(result.summary())
     return 0 if result.passed else 1
 

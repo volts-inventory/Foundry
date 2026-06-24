@@ -43,8 +43,14 @@ SOP = (
     "rest 'normal'.\n"
     "4. Flag any security/abuse criterion with security_abuse=true.\n"
     "5. Declare required_capabilities (e.g. 'ui', 'ml') — these drive routing.\n"
-    "Respond in the constrained JSON schema."
+    "When a DESIGN SPEC is provided below, derive the PRD and acceptance criteria "
+    "FROM it (it is the detailed source of truth) rather than synthesizing from the "
+    "one-line request alone. Respond in the constrained JSON schema."
 )
+
+# A provided design spec is truncated to this many characters in the intent
+# prompt — deterministic, bounds token cost on a large design doc (task [8]).
+_SPEC_PROMPT_CAP = 24_000
 
 # The model fills the content; the node owns the Seq (causal order), the PRD
 # body's CAS handle, and the PRD's criterion_ids list, so those are excluded
@@ -81,8 +87,21 @@ _SCHEMA: dict[str, Any] = {
 
 def _intent_text(state: FactoryState) -> str:
     """The intent the PM works from: the raw request (the IntentBrief body lives
-    out-of-band behind its handle; the request is the in-channel ground truth)."""
-    return str(state.get("request", ""))
+    out-of-band behind its handle; the request is the in-channel ground truth),
+    plus the full design-spec document text when one was provided (task [8]).
+
+    The spec is ADDITIVE and is plain input data — it GROUNDS the PRD/criteria the
+    PM derives, but never replaces the acceptance-criteria or spec-gate machinery
+    downstream (agents propose, only signed gates decide, L5)."""
+    request = str(state.get("request", ""))
+    spec = str(state.get("spec", "") or "")
+    if not spec.strip():
+        return request
+    body = spec[:_SPEC_PROMPT_CAP]
+    return (
+        f"REQUEST (intent summary):\n{request}\n\n"
+        f"DESIGN SPEC (detailed source of truth):\n{body}"
+    )
 
 
 def _build_criteria(raw: Any, seq: Seq) -> list[AcceptanceCriterion]:

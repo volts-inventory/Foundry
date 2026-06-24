@@ -20,6 +20,17 @@ from foundry.state import reducers
 
 class FactoryState(TypedDict, total=False):
     request: str  # single-writer
+    # OPTIONAL full design-spec document text (task [8]). Additive input: a short
+    # `request` still summarizes intent; when present, `spec` carries the detailed
+    # design-spec doc(s) text that GROUNDS the product layer — the Stakeholder /
+    # Client Proxy and Product Manager derive the IntentBrief/PRD/criteria FROM it
+    # (read by `stakeholder_proxy._intake_text` / `product_manager._intent_text`).
+    # The architecture layer inherits the grounding indirectly, through the
+    # spec-grounded PRD/criteria the product layer emits. Single-writer (seeded at
+    # graph entry). It is plain INPUT DATA — it INFORMS the PRD/criteria but never
+    # bypasses the acceptance-criteria derivation or any signed gate (same trust
+    # posture as `request`: agents propose, only gates decide, L5).
+    spec: str  # single-writer
     route: str | None  # single-writer (triage)
     phase: str  # single-writer (supervisor)
     required_capabilities: Annotated[list[str], reducers.union]

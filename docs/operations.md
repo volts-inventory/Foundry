@@ -242,6 +242,24 @@ A/B alone is `3 arms × n × k`). A run-admission layer is required:
   noisy-neighbor guard applies to that lineage's provider quota too — runs queue
   against **that lineage's reserved capacity** (§4) instead of fleet-stalling on its
   shared `429`s.
+- **Execution-worker pool — logical fan-out vs physical slots.** Sandbox execution
+  (the untrusted `WorkerAdapter` runs) is dispatched through a `WorkPool` seam
+  (`foundry/execution/work_pool.py`), NOT spawned in-app: the orchestrator emits a
+  durable, content-addressed `ExecutionTask`; a pool of **generic** workers (role
+  comes from the task, not the worker) each claim one and run its adapter in a fresh
+  `Sandbox` with the hard-kill + limits. **Logical concurrency** (how many parallel
+  execution tasks) is the orchestrator's `Send` fan-out, in code; **physical slots**
+  (how many workers) are infra — `docker compose up --scale worker=N` or a Kubernetes
+  `Deployment.replicas` + an **HPA on queue depth**. The application **never**
+  imperatively spawns a container (no `docker run` from app code) — making slots is
+  infra's job. Admission refuses any task that would breach the slot cap (excess
+  **queues**) or the `BudgetLedger` / **per-lineage** quota above (over-budget tasks
+  are **rejected at admit, not run**) — budget + provider quota is the real ceiling,
+  not slot count. The durable record is **idempotently claimable** (a worker dying
+  mid-task neither loses nor double-runs the work; ties to the §7 resumable
+  checkpoint). TESTED today: the in-process `LocalWorkPool` dev drop-in. SCAFFOLDING
+  (documented seam, not built — no real broker/cluster here): `ContainerWorkPool` /
+  `K8sJobPool` over a real broker + worker replicas.
 - **Paused-run state footprint.** Releasing compute on HITL/store/trust pause (§7,
   §3, §4) does **not** release state — worktrees, checkpoints, artifacts, indexes
   persist and are **unbounded at fleet scale**. Each run carries a **state-footprint

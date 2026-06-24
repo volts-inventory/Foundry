@@ -50,6 +50,7 @@ import json
 import sys
 import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from foundry.agents import AgentRuntime
@@ -280,6 +281,64 @@ def _synthetic_resolve_blob(store: ArtifactStore, diff_body: str) -> BlobResolve
     return _resolve_blob
 
 
+# ---- final source-tree materialization (on a passing build) -----------------
+
+# The gate-input file the integrated tree carries for the Spec gate; it is NOT a
+# source file the user asked the factory to produce, so it is excluded from the
+# emitted output tree.
+_GATE_INPUT_FILES = frozenset({"criteria.json"})
+
+
+def _write_output_tree(
+    final_state: FactoryState,
+    output_dir: str,
+    *,
+    resolve: ArtifactResolver,
+    resolve_blob: BlobResolver,
+) -> str:
+    """Materialize the FINAL accepted integrated tree and write the source files.
+
+    Reuses :func:`graph.gate_wiring.materialize_workdir` over the reviewed
+    FeatureDiff handles + the same ``resolve`` / ``resolve_blob`` seams the run
+    wired (so the bytes written are EXACTLY what the terminal gates ran against,
+    never a parallel re-render). The materialization happens in a throwaway temp
+    dir; the real source files (everything except the Spec gate's ``criteria.json``
+    input) are then copied into ``output_dir`` on disk. Returns the resolved
+    absolute path written.
+
+    ``output_dir`` is operator-supplied, but the per-file relative paths come
+    from agent-influenced diff bodies; ``materialize_workdir`` already rejects an
+    absolute/``..`` diff path fail-closed (D-R1-03), and we re-check each copied
+    relative path against the destination root (mirrors
+    :func:`docs.assemble.write_bundle`) so a write can never escape ``output_dir``.
+    """
+    from foundry.graph.gate_wiring import materialize_workdir
+
+    out_root = Path(output_dir).resolve()
+    out_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="foundry-cli-out-") as staging:
+        stage_root = Path(staging)
+        materialize_workdir(
+            final_state, stage_root, resolve=resolve, resolve_blob=resolve_blob
+        )
+        for src in sorted(stage_root.rglob("*")):
+            if not src.is_file():
+                continue
+            rel = src.relative_to(stage_root)
+            if rel.name in _GATE_INPUT_FILES and len(rel.parts) == 1:
+                continue
+            # Defense-in-depth (mirrors docs/assemble.write_bundle): reject an
+            # absolute or '..' relative path before writing under out_root.
+            if rel.is_absolute() or ".." in rel.parts:
+                raise ValueError(f"unsafe source path {str(rel)!r}")
+            target = (out_root / rel).resolve()
+            if not target.is_relative_to(out_root):
+                raise ValueError(f"source path escapes output dir: {str(rel)!r}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(src.read_bytes())
+    return str(out_root)
+
+
 # ---- result ----------------------------------------------------------------
 
 
@@ -303,6 +362,9 @@ class RunResult:
     """Newest-by-name attested status per gate (spec / build / test / review...)."""
     doc_root: str | None = None
     """Where the per-build documentation set was written (when ``docs_dir`` set)."""
+    output_root: str | None = None
+    """Where the final accepted source tree was written (when ``output_dir`` is
+    set AND the build passed); ``None`` on a halted run (no PASS, no write)."""
 
     def summary(self) -> str:
         """A concise human-readable report of the run (printed by ``main``)."""
@@ -323,6 +385,8 @@ class RunResult:
             lines.append(f"  payload_uri:     {self.open_pr_payload_uri}")
         else:
             lines.append("no open_pr action emitted (gates did not all PASS).")
+        if self.output_root:
+            lines.append(f"source tree written to: {self.output_root}")
         if self.doc_root:
             lines.append(f"documentation set written to: {self.doc_root}")
         return "\n".join(lines)
@@ -340,6 +404,7 @@ def run(
     diff_body: str = _PASSING_DIFF,
     max_fix_attempts: int = 3,
     docs_dir: str | None = None,
+    output_dir: str | None = None,
 ) -> RunResult:
     """Run ``request`` end-to-end through the compiled factory graph (smoke path).
 
@@ -366,6 +431,14 @@ def run(
         exercise the halted-run path).
     max_fix_attempts:
         Convergence bound for the gate fix-loop.
+    docs_dir:
+        When set, write the company-shaped documentation set + BUILD-MANIFEST to
+        this directory (best-effort; surfaced on ``RunResult.doc_root``).
+    output_dir:
+        When set AND the build PASSES (terminal gates pass), materialize the
+        final accepted integrated source tree to this directory on disk; the
+        written path is surfaced on ``RunResult.output_root``. On a halted run
+        nothing is written (no accepted tree to emit).
     """
     store = ArtifactStore()
     tx = MockTransport.scripted(dict(_SCRIPTS), default_verdict="approve")
@@ -411,6 +484,17 @@ def run(
 
     final_state = cast("FactoryState", final)
     result = _result(request, thread_id, final_state)
+    if output_dir is not None and result.passed:
+        # On a PASSING build, materialize the FINAL accepted integrated tree
+        # (reusing the SAME materialize_workdir + resolve/resolve_blob seams the
+        # terminal gates ran against) and write the real source files to disk.
+        # Halted runs write nothing — there is no accepted tree to emit.
+        from dataclasses import replace
+
+        output_root = _write_output_tree(
+            final_state, output_dir, resolve=resolve, resolve_blob=resolve_blob
+        )
+        result = replace(result, output_root=output_root)
     if docs_dir is not None:
         # Assemble the company-shaped documentation set + BUILD-MANIFEST. The
         # Technical Writer authors the runbook/known-issues/upgrade/perf-cost
@@ -479,9 +563,18 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         docs_dir = args[i + 1]
         args = args[:i] + args[i + 2 :]
+    output_dir: str | None = None
+    if "--out" in args:
+        i = args.index("--out")
+        if i + 1 >= len(args):
+            print("error: --out requires a directory argument", file=sys.stderr)
+            return 2
+        output_dir = args[i + 1]
+        args = args[:i] + args[i + 2 :]
     if not args:
         print(
-            'usage: python -m foundry.cli [--docs DIR] "<one-line request>"', file=sys.stderr
+            'usage: python -m foundry.cli [--docs DIR] [--out DIR] "<one-line request>"',
+            file=sys.stderr,
         )
         return 2
     request = " ".join(args).strip()
@@ -489,7 +582,7 @@ def main(argv: list[str] | None = None) -> int:
         print("error: request must be non-empty", file=sys.stderr)
         return 2
 
-    result = run(request, docs_dir=docs_dir)
+    result = run(request, docs_dir=docs_dir, output_dir=output_dir)
     print(result.summary())
     return 0 if result.passed else 1
 

@@ -21,6 +21,7 @@ the same topology lifts to Kubernetes without rewriting app code.
 cat > .env <<'EOF'
 POSTGRES_PASSWORD=change-me
 FOUNDRY_CHECKPOINTER=sqlite      # or 'postgres' once that swap is wired
+FOUNDRY_STATE_DIR=/data          # mounted volume → single-host durability
 EOF
 
 # 2. Validate the compose file without starting anything:
@@ -49,6 +50,10 @@ The profile is built on three rules that make the EKS migration mechanical:
    - Checkpoints go to the **checkpointer**, selected by env
      `FOUNDRY_CHECKPOINTER` (`sqlite` default, volume-backed; `postgres` for
      prod).
+   - **One seam wires all of single-host durability: `FOUNDRY_STATE_DIR`.** Set
+     it to the mounted volume (e.g. `/data`) and the worker/app run file-backed
+     instead of in-memory — see the next section. Leave it unset and every store
+     is in-memory (the dev/test default, byte-identical).
 2. **Config and secrets arrive via the environment** (no hardcoded
    localhost/paths/credentials). Every endpoint and path in the compose file is
    an env var with a safe default; required secrets use `${VAR:?msg}` so
@@ -68,6 +73,37 @@ The profile is built on three rules that make the EKS migration mechanical:
 | `networks: { internal: true }` + service split | **NetworkPolicy** + per-service **ServiceAccount** | One Deployment per service; NetworkPolicy denies app→provider egress except via the proxy; builder gets a sandboxed `runtimeClass` (gVisor/Kata). |
 | `restart: unless-stopped`, single app replica | **Deployment replicas + HPA** | The app is stateless (all state is behind the CAS/checkpointer interfaces), so it scales horizontally; an HPA scales on CPU/queue depth. |
 | Commented OTel/Prometheus/Grafana/Loki | Helm: **OTel-Collector + kube-prometheus-stack + Loki** | Scrape the app `/metrics` + OTLP exporters. Left as a placeholder here on purpose (not real infra). |
+
+## Single-host durability — `FOUNDRY_STATE_DIR` (survives a process restart)
+
+The dev-grade stores are in-memory and lost on restart. The compose worker/app
+should set **`FOUNDRY_STATE_DIR`** to the mounted volume (e.g. `/data`); one seam
+makes every store on that host durable, wired in ONE place
+(`foundry/durability/persistence.py::durable_backends`, honored by `cli.py`):
+
+| Store | Unset (default) | `FOUNDRY_STATE_DIR=/data` |
+| --- | --- | --- |
+| Checkpointer | `:memory:` SQLite | `make_checkpointer(/data/checkpoints.db)` — file-backed WAL; checkpoint threads RESUME after restart |
+| Outbox + WORM audit | in the `:memory:` conn | ride the checkpointer's **same** file connection — persist with it (no separate wiring) |
+| GlobalRecords trust ledgers (consumed-nonce, stable-FAIL latch, neg-verdict / digest-disqualification, alpha-look) | in-memory `:memory:` conn | `GlobalRecords(/data/global_records.db)` — the latches SURVIVE a restart (a stable-FAIL'd digest stays disqualified) |
+| CAS (artifact bodies/blobs) | in-memory `ArtifactStore` | `FilesystemArtifactStore(/data/cas)` — the already-built, unit-tested durable drop-in |
+
+Pinned by `tests/test_durable_persistence.py`: write a stable-FAIL latch + a
+checkpoint + an outbox row + an artifact body via file-backed instances, DROP
+them, re-open NEW instances on the same dir (a process restart) — the latch is
+still latched, the checkpoint thread resumes, the outbox/audit survive, and the
+body resolves. The same test pins that UNSET ⇒ `:memory:` + in-memory dicts with
+no file written (byte-identical to today).
+
+**Atomicity nuance / where this stops (honest).** For single-host file
+durability the GlobalRecords ledgers use a **separate** file connection from the
+checkpointer, so each store is independently durable but a checkpoint commit and
+a ledger write are NOT cross-store atomic across a crash. True
+checkpoint+ledger atomicity (one transaction joining the saver, outbox and
+ledgers per superstep, architecture §5 / DS3) is a **multi-host / Postgres**
+concern — the `PostgresSaver` on a shared `superstep_txn` connection — and is the
+documented swap point below, NOT something single-host durability provides. HA /
+broker / multi-replica are likewise the multi-host upgrade (unchanged here).
 
 ### The Postgres checkpoint swap (documented swap point)
 
@@ -89,5 +125,9 @@ shared-connection `PostgresSaver` path, and add tests against a real Postgres.
   network-isolated **stubs** (`command: ["true"]`) to make the topology
   reviewable.
 - Does **not** stand up the observability stack — it is a commented placeholder.
-- Does **not** touch `cli.py`, `proxy/`, `gates/`, or `agents/`; the app
-  `command:` in compose is left commented for whoever wires the cli entrypoint.
+- Does **not** touch `proxy/`, `gates/`, or `agents/`. The `cli.py` change is
+  limited to honoring `FOUNDRY_STATE_DIR` (above); the app `command:` in compose
+  is left commented for whoever wires the cli entrypoint.
+- Does **not** provide cross-store (checkpoint+ledger) atomicity, HA, a broker,
+  or multi-replica — those are the multi-host / Postgres upgrade, out of scope
+  for single-host durability.

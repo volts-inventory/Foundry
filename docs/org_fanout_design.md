@@ -73,7 +73,7 @@ roster is hardcoded in the implementation subgraph
 | Org concept | Existing seam it rides on | Change needed |
 |---|---|---|
 | Domains | `OwnershipMap.owners` (unit→owner) | none — owners *are* the domains |
-| Area of a domain | *(new)* `OwnershipMap.areas: owner→area` | additive schema field, default `{}` → flat org (back-compat) |
+| Area of a domain | *(new)* `OwnershipMap.area_of()` / `leads_by_area()` — **derived**, not stored | added in Wave A; pure methods, see note below |
 | Tech-Lead per domain | Senior decomposition `senior_engineer.py:218` | fan out the Senior **per owner** (LangGraph `Send`), each emits its slice's Tasks |
 | Conditional Area Manager | *(new node)* | one node per non-empty area; sub-allocates budget, checks `InterfaceContract` consumers crossing its boundary |
 | Parallel ICs | `LocalWorkPool.submit` + `Send` (`work_pool.py:16`, `:323`) | replace the Junior's sequential loop with a `Send`-per-task fan-out into the pool |
@@ -90,14 +90,26 @@ with no new budget code.
 Each wave: worktree-isolated implementer → fresh-eyes critic → fix → full suite
 green → merge. No wave lands unless the trust/determinism invariants below hold.
 
-- **Wave A — Area classification (data only, no behavior change).**
-  Add `OwnershipMap.areas: dict[str, str]` (owner→area), default `{}`. Extend the
-  Principal Architect to classify each owner into the canonical vocabulary
-  (reusing the same capability signal that drives the `frontend`/`ml_data` domain
-  packs). Add `OwnershipMap.areas_present()` / `leads_by_area()` helpers, both
-  pure functions of the mapping (so resume re-derives identically). Ships dark:
-  nothing consumes it yet. *Critic focus: schema back-compat + determinism of the
-  classification.*
+- **Wave A — Area classification (data only, no behavior change). ✅ DONE.**
+  **Decision (deviates from the original "add a field" plan):** areas are
+  **derived on demand**, NOT stored. A stored `areas: dict[str,str]` field — even
+  defaulting to `{}` — changes `model_dump`, so any *populated* map would churn
+  the `ownership_map` `content_identity()` and every downstream `state_sha`. A
+  derived method changes no serialization → **zero digest churn** → true
+  back-compat. Since classification is a pure function of `owners` (itself frozen
+  + content-addressed), the derived value is *implicitly* content-addressed —
+  a resume recomputes the identical result. The one thing a stored field would
+  buy (pinning the label so a future `_AREA_RULES` change can't retroactively
+  re-label historical runs) belongs in **Wave B**, recorded on the `Task` it
+  first influences, not on the OwnershipMap schema.
+  Implemented in `foundry/schemas/architecture.py`: `OwnershipMap.leads()` /
+  `units_of()` / `area_of()` / `areas_present()` / `leads_by_area()`, plus
+  module-level `classify_area()` / `classify_areas()`. Classification reuses the
+  domain-pack capability vocabulary; **`ml` folds into the `data` area** (the org
+  has 5 areas — `frontend, backend, data, infra, security` — not the 6-label
+  vocabulary). Matching is **whole-token only** (no substring matching: it
+  false-fires on `tokenizer`/`interview`/`metadata`), erring toward precision
+  with a `backend` fallback. Ships dark — nothing consumes it yet.
 
 - **Wave B — Tech-Lead fan-out (decomposition parallelism).**
   Replace the single Senior node with a `Send`-per-owner fan-out: each Tech-Lead

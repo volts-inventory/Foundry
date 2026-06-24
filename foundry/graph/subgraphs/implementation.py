@@ -104,6 +104,7 @@ def build_implementation_subgraph(
         cost_budget_microusd=cost_budget_microusd,
         max_slots=max_slots,
         cost_cap_microusd=cost_cap_microusd,
+        resolve=resolve,  # per-area budget lineage from the OwnershipMap (Wave D)
     )
 
     # The factory closures are typed as the ``_Node`` alias; LangGraph's

@@ -103,7 +103,33 @@ __all__ = [
     "TaskState",
     "TaskStatus",
     "WorkPool",
+    "allocate_lineage_quotas",
 ]
+
+
+def allocate_lineage_quotas(weights: Mapping[str, int], global_cap_microusd: int) -> dict[str, int]:
+    """Split a global micro-USD envelope across lineages proportional to ``weights``
+    — the budget tree the org fan-out spends down (org_fanout_design.md, Wave D).
+
+    The Program Manager owns one global cap; it sub-allocates a per-lineage (per-
+    AREA) quota so one area's fan-out cannot starve the others (the noisy-neighbor
+    guard, ops §6 / arch §4). FLOOR division guarantees **Σ(allocations) ≤
+    global_cap** — a fail-closed invariant: the sum of the children's quotas can
+    never let total committed spend exceed the parent envelope (any rounding
+    remainder stays as un-allocated global headroom, never over-commits).
+
+    ``global_cap_microusd <= 0`` (unlimited) or no positive weight => ``{}`` (no
+    per-lineage limit; lineages remain bound only by the global ledger). Integer
+    micro-USD throughout — never floats (arch §8). Deterministic: a pure function
+    of its inputs, so a resume re-derives the identical tree."""
+    total = sum(w for w in weights.values() if w > 0)
+    if global_cap_microusd <= 0 or total <= 0:
+        return {}
+    return {
+        lineage: (global_cap_microusd * weight) // total
+        for lineage, weight in weights.items()
+        if weight > 0
+    }
 
 # A worker, having claimed a task, builds its OWN sandbox + adapter from the task.
 # The pool is handed FACTORIES (not live instances) precisely because a real

@@ -30,7 +30,11 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from foundry.agents import AgentRuntime
 from foundry.agents._common import emit_artifact
-from foundry.agents.implementation.senior_engineer import DESIGN_KIND, OWNERSHIP_KIND
+from foundry.agents.implementation.senior_engineer import (
+    DESIGN_KIND,
+    OWNERSHIP_KIND,
+    task_id_for_unit,
+)
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
 from foundry.execution.adapters.stub import StubAdapter
@@ -340,6 +344,52 @@ def test_pool_partial_budget_rejection(tmp_path: Any) -> None:
     final: FactoryState = app.invoke(_seed_state(), _config("run-partial"))
 
     assert len(_feature_diffs(final)) == 1  # one admitted, one rejected at admit
+
+
+def _seed_with_ownership(ownership: OwnershipMap) -> FactoryState:
+    """Seed state with a custom OwnershipMap (for area/budget-tree tests)."""
+    design = _design()
+    handles = [
+        emit_artifact(design, DESIGN_KIND, "principal_architect", _seq()),
+        emit_artifact(ownership, OWNERSHIP_KIND, "principal_architect", _seq()),
+    ]
+    _BODIES[handles[0].uri] = design
+    _BODIES[handles[1].uri] = ownership
+    return {"request": "x", "artifacts": handles, "pinned_constraints": _constraints()}
+
+
+def test_pool_per_area_budget_isolation(tmp_path: Any) -> None:
+    """The budget tree (Wave D): the global envelope is sub-allocated per AREA, so
+    an area is starved by ITS OWN share — not by global contention. One data domain
+    + three backend domains; a global cap of 3M splits to data=750k (< the 1M task,
+    so data is rejected) and backend=2.25M (admits 2 of its 3 tasks). The data task
+    is rejected even though global had room — proving per-area isolation, not a
+    single global bucket."""
+    (tmp_path / "README.md").write_text("seed\n")
+    ownership = OwnershipMap(
+        owners={
+            "warehouse/etl.py": "data_team",  # -> data
+            "services/a.py": "svc",  # -> backend
+            "services/b.py": "svc",
+            "services/c.py": "svc",
+        },
+        seq=_seq(),
+    )
+    app = build_implementation_subgraph(
+        _runtime(),
+        source_dir=str(tmp_path),
+        resolve=_resolve,
+        max_slots=4,
+        cost_cap_microusd=3_000_000,  # data share 750k < 1M est; backend share 2.25M
+    ).compile()
+
+    final: FactoryState = app.invoke(_seed_with_ownership(ownership), _config("run-iso"))
+
+    diffs = _feature_diffs(final)
+    assert len(diffs) == 2  # data starved by its sub-cap; backend admits 2 of 3
+    built = {a.task_id for a in diffs}
+    assert task_id_for_unit("warehouse/etl.py") not in built  # data area rejected
+    assert task_id_for_unit("services/a.py") in built  # backend admitted within its cap
 
 
 def test_pool_fail_closed_when_over_budget(tmp_path: Any) -> None:

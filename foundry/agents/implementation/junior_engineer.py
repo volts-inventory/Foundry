@@ -47,21 +47,26 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from foundry.agents._runtime import AgentRuntime, NodeFn
+from foundry.agents.implementation.senior_engineer import OWNERSHIP_KIND, task_id_for_unit
 from foundry.canonical import content_digest
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
 from foundry.execution.sandbox import Sandbox
-from foundry.schemas.architecture import PinnedConstraint
+from foundry.schemas.architecture import OwnershipMap, PinnedConstraint
 from foundry.schemas.base import Artifact, BudgetLedger
 from foundry.schemas.implementation import FeatureDiff, Task, TaskStatus
 from foundry.state.reducers import live_constraints
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from langchain_core.runnables import RunnableConfig
 
     from foundry.execution.work_pool import ExecutionTask
     from foundry.state.factory_state import FactoryState
+
+    # Reconstitutes a typed body from its content-addressed handle (the same INFRA
+    # seam the Senior takes; CAS in prod, an in-memory map in tests).
+    ArtifactResolver = Callable[[Artifact], Any]
 
 __all__ = [
     "execution_task_for",
@@ -140,6 +145,28 @@ def _base_snapshot_of(task: Task, state: FactoryState) -> str | None:
             base = entry.get("base_tree_sha")
             return str(base) if base else None
     return None
+
+
+def _read_ownership(state: FactoryState, resolve: ArtifactResolver) -> OwnershipMap | None:
+    """Reconstitute the OwnershipMap off ``state['artifacts']`` (newest by Seq), or
+    None if absent / wrong type. READ-ONLY — the Junior derives the per-area budget
+    lineage from it (Wave D); it never mutates ownership."""
+    handles = [a for a in (state.get("artifacts") or ()) if a.kind == OWNERSHIP_KIND]
+    if not handles:
+        return None
+    body = resolve(max(handles, key=lambda a: a.seq))
+    return body if isinstance(body, OwnershipMap) else None
+
+
+def _area_by_task_id(ownership: OwnershipMap) -> dict[str, str]:
+    """task_id -> canonical AREA (the per-area budget lineage). A pure function of
+    the OwnershipMap (Wave A ``area_of``): it recomputes each unit's task id
+    (``task_id_for_unit``) so it joins to the Tasks the Senior emitted WITHOUT
+    storing area on the Task (preserves the Task's content identity)."""
+    return {
+        task_id_for_unit(unit): ownership.area_of(owner)
+        for unit, owner in ownership.owners.items()
+    }
 
 
 def _build_packet(
@@ -358,6 +385,7 @@ def _run_tasks_pooled(
     cost_budget_microusd: int,
     max_slots: int,
     cost_cap_microusd: int | None,
+    area_by_task: Mapping[str, str],
 ) -> dict[str, Any]:
     """Run the ready tasks' adapter work in PARALLEL through a bounded
     :class:`LocalWorkPool` (``max_slots`` physical slots), then post-process the
@@ -365,18 +393,35 @@ def _run_tasks_pooled(
     ``rt.seq``) executes concurrently; the diff blob is mirrored to CAS in-worker
     by :class:`_MirroringAdapter`, and the FeatureDiff/Artifact minting runs
     single-threaded in ready order — so the output is identical to the serial
-    loop modulo execution order. Over-budget tasks are REJECTED at admit
-    (fail-closed): they never run, produce no diff, and the downstream gate fails
-    closed. ``lineage`` stays ``"default"`` here; the per-area budget tree is
-    Wave D."""
+    loop modulo execution order.
+
+    Budget tree (Wave D): each task's ``lineage`` is its AREA (``area_by_task``,
+    derived from the OwnershipMap); the Program Manager's global cap is
+    sub-allocated across the present areas (``allocate_lineage_quotas``) so an
+    area that exhausts its share is REJECTED at admit even while another area has
+    headroom (fail-closed + noisy-neighbor guard). A rejected task never runs,
+    produces no diff, and the downstream gate fails closed. When no area mapping
+    is available the lineage falls back to ``"default"`` (a single bucket)."""
     from foundry.execution.work_pool import (
         BudgetExceededError,
         LocalWorkPool,
         QuotaPolicy,
+        allocate_lineage_quotas,
     )
 
     if not tasks:
         return {}
+
+    def lineage_of(task: Task) -> str:
+        return area_by_task.get(task.id, "default")
+
+    # The PM sub-allocates the global envelope across present areas proportional to
+    # their task count; Σ(area quotas) ≤ global cap (fail-closed, by floor).
+    weights: dict[str, int] = {}
+    for task in tasks:
+        weights[lineage_of(task)] = weights.get(lineage_of(task), 0) + 1
+    global_cap = 0 if cost_cap_microusd is None else cost_cap_microusd
+    lineage_quotas = allocate_lineage_quotas(weights, global_cap)
 
     # base per task: the recorded base (a retry) or the fresh-clone snapshot (first
     # run). All first-run tasks clone the SAME source_dir, and snapshot() is a
@@ -403,8 +448,10 @@ def _run_tasks_pooled(
             sandbox.restore(prior)  # retry: reset to base so the diff supersedes (L4)
         return sandbox
 
-    cap = 0 if cost_cap_microusd is None else cost_cap_microusd  # 0 == unlimited
-    quota = QuotaPolicy(ledger=BudgetLedger(cap_microusd=cap))
+    quota = QuotaPolicy(
+        ledger=BudgetLedger(cap_microusd=global_cap),  # 0 == unlimited global
+        lineage_quota_microusd=lineage_quotas,  # per-area sub-envelopes (Wave D)
+    )
     adapter_name = _adapter_name(rt)
     merged: dict[str, Any] = {}
 
@@ -421,6 +468,7 @@ def _run_tasks_pooled(
                 constraints,
                 adapter=adapter_name,
                 worktree_path=task.branch,  # stable placeholder; adapters use sandbox.worktree
+                lineage=lineage_of(task),  # per-area budget bucket (Wave D)
                 turn_budget=turn_budget,
                 cost_budget_microusd=cost_budget_microusd,
             )
@@ -453,6 +501,7 @@ def make_junior_engineer_node(
     cost_budget_microusd: int = _DEFAULT_COST_BUDGET_MICROUSD,
     max_slots: int = 1,
     cost_cap_microusd: int | None = None,
+    resolve: ArtifactResolver | None = None,
 ) -> NodeFn:
     """Build the Junior Engineer node.
 
@@ -481,9 +530,15 @@ def make_junior_engineer_node(
         :class:`~foundry.execution.work_pool.LocalWorkPool`; the physical worker
         count is this knob (infra owns it — nothing here spawns a container).
     cost_cap_microusd:
-        Global micro-USD cap the pool admits against (fail-closed; only used when
-        ``max_slots > 1``). ``None`` (default) = unlimited (every task admits).
-        Wave D replaces this single cap with the per-area/per-domain budget tree.
+        The Program Manager's GLOBAL micro-USD envelope the pool admits against
+        (fail-closed; only used when ``max_slots > 1``). ``None`` (default) =
+        unlimited. When set, it is sub-allocated across the present AREAS as
+        per-lineage quotas (Wave D), so one area cannot starve another.
+    resolve:
+        INFRA dependency (CAS in prod, an in-memory map in tests) used to
+        reconstitute the OwnershipMap so each task's budget ``lineage`` is its
+        AREA (Wave D). ``None`` keeps a single ``"default"`` lineage (Wave C
+        behaviour). DATA (which ownership) is read from ``state`` inside the node.
     """
     if rt.adapter is None:
         raise ValueError(
@@ -498,6 +553,13 @@ def make_junior_engineer_node(
         # task/<id> branch. With max_slots>1 the adapter runs fan out across the
         # IC pool (Wave C); otherwise they run serially (the original path).
         if max_slots > 1:
+            # Per-area budget lineage (Wave D): map each task to its area via the
+            # OwnershipMap when a resolver is wired; else a single "default" bucket.
+            area_by_task: dict[str, str] = {}
+            if resolve is not None:
+                ownership = _read_ownership(state, resolve)
+                if ownership is not None:
+                    area_by_task = _area_by_task_id(ownership)
             return _run_tasks_pooled(
                 rt,
                 tasks,
@@ -510,6 +572,7 @@ def make_junior_engineer_node(
                 cost_budget_microusd=cost_budget_microusd,
                 max_slots=max_slots,
                 cost_cap_microusd=cost_cap_microusd,
+                area_by_task=area_by_task,
             )
         merged: dict[str, Any] = {}
         for task in tasks:

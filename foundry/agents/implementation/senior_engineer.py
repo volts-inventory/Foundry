@@ -72,6 +72,7 @@ __all__ = [
     "ArtifactResolverError",
     "make_senior_engineer_node",
     "stub_conflict_resolution",
+    "task_id_for_unit",
 ]
 
 NODE_ID = "senior_engineer"
@@ -122,14 +123,19 @@ class ArtifactResolverError(LookupError):
     """
 
 
-def _task_id(unit: str) -> str:
+def task_id_for_unit(unit: str) -> str:
     """Stable, process-reproducible task id for an ownership unit.
 
     Keyed by ``content_digest`` (LEARNINGS L7), NEVER builtin ``hash()`` — a
     resume in a fresh process must derive the identical id so the ``tasks``
     channel's keyed union coalesces the re-emission instead of duplicating it.
+    Public so the Junior (Wave D) can map a task back to its unit -> owner ->
+    area for the per-area budget lineage, without storing area on the Task.
     """
     return f"t-{content_digest({'unit': unit})[:12]}"
+
+
+_task_id = task_id_for_unit  # internal alias (historical call sites)
 
 
 def _first_of_kind(artifacts: Sequence[Artifact], kind: str) -> Artifact:

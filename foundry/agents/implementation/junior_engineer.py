@@ -265,8 +265,11 @@ def _mirror_diff_blob(rt: AgentRuntime, sandbox: Sandbox, result: AdapterResult)
     — arch §2(d): no reuse) into the run-scoped CAS so a store-backed resolve_blob
     reads it end to end. Both stores key by the RAW sha256, so the mirrored uri ==
     ``result.diff_uri`` (asserted). No-op when ``rt.cas`` is None (synthetic
-    resolver). Content-addressed + atomic, so it is safe to call from a pool worker
-    thread (the only shared-state touch the parallel path makes concurrently)."""
+    resolver). This is the ONLY shared-state write a pool worker makes — and it is
+    safe to call concurrently: ``put_blob`` is content-addressed and idempotent
+    (in-memory store = a single GIL-atomic dict setitem; filesystem store =
+    thread-unique temp + ``os.replace``), so two workers mirroring the same digest
+    converge on identical bytes."""
     if rt.cas is None:
         return
     mirrored = rt.cas.put_blob(sandbox.get_blob(result.diff_uri))

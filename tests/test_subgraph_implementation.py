@@ -19,9 +19,9 @@ records on the SEPARATE ``pinned_constraints`` channel. Asserts:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +31,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from foundry.agents import AgentRuntime
 from foundry.agents._common import emit_artifact
 from foundry.agents.implementation.senior_engineer import DESIGN_KIND, OWNERSHIP_KIND
+from foundry.durability.artifact_store import ArtifactStore
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
 from foundry.execution.adapters.stub import StubAdapter
 from foundry.execution.sandbox import Sandbox
@@ -216,14 +217,16 @@ def test_subgraph_idempotent_rerun_same_key(tmp_path: Any) -> None:
 
 
 class _ConcurrencyProbe:
-    """A deterministic adapter that records the MAX simultaneous in-flight runs,
-    to prove the pool actually executes tasks in parallel (not serially)."""
+    """Adapter that proves real parallelism DETERMINISTICALLY: a Barrier(parties)
+    only releases once that many tasks are concurrently in-flight, so serial
+    execution would time out (BrokenBarrierError) instead of silently passing."""
 
     supports_turn_snapshots = True
     name = "concurrency-probe"
 
-    def __init__(self) -> None:
+    def __init__(self, parties: int = 2) -> None:
         self._lock = threading.Lock()
+        self._barrier = threading.Barrier(parties, timeout=5.0)
         self.active = 0
         self.max_active = 0
 
@@ -232,7 +235,7 @@ class _ConcurrencyProbe:
             self.active += 1
             self.max_active = max(self.max_active, self.active)
         try:
-            time.sleep(0.08)  # widen the overlap window so concurrency is observable
+            self._barrier.wait()  # blocks until `parties` runs overlap (or times out)
             tid = str(packet.task["id"])
             (Path(sandbox.worktree) / "out.txt").write_text(tid)
             diff_uri = sandbox.put_blob(f"diff:{tid}".encode())
@@ -240,6 +243,20 @@ class _ConcurrencyProbe:
         finally:
             with self._lock:
                 self.active -= 1
+
+
+class _ConstantDiffAdapter:
+    """Every task writes IDENTICAL worktree content + diff bytes -> identical
+    snapshot AND blob digests, so concurrent workers collide on the shared
+    content-addressed store. Exercises the Wave C parallel-write race directly."""
+
+    supports_turn_snapshots = True
+    name = "constant-diff"
+
+    def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
+        (Path(sandbox.worktree) / "same.txt").write_text("constant")
+        diff_uri = sandbox.put_blob(b"identical-diff")
+        return AdapterResult(diff_uri=diff_uri, snapshot_digest=sandbox.snapshot())
 
 
 def test_pool_parallel_output_matches_serial(tmp_path: Any) -> None:
@@ -275,7 +292,54 @@ def test_pool_runs_tasks_concurrently(tmp_path: Any) -> None:
     final: FactoryState = app.invoke(_seed_state(), _config("run-conc"))
 
     assert len(_feature_diffs(final)) == 2
-    assert probe.max_active == 2  # the two tasks were in flight at the same time
+    assert probe.max_active == 2  # the Barrier only releases if both ran at once
+
+
+def test_pool_concurrent_cas_writes_are_safe(tmp_path: Any) -> None:
+    """The shared content-addressed store (durable snapshot_store + rt.cas) must
+    survive concurrent identical-digest writes from pool workers. Pre-fix this
+    raced (FileExistsError / 'Directory not empty') because the sandbox staged on a
+    PID-only temp name shared across threads; the diffs must still resolve."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "README.md").write_text("seed\n")
+    store = str(tmp_path / "store")  # shared DURABLE store -> snapshots/blobs shared
+    body = _decomposition_payload()
+    proxy = ModelProviderProxy(
+        MockTransport(completions=[body], default_text=body), signer=ZoneBSigner(KEY, KEY_ID)
+    )
+    rt = AgentRuntime(proxy=proxy, adapter=_ConstantDiffAdapter(), cas=ArtifactStore())
+    app = build_implementation_subgraph(
+        rt, source_dir=str(src), resolve=_resolve, snapshot_store=store, max_slots=4
+    ).compile()
+
+    final: FactoryState = app.invoke(_seed_state(), _config("run-cas"))
+
+    diffs = _feature_diffs(final)
+    assert len(diffs) == 2  # two tasks, distinct idempotency keys, no race crash
+    # the identical diff blob mirrored into rt.cas resolves end to end.
+    assert rt.cas is not None
+    assert rt.cas.resolve_blob("cas://sha256/" + hashlib.sha256(b"identical-diff").hexdigest()) == (
+        b"identical-diff"
+    )
+
+
+def test_pool_partial_budget_rejection(tmp_path: Any) -> None:
+    """A cap between 1x and 2x the per-task estimate admits the FIRST task and
+    rejects the second (fail-closed) — exercising the mixed admitted/rejected
+    path: exactly one diff is produced, the other is never built."""
+    (tmp_path / "README.md").write_text("seed\n")
+    app = build_implementation_subgraph(
+        _runtime(),
+        source_dir=str(tmp_path),
+        resolve=_resolve,
+        max_slots=2,
+        cost_cap_microusd=1_500_000,  # one task (est 1_000_000) admits, the next exceeds
+    ).compile()
+
+    final: FactoryState = app.invoke(_seed_state(), _config("run-partial"))
+
+    assert len(_feature_diffs(final)) == 1  # one admitted, one rejected at admit
 
 
 def test_pool_fail_closed_when_over_budget(tmp_path: Any) -> None:

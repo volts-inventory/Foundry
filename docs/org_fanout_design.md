@@ -143,6 +143,16 @@ green → merge. No wave lands unless the trust/determinism invariants below hol
   Results read back via `pool.result()` and merge branch-per-task as today.
   *Critic focus: idempotent/no-double-run on resume; budget rejection still
   fail-closed; results identical to serial modulo order.*
+  **Done.** Implemented opt-in (`max_slots`, default 1 = serial/byte-identical);
+  only the isolated adapter run + a content-addressed `rt.cas.put_blob` execute on
+  worker threads, all `rt.seq`/CAS-body writes stay sequential in the node.
+  The adversarial critic caught a real **data race it newly triggered**:
+  `Sandbox` staged snapshots/blobs on a `.tmp-{digest}-{pid}` name that COLLIDES
+  across threads sharing a PID, so two concurrent identical-digest writes raced on
+  a shared `snapshot_store`. Fixed in `execution/sandbox.py` (thread-unique staging
+  name + tolerate a concurrent content-addressed winner) with a CAS-backed
+  concurrent test that reproduces it. lineage stays `"default"`; the per-area
+  budget tree is Wave D.
 
 - **Wave D — Conditional Area Managers + budget tree.**
   Materialize one Area-Manager node per non-empty area (skip singletons → report

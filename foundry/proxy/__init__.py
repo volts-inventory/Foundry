@@ -32,7 +32,9 @@ from foundry.proxy.model_provider_proxy import (
     ProviderResponse,
     ProviderTransport,
     ProxyUnavailable,
+    SamplingPolicy,
     VerdictChannelError,
+    default_sampling_policy,
 )
 
 __all__ = [
@@ -53,6 +55,7 @@ __all__ = [
     "ProviderResponse",
     "ProviderTransport",
     "ProxyUnavailable",
+    "SamplingPolicy",
     "TransportError",
     "UnknownModelLineageError",
     "VerdictChannelError",
@@ -60,5 +63,6 @@ __all__ = [
     "build_backend",
     "claude_cli_backend",
     "codex_backend",
+    "default_sampling_policy",
     "ollama_gemma_backend",
 ]

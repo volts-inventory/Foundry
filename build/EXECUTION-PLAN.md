@@ -115,7 +115,7 @@ Accept: temperature-vs-effort decision is backend/lineage-aware; reasoning/OpenA
 models get effort, never a rejected temperature; T2/T3 CLI gate calls pin
 determinism; per-backend tests.
 
-### [6] CLI parser hardening — #9 · deps: [5] · ☐
+### [6] CLI parser hardening — #9 · deps: [5] · ✓ (Wave 2; critic CLEAN; merged)
 Files: `proxy/cli_transports.py`, tests/fixtures.
 Accept: Codex extraction handles current `item.completed`/`agent_message` shapes
 and raises `TransportError` on empty text at zero-exit; Claude handles
@@ -204,3 +204,9 @@ container spawning; bounded by provider quota + budget. Tests.
   after every merge. NEXT: Wave 2 — [3] doc-node (needs [1]) · [6] CLI parser
   hardening · [11] agent journal. (Hold [7] drift for Wave 3: shares manifest.py
   with [3].)
+- **Wave 2 STARTED** — 3 lanes off `cda4f55` (branches `wave2/{doc-node,cli-parsers,journal}`).
+- **[6] CLI parser hardening — DONE.** Critic CLEAN. Merged; full suite green.
+  Codex `item.completed`/`agent_message` nesting handled + raises on zero-exit
+  empty (no silent empty completion); Claude robust to modelUsage-absent envelope,
+  still fail-closed. Real-shape fixtures added. (Out-of-scope note for later:
+  Claude doesn't raise on empty-result-text-with-observable-model.)

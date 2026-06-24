@@ -142,7 +142,7 @@ Accept: selectable mode that pauses at stage boundaries, surfaces stage
 artifacts/evidence, and resumes on human approve/reject (reuses existing Gated +
 sign-off machinery); tests.
 
-### [11] Agent journal + interview — #6 · deps: none · ☐
+### [11] Agent journal + interview — #6 · deps: none · ✓ (Wave 2; adversarial critic CLEAN; merged)
 Files: `agents/_runtime.py`, `agents/_common.py`, agent nodes, `state/` channel.
 Accept: each node records a structured advisory rationale entry; checkpoint
 "interview" re-instantiates role+journal via proxy. HARD: strictly advisory,
@@ -210,3 +210,10 @@ container spawning; bounded by provider quota + budget. Tests.
   empty (no silent empty completion); Claude robust to modelUsage-absent envelope,
   still fail-closed. Real-shape fixtures added. (Out-of-scope note for later:
   Claude doesn't raise on empty-result-text-with-observable-model.)
+- **[11] agent journal — DONE.** ADVERSARIAL critic CLEAN — advisory-only
+  guarantee holds structurally (zero reads of `agent_journal` into merge_gates /
+  route_after_gates / admission / evidence-pack; `interview()` has no channel-write
+  surface; reviewer_critic gate write unchanged; zero added model calls). Merged.
+  Wired into product_manager/principal_architect/reviewer_critic (full rollout
+  mechanical). Branch-name collision (work on `worktree-agent-aa8f2d99f3cb51476`)
+  was harmless — merged the correct ref.

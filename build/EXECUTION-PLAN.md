@@ -109,7 +109,7 @@ Files: `gates/spec.py`, `agents/product/criteria_critic.py`.
 Accept: critic-flagged security/abuse omission (zone-B-re-derivable) FAILS the
 Spec gate; adversarial test: omission → Spec FAIL → no PR.
 
-### [5] Backend-aware determinism — #8 · deps: none · ☐
+### [5] Backend-aware determinism — #8 · deps: none · ✓ (Wave 1; critic CLEAN; merged)
 Files: `proxy/model_provider_proxy.py`, `proxy/cli_transports.py`, maybe `proxy/lineage.py`.
 Accept: temperature-vs-effort decision is backend/lineage-aware; reasoning/OpenAI
 models get effort, never a rejected temperature; T2/T3 CLI gate calls pin
@@ -187,3 +187,7 @@ container spawning; bounded by provider quota + budget. Tests.
   `wave1/{output,prose,spec-gate,determinism,compose}`). Gitignored `.claude/`.
 - **[1] output dir — DONE.** Critic CLEAN (no findings); merged to branch; full
   suite green. `run(output_dir=)` / `--out DIR` writes the gate-reviewed tree.
+- **[5] backend determinism — DONE.** Critic CLEAN (2 non-blocking latent MINORs:
+  `gpt-*` could over-match a hypothetical Ollama `gpt-oss`; legacy `claude-3-opus`
+  id unmatched — both outside default tier maps, injectable escape hatch). Merged;
+  full suite green. Injectable `SamplingPolicy` (effort vs temperature per model).

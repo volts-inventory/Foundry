@@ -60,6 +60,11 @@ from foundry.agents import AgentRuntime
 from foundry.docs import write_bundle
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.durability.checkpointer import FoundryCheckpointer
+from foundry.durability.persistence import (
+    DurableBackends,
+    durable_backends,
+    state_dir_from_env,
+)
 from foundry.execution.adapters.stub import StubAdapter
 from foundry.gates import DevGateWriteVerifier, TwoZoneGateRunner, ZoneBSigner
 from foundry.graph.factory_graph import build_factory_graph, terminal_gates_pass
@@ -848,12 +853,31 @@ def run(
     if diff_body is None:
         diff_body = _PASSING_DIFF if mode == MODE_ASSISTANT else _ASSURANCE_PASSING_DIFF
     spec_text = _load_spec(spec)
-    store = ArtifactStore()
+    # Single-host durability seam (durability/persistence.py): when
+    # FOUNDRY_STATE_DIR is SET, the checkpointer (+ its outbox/WORM audit),
+    # the GlobalRecords trust ledgers and the CAS are all file-backed under that
+    # dir so the run survives a process restart. UNSET (the DEFAULT) ⇒ in-memory
+    # everywhere — byte-identical to the historical request-only run.
+    state_dir = state_dir_from_env()
+    durable: DurableBackends | None = (
+        durable_backends(state_dir) if state_dir is not None else None
+    )
+    if durable is not None:
+        # FilesystemArtifactStore is a documented structural drop-in for the
+        # in-memory ArtifactStore (identical put_body/.../resolve/resolve_blob
+        # seams, pinned by tests/test_fs_artifact_store.py); cast so the rest of
+        # the assembly reads it as the same cas type with no call-site change.
+        store: ArtifactStore = cast("ArtifactStore", durable.cas)
+        records = durable.global_records
+        ckpt = durable.checkpointer
+    else:
+        store = ArtifactStore()
+        records = GlobalRecords()
+        ckpt = FoundryCheckpointer()
     tx = MockTransport.scripted(dict(_SCRIPTS), default_verdict="approve")
     proxy = ModelProviderProxy(tx, signer=ZoneBSigner(_KEY, _KEY_ID))
     rt = AgentRuntime(proxy=proxy, adapter=StubAdapter(), cas=store)
 
-    records = GlobalRecords()
     runner = TwoZoneGateRunner(ZoneBSigner(_KEY, _KEY_ID), records, _SCANNER_REV, _LINEAGE_REV)
 
     resolve = resolve or _synthetic_resolve(store)
@@ -909,7 +933,6 @@ def run(
     # Install the dev gate-write verifier so the REAL merge_gates admits the
     # runner-attested verdicts (D4); reset its token in finally so it never leaks.
     token = set_gate_write_verifier(DevGateWriteVerifier(_KEY, _KEY_ID, records))
-    ckpt = FoundryCheckpointer()
     with tempfile.TemporaryDirectory(prefix="foundry-cli-src-") as source_dir:
         try:
             app = build_factory_graph(
@@ -949,7 +972,12 @@ def run(
             )
         finally:
             reset_gate_write_verifier(token)
-            ckpt.close()
+            # Release the SQLite handles: durable mode closes the checkpointer +
+            # the global-records connection together; otherwise just the ckpt.
+            if durable is not None:
+                durable.close()
+            else:
+                ckpt.close()
 
     final_state = final
     result = _result(

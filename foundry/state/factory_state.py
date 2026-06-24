@@ -14,6 +14,7 @@ from foundry.schemas.architecture import PinnedConstraint
 from foundry.schemas.base import Artifact, BudgetLedger, ExternalAction, LogRef
 from foundry.schemas.gates import GateResult, GateTriage
 from foundry.schemas.governance import SignOffRecord, TierDecision
+from foundry.schemas.journal import JournalEntry
 from foundry.state import reducers
 
 
@@ -26,6 +27,12 @@ class FactoryState(TypedDict, total=False):
     artifacts: Annotated[list[Artifact], reducers.merge_by_uri]
     gates: Annotated[list[GateResult], reducers.merge_gates]
     gate_triage: Annotated[list[GateTriage], reducers.union_triage]
+    # ADVISORY observability ONLY (plan [11]). A SEPARATE channel from gates: an
+    # agent's work-journal note, folded additively by `union_journal`. NEVER read
+    # by any gate, by `merge_gates`, by `route_after_gates`, or by `admission` —
+    # the journal cannot influence whether a build passes (agents propose, only
+    # signed gates decide, L5). Same posture as `gate_triage`, weaker still.
+    agent_journal: Annotated[list[JournalEntry], reducers.union_journal]
     tasks: Annotated[list[dict], reducers.union_by_id]
     budget: BudgetLedger  # single-writer (Budget Controller)
     actions: Annotated[list[ExternalAction], reducers.union_actions]

@@ -24,6 +24,9 @@ FOUNDRY_MSGPACK_MODULES: list[tuple[str, str]] = [
     ("foundry.schemas.gates", "GateStatus"),
     ("foundry.schemas.gates", "VerdictClass"),
     ("foundry.schemas.gates", "JudgmentProvenance"),
+    # Advisory `agent_journal` channel record (plan [11]) — small, rides the
+    # channel directly (like GateTriage), so it must round-trip the checkpoint.
+    ("foundry.schemas.journal", "JournalEntry"),
     ("foundry.schemas.architecture", "PinnedConstraint"),
     ("foundry.schemas.architecture", "ConstraintScope"),
     ("foundry.state.seq", "Seq"),

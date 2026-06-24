@@ -333,3 +333,101 @@ def test_codex_transport_direct_construction() -> None:
     t = CodexCliTransport(runner=_codex_runner([{"type": "agent_message", "text": "x"}]))
     resp = t.send({"model": "gpt-5", "messages": [{"role": "user", "content": "q"}]})
     assert resp.text == "x"
+
+
+# --------------------------------------------------------------------------- #
+# Parser hardening (task [6]) — current/legacy shapes + fail-closed-on-empty   #
+# --------------------------------------------------------------------------- #
+
+
+def _raw_runner(stdout: str, *, returncode: int = 0) -> Any:
+    def run(argv: Sequence[str], timeout_s: float | None) -> CliResult:
+        run.calls.append(list(argv))  # type: ignore[attr-defined]
+        return CliResult(returncode, stdout)
+
+    run.calls = []  # type: ignore[attr-defined]
+    return run
+
+
+def test_codex_item_completed_agent_message_is_extracted() -> None:
+    # Current `codex exec --json` wraps the final message as
+    # {"type":"item.completed","item":{"type":"agent_message","text":...}}.
+    # The OUTER type is a lifecycle phase; the tag rides on the nested item.
+    runner = _codex_runner(
+        [
+            {"type": "thread.started", "thread_id": "thr_1", "model": "gpt-5-codex"},
+            {"type": "item.completed", "item": {"type": "reasoning", "text": "thinking"}},
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": "final codex answer"},
+            },
+            {"type": "turn.completed", "item": {"usage": {"input_tokens": 9, "output_tokens": 4}}},
+        ]
+    )
+    resp = CodexCliTransport(runner=runner).send(
+        {"model": "gpt-5-codex", "messages": [{"role": "user", "content": "go"}]}
+    )
+    assert resp.text == "final codex answer"
+    assert resp.served_model == "gpt-5-codex"
+    assert resp.usage["input_tokens"] == 9
+    assert resp.usage["output_tokens"] == 4
+
+
+def test_codex_zero_exit_with_no_agent_message_fails_closed() -> None:
+    # A shape mismatch / no agent_message on a zero-exit run must raise, NOT
+    # return a silent empty completion the proxy would admit as an empty turn.
+    runner = _codex_runner(
+        [
+            {"type": "thread.started", "model": "gpt-5-codex"},
+            {"type": "item.completed", "item": {"type": "reasoning", "text": "only reasoning"}},
+            {"type": "turn.completed", "item": {"usage": {"input_tokens": 3}}},
+        ]
+    )
+    with pytest.raises(TransportError, match="no agent_message"):
+        CodexCliTransport(runner=runner).send(
+            {"model": "gpt-5-codex", "messages": [{"role": "user", "content": "q"}]}
+        )
+
+
+def test_codex_real_shape_fixture_stream() -> None:
+    from tests.fixtures.cli_transport_samples import CODEX_EXEC_JSON_STREAM
+
+    runner = _raw_runner(CODEX_EXEC_JSON_STREAM)
+    resp = CodexCliTransport(runner=runner).send(
+        {"model": "gpt-5-codex", "messages": [{"role": "user", "content": "q"}]}
+    )
+    assert resp.text == "Here is the final answer from codex."
+    assert resp.served_model == "gpt-5-codex"
+    assert resp.usage["input_tokens"] == 128
+    assert resp.usage["output_tokens"] == 41
+    assert resp.usage["cache_read_input_tokens"] == 16
+
+
+def test_claude_real_shape_fixture_result() -> None:
+    from tests.fixtures.cli_transport_samples import CLAUDE_P_JSON_RESULT
+
+    runner = _raw_runner(CLAUDE_P_JSON_RESULT)
+    resp = ClaudeCliTransport(runner=runner).send(
+        {"model": "claude-opus-4-8", "messages": [{"role": "user", "content": "q"}]}
+    )
+    assert resp.text == "Here is the final answer from claude."
+    assert resp.served_model == "claude-opus-4-8"
+    assert resp.usage["input_tokens"] == 140
+    assert resp.usage["output_tokens"] == 52
+    assert resp.usage["cache_read_input_tokens"] == 96
+    assert resp.request_id == "claude-cli:a1b2c3d4-0000-4444-8888-abcdef012345"
+
+
+def test_claude_envelope_without_modelusage_observes_top_level_model() -> None:
+    # Older/degraded envelope: no modelUsage, but total_cost_usd + usage + a
+    # top-level model. The model is still OBSERVED (not guessed), so this does
+    # not fail closed.
+    from tests.fixtures.cli_transport_samples import CLAUDE_P_JSON_NO_MODELUSAGE
+
+    runner = _raw_runner(CLAUDE_P_JSON_NO_MODELUSAGE)
+    resp = ClaudeCliTransport(runner=runner).send(
+        {"model": "claude-opus-4-8", "messages": [{"role": "user", "content": "q"}]}
+    )
+    assert resp.served_model == "claude-opus-4-8"
+    assert resp.text == "Answer without modelUsage."
+    assert resp.usage["input_tokens"] == 20

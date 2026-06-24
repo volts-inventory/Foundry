@@ -309,9 +309,21 @@ class ClaudeCliTransport:
 
 
 def _observe_claude_model(parsed: dict[str, Any], *, requested: str | None) -> str:
-    """Observe the served model from the CLI JSON. ``modelUsage`` is keyed by
-    model id; prefer a key matching the pinned request, else the one with the
-    most tokens, else the top-level ``model``. Empty ⇒ fail closed downstream."""
+    """Observe the served model from the ``claude -p --output-format json``
+    envelope. The current shape is::
+
+        {"type": "result", "subtype": "success", "result": "...",
+         "session_id": "...", "total_cost_usd": ..., "usage": {...},
+         "modelUsage": {"claude-...": {"inputTokens": ..., "outputTokens": ...}}}
+
+    ``modelUsage`` is keyed by model id and is the primary observation: prefer a
+    key matching the pinned request, else the one with the most tokens. Fall back
+    to the top-level ``model`` (and, defensively, a ``model`` nested in the
+    ``usage`` block) for envelopes that carry only ``total_cost_usd`` + ``usage``.
+
+    An empty result ⇒ fail closed in the LineageMap — we never guess. The
+    fallbacks only PROMOTE a model the backend actually reported; they do not
+    invent one when the envelope is truly unobservable."""
     usage_by_model = parsed.get("modelUsage")
     if isinstance(usage_by_model, dict) and usage_by_model:
         keys = [k for k in usage_by_model if isinstance(k, str)]
@@ -331,7 +343,12 @@ def _observe_claude_model(parsed: dict[str, Any], *, requested: str | None) -> s
         if keys:
             return max(keys, key=_tokens)
     model = parsed.get("model")
-    return model if isinstance(model, str) else ""
+    if isinstance(model, str) and model:
+        return model
+    # Defensive fallback: some envelopes omit modelUsage AND top-level model but
+    # carry a model id inside the usage block. Still an OBSERVATION, never a guess.
+    nested = _as_dict(parsed.get("usage")).get("model")
+    return nested if isinstance(nested, str) else ""
 
 
 # --------------------------------------------------------------------------- #
@@ -341,6 +358,13 @@ def _observe_claude_model(parsed: dict[str, Any], *, requested: str | None) -> s
 
 class CodexCliTransport:
     """``codex exec --json [-m <model>] [-c model_reasoning_effort=<e>] "<prompt>"``.
+
+    ALTITUDE CAVEAT: ``codex exec`` is an *agentic loop*, not a single-shot
+    completion — it may take tool/command turns before emitting a final
+    ``agent_message``. We observe only the LAST agent message as the turn text
+    and the model/usage off the stream; the proxy treats this transport as a
+    single completion at its own altitude (the intermediate agent steps are
+    Codex-internal and not surfaced to the graph).
 
     Codex emits JSONL events; the model id, the final agent message, and token
     usage are observed from that stream (lenient — the exact event shapes are
@@ -379,6 +403,14 @@ class CodexCliTransport:
         if not text and result.returncode != 0:
             raise TransportError(
                 f"codex CLI exit {result.returncode}: {result.stderr[:400] or '(no stderr)'}"
+            )
+        if not text:
+            # Zero-exit but no agent_message recovered from the JSONL stream:
+            # a parser/shape mismatch must NOT masquerade as a silent empty
+            # completion (the proxy would admit an empty turn). Fail closed.
+            raise TransportError(
+                "codex CLI exit 0 but no agent_message text found in JSONL stream "
+                f"(stdout {len(result.stdout)} bytes; event shape unrecognised)"
             )
         return ProviderResponse(
             served_model=served,
@@ -433,22 +465,55 @@ def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _is_agent_message_type(etype: str) -> bool:
+    return "agent_message" in etype or etype in ("message", "assistant")
+
+
+def _agent_message_text(carrier: dict[str, Any]) -> str:
+    for key in ("message", "text", "content"):
+        v = carrier.get(key)
+        if isinstance(v, str) and v:
+            return v
+    return ""
+
+
 def _find_agent_message(event: dict[str, Any]) -> str:
+    """Final-agent-message text across Codex event shapes:
+
+    * current ``codex exec --json``: the message is nested as
+      ``{"type": "item.completed", "item": {"type": "agent_message", "text": ...}}``
+      — the OUTER ``type`` is the lifecycle phase, the agent_message tag lives on
+      the ``item``;
+    * older streams: ``{"msg": {"type": "agent_message", "message": ...}}`` or a
+      flat ``{"type": "message"|"assistant"|"agent_message", ...}``.
+
+    We inspect the nested item tag first (so ``item.completed`` no longer misses),
+    then fall back to the inner/outer envelope tag — keeping tolerance for the
+    older shapes."""
     inner = _as_dict(event.get("msg")) or event
-    item = _as_dict(inner.get("item")) or inner
-    etype = str(inner.get("type") or item.get("type") or event.get("type") or "")
-    if "agent_message" in etype or etype in ("message", "assistant"):
-        for key in ("message", "text", "content"):
-            v = item.get(key) or inner.get(key)
-            if isinstance(v, str) and v:
-                return v
+    item = _as_dict(inner.get("item"))
+    # 1) current shape: the agent_message tag rides on the nested item.
+    if item and _is_agent_message_type(str(item.get("type") or "")):
+        text = _agent_message_text(item)
+        if text:
+            return text
+    # 2) older/flat shapes: the tag rides on the inner (msg) or outer envelope.
+    etype = str(inner.get("type") or event.get("type") or "")
+    if _is_agent_message_type(etype):
+        text = _agent_message_text(item) or _agent_message_text(inner)
+        if text:
+            return text
     return ""
 
 
 def _find_usage(event: dict[str, Any]) -> dict[str, int] | None:
+    # Usage rides at the top level (older shapes), on the ``msg`` envelope, or on
+    # the nested ``item`` of a current ``turn.completed`` event.
     src: Any = event.get("usage")
     if not isinstance(src, dict):
         src = _as_dict(event.get("msg")).get("usage")
+    if not isinstance(src, dict):
+        src = _as_dict(event.get("item")).get("usage")
     if not isinstance(src, dict):
         return None
     return _usage(

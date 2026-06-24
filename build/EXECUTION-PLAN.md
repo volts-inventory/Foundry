@@ -87,7 +87,7 @@ lanes drain by Wave 3.
 
 > `order` = the [N] tag. `#` = TaskList id. Status: ☐ pending / ◐ in progress / ✓ done.
 
-### [1] Output dir — #2 · deps: none · ☐
+### [1] Output dir — #2 · deps: none · ✓ (Wave 1; critic CLEAN; merged)
 Files: `cli.py`, reuse `graph/gate_wiring.materialize_workdir`, `RunResult`.
 Accept: `run(..., output_dir=)` + `--out DIR` materializes the final accepted
 integrated tree to disk on a passing build; path surfaced on `RunResult`; tests.
@@ -183,3 +183,7 @@ container spawning; bounded by provider quota + budget. Tests.
 - _(not started)_ — plan authored; baseline green (ruff/mypy clean, full suite
   passing, 169 modules). Awaiting go to start **Wave 1**:
   [1] output · [5] backend-determinism · [4] spec-gate-critic · [2] prose · [14] compose.
+- **Wave 1 STARTED** — 5 lanes launched as worktree-isolated agents (branches
+  `wave1/{output,prose,spec-gate,determinism,compose}`). Gitignored `.claude/`.
+- **[1] output dir — DONE.** Critic CLEAN (no findings); merged to branch; full
+  suite green. `run(output_dir=)` / `--out DIR` writes the gate-reviewed tree.

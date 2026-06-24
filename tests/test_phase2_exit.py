@@ -109,7 +109,11 @@ from foundry.schemas.base import Artifact, FrozenModel
 from foundry.schemas.gates import GateResult, GateStatus, JudgmentProvenance
 from foundry.schemas.governance import EvidencePack, SignOffRecord
 from foundry.schemas.implementation import FeatureDiff
-from foundry.schemas.product import AcceptanceCriterion, Criticality
+from foundry.schemas.product import (
+    AcceptanceCriterion,
+    CriteriaCritique,
+    Criticality,
+)
 from foundry.state.factory_state import FactoryState
 from foundry.state.global_records import GlobalRecords
 from foundry.state.reducers import reset_gate_write_verifier, set_gate_write_verifier
@@ -261,6 +265,15 @@ def _synthetic_resolve(handle: Artifact) -> FrozenModel:
             criticality=Criticality.HIGH_RISK,
             oracle_hint=f"oracle for {cid}",
             security_abuse=True,
+            seq=handle.seq,
+        )
+    if handle.kind == "criteria_findings":
+        # The Criteria-Completeness Critic finding the Spec gate now consumes.
+        # No security/abuse omission here -> does not block the clean run.
+        return CriteriaCritique(
+            prd_uri="cas://design/prd",
+            security_abuse_omissions=(),
+            judgment_provenance=JudgmentProvenance.SELF,
             seq=handle.seq,
         )
     if handle.kind == "feature_diff":

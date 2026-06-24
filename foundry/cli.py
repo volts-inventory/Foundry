@@ -386,7 +386,11 @@ def _read_spec_path(path: str) -> str:
 def _is_existing_path(value: str) -> bool:
     """True iff ``value`` names an existing path. Guards ``Path.exists()`` against
     an ``OSError`` (e.g. a long literal-spec string exceeding the OS name limit),
-    so literal spec text never crashes the path probe."""
+    so literal spec text never crashes the path probe. An empty/whitespace string
+    is NEVER a path (``Path("").exists()`` resolves to cwd) — else an explicit
+    ``spec=""`` would silently ingest the entire working directory."""
+    if not value.strip():
+        return False
     try:
         return Path(value).exists()
     except OSError:
@@ -409,6 +413,8 @@ def _load_spec(spec: str | list[str] | None) -> str:
     if spec is None:
         return ""
     if isinstance(spec, str):
+        if not spec.strip():
+            return ""  # empty/blank literal == no spec (never probed as a path)
         text = _read_spec_path(spec) if _is_existing_path(spec) else spec
     else:
         text = "\n\n".join(_read_spec_path(s) for s in sorted(spec))

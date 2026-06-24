@@ -92,6 +92,15 @@ def test_load_spec_literal_text_passthrough() -> None:
     assert _load_spec("just literal intent text") == "just literal intent text"
 
 
+def test_load_spec_empty_string_is_no_spec_not_cwd() -> None:
+    # FOOT-GUN GUARD: Path("").exists() is True (resolves to cwd), so an explicit
+    # empty/blank spec must short-circuit to "" rather than ingesting the entire
+    # working directory's .md/.txt files.
+    assert _load_spec("") == ""
+    assert _load_spec("   ") == ""
+    assert _load_spec("\n\t") == ""
+
+
 def test_load_spec_missing_path_in_list_raises() -> None:
     # A path given via the list form (as the CLI --spec flag does) must exist.
     with pytest.raises(FileNotFoundError):

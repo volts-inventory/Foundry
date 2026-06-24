@@ -73,7 +73,7 @@ BLOCKER/MAJOR, the implementation is partial, or the full suite regressed.
 |------|-------|-------|------------------------------|------------------|--------|
 | **1** | [1] Output dir | [5] Backend determinism | [4] Spec-gate critic · [2] Prose bodies | [14] Compose profile | ✓ DONE |
 | **2** | [3] Doc-node *(needs [1])* | [6] CLI parser hardening | [11] Agent journal | [14] cont. | ✓ DONE |
-| **3** | [8] Spec ingestion | [7] Drift actionable | — | [15] Worker pool *(needs [14])* | ☐ |
+| **3** | [8] Spec ingestion | [7] Drift actionable | — | ([15] deferred to a later wave) | ✓ DONE |
 | **4** | [9] `--mode`/`--packs` *(needs [8])* | proxy done | — | [13] ideation *module* *(needs [8])* | ☐ |
 | **5** | [10] Checkpoint/HITL *(needs [9])* | — | — | [13] cli integration | ☐ |
 | **6** | [12] Evolution route *(needs [1]+[8])* | — | — | — | ☐ |
@@ -126,7 +126,7 @@ Files: `proxy/model_provider_proxy.py`, `observability/drift_alerts.py`, `docs/m
 Accept: drift policy decided + implemented (fail-closed for gate/judgment or
 explicitly advisory + live monitor wired); Ollama tier-mismatch surfaced; tests.
 
-### [8] Spec-doc ingestion — #4 · deps: none · ☐
+### [8] Spec-doc ingestion — #4 · deps: none · ✓ (Wave 3; critic CLEAN + 1 MINOR fixed; merged)
 Files: `cli.py`, state init/intake, `agents/product/*`.
 Accept: `--spec FILE` / `run(spec=)` ingests full design-spec doc(s) seeding
 product/architecture (retrieved_spans / pre-seeded intent); tests. Unblocks [12][13].
@@ -225,3 +225,14 @@ container spawning; bounded by provider quota + budget. Tests.
   (1642+). 9/15 tasks done. NEXT: Wave 3 — [8] spec ingestion · [7] drift
   actionable. (Then Wave 4: [9] modes + [13] ideation module; Wave 5: [10]
   checkpoints; Wave 6: [12] evolution.)
+- **[7] drift actionable — DONE.** Critic CLEAN (trust verified). Merged. Injectable
+  DriftPolicy: advisory default, opt-in fail-closed raises on gate/judgment drift
+  before stamping; tier-mismatch surfaced.
+- **[8] spec ingestion — DONE.** Critic CLEAN (no gate/criteria path reads
+  `state['spec']`) + 1 MINOR fixed (empty-string `_load_spec("")` no longer ingests
+  cwd). Merged. `--spec FILE|DIR` / `run(spec=)` seeds the spec into the product
+  intake prompts; request-only byte-identical.
+- **WAVE 3 COMPLETE** — [7]/[8] merged, critic-CLEAN, full suite green. 11/15 done.
+  NEXT: Wave 4 — [9] `--mode`/`--packs` + [13] ideation module (both unblocked by
+  [8]). Then Wave 5: [10] checkpoints; Wave 6: [12] evolution. ([15] worker pool
+  deferred to a final infra pass after [14].)

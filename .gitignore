@@ -15,3 +15,6 @@ dist/
 .mypy_cache/
 .mutmut-cache
 mutants/
+
+# Claude Code local state: agent worktrees, settings (never commit)
+.claude/

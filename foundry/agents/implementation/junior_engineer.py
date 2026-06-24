@@ -60,9 +60,16 @@ if TYPE_CHECKING:
 
     from langchain_core.runnables import RunnableConfig
 
+    from foundry.execution.work_pool import ExecutionTask
     from foundry.state.factory_state import FactoryState
 
-__all__ = ["idempotency_key", "make_junior_engineer_node", "pinned_texts", "ready_tasks"]
+__all__ = [
+    "execution_task_for",
+    "idempotency_key",
+    "make_junior_engineer_node",
+    "pinned_texts",
+    "ready_tasks",
+]
 
 NODE_ID = "junior_engineer"
 
@@ -163,6 +170,56 @@ def _build_packet(
         turn_budget=turn_budget,
         cost_budget_microusd=cost_budget_microusd,
         proxy_endpoint=None,
+    )
+
+
+def execution_task_for(
+    task: Task,
+    constraints: Sequence[PinnedConstraint],
+    *,
+    adapter: str,
+    worktree_path: str,
+    lineage: str = "default",
+    turn_budget: int = _DEFAULT_TURN_BUDGET,
+    cost_budget_microusd: int = _DEFAULT_COST_BUDGET_MICROUSD,
+) -> ExecutionTask:
+    """OPT-IN seam (additive — NOT on the default path): build the durable
+    :class:`~foundry.execution.work_pool.ExecutionTask` that would dispatch THIS
+    task's adapter run through a :class:`~foundry.execution.work_pool.WorkPool`
+    instead of running it in-process here.
+
+    The default :func:`make_junior_engineer_node` path is unchanged — it still runs
+    the adapter directly in a per-task :class:`Sandbox`. This helper exists only so
+    a future implementation subgraph can opt into pooled dispatch (logical fan-out
+    in the orchestrator; physical slots in infra; plan §4 [15]) WITHOUT the app ever
+    spawning a container: it emits a content-addressed task record (a generic worker
+    builds its own sandbox + adapter from it) and meters spend by ``lineage`` /
+    ``cost_budget_microusd`` against the pool's :class:`QuotaPolicy`.
+
+    The packet is byte-identical to the in-process path (pinned constraints VERBATIM
+    + FIRST), so the pool's content-addressed ``task_id`` is stable across a resume.
+    """
+    from foundry.execution.work_pool import ExecutionTask
+
+    packet = TaskPacket(
+        task={
+            "id": task.id,
+            "title": task.id,
+            "spec_uri": task.spec_uri,
+            "branch": task.branch,
+            "criterion_ids": list(task.criterion_ids),
+        },
+        pinned_constraints=pinned_texts(constraints),  # VERBATIM + FIRST (arch §2)
+        worktree_path=worktree_path,
+        turn_budget=turn_budget,
+        cost_budget_microusd=cost_budget_microusd,
+        proxy_endpoint=None,
+    )
+    return ExecutionTask(
+        packet=packet,
+        adapter=adapter,
+        lineage=lineage,
+        est_cost_microusd=cost_budget_microusd,
     )
 
 

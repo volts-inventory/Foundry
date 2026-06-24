@@ -190,6 +190,47 @@ def test_codex_default_tier_models_are_openai() -> None:
     assert proxy.tier_models["T1"] == "gpt-5-codex"
 
 
+def test_codex_gate_call_pins_effort_and_never_a_temperature() -> None:
+    # BLOCKER fix (arch §8): a gate/judge call on the Codex backend must pin a
+    # determinism control the backend actually honours. gpt-* / codex-* are
+    # reasoning models — they REJECT temperature; the Codex CLI forwards
+    # `model_reasoning_effort`. The proxy must therefore pin effort, NOT a
+    # temperature that the transport would silently drop (= no determinism).
+    runner = _codex_runner(
+        [
+            {"type": "session_configured", "model": "gpt-5-codex"},
+            {"msg": {"type": "agent_message", "message": "ok"}},
+        ]
+    )
+    proxy = build_backend("codex", runner=runner)
+    result = proxy.complete(
+        "gate_node", "T1", "SOP", [{"role": "user", "content": "review"}], purpose="gate"
+    )
+    # Manifest records effort (the substitution), never a temperature.
+    assert result.manifest_record["sampling"] == {"effort": "high"}
+    assert "sampling_note" in result.manifest_record
+    # The effort control reached the CLI as model_reasoning_effort; no temperature.
+    argv = runner.calls[0]
+    assert "-c" in argv and "model_reasoning_effort=high" in argv
+    assert not any("temperature" in str(a) for a in argv)
+
+
+def test_codex_t2_gate_call_also_pins_determinism() -> None:
+    # gpt-5 (T2) is still a reasoning model => effort, not a dropped temperature.
+    runner = _codex_runner(
+        [
+            {"type": "session_configured", "model": "gpt-5"},
+            {"msg": {"type": "agent_message", "message": "ok"}},
+        ]
+    )
+    proxy = build_backend("codex", runner=runner)
+    result = proxy.complete(
+        "gate_node", "T2", "SOP", [{"role": "user", "content": "review"}], purpose="gate"
+    )
+    assert result.manifest_record["sampling"] == {"effort": "high"}
+    assert "model_reasoning_effort=high" in runner.calls[0]
+
+
 # --------------------------------------------------------------------------- #
 # ollama gemma                                                                 #
 # --------------------------------------------------------------------------- #
@@ -244,6 +285,23 @@ def test_ollama_verdict_channel_sends_native_json_schema_format() -> None:
     assert payload["format"]["properties"]["status"]["enum"] == ["approve", "request-changes"]
     # Deterministic judge call pinned temperature 0 (gemma is a sampling model).
     assert payload["options"]["temperature"] == 0
+
+
+def test_ollama_gate_call_pins_temperature_zero_not_effort() -> None:
+    # Gemma honours options.temperature, so a deterministic gate call pins
+    # temperature 0 (NOT an effort control it would ignore).
+    post = _ollama_post(
+        {"model": "gemma3:27b", "message": {"content": "ok"}}
+    )
+    proxy = build_backend("ollama-gemma", http_post=post)
+    result = proxy.complete(
+        "gate_node", "T1", "SYS", [{"role": "user", "content": "x"}], purpose="gate"
+    )
+    assert result.manifest_record["sampling"] == {"temperature": 0}
+    assert "sampling_note" not in result.manifest_record
+    _url, payload = post.calls[0]
+    assert payload["options"]["temperature"] == 0
+    assert "format" not in payload  # no schema on a plain gate complete()
 
 
 def test_ollama_transport_requires_pinned_model() -> None:

@@ -22,11 +22,16 @@ goes through :class:`ModelProviderProxy`, which:
   budget ledger).
 
 Determinism policy (arch §8) vs current API surface: "temperature 0 for
-gates/judges" applies only to T2/T3 — sampling parameters are REMOVED on the
-T1 model (``claude-opus-4-8``; sending them is a 400). On T1 the proxy pins
+gates/judges" pins a determinism control, but WHICH control is backend/model-
+aware (:class:`SamplingPolicy`). Reasoning / no-sampling models (the Anthropic
+T1 reasoning tier; any OpenAI/Codex id) REMOVE sampling params — sending a
+temperature is a 400 (and a CLI transport that silently drops it would leave
+the call with no determinism control at all) — so the proxy pins
 ``output_config={"effort": "high"}`` instead and records the substitution in
-the manifest. Thinking is enabled (adaptive) only for ideation-class T1
-calls and OMITTED for deterministic gate/judge calls.
+the manifest. Models that honour sampling (Anthropic Sonnet/Haiku, Ollama/
+Gemma) get ``temperature 0``. Thinking is enabled (adaptive) only for
+ideation-class reasoning-model calls and OMITTED for deterministic gate/judge
+calls.
 
 Degraded-mode rule (fail-closed): on transport failure the proxy retries
 with bounded backoff and then raises :class:`ProxyUnavailable`. It NEVER
@@ -41,6 +46,7 @@ import json
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 from typing import Any, Literal, Protocol
 
 from foundry.gates.attestation import ZoneBSigner
@@ -56,9 +62,35 @@ TIER_MODELS: dict[str, str] = {
     "T3": "claude-haiku-4-5",
 }
 
-# Sampling parameters are removed on these models (400 if sent); the proxy
-# substitutes a pinned effort config and notes it in the manifest.
-_NO_SAMPLING_MODELS = frozenset({"claude-opus-4-8"})
+# ---- Determinism policy: effort vs temperature, per backend/model (arch §8) ----
+#
+# arch §8 pins determinism for gates/judges (temperature 0). But the *control*
+# that pins it is backend/model-specific: some models REMOVE sampling params
+# (400 if a temperature is sent) and instead take a reasoning-`effort` knob.
+# Pinning the WRONG control means either a rejected request or — worse, on a CLI
+# transport that silently drops an unsupported field — NO determinism control at
+# all. So the choice is a property of the model id, not a hardcoded Anthropic id.
+#
+# A model id matching any of these globs takes a pinned `effort` (and NEVER a
+# temperature) on deterministic gate/judge calls:
+#   - reasoning / OpenAI lineage (gpt-*, o1/o3/o4*, codex-*, *-codex) — reject
+#     temperature; the Codex CLI forwards `model_reasoning_effort` instead;
+#   - the Anthropic T1 reasoning model (claude-opus-*) — sampling params are
+#     removed (existing behaviour, kept).
+# Everything else (Anthropic Sonnet/Haiku, Ollama/Gemma) honours `temperature`,
+# so a deterministic call pins temperature 0 there.
+_DEFAULT_EFFORT_MODEL_GLOBS: tuple[str, ...] = (
+    "claude-opus-*",
+    "gpt-*",
+    "o1*",
+    "o3*",
+    "o4*",
+    "codex-*",
+    "*-codex",
+    "*-codex-*",
+)
+
+_DEFAULT_EFFORT = "high"
 
 _DEFAULT_MAX_TOKENS = 16000
 
@@ -81,6 +113,35 @@ _STATUS_BY_VERDICT = {
     "approve": GateStatus.PASS,
     "request-changes": GateStatus.FAIL,
 }
+
+
+@dataclass(frozen=True, slots=True)
+class SamplingPolicy:
+    """Backend/model-aware determinism control selector (arch §8).
+
+    For a deterministic gate/judge call the proxy must pin *some* determinism
+    control. Which one is a property of the served model id: a reasoning /
+    no-sampling model takes a pinned ``effort`` (and rejects ``temperature``);
+    every other model honours ``temperature`` and gets temperature 0.
+
+    Injectable so an operator can pin the exact policy for the backend they run;
+    the default (:func:`default_sampling_policy`) covers the curated backends
+    (Anthropic / OpenAI-Codex / Ollama-Gemma).
+    """
+
+    effort_model_globs: tuple[str, ...] = _DEFAULT_EFFORT_MODEL_GLOBS
+    effort: str = _DEFAULT_EFFORT
+
+    def takes_effort(self, model_id: str) -> bool:
+        """True if this model takes a pinned ``effort`` instead of a temperature
+        on deterministic calls (reasoning / no-sampling models)."""
+        return any(fnmatchcase(model_id, glob) for glob in self.effort_model_globs)
+
+
+def default_sampling_policy() -> SamplingPolicy:
+    """The curated default policy (Anthropic opus + OpenAI/Codex => effort;
+    Anthropic sonnet/haiku + Ollama/Gemma => temperature 0)."""
+    return SamplingPolicy()
 
 
 class ProxyUnavailable(RuntimeError):
@@ -197,6 +258,7 @@ class ModelProviderProxy:
         *,
         profile: Literal["self_judge", "decorrelated"] = "self_judge",
         tier_models: Mapping[str, str] | None = None,
+        sampling_policy: SamplingPolicy | None = None,
         max_retries: int = 2,
         backoff_base_s: float = 0.5,
         sleeper: Callable[[float], None] = time.sleep,
@@ -208,6 +270,10 @@ class ModelProviderProxy:
         self._lineage = lineage_map or LineageMap()
         self._signer = signer
         self._profile = profile
+        # Backend/model-aware determinism control (arch §8): which knob a
+        # deterministic gate/judge call pins (effort vs temperature 0) is a
+        # property of the configured backend's model ids, not a hardcoded id.
+        self._sampling_policy = sampling_policy or default_sampling_policy()
         # Tier -> pinned-model-id map. Defaults to the Anthropic lineage
         # (TIER_MODELS) but is injectable so an alternative backend (Codex/
         # Ollama-Gemma) can pin ITS real model ids — the flow is identical, the
@@ -237,6 +303,11 @@ class ModelProviderProxy:
     def tier_models(self) -> dict[str, str]:
         """The configured tier -> pinned-model-id map (read-only copy)."""
         return dict(self._tier_models)
+
+    @property
+    def sampling_policy(self) -> SamplingPolicy:
+        """The configured determinism-control policy (effort vs temperature)."""
+        return self._sampling_policy
 
     @property
     def manifest(self) -> tuple[dict[str, Any], ...]:
@@ -442,23 +513,28 @@ class ModelProviderProxy:
         sampling: dict[str, Any] = {}
         note: str | None = None
         output_config: dict[str, Any] = {}
+        takes_effort = self._sampling_policy.takes_effort(requested_model)
+        effort = self._sampling_policy.effort
 
         if purpose in ("gate", "judgment"):
             # Determinism policy (arch §8). Thinking is OMITTED on this path.
-            if requested_model in _NO_SAMPLING_MODELS:
-                # temperature/top_p/top_k are removed on this model (400 if
-                # sent) — record the documented substitution instead.
-                output_config["effort"] = "high"
-                sampling = {"effort": "high"}
+            # The control is backend/model-aware: reasoning / no-sampling models
+            # take a pinned `effort` (a temperature would be rejected and — on a
+            # CLI transport that silently drops it — leave the call with NO
+            # determinism control); every other model honours temperature 0.
+            if takes_effort:
+                output_config["effort"] = effort
+                sampling = {"effort": effort}
                 note = (
                     f"sampling params removed on {requested_model}; "
-                    'pinned output_config={"effort": "high"} in lieu of temperature 0'
+                    f'pinned output_config={{"effort": "{effort}"}} in lieu of '
+                    "temperature 0 (reasoning/no-sampling model)"
                 )
             else:
                 request["temperature"] = 0
                 sampling = {"temperature": 0}
         else:  # ideation — exploration helps (arch §8)
-            if requested_model in _NO_SAMPLING_MODELS:
+            if takes_effort:
                 request["thinking"] = {"type": "adaptive"}
                 sampling = {"thinking": "adaptive"}
 

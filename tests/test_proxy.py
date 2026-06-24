@@ -25,7 +25,9 @@ from foundry.proxy import (
     ModelProviderProxy,
     ProviderResponse,
     ProxyUnavailable,
+    SamplingPolicy,
     UnknownModelLineageError,
+    default_sampling_policy,
 )
 from foundry.schemas.gates import GateStatus, JudgmentProvenance
 from foundry.state.global_records import GlobalRecords
@@ -283,6 +285,69 @@ def test_t1_ideation_uses_adaptive_thinking_not_temperature():
     assert req["thinking"] == {"type": "adaptive"}
     assert "temperature" not in req
     assert "output_config" not in req  # no schema, no pinned effort on ideation
+
+
+# ---- 4b. sampling policy: backend/model-aware determinism control --------------
+
+
+def test_sampling_policy_routes_effort_vs_temperature_by_model_id():
+    policy = default_sampling_policy()
+    # Reasoning / no-sampling models => effort (temperature is rejected there).
+    for effort_id in ("claude-opus-4-8", "gpt-5", "gpt-5-codex", "o3-mini", "codex-mini"):
+        assert policy.takes_effort(effort_id), effort_id
+    # Models that honour options.temperature => temperature 0.
+    for temp_id in ("claude-sonnet-4-6", "claude-haiku-4-5", "gemma3:27b", "gemma3:4b"):
+        assert not policy.takes_effort(temp_id), temp_id
+
+
+def test_anthropic_opus_gate_uses_effort_sonnet_pins_temperature_zero():
+    # The DEFAULT Anthropic backend stays backward-compatible: opus (T1, a
+    # reasoning model) gets effort; sonnet (T2) pins temperature 0.
+    proxy, transport = make_proxy()
+    proxy.complete("n1", "T1", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
+    proxy.complete("n2", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
+    t1_req, t2_req = transport.requests
+    assert t1_req["output_config"] == {"effort": "high"}
+    assert "temperature" not in t1_req
+    assert t2_req["temperature"] == 0
+    assert "output_config" not in t2_req
+
+
+def test_codex_tier_model_gate_pins_effort_not_temperature_via_policy():
+    # With a Codex tier map, a T1 (gpt-5-codex) AND a T2 (gpt-5) gate call both
+    # pin effort — proving the decision follows the configured backend's model
+    # ids, not a hardcoded Anthropic id.
+    transport = FakeTransport(served_model="gpt-5-codex")
+    proxy = ModelProviderProxy(
+        transport,
+        LineageMap([("gpt-*", {"openai-gpt"})]),
+        ZoneBSigner(KEY, KEY_ID),
+        tier_models={"T1": "gpt-5-codex", "T2": "gpt-5"},
+        sleeper=lambda _s: None,
+    )
+    for tier in ("T1", "T2"):
+        proxy.complete(f"n-{tier}", tier, "SOP", [{"role": "user", "content": "x"}], purpose="gate")
+    for req in transport.requests:
+        assert req["output_config"] == {"effort": "high"}
+        assert "temperature" not in req
+    for rec in proxy.manifest:
+        assert rec["sampling"] == {"effort": "high"}
+        assert "sampling_note" in rec
+
+
+def test_sampling_policy_is_injectable_and_overrides_default():
+    # An operator can pin an exact policy for the backend they run.
+    transport = FakeTransport()
+    proxy = ModelProviderProxy(
+        transport,
+        LineageMap(),
+        sampling_policy=SamplingPolicy(effort_model_globs=(), effort="medium"),
+        sleeper=lambda _s: None,
+    )
+    # Empty effort-glob set => even opus is treated as a sampling model here.
+    proxy.complete("n", "T1", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
+    assert transport.requests[0]["temperature"] == 0
+    assert proxy.sampling_policy.effort == "medium"
 
 
 # ---- 5. unavailability: bounded retry, then fail closed -------------------------

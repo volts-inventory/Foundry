@@ -76,6 +76,7 @@ from foundry.lifecycle.maintenance import (
 )
 from foundry.monitors.oracle_monitor import (
     DEFAULT_CRITERIA_GLOBS,
+    DEFAULT_ORACLE_GLOBS,
     DiffEntry,
     OracleMonitor,
 )
@@ -133,6 +134,20 @@ _DEFAULT_GATES: tuple[GateImpl, ...] = (
 # the factory actually carries) — an edit to it is still a deterministic
 # CRITICAL-DIFF HITL trip, never a weakening of the rule.
 _CRITERIA_GLOBS = (*DEFAULT_CRITERIA_GLOBS, "**/criteria.json", "criteria.json")
+# Same tightening for ORACLES: DEFAULT_ORACLE_GLOBS only cover ``tests/**`` +
+# ``**/conftest.py``, but the factory emits its oracle as a ROOT-LEVEL
+# ``test_*.py`` / ``*_test.py`` (cli.py / the smoke path). Without this an evolved
+# change could silently REPLACE a prior oracle with a vacuous-but-passing test and
+# slip past the Guardian. We ADD the root-level test patterns — a TIGHTENING (more
+# paths protected), never a weakening — so an edit to an existing oracle is a
+# deterministic CRITICAL-DIFF -> HITL, honoring the module's stated guarantee.
+_ORACLE_GLOBS = (
+    *DEFAULT_ORACLE_GLOBS,
+    "**/test_*.py",
+    "test_*.py",
+    "**/*_test.py",
+    "*_test.py",
+)
 
 # The gates whose verdict is the regression signal: Spec re-checks the carried
 # acceptance criteria, Test re-runs the carried oracles. A regression FAIL here
@@ -305,7 +320,9 @@ def _guardian_diff(changes: Mapping[str, str | None]) -> CriticalDiffTrip | None
     to a human. Pure (globs, paths) function — no model judgment, no override.
     """
     entries = tuple(DiffEntry(path=rel) for rel in sorted(changes))
-    return OracleMonitor(criteria_globs=_CRITERIA_GLOBS).inspect(entries)
+    return OracleMonitor(
+        oracle_globs=_ORACLE_GLOBS, criteria_globs=_CRITERIA_GLOBS
+    ).inspect(entries)
 
 
 def evolve(

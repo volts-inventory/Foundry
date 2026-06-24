@@ -76,7 +76,7 @@ BLOCKER/MAJOR, the implementation is partial, or the full suite regressed.
 | **3** | [8] Spec ingestion | [7] Drift actionable | — | ([15] deferred to a later wave) | ✓ DONE |
 | **4** | [9] `--mode`/`--packs` *(needs [8])* | proxy done | — | [13] ideation *module* *(needs [8])* | ✓ DONE |
 | **5** | [10] Checkpoint/HITL *(needs [9])* | — | — | [13] cli integration | ✓ DONE |
-| **6** | [12] Evolution route *(needs [1]+[8])* | — | — | — | ☐ |
+| **6** | [12] Evolution route *(needs [1]+[8])* | — | — | — | ✓ DONE |
 
 **Critical path:** [1]→[3]→[8]→[9]→[10]→[12] (~6 serial integrations). All other
 lanes drain by Wave 3.
@@ -148,7 +148,7 @@ Accept: each node records a structured advisory rationale entry; checkpoint
 "interview" re-instantiates role+journal via proxy. HARD: strictly advisory,
 NEVER a trust input / gate influence. Cost-gated. Tests assert it cannot gate.
 
-### [12] Evolution route — #13 · deps: [1] + [8] · ☐
+### [12] Evolution route — #13 · deps: [1] + [8] · ✓ (Wave 6; adversarial critic CLEAN + 1 MAJOR fixed; merged)
 Files: `cli.py`, `lifecycle/maintenance.py` wiring, `graph/factory_graph.py`.
 Accept: `foundry evolve <repo> "<change>"` / `run(evolve_from=)` — change-
 proportional re-verify, re-gate (same runner), re-admit fail-closed, provenance
@@ -261,3 +261,17 @@ container spawning; bounded by provider quota + budget. Tests.
 - **WAVE 5 COMPLETE** — [10] merged, adversarial critic CLEAN, full suite green
   (1720). 14/15 done. NEXT: Wave 6 — [12] evolution route (final feature; needs
   [1]+[8] ✓). Optional polish: the `--ideate` cli handoff for [13]; [15] worker pool.
+- **[12] evolution route — DONE.** ADVERSARIAL critic: fail-closed re-gate VERIFIED
+  (Security-FAIL / broken-oracle / oracle-drop / criteria-delete all -> released=False,
+  no PR; stale-verdict reuse impossible; --guardian-approve cannot launder a FAIL;
+  greenfield run() byte-identical). 1 MAJOR fixed: Guardian oracle-globs tightened to
+  cover the factory's root-level `test_*.py` oracle (an oracle-weakening edit now
+  escalates -> HITL), + regression test. Merged. `foundry evolve <repo> "<change>"`
+  re-verifies change-proportionally, re-gates via the same runner, re-admits
+  fail-closed, chains provenance to prior, carries prior oracles as a regression suite.
+- **WAVE 6 COMPLETE — ALL 15 BACKLOG TASKS DONE.** Full suite green; every lane
+  passed a fresh-eyes (often adversarial) critic; every critic finding fixed before
+  close. Remaining = optional polish only: `--ideate` cli handoff for [13]; [15]
+  execution-worker pool (infra, deferred). Trust model intact end to end: gates
+  remain the sole authority — checkpoints, journals, ideation, and evolution all sit
+  on top of it without ever being able to release a failing build.

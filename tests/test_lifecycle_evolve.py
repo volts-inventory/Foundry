@@ -253,3 +253,20 @@ def test_greenfield_run_unchanged():
     assert result.gate_statuses.get("spec") is GateStatus.PASS
     assert result.gate_statuses.get("build") is GateStatus.PASS
     assert result.gate_statuses.get("test") is GateStatus.PASS
+
+
+def test_replacing_prior_root_oracle_with_vacuous_test_escalates(tmp_path):
+    """Guardian oracle-glob coverage (critic MAJOR fix): the factory emits its
+    oracle as a ROOT-LEVEL ``test_app.py``. Silently replacing it with a
+    vacuous-but-passing test is a protected-oracle edit -> deterministic
+    CRITICAL-DIFF HITL -> blocked without approval (otherwise the gamed-green
+    suite would re-pass the dev-grade Test gate and slip through)."""
+    prior = _prior_repo(tmp_path)
+    result = evolve(
+        prior,
+        "weaken the oracle",
+        changes={"test_app.py": "def test_ok():\n    pass\n"},
+    )
+    assert result.guardian_escalated is True
+    assert result.released is False
+    assert any("guardian" in f for f in result.flags)

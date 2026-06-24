@@ -27,9 +27,12 @@ from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
 from foundry.monitors import Trip, TripKind
+from foundry.monitors.constraint_pressure_monitor import ConstraintPressureMonitor
 from foundry.monitors.cost_monitor import CostAlert, CostMonitor
+from foundry.monitors.coverage_delta_monitor import CoverageDeltaMonitor
 from foundry.monitors.loop_detector import SemanticLoopDetector
 from foundry.monitors.oracle_monitor import DiffEntry, OracleMonitor
+from foundry.monitors.pinned_id_drift_monitor import PinnedIdDriftMonitor
 from foundry.monitors.policy_monitor import PolicyMonitor
 from foundry.schemas.base import BudgetLedger, FrozenModel
 
@@ -48,6 +51,9 @@ MANDATED_ACTIONS: dict[TripKind, GuardianAction] = {
     TripKind.CAP_BREACH: GuardianAction.HALT,
     TripKind.POLICY_DENY_THRESHOLD: GuardianAction.ESCALATE,
     TripKind.RETRY_OSCILLATION: GuardianAction.PAUSE,
+    TripKind.PINNED_ID_DRIFT: GuardianAction.ESCALATE,
+    TripKind.CONSTRAINT_PRESSURE: GuardianAction.ESCALATE,
+    TripKind.COVERAGE_DELTA: GuardianAction.ESCALATE,
 }
 
 #: severity order for folding multiple trips into one action.
@@ -108,7 +114,40 @@ class GateVerdictEvent(FrozenModel):
     passed: bool
 
 
-MonitorEvent = GateFailureEvent | LedgerEvent | DiffEvent | PolicyDenialEvent | GateVerdictEvent
+class PinnedIdDriftEvent(FrozenModel):
+    """Proxy-observed pinned-ID drift events (arch §8). Each mapping carries at
+    least ``requested_model`` + ``served_model`` (the proxy's `drift_events`)."""
+
+    events: tuple[Mapping[str, object], ...]
+
+
+class ConstraintPressureEvent(FrozenModel):
+    """Per-node pinned-constraint injection counts vs the budget (arch §8)."""
+
+    node_id: str
+    injected_count: int
+    budget: int
+    global_count: int = 0
+
+
+class CoverageDeltaEvent(FrozenModel):
+    """Frozen high-risk baseline vs runner-attested satisfied count (gov §3)."""
+
+    baseline_high_risk: int
+    attested_satisfied: int
+    run_against: str = ""
+
+
+MonitorEvent = (
+    GateFailureEvent
+    | LedgerEvent
+    | DiffEvent
+    | PolicyDenialEvent
+    | GateVerdictEvent
+    | PinnedIdDriftEvent
+    | ConstraintPressureEvent
+    | CoverageDeltaEvent
+)
 
 
 class GuardianAssessment(FrozenModel):
@@ -126,12 +165,20 @@ class Guardian:
         cost_monitor: CostMonitor | None = None,
         oracle_monitor: OracleMonitor | None = None,
         policy_monitor: PolicyMonitor | None = None,
+        pinned_id_drift_monitor: PinnedIdDriftMonitor | None = None,
+        constraint_pressure_monitor: ConstraintPressureMonitor | None = None,
+        coverage_delta_monitor: CoverageDeltaMonitor | None = None,
         analyzer: AdvisoryAnalyzer | None = None,
     ) -> None:
         self.loop_detector = loop_detector or SemanticLoopDetector()
         self.cost_monitor = cost_monitor or CostMonitor()
         self.oracle_monitor = oracle_monitor or OracleMonitor()
         self.policy_monitor = policy_monitor or PolicyMonitor()
+        self.pinned_id_drift_monitor = pinned_id_drift_monitor or PinnedIdDriftMonitor()
+        self.constraint_pressure_monitor = (
+            constraint_pressure_monitor or ConstraintPressureMonitor()
+        )
+        self.coverage_delta_monitor = coverage_delta_monitor or CoverageDeltaMonitor()
         self.analyzer = analyzer
 
     def assess(self, events: Iterable[MonitorEvent]) -> GuardianAssessment:
@@ -166,13 +213,34 @@ class Guardian:
                     if trip is not None:
                         trips.append(trip)
                 case PolicyDenialEvent():
-                    trip = self.policy_monitor.record_denial(event.policy, event.subject)
-                    if trip is not None:
-                        trips.append(trip)
+                    denial_trip = self.policy_monitor.record_denial(event.policy, event.subject)
+                    if denial_trip is not None:
+                        trips.append(denial_trip)
                 case GateVerdictEvent():
-                    trip = self.policy_monitor.record_verdict(event.key, event.passed)
-                    if trip is not None:
-                        trips.append(trip)
+                    verdict_trip = self.policy_monitor.record_verdict(event.key, event.passed)
+                    if verdict_trip is not None:
+                        trips.append(verdict_trip)
+                case PinnedIdDriftEvent():
+                    drift_trip = self.pinned_id_drift_monitor.inspect(event.events)
+                    if drift_trip is not None:
+                        trips.append(drift_trip)
+                case ConstraintPressureEvent():
+                    pressure_trip = self.constraint_pressure_monitor.inspect(
+                        node_id=event.node_id,
+                        injected_count=event.injected_count,
+                        budget=event.budget,
+                        global_count=event.global_count,
+                    )
+                    if pressure_trip is not None:
+                        trips.append(pressure_trip)
+                case CoverageDeltaEvent():
+                    coverage_trip = self.coverage_delta_monitor.inspect(
+                        baseline_high_risk=event.baseline_high_risk,
+                        attested_satisfied=event.attested_satisfied,
+                        run_against=event.run_against,
+                    )
+                    if coverage_trip is not None:
+                        trips.append(coverage_trip)
 
         deterministic = GuardianAssessment(
             action=self._fold_action(trips),

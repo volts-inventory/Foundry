@@ -45,6 +45,7 @@ commits in ONE SQLite transaction, or none of it does.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -53,6 +54,8 @@ from pathlib import Path
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from foundry.durability.outbox import ensure_outbox_schema
+
+__all__ = ["FoundryCheckpointer", "make_checkpointer"]
 
 
 class _SuperstepConnection(sqlite3.Connection):
@@ -65,7 +68,7 @@ class _SuperstepConnection(sqlite3.Connection):
 
     _in_superstep: bool = False
 
-    def commit(self) -> None:  # type: ignore[override]
+    def commit(self) -> None:
         if self._in_superstep:
             return
         super().commit()
@@ -117,3 +120,36 @@ class FoundryCheckpointer:
 
     def close(self) -> None:
         self.conn.close()
+
+
+def make_checkpointer(db_path: str | Path = ":memory:") -> FoundryCheckpointer:
+    """Construct the checkpointer for the backend named by ``FOUNDRY_CHECKPOINTER``.
+
+    The deployment-portability seam (TASK [14]): the dev / docker-compose default
+    is ``sqlite`` (this module's :class:`FoundryCheckpointer`, the ONLY backend
+    validated in this environment). ``postgres`` is the production EKS/RDS target.
+
+    SCAFFOLDING / SWAP POINT (honest): the Postgres path is NOT wired here. The
+    ``PostgresSaver`` must join the IDENTICAL one-transaction-per-superstep
+    discipline (architecture.md §5 / DS3) — a ``PostgresSaver`` constructed on a
+    shared connection whose ``commit()`` defers to ``superstep_txn``, the same
+    invariant ``_SuperstepConnection`` enforces for SQLite — and that cannot be
+    built/validated without a live Postgres in this environment. Rather than ship
+    untestable wiring, this factory FAILS CLOSED on ``postgres`` with a pointer to
+    the swap, and on any unknown value. See ``docs/deploy-compose.md`` (EKS note).
+    """
+    backend = os.environ.get("FOUNDRY_CHECKPOINTER", "sqlite").strip().lower()
+    if backend == "sqlite":
+        return FoundryCheckpointer(db_path)
+    if backend == "postgres":
+        raise NotImplementedError(
+            "FOUNDRY_CHECKPOINTER=postgres is a documented swap point, not yet "
+            "wired: a PostgresSaver must join the same one-transaction-per-"
+            "superstep discipline as _SuperstepConnection (architecture.md §5 / "
+            "DS3). Add langgraph-checkpoint-postgres and the shared-connection "
+            "wiring against a live Postgres, then validate. See "
+            "docs/deploy-compose.md."
+        )
+    raise ValueError(
+        f"unknown FOUNDRY_CHECKPOINTER {backend!r} (expected 'sqlite' or 'postgres')"
+    )

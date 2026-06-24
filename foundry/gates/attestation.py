@@ -19,10 +19,13 @@ Caching split (project efficiency requirement — the architecture-doc
 pseudocode re-verifies every signature on every fold, O(records × supersteps)
 HMACs over immutable records):
 
-- ``verify_attestation`` / ``verify_judgment_binding`` are PURE in record
-  content + the verifier's key: ``GateResult`` is frozen, and the verdict's
-  ``content_identity()`` covers every signed field *including* the signature
-  strings themselves. They are therefore memoized in a bounded FIFO cache.
+- ``verify_attestation`` / ``verify_judgment_binding`` /
+  ``verify_provenance_binding`` are PURE in record content + the verifier's key:
+  ``GateResult`` is frozen, and the verdict's ``content_identity()`` covers every
+  signed field *including* the signature strings themselves. They are therefore
+  memoized in a bounded FIFO cache (the provenance check keys on
+  ``(verdict identity, provenance identity)`` — the provenance is an argument,
+  not a record field, so it joins the memo key).
   (The judgment-binding tuple also signs ``seq.node_id``, which
   ``content_identity()`` deliberately excludes — so the binding cache keys on
   ``(content_identity, seq.node_id)`` to stay sound.)
@@ -40,6 +43,7 @@ from collections import OrderedDict
 
 from foundry.canonical import canonical_bytes
 from foundry.schemas.gates import GateResult
+from foundry.schemas.security import SLSAProvenance
 from foundry.state.global_records import GlobalRecordsView
 
 _SCHEME = "hmac256"
@@ -91,6 +95,33 @@ def _judgment_payload(g: GateResult) -> bytes:
     )
 
 
+def _provenance_payload(g: GateResult, prov: SLSAProvenance) -> bytes:
+    """Canonical bytes of a build-artifact attestation bound to its provenance.
+
+    Folds the deterministic-gate attestation tuple together with the SLSA
+    provenance predicate's IDENTITY (builder + materials + subject digest +
+    source/tree, via ``content_identity()``), plus the load-bearing
+    ``subject_digest`` / ``builder_id`` spelled out so a reviewer sees exactly
+    what is bound. Because the predicate's identity covers every input it names
+    (material digests, ``source_digest``, ``tree_sha``, ``scanner_config_rev``,
+    ``gate_result_uris`` — security.py ``SLSAProvenance`` INPUT-BINDING note),
+    a build attestation signed for provenance P cannot verify against a DIFFERENT
+    provenance P' (any tampered material/subject digest yields a different
+    ``content_identity()``), nor be replayed onto a different tree/config/status
+    (the base attestation tuple already binds those). (governance.md §4/§5)
+    """
+    return canonical_bytes(
+        {
+            "attestation": _attestation_payload(g).decode("utf-8"),
+            "provenance_identity": prov.content_identity(),
+            "subject_name": prov.subject_name,
+            "subject_digest": prov.subject_digest,
+            "builder_id": prov.builder_id,
+            "tree_sha": prov.tree_sha,
+        }
+    )
+
+
 class ZoneBSigner:
     """Signs gate verdicts. Held ONLY by trusted infra (zone B / the proxy);
     agent code never sees the key. Dev-grade root: symmetric HMAC key."""
@@ -111,6 +142,11 @@ class ZoneBSigner:
         implementing adapter (the adapter never holds this key)."""
         return self._sign(_judgment_payload(g))
 
+    def attest_provenance(self, g: GateResult, prov: SLSAProvenance) -> str:
+        """Zone-B attestation for a BUILD-artifact verdict, INPUT-BOUND to its
+        SLSA provenance predicate (builder + materials + subject digest)."""
+        return self._sign(_provenance_payload(g, prov))
+
     # GateResult is frozen — attach signatures via model_copy supersession.
 
     def with_attestation(self, g: GateResult) -> GateResult:
@@ -118,6 +154,20 @@ class ZoneBSigner:
 
     def with_judgment_binding(self, g: GateResult) -> GateResult:
         return g.model_copy(update={"judgment_binding": self.stamp_judgment(g)})
+
+    def with_provenance_binding(
+        self, g: GateResult, prov: SLSAProvenance
+    ) -> GateResult:
+        """Attach a provenance-bound attestation to a build verdict.
+
+        Mirrors ``with_attestation`` but the signature is over the attestation
+        tuple AND the provenance identity, so the verdict is bound to its EXACT
+        build (subject/builder/materials). Verify with
+        ``DevGateWriteVerifier.verify_provenance_binding(g, prov)``; the same
+        ``prov`` must be re-presented or verification fails."""
+        return g.model_copy(
+            update={"runner_attestation": self.attest_provenance(g, prov)}
+        )
 
 
 class _BoundedCache:
@@ -157,6 +207,7 @@ class DevGateWriteVerifier:
         self._records = records
         self._attestation_cache = _BoundedCache(cache_size)
         self._binding_cache = _BoundedCache(cache_size)
+        self._provenance_cache = _BoundedCache(cache_size)
 
     # ---- immutable, memoizable signature checks -----------------------------
 
@@ -188,6 +239,24 @@ class DevGateWriteVerifier:
             return hit
         ok = self._check(g.judgment_binding, _judgment_payload(g))
         self._binding_cache.put(key, ok)
+        return ok
+
+    def verify_provenance_binding(self, g: GateResult, prov: SLSAProvenance) -> bool:
+        """Verify a build verdict's provenance-bound attestation.
+
+        Returns True iff ``g.runner_attestation`` is a valid zone-B signature
+        over (this attestation tuple, THIS provenance's identity). Re-presenting
+        the verdict with a TAMPERED provenance (different material/subject digest
+        -> different ``content_identity()``) recomputes a different expected MAC
+        and fails. Sound memo key: ``content_identity()`` covers the attestation
+        tuple + the ``runner_attestation`` string, joined with the provenance
+        identity so a given verdict/provenance pair caches independently."""
+        key = (g.content_identity(), prov.content_identity())
+        hit = self._provenance_cache.get(key)
+        if hit is not None:
+            return hit
+        ok = self._check(g.runner_attestation, _provenance_payload(g, prov))
+        self._provenance_cache.put(key, ok)
         return ok
 
     # ---- mutable committed reads — NEVER cached ------------------------------

@@ -20,12 +20,18 @@ import pytest
 from foundry.gates.attestation import DevGateWriteVerifier, ZoneBSigner
 from foundry.proxy import (
     TIER_MODELS,
+    DriftMode,
+    DriftPolicy,
     FamilyOverlapError,
     LineageMap,
     ModelProviderProxy,
+    PinnedIdDriftError,
     ProviderResponse,
     ProxyUnavailable,
+    SamplingPolicy,
     UnknownModelLineageError,
+    default_drift_policy,
+    default_sampling_policy,
 )
 from foundry.schemas.gates import GateStatus, JudgmentProvenance
 from foundry.state.global_records import GlobalRecords
@@ -224,9 +230,13 @@ def test_drift_alert_recorded_when_served_model_differs():
         "gate_node", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate"
     )
     assert result.manifest_record["drift"] is True
+    assert result.manifest_record["drift_kind"] == "pinned-id"
     assert proxy.drift_events == (
         {
             "node_id": "gate_node",
+            "purpose": "gate",
+            "tier": "T2",
+            "kind": "pinned-id",
             "requested_model": "claude-sonnet-4-6",
             "served_model": "claude-sonnet-9-experimental",
             "request_id": "req_fake_001",
@@ -243,6 +253,127 @@ def test_no_drift_for_pinned_id_match():
     )
     assert result.manifest_record["drift"] is False
     assert proxy.drift_events == ()
+
+
+def test_versioned_suffix_of_pinned_id_is_not_drift():
+    # A date/version-suffixed form of the SAME pinned id is the trusted case:
+    # claude-sonnet-4-6-20250101 against the claude-sonnet-4-6 pin is no drift.
+    transport = FakeTransport(served_model="claude-sonnet-4-6-20250101")
+    proxy, _ = make_proxy(transport)
+    result = proxy.complete(
+        "gate_node", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate"
+    )
+    assert result.manifest_record["drift"] is False
+    assert "drift_kind" not in result.manifest_record
+    assert proxy.drift_events == ()
+
+
+# ---- 3a. drift policy: advisory (default) vs fail-closed -----------------------
+
+
+def test_advisory_is_the_default_and_records_without_raising():
+    # DEFAULT policy is ADVISORY: a gate/judgment drift is recorded + surfaced
+    # but never raises — the prior behaviour is preserved.
+    assert default_drift_policy().mode is DriftMode.ADVISORY
+    transport = FakeTransport(served_model="claude-sonnet-9-experimental")
+    proxy, _ = make_proxy(transport)
+    assert proxy.drift_policy.mode is DriftMode.ADVISORY
+    result = proxy.complete(
+        "gate_node", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate"
+    )
+    assert result.manifest_record["drift"] is True
+    assert len(proxy.drift_events) == 1
+
+
+def _fail_closed_proxy(transport: FakeTransport) -> ModelProviderProxy:
+    return ModelProviderProxy(
+        transport,
+        LineageMap(),
+        ZoneBSigner(KEY, KEY_ID),
+        drift_policy=DriftPolicy(mode=DriftMode.FAIL_CLOSED),
+        sleeper=lambda _s: None,
+    )
+
+
+def test_fail_closed_raises_on_gate_drift_but_still_records_it():
+    transport = FakeTransport(served_model="claude-sonnet-9-experimental")
+    proxy = _fail_closed_proxy(transport)
+    with pytest.raises(PinnedIdDriftError) as exc:
+        proxy.complete(
+            "gate_node", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate"
+        )
+    # The drift is recorded BEFORE the raise — nothing is swallowed (the alert
+    # surface + manifest still see it; the caller pause-and-escalates).
+    assert exc.value.event["kind"] == "pinned-id"
+    assert len(proxy.drift_events) == 1
+    assert len(proxy.manifest) == 1
+    assert proxy.manifest[0]["drift"] is True
+
+
+def test_fail_closed_raises_on_judgment_drift_via_judge():
+    # The trusted judgment path inherits the fail-closed behaviour: a drifted
+    # weight set must not be stamped into a verdict binding.
+    transport = FakeTransport(served_model="claude-opus-9-experimental")
+    proxy = _fail_closed_proxy(transport)
+    with pytest.raises(PinnedIdDriftError):
+        proxy.judge(
+            "review_node", "cas://artifact", "state-sha", "nonce-1", "SOP",
+            [{"role": "user", "content": "review"}],
+            seq=make_seq("review_node"), tier="T1",
+        )
+
+
+def test_fail_closed_stays_advisory_for_ideation():
+    # Ideation is exploratory — a fail-closed policy guards gate/judgment only,
+    # so an ideation drift is recorded but does not raise.
+    transport = FakeTransport(served_model="claude-opus-9-experimental")
+    proxy = _fail_closed_proxy(transport)
+    result = proxy.complete(
+        "arch", "T1", "SOP", [{"role": "user", "content": "ideate"}], purpose="ideation"
+    )
+    assert result.manifest_record["drift"] is True
+    assert len(proxy.drift_events) == 1
+
+
+# ---- 3b. tier-mismatch: same family, wrong tier id -----------------------------
+
+
+def _gemma_proxy(transport: FakeTransport, **kw: Any) -> ModelProviderProxy:
+    # An Ollama/Gemma backend with two pinned tiers in ONE lineage family.
+    return ModelProviderProxy(
+        transport,
+        LineageMap([("gemma*", {"google-gemma"})]),
+        ZoneBSigner(KEY, KEY_ID),
+        tier_models={"T1": "gemma3:27b", "T2": "gemma3:12b"},
+        sleeper=lambda _s: None,
+        **kw,
+    )
+
+
+def test_tier_mismatch_same_family_is_surfaced_as_drift():
+    # A smaller tag (gemma3:12b) served against the larger T1 pin (gemma3:27b)
+    # resolves to the SAME family — but the served capability silently degraded,
+    # so it is flagged drift with kind tier-mismatch (not family-resolved away).
+    transport = FakeTransport(served_model="gemma3:12b")
+    proxy = _gemma_proxy(transport)
+    result = proxy.complete(
+        "gate_node", "T1", "SOP", [{"role": "user", "content": "x"}], purpose="gate"
+    )
+    assert result.served_family == frozenset({"google-gemma"})  # same family
+    assert result.manifest_record["drift"] is True
+    assert result.manifest_record["drift_kind"] == "tier-mismatch"
+    assert proxy.drift_events[0]["kind"] == "tier-mismatch"
+    assert proxy.drift_events[0]["served_model"] == "gemma3:12b"
+
+
+def test_tier_mismatch_fails_closed_under_fail_closed_policy():
+    transport = FakeTransport(served_model="gemma3:12b")
+    proxy = _gemma_proxy(transport, drift_policy=DriftPolicy(mode=DriftMode.FAIL_CLOSED))
+    with pytest.raises(PinnedIdDriftError) as exc:
+        proxy.complete(
+            "gate_node", "T1", "SOP", [{"role": "user", "content": "x"}], purpose="gate"
+        )
+    assert exc.value.event["kind"] == "tier-mismatch"
 
 
 # ---- 4. determinism / sampling policy per tier ---------------------------------
@@ -283,6 +414,69 @@ def test_t1_ideation_uses_adaptive_thinking_not_temperature():
     assert req["thinking"] == {"type": "adaptive"}
     assert "temperature" not in req
     assert "output_config" not in req  # no schema, no pinned effort on ideation
+
+
+# ---- 4b. sampling policy: backend/model-aware determinism control --------------
+
+
+def test_sampling_policy_routes_effort_vs_temperature_by_model_id():
+    policy = default_sampling_policy()
+    # Reasoning / no-sampling models => effort (temperature is rejected there).
+    for effort_id in ("claude-opus-4-8", "gpt-5", "gpt-5-codex", "o3-mini", "codex-mini"):
+        assert policy.takes_effort(effort_id), effort_id
+    # Models that honour options.temperature => temperature 0.
+    for temp_id in ("claude-sonnet-4-6", "claude-haiku-4-5", "gemma3:27b", "gemma3:4b"):
+        assert not policy.takes_effort(temp_id), temp_id
+
+
+def test_anthropic_opus_gate_uses_effort_sonnet_pins_temperature_zero():
+    # The DEFAULT Anthropic backend stays backward-compatible: opus (T1, a
+    # reasoning model) gets effort; sonnet (T2) pins temperature 0.
+    proxy, transport = make_proxy()
+    proxy.complete("n1", "T1", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
+    proxy.complete("n2", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
+    t1_req, t2_req = transport.requests
+    assert t1_req["output_config"] == {"effort": "high"}
+    assert "temperature" not in t1_req
+    assert t2_req["temperature"] == 0
+    assert "output_config" not in t2_req
+
+
+def test_codex_tier_model_gate_pins_effort_not_temperature_via_policy():
+    # With a Codex tier map, a T1 (gpt-5-codex) AND a T2 (gpt-5) gate call both
+    # pin effort — proving the decision follows the configured backend's model
+    # ids, not a hardcoded Anthropic id.
+    transport = FakeTransport(served_model="gpt-5-codex")
+    proxy = ModelProviderProxy(
+        transport,
+        LineageMap([("gpt-*", {"openai-gpt"})]),
+        ZoneBSigner(KEY, KEY_ID),
+        tier_models={"T1": "gpt-5-codex", "T2": "gpt-5"},
+        sleeper=lambda _s: None,
+    )
+    for tier in ("T1", "T2"):
+        proxy.complete(f"n-{tier}", tier, "SOP", [{"role": "user", "content": "x"}], purpose="gate")
+    for req in transport.requests:
+        assert req["output_config"] == {"effort": "high"}
+        assert "temperature" not in req
+    for rec in proxy.manifest:
+        assert rec["sampling"] == {"effort": "high"}
+        assert "sampling_note" in rec
+
+
+def test_sampling_policy_is_injectable_and_overrides_default():
+    # An operator can pin an exact policy for the backend they run.
+    transport = FakeTransport()
+    proxy = ModelProviderProxy(
+        transport,
+        LineageMap(),
+        sampling_policy=SamplingPolicy(effort_model_globs=(), effort="medium"),
+        sleeper=lambda _s: None,
+    )
+    # Empty effort-glob set => even opus is treated as a sampling model here.
+    proxy.complete("n", "T1", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
+    assert transport.requests[0]["temperature"] == 0
+    assert proxy.sampling_policy.effort == "medium"
 
 
 # ---- 5. unavailability: bounded retry, then fail closed -------------------------

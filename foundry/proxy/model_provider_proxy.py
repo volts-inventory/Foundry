@@ -22,25 +22,52 @@ goes through :class:`ModelProviderProxy`, which:
   budget ledger).
 
 Determinism policy (arch §8) vs current API surface: "temperature 0 for
-gates/judges" applies only to T2/T3 — sampling parameters are REMOVED on the
-T1 model (``claude-opus-4-8``; sending them is a 400). On T1 the proxy pins
+gates/judges" pins a determinism control, but WHICH control is backend/model-
+aware (:class:`SamplingPolicy`). Reasoning / no-sampling models (the Anthropic
+T1 reasoning tier; any OpenAI/Codex id) REMOVE sampling params — sending a
+temperature is a 400 (and a CLI transport that silently drops it would leave
+the call with no determinism control at all) — so the proxy pins
 ``output_config={"effort": "high"}`` instead and records the substitution in
-the manifest. Thinking is enabled (adaptive) only for ideation-class T1
-calls and OMITTED for deterministic gate/judge calls.
+the manifest. Models that honour sampling (Anthropic Sonnet/Haiku, Ollama/
+Gemma) get ``temperature 0``. Thinking is enabled (adaptive) only for
+ideation-class reasoning-model calls and OMITTED for deterministic gate/judge
+calls.
 
 Degraded-mode rule (fail-closed): on transport failure the proxy retries
 with bounded backoff and then raises :class:`ProxyUnavailable`. It NEVER
 silently falls back to a different model family — judgment nodes catching
 ``ProxyUnavailable`` pause-and-escalate (same discipline as the
 no-auto-downgrade rule, arch §2b/§8).
+
+Pinned-ID-drift policy (arch §8, ops §5): a served model id that departs
+from the pinned request invalidates calibration baselines. The proxy records
+EVERY drift on the manifest + ``drift_events`` regardless of policy. What
+DIFFERS by policy is whether a drift on a high-risk call ALSO fails closed:
+
+- :attr:`DriftMode.ADVISORY` (DEFAULT — preserves prior behaviour): record +
+  alert, never raise. Ideation stays advisory; a recalibration flag rides the
+  scorecard and the run continues (operator chooses continue/fork/abort
+  out-of-band, ops §5).
+- :attr:`DriftMode.FAIL_CLOSED`: on a gate/judgment drift the proxy raises
+  :class:`PinnedIdDriftError` (mirroring :class:`ProxyUnavailable`) so a
+  judgment node pause-and-escalates instead of trusting a drifted model — the
+  same no-silent-downgrade discipline applied to weights, not just transport.
+
+Tier-mismatch is drift even WITHIN a lineage family: when the served model
+resolves to the same family as the pin but is not the pinned tier id (e.g. a
+smaller Ollama tag ``gemma3:12b`` served against a ``gemma3:27b`` pin) the
+served capability silently degraded. That is flagged as drift (kind
+``tier-mismatch``) even though family resolution would otherwise pass it.
 """
 
 from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from enum import StrEnum
+from fnmatch import fnmatchcase
 from typing import Any, Literal, Protocol
 
 from foundry.gates.attestation import ZoneBSigner
@@ -56,9 +83,35 @@ TIER_MODELS: dict[str, str] = {
     "T3": "claude-haiku-4-5",
 }
 
-# Sampling parameters are removed on these models (400 if sent); the proxy
-# substitutes a pinned effort config and notes it in the manifest.
-_NO_SAMPLING_MODELS = frozenset({"claude-opus-4-8"})
+# ---- Determinism policy: effort vs temperature, per backend/model (arch §8) ----
+#
+# arch §8 pins determinism for gates/judges (temperature 0). But the *control*
+# that pins it is backend/model-specific: some models REMOVE sampling params
+# (400 if a temperature is sent) and instead take a reasoning-`effort` knob.
+# Pinning the WRONG control means either a rejected request or — worse, on a CLI
+# transport that silently drops an unsupported field — NO determinism control at
+# all. So the choice is a property of the model id, not a hardcoded Anthropic id.
+#
+# A model id matching any of these globs takes a pinned `effort` (and NEVER a
+# temperature) on deterministic gate/judge calls:
+#   - reasoning / OpenAI lineage (gpt-*, o1/o3/o4*, codex-*, *-codex) — reject
+#     temperature; the Codex CLI forwards `model_reasoning_effort` instead;
+#   - the Anthropic T1 reasoning model (claude-opus-*) — sampling params are
+#     removed (existing behaviour, kept).
+# Everything else (Anthropic Sonnet/Haiku, Ollama/Gemma) honours `temperature`,
+# so a deterministic call pins temperature 0 there.
+_DEFAULT_EFFORT_MODEL_GLOBS: tuple[str, ...] = (
+    "claude-opus-*",
+    "gpt-*",
+    "o1*",
+    "o3*",
+    "o4*",
+    "codex-*",
+    "*-codex",
+    "*-codex-*",
+)
+
+_DEFAULT_EFFORT = "high"
 
 _DEFAULT_MAX_TOKENS = 16000
 
@@ -83,9 +136,104 @@ _STATUS_BY_VERDICT = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class SamplingPolicy:
+    """Backend/model-aware determinism control selector (arch §8).
+
+    For a deterministic gate/judge call the proxy must pin *some* determinism
+    control. Which one is a property of the served model id: a reasoning /
+    no-sampling model takes a pinned ``effort`` (and rejects ``temperature``);
+    every other model honours ``temperature`` and gets temperature 0.
+
+    Injectable so an operator can pin the exact policy for the backend they run;
+    the default (:func:`default_sampling_policy`) covers the curated backends
+    (Anthropic / OpenAI-Codex / Ollama-Gemma).
+    """
+
+    effort_model_globs: tuple[str, ...] = _DEFAULT_EFFORT_MODEL_GLOBS
+    effort: str = _DEFAULT_EFFORT
+
+    def takes_effort(self, model_id: str) -> bool:
+        """True if this model takes a pinned ``effort`` instead of a temperature
+        on deterministic calls (reasoning / no-sampling models)."""
+        return any(fnmatchcase(model_id, glob) for glob in self.effort_model_globs)
+
+
+def default_sampling_policy() -> SamplingPolicy:
+    """The curated default policy (Anthropic opus + OpenAI/Codex => effort;
+    Anthropic sonnet/haiku + Ollama/Gemma => temperature 0)."""
+    return SamplingPolicy()
+
+
+# ---- Pinned-ID-drift policy (arch §8, ops §5) ---------------------------------
+#
+# Drift is ALWAYS recorded (manifest + drift_events) — the policy only decides
+# whether a drift on a HIGH-RISK call additionally fails closed. Default is
+# ADVISORY (the prior behaviour: record + alert, never crash); FAIL_CLOSED makes
+# a gate/judgment drift raise so a judgment node pause-and-escalates rather than
+# trusting a drifted (recalibration-invalidating) model.
+
+
+class DriftMode(StrEnum):
+    """How the proxy reacts to a recorded pinned-ID drift."""
+
+    ADVISORY = "advisory"  # record + alert, never raise (DEFAULT)
+    FAIL_CLOSED = "fail-closed"  # raise PinnedIdDriftError on a high-risk drift
+
+
+# The high-risk purposes a fail-closed policy guards. Ideation is exploratory and
+# may stay advisory even under FAIL_CLOSED; gate/judgment feed trusted verdicts.
+_DEFAULT_FAIL_CLOSED_PURPOSES: frozenset[Purpose] = frozenset({"gate", "judgment"})
+
+
+@dataclass(frozen=True, slots=True)
+class DriftPolicy:
+    """Injectable pinned-ID-drift reaction policy (arch §8, ops §5).
+
+    ``mode`` defaults to :attr:`DriftMode.ADVISORY` — drift is recorded and
+    surfaced as an alert but never raises, preserving prior behaviour. Under
+    :attr:`DriftMode.FAIL_CLOSED` a drift whose ``purpose`` is in
+    ``fail_closed_purposes`` (gate/judgment by default) raises
+    :class:`PinnedIdDriftError`, so the no-silent-downgrade discipline that
+    already covers transport unavailability also covers a drifted model.
+    """
+
+    mode: DriftMode = DriftMode.ADVISORY
+    fail_closed_purposes: frozenset[Purpose] = _DEFAULT_FAIL_CLOSED_PURPOSES
+
+    def should_raise(self, purpose: Purpose) -> bool:
+        """True iff a recorded drift on this purpose must fail closed."""
+        return self.mode is DriftMode.FAIL_CLOSED and purpose in self.fail_closed_purposes
+
+
+def default_drift_policy() -> DriftPolicy:
+    """The default ADVISORY policy (record + alert, never raise)."""
+    return DriftPolicy()
+
+
 class ProxyUnavailable(RuntimeError):
     """Transport exhausted retries. Judgment nodes pause-and-escalate —
     there is no silent fallback to another model or family (fail-closed)."""
+
+
+class PinnedIdDriftError(RuntimeError):
+    """A served model drifted from the pinned id on a high-risk (gate/judgment)
+    call under a FAIL_CLOSED :class:`DriftPolicy`.
+
+    Carries the recorded drift event so nothing is swallowed; judgment nodes
+    catch it and pause-and-escalate (same discipline as :class:`ProxyUnavailable`,
+    arch §2b/§8) rather than trusting weights whose calibration baseline is now
+    invalid (arch §8 / ops §5)."""
+
+    def __init__(self, event: Mapping[str, Any]) -> None:
+        self.event: dict[str, Any] = dict(event)
+        super().__init__(
+            f"pinned-ID drift on {event.get('purpose')!r} call node "
+            f"{event.get('node_id')!r}: pinned {event.get('requested_model')!r} but "
+            f"served {event.get('served_model')!r} (kind={event.get('kind')!r}); "
+            "calibration baselines are invalidated (arch §8) — pause-and-escalate, "
+            "do not trust the drifted model (fail-closed drift policy)"
+        )
 
 
 class FamilyOverlapError(RuntimeError):
@@ -196,6 +344,9 @@ class ModelProviderProxy:
         signer: ZoneBSigner | None = None,
         *,
         profile: Literal["self_judge", "decorrelated"] = "self_judge",
+        tier_models: Mapping[str, str] | None = None,
+        sampling_policy: SamplingPolicy | None = None,
+        drift_policy: DriftPolicy | None = None,
         max_retries: int = 2,
         backoff_base_s: float = 0.5,
         sleeper: Callable[[float], None] = time.sleep,
@@ -207,6 +358,24 @@ class ModelProviderProxy:
         self._lineage = lineage_map or LineageMap()
         self._signer = signer
         self._profile = profile
+        # Backend/model-aware determinism control (arch §8): which knob a
+        # deterministic gate/judge call pins (effort vs temperature 0) is a
+        # property of the configured backend's model ids, not a hardcoded id.
+        self._sampling_policy = sampling_policy or default_sampling_policy()
+        # Pinned-ID-drift reaction policy (arch §8, ops §5). Default ADVISORY:
+        # drift is recorded + alerted but never raises. A FAIL_CLOSED policy
+        # makes gate/judgment drift raise PinnedIdDriftError (pause-and-escalate).
+        self._drift_policy = drift_policy or default_drift_policy()
+        # Tier -> pinned-model-id map. Defaults to the Anthropic lineage
+        # (TIER_MODELS) but is injectable so an alternative backend (Codex/
+        # Ollama-Gemma) can pin ITS real model ids — the flow is identical, the
+        # ids the proxy pins/observes/drift-checks against just change with the
+        # configured backend. Empty/unknown tiers still fail closed in complete().
+        self._tier_models: dict[str, str] = (
+            dict(tier_models) if tier_models is not None else dict(TIER_MODELS)
+        )
+        if not self._tier_models:
+            raise ValueError("tier_models must define at least one tier")
         self._retry = _RetryPolicy(max_retries, backoff_base_s, sleeper)
         self._max_tokens = max_tokens
         self._manifest: list[dict[str, Any]] = []  # append-only
@@ -221,6 +390,21 @@ class ModelProviderProxy:
     @property
     def lineage_map_revision(self) -> str:
         return self._lineage.revision
+
+    @property
+    def tier_models(self) -> dict[str, str]:
+        """The configured tier -> pinned-model-id map (read-only copy)."""
+        return dict(self._tier_models)
+
+    @property
+    def sampling_policy(self) -> SamplingPolicy:
+        """The configured determinism-control policy (effort vs temperature)."""
+        return self._sampling_policy
+
+    @property
+    def drift_policy(self) -> DriftPolicy:
+        """The configured pinned-ID-drift reaction policy (advisory/fail-closed)."""
+        return self._drift_policy
 
     @property
     def manifest(self) -> tuple[dict[str, Any], ...]:
@@ -270,9 +454,11 @@ class ModelProviderProxy:
         observe lineage → record manifest → return text/JSON + usage."""
         if purpose not in _PURPOSES:
             raise ValueError(f"unknown purpose: {purpose!r}")
-        if tier not in TIER_MODELS:
-            raise ValueError(f"unknown tier: {tier!r} (expected one of {sorted(TIER_MODELS)})")
-        requested_model = TIER_MODELS[tier]
+        if tier not in self._tier_models:
+            raise ValueError(
+                f"unknown tier: {tier!r} (expected one of {sorted(self._tier_models)})"
+            )
+        requested_model = self._tier_models[tier]
         request, sampling, sampling_note = self._build_request(
             requested_model, system_sop, messages, purpose, schema
         )
@@ -283,7 +469,7 @@ class ModelProviderProxy:
         # unknown id fails closed inside the LineageMap (never guessed).
         served_family = self._lineage.resolve(response.served_model)
 
-        drift = not response.served_model.startswith(requested_model)
+        drift, drift_kind = self._classify_drift(requested_model, response.served_model, tier)
         record: dict[str, Any] = {
             "node_id": node_id,
             "purpose": purpose,
@@ -298,19 +484,29 @@ class ModelProviderProxy:
             "sampling": sampling,
             "drift": drift,
         }
+        if drift_kind is not None:
+            record["drift_kind"] = drift_kind
         if sampling_note:
             record["sampling_note"] = sampling_note
         self._manifest.append(record)
         if drift:
-            # Pinned-ID drift (arch §8): invalidates calibration baselines.
-            self._drift_events.append(
-                {
-                    "node_id": node_id,
-                    "requested_model": requested_model,
-                    "served_model": response.served_model,
-                    "request_id": response.request_id,
-                }
-            )
+            # Pinned-ID drift (arch §8): invalidates calibration baselines. The
+            # event is ALWAYS recorded (advisory or fail-closed); the policy only
+            # decides whether a high-risk (gate/judgment) drift ALSO raises.
+            event = {
+                "node_id": node_id,
+                "purpose": purpose,
+                "tier": tier,
+                "kind": drift_kind,
+                "requested_model": requested_model,
+                "served_model": response.served_model,
+                "request_id": response.request_id,
+            }
+            self._drift_events.append(event)
+            if self._drift_policy.should_raise(purpose):
+                # Fail-closed: a drifted high-risk call must not be trusted — the
+                # judgment node pause-and-escalates (mirrors ProxyUnavailable).
+                raise PinnedIdDriftError(event)
 
         parsed: dict[str, Any] | None = None
         if schema is not None:
@@ -395,6 +591,36 @@ class ModelProviderProxy:
 
     # ---- internals ------------------------------------------------------------
 
+    def _classify_drift(
+        self, requested_model: str, served_model: str, tier: str
+    ) -> tuple[bool, str | None]:
+        """Decide whether the observed served id is pinned-ID drift, and its kind.
+
+        Returns ``(drift, kind)``:
+
+        - ``(False, None)`` — the served id IS the pinned id, or a version-suffixed
+          form of it (``claude-sonnet-4-6-20250101`` against ``claude-sonnet-4-6``):
+          same pinned tier, no drift.
+        - ``(True, "tier-mismatch")`` — the served id is a DIFFERENT configured
+          tier's id (e.g. a smaller Ollama tag served against a larger pin). It may
+          resolve to the same lineage family, so the family check would pass it; we
+          surface it as drift anyway because the served CAPABILITY silently changed.
+        - ``(True, "pinned-id")`` — any other departure from the pinned id.
+        """
+        # Exact pin, or a version-suffixed form of it, is the trusted case. The
+        # suffix must start at a version-style boundary so e.g. a `gemma3:27b` pin
+        # is NOT matched by a `gemma3:27b-it` distinct tag silently — but a bare
+        # date/version suffix on the same id is (the prior startswith contract).
+        if served_model == requested_model or served_model.startswith(requested_model + "-"):
+            return (False, None)
+        # Same-family but wrong-tier: the served id is some OTHER pinned tier id.
+        for other_tier, other_model in self._tier_models.items():
+            if other_tier == tier:
+                continue
+            if served_model == other_model or served_model.startswith(other_model + "-"):
+                return (True, "tier-mismatch")
+        return (True, "pinned-id")
+
     def _build_request(
         self,
         requested_model: str,
@@ -424,23 +650,28 @@ class ModelProviderProxy:
         sampling: dict[str, Any] = {}
         note: str | None = None
         output_config: dict[str, Any] = {}
+        takes_effort = self._sampling_policy.takes_effort(requested_model)
+        effort = self._sampling_policy.effort
 
         if purpose in ("gate", "judgment"):
             # Determinism policy (arch §8). Thinking is OMITTED on this path.
-            if requested_model in _NO_SAMPLING_MODELS:
-                # temperature/top_p/top_k are removed on this model (400 if
-                # sent) — record the documented substitution instead.
-                output_config["effort"] = "high"
-                sampling = {"effort": "high"}
+            # The control is backend/model-aware: reasoning / no-sampling models
+            # take a pinned `effort` (a temperature would be rejected and — on a
+            # CLI transport that silently drops it — leave the call with NO
+            # determinism control); every other model honours temperature 0.
+            if takes_effort:
+                output_config["effort"] = effort
+                sampling = {"effort": effort}
                 note = (
                     f"sampling params removed on {requested_model}; "
-                    'pinned output_config={"effort": "high"} in lieu of temperature 0'
+                    f'pinned output_config={{"effort": "{effort}"}} in lieu of '
+                    "temperature 0 (reasoning/no-sampling model)"
                 )
             else:
                 request["temperature"] = 0
                 sampling = {"temperature": 0}
         else:  # ideation — exploration helps (arch §8)
-            if requested_model in _NO_SAMPLING_MODELS:
+            if takes_effort:
                 request["thinking"] = {"type": "adaptive"}
                 sampling = {"thinking": "adaptive"}
 

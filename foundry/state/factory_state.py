@@ -12,12 +12,26 @@ from typing import Annotated, TypedDict
 
 from foundry.schemas.architecture import PinnedConstraint
 from foundry.schemas.base import Artifact, BudgetLedger, ExternalAction, LogRef
+from foundry.schemas.checkpoint import CheckpointDecision
 from foundry.schemas.gates import GateResult, GateTriage
+from foundry.schemas.governance import SignOffRecord, TierDecision
+from foundry.schemas.journal import JournalEntry
 from foundry.state import reducers
 
 
 class FactoryState(TypedDict, total=False):
     request: str  # single-writer
+    # OPTIONAL full design-spec document text (task [8]). Additive input: a short
+    # `request` still summarizes intent; when present, `spec` carries the detailed
+    # design-spec doc(s) text that GROUNDS the product layer — the Stakeholder /
+    # Client Proxy and Product Manager derive the IntentBrief/PRD/criteria FROM it
+    # (read by `stakeholder_proxy._intake_text` / `product_manager._intent_text`).
+    # The architecture layer inherits the grounding indirectly, through the
+    # spec-grounded PRD/criteria the product layer emits. Single-writer (seeded at
+    # graph entry). It is plain INPUT DATA — it INFORMS the PRD/criteria but never
+    # bypasses the acceptance-criteria derivation or any signed gate (same trust
+    # posture as `request`: agents propose, only gates decide, L5).
+    spec: str  # single-writer
     route: str | None  # single-writer (triage)
     phase: str  # single-writer (supervisor)
     required_capabilities: Annotated[list[str], reducers.union]
@@ -25,7 +39,27 @@ class FactoryState(TypedDict, total=False):
     artifacts: Annotated[list[Artifact], reducers.merge_by_uri]
     gates: Annotated[list[GateResult], reducers.merge_gates]
     gate_triage: Annotated[list[GateTriage], reducers.union_triage]
+    # ADVISORY observability ONLY (plan [11]). A SEPARATE channel from gates: an
+    # agent's work-journal note, folded additively by `union_journal`. NEVER read
+    # by any gate, by `merge_gates`, by `route_after_gates`, or by `admission` —
+    # the journal cannot influence whether a build passes (agents propose, only
+    # signed gates decide, L5). Same posture as `gate_triage`, weaker still.
+    agent_journal: Annotated[list[JournalEntry], reducers.union_journal]
     tasks: Annotated[list[dict], reducers.union_by_id]
     budget: BudgetLedger  # single-writer (Budget Controller)
     actions: Annotated[list[ExternalAction], reducers.union_actions]
     history_ref: LogRef  # handle; raw events live out-of-band
+    # --- Phase-2 (Gated mode) channels (governance.md §1e/§2) -----------------
+    mode: str  # single-writer: "assistant" | "gated" (supervisor/factory_graph)
+    risk_tier: TierDecision | None  # single-writer (triage tiering, gov §1e)
+    sign_offs: Annotated[list[SignOffRecord], reducers.union_sign_offs]
+    # HUMAN-STEERING ONLY (plan [10]). A SEPARATE channel from gates/sign_offs:
+    # the human's per-stage-boundary checkpoint decision (approve/reject/needs-
+    # changes), folded additively by `union_checkpoint_decisions`. NEVER read by
+    # any gate, by `merge_gates`, by `route_after_gates`, by `release_allowed`, or
+    # by `admission` — a checkpoint approve can HALT or re-route a run but can
+    # NEVER turn a gate FAIL into a pass (the gates remain the sole trust
+    # authority, L5). Same posture as `agent_journal`, but it can halt/steer.
+    checkpoint_decisions: Annotated[
+        list[CheckpointDecision], reducers.union_checkpoint_decisions
+    ]

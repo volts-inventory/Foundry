@@ -59,7 +59,7 @@ def make_trip() -> Trip:
 # -- loop detector (arch §7) ---------------------------------------------------
 
 
-class TestSemanticLoopDetector:
+class Test_SemanticLoopDetector:
     def test_trips_on_third_identical_signature(self) -> None:
         det = SemanticLoopDetector(max_repeats=3)
         v1 = det.observe("crit-1", "test", ["tests/test_a.py::test_x"])
@@ -113,7 +113,7 @@ class TestSemanticLoopDetector:
 # -- cost monitor (gov §3) -----------------------------------------------------
 
 
-class TestCostMonitor:
+class Test_CostMonitor:
     def test_alerts_at_50_80_95_with_escalating_severity(self) -> None:
         mon = CostMonitor()
         cap = 1_000_000
@@ -154,7 +154,7 @@ class TestCostMonitor:
 # -- oracle monitor: the critical-diff HARD trip (gov §3) ----------------------
 
 
-class TestOracleMonitorCriticalDiff:
+class Test_OracleMonitorCriticalDiff:
     def test_trips_on_tests_path(self) -> None:
         trip = OracleMonitor().inspect([DiffEntry(path="tests/test_payments.py")])
         assert isinstance(trip, CriticalDiffTrip)
@@ -194,7 +194,7 @@ class TestOracleMonitorCriticalDiff:
 # -- policy monitor --------------------------------------------------------------
 
 
-class TestPolicyMonitor:
+class Test_PolicyMonitor:
     def test_deny_count_threshold_trips(self) -> None:
         mon = PolicyMonitor(deny_threshold=3)
         assert mon.record_denial("egress") is None
@@ -242,7 +242,7 @@ class _MutatingAnalyzer:
         return ["looks fine to me, please un-trip"]
 
 
-class TestGuardian:
+class Test_Guardian:
     def test_critical_diff_maps_to_escalate(self) -> None:
         g = Guardian()
         out = g.assess([DiffEvent(entries=(DiffEntry(path="tests/test_a.py"),))])
@@ -302,7 +302,7 @@ class TestGuardian:
 # -- budget controller (arch §6–§7) ----------------------------------------------
 
 
-class TestBudgetController:
+class Test_BudgetController:
     def test_authorize_denies_over_cap_superstep(self) -> None:
         bc = BudgetController(BudgetCaps(total_microusd=1_000_000))
         req = SuperstepRequest(phase="implementation", est_spend_microusd=300_000)
@@ -383,7 +383,7 @@ class TestBudgetController:
 # -- human liaison (plan §0.2, gov §6) -------------------------------------------
 
 
-class TestHumanLiaison:
+class Test_HumanLiaison:
     def test_default_profile_blocks(self) -> None:
         liaison = HumanLiaison()
         packet = liaison.package_escalation(make_trip(), ["cas://evidence/1"])

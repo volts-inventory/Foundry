@@ -87,8 +87,13 @@ class CriteriaCritique(FrozenModel):
 
     def spec_gate_blocking(self) -> bool:
         """Omission of applicable security/abuse criteria FAILS the Spec gate
-        (agents.md Layer 1 — Criteria-Completeness Critic SOP)."""
-        return bool(self.security_abuse_omissions)
+        (agents.md Layer 1 — Criteria-Completeness Critic SOP).
+
+        Blank/whitespace-only entries are ignored so this predicate matches the
+        Spec gate's own re-derivation byte-for-byte (``SpecGate._critique_blocks``
+        requires ``o.strip()`` truthy) — the materialize decision and the gate
+        decision apply the SAME rule to a degenerate omission list."""
+        return any(o.strip() for o in self.security_abuse_omissions)
 
 
 class SprintPlan(FrozenModel):

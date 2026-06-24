@@ -26,12 +26,19 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from foundry.schemas.gates import GateStatus, VerdictClass
 
 from .runner import ZoneAObservation, observe, run_grounding_command
 
+if TYPE_CHECKING:
+    from .discriminator import TestSuiteDiscriminator
+
 __all__ = ["TestGate", "parse_pytest_summary"]
+
+# Structured-observation key carrying the discriminator's report (zone A → B).
+DISCRIMINATOR_KEY = "discriminator"
 
 _SUMMARY_RE = re.compile(r"(\d+) (passed|failed|errors?|skipped)")
 
@@ -72,12 +79,23 @@ class TestGate:
         *,
         min_passed: int = 1,
         mutant_rotation_id: int = 0,
+        discriminator: TestSuiteDiscriminator | None = None,
         timeout_s: float = 600.0,
     ) -> None:
         self.cmd = cmd or (sys.executable, "-m", "pytest", "-q", "--tb=no")
         self.min_passed = min_passed
-        # Bound into the class-2 reuse key now; rotated by Phase-2 machinery.
-        self.mutant_rotation_id = mutant_rotation_id
+        # The held-out-mutant + behavioral-invariance discriminator: a green
+        # pytest run is NECESSARY but NOT SUFFICIENT — a vacuous/gamed-green
+        # suite that survives a held-out mutant or violates an invariant is
+        # FAILed here even though pytest is green (gov §1c, the malicious-test
+        # defense). None → no discriminator wired (legacy: green suffices).
+        self._discriminator = discriminator
+        # ``mutant_rotation_id`` rotates the held-out family the discriminator
+        # draws from; mirror it from the discriminator when one is wired so the
+        # reuse key and the substitution family agree.
+        self.mutant_rotation_id = (
+            discriminator.mutant_rotation_id if discriminator is not None else mutant_rotation_id
+        )
         self.scanner_rule_version = "pytest-harness-v1"
         self._timeout_s = timeout_s
 
@@ -90,12 +108,26 @@ class TestGate:
         rc, out, err = run_grounding_command(
             self.cmd, workdir, env=self._env(), timeout_s=self._timeout_s
         )
+        structured: dict[str, object] = {
+            "cmd": list(self.cmd),
+            "summary": parse_pytest_summary(out),
+        }
+        findings: tuple[str, ...] = ()
+        # The discriminator runs in zone A (no signing key in scope) ONLY when
+        # the agent suite is actually green — a red/no-tests run is already a
+        # FAIL/ERROR by exit code, so there is nothing to re-verify. The report
+        # rides the sealed observation; zone B decides over it.
+        if self._discriminator is not None and rc == 0:
+            report = self._discriminator.evaluate(workdir)
+            structured[DISCRIMINATOR_KEY] = report.model_dump(mode="json")
+            findings = report.findings
         return observe(
             self.name,
             exit_codes=(rc,),
             stdout=out,
             stderr=err,
-            structured={"cmd": list(self.cmd), "summary": parse_pytest_summary(out)},
+            findings=findings,
+            structured=structured,
         )
 
     # ---- zone B: pure decision over rc + counts ----------------------------
@@ -112,4 +144,13 @@ class TestGate:
         if rc != 0:
             return GateStatus.FAIL
         passed = obs.structured.get("summary", {}).get("passed", 0)
-        return GateStatus.PASS if passed >= self.min_passed else GateStatus.FAIL
+        if passed < self.min_passed:
+            return GateStatus.FAIL  # adequacy floor: a vacuous green run cannot pass
+        # Green + adequate is NECESSARY but NOT SUFFICIENT: a gamed-green suite
+        # that survives a held-out mutant or violates a behavioral invariant is
+        # FAILed here (gov §1c). A surviving mutant means the suite tested
+        # nothing real; the discriminator report rode the sealed observation.
+        report = obs.structured.get(DISCRIMINATOR_KEY)
+        if report is not None and not report.get("passed", False):
+            return GateStatus.FAIL
+        return GateStatus.PASS

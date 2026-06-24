@@ -10,6 +10,7 @@ from __future__ import annotations
 from enum import StrEnum
 
 from foundry.schemas.base import FrozenModel
+from foundry.schemas.gates import JudgmentProvenance
 from foundry.state.seq import Seq
 
 
@@ -95,4 +96,102 @@ class HumanDecision(FrozenModel):
     approved: bool
     server_nonce: str  # per-approval server-issued challenge (governance.md §6)
     note: str = ""
+    seq: Seq
+
+
+# --- Phase-2 (Gated mode) assurance + governance artifacts ------------------
+# Change-risk tiering scales assurance DEPTH and HITL load, never the integrity
+# guarantees (admission stays fail-closed, verdicts always runner-signed —
+# governance.md §1e). RiskTier is an alias of the existing ChangeRiskTier so the
+# tiering wave and triage share ONE enum (no parallel verdict type, L3).
+RiskTier = ChangeRiskTier
+
+
+class TierDecision(FrozenModel):
+    """Change-risk tier decision (governance.md §1e): the first-class, validated
+    record of WHICH assurance depth + HITL load a change is scaled to.
+
+    The tier scales assurance DEPTH and human load ONLY — it NEVER relaxes the
+    integrity guarantees (admission stays fail-closed, verdicts stay
+    runner-signed). `forced_high` records a security-relevant/trust-root path or
+    a domain-pack regulatory-significance escalation that pins HIGH regardless of
+    diff size; `gate_set` is the (advisory) scoped gate family this tier runs.
+    Mis-tiering is caught the same way criteria/config edits are — by
+    deterministic pattern checks + HITL — so this is a triage record, not a
+    bypass of any gate.
+    """
+
+    tier: RiskTier
+    rationale: str  # why this tier (the deterministic-classifier explanation)
+    run_against: str  # tree_sha / design ref the tiering was computed against
+    gate_set: tuple[str, ...] = ()  # scoped gate family this tier runs (advisory)
+    two_person_release: bool = False  # HIGH / regulated → distinct-identity sign-off
+    forced_high: bool = False  # security-relevant/trust-root/regulated force-escalation
+    version: int = 1
+    supersedes: str | None = None
+    seq: Seq
+
+    def relaxes_integrity(self) -> bool:
+        """Tiering NEVER relaxes admission/integrity — always False by design.
+
+        Present so callers can assert the invariant in routing/admission rather
+        than rely on a comment (governance.md §1e: depth/HITL only)."""
+        return False
+
+
+class SignOffRecord(FrozenModel):
+    """Approver-of-record sign-off for a Gated release / HITL decision
+    (governance.md §1e/§6, domains.md §1 class-4 human-witnessed).
+
+    `approver`/`role` are the named accountable identity + its distinct role
+    (admission REJECTS when the approver intersects the author set or lacks the
+    required role — segregation of duties is an enforced predicate, gov §1e).
+    `server_nonce` is the per-approval server-issued challenge bound into the
+    class-4 attestation so a sign-off cannot be minted or replayed (gov §6);
+    `presented_evidence_hash` is the content hash of the EXACT evidence pack
+    shown to the signer, so the human signs over what was presented.
+
+    `judgment_provenance` is the self-judge stamp for the CHOSEN profile
+    (governance.md §1e solo-lineage profile): SELF when a same-lineage judge
+    issued the residual judgment verdict (recorded, never hidden — the scorecard
+    MUST NOT claim independent validation for it), INDEPENDENT otherwise. The
+    MODEL never supplies it; the proxy/runner stamps it from the active profile.
+    """
+
+    subject_artifact_uri: str  # what was signed off (the attested artifact)
+    state_sha: str  # the integrated state the sign-off binds to
+    approver: str  # approver-of-record — named accountable human identity
+    role: str  # the distinct required role (segregation of duties, gov §1e)
+    approved: bool
+    server_nonce: str  # per-approval server-issued challenge (gov §6)
+    presented_evidence_hash: str  # hash of the exact evidence pack shown (gov §6)
+    judgment_provenance: JudgmentProvenance  # self-judge profile stamp (gov §1e)
+    meaning_of_signing: str = ""  # what the signature attests (gov §1c class-4)
+    note: str = ""
+    seq: Seq
+
+
+class EvidencePack(FrozenModel):
+    """Independent, non-agent-assembled release evidence pack (governance.md §6,
+    SOP agents.md Layer 6 Release Manager).
+
+    Travels with a Gated release: a HASH-CHAINED set of content-addressed
+    references to the WORM-anchored gate results + artifacts + sign-offs keyed to
+    one integrated `tree_sha`. Bodies are out-of-band CAS handles (DS9, L4); this
+    record carries only the handles + the chain head so the chain is
+    tamper-evident. `pack_uri` is the content-addressed handle of the assembled
+    pack itself — its hash is what a `SignOffRecord.presented_evidence_hash`
+    binds to, closing the what-you-see-is-what-you-sign gap (gov §6).
+    """
+
+    pack_uri: str  # CAS handle of the assembled pack body (DS9)
+    run_against: str  # the integrated tree_sha this evidence pack is keyed to
+    chain_head: str  # hash-chain head over the ordered references (tamper-evident)
+    gate_result_uris: tuple[str, ...] = ()  # WORM-anchored attested verdicts (gov §4)
+    artifact_uris: tuple[str, ...] = ()  # content-addressed artifact handles
+    sign_off_uris: tuple[str, ...] = ()  # SignOffRecord handles (approvers of record)
+    scanner_config_rev: str | None = None  # pinned external scanner-config revision (gov §2)
+    provenance_predicate_uri: str | None = None  # SLSA/in-toto predicate handle (gov §4)
+    version: int = 1
+    supersedes: str | None = None
     seq: Seq

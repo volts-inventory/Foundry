@@ -20,17 +20,25 @@ from typing import TYPE_CHECKING, Any
 from foundry.schemas.base import FrozenModel
 
 if TYPE_CHECKING:
+    from foundry.monitors.analyzer import SandboxedAnalyzer
+    from foundry.monitors.constraint_pressure_monitor import ConstraintPressureMonitor
     from foundry.monitors.cost_monitor import CostMonitor
+    from foundry.monitors.coverage_delta_monitor import CoverageDeltaMonitor
     from foundry.monitors.guardian import Guardian
     from foundry.monitors.loop_detector import SemanticLoopDetector
     from foundry.monitors.oracle_monitor import OracleMonitor
+    from foundry.monitors.pinned_id_drift_monitor import PinnedIdDriftMonitor
     from foundry.monitors.policy_monitor import PolicyMonitor
 
 __all__ = [
+    "ConstraintPressureMonitor",
     "CostMonitor",
+    "CoverageDeltaMonitor",
     "Guardian",
     "OracleMonitor",
+    "PinnedIdDriftMonitor",
     "PolicyMonitor",
+    "SandboxedAnalyzer",
     "SemanticLoopDetector",
     "Severity",
     "Trip",
@@ -55,6 +63,9 @@ class TripKind(StrEnum):
     CRITICAL_DIFF = "critical_diff"  # oracle/gate/criteria/scanner-config touched (gov §3)
     POLICY_DENY_THRESHOLD = "policy_deny_threshold"  # OPA deny-count stand-in
     RETRY_OSCILLATION = "retry_oscillation"  # alternating pass/fail per key
+    PINNED_ID_DRIFT = "pinned_id_drift"  # served model != pinned request (arch §8)
+    CONSTRAINT_PRESSURE = "constraint_pressure"  # pinned-constraint cardinality (arch §8)
+    COVERAGE_DELTA = "coverage_delta"  # runner-attested coverage regression (gov §3)
 
 
 class Trip(FrozenModel):
@@ -70,10 +81,14 @@ class Trip(FrozenModel):
 
 
 _LAZY = {
+    "ConstraintPressureMonitor": "foundry.monitors.constraint_pressure_monitor",
     "CostMonitor": "foundry.monitors.cost_monitor",
+    "CoverageDeltaMonitor": "foundry.monitors.coverage_delta_monitor",
     "Guardian": "foundry.monitors.guardian",
     "OracleMonitor": "foundry.monitors.oracle_monitor",
+    "PinnedIdDriftMonitor": "foundry.monitors.pinned_id_drift_monitor",
     "PolicyMonitor": "foundry.monitors.policy_monitor",
+    "SandboxedAnalyzer": "foundry.monitors.analyzer",
     "SemanticLoopDetector": "foundry.monitors.loop_detector",
 }
 

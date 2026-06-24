@@ -5,9 +5,16 @@ __pycache__/
 .hypothesis/
 .ruff_cache/
 dist/
-build/
 *.egg-info/
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
+.coverage
+.coverage.*
+.mypy_cache/
+.mutmut-cache
+mutants/
+
+# Claude Code local state: agent worktrees, settings (never commit)
+.claude/

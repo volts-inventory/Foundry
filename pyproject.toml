@@ -1,7 +1,7 @@
 [project]
 name = "foundry"
 version = "0.1.0"
-description = "Foundry — graph-based multi-agent software factory (Phase 0 backbone)"
+description = "Foundry — graph-based multi-agent software factory"
 requires-python = ">=3.12"
 dependencies = [
     "anthropic>=0.109.1",
@@ -10,10 +10,22 @@ dependencies = [
     "pydantic>=2.13.4",
 ]
 
+[project.optional-dependencies]
+# Production checkpoint backend for the docker-compose / EKS profile
+# (FOUNDRY_CHECKPOINTER=postgres). OPTIONAL: the dev/default backend is sqlite,
+# the only one wired and validated in this repo. The Postgres swap (a
+# PostgresSaver on the shared one-txn-per-superstep connection) is a documented
+# swap point — see docs/deploy-compose.md. Install with: uv sync --extra postgres
+postgres = ["langgraph-checkpoint-postgres>=2.0.0"]
+
 [dependency-groups]
 dev = [
     "hypothesis>=6.155.2",
     "pytest>=9.0.3",
+    "pytest-cov>=6.0",
+    "pytest-xdist>=3.6",
+    "mypy>=1.13",
+    "mutmut>=3.2",
     "ruff>=0.8",
 ]
 
@@ -40,3 +52,37 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 # RUF002/RUF003: docstrings quote the design docs, which use typographic
 # dashes/multiplication signs; not worth mangling the prose.
 ignore = ["RUF002", "RUF003"]
+
+# Type checker — the static-analysis quality bar (ARCHITECTURE.md QUALITY BARS).
+# `--ignore-missing-imports` is expressed here so `mypy foundry tests` is the gate.
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
+
+# Coverage bar is enforced at milestone gates via `--cov-fail-under` on the CLI.
+[tool.coverage.run]
+source = ["foundry"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", "raise NotImplementedError"]
+
+# Mutation testing (milestone gate, scoped to changed paths). See build/DECISIONS.md D7.
+# mutmut 3.x copies source_paths into a mutants/ tree and runs the suite from there, so the
+# WHOLE foundry package must be present for imports (foundry.agents et al.) to resolve —
+# narrowing source_paths to one file (the original D7 failure) breaks the package import.
+# Fix: copy the full tree but scope which lines are MUTATED with only_mutate, and run only
+# the target module's targeted tests via pytest_add_cli_args_test_selection (a time-boxed,
+# per-module gate; flip only_mutate/test-selection to the module under change).
+[tool.mutmut]
+source_paths = ["foundry"]
+only_mutate = ["foundry/state/reducers.py"]
+pytest_add_cli_args_test_selection = [
+    "tests/test_reducers_properties.py",
+    "tests/test_merge_gates_grounding.py",
+]

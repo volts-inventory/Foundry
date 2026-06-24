@@ -21,7 +21,8 @@ writer's model calls go through the same proxy seam.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
+import sys
+from collections.abc import Callable, MutableSequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,11 +40,18 @@ from foundry.schemas.product import PRD, AcceptanceCriterion
 from foundry.schemas.quality import E2EReport, TestPlan, TestReport
 
 if TYPE_CHECKING:
+    from langchain_core.runnables import RunnableConfig
+
     from foundry.agents._runtime import AgentRuntime
     from foundry.schemas.base import FrozenModel
     from foundry.state.factory_state import FactoryState
 
-__all__ = ["DocumentationBundle", "assemble_documentation", "write_bundle"]
+__all__ = [
+    "DocumentationBundle",
+    "assemble_documentation",
+    "make_documentation_node",
+    "write_bundle",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,6 +251,62 @@ def assemble_documentation(
     if write_to is not None:
         write_bundle(bundle, write_to)
     return bundle
+
+
+def make_documentation_node(
+    rt: AgentRuntime,
+    *,
+    sink: MutableSequence[DocumentationBundle] | None = None,
+) -> Callable[[FactoryState, RunnableConfig], dict[str, Any]]:
+    """Build the TERMINAL documentation node for the factory graph (task [3]).
+
+    The node runs :func:`assemble_documentation` against the IN-GRAPH terminal
+    state + ``rt``, so the Technical Writer's model calls go through the SAME
+    proxy/budget seam as every other node (budget-metered, observed on the proxy
+    manifest) and the authored doc artifacts are returned on the ``artifacts``
+    channel — checkpointed + outbox-governed like every other artifact. This
+    replaces the old out-of-graph ``assemble_documentation`` call the CLI made
+    AFTER ``app.invoke`` (whose writer spend escaped the ledger and whose doc
+    handles never entered the checkpointed channel).
+
+    BEST-EFFORT (governance: a docs failure must NEVER fail the build / block the
+    PR — the build's correctness is decided by the gates, not by whether the
+    writer reached the model). Any exception during assembly is swallowed with a
+    warning, and the node returns an empty delta — the emit guard / gate verdicts
+    are untouched. Mirrors the fail-safe guard the CLI historically wrapped this
+    call in.
+
+    ``sink`` (optional, in-process) receives the assembled
+    :class:`DocumentationBundle` so an in-process caller (the CLI) can write the
+    ALREADY-assembled tree to disk without re-authoring (no second round of model
+    spend). It is a plain in-memory holder — NOT a state channel — so it never
+    rides the checkpoint; the durable record of the authored docs is the doc
+    artifacts emitted onto the ``artifacts`` channel.
+    """
+
+    def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        # Lazy import to avoid a graph<->factory_graph import cycle at module top.
+        from foundry.graph.factory_graph import terminal_gates_pass
+
+        try:
+            bundle = assemble_documentation(
+                request=str(state.get("request") or ""),
+                thread_id=str(config["configurable"]["thread_id"]),
+                state=state,
+                rt=rt,
+                passed=terminal_gates_pass(state),
+                phase=str(state.get("phase") or "unknown"),
+            )
+        except Exception as exc:
+            print(f"warning: documentation assembly failed: {exc}", file=sys.stderr)
+            return {}
+        if sink is not None:
+            sink.append(bundle)
+        # The authored doc handles ride the artifacts channel (checkpointed); they
+        # fold through merge_by_uri alongside the upstream artifacts.
+        return {"artifacts": list(bundle.doc_artifacts)}
+
+    return _node
 
 
 def _proxy_usage(rt: AgentRuntime) -> dict[str, int]:

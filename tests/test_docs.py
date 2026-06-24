@@ -26,6 +26,7 @@ from foundry.proxy import ModelProviderProxy
 from foundry.proxy.test_doubles import MockTransport
 from foundry.schemas.architecture import SystemDesign
 from foundry.schemas.docs import KnownIssue, KnownIssues, PerfCostReport, Runbook
+from foundry.schemas.gates import GateResult, GateStatus, VerdictClass
 from foundry.schemas.product import PRD, AcceptanceCriterion, Criticality
 from foundry.state.seq import Seq
 
@@ -148,6 +149,50 @@ def test_build_manifest_aggregates_usage_and_indexes() -> None:
     assert any(a.kind == "prd" for a in m.artifacts)
     md = render_manifest_md(m)
     assert "Build Manifest" in md and "claude-opus-4-8" in md
+
+
+def test_manifest_attested_counts_judgment_binding() -> None:
+    """A bound judgment verdict (Review) carries ``judgment_binding`` (a proxy
+    stamp), not ``runner_attestation`` (a zone-B deterministic signature). The
+    manifest must report BOTH binding kinds as attested (task [3])."""
+    det = GateResult(
+        name="build",
+        status=GateStatus.PASS,
+        decision_deterministic=True,
+        execution_deterministic=True,
+        verdict_class=VerdictClass.EXECUTION_DETERMINISTIC,
+        runner_attestation="zoneB-sig",
+        run_against="tree-sha",
+        seq=SEQ,
+    )
+    judged = GateResult(
+        name="review",
+        status=GateStatus.PASS,
+        decision_deterministic=False,
+        execution_deterministic=False,
+        verdict_class=VerdictClass.PERCEPTUAL,
+        judgment_binding="proxy-binding",  # bound, but NO runner_attestation
+        run_against="tree-sha",
+        seq=SEQ,
+    )
+    unbound = GateResult(
+        name="audit",
+        status=GateStatus.PASS,
+        decision_deterministic=True,
+        execution_deterministic=True,
+        verdict_class=VerdictClass.CONFIG_EVALUABLE,
+        run_against="tree-sha",
+        seq=SEQ,  # neither binding -> not attested
+    )
+    m = build_manifest(
+        request="x", thread_id="r", generated_at="t", passed=True, phase="done",
+        artifacts=[], gates=[det, judged, unbound],
+        docs=[DocRef(path="README.md", title="R", sha256="a" * 64)],
+    )
+    by_name = {g.name: g.attested for g in m.gates}
+    assert by_name["build"] is True  # runner_attestation
+    assert by_name["review"] is True  # judgment_binding (previously showed no)
+    assert by_name["audit"] is False  # neither binding
 
 
 # ---- end-to-end assembly ----------------------------------------------------

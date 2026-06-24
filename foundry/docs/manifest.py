@@ -103,7 +103,13 @@ def _gate_refs(gates: Sequence[GateResult]) -> tuple[GateRef, ...]:
             name=g.name,
             status=g.status.value,
             run_against=g.run_against,
-            attested=bool(getattr(g, "runner_attestation", None)),
+            # A verdict is attested by EITHER a zone-B deterministic-gate signature
+            # (``runner_attestation``) OR a proxy-stamped judgment binding
+            # (``judgment_binding``) — a bound Review / judgment verdict carries the
+            # latter, not the former, so counting only ``runner_attestation`` showed
+            # it as attested:no. Both are trusted, proxy/zone-B-minted bindings.
+            attested=bool(getattr(g, "runner_attestation", None))
+            or bool(getattr(g, "judgment_binding", None)),
         )
         for g in gates
     ]

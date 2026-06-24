@@ -49,7 +49,7 @@ from foundry.gates.spec import SpecGate
 from foundry.gates.test import TestGate
 from foundry.schemas.gates import GateResult, GateStatus
 from foundry.schemas.implementation import FeatureDiff
-from foundry.schemas.product import AcceptanceCriterion
+from foundry.schemas.product import AcceptanceCriterion, CriteriaCritique
 from foundry.state.tree_sha import tree_sha
 
 if TYPE_CHECKING:
@@ -79,6 +79,7 @@ if TYPE_CHECKING:
     BlobResolver = Callable[[str], "bytes | str"]
 
 __all__ = [
+    "CRITERIA_CRITIQUE_KIND",
     "CRITERION_KIND",
     "FEATURE_DIFF_KIND",
     "FeatureDiffBodyError",
@@ -94,6 +95,7 @@ __all__ = [
 # Artifact.kind tags the upstream layers stamp on their handles — the seam we
 # read the boundary's DATA inputs back off the artifacts channel by.
 CRITERION_KIND = "acceptance_criterion"  # product layer (LEARNINGS QS3)
+CRITERIA_CRITIQUE_KIND = "criteria_findings"  # Criteria-Completeness Critic output
 FEATURE_DIFF_KIND = "feature_diff"  # implementation layer (junior_engineer)
 
 # Dev-grade toolchain digest for tree_sha. Production threads the pinned builder
@@ -158,10 +160,10 @@ def _resolve_typed(
 # ---- criteria.json (the exact shape SpecGate parses) ------------------------
 
 
-def _criteria_payload(
+def _criteria_list(
     state: FactoryState, resolve: ArtifactResolver
 ) -> list[dict[str, Any]]:
-    """The ``criteria.json`` array SpecGate parses, built from the artifacts.
+    """The acceptance-criteria array SpecGate parses, built from the artifacts.
 
     Each entry carries the fields SpecGate's zone-A read expects: ``id``,
     ``text``, ``oracle`` (mapped from :attr:`AcceptanceCriterion.oracle_hint`),
@@ -181,6 +183,56 @@ def _criteria_payload(
         }
         for c in sorted(criteria, key=lambda c: c.id)
     ]
+
+
+def _latest_critique(
+    state: FactoryState, resolve: ArtifactResolver
+) -> CriteriaCritique | None:
+    """The newest Criteria-Completeness Critic finding on the channel, or ``None``.
+
+    Resolved through the SAME typed ``resolve`` seam as the criteria (not a
+    parallel one). Newest-by-``Seq`` so a supersession wins; ``None`` when the
+    critic has not run (a degenerate greenfield boundary).
+    """
+    handles = _of_kind(state, CRITERIA_CRITIQUE_KIND)
+    if not handles:
+        return None
+    latest = max(handles, key=lambda a: a.seq)
+    return _resolve_typed(latest, resolve, CriteriaCritique, CRITERIA_CRITIQUE_KIND)
+
+
+def _criteria_payload(
+    state: FactoryState, resolve: ArtifactResolver
+) -> list[dict[str, Any]] | dict[str, Any]:
+    """The ``criteria.json`` document SpecGate parses, built from the artifacts.
+
+    The document is the bare criteria LIST (byte-identical to the historical
+    shape) UNLESS the Criteria-Completeness Critic flagged an applicable
+    security/abuse omission. A flagged omission wraps the document as
+    ``{"criteria": [...], "critique": {"security_abuse_omissions": [...]}}`` so
+    the Spec gate's zone-A read materializes the critic's RAW findings as a gate
+    input (SpecGate accepts both shapes). The critic mints NO verdict (LEARNINGS
+    L5): the gate re-derives the FAIL from the non-empty omission list, so this
+    is a zone-B-re-derivable input, not an agent-signed pass/fail bit.
+
+    Why ONLY when blocking: an empty critique (the clean path) is materially the
+    same input as "no critique" — both mean "nothing flagged". Emitting the wrapper
+    only on a blocking finding keeps the clean tree BYTE-IDENTICAL to the historical
+    list (so the integrated ``tree_sha`` is unperturbed and resume-stable), while a
+    real omission still deterministically reshapes the document into a FAIL input.
+    The document content is a pure function of the materialized findings either way.
+    """
+    criteria = _criteria_list(state, resolve)
+    critique = _latest_critique(state, resolve)
+    if critique is None or not critique.spec_gate_blocking():
+        return criteria
+    return {
+        "criteria": criteria,
+        "critique": {
+            # RAW findings only — sorted for byte-stable tree_sha across folds.
+            "security_abuse_omissions": sorted(critique.security_abuse_omissions),
+        },
+    }
 
 
 # ---- code + test sources from FeatureDiff diff bodies -----------------------

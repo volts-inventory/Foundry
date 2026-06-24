@@ -6,10 +6,23 @@ criteria coverage is mandatory where applicable — omission fails the gate**
 (governance §1b: "100% criterion-coverage" cannot be satisfied by
 under-specifying).
 
+A SECOND input is honored: the Criteria-Completeness Critic's findings — its
+``security_abuse_omissions`` (``CriteriaCritique.spec_gate_blocking()``). A
+critic-flagged applicable security/abuse omission FAILS the Spec gate
+(governance §1b / agents.md Layer 1 — Criteria-Completeness Critic SOP). The
+critic emits findings ONLY (LEARNINGS L5); it never mints a verdict, so the
+gate reads the critique BODY as a materialized input (a ``critique`` block on
+the criteria document) and re-derives the FAIL itself.
+
 Two-zone split: zone A (``execute``) only reads + parses the criteria
-document and reports the raw parsed payload; zone B (``decide``) applies the
-completeness rules — the verdict is a pure function of the observation, never
-a bit the document (an agent-authored artifact) self-reports.
+document (criteria list + critique block) and reports the raw parsed payload;
+zone B (``decide``) applies the completeness rules — the verdict is a pure
+function of the observation, never a bit the document (an agent-authored
+artifact) self-reports. The critique block carries the critic's RAW findings
+(``security_abuse_omissions``), not a verdict bit: zone B alone turns a
+non-empty omission list into a FAIL, so an agent cannot forge a PASS by
+omitting the block (its absence is just "no flagged omission", and the
+structural security-criterion rule still independently guards coverage).
 
 Dev-grade scope (plan §0.3): this is the *structural* half of the Spec gate.
 The LLM half (independent criteria critique, Given/When/Then quality) is a
@@ -30,6 +43,12 @@ from .runner import ZoneAObservation, observe
 __all__ = ["SpecGate"]
 
 _REQUIRED_FIELDS = ("id", "text", "oracle")
+
+# The critique block the materializer writes onto the criteria document from the
+# Criteria-Completeness Critic's findings. Zone A surfaces the RAW omission list;
+# zone B alone turns a non-empty list into a FAIL (the critic mints no verdict).
+_CRITIQUE_KEY = "critique"
+_OMISSIONS_KEY = "security_abuse_omissions"
 
 
 class SpecGate:
@@ -89,6 +108,12 @@ class SpecGate:
         ):
             # Security/abuse-class coverage omission fails the gate (gov §1, §1b).
             return GateStatus.FAIL
+        if self._critique_blocks(obs.structured.get("doc")):
+            # The Criteria-Completeness Critic flagged an applicable security/abuse
+            # omission (CriteriaCritique.security_abuse_omissions). Zone B re-derives
+            # the FAIL from the critic's raw findings — the critic minted no verdict
+            # (gov §1b / agents.md Layer 1; LEARNINGS L5).
+            return GateStatus.FAIL
         return GateStatus.PASS
 
     @staticmethod
@@ -98,3 +123,27 @@ class SpecGate:
         if isinstance(doc, dict) and isinstance(doc.get("criteria"), list):
             return doc["criteria"]
         return None
+
+    @staticmethod
+    def _critique_blocks(doc: Any) -> bool:
+        """True iff the materialized critique block flags a security/abuse omission.
+
+        Mirrors ``CriteriaCritique.spec_gate_blocking()`` over the RAW findings the
+        materializer wrote: a non-empty ``security_abuse_omissions`` list blocks.
+        The block is OPTIONAL — its absence is "no flagged omission", never a PASS
+        bit an agent can assert. A malformed block (wrong types) is treated as a
+        present-but-uninterpretable finding and fails closed.
+        """
+        if not isinstance(doc, dict):
+            return False  # bare-list doc carries no critique block
+        critique = doc.get(_CRITIQUE_KEY)
+        if critique is None:
+            return False
+        if not isinstance(critique, dict):
+            return True  # present but unparseable → fail closed
+        omissions = critique.get(_OMISSIONS_KEY)
+        if omissions is None:
+            return False
+        if not isinstance(omissions, list):
+            return True  # present but unparseable → fail closed
+        return any(isinstance(o, str) and o.strip() for o in omissions)

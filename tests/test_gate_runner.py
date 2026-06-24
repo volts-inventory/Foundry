@@ -239,6 +239,62 @@ def test_spec_passes_with_security_criterion(tmp_path, runner, verifier):
     _assert_admitted(r, verifier)
 
 
+# A criteria document that, on its OWN structural merits, would PASS — so any
+# FAIL below is attributable solely to the materialized critique block.
+_STRUCTURALLY_OK = (
+    '"criteria":[{"id":"c1","text":"does X","oracle":"test_x"},'
+    '{"id":"c2","text":"rejects bad input","oracle":"test_abuse","security_abuse":true}]'
+)
+
+
+def test_spec_fails_when_critic_flags_security_omission(tmp_path, runner, verifier):
+    """ADVERSARIAL: a CriteriaCritique with a non-empty ``security_abuse_omissions``
+    makes the Spec gate FAIL even though the criteria are structurally complete —
+    the gate re-derives the FAIL from the critic's RAW findings (gov §1b, L5)."""
+    _write(
+        tmp_path,
+        "criteria.json",
+        "{" + _STRUCTURALLY_OK + ',"critique":{"security_abuse_omissions":'
+        '["no rate-limit abuse criterion","no auth-bypass criterion"]}}',
+    )
+    r = runner.run(SpecGate(), "task/1", _seq("spec", "task/1"), tmp_path)
+    assert r.status is GateStatus.FAIL  # flagged omission → FAIL → no PR
+    _assert_admitted(r, verifier)
+
+
+def test_spec_passes_when_critic_finds_no_omission(tmp_path, runner, verifier):
+    """Inverse: an EMPTY ``security_abuse_omissions`` does not block — the same
+    structurally-complete criteria PASS."""
+    _write(
+        tmp_path,
+        "criteria.json",
+        "{" + _STRUCTURALLY_OK + ',"critique":{"security_abuse_omissions":[]}}',
+    )
+    r = runner.run(SpecGate(), "task/1", _seq("spec", "task/1"), tmp_path)
+    assert r.status is GateStatus.PASS
+    _assert_admitted(r, verifier)
+
+
+def test_spec_critique_block_is_optional(tmp_path, runner, verifier):
+    """The wrapped doc shape with NO critique block PASSES exactly as the bare
+    list does — an absent block is 'no flagged omission', never a forced FAIL."""
+    _write(tmp_path, "criteria.json", "{" + _STRUCTURALLY_OK + "}")
+    r = runner.run(SpecGate(), "task/1", _seq("spec", "task/1"), tmp_path)
+    assert r.status is GateStatus.PASS
+
+
+def test_spec_fails_closed_on_malformed_critique_block(tmp_path, runner, verifier):
+    """A present-but-uninterpretable critique block (wrong type) fails closed —
+    an agent cannot smuggle a PASS by corrupting the findings shape."""
+    _write(
+        tmp_path,
+        "criteria.json",
+        "{" + _STRUCTURALLY_OK + ',"critique":"not-an-object"}',
+    )
+    r = runner.run(SpecGate(), "task/1", _seq("spec", "task/1"), tmp_path)
+    assert r.status is GateStatus.FAIL
+
+
 # ---- Trust-seam invariants -------------------------------------------------
 
 

@@ -30,6 +30,7 @@ from foundry.execution.sandbox import Sandbox
 from foundry.gates import DevGateWriteVerifier, TwoZoneGateRunner, ZoneBSigner
 from foundry.graph.gate_wiring import (
     BUILD_TEST_BOUNDARY,
+    CRITERIA_CRITIQUE_KIND,
     CRITERION_KIND,
     FEATURE_DIFF_KIND,
     SPEC_BOUNDARY,
@@ -44,9 +45,14 @@ from foundry.graph.gate_wiring import (
 from foundry.proxy import ModelProviderProxy
 from foundry.proxy.test_doubles import MockTransport
 from foundry.schemas.base import Artifact
-from foundry.schemas.gates import GateResult, GateStatus, VerdictClass
+from foundry.schemas.gates import (
+    GateResult,
+    GateStatus,
+    JudgmentProvenance,
+    VerdictClass,
+)
 from foundry.schemas.implementation import FeatureDiff
-from foundry.schemas.product import AcceptanceCriterion
+from foundry.schemas.product import AcceptanceCriterion, CriteriaCritique
 from foundry.state.factory_state import FactoryState
 from foundry.state.global_records import GlobalRecords
 from foundry.state.reducers import (
@@ -146,9 +152,22 @@ def _feature_diff(files: dict[str, str], *, task_id: str = "T1") -> tuple[Featur
     return diff, diff_uri, blob
 
 
+def _critique(*, omissions: tuple[str, ...] = ()) -> CriteriaCritique:
+    """A Criteria-Completeness Critic finding — ``security_abuse_omissions`` is the
+    blocking input the Spec gate re-derives a FAIL from (it carries NO verdict)."""
+    return CriteriaCritique(
+        prd_uri="cas://sha256/prd",
+        security_abuse_omissions=omissions,
+        judgment_provenance=JudgmentProvenance.INDEPENDENT,
+        seq=_seq("criteria_completeness_critic", "artifact:criteria_findings"),
+    )
+
+
 def _seed(
     criteria: tuple[AcceptanceCriterion, ...],
     diffs: tuple[tuple[FeatureDiff, str, bytes], ...] = (),
+    *,
+    critique: CriteriaCritique | None = None,
 ) -> tuple[FactoryState, Any, Any]:
     """Seed state with criterion + feature_diff HANDLES, a typed resolver, and a BlobResolver.
 
@@ -156,6 +175,9 @@ def _seed(
     from its handle (criterion -> AcceptanceCriterion; feature_diff handle ->
     FeatureDiff); ``resolve_blob`` fetches the raw unified-diff BODY keyed on its
     ``cas://`` uri — exactly what ``sandbox.get_blob`` does in production.
+
+    An optional ``critique`` seeds the Criteria-Completeness Critic's finding on
+    the SAME ``criteria_findings`` handle the Spec gate's materializer reads.
     """
     artifacts: list[Artifact] = []
     by_handle: dict[str, Any] = {}
@@ -165,6 +187,13 @@ def _seed(
         handle = emit_artifact(c, CRITERION_KIND, "product_manager", c.seq)
         artifacts.append(handle)
         by_handle[handle.uri] = c
+
+    if critique is not None:
+        handle = emit_artifact(
+            critique, CRITERIA_CRITIQUE_KIND, "criteria_completeness_critic", critique.seq
+        )
+        artifacts.append(handle)
+        by_handle[handle.uri] = critique
 
     for diff, diff_uri, blob in diffs:
         handle = Artifact(
@@ -328,6 +357,68 @@ def test_integrated_fail_latches_and_does_not_autoclear(tmp_path, rt, runner, re
         {**bad_state, "gates": [good_pass]}, _config(), boundary=SPEC_BOUNDARY, records=records
     )
     assert still == "halt"
+
+
+# ---- 4b. critic-flagged security/abuse omission FAILS the Spec gate ----------
+
+
+def test_critic_security_omission_fails_spec_no_pr(tmp_path, rt, runner, records, verifier):
+    """ADVERSARIAL (plan [4]): the criteria are STRUCTURALLY complete — every
+    criterion well-formed, a security_abuse criterion present — so the structural
+    rules alone would PASS. But the Criteria-Completeness Critic flagged an
+    applicable security/abuse omission (``security_abuse_omissions``). That finding
+    is materialized into the workdir as a gate input, and the Spec gate re-derives
+    a FAIL from it -> the boundary halts -> no PR (gov §1b, LEARNINGS L5).
+    """
+    criteria = (_criterion("c1"), _criterion("c2", security=True))
+    critique = _critique(omissions=("no rate-limit abuse criterion",))
+    state, resolve, resolve_blob = _seed(criteria, critique=critique)
+
+    spec_out = run_spec_gate(
+        state,
+        _config(),
+        rt=rt,
+        runner=runner,
+        resolve=resolve,
+        resolve_blob=resolve_blob,
+        workdir=tmp_path / "blocked",
+    )
+    fail = spec_out["gates"][0]
+    assert fail.name == "spec" and fail.status is GateStatus.FAIL
+    # Attested FAIL on an integrated digest -> latched + routes to halt (no PR).
+    assert merge_gates(spec_out["gates"], None) == spec_out["gates"]
+    assert records.stable_fail_latched(fail.run_against, "spec")
+    state_with = {**state, "gates": spec_out["gates"]}
+    assert (
+        route_after_gates(state_with, _config(), boundary=SPEC_BOUNDARY, records=records) == "halt"
+    )
+
+
+def test_critic_no_omission_passes_spec(tmp_path, rt, runner, records, verifier):
+    """Inverse: the SAME structurally-complete criteria with an EMPTY
+    ``security_abuse_omissions`` critique PASS — the finding does not block."""
+    criteria = (_criterion("c1"), _criterion("c2", security=True))
+    critique = _critique(omissions=())  # critic found nothing to block on
+    state, resolve, resolve_blob = _seed(criteria, critique=critique)
+
+    spec_out = run_spec_gate(
+        state,
+        _config(),
+        rt=rt,
+        runner=runner,
+        resolve=resolve,
+        resolve_blob=resolve_blob,
+        workdir=tmp_path / "ok",
+    )
+    spec = spec_out["gates"][0]
+    assert spec.name == "spec" and spec.status is GateStatus.PASS
+    assert merge_gates(spec_out["gates"], None) == spec_out["gates"]
+    assert not records.stable_fail_latched(spec.run_against, "spec")
+    state_with = {**state, "gates": spec_out["gates"]}
+    assert (
+        route_after_gates(state_with, _config(), boundary=SPEC_BOUNDARY, records=records)
+        == "advance"
+    )
 
 
 # ---- 5. adequacy floor: a vacuous (0-test) suite is FAIL, not PASS -----------

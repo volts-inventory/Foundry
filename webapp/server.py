@@ -304,6 +304,9 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/static/"):
             self._serve_static(path[len("/static/"):])
             return
+        if path == "/api/config":
+            self._config()
+            return
         if path.startswith("/api/files/"):
             self._list_files(path.rsplit("/", 1)[-1])
             return
@@ -317,6 +320,16 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_static(path)  # e.g. /favicon.ico
             return
         self._json(404, {"error": "not found"})
+
+    def _config(self) -> None:
+        """UI config: the default backend (FOUNDRY_MODEL_BACKEND, else mock) so the
+        modal preselects it — a deployment sets the env to default to claude-cli."""
+        from foundry.cli import BACKENDS
+
+        default = os.environ.get("FOUNDRY_MODEL_BACKEND", "mock")
+        if default not in BACKENDS:
+            default = "mock"
+        self._json(200, {"default_backend": default, "backends": list(BACKENDS)})
 
     # -- output browsing (the build's written code + docs) ----------------------
     def _out_base(self, pid: str) -> Path | None:

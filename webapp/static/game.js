@@ -730,5 +730,13 @@ document.getElementById("cp-reject").onclick=()=>sendDecision("reject");
 document.getElementById("output-btn").onclick=openFiles;
 document.getElementById("files-close").onclick=hideFiles;
 
+// preselect the configured default backend (FOUNDRY_MODEL_BACKEND on the server;
+// mock if unset). A deployment sets the env to default to claude-cli.
+fetch("/api/config").then(r=>r.json()).then(c=>{
+  const sel=document.getElementById("backend-select");
+  if(c && c.default_backend && [...sel.options].some(o=>o.value===c.default_backend))
+    sel.value=c.default_backend;
+}).catch(()=>{});
+
 // open the new-project dialog on first load
 newModal.classList.remove("hidden");

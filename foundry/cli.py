@@ -47,6 +47,7 @@ is the sole component that ever touches the outside world.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 from collections.abc import Callable
@@ -1260,10 +1261,14 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
-    # --backend {mock|anthropic|claude-cli|codex|ollama-gemma} (default mock — the
-    # deterministic keyless transport, byte-identical to the historical run). A real
-    # backend routes model egress through the proxy and makes metered model calls.
-    backend = _MOCK_BACKEND
+    # --backend {mock|anthropic|claude-cli|codex|ollama-gemma}. The default is
+    # FOUNDRY_MODEL_BACKEND if set, else "mock" (the deterministic keyless transport
+    # — keeps the no-credential quickstart + the hermetic test suite byte-identical).
+    # So a deployment sets FOUNDRY_MODEL_BACKEND=claude-cli once to make a real
+    # backend the default everywhere; an explicit --backend still overrides.
+    backend = os.environ.get("FOUNDRY_MODEL_BACKEND", _MOCK_BACKEND) or _MOCK_BACKEND
+    if backend not in BACKENDS:
+        backend = _MOCK_BACKEND
     if "--backend" in args:
         i = args.index("--backend")
         if i + 1 >= len(args):

@@ -55,6 +55,7 @@ ENV PATH="/opt/venv/bin:$PATH" \
 WORKDIR /app
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /app/foundry ./foundry
+COPY webapp ./webapp
 COPY pyproject.toml ./
 
 # --- optional: CLI model backends (claude -p / codex) ------------------------
@@ -86,13 +87,16 @@ RUN if [ "$INSTALL_CLI_BACKENDS" = "true" ]; then \
       && rm -rf /var/lib/apt/lists/* /root/.npm; \
     fi
 
-# Volume mount points for the durable CAS + checkpoint DB (compose/K8s provide
-# the actual volumes; these are owned by the non-root runtime user).
-RUN mkdir -p /var/lib/foundry/cas /var/lib/foundry/state \
+# Volume mount points for the durable CAS + checkpoint DB + the workshop's written
+# output (compose/K8s provide the actual volumes; owned by the non-root user).
+RUN mkdir -p /var/lib/foundry/cas /var/lib/foundry/state /var/lib/foundry/web \
     && chown -R foundry:foundry /var/lib/foundry /app
 USER foundry
 
-# Smoke default: import the package. The real entrypoint is the cli, which this
-# task does NOT touch — override `command:` in compose / K8s to run the factory.
+# ENTRYPOINT is `python -m`, so `command:` (compose) / args pick the module. The
+# default serves the Workshop UI (webapp.server reads WORKSHOP_HOST/PORT/
+# WORKSHOP_OUTPUT_DIR + FOUNDRY_MODEL_BACKEND/FOUNDRY_MAX_SLOTS from the env).
+# Override to `["foundry", "run", …]` for a one-shot CLI build instead.
+EXPOSE 8765
 ENTRYPOINT ["python", "-m"]
-CMD ["foundry"]
+CMD ["webapp.server"]

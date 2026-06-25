@@ -38,6 +38,8 @@ volumes:
   pg_data: {}
   # SQLite checkpoint DB (default backend). Used unless FOUNDRY_CHECKPOINTER=postgres.
   foundry_state: {}
+  # The Workshop's written output (generated code + doc bundles per floor).
+  foundry_web: {}
 
 services:
   # --- the Foundry app (the only service built from this repo) ---------------
@@ -91,9 +93,18 @@ services:
       # a remote GPU box's URL. (Linux needs the extra_hosts mapping below to
       # resolve host.docker.internal; Docker Desktop provides it automatically.)
       FOUNDRY_OLLAMA_URL: "${FOUNDRY_OLLAMA_URL:-http://host.docker.internal:11434}"
+      # --- workshop UI (the image's default CMD: python -m webapp.server) -------
+      WORKSHOP_HOST: "0.0.0.0"                       # reachable from the host / LAN
+      WORKSHOP_PORT: "8765"
+      WORKSHOP_OUTPUT_DIR: "/var/lib/foundry/web"    # builds' code+docs (volume below)
+      # IC-pool parallelism (Wave C) + per-domain budget tree (Wave D). 1 = serial.
+      FOUNDRY_MAX_SLOTS: "${FOUNDRY_MAX_SLOTS:-1}"
     volumes:
       - foundry_cas:/var/lib/foundry/cas
       - foundry_state:/var/lib/foundry/state
+      - foundry_web:/var/lib/foundry/web
+    ports:
+      - "${WORKSHOP_PORT:-8765}:8765"                # open the Workshop UI in a browser
     networks: [frontend, backend]
     # Reach host-run endpoints (e.g. a host/GPU-box Ollama) by name. Docker Desktop
     # (Mac/Win) provides host.docker.internal automatically; Linux needs this map.
@@ -102,9 +113,9 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    # The real entrypoint is the cli (NOT touched by this task). Override here to
-    # run the factory once it is wired to read these env vars.
-    # command: ["foundry", "run", "--spec", "/work/spec.md"]
+    # Default CMD serves the Workshop UI on :8765 (see Dockerfile). For a one-shot
+    # headless build instead, override:
+    #   command: ["foundry", "run", "--spec", "/work/spec.md", "--out", "/var/lib/foundry/web/code"]
 
   # --- postgres: durable checkpoint store (volume-backed) --------------------
   # EKS: replace with RDS; the app keeps the same FOUNDRY_POSTGRES_DSN contract.

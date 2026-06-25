@@ -217,15 +217,26 @@ docker compose up --build
   container. (This also sidesteps Docker Desktop on macOS being unable to pass the
   Apple GPU into a Linux container — moot, since Ollama is on the host.)
 
+## The app serves the Workshop UI
+
+`docker compose up` runs the app's default command (`python -m webapp.server`) and
+publishes the Workshop UI on **http://localhost:${WORKSHOP_PORT:-8765}** (bound to
+`0.0.0.0` in the container; `webapp/` is baked into the image). Builds' output
+(code + docs per floor) persists on the `foundry_web` volume. Set
+`FOUNDRY_MODEL_BACKEND` (+ creds) and `FOUNDRY_MAX_SLOTS` in `.env` to drive real,
+parallel builds. For a one-shot headless build instead, override the app
+`command:` (commented example in the compose file).
+
 ## What this task does NOT do (honesty)
 
 - Does **not** build the real proxy / signer / builder services — they are
   network-isolated **stubs** (`command: ["true"]`) to make the topology
-  reviewable.
+  reviewable. The app builds the proxy/signer in-process today, so the
+  `FOUNDRY_PROXY_URL`/`SIGNER_URL`/`BUILDER_URL` env vars are aspirational
+  topology, read by no code yet.
 - Does **not** stand up the observability stack — it is a commented placeholder.
-- Does **not** touch `proxy/`, `gates/`, or `agents/`. The `cli.py` change is
-  limited to honoring `FOUNDRY_STATE_DIR` (above); the app `command:` in compose
-  is left commented for whoever wires the cli entrypoint.
+- `FOUNDRY_CHECKPOINTER=postgres` is a **documented swap point** that fails closed
+  (the PostgresSaver shared-connection wiring isn't built); sqlite is the default.
 - Does **not** provide cross-store (checkpoint+ledger) atomicity, HA, a broker,
   or multi-replica — those are the multi-host / Postgres upgrade, out of scope
   for single-host durability.

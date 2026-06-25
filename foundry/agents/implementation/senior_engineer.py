@@ -135,9 +135,6 @@ def task_id_for_unit(unit: str) -> str:
     return f"t-{content_digest({'unit': unit})[:12]}"
 
 
-_task_id = task_id_for_unit  # internal alias (historical call sites)
-
-
 def _first_of_kind(artifacts: Sequence[Artifact], kind: str) -> Artifact:
     """The newest-by-Seq artifact handle of ``kind`` on the channel.
 
@@ -241,7 +238,7 @@ def make_senior_engineer_node(
             )
             criteria_by_unit = _criteria_by_unit((result.parsed or {}).get("tasks", []))
             for unit in units:
-                tid = _task_id(unit)
+                tid = task_id_for_unit(unit)
                 seq = rt.seq(config, NODE_ID, f"task:{tid}", local=index_of[unit])
                 spec_digest = content_digest({"unit": unit, "design": design.design_uri})
                 task = Task(

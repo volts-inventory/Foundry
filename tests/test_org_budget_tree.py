@@ -6,10 +6,15 @@ end-to-end in test_subgraph_implementation.py.
 
 from __future__ import annotations
 
-from foundry.agents.implementation.junior_engineer import _area_by_task_id
-from foundry.agents.implementation.senior_engineer import task_id_for_unit
-from foundry.execution.work_pool import allocate_lineage_quotas
+from foundry.agents.implementation.junior_engineer import (
+    _area_by_task_id,
+    _domain_by_task_id,
+    _read_ownership,
+)
+from foundry.agents.implementation.senior_engineer import OWNERSHIP_KIND, task_id_for_unit
+from foundry.execution.work_pool import allocate_budget_tree, allocate_lineage_quotas
 from foundry.schemas.architecture import OwnershipMap
+from foundry.schemas.base import Artifact
 from foundry.state.seq import Seq
 
 
@@ -71,3 +76,60 @@ def test_area_by_task_id_groups_units_by_owner_area() -> None:
         task_id_for_unit("svc/a.py"): "backend",
         task_id_for_unit("svc/b.py"): "backend",
     }
+
+
+def test_domain_by_task_id_maps_each_task_to_its_owner() -> None:
+    om = _om({"svc/a.py": "svc", "warehouse/etl.py": "data_team"})
+    mapping = _domain_by_task_id(om)
+    assert mapping == {
+        task_id_for_unit("svc/a.py"): "svc",
+        task_id_for_unit("warehouse/etl.py"): "data_team",
+    }
+
+
+# -- allocate_budget_tree: two-level global -> area -> domain ----------------
+
+
+def test_budget_tree_two_levels_sum_within_cap() -> None:
+    # data area weight 2, backend area weight 2 (two domains of 1 each). global 4M
+    # -> data 2M, backend 2M -> backend splits 1M/1M between its two domains.
+    domain_area = {"ds": "data", "svc1": "backend", "svc2": "backend"}
+    domain_weight = {"ds": 2, "svc1": 1, "svc2": 1}
+    quotas = allocate_budget_tree(domain_area, domain_weight, 4_000_000)
+    assert quotas == {"ds": 2_000_000, "svc1": 1_000_000, "svc2": 1_000_000}
+    assert sum(quotas.values()) <= 4_000_000
+
+
+def test_budget_tree_siblings_split_their_area_not_the_global() -> None:
+    # Two backend domains share the backend AREA cap, not the whole global cap:
+    # heavier domain gets a bigger slice, but Σ stays within the area (and global).
+    domain_area = {"light": "backend", "heavy": "backend"}
+    domain_weight = {"light": 1, "heavy": 3}
+    quotas = allocate_budget_tree(domain_area, domain_weight, 3_600_000)
+    assert quotas == {"light": 900_000, "heavy": 2_700_000}  # 1:3 of the 3.6M area
+    assert sum(quotas.values()) <= 3_600_000
+
+
+def test_budget_tree_unlimited_yields_no_limit() -> None:
+    assert allocate_budget_tree({"a": "x"}, {"a": 1}, 0) == {}
+    assert allocate_budget_tree({}, {}, 1_000_000) == {}
+
+
+# -- _read_ownership: fail-soft to the "default" bucket ----------------------
+
+
+def test_read_ownership_none_when_handle_absent() -> None:
+    # No ownership handle on the channel -> None -> caller falls back to "default".
+    assert _read_ownership({"artifacts": []}, lambda _h: None) is None
+    assert _read_ownership({}, lambda _h: None) is None
+
+
+def test_read_ownership_none_on_wrong_type() -> None:
+    handle = Artifact(
+        kind=OWNERSHIP_KIND,
+        uri="cas://x",
+        produced_by="principal_architect",
+        seq=Seq("run", 0, 0, "principal_architect", 0),
+    )
+    # resolve returns a non-OwnershipMap body -> None (fail closed to no per-area).
+    assert _read_ownership({"artifacts": [handle]}, lambda _h: "not an ownership map") is None

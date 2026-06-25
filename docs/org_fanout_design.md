@@ -154,12 +154,22 @@ green → merge. No wave lands unless the trust/determinism invariants below hol
   concurrent test that reproduces it. lineage stays `"default"`; the per-area
   budget tree is Wave D.
 
-- **Wave D — Conditional Area Managers + budget tree.**
-  Materialize one Area-Manager node per non-empty area (skip singletons → report
-  to PM). The PM sub-allocates the global envelope into per-area
-  `lineage_quota_microusd`; each Area Manager sub-allocates to its domains. Pure
-  budget-tree wiring on `QuotaPolicy`. *Critic focus: Σ(area quotas) ≤ global cap;
-  an over-budget domain is rejected at admit, never run.*
+- **Wave D — Budget tree (per-area → per-domain).**
+  *Critic focus: Σ(area quotas) ≤ global cap; an over-budget domain is rejected at
+  admit, never run.*
+  **Done.** The two-level tree is realized as a deterministic ALLOCATOR (the area
+  manager's load-bearing function), not a LangGraph node: `allocate_budget_tree`
+  splits the PM's global envelope across present areas (by area task-weight), then
+  each area's cap across its domains (by domain task-weight), both by floor
+  division so **Σ(domain quotas) ≤ Σ(area quotas) ≤ global cap**. Each task's pool
+  `lineage` is its DOMAIN (owner), so a domain that exhausts its share is rejected
+  even when sibling domains in its area are idle and the global ledger has room
+  (true per-domain isolation). Wired into the Junior via `resolve` (reads the
+  OwnershipMap → `_domain_by_task_id` + `area_of`); unchanged when `resolve`/cap is
+  absent or `max_slots==1`. Admission is in merge order, so the admitted subset is
+  resume-deterministic. *Deferred to Wave E:* a human-facing Area-Manager entity
+  (journal/telemetry) and the "singleton area → report to PM" labelling — these are
+  surfacing concerns, not budget mechanics, so they ride the telemetry wave.
 
 - **Wave E — Surface it.** Telemetry/inspection payload gains
   `org: {areas, leads, ics, budget_tree}`; the checkpoint inspection shows the

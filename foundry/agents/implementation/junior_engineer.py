@@ -159,14 +159,21 @@ def _read_ownership(state: FactoryState, resolve: ArtifactResolver) -> Ownership
 
 
 def _area_by_task_id(ownership: OwnershipMap) -> dict[str, str]:
-    """task_id -> canonical AREA (the per-area budget lineage). A pure function of
-    the OwnershipMap (Wave A ``area_of``): it recomputes each unit's task id
-    (``task_id_for_unit``) so it joins to the Tasks the Senior emitted WITHOUT
-    storing area on the Task (preserves the Task's content identity)."""
+    """task_id -> canonical AREA. A pure function of the OwnershipMap (Wave A
+    ``area_of``): it recomputes each unit's task id (``task_id_for_unit``) so it
+    joins to the Tasks the Senior emitted WITHOUT storing area on the Task
+    (preserves the Task's content identity). Used for org telemetry (Wave E)."""
     return {
         task_id_for_unit(unit): ownership.area_of(owner)
         for unit, owner in ownership.owners.items()
     }
+
+
+def _domain_by_task_id(ownership: OwnershipMap) -> dict[str, str]:
+    """task_id -> DOMAIN (owner) — the per-domain budget lineage (Wave D). Same
+    content-identity-preserving join as :func:`_area_by_task_id`, keyed to the
+    owner (the Tech-Lead's domain) so each domain meters against its own quota."""
+    return {task_id_for_unit(unit): owner for unit, owner in ownership.owners.items()}
 
 
 def _build_packet(
@@ -385,7 +392,8 @@ def _run_tasks_pooled(
     cost_budget_microusd: int,
     max_slots: int,
     cost_cap_microusd: int | None,
-    area_by_task: Mapping[str, str],
+    domain_by_task: Mapping[str, str],
+    domain_area: Mapping[str, str],
 ) -> dict[str, Any]:
     """Run the ready tasks' adapter work in PARALLEL through a bounded
     :class:`LocalWorkPool` (``max_slots`` physical slots), then post-process the
@@ -395,33 +403,38 @@ def _run_tasks_pooled(
     single-threaded in ready order — so the output is identical to the serial
     loop modulo execution order.
 
-    Budget tree (Wave D): each task's ``lineage`` is its AREA (``area_by_task``,
-    derived from the OwnershipMap); the Program Manager's global cap is
-    sub-allocated across the present areas (``allocate_lineage_quotas``) so an
-    area that exhausts its share is REJECTED at admit even while another area has
-    headroom (fail-closed + noisy-neighbor guard). A rejected task never runs,
-    produces no diff, and the downstream gate fails closed. When no area mapping
-    is available the lineage falls back to ``"default"`` (a single bucket)."""
+    Budget tree (Wave D): each task's ``lineage`` is its DOMAIN (owner); the global
+    cap flows down the two-level org tree — Program Manager -> per-AREA -> per-DOMAIN
+    (``allocate_budget_tree``) — so a domain that exhausts ITS share is REJECTED at
+    admit even when sibling domains in its area are idle and the global ledger has
+    room (true per-domain isolation + the noisy-neighbor guard). A rejected task
+    never runs, produces no diff, and the downstream gate fails closed. When no
+    domain mapping is available the lineage falls back to ``"default"`` (a single
+    bucket = Wave C behaviour).
+
+    Admission is in ready (merge) order, so the admitted subset under a binding cap
+    is a DETERMINISTIC function of that order — a resume re-derives the identical
+    set (the pool's content-addressed task_id also coalesces any re-submit)."""
     from foundry.execution.work_pool import (
         BudgetExceededError,
         LocalWorkPool,
         QuotaPolicy,
-        allocate_lineage_quotas,
+        allocate_budget_tree,
     )
 
     if not tasks:
         return {}
 
     def lineage_of(task: Task) -> str:
-        return area_by_task.get(task.id, "default")
+        return domain_by_task.get(task.id, "default")
 
-    # The PM sub-allocates the global envelope across present areas proportional to
-    # their task count; Σ(area quotas) ≤ global cap (fail-closed, by floor).
-    weights: dict[str, int] = {}
+    # Per-domain task weights + each domain's area, so the global cap can flow down
+    # the PM -> area -> domain tree; Σ(domain quotas) ≤ Σ(area quotas) ≤ global cap.
+    domain_weight: dict[str, int] = {}
     for task in tasks:
-        weights[lineage_of(task)] = weights.get(lineage_of(task), 0) + 1
+        domain_weight[lineage_of(task)] = domain_weight.get(lineage_of(task), 0) + 1
     global_cap = 0 if cost_cap_microusd is None else cost_cap_microusd
-    lineage_quotas = allocate_lineage_quotas(weights, global_cap)
+    lineage_quotas = allocate_budget_tree(domain_area, domain_weight, global_cap)
 
     # base per task: the recorded base (a retry) or the fresh-clone snapshot (first
     # run). All first-run tasks clone the SAME source_dir, and snapshot() is a
@@ -553,13 +566,15 @@ def make_junior_engineer_node(
         # task/<id> branch. With max_slots>1 the adapter runs fan out across the
         # IC pool (Wave C); otherwise they run serially (the original path).
         if max_slots > 1:
-            # Per-area budget lineage (Wave D): map each task to its area via the
-            # OwnershipMap when a resolver is wired; else a single "default" bucket.
-            area_by_task: dict[str, str] = {}
+            # Per-domain budget lineage + each domain's area (Wave D), derived from
+            # the OwnershipMap when a resolver is wired; else a single "default".
+            domain_by_task: dict[str, str] = {}
+            domain_area: dict[str, str] = {}
             if resolve is not None:
                 ownership = _read_ownership(state, resolve)
                 if ownership is not None:
-                    area_by_task = _area_by_task_id(ownership)
+                    domain_by_task = _domain_by_task_id(ownership)
+                    domain_area = {owner: ownership.area_of(owner) for owner in ownership.leads()}
             return _run_tasks_pooled(
                 rt,
                 tasks,
@@ -572,7 +587,8 @@ def make_junior_engineer_node(
                 cost_budget_microusd=cost_budget_microusd,
                 max_slots=max_slots,
                 cost_cap_microusd=cost_cap_microusd,
-                area_by_task=area_by_task,
+                domain_by_task=domain_by_task,
+                domain_area=domain_area,
             )
         merged: dict[str, Any] = {}
         for task in tasks:

@@ -341,13 +341,15 @@ class FloorScene extends Phaser.Scene {
     for (const x of AISLE_VX) for (const y of AISLE_HY) P("plant", x, y+6);
     // a water cooler tucked at each corridor mouth (symmetric)
     P("cooler", AISLE_VX[0], WALL_TOP+24); P("cooler", AISLE_VX[1], WALL_TOP+24);
-    // the open break area in the spare cell (col 2, row 2): benches + plants + cooler
+    // the break/org cell (col 2, row 2): an org notice-board pins to the TOP
+    // (see renderOrg) so the lounge furniture is arranged tidily along the BOTTOM.
     const B = cellBox(2,2), bx = B.x+B.w/2;
     this.add.text(bx, B.y+8, "BREAK", {fontFamily:"'PixelFont','Courier New',monospace",
       fontSize:"10px", color:"#8aa0c8"}).setOrigin(0.5,0).setDepth(4);
-    P("bench", bx-46, B.y+B.h*0.55); P("bench", bx+46, B.y+B.h*0.55);
-    P("plant", B.x+24, B.y+44); P("plant", B.x+B.w-24, B.y+44);
-    P("cooler", bx, B.y+B.h-22);
+    const baseY = B.y+B.h-18;
+    P("bench", bx-52, baseY); P("bench", bx+52, baseY);
+    P("plant", B.x+26, baseY); P("plant", B.x+B.w-26, baseY);
+    P("cooler", bx, baseY);
   }
 
   buildAtmosphere(){
@@ -954,18 +956,22 @@ class FloorScene extends Phaser.Scene {
       infra:0xb59bff, security:0xff6d6d, default:0xcccccc,
     };
     const areas = ev.areas || [];
-    const rowH = 18, padding = 10, headerH = 22;
-    const w = 232, h = headerH + areas.length*rowH + padding;
-    const c = this.add.container(652, 112).setDepth(28);  // gap between Architecture & Lounge
-    c.add(this.add.rectangle(0,0,w,h,0x0c1322,0.88).setOrigin(0,0).setStrokeStyle(2,0xffcf52));
-    c.add(this.add.text(8,5,"🏢 ORG · PM",{fontFamily:"'PixelFont','Courier New'",fontSize:"12px",
+    const rowH = 16, padding = 8, headerH = 20;
+    // pin the org board to the BREAK cell, centred under its label
+    const B = cellBox(2,2);
+    const w = Math.min(232, B.w-24), h = headerH + areas.length*rowH + padding;
+    const c = this.add.container(Math.round(B.x+(B.w-w)/2), B.y+22).setDepth(28);
+    c.add(this.add.rectangle(0,0,w,h,0x0c1322,0.92).setOrigin(0,0).setStrokeStyle(2,0xffcf52));
+    c.add(this.add.rectangle(0,0,w,2,0xffcf52,0.5).setOrigin(0,0));   // board top rail
+    c.add(this.add.rectangle(w/2,-3,5,5,0xffcf52).setOrigin(0.5,0));  // pin
+    c.add(this.add.text(8,4,"🏢 ORG · PM",{fontFamily:"'PixelFont','Courier New'",fontSize:"12px",
       fontStyle:"bold",color:"#ffcf52"}).setOrigin(0,0));
     areas.forEach((a,i)=>{
       const y = headerH + i*rowH;
       const col = areaColor[a.area] || areaColor.default;
-      c.add(this.add.rectangle(8,y+3,10,10,col).setOrigin(0,0));
+      c.add(this.add.rectangle(8,y+2,9,9,col).setOrigin(0,0));
       const leads = (a.leads||[]).join(", ");
-      c.add(this.add.text(24,y,`${a.area}: ${leads}`,
+      c.add(this.add.text(22,y,`${a.area}: ${leads}`,
         {fontFamily:"'PixelFont','Courier New'",fontSize:"11px",color:"#e8eefb"}).setOrigin(0,0));
     });
     c.setAlpha(0);

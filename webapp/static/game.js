@@ -18,13 +18,14 @@ const FLOOR_TOP = 250, FLOOR_BOT = H - 64;
 
 // ---- rooms (left -> right), weighted widths --------------------------------
 const ROOM_DEFS = [
-  ["reception",    "RECEPTION",    1.0,  0x3a4a2e],
-  ["product",      "PRODUCT",      1.7,  0x2e3b5a],
-  ["architecture", "ARCHITECTURE", 1.5,  0x3a2e5a],
-  ["engineering",  "ENGINEERING",  1.5,  0x5a3a2e],
-  ["qa",           "QA · REVIEW",  1.8,  0x2e5a4a],
-  ["gate",         "THE GATE",     0.95, 0x444444],
-  ["vault",        "VAULT",        1.15, 0x5a4a18],
+  ["lounge",       "LOUNGE",       1.5,  0x40354f],
+  ["reception",    "RECEPTION",    0.9,  0x3a4a2e],
+  ["product",      "PRODUCT",      1.6,  0x2e3b5a],
+  ["architecture", "ARCHITECTURE", 1.4,  0x3a2e5a],
+  ["engineering",  "ENGINEERING",  1.4,  0x5a3a2e],
+  ["qa",           "QA · REVIEW",  1.7,  0x2e5a4a],
+  ["gate",         "THE GATE",     0.9,  0x444444],
+  ["vault",        "VAULT",        1.1,  0x5a4a18],
 ];
 const ROOMS = {};
 (function layout(){
@@ -50,6 +51,7 @@ const ROSTER = {
   qa:["QA Engineer","SDET","Reviewer","Technical Writer"],
 };
 const GATE_ORDER = ["spec","build","test","review","security","audit","e2e"];
+const AGENT_ROOM = {}; for (const rm in ROSTER) for (const nm of ROSTER[rm]) AGENT_ROOM[nm] = rm;
 
 // ---- generated character sprites (our own pixel art) -----------------------
 // 16-wide pixel map: big head, tiny torso, short legs. Details (eyes/ears/hair/
@@ -204,6 +206,7 @@ class FloorScene extends Phaser.Scene {
       const ws = this.makeWorkstation(x, y+22, k.body);
       const s = this.makePerson(x, y, k);
       s.setScale(2.3).setDepth(y).setAlpha(0.96);
+      s.home = {x,y}; s.loungeSlot = 12 + i; s.seen = true;    // can walk to the lounge too
       this.startWalk(s);                                       // ICs are busy building
       this.poolGroup.push(s, ws);
     }
@@ -274,6 +277,14 @@ class FloorScene extends Phaser.Scene {
       const R = ROOMS[key]; if(!R) continue;
       for (const [kind,fx] of props[key]) this.makeProp(kind, R.x0 + R.w*fx, FLOOR_TOP);
     }
+    // the lounge: a couch + coffee table + plants — where idle folks hang out
+    const L = ROOMS.lounge;
+    if (L){
+      this.makeProp("plant", L.x0 + 16, FLOOR_TOP);
+      this.makeProp("couch", L.cx, FLOOR_TOP + 118);
+      this.makeProp("ctable", L.cx, FLOOR_TOP + 168);
+      this.makeProp("plant", L.x1 - 16, FLOOR_TOP);
+    }
   }
 
   makeProp(kind, x, floorY){
@@ -302,6 +313,17 @@ class FloorScene extends Phaser.Scene {
       c.add(this.add.rectangle(-12,-22,12,3,0xffd95e).setOrigin(0.5,1));
       c.add(this.add.rectangle(2,-16,16,3,0x7fd1ff).setOrigin(0.5,1));
       c.add(this.add.rectangle(-6,-10,10,3,0x7dffb0).setOrigin(0.5,1));
+    } else if (kind==="couch"){
+      out(0,0,52,10,0x6a4a7a);                                  // seat
+      out(0,-8,52,8,0x7a5a8a);                                  // backrest
+      c.add(this.add.rectangle(-25,-4,5,14,0x5a3a6a).setOrigin(0.5,1)); // arm L
+      c.add(this.add.rectangle(25,-4,5,14,0x5a3a6a).setOrigin(0.5,1));  // arm R
+      c.add(this.add.rectangle(-11,-3,16,4,0x8a6aa0).setOrigin(0.5,1)); // cushions
+      c.add(this.add.rectangle(11,-3,16,4,0x8a6aa0).setOrigin(0.5,1));
+    } else if (kind==="ctable"){
+      out(0,0,24,7,0x6b4a2c);                                   // coffee table
+      c.add(this.add.rectangle(-5,-6,6,4,0x9adfff).setOrigin(0.5,1)); // mug
+      c.add(this.add.rectangle(7,-6,8,2,0xe8e0c0).setOrigin(0.5,1));  // a magazine
     }
     return c;
   }
@@ -339,6 +361,7 @@ class FloorScene extends Phaser.Scene {
       const sc = s[(this._sf = (this._sf||0)+1) % s.length];
       if (sc) this.tweens.add({targets:sc, alpha:{from:0.6,to:0.95}, duration:150, yoyo:true});
     }});
+    this.time.addEvent({delay:2600, loop:true, callback:()=>this.mill()});  // lounge wander
   }
   blink(a){
     if (!a || !a.eyes) return;
@@ -487,6 +510,7 @@ class FloorScene extends Phaser.Scene {
   }
 
   buildAgents(){
+    let li = 0;                                    // global lounge-slot index
     for (const room in ROSTER){
       const names = ROSTER[room], R = ROOMS[room];
       names.forEach((name,i)=>{
@@ -498,7 +522,7 @@ class FloorScene extends Phaser.Scene {
         this.makeWorkstation(hx, hy+22, kit.body);                // desk just in front of them
         const a = this.makePerson(hx, hy, kit);
         a.setScale(2.9).setDepth(hy);                             // y-sort (desk occludes legs)
-        a.home = {x:hx,y:hy};
+        a.home = {x:hx,y:hy}; a.room = room; a.loungeSlot = li++;
         a.setPosition(hx, hy+200).setAlpha(0.32);
         a.seen = false; a.bubble = null;
         // Clickable -> interview this lead (their journal + a question), advisory.
@@ -593,6 +617,51 @@ class FloorScene extends Phaser.Scene {
     for (const k in this.roomGlow)
       this.tweens.add({targets:this.roomGlow[k], fillAlpha:(k===key?0.10:0), duration:420});
     if (ROOMS[key]) this.walkCTO(ROOMS[key].cx);
+    this.staffRoom(key);                 // active team to desks, everyone else to the lounge
+  }
+
+  // ---- movement: desks <-> lounge -----------------------------------------
+  loungeSpot(i){
+    const R = ROOMS.lounge; if (!R) return {x: 80, y: FLOOR_BOT-40};
+    const per = 4, col = i%per, row = Math.floor(i/per);
+    return { x: R.x0 + 22 + col*((R.w-44)/(per-1)), y: FLOOR_TOP + 150 + row*64 };
+  }
+  walkTo(a, tx, ty, then){
+    if (!a) return;
+    if (a.moveTween) a.moveTween.stop();
+    const dx = tx - a.x;
+    if (Math.abs(dx) > 3) a.scaleX = dx < 0 ? -1 : 1;   // face travel direction
+    const dist = Math.hypot(tx-a.x, ty-a.y);
+    a.setDepth(Math.max(ty, a.y) + 1);
+    if (dist < 3){ a.x = tx; a.y = ty; if (then) then(); return; }
+    this.startWalk(a);
+    a.moveTween = this.tweens.add({targets:a, x:tx, y:ty, duration:Math.max(450, dist*4), ease:"Sine.inOut",
+      onComplete:()=>{ this.stopWalk(a); a.scaleX = 1; a.setDepth(ty); if (then) then(); }});
+  }
+  gotoLounge(a){ if (!a || !a.seen) return; a.inLounge = true;
+    const s = this.loungeSpot(a.loungeSlot||0); this.walkTo(a, s.x + (Math.random()*12-6), s.y); }
+  gotoDesk(a){ if (!a) return; a.inLounge = false;
+    if (!a.seen){ a.seen = true; a.setAlpha(1); }
+    if (a.home) this.walkTo(a, a.home.x, a.home.y); }
+  staffRoom(key){
+    this.activeRoomKey = key;
+    const hasTeam = !!ROSTER[key];
+    for (const [name,a] of this.agents){
+      if (hasTeam && AGENT_ROOM[name] === key) this.gotoDesk(a);
+      else if (a.seen) this.gotoLounge(a);
+    }
+    for (const s of (this.poolGroup||[])){ if (!s || !s.bob) continue;
+      if (key === 'engineering' && s.home) this.walkTo(s, s.home.x, s.home.y); else this.gotoLounge(s); }
+  }
+  toLounge(){   // everyone hangs out (checkpoints / done)
+    for (const [,a] of this.agents) if (a.seen) this.gotoLounge(a);
+    for (const s of (this.poolGroup||[])) if (s && s.bob) this.gotoLounge(s);
+  }
+  mill(){       // gentle wander for whoever is in the lounge
+    const move = (a)=>{ if (a && a.seen && a.inLounge && !a.moveTween?.isPlaying() && Math.random()<0.5){
+      const s = this.loungeSpot(a.loungeSlot||0); this.walkTo(a, s.x+(Math.random()*20-10), s.y+(Math.random()*16-8)); } };
+    for (const [,a] of this.agents) move(a);
+    for (const s of (this.poolGroup||[])) move(s);
   }
 
   walkCTO(tx){
@@ -857,11 +926,12 @@ function routeEvent(floor, ev){
     case "await_decision":
       F.awaiting = true; if (Array.isArray(ev.journal)) F.journal = ev.journal;
       renderElevator();
-      if (S) S.spotlightCTO(true);
+      if (S){ S.spotlightCTO(true); S.toLounge(); }   // team hangs out while CTO decides
       if (isActive) showCheckpoint(F); break;
     case "resolved":
       F.awaiting = false; renderElevator();
       if (S){ S.spotlightCTO(false);
+        if (S.activeRoomKey) S.staffRoom(S.activeRoomKey);   // back to work
         const ap = ev.decision === "approve";
         S.hop(S.cto, ap?2:1); S.ring(S.cto.x, S.cto.y-10, ap?0x5ddc7a:0xff5d6c);
         S.burst(S.cto.x, S.cto.y-10, ap?[0x5ddc7a,0xffffff]:[0xff5d6c,0xffffff], 12);
@@ -876,7 +946,7 @@ function routeEvent(floor, ev){
       logTo(F, "bad", "⛔ HELD: "+ev.reason); break;
     case "done":
       F.status = "done"; F.passed = !!ev.passed; renderElevator();
-      if (S && !ev.passed){ S.gloom(); S.banner("HELD AT THE GATE", 0xff5d6c); }
+      if (S){ S.toLounge(); if (!ev.passed){ S.gloom(); S.banner("HELD AT THE GATE", 0xff5d6c); } }
       logTo(F, ev.passed?"good":"bad",
         ev.passed?"✅ Build complete — shipped.":"❌ Build halted — nothing shipped."); break;
   }

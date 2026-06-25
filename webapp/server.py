@@ -245,9 +245,34 @@ class Handler(BaseHTTPRequestHandler):
             return  # client navigated away
 
 
+def _lan_ip() -> str | None:
+    """Best-effort LAN IP of this host (for the 0.0.0.0 banner). None if unknown."""
+    import socket
+
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))  # no packets sent — just selects the route's iface
+            return str(s.getsockname()[0])
+        finally:
+            s.close()
+    except OSError:
+        try:
+            return socket.gethostbyname(socket.gethostname())
+        except OSError:
+            return None
+
+
 def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
     srv = ThreadingHTTPServer((host, port), Handler)
-    print(f"\n  🏭  Foundry Workshop running →  http://{host}:{port}\n")
+    shown = "localhost" if host in ("127.0.0.1", "0.0.0.0") else host
+    print(f"\n  🏭  Foundry Workshop running →  http://{shown}:{port}\n")
+    if host == "0.0.0.0":  # opt-in LAN exposure (e.g. a Pi) — warned below
+        lan = _lan_ip()
+        if lan:
+            print(f"      On your LAN (phone/tablet):  http://{lan}:{port}")
+        print("      ⚠ bound to ALL interfaces — anyone on this network can reach it"
+              " (and start/steer builds). Use only on a trusted LAN.\n")
     print("      (Ctrl-C to stop)\n")
     try:
         srv.serve_forever()
@@ -257,4 +282,9 @@ def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
 
 
 if __name__ == "__main__":
-    serve(port=int(os.environ.get("WORKSHOP_PORT", "8765")))
+    # Host/port from env so a deployment (e.g. a Raspberry Pi on your LAN) can bind
+    # 0.0.0.0 via WORKSHOP_HOST. Default stays localhost — exposure is opt-in.
+    serve(
+        host=os.environ.get("WORKSHOP_HOST", "127.0.0.1"),
+        port=int(os.environ.get("WORKSHOP_PORT", "8765")),
+    )

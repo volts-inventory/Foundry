@@ -19,14 +19,17 @@ body{
 }
 #app{display:flex;flex-direction:column;height:100vh}
 
-/* ---- HUD ---- */
+/* ---- HUD (themed: pixel frame + gold accent) ---- */
 #hud{
   display:flex;justify-content:space-between;align-items:center;
-  padding:8px 14px;background:var(--panel);border-bottom:3px solid var(--line);
+  padding:8px 14px;
+  background:linear-gradient(180deg,#1b2440 0%,#141a2c 100%);
+  border-bottom:3px solid var(--gold);
+  box-shadow:inset 0 -6px 0 rgba(0,0,0,.35), 0 2px 0 #0a0f1c;
   text-transform:uppercase;font-size:13px;gap:10px;flex:0 0 auto;
 }
 .hud-left,.hud-right{display:flex;align-items:center;gap:12px}
-.logo{font-weight:bold;color:var(--gold);font-size:16px}
+.logo{font-weight:bold;color:var(--gold);font-size:16px;text-shadow:0 0 8px rgba(255,207,82,.4), 2px 2px 0 #0a0f1c}
 .elevator{color:var(--blue);border:2px solid var(--blue);border-radius:4px;padding:2px 8px;font-weight:bold}
 .proj{color:var(--ink);max-width:46vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .mode{color:var(--dim)}
@@ -93,10 +96,13 @@ button.danger{background:#6b1f28;border-color:var(--red);color:#ffe0e3}
 }
 #log-panel{
   flex:0 0 264px;width:264px;min-width:0;max-width:264px;
-  background:var(--panel);border-left:3px solid var(--line);
+  background:linear-gradient(180deg,#161d31 0%,#10182a 100%);
+  border-left:3px solid var(--gold);
+  box-shadow:inset 4px 0 0 rgba(0,0,0,.3);
   display:flex;flex-direction:column;min-height:0;
 }
-.log-title{padding:8px 12px;border-bottom:2px solid var(--line);color:var(--gold);
+.log-title{padding:8px 12px;border-bottom:2px solid var(--gold);color:var(--gold);
+  background:rgba(255,207,82,.06);text-shadow:1px 1px 0 #0a0f1c;
   text-transform:uppercase;font-size:12px;font-weight:bold;flex:0 0 auto}
 #log{list-style:none;margin:0;padding:8px 10px;overflow-y:auto;font-size:12px;line-height:1.5}
 #log li{padding:3px 0;border-bottom:1px dashed #1f2942;color:var(--dim);animation:pop .25s;

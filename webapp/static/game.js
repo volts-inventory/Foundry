@@ -27,13 +27,17 @@ const ROOM_DEFS = [
   ["gate",         "THE GATE",     0.9,  0x444444],
   ["vault",        "VAULT",        1.1,  0x5a4a18],
 ];
+// per-room CEILING height (wall top) -> a varied skyline against the sky (one level)
+const CEIL = {lounge:96, reception:128, product:54, architecture:82, engineering:24, qa:62, gate:108, vault:150};
+// per-room ambient light tint [color, alpha] -> warm lounge / cool gate, depth
+const TINT = {lounge:[0xffb070,0.08], reception:[0xffd9a0,0.05], gate:[0x6aa0ff,0.07], vault:[0xffd25a,0.07]};
 const ROOMS = {};
 (function layout(){
   const total = ROOM_DEFS.reduce((s,r)=>s+r[2],0);
   let x = 0;
   for (const [key,label,w,color] of ROOM_DEFS){
     const px = Math.round((w/total)*W);
-    ROOMS[key] = {key,label,color,x0:x,x1:x+px,cx:x+px/2,w:px};
+    ROOMS[key] = {key,label,color,x0:x,x1:x+px,cx:x+px/2,w:px,ceil:CEIL[key]||60};
     x += px;
   }
 })();
@@ -126,6 +130,12 @@ function buildSharedTextures(scene){
     g.fillStyle(0xfff0a8,1); g.fillRect(0,0,2,2);
     g.generateTexture("spark",4,4); g.destroy();
   }
+  if (!scene.textures.exists("vignette")){      // radial dark-edge overlay for depth
+    const cv = document.createElement("canvas"); cv.width = cv.height = 256;
+    const g = cv.getContext("2d"); const rg = g.createRadialGradient(128,128,46,128,128,172);
+    rg.addColorStop(0,"rgba(0,0,0,0)"); rg.addColorStop(1,"rgba(0,0,0,1)");
+    g.fillStyle = rg; g.fillRect(0,0,256,256); scene.textures.addCanvas("vignette", cv);
+  }
   for (const key in ROOMS){
     const tkey = "floor_"+key;
     if (scene.textures.exists(tkey)) continue;
@@ -216,51 +226,80 @@ class FloorScene extends Phaser.Scene {
   }
 
   buildRooms(){
+    this.buildSky();                 // parallax sky behind the building skyline
     this.roomGlow = {};
     const floorH = H - FLOOR_TOP;
     for (const key in ROOMS){
-      const R = ROOMS[key];
-      // wall (top) -> baseboard -> floor (bottom): a side-on interior per room.
-      this.add.tileSprite(R.x0, 0, R.w, FLOOR_TOP, "wall_"+key).setOrigin(0,0).setDepth(0);
+      const R = ROOMS[key], ceil = R.ceil;
+      // wall (ceil..floor) + floor (floor..H); sky shows above ceil -> varied skyline
+      this.add.tileSprite(R.x0, ceil, R.w, FLOOR_TOP-ceil, "wall_"+key).setOrigin(0,0).setDepth(0);
       this.add.tileSprite(R.x0, FLOOR_TOP, R.w, floorH, "floor_"+key).setOrigin(0,0).setDepth(0);
-      // baseboard skirting where wall meets floor (light top edge + dark shadow).
+      // ROOF cap on top of the wall, against the sky (light eave + shadow line)
+      this.add.rectangle(R.x0-1, ceil-6, R.w+2, 6, shade(R.color,0.72)).setOrigin(0,0).setDepth(2);
+      this.add.rectangle(R.x0-1, ceil-1, R.w+2, 2, 0x0a0d16).setOrigin(0,0).setDepth(2);
+      // ambient light tint (warm lounge / cool gate) over the room
+      const t = TINT[key]; if (t) this.add.rectangle(R.x0, ceil, R.w, H-ceil, t[0], t[1]).setOrigin(0,0).setDepth(1);
+      // baseboard
       this.add.rectangle(R.x0, FLOOR_TOP-6, R.w, 6, shade(R.color,0.5)).setOrigin(0,0).setDepth(1);
       this.add.rectangle(R.x0, FLOOR_TOP, R.w, 3, 0x000000, 0.3).setOrigin(0,0).setDepth(1);
-      // room divider pilasters
-      this.add.rectangle(R.x1-2, 0, 2, H, 0x000000, 0.22).setOrigin(0,0).setDepth(1);
-      this.add.rectangle(R.x1, 0, 2, H, 0xffffff, 0.04).setOrigin(0,0).setDepth(1);
-      // hanging room sign at the very top of the wall
+      // divider pilasters (ceil..floor)
+      this.add.rectangle(R.x1-2, ceil, 2, H-ceil, 0x000000, 0.22).setOrigin(0,0).setDepth(1);
+      this.add.rectangle(R.x1, ceil, 2, H-ceil, 0xffffff, 0.04).setOrigin(0,0).setDepth(1);
+      // hanging room sign just under the roof
       const sw = Math.min(R.w-14, R.label.length*7+18);
-      this.add.rectangle(R.cx, 12, sw, 20, shade(R.color,0.24)).setOrigin(0.5,0).setDepth(2)
+      this.add.rectangle(R.cx, ceil+4, sw, 18, shade(R.color,0.24)).setOrigin(0.5,0).setDepth(3)
         .setStrokeStyle(2, shade(R.color,0.62));
-      this.add.text(R.cx, 15, R.label, {
-        fontFamily:"'PixelFont','Courier New',monospace", fontSize:"12px",
-        fontStyle:"bold", color:"#eef3ff",
-      }).setOrigin(0.5,0).setDepth(3);
-      // a big lit window (animated sky glow) centred on the wall
-      const wy = 70, ww = Math.min(72, R.w-66), wh = 70;
-      this.add.rectangle(R.cx, wy, ww+8, wh+8, shade(R.color,0.16)).setOrigin(0.5,0).setDepth(2);
-      const glow = this.add.rectangle(R.cx, wy+4, ww, wh, 0x1c4a86).setOrigin(0.5,0).setDepth(2);
-      this.add.rectangle(R.cx, wy+4, ww, wh*0.5, 0x357bbe).setOrigin(0.5,0).setDepth(2); // sky
-      this.add.circle(R.cx+ww*0.28, wy+18, 6, 0xffe9a8, 0.9).setDepth(2);                // sun
-      this.add.rectangle(R.cx, wy+4, 3, wh, shade(R.color,0.16)).setOrigin(0.5,0).setDepth(2);
-      this.add.rectangle(R.cx, wy+4+wh*0.5, ww, 3, shade(R.color,0.16)).setOrigin(0.5,0).setDepth(2);
-      this.tweens.add({targets:glow, fillAlpha:{from:0.7,to:1}, duration:2600, yoyo:true, repeat:-1});
-      // a framed poster + a wall clock flanking the window, then the dado rail
-      if (R.w > 150){
-        this.add.rectangle(R.x0+22, wy+22, 26, 34, shade(R.color,0.5)).setDepth(2).setStrokeStyle(2, shade(R.color,0.7));
-        this.add.rectangle(R.x0+22, wy+22, 18, 26, shade(R.color,1.25)).setDepth(2);
+      this.add.text(R.cx, ceil+7, R.label, {fontFamily:"'PixelFont','Courier New',monospace",
+        fontSize:"11px", fontStyle:"bold", color:"#eef3ff"}).setOrigin(0.5,0).setDepth(4);
+      // lit window + god-ray (only when the wall is tall enough)
+      const wy = ceil+28, ww = Math.min(72, R.w-66), wh = Math.min(64, FLOOR_TOP-46-wy);
+      if (wh > 22 && ww > 24){
+        this.add.rectangle(R.cx, wy, ww+8, wh+8, shade(R.color,0.16)).setOrigin(0.5,0).setDepth(2);
+        const glow = this.add.rectangle(R.cx, wy+4, ww, wh, 0x1c4a86).setOrigin(0.5,0).setDepth(2);
+        this.add.rectangle(R.cx, wy+4, ww, wh*0.5, 0x357bbe).setOrigin(0.5,0).setDepth(2);
+        this.add.circle(R.cx+ww*0.28, wy+15, 5, 0xffe9a8, 0.9).setDepth(2);
+        this.add.rectangle(R.cx, wy+4, 3, wh, shade(R.color,0.16)).setOrigin(0.5,0).setDepth(2);
+        this.add.rectangle(R.cx, wy+4+wh*0.5, ww, 3, shade(R.color,0.16)).setOrigin(0.5,0).setDepth(2);
+        this.tweens.add({targets:glow, fillAlpha:{from:0.7,to:1}, duration:2600, yoyo:true, repeat:-1});
+        const ray = this.add.triangle(R.cx, wy+wh+4, -ww*0.45,96, ww*0.45,96, 0,0, 0xffe9a8, 0.05).setDepth(2);
+        this.tweens.add({targets:ray, alpha:{from:0.03,to:0.085}, duration:3200, yoyo:true, repeat:-1});
       }
-      const clk = this.add.circle(R.x1-22, wy+18, 9, 0xf2efe0).setDepth(2).setStrokeStyle(2, 0x2a2a33);
-      this.clocks = this.clocks || []; this.clocks.push({x:R.x1-22, y:wy+18});
-      this.add.rectangle(R.x1-22, wy+18, 2, 6, 0x2a2a33).setDepth(3);
+      // a hanging ceiling lamp in the bigger rooms
+      if (R.w > 150){
+        this.add.rectangle(R.cx-26, ceil, 1, 14, 0x2a2f40).setOrigin(0,0).setDepth(2);
+        this.add.circle(R.cx-26, ceil+16, 4, 0xffe6a0, 0.95).setDepth(2);
+        this.add.circle(R.cx-26, ceil+16, 9, 0xffe6a0, 0.10).setDepth(2);
+      }
       this.add.rectangle(R.x0, FLOOR_TOP-34, R.w, 4, shade(R.color,0.5)).setOrigin(0,0).setDepth(1); // dado rail
       this.add.rectangle(R.x0, FLOOR_TOP-34, R.w, 30, shade(R.color,0.34), 0.5).setOrigin(0,0).setDepth(0); // wainscot
-      this.roomGlow[key] = this.add.rectangle(R.x0, 0, R.w, H, 0xffd25a, 0)
-        .setOrigin(0,0).setDepth(1);
+      this.add.rectangle(R.cx, FLOOR_BOT+6, Math.min(R.w-24, 120), 10, shade(R.color,0.6), 0.5).setDepth(1); // floor rug
+      this.roomGlow[key] = this.add.rectangle(R.x0, ceil, R.w, H-ceil, 0xffd25a, 0).setOrigin(0,0).setDepth(1);
     }
     this.furnish();
+    this.buildAtmosphere();          // vignette + dust motes on top
     this.setActiveRoom("reception");
+  }
+
+  buildSky(){
+    [[0,0x111a30],[44,0x1a2745],[96,0x274066],[150,0x37587f]].forEach(([y,c])=>
+      this.add.rectangle(0,y,W,FLOOR_TOP-y+4,c).setOrigin(0,0).setDepth(-3));
+    this.add.circle(W*0.82, 58, 24, 0xffe9a8, 0.95).setDepth(-2);
+    this.add.circle(W*0.82, 58, 40, 0xffe9a8, 0.10).setDepth(-2);
+    const cloud=(cx,cy,cw,a)=>{ const c=this.add.rectangle(cx,cy,cw,12,0xdce8ff,a).setOrigin(0,0).setDepth(-2);
+      this.tweens.add({targets:c, x:cx+70, duration:20000+cw*70, yoyo:true, repeat:-1, ease:"Sine.inOut"}); };
+    cloud(150,42,90,0.10); cloud(440,72,140,0.08); cloud(720,30,80,0.10); cloud(1000,86,110,0.07);
+  }
+
+  buildAtmosphere(){
+    if (this.textures.exists("vignette"))
+      this.add.image(W/2,H/2,"vignette").setDisplaySize(W+20,H+20).setDepth(60).setAlpha(0.5);
+    for (let i=0;i<24;i++){
+      const rx=()=>Math.random()*W, ry=()=>FLOOR_TOP+Math.random()*(H-FLOOR_TOP);
+      const m=this.add.rectangle(rx(),ry(),2,2,0xfff0c0,0.16).setDepth(33);
+      this.tweens.add({targets:m, y:m.y-24-Math.random()*36, x:m.x+(Math.random()*24-12), alpha:0,
+        duration:5000+Math.random()*4000, repeat:-1, delay:Math.random()*5000,
+        onRepeat:()=>{ m.x=rx(); m.y=ry(); m.alpha=0.16; }});
+    }
   }
 
   // Procedural pixel furniture so each room reads like a furnished interior.

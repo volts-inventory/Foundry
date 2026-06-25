@@ -338,8 +338,37 @@ class WorkshopScene extends Phaser.Scene {
     this.setActiveRoom("vault");
   }
 
+  renderOrg(ev){
+    // The REAL org chart from the build's OwnershipMap (Wave E telemetry): present
+    // areas -> Tech-Lead domains. Drawn as a labelled panel over the floor.
+    if (this.orgPanel){ this.orgPanel.destroy(); }
+    const areaColor = {
+      frontend:0x7fd1ff, backend:0xff9b5e, data:0x7dffb0,
+      infra:0xb59bff, security:0xff6d6d, default:0xcccccc,
+    };
+    const areas = ev.areas || [];
+    const rowH = 18, padding = 10, headerH = 22;
+    const w = 232, h = headerH + areas.length*rowH + padding;
+    const c = this.add.container(12, FLOOR_TOP + 6).setDepth(28);
+    c.add(this.add.rectangle(0,0,w,h,0x0c1322,0.88).setOrigin(0,0).setStrokeStyle(2,0xffcf52));
+    c.add(this.add.text(8,5,"🏢 ORG · PM",{fontFamily:"'Courier New'",fontSize:"12px",
+      fontStyle:"bold",color:"#ffcf52"}).setOrigin(0,0));
+    areas.forEach((a,i)=>{
+      const y = headerH + i*rowH;
+      const col = areaColor[a.area] || areaColor.default;
+      c.add(this.add.rectangle(8,y+3,10,10,col).setOrigin(0,0));
+      const leads = (a.leads||[]).join(", ");
+      c.add(this.add.text(24,y,`${a.area}: ${leads}`,
+        {fontFamily:"'Courier New'",fontSize:"11px",color:"#e8eefb"}).setOrigin(0,0));
+    });
+    c.setAlpha(0);
+    this.tweens.add({targets:c, alpha:1, duration:300});
+    this.orgPanel = c;
+  }
+
   reset(){
     // tear down a finished build's dynamic objects, re-seat the crew
+    if (this.orgPanel){ this.orgPanel.destroy(); this.orgPanel = null; }
     for (const a of this.agents.values()){
       if (a.bubble){ a.bubble.destroy(); a.bubble=null; }
       if (a.workTween) a.workTween.stop();
@@ -453,6 +482,10 @@ function applyEvent(ev){
              renderGatesMini(S.gates); }
       if(!ev.advisory) pushLog(ev.status==="pass"?"good":"bad",
         `🛡 GATE ${ev.name.toUpperCase()}: ${ev.status.toUpperCase()}${ev.attested?" (signed)":""}`);
+      break;
+    case "org":
+      if(S) S.renderOrg(ev);
+      pushLog("gold","🏢 ORG · "+(ev.areas||[]).map(a=>`${a.area}(${a.leads.length})`).join("  "));
       break;
     case "checkpoint":
       PENDING_CP={title:ev.title,summary:ev.summary,boundary:ev.boundary}; break;

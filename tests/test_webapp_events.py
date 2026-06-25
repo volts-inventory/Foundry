@@ -22,6 +22,33 @@ def test_payload_maps_artifacts_journal_and_checkpoint() -> None:
     assert "cas://a" in seen  # idempotent: re-emit won't double-fire
 
 
+def test_org_chart_emitted_once_from_payload() -> None:
+    payload = {
+        "boundary": "design",
+        "artifacts": [],
+        "gates": [],
+        "agent_journal": [],
+        "org": {
+            "areas": [
+                {"area": "frontend", "leads": ["ui_team"]},
+                {"area": "backend", "leads": ["svc"]},
+            ],
+            "domains": [
+                {"owner": "ui_team", "area": "frontend", "units": ["web/Nav.tsx"]},
+                {"owner": "svc", "area": "backend", "units": ["services/a.py"]},
+            ],
+        },
+    }
+    seen: set[str] = set()
+    evs = events_for_payload(payload, seen)
+    org = [e for e in evs if e["type"] == "org"]
+    assert len(org) == 1
+    assert {a["area"] for a in org[0]["areas"]} == {"frontend", "backend"}
+    assert any(d["owner"] == "svc" for d in org[0]["domains"])
+    # re-emitting the same payload does NOT fire a second org event (idempotent)
+    assert not any(e["type"] == "org" for e in events_for_payload(payload, seen))
+
+
 def test_seen_uris_dedup() -> None:
     payload = {"boundary": "product",
                "artifacts": [{"kind": "prd", "uri": "cas://a", "produced_by": "pm"}],

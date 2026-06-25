@@ -260,6 +260,67 @@ def test_inspection_payload_is_read_only_advisory() -> None:
     assert payload["artifacts"] == [] and payload["gates"] == []
     assert payload["agent_journal"] == []
     assert "gate" in str(payload["note"]).lower()  # documents the trust posture
+    assert "org" not in payload  # no resolver / no OwnershipMap -> no org section
+
+
+def test_inspection_payload_surfaces_org_chart_when_resolvable() -> None:
+    """Wave E: with a resolver + an OwnershipMap on state, the payload carries an
+    advisory org chart — present areas, their Tech-Lead domains, and each domain's
+    units (derived from Wave A's leads_by_area/area_of/units_of)."""
+    from foundry.schemas.architecture import OwnershipMap
+    from foundry.schemas.base import Artifact
+
+    ownership = OwnershipMap(
+        owners={
+            "web/Nav.tsx": "ui_team",  # frontend
+            "warehouse/etl.py": "data_team",  # data
+            "services/a.py": "svc",  # backend
+        },
+        seq=Seq("run", 1, 1, "principal_architect", 0),
+    )
+    handle = Artifact(
+        kind="ownership_map",
+        uri="cas://ownership/x",
+        produced_by="principal_architect",
+        seq=Seq("run", 1, 1, "principal_architect", 0),
+    )
+    state: FactoryState = {"phase": "design", "artifacts": [handle]}
+
+    payload = inspection_payload(
+        state,
+        boundary=CheckpointBoundary.DESIGN,
+        state_sha="sha-y",
+        resolve=lambda _h: ownership,
+    )
+
+    org = payload["org"]
+    assert isinstance(org, dict)
+    areas = {a["area"]: a["leads"] for a in org["areas"]}
+    assert areas == {"frontend": ["ui_team"], "backend": ["svc"], "data": ["data_team"]}
+    domains = {d["owner"]: d for d in org["domains"]}
+    assert domains["data_team"]["area"] == "data"
+    assert domains["svc"]["units"] == ["services/a.py"]
+
+
+def test_inspection_payload_org_fail_soft_on_resolver_error() -> None:
+    """A telemetry read must NEVER break a pause: a resolver that raises (or a
+    missing/typed-wrong body) just omits the org section."""
+    from foundry.schemas.base import Artifact
+
+    def _boom(_h: Any) -> Any:
+        raise RuntimeError("cas down")
+
+    handle = Artifact(
+        kind="ownership_map",
+        uri="cas://ownership/x",
+        produced_by="principal_architect",
+        seq=Seq("run", 1, 1, "principal_architect", 0),
+    )
+    state: FactoryState = {"phase": "design", "artifacts": [handle]}
+    payload = inspection_payload(
+        state, boundary=CheckpointBoundary.DESIGN, state_sha="z", resolve=_boom
+    )
+    assert "org" not in payload  # fail-soft, no crash
 
 
 def test_unknown_checkpoint_boundary_is_rejected() -> None:

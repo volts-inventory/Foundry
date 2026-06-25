@@ -122,6 +122,25 @@ def events_for_payload(
          "label": _BOUNDARY_TITLE.get(boundary, boundary.title())},
     ]
 
+    # Org chart (Wave E): the REAL hierarchy from the inspection payload — present
+    # areas, their Tech-Lead domains, and each domain's units. Emitted ONCE (the
+    # OwnershipMap is stable across boundaries); the canvas renders the org tree.
+    org = payload.get("org")
+    if isinstance(org, dict) and "__org__" not in seen_uris:
+        seen_uris.add("__org__")
+        out.append({
+            "type": "org",
+            "areas": [
+                {"area": str(a.get("area", "")), "leads": [str(x) for x in a.get("leads", [])]}
+                for a in org.get("areas", [])
+            ],
+            "domains": [
+                {"owner": str(d.get("owner", "")), "area": str(d.get("area", "")),
+                 "units": [str(u) for u in d.get("units", [])]}
+                for d in org.get("domains", [])
+            ],
+        })
+
     # Journal: the agents' own words -> speech bubbles (advisory, observability).
     say_by_room: dict[str, list[dict[str, str]]] = {}
     for e in payload.get("agent_journal", []):

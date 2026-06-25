@@ -789,7 +789,14 @@ def build_supervisor_graph(
             # graph (resumable via the checkpointer); on the resume invoke
             # (``Command(resume=...)``) it RETURNS the supplied value here.
             raw = interrupt(
-                inspection_payload(state, boundary=boundary, state_sha=sha)
+                inspection_payload(
+                    state,
+                    boundary=boundary,
+                    state_sha=sha,
+                    # Advisory org chart (Wave E): reconstitute the OwnershipMap
+                    # via the CAS when available; None falls back to no org.
+                    resolve=rt.cas.resolve if rt.cas is not None else None,
+                )
             )
             decision = _coerce_decision(
                 raw,

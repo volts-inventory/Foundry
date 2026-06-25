@@ -51,6 +51,51 @@ const ROSTER = {
 };
 const GATE_ORDER = ["spec","build","test","review","security","audit","e2e"];
 
+// ---- generated character sprites (our own pixel art) -----------------------
+// 16-wide pixel map: big head, tiny torso, short legs. Details (eyes/ears/hair/
+// clothes/accessories) are drawn as overlays so one base parameterises everyone.
+const SP_BASE = [
+"...KKKKKKKK.....","..KhhhhhhhhK....","..KhhhhhhhhK....","..KhhhhhhhhK....",
+"..KssssssssK....","..KssssssssK....","..KssssssssK....","...KssssssK.....",
+"...KccccccK.....","...KsccccsK.....","...KppppppK.....","...KppKppK......","...KbbKbbK......",
+];
+const SKINS = [0xf2c79c,0xe8b487,0xcf9a6e,0xa06a44,0x8a5a3a];
+const HAIRS = [0x3a3f74,0x161109,0x4a3420,0xcaa84a,0x9a9aa2,0xe85a9a,0xb5542e,0x2a8b5a,0x3a6abf,0x6a4aa0,0xd86a2e];
+const POOL_OUT = [0x3aa564,0xe07a2e,0x3a6abf,0xd24a86,0xcaa84a,0x2fae6a];
+const POOL_STYLE = ['short','spiky','bun','ponytail','long'];
+const GARMENTS = ['plain','collar','stripe','belt','vest','twotone','hoodie'];
+const ROLE_KIT = {
+  "Stakeholder Proxy":{body:0x3f6fb5,trim:0xcdd6e6,style:'swept',cloth:'collar',scarf:0xa83a2e},
+  "Product Manager":{body:0xe0b53a,trim:0x7a5a18,style:'bun',cloth:'belt'},
+  "Criteria Critic":{body:0xd24a86,trim:0xf4c2d6,style:'sidelock',cloth:'vest',glasses:1},
+  "Program Manager":{body:0x7a5ad0,trim:0xd6c8f4,style:'ponytail',cloth:'stripe',headset:1},
+  "Principal Architect":{body:0x5a6178,trim:0xcfd4e0,style:'short',cloth:'collar',coat:1,glasses:1,hair:0x9a9aa2},
+  "Senior Engineer":{body:0xe07a2e,trim:0x3a2a18,style:'spiky',cloth:'hoodie'},
+  "Junior Engineer":{body:0x3aa564,trim:0xe0e0c0,style:'short',cloth:'twotone',cap:0x2f6dbf},
+  "QA Engineer":{body:0x2fae6a,trim:0xcfeede,style:'long',cloth:'collar',coat:1},
+  "SDET":{body:0x1f9b9b,trim:0xcdeaea,style:'short',cloth:'stripe',headset:1},
+  "Reviewer":{body:0x3a6abf,trim:0xcdd9f0,style:'swept',cloth:'vest',glasses:1},
+  "Technical Writer":{body:0xcaa84a,trim:0x6a5520,style:'long',cloth:'belt'},
+  "AppSec Engineer":{body:0xc0392b,trim:0xf0b0b0,style:'short',cloth:'hoodie',hood:0x7a1f24},
+  "CTO":{body:0x2f3450,trim:0xc8a23a,style:'short',cloth:'collar',tie:0xc8a23a},
+};
+function hashStr(s){ let h=2166136261; for(let i=0;i<s.length;i++){ h^=s.charCodeAt(i); h=Math.imul(h,16777619); } return h>>>0; }
+function kitFor(name, seed){
+  const k = ROLE_KIT[name] || {body:0x4a78c0,trim:0xcdd6e6,style:'short',cloth:'collar'};
+  const o = Object.assign({}, k);
+  o.skin = SKINS[((seed*3+1)%SKINS.length+SKINS.length)%SKINS.length];
+  o.hair = k.hair || HAIRS[((seed*7+2)%HAIRS.length+HAIRS.length)%HAIRS.length];
+  return o;
+}
+function poolKit(i){ // the IC pool: same family, distinct people
+  const o = {body:POOL_OUT[i%POOL_OUT.length], style:POOL_STYLE[i%POOL_STYLE.length],
+    cloth:GARMENTS[(i+1)%GARMENTS.length], skin:SKINS[(i*3)%SKINS.length], hair:HAIRS[(i*7+1)%HAIRS.length]};
+  o.trim = shade(o.body,1.4);
+  if (i%2===0) o.cap = [0x2f9d54,0x3a6abf,0xb5542e][i%3];
+  if (i%5===3) o.glasses = 1;
+  return o;
+}
+
 function shade(color,f){
   const r=Math.min(255,Math.round(((color>>16)&255)*f));
   const g=Math.min(255,Math.round(((color>>8)&255)*f));
@@ -155,9 +200,10 @@ class FloorScene extends Phaser.Scene {
     for (let i=0;i<count;i++){
       const x = Math.round(R.x0+26 + (R.w-52)*(count>1 ? i/(count-1) : 0.5));
       const y = FLOOR_BOT - 64 + (i%2)*30;                    // two rows of desks
-      const ws = this.makeWorkstation(x, y+24, 0xffc08a);
-      const s = this.makePerson(x, y, 0xffc08a, false);
-      s.setScale(1.4).setDepth(y).setAlpha(0.95);
+      const k = poolKit(i);
+      const ws = this.makeWorkstation(x, y+24, k.body);
+      const s = this.makePerson(x, y, k);
+      s.setScale(2.0).setDepth(y).setAlpha(0.95);
       this.startWalk(s);                                       // ICs are busy building
       this.poolGroup.push(s, ws);
     }
@@ -448,14 +494,15 @@ class FloorScene extends Phaser.Scene {
         const hx = R.x0+36 + (names.length>1 ? span*i/(names.length-1) : span/2);
         // each lead works at their OWN desk inside the room, staggered front/back
         const hy = FLOOR_TOP + 96 + (i%2)*92;
-        this.makeWorkstation(hx, hy+30, COLORS[name]||0xcccccc);  // desk in front of them
-        const a = this.makePerson(hx, hy, COLORS[name]||0xcccccc, false);
-        a.setScale(1.95).setDepth(hy);                            // y-sort (desk occludes legs)
+        const seed = hashStr((this.proj.id||'f')+name), kit = kitFor(name, seed);
+        this.makeWorkstation(hx, hy+30, kit.body);                // desk in front of them
+        const a = this.makePerson(hx, hy, kit);
+        a.setScale(2.6).setDepth(hy);                             // y-sort (desk occludes legs)
         a.home = {x:hx,y:hy};
         a.setPosition(hx, hy+200).setAlpha(0.32);
         a.seen = false; a.bubble = null;
         // Clickable -> interview this lead (their journal + a question), advisory.
-        a.setInteractive(new Phaser.Geom.Rectangle(-10,-20,20,34), Phaser.Geom.Rectangle.Contains);
+        a.setInteractive(new Phaser.Geom.Rectangle(-8,-8,16,15), Phaser.Geom.Rectangle.Contains);
         a.on("pointerdown", ()=> openInterview(name));
         a.on("pointerover", ()=>{ this.input.manager.canvas.style.cursor = "pointer"; });
         a.on("pointerout", ()=>{ this.input.manager.canvas.style.cursor = "default"; });
@@ -466,69 +513,79 @@ class FloorScene extends Phaser.Scene {
   }
 
   buildCTO(){
-    const c = this.makePerson(ROOMS.reception.cx, FLOOR_BOT-18, 0x222a44, true);
-    c.setDepth(15);
-    c.add(this.add.text(0,-30,"CTO",{fontFamily:"'PixelFont','Courier New'",fontSize:"9px",color:"#ffcf52"})
+    const c = this.makePerson(ROOMS.reception.cx, FLOOR_BOT-18, kitFor("CTO", hashStr((this.proj.id||'f')+"CTO")));
+    c.setScale(2.6).setDepth(15);
+    c.add(this.add.text(0,-22,"CTO",{fontFamily:"'PixelFont','Courier New'",fontSize:"5px",color:"#ffcf52"})
       .setOrigin(0.5));
     this.cto = c;
     this.tweens.add({targets:c.bob, y:-1, duration:380, yoyo:true, repeat:-1, ease:"Sine.inOut"});
   }
 
-  // Original chibi sprite in the general GBA-JRPG style: big head, small body,
-  // dark outline, limited palette, stepped-frame-ready legs. (Our own art.)
-  makePerson(x,y,bodyColor,isCTO){
+  // Our own generated GBA-style sprite: big head, tiny torso, pointed ears, vertical
+  // eyes, colourful clothes. `opt` = a role/pool kit (body/trim/style/cloth/hw/acc).
+  makePerson(x,y,opt){
+    opt = opt || {};
     const c = this.add.container(x,y).setDepth(10);
-    const O = 0x0b0e18;                                    // near-black outline
-    const skin = 0xf3c7a0, skinSh = 0xd6a37a;
-    const hairs = [0x2a1d12,0x140f0a,0x6b4a1e,0x4a2e1a,0x55607a];
-    const hair = isCTO ? 0x14110c : hairs[Math.abs(Math.round(x)) % hairs.length];
-    c.add(this.add.ellipse(0,17,20,6,0x000000,0.32));      // drop shadow
+    const O=0x0a0a0c, e=0x141822, g=0x464d60, m=0x5a627a, lens=0xbfe6ff, pant=0x2b3146, shoe=0x0a0a0c;
+    const body=opt.body!=null?opt.body:0x4a78c0, a=opt.trim!=null?opt.trim:shade(body,1.4);
+    const skin=opt.skin!=null?opt.skin:0xf2c79c, hair=opt.hair!=null?opt.hair:0x3a2616;
+    c.add(this.add.ellipse(0.5,6.5,11,3,0x000000,0.3));    // shadow under the feet
     const bob = this.add.container(0,0);
-    // short legs (separate, for a 2-frame walk cycle)
-    bob.add(this.add.rectangle(0,15,14,9,O));
-    const legL = this.add.rectangle(-4,15,5,7,0x33406a), legR = this.add.rectangle(4,15,5,7,0x33406a);
-    bob.add(legL); bob.add(legR);
-    bob.add(this.add.rectangle(-4,18,5,2,0x20283f)); bob.add(this.add.rectangle(4,18,5,2,0x20283f)); // shoes
-    // small torso + arms (2-tone shaded)
-    bob.add(this.add.rectangle(-7,7,4,10,O)); bob.add(this.add.rectangle(7,7,4,10,O));   // arm outlines
-    bob.add(this.add.rectangle(-7,7,3,9,shade(bodyColor,0.85))); bob.add(this.add.rectangle(7,7,3,9,shade(bodyColor,0.85)));
-    bob.add(this.add.rectangle(0,8,16,13,O));
-    bob.add(this.add.rectangle(0,8,12,11,bodyColor));
-    bob.add(this.add.rectangle(-4,8,3,11,shade(bodyColor,1.34)));   // highlight
-    bob.add(this.add.rectangle(5,8,2,11,shade(bodyColor,0.7)));     // shadow
-    if (isCTO) bob.add(this.add.rectangle(0,8,3,10,0xffcf52));      // tie
-    // big chibi head
-    bob.add(this.add.rectangle(0,-6,21,19,O));
-    bob.add(this.add.rectangle(0,-6,17,16,skin));
-    bob.add(this.add.rectangle(6,-6,4,16,skinSh));                  // face shading
-    bob.add(this.add.rectangle(0,-14,19,8,hair));                  // hair top
-    bob.add(this.add.rectangle(-8,-8,4,7,hair)); bob.add(this.add.rectangle(8,-8,4,7,hair)); // sides
-    const eL=this.add.rectangle(-4,-5,3,4,0x14182a), eR=this.add.rectangle(5,-5,3,4,0x14182a); // eyes
-    bob.add(eL); bob.add(eR);
-    bob.add(this.add.rectangle(-5,-6,1,1,0xffffff)); bob.add(this.add.rectangle(4,-6,1,1,0xffffff)); // glints
-    const spark = this.add.rectangle(12,-13,4,4,0xfff04a).setVisible(false);
-    bob.add(spark);
+    const P=(gx,gy,w,h,col)=>{ const r=this.add.rectangle(gx-8,gy-7,w,h,col).setOrigin(0,0); bob.add(r); return r; };
+    const pal={K:O,h:hair,s:skin,c:body,p:pant,b:shoe};
+    SP_BASE.forEach((row,gy)=>{ for(let gx=0;gx<16;gx++){ const col=pal[row[gx]]; if(col!=null) P(gx,gy,1,1,col); }});
+    // pointed ears
+    P(2,5,1,1,skin);P(1,4,1,1,skin);P(0,4,1,1,O);P(1,3,1,1,O);P(1,5,1,1,O);
+    P(11,5,1,1,skin);P(12,4,1,1,skin);P(13,4,1,1,O);P(12,3,1,1,O);P(12,5,1,1,O);
+    // colourful clothing detail
+    const ct=opt.cloth;
+    if(ct==='collar') P(4,8,6,1,a);
+    else if(ct==='stripe'){P(6,8,1,2,a);P(7,8,1,2,a);}
+    else if(ct==='belt') P(4,9,6,1,a);
+    else if(ct==='vest'){P(4,8,1,2,a);P(9,8,1,2,a);P(5,8,4,1,a);}
+    else if(ct==='twotone') P(4,9,6,1,a);
+    else if(ct==='hoodie'){P(4,7,6,1,a);P(5,8,1,1,a);P(8,8,1,1,a);}
+    // vertical eyes (tracked for blink)
+    const eL=P(4,5,1,2,e), eR=P(9,5,1,2,e);
+    // hair styles
+    const st=opt.style||'short';
+    if(st==='short'){P(2,4,1,1,hair);P(11,4,1,1,hair);}
+    else if(st==='swept'){P(2,4,1,2,hair);P(3,4,1,1,hair);P(9,4,2,1,hair);P(11,4,1,2,hair);}
+    else if(st==='sidelock'){P(11,4,1,5,hair);P(12,4,1,6,O);P(11,9,1,1,O);P(2,4,1,1,hair);}
+    else if(st==='bun'){P(6,-1,4,2,hair);P(5,-1,1,2,O);P(10,-1,1,2,O);P(5,-2,5,1,O);P(2,4,1,1,hair);P(11,4,1,1,hair);}
+    else if(st==='spiky'){[4,6,8,10].forEach(gx=>P(gx,0,1,1,hair));P(5,-1,1,1,hair);P(9,-1,1,1,hair);}
+    else if(st==='afro'){for(let gx=3;gx<11;gx++)P(gx,0,1,1,hair);P(2,1,1,3,hair);P(11,1,1,3,hair);P(2,0,8,1,O);P(1,1,1,4,O);P(12,1,1,4,O);}
+    else if(st==='long'){P(2,4,1,6,hair);P(11,4,1,6,hair);P(1,4,1,7,O);P(12,4,1,7,O);P(2,10,2,1,O);P(10,10,2,1,O);}
+    else if(st==='ponytail'){P(11,3,1,5,hair);P(12,3,1,6,O);P(11,8,1,1,O);P(2,4,1,1,hair);}
+    // headwear (coloured, never pure black)
+    if(opt.cap!=null){P(3,1,8,2,opt.cap);P(2,2,10,1,opt.cap);P(2,0,8,1,O);P(0,2,3,1,O);P(12,2,1,1,O);}
+    if(opt.hood!=null){P(2,-1,10,4,opt.hood);P(2,3,2,7,opt.hood);P(12,3,2,7,opt.hood);P(1,-1,1,11,O);P(14,3,1,7,O);P(2,-2,10,1,O);}
+    // accessories (slate glasses/headset, not black)
+    if(opt.glasses){P(3,5,3,2,g);P(8,5,3,2,g);P(6,5,2,1,g);P(4,5,1,1,lens);P(9,5,1,1,lens);}
+    if(opt.headset){P(2,1,10,1,m);P(2,2,1,3,m);P(11,4,1,2,m);P(11,6,1,1,0xcc5555);}
+    if(opt.scarf!=null){P(4,7,6,1,opt.scarf);P(8,8,1,1,opt.scarf);}
+    if(opt.tie!=null){P(8,8,1,2,opt.tie);}
+    if(opt.coat){P(4,8,1,2,0xe6e9ef);P(9,8,1,2,0xd2d7e0);}
+    const spark = this.add.rectangle(4,-10,2,2,0xfff04a).setOrigin(0,0).setVisible(false); bob.add(spark);
     c.add(bob);
-    c.bob = bob; c.spark = spark; c.legL = legL; c.legR = legR; c.baseLegY = 15;
-    c.eyes = [eL, eR];
+    c.bob = bob; c.spark = spark; c.eyes = [eL, eR];
     return c;
   }
 
-  // Frame-stepped walk (2-frame leg alternation) — the snappy 8/16-bit motion.
+  // Stepped walk: a snappy 2-frame bob + waddle on the whole body (legs are baked).
   startWalk(a){
-    if (!a || a.walkEv) return;
+    if (!a || !a.bob || a.walkEv) return;
     let f = 0;
     a.walkEv = this.time.addEvent({delay:130, loop:true, callback:()=>{
       f ^= 1;
-      a.legL.y = a.baseLegY + (f ? -2 : 2);
-      a.legR.y = a.baseLegY + (f ? 2 : -2);
-      a.bob.y  = f ? -1 : 0;
+      a.bob.y = f ? -1 : 0;
+      a.bob.x = f ? 0.6 : -0.6;
     }});
   }
   stopWalk(a){
-    if (!a) return;
+    if (!a || !a.bob) return;
     if (a.walkEv){ a.walkEv.remove(); a.walkEv = null; }
-    a.legL.y = a.baseLegY; a.legR.y = a.baseLegY; a.bob.y = 0;
+    a.bob.y = 0; a.bob.x = 0;
   }
 
   setActiveRoom(key){

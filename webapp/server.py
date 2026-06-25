@@ -46,6 +46,8 @@ class Project:
     mode: str
     supervised: bool
     floor: int
+    backend: str = "mock"
+    packs: list[str] = field(default_factory=list)
     events: queue.Queue[dict[str, Any]] = field(default_factory=queue.Queue)
     decisions: queue.Queue[str] = field(default_factory=queue.Queue)
     seen_uris: set[str] = field(default_factory=set)
@@ -73,7 +75,8 @@ def _run_factory(p: Project) -> None:
     # Imported here so the server starts fast and a missing dep never blocks boot.
     from foundry.cli import run
 
-    _emit(p, type="project", id=p.id, request=p.request, mode=p.mode, floor=p.floor)
+    _emit(p, type="project", id=p.id, request=p.request, mode=p.mode, floor=p.floor,
+          backend=p.backend)
     _emit(p, type="narrate", text=f"📋 New project on Floor {p.floor}: {p.request!r}")
     _emit(p, type="narrate", text=f"🏭 Mode: {p.mode}. The crew reports for duty…")
     time.sleep(_PACE)
@@ -102,6 +105,9 @@ def _run_factory(p: Project) -> None:
         result = run(
             p.request,
             mode=p.mode,
+            backend=p.backend,            # real backend per project (not always mock)
+            packs=p.packs or None,        # optional domain packs (regulated/ml_data/frontend)
+            thread_id=p.id,               # UNIQUE per project — no cross-floor collision
             checkpoints=True,
             checkpoint_responder=responder,
             output_dir=str(code_dir) if code_dir else None,
@@ -284,11 +290,20 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
 
     def _new_project(self) -> None:
+        from foundry.cli import BACKENDS  # validate against the real backend set
+
         body = self._read_json()
         request = str(body.get("request", "")).strip() or "build a tiny URL-shortener service"
         mode = str(body.get("mode", "assistant"))
         if mode not in _MODES:
             mode = "assistant"
+        backend = str(body.get("backend", "mock"))
+        if backend not in BACKENDS:
+            backend = "mock"
+        raw_packs = body.get("packs", [])
+        if isinstance(raw_packs, str):
+            raw_packs = raw_packs.replace(",", " ").split()
+        packs = [str(p).strip() for p in raw_packs if str(p).strip()]
         supervised = bool(body.get("supervised", True))
         with _LOCK:
             _FLOOR[0] += 1
@@ -296,6 +311,7 @@ class Handler(BaseHTTPRequestHandler):
             pid = uuid.uuid4().hex[:12]
             p = Project(
                 id=pid, request=request, mode=mode, supervised=supervised, floor=floor,
+                backend=backend, packs=packs,
                 out_base=_OUTPUT_ROOT / f"floor-{floor}",
             )
             _PROJECTS[pid] = p

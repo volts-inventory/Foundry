@@ -434,19 +434,19 @@ let ACTIVE = null;          // the floor currently shown
 
 function floorKey(f){ return "floor-"+f; }
 
-async function newProject(req, mode, supervised){
+async function newProject(req, mode, supervised, backend, packs){
   await bootReady;  // shared textures must exist before a FloorScene builds
   let resp;
   try {
     resp = await fetch("/api/projects", {
       method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({request:req, mode, supervised}),
+      body: JSON.stringify({request:req, mode, supervised, backend, packs}),
     }).then(r=>r.json());
   } catch(err){ appendLogDom("bad","✗ "+err); return; }
 
   const floor = resp.floor;
   const F = {
-    id: resp.id, floor, request:req, mode, scene:null,
+    id: resp.id, floor, request:req, mode, backend, scene:null,
     log:[], gates:{}, org:null, cp:null, awaiting:false, status:"running", passed:false,
     seenUris:new Set(),
   };
@@ -481,7 +481,7 @@ function routeEvent(floor, ev){
   const S = F.scene, isActive = floor === ACTIVE;
   switch(ev.type){
     case "project":
-      F.request = ev.request; F.mode = ev.mode;
+      F.request = ev.request; F.mode = ev.mode; F.backend = ev.backend || F.backend;
       if (isActive) updateHud(F);
       break;
     case "narrate": logTo(F, logClass(ev.text), ev.text); break;
@@ -566,7 +566,8 @@ function renderGatesMini(gates){
 function updateHud(F){
   document.getElementById("floor-tag").textContent = "FLOOR "+F.floor;
   document.getElementById("proj-tag").textContent = F.request || "—";
-  document.getElementById("mode-tag").textContent = F.mode ? "· "+F.mode : "";
+  const tail = (F.mode ? "· "+F.mode : "") + (F.backend ? " · "+F.backend : "");
+  document.getElementById("mode-tag").textContent = tail.trim();
 }
 function renderElevator(){
   const el=document.getElementById("el-floors"); el.innerHTML="";
@@ -649,9 +650,11 @@ document.getElementById("cancel-btn").onclick=()=>newModal.classList.add("hidden
 document.getElementById("start-btn").onclick=()=>{
   const req=document.getElementById("req-input").value;
   const mode=document.getElementById("mode-select").value;
+  const backend=document.getElementById("backend-select").value;
+  const packs=document.getElementById("packs-input").value;
   const sup=document.getElementById("supervised").checked;
   newModal.classList.add("hidden");
-  newProject(req, mode, sup);
+  newProject(req, mode, sup, backend, packs);
 };
 document.getElementById("cp-approve").onclick=()=>sendDecision("approve");
 document.getElementById("cp-reject").onclick=()=>sendDecision("reject");

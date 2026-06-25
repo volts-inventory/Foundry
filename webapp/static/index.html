@@ -50,6 +50,18 @@
           <option value="autonomous">autonomous — build · admit · deploy</option>
         </select>
       </div>
+      <div class="row">
+        <label>Backend</label>
+        <select id="backend-select">
+          <option value="mock">mock — deterministic, offline (no key)</option>
+          <option value="anthropic">anthropic — Claude API (ANTHROPIC_API_KEY)</option>
+          <option value="claude-cli">claude-cli — claude -p (Max subscription)</option>
+          <option value="codex">codex — codex CLI (OPENAI_API_KEY)</option>
+          <option value="ollama-gemma">ollama-gemma — local Ollama endpoint</option>
+        </select>
+      </div>
+      <label>Domain packs (optional, comma-separated)</label>
+      <input id="packs-input" type="text" placeholder="regulated, ml_data, frontend" />
       <label class="check"><input type="checkbox" id="supervised" checked /> Supervised (CTO approves each checkpoint)</label>
       <div class="dialog-actions">
         <button id="start-btn" class="primary">🔨 BREAK GROUND</button>

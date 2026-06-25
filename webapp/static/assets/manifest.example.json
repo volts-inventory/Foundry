@@ -1,0 +1,7 @@
+{
+  "_comment": "Copy to manifest.json and point each room at a tileable PNG in this folder to override its procedural floor. Rooms you omit stay procedural.",
+  "tiles": {
+    "engineering": "engineering_floor.png",
+    "vault": "vault_floor.png"
+  }
+}

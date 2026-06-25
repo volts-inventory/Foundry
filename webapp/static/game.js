@@ -1,12 +1,14 @@
 "use strict";
-/* Foundry Workshop — a Phaser 3 pixel factory floor driven by REAL build telemetry.
+/* Foundry Workshop — Phaser 3 pixel factory, multi-floor (one floor per project).
  *
- * The engine (Phaser) owns the scene graph, tweens, particles, depth-sorting and
- * timed lifecycles. This file only describes the workshop and reacts to the SAME
- * Server-Sent-Events the vanilla renderer consumed — so server.py / events.py are
- * untouched. Sprites are generated procedurally (no binary art) so the whole app
- * stays offline, like the rest of Foundry. Nothing here can influence a build; the
- * signed gates decide and this is only the view.
+ * The engine owns the scene graph, tweens, particles, depth-sorting and timed
+ * lifecycles. This file describes the workshop and reacts to the SAME Server-Sent
+ * Events the backend already emits (server.py / events.py are untouched) — now
+ * routed PER PROJECT: each project is its own floor (a Phaser scene); the elevator
+ * switches the active floor. Sprites are generated procedurally so the app stays
+ * offline; a drop-in art slot (static/assets/manifest.json) can override the floor
+ * tiles with real PNGs. Nothing here can influence a build — the signed gates
+ * decide and this is only the view.
  */
 
 const W = 1280, H = 620;
@@ -33,7 +35,6 @@ const ROOMS = {};
   }
 })();
 
-// ---- roster: who idles in which room ---------------------------------------
 const COLORS = {
   "Stakeholder Proxy":0x7fd1ff,"Product Manager":0xffd95e,"Criteria Critic":0xff8fae,
   "Program Manager":0xb59bff,"Principal Architect":0xc79bff,"Senior Engineer":0xff9b5e,
@@ -55,62 +56,118 @@ function shade(color,f){
   return (r<<16)|(g<<8)|b;
 }
 
-// =========================================================================== //
-//  Scene                                                                      //
-// =========================================================================== //
-class WorkshopScene extends Phaser.Scene {
-  constructor(){ super("workshop"); }
+// ---- text wrapping (shared) -----------------------------------------------
+function wrap(t,n){
+  const out=[], words=(t||"").split(" "); let line="";
+  for (const x of words){
+    if ((line+" "+x).trim().length>n){ out.push(line.trim()); line=x; }
+    else line += " "+x;
+  }
+  if (line.trim()) out.push(line.trim());
+  return out.slice(0,4);
+}
 
-  preload(){
-    // a 4x4 gold "spark" texture for particle emitters (release confetti / work)
-    const g = this.make.graphics({x:0,y:0,add:false});
+// =========================================================================== //
+//  Shared procedural textures (generated ONCE; reused by every floor scene)   //
+// =========================================================================== //
+function buildSharedTextures(scene){
+  if (!scene.textures.exists("spark")){
+    const g = scene.make.graphics({add:false});
     g.fillStyle(0xffd95e,1); g.fillRect(0,0,4,4);
     g.fillStyle(0xfff0a8,1); g.fillRect(0,0,2,2);
-    g.generateTexture("spark",4,4);
-    g.destroy();
+    g.generateTexture("spark",4,4); g.destroy();
   }
+  for (const key in ROOMS){
+    const tkey = "floor_"+key;
+    if (scene.textures.exists(tkey)) continue;
+    const R = ROOMS[key]; const g = scene.make.graphics({add:false});
+    g.fillStyle(shade(R.color,0.42),1); g.fillRect(0,0,40,40);              // base
+    g.fillStyle(shade(R.color,0.55),1); g.fillRect(20,0,20,20); g.fillRect(0,20,20,20);
+    g.fillStyle(shade(R.color,0.64),1); g.fillRect(6,6,2,2); g.fillRect(28,14,2,2); g.fillRect(14,30,2,2);
+    g.fillStyle(shade(R.color,0.34),1); g.fillRect(32,33,2,2); g.fillRect(11,18,2,2);  // speckle
+    g.generateTexture(tkey,40,40); g.destroy();
+  }
+}
+
+// Optional drop-in art: static/assets/manifest.json may map room -> tile PNG to
+// override the procedural floor texture. Best-effort; the procedural baseline
+// always works, so missing/broken assets degrade silently.
+function applyDropInArt(scene, done){
+  const man = scene.cache.json.get("artManifest");
+  const tiles = man && man.tiles;
+  if (!tiles || typeof tiles !== "object"){ done(); return; }
+  for (const [room, file] of Object.entries(tiles)){
+    if (ROOMS[room] && typeof file === "string") scene.load.image("dropin_"+room, "assets/"+file);
+  }
+  scene.load.once("complete", ()=>{
+    for (const room of Object.keys(tiles)){
+      const dk = "dropin_"+room, key = "floor_"+room;
+      if (scene.textures.exists(dk)){
+        if (scene.textures.exists(key)) scene.textures.remove(key);
+        scene.textures.addImage(key, scene.textures.get(dk).getSourceImage());
+      }
+    }
+    done();
+  });
+  scene.load.on("loaderror", ()=>{});
+  scene.load.start();
+}
+
+// =========================================================================== //
+//  Boot: generate shared art (+ drop-in), then signal ready                   //
+// =========================================================================== //
+let bootResolve;
+const bootReady = new Promise((r)=>{ bootResolve = r; });
+
+class BootScene extends Phaser.Scene {
+  constructor(){ super("boot"); }
+  preload(){
+    // A missing manifest is the normal (procedural-only) case — ignore its 404.
+    this.load.json("artManifest", "assets/manifest.json");
+    this.load.on("loaderror", ()=>{});
+  }
+  create(){
+    buildSharedTextures(this);
+    applyDropInArt(this, ()=>bootResolve());
+  }
+}
+
+// =========================================================================== //
+//  Floor scene — one workshop per project                                     //
+// =========================================================================== //
+class FloorScene extends Phaser.Scene {
+  init(data){ this.proj = data || {}; }
 
   create(){
-    SCENE = this;
     this.cameras.main.setBackgroundColor(0x0a0f1c);
     this.agents = new Map();
-    this.gates = {};            // name -> {status, attested, advisory}
-    this.gatePips = {};         // name -> container shown above the gate
+    this.gates = {};
+    this.gatePips = {};
     this.activeRoom = "reception";
-
     this.buildRooms();
     this.buildGate();
     this.buildChest();
     this.buildGuardian();
     this.buildAgents();
     this.buildCTO();
+    const F = FLOORS.get(this.proj.floor);
+    if (F) F.scene = this;
+    this.sys.setVisible(this.proj.floor === ACTIVE);
   }
 
-  // -- static scenery --------------------------------------------------------
   buildRooms(){
     this.roomGlow = {};
     for (const key in ROOMS){
       const R = ROOMS[key];
-      // checker floor as a TileSprite over a generated 40x40 tile
-      const tkey = "floor_"+key;
-      if (!this.textures.exists(tkey)){
-        const g = this.make.graphics({add:false});
-        g.fillStyle(shade(R.color,0.42),1); g.fillRect(0,0,40,40);
-        g.fillStyle(shade(R.color,0.55),1); g.fillRect(20,0,20,20); g.fillRect(0,20,20,20);
-        g.generateTexture(tkey,40,40); g.destroy();
-      }
       const fh = FLOOR_BOT - FLOOR_TOP + 20;
-      this.add.tileSprite(R.x0, FLOOR_TOP, R.w, fh, tkey).setOrigin(0,0).setDepth(0);
-      // wall band + top shadow line
+      this.add.tileSprite(R.x0, FLOOR_TOP, R.w, fh, "floor_"+key).setOrigin(0,0).setDepth(0);
       this.add.rectangle(R.x0, FLOOR_TOP-26, R.w, 26, R.color).setOrigin(0,0).setDepth(1);
       this.add.rectangle(R.x0, FLOOR_TOP-26, R.w, 4, 0x000000, 0.25).setOrigin(0,0).setDepth(1);
-      // divider
       this.add.rectangle(R.x1-2, FLOOR_TOP-26, 2, fh+26, 0xffffff, 0.05).setOrigin(0,0).setDepth(1);
       this.add.text(R.cx, FLOOR_TOP-22, R.label, {
         fontFamily:"'Courier New',monospace", fontSize:"13px",
         fontStyle:"bold", color:"#dfe7ff",
       }).setOrigin(0.5,0).setDepth(2);
-      // active-room glow overlay (alpha tweened on stage change)
       this.roomGlow[key] = this.add.rectangle(R.x0, FLOOR_TOP, R.w, fh, 0xffd25a, 0)
         .setOrigin(0,0).setDepth(1);
     }
@@ -123,7 +180,7 @@ class WorkshopScene extends Phaser.Scene {
     c.add(this.add.rectangle(0,0,16,16,0x9aa6c0));
     c.add(this.add.rectangle(0,-12,12,10,0xcfd8ee));
     c.add(this.add.rectangle(0,7,16,3,0x39406a));
-    c.add(this.add.rectangle(11,-7,2,30,0xc0c8e0));   // spear
+    c.add(this.add.rectangle(11,-7,2,30,0xc0c8e0));
   }
 
   buildGate(){
@@ -135,14 +192,12 @@ class WorkshopScene extends Phaser.Scene {
     this.gateFrame = this.add.rectangle(ax,atop,aw,h,0x2b3147).setOrigin(0,0);
     this.gateDoor  = this.add.rectangle(ax+6,atop+6,aw-12,h-6,0x0c1322).setOrigin(0,0);
     c.add([this.gateFrame,this.gateDoor]);
-    // bars + latch (hidden when the gate opens)
     this.gateBars = this.add.container(0,0);
     for (let bx=ax+10; bx<ax+aw-8; bx+=12)
       this.gateBars.add(this.add.rectangle(bx,atop+8,3,h-12,0x566089).setOrigin(0,0));
     this.gateLatch = this.add.rectangle(R.cx,(atop+abot)/2,14,14,0xaab4d6);
     this.gateBars.add(this.gateLatch);
     c.add(this.gateBars);
-    this.gateContainer = c;
   }
 
   buildChest(){
@@ -153,18 +208,15 @@ class WorkshopScene extends Phaser.Scene {
     c.add(this.add.ellipse(0,15,40,8,0x000000,0.3));
     c.add(this.add.rectangle(0,3,36,18,0x7a3b1a));
     c.add(this.add.rectangle(0,9,36,6,0x5a2c12));
-    // closed lid + lock (toggled off on release)
     this.chestClosed = this.add.container(0,0);
     this.chestClosed.add(this.add.rectangle(0,-9,36,10,0x8a4720));
     this.chestClosed.add(this.add.rectangle(0,-3,6,10,0xb9892f));
-    // open lid + gold (hidden until release)
     this.chestOpen = this.add.container(0,0).setVisible(false);
     this.chestOpen.add(this.add.rectangle(0,-18,36,8,0x7a3b1a));
     this.chestOpen.add(this.add.rectangle(0,-8,30,8,0xffcf52));
     for (let k=0;k<5;k++) this.chestOpen.add(this.add.rectangle(-12+k*6,-12,3,3,0xfff0a8));
     c.add([this.chestClosed,this.chestOpen]);
     c.add(this.add.rectangle(0,1,36,2,0xcaa24a));
-    this.chestContainer = c;
     this.chestOpened = false;
   }
 
@@ -177,9 +229,8 @@ class WorkshopScene extends Phaser.Scene {
         const hy = FLOOR_BOT-20 - (i%2)*26;
         const a = this.makePerson(hx, hy, COLORS[name]||0xcccccc, false);
         a.home = {x:hx,y:hy};
-        a.setPosition(hx, hy+200).setAlpha(0.32);    // off-floor, faded until revealed
+        a.setPosition(hx, hy+200).setAlpha(0.32);
         a.seen = false; a.bubble = null;
-        // walk into place
         this.tweens.add({targets:a, y:hy, duration:700, delay:120*i, ease:"Back.out"});
         this.agents.set(name, a);
       });
@@ -192,21 +243,19 @@ class WorkshopScene extends Phaser.Scene {
     c.add(this.add.text(0,-30,"CTO",{fontFamily:"'Courier New'",fontSize:"9px",color:"#ffcf52"})
       .setOrigin(0.5));
     this.cto = c;
-    // idle bob
     this.tweens.add({targets:c.bob, y:-1, duration:380, yoyo:true, repeat:-1, ease:"Sine.inOut"});
   }
 
-  // a chunky person as a Container; `bob` is the inner group tweened for motion
   makePerson(x,y,bodyColor,isCTO){
     const c = this.add.container(x,y).setDepth(10);
-    c.add(this.add.ellipse(1,14,16,4,0x000000,0.3));     // shadow (static)
+    c.add(this.add.ellipse(1,14,16,4,0x000000,0.3));
     const bob = this.add.container(0,0);
-    bob.add(this.add.rectangle(-4,9,4,7,0x1a2236));       // legs
+    bob.add(this.add.rectangle(-4,9,4,7,0x1a2236));
     bob.add(this.add.rectangle(4,9,4,7,0x1a2236));
-    bob.add(this.add.rectangle(0,0,14,13,bodyColor));     // body
-    if (isCTO) bob.add(this.add.rectangle(0,-1,2,8,0xffcf52)); // tie
-    bob.add(this.add.rectangle(0,-10,10,9,0xf1c9a5));     // head
-    bob.add(this.add.rectangle(0,-15,10,3,isCTO?0x15110c:0x2a2018)); // hair
+    bob.add(this.add.rectangle(0,0,14,13,bodyColor));
+    if (isCTO) bob.add(this.add.rectangle(0,-1,2,8,0xffcf52));
+    bob.add(this.add.rectangle(0,-10,10,9,0xf1c9a5));
+    bob.add(this.add.rectangle(0,-15,10,3,isCTO?0x15110c:0x2a2018));
     const spark = this.add.rectangle(8,-8,3,3,0xfff04a).setVisible(false);
     bob.add(spark);
     c.add(bob);
@@ -214,7 +263,6 @@ class WorkshopScene extends Phaser.Scene {
     return c;
   }
 
-  // -- live reactions to telemetry ------------------------------------------
   setActiveRoom(key){
     this.activeRoom = key;
     for (const k in this.roomGlow)
@@ -296,10 +344,10 @@ class WorkshopScene extends Phaser.Scene {
       const sx = ax+12+i*26, sy = atop-12;
       if (!this.gatePips[n]){
         const c = this.add.container(sx, sy).setDepth(6);
-        c.add(this.add.rectangle(10,4,20,18,0x000000));        // plate (recolored below)
+        c.add(this.add.rectangle(10,4,20,18,0x000000));
         c.add(this.add.text(10,3,"",{fontFamily:"'Courier New'",fontSize:"12px",
           fontStyle:"bold",color:"#fff"}).setOrigin(0.5));
-        c.add(this.add.rectangle(17,-3,5,5,0xffcf52).setVisible(false)); // signed pip
+        c.add(this.add.rectangle(17,-3,5,5,0xffcf52).setVisible(false));
         this.gatePips[n] = c;
         c.setScale(0); this.tweens.add({targets:c, scale:1, duration:240, ease:"Back.out"});
       }
@@ -319,10 +367,8 @@ class WorkshopScene extends Phaser.Scene {
   }
 
   openGateAndChest(){
-    // door swings to green, bars retract
     this.gateDoor.setFillStyle(0x1f8a3f);
     this.tweens.add({targets:this.gateBars, alpha:0, y:-30, duration:500, ease:"Cubic.in"});
-    // chest opens with a gold burst + glow
     if (this.chestOpened) return;
     this.chestOpened = true;
     this.chestClosed.setVisible(false);
@@ -339,8 +385,7 @@ class WorkshopScene extends Phaser.Scene {
   }
 
   renderOrg(ev){
-    // The REAL org chart from the build's OwnershipMap (Wave E telemetry): present
-    // areas -> Tech-Lead domains. Drawn as a labelled panel over the floor.
+    // The REAL org chart (Wave E telemetry): present areas -> Tech-Lead domains.
     if (this.orgPanel){ this.orgPanel.destroy(); }
     const areaColor = {
       frontend:0x7fd1ff, backend:0xff9b5e, data:0x7dffb0,
@@ -365,43 +410,11 @@ class WorkshopScene extends Phaser.Scene {
     this.tweens.add({targets:c, alpha:1, duration:300});
     this.orgPanel = c;
   }
-
-  reset(){
-    // tear down a finished build's dynamic objects, re-seat the crew
-    if (this.orgPanel){ this.orgPanel.destroy(); this.orgPanel = null; }
-    for (const a of this.agents.values()){
-      if (a.bubble){ a.bubble.destroy(); a.bubble=null; }
-      if (a.workTween) a.workTween.stop();
-      a.spark.setVisible(false); a.bob.y=0;
-      a.seen=false; a.setAlpha(0.32).setPosition(a.home.x, a.home.y);
-    }
-    this.gates={};
-    for (const n in this.gatePips){ this.gatePips[n].destroy(); }
-    this.gatePips={};
-    this.gateBars.setAlpha(1).setY(0); this.gateDoor.setFillStyle(0x0c1322);
-    this.chestOpened=false; this.chestClosed.setVisible(true);
-    this.chestOpen.setVisible(false); this.chestGlow.setAlpha(0);
-    this.tweens.killTweensOf(this.chestGlow);
-    this.setActiveRoom("reception");
-    renderGatesMini(this.gates);
-  }
-}
-
-// ---- text wrapping (shared) -----------------------------------------------
-function wrap(t,n){
-  const out=[], words=(t||"").split(" "); let line="";
-  for (const x of words){
-    if ((line+" "+x).trim().length>n){ out.push(line.trim()); line=x; }
-    else line += " "+x;
-  }
-  if (line.trim()) out.push(line.trim());
-  return out.slice(0,4);
 }
 
 // =========================================================================== //
 //  Phaser boot                                                                //
 // =========================================================================== //
-let SCENE = null;
 const GAME = new Phaser.Game({
   type: Phaser.AUTO,
   parent: "game",
@@ -410,23 +423,137 @@ const GAME = new Phaser.Game({
   pixelArt: true,
   roundPixels: true,
   scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH },
-  scene: WorkshopScene,
+  scene: [BootScene],
 });
 
 // =========================================================================== //
-//  DOM HUD + networking (unchanged event protocol)                            //
+//  Floor manager + multi-project networking                                   //
 // =========================================================================== //
-function pushLog(cls,text){
-  const ul=document.getElementById("log");
-  const li=document.createElement("li"); li.className=cls; li.textContent=text;
-  ul.appendChild(li); ul.scrollTop=ul.scrollHeight;
-  while(ul.children.length>200) ul.removeChild(ul.firstChild);
+const FLOORS = new Map();   // floorNum -> floor state (incl. its Phaser scene)
+let ACTIVE = null;          // the floor currently shown
+
+function floorKey(f){ return "floor-"+f; }
+
+async function newProject(req, mode, supervised){
+  await bootReady;  // shared textures must exist before a FloorScene builds
+  let resp;
+  try {
+    resp = await fetch("/api/projects", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({request:req, mode, supervised}),
+    }).then(r=>r.json());
+  } catch(err){ appendLogDom("bad","✗ "+err); return; }
+
+  const floor = resp.floor;
+  const F = {
+    id: resp.id, floor, request:req, mode, scene:null,
+    log:[], gates:{}, org:null, cp:null, awaiting:false, status:"running", passed:false,
+    seenUris:new Set(),
+  };
+  FLOORS.set(floor, F);
+  GAME.scene.add(floorKey(floor), FloorScene, true, {floor, id:resp.id, request:req, mode});
+  switchToFloor(floor);
+
+  const es = new EventSource("/api/stream/"+resp.id);
+  es.onmessage = e => { try { routeEvent(floor, JSON.parse(e.data)); } catch(_){} };
+  es.addEventListener("end", ()=>es.close());
+  F.es = es;
 }
+
+function switchToFloor(floor){
+  ACTIVE = floor;
+  for (const f of FLOORS.keys()){
+    const sc = GAME.scene.getScene(floorKey(f));
+    if (sc && sc.sys) sc.sys.setVisible(f === floor);
+  }
+  GAME.scene.bringToTop(floorKey(floor));
+  const F = FLOORS.get(floor);
+  rebuildLog(F);
+  renderGatesMini(F.gates);
+  updateHud(F);
+  if (F.awaiting) showCheckpoint(F); else hideCheckpoint();
+  renderElevator();
+}
+
+// ---- per-floor event routing ----------------------------------------------
+function routeEvent(floor, ev){
+  const F = FLOORS.get(floor); if (!F) return;
+  const S = F.scene, isActive = floor === ACTIVE;
+  switch(ev.type){
+    case "project":
+      F.request = ev.request; F.mode = ev.mode;
+      if (isActive) updateHud(F);
+      break;
+    case "narrate": logTo(F, logClass(ev.text), ev.text); break;
+    case "stage":
+      if (S) S.setActiveRoom(ev.room);
+      logTo(F, "gold", "── "+ev.label+" ──"); break;
+    case "agent": if (S) S.agentWork(ev.agent); break;
+    case "say":
+      if (S) S.agentSay(ev.agent, ev.text);
+      if (ev.concern) logTo(F, "", `💭 ${ev.agent}: "${ev.concern}"`); break;
+    case "artifact":
+      if (S) S.spawnPickup(ev.room, ev.label);
+      logTo(F, "good", "✚ "+ev.label+"  ·  "+ev.agent); break;
+    case "gate":
+      F.gates[ev.name] = {status:ev.status, attested:ev.attested, advisory:ev.advisory};
+      if (S) S.setGate(ev.name, F.gates[ev.name]);
+      if (isActive) renderGatesMini(F.gates);
+      if (!ev.advisory) logTo(F, ev.status==="pass"?"good":"bad",
+        `🛡 GATE ${ev.name.toUpperCase()}: ${ev.status.toUpperCase()}${ev.attested?" (signed)":""}`);
+      break;
+    case "org":
+      F.org = ev;
+      if (S) S.renderOrg(ev);
+      logTo(F, "gold", "🏢 ORG · "+(ev.areas||[]).map(a=>`${a.area}(${(a.leads||[]).length})`).join("  "));
+      break;
+    case "checkpoint":
+      F.cp = {title:ev.title, summary:ev.summary, boundary:ev.boundary}; break;
+    case "await_decision":
+      F.awaiting = true; renderElevator();
+      if (isActive) showCheckpoint(F); break;
+    case "resolved":
+      F.awaiting = false; renderElevator();
+      if (isActive) hideCheckpoint(); break;
+    case "release":
+      if (S) S.openGateAndChest();
+      logTo(F, "gold", "💰 RELEASED → "+(ev.uri||"artifact")); break;
+    case "halt":
+      if (S) S.flashGate();
+      logTo(F, "bad", "⛔ HELD: "+ev.reason); break;
+    case "done":
+      F.status = "done"; F.passed = !!ev.passed; renderElevator();
+      logTo(F, ev.passed?"good":"bad",
+        ev.passed?"✅ Build complete — shipped.":"❌ Build halted — nothing shipped."); break;
+  }
+}
+
+// =========================================================================== //
+//  DOM: quest log, gates-mini, HUD, elevator, checkpoint modal                //
+// =========================================================================== //
 function logClass(t){
   if(/✅|💰|green|Shipped/i.test(t)) return "good";
   if(/💥|🚫|⛔|error|halt/i.test(t)) return "bad";
   if(/📋|🏭|🧑/i.test(t)) return "hot";
   return "";
+}
+function appendLogDom(cls,text){
+  const ul=document.getElementById("log");
+  const li=document.createElement("li"); li.className=cls; li.textContent=text;
+  ul.appendChild(li); ul.scrollTop=ul.scrollHeight;
+  while(ul.children.length>200) ul.removeChild(ul.firstChild);
+}
+function logTo(F, cls, text){
+  F.log.push({cls,text});
+  if (F.log.length > 200) F.log.shift();
+  if (F.floor === ACTIVE) appendLogDom(cls, text);
+}
+function rebuildLog(F){
+  const ul=document.getElementById("log"); ul.innerHTML="";
+  for (const {cls,text} of F.log){
+    const li=document.createElement("li"); li.className=cls; li.textContent=text; ul.appendChild(li);
+  }
+  ul.scrollTop = ul.scrollHeight;
 }
 function renderGatesMini(gates){
   const el=document.getElementById("gates-mini"); el.innerHTML="";
@@ -434,83 +561,42 @@ function renderGatesMini(gates){
     const s=document.createElement("span"); s.className="g "+(g.status); s.textContent=n;
     el.appendChild(s);}
 }
-
-let es=null, CURRENT_ID=null;
-function startProject(req,mode,supervised){
-  if(es){es.close();es=null;}
-  if(SCENE) SCENE.reset();
-  document.getElementById("log").innerHTML="";
-  pushLog("hot","⏳ Breaking ground…");
-  fetch("/api/projects",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({request:req,mode,supervised})})
-   .then(r=>r.json()).then(({id,floor})=>{
-      document.getElementById("floor-tag").textContent="FLOOR "+floor;
-      es=new EventSource("/api/stream/"+id);
-      es.onmessage=e=>{try{applyEvent(JSON.parse(e.data));}catch(_){}};
-      es.addEventListener("end",()=>{es.close();es=null;});
-   }).catch(err=>pushLog("bad","✗ "+err));
+function updateHud(F){
+  document.getElementById("floor-tag").textContent = "FLOOR "+F.floor;
+  document.getElementById("proj-tag").textContent = F.request || "—";
+  document.getElementById("mode-tag").textContent = F.mode ? "· "+F.mode : "";
 }
-function sendDecision(decision){
-  if(!CURRENT_ID) return;
-  fetch("/api/decision/"+CURRENT_ID,{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({decision})});
-  hideCheckpoint();
-}
-
-let PENDING_CP=null;
-function applyEvent(ev){
-  const S=SCENE;
-  switch(ev.type){
-    case "project":
-      CURRENT_ID=ev.id;
-      document.getElementById("proj-tag").textContent=ev.request;
-      document.getElementById("mode-tag").textContent="· "+ev.mode;
-      break;
-    case "narrate": pushLog(logClass(ev.text),ev.text); break;
-    case "stage":
-      if(S) S.setActiveRoom(ev.room);
-      pushLog("gold","── "+ev.label+" ──"); break;
-    case "agent": if(S) S.agentWork(ev.agent); break;
-    case "say":
-      if(S) S.agentSay(ev.agent,ev.text);
-      if(ev.concern) pushLog("",`💭 ${ev.agent}: "${ev.concern}"`); break;
-    case "artifact":
-      if(S) S.spawnPickup(ev.room,ev.label);
-      pushLog("good","✚ "+ev.label+"  ·  "+ev.agent); break;
-    case "gate":
-      if(S){ S.setGate(ev.name,{status:ev.status,attested:ev.attested,advisory:ev.advisory});
-             renderGatesMini(S.gates); }
-      if(!ev.advisory) pushLog(ev.status==="pass"?"good":"bad",
-        `🛡 GATE ${ev.name.toUpperCase()}: ${ev.status.toUpperCase()}${ev.attested?" (signed)":""}`);
-      break;
-    case "org":
-      if(S) S.renderOrg(ev);
-      pushLog("gold","🏢 ORG · "+(ev.areas||[]).map(a=>`${a.area}(${(a.leads||[]).length})`).join("  "));
-      break;
-    case "checkpoint":
-      PENDING_CP={title:ev.title,summary:ev.summary,boundary:ev.boundary}; break;
-    case "await_decision": showCheckpoint(); break;
-    case "resolved": hideCheckpoint(); break;
-    case "release":
-      if(S) S.openGateAndChest();
-      pushLog("gold","💰 RELEASED → "+(ev.uri||"artifact")); break;
-    case "halt":
-      if(S) S.flashGate();
-      pushLog("bad","⛔ HELD: "+ev.reason); break;
-    case "done":
-      pushLog(ev.passed?"good":"bad",
-        ev.passed?"✅ Build complete — shipped.":"❌ Build halted — nothing shipped."); break;
+function renderElevator(){
+  const el=document.getElementById("el-floors"); el.innerHTML="";
+  for (const f of [...FLOORS.keys()].sort((a,b)=>a-b)){
+    const F=FLOORS.get(f);
+    const btn=document.createElement("button");
+    let cls="el-btn";
+    if (f===ACTIVE) cls+=" active";
+    if (F.status==="done") cls += F.passed ? " done" : " failed";
+    btn.className=cls;
+    btn.innerHTML=`<span class="fl-no">${f}</span>FL`;
+    if (F.awaiting){ const b=document.createElement("span"); b.className="badge"; b.textContent="!"; btn.appendChild(b); }
+    btn.onclick=()=>switchToFloor(f);
+    el.appendChild(btn);
   }
 }
 
-// ---- checkpoint modal ------------------------------------------------------
-function showCheckpoint(){
-  const cp=PENDING_CP||{title:"CHECKPOINT",summary:""};
+// ---- checkpoint modal (per active floor) -----------------------------------
+function showCheckpoint(F){
+  const cp = (F && F.cp) || {title:"CHECKPOINT", summary:""};
   document.getElementById("cp-title").textContent="CHECKPOINT · "+(cp.title||"");
   document.getElementById("cp-summary").textContent=cp.summary||"";
   document.getElementById("cp-modal").classList.remove("hidden");
 }
 function hideCheckpoint(){ document.getElementById("cp-modal").classList.add("hidden"); }
+function sendDecision(decision){
+  const F = FLOORS.get(ACTIVE);
+  if (!F){ hideCheckpoint(); return; }
+  fetch("/api/decision/"+F.id, {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({decision})});
+  F.awaiting = false; renderElevator(); hideCheckpoint();
+}
 
 // ---- UI wiring -------------------------------------------------------------
 const newModal=document.getElementById("new-modal");
@@ -520,7 +606,8 @@ document.getElementById("start-btn").onclick=()=>{
   const req=document.getElementById("req-input").value;
   const mode=document.getElementById("mode-select").value;
   const sup=document.getElementById("supervised").checked;
-  newModal.classList.add("hidden"); startProject(req,mode,sup);
+  newModal.classList.add("hidden");
+  newProject(req, mode, sup);
 };
 document.getElementById("cp-approve").onclick=()=>sendDecision("approve");
 document.getElementById("cp-reject").onclick=()=>sendDecision("reject");

@@ -22,10 +22,10 @@ const FLOOR_TOP = 100, FLOOR_BOT = H - 40;   // general playfield bounds (rooms 
 const WALL_TOP = 118, FLOOR_BOTTOM = H - 26;
 const CELL_W = 368, CELL_H = 196, AISLE = 48, GX0 = 40, GY0 = 132, GX1 = W - 40;
 function cellBox(c,r){ return {x: GX0 + c*(CELL_W+AISLE), y: GY0 + r*(CELL_H+AISLE), w:CELL_W, h:CELL_H}; }
-const GRID = {  // [col,row] in the 3x3 grid; (0,2) is left as an open break area
-  product:[0,0], architecture:[1,0], engineering:[2,0],
-  reception:[0,1], lounge:[1,1], qa:[2,1],
-  gate:[1,2], vault:[2,2],
+const GRID = {  // real-office axis: centre column is Vault(top) -> Gate(centre) -> Reception(front)
+  product:[0,0], vault:[1,0], architecture:[2,0],
+  engineering:[0,1], gate:[1,1], qa:[2,1],
+  lounge:[0,2], reception:[1,2],     // (2,2) is the open break area
 };
 const RBASE = {
   product:{label:"PRODUCT",color:0x2e3b5a}, architecture:{label:"ARCHITECTURE",color:0x3a2e5a},
@@ -339,8 +339,8 @@ class FloorScene extends Phaser.Scene {
     for (const x of AISLE_VX) for (const y of AISLE_HY) P("plant", x, y+6);
     // a water cooler tucked at each corridor mouth (symmetric)
     P("cooler", AISLE_VX[0], WALL_TOP+24); P("cooler", AISLE_VX[1], WALL_TOP+24);
-    // the open break area in the spare cell (col 0, row 2): benches + plants + cooler
-    const B = cellBox(0,2), bx = B.x+B.w/2;
+    // the open break area in the spare cell (col 2, row 2): benches + plants + cooler
+    const B = cellBox(2,2), bx = B.x+B.w/2;
     this.add.text(bx, B.y+8, "BREAK", {fontFamily:"'PixelFont','Courier New',monospace",
       fontSize:"10px", color:"#8aa0c8"}).setOrigin(0.5,0).setDepth(4);
     P("bench", bx-46, B.y+B.h*0.55); P("bench", bx+46, B.y+B.h*0.55);

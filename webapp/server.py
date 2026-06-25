@@ -13,6 +13,7 @@ approve can NEVER release a failing build (the gates decide; this is just the vi
 from __future__ import annotations
 
 import json
+import os
 import queue
 import threading
 import time
@@ -256,4 +257,4 @@ def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
 
 
 if __name__ == "__main__":
-    serve()
+    serve(port=int(os.environ.get("WORKSHOP_PORT", "8765")))

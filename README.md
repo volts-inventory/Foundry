@@ -29,8 +29,10 @@ uv sync --dev
 uv run python -m foundry.cli "build a tiny URL-shortener service"
 
 # …and write the generated code, a company-style doc set, and the build manifest to disk:
-uv run python -m foundry.cli --out ./build --docs ./build-docs "build a URL shortener"
+uv run python -m foundry.cli --out ./out --docs ./out-docs "build a URL shortener"
 ```
+
+> **Shortcut — the `Makefile` is the front door.** `make setup` → `make check` → `make run`; also `make workshop` (the localhost game UI), `make spec`, `make token` (mint the Max-subscription token), and `make up` (docker-compose). Run `make` to list every target. `make run` writes to a gitignored `./.run/` — never the tracked `build/` planning docs.
 
 The bundled CLI is a **deterministic smoke harness**: every model call goes through a mock transport and every external effect is a queued action, so a full run touches no network and needs no credentials. Point it at a real backend (below) to do real work.
 

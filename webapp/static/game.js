@@ -16,26 +16,33 @@
 const W = 1280, H = 840;
 const FLOOR_TOP = 100, FLOOR_BOT = H - 40;   // general playfield bounds (rooms are placed boxes)
 
-// ---- rooms: a 2D floorplan (one level), placed boxes — non-linear (mockup-style)
-// The elevator switches PROJECTS (floors), not rooms. Each room is its own little
-// interior box {x,y,w,h}; build flow winds Reception->Product->Arch->Eng->QA->Gate->Vault.
-// One open-plan floor: rooms are coloured FLOOR ZONES (no internal walls), placed in 2D.
-const WALL_TOP = 118, FLOOR_BOTTOM = H - 26;     // top perimeter wall / interior floor bounds
-const ROOMS = {
-  product:     {label:"PRODUCT",      color:0x2e3b5a, x:56,  y:150, w:300, h:182},
-  architecture:{label:"ARCHITECTURE", color:0x3a2e5a, x:372, y:150, w:268, h:182},
-  lounge:      {label:"LOUNGE",       color:0x40354f, x:902, y:150, w:300, h:200},
-  engineering: {label:"ENGINEERING",  color:0x5a3a2e, x:56,  y:362, w:430, h:320},
-  qa:          {label:"QA · REVIEW",  color:0x2e5a4a, x:506, y:362, w:330, h:210},
-  reception:   {label:"RECEPTION",    color:0x3a4a2e, x:506, y:600, w:330, h:96},
-  gate:        {label:"THE GATE",     color:0x394a3a, x:872, y:430, w:150, h:266},
-  vault:       {label:"VAULT",        color:0x5a4a18, x:1050,y:470, w:152, h:186},
+// ---- floorplan: a tidy 3x3 GRID of section zones with walkway aisles (the "#").
+// One open level; the elevator switches PROJECTS. Aisles between cells are corridors
+// people walk along; sections are coloured floor rugs in the cells.
+const WALL_TOP = 118, FLOOR_BOTTOM = H - 26;
+const CELL_W = 368, CELL_H = 196, AISLE = 48, GX0 = 40, GY0 = 132, GX1 = W - 40;
+function cellBox(c,r){ return {x: GX0 + c*(CELL_W+AISLE), y: GY0 + r*(CELL_H+AISLE), w:CELL_W, h:CELL_H}; }
+const GRID = {  // [col,row] in the 3x3 grid; (0,2) is left as an open break area
+  product:[0,0], architecture:[1,0], engineering:[2,0],
+  reception:[0,1], lounge:[1,1], qa:[2,1],
+  gate:[1,2], vault:[2,2],
 };
+const RBASE = {
+  product:{label:"PRODUCT",color:0x2e3b5a}, architecture:{label:"ARCHITECTURE",color:0x3a2e5a},
+  engineering:{label:"ENGINEERING",color:0x5a3a2e}, reception:{label:"RECEPTION",color:0x3a4a2e},
+  lounge:{label:"LOUNGE",color:0x40354f}, qa:{label:"QA · REVIEW",color:0x2e5a4a},
+  gate:{label:"THE GATE",color:0x394a3a}, vault:{label:"VAULT",color:0x5a4a18},
+};
+const ROOMS = {};
+for (const k in RBASE) ROOMS[k] = Object.assign({}, RBASE[k], cellBox(GRID[k][0], GRID[k][1]));
 const ROOM_ORDER = ["reception","product","architecture","engineering","qa","gate","vault"];
 const TINT = {lounge:[0xffb070,0.06], gate:[0x6aa0ff,0.05], vault:[0xffd25a,0.06]};
+// the "#": centre-lines of the walkway aisles between columns / rows
+const AISLE_VX = [GX0+CELL_W+AISLE/2, GX0+2*CELL_W+AISLE+AISLE/2];
+const AISLE_HY = [GY0+CELL_H+AISLE/2, GY0+2*CELL_H+AISLE+AISLE/2];
 (function layout(){ for (const k in ROOMS){ const R = ROOMS[k];
   R.key=k; R.x0=R.x; R.x1=R.x+R.w; R.y1=R.y+R.h; R.cx=R.x+R.w/2; R.cy=R.y+R.h/2;
-  R.wallH=0; R.floorY=R.y+18; R.standY=R.y1-14;     // floor zone: stand in its lower area
+  R.wallH=0; R.floorY=R.y+18; R.standY=R.y1-14;
 } })();
 
 const COLORS = {
@@ -244,6 +251,18 @@ class FloorScene extends Phaser.Scene {
     this.roomGlow = {};
     // ONE shared open floor across the whole interior
     this.add.tileSprite(24, WALL_TOP, W-48, FLOOR_BOTTOM-WALL_TOP, "floor_base").setOrigin(0,0).setDepth(0);
+    // walkable corridor aisles forming the "#" between the section cells
+    const lane=(x,y,w,h,horiz)=>{
+      this.add.rectangle(x,y,w,h,0x303a55).setOrigin(0,0).setDepth(0);
+      this.add.rectangle(x,y,w,1,0x3e4a68).setOrigin(0,0).setDepth(0);
+      this.add.rectangle(x,y+h-1,w,1,0x1d2438).setOrigin(0,0).setDepth(0);
+      // dashed centre line
+      const g=this.add.graphics().setDepth(0); g.fillStyle(0x4a587a,0.5);
+      if (horiz){ for(let dx=x+6; dx<x+w-6; dx+=18) g.fillRect(dx,y+h/2-1,9,2); }
+      else { for(let dy=y+6; dy<y+h-6; dy+=18) g.fillRect(x+w/2-1,dy,2,9); }
+    };
+    for (const vx of AISLE_VX) lane(vx-AISLE/2, WALL_TOP, AISLE, FLOOR_BOTTOM-WALL_TOP, false);
+    for (const hy of AISLE_HY) lane(GX0, hy-AISLE/2, GX1-GX0, AISLE, true);
     // perimeter walls only (top + left + right + bottom edges)
     this.add.tileSprite(0, 50, W, WALL_TOP-50, "wall_base").setOrigin(0,0).setDepth(1);
     this.add.rectangle(0, 46, W, 6, 0x2a3550).setOrigin(0,0).setDepth(1);                 // roof eave
@@ -314,17 +333,19 @@ class FloorScene extends Phaser.Scene {
     g.strokePath();
   }
 
-  decorateFloor(){   // fill the open floor between zones so it isn't bare
+  decorateFloor(){   // ORDERLY, grid-aligned decor along the corridors
     const P=(k,x,y)=>this.makeProp(k, x, y);
-    // potted plants in the building corners
-    P("plant", 48, WALL_TOP+46); P("plant", W-48, WALL_TOP+50);
-    P("plant", 48, FLOOR_BOTTOM-16); P("plant", W-48, FLOOR_BOTTOM-16);
-    // top-middle gap (between Architecture and Lounge): cooler + plants + bench
-    P("cooler", 700, 196); P("plant", 760, 250); P("bench", 820, 300); P("plant", 660, 300);
-    // aisle between Engineering and QA + by the Gate
-    P("plant", 496, 470); P("cooler", 854, 470); P("plant", 854, 600);
-    // bottom strip
-    P("bench", 300, 740); P("plant", 430, 745); P("plant", 690, 745); P("plant", 980, 740);
+    // a potted plant at each of the 4 corridor intersections of the "#"
+    for (const x of AISLE_VX) for (const y of AISLE_HY) P("plant", x, y+6);
+    // a water cooler tucked at each corridor mouth (symmetric)
+    P("cooler", AISLE_VX[0], WALL_TOP+24); P("cooler", AISLE_VX[1], WALL_TOP+24);
+    // the open break area in the spare cell (col 0, row 2): benches + plants + cooler
+    const B = cellBox(0,2), bx = B.x+B.w/2;
+    this.add.text(bx, B.y+8, "BREAK", {fontFamily:"'PixelFont','Courier New',monospace",
+      fontSize:"10px", color:"#8aa0c8"}).setOrigin(0.5,0).setDepth(4);
+    P("bench", bx-46, B.y+B.h*0.55); P("bench", bx+46, B.y+B.h*0.55);
+    P("plant", B.x+24, B.y+44); P("plant", B.x+B.w-24, B.y+44);
+    P("cooler", bx, B.y+B.h-22);
   }
 
   buildAtmosphere(){
@@ -625,7 +646,7 @@ class FloorScene extends Phaser.Scene {
   buildCTO(){
     const R = ROOMS.reception;
     const c = this.makePerson(R.cx, R.standY, kitFor("CTO", hashStr((this.proj.id||'f')+"CTO")));
-    c.setScale(2.0).setDepth(900);   // CTO walks the whole floor -> always on top
+    c.setScale(2.0).setDepth(900); c.fixedDepth = 900;   // CTO walks the floor -> always on top
     c.add(this.add.text(0,-22,"CTO",{fontFamily:"'PixelFont','Courier New'",fontSize:"5px",color:"#ffcf52"})
       .setOrigin(0.5));
     this.cto = c;
@@ -716,14 +737,23 @@ class FloorScene extends Phaser.Scene {
   walkTo(a, tx, ty, then){
     if (!a) return;
     if (a.moveTween) a.moveTween.stop();
-    const dx = tx - a.x;
-    if (Math.abs(dx) > 3) a.scaleX = dx < 0 ? -1 : 1;   // face travel direction
-    const dist = Math.hypot(tx-a.x, ty-a.y);
-    a.setDepth(Math.max(ty, a.y) + 1);
-    if (dist < 3){ a.x = tx; a.y = ty; if (then) then(); return; }
+    if (Math.hypot(tx-a.x, ty-a.y) < 3){ a.x=tx; a.y=ty; if (then) then(); return; }
+    // cross-floor moves route along the corridor aisles (L/Z path); short hops are direct
+    let pts;
+    if (Math.hypot(tx-a.x, ty-a.y) > 140){
+      const ay = AISLE_HY.reduce((b,y)=> Math.abs(y-(a.y+ty)/2) < Math.abs(b-(a.y+ty)/2) ? y : b, AISLE_HY[0]);
+      pts = [[a.x, ay], [tx, ay], [tx, ty]];
+    } else pts = [[tx, ty]];
     this.startWalk(a);
-    a.moveTween = this.tweens.add({targets:a, x:tx, y:ty, duration:Math.max(450, dist*4), ease:"Sine.inOut",
-      onComplete:()=>{ this.stopWalk(a); a.scaleX = 1; a.setDepth(ty); if (then) then(); }});
+    let i = 0;
+    const step = ()=>{
+      if (i >= pts.length){ this.stopWalk(a); a.scaleX = 1; if (a.fixedDepth==null) a.setDepth(ty); if (then) then(); return; }
+      const [px,py] = pts[i++], d = Math.hypot(px-a.x, py-a.y);
+      if (Math.abs(px-a.x) > 3) a.scaleX = px < a.x ? -1 : 1;   // face travel direction
+      if (a.fixedDepth == null) a.setDepth(Math.max(py, a.y) + 1);
+      a.moveTween = this.tweens.add({targets:a, x:px, y:py, duration:Math.max(200, d*3.2), ease:"Sine.inOut", onComplete:step});
+    };
+    step();
   }
   gotoLounge(a){ if (!a || !a.seen) return; a.inLounge = true;
     const s = this.loungeSpot(a.loungeSlot||0); this.walkTo(a, s.x + (Math.random()*12-6), s.y); }
@@ -751,18 +781,9 @@ class FloorScene extends Phaser.Scene {
     for (const s of (this.poolGroup||[])) move(s);
   }
 
-  walkCTO(tx, ty){
+  walkCTO(tx, ty){   // routes along the corridors like everyone else
     if (!this.cto) return;
-    if (ty == null) ty = this.cto.y;
-    const dist = Math.hypot(tx - this.cto.x, ty - this.cto.y);
-    if (dist < 3) return;
-    if (Math.abs(tx - this.cto.x) > 3) this.cto.scaleX = (tx < this.cto.x) ? -1 : 1; // face travel
-    this.startWalk(this.cto);
-    if (this.ctoWalk) this.ctoWalk.stop();
-    this.ctoWalk = this.tweens.add({
-      targets:this.cto, x:tx, y:ty, duration:Math.max(400,dist*3.5), ease:"Sine.inOut",
-      onComplete:()=>{ this.stopWalk(this.cto); this.cto.scaleX = 1; },
-    });
+    this.walkTo(this.cto, tx, (ty==null ? this.cto.y : ty));
   }
 
   reveal(name){

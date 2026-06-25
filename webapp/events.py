@@ -15,11 +15,11 @@ from typing import Any
 
 # Workshop rooms, left -> right (the agent walks the floor as the build advances).
 ROOMS: tuple[str, ...] = (
-    "reception",
     "product",
     "architecture",
     "engineering",
     "qa",
+    "security",
     "gate",
     "vault",
 )
@@ -36,6 +36,9 @@ AGENT_BY_NODE: dict[str, tuple[str, str]] = {
     "qa_engineer": ("QA Engineer", "qa"),
     "sdet": ("SDET", "qa"),
     "reviewer_critic": ("Reviewer", "qa"),
+    "appsec_engineer": ("AppSec Engineer", "security"),
+    "audit_compliance": ("Audit & Compliance", "security"),
+    "supply_chain_reviewer": ("Supply-chain Reviewer", "security"),
 }
 
 # Which agent/room PRODUCED each artifact kind (so a new artifact lights up a desk).
@@ -54,7 +57,9 @@ ARTIFACT_ORIGIN: dict[str, tuple[str, str]] = {
     "oracle_binding": ("QA Engineer", "qa"),
     "test_report": ("QA Engineer", "qa"),
     "e2e_report": ("SDET", "qa"),
-    "threat_model": ("AppSec Engineer", "qa"),
+    "threat_model": ("AppSec Engineer", "security"),
+    "audit_finding": ("Audit & Compliance", "security"),
+    "supply_chain_report": ("Supply-chain Reviewer", "security"),
     "runbook": ("Technical Writer", "qa"),
     "known_issues": ("Technical Writer", "qa"),
     "upgrade_guide": ("Technical Writer", "qa"),
@@ -78,6 +83,8 @@ ARTIFACT_LABEL: dict[str, str] = {
     "test_report": "Test Report",
     "e2e_report": "E2E Report",
     "threat_model": "Threat Model",
+    "audit_finding": "Audit Finding",
+    "supply_chain_report": "Supply-chain Report",
     "runbook": "Runbook",
     "known_issues": "Known Issues",
     "upgrade_guide": "Upgrade Guide",

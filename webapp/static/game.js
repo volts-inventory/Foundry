@@ -22,21 +22,24 @@ const FLOOR_TOP = 100, FLOOR_BOT = H - 40;   // general playfield bounds (rooms 
 const WALL_TOP = 118, FLOOR_BOTTOM = H - 26;
 const CELL_W = 368, CELL_H = 196, AISLE = 48, GX0 = 40, GY0 = 132, GX1 = W - 40;
 function cellBox(c,r){ return {x: GX0 + c*(CELL_W+AISLE), y: GY0 + r*(CELL_H+AISLE), w:CELL_W, h:CELL_H}; }
-const GRID = {  // real-office axis: centre column is Vault(top) -> Gate(centre) -> Reception(front)
-  product:[0,0], vault:[1,0], architecture:[2,0],
-  engineering:[0,1], gate:[1,1], qa:[2,1],
-  lounge:[0,2], reception:[1,2],     // (2,2) is the open break area
+const GRID = {  // rooms mirror the pipeline, read left->right, top->bottom:
+  // product -> architecture -> engineering -> qa -> security -> gate -> vault.
+  product:[0,0], architecture:[1,0], engineering:[2,0],
+  qa:[0,1], security:[1,1], gate:[2,1],
+  vault:[2,2],                       // gate(2,1) sits directly above vault(2,2)
 };
+// (0,2) = org notice-board cell; (1,2) = open front lobby (the CTO's idle spot).
+const ORG_CELL = [0,2], LOBBY_CELL = [1,2];
 const RBASE = {
   product:{label:"PRODUCT",color:0x2e3b5a}, architecture:{label:"ARCHITECTURE",color:0x3a2e5a},
-  engineering:{label:"ENGINEERING",color:0x5a3a2e}, reception:{label:"RECEPTION",color:0x3a4a2e},
-  lounge:{label:"LOUNGE",color:0x40354f}, qa:{label:"QA · REVIEW",color:0x2e5a4a},
-  gate:{label:"SECURITY",color:0x2c4a55}, vault:{label:"VAULT",color:0x5a4a18},
+  engineering:{label:"ENGINEERING",color:0x5a3a2e}, qa:{label:"QA · REVIEW",color:0x2e5a4a},
+  security:{label:"SECURITY",color:0x5a2e36},
+  gate:{label:"GATE",color:0x2c4a55}, vault:{label:"VAULT",color:0x5a4a18},
 };
 const ROOMS = {};
 for (const k in RBASE) ROOMS[k] = Object.assign({}, RBASE[k], cellBox(GRID[k][0], GRID[k][1]));
-const ROOM_ORDER = ["reception","product","architecture","engineering","qa","gate","vault"];
-const TINT = {lounge:[0xffb070,0.06], gate:[0x6aa0ff,0.05], vault:[0xffd25a,0.06]};
+const ROOM_ORDER = ["product","architecture","engineering","qa","security","gate","vault"];
+const TINT = {security:[0xff6d6d,0.05], gate:[0x6aa0ff,0.05], vault:[0xffd25a,0.06]};
 // the "#": centre-lines of the walkway aisles between columns / rows
 const AISLE_VX = [GX0+CELL_W+AISLE/2, GX0+2*CELL_W+AISLE+AISLE/2];
 const AISLE_HY = [GY0+CELL_H+AISLE/2, GY0+2*CELL_H+AISLE+AISLE/2];
@@ -52,12 +55,14 @@ const COLORS = {
   "Program Manager":0xb59bff,"Principal Architect":0xc79bff,"Senior Engineer":0xff9b5e,
   "Junior Engineer":0xffc08a,"QA Engineer":0x7dffb0,"SDET":0x5ddc7a,"Reviewer":0x5db8ff,
   "Technical Writer":0xe8e0a0,"AppSec Engineer":0xff6d6d,
+  "Audit & Compliance":0xffb38a,"Supply-chain Reviewer":0x9bb0ff,
 };
 const ROSTER = {
   product:["Stakeholder Proxy","Product Manager","Criteria Critic","Program Manager"],
   architecture:["Principal Architect"],
   engineering:["Senior Engineer","Junior Engineer"],
   qa:["QA Engineer","SDET","Reviewer","Technical Writer"],
+  security:["AppSec Engineer","Audit & Compliance","Supply-chain Reviewer"],
 };
 const GATE_ORDER = ["spec","build","test","review","security","audit","e2e"];
 const AGENT_ROOM = {}; for (const rm in ROSTER) for (const nm of ROSTER[rm]) AGENT_ROOM[nm] = rm;
@@ -214,7 +219,7 @@ class FloorScene extends Phaser.Scene {
     this.agents = new Map();
     this.gates = {};
     this.gatePips = {};
-    this.activeRoom = "reception";
+    this.activeRoom = "lobby";
     this.buildRooms();
     this.buildGate();
     this.buildChest();
@@ -321,7 +326,7 @@ class FloorScene extends Phaser.Scene {
     this.decorateFloor();
     this.furnish();
     this.buildAtmosphere();                       // vignette + dust motes on top
-    this.setActiveRoom("reception");
+    this.setActiveRoom("lobby");
   }
 
   // A ~10px WHITE department glyph on the plaque so rooms are identifiable by SHAPE
@@ -337,6 +342,8 @@ class FloorScene extends Phaser.Scene {
         M([[1,0,6,1,1],[1,5,6,1,1],[0,1,1,4,1],[6,1,1,4,1],[6,6,2,2,1],[8,8,2,2,1]]); break;
       case "gate":         // shield: flat top, tapered point
         M([[2,0,6,2,1],[1,2,8,3,1],[2,5,6,1,1],[3,6,4,1,1],[4,7,2,2,1]]); break;
+      case "security":     // padlock: shackle + body + keyhole
+        M([[3,0,4,1,1],[2,1,1,3,1],[7,1,1,3,1],[1,4,8,6,1],[4,6,2,3,0]]); break;
       case "product":      // clipboard: board + clip + two text lines
         M([[3,0,4,1,1],[1,1,8,9,1],[3,3,4,1,0],[3,5,4,1,0],[3,7,3,1,0]]); break;
       case "architecture": // solid triangle (set-square)
@@ -374,15 +381,13 @@ class FloorScene extends Phaser.Scene {
     for (const x of AISLE_VX) for (const y of AISLE_HY) P("plant", x, y+6);
     // a water cooler tucked at each corridor mouth (symmetric)
     P("cooler", AISLE_VX[0], WALL_TOP+24); P("cooler", AISLE_VX[1], WALL_TOP+24);
-    // the break/org cell (col 2, row 2): an org notice-board pins to the TOP
-    // (see renderOrg) so the lounge furniture is arranged tidily along the BOTTOM.
-    const B = cellBox(2,2), bx = B.x+B.w/2;
-    this.add.text(bx, B.y+8, "BREAK", {fontFamily:"'PixelFont','Courier New',monospace",
+    // the ORG notice-board cell: renderOrg pins the live org tree to the TOP here
+    // during parallel-IC fan-out builds; idle it just shows the header + a plant or two.
+    const B = cellBox(ORG_CELL[0], ORG_CELL[1]);
+    this.add.text(B.x+B.w/2, B.y+8, "ORG", {fontFamily:"'PixelFont','Courier New',monospace",
       fontSize:"10px", color:"#8aa0c8"}).setOrigin(0.5,0).setDepth(4);
     const baseY = B.y+B.h-18;
-    P("bench", bx-52, baseY); P("bench", bx+52, baseY);
     P("plant", B.x+26, baseY); P("plant", B.x+B.w-26, baseY);
-    P("cooler", bx, baseY);
   }
 
   buildAtmosphere(){
@@ -401,11 +406,11 @@ class FloorScene extends Phaser.Scene {
   furnish(){
     // ambient props at room EDGES (the working desks are per-lead, in the floor)
     const props = {
-      reception:   [["plant",0.12],["plant",0.88]],
       product:     [["board",0.10],["plant",0.92]],
       architecture:[["board",0.10],["board",0.52],["shelf",0.90]],
       engineering: [["rack",0.07],["plant",0.94]],
       qa:          [["shelf",0.07],["plant",0.95]],
+      security:    [["rack",0.08],["shelf",0.92]],
     };
     for (const key in props){
       const R = ROOMS[key]; if(!R) continue;
@@ -637,8 +642,8 @@ class FloorScene extends Phaser.Scene {
     this.tweens.add({targets:this.guardSpark, alpha:0.2, duration:900, yoyo:true, repeat:-1});
   }
 
-  // The Gate is a SECURITY OFFICE: a CCTV bank + checkpoint desk, plus a sealed
-  // vault door (vertical) in the gap to the VAULT above. The horizontal corridor
+  // The Gate is the RELEASE CHECKPOINT: a CCTV bank + checkpoint desk, plus a sealed
+  // vault door (vertical) in the gap to the VAULT below. The horizontal corridor
   // between the two cells is walled off — the only link is that short door,
   // which unlocks only when every release gate passes.
   buildGate(){
@@ -659,8 +664,8 @@ class FloorScene extends Phaser.Scene {
     desk.add(this.add.rectangle(0,-15,70,4,0x4a587a).setOrigin(0.5,1));      // counter top
     desk.add(this.add.rectangle(-20,-26,18,12,0x10151f).setOrigin(0.5,1));   // terminal
     desk.add(this.add.rectangle(-20,-28,14,8,0x2bd3ff,0.85).setOrigin(0.5,1));
-    // ---- seal the corridor gap between SECURITY and the VAULT above ----
-    const gapTop = V.y1, gapBot = G.y, dw = 60;          // short vertical door
+    // ---- seal the corridor gap between the GATE and the VAULT below ----
+    const gapTop = G.y1, gapBot = V.y, dw = 60;          // short vertical door
     const wallC = 0x1a2030, capC = 0x2a3550;
     const seal=(sx,w)=>{ if (w<=0) return;
       this.add.rectangle(sx, gapTop, w, gapBot-gapTop, wallC).setOrigin(0,0).setDepth(7);
@@ -738,8 +743,9 @@ class FloorScene extends Phaser.Scene {
   }
 
   buildCTO(){
-    const R = ROOMS.reception;
-    const c = this.makePerson(R.cx, R.standY, kitFor("CTO", hashStr((this.proj.id||'f')+"CTO")));
+    const L = cellBox(LOBBY_CELL[0], LOBBY_CELL[1]);
+    this.lobby = {cx: Math.round(L.x+L.w/2), standY: Math.round(L.y+L.h-24)};
+    const c = this.makePerson(this.lobby.cx, this.lobby.standY, kitFor("CTO", hashStr((this.proj.id||'f')+"CTO")));
     c.setScale(1.4).setDepth(900); c.fixedDepth = 900;   // CTO walks the floor -> always on top
     c.add(this.add.text(0,-22,"CTO",{fontFamily:"'PixelFont','Courier New'",fontSize:"8px",fontStyle:"bold",color:"#ffcf52"})
       .setOrigin(0.5));
@@ -818,8 +824,10 @@ class FloorScene extends Phaser.Scene {
     this.activeRoom = key;
     for (const k in this.roomGlow)
       this.tweens.add({targets:this.roomGlow[k], fillAlpha:(k===key?0.10:0), duration:420});
-    const R = ROOMS[key]; if (R) this.walkCTO(R.cx, R.standY);
-    this.staffRoom(key);                 // active team to desks, everyone else to the lounge
+    const R = ROOMS[key];
+    if (R) this.walkCTO(R.cx, R.standY);
+    else if (this.lobby) this.walkCTO(this.lobby.cx, this.lobby.standY);
+    this.staffRoom(key);                 // everyone stays at their own desk; active room glows
   }
 
   // ---- movement: desks <-> lounge -----------------------------------------
@@ -858,8 +866,9 @@ class FloorScene extends Phaser.Scene {
     };
     step();
   }
-  gotoLounge(a){ if (!a || !a.seen) return; a.inLounge = true;
-    const s = this.loungeSpot(a.loungeSlot||0); this.walkTo(a, s.x + (Math.random()*12-6), s.y); }
+  // No lounge any more — "off duty" just means seated at your own desk (rooms are
+  // only for people doing work, so everyone stays home; the active room glows).
+  gotoLounge(a){ if (!a) return; this.gotoDesk(a); }
   gotoDesk(a){ if (!a) return; a.inLounge = false;
     if (!a.seen){ a.seen = true; a.setAlpha(1); }
     if (a.home) this.walkTo(a, a.home.x, a.home.y, ()=>{ if (a.faceBack) a.faceBack(); this.deskIdle(a); }); }
@@ -1014,8 +1023,8 @@ class FloorScene extends Phaser.Scene {
     };
     const areas = ev.areas || [];
     const rowH = 16, padding = 8, headerH = 20;
-    // pin the org board to the BREAK cell, centred under its label
-    const B = cellBox(2,2);
+    // pin the org board to the ORG cell, centred under its label
+    const B = cellBox(ORG_CELL[0], ORG_CELL[1]);
     const w = Math.min(232, B.w-24), h = headerH + areas.length*rowH + padding;
     const c = this.add.container(Math.round(B.x+(B.w-w)/2), B.y+22).setDepth(28);
     c.add(this.add.rectangle(0,0,w,h,0x0c1322,0.92).setOrigin(0,0).setStrokeStyle(2,0xffcf52));

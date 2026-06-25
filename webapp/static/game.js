@@ -340,8 +340,8 @@ class FloorScene extends Phaser.Scene {
         M([[3,0,4,1,1],[1,1,8,9,1],[3,3,4,1,0],[3,5,4,1,0],[3,7,3,1,0]]); break;
       case "architecture": // solid triangle (set-square)
         M([[4,0,2,1,1],[3,1,4,1,1],[3,2,4,1,1],[2,3,6,1,1],[2,4,6,1,1],[1,5,8,1,1],[1,6,8,1,1],[0,7,10,1,1],[0,8,10,1,1]]); break;
-      case "vault":        // key: ring (hole) + shaft + teeth
-        M([[1,1,4,4,1],[2,2,2,2,0],[5,2,4,1,1],[7,3,1,2,1],[9,3,1,2,1]]); break;
+      case "vault":        // key: round bow (hole) + clean straight stem + 2 teeth
+        M([[1,1,4,4,1],[2,2,2,2,0],[5,2,5,1,1],[7,3,1,2,1],[9,3,1,2,1]]); break;
       case "reception":    // door: frame + dark panel + knob
         M([[2,0,6,10,1],[3,1,4,8,0],[6,4,1,2,1]]); break;
       case "lounge":       // mug: cup + handle

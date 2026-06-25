@@ -312,7 +312,7 @@ class FloorScene extends Phaser.Scene {
       const sw = Math.min(R.w-12, R.label.length*7+22);
       this.add.rectangle(R.cx, R.y+6, sw, 16, 0x0e1422, 0.92).setOrigin(0.5,0).setDepth(3).setStrokeStyle(1, shade(R.color,1.1));
       this.add.rectangle(R.cx, R.y+6, sw, 2, shade(R.color,1.3)).setOrigin(0.5,0).setDepth(4);
-      this.roomGlyph(key, R.cx-sw/2+6, R.y+8, shade(R.color,1.5));   // dept identity glyph (shape, not just hue)
+      this.roomGlyph(key, R.cx-sw/2+5, R.y+8);   // dept identity glyph (white, shape — not just hue)
       this.add.text(R.cx+4, R.y+8, R.label, {fontFamily:"'PixelFont','Courier New',monospace",
         fontSize:"10px", fontStyle:"bold", color:"#eef3ff"}).setOrigin(0.5,0).setDepth(4);
       this.roomGlow[key] = this.add.rectangle(R.x, R.y, R.w, R.h, 0xffd25a, 0).setOrigin(0,0).setDepth(1);
@@ -323,30 +323,30 @@ class FloorScene extends Phaser.Scene {
     this.setActiveRoom("reception");
   }
 
-  // A tiny 10px department glyph drawn on the plaque so rooms are identifiable by
-  // SHAPE (colour-blind safe), not hue alone. (x,y) = top-left; col = main colour.
-  roomGlyph(key, x, y, col){
-    const D = 0x0a0d16;
+  // A ~10px WHITE department glyph on the plaque so rooms are identifiable by SHAPE
+  // (colour-blind / grayscale safe), not hue. (x,y)=top-left. High contrast on dark.
+  roomGlyph(key, x, y){
+    const W = 0xffffff, D = 0x0e1422;     // white glyph, plaque-dark cut-outs
     const p = (dx,dy,w,h,c)=> this.add.rectangle(x+dx, y+dy, w, h, c).setOrigin(0,0).setDepth(4);
-    const M = (rects)=> rects.forEach(([dx,dy,w,h,k])=> p(dx,dy,w,h, k?col:D));
+    const M = (rects)=> rects.forEach(([dx,dy,w,h,k])=> p(dx,dy,w,h, k?W:D));
     switch(key){
-      case "engineering":  // gear
-        M([[3,0,4,1,1],[3,9,4,1,1],[0,3,1,4,1],[9,3,1,4,1],[2,2,6,6,1],[4,4,2,2,0]]); break;
-      case "qa":           // magnifier
-        M([[1,0,5,1,1],[1,5,5,1,1],[0,1,1,4,1],[5,1,1,4,1],[2,2,2,2,0],[6,6,3,3,1]]); break;
-      case "gate":         // shield + tick
-        M([[2,0,6,1,1],[1,1,8,4,1],[2,5,6,1,1],[3,6,4,1,1],[4,7,2,1,1],[5,2,1,1,0],[4,3,1,1,0],[3,3,1,1,0]]); break;
-      case "product":      // clipboard
-        M([[3,0,4,1,1],[1,1,8,8,1],[3,3,4,1,0],[3,5,4,1,0]]); break;
-      case "architecture": // drafting triangle
-        M([[4,0,2,1,1],[3,2,4,1,1],[2,4,6,1,1],[1,6,8,1,1],[0,8,10,1,1],[4,3,2,4,0]]); break;
-      case "vault":        // key
-        M([[1,1,4,4,1],[2,2,2,2,0],[5,2,4,1,1],[7,3,1,2,1],[8,3,1,1,1]]); break;
-      case "reception":    // door
-        M([[2,0,6,10,1],[3,1,4,8,0],[6,5,1,1,1]]); break;
-      case "lounge":       // mug
-        M([[1,1,5,7,1],[2,2,3,1,0],[6,2,2,1,1],[7,3,1,2,1],[6,5,2,1,1]]); break;
-      default: p(1,2,6,6,col);
+      case "engineering":  // gear: body + 4 teeth + hole
+        M([[2,2,6,6,1],[4,0,2,2,1],[4,8,2,2,1],[0,4,2,2,1],[8,4,2,2,1],[4,4,2,2,0]]); break;
+      case "qa":           // magnifier: square lens ring + diagonal handle
+        M([[1,0,6,1,1],[1,5,6,1,1],[0,1,1,4,1],[6,1,1,4,1],[6,6,2,2,1],[8,8,2,2,1]]); break;
+      case "gate":         // shield: flat top, tapered point
+        M([[2,0,6,2,1],[1,2,8,3,1],[2,5,6,1,1],[3,6,4,1,1],[4,7,2,2,1]]); break;
+      case "product":      // clipboard: board + clip + two text lines
+        M([[3,0,4,1,1],[1,1,8,9,1],[3,3,4,1,0],[3,5,4,1,0],[3,7,3,1,0]]); break;
+      case "architecture": // solid triangle (set-square)
+        M([[4,0,2,1,1],[3,1,4,1,1],[3,2,4,1,1],[2,3,6,1,1],[2,4,6,1,1],[1,5,8,1,1],[1,6,8,1,1],[0,7,10,1,1],[0,8,10,1,1]]); break;
+      case "vault":        // key: ring (hole) + shaft + teeth
+        M([[1,1,4,4,1],[2,2,2,2,0],[5,2,4,1,1],[7,3,1,2,1],[9,3,1,2,1]]); break;
+      case "reception":    // door: frame + dark panel + knob
+        M([[2,0,6,10,1],[3,1,4,8,0],[6,4,1,2,1]]); break;
+      case "lounge":       // mug: cup + handle
+        M([[1,1,5,8,1],[6,2,1,1,1],[7,3,1,2,1],[6,5,1,1,1],[2,0,3,1,1]]); break;
+      default: p(2,2,6,6,W);
     }
   }
 

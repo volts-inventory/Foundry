@@ -2,8 +2,8 @@
   --bg:#0e1320; --panel:#161d31; --ink:#e8eefb; --dim:#8aa0c8;
   --green:#5ddc7a; --red:#ff5d6c; --gold:#ffcf52; --blue:#5db8ff; --line:#2a3550;
 }
-/* Pixel UI font (Pixelify Sans, OFL) — one bitmap face across DOM + canvas so the
-   chrome and the pixel-art game read as a single product. Falls back to monospace. */
+/* Pixel UI font (Silkscreen, OFL) — a true pixel-grid bitmap face (crisp at small
+   px) used across DOM + canvas so the chrome and the pixel game are one product. */
 @font-face{
   font-family:"PixelFont";
   src:url("assets/fonts/pixel.ttf") format("truetype");
@@ -14,7 +14,7 @@ html,body{margin:0;height:100%}
 body{
   background:var(--bg); color:var(--ink);
   font-family:"PixelFont","Courier New",ui-monospace,Menlo,Consolas,monospace;
-  letter-spacing:.5px; overflow:hidden;
+  letter-spacing:0; overflow:hidden;          /* Silkscreen carries its own spacing */
 }
 #app{display:flex;flex-direction:column;height:100vh}
 
@@ -123,11 +123,11 @@ button.danger{background:#6b1f28;border-color:var(--red);color:#ffe0e3}
 .dialog.cp{border-color:var(--gold)}
 .dialog h2{margin:0 0 14px;color:var(--gold);text-transform:uppercase;font-size:18px}
 .dialog label{display:block;margin:10px 0 4px;color:var(--dim);font-size:12px;text-transform:uppercase}
-.dialog input[type=text],.dialog select,.dialog textarea{
-  width:100%;padding:9px;background:#0e1424;color:var(--ink);
-  border:3px solid var(--line);border-radius:6px;font-family:inherit;font-size:14px;
+.dialog input[type=text],.dialog input[type=number],.dialog select,.dialog textarea{
+  width:100%;padding:8px;background:#0e1424;color:var(--ink);
+  border:3px solid var(--line);border-radius:6px;font-family:inherit;font-size:12px;
 }
-.dialog textarea{resize:vertical;min-height:60px;line-height:1.4}
+.dialog textarea{resize:vertical;min-height:60px;line-height:1.5}
 .dialog .hint{color:var(--dim);font-weight:normal;text-transform:none;font-size:11px}
 
 /* ---- intake modes (idea / paste spec / upload zip) ---- */
@@ -137,7 +137,17 @@ button.danger{background:#6b1f28;border-color:var(--red);color:#ffe0e3}
 .intake-modes input{width:auto}
 .intake-panel{margin-top:6px}
 .intake-panel code{background:#0e1424;border:1px solid var(--line);border-radius:3px;padding:0 4px}
-input[type=file]{color:var(--dim);font-family:inherit;font-size:12px}
+input[type=file]{color:var(--dim);font-family:inherit;font-size:11px}
+/* style the OS chrome so it doesn't poke through the pixel skin */
+input[type=file]::file-selector-button{
+  background:var(--panel);color:var(--ink);border:2px solid var(--line);border-radius:6px;
+  padding:5px 10px;margin-right:8px;font-family:inherit;font-weight:bold;font-size:10px;
+  text-transform:uppercase;cursor:pointer;box-shadow:0 2px 0 #0c1322}
+input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff2ff}
+/* kill the native number spinner — value is typed or set via SUGGEST */
+.dialog input[type=number]{ -moz-appearance:textfield; appearance:textfield }
+.dialog input[type=number]::-webkit-inner-spin-button,
+.dialog input[type=number]::-webkit-outer-spin-button{ -webkit-appearance:none; margin:0 }
 
 /* ---- spec chat with the leads ---- */
 #chat-log{border:2px solid var(--line);border-radius:6px;background:#0e1424;

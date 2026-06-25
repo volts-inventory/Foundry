@@ -63,48 +63,49 @@ const GATE_ORDER = ["spec","build","test","review","security","audit","e2e"];
 const AGENT_ROOM = {}; for (const rm in ROSTER) for (const nm of ROSTER[rm]) AGENT_ROOM[nm] = rm;
 
 // ---- generated character sprites (our own pixel art) -----------------------
-// 16-wide pixel map: big head, tiny torso, short legs. Details (eyes/ears/hair/
-// clothes/accessories) are drawn as overlays so one base parameterises everyone.
+// route1rodent-style 16x22 GBA RPG sprite: a BIG rounded hair mass (the hero) over
+// a small face, a narrow slate body with one accent colour, and two split leg stubs.
+// Role identity rides on hair colour + style + accent (not a coloured shirt). One
+// base parameterises everyone; eyes/hair-style/accent are drawn as overlays.
 const SP_BASE = [
-"...KKKKKKKK.....","..KhhhhhhhhK....","..KhhhhhhhhK....","..KhhhhhhhhK....",
-"..KssssssssK....","..KssssssssK....","..KssssssssK....","...KssssssK.....",
-"...KccccccK.....","...KsccccsK.....","...KppppppK.....","...KppKppK......","...KbbKbbK......",
+//      0123456789012345
+"......KKKK......","....KKhhhhKK....","...KhhhhhhhhK...","..KhhhhhhhhhhK..",
+"..KhhhhhhhhhhK..",".KhhhhsssshhhhK.",".KhhhsssssshhhK.",".KhhhsssssshhhK.",
+"..KhsssssssshK..","...KssssssssK...","....KssssssK....",".....KssssK.....",
+"......KssK......","....KBBBBBBK....","....KBBBBBBK....","....KBBBBBBK....",
+"....KsBBBBsK....","....KBBBBBBK....","....Kpp..ppK....","....Kpp..ppK....",
+"....Koo..ooK....","....KKK..KKK....",
 ];
-const SKINS = [0xf2c79c,0xe8b487,0xcf9a6e,0xa06a44,0x8a5a3a];
-const HAIRS = [0x3a3f74,0x161109,0x4a3420,0xcaa84a,0x9a9aa2,0xe85a9a,0xb5542e,0x2a8b5a,0x3a6abf,0x6a4aa0,0xd86a2e];
-const POOL_OUT = [0x3aa564,0xe07a2e,0x3a6abf,0xd24a86,0xcaa84a,0x2fae6a];
-const POOL_STYLE = ['short','spiky','bun','ponytail','long'];
-const GARMENTS = ['plain','collar','stripe','belt','vest','twotone','hoodie'];
+const SKINS = [0xf4cfa0,0xe8b487,0xc98d5a,0xa06a44,0x8a5a34];
+const HAIRS = [0x3a3f74,0x161109,0x7a4a24,0xcaa84a,0xd8dde6,0xee5fa0,0xb5542e,0x2a9b8b,0x3aa0e6,0x6a4aa0,0xe07a2e];
+const POOL_STYLE = ['short','swept','spiky','bob','ponytail'];
+const POOL_ACCENT = [0x3a8a52,0xe23c2e,0x3a8ae6,0xcaa84a,0x7a3a8a,0x2a9b8b];
+// per-role: hair colour + hair style + a single accent colour (the chest band)
 const ROLE_KIT = {
-  "Stakeholder Proxy":{body:0x3f6fb5,trim:0xcdd6e6,style:'swept',cloth:'collar',scarf:0xa83a2e},
-  "Product Manager":{body:0xe0b53a,trim:0x7a5a18,style:'bun',cloth:'belt'},
-  "Criteria Critic":{body:0xd24a86,trim:0xf4c2d6,style:'sidelock',cloth:'vest',glasses:1},
-  "Program Manager":{body:0x7a5ad0,trim:0xd6c8f4,style:'ponytail',cloth:'stripe',headset:1},
-  "Principal Architect":{body:0x5a6178,trim:0xcfd4e0,style:'short',cloth:'collar',coat:1,glasses:1,hair:0x9a9aa2},
-  "Senior Engineer":{body:0xe07a2e,trim:0x3a2a18,style:'spiky',cloth:'hoodie'},
-  "Junior Engineer":{body:0x3aa564,trim:0xe0e0c0,style:'short',cloth:'twotone',cap:0x2f6dbf},
-  "QA Engineer":{body:0x2fae6a,trim:0xcfeede,style:'long',cloth:'collar',coat:1},
-  "SDET":{body:0x1f9b9b,trim:0xcdeaea,style:'short',cloth:'stripe',headset:1},
-  "Reviewer":{body:0x3a6abf,trim:0xcdd9f0,style:'swept',cloth:'vest',glasses:1},
-  "Technical Writer":{body:0xcaa84a,trim:0x6a5520,style:'long',cloth:'belt'},
-  "AppSec Engineer":{body:0xc0392b,trim:0xf0b0b0,style:'short',cloth:'hoodie',hood:0x7a1f24},
-  "CTO":{body:0x2f3450,trim:0xc8a23a,style:'short',cloth:'collar',tie:0xc8a23a},
+  "Stakeholder Proxy":{hair:0x3a3f74,style:'swept',accent:0xe23c2e},
+  "Product Manager":{hair:0xe0b53a,style:'bob',accent:0x3a8a52},
+  "Criteria Critic":{hair:0xee5fa0,style:'ponytail',accent:0x7a3a8a},
+  "Program Manager":{hair:0x7a5ad0,style:'ponytail',accent:0x3a8ae6},
+  "Principal Architect":{hair:0xd8dde6,style:'swept',accent:0x5a9ad0},
+  "Senior Engineer":{hair:0xe07a2e,style:'spiky',accent:0xcaa84a},
+  "Junior Engineer":{hair:0x3aa564,style:'short',accent:0x2f6dbf},
+  "QA Engineer":{hair:0x2a9b8b,style:'bob',accent:0xcfeede},
+  "SDET":{hair:0x1f9b9b,style:'short',accent:0x5db8ff},
+  "Reviewer":{hair:0x3a6abf,style:'swept',accent:0xcdd9f0},
+  "Technical Writer":{hair:0xcaa84a,style:'bob',accent:0x9a7a30},
+  "AppSec Engineer":{hair:0xc0392b,style:'afro',accent:0xf0b0b0},
+  "CTO":{hair:0x161109,style:'short',accent:0xc8a23a},
 };
 function hashStr(s){ let h=2166136261; for(let i=0;i<s.length;i++){ h^=s.charCodeAt(i); h=Math.imul(h,16777619); } return h>>>0; }
 function kitFor(name, seed){
-  const k = ROLE_KIT[name] || {body:0x4a78c0,trim:0xcdd6e6,style:'short',cloth:'collar'};
+  const k = ROLE_KIT[name] || {hair:0x3a3f74,style:'short',accent:0x5db8ff};
   const o = Object.assign({}, k);
-  o.skin = SKINS[((seed*3+1)%SKINS.length+SKINS.length)%SKINS.length];
-  o.hair = k.hair || HAIRS[((seed*7+2)%HAIRS.length+HAIRS.length)%HAIRS.length];
+  o.skin = SKINS[((seed*3+1)%SKINS.length+SKINS.length)%SKINS.length];  // skin varies; hair fixed per role
   return o;
 }
-function poolKit(i){ // the IC pool: same family, distinct people
-  const o = {body:POOL_OUT[i%POOL_OUT.length], style:POOL_STYLE[i%POOL_STYLE.length],
-    cloth:GARMENTS[(i+1)%GARMENTS.length], skin:SKINS[(i*3)%SKINS.length], hair:HAIRS[(i*7+1)%HAIRS.length]};
-  o.trim = shade(o.body,1.4);
-  if (i%2===0) o.cap = [0x2f9d54,0x3a6abf,0xb5542e][i%3];
-  if (i%5===3) o.glasses = 1;
-  return o;
+function poolKit(i){ // the IC pool: same family, distinct people (hair/style/accent vary)
+  return { hair:HAIRS[(i*7+1)%HAIRS.length], style:POOL_STYLE[i%POOL_STYLE.length],
+    accent:POOL_ACCENT[i%POOL_ACCENT.length], skin:SKINS[(i*3)%SKINS.length] };
 }
 
 function shade(color,f){
@@ -240,9 +241,9 @@ class FloorScene extends Phaser.Scene {
       const x = Math.round(R.x+30 + (R.w-60)*(cols>1 ? col/(cols-1) : 0.5));
       const y = R.floorY + 74 + row*52;                        // pool desks below the leads
       const k = poolKit(i);
-      const ws = this.makeWorkstation(x, y+16, k.body);
+      const ws = this.makeWorkstation(x, y+16, k.accent);
       const s = this.makePerson(x, y, k);
-      s.setScale(1.8).setDepth(y).setAlpha(0.96);
+      s.setScale(1.25).setDepth(y).setAlpha(0.96);
       s.home = {x,y}; s.loungeSlot = 12 + i; s.seen = true;    // can walk to the lounge too
       this.startWalk(s);                                       // ICs are busy building
       this.poolGroup.push(s, ws);
@@ -719,14 +720,14 @@ class FloorScene extends Phaser.Scene {
         const blockW = (cols-1)*64, hx = R.cx - blockW/2 + col*64;
         const hy = R.floorY + 34 + row*48;          // stand in the room's floor
         const seed = hashStr((this.proj.id||'f')+name), kit = kitFor(name, seed);
-        this.makeWorkstation(hx, hy+16, kit.body);                // desk just in front of them
+        this.makeWorkstation(hx, hy+16, kit.accent);              // desk just in front of them
         const a = this.makePerson(hx, hy, kit);
-        a.setScale(2.0).setDepth(hy);                             // y-sort (desk occludes legs)
+        a.setScale(1.4).setDepth(hy);                             // y-sort (desk occludes legs)
         a.home = {x:hx,y:hy}; a.room = room; a.loungeSlot = li++;
         a.setPosition(hx, hy+120).setAlpha(0.32);
         a.seen = false; a.bubble = null;
         // Clickable -> interview this lead (their journal + a question), advisory.
-        a.setInteractive(new Phaser.Geom.Rectangle(-8,-8,16,15), Phaser.Geom.Rectangle.Contains);
+        a.setInteractive(new Phaser.Geom.Rectangle(-8,-15,16,22), Phaser.Geom.Rectangle.Contains);
         a.on("pointerdown", ()=> openInterview(name));
         a.on("pointerover", ()=>{ this.input.manager.canvas.style.cursor = "pointer"; });
         a.on("pointerout", ()=>{ this.input.manager.canvas.style.cursor = "default"; });
@@ -739,7 +740,7 @@ class FloorScene extends Phaser.Scene {
   buildCTO(){
     const R = ROOMS.reception;
     const c = this.makePerson(R.cx, R.standY, kitFor("CTO", hashStr((this.proj.id||'f')+"CTO")));
-    c.setScale(2.0).setDepth(900); c.fixedDepth = 900;   // CTO walks the floor -> always on top
+    c.setScale(1.4).setDepth(900); c.fixedDepth = 900;   // CTO walks the floor -> always on top
     c.add(this.add.text(0,-22,"CTO",{fontFamily:"'PixelFont','Courier New'",fontSize:"8px",fontStyle:"bold",color:"#ffcf52"})
       .setOrigin(0.5));
     this.cto = c;
@@ -751,60 +752,42 @@ class FloorScene extends Phaser.Scene {
   makePerson(x,y,opt){
     opt = opt || {};
     const c = this.add.container(x,y).setDepth(10);
-    const O=0x0a0a0c, e=0x141822, g=0x464d60, m=0x5a627a, lens=0xbfe6ff, pant=0x2b3146, shoe=0x0a0a0c;
-    const body=opt.body!=null?opt.body:0x4a78c0, a=opt.trim!=null?opt.trim:shade(body,1.4);
-    const skin=opt.skin!=null?opt.skin:0xf2c79c, hair=opt.hair!=null?opt.hair:0x3a2616;
-    c.add(this.add.ellipse(0.5,6.5,11,3,0x000000,0.3));    // shadow under the feet
+    const OY = 15;                                  // grid row that sits at the container origin
+    const O=0x10141c, e=0x16181f;                   // soft outline (readable on dark rugs), eye
+    const skin=opt.skin!=null?opt.skin:0xf4cfa0;
+    const hair=opt.hair!=null?opt.hair:0x3a3f74;
+    const accent=opt.accent!=null?opt.accent:0xe23c2e;
+    const B=0x2a3140, pant=shade(B,0.92), boot=shade(B,0.6), d=shade(hair,0.64);
+    c.add(this.add.ellipse(0,8,9,3,0x000000,0.3));  // shadow under the feet
     const bob = this.add.container(0,0);
-    const P=(gx,gy,w,h,col)=>{ const r=this.add.rectangle(gx-8,gy-7,w,h,col).setOrigin(0,0); bob.add(r); return r; };
-    const pal={K:O,h:hair,s:skin,c:body,p:pant,b:shoe};
+    const P=(gx,gy,w,h,col)=>{ const r=this.add.rectangle(gx-8,gy-OY,w,h,col).setOrigin(0,0); bob.add(r); return r; };
+    const pal={K:O,h:hair,s:skin,B:B,p:pant,o:boot};
     SP_BASE.forEach((row,gy)=>{ for(let gx=0;gx<16;gx++){ const col=pal[row[gx]]; if(col!=null) P(gx,gy,1,1,col); }});
-    // pointed ears
-    P(2,5,1,1,skin);P(1,4,1,1,skin);P(0,4,1,1,O);P(1,3,1,1,O);P(1,5,1,1,O);
-    P(11,5,1,1,skin);P(12,4,1,1,skin);P(13,4,1,1,O);P(12,3,1,1,O);P(12,5,1,1,O);
-    // colourful clothing detail
-    const ct=opt.cloth;
-    if(ct==='collar') P(4,8,6,1,a);
-    else if(ct==='stripe'){P(6,8,1,2,a);P(7,8,1,2,a);}
-    else if(ct==='belt') P(4,9,6,1,a);
-    else if(ct==='vest'){P(4,8,1,2,a);P(9,8,1,2,a);P(5,8,4,1,a);}
-    else if(ct==='twotone') P(4,9,6,1,a);
-    else if(ct==='hoodie'){P(4,7,6,1,a);P(5,8,1,1,a);P(8,8,1,1,a);}
-    // face modelling: brow shadow + forehead top-light give the head 3 values so
-    // features read at game scale (was a single dark smear).
-    const brow=shade(skin,0.7), fhi=shade(skin,1.15);
-    P(3,4,3,1,brow); P(8,4,3,1,brow);     // brow shadow over each eye
-    P(6,4,2,1,fhi);                        // forehead centre highlight
-    // vertical eyes (tracked for blink) + a white catchlight pixel
-    const eL=P(4,5,1,2,e), eR=P(9,5,1,2,e);
-    P(4,5,1,1,lens); P(9,5,1,1,lens);      // catchlight (glossy top pixel)
-    // hair styles
+    // big eyes (2x3 solid dark), tracked for blink
+    const eL=P(5,7,2,3,e), eR=P(9,7,2,3,e);
+    // hair dome 2-tone shadow -> reads as a rounded volume (all styles)
+    P(4,8,8,1,d); P(11,6,1,2,d);
+    // per-style hair flourish (modifies crown/sides only)
     const st=opt.style||'short';
-    if(st==='short'){P(2,4,1,1,hair);P(11,4,1,1,hair);}
-    else if(st==='swept'){P(2,4,1,2,hair);P(3,4,1,1,hair);P(9,4,2,1,hair);P(11,4,1,2,hair);}
-    else if(st==='sidelock'){P(11,4,1,5,hair);P(12,4,1,6,O);P(11,9,1,1,O);P(2,4,1,1,hair);}
-    else if(st==='bun'){P(6,-1,4,2,hair);P(5,-1,1,2,O);P(10,-1,1,2,O);P(5,-2,5,1,O);P(2,4,1,1,hair);P(11,4,1,1,hair);}
-    else if(st==='spiky'){[4,6,8,10].forEach(gx=>P(gx,0,1,1,hair));P(5,-1,1,1,hair);P(9,-1,1,1,hair);}
-    else if(st==='afro'){for(let gx=3;gx<11;gx++)P(gx,0,1,1,hair);P(2,1,1,3,hair);P(11,1,1,3,hair);P(2,0,8,1,O);P(1,1,1,4,O);P(12,1,1,4,O);}
-    else if(st==='long'){P(2,4,1,6,hair);P(11,4,1,6,hair);P(1,4,1,7,O);P(12,4,1,7,O);P(2,10,2,1,O);P(10,10,2,1,O);}
-    else if(st==='ponytail'){P(11,3,1,5,hair);P(12,3,1,6,O);P(11,8,1,1,O);P(2,4,1,1,hair);}
-    // headwear (coloured, never pure black)
-    if(opt.cap!=null){P(3,1,8,2,opt.cap);P(2,2,10,1,opt.cap);P(2,0,8,1,O);P(0,2,3,1,O);P(12,2,1,1,O);}
-    if(opt.hood!=null){P(2,-1,10,4,opt.hood);P(2,3,2,7,opt.hood);P(12,3,2,7,opt.hood);P(1,-1,1,11,O);P(14,3,1,7,O);P(2,-2,10,1,O);}
-    // accessories (slate glasses/headset, not black)
-    if(opt.glasses){P(3,5,3,2,g);P(8,5,3,2,g);P(6,5,2,1,g);P(4,5,1,1,lens);P(9,5,1,1,lens);}
-    if(opt.headset){P(2,1,10,1,m);P(2,2,1,3,m);P(11,4,1,2,m);P(11,6,1,1,0xcc5555);}
-    if(opt.scarf!=null){P(4,7,6,1,opt.scarf);P(8,8,1,1,opt.scarf);}
-    if(opt.tie!=null){P(8,8,1,2,opt.tie);}
-    if(opt.coat){P(4,8,1,2,0xe6e9ef);P(9,8,1,2,0xd2d7e0);}
-    // back-of-head pose: a hair-coloured cap over the face, shown while seated at a
-    // desk so working agents face their monitor (away from camera), not the viewer.
+    if(st==='swept'){ P(3,1,1,1,hair); P(4,0,3,1,hair); P(2,5,1,3,hair); }
+    else if(st==='ponytail'){ P(12,5,2,5,hair); P(13,6,1,4,O); P(12,10,2,1,O); P(12,5,1,4,d); }
+    else if(st==='afro'){
+      P(5,0,6,1,hair); P(3,1,10,1,hair); P(2,2,12,2,hair);
+      P(1,4,1,4,hair); P(14,4,1,4,hair); P(3,8,2,1,hair); P(11,8,2,1,hair);
+      P(5,0,1,1,O); P(10,0,1,1,O); P(2,1,1,1,O); P(13,1,1,1,O);
+      P(1,2,1,2,O); P(14,2,1,2,O); P(0,4,1,4,O); P(15,4,1,4,O); P(4,8,8,1,d); }
+    else if(st==='spiky'){ [4,6,8,10].forEach(gx=>P(gx,0,1,2,hair)); }
+    else if(st==='bob'){ P(2,8,1,3,hair); P(13,8,1,3,hair); P(2,11,1,1,O); P(13,11,1,1,O); }
+    // accent: a small centred chest band
+    P(6,14,4,1,accent); P(6,15,4,1,shade(accent,0.78));
+    // back-of-head pose: hair over the face, shown while seated so workers face their
+    // monitor (away from camera). Covers eyes/face; restored on walk.
     const back = this.add.container(0,0).setVisible(false);
-    for (let gy=4; gy<=6; gy++) for (let gx=3; gx<=10; gx++)
-      back.add(this.add.rectangle(gx-8, gy-7, 1, 1, hair).setOrigin(0,0));
-    back.add(this.add.rectangle(5-8,6-7,4,1,shade(hair,1.35)).setOrigin(0,0));  // nape highlight
+    for (let gy=5; gy<=9; gy++) for (let gx=4; gx<=11; gx++)
+      back.add(this.add.rectangle(gx-8, gy-OY, 1, 1, hair).setOrigin(0,0));
+    back.add(this.add.rectangle(5-8, 9-OY, 5, 1, d).setOrigin(0,0));   // nape shade
     bob.add(back);
-    const spark = this.add.rectangle(4,-10,2,2,0xfff04a).setOrigin(0,0).setVisible(false); bob.add(spark);
+    const spark = this.add.rectangle(3,2-OY,2,2,0xfff04a).setOrigin(0,0).setVisible(false); bob.add(spark);
     c.add(bob);
     c.bob = bob; c.spark = spark; c.eyes = [eL, eR];
     c.faceBack  = ()=>{ back.setVisible(true);  };

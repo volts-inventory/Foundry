@@ -243,7 +243,7 @@ class FloorScene extends Phaser.Scene {
       const k = poolKit(i);
       const ws = this.makeWorkstation(x, y+16, k.accent);
       const s = this.makePerson(x, y, k);
-      s.setScale(1.25).setDepth(y).setAlpha(0.96);
+      s.setScale(1.4).setDepth(y).setAlpha(0.96);   // match the leads so IC faces stay legible
       s.home = {x,y}; s.loungeSlot = 12 + i; s.seen = true;    // can walk to the lounge too
       this.startWalk(s);                                       // ICs are busy building
       this.poolGroup.push(s, ws);
@@ -778,8 +778,8 @@ class FloorScene extends Phaser.Scene {
       P(1,2,1,2,O); P(14,2,1,2,O); P(0,4,1,4,O); P(15,4,1,4,O); P(4,8,8,1,d); }
     else if(st==='spiky'){ [4,6,8,10].forEach(gx=>P(gx,0,1,2,hair)); }
     else if(st==='bob'){ P(2,8,1,3,hair); P(13,8,1,3,hair); P(2,11,1,1,O); P(13,11,1,1,O); }
-    // accent: a small centred chest band
-    P(6,14,4,1,accent); P(6,15,4,1,shade(accent,0.78));
+    // accent: a small centred chest band (raised 1 row so it clears the desk when seated)
+    P(6,13,4,1,accent); P(6,14,4,1,shade(accent,0.78));
     // back-of-head pose: hair over the face, shown while seated so workers face their
     // monitor (away from camera). Covers eyes/face; restored on walk.
     const back = this.add.container(0,0).setVisible(false);

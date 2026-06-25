@@ -31,7 +31,7 @@ const RBASE = {
   product:{label:"PRODUCT",color:0x2e3b5a}, architecture:{label:"ARCHITECTURE",color:0x3a2e5a},
   engineering:{label:"ENGINEERING",color:0x5a3a2e}, reception:{label:"RECEPTION",color:0x3a4a2e},
   lounge:{label:"LOUNGE",color:0x40354f}, qa:{label:"QA · REVIEW",color:0x2e5a4a},
-  gate:{label:"THE GATE",color:0x394a3a}, vault:{label:"VAULT",color:0x5a4a18},
+  gate:{label:"SECURITY",color:0x2c3a55}, vault:{label:"VAULT",color:0x5a4a18},
 };
 const ROOMS = {};
 for (const k in RBASE) ROOMS[k] = Object.assign({}, RBASE[k], cellBox(GRID[k][0], GRID[k][1]));
@@ -572,28 +572,66 @@ class FloorScene extends Phaser.Scene {
       onComplete:()=>b.destroy()}));
   }
 
+  // a security guard posted at the checkpoint desk (dark uniform, cap, badge)
   buildGuardian(){
-    const R = ROOMS.gate, x = Math.round(R.cx), y = R.y1-22;
+    const R = ROOMS.gate, x = Math.round(R.x + R.w*0.30), y = R.y1-30;
     const c = this.add.container(x,y).setDepth(6);
-    c.add(this.add.rectangle(0,0,16,16,0x9aa6c0));
-    c.add(this.add.rectangle(0,-12,12,10,0xcfd8ee));
-    c.add(this.add.rectangle(0,7,16,3,0x39406a));
-    c.add(this.add.rectangle(11,-7,2,30,0xc0c8e0));
+    c.add(this.add.ellipse(0,9,18,5,0x000000,0.28));            // shadow
+    c.add(this.add.rectangle(0,0,14,16,0x2b3350));              // torso (navy uniform)
+    c.add(this.add.rectangle(0,2,14,2,0x1a2030));               // belt line
+    c.add(this.add.rectangle(-4,-4,3,3,0xffd95e));              // brass badge
+    c.add(this.add.rectangle(0,-12,12,11,0xe8b487));            // head
+    c.add(this.add.rectangle(0,-18,13,5,0x1a2030));             // cap brim
+    c.add(this.add.rectangle(0,-21,11,4,0x2b3350));             // cap crown
+    c.add(this.add.rectangle(-3,-12,2,2,0x141822));             // eyes
+    c.add(this.add.rectangle(3,-12,2,2,0x141822));
+    this.guardSpark = this.add.rectangle(7,-6,3,3,0x5ddc7a,0.9);// radio LED
+    c.add(this.guardSpark);
+    this.tweens.add({targets:this.guardSpark, alpha:0.2, duration:900, yoyo:true, repeat:-1});
   }
 
+  // The Gate is a SECURITY OFFICE: a CCTV bank + checkpoint desk, plus a sealed
+  // vault door (vertical) in the gap to the VAULT above. The horizontal corridor
+  // between the two cells is walled off — the only link is that short door,
+  // which unlocks only when every release gate passes.
   buildGate(){
-    const R = ROOMS.gate;
-    const ax = R.x+10, aw = R.w-20, atop = R.y+8, abot = R.y1-8;
-    const h = abot-atop;
-    this.gateGeom = {ax,aw,atop,abot,h,cx:R.cx};
-    const c = this.add.container(0,0).setDepth(5);
-    this.gateFrame = this.add.rectangle(ax,atop,aw,h,0x2b3147).setOrigin(0,0);
-    this.gateDoor  = this.add.rectangle(ax+6,atop+6,aw-12,h-6,0x0c1322).setOrigin(0,0);
-    c.add([this.gateFrame,this.gateDoor]);
+    const G = ROOMS.gate, V = ROOMS.vault, cx = Math.round(G.cx);
+    // ---- CCTV monitor bank on the office wall (camera feeds) ----
+    const bx = G.x+46, by = G.floorY+18, mon=[0x2bd3ff,0x7dffb0,0xffd95e,0x5db8ff];
+    const bank = this.add.container(bx,by).setDepth(3);
+    bank.add(this.add.rectangle(0,0,76,52,0x10151f).setStrokeStyle(2,0x2a3550));
+    for (let i=0;i<4;i++){ const sx=-18+(i%2)*36, sy=-12+Math.floor(i/2)*24;
+      bank.add(this.add.rectangle(sx,sy,30,18,mon[i],0.85));
+      bank.add(this.add.rectangle(sx,sy,30,18).setStrokeStyle(1,0x05080f)); }
+    const led=this.add.rectangle(bx+30,by-22,4,4,0xff5d6c,0.9).setDepth(3);  // REC light
+    this.tweens.add({targets:led, alpha:0.2, duration:700, yoyo:true, repeat:-1});
+    // ---- checkpoint desk / counter ----
+    const dx = cx+30, dy = G.y1-34;
+    const desk = this.add.container(dx,dy).setDepth(3);
+    desk.add(this.add.rectangle(0,0,70,16,0x394566).setOrigin(0.5,1));
+    desk.add(this.add.rectangle(0,-15,70,4,0x4a587a).setOrigin(0.5,1));      // counter top
+    desk.add(this.add.rectangle(-20,-26,18,12,0x10151f).setOrigin(0.5,1));   // terminal
+    desk.add(this.add.rectangle(-20,-28,14,8,0x2bd3ff,0.85).setOrigin(0.5,1));
+    // ---- seal the corridor gap between SECURITY and the VAULT above ----
+    const gapTop = V.y1, gapBot = G.y, dw = 60;          // short vertical door
+    const wallC = 0x1a2030, capC = 0x2a3550;
+    const seal=(sx,w)=>{ if (w<=0) return;
+      this.add.rectangle(sx, gapTop, w, gapBot-gapTop, wallC).setOrigin(0,0).setDepth(7);
+      this.add.rectangle(sx, gapTop, w, 3, capC).setOrigin(0,0).setDepth(7);
+      this.add.rectangle(sx, gapBot-3, w, 3, 0x0a0d16).setOrigin(0,0).setDepth(7); };
+    seal(G.x0, (cx-dw/2)-G.x0);                          // left wall segment
+    seal(cx+dw/2, G.x1-(cx+dw/2));                       // right wall segment
+    // ---- the sealed VAULT DOOR (vertical, fills the gap) ----
+    const atop = gapTop, abot = gapBot, h = abot-atop, ax = cx-dw/2;
+    this.gateGeom = {ax, aw:dw, atop, abot, h, cx};
+    const c = this.add.container(0,0).setDepth(8);
+    this.gateFrame = this.add.rectangle(ax-4, atop, dw+8, h, 0x566089).setOrigin(0,0); // steel frame
+    this.gateDoor  = this.add.rectangle(ax, atop+3, dw, h-6, 0x0c1322).setOrigin(0,0);  // door panel
+    c.add([this.gateFrame, this.gateDoor]);
     this.gateBars = this.add.container(0,0);
-    for (let bx=ax+10; bx<ax+aw-8; bx+=12)
-      this.gateBars.add(this.add.rectangle(bx,atop+8,3,h-12,0x566089).setOrigin(0,0));
-    this.gateLatch = this.add.rectangle(R.cx,(atop+abot)/2,14,14,0xaab4d6);
+    for (let by2=atop+9; by2<abot-6; by2+=10)            // horizontal bolts
+      this.gateBars.add(this.add.rectangle(ax+5, by2, dw-10, 3, 0x6a7aa0).setOrigin(0,0));
+    this.gateLatch = this.add.circle(cx,(atop+abot)/2,8,0xaab4d6).setStrokeStyle(2,0x2a3550); // vault wheel
     this.gateBars.add(this.gateLatch);
     c.add(this.gateBars);
   }

@@ -41,6 +41,7 @@ from foundry.agents.implementation import (
     stub_conflict_resolution,
 )
 from foundry.agents.implementation.senior_engineer import DESIGN_KIND, OWNERSHIP_KIND
+from foundry.canonical import content_digest
 from foundry.execution.adapter_contract import TaskPacket, assemble_prompt
 from foundry.execution.adapters.stub import StubAdapter
 from foundry.gates.attestation import ZoneBSigner
@@ -171,7 +172,12 @@ def scripted_decomposition(criteria_by_unit: dict[str, list[str]]) -> MockTransp
             for unit, cids in criteria_by_unit.items()
         ]
     }
-    return MockTransport(completions=[json.dumps(payload)])
+    # One decomposition call PER Tech-Lead (per OwnershipMap owner) now, not one
+    # global call — so serve the full scripted payload on EVERY call (each lead
+    # extracts the criteria for its own units). default_text carries it for the
+    # 2nd..Nth lead once the explicit completion is popped.
+    body = json.dumps(payload)
+    return MockTransport(completions=[body], default_text=body)
 
 
 # ---- senior_engineer ---------------------------------------------------------
@@ -237,6 +243,102 @@ def test_senior_never_mints_a_gate_result() -> None:
     node = senior_node(rt, design, ownership)
     writes = node(senior_state(design, ownership), config_for("run-A"))
     assert "gates" not in writes  # verdicts are computed + signed by the runner
+
+
+# ---- Wave B: per-domain Tech-Lead fan-out ------------------------------------
+
+
+def _single_owner_map() -> OwnershipMap:
+    """All units owned by ONE lead — the byte-identity regression case."""
+    return OwnershipMap(
+        owners={"src/api.py": "solo", "src/store.py": "solo", "src/util.py": "solo"},
+        seq=a_seq("principal_architect"),
+    )
+
+
+def test_single_owner_makes_one_call_byte_identical_to_pre_fanout() -> None:
+    """One owner -> exactly ONE decomposition call over all units, and the task
+    records are exactly what the pre-fan-out Senior produced (same ids, branches,
+    spec_uris, seq order, criteria). The fan-out is a no-op when there's 1 lead."""
+    design, ownership = a_design(), _single_owner_map()
+    transport = scripted_decomposition({"src/store.py": ["AC-1"], "src/util.py": ["AC-2"]})
+    rt = make_runtime(transport)
+    node = senior_node(rt, design, ownership)
+
+    tasks = node(senior_state(design, ownership), config_for("run-A"))["tasks"]
+
+    assert len(transport.requests) == 1  # ONE lead -> ONE focused decomposition call
+    order = ownership.merge_order()
+    assert [t["id"] for t in tasks] == [f"t-{content_digest({'unit': u})[:12]}" for u in order]
+    assert [t["seq"][4] for t in tasks] == [0, 1, 2]  # merge-order index preserved
+    for unit, t in zip(order, tasks, strict=True):
+        assert t["branch"] == f"task/{t['id']}"
+        # spec_uri is byte-identical to the pre-fan-out formula (full-record parity)
+        spec_digest = content_digest({"unit": unit, "design": design.design_uri})
+        assert t["spec_uri"] == f"cas://task/{spec_digest}"
+    # criteria flowed from the single call
+    assert any(t["criterion_ids"] == ["AC-1"] for t in tasks)
+    assert any(t["criterion_ids"] == ["AC-2"] for t in tasks)
+
+
+def test_multi_owner_fans_out_one_call_per_lead() -> None:
+    """N owners -> N decomposition calls (one per Tech-Lead), but the same task
+    ids and the same merge order as a single decomposition would yield."""
+    design, ownership = a_design(), an_ownership_map()  # owner-a (2 units), owner-b (1)
+    transport = scripted_decomposition(
+        {"src/store.py": ["AC-1"], "src/util.py": ["AC-2"], "src/api.py": ["AC-3"]}
+    )
+    rt = make_runtime(transport)
+    node = senior_node(rt, design, ownership)
+
+    writes = node(senior_state(design, ownership), config_for("run-A"))
+    tasks = writes["tasks"]
+
+    assert len(transport.requests) == len(ownership.leads()) == 2  # one call per lead
+    # Same task ids AND same global merge order as a single decomposition would
+    # yield — the fan-out changes WHO proposes a task, never its identity/order.
+    order = ownership.merge_order()
+    assert [t["id"] for t in tasks] == [f"t-{content_digest({'unit': u})[:12]}" for u in order]
+    assert [t["seq"][4] for t in tasks] == list(range(len(order)))
+    # Per-lead criteria are partitioned to the right unit (owner-a owns store+util,
+    # owner-b owns api) — each lead enriched only its own units.
+    by_id = {t["id"]: t for t in tasks}
+
+    def crit(unit: str) -> list[str]:
+        return by_id[f"t-{content_digest({'unit': unit})[:12]}"]["criterion_ids"]
+
+    assert crit("src/store.py") == ["AC-1"]
+    assert crit("src/api.py") == ["AC-3"]
+
+
+def test_fanout_emits_one_advisory_journal_entry_per_lead() -> None:
+    design, ownership = a_design(), an_ownership_map()
+    rt = make_runtime(scripted_decomposition({}))
+    node = senior_node(rt, design, ownership)
+
+    writes = node(senior_state(design, ownership), config_for("run-A"))
+    notes = writes["agent_journal"]
+
+    assert len(notes) == len(ownership.leads()) == 2
+    roles = {n.role for n in notes}
+    assert all(r.startswith("Tech-Lead") for r in roles)
+    # advisory only — never on the gates channel
+    assert "gates" not in writes and "gate_triage" not in writes
+
+
+def test_empty_ownership_map_makes_no_calls() -> None:
+    """No owners -> no leads -> no decomposition calls, empty tasks + journal."""
+    design = a_design()
+    ownership = OwnershipMap(owners={}, seq=a_seq("principal_architect"))
+    transport = scripted_decomposition({})
+    rt = make_runtime(transport)
+    node = senior_node(rt, design, ownership)
+
+    writes = node(senior_state(design, ownership), config_for("run-A"))
+
+    assert writes["tasks"] == []
+    assert writes["agent_journal"] == []
+    assert len(transport.requests) == 0  # nothing to decompose -> no egress
 
 
 def test_stub_conflict_resolution_is_typed_and_deterministic() -> None:

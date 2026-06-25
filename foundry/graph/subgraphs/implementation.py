@@ -65,6 +65,8 @@ def build_implementation_subgraph(
     tier: str = "T1",
     turn_budget: int = 8,
     cost_budget_microusd: int = 1_000_000,
+    max_slots: int = 1,
+    cost_cap_microusd: int | None = None,
 ) -> StateGraph[FactoryState]:
     """Build the UNCOMPILED implementation (Layer 3) role subgraph.
 
@@ -100,6 +102,9 @@ def build_implementation_subgraph(
         snapshot_store=snapshot_store,
         turn_budget=turn_budget,
         cost_budget_microusd=cost_budget_microusd,
+        max_slots=max_slots,
+        cost_cap_microusd=cost_cap_microusd,
+        resolve=resolve,  # per-area budget lineage from the OwnershipMap (Wave D)
     )
 
     # The factory closures are typed as the ``_Node`` alias; LangGraph's

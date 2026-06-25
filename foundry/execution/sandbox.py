@@ -56,7 +56,9 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 import time
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -108,6 +110,17 @@ def _denied(name: str) -> bool:
         or any(upper.endswith(s) for s in _DENIED_SUFFIXES)
         or any(upper.startswith(p) for p in _DENIED_PREFIXES)
     )
+
+
+def _tmp_name(digest: str) -> str:
+    """A staging name unique across processes AND threads before the atomic publish.
+
+    The IC pool (Wave C, max_slots>1) runs many sandbox workers in ONE process over
+    a shared snapshot_store, so ``os.getpid()`` alone collides — two threads staging
+    the same content-addressed digest would clobber each other's tmp. Thread id +
+    a uuid make the staging path unique; the final publish stays content-addressed.
+    """
+    return f".tmp-{digest}-{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex}"
 
 
 @dataclass(frozen=True)
@@ -271,9 +284,16 @@ class Sandbox:
         digest = normalized_source_tree(self.worktree, prefer_git=False)
         dest = self._snapshots_dir / digest
         if not dest.exists():
-            tmp = self._snapshots_dir / f".tmp-{digest}-{os.getpid()}"
+            tmp = self._snapshots_dir / _tmp_name(digest)
             shutil.copytree(self.worktree, tmp, symlinks=True)
-            os.replace(tmp, dest)  # atomic publish: never a half-written snapshot
+            try:
+                os.replace(tmp, dest)  # atomic publish: never a half-written snapshot
+            except OSError:
+                # A concurrent worker (pool path, max_slots>1) published the SAME
+                # content-addressed snapshot first — os.replace onto a now-existing
+                # dir fails. The store is content-addressed, so the winner's copy is
+                # byte-identical; discard ours. (dest is guaranteed present here.)
+                shutil.rmtree(tmp, ignore_errors=True)
         return digest
 
     def restore(self, snapshot: str | Path) -> str:
@@ -309,9 +329,9 @@ class Sandbox:
         digest = hashlib.sha256(data).hexdigest()
         path = self._blobs_dir / digest
         if not path.exists():
-            tmp = self._blobs_dir / f".tmp-{digest}-{os.getpid()}"
+            tmp = self._blobs_dir / _tmp_name(digest)
             tmp.write_bytes(data)
-            os.replace(tmp, path)
+            os.replace(tmp, path)  # atomic for a file; last identical writer wins
         return f"cas://sha256/{digest}"
 
     def get_blob(self, uri: str) -> bytes:

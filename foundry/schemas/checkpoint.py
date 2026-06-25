@@ -34,13 +34,25 @@ identity so a LangGraph resume re-fold coalesces the re-emission (idempotent, L7
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from foundry.schemas.architecture import OwnershipMap
 from foundry.schemas.base import FrozenModel
 from foundry.state.seq import Seq
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from foundry.schemas.base import Artifact
     from foundry.state.factory_state import FactoryState
+
+    # Reconstitutes a typed body from its content-addressed handle (CAS in prod).
+    ArtifactResolver = Callable[[Artifact], Any]
+
+# The Artifact.kind the Principal Architect stamps on the OwnershipMap handle.
+# Held as a literal here (not imported from the agents layer) to keep schemas
+# free of an agents dependency.
+_OWNERSHIP_KIND = "ownership_map"
 
 __all__ = [
     "CHECKPOINT_BOUNDARIES",
@@ -125,11 +137,50 @@ class CheckpointDecision(FrozenModel):
         return (str(self.boundary), self.content_identity())
 
 
+def _org_section(state: FactoryState, resolve: ArtifactResolver | None) -> dict[str, Any] | None:
+    """The org chart for display (org_fanout_design.md, Wave E): present AREAS,
+    their Tech-Lead DOMAINS, and each domain's units — derived from the
+    OwnershipMap (Wave A ``leads_by_area``/``area_of``/``units_of``). Advisory and
+    fail-soft: returns None when there is no resolver, no OwnershipMap handle, or
+    the handle does not reconstitute (a telemetry read must NEVER break a pause)."""
+    if resolve is None:
+        return None
+    handles = [a for a in (state.get("artifacts") or ()) if a.kind == _OWNERSHIP_KIND]
+    if not handles:
+        return None
+    # The ENTIRE build is wrapped: resolve, the isinstance guard, AND the Wave A
+    # derivations. A telemetry read must never break the pause, so any failure
+    # (resolver error, wrong-type body, a malformed map) just omits "org".
+    # ``max`` orders by Seq, which is correct within a run (how supersession
+    # works); cross-run recency is irrelevant for this advisory display.
+    try:
+        ownership = resolve(max(handles, key=lambda a: a.seq))
+        if not isinstance(ownership, OwnershipMap):
+            return None
+        return {
+            "areas": [
+                {"area": area, "leads": list(leads)}
+                for area, leads in ownership.leads_by_area().items()
+            ],
+            "domains": [
+                {
+                    "owner": owner,
+                    "area": ownership.area_of(owner),
+                    "units": list(ownership.units_of(owner)),
+                }
+                for owner in ownership.leads()
+            ],
+        }
+    except Exception:
+        return None
+
+
 def inspection_payload(
     state: FactoryState,
     *,
     boundary: CheckpointBoundary,
     state_sha: str,
+    resolve: ArtifactResolver | None = None,
 ) -> dict[str, object]:
     """Build the READ-ONLY inspection payload surfaced to the human at a pause.
 
@@ -162,7 +213,7 @@ def inspection_payload(
         }
         for e in (state.get("agent_journal") or ())
     ]
-    return {
+    payload: dict[str, object] = {
         "boundary": str(boundary),
         "state_sha": state_sha,
         "phase": state.get("phase"),
@@ -177,3 +228,9 @@ def inspection_payload(
             "gates remain the sole trust authority."
         ),
     }
+    org = _org_section(state, resolve)
+    if org is not None:
+        # Advisory org chart (Wave E): areas -> Tech-Lead domains -> units. Pure
+        # display (the workshop UI renders the org); influences nothing.
+        payload["org"] = org
+    return payload

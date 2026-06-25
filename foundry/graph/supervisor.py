@@ -371,6 +371,8 @@ def build_supervisor_graph(
     discriminator_factory: DiscriminatorFactory | None = None,
     pack_registry: PackRegistry | None = None,
     checkpoints: bool | Sequence[str | CheckpointBoundary] | None = None,
+    max_slots: int = 1,
+    cost_cap_microusd: int | None = None,
 ) -> StateGraph[FactoryState]:
     """Build the UNCOMPILED supervisor graph over :class:`FactoryState`.
 
@@ -538,7 +540,8 @@ def build_supervisor_graph(
     product = build_product_subgraph(rt).compile()
     architecture = build_architecture_subgraph(rt, index).compile()
     implementation = build_implementation_subgraph(
-        rt, source_dir=source_dir, resolve=resolve
+        rt, source_dir=source_dir, resolve=resolve,
+        max_slots=max_slots, cost_cap_microusd=cost_cap_microusd,
     ).compile()
     quality = build_quality_subgraph(rt, resolve=resolve).compile()
 
@@ -789,7 +792,14 @@ def build_supervisor_graph(
             # graph (resumable via the checkpointer); on the resume invoke
             # (``Command(resume=...)``) it RETURNS the supplied value here.
             raw = interrupt(
-                inspection_payload(state, boundary=boundary, state_sha=sha)
+                inspection_payload(
+                    state,
+                    boundary=boundary,
+                    state_sha=sha,
+                    # Advisory org chart (Wave E): reconstitute the OwnershipMap
+                    # via the CAS when available; None falls back to no org.
+                    resolve=rt.cas.resolve if rt.cas is not None else None,
+                )
             )
             decision = _coerce_decision(
                 raw,

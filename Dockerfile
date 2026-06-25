@@ -66,12 +66,14 @@ COPY pyproject.toml ./
 # login` open a BROWSER OAuth flow — they CANNOT run in a container. Authenticate
 # by INJECTING A CREDENTIAL as a secret — NEVER baked into the image (full
 # precedence + options in docs/deploy-compose.md):
-#   * API key via env — ANTHROPIC_API_KEY (claude-cli) / OPENAI_API_KEY (codex).
-#     `claude -p` uses it directly, no prior login. The proxy passes its env
-#     through to the CLI subprocess (cli_transports inherits os.environ), so the
-#     key just needs to be on the process. Compose: a .env value; K8s: a Secret.
-#   * OR CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`, run once on a
-#     workstation) to use a Pro/Max/Team subscription headlessly.
+#   * claude-cli on a MAX SUBSCRIPTION -> CLAUDE_CODE_OAUTH_TOKEN, minted once on a
+#     workstation with `claude setup-token`. `claude -p` honours it (no --bare).
+#     Do NOT also set ANTHROPIC_API_KEY: it OUTRANKS the token and would bill the
+#     pay-per-token Console API instead of the subscription.
+#   * codex -> OPENAI_API_KEY.
+#   The proxy passes its env through to the CLI subprocess (cli_transports inherits
+#   os.environ), so the credential just needs to be on the process. Compose: a
+#   .env value; K8s: a Secret.
 #   * OR a pre-provisioned ~/.claude/.credentials.json (Linux/Win; NOT macOS
 #     keychain) mounted read-only under $HOME (HOME=/app here, so /app/.claude).
 #     Mount it; do not COPY it into the image.

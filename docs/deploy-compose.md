@@ -131,17 +131,28 @@ care.
 The CLI binaries must be **in the image** and **authenticated without an
 interactive login** (there is no browser/TTY in a container).
 
+**Our setup: `claude-cli` on a Max subscription.** A Max plan is OAuth-based, not
+a Console API key. Authenticate headlessly with a **subscription OAuth token**:
+
 ```bash
 # Bake the CLIs in (off by default — keeps the base image slim):
 docker build --build-arg INSTALL_CLI_BACKENDS=true -t foundry:cli .
 
-# Authenticate by INJECTING A CREDENTIAL (never baked into the image):
+# ONCE, on a workstation logged into the Max account, mint a long-lived token:
+claude setup-token            # -> prints a CLAUDE_CODE_OAUTH_TOKEN (≈1yr, inference-only)
+
+# Inject it as a secret (never baked into the image):
 cat >> .env <<'EOF'
 FOUNDRY_MODEL_BACKEND=claude-cli
-ANTHROPIC_API_KEY=sk-ant-...        # claude-cli   (OPENAI_API_KEY for codex)
+CLAUDE_CODE_OAUTH_TOKEN=...        # the token from `claude setup-token`
 EOF
 docker compose up --build
 ```
+
+> **Do NOT also set `ANTHROPIC_API_KEY`.** It has *higher* precedence than the
+> OAuth token (see below), so it would silently bill the **pay-per-token Console
+> API** instead of your Max subscription. Leave it unset. (`claude -p` does not use
+> `--bare`, so the OAuth token is honoured.)
 
 **How `claude` authenticates (and why interactive login can't run in a
 container).** `claude login` (or `/login` in a session) runs an **interactive

@@ -72,15 +72,19 @@ services:
       # Default "anthropic". Config-swap to claude-cli | codex | ollama-gemma —
       # the SAME factory flow, a different backend (no call-site change).
       FOUNDRY_MODEL_BACKEND: "${FOUNDRY_MODEL_BACKEND:-anthropic}"
-      # CLI-backend credentials (claude-cli / codex), HEADLESS: injected as
-      # secrets from .env, NEVER baked into the image. Interactive `claude login`
-      # does not work in a container — use an API key (or a mounted creds file;
-      # see the Dockerfile). Empty/harmless for the other backends. In the
-      # isolated topology these move to the proxy egress service (which builds the
-      # backend), not the app — kept here for the single-host/dev model where the
-      # app builds the proxy in-process.
-      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
-      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      # CLI-backend credentials (claude-cli / codex), HEADLESS: injected as secrets
+      # from .env, NEVER baked into the image. Interactive `claude login` (browser
+      # OAuth) cannot run in a container.
+      #
+      # claude-cli runs on a MAX SUBSCRIPTION -> authenticate with a subscription
+      # OAuth token from `claude setup-token` (run ONCE on a workstation logged into
+      # the Max account). Do NOT set ANTHROPIC_API_KEY for this: it has HIGHER
+      # precedence than the OAuth token and would silently bill the pay-per-token
+      # Console API instead of the subscription. (`claude -p` does not use --bare,
+      # so the OAuth token is honoured.) In the isolated topology this lives on the
+      # proxy egress service (which builds the backend), not the app.
+      CLAUDE_CODE_OAUTH_TOKEN: "${CLAUDE_CODE_OAUTH_TOKEN:-}"   # claude-cli (Max subscription)
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"                     # codex backend, if used
       # ollama-gemma: point every worker at ONE shared Ollama ENDPOINT. Ollama
       # ALWAYS runs on the HOST (or a dedicated GPU box) with the GPU natively —
       # we NEVER pass a GPU into a container. Default targets the host; override to

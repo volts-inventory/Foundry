@@ -323,6 +323,34 @@ def test_inspection_payload_org_fail_soft_on_resolver_error() -> None:
     assert "org" not in payload  # fail-soft, no crash
 
 
+def test_inspection_payload_org_omitted_on_wrong_type_or_empty() -> None:
+    """The isinstance guard (resolver returns a non-OwnershipMap) omits org; an
+    empty OwnershipMap yields an empty (but present) org chart."""
+    from foundry.schemas.architecture import OwnershipMap
+    from foundry.schemas.base import Artifact
+
+    handle = Artifact(
+        kind="ownership_map",
+        uri="cas://ownership/x",
+        produced_by="principal_architect",
+        seq=Seq("run", 1, 1, "principal_architect", 0),
+    )
+    state: FactoryState = {"phase": "design", "artifacts": [handle]}
+
+    # wrong type -> omitted
+    wrong = inspection_payload(
+        state, boundary=CheckpointBoundary.DESIGN, state_sha="z", resolve=lambda _h: 123
+    )
+    assert "org" not in wrong
+
+    # zero owners -> present but empty
+    empty_om = OwnershipMap(owners={}, seq=Seq("run", 1, 1, "principal_architect", 0))
+    empty = inspection_payload(
+        state, boundary=CheckpointBoundary.DESIGN, state_sha="z", resolve=lambda _h: empty_om
+    )
+    assert empty["org"] == {"areas": [], "domains": []}
+
+
 def test_unknown_checkpoint_boundary_is_rejected() -> None:
     """A typo'd boundary name is fail-closed (ValueError), never a silent no-op."""
     import pytest

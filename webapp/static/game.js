@@ -485,7 +485,7 @@ function applyEvent(ev){
       break;
     case "org":
       if(S) S.renderOrg(ev);
-      pushLog("gold","🏢 ORG · "+(ev.areas||[]).map(a=>`${a.area}(${a.leads.length})`).join("  "));
+      pushLog("gold","🏢 ORG · "+(ev.areas||[]).map(a=>`${a.area}(${(a.leads||[]).length})`).join("  "));
       break;
     case "checkpoint":
       PENDING_CP={title:ev.title,summary:ev.summary,boundary:ev.boundary}; break;

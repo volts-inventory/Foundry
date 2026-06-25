@@ -148,26 +148,31 @@ def _org_section(state: FactoryState, resolve: ArtifactResolver | None) -> dict[
     handles = [a for a in (state.get("artifacts") or ()) if a.kind == _OWNERSHIP_KIND]
     if not handles:
         return None
+    # The ENTIRE build is wrapped: resolve, the isinstance guard, AND the Wave A
+    # derivations. A telemetry read must never break the pause, so any failure
+    # (resolver error, wrong-type body, a malformed map) just omits "org".
+    # ``max`` orders by Seq, which is correct within a run (how supersession
+    # works); cross-run recency is irrelevant for this advisory display.
     try:
         ownership = resolve(max(handles, key=lambda a: a.seq))
+        if not isinstance(ownership, OwnershipMap):
+            return None
+        return {
+            "areas": [
+                {"area": area, "leads": list(leads)}
+                for area, leads in ownership.leads_by_area().items()
+            ],
+            "domains": [
+                {
+                    "owner": owner,
+                    "area": ownership.area_of(owner),
+                    "units": list(ownership.units_of(owner)),
+                }
+                for owner in ownership.leads()
+            ],
+        }
     except Exception:
         return None
-    if not isinstance(ownership, OwnershipMap):
-        return None
-    return {
-        "areas": [
-            {"area": area, "leads": list(leads)}
-            for area, leads in ownership.leads_by_area().items()
-        ],
-        "domains": [
-            {
-                "owner": owner,
-                "area": ownership.area_of(owner),
-                "units": list(ownership.units_of(owner)),
-            }
-            for owner in ownership.leads()
-        ],
-    }
 
 
 def inspection_payload(

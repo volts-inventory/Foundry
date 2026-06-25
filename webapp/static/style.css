@@ -74,13 +74,15 @@ button.danger{background:#6b1f28;border-color:var(--red);color:#ffe0e3}
   image-rendering:pixelated;image-rendering:crisp-edges;max-width:100%;max-height:100%;
 }
 #log-panel{
-  flex:0 0 300px;background:var(--panel);border-left:3px solid var(--line);
+  flex:0 0 264px;width:264px;min-width:0;max-width:264px;
+  background:var(--panel);border-left:3px solid var(--line);
   display:flex;flex-direction:column;min-height:0;
 }
 .log-title{padding:8px 12px;border-bottom:2px solid var(--line);color:var(--gold);
   text-transform:uppercase;font-size:12px;font-weight:bold;flex:0 0 auto}
 #log{list-style:none;margin:0;padding:8px 10px;overflow-y:auto;font-size:12px;line-height:1.5}
-#log li{padding:3px 0;border-bottom:1px dashed #1f2942;color:var(--dim);animation:pop .25s}
+#log li{padding:3px 0;border-bottom:1px dashed #1f2942;color:var(--dim);animation:pop .25s;
+  overflow-wrap:anywhere;word-break:break-word}
 #log li.hot{color:var(--ink)}
 #log li.good{color:var(--green)}
 #log li.bad{color:var(--red)}

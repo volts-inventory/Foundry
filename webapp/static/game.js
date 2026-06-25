@@ -11,8 +11,11 @@
  * decide and this is only the view.
  */
 
-const W = 1280, H = 620;
-const FLOOR_TOP = 96, FLOOR_BOT = H - 70;
+// Canvas aspect (~1.5:1) is matched to the game panel so the world FILLS the frame
+// (no letterbox). Pokémon-interior vertical split: WALL fills the top, FLOOR the
+// rest. FLOOR_TOP is the wall/floor seam; characters stand on the floor near FLOOR_BOT.
+const W = 1280, H = 840;
+const FLOOR_TOP = 330, FLOOR_BOT = H - 70;
 
 // ---- rooms (left -> right), weighted widths --------------------------------
 const ROOM_DEFS = [
@@ -86,6 +89,20 @@ function buildSharedTextures(scene){
     g.fillStyle(shade(R.color,0.64),1); g.fillRect(6,6,2,2); g.fillRect(28,14,2,2); g.fillRect(14,30,2,2);
     g.fillStyle(shade(R.color,0.34),1); g.fillRect(32,33,2,2); g.fillRect(11,18,2,2);  // speckle
     g.generateTexture(tkey,40,40); g.destroy();
+  }
+  // Wall tile per room: a darker brick course (offset rows + mortar + highlight).
+  for (const key in ROOMS){
+    const wkey = "wall_"+key;
+    if (scene.textures.exists(wkey)) continue;
+    const R = ROOMS[key]; const g = scene.make.graphics({add:false});
+    const brick = shade(R.color,0.30), mortar = shade(R.color,0.18), hi = shade(R.color,0.40);
+    g.fillStyle(mortar,1); g.fillRect(0,0,40,32);
+    g.fillStyle(brick,1);
+    g.fillRect(1,1,18,14); g.fillRect(21,1,18,14);       // top course
+    g.fillRect(-9,17,18,14); g.fillRect(11,17,18,14); g.fillRect(31,17,18,14);  // offset course
+    g.fillStyle(hi,1);                                    // top-edge highlight per brick
+    g.fillRect(1,1,18,2); g.fillRect(21,1,18,2); g.fillRect(11,17,18,2); g.fillRect(31,17,18,2);
+    g.generateTexture(wkey,40,32); g.destroy();
   }
 }
 
@@ -166,8 +183,8 @@ class FloorScene extends Phaser.Scene {
     const R = ROOMS.engineering, count = Math.min(n, 8);
     for (let i=0;i<count;i++){
       const x = R.x0+22 + (R.w-44)*(count>1 ? i/(count-1) : 0.5);
-      const s = this.makePerson(Math.round(x), FLOOR_BOT-46, 0xffc08a, false);
-      s.setScale(0.66).setDepth(9).setAlpha(0.9);
+      const s = this.makePerson(Math.round(x), FLOOR_BOT-40, 0xffc08a, false);
+      s.setScale(1.5).setDepth(9).setAlpha(0.92);
       this.tweens.add({targets:s.bob, y:-2, duration:300+i*40, yoyo:true, repeat:-1, ease:"Sine.inOut"});
       this.poolGroup.push(s);
     }
@@ -178,21 +195,84 @@ class FloorScene extends Phaser.Scene {
 
   buildRooms(){
     this.roomGlow = {};
+    const floorH = H - FLOOR_TOP;
     for (const key in ROOMS){
       const R = ROOMS[key];
-      const fh = FLOOR_BOT - FLOOR_TOP + 20;
-      this.add.tileSprite(R.x0, FLOOR_TOP, R.w, fh, "floor_"+key).setOrigin(0,0).setDepth(0);
-      this.add.rectangle(R.x0, FLOOR_TOP-26, R.w, 26, R.color).setOrigin(0,0).setDepth(1);
-      this.add.rectangle(R.x0, FLOOR_TOP-26, R.w, 4, 0x000000, 0.25).setOrigin(0,0).setDepth(1);
-      this.add.rectangle(R.x1-2, FLOOR_TOP-26, 2, fh+26, 0xffffff, 0.05).setOrigin(0,0).setDepth(1);
-      this.add.text(R.cx, FLOOR_TOP-22, R.label, {
-        fontFamily:"'Courier New',monospace", fontSize:"13px",
-        fontStyle:"bold", color:"#dfe7ff",
-      }).setOrigin(0.5,0).setDepth(2);
-      this.roomGlow[key] = this.add.rectangle(R.x0, FLOOR_TOP, R.w, fh, 0xffd25a, 0)
+      // wall (top) -> baseboard -> floor (bottom): a side-on interior per room.
+      this.add.tileSprite(R.x0, 0, R.w, FLOOR_TOP, "wall_"+key).setOrigin(0,0).setDepth(0);
+      this.add.tileSprite(R.x0, FLOOR_TOP, R.w, floorH, "floor_"+key).setOrigin(0,0).setDepth(0);
+      // baseboard skirting where wall meets floor (light top edge + dark shadow).
+      this.add.rectangle(R.x0, FLOOR_TOP-6, R.w, 6, shade(R.color,0.5)).setOrigin(0,0).setDepth(1);
+      this.add.rectangle(R.x0, FLOOR_TOP, R.w, 3, 0x000000, 0.3).setOrigin(0,0).setDepth(1);
+      // room divider pilasters
+      this.add.rectangle(R.x1-2, 0, 2, H, 0x000000, 0.22).setOrigin(0,0).setDepth(1);
+      this.add.rectangle(R.x1, 0, 2, H, 0xffffff, 0.04).setOrigin(0,0).setDepth(1);
+      // wall decor: a lit window + wainscot rail so the tall wall isn't bare
+      const wy = 96, ww = Math.min(64, R.w-60), wh = 54;
+      this.add.rectangle(R.cx, wy, ww+6, wh+6, shade(R.color,0.16)).setOrigin(0.5,0).setDepth(2);
+      this.add.rectangle(R.cx, wy+3, ww, wh, 0x14305a).setOrigin(0.5,0).setDepth(2);
+      this.add.rectangle(R.cx, wy+3, ww, wh*0.5, 0x2a5a8c).setOrigin(0.5,0).setDepth(2); // sky
+      this.add.rectangle(R.cx, wy+3, 3, wh, shade(R.color,0.16)).setOrigin(0.5,0).setDepth(2); // mullion
+      this.add.rectangle(R.cx, wy+3+wh*0.5, ww, 3, shade(R.color,0.16)).setOrigin(0.5,0).setDepth(2);
+      this.add.rectangle(R.x0, FLOOR_TOP-46, R.w, 4, shade(R.color,0.46)).setOrigin(0,0).setDepth(1); // dado rail
+      // a hanging room sign on the wall
+      const sw = Math.min(R.w-14, R.label.length*7+18);
+      this.add.rectangle(R.cx, 20, sw, 20, shade(R.color,0.22)).setOrigin(0.5,0).setDepth(2)
+        .setStrokeStyle(2, shade(R.color,0.6));
+      this.add.text(R.cx, 23, R.label, {
+        fontFamily:"'Courier New',monospace", fontSize:"12px",
+        fontStyle:"bold", color:"#eef3ff",
+      }).setOrigin(0.5,0).setDepth(3);
+      this.roomGlow[key] = this.add.rectangle(R.x0, 0, R.w, H, 0xffd25a, 0)
         .setOrigin(0,0).setDepth(1);
     }
+    this.furnish();
     this.setActiveRoom("reception");
+  }
+
+  // Procedural pixel furniture so each room reads like a furnished interior.
+  furnish(){
+    const props = {
+      reception:   [["desk",0.5,0]],
+      product:     [["board",0.30,0],["plant",0.82,0],["desk",0.62,0]],
+      architecture:[["board",0.5,0],["plant",0.16,0]],
+      engineering: [["rack",0.16,0],["monitor",0.5,0],["monitor",0.74,0]],
+      qa:          [["monitor",0.22,0],["monitor",0.44,0],["shelf",0.74,0],["plant",0.92,0]],
+    };
+    for (const key in props){
+      const R = ROOMS[key]; if(!R) continue;
+      for (const [kind,fx] of props[key]) this.makeProp(kind, R.x0 + R.w*fx, FLOOR_TOP);
+    }
+  }
+
+  makeProp(kind, x, floorY){
+    x = Math.round(x);
+    const c = this.add.container(x, floorY).setDepth(3);
+    const out = (rx,ry,w,h,col)=>{ // outlined pixel rect (1px black border)
+      c.add(this.add.rectangle(rx,ry,w+2,h+2,0x0a0d16).setOrigin(0.5,1));
+      c.add(this.add.rectangle(rx,ry,w,h,col).setOrigin(0.5,1));
+    };
+    if (kind==="plant"){
+      out(0,0,8,12,0x6a4a2a); out(0,-10,18,16,0x2f8f4e); out(-4,-18,10,12,0x37a85c);
+    } else if (kind==="monitor"){
+      out(0,0,6,10,0x2a3550); out(0,-9,26,18,0x10151f);
+      c.add(this.add.rectangle(0,-11,20,12,0x2bd3ff,0.85).setOrigin(0.5,1)); // glowing screen
+    } else if (kind==="desk"){
+      out(0,0,46,14,0x6b4a2c); out(-16,-12,10,12,0x10151f); // desk + small monitor
+      c.add(this.add.rectangle(-16,-14,7,7,0x7dffb0,0.8).setOrigin(0.5,1));
+    } else if (kind==="rack"){
+      out(0,0,26,40,0x1b2233);
+      for(let i=0;i<5;i++) c.add(this.add.rectangle(8,-6-i*7,6,3,i%2?0x5ddc7a:0xffd95e).setOrigin(0.5,1));
+    } else if (kind==="shelf"){
+      out(0,0,34,30,0x5a4326);
+      for(let i=0;i<4;i++) c.add(this.add.rectangle(-12+i*8,-16,5,12,[0xff8fae,0x7fd1ff,0xffd95e,0x7dffb0][i]).setOrigin(0.5,1));
+    } else if (kind==="board"){
+      out(0,-6,40,26,0x223047);
+      c.add(this.add.rectangle(-12,-22,12,3,0xffd95e).setOrigin(0.5,1));
+      c.add(this.add.rectangle(2,-16,16,3,0x7fd1ff).setOrigin(0.5,1));
+      c.add(this.add.rectangle(-6,-10,10,3,0x7dffb0).setOrigin(0.5,1));
+    }
+    return c;
   }
 
   buildGuardian(){
@@ -245,10 +325,12 @@ class FloorScene extends Phaser.Scene {
     for (const room in ROSTER){
       const names = ROSTER[room], R = ROOMS[room];
       names.forEach((name,i)=>{
-        const span = R.w-50;
-        const hx = R.x0+30 + (names.length>1 ? span*i/(names.length-1) : span/2);
-        const hy = FLOOR_BOT-20 - (i%2)*26;
+        const span = R.w-60;
+        const hx = R.x0+34 + (names.length>1 ? span*i/(names.length-1) : span/2);
+        // stand in the middle of the floor (not jammed at the bottom), staggered
+        const hy = FLOOR_TOP + 150 - (i%2)*70;
         const a = this.makePerson(hx, hy, COLORS[name]||0xcccccc, false);
+        a.setScale(2.3);
         a.home = {x:hx,y:hy};
         a.setPosition(hx, hy+200).setAlpha(0.32);
         a.seen = false; a.bubble = null;
@@ -274,18 +356,29 @@ class FloorScene extends Phaser.Scene {
 
   makePerson(x,y,bodyColor,isCTO){
     const c = this.add.container(x,y).setDepth(10);
-    c.add(this.add.ellipse(1,14,16,4,0x000000,0.3));
+    const O = 0x0a0d16;  // 1px black-ish outline, the pixel-art read
+    c.add(this.add.ellipse(1,17,22,6,0x000000,0.32));            // drop shadow
     const bob = this.add.container(0,0);
-    bob.add(this.add.rectangle(-4,9,4,7,0x1a2236));
-    bob.add(this.add.rectangle(4,9,4,7,0x1a2236));
-    bob.add(this.add.rectangle(0,0,14,13,bodyColor));
-    if (isCTO) bob.add(this.add.rectangle(0,-1,2,8,0xffcf52));
-    bob.add(this.add.rectangle(0,-10,10,9,0xf1c9a5));
-    bob.add(this.add.rectangle(0,-15,10,3,isCTO?0x15110c:0x2a2018));
-    const spark = this.add.rectangle(8,-8,3,3,0xfff04a).setVisible(false);
+    // legs (separate sprites so they can step for a walk cycle)
+    bob.add(this.add.rectangle(-5,12,8,11,O)); bob.add(this.add.rectangle(5,12,8,11,O));
+    const legL = this.add.rectangle(-5,12,6,9,0x222d47), legR = this.add.rectangle(5,12,6,9,0x222d47);
+    bob.add(legL); bob.add(legR);
+    // torso: outline + fill + a highlight stripe + shadow stripe (2-tone shading)
+    bob.add(this.add.rectangle(0,1,20,18,O));
+    bob.add(this.add.rectangle(0,1,16,16,bodyColor));
+    bob.add(this.add.rectangle(-5,1,4,16,shade(bodyColor,1.32)));
+    bob.add(this.add.rectangle(6,1,3,16,shade(bodyColor,0.7)));
+    if (isCTO) bob.add(this.add.rectangle(0,0,3,12,0xffcf52));   // tie
+    // head: outline + skin + hair + eyes
+    bob.add(this.add.rectangle(0,-12,16,15,O));
+    bob.add(this.add.rectangle(0,-12,13,13,0xf1c9a5));
+    bob.add(this.add.rectangle(1,-12,3,13,0xe0b48f));            // face shade
+    bob.add(this.add.rectangle(0,-19,15,6,isCTO?0x15110c:0x3a2a1c));
+    bob.add(this.add.rectangle(-3,-13,2,3,0x14182a)); bob.add(this.add.rectangle(3,-13,2,3,0x14182a));
+    const spark = this.add.rectangle(11,-13,4,4,0xfff04a).setVisible(false);
     bob.add(spark);
     c.add(bob);
-    c.bob = bob; c.spark = spark;
+    c.bob = bob; c.spark = spark; c.legL = legL; c.legR = legR;
     return c;
   }
 

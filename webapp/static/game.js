@@ -14,33 +14,28 @@
 // (no letterbox). Pokémon-interior vertical split: WALL fills the top, FLOOR the
 // rest. FLOOR_TOP is the wall/floor seam; characters stand on the floor near FLOOR_BOT.
 const W = 1280, H = 840;
-const FLOOR_TOP = 250, FLOOR_BOT = H - 64;
+const FLOOR_TOP = 100, FLOOR_BOT = H - 40;   // general playfield bounds (rooms are placed boxes)
 
-// ---- rooms (left -> right), weighted widths --------------------------------
-const ROOM_DEFS = [
-  ["lounge",       "LOUNGE",       1.5,  0x40354f],
-  ["reception",    "RECEPTION",    0.9,  0x3a4a2e],
-  ["product",      "PRODUCT",      1.6,  0x2e3b5a],
-  ["architecture", "ARCHITECTURE", 1.4,  0x3a2e5a],
-  ["engineering",  "ENGINEERING",  1.4,  0x5a3a2e],
-  ["qa",           "QA · REVIEW",  1.7,  0x2e5a4a],
-  ["gate",         "THE GATE",     0.9,  0x444444],
-  ["vault",        "VAULT",        1.1,  0x5a4a18],
-];
-// per-room CEILING height (wall top) -> a varied skyline against the sky (one level)
-const CEIL = {lounge:96, reception:128, product:54, architecture:82, engineering:24, qa:62, gate:108, vault:150};
-// per-room ambient light tint [color, alpha] -> warm lounge / cool gate, depth
-const TINT = {lounge:[0xffb070,0.08], reception:[0xffd9a0,0.05], gate:[0x6aa0ff,0.07], vault:[0xffd25a,0.07]};
-const ROOMS = {};
-(function layout(){
-  const total = ROOM_DEFS.reduce((s,r)=>s+r[2],0);
-  let x = 0;
-  for (const [key,label,w,color] of ROOM_DEFS){
-    const px = Math.round((w/total)*W);
-    ROOMS[key] = {key,label,color,x0:x,x1:x+px,cx:x+px/2,w:px,ceil:CEIL[key]||60};
-    x += px;
-  }
-})();
+// ---- rooms: a 2D floorplan (one level), placed boxes — non-linear (mockup-style)
+// The elevator switches PROJECTS (floors), not rooms. Each room is its own little
+// interior box {x,y,w,h}; build flow winds Reception->Product->Arch->Eng->QA->Gate->Vault.
+const ROOMS = {
+  product:     {label:"PRODUCT",      color:0x2e3b5a, x:56,  y:104, w:300, h:196},
+  architecture:{label:"ARCHITECTURE", color:0x3a2e5a, x:372, y:104, w:268, h:196},
+  lounge:      {label:"LOUNGE",       color:0x40354f, x:900, y:96,  w:322, h:236},
+  engineering: {label:"ENGINEERING",  color:0x5a3a2e, x:56,  y:330, w:430, h:354},
+  qa:          {label:"QA · REVIEW",  color:0x2e5a4a, x:506, y:330, w:330, h:232},
+  reception:   {label:"RECEPTION",    color:0x3a4a2e, x:506, y:592, w:330, h:108},
+  gate:        {label:"THE GATE",     color:0x444444, x:872, y:452, w:158, h:238},
+  vault:       {label:"VAULT",        color:0x5a4a18, x:1052,y:512, w:150, h:178},
+};
+const ROOM_ORDER = ["reception","product","architecture","engineering","qa","gate","vault"];
+const TINT = {lounge:[0xffb070,0.08], reception:[0xffd9a0,0.05], gate:[0x6aa0ff,0.07],
+              vault:[0xffd25a,0.08], engineering:[0xff9a5a,0.04]};
+(function layout(){ for (const k in ROOMS){ const R = ROOMS[k];
+  R.key=k; R.x0=R.x; R.x1=R.x+R.w; R.y1=R.y+R.h; R.cx=R.x+R.w/2; R.cy=R.y+R.h/2;
+  R.wallH=Math.round(R.h*0.42); R.floorY=R.y+R.wallH; R.standY=R.y1-16;   // floor seam / where folks stand
+} })();
 
 const COLORS = {
   "Stakeholder Proxy":0x7fd1ff,"Product Manager":0xffd95e,"Criteria Critic":0xff8fae,
@@ -208,72 +203,65 @@ class FloorScene extends Phaser.Scene {
     if (this.poolLabel){ this.poolLabel.destroy(); this.poolLabel = null; }
     this.poolGroup = [];
     if (!n || n <= 1) return;
-    const R = ROOMS.engineering, count = Math.min(n, 8);
+    const R = ROOMS.engineering, count = Math.min(n, 8), cols = Math.min(count, 4);
     for (let i=0;i<count;i++){
-      const x = Math.round(R.x0+24 + (R.w-48)*(count>1 ? i/(count-1) : 0.5));
-      const y = FLOOR_BOT - 96 + (i%2)*42;                    // two rows of desks
+      const col = i%cols, row = Math.floor(i/cols);
+      const x = Math.round(R.x+30 + (R.w-60)*(cols>1 ? col/(cols-1) : 0.5));
+      const y = R.floorY + 74 + row*52;                        // pool desks below the leads
       const k = poolKit(i);
-      const ws = this.makeWorkstation(x, y+22, k.body);
+      const ws = this.makeWorkstation(x, y+16, k.body);
       const s = this.makePerson(x, y, k);
-      s.setScale(2.3).setDepth(y).setAlpha(0.96);
+      s.setScale(1.8).setDepth(y).setAlpha(0.96);
       s.home = {x,y}; s.loungeSlot = 12 + i; s.seen = true;    // can walk to the lounge too
       this.startWalk(s);                                       // ICs are busy building
       this.poolGroup.push(s, ws);
     }
-    this.poolLabel = this.add.text(R.cx, FLOOR_TOP+8, "⚙ "+n+" ICs",
-      {fontFamily:"'PixelFont','Courier New'",fontSize:"11px",fontStyle:"bold",color:"#ffc08a"})
+    this.poolLabel = this.add.text(R.cx, R.y+24, "⚙ "+n+" ICs",
+      {fontFamily:"'PixelFont','Courier New'",fontSize:"10px",fontStyle:"bold",color:"#ffc08a"})
       .setOrigin(0.5,0).setDepth(28);
   }
 
   buildRooms(){
-    this.buildSky();                 // parallax sky behind the building skyline
+    this.buildSky();                 // sky band on top, dark interior behind the boxes
     this.roomGlow = {};
-    const floorH = H - FLOOR_TOP;
+    this.drawFlowPath();             // dotted path winding through the rooms
     for (const key in ROOMS){
-      const R = ROOMS[key], ceil = R.ceil;
-      // wall (ceil..floor) + floor (floor..H); sky shows above ceil -> varied skyline
-      this.add.tileSprite(R.x0, ceil, R.w, FLOOR_TOP-ceil, "wall_"+key).setOrigin(0,0).setDepth(0);
-      this.add.tileSprite(R.x0, FLOOR_TOP, R.w, floorH, "floor_"+key).setOrigin(0,0).setDepth(0);
-      // ROOF cap on top of the wall, against the sky (light eave + shadow line)
-      this.add.rectangle(R.x0-1, ceil-6, R.w+2, 6, shade(R.color,0.72)).setOrigin(0,0).setDepth(2);
-      this.add.rectangle(R.x0-1, ceil-1, R.w+2, 2, 0x0a0d16).setOrigin(0,0).setDepth(2);
-      // ambient light tint (warm lounge / cool gate) over the room
-      const t = TINT[key]; if (t) this.add.rectangle(R.x0, ceil, R.w, H-ceil, t[0], t[1]).setOrigin(0,0).setDepth(1);
-      // baseboard
-      this.add.rectangle(R.x0, FLOOR_TOP-6, R.w, 6, shade(R.color,0.5)).setOrigin(0,0).setDepth(1);
-      this.add.rectangle(R.x0, FLOOR_TOP, R.w, 3, 0x000000, 0.3).setOrigin(0,0).setDepth(1);
-      // divider pilasters (ceil..floor)
-      this.add.rectangle(R.x1-2, ceil, 2, H-ceil, 0x000000, 0.22).setOrigin(0,0).setDepth(1);
-      this.add.rectangle(R.x1, ceil, 2, H-ceil, 0xffffff, 0.04).setOrigin(0,0).setDepth(1);
-      // hanging room sign just under the roof
-      const sw = Math.min(R.w-14, R.label.length*7+18);
-      this.add.rectangle(R.cx, ceil+4, sw, 18, shade(R.color,0.24)).setOrigin(0.5,0).setDepth(3)
+      const R = ROOMS[key];
+      // each room is a placed BOX: wall (top) + floor (bottom), framed
+      this.add.tileSprite(R.x, R.y, R.w, R.wallH, "wall_"+key).setOrigin(0,0).setDepth(0);
+      this.add.tileSprite(R.x, R.floorY, R.w, R.h-R.wallH, "floor_"+key).setOrigin(0,0).setDepth(0);
+      this.add.rectangle(R.x-2, R.y-6, R.w+4, 6, shade(R.color,0.72)).setOrigin(0,0).setDepth(2); // roof eave
+      const t = TINT[key]; if (t) this.add.rectangle(R.x, R.y, R.w, R.h, t[0], t[1]).setOrigin(0,0).setDepth(1);
+      this.add.rectangle(R.x, R.floorY-4, R.w, 4, shade(R.color,0.5)).setOrigin(0,0).setDepth(1); // baseboard
+      // box frame (dark outer + light inner) so each room reads as a room
+      this.add.rectangle(R.x, R.y, R.w, R.h).setOrigin(0,0).setStrokeStyle(3,0x0a0d16).setDepth(2);
+      this.add.rectangle(R.x+1.5, R.y+1.5, R.w-3, R.h-3).setOrigin(0,0).setStrokeStyle(1,shade(R.color,0.7)).setDepth(2);
+      // sign at the top of the box
+      const sw = Math.min(R.w-12, R.label.length*7+16);
+      this.add.rectangle(R.cx, R.y+4, sw, 16, shade(R.color,0.26)).setOrigin(0.5,0).setDepth(3)
         .setStrokeStyle(2, shade(R.color,0.62));
-      this.add.text(R.cx, ceil+7, R.label, {fontFamily:"'PixelFont','Courier New',monospace",
-        fontSize:"11px", fontStyle:"bold", color:"#eef3ff"}).setOrigin(0.5,0).setDepth(4);
-      // lit window + god-ray (only when the wall is tall enough)
-      const wy = ceil+28, ww = Math.min(72, R.w-66), wh = Math.min(64, FLOOR_TOP-46-wy);
-      if (wh > 22 && ww > 24){
-        this.add.rectangle(R.cx, wy, ww+8, wh+8, shade(R.color,0.16)).setOrigin(0.5,0).setDepth(2);
-        const glow = this.add.rectangle(R.cx, wy+4, ww, wh, 0x1c4a86).setOrigin(0.5,0).setDepth(2);
-        this.add.rectangle(R.cx, wy+4, ww, wh*0.5, 0x357bbe).setOrigin(0.5,0).setDepth(2);
-        this.add.circle(R.cx+ww*0.28, wy+15, 5, 0xffe9a8, 0.9).setDepth(2);
-        this.add.rectangle(R.cx, wy+4, 3, wh, shade(R.color,0.16)).setOrigin(0.5,0).setDepth(2);
-        this.add.rectangle(R.cx, wy+4+wh*0.5, ww, 3, shade(R.color,0.16)).setOrigin(0.5,0).setDepth(2);
+      this.add.text(R.cx, R.y+6, R.label, {fontFamily:"'PixelFont','Courier New',monospace",
+        fontSize:"10px", fontStyle:"bold", color:"#eef3ff"}).setOrigin(0.5,0).setDepth(4);
+      // lit window + god-ray in the wall
+      const wy = R.y+26, ww = Math.min(70, R.w-44), wh = Math.min(54, R.wallH-30);
+      if (wh > 16 && ww > 22){
+        this.add.rectangle(R.cx, wy, ww+6, wh+6, shade(R.color,0.16)).setOrigin(0.5,0).setDepth(2);
+        const glow = this.add.rectangle(R.cx, wy+3, ww, wh, 0x1c4a86).setOrigin(0.5,0).setDepth(2);
+        this.add.rectangle(R.cx, wy+3, ww, wh*0.5, 0x357bbe).setOrigin(0.5,0).setDepth(2);
+        this.add.circle(R.cx+ww*0.28, wy+12, 4, 0xffe9a8, 0.9).setDepth(2);
+        this.add.rectangle(R.cx, wy+3, 2, wh, shade(R.color,0.16)).setOrigin(0.5,0).setDepth(2);
         this.tweens.add({targets:glow, fillAlpha:{from:0.7,to:1}, duration:2600, yoyo:true, repeat:-1});
-        const ray = this.add.triangle(R.cx, wy+wh+4, -ww*0.45,96, ww*0.45,96, 0,0, 0xffe9a8, 0.05).setDepth(2);
-        this.tweens.add({targets:ray, alpha:{from:0.03,to:0.085}, duration:3200, yoyo:true, repeat:-1});
+        const ray = this.add.triangle(R.cx, wy+wh+2, -ww*0.4,70, ww*0.4,70, 0,0, 0xffe9a8, 0.05).setDepth(2);
+        this.tweens.add({targets:ray, alpha:{from:0.03,to:0.08}, duration:3200, yoyo:true, repeat:-1});
       }
-      // a hanging ceiling lamp in the bigger rooms
-      if (R.w > 150){
-        this.add.rectangle(R.cx-26, ceil, 1, 14, 0x2a2f40).setOrigin(0,0).setDepth(2);
-        this.add.circle(R.cx-26, ceil+16, 4, 0xffe6a0, 0.95).setDepth(2);
-        this.add.circle(R.cx-26, ceil+16, 9, 0xffe6a0, 0.10).setDepth(2);
+      // hanging lamp + rug in larger rooms
+      if (R.w > 200){
+        this.add.rectangle(R.x+30, R.y, 1, 12, 0x2a2f40).setOrigin(0,0).setDepth(2);
+        this.add.circle(R.x+30, R.y+14, 4, 0xffe6a0, 0.95).setDepth(2);
+        this.add.circle(R.x+30, R.y+14, 9, 0xffe6a0, 0.10).setDepth(2);
       }
-      this.add.rectangle(R.x0, FLOOR_TOP-34, R.w, 4, shade(R.color,0.5)).setOrigin(0,0).setDepth(1); // dado rail
-      this.add.rectangle(R.x0, FLOOR_TOP-34, R.w, 30, shade(R.color,0.34), 0.5).setOrigin(0,0).setDepth(0); // wainscot
-      this.add.rectangle(R.cx, FLOOR_BOT+6, Math.min(R.w-24, 120), 10, shade(R.color,0.6), 0.5).setDepth(1); // floor rug
-      this.roomGlow[key] = this.add.rectangle(R.x0, ceil, R.w, H-ceil, 0xffd25a, 0).setOrigin(0,0).setDepth(1);
+      this.add.rectangle(R.cx, R.y1-7, Math.min(R.w-20, 120), 7, shade(R.color,0.6), 0.5).setDepth(1); // rug
+      this.roomGlow[key] = this.add.rectangle(R.x, R.y, R.w, R.h, 0xffd25a, 0).setOrigin(0,0).setDepth(1);
     }
     this.furnish();
     this.buildAtmosphere();          // vignette + dust motes on top
@@ -281,13 +269,23 @@ class FloorScene extends Phaser.Scene {
   }
 
   buildSky(){
-    [[0,0x111a30],[44,0x1a2745],[96,0x274066],[150,0x37587f]].forEach(([y,c])=>
-      this.add.rectangle(0,y,W,FLOOR_TOP-y+4,c).setOrigin(0,0).setDepth(-3));
-    this.add.circle(W*0.82, 58, 24, 0xffe9a8, 0.95).setDepth(-2);
-    this.add.circle(W*0.82, 58, 40, 0xffe9a8, 0.10).setDepth(-2);
-    const cloud=(cx,cy,cw,a)=>{ const c=this.add.rectangle(cx,cy,cw,12,0xdce8ff,a).setOrigin(0,0).setDepth(-2);
+    this.add.rectangle(0,0,W,H,0x0c1020).setOrigin(0,0).setDepth(-2);     // dark building interior
+    [[0,0x111a30],[36,0x1a2745],[72,0x294568]].forEach(([y,c])=>
+      this.add.rectangle(0,y,W,108-y,c).setOrigin(0,0).setDepth(-1));      // sky band on top
+    this.add.circle(700, 50, 22, 0xffe9a8, 0.95).setDepth(-1);
+    this.add.circle(700, 50, 36, 0xffe9a8, 0.10).setDepth(-1);
+    const cloud=(cx,cy,cw,a)=>{ const c=this.add.rectangle(cx,cy,cw,10,0xdce8ff,a).setOrigin(0,0).setDepth(-1);
       this.tweens.add({targets:c, x:cx+70, duration:20000+cw*70, yoyo:true, repeat:-1, ease:"Sine.inOut"}); };
-    cloud(150,42,90,0.10); cloud(440,72,140,0.08); cloud(720,30,80,0.10); cloud(1000,86,110,0.07);
+    cloud(150,34,90,0.10); cloud(420,60,130,0.08); cloud(840,26,80,0.10);
+  }
+
+  drawFlowPath(){   // faint dotted line winding through the build order
+    const g = this.add.graphics().setDepth(0); g.lineStyle(2, 0xffcf52, 0.16);
+    let started = false;
+    for (const k of ROOM_ORDER){ const R = ROOMS[k]; if(!R) continue;
+      if (!started){ g.beginPath(); g.moveTo(R.cx, R.cy); started = true; } else g.lineTo(R.cx, R.cy);
+    }
+    g.strokePath();
   }
 
   buildAtmosphere(){
@@ -314,15 +312,15 @@ class FloorScene extends Phaser.Scene {
     };
     for (const key in props){
       const R = ROOMS[key]; if(!R) continue;
-      for (const [kind,fx] of props[key]) this.makeProp(kind, R.x0 + R.w*fx, FLOOR_TOP);
+      for (const [kind,fx] of props[key]) this.makeProp(kind, R.x + R.w*fx, R.floorY+6);
     }
     // the lounge: a couch + coffee table + plants — where idle folks hang out
     const L = ROOMS.lounge;
     if (L){
-      this.makeProp("plant", L.x0 + 16, FLOOR_TOP);
-      this.makeProp("couch", L.cx, FLOOR_TOP + 118);
-      this.makeProp("ctable", L.cx, FLOOR_TOP + 168);
-      this.makeProp("plant", L.x1 - 16, FLOOR_TOP);
+      this.makeProp("plant", L.x + 14, L.floorY+6);
+      this.makeProp("couch", L.cx, L.floorY + 34);
+      this.makeProp("ctable", L.cx, L.floorY + 76);
+      this.makeProp("plant", L.x1 - 14, L.floorY+6);
     }
   }
 
@@ -503,7 +501,7 @@ class FloorScene extends Phaser.Scene {
   }
 
   buildGuardian(){
-    const R = ROOMS.gate, x = Math.round(R.cx), y = FLOOR_BOT-22;
+    const R = ROOMS.gate, x = Math.round(R.cx), y = R.y1-22;
     const c = this.add.container(x,y).setDepth(6);
     c.add(this.add.rectangle(0,0,16,16,0x9aa6c0));
     c.add(this.add.rectangle(0,-12,12,10,0xcfd8ee));
@@ -513,7 +511,7 @@ class FloorScene extends Phaser.Scene {
 
   buildGate(){
     const R = ROOMS.gate;
-    const ax = R.x0+10, aw = R.w-20, atop = FLOOR_TOP+6, abot = FLOOR_BOT+16;
+    const ax = R.x+10, aw = R.w-20, atop = R.y+8, abot = R.y1-8;
     const h = abot-atop;
     this.gateGeom = {ax,aw,atop,abot,h,cx:R.cx};
     const c = this.add.container(0,0).setDepth(5);
@@ -529,7 +527,7 @@ class FloorScene extends Phaser.Scene {
   }
 
   buildChest(){
-    const R = ROOMS.vault, x = Math.round(R.cx), y = FLOOR_BOT-18;
+    const R = ROOMS.vault, x = Math.round(R.cx), y = R.y1-18;
     this.chestPos = {x,y};
     this.chestGlow = this.add.rectangle(x,y-20,90,90,0xffd25a,0).setDepth(4);
     const c = this.add.container(x,y).setDepth(5);
@@ -551,18 +549,18 @@ class FloorScene extends Phaser.Scene {
   buildAgents(){
     let li = 0;                                    // global lounge-slot index
     for (const room in ROSTER){
-      const names = ROSTER[room], R = ROOMS[room];
+      const names = ROSTER[room], R = ROOMS[room]; if (!R) continue;
+      const cols = Math.min(names.length, 3);
       names.forEach((name,i)=>{
-        const span = R.w-64;
-        const hx = R.x0+36 + (names.length>1 ? span*i/(names.length-1) : span/2);
-        // each lead works at their OWN desk inside the room, staggered front/back
-        const hy = FLOOR_TOP + 78 + (i%2)*94;
+        const col = i%cols, row = Math.floor(i/cols);
+        const hx = R.x+28 + (R.w-56)*(cols>1 ? col/(cols-1) : 0.5);
+        const hy = R.floorY + 28 + row*52;          // stand in the room's floor
         const seed = hashStr((this.proj.id||'f')+name), kit = kitFor(name, seed);
-        this.makeWorkstation(hx, hy+22, kit.body);                // desk just in front of them
+        this.makeWorkstation(hx, hy+16, kit.body);                // desk just in front of them
         const a = this.makePerson(hx, hy, kit);
-        a.setScale(2.9).setDepth(hy);                             // y-sort (desk occludes legs)
+        a.setScale(2.0).setDepth(hy);                             // y-sort (desk occludes legs)
         a.home = {x:hx,y:hy}; a.room = room; a.loungeSlot = li++;
-        a.setPosition(hx, hy+200).setAlpha(0.32);
+        a.setPosition(hx, hy+120).setAlpha(0.32);
         a.seen = false; a.bubble = null;
         // Clickable -> interview this lead (their journal + a question), advisory.
         a.setInteractive(new Phaser.Geom.Rectangle(-8,-8,16,15), Phaser.Geom.Rectangle.Contains);
@@ -576,8 +574,9 @@ class FloorScene extends Phaser.Scene {
   }
 
   buildCTO(){
-    const c = this.makePerson(ROOMS.reception.cx, FLOOR_BOT-18, kitFor("CTO", hashStr((this.proj.id||'f')+"CTO")));
-    c.setScale(2.6).setDepth(15);
+    const R = ROOMS.reception;
+    const c = this.makePerson(R.cx, R.standY, kitFor("CTO", hashStr((this.proj.id||'f')+"CTO")));
+    c.setScale(2.0).setDepth(900);   // CTO walks the whole floor -> always on top
     c.add(this.add.text(0,-22,"CTO",{fontFamily:"'PixelFont','Courier New'",fontSize:"5px",color:"#ffcf52"})
       .setOrigin(0.5));
     this.cto = c;
@@ -655,15 +654,15 @@ class FloorScene extends Phaser.Scene {
     this.activeRoom = key;
     for (const k in this.roomGlow)
       this.tweens.add({targets:this.roomGlow[k], fillAlpha:(k===key?0.10:0), duration:420});
-    if (ROOMS[key]) this.walkCTO(ROOMS[key].cx);
+    const R = ROOMS[key]; if (R) this.walkCTO(R.cx, R.standY);
     this.staffRoom(key);                 // active team to desks, everyone else to the lounge
   }
 
   // ---- movement: desks <-> lounge -----------------------------------------
   loungeSpot(i){
-    const R = ROOMS.lounge; if (!R) return {x: 80, y: FLOOR_BOT-40};
+    const R = ROOMS.lounge; if (!R) return {x: 80, y: 700};
     const per = 4, col = i%per, row = Math.floor(i/per);
-    return { x: R.x0 + 22 + col*((R.w-44)/(per-1)), y: FLOOR_TOP + 150 + row*64 };
+    return { x: R.x + 26 + col*((R.w-52)/(per-1)), y: R.floorY + 26 + row*44 };
   }
   walkTo(a, tx, ty, then){
     if (!a) return;
@@ -703,15 +702,16 @@ class FloorScene extends Phaser.Scene {
     for (const s of (this.poolGroup||[])) move(s);
   }
 
-  walkCTO(tx){
+  walkCTO(tx, ty){
     if (!this.cto) return;
-    const dist = Math.abs(tx - this.cto.x);
-    if (dist < 2) return;
-    this.cto.scaleX = (tx < this.cto.x) ? -1 : 1;   // face the way they walk
+    if (ty == null) ty = this.cto.y;
+    const dist = Math.hypot(tx - this.cto.x, ty - this.cto.y);
+    if (dist < 3) return;
+    if (Math.abs(tx - this.cto.x) > 3) this.cto.scaleX = (tx < this.cto.x) ? -1 : 1; // face travel
     this.startWalk(this.cto);
     if (this.ctoWalk) this.ctoWalk.stop();
     this.ctoWalk = this.tweens.add({
-      targets:this.cto, x:tx, duration:Math.max(350,dist*4), ease:"Sine.inOut",
+      targets:this.cto, x:tx, y:ty, duration:Math.max(400,dist*3.5), ease:"Sine.inOut",
       onComplete:()=>{ this.stopWalk(this.cto); this.cto.scaleX = 1; },
     });
   }
@@ -765,7 +765,7 @@ class FloorScene extends Phaser.Scene {
   spawnPickup(room, label){
     const R = ROOMS[room] || ROOMS.product;
     const w = Math.max(64, label.length*7+18);
-    const c = this.add.container(R.cx, FLOOR_BOT-60).setDepth(20);
+    const c = this.add.container(R.cx, R.floorY+24).setDepth(50);
     c.add(this.add.rectangle(0,0,w,18,0x161d31).setStrokeStyle(2,0xffcf52));
     c.add(this.add.text(0,0,"✚ "+label,{fontFamily:"'PixelFont','Courier New'",fontSize:"11px",color:"#ffe9a8"})
       .setOrigin(0.5));
@@ -837,7 +837,7 @@ class FloorScene extends Phaser.Scene {
     const areas = ev.areas || [];
     const rowH = 18, padding = 10, headerH = 22;
     const w = 232, h = headerH + areas.length*rowH + padding;
-    const c = this.add.container(12, FLOOR_TOP + 6).setDepth(28);
+    const c = this.add.container(652, 112).setDepth(28);  // gap between Architecture & Lounge
     c.add(this.add.rectangle(0,0,w,h,0x0c1322,0.88).setOrigin(0,0).setStrokeStyle(2,0xffcf52));
     c.add(this.add.text(8,5,"🏢 ORG · PM",{fontFamily:"'PixelFont','Courier New'",fontSize:"12px",
       fontStyle:"bold",color:"#ffcf52"}).setOrigin(0,0));
@@ -942,7 +942,7 @@ function routeEvent(floor, ev){
       if (ev.concern) logTo(F, "", `💭 ${ev.agent}: "${ev.concern}"`); break;
     case "artifact":
       if (S){ S.spawnPickup(ev.room, ev.label); const pa=S.agents.get(ev.agent);
-        if (pa){ S.hop(pa,1); const R=ROOMS[ev.room]; if(R) S.burst(R.cx, FLOOR_TOP+70, [0xffd95e,0xffffff], 8); } }
+        if (pa){ S.hop(pa,1); const R=ROOMS[ev.room]; if(R) S.burst(R.cx, R.floorY+20, [0xffd95e,0xffffff], 8); } }
       logTo(F, "good", "✚ "+ev.label+"  ·  "+ev.agent); break;
     case "gate":
       F.gates[ev.name] = {status:ev.status, attested:ev.attested, advisory:ev.advisory};

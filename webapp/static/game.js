@@ -268,19 +268,30 @@ class FloorScene extends Phaser.Scene {
       this.add.circle(lx, WALL_TOP+20, 4, 0xffe6a0, 0.95).setDepth(2);
       this.add.circle(lx, WALL_TOP+20, 10, 0xffe6a0, 0.10).setDepth(2); });
     this.drawFlowPath();
-    // coloured floor ZONES denote the sections — no internal walls
+    // each section is a soft RUG on the shared floor (no walls)
+    const cc = 0x232a3c;   // base-floor colour for chamfered corners
     for (const key in ROOMS){
       const R = ROOMS[key];
-      this.add.tileSprite(R.x, R.y, R.w, R.h, "floor_"+key).setOrigin(0,0).setDepth(0).setAlpha(0.9);
-      this.add.rectangle(R.x, R.y, R.w, R.h).setOrigin(0,0).setStrokeStyle(2, shade(R.color,0.7)).setDepth(1);
+      this.add.rectangle(R.x+5, R.y+6, R.w, R.h, 0x000000, 0.22).setOrigin(0,0).setDepth(0);    // soft shadow
+      this.add.tileSprite(R.x, R.y, R.w, R.h, "floor_"+key).setOrigin(0,0).setDepth(0).setAlpha(0.95);
+      this.add.rectangle(R.x, R.y, R.w, R.h, shade(R.color,1.7), 0.10).setOrigin(0,0).setDepth(1); // brighten/pop
       const t = TINT[key]; if (t) this.add.rectangle(R.x, R.y, R.w, R.h, t[0], t[1]).setOrigin(0,0).setDepth(1);
-      const sw = Math.min(R.w-12, R.label.length*7+16);
-      this.add.rectangle(R.cx, R.y+5, sw, 15, shade(R.color,0.32),0.92).setOrigin(0.5,0).setDepth(3)
-        .setStrokeStyle(1, shade(R.color,0.7));
-      this.add.text(R.cx, R.y+7, R.label, {fontFamily:"'PixelFont','Courier New',monospace",
+      // rug trim: light outer band + dark inner line
+      this.add.rectangle(R.x, R.y, R.w, R.h).setOrigin(0,0).setStrokeStyle(3, shade(R.color,1.25)).setDepth(1);
+      this.add.rectangle(R.x+4, R.y+4, R.w-8, R.h-8).setOrigin(0,0).setStrokeStyle(1, shade(R.color,0.55)).setDepth(1);
+      // chamfer the 4 corners so rugs read as rounded
+      [[R.x,R.y],[R.x1-3,R.y],[R.x,R.y1-3],[R.x1-3,R.y1-3]].forEach(([px,py])=>{
+        this.add.rectangle(px,py,3,1,cc).setOrigin(0,0).setDepth(1); this.add.rectangle(px,py,1,3,cc).setOrigin(0,0).setDepth(1); });
+      // floating label plaque (rounded look: dark body + light top edge + dept dot)
+      const sw = Math.min(R.w-12, R.label.length*7+22);
+      this.add.rectangle(R.cx, R.y+6, sw, 16, 0x0e1422, 0.92).setOrigin(0.5,0).setDepth(3).setStrokeStyle(1, shade(R.color,1.1));
+      this.add.rectangle(R.cx, R.y+6, sw, 2, shade(R.color,1.3)).setOrigin(0.5,0).setDepth(4);
+      this.add.rectangle(R.cx-sw/2+8, R.y+13, 5, 5, shade(R.color,1.4)).setDepth(4);   // dept colour dot
+      this.add.text(R.cx+4, R.y+8, R.label, {fontFamily:"'PixelFont','Courier New',monospace",
         fontSize:"10px", fontStyle:"bold", color:"#eef3ff"}).setOrigin(0.5,0).setDepth(4);
       this.roomGlow[key] = this.add.rectangle(R.x, R.y, R.w, R.h, 0xffd25a, 0).setOrigin(0,0).setDepth(1);
     }
+    this.decorateFloor();
     this.furnish();
     this.buildAtmosphere();                       // vignette + dust motes on top
     this.setActiveRoom("reception");
@@ -301,6 +312,19 @@ class FloorScene extends Phaser.Scene {
       if (!started){ g.beginPath(); g.moveTo(R.cx, R.cy); started = true; } else g.lineTo(R.cx, R.cy);
     }
     g.strokePath();
+  }
+
+  decorateFloor(){   // fill the open floor between zones so it isn't bare
+    const P=(k,x,y)=>this.makeProp(k, x, y);
+    // potted plants in the building corners
+    P("plant", 48, WALL_TOP+46); P("plant", W-48, WALL_TOP+50);
+    P("plant", 48, FLOOR_BOTTOM-16); P("plant", W-48, FLOOR_BOTTOM-16);
+    // top-middle gap (between Architecture and Lounge): cooler + plants + bench
+    P("cooler", 700, 196); P("plant", 760, 250); P("bench", 820, 300); P("plant", 660, 300);
+    // aisle between Engineering and QA + by the Gate
+    P("plant", 496, 470); P("cooler", 854, 470); P("plant", 854, 600);
+    // bottom strip
+    P("bench", 300, 740); P("plant", 430, 745); P("plant", 690, 745); P("plant", 980, 740);
   }
 
   buildAtmosphere(){
@@ -376,6 +400,16 @@ class FloorScene extends Phaser.Scene {
       out(0,0,24,7,0x6b4a2c);                                   // coffee table
       c.add(this.add.rectangle(-5,-6,6,4,0x9adfff).setOrigin(0.5,1)); // mug
       c.add(this.add.rectangle(7,-6,8,2,0xe8e0c0).setOrigin(0.5,1));  // a magazine
+    } else if (kind==="cooler"){
+      out(0,0,12,9,0x6a7a8a);                                   // base
+      c.add(this.add.rectangle(0,-9,9,13,0x9fd8ff,0.92).setOrigin(0.5,1)); // water jug
+      c.add(this.add.rectangle(0,-9,9,5,0xcfeaff,0.95).setOrigin(0.5,1));
+      c.add(this.add.rectangle(0,-3,4,2,0x3a4150).setOrigin(0.5,1));       // spout
+    } else if (kind==="bench"){
+      out(0,0,32,5,0x6b4a2c);
+      c.add(this.add.rectangle(-13,5,3,8,0x4a3320).setOrigin(0.5,1));
+      c.add(this.add.rectangle(13,5,3,8,0x4a3320).setOrigin(0.5,1));
+      c.add(this.add.rectangle(0,-2,30,2,0x7a5836).setOrigin(0.5,1));      // backrest slat
     }
     return c;
   }

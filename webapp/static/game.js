@@ -19,22 +19,23 @@ const FLOOR_TOP = 100, FLOOR_BOT = H - 40;   // general playfield bounds (rooms 
 // ---- rooms: a 2D floorplan (one level), placed boxes — non-linear (mockup-style)
 // The elevator switches PROJECTS (floors), not rooms. Each room is its own little
 // interior box {x,y,w,h}; build flow winds Reception->Product->Arch->Eng->QA->Gate->Vault.
+// One open-plan floor: rooms are coloured FLOOR ZONES (no internal walls), placed in 2D.
+const WALL_TOP = 118, FLOOR_BOTTOM = H - 26;     // top perimeter wall / interior floor bounds
 const ROOMS = {
-  product:     {label:"PRODUCT",      color:0x2e3b5a, x:56,  y:104, w:300, h:196},
-  architecture:{label:"ARCHITECTURE", color:0x3a2e5a, x:372, y:104, w:268, h:196},
-  lounge:      {label:"LOUNGE",       color:0x40354f, x:900, y:96,  w:322, h:236},
-  engineering: {label:"ENGINEERING",  color:0x5a3a2e, x:56,  y:330, w:430, h:354},
-  qa:          {label:"QA · REVIEW",  color:0x2e5a4a, x:506, y:330, w:330, h:232},
-  reception:   {label:"RECEPTION",    color:0x3a4a2e, x:506, y:592, w:330, h:108},
-  gate:        {label:"THE GATE",     color:0x444444, x:872, y:452, w:158, h:238},
-  vault:       {label:"VAULT",        color:0x5a4a18, x:1052,y:512, w:150, h:178},
+  product:     {label:"PRODUCT",      color:0x2e3b5a, x:56,  y:150, w:300, h:182},
+  architecture:{label:"ARCHITECTURE", color:0x3a2e5a, x:372, y:150, w:268, h:182},
+  lounge:      {label:"LOUNGE",       color:0x40354f, x:902, y:150, w:300, h:200},
+  engineering: {label:"ENGINEERING",  color:0x5a3a2e, x:56,  y:362, w:430, h:320},
+  qa:          {label:"QA · REVIEW",  color:0x2e5a4a, x:506, y:362, w:330, h:210},
+  reception:   {label:"RECEPTION",    color:0x3a4a2e, x:506, y:600, w:330, h:96},
+  gate:        {label:"THE GATE",     color:0x394a3a, x:872, y:430, w:150, h:266},
+  vault:       {label:"VAULT",        color:0x5a4a18, x:1050,y:470, w:152, h:186},
 };
 const ROOM_ORDER = ["reception","product","architecture","engineering","qa","gate","vault"];
-const TINT = {lounge:[0xffb070,0.08], reception:[0xffd9a0,0.05], gate:[0x6aa0ff,0.07],
-              vault:[0xffd25a,0.08], engineering:[0xff9a5a,0.04]};
+const TINT = {lounge:[0xffb070,0.06], gate:[0x6aa0ff,0.05], vault:[0xffd25a,0.06]};
 (function layout(){ for (const k in ROOMS){ const R = ROOMS[k];
   R.key=k; R.x0=R.x; R.x1=R.x+R.w; R.y1=R.y+R.h; R.cx=R.x+R.w/2; R.cy=R.y+R.h/2;
-  R.wallH=Math.round(R.h*0.42); R.floorY=R.y+R.wallH; R.standY=R.y1-16;   // floor seam / where folks stand
+  R.wallH=0; R.floorY=R.y+18; R.standY=R.y1-14;     // floor zone: stand in its lower area
 } })();
 
 const COLORS = {
@@ -155,6 +156,23 @@ function buildSharedTextures(scene){
     g.fillRect(1,1,18,2); g.fillRect(21,1,18,2); g.fillRect(11,17,18,2); g.fillRect(31,17,18,2);
     g.generateTexture(wkey,40,32); g.destroy();
   }
+  // neutral shared-floor + perimeter-wall tiles (open-plan look)
+  if (!scene.textures.exists("floor_base")){
+    const base=0x232a3c, g=scene.make.graphics({add:false});
+    g.fillStyle(shade(base,1.0),1); g.fillRect(0,0,40,40);
+    g.fillStyle(shade(base,1.14),1); g.fillRect(20,0,20,20); g.fillRect(0,20,20,20);
+    g.fillStyle(shade(base,0.82),1); g.fillRect(0,0,40,1); g.fillRect(0,0,1,40);   // tile seams
+    g.generateTexture("floor_base",40,40); g.destroy();
+  }
+  if (!scene.textures.exists("wall_base")){
+    const base=0x1b2236, g=scene.make.graphics({add:false});
+    g.fillStyle(shade(base,0.7),1); g.fillRect(0,0,40,32);
+    g.fillStyle(shade(base,1.0),1);
+    g.fillRect(1,1,18,14); g.fillRect(21,1,18,14); g.fillRect(-9,17,18,14); g.fillRect(11,17,18,14); g.fillRect(31,17,18,14);
+    g.fillStyle(shade(base,1.3),1);
+    g.fillRect(1,1,18,2); g.fillRect(21,1,18,2); g.fillRect(11,17,18,2); g.fillRect(31,17,18,2);
+    g.generateTexture("wall_base",40,32); g.destroy();
+  }
 }
 
 // =========================================================================== //
@@ -222,61 +240,58 @@ class FloorScene extends Phaser.Scene {
   }
 
   buildRooms(){
-    this.buildSky();                 // sky band on top, dark interior behind the boxes
+    this.buildSky();                              // roof + night sky strip (no sun)
     this.roomGlow = {};
-    this.drawFlowPath();             // dotted path winding through the rooms
+    // ONE shared open floor across the whole interior
+    this.add.tileSprite(24, WALL_TOP, W-48, FLOOR_BOTTOM-WALL_TOP, "floor_base").setOrigin(0,0).setDepth(0);
+    // perimeter walls only (top + left + right + bottom edges)
+    this.add.tileSprite(0, 50, W, WALL_TOP-50, "wall_base").setOrigin(0,0).setDepth(1);
+    this.add.rectangle(0, 46, W, 6, 0x2a3550).setOrigin(0,0).setDepth(1);                 // roof eave
+    this.add.rectangle(0, WALL_TOP-4, W, 4, 0x0a0d16).setOrigin(0,0).setDepth(1);          // baseboard
+    this.add.rectangle(0, 50, 24, FLOOR_BOTTOM-50, 0x141a2c).setOrigin(0,0).setDepth(1);
+    this.add.rectangle(W-24, 50, 24, FLOOR_BOTTOM-50, 0x141a2c).setOrigin(0,0).setDepth(1);
+    this.add.rectangle(0, FLOOR_BOTTOM, W, H-FLOOR_BOTTOM, 0x0e1322).setOrigin(0,0).setDepth(1);
+    // windows in the top wall (NO sun) + god-rays into the floor
+    for (let wx=80; wx<W-110; wx+=210){
+      const ww=78, wh=44, wy=60;
+      this.add.rectangle(wx, wy, ww+6, wh+6, 0x10182c).setOrigin(0,0).setDepth(2);
+      const glow=this.add.rectangle(wx+3, wy+3, ww, wh, 0x284a70).setOrigin(0,0).setDepth(2);
+      this.add.rectangle(wx+3, wy+3, ww, wh*0.5, 0x3a6ea0).setOrigin(0,0).setDepth(2);     // sky band, no sun
+      this.add.rectangle(wx+2+ww/2, wy+3, 2, wh, 0x10182c).setOrigin(0,0).setDepth(2);
+      this.add.rectangle(wx+3, wy+3+wh/2, ww, 2, 0x10182c).setOrigin(0,0).setDepth(2);
+      this.tweens.add({targets:glow, fillAlpha:{from:0.8,to:1}, duration:3000, yoyo:true, repeat:-1});
+      const ray=this.add.triangle(wx+ww/2+3, wy+wh+4, -ww*0.5,170, ww*0.5,170, 0,0, 0xbfd2ff, 0.04).setDepth(0);
+      this.tweens.add({targets:ray, alpha:{from:0.02,to:0.06}, duration:3600, yoyo:true, repeat:-1});
+    }
+    // a few hanging lamps over the open floor
+    [240,560,1140].forEach(lx=>{ this.add.rectangle(lx, WALL_TOP, 1, 16, 0x2a2f40).setOrigin(0,0).setDepth(2);
+      this.add.circle(lx, WALL_TOP+20, 4, 0xffe6a0, 0.95).setDepth(2);
+      this.add.circle(lx, WALL_TOP+20, 10, 0xffe6a0, 0.10).setDepth(2); });
+    this.drawFlowPath();
+    // coloured floor ZONES denote the sections — no internal walls
     for (const key in ROOMS){
       const R = ROOMS[key];
-      // each room is a placed BOX: wall (top) + floor (bottom), framed
-      this.add.tileSprite(R.x, R.y, R.w, R.wallH, "wall_"+key).setOrigin(0,0).setDepth(0);
-      this.add.tileSprite(R.x, R.floorY, R.w, R.h-R.wallH, "floor_"+key).setOrigin(0,0).setDepth(0);
-      this.add.rectangle(R.x-2, R.y-6, R.w+4, 6, shade(R.color,0.72)).setOrigin(0,0).setDepth(2); // roof eave
+      this.add.tileSprite(R.x, R.y, R.w, R.h, "floor_"+key).setOrigin(0,0).setDepth(0).setAlpha(0.9);
+      this.add.rectangle(R.x, R.y, R.w, R.h).setOrigin(0,0).setStrokeStyle(2, shade(R.color,0.7)).setDepth(1);
       const t = TINT[key]; if (t) this.add.rectangle(R.x, R.y, R.w, R.h, t[0], t[1]).setOrigin(0,0).setDepth(1);
-      this.add.rectangle(R.x, R.floorY-4, R.w, 4, shade(R.color,0.5)).setOrigin(0,0).setDepth(1); // baseboard
-      // box frame (dark outer + light inner) so each room reads as a room
-      this.add.rectangle(R.x, R.y, R.w, R.h).setOrigin(0,0).setStrokeStyle(3,0x0a0d16).setDepth(2);
-      this.add.rectangle(R.x+1.5, R.y+1.5, R.w-3, R.h-3).setOrigin(0,0).setStrokeStyle(1,shade(R.color,0.7)).setDepth(2);
-      // sign at the top of the box
       const sw = Math.min(R.w-12, R.label.length*7+16);
-      this.add.rectangle(R.cx, R.y+4, sw, 16, shade(R.color,0.26)).setOrigin(0.5,0).setDepth(3)
-        .setStrokeStyle(2, shade(R.color,0.62));
-      this.add.text(R.cx, R.y+6, R.label, {fontFamily:"'PixelFont','Courier New',monospace",
+      this.add.rectangle(R.cx, R.y+5, sw, 15, shade(R.color,0.32),0.92).setOrigin(0.5,0).setDepth(3)
+        .setStrokeStyle(1, shade(R.color,0.7));
+      this.add.text(R.cx, R.y+7, R.label, {fontFamily:"'PixelFont','Courier New',monospace",
         fontSize:"10px", fontStyle:"bold", color:"#eef3ff"}).setOrigin(0.5,0).setDepth(4);
-      // lit window + god-ray in the wall
-      const wy = R.y+26, ww = Math.min(70, R.w-44), wh = Math.min(54, R.wallH-30);
-      if (wh > 16 && ww > 22){
-        this.add.rectangle(R.cx, wy, ww+6, wh+6, shade(R.color,0.16)).setOrigin(0.5,0).setDepth(2);
-        const glow = this.add.rectangle(R.cx, wy+3, ww, wh, 0x1c4a86).setOrigin(0.5,0).setDepth(2);
-        this.add.rectangle(R.cx, wy+3, ww, wh*0.5, 0x357bbe).setOrigin(0.5,0).setDepth(2);
-        this.add.circle(R.cx+ww*0.28, wy+12, 4, 0xffe9a8, 0.9).setDepth(2);
-        this.add.rectangle(R.cx, wy+3, 2, wh, shade(R.color,0.16)).setOrigin(0.5,0).setDepth(2);
-        this.tweens.add({targets:glow, fillAlpha:{from:0.7,to:1}, duration:2600, yoyo:true, repeat:-1});
-        const ray = this.add.triangle(R.cx, wy+wh+2, -ww*0.4,70, ww*0.4,70, 0,0, 0xffe9a8, 0.05).setDepth(2);
-        this.tweens.add({targets:ray, alpha:{from:0.03,to:0.08}, duration:3200, yoyo:true, repeat:-1});
-      }
-      // hanging lamp + rug in larger rooms
-      if (R.w > 200){
-        this.add.rectangle(R.x+30, R.y, 1, 12, 0x2a2f40).setOrigin(0,0).setDepth(2);
-        this.add.circle(R.x+30, R.y+14, 4, 0xffe6a0, 0.95).setDepth(2);
-        this.add.circle(R.x+30, R.y+14, 9, 0xffe6a0, 0.10).setDepth(2);
-      }
-      this.add.rectangle(R.cx, R.y1-7, Math.min(R.w-20, 120), 7, shade(R.color,0.6), 0.5).setDepth(1); // rug
       this.roomGlow[key] = this.add.rectangle(R.x, R.y, R.w, R.h, 0xffd25a, 0).setOrigin(0,0).setDepth(1);
     }
     this.furnish();
-    this.buildAtmosphere();          // vignette + dust motes on top
+    this.buildAtmosphere();                       // vignette + dust motes on top
     this.setActiveRoom("reception");
   }
 
-  buildSky(){
-    this.add.rectangle(0,0,W,H,0x0c1020).setOrigin(0,0).setDepth(-2);     // dark building interior
-    [[0,0x111a30],[36,0x1a2745],[72,0x294568]].forEach(([y,c])=>
-      this.add.rectangle(0,y,W,108-y,c).setOrigin(0,0).setDepth(-1));      // sky band on top
-    this.add.circle(700, 50, 22, 0xffe9a8, 0.95).setDepth(-1);
-    this.add.circle(700, 50, 36, 0xffe9a8, 0.10).setDepth(-1);
-    const cloud=(cx,cy,cw,a)=>{ const c=this.add.rectangle(cx,cy,cw,10,0xdce8ff,a).setOrigin(0,0).setDepth(-1);
-      this.tweens.add({targets:c, x:cx+70, duration:20000+cw*70, yoyo:true, repeat:-1, ease:"Sine.inOut"}); };
-    cloud(150,34,90,0.10); cloud(420,60,130,0.08); cloud(840,26,80,0.10);
+  buildSky(){   // roof + a thin night-sky strip above the building — NO sun
+    this.add.rectangle(0,0,W,H,0x0c1020).setOrigin(0,0).setDepth(-2);
+    [[0,0x10182e],[22,0x1c2742]].forEach(([y,c])=>this.add.rectangle(0,y,W,52-y,c).setOrigin(0,0).setDepth(-1));
+    const cloud=(cx,cy,cw,a)=>{ const c=this.add.rectangle(cx,cy,cw,7,0x2a3a58,a).setOrigin(0,0).setDepth(-1);
+      this.tweens.add({targets:c, x:cx+60, duration:22000, yoyo:true, repeat:-1, ease:"Sine.inOut"}); };
+    cloud(160,18,90,0.5); cloud(520,30,130,0.4); cloud(900,14,80,0.5);
   }
 
   drawFlowPath(){   // faint dotted line winding through the build order

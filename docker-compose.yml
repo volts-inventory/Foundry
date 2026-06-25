@@ -38,6 +38,8 @@ volumes:
   pg_data: {}
   # SQLite checkpoint DB (default backend). Used unless FOUNDRY_CHECKPOINTER=postgres.
   foundry_state: {}
+  # Ollama model weights (only with the `ollama` profile). EKS: a PVC on the GPU node.
+  ollama_models: {}
 
 services:
   # --- the Foundry app (the only service built from this repo) ---------------
@@ -61,11 +63,30 @@ services:
       # no credential is hardcoded). EKS: an RDS endpoint + a K8s Secret.
       FOUNDRY_POSTGRES_DSN: "postgresql://foundry:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/foundry"
       # The app reaches model providers ONLY through the proxy service (egress
-      # chokepoint). No provider base-url / api-key on the app itself.
+      # chokepoint) in the ISOLATED topology. No provider base-url / api-key on
+      # the app itself there.
       FOUNDRY_PROXY_URL: "http://proxy:8080"
       # Side-service endpoints (network-isolated; see comments below).
       FOUNDRY_SIGNER_URL: "http://signer:8443"
       FOUNDRY_BUILDER_URL: "http://builder:9000"
+
+      # --- model backend selection (foundry.proxy.backend_from_env) -----------
+      # Default "anthropic". Config-swap to claude-cli | codex | ollama-gemma —
+      # the SAME factory flow, a different backend (no call-site change).
+      FOUNDRY_MODEL_BACKEND: "${FOUNDRY_MODEL_BACKEND:-anthropic}"
+      # CLI-backend credentials (claude-cli / codex), HEADLESS: injected as
+      # secrets from .env, NEVER baked into the image. Interactive `claude login`
+      # does not work in a container — use an API key (or a mounted creds file;
+      # see the Dockerfile). Empty/harmless for the other backends. In the
+      # isolated topology these move to the proxy egress service (which builds the
+      # backend), not the app — kept here for the single-host/dev model where the
+      # app builds the proxy in-process.
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      # ollama-gemma: point every worker at the ONE shared Ollama service over the
+      # network (the GPU is a host/infra concern, NOT a per-container one). Bring
+      # the service up with:  docker compose --profile ollama up
+      FOUNDRY_OLLAMA_URL: "${FOUNDRY_OLLAMA_URL:-http://ollama:11434}"
     volumes:
       - foundry_cas:/var/lib/foundry/cas
       - foundry_state:/var/lib/foundry/state
@@ -132,6 +153,41 @@ services:
     restart: "no"
     networks: [isolated]
     # EKS: gVisor/Kata runtimeClass + NetworkPolicy denying egress.
+
+  # --- ollama: ONE shared local-model service (opt-in) -----------------------
+  # For FOUNDRY_MODEL_BACKEND=ollama-gemma. Run it ONCE and point every app/worker
+  # at it (FOUNDRY_OLLAMA_URL=http://ollama:11434) — never an Ollama per worker.
+  # The GPU is a HOST/infra concern: this service owns it; workers just make HTTP
+  # calls. Opt-in via the `ollama` profile so the default stack stays lightweight:
+  #     docker compose --profile ollama up
+  #
+  # GPU PASSTHROUGH:
+  #   * Linux + NVIDIA: the `deploy.resources.reservations.devices` block below
+  #     (needs the NVIDIA Container Toolkit). EKS: schedule onto a GPU node pool.
+  #   * macOS (Apple Silicon): ⚠ Docker Desktop CANNOT pass the Apple GPU/unified
+  #     memory into a Linux container — Ollama-in-Docker runs CPU-only (slow). Run
+  #     Ollama NATIVELY on the host instead and set
+  #     FOUNDRY_OLLAMA_URL=http://host.docker.internal:11434 (drop this service).
+  ollama:
+    image: ollama/ollama:0.3.14@sha256:REPLACE_ME_OLLAMA
+    profiles: ["ollama"]
+    restart: unless-stopped
+    networks: [frontend]   # reachable by the app's egress path; no inbound internet
+    volumes:
+      - ollama_models:/root/.ollama   # pulled model weights persist across restarts
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    # NVIDIA GPU reservation (Linux). Remove on a CPU-only / macOS host.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: ["gpu"]
 
   # === observability (PLACEHOLDER — intentionally not real infra) ============
   # The accept criteria mention bundled OTel + Prometheus + Grafana + Loki. That

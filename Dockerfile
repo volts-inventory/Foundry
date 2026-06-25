@@ -57,6 +57,30 @@ COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /app/foundry ./foundry
 COPY pyproject.toml ./
 
+# --- optional: CLI model backends (claude -p / codex) ------------------------
+# OFF by default (the anthropic / ollama backends need no extra binary, so the
+# base image stays slim). Build with `--build-arg INSTALL_CLI_BACKENDS=true` to
+# bake the CLIs in for FOUNDRY_MODEL_BACKEND=claude-cli|codex.
+#
+# HEADLESS AUTH (the load-bearing part): interactive `claude login` / `codex
+# login` CANNOT run in a container. Authenticate by INJECTING A CREDENTIAL as a
+# secret — NEVER baked into the image:
+#   * API key via env — ANTHROPIC_API_KEY (claude-cli) / OPENAI_API_KEY (codex);
+#     the proxy passes its env through to the CLI subprocess (cli_transports
+#     inherits os.environ), so the key just needs to be on the process. In
+#     compose that's a .env value; in K8s a Secret env-var.
+#   * OR a pre-provisioned credentials file mounted read-only at the CLI's config
+#     dir under $HOME (HOME=/app here, so e.g. /app/.claude). Mount it; do not
+#     COPY it into the image.
+ARG INSTALL_CLI_BACKENDS=false
+RUN if [ "$INSTALL_CLI_BACKENDS" = "true" ]; then \
+      apt-get update \
+      && apt-get install -y --no-install-recommends nodejs npm \
+      && npm install -g @anthropic-ai/claude-code @openai/codex \
+      && apt-get purge -y --auto-remove \
+      && rm -rf /var/lib/apt/lists/* /root/.npm; \
+    fi
+
 # Volume mount points for the durable CAS + checkpoint DB (compose/K8s provide
 # the actual volumes; these are owned by the non-root runtime user).
 RUN mkdir -p /var/lib/foundry/cas /var/lib/foundry/state \

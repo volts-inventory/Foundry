@@ -119,6 +119,65 @@ authoring environment — hence it is a documented swap point, not fabricated
 untestable code. To complete it: `uv sync --extra postgres`, build the
 shared-connection `PostgresSaver` path, and add tests against a real Postgres.
 
+## Model backends — credentials & local models
+
+The factory flow is identical across backends; only `FOUNDRY_MODEL_BACKEND`
+(`anthropic` | `claude-cli` | `codex` | `ollama-gemma`) changes which proxy is
+built (`foundry.proxy.backend_from_env`). Two backend families need deployment
+care.
+
+### CLI backends (`claude-cli`, `codex`) — headless auth
+
+The CLI binaries must be **in the image** and **authenticated without an
+interactive login** (there is no TTY in a container).
+
+```bash
+# Bake the CLIs in (off by default — keeps the base image slim):
+docker build --build-arg INSTALL_CLI_BACKENDS=true -t foundry:cli .
+
+# Authenticate by INJECTING A CREDENTIAL (never baked into the image):
+cat >> .env <<'EOF'
+FOUNDRY_MODEL_BACKEND=claude-cli
+ANTHROPIC_API_KEY=sk-ant-...        # claude-cli   (OPENAI_API_KEY for codex)
+EOF
+docker compose up --build
+```
+
+- **Interactive `claude login` / `codex login` do NOT work headless** — use an
+  API key (above) or mount a pre-provisioned credentials file **read-only** at the
+  CLI's config dir under `$HOME` (the image sets `HOME=/app`, so e.g.
+  `./creds/claude:/app/.claude:ro`). Never `COPY` a credential into the image.
+- The proxy passes its process env through to the CLI subprocess
+  (`cli_transports` inherits `os.environ`), so the key only needs to be on the
+  process — a compose `.env` value here, a **K8s Secret** env-var in EKS.
+- In the isolated topology the CLI + credential live on the **proxy egress
+  service** (which builds the backend), not the app.
+
+### Local models (`ollama-gemma`) — ONE shared service
+
+Run **one** Ollama service and point every app/worker at it — never an Ollama per
+worker (the GPU is a host/infra concern, not per-container).
+
+```bash
+cat >> .env <<'EOF'
+FOUNDRY_MODEL_BACKEND=ollama-gemma
+FOUNDRY_OLLAMA_URL=http://ollama:11434   # the shared service (compose default)
+EOF
+docker compose --profile ollama up        # brings up the shared ollama service
+```
+
+- `FOUNDRY_OLLAMA_URL` is read by `backend_from_env` and handed to the Ollama
+  transport, so all workers share one endpoint (an explicit `base_url=` still
+  wins). Tested: `tests/test_cli_transports.py`.
+- **GPU**: Linux + NVIDIA uses the compose `deploy.resources.reservations.devices`
+  block (needs the NVIDIA Container Toolkit); EKS schedules the Ollama Deployment
+  onto a **GPU node pool**, workers reach it by service DNS.
+- **macOS (Apple Silicon) caveat**: Docker Desktop **cannot** pass the Apple
+  GPU/unified memory into a Linux container, so Ollama-in-Docker runs CPU-only.
+  Run Ollama **natively on the host** and set
+  `FOUNDRY_OLLAMA_URL=http://host.docker.internal:11434` (drop the `ollama`
+  service).
+
 ## What this task does NOT do (honesty)
 
 - Does **not** build the real proxy / signer / builder services — they are

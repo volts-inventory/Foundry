@@ -324,6 +324,30 @@ def test_backend_from_env_selects_named_backend() -> None:
     assert proxy.tier_models["T1"] == "gemma3:27b"
 
 
+def test_backend_from_env_points_ollama_at_shared_endpoint() -> None:
+    # A deployment sets FOUNDRY_OLLAMA_URL so every worker uses ONE shared Ollama
+    # service over the network, not the hardcoded localhost (the GPU is infra's).
+    proxy = backend_from_env(
+        {"FOUNDRY_MODEL_BACKEND": "ollama-gemma", "FOUNDRY_OLLAMA_URL": "http://ollama:11434"},
+        http_post=_ollama_post({}),
+    )
+    assert proxy._transport._url == "http://ollama:11434/api/chat"
+
+
+def test_backend_from_env_ollama_defaults_to_localhost() -> None:
+    proxy = backend_from_env({"FOUNDRY_MODEL_BACKEND": "ollama-gemma"}, http_post=_ollama_post({}))
+    assert proxy._transport._url == "http://localhost:11434/api/chat"
+
+
+def test_backend_from_env_explicit_base_url_wins_over_env() -> None:
+    proxy = backend_from_env(
+        {"FOUNDRY_MODEL_BACKEND": "ollama-gemma", "FOUNDRY_OLLAMA_URL": "http://env:11434"},
+        base_url="http://explicit:11434",
+        http_post=_ollama_post({}),
+    )
+    assert proxy._transport._url == "http://explicit:11434/api/chat"
+
+
 def test_build_backend_rejects_unknown_name() -> None:
     with pytest.raises(ValueError, match="unknown backend"):
         build_backend("bedrock")  # type: ignore[arg-type]

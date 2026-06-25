@@ -44,6 +44,8 @@ const AISLE_HY = [GY0+CELL_H+AISLE/2, GY0+2*CELL_H+AISLE+AISLE/2];
   R.key=k; R.x0=R.x; R.x1=R.x+R.w; R.y1=R.y+R.h; R.cx=R.x+R.w/2; R.cy=R.y+R.h/2;
   R.wallH=0; R.floorY=R.y+18; R.standY=R.y1-14;
 } })();
+function roomAt(x,y){ for (const k in ROOMS){ const R=ROOMS[k];
+  if (x>=R.x && x<=R.x1 && y>=R.y && y<=R.y1) return k; } return null; }
 
 const COLORS = {
   "Stakeholder Proxy":0x7fd1ff,"Product Manager":0xffd95e,"Criteria Critic":0xff8fae,
@@ -734,16 +736,25 @@ class FloorScene extends Phaser.Scene {
     const per = 4, col = i%per, row = Math.floor(i/per);
     return { x: R.x + 26 + col*((R.w-52)/(per-1)), y: R.floorY + 26 + row*44 };
   }
+  // shortest path along the "#" corridors: exit to the nearest aisle, run the aisles,
+  // then step into the destination. (Within-room moves stay direct — handled in walkTo.)
+  corridorRoute(sx,sy,tx,ty){
+    const near=(arr,v)=>arr.reduce((b,n)=>Math.abs(n-v)<Math.abs(b-v)?n:b, arr[0]);
+    const exitY=near(AISLE_HY,sy), entryY=near(AISLE_HY,ty), vx=near(AISLE_VX,(sx+tx)/2);
+    const pts=[[sx,exitY]];                              // step out to the nearest horizontal aisle
+    if (exitY!==entryY){ pts.push([vx,exitY],[vx,entryY],[tx,entryY]); }  // switch rows via a vertical aisle
+    else { pts.push([tx,exitY]); }                       // same aisle -> straight along it
+    pts.push([tx,ty]);                                   // step into the destination
+    return pts;
+  }
   walkTo(a, tx, ty, then){
     if (!a) return;
     if (a.moveTween) a.moveTween.stop();
     if (Math.hypot(tx-a.x, ty-a.y) < 3){ a.x=tx; a.y=ty; if (then) then(); return; }
-    // cross-floor moves route along the corridor aisles (L/Z path); short hops are direct
-    let pts;
-    if (Math.hypot(tx-a.x, ty-a.y) > 140){
-      const ay = AISLE_HY.reduce((b,y)=> Math.abs(y-(a.y+ty)/2) < Math.abs(b-(a.y+ty)/2) ? y : b, AISLE_HY[0]);
-      pts = [[a.x, ay], [tx, ay], [tx, ty]];
-    } else pts = [[tx, ty]];
+    // within the same room (or a tiny hop): walk freely/direct. Between rooms: corridors.
+    const ra = roomAt(a.x, a.y), rb = roomAt(tx, ty);
+    const pts = ((ra && ra===rb) || Math.hypot(tx-a.x, ty-a.y) < 50)
+      ? [[tx, ty]] : this.corridorRoute(a.x, a.y, tx, ty);
     this.startWalk(a);
     let i = 0;
     const step = ()=>{

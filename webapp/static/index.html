@@ -49,6 +49,7 @@
         <label><input type="radio" name="intake" value="idea" checked /> 💡 Idea only</label>
         <label><input type="radio" name="intake" value="spec" /> 📄 Paste spec</label>
         <label><input type="radio" name="intake" value="zip" /> 🗂 Upload .zip</label>
+        <label><input type="radio" name="intake" value="chat" /> 🗣 Work it out with the leads</label>
       </div>
       <div class="intake-panel hidden" data-mode="spec">
         <label>Full spec (markdown / text) — grounds the PRD</label>
@@ -59,6 +60,15 @@
         <label>Zip of <code>.md</code> / <code>.txt</code> docs — read as the spec</label>
         <input id="zip-file" type="file" accept=".zip,application/zip" />
         <p class="cp-note">Docs are read as plain spec input; they inform the PRD, never bypass a gate.</p>
+      </div>
+      <div class="intake-panel hidden" data-mode="chat">
+        <div id="chat-log"></div>
+        <div class="chat-row">
+          <input id="chat-msg" type="text" placeholder="Tell the leads what you're thinking…" />
+          <button id="chat-send" type="button">send</button>
+        </div>
+        <p class="cp-note">The Program Manager, Architect &amp; Tech-Leads help shape a spec (best on a real backend; mock can't converse). “Break ground” builds from the draft below.</p>
+        <details id="chat-spec-wrap"><summary>📝 Draft spec (updates as you talk)</summary><pre id="chat-spec">(nothing yet)</pre></details>
       </div>
 
       <div class="row">

@@ -656,6 +656,39 @@ for(const r of document.querySelectorAll('input[name="intake"]')){
       p.classList.toggle("hidden", p.dataset.mode !== v);
   });
 }
+// ---- spec chat with the leads (intake mode "chat") -------------------------
+let chatSession = null, chatDraft = "";
+function appendChatTurn(role, text){
+  const log = document.getElementById("chat-log");
+  const cls = role === "user" ? "user" : (role === "system" ? "system" : "lead");
+  const div = document.createElement("div");
+  div.className = "chat-turn "+cls;
+  div.innerHTML = `<span class="who"></span> <span class="txt"></span>`;
+  div.querySelector(".who").textContent = role === "user" ? "you" : role;
+  div.querySelector(".txt").textContent = text;
+  log.appendChild(div); log.scrollTop = log.scrollHeight;
+}
+function sendChat(){
+  const input = document.getElementById("chat-msg");
+  const msg = input.value.trim();
+  if(!msg) return;
+  input.value = "";
+  appendChatTurn("user", msg);
+  appendChatTurn("system", "…leads are thinking…");
+  const backend = document.getElementById("backend-select").value;
+  fetch("/api/ideate", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({session:chatSession, message:msg, backend})})
+   .then(r=>r.json())
+   .then(d=>{
+     // drop the "thinking…" placeholder
+     const log=document.getElementById("chat-log"); if(log.lastChild) log.removeChild(log.lastChild);
+     chatSession = d.session;
+     for(const m of (d.messages||[])) appendChatTurn(m.role||"lead", m.text||"");
+     if(typeof d.spec === "string"){ chatDraft = d.spec; document.getElementById("chat-spec").textContent = chatDraft || "(nothing yet)"; }
+   })
+   .catch(()=>{ const log=document.getElementById("chat-log"); if(log.lastChild) log.removeChild(log.lastChild); appendChatTurn("system","(chat request failed)"); });
+}
+
 function fileToB64(file){
   return new Promise((res,rej)=>{
     const r=new FileReader();
@@ -679,10 +712,19 @@ document.getElementById("start-btn").onclick=async ()=>{
     if(!f){ alert("Choose a .zip of docs first."); return; }
     try { extra.spec_zip_b64=await fileToB64(f); }
     catch(_){ alert("Could not read that file."); return; }
+  } else if(intake==="chat"){
+    if(!chatDraft.trim()){ alert("Chat with the leads first to draft a spec (or pick another mode)."); return; }
+    extra.spec_text=chatDraft;
   }
   newModal.classList.add("hidden");
   newProject(req, mode, sup, backend, packs, extra);
+  // reset the chat for the next project
+  chatSession=null; chatDraft="";
+  document.getElementById("chat-log").innerHTML="";
+  document.getElementById("chat-spec").textContent="(nothing yet)";
 };
+document.getElementById("chat-send").onclick=sendChat;
+document.getElementById("chat-msg").addEventListener("keydown",(e)=>{ if(e.key==="Enter"){ e.preventDefault(); sendChat(); }});
 document.getElementById("cp-approve").onclick=()=>sendDecision("approve");
 document.getElementById("cp-reject").onclick=()=>sendDecision("reject");
 document.getElementById("output-btn").onclick=openFiles;

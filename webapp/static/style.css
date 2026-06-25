@@ -113,6 +113,20 @@ button.danger{background:#6b1f28;border-color:var(--red);color:#ffe0e3}
 .intake-panel{margin-top:6px}
 .intake-panel code{background:#0e1424;border:1px solid var(--line);border-radius:3px;padding:0 4px}
 input[type=file]{color:var(--dim);font-family:inherit;font-size:12px}
+
+/* ---- spec chat with the leads ---- */
+#chat-log{border:2px solid var(--line);border-radius:6px;background:#0e1424;
+  height:min(34vh,260px);overflow:auto;padding:8px;font-size:12px}
+.chat-turn{margin:0 0 9px;line-height:1.4}
+.chat-turn .who{color:var(--gold);font-weight:bold;font-size:11px;text-transform:uppercase}
+.chat-turn.user .who{color:var(--blue)}
+.chat-turn.system .who{color:var(--dim)}
+.chat-turn .txt{color:var(--ink);white-space:pre-wrap}
+.chat-row{display:flex;gap:8px;margin-top:8px}
+.chat-row input{flex:1}
+#chat-spec-wrap summary{cursor:pointer;color:var(--gold);font-size:12px;margin-top:8px}
+#chat-spec{max-height:24vh;overflow:auto;white-space:pre-wrap;background:#0e1424;
+  border:2px solid var(--line);border-radius:6px;padding:8px;font-size:11px;color:var(--dim);margin:6px 0 0}
 .dialog .row{display:flex;gap:10px;align-items:center}
 .dialog .row label{margin:10px 0 4px}
 .dialog .row select{flex:1}

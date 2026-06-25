@@ -77,6 +77,70 @@ def _safe_unzip_spec(b64: str, dest: Path) -> int:
     return written
 
 
+# --- interactive spec chat with the leads (intake option 4) ----------------- #
+# Advisory authoring aid (same posture as foundry.ideation): it produces ONLY
+# text — a transcript + a running draft spec — and writes NO FactoryState / gate /
+# verdict. "Lock spec & build" just feeds the draft back as run(spec=<text>); the
+# spec gate + criteria machinery are unchanged (agents propose, gates decide).
+_CHATS: dict[str, dict[str, Any]] = {}  # session id -> {"history":[...], "spec":str}
+
+_LEADS_SOP = (
+    "You are a product leadership round-table — the Program Manager, the Principal "
+    "Architect, and 1-2 domain Tech-Leads — helping a CTO turn an idea into a "
+    "buildable spec. Each turn, reply as 2-4 of these voices (set role to the "
+    "title), each one or two concise, substantive sentences: ask the single most "
+    "important clarifying question, surface a risk, or propose a concrete "
+    "capability / acceptance criterion. Then output spec_markdown: the CURRENT best "
+    "full draft spec (goals, constraints, interfaces, acceptance criteria) "
+    "reflecting the whole conversation so far. Reply with JSON only."
+)
+_CHAT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "messages": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"role": {"type": "string"}, "text": {"type": "string"}},
+                "required": ["role", "text"],
+                "additionalProperties": False,
+            },
+        },
+        "spec_markdown": {"type": "string"},
+    },
+    "required": ["messages", "spec_markdown"],
+    "additionalProperties": False,
+}
+
+
+def _chat_proxy(backend: str) -> Any:
+    """A ModelProviderProxy for the spec chat — mock returns canned/empty, the real
+    backends actually converse. Uses the observation path (complete), no signer."""
+    from foundry.proxy.cli_transports import build_backend
+    from foundry.proxy.model_provider_proxy import ModelProviderProxy
+    from foundry.proxy.test_doubles import MockTransport
+
+    if backend == "mock":
+        return ModelProviderProxy(MockTransport(default_text="{}"))
+    return build_backend(backend)  # type: ignore[arg-type]
+
+
+def _ideate_turn(backend: str, history: list[dict[str, str]]) -> dict[str, Any]:
+    """One round-table turn over the chosen backend; returns {messages, spec_markdown}."""
+    proxy = _chat_proxy(backend)
+    messages = [
+        {
+            "role": "user" if h["role"] == "user" else "assistant",
+            "content": h["text"] if h["role"] == "user" else f"[{h['role']}] {h['text']}",
+        }
+        for h in history
+    ]
+    result = proxy.complete(
+        "ideation_chat", "T1", _LEADS_SOP, messages, purpose="ideation", schema=_CHAT_SCHEMA
+    )
+    return result.parsed or {}
+
+
 @dataclass
 class Project:
     id: str
@@ -324,10 +388,46 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == "/api/projects":
             self._new_project()
+        elif path == "/api/ideate":
+            self._ideate()
         elif path.startswith("/api/decision/"):
             self._decision(path.rsplit("/", 1)[-1])
         else:
             self._json(404, {"error": "not found"})
+
+    def _ideate(self) -> None:
+        from foundry.cli import BACKENDS
+
+        body = self._read_json()
+        session = str(body.get("session", "")).strip() or uuid.uuid4().hex[:12]
+        message = str(body.get("message", "")).strip()
+        backend = str(body.get("backend", "mock"))
+        if backend not in BACKENDS:
+            backend = "mock"
+        chat = _CHATS.setdefault(session, {"history": [], "spec": ""})
+        if message:
+            chat["history"].append({"role": "user", "text": message})
+        try:
+            reply = _ideate_turn(backend, chat["history"])
+        except Exception as exc:  # advisory aid — never 500 the chat
+            self._json(200, {"session": session, "messages":
+                             [{"role": "system", "text": f"(ideation error: {exc})"}],
+                             "spec": chat["spec"]})
+            return
+        msgs = [
+            {"role": str(m.get("role", "lead")), "text": str(m.get("text", ""))}
+            for m in (reply.get("messages") or []) if str(m.get("text", "")).strip()
+        ]
+        if not msgs:
+            msgs = [{"role": "system", "text":
+                     "(no reply — on the mock backend the leads can't really converse; "
+                     "pick a real backend for an interactive spec session.)"}]
+        spec = str(reply.get("spec_markdown") or chat["spec"])
+        for m in msgs:
+            chat["history"].append(m)
+        chat["spec"] = spec
+        chat["history"] = chat["history"][-40:]  # bound the session
+        self._json(200, {"session": session, "messages": msgs, "spec": spec})
 
     def _new_project(self) -> None:
         from foundry.cli import BACKENDS  # validate against the real backend set

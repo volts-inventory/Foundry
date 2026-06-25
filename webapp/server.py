@@ -23,6 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from foundry.schemas.architecture import CANONICAL_AREAS
 from webapp.events import events_for_payload, events_for_result
 
 _STATIC = Path(__file__).parent / "static"
@@ -157,10 +158,45 @@ class Project:
     decisions: queue.Queue[str] = field(default_factory=queue.Queue)
     seen_uris: set[str] = field(default_factory=set)
     status: str = "running"
+    passed: bool = False  # final verdict (for elevator/reload rehydration)
+    awaiting: bool = False  # at a checkpoint right now (badge survives reload)
+    journal: list[dict[str, Any]] = field(default_factory=list)  # latest agent journal ([11])
     out_base: Path | None = None  # this floor's output dir (code/ + docs/)
 
 
 _PROJECTS: dict[str, Project] = {}
+
+# Keyword -> area map for the "suggest N" hint (one IC per area the work touches).
+# Advisory only: the REAL area split is derived during the build (Wave A).
+_AREA_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "frontend": ("ui", "page", "frontend", "react", "css", "button", "screen",
+                 "dashboard", "web", "form", "style", "client"),
+    "backend": ("api", "service", "server", "endpoint", "backend", "route",
+                "handler", "queue", "worker", "webhook", "microservice"),
+    "data": ("db", "database", "data", "sql", "schema", "store", "analytics",
+             "ml", "model", "pipeline", "etl", "report", "warehouse"),
+    "infra": ("deploy", "docker", "k8s", "kubernetes", "infra", "terraform",
+              "cloud", "scale", "ops", "ci/cd", "observability"),
+    "security": ("security", "encrypt", "compliance", "pii", "regulated", "audit",
+                 "secret", "gdpr", "hipaa", "auth", "oauth"),
+}
+_PACK_AREA: dict[str, str] = {"frontend": "frontend", "regulated": "security", "ml_data": "data"}
+
+
+def _suggest_slots(request: str, packs: list[Any]) -> tuple[int, list[str]]:
+    """N = the distinct CANONICAL_AREAS the request + packs likely touch (>=1).
+    'backend' is the baseline area for any service build."""
+    text = request.lower()
+    hit = {"backend"}
+    for area, kws in _AREA_KEYWORDS.items():
+        if any(k in text for k in kws):
+            hit.add(area)
+    for pk in packs:
+        pack_area = _PACK_AREA.get(str(pk).strip().lower())
+        if pack_area:
+            hit.add(pack_area)
+    ordered = [a for a in CANONICAL_AREAS if a in hit]
+    return max(1, min(len(ordered), len(CANONICAL_AREAS))), ordered
 _LOCK = threading.Lock()
 _FLOOR = [0]
 
@@ -181,7 +217,7 @@ def _run_factory(p: Project) -> None:
     from foundry.cli import run
 
     _emit(p, type="project", id=p.id, request=p.request, mode=p.mode, floor=p.floor,
-          backend=p.backend)
+          backend=p.backend, slots=p.max_slots)
     _emit(p, type="narrate", text=f"📋 New project on Floor {p.floor}: {p.request!r}")
     _emit(p, type="narrate", text=f"🏭 Mode: {p.mode}. The crew reports for duty…")
     time.sleep(_PACE)
@@ -189,9 +225,14 @@ def _run_factory(p: Project) -> None:
     def responder(payload: dict[str, Any]) -> str:
         # The REAL stage payload -> paced game events, then the CTO's call.
         _emit_paced(p, events_for_payload(payload, p.seen_uris))
+        # Stash the agents' journal so a lead can be "interviewed" ([11], advisory).
+        jrnl = payload.get("agent_journal")
+        if isinstance(jrnl, list):
+            p.journal = jrnl
         boundary = str(payload.get("boundary", "stage"))
         if p.supervised:
-            _emit(p, type="await_decision", boundary=boundary)
+            p.awaiting = True
+            _emit(p, type="await_decision", boundary=boundary, journal=p.journal)
             try:
                 decision = p.decisions.get(timeout=600)
             except queue.Empty:
@@ -199,6 +240,7 @@ def _run_factory(p: Project) -> None:
         else:
             time.sleep(_AUTO_APPROVE_DELAY)
             decision = "approve"
+        p.awaiting = False
         _emit(p, type="resolved", boundary=boundary, decision=decision)
         verb = "approved" if decision == "approve" else "REJECTED"
         _emit(p, type="narrate", text=f"🧑‍💼 CTO {verb} the {boundary} checkpoint.")
@@ -246,6 +288,7 @@ def _run_factory(p: Project) -> None:
     if n_files:
         _emit(p, type="files", count=n_files)
         _emit(p, type="narrate", text=f"📂 {n_files} file(s) written — open OUTPUT to browse.")
+    p.passed = bool(result.passed)
     p.status = "done"
     p.events.put(_END)
 
@@ -310,6 +353,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/config":
             self._config()
+            return
+        if path == "/api/projects":
+            self._list_projects()
             return
         if path.startswith("/api/files/"):
             self._list_files(path.rsplit("/", 1)[-1])
@@ -416,8 +462,85 @@ class Handler(BaseHTTPRequestHandler):
             self._ideate()
         elif path.startswith("/api/decision/"):
             self._decision(path.rsplit("/", 1)[-1])
+        elif path == "/api/suggest-slots":
+            self._suggest_slots()
+        elif path.startswith("/api/interview/"):
+            self._interview(path.rsplit("/", 1)[-1])
         else:
             self._json(404, {"error": "not found"})
+
+    def _list_projects(self) -> None:
+        """Every floor's live state — the browser rehydrates the elevator on reload
+        (and reconnects each running floor's stream) so a refresh loses nothing."""
+        with _LOCK:
+            ordered = sorted(_PROJECTS.values(), key=lambda p: p.floor)
+        rows = [
+            {"id": p.id, "floor": p.floor, "request": p.request, "mode": p.mode,
+             "backend": p.backend, "supervised": p.supervised, "slots": p.max_slots,
+             "status": p.status, "passed": p.passed, "awaiting": p.awaiting}
+            for p in ordered
+        ]
+        self._json(200, {"projects": rows})
+
+    def _suggest_slots(self) -> None:
+        """Suggest an IC-pool size N from the request + packs — count the distinct
+        CANONICAL_AREAS the work is likely to touch (one IC per area). Advisory: the
+        real area split is derived during the build (Wave A); this just seeds the UI."""
+        body = self._read_json()
+        request = str(body.get("request", ""))
+        packs = body.get("packs") or []
+        n, areas = _suggest_slots(request, packs if isinstance(packs, list) else [])
+        self._json(200, {"slots": n, "areas": areas})
+
+    def _interview(self, pid: str) -> None:
+        """Ask a lead a question given its journal ([11]) — advisory, writes nothing.
+        Best-effort: a backend/proxy error degrades to a short string, never 500s."""
+        p = _PROJECTS.get(pid)
+        if p is None:
+            self._json(404, {"error": "unknown project"})
+            return
+        body = self._read_json()
+        role = str(body.get("role", "")).strip() or "agent"
+        question = str(body.get("question", "")).strip() or "How is it going?"
+        if p.backend == "mock":
+            # The mock transport can't deliberate; answer from the real journal we have.
+            mine = [e for e in p.journal if str(e.get("role", "")) == role] or p.journal
+            bits = "; ".join(
+                str(e.get("summary", "")) for e in mine[:3] if str(e.get("summary", ""))
+            )
+            concerns = [c for e in mine for c in (e.get("concerns") or [])]
+            note = f" Concerns: {concerns[0]}." if concerns else ""
+            self._json(200, {"role": role, "answer": (
+                f"(mock — from {role}'s journal) {bits or 'Working as planned.'}{note} "
+                "Pick a real backend to actually interview the leads.")})
+            return
+        try:
+            from foundry.agents.interview import interview
+            from foundry.cli import _build_proxy
+            from foundry.schemas.journal import JournalEntry
+            from foundry.state.seq import Seq
+
+            entries = []
+            for i, e in enumerate(p.journal):
+                conf = e.get("confidence")
+                node_id = str(e.get("node_id", "")) or f"agent-{i}"
+                entries.append(JournalEntry(
+                    node_id=node_id,
+                    role=str(e.get("role", role)),
+                    summary=str(e.get("summary", "")),
+                    assumptions=tuple(str(a) for a in (e.get("assumptions") or [])),
+                    concerns=tuple(str(c) for c in (e.get("concerns") or [])),
+                    confidence=float(conf) if isinstance(conf, (int, float)) else None,
+                    # interview() never reads seq; mint a valid synthetic one.
+                    seq=Seq(run_id=p.id, emission_epoch=0, superstep_index=0,
+                            node_id=node_id, local=i),
+                ))
+            answer = interview(
+                _build_proxy(p.backend), role=role, question=question, entries=entries,
+            )
+        except Exception as exc:  # advisory — never let an interview wedge the UI
+            answer = f"(interview unavailable: {type(exc).__name__})"
+        self._json(200, {"role": role, "answer": answer})
 
     def _ideate(self) -> None:
         from foundry.cli import BACKENDS

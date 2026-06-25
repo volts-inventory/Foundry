@@ -91,7 +91,11 @@
       </div>
       <div class="row">
         <label>Parallel ICs <span class="hint">— engineers building at once (Wave C/D)</span></label>
-        <input id="slots-input" type="number" min="1" max="16" value="1" />
+        <div class="slots-row">
+          <input id="slots-input" type="number" min="1" max="16" value="1" />
+          <button id="suggest-btn" type="button" title="Suggest a count from the request + packs">💡 suggest</button>
+          <span id="slots-hint" class="hint"></span>
+        </div>
       </div>
       <label>Domain packs (optional, comma-separated)</label>
       <input id="packs-input" type="text" placeholder="regulated, ml_data, frontend" />
@@ -128,6 +132,22 @@
       <div class="dialog-actions">
         <a id="files-zip" class="btn-link" href="#" download>⬇ Download .zip</a>
         <button id="files-close">close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Interview a lead: their journal (advisory) + ask a question ([11]) -->
+  <div id="iv-modal" class="overlay hidden">
+    <div class="dialog">
+      <h2>🎙 INTERVIEW · <span id="iv-role"></span></h2>
+      <p class="cp-note">The agent's own work journal — advisory only, writes nothing to the build.</p>
+      <div id="iv-journal" class="iv-journal"></div>
+      <label>Ask this lead</label>
+      <input id="iv-question" type="text" placeholder="What worried you? What did you assume?" />
+      <div id="iv-answer" class="iv-answer hidden"></div>
+      <div class="dialog-actions">
+        <button id="iv-ask" class="primary">ask</button>
+        <button id="iv-close">close</button>
       </div>
     </div>
   </div>

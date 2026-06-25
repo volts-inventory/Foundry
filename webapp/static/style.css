@@ -136,6 +136,24 @@ input[type=file]{color:var(--dim);font-family:inherit;font-size:12px}
 .cp-note{color:var(--dim);font-size:11px;font-style:italic;margin:6px 0 0}
 #cp-summary{color:var(--ink);font-size:14px;margin:4px 0}
 
+/* ---- suggest-N row ---- */
+.slots-row{display:flex;align-items:center;gap:8px}
+.slots-row #slots-input{width:64px}
+#suggest-btn{background:#22314a;border-color:var(--blue);color:#dff2ff;
+  font-size:11px;padding:4px 8px;cursor:pointer}
+#slots-hint{flex:1;font-size:11px}
+
+/* ---- Interview a lead ---- */
+.iv-journal{max-height:34vh;overflow:auto;margin:8px 0;display:flex;flex-direction:column;gap:8px}
+.iv-entry{border:2px solid var(--line);border-radius:6px;padding:7px 9px;background:#0e1626}
+.iv-entry .role{color:var(--gold);font-weight:bold;font-size:12px}
+.iv-entry .sum{color:var(--ink);font-size:13px;margin:3px 0}
+.iv-entry .meta{color:var(--dim);font-size:11px}
+.iv-entry .concern{color:#ff9b9b}
+.iv-answer{border:2px solid var(--blue);border-radius:6px;padding:8px 10px;margin:6px 0;
+  background:#0c1c2a;color:#dff2ff;font-size:13px;white-space:pre-wrap}
+#iv-question{width:100%}
+
 /* ---- Output (files) browser ---- */
 #output-btn{background:#1b3a4a;border-color:var(--blue);color:#dff2ff}
 .dialog.files{width:min(860px,95vw)}

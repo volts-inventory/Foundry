@@ -152,7 +152,28 @@ class FloorScene extends Phaser.Scene {
     this.buildCTO();
     const F = FLOORS.get(this.proj.floor);
     if (F) F.scene = this;
+    if (this.proj.slots) this.setPool(this.proj.slots);  // rehydrate / initial pool
     this.sys.setVisible(this.proj.floor === ACTIVE);
+  }
+
+  // Visualize the parallel IC pool (Wave C): N junior engineers building at once,
+  // bobbing in the engineering room, with a ⚙ count badge. n<=1 => serial (none).
+  setPool(n){
+    if (this.poolGroup) this.poolGroup.forEach(s=>s.destroy());
+    if (this.poolLabel){ this.poolLabel.destroy(); this.poolLabel = null; }
+    this.poolGroup = [];
+    if (!n || n <= 1) return;
+    const R = ROOMS.engineering, count = Math.min(n, 8);
+    for (let i=0;i<count;i++){
+      const x = R.x0+22 + (R.w-44)*(count>1 ? i/(count-1) : 0.5);
+      const s = this.makePerson(Math.round(x), FLOOR_BOT-46, 0xffc08a, false);
+      s.setScale(0.66).setDepth(9).setAlpha(0.9);
+      this.tweens.add({targets:s.bob, y:-2, duration:300+i*40, yoyo:true, repeat:-1, ease:"Sine.inOut"});
+      this.poolGroup.push(s);
+    }
+    this.poolLabel = this.add.text(R.cx, FLOOR_TOP+8, "⚙ "+n+" ICs",
+      {fontFamily:"'Courier New'",fontSize:"11px",fontStyle:"bold",color:"#ffc08a"})
+      .setOrigin(0.5,0).setDepth(28);
   }
 
   buildRooms(){
@@ -231,6 +252,11 @@ class FloorScene extends Phaser.Scene {
         a.home = {x:hx,y:hy};
         a.setPosition(hx, hy+200).setAlpha(0.32);
         a.seen = false; a.bubble = null;
+        // Clickable -> interview this lead (their journal + a question), advisory.
+        a.setInteractive(new Phaser.Geom.Rectangle(-10,-20,20,34), Phaser.Geom.Rectangle.Contains);
+        a.on("pointerdown", ()=> openInterview(name));
+        a.on("pointerover", ()=>{ this.input.manager.canvas.style.cursor = "pointer"; });
+        a.on("pointerout", ()=>{ this.input.manager.canvas.style.cursor = "default"; });
         this.tweens.add({targets:a, y:hy, duration:700, delay:120*i, ease:"Back.out"});
         this.agents.set(name, a);
       });
@@ -445,13 +471,14 @@ async function newProject(req, mode, supervised, backend, packs, extra){
   } catch(err){ appendLogDom("bad","✗ "+err); return; }
 
   const floor = resp.floor;
+  const slots = (extra && extra.max_slots) || 1;
   const F = {
     id: resp.id, floor, request:req, mode, backend, scene:null,
     log:[], gates:{}, org:null, cp:null, awaiting:false, status:"running", passed:false,
-    seenUris:new Set(),
+    slots, journal:[], seenUris:new Set(),
   };
   FLOORS.set(floor, F);
-  GAME.scene.add(floorKey(floor), FloorScene, true, {floor, id:resp.id, request:req, mode});
+  GAME.scene.add(floorKey(floor), FloorScene, true, {floor, id:resp.id, request:req, mode, slots});
   switchToFloor(floor);
 
   const es = new EventSource("/api/stream/"+resp.id);
@@ -482,6 +509,8 @@ function routeEvent(floor, ev){
   switch(ev.type){
     case "project":
       F.request = ev.request; F.mode = ev.mode; F.backend = ev.backend || F.backend;
+      F.slots = ev.slots || 1;
+      if (S) S.setPool(F.slots);
       if (isActive) updateHud(F);
       break;
     case "narrate": logTo(F, logClass(ev.text), ev.text); break;
@@ -512,7 +541,8 @@ function routeEvent(floor, ev){
     case "checkpoint":
       F.cp = {title:ev.title, summary:ev.summary, boundary:ev.boundary}; break;
     case "await_decision":
-      F.awaiting = true; renderElevator();
+      F.awaiting = true; if (Array.isArray(ev.journal)) F.journal = ev.journal;
+      renderElevator();
       if (isActive) showCheckpoint(F); break;
     case "resolved":
       F.awaiting = false; renderElevator();
@@ -643,6 +673,46 @@ function sendDecision(decision){
   F.awaiting = false; renderElevator(); hideCheckpoint();
 }
 
+// ---- interview a lead (click an agent) -------------------------------------
+let IV_TARGET = null;
+function openInterview(name){
+  const F = FLOORS.get(ACTIVE); if(!F) return;
+  const journal = F.journal || [];
+  const mine = journal.filter(e=>e.role===name);
+  const entries = mine.length ? mine : journal;
+  document.getElementById("iv-role").textContent = name;
+  const jc = document.getElementById("iv-journal"); jc.innerHTML = "";
+  if(!entries.length){
+    jc.innerHTML = "<div class='cp-note'>No journal yet — reach a checkpoint first (or run supervised).</div>";
+  }
+  for(const e of entries.slice(0,6)){
+    const d = document.createElement("div"); d.className = "iv-entry";
+    const conf = (e.confidence!=null) ? ` · conf ${Math.round(e.confidence*100)}%` : "";
+    d.innerHTML = `<div class="role"></div><div class="sum"></div><div class="meta"></div>`;
+    d.querySelector(".role").textContent = (e.role||"agent")+conf;
+    d.querySelector(".sum").textContent = e.summary||"";
+    const meta = d.querySelector(".meta");
+    const assumptions = e.assumptions||[], concerns = e.concerns||[];
+    if(assumptions.length){ const a=document.createElement("div"); a.textContent="assumes: "+assumptions.join("; "); meta.appendChild(a); }
+    if(concerns.length){ const c=document.createElement("div"); c.className="concern"; c.textContent="concern: "+concerns.join("; "); meta.appendChild(c); }
+    jc.appendChild(d);
+  }
+  const ans=document.getElementById("iv-answer"); ans.classList.add("hidden"); ans.textContent="";
+  document.getElementById("iv-question").value = "";
+  IV_TARGET = {id:F.id, role:name};
+  document.getElementById("iv-modal").classList.remove("hidden");
+}
+function askInterview(){
+  if(!IV_TARGET) return;
+  const q = document.getElementById("iv-question").value.trim();
+  const ans = document.getElementById("iv-answer");
+  ans.classList.remove("hidden"); ans.textContent = "…asking "+IV_TARGET.role+"…";
+  fetch("/api/interview/"+IV_TARGET.id,{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({role:IV_TARGET.role, question:q})})
+   .then(r=>r.json()).then(d=>{ ans.textContent = d.answer || "(no answer)"; })
+   .catch(()=>{ ans.textContent = "(interview request failed)"; });
+}
+
 // ---- UI wiring -------------------------------------------------------------
 const newModal=document.getElementById("new-modal");
 document.getElementById("new-btn").onclick=()=>newModal.classList.remove("hidden");
@@ -729,6 +799,22 @@ document.getElementById("cp-approve").onclick=()=>sendDecision("approve");
 document.getElementById("cp-reject").onclick=()=>sendDecision("reject");
 document.getElementById("output-btn").onclick=openFiles;
 document.getElementById("files-close").onclick=hideFiles;
+// interview modal
+document.getElementById("iv-ask").onclick=askInterview;
+document.getElementById("iv-close").onclick=()=>document.getElementById("iv-modal").classList.add("hidden");
+document.getElementById("iv-question").addEventListener("keydown",(e)=>{ if(e.key==="Enter"){ e.preventDefault(); askInterview(); }});
+// suggest a parallel-IC count from the request + packs
+document.getElementById("suggest-btn").onclick=()=>{
+  const request=document.getElementById("req-input").value;
+  const packs=document.getElementById("packs-input").value.split(",").map(s=>s.trim()).filter(Boolean);
+  const hint=document.getElementById("slots-hint"); hint.textContent="…";
+  fetch("/api/suggest-slots",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({request,packs})})
+   .then(r=>r.json()).then(d=>{
+     document.getElementById("slots-input").value=d.slots;
+     hint.textContent="≈"+d.slots+" areas: "+(d.areas||[]).join(", ");
+   }).catch(()=>{ hint.textContent=""; });
+};
 
 // preselect the configured default backend (FOUNDRY_MODEL_BACKEND on the server;
 // mock if unset). A deployment sets the env to default to claude-cli.
@@ -739,5 +825,34 @@ fetch("/api/config").then(r=>r.json()).then(c=>{
   if(c && c.default_max_slots) document.getElementById("slots-input").value=c.default_max_slots;
 }).catch(()=>{});
 
-// open the new-project dialog on first load
-newModal.classList.remove("hidden");
+// Rehydrate on (re)load: floors run server-side independently of this tab, so a
+// refresh / reconnect from another device rebuilds every floor + reconnects the
+// live stream of any still-running build. No floors yet => open the new dialog.
+function adoptFloor(row){
+  if (FLOORS.has(row.floor)) return;
+  const F = {
+    id:row.id, floor:row.floor, request:row.request, mode:row.mode, backend:row.backend,
+    scene:null, log:[], gates:{}, org:null, cp:null, awaiting:!!row.awaiting,
+    status:row.status, passed:!!row.passed, slots:row.slots||1, journal:[], seenUris:new Set(),
+  };
+  FLOORS.set(row.floor, F);
+  GAME.scene.add(floorKey(row.floor), FloorScene, true,
+    {floor:row.floor, id:row.id, request:row.request, mode:row.mode, slots:F.slots});
+  if (row.status !== "done"){          // running build: reconnect its live stream
+    const es = new EventSource("/api/stream/"+row.id);
+    es.onmessage = e => { try { routeEvent(row.floor, JSON.parse(e.data)); } catch(_){} };
+    es.addEventListener("end", ()=>es.close());
+    F.es = es;
+  }
+}
+async function rehydrate(){
+  await bootReady;  // shared textures must exist before a FloorScene builds
+  try {
+    const {projects} = await fetch("/api/projects").then(r=>r.json());
+    if(!projects || !projects.length){ newModal.classList.remove("hidden"); return; }
+    for(const row of projects) adoptFloor(row);
+    switchToFloor(projects[projects.length-1].floor);
+    renderElevator();
+  } catch(_){ newModal.classList.remove("hidden"); }
+}
+rehydrate();

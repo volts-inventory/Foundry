@@ -129,7 +129,7 @@ care.
 ### CLI backends (`claude-cli`, `codex`) — headless auth
 
 The CLI binaries must be **in the image** and **authenticated without an
-interactive login** (there is no TTY in a container).
+interactive login** (there is no browser/TTY in a container).
 
 ```bash
 # Bake the CLIs in (off by default — keeps the base image slim):
@@ -143,40 +143,68 @@ EOF
 docker compose up --build
 ```
 
-- **Interactive `claude login` / `codex login` do NOT work headless** — use an
-  API key (above) or mount a pre-provisioned credentials file **read-only** at the
-  CLI's config dir under `$HOME` (the image sets `HOME=/app`, so e.g.
-  `./creds/claude:/app/.claude:ro`). Never `COPY` a credential into the image.
-- The proxy passes its process env through to the CLI subprocess
-  (`cli_transports` inherits `os.environ`), so the key only needs to be on the
-  process — a compose `.env` value here, a **K8s Secret** env-var in EKS.
+**How `claude` authenticates (and why interactive login can't run in a
+container).** `claude login` (or `/login` in a session) runs an **interactive
+OAuth flow that opens a browser** — impossible headless. For a container, give the
+CLI a credential via env instead; `claude -p "<prompt>"` (the non-interactive
+"print" mode the `claude-cli` backend uses) reads it directly, no prior login.
+Claude Code's credential precedence (first match wins):
+
+1. **Cloud provider** — `CLAUDE_CODE_USE_BEDROCK` / `CLAUDE_CODE_USE_VERTEX` (+ the
+   provider's own creds). Use this if you front Claude with Bedrock/Vertex.
+2. **`ANTHROPIC_AUTH_TOKEN`** — a bearer token, for an LLM gateway/proxy.
+3. **`ANTHROPIC_API_KEY`** — a Console API key (sent as `X-Api-Key`). **The simplest
+   container path** — what the example above uses.
+4. **`apiKeyHelper`** — a script (in `settings.json`) returning a short-lived key,
+   re-invoked on a TTL / HTTP 401; for vault-issued rotating creds.
+5. **`CLAUDE_CODE_OAUTH_TOKEN`** — a long-lived (≈1yr, inference-only) OAuth token
+   from running **`claude setup-token`** once interactively on a workstation; good
+   for using a Pro/Max/Team subscription in CI instead of a Console key.
+6. **Stored `/login` credentials** — the interactive default (browser OAuth).
+
+Notes for containers:
+- The proxy passes its process env straight through to the CLI subprocess
+  (`cli_transports` inherits `os.environ`), so the credential just needs to be on
+  the process — a compose `.env` value here, a **K8s Secret** env-var in EKS.
+- **Mounting a pre-provisioned credentials file** also works on **Linux/Windows**:
+  copy `~/.claude/.credentials.json` (mode `0600`) from a machine where you logged
+  in and mount it **read-only** at the CLI's config dir under `$HOME` (the image
+  sets `HOME=/app`, so `./creds/.claude:/app/.claude:ro`; or set
+  `CLAUDE_CONFIG_DIR`). **macOS keychain creds cannot be copied** — use a token/key
+  there. Never `COPY` a credential into the image.
 - In the isolated topology the CLI + credential live on the **proxy egress
   service** (which builds the backend), not the app.
 
-### Local models (`ollama-gemma`) — ONE shared service
+### Local models (`ollama-gemma`) — Ollama on the HOST, reached by endpoint
 
-Run **one** Ollama service and point every app/worker at it — never an Ollama per
-worker (the GPU is a host/infra concern, not per-container).
+**Policy: we never pass a GPU into a container.** Ollama runs **natively on the
+host** (or a dedicated GPU box) where it owns the GPU directly, and the app reaches
+it over HTTP at `FOUNDRY_OLLAMA_URL`. This is portable across Linux, macOS, and a
+remote GPU host with zero per-container device wiring.
 
 ```bash
+# On the host (native install — uses the GPU directly):
+ollama serve &        # http://localhost:11434
+ollama pull gemma3:27b
+
+# In .env — point the containerized app at the host endpoint:
 cat >> .env <<'EOF'
 FOUNDRY_MODEL_BACKEND=ollama-gemma
-FOUNDRY_OLLAMA_URL=http://ollama:11434   # the shared service (compose default)
+FOUNDRY_OLLAMA_URL=http://host.docker.internal:11434   # or a remote GPU box's URL
 EOF
-docker compose --profile ollama up        # brings up the shared ollama service
+docker compose up --build
 ```
 
 - `FOUNDRY_OLLAMA_URL` is read by `backend_from_env` and handed to the Ollama
-  transport, so all workers share one endpoint (an explicit `base_url=` still
-  wins). Tested: `tests/test_cli_transports.py`.
-- **GPU**: Linux + NVIDIA uses the compose `deploy.resources.reservations.devices`
-  block (needs the NVIDIA Container Toolkit); EKS schedules the Ollama Deployment
-  onto a **GPU node pool**, workers reach it by service DNS.
-- **macOS (Apple Silicon) caveat**: Docker Desktop **cannot** pass the Apple
-  GPU/unified memory into a Linux container, so Ollama-in-Docker runs CPU-only.
-  Run Ollama **natively on the host** and set
-  `FOUNDRY_OLLAMA_URL=http://host.docker.internal:11434` (drop the `ollama`
-  service).
+  transport, so **every worker shares the one endpoint** (an explicit `base_url=`
+  still wins). Tested: `tests/test_cli_transports.py`.
+- `host.docker.internal` resolves automatically on Docker Desktop (Mac/Windows);
+  on **Linux** the app service maps it via `extra_hosts: host-gateway` (already in
+  the compose file). Or point `FOUNDRY_OLLAMA_URL` straight at a remote GPU box.
+- **EKS**: run Ollama as its **own Deployment on a GPU node pool** and point the app
+  at its Service DNS — still just an endpoint, still no GPU inside the app
+  container. (This also sidesteps Docker Desktop on macOS being unable to pass the
+  Apple GPU into a Linux container — moot, since Ollama is on the host.)
 
 ## What this task does NOT do (honesty)
 

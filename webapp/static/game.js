@@ -434,13 +434,13 @@ let ACTIVE = null;          // the floor currently shown
 
 function floorKey(f){ return "floor-"+f; }
 
-async function newProject(req, mode, supervised, backend, packs){
+async function newProject(req, mode, supervised, backend, packs, extra){
   await bootReady;  // shared textures must exist before a FloorScene builds
   let resp;
   try {
     resp = await fetch("/api/projects", {
       method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({request:req, mode, supervised, backend, packs}),
+      body: JSON.stringify({request:req, mode, supervised, backend, packs, ...(extra||{})}),
     }).then(r=>r.json());
   } catch(err){ appendLogDom("bad","✗ "+err); return; }
 
@@ -647,14 +647,41 @@ function sendDecision(decision){
 const newModal=document.getElementById("new-modal");
 document.getElementById("new-btn").onclick=()=>newModal.classList.remove("hidden");
 document.getElementById("cancel-btn").onclick=()=>newModal.classList.add("hidden");
-document.getElementById("start-btn").onclick=()=>{
+// intake mode radios -> reveal the matching panel
+function intakeMode(){ return (document.querySelector('input[name="intake"]:checked')||{}).value||"idea"; }
+for(const r of document.querySelectorAll('input[name="intake"]')){
+  r.addEventListener("change", ()=>{
+    const v = intakeMode();
+    for(const p of document.querySelectorAll(".intake-panel"))
+      p.classList.toggle("hidden", p.dataset.mode !== v);
+  });
+}
+function fileToB64(file){
+  return new Promise((res,rej)=>{
+    const r=new FileReader();
+    r.onload=()=>res(String(r.result).split(",",2)[1]||"");  // drop the data: prefix
+    r.onerror=()=>rej(r.error);
+    r.readAsDataURL(file);
+  });
+}
+document.getElementById("start-btn").onclick=async ()=>{
   const req=document.getElementById("req-input").value;
   const mode=document.getElementById("mode-select").value;
   const backend=document.getElementById("backend-select").value;
   const packs=document.getElementById("packs-input").value;
   const sup=document.getElementById("supervised").checked;
+  const extra={};
+  const intake=intakeMode();
+  if(intake==="spec"){
+    extra.spec_text=document.getElementById("spec-text").value;
+  } else if(intake==="zip"){
+    const f=document.getElementById("zip-file").files[0];
+    if(!f){ alert("Choose a .zip of docs first."); return; }
+    try { extra.spec_zip_b64=await fileToB64(f); }
+    catch(_){ alert("Could not read that file."); return; }
+  }
   newModal.classList.add("hidden");
-  newProject(req, mode, sup, backend, packs);
+  newProject(req, mode, sup, backend, packs, extra);
 };
 document.getElementById("cp-approve").onclick=()=>sendDecision("approve");
 document.getElementById("cp-reject").onclick=()=>sendDecision("reject");

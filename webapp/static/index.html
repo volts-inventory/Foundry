@@ -43,6 +43,24 @@
       <label>What should the factory build? <span class="hint">— a sentence, or a full brief</span></label>
       <textarea id="req-input" rows="3"
         placeholder="e.g. a URL shortener with custom slugs, link expiry, and per-IP abuse rate-limiting">build a tiny URL-shortener service</textarea>
+
+      <label>How do you want to feed the spec? <span class="hint">— the request alone is enough; these add detail</span></label>
+      <div class="intake-modes" id="intake-modes">
+        <label><input type="radio" name="intake" value="idea" checked /> 💡 Idea only</label>
+        <label><input type="radio" name="intake" value="spec" /> 📄 Paste spec</label>
+        <label><input type="radio" name="intake" value="zip" /> 🗂 Upload .zip</label>
+      </div>
+      <div class="intake-panel hidden" data-mode="spec">
+        <label>Full spec (markdown / text) — grounds the PRD</label>
+        <textarea id="spec-text" rows="7"
+          placeholder="# Spec&#10;&#10;Goals, constraints, interfaces, acceptance criteria…"></textarea>
+      </div>
+      <div class="intake-panel hidden" data-mode="zip">
+        <label>Zip of <code>.md</code> / <code>.txt</code> docs — read as the spec</label>
+        <input id="zip-file" type="file" accept=".zip,application/zip" />
+        <p class="cp-note">Docs are read as plain spec input; they inform the PRD, never bypass a gate.</p>
+      </div>
+
       <div class="row">
         <label>Mode</label>
         <select id="mode-select">

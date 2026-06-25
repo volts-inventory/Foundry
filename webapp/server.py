@@ -37,6 +37,44 @@ _MODES = ("assistant", "gated", "autonomous")
 # Override with WORKSHOP_OUTPUT_DIR (e.g. a mounted volume on a Pi).
 _OUTPUT_ROOT = Path(os.environ.get("WORKSHOP_OUTPUT_DIR", ".run/web")).resolve()
 _MAX_VIEW_BYTES = 1_000_000  # cap a single file served to the in-page viewer
+# Uploaded-spec-zip limits (defence-in-depth for an untrusted upload).
+_MAX_ZIP_BYTES = 5_000_000
+_MAX_ZIP_MEMBER_BYTES = 1_000_000
+_MAX_ZIP_MEMBERS = 200
+_SPEC_SUFFIXES = (".md", ".markdown", ".txt", ".rst")
+
+
+def _safe_unzip_spec(b64: str, dest: Path) -> int:
+    """Decode + extract a base64 docs-zip into ``dest``, returning the file count.
+
+    Defence-in-depth for an untrusted upload: caps total/member size + member
+    count, keeps only text-doc suffixes, and fail-closes on zip-slip (a member
+    that resolves outside ``dest`` is skipped, never written)."""
+    import base64
+    import io
+    import zipfile
+
+    raw = base64.b64decode(b64, validate=False)
+    if len(raw) > _MAX_ZIP_BYTES:
+        raise ValueError("uploaded zip exceeds size cap")
+    dest.mkdir(parents=True, exist_ok=True)
+    root = str(dest.resolve())
+    written = 0
+    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+        for info in zf.infolist():
+            if info.is_dir() or info.file_size > _MAX_ZIP_MEMBER_BYTES:
+                continue
+            if Path(info.filename).suffix.lower() not in _SPEC_SUFFIXES:
+                continue
+            target = (dest / info.filename).resolve()
+            if not str(target).startswith(root + os.sep):  # zip-slip guard
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(zf.read(info))
+            written += 1
+            if written >= _MAX_ZIP_MEMBERS:
+                break
+    return written
 
 
 @dataclass
@@ -48,6 +86,7 @@ class Project:
     floor: int
     backend: str = "mock"
     packs: list[str] = field(default_factory=list)
+    spec: str | None = None  # literal spec text OR a dir of uploaded docs (run(spec=))
     events: queue.Queue[dict[str, Any]] = field(default_factory=queue.Queue)
     decisions: queue.Queue[str] = field(default_factory=queue.Queue)
     seen_uris: set[str] = field(default_factory=set)
@@ -107,6 +146,7 @@ def _run_factory(p: Project) -> None:
             mode=p.mode,
             backend=p.backend,            # real backend per project (not always mock)
             packs=p.packs or None,        # optional domain packs (regulated/ml_data/frontend)
+            spec=p.spec,                  # pasted spec text OR uploaded docs dir (additive)
             thread_id=p.id,               # UNIQUE per project — no cross-floor collision
             checkpoints=True,
             checkpoint_responder=responder,
@@ -305,15 +345,28 @@ class Handler(BaseHTTPRequestHandler):
             raw_packs = raw_packs.replace(",", " ").split()
         packs = [str(p).strip() for p in raw_packs if str(p).strip()]
         supervised = bool(body.get("supervised", True))
+        spec_text = str(body.get("spec_text", "")).strip()
+        spec_zip_b64 = body.get("spec_zip_b64")
         with _LOCK:
             _FLOOR[0] += 1
             floor = _FLOOR[0]
-            pid = uuid.uuid4().hex[:12]
-            p = Project(
-                id=pid, request=request, mode=mode, supervised=supervised, floor=floor,
-                backend=backend, packs=packs,
-                out_base=_OUTPUT_ROOT / f"floor-{floor}",
-            )
+        pid = uuid.uuid4().hex[:12]
+        out_base = _OUTPUT_ROOT / f"floor-{floor}"
+        # Spec input: pasted text (literal), else an uploaded docs-zip (a dir),
+        # else None (build from the request alone). A bad zip degrades to None.
+        spec: str | None = spec_text or None
+        if spec is None and isinstance(spec_zip_b64, str) and spec_zip_b64.strip():
+            try:
+                spec_dir = out_base / "spec-in"
+                if _safe_unzip_spec(spec_zip_b64, spec_dir) > 0:
+                    spec = str(spec_dir)
+            except Exception:
+                spec = None
+        p = Project(
+            id=pid, request=request, mode=mode, supervised=supervised, floor=floor,
+            backend=backend, packs=packs, spec=spec, out_base=out_base,
+        )
+        with _LOCK:
             _PROJECTS[pid] = p
         threading.Thread(target=_run_factory, args=(p,), daemon=True).start()
         self._json(200, {"id": pid, "floor": floor})

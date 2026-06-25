@@ -31,7 +31,7 @@ const RBASE = {
   product:{label:"PRODUCT",color:0x2e3b5a}, architecture:{label:"ARCHITECTURE",color:0x3a2e5a},
   engineering:{label:"ENGINEERING",color:0x5a3a2e}, reception:{label:"RECEPTION",color:0x3a4a2e},
   lounge:{label:"LOUNGE",color:0x40354f}, qa:{label:"QA · REVIEW",color:0x2e5a4a},
-  gate:{label:"SECURITY",color:0x2c3a55}, vault:{label:"VAULT",color:0x5a4a18},
+  gate:{label:"SECURITY",color:0x2c4a55}, vault:{label:"VAULT",color:0x5a4a18},
 };
 const ROOMS = {};
 for (const k in RBASE) ROOMS[k] = Object.assign({}, RBASE[k], cellBox(GRID[k][0], GRID[k][1]));
@@ -145,10 +145,10 @@ function buildSharedTextures(scene){
     const tkey = "floor_"+key;
     if (scene.textures.exists(tkey)) continue;
     const R = ROOMS[key]; const g = scene.make.graphics({add:false});
-    g.fillStyle(shade(R.color,0.42),1); g.fillRect(0,0,40,40);              // base
-    g.fillStyle(shade(R.color,0.55),1); g.fillRect(20,0,20,20); g.fillRect(0,20,20,20);
-    g.fillStyle(shade(R.color,0.64),1); g.fillRect(6,6,2,2); g.fillRect(28,14,2,2); g.fillRect(14,30,2,2);
-    g.fillStyle(shade(R.color,0.34),1); g.fillRect(32,33,2,2); g.fillRect(11,18,2,2);  // speckle
+    g.fillStyle(shade(R.color,0.60),1); g.fillRect(0,0,40,40);              // base (lifted)
+    g.fillStyle(shade(R.color,0.76),1); g.fillRect(20,0,20,20); g.fillRect(0,20,20,20);
+    g.fillStyle(shade(R.color,0.95),1); g.fillRect(6,6,2,2); g.fillRect(28,14,2,2); g.fillRect(14,30,2,2); // bright speckle
+    g.fillStyle(shade(R.color,0.45),1); g.fillRect(32,33,2,2); g.fillRect(11,18,2,2);  // dark speckle
     g.generateTexture(tkey,40,40); g.destroy();
   }
   // Wall tile per room: a darker brick course (offset rows + mortar + highlight).
@@ -194,7 +194,11 @@ class BootScene extends Phaser.Scene {
   constructor(){ super("boot"); }
   create(){
     buildSharedTextures(this);   // every texture is generated here — no external assets
-    bootResolve();
+    // wait for the pixel font so the FIRST canvas labels render in it (no monospace flash)
+    const ready = (document.fonts && document.fonts.load)
+      ? document.fonts.load('16px "PixelFont"').then(()=>document.fonts.ready).catch(()=>{})
+      : Promise.resolve();
+    ready.then(()=>bootResolve());
   }
 }
 
@@ -224,7 +228,7 @@ class FloorScene extends Phaser.Scene {
   }
 
   // Visualize the parallel IC pool (Wave C): N junior engineers building at once,
-  // bobbing in the engineering room, with a ⚙ count badge. n<=1 => serial (none).
+  // bobbing in the engineering room, with an "ICs xN" count badge. n<=1 => serial.
   setPool(n){
     if (this.poolGroup) this.poolGroup.forEach(s=>s.destroy());
     if (this.poolLabel){ this.poolLabel.destroy(); this.poolLabel = null; }
@@ -243,7 +247,7 @@ class FloorScene extends Phaser.Scene {
       this.startWalk(s);                                       // ICs are busy building
       this.poolGroup.push(s, ws);
     }
-    this.poolLabel = this.add.text(R.cx, R.y+24, "⚙ "+n+" ICs",
+    this.poolLabel = this.add.text(R.cx, R.y+24, "ICs ×"+n,
       {fontFamily:"'PixelFont','Courier New'",fontSize:"10px",fontStyle:"bold",color:"#ffc08a"})
       .setOrigin(0.5,0).setDepth(28);
   }
@@ -281,11 +285,12 @@ class FloorScene extends Phaser.Scene {
       this.add.rectangle(wx+2+ww/2, wy+3, 2, wh, 0x10182c).setOrigin(0,0).setDepth(2);
       this.add.rectangle(wx+3, wy+3+wh/2, ww, 2, 0x10182c).setOrigin(0,0).setDepth(2);
       this.tweens.add({targets:glow, fillAlpha:{from:0.8,to:1}, duration:3000, yoyo:true, repeat:-1});
-      const ray=this.add.triangle(wx+ww/2+3, wy+wh+4, -ww*0.5,170, ww*0.5,170, 0,0, 0xbfd2ff, 0.04).setDepth(0);
-      this.tweens.add({targets:ray, alpha:{from:0.02,to:0.06}, duration:3600, yoyo:true, repeat:-1});
+      const ray=this.add.triangle(wx+ww/2+3, wy+wh+4, -ww*0.5,170, ww*0.5,170, 0,0, 0xbfd2ff, 0.08).setDepth(0);
+      this.tweens.add({targets:ray, alpha:{from:0.05,to:0.12}, duration:3600, yoyo:true, repeat:-1});
     }
-    // a few hanging lamps over the open floor
+    // a few hanging lamps over the open floor — each casts a warm pool on the floor
     [240,560,1140].forEach(lx=>{ this.add.rectangle(lx, WALL_TOP, 1, 16, 0x2a2f40).setOrigin(0,0).setDepth(2);
+      this.add.ellipse(lx, WALL_TOP+92, 96, 34, 0xffe6a0, 0.08).setDepth(0);   // warm floor pool
       this.add.circle(lx, WALL_TOP+20, 4, 0xffe6a0, 0.95).setDepth(2);
       this.add.circle(lx, WALL_TOP+20, 10, 0xffe6a0, 0.10).setDepth(2); });
     this.drawFlowPath();
@@ -295,7 +300,7 @@ class FloorScene extends Phaser.Scene {
       const R = ROOMS[key];
       this.add.rectangle(R.x+5, R.y+6, R.w, R.h, 0x000000, 0.22).setOrigin(0,0).setDepth(0);    // soft shadow
       this.add.tileSprite(R.x, R.y, R.w, R.h, "floor_"+key).setOrigin(0,0).setDepth(0).setAlpha(0.95);
-      this.add.rectangle(R.x, R.y, R.w, R.h, shade(R.color,1.7), 0.10).setOrigin(0,0).setDepth(1); // brighten/pop
+      this.add.rectangle(R.x, R.y, R.w, R.h, shade(R.color,1.7), 0.16).setOrigin(0,0).setDepth(1); // brighten/pop
       const t = TINT[key]; if (t) this.add.rectangle(R.x, R.y, R.w, R.h, t[0], t[1]).setOrigin(0,0).setDepth(1);
       // rug trim: light outer band + dark inner line
       this.add.rectangle(R.x, R.y, R.w, R.h).setOrigin(0,0).setStrokeStyle(3, shade(R.color,1.25)).setDepth(1);
@@ -307,7 +312,7 @@ class FloorScene extends Phaser.Scene {
       const sw = Math.min(R.w-12, R.label.length*7+22);
       this.add.rectangle(R.cx, R.y+6, sw, 16, 0x0e1422, 0.92).setOrigin(0.5,0).setDepth(3).setStrokeStyle(1, shade(R.color,1.1));
       this.add.rectangle(R.cx, R.y+6, sw, 2, shade(R.color,1.3)).setOrigin(0.5,0).setDepth(4);
-      this.add.rectangle(R.cx-sw/2+8, R.y+13, 5, 5, shade(R.color,1.4)).setDepth(4);   // dept colour dot
+      this.roomGlyph(key, R.cx-sw/2+6, R.y+8, shade(R.color,1.5));   // dept identity glyph (shape, not just hue)
       this.add.text(R.cx+4, R.y+8, R.label, {fontFamily:"'PixelFont','Courier New',monospace",
         fontSize:"10px", fontStyle:"bold", color:"#eef3ff"}).setOrigin(0.5,0).setDepth(4);
       this.roomGlow[key] = this.add.rectangle(R.x, R.y, R.w, R.h, 0xffd25a, 0).setOrigin(0,0).setDepth(1);
@@ -316,6 +321,33 @@ class FloorScene extends Phaser.Scene {
     this.furnish();
     this.buildAtmosphere();                       // vignette + dust motes on top
     this.setActiveRoom("reception");
+  }
+
+  // A tiny 10px department glyph drawn on the plaque so rooms are identifiable by
+  // SHAPE (colour-blind safe), not hue alone. (x,y) = top-left; col = main colour.
+  roomGlyph(key, x, y, col){
+    const D = 0x0a0d16;
+    const p = (dx,dy,w,h,c)=> this.add.rectangle(x+dx, y+dy, w, h, c).setOrigin(0,0).setDepth(4);
+    const M = (rects)=> rects.forEach(([dx,dy,w,h,k])=> p(dx,dy,w,h, k?col:D));
+    switch(key){
+      case "engineering":  // gear
+        M([[3,0,4,1,1],[3,9,4,1,1],[0,3,1,4,1],[9,3,1,4,1],[2,2,6,6,1],[4,4,2,2,0]]); break;
+      case "qa":           // magnifier
+        M([[1,0,5,1,1],[1,5,5,1,1],[0,1,1,4,1],[5,1,1,4,1],[2,2,2,2,0],[6,6,3,3,1]]); break;
+      case "gate":         // shield + tick
+        M([[2,0,6,1,1],[1,1,8,4,1],[2,5,6,1,1],[3,6,4,1,1],[4,7,2,1,1],[5,2,1,1,0],[4,3,1,1,0],[3,3,1,1,0]]); break;
+      case "product":      // clipboard
+        M([[3,0,4,1,1],[1,1,8,8,1],[3,3,4,1,0],[3,5,4,1,0]]); break;
+      case "architecture": // drafting triangle
+        M([[4,0,2,1,1],[3,2,4,1,1],[2,4,6,1,1],[1,6,8,1,1],[0,8,10,1,1],[4,3,2,4,0]]); break;
+      case "vault":        // key
+        M([[1,1,4,4,1],[2,2,2,2,0],[5,2,4,1,1],[7,3,1,2,1],[8,3,1,1,1]]); break;
+      case "reception":    // door
+        M([[2,0,6,10,1],[3,1,4,8,0],[6,5,1,1,1]]); break;
+      case "lounge":       // mug
+        M([[1,1,5,7,1],[2,2,3,1,0],[6,2,2,1,1],[7,3,1,2,1],[6,5,2,1,1]]); break;
+      default: p(1,2,6,6,col);
+    }
   }
 
   buildSky(){   // roof + a thin night-sky strip above the building — NO sun
@@ -370,7 +402,7 @@ class FloorScene extends Phaser.Scene {
     const props = {
       reception:   [["plant",0.12],["plant",0.88]],
       product:     [["board",0.10],["plant",0.92]],
-      architecture:[["board",0.10],["plant",0.90]],
+      architecture:[["board",0.10],["board",0.52],["shelf",0.90]],
       engineering: [["rack",0.07],["plant",0.94]],
       qa:          [["shelf",0.07],["plant",0.95]],
     };
@@ -391,12 +423,19 @@ class FloorScene extends Phaser.Scene {
   makeProp(kind, x, floorY){
     x = Math.round(x);
     const c = this.add.container(x, floorY).setDepth(3);
-    const out = (rx,ry,w,h,col)=>{ // outlined pixel rect (1px black border)
+    const out = (rx,ry,w,h,col)=>{ // outlined pixel rect (1px black border) + 1px top-light
       c.add(this.add.rectangle(rx,ry,w+2,h+2,0x0a0d16).setOrigin(0.5,1));
       c.add(this.add.rectangle(rx,ry,w,h,col).setOrigin(0.5,1));
+      c.add(this.add.rectangle(rx,ry-h+1,w,1,shade(col,1.3)).setOrigin(0.5,1));   // top highlight
+      c.add(this.add.rectangle(rx,ry-1,w,1,shade(col,0.6)).setOrigin(0.5,1));     // base shadow
     };
     if (kind==="plant"){
-      out(0,0,8,12,0x6a4a2a); out(0,-10,18,16,0x2f8f4e); out(-4,-18,10,12,0x37a85c);
+      const v = Math.abs(Math.round(x))%3;
+      out(0,0,8,12,0x6a4a2a);                                   // pot (now top-lit by `out`)
+      if (v===0){ out(0,-10,18,16,0x2f8f4e); out(-4,-18,10,12,0x37a85c); }     // bushy
+      else if (v===1){ out(0,-12,12,22,0x2f8f4e); out(0,-24,8,10,0x37a85c); }  // tall
+      else { out(0,-9,22,12,0x2f8f4e); out(2,-15,10,8,0x37a85c); }             // round
+      c.add(this.add.rectangle(-4,-13,2,7,shade(0x37a85c,1.35)).setOrigin(0.5,1)); // leaf highlight
     } else if (kind==="monitor"){
       out(0,0,6,10,0x2a3550); out(0,-9,26,18,0x10151f);
       c.add(this.add.rectangle(0,-11,20,12,0x2bd3ff,0.85).setOrigin(0.5,1)); // glowing screen
@@ -504,10 +543,15 @@ class FloorScene extends Phaser.Scene {
   shake(ms,amt){ this.cameras.main.shake(ms||300, amt||0.012); }
   hop(a, times){
     if (!a) return; const y0=a.y; let i=0; times=times||1;
-    const up=()=>{ this.tweens.add({targets:a, y:y0-15, duration:130, ease:"Quad.out", yoyo:true,
-      onComplete:()=>{ a.y=y0; if (++i<times) up(); }}); };
+    const up=()=>{
+      if (a.bob) this.tweens.add({targets:a.bob, scaleY:0.86, duration:60, yoyo:true, ease:"Quad.out"}); // anticipation squash
+      this.tweens.add({targets:a, y:y0-15, duration:130, delay:55, ease:"Quad.out", yoyo:true,
+        onComplete:()=>{ a.y=y0; if (++i<times) up(); }}); };
     up();
   }
+  deskIdle(a){ if (!a || !a.bob) return; this.stopDeskIdle(a);
+    a.breathe = this.tweens.add({targets:a.bob, y:{from:0,to:-1}, duration:1500, yoyo:true, repeat:-1, ease:"Sine.inOut"}); }
+  stopDeskIdle(a){ if (a && a.breathe){ a.breathe.stop(); a.breathe=null; if (a.bob) a.bob.y=0; } }
   codeGlyph(a){
     if (!a) return;
     const g=["</>","{ }","( )",";","==","fn","[]","#"][Math.abs(Math.round(a.x))%8];
@@ -639,10 +683,16 @@ class FloorScene extends Phaser.Scene {
   }
 
   buildChest(){
-    const R = ROOMS.vault, x = Math.round(R.cx), y = R.y1-18;
+    const R = ROOMS.vault, x = Math.round(R.cx), y = Math.round(R.cy+12);
     this.chestPos = {x,y};
-    this.chestGlow = this.add.rectangle(x,y-20,90,90,0xffd25a,0).setDepth(4);
-    const c = this.add.container(x,y).setDepth(5);
+    // enshrined: concentric floor inlay rings + a pedestal so the Vault reads as
+    // "the prize lives here" even before it's earned.
+    this.add.ellipse(x, y+10, 132, 44).setStrokeStyle(2, shade(R.color,1.5)).setDepth(0).setAlpha(0.5);
+    this.add.ellipse(x, y+10, 92, 30).setStrokeStyle(1, shade(R.color,1.7)).setDepth(0).setAlpha(0.4);
+    this.add.ellipse(x, y+14, 56, 16, shade(R.color,1.3), 0.5).setDepth(0);   // pedestal top
+    this.chestGlow = this.add.rectangle(x,y-20,120,120,0xffd25a,0.10).setDepth(4);
+    this.tweens.add({targets:this.chestGlow, fillAlpha:{from:0.06,to:0.14}, duration:2200, yoyo:true, repeat:-1});
+    const c = this.add.container(x,y).setDepth(5).setScale(1.3);
     c.add(this.add.ellipse(0,15,40,8,0x000000,0.3));
     c.add(this.add.rectangle(0,3,36,18,0x7a3b1a));
     c.add(this.add.rectangle(0,9,36,6,0x5a2c12));
@@ -665,8 +715,9 @@ class FloorScene extends Phaser.Scene {
       const cols = Math.min(names.length, 3);
       names.forEach((name,i)=>{
         const col = i%cols, row = Math.floor(i/cols);
-        const hx = R.x+28 + (R.w-56)*(cols>1 ? col/(cols-1) : 0.5);
-        const hy = R.floorY + 28 + row*52;          // stand in the room's floor
+        // tight pods: fixed pitch from a left margin, centred as a block in the room
+        const blockW = (cols-1)*64, hx = R.cx - blockW/2 + col*64;
+        const hy = R.floorY + 34 + row*48;          // stand in the room's floor
         const seed = hashStr((this.proj.id||'f')+name), kit = kitFor(name, seed);
         this.makeWorkstation(hx, hy+16, kit.body);                // desk just in front of them
         const a = this.makePerson(hx, hy, kit);
@@ -689,7 +740,7 @@ class FloorScene extends Phaser.Scene {
     const R = ROOMS.reception;
     const c = this.makePerson(R.cx, R.standY, kitFor("CTO", hashStr((this.proj.id||'f')+"CTO")));
     c.setScale(2.0).setDepth(900); c.fixedDepth = 900;   // CTO walks the floor -> always on top
-    c.add(this.add.text(0,-22,"CTO",{fontFamily:"'PixelFont','Courier New'",fontSize:"5px",color:"#ffcf52"})
+    c.add(this.add.text(0,-22,"CTO",{fontFamily:"'PixelFont','Courier New'",fontSize:"8px",fontStyle:"bold",color:"#ffcf52"})
       .setOrigin(0.5));
     this.cto = c;
     this.tweens.add({targets:c.bob, y:-1, duration:380, yoyo:true, repeat:-1, ease:"Sine.inOut"});
@@ -719,8 +770,14 @@ class FloorScene extends Phaser.Scene {
     else if(ct==='vest'){P(4,8,1,2,a);P(9,8,1,2,a);P(5,8,4,1,a);}
     else if(ct==='twotone') P(4,9,6,1,a);
     else if(ct==='hoodie'){P(4,7,6,1,a);P(5,8,1,1,a);P(8,8,1,1,a);}
-    // vertical eyes (tracked for blink)
+    // face modelling: brow shadow + forehead top-light give the head 3 values so
+    // features read at game scale (was a single dark smear).
+    const brow=shade(skin,0.7), fhi=shade(skin,1.15);
+    P(3,4,3,1,brow); P(8,4,3,1,brow);     // brow shadow over each eye
+    P(6,4,2,1,fhi);                        // forehead centre highlight
+    // vertical eyes (tracked for blink) + a white catchlight pixel
     const eL=P(4,5,1,2,e), eR=P(9,5,1,2,e);
+    P(4,5,1,1,lens); P(9,5,1,1,lens);      // catchlight (glossy top pixel)
     // hair styles
     const st=opt.style||'short';
     if(st==='short'){P(2,4,1,1,hair);P(11,4,1,1,hair);}
@@ -740,15 +797,27 @@ class FloorScene extends Phaser.Scene {
     if(opt.scarf!=null){P(4,7,6,1,opt.scarf);P(8,8,1,1,opt.scarf);}
     if(opt.tie!=null){P(8,8,1,2,opt.tie);}
     if(opt.coat){P(4,8,1,2,0xe6e9ef);P(9,8,1,2,0xd2d7e0);}
+    // back-of-head pose: a hair-coloured cap over the face, shown while seated at a
+    // desk so working agents face their monitor (away from camera), not the viewer.
+    const back = this.add.container(0,0).setVisible(false);
+    for (let gy=4; gy<=6; gy++) for (let gx=3; gx<=10; gx++)
+      back.add(this.add.rectangle(gx-8, gy-7, 1, 1, hair).setOrigin(0,0));
+    back.add(this.add.rectangle(5-8,6-7,4,1,shade(hair,1.35)).setOrigin(0,0));  // nape highlight
+    bob.add(back);
     const spark = this.add.rectangle(4,-10,2,2,0xfff04a).setOrigin(0,0).setVisible(false); bob.add(spark);
     c.add(bob);
     c.bob = bob; c.spark = spark; c.eyes = [eL, eR];
+    c.faceBack  = ()=>{ back.setVisible(true);  };
+    c.faceFront = ()=>{ back.setVisible(false); };
     return c;
   }
 
   // Stepped walk: a snappy 2-frame bob + waddle on the whole body (legs are baked).
   startWalk(a){
-    if (!a || !a.bob || a.walkEv) return;
+    if (!a || !a.bob) return;
+    if (a.faceFront) a.faceFront();              // show the face while moving
+    this.stopDeskIdle(a);                        // stop breathing while walking
+    if (a.walkEv) return;
     let f = 0;
     a.walkEv = this.time.addEvent({delay:130, loop:true, callback:()=>{
       f ^= 1;
@@ -810,7 +879,7 @@ class FloorScene extends Phaser.Scene {
     const s = this.loungeSpot(a.loungeSlot||0); this.walkTo(a, s.x + (Math.random()*12-6), s.y); }
   gotoDesk(a){ if (!a) return; a.inLounge = false;
     if (!a.seen){ a.seen = true; a.setAlpha(1); }
-    if (a.home) this.walkTo(a, a.home.x, a.home.y); }
+    if (a.home) this.walkTo(a, a.home.x, a.home.y, ()=>{ if (a.faceBack) a.faceBack(); this.deskIdle(a); }); }
   staffRoom(key){
     this.activeRoomKey = key;
     const hasTeam = !!ROSTER[key];
@@ -819,7 +888,7 @@ class FloorScene extends Phaser.Scene {
       else if (a.seen) this.gotoLounge(a);
     }
     for (const s of (this.poolGroup||[])){ if (!s || !s.bob) continue;
-      if (key === 'engineering' && s.home) this.walkTo(s, s.home.x, s.home.y); else this.gotoLounge(s); }
+      if (key === 'engineering' && s.home) this.walkTo(s, s.home.x, s.home.y, ()=>{ if (s.faceBack) s.faceBack(); }); else this.gotoLounge(s); }
   }
   toLounge(){   // everyone hangs out (checkpoints / done)
     for (const [,a] of this.agents) if (a.seen) this.gotoLounge(a);
@@ -888,7 +957,7 @@ class FloorScene extends Phaser.Scene {
     const w = Math.max(64, label.length*7+18);
     const c = this.add.container(R.cx, R.floorY+24).setDepth(50);
     c.add(this.add.rectangle(0,0,w,18,0x161d31).setStrokeStyle(2,0xffcf52));
-    c.add(this.add.text(0,0,"✚ "+label,{fontFamily:"'PixelFont','Courier New'",fontSize:"11px",color:"#ffe9a8"})
+    c.add(this.add.text(0,0,"+ "+label,{fontFamily:"'PixelFont','Courier New'",fontSize:"11px",color:"#ffe9a8"})
       .setOrigin(0.5));
     this.tweens.add({targets:c, y:c.y-50, alpha:0, duration:2600, ease:"Cubic.out",
       onComplete:()=>c.destroy()});
@@ -918,7 +987,7 @@ class FloorScene extends Phaser.Scene {
       const [plate,label,pip] = this.gatePips[n].list;
       const pass = g.status === "pass";
       plate.setFillStyle(pass?0x1f6b3a:0x6b1f28);
-      label.setText(pass?"✓":"✗").setColor(pass?"#5ddc7a":"#ff5d6c");
+      label.setText(pass?"P":"F").setColor(pass?"#5ddc7a":"#ff5d6c");
       pip.setVisible(!!g.attested);
       i++;
     }
@@ -931,21 +1000,26 @@ class FloorScene extends Phaser.Scene {
   }
 
   openGateAndChest(){
+    // 1) the vault door unlocks first…
     this.gateDoor.setFillStyle(0x1f8a3f);
     this.tweens.add({targets:this.gateBars, alpha:0, y:-30, duration:500, ease:"Cubic.in"});
     if (this.chestOpened) return;
     this.chestOpened = true;
-    this.chestClosed.setVisible(false);
-    this.chestOpen.setVisible(true).setScale(1,0);
-    this.tweens.add({targets:this.chestOpen, scaleY:1, duration:300, ease:"Back.out"});
-    this.tweens.add({targets:this.chestGlow, fillAlpha:0.28, duration:400, yoyo:true,
-      repeat:-1, ease:"Sine.inOut"});
-    this.add.particles(this.chestPos.x, this.chestPos.y-12, "spark", {
-      speed:{min:60,max:160}, angle:{min:230,max:310}, gravityY:240,
-      lifespan:1100, quantity:3, frequency:40, scale:{start:1.4,end:0},
-      duration:1400, depth:24,
-    });
     this.setActiveRoom("vault");
+    // 2) …then, a beat later, the chest pops open (sequential, not simultaneous).
+    this.time.delayedCall(320, ()=>{
+      this.chestClosed.setVisible(false);
+      this.chestOpen.setVisible(true).setScale(1,0);
+      this.tweens.add({targets:this.chestOpen, scaleY:1, duration:300, ease:"Back.out"});
+      this.tweens.add({targets:this.chestGlow, fillAlpha:0.34, duration:400, yoyo:true,
+        repeat:-1, ease:"Sine.inOut"});
+      this.ring(this.chestPos.x, this.chestPos.y-12, 0xffd95e);
+      this.add.particles(this.chestPos.x, this.chestPos.y-12, "spark", {
+        speed:{min:60,max:160}, angle:{min:230,max:310}, gravityY:240,
+        lifespan:1100, quantity:3, frequency:40, scale:{start:1.4,end:0},
+        duration:1400, depth:24,
+      });
+    });
   }
 
   renderOrg(ev){
@@ -964,7 +1038,7 @@ class FloorScene extends Phaser.Scene {
     c.add(this.add.rectangle(0,0,w,h,0x0c1322,0.92).setOrigin(0,0).setStrokeStyle(2,0xffcf52));
     c.add(this.add.rectangle(0,0,w,2,0xffcf52,0.5).setOrigin(0,0));   // board top rail
     c.add(this.add.rectangle(w/2,-3,5,5,0xffcf52).setOrigin(0.5,0));  // pin
-    c.add(this.add.text(8,4,"🏢 ORG · PM",{fontFamily:"'PixelFont','Courier New'",fontSize:"12px",
+    c.add(this.add.text(8,4,"ORG · PM",{fontFamily:"'PixelFont','Courier New'",fontSize:"12px",
       fontStyle:"bold",color:"#ffcf52"}).setOrigin(0,0));
     areas.forEach((a,i)=>{
       const y = headerH + i*rowH;
@@ -1010,7 +1084,7 @@ async function newProject(req, mode, supervised, backend, packs, extra){
       method:"POST", headers:{"Content-Type":"application/json"},
       body: JSON.stringify({request:req, mode, supervised, backend, packs, ...(extra||{})}),
     }).then(r=>r.json());
-  } catch(err){ appendLogDom("bad","✗ "+err); return; }
+  } catch(err){ appendLogDom("bad","ERR "+err); return; }
 
   const floor = resp.floor;
   const slots = (extra && extra.max_slots) || 1;
@@ -1064,11 +1138,11 @@ function routeEvent(floor, ev){
     case "agent": if (S) S.agentWork(ev.agent); break;
     case "say":
       if (S) S.agentSay(ev.agent, ev.text);
-      if (ev.concern) logTo(F, "", `💭 ${ev.agent}: "${ev.concern}"`); break;
+      if (ev.concern) logTo(F, "", `${ev.agent}: "${ev.concern}"`); break;
     case "artifact":
       if (S){ S.spawnPickup(ev.room, ev.label); const pa=S.agents.get(ev.agent);
         if (pa){ S.hop(pa,1); const R=ROOMS[ev.room]; if(R) S.burst(R.cx, R.floorY+20, [0xffd95e,0xffffff], 8); } }
-      logTo(F, "good", "✚ "+ev.label+"  ·  "+ev.agent); break;
+      logTo(F, "good", "+ "+ev.label+"  ·  "+ev.agent); break;
     case "gate":
       F.gates[ev.name] = {status:ev.status, attested:ev.attested, advisory:ev.advisory};
       if (S){ S.setGate(ev.name, F.gates[ev.name]);
@@ -1076,12 +1150,12 @@ function routeEvent(floor, ev){
           S.ring(g.cx,(g.atop+g.abot)/2,col); S.burst(g.cx,(g.atop+g.abot)/2,[col,0xffffff],8); } }
       if (isActive) renderGatesMini(F.gates);
       if (!ev.advisory) logTo(F, ev.status==="pass"?"good":"bad",
-        `🛡 GATE ${ev.name.toUpperCase()}: ${ev.status.toUpperCase()}${ev.attested?" (signed)":""}`);
+        `GATE ${ev.name.toUpperCase()}: ${ev.status.toUpperCase()}${ev.attested?" (signed)":""}`);
       break;
     case "org":
       F.org = ev;
       if (S) S.renderOrg(ev);
-      logTo(F, "gold", "🏢 ORG · "+(ev.areas||[]).map(a=>`${a.area}(${(a.leads||[]).length})`).join("  "));
+      logTo(F, "gold", "ORG · "+(ev.areas||[]).map(a=>`${a.area}(${(a.leads||[]).length})`).join("  "));
       break;
     case "files":
       F.hasFiles = ev.count; break;
@@ -1104,30 +1178,33 @@ function routeEvent(floor, ev){
       if (isActive) hideCheckpoint(); break;
     case "release":
       if (S){ S.openGateAndChest(); S.stampGate(true); S.celebrate(); S.banner("SHIPPED!", 0x5ddc7a); }
-      logTo(F, "gold", "💰 RELEASED → "+(ev.uri||"artifact")); break;
+      logTo(F, "gold", "RELEASED -> "+(ev.uri||"artifact")); break;
     case "halt":
       if (S){ S.flashGate(); S.stampGate(false); }
-      logTo(F, "bad", "⛔ HELD: "+ev.reason); break;
+      logTo(F, "bad", "HELD: "+ev.reason); break;
     case "done":
       F.status = "done"; F.passed = !!ev.passed; renderElevator();
       if (S){ S.toLounge(); if (!ev.passed){ S.gloom(); S.banner("HELD AT THE GATE", 0xff5d6c); } }
       logTo(F, ev.passed?"good":"bad",
-        ev.passed?"✅ Build complete — shipped.":"❌ Build halted — nothing shipped."); break;
+        ev.passed?"Build complete — shipped.":"Build halted — nothing shipped."); break;
   }
 }
 
 // =========================================================================== //
 //  DOM: quest log, gates-mini, HUD, elevator, checkpoint modal                //
 // =========================================================================== //
-function logClass(t){
-  if(/✅|💰|green|Shipped/i.test(t)) return "good";
-  if(/💥|🚫|⛔|error|halt/i.test(t)) return "bad";
-  if(/📋|🏭|🧑/i.test(t)) return "hot";
+function logClass(t){   // classify BEFORE stripping, so server emoji still tint the row
+  if(/✅|💰|green|shipped|released|complete/i.test(t)) return "good";
+  if(/💥|🚫|⛔|error|halt|held|reject|fail/i.test(t)) return "bad";
+  if(/📋|🏭|🧑|mode|stage|crew/i.test(t)) return "hot";
   return "";
 }
+// strip any emoji so the QUEST LOG is pure bitmap-font text (matches the pixel UI)
+const EMOJI_RE = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{2300}-\u{23FF}\u{2190}-\u{21FF}️]/gu;
+function deEmoji(t){ return (t==null?"":(""+t)).replace(EMOJI_RE,"").replace(/^\s+/,""); }
 function appendLogDom(cls,text){
   const ul=document.getElementById("log");
-  const li=document.createElement("li"); li.className=cls; li.textContent=text;
+  const li=document.createElement("li"); li.className=cls; li.textContent=deEmoji(text);
   ul.appendChild(li); ul.scrollTop=ul.scrollHeight;
   while(ul.children.length>200) ul.removeChild(ul.firstChild);
 }
@@ -1139,7 +1216,7 @@ function logTo(F, cls, text){
 function rebuildLog(F){
   const ul=document.getElementById("log"); ul.innerHTML="";
   for (const {cls,text} of F.log){
-    const li=document.createElement("li"); li.className=cls; li.textContent=text; ul.appendChild(li);
+    const li=document.createElement("li"); li.className=cls; li.textContent=deEmoji(text); ul.appendChild(li);
   }
   ul.scrollTop = ul.scrollHeight;
 }

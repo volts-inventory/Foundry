@@ -10,14 +10,14 @@
   <div id="app">
     <header id="hud">
       <div class="hud-left">
-        <span class="logo">🏭 FOUNDRY</span>
+        <span class="logo">FOUNDRY</span>
         <span class="elevator" id="floor-tag">FLOOR —</span>
         <span class="proj" id="proj-tag">no project</span>
         <span class="mode" id="mode-tag"></span>
       </div>
       <div class="hud-right">
         <span class="gates-mini" id="gates-mini"></span>
-        <button id="output-btn">📂 OUTPUT</button>
+        <button id="output-btn">OUTPUT</button>
         <button id="new-btn">▶ NEW PROJECT</button>
       </div>
     </header>
@@ -31,7 +31,7 @@
       <div id="game"></div>
       <div id="wipe" aria-hidden="true"></div>
       <aside id="log-panel">
-        <div class="log-title">📜 QUEST LOG</div>
+        <div class="log-title">QUEST LOG</div>
         <ul id="log"></ul>
       </aside>
     </main>
@@ -47,10 +47,10 @@
 
       <label>How do you want to feed the spec? <span class="hint">— the request alone is enough; these add detail</span></label>
       <div class="intake-modes" id="intake-modes">
-        <label><input type="radio" name="intake" value="idea" checked /> 💡 Idea only</label>
-        <label><input type="radio" name="intake" value="spec" /> 📄 Paste spec</label>
-        <label><input type="radio" name="intake" value="zip" /> 🗂 Upload .zip</label>
-        <label><input type="radio" name="intake" value="chat" /> 🗣 Work it out with the leads</label>
+        <label><input type="radio" name="intake" value="idea" checked /> Idea only</label>
+        <label><input type="radio" name="intake" value="spec" /> Paste spec</label>
+        <label><input type="radio" name="intake" value="zip" /> Upload .zip</label>
+        <label><input type="radio" name="intake" value="chat" /> Work it out with the leads</label>
       </div>
       <div class="intake-panel hidden" data-mode="spec">
         <label>Full spec (markdown / text) — grounds the PRD</label>
@@ -69,7 +69,7 @@
           <button id="chat-send" type="button">send</button>
         </div>
         <p class="cp-note">The Program Manager, Architect &amp; Tech-Leads help shape a spec (best on a real backend; mock can't converse). “Break ground” builds from the draft below.</p>
-        <details id="chat-spec-wrap"><summary>📝 Draft spec (updates as you talk)</summary><pre id="chat-spec">(nothing yet)</pre></details>
+        <details id="chat-spec-wrap"><summary>Draft spec (updates as you talk)</summary><pre id="chat-spec">(nothing yet)</pre></details>
       </div>
 
       <div class="row">
@@ -94,7 +94,7 @@
         <label>Parallel ICs <span class="hint">— engineers building at once (Wave C/D)</span></label>
         <div class="slots-row">
           <input id="slots-input" type="number" min="1" max="16" value="1" />
-          <button id="suggest-btn" type="button" title="Suggest a count from the request + packs">💡 suggest</button>
+          <button id="suggest-btn" type="button" title="Suggest a count from the request + packs">suggest</button>
           <span id="slots-hint" class="hint"></span>
         </div>
       </div>
@@ -102,7 +102,7 @@
       <input id="packs-input" type="text" placeholder="regulated, ml_data, frontend" />
       <label class="check"><input type="checkbox" id="supervised" checked /> Supervised (CTO approves each checkpoint)</label>
       <div class="dialog-actions">
-        <button id="start-btn" class="primary">🔨 BREAK GROUND</button>
+        <button id="start-btn" class="primary">BREAK GROUND</button>
         <button id="cancel-btn">cancel</button>
       </div>
     </div>
@@ -115,8 +115,8 @@
       <p id="cp-summary"></p>
       <p class="cp-note">An approve only lets the build reach the gates — it can never ship a failing build.</p>
       <div class="dialog-actions">
-        <button id="cp-approve" class="primary">✅ APPROVE</button>
-        <button id="cp-reject" class="danger">⛔ REJECT</button>
+        <button id="cp-approve" class="primary">APPROVE</button>
+        <button id="cp-reject" class="danger">REJECT</button>
       </div>
     </div>
   </div>
@@ -124,14 +124,14 @@
   <!-- Output browser: the build's written code + docs (read-only) -->
   <div id="files-modal" class="overlay hidden">
     <div class="dialog files">
-      <h2>📂 OUTPUT · <span id="files-floor"></span></h2>
+      <h2>OUTPUT · <span id="files-floor"></span></h2>
       <p class="cp-note">The generated source tree + company-style doc set this build wrote to disk (read-only view).</p>
       <div class="files-body">
         <ul id="files-list"></ul>
         <pre id="files-view">Select a file…</pre>
       </div>
       <div class="dialog-actions">
-        <a id="files-zip" class="btn-link" href="#" download>⬇ Download .zip</a>
+        <a id="files-zip" class="btn-link" href="#" download>Download .zip</a>
         <button id="files-close">close</button>
       </div>
     </div>
@@ -140,7 +140,7 @@
   <!-- Interview a lead: their journal (advisory) + ask a question ([11]) -->
   <div id="iv-modal" class="overlay hidden">
     <div class="dialog">
-      <h2>🎙 INTERVIEW · <span id="iv-role"></span></h2>
+      <h2>INTERVIEW · <span id="iv-role"></span></h2>
       <p class="cp-note">The agent's own work journal — advisory only, writes nothing to the build.</p>
       <div id="iv-journal" class="iv-journal"></div>
       <label>Ask this lead</label>

@@ -2,13 +2,12 @@
   --bg:#0e1320; --panel:#161d31; --ink:#e8eefb; --dim:#8aa0c8;
   --green:#5ddc7a; --red:#ff5d6c; --gold:#ffcf52; --blue:#5db8ff; --line:#2a3550;
 }
-/* Pixel-font DROP-IN slot: drop a CC0 pixel webfont at
-   static/assets/fonts/pixel.woff2 and the whole UI (DOM + canvas) switches to it.
-   Until then it falls back to monospace — no error, no FOUT. */
+/* Pixel UI font (Pixelify Sans, OFL) — one bitmap face across DOM + canvas so the
+   chrome and the pixel-art game read as a single product. Falls back to monospace. */
 @font-face{
   font-family:"PixelFont";
-  src:url("assets/fonts/pixel.woff2") format("woff2");
-  font-display:swap;
+  src:url("assets/fonts/pixel.ttf") format("truetype");
+  font-display:block;
 }
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}

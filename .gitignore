@@ -28,3 +28,7 @@ mutants/
 /webapp/static/assets/*
 !/webapp/static/assets/README.md
 !/webapp/static/assets/manifest.example.json
+# …but the pixel UI font is a required, bundled asset
+!/webapp/static/assets/fonts
+/webapp/static/assets/fonts/*
+!/webapp/static/assets/fonts/pixel.ttf

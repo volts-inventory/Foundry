@@ -507,6 +507,8 @@ function routeEvent(floor, ev){
       if (S) S.renderOrg(ev);
       logTo(F, "gold", "🏢 ORG · "+(ev.areas||[]).map(a=>`${a.area}(${(a.leads||[]).length})`).join("  "));
       break;
+    case "files":
+      F.hasFiles = ev.count; break;
     case "checkpoint":
       F.cp = {title:ev.title, summary:ev.summary, boundary:ev.boundary}; break;
     case "await_decision":
@@ -590,6 +592,48 @@ function showCheckpoint(F){
   document.getElementById("cp-modal").classList.remove("hidden");
 }
 function hideCheckpoint(){ document.getElementById("cp-modal").classList.add("hidden"); }
+
+// ---- output (files) browser ------------------------------------------------
+function openFiles(){
+  const F = FLOORS.get(ACTIVE);
+  const modal = document.getElementById("files-modal");
+  const list = document.getElementById("files-list");
+  const view = document.getElementById("files-view");
+  list.innerHTML = ""; view.textContent = "";
+  if(!F){ list.innerHTML = "<li class='muted'>Start a project first.</li>"; modal.classList.remove("hidden"); return; }
+  document.getElementById("files-floor").textContent = "Floor "+F.floor;
+  document.getElementById("files-zip").href = "/api/zip/"+F.id;
+  view.textContent = "Loading…";
+  fetch("/api/files/"+F.id)
+    .then(r => r.ok ? r.json() : {files:[]})
+    .then(({files}) => {
+      if(!files || !files.length){
+        list.innerHTML = "<li class='muted'>No output yet — finish a build (it writes code + docs).</li>";
+        view.textContent = ""; return;
+      }
+      view.textContent = "Select a file…";
+      for(const f of files){
+        const li = document.createElement("li");
+        li.textContent = `${f.path}  (${f.size}b)`;
+        li.title = f.path;
+        li.onclick = () => viewFile(F.id, f.path, li);
+        list.appendChild(li);
+      }
+    })
+    .catch(() => { list.innerHTML = "<li class='muted'>(could not list output)</li>"; view.textContent = ""; });
+  modal.classList.remove("hidden");
+}
+function viewFile(id, path, li){
+  for(const c of document.getElementById("files-list").children) c.classList.remove("sel");
+  if(li) li.classList.add("sel");
+  const view = document.getElementById("files-view");
+  view.textContent = "Loading…";
+  fetch("/api/file/"+id+"?path="+encodeURIComponent(path))
+    .then(r => r.text())
+    .then(t => { view.textContent = t || "(empty file)"; })
+    .catch(() => { view.textContent = "(could not load file)"; });
+}
+function hideFiles(){ document.getElementById("files-modal").classList.add("hidden"); }
 function sendDecision(decision){
   const F = FLOORS.get(ACTIVE);
   if (!F){ hideCheckpoint(); return; }
@@ -611,6 +655,8 @@ document.getElementById("start-btn").onclick=()=>{
 };
 document.getElementById("cp-approve").onclick=()=>sendDecision("approve");
 document.getElementById("cp-reject").onclick=()=>sendDecision("reject");
+document.getElementById("output-btn").onclick=openFiles;
+document.getElementById("files-close").onclick=hideFiles;
 
 // open the new-project dialog on first load
 newModal.classList.remove("hidden");

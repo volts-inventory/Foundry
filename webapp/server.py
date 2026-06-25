@@ -33,6 +33,11 @@ _END = {"type": "_end"}
 
 _MODES = ("assistant", "gated", "autonomous")
 
+# Where each floor's build writes its output tree + doc bundle (gitignored).
+# Override with WORKSHOP_OUTPUT_DIR (e.g. a mounted volume on a Pi).
+_OUTPUT_ROOT = Path(os.environ.get("WORKSHOP_OUTPUT_DIR", ".run/web")).resolve()
+_MAX_VIEW_BYTES = 1_000_000  # cap a single file served to the in-page viewer
+
 
 @dataclass
 class Project:
@@ -45,6 +50,7 @@ class Project:
     decisions: queue.Queue[str] = field(default_factory=queue.Queue)
     seen_uris: set[str] = field(default_factory=set)
     status: str = "running"
+    out_base: Path | None = None  # this floor's output dir (code/ + docs/)
 
 
 _PROJECTS: dict[str, Project] = {}
@@ -90,8 +96,17 @@ def _run_factory(p: Project) -> None:
         _emit(p, type="narrate", text=f"🧑‍💼 CTO {verb} the {boundary} checkpoint.")
         return decision
 
+    code_dir = (p.out_base / "code") if p.out_base else None
+    docs_dir = (p.out_base / "docs") if p.out_base else None
     try:
-        result = run(p.request, mode=p.mode, checkpoints=True, checkpoint_responder=responder)
+        result = run(
+            p.request,
+            mode=p.mode,
+            checkpoints=True,
+            checkpoint_responder=responder,
+            output_dir=str(code_dir) if code_dir else None,
+            docs_dir=str(docs_dir) if docs_dir else None,
+        )
     except Exception as exc:
         _emit(p, type="narrate", text=f"💥 Build error: {exc}")
         _emit(p, type="halt", phase="error", reason=str(exc))
@@ -112,6 +127,11 @@ def _run_factory(p: Project) -> None:
         _emit(p, type="narrate", text="💰 Gates all green — the vault opens. Shipped!")
     else:
         _emit(p, type="narrate", text="🚫 Held at the gate (fail-closed). Nothing shipped.")
+    # Surface the written output (code + docs) for in-page browsing / download.
+    n_files = sum(1 for f in p.out_base.rglob("*") if f.is_file()) if p.out_base else 0
+    if n_files:
+        _emit(p, type="files", count=n_files)
+        _emit(p, type="narrate", text=f"📂 {n_files} file(s) written — open OUTPUT to browse.")
     p.status = "done"
     p.events.put(_END)
 
@@ -174,10 +194,85 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/static/"):
             self._serve_static(path[len("/static/"):])
             return
+        if path.startswith("/api/files/"):
+            self._list_files(path.rsplit("/", 1)[-1])
+            return
+        if path.startswith("/api/file/"):
+            self._serve_output_file(path.rsplit("/", 1)[-1])
+            return
+        if path.startswith("/api/zip/"):
+            self._zip_output(path.rsplit("/", 1)[-1])
+            return
         if not path.startswith("/api"):
             self._serve_static(path)  # e.g. /favicon.ico
             return
         self._json(404, {"error": "not found"})
+
+    # -- output browsing (the build's written code + docs) ----------------------
+    def _out_base(self, pid: str) -> Path | None:
+        p = _PROJECTS.get(pid)
+        if p is None or p.out_base is None or not p.out_base.is_dir():
+            return None
+        return p.out_base
+
+    def _list_files(self, pid: str) -> None:
+        base = self._out_base(pid)
+        if base is None:
+            self._json(404, {"error": "no output yet"})
+            return
+        files = [
+            {"path": str(f.relative_to(base)), "size": f.stat().st_size}
+            for f in sorted(base.rglob("*")) if f.is_file()
+        ]
+        self._json(200, {"files": files})
+
+    def _resolve_within(self, base: Path, rel: str) -> Path | None:
+        """Resolve ``rel`` under ``base``, fail-closed on traversal/symlink escape."""
+        target = (base / rel).resolve()
+        root = str(base.resolve())
+        if target == base.resolve() or not str(target).startswith(root + os.sep):
+            return None
+        return target
+
+    def _serve_output_file(self, pid: str) -> None:
+        from urllib.parse import parse_qs, urlparse
+
+        base = self._out_base(pid)
+        if base is None:
+            self._json(404, {"error": "no output"})
+            return
+        rel = (parse_qs(urlparse(self.path).query).get("path") or [""])[0]
+        target = self._resolve_within(base, rel)
+        if target is None or not target.is_file():
+            self._json(404, {"error": "not found"})
+            return
+        data = target.read_bytes()[:_MAX_VIEW_BYTES]  # capped for the in-page viewer
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _zip_output(self, pid: str) -> None:
+        import io
+        import zipfile
+
+        base = self._out_base(pid)
+        if base is None:
+            self._json(404, {"error": "no output"})
+            return
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for f in sorted(base.rglob("*")):
+                if f.is_file():
+                    zf.write(f, f.relative_to(base))
+        data = buf.getvalue()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Disposition", f'attachment; filename="{base.name}.zip"')
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def do_POST(self) -> None:
         path = self.path.split("?", 1)[0]
@@ -199,7 +294,10 @@ class Handler(BaseHTTPRequestHandler):
             _FLOOR[0] += 1
             floor = _FLOOR[0]
             pid = uuid.uuid4().hex[:12]
-            p = Project(id=pid, request=request, mode=mode, supervised=supervised, floor=floor)
+            p = Project(
+                id=pid, request=request, mode=mode, supervised=supervised, floor=floor,
+                out_base=_OUTPUT_ROOT / f"floor-{floor}",
+            )
             _PROJECTS[pid] = p
         threading.Thread(target=_run_factory, args=(p,), daemon=True).start()
         self._json(200, {"id": pid, "floor": floor})

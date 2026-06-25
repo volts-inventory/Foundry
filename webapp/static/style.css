@@ -107,9 +107,26 @@ button.danger{background:#6b1f28;border-color:var(--red);color:#ffe0e3}
 .dialog .row select{flex:1}
 .dialog label.check{display:flex;align-items:center;gap:8px;text-transform:none;color:var(--ink);margin-top:14px}
 .dialog label.check input{width:auto}
-.dialog-actions{display:flex;gap:10px;margin-top:18px}
+.dialog-actions{display:flex;gap:10px;margin-top:18px;align-items:center}
 .cp-note{color:var(--dim);font-size:11px;font-style:italic;margin:6px 0 0}
 #cp-summary{color:var(--ink);font-size:14px;margin:4px 0}
+
+/* ---- Output (files) browser ---- */
+#output-btn{background:#1b3a4a;border-color:var(--blue);color:#dff2ff}
+.dialog.files{width:min(860px,95vw)}
+.files-body{display:flex;gap:10px;height:min(56vh,440px);margin-top:8px}
+#files-list{list-style:none;margin:0;padding:0;overflow:auto;flex:0 0 40%;
+  border:2px solid var(--line);border-radius:6px}
+#files-list li{padding:5px 9px;font-size:12px;color:var(--dim);cursor:pointer;
+  border-bottom:1px dashed #1f2942;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#files-list li:hover{color:var(--ink)}
+#files-list li.sel{background:#24304f;color:var(--gold)}
+#files-list li.muted{color:var(--dim);cursor:default;font-style:italic;white-space:normal}
+#files-view{flex:1 1 auto;margin:0;overflow:auto;background:#0e1424;
+  border:2px solid var(--line);border-radius:6px;padding:10px;font-size:12px;
+  color:var(--ink);white-space:pre-wrap;word-break:break-word}
+.btn-link{margin-right:auto;color:#fff6da;text-decoration:none;border:3px solid var(--gold);
+  border-radius:6px;padding:6px 12px;font-weight:bold;font-size:12px;background:#5a4a18}
 
 /* ---- Mobile / narrow-screen layout --------------------------------------- */
 /* Stack the desktop three-pane (elevator | game | log) into a column: a
@@ -140,6 +157,11 @@ button.danger{background:#6b1f28;border-color:var(--red);color:#ffe0e3}
     flex:0 0 auto;width:100%;max-height:30vh;
     border-left:none;border-top:3px solid var(--line);
   }
+
+  /* file browser stacks: list above, viewer below */
+  .files-body{flex-direction:column;height:auto}
+  #files-list{flex:0 0 auto;max-height:22vh}
+  #files-view{min-height:30vh}
 }
 
 /* Coarse-pointer (touch) targets a little larger, regardless of width. */

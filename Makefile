@@ -5,13 +5,21 @@
 # Requires `uv` (https://docs.astral.sh/uv/). Docker targets additionally need a
 # Docker daemon; the `token` target needs the Claude Code CLI on a Max account.
 
+# Load .env (if present) so LOCAL targets see the same config docker-compose does
+# — FOUNDRY_MODEL_BACKEND, CLAUDE_CODE_OAUTH_TOKEN, FOUNDRY_OLLAMA_URL, etc. Keep
+# it simple KEY=value (no quotes). `export` passes every var to the recipe procs
+# (so e.g. `claude -p` sees the token). `make up` reads .env directly via compose.
+-include .env
+export
+
 # ---- tunables (override on the command line) -------------------------------
 # MODE:    assistant | gated | autonomous
 # BACKEND: mock | anthropic | claude-cli | codex | ollama-gemma
+#          (defaults to FOUNDRY_MODEL_BACKEND from the env / .env, else mock)
 # INSTALL_CLI_BACKENDS: `true` bakes the claude/codex CLIs into the docker image
 REQUEST ?= build a tiny URL-shortener service
 MODE ?= assistant
-BACKEND ?= mock
+BACKEND ?= $(or $(FOUNDRY_MODEL_BACKEND),mock)
 # Run output goes to an ephemeral, gitignored dir — NOT ./build (that is the
 # project's tracked planning-doc directory).
 OUT ?= ./.run/code
@@ -63,10 +71,10 @@ spec: ## Co-generate a spec from REQUEST (ideation) -> spec.md
 	@echo "wrote spec.md — refine it, then: make run REQUEST=... (or --spec spec.md)"
 
 workshop: ## Launch the Workshop game UI (HOST:$(PORT); default localhost)
-	WORKSHOP_HOST=$(HOST) WORKSHOP_PORT=$(PORT) $(UV) run python -m webapp.server
+	FOUNDRY_MODEL_BACKEND=$(BACKEND) WORKSHOP_HOST=$(HOST) WORKSHOP_PORT=$(PORT) $(UV) run python -m webapp.server
 
 workshop-lan: ## Launch bound to 0.0.0.0 — reachable on your LAN (e.g. a Pi from your phone)
-	WORKSHOP_HOST=0.0.0.0 WORKSHOP_PORT=$(PORT) $(UV) run python -m webapp.server
+	FOUNDRY_MODEL_BACKEND=$(BACKEND) WORKSHOP_HOST=0.0.0.0 WORKSHOP_PORT=$(PORT) $(UV) run python -m webapp.server
 
 # ---- credentials / config --------------------------------------------------
 token: ## Mint a Max-subscription OAuth token for the claude-cli backend

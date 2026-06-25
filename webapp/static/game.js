@@ -5,17 +5,16 @@
  * lifecycles. This file describes the workshop and reacts to the SAME Server-Sent
  * Events the backend already emits (server.py / events.py are untouched) — now
  * routed PER PROJECT: each project is its own floor (a Phaser scene); the elevator
- * switches the active floor. Sprites are generated procedurally so the app stays
- * offline; a drop-in art slot (static/assets/manifest.json) can override the floor
- * tiles with real PNGs. Nothing here can influence a build — the signed gates
- * decide and this is only the view.
+ * switches the active floor. EVERY sprite, tile and prop is generated procedurally
+ * in code (our own pixel art — no external image assets, no drop-in). Nothing here
+ * can influence a build — the signed gates decide and this is only the view.
  */
 
 // Canvas aspect (~1.5:1) is matched to the game panel so the world FILLS the frame
 // (no letterbox). Pokémon-interior vertical split: WALL fills the top, FLOOR the
 // rest. FLOOR_TOP is the wall/floor seam; characters stand on the floor near FLOOR_BOT.
 const W = 1280, H = 840;
-const FLOOR_TOP = 330, FLOOR_BOT = H - 70;
+const FLOOR_TOP = 250, FLOOR_BOT = H - 64;
 
 // ---- rooms (left -> right), weighted widths --------------------------------
 const ROOM_DEFS = [
@@ -106,46 +105,17 @@ function buildSharedTextures(scene){
   }
 }
 
-// Optional drop-in art: static/assets/manifest.json may map room -> tile PNG to
-// override the procedural floor texture. Best-effort; the procedural baseline
-// always works, so missing/broken assets degrade silently.
-function applyDropInArt(scene, done){
-  const man = scene.cache.json.get("artManifest");
-  const tiles = man && man.tiles;
-  if (!tiles || typeof tiles !== "object"){ done(); return; }
-  for (const [room, file] of Object.entries(tiles)){
-    if (ROOMS[room] && typeof file === "string") scene.load.image("dropin_"+room, "assets/"+file);
-  }
-  scene.load.once("complete", ()=>{
-    for (const room of Object.keys(tiles)){
-      const dk = "dropin_"+room, key = "floor_"+room;
-      if (scene.textures.exists(dk)){
-        if (scene.textures.exists(key)) scene.textures.remove(key);
-        scene.textures.addImage(key, scene.textures.get(dk).getSourceImage());
-      }
-    }
-    done();
-  });
-  scene.load.on("loaderror", ()=>{});
-  scene.load.start();
-}
-
 // =========================================================================== //
-//  Boot: generate shared art (+ drop-in), then signal ready                   //
+//  Boot: generate ALL our own pixel art, then signal ready                    //
 // =========================================================================== //
 let bootResolve;
 const bootReady = new Promise((r)=>{ bootResolve = r; });
 
 class BootScene extends Phaser.Scene {
   constructor(){ super("boot"); }
-  preload(){
-    // A missing manifest is the normal (procedural-only) case — ignore its 404.
-    this.load.json("artManifest", "assets/manifest.json");
-    this.load.on("loaderror", ()=>{});
-  }
   create(){
-    buildSharedTextures(this);
-    applyDropInArt(this, ()=>bootResolve());
+    buildSharedTextures(this);   // every texture is generated here — no external assets
+    bootResolve();
   }
 }
 
@@ -170,6 +140,7 @@ class FloorScene extends Phaser.Scene {
     const F = FLOORS.get(this.proj.floor);
     if (F) F.scene = this;
     if (this.proj.slots) this.setPool(this.proj.slots);  // rehydrate / initial pool
+    this.startAmbient();                                 // blink + monitor flicker
     this.sys.setVisible(this.proj.floor === ACTIVE);
   }
 
@@ -209,22 +180,33 @@ class FloorScene extends Phaser.Scene {
       // room divider pilasters
       this.add.rectangle(R.x1-2, 0, 2, H, 0x000000, 0.22).setOrigin(0,0).setDepth(1);
       this.add.rectangle(R.x1, 0, 2, H, 0xffffff, 0.04).setOrigin(0,0).setDepth(1);
-      // wall decor: a lit window + wainscot rail so the tall wall isn't bare
-      const wy = 96, ww = Math.min(64, R.w-60), wh = 54;
-      this.add.rectangle(R.cx, wy, ww+6, wh+6, shade(R.color,0.16)).setOrigin(0.5,0).setDepth(2);
-      this.add.rectangle(R.cx, wy+3, ww, wh, 0x14305a).setOrigin(0.5,0).setDepth(2);
-      this.add.rectangle(R.cx, wy+3, ww, wh*0.5, 0x2a5a8c).setOrigin(0.5,0).setDepth(2); // sky
-      this.add.rectangle(R.cx, wy+3, 3, wh, shade(R.color,0.16)).setOrigin(0.5,0).setDepth(2); // mullion
-      this.add.rectangle(R.cx, wy+3+wh*0.5, ww, 3, shade(R.color,0.16)).setOrigin(0.5,0).setDepth(2);
-      this.add.rectangle(R.x0, FLOOR_TOP-46, R.w, 4, shade(R.color,0.46)).setOrigin(0,0).setDepth(1); // dado rail
-      // a hanging room sign on the wall
+      // hanging room sign at the very top of the wall
       const sw = Math.min(R.w-14, R.label.length*7+18);
-      this.add.rectangle(R.cx, 20, sw, 20, shade(R.color,0.22)).setOrigin(0.5,0).setDepth(2)
-        .setStrokeStyle(2, shade(R.color,0.6));
-      this.add.text(R.cx, 23, R.label, {
+      this.add.rectangle(R.cx, 12, sw, 20, shade(R.color,0.24)).setOrigin(0.5,0).setDepth(2)
+        .setStrokeStyle(2, shade(R.color,0.62));
+      this.add.text(R.cx, 15, R.label, {
         fontFamily:"'PixelFont','Courier New',monospace", fontSize:"12px",
         fontStyle:"bold", color:"#eef3ff",
       }).setOrigin(0.5,0).setDepth(3);
+      // a big lit window (animated sky glow) centred on the wall
+      const wy = 70, ww = Math.min(72, R.w-66), wh = 70;
+      this.add.rectangle(R.cx, wy, ww+8, wh+8, shade(R.color,0.16)).setOrigin(0.5,0).setDepth(2);
+      const glow = this.add.rectangle(R.cx, wy+4, ww, wh, 0x1c4a86).setOrigin(0.5,0).setDepth(2);
+      this.add.rectangle(R.cx, wy+4, ww, wh*0.5, 0x357bbe).setOrigin(0.5,0).setDepth(2); // sky
+      this.add.circle(R.cx+ww*0.28, wy+18, 6, 0xffe9a8, 0.9).setDepth(2);                // sun
+      this.add.rectangle(R.cx, wy+4, 3, wh, shade(R.color,0.16)).setOrigin(0.5,0).setDepth(2);
+      this.add.rectangle(R.cx, wy+4+wh*0.5, ww, 3, shade(R.color,0.16)).setOrigin(0.5,0).setDepth(2);
+      this.tweens.add({targets:glow, fillAlpha:{from:0.7,to:1}, duration:2600, yoyo:true, repeat:-1});
+      // a framed poster + a wall clock flanking the window, then the dado rail
+      if (R.w > 150){
+        this.add.rectangle(R.x0+22, wy+22, 26, 34, shade(R.color,0.5)).setDepth(2).setStrokeStyle(2, shade(R.color,0.7));
+        this.add.rectangle(R.x0+22, wy+22, 18, 26, shade(R.color,1.25)).setDepth(2);
+      }
+      const clk = this.add.circle(R.x1-22, wy+18, 9, 0xf2efe0).setDepth(2).setStrokeStyle(2, 0x2a2a33);
+      this.clocks = this.clocks || []; this.clocks.push({x:R.x1-22, y:wy+18});
+      this.add.rectangle(R.x1-22, wy+18, 2, 6, 0x2a2a33).setDepth(3);
+      this.add.rectangle(R.x0, FLOOR_TOP-34, R.w, 4, shade(R.color,0.5)).setOrigin(0,0).setDepth(1); // dado rail
+      this.add.rectangle(R.x0, FLOOR_TOP-34, R.w, 30, shade(R.color,0.34), 0.5).setOrigin(0,0).setDepth(0); // wainscot
       this.roomGlow[key] = this.add.rectangle(R.x0, 0, R.w, H, 0xffd25a, 0)
         .setOrigin(0,0).setDepth(1);
     }
@@ -291,9 +273,125 @@ class FloorScene extends Phaser.Scene {
     c.add(this.add.rectangle(-23,9,4,13,0x4a3320).setOrigin(0.5,1));
     c.add(this.add.rectangle(23,9,4,13,0x4a3320).setOrigin(0.5,1)); // legs
     out(-4,-9,24,16,0x10151f);                                    // monitor bezel
-    c.add(this.add.rectangle(-4,-11,18,11,shade(accent,1.25),0.92).setOrigin(0.5,1)); // dept-tinted screen
+    const screen = this.add.rectangle(-4,-11,18,11,shade(accent,1.25),0.92).setOrigin(0.5,1);
+    c.add(screen);                                                // dept-tinted screen
+    c.add(this.add.rectangle(-9,-16,8,2,shade(accent,1.5))); c.add(this.add.rectangle(-11,-12,12,2,shade(accent,1.4))); // code lines
     out(16,-1,16,4,0x2a3550);                                     // keyboard
+    this.screens = this.screens || []; this.screens.push(screen);
     return c;
+  }
+
+  // ========================= animation library ============================ //
+  // Ambient life: blink + monitor flicker, always running on a floor.
+  startAmbient(){
+    this.time.addEvent({delay:2600, loop:true, callback:()=>{
+      for (const a of this.agents.values()) if (a.seen) this.blink(a);
+      this.blink(this.cto);
+    }});
+    this.time.addEvent({delay:360, loop:true, callback:()=>{
+      const s = this.screens; if (!s || !s.length) return;
+      const sc = s[(this._sf = (this._sf||0)+1) % s.length];
+      if (sc) this.tweens.add({targets:sc, alpha:{from:0.6,to:0.95}, duration:150, yoyo:true});
+    }});
+  }
+  blink(a){
+    if (!a || !a.eyes) return;
+    a.eyes.forEach(e=>{ e.scaleY = 0.15; });
+    this.time.delayedCall(110, ()=>{ if (a.eyes) a.eyes.forEach(e=>{ e.scaleY = 1; }); });
+  }
+  // generic effects
+  floatText(x,y,txt,color,size){
+    const t = this.add.text(x,y,txt,{fontFamily:"'PixelFont','Courier New',monospace",
+      fontSize:(size||13)+"px",fontStyle:"bold",color:color||"#ffe9a8"}).setOrigin(0.5).setDepth(40);
+    this.tweens.add({targets:t, y:y-34, alpha:{from:1,to:0}, duration:1100, ease:"Cubic.out",
+      onComplete:()=>t.destroy()});
+  }
+  burst(x,y,colors,n){
+    n = n||12;
+    for (let i=0;i<n;i++){
+      const ang=(Math.PI*2*i)/n + (x%6)/6, sp=44+(i%4)*22;
+      const p=this.add.rectangle(x,y,4,4,colors[i%colors.length]).setDepth(41);
+      this.tweens.add({targets:p, x:x+Math.cos(ang)*sp, y:y+Math.sin(ang)*sp,
+        alpha:{from:1,to:0}, scale:{from:1.4,to:0.2}, duration:560+(i%5)*40, ease:"Cubic.out",
+        onComplete:()=>p.destroy()});
+    }
+  }
+  ring(x,y,color){
+    const r=this.add.circle(x,y,8,color,0).setStrokeStyle(3,color).setDepth(41);
+    this.tweens.add({targets:r, scale:{from:0.4,to:4}, alpha:{from:0.9,to:0}, duration:520,
+      onComplete:()=>r.destroy()});
+  }
+  shake(ms,amt){ this.cameras.main.shake(ms||300, amt||0.012); }
+  hop(a, times){
+    if (!a) return; const y0=a.y; let i=0; times=times||1;
+    const up=()=>{ this.tweens.add({targets:a, y:y0-15, duration:130, ease:"Quad.out", yoyo:true,
+      onComplete:()=>{ a.y=y0; if (++i<times) up(); }}); };
+    up();
+  }
+  codeGlyph(a){
+    if (!a) return;
+    const g=["</>","{ }","( )",";","==","fn","[]","#"][Math.abs(Math.round(a.x))%8];
+    this.floatText(a.x+12, a.y-30, g, "#9fe6ff", 12);
+  }
+  // gate stamp (big PASS/FAIL slam) + ring + burst
+  stampGate(pass){
+    const g=this.gateGeom; if (!g) return;
+    const cx=g.cx, cy=(g.atop+g.abot)/2, col=pass?0x5ddc7a:0xff5d6c;
+    const s=this.add.container(cx,cy).setDepth(42);
+    s.add(this.add.rectangle(0,0,58,32,0x101622,0.96).setStrokeStyle(3,col));
+    s.add(this.add.text(0,0,pass?"PASS":"FAIL",{fontFamily:"'PixelFont','Courier New',monospace",
+      fontSize:"16px",fontStyle:"bold",color:pass?"#9dffbf":"#ffb3ba"}).setOrigin(0.5));
+    s.setScale(3.4).setAlpha(0).setAngle(-12);
+    this.tweens.add({targets:s, scale:1, alpha:1, angle:-6, duration:170, ease:"Back.out",
+      onComplete:()=>{ this.ring(cx,cy,col); this.burst(cx,cy,[col,0xffffff],16);
+        this.time.delayedCall(950,()=>this.tweens.add({targets:s,alpha:0,duration:300,onComplete:()=>s.destroy()})); }});
+    if (!pass) this.shake(380,0.015);
+  }
+  // checkpoint spotlight + bouncing "?" over the CTO
+  spotlightCTO(on){
+    if (this.spot){ this.spot.destroy(); this.spot=null; }
+    if (this.qmark){ this.qmark.destroy(); this.qmark=null; }
+    if (!on || !this.cto) return;
+    const x=this.cto.x;
+    const dim=this.add.rectangle(0,0,W,H,0x05080f,0.5).setOrigin(0,0);
+    const beam=this.add.triangle(x,FLOOR_TOP-70,-66,180,66,180,0,0,0xfff1c0,0.10);
+    this.spot=this.add.container(0,0).setDepth(34); this.spot.add([dim,beam]);
+    const q=this.add.text(x,this.cto.y-48,"?",{fontFamily:"'PixelFont','Courier New',monospace",
+      fontSize:"24px",fontStyle:"bold",color:"#ffd95e"}).setOrigin(0.5).setDepth(43);
+    this.qmark=q;
+    this.tweens.add({targets:q, y:q.y-7, duration:480, yoyo:true, repeat:-1, ease:"Sine.inOut"});
+  }
+  celebrate(){
+    for (const a of this.agents.values()) if (a.seen) this.hop(a,3);
+    this.hop(this.cto,3);
+    for (const s of (this.poolGroup||[])) if (s && s.bob) this.hop(s,2);
+    this.confetti();
+  }
+  confetti(){
+    const cols=[0xff5d6c,0x5ddc7a,0x5db8ff,0xffcf52,0xff8fae,0xb59bff];
+    for (let i=0;i<72;i++){
+      const x=20+Math.abs((i*97)%(W-40)), c=cols[i%cols.length];
+      const p=this.add.rectangle(x,-12,5,8,c).setDepth(45).setAngle((i*53)%360);
+      this.tweens.add({targets:p, y:H+20, angle:p.angle+360, duration:1900+(i%6)*260,
+        delay:(i%10)*70, ease:"Cubic.in", onComplete:()=>p.destroy()});
+      this.tweens.add({targets:p, x:x+((i%2)?46:-46), duration:1900, yoyo:true});
+    }
+  }
+  gloom(){
+    const o=this.add.rectangle(0,0,W,H,0x0a0f1c,0).setOrigin(0,0).setDepth(33);
+    this.tweens.add({targets:o, fillAlpha:0.45, duration:700});
+    for (const a of this.agents.values()) if (a.seen)
+      this.tweens.add({targets:a.bob, angle:7, y:3, duration:500});
+  }
+  banner(txt,color){
+    const b=this.add.container(W/2, FLOOR_TOP+40).setDepth(46);
+    b.add(this.add.rectangle(0,0,380,48,0x0c1322,0.95).setStrokeStyle(3,color));
+    b.add(this.add.text(0,0,txt,{fontFamily:"'PixelFont','Courier New',monospace",
+      fontSize:"22px",fontStyle:"bold",color:"#ffffff"}).setOrigin(0.5));
+    b.setScale(0.2).setAlpha(0);
+    this.tweens.add({targets:b, scale:1, alpha:1, duration:300, ease:"Back.out"});
+    this.time.delayedCall(2400,()=>this.tweens.add({targets:b, alpha:0, y:b.y-20, duration:400,
+      onComplete:()=>b.destroy()}));
   }
 
   buildGuardian(){
@@ -405,12 +503,14 @@ class FloorScene extends Phaser.Scene {
     bob.add(this.add.rectangle(6,-6,4,16,skinSh));                  // face shading
     bob.add(this.add.rectangle(0,-14,19,8,hair));                  // hair top
     bob.add(this.add.rectangle(-8,-8,4,7,hair)); bob.add(this.add.rectangle(8,-8,4,7,hair)); // sides
-    bob.add(this.add.rectangle(-4,-5,3,4,0x14182a)); bob.add(this.add.rectangle(5,-5,3,4,0x14182a)); // eyes
+    const eL=this.add.rectangle(-4,-5,3,4,0x14182a), eR=this.add.rectangle(5,-5,3,4,0x14182a); // eyes
+    bob.add(eL); bob.add(eR);
     bob.add(this.add.rectangle(-5,-6,1,1,0xffffff)); bob.add(this.add.rectangle(4,-6,1,1,0xffffff)); // glints
     const spark = this.add.rectangle(12,-13,4,4,0xfff04a).setVisible(false);
     bob.add(spark);
     c.add(bob);
     c.bob = bob; c.spark = spark; c.legL = legL; c.legR = legR; c.baseLegY = 15;
+    c.eyes = [eL, eR];
     return c;
   }
 
@@ -462,10 +562,13 @@ class FloorScene extends Phaser.Scene {
     a.spark.setVisible(true);
     if (a.workTween) a.workTween.stop();
     a.bob.y = 0;
+    // typing: quick stepped bob + a couple of floating code glyphs rising off the desk
     a.workTween = this.tweens.add({
       targets:a.bob, y:-2, duration:90, yoyo:true, repeat:13, ease:"Sine.inOut",
       onComplete:()=>{ a.spark.setVisible(false); a.bob.y=0; },
     });
+    this.codeGlyph(a);
+    this.time.delayedCall(420, ()=>this.codeGlyph(a));
   }
 
   agentSay(name, text){
@@ -673,11 +776,14 @@ function routeEvent(floor, ev){
       if (S) S.agentSay(ev.agent, ev.text);
       if (ev.concern) logTo(F, "", `💭 ${ev.agent}: "${ev.concern}"`); break;
     case "artifact":
-      if (S) S.spawnPickup(ev.room, ev.label);
+      if (S){ S.spawnPickup(ev.room, ev.label); const pa=S.agents.get(ev.agent);
+        if (pa){ S.hop(pa,1); const R=ROOMS[ev.room]; if(R) S.burst(R.cx, FLOOR_TOP+70, [0xffd95e,0xffffff], 8); } }
       logTo(F, "good", "✚ "+ev.label+"  ·  "+ev.agent); break;
     case "gate":
       F.gates[ev.name] = {status:ev.status, attested:ev.attested, advisory:ev.advisory};
-      if (S) S.setGate(ev.name, F.gates[ev.name]);
+      if (S){ S.setGate(ev.name, F.gates[ev.name]);
+        const g=S.gateGeom; if(g){ const col=ev.status==="pass"?0x5ddc7a:0xff5d6c;
+          S.ring(g.cx,(g.atop+g.abot)/2,col); S.burst(g.cx,(g.atop+g.abot)/2,[col,0xffffff],8); } }
       if (isActive) renderGatesMini(F.gates);
       if (!ev.advisory) logTo(F, ev.status==="pass"?"good":"bad",
         `🛡 GATE ${ev.name.toUpperCase()}: ${ev.status.toUpperCase()}${ev.attested?" (signed)":""}`);
@@ -694,18 +800,26 @@ function routeEvent(floor, ev){
     case "await_decision":
       F.awaiting = true; if (Array.isArray(ev.journal)) F.journal = ev.journal;
       renderElevator();
+      if (S) S.spotlightCTO(true);
       if (isActive) showCheckpoint(F); break;
     case "resolved":
       F.awaiting = false; renderElevator();
+      if (S){ S.spotlightCTO(false);
+        const ap = ev.decision === "approve";
+        S.hop(S.cto, ap?2:1); S.ring(S.cto.x, S.cto.y-10, ap?0x5ddc7a:0xff5d6c);
+        S.burst(S.cto.x, S.cto.y-10, ap?[0x5ddc7a,0xffffff]:[0xff5d6c,0xffffff], 12);
+        S.floatText(S.cto.x, S.cto.y-30, ap?"APPROVED":"REJECTED", ap?"#9dffbf":"#ffb3ba", 13);
+        if (!ap) S.shake(280,0.01); }
       if (isActive) hideCheckpoint(); break;
     case "release":
-      if (S) S.openGateAndChest();
+      if (S){ S.openGateAndChest(); S.stampGate(true); S.celebrate(); S.banner("SHIPPED!", 0x5ddc7a); }
       logTo(F, "gold", "💰 RELEASED → "+(ev.uri||"artifact")); break;
     case "halt":
-      if (S) S.flashGate();
+      if (S){ S.flashGate(); S.stampGate(false); }
       logTo(F, "bad", "⛔ HELD: "+ev.reason); break;
     case "done":
       F.status = "done"; F.passed = !!ev.passed; renderElevator();
+      if (S && !ev.passed){ S.gloom(); S.banner("HELD AT THE GATE", 0xff5d6c); }
       logTo(F, ev.passed?"good":"bad",
         ev.passed?"✅ Build complete — shipped.":"❌ Build halted — nothing shipped."); break;
   }

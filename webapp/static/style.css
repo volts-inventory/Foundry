@@ -2,11 +2,19 @@
   --bg:#0e1320; --panel:#161d31; --ink:#e8eefb; --dim:#8aa0c8;
   --green:#5ddc7a; --red:#ff5d6c; --gold:#ffcf52; --blue:#5db8ff; --line:#2a3550;
 }
+/* Pixel-font DROP-IN slot: drop a CC0 pixel webfont at
+   static/assets/fonts/pixel.woff2 and the whole UI (DOM + canvas) switches to it.
+   Until then it falls back to monospace — no error, no FOUT. */
+@font-face{
+  font-family:"PixelFont";
+  src:url("assets/fonts/pixel.woff2") format("woff2");
+  font-display:swap;
+}
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
 body{
   background:var(--bg); color:var(--ink);
-  font-family:"Courier New",ui-monospace,Menlo,Consolas,monospace;
+  font-family:"PixelFont","Courier New",ui-monospace,Menlo,Consolas,monospace;
   letter-spacing:.5px; overflow:hidden;
 }
 #app{display:flex;flex-direction:column;height:100vh}
@@ -38,7 +46,17 @@ button.danger{background:#6b1f28;border-color:var(--red);color:#ffe0e3}
 #new-btn{background:#5a4a18;border-color:var(--gold);color:#fff6da}
 
 /* ---- Stage ---- */
-#stage{display:flex;flex:1 1 auto;min-height:0}
+#stage{display:flex;flex:1 1 auto;min-height:0;position:relative}
+/* Zelda-style screen wipe on floor change (chunky stepped sweep) */
+#wipe{position:absolute;top:0;bottom:0;left:66px;right:264px;background:#0a0f1c;
+  transform:scaleX(0);transform-origin:left;pointer-events:none;z-index:40}
+#wipe.go{animation:wipe .42s steps(9) forwards}
+@keyframes wipe{
+  0%{transform:scaleX(0);transform-origin:left center}
+  48%{transform:scaleX(1);transform-origin:left center}
+  52%{transform:scaleX(1);transform-origin:right center}
+  100%{transform:scaleX(0);transform-origin:right center}
+}
 
 /* ---- Elevator (floor switcher) ---- */
 #elevator{

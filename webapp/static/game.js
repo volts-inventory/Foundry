@@ -182,14 +182,16 @@ class FloorScene extends Phaser.Scene {
     if (!n || n <= 1) return;
     const R = ROOMS.engineering, count = Math.min(n, 8);
     for (let i=0;i<count;i++){
-      const x = R.x0+22 + (R.w-44)*(count>1 ? i/(count-1) : 0.5);
-      const s = this.makePerson(Math.round(x), FLOOR_BOT-40, 0xffc08a, false);
-      s.setScale(1.5).setDepth(9).setAlpha(0.92);
-      this.tweens.add({targets:s.bob, y:-2, duration:300+i*40, yoyo:true, repeat:-1, ease:"Sine.inOut"});
-      this.poolGroup.push(s);
+      const x = Math.round(R.x0+26 + (R.w-52)*(count>1 ? i/(count-1) : 0.5));
+      const y = FLOOR_BOT - 64 + (i%2)*30;                    // two rows of desks
+      const ws = this.makeWorkstation(x, y+24, 0xffc08a);
+      const s = this.makePerson(x, y, 0xffc08a, false);
+      s.setScale(1.4).setDepth(y).setAlpha(0.95);
+      this.startWalk(s);                                       // ICs are busy building
+      this.poolGroup.push(s, ws);
     }
     this.poolLabel = this.add.text(R.cx, FLOOR_TOP+8, "⚙ "+n+" ICs",
-      {fontFamily:"'Courier New'",fontSize:"11px",fontStyle:"bold",color:"#ffc08a"})
+      {fontFamily:"'PixelFont','Courier New'",fontSize:"11px",fontStyle:"bold",color:"#ffc08a"})
       .setOrigin(0.5,0).setDepth(28);
   }
 
@@ -220,7 +222,7 @@ class FloorScene extends Phaser.Scene {
       this.add.rectangle(R.cx, 20, sw, 20, shade(R.color,0.22)).setOrigin(0.5,0).setDepth(2)
         .setStrokeStyle(2, shade(R.color,0.6));
       this.add.text(R.cx, 23, R.label, {
-        fontFamily:"'Courier New',monospace", fontSize:"12px",
+        fontFamily:"'PixelFont','Courier New',monospace", fontSize:"12px",
         fontStyle:"bold", color:"#eef3ff",
       }).setOrigin(0.5,0).setDepth(3);
       this.roomGlow[key] = this.add.rectangle(R.x0, 0, R.w, H, 0xffd25a, 0)
@@ -232,12 +234,13 @@ class FloorScene extends Phaser.Scene {
 
   // Procedural pixel furniture so each room reads like a furnished interior.
   furnish(){
+    // ambient props at room EDGES (the working desks are per-lead, in the floor)
     const props = {
-      reception:   [["desk",0.5,0]],
-      product:     [["board",0.30,0],["plant",0.82,0],["desk",0.62,0]],
-      architecture:[["board",0.5,0],["plant",0.16,0]],
-      engineering: [["rack",0.16,0],["monitor",0.5,0],["monitor",0.74,0]],
-      qa:          [["monitor",0.22,0],["monitor",0.44,0],["shelf",0.74,0],["plant",0.92,0]],
+      reception:   [["plant",0.12],["plant",0.88]],
+      product:     [["board",0.10],["plant",0.92]],
+      architecture:[["board",0.10],["plant",0.90]],
+      engineering: [["rack",0.07],["plant",0.94]],
+      qa:          [["shelf",0.07],["plant",0.95]],
     };
     for (const key in props){
       const R = ROOMS[key]; if(!R) continue;
@@ -272,6 +275,24 @@ class FloorScene extends Phaser.Scene {
       c.add(this.add.rectangle(2,-16,16,3,0x7fd1ff).setOrigin(0.5,1));
       c.add(this.add.rectangle(-6,-10,10,3,0x7dffb0).setOrigin(0.5,1));
     }
+    return c;
+  }
+
+  // A desk + monitor + keyboard each lead works at, placed IN the room floor.
+  makeWorkstation(x, floorY, accent){
+    x = Math.round(x);
+    const c = this.add.container(x, floorY).setDepth(floorY+5);  // occludes its lead's legs
+    const O = 0x0a0d16;
+    const out = (rx,ry,w,h,col)=>{
+      c.add(this.add.rectangle(rx,ry,w+2,h+2,O).setOrigin(0.5,1));
+      c.add(this.add.rectangle(rx,ry,w,h,col).setOrigin(0.5,1));
+    };
+    out(0,0,54,9,0x6b4a2c);                                       // desktop
+    c.add(this.add.rectangle(-23,9,4,13,0x4a3320).setOrigin(0.5,1));
+    c.add(this.add.rectangle(23,9,4,13,0x4a3320).setOrigin(0.5,1)); // legs
+    out(-4,-9,24,16,0x10151f);                                    // monitor bezel
+    c.add(this.add.rectangle(-4,-11,18,11,shade(accent,1.25),0.92).setOrigin(0.5,1)); // dept-tinted screen
+    out(16,-1,16,4,0x2a3550);                                     // keyboard
     return c;
   }
 
@@ -325,12 +346,13 @@ class FloorScene extends Phaser.Scene {
     for (const room in ROSTER){
       const names = ROSTER[room], R = ROOMS[room];
       names.forEach((name,i)=>{
-        const span = R.w-60;
-        const hx = R.x0+34 + (names.length>1 ? span*i/(names.length-1) : span/2);
-        // stand in the middle of the floor (not jammed at the bottom), staggered
-        const hy = FLOOR_TOP + 150 - (i%2)*70;
+        const span = R.w-64;
+        const hx = R.x0+36 + (names.length>1 ? span*i/(names.length-1) : span/2);
+        // each lead works at their OWN desk inside the room, staggered front/back
+        const hy = FLOOR_TOP + 96 + (i%2)*92;
+        this.makeWorkstation(hx, hy+30, COLORS[name]||0xcccccc);  // desk in front of them
         const a = this.makePerson(hx, hy, COLORS[name]||0xcccccc, false);
-        a.setScale(2.3);
+        a.setScale(1.95).setDepth(hy);                            // y-sort (desk occludes legs)
         a.home = {x:hx,y:hy};
         a.setPosition(hx, hy+200).setAlpha(0.32);
         a.seen = false; a.bubble = null;
@@ -348,38 +370,65 @@ class FloorScene extends Phaser.Scene {
   buildCTO(){
     const c = this.makePerson(ROOMS.reception.cx, FLOOR_BOT-18, 0x222a44, true);
     c.setDepth(15);
-    c.add(this.add.text(0,-30,"CTO",{fontFamily:"'Courier New'",fontSize:"9px",color:"#ffcf52"})
+    c.add(this.add.text(0,-30,"CTO",{fontFamily:"'PixelFont','Courier New'",fontSize:"9px",color:"#ffcf52"})
       .setOrigin(0.5));
     this.cto = c;
     this.tweens.add({targets:c.bob, y:-1, duration:380, yoyo:true, repeat:-1, ease:"Sine.inOut"});
   }
 
+  // Original chibi sprite in the general GBA-JRPG style: big head, small body,
+  // dark outline, limited palette, stepped-frame-ready legs. (Our own art.)
   makePerson(x,y,bodyColor,isCTO){
     const c = this.add.container(x,y).setDepth(10);
-    const O = 0x0a0d16;  // 1px black-ish outline, the pixel-art read
-    c.add(this.add.ellipse(1,17,22,6,0x000000,0.32));            // drop shadow
+    const O = 0x0b0e18;                                    // near-black outline
+    const skin = 0xf3c7a0, skinSh = 0xd6a37a;
+    const hairs = [0x2a1d12,0x140f0a,0x6b4a1e,0x4a2e1a,0x55607a];
+    const hair = isCTO ? 0x14110c : hairs[Math.abs(Math.round(x)) % hairs.length];
+    c.add(this.add.ellipse(0,17,20,6,0x000000,0.32));      // drop shadow
     const bob = this.add.container(0,0);
-    // legs (separate sprites so they can step for a walk cycle)
-    bob.add(this.add.rectangle(-5,12,8,11,O)); bob.add(this.add.rectangle(5,12,8,11,O));
-    const legL = this.add.rectangle(-5,12,6,9,0x222d47), legR = this.add.rectangle(5,12,6,9,0x222d47);
+    // short legs (separate, for a 2-frame walk cycle)
+    bob.add(this.add.rectangle(0,15,14,9,O));
+    const legL = this.add.rectangle(-4,15,5,7,0x33406a), legR = this.add.rectangle(4,15,5,7,0x33406a);
     bob.add(legL); bob.add(legR);
-    // torso: outline + fill + a highlight stripe + shadow stripe (2-tone shading)
-    bob.add(this.add.rectangle(0,1,20,18,O));
-    bob.add(this.add.rectangle(0,1,16,16,bodyColor));
-    bob.add(this.add.rectangle(-5,1,4,16,shade(bodyColor,1.32)));
-    bob.add(this.add.rectangle(6,1,3,16,shade(bodyColor,0.7)));
-    if (isCTO) bob.add(this.add.rectangle(0,0,3,12,0xffcf52));   // tie
-    // head: outline + skin + hair + eyes
-    bob.add(this.add.rectangle(0,-12,16,15,O));
-    bob.add(this.add.rectangle(0,-12,13,13,0xf1c9a5));
-    bob.add(this.add.rectangle(1,-12,3,13,0xe0b48f));            // face shade
-    bob.add(this.add.rectangle(0,-19,15,6,isCTO?0x15110c:0x3a2a1c));
-    bob.add(this.add.rectangle(-3,-13,2,3,0x14182a)); bob.add(this.add.rectangle(3,-13,2,3,0x14182a));
-    const spark = this.add.rectangle(11,-13,4,4,0xfff04a).setVisible(false);
+    bob.add(this.add.rectangle(-4,18,5,2,0x20283f)); bob.add(this.add.rectangle(4,18,5,2,0x20283f)); // shoes
+    // small torso + arms (2-tone shaded)
+    bob.add(this.add.rectangle(-7,7,4,10,O)); bob.add(this.add.rectangle(7,7,4,10,O));   // arm outlines
+    bob.add(this.add.rectangle(-7,7,3,9,shade(bodyColor,0.85))); bob.add(this.add.rectangle(7,7,3,9,shade(bodyColor,0.85)));
+    bob.add(this.add.rectangle(0,8,16,13,O));
+    bob.add(this.add.rectangle(0,8,12,11,bodyColor));
+    bob.add(this.add.rectangle(-4,8,3,11,shade(bodyColor,1.34)));   // highlight
+    bob.add(this.add.rectangle(5,8,2,11,shade(bodyColor,0.7)));     // shadow
+    if (isCTO) bob.add(this.add.rectangle(0,8,3,10,0xffcf52));      // tie
+    // big chibi head
+    bob.add(this.add.rectangle(0,-6,21,19,O));
+    bob.add(this.add.rectangle(0,-6,17,16,skin));
+    bob.add(this.add.rectangle(6,-6,4,16,skinSh));                  // face shading
+    bob.add(this.add.rectangle(0,-14,19,8,hair));                  // hair top
+    bob.add(this.add.rectangle(-8,-8,4,7,hair)); bob.add(this.add.rectangle(8,-8,4,7,hair)); // sides
+    bob.add(this.add.rectangle(-4,-5,3,4,0x14182a)); bob.add(this.add.rectangle(5,-5,3,4,0x14182a)); // eyes
+    bob.add(this.add.rectangle(-5,-6,1,1,0xffffff)); bob.add(this.add.rectangle(4,-6,1,1,0xffffff)); // glints
+    const spark = this.add.rectangle(12,-13,4,4,0xfff04a).setVisible(false);
     bob.add(spark);
     c.add(bob);
-    c.bob = bob; c.spark = spark; c.legL = legL; c.legR = legR;
+    c.bob = bob; c.spark = spark; c.legL = legL; c.legR = legR; c.baseLegY = 15;
     return c;
+  }
+
+  // Frame-stepped walk (2-frame leg alternation) — the snappy 8/16-bit motion.
+  startWalk(a){
+    if (!a || a.walkEv) return;
+    let f = 0;
+    a.walkEv = this.time.addEvent({delay:130, loop:true, callback:()=>{
+      f ^= 1;
+      a.legL.y = a.baseLegY + (f ? -2 : 2);
+      a.legR.y = a.baseLegY + (f ? 2 : -2);
+      a.bob.y  = f ? -1 : 0;
+    }});
+  }
+  stopWalk(a){
+    if (!a) return;
+    if (a.walkEv){ a.walkEv.remove(); a.walkEv = null; }
+    a.legL.y = a.baseLegY; a.legR.y = a.baseLegY; a.bob.y = 0;
   }
 
   setActiveRoom(key){
@@ -392,7 +441,14 @@ class FloorScene extends Phaser.Scene {
   walkCTO(tx){
     if (!this.cto) return;
     const dist = Math.abs(tx - this.cto.x);
-    this.tweens.add({targets:this.cto, x:tx, duration:Math.max(350,dist*4), ease:"Sine.inOut"});
+    if (dist < 2) return;
+    this.cto.scaleX = (tx < this.cto.x) ? -1 : 1;   // face the way they walk
+    this.startWalk(this.cto);
+    if (this.ctoWalk) this.ctoWalk.stop();
+    this.ctoWalk = this.tweens.add({
+      targets:this.cto, x:tx, duration:Math.max(350,dist*4), ease:"Sine.inOut",
+      onComplete:()=>{ this.stopWalk(this.cto); this.cto.scaleX = 1; },
+    });
   }
 
   reveal(name){
@@ -432,7 +488,7 @@ class FloorScene extends Phaser.Scene {
     c.add(this.add.rectangle(0,-h/2,w,h,0xf4f7ff).setStrokeStyle(2,0xc7d2ec));
     c.add(this.add.triangle(0,0,-4,-1,4,-1,0,6,0xf4f7ff));
     lines.forEach((l,i)=>c.add(this.add.text(-w/2+8,-h+8+i*13,l,
-      {fontFamily:"'Courier New'",fontSize:"11px",color:"#1a2236"}).setOrigin(0,0)));
+      {fontFamily:"'PixelFont','Courier New'",fontSize:"11px",color:"#1a2236"}).setOrigin(0,0)));
     c.setScale(0.6); c.setAlpha(0);
     this.tweens.add({targets:c, scale:1, alpha:1, duration:200, ease:"Back.out"});
     return c;
@@ -443,7 +499,7 @@ class FloorScene extends Phaser.Scene {
     const w = Math.max(64, label.length*7+18);
     const c = this.add.container(R.cx, FLOOR_BOT-60).setDepth(20);
     c.add(this.add.rectangle(0,0,w,18,0x161d31).setStrokeStyle(2,0xffcf52));
-    c.add(this.add.text(0,0,"✚ "+label,{fontFamily:"'Courier New'",fontSize:"11px",color:"#ffe9a8"})
+    c.add(this.add.text(0,0,"✚ "+label,{fontFamily:"'PixelFont','Courier New'",fontSize:"11px",color:"#ffe9a8"})
       .setOrigin(0.5));
     this.tweens.add({targets:c, y:c.y-50, alpha:0, duration:2600, ease:"Cubic.out",
       onComplete:()=>c.destroy()});
@@ -464,7 +520,7 @@ class FloorScene extends Phaser.Scene {
       if (!this.gatePips[n]){
         const c = this.add.container(sx, sy).setDepth(6);
         c.add(this.add.rectangle(10,4,20,18,0x000000));
-        c.add(this.add.text(10,3,"",{fontFamily:"'Courier New'",fontSize:"12px",
+        c.add(this.add.text(10,3,"",{fontFamily:"'PixelFont','Courier New'",fontSize:"12px",
           fontStyle:"bold",color:"#fff"}).setOrigin(0.5));
         c.add(this.add.rectangle(17,-3,5,5,0xffcf52).setVisible(false));
         this.gatePips[n] = c;
@@ -515,7 +571,7 @@ class FloorScene extends Phaser.Scene {
     const w = 232, h = headerH + areas.length*rowH + padding;
     const c = this.add.container(12, FLOOR_TOP + 6).setDepth(28);
     c.add(this.add.rectangle(0,0,w,h,0x0c1322,0.88).setOrigin(0,0).setStrokeStyle(2,0xffcf52));
-    c.add(this.add.text(8,5,"🏢 ORG · PM",{fontFamily:"'Courier New'",fontSize:"12px",
+    c.add(this.add.text(8,5,"🏢 ORG · PM",{fontFamily:"'PixelFont','Courier New'",fontSize:"12px",
       fontStyle:"bold",color:"#ffcf52"}).setOrigin(0,0));
     areas.forEach((a,i)=>{
       const y = headerH + i*rowH;
@@ -523,7 +579,7 @@ class FloorScene extends Phaser.Scene {
       c.add(this.add.rectangle(8,y+3,10,10,col).setOrigin(0,0));
       const leads = (a.leads||[]).join(", ");
       c.add(this.add.text(24,y,`${a.area}: ${leads}`,
-        {fontFamily:"'Courier New'",fontSize:"11px",color:"#e8eefb"}).setOrigin(0,0));
+        {fontFamily:"'PixelFont','Courier New'",fontSize:"11px",color:"#e8eefb"}).setOrigin(0,0));
     });
     c.setAlpha(0);
     this.tweens.add({targets:c, alpha:1, duration:300});
@@ -581,6 +637,8 @@ async function newProject(req, mode, supervised, backend, packs, extra){
 }
 
 function switchToFloor(floor){
+  const w = document.getElementById("wipe");      // chunky Zelda-style screen wipe
+  if (w){ w.classList.remove("go"); void w.offsetWidth; w.classList.add("go"); }
   ACTIVE = floor;
   for (const f of FLOORS.keys()){
     const sc = GAME.scene.getScene(floorKey(f));

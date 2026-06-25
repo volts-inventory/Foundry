@@ -198,12 +198,12 @@ class FloorScene extends Phaser.Scene {
     if (!n || n <= 1) return;
     const R = ROOMS.engineering, count = Math.min(n, 8);
     for (let i=0;i<count;i++){
-      const x = Math.round(R.x0+26 + (R.w-52)*(count>1 ? i/(count-1) : 0.5));
-      const y = FLOOR_BOT - 64 + (i%2)*30;                    // two rows of desks
+      const x = Math.round(R.x0+24 + (R.w-48)*(count>1 ? i/(count-1) : 0.5));
+      const y = FLOOR_BOT - 96 + (i%2)*42;                    // two rows of desks
       const k = poolKit(i);
-      const ws = this.makeWorkstation(x, y+24, k.body);
+      const ws = this.makeWorkstation(x, y+22, k.body);
       const s = this.makePerson(x, y, k);
-      s.setScale(2.0).setDepth(y).setAlpha(0.95);
+      s.setScale(2.3).setDepth(y).setAlpha(0.96);
       this.startWalk(s);                                       // ICs are busy building
       this.poolGroup.push(s, ws);
     }
@@ -315,14 +315,14 @@ class FloorScene extends Phaser.Scene {
       c.add(this.add.rectangle(rx,ry,w+2,h+2,O).setOrigin(0.5,1));
       c.add(this.add.rectangle(rx,ry,w,h,col).setOrigin(0.5,1));
     };
-    out(0,0,54,9,0x6b4a2c);                                       // desktop
-    c.add(this.add.rectangle(-23,9,4,13,0x4a3320).setOrigin(0.5,1));
-    c.add(this.add.rectangle(23,9,4,13,0x4a3320).setOrigin(0.5,1)); // legs
-    out(-4,-9,24,16,0x10151f);                                    // monitor bezel
-    const screen = this.add.rectangle(-4,-11,18,11,shade(accent,1.25),0.92).setOrigin(0.5,1);
+    out(0,0,40,7,0x6b4a2c);                                       // desktop (smaller)
+    c.add(this.add.rectangle(-17,7,3,10,0x4a3320).setOrigin(0.5,1));
+    c.add(this.add.rectangle(17,7,3,10,0x4a3320).setOrigin(0.5,1)); // legs
+    out(-4,-7,17,12,0x10151f);                                    // monitor bezel
+    const screen = this.add.rectangle(-4,-9,12,8,shade(accent,1.25),0.92).setOrigin(0.5,1);
     c.add(screen);                                                // dept-tinted screen
-    c.add(this.add.rectangle(-9,-16,8,2,shade(accent,1.5))); c.add(this.add.rectangle(-11,-12,12,2,shade(accent,1.4))); // code lines
-    out(16,-1,16,4,0x2a3550);                                     // keyboard
+    c.add(this.add.rectangle(-7,-12,6,1.5,shade(accent,1.5))); c.add(this.add.rectangle(-8,-9,9,1.5,shade(accent,1.4))); // code lines
+    out(12,-1,11,3,0x2a3550);                                     // keyboard
     this.screens = this.screens || []; this.screens.push(screen);
     return c;
   }
@@ -493,11 +493,11 @@ class FloorScene extends Phaser.Scene {
         const span = R.w-64;
         const hx = R.x0+36 + (names.length>1 ? span*i/(names.length-1) : span/2);
         // each lead works at their OWN desk inside the room, staggered front/back
-        const hy = FLOOR_TOP + 96 + (i%2)*92;
+        const hy = FLOOR_TOP + 78 + (i%2)*94;
         const seed = hashStr((this.proj.id||'f')+name), kit = kitFor(name, seed);
-        this.makeWorkstation(hx, hy+30, kit.body);                // desk in front of them
+        this.makeWorkstation(hx, hy+22, kit.body);                // desk just in front of them
         const a = this.makePerson(hx, hy, kit);
-        a.setScale(2.6).setDepth(hy);                             // y-sort (desk occludes legs)
+        a.setScale(2.9).setDepth(hy);                             // y-sort (desk occludes legs)
         a.home = {x:hx,y:hy};
         a.setPosition(hx, hy+200).setAlpha(0.32);
         a.seen = false; a.bubble = null;

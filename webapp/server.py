@@ -151,6 +151,8 @@ class Project:
     backend: str = "mock"
     packs: list[str] = field(default_factory=list)
     spec: str | None = None  # literal spec text OR a dir of uploaded docs (run(spec=))
+    max_slots: int = 1  # IC-pool parallelism (Wave C; >1 engages the budget tree, Wave D)
+    cost_cap_microusd: int | None = None  # global spend envelope (env-only; Wave D)
     events: queue.Queue[dict[str, Any]] = field(default_factory=queue.Queue)
     decisions: queue.Queue[str] = field(default_factory=queue.Queue)
     seen_uris: set[str] = field(default_factory=set)
@@ -211,6 +213,8 @@ def _run_factory(p: Project) -> None:
             backend=p.backend,            # real backend per project (not always mock)
             packs=p.packs or None,        # optional domain packs (regulated/ml_data/frontend)
             spec=p.spec,                  # pasted spec text OR uploaded docs dir (additive)
+            max_slots=p.max_slots,        # IC-pool parallelism (Wave C) + budget tree (Wave D)
+            cost_cap_microusd=p.cost_cap_microusd,
             thread_id=p.id,               # UNIQUE per project — no cross-floor collision
             checkpoints=True,
             checkpoint_responder=responder,
@@ -329,7 +333,14 @@ class Handler(BaseHTTPRequestHandler):
         default = os.environ.get("FOUNDRY_MODEL_BACKEND", "mock")
         if default not in BACKENDS:
             default = "mock"
-        self._json(200, {"default_backend": default, "backends": list(BACKENDS)})
+        try:
+            default_slots = max(1, int(os.environ.get("FOUNDRY_MAX_SLOTS", "1") or "1"))
+        except ValueError:
+            default_slots = 1
+        self._json(200, {
+            "default_backend": default, "backends": list(BACKENDS),
+            "default_max_slots": default_slots,
+        })
 
     # -- output browsing (the build's written code + docs) ----------------------
     def _out_base(self, pid: str) -> Path | None:
@@ -460,6 +471,17 @@ class Handler(BaseHTTPRequestHandler):
         supervised = bool(body.get("supervised", True))
         spec_text = str(body.get("spec_text", "")).strip()
         spec_zip_b64 = body.get("spec_zip_b64")
+        try:
+            default_slots = int(os.environ.get("FOUNDRY_MAX_SLOTS", "1") or "1")
+        except ValueError:
+            default_slots = 1
+        try:
+            max_slots = int(body.get("max_slots", default_slots))
+        except (TypeError, ValueError):
+            max_slots = default_slots
+        max_slots = max(1, max_slots)
+        cost_env = os.environ.get("FOUNDRY_COST_CAP_MICROUSD", "").strip()
+        cost_cap_microusd = int(cost_env) if cost_env.isdigit() else None
         with _LOCK:
             _FLOOR[0] += 1
             floor = _FLOOR[0]
@@ -478,6 +500,7 @@ class Handler(BaseHTTPRequestHandler):
         p = Project(
             id=pid, request=request, mode=mode, supervised=supervised, floor=floor,
             backend=backend, packs=packs, spec=spec, out_base=out_base,
+            max_slots=max_slots, cost_cap_microusd=cost_cap_microusd,
         )
         with _LOCK:
             _PROJECTS[pid] = p

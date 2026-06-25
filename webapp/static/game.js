@@ -703,7 +703,7 @@ document.getElementById("start-btn").onclick=async ()=>{
   const backend=document.getElementById("backend-select").value;
   const packs=document.getElementById("packs-input").value;
   const sup=document.getElementById("supervised").checked;
-  const extra={};
+  const extra={max_slots: parseInt(document.getElementById("slots-input").value,10)||1};
   const intake=intakeMode();
   if(intake==="spec"){
     extra.spec_text=document.getElementById("spec-text").value;
@@ -736,6 +736,7 @@ fetch("/api/config").then(r=>r.json()).then(c=>{
   const sel=document.getElementById("backend-select");
   if(c && c.default_backend && [...sel.options].some(o=>o.value===c.default_backend))
     sel.value=c.default_backend;
+  if(c && c.default_max_slots) document.getElementById("slots-input").value=c.default_max_slots;
 }).catch(()=>{});
 
 // open the new-project dialog on first load

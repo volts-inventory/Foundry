@@ -89,6 +89,10 @@
           <option value="ollama-gemma">ollama-gemma — local Ollama endpoint</option>
         </select>
       </div>
+      <div class="row">
+        <label>Parallel ICs <span class="hint">— engineers building at once (Wave C/D)</span></label>
+        <input id="slots-input" type="number" min="1" max="16" value="1" />
+      </div>
       <label>Domain packs (optional, comma-separated)</label>
       <input id="packs-input" type="text" placeholder="regulated, ml_data, frontend" />
       <label class="check"><input type="checkbox" id="supervised" checked /> Supervised (CTO approves each checkpoint)</label>

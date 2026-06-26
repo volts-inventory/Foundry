@@ -16,6 +16,28 @@ real risk under a documented future config · **low** = cleanup / hygiene.
 
 ---
 
+## Remediation status (updated)
+
+| Finding | Status | Note |
+|---|---|---|
+| **H1** retry-supersession | ✅ docs/test made honest | Documented design decision (IM3), not a bug — corrected the false docstring + false-confidence test; true supersession-via-fresh-id is a deliberate follow-up. |
+| **H2** admission tree-namespace | ✅ fixed | Check #4b added; regression-tested (fails without fix). |
+| **H3** nonce never consumed | 📝 documented gap | Specified-but-unwired trust-core seam (sibling negative-latch too); defense-in-depth behind the signed binding. Needs a dedicated judgment-commit step — recommended as a focused, separately-validated change, not a sweep. |
+| **H4** CLI subprocess timeout | ✅ fixed | 300s default, overridable; tested. |
+| **H5** cli.py argparse | ⏳ open | Large refactor of the 1482-line CLI; flagged for a focused pass. |
+| **M1** WORM/ledger concurrency | ✅ fixed | UNIQUE(prev_hash) + atomic consume_nonce. |
+| **M2** CAS set canonicalization | ✅ fixed | content_identity sorts set fields; hash-seed-stable. |
+| **M3** security `_common.py` | ✅ fixed | Extracted; supply_chain left as-is by design. |
+| **M4** schemas/operations split | ⏳ open | High-churn organizational move across many imports; flagged for a focused pass. |
+| **W1** SSE fan-out | ✅ fixed | Retained event log + per-subscriber cursors. |
+| **W3** restart durability | ✅ fixed | Durable state default + resume. |
+| **LOW** dead code / asserts / hmac | ✅ fixed | Sweep: deletions, hmac.compare_digest, assert→raise. |
+
+Remaining (**H3**, **H5**, **M4**) are each large or trust-critical enough to warrant
+their own validated change rather than a batch edit; see notes inline below.
+
+---
+
 ## HIGH
 
 ### H1 · Retry-supersession (L4) is broken — the `tasks` reducer's seq-tiebreak is inert for dicts

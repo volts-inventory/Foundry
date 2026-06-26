@@ -267,9 +267,17 @@ def merge_gates(a: list[GateResult] | None, b: list[GateResult] | None) -> list[
             # production (only tests call them). So today both checks are inert at
             # runtime: the single-use-nonce + negative-latch defenses are carried by
             # the SIGNED binding above (which already blocks the verdict-flip replay
-            # without the signer key), not by the ledger. Wiring the writes needs a
-            # dedicated trusted judgment-commit step at every gate-fold site (this
-            # reducer is pure and cannot consume); tracked as a follow-up.
+            # without the signer key), not by the ledger.
+            #
+            # PREREQUISITE for wiring (verified blocker): nonce ISSUANCE is not yet
+            # per-verdict. The orchestrator threads ONE `verdict_nonce` ("N-<thread>",
+            # cli.py) that ALL judgment verdicts (review / threat_review / release)
+            # read via `server_issued_nonce`. Consuming it on the first verdict would
+            # therefore make this very check reject the next two (same nonce, different
+            # content_identity) and break gated/autonomous runs. So the fix is a
+            # trust-core feature, not a one-liner: issue a UNIQUE per-(node, state_sha)
+            # server nonce, THEN add a trusted judgment-commit step (this pure reducer
+            # cannot consume). Tracked as a focused follow-up.
             if v.nonce_consumed_by_other_verdict(g):
                 continue  # single-use nonce replayed by a different verdict
             if v.negative_verdict_latched(g):

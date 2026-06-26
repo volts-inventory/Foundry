@@ -435,7 +435,7 @@ class FloorScene extends Phaser.Scene {
 
   makeProp(kind, x, floorY){
     x = Math.round(x);
-    const c = this.add.container(x, floorY).setDepth(3);
+    const c = this.add.container(x, floorY).setDepth(3).setScale(1.25);  // scaled to the bigger sprites
     const out = (rx,ry,w,h,col)=>{ // outlined pixel rect (1px black border) + 1px top-light
       c.add(this.add.rectangle(rx,ry,w+2,h+2,0x0a0d16).setOrigin(0.5,1));
       c.add(this.add.rectangle(rx,ry,w,h,col).setOrigin(0.5,1));
@@ -502,7 +502,7 @@ class FloorScene extends Phaser.Scene {
   makeWorkstation(x, floorY, accent){
     if (accent == null) accent = 0x7fd1ff;   // monitor glow default (sprites carry their own colour)
     x = Math.round(x);
-    const c = this.add.container(x, floorY).setDepth(floorY+5);  // occludes its lead's legs
+    const c = this.add.container(x, floorY).setDepth(floorY+5).setScale(1.3);  // desk, scaled to the bigger sprites
     const O = 0x0a0d16;
     const out = (rx,ry,w,h,col)=>{
       c.add(this.add.rectangle(rx,ry,w+2,h+2,O).setOrigin(0.5,1));
@@ -542,7 +542,7 @@ class FloorScene extends Phaser.Scene {
   // generic effects
   floatText(x,y,txt,color,size){
     const t = this.add.text(x,y,txt,{fontFamily:"'PixelFont','Courier New',monospace",
-      fontSize:(size||13)+"px",fontStyle:"bold",color:color||"#ffe9a8"}).setOrigin(0.5).setDepth(40);
+      fontSize:(size||13)+"px",fontStyle:"bold",color:color||"#ffe9a8"}).setOrigin(0.5).setDepth(2000);
     this.tweens.add({targets:t, y:y-34, alpha:{from:1,to:0}, duration:1100, ease:"Cubic.out",
       onComplete:()=>t.destroy()});
   }
@@ -602,7 +602,7 @@ class FloorScene extends Phaser.Scene {
     const beam=this.add.triangle(x,FLOOR_TOP-70,-66,180,66,180,0,0,0xfff1c0,0.10);
     this.spot=this.add.container(0,0).setDepth(34); this.spot.add([dim,beam]);
     const q=this.add.text(x,this.cto.y-48,"?",{fontFamily:"'PixelFont','Courier New',monospace",
-      fontSize:"24px",fontStyle:"bold",color:"#ffd95e"}).setOrigin(0.5).setDepth(43);
+      fontSize:"24px",fontStyle:"bold",color:"#ffd95e"}).setOrigin(0.5).setDepth(2000);
     this.qmark=q;
     this.tweens.add({targets:q, y:q.y-7, duration:480, yoyo:true, repeat:-1, ease:"Sine.inOut"});
   }
@@ -629,7 +629,7 @@ class FloorScene extends Phaser.Scene {
       this.tweens.add({targets:a.bob, angle:7, y:3, duration:500});
   }
   banner(txt,color){
-    const b=this.add.container(W/2, FLOOR_TOP+40).setDepth(46);
+    const b=this.add.container(W/2, FLOOR_TOP+40).setDepth(2200);
     b.add(this.add.rectangle(0,0,380,48,0x0c1322,0.95).setStrokeStyle(3,color));
     b.add(this.add.text(0,0,txt,{fontFamily:"'PixelFont','Courier New',monospace",
       fontSize:"22px",fontStyle:"bold",color:"#ffffff"}).setOrigin(0.5));
@@ -782,7 +782,7 @@ class FloorScene extends Phaser.Scene {
     const c = this.add.container(x,y).setDepth(10);
     c.add(this.add.ellipse(0,3,11,4,0x000000,0.30));        // shadow under the feet
     const bob = this.add.container(0,0);
-    const sprite = this.add.sprite(0,5,"chars",ch.front[0]).setOrigin(0.5,1).setScale(0.36);
+    const sprite = this.add.sprite(0,5,"chars",ch.front[0]).setOrigin(0.5,1).setScale(0.52);
     bob.add(sprite);
     const spark = this.add.rectangle(6,-24,2,2,0xfff04a).setOrigin(0,0).setVisible(false);
     bob.add(spark);
@@ -895,7 +895,7 @@ class FloorScene extends Phaser.Scene {
     a.zzzEv = this.time.addEvent({delay:1500, loop:true, callback:()=>{
       if (!a.inLounge || a.loungeBusy !== "sleep") return;
       const t = this.add.text(a.x+8, a.y-22, "z",
-        {fontFamily:"'PixelFont','Courier New'",fontSize:"10px",color:"#9fb4d8"}).setDepth(40);
+        {fontFamily:"'PixelFont','Courier New'",fontSize:"10px",color:"#9fb4d8"}).setDepth(2000);
       this.tweens.add({targets:t, y:t.y-18, x:t.x+8, alpha:{from:0.9,to:0}, duration:1600,
         ease:"Sine.out", onComplete:()=>t.destroy()});
     }});
@@ -978,7 +978,7 @@ class FloorScene extends Phaser.Scene {
     const lines = wrap(text, 26);
     const w = Math.max(...lines.map(l=>l.length))*6.4 + 16;
     const h = lines.length*13 + 12;
-    const c = this.add.container(a.x, a.y-26).setDepth(30);
+    const c = this.add.container(a.x, a.y-26).setDepth(2000);
     c.add(this.add.rectangle(0,-h/2,w,h,0xf4f7ff).setStrokeStyle(2,0xc7d2ec));
     c.add(this.add.triangle(0,0,-4,-1,4,-1,0,6,0xf4f7ff));
     lines.forEach((l,i)=>c.add(this.add.text(-w/2+8,-h+8+i*13,l,
@@ -991,7 +991,7 @@ class FloorScene extends Phaser.Scene {
   spawnPickup(room, label){
     const R = ROOMS[room] || ROOMS.product;
     const w = Math.max(64, label.length*7+18);
-    const c = this.add.container(R.cx, R.floorY+24).setDepth(50);
+    const c = this.add.container(R.cx, R.floorY+24).setDepth(2000);
     c.add(this.add.rectangle(0,0,w,18,0x161d31).setStrokeStyle(2,0xffcf52));
     c.add(this.add.text(0,0,"+ "+label,{fontFamily:"'PixelFont','Courier New'",fontSize:"11px",color:"#ffe9a8"})
       .setOrigin(0.5));

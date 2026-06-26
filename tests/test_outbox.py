@@ -253,6 +253,25 @@ def test_audit_chain_detects_deleted_interior_row(cp):
     assert verify_audit_chain(cp.conn) is False
 
 
+def test_concurrent_chain_fork_fails_closed(cp):
+    """UNIQUE(prev_hash): two appenders off the SAME head can't both land — the
+    second INSERT raises instead of silently branching the WORM chain."""
+    append_audit(cp.conn, {"i": 0})
+    head = cp.conn.execute(
+        "SELECT hash FROM worm_audit ORDER BY id DESC LIMIT 1"
+    ).fetchone()[0]
+    # First child off `head` is fine; a SECOND child off the same head is a fork.
+    cp.conn.execute(
+        "INSERT INTO worm_audit (event, prev_hash, hash) VALUES (?, ?, ?)",
+        ('{"a":1}', head, "h-a"),
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        cp.conn.execute(
+            "INSERT INTO worm_audit (event, prev_hash, hash) VALUES (?, ?, ?)",
+            ('{"b":2}', head, "h-b"),
+        )
+
+
 # ---------------------------------------------------------------------------
 # DS3: checkpoint + outbox in ONE transaction on ONE connection
 # ---------------------------------------------------------------------------

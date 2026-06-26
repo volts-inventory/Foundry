@@ -177,18 +177,24 @@ class GlobalRecords:
 
         Returns True if consumed (or already consumed by the SAME identity —
         idempotent); False if already consumed by a different identity (replay).
+
+        Atomic insert-if-absent on the ``nonce`` PRIMARY KEY: a concurrent consumer
+        (another build sharing the durable ledger) cannot pass a stale "absent" read
+        and double-consume — exactly one ``INSERT OR IGNORE`` wins, and the loser
+        re-reads the committed row. This closes the check-then-insert TOCTOU the old
+        SELECT-then-INSERT form had across connections (mirrors `disqualify_digest`).
         """
         with self._lock, self._conn:
-            row = self._conn.execute(
-                "SELECT content_identity FROM nonce_ledger WHERE nonce=?", (nonce,)
-            ).fetchone()
-            if row is not None:
-                return row[0] == content_identity
-            self._conn.execute(
-                "INSERT INTO nonce_ledger (nonce, content_identity) VALUES (?, ?)",
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO nonce_ledger (nonce, content_identity) VALUES (?, ?)",
                 (nonce, content_identity),
             )
-            return True
+            if cur.rowcount == 1:
+                return True                       # THIS call consumed the nonce
+            row = self._conn.execute(             # already present — replay iff a
+                "SELECT content_identity FROM nonce_ledger WHERE nonce=?", (nonce,)
+            ).fetchone()                          # DIFFERENT identity holds it
+            return row is not None and row[0] == content_identity
 
     def latch_negative_verdict(self, key: LatchKey) -> None:
         with self._lock, self._conn:

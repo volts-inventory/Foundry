@@ -124,17 +124,22 @@ removes ~160 lines, the duplicated validation, and the `--checkpoints` ambiguity
 
 ## MEDIUM
 
-### M1 · WORM audit chain can fork under the documented Postgres port
-**`foundry/durability/outbox.py:118-142`** · *bad-practice*
+### M1 · WORM audit chain can fork under concurrency  ✅ FIXED
+**`foundry/durability/outbox.py`** · *bad-practice*
 
-`append_audit` reads the chain head (`SELECT … ORDER BY id DESC LIMIT 1`) then
-`INSERT`s, with no DB-level guard against two appenders reading the same head.
-Safe on SQLite (whole-DB write lock), but the docstring claims it "ports to
-Postgres unchanged" — under `READ COMMITTED` two txns can read the same head and
-both insert, forking the chain silently until `verify_audit_chain` runs.
-
-**Fix:** add `UNIQUE(prev_hash)` to `worm_audit` (a fork attempt then fails
-fail-closed) — costs nothing on SQLite and is the portable fix.
+> **Resolved** (`tests/test_outbox.py::test_concurrent_chain_fork_fails_closed`):
+> added a `UNIQUE(prev_hash)` index to `worm_audit` so two appenders off the same
+> head fail closed on the second INSERT instead of silently branching the chain —
+> the portable guard that holds even where `BEGIN IMMEDIATE` doesn't (Postgres
+> `READ COMMITTED`). Added as an *index* so existing DBs migrate, not just fresh
+> ones. Also hardened `GlobalRecords.consume_nonce`: its SELECT-then-INSERT had a
+> cross-connection TOCTOU (now that concurrent Workshop builds share one durable
+> ledger), replaced with an atomic `INSERT OR IGNORE` + re-read so exactly one
+> consumer can win a contested nonce
+> (`tests/test_global_records_admission.py::test_consume_nonce_is_atomic_across_shared_connections`).
+> Audited the other four ledger writers (`latch_stable_fail`, `disqualify_digest`,
+> `try_first_alpha_look`, `record_alpha_look`) — all already atomic insert-if-absent
+> backed by their PRIMARY KEYs (a race fails closed). Original finding below.
 
 ### M2 · `content_identity()` doesn't canonicalize sets → non-deterministic CAS digest (latent)
 **`foundry/canonical.py` / `foundry/schemas/base.py`** · *bad-practice*

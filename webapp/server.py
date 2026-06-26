@@ -19,12 +19,14 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
 from foundry.schemas.architecture import CANONICAL_AREAS
 from webapp.events import events_for_payload, events_for_result
+from webapp.store import BuildStore
 
 _STATIC = Path(__file__).parent / "static"
 _PACE = 0.5          # seconds between paced game events
@@ -155,6 +157,10 @@ class Project:
     max_slots: int = 1  # IC-pool parallelism (Wave C; >1 engages the budget tree, Wave D)
     cost_cap_microusd: int | None = None  # global spend envelope (Wave D)
     max_fix_attempts: int = 3  # auto-fix retry budget per failing gate (run() default)
+    parent_id: str | None = None  # lineage: the finished build this floor iterates on
+    created_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
     events: queue.Queue[dict[str, Any]] = field(default_factory=queue.Queue)
     decisions: queue.Queue[str] = field(default_factory=queue.Queue)
     seen_uris: set[str] = field(default_factory=set)
@@ -202,54 +208,56 @@ def _suggest_slots(request: str, packs: list[Any]) -> tuple[int, list[str]]:
 _LOCK = threading.Lock()
 _FLOOR = [0]
 
-# --- durable floor index ----------------------------------------------------- #
-# Floors run in-memory (_PROJECTS), but the per-floor OUTPUT already persists to
-# disk (_OUTPUT_ROOT/floor-N). We also persist each floor's METADATA here, so a
-# server restart rehydrates the elevator + OUTPUT browser + HUD gate pills for
-# finished floors. (A build in flight is an in-memory thread — it can't resume;
-# on reload it's marked finished so the floor and its output are still browsable.)
-_PROJECTS_FILE = _OUTPUT_ROOT / "projects.json"
+# --- durable build catalog --------------------------------------------------- #
+# Floors run in-memory (_PROJECTS), but the per-floor OUTPUT persists to disk
+# (_OUTPUT_ROOT/floor-N) and each build's METADATA + repo reference is catalogued
+# in a SQLite DB (webapp/store.py). So a server restart rehydrates the elevator /
+# OUTPUT / HUD gate pills for finished floors, AND a new floor can be started FROM
+# an existing finished build (its repo pulled from the catalog by out_base).
+# A build in flight is an in-memory thread — it can't resume; on reload it's
+# marked finished so the floor and its output stay browsable.
+_STORE = BuildStore(_OUTPUT_ROOT / "foundry.db")
 _PERSIST_ON = {"project", "gate", "files", "halt", "release", "done",
                "await_decision", "resolved"}
 
 
-def _project_row(p: "Project") -> dict[str, Any]:
-    """The wire/disk shape of a floor (shared by /api/projects and the disk index)."""
+def _build_record(p: "Project") -> dict[str, Any]:
+    """The catalog (DB) shape of a build."""
     return {
-        "id": p.id, "floor": p.floor, "request": p.request, "mode": p.mode,
-        "backend": p.backend, "supervised": p.supervised, "slots": p.max_slots,
-        "status": p.status, "passed": p.passed, "awaiting": p.awaiting,
-        "gates": p.gates, "packs": list(p.packs),
-        "max_fix_attempts": p.max_fix_attempts,
+        "id": p.id, "floor": p.floor, "parent_id": p.parent_id,
+        "request": p.request, "mode": p.mode, "backend": p.backend,
+        "supervised": p.supervised, "slots": p.max_slots,
+        "max_fix_attempts": p.max_fix_attempts, "status": p.status,
+        "passed": p.passed, "gates": p.gates,
         "out_base": str(p.out_base) if p.out_base else None,
+        "created_at": p.created_at,
     }
 
 
-def _persist() -> None:
-    """Best-effort atomic write of the floor index to disk (never raises)."""
+def _persist(p: "Project | None" = None) -> None:
+    """Upsert build(s) into the catalog on a state change (best-effort, never raises)."""
     try:
+        if p is not None:
+            _STORE.upsert(_build_record(p))
+            return
         with _LOCK:
-            payload = {"floor": _FLOOR[0],
-                       "projects": [_project_row(p) for p in _PROJECTS.values()]}
-        _OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
-        tmp = _PROJECTS_FILE.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
-        tmp.replace(_PROJECTS_FILE)
+            projs = list(_PROJECTS.values())
+        for q in projs:
+            _STORE.upsert(_build_record(q))
     except Exception:
         pass
 
 
 def _load_persisted() -> None:
-    """Rehydrate finished floors from the disk index on startup (best-effort).
+    """Rehydrate finished floors from the catalog on startup (best-effort).
 
     A floor that was mid-build at save time can't resume (its thread is gone), so
     it's marked ``done`` (not awaiting) — the floor + its written OUTPUT remain
     browsable, but no live stream reconnects."""
     try:
-        data = json.loads(_PROJECTS_FILE.read_text(encoding="utf-8"))
+        rows = _STORE.all()
     except Exception:
         return
-    rows = data.get("projects") or []
     with _LOCK:
         for row in rows:
             try:
@@ -260,10 +268,11 @@ def _load_persisted() -> None:
                     supervised=bool(row.get("supervised", True)),
                     floor=int(row.get("floor", 0)),
                     backend=str(row.get("backend", "mock")),
-                    packs=list(row.get("packs") or []),
                     max_slots=int(row.get("slots", 1) or 1),
                     max_fix_attempts=int(row.get("max_fix_attempts", 3) or 3),
+                    parent_id=row.get("parent_id"),
                     out_base=Path(ob) if ob else None,
+                    created_at=str(row.get("created_at") or ""),
                 )
                 p.status = "done"            # in-flight at save => finished/interrupted
                 p.passed = bool(row.get("passed", False))
@@ -273,9 +282,7 @@ def _load_persisted() -> None:
                 _PROJECTS[p.id] = p
             except Exception:
                 continue
-        floors = [int(r.get("floor", 0)) for r in rows]
-        saved_floor = data.get("floor", 0)
-        _FLOOR[0] = max([_FLOOR[0], saved_floor if isinstance(saved_floor, int) else 0, *floors])
+        _FLOOR[0] = max(_FLOOR[0], _STORE.max_floor())
 
 
 def _emit(p: Project, **event: Any) -> None:
@@ -289,7 +296,7 @@ def _emit(p: Project, **event: Any) -> None:
                              "advisory": event.get("advisory", False)}
     p.events.put(event)
     if event.get("type") in _PERSIST_ON:
-        _persist()   # checkpoint floor metadata to disk on each state change
+        _persist(p)   # catalog the build's metadata on each state change
 
 
 def _emit_paced(p: Project, events: list[dict[str, Any]]) -> None:
@@ -356,6 +363,7 @@ def _run_factory(p: Project) -> None:
         _emit(p, type="halt", phase="error", reason=str(exc))
         _emit(p, type="done", passed=False, phase="error")
         p.status = "done"
+        _persist(p)
         p.events.put(_END)
         return
 
@@ -378,6 +386,7 @@ def _run_factory(p: Project) -> None:
         _emit(p, type="narrate", text=f"📂 {n_files} file(s) written — open OUTPUT to browse.")
     p.passed = bool(result.passed)
     p.status = "done"
+    _persist(p)              # catalog the FINAL status/passed (after they're set)
     p.events.put(_END)
 
 
@@ -444,6 +453,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/projects":
             self._list_projects()
+            return
+        if path == "/api/builds":
+            self._list_builds()
             return
         if path.startswith("/api/files/"):
             self._list_files(path.rsplit("/", 1)[-1])
@@ -570,6 +582,22 @@ class Handler(BaseHTTPRequestHandler):
             for p in ordered
         ]
         self._json(200, {"projects": rows})
+
+    def _list_builds(self) -> None:
+        """Finished builds from the catalog — the 'iterate on…' picker reads this
+        to let a new floor start from an existing build (lineage via parent_id)."""
+        try:
+            rows = _STORE.finished()
+        except Exception:
+            rows = []
+        builds = [
+            {"id": r["id"], "floor": r.get("floor"), "request": r.get("request"),
+             "passed": r.get("passed"), "parent_id": r.get("parent_id"),
+             "created_at": r.get("created_at"),
+             "has_repo": bool(r.get("out_base") and (Path(r["out_base"]) / "code").is_dir())}
+            for r in rows
+        ]
+        self._json(200, {"builds": builds})
 
     def _suggest_slots(self) -> None:
         """Suggest an IC-pool size N from the request + packs — count the distinct
@@ -707,13 +735,20 @@ class Handler(BaseHTTPRequestHandler):
                 cost_cap_microusd = int(round(usd * 1_000_000))
         except (TypeError, ValueError):
             pass
+        # Iterate: a new floor can be started FROM a finished build (parent_id),
+        # pulled straight from the catalog. We ground the new build in the parent's
+        # design docs so the agents EXTEND the prior build rather than start clean.
+        parent_id = str(body.get("parent_id") or "").strip() or None
+        parent = _STORE.get(parent_id) if parent_id else None
+        if parent is None:
+            parent_id = None
         with _LOCK:
             _FLOOR[0] += 1
             floor = _FLOOR[0]
         pid = uuid.uuid4().hex[:12]
         out_base = _OUTPUT_ROOT / f"floor-{floor}"
         # Spec input: pasted text (literal), else an uploaded docs-zip (a dir),
-        # else None (build from the request alone). A bad zip degrades to None.
+        # else the PARENT's design docs (iterate), else None (request alone).
         spec: str | None = spec_text or None
         if spec is None and isinstance(spec_zip_b64, str) and spec_zip_b64.strip():
             try:
@@ -722,15 +757,19 @@ class Handler(BaseHTTPRequestHandler):
                     spec = str(spec_dir)
             except Exception:
                 spec = None
+        if spec is None and parent and parent.get("out_base"):
+            pdocs = Path(parent["out_base"]) / "docs"
+            if pdocs.is_dir():
+                spec = str(pdocs)
         p = Project(
             id=pid, request=request, mode=mode, supervised=supervised, floor=floor,
             backend=backend, packs=packs, spec=spec, out_base=out_base,
             max_slots=max_slots, cost_cap_microusd=cost_cap_microusd,
-            max_fix_attempts=max_fix_attempts,
+            max_fix_attempts=max_fix_attempts, parent_id=parent_id,
         )
         with _LOCK:
             _PROJECTS[pid] = p
-        _persist()
+        _persist(p)
         threading.Thread(target=_run_factory, args=(p,), daemon=True).start()
         self._json(200, {"id": pid, "floor": floor})
 
@@ -799,7 +838,7 @@ def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
     shown = "localhost" if host in ("127.0.0.1", "0.0.0.0") else host
     print(f"\n  🏭  Foundry Workshop running →  http://{shown}:{port}\n")
     if _PROJECTS:
-        print(f"      restored {len(_PROJECTS)} floor(s) from {_PROJECTS_FILE}\n")
+        print(f"      restored {len(_PROJECTS)} floor(s) from the build catalog\n")
     if host == "0.0.0.0":  # opt-in LAN exposure (e.g. a Pi) — warned below
         lan = _lan_ip()
         if lan:

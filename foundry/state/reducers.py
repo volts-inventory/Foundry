@@ -260,24 +260,14 @@ def merge_gates(a: list[GateResult] | None, b: list[GateResult] | None) -> list[
         if g.name in JUDGMENT_VERDICTS:
             if not v.verify_judgment_binding(g):
                 continue  # forged / replayed / status-flipped binding
-            # KNOWN GAP (H3): these two are READS of the cross-fork ledger, but the
-            # WRITE side — the orchestrator/runner calling `records.consume_nonce`
-            # on an admitted verdict and `records.latch_negative_verdict` on a
-            # request-changes (LEARNINGS Q1/Q3) — is specified but NOT yet wired in
-            # production (only tests call them). So today both checks are inert at
-            # runtime: the single-use-nonce + negative-latch defenses are carried by
-            # the SIGNED binding above (which already blocks the verdict-flip replay
-            # without the signer key), not by the ledger.
-            #
-            # PREREQUISITE for wiring (verified blocker): nonce ISSUANCE is not yet
-            # per-verdict. The orchestrator threads ONE `verdict_nonce` ("N-<thread>",
-            # cli.py) that ALL judgment verdicts (review / threat_review / release)
-            # read via `server_issued_nonce`. Consuming it on the first verdict would
-            # therefore make this very check reject the next two (same nonce, different
-            # content_identity) and break gated/autonomous runs. So the fix is a
-            # trust-core feature, not a one-liner: issue a UNIQUE per-(node, state_sha)
-            # server nonce, THEN add a trusted judgment-commit step (this pure reducer
-            # cannot consume). Tracked as a focused follow-up.
+            # These two are READS of the cross-fork ledger; the WRITE side is the
+            # trusted judgment-commit step `_commit_judgment_ledger` (graph/supervisor.py,
+            # H3): after a judgment verdict survives this filter it consumes the
+            # verdict's single-use nonce (keyed to content identity) and latches a
+            # request-changes. Each verdict carries its OWN per-(node,subject,state)
+            # nonce (quality/_common.server_issued_nonce), so the two reviews a run
+            # emits don't collide. This reducer stays PURE (read-only); the supervisor
+            # holds the records and does the write.
             if v.nonce_consumed_by_other_verdict(g):
                 continue  # single-use nonce replayed by a different verdict
             if v.negative_verdict_latched(g):

@@ -249,7 +249,15 @@ def test_quality_subgraph_admits_reviewer_verdict_to_gates() -> None:
         # The PROXY stamped the binding + provenance — the agent never signed it.
         assert verdict.judgment_binding is not None
         assert verdict.judgment_provenance is JudgmentProvenance.SELF
-        assert verdict.verdict_nonce == "N-server-issued"
+        # H3: the nonce is the per-request derivation of the verdict's own identity
+        # (the base "N-server-issued" bound to node/subject/state), not the raw base.
+        from foundry.agents.quality._common import server_issued_nonce
+
+        assert verdict.verdict_nonce == server_issued_nonce(
+            _config(), node_id=verdict.seq.node_id,
+            subject_uri=verdict.subject_artifact_uri or "", state_sha=verdict.run_against,
+        )
+        assert verdict.verdict_nonce != "N-server-issued"
         # ADMITTED by the real reducer + verifier (it already merged into `gates`,
         # and a re-fold of the committed verdict is idempotent).
         assert merge_gates([verdict], None) == [verdict]

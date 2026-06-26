@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any
 
 from foundry.agents.quality._common import (
     journal_entry,
+    require_verdict_nonce,
     server_issued_nonce,
     state_sha,
     subject_artifact_uri,
@@ -87,10 +88,10 @@ def make_reviewer_critic_node(rt: AgentRuntime) -> NodeFn:
         # signs seq.node_id, so judge() rejects a mismatched record (proxy L5).
         seq = rt.seq(config, _NODE_ID, "verdict:review")
 
-        # Server-issued, single-use; the agent consumes but never mints it. Read
-        # first so a missing nonce fails closed before anything else (the most
-        # fundamental trust input of a verdict).
-        nonce = server_issued_nonce(config)
+        # Fail closed on a missing server-issued nonce BEFORE anything else (the most
+        # fundamental trust input of a verdict); the per-request nonce is derived
+        # below, once the subject + state it binds to are known.
+        require_verdict_nonce(config)
 
         # Primary source is the config-pinned subject (the runner sets it); the
         # state fallback selects the feature_diff by KIND, newest-by-seq (C-R1-03)
@@ -112,6 +113,13 @@ def make_reviewer_critic_node(rt: AgentRuntime) -> NodeFn:
                 "must pin subject_artifact_uri on the run config for judgment nodes."
             )
         run_against = state_sha(config, fallback=seq.run_id)
+
+        # Server-issued, single-use; the agent consumes but never mints it. Derived
+        # per-request (bound to node/subject/state) so each verdict in a run has its
+        # OWN nonce — fail-closed when the run config has no base nonce.
+        nonce = server_issued_nonce(
+            config, node_id=_NODE_ID, subject_uri=subject_uri, state_sha=run_against
+        )
 
         result = rt.proxy.judge(
             _NODE_ID,

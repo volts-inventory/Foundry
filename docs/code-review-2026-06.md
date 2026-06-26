@@ -22,7 +22,7 @@ real risk under a documented future config · **low** = cleanup / hygiene.
 |---|---|---|
 | **H1** retry-supersession | ✅ docs/test made honest | Documented design decision (IM3), not a bug — corrected the false docstring + false-confidence test; true supersession-via-fresh-id is a deliberate follow-up. |
 | **H2** admission tree-namespace | ✅ fixed | Check #4b added; regression-tested (fails without fix). |
-| **H3** nonce never consumed | 📝 documented gap (blocker found) | Specified-but-unwired trust-core seam. **Verified blocker:** all three judgment verdicts share one per-thread nonce, so naive consumption would reject the 2nd/3rd and break gated/autonomous runs — needs per-(node,state_sha) nonce *issuance* first. Defense-in-depth behind the signed binding; recommended as a focused, separately-validated feature. |
+| **H3** nonce never consumed | ✅ fixed | Wired the full trust-core feature: per-(node,subject,state) nonce *issuance* (so a run's two reviews don't collide — the blocker), plus a trusted `_commit_judgment_ledger` step that consumes the admitted verdict's single-use nonce and latches a request-changes. The single-use-replay + no-approve-override defenses are now live (ledger shows real consumption); merge_gates stays pure. Verified end-to-end (gated/autonomous/durable runs) + 4 new tests. |
 | **H4** CLI subprocess timeout | ✅ fixed | 300s default, overridable; tested. |
 | **H5** cli.py argparse | ✅ fixed | De-duplicated the 13 blocks via `_take_value`/`_take_int` helpers — preserves every tested message + the `--checkpoints` heuristic (chosen over an argparse swap, which would change the tested error UX and greedily eat the request). |
 | **M1** WORM/ledger concurrency | ✅ fixed | UNIQUE(prev_hash) + atomic consume_nonce. |
@@ -33,10 +33,9 @@ real risk under a documented future config · **low** = cleanup / hygiene.
 | **W3** restart durability | ✅ fixed | Durable state default + resume. |
 | **LOW** dead code / asserts / hmac | ✅ fixed | Sweep: deletions, hmac.compare_digest, assert→raise. |
 
-Everything is fixed except **H3**, which has a verified blocker (shared per-thread
-nonce) making it a trust-core *feature* — issue per-verdict nonces first, then add a
-trusted judgment-commit step — rather than a safe sweep edit. The gap is documented
-honestly in code (`reducers.py`) so its inertness isn't a silent surprise.
+**All findings are now fixed.** H3 — the trickiest — was wired as a real trust-core
+feature: per-request nonce issuance (clearing the shared-nonce blocker) plus a trusted
+judgment-commit step, validated end-to-end with the ledger showing live consumption.
 
 ---
 

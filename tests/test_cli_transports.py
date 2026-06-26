@@ -78,6 +78,30 @@ def _ollama_post(response: dict[str, Any]) -> Any:
 # --------------------------------------------------------------------------- #
 
 
+def _timeout_capturing_runner() -> Any:
+    def run(argv: Sequence[str], timeout_s: float | None) -> CliResult:
+        run.timeouts.append(timeout_s)  # type: ignore[attr-defined]
+        return CliResult(0, json.dumps({"type": "result", "subtype": "success",
+                                        "result": "ok", "session_id": "s",
+                                        "modelUsage": {"claude-opus-4-8": {}}}))
+    run.timeouts = []  # type: ignore[attr-defined]
+    return run
+
+
+def test_cli_backends_apply_a_default_subprocess_timeout() -> None:
+    # H4: a hung claude/codex must not wedge the worker forever. The shipped
+    # backends now set a non-None wall-clock cap by default, overridable.
+    runner = _timeout_capturing_runner()
+    proxy = build_backend("claude-cli", runner=runner)
+    proxy.complete("n1", "T1", "SOP", [{"role": "user", "content": "x"}], purpose="ideation")
+    assert runner.timeouts[0] == 300.0                       # default cap applied
+
+    over = _timeout_capturing_runner()
+    proxy2 = build_backend("claude-cli", runner=over, timeout_s=42.0)
+    proxy2.complete("n1", "T1", "SOP", [{"role": "user", "content": "x"}], purpose="ideation")
+    assert over.timeouts[0] == 42.0                          # override flows through
+
+
 def test_claude_cli_completion_observes_model_and_flattens_prompt() -> None:
     runner = _claude_runner(
         {

@@ -32,6 +32,7 @@ swapped/forged sign-off breaks the chain (see :mod:`foundry.durability.evidence_
 
 from __future__ import annotations
 
+import hmac
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
@@ -210,12 +211,18 @@ def release_allowed(
     """
     if record is None:
         return False
+    # Security-bearing tokens (evidence hash, server nonce) are compared in
+    # constant time — consistent with attestation.py / runner.py — so a
+    # release-admission check cannot leak a match via timing. The ordinary
+    # identity fields (subject/state) stay plain ``==``.
     return (
         record.approved
         and record.subject_artifact_uri == subject_artifact_uri
         and record.state_sha == state_sha
-        and record.presented_evidence_hash == presented_evidence_hash
-        and record.server_nonce == server_nonce
+        and hmac.compare_digest(
+            record.presented_evidence_hash.encode(), presented_evidence_hash.encode()
+        )
+        and hmac.compare_digest(record.server_nonce.encode(), server_nonce.encode())
     )
 
 

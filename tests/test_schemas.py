@@ -365,6 +365,21 @@ def test_content_identity_stable_and_field_sensitive(cls, kwargs, field, changed
     assert mutated.content_identity() != a.content_identity()
 
 
+def test_set_valued_field_digest_is_order_independent():
+    """M2: a frozenset field must hash stably regardless of iteration order, so the
+    content digest can't drift across processes (CAS / evidence-chain integrity)."""
+    from foundry.canonical import content_digest
+
+    class _M(FrozenModel):
+        tags: frozenset[str] = frozenset()
+
+    m = _M(tags=frozenset({"z", "a", "m", "q", "b"}))
+    # The digest equals the canonical digest with the set field explicitly SORTED —
+    # i.e. iteration order can't leak into the hash.
+    expected = content_digest({"tags": sorted(["z", "a", "m", "q", "b"])})
+    assert m.content_identity() == expected
+
+
 # ---------------------------------------------------------------------------
 # Spot checks on key invariants
 # ---------------------------------------------------------------------------

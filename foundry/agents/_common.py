@@ -107,8 +107,11 @@ def emit_artifact(
     if store is not None:
         stored = store.put_body(model)
         # Invariant: the handle uri MUST equal the stored uri (both are the
-        # body's content identity) — else a resolve would miss the body.
-        assert stored == uri, f"store uri {stored!r} != handle uri {uri!r}"
+        # body's content identity) — else a resolve would miss the body. This is
+        # a CAS-identity integrity check, so it must survive ``python -O`` (not a
+        # bare assert).
+        if stored != uri:
+            raise RuntimeError(f"store uri {stored!r} != handle uri {uri!r}")
     return Artifact(kind=kind, uri=uri, produced_by=produced_by, seq=seq)
 
 

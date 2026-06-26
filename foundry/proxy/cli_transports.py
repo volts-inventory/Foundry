@@ -190,6 +190,13 @@ class CliResult:
 CliRunner = Callable[[Sequence[str], float | None], CliResult]
 
 
+# Default wall-clock cap for a CLI backend subprocess. Without it a hung
+# `claude`/`codex` invocation blocks its worker thread forever (the transports
+# accept timeout_s=None, but the shipped backends never set it). 300s matches the
+# Ollama HTTP transport's cap; override via claude_cli_backend/codex_backend.
+_DEFAULT_CLI_TIMEOUT_S = 300.0
+
+
 def _default_cli_runner(argv: Sequence[str], timeout_s: float | None) -> CliResult:
     import subprocess
 
@@ -622,12 +629,14 @@ def claude_cli_backend(
     *,
     tier_models: dict[str, str] | None = None,
     runner: CliRunner | None = None,
+    timeout_s: float | None = _DEFAULT_CLI_TIMEOUT_S,
     **proxy_kwargs: Any,
 ) -> ModelProviderProxy:
     """Proxy backed by ``claude -p``. Same Anthropic tier ids + lineage as the
-    SDK transport, so calibration baselines carry over."""
+    SDK transport, so calibration baselines carry over. ``timeout_s`` hard-caps each
+    subprocess (default 300s) so a hung CLI can't wedge the worker forever."""
     return ModelProviderProxy(
-        transport=ClaudeCliTransport(runner=runner),
+        transport=ClaudeCliTransport(runner=runner, timeout_s=timeout_s),
         lineage_map=LineageMap(DEFAULT_LINEAGE_ENTRIES),
         tier_models=tier_models,  # None ⇒ proxy default TIER_MODELS
         **proxy_kwargs,
@@ -638,12 +647,14 @@ def codex_backend(
     *,
     tier_models: dict[str, str] | None = None,
     runner: CliRunner | None = None,
+    timeout_s: float | None = _DEFAULT_CLI_TIMEOUT_S,
     **proxy_kwargs: Any,
 ) -> ModelProviderProxy:
     """Proxy backed by ``codex exec``. OpenAI lineage — a genuinely different
-    served_family, so the ``decorrelated`` profile becomes meaningful."""
+    served_family, so the ``decorrelated`` profile becomes meaningful. ``timeout_s``
+    hard-caps each subprocess (default 300s) so a hung CLI can't wedge the worker."""
     return ModelProviderProxy(
-        transport=CodexCliTransport(runner=runner),
+        transport=CodexCliTransport(runner=runner, timeout_s=timeout_s),
         lineage_map=LineageMap((*OPENAI_LINEAGE_ENTRIES, *DEFAULT_LINEAGE_ENTRIES)),
         tier_models=tier_models or CODEX_TIER_MODELS,
         **proxy_kwargs,

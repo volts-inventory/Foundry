@@ -99,16 +99,6 @@ class Span:
         return hash(self.digest)
 
     @property
-    def served_model(self) -> str | None:
-        v = self.attributes.get("served_model")
-        return v if isinstance(v, str) else None
-
-    @property
-    def requested_model(self) -> str | None:
-        v = self.attributes.get("requested_model")
-        return v if isinstance(v, str) else None
-
-    @property
     def drift(self) -> bool:
         return bool(self.attributes.get("drift", False))
 

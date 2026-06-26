@@ -25,19 +25,22 @@ body{
   background:linear-gradient(180deg,#1b2440 0%,#141a2c 100%);
   border-bottom:3px solid var(--gold);
   box-shadow:inset 0 -6px 0 rgba(0,0,0,.35), 0 2px 0 #0a0f1c;
-  text-transform:uppercase;font-size:13px;gap:10px;flex:0 0 auto;
+  text-transform:uppercase;font-size:13px;gap:10px;flex:0 0 auto;flex-wrap:nowrap;
 }
-.hud-left,.hud-right{display:flex;align-items:center;gap:12px}
-.logo{font-weight:bold;color:var(--gold);font-size:16px;text-shadow:0 0 8px rgba(255,207,82,.4), 2px 2px 0 #0a0f1c}
-.elevator{color:var(--blue);border:2px solid var(--blue);border-radius:4px;padding:2px 8px;font-weight:bold}
+/* hud-left absorbs the slack and lets the project title ellipsis; hud-right
+   (buttons) never shrinks. Keeps everything on one row from ~820px up. */
+.hud-left{display:flex;align-items:center;gap:12px;min-width:0;flex:1 1 auto}
+.hud-right{display:flex;align-items:center;gap:12px;flex:0 0 auto}
+.logo{font-weight:bold;color:var(--gold);font-size:16px;white-space:nowrap;text-shadow:0 0 8px rgba(255,207,82,.4), 2px 2px 0 #0a0f1c}
+.elevator{color:var(--blue);border:2px solid var(--blue);border-radius:4px;padding:2px 8px;font-weight:bold;white-space:nowrap}
 .proj{color:var(--ink);max-width:46vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.mode{color:var(--dim)}
+.mode{color:var(--dim);white-space:nowrap}
 .gates-mini{display:flex;gap:5px}
 .gates-mini .g{padding:1px 6px;border-radius:3px;border:2px solid var(--line);font-size:11px}
 .gates-mini .g.pass{border-color:var(--green);color:var(--green)}
 .gates-mini .g.fail{border-color:var(--red);color:var(--red)}
 button{
-  font-family:inherit;text-transform:uppercase;cursor:pointer;
+  font-family:inherit;text-transform:uppercase;cursor:pointer;white-space:nowrap;
   background:#24304f;color:var(--ink);border:3px solid var(--line);
   border-radius:6px;padding:7px 12px;font-weight:bold;font-size:12px;
   box-shadow:0 3px 0 #0c1322;
@@ -116,9 +119,13 @@ button.danger{background:#6b1f28;border-color:var(--red);color:#ffe0e3}
 .overlay{position:fixed;inset:0;background:rgba(6,10,20,.78);
   display:flex;align-items:center;justify-content:center;z-index:50}
 .overlay.hidden{display:none}
+/* generic hide utility — JS toggles `hidden` on intake panels, the interview
+   answer box, etc. (not just overlays), so it must hide non-overlay elements too. */
+.hidden{display:none}
 .dialog{
   background:var(--panel);border:4px solid var(--ink);border-radius:8px;
   padding:20px 22px;width:min(520px,92vw);box-shadow:0 8px 0 #05080f;
+  max-height:90vh;overflow-y:auto;          /* never overflow the viewport (clipped buttons) */
 }
 .dialog.cp{border-color:var(--gold)}
 .dialog h2{margin:0 0 14px;color:var(--gold);text-transform:uppercase;font-size:18px}

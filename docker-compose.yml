@@ -38,6 +38,8 @@ volumes:
   pg_data: {}
   # SQLite checkpoint DB (default backend). Used unless FOUNDRY_CHECKPOINTER=postgres.
   foundry_state: {}
+  # The Workshop's written output (generated code + doc bundles per floor).
+  foundry_web: {}
 
 services:
   # --- the Foundry app (the only service built from this repo) ---------------
@@ -61,21 +63,59 @@ services:
       # no credential is hardcoded). EKS: an RDS endpoint + a K8s Secret.
       FOUNDRY_POSTGRES_DSN: "postgresql://foundry:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/foundry"
       # The app reaches model providers ONLY through the proxy service (egress
-      # chokepoint). No provider base-url / api-key on the app itself.
+      # chokepoint) in the ISOLATED topology. No provider base-url / api-key on
+      # the app itself there.
       FOUNDRY_PROXY_URL: "http://proxy:8080"
       # Side-service endpoints (network-isolated; see comments below).
       FOUNDRY_SIGNER_URL: "http://signer:8443"
       FOUNDRY_BUILDER_URL: "http://builder:9000"
+
+      # --- model backend selection (foundry.proxy.backend_from_env) -----------
+      # Default "anthropic". Config-swap to claude-cli | codex | ollama-gemma —
+      # the SAME factory flow, a different backend (no call-site change).
+      FOUNDRY_MODEL_BACKEND: "${FOUNDRY_MODEL_BACKEND:-anthropic}"
+      # CLI-backend credentials (claude-cli / codex), HEADLESS: injected as secrets
+      # from .env, NEVER baked into the image. Interactive `claude login` (browser
+      # OAuth) cannot run in a container.
+      #
+      # claude-cli runs on a MAX SUBSCRIPTION -> authenticate with a subscription
+      # OAuth token from `claude setup-token` (run ONCE on a workstation logged into
+      # the Max account). Do NOT set ANTHROPIC_API_KEY for this: it has HIGHER
+      # precedence than the OAuth token and would silently bill the pay-per-token
+      # Console API instead of the subscription. (`claude -p` does not use --bare,
+      # so the OAuth token is honoured.) In the isolated topology this lives on the
+      # proxy egress service (which builds the backend), not the app.
+      CLAUDE_CODE_OAUTH_TOKEN: "${CLAUDE_CODE_OAUTH_TOKEN:-}"   # claude-cli (Max subscription)
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"                     # codex backend, if used
+      # ollama-gemma: point every worker at ONE shared Ollama ENDPOINT. Ollama
+      # ALWAYS runs on the HOST (or a dedicated GPU box) with the GPU natively —
+      # we NEVER pass a GPU into a container. Default targets the host; override to
+      # a remote GPU box's URL. (Linux needs the extra_hosts mapping below to
+      # resolve host.docker.internal; Docker Desktop provides it automatically.)
+      FOUNDRY_OLLAMA_URL: "${FOUNDRY_OLLAMA_URL:-http://host.docker.internal:11434}"
+      # --- workshop UI (the image's default CMD: python -m webapp.server) -------
+      WORKSHOP_HOST: "0.0.0.0"                       # reachable from the host / LAN
+      WORKSHOP_PORT: "8765"
+      WORKSHOP_OUTPUT_DIR: "/var/lib/foundry/web"    # builds' code+docs (volume below)
+      # IC-pool parallelism (Wave C) + per-domain budget tree (Wave D). 1 = serial.
+      FOUNDRY_MAX_SLOTS: "${FOUNDRY_MAX_SLOTS:-1}"
     volumes:
       - foundry_cas:/var/lib/foundry/cas
       - foundry_state:/var/lib/foundry/state
+      - foundry_web:/var/lib/foundry/web
+    ports:
+      - "${WORKSHOP_PORT:-8765}:8765"                # open the Workshop UI in a browser
     networks: [frontend, backend]
+    # Reach host-run endpoints (e.g. a host/GPU-box Ollama) by name. Docker Desktop
+    # (Mac/Win) provides host.docker.internal automatically; Linux needs this map.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
-    # The real entrypoint is the cli (NOT touched by this task). Override here to
-    # run the factory once it is wired to read these env vars.
-    # command: ["foundry", "run", "--spec", "/work/spec.md"]
+    # Default CMD serves the Workshop UI on :8765 (see Dockerfile). For a one-shot
+    # headless build instead, override:
+    #   command: ["foundry", "run", "--spec", "/work/spec.md", "--out", "/var/lib/foundry/web/code"]
 
   # --- postgres: durable checkpoint store (volume-backed) --------------------
   # EKS: replace with RDS; the app keeps the same FOUNDRY_POSTGRES_DSN contract.
@@ -132,6 +172,21 @@ services:
     restart: "no"
     networks: [isolated]
     # EKS: gVisor/Kata runtimeClass + NetworkPolicy denying egress.
+
+  # --- local models (ollama-gemma): run Ollama ON THE HOST, not in a container -
+  # POLICY: we NEVER pass a GPU into a container. Ollama runs natively on the host
+  # (or a dedicated GPU box) where it owns the GPU directly, and the app reaches it
+  # over HTTP at FOUNDRY_OLLAMA_URL (default http://host.docker.internal:11434; see
+  # the app service). This avoids GPU-passthrough entirely — portable across Linux,
+  # macOS, and a remote GPU host with no per-container device wiring.
+  #
+  #   On the host:   ollama serve   &&   ollama pull gemma3:27b
+  #   In .env:       FOUNDRY_MODEL_BACKEND=ollama-gemma
+  #                  FOUNDRY_OLLAMA_URL=http://host.docker.internal:11434   (or the
+  #                                     remote GPU box's URL)
+  #
+  # EKS: run Ollama as its OWN Deployment on a GPU node pool and point the app at
+  # its Service DNS — still an endpoint, still no GPU inside the app container.
 
   # === observability (PLACEHOLDER — intentionally not real infra) ============
   # The accept criteria mention bundled OTel + Prometheus + Grafana + Loki. That

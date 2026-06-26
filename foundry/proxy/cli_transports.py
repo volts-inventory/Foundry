@@ -691,9 +691,19 @@ def backend_from_env(env: dict[str, str] | None = None, **kwargs: Any) -> ModelP
 
     Lets an operator config-swap the backend without touching call sites:
     ``FOUNDRY_MODEL_BACKEND=ollama-gemma`` runs the exact same flow on Gemma.
+
+    For the ``ollama-gemma`` backend, the server endpoint is read from
+    ``FOUNDRY_OLLAMA_URL`` (default in-process: ``http://localhost:11434``) so a
+    deployment points every worker at ONE shared Ollama service over the network
+    (the GPU is a host/infra concern, not a per-container one) instead of the
+    hardcoded localhost. An explicit ``base_url=`` kwarg still wins.
     """
     import os
 
     source = env if env is not None else dict(os.environ)
     name = source.get("FOUNDRY_MODEL_BACKEND", "anthropic").strip() or "anthropic"
+    if name == "ollama-gemma" and "base_url" not in kwargs:
+        url = source.get("FOUNDRY_OLLAMA_URL", "").strip()
+        if url:
+            kwargs["base_url"] = url
     return build_backend(name, **kwargs)  # type: ignore[arg-type]

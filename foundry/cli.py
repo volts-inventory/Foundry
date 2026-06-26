@@ -47,6 +47,8 @@ is the sole component that ever touches the outside world.
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import sys
 import tempfile
 from collections.abc import Callable
@@ -792,6 +794,9 @@ def run(
     output_dir: str | None = None,
     checkpoints: bool | list[str | CheckpointBoundary] | None = None,
     checkpoint_responder: CheckpointResponder | None = None,
+    max_slots: int = 1,
+    cost_cap_microusd: int | None = None,
+    base_dir: str | None = None,
 ) -> RunResult:
     """Run ``request`` end-to-end through the compiled factory graph (smoke path).
 
@@ -976,6 +981,15 @@ def run(
     # runner-attested verdicts (D4); reset its token in finally so it never leaks.
     token = set_gate_write_verifier(DevGateWriteVerifier(_KEY, _KEY_ID, records))
     with tempfile.TemporaryDirectory(prefix="foundry-cli-src-") as source_dir:
+        # Seed the base tree with an existing codebase (the evolution / iterate
+        # path): the implementation agents clone ``source_dir`` into each sandbox
+        # worktree and produce a diff AGAINST it, so a seeded base makes the change
+        # build ON TOP of the prior code instead of greenfield. Plain input bytes —
+        # copied, never executed (the gates still decide what ships).
+        if base_dir:
+            base = Path(base_dir)
+            if base.is_dir():
+                shutil.copytree(base, source_dir, dirs_exist_ok=True)
         try:
             app = build_factory_graph(
                 rt,
@@ -993,6 +1007,8 @@ def run(
                 pack_registry=pack_registry,
                 doc_sink=doc_sink if docs_dir is not None else None,
                 checkpoints=sorted(ckpt_set) if ckpt_set else None,
+                max_slots=max_slots,
+                cost_cap_microusd=cost_cap_microusd,
             )
             # `spec` is additive and seeded ONLY when provided (request-only runs
             # keep the historical {"request": ...} seed exactly). The product
@@ -1260,10 +1276,14 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
-    # --backend {mock|anthropic|claude-cli|codex|ollama-gemma} (default mock — the
-    # deterministic keyless transport, byte-identical to the historical run). A real
-    # backend routes model egress through the proxy and makes metered model calls.
-    backend = _MOCK_BACKEND
+    # --backend {mock|anthropic|claude-cli|codex|ollama-gemma}. The default is
+    # FOUNDRY_MODEL_BACKEND if set, else "mock" (the deterministic keyless transport
+    # — keeps the no-credential quickstart + the hermetic test suite byte-identical).
+    # So a deployment sets FOUNDRY_MODEL_BACKEND=claude-cli once to make a real
+    # backend the default everywhere; an explicit --backend still overrides.
+    backend = os.environ.get("FOUNDRY_MODEL_BACKEND", _MOCK_BACKEND) or _MOCK_BACKEND
+    if backend not in BACKENDS:
+        backend = _MOCK_BACKEND
     if "--backend" in args:
         i = args.index("--backend")
         if i + 1 >= len(args):
@@ -1310,6 +1330,42 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         if max_fix_attempts < 1:
             print("error: --max-fix-attempts must be >= 1", file=sys.stderr)
+            return 2
+        args = args[:i] + args[i + 2 :]
+    # --max-slots N: IC-pool size — how many tasks build in PARALLEL (Wave C; >1
+    # also engages the per-domain budget tree, Wave D). Default FOUNDRY_MAX_SLOTS
+    # (else 1 = serial, byte-identical). --cost-cap-microusd N: the global spend
+    # envelope the pool sub-allocates per area/domain (default FOUNDRY_COST_CAP_MICROUSD).
+    try:
+        max_slots = int(os.environ.get("FOUNDRY_MAX_SLOTS", "1") or "1")
+    except ValueError:
+        max_slots = 1
+    if "--max-slots" in args:
+        i = args.index("--max-slots")
+        if i + 1 >= len(args):
+            print("error: --max-slots requires an integer", file=sys.stderr)
+            return 2
+        try:
+            max_slots = int(args[i + 1])
+        except ValueError:
+            print(f"error: --max-slots must be an integer, got {args[i + 1]!r}", file=sys.stderr)
+            return 2
+        if max_slots < 1:
+            print("error: --max-slots must be >= 1", file=sys.stderr)
+            return 2
+        args = args[:i] + args[i + 2 :]
+    _cost_env = os.environ.get("FOUNDRY_COST_CAP_MICROUSD", "").strip()
+    cost_cap_microusd: int | None = int(_cost_env) if _cost_env.isdigit() else None
+    if "--cost-cap-microusd" in args:
+        i = args.index("--cost-cap-microusd")
+        if i + 1 >= len(args):
+            print("error: --cost-cap-microusd requires an integer", file=sys.stderr)
+            return 2
+        try:
+            cost_cap_microusd = int(args[i + 1])
+        except ValueError:
+            print(f"error: --cost-cap-microusd must be an integer, got {args[i + 1]!r}",
+                  file=sys.stderr)
             return 2
         args = args[:i] + args[i + 2 :]
     # --packs name1,name2 (task [9]): the domain packs to engage (by name). A pack
@@ -1412,6 +1468,8 @@ def main(argv: list[str] | None = None) -> int:
             output_dir=output_dir,
             checkpoints=checkpoints,
             checkpoint_responder=responder,
+            max_slots=max_slots,
+            cost_cap_microusd=cost_cap_microusd,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)

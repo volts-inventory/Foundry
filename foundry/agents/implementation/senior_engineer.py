@@ -4,8 +4,16 @@ The Senior Engineer is the *decomposition* half of the implementation layer:
 it breaks the chosen :class:`~foundry.schemas.architecture.SystemDesign` into
 well-specified :class:`~foundry.schemas.implementation.Task` units, one per
 branch (``task/<id>``), each tracing back to the acceptance criteria it
-implements (``criterion_ids``). The branch/merge ORDER is a deterministic
-function of the architect's
+implements (``criterion_ids``).
+
+Org fan-out (org_fanout_design.md, Wave B): the decomposition runs ONE focused
+proxy call PER Tech-Lead — one per OwnershipMap owner (``OwnershipMap.leads()``)
+— each decomposing only its own ``units_of(owner)``. Because the task id/seq/
+branch are keyed off the unit and its GLOBAL merge-order index, this changes only
+WHO proposes a task, never its identity or order: a single-owner map is one call,
+byte-identical to the pre-fan-out Senior; a multi-owner map keeps the same ids and
+the same merge order, differing only in per-domain ``criterion_ids`` enrichment.
+The branch/merge ORDER is a deterministic function of the architect's
 :class:`~foundry.schemas.architecture.OwnershipMap` —
 ``OwnershipMap.merge_order()`` — so a LangGraph resume re-derives the identical
 ordering (no reliance on dict insertion or process state; LEARNINGS L8).
@@ -39,6 +47,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+from foundry.agents._common import journal_entry
 from foundry.agents._runtime import AgentRuntime, NodeFn
 from foundry.canonical import content_digest
 from foundry.schemas.architecture import OwnershipMap, SystemDesign
@@ -50,6 +59,7 @@ if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
 
     from foundry.schemas.base import Artifact
+    from foundry.schemas.journal import JournalEntry
     from foundry.state.factory_state import FactoryState
     from foundry.state.seq import Seq
 
@@ -62,6 +72,7 @@ __all__ = [
     "ArtifactResolverError",
     "make_senior_engineer_node",
     "stub_conflict_resolution",
+    "task_id_for_unit",
 ]
 
 NODE_ID = "senior_engineer"
@@ -112,12 +123,14 @@ class ArtifactResolverError(LookupError):
     """
 
 
-def _task_id(unit: str) -> str:
+def task_id_for_unit(unit: str) -> str:
     """Stable, process-reproducible task id for an ownership unit.
 
     Keyed by ``content_digest`` (LEARNINGS L7), NEVER builtin ``hash()`` — a
     resume in a fresh process must derive the identical id so the ``tasks``
     channel's keyed union coalesces the re-emission instead of duplicating it.
+    Public so the Junior (Wave D) can map a task back to its unit -> owner ->
+    area for the per-area budget lineage, without storing area on the Task.
     """
     return f"t-{content_digest({'unit': unit})[:12]}"
 
@@ -186,48 +199,74 @@ def make_senior_engineer_node(
     def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         design, ownership = _read_design_and_ownership(state, resolve)
         order = ownership.merge_order()
-        # Map each ownership unit to the criteria its task should implement,
-        # asking the proxy (single egress, L6) for the decomposition.
-        prompt = json.dumps(
-            {
-                "design_title": design.title,
-                "design_uri": design.design_uri,
-                "components": list(design.components),
-                "interfaces": list(design.interface_ids),
-                "ownership_units_in_merge_order": list(order),
-            },
-            sort_keys=True,
-            ensure_ascii=False,
-        )
-        result = rt.proxy.complete(
-            NODE_ID,
-            tier,
-            _SOP,
-            [{"role": "user", "content": prompt}],
-            purpose="ideation",
-            schema=_DECOMPOSITION_SCHEMA,
-        )
-        proposed = (result.parsed or {}).get("tasks", [])
-        criteria_by_unit = _criteria_by_unit(proposed)
+        index_of = {unit: i for i, unit in enumerate(order)}
 
-        # Emit one Task per ownership unit, IN merge order, so a downstream
-        # consumer iterating the channel by Seq sees the deterministic order.
-        # `local` carries the merge-order index (the Seq tail-break), so the
-        # ordering is recoverable from the records alone.
+        # ONE Tech-Lead per domain (each OwnershipMap owner; Wave A
+        # `OwnershipMap.leads()`): a lead decomposes ONLY its own ownership units,
+        # so its decomposition context stays focused on its slice. The task
+        # id/seq/branch are GLOBAL — keyed off the unit and its merge-order index —
+        # so the org fan-out changes WHO proposes a task, never its identity:
+        #   * a single-owner map makes exactly one decomposition call over all
+        #     units, byte-identical to the pre-fan-out Senior (regression guard);
+        #   * a multi-owner map preserves the same task ids AND the same merge
+        #     order (leads + units iterate in (owner, unit) order == merge_order);
+        #     only the per-domain `criterion_ids` enrichment differs — the point.
+        # Areas/leads are DERIVED from the OwnershipMap (Wave A); nothing about the
+        # org is stored on the Task (a later wave records lineage where consumed).
         tasks: list[dict[str, Any]] = []
-        for index, unit in enumerate(order):
-            tid = _task_id(unit)
-            seq = rt.seq(config, NODE_ID, f"task:{tid}", local=index)
-            spec_digest = content_digest({"unit": unit, "design": design.design_uri})
-            task = Task(
-                id=tid,
-                spec_uri=f"cas://task/{spec_digest}",
-                criterion_ids=criteria_by_unit.get(unit, ()),
-                branch=f"task/{tid}",
-                seq=seq,
+        notes: list[JournalEntry] = []
+        for lead in ownership.leads():
+            units = ownership.units_of(lead)
+            prompt = json.dumps(
+                {
+                    "design_title": design.title,
+                    "design_uri": design.design_uri,
+                    "components": list(design.components),
+                    "interfaces": list(design.interface_ids),
+                    "ownership_units_in_merge_order": list(units),
+                },
+                sort_keys=True,
+                ensure_ascii=False,
             )
-            tasks.append(task.model_dump(mode="json"))
-        return {"tasks": tasks}
+            result = rt.proxy.complete(
+                NODE_ID,
+                tier,
+                _SOP,
+                [{"role": "user", "content": prompt}],
+                purpose="ideation",
+                schema=_DECOMPOSITION_SCHEMA,
+            )
+            criteria_by_unit = _criteria_by_unit((result.parsed or {}).get("tasks", []))
+            for unit in units:
+                tid = task_id_for_unit(unit)
+                seq = rt.seq(config, NODE_ID, f"task:{tid}", local=index_of[unit])
+                spec_digest = content_digest({"unit": unit, "design": design.design_uri})
+                task = Task(
+                    id=tid,
+                    spec_uri=f"cas://task/{spec_digest}",
+                    criterion_ids=criteria_by_unit.get(unit, ()),
+                    branch=f"task/{tid}",
+                    seq=seq,
+                )
+                tasks.append(task.model_dump(mode="json"))
+            # ADVISORY per-lead journal note (plan [11]; zero extra model call —
+            # derived from data this lead already produced). Distinct seq key per
+            # lead so `union_journal` keeps one entry per domain. Never a trust
+            # input; no gate reads it.
+            area = ownership.area_of(lead)
+            notes.append(
+                journal_entry(
+                    node_id=NODE_ID,
+                    role=f"Tech-Lead · {area}",
+                    seq=rt.seq(config, NODE_ID, f"journal:{lead}"),
+                    summary=(
+                        f"Lead {lead!r} ({area}) decomposed {len(units)} "
+                        "ownership unit(s) into tasks."
+                    ),
+                    assumptions=(f"Owns: {', '.join(units)}.",),  # a lead always owns ≥1 unit
+                )
+            )
+        return {"tasks": tasks, "agent_journal": notes}
 
     return _node
 

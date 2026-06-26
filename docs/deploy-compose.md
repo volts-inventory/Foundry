@@ -119,15 +119,124 @@ authoring environment — hence it is a documented swap point, not fabricated
 untestable code. To complete it: `uv sync --extra postgres`, build the
 shared-connection `PostgresSaver` path, and add tests against a real Postgres.
 
+## Model backends — credentials & local models
+
+The factory flow is identical across backends; only `FOUNDRY_MODEL_BACKEND`
+(`anthropic` | `claude-cli` | `codex` | `ollama-gemma`) changes which proxy is
+built (`foundry.proxy.backend_from_env`). Two backend families need deployment
+care.
+
+### CLI backends (`claude-cli`, `codex`) — headless auth
+
+The CLI binaries must be **in the image** and **authenticated without an
+interactive login** (there is no browser/TTY in a container).
+
+**Our setup: `claude-cli` on a Max subscription.** A Max plan is OAuth-based, not
+a Console API key. Authenticate headlessly with a **subscription OAuth token**:
+
+```bash
+# Bake the CLIs in (off by default — keeps the base image slim):
+docker build --build-arg INSTALL_CLI_BACKENDS=true -t foundry:cli .
+
+# ONCE, on a workstation logged into the Max account, mint a long-lived token:
+claude setup-token            # -> prints a CLAUDE_CODE_OAUTH_TOKEN (≈1yr, inference-only)
+
+# Inject it as a secret (never baked into the image):
+cat >> .env <<'EOF'
+FOUNDRY_MODEL_BACKEND=claude-cli
+CLAUDE_CODE_OAUTH_TOKEN=...        # the token from `claude setup-token`
+EOF
+docker compose up --build
+```
+
+> **Do NOT also set `ANTHROPIC_API_KEY`.** It has *higher* precedence than the
+> OAuth token (see below), so it would silently bill the **pay-per-token Console
+> API** instead of your Max subscription. Leave it unset. (`claude -p` does not use
+> `--bare`, so the OAuth token is honoured.)
+
+**How `claude` authenticates (and why interactive login can't run in a
+container).** `claude login` (or `/login` in a session) runs an **interactive
+OAuth flow that opens a browser** — impossible headless. For a container, give the
+CLI a credential via env instead; `claude -p "<prompt>"` (the non-interactive
+"print" mode the `claude-cli` backend uses) reads it directly, no prior login.
+Claude Code's credential precedence (first match wins):
+
+1. **Cloud provider** — `CLAUDE_CODE_USE_BEDROCK` / `CLAUDE_CODE_USE_VERTEX` (+ the
+   provider's own creds). Use this if you front Claude with Bedrock/Vertex.
+2. **`ANTHROPIC_AUTH_TOKEN`** — a bearer token, for an LLM gateway/proxy.
+3. **`ANTHROPIC_API_KEY`** — a Console API key (sent as `X-Api-Key`). **The simplest
+   container path** — what the example above uses.
+4. **`apiKeyHelper`** — a script (in `settings.json`) returning a short-lived key,
+   re-invoked on a TTL / HTTP 401; for vault-issued rotating creds.
+5. **`CLAUDE_CODE_OAUTH_TOKEN`** — a long-lived (≈1yr, inference-only) OAuth token
+   from running **`claude setup-token`** once interactively on a workstation; good
+   for using a Pro/Max/Team subscription in CI instead of a Console key.
+6. **Stored `/login` credentials** — the interactive default (browser OAuth).
+
+Notes for containers:
+- The proxy passes its process env straight through to the CLI subprocess
+  (`cli_transports` inherits `os.environ`), so the credential just needs to be on
+  the process — a compose `.env` value here, a **K8s Secret** env-var in EKS.
+- **Mounting a pre-provisioned credentials file** also works on **Linux/Windows**:
+  copy `~/.claude/.credentials.json` (mode `0600`) from a machine where you logged
+  in and mount it **read-only** at the CLI's config dir under `$HOME` (the image
+  sets `HOME=/app`, so `./creds/.claude:/app/.claude:ro`; or set
+  `CLAUDE_CONFIG_DIR`). **macOS keychain creds cannot be copied** — use a token/key
+  there. Never `COPY` a credential into the image.
+- In the isolated topology the CLI + credential live on the **proxy egress
+  service** (which builds the backend), not the app.
+
+### Local models (`ollama-gemma`) — Ollama on the HOST, reached by endpoint
+
+**Policy: we never pass a GPU into a container.** Ollama runs **natively on the
+host** (or a dedicated GPU box) where it owns the GPU directly, and the app reaches
+it over HTTP at `FOUNDRY_OLLAMA_URL`. This is portable across Linux, macOS, and a
+remote GPU host with zero per-container device wiring.
+
+```bash
+# On the host (native install — uses the GPU directly):
+ollama serve &        # http://localhost:11434
+ollama pull gemma3:27b
+
+# In .env — point the containerized app at the host endpoint:
+cat >> .env <<'EOF'
+FOUNDRY_MODEL_BACKEND=ollama-gemma
+FOUNDRY_OLLAMA_URL=http://host.docker.internal:11434   # or a remote GPU box's URL
+EOF
+docker compose up --build
+```
+
+- `FOUNDRY_OLLAMA_URL` is read by `backend_from_env` and handed to the Ollama
+  transport, so **every worker shares the one endpoint** (an explicit `base_url=`
+  still wins). Tested: `tests/test_cli_transports.py`.
+- `host.docker.internal` resolves automatically on Docker Desktop (Mac/Windows);
+  on **Linux** the app service maps it via `extra_hosts: host-gateway` (already in
+  the compose file). Or point `FOUNDRY_OLLAMA_URL` straight at a remote GPU box.
+- **EKS**: run Ollama as its **own Deployment on a GPU node pool** and point the app
+  at its Service DNS — still just an endpoint, still no GPU inside the app
+  container. (This also sidesteps Docker Desktop on macOS being unable to pass the
+  Apple GPU into a Linux container — moot, since Ollama is on the host.)
+
+## The app serves the Workshop UI
+
+`docker compose up` runs the app's default command (`python -m webapp.server`) and
+publishes the Workshop UI on **http://localhost:${WORKSHOP_PORT:-8765}** (bound to
+`0.0.0.0` in the container; `webapp/` is baked into the image). Builds' output
+(code + docs per floor) persists on the `foundry_web` volume. Set
+`FOUNDRY_MODEL_BACKEND` (+ creds) and `FOUNDRY_MAX_SLOTS` in `.env` to drive real,
+parallel builds. For a one-shot headless build instead, override the app
+`command:` (commented example in the compose file).
+
 ## What this task does NOT do (honesty)
 
 - Does **not** build the real proxy / signer / builder services — they are
   network-isolated **stubs** (`command: ["true"]`) to make the topology
-  reviewable.
+  reviewable. The app builds the proxy/signer in-process today, so the
+  `FOUNDRY_PROXY_URL`/`SIGNER_URL`/`BUILDER_URL` env vars are aspirational
+  topology, read by no code yet.
 - Does **not** stand up the observability stack — it is a commented placeholder.
-- Does **not** touch `proxy/`, `gates/`, or `agents/`. The `cli.py` change is
-  limited to honoring `FOUNDRY_STATE_DIR` (above); the app `command:` in compose
-  is left commented for whoever wires the cli entrypoint.
+- `FOUNDRY_CHECKPOINTER=postgres` is a **documented swap point** that fails closed
+  (the PostgresSaver shared-connection wiring isn't built); sqlite is the default.
 - Does **not** provide cross-store (checkpoint+ledger) atomicity, HA, a broker,
   or multi-replica — those are the multi-host / Postgres upgrade, out of scope
   for single-host durability.

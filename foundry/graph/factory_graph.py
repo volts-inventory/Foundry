@@ -620,6 +620,8 @@ def build_factory_graph(
     pack_registry: PackRegistry | None = None,
     doc_sink: MutableSequence[DocumentationBundle] | None = None,
     checkpoints: bool | Sequence[str | CheckpointBoundary] | None = None,
+    max_slots: int = 1,
+    cost_cap_microusd: int | None = None,
 ) -> CompiledStateGraph[FactoryState]:
     """Compile the full factory graph (Assistant-mode default; Gated/Autonomous opt-in).
 
@@ -743,6 +745,8 @@ def build_factory_graph(
         discriminator_factory=discriminator_factory,
         pack_registry=pack_registry,
         checkpoints=checkpoints,
+        max_slots=max_slots,
+        cost_cap_microusd=cost_cap_microusd,
     ).compile()
 
     def emit(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:

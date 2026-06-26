@@ -9,9 +9,13 @@ from __future__ import annotations
 
 import re
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from foundry.schemas.base import FrozenModel
 from foundry.state.seq import Seq
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
 
 
 class ConstraintScope(StrEnum):
@@ -117,3 +121,149 @@ class OwnershipMap(FrozenModel):
         Senior Engineer's integration order is reproducible across resume
         (agents.md Layer 3; no reliance on dict insertion or process state)."""
         return tuple(sorted(self.owners, key=lambda unit: (self.owners[unit], unit)))
+
+    # -- org fan-out derivation (plan: org_fanout_design.md, Wave A) -----------
+    # Areas/leads are DERIVED on demand (a pure function of ``owners``), never a
+    # stored field — so this adds NO serialization change and churns NO digest
+    # (the ownership_map record is byte-identical to before). Every result is a
+    # deterministic function of the mapping alone, so a resume re-derives the
+    # identical org tree. Nothing consumes this yet (ships dark).
+
+    def leads(self) -> tuple[str, ...]:
+        """Distinct owners — one Tech-Lead per domain — in deterministic order."""
+        return tuple(sorted(set(self.owners.values())))
+
+    def units_of(self, owner: str) -> tuple[str, ...]:
+        """Ownership units assigned to ``owner``, in merge order."""
+        return tuple(u for u in self.merge_order() if self.owners[u] == owner)
+
+    def area_of(self, owner: str) -> str:
+        """Canonical area an owner's domain belongs to (``backend`` default)."""
+        return classify_area(owner, self.units_of(owner))
+
+    def areas_present(self) -> tuple[str, ...]:
+        """Distinct areas that actually have ≥1 domain, in canonical order.
+
+        Areas materialize from the work: an area appears here only when some
+        owner classifies into it (so a headless service has no ``frontend``,
+        a static site no ``data`` — no idle departments)."""
+        present = {self.area_of(owner) for owner in self.leads()}
+        return tuple(area for area in CANONICAL_AREAS if area in present)
+
+    def leads_by_area(self) -> dict[str, tuple[str, ...]]:
+        """area -> the owners (Tech-Leads) in it, in canonical area order.
+
+        The org tree the fan-out reads: one entry per *present* area, each
+        listing its domains' leads. Tiny areas (one lead) still appear — the
+        manager-vs-report-to-PM decision is a later wave's, not this mapping's."""
+        grouped: dict[str, list[str]] = {}
+        for owner in self.leads():
+            grouped.setdefault(self.area_of(owner), []).append(owner)
+        return {area: tuple(grouped[area]) for area in CANONICAL_AREAS if area in grouped}
+
+
+# --------------------------------------------------------------------------- #
+# Area classification (org_fanout_design.md, Wave A)                           #
+# --------------------------------------------------------------------------- #
+# A domain (OwnershipMap owner) is classified into a canonical AREA from the
+# names of the units it owns, reusing the SAME capability vocabulary that routes
+# the domain packs (frontend / ml_data / regulated) so the org and the governance
+# packs speak one language. Pure + deterministic: a fixed precedence resolves a
+# multi-match, ``backend`` is the fallback, and the function depends only on its
+# inputs (no wall-clock, no process state) so a resume re-derives identically.
+
+#: Canonical areas in display / tree order (``backend`` is the default bucket).
+CANONICAL_AREAS: tuple[str, ...] = ("frontend", "backend", "data", "infra", "security")
+_DEFAULT_AREA = "backend"
+
+#: (area, keywords) in PRECEDENCE order — first match wins (most-specific first).
+#: Matching is WHOLE-TOKEN ONLY (a path is split into tokens on /_-. and each
+#: keyword must equal a token). No substring matching: it false-fires on real
+#: paths (``token`` ⊂ ``tokenizer``, ``view`` ⊂ ``interview``, ``data`` ⊂
+#: ``metadata``), and shipping wrong labels into a content-addressed system is
+#: worse than a ``backend`` fallback. Keywords therefore include common variants
+#: (``view``/``views``) and exclude genuinely ambiguous tokens (``client`` —
+#: api_client; ``store`` — storefront; ``model`` — domain model; ``feature`` —
+#: feature flag; ``render``). A miss costs one backend label; a false hit
+#: corrupts the org tree, so the set errs toward precision over recall.
+_AREA_RULES: tuple[tuple[str, frozenset[str]], ...] = (
+    (
+        "security",
+        frozenset({
+            "auth", "authn", "authz", "oauth", "crypto", "cryptography",
+            "secret", "secrets", "credential", "credentials", "token", "tokens",
+            "security", "compliance", "regulated", "fintech", "finance",
+            "financial", "payment", "payments", "billing", "phi", "pii", "kms",
+            "vault", "login", "signin", "signup", "session", "sessions", "rbac",
+            "permission", "permissions",
+        }),
+    ),
+    (
+        "frontend",
+        frozenset({
+            "ui", "ux", "web", "mobile", "frontend", "view", "views",
+            "component", "components", "page", "pages", "css", "html", "widget",
+            "widgets", "screen", "screens", "button", "buttons", "layout",
+            "layouts", "nav", "navbar", "theme", "themes", "stylesheet",
+            "stylesheets",
+        }),
+    ),
+    (
+        "data",
+        frozenset({
+            "data", "dataset", "datasets", "etl", "warehouse", "schema",
+            "schemas", "migration", "migrations", "sql", "analytics", "ingest",
+            "ingestion", "ml", "training", "ai", "query", "queries", "database",
+            "databases", "embedding", "embeddings",
+        }),
+    ),
+    (
+        "infra",
+        frozenset({
+            "infra", "infrastructure", "deploy", "deployment", "deployments",
+            "ops", "devops", "sre", "platform", "docker", "dockerfile", "k8s",
+            "kubernetes", "terraform", "helm", "cluster", "gateway", "proxy",
+            "network", "networking", "provision", "provisioning", "ci", "cd",
+            "pipeline", "pipelines",
+        }),
+    ),
+)
+
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def _tokens(*texts: str) -> frozenset[str]:
+    """Lowercased alphanumeric tokens across all inputs (paths split on / _ - .)."""
+    out: set[str] = set()
+    for text in texts:
+        out.update(_TOKEN_RE.findall(text.lower()))
+    return frozenset(out)
+
+
+def classify_area(owner: str, units: Iterable[str]) -> str:
+    """Canonical area for a domain, from its owner id + the units it owns.
+
+    Both the owner identifier AND every unit path contribute tokens, so an owner
+    literally named ``auth_team`` classifies as ``security`` even before its
+    files are considered. Deterministic: scans the area rules in fixed precedence
+    (security → frontend → data → infra), returns the first whole-token match,
+    else ``backend``."""
+    tokens = _tokens(owner, *units)
+    for area, keywords in _AREA_RULES:
+        if tokens & keywords:  # whole-token intersection — no substring matching
+            return area
+    return _DEFAULT_AREA
+
+
+def classify_areas(owners: Mapping[str, str]) -> dict[str, str]:
+    """owner -> area for every distinct owner in an ``OwnershipMap.owners`` map.
+
+    A standalone, pure mirror of :meth:`OwnershipMap.area_of` over the whole
+    mapping (handy for telemetry / tests); returns owners in sorted order."""
+    units_by_owner: dict[str, list[str]] = {}
+    for unit, owner in owners.items():
+        units_by_owner.setdefault(owner, []).append(unit)
+    return {
+        owner: classify_area(owner, units_by_owner[owner])
+        for owner in sorted(units_by_owner)
+    }

@@ -55,15 +55,48 @@ ENV PATH="/opt/venv/bin:$PATH" \
 WORKDIR /app
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /app/foundry ./foundry
+COPY webapp ./webapp
 COPY pyproject.toml ./
 
-# Volume mount points for the durable CAS + checkpoint DB (compose/K8s provide
-# the actual volumes; these are owned by the non-root runtime user).
-RUN mkdir -p /var/lib/foundry/cas /var/lib/foundry/state \
+# --- optional: CLI model backends (claude -p / codex) ------------------------
+# OFF by default (the anthropic / ollama backends need no extra binary, so the
+# base image stays slim). Build with `--build-arg INSTALL_CLI_BACKENDS=true` to
+# bake the CLIs in for FOUNDRY_MODEL_BACKEND=claude-cli|codex.
+#
+# HEADLESS AUTH (the load-bearing part): interactive `claude login` / `codex
+# login` open a BROWSER OAuth flow — they CANNOT run in a container. Authenticate
+# by INJECTING A CREDENTIAL as a secret — NEVER baked into the image (full
+# precedence + options in docs/deploy-compose.md):
+#   * claude-cli on a MAX SUBSCRIPTION -> CLAUDE_CODE_OAUTH_TOKEN, minted once on a
+#     workstation with `claude setup-token`. `claude -p` honours it (no --bare).
+#     Do NOT also set ANTHROPIC_API_KEY: it OUTRANKS the token and would bill the
+#     pay-per-token Console API instead of the subscription.
+#   * codex -> OPENAI_API_KEY.
+#   The proxy passes its env through to the CLI subprocess (cli_transports inherits
+#   os.environ), so the credential just needs to be on the process. Compose: a
+#   .env value; K8s: a Secret.
+#   * OR a pre-provisioned ~/.claude/.credentials.json (Linux/Win; NOT macOS
+#     keychain) mounted read-only under $HOME (HOME=/app here, so /app/.claude).
+#     Mount it; do not COPY it into the image.
+ARG INSTALL_CLI_BACKENDS=false
+RUN if [ "$INSTALL_CLI_BACKENDS" = "true" ]; then \
+      apt-get update \
+      && apt-get install -y --no-install-recommends nodejs npm \
+      && npm install -g @anthropic-ai/claude-code @openai/codex \
+      && apt-get purge -y --auto-remove \
+      && rm -rf /var/lib/apt/lists/* /root/.npm; \
+    fi
+
+# Volume mount points for the durable CAS + checkpoint DB + the workshop's written
+# output (compose/K8s provide the actual volumes; owned by the non-root user).
+RUN mkdir -p /var/lib/foundry/cas /var/lib/foundry/state /var/lib/foundry/web \
     && chown -R foundry:foundry /var/lib/foundry /app
 USER foundry
 
-# Smoke default: import the package. The real entrypoint is the cli, which this
-# task does NOT touch — override `command:` in compose / K8s to run the factory.
+# ENTRYPOINT is `python -m`, so `command:` (compose) / args pick the module. The
+# default serves the Workshop UI (webapp.server reads WORKSHOP_HOST/PORT/
+# WORKSHOP_OUTPUT_DIR + FOUNDRY_MODEL_BACKEND/FOUNDRY_MAX_SLOTS from the env).
+# Override to `["foundry", "run", …]` for a one-shot CLI build instead.
+EXPOSE 8765
 ENTRYPOINT ["python", "-m"]
-CMD ["foundry"]
+CMD ["webapp.server"]

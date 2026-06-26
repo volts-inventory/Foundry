@@ -18,3 +18,22 @@ mutants/
 
 # Claude Code local state: agent worktrees, settings (never commit)
 .claude/
+
+# Secrets + Makefile/CLI run artifacts (never commit). NOTE: /build/ is the
+# project's tracked planning-doc dir — do NOT ignore it; run output goes to /.run/.
+.env
+/.run/
+/spec.md
+# Drop-in workshop art (operator-provided; keep the README + example only)
+/webapp/static/assets/*
+!/webapp/static/assets/README.md
+!/webapp/static/assets/manifest.example.json
+# …but the pixel UI font is a required, bundled asset
+!/webapp/static/assets/fonts
+/webapp/static/assets/fonts/*
+!/webapp/static/assets/fonts/pixel.ttf
+# …and the bundled character sprites (CC BY-SA 4.0 — see sprites/CREDITS.md)
+!/webapp/static/assets/sprites
+/webapp/static/assets/sprites/*
+!/webapp/static/assets/sprites/characters.png
+!/webapp/static/assets/sprites/CREDITS.md

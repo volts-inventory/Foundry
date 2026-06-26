@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import os
-import queue
 import shutil
 import threading
 import time
@@ -33,7 +32,6 @@ _STATIC = Path(__file__).parent / "static"
 _PACE = 0.5          # seconds between paced game events
 _STAGE_PAUSE = 0.9   # extra beat when a new stage opens
 _AUTO_APPROVE_DELAY = 1.4  # auto-run: dwell on each checkpoint before approving
-_END = {"type": "_end"}
 
 _MODES = ("assistant", "gated", "autonomous")
 
@@ -164,8 +162,19 @@ class Project:
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
-    events: queue.Queue[dict[str, Any]] = field(default_factory=queue.Queue)
-    decisions: queue.Queue[str] = field(default_factory=queue.Queue)
+    # The retained, append-only event log + a Condition every viewer waits on.
+    # A single shared queue would let two streams STEAL each other's events; a log
+    # lets many devices each tail it at their own cursor, and a late/reconnecting
+    # device replays from the start (or from its Last-Event-ID). `cond` guards
+    # `log`, `ended`, and the checkpoint-decision fields below.
+    log: list[dict[str, Any]] = field(default_factory=list)
+    cond: threading.Condition = field(default_factory=threading.Condition)
+    ended: bool = False
+    # Checkpoint decisions: first decision for a checkpoint wins (idempotent);
+    # every device still watches the resolution play (it's just another log event).
+    checkpoint_seq: int = 0          # monotonic id of the LATEST checkpoint reached
+    pending_checkpoint: int | None = None  # the checkpoint awaiting a decision, if any
+    decision_for: dict[int, str] = field(default_factory=dict)  # checkpoint id -> decision
     seen_uris: set[str] = field(default_factory=set)
     status: str = "running"
     passed: bool = False  # final verdict (for elevator/reload rehydration)
@@ -252,11 +261,14 @@ def _persist(p: "Project | None" = None) -> None:
 
 
 def _load_persisted() -> None:
-    """Rehydrate finished floors from the catalog on startup (best-effort).
+    """Rehydrate floors from the catalog on startup (best-effort).
 
-    A floor that was mid-build at save time can't resume (its thread is gone), so
-    it's marked ``done`` (not awaiting) — the floor + its written OUTPUT remain
-    browsable, but no live stream reconnects."""
+    The persisted event log is loaded back into each project, so a device that
+    connects after a restart replays the build's WHOLE story (not just a final
+    snapshot). A floor that was mid-build at save time can't resume its computation
+    (its thread is gone — that needs the durable checkpointer, FOUNDRY_STATE_DIR),
+    so it's closed out honestly: an `interrupted` marker is appended and the stream
+    ends once the replay catches up."""
     try:
         rows = _STORE.latest_per_floor()   # one row per project (its newest release)
     except Exception:
@@ -278,12 +290,30 @@ def _load_persisted() -> None:
                     out_base=Path(ob) if ob else None,
                     created_at=str(row.get("created_at") or ""),
                 )
-                p.status = "done"            # in-flight at save => finished/interrupted
+                try:
+                    p.log = _STORE.events_of(p.id)   # the durable replay log
+                except Exception:
+                    p.log = []
+                was_running = str(row.get("status", "")) == "running" and not any(
+                    e.get("type") == "_end" for e in p.log
+                )
                 p.passed = bool(row.get("passed", False))
                 p.awaiting = False
                 p.gates = dict(row.get("gates") or {})
-                p.events.put(_END)           # any late stream connect ends at once
                 _PROJECTS[p.id] = p
+                if was_running:
+                    # Closed out on the same log so every replay ends cleanly.
+                    p.status = "done"
+                    _emit(p, type="narrate",
+                          text="↻ Server restarted — this build was interrupted "
+                               "(its history is preserved).")
+                    _emit(p, type="halt", phase="interrupted",
+                          reason="server restarted mid-build")
+                    _emit(p, type="done", passed=False, phase="interrupted")
+                    _close(p)
+                else:
+                    p.status = "done"
+                    p.ended = True           # already terminal; a late connect ends at once
             except Exception:
                 continue
         _FLOOR[0] = max(_FLOOR[0], _STORE.max_floor())
@@ -298,9 +328,68 @@ def _emit(p: Project, **event: Any) -> None:
             p.gates[name] = {"status": event.get("status"),
                              "attested": event.get("attested", True),
                              "advisory": event.get("advisory", False)}
-    p.events.put(event)
+    with p.cond:
+        seq = len(p.log)
+        p.log.append(event)
+        if event.get("type") == "_end":
+            p.ended = True
+        p.cond.notify_all()       # wake EVERY connected stream (not just one)
+    # Durably back the log so a reconnect/restart can replay the whole story.
+    try:
+        _STORE.append_event(p.id, seq, event)
+    except Exception:
+        pass
     if event.get("type") in _PERSIST_ON:
         _persist(p)   # catalog the build's metadata on each state change
+
+
+def _close(p: Project) -> None:
+    """Terminate the stream for every viewer (the build is over)."""
+    _emit(p, type="_end")
+
+
+def _record_decision(p: Project, decision: str, checkpoint: int | None) -> tuple[bool, bool]:
+    """Record a checkpoint decision, FIRST-wins. Returns ``(applied, stale)``.
+
+    ``stale`` is True when the decision names no current pause (already resolved,
+    or a different checkpoint than the one awaiting) — a no-op. ``applied`` is True
+    only for the FIRST decision on the awaiting checkpoint; later/duplicate clicks
+    from any device return ``(False, False)`` and simply watch the resolution play."""
+    with p.cond:
+        cidx = p.pending_checkpoint
+        if checkpoint is not None and checkpoint != cidx:
+            return (False, True)          # a stale click for an already-passed pause
+        if cidx is None:
+            return (False, True)          # nothing is awaiting a decision
+        if cidx in p.decision_for:
+            return (False, False)         # someone already decided this one
+        p.decision_for[cidx] = decision
+        p.cond.notify_all()
+        return (True, False)
+
+
+def _resume_cursor(last_event_id: str | None) -> int:
+    """The log index a stream should resume at given an SSE ``Last-Event-ID``.
+
+    A fresh viewer (no id) starts at 0 and replays the whole log; a reconnecting
+    EventSource replays its last id, so we resume at the NEXT event."""
+    if last_event_id and last_event_id.isdigit():
+        return int(last_event_id) + 1
+    return 0
+
+
+def _await_decision(p: Project, cidx: int, timeout: float = 600.0) -> str:
+    """Block the build until SOME device decides checkpoint ``cidx`` (first wins),
+    or until ``timeout`` elapses (then auto-approve). Many devices can post; only
+    the first is recorded — the rest watch the `resolved` event play, live."""
+    deadline = time.monotonic() + timeout
+    with p.cond:
+        while cidx not in p.decision_for:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return "approve"
+            p.cond.wait(remaining)
+        return p.decision_for[cidx]
 
 
 def _emit_paced(p: Project, events: list[dict[str, Any]]) -> None:
@@ -329,16 +418,22 @@ def _run_factory(p: Project) -> None:
             p.journal = jrnl
         boundary = str(payload.get("boundary", "stage"))
         if p.supervised:
+            with p.cond:
+                p.checkpoint_seq += 1
+                cidx = p.checkpoint_seq
+                p.pending_checkpoint = cidx
             p.awaiting = True
-            _emit(p, type="await_decision", boundary=boundary, journal=p.journal)
-            try:
-                decision = p.decisions.get(timeout=600)
-            except queue.Empty:
-                decision = "approve"
+            # `checkpoint` lets any device's decision name WHICH pause it answers,
+            # so a stale/duplicate click can't leak into the next checkpoint.
+            _emit(p, type="await_decision", boundary=boundary, checkpoint=cidx,
+                  journal=p.journal)
+            decision = _await_decision(p, cidx)
         else:
             time.sleep(_AUTO_APPROVE_DELAY)
             decision = "approve"
         p.awaiting = False
+        with p.cond:
+            p.pending_checkpoint = None
         _emit(p, type="resolved", boundary=boundary, decision=decision)
         verb = "approved" if decision == "approve" else "REJECTED"
         _emit(p, type="narrate", text=f"🧑‍💼 CTO {verb} the {boundary} checkpoint.")
@@ -369,7 +464,7 @@ def _run_factory(p: Project) -> None:
         _emit(p, type="done", passed=False, phase="error")
         p.status = "done"
         _persist(p)
-        p.events.put(_END)
+        _close(p)
         return
 
     # Iterate "on top of" the prior code: the build wrote ONLY its changed/added
@@ -407,7 +502,7 @@ def _run_factory(p: Project) -> None:
     p.passed = bool(result.passed)
     p.status = "done"
     _persist(p)              # catalog the FINAL status/passed (after they're set)
-    p.events.put(_END)
+    _close(p)
 
 
 # --------------------------------------------------------------------------- #
@@ -843,14 +938,26 @@ class Handler(BaseHTTPRequestHandler):
         if p is None:
             self._json(404, {"error": "no such project"})
             return
-        p.decisions.put(decision)
-        self._json(200, {"ok": True})
+        # First decision for the awaiting checkpoint wins; later/duplicate clicks
+        # (from this or another device) are no-ops — but every device still sees
+        # the `resolved` event play, because it rides the shared log.
+        cp = body.get("checkpoint")
+        try:
+            checkpoint = int(cp) if cp is not None else None
+        except (TypeError, ValueError):
+            checkpoint = None
+        applied, stale = _record_decision(p, decision, checkpoint)
+        self._json(200, {"ok": not stale, "applied": applied, "stale": stale})
 
     def _stream(self, pid: str) -> None:
         p = _PROJECTS.get(pid)
         if p is None:
             self._json(404, {"error": "no such project"})
             return
+        # Resume point: the browser's EventSource replays its Last-Event-ID on a
+        # transient reconnect (so it tails from where it left off, no re-replay);
+        # a brand-new viewer sends none and replays the whole log from 0.
+        cursor = _resume_cursor(self.headers.get("Last-Event-ID"))
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -859,17 +966,29 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         try:
             while True:
-                try:
-                    ev = p.events.get(timeout=15)
-                except queue.Empty:
+                with p.cond:
+                    while len(p.log) <= cursor and not p.ended:
+                        if not p.cond.wait(timeout=15):
+                            break          # idle → fall through to a keep-alive
+                    batch = p.log[cursor:]
+                    ended = p.ended
+                if not batch:
+                    if ended:              # caught up AND the build is over
+                        self.wfile.write(b"event: end\ndata: {}\n\n")
+                        self.wfile.flush()
+                        return
                     self.wfile.write(b": keep-alive\n\n")  # comment frame
                     self.wfile.flush()
                     continue
-                if ev is _END or ev.get("type") == "_end":
-                    self.wfile.write(b"event: end\ndata: {}\n\n")
-                    self.wfile.flush()
-                    return
-                self.wfile.write(f"data: {json.dumps(ev)}\n\n".encode())
+                for idx, ev in enumerate(batch, start=cursor):
+                    if ev.get("type") == "_end":
+                        self.wfile.write(f"id: {idx}\nevent: end\ndata: {{}}\n\n".encode())
+                        self.wfile.flush()
+                        return
+                    self.wfile.write(
+                        f"id: {idx}\ndata: {json.dumps(ev)}\n\n".encode()
+                    )
+                cursor += len(batch)
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, OSError):
             return  # client navigated away

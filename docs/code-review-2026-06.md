@@ -226,8 +226,16 @@ deterministic mapping from factory telemetry → game events (no I/O, unit-teste
 good separation). The wiring is sound in the common single-viewer case; the gaps are
 in concurrency, exposure, and lifecycle.
 
-### W1 · SSE fan-out is broken — multiple viewers steal each other's events
+### W1 · SSE fan-out is broken — multiple viewers steal each other's events  ✅ FIXED
 **`webapp/server.py:849-873`** · *correctness* · **medium-high**
+
+> **Resolved** (see `tests/test_webapp_stream.py`): the single per-project queue was
+> replaced with a retained, durably-backed event log that every viewer tails at its
+> own cursor (SSE `id:` + `Last-Event-ID` resume). Many devices now view one build
+> live, a reconnect/restart replays the whole story, and checkpoint decisions are
+> first-wins + idempotent so multiple devices can drive a build safely. Original
+> finding below.
+
 
 Each project has **one** `events: queue.Queue`, and `_stream` consumes it with
 `p.events.get()`. The server is threaded (one handler thread per request), and the
@@ -248,15 +256,15 @@ buffer of recent events also lets a reconnect replay what it missed.)
 **`webapp/server.py:580-593, 747-835, 878-898`** · *security* · **medium**
 
 `POST /api/projects` launches a real build: with a non-mock backend that shells out to
-`claude`/`codex` and can spend against the cost cap. No endpoint checks any
-credential, and the server binds `0.0.0.0` with a LAN-IP banner — so anyone on the
-network can start builds (spend budget, run model backends, write files). There's also
-no `Origin`/CSRF check, so any web page the operator visits can `POST` to
-`http://localhost:<port>/api/projects` from their browser. Acceptable *only* as a
-trusted-LAN dev toy; it should not be exposed beyond that without a guard.
+`claude`/`codex` and can spend against the cost cap. The server already default-binds
+`127.0.0.1` and only exposes the LAN on an explicit `WORKSHOP_HOST=0.0.0.0` opt-in
+(with a printed warning) — good. The remaining gaps: (1) no endpoint checks any
+credential, so on the opt-in LAN anyone can start builds; (2) there's no `Origin`/CSRF
+check, so any web page the operator visits can `POST` to
+`http://localhost:<port>/api/projects` from their browser even on the default bind.
 
-**Fix:** default-bind `127.0.0.1`; gate state-changing routes behind a shared token
-(env var) and/or an `Origin`/`Host` allowlist; document the trust boundary.
+**Fix:** gate state-changing routes behind a shared token (env var) and/or an
+`Origin`/`Host` allowlist; the localhost-default + LAN warning are already in place.
 
 ### W3 · Live build state is in-memory; a build in flight is lost on restart
 **`webapp/server.py:264-289`** · *structure* · **low**

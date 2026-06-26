@@ -1254,7 +1254,8 @@ function routeEvent(floor, ev){
     case "checkpoint":
       F.cp = {title:ev.title, summary:ev.summary, boundary:ev.boundary}; break;
     case "await_decision":
-      F.awaiting = true; if (Array.isArray(ev.journal)) F.journal = ev.journal;
+      F.awaiting = true; F.cpIndex = ev.checkpoint;
+      if (Array.isArray(ev.journal)) F.journal = ev.journal;
       renderElevator();
       if (S){ S.spotlightCTO(true); S.toLounge(); }   // team hangs out while CTO decides
       if (isActive) showCheckpoint(F); break;
@@ -1400,7 +1401,7 @@ function sendDecision(decision){
   const F = FLOORS.get(ACTIVE);
   if (!F){ hideCheckpoint(); return; }
   fetch("/api/decision/"+F.id, {method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({decision})});
+    body: JSON.stringify({decision, checkpoint: F.cpIndex})});
   F.awaiting = false; renderElevator(); hideCheckpoint();
 }
 

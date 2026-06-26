@@ -42,7 +42,9 @@
   <div id="new-modal" class="overlay hidden">
     <div class="dialog">
       <h2>▶ START A BUILD</h2>
-      <label>What should the factory build? <span class="hint">— a sentence, or a full brief</span></label>
+      <label>Start from <span class="hint">— a fresh build, or iterate on a finished one</span></label>
+      <select id="startfrom-select"><option value="">✦ Fresh build</option></select>
+      <label id="req-label">What should the factory build? <span class="hint">— a sentence, or a full brief</span></label>
       <textarea id="req-input" rows="3"
         placeholder="e.g. a URL shortener with custom slugs, link expiry, and per-IP abuse rate-limiting">build a tiny URL-shortener service</textarea>
 
@@ -137,6 +139,7 @@
       </div>
       <div class="dialog-actions">
         <a id="files-zip" class="btn-link" href="#" download>Download .zip</a>
+        <button id="files-iterate" class="primary">⎘ ITERATE</button>
         <button id="files-close">close</button>
       </div>
     </div>

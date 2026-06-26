@@ -1362,6 +1362,10 @@ function openFiles(){
   if(!F){ list.innerHTML = "<li class='muted'>Start a project first.</li>"; modal.classList.remove("hidden"); return; }
   document.getElementById("files-floor").textContent = "Floor "+F.floor;
   document.getElementById("files-zip").href = "/api/zip/"+F.id;
+  // ITERATE: start a new floor from this finished build (enabled once it's done).
+  const itBtn = document.getElementById("files-iterate");
+  itBtn.style.display = (F.status === "done") ? "" : "none";
+  itBtn.onclick = () => { hideFiles(); showNewModal(F.id); };
   view.textContent = "Loading…";
   fetch("/api/files/"+F.id)
     .then(r => r.ok ? r.json() : {files:[]})
@@ -1443,8 +1447,42 @@ function askInterview(){
 
 // ---- UI wiring -------------------------------------------------------------
 const newModal=document.getElementById("new-modal");
-document.getElementById("new-btn").onclick=()=>newModal.classList.remove("hidden");
+document.getElementById("new-btn").onclick=()=>showNewModal();
 document.getElementById("cancel-btn").onclick=()=>newModal.classList.add("hidden");
+
+// ---- "Start from": fresh build, or iterate on a finished build -------------
+const startFromSel=document.getElementById("startfrom-select");
+const REQ_FRESH='What should the factory build? <span class="hint">— a sentence, or a full brief</span>';
+const REQ_ITER='What to change or add? <span class="hint">— the agents build on the selected floor</span>';
+const SEED_REQ='build a tiny URL-shortener service';
+async function loadStartFrom(){
+  let builds=[];
+  try{ const r=await fetch("/api/builds"); builds=((await r.json())||{}).builds||[]; }catch(_){}
+  startFromSel.innerHTML='<option value="">✦ Fresh build</option>';
+  for(const b of builds){
+    if(b.has_repo===false) continue;
+    const o=document.createElement("option");
+    o.value=b.id;
+    o.textContent=`⎘ Floor ${b.floor} ${b.passed?"✓":"✗"} · ${(b.request||"").slice(0,40)}`;
+    startFromSel.appendChild(o);
+  }
+}
+function syncStartFrom(){
+  const iterating=!!startFromSel.value;
+  document.getElementById("req-label").innerHTML=iterating?REQ_ITER:REQ_FRESH;
+  const req=document.getElementById("req-input");
+  if(iterating && (req.value.trim()===""||req.value.trim()===SEED_REQ)){
+    req.value=""; req.placeholder="e.g. add link expiry + custom slugs, and rate-limit by IP";
+  }
+}
+startFromSel.addEventListener("change", syncStartFrom);
+function showNewModal(parentId){
+  newModal.classList.remove("hidden");
+  loadStartFrom().then(()=>{
+    startFromSel.value=(parentId && [...startFromSel.options].some(o=>o.value===parentId))?parentId:"";
+    syncStartFrom();
+  });
+}
 // intake mode radios -> reveal the matching panel
 function intakeMode(){ return (document.querySelector('input[name="intake"]:checked')||{}).value||"idea"; }
 for(const r of document.querySelectorAll('input[name="intake"]')){
@@ -1506,7 +1544,9 @@ document.getElementById("start-btn").onclick=async ()=>{
   if(Number.isFinite(fix) && fix>=0) extra.max_fix_attempts=fix;
   const cap=parseFloat(document.getElementById("cap-input").value);
   if(Number.isFinite(cap) && cap>0) extra.cost_cap_usd=cap;
+  if(startFromSel.value) extra.parent_id=startFromSel.value;   // iterate on a finished build
   const intake=intakeMode();
+  if(startFromSel.value && !req.trim()){ alert("Describe what to change or add."); return; }
   if(intake==="spec"){
     extra.spec_text=document.getElementById("spec-text").value;
   } else if(intake==="zip"){

@@ -202,6 +202,81 @@ def _suggest_slots(request: str, packs: list[Any]) -> tuple[int, list[str]]:
 _LOCK = threading.Lock()
 _FLOOR = [0]
 
+# --- durable floor index ----------------------------------------------------- #
+# Floors run in-memory (_PROJECTS), but the per-floor OUTPUT already persists to
+# disk (_OUTPUT_ROOT/floor-N). We also persist each floor's METADATA here, so a
+# server restart rehydrates the elevator + OUTPUT browser + HUD gate pills for
+# finished floors. (A build in flight is an in-memory thread — it can't resume;
+# on reload it's marked finished so the floor and its output are still browsable.)
+_PROJECTS_FILE = _OUTPUT_ROOT / "projects.json"
+_PERSIST_ON = {"project", "gate", "files", "halt", "release", "done",
+               "await_decision", "resolved"}
+
+
+def _project_row(p: "Project") -> dict[str, Any]:
+    """The wire/disk shape of a floor (shared by /api/projects and the disk index)."""
+    return {
+        "id": p.id, "floor": p.floor, "request": p.request, "mode": p.mode,
+        "backend": p.backend, "supervised": p.supervised, "slots": p.max_slots,
+        "status": p.status, "passed": p.passed, "awaiting": p.awaiting,
+        "gates": p.gates, "packs": list(p.packs),
+        "max_fix_attempts": p.max_fix_attempts,
+        "out_base": str(p.out_base) if p.out_base else None,
+    }
+
+
+def _persist() -> None:
+    """Best-effort atomic write of the floor index to disk (never raises)."""
+    try:
+        with _LOCK:
+            payload = {"floor": _FLOOR[0],
+                       "projects": [_project_row(p) for p in _PROJECTS.values()]}
+        _OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+        tmp = _PROJECTS_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(_PROJECTS_FILE)
+    except Exception:
+        pass
+
+
+def _load_persisted() -> None:
+    """Rehydrate finished floors from the disk index on startup (best-effort).
+
+    A floor that was mid-build at save time can't resume (its thread is gone), so
+    it's marked ``done`` (not awaiting) — the floor + its written OUTPUT remain
+    browsable, but no live stream reconnects."""
+    try:
+        data = json.loads(_PROJECTS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    rows = data.get("projects") or []
+    with _LOCK:
+        for row in rows:
+            try:
+                ob = row.get("out_base")
+                p = Project(
+                    id=str(row["id"]), request=str(row.get("request", "")),
+                    mode=str(row.get("mode", "assistant")),
+                    supervised=bool(row.get("supervised", True)),
+                    floor=int(row.get("floor", 0)),
+                    backend=str(row.get("backend", "mock")),
+                    packs=list(row.get("packs") or []),
+                    max_slots=int(row.get("slots", 1) or 1),
+                    max_fix_attempts=int(row.get("max_fix_attempts", 3) or 3),
+                    out_base=Path(ob) if ob else None,
+                )
+                p.status = "done"            # in-flight at save => finished/interrupted
+                p.passed = bool(row.get("passed", False))
+                p.awaiting = False
+                p.gates = dict(row.get("gates") or {})
+                p.events.put(_END)           # any late stream connect ends at once
+                _PROJECTS[p.id] = p
+            except Exception:
+                continue
+        floors = [int(r.get("floor", 0)) for r in rows]
+        saved_floor = data.get("floor", 0)
+        _FLOOR[0] = max([_FLOOR[0], saved_floor if isinstance(saved_floor, int) else 0, *floors])
+
 
 def _emit(p: Project, **event: Any) -> None:
     # Capture gate verdicts as they stream so /api/projects can rehydrate the HUD
@@ -213,6 +288,8 @@ def _emit(p: Project, **event: Any) -> None:
                              "attested": event.get("attested", True),
                              "advisory": event.get("advisory", False)}
     p.events.put(event)
+    if event.get("type") in _PERSIST_ON:
+        _persist()   # checkpoint floor metadata to disk on each state change
 
 
 def _emit_paced(p: Project, events: list[dict[str, Any]]) -> None:
@@ -653,6 +730,7 @@ class Handler(BaseHTTPRequestHandler):
         )
         with _LOCK:
             _PROJECTS[pid] = p
+        _persist()
         threading.Thread(target=_run_factory, args=(p,), daemon=True).start()
         self._json(200, {"id": pid, "floor": floor})
 
@@ -716,9 +794,12 @@ def _lan_ip() -> str | None:
 
 
 def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
+    _load_persisted()   # rehydrate finished floors from the disk index
     srv = ThreadingHTTPServer((host, port), Handler)
     shown = "localhost" if host in ("127.0.0.1", "0.0.0.0") else host
     print(f"\n  🏭  Foundry Workshop running →  http://{shown}:{port}\n")
+    if _PROJECTS:
+        print(f"      restored {len(_PROJECTS)} floor(s) from {_PROJECTS_FILE}\n")
     if host == "0.0.0.0":  # opt-in LAN exposure (e.g. a Pi) — warned below
         lan = _lan_ip()
         if lan:

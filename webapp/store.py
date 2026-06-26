@@ -49,6 +49,14 @@ CREATE TABLE IF NOT EXISTS events (
   data        TEXT NOT NULL,      -- json of the event dict
   PRIMARY KEY (project_id, seq)
 );
+-- The set of artifact handles a build has already surfaced. Persisted so a build
+-- RESUMED after a restart doesn't re-emit its whole history (the resumed run's
+-- cumulative inspection payload re-lists every prior artifact; this dedups them).
+CREATE TABLE IF NOT EXISTS seen_uris (
+  project_id  TEXT NOT NULL,
+  uri         TEXT NOT NULL,
+  PRIMARY KEY (project_id, uri)
+);
 """
 
 _COLS = (
@@ -176,3 +184,23 @@ class BuildStore:
             except (TypeError, ValueError):
                 continue
         return out
+
+    def add_seen(self, project_id: str, uris: set[str]) -> None:
+        """Record the artifact handles a build has surfaced (idempotent)."""
+        if not uris:
+            return
+        with self._lock:
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO seen_uris (project_id, uri) VALUES (?, ?)",
+                [(project_id, u) for u in uris],
+            )
+            self._conn.commit()
+
+    def seen_of(self, project_id: str) -> set[str]:
+        """The handles a build already surfaced — seeded into a resumed run so it
+        doesn't re-emit them."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT uri FROM seen_uris WHERE project_id = ?", (project_id,)
+            ).fetchall()
+        return {r["uri"] for r in rows}

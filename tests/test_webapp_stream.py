@@ -10,6 +10,7 @@ build without a stale click leaking into the next pause.
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 
@@ -27,9 +28,11 @@ from webapp.store import BuildStore
 
 @pytest.fixture
 def store(tmp_path, monkeypatch):
-    """A throwaway BuildStore so _emit's durable append doesn't touch real state."""
+    """A throwaway BuildStore + an empty durable-state dir, so _emit's persistence
+    and the resume probe stay hermetic (no real state, no accidental resume)."""
     s = BuildStore(tmp_path / "foundry.db")
     monkeypatch.setattr(server, "_STORE", s)
+    monkeypatch.setattr(server, "_STATE_DIR", str(tmp_path / "state"))
     return s
 
 
@@ -142,6 +145,62 @@ def test_load_persisted_replays_finished_build(store, monkeypatch):
     p = server._PROJECTS["done1"]
     assert [e["type"] for e in p.log] == ["stage", "release", "_end"]
     assert p.ended                      # a late viewer replays then ends at once
+
+
+def test_durable_state_dir_defaults_on_under_output_root():
+    # The Workshop turns durable state ON by default (CLI leaves it off) so a build
+    # survives a restart. The constant resolves to a real, non-empty path.
+    assert server._STATE_DIR and server._STATE_DIR != ""
+
+
+def test_seen_uris_roundtrip(tmp_path):
+    s = BuildStore(tmp_path / "db.sqlite")
+    s.add_seen("p1", {"cas://a", "cas://b"})
+    s.add_seen("p1", {"cas://b", "cas://c"})        # overlap is idempotent
+    assert s.seen_of("p1") == {"cas://a", "cas://b", "cas://c"}
+    assert s.seen_of("other") == set()
+
+
+def test_has_durable_checkpoint_false_without_db(store, monkeypatch):
+    # No checkpoints.db under the (empty, tmp) state dir → not resumable.
+    assert server._has_durable_checkpoint("anything") is False
+
+
+def test_interrupted_build_resumes_to_completion(store, monkeypatch, tmp_path):
+    """End-to-end: a durable build interrupted mid-run is RESUMED by _load_persisted
+    and driven to completion (not re-run from scratch, not silently dropped)."""
+    from foundry.cli import run
+
+    state_dir = str(tmp_path / "state")
+    monkeypatch.setattr(server, "_STATE_DIR", state_dir)
+    monkeypatch.setattr(server, "_OUTPUT_ROOT", tmp_path / "out")
+    tid = "rz1"
+
+    # Simulate a crash mid-build: a checkpointed run with NO responder pauses at the
+    # first boundary and leaves a durable checkpoint behind.
+    run("build a tiny url shortener", thread_id=tid, state_dir=state_dir,
+        checkpoints=True, mode="assistant")
+    assert server._has_durable_checkpoint(tid) is True       # the probe sees it
+
+    # Catalog it as it would have been mid-flight: status 'running', a little history,
+    # unsupervised so the resumed run auto-approves to the end without a human.
+    store.append_event(tid, 0, {"type": "stage", "room": "product"})
+    store.upsert({"id": tid, "floor": 1, "release_seq": 1, "request": "r",
+                  "mode": "assistant", "supervised": False, "status": "running",
+                  "passed": False})
+
+    monkeypatch.setattr(server, "_PROJECTS", {})
+    server._load_persisted()                                  # → spawns the resume thread
+    p = server._PROJECTS[tid]
+    assert p.status == "running"                              # resuming, not closed
+
+    deadline = time.monotonic() + 60
+    while not p.ended and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert p.ended, "resumed build did not finish in time"
+    types = [e["type"] for e in p.log]
+    assert "done" in types and types[-1] == "_end"           # ran to completion
+    assert p.status == "done"
 
 
 def test_load_persisted_closes_interrupted_build(store, monkeypatch):

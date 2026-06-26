@@ -266,14 +266,19 @@ check, so any web page the operator visits can `POST` to
 **Fix:** gate state-changing routes behind a shared token (env var) and/or an
 `Origin`/`Host` allowlist; the localhost-default + LAN warning are already in place.
 
-### W3 · Live build state is in-memory; a build in flight is lost on restart
-**`webapp/server.py:264-289`** · *structure* · **low**
+### W3 · Live build state is in-memory; a build in flight is lost on restart  ✅ ADDRESSED
+**`webapp/server.py`** · *structure* · **low**
 
-`_PROJECTS`, `_FLOOR`, `_CHATS` are module globals; only metadata is `_persist`ed to
-SQLite. On restart, projects rehydrate as `status="done"` with `p.events.put(_END)` —
-a build that was running at shutdown is silently marked finished/interrupted and its
-thread is gone. Fine for a localhost game, but the "a refresh loses nothing" claim
-only holds for a *reload*, not a *server restart*.
+> **Resolved.** Durable factory state is now ON by default for the Workshop
+> (`_STATE_DIR`, file-backed checkpointer + trust ledgers + CAS + WORM audit) — the
+> right call for a long-lived server (the one-shot CLI keeps its hermetic in-memory
+> default). On restart, `_load_persisted` replays the persisted event log and, when a
+> durable checkpoint exists for the thread (probed read-only via the checkpointer),
+> **resumes the build from its last checkpoint** to completion; a build with no
+> recoverable checkpoint is closed out honestly. See
+> `tests/test_webapp_stream.py::test_interrupted_build_resumes_to_completion`.
+> Residual: concurrent builds now share one checkpoint/ledger DB (see M1) — fine at
+> localhost-game concurrency.
 
 ### W4 · UI pacing runs inside the real build thread; the event queue is unbounded
 **`webapp/server.py:306-309`** · *efficiency* · **low**

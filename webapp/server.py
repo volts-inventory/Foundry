@@ -38,6 +38,19 @@ _MODES = ("assistant", "gated", "autonomous")
 # Where each floor's build writes its output tree + doc bundle (gitignored).
 # Override with WORKSHOP_OUTPUT_DIR (e.g. a mounted volume on a Pi).
 _OUTPUT_ROOT = Path(os.environ.get("WORKSHOP_OUTPUT_DIR", ".run/web")).resolve()
+
+# Durable factory state is ALWAYS ON for the Workshop (unlike the one-shot CLI,
+# whose in-memory default is right for a hermetic smoke run). The Workshop is a
+# long-lived, multi-device, restart-prone SERVER driving human-in-the-loop builds:
+# making the checkpointer + trust ledgers + CAS + WORM audit file-backed lets a
+# build SURVIVE a restart (and is the precondition for resuming one). Default lives
+# beside the other persisted state (catalog/output); override or relocate with
+# WORKSHOP_STATE_DIR / FOUNDRY_STATE_DIR.
+_STATE_DIR = (
+    os.environ.get("WORKSHOP_STATE_DIR")
+    or os.environ.get("FOUNDRY_STATE_DIR")
+    or str(_OUTPUT_ROOT / "state")
+)
 _MAX_VIEW_BYTES = 1_000_000  # cap a single file served to the in-page viewer
 # Uploaded-spec-zip limits (defence-in-depth for an untrusted upload).
 _MAX_ZIP_BYTES = 5_000_000
@@ -301,12 +314,25 @@ def _load_persisted() -> None:
                 p.awaiting = False
                 p.gates = dict(row.get("gates") or {})
                 _PROJECTS[p.id] = p
-                if was_running:
-                    # Closed out on the same log so every replay ends cleanly.
+                if was_running and _has_durable_checkpoint(p.id):
+                    # Durable state survived the restart → RESUME the build from its
+                    # last checkpoint. Seed the dedup set so the resumed run doesn't
+                    # re-emit the history already in the log.
+                    try:
+                        p.seen_uris = _STORE.seen_of(p.id)
+                    except Exception:
+                        p.seen_uris = set()
+                    p.status = "running"
+                    p.ended = False
+                    threading.Thread(target=_run_factory, args=(p,),
+                                     kwargs={"resume": True}, daemon=True).start()
+                elif was_running:
+                    # No recoverable checkpoint → close it out honestly (history kept,
+                    # terminal markers appended on the same log so replays end cleanly).
                     p.status = "done"
                     _emit(p, type="narrate",
                           text="↻ Server restarted — this build was interrupted "
-                               "(its history is preserved).")
+                               "(its history is preserved; it can't be resumed).")
                     _emit(p, type="halt", phase="interrupted",
                           reason="server restarted mid-build")
                     _emit(p, type="done", passed=False, phase="interrupted")
@@ -317,6 +343,26 @@ def _load_persisted() -> None:
             except Exception:
                 continue
         _FLOOR[0] = max(_FLOOR[0], _STORE.max_floor())
+
+
+def _has_durable_checkpoint(thread_id: str) -> bool:
+    """True iff a durable checkpoint exists for ``thread_id`` — i.e. the build can
+    actually be RESUMED (vs. re-run from scratch). Probes the checkpoint DB read-only
+    and fail-closed: any error ⇒ not resumable (we then close it out honestly)."""
+    try:
+        from foundry.durability.checkpointer import FoundryCheckpointer
+
+        db = Path(_STATE_DIR) / "checkpoints.db"
+        if not db.exists():
+            return False
+        ckpt = FoundryCheckpointer(str(db))
+        try:
+            tup = ckpt.saver.get_tuple({"configurable": {"thread_id": thread_id}})
+            return tup is not None
+        finally:
+            ckpt.close()
+    except Exception:
+        return False
 
 
 def _emit(p: Project, **event: Any) -> None:
@@ -398,20 +444,33 @@ def _emit_paced(p: Project, events: list[dict[str, Any]]) -> None:
         time.sleep(_STAGE_PAUSE if ev.get("type") == "stage" else _PACE)
 
 
-def _run_factory(p: Project) -> None:
-    """Drive a REAL build; stream its telemetry as paced game events."""
+def _run_factory(p: Project, resume: bool = False) -> None:
+    """Drive a REAL build; stream its telemetry as paced game events.
+
+    ``resume=True`` re-enters a build that was interrupted by a server restart: the
+    durable checkpointer continues the graph from its last superstep, and the
+    persisted ``seen_uris`` (seeded by the caller) keep the resumed run from
+    re-emitting the history it already streamed."""
     # Imported here so the server starts fast and a missing dep never blocks boot.
     from foundry.cli import run
 
-    _emit(p, type="project", id=p.id, request=p.request, mode=p.mode, floor=p.floor,
-          backend=p.backend, slots=p.max_slots)
-    _emit(p, type="narrate", text=f"📋 New project on Floor {p.floor}: {p.request!r}")
-    _emit(p, type="narrate", text=f"🏭 Mode: {p.mode}. The crew reports for duty…")
+    if resume:
+        _emit(p, type="narrate",
+              text="↻ Resuming after a restart — picking up from the last checkpoint…")
+    else:
+        _emit(p, type="project", id=p.id, request=p.request, mode=p.mode, floor=p.floor,
+              backend=p.backend, slots=p.max_slots)
+        _emit(p, type="narrate", text=f"📋 New project on Floor {p.floor}: {p.request!r}")
+        _emit(p, type="narrate", text=f"🏭 Mode: {p.mode}. The crew reports for duty…")
     time.sleep(_PACE)
 
     def responder(payload: dict[str, Any]) -> str:
         # The REAL stage payload -> paced game events, then the CTO's call.
         _emit_paced(p, events_for_payload(payload, p.seen_uris))
+        try:                          # persist the dedup set so a resume won't replay
+            _STORE.add_seen(p.id, p.seen_uris)
+        except Exception:
+            pass
         # Stash the agents' journal so a lead can be "interviewed" ([11], advisory).
         jrnl = payload.get("agent_journal")
         if isinstance(jrnl, list):
@@ -453,6 +512,7 @@ def _run_factory(p: Project) -> None:
             max_fix_attempts=p.max_fix_attempts,
             base_dir=p.base_dir,          # iterate: prior code seeded as the base tree
             thread_id=p.id,               # UNIQUE per project — no cross-floor collision
+            state_dir=_STATE_DIR,         # durable: the build survives (and resumes past) a restart
             checkpoints=True,
             checkpoint_responder=responder,
             output_dir=str(code_dir) if code_dir else None,
@@ -1013,12 +1073,16 @@ def _lan_ip() -> str | None:
 
 
 def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
-    _load_persisted()   # rehydrate finished floors from the disk index
+    Path(_STATE_DIR).mkdir(parents=True, exist_ok=True)   # durable factory state
+    _load_persisted()   # rehydrate floors (+ resume any interrupted build) from disk
     srv = ThreadingHTTPServer((host, port), Handler)
     shown = "localhost" if host in ("127.0.0.1", "0.0.0.0") else host
     print(f"\n  🏭  Foundry Workshop running →  http://{shown}:{port}\n")
+    print(f"      durable state: {_STATE_DIR}  (builds survive a restart)")
     if _PROJECTS:
-        print(f"      restored {len(_PROJECTS)} floor(s) from the build catalog\n")
+        resumed = sum(1 for q in _PROJECTS.values() if q.status == "running")
+        line = f"      restored {len(_PROJECTS)} floor(s) from the build catalog"
+        print(line + (f" — resuming {resumed} interrupted build(s)\n" if resumed else "\n"))
     if host == "0.0.0.0":  # opt-in LAN exposure (e.g. a Pi) — warned below
         lan = _lan_ip()
         if lan:

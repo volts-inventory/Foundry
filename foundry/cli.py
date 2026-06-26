@@ -1231,6 +1231,40 @@ def _evolve_main(args: list[str]) -> int:
 # ---- entry point ------------------------------------------------------------
 
 
+class _CliUsageError(Exception):
+    """A flag-parsing usage error; ``main`` prints ``error: <msg>`` and returns 2."""
+
+
+def _take_value(args: list[str], flag: str, *, what: str) -> tuple[list[str], str | None]:
+    """Pop ``flag VALUE`` out of ``args``; return ``(remaining, value)`` — or
+    ``(args, None)`` if the flag is absent. Raises :class:`_CliUsageError` if the
+    flag is present with no following value. (Replaces the 13 copy-pasted
+    ``if flag in args: i = args.index(flag); …`` blocks; H5.)"""
+    if flag not in args:
+        return args, None
+    i = args.index(flag)
+    if i + 1 >= len(args):
+        raise _CliUsageError(f"{flag} requires {what}")
+    return args[:i] + args[i + 2 :], args[i + 1]
+
+
+def _take_int(
+    args: list[str], flag: str, *, minimum: int | None = None
+) -> tuple[list[str], int | None]:
+    """Pop an integer-valued ``flag``. Raises :class:`_CliUsageError` on a missing
+    value, a non-integer, or a value below ``minimum``."""
+    args, raw = _take_value(args, flag, what="an integer")
+    if raw is None:
+        return args, None
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise _CliUsageError(f"{flag} must be an integer, got {raw!r}") from exc
+    if minimum is not None and value < minimum:
+        raise _CliUsageError(f"{flag} must be >= {minimum}")
+    return args, value
+
+
 def main(argv: list[str] | None = None) -> int:
     """``python -m foundry.cli "build a ..."`` — run the smoke path, print a report.
 
@@ -1244,149 +1278,74 @@ def main(argv: list[str] | None = None) -> int:
     # path stays byte-identical (the default — no subcommand — is unchanged).
     if args and args[0] == "evolve":
         return _evolve_main(args[1:])
-    docs_dir: str | None = None
-    if "--docs" in args:
-        i = args.index("--docs")
-        if i + 1 >= len(args):
-            print("error: --docs requires a directory argument", file=sys.stderr)
-            return 2
-        docs_dir = args[i + 1]
-        args = args[:i] + args[i + 2 :]
-    output_dir: str | None = None
-    if "--out" in args:
-        i = args.index("--out")
-        if i + 1 >= len(args):
-            print("error: --out requires a directory argument", file=sys.stderr)
-            return 2
-        output_dir = args[i + 1]
-        args = args[:i] + args[i + 2 :]
-    # --mode {assistant|gated|autonomous} (default assistant; task [9]). The
-    # default keeps the run byte-identical to the historical request-only path.
-    mode = MODE_ASSISTANT
-    if "--mode" in args:
-        i = args.index("--mode")
-        if i + 1 >= len(args):
-            print("error: --mode requires a value", file=sys.stderr)
-            return 2
-        mode = args[i + 1]
-        args = args[:i] + args[i + 2 :]
-        if mode not in MODES:
-            print(
-                f"error: unknown --mode {mode!r}; choose one of {', '.join(MODES)}",
-                file=sys.stderr,
-            )
-            return 2
-    # --backend {mock|anthropic|claude-cli|codex|ollama-gemma}. The default is
-    # FOUNDRY_MODEL_BACKEND if set, else "mock" (the deterministic keyless transport
-    # — keeps the no-credential quickstart + the hermetic test suite byte-identical).
-    # So a deployment sets FOUNDRY_MODEL_BACKEND=claude-cli once to make a real
-    # backend the default everywhere; an explicit --backend still overrides.
-    backend = os.environ.get("FOUNDRY_MODEL_BACKEND", _MOCK_BACKEND) or _MOCK_BACKEND
-    if backend not in BACKENDS:
-        backend = _MOCK_BACKEND
-    if "--backend" in args:
-        i = args.index("--backend")
-        if i + 1 >= len(args):
-            print("error: --backend requires a value", file=sys.stderr)
-            return 2
-        backend = args[i + 1]
-        args = args[:i] + args[i + 2 :]
-        if backend not in BACKENDS:
-            print(
-                f"error: unknown --backend {backend!r}; choose one of {', '.join(BACKENDS)}",
-                file=sys.stderr,
-            )
-            return 2
-    # --state-dir DIR: durable file/volume-backed state (overrides FOUNDRY_STATE_DIR);
-    # unset ⇒ in-memory (the default). --thread-id NAME: the run identity (also seeds
-    # the deterministic idempotency keys); --max-fix-attempts N: the gate fix-loop bound.
-    state_dir: str | None = None
-    if "--state-dir" in args:
-        i = args.index("--state-dir")
-        if i + 1 >= len(args):
-            print("error: --state-dir requires a directory argument", file=sys.stderr)
-            return 2
-        state_dir = args[i + 1]
-        args = args[:i] + args[i + 2 :]
-    thread_id = "cli-run"
-    if "--thread-id" in args:
-        i = args.index("--thread-id")
-        if i + 1 >= len(args):
-            print("error: --thread-id requires a value", file=sys.stderr)
-            return 2
-        thread_id = args[i + 1]
-        args = args[:i] + args[i + 2 :]
-    max_fix_attempts = 3
-    if "--max-fix-attempts" in args:
-        i = args.index("--max-fix-attempts")
-        if i + 1 >= len(args):
-            print("error: --max-fix-attempts requires an integer", file=sys.stderr)
-            return 2
-        try:
-            max_fix_attempts = int(args[i + 1])
-        except ValueError:
-            print(f"error: --max-fix-attempts must be an integer, got {args[i + 1]!r}",
-                  file=sys.stderr)
-            return 2
-        if max_fix_attempts < 1:
-            print("error: --max-fix-attempts must be >= 1", file=sys.stderr)
-            return 2
-        args = args[:i] + args[i + 2 :]
-    # --max-slots N: IC-pool size — how many tasks build in PARALLEL (Wave C; >1
-    # also engages the per-domain budget tree, Wave D). Default FOUNDRY_MAX_SLOTS
-    # (else 1 = serial, byte-identical). --cost-cap-microusd N: the global spend
-    # envelope the pool sub-allocates per area/domain (default FOUNDRY_COST_CAP_MICROUSD).
+    # Simple value flags parse through `_take_value`/`_take_int` (H5: one helper
+    # instead of 13 copy-pasted index/slice blocks); a usage error raises and is
+    # rendered identically below. Comments mark the non-obvious semantics.
     try:
-        max_slots = int(os.environ.get("FOUNDRY_MAX_SLOTS", "1") or "1")
-    except ValueError:
-        max_slots = 1
-    if "--max-slots" in args:
-        i = args.index("--max-slots")
-        if i + 1 >= len(args):
-            print("error: --max-slots requires an integer", file=sys.stderr)
-            return 2
+        args, docs_dir = _take_value(args, "--docs", what="a directory argument")
+        args, output_dir = _take_value(args, "--out", what="a directory argument")
+
+        # --mode {assistant|gated|autonomous} (default assistant; task [9]); the
+        # default keeps the run byte-identical to the historical request-only path.
+        args, _mode = _take_value(args, "--mode", what="a value")
+        mode = _mode if _mode is not None else MODE_ASSISTANT
+        if mode not in MODES:
+            raise _CliUsageError(f"unknown --mode {mode!r}; choose one of {', '.join(MODES)}")
+
+        # --backend default is FOUNDRY_MODEL_BACKEND if set, else "mock" (keyless,
+        # deterministic — keeps the no-credential quickstart + hermetic suite
+        # byte-identical). A deployment sets the env once; an explicit flag overrides.
+        backend = os.environ.get("FOUNDRY_MODEL_BACKEND", _MOCK_BACKEND) or _MOCK_BACKEND
+        if backend not in BACKENDS:
+            backend = _MOCK_BACKEND
+        args, _backend = _take_value(args, "--backend", what="a value")
+        if _backend is not None:
+            if _backend not in BACKENDS:
+                raise _CliUsageError(
+                    f"unknown --backend {_backend!r}; choose one of {', '.join(BACKENDS)}"
+                )
+            backend = _backend
+
+        # --state-dir DIR: durable file/volume-backed state (overrides
+        # FOUNDRY_STATE_DIR); unset ⇒ in-memory. --thread-id NAME: the run identity
+        # (also seeds idempotency keys). --max-fix-attempts N: the gate fix-loop bound.
+        args, state_dir = _take_value(args, "--state-dir", what="a directory argument")
+        args, _tid = _take_value(args, "--thread-id", what="a value")
+        thread_id = _tid if _tid is not None else "cli-run"
+        args, _mfa = _take_int(args, "--max-fix-attempts", minimum=1)
+        max_fix_attempts = _mfa if _mfa is not None else 3
+
+        # --max-slots N: IC-pool size — tasks built in PARALLEL (Wave C; >1 also
+        # engages the per-domain budget tree, Wave D). Default FOUNDRY_MAX_SLOTS (else
+        # 1 = serial). --cost-cap-microusd N: the global spend envelope the pool
+        # sub-allocates (default FOUNDRY_COST_CAP_MICROUSD).
         try:
-            max_slots = int(args[i + 1])
+            _slots_default = int(os.environ.get("FOUNDRY_MAX_SLOTS", "1") or "1")
         except ValueError:
-            print(f"error: --max-slots must be an integer, got {args[i + 1]!r}", file=sys.stderr)
-            return 2
-        if max_slots < 1:
-            print("error: --max-slots must be >= 1", file=sys.stderr)
-            return 2
-        args = args[:i] + args[i + 2 :]
-    _cost_env = os.environ.get("FOUNDRY_COST_CAP_MICROUSD", "").strip()
-    cost_cap_microusd: int | None = int(_cost_env) if _cost_env.isdigit() else None
-    if "--cost-cap-microusd" in args:
-        i = args.index("--cost-cap-microusd")
-        if i + 1 >= len(args):
-            print("error: --cost-cap-microusd requires an integer", file=sys.stderr)
-            return 2
-        try:
-            cost_cap_microusd = int(args[i + 1])
-        except ValueError:
-            print(f"error: --cost-cap-microusd must be an integer, got {args[i + 1]!r}",
-                  file=sys.stderr)
-            return 2
-        args = args[:i] + args[i + 2 :]
-    # --packs name1,name2 (task [9]): the domain packs to engage (by name). A pack
-    # may VETO the requested mode (enforced fail-closed in run()).
-    packs: list[str] = []
-    if "--packs" in args:
-        i = args.index("--packs")
-        if i + 1 >= len(args):
-            print("error: --packs requires a comma-separated list", file=sys.stderr)
-            return 2
-        packs = [p.strip() for p in args[i + 1].split(",") if p.strip()]
-        args = args[:i] + args[i + 2 :]
-    # --spec FILE|DIR (task [8]): may REPEAT to ingest several spec files/dirs.
-    spec_paths: list[str] = []
-    while "--spec" in args:
-        i = args.index("--spec")
-        if i + 1 >= len(args):
-            print("error: --spec requires a file or directory argument", file=sys.stderr)
-            return 2
-        spec_paths.append(args[i + 1])
-        args = args[:i] + args[i + 2 :]
+            _slots_default = 1
+        args, _slots = _take_int(args, "--max-slots", minimum=1)
+        max_slots = _slots if _slots is not None else _slots_default
+
+        _cost_env = os.environ.get("FOUNDRY_COST_CAP_MICROUSD", "").strip()
+        cost_cap_microusd: int | None = int(_cost_env) if _cost_env.isdigit() else None
+        args, _cost = _take_int(args, "--cost-cap-microusd")
+        if _cost is not None:
+            cost_cap_microusd = _cost
+
+        # --packs name1,name2 (task [9]): domain packs to engage. A pack may VETO the
+        # requested mode (enforced fail-closed in run()).
+        args, _packs = _take_value(args, "--packs", what="a comma-separated list")
+        packs: list[str] = [p.strip() for p in _packs.split(",") if p.strip()] if _packs else []
+
+        # --spec FILE|DIR (task [8]): may REPEAT to ingest several spec files/dirs.
+        spec_paths: list[str] = []
+        while "--spec" in args:
+            args, _sp = _take_value(args, "--spec", what="a file or directory argument")
+            if _sp is not None:
+                spec_paths.append(_sp)
+    except _CliUsageError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     # --checkpoints [all|name1,name2] (plan [10]): pause at the stage boundaries
     # for human verification. ``--checkpoints`` alone (or ``all``) enables all
     # three; a comma list selects specific boundaries. From the shell the CLI uses

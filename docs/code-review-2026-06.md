@@ -22,19 +22,21 @@ real risk under a documented future config · **low** = cleanup / hygiene.
 |---|---|---|
 | **H1** retry-supersession | ✅ docs/test made honest | Documented design decision (IM3), not a bug — corrected the false docstring + false-confidence test; true supersession-via-fresh-id is a deliberate follow-up. |
 | **H2** admission tree-namespace | ✅ fixed | Check #4b added; regression-tested (fails without fix). |
-| **H3** nonce never consumed | 📝 documented gap | Specified-but-unwired trust-core seam (sibling negative-latch too); defense-in-depth behind the signed binding. Needs a dedicated judgment-commit step — recommended as a focused, separately-validated change, not a sweep. |
+| **H3** nonce never consumed | 📝 documented gap (blocker found) | Specified-but-unwired trust-core seam. **Verified blocker:** all three judgment verdicts share one per-thread nonce, so naive consumption would reject the 2nd/3rd and break gated/autonomous runs — needs per-(node,state_sha) nonce *issuance* first. Defense-in-depth behind the signed binding; recommended as a focused, separately-validated feature. |
 | **H4** CLI subprocess timeout | ✅ fixed | 300s default, overridable; tested. |
-| **H5** cli.py argparse | ⏳ open | Large refactor of the 1482-line CLI; flagged for a focused pass. |
+| **H5** cli.py argparse | ✅ fixed | De-duplicated the 13 blocks via `_take_value`/`_take_int` helpers — preserves every tested message + the `--checkpoints` heuristic (chosen over an argparse swap, which would change the tested error UX and greedily eat the request). |
 | **M1** WORM/ledger concurrency | ✅ fixed | UNIQUE(prev_hash) + atomic consume_nonce. |
 | **M2** CAS set canonicalization | ✅ fixed | content_identity sorts set fields; hash-seed-stable. |
 | **M3** security `_common.py` | ✅ fixed | Extracted; supply_chain left as-is by design. |
-| **M4** schemas/operations split | ⏳ open | High-churn organizational move across many imports; flagged for a focused pass. |
+| **M4** schemas/operations split | ✅ fixed | Split into operations/operability/trust_root.py; ~30 importers updated; true split, no facade. |
 | **W1** SSE fan-out | ✅ fixed | Retained event log + per-subscriber cursors. |
 | **W3** restart durability | ✅ fixed | Durable state default + resume. |
 | **LOW** dead code / asserts / hmac | ✅ fixed | Sweep: deletions, hmac.compare_digest, assert→raise. |
 
-Remaining (**H3**, **H5**, **M4**) are each large or trust-critical enough to warrant
-their own validated change rather than a batch edit; see notes inline below.
+Everything is fixed except **H3**, which has a verified blocker (shared per-thread
+nonce) making it a trust-core *feature* — issue per-verdict nonces first, then add a
+trusted judgment-commit step — rather than a safe sweep edit. The gap is documented
+honestly in code (`reducers.py`) so its inertness isn't a silent surprise.
 
 ---
 

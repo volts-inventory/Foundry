@@ -1457,7 +1457,7 @@ function adoptFloor(row){
   if (FLOORS.has(row.floor)) return;
   const F = {
     id:row.id, floor:row.floor, request:row.request, mode:row.mode, backend:row.backend,
-    scene:null, log:[], gates:{}, org:null, cp:null, awaiting:!!row.awaiting,
+    scene:null, log:[], gates:row.gates||{}, org:null, cp:null, awaiting:!!row.awaiting,
     status:row.status, passed:!!row.passed, slots:row.slots||1, journal:[], seenUris:new Set(),
   };
   FLOORS.set(row.floor, F);

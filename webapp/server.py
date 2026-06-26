@@ -161,6 +161,7 @@ class Project:
     passed: bool = False  # final verdict (for elevator/reload rehydration)
     awaiting: bool = False  # at a checkpoint right now (badge survives reload)
     journal: list[dict[str, Any]] = field(default_factory=list)  # latest agent journal ([11])
+    gates: dict[str, Any] = field(default_factory=dict)  # name -> {status,attested,advisory} (survives reload)
     out_base: Path | None = None  # this floor's output dir (code/ + docs/)
 
 
@@ -202,6 +203,14 @@ _FLOOR = [0]
 
 
 def _emit(p: Project, **event: Any) -> None:
+    # Capture gate verdicts as they stream so /api/projects can rehydrate the HUD
+    # pills after a reload (a finished build keeps showing its signed gate row).
+    if event.get("type") == "gate":
+        name = str(event.get("name", ""))
+        if name:
+            p.gates[name] = {"status": event.get("status"),
+                             "attested": event.get("attested", True),
+                             "advisory": event.get("advisory", False)}
     p.events.put(event)
 
 
@@ -477,7 +486,8 @@ class Handler(BaseHTTPRequestHandler):
         rows = [
             {"id": p.id, "floor": p.floor, "request": p.request, "mode": p.mode,
              "backend": p.backend, "supervised": p.supervised, "slots": p.max_slots,
-             "status": p.status, "passed": p.passed, "awaiting": p.awaiting}
+             "status": p.status, "passed": p.passed, "awaiting": p.awaiting,
+             "gates": p.gates}
             for p in ordered
         ]
         self._json(200, {"projects": rows})

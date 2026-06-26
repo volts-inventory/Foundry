@@ -216,6 +216,82 @@ SQL in `webapp/store.py` (fully parameterized) · path-traversal in `webapp/serv
 
 ---
 
+## The Workshop UI & its backend wiring (`webapp/`)
+
+The frontend is a Phaser canvas "factory floor" game (`static/game.js`, 1647 lines).
+The backend is a stdlib `ThreadingHTTPServer` (`server.py`, 923 lines) that drives a
+**real** `foundry.cli.run(...)` build in a per-project daemon thread and streams its
+telemetry to the browser over **Server-Sent Events**. `events.py` is a clean, pure,
+deterministic mapping from factory telemetry → game events (no I/O, unit-tested —
+good separation). The wiring is sound in the common single-viewer case; the gaps are
+in concurrency, exposure, and lifecycle.
+
+### W1 · SSE fan-out is broken — multiple viewers steal each other's events
+**`webapp/server.py:849-873`** · *correctness* · **medium-high**
+
+Each project has **one** `events: queue.Queue`, and `_stream` consumes it with
+`p.events.get()`. The server is threaded (one handler thread per request), and the
+frontend opens an `EventSource` to `/api/stream/<id>` both on build start
+(`game.js:1164`) **and** on reload / another device (`game.js:1631`, under a comment
+that advertises "reconnect from another device … reconnects the live stream"). When
+two connections to the same running build are live, each game event is delivered to
+**exactly one** of them (whichever `get()` wins the race) — so the advertised
+multi-device / reload-while-running feature split-brains the animation. A same-tab
+reload also races: the old `EventSource` can still be draining when the new one
+connects, stealing events during the overlap.
+
+**Fix:** fan out per-subscriber. Keep a `set` of subscriber queues per project; `_emit`
+publishes to all of them; `_stream` registers/unregisters its own queue. (A ring
+buffer of recent events also lets a reconnect replay what it missed.)
+
+### W2 · No auth, binds `0.0.0.0`, triggers real backends — and no CSRF guard
+**`webapp/server.py:580-593, 747-835, 878-898`** · *security* · **medium**
+
+`POST /api/projects` launches a real build: with a non-mock backend that shells out to
+`claude`/`codex` and can spend against the cost cap. No endpoint checks any
+credential, and the server binds `0.0.0.0` with a LAN-IP banner — so anyone on the
+network can start builds (spend budget, run model backends, write files). There's also
+no `Origin`/CSRF check, so any web page the operator visits can `POST` to
+`http://localhost:<port>/api/projects` from their browser. Acceptable *only* as a
+trusted-LAN dev toy; it should not be exposed beyond that without a guard.
+
+**Fix:** default-bind `127.0.0.1`; gate state-changing routes behind a shared token
+(env var) and/or an `Origin`/`Host` allowlist; document the trust boundary.
+
+### W3 · Live build state is in-memory; a build in flight is lost on restart
+**`webapp/server.py:264-289`** · *structure* · **low**
+
+`_PROJECTS`, `_FLOOR`, `_CHATS` are module globals; only metadata is `_persist`ed to
+SQLite. On restart, projects rehydrate as `status="done"` with `p.events.put(_END)` —
+a build that was running at shutdown is silently marked finished/interrupted and its
+thread is gone. Fine for a localhost game, but the "a refresh loses nothing" claim
+only holds for a *reload*, not a *server restart*.
+
+### W4 · UI pacing runs inside the real build thread; the event queue is unbounded
+**`webapp/server.py:306-309`** · *efficiency* · **low**
+
+`_emit_paced` does `time.sleep(_PACE)` between events **on the build-driver thread**,
+so the real build's wall-clock is inflated by the animation cadence (the build is
+literally slowed down to look good). Separately, `p.events` is an unbounded queue with
+no backpressure: a long build with no connected viewer accumulates every event in
+memory until someone streams. Both are bounded in practice (short demo builds) but
+couple the build to the costume. Consider pacing on the *consumer* (stream) side, not
+the producer.
+
+### W5 · `server.py` is a 923-line god-module
+**`webapp/server.py`** · *structure* · **low**
+
+It mixes HTTP routing, the build-driver thread (`_run_factory`/`responder`), SSE
+pacing, in-memory project state, SQLite persistence, ideation chat, and the interview
+proxy. Same shape as `cli.py` (H5). Split into `routes` / `run_driver` / `state` /
+`spec_io`. (Also see the LOW item above: it imports the private `foundry.cli._build_proxy`.)
+
+**Frontend (`game.js`) checked and clean:** rendering uses `textContent` / Phaser
+canvas text (not HTML); the lone `innerHTML` injects only a numeric floor id; fetch
+errors are swallowed deliberately (a game, not a console). No XSS vector found.
+
+---
+
 ## Suggested order of attack
 1. **H1** (silently broken feature + a test that hides it) and **H4** (every default deployment can hang).
 2. **H2 / H3** (trust-root invariants that don't hold; both also have tests giving false confidence — fix the tests too).

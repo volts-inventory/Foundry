@@ -435,7 +435,7 @@ class FloorScene extends Phaser.Scene {
 
   makeProp(kind, x, floorY){
     x = Math.round(x);
-    const c = this.add.container(x, floorY).setDepth(3).setScale(1.25);  // scaled to the bigger sprites
+    const c = this.add.container(x, floorY).setDepth(3).setScale(1.15);  // scaled to the bigger sprites
     const out = (rx,ry,w,h,col)=>{ // outlined pixel rect (1px black border) + 1px top-light
       c.add(this.add.rectangle(rx,ry,w+2,h+2,0x0a0d16).setOrigin(0.5,1));
       c.add(this.add.rectangle(rx,ry,w,h,col).setOrigin(0.5,1));
@@ -502,7 +502,7 @@ class FloorScene extends Phaser.Scene {
   makeWorkstation(x, floorY, accent){
     if (accent == null) accent = 0x7fd1ff;   // monitor glow default (sprites carry their own colour)
     x = Math.round(x);
-    const c = this.add.container(x, floorY).setDepth(floorY+5).setScale(1.3);  // desk, scaled to the bigger sprites
+    const c = this.add.container(x, floorY).setDepth(floorY+5).setScale(1.2);  // desk, scaled to the bigger sprites
     const O = 0x0a0d16;
     const out = (rx,ry,w,h,col)=>{
       c.add(this.add.rectangle(rx,ry,w+2,h+2,O).setOrigin(0.5,1));
@@ -782,7 +782,7 @@ class FloorScene extends Phaser.Scene {
     const c = this.add.container(x,y).setDepth(10);
     c.add(this.add.ellipse(0,3,11,4,0x000000,0.30));        // shadow under the feet
     const bob = this.add.container(0,0);
-    const sprite = this.add.sprite(0,5,"chars",ch.front[0]).setOrigin(0.5,1).setScale(0.52);
+    const sprite = this.add.sprite(0,5,"chars",ch.front[0]).setOrigin(0.5,1).setScale(0.45);
     bob.add(sprite);
     const spark = this.add.rectangle(6,-24,2,2,0xfff04a).setOrigin(0,0).setVisible(false);
     bob.add(spark);

@@ -81,8 +81,8 @@ from foundry.monitors.oracle_monitor import (
     OracleMonitor,
 )
 from foundry.schemas.gates import GateResult, GateStatus
-from foundry.schemas.operations import BuildRequest
 from foundry.schemas.security import SBOMComponent
+from foundry.schemas.trust_root import BuildRequest
 from foundry.state.global_records import GlobalRecords
 from foundry.state.seq import Seq
 from foundry.state.tree_sha import tree_sha

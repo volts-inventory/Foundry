@@ -51,12 +51,15 @@ from dataclasses import dataclass
 from foundry.canonical import content_digest
 from foundry.gates.attestation import ZoneBSigner
 from foundry.schemas.gates import GateResult, GateStatus, VerdictClass
-from foundry.schemas.operations import BuildRequest, BuildResult
 from foundry.schemas.security import (
     SBOM,
     Material,
     SBOMComponent,
     SLSAProvenance,
+)
+from foundry.schemas.trust_root import (
+    BuildRequest,
+    BuildResult,
 )
 from foundry.state.seq import Seq
 

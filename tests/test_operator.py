@@ -24,7 +24,7 @@ from foundry.operations.operator import (
     evaluate_slos,
 )
 from foundry.operations.run_status import DeadlineModel, RunSignals
-from foundry.schemas.operations import (
+from foundry.schemas.operability import (
     AlertSeverity,
     PauseReason,
     RunStatus,

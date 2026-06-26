@@ -103,7 +103,7 @@ from foundry.graph.supervisor import (
 from foundry.schemas.base import ExternalAction, IdempotencyPath
 from foundry.schemas.checkpoint import CheckpointBoundary
 from foundry.schemas.gates import GateStatus
-from foundry.schemas.operations import BuildRequest
+from foundry.schemas.trust_root import BuildRequest
 from foundry.state.factory_state import FactoryState
 
 if TYPE_CHECKING:

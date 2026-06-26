@@ -39,7 +39,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from foundry.schemas.operations import (
+from foundry.schemas.operability import (
     PauseReason,
     RunStatus,
     RunStatusRecord,

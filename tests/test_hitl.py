@@ -20,7 +20,10 @@ from foundry.operations.hitl import (
     sla_breach_alerts,
     sla_breached,
 )
-from foundry.schemas.operations import AlertSeverity, ReviewerQueueEntry
+from foundry.schemas.operability import (
+    AlertSeverity,
+    ReviewerQueueEntry,
+)
 from foundry.state.seq import Seq
 
 SEQ = Seq(run_id="r1", emission_epoch=1, superstep_index=3, node_id="hitl", local=0)

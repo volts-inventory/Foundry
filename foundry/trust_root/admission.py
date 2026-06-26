@@ -67,7 +67,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from foundry.schemas.gates import GateResult, GateStatus
-from foundry.schemas.operations import AdmissionDecision, AdmissionVerdict
+from foundry.schemas.trust_root import (
+    AdmissionDecision,
+    AdmissionVerdict,
+)
 from foundry.state.global_records import AdmissionState
 
 if TYPE_CHECKING:

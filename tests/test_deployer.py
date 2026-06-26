@@ -22,7 +22,11 @@ import inspect
 import pytest
 
 from foundry.schemas.base import ExternalAction, IdempotencyPath
-from foundry.schemas.operations import AdmissionDecision, AdmissionVerdict, DeployResult
+from foundry.schemas.trust_root import (
+    AdmissionDecision,
+    AdmissionVerdict,
+    DeployResult,
+)
 from foundry.state.seq import Seq
 from foundry.trust_root import Deployer, DeployRefused
 

@@ -25,7 +25,11 @@ from foundry.operations.upgrade import (
     schema_compatible,
     serde_loadable,
 )
-from foundry.schemas.operations import UpgradeAction, UpgradePlan, VersionStamp
+from foundry.schemas.operability import (
+    UpgradeAction,
+    UpgradePlan,
+    VersionStamp,
+)
 from foundry.state.seq import Seq
 
 

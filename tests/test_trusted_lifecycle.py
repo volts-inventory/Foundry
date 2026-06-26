@@ -30,7 +30,10 @@ from foundry.operations.trusted_lifecycle import (
     classify_ha,
     pause_for_rotation,
 )
-from foundry.schemas.operations import PauseReason, RunStatus
+from foundry.schemas.operability import (
+    PauseReason,
+    RunStatus,
+)
 from foundry.state.seq import Seq
 
 SEQ = Seq(run_id="r1", emission_epoch=1, superstep_index=3, node_id="judge", local=0)

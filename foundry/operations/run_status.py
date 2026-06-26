@@ -39,7 +39,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from foundry.schemas.operations import (
+from foundry.schemas.operability import (
     PauseReason,
     RunStatus,
     RunStatusRecord,

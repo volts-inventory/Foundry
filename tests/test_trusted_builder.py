@@ -19,8 +19,8 @@ from __future__ import annotations
 import pytest
 
 from foundry.gates.attestation import DevGateWriteVerifier, ZoneBSigner
-from foundry.schemas.operations import BuildRequest
 from foundry.schemas.security import SBOMComponent
+from foundry.schemas.trust_root import BuildRequest
 from foundry.state.global_records import GlobalRecords
 from foundry.trust_root import (
     BuildOutput,

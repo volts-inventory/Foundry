@@ -30,7 +30,12 @@ from foundry.schemas.implementation import (
     Task,
     TaskStatus,
 )
-from foundry.schemas.operations import DeployPlan, IaCProposal, Pipeline, Release
+from foundry.schemas.operations import (
+    DeployPlan,
+    IaCProposal,
+    Pipeline,
+    Release,
+)
 from foundry.schemas.product import (
     PRD,
     AcceptanceCriterion,

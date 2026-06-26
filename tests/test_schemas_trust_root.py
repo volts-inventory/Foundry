@@ -22,18 +22,18 @@ import pytest
 from pydantic import ValidationError
 
 from foundry.schemas.base import FrozenModel
-from foundry.schemas.operations import (
-    AdmissionDecision,
-    AdmissionVerdict,
-    BuildRequest,
-    BuildResult,
-    DeployResult,
-)
 from foundry.schemas.security import (
     SBOM,
     Material,
     SBOMComponent,
     SLSAProvenance,
+)
+from foundry.schemas.trust_root import (
+    AdmissionDecision,
+    AdmissionVerdict,
+    BuildRequest,
+    BuildResult,
+    DeployResult,
 )
 from foundry.state.seq import Seq
 

@@ -43,7 +43,7 @@ from foundry.schemas.base import FrozenModel
 # concrete classes at model-build time (a TYPE_CHECKING-only import leaves the
 # forward refs unresolved). All are import-cheap.
 from foundry.schemas.gates import GateResult, GateStatus
-from foundry.schemas.operations import AdmissionVerdict
+from foundry.schemas.trust_root import AdmissionVerdict
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping

@@ -542,7 +542,7 @@ def _with_criteria(files: dict[str, str]) -> dict[str, str]:
 
 def _build_provenance(signer: ZoneBSigner, *, tree: str):
     """A genuine hermetic build keyed to the maintained tree_sha."""
-    from foundry.schemas.operations import BuildRequest
+    from foundry.schemas.trust_root import BuildRequest
 
     builder = TrustedBuilder(signer, builder_id=_BUILDER_ID)
     request = BuildRequest(

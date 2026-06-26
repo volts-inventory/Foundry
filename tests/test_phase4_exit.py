@@ -97,13 +97,15 @@ from foundry.proxy import ModelProviderProxy
 from foundry.proxy.test_doubles import MockTransport
 from foundry.schemas.base import Artifact
 from foundry.schemas.gates import GateResult, GateStatus, VerdictClass
-from foundry.schemas.operations import (
-    AdmissionVerdict,
-    BuildRequest,
+from foundry.schemas.operability import (
     PauseReason,
     RunStatus,
 )
 from foundry.schemas.security import SBOMComponent
+from foundry.schemas.trust_root import (
+    AdmissionVerdict,
+    BuildRequest,
+)
 from foundry.state.factory_state import FactoryState
 from foundry.state.global_records import GlobalRecords
 from foundry.state.reducers import (

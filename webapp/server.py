@@ -157,7 +157,9 @@ class Project:
     max_slots: int = 1  # IC-pool parallelism (Wave C; >1 engages the budget tree, Wave D)
     cost_cap_microusd: int | None = None  # global spend envelope (Wave D)
     max_fix_attempts: int = 3  # auto-fix retry budget per failing gate (run() default)
-    parent_id: str | None = None  # lineage: the finished build this floor iterates on
+    release_seq: int = 1  # 1,2,3… within the floor; each iterate adds a release
+    parent_id: str | None = None  # lineage: the release this one iterates on
+    base_dir: str | None = None  # prior code seeded as the base tree (iterate)
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -224,9 +226,9 @@ _PERSIST_ON = {"project", "gate", "files", "halt", "release", "done",
 def _build_record(p: "Project") -> dict[str, Any]:
     """The catalog (DB) shape of a build."""
     return {
-        "id": p.id, "floor": p.floor, "parent_id": p.parent_id,
-        "request": p.request, "mode": p.mode, "backend": p.backend,
-        "supervised": p.supervised, "slots": p.max_slots,
+        "id": p.id, "floor": p.floor, "release_seq": p.release_seq,
+        "parent_id": p.parent_id, "request": p.request, "mode": p.mode,
+        "backend": p.backend, "supervised": p.supervised, "slots": p.max_slots,
         "max_fix_attempts": p.max_fix_attempts, "status": p.status,
         "passed": p.passed, "gates": p.gates,
         "out_base": str(p.out_base) if p.out_base else None,
@@ -255,7 +257,7 @@ def _load_persisted() -> None:
     it's marked ``done`` (not awaiting) — the floor + its written OUTPUT remain
     browsable, but no live stream reconnects."""
     try:
-        rows = _STORE.all()
+        rows = _STORE.latest_per_floor()   # one row per project (its newest release)
     except Exception:
         return
     with _LOCK:
@@ -267,6 +269,7 @@ def _load_persisted() -> None:
                     mode=str(row.get("mode", "assistant")),
                     supervised=bool(row.get("supervised", True)),
                     floor=int(row.get("floor", 0)),
+                    release_seq=int(row.get("release_seq", 1) or 1),
                     backend=str(row.get("backend", "mock")),
                     max_slots=int(row.get("slots", 1) or 1),
                     max_fix_attempts=int(row.get("max_fix_attempts", 3) or 3),
@@ -352,6 +355,7 @@ def _run_factory(p: Project) -> None:
             max_slots=p.max_slots,        # IC-pool parallelism (Wave C) + budget tree (Wave D)
             cost_cap_microusd=p.cost_cap_microusd,
             max_fix_attempts=p.max_fix_attempts,
+            base_dir=p.base_dir,          # iterate: prior code seeded as the base tree
             thread_id=p.id,               # UNIQUE per project — no cross-floor collision
             checkpoints=True,
             checkpoint_responder=responder,
@@ -456,6 +460,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/builds":
             self._list_builds()
+            return
+        if path.startswith("/api/releases/"):
+            self._list_releases(path.rsplit("/", 1)[-1])
             return
         if path.startswith("/api/files/"):
             self._list_files(path.rsplit("/", 1)[-1])
@@ -573,13 +580,22 @@ class Handler(BaseHTTPRequestHandler):
         """Every floor's live state — the browser rehydrates the elevator on reload
         (and reconnects each running floor's stream) so a refresh loses nothing."""
         with _LOCK:
-            ordered = sorted(_PROJECTS.values(), key=lambda p: p.floor)
+            projs = list(_PROJECTS.values())
+        # One row per FLOOR (project) = its latest release, plus the release count.
+        by_floor: dict[int, "Project"] = {}
+        counts: dict[int, int] = {}
+        for p in projs:
+            counts[p.floor] = counts.get(p.floor, 0) + 1
+            cur = by_floor.get(p.floor)
+            if cur is None or p.release_seq > cur.release_seq:
+                by_floor[p.floor] = p
         rows = [
-            {"id": p.id, "floor": p.floor, "request": p.request, "mode": p.mode,
+            {"id": p.id, "floor": p.floor, "release": p.release_seq,
+             "releases": counts[p.floor], "request": p.request, "mode": p.mode,
              "backend": p.backend, "supervised": p.supervised, "slots": p.max_slots,
              "status": p.status, "passed": p.passed, "awaiting": p.awaiting,
-             "gates": p.gates}
-            for p in ordered
+             "gates": p.gates, "parent_id": p.parent_id}
+            for p in sorted(by_floor.values(), key=lambda x: x.floor)
         ]
         self._json(200, {"projects": rows})
 
@@ -591,13 +607,32 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             rows = []
         builds = [
-            {"id": r["id"], "floor": r.get("floor"), "request": r.get("request"),
-             "passed": r.get("passed"), "parent_id": r.get("parent_id"),
-             "created_at": r.get("created_at"),
+            {"id": r["id"], "floor": r.get("floor"), "release": r.get("release_seq"),
+             "request": r.get("request"), "passed": r.get("passed"),
+             "parent_id": r.get("parent_id"), "created_at": r.get("created_at"),
              "has_repo": bool(r.get("out_base") and (Path(r["out_base"]) / "code").is_dir())}
             for r in rows
         ]
         self._json(200, {"builds": builds})
+
+    def _list_releases(self, floor_s: str) -> None:
+        """Every release of one floor (project), newest first — release history."""
+        try:
+            floor = int(floor_s)
+        except ValueError:
+            self._json(400, {"error": "bad floor"})
+            return
+        try:
+            rows = _STORE.releases_of(floor)
+        except Exception:
+            rows = []
+        rels = [
+            {"id": r["id"], "release": r.get("release_seq"), "request": r.get("request"),
+             "status": r.get("status"), "passed": r.get("passed"),
+             "created_at": r.get("created_at")}
+            for r in rows
+        ]
+        self._json(200, {"floor": floor, "releases": rels})
 
     def _suggest_slots(self) -> None:
         """Suggest an IC-pool size N from the request + packs — count the distinct
@@ -735,18 +770,24 @@ class Handler(BaseHTTPRequestHandler):
                 cost_cap_microusd = int(round(usd * 1_000_000))
         except (TypeError, ValueError):
             pass
-        # Iterate: a new floor can be started FROM a finished build (parent_id),
-        # pulled straight from the catalog. We ground the new build in the parent's
-        # design docs so the agents EXTEND the prior build rather than start clean.
+        # A floor is one PROJECT. A fresh build is a NEW project (new floor, release
+        # 1). Iterating (parent_id) adds the NEXT RELEASE to the parent's floor — same
+        # project, release_seq + 1 — never a new floor.
         parent_id = str(body.get("parent_id") or "").strip() or None
         parent = _STORE.get(parent_id) if parent_id else None
         if parent is None:
             parent_id = None
-        with _LOCK:
-            _FLOOR[0] += 1
-            floor = _FLOOR[0]
+        if parent is not None:
+            floor = int(parent.get("floor", 0))
+            with _LOCK:
+                release_seq = _STORE.max_release(floor) + 1
+        else:
+            with _LOCK:
+                _FLOOR[0] += 1
+                floor = _FLOOR[0]
+            release_seq = 1
         pid = uuid.uuid4().hex[:12]
-        out_base = _OUTPUT_ROOT / f"floor-{floor}"
+        out_base = _OUTPUT_ROOT / f"floor-{floor}" / f"r{release_seq}"
         # Spec input: pasted text (literal), else an uploaded docs-zip (a dir),
         # else the PARENT's design docs (iterate), else None (request alone).
         spec: str | None = spec_text or None
@@ -757,21 +798,25 @@ class Handler(BaseHTTPRequestHandler):
                     spec = str(spec_dir)
             except Exception:
                 spec = None
-        if spec is None and parent and parent.get("out_base"):
-            pdocs = Path(parent["out_base"]) / "docs"
-            if pdocs.is_dir():
-                spec = str(pdocs)
+        base_dir: str | None = None
+        if parent and parent.get("out_base"):
+            pbase = Path(parent["out_base"])
+            pdocs, pcode = pbase / "docs", pbase / "code"
+            if spec is None and pdocs.is_dir():
+                spec = str(pdocs)            # ground the release in the prior design
+            if pcode.is_dir():
+                base_dir = str(pcode)        # seed the base tree with the prior code
         p = Project(
             id=pid, request=request, mode=mode, supervised=supervised, floor=floor,
-            backend=backend, packs=packs, spec=spec, out_base=out_base,
-            max_slots=max_slots, cost_cap_microusd=cost_cap_microusd,
-            max_fix_attempts=max_fix_attempts, parent_id=parent_id,
+            release_seq=release_seq, backend=backend, packs=packs, spec=spec,
+            out_base=out_base, max_slots=max_slots, cost_cap_microusd=cost_cap_microusd,
+            max_fix_attempts=max_fix_attempts, parent_id=parent_id, base_dir=base_dir,
         )
         with _LOCK:
             _PROJECTS[pid] = p
         _persist(p)
         threading.Thread(target=_run_factory, args=(p,), daemon=True).start()
-        self._json(200, {"id": pid, "floor": floor})
+        self._json(200, {"id": pid, "floor": floor, "release": release_seq})
 
     def _decision(self, pid: str) -> None:
         body = self._read_json()

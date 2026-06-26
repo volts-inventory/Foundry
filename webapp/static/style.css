@@ -89,6 +89,11 @@ button.danger{background:#6b1f28;border-color:var(--red);color:#ffe0e3}
   animation:pulse 1s infinite;
 }
 @keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.25)}}
+/* release counter on a project's elevator button (bottom-left, distinct from the ! badge) */
+.el-btn .rel-badge{
+  position:absolute;bottom:-5px;left:-5px;background:var(--blue);color:#06121f;
+  border-radius:6px;padding:0 4px;font-size:9px;line-height:13px;font-weight:bold;
+}
 #game{
   flex:1 1 auto;min-width:0;height:100%;display:flex;
   align-items:center;justify-content:center;background:#0a0f1c;overflow:hidden;

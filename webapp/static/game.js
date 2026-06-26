@@ -1181,20 +1181,40 @@ async function newProject(req, mode, supervised, backend, packs, extra){
   } catch(err){ appendLogDom("bad","ERR "+err); return; }
 
   const floor = resp.floor;
+  const release = resp.release || 1;
   const slots = (extra && extra.max_slots) || 1;
+  const openStream = (F) => {
+    const es = new EventSource("/api/stream/"+resp.id);
+    es.onmessage = e => { try { routeEvent(floor, JSON.parse(e.data)); } catch(_){} };
+    es.addEventListener("end", ()=>es.close());
+    F.es = es;
+  };
+  const existing = FLOORS.get(floor);
+  if (existing){
+    // NEW RELEASE on an existing project: reset per-release state + replay the scene.
+    if (existing.es){ try{ existing.es.close(); }catch(_){} }
+    Object.assign(existing, {
+      id:resp.id, release, releases:(existing.releases||1)+1, request:req, mode, backend,
+      log:[], gates:{}, org:null, cp:null, awaiting:false, status:"running", passed:false,
+      slots, journal:[], seenUris:new Set(),
+    });
+    const sc = GAME.scene.getScene(floorKey(floor));
+    if (sc) sc.scene.restart({floor, id:resp.id, request:req, mode, slots});
+    else GAME.scene.add(floorKey(floor), FloorScene, true, {floor, id:resp.id, request:req, mode, slots});
+    switchToFloor(floor);
+    openStream(existing);
+    return;
+  }
+  // NEW PROJECT: a fresh floor.
   const F = {
-    id: resp.id, floor, request:req, mode, backend, scene:null,
+    id: resp.id, floor, release, releases:1, request:req, mode, backend, scene:null,
     log:[], gates:{}, org:null, cp:null, awaiting:false, status:"running", passed:false,
     slots, journal:[], seenUris:new Set(),
   };
   FLOORS.set(floor, F);
   GAME.scene.add(floorKey(floor), FloorScene, true, {floor, id:resp.id, request:req, mode, slots});
   switchToFloor(floor);
-
-  const es = new EventSource("/api/stream/"+resp.id);
-  es.onmessage = e => { try { routeEvent(floor, JSON.parse(e.data)); } catch(_){} };
-  es.addEventListener("end", ()=>es.close());
-  F.es = es;
+  openStream(F);
 }
 
 function switchToFloor(floor){
@@ -1322,7 +1342,8 @@ function renderGatesMini(gates){
     el.appendChild(s);}
 }
 function updateHud(F){
-  document.getElementById("floor-tag").textContent = "FLOOR "+F.floor;
+  document.getElementById("floor-tag").textContent =
+    "FLOOR "+F.floor + (F.release>1 ? " · r"+F.release : "");
   document.getElementById("proj-tag").textContent = F.request || "—";
   const tail = (F.mode ? "· "+F.mode : "") + (F.backend ? " · "+F.backend : "");
   document.getElementById("mode-tag").textContent = tail.trim();
@@ -1337,6 +1358,7 @@ function renderElevator(){
     if (F.status==="done") cls += F.passed ? " done" : " failed";
     btn.className=cls;
     btn.innerHTML=`<span class="fl-no">${f}</span>FL`;
+    if (F.releases>1){ const r=document.createElement("span"); r.className="rel-badge"; r.textContent="r"+F.release; btn.appendChild(r); }
     if (F.awaiting){ const b=document.createElement("span"); b.className="badge"; b.textContent="!"; btn.appendChild(b); }
     btn.onclick=()=>switchToFloor(f);
     el.appendChild(btn);
@@ -1620,7 +1642,8 @@ syncCostCap();
 function adoptFloor(row){
   if (FLOORS.has(row.floor)) return;
   const F = {
-    id:row.id, floor:row.floor, request:row.request, mode:row.mode, backend:row.backend,
+    id:row.id, floor:row.floor, release:row.release||1, releases:row.releases||1,
+    request:row.request, mode:row.mode, backend:row.backend,
     scene:null, log:[], gates:row.gates||{}, org:null, cp:null, awaiting:!!row.awaiting,
     status:row.status, passed:!!row.passed, slots:row.slots||1, journal:[], seenUris:new Set(),
   };

@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 from collections.abc import Callable
@@ -795,6 +796,7 @@ def run(
     checkpoint_responder: CheckpointResponder | None = None,
     max_slots: int = 1,
     cost_cap_microusd: int | None = None,
+    base_dir: str | None = None,
 ) -> RunResult:
     """Run ``request`` end-to-end through the compiled factory graph (smoke path).
 
@@ -979,6 +981,15 @@ def run(
     # runner-attested verdicts (D4); reset its token in finally so it never leaks.
     token = set_gate_write_verifier(DevGateWriteVerifier(_KEY, _KEY_ID, records))
     with tempfile.TemporaryDirectory(prefix="foundry-cli-src-") as source_dir:
+        # Seed the base tree with an existing codebase (the evolution / iterate
+        # path): the implementation agents clone ``source_dir`` into each sandbox
+        # worktree and produce a diff AGAINST it, so a seeded base makes the change
+        # build ON TOP of the prior code instead of greenfield. Plain input bytes —
+        # copied, never executed (the gates still decide what ships).
+        if base_dir:
+            base = Path(base_dir)
+            if base.is_dir():
+                shutil.copytree(base, source_dir, dirs_exist_ok=True)
         try:
             app = build_factory_graph(
                 rt,

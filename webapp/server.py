@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import shutil
 import threading
 import time
 import uuid
@@ -370,6 +371,21 @@ def _run_factory(p: Project) -> None:
         _persist(p)
         p.events.put(_END)
         return
+
+    # Iterate "on top of" the prior code: the build wrote ONLY its changed/added
+    # files to code_dir; fill in every unchanged file from the parent so the
+    # release's tree is the prior code + the change (a real build-on-top, not a
+    # from-scratch regen). Parent files NEVER overwrite the build's own output.
+    if p.base_dir and code_dir:
+        base = Path(p.base_dir)
+        if base.is_dir():
+            code_dir.mkdir(parents=True, exist_ok=True)
+            for src in base.rglob("*"):
+                if src.is_file():
+                    dst = code_dir / src.relative_to(base)
+                    if not dst.exists():
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(src, dst)
 
     result_dict = {
         "passed": result.passed,

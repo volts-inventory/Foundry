@@ -32,3 +32,8 @@ mutants/
 !/webapp/static/assets/fonts
 /webapp/static/assets/fonts/*
 !/webapp/static/assets/fonts/pixel.ttf
+# …and the bundled character sprites (CC BY-SA 4.0 — see sprites/CREDITS.md)
+!/webapp/static/assets/sprites
+/webapp/static/assets/sprites/*
+!/webapp/static/assets/sprites/characters.png
+!/webapp/static/assets/sprites/CREDITS.md

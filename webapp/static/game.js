@@ -71,48 +71,37 @@ const AGENT_ROOM = {}; for (const rm in ROSTER) for (const nm of ROSTER[rm]) AGE
 // ---- generated character sprites (our own pixel art) -----------------------
 // route1rodent-style 16x22 GBA RPG sprite: a BIG rounded hair mass (the hero) over
 // a small face, a narrow slate body with one accent colour, and two split leg stubs.
-// Role identity rides on hair colour + style + accent (not a coloured shirt). One
-// base parameterises everyone; eyes/hair-style/accent are drawn as overlays.
-const SP_BASE = [
-//      0123456789012345
-"......KKKK......","....KKhhhhKK....","...KhhhhhhhhK...","..KhhhhhhhhhhK..",
-"..KhhhhhhhhhhK..",".KhhhhsssshhhhK.",".KhhhsssssshhhK.",".KhhhsssssshhhK.",
-"..KhsssssssshK..","...KssssssssK...","....KssssssK....",".....KssssK.....",
-"......KssK......","....KBBBBBBK....","....KBBBBBBK....","....KBBBBBBK....",
-"....KsBBBBsK....","....KBBBBBBK....","....Kpp..ppK....","....Kpp..ppK....",
-"....Koo..ooK....","....KKK..KKK....",
-];
-const SKINS = [0xf4cfa0,0xe8b487,0xc98d5a,0xa06a44,0x8a5a34];
-const HAIRS = [0x3a3f74,0x161109,0x7a4a24,0xcaa84a,0xd8dde6,0xee5fa0,0xb5542e,0x2a9b8b,0x3aa0e6,0x6a4aa0,0xe07a2e];
-const POOL_STYLE = ['short','swept','spiky','bob','ponytail'];
-const POOL_ACCENT = [0x3a8a52,0xe23c2e,0x3a8ae6,0xcaa84a,0x7a3a8a,0x2a9b8b];
-// per-role: hair colour + hair style + a single accent colour (the chest band)
-const ROLE_KIT = {
-  "Stakeholder Proxy":{hair:0x3a3f74,style:'swept',accent:0xe23c2e},
-  "Product Manager":{hair:0xe0b53a,style:'bob',accent:0x3a8a52},
-  "Criteria Critic":{hair:0xee5fa0,style:'ponytail',accent:0x7a3a8a},
-  "Program Manager":{hair:0x7a5ad0,style:'ponytail',accent:0x3a8ae6},
-  "Principal Architect":{hair:0xd8dde6,style:'swept',accent:0x5a9ad0},
-  "Senior Engineer":{hair:0xe07a2e,style:'spiky',accent:0xcaa84a},
-  "Junior Engineer":{hair:0x3aa564,style:'short',accent:0x2f6dbf},
-  "QA Engineer":{hair:0x2a9b8b,style:'bob',accent:0xcfeede},
-  "SDET":{hair:0x1f9b9b,style:'short',accent:0x5db8ff},
-  "Reviewer":{hair:0x3a6abf,style:'swept',accent:0xcdd9f0},
-  "Technical Writer":{hair:0xcaa84a,style:'bob',accent:0x9a7a30},
-  "AppSec Engineer":{hair:0xc0392b,style:'afro',accent:0xf0b0b0},
-  "CTO":{hair:0x161109,style:'short',accent:0xc8a23a},
-};
+// Character sprites come from the route1rodent sheet (see CHARACTERS / makePerson
+// below) — the old procedural pixel body + per-role hair/skin/accent kit is gone.
 function hashStr(s){ let h=2166136261; for(let i=0;i<s.length;i++){ h^=s.charCodeAt(i); h=Math.imul(h,16777619); } return h>>>0; }
-function kitFor(name, seed){
-  const k = ROLE_KIT[name] || {hair:0x3a3f74,style:'short',accent:0x5db8ff};
-  const o = Object.assign({}, k);
-  o.skin = SKINS[((seed*3+1)%SKINS.length+SKINS.length)%SKINS.length];  // skin varies; hair fixed per role
-  return o;
+// route1rodent CC BY-SA 4.0 sheet -> 13x6 grid of 64px frames (assets/sprites/CREDITS.md).
+// frame index = row*13 + col. 10 characters; `front` = walk frames (cycle), `back` =
+// the away/back-of-head pose used while seated at a desk facing the monitor.
+const CHARACTERS = [
+  {front:[0,1],      back:26},   // 0 navy
+  {front:[2,3,4],    back:28},   // 1 brown
+  {front:[5,6,7],    back:31},   // 2 pink
+  {front:[8,9,10],   back:34},   // 3 white
+  {front:[11,12],    back:37},   // 4 blue
+  {front:[39,40],    back:39},   // 5 red
+  {front:[41,42,43], back:41},   // 6 purple
+  {front:[44,45,46], back:44},   // 7 gold
+  {front:[47,48,49], back:47},   // 8 green
+  {front:[50,51],    back:50},   // 9 orange
+];
+// Stable, room-distinct character per role (no two leads in a room share a sprite).
+const ROLE_CHAR = {
+  "Stakeholder Proxy":4,"Product Manager":7,"Criteria Critic":2,"Program Manager":6,
+  "Principal Architect":0,"Senior Engineer":5,"Junior Engineer":9,
+  "QA Engineer":8,"SDET":1,"Reviewer":4,"Technical Writer":3,
+  "AppSec Engineer":5,"Audit & Compliance":7,"Supply-chain Reviewer":0,"CTO":3,
+};
+function charFor(name, seed){
+  if (ROLE_CHAR[name] != null) return ROLE_CHAR[name];
+  return ((seed||hashStr(name||""))>>>0) % CHARACTERS.length;   // pool/tech-leads: hashed
 }
-function poolKit(i){ // the IC pool: same family, distinct people (hair/style/accent vary)
-  return { hair:HAIRS[(i*7+1)%HAIRS.length], style:POOL_STYLE[i%POOL_STYLE.length],
-    accent:POOL_ACCENT[i%POOL_ACCENT.length], skin:SKINS[(i*3)%SKINS.length] };
-}
+function kitFor(name, seed){ return {ci: charFor(name, seed)}; }
+function poolKit(i){ return {ci: (i*5+3) % CHARACTERS.length}; }
 
 function shade(color,f){
   const r=Math.min(255,Math.round(((color>>16)&255)*f));
@@ -199,8 +188,14 @@ const bootReady = new Promise((r)=>{ bootResolve = r; });
 
 class BootScene extends Phaser.Scene {
   constructor(){ super("boot"); }
+  preload(){
+    // route1rodent 16x16 RPG sprites (CC BY-SA 4.0) — see assets/sprites/CREDITS.md.
+    // Re-tiled to a clean 13x6 grid of 64px frames.
+    this.load.spritesheet("chars", "/static/assets/sprites/characters.png",
+      {frameWidth:64, frameHeight:64});
+  }
   create(){
-    buildSharedTextures(this);   // every texture is generated here — no external assets
+    buildSharedTextures(this);   // procedural textures (floors/walls/props) — sprites load above
     // wait for the pixel font so the FIRST canvas labels render in it (no monospace flash)
     const ready = (document.fonts && document.fonts.load)
       ? document.fonts.load('16px "PixelFont"').then(()=>document.fonts.ready).catch(()=>{})
@@ -505,6 +500,7 @@ class FloorScene extends Phaser.Scene {
 
   // A desk + monitor + keyboard each lead works at, placed IN the room floor.
   makeWorkstation(x, floorY, accent){
+    if (accent == null) accent = 0x7fd1ff;   // monitor glow default (sprites carry their own colour)
     x = Math.round(x);
     const c = this.add.container(x, floorY).setDepth(floorY+5);  // occludes its lead's legs
     const O = 0x0a0d16;
@@ -776,49 +772,24 @@ class FloorScene extends Phaser.Scene {
 
   // Our own generated GBA-style sprite: big head, tiny torso, pointed ears, vertical
   // eyes, colourful clothes. `opt` = a role/pool kit (body/trim/style/cloth/hw/acc).
+  // A character from the route1rodent sprite sheet. Preserves the old API
+  // (c.bob / c.faceFront / c.faceBack / c.spark / c.eyes) so walk / desk-idle /
+  // hop / work animations keep working — the body is now a single sprite frame.
   makePerson(x,y,opt){
     opt = opt || {};
+    const ci = opt.ci != null ? opt.ci : 0;
+    const ch = CHARACTERS[((ci % CHARACTERS.length) + CHARACTERS.length) % CHARACTERS.length];
     const c = this.add.container(x,y).setDepth(10);
-    const OY = 15;                                  // grid row that sits at the container origin
-    const O=0x10141c, e=0x16181f;                   // soft outline (readable on dark rugs), eye
-    const skin=opt.skin!=null?opt.skin:0xf4cfa0;
-    const hair=opt.hair!=null?opt.hair:0x3a3f74;
-    const accent=opt.accent!=null?opt.accent:0xe23c2e;
-    const B=0x2a3140, pant=shade(B,0.92), boot=shade(B,0.6), d=shade(hair,0.64);
-    c.add(this.add.ellipse(0,8,9,3,0x000000,0.3));  // shadow under the feet
+    c.add(this.add.ellipse(0,3,11,4,0x000000,0.30));        // shadow under the feet
     const bob = this.add.container(0,0);
-    const P=(gx,gy,w,h,col)=>{ const r=this.add.rectangle(gx-8,gy-OY,w,h,col).setOrigin(0,0); bob.add(r); return r; };
-    const pal={K:O,h:hair,s:skin,B:B,p:pant,o:boot};
-    SP_BASE.forEach((row,gy)=>{ for(let gx=0;gx<16;gx++){ const col=pal[row[gx]]; if(col!=null) P(gx,gy,1,1,col); }});
-    // big eyes (2x3 solid dark), tracked for blink
-    const eL=P(5,7,2,3,e), eR=P(9,7,2,3,e);
-    // hair dome 2-tone shadow -> reads as a rounded volume (all styles)
-    P(4,8,8,1,d); P(11,6,1,2,d);
-    // per-style hair flourish (modifies crown/sides only)
-    const st=opt.style||'short';
-    if(st==='swept'){ P(3,1,1,1,hair); P(4,0,3,1,hair); P(2,5,1,3,hair); }
-    else if(st==='ponytail'){ P(12,5,2,5,hair); P(13,6,1,4,O); P(12,10,2,1,O); P(12,5,1,4,d); }
-    else if(st==='afro'){
-      P(5,0,6,1,hair); P(3,1,10,1,hair); P(2,2,12,2,hair);
-      P(1,4,1,4,hair); P(14,4,1,4,hair); P(3,8,2,1,hair); P(11,8,2,1,hair);
-      P(5,0,1,1,O); P(10,0,1,1,O); P(2,1,1,1,O); P(13,1,1,1,O);
-      P(1,2,1,2,O); P(14,2,1,2,O); P(0,4,1,4,O); P(15,4,1,4,O); P(4,8,8,1,d); }
-    else if(st==='spiky'){ [4,6,8,10].forEach(gx=>P(gx,0,1,2,hair)); }
-    else if(st==='bob'){ P(2,8,1,3,hair); P(13,8,1,3,hair); P(2,11,1,1,O); P(13,11,1,1,O); }
-    // accent: a small centred chest band (raised 1 row so it clears the desk when seated)
-    P(6,13,4,1,accent); P(6,14,4,1,shade(accent,0.78));
-    // back-of-head pose: hair over the face, shown while seated so workers face their
-    // monitor (away from camera). Covers eyes/face; restored on walk.
-    const back = this.add.container(0,0).setVisible(false);
-    for (let gy=5; gy<=9; gy++) for (let gx=4; gx<=11; gx++)
-      back.add(this.add.rectangle(gx-8, gy-OY, 1, 1, hair).setOrigin(0,0));
-    back.add(this.add.rectangle(5-8, 9-OY, 5, 1, d).setOrigin(0,0));   // nape shade
-    bob.add(back);
-    const spark = this.add.rectangle(3,2-OY,2,2,0xfff04a).setOrigin(0,0).setVisible(false); bob.add(spark);
+    const sprite = this.add.sprite(0,5,"chars",ch.front[0]).setOrigin(0.5,1).setScale(0.36);
+    bob.add(sprite);
+    const spark = this.add.rectangle(6,-24,2,2,0xfff04a).setOrigin(0,0).setVisible(false);
+    bob.add(spark);
     c.add(bob);
-    c.bob = bob; c.spark = spark; c.eyes = [eL, eR];
-    c.faceBack  = ()=>{ back.setVisible(true);  };
-    c.faceFront = ()=>{ back.setVisible(false); };
+    c.bob=bob; c.sprite=sprite; c.spark=spark; c.eyes=[]; c.char=ch; c._wf=0;
+    c.faceFront = ()=>{ sprite.setFrame(ch.front[c._wf % ch.front.length]); };
+    c.faceBack  = ()=>{ sprite.setFrame(ch.back); };
     return c;
   }
 
@@ -829,16 +800,19 @@ class FloorScene extends Phaser.Scene {
     this.stopDeskIdle(a);                        // stop breathing while walking
     if (a.walkEv) return;
     let f = 0;
-    a.walkEv = this.time.addEvent({delay:130, loop:true, callback:()=>{
+    a.walkEv = this.time.addEvent({delay:150, loop:true, callback:()=>{
       f ^= 1;
       a.bob.y = f ? -1 : 0;
       a.bob.x = f ? 0.6 : -0.6;
+      if (a.sprite && a.char){ a._wf = (a._wf+1) % a.char.front.length;
+        a.sprite.setFrame(a.char.front[a._wf]); }   // step the walk cycle
     }});
   }
   stopWalk(a){
     if (!a || !a.bob) return;
     if (a.walkEv){ a.walkEv.remove(); a.walkEv = null; }
     a.bob.y = 0; a.bob.x = 0;
+    if (a.sprite && a.char){ a._wf = 0; a.sprite.setFrame(a.char.front[0]); }
   }
 
   setActiveRoom(key){

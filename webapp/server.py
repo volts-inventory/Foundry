@@ -153,7 +153,8 @@ class Project:
     packs: list[str] = field(default_factory=list)
     spec: str | None = None  # literal spec text OR a dir of uploaded docs (run(spec=))
     max_slots: int = 1  # IC-pool parallelism (Wave C; >1 engages the budget tree, Wave D)
-    cost_cap_microusd: int | None = None  # global spend envelope (env-only; Wave D)
+    cost_cap_microusd: int | None = None  # global spend envelope (Wave D)
+    max_fix_attempts: int = 3  # auto-fix retry budget per failing gate (run() default)
     events: queue.Queue[dict[str, Any]] = field(default_factory=queue.Queue)
     decisions: queue.Queue[str] = field(default_factory=queue.Queue)
     seen_uris: set[str] = field(default_factory=set)
@@ -266,6 +267,7 @@ def _run_factory(p: Project) -> None:
             spec=p.spec,                  # pasted spec text OR uploaded docs dir (additive)
             max_slots=p.max_slots,        # IC-pool parallelism (Wave C) + budget tree (Wave D)
             cost_cap_microusd=p.cost_cap_microusd,
+            max_fix_attempts=p.max_fix_attempts,
             thread_id=p.id,               # UNIQUE per project — no cross-floor collision
             checkpoints=True,
             checkpoint_responder=responder,
@@ -613,8 +615,21 @@ class Handler(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             max_slots = default_slots
         max_slots = max(1, max_slots)
+        # auto-fix retry budget (run() default = 3); optional UI override.
+        try:
+            max_fix_attempts = int(body.get("max_fix_attempts", 3))
+        except (TypeError, ValueError):
+            max_fix_attempts = 3
+        max_fix_attempts = max(0, max_fix_attempts)
+        # spend cap: UI sends dollars (cost_cap_usd); fall back to the env micro-USD.
         cost_env = os.environ.get("FOUNDRY_COST_CAP_MICROUSD", "").strip()
         cost_cap_microusd = int(cost_env) if cost_env.isdigit() else None
+        try:
+            usd = float(body.get("cost_cap_usd") or 0)
+            if usd > 0:
+                cost_cap_microusd = int(round(usd * 1_000_000))
+        except (TypeError, ValueError):
+            pass
         with _LOCK:
             _FLOOR[0] += 1
             floor = _FLOOR[0]
@@ -634,6 +649,7 @@ class Handler(BaseHTTPRequestHandler):
             id=pid, request=request, mode=mode, supervised=supervised, floor=floor,
             backend=backend, packs=packs, spec=spec, out_base=out_base,
             max_slots=max_slots, cost_cap_microusd=cost_cap_microusd,
+            max_fix_attempts=max_fix_attempts,
         )
         with _LOCK:
             _PROJECTS[pid] = p

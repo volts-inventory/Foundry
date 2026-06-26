@@ -65,7 +65,7 @@ const ROSTER = {
   qa:["QA Engineer","SDET","Reviewer","Technical Writer"],
   security:["AppSec Engineer","Audit & Compliance","Supply-chain Reviewer"],
 };
-const GATE_ORDER = ["spec","build","test","review","security","audit","e2e"];
+const GATE_ORDER = ["spec","build","test","review","security","audit","supply_chain","e2e"];
 const AGENT_ROOM = {}; for (const rm in ROSTER) for (const nm of ROSTER[rm]) AGENT_ROOM[nm] = rm;
 
 // ---- generated character sprites (our own pixel art) -----------------------
@@ -1502,6 +1502,10 @@ document.getElementById("start-btn").onclick=async ()=>{
   const packs=document.getElementById("packs-input").value;
   const sup=document.getElementById("supervised").checked;
   const extra={max_slots: parseInt(document.getElementById("slots-input").value,10)||1};
+  const fix=parseInt(document.getElementById("fix-input").value,10);
+  if(Number.isFinite(fix) && fix>=0) extra.max_fix_attempts=fix;
+  const cap=parseFloat(document.getElementById("cap-input").value);
+  if(Number.isFinite(cap) && cap>0) extra.cost_cap_usd=cap;
   const intake=intakeMode();
   if(intake==="spec"){
     extra.spec_text=document.getElementById("spec-text").value;
@@ -1551,7 +1555,24 @@ fetch("/api/config").then(r=>r.json()).then(c=>{
   if(c && c.default_backend && [...sel.options].some(o=>o.value===c.default_backend))
     sel.value=c.default_backend;
   if(c && c.default_max_slots) document.getElementById("slots-input").value=c.default_max_slots;
+  syncCostCap();
 }).catch(()=>{});
+
+// The USD cost cap only binds *metered* API backends (real per-token charges).
+// mock is offline, ollama is local, and claude-cli bills a flat subscription —
+// so for those a per-build USD cap is meaningless: disable + annotate the field.
+const METERED_BACKENDS = ["anthropic","codex"];
+function syncCostCap(){
+  const backend = document.getElementById("backend-select").value;
+  const cap = document.getElementById("cap-input");
+  if(!cap) return;
+  const metered = METERED_BACKENDS.includes(backend);
+  cap.disabled = !metered;
+  cap.placeholder = metered ? "no cap" : `${backend} isn't metered — no USD cost`;
+  if(!metered) cap.value = "";
+}
+document.getElementById("backend-select").addEventListener("change", syncCostCap);
+syncCostCap();
 
 // Rehydrate on (re)load: floors run server-side independently of this tab, so a
 // refresh / reconnect from another device rebuilds every floor + reconnects the

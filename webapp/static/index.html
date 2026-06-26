@@ -99,6 +99,10 @@
           <span id="slots-hint" class="hint"></span>
         </div>
       </div>
+      <label>Auto-fix attempts <span class="hint">— retries per failing gate (default 3)</span></label>
+      <input id="fix-input" type="number" min="0" max="10" value="3" />
+      <label>Cost cap (USD) <span class="hint">— max model spend (metered API backends only)</span></label>
+      <input id="cap-input" type="number" min="0" step="0.01" placeholder="no cap" />
       <label>Domain packs (optional, comma-separated)</label>
       <input id="packs-input" type="text" placeholder="regulated, ml_data, frontend" />
       <label class="check"><input type="checkbox" id="supervised" checked /> Supervised (CTO approves each checkpoint)</label>

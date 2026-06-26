@@ -28,8 +28,9 @@ const GRID = {  // rooms mirror the pipeline, read left->right, top->bottom:
   qa:[0,1], security:[1,1], gate:[2,1],
   vault:[2,2],                       // gate(2,1) sits directly above vault(2,2)
 };
-// (0,2) = org notice-board cell; (1,2) = open front lobby (the CTO's idle spot).
-const ORG_CELL = [0,2], LOBBY_CELL = [1,2];
+// (0,2) = the LOUNGE (idle agents relax here); (1,2) = a decorative ENTRANCE /
+// lobby (the org chart on the wall + where the CTO greets). No work happens in either.
+const LOUNGE_CELL = [0,2], ENTRANCE_CELL = [1,2];
 const RBASE = {
   product:{label:"PRODUCT",color:0x2e3b5a}, architecture:{label:"ARCHITECTURE",color:0x3a2e5a},
   engineering:{label:"ENGINEERING",color:0x5a3a2e}, qa:{label:"QA · REVIEW",color:0x2e5a4a},
@@ -381,20 +382,24 @@ class FloorScene extends Phaser.Scene {
     for (const x of AISLE_VX) for (const y of AISLE_HY) P("plant", x, y+6);
     // a water cooler tucked at each corridor mouth (symmetric)
     P("cooler", AISLE_VX[0], WALL_TOP+24); P("cooler", AISLE_VX[1], WALL_TOP+24);
-    // the ORG notice-board cell: renderOrg pins the live org tree to the TOP here
-    // during parallel-IC fan-out builds; idle it just shows the header + a plant or two.
-    const B = cellBox(ORG_CELL[0], ORG_CELL[1]);
-    this.add.text(B.x+B.w/2, B.y+8, "ORG", {fontFamily:"'PixelFont','Courier New',monospace",
-      fontSize:"10px", color:"#8aa0c8"}).setOrigin(0.5,0).setDepth(4);
-    const baseY = B.y+B.h-18;
-    P("plant", B.x+26, baseY); P("plant", B.x+B.w-26, baseY);
-    // the LOUNGE (open bottom-centre cell): a couch + table + plants where idle
-    // leads wait between stages (everyone starts here; stages pull teams to desks).
-    const L = cellBox(LOBBY_CELL[0], LOBBY_CELL[1]);
+    // the LOUNGE (bottom-left): couch, TV, coffee table, water cooler — where idle
+    // leads sit, nap and mill about between stages (see loungeArrive / mill).
+    const L = cellBox(LOUNGE_CELL[0], LOUNGE_CELL[1]);
     this.add.text(L.x+L.w/2, L.y+8, "LOUNGE", {fontFamily:"'PixelFont','Courier New',monospace",
       fontSize:"10px", color:"#8aa0c8"}).setOrigin(0.5,0).setDepth(4);
-    P("couch", L.x+34, L.y+L.h-26); P("ctable", L.x+34, L.y+L.h-2);
-    P("plant", L.x+L.w-26, L.y+L.h-22);
+    P("couch", L.x+44, L.y+L.h-30); P("ctable", L.x+44, L.y+L.h-6);
+    P("tv", L.x+L.w-44, L.y+50); P("cooler", L.x+L.w-28, L.y+L.h-14);
+    P("plant", L.x+22, L.y+48);
+    // the ENTRANCE (bottom-centre): a purely decorative lobby — welcome mat, plants,
+    // and the company ORG chart on the wall (renderOrg pins here). No work happens here.
+    const E = cellBox(ENTRANCE_CELL[0], ENTRANCE_CELL[1]);
+    this.add.text(E.x+E.w/2, E.y+8, "ENTRANCE", {fontFamily:"'PixelFont','Courier New',monospace",
+      fontSize:"10px", color:"#8aa0c8"}).setOrigin(0.5,0).setDepth(4);
+    this.add.rectangle(E.x+E.w/2, E.y+E.h-16, 74, 22, 0x2a3550, 0.55).setDepth(0)
+      .setStrokeStyle(2, 0x3e4a68);
+    this.add.text(E.x+E.w/2, E.y+E.h-16, "WELCOME",
+      {fontFamily:"'PixelFont','Courier New'",fontSize:"7px",color:"#8aa0c8"}).setOrigin(0.5).setDepth(1);
+    P("plant", E.x+24, E.y+E.h-20); P("plant", E.x+E.w-24, E.y+E.h-20);
   }
 
   buildAtmosphere(){
@@ -487,6 +492,13 @@ class FloorScene extends Phaser.Scene {
       c.add(this.add.rectangle(-13,5,3,8,0x4a3320).setOrigin(0.5,1));
       c.add(this.add.rectangle(13,5,3,8,0x4a3320).setOrigin(0.5,1));
       c.add(this.add.rectangle(0,-2,30,2,0x7a5836).setOrigin(0.5,1));      // backrest slat
+    } else if (kind==="tv"){
+      out(0,0,10,5,0x2a3550);                                   // stand
+      out(0,-7,34,22,0x10151f);                                 // body/bezel
+      const scr=this.add.rectangle(0,-9,26,15,0x2bd3ff,0.7).setOrigin(0.5,1); // screen
+      c.add(scr);
+      this.tweens.add({targets:scr, fillAlpha:{from:0.45,to:0.8}, duration:700+Math.abs(Math.round(x))%500,
+        yoyo:true, repeat:-1, ease:"Sine.inOut"});                // flicker
     }
     return c;
   }
@@ -752,7 +764,7 @@ class FloorScene extends Phaser.Scene {
   }
 
   buildCTO(){
-    const L = cellBox(LOBBY_CELL[0], LOBBY_CELL[1]);
+    const L = cellBox(ENTRANCE_CELL[0], ENTRANCE_CELL[1]);
     this.lobby = {cx: Math.round(L.x+L.w/2), standY: Math.round(L.y+L.h-24)};
     const c = this.makePerson(this.lobby.cx, this.lobby.standY, kitFor("CTO", hashStr((this.proj.id||'f')+"CTO")));
     c.setScale(1.4).setDepth(900); c.fixedDepth = 900;   // CTO walks the floor -> always on top
@@ -840,12 +852,23 @@ class FloorScene extends Phaser.Scene {
   }
 
   // ---- movement: desks <-> lounge -----------------------------------------
-  // The lounge is the open bottom-centre cell: idle agents wait here and only
-  // walk to their desk while their stage is the active one (then back here).
+  // What each idle lead does in the lounge — a stable mix by slot: sit, nap, mill.
+  loungeMode(i){ return ["sit","wander","sleep","wander","sit","wander"][i % 6]; }
+  // Idle agents relax in the LOUNGE (bottom-left). Their spot depends on what they're
+  // doing: sitters by the couch (lower-left), sleepers in the nap corner (lower-right),
+  // wanderers loosely spread up top (mill() nudges them around).
   loungeSpot(i){
-    const B = cellBox(LOBBY_CELL[0], LOBBY_CELL[1]);
-    const per = 6, col = i%per, row = Math.floor(i/per);
-    return { x: B.x + 30 + col*((B.w-60)/(per-1)), y: B.y + 46 + row*40 };
+    const B = cellBox(LOUNGE_CELL[0], LOUNGE_CELL[1]);
+    const mode = this.loungeMode(i);
+    if (mode === "sit"){
+      const k = Math.floor(i/6);
+      return { x: B.x + 32 + (i%3)*26, y: B.y + B.h - 36 - k*16, mode };
+    }
+    if (mode === "sleep"){
+      return { x: B.x + B.w - 40 - (Math.floor(i/6)%2)*22, y: B.y + B.h - 28, mode };
+    }
+    const per = 4, col = i%per, row = Math.floor(i/per) % 2;
+    return { x: B.x + 30 + col*((B.w-60)/(per-1)), y: B.y + 60 + row*30, mode };
   }
   // shortest path along the "#" corridors: exit to the nearest aisle, run the aisles,
   // then step into the destination. (Within-room moves stay direct — handled in walkTo.)
@@ -880,10 +903,37 @@ class FloorScene extends Phaser.Scene {
   // Off duty -> walk to the lounge (so a room only ever shows people actually
   // working that stage; idle leads physically wait it out in the break area).
   gotoLounge(a){ if (!a || !a.seen) return; a.inLounge = true;
-    if (a.faceFront) a.faceFront(); this.stopDeskIdle && this.stopDeskIdle(a);
+    if (a.faceFront) a.faceFront(); this.stopDeskIdle(a);
     const s = this.loungeSpot(a.loungeSlot||0);
-    this.walkTo(a, s.x + (Math.random()*12-6), s.y); }
-  gotoDesk(a){ if (!a) return; a.inLounge = false;
+    this.walkTo(a, s.x + (Math.random()*10-5), s.y, ()=> this.loungeArrive(a, s.mode)); }
+  // Once parked in the lounge, do something: nap (with Zzz), sit and breathe, or mill.
+  loungeArrive(a, mode){
+    if (!a || !a.inLounge) return;
+    this.clearLounge(a);
+    a.loungeBusy = mode;
+    if (mode === "sleep"){ if (a.faceFront) a.faceFront(); this.sleepZzz(a);
+      a.napTween = this.tweens.add({targets:a.bob, y:{from:0,to:-1.5}, duration:2200,
+        yoyo:true, repeat:-1, ease:"Sine.inOut"}); }
+    else if (mode === "sit"){ if (a.faceFront) a.faceFront(); this.deskIdle(a); }
+  }
+  sleepZzz(a){
+    if (a.zzzEv) return;
+    a.zzzEv = this.time.addEvent({delay:1500, loop:true, callback:()=>{
+      if (!a.inLounge || a.loungeBusy !== "sleep") return;
+      const t = this.add.text(a.x+8, a.y-22, "z",
+        {fontFamily:"'PixelFont','Courier New'",fontSize:"10px",color:"#9fb4d8"}).setDepth(40);
+      this.tweens.add({targets:t, y:t.y-18, x:t.x+8, alpha:{from:0.9,to:0}, duration:1600,
+        ease:"Sine.out", onComplete:()=>t.destroy()});
+    }});
+  }
+  clearLounge(a){
+    if (!a) return;
+    a.loungeBusy = null;
+    if (a.napTween){ a.napTween.stop(); a.napTween = null; if (a.bob) a.bob.y = 0; }
+    if (a.zzzEv){ a.zzzEv.remove(); a.zzzEv = null; }
+    this.stopDeskIdle(a);
+  }
+  gotoDesk(a){ if (!a) return; a.inLounge = false; this.clearLounge(a);
     if (!a.seen){ a.seen = true; a.setAlpha(1); }
     if (a.home) this.walkTo(a, a.home.x, a.home.y, ()=>{ if (a.faceBack) a.faceBack(); this.deskIdle(a); }); }
   staffRoom(key){
@@ -904,11 +954,13 @@ class FloorScene extends Phaser.Scene {
     for (const [,a] of this.agents) if (a.seen) this.gotoLounge(a);
     for (const s of (this.poolGroup||[])) if (s && s.bob) this.gotoLounge(s);
   }
-  mill(){       // gentle wander for whoever is in the lounge
-    const move = (a)=>{ if (a && a.seen && a.inLounge && !a.moveTween?.isPlaying() && Math.random()<0.5){
-      const s = this.loungeSpot(a.loungeSlot||0); this.walkTo(a, s.x+(Math.random()*20-10), s.y+(Math.random()*16-8)); } };
+  mill(){       // gentle wander for the lounge "wander" folks (sitters/sleepers stay put)
+    const B = cellBox(LOUNGE_CELL[0], LOUNGE_CELL[1]);
+    const move = (a)=>{ if (a && a.seen && a.inLounge && a.loungeBusy === "wander"
+        && !a.moveTween?.isPlaying() && Math.random()<0.5){
+      this.walkTo(a, B.x+26+Math.random()*(B.w-52), B.y+58+Math.random()*(B.h-86)); } };
     for (const [,a] of this.agents) move(a);
-    for (const s of (this.poolGroup||[])) move(s);
+    for (const s of [...(this.poolGroup||[]), ...(this.techLeadGroup||[])]) move(s);
   }
 
   walkCTO(tx, ty){   // routes along the corridors like everyone else
@@ -1041,8 +1093,8 @@ class FloorScene extends Phaser.Scene {
     };
     const areas = ev.areas || [];
     const rowH = 16, padding = 8, headerH = 20;
-    // pin the org board to the ORG cell, centred under its label
-    const B = cellBox(ORG_CELL[0], ORG_CELL[1]);
+    // pin the org board to the ENTRANCE wall (the company org chart in the lobby)
+    const B = cellBox(ENTRANCE_CELL[0], ENTRANCE_CELL[1]);
     const w = Math.min(232, B.w-24), h = headerH + areas.length*rowH + padding;
     const c = this.add.container(Math.round(B.x+(B.w-w)/2), B.y+22).setDepth(28);
     c.add(this.add.rectangle(0,0,w,h,0x0c1322,0.92).setOrigin(0,0).setStrokeStyle(2,0xffcf52));

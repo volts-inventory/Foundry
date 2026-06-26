@@ -964,6 +964,37 @@ def test_fork_divergence_stable_fail_latch_cannot_reach_prod() -> None:
     with_pytest_refuse(decision)
 
 
+def test_stable_fail_latch_on_TREE_namespace_cannot_reach_prod() -> None:
+    """ATTACK (H2): the runner latches stable FAIL on the TREE sha (`run_against`) —
+    a DIFFERENT namespace from `subject_digest`. A later PASS masks the FAIL in the
+    live gate-state, and check #4's subject query can't see a TREE latch. The test
+    above latches the SUBJECT digest (so #4 catches it); this one latches the TREE,
+    the way production actually does, and proves admission STILL denies via #4b."""
+    records, verifier = _records_verifier()
+    signer = ZoneBSigner(KEY, KEY_ID)
+    build = _genuine_build(signer, "tree-fork-treelatch")
+    tree = build.provenance.tree_sha
+    digest = build.result.subject_digest
+    # Latch on the TREE, not the subject digest (what the runner does on a FAIL).
+    records.latch_stable_fail(tree, "security", "run-9")
+    from foundry.state.global_records import AdmissionState
+
+    # The namespaces are genuinely distinct: the SUBJECT reads admissible…
+    assert records.admission_look(digest) is AdmissionState.ADMISSIBLE
+    # …while the TREE is disqualified. Check #4 (subject) alone would miss this.
+    assert records.admission_look(tree) is AdmissionState.DISQUALIFIED
+
+    decision = AdmissionController(builder_id=BUILDER_ID).admit(
+        digest, provenance=build.provenance, build_verdict=build.signed_verdict,
+        gate_results=tuple(_all_pass_gate_state(signer, tree).values()),
+        required_gates=_REQUIRED_GATES, records=records, verifier=verifier, seq=_seq(),
+    )
+    assert decision.verdict is AdmissionVerdict.DENY
+    assert decision.reason == "stable_fail_latched_or_disqualified"
+    assert decision.stable_fail_latched
+    with_pytest_refuse(decision)
+
+
 # ===========================================================================
 # Clean control — full E2E autonomous run deploys EXACTLY ONCE
 # ===========================================================================

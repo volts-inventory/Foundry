@@ -244,6 +244,19 @@ class AdmissionController:
             latched = True
             return deny(_R_DISQUALIFIED)
 
+        # -- 4b. Stable-FAIL latch is keyed on the TREE, not the subject -------
+        # The runner latches stable FAIL on `run_against` (the integrated tree sha),
+        # a DIFFERENT namespace from `subject_digest` — so check #4's subject query
+        # alone would miss a stably-FAILed tree re-presented with a fresh PASS (the
+        # newest-by-Seq verdict check #3 reads). Consult the latch under every tree
+        # this release rests on (the provenance tree + any distinct per-gate tree).
+        # This is what actually upholds the §5 "a later PASS can't mask a stable
+        # FAIL at deploy" invariant the check #4 docstring claims.
+        for expected_tree in {tree_sha, *trees.values()}:
+            if records.admission_look(expected_tree) is not AdmissionState.ADMISSIBLE:
+                latched = True
+                return deny(_R_DISQUALIFIED)
+
         # All four checks held for the EXACT subject_digest ⇒ ADMIT.
         return AdmissionDecision(
             subject_digest=subject_digest,

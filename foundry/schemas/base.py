@@ -22,8 +22,18 @@ class FrozenModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     def content_identity(self) -> str:
-        """Content digest over the full canonical record (immutable, cacheable)."""
-        return content_digest(self.model_dump(mode="json"))
+        """Content digest over the full canonical record (immutable, cacheable).
+
+        Set/frozenset fields serialize to a list in hash-seed-dependent order, which
+        would make the digest non-deterministic across processes (breaking CAS
+        addressing + the evidence/WORM chain). They're sorted here so EVERY set-valued
+        field is stable by default — a subclass no longer has to remember (GateResult
+        historically hand-sorted `served_family`; this generalizes that guard)."""
+        d = self.model_dump(mode="json")
+        for name, value in self:
+            if isinstance(value, (set, frozenset)) and isinstance(d.get(name), list):
+                d[name] = sorted(d[name])
+        return content_digest(d)
 
 
 class Artifact(FrozenModel):

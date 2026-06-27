@@ -58,9 +58,6 @@ class PolicyMonitor:
             )
         return None
 
-    def deny_count(self, policy: str) -> int:
-        return self._deny_counts.get(policy, 0)
-
     # -- retry-oscillation --------------------------------------------------
     def record_verdict(self, key: str, passed: bool) -> Trip | None:
         """Record a pass/fail verdict for `key`; trips when the last

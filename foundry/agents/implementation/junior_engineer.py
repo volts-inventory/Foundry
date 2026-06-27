@@ -139,7 +139,16 @@ def _base_snapshot_of(task: Task, state: FactoryState) -> str | None:
     A prior run's done-marker for this task carries the ``base_tree_sha`` it was
     built against; a retry restores the worktree to it first so the diff
     supersedes rather than stacks. Absent (first run), the freshly-cloned
-    worktree IS the base."""
+    worktree IS the base.
+
+    KNOWN LIMITATION (LEARNINGS IM3 / T-M1-10): in the WIRED subgraph the `tasks`
+    reducer (`union_by_id`) is FIRST-keyed-wins for dicts, so the Senior's plain
+    Task survives and the Junior's done-marker is dropped — this read therefore
+    returns None there and the reset-to-base never fires. The retry still re-derives
+    deterministically (content-addressed `idempotency_key`); true supersession would
+    require minting a fresh task id/version, NOT relying on the reducer's later-wins.
+    The reset path is exercised when a done-marker is presented directly (the durable
+    `snapshot_store` retry test), not via the reduced channel."""
     for entry in state.get("tasks") or ():
         if isinstance(entry, dict) and entry.get("id") == task.id:
             base = entry.get("base_tree_sha")
@@ -562,10 +571,18 @@ def make_junior_engineer_node(
     def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         constraints: Sequence[PinnedConstraint] = state.get("pinned_constraints") or ()
         tasks = ready_tasks(state)
+        # SYSTEM-DECIDED parallelism. The Tech-Lead's decomposition IS the decision
+        # to parallelize: it splits the work into independently-buildable tasks. We
+        # size the IC pool to that decomposition — one worker per ready task —
+        # capped by ``max_slots`` (a safety ceiling, not a user-tuned target). So a
+        # single-task build runs serially with no pool overhead; an N-task build
+        # fans N adapter runs across the pool automatically (≤ the cap). Nobody sets
+        # a worker count: the system reads it off the lead's plan.
+        effective_slots = min(len(tasks), max_slots) if tasks else 1
         # Branch-per-task: each task builds in its own fresh sandbox on its own
-        # task/<id> branch. With max_slots>1 the adapter runs fan out across the
-        # IC pool (Wave C); otherwise they run serially (the original path).
-        if max_slots > 1:
+        # task/<id> branch. >1 task ⇒ the adapter runs fan out across the IC pool
+        # (Wave C); a single task runs serially (the original path).
+        if effective_slots > 1:
             # Per-domain budget lineage + each domain's area (Wave D), derived from
             # the OwnershipMap when a resolver is wired; else a single "default".
             domain_by_task: dict[str, str] = {}
@@ -585,7 +602,7 @@ def make_junior_engineer_node(
                 snapshot_store=snapshot_store,
                 turn_budget=turn_budget,
                 cost_budget_microusd=cost_budget_microusd,
-                max_slots=max_slots,
+                max_slots=effective_slots,
                 cost_cap_microusd=cost_cap_microusd,
                 domain_by_task=domain_by_task,
                 domain_area=domain_area,
@@ -613,9 +630,13 @@ def make_junior_engineer_node(
 def _task_done_marker(task: Task, diff: FeatureDiff) -> dict[str, Any]:
     """The task channel entry, updated with the produced diff handle.
 
-    Keyed by ``id`` (the tasks reducer is a keyed union); within one fold the
-    Senior's plain Task dict wins (IM3), but the marker carries the produced diff
-    handle + base tree so a downstream review / retry can read them off state."""
+    Keyed by ``id`` (the tasks reducer is a keyed union). NOTE (LEARNINGS IM3 /
+    T-M1-10): in the wired subgraph the reducer is FIRST-keyed-wins for dicts, so the
+    Senior's plain Task dict survives and THIS marker is dropped on the `tasks`
+    channel — the produced `diff_uri`/`base_tree_sha` are read off the **`artifacts`**
+    channel (the FeatureDiff), not off this done-marker. The extra keys here are still
+    populated for the in-isolation node path (and any future fresh-id supersession);
+    do NOT assume a downstream node reads them off the reduced `tasks` channel."""
     d = task.model_dump(mode="json")
     d["status"] = TaskStatus.DONE.value
     d["diff_uri"] = diff.diff_uri

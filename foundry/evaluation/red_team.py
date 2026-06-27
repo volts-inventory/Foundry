@@ -622,8 +622,8 @@ _BUILDER_ID = "red-team-trusted-builder"
 
 def _build_output():
     """A GENUINE hermetic build (signed, provenance-bound) for the admission probes."""
-    from foundry.schemas.operations import BuildRequest
     from foundry.schemas.security import SBOMComponent
+    from foundry.schemas.trust_root import BuildRequest
 
     signer = ZoneBSigner(_KEY, _KEY_ID)
     req = BuildRequest(
@@ -703,7 +703,7 @@ def _probe_forged_verdict(weaken: bool) -> ProbeResult:
     modeled by re-attaching a genuine signature so the forged path is laundered
     into an ADMIT, UNDEFENDED.
     """
-    from foundry.schemas.operations import AdmissionVerdict
+    from foundry.schemas.trust_root import AdmissionVerdict
 
     name, attack = "forged_verdict_denied", "forged-verdict"
     signer = ZoneBSigner(_KEY, _KEY_ID)
@@ -757,7 +757,7 @@ def _probe_fork_divergence(weaken: bool) -> ProbeResult:
     WEAKEN: the records view is replaced by one that NEVER reports a
     disqualification (the look is bypassed) — admission ADMITs, UNDEFENDED.
     """
-    from foundry.schemas.operations import AdmissionVerdict
+    from foundry.schemas.trust_root import AdmissionVerdict
 
     name, attack = "fork_divergence_disqualified_denied", "fork-divergence"
     signer = ZoneBSigner(_KEY, _KEY_ID)

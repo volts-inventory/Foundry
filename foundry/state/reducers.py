@@ -260,6 +260,14 @@ def merge_gates(a: list[GateResult] | None, b: list[GateResult] | None) -> list[
         if g.name in JUDGMENT_VERDICTS:
             if not v.verify_judgment_binding(g):
                 continue  # forged / replayed / status-flipped binding
+            # These two are READS of the cross-fork ledger; the WRITE side is the
+            # trusted judgment-commit step `_commit_judgment_ledger` (graph/supervisor.py,
+            # H3): after a judgment verdict survives this filter it consumes the
+            # verdict's single-use nonce (keyed to content identity) and latches a
+            # request-changes. Each verdict carries its OWN per-(node,subject,state)
+            # nonce (quality/_common.server_issued_nonce), so the two reviews a run
+            # emits don't collide. This reducer stays PURE (read-only); the supervisor
+            # holds the records and does the write.
             if v.nonce_consumed_by_other_verdict(g):
                 continue  # single-use nonce replayed by a different verdict
             if v.negative_verdict_latched(g):

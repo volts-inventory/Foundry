@@ -39,11 +39,18 @@ SOP = (
     "You are the Criteria-Completeness Critic (Layer 1), an INDEPENDENT reviewer "
     "of the Product Manager's acceptance criteria. Stop '100% coverage of weak "
     "criteria.' Follow this SOP, in order:\n"
-    "1. Read the PRD and the declared acceptance criteria.\n"
-    "2. Enumerate missing or under-specified criteria.\n"
-    "3. Flag omitted security/abuse cases that the PRD's scope makes applicable.\n"
-    "4. Require additions. Omission of applicable security/abuse criteria FAILS "
-    "the Spec gate — list every such omission under security_abuse_omissions.\n"
+    "1. Read the request, the PRD, and the PM's DECLARED acceptance criteria "
+    "(all provided below).\n"
+    "2. Enumerate criteria that are MISSING or under-specified relative to the "
+    "request's actual scope.\n"
+    "3. Flag a security/abuse case under security_abuse_omissions ONLY when it is "
+    "(a) genuinely APPLICABLE to THIS request's scope AND (b) NOT already covered "
+    "by one of the declared criteria below. Judge coverage by intent, not exact "
+    "wording — a criterion that already tests the abuse case counts as covered.\n"
+    "4. If the declared criteria already cover the applicable security/abuse "
+    "cases, return EMPTY arrays. Do NOT invent speculative, out-of-scope, or "
+    "gold-plated omissions — an omission you list FAILS the Spec gate, so list "
+    "only real, in-scope gaps.\n"
     "Respond in the constrained JSON schema. You produce findings only; you do "
     "NOT decide the gate verdict."
 )
@@ -71,6 +78,43 @@ def _prd_uri(state: FactoryState) -> str:
     return max(prds, key=lambda a: a.seq).uri
 
 
+def _declared_criteria(state: FactoryState, rt: AgentRuntime) -> str:
+    """The PM's declared acceptance criteria, resolved to a readable list so the
+    critic critiques what was ACTUALLY authored (its SOP says "read the declared
+    acceptance criteria") rather than re-deriving omissions from the bare request.
+
+    Without this the critic only sees ``state['request']`` and, on a real model,
+    invents security/abuse omissions the PM may already cover — failing the Spec
+    gate spuriously. Best-effort: an unresolvable handle is skipped, never fatal."""
+    if rt.cas is None:
+        return "(none declared yet)"
+    lines: list[str] = []
+    for a in state.get("artifacts") or ():
+        if getattr(a, "kind", None) != "acceptance_criterion":
+            continue
+        try:
+            c = rt.cas.resolve(a)
+        except Exception:
+            continue
+        lines.append(
+            f"- [{getattr(c, 'id', '?')}] {getattr(c, 'text', '')} "
+            f"(oracle: {getattr(c, 'oracle_hint', '')!r}; "
+            f"security_abuse={getattr(c, 'security_abuse', False)})"
+        )
+    return "\n".join(lines) if lines else "(none declared yet)"
+
+
+def _prd_body(state: FactoryState, rt: AgentRuntime) -> str:
+    """The PRD prose body for context (best-effort; empty if unavailable)."""
+    uri = _prd_uri(state)
+    if not uri or rt.cas is None:
+        return ""
+    try:
+        return rt.cas.resolve_blob(uri).decode("utf-8", "replace")
+    except Exception:
+        return ""
+
+
 def _provenance(rt: AgentRuntime) -> JudgmentProvenance:
     """Record the proxy's operating profile openly (governance §1e / plan §0.2):
     a same-lineage self-judge critique is SELF; a decorrelated one INDEPENDENT."""
@@ -90,11 +134,18 @@ def make_criteria_completeness_critic_node(rt: AgentRuntime) -> NodeFn:
         triage_seq = rt.seq(config, _NODE_ID, "gate_triage:spec")
         prd_uri = _prd_uri(state)
 
+        prd_body = _prd_body(state, rt)
+        user_content = (
+            f"Request:\n{state.get('request', '')}\n\n"
+            f"PRD:\n{prd_body or '(no PRD body)'}\n\n"
+            f"Declared acceptance criteria (review THESE for coverage):\n"
+            f"{_declared_criteria(state, rt)}"
+        )
         result = rt.proxy.complete(
             _NODE_ID,
             _TIER,
             SOP,
-            [{"role": "user", "content": state.get("request", "")}],
+            [{"role": "user", "content": user_content}],
             purpose="ideation",
             schema=_SCHEMA,
         )

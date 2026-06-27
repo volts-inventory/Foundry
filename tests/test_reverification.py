@@ -81,7 +81,7 @@ _GATES = (
     BuildGate(),
     TestGate(min_passed=1),
     AuditGate(),
-    SecurityGate(use_semgrep=False),
+    SecurityGate(),
 )
 _GATE_NAMES = {g.name for g in _GATES}
 

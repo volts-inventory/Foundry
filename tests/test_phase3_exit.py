@@ -82,7 +82,7 @@ from foundry.schemas.base import (
     ExternalAction,
     IdempotencyPath,
 )
-from foundry.schemas.operations import (
+from foundry.schemas.operability import (
     AlertSeverity,
     PauseReason,
     QueueEntry,

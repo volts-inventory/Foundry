@@ -570,6 +570,10 @@ def test_idempotent_retry_resets_base_and_repeats_key(tmp_path: Any) -> None:
     # The retry re-presents the produced done-marker (carrying base_tree_sha) on
     # state["tasks"]; the Junior resets the worktree to that SAME base (super-
     # session, not edit) and the diff idempotency key re-derives identically.
+    # NB (LEARNINGS IM3 / T-M1-10): this drives the node in ISOLATION — `first["tasks"]`
+    # (the node's raw return) is fed straight in, BYPASSING the `tasks` reducer. In the
+    # wired subgraph the reducer is first-keyed-wins, so the marker would be dropped and
+    # base_tree_sha would NOT be readable off `tasks`; this is not proof of wired supersession.
     rt2 = make_runtime(adapter=StubAdapter())
     retry_node = make_junior_engineer_node(rt2, source_dir=str(src), snapshot_store=store)
     second = retry_node(

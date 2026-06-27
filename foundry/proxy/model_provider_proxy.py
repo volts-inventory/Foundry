@@ -244,6 +244,44 @@ class VerdictChannelError(RuntimeError):
     """The structured verdict channel returned something outside the grammar."""
 
 
+class StructuredOutputError(RuntimeError):
+    """A schema (structured-output) completion didn't yield a parseable JSON
+    object. SDK structured-outputs are grammar-constrained, but the CLI backends
+    (claude -p / codex) only carry a json-only PROMPT instruction, so a model may
+    return prose, a ```json fence, or empty text. Raised inside the send-retry
+    loop so a transient miss is RE-ROLLED, then escalates to ProxyUnavailable —
+    never an opaque JSONDecodeError mid-graph (fail-closed)."""
+
+
+def _extract_json_object(text: str) -> dict[str, Any]:
+    """Recover the JSON object from a completion REQUESTED to be schema-conforming.
+
+    Strict parse first (the SDK path and a well-behaved CLI response land here),
+    else the outermost ``{...}`` span (strips a prose preamble or a ```json fence
+    the CLI model may add). Raises :class:`StructuredOutputError` when nothing
+    parseable is present (empty / non-object), so the caller fails closed rather
+    than crashing — and, inside the retry loop, re-rolls the call first."""
+    s = (text or "").strip()
+    if s:
+        try:
+            obj = json.loads(s)
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+        start, end = s.find("{"), s.rfind("}")
+        if 0 <= start < end:
+            try:
+                obj = json.loads(s[start : end + 1])
+                if isinstance(obj, dict):
+                    return obj
+            except json.JSONDecodeError:
+                pass
+    raise StructuredOutputError(
+        f"schema completion returned no parseable JSON object ({len(s)} chars)"
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderResponse:
     """The proxy-observed provider response (the trusted observation)."""
@@ -463,7 +501,7 @@ class ModelProviderProxy:
             requested_model, system_sop, messages, purpose, schema
         )
 
-        response = self._send_with_retry(request)
+        response, parsed = self._send_with_retry(request, schema=schema)
 
         # Lineage is resolved from the proxy-OBSERVED served model id; an
         # unknown id fails closed inside the LineageMap (never guessed).
@@ -508,12 +546,8 @@ class ModelProviderProxy:
                 # judgment node pause-and-escalates (mirrors ProxyUnavailable).
                 raise PinnedIdDriftError(event)
 
-        parsed: dict[str, Any] | None = None
-        if schema is not None:
-            # Structured outputs: the first content block is text containing
-            # valid JSON conforming to the schema — the constrained channel.
-            parsed = json.loads(response.text)
-
+        # `parsed` was extracted inside the retry unit (lenient for CLI backends,
+        # re-rolled on a miss, fail-closed after the budget) — see _send_with_retry.
         return CompletionResult(
             text=response.text,
             parsed=parsed,
@@ -681,17 +715,28 @@ class ModelProviderProxy:
             request["output_config"] = output_config
         return request, sampling, note
 
-    def _send_with_retry(self, request: dict[str, Any]) -> ProviderResponse:
-        """Bounded retry/backoff, then fail closed.
+    def _send_with_retry(
+        self, request: dict[str, Any], *, schema: dict[str, Any] | None = None
+    ) -> tuple[ProviderResponse, dict[str, Any] | None]:
+        """Bounded retry/backoff, then fail closed; returns (response, parsed).
 
-        No model/family fallback ever happens here — unavailability of the
-        pinned model is surfaced as ProxyUnavailable so judgment nodes
-        pause-and-escalate instead of degrading silently (arch §2b/§8).
+        When a ``schema`` is set the structured-output PARSE is part of the
+        retried unit: a CLI backend that returns prose / a fence / empty for a
+        structured call is RE-ROLLED (lenient extraction first), and only
+        escalates to ProxyUnavailable after the retry budget — never an opaque
+        JSONDecodeError mid-graph. No model/family fallback ever happens here —
+        unavailability of the pinned model is surfaced as ProxyUnavailable so
+        judgment nodes pause-and-escalate instead of degrading silently
+        (arch §2b/§8).
         """
         attempt = 0
         while True:
             try:
-                return self._transport.send(request)
+                response = self._transport.send(request)
+                parsed = (
+                    _extract_json_object(response.text) if schema is not None else None
+                )
+                return response, parsed
             except Exception as exc:
                 if attempt >= self._retry.max_retries:
                     raise ProxyUnavailable(

@@ -67,7 +67,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from foundry.schemas.gates import GateResult, GateStatus
-from foundry.schemas.operations import AdmissionDecision, AdmissionVerdict
+from foundry.schemas.trust_root import (
+    AdmissionDecision,
+    AdmissionVerdict,
+)
 from foundry.state.global_records import AdmissionState
 
 if TYPE_CHECKING:
@@ -91,6 +94,23 @@ _R_GATE_WRONG_TREE = "required_gate_wrong_tree"
 _R_GATE_SIG_INVALID = "required_gate_signature_invalid"
 _R_DISQUALIFIED = "stable_fail_latched_or_disqualified"
 _R_SCANNER_CONFIG_MISMATCH = "scanner_config_rev_mismatch"
+
+# Deny reasons that indicate a FORGERY / TAMPER / cross-tree replay (not a benign
+# gate failure): a forged/unsigned signature, a verdict bound to the wrong tree, a
+# provenance that doesn't bind the subject, or a tampered scanner config. On such a
+# deny the caller disqualifies the digest cross-fork (gov §5 fork-divergence
+# defense) so a sibling fork re-presenting it under a fresh run_id is also denied.
+# A plain `_R_GATE_NOT_PASS` (an honest failing gate) is NOT here — the stable-FAIL
+# latch handles that; we do not poison a digest for an honest failure.
+FORGERY_DENY_REASONS: frozenset[str] = frozenset(
+    {
+        _R_PROVENANCE_UNBOUND,
+        _R_SIG_INVALID,
+        _R_GATE_WRONG_TREE,
+        _R_GATE_SIG_INVALID,
+        _R_SCANNER_CONFIG_MISMATCH,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -243,6 +263,19 @@ class AdmissionController:
         if records.admission_look(subject_digest) is not AdmissionState.ADMISSIBLE:
             latched = True
             return deny(_R_DISQUALIFIED)
+
+        # -- 4b. Stable-FAIL latch is keyed on the TREE, not the subject -------
+        # The runner latches stable FAIL on `run_against` (the integrated tree sha),
+        # a DIFFERENT namespace from `subject_digest` — so check #4's subject query
+        # alone would miss a stably-FAILed tree re-presented with a fresh PASS (the
+        # newest-by-Seq verdict check #3 reads). Consult the latch under every tree
+        # this release rests on (the provenance tree + any distinct per-gate tree).
+        # This is what actually upholds the §5 "a later PASS can't mask a stable
+        # FAIL at deploy" invariant the check #4 docstring claims.
+        for expected_tree in {tree_sha, *trees.values()}:
+            if records.admission_look(expected_tree) is not AdmissionState.ADMISSIBLE:
+                latched = True
+                return deny(_R_DISQUALIFIED)
 
         # All four checks held for the EXACT subject_digest ⇒ ADMIT.
         return AdmissionDecision(

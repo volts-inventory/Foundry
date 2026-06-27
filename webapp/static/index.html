@@ -94,12 +94,17 @@
         </select>
       </div>
       <div class="row">
-        <label>Parallel ICs <span class="hint">— engineers building at once (Wave C/D)</span></label>
-        <div class="slots-row">
-          <input id="slots-input" type="number" min="1" max="16" value="1" />
-          <button id="suggest-btn" type="button" title="Suggest a count from the request + packs">suggest</button>
-          <span id="slots-hint" class="hint"></span>
-        </div>
+        <label>Coding substrate</label>
+        <select id="adapter-select">
+          <option value="stub">stub — deterministic no-op (smoke/demo)</option>
+          <option value="claude-code">claude-code — claude -p writes the code</option>
+          <option value="raw-react">raw-react — code via the chosen backend</option>
+        </select>
+      </div>
+      <div class="row">
+        <label>Parallelism</label>
+        <p class="hint" id="parallel-note">Automatic — the tech-lead decomposes the
+          work and the system runs the independent tasks in parallel.</p>
       </div>
       <label>Auto-fix attempts <span class="hint">— retries per failing gate (default 3)</span></label>
       <input id="fix-input" type="number" min="0" max="10" value="3" />
@@ -108,6 +113,7 @@
       <label>Domain packs (optional, comma-separated)</label>
       <input id="packs-input" type="text" placeholder="regulated, ml_data, frontend" />
       <label class="check"><input type="checkbox" id="supervised" checked /> Supervised (CTO approves each checkpoint)</label>
+      <p class="hint" id="supervised-hint"></p>
       <div class="dialog-actions">
         <button id="start-btn" class="primary">BREAK GROUND</button>
         <button id="cancel-btn">cancel</button>

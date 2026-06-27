@@ -58,10 +58,10 @@ from typing import TYPE_CHECKING
 
 from foundry.canonical import content_digest
 from foundry.schemas.base import ExternalAction, IdempotencyPath
-from foundry.schemas.operations import DeployResult
+from foundry.schemas.trust_root import DeployResult
 
 if TYPE_CHECKING:
-    from foundry.schemas.operations import AdmissionDecision
+    from foundry.schemas.trust_root import AdmissionDecision
     from foundry.state.seq import Seq
 
 # The deploy ExternalAction kind (matches base.ExternalAction's documented set).

@@ -54,6 +54,35 @@ def test_max_fix_attempts_valid_runs() -> None:
     assert main(["--max-fix-attempts", "5", "build a thing"]) == 0
 
 
+# ---- --checkpoints heuristic (H5: must not greedily eat the request) ---------
+
+
+def test_checkpoints_bare_enables_all_and_does_not_eat_request() -> None:
+    # `--checkpoints` directly before the request must NOT consume it as a value.
+    assert main(["--checkpoints", "build a thing"]) == 0
+
+
+def test_checkpoints_all_and_boundary_list_parse() -> None:
+    assert main(["--checkpoints", "all", "build a thing"]) == 0
+    assert main(["--checkpoints", "product,design", "build a thing"]) == 0
+
+
+# ---- the de-duplicated value-flag helpers (H5) ------------------------------
+
+
+def test_value_flag_missing_value_is_usage_error() -> None:
+    # A value flag at the end with no following token is a clean exit-2 usage error.
+    assert main(["build a thing", "--out"]) == 2
+    assert main(["--max-slots"]) == 2
+
+
+def test_max_slots_and_cost_cap_validate() -> None:
+    assert main(["--max-slots", "abc", "build a thing"]) == 2
+    assert main(["--max-slots", "0", "build a thing"]) == 2
+    assert main(["--cost-cap-microusd", "nope", "build a thing"]) == 2
+    assert main(["--max-slots", "2", "build a thing"]) == 0
+
+
 # ---- evolve --strict --------------------------------------------------------
 
 

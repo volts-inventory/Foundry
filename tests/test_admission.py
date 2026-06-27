@@ -23,8 +23,11 @@ import pytest
 
 from foundry.gates.attestation import DevGateWriteVerifier, ZoneBSigner
 from foundry.schemas.gates import GateResult, GateStatus, VerdictClass
-from foundry.schemas.operations import AdmissionVerdict, BuildRequest
 from foundry.schemas.security import SBOMComponent
+from foundry.schemas.trust_root import (
+    AdmissionVerdict,
+    BuildRequest,
+)
 from foundry.state.global_records import GlobalRecords
 from foundry.state.seq import Seq
 from foundry.trust_root import AdmissionController, BuildOutput, TrustedBuilder

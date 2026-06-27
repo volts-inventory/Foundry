@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS builds (
   request          TEXT,
   mode             TEXT,
   backend          TEXT,
+  adapter          TEXT,   -- coding substrate (stub/claude-code/raw-react)
   supervised       INTEGER,
   slots            INTEGER,
   max_fix_attempts INTEGER,
@@ -40,12 +41,29 @@ CREATE TABLE IF NOT EXISTS builds (
   out_base         TEXT,
   created_at       TEXT
 );
+-- The append-only game-event log per build (the SSE stream's durable backing).
+-- Persisting it lets ANY device replay a build's whole story after a reconnect or
+-- a server restart, and lets many viewers each tail the same log independently.
+CREATE TABLE IF NOT EXISTS events (
+  project_id  TEXT NOT NULL,
+  seq         INTEGER NOT NULL,   -- 0,1,2… the event's index within the build
+  data        TEXT NOT NULL,      -- json of the event dict
+  PRIMARY KEY (project_id, seq)
+);
+-- The set of artifact handles a build has already surfaced. Persisted so a build
+-- RESUMED after a restart doesn't re-emit its whole history (the resumed run's
+-- cumulative inspection payload re-lists every prior artifact; this dedups them).
+CREATE TABLE IF NOT EXISTS seen_uris (
+  project_id  TEXT NOT NULL,
+  uri         TEXT NOT NULL,
+  PRIMARY KEY (project_id, uri)
+);
 """
 
 _COLS = (
     "id", "floor", "release_seq", "parent_id", "request", "mode", "backend",
-    "supervised", "slots", "max_fix_attempts", "status", "passed", "gates",
-    "out_base", "created_at",
+    "adapter", "supervised", "slots", "max_fix_attempts", "status", "passed",
+    "gates", "out_base", "created_at",
 )
 
 
@@ -61,7 +79,15 @@ class BuildStore:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.executescript(_SCHEMA)
+            self._migrate()
             self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after a DB was first created (CREATE TABLE IF NOT
+        EXISTS never alters an existing table). Idempotent; runs under the lock."""
+        have = {r["name"] for r in self._conn.execute("PRAGMA table_info(builds)")}
+        if "adapter" not in have:
+            self._conn.execute("ALTER TABLE builds ADD COLUMN adapter TEXT")
 
     def upsert(self, rec: dict[str, Any]) -> None:
         """Insert or replace one build row. ``gates`` is JSON-encoded."""
@@ -141,3 +167,49 @@ class BuildStore:
                 "SELECT MAX(release_seq) AS m FROM builds WHERE floor = ?", (floor,)
             ).fetchone()
         return int(r["m"]) if r and r["m"] is not None else 0
+
+    # ---- per-build event log (the durable SSE backing) ----------------------
+    def append_event(self, project_id: str, seq: int, data: dict[str, Any]) -> None:
+        """Append one game event at index ``seq``. Idempotent on (project_id, seq)
+        — a replayed/duplicate emit (e.g. a resume) coalesces instead of forking."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO events (project_id, seq, data) VALUES (?, ?, ?)",
+                (project_id, seq, json.dumps(data)),
+            )
+            self._conn.commit()
+
+    def events_of(self, project_id: str) -> list[dict[str, Any]]:
+        """Every event for a build, in order — the full replay log."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT data FROM events WHERE project_id = ? ORDER BY seq ASC",
+                (project_id,),
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            try:
+                out.append(json.loads(r["data"]))
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    def add_seen(self, project_id: str, uris: set[str]) -> None:
+        """Record the artifact handles a build has surfaced (idempotent)."""
+        if not uris:
+            return
+        with self._lock:
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO seen_uris (project_id, uri) VALUES (?, ?)",
+                [(project_id, u) for u in uris],
+            )
+            self._conn.commit()
+
+    def seen_of(self, project_id: str) -> set[str]:
+        """The handles a build already surfaced — seeded into a resumed run so it
+        doesn't re-emit them."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT uri FROM seen_uris WHERE project_id = ?", (project_id,)
+            ).fetchall()
+        return {r["uri"] for r in rows}

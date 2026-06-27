@@ -32,7 +32,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from foundry.operations.run_status import RunSignals, derive_status
-from foundry.schemas.operations import (
+from foundry.schemas.operability import (
     Alert,
     AlertSeverity,
     RunStatus,

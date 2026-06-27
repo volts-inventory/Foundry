@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Any
 # ``foundry.agents._common``); re-exported here so the quality factories' import
 # path stays stable and there is no byte-duplicate to drift.
 from foundry.agents._common import emit_artifact, journal_entry
+from foundry.canonical import content_digest
 
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
@@ -46,6 +47,7 @@ __all__ = [
     "MissingVerdictNonceError",
     "emit_artifact",
     "journal_entry",
+    "require_verdict_nonce",
     "server_issued_nonce",
     "state_sha",
     "subject_artifact_uri",
@@ -67,20 +69,45 @@ def _configurable(config: RunnableConfig) -> dict[str, Any]:
     return dict(cfg)
 
 
-def server_issued_nonce(config: RunnableConfig) -> str:
-    """The single-use ``verdict_nonce`` the runtime threaded onto the run config.
+def require_verdict_nonce(config: RunnableConfig) -> str:
+    """Return the server-issued BASE nonce, or raise :class:`MissingVerdictNonceError`.
 
-    Server-issued by the nonce ledger (``global_records.py``); the reviewer
-    consumes it and never mints one (LEARNINGS L5: agents do not author the
-    trust inputs of a verdict). Fail-closed when absent.
-    """
-    nonce = _configurable(config).get("verdict_nonce")
-    if not isinstance(nonce, str) or not nonce:
+    Called first by a judgment node so a missing nonce fails closed BEFORE anything
+    else — the most fundamental trust input of a verdict — even though the
+    per-request nonce is only derived later (once the subject/state it binds to are
+    known). The reviewer never mints one (L5)."""
+    base = _configurable(config).get("verdict_nonce")
+    if not isinstance(base, str) or not base:
         raise MissingVerdictNonceError(
             "reviewer_critic requires a server-issued verdict_nonce on "
             "config['configurable']['verdict_nonce']; agents never mint one"
         )
-    return nonce
+    return base
+
+
+def server_issued_nonce(
+    config: RunnableConfig, *, node_id: str, subject_uri: str, state_sha: str
+) -> str:
+    """The single-use ``verdict_nonce`` for THIS review request.
+
+    Server-issued by the nonce ledger (``global_records.py``) as a per-run BASE and
+    threaded onto the run config; the reviewer consumes it and never mints one
+    (LEARNINGS L5: agents do not author the trust inputs of a verdict). Fail-closed
+    when absent.
+
+    The base is BOUND to this request's identity — ``(node_id, subject_uri,
+    state_sha)`` — so every judgment verdict in a run gets its OWN single-use nonce
+    (H3). Without this, the two reviews a gated/autonomous run emits (quality +
+    assurance) would share one nonce, and consuming the first would make
+    ``merge_gates`` reject the second. The derivation is still server-grounded (the
+    base) and not agent-mintable (node/subject/state are run identity, all signed
+    into the judgment binding), and it is deterministic so a resume re-derives the
+    SAME nonce (idempotent consumption).
+    """
+    base = require_verdict_nonce(config)
+    return "N-" + content_digest(
+        {"base": base, "node": node_id, "subject": subject_uri, "state": state_sha}
+    )
 
 
 def subject_artifact_uri(config: RunnableConfig, state_subject: str | None) -> str:

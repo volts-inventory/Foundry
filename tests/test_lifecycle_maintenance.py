@@ -37,8 +37,11 @@ from foundry.lifecycle.maintenance import (
     plan_maintenance,
 )
 from foundry.schemas.gates import GateResult, GateStatus
-from foundry.schemas.operations import AdmissionVerdict, BuildRequest
 from foundry.schemas.security import SBOMComponent
+from foundry.schemas.trust_root import (
+    AdmissionVerdict,
+    BuildRequest,
+)
 from foundry.state.global_records import GlobalRecords
 from foundry.state.seq import Seq
 from foundry.state.tree_sha import tree_sha
@@ -71,7 +74,7 @@ _GATES = (
     BuildGate(),
     TestGate(min_passed=1),
     AuditGate(),
-    SecurityGate(use_semgrep=False),
+    SecurityGate(),
 )
 _REQUIRED = tuple(g.name for g in _GATES)
 _COMPONENTS = (SBOMComponent(name="libfoo", version="1.2.3", digest=_MAT_A, license="MIT"),)

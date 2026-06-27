@@ -23,6 +23,10 @@ mutants/
 # project's tracked planning-doc dir — do NOT ignore it; run output goes to /.run/.
 .env
 /.run/
+# ephemeral real-backend smoke output (not a deliverable)
+/.realtest/
+/.realtest*/
+/.auto*/
 /spec.md
 # Drop-in workshop art (operator-provided; keep the README + example only)
 /webapp/static/assets/*

@@ -10,14 +10,6 @@ dependencies = [
     "pydantic>=2.13.4",
 ]
 
-[project.optional-dependencies]
-# Production checkpoint backend for the docker-compose / EKS profile
-# (FOUNDRY_CHECKPOINTER=postgres). OPTIONAL: the dev/default backend is sqlite,
-# the only one wired and validated in this repo. The Postgres swap (a
-# PostgresSaver on the shared one-txn-per-superstep connection) is a documented
-# swap point — see docs/deploy-compose.md. Install with: uv sync --extra postgres
-postgres = ["langgraph-checkpoint-postgres>=2.0.0"]
-
 [dependency-groups]
 dev = [
     "hypothesis>=6.155.2",

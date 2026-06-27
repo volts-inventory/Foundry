@@ -39,7 +39,10 @@ from foundry.operations.store_resilience import (
     with_store_outage_handling,
 )
 from foundry.schemas.base import BudgetLedger, ExternalAction, IdempotencyPath
-from foundry.schemas.operations import PauseReason, RunStatus
+from foundry.schemas.operability import (
+    PauseReason,
+    RunStatus,
+)
 from foundry.state.seq import Seq
 
 RUN = "run-resilience-1"

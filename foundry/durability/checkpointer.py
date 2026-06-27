@@ -11,11 +11,6 @@ Dev backend (this module): a single ``sqlite3`` connection (WAL,
 checkpoint ``put()`` and an outbox ``enqueue()`` inside
 :meth:`FoundryCheckpointer.superstep_txn` commit (or roll back) atomically.
 
-Prod backend: ``PostgresSaver`` constructed on the same shared
-connection/transaction with the identical discipline — the saver, the outbox
-INSERTs, and the ledger UPDATEs all join one server-side transaction; nothing
-in :mod:`foundry.durability.outbox` is SQLite-specific.
-
 SqliteSaver API friction (langgraph-checkpoint-sqlite 3.1.0) and how it is
 resolved here:
 
@@ -123,33 +118,15 @@ class FoundryCheckpointer:
 
 
 def make_checkpointer(db_path: str | Path = ":memory:") -> FoundryCheckpointer:
-    """Construct the checkpointer for the backend named by ``FOUNDRY_CHECKPOINTER``.
+    """Construct the sqlite checkpointer (the single-host LAN backend).
 
-    The deployment-portability seam (TASK [14]): the dev / docker-compose default
-    is ``sqlite`` (this module's :class:`FoundryCheckpointer`, the ONLY backend
-    validated in this environment). ``postgres`` is the production EKS/RDS target.
-
-    SCAFFOLDING / SWAP POINT (honest): the Postgres path is NOT wired here. The
-    ``PostgresSaver`` must join the IDENTICAL one-transaction-per-superstep
-    discipline (architecture.md §5 / DS3) — a ``PostgresSaver`` constructed on a
-    shared connection whose ``commit()`` defers to ``superstep_txn``, the same
-    invariant ``_SuperstepConnection`` enforces for SQLite — and that cannot be
-    built/validated without a live Postgres in this environment. Rather than ship
-    untestable wiring, this factory FAILS CLOSED on ``postgres`` with a pointer to
-    the swap, and on any unknown value. See ``docs/deploy-compose.md`` (EKS note).
-    """
+    sqlite (this module's :class:`FoundryCheckpointer`) is durable on a mounted
+    volume and survives a restart — the validated single-host backend. The
+    ``FOUNDRY_CHECKPOINTER`` env is accepted for back-compat but only ``sqlite``
+    is supported."""
     backend = os.environ.get("FOUNDRY_CHECKPOINTER", "sqlite").strip().lower()
-    if backend == "sqlite":
+    if backend in ("", "sqlite"):
         return FoundryCheckpointer(db_path)
-    if backend == "postgres":
-        raise NotImplementedError(
-            "FOUNDRY_CHECKPOINTER=postgres is a documented swap point, not yet "
-            "wired: a PostgresSaver must join the same one-transaction-per-"
-            "superstep discipline as _SuperstepConnection (architecture.md §5 / "
-            "DS3). Add langgraph-checkpoint-postgres and the shared-connection "
-            "wiring against a live Postgres, then validate. See "
-            "docs/deploy-compose.md."
-        )
     raise ValueError(
-        f"unknown FOUNDRY_CHECKPOINTER {backend!r} (expected 'sqlite' or 'postgres')"
+        f"unknown FOUNDRY_CHECKPOINTER {backend!r} (only 'sqlite' is supported)"
     )

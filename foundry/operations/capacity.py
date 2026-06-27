@@ -45,7 +45,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
 from foundry.schemas.base import FrozenModel
-from foundry.schemas.operations import (
+from foundry.schemas.operability import (
     FairnessDecision,
     QueueEntry,
     RunStatus,
@@ -61,7 +61,6 @@ DEFAULT_HIBERNATE_IDLE_MS = 30 * 60 * 1000  # 30 minutes
 # --- reasons (stable strings, mirror FairnessDecision.reason vocabulary) ----
 
 REASON_ADMITTED = "admitted"
-REASON_FAIR_SHARE = "fair_share"
 REASON_FLEET_COST_RATE_CAP = "fleet_cost_rate_cap"
 REASON_TENANT_CONCURRENCY = "tenant_concurrency"
 REASON_NO_SLOTS = "no_slots"

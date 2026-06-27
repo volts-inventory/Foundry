@@ -18,8 +18,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from foundry.agents._common import cas_uri, emit_artifact
-from foundry.schemas.gates import GateTriage
+from foundry.agents.security._common import (
+    blocking_triage,
+    cas_uri,
+    emit_artifact,
+    run_against,
+)
 from foundry.schemas.security import AuditFinding, Severity
 
 if TYPE_CHECKING:
@@ -31,8 +35,6 @@ if TYPE_CHECKING:
 _NODE_ID = "audit_compliance"
 _TIER = "T2"
 _AUDIT_GATE = "audit"
-
-_BLOCKING_SEVERITIES = frozenset({Severity.HIGH, Severity.CRITICAL})
 
 SOP = (
     "You are the Audit / Compliance agent (Layer 5). Follow this SOP, in order:\n"
@@ -63,15 +65,6 @@ _SCHEMA: dict[str, Any] = {
 }
 
 
-def _run_against(config: RunnableConfig) -> str:
-    """The tree_sha the audit triaged (config-pinned; run-id fallback)."""
-    configurable = config.get("configurable") or {}
-    pinned = configurable.get("run_against") or configurable.get("state_sha")
-    if pinned:
-        return str(pinned)
-    return str(configurable.get("thread_id", ""))
-
-
 def make_audit_compliance_node(rt: AgentRuntime) -> NodeFn:
     """Factory for the Audit / Compliance node (LEARNINGS AR3).
 
@@ -81,7 +74,7 @@ def make_audit_compliance_node(rt: AgentRuntime) -> NodeFn:
     def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         finding_seq = rt.seq(config, _NODE_ID, "artifact:audit_finding")
         triage_seq = rt.seq(config, _NODE_ID, "gate_triage:audit")
-        run_against = _run_against(config)
+        run_ref = run_against(config)
 
         result = rt.proxy.complete(
             _NODE_ID,
@@ -99,7 +92,7 @@ def make_audit_compliance_node(rt: AgentRuntime) -> NodeFn:
         compliance_body = payload.get("compliance_map_body")
 
         finding = AuditFinding(
-            run_against=run_against,
+            run_against=run_ref,
             sbom_uri=cas_uri(str(payload.get("sbom_body", ""))),
             severity=severity,
             findings=findings,
@@ -112,39 +105,23 @@ def make_audit_compliance_node(rt: AgentRuntime) -> NodeFn:
         handle = emit_artifact(
             finding, "audit_finding", _NODE_ID, finding_seq, store=rt.cas
         )
-        triage = _triage(severity, findings, run_against, triage_seq)
+        triage = blocking_triage(
+            name=_AUDIT_GATE,
+            severity=severity,
+            findings=findings,
+            run_against=run_ref,
+            seq=triage_seq,
+            produced_by=_NODE_ID,
+            noun="audit",
+            blocking_suffix=(
+                "The Audit gate runner must confirm SBOM/license/CVE "
+                "before admission."
+            ),
+            empty="No license/CVE/control-mapping findings.",
+        )
 
         # ADVISORY only — never a GateResult; the trusted runner re-derives and
         # signs the Audit verdict (LEARNINGS L5).
         return {"artifacts": [handle], "gate_triage": [triage]}
 
     return _node
-
-
-def _triage(
-    severity: Severity,
-    findings: tuple[str, ...],
-    run_against: str,
-    seq: Any,
-) -> GateTriage:
-    """The advisory the Audit gate consumes (HIGH/CRITICAL flagged BLOCKING)."""
-    if severity in _BLOCKING_SEVERITIES and findings:
-        explanation = (
-            f"BLOCKING: {severity.value}-severity audit finding(s) — "
-            f"{'; '.join(findings)}. The Audit gate runner must confirm "
-            "SBOM/license/CVE before admission."
-        )
-    elif findings:
-        explanation = (
-            f"Non-blocking ({severity.value}): audit findings — "
-            f"{'; '.join(findings)}."
-        )
-    else:
-        explanation = "No license/CVE/control-mapping findings."
-    return GateTriage(
-        name=_AUDIT_GATE,
-        run_against=run_against,
-        explanation=explanation,
-        produced_by=_NODE_ID,
-        seq=seq,
-    )

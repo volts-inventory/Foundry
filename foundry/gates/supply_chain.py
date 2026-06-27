@@ -14,9 +14,8 @@ code (gov §4). This is a deterministic OPA-style policy over the *diff text*:
   decision, not an application change.
 
 Pure-python and self-contained: the input is the unified-diff text, so the gate
-needs no scanners and never executes the diff. Production layers Conftest/OPA
-policy bundles behind the same seam; ``scanner_config_rev`` in the attestation
-pins the policy revision (plan §0.3).
+needs no scanners and never executes the diff. ``scanner_config_rev`` in the
+attestation pins the policy revision.
 """
 
 from __future__ import annotations

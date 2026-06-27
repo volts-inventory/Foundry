@@ -97,6 +97,16 @@ CREATE TABLE IF NOT EXISTS worm_audit (
     prev_hash TEXT NOT NULL,
     hash      TEXT NOT NULL
 );
+-- A valid linear chain has a UNIQUE prev_hash per row (each row links the one
+-- head before it). Enforcing it makes a CONCURRENT fork — two appenders reading
+-- the same head and both inserting — FAIL CLOSED on the second INSERT instead of
+-- silently branching the chain (DEFENCE for the read-then-insert in append_audit;
+-- the portable guard that holds even where BEGIN IMMEDIATE doesn't, e.g. Postgres
+-- READ COMMITTED). An INDEX (not just a table constraint) so existing DBs migrate.
+-- (A valid chain has unique prev_hashes — genesis appears once; the index builds
+-- cleanly on any honest existing DB and only errors on one already forked, which
+-- is the corruption we want surfaced, not hidden.)
+CREATE UNIQUE INDEX IF NOT EXISTS ux_worm_audit_prev_hash ON worm_audit (prev_hash);
 """
 
 
@@ -127,7 +137,9 @@ def append_audit(conn: sqlite3.Connection, event: dict) -> str:
 
     WORM discipline: this is the only writer and it only ever INSERTs.
     Callers running inside the superstep txn get the audit row committed
-    atomically with the checkpoint/outbox rows.
+    atomically with the checkpoint/outbox rows. The ``UNIQUE(prev_hash)`` index
+    makes a concurrent fork (two appenders off the same head) fail closed on the
+    second INSERT rather than silently branch the chain.
     """
     event_text = canonical_bytes(event).decode("utf-8")
     row = conn.execute(

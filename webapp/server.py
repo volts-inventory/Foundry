@@ -12,9 +12,9 @@ approve can NEVER release a failing build (the gates decide; this is just the vi
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
-import queue
 import shutil
 import threading
 import time
@@ -33,13 +33,53 @@ _STATIC = Path(__file__).parent / "static"
 _PACE = 0.5          # seconds between paced game events
 _STAGE_PAUSE = 0.9   # extra beat when a new stage opens
 _AUTO_APPROVE_DELAY = 1.4  # auto-run: dwell on each checkpoint before approving
-_END = {"type": "_end"}
 
 _MODES = ("assistant", "gated", "autonomous")
 
 # Where each floor's build writes its output tree + doc bundle (gitignored).
 # Override with WORKSHOP_OUTPUT_DIR (e.g. a mounted volume on a Pi).
 _OUTPUT_ROOT = Path(os.environ.get("WORKSHOP_OUTPUT_DIR", ".run/web")).resolve()
+
+# Durable factory state is ALWAYS ON for the Workshop (unlike the one-shot CLI,
+# whose in-memory default is right for a hermetic smoke run). The Workshop is a
+# long-lived, multi-device, restart-prone SERVER driving human-in-the-loop builds:
+# making the checkpointer + trust ledgers + CAS + WORM audit file-backed lets a
+# build SURVIVE a restart (and is the precondition for resuming one). Default lives
+# beside the other persisted state (catalog/output); override or relocate with
+# WORKSHOP_STATE_DIR / FOUNDRY_STATE_DIR.
+_STATE_DIR = (
+    os.environ.get("WORKSHOP_STATE_DIR")
+    or os.environ.get("FOUNDRY_STATE_DIR")
+    or str(_OUTPUT_ROOT / "state")
+)
+
+# State-changing routes (start a build → real model spend, drive a checkpoint) are
+# guarded. A shared token (FOUNDRY_WORKSHOP_TOKEN) gates them when the server is
+# exposed beyond localhost; an Origin/Host same-origin check blocks a malicious web
+# page from POSTing to a localhost workshop (CSRF) even with no token set.
+_AUTH_TOKEN = os.environ.get("FOUNDRY_WORKSHOP_TOKEN") or None
+
+
+def _authorize_mutation(headers: Any, token: str | None) -> str | None:
+    """Return a denial reason for a state-changing request, or None if allowed.
+
+    1. CSRF: if an ``Origin`` header is present it MUST match the request ``Host``
+       (a cross-site browser POST carries the attacker's Origin → rejected). A
+       request with no Origin (curl, same-origin fetch) passes this check.
+    2. Token: if a shared token is configured, a matching ``X-Workshop-Token``
+       header (constant-time compared) is required. Unset ⇒ no token needed
+       (localhost-only default)."""
+    origin = headers.get("Origin")
+    if origin:
+        from urllib.parse import urlparse
+
+        if urlparse(origin).netloc != (headers.get("Host") or ""):
+            return "cross-origin request rejected (CSRF guard)"
+    if token:
+        provided = headers.get("X-Workshop-Token") or ""
+        if not hmac.compare_digest(provided, token):
+            return "missing or invalid workshop token"
+    return None
 _MAX_VIEW_BYTES = 1_000_000  # cap a single file served to the in-page viewer
 # Uploaded-spec-zip limits (defence-in-depth for an untrusted upload).
 _MAX_ZIP_BYTES = 5_000_000
@@ -153,9 +193,11 @@ class Project:
     supervised: bool
     floor: int
     backend: str = "mock"
+    adapter: str = "stub"  # coding substrate (see foundry.cli.ADAPTERS)
     packs: list[str] = field(default_factory=list)
     spec: str | None = None  # literal spec text OR a dir of uploaded docs (run(spec=))
-    max_slots: int = 1  # IC-pool parallelism (Wave C; >1 engages the budget tree, Wave D)
+    max_slots: int = 4  # IC-pool CEILING (= cli.AUTO_SLOTS_CAP); the system sizes
+    # actual parallelism to the lead's decomposition (min(tasks, this)).
     cost_cap_microusd: int | None = None  # global spend envelope (Wave D)
     max_fix_attempts: int = 3  # auto-fix retry budget per failing gate (run() default)
     release_seq: int = 1  # 1,2,3… within the floor; each iterate adds a release
@@ -164,8 +206,19 @@ class Project:
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
-    events: queue.Queue[dict[str, Any]] = field(default_factory=queue.Queue)
-    decisions: queue.Queue[str] = field(default_factory=queue.Queue)
+    # The retained, append-only event log + a Condition every viewer waits on.
+    # A single shared queue would let two streams STEAL each other's events; a log
+    # lets many devices each tail it at their own cursor, and a late/reconnecting
+    # device replays from the start (or from its Last-Event-ID). `cond` guards
+    # `log`, `ended`, and the checkpoint-decision fields below.
+    log: list[dict[str, Any]] = field(default_factory=list)
+    cond: threading.Condition = field(default_factory=threading.Condition)
+    ended: bool = False
+    # Checkpoint decisions: first decision for a checkpoint wins (idempotent);
+    # every device still watches the resolution play (it's just another log event).
+    checkpoint_seq: int = 0          # monotonic id of the LATEST checkpoint reached
+    pending_checkpoint: int | None = None  # the checkpoint awaiting a decision, if any
+    decision_for: dict[int, str] = field(default_factory=dict)  # checkpoint id -> decision
     seen_uris: set[str] = field(default_factory=set)
     status: str = "running"
     passed: bool = False  # final verdict (for elevator/reload rehydration)
@@ -229,7 +282,8 @@ def _build_record(p: "Project") -> dict[str, Any]:
     return {
         "id": p.id, "floor": p.floor, "release_seq": p.release_seq,
         "parent_id": p.parent_id, "request": p.request, "mode": p.mode,
-        "backend": p.backend, "supervised": p.supervised, "slots": p.max_slots,
+        "backend": p.backend, "adapter": p.adapter,
+        "supervised": p.supervised, "slots": p.max_slots,
         "max_fix_attempts": p.max_fix_attempts, "status": p.status,
         "passed": p.passed, "gates": p.gates,
         "out_base": str(p.out_base) if p.out_base else None,
@@ -252,11 +306,14 @@ def _persist(p: "Project | None" = None) -> None:
 
 
 def _load_persisted() -> None:
-    """Rehydrate finished floors from the catalog on startup (best-effort).
+    """Rehydrate floors from the catalog on startup (best-effort).
 
-    A floor that was mid-build at save time can't resume (its thread is gone), so
-    it's marked ``done`` (not awaiting) — the floor + its written OUTPUT remain
-    browsable, but no live stream reconnects."""
+    The persisted event log is loaded back into each project, so a device that
+    connects after a restart replays the build's WHOLE story (not just a final
+    snapshot). A floor that was mid-build at save time can't resume its computation
+    (its thread is gone — that needs the durable checkpointer, FOUNDRY_STATE_DIR),
+    so it's closed out honestly: an `interrupted` marker is appended and the stream
+    ends once the replay catches up."""
     try:
         rows = _STORE.latest_per_floor()   # one row per project (its newest release)
     except Exception:
@@ -272,21 +329,73 @@ def _load_persisted() -> None:
                     floor=int(row.get("floor", 0)),
                     release_seq=int(row.get("release_seq", 1) or 1),
                     backend=str(row.get("backend", "mock")),
+                    adapter=str(row.get("adapter", "stub")),
                     max_slots=int(row.get("slots", 1) or 1),
                     max_fix_attempts=int(row.get("max_fix_attempts", 3) or 3),
                     parent_id=row.get("parent_id"),
                     out_base=Path(ob) if ob else None,
                     created_at=str(row.get("created_at") or ""),
                 )
-                p.status = "done"            # in-flight at save => finished/interrupted
+                try:
+                    p.log = _STORE.events_of(p.id)   # the durable replay log
+                except Exception:
+                    p.log = []
+                was_running = str(row.get("status", "")) == "running" and not any(
+                    e.get("type") == "_end" for e in p.log
+                )
                 p.passed = bool(row.get("passed", False))
                 p.awaiting = False
                 p.gates = dict(row.get("gates") or {})
-                p.events.put(_END)           # any late stream connect ends at once
                 _PROJECTS[p.id] = p
+                if was_running and _has_durable_checkpoint(p.id):
+                    # Durable state survived the restart → RESUME the build from its
+                    # last checkpoint. Seed the dedup set so the resumed run doesn't
+                    # re-emit the history already in the log.
+                    try:
+                        p.seen_uris = _STORE.seen_of(p.id)
+                    except Exception:
+                        p.seen_uris = set()
+                    p.status = "running"
+                    p.ended = False
+                    threading.Thread(target=_run_factory, args=(p,),
+                                     kwargs={"resume": True}, daemon=True).start()
+                elif was_running:
+                    # No recoverable checkpoint → close it out honestly (history kept,
+                    # terminal markers appended on the same log so replays end cleanly).
+                    p.status = "done"
+                    _emit(p, type="narrate",
+                          text="↻ Server restarted — this build was interrupted "
+                               "(its history is preserved; it can't be resumed).")
+                    _emit(p, type="halt", phase="interrupted",
+                          reason="server restarted mid-build")
+                    _emit(p, type="done", passed=False, phase="interrupted")
+                    _close(p)
+                else:
+                    p.status = "done"
+                    p.ended = True           # already terminal; a late connect ends at once
             except Exception:
                 continue
         _FLOOR[0] = max(_FLOOR[0], _STORE.max_floor())
+
+
+def _has_durable_checkpoint(thread_id: str) -> bool:
+    """True iff a durable checkpoint exists for ``thread_id`` — i.e. the build can
+    actually be RESUMED (vs. re-run from scratch). Probes the checkpoint DB read-only
+    and fail-closed: any error ⇒ not resumable (we then close it out honestly)."""
+    try:
+        from foundry.durability.checkpointer import FoundryCheckpointer
+
+        db = Path(_STATE_DIR) / "checkpoints.db"
+        if not db.exists():
+            return False
+        ckpt = FoundryCheckpointer(str(db))
+        try:
+            tup = ckpt.saver.get_tuple({"configurable": {"thread_id": thread_id}})
+            return tup is not None
+        finally:
+            ckpt.close()
+    except Exception:
+        return False
 
 
 def _emit(p: Project, **event: Any) -> None:
@@ -298,9 +407,68 @@ def _emit(p: Project, **event: Any) -> None:
             p.gates[name] = {"status": event.get("status"),
                              "attested": event.get("attested", True),
                              "advisory": event.get("advisory", False)}
-    p.events.put(event)
+    with p.cond:
+        seq = len(p.log)
+        p.log.append(event)
+        if event.get("type") == "_end":
+            p.ended = True
+        p.cond.notify_all()       # wake EVERY connected stream (not just one)
+    # Durably back the log so a reconnect/restart can replay the whole story.
+    try:
+        _STORE.append_event(p.id, seq, event)
+    except Exception:
+        pass
     if event.get("type") in _PERSIST_ON:
         _persist(p)   # catalog the build's metadata on each state change
+
+
+def _close(p: Project) -> None:
+    """Terminate the stream for every viewer (the build is over)."""
+    _emit(p, type="_end")
+
+
+def _record_decision(p: Project, decision: str, checkpoint: int | None) -> tuple[bool, bool]:
+    """Record a checkpoint decision, FIRST-wins. Returns ``(applied, stale)``.
+
+    ``stale`` is True when the decision names no current pause (already resolved,
+    or a different checkpoint than the one awaiting) — a no-op. ``applied`` is True
+    only for the FIRST decision on the awaiting checkpoint; later/duplicate clicks
+    from any device return ``(False, False)`` and simply watch the resolution play."""
+    with p.cond:
+        cidx = p.pending_checkpoint
+        if checkpoint is not None and checkpoint != cidx:
+            return (False, True)          # a stale click for an already-passed pause
+        if cidx is None:
+            return (False, True)          # nothing is awaiting a decision
+        if cidx in p.decision_for:
+            return (False, False)         # someone already decided this one
+        p.decision_for[cidx] = decision
+        p.cond.notify_all()
+        return (True, False)
+
+
+def _resume_cursor(last_event_id: str | None) -> int:
+    """The log index a stream should resume at given an SSE ``Last-Event-ID``.
+
+    A fresh viewer (no id) starts at 0 and replays the whole log; a reconnecting
+    EventSource replays its last id, so we resume at the NEXT event."""
+    if last_event_id and last_event_id.isdigit():
+        return int(last_event_id) + 1
+    return 0
+
+
+def _await_decision(p: Project, cidx: int, timeout: float = 600.0) -> str:
+    """Block the build until SOME device decides checkpoint ``cidx`` (first wins),
+    or until ``timeout`` elapses (then auto-approve). Many devices can post; only
+    the first is recorded — the rest watch the `resolved` event play, live."""
+    deadline = time.monotonic() + timeout
+    with p.cond:
+        while cidx not in p.decision_for:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return "approve"
+            p.cond.wait(remaining)
+        return p.decision_for[cidx]
 
 
 def _emit_paced(p: Project, events: list[dict[str, Any]]) -> None:
@@ -309,36 +477,55 @@ def _emit_paced(p: Project, events: list[dict[str, Any]]) -> None:
         time.sleep(_STAGE_PAUSE if ev.get("type") == "stage" else _PACE)
 
 
-def _run_factory(p: Project) -> None:
-    """Drive a REAL build; stream its telemetry as paced game events."""
+def _run_factory(p: Project, resume: bool = False) -> None:
+    """Drive a REAL build; stream its telemetry as paced game events.
+
+    ``resume=True`` re-enters a build that was interrupted by a server restart: the
+    durable checkpointer continues the graph from its last superstep, and the
+    persisted ``seen_uris`` (seeded by the caller) keep the resumed run from
+    re-emitting the history it already streamed."""
     # Imported here so the server starts fast and a missing dep never blocks boot.
     from foundry.cli import run
 
-    _emit(p, type="project", id=p.id, request=p.request, mode=p.mode, floor=p.floor,
-          backend=p.backend, slots=p.max_slots)
-    _emit(p, type="narrate", text=f"📋 New project on Floor {p.floor}: {p.request!r}")
-    _emit(p, type="narrate", text=f"🏭 Mode: {p.mode}. The crew reports for duty…")
+    if resume:
+        _emit(p, type="narrate",
+              text="↻ Resuming after a restart — picking up from the last checkpoint…")
+    else:
+        _emit(p, type="project", id=p.id, request=p.request, mode=p.mode, floor=p.floor,
+              backend=p.backend, slots=p.max_slots)
+        _emit(p, type="narrate", text=f"📋 New project on Floor {p.floor}: {p.request!r}")
+        _emit(p, type="narrate", text=f"🏭 Mode: {p.mode}. The crew reports for duty…")
     time.sleep(_PACE)
 
     def responder(payload: dict[str, Any]) -> str:
         # The REAL stage payload -> paced game events, then the CTO's call.
         _emit_paced(p, events_for_payload(payload, p.seen_uris))
+        try:                          # persist the dedup set so a resume won't replay
+            _STORE.add_seen(p.id, p.seen_uris)
+        except Exception:
+            pass
         # Stash the agents' journal so a lead can be "interviewed" ([11], advisory).
         jrnl = payload.get("agent_journal")
         if isinstance(jrnl, list):
             p.journal = jrnl
         boundary = str(payload.get("boundary", "stage"))
         if p.supervised:
+            with p.cond:
+                p.checkpoint_seq += 1
+                cidx = p.checkpoint_seq
+                p.pending_checkpoint = cidx
             p.awaiting = True
-            _emit(p, type="await_decision", boundary=boundary, journal=p.journal)
-            try:
-                decision = p.decisions.get(timeout=600)
-            except queue.Empty:
-                decision = "approve"
+            # `checkpoint` lets any device's decision name WHICH pause it answers,
+            # so a stale/duplicate click can't leak into the next checkpoint.
+            _emit(p, type="await_decision", boundary=boundary, checkpoint=cidx,
+                  journal=p.journal)
+            decision = _await_decision(p, cidx)
         else:
             time.sleep(_AUTO_APPROVE_DELAY)
             decision = "approve"
         p.awaiting = False
+        with p.cond:
+            p.pending_checkpoint = None
         _emit(p, type="resolved", boundary=boundary, decision=decision)
         verb = "approved" if decision == "approve" else "REJECTED"
         _emit(p, type="narrate", text=f"🧑‍💼 CTO {verb} the {boundary} checkpoint.")
@@ -351,6 +538,7 @@ def _run_factory(p: Project) -> None:
             p.request,
             mode=p.mode,
             backend=p.backend,            # real backend per project (not always mock)
+            adapter=p.adapter,            # coding substrate (stub/claude-code/raw-react)
             packs=p.packs or None,        # optional domain packs (regulated/ml_data/frontend)
             spec=p.spec,                  # pasted spec text OR uploaded docs dir (additive)
             max_slots=p.max_slots,        # IC-pool parallelism (Wave C) + budget tree (Wave D)
@@ -358,6 +546,7 @@ def _run_factory(p: Project) -> None:
             max_fix_attempts=p.max_fix_attempts,
             base_dir=p.base_dir,          # iterate: prior code seeded as the base tree
             thread_id=p.id,               # UNIQUE per project — no cross-floor collision
+            state_dir=_STATE_DIR,         # durable: the build survives (and resumes past) a restart
             checkpoints=True,
             checkpoint_responder=responder,
             output_dir=str(code_dir) if code_dir else None,
@@ -369,7 +558,7 @@ def _run_factory(p: Project) -> None:
         _emit(p, type="done", passed=False, phase="error")
         p.status = "done"
         _persist(p)
-        p.events.put(_END)
+        _close(p)
         return
 
     # Iterate "on top of" the prior code: the build wrote ONLY its changed/added
@@ -407,7 +596,7 @@ def _run_factory(p: Project) -> None:
     p.passed = bool(result.passed)
     p.status = "done"
     _persist(p)              # catalog the FINAL status/passed (after they're set)
-    p.events.put(_END)
+    _close(p)
 
 
 # --------------------------------------------------------------------------- #
@@ -497,18 +686,26 @@ class Handler(BaseHTTPRequestHandler):
     def _config(self) -> None:
         """UI config: the default backend (FOUNDRY_MODEL_BACKEND, else mock) so the
         modal preselects it — a deployment sets the env to default to claude-cli."""
-        from foundry.cli import BACKENDS
+        from foundry.cli import ADAPTERS, BACKENDS, _tier_models
 
         default = os.environ.get("FOUNDRY_MODEL_BACKEND", "mock")
         if default not in BACKENDS:
             default = "mock"
+        default_adapter = os.environ.get("FOUNDRY_CODING_ADAPTER", "stub")
+        if default_adapter not in ADAPTERS:
+            default_adapter = "stub"
+        # The effective per-tier model ids the default real backend would serve
+        # (curated default + FOUNDRY_MODEL_T{1,2,3} overrides) so the UI can SHOW
+        # what runs. Mock has no real models.
+        models = {} if default == "mock" else _tier_models(default)
         try:
             default_slots = max(1, int(os.environ.get("FOUNDRY_MAX_SLOTS", "1") or "1"))
         except ValueError:
             default_slots = 1
         self._json(200, {
             "default_backend": default, "backends": list(BACKENDS),
-            "default_max_slots": default_slots,
+            "default_adapter": default_adapter, "adapters": list(ADAPTERS),
+            "default_max_slots": default_slots, "models": models,
         })
 
     # -- output browsing (the build's written code + docs) ----------------------
@@ -579,6 +776,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = self.path.split("?", 1)[0]
+        denied = _authorize_mutation(self.headers, _AUTH_TOKEN)
+        if denied is not None:
+            self._json(403, {"error": denied})
+            return
         if path == "/api/projects":
             self._new_project()
         elif path == "/api/ideate":
@@ -608,7 +809,8 @@ class Handler(BaseHTTPRequestHandler):
         rows = [
             {"id": p.id, "floor": p.floor, "release": p.release_seq,
              "releases": counts[p.floor], "request": p.request, "mode": p.mode,
-             "backend": p.backend, "supervised": p.supervised, "slots": p.max_slots,
+             "backend": p.backend, "adapter": p.adapter,
+             "supervised": p.supervised, "slots": p.max_slots,
              "status": p.status, "passed": p.passed, "awaiting": p.awaiting,
              "gates": p.gates, "parent_id": p.parent_id}
             for p in sorted(by_floor.values(), key=lambda x: x.floor)
@@ -745,7 +947,8 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, {"session": session, "messages": msgs, "spec": spec})
 
     def _new_project(self) -> None:
-        from foundry.cli import BACKENDS  # validate against the real backend set
+        # validate against the real backend + adapter sets
+        from foundry.cli import ADAPTERS, BACKENDS
 
         body = self._read_json()
         request = str(body.get("request", "")).strip() or "build a tiny URL-shortener service"
@@ -755,6 +958,9 @@ class Handler(BaseHTTPRequestHandler):
         backend = str(body.get("backend", "mock"))
         if backend not in BACKENDS:
             backend = "mock"
+        adapter = str(body.get("adapter", "stub"))
+        if adapter not in ADAPTERS:
+            adapter = "stub"
         raw_packs = body.get("packs", [])
         if isinstance(raw_packs, str):
             raw_packs = raw_packs.replace(",", " ").split()
@@ -762,10 +968,15 @@ class Handler(BaseHTTPRequestHandler):
         supervised = bool(body.get("supervised", True))
         spec_text = str(body.get("spec_text", "")).strip()
         spec_zip_b64 = body.get("spec_zip_b64")
+        # Parallelism is system-decided (the Tech-Lead's decomposition sizes the IC
+        # pool, capped by AUTO_SLOTS_CAP). The env/body value only OVERRIDES the
+        # ceiling; absent ⇒ the automatic cap. The UI no longer asks for a count.
+        from foundry.cli import AUTO_SLOTS_CAP
+
         try:
-            default_slots = int(os.environ.get("FOUNDRY_MAX_SLOTS", "1") or "1")
+            default_slots = int(os.environ.get("FOUNDRY_MAX_SLOTS", "") or AUTO_SLOTS_CAP)
         except ValueError:
-            default_slots = 1
+            default_slots = AUTO_SLOTS_CAP
         try:
             max_slots = int(body.get("max_slots", default_slots))
         except (TypeError, ValueError):
@@ -824,7 +1035,7 @@ class Handler(BaseHTTPRequestHandler):
                 base_dir = str(pcode)        # seed the base tree with the prior code
         p = Project(
             id=pid, request=request, mode=mode, supervised=supervised, floor=floor,
-            release_seq=release_seq, backend=backend, packs=packs, spec=spec,
+            release_seq=release_seq, backend=backend, adapter=adapter, packs=packs, spec=spec,
             out_base=out_base, max_slots=max_slots, cost_cap_microusd=cost_cap_microusd,
             max_fix_attempts=max_fix_attempts, parent_id=parent_id, base_dir=base_dir,
         )
@@ -843,14 +1054,26 @@ class Handler(BaseHTTPRequestHandler):
         if p is None:
             self._json(404, {"error": "no such project"})
             return
-        p.decisions.put(decision)
-        self._json(200, {"ok": True})
+        # First decision for the awaiting checkpoint wins; later/duplicate clicks
+        # (from this or another device) are no-ops — but every device still sees
+        # the `resolved` event play, because it rides the shared log.
+        cp = body.get("checkpoint")
+        try:
+            checkpoint = int(cp) if cp is not None else None
+        except (TypeError, ValueError):
+            checkpoint = None
+        applied, stale = _record_decision(p, decision, checkpoint)
+        self._json(200, {"ok": not stale, "applied": applied, "stale": stale})
 
     def _stream(self, pid: str) -> None:
         p = _PROJECTS.get(pid)
         if p is None:
             self._json(404, {"error": "no such project"})
             return
+        # Resume point: the browser's EventSource replays its Last-Event-ID on a
+        # transient reconnect (so it tails from where it left off, no re-replay);
+        # a brand-new viewer sends none and replays the whole log from 0.
+        cursor = _resume_cursor(self.headers.get("Last-Event-ID"))
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -859,17 +1082,29 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         try:
             while True:
-                try:
-                    ev = p.events.get(timeout=15)
-                except queue.Empty:
+                with p.cond:
+                    while len(p.log) <= cursor and not p.ended:
+                        if not p.cond.wait(timeout=15):
+                            break          # idle → fall through to a keep-alive
+                    batch = p.log[cursor:]
+                    ended = p.ended
+                if not batch:
+                    if ended:              # caught up AND the build is over
+                        self.wfile.write(b"event: end\ndata: {}\n\n")
+                        self.wfile.flush()
+                        return
                     self.wfile.write(b": keep-alive\n\n")  # comment frame
                     self.wfile.flush()
                     continue
-                if ev is _END or ev.get("type") == "_end":
-                    self.wfile.write(b"event: end\ndata: {}\n\n")
-                    self.wfile.flush()
-                    return
-                self.wfile.write(f"data: {json.dumps(ev)}\n\n".encode())
+                for idx, ev in enumerate(batch, start=cursor):
+                    if ev.get("type") == "_end":
+                        self.wfile.write(f"id: {idx}\nevent: end\ndata: {{}}\n\n".encode())
+                        self.wfile.flush()
+                        return
+                    self.wfile.write(
+                        f"id: {idx}\ndata: {json.dumps(ev)}\n\n".encode()
+                    )
+                cursor += len(batch)
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, OSError):
             return  # client navigated away
@@ -894,18 +1129,30 @@ def _lan_ip() -> str | None:
 
 
 def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
-    _load_persisted()   # rehydrate finished floors from the disk index
+    Path(_STATE_DIR).mkdir(parents=True, exist_ok=True)   # durable factory state
+    _load_persisted()   # rehydrate floors (+ resume any interrupted build) from disk
     srv = ThreadingHTTPServer((host, port), Handler)
     shown = "localhost" if host in ("127.0.0.1", "0.0.0.0") else host
     print(f"\n  🏭  Foundry Workshop running →  http://{shown}:{port}\n")
+    print(f"      durable state: {_STATE_DIR}  (builds survive a restart)")
     if _PROJECTS:
-        print(f"      restored {len(_PROJECTS)} floor(s) from the build catalog\n")
+        resumed = sum(1 for q in _PROJECTS.values() if q.status == "running")
+        line = f"      restored {len(_PROJECTS)} floor(s) from the build catalog"
+        print(line + (f" — resuming {resumed} interrupted build(s)\n" if resumed else "\n"))
     if host == "0.0.0.0":  # opt-in LAN exposure (e.g. a Pi) — warned below
         lan = _lan_ip()
         if lan:
-            print(f"      On your LAN (phone/tablet):  http://{lan}:{port}")
-        print("      ⚠ bound to ALL interfaces — anyone on this network can reach it"
-              " (and start/steer builds). Use only on a trusted LAN.\n")
+            tok = f"/?token={_AUTH_TOKEN}" if _AUTH_TOKEN else ""
+            print(f"      On your LAN (phone/tablet):  http://{lan}:{port}{tok}")
+        print("      ⚠ bound to ALL interfaces — anyone on this network can reach it.")
+        if _AUTH_TOKEN:
+            print("      🔒 a FOUNDRY_WORKSHOP_TOKEN is required for builds (good).\n")
+        else:
+            print("      ⚠ no FOUNDRY_WORKSHOP_TOKEN set — set one to require auth for"
+                  " state-changing requests on an exposed network.\n")
+    else:
+        # Localhost default: the Origin/CSRF guard still blocks a malicious page.
+        print(f"      auth: {'token required' if _AUTH_TOKEN else 'localhost-only + CSRF guard'}")
     print("      (Ctrl-C to stop)\n")
     try:
         srv.serve_forever()

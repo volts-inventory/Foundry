@@ -18,7 +18,10 @@ from foundry.operations.run_status import (
     is_past_deadline,
     watchdog,
 )
-from foundry.schemas.operations import PauseReason, RunStatus
+from foundry.schemas.operability import (
+    PauseReason,
+    RunStatus,
+)
 from foundry.state.seq import Seq
 
 # A simple per-node-type latency model: deadline budget = 100 + 20 + 30 = 150ms

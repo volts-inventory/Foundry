@@ -39,7 +39,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from foundry.schemas.operations import (
+from foundry.schemas.operability import (
     Alert,
     AlertSeverity,
     HITLLoad,

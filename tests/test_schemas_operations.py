@@ -15,7 +15,7 @@ import pytest
 from pydantic import ValidationError
 
 from foundry.schemas.base import FrozenModel
-from foundry.schemas.operations import (
+from foundry.schemas.operability import (
     SLO,
     Alert,
     AlertSeverity,

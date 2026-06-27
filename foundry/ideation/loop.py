@@ -143,19 +143,14 @@ class IdeationResult:
 
     Carries the original ``idea``, every :class:`IdeationRound` (oldest first),
     and the rendered markdown ``spec_markdown`` — the handoff artifact for task
-    [8]'s ``--spec`` ingest. ``final`` is the last (most-refined) round, the one
-    the spec document is rendered from. This is NOT a channel record: it holds no
-    ``Seq``, writes to no reducer, and round-trips through no store.
+    [8]'s ``--spec`` ingest. The spec document is rendered from the last
+    (most-refined) round. This is NOT a channel record: it holds no ``Seq``,
+    writes to no reducer, and round-trips through no store.
     """
 
     idea: str
     rounds: tuple[IdeationRound, ...]
     spec_markdown: str
-
-    @property
-    def final(self) -> IdeationRound:
-        """The most-refined round (the spec is rendered from this one)."""
-        return self.rounds[-1]
 
 
 def _round_prompt(idea: str, prior: IdeationRound | None, round_no: int, total: int) -> str:

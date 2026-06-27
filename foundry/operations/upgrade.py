@@ -45,7 +45,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from foundry.durability.serde import FOUNDRY_MSGPACK_MODULES
-from foundry.schemas.operations import (
+from foundry.schemas.operability import (
     UpgradeAction,
     UpgradePlan,
     VersionStamp,

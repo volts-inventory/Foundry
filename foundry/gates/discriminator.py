@@ -68,10 +68,8 @@ __all__ = [
     "required_kill_ratio",
 ]
 
-# A green pytest run uses these counts; re-used here for the mutant re-runs.
-_PYTEST_GREEN = 0
+# A failing pytest run uses this rc; the mutant re-runs key "killed" off it.
 _PYTEST_FAILED = 1
-_NO_TESTS_COLLECTED = 5
 
 #: Default minimum fraction of held-out mutants a genuine suite must kill.
 default_kill_bar: float = 1.0

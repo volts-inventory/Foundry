@@ -97,13 +97,15 @@ from foundry.proxy import ModelProviderProxy
 from foundry.proxy.test_doubles import MockTransport
 from foundry.schemas.base import Artifact
 from foundry.schemas.gates import GateResult, GateStatus, VerdictClass
-from foundry.schemas.operations import (
-    AdmissionVerdict,
-    BuildRequest,
+from foundry.schemas.operability import (
     PauseReason,
     RunStatus,
 )
 from foundry.schemas.security import SBOMComponent
+from foundry.schemas.trust_root import (
+    AdmissionVerdict,
+    BuildRequest,
+)
 from foundry.state.factory_state import FactoryState
 from foundry.state.global_records import GlobalRecords
 from foundry.state.reducers import (
@@ -764,6 +766,42 @@ def test_forged_verdict_unsigned_attestation_cannot_reach_prod() -> None:
         pass
 
 
+def test_forgery_deny_disqualifies_digest_cross_fork() -> None:
+    """The autonomous emit node's cross-fork defense (gov §5, trust-audit F1): a
+    forgery/tamper admission DENY disqualifies the digest in the ledger, so a sibling
+    fork re-presenting the SAME digest under a fresh run_id is also denied. An honest
+    gate FAILURE is NOT a forgery and must NOT poison the digest."""
+    from foundry.state.global_records import AdmissionState
+    from foundry.trust_root.admission import FORGERY_DENY_REASONS
+
+    records, verifier = _records_verifier()
+    signer = ZoneBSigner(KEY, KEY_ID)
+    build = _genuine_build(signer, "tree-fv-disq")
+    tree = build.provenance.tree_sha
+    digest = build.result.subject_digest
+    gates = list(_all_pass_gate_state(signer, tree).values())
+    # Agent-forged (unsigned) security verdict -> signature-invalid forgery deny.
+    gates[_REQUIRED_GATES.index("security")] = gates[
+        _REQUIRED_GATES.index("security")
+    ].model_copy(update={"runner_attestation": None})
+
+    decision = AdmissionController(builder_id=BUILDER_ID).admit(
+        digest, provenance=build.provenance, build_verdict=build.signed_verdict,
+        gate_results=tuple(gates), required_gates=_REQUIRED_GATES,
+        records=records, verifier=verifier, seq=_seq(),
+    )
+    assert decision.verdict is AdmissionVerdict.DENY
+    assert decision.reason in FORGERY_DENY_REASONS              # a forgery, not a benign fail
+
+    # This is what the emit node does on a forgery deny (factory_graph):
+    records.disqualify_digest(decision.subject_digest, decision.reason, "run-A")
+    # A sibling fork re-presenting the SAME digest now reads DISQUALIFIED.
+    assert records.admission_look(digest) is AdmissionState.DISQUALIFIED
+
+    # Honest failure must NOT be treated as forgery (the stable-FAIL latch owns that).
+    assert "required_gate_not_pass" not in FORGERY_DENY_REASONS
+
+
 def test_forged_terminal_gate_across_trees_cannot_reach_prod() -> None:
     """ATTACK (M4-R1-01): the release spans TWO materialized trees — the terminal
     Spec/Build/Test gates on the terminal tree, the assurance gates (security/
@@ -961,6 +999,37 @@ def test_fork_divergence_stable_fail_latch_cannot_reach_prod() -> None:
     )
     assert decision.verdict is AdmissionVerdict.DENY
     assert decision.reason == "stable_fail_latched_or_disqualified"
+    with_pytest_refuse(decision)
+
+
+def test_stable_fail_latch_on_TREE_namespace_cannot_reach_prod() -> None:
+    """ATTACK (H2): the runner latches stable FAIL on the TREE sha (`run_against`) —
+    a DIFFERENT namespace from `subject_digest`. A later PASS masks the FAIL in the
+    live gate-state, and check #4's subject query can't see a TREE latch. The test
+    above latches the SUBJECT digest (so #4 catches it); this one latches the TREE,
+    the way production actually does, and proves admission STILL denies via #4b."""
+    records, verifier = _records_verifier()
+    signer = ZoneBSigner(KEY, KEY_ID)
+    build = _genuine_build(signer, "tree-fork-treelatch")
+    tree = build.provenance.tree_sha
+    digest = build.result.subject_digest
+    # Latch on the TREE, not the subject digest (what the runner does on a FAIL).
+    records.latch_stable_fail(tree, "security", "run-9")
+    from foundry.state.global_records import AdmissionState
+
+    # The namespaces are genuinely distinct: the SUBJECT reads admissible…
+    assert records.admission_look(digest) is AdmissionState.ADMISSIBLE
+    # …while the TREE is disqualified. Check #4 (subject) alone would miss this.
+    assert records.admission_look(tree) is AdmissionState.DISQUALIFIED
+
+    decision = AdmissionController(builder_id=BUILDER_ID).admit(
+        digest, provenance=build.provenance, build_verdict=build.signed_verdict,
+        gate_results=tuple(_all_pass_gate_state(signer, tree).values()),
+        required_gates=_REQUIRED_GATES, records=records, verifier=verifier, seq=_seq(),
+    )
+    assert decision.verdict is AdmissionVerdict.DENY
+    assert decision.reason == "stable_fail_latched_or_disqualified"
+    assert decision.stable_fail_latched
     with_pytest_refuse(decision)
 
 

@@ -535,7 +535,7 @@ _REV_GATES = (
     BuildGate(),
     TestGate(min_passed=1),
     AuditGate(),
-    SecurityGate(use_semgrep=False),
+    SecurityGate(),
 )
 _REV_GATE_NAMES = {g.name for g in _REV_GATES}
 

@@ -54,7 +54,7 @@ from foundry.operations.trusted_component import (
     on_recovery,
     on_unavailable,
 )
-from foundry.schemas.operations import RunStatusRecord
+from foundry.schemas.operability import RunStatusRecord
 from foundry.state.seq import Seq
 
 # ===========================================================================

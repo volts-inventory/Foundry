@@ -142,6 +142,15 @@ def _review_requests_changes(state: FactoryState) -> bool:
     A MISSING review verdict is treated as "needs review" (fail-closed: never
     advance past the evaluator on an absent verdict). An attested approve (PASS)
     is the only thing that does NOT request changes.
+
+    LOAD-BEARING (H3 negative latch): the fail-closed-on-missing branch is what
+    makes "an approve cannot override a latched request-changes" hold. Once the
+    judgment-commit step latches a request-changes (``_commit_judgment_ledger``),
+    ``merge_gates`` DROPS that verdict (and any later approve at the same key) from
+    the channel, so ``_latest_review`` returns None here — which MUST route as
+    request-changes. Do NOT change this to fail-open on a missing verdict: that
+    would let a latched (rejected) review silently advance. The negative-latch
+    no-override invariant is asserted end-to-end in test_agents_quality.
     """
     review = _latest_review(state)
     if review is None:

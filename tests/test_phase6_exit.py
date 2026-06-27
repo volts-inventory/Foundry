@@ -504,7 +504,7 @@ _GATES = (
     BuildGate(),
     TestGate(min_passed=1),
     AuditGate(),
-    SecurityGate(use_semgrep=False),
+    SecurityGate(),
 )
 _REQUIRED = tuple(g.name for g in _GATES)
 _COMPONENTS = (SBOMComponent(name="libfoo", version="1.2.3", digest=_MAT_A, license="MIT"),)
@@ -542,7 +542,7 @@ def _with_criteria(files: dict[str, str]) -> dict[str, str]:
 
 def _build_provenance(signer: ZoneBSigner, *, tree: str):
     """A genuine hermetic build keyed to the maintained tree_sha."""
-    from foundry.schemas.operations import BuildRequest
+    from foundry.schemas.trust_root import BuildRequest
 
     builder = TrustedBuilder(signer, builder_id=_BUILDER_ID)
     request = BuildRequest(

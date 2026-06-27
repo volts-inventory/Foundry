@@ -1,20 +1,11 @@
 # Foundry application image — builds the `foundry` package and its deps with uv.
 #
-# SCAFFOLDING (TASK [14]): no docker daemon is available in the authoring
-# environment, so this Dockerfile is NOT built/validated here. It is written to
-# be EKS-portable by construction (12-factor: config via env, no baked-in
-# secrets, runs as a non-root user). Build with: `docker build -t foundry:dev .`
-#
-# IMAGE PINNING: external base images SHOULD be pinned by digest for
-# reproducibility/supply-chain (the `@sha256:...` form). The digests below are
-# PLACEHOLDERS — resolve the real digest in your environment before shipping:
-#     docker buildx imagetools inspect ghcr.io/astral-sh/uv:python3.12-bookworm-slim
-# and replace `@sha256:REPLACE_ME_*`. CI should fail if a tag is unpinned.
+# Builds a runnable Workshop image: `docker build -t foundry:dev .` then
+# `docker run -p 8765:8765 -e WORKSHOP_HOST=0.0.0.0 foundry:dev` serves the UI.
+# 12-factor: config via env, no baked-in secrets, non-root user.
 
 # --- builder: install deps + project into a self-contained venv --------------
-# uv's official image bundles a pinned Python; tag pins the minor, digest pins
-# the exact build (REPLACE the placeholder digest before shipping).
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim@sha256:REPLACE_ME_UV_BUILDER AS builder
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
@@ -37,17 +28,16 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev || uv sync --no-dev
 
 # --- runtime: slim, non-root, venv-on-PATH -----------------------------------
-# REPLACE the placeholder digest before shipping (see note above).
-FROM python:3.12-slim-bookworm@sha256:REPLACE_ME_PYTHON_RUNTIME AS runtime
+FROM python:3.12-slim-bookworm AS runtime
 
-# Non-root by construction (EKS securityContext parity).
+# Non-root by construction.
 RUN groupadd --system foundry && useradd --system --gid foundry --home /app foundry
 
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    # 12-factor defaults; every one is overridable by the orchestrator (compose
-    # env / K8s env). NO secrets baked in.
+    # 12-factor defaults; every one is overridable via the compose env. NO
+    # secrets baked in.
     FOUNDRY_CHECKPOINTER=sqlite \
     FOUNDRY_CAS_ROOT=/var/lib/foundry/cas \
     FOUNDRY_CHECKPOINT_DB=/var/lib/foundry/state/checkpoints.sqlite
@@ -66,15 +56,15 @@ COPY pyproject.toml ./
 # HEADLESS AUTH (the load-bearing part): interactive `claude login` / `codex
 # login` open a BROWSER OAuth flow — they CANNOT run in a container. Authenticate
 # by INJECTING A CREDENTIAL as a secret — NEVER baked into the image (full
-# precedence + options in docs/deploy-compose.md):
+# precedence + options in docs/deploy-docker.md):
 #   * claude-cli on a MAX SUBSCRIPTION -> CLAUDE_CODE_OAUTH_TOKEN, minted once on a
 #     workstation with `claude setup-token`. `claude -p` honours it (no --bare).
 #     Do NOT also set ANTHROPIC_API_KEY: it OUTRANKS the token and would bill the
 #     pay-per-token Console API instead of the subscription.
 #   * codex -> OPENAI_API_KEY.
 #   The proxy passes its env through to the CLI subprocess (cli_transports inherits
-#   os.environ), so the credential just needs to be on the process. Compose: a
-#   .env value; K8s: a Secret.
+#   os.environ), so the credential just needs to be on the process — a .env value
+#   read by compose.
 #   * OR a pre-provisioned ~/.claude/.credentials.json (Linux/Win; NOT macOS
 #     keychain) mounted read-only under $HOME (HOME=/app here, so /app/.claude).
 #     Mount it; do not COPY it into the image.
@@ -88,7 +78,7 @@ RUN if [ "$INSTALL_CLI_BACKENDS" = "true" ]; then \
     fi
 
 # Volume mount points for the durable CAS + checkpoint DB + the workshop's written
-# output (compose/K8s provide the actual volumes; owned by the non-root user).
+# output (compose provides the actual volumes; owned by the non-root user).
 RUN mkdir -p /var/lib/foundry/cas /var/lib/foundry/state /var/lib/foundry/web \
     && chown -R foundry:foundry /var/lib/foundry /app
 USER foundry
@@ -97,6 +87,19 @@ USER foundry
 # default serves the Workshop UI (webapp.server reads WORKSHOP_HOST/PORT/
 # WORKSHOP_OUTPUT_DIR + FOUNDRY_MODEL_BACKEND/FOUNDRY_MAX_SLOTS from the env).
 # Override to `["foundry", "run", …]` for a one-shot CLI build instead.
+# Durable state on the mounted volumes by default (survives a container restart):
+# the Workshop's catalog, event log, and factory checkpoints/ledgers live here.
+ENV WORKSHOP_OUTPUT_DIR=/var/lib/foundry/web \
+    WORKSHOP_STATE_DIR=/var/lib/foundry/state \
+    WORKSHOP_HOST=0.0.0.0 \
+    WORKSHOP_PORT=8765
+
+# Liveness: the Workshop answers /api/config (stdlib, no curl in the slim image).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD \
+    python -c "import urllib.request,os,sys; \
+u='http://127.0.0.1:'+os.environ.get('WORKSHOP_PORT','8765')+'/api/config'; \
+sys.exit(0 if urllib.request.urlopen(u,timeout=4).status==200 else 1)"
+
 EXPOSE 8765
 ENTRYPOINT ["python", "-m"]
 CMD ["webapp.server"]

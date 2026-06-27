@@ -1142,6 +1142,15 @@ const GAME = new Phaser.Game({
 // =========================================================================== //
 //  Floor manager + multi-project networking                                   //
 // =========================================================================== //
+// Workshop token (for a deployment that sets FOUNDRY_WORKSHOP_TOKEN): pass it as
+// ?token=… in the URL and it rides every state-changing POST. No token → omitted.
+const WORKSHOP_TOKEN = new URLSearchParams(location.search).get("token");
+function postHeaders(){
+  const h = {"Content-Type":"application/json"};
+  if (WORKSHOP_TOKEN) h["X-Workshop-Token"] = WORKSHOP_TOKEN;
+  return h;
+}
+
 const FLOORS = new Map();   // floorNum -> floor state (incl. its Phaser scene)
 let ACTIVE = null;          // the floor currently shown
 
@@ -1152,7 +1161,7 @@ async function newProject(req, mode, supervised, backend, packs, extra){
   let resp;
   try {
     resp = await fetch("/api/projects", {
-      method:"POST", headers:{"Content-Type":"application/json"},
+      method:"POST", headers:postHeaders(),
       body: JSON.stringify({request:req, mode, supervised, backend, packs, ...(extra||{})}),
     }).then(r=>r.json());
   } catch(err){ appendLogDom("bad","ERR "+err); return; }
@@ -1254,7 +1263,8 @@ function routeEvent(floor, ev){
     case "checkpoint":
       F.cp = {title:ev.title, summary:ev.summary, boundary:ev.boundary}; break;
     case "await_decision":
-      F.awaiting = true; if (Array.isArray(ev.journal)) F.journal = ev.journal;
+      F.awaiting = true; F.cpIndex = ev.checkpoint;
+      if (Array.isArray(ev.journal)) F.journal = ev.journal;
       renderElevator();
       if (S){ S.spotlightCTO(true); S.toLounge(); }   // team hangs out while CTO decides
       if (isActive) showCheckpoint(F); break;
@@ -1399,8 +1409,8 @@ function hideFiles(){ document.getElementById("files-modal").classList.add("hidd
 function sendDecision(decision){
   const F = FLOORS.get(ACTIVE);
   if (!F){ hideCheckpoint(); return; }
-  fetch("/api/decision/"+F.id, {method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({decision})});
+  fetch("/api/decision/"+F.id, {method:"POST", headers:postHeaders(),
+    body: JSON.stringify({decision, checkpoint: F.cpIndex})});
   F.awaiting = false; renderElevator(); hideCheckpoint();
 }
 
@@ -1438,7 +1448,7 @@ function askInterview(){
   const q = document.getElementById("iv-question").value.trim();
   const ans = document.getElementById("iv-answer");
   ans.classList.remove("hidden"); ans.textContent = "…asking "+IV_TARGET.role+"…";
-  fetch("/api/interview/"+IV_TARGET.id,{method:"POST",headers:{"Content-Type":"application/json"},
+  fetch("/api/interview/"+IV_TARGET.id,{method:"POST",headers:postHeaders(),
     body:JSON.stringify({role:IV_TARGET.role, question:q})})
    .then(r=>r.json()).then(d=>{ ans.textContent = d.answer || "(no answer)"; })
    .catch(()=>{ ans.textContent = "(interview request failed)"; });
@@ -1511,7 +1521,7 @@ function sendChat(){
   appendChatTurn("user", msg);
   appendChatTurn("system", "…leads are thinking…");
   const backend = document.getElementById("backend-select").value;
-  fetch("/api/ideate", {method:"POST", headers:{"Content-Type":"application/json"},
+  fetch("/api/ideate", {method:"POST", headers:postHeaders(),
     body: JSON.stringify({session:chatSession, message:msg, backend})})
    .then(r=>r.json())
    .then(d=>{
@@ -1538,7 +1548,10 @@ document.getElementById("start-btn").onclick=async ()=>{
   const backend=document.getElementById("backend-select").value;
   const packs=document.getElementById("packs-input").value;
   const sup=document.getElementById("supervised").checked;
-  const extra={max_slots: parseInt(document.getElementById("slots-input").value,10)||1};
+  // Parallelism is system-decided — the server sizes the IC pool to the lead's
+  // decomposition; the client sends no worker count.
+  const extra={};
+  extra.adapter=document.getElementById("adapter-select").value;
   const fix=parseInt(document.getElementById("fix-input").value,10);
   if(Number.isFinite(fix) && fix>=0) extra.max_fix_attempts=fix;
   const cap=parseFloat(document.getElementById("cap-input").value);
@@ -1574,18 +1587,6 @@ document.getElementById("files-close").onclick=hideFiles;
 document.getElementById("iv-ask").onclick=askInterview;
 document.getElementById("iv-close").onclick=()=>document.getElementById("iv-modal").classList.add("hidden");
 document.getElementById("iv-question").addEventListener("keydown",(e)=>{ if(e.key==="Enter"){ e.preventDefault(); askInterview(); }});
-// suggest a parallel-IC count from the request + packs
-document.getElementById("suggest-btn").onclick=()=>{
-  const request=document.getElementById("req-input").value;
-  const packs=document.getElementById("packs-input").value.split(",").map(s=>s.trim()).filter(Boolean);
-  const hint=document.getElementById("slots-hint"); hint.textContent="…";
-  fetch("/api/suggest-slots",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({request,packs})})
-   .then(r=>r.json()).then(d=>{
-     document.getElementById("slots-input").value=d.slots;
-     hint.textContent="≈"+d.slots+" areas: "+(d.areas||[]).join(", ");
-   }).catch(()=>{ hint.textContent=""; });
-};
 
 // preselect the configured default backend (FOUNDRY_MODEL_BACKEND on the server;
 // mock if unset). A deployment sets the env to default to claude-cli.
@@ -1593,7 +1594,9 @@ fetch("/api/config").then(r=>r.json()).then(c=>{
   const sel=document.getElementById("backend-select");
   if(c && c.default_backend && [...sel.options].some(o=>o.value===c.default_backend))
     sel.value=c.default_backend;
-  if(c && c.default_max_slots) document.getElementById("slots-input").value=c.default_max_slots;
+  const asel=document.getElementById("adapter-select");
+  if(c && c.default_adapter && asel && [...asel.options].some(o=>o.value===c.default_adapter))
+    asel.value=c.default_adapter;
   syncCostCap();
 }).catch(()=>{});
 
@@ -1612,6 +1615,27 @@ function syncCostCap(){
 }
 document.getElementById("backend-select").addEventListener("change", syncCostCap);
 syncCostCap();
+
+// Autonomous mode is HANDS-OFF by definition: the trust-root admission controller
+// is the sole release gate (build · admit · deploy, no human sign-off). So when
+// `autonomous` is picked, supervision (per-checkpoint human approval) is forced
+// OFF — keeping it on would pause an unattended build. assistant/gated re-enable it.
+function syncMode(){
+  const mode = document.getElementById("mode-select").value;
+  const sup = document.getElementById("supervised");
+  const hint = document.getElementById("supervised-hint");
+  if(!sup) return;
+  if(mode === "autonomous"){
+    sup.checked = false;
+    sup.disabled = true;
+    if(hint) hint.textContent = "Autonomous is hands-off — admission is the sole release gate; no checkpoint approvals.";
+  } else {
+    sup.disabled = false;
+    if(hint) hint.textContent = "";
+  }
+}
+document.getElementById("mode-select").addEventListener("change", syncMode);
+syncMode();
 
 // Rehydrate on (re)load: floors run server-side independently of this tab, so a
 // refresh / reconnect from another device rebuilds every floor + reconnects the

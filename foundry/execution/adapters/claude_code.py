@@ -13,6 +13,7 @@ comes from proxy observation only (arch §2b).
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 from pathlib import Path
@@ -60,11 +61,23 @@ class ClaudeCodeAdapter:
         run_id: str = "dev",
         node_id: str = "claude-code",
         timeout_s: float | None = None,
+        permission_mode: str | None = None,
     ) -> None:
         self._bin = claude_bin
         self._run_id = run_id
         self._node_id = node_id
         self._timeout_s = timeout_s
+        # `claude -p` runs HEADLESS with no interactive approval, so file writes
+        # are DENIED by default ("write permission wasn't granted") and the agent
+        # produces NO code. The adapter runs in a throwaway sandbox worktree, so
+        # auto-accepting edits there is safe + necessary. `acceptEdits` works as
+        # root AND non-root; `bypassPermissions` is broader (Bash too) but the CLI
+        # REFUSES it under root. Override via FOUNDRY_CLAUDE_PERMISSION_MODE.
+        self._permission_mode = (
+            permission_mode
+            or os.environ.get("FOUNDRY_CLAUDE_PERMISSION_MODE", "").strip()
+            or "acceptEdits"
+        )
 
     def available(self) -> bool:
         """True iff the `claude` binary is on PATH here."""
@@ -76,7 +89,14 @@ class ClaudeCodeAdapter:
             packet,
             epilogue=(
                 "Make the required changes in the current working directory. "
-                "Do not push, publish, or touch anything outside this worktree."
+                "Do not push, publish, or touch anything outside this worktree. "
+                # The Audit gate (autonomous/gated) grounds a dependency inventory
+                # from a lockfile and fails CLOSED if none exists, so the build must
+                # DECLARE its dependencies — even when there are none.
+                "For a Python project, ALWAYS include a `requirements.txt` pinning "
+                "every third-party dependency you use (create an EMPTY "
+                "`requirements.txt` if the code uses only the standard library) so "
+                "the dependency inventory is auditable."
             ),
         )
 
@@ -85,7 +105,11 @@ class ClaudeCodeAdapter:
             raise AdapterUnavailableError(f"{self._bin!r} binary not found on PATH")
 
         proc = sandbox.run(
-            [self._bin, "-p", self.build_prompt(packet), "--output-format", "json"],
+            [
+                self._bin, "-p", self.build_prompt(packet),
+                "--output-format", "json",
+                "--permission-mode", self._permission_mode,
+            ],
             timeout_s=self._timeout_s,
         )
         parsed = _parse_json_lenient(proc.stdout)

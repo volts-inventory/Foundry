@@ -22,7 +22,11 @@ from foundry.operations.capacity import (
     FleetCapacity,
     RunningRun,
 )
-from foundry.schemas.operations import QueueEntry, RunStatus, TenantQuota
+from foundry.schemas.operability import (
+    QueueEntry,
+    RunStatus,
+    TenantQuota,
+)
 from foundry.state.seq import Seq
 
 SEQ = Seq(run_id="sched", emission_epoch=1, superstep_index=0, node_id="capacity", local=0)

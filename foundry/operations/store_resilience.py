@@ -51,7 +51,7 @@ from typing import TYPE_CHECKING
 from foundry.durability.artifact_store import UnknownArtifactError
 from foundry.durability.outbox import verify_audit_chain
 from foundry.schemas.base import FrozenModel
-from foundry.schemas.operations import (
+from foundry.schemas.operability import (
     CheckpointHealth,
     PauseReason,
     RunStatus,

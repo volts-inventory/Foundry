@@ -129,8 +129,9 @@ from foundry.schemas.checkpoint import (
     CheckpointVerdict,
     inspection_payload,
 )
+from foundry.schemas.gates import GateResult, GateStatus
 from foundry.state.factory_state import FactoryState
-from foundry.state.reducers import merge_gates
+from foundry.state.reducers import JUDGMENT_VERDICTS, merge_gates
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -197,6 +198,30 @@ _CHECKPOINT_NODE: dict[CheckpointBoundary, str] = {
 # The conditional-edge labels a checkpoint router returns.
 _CKPT_PROCEED = "proceed"  # human approve -> continue to the gate boundary
 _CKPT_HALT = "halt"  # human reject/needs-changes -> END (no PR / no release)
+
+
+def _commit_judgment_ledger(
+    prior: list[GateResult] | None,
+    delta: list[GateResult] | None,
+    records: Any,
+) -> None:
+    """Trusted post-admission ledger WRITE for judgment verdicts (H3 / arch §3).
+
+    The orchestrator-side write that makes ``merge_gates``' read-only nonce +
+    negative-latch checks live: for each judgment verdict that SURVIVES the
+    ``merge_gates`` trust filter, consume its single-use ``verdict_nonce`` (keyed to
+    the verdict's content identity — idempotent, so re-folding the SAME verdict on a
+    resume is a no-op) and latch a request-changes (status FAIL) monotonically so a
+    later approve can't supersede it without a fresh nonce-bound re-review (LEARNINGS
+    Q3). Only ADMITTED verdicts are committed, so a forged/replayed verdict can never
+    burn the legit verdict's nonce. ``merge_gates`` is a PURE reducer and cannot do
+    this; the supervisor (which holds the cross-fork ``records``) does it here.
+    """
+    for g in merge_gates(prior, delta):
+        if g.name in JUDGMENT_VERDICTS and g.verdict_nonce:
+            records.consume_nonce(g.verdict_nonce, g.content_identity())
+            if g.status is GateStatus.FAIL:
+                records.latch_negative_verdict(g.latch_key())
 
 
 def normalize_checkpoints(
@@ -562,6 +587,9 @@ def build_supervisor_graph(
 
     def quality_node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         out: dict[str, Any] = dict(quality.invoke(state, config))
+        # H3: commit the admitted review verdict's nonce/negative-latch to the
+        # cross-fork ledger (the trusted write merge_gates' checks read).
+        _commit_judgment_ledger(state.get("gates"), out.get("gates"), runner.records)
         out["phase"] = _QUALITY
         return out
 
@@ -684,6 +712,9 @@ def build_supervisor_graph(
 
     def assurance_node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         out: dict[str, Any] = dict(assurance.invoke(state, config))
+        # H3: commit the assurance review verdict's nonce/negative-latch (same
+        # trusted post-admission write as the quality boundary).
+        _commit_judgment_ledger(state.get("gates"), out.get("gates"), runner.records)
         out["phase"] = _ASSURANCE
         return out
 

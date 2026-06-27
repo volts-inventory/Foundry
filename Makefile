@@ -24,7 +24,6 @@ BACKEND ?= $(or $(FOUNDRY_MODEL_BACKEND),mock)
 # project's tracked planning-doc directory).
 OUT ?= ./.run/code
 DOCS ?= ./.run/docs
-HOST ?= 127.0.0.1
 PORT ?= 8765
 IMAGE ?= foundry:dev
 INSTALL_CLI_BACKENDS ?= false
@@ -32,7 +31,7 @@ INSTALL_CLI_BACKENDS ?= false
 UV ?= uv
 
 .DEFAULT_GOAL := help
-.PHONY: help setup check lint fix typecheck test run spec workshop workshop-lan \
+.PHONY: help setup check lint fix typecheck test run spec \
         token env docker-build compose-config up down clean
 
 help: ## Show this help
@@ -40,7 +39,7 @@ help: ## Show this help
 	@grep -hE '^[a-zA-Z0-9_.-]+:.*?## ' $(MAKEFILE_LIST) \
 	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 	@echo
-	@echo "Vars: REQUEST MODE BACKEND OUT DOCS HOST PORT IMAGE INSTALL_CLI_BACKENDS"
+	@echo "Vars: REQUEST MODE BACKEND OUT DOCS PORT IMAGE INSTALL_CLI_BACKENDS"
 
 # ---- develop ---------------------------------------------------------------
 setup: ## Install deps + the project into a local venv (uv sync)
@@ -70,11 +69,9 @@ spec: ## Co-generate a spec from REQUEST (ideation) -> spec.md
 	$(UV) run python -m foundry.ideation --mock "$(REQUEST)" > spec.md
 	@echo "wrote spec.md — refine it, then: make run REQUEST=... (or --spec spec.md)"
 
-workshop: ## Launch the Workshop game UI (HOST:$(PORT); default localhost)
-	FOUNDRY_MODEL_BACKEND=$(BACKEND) WORKSHOP_HOST=$(HOST) WORKSHOP_PORT=$(PORT) $(UV) run python -m webapp.server
-
-workshop-lan: ## Launch bound to 0.0.0.0 — reachable on your LAN (e.g. a Pi from your phone)
-	FOUNDRY_MODEL_BACKEND=$(BACKEND) WORKSHOP_HOST=0.0.0.0 WORKSHOP_PORT=$(PORT) $(UV) run python -m webapp.server
+# Note: `make up` (Docker) is the Workshop launcher — it already binds 0.0.0.0,
+# so it's reachable on the LAN. To run WITHOUT Docker, just:
+#   uv run python -m webapp.server         (add WORKSHOP_HOST=0.0.0.0 for the LAN)
 
 # ---- credentials / config --------------------------------------------------
 token: ## Mint a Max-subscription OAuth token for the claude-cli backend
@@ -88,7 +85,6 @@ token: ## Mint a Max-subscription OAuth token for the claude-cli backend
 env: ## Scaffold a .env (secrets; gitignored) if missing
 	@if [ -f .env ]; then echo ".env already exists — leaving it untouched."; else \
 	  printf '%s\n' \
-	    'POSTGRES_PASSWORD=change-me' \
 	    'FOUNDRY_MODEL_BACKEND=mock' \
 	    '# claude-cli on a Max subscription (mint with: make token):' \
 	    '# FOUNDRY_MODEL_BACKEND=claude-cli' \
@@ -96,7 +92,12 @@ env: ## Scaffold a .env (secrets; gitignored) if missing
 	    '# ollama-gemma (Ollama runs on the HOST; never GPU-passthrough):' \
 	    '# FOUNDRY_MODEL_BACKEND=ollama-gemma' \
 	    '# FOUNDRY_OLLAMA_URL=http://host.docker.internal:11434' \
-	    '# codex backend: OPENAI_API_KEY=' > .env; \
+	    '# codex backend: OPENAI_API_KEY=' \
+	    '# Pin the EXACT model id per tier if your egress serves one the default' \
+	    "# map doesn't name (else the fail-closed drift policy rejects the call):" \
+	    '# FOUNDRY_MODEL_T1=claude-opus-4-8' \
+	    '# FOUNDRY_MODEL_T2=claude-sonnet-4-6' \
+	    '# FOUNDRY_MODEL_T3=claude-haiku-4-5' > .env; \
 	  echo "wrote .env — edit it before 'make up'."; fi
 
 # ---- docker / compose ------------------------------------------------------
@@ -106,7 +107,8 @@ docker-build: ## Build the image (INSTALL_CLI_BACKENDS=true bakes claude/codex C
 compose-config: ## Validate docker-compose.yml without starting anything
 	docker compose config
 
-up: env ## Build + start the compose stack (reads .env)
+up: env ## Build + serve the Workshop in Docker → http://localhost:$(PORT)
+	@echo "→ Building + starting the Workshop. When it's up, open: http://localhost:$(PORT)"
 	docker compose up --build
 
 down: ## Stop the compose stack

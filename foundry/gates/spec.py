@@ -83,8 +83,17 @@ class SpecGate:
             return observe(
                 self.name,
                 structured={"parse_ok": False, "error": f"unparseable criteria: {exc}"},
+                findings=(f"unparseable {self._criteria_filename}: {exc}",),
             )
-        return observe(self.name, structured={"parse_ok": True, "doc": doc})
+        # Descriptive (non-verdict) observations of the parsed criteria so a FAIL
+        # is diagnosable (which criterion / which missing field / no abuse case).
+        # These are raw observations — zone B (`decide`) alone turns them into the
+        # verdict; the findings only EXPLAIN it.
+        return observe(
+            self.name,
+            structured={"parse_ok": True, "doc": doc},
+            findings=self._describe(doc),
+        )
 
     # ---- zone B: pure completeness rules over the raw payload --------------
 
@@ -115,6 +124,40 @@ class SpecGate:
             # (gov §1b / agents.md Layer 1; LEARNINGS L5).
             return GateStatus.FAIL
         return GateStatus.PASS
+
+    def _describe(self, doc: Any) -> tuple[str, ...]:
+        """Human-readable observations of the parsed criteria (NOT a verdict).
+
+        Mirrors the fields ``decide`` checks so the findings name exactly why a
+        FAIL happened — surfaced in the run summary for a halted build. Pure
+        observation: zone B re-derives the verdict independently."""
+        criteria = self._criteria_of(doc)
+        if criteria is None:
+            return ("criteria doc is neither a JSON list nor an object with a 'criteria' list",)
+        if not criteria:
+            return ("criteria set is empty — nothing is specified",)
+        out: list[str] = []
+        for i, c in enumerate(criteria):
+            if not isinstance(c, dict):
+                out.append(f"criterion #{i} is not an object")
+                continue
+            cid = str(c.get("id") or f"#{i}")
+            missing = [
+                f for f in _REQUIRED_FIELDS
+                if not (isinstance(v := c.get(f), str) and v.strip())
+            ]
+            if missing:
+                out.append(f"criterion {cid}: missing/empty {', '.join(missing)}")
+        if self._require_security_criterion and not any(
+            isinstance(c, dict) and c.get("security_abuse") is True for c in criteria
+        ):
+            out.append(
+                "no criterion flags security_abuse=true — security/abuse coverage "
+                "is mandatory (gov §1b)"
+            )
+        if self._critique_blocks(doc):
+            out.append("criteria-completeness critic flagged a security/abuse omission")
+        return tuple(out) if out else (f"{len(criteria)} criteria, all structurally complete",)
 
     @staticmethod
     def _criteria_of(doc: Any) -> list[Any] | None:

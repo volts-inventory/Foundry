@@ -1,11 +1,7 @@
-"""make_checkpointer (TASK [14]) — the deployment-portability backend switch.
+"""make_checkpointer — the single-host sqlite checkpoint backend.
 
-The compose/EKS profile selects the checkpoint backend via env
-``FOUNDRY_CHECKPOINTER`` (12-factor config). Only the ``sqlite`` path is wired
-and validatable in this environment; ``postgres`` is a documented swap point
-that FAILS CLOSED. These tests pin that contract — they do NOT exercise a real
-Postgres (none is available here).
-"""
+``FOUNDRY_CHECKPOINTER`` is accepted for back-compat but only ``sqlite`` is
+supported (durable on a mounted volume, survives a restart)."""
 
 from __future__ import annotations
 
@@ -35,15 +31,8 @@ def test_explicit_sqlite(monkeypatch: pytest.MonkeyPatch) -> None:
         cp.close()
 
 
-def test_postgres_is_documented_swap_point_fails_closed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("FOUNDRY_CHECKPOINTER", "postgres")
-    with pytest.raises(NotImplementedError, match="swap point"):
-        make_checkpointer(":memory:")
-
-
 def test_unknown_backend_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("FOUNDRY_CHECKPOINTER", "mongodb")
-    with pytest.raises(ValueError, match="unknown FOUNDRY_CHECKPOINTER"):
-        make_checkpointer(":memory:")
+    for backend in ("postgres", "mongodb"):
+        monkeypatch.setenv("FOUNDRY_CHECKPOINTER", backend)
+        with pytest.raises(ValueError, match="unknown FOUNDRY_CHECKPOINTER"):
+            make_checkpointer(":memory:")

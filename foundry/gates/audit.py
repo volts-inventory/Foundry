@@ -12,11 +12,9 @@ agent hands in. Two pure checks over that inventory:
 - **License allowlist.** No dependency may carry a license marker outside the
   pinned allowlist; a denied-license marker ⇒ FAIL.
 
-The SBOM stand-in here is the content digest of the concatenated, canonically
-ordered lockfile bytes (a stable per-tree identity); production swaps in a real
-Syft/Grype SBOM + pinned CVE snapshot behind the same zone-A/zone-B seam, with
-``scanner_config_rev`` (already in every attestation) pinning the CVE/license
-config (plan §0.3).
+The SBOM here is the content digest of the concatenated, canonically ordered
+lockfile bytes (a stable per-tree identity); ``scanner_config_rev`` (carried in
+every attestation) pins the license config.
 """
 
 from __future__ import annotations

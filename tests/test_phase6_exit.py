@@ -504,7 +504,7 @@ _GATES = (
     BuildGate(),
     TestGate(min_passed=1),
     AuditGate(),
-    SecurityGate(use_semgrep=False),
+    SecurityGate(),
 )
 _REQUIRED = tuple(g.name for g in _GATES)
 _COMPONENTS = (SBOMComponent(name="libfoo", version="1.2.3", digest=_MAT_A, license="MIT"),)

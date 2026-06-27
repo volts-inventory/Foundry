@@ -228,14 +228,12 @@ def _assurance_gates(
     """The (node_id, gate) pairs to run for this tier — floor + scaled depth.
 
     Mirrors :func:`assurance_gate_set`: Security + Audit ALWAYS (the integrity
-    floor); Supply-chain at STANDARD+; E2E at HIGH. The Security gate is pinned
-    to its dev-grade secret scan (``use_semgrep=False``) so the floor has real
-    machine grounding with no external binary dependency (plan §0.3) — production
-    threads the pinned semgrep rules dir in via the same seam.
+    floor); Supply-chain at STANDARD+; E2E at HIGH. The Security gate runs its
+    pure-python secret scan — real machine grounding, no external binary.
     """
     selected = assurance_gate_set(tier)
     builders: dict[str, tuple[str, GateImpl]] = {
-        "security": (_SECURITY_NODE, SecurityGate(use_semgrep=False)),
+        "security": (_SECURITY_NODE, SecurityGate()),
         "audit": (_AUDIT_NODE, AuditGate()),
         "supply_chain": (
             _SUPPLY_CHAIN_NODE,

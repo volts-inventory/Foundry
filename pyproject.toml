@@ -10,19 +10,6 @@ dependencies = [
     "pydantic>=2.13.4",
 ]
 
-[project.optional-dependencies]
-# Production checkpoint backend for the docker-compose / EKS profile
-# (FOUNDRY_CHECKPOINTER=postgres). OPTIONAL: the dev/default backend is sqlite,
-# the only one wired and validated in this repo. The Postgres swap (a
-# PostgresSaver on the shared one-txn-per-superstep connection) is a documented
-# swap point — see docs/deploy-compose.md. Install with: uv sync --extra postgres
-postgres = ["langgraph-checkpoint-postgres>=2.0.0", "psycopg[binary]>=3.2"]
-# Production crypto root: the ASYMMETRIC zone-B signing scheme
-# (FOUNDRY_SIGNING_SCHEME=ed25519) where the verifier holds only the public key.
-# OPTIONAL: the dev/default scheme is symmetric HMAC-SHA256 (pure-stdlib, the only
-# scheme needed for the hermetic smoke run). See foundry/gates/signing.py.
-crypto = ["cryptography>=43"]
-
 [dependency-groups]
 dev = [
     "hypothesis>=6.155.2",
@@ -32,12 +19,6 @@ dev = [
     "mypy>=1.13",
     "mutmut>=3.2",
     "ruff>=0.8",
-    # The production backends are exercised by the suite (ed25519 signing root,
-    # Postgres checkpointer), so their libs are dev deps even though they are
-    # OPTIONAL extras for a deployment.
-    "cryptography>=43",
-    "psycopg[binary]>=3.2",
-    "langgraph-checkpoint-postgres>=2.0.0",
 ]
 
 [build-system]

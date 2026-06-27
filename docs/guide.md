@@ -229,8 +229,7 @@ backends = durable_backends(sd) if sd else None   # (checkpointer, global_record
 | Where | Command | Persistence |
 |---|---|---|
 | **Local / dev** | `python -m foundry.cli …` | in-memory (nothing persists) |
-| **One host** | docker-compose ([`deploy-compose.md`](./deploy-compose.md)) + `FOUNDRY_STATE_DIR=/data` | durable across restart |
-| **Cloud / EKS** | documented path | same images; CAS→S3, SQLite→Postgres, scale→replicas |
+| **One host (LAN)** | docker-compose ([`deploy-docker.md`](./deploy-docker.md)) + `FOUNDRY_STATE_DIR=/data` | durable across restart; Workshop on `0.0.0.0:8765` over plain HTTP |
 
 ---
 

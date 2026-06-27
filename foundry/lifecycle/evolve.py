@@ -123,7 +123,7 @@ _DEFAULT_GATES: tuple[GateImpl, ...] = (
     BuildGate(),
     TestGate(min_passed=1),
     AuditGate(),
-    SecurityGate(use_semgrep=False),
+    SecurityGate(),
 )
 
 # The protected-criteria globs the Guardian polices in the evolution route. The

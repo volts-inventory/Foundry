@@ -100,7 +100,7 @@ make workshop          # http://localhost:8765
 make workshop-lan      # bound to 0.0.0.0 — reachable from your phone on the LAN
 ```
 
-A stdlib HTTP + Server-Sent-Events server (no extra deps) renders each build as a live "software factory" game: real stage boundaries, the agents at work, checkpoint pauses you approve in-browser. It is **durable and multi-device** — state survives a server restart, every connected device sees the same live view, and the first checkpoint decision wins. Expose it only behind a TLS reverse proxy and set `FOUNDRY_WORKSHOP_TOKEN` (a same-origin/CSRF guard always applies). See [`docs/deploy-docker.md`](./docs/deploy-docker.md).
+A stdlib HTTP + Server-Sent-Events server (no extra deps) renders each build as a live "software factory" game: real stage boundaries, the agents at work, checkpoint pauses you approve in-browser. It is **durable and multi-device** — state survives a server restart, every connected device sees the same live view, and the first checkpoint decision wins. On a trusted home LAN run it over plain HTTP; set `FOUNDRY_WORKSHOP_TOKEN` if others share the network (a same-origin/CSRF guard always applies). See [`docs/deploy-docker.md`](./docs/deploy-docker.md).
 
 ---
 
@@ -127,10 +127,9 @@ A stdlib HTTP + Server-Sent-Events server (no extra deps) renders each build as 
 | Tier | How | What you get |
 |---|---|---|
 | **Dev / smoke** | `uv run python -m foundry.cli …` | deterministic, no network, in-memory state |
-| **Single host** | **docker-compose** ([`docs/deploy-docker.md`](./docs/deploy-docker.md)) + `FOUNDRY_STATE_DIR` | durable filesystem CAS + file-backed checkpoints/ledgers; the Workshop UI; real backends + a token |
-| **Fleet / cloud** | EKS (documented path) | the *same* images — CAS→S3, SQLite→Postgres, secrets→K8s/IRSA, scale→replicas+HPA |
+| **Single host (LAN)** | **docker-compose** ([`docs/deploy-docker.md`](./docs/deploy-docker.md)) + `FOUNDRY_STATE_DIR` | durable filesystem CAS + file-backed checkpoints/ledgers; the Workshop UI on `0.0.0.0:8765` over plain HTTP; real backends + an optional token |
 
-The compose profile is **12-factor / EKS-portable by construction** — moving to Kubernetes is a backend swap, not a rewrite, and it physically realizes the two-zone / single-egress isolation that's logical-only in dev.
+Built to run on a home LAN — a Raspberry Pi or a spare box — over plain HTTP, for a single user: `docker compose up` and open it from any device on the network.
 
 ---
 
@@ -172,18 +171,17 @@ Quality bars are enforced as gates: ruff clean, mypy clean, suite green, mutatio
 
 ---
 
-## Honesty: what's real vs. dev-grade
+## Honesty: what's real, what's dev-grade
 
-Foundry's *logic* — the gates, the trust model, fail-closed admission, the statistical decision machinery — is real, adversarially tested, and load-bearing. What is deliberately **dev-grade** (per implementation-plan §0.3), all behind production-swappable interfaces:
+Foundry's *logic* — the gates, the trust model, fail-closed admission, the statistical decision machinery — is real, adversarially tested, and load-bearing. It runs **hands-off (autonomous)** on a home LAN: from a one-line request it builds, attests, and releases behind the real gates + the admission trust root, with no human in the loop unless you add a checkpoint.
 
-- **Crypto roots** default to HMAC; Ed25519 is wired (asymmetric, verifier can't forge) — KMS / keyless-OIDC / Sigstore are the production swap.
-- **Coding adapter** defaults to `stub`; `claude-code` / `raw-react` are real and selectable, but a reliable real *end-to-end* build still needs prompt/fix-loop tuning against your live backend ([`docs/real-builds-scope.md`](./docs/real-builds-scope.md), Phase 2).
-- **Persistence** defaults to in-memory; durable filesystem/SQLite ships today (one env var); HA Postgres + S3 is the documented multi-host swap.
-- **The two zones / proxy / builder** run in one process in dev; the compose profile gives them real container isolation.
-- **Scanners** (OPA/Semgrep/Syft) and the **container/K8s worker pool** are documented seams pending real infra.
-- The default profile is single-lineage **self-judge** (recorded openly); the decorrelation machinery engages with a cross-vendor backend or the regulated pack.
+The infrastructure underneath is deliberately **dev-grade** and labeled as such:
 
-Nothing dev-grade is hidden — it's labeled in code and here. The path to production is *swapping backends behind stable interfaces*, not rewriting the system.
+- It runs on a **trusted LAN over plain HTTP** (single user; optional shared token).
+- The crypto root signs with **HMAC** by default (Ed25519 is wired for the asymmetric root); state is **sqlite + a filesystem CAS** on volumes, durable across restarts.
+- The scanners (OPA/Semgrep/Syft) are **dev-grade seams**, and the coding adapter (`stub` default; `claude-code` / `raw-react` real) still needs prompt/fix-loop tuning against your live backend ([`docs/real-builds-scope.md`](./docs/real-builds-scope.md)).
+
+The point is that the *trust logic* is real and enforced even on this modest substrate — nothing dev-grade is hidden; it's labeled in code and here.
 
 ---
 

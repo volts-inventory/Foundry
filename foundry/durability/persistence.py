@@ -31,11 +31,8 @@ never diverge. For SINGLE-HOST FILE DURABILITY we accept a SEPARATE file
 connection for the ledgers (its own ``<state_dir>/global_records.db``). This is
 a deliberate, documented trade-off: each store is independently durable across a
 restart, but a crash in the narrow window between a checkpoint commit and a
-ledger write is NOT cross-store atomic. That cross-store atomicity is a
-MULTI-HOST / Postgres concern (one server-side transaction joining the saver,
-outbox and ledgers) — explicitly out of scope for single-host durability and
-deferred to the documented Postgres swap point (see
-``checkpointer.make_checkpointer`` / ``docs/deploy-compose.md``).
+ledger write is NOT cross-store atomic — out of scope for single-host LAN
+durability.
 
 DEFAULT UNCHANGED: when ``FOUNDRY_STATE_DIR`` is UNSET, callers take the
 historical in-memory path (``:memory:`` checkpointer + in-memory
@@ -127,8 +124,7 @@ def durable_backends(state_dir: str | Path) -> DurableBackends:
     * ``cas`` — :class:`FilesystemArtifactStore` at ``<state_dir>/cas``.
 
     See the module docstring for the checkpoint/ledger atomicity nuance (a
-    SEPARATE ledger connection is acceptable for single-host file durability;
-    cross-store atomicity is the Postgres / multi-host concern).
+    SEPARATE ledger connection is acceptable for single-host file durability).
     """
     root = Path(state_dir)
     root.mkdir(parents=True, exist_ok=True)

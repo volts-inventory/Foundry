@@ -140,7 +140,7 @@ def test_e2e_stable_pass(tmp_path, runner, verifier):
 
 def test_security_flags_planted_aws_key(tmp_path, runner, verifier):
     _write(tmp_path, "config.py", 'AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n')
-    r = runner.run(SecurityGate(use_semgrep=False), "task/1", _seq("security", "task/1"), tmp_path)
+    r = runner.run(SecurityGate(), "task/1", _seq("security", "task/1"), tmp_path)
     assert r.status is GateStatus.FAIL
     assert any("aws-access-key-id" in f for f in r.findings)
     _assert_admitted(r, verifier)
@@ -148,7 +148,7 @@ def test_security_flags_planted_aws_key(tmp_path, runner, verifier):
 
 def test_security_clean_tree_passes(tmp_path, runner, verifier):
     _write(tmp_path, "clean.py", "VALUE = 42\n")
-    r = runner.run(SecurityGate(use_semgrep=False), "task/1", _seq("security", "task/1"), tmp_path)
+    r = runner.run(SecurityGate(), "task/1", _seq("security", "task/1"), tmp_path)
     assert r.status is GateStatus.PASS
 
 

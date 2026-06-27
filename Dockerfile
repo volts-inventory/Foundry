@@ -2,13 +2,7 @@
 #
 # Builds a runnable Workshop image: `docker build -t foundry:dev .` then
 # `docker run -p 8765:8765 -e WORKSHOP_HOST=0.0.0.0 foundry:dev` serves the UI.
-# 12-factor / EKS-portable: config via env, no baked-in secrets, non-root user.
-#
-# IMAGE PINNING (supply-chain): the base images below use minor-version TAGS so
-# the image builds out of the box. For a reproducible production build, PIN each
-# by digest (`@sha256:…`) — resolve with e.g.
-#     docker buildx imagetools inspect ghcr.io/astral-sh/uv:python3.12-bookworm-slim
-# and have CI fail on an unpinned tag.
+# 12-factor: config via env, no baked-in secrets, non-root user.
 
 # --- builder: install deps + project into a self-contained venv --------------
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
@@ -34,17 +28,16 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev || uv sync --no-dev
 
 # --- runtime: slim, non-root, venv-on-PATH -----------------------------------
-# Minor-version tag (pin by digest for a reproducible production build, see top).
 FROM python:3.12-slim-bookworm AS runtime
 
-# Non-root by construction (EKS securityContext parity).
+# Non-root by construction.
 RUN groupadd --system foundry && useradd --system --gid foundry --home /app foundry
 
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    # 12-factor defaults; every one is overridable by the orchestrator (compose
-    # env / K8s env). NO secrets baked in.
+    # 12-factor defaults; every one is overridable via the compose env. NO
+    # secrets baked in.
     FOUNDRY_CHECKPOINTER=sqlite \
     FOUNDRY_CAS_ROOT=/var/lib/foundry/cas \
     FOUNDRY_CHECKPOINT_DB=/var/lib/foundry/state/checkpoints.sqlite
@@ -63,15 +56,15 @@ COPY pyproject.toml ./
 # HEADLESS AUTH (the load-bearing part): interactive `claude login` / `codex
 # login` open a BROWSER OAuth flow — they CANNOT run in a container. Authenticate
 # by INJECTING A CREDENTIAL as a secret — NEVER baked into the image (full
-# precedence + options in docs/deploy-compose.md):
+# precedence + options in docs/deploy-docker.md):
 #   * claude-cli on a MAX SUBSCRIPTION -> CLAUDE_CODE_OAUTH_TOKEN, minted once on a
 #     workstation with `claude setup-token`. `claude -p` honours it (no --bare).
 #     Do NOT also set ANTHROPIC_API_KEY: it OUTRANKS the token and would bill the
 #     pay-per-token Console API instead of the subscription.
 #   * codex -> OPENAI_API_KEY.
 #   The proxy passes its env through to the CLI subprocess (cli_transports inherits
-#   os.environ), so the credential just needs to be on the process. Compose: a
-#   .env value; K8s: a Secret.
+#   os.environ), so the credential just needs to be on the process — a .env value
+#   read by compose.
 #   * OR a pre-provisioned ~/.claude/.credentials.json (Linux/Win; NOT macOS
 #     keychain) mounted read-only under $HOME (HOME=/app here, so /app/.claude).
 #     Mount it; do not COPY it into the image.
@@ -85,7 +78,7 @@ RUN if [ "$INSTALL_CLI_BACKENDS" = "true" ]; then \
     fi
 
 # Volume mount points for the durable CAS + checkpoint DB + the workshop's written
-# output (compose/K8s provide the actual volumes; owned by the non-root user).
+# output (compose provides the actual volumes; owned by the non-root user).
 RUN mkdir -p /var/lib/foundry/cas /var/lib/foundry/state /var/lib/foundry/web \
     && chown -R foundry:foundry /var/lib/foundry /app
 USER foundry

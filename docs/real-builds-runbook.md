@@ -74,6 +74,9 @@ In the **Workshop UI**, pick backend `claude-cli` + coding substrate
 
 ## LAN serving
 
-Run the Workshop (`make workshop-lan` → `0.0.0.0:8765`) behind a TLS reverse
-proxy with `FOUNDRY_WORKSHOP_TOKEN` set; see `docs/deploy-docker.md`. Every
-device gets the same live, restart-surviving view of the build.
+On a trusted home LAN, run the Workshop with `make workshop-lan`
+(→ `0.0.0.0:8765`) over **plain HTTP** — open it from any device at
+`http://<this-host>:8765`. A token is optional (`FOUNDRY_WORKSHOP_TOKEN`); set
+one only if others share the network. TLS only matters on an untrusted/public
+network, which is out of scope here. See `docs/deploy-docker.md`. Every device
+gets the same live, restart-surviving view of the build.

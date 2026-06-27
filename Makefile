@@ -88,7 +88,6 @@ token: ## Mint a Max-subscription OAuth token for the claude-cli backend
 env: ## Scaffold a .env (secrets; gitignored) if missing
 	@if [ -f .env ]; then echo ".env already exists — leaving it untouched."; else \
 	  printf '%s\n' \
-	    'POSTGRES_PASSWORD=change-me' \
 	    'FOUNDRY_MODEL_BACKEND=mock' \
 	    '# claude-cli on a Max subscription (mint with: make token):' \
 	    '# FOUNDRY_MODEL_BACKEND=claude-cli' \

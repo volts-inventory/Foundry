@@ -110,10 +110,8 @@ CheckpointResponder = Callable[[dict[str, Any]], "str | dict[str, Any]"]
 
 __all__ = ["MODES", "CheckpointResponder", "RunResult", "main", "run"]
 
-# Dev trust-root material (HMAC keys stand in for the production roots, §0.3).
-# A production deployment sets FOUNDRY_SIGNING_SCHEME=ed25519 + key env (see
-# foundry.gates.signing) to swap this symmetric dev key for an ASYMMETRIC root
-# where the verifier holds only the public key and cannot mint a verdict.
+# Zone-B trust-root key material: a locally-held HMAC secret (the operator is the
+# trust boundary on a single-user LAN; see foundry.gates.signing).
 _KEY = b"dev-zone-b-cli-key-0123456789-abcdef"
 _KEY_ID = "dev-key-cli"
 _SCANNER_REV = "scanner-rev-cli-1"
@@ -225,14 +223,14 @@ def _resolve_coding_adapter(
 
 
 def _zone_b_signer() -> ZoneBSigner:
-    """The zone-B signer, scheme chosen by env (dev HMAC default; ed25519 in prod)."""
+    """The zone-B signer — the locally-held HMAC root."""
     signer_scheme, _ = signing_schemes_from_env(dev_key=_KEY, dev_key_id=_KEY_ID)
     return ZoneBSigner.from_scheme(signer_scheme)
 
 
 def _gate_verifier(records: Any) -> DevGateWriteVerifier:
-    """The gate-write verifier — holds only the PUBLIC key under the ed25519 root,
-    so the party that admits a verdict cannot forge one."""
+    """The gate-write verifier — admits only verdicts carrying a valid zone-B tag,
+    so an untrusted agent cannot forge one."""
     _, verifier_scheme = signing_schemes_from_env(dev_key=_KEY, dev_key_id=_KEY_ID)
     return DevGateWriteVerifier.from_scheme(verifier_scheme, records)
 

@@ -1,228 +1,67 @@
-# Foundry deployment profile — EKS-portable by construction (TASK [14]).
+# Foundry — LAN deployment (the Workshop, one service, plain HTTP).
 #
-# DEFAULT `docker compose up` runs ONE service — the Workshop `app` — fully
-# functional with NO secrets: sqlite checkpoints on a volume, the keyless `mock`
-# model backend, durable state that survives a restart. Open http://localhost:8765.
-# Everything maps 1:1 to an EKS primitive (see docs/deploy-compose.md): state on
-# VOLUMES -> S3/RDS, config+secrets via ENV -> ConfigMap/Secret, the
-# proxy/signer/builder on an ISOLATED network -> NetworkPolicy + IRSA.
+# `docker compose up` runs the Workshop fully functional with NO secrets: the
+# keyless `mock` backend, sqlite checkpoints + a filesystem CAS on volumes,
+# durable state that survives a restart. Open http://localhost:8765 (or
+# http://<this-host>:8765 from another device on your LAN).
 #
-# Profiles (off by default):
-#   --profile postgres   add the Postgres checkpoint store (with FOUNDRY_CHECKPOINTER=postgres)
-#   --profile isolated   add the proxy/signer/builder topology stubs (review only)
+# Real builds: pick a backend + supply its credential via a gitignored .env
+# (see below). For claude -p on a Max subscription, mint a token once with
+# `make token` and set CLAUDE_CODE_OAUTH_TOKEN (do NOT also set ANTHROPIC_API_KEY
+# — it outranks the token and bills the pay-per-token API).
 #
-# Run:   docker compose up                      # the Workshop, zero config
-#        FOUNDRY_MODEL_BACKEND=anthropic ANTHROPIC_API_KEY=… docker compose up   # real builds
-# Lint:  docker compose config                  # validates this YAML, no daemon
-#
-# IMAGE PINNING (supply-chain): base images use minor-version TAGS so this runs
-# out of the box; PIN each by digest (@sha256:…) for a reproducible production
-# build (`docker buildx imagetools inspect <image:tag>`).
-
-# Two networks enforce the isolation INTENT: the app talks to its datastore on a
-# private backend network; the privileged side-services (signer/builder) sit on
-# their own isolated network with no inbound app reachability except the proxy.
-# (In EKS this is a NetworkPolicy, not a bridge network — documented, not relied
-# on as a real security boundary here.)
-networks:
-  frontend: {}        # app <-> proxy (the ONLY egress path to model providers)
-  backend:
-    internal: true    # app <-> postgres; no external routing
-  isolated:
-    internal: true    # signer/builder; key material never leaves this net
+# Lint:  docker compose config        # validates this YAML, no daemon needed.
 
 volumes:
-  # Durable filesystem CAS — the FilesystemArtifactStore root. EKS: a PVC, or
-  # swap the store backend to S3 (drop-in; same interface). This is the one
-  # production seam fully TESTED in this repo (tests/test_fs_artifact_store.py).
-  foundry_cas: {}
-  # Postgres data dir for checkpoints. EKS: RDS (managed) instead of this volume.
-  pg_data: {}
-  # SQLite checkpoint DB (default backend). Used unless FOUNDRY_CHECKPOINTER=postgres.
-  foundry_state: {}
-  # The Workshop's written output (generated code + doc bundles per floor).
-  foundry_web: {}
+  foundry_cas: {}     # filesystem CAS (content-addressed artifact bodies)
+  foundry_state: {}   # sqlite checkpoint DB + trust ledgers
+  foundry_web: {}     # the Workshop's written output (code + doc bundles per floor)
 
 services:
-  # --- the Foundry app (the only service built from this repo) ---------------
   app:
     build:
       context: .
       dockerfile: Dockerfile
     image: foundry:dev
     restart: unless-stopped
-    # 12-factor config: every value comes from the environment, NO hardcoded
-    # localhost / paths. Secrets come from a .env file (gitignored) — never the
-    # image. `${VAR:?msg}` FAILS startup if a required secret is unset.
+    # 12-factor config: every value comes from the environment; secrets come from
+    # a .env file (gitignored), never the image.
     environment:
-      # Checkpoint backend switch (foundry.durability.checkpointer.make_checkpointer).
-      # Default sqlite (volume-backed). Set to "postgres" once the documented
-      # PostgresSaver swap is wired (see docs/deploy-compose.md).
-      FOUNDRY_CHECKPOINTER: "${FOUNDRY_CHECKPOINTER:-sqlite}"
       FOUNDRY_CAS_ROOT: "/var/lib/foundry/cas"
       FOUNDRY_CHECKPOINT_DB: "/var/lib/foundry/state/checkpoints.sqlite"
-      # Consumed only when FOUNDRY_CHECKPOINTER=postgres (assembled from parts so
-      # no credential is hardcoded). EKS: an RDS endpoint + a K8s Secret. The
-      # default-empty password does NOT block sqlite startup; set it (and the
-      # `postgres` profile) only when using the Postgres backend.
-      FOUNDRY_POSTGRES_DSN: "postgresql://foundry:${POSTGRES_PASSWORD:-}@postgres:5432/foundry"
-      # The app reaches model providers ONLY through the proxy service (egress
-      # chokepoint) in the ISOLATED topology. No provider base-url / api-key on
-      # the app itself there.
-      FOUNDRY_PROXY_URL: "http://proxy:8080"
-      # Side-service endpoints (network-isolated; see comments below).
-      FOUNDRY_SIGNER_URL: "http://signer:8443"
-      FOUNDRY_BUILDER_URL: "http://builder:9000"
 
-      # --- model backend selection (foundry.proxy.backend_from_env) -----------
-      # Default "mock": the Workshop is FULLY FUNCTIONAL out of the box with NO
-      # secrets (deterministic, keyless). Set anthropic | claude-cli | codex |
-      # ollama-gemma (+ the matching credential below) for real model egress — the
-      # SAME factory flow. The UI's backend picker also selects per build.
+      # --- model backend (foundry.proxy.backend_from_env) ---------------------
+      # Default "mock": fully functional out of the box, no secrets. Set
+      # anthropic | claude-cli | codex | ollama-gemma (+ the matching credential)
+      # for real model egress — the SAME factory flow. The UI's picker also
+      # selects per build.
       FOUNDRY_MODEL_BACKEND: "${FOUNDRY_MODEL_BACKEND:-mock}"
-      # API key for the default `anthropic` SDK backend (empty unless you use it).
-      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
-      # Auth for the exposed Workshop: a shared token gates every state-changing
-      # request (start/steer a build). REQUIRED when reachable beyond localhost —
-      # open the UI at http://host:8765/?token=<the token>. Empty = none (the
-      # same-origin/CSRF guard still applies).
-      FOUNDRY_WORKSHOP_TOKEN: "${FOUNDRY_WORKSHOP_TOKEN:-}"
-      # CLI-backend credentials (claude-cli / codex), HEADLESS: injected as secrets
-      # from .env, NEVER baked into the image. Interactive `claude login` (browser
-      # OAuth) cannot run in a container.
-      #
-      # claude-cli runs on a MAX SUBSCRIPTION -> authenticate with a subscription
-      # OAuth token from `claude setup-token` (run ONCE on a workstation logged into
-      # the Max account). Do NOT set ANTHROPIC_API_KEY for this: it has HIGHER
-      # precedence than the OAuth token and would silently bill the pay-per-token
-      # Console API instead of the subscription. (`claude -p` does not use --bare,
-      # so the OAuth token is honoured.) In the isolated topology this lives on the
-      # proxy egress service (which builds the backend), not the app.
-      CLAUDE_CODE_OAUTH_TOKEN: "${CLAUDE_CODE_OAUTH_TOKEN:-}"   # claude-cli (Max subscription)
-      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"                     # codex backend, if used
-      # ollama-gemma: point every worker at ONE shared Ollama ENDPOINT. Ollama
-      # ALWAYS runs on the HOST (or a dedicated GPU box) with the GPU natively —
-      # we NEVER pass a GPU into a container. Default targets the host; override to
-      # a remote GPU box's URL. (Linux needs the extra_hosts mapping below to
-      # resolve host.docker.internal; Docker Desktop provides it automatically.)
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"              # anthropic SDK backend
+      CLAUDE_CODE_OAUTH_TOKEN: "${CLAUDE_CODE_OAUTH_TOKEN:-}"  # claude-cli (Max subscription)
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"                    # codex backend
+      # ollama-gemma: Ollama runs on the HOST (it owns the GPU natively — we never
+      # pass a GPU into a container); the app reaches it over HTTP.
       FOUNDRY_OLLAMA_URL: "${FOUNDRY_OLLAMA_URL:-http://host.docker.internal:11434}"
-      # --- workshop UI (the image's default CMD: python -m webapp.server) -------
+
+      # Optional shared token: gates every state-changing request (start/steer a
+      # build). Empty = none (the same-origin/CSRF guard always applies). Set one
+      # if other people share your LAN; open the UI at .../?token=<the token>.
+      FOUNDRY_WORKSHOP_TOKEN: "${FOUNDRY_WORKSHOP_TOKEN:-}"
+
+      # --- workshop UI (the image's default CMD: python -m webapp.server) ------
       WORKSHOP_HOST: "0.0.0.0"                       # reachable from the host / LAN
       WORKSHOP_PORT: "8765"
-      WORKSHOP_OUTPUT_DIR: "/var/lib/foundry/web"    # builds' code+docs (volume below)
-      # IC-pool parallelism (Wave C) + per-domain budget tree (Wave D). 1 = serial.
-      FOUNDRY_MAX_SLOTS: "${FOUNDRY_MAX_SLOTS:-1}"
+      WORKSHOP_OUTPUT_DIR: "/var/lib/foundry/web"
     volumes:
       - foundry_cas:/var/lib/foundry/cas
       - foundry_state:/var/lib/foundry/state
       - foundry_web:/var/lib/foundry/web
     ports:
-      - "${WORKSHOP_PORT:-8765}:8765"                # open the Workshop UI in a browser
-    networks: [frontend, backend]
-    # Reach host-run endpoints (e.g. a host/GPU-box Ollama) by name. Docker Desktop
-    # (Mac/Win) provides host.docker.internal automatically; Linux needs this map.
+      - "${WORKSHOP_PORT:-8765}:8765"
+    # Reach a host-run Ollama (or GPU box) by name. Docker Desktop provides this
+    # automatically; Linux needs the explicit mapping.
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    # No hard dependency: the default backend is sqlite, so `docker compose up`
-    # starts the Workshop standalone. For the Postgres backend bring the profile
-    # up first:  FOUNDRY_CHECKPOINTER=postgres docker compose --profile postgres up
     # Default CMD serves the Workshop UI on :8765 (see Dockerfile). For a one-shot
     # headless build instead, override:
-    #   command: ["foundry", "run", "--spec", "/work/spec.md", "--out", "/var/lib/foundry/web/code"]
-
-  # --- postgres: durable checkpoint store (volume-backed) --------------------
-  # OPT-IN (profile "postgres"): the default sqlite backend needs none of this, so
-  # `docker compose up` skips it. EKS: replace with RDS; same FOUNDRY_POSTGRES_DSN.
-  postgres:
-    image: postgres:16-bookworm
-    profiles: ["postgres"]
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: foundry
-      POSTGRES_DB: foundry
-      # Secret via env (compose reads it from .env). EKS: a K8s Secret.
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-foundry}"
-    volumes:
-      - pg_data:/var/lib/postgresql/data
-    networks: [backend]
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U foundry -d foundry"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
-  # === network-isolated side services (STUBS) ================================
-  # These three run in SEPARATE containers ON ISOLATED NETWORKS by intent: the
-  # proxy is the sole egress chokepoint to model providers; the signer holds key
-  # material that must NEVER share a process/namespace with app code; the builder
-  # executes untrusted diffs sandboxed. In EKS each is its own Deployment with a
-  # NetworkPolicy + dedicated ServiceAccount (IRSA). The images below are STUBS
-  # (`command: ["true"]` placeholders) — this task does NOT build real proxy /
-  # signer / builder services; they are scaffolding to make the topology
-  # reviewable. Replace `image:`/`command:` when those services exist.
-
-  # Egress chokepoint to model providers. Only the app (frontend net) may reach
-  # it; it is the ONLY service with outbound provider connectivity.
-  proxy:
-    image: alpine:3.20
-    profiles: ["isolated"]
-    command: ["true"]   # STUB — replace with the real proxy service.
-    restart: "no"
-    networks: [frontend]
-    # EKS: NetworkPolicy allowing egress to provider CIDRs only; api key as a
-    # mounted K8s Secret, NOT an env var on the app.
-
-  # Attestation signer (Zone-B). Key material lives ONLY here, on the isolated
-  # network with no inbound app path except a tight request surface.
-  signer:
-    image: alpine:3.20
-    profiles: ["isolated"]
-    command: ["true"]   # STUB — replace with the real signer service.
-    restart: "no"
-    networks: [isolated]
-    # EKS: signing key as a K8s Secret / KMS via IRSA; never in the image or app env.
-
-  # Builder/sandbox that executes untrusted feature diffs in isolation.
-  builder:
-    image: alpine:3.20
-    profiles: ["isolated"]
-    command: ["true"]   # STUB — replace with the real builder service.
-    restart: "no"
-    networks: [isolated]
-    # EKS: gVisor/Kata runtimeClass + NetworkPolicy denying egress.
-
-  # --- local models (ollama-gemma): run Ollama ON THE HOST, not in a container -
-  # POLICY: we NEVER pass a GPU into a container. Ollama runs natively on the host
-  # (or a dedicated GPU box) where it owns the GPU directly, and the app reaches it
-  # over HTTP at FOUNDRY_OLLAMA_URL (default http://host.docker.internal:11434; see
-  # the app service). This avoids GPU-passthrough entirely — portable across Linux,
-  # macOS, and a remote GPU host with no per-container device wiring.
-  #
-  #   On the host:   ollama serve   &&   ollama pull gemma3:27b
-  #   In .env:       FOUNDRY_MODEL_BACKEND=ollama-gemma
-  #                  FOUNDRY_OLLAMA_URL=http://host.docker.internal:11434   (or the
-  #                                     remote GPU box's URL)
-  #
-  # EKS: run Ollama as its OWN Deployment on a GPU node pool and point the app at
-  # its Service DNS — still an endpoint, still no GPU inside the app container.
-
-  # === observability (PLACEHOLDER — intentionally not real infra) ============
-  # The accept criteria mention bundled OTel + Prometheus + Grafana + Loki. That
-  # stack is deliberately LEFT AS A COMMENTED PLACEHOLDER (do-not-over-build):
-  # wiring real collectors/dashboards is out of scope for this scaffolding wave
-  # and cannot be validated without a daemon. In EKS this is the
-  # OTel-Collector + kube-prometheus-stack + Loki Helm charts, scraping the app's
-  # /metrics and OTLP exporters.
-  #
-  # otel-collector:
-  #   image: otel/opentelemetry-collector:<pin-digest>
-  #   ...
-  # prometheus:
-  #   image: prom/prometheus:<pin-digest>
-  #   ...
-  # grafana:
-  #   image: grafana/grafana:<pin-digest>
-  #   ...
-  # loki:
-  #   image: grafana/loki:<pin-digest>
-  #   ...
+    #   command: ["foundry", "run", "--out", "/var/lib/foundry/web/code", "build a thing"]

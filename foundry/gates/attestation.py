@@ -132,9 +132,8 @@ class ZoneBSigner:
     agent code never sees the key.
 
     The signing scheme is pluggable (:mod:`foundry.gates.signing`). The
-    ``(key, key_id)`` constructor is the dev-grade symmetric HMAC root (unchanged);
-    :meth:`from_scheme` takes an asymmetric Ed25519 (or future KMS) scheme so the
-    verifier never holds the signing secret."""
+    ``(key, key_id)`` constructor is the symmetric HMAC root; :meth:`from_scheme`
+    takes an explicit :class:`SigningScheme` instance for tests/alternate wiring."""
 
     def __init__(self, key: bytes, key_id: str) -> None:
         self._scheme: SigningScheme = HmacScheme(key, key_id)

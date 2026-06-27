@@ -24,7 +24,7 @@ bypass for real backends, carefully.
 | Agents author **real** artifact bodies to the CAS | ✅ real | `principal_architect` → `proxy.complete(schema=…)` → `emit_artifact(store=rt.cas)` |
 | `ClaudeCodeAdapter` (real code via `claude -p` in a sandbox) | ✅ built | `execution/adapters/claude_code.py`; junior calls `rt.adapter.run` |
 | Build/Test gates **execute** the code (real pytest) | ✅ real | `gate_wiring.run_build_test_gates` → `materialize_workdir` + `TestGate` |
-| **Coding substrate selection** | ❌ hardcoded `StubAdapter` | `cli.py:955` |
+| **Coding substrate selection** | ✅ selectable (`--adapter` / API `adapter`) | `cli.py` `make_coding_adapter`; default `stub` |
 | **Artifact resolver** | ❌ `_synthetic_resolve` overrides real bodies | `cli.py:959`, `_synthetic_resolve` |
 | **Diff/code resolver** | ❌ `_synthetic_resolve_blob` returns a canned body | `cli.py:960`, `_DIFF_BODY_URI` |
 | **Reviewer/admission binding** | ❌ hardcoded `subject_artifact_uri=_DIFF_BODY_URI`, `state_sha="integrated-sha"` | `cli.py:966-967` |
@@ -35,14 +35,27 @@ So: **agents real, adapter real, gates real — the CLI just doesn't let them ru
 
 ## 2. The changes (file-level)
 
-### 2a. Select a real coding adapter for real backends — `foundry/cli.py`
-- Add `_coding_adapter(backend, proxy, thread_id) -> WorkerAdapter`:
-  - `mock` → `StubAdapter()` (keep the deterministic suite + zero-config demo intact).
-  - `claude-cli` → `ClaudeCodeAdapter(run_id=thread_id, timeout_s=…)` **if `claude` is on
-    PATH** (`adapter.available()`), else fail closed with a clear message.
-  - other real backends → `RawReactAdapter` over the proxy (provider-agnostic fallback).
-- `cli.py:955`: `adapter=_coding_adapter(backend, proxy, thread_id)`.
-- **Risk:** low. Isolated; mock path unchanged.
+### 2a. Select a real coding adapter — `foundry/cli.py`  ✅ DONE
+- `make_coding_adapter(name, *, proxy, thread_id, timeout_s)` constructs the chosen
+  substrate from `ADAPTERS = ("stub", "claude-code", "raw-react")`:
+  - `stub` → `StubAdapter()` (the default — keeps the deterministic suite + zero-config
+    demo intact; `None` also resolves here for back-compat).
+  - `claude-code` → `ClaudeCodeAdapter(run_id=thread_id, …)` **only if `claude` is on
+    PATH** (`adapter.available()`), else it fails closed with a clear message.
+  - `raw-react` → `RawReactAdapter` over the single-egress proxy (any backend).
+- Selectable two ways (this is the wired-in part):
+  - **CLI:** `foundry run --adapter {stub|claude-code|raw-react} "<request>"`.
+  - **API:** `POST /api/projects {"adapter": "claude-code", …}` (UI dropdown +
+    `FOUNDRY_CODING_ADAPTER` default); persisted on the build row and replayed on restart.
+- `run(..., adapter=…)` threads it into `AgentRuntime`; an explicit `WorkerAdapter`
+  instance still passes through (tests inject one). **Risk:** low — isolated; the default
+  (`stub`) path is unchanged, so the deterministic smoke build is untouched.
+
+  NOTE: adapter selection is independent of `backend`. Picking `claude-code`/`raw-react`
+  makes the agents author code via that substrate, but the CLI/webapp `run()` still
+  overrides the resolver (`_synthetic_resolve(_blob)`) — so the *smoke harness* shape
+  applies until 2b lands. The substrate is wired and selectable; 2b removes the resolver
+  override so the real authored bodies actually flow through.
 
 ### 2b. Use the real resolver for real backends — `foundry/cli.py`
 - When `backend != "mock"` and the caller didn't pass one, use the **real CAS resolver**

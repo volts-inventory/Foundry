@@ -1549,6 +1549,7 @@ document.getElementById("start-btn").onclick=async ()=>{
   const packs=document.getElementById("packs-input").value;
   const sup=document.getElementById("supervised").checked;
   const extra={max_slots: parseInt(document.getElementById("slots-input").value,10)||1};
+  extra.adapter=document.getElementById("adapter-select").value;
   const fix=parseInt(document.getElementById("fix-input").value,10);
   if(Number.isFinite(fix) && fix>=0) extra.max_fix_attempts=fix;
   const cap=parseFloat(document.getElementById("cap-input").value);
@@ -1603,6 +1604,9 @@ fetch("/api/config").then(r=>r.json()).then(c=>{
   const sel=document.getElementById("backend-select");
   if(c && c.default_backend && [...sel.options].some(o=>o.value===c.default_backend))
     sel.value=c.default_backend;
+  const asel=document.getElementById("adapter-select");
+  if(c && c.default_adapter && asel && [...asel.options].some(o=>o.value===c.default_adapter))
+    asel.value=c.default_adapter;
   if(c && c.default_max_slots) document.getElementById("slots-input").value=c.default_max_slots;
   syncCostCap();
 }).catch(()=>{});

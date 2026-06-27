@@ -193,6 +193,7 @@ class Project:
     supervised: bool
     floor: int
     backend: str = "mock"
+    adapter: str = "stub"  # coding substrate (see foundry.cli.ADAPTERS)
     packs: list[str] = field(default_factory=list)
     spec: str | None = None  # literal spec text OR a dir of uploaded docs (run(spec=))
     max_slots: int = 1  # IC-pool parallelism (Wave C; >1 engages the budget tree, Wave D)
@@ -280,7 +281,8 @@ def _build_record(p: "Project") -> dict[str, Any]:
     return {
         "id": p.id, "floor": p.floor, "release_seq": p.release_seq,
         "parent_id": p.parent_id, "request": p.request, "mode": p.mode,
-        "backend": p.backend, "supervised": p.supervised, "slots": p.max_slots,
+        "backend": p.backend, "adapter": p.adapter,
+        "supervised": p.supervised, "slots": p.max_slots,
         "max_fix_attempts": p.max_fix_attempts, "status": p.status,
         "passed": p.passed, "gates": p.gates,
         "out_base": str(p.out_base) if p.out_base else None,
@@ -326,6 +328,7 @@ def _load_persisted() -> None:
                     floor=int(row.get("floor", 0)),
                     release_seq=int(row.get("release_seq", 1) or 1),
                     backend=str(row.get("backend", "mock")),
+                    adapter=str(row.get("adapter", "stub")),
                     max_slots=int(row.get("slots", 1) or 1),
                     max_fix_attempts=int(row.get("max_fix_attempts", 3) or 3),
                     parent_id=row.get("parent_id"),
@@ -534,6 +537,7 @@ def _run_factory(p: Project, resume: bool = False) -> None:
             p.request,
             mode=p.mode,
             backend=p.backend,            # real backend per project (not always mock)
+            adapter=p.adapter,            # coding substrate (stub/claude-code/raw-react)
             packs=p.packs or None,        # optional domain packs (regulated/ml_data/frontend)
             spec=p.spec,                  # pasted spec text OR uploaded docs dir (additive)
             max_slots=p.max_slots,        # IC-pool parallelism (Wave C) + budget tree (Wave D)
@@ -681,17 +685,21 @@ class Handler(BaseHTTPRequestHandler):
     def _config(self) -> None:
         """UI config: the default backend (FOUNDRY_MODEL_BACKEND, else mock) so the
         modal preselects it — a deployment sets the env to default to claude-cli."""
-        from foundry.cli import BACKENDS
+        from foundry.cli import ADAPTERS, BACKENDS
 
         default = os.environ.get("FOUNDRY_MODEL_BACKEND", "mock")
         if default not in BACKENDS:
             default = "mock"
+        default_adapter = os.environ.get("FOUNDRY_CODING_ADAPTER", "stub")
+        if default_adapter not in ADAPTERS:
+            default_adapter = "stub"
         try:
             default_slots = max(1, int(os.environ.get("FOUNDRY_MAX_SLOTS", "1") or "1"))
         except ValueError:
             default_slots = 1
         self._json(200, {
             "default_backend": default, "backends": list(BACKENDS),
+            "default_adapter": default_adapter, "adapters": list(ADAPTERS),
             "default_max_slots": default_slots,
         })
 
@@ -796,7 +804,8 @@ class Handler(BaseHTTPRequestHandler):
         rows = [
             {"id": p.id, "floor": p.floor, "release": p.release_seq,
              "releases": counts[p.floor], "request": p.request, "mode": p.mode,
-             "backend": p.backend, "supervised": p.supervised, "slots": p.max_slots,
+             "backend": p.backend, "adapter": p.adapter,
+             "supervised": p.supervised, "slots": p.max_slots,
              "status": p.status, "passed": p.passed, "awaiting": p.awaiting,
              "gates": p.gates, "parent_id": p.parent_id}
             for p in sorted(by_floor.values(), key=lambda x: x.floor)
@@ -933,7 +942,8 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, {"session": session, "messages": msgs, "spec": spec})
 
     def _new_project(self) -> None:
-        from foundry.cli import BACKENDS  # validate against the real backend set
+        # validate against the real backend + adapter sets
+        from foundry.cli import ADAPTERS, BACKENDS
 
         body = self._read_json()
         request = str(body.get("request", "")).strip() or "build a tiny URL-shortener service"
@@ -943,6 +953,9 @@ class Handler(BaseHTTPRequestHandler):
         backend = str(body.get("backend", "mock"))
         if backend not in BACKENDS:
             backend = "mock"
+        adapter = str(body.get("adapter", "stub"))
+        if adapter not in ADAPTERS:
+            adapter = "stub"
         raw_packs = body.get("packs", [])
         if isinstance(raw_packs, str):
             raw_packs = raw_packs.replace(",", " ").split()
@@ -1012,7 +1025,7 @@ class Handler(BaseHTTPRequestHandler):
                 base_dir = str(pcode)        # seed the base tree with the prior code
         p = Project(
             id=pid, request=request, mode=mode, supervised=supervised, floor=floor,
-            release_seq=release_seq, backend=backend, packs=packs, spec=spec,
+            release_seq=release_seq, backend=backend, adapter=adapter, packs=packs, spec=spec,
             out_base=out_base, max_slots=max_slots, cost_cap_microusd=cost_cap_microusd,
             max_fix_attempts=max_fix_attempts, parent_id=parent_id, base_dir=base_dir,
         )

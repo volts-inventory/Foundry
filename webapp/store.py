@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS builds (
   request          TEXT,
   mode             TEXT,
   backend          TEXT,
+  adapter          TEXT,   -- coding substrate (stub/claude-code/raw-react)
   supervised       INTEGER,
   slots            INTEGER,
   max_fix_attempts INTEGER,
@@ -61,8 +62,8 @@ CREATE TABLE IF NOT EXISTS seen_uris (
 
 _COLS = (
     "id", "floor", "release_seq", "parent_id", "request", "mode", "backend",
-    "supervised", "slots", "max_fix_attempts", "status", "passed", "gates",
-    "out_base", "created_at",
+    "adapter", "supervised", "slots", "max_fix_attempts", "status", "passed",
+    "gates", "out_base", "created_at",
 )
 
 
@@ -78,7 +79,15 @@ class BuildStore:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.executescript(_SCHEMA)
+            self._migrate()
             self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after a DB was first created (CREATE TABLE IF NOT
+        EXISTS never alters an existing table). Idempotent; runs under the lock."""
+        have = {r["name"] for r in self._conn.execute("PRAGMA table_info(builds)")}
+        if "adapter" not in have:
+            self._conn.execute("ALTER TABLE builds ADD COLUMN adapter TEXT")
 
     def upsert(self, rec: dict[str, Any]) -> None:
         """Insert or replace one build row. ``gates`` is JSON-encoded."""

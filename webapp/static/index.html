@@ -94,6 +94,14 @@
         </select>
       </div>
       <div class="row">
+        <label>Coding substrate</label>
+        <select id="adapter-select">
+          <option value="stub">stub — deterministic no-op (smoke/demo)</option>
+          <option value="claude-code">claude-code — claude -p writes the code</option>
+          <option value="raw-react">raw-react — code via the chosen backend</option>
+        </select>
+      </div>
+      <div class="row">
         <label>Parallel ICs <span class="hint">— engineers building at once (Wave C/D)</span></label>
         <div class="slots-row">
           <input id="slots-input" type="number" min="1" max="16" value="1" />

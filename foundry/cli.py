@@ -147,6 +147,73 @@ _MOCK_BACKEND = "mock"
 BACKENDS = (_MOCK_BACKEND, "anthropic", "claude-cli", "codex", "ollama-gemma")
 
 
+# Coding substrates (WorkerAdapter): the thing that actually writes the code for
+# each task. `stub` is the deterministic no-op (the smoke default); `claude-code`
+# runs `claude -p` in the sandbox (real code); `raw-react` is a provider-agnostic
+# single-loop substrate over the same model backend (real code, any backend).
+ADAPTERS = ("stub", "claude-code", "raw-react")
+_DEFAULT_ADAPTER = "stub"
+# Minimal system prompt for the raw-react substrate (the full task prompt — pinned
+# constraints, task, spans, "emit a unified diff" — is built by the adapter itself).
+_RAW_REACT_SOP = (
+    "You are a senior software engineer. Implement the requested change exactly, "
+    "returning your work as a single fenced ```diff block. Touch nothing outside it."
+)
+
+
+def make_coding_adapter(
+    name: str | None,
+    *,
+    proxy: ModelProviderProxy,
+    thread_id: str = "cli-run",
+    timeout_s: float | None = None,
+) -> Any:
+    """Construct the selected coding substrate (``ADAPTERS``). ``None`` ⇒ the
+    deterministic ``stub`` (back-compat). ``claude-code`` requires the ``claude``
+    binary on PATH (fail-closed). ``raw-react`` drives the chosen model backend
+    through the single-egress proxy."""
+    name = (name or _DEFAULT_ADAPTER).strip().lower()
+    if name == "stub":
+        return StubAdapter()
+    if name == "claude-code":
+        from foundry.execution.adapters.claude_code import ClaudeCodeAdapter
+
+        adapter = ClaudeCodeAdapter(run_id=thread_id, timeout_s=timeout_s)
+        if not adapter.available():
+            raise ValueError(
+                "adapter 'claude-code' selected but the `claude` binary is not on "
+                "PATH; install Claude Code (and authenticate) or pick another adapter"
+            )
+        return adapter
+    if name == "raw-react":
+        from foundry.execution.adapters.raw_react import RawReactAdapter
+
+        def _complete(prompt: str) -> str:
+            return (
+                proxy.complete(
+                    "junior_engineer",
+                    "T1",
+                    _RAW_REACT_SOP,
+                    [{"role": "user", "content": prompt}],
+                    purpose="ideation",
+                ).text
+                or ""
+            )
+
+        return RawReactAdapter(complete_fn=_complete, run_id=thread_id)
+    raise ValueError(f"unknown adapter {name!r}; choose one of {', '.join(ADAPTERS)}")
+
+
+def _resolve_coding_adapter(
+    adapter: str | Any | None, *, proxy: ModelProviderProxy, thread_id: str
+) -> Any:
+    """A WorkerAdapter instance passes through (tests inject one); a name (or None)
+    is constructed via :func:`make_coding_adapter`."""
+    if adapter is None or isinstance(adapter, str):
+        return make_coding_adapter(adapter, proxy=proxy, thread_id=thread_id)
+    return adapter
+
+
 def _zone_b_signer() -> ZoneBSigner:
     """The zone-B signer, scheme chosen by env (dev HMAC default; ed25519 in prod)."""
     signer_scheme, _ = signing_schemes_from_env(dev_key=_KEY, dev_key_id=_KEY_ID)
@@ -817,6 +884,7 @@ def run(
     state_dir: str | None = None,
     resolve: ArtifactResolver | None = None,
     resolve_blob: BlobResolver | None = None,
+    adapter: str | Any | None = None,
     diff_body: str | None = None,
     max_fix_attempts: int = 3,
     docs_dir: str | None = None,
@@ -952,7 +1020,11 @@ def run(
         records = GlobalRecords()
         ckpt = FoundryCheckpointer()
     proxy = _build_proxy(backend)
-    rt = AgentRuntime(proxy=proxy, adapter=StubAdapter(), cas=store)
+    rt = AgentRuntime(
+        proxy=proxy,
+        adapter=_resolve_coding_adapter(adapter, proxy=proxy, thread_id=thread_id),
+        cas=store,
+    )
 
     runner = TwoZoneGateRunner(_zone_b_signer(), records, _SCANNER_REV, _LINEAGE_REV)
 
@@ -1366,6 +1438,15 @@ def main(argv: list[str] | None = None) -> int:
         args, _packs = _take_value(args, "--packs", what="a comma-separated list")
         packs: list[str] = [p.strip() for p in _packs.split(",") if p.strip()] if _packs else []
 
+        # --adapter {stub|claude-code|raw-react}: the coding substrate that writes the
+        # code. Default stub (deterministic). claude-code needs the `claude` binary.
+        args, _adapter = _take_value(args, "--adapter", what="a value")
+        adapter = _adapter if _adapter is not None else _DEFAULT_ADAPTER
+        if adapter not in ADAPTERS:
+            raise _CliUsageError(
+                f"unknown --adapter {adapter!r}; choose one of {', '.join(ADAPTERS)}"
+            )
+
         # --spec FILE|DIR (task [8]): may REPEAT to ingest several spec files/dirs.
         spec_paths: list[str] = []
         while "--spec" in args:
@@ -1401,6 +1482,7 @@ def main(argv: list[str] | None = None) -> int:
             "usage: python -m foundry.cli "
             "[--mode {assistant|gated|autonomous}] [--packs name1,name2] "
             "[--backend {mock|anthropic|claude-cli|codex|ollama-gemma}] "
+            "[--adapter {stub|claude-code|raw-react}] "
             "[--checkpoints [all|product,design,release]] "
             "[--docs DIR] [--out DIR] [--spec FILE|DIR ...] "
             "[--state-dir DIR] [--thread-id NAME] [--max-fix-attempts N] "
@@ -1411,6 +1493,8 @@ def main(argv: list[str] | None = None) -> int:
             f"    autonomous {_TRUST_POSTURE[MODE_AUTONOMOUS]}\n"
             "  backend: mock (default — keyless, deterministic) | anthropic | "
             "claude-cli | codex | ollama-gemma (real model egress)\n"
+            "  adapter (coding substrate): stub (default — no-op) | claude-code "
+            "(real `claude -p`) | raw-react (real, any backend)\n"
             "  packs: regulated | ml_data | frontend "
             "(a pack may VETO an unsafe mode — fail-closed)\n"
             "  checkpoints (plan [10]): pause at stage boundaries for human "
@@ -1449,6 +1533,7 @@ def main(argv: list[str] | None = None) -> int:
             packs=packs or None,
             spec=spec_text,
             backend=backend,
+            adapter=adapter,
             thread_id=thread_id,
             state_dir=state_dir,
             max_fix_attempts=max_fix_attempts,

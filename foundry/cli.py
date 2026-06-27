@@ -69,6 +69,7 @@ from foundry.durability.persistence import (
 )
 from foundry.execution.adapters.stub import StubAdapter
 from foundry.gates import DevGateWriteVerifier, TwoZoneGateRunner, ZoneBSigner
+from foundry.gates.signing import signing_schemes_from_env
 from foundry.graph.factory_graph import build_factory_graph, terminal_gates_pass
 from foundry.graph.supervisor import (
     MODE_ASSISTANT,
@@ -109,6 +110,9 @@ CheckpointResponder = Callable[[dict[str, Any]], "str | dict[str, Any]"]
 __all__ = ["MODES", "CheckpointResponder", "RunResult", "main", "run"]
 
 # Dev trust-root material (HMAC keys stand in for the production roots, §0.3).
+# A production deployment sets FOUNDRY_SIGNING_SCHEME=ed25519 + key env (see
+# foundry.gates.signing) to swap this symmetric dev key for an ASYMMETRIC root
+# where the verifier holds only the public key and cannot mint a verdict.
 _KEY = b"dev-zone-b-cli-key-0123456789-abcdef"
 _KEY_ID = "dev-key-cli"
 _SCANNER_REV = "scanner-rev-cli-1"
@@ -142,6 +146,19 @@ _MOCK_BACKEND = "mock"
 BACKENDS = (_MOCK_BACKEND, "anthropic", "claude-cli", "codex", "ollama-gemma")
 
 
+def _zone_b_signer() -> ZoneBSigner:
+    """The zone-B signer, scheme chosen by env (dev HMAC default; ed25519 in prod)."""
+    signer_scheme, _ = signing_schemes_from_env(dev_key=_KEY, dev_key_id=_KEY_ID)
+    return ZoneBSigner.from_scheme(signer_scheme)
+
+
+def _gate_verifier(records: Any) -> DevGateWriteVerifier:
+    """The gate-write verifier — holds only the PUBLIC key under the ed25519 root,
+    so the party that admits a verdict cannot forge one."""
+    _, verifier_scheme = signing_schemes_from_env(dev_key=_KEY, dev_key_id=_KEY_ID)
+    return DevGateWriteVerifier.from_scheme(verifier_scheme, records)
+
+
 def _build_proxy(backend: str) -> ModelProviderProxy:
     """Build the single-egress proxy for the chosen backend (the dev zone-B signer
     is injected so the judgment path can stamp verdicts regardless of backend).
@@ -153,7 +170,7 @@ def _build_proxy(backend: str) -> ModelProviderProxy:
         raise ValueError(
             f"unknown backend {backend!r}; choose one of {', '.join(BACKENDS)}"
         )
-    signer = ZoneBSigner(_KEY, _KEY_ID)
+    signer = _zone_b_signer()
     if backend == _MOCK_BACKEND:
         tx = MockTransport.scripted(dict(_SCRIPTS), default_verdict="approve")
         return ModelProviderProxy(tx, signer=signer)
@@ -925,7 +942,7 @@ def run(
     proxy = _build_proxy(backend)
     rt = AgentRuntime(proxy=proxy, adapter=StubAdapter(), cas=store)
 
-    runner = TwoZoneGateRunner(ZoneBSigner(_KEY, _KEY_ID), records, _SCANNER_REV, _LINEAGE_REV)
+    runner = TwoZoneGateRunner(_zone_b_signer(), records, _SCANNER_REV, _LINEAGE_REV)
 
     resolve = resolve or _synthetic_resolve(store)
     resolve_blob = resolve_blob or _synthetic_resolve_blob(store, diff_body)
@@ -963,10 +980,10 @@ def run(
     if mode == MODE_AUTONOMOUS:
         from foundry.trust_root import AdmissionController, Deployer, TrustedBuilder
 
-        builder = TrustedBuilder(ZoneBSigner(_KEY, _KEY_ID), builder_id=_BUILDER_ID)
+        builder = TrustedBuilder(_zone_b_signer(), builder_id=_BUILDER_ID)
         admission = AdmissionController(builder_id=_BUILDER_ID)
         deployer = Deployer(target=_DEPLOY_TARGET)
-        gate_verifier = DevGateWriteVerifier(_KEY, _KEY_ID, records)
+        gate_verifier = _gate_verifier(records)
 
     # The terminal ``docs`` graph node assembles the company-shaped documentation
     # set + BUILD-MANIFEST IN-GRAPH (task [3]): the Technical Writer's model spend
@@ -979,7 +996,7 @@ def run(
 
     # Install the dev gate-write verifier so the REAL merge_gates admits the
     # runner-attested verdicts (D4); reset its token in finally so it never leaks.
-    token = set_gate_write_verifier(DevGateWriteVerifier(_KEY, _KEY_ID, records))
+    token = set_gate_write_verifier(_gate_verifier(records))
     with tempfile.TemporaryDirectory(prefix="foundry-cli-src-") as source_dir:
         # Seed the base tree with an existing codebase (the evolution / iterate
         # path): the implementation agents clone ``source_dir`` into each sandbox

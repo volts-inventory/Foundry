@@ -42,11 +42,16 @@ import hmac
 from collections import OrderedDict
 
 from foundry.canonical import canonical_bytes
+from foundry.gates.signing import (
+    HmacScheme,
+    SigningScheme,
+    parse_signature,
+)
 from foundry.schemas.gates import GateResult
 from foundry.schemas.security import SLSAProvenance
 from foundry.state.global_records import GlobalRecordsView
 
-_SCHEME = "hmac256"
+_SCHEME = "hmac256"  # the dev-default scheme name (see foundry.gates.signing)
 _DEFAULT_CACHE_SIZE = 4096
 
 
@@ -124,14 +129,24 @@ def _provenance_payload(g: GateResult, prov: SLSAProvenance) -> bytes:
 
 class ZoneBSigner:
     """Signs gate verdicts. Held ONLY by trusted infra (zone B / the proxy);
-    agent code never sees the key. Dev-grade root: symmetric HMAC key."""
+    agent code never sees the key.
+
+    The signing scheme is pluggable (:mod:`foundry.gates.signing`). The
+    ``(key, key_id)`` constructor is the dev-grade symmetric HMAC root (unchanged);
+    :meth:`from_scheme` takes an asymmetric Ed25519 (or future KMS) scheme so the
+    verifier never holds the signing secret."""
 
     def __init__(self, key: bytes, key_id: str) -> None:
-        self._key = key
-        self._key_id = key_id
+        self._scheme: SigningScheme = HmacScheme(key, key_id)
+
+    @classmethod
+    def from_scheme(cls, scheme: SigningScheme) -> ZoneBSigner:
+        self = cls.__new__(cls)
+        self._scheme = scheme
+        return self
 
     def _sign(self, payload: bytes) -> str:
-        return f"{_SCHEME}:{self._key_id}:{_mac(self._key, payload)}"
+        return f"{self._scheme.name}:{self._scheme.key_id}:{self._scheme.tag(payload)}"
 
     def attest_gate(self, g: GateResult) -> str:
         """Zone-B runner attestation for a deterministic-gate verdict."""
@@ -202,21 +217,41 @@ class DevGateWriteVerifier:
         *,
         cache_size: int = _DEFAULT_CACHE_SIZE,
     ) -> None:
-        self._key = key
-        self._key_id = key_id
+        self._scheme: SigningScheme = HmacScheme(key, key_id)
         self._records = records
         self._attestation_cache = _BoundedCache(cache_size)
         self._binding_cache = _BoundedCache(cache_size)
         self._provenance_cache = _BoundedCache(cache_size)
 
+    @classmethod
+    def from_scheme(
+        cls,
+        scheme: SigningScheme,
+        records: GlobalRecordsView,
+        *,
+        cache_size: int = _DEFAULT_CACHE_SIZE,
+    ) -> DevGateWriteVerifier:
+        self = cls.__new__(cls)
+        self._scheme = scheme
+        self._records = records
+        self._attestation_cache = _BoundedCache(cache_size)
+        self._binding_cache = _BoundedCache(cache_size)
+        self._provenance_cache = _BoundedCache(cache_size)
+        return self
+
     # ---- immutable, memoizable signature checks -----------------------------
 
     def _check(self, provided: object, payload: bytes) -> bool:
-        """Recompute and constant-time-compare. False on missing/malformed."""
-        if not isinstance(provided, str) or not provided:
+        """Verify a wire signature against ``payload``. False on missing/malformed
+        or a scheme/key-id mismatch. Only the secret tag is constant-time-compared
+        (the scheme name + key_id are public identifiers)."""
+        parsed = parse_signature(provided)
+        if parsed is None:
             return False
-        expected = f"{_SCHEME}:{self._key_id}:{_mac(self._key, payload)}"
-        return hmac.compare_digest(expected.encode(), provided.encode())
+        scheme_name, key_id, tag = parsed
+        if scheme_name != self._scheme.name or key_id != self._scheme.key_id:
+            return False
+        return self._scheme.verify_tag(payload, tag)
 
     def verify_attestation(self, g: GateResult) -> bool:
         # Sound memo key: content_identity() covers every field of the

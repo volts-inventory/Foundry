@@ -298,13 +298,17 @@ def test_signature_memoized_but_records_read_every_fold(signer, records, monkeyp
     review = signer.with_judgment_binding(make_review())
 
     calls = {"n": 0}
-    real_mac = attestation._mac
+    # The HMAC scheme computes its tag via signing.hmac_tag; spy there to count
+    # the verifier's signature (re)computations (memoized by content identity).
+    from foundry.gates import signing
+
+    real_mac = signing.hmac_tag
 
     def spy(key: bytes, payload: bytes) -> str:
         calls["n"] += 1
         return real_mac(key, payload)
 
-    monkeypatch.setattr(attestation, "_mac", spy)
+    monkeypatch.setattr(signing, "hmac_tag", spy)
 
     token = set_gate_write_verifier(verifier)
     try:

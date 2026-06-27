@@ -150,11 +150,21 @@ them run** (the `mock` smoke is byte-identical via the synthetic doubles).
    (`tests/test_adapter_selection.py`, `tests/test_real_materialization.py`).
    → Real code is authored and verified; bindings are real. The remaining gap is purely
    live-tuning (Phase 2) — the wiring no longer bypasses the real path.
-2. **Phase 2 — integration pass (the unknowns):** run real `claude -p` builds, fix the
-   1-3 hidden smoke assumptions, tune the fix-loop/prompts until builds reliably pass.
-   → Requires your `claude -p`.
+2. **Phase 2 — integration pass: ✅ DONE (validated on a live `claude -p`).** Real builds
+   run end-to-end and go green: from a one-line request, `claude -p` authors real code +
+   tests, the Build/Test gates EXECUTE them (real pytest), and the run emits the PR action
+   + writes the tree. Verified on two distinct shapes (a function + a class); the generated
+   trees pass under an independent `pytest`. The hidden smoke assumptions found + fixed:
+   - structured-output crash on a non-JSON CLI response (lenient parse + re-roll + fail-closed);
+   - the criteria critic reviewing the bare request instead of the PM's real criteria;
+   - headless `claude -p` denying file writes (adapter now passes `--permission-mode`);
+   - the gate materializer not understanding the adapter's `full-file-snapshot` body;
+   - the PM under-identifying the misuse/abuse surface (spec-gate coverage rule).
+   Plus diagnosability: gate-failure findings in the summary + `FOUNDRY_PROGRESS` streaming.
+   See `docs/real-builds-runbook.md`. Remaining live-tuning is per-request (harder asks may
+   need more `--max-fix-attempts` / a fuller `--spec`), not structural.
 3. **Phase 3 — LAN packaging:** image with CLI backends + headless OAuth + the TLS
-   reverse-proxy guide; a "first real build" runbook.
+   reverse-proxy guide (`docs/deploy-docker.md`) + the runbook (`docs/real-builds-runbook.md`).
 
 **Rough effort:** Phase 1 ≈ half a day + tests; Phase 2 is the open-ended one (depends
 on how much the real model fights the gates) — plan a few iterations; Phase 3 ≈ a couple

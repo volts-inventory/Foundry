@@ -1,21 +1,23 @@
 # Foundry deployment profile — EKS-portable by construction (TASK [14]).
 #
-# SCAFFOLDING: no docker daemon exists in the authoring environment, so this
-# file is NOT run/validated here. It is written so that every production concern
-# maps 1:1 to an EKS primitive (see docs/deploy-compose.md):
-#   * state lives behind interfaces on VOLUMES (CAS dir, postgres data) ->
-#     swap to S3 (CAS) / RDS (postgres) without touching app code;
-#   * config + secrets arrive via ENV (12-factor) -> K8s ConfigMap / Secret;
-#   * the proxy / signer / builder are SEPARATE services on an ISOLATED network
-#     -> K8s NetworkPolicy + per-service ServiceAccount/IRSA.
+# DEFAULT `docker compose up` runs ONE service — the Workshop `app` — fully
+# functional with NO secrets: sqlite checkpoints on a volume, the keyless `mock`
+# model backend, durable state that survives a restart. Open http://localhost:8765.
+# Everything maps 1:1 to an EKS primitive (see docs/deploy-compose.md): state on
+# VOLUMES -> S3/RDS, config+secrets via ENV -> ConfigMap/Secret, the
+# proxy/signer/builder on an ISOLATED network -> NetworkPolicy + IRSA.
 #
-# Run:   docker compose up        (set the secrets in a .env file first)
-# Lint:  docker compose config    (validates this YAML without starting anything)
+# Profiles (off by default):
+#   --profile postgres   add the Postgres checkpoint store (with FOUNDRY_CHECKPOINTER=postgres)
+#   --profile isolated   add the proxy/signer/builder topology stubs (review only)
 #
-# IMAGE PINNING: external images are pinned by DIGEST (@sha256:...) for
-# supply-chain reproducibility. The digests below are PLACEHOLDERS — resolve the
-# real ones in your environment (`docker buildx imagetools inspect <image:tag>`)
-# and replace each `sha256:REPLACE_ME_*` before shipping.
+# Run:   docker compose up                      # the Workshop, zero config
+#        FOUNDRY_MODEL_BACKEND=anthropic ANTHROPIC_API_KEY=… docker compose up   # real builds
+# Lint:  docker compose config                  # validates this YAML, no daemon
+#
+# IMAGE PINNING (supply-chain): base images use minor-version TAGS so this runs
+# out of the box; PIN each by digest (@sha256:…) for a reproducible production
+# build (`docker buildx imagetools inspect <image:tag>`).
 
 # Two networks enforce the isolation INTENT: the app talks to its datastore on a
 # private backend network; the privileged side-services (signer/builder) sit on
@@ -60,8 +62,10 @@ services:
       FOUNDRY_CAS_ROOT: "/var/lib/foundry/cas"
       FOUNDRY_CHECKPOINT_DB: "/var/lib/foundry/state/checkpoints.sqlite"
       # Consumed only when FOUNDRY_CHECKPOINTER=postgres (assembled from parts so
-      # no credential is hardcoded). EKS: an RDS endpoint + a K8s Secret.
-      FOUNDRY_POSTGRES_DSN: "postgresql://foundry:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/foundry"
+      # no credential is hardcoded). EKS: an RDS endpoint + a K8s Secret. The
+      # default-empty password does NOT block sqlite startup; set it (and the
+      # `postgres` profile) only when using the Postgres backend.
+      FOUNDRY_POSTGRES_DSN: "postgresql://foundry:${POSTGRES_PASSWORD:-}@postgres:5432/foundry"
       # The app reaches model providers ONLY through the proxy service (egress
       # chokepoint) in the ISOLATED topology. No provider base-url / api-key on
       # the app itself there.
@@ -71,9 +75,18 @@ services:
       FOUNDRY_BUILDER_URL: "http://builder:9000"
 
       # --- model backend selection (foundry.proxy.backend_from_env) -----------
-      # Default "anthropic". Config-swap to claude-cli | codex | ollama-gemma —
-      # the SAME factory flow, a different backend (no call-site change).
-      FOUNDRY_MODEL_BACKEND: "${FOUNDRY_MODEL_BACKEND:-anthropic}"
+      # Default "mock": the Workshop is FULLY FUNCTIONAL out of the box with NO
+      # secrets (deterministic, keyless). Set anthropic | claude-cli | codex |
+      # ollama-gemma (+ the matching credential below) for real model egress — the
+      # SAME factory flow. The UI's backend picker also selects per build.
+      FOUNDRY_MODEL_BACKEND: "${FOUNDRY_MODEL_BACKEND:-mock}"
+      # API key for the default `anthropic` SDK backend (empty unless you use it).
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      # Auth for the exposed Workshop: a shared token gates every state-changing
+      # request (start/steer a build). REQUIRED when reachable beyond localhost —
+      # open the UI at http://host:8765/?token=<the token>. Empty = none (the
+      # same-origin/CSRF guard still applies).
+      FOUNDRY_WORKSHOP_TOKEN: "${FOUNDRY_WORKSHOP_TOKEN:-}"
       # CLI-backend credentials (claude-cli / codex), HEADLESS: injected as secrets
       # from .env, NEVER baked into the image. Interactive `claude login` (browser
       # OAuth) cannot run in a container.
@@ -110,23 +123,25 @@ services:
     # (Mac/Win) provides host.docker.internal automatically; Linux needs this map.
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    depends_on:
-      postgres:
-        condition: service_healthy
+    # No hard dependency: the default backend is sqlite, so `docker compose up`
+    # starts the Workshop standalone. For the Postgres backend bring the profile
+    # up first:  FOUNDRY_CHECKPOINTER=postgres docker compose --profile postgres up
     # Default CMD serves the Workshop UI on :8765 (see Dockerfile). For a one-shot
     # headless build instead, override:
     #   command: ["foundry", "run", "--spec", "/work/spec.md", "--out", "/var/lib/foundry/web/code"]
 
   # --- postgres: durable checkpoint store (volume-backed) --------------------
-  # EKS: replace with RDS; the app keeps the same FOUNDRY_POSTGRES_DSN contract.
+  # OPT-IN (profile "postgres"): the default sqlite backend needs none of this, so
+  # `docker compose up` skips it. EKS: replace with RDS; same FOUNDRY_POSTGRES_DSN.
   postgres:
-    image: postgres:16-bookworm@sha256:REPLACE_ME_POSTGRES
+    image: postgres:16-bookworm
+    profiles: ["postgres"]
     restart: unless-stopped
     environment:
       POSTGRES_USER: foundry
       POSTGRES_DB: foundry
       # Secret via env (compose reads it from .env). EKS: a K8s Secret.
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-foundry}"
     volumes:
       - pg_data:/var/lib/postgresql/data
     networks: [backend]
@@ -149,7 +164,8 @@ services:
   # Egress chokepoint to model providers. Only the app (frontend net) may reach
   # it; it is the ONLY service with outbound provider connectivity.
   proxy:
-    image: alpine:3.20@sha256:REPLACE_ME_PROXY_STUB
+    image: alpine:3.20
+    profiles: ["isolated"]
     command: ["true"]   # STUB — replace with the real proxy service.
     restart: "no"
     networks: [frontend]
@@ -159,7 +175,8 @@ services:
   # Attestation signer (Zone-B). Key material lives ONLY here, on the isolated
   # network with no inbound app path except a tight request surface.
   signer:
-    image: alpine:3.20@sha256:REPLACE_ME_SIGNER_STUB
+    image: alpine:3.20
+    profiles: ["isolated"]
     command: ["true"]   # STUB — replace with the real signer service.
     restart: "no"
     networks: [isolated]
@@ -167,7 +184,8 @@ services:
 
   # Builder/sandbox that executes untrusted feature diffs in isolation.
   builder:
-    image: alpine:3.20@sha256:REPLACE_ME_BUILDER_STUB
+    image: alpine:3.20
+    profiles: ["isolated"]
     command: ["true"]   # STUB — replace with the real builder service.
     restart: "no"
     networks: [isolated]

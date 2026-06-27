@@ -1,20 +1,17 @@
 # Foundry application image — builds the `foundry` package and its deps with uv.
 #
-# SCAFFOLDING (TASK [14]): no docker daemon is available in the authoring
-# environment, so this Dockerfile is NOT built/validated here. It is written to
-# be EKS-portable by construction (12-factor: config via env, no baked-in
-# secrets, runs as a non-root user). Build with: `docker build -t foundry:dev .`
+# Builds a runnable Workshop image: `docker build -t foundry:dev .` then
+# `docker run -p 8765:8765 -e WORKSHOP_HOST=0.0.0.0 foundry:dev` serves the UI.
+# 12-factor / EKS-portable: config via env, no baked-in secrets, non-root user.
 #
-# IMAGE PINNING: external base images SHOULD be pinned by digest for
-# reproducibility/supply-chain (the `@sha256:...` form). The digests below are
-# PLACEHOLDERS — resolve the real digest in your environment before shipping:
+# IMAGE PINNING (supply-chain): the base images below use minor-version TAGS so
+# the image builds out of the box. For a reproducible production build, PIN each
+# by digest (`@sha256:…`) — resolve with e.g.
 #     docker buildx imagetools inspect ghcr.io/astral-sh/uv:python3.12-bookworm-slim
-# and replace `@sha256:REPLACE_ME_*`. CI should fail if a tag is unpinned.
+# and have CI fail on an unpinned tag.
 
 # --- builder: install deps + project into a self-contained venv --------------
-# uv's official image bundles a pinned Python; tag pins the minor, digest pins
-# the exact build (REPLACE the placeholder digest before shipping).
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim@sha256:REPLACE_ME_UV_BUILDER AS builder
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
@@ -37,8 +34,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev || uv sync --no-dev
 
 # --- runtime: slim, non-root, venv-on-PATH -----------------------------------
-# REPLACE the placeholder digest before shipping (see note above).
-FROM python:3.12-slim-bookworm@sha256:REPLACE_ME_PYTHON_RUNTIME AS runtime
+# Minor-version tag (pin by digest for a reproducible production build, see top).
+FROM python:3.12-slim-bookworm AS runtime
 
 # Non-root by construction (EKS securityContext parity).
 RUN groupadd --system foundry && useradd --system --gid foundry --home /app foundry
@@ -97,6 +94,19 @@ USER foundry
 # default serves the Workshop UI (webapp.server reads WORKSHOP_HOST/PORT/
 # WORKSHOP_OUTPUT_DIR + FOUNDRY_MODEL_BACKEND/FOUNDRY_MAX_SLOTS from the env).
 # Override to `["foundry", "run", …]` for a one-shot CLI build instead.
+# Durable state on the mounted volumes by default (survives a container restart):
+# the Workshop's catalog, event log, and factory checkpoints/ledgers live here.
+ENV WORKSHOP_OUTPUT_DIR=/var/lib/foundry/web \
+    WORKSHOP_STATE_DIR=/var/lib/foundry/state \
+    WORKSHOP_HOST=0.0.0.0 \
+    WORKSHOP_PORT=8765
+
+# Liveness: the Workshop answers /api/config (stdlib, no curl in the slim image).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD \
+    python -c "import urllib.request,os,sys; \
+u='http://127.0.0.1:'+os.environ.get('WORKSHOP_PORT','8765')+'/api/config'; \
+sys.exit(0 if urllib.request.urlopen(u,timeout=4).status==200 else 1)"
+
 EXPOSE 8765
 ENTRYPOINT ["python", "-m"]
 CMD ["webapp.server"]

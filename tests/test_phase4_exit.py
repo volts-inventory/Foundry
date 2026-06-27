@@ -766,6 +766,42 @@ def test_forged_verdict_unsigned_attestation_cannot_reach_prod() -> None:
         pass
 
 
+def test_forgery_deny_disqualifies_digest_cross_fork() -> None:
+    """The autonomous emit node's cross-fork defense (gov §5, trust-audit F1): a
+    forgery/tamper admission DENY disqualifies the digest in the ledger, so a sibling
+    fork re-presenting the SAME digest under a fresh run_id is also denied. An honest
+    gate FAILURE is NOT a forgery and must NOT poison the digest."""
+    from foundry.state.global_records import AdmissionState
+    from foundry.trust_root.admission import FORGERY_DENY_REASONS
+
+    records, verifier = _records_verifier()
+    signer = ZoneBSigner(KEY, KEY_ID)
+    build = _genuine_build(signer, "tree-fv-disq")
+    tree = build.provenance.tree_sha
+    digest = build.result.subject_digest
+    gates = list(_all_pass_gate_state(signer, tree).values())
+    # Agent-forged (unsigned) security verdict -> signature-invalid forgery deny.
+    gates[_REQUIRED_GATES.index("security")] = gates[
+        _REQUIRED_GATES.index("security")
+    ].model_copy(update={"runner_attestation": None})
+
+    decision = AdmissionController(builder_id=BUILDER_ID).admit(
+        digest, provenance=build.provenance, build_verdict=build.signed_verdict,
+        gate_results=tuple(gates), required_gates=_REQUIRED_GATES,
+        records=records, verifier=verifier, seq=_seq(),
+    )
+    assert decision.verdict is AdmissionVerdict.DENY
+    assert decision.reason in FORGERY_DENY_REASONS              # a forgery, not a benign fail
+
+    # This is what the emit node does on a forgery deny (factory_graph):
+    records.disqualify_digest(decision.subject_digest, decision.reason, "run-A")
+    # A sibling fork re-presenting the SAME digest now reads DISQUALIFIED.
+    assert records.admission_look(digest) is AdmissionState.DISQUALIFIED
+
+    # Honest failure must NOT be treated as forgery (the stable-FAIL latch owns that).
+    assert "required_gate_not_pass" not in FORGERY_DENY_REASONS
+
+
 def test_forged_terminal_gate_across_trees_cannot_reach_prod() -> None:
     """ATTACK (M4-R1-01): the release spans TWO materialized trees — the terminal
     Spec/Build/Test gates on the terminal tree, the assurance gates (security/

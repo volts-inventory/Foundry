@@ -95,6 +95,23 @@ _R_GATE_SIG_INVALID = "required_gate_signature_invalid"
 _R_DISQUALIFIED = "stable_fail_latched_or_disqualified"
 _R_SCANNER_CONFIG_MISMATCH = "scanner_config_rev_mismatch"
 
+# Deny reasons that indicate a FORGERY / TAMPER / cross-tree replay (not a benign
+# gate failure): a forged/unsigned signature, a verdict bound to the wrong tree, a
+# provenance that doesn't bind the subject, or a tampered scanner config. On such a
+# deny the caller disqualifies the digest cross-fork (gov §5 fork-divergence
+# defense) so a sibling fork re-presenting it under a fresh run_id is also denied.
+# A plain `_R_GATE_NOT_PASS` (an honest failing gate) is NOT here — the stable-FAIL
+# latch handles that; we do not poison a digest for an honest failure.
+FORGERY_DENY_REASONS: frozenset[str] = frozenset(
+    {
+        _R_PROVENANCE_UNBOUND,
+        _R_SIG_INVALID,
+        _R_GATE_WRONG_TREE,
+        _R_GATE_SIG_INVALID,
+        _R_SCANNER_CONFIG_MISMATCH,
+    }
+)
+
 
 @dataclass(frozen=True)
 class AdmissionController:

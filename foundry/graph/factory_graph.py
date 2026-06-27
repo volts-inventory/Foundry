@@ -105,6 +105,7 @@ from foundry.schemas.checkpoint import CheckpointBoundary
 from foundry.schemas.gates import GateStatus
 from foundry.schemas.trust_root import BuildRequest
 from foundry.state.factory_state import FactoryState
+from foundry.trust_root.admission import FORGERY_DENY_REASONS
 
 if TYPE_CHECKING:
     from collections.abc import MutableSequence, Sequence
@@ -1015,6 +1016,15 @@ def build_factory_graph(
         if not decision.admitted():
             # ADMISSION DENIED — emit NOTHING (no deploy). The trust root is the
             # only release authority; a denied artifact ships nothing (gov §5).
+            # Cross-fork defense (gov §5): if the deny indicates a FORGERY / tamper
+            # / wrong-tree replay (not an honest gate failure), disqualify the digest
+            # in the cross-fork ledger so a sibling fork re-presenting it under a
+            # fresh run_id is also denied — the trusted WRITE that makes
+            # admission_look's disqualification half live (previously inert).
+            if decision.reason in FORGERY_DENY_REASONS:
+                runner.records.disqualify_digest(
+                    build_out.result.subject_digest, decision.reason, admit_seq.run_id
+                )
             return {"phase": "halted"}
 
         # -- 4. Deploy ONLY the admitted decision (idempotent) ----------------

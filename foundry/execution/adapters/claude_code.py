@@ -89,7 +89,14 @@ class ClaudeCodeAdapter:
             packet,
             epilogue=(
                 "Make the required changes in the current working directory. "
-                "Do not push, publish, or touch anything outside this worktree."
+                "Do not push, publish, or touch anything outside this worktree. "
+                # The Audit gate (autonomous/gated) grounds a dependency inventory
+                # from a lockfile and fails CLOSED if none exists, so the build must
+                # DECLARE its dependencies — even when there are none.
+                "For a Python project, ALWAYS include a `requirements.txt` pinning "
+                "every third-party dependency you use (create an EMPTY "
+                "`requirements.txt` if the code uses only the standard library) so "
+                "the dependency inventory is auditable."
             ),
         )
 

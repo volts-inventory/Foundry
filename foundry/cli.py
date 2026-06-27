@@ -912,6 +912,35 @@ def _pending_interrupt(result: Any) -> Any:
     return None
 
 
+def _progress_enabled() -> bool:
+    """``FOUNDRY_PROGRESS`` truthy ⇒ stream per-node stage progress to stderr.
+
+    A real backend build makes many sequential model calls and can run for
+    minutes with NO output (the summary prints only at the end) — on a Pi /
+    over the LAN that looks hung. This surfaces each node as it completes so the
+    operator can SEE the build advancing. Off by default (byte-identical)."""
+    return os.environ.get("FOUNDRY_PROGRESS", "").strip().lower() not in ("", "0", "false", "no")
+
+
+def _invoke_streaming(app: Any, seed: FactoryState, config: RunnableConfig) -> FactoryState:
+    """Drive the graph with ``stream`` (updates mode), printing each completed
+    node + elapsed time to stderr, then return the terminal channel state."""
+    import time
+
+    t0 = time.monotonic()
+    # subgraphs=True surfaces the INNER stage nodes (product/architecture/…), not
+    # just the top-level supernode; each item is (namespace_tuple, {node: update}).
+    for item in app.stream(seed, config, stream_mode="updates", subgraphs=True):
+        ns, chunk = item if isinstance(item, tuple) else ((), item)
+        if not isinstance(chunk, dict):
+            continue
+        scope = ":".join(str(n).split(":")[0] for n in ns) if ns else ""
+        for node in chunk:
+            label = f"{scope} ▸ {node}" if scope else str(node)
+            print(f"  [{time.monotonic() - t0:6.1f}s] · {label}", file=sys.stderr, flush=True)
+    return cast("FactoryState", app.get_state(config).values)
+
+
 def _invoke_with_checkpoints(
     app: Any,
     seed: FactoryState,
@@ -929,11 +958,14 @@ def _invoke_with_checkpoints(
     responder, it stops at the first pause and returns ``(state, boundary)`` so the
     caller can resume out-of-band. The bound on the resume loop is the number of
     checkpoint boundaries (a responder that always rejects halts immediately)."""
-    result = app.invoke(seed, config)
     if not checkpointed:
         # Byte-identical to the historical single-invoke path: the invoke return
         # IS the terminal channel state (no interrupts on a non-checkpointed run).
-        return cast("FactoryState", result), None
+        # With progress on, stream per-node so a long real build shows liveness.
+        if _progress_enabled():
+            return _invoke_streaming(app, seed, config), None
+        return cast("FactoryState", app.invoke(seed, config)), None
+    result = app.invoke(seed, config)
 
     # Bound the loop: at most one pause per stage boundary (3) + slack.
     for _ in range(len(CHECKPOINT_BOUNDARIES) + 1):

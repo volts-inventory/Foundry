@@ -48,6 +48,7 @@ button{
 button:active{transform:translateY(2px);box-shadow:0 1px 0 #0c1322}
 button.primary{background:#1f6b3a;border-color:var(--green);color:#dffce8}
 button.danger{background:#6b1f28;border-color:var(--red);color:#ffe0e3}
+button.warn{background:#5a4a18;border-color:var(--gold);color:#fff6da}
 #new-btn{background:#5a4a18;border-color:var(--gold);color:#fff6da}
 
 /* ---- Stage ---- */
@@ -204,6 +205,10 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
 /* ---- Output (files) browser ---- */
 #output-btn{background:#1b3a4a;border-color:var(--blue);color:#dff2ff}
 .dialog.files{width:min(860px,95vw)}
+.files-releases{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.files-releases:empty{display:none}
+.rel-chip{padding:4px 9px;font-size:11px}
+.rel-chip.sel{background:#24304f;border-color:var(--gold);color:var(--gold)}
 .files-body{display:flex;gap:10px;height:min(56vh,440px);margin-top:8px}
 #files-list{list-style:none;margin:0;padding:0;overflow:auto;flex:0 0 40%;
   border:2px solid var(--line);border-radius:6px}

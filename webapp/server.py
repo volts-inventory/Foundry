@@ -527,7 +527,8 @@ def _run_factory(p: Project, resume: bool = False) -> None:
         with p.cond:
             p.pending_checkpoint = None
         _emit(p, type="resolved", boundary=boundary, decision=decision)
-        verb = "approved" if decision == "approve" else "REJECTED"
+        verb = {"approve": "approved", "needs_changes": "requested changes on",
+                "reject": "REJECTED"}.get(decision, "REJECTED")
         _emit(p, type="narrate", text=f"🧑‍💼 CTO {verb} the {boundary} checkpoint.")
         return decision
 
@@ -695,10 +696,13 @@ class Handler(BaseHTTPRequestHandler):
         default_adapter = os.environ.get("FOUNDRY_CODING_ADAPTER", "stub")
         if default_adapter not in ADAPTERS:
             default_adapter = "stub"
-        # The effective per-tier model ids the default real backend would serve
-        # (curated default + FOUNDRY_MODEL_T{1,2,3} overrides) so the UI can SHOW
-        # what runs. Mock has no real models.
+        # The effective per-tier model ids each real backend would serve (curated
+        # default + FOUNDRY_MODEL_T{1,2,3} overrides) so the UI can SHOW what runs
+        # for whichever backend the user picks. Mock has no real models.
         models = {} if default == "mock" else _tier_models(default)
+        models_by_backend = {
+            b: _tier_models(b) for b in BACKENDS if b != "mock"
+        }
         try:
             default_slots = max(1, int(os.environ.get("FOUNDRY_MAX_SLOTS", "1") or "1"))
         except ValueError:
@@ -707,6 +711,7 @@ class Handler(BaseHTTPRequestHandler):
             "default_backend": default, "backends": list(BACKENDS),
             "default_adapter": default_adapter, "adapters": list(ADAPTERS),
             "default_max_slots": default_slots, "models": models,
+            "models_by_backend": models_by_backend,
         })
 
     # -- output browsing (the build's written code + docs) ----------------------

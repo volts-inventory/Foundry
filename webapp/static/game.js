@@ -1627,6 +1627,27 @@ function syncCostCap(){
 document.getElementById("backend-select").addEventListener("change", syncCostCap);
 syncCostCap();
 
+// Autonomous mode is HANDS-OFF by definition: the trust-root admission controller
+// is the sole release gate (build · admit · deploy, no human sign-off). So when
+// `autonomous` is picked, supervision (per-checkpoint human approval) is forced
+// OFF — keeping it on would pause an unattended build. assistant/gated re-enable it.
+function syncMode(){
+  const mode = document.getElementById("mode-select").value;
+  const sup = document.getElementById("supervised");
+  const hint = document.getElementById("supervised-hint");
+  if(!sup) return;
+  if(mode === "autonomous"){
+    sup.checked = false;
+    sup.disabled = true;
+    if(hint) hint.textContent = "Autonomous is hands-off — admission is the sole release gate; no checkpoint approvals.";
+  } else {
+    sup.disabled = false;
+    if(hint) hint.textContent = "";
+  }
+}
+document.getElementById("mode-select").addEventListener("change", syncMode);
+syncMode();
+
 // Rehydrate on (re)load: floors run server-side independently of this tab, so a
 // refresh / reconnect from another device rebuilds every floor + reconnects the
 // live stream of any still-running build. No floors yet => open the new dialog.

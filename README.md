@@ -43,16 +43,18 @@ If you prefer the terminal, the same factory runs headless:
 
 ```sh
 make setup                                   # uv sync
-uv run python -m foundry.cli --out ./out --docs ./out-docs "build a URL shortener"
+uv run python -m foundry.cli --out ./repo "build a URL shortener"
 ```
 
 `make` lists every target — `make run`, `make spec` (co-generate a spec),
 `make token` (mint a Max-subscription token), `make up` (docker-compose).
 
-A passing run produces:
-- the **generated source tree** (`--out`) — the exact tree the gates verified;
-- a **company-shaped doc set** (`--docs`) — PRD, design + ADRs, interfaces, test plan/report, threat model, runbook, known-issues, upgrade & perf/cost docs — plus a **`BUILD-MANIFEST`** indexing every artifact, every gate verdict (and whether it's *attested*), provenance digests, and the proxy's *observed* model usage;
-- a single `open_pr` action (Assistant), a WORM **evidence pack** (Gated), or an attested **deploy** (Autonomous).
+`--out` produces a single **GitHub-ready repository**:
+- the **generated source** at the root (the exact tree the gates verified), with a real **`README.md`**;
+- a **`docs/`** folder — PRD, design + ADRs, interfaces, test plan/report, runbook, known-issues, upgrade & perf/cost docs — plus a **`BUILD-MANIFEST`** indexing every artifact, every gate verdict (and whether it's *attested*), provenance digests, and the proxy's *observed* model usage;
+- the release: a single `open_pr` action (Assistant), a WORM **evidence pack** (Gated), or an attested **deploy** (Autonomous).
+
+(`--docs DIR` still writes the doc set to a separate location if you want it elsewhere.)
 
 ---
 

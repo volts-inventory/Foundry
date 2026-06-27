@@ -39,7 +39,8 @@ def test_postgres_is_documented_swap_point_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("FOUNDRY_CHECKPOINTER", "postgres")
-    with pytest.raises(NotImplementedError, match="swap point"):
+    # Validated swap point, fail-closed until the dialect-portable outbox lands.
+    with pytest.raises(NotImplementedError, match="Fail-closed"):
         make_checkpointer(":memory:")
 
 

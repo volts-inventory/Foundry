@@ -20,10 +20,8 @@ export
 REQUEST ?= build a tiny URL-shortener service
 MODE ?= assistant
 BACKEND ?= $(or $(FOUNDRY_MODEL_BACKEND),mock)
-# Run output goes to an ephemeral, gitignored dir — NOT ./build (that is the
-# project's tracked planning-doc directory).
-OUT ?= ./.run/code
-DOCS ?= ./.run/docs
+# Run output goes to an ephemeral, gitignored dir (one GitHub-ready repo).
+OUT ?= ./.run/repo
 PORT ?= 8765
 IMAGE ?= foundry:dev
 INSTALL_CLI_BACKENDS ?= false
@@ -32,14 +30,14 @@ UV ?= uv
 
 .DEFAULT_GOAL := help
 .PHONY: help setup check lint fix typecheck test run spec \
-        token env docker-build compose-config up down clean
+        test-fast token env docker-build compose-config up down clean
 
 help: ## Show this help
 	@echo "Foundry — make targets:"
 	@grep -hE '^[a-zA-Z0-9_.-]+:.*?## ' $(MAKEFILE_LIST) \
 	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 	@echo
-	@echo "Vars: REQUEST MODE BACKEND OUT DOCS PORT IMAGE INSTALL_CLI_BACKENDS"
+	@echo "Vars: REQUEST MODE BACKEND OUT PORT IMAGE INSTALL_CLI_BACKENDS"
 
 # ---- develop ---------------------------------------------------------------
 setup: ## Install deps + the project into a local venv (uv sync)
@@ -60,10 +58,13 @@ typecheck: ## Mypy (strict, per pyproject)
 test: ## Full test suite, parallel
 	$(UV) run pytest -n auto -q
 
+test-fast: ## Fast inner-loop suite — skips the slow end-to-end factory passes
+	$(UV) run pytest -n auto -q -m "not slow"
+
 # ---- run the factory -------------------------------------------------------
-run: ## Build REQUEST with BACKEND/MODE, writing code to OUT (+ docs to DOCS)
+run: ## Build REQUEST with BACKEND/MODE → a GitHub-ready repo in OUT
 	$(UV) run python -m foundry.cli "$(REQUEST)" \
-	  --backend $(BACKEND) --mode $(MODE) --out $(OUT) --docs $(DOCS)
+	  --backend $(BACKEND) --mode $(MODE) --out $(OUT)
 
 spec: ## Co-generate a spec from REQUEST (ideation) -> spec.md
 	$(UV) run python -m foundry.ideation --mock "$(REQUEST)" > spec.md
@@ -115,6 +116,6 @@ down: ## Stop the compose stack
 	docker compose down
 
 # ---- housekeeping ----------------------------------------------------------
-clean: ## Remove caches + the ephemeral .run/ output (never touches build/)
+clean: ## Remove caches + the ephemeral .run/ output
 	rm -rf .pytest_cache .mypy_cache .ruff_cache ./.run spec.md
 	find . -path ./.git -prune -o -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true

@@ -34,6 +34,12 @@ testpaths = ["tests"]
 # plain `pytest` would otherwise run serially and feel slow. Disable for a single
 # test / debugging with `-p no:xdist` (or `-n0`).
 addopts = "-q -n auto"
+markers = [
+    # Whole-pipeline end-to-end factory passes (each compiles + runs the full
+    # graph). They dominate wall time, so `pytest -m "not slow"` is the fast
+    # inner-loop; `make check` / CI still runs everything.
+    "slow: full end-to-end factory-graph integration test",
+]
 # Production classes named Test* (TestGate, TestPlan, TestReport) are domain
 # types, not test cases — only collect classes prefixed "Test_".
 python_classes = ["Test_*"]

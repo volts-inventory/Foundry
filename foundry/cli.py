@@ -833,6 +833,9 @@ class RunResult:
     open_pr_payload_uri: str | None = None
     gate_statuses: dict[str, GateStatus] = field(default_factory=dict)
     """Newest-by-name attested status per gate (spec / build / test / review...)."""
+    gate_findings: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    """Findings (the human-readable WHY) for the newest verdict per gate — surfaced
+    in the summary for FAILING gates so a halted real build is diagnosable."""
     doc_root: str | None = None
     """Where the per-build documentation set was written (when ``docs_dir`` set)."""
     output_root: str | None = None
@@ -873,6 +876,11 @@ class RunResult:
         ]
         for name in sorted(self.gate_statuses):
             lines.append(f"  - {name}: {self.gate_statuses[name].value}")
+            # Surface WHY a gate didn't pass (real builds halt here; the findings
+            # are the actionable detail — a missing oracle hint, a failing test, …).
+            if self.gate_statuses[name] is not GateStatus.PASS:
+                for finding in self.gate_findings.get(name, ()):
+                    lines.append(f"      · {finding}")
         if self.passed:
             lines.append("reviewed artifact (PR subject):")
             lines.append(f"  {self.artifact_uri}")
@@ -1293,11 +1301,17 @@ def _result(
     on the same ``open_pr_*`` fields so the summary reports the release uniformly.
     """
     statuses: dict[str, GateStatus] = {}
+    findings: dict[str, tuple[str, ...]] = {}
+    # newest-by-Seq per gate (the verdict that gates the release; mirrors emit guard)
+    newest: dict[str, Any] = {}
     for g in final.get("gates") or ():
-        prev = statuses.get(g.name)
-        # newest-by-name (the verdict that gates the release; mirrors emit guard)
-        if prev is None:
-            statuses[g.name] = g.status
+        cur = newest.get(g.name)
+        if cur is None or g.seq > cur.seq:
+            newest[g.name] = g
+    for name, g in newest.items():
+        statuses[name] = g.status
+        if getattr(g, "findings", None):
+            findings[name] = tuple(g.findings)
 
     # The mode-specific release action: open_pr (assistant/gated) or deploy
     # (autonomous). At most one is emitted on a released run (fail-closed otherwise).
@@ -1324,6 +1338,7 @@ def _result(
         open_pr_idempotency_key=release.idempotency_key if release is not None else None,
         open_pr_payload_uri=release.payload_uri if release is not None else None,
         gate_statuses=statuses,
+        gate_findings=findings,
         checkpoints=checkpoints,
         paused_at=paused_at,
     )

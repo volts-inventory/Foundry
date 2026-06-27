@@ -30,7 +30,10 @@ packages = ["foundry"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+# Parallel by default (pytest-xdist across all cores) — the suite is large, so a
+# plain `pytest` would otherwise run serially and feel slow. Disable for a single
+# test / debugging with `-p no:xdist` (or `-n0`).
+addopts = "-q -n auto"
 # Production classes named Test* (TestGate, TestPlan, TestReport) are domain
 # types, not test cases — only collect classes prefixed "Test_".
 python_classes = ["Test_*"]

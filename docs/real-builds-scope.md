@@ -25,11 +25,12 @@ bypass for real backends, carefully.
 | `ClaudeCodeAdapter` (real code via `claude -p` in a sandbox) | ✅ built | `execution/adapters/claude_code.py`; junior calls `rt.adapter.run` |
 | Build/Test gates **execute** the code (real pytest) | ✅ real | `gate_wiring.run_build_test_gates` → `materialize_workdir` + `TestGate` |
 | **Coding substrate selection** | ✅ selectable (`--adapter` / API `adapter`) | `cli.py` `make_coding_adapter`; default `stub` |
-| **Artifact resolver** | ❌ `_synthetic_resolve` overrides real bodies | `cli.py:959`, `_synthetic_resolve` |
-| **Diff/code resolver** | ❌ `_synthetic_resolve_blob` returns a canned body | `cli.py:960`, `_DIFF_BODY_URI` |
-| **Reviewer/admission binding** | ❌ hardcoded `subject_artifact_uri=_DIFF_BODY_URI`, `state_sha="integrated-sha"` | `cli.py:966-967` |
+| **Artifact resolver** | ✅ real off the CAS for real backends | `cli.py` `_materialization_seam`; synthetic only for `mock` |
+| **Diff/code resolver** | ✅ real `store.resolve_blob` for real backends | same; `_DIFF_BODY_URI` only on the mock smoke |
+| **Reviewer/admission binding** | ✅ dynamic for real backends | `cli.py` `_judgment_anchors` (unpinned ⇒ reviewer binds the real diff + real tree) |
 
-So: **agents real, adapter real, gates real — the CLI just doesn't let them run.**
+So: **agents real, adapter real, gates real — and for a real backend the CLI now lets
+them run** (the `mock` smoke is byte-identical via the synthetic doubles).
 
 ---
 
@@ -52,27 +53,41 @@ So: **agents real, adapter real, gates real — the CLI just doesn't let them ru
   (`stub`) path is unchanged, so the deterministic smoke build is untouched.
 
   NOTE: adapter selection is independent of `backend`. Picking `claude-code`/`raw-react`
-  makes the agents author code via that substrate, but the CLI/webapp `run()` still
-  overrides the resolver (`_synthetic_resolve(_blob)`) — so the *smoke harness* shape
-  applies until 2b lands. The substrate is wired and selectable; 2b removes the resolver
-  override so the real authored bodies actually flow through.
+  makes the agents author code via that substrate; **for a real backend `run()` now
+  resolves off the real CAS** (2b) so those authored bodies flow through to the gates.
 
-### 2b. Use the real resolver for real backends — `foundry/cli.py`
-- When `backend != "mock"` and the caller didn't pass one, use the **real CAS resolver**
-  (`store.resolve` / `store.resolve_blob`) instead of `_synthetic_resolve(_blob)`.
-- Keep `_synthetic_resolve` for `mock` (it guarantees the smoke build passes).
-- **Risk:** medium. The real designs/criteria/diff now flow through; downstream agents
-  (senior decomposition, QA oracles) must consume *real* shapes. Most consume via the
-  resolver already, so this is mostly removing the override — but it surfaces any place
-  that quietly relied on the synthetic "faithful" bodies. Needs an integration pass.
+### 2b. Use the real resolver for real backends — `foundry/cli.py`  ✅ DONE
+- `_materialization_seam(real_artifacts, store, diff_body)`: `backend != "mock"` resolves
+  off the **real CAS** (`store.resolve` / `store.resolve_blob`); `mock` keeps the
+  synthetic doubles (the smoke build's guaranteed PASS). Default `stub` adapter on a real
+  backend authors no diff ⇒ the reviewer fail-closes honestly (a real build needs a real
+  coding adapter).
+- **Validated deterministically** (`tests/test_real_materialization.py`): the seam picks
+  the real store for real backends and the synthetic doubles (returning the canned body)
+  for mock. The live end-to-end (real bodies actually passing the gates) is the Phase-2
+  integration pass — it needs your `claude -p` and may surface 1-3 hidden smoke
+  assumptions in the downstream agents (senior decomposition, QA oracles).
 
-### 2c. Make the trust-binding values dynamic — `foundry/cli.py` (+ maybe gate_wiring)
-- `subject_artifact_uri` must be the **real** integrated FeatureDiff uri, and `state_sha`
-  the **real** integrated tree sha (the one `materialize_workdir` computes), not the
-  hardcoded constants — so the reviewer's judgment binding and admission bind to the
-  artifact that was actually built.
-- **Risk:** medium-high (trust path). This touches what the reviewer signs and what
-  admission re-verifies. Must keep the H2/H3/F1 properties intact (regression-test).
+### 2c. Make the trust-binding values dynamic — `foundry/cli.py`  ✅ DONE
+- **Key finding from the trace:** the load-bearing trust binds are ALREADY real. Admission's
+  expected per-gate trees (`factory_graph._autonomous_admission_inputs`), the BuildOutput
+  provenance, the evidence pack (`_attested_run_against`), and the stable-FAIL latch all
+  bind the **real verdict-carried `run_against`** (the `tree_sha` `materialize_workdir`
+  computes), NEVER the config label. The config `subject_artifact_uri`/`state_sha` are
+  pre-build LABELS the *reviewer's advisory verdict* + the gated sign-off bind to — and
+  the real integrated values literally don't exist when the config is built (the diff is
+  authored mid-run), so they can't be static.
+- `_judgment_anchors(real_artifacts)`: `mock` pins the synthetic subject/label (byte-
+  identical smoke); a real backend pins **nothing**, so the reviewer binds the **real**
+  newest FeatureDiff uri (its existing state fallback) + the **real** integrated tree sha
+  (`reviewer_critic._attested_tree_sha`, read off the attested gate verdicts). The gated
+  sign-off anchors derive consistently because both the supervisor boundary and the emit
+  re-check read the (now unpinned) config — `release_allowed` checks equality, so "" == ""
+  still admits a legitimate release.
+- **Risk retired deterministically:** the full H2/H3/F1/M1 trust suite stays green
+  (admission trusts the real verdict trees, not the unpinned label), and the `mock` path
+  is byte-identical (config-pin precedence). Live trust behaviour on real output is part
+  of the Phase-2 pass.
 
 ### 2d. Wire it through the webapp — `webapp/server.py`
 - `_run_factory` already calls `run(backend=p.backend, …)`; once `run()` chooses the
@@ -130,9 +145,11 @@ So: **agents real, adapter real, gates real — the CLI just doesn't let them ru
 
 ## 5. Sequencing (suggested)
 
-1. **Phase 1 — code real, gates real (small, mostly safe):** 2a + 2b + 2c behind
-   `backend != "mock"`, with the trust suite kept green. Deterministic tests.
-   → Real code is authored and verified; bindings are real.
+1. **Phase 1 — code real, gates real (small, mostly safe): ✅ DONE.** 2a + 2b + 2c behind
+   `backend != "mock"`, trust suite green, mock byte-identical. Deterministic tests
+   (`tests/test_adapter_selection.py`, `tests/test_real_materialization.py`).
+   → Real code is authored and verified; bindings are real. The remaining gap is purely
+   live-tuning (Phase 2) — the wiring no longer bypasses the real path.
 2. **Phase 2 — integration pass (the unknowns):** run real `claude -p` builds, fix the
    1-3 hidden smoke assumptions, tune the fix-loop/prompts until builds reliably pass.
    → Requires your `claude -p`.

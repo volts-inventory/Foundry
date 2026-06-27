@@ -65,6 +65,26 @@ def _newest_feature_diff_uri(artifacts: Sequence[Artifact]) -> str | None:
         return None
     return max(candidates, key=lambda a: a.seq).uri
 
+
+def _attested_tree_sha(state: FactoryState) -> str | None:
+    """The REAL integrated ``tree_sha`` the deterministic gates ran against, read
+    off the newest-by-``Seq`` attested verdict on the ``gates`` channel.
+
+    Every ``GateResult`` carries the TRUE ``run_against`` of the integrated tree it
+    was evaluated on (``materialize_workdir`` → ``tree_sha``; GW2 binds the release
+    gates to ONE tree). Used as the reviewer's ``state_sha`` fallback so that when
+    the runner does NOT pin a synthetic ``state_sha`` label (real backends), the
+    verdict's ``run_against`` honestly names the tree that was actually built —
+    rather than a bare run id. ``None`` when no verdict carries one yet (e.g. the
+    reviewer runs before the build gates), in which case the caller falls back to
+    a stable per-run label. Config-pin precedence means the ``mock`` smoke (which
+    pins ``state_sha``) is unaffected."""
+    best: Any = None
+    for g in state.get("gates") or ():
+        if getattr(g, "run_against", "") and (best is None or g.seq > best.seq):
+            best = g
+    return str(best.run_against) if best is not None else None
+
 _SOP = (
     "You are the Reviewer/Critic, the evaluator side of the evaluator-optimizer "
     "loop. Review the diff for correctness, design adherence, readability, and "
@@ -112,7 +132,13 @@ def make_reviewer_critic_node(rt: AgentRuntime) -> NodeFn:
                 "artifact is present. The supervisor/gate-wiring wave (T-M1-13) "
                 "must pin subject_artifact_uri on the run config for judgment nodes."
             )
-        run_against = state_sha(config, fallback=seq.run_id)
+        # Config-pinned `state_sha` wins (the `mock` smoke pins it); otherwise
+        # (real backends) prefer the REAL integrated tree_sha the gates ran
+        # against, falling back to a stable per-run label only before any gate
+        # verdict carries one.
+        run_against = state_sha(
+            config, fallback=_attested_tree_sha(state) or seq.run_id
+        )
 
         # Server-issued, single-use; the agent consumes but never mints it. Derived
         # per-request (bound to node/subject/state) so each verdict in a run has its

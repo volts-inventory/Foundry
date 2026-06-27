@@ -576,6 +576,35 @@ def _synthetic_resolve_blob(store: ArtifactStore, diff_body: str) -> BlobResolve
     return _resolve_blob
 
 
+def _materialization_seam(
+    real_artifacts: bool, *, store: ArtifactStore, diff_body: str
+) -> tuple[ArtifactResolver, BlobResolver]:
+    """The (resolve, resolve_blob) pair for the run (Phase-1 2b).
+
+    Real backend ⇒ resolve straight off the real CAS (the agents' authored
+    designs/criteria + the adapter's real FeatureDiff are the bytes the gates
+    run). Mock ⇒ the synthetic SUP7 doubles that guarantee the deterministic
+    Spec/Build/Test PASS with the StubAdapter (byte-identical smoke)."""
+    if real_artifacts:
+        return store.resolve, store.resolve_blob
+    return _synthetic_resolve(store), _synthetic_resolve_blob(store, diff_body)
+
+
+def _judgment_anchors(real_artifacts: bool) -> dict[str, str]:
+    """The pre-build judgment-binding LABELS pinned on the run config (Phase-1 2c).
+
+    Mock ⇒ pin the synthetic subject + tree label the synthetic resolver
+    produces (the reviewer's advisory verdict binds them; byte-identical smoke).
+    Real backend ⇒ pin NOTHING: the reviewer then binds the REAL newest
+    FeatureDiff uri (state fallback) + the REAL integrated tree_sha (read off the
+    attested gate verdicts), and the gated sign-off anchors derive consistently
+    on both read sites. Admission/provenance/evidence already bind the real
+    verdict-carried ``run_against``, never these labels, so unpinning is safe."""
+    if real_artifacts:
+        return {}
+    return {"subject_artifact_uri": _DIFF_BODY_URI, "state_sha": "integrated-sha"}
+
+
 # ---- final source-tree materialization (on a passing build) -----------------
 
 # The gate-input file the integrated tree carries for the Spec gate; it is NOT a
@@ -1028,16 +1057,45 @@ def run(
 
     runner = TwoZoneGateRunner(_zone_b_signer(), records, _SCANNER_REV, _LINEAGE_REV)
 
-    resolve = resolve or _synthetic_resolve(store)
-    resolve_blob = resolve_blob or _synthetic_resolve_blob(store, diff_body)
+    # -- materialization seam (Phase-1 2b) ------------------------------------
+    # The `mock` smoke backend uses the synthetic SUP7 doubles: with the
+    # StubAdapter no faithful test body is ever authored and the architecture
+    # agents mint epoch-keyed handles, so the doubles synthesize faithful bodies
+    # that guarantee the deterministic Spec/Build/Test PASS. A REAL backend means
+    # the agents author real designs / criteria / ownership AND (with a real
+    # coding adapter) a real FeatureDiff is written into the CAS, so we resolve
+    # straight off the real store — the bytes the gates run are EXACTLY what was
+    # authored, never a canned override. (A real backend with the `stub` adapter
+    # authors no diff; the reviewer then fail-closes honestly — a real build needs
+    # a real coding adapter.)
+    real_artifacts = backend != _MOCK_BACKEND
+    _resolve, _resolve_blob = _materialization_seam(
+        real_artifacts, store=store, diff_body=diff_body
+    )
+    resolve = resolve or _resolve
+    resolve_blob = resolve_blob or _resolve_blob
 
+    # -- judgment-binding anchors (Phase-1 2c) --------------------------------
+    # `subject_artifact_uri` / `state_sha` are pre-build RUN-INPUT LABELS the
+    # reviewer's advisory verdict + the gated sign-off bind to. For the `mock`
+    # smoke they are PINNED to the synthetic subject/label the synthetic resolver
+    # produces (byte-identical to before). For a REAL backend we DON'T pin them:
+    # the reviewer then binds the REAL newest FeatureDiff uri (state fallback) +
+    # the REAL integrated tree_sha (read off the attested gate verdicts), so the
+    # verdict honestly cites the artifact that was actually built, and the gated
+    # sign-off anchors derive consistently on both read sites. The LOAD-BEARING
+    # trust binds — admission's expected per-gate trees, the BuildOutput
+    # provenance, the evidence pack, the stable-FAIL latch — already use the real
+    # verdict-carried `run_against`, NEVER this label (factory_graph
+    # `_attested_run_against` / `_autonomous_admission_inputs`), so unpinning is
+    # safe: admission re-verifies each gate against its own real tree.
+    configurable: dict[str, Any] = {
+        "thread_id": thread_id,
+        "verdict_nonce": f"N-{thread_id}",
+        **_judgment_anchors(real_artifacts),
+    }
     config: RunnableConfig = {
-        "configurable": {
-            "thread_id": thread_id,
-            "verdict_nonce": f"N-{thread_id}",
-            "subject_artifact_uri": _DIFF_BODY_URI,
-            "state_sha": "integrated-sha",
-        },
+        "configurable": configurable,
         "metadata": {"langgraph_step": 1},
         "recursion_limit": 200,
     }

@@ -1076,14 +1076,16 @@ def run(
         error/failing body to exercise the halted-run path.
     max_fix_attempts:
         Convergence bound for the gate fix-loop.
-    docs_dir:
-        When set, write the company-shaped documentation set + BUILD-MANIFEST to
-        this directory (best-effort; surfaced on ``RunResult.doc_root``).
     output_dir:
-        When set AND the build PASSES (terminal gates pass), materialize the
-        final accepted integrated source tree to this directory on disk; the
-        written path is surfaced on ``RunResult.output_root``. On a halted run
+        When set AND the build PASSES (terminal gates pass), write a single
+        **GitHub-ready repository** here: the accepted integrated source tree at
+        the root + a real ``README.md`` + the doc set under ``docs/`` + the
+        ``BUILD-MANIFEST``. Surfaced on ``RunResult.output_root``. On a halted run
         nothing is written (no accepted tree to emit).
+    docs_dir:
+        OPTIONAL. When set, ALSO write the documentation set to this SEPARATE
+        directory (back-compat / docs elsewhere). When only ``output_dir`` is
+        given, the docs already live inside that repo under ``docs/``.
     checkpoints:
         OPTIONAL checkpoint/HITL mode (plan [10]). ``None``/``False`` (the
         DEFAULT) runs straight through with NO pauses (byte-identical to today).
@@ -1256,7 +1258,9 @@ def run(
                 deployer=deployer,
                 gate_verifier=gate_verifier,
                 pack_registry=pack_registry,
-                doc_sink=doc_sink if docs_dir is not None else None,
+                # Author the doc set when EITHER a separate --docs dir OR an --out
+                # tree is requested (the docs land inside the --out repo, below).
+                doc_sink=doc_sink if (docs_dir is not None or output_dir is not None) else None,
                 checkpoints=sorted(ckpt_set) if ckpt_set else None,
                 max_slots=max_slots,
                 cost_cap_microusd=cost_cap_microusd,
@@ -1308,15 +1312,18 @@ def run(
             final_state, output_dir, resolve=resolve, resolve_blob=resolve_blob
         )
         result = replace(result, output_root=output_root)
+        # GitHub-ready repo: write the doc set INTO the same tree (a real README
+        # at the root + the design/ops docs under docs/ + the BUILD-MANIFEST), so
+        # `--out` produces a single push-ready repository, not code-then-docs in
+        # two places. The bundle's RenderedDoc paths (README.md / docs/… /
+        # BUILD-MANIFEST.*) compose with the source files already at the root.
+        if doc_sink:
+            write_bundle(doc_sink[-1], output_dir)
+            result = replace(result, doc_root=output_dir)
     if docs_dir is not None and doc_sink:
-        # AUTHORING + the manifest already happened IN-GRAPH (budget-metered,
-        # checkpointed). The CLI only WRITES the already-assembled bundle to disk.
-        # The blanket ``except Exception`` is GONE: the bundle was assembled
-        # fail-safe inside the node, so a missing bundle means docs were skipped
-        # (halted run) or the node swallowed an authoring error — both leave
-        # ``doc_sink`` empty and we simply don't write. A FAILURE here is now only
-        # a disk-write fault, which we let surface (a narrow guard) rather than
-        # re-swallow wiring bugs the assembly deliberately would have raised.
+        # An EXPLICIT --docs DIR still writes the bundle to that separate location
+        # (back-compat / docs elsewhere). AUTHORING + the manifest already happened
+        # IN-GRAPH (budget-metered, checkpointed); the CLI only writes to disk.
         write_bundle(doc_sink[-1], docs_dir)
         result = replace(result, doc_root=docs_dir)
     return result

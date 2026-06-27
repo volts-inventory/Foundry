@@ -531,8 +531,10 @@ def _run_factory(p: Project, resume: bool = False) -> None:
         _emit(p, type="narrate", text=f"🧑‍💼 CTO {verb} the {boundary} checkpoint.")
         return decision
 
+    # One GitHub-ready repo per build: code at the root + a real README + the
+    # design/ops docs under docs/ (no separate docs dir — the doc set is written
+    # INTO the code tree by run()).
     code_dir = (p.out_base / "code") if p.out_base else None
-    docs_dir = (p.out_base / "docs") if p.out_base else None
     try:
         result = run(
             p.request,
@@ -550,7 +552,6 @@ def _run_factory(p: Project, resume: bool = False) -> None:
             checkpoints=True,
             checkpoint_responder=responder,
             output_dir=str(code_dir) if code_dir else None,
-            docs_dir=str(docs_dir) if docs_dir else None,
         )
     except Exception as exc:
         _emit(p, type="narrate", text=f"💥 Build error: {exc}")

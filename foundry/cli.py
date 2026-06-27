@@ -153,6 +153,16 @@ BACKENDS = (_MOCK_BACKEND, "anthropic", "claude-cli", "codex", "ollama-gemma")
 # single-loop substrate over the same model backend (real code, any backend).
 ADAPTERS = ("stub", "claude-code", "raw-react")
 _DEFAULT_ADAPTER = "stub"
+
+# System-decided parallelism (no user knob): the Tech-Lead decomposes the work
+# into independently-buildable tasks, and the IC pool sizes ITSELF to that plan —
+# one worker per ready task, bounded by this SAFETY CAP so a large decomposition
+# can't spawn unbounded concurrent model/coding sessions (rate-limit / resource
+# guard). Effective parallelism = min(tasks the lead created, AUTO_SLOTS_CAP); a
+# single-task build still runs serially. An explicit --max-slots / FOUNDRY_MAX_SLOTS
+# only LOWERS or RAISES this ceiling for constrained/over-provisioned infra; it is
+# never required, and the default is fully automatic.
+AUTO_SLOTS_CAP = 4
 # Minimal system prompt for the raw-react substrate (the full task prompt — pinned
 # constraints, task, spans, "emit a unified diff" — is built by the adapter itself).
 _RAW_REACT_SOP = (
@@ -1004,7 +1014,7 @@ def run(
     output_dir: str | None = None,
     checkpoints: bool | list[str | CheckpointBoundary] | None = None,
     checkpoint_responder: CheckpointResponder | None = None,
-    max_slots: int = 1,
+    max_slots: int = AUTO_SLOTS_CAP,
     cost_cap_microusd: int | None = None,
     base_dir: str | None = None,
 ) -> RunResult:
@@ -1565,14 +1575,15 @@ def main(argv: list[str] | None = None) -> int:
         args, _mfa = _take_int(args, "--max-fix-attempts", minimum=1)
         max_fix_attempts = _mfa if _mfa is not None else 3
 
-        # --max-slots N: IC-pool size — tasks built in PARALLEL (Wave C; >1 also
-        # engages the per-domain budget tree, Wave D). Default FOUNDRY_MAX_SLOTS (else
-        # 1 = serial). --cost-cap-microusd N: the global spend envelope the pool
-        # sub-allocates (default FOUNDRY_COST_CAP_MICROUSD).
+        # Parallelism is SYSTEM-DECIDED: the Tech-Lead decomposes the work and the
+        # IC pool sizes itself to that plan (min(tasks, AUTO_SLOTS_CAP)). --max-slots
+        # / FOUNDRY_MAX_SLOTS only OVERRIDE the safety ceiling (e.g. lower it on a
+        # constrained box); neither is required. --cost-cap-microusd N: the global
+        # spend envelope the pool sub-allocates (default FOUNDRY_COST_CAP_MICROUSD).
         try:
-            _slots_default = int(os.environ.get("FOUNDRY_MAX_SLOTS", "1") or "1")
+            _slots_default = int(os.environ.get("FOUNDRY_MAX_SLOTS", "") or AUTO_SLOTS_CAP)
         except ValueError:
-            _slots_default = 1
+            _slots_default = AUTO_SLOTS_CAP
         args, _slots = _take_int(args, "--max-slots", minimum=1)
         max_slots = _slots if _slots is not None else _slots_default
 

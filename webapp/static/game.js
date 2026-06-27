@@ -1548,7 +1548,9 @@ document.getElementById("start-btn").onclick=async ()=>{
   const backend=document.getElementById("backend-select").value;
   const packs=document.getElementById("packs-input").value;
   const sup=document.getElementById("supervised").checked;
-  const extra={max_slots: parseInt(document.getElementById("slots-input").value,10)||1};
+  // Parallelism is system-decided — the server sizes the IC pool to the lead's
+  // decomposition; the client sends no worker count.
+  const extra={};
   extra.adapter=document.getElementById("adapter-select").value;
   const fix=parseInt(document.getElementById("fix-input").value,10);
   if(Number.isFinite(fix) && fix>=0) extra.max_fix_attempts=fix;
@@ -1585,18 +1587,6 @@ document.getElementById("files-close").onclick=hideFiles;
 document.getElementById("iv-ask").onclick=askInterview;
 document.getElementById("iv-close").onclick=()=>document.getElementById("iv-modal").classList.add("hidden");
 document.getElementById("iv-question").addEventListener("keydown",(e)=>{ if(e.key==="Enter"){ e.preventDefault(); askInterview(); }});
-// suggest a parallel-IC count from the request + packs
-document.getElementById("suggest-btn").onclick=()=>{
-  const request=document.getElementById("req-input").value;
-  const packs=document.getElementById("packs-input").value.split(",").map(s=>s.trim()).filter(Boolean);
-  const hint=document.getElementById("slots-hint"); hint.textContent="…";
-  fetch("/api/suggest-slots",{method:"POST",headers:postHeaders(),
-    body:JSON.stringify({request,packs})})
-   .then(r=>r.json()).then(d=>{
-     document.getElementById("slots-input").value=d.slots;
-     hint.textContent="≈"+d.slots+" areas: "+(d.areas||[]).join(", ");
-   }).catch(()=>{ hint.textContent=""; });
-};
 
 // preselect the configured default backend (FOUNDRY_MODEL_BACKEND on the server;
 // mock if unset). A deployment sets the env to default to claude-cli.
@@ -1607,7 +1597,6 @@ fetch("/api/config").then(r=>r.json()).then(c=>{
   const asel=document.getElementById("adapter-select");
   if(c && c.default_adapter && asel && [...asel.options].some(o=>o.value===c.default_adapter))
     asel.value=c.default_adapter;
-  if(c && c.default_max_slots) document.getElementById("slots-input").value=c.default_max_slots;
   syncCostCap();
 }).catch(()=>{});
 

@@ -196,7 +196,8 @@ class Project:
     adapter: str = "stub"  # coding substrate (see foundry.cli.ADAPTERS)
     packs: list[str] = field(default_factory=list)
     spec: str | None = None  # literal spec text OR a dir of uploaded docs (run(spec=))
-    max_slots: int = 1  # IC-pool parallelism (Wave C; >1 engages the budget tree, Wave D)
+    max_slots: int = 4  # IC-pool CEILING (= cli.AUTO_SLOTS_CAP); the system sizes
+    # actual parallelism to the lead's decomposition (min(tasks, this)).
     cost_cap_microusd: int | None = None  # global spend envelope (Wave D)
     max_fix_attempts: int = 3  # auto-fix retry budget per failing gate (run() default)
     release_seq: int = 1  # 1,2,3… within the floor; each iterate adds a release
@@ -967,10 +968,15 @@ class Handler(BaseHTTPRequestHandler):
         supervised = bool(body.get("supervised", True))
         spec_text = str(body.get("spec_text", "")).strip()
         spec_zip_b64 = body.get("spec_zip_b64")
+        # Parallelism is system-decided (the Tech-Lead's decomposition sizes the IC
+        # pool, capped by AUTO_SLOTS_CAP). The env/body value only OVERRIDES the
+        # ceiling; absent ⇒ the automatic cap. The UI no longer asks for a count.
+        from foundry.cli import AUTO_SLOTS_CAP
+
         try:
-            default_slots = int(os.environ.get("FOUNDRY_MAX_SLOTS", "1") or "1")
+            default_slots = int(os.environ.get("FOUNDRY_MAX_SLOTS", "") or AUTO_SLOTS_CAP)
         except ValueError:
-            default_slots = 1
+            default_slots = AUTO_SLOTS_CAP
         try:
             max_slots = int(body.get("max_slots", default_slots))
         except (TypeError, ValueError):

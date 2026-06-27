@@ -571,10 +571,18 @@ def make_junior_engineer_node(
     def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         constraints: Sequence[PinnedConstraint] = state.get("pinned_constraints") or ()
         tasks = ready_tasks(state)
+        # SYSTEM-DECIDED parallelism. The Tech-Lead's decomposition IS the decision
+        # to parallelize: it splits the work into independently-buildable tasks. We
+        # size the IC pool to that decomposition — one worker per ready task —
+        # capped by ``max_slots`` (a safety ceiling, not a user-tuned target). So a
+        # single-task build runs serially with no pool overhead; an N-task build
+        # fans N adapter runs across the pool automatically (≤ the cap). Nobody sets
+        # a worker count: the system reads it off the lead's plan.
+        effective_slots = min(len(tasks), max_slots) if tasks else 1
         # Branch-per-task: each task builds in its own fresh sandbox on its own
-        # task/<id> branch. With max_slots>1 the adapter runs fan out across the
-        # IC pool (Wave C); otherwise they run serially (the original path).
-        if max_slots > 1:
+        # task/<id> branch. >1 task ⇒ the adapter runs fan out across the IC pool
+        # (Wave C); a single task runs serially (the original path).
+        if effective_slots > 1:
             # Per-domain budget lineage + each domain's area (Wave D), derived from
             # the OwnershipMap when a resolver is wired; else a single "default".
             domain_by_task: dict[str, str] = {}
@@ -594,7 +602,7 @@ def make_junior_engineer_node(
                 snapshot_store=snapshot_store,
                 turn_budget=turn_budget,
                 cost_budget_microusd=cost_budget_microusd,
-                max_slots=max_slots,
+                max_slots=effective_slots,
                 cost_cap_microusd=cost_cap_microusd,
                 domain_by_task=domain_by_task,
                 domain_area=domain_area,

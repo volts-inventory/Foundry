@@ -78,6 +78,7 @@ from foundry.graph.supervisor import (
     normalize_checkpoints,
 )
 from foundry.proxy import ModelProviderProxy, build_backend
+from foundry.proxy.model_provider_proxy import DriftMode, DriftPolicy
 from foundry.proxy.test_doubles import MockTransport
 from foundry.schemas.architecture import OwnershipMap, SystemDesign
 from foundry.schemas.base import FrozenModel
@@ -159,23 +160,34 @@ def _gate_verifier(records: Any) -> DevGateWriteVerifier:
     return DevGateWriteVerifier.from_scheme(verifier_scheme, records)
 
 
+def _drift_policy() -> DriftPolicy:
+    """Production default: a served-model drift from the pinned id on a gate/judgment
+    call FAILS CLOSED (pause-and-escalate) rather than silently trusting the drifted
+    model. Opt back to record-only with ``FOUNDRY_DRIFT_POLICY=advisory``."""
+    if os.environ.get("FOUNDRY_DRIFT_POLICY", "fail-closed").strip().lower() == "advisory":
+        return DriftPolicy(mode=DriftMode.ADVISORY)
+    return DriftPolicy(mode=DriftMode.FAIL_CLOSED)
+
+
 def _build_proxy(backend: str) -> ModelProviderProxy:
     """Build the single-egress proxy for the chosen backend (the dev zone-B signer
     is injected so the judgment path can stamp verdicts regardless of backend).
 
     ``"mock"`` is the deterministic scripted transport (the default, keyless); any
     other name is delegated to ``build_backend`` (a real egress). An unknown name
-    fails closed with a clear ``ValueError``."""
+    fails closed with a clear ``ValueError``. Drift from the pinned model on a
+    gate/judgment call fails closed by default (see :func:`_drift_policy`)."""
     if backend not in BACKENDS:
         raise ValueError(
             f"unknown backend {backend!r}; choose one of {', '.join(BACKENDS)}"
         )
     signer = _zone_b_signer()
+    drift = _drift_policy()
     if backend == _MOCK_BACKEND:
         tx = MockTransport.scripted(dict(_SCRIPTS), default_verdict="approve")
-        return ModelProviderProxy(tx, signer=signer)
+        return ModelProviderProxy(tx, signer=signer, drift_policy=drift)
     # Past the guard above, `backend` is one of the real BackendName literals.
-    return build_backend(cast("BackendName", backend), signer=signer)
+    return build_backend(cast("BackendName", backend), signer=signer, drift_policy=drift)
 
 # The first-party domain packs selectable via ``--packs`` (T-M5-08). Mapped by the
 # stable pack NAME (``pack.name``); a NEW pack is added here AND via register() — but

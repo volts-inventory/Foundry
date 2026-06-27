@@ -23,7 +23,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Now the source, then install the project itself into the same venv.
 COPY foundry ./foundry
-COPY README.md* ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev || uv sync --no-dev
 

@@ -1142,6 +1142,15 @@ const GAME = new Phaser.Game({
 // =========================================================================== //
 //  Floor manager + multi-project networking                                   //
 // =========================================================================== //
+// Workshop token (for a deployment that sets FOUNDRY_WORKSHOP_TOKEN): pass it as
+// ?token=… in the URL and it rides every state-changing POST. No token → omitted.
+const WORKSHOP_TOKEN = new URLSearchParams(location.search).get("token");
+function postHeaders(){
+  const h = {"Content-Type":"application/json"};
+  if (WORKSHOP_TOKEN) h["X-Workshop-Token"] = WORKSHOP_TOKEN;
+  return h;
+}
+
 const FLOORS = new Map();   // floorNum -> floor state (incl. its Phaser scene)
 let ACTIVE = null;          // the floor currently shown
 
@@ -1152,7 +1161,7 @@ async function newProject(req, mode, supervised, backend, packs, extra){
   let resp;
   try {
     resp = await fetch("/api/projects", {
-      method:"POST", headers:{"Content-Type":"application/json"},
+      method:"POST", headers:postHeaders(),
       body: JSON.stringify({request:req, mode, supervised, backend, packs, ...(extra||{})}),
     }).then(r=>r.json());
   } catch(err){ appendLogDom("bad","ERR "+err); return; }
@@ -1400,7 +1409,7 @@ function hideFiles(){ document.getElementById("files-modal").classList.add("hidd
 function sendDecision(decision){
   const F = FLOORS.get(ACTIVE);
   if (!F){ hideCheckpoint(); return; }
-  fetch("/api/decision/"+F.id, {method:"POST", headers:{"Content-Type":"application/json"},
+  fetch("/api/decision/"+F.id, {method:"POST", headers:postHeaders(),
     body: JSON.stringify({decision, checkpoint: F.cpIndex})});
   F.awaiting = false; renderElevator(); hideCheckpoint();
 }
@@ -1439,7 +1448,7 @@ function askInterview(){
   const q = document.getElementById("iv-question").value.trim();
   const ans = document.getElementById("iv-answer");
   ans.classList.remove("hidden"); ans.textContent = "…asking "+IV_TARGET.role+"…";
-  fetch("/api/interview/"+IV_TARGET.id,{method:"POST",headers:{"Content-Type":"application/json"},
+  fetch("/api/interview/"+IV_TARGET.id,{method:"POST",headers:postHeaders(),
     body:JSON.stringify({role:IV_TARGET.role, question:q})})
    .then(r=>r.json()).then(d=>{ ans.textContent = d.answer || "(no answer)"; })
    .catch(()=>{ ans.textContent = "(interview request failed)"; });
@@ -1512,7 +1521,7 @@ function sendChat(){
   appendChatTurn("user", msg);
   appendChatTurn("system", "…leads are thinking…");
   const backend = document.getElementById("backend-select").value;
-  fetch("/api/ideate", {method:"POST", headers:{"Content-Type":"application/json"},
+  fetch("/api/ideate", {method:"POST", headers:postHeaders(),
     body: JSON.stringify({session:chatSession, message:msg, backend})})
    .then(r=>r.json())
    .then(d=>{
@@ -1580,7 +1589,7 @@ document.getElementById("suggest-btn").onclick=()=>{
   const request=document.getElementById("req-input").value;
   const packs=document.getElementById("packs-input").value.split(",").map(s=>s.trim()).filter(Boolean);
   const hint=document.getElementById("slots-hint"); hint.textContent="…";
-  fetch("/api/suggest-slots",{method:"POST",headers:{"Content-Type":"application/json"},
+  fetch("/api/suggest-slots",{method:"POST",headers:postHeaders(),
     body:JSON.stringify({request,packs})})
    .then(r=>r.json()).then(d=>{
      document.getElementById("slots-input").value=d.slots;

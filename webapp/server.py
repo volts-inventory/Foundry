@@ -12,6 +12,7 @@ approve can NEVER release a failing build (the gates decide; this is just the vi
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import shutil
@@ -51,6 +52,34 @@ _STATE_DIR = (
     or os.environ.get("FOUNDRY_STATE_DIR")
     or str(_OUTPUT_ROOT / "state")
 )
+
+# State-changing routes (start a build → real model spend, drive a checkpoint) are
+# guarded. A shared token (FOUNDRY_WORKSHOP_TOKEN) gates them when the server is
+# exposed beyond localhost; an Origin/Host same-origin check blocks a malicious web
+# page from POSTing to a localhost workshop (CSRF) even with no token set.
+_AUTH_TOKEN = os.environ.get("FOUNDRY_WORKSHOP_TOKEN") or None
+
+
+def _authorize_mutation(headers: Any, token: str | None) -> str | None:
+    """Return a denial reason for a state-changing request, or None if allowed.
+
+    1. CSRF: if an ``Origin`` header is present it MUST match the request ``Host``
+       (a cross-site browser POST carries the attacker's Origin → rejected). A
+       request with no Origin (curl, same-origin fetch) passes this check.
+    2. Token: if a shared token is configured, a matching ``X-Workshop-Token``
+       header (constant-time compared) is required. Unset ⇒ no token needed
+       (localhost-only default)."""
+    origin = headers.get("Origin")
+    if origin:
+        from urllib.parse import urlparse
+
+        if urlparse(origin).netloc != (headers.get("Host") or ""):
+            return "cross-origin request rejected (CSRF guard)"
+    if token:
+        provided = headers.get("X-Workshop-Token") or ""
+        if not hmac.compare_digest(provided, token):
+            return "missing or invalid workshop token"
+    return None
 _MAX_VIEW_BYTES = 1_000_000  # cap a single file served to the in-page viewer
 # Uploaded-spec-zip limits (defence-in-depth for an untrusted upload).
 _MAX_ZIP_BYTES = 5_000_000
@@ -734,6 +763,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = self.path.split("?", 1)[0]
+        denied = _authorize_mutation(self.headers, _AUTH_TOKEN)
+        if denied is not None:
+            self._json(403, {"error": denied})
+            return
         if path == "/api/projects":
             self._new_project()
         elif path == "/api/ideate":
@@ -1086,9 +1119,17 @@ def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
     if host == "0.0.0.0":  # opt-in LAN exposure (e.g. a Pi) — warned below
         lan = _lan_ip()
         if lan:
-            print(f"      On your LAN (phone/tablet):  http://{lan}:{port}")
-        print("      ⚠ bound to ALL interfaces — anyone on this network can reach it"
-              " (and start/steer builds). Use only on a trusted LAN.\n")
+            tok = f"/?token={_AUTH_TOKEN}" if _AUTH_TOKEN else ""
+            print(f"      On your LAN (phone/tablet):  http://{lan}:{port}{tok}")
+        print("      ⚠ bound to ALL interfaces — anyone on this network can reach it.")
+        if _AUTH_TOKEN:
+            print("      🔒 a FOUNDRY_WORKSHOP_TOKEN is required for builds (good).\n")
+        else:
+            print("      ⚠ no FOUNDRY_WORKSHOP_TOKEN set — set one to require auth for"
+                  " state-changing requests on an exposed network.\n")
+    else:
+        # Localhost default: the Origin/CSRF guard still blocks a malicious page.
+        print(f"      auth: {'token required' if _AUTH_TOKEN else 'localhost-only + CSRF guard'}")
     print("      (Ctrl-C to stop)\n")
     try:
         srv.serve_forever()

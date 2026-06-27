@@ -39,6 +39,7 @@ What this module is careful about (the invariants the next waves reuse):
 
 from __future__ import annotations
 
+import json
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
@@ -352,9 +353,38 @@ def _diff_files(diff: FeatureDiff, resolve_blob: BlobResolver) -> dict[str, str]
     else:
         raise FeatureDiffBodyError(
             f"FeatureDiff body for {diff.diff_uri!r} resolved to "
-            f"{type(body).__name__}, expected the unified-diff blob (bytes|str)"
+            f"{type(body).__name__}, expected the diff/snapshot blob (bytes|str)"
         )
+    # The real coding adapters (ClaudeCodeAdapter / RawReact) emit a full-file
+    # SNAPSHOT — {"kind":"full-file-snapshot","files":{path:content}} — the exact
+    # file set the agent authored in its worktree (DS9). It is the integrated tree
+    # slice directly, so consume it as-is; the synthetic StubAdapter unified-diff
+    # format falls through to the addition-hunk parser. Both round-trip the same
+    # path->content contract the gates compile/run.
+    snapshot = _maybe_snapshot_files(diff.diff_uri, text)
+    if snapshot is not None:
+        return snapshot
     return _parse_addition_diff(diff.diff_uri, text)
+
+
+def _maybe_snapshot_files(diff_uri: str, text: str) -> dict[str, str] | None:
+    """Parse a ``full-file-snapshot`` body to its path->content map, else ``None``
+    (the body is a unified diff). Fail-closed on a malformed snapshot shape."""
+    if not text.lstrip().startswith("{"):
+        return None
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        return None  # a diff that merely happens to start with '{' — let the parser try
+    if not (isinstance(obj, dict) and obj.get("kind") == "full-file-snapshot"):
+        return None
+    files = obj.get("files")
+    if not isinstance(files, dict):
+        raise FeatureDiffBodyError(
+            f"FeatureDiff body for {diff_uri!r}: full-file-snapshot 'files' is "
+            f"{type(files).__name__}, expected an object of path->content"
+        )
+    return {str(k): v if isinstance(v, str) else json.dumps(v) for k, v in files.items()}
 
 
 def _contained_target(dest: Path, rel: str) -> Path:

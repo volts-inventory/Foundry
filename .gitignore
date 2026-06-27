@@ -26,6 +26,7 @@ mutants/
 # ephemeral real-backend smoke output (not a deliverable)
 /.realtest/
 /.realtest*/
+/.auto*/
 /spec.md
 # Drop-in workshop art (operator-provided; keep the README + example only)
 /webapp/static/assets/*

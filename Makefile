@@ -70,7 +70,9 @@ spec: ## Co-generate a spec from REQUEST (ideation) -> spec.md
 	$(UV) run python -m foundry.ideation --mock "$(REQUEST)" > spec.md
 	@echo "wrote spec.md — refine it, then: make run REQUEST=... (or --spec spec.md)"
 
-workshop: ## Launch the Workshop game UI (HOST:$(PORT); default localhost)
+workshop: ## Launch the Workshop UI + open it in your browser (HOST:$(PORT))
+	@echo "→ Workshop UI: http://$(HOST):$(PORT)"
+	@( sleep 2; xdg-open "http://$(HOST):$(PORT)" || open "http://$(HOST):$(PORT)" ) >/dev/null 2>&1 &
 	FOUNDRY_MODEL_BACKEND=$(BACKEND) WORKSHOP_HOST=$(HOST) WORKSHOP_PORT=$(PORT) $(UV) run python -m webapp.server
 
 workshop-lan: ## Launch bound to 0.0.0.0 — reachable on your LAN (e.g. a Pi from your phone)
@@ -110,7 +112,8 @@ docker-build: ## Build the image (INSTALL_CLI_BACKENDS=true bakes claude/codex C
 compose-config: ## Validate docker-compose.yml without starting anything
 	docker compose config
 
-up: env ## Build + start the compose stack (reads .env)
+up: env ## Build + serve the Workshop in Docker → http://localhost:$(PORT)
+	@echo "→ Building + starting the Workshop. When it's up, open: http://localhost:$(PORT)"
 	docker compose up --build
 
 down: ## Stop the compose stack

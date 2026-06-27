@@ -20,19 +20,35 @@ This repo is **both the design and a working build**: the design lives in [`PLAN
 
 ---
 
-## Quickstart
+## Quickstart — the Workshop (the main interface)
+
+The primary way to use Foundry is the **Workshop**, a live browser UI. Start it
+and open the page:
 
 ```sh
-make setup                  # uv sync — deps + project into a local venv
+docker compose up            # then open  http://localhost:8765
+# or, without Docker:
+make workshop                # then open  http://localhost:8765
+make workshop-lan            # bound to 0.0.0.0 — reach it from your phone at http://<this-host>:8765
+```
 
-# Run the whole pipeline end-to-end (deterministic; no key, no network):
-uv run python -m foundry.cli "build a tiny URL-shortener service"
+`docker compose up` builds the image (the UI is baked in) and serves the Workshop
+at **http://localhost:8765** — it won't auto-open a browser, so navigate there
+yourself. Out of the box it runs the keyless `mock` backend; pick a real backend
+(and `claude-code` adapter) in the new-build dialog to do real builds. State is
+durable on volumes, so builds survive a restart.
 
-# …and write the generated code + a company-style doc set + a build manifest to disk:
+### Or drive it from the CLI (optional)
+
+If you prefer the terminal, the same factory runs headless:
+
+```sh
+make setup                                   # uv sync
 uv run python -m foundry.cli --out ./out --docs ./out-docs "build a URL shortener"
 ```
 
-`make` lists every target — the front door is `make setup` → `make check` → `make run`, plus `make workshop` (the browser UI), `make spec` (co-generate a spec), `make token` (mint a Max-subscription token), and `make up` (docker-compose).
+`make` lists every target — `make run`, `make spec` (co-generate a spec),
+`make token` (mint a Max-subscription token), `make up` (docker-compose).
 
 A passing run produces:
 - the **generated source tree** (`--out`) — the exact tree the gates verified;

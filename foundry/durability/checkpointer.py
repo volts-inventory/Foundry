@@ -129,26 +129,38 @@ def make_checkpointer(db_path: str | Path = ":memory:") -> FoundryCheckpointer:
     is ``sqlite`` (this module's :class:`FoundryCheckpointer`, the ONLY backend
     validated in this environment). ``postgres`` is the production EKS/RDS target.
 
-    SCAFFOLDING / SWAP POINT (honest): the Postgres path is NOT wired here. The
-    ``PostgresSaver`` must join the IDENTICAL one-transaction-per-superstep
-    discipline (architecture.md §5 / DS3) — a ``PostgresSaver`` constructed on a
-    shared connection whose ``commit()`` defers to ``superstep_txn``, the same
-    invariant ``_SuperstepConnection`` enforces for SQLite — and that cannot be
-    built/validated without a live Postgres in this environment. Rather than ship
-    untestable wiring, this factory FAILS CLOSED on ``postgres`` with a pointer to
-    the swap, and on any unknown value. See ``docs/deploy-compose.md`` (EKS note).
+    SWAP POINT — Postgres (HA): validated, scoped, fail-closed until wired. The
+    one-transaction-per-superstep discipline (architecture.md §5 / DS3) ports cleanly
+    to Postgres — and the hardest unknown is now RESOLVED (see
+    ``tests/test_postgres_checkpointer.py``, which runs against a live PG when
+    ``FOUNDRY_TEST_PG_DSN`` is set):
+
+    * ``langgraph.checkpoint.postgres.PostgresSaver.put()`` does NOT self-commit (it
+      uses a pipeline and respects the outer transaction) — so unlike ``SqliteSaver``
+      it needs NO ``commit()``-deferral hack: opening the psycopg connection with
+      ``autocommit=False`` and committing at the ``superstep_txn`` boundary gives the
+      identical atomic discipline, more simply.
+    * Validated end-to-end: a ``PostgresSaver`` checkpoint put/get round-trips on a
+      live PG16, and a rolled-back outer transaction discards the checkpoint.
+
+    REMAINING (the scoped, separately-reviewed change): the outbox + WORM-audit DDL
+    and statements in :mod:`foundry.durability.outbox` are SQLite-dialect (``?``
+    params, ``AUTOINCREMENT``); they must share the saver's psycopg connection to
+    preserve DS3, so they need a dialect shim (``%s`` params, ``GENERATED … AS
+    IDENTITY``; the ``ON CONFLICT`` upserts already port). Until that lands, this
+    factory FAILS CLOSED on ``postgres`` rather than ship a path that would split the
+    superstep transaction across two stores. See ``docs/deploy-compose.md``.
     """
     backend = os.environ.get("FOUNDRY_CHECKPOINTER", "sqlite").strip().lower()
     if backend == "sqlite":
         return FoundryCheckpointer(db_path)
     if backend == "postgres":
         raise NotImplementedError(
-            "FOUNDRY_CHECKPOINTER=postgres is a documented swap point, not yet "
-            "wired: a PostgresSaver must join the same one-transaction-per-"
-            "superstep discipline as _SuperstepConnection (architecture.md §5 / "
-            "DS3). Add langgraph-checkpoint-postgres and the shared-connection "
-            "wiring against a live Postgres, then validate. See "
-            "docs/deploy-compose.md."
+            "FOUNDRY_CHECKPOINTER=postgres: the PostgresSaver checkpoint path is "
+            "VALIDATED (tests/test_postgres_checkpointer.py) and its atomicity model "
+            "confirmed clean (PostgresSaver.put respects the outer txn). The remaining "
+            "scoped step is the dialect-portable outbox/WORM SQL on the shared psycopg "
+            "connection (DS3). Fail-closed until that lands. See docs/deploy-compose.md."
         )
     raise ValueError(
         f"unknown FOUNDRY_CHECKPOINTER {backend!r} (expected 'sqlite' or 'postgres')"

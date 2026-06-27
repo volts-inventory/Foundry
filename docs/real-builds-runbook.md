@@ -74,7 +74,7 @@ In the **Workshop UI**, pick backend `claude-cli` + coding substrate
 
 ## LAN serving
 
-On a trusted home LAN, run the Workshop with `make workshop-lan`
+On a trusted home LAN, run the Workshop with `docker compose up`
 (→ `0.0.0.0:8765`) over **plain HTTP** — open it from any device at
 `http://<this-host>:8765`. A token is optional (`FOUNDRY_WORKSHOP_TOKEN`); set
 one only if others share the network. TLS only matters on an untrusted/public

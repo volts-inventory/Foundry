@@ -27,16 +27,15 @@ and open the page:
 
 ```sh
 docker compose up            # then open  http://localhost:8765
-# or, without Docker:
-make workshop                # then open  http://localhost:8765
-make workshop-lan            # bound to 0.0.0.0 — reach it from your phone at http://<this-host>:8765
+# (or, without Docker:  uv run python -m webapp.server )
 ```
 
 `docker compose up` builds the image (the UI is baked in) and serves the Workshop
 at **http://localhost:8765** — it won't auto-open a browser, so navigate there
-yourself. Out of the box it runs the keyless `mock` backend; pick a real backend
-(and `claude-code` adapter) in the new-build dialog to do real builds. State is
-durable on volumes, so builds survive a restart.
+yourself. It binds `0.0.0.0`, so it's also reachable from your phone at
+`http://<this-host>:8765`. Out of the box it runs the keyless `mock` backend; pick
+a real backend (and `claude-code` adapter) in the new-build dialog to do real
+builds. State is durable on volumes, so builds survive a restart.
 
 ### Or drive it from the CLI (optional)
 
@@ -112,8 +111,7 @@ FOUNDRY_MODEL_BACKEND=claude-cli \
 ## The Workshop — a live browser UI
 
 ```sh
-make workshop          # http://localhost:8765
-make workshop-lan      # bound to 0.0.0.0 — reachable from your phone on the LAN
+docker compose up      # http://localhost:8765  (binds 0.0.0.0 → reachable on the LAN)
 ```
 
 A stdlib HTTP + Server-Sent-Events server (no extra deps) renders each build as a live "software factory" game: real stage boundaries, the agents at work, checkpoint pauses you approve in-browser. It is **durable and multi-device** — state survives a server restart, every connected device sees the same live view, and the first checkpoint decision wins. On a trusted home LAN run it over plain HTTP; set `FOUNDRY_WORKSHOP_TOKEN` if others share the network (a same-origin/CSRF guard always applies). See [`docs/deploy-docker.md`](./docs/deploy-docker.md).

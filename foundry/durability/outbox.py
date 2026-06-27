@@ -103,6 +103,9 @@ CREATE TABLE IF NOT EXISTS worm_audit (
 -- silently branching the chain (DEFENCE for the read-then-insert in append_audit;
 -- the portable guard that holds even where BEGIN IMMEDIATE doesn't, e.g. Postgres
 -- READ COMMITTED). An INDEX (not just a table constraint) so existing DBs migrate.
+-- (A valid chain has unique prev_hashes — genesis appears once; the index builds
+-- cleanly on any honest existing DB and only errors on one already forked, which
+-- is the corruption we want surfaced, not hidden.)
 CREATE UNIQUE INDEX IF NOT EXISTS ux_worm_audit_prev_hash ON worm_audit (prev_hash);
 """
 

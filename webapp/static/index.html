@@ -93,6 +93,7 @@
           <option value="ollama-gemma">ollama-gemma — local Ollama endpoint</option>
         </select>
       </div>
+      <p class="hint" id="model-note"></p>
       <div class="row">
         <label>Coding substrate</label>
         <select id="adapter-select">
@@ -126,9 +127,10 @@
     <div class="dialog cp">
       <h2 id="cp-title">CHECKPOINT</h2>
       <p id="cp-summary"></p>
-      <p class="cp-note">An approve only lets the build reach the gates — it can never ship a failing build.</p>
+      <p class="cp-note">An approve only lets the build reach the gates — it can never ship a failing build. Request changes to send the work back for another pass.</p>
       <div class="dialog-actions">
         <button id="cp-approve" class="primary">APPROVE</button>
+        <button id="cp-changes" class="warn">REQUEST CHANGES</button>
         <button id="cp-reject" class="danger">REJECT</button>
       </div>
     </div>
@@ -139,6 +141,7 @@
     <div class="dialog files">
       <h2>OUTPUT · <span id="files-floor"></span></h2>
       <p class="cp-note">The generated source tree + company-style doc set this build wrote to disk (read-only view).</p>
+      <div id="files-releases" class="files-releases"></div>
       <div class="files-body">
         <ul id="files-list"></ul>
         <pre id="files-view">Select a file…</pre>

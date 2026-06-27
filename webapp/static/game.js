@@ -1272,11 +1272,15 @@ function routeEvent(floor, ev){
       F.awaiting = false; renderElevator();
       if (S){ S.spotlightCTO(false);
         if (S.activeRoomKey) S.staffRoom(S.activeRoomKey);   // back to work
-        const ap = ev.decision === "approve";
-        S.hop(S.cto, ap?2:1); S.ring(S.cto.x, S.cto.y-10, ap?0x5ddc7a:0xff5d6c);
-        S.burst(S.cto.x, S.cto.y-10, ap?[0x5ddc7a,0xffffff]:[0xff5d6c,0xffffff], 12);
-        S.floatText(S.cto.x, S.cto.y-30, ap?"APPROVED":"REJECTED", ap?"#9dffbf":"#ffb3ba", 13);
-        if (!ap) S.shake(280,0.01); }
+        // three-way verdict: approve (green) · needs_changes (gold) · reject (red)
+        const ap = ev.decision === "approve", ch = ev.decision === "needs_changes";
+        const col = ap?0x5ddc7a:(ch?0xffcf52:0xff5d6c);
+        const hex = ap?"#9dffbf":(ch?"#ffe6a3":"#ffb3ba");
+        const txt = ap?"APPROVED":(ch?"CHANGES":"REJECTED");
+        S.hop(S.cto, ap?2:1); S.ring(S.cto.x, S.cto.y-10, col);
+        S.burst(S.cto.x, S.cto.y-10, [col,0xffffff], 12);
+        S.floatText(S.cto.x, S.cto.y-30, txt, hex, 13);
+        if (ev.decision === "reject") S.shake(280,0.01); }
       if (isActive) hideCheckpoint(); break;
     case "release":
       if (S){ S.openGateAndChest(); S.stampGate(true); S.celebrate(); S.banner("SHIPPED!", 0x5ddc7a); }
@@ -1362,21 +1366,53 @@ function showCheckpoint(F){
 function hideCheckpoint(){ document.getElementById("cp-modal").classList.add("hidden"); }
 
 // ---- output (files) browser ------------------------------------------------
+let FILES_ID = null;   // which release's output the browser is currently showing
 function openFiles(){
   const F = FLOORS.get(ACTIVE);
   const modal = document.getElementById("files-modal");
   const list = document.getElementById("files-list");
   const view = document.getElementById("files-view");
-  list.innerHTML = ""; view.textContent = "";
+  const rels = document.getElementById("files-releases");
+  list.innerHTML = ""; view.textContent = ""; rels.innerHTML = "";
   if(!F){ list.innerHTML = "<li class='muted'>Start a project first.</li>"; modal.classList.remove("hidden"); return; }
   document.getElementById("files-floor").textContent = "Floor "+F.floor;
-  document.getElementById("files-zip").href = "/api/zip/"+F.id;
   // ITERATE: start a new floor from this finished build (enabled once it's done).
   const itBtn = document.getElementById("files-iterate");
   itBtn.style.display = (F.status === "done") ? "" : "none";
   itBtn.onclick = () => { hideFiles(); showNewModal(F.id); };
-  view.textContent = "Loading…";
-  fetch("/api/files/"+F.id)
+  renderReleases(F);                 // release history for this floor (newest first)
+  loadFiles(F.id);                   // start on the latest release's output
+  modal.classList.remove("hidden");
+}
+// Release history of the open floor — one row per release; click to browse it.
+function renderReleases(F){
+  const rels = document.getElementById("files-releases");
+  fetch("/api/releases/"+F.floor)
+    .then(r => r.ok ? r.json() : {releases:[]})
+    .then(({releases}) => {
+      rels.innerHTML = "";
+      if(!releases || releases.length <= 1) return;   // nothing to switch between
+      for(const rel of releases){
+        const b = document.createElement("button");
+        b.type = "button"; b.className = "rel-chip";
+        const ok = rel.passed ? "✓" : (rel.status === "done" ? "✗" : "…");
+        b.textContent = `r${rel.release} ${ok}`;
+        b.title = (rel.request || "") + (rel.created_at ? `  ·  ${rel.created_at}` : "");
+        b.onclick = () => { for(const c of rels.children) c.classList.remove("sel");
+                            b.classList.add("sel"); loadFiles(rel.id); };
+        rels.appendChild(b);
+      }
+    })
+    .catch(() => { rels.innerHTML = ""; });
+}
+// List the written files of one release id into the browser pane.
+function loadFiles(id){
+  FILES_ID = id;
+  const list = document.getElementById("files-list");
+  const view = document.getElementById("files-view");
+  document.getElementById("files-zip").href = "/api/zip/"+id;
+  list.innerHTML = ""; view.textContent = "Loading…";
+  fetch("/api/files/"+id)
     .then(r => r.ok ? r.json() : {files:[]})
     .then(({files}) => {
       if(!files || !files.length){
@@ -1388,12 +1424,11 @@ function openFiles(){
         const li = document.createElement("li");
         li.textContent = `${f.path}  (${f.size}b)`;
         li.title = f.path;
-        li.onclick = () => viewFile(F.id, f.path, li);
+        li.onclick = () => viewFile(id, f.path, li);
         list.appendChild(li);
       }
     })
     .catch(() => { list.innerHTML = "<li class='muted'>(could not list output)</li>"; view.textContent = ""; });
-  modal.classList.remove("hidden");
 }
 function viewFile(id, path, li){
   for(const c of document.getElementById("files-list").children) c.classList.remove("sel");
@@ -1491,6 +1526,31 @@ function showNewModal(parentId){
     startFromSel.value=(parentId && [...startFromSel.options].some(o=>o.value===parentId))?parentId:"";
     syncStartFrom();
   });
+  updateSlotHint();
+}
+// Advisory IC-pool sizing: ask the server (/api/suggest-slots) how many parallel
+// workers the request + packs are likely to need, and fold it into the note. The
+// real split is decided during the build — this just previews the scale.
+const PARALLEL_BASE = "Automatic — the tech-lead decomposes the work and the system runs the independent tasks in parallel.";
+let slotHintTimer = null;
+function updateSlotHint(){
+  if(slotHintTimer) clearTimeout(slotHintTimer);
+  slotHintTimer = setTimeout(()=>{
+    const note = document.getElementById("parallel-note");
+    const request = (document.getElementById("req-input").value || "").trim();
+    const packs = (document.getElementById("packs-input").value || "")
+      .split(",").map(s=>s.trim()).filter(Boolean);
+    if(!note || !request){ if(note) note.textContent = PARALLEL_BASE; return; }
+    fetch("/api/suggest-slots",{method:"POST",headers:postHeaders(),
+      body:JSON.stringify({request, packs})})
+     .then(r=>r.ok?r.json():null)
+     .then(d=>{
+       if(!d || !d.slots){ note.textContent = PARALLEL_BASE; return; }
+       const areas = (d.areas||[]).length ? ` across ${d.areas.join(", ")}` : "";
+       note.textContent = `${PARALLEL_BASE} For this request, expect ≈ ${d.slots} parallel worker${d.slots===1?"":"s"}${areas}.`;
+     })
+     .catch(()=>{ note.textContent = PARALLEL_BASE; });
+  }, 350);
 }
 // intake mode radios -> reveal the matching panel
 function intakeMode(){ return (document.querySelector('input[name="intake"]:checked')||{}).value||"idea"; }
@@ -1577,9 +1637,12 @@ document.getElementById("start-btn").onclick=async ()=>{
   document.getElementById("chat-log").innerHTML="";
   document.getElementById("chat-spec").textContent="(nothing yet)";
 };
+document.getElementById("req-input").addEventListener("input", updateSlotHint);
+document.getElementById("packs-input").addEventListener("input", updateSlotHint);
 document.getElementById("chat-send").onclick=sendChat;
 document.getElementById("chat-msg").addEventListener("keydown",(e)=>{ if(e.key==="Enter"){ e.preventDefault(); sendChat(); }});
 document.getElementById("cp-approve").onclick=()=>sendDecision("approve");
+document.getElementById("cp-changes").onclick=()=>sendDecision("needs_changes");
 document.getElementById("cp-reject").onclick=()=>sendDecision("reject");
 document.getElementById("output-btn").onclick=openFiles;
 document.getElementById("files-close").onclick=hideFiles;
@@ -1588,15 +1651,45 @@ document.getElementById("iv-ask").onclick=askInterview;
 document.getElementById("iv-close").onclick=()=>document.getElementById("iv-modal").classList.add("hidden");
 document.getElementById("iv-question").addEventListener("keydown",(e)=>{ if(e.key==="Enter"){ e.preventDefault(); askInterview(); }});
 
-// preselect the configured default backend (FOUNDRY_MODEL_BACKEND on the server;
-// mock if unset). A deployment sets the env to default to claude-cli.
+// Pull runtime config from the server: preselect the configured default backend +
+// adapter (FOUNDRY_MODEL_BACKEND/_CODING_ADAPTER; mock/stub if unset), drop any
+// option the server doesn't actually support (keeps the picker 1-1 with BACKENDS /
+// ADAPTERS), and surface the per-tier model ids each backend would serve.
+let MODELS_BY_BACKEND = {};
+function reconcileSelect(sel, supported, fallback){
+  if(!sel || !Array.isArray(supported) || !supported.length) return;
+  // drop options the server no longer supports…
+  for(const o of [...sel.options]) if(!supported.includes(o.value)) o.remove();
+  // …and add any the server supports but the static markup didn't list (the rich
+  // descriptions stay on the known ones; new ones get a plain label).
+  const have = new Set([...sel.options].map(o=>o.value));
+  for(const v of supported) if(!have.has(v)){
+    const o=document.createElement("option"); o.value=v; o.textContent=v; sel.appendChild(o);
+  }
+  if(![...sel.options].some(o=>o.value===sel.value))
+    sel.value = (fallback && supported.includes(fallback)) ? fallback : supported[0];
+}
+function updateModelNote(){
+  const note=document.getElementById("model-note");
+  if(!note) return;
+  const backend=document.getElementById("backend-select").value;
+  const m=MODELS_BY_BACKEND[backend];
+  if(!m || !Object.keys(m).length){ note.textContent = backend==="mock"
+    ? "mock runs no real model — deterministic, offline." : ""; return; }
+  note.textContent = "Models · " + Object.entries(m).map(([t,id])=>`${t}: ${id}`).join("  ·  ");
+}
 fetch("/api/config").then(r=>r.json()).then(c=>{
+  if(!c) return;
   const sel=document.getElementById("backend-select");
-  if(c && c.default_backend && [...sel.options].some(o=>o.value===c.default_backend))
+  reconcileSelect(sel, c.backends, c.default_backend);
+  if(c.default_backend && [...sel.options].some(o=>o.value===c.default_backend))
     sel.value=c.default_backend;
   const asel=document.getElementById("adapter-select");
-  if(c && c.default_adapter && asel && [...asel.options].some(o=>o.value===c.default_adapter))
+  reconcileSelect(asel, c.adapters, c.default_adapter);
+  if(c.default_adapter && asel && [...asel.options].some(o=>o.value===c.default_adapter))
     asel.value=c.default_adapter;
+  MODELS_BY_BACKEND = c.models_by_backend || {};
+  updateModelNote();
   syncCostCap();
 }).catch(()=>{});
 
@@ -1613,7 +1706,7 @@ function syncCostCap(){
   cap.placeholder = metered ? "no cap" : `${backend} isn't metered — no USD cost`;
   if(!metered) cap.value = "";
 }
-document.getElementById("backend-select").addEventListener("change", syncCostCap);
+document.getElementById("backend-select").addEventListener("change", ()=>{ syncCostCap(); updateModelNote(); });
 syncCostCap();
 
 // Autonomous mode is HANDS-OFF by definition: the trust-root admission controller

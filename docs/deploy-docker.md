@@ -39,6 +39,34 @@ docker build --build-arg INSTALL_CLI_BACKENDS=true -t foundry:cli .
 Set a **cost cap** for real backends (`FOUNDRY_COST_CAP_MICROUSD`) — a build spends real
 tokens. The UI's backend picker also selects per build.
 
+### Which models it uses
+
+Each backend pins a model id per reasoning **tier** (T1 deep / T2 mid / T3 cheap). The
+defaults:
+
+| Backend | T1 | T2 | T3 |
+|---|---|---|---|
+| `anthropic` / `claude-cli` | `claude-opus-4-8` | `claude-sonnet-4-6` | `claude-haiku-4-5` |
+| `codex` | `gpt-5-codex` | `gpt-5` | `gpt-5-mini` |
+| `ollama-gemma` | `gemma3:27b` | `gemma3:12b` | `gemma3:4b` |
+
+The proxy **pins** these ids and the **fail-closed** drift policy (`FOUNDRY_DRIFT_POLICY`,
+default `fail-closed`) rejects a gate/judge call whose *served* model doesn't resolve to
+the pinned one. So if your egress serves a model the default map doesn't name (a newer
+snapshot, a dated id like `claude-haiku-4-5-20251001`, a Bedrock/Vertex alias), **pin the
+exact id** per tier — no code edit needed:
+
+```sh
+FOUNDRY_MODEL_T1=claude-opus-4-8           # deep reasoning / architecture
+FOUNDRY_MODEL_T2=claude-sonnet-4-6         # the bulk of the agents
+FOUNDRY_MODEL_T3=claude-haiku-4-5-20251001 # cheap/parallel
+```
+
+A partial set overlays the default (set only the tiers you need). The Workshop's
+`/api/config` reports the **effective** map (`models`) so the UI can show what runs. If
+you'd rather not pin and just record mismatches, set `FOUNDRY_DRIFT_POLICY=advisory`
+(the gates still run; drift is logged, not enforced).
+
 ## 3. Exposing it on a web server  ← the important part
 
 The Workshop is a stdlib HTTP server: **no TLS, not hardened for direct internet

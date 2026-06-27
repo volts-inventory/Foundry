@@ -236,6 +236,43 @@ def _drift_policy() -> DriftPolicy:
     return DriftPolicy(mode=DriftMode.FAIL_CLOSED)
 
 
+# Per-tier model pinning (12-factor, like FOUNDRY_MODEL_BACKEND): set the EXACT
+# model id your backend serves for each reasoning tier. The proxy pins these ids
+# and the fail-closed drift policy rejects a gate/judge call whose SERVED model
+# doesn't resolve to the pinned one — so if your `claude -p` / API serves a model
+# the default map doesn't name, pin it here rather than editing code. A partial
+# set overlays the backend's curated default (e.g. set only FOUNDRY_MODEL_T1).
+_TIER_ENV: dict[str, str] = {
+    "T1": "FOUNDRY_MODEL_T1",
+    "T2": "FOUNDRY_MODEL_T2",
+    "T3": "FOUNDRY_MODEL_T3",
+}
+
+
+def _default_tier_models(backend: str) -> dict[str, str]:
+    """The curated default tier→model map the backend ships with (so an env
+    override can overlay a partial set without dropping the other tiers)."""
+    from foundry.proxy.cli_transports import CODEX_TIER_MODELS, GEMMA_TIER_MODELS
+    from foundry.proxy.model_provider_proxy import TIER_MODELS
+
+    if backend == "codex":
+        return dict(CODEX_TIER_MODELS)
+    if backend == "ollama-gemma":
+        return dict(GEMMA_TIER_MODELS)
+    return dict(TIER_MODELS)  # anthropic / claude-cli share the Anthropic lineage
+
+
+def _tier_models(backend: str) -> dict[str, str]:
+    """The effective tier→model map for ``backend``: the curated default with any
+    ``FOUNDRY_MODEL_T{1,2,3}`` env overrides overlaid. Mock has no real models."""
+    base = _default_tier_models(backend)
+    for tier, var in _TIER_ENV.items():
+        pinned = os.environ.get(var, "").strip()
+        if pinned:
+            base[tier] = pinned
+    return base
+
+
 def _build_proxy(backend: str) -> ModelProviderProxy:
     """Build the single-egress proxy for the chosen backend (the dev zone-B signer
     is injected so the judgment path can stamp verdicts regardless of backend).
@@ -254,7 +291,14 @@ def _build_proxy(backend: str) -> ModelProviderProxy:
         tx = MockTransport.scripted(dict(_SCRIPTS), default_verdict="approve")
         return ModelProviderProxy(tx, signer=signer, drift_policy=drift)
     # Past the guard above, `backend` is one of the real BackendName literals.
-    return build_backend(cast("BackendName", backend), signer=signer, drift_policy=drift)
+    # Pin the per-tier models (curated default + FOUNDRY_MODEL_T{1,2,3} overrides)
+    # so an operator can name the EXACT ids their egress serves without code edits.
+    return build_backend(
+        cast("BackendName", backend),
+        signer=signer,
+        drift_policy=drift,
+        tier_models=_tier_models(backend),
+    )
 
 # The first-party domain packs selectable via ``--packs`` (T-M5-08). Mapped by the
 # stable pack NAME (``pack.name``); a NEW pack is added here AND via register() — but

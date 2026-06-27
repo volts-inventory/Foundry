@@ -96,7 +96,12 @@ env: ## Scaffold a .env (secrets; gitignored) if missing
 	    '# ollama-gemma (Ollama runs on the HOST; never GPU-passthrough):' \
 	    '# FOUNDRY_MODEL_BACKEND=ollama-gemma' \
 	    '# FOUNDRY_OLLAMA_URL=http://host.docker.internal:11434' \
-	    '# codex backend: OPENAI_API_KEY=' > .env; \
+	    '# codex backend: OPENAI_API_KEY=' \
+	    '# Pin the EXACT model id per tier if your egress serves one the default' \
+	    "# map doesn't name (else the fail-closed drift policy rejects the call):" \
+	    '# FOUNDRY_MODEL_T1=claude-opus-4-8' \
+	    '# FOUNDRY_MODEL_T2=claude-sonnet-4-6' \
+	    '# FOUNDRY_MODEL_T3=claude-haiku-4-5' > .env; \
 	  echo "wrote .env — edit it before 'make up'."; fi
 
 # ---- docker / compose ------------------------------------------------------

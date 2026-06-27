@@ -685,7 +685,7 @@ class Handler(BaseHTTPRequestHandler):
     def _config(self) -> None:
         """UI config: the default backend (FOUNDRY_MODEL_BACKEND, else mock) so the
         modal preselects it — a deployment sets the env to default to claude-cli."""
-        from foundry.cli import ADAPTERS, BACKENDS
+        from foundry.cli import ADAPTERS, BACKENDS, _tier_models
 
         default = os.environ.get("FOUNDRY_MODEL_BACKEND", "mock")
         if default not in BACKENDS:
@@ -693,6 +693,10 @@ class Handler(BaseHTTPRequestHandler):
         default_adapter = os.environ.get("FOUNDRY_CODING_ADAPTER", "stub")
         if default_adapter not in ADAPTERS:
             default_adapter = "stub"
+        # The effective per-tier model ids the default real backend would serve
+        # (curated default + FOUNDRY_MODEL_T{1,2,3} overrides) so the UI can SHOW
+        # what runs. Mock has no real models.
+        models = {} if default == "mock" else _tier_models(default)
         try:
             default_slots = max(1, int(os.environ.get("FOUNDRY_MAX_SLOTS", "1") or "1"))
         except ValueError:
@@ -700,7 +704,7 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, {
             "default_backend": default, "backends": list(BACKENDS),
             "default_adapter": default_adapter, "adapters": list(ADAPTERS),
-            "default_max_slots": default_slots,
+            "default_max_slots": default_slots, "models": models,
         })
 
     # -- output browsing (the build's written code + docs) ----------------------

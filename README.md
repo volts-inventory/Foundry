@@ -90,6 +90,29 @@ echo "FOUNDRY_MODEL_BACKEND=anthropic" >> .env
 make run REQUEST="build a todo API"       # uses anthropic
 ```
 
+### Backend settings
+
+| Backend | What it is | Required setting(s) | How to get it |
+|---|---|---|---|
+| `mock` | Keyless, deterministic stub (default) | none | — |
+| `anthropic` | Claude API | `ANTHROPIC_API_KEY` | console.anthropic.com |
+| `claude-cli` | `claude -p` on a Max plan | `CLAUDE_CODE_OAUTH_TOKEN` | `make token` |
+| `codex` | codex CLI | `OPENAI_API_KEY` | platform.openai.com |
+| `ollama-gemma` | Local Ollama endpoint | `FOUNDRY_OLLAMA_URL` | run Ollama locally |
+
+Optional, any real backend — pin the exact model id per tier when your egress
+serves one the default map doesn't name (else the fail-closed drift policy
+rejects the call):
+
+| Setting | Tier | Example |
+|---|---|---|
+| `FOUNDRY_MODEL_T1` | heaviest reasoning | `claude-opus-4-8` |
+| `FOUNDRY_MODEL_T2` | mid | `claude-sonnet-4-6` |
+| `FOUNDRY_MODEL_T3` | light / cheap | `claude-haiku-4-5` |
+
+> Don't set both `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` — the key
+> outranks the token and bills the API.
+
 ### Per-backend setup (credentials)
 
 ```bash
@@ -113,20 +136,6 @@ uv run python -m foundry.cli "build a todo API" --backend codex --out ./out
 export FOUNDRY_OLLAMA_URL=http://localhost:11434
 uv run python -m foundry.cli "build a todo API" --backend ollama-gemma --out ./out
 ```
-
-### Pinning the exact model per tier (optional)
-
-If your egress serves a model id the default map doesn't name, the fail-closed
-drift policy rejects the call — pin each tier explicitly:
-
-```bash
-export FOUNDRY_MODEL_T1=claude-opus-4-8       # heaviest reasoning
-export FOUNDRY_MODEL_T2=claude-sonnet-4-6     # mid
-export FOUNDRY_MODEL_T3=claude-haiku-4-5      # light/cheap
-```
-
-> Don't set both `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` — the key
-> outranks the token and bills the API.
 
 `mock` writes no real code (the `stub` adapter no-ops). For real code generation,
 pair a real backend with a real adapter — see §5. In the Workshop UI, the backend

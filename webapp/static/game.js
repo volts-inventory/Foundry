@@ -20,30 +20,44 @@ const FLOOR_TOP = 100, FLOOR_BOT = H - 40;   // general playfield bounds (rooms 
 // One open level; the elevator switches PROJECTS. Aisles between cells are corridors
 // people walk along; sections are coloured floor rugs in the cells.
 const WALL_TOP = 118, FLOOR_BOTTOM = H - 26;
-const CELL_W = 368, CELL_H = 196, AISLE = 48, GX0 = 40, GY0 = 132, GX1 = W - 40;
+// 4×3 grid of (smaller) section-cells. The engineering stage is split into its OWN
+// per-discipline rooms — FRONTEND / BACKEND / DATA — top-level sections like the
+// others, occupying row 1; all of an area's engineers live in its room.
+const CELL_W = 274, CELL_H = 196, AISLE = 34, GX0 = 40, GY0 = 132, GX1 = W - 40;
 function cellBox(c,r){ return {x: GX0 + c*(CELL_W+AISLE), y: GY0 + r*(CELL_H+AISLE), w:CELL_W, h:CELL_H}; }
-const GRID = {  // rooms mirror the pipeline, read left->right, top->bottom:
-  // product -> architecture -> engineering -> qa -> security -> gate -> vault.
-  product:[0,0], architecture:[1,0], engineering:[2,0],
-  qa:[0,1], security:[1,1], gate:[2,1],
-  vault:[2,2],                       // gate(2,1) sits directly above vault(2,2)
+const GRID = {  // pipeline: product → architecture → engineering(FE/BE/DA) → qa → security → gate → vault
+  product:[0,0], architecture:[1,0], qa:[2,0], security:[3,0],
+  frontend:[0,1], backend:[1,1], data:[2,1], gate:[3,1],
+  vault:[3,2],                       // gate(3,1) sits directly above vault(3,2)
 };
 // (0,2) = the LOUNGE (idle agents relax here); (1,2) = a decorative ENTRANCE /
 // lobby (the org chart on the wall + where the CTO greets). No work happens in either.
 const LOUNGE_CELL = [0,2], ENTRANCE_CELL = [1,2];
+const ENG_ROOMS = ["frontend","backend","data"];               // engineering discipline rooms
+const ENG_AREA_ROOM = {frontend:"frontend", backend:"backend", data:"data",
+                       infra:"backend", security:"backend"};   // org AREA → its discipline room
 const RBASE = {
   product:{label:"PRODUCT",color:0x2e3b5a}, architecture:{label:"ARCHITECTURE",color:0x3a2e5a},
-  engineering:{label:"ENGINEERING",color:0x5a3a2e}, qa:{label:"QA · REVIEW",color:0x2e5a4a},
+  frontend:{label:"FRONTEND",color:0x243f5a}, backend:{label:"BACKEND",color:0x5a4524},
+  data:{label:"DATA",color:0x245a42}, qa:{label:"QA · REVIEW",color:0x2e5a4a},
   security:{label:"SECURITY",color:0x5a2e36},
   gate:{label:"GATE",color:0x2c4a55}, vault:{label:"VAULT",color:0x5a4a18},
 };
 const ROOMS = {};
 for (const k in RBASE) ROOMS[k] = Object.assign({}, RBASE[k], cellBox(GRID[k][0], GRID[k][1]));
-const ROOM_ORDER = ["product","architecture","engineering","qa","security","gate","vault"];
+// Virtual "engineering" region = bbox over the discipline rooms. NOT drawn (virtual),
+// but present so server events keyed to room "engineering" (stage glow / pickups /
+// bursts) still resolve to a sensible position.
+(function(){ const rs = ENG_ROOMS.map(k=>ROOMS[k]);
+  const x0=Math.min(...rs.map(r=>r.x)), y0=Math.min(...rs.map(r=>r.y));
+  const x1=Math.max(...rs.map(r=>r.x+r.w)), y1=Math.max(...rs.map(r=>r.y+r.h));
+  ROOMS.engineering = {label:"ENGINEERING", color:0x5a3a2e, virtual:true, x:x0, y:y0, w:x1-x0, h:y1-y0};
+})();
+const ROOM_ORDER = ["product","architecture","frontend","backend","data","qa","security","gate","vault"];
 const TINT = {security:[0xff6d6d,0.05], gate:[0x6aa0ff,0.05], vault:[0xffd25a,0.06]};
-// the "#": centre-lines of the walkway aisles between columns / rows
-const AISLE_VX = [GX0+CELL_W+AISLE/2, GX0+2*CELL_W+AISLE+AISLE/2];
-const AISLE_HY = [GY0+CELL_H+AISLE/2, GY0+2*CELL_H+AISLE+AISLE/2];
+// the "#": centre-lines of the walkway aisles between columns / rows (generated)
+const AISLE_VX = [0,1,2].map(c => GX0 + (c+1)*CELL_W + c*AISLE + AISLE/2);
+const AISLE_HY = [0,1].map(r => GY0 + (r+1)*CELL_H + r*AISLE + AISLE/2);
 (function layout(){ for (const k in ROOMS){ const R = ROOMS[k];
   R.key=k; R.x0=R.x; R.x1=R.x+R.w; R.y1=R.y+R.h; R.cx=R.x+R.w/2; R.cy=R.y+R.h/2;
   R.wallH=0; R.floorY=R.y+18; R.standY=R.y1-14;
@@ -61,7 +75,8 @@ const COLORS = {
 const ROSTER = {
   product:["Stakeholder Proxy","Product Manager","Criteria Critic","Program Manager"],
   architecture:["Principal Architect"],
-  engineering:["Senior Engineer","Junior Engineer"],
+  // engineering is NOT a static room: its engineers are placed per-discipline
+  // (frontend/backend/data) from the live org telemetry (layoutEngineering).
   qa:["QA Engineer","SDET","Reviewer","Technical Writer"],
   security:["AppSec Engineer","Audit & Compliance","Supply-chain Reviewer"],
 };
@@ -288,6 +303,7 @@ class FloorScene extends Phaser.Scene {
     const cc = 0x232a3c;   // base-floor colour for chamfered corners
     for (const key in ROOMS){
       const R = ROOMS[key];
+      if (R.virtual) continue;          // the engineering region isn't drawn — its discipline rooms are
       this.add.rectangle(R.x+5, R.y+6, R.w, R.h, 0x000000, 0.22).setOrigin(0,0).setDepth(0);    // soft shadow
       this.add.tileSprite(R.x, R.y, R.w, R.h, "floor_"+key).setOrigin(0,0).setDepth(0).setAlpha(0.95);
       this.add.rectangle(R.x, R.y, R.w, R.h, shade(R.color,1.7), 0.16).setOrigin(0,0).setDepth(1); // brighten/pop
@@ -402,8 +418,10 @@ class FloorScene extends Phaser.Scene {
     // ambient props at room EDGES (the working desks are per-lead, in the floor)
     const props = {
       product:     [["board",0.10],["plant",0.92]],
-      architecture:[["board",0.10],["board",0.52],["shelf",0.90]],
-      engineering: [["rack",0.07],["plant",0.94]],
+      architecture:[["board",0.10],["shelf",0.90]],
+      frontend:    [["rack",0.92]],
+      backend:     [["rack",0.92]],
+      data:        [["shelf",0.92]],
       qa:          [["shelf",0.07],["plant",0.95]],
       security:    [["rack",0.08],["shelf",0.92]],
     };
@@ -827,8 +845,10 @@ class FloorScene extends Phaser.Scene {
 
   setActiveRoom(key){
     this.activeRoom = key;
+    // "engineering" is a virtual stage — light up all its discipline rooms.
+    const lit = (k)=> k===key || (key==="engineering" && ENG_ROOMS.includes(k));
     for (const k in this.roomGlow)
-      this.tweens.add({targets:this.roomGlow[k], fillAlpha:(k===key?0.10:0), duration:420});
+      this.tweens.add({targets:this.roomGlow[k], fillAlpha:(lit(k)?0.10:0), duration:420});
     const R = ROOMS[key];
     if (R) this.walkCTO(R.cx, R.standY);
     else if (this.lobby) this.walkCTO(this.lobby.cx, this.lobby.standY);
@@ -1099,19 +1119,18 @@ class FloorScene extends Phaser.Scene {
     this.orgPanel = c;
   }
 
-  // Store the REAL org (areas + per-domain units) and lay the engineering room out
-  // as proportional per-area LANES — each discipline clustered together, its width
-  // and headcount sized to its workload. Called from the org event (Wave E).
+  // Store the REAL org (areas + per-domain units), then populate the per-discipline
+  // engineering ROOMS: all of an area's engineers — its Tech-Lead + expert ICs — live
+  // in that area's room (frontend/backend/data), each on a colour carpet.
   setOrg(areas, domains){
     this.orgAreas = (areas||[]).filter(a=>a && a.area);
     this.orgDomains = domains||[];
     this.layoutEngineering();
   }
 
-  // Per-area lanes across the engineering room: width ∝ that area's unit weight,
-  // and the IC pool distributed across lanes ∝ the same weight (largest-remainder,
-  // ≥1 where the pool allows). A heavy area gets a wide lane + more engineers; a
-  // light one a narrow lane + fewer — "smaller counts, smaller size".
+  // Per-area engineer counts: the IC pool distributed across the present areas ∝
+  // each area's unit weight (largest-remainder, ≥1 where the pool allows). null when
+  // there's no org telemetry yet.
   engineeringLanes(){
     const list = (this.orgAreas||[]).map(a=>a&&a.area).filter(Boolean);
     if(!list.length) return null;
@@ -1126,88 +1145,71 @@ class FloorScene extends Phaser.Scene {
       rem.sort((p,q)=>q[1]-p[1]);
       for(let k=0; used<N; k++,used++) ics[rem[k%rem.length][0]]++;
     }
-    const R=ROOMS.engineering, pad=12, innerX=R.x+pad, innerW=R.w-2*pad;
-    let x=innerX; const lanes=[];
-    for(const a of list){
-      const lw=innerW*(weight[a]/total);
-      lanes.push({area:a, x0:x, w:lw, cx:Math.round(x+lw/2),
-                  color:AREA_COLOR[a]||0xffc08a, ics:ics[a]||0});
-      x+=lw;
-    }
-    return lanes;
+    return list.map(a=>({area:a, ics:ics[a]||0, color:AREA_COLOR[a]||0xffc08a}));
   }
 
-  // Render the engineering room from current org + pool state. Per-area lanes when
-  // org telemetry is in; otherwise the flat IC pool fallback.
+  // Seat the engineers in their discipline ROOMS from current org + pool state.
   layoutEngineering(){
     if(this.techLeadGroup) this.techLeadGroup.forEach(s=>s.destroy());
     if(this.poolGroup) this.poolGroup.forEach(s=>s.destroy());
-    if(this.tlLabel){ this.tlLabel.destroy(); this.tlLabel=null; }
     if(this.poolLabel){ this.poolLabel.destroy(); this.poolLabel=null; }
+    if(this.engLabels) this.engLabels.forEach(o=>o.destroy());
     if(this.laneDecor) this.laneDecor.forEach(o=>o.destroy());
-    this.techLeadGroup=[]; this.poolGroup=[]; this.laneDecor=[];
+    this.techLeadGroup=[]; this.poolGroup=[]; this.laneDecor=[]; this.engLabels=[];
 
-    const lanes=this.engineeringLanes();
-    if(!lanes){ this._flatPool(); return; }
-    const R=ROOMS.engineering;
-    let leadSlot=24, icSlot=12;
-    for(let li=0; li<lanes.length; li++){
-      const L=lanes[li], col6=L.color.toString(16).padStart(6,"0");
-      const tag=AREA_TAG[L.area]||L.area.slice(0,2).toUpperCase();
-      if(li>0) this.laneDecor.push(this.add.rectangle(Math.round(L.x0), R.y+30, 1, R.h-46, L.color, 0.16)
-        .setOrigin(0.5,0).setDepth(2));
-      this.laneDecor.push(this.add.text(L.cx, R.y+20, tag+" ·"+L.ics,
-        {fontFamily:"'PixelFont','Courier New'",fontSize:"9px",fontStyle:"bold",color:"#"+col6})
-        .setOrigin(0.5,0).setDepth(28));
-      // Tech-Lead at the lane head — on its own colour carpet (slightly bigger).
-      const cols=L.w>118?2:1;
-      const yLead=R.y+58;
-      const leadCW=Math.min(58, L.w-10);
-      this.laneDecor.push(this._carpet(L.cx, yLead+8, leadCW, 36, L.color, true));
-      const lk=kitFor("Tech-Lead "+L.area, hashStr((this.proj.id||'f')+"TL"+L.area)); lk.accent=L.color;
-      const lws=this.makeWorkstation(L.cx, yLead+16, L.color);
-      const ls=this.makePerson(L.cx, yLead, lk); ls.setScale(1.25).setDepth(yLead);
-      ls.home={x:L.cx,y:yLead}; ls.loungeSlot=leadSlot++; ls.seen=true; ls.inLounge=false;
-      this.startWalk(ls); this.techLeadGroup.push(ls, lws);
-      // expert ICs stacked beneath, each in its OWN colour-carpet cell.
-      const icCW = cols>1 ? Math.min(42, L.w/2-6) : Math.min(52, L.w-12);
-      for(let i=0;i<L.ics;i++){
+    const dist=this.engineeringLanes();
+    if(!dist){ this._flatPool(); return; }
+    // Bucket each area's people (1 Tech-Lead + its ICs) into its discipline room.
+    const perRoom={};
+    for(const d of dist){
+      const rk=ENG_AREA_ROOM[d.area]||"backend";
+      (perRoom[rk]=perRoom[rk]||[]).push({area:d.area, color:d.color, lead:true});
+      for(let i=0;i<d.ics;i++) perRoom[rk].push({area:d.area, color:d.color, lead:false});
+    }
+    let slot=12;
+    for(const rk in perRoom){
+      const R=ROOMS[rk]; if(!R) continue;
+      const people=perRoom[rk];
+      const cols=Math.min(3, Math.max(1, Math.ceil(people.length/2)));
+      const cw=Math.min(48, R.w/cols-10);
+      people.forEach((p,i)=>{
         const c=i%cols, r=Math.floor(i/cols);
-        const x = cols>1 ? Math.round(L.x0 + L.w*(0.3+0.4*c)) : L.cx;
-        const y = R.floorY + 58 + r*46;
-        this.laneDecor.push(this._carpet(x, y+8, icCW, 32, L.color, false));
-        const k=poolKit(icSlot); k.accent=L.color;
-        const ws=this.makeWorkstation(x, y+16, L.color);
-        const s=this.makePerson(x, y, k); s.setScale(1.25).setDepth(y).setAlpha(0.96);
+        const x=Math.round(R.x + R.w*((c+1)/(cols+1)));
+        const y=R.floorY + 34 + r*44;
+        const col6=p.color.toString(16).padStart(6,"0");
+        const tag=AREA_TAG[p.area]||p.area.slice(0,2).toUpperCase();
+        this.laneDecor.push(this._carpet(x, y+8, cw, p.lead?34:30, p.color, p.lead));
+        const k = p.lead ? kitFor("Tech-Lead "+p.area, hashStr((this.proj.id||'f')+"TL"+p.area)) : poolKit(slot);
+        k.accent=p.color;
+        const ws=this.makeWorkstation(x, y+16, p.color);
+        const s=this.makePerson(x, y, k); s.setScale(p.lead?1.25:1.2).setDepth(y).setAlpha(p.lead?1:0.96);
         s.add(this.add.text(0,-15, tag,
           {fontFamily:"'PixelFont','Courier New'",fontSize:"7px",fontStyle:"bold",color:"#"+col6}).setOrigin(0.5));
-        s.home={x,y}; s.loungeSlot=icSlot++; s.seen=true;
-        this.startWalk(s); this.poolGroup.push(s, ws);
-      }
+        s.home={x,y}; s.loungeSlot=slot++; s.seen=true; s.inLounge=false;
+        this.startWalk(s);
+        (p.lead?this.techLeadGroup:this.poolGroup).push(s, ws);
+      });
+      this.engLabels.push(this.add.text(R.x1-8, R.y+8, "×"+people.length,
+        {fontFamily:"'PixelFont','Courier New'",fontSize:"9px",fontStyle:"bold",color:"#ffc08a"})
+        .setOrigin(1,0).setDepth(28));
     }
-    const totalIcs=lanes.reduce((n,L)=>n+L.ics,0);
-    this.poolLabel=this.add.text(R.cx, R.y+4, "Engineers ×"+(this.poolN||totalIcs),
-      {fontFamily:"'PixelFont','Courier New'",fontSize:"10px",fontStyle:"bold",color:"#ffc08a"})
-      .setOrigin(0.5,0).setDepth(28);
   }
 
-  // No org telemetry yet — the original flat IC pool (pre-lane behaviour).
+  // No org telemetry yet — a flat pool in the BACKEND room (default engineering room).
   _flatPool(){
     const n=this.poolN; if(!n || n<=1) return;
-    const R=ROOMS.engineering, count=Math.min(n,8), cols=Math.min(count,4);
+    const R=ROOMS.backend; if(!R) return;
+    const count=Math.min(n,8), cols=Math.min(count,3);
     for(let i=0;i<count;i++){
       const col=i%cols, row=Math.floor(i/cols);
-      const x=Math.round(R.x+30+(R.w-60)*(cols>1?col/(cols-1):0.5));
-      const y=R.floorY+74+row*52;
+      const x=Math.round(R.x + R.w*((col+1)/(cols+1)));
+      const y=R.floorY+34+row*44;
       const k=poolKit(i);
       const ws=this.makeWorkstation(x, y+16, k.accent);
-      const s=this.makePerson(x, y, k); s.setScale(1.4).setDepth(y).setAlpha(0.96);
+      const s=this.makePerson(x, y, k); s.setScale(1.25).setDepth(y).setAlpha(0.96);
       s.home={x,y}; s.loungeSlot=12+i; s.seen=true; this.startWalk(s);
       this.poolGroup.push(s, ws);
     }
-    this.poolLabel=this.add.text(R.cx, R.y+24, "ICs ×"+n,
-      {fontFamily:"'PixelFont','Courier New'",fontSize:"10px",fontStyle:"bold",color:"#ffc08a"})
-      .setOrigin(0.5,0).setDepth(28);
   }
 
   // A small per-engineer colour CARPET — each engineer's own section, tinted by

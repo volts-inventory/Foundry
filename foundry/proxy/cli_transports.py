@@ -222,7 +222,7 @@ def _to_text(value: str | bytes | None) -> str:
 
 def _lenient_json_object(text: str) -> dict[str, Any]:
     """Parse stdout to a dict: strict first, else the outermost ``{...}`` span,
-    else ``{}`` (mirrors the claude_code adapter's tolerance)."""
+    else ``{}`` (tolerant of CLI chatter around the JSON object)."""
     text = text.strip()
     if not text:
         return {}

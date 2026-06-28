@@ -146,10 +146,11 @@ BACKENDS = (_MOCK_BACKEND, "anthropic", "claude-cli", "codex", "ollama-gemma")
 
 
 # Coding substrates (WorkerAdapter): the thing that actually writes the code for
-# each task. `stub` is the deterministic no-op (the smoke default); `claude-code`
-# runs `claude -p` in the sandbox (real code); `raw-react` is a provider-agnostic
-# single-loop substrate over the same model backend (real code, any backend).
-ADAPTERS = ("stub", "claude-code", "raw-react")
+# each task. `stub` is the deterministic no-op (the smoke default); `raw-react` is a
+# provider-agnostic single-loop substrate over the model backend (real code, any
+# backend) — over `claude-cli` it writes code via `claude -p` (completion only), over
+# `anthropic` via the Anthropic API.
+ADAPTERS = ("stub", "raw-react")
 _DEFAULT_ADAPTER = "stub"
 
 
@@ -160,8 +161,6 @@ _DEFAULT_ADAPTER = "stub"
 # hermetic + byte-identical). Every REAL backend defaults to `raw-react` — the
 # provider-agnostic completion substrate — so `anthropic` writes code via the Anthropic
 # API and `claude-cli` writes code via `claude -p` used purely as a completion endpoint.
-# The agentic `claude-code` substrate (runs `claude`'s OWN loop; needs the binary;
-# bypasses the proxy/lineage seam) is NEVER auto-selected — strictly opt-in via --adapter.
 def _default_adapter_for(backend: str) -> str:
     """The coding substrate to use when ``--adapter`` is omitted, derived from
     ``backend``: ``mock`` ⇒ ``stub`` (no real model), any real backend ⇒
@@ -190,25 +189,14 @@ def make_coding_adapter(
     *,
     proxy: ModelProviderProxy,
     thread_id: str = "cli-run",
-    timeout_s: float | None = None,
 ) -> Any:
     """Construct the selected coding substrate (``ADAPTERS``). ``None`` ⇒ the
-    deterministic ``stub`` (back-compat). ``claude-code`` requires the ``claude``
-    binary on PATH (fail-closed). ``raw-react`` drives the chosen model backend
-    through the single-egress proxy."""
+    deterministic ``stub`` (back-compat). ``raw-react`` drives the chosen model
+    backend through the single-egress proxy (real code over any backend — `claude -p`
+    completions under ``claude-cli``, the Anthropic API under ``anthropic``)."""
     name = (name or _DEFAULT_ADAPTER).strip().lower()
     if name == "stub":
         return StubAdapter()
-    if name == "claude-code":
-        from foundry.execution.adapters.claude_code import ClaudeCodeAdapter
-
-        adapter = ClaudeCodeAdapter(run_id=thread_id, timeout_s=timeout_s)
-        if not adapter.available():
-            raise ValueError(
-                "adapter 'claude-code' selected but the `claude` binary is not on "
-                "PATH; install Claude Code (and authenticate) or pick another adapter"
-            )
-        return adapter
     if name == "raw-react":
         from foundry.execution.adapters.raw_react import RawReactAdapter
 
@@ -1624,10 +1612,9 @@ def main(argv: list[str] | None = None) -> int:
         args, _packs = _take_value(args, "--packs", what="a comma-separated list")
         packs: list[str] = [p.strip() for p in _packs.split(",") if p.strip()] if _packs else []
 
-        # --adapter {stub|claude-code|raw-react}: the coding substrate that writes the
-        # code. OMITTED ⇒ DERIVED from --backend in run() (mock→stub, any real backend→
-        # raw-react) so a real backend writes real code without a second flag. The
-        # agentic `claude-code` (needs the `claude` binary) stays explicit-only.
+        # --adapter {stub|raw-react}: the coding substrate that writes the code.
+        # OMITTED ⇒ DERIVED from --backend in run() (mock→stub, any real backend→
+        # raw-react) so a real backend writes real code without a second flag.
         args, _adapter = _take_value(args, "--adapter", what="a value")
         if _adapter is not None and _adapter not in ADAPTERS:
             raise _CliUsageError(
@@ -1670,7 +1657,7 @@ def main(argv: list[str] | None = None) -> int:
             "usage: python -m foundry.cli "
             "[--mode {assistant|gated|autonomous}] [--packs name1,name2] "
             "[--backend {mock|anthropic|claude-cli|codex|ollama-gemma}] "
-            "[--adapter {stub|claude-code|raw-react}] "
+            "[--adapter {stub|raw-react}] "
             "[--checkpoints [all|product,design,release]] "
             "[--docs DIR] [--out DIR] [--spec FILE|DIR ...] "
             "[--state-dir DIR] [--thread-id NAME] [--max-fix-attempts N] "
@@ -1683,7 +1670,7 @@ def main(argv: list[str] | None = None) -> int:
             "claude-cli | codex | ollama-gemma (real model egress)\n"
             "  adapter (coding substrate): omitted => DERIVED from --backend "
             "(mock=>stub no-op, any real backend=>raw-react real code); override with "
-            "stub | raw-react | claude-code (agentic; needs the `claude` binary)\n"
+            "stub | raw-react\n"
             "  packs: regulated | ml_data | frontend "
             "(a pack may VETO an unsafe mode — fail-closed)\n"
             "  checkpoints (plan [10]): pause at stage boundaries for human "

@@ -121,7 +121,7 @@ class FeatureDiffBodyError(MaterializationError):
     The materialization contract: ``resolve(feature_diff_artifact)`` returns the
     typed :class:`FeatureDiff`; its ``diff_uri`` body — fetched through the
     SEPARATE :data:`BlobResolver` seam (``sandbox.get_blob``) — is a UNIFIED-DIFF
-    string (what the StubAdapter / raw_react / claude_code adapters emit via
+    string (what the StubAdapter / raw_react adapters emit via
     ``sandbox.put_blob``). It is parsed into a relative-POSIX-path -> file-content
     mapping by the Phase-1 additions-only applier. A body present but of a hunk
     shape we don't support yet (modifications / deletions) is fail-closed here
@@ -245,8 +245,8 @@ _DEV_NULL = "/dev/null"
 def _parse_addition_diff(diff_uri: str, body: str) -> dict[str, str]:
     """Parse a UNIFIED-DIFF body into a relative-path -> file-content mapping.
 
-    Phase-1 scope: diffs are pure FILE ADDITIONS (the StubAdapter / raw_react /
-    claude_code adapters emit ``--- /dev/null`` / ``+++ b/<path>`` hunks). A
+    Phase-1 scope: diffs are pure FILE ADDITIONS (the StubAdapter / raw_react
+    adapters emit ``--- /dev/null`` / ``+++ b/<path>`` hunks). A
     minimal applier handling additions is sufficient here; FULL patch application
     (context-line matching, modifications, deletions, renames) is a LATER PHASE.
     We therefore FAIL-CLOSED (raise :class:`FeatureDiffBodyError`) on any hunk
@@ -355,10 +355,10 @@ def _diff_files(diff: FeatureDiff, resolve_blob: BlobResolver) -> dict[str, str]
             f"FeatureDiff body for {diff.diff_uri!r} resolved to "
             f"{type(body).__name__}, expected the diff/snapshot blob (bytes|str)"
         )
-    # The real coding adapters (ClaudeCodeAdapter / RawReact) emit a full-file
-    # SNAPSHOT — {"kind":"full-file-snapshot","files":{path:content}} — the exact
-    # file set the agent authored in its worktree (DS9). It is the integrated tree
-    # slice directly, so consume it as-is; the synthetic StubAdapter unified-diff
+    # A coding adapter may emit a full-file SNAPSHOT —
+    # {"kind":"full-file-snapshot","files":{path:content}} — the exact file set the
+    # agent authored in its worktree (DS9). It is the integrated tree slice directly,
+    # so consume it as-is; the synthetic StubAdapter unified-diff
     # format falls through to the addition-hunk parser. Both round-trip the same
     # path->content contract the gates compile/run.
     snapshot = _maybe_snapshot_files(diff.diff_uri, text)

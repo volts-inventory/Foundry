@@ -541,7 +541,7 @@ def _run_factory(p: Project, resume: bool = False) -> None:
             p.request,
             mode=p.mode,
             backend=p.backend,            # real backend per project (not always mock)
-            adapter=p.adapter,            # coding substrate (stub/claude-code/raw-react)
+            adapter=p.adapter,            # coding substrate (stub/raw-react)
             packs=p.packs or None,        # optional domain packs (regulated/ml_data/frontend)
             spec=p.spec,                  # pasted spec text OR uploaded docs dir (additive)
             max_slots=p.max_slots,        # IC-pool parallelism (Wave C) + budget tree (Wave D)

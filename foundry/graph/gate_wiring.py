@@ -241,6 +241,13 @@ def _criteria_payload(
 # Unified-diff line markers we recognise for the Phase-1 additions-only applier.
 _DEV_NULL = "/dev/null"
 
+# git-diff preamble lines that may precede a `--- /dev/null` addition section in a
+# REAL unified diff (what `claude -p` / the OpenAI SDK emit). They carry no file
+# CONTENT — a section marker, the addition mode, and blob hashes — so for an
+# addition they are skipped. A modification/deletion/rename is NOT in this set and
+# still fails closed at the `--- a/<path>` (non-/dev/null) check.
+_GIT_PREAMBLE_PREFIXES = ("diff --git ", "index ", "new file mode ")
+
 
 def _parse_addition_diff(diff_uri: str, body: str) -> dict[str, str]:
     """Parse a UNIFIED-DIFF body into a relative-path -> file-content mapping.
@@ -255,16 +262,20 @@ def _parse_addition_diff(diff_uri: str, body: str) -> dict[str, str]:
 
     Recognised shape (one or more file sections):
 
+        diff --git a/<path> b/<path>   # optional git preamble (real models emit it)
+        new file mode 100644           #   (skipped — carries no content)
+        index 000..abc                 #   (skipped)
         --- /dev/null
         +++ b/<relative/posix/path>
         @@ ... @@                 # hunk header (ranges, if present, are ignored)
         +<added line>             # every body line of an addition is '+'-prefixed
         ...
 
-    The StubAdapter emits a single ``+``-prefixed first line followed by the
-    remaining file body verbatim (``@@\n+<body>``); we treat the bytes after the
-    leading ``+`` of the first hunk line as the file content so the genuine
-    producer->consumer contract round-trips.
+    Two producers round-trip through this: a REAL git-style unified diff (every
+    added line ``+``-prefixed, optional ``diff --git``/``index``/``new file mode``
+    preamble, ``\\ No newline at end of file`` markers — what ``claude -p`` / the
+    OpenAI SDK emit), and the synthetic StubAdapter form, which ``+``-prefixes only
+    the FIRST body line and appends the remaining file body verbatim (``@@\\n+<body>``).
     """
     files: dict[str, str] = {}
     lines = body.splitlines(keepends=True)
@@ -274,9 +285,11 @@ def _parse_addition_diff(diff_uri: str, body: str) -> dict[str, str]:
         raw = lines[i]
         stripped = raw.rstrip("\n")
         if not stripped.startswith("--- "):
-            # Skip blank/preamble lines between file sections; anything else
-            # non-empty that isn't a recognised file header is unsupported.
-            if stripped == "":
+            # Skip blank lines + the git-diff preamble that real producers emit
+            # before a `--- /dev/null` addition section (these carry no content). A
+            # MODIFICATION/deletion still fails closed: its `diff --git` is skipped
+            # but the following `--- a/<path>` is not `/dev/null`, caught below.
+            if stripped == "" or stripped.startswith(_GIT_PREAMBLE_PREFIXES):
                 i += 1
                 continue
             raise FeatureDiffBodyError(
@@ -308,13 +321,20 @@ def _parse_addition_diff(diff_uri: str, body: str) -> dict[str, str]:
                 f"FeatureDiff body for {diff_uri!r}: missing '@@' hunk header for {rel!r}"
             )
         i += 1
-        # Collect the added body up to the next file header (next '--- ').
+        # Collect the added body up to the next file section (next '--- ' or the
+        # next git 'diff --git ' header in a multi-file diff).
         content_lines: list[str] = []
         first = True
-        while i < n and not lines[i].rstrip("\n").startswith("--- "):
+        while i < n:
             line = lines[i]
+            line_stripped = line.rstrip("\n")
+            if line_stripped.startswith("--- ") or line_stripped.startswith("diff --git "):
+                break
             if line.startswith("+"):
                 content_lines.append(line[1:])
+            elif line_stripped.startswith("\\"):
+                # `\ No newline at end of file` — a real-diff marker, not content.
+                pass
             elif first:
                 # Defensive: a hunk body should open with a '+' line.
                 raise FeatureDiffBodyError(

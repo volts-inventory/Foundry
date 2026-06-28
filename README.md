@@ -12,6 +12,95 @@ with no API key until you opt into a real model.
 
 ---
 
+## CLI at a glance
+
+Every flag, with what it does, inline. Defaults are shown in each comment — the
+bare command (no flags) is a fully working, keyless, deterministic run.
+
+```bash
+python -m foundry.cli [OPTIONS] "<one-line request>"   # build a GitHub-ready repo from one sentence
+
+# ── Release posture ───────────────────────────────────────────────────────────
+  --mode <assistant|gated|autonomous>  # trust posture: advisory PR · full gates+sign-off · hands-off deploy   (default: assistant)
+
+# ── Model egress & code generation (orthogonal seams) ─────────────────────────
+  --backend <mock|anthropic|claude-cli|codex|ollama-gemma>  # WHERE model calls go (the "brain")            (default: mock — keyless/deterministic)
+  --adapter <stub|claude-code|raw-react>                    # WHAT writes the code (the "hands")            (default: stub — no-op; pair a real one for real code)
+
+# ── Inputs ────────────────────────────────────────────────────────────────────
+  --spec <FILE|DIR>          # ground the build with a spec beyond the one-liner; REPEATABLE   (default: none)
+  --packs <name1,name2>      # engage domain packs: regulated|ml_data|frontend; a pack may VETO a mode   (default: none)
+  --docs <DIR>               # write the generated doc set (PRD / design / ops) here           (default: none)
+
+# ── Output & durable state ────────────────────────────────────────────────────
+  --out <DIR>                # write the generated repo here                                   (default: none — report only)
+  --state-dir <DIR>          # durable, restart-survivable state (overrides FOUNDRY_STATE_DIR) (default: in-memory)
+  --thread-id <NAME>         # run identity; seeds idempotency keys + resume                   (default: cli-run)
+
+# ── Budgets & flow control ────────────────────────────────────────────────────
+  --max-fix-attempts <N>     # auto-fix retries per FAILING gate (N ≥ 1)                        (default: 3)
+  --max-slots <N>            # parallelism CEILING; pool usually auto-sizes (N ≥ 1)             (default: auto)
+  --cost-cap-microusd <N>    # global spend envelope in micro-USD, for metered backends         (default: none)
+  --checkpoints [all|product,design,release]  # pause at stage boundaries (CLI auto-approves)   (default: off)
+
+# ── Subcommand: evolve an already-released repo (re-gate a change) ─────────────
+python -m foundry.cli evolve <prior-repo> "<change>" [OPTIONS]
+  --apply <DIR>              # overlay these changed files onto the prior tree
+  --guardian-approve         # authorize a protected criterion / oracle / gate edit (else blocked)
+  --strict                   # exit non-zero if the re-gate REFUSES to release (for CI)
+
+# Exit codes:  0 = passed (PR-ready)  ·  1 = halted / failed  ·  2 = usage error
+# Run with no arguments to print the full usage text:  python -m foundry.cli
+```
+
+---
+
+## Contents
+
+1. [Requirements](#requirements)
+2. [Setup](#1-setup)
+3. [Quickstart (CLI)](#2-quickstart-cli)
+4. [Picking a mode](#3-picking-a-mode)
+5. [Setting the backend (real models)](#4-setting-the-backend-real-models)
+6. [Choosing a coding substrate (`--adapter`)](#5-choosing-a-coding-substrate---adapter)
+7. [Feeding a spec](#6-feeding-a-spec)
+8. [Common flags](#7-common-flags)
+9. [Evolve an existing repo](#8-evolve-an-existing-repo)
+10. [Workshop UI](#9-workshop-ui)
+11. [Develop](#10-develop)
+12. [Configuration reference](#configuration-reference)
+
+---
+
+## How it works
+
+```
+"<one-line request>"
+        │
+        ▼
+  product ──▶ architecture ──▶ engineering ──▶ QA ──▶ security ──▶ gates
+        │            │              │            │         │          │
+        └──────── one graph; agents share state, parallelize, and re-loop ───────┘
+                                                                       │
+                                                                       ▼
+                                                          ./out  (code + docs + report)
+```
+
+Two seams are deliberately independent, and worth internalizing before you start:
+
+- **`--backend`** — the model egress ("the brain"). It decides *where model calls
+  go*. `mock` is a deterministic, keyless transport; the others route real,
+  metered calls through the single-egress proxy.
+- **`--adapter`** — the coding substrate ("the hands"). It decides *what actually
+  writes the code*. `stub` is a deterministic no-op; `claude-code` and `raw-react`
+  write real code.
+
+A real backend with the default `stub` adapter exercises the proxy / lineage /
+determinism path **without** generating real code. For real code generation, pair
+a real backend with a real adapter (§5).
+
+---
+
 ## Requirements
 
 - Python ≥ 3.12 and [`uv`](https://docs.astral.sh/uv/).
@@ -312,12 +401,15 @@ make clean           # remove caches + ./.run output
 | `--backend` | `mock` · `anthropic` · `claude-cli` · `codex` · `ollama-gemma` | `mock` |
 | `--adapter` | `stub` · `claude-code` · `raw-react` | `stub` |
 | `--spec FILE\|DIR` | spec input (repeatable) | — |
-| `--packs a,b` | domain packs | — |
+| `--packs a,b` | domain packs (`regulated` · `ml_data` · `frontend`) | — |
+| `--docs DIR` | generated doc-set output | — |
 | `--checkpoints` | `all` · `product,design,release` | off |
-| `--max-fix-attempts N` | gate fix-loop bound | `3` |
-| `--max-slots N` | parallelism ceiling | auto |
+| `--max-fix-attempts N` | gate fix-loop bound (N ≥ 1) | `3` |
+| `--max-slots N` | parallelism ceiling (N ≥ 1) | auto |
 | `--cost-cap-microusd N` | spend envelope | — |
 | `--out DIR` | output repo | — |
 | `--state-dir DIR` / `--thread-id NAME` | durable resume | in-memory / `cli-run` |
+
+**`evolve` subcommand:** `--apply DIR` · `--guardian-approve` · `--strict`
 
 Exit codes: `0` passed · `1` halted/failed · `2` usage error.

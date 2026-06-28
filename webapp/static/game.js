@@ -727,6 +727,26 @@ class FloorScene extends Phaser.Scene {
     c.add([this.chestClosed,this.chestOpen]);
     c.add(this.add.rectangle(0,1,36,2,0xcaa24a));
     this.chestOpened = false;
+    // The chest is the door to this floor's repo: once the build is DONE you can
+    // click it to jump straight to the repo (the Floor 0 repos, preselected to
+    // this one). While agents are still working — first build OR a later revision
+    // — it's locked and does nothing; same when there's no repo yet.
+    this.chest = c;
+    c.setInteractive(new Phaser.Geom.Rectangle(-22,-22,44,42), Phaser.Geom.Rectangle.Contains);
+    c.on("pointerover", ()=>{ if(this.chestActionable()){ this.game.canvas.style.cursor="pointer"; c.setScale(1.42); } });
+    c.on("pointerout",  ()=>{ this.game.canvas.style.cursor="default"; c.setScale(1.3); });
+    c.on("pointerdown", ()=> this.onChestClick());
+  }
+  // Actionable only when this floor's build has finished (a repo exists). Locked
+  // while running/iterating, so agents-at-work never opens a half-baked tree.
+  chestActionable(){
+    const F = FLOORS.get(this.proj.floor);
+    return !!(F && F.status === "done");
+  }
+  onChestClick(){
+    const F = FLOORS.get(this.proj.floor);
+    if(!F || F.status !== "done") return;   // locked / no repo yet -> do nothing
+    openFilesFor({id:F.id, floor:F.floor, release:F.release, request:F.request, status:"done"});
   }
 
   buildAgents(){

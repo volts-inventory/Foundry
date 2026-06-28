@@ -915,18 +915,28 @@ class FloorScene extends Phaser.Scene {
     if (!a || !a.inLounge) return;
     this.clearLounge(a);
     a.loungeBusy = mode;
-    if (mode === "sleep"){ if (a.faceFront) a.faceFront(); this.sleepZzz(a);
+    if (mode === "sleep"){ if (a.faceFront) a.faceFront(); this.zzzLoop(a);
       a.napTween = this.tweens.add({targets:a.bob, y:{from:0,to:-1.5}, duration:2200,
         yoyo:true, repeat:-1, ease:"Sine.inOut"}); }
     else if (mode === "sit"){ if (a.faceFront) a.faceFront(); this.deskIdle(a); }
   }
-  sleepZzz(a){
-    if (a.zzzEv) return;
-    a.zzzEv = this.time.addEvent({delay:1500, loop:true, callback:()=>{
-      if (!a.inLounge || a.loungeBusy !== "sleep") return;
-      const t = this.add.text(a.x+8, a.y-22, "z",
-        {fontFamily:"'PixelFont','Courier New'",fontSize:"10px",color:"#9fb4d8"}).setDepth(2000);
-      this.tweens.add({targets:t, y:t.y-18, x:t.x+8, alpha:{from:0.9,to:0}, duration:1600,
+  // Is this person at rest RIGHT NOW (so a Zzz should float up)? — either napping in
+  // the lounge, or sitting idle at their desk (off-stage, not currently working).
+  restingNow(a){
+    if (!a || !a.seen || (a.moveTween && a.moveTween.isPlaying())) return false;
+    if (a.inLounge) return a.loungeBusy === "sleep";
+    return !a.working;                         // at desk, but their stage isn't active
+  }
+  // One persistent Zzz emitter per person; the gate decides when it actually shows.
+  zzzLoop(a){
+    if (!a || a.zzzEv) return;
+    // Stagger each sleeper's first puff so the Zzz don't all blink in unison.
+    a.zzzEv = this.time.addEvent({delay:1700, loop:true, startAt:Math.floor(Math.random()*1700), callback:()=>{
+      if (a._dead || !this.restingNow(a)) return;
+      const t = this.add.text(a.x+8, a.y-20, "Zzz",
+        {fontFamily:"'PixelFont','Courier New'",fontSize:"11px",fontStyle:"bold",color:"#bcd6ff"})
+        .setOrigin(0,1).setDepth(2000);
+      this.tweens.add({targets:t, y:t.y-16, x:t.x+6, alpha:{from:0.95,to:0}, duration:1600,
         ease:"Sine.out", onComplete:()=>t.destroy()});
     }});
   }
@@ -934,25 +944,38 @@ class FloorScene extends Phaser.Scene {
     if (!a) return;
     a.loungeBusy = null;
     if (a.napTween){ a.napTween.stop(); a.napTween = null; if (a.bob) a.bob.y = 0; }
-    if (a.zzzEv){ a.zzzEv.remove(); a.zzzEv = null; }
-    this.stopDeskIdle(a);
+    this.stopDeskIdle(a);   // the Zzz emitter (a.zzzEv) is PERSISTENT — gated by restingNow
   }
-  gotoDesk(a){ if (!a) return; a.inLounge = false; this.clearLounge(a);
+  gotoDesk(a){ this.deskRest(a, true); }
+  // Park a person at their desk. ``working`` true => their stage is active (heads-down,
+  // no Zzz); false => idle at the desk (a Zzz floats up). Nobody leaves for the lounge
+  // just because their stage is off — they wait it out at their own desk.
+  deskRest(a, working, busy){
+    if (!a || !a.home) return;
+    a.working = working; a.inLounge = false; this.clearLounge(a);
     if (!a.seen){ a.seen = true; a.setAlpha(1); }
-    if (a.home) this.walkTo(a, a.home.x, a.home.y, ()=>{ if (a.faceBack) a.faceBack(); this.deskIdle(a); }); }
+    this.zzzLoop(a);                       // idempotent; the gate shows it only when idle
+    const settle = ()=>{
+      if (a.faceBack) a.faceBack();
+      if (working && busy) this.startWalk(a);   // engineers actively building = busy bob
+      else { this.stopWalk(a); this.deskIdle(a); }
+    };
+    const here = Math.abs(a.x-a.home.x) < 2 && Math.abs(a.y-a.home.y) < 2;
+    if (here) settle(); else this.walkTo(a, a.home.x, a.home.y, settle);
+  }
   staffRoom(key){
     this.activeRoomKey = key;
-    const hasTeam = !!ROSTER[key];
+    const working = (room)=> !!room && (room===key || (key==="engineering" && ENG_ROOMS.includes(room)));
+    // Everyone goes to their OWN desk — working (heads-down) or idle (a Zzz floats up).
+    // Nobody parks in the lounge just because their stage is off; mill() lets a few
+    // drift there at random between stages.
     for (const [name,a] of this.agents){
-      if (hasTeam && AGENT_ROOM[name] === key) this.gotoDesk(a);
-      else if (a.seen) this.gotoLounge(a);
+      if (a.seen) this.deskRest(a, working(AGENT_ROOM[name]));
     }
-    // IC pool + per-area Tech-Leads belong to engineering: at their desks while
-    // engineering is active, otherwise off to the lounge with everyone else.
+    const engActive = key === "engineering";
     for (const s of [...(this.poolGroup||[]), ...(this.techLeadGroup||[])]){
-      if (!s || !s.bob) continue;
-      if (key === 'engineering' && s.home) this.walkTo(s, s.home.x, s.home.y, ()=>{ if (s.faceBack) s.faceBack(); });
-      else this.gotoLounge(s); }
+      if (s && s.bob) this.deskRest(s, engActive, engActive);
+    }
   }
   toLounge(){   // everyone hangs out (checkpoints / done)
     for (const [,a] of this.agents) if (a.seen) this.gotoLounge(a);
@@ -963,8 +986,13 @@ class FloorScene extends Phaser.Scene {
     const move = (a)=>{ if (a && a.seen && a.inLounge && a.loungeBusy === "wander"
         && !a.moveTween?.isPlaying() && Math.random()<0.5){
       this.walkTo(a, B.x+26+Math.random()*(B.w-52), B.y+58+Math.random()*(B.h-86)); } };
-    for (const [,a] of this.agents) move(a);
-    for (const s of [...(this.poolGroup||[]), ...(this.techLeadGroup||[])]) move(s);
+    // Idle desk folks only OCCASIONALLY drift off to the lounge (and drift back) —
+    // the floor stays populated; the break room is the exception, not the rule.
+    const drift = (a)=>{ if (!a || !a.seen || (a.moveTween && a.moveTween.isPlaying())) return;
+      if (!a.inLounge && !a.working && Math.random() < 0.04) this.gotoLounge(a);
+      else if (a.inLounge && Math.random() < 0.12) this.deskRest(a, false); };
+    for (const [,a] of this.agents){ move(a); drift(a); }
+    for (const s of [...(this.poolGroup||[]), ...(this.techLeadGroup||[])]){ move(s); drift(s); }
   }
 
   walkCTO(tx, ty){   // routes along the corridors like everyone else
@@ -1150,8 +1178,9 @@ class FloorScene extends Phaser.Scene {
 
   // Seat the engineers in their discipline ROOMS from current org + pool state.
   layoutEngineering(){
-    if(this.techLeadGroup) this.techLeadGroup.forEach(s=>s.destroy());
-    if(this.poolGroup) this.poolGroup.forEach(s=>s.destroy());
+    const kill=(s)=>{ if(!s) return; s._dead=true; if(s.zzzEv){ s.zzzEv.remove(); s.zzzEv=null; } s.destroy(); };
+    if(this.techLeadGroup) this.techLeadGroup.forEach(kill);
+    if(this.poolGroup) this.poolGroup.forEach(kill);
     if(this.poolLabel){ this.poolLabel.destroy(); this.poolLabel=null; }
     if(this.engLabels) this.engLabels.forEach(o=>o.destroy());
     if(this.laneDecor) this.laneDecor.forEach(o=>o.destroy());
@@ -1184,7 +1213,9 @@ class FloorScene extends Phaser.Scene {
         s.add(this.add.text(0,-15, tag,
           {fontFamily:"'PixelFont','Courier New'",fontSize:"7px",fontStyle:"bold",color:"#"+col6}).setOrigin(0.5));
         s.home={x,y}; s.loungeSlot=slot++; s.seen=true; s.inLounge=false;
-        this.startWalk(s);
+        s.working = (this.activeRoomKey === "engineering");   // building if the stage is live
+        this.zzzLoop(s);                                       // idle engineers nap at the desk
+        if (s.working) this.startWalk(s); else this.deskIdle(s);
         (p.lead?this.techLeadGroup:this.poolGroup).push(s, ws);
       });
       this.engLabels.push(this.add.text(R.x1-8, R.y+8, "×"+people.length,
@@ -1205,7 +1236,10 @@ class FloorScene extends Phaser.Scene {
       const k=poolKit(i);
       const ws=this.makeWorkstation(x, y+16, k.accent);
       const s=this.makePerson(x, y, k); s.setScale(1.25).setDepth(y).setAlpha(0.96);
-      s.home={x,y}; s.loungeSlot=12+i; s.seen=true; this.startWalk(s);
+      s.home={x,y}; s.loungeSlot=12+i; s.seen=true; s.inLounge=false;
+      s.working = (this.activeRoomKey === "engineering");
+      this.zzzLoop(s);
+      if (s.working) this.startWalk(s); else this.deskIdle(s);
       this.poolGroup.push(s, ws);
     }
   }

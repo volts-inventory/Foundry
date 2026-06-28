@@ -60,6 +60,15 @@ class TaskPacket(FrozenModel):
         ),
     )
     retrieved_spans: tuple[str, ...] = ()
+    prior_failures: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Findings from a PRIOR failed gate verification (the fix loop): the "
+            "specific failing tests + assertions from the last attempt, so this "
+            "attempt fixes THAT failure instead of re-rolling blind. Empty on the "
+            "first attempt."
+        ),
+    )
     worktree_path: str
     turn_budget: int
     cost_budget_microusd: int  # integer micro-USD, never floats (arch §8)
@@ -105,6 +114,13 @@ def assemble_prompt(packet: TaskPacket, *, epilogue: str = "") -> str:
         parts.append("")
     parts.append("TASK:")
     parts.append(json.dumps(packet.task, indent=2, sort_keys=True, ensure_ascii=False))
+    if packet.prior_failures:
+        parts.append("")
+        parts.append(
+            "YOUR PREVIOUS ATTEMPT FAILED VERIFICATION. Fix these SPECIFIC failures "
+            "(make the implementation and tests agree — change whichever is wrong):"
+        )
+        parts.extend(packet.prior_failures)
     if packet.retrieved_spans:
         parts.append("")
         parts.append("RETRIEVED CONTEXT SPANS:")

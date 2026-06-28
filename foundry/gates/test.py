@@ -89,6 +89,28 @@ def _host_source_root() -> str | None:
     return str(root) if (root / "pyproject.toml").is_file() else None
 
 
+def failure_findings(stdout: str, *, limit: int = 50) -> tuple[str, ...]:
+    """Human-readable failure lines from pytest output — the failing tests + the
+    assertion (expected vs got) — so the fix loop can target the SPECIFIC failure
+    instead of re-rolling blind. Bounded; lines are truncated. (Zone A: pure parse.)"""
+    keep: list[str] = []
+    for raw in stdout.splitlines():
+        s = raw.rstrip()
+        st = s.strip()
+        if not st:
+            continue
+        if (
+            st.startswith(("E ", "E\t", ">", "FAILED", "ERROR", "_____"))
+            or "assert" in st
+            or "Error" in st
+            or st.startswith("def test")
+        ):
+            keep.append(s[:300])
+        if len(keep) >= limit:
+            break
+    return tuple(keep)
+
+
 def parse_pytest_summary(stdout: str) -> dict[str, int]:
     """Counts from the pytest tail line (raw observation, zone A side)."""
     counts: dict[str, int] = {}
@@ -128,7 +150,7 @@ class TestGate:
         # so generated modules can't collide with / reach ours). An explicit cmd is
         # honored verbatim (tests inject one).
         self.cmd = cmd or (
-            sys.executable, "-c", _ISOLATED_PYTEST_BOOTSTRAP, "-q", "--tb=no"
+            sys.executable, "-c", _ISOLATED_PYTEST_BOOTSTRAP, "-q", "--tb=short"
         )
         self.min_passed = min_passed
         # The held-out-mutant + behavioral-invariance discriminator: a green
@@ -176,6 +198,11 @@ class TestGate:
             "summary": parse_pytest_summary(out),
         }
         findings: tuple[str, ...] = ()
+        # A red run carries its WHY: the failing tests + assertions, parsed off the
+        # pinned harness's own stdout (zone A) so the fix loop feeds the SPECIFIC
+        # failure back to the engineer (zone B still decides the verdict on rc alone).
+        if rc != 0:
+            findings = failure_findings(out)
         # The discriminator runs in zone A (no signing key in scope) ONLY when
         # the agent suite is actually green — a red/no-tests run is already a
         # FAIL/ERROR by exit code, so there is nothing to re-verify. The report

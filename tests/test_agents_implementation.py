@@ -631,3 +631,28 @@ def test_junior_node_runs_inside_a_state_graph(tmp_path: Any) -> None:
     artifacts = final["artifacts"]
     assert any(isinstance(a, FeatureDiff) is False for a in artifacts)  # they are Artifacts
     assert artifacts[0].uri.startswith("cas://feature_diff/")
+
+
+def test_prior_failures_feeds_failed_gate_findings_back_to_the_engineer() -> None:
+    """The fix loop's feedback seam: a FAILED gate's findings become the packet's
+    prior_failures; a clean / PASSed state contributes nothing (first-pass blind)."""
+    from foundry.agents.implementation.junior_engineer import _prior_failures
+    from foundry.schemas.gates import GateResult, GateStatus, VerdictClass
+    from foundry.state.seq import Seq
+
+    failing = GateResult(
+        name="test",
+        status=GateStatus.FAIL,
+        decision_deterministic=True,
+        execution_deterministic=True,
+        verdict_class=VerdictClass.EXECUTION_DETERMINISTIC,
+        findings=("FAILED test_rw::test_double_spaces", "E   assert 'a b' == 'a  b'"),
+        run_against="a" * 64,
+        seq=Seq("r", 1, 1, "test", 0),
+    )
+    fed = _prior_failures({"gates": [failing]})
+    assert "E   assert 'a b' == 'a  b'" in fed
+    assert any("test gate FAILED" in f for f in fed)
+    assert _prior_failures({}) == ()                                   # first pass: blind
+    passing = failing.model_copy(update={"status": GateStatus.PASS})
+    assert _prior_failures({"gates": [passing]}) == ()                 # green: no feedback

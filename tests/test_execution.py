@@ -214,6 +214,21 @@ def test_constraints_verbatim_round_trip(tmp_path: Path):
     assert rehydrated == packet
 
 
+def test_prompt_surfaces_prior_failures_for_the_fix_loop(tmp_path: Path):
+    # On a re-attempt, the SPECIFIC prior failure rides the packet -> the prompt, so
+    # the engineer fixes that instead of re-rolling blind.
+    failure = "E       assert 'world hello' == 'world  hello'"
+    packet = make_packet(tmp_path, prior_failures=(failure,))
+    prompt = RawReactAdapter(lambda p: "").build_prompt(packet)
+    assert failure in prompt
+    assert "PREVIOUS ATTEMPT FAILED" in prompt
+    assert prompt.index("TASK:") < prompt.index(failure)  # after the task, as feedback
+    # No prior failures (first attempt) -> no feedback section.
+    assert "PREVIOUS ATTEMPT FAILED" not in RawReactAdapter(lambda p: "").build_prompt(
+        make_packet(tmp_path)
+    )
+
+
 def test_prompt_injects_constraints_verbatim_and_first(tmp_path: Path):
     constraints = ("never use floats for money", "unicode: ⧺ §2b — décorrélation")
     packet = make_packet(tmp_path, pinned_constraints=constraints)

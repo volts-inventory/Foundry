@@ -53,6 +53,7 @@ from foundry.execution.adapter_contract import AdapterResult, TaskPacket
 from foundry.execution.sandbox import Sandbox
 from foundry.schemas.architecture import OwnershipMap, PinnedConstraint
 from foundry.schemas.base import Artifact, BudgetLedger
+from foundry.schemas.gates import GateStatus
 from foundry.schemas.implementation import FeatureDiff, Task, TaskStatus
 from foundry.state.reducers import live_constraints
 
@@ -185,6 +186,18 @@ def _domain_by_task_id(ownership: OwnershipMap) -> dict[str, str]:
     return {task_id_for_unit(unit): owner for unit, owner in ownership.owners.items()}
 
 
+def _prior_failures(state: FactoryState) -> tuple[str, ...]:
+    """Findings from any gate that FAILED/ERRORed on the previous pass — fed back to
+    the engineer (via the TaskPacket) so a fix attempt targets the SPECIFIC failure
+    instead of re-rolling blind. Empty on the first pass (no gates yet)."""
+    out: list[str] = []
+    for g in state.get("gates") or ():
+        if g.status in (GateStatus.FAIL, GateStatus.ERROR) and g.findings:
+            out.append(f"[{g.name} gate FAILED]")
+            out.extend(g.findings)
+    return tuple(out)
+
+
 def _build_packet(
     task: Task,
     constraints: Sequence[PinnedConstraint],
@@ -192,6 +205,7 @@ def _build_packet(
     *,
     turn_budget: int,
     cost_budget_microusd: int,
+    prior_failures: tuple[str, ...] = (),
 ) -> TaskPacket:
     """Assemble the immutable packet: pinned constraints VERBATIM + FIRST.
 
@@ -209,6 +223,7 @@ def _build_packet(
             "criterion_ids": list(task.criterion_ids),
         },
         pinned_constraints=pinned_texts(constraints),  # VERBATIM + FIRST (arch §2)
+        prior_failures=prior_failures,
         worktree_path=str(sandbox.worktree),
         turn_budget=turn_budget,
         cost_budget_microusd=cost_budget_microusd,
@@ -225,6 +240,7 @@ def execution_task_for(
     lineage: str = "default",
     turn_budget: int = _DEFAULT_TURN_BUDGET,
     cost_budget_microusd: int = _DEFAULT_COST_BUDGET_MICROUSD,
+    prior_failures: tuple[str, ...] = (),
 ) -> ExecutionTask:
     """OPT-IN seam (additive — NOT on the default path): build the durable
     :class:`~foundry.execution.work_pool.ExecutionTask` that would dispatch THIS
@@ -253,6 +269,7 @@ def execution_task_for(
             "criterion_ids": list(task.criterion_ids),
         },
         pinned_constraints=pinned_texts(constraints),  # VERBATIM + FIRST (arch §2)
+        prior_failures=prior_failures,
         worktree_path=worktree_path,
         turn_budget=turn_budget,
         cost_budget_microusd=cost_budget_microusd,
@@ -277,6 +294,7 @@ def _run_one_task(
     snapshot_store: str | None,
     turn_budget: int,
     cost_budget_microusd: int,
+    prior_failures: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Run the adapter for ONE task in a fresh sandbox; return its channel writes.
 
@@ -294,6 +312,7 @@ def _run_one_task(
             sandbox,
             turn_budget=turn_budget,
             cost_budget_microusd=cost_budget_microusd,
+            prior_failures=prior_failures,
         )
         result: AdapterResult = rt.adapter.run(packet, sandbox)
         _mirror_diff_blob(rt, sandbox, result)  # while the sandbox is alive
@@ -403,6 +422,7 @@ def _run_tasks_pooled(
     cost_cap_microusd: int | None,
     domain_by_task: Mapping[str, str],
     domain_area: Mapping[str, str],
+    prior_failures: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Run the ready tasks' adapter work in PARALLEL through a bounded
     :class:`LocalWorkPool` (``max_slots`` physical slots), then post-process the
@@ -493,6 +513,7 @@ def _run_tasks_pooled(
                 lineage=lineage_of(task),  # per-area budget bucket (Wave D)
                 turn_budget=turn_budget,
                 cost_budget_microusd=cost_budget_microusd,
+                prior_failures=prior_failures,
             )
             try:
                 submitted[task.id] = pool.submit(etask)
@@ -571,6 +592,9 @@ def make_junior_engineer_node(
     def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         constraints: Sequence[PinnedConstraint] = state.get("pinned_constraints") or ()
         tasks = ready_tasks(state)
+        # Fix loop: on a re-entry after a failed gate, feed the SPECIFIC failure back
+        # to the engineer (empty on the first pass) so it fixes that instead of re-rolling.
+        prior_failures = _prior_failures(state)
         # SYSTEM-DECIDED parallelism. The Tech-Lead's decomposition IS the decision
         # to parallelize: it splits the work into independently-buildable tasks. We
         # size the IC pool to that decomposition — one worker per ready task —
@@ -606,6 +630,7 @@ def make_junior_engineer_node(
                 cost_cap_microusd=cost_cap_microusd,
                 domain_by_task=domain_by_task,
                 domain_area=domain_area,
+                prior_failures=prior_failures,
             )
         merged: dict[str, Any] = {}
         for task in tasks:
@@ -619,6 +644,7 @@ def make_junior_engineer_node(
                 snapshot_store=snapshot_store,
                 turn_budget=turn_budget,
                 cost_budget_microusd=cost_budget_microusd,
+                prior_failures=prior_failures,
             )
             for channel, records in writes.items():
                 merged.setdefault(channel, []).extend(records)

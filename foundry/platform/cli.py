@@ -34,9 +34,12 @@ def _parser() -> argparse.ArgumentParser:
                    help=f"services built concurrently (default: {DEFAULT_MAX_PARALLEL})")
     p.add_argument("--max-slots-per-service", type=int, default=6,
                    help="task parallelism inside each service build (default: 6)")
-    p.add_argument("--passes", type=int, default=1,
-                   help="deepening iterations per service: each pass extends the prior "
-                        "tree toward completeness (default: 1; complex services want 2-3)")
+    p.add_argument("--passes", default="auto",
+                   help="deepening per service: 'auto' (default) keeps extending each "
+                        "service until it passes its gates AND stops growing (so simple "
+                        "services stop early, complex ones run longer); or a fixed integer")
+    p.add_argument("--max-passes", type=int, default=6,
+                   help="failsafe ceiling on auto deepening passes per service (default: 6)")
     p.add_argument("--cost-cap-microusd", type=int, default=None,
                    help="per-service spend envelope in micro-USD (metered backends)")
     p.add_argument("--plan-only", action="store_true",
@@ -50,6 +53,7 @@ def main(argv: list[str] | None = None) -> int:
         _parser().print_help()
         return 2
     only = [s for s in (args.services or "").split(",") if s.strip()] or None
+    passes: int | str = args.passes if args.passes == "auto" else int(args.passes)
 
     if args.plan_only:
         plan = plan_platform(args.request, name=args.name, only=only)
@@ -78,7 +82,8 @@ def main(argv: list[str] | None = None) -> int:
         max_parallel=args.max_parallel,
         max_slots_per_service=args.max_slots_per_service,
         cost_cap_microusd=args.cost_cap_microusd,
-        passes=args.passes,
+        passes=passes,
+        max_passes=args.max_passes,
     )
     print(result.summary())
     return 0 if result.passed else 1

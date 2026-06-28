@@ -41,6 +41,34 @@ _DEEPEN_DIRECTIVE = (
 )
 
 
+def _tree_metrics(path: str) -> tuple[int, int]:
+    """(file count, total bytes) of a built tree's CODE — the per-pass ``docs/`` set
+    is excluded so growth reflects implementation, not regenerated prose."""
+    n, total = 0, 0
+    for root, dirs, files in os.walk(path):
+        if "docs" in dirs:
+            dirs.remove("docs")
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+                n += 1
+            except OSError:
+                pass
+    return n, total
+
+
+def _still_growing(prev: tuple[int, int] | None, cur: tuple[int, int]) -> bool:
+    """Did this pass add MEANINGFUL new code vs the previous one? New files, or a
+    >5% (and >256 B) increase in code bytes. False => the service has plateaued."""
+    if prev is None:
+        return True
+    pf, pb = prev
+    cf, cb = cur
+    if cf > pf:
+        return True
+    return (cb - pb) > max(256, int(pb * 0.05))
+
+
 def _build_one(
     svc: ServiceSpec,
     *,
@@ -51,18 +79,30 @@ def _build_one(
     work_dir: str,
     max_slots: int,
     cost_cap_microusd: int | None,
-    passes: int = 1,
+    passes: int | str = "auto",
+    max_passes: int = 6,
 ) -> ServiceResult:
     """Build a service into ``work_dir`` and project the result.
 
-    ``passes`` > 1 runs deepening iterations: each pass rebuilds the service ON TOP
-    of the previous pass's tree (``base_dir``), layering depth the engine's single
-    planning pass can't reach in one shot. The LAST pass's tree is the result.
+    Deepening: each pass after the first rebuilds the service ON TOP of the prior
+    pass's tree (``base_dir``), layering depth the engine's single planning pass
+    can't reach in one shot. ``passes`` is either a fixed int OR ``"auto"`` (the
+    default): in auto mode the loop keeps deepening until a pass both PASSES its
+    gates AND stops adding meaningful new code (converged = "done"), bounded by
+    ``max_passes`` as a failsafe. So a simple service stops after ~1-2 passes and a
+    complex one runs as many as it needs — never a blind fixed rerun.
     """
+    auto = (passes == "auto")
+    cap = max(1, max_passes if auto else int(passes))
     base: str | None = None
+    prev_metrics: tuple[int, int] | None = None
     result = None
-    for p in range(1, max(1, passes) + 1):
-        svc_out = os.path.join(work_dir, svc.name if p == passes else f"{svc.name}.p{p}")
+    used = 0
+    for p in range(1, cap + 1):
+        used = p
+        last = p == cap
+        # The final tree lands in <name>; intermediate passes in <name>.pN.
+        svc_out = os.path.join(work_dir, svc.name if last else f"{svc.name}.p{p}")
         state_dir = os.path.join(work_dir, ".state", svc.name, f"p{p}")
         os.makedirs(state_dir, exist_ok=True)
         request = svc.request + (_DEEPEN_DIRECTIVE if p > 1 else "")
@@ -83,16 +123,23 @@ def _build_one(
         except Exception as exc:  # a service failing to build must not sink the platform
             return ServiceResult(
                 name=svc.name, role=svc.role, passed=False, phase=f"error: {exc}",
-                source_root=base, is_draft=bool(base), gates={},
+                source_root=base, is_draft=bool(base), gates={}, passes=p,
             )
         out = result.output_root or result.draft_root
         if not out:
             break                                    # nothing produced — stop deepening
+        cur = _tree_metrics(out)
         base = out                                   # next pass extends this tree
+        # AUTO stop: verified (gates passed) AND the tree has plateaued -> "done".
+        if auto and p > 1 and result.passed and not _still_growing(prev_metrics, cur):
+            break
+        prev_metrics = cur
 
     if result is None:
         return ServiceResult(name=svc.name, role=svc.role, passed=False, phase="no output",
-                             source_root=None, is_draft=False, gates={})
+                             source_root=None, is_draft=False, gates={}, passes=used)
+    # If the converged tree isn't at <name> (we stopped before the last slot), make
+    # sure the result points at the tree we actually kept.
     source = result.output_root or result.draft_root
     return ServiceResult(
         name=svc.name,
@@ -102,6 +149,7 @@ def _build_one(
         source_root=source,
         is_draft=bool(result.draft_root and not result.output_root),
         gates={k: getattr(v, "status", str(v)) for k, v in result.gate_statuses.items()},
+        passes=used,
     )
 
 
@@ -116,7 +164,8 @@ def build_platform(
     max_parallel: int = DEFAULT_MAX_PARALLEL,
     max_slots_per_service: int = 6,
     cost_cap_microusd: int | None = None,
-    passes: int = 1,
+    passes: int | str = "auto",
+    max_passes: int = 6,
     work_dir: str | None = None,
 ) -> PlatformResult:
     """Plan, build every service, and stitch the monorepo at ``out_dir``.
@@ -143,7 +192,7 @@ def build_platform(
                 _build_one, svc,
                 plan_name=plan.name, backend=backend, mode=mode, spec_text=spec_text,
                 work_dir=staging, max_slots=max_slots_per_service,
-                cost_cap_microusd=cost_cap_microusd, passes=passes,
+                cost_cap_microusd=cost_cap_microusd, passes=passes, max_passes=max_passes,
             ): svc
             for svc in plan.services
         }

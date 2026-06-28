@@ -74,6 +74,8 @@ class ServiceResult:
     source_root: str | None
     is_draft: bool = False
     gates: dict[str, str] = field(default_factory=dict)
+    # How many deepening passes ran (1 = single build; more = auto-converged depth).
+    passes: int = 1
 
 
 @dataclass(frozen=True)
@@ -102,5 +104,6 @@ class PlatformResult:
         for s in self.services:
             mark = "✓" if s.passed else ("◐" if s.source_root else "✗")
             note = " (draft)" if s.is_draft else ("" if s.source_root else " (no output)")
-            lines.append(f"  {mark} {s.name:<14} {s.role:<8} {s.phase}{note}")
+            passes = f"  [{s.passes} pass{'es' if s.passes != 1 else ''}]" if s.passes > 1 else ""
+            lines.append(f"  {mark} {s.name:<14} {s.role:<8} {s.phase}{note}{passes}")
         return "\n".join(lines)

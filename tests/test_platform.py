@@ -116,6 +116,18 @@ def test_deepening_passes_build_on_prior_tree(tmp_path) -> None:  # type: ignore
     assert os.path.isdir(os.path.join(out, "services", "api"))
 
 
+def test_auto_passes_converge_below_the_failsafe(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    out = str(tmp_path / "auto")
+    result = build_platform(
+        "a tiny REST api", out_dir=out, backend="mock", only=["api"],
+        passes="auto", max_passes=6,
+    )
+    svc = result.services[0]
+    assert result.passed
+    assert 1 <= svc.passes < 6          # converged on "done", did NOT hit the failsafe
+    assert os.path.isdir(os.path.join(out, "services", "api"))
+
+
 def test_game_platform_skips_compose_service(tmp_path) -> None:  # type: ignore[no-untyped-def]
     out = str(tmp_path / "game")
     result = build_platform("a lua based farming game like stardew", out_dir=out, backend="mock")

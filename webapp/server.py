@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from foundry.schemas.architecture import CANONICAL_AREAS
-from webapp.events import events_for_payload, events_for_result
+from webapp.events import events_for_payload, events_for_result, live_event_for_node
 from webapp.store import BuildStore
 
 _STATIC = Path(__file__).parent / "static"
@@ -532,6 +532,14 @@ def _run_factory(p: Project, resume: bool = False) -> None:
         _emit(p, type="narrate", text=f"🧑‍💼 CTO {verb} the {boundary} checkpoint.")
         return decision
 
+    # LIVE per-node telemetry: as each real graph node executes, seat its agent at
+    # the desk in real time (not the retroactive burst at the checkpoint). Emitted
+    # immediately (unpaced) so the floor reflects the build actually grinding.
+    def progress(node: str, scope: str) -> None:
+        ev = live_event_for_node(node, scope)
+        if ev is not None:
+            _emit(p, **ev)
+
     # One GitHub-ready repo per build: code at the root + a real README + the
     # design/ops docs under docs/ (no separate docs dir — the doc set is written
     # INTO the code tree by run()).
@@ -539,6 +547,7 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     try:
         result = run(
             p.request,
+            progress_cb=progress,
             mode=p.mode,
             backend=p.backend,            # real backend per project (not always mock)
             adapter=p.adapter,            # coding substrate (stub/raw-react)

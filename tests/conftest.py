@@ -28,3 +28,12 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         filename = item.nodeid.split("::", 1)[0].rsplit("/", 1)[-1]
         if filename in _SLOW_FILES:
             item.add_marker(pytest.mark.slow)
+
+
+@pytest.fixture(autouse=True)
+def _in_process_test_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Docker sandbox is the PRODUCTION default for running generated tests, but
+    the hermetic suite has no daemon — so default every test to the in-process gate
+    harness. A test that specifically exercises the sandbox path opts back in with
+    ``monkeypatch.setenv("FOUNDRY_GATE_SANDBOX", "docker")``."""
+    monkeypatch.setenv("FOUNDRY_GATE_SANDBOX", "inprocess")

@@ -2,42 +2,39 @@
 # `make` (or `make help`) lists every target. Override any variable inline, e.g.
 #   make run REQUEST="build a link shortener" BACKEND=claude-cli MODE=gated
 #
-# Requires `uv` (https://docs.astral.sh/uv/). Docker targets additionally need a
-# Docker daemon; the `token` target needs the Claude Code CLI on a Max account.
+# Requires `uv` (https://docs.astral.sh/uv/). The `token` target needs the Claude
+# Code CLI on a Max account.
 
-# Load .env (if present) so LOCAL targets see the same config docker-compose does
-# — FOUNDRY_MODEL_BACKEND, CLAUDE_CODE_OAUTH_TOKEN, FOUNDRY_OLLAMA_URL, etc. Keep
-# it simple KEY=value (no quotes). `export` passes every var to the recipe procs
-# (so e.g. `claude -p` sees the token). `make up` reads .env directly via compose.
+# Load .env (if present) so targets see the same config — FOUNDRY_MODEL_BACKEND,
+# CLAUDE_CODE_OAUTH_TOKEN, FOUNDRY_OLLAMA_URL, etc. Keep it simple KEY=value (no
+# quotes). `export` passes every var to the recipe procs (so e.g. `claude -p` sees
+# the token).
 -include .env
 export
 
 # ---- tunables (override on the command line) -------------------------------
 # MODE:    assistant | gated | autonomous
-# BACKEND: mock | anthropic | claude-cli | codex | ollama-gemma
+# BACKEND: mock | anthropic | openai | claude-cli | codex | ollama-gemma
 #          (defaults to FOUNDRY_MODEL_BACKEND from the env / .env, else mock)
-# INSTALL_CLI_BACKENDS: `true` bakes the claude/codex CLIs into the docker image
 REQUEST ?= build a tiny URL-shortener service
 MODE ?= assistant
 BACKEND ?= $(or $(FOUNDRY_MODEL_BACKEND),mock)
 # Run output goes to an ephemeral, gitignored dir (one GitHub-ready repo).
 OUT ?= ./.run/repo
 PORT ?= 8765
-IMAGE ?= foundry:dev
-INSTALL_CLI_BACKENDS ?= false
 
 UV ?= uv
 
 .DEFAULT_GOAL := help
 .PHONY: help setup check lint fix typecheck test run spec \
-        test-fast token env docker-build compose-config up down clean
+        test-fast token env serve clean
 
 help: ## Show this help
 	@echo "Foundry — make targets:"
 	@grep -hE '^[a-zA-Z0-9_.-]+:.*?## ' $(MAKEFILE_LIST) \
 	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 	@echo
-	@echo "Vars: REQUEST MODE BACKEND OUT PORT IMAGE INSTALL_CLI_BACKENDS"
+	@echo "Vars: REQUEST MODE BACKEND OUT PORT"
 
 # ---- develop ---------------------------------------------------------------
 setup: ## Install deps + the project into a local venv (uv sync)
@@ -70,9 +67,9 @@ spec: ## Co-generate a spec from REQUEST (ideation) -> spec.md
 	$(UV) run python -m foundry.ideation --mock "$(REQUEST)" > spec.md
 	@echo "wrote spec.md — refine it, then: make run REQUEST=... (or --spec spec.md)"
 
-# Note: `make up` (Docker) is the Workshop launcher — it already binds 0.0.0.0,
-# so it's reachable on the LAN. To run WITHOUT Docker, just:
-#   uv run python -m webapp.server         (add WORKSHOP_HOST=0.0.0.0 for the LAN)
+# ---- serve the Workshop UI -------------------------------------------------
+serve: ## Serve the Workshop UI → http://localhost:$(PORT)  (WORKSHOP_HOST=0.0.0.0 for the LAN)
+	WORKSHOP_PORT=$(PORT) $(UV) run python -m webapp.server
 
 # ---- credentials / config --------------------------------------------------
 token: ## Mint a Max-subscription OAuth token for the claude-cli backend
@@ -92,28 +89,14 @@ env: ## Scaffold a .env (secrets; gitignored) if missing
 	    '# CLAUDE_CODE_OAUTH_TOKEN=' \
 	    '# ollama-gemma (Ollama runs on the HOST; never GPU-passthrough):' \
 	    '# FOUNDRY_MODEL_BACKEND=ollama-gemma' \
-	    '# FOUNDRY_OLLAMA_URL=http://host.docker.internal:11434' \
+	    '# FOUNDRY_OLLAMA_URL=http://localhost:11434' \
 	    '# codex backend: OPENAI_API_KEY=' \
 	    '# Pin the EXACT model id per tier if your egress serves one the default' \
 	    "# map doesn't name (else the fail-closed drift policy rejects the call):" \
 	    '# FOUNDRY_MODEL_T1=claude-opus-4-8' \
 	    '# FOUNDRY_MODEL_T2=claude-sonnet-4-6' \
 	    '# FOUNDRY_MODEL_T3=claude-haiku-4-5' > .env; \
-	  echo "wrote .env — edit it before 'make up'."; fi
-
-# ---- docker / compose ------------------------------------------------------
-docker-build: ## Build the image (INSTALL_CLI_BACKENDS=true bakes claude/codex CLIs)
-	docker build --build-arg INSTALL_CLI_BACKENDS=$(INSTALL_CLI_BACKENDS) -t $(IMAGE) .
-
-compose-config: ## Validate docker-compose.yml without starting anything
-	docker compose config
-
-up: env ## Build + serve the Workshop in Docker → http://localhost:$(PORT)
-	@echo "→ Building + starting the Workshop. When it's up, open: http://localhost:$(PORT)"
-	docker compose up --build
-
-down: ## Stop the compose stack
-	docker compose down
+	  echo "wrote .env — edit it, then 'make run' or 'make serve'."; fi
 
 # ---- housekeeping ----------------------------------------------------------
 clean: ## Remove caches + the ephemeral .run/ output

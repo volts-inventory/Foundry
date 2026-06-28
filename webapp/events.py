@@ -11,6 +11,7 @@ influence a build — it only describes what already happened.
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any
 
 # Workshop rooms, left -> right (the agent walks the floor as the build advances).
@@ -112,6 +113,24 @@ def _origin(kind: str, produced_by: str) -> tuple[str, str]:
     return (produced_by.replace("_", " ").title() or "Agent", "engineering")
 
 
+def live_event_for_node(node: str, scope: str) -> dict[str, Any] | None:
+    """A LIVE "this agent is at its desk working RIGHT NOW" event for a graph node
+    that just executed in the real run (streamed per-node, not the checkpoint burst).
+
+    Maps the node id -> (agent, room) so the canvas seats that agent at its desk and
+    keeps them working until the stage's checkpoint. Falls back to the subgraph
+    ``scope`` -> room when the node isn't a named agent (so a stage still lights the
+    right room). Returns ``None`` for infra/non-agent nodes with no desk to light."""
+    who = AGENT_BY_NODE.get(node)
+    if who is not None:
+        agent, room = who
+        return {"type": "active", "room": room, "agent": agent, "live": True}
+    room = _BOUNDARY_ROOM.get(scope) or (scope if scope in ROOMS else "")
+    if room:
+        return {"type": "active", "room": room, "agent": "", "live": True}
+    return None
+
+
 def events_for_payload(
     payload: dict[str, Any], seen_uris: set[str]
 ) -> list[dict[str, Any]]:
@@ -160,7 +179,18 @@ def events_for_payload(
              "concern": concerns[0] if concerns else ""}
         )
 
-    # New artifacts -> the producing desk lights up + a quest-log pickup.
+    # New artifacts -> the producing desk lights up + a quest-log pickup. A stage
+    # often emits MANY artifacts of one kind (e.g. 9 acceptance criteria); numbering
+    # same-kind pickups (#1..#9) keeps the quest log readable instead of a wall of
+    # identical "Acceptance Criterion · Product Manager" lines. Lone kinds (one PRD)
+    # are left unnumbered. Counts are over the NEW artifacts in THIS payload only.
+    new_uris = [
+        u for u in (str(a.get("uri", "")) for a in payload.get("artifacts", []))
+        if u and u not in seen_uris
+    ]
+    kind_of = {str(a.get("uri", "")): str(a.get("kind", "")) for a in payload.get("artifacts", [])}
+    kind_total: Counter[str] = Counter(kind_of[u] for u in new_uris)
+    kind_seen: Counter[str] = Counter()
     for a in payload.get("artifacts", []):
         uri = str(a.get("uri", ""))
         if not uri or uri in seen_uris:
@@ -168,10 +198,14 @@ def events_for_payload(
         seen_uris.add(uri)
         kind = str(a.get("kind", ""))
         agent, aroom = _origin(kind, str(a.get("produced_by", "")))
+        label = ARTIFACT_LABEL.get(kind, kind.replace("_", " ").title())
+        if kind_total[kind] > 1:
+            kind_seen[kind] += 1
+            label = f"{label} #{kind_seen[kind]}"
         out.append({"type": "agent", "room": aroom, "agent": agent, "action": "work"})
         out.append({
             "type": "artifact", "room": aroom, "agent": agent, "kind": kind,
-            "label": ARTIFACT_LABEL.get(kind, kind.replace("_", " ").title()),
+            "label": label,
         })
         # Attach a speech bubble for this agent if the journal had one.
         for s in say_by_room.get(aroom, []):

@@ -1236,6 +1236,16 @@ function routeEvent(floor, ev){
       if (S) S.setActiveRoom(ev.room);
       logTo(F, "gold", "── "+ev.label+" ──"); break;
     case "agent": if (S) S.agentWork(ev.agent); break;
+    case "active":
+      // LIVE per-node telemetry: a real graph node is executing RIGHT NOW. Seat
+      // that stage's crew at their desks (only re-walk on a room CHANGE — cheap)
+      // and put the named agent heads-down. This is what fills the office DURING
+      // the work instead of the retroactive burst at the checkpoint.
+      if (S){
+        if (S.activeRoom !== ev.room) S.setActiveRoom(ev.room);
+        if (ev.agent) S.agentWork(ev.agent);
+      }
+      break;
     case "say":
       if (S) S.agentSay(ev.agent, ev.text);
       if (ev.concern) logTo(F, "", `${ev.agent}: "${ev.concern}"`); break;

@@ -109,7 +109,6 @@ Two seams are deliberately independent, and worth internalizing before you start
 ## Requirements
 
 - Python ≥ 3.12 and [`uv`](https://docs.astral.sh/uv/).
-- Docker (only for `make up` / compose).
 - A real backend (optional): an Anthropic API key, an OpenAI API key, the `claude`
   CLI on a Max plan, the `codex` CLI, or a local Ollama.
 
@@ -178,7 +177,7 @@ uv run python -m foundry.cli "build a todo API" --backend anthropic --out ./out
 export FOUNDRY_MODEL_BACKEND=anthropic
 uv run python -m foundry.cli "build a todo API" --out ./out      # uses anthropic
 
-# 3. Persistently — put it in .env (read by make + docker compose)
+# 3. Persistently — put it in .env (read by make)
 make env                                  # scaffold .env if missing
 echo "FOUNDRY_MODEL_BACKEND=anthropic" >> .env
 make run REQUEST="build a todo API"       # uses anthropic
@@ -357,7 +356,7 @@ projects; iterate to add releases; browse output and release history; approve,
 request changes, or reject at checkpoints.
 
 ```bash
-# 1. Run locally (no Docker) on http://localhost:8765
+# 1. Serve it on http://localhost:8765  (or: make serve)
 uv run python -m webapp.server
 
 # 2. Expose it to your LAN
@@ -371,17 +370,17 @@ FOUNDRY_WORKSHOP_TOKEN=secret uv run python -m webapp.server
 #    then open  http://localhost:8765/?token=secret
 ```
 
-### Docker / compose
+**Sandboxed test gate (untrusted-code isolation).** Generated tests run inside a
+**namespace sandbox** by default — an unprivileged Linux `unshare` (user + net +
+mount + pid + ipc + uts) — so model code runs with **no network** (can't exfiltrate),
+isolated mounts/processes, and resource caps, while the pinned harness fences our
+source off `sys.path` (a generated module can't import or shadow `foundry.*`). No
+Docker daemon, no image — just the kernel. If the host can't create unprivileged
+user namespaces the gate **fails closed (ERROR)** rather than run untrusted code
+unsandboxed; opt out to the in-process-only harness (still sys.path-fenced) with:
 
 ```bash
-# 1. Scaffold a .env (backend + secrets; gitignored)
-make env && $EDITOR .env
-
-# 2. Build + serve in Docker → http://localhost:8765
-make up
-
-# 3. Stop the stack
-make down
+export FOUNDRY_GATE_SANDBOX=inprocess
 ```
 
 ---
@@ -414,6 +413,7 @@ make clean           # remove caches + ./.run output
 | `FOUNDRY_MAX_SLOTS` | Parallelism ceiling | auto |
 | `FOUNDRY_COST_CAP_MICROUSD` | Global spend envelope | — |
 | `FOUNDRY_STATE_DIR` | Durable state dir | in-memory |
+| `FOUNDRY_GATE_SANDBOX` | Run generated tests in a namespace sandbox (default) or `inprocess` to opt out | sandbox |
 | `WORKSHOP_HOST` / `WORKSHOP_PORT` | UI bind address / port | `127.0.0.1` / `8765` |
 | `WORKSHOP_OUTPUT_DIR` | UI build output root | `.run/web` |
 | `FOUNDRY_WORKSHOP_TOKEN` | Shared token for UI mutations | off (localhost-only) |

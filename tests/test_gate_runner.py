@@ -367,3 +367,23 @@ def test_build_missing_tool_is_error(tmp_path, runner, verifier):
     g = BuildGate(cmd=("this-binary-does-not-exist-xyz",))
     r = runner.run(g, "task/1", _seq("build", "task/1"), tmp_path)
     assert r.status is GateStatus.ERROR  # GroundingUnavailable -> fail-closed ERROR
+
+
+def test_generated_module_named_like_host_pkg_is_isolated(tmp_path, runner, records, verifier):
+    """The real failure reproduced: a generated impl under ``foundry/`` (a namespace
+    package, no ``__init__``) + a test importing it. In a shared interpreter the host
+    ``foundry`` package shadows the workdir's -> pytest collection ERROR. The isolated
+    pinned harness fences the host source off ``sys.path`` so the workdir's module wins
+    and the suite runs -> PASS (generated code is isolated from ours)."""
+    (tmp_path / "foundry").mkdir()
+    (tmp_path / "foundry" / "text_processing.py").write_text(
+        "def reverse_words(s):\n    return ' '.join(reversed(s.split()))\n", encoding="utf-8"
+    )
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_rw.py").write_text(
+        "from foundry.text_processing import reverse_words\n\n\n"
+        "def test_rw():\n    assert reverse_words('a b c') == 'c b a'\n",
+        encoding="utf-8",
+    )
+    r = runner.run(TestGate(), "task/iso", _seq("test", "task/iso"), tmp_path)
+    assert r.status is GateStatus.PASS

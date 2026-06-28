@@ -223,6 +223,50 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
 .btn-link{margin-right:auto;color:#fff6da;text-decoration:none;border:3px solid var(--gold);
   border-radius:6px;padding:6px 12px;font-weight:bold;font-size:12px;background:#5a4a18}
 
+/* ---- Repo (self-hosted GitHub) tabs ---- */
+.repo-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.repo-head h2{margin:0}
+.repo-sha{font-size:11px;color:var(--dim);font-family:monospace}
+.repo-src{font-size:11px;color:var(--dim)}
+.repo-src.ok{color:#7fe7a4}
+.repo-tabs{display:flex;gap:6px;margin-top:10px;border-bottom:2px solid var(--line)}
+.repo-tab{background:transparent;border:none;border-bottom:3px solid transparent;color:var(--dim);
+  padding:7px 12px;font-size:12px;font-weight:bold;cursor:pointer}
+.repo-tab:hover{color:var(--ink)}
+.repo-tab.sel{color:var(--gold);border-bottom-color:var(--gold)}
+.tab-count{font-size:10px;color:var(--dim);background:#1f2942;border-radius:8px;padding:1px 6px;margin-left:2px}
+.repo-pane{margin-top:8px}
+.checks-list{list-style:none;margin:0;padding:0;max-height:min(56vh,440px);overflow:auto}
+.checks-list li.check{display:flex;align-items:center;gap:9px;flex-wrap:wrap;
+  padding:9px 11px;border:2px solid var(--line);border-radius:6px;margin-bottom:7px;font-size:13px}
+.check.ok{border-color:#2c5a3c}
+.check.bad{border-color:#6b2a2a}
+.ck-icon{width:20px;height:20px;display:inline-flex;align-items:center;justify-content:center;
+  border-radius:50%;font-weight:bold;font-size:12px}
+.check.ok .ck-icon{background:#1d3a26;color:#7fe7a4}
+.check.bad .ck-icon{background:#3a1d1d;color:#ff9a9a}
+.ck-name{font-weight:bold;color:var(--ink)}
+.ck-status{color:var(--dim);font-size:11px;text-transform:uppercase}
+.adv{font-size:10px;color:#d9c27a;background:#2e2814;border-radius:4px;padding:1px 5px}
+.ck-findings{flex-basis:100%;margin-top:5px;font-family:monospace;font-size:11px;color:#ffb4b4;
+  white-space:pre-wrap;word-break:break-word}
+.checks-list li.muted{color:var(--dim);list-style:none}
+.pulls-list{max-height:min(56vh,440px);overflow:auto}
+.pull{border:2px solid var(--line);border-radius:6px;margin-bottom:8px;overflow:hidden}
+.pull-head{display:flex;align-items:center;gap:8px;padding:9px 11px;cursor:pointer;background:#161d30}
+.pull-head:hover{background:#1c2540}
+.pull-no{color:var(--gold);font-weight:bold;font-size:12px}
+.pull-sum{flex:1 1 auto;font-size:12px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pull-merged{font-size:10px;color:#cdbcf0;background:#2c2052;border-radius:8px;padding:2px 8px}
+.pull-diff{display:none;margin:0;padding:10px;background:#0e1424;border-top:2px solid var(--line);
+  font-size:11px;overflow:auto;max-height:40vh;white-space:pre;color:var(--ink)}
+.pull-diff.open{display:block}
+.d-add{color:#7fe7a4}
+.d-del{color:#ff9a9a}
+.d-hunk{color:#9ab8ff}
+.d-file{color:#d9c27a}
+.muted{color:var(--dim)}
+
 /* ---- Mobile / narrow-screen layout --------------------------------------- */
 /* Stack the desktop three-pane (elevator | game | log) into a column: a
    horizontal floor strip on top, the game in the middle (canvas auto-scales via

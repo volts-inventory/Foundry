@@ -12,10 +12,12 @@ approve can NEVER release a failing build (the gates decide; this is just the vi
 
 from __future__ import annotations
 
+import contextlib
 import hmac
 import json
 import os
 import shutil
+import tempfile
 import threading
 import time
 import uuid
@@ -27,6 +29,7 @@ from typing import Any
 
 from foundry.schemas.architecture import CANONICAL_AREAS
 from webapp.events import events_for_payload, events_for_result, live_event_for_node
+from webapp.repo import Repo, RepoUnavailable, read_repo
 from webapp.store import BuildStore
 
 _STATIC = Path(__file__).parent / "static"
@@ -52,6 +55,15 @@ _STATE_DIR = (
     or os.environ.get("FOUNDRY_STATE_DIR")
     or str(_OUTPUT_ROOT / "state")
 )
+
+# Where the code lives: the durable CAS (content-addressed store) under _STATE_DIR
+# is the SINGLE SOURCE OF TRUTH — a finished build's tree is materialized back out
+# of it on demand (see webapp/repo.py), no output directory required. Writing the
+# tree to disk during a build is now an OPT-IN export (WORKSHOP_WRITE_DISK=1), off
+# by default: the Repo/OUTPUT browser reads straight from the database, and an
+# explicit "Download .zip" exports on demand.
+_WRITE_DISK = (os.environ.get("WORKSHOP_WRITE_DISK", "").strip().lower()
+               in ("1", "true", "yes", "on"))
 
 # State-changing routes (start a build → real model spend, drive a checkpoint) are
 # guarded. A shared token (FOUNDRY_WORKSHOP_TOKEN) gates them when the server is
@@ -224,7 +236,7 @@ class Project:
     passed: bool = False  # final verdict (for elevator/reload rehydration)
     awaiting: bool = False  # at a checkpoint right now (badge survives reload)
     journal: list[dict[str, Any]] = field(default_factory=list)  # latest agent journal ([11])
-    gates: dict[str, Any] = field(default_factory=dict)  # name -> {status,attested,advisory} (survives reload)
+    gates: dict[str, Any] = field(default_factory=dict)  # name -> {status,attested,advisory}
     out_base: Path | None = None  # this floor's output dir (code/ + docs/)
 
 
@@ -398,6 +410,96 @@ def _has_durable_checkpoint(thread_id: str) -> bool:
         return False
 
 
+# --- CAS-backed repo reads (the code lives in the store, not a disk dir) ------ #
+# A finished build's tree is read straight from the durable CAS + checkpoint (see
+# webapp/repo.py). Reads are cached: a finished build's tree is immutable, so the
+# materialization is done once per build id. A build still running has no terminal
+# checkpoint yet — read_repo raises RepoUnavailable and we simply return None.
+_REPO_CACHE: dict[str, Repo] = {}
+_REPO_CACHE_LOCK = threading.Lock()
+
+
+def _read_repo_cached(pid: str) -> Repo | None:
+    """``read_repo(pid)`` from the durable store, cached. ``None`` when the build
+    has no readable durable checkpoint (older build, or still in flight).
+
+    A build STILL RUNNING is read fresh every time and never cached — its latest
+    checkpoint is an intermediate superstep whose tree would be stale the moment the
+    next node runs. Only a FINISHED build's tree is immutable, so only it is cached.
+    """
+    with _REPO_CACHE_LOCK:
+        hit = _REPO_CACHE.get(pid)
+    if hit is not None:
+        return hit
+    try:
+        repo = read_repo(pid, _STATE_DIR)
+    except RepoUnavailable:
+        return None
+    except Exception:
+        return None
+    proj = _PROJECTS.get(pid)
+    finished = proj is None or proj.status == "done"
+    if finished:
+        with _REPO_CACHE_LOCK:
+            _REPO_CACHE[pid] = repo
+    return repo
+
+
+def _invalidate_repo(pid: str) -> None:
+    with _REPO_CACHE_LOCK:
+        _REPO_CACHE.pop(pid, None)
+
+
+def _lineage_ids(pid: str) -> list[str]:
+    """The build's ancestry oldest→newest (root … pid) via ``parent_id`` in the
+    catalog — so a release's full tree is the parent's tree + this release's diffs."""
+    chain: list[str] = []
+    seen: set[str] = set()
+    cur: str | None = pid
+    while cur and cur not in seen:
+        seen.add(cur)
+        chain.append(cur)
+        try:
+            rec = _STORE.get(cur)
+        except Exception:
+            rec = None
+        cur = (rec or {}).get("parent_id")
+    chain.reverse()
+    return chain
+
+
+def _overlay_tree(pid: str) -> dict[str, bytes] | None:
+    """The FULL release tree for ``pid`` from the CAS: each ancestor's materialized
+    files overlaid oldest→newest (this release's diffs win) — mirroring the on-disk
+    'fill the unchanged files from the parent' merge. ``None`` if nothing readable."""
+    blobs: dict[str, bytes] = {}
+    found = False
+    for anc in _lineage_ids(pid):
+        repo = _read_repo_cached(anc)
+        if repo is None:
+            continue
+        found = True
+        for f in repo.files:
+            b = repo.file_bytes(f.path)
+            if b is not None:
+                blobs[f.path] = b
+    return blobs if found else None
+
+
+def _materialize_base_dir(parent_id: str, dest: Path) -> bool:
+    """Write the parent build's full CAS tree into ``dest`` (the base a release
+    iterates on). Returns True if any file was written. Used in place of an on-disk
+    parent ``code`` dir so iterate works with no output directory."""
+    tree = _overlay_tree(parent_id)
+    if not tree:
+        return False
+    for rel, data in tree.items():
+        target = (dest / rel)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    return True
+
+
 def _emit(p: Project, **event: Any) -> None:
     # Capture gate verdicts as they stream so /api/projects can rehydrate the HUD
     # pills after a reload (a finished build keeps showing its signed gate row).
@@ -540,29 +642,42 @@ def _run_factory(p: Project, resume: bool = False) -> None:
         if ev is not None:
             _emit(p, **ev)
 
-    # One GitHub-ready repo per build: code at the root + a real README + the
-    # design/ops docs under docs/ (no separate docs dir — the doc set is written
-    # INTO the code tree by run()).
-    code_dir = (p.out_base / "code") if p.out_base else None
+    # The code lives in the durable CAS — the build needs NO output directory. We
+    # only write a disk tree when WORKSHOP_WRITE_DISK opts in (an export cache);
+    # otherwise the Repo/OUTPUT browser materializes the tree straight from the store.
+    code_dir = (p.out_base / "code") if (p.out_base and _WRITE_DISK) else None
+    # Iterate base: prefer an on-disk parent code dir (set when disk export is on);
+    # else materialize the parent's full tree from the CAS into a scratch dir, so a
+    # release still builds ON TOP of the prior code with no output directory.
+    base_stack = contextlib.ExitStack()
+    base_dir = p.base_dir
+    if not base_dir and p.parent_id:
+        scratch = Path(base_stack.enter_context(
+            tempfile.TemporaryDirectory(prefix="foundry-base-")))
+        if _materialize_base_dir(p.parent_id, scratch):
+            base_dir = str(scratch)
     try:
-        result = run(
-            p.request,
-            progress_cb=progress,
-            mode=p.mode,
-            backend=p.backend,            # real backend per project (not always mock)
-            adapter=p.adapter,            # coding substrate (stub/raw-react)
-            packs=p.packs or None,        # optional domain packs (regulated/ml_data/frontend)
-            spec=p.spec,                  # pasted spec text OR uploaded docs dir (additive)
-            max_slots=p.max_slots,        # IC-pool parallelism (Wave C) + budget tree (Wave D)
-            cost_cap_microusd=p.cost_cap_microusd,
-            max_fix_attempts=p.max_fix_attempts,
-            base_dir=p.base_dir,          # iterate: prior code seeded as the base tree
-            thread_id=p.id,               # UNIQUE per project — no cross-floor collision
-            state_dir=_STATE_DIR,         # durable: the build survives (and resumes past) a restart
-            checkpoints=True,
-            checkpoint_responder=responder,
-            output_dir=str(code_dir) if code_dir else None,
-        )
+        try:
+            result = run(
+                p.request,
+                progress_cb=progress,
+                mode=p.mode,
+                backend=p.backend,            # real backend per project (not always mock)
+                adapter=p.adapter,            # coding substrate (stub/raw-react)
+                packs=p.packs or None,        # optional domain packs (regulated/ml_data/frontend)
+                spec=p.spec,                  # pasted spec text OR uploaded docs dir (additive)
+                max_slots=p.max_slots,        # IC-pool parallelism (Wave C) + budget tree (Wave D)
+                cost_cap_microusd=p.cost_cap_microusd,
+                max_fix_attempts=p.max_fix_attempts,
+                base_dir=base_dir,            # iterate: prior code seeded as the base tree
+                thread_id=p.id,               # UNIQUE per project — no cross-floor collision
+                state_dir=_STATE_DIR,         # durable: build survives + resumes past a restart
+                checkpoints=True,
+                checkpoint_responder=responder,
+                output_dir=str(code_dir) if code_dir else None,
+            )
+        finally:
+            base_stack.close()  # run() copies base_dir into its sandbox synchronously
     except Exception as exc:
         _emit(p, type="narrate", text=f"💥 Build error: {exc}")
         _emit(p, type="halt", phase="error", reason=str(exc))
@@ -572,12 +687,11 @@ def _run_factory(p: Project, resume: bool = False) -> None:
         _close(p)
         return
 
-    # Iterate "on top of" the prior code: the build wrote ONLY its changed/added
-    # files to code_dir; fill in every unchanged file from the parent so the
-    # release's tree is the prior code + the change (a real build-on-top, not a
-    # from-scratch regen). Parent files NEVER overwrite the build's own output.
-    if p.base_dir and code_dir:
-        base = Path(p.base_dir)
+    # Disk-export mode only: the build wrote ONLY its changed/added files to
+    # code_dir; fill in every unchanged file from the parent so the on-disk tree is
+    # the prior code + the change. (The CAS Repo view does this overlay at read time.)
+    if base_dir and code_dir:
+        base = Path(base_dir)
         if base.is_dir():
             code_dir.mkdir(parents=True, exist_ok=True)
             for src in base.rglob("*"):
@@ -599,11 +713,17 @@ def _run_factory(p: Project, resume: bool = False) -> None:
         _emit(p, type="narrate", text="💰 Gates all green — the vault opens. Shipped!")
     else:
         _emit(p, type="narrate", text="🚫 Held at the gate (fail-closed). Nothing shipped.")
-    # Surface the written output (code + docs) for in-page browsing / download.
-    n_files = sum(1 for f in p.out_base.rglob("*") if f.is_file()) if p.out_base else 0
+    # Surface the repo (read from the store) for in-page browsing / export. The tree
+    # is materialized from the CAS — no output directory required.
+    _invalidate_repo(p.id)
+    repo = _read_repo_cached(p.id)
+    n_files = len(repo.files) if repo is not None else (
+        sum(1 for f in p.out_base.rglob("*") if f.is_file()) if p.out_base else 0
+    )
     if n_files:
         _emit(p, type="files", count=n_files)
-        _emit(p, type="narrate", text=f"📂 {n_files} file(s) written — open OUTPUT to browse.")
+        _emit(p, type="narrate",
+              text=f"📂 {n_files} file(s) in the repo — open REPO to browse the store.")
     p.passed = bool(result.passed)
     p.status = "done"
     _persist(p)              # catalog the FINAL status/passed (after they're set)
@@ -680,6 +800,9 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/releases/"):
             self._list_releases(path.rsplit("/", 1)[-1])
             return
+        if path.startswith("/api/repo/"):
+            self._repo_meta(path.rsplit("/", 1)[-1])
+            return
         if path.startswith("/api/files/"):
             self._list_files(path.rsplit("/", 1)[-1])
             return
@@ -731,6 +854,13 @@ class Handler(BaseHTTPRequestHandler):
         return p.out_base
 
     def _list_files(self, pid: str) -> None:
+        # The code lives in the store: list the materialized CAS tree first. Fall
+        # back to a disk export only for an older build with no durable checkpoint.
+        tree = _overlay_tree(pid)
+        if tree is not None:
+            files = [{"path": p, "size": len(b)} for p, b in sorted(tree.items())]
+            self._json(200, {"files": files, "source": "store"})
+            return
         base = self._out_base(pid)
         if base is None:
             self._json(404, {"error": "no output yet"})
@@ -739,7 +869,46 @@ class Handler(BaseHTTPRequestHandler):
             {"path": str(f.relative_to(base)), "size": f.stat().st_size}
             for f in sorted(base.rglob("*")) if f.is_file()
         ]
-        self._json(200, {"files": files})
+        self._json(200, {"files": files, "source": "disk"})
+
+    def _repo_meta(self, pid: str) -> None:
+        """The self-hosted-GitHub view of a build: tree + gate 'checks' + the
+        FeatureDiff 'pull requests', all read from the durable store."""
+        repo = _read_repo_cached(pid)
+        tree = _overlay_tree(pid)
+        if repo is None and tree is None:
+            # No durable checkpoint — degrade to a disk listing + the cached HUD gates.
+            base = self._out_base(pid)
+            p = _PROJECTS.get(pid)
+            if base is None:
+                self._json(404, {"error": "no repo yet"})
+                return
+            files = [
+                {"path": str(f.relative_to(base)), "size": f.stat().st_size}
+                for f in sorted(base.rglob("*")) if f.is_file()
+            ]
+            checks = [
+                {"name": n, "status": str(g.get("status", "")).split(".")[-1].lower(),
+                 "ok": str(g.get("status", "")).split(".")[-1].lower() == "pass",
+                 "advisory": bool(g.get("advisory")), "findings": []}
+                for n, g in (p.gates.items() if p else [])
+            ]
+            self._json(200, {"source": "disk", "tree_sha": None, "files": files,
+                             "checks": checks, "diffs": []})
+            return
+        files = [{"path": p, "size": len(b)} for p, b in sorted((tree or {}).items())]
+        checks = [
+            {"name": c.name, "status": c.status, "ok": c.ok,
+             "advisory": c.advisory, "findings": list(c.findings)}
+            for c in (repo.checks if repo else ())
+        ]
+        diffs = [
+            {"uri": d.uri, "summary": d.summary, "text": d.text}
+            for d in (repo.diffs if repo else ())
+        ]
+        self._json(200, {"source": "store",
+                         "tree_sha": repo.tree_sha if repo else None,
+                         "files": files, "checks": checks, "diffs": diffs})
 
     def _resolve_within(self, base: Path, rel: str) -> Path | None:
         """Resolve ``rel`` under ``base``, fail-closed on traversal/symlink escape."""
@@ -752,16 +921,28 @@ class Handler(BaseHTTPRequestHandler):
     def _serve_output_file(self, pid: str) -> None:
         from urllib.parse import parse_qs, urlparse
 
+        rel = (parse_qs(urlparse(self.path).query).get("path") or [""])[0]
+        # Store first: the materialized tree's keys are already containment-checked
+        # by materialize_workdir (D-R1-03), so an exact-key lookup needs no re-guard.
+        tree = _overlay_tree(pid)
+        if tree is not None:
+            data = tree.get(rel)
+            if data is None:
+                self._json(404, {"error": "not found"})
+                return
+            self._send_text(data[:_MAX_VIEW_BYTES])
+            return
         base = self._out_base(pid)
         if base is None:
             self._json(404, {"error": "no output"})
             return
-        rel = (parse_qs(urlparse(self.path).query).get("path") or [""])[0]
         target = self._resolve_within(base, rel)
         if target is None or not target.is_file():
             self._json(404, {"error": "not found"})
             return
-        data = target.read_bytes()[:_MAX_VIEW_BYTES]  # capped for the in-page viewer
+        self._send_text(target.read_bytes()[:_MAX_VIEW_BYTES])
+
+    def _send_text(self, data: bytes) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
@@ -769,25 +950,34 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _zip_output(self, pid: str) -> None:
+        """Export the build's repo as a .zip — materialized straight from the store
+        (the explicit 'export' now that the build writes no output dir by default)."""
         import io
         import zipfile
 
-        base = self._out_base(pid)
-        if base is None:
-            self._json(404, {"error": "no output"})
-            return
+        tree = _overlay_tree(pid)
+        name = pid
+        if tree is None:
+            base = self._out_base(pid)
+            if base is None:
+                self._json(404, {"error": "no output"})
+                return
+            tree = {
+                str(f.relative_to(base)): f.read_bytes()
+                for f in sorted(base.rglob("*")) if f.is_file()
+            }
+            name = base.name
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for f in sorted(base.rglob("*")):
-                if f.is_file():
-                    zf.write(f, f.relative_to(base))
-        data = buf.getvalue()
+            for rel, data in sorted(tree.items()):
+                zf.writestr(rel, data)
+        payload = buf.getvalue()
         self.send_response(200)
         self.send_header("Content-Type", "application/zip")
-        self.send_header("Content-Disposition", f'attachment; filename="{base.name}.zip"')
-        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Disposition", f'attachment; filename="{name}.zip"')
+        self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
-        self.wfile.write(data)
+        self.wfile.write(payload)
 
     def do_POST(self) -> None:
         path = self.path.split("?", 1)[0]
@@ -843,7 +1033,10 @@ class Handler(BaseHTTPRequestHandler):
             {"id": r["id"], "floor": r.get("floor"), "release": r.get("release_seq"),
              "request": r.get("request"), "passed": r.get("passed"),
              "parent_id": r.get("parent_id"), "created_at": r.get("created_at"),
-             "has_repo": bool(r.get("out_base") and (Path(r["out_base"]) / "code").is_dir())}
+             # The repo lives in the store: a finished build has one (a disk export
+             # may also exist). Either makes it a valid base to iterate on.
+             "has_repo": bool(r.get("status") == "done" or (
+                 r.get("out_base") and (Path(r["out_base"]) / "code").is_dir()))}
             for r in rows
         ]
         self._json(200, {"builds": builds})

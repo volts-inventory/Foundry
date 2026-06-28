@@ -1375,8 +1375,14 @@ function showCheckpoint(F){
 }
 function hideCheckpoint(){ document.getElementById("cp-modal").classList.add("hidden"); }
 
-// ---- output (files) browser ------------------------------------------------
-let FILES_ID = null;   // which release's output the browser is currently showing
+// ---- repo browser (self-hosted GitHub over the store) ----------------------
+let FILES_ID = null;   // which release's repo the browser is currently showing
+function selectTab(name){
+  for(const t of document.querySelectorAll(".repo-tab"))
+    t.classList.toggle("sel", t.dataset.tab === name);
+  for(const p of document.querySelectorAll(".repo-pane"))
+    p.classList.toggle("hidden", p.dataset.pane !== name);
+}
 function openFiles(){
   const F = FLOORS.get(ACTIVE);
   const modal = document.getElementById("files-modal");
@@ -1386,13 +1392,105 @@ function openFiles(){
   list.innerHTML = ""; view.textContent = ""; rels.innerHTML = "";
   if(!F){ list.innerHTML = "<li class='muted'>Start a project first.</li>"; modal.classList.remove("hidden"); return; }
   document.getElementById("files-floor").textContent = "Floor "+F.floor;
+  for(const t of document.querySelectorAll(".repo-tab")) t.onclick = () => selectTab(t.dataset.tab);
+  selectTab("code");
   // ITERATE: start a new floor from this finished build (enabled once it's done).
   const itBtn = document.getElementById("files-iterate");
   itBtn.style.display = (F.status === "done") ? "" : "none";
   itBtn.onclick = () => { hideFiles(); showNewModal(F.id); };
   renderReleases(F);                 // release history for this floor (newest first)
-  loadFiles(F.id);                   // start on the latest release's output
+  loadRepo(F.id);                    // start on the latest release's repo
   modal.classList.remove("hidden");
+}
+// Load the whole repo (tree + checks + pull-request diffs) for one release id.
+function loadRepo(id){
+  FILES_ID = id;
+  const list = document.getElementById("files-list");
+  const view = document.getElementById("files-view");
+  document.getElementById("files-zip").href = "/api/zip/"+id;
+  list.innerHTML = ""; view.textContent = "Loading…";
+  document.getElementById("repo-sha").textContent = "";
+  document.getElementById("repo-src").textContent = "";
+  fetch("/api/repo/"+id)
+    .then(r => r.ok ? r.json() : {files:[],checks:[],diffs:[]})
+    .then(repo => { renderRepo(id, repo); })
+    .catch(() => { list.innerHTML = "<li class='muted'>(could not load repo)</li>"; view.textContent = ""; });
+}
+function renderRepo(id, repo){
+  const sha = document.getElementById("repo-sha");
+  if(repo.tree_sha){ sha.textContent = "sha "+repo.tree_sha.slice(0,10); }
+  const src = document.getElementById("repo-src");
+  src.textContent = repo.source === "store" ? "● from store" : "○ from disk";
+  src.className = "repo-src " + (repo.source === "store" ? "ok" : "");
+  renderTree(id, repo.files || []);
+  renderChecks(repo.checks || []);
+  renderPulls(repo.diffs || []);
+}
+function renderTree(id, files){
+  const list = document.getElementById("files-list");
+  const view = document.getElementById("files-view");
+  list.innerHTML = "";
+  if(!files.length){
+    list.innerHTML = "<li class='muted'>No files yet — finish a build (its code lands in the store).</li>";
+    view.textContent = ""; return;
+  }
+  view.textContent = "Select a file…";
+  for(const f of files){
+    const li = document.createElement("li");
+    li.textContent = `${f.path}  (${f.size}b)`;
+    li.title = f.path;
+    li.onclick = () => viewFile(id, f.path, li);
+    list.appendChild(li);
+  }
+}
+function renderChecks(checks){
+  const ul = document.getElementById("checks-list");
+  const cnt = document.getElementById("checks-count");
+  ul.innerHTML = "";
+  const passed = checks.filter(c => c.ok).length;
+  cnt.textContent = checks.length ? `${passed}/${checks.length}` : "";
+  if(!checks.length){ ul.innerHTML = "<li class='muted'>No gate verdicts yet.</li>"; return; }
+  for(const c of checks){
+    const li = document.createElement("li");
+    li.className = "check " + (c.ok ? "ok" : "bad");
+    const icon = c.ok ? "✓" : (c.status === "error" ? "!" : "✕");
+    const adv = c.advisory ? " <span class='adv'>advisory</span>" : "";
+    let html = `<span class="ck-icon">${icon}</span><span class="ck-name">${c.name}</span>`+
+               `<span class="ck-status">${c.status}</span>${adv}`;
+    if(c.findings && c.findings.length){
+      html += `<div class="ck-findings">`+ c.findings.map(escapeHtml).join("<br>") +`</div>`;
+    }
+    li.innerHTML = html;
+    ul.appendChild(li);
+  }
+}
+function renderPulls(diffs){
+  const box = document.getElementById("pulls-list");
+  const cnt = document.getElementById("pulls-count");
+  box.innerHTML = "";
+  cnt.textContent = diffs.length ? String(diffs.length) : "";
+  if(!diffs.length){ box.innerHTML = "<div class='muted'>No pull requests (no FeatureDiff in this build).</div>"; return; }
+  diffs.forEach((d, i) => {
+    const card = document.createElement("div"); card.className = "pull";
+    const head = document.createElement("div"); head.className = "pull-head";
+    head.innerHTML = `<span class="pull-no">#${i+1}</span> <span class="pull-sum">${escapeHtml(d.summary||"feature diff")}</span> <span class="pull-merged">merged</span>`;
+    const pre = document.createElement("pre"); pre.className = "pull-diff";
+    pre.innerHTML = colorizeDiff(d.text || "");
+    head.onclick = () => pre.classList.toggle("open");
+    card.appendChild(head); card.appendChild(pre);
+    box.appendChild(card);
+  });
+}
+function escapeHtml(s){ return String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+function colorizeDiff(text){
+  return text.split("\n").map(line => {
+    const e = escapeHtml(line);
+    if(line.startsWith("+") && !line.startsWith("+++")) return `<span class="d-add">${e}</span>`;
+    if(line.startsWith("-") && !line.startsWith("---")) return `<span class="d-del">${e}</span>`;
+    if(line.startsWith("@@")) return `<span class="d-hunk">${e}</span>`;
+    if(line.startsWith("diff ") || line.startsWith("+++") || line.startsWith("---")) return `<span class="d-file">${e}</span>`;
+    return e;
+  }).join("\n");
 }
 // Release history of the open floor — one row per release; click to browse it.
 function renderReleases(F){
@@ -1409,36 +1507,11 @@ function renderReleases(F){
         b.textContent = `r${rel.release} ${ok}`;
         b.title = (rel.request || "") + (rel.created_at ? `  ·  ${rel.created_at}` : "");
         b.onclick = () => { for(const c of rels.children) c.classList.remove("sel");
-                            b.classList.add("sel"); loadFiles(rel.id); };
+                            b.classList.add("sel"); loadRepo(rel.id); };
         rels.appendChild(b);
       }
     })
     .catch(() => { rels.innerHTML = ""; });
-}
-// List the written files of one release id into the browser pane.
-function loadFiles(id){
-  FILES_ID = id;
-  const list = document.getElementById("files-list");
-  const view = document.getElementById("files-view");
-  document.getElementById("files-zip").href = "/api/zip/"+id;
-  list.innerHTML = ""; view.textContent = "Loading…";
-  fetch("/api/files/"+id)
-    .then(r => r.ok ? r.json() : {files:[]})
-    .then(({files}) => {
-      if(!files || !files.length){
-        list.innerHTML = "<li class='muted'>No output yet — finish a build (it writes code + docs).</li>";
-        view.textContent = ""; return;
-      }
-      view.textContent = "Select a file…";
-      for(const f of files){
-        const li = document.createElement("li");
-        li.textContent = `${f.path}  (${f.size}b)`;
-        li.title = f.path;
-        li.onclick = () => viewFile(id, f.path, li);
-        list.appendChild(li);
-      }
-    })
-    .catch(() => { list.innerHTML = "<li class='muted'>(could not list output)</li>"; view.textContent = ""; });
 }
 function viewFile(id, path, li){
   for(const c of document.getElementById("files-list").children) c.classList.remove("sel");

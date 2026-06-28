@@ -18,7 +18,7 @@
       </div>
       <div class="hud-right">
         <span class="gates-mini" id="gates-mini"></span>
-        <button id="output-btn">OUTPUT</button>
+        <button id="output-btn">⌥ REPO</button>
         <button id="new-btn">▶ NEW PROJECT</button>
       </div>
     </header>
@@ -136,18 +136,36 @@
     </div>
   </div>
 
-  <!-- Output browser: the build's written code + docs (read-only) -->
+  <!-- Repo browser: a self-hosted "GitHub" over the build's store (read-only) -->
   <div id="files-modal" class="overlay hidden">
     <div class="dialog files">
-      <h2>OUTPUT · <span id="files-floor"></span></h2>
-      <p class="cp-note">The generated source tree + company-style doc set this build wrote to disk (read-only view).</p>
+      <div class="repo-head">
+        <h2>⌥ REPO · <span id="files-floor"></span></h2>
+        <span class="repo-sha" id="repo-sha" title="integrated tree sha"></span>
+        <span class="repo-src" id="repo-src"></span>
+      </div>
+      <p class="cp-note">A self-hosted view of this build's repository — read straight
+        from the content-addressed store (the database), not a working directory.</p>
       <div id="files-releases" class="files-releases"></div>
-      <div class="files-body">
-        <ul id="files-list"></ul>
-        <pre id="files-view">Select a file…</pre>
+      <div class="repo-tabs">
+        <button class="repo-tab sel" data-tab="code">⊞ Code</button>
+        <button class="repo-tab" data-tab="checks">✓ Checks <span id="checks-count" class="tab-count"></span></button>
+        <button class="repo-tab" data-tab="pulls">⇄ Pull requests <span id="pulls-count" class="tab-count"></span></button>
+      </div>
+      <div class="repo-pane" data-pane="code">
+        <div class="files-body">
+          <ul id="files-list"></ul>
+          <pre id="files-view">Select a file…</pre>
+        </div>
+      </div>
+      <div class="repo-pane hidden" data-pane="checks">
+        <ul id="checks-list" class="checks-list"></ul>
+      </div>
+      <div class="repo-pane hidden" data-pane="pulls">
+        <div id="pulls-list" class="pulls-list"></div>
       </div>
       <div class="dialog-actions">
-        <a id="files-zip" class="btn-link" href="#" download>Download .zip</a>
+        <a id="files-zip" class="btn-link" href="#" download>⭳ Export .zip</a>
         <button id="files-iterate" class="primary">⎘ ITERATE</button>
         <button id="files-close">close</button>
       </div>

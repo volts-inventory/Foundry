@@ -102,3 +102,22 @@ sys.exit(0 if urllib.request.urlopen(u,timeout=4).status==200 else 1)"
 EXPOSE 8765
 ENTRYPOINT ["python", "-m"]
 CMD ["webapp.server"]
+
+# --- gate test sandbox: the ISOLATION boundary for untrusted generated tests ---
+# A deliberately MINIMAL image — python + the PINNED pytest, and NONE of our code —
+# so a model-generated test runs with no way to reach, import, or collide with the
+# `foundry` package (the namespace-shadow bug that held a real build). The test gate
+# uses it when FOUNDRY_GATE_SANDBOX=docker; at run time the materialized workdir is
+# bind-mounted READ-ONLY at /work, with no network and resource caps (see
+# foundry/gates/sandbox.py). Build it (separately from the app image):
+#   docker build --target test-sandbox -t foundry-test-sandbox .
+FROM python:3.12-slim-bookworm AS test-sandbox
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+# Pin the harness to the project's pytest so the in-process and sandbox runs agree.
+RUN pip install --no-cache-dir "pytest==9.0.3"
+WORKDIR /work
+# Inert by default: the gate supplies the `python -m pytest …` argv at `docker run`.
+ENTRYPOINT []
+CMD ["python", "-m", "pytest", "-q", "--tb=no", "-p", "no:cacheprovider"]

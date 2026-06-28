@@ -46,6 +46,39 @@ _SUMMARY_RE = re.compile(r"(\d+) (passed|failed|errors?|skipped)")
 _INFRA_EXIT_CODES = frozenset({2, 3, 4})
 _NO_TESTS_COLLECTED = 5
 
+# Env key naming the host paths to FENCE OFF from the pinned-harness subprocess.
+_DENY_PATHS_ENV = "FOUNDRY_GATE_DENY_PATHS"
+
+# The pinned pytest invocation, run as a bootstrap that ISOLATES generated code
+# from ours: it removes the host source checkout (``_DENY_PATHS_ENV``) from
+# ``sys.path`` and puts the workdir first BEFORE importing pytest. So a model-named
+# module that collides with a host package (e.g. ``foundry.x``) resolves to the
+# WORKDIR and can never reach — or be shadowed by — our code. (Best-effort, in
+# the shared interpreter; the Docker sandbox runner is the hard boundary.)
+_ISOLATED_PYTEST_BOOTSTRAP = (
+    "import os,sys;"
+    "deny={os.path.realpath(p) for p in os.environ.get('FOUNDRY_GATE_DENY_PATHS','')"
+    ".split(os.pathsep) if p};"
+    "sys.path[:]=[p for p in sys.path if os.path.realpath(p) not in deny];"
+    "sys.path.insert(0,os.getcwd());"
+    "from pytest import console_main;"
+    "sys.exit(console_main())"
+)
+
+
+def _host_source_root() -> str | None:
+    """The host source-checkout dir to fence off — the directory holding the
+    EDITABLE ``foundry`` package (a sibling of its ``pyproject.toml``). Returns
+    ``None`` for a normal site-packages install, where the package shares its dir
+    with pytest and stripping it would break the harness (use the sandbox there)."""
+    try:
+        import foundry
+
+        root = Path(foundry.__file__).resolve().parents[1]
+    except Exception:
+        return None
+    return str(root) if (root / "pyproject.toml").is_file() else None
+
 
 def parse_pytest_summary(stdout: str) -> dict[str, int]:
     """Counts from the pytest tail line (raw observation, zone A side)."""
@@ -82,7 +115,12 @@ class TestGate:
         discriminator: TestSuiteDiscriminator | None = None,
         timeout_s: float = 600.0,
     ) -> None:
-        self.cmd = cmd or (sys.executable, "-m", "pytest", "-q", "--tb=no")
+        # Default: the ISOLATED pinned harness (fences the host source off sys.path
+        # so generated modules can't collide with / reach ours). An explicit cmd is
+        # honored verbatim (tests inject one).
+        self.cmd = cmd or (
+            sys.executable, "-c", _ISOLATED_PYTEST_BOOTSTRAP, "-q", "--tb=no"
+        )
         self.min_passed = min_passed
         # The held-out-mutant + behavioral-invariance discriminator: a green
         # pytest run is NECESSARY but NOT SUFFICIENT — a vacuous/gamed-green
@@ -100,14 +138,30 @@ class TestGate:
         self._timeout_s = timeout_s
 
     def _env(self) -> dict[str, str]:
-        return pinned_test_env()
+        # Tell the isolating bootstrap which host paths to fence off (the source
+        # checkout root); absent ⇒ nothing stripped (normal install / no checkout).
+        extra: dict[str, str] = {}
+        root = _host_source_root()
+        if root:
+            extra[_DENY_PATHS_ENV] = root
+        return pinned_test_env(extra)
 
     # ---- zone A: pinned harness execution, raw rc + summary ---------------
 
-    def execute(self, workdir: Path) -> ZoneAObservation:
-        rc, out, err = run_grounding_command(
+    def _ground(self, workdir: Path) -> tuple[int, str, str]:
+        """Run the pinned harness over ``workdir``. The HARD boundary (a throwaway
+        container with none of our code) is used when ``FOUNDRY_GATE_SANDBOX=docker``;
+        otherwise the in-process isolated harness (host source fenced off sys.path)."""
+        from .sandbox import run_in_sandbox, sandbox_enabled
+
+        if sandbox_enabled():
+            return run_in_sandbox(workdir, timeout_s=self._timeout_s)
+        return run_grounding_command(
             self.cmd, workdir, env=self._env(), timeout_s=self._timeout_s
         )
+
+    def execute(self, workdir: Path) -> ZoneAObservation:
+        rc, out, err = self._ground(workdir)
         structured: dict[str, object] = {
             "cmd": list(self.cmd),
             "summary": parse_pytest_summary(out),

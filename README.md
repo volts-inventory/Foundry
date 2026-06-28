@@ -384,6 +384,19 @@ make up
 make down
 ```
 
+**Sandboxed test gate (untrusted-code isolation).** Generated code runs through the
+test gate; by default it runs in-process with the host source fenced off `sys.path`
+(so a model-named module can't collide with or reach `foundry.*`). For a hard
+boundary on real builds, run the generated tests in a throwaway container that holds
+python + pytest and *none* of our code — no network, read-only rootfs, resource caps:
+
+```bash
+# Build the minimal sandbox image (a separate stage of the same Dockerfile)
+docker build --target test-sandbox -t foundry-test-sandbox .
+# Opt in: the test gate then runs generated tests in that container
+export FOUNDRY_GATE_SANDBOX=docker
+```
+
 ---
 
 ## 10. Develop
@@ -414,6 +427,8 @@ make clean           # remove caches + ./.run output
 | `FOUNDRY_MAX_SLOTS` | Parallelism ceiling | auto |
 | `FOUNDRY_COST_CAP_MICROUSD` | Global spend envelope | — |
 | `FOUNDRY_STATE_DIR` | Durable state dir | in-memory |
+| `FOUNDRY_GATE_SANDBOX` | Run generated tests in a Docker sandbox (`docker`) vs in-process | in-process |
+| `FOUNDRY_GATE_SANDBOX_IMAGE` | Sandbox image ref (the Dockerfile `test-sandbox` stage) | `foundry-test-sandbox` |
 | `WORKSHOP_HOST` / `WORKSHOP_PORT` | UI bind address / port | `127.0.0.1` / `8765` |
 | `WORKSHOP_OUTPUT_DIR` | UI build output root | `.run/web` |
 | `FOUNDRY_WORKSHOP_TOKEN` | Shared token for UI mutations | off (localhost-only) |

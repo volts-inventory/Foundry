@@ -217,6 +217,22 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
 #files-list li:hover{color:var(--ink)}
 #files-list li.sel{background:#24304f;color:var(--gold)}
 #files-list li.muted{color:var(--dim);cursor:default;white-space:normal}
+/* GitHub-style folder rows: icon · name (ellipsised) · size/count pinned right */
+#files-list li.dir,#files-list li.file{display:flex;align-items:center;gap:6px}
+#files-list li .ico{flex:none;width:13px;text-align:center;color:var(--dim)}
+#files-list li .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#files-list li .meta{margin-left:auto;flex:none;font-size:10px;color:var(--dim)}
+#files-list li.dir{color:#cfe0ff}
+#files-list li.dir .ico{color:var(--gold)}
+#files-list li.dir.up{color:var(--dim)}
+#files-list li.dir.up .ico{color:var(--dim)}
+/* breadcrumb trail above the tree (⌂ root / folder / subfolder) */
+.files-crumb{display:flex;flex-wrap:wrap;align-items:center;gap:1px;margin-top:8px;font-size:11px}
+.files-crumb:empty{display:none}
+.files-crumb .crumb{cursor:pointer;color:#9ab8ff;padding:1px 4px;border-radius:4px}
+.files-crumb .crumb:hover{color:#cfe0ff;background:#1c2540}
+.files-crumb .crumb.here{color:var(--gold);cursor:default}
+.files-crumb .crumb-sep{color:var(--dim);padding:0 1px}
 #files-view{flex:1 1 auto;margin:0;overflow:auto;background:#0e1424;
   border:2px solid var(--line);border-radius:6px;padding:10px;font-size:12px;
   color:var(--ink);white-space:pre-wrap;word-break:break-word}

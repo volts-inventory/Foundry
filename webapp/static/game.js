@@ -1377,6 +1377,8 @@ function hideCheckpoint(){ document.getElementById("cp-modal").classList.add("hi
 
 // ---- repo browser (self-hosted GitHub over the store) ----------------------
 let FILES_ID = null;   // which release's repo the browser is currently showing
+let FILES_TREE = [];   // the open repo's flat file list ({path,size}); folded into folders below
+let FILES_CWD = "";    // the folder the Code tab is currently showing (""=repo root)
 function selectTab(name){
   for(const t of document.querySelectorAll(".repo-tab"))
     t.classList.toggle("sel", t.dataset.tab === name);
@@ -1427,19 +1429,85 @@ function renderRepo(id, repo){
   renderPulls(repo.diffs || []);
 }
 function renderTree(id, files){
-  const list = document.getElementById("files-list");
+  FILES_TREE = files || [];
+  FILES_CWD = "";
   const view = document.getElementById("files-view");
-  list.innerHTML = "";
-  if(!files.length){
+  const list = document.getElementById("files-list");
+  const crumb = document.getElementById("files-crumb");
+  if(!FILES_TREE.length){
     list.innerHTML = "<li class='muted'>No files yet — finish a build (its code lands in the store).</li>";
-    view.textContent = ""; return;
+    crumb.innerHTML = ""; view.textContent = ""; return;
   }
   view.textContent = "Select a file…";
+  renderDir("");                     // start at the repo root, GitHub-style
+}
+// Immediate children of `dir` folded out of the flat path list: subfolders
+// (with a descendant count) first, then files — each sorted alphabetically.
+function dirChildren(dir){
+  const prefix = dir ? dir + "/" : "";
+  const folders = new Map();
+  const files = [];
+  for(const f of FILES_TREE){
+    if(prefix && !f.path.startsWith(prefix)) continue;
+    const rest = f.path.slice(prefix.length);
+    const slash = rest.indexOf("/");
+    if(slash === -1){ files.push(f); continue; }
+    const name = rest.slice(0, slash);
+    const fld = folders.get(name) || {name, count:0};
+    fld.count++; folders.set(name, fld);
+  }
+  return {
+    folders: [...folders.values()].sort((a,b) => a.name.localeCompare(b.name)),
+    files: files.sort((a,b) => a.path.localeCompare(b.path)),
+  };
+}
+// Render one folder level: a breadcrumb trail + this directory's folders/files.
+function renderDir(dir){
+  FILES_CWD = dir;
+  const list = document.getElementById("files-list");
+  const crumb = document.getElementById("files-crumb");
+  list.innerHTML = ""; crumb.innerHTML = "";
+  // breadcrumb: ⌂ root / a / b — every ancestor is a jump-up link.
+  const crumbLink = (label, target) => {
+    const s = document.createElement("span");
+    s.className = "crumb" + (target === dir ? " here" : "");
+    s.textContent = label;
+    if(target !== dir) s.onclick = () => renderDir(target);
+    return s;
+  };
+  crumb.appendChild(crumbLink("⌂ root", ""));
+  let acc = "";
+  for(const part of (dir ? dir.split("/") : [])){
+    acc = acc ? acc + "/" + part : part;
+    const sep = document.createElement("span"); sep.className = "crumb-sep"; sep.textContent = "/";
+    crumb.appendChild(sep);
+    crumb.appendChild(crumbLink(part, acc));
+  }
+  const {folders, files} = dirChildren(dir);
+  // ".." row to step back up one level (absent at the root).
+  if(dir){
+    const up = document.createElement("li"); up.className = "dir up";
+    up.innerHTML = "<span class='ico'>⮬</span><span class='nm'>..</span>";
+    const parent = dir.includes("/") ? dir.slice(0, dir.lastIndexOf("/")) : "";
+    up.onclick = () => renderDir(parent);
+    list.appendChild(up);
+  }
+  for(const fld of folders){
+    const li = document.createElement("li"); li.className = "dir";
+    li.innerHTML = `<span class='ico'>▸</span><span class='nm'>${escapeHtml(fld.name)}/</span>`+
+                   `<span class='meta'>${fld.count}</span>`;
+    li.title = fld.name;
+    const target = dir ? dir + "/" + fld.name : fld.name;
+    li.onclick = () => renderDir(target);
+    list.appendChild(li);
+  }
   for(const f of files){
-    const li = document.createElement("li");
-    li.textContent = `${f.path}  (${f.size}b)`;
+    const li = document.createElement("li"); li.className = "file";
+    const name = f.path.slice(f.path.lastIndexOf("/") + 1);
+    li.innerHTML = `<span class='ico'>≡</span><span class='nm'>${escapeHtml(name)}</span>`+
+                   `<span class='meta'>${f.size}b</span>`;
     li.title = f.path;
-    li.onclick = () => viewFile(id, f.path, li);
+    li.onclick = () => viewFile(FILES_ID, f.path, li);
     list.appendChild(li);
   }
 }

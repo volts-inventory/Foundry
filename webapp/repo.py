@@ -89,21 +89,44 @@ class RepoUnavailable(RuntimeError):
     """The build's tree could not be read from the store (no checkpoint / CAS miss)."""
 
 
+def _has_tree(state: Any) -> bool:
+    """True iff ``state`` carries at least one FeatureDiff — i.e. a materializable
+    source tree (not just the criteria.json gate input)."""
+    if not isinstance(state, dict):
+        return False
+    from foundry.graph.gate_wiring import FEATURE_DIFF_KIND, _of_kind
+
+    return bool(_of_kind(cast("FactoryState", state), FEATURE_DIFF_KIND))
+
+
 def _load_final_state(thread_id: str, backends: Any) -> FactoryState:
-    """The terminal :class:`FactoryState` for ``thread_id`` from the checkpointer.
+    """The :class:`FactoryState` whose tree we render for ``thread_id``.
 
     The latest checkpoint's ``channel_values`` IS the FactoryState shape
-    (``request`` / ``gates`` / ``artifacts`` / …). Fail-closed: a thread with no
-    durable checkpoint raises :class:`RepoUnavailable`.
+    (``request`` / ``gates`` / ``artifacts`` / …) and is preferred. But a build
+    paused MID-FIX-LOOP (a gate sent the work back to engineering) can leave its
+    newest checkpoint with no integrated FeatureDiff yet — an empty tree. So when
+    the latest carries no source tree, we fall back to the most RECENT checkpoint
+    that does, so the repo always shows the best tree the store holds for the build
+    rather than an empty one. Fail-closed: no durable checkpoint at all raises
+    :class:`RepoUnavailable`.
     """
-    tup = backends.checkpointer.saver.get_tuple({"configurable": {"thread_id": thread_id}})
+    cfg = {"configurable": {"thread_id": thread_id}}
+    saver = backends.checkpointer.saver
+    tup = saver.get_tuple(cfg)
     if tup is None or not getattr(tup, "checkpoint", None):
         raise RepoUnavailable(f"no durable checkpoint for build {thread_id!r}")
     values = tup.checkpoint.get("channel_values") or {}
     if not isinstance(values, dict):
         raise RepoUnavailable(f"checkpoint for {thread_id!r} has no channel state")
-    # The checkpoint's channel_values IS the FactoryState shape (request / gates /
-    # artifacts / …) — the same dict the graph nodes read and write.
+    if _has_tree(values):
+        return cast("FactoryState", values)
+    # Latest checkpoint has no materializable tree (mid-fold / in-flight) — use the
+    # most recent checkpoint that does. saver.list() yields newest-first.
+    for ct in saver.list(cfg):
+        cv = ct.checkpoint.get("channel_values") or {}
+        if _has_tree(cv):
+            return cast("FactoryState", cv)
     return cast("FactoryState", values)
 
 

@@ -727,6 +727,26 @@ class FloorScene extends Phaser.Scene {
     c.add([this.chestClosed,this.chestOpen]);
     c.add(this.add.rectangle(0,1,36,2,0xcaa24a));
     this.chestOpened = false;
+    // The chest is the door to this floor's repo: once the build is DONE you can
+    // click it to jump straight to the repo (the Floor 0 repos, preselected to
+    // this one). While agents are still working — first build OR a later revision
+    // — it's locked and does nothing; same when there's no repo yet.
+    this.chest = c;
+    c.setInteractive(new Phaser.Geom.Rectangle(-22,-22,44,42), Phaser.Geom.Rectangle.Contains);
+    c.on("pointerover", ()=>{ if(this.chestActionable()){ this.game.canvas.style.cursor="pointer"; c.setScale(1.42); } });
+    c.on("pointerout",  ()=>{ this.game.canvas.style.cursor="default"; c.setScale(1.3); });
+    c.on("pointerdown", ()=> this.onChestClick());
+  }
+  // Actionable only when this floor's build has finished (a repo exists). Locked
+  // while running/iterating, so agents-at-work never opens a half-baked tree.
+  chestActionable(){
+    const F = FLOORS.get(this.proj.floor);
+    return !!(F && F.status === "done");
+  }
+  onChestClick(){
+    const F = FLOORS.get(this.proj.floor);
+    if(!F || F.status !== "done") return;   // locked / no repo yet -> do nothing
+    openFilesFor({id:F.id, floor:F.floor, release:F.release, request:F.request, status:"done"});
   }
 
   buildAgents(){
@@ -1351,6 +1371,14 @@ function updateHud(F){
 }
 function renderElevator(){
   const el=document.getElementById("el-floors"); el.innerHTML="";
+  // Floor 0 — the GitHub home: a hub of every build's repo. Always present, even
+  // before any project exists, so the repositories are always one click away.
+  const hub=document.createElement("button");
+  hub.className="el-btn hub"+(REPOS_OPEN?" active":"");
+  hub.title="Floor 0 — repositories (every build's code)";
+  hub.innerHTML=`<span class="fl-no">0</span>⌥`;
+  hub.onclick=()=>openRepoHub();
+  el.appendChild(hub);
   for (const f of [...FLOORS.keys()].sort((a,b)=>a-b)){
     const F=FLOORS.get(f);
     const btn=document.createElement("button");
@@ -1375,24 +1403,251 @@ function showCheckpoint(F){
 }
 function hideCheckpoint(){ document.getElementById("cp-modal").classList.add("hidden"); }
 
-// ---- output (files) browser ------------------------------------------------
-let FILES_ID = null;   // which release's output the browser is currently showing
+// ---- repo browser (self-hosted GitHub over the store) ----------------------
+let FILES_ID = null;   // which release's repo the browser is currently showing
+let FILES_TREE = [];   // the open repo's flat file list ({path,size}); folded into folders below
+let FILES_CWD = "";    // the folder the Code tab is currently showing (""=repo root)
+function selectTab(name){
+  for(const t of document.querySelectorAll(".repo-tab"))
+    t.classList.toggle("sel", t.dataset.tab === name);
+  for(const p of document.querySelectorAll(".repo-pane"))
+    p.classList.toggle("hidden", p.dataset.pane !== name);
+}
 function openFiles(){
   const F = FLOORS.get(ACTIVE);
+  if(!F){ openRepoHub(); return; }   // no active build — go to the Floor 0 repo hub
+  openFilesFor(F);
+}
+// Open the repo browser for any build (`meta` = {id, floor, release, request,
+// status}) — used by the active floor AND by the Floor 0 repo hub.
+function openFilesFor(meta){
   const modal = document.getElementById("files-modal");
   const list = document.getElementById("files-list");
   const view = document.getElementById("files-view");
   const rels = document.getElementById("files-releases");
   list.innerHTML = ""; view.textContent = ""; rels.innerHTML = "";
-  if(!F){ list.innerHTML = "<li class='muted'>Start a project first.</li>"; modal.classList.remove("hidden"); return; }
-  document.getElementById("files-floor").textContent = "Floor "+F.floor;
+  document.getElementById("files-floor").textContent = "Floor "+meta.floor;
+  for(const t of document.querySelectorAll(".repo-tab")) t.onclick = () => selectTab(t.dataset.tab);
+  selectTab("code");
   // ITERATE: start a new floor from this finished build (enabled once it's done).
   const itBtn = document.getElementById("files-iterate");
-  itBtn.style.display = (F.status === "done") ? "" : "none";
-  itBtn.onclick = () => { hideFiles(); showNewModal(F.id); };
-  renderReleases(F);                 // release history for this floor (newest first)
-  loadFiles(F.id);                   // start on the latest release's output
+  itBtn.style.display = (meta.status === "done") ? "" : "none";
+  itBtn.onclick = () => { hideFiles(); showNewModal(meta.id); };
+  renderReleases(meta);              // release history for this floor (newest first)
+  loadRepo(meta.id);                 // start on the latest release's repo
   modal.classList.remove("hidden");
+}
+// ---- Floor 0: the repo hub (a self-hosted GitHub home) ---------------------
+let REPOS_OPEN = false;
+// A short GitHub-ish repo name slugged from the build's request line.
+function repoSlug(req){
+  const s = String(req||"project").toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"");
+  return s.split("-").filter(Boolean).slice(0,5).join("-") || "project";
+}
+// Open the hub: list every build that produced code (newest first). The catalog
+// grows as more floors finish, so each open reflects the latest set of repos.
+function openRepoHub(){
+  const modal = document.getElementById("repos-modal");
+  const list = document.getElementById("repos-list");
+  const cnt = document.getElementById("repos-count");
+  list.innerHTML = "<li class='muted'>Loading…</li>"; cnt.textContent = "";
+  modal.classList.remove("hidden");
+  REPOS_OPEN = true; renderElevator();
+  fetch("/api/builds")
+    .then(r => r.ok ? r.json() : {builds:[]})
+    .then(({builds}) => {
+      const repos = (builds||[]).filter(b => b.has_repo)
+        .sort((a,b) => String(b.created_at||"").localeCompare(String(a.created_at||"")));
+      cnt.textContent = repos.length ? `${repos.length} ${repos.length===1?"repository":"repositories"}` : "";
+      list.innerHTML = "";
+      if(!repos.length){
+        list.innerHTML = "<li class='muted'>No repositories yet — finish a build and its code lands here.</li>";
+        return;
+      }
+      for(const b of repos) list.appendChild(repoRow(b));
+    })
+    .catch(() => { list.innerHTML = "<li class='muted'>(could not load repositories)</li>"; });
+}
+function repoRow(b){
+  const li = document.createElement("li"); li.className = "repo-item";
+  const ok = b.passed ? "ok" : "bad";
+  const pill = b.passed ? "✓ passing" : "✗ failing";
+  const when = b.created_at ? String(b.created_at).slice(0,10) : "";
+  li.innerHTML =
+    `<div class="repo-row1">`+
+      `<span class="repo-name">${escapeHtml(repoSlug(b.request))}</span>`+
+      `<span class="repo-vis">store</span>`+
+      (b.release>1 ? `<span class="repo-rel" title="${b.release} releases — this project has been iterated">↻ r${b.release}</span>` : ``)+
+      `<span class="repo-pill ${ok}">${pill}</span>`+
+    `</div>`+
+    `<div class="repo-desc">${escapeHtml(b.request||"")}</div>`+
+    `<div class="repo-meta">`+
+      `<span>⌥ floor ${b.floor}</span>`+
+      (when ? `<span>updated ${when}</span>` : ``)+
+    `</div>`;
+  li.onclick = () => { closeRepoHub();
+    openFilesFor({id:b.id, floor:b.floor, release:b.release, request:b.request, status:"done"}); };
+  return li;
+}
+function closeRepoHub(){
+  document.getElementById("repos-modal").classList.add("hidden");
+  REPOS_OPEN = false; renderElevator();
+}
+// Load the whole repo (tree + checks + pull-request diffs) for one release id.
+function loadRepo(id){
+  FILES_ID = id;
+  const list = document.getElementById("files-list");
+  const view = document.getElementById("files-view");
+  document.getElementById("files-zip").href = "/api/zip/"+id;
+  list.innerHTML = ""; view.textContent = "Loading…";
+  document.getElementById("repo-sha").textContent = "";
+  document.getElementById("repo-src").textContent = "";
+  fetch("/api/repo/"+id)
+    .then(r => r.ok ? r.json() : {files:[],checks:[],diffs:[]})
+    .then(repo => { renderRepo(id, repo); })
+    .catch(() => { list.innerHTML = "<li class='muted'>(could not load repo)</li>"; view.textContent = ""; });
+}
+function renderRepo(id, repo){
+  const sha = document.getElementById("repo-sha");
+  if(repo.tree_sha){ sha.textContent = "sha "+repo.tree_sha.slice(0,10); }
+  const src = document.getElementById("repo-src");
+  src.textContent = repo.source === "store" ? "● from store" : "○ from disk";
+  src.className = "repo-src " + (repo.source === "store" ? "ok" : "");
+  renderTree(id, repo.files || []);
+  renderChecks(repo.checks || []);
+  renderPulls(repo.diffs || []);
+}
+function renderTree(id, files){
+  FILES_TREE = files || [];
+  FILES_CWD = "";
+  const view = document.getElementById("files-view");
+  const list = document.getElementById("files-list");
+  const crumb = document.getElementById("files-crumb");
+  if(!FILES_TREE.length){
+    list.innerHTML = "<li class='muted'>No files yet — finish a build (its code lands in the store).</li>";
+    crumb.innerHTML = ""; view.textContent = ""; return;
+  }
+  view.textContent = "Select a file…";
+  renderDir("");                     // start at the repo root, GitHub-style
+}
+// Immediate children of `dir` folded out of the flat path list: subfolders
+// (with a descendant count) first, then files — each sorted alphabetically.
+function dirChildren(dir){
+  const prefix = dir ? dir + "/" : "";
+  const folders = new Map();
+  const files = [];
+  for(const f of FILES_TREE){
+    if(prefix && !f.path.startsWith(prefix)) continue;
+    const rest = f.path.slice(prefix.length);
+    const slash = rest.indexOf("/");
+    if(slash === -1){ files.push(f); continue; }
+    const name = rest.slice(0, slash);
+    const fld = folders.get(name) || {name, count:0};
+    fld.count++; folders.set(name, fld);
+  }
+  return {
+    folders: [...folders.values()].sort((a,b) => a.name.localeCompare(b.name)),
+    files: files.sort((a,b) => a.path.localeCompare(b.path)),
+  };
+}
+// Render one folder level: a breadcrumb trail + this directory's folders/files.
+function renderDir(dir){
+  FILES_CWD = dir;
+  const list = document.getElementById("files-list");
+  const crumb = document.getElementById("files-crumb");
+  list.innerHTML = ""; crumb.innerHTML = "";
+  // breadcrumb: ⌂ root / a / b — every ancestor is a jump-up link.
+  const crumbLink = (label, target) => {
+    const s = document.createElement("span");
+    s.className = "crumb" + (target === dir ? " here" : "");
+    s.textContent = label;
+    if(target !== dir) s.onclick = () => renderDir(target);
+    return s;
+  };
+  crumb.appendChild(crumbLink("⌂ root", ""));
+  let acc = "";
+  for(const part of (dir ? dir.split("/") : [])){
+    acc = acc ? acc + "/" + part : part;
+    const sep = document.createElement("span"); sep.className = "crumb-sep"; sep.textContent = "/";
+    crumb.appendChild(sep);
+    crumb.appendChild(crumbLink(part, acc));
+  }
+  const {folders, files} = dirChildren(dir);
+  // ".." row to step back up one level (absent at the root).
+  if(dir){
+    const up = document.createElement("li"); up.className = "dir up";
+    up.innerHTML = "<span class='ico'>⮬</span><span class='nm'>..</span>";
+    const parent = dir.includes("/") ? dir.slice(0, dir.lastIndexOf("/")) : "";
+    up.onclick = () => renderDir(parent);
+    list.appendChild(up);
+  }
+  for(const fld of folders){
+    const li = document.createElement("li"); li.className = "dir";
+    li.innerHTML = `<span class='ico'>▸</span><span class='nm'>${escapeHtml(fld.name)}/</span>`+
+                   `<span class='meta'>${fld.count}</span>`;
+    li.title = fld.name;
+    const target = dir ? dir + "/" + fld.name : fld.name;
+    li.onclick = () => renderDir(target);
+    list.appendChild(li);
+  }
+  for(const f of files){
+    const li = document.createElement("li"); li.className = "file";
+    const name = f.path.slice(f.path.lastIndexOf("/") + 1);
+    li.innerHTML = `<span class='ico'>≡</span><span class='nm'>${escapeHtml(name)}</span>`+
+                   `<span class='meta'>${f.size}b</span>`;
+    li.title = f.path;
+    li.onclick = () => viewFile(FILES_ID, f.path, li);
+    list.appendChild(li);
+  }
+}
+function renderChecks(checks){
+  const ul = document.getElementById("checks-list");
+  const cnt = document.getElementById("checks-count");
+  ul.innerHTML = "";
+  const passed = checks.filter(c => c.ok).length;
+  cnt.textContent = checks.length ? `${passed}/${checks.length}` : "";
+  if(!checks.length){ ul.innerHTML = "<li class='muted'>No gate verdicts yet.</li>"; return; }
+  for(const c of checks){
+    const li = document.createElement("li");
+    li.className = "check " + (c.ok ? "ok" : "bad");
+    const icon = c.ok ? "✓" : (c.status === "error" ? "!" : "✕");
+    const adv = c.advisory ? " <span class='adv'>advisory</span>" : "";
+    let html = `<span class="ck-icon">${icon}</span><span class="ck-name">${c.name}</span>`+
+               `<span class="ck-status">${c.status}</span>${adv}`;
+    if(c.findings && c.findings.length){
+      html += `<div class="ck-findings">`+ c.findings.map(escapeHtml).join("<br>") +`</div>`;
+    }
+    li.innerHTML = html;
+    ul.appendChild(li);
+  }
+}
+function renderPulls(diffs){
+  const box = document.getElementById("pulls-list");
+  const cnt = document.getElementById("pulls-count");
+  box.innerHTML = "";
+  cnt.textContent = diffs.length ? String(diffs.length) : "";
+  if(!diffs.length){ box.innerHTML = "<div class='muted'>No pull requests (no FeatureDiff in this build).</div>"; return; }
+  diffs.forEach((d, i) => {
+    const card = document.createElement("div"); card.className = "pull";
+    const head = document.createElement("div"); head.className = "pull-head";
+    head.innerHTML = `<span class="pull-no">#${i+1}</span> <span class="pull-sum">${escapeHtml(d.summary||"feature diff")}</span> <span class="pull-merged">merged</span>`;
+    const pre = document.createElement("pre"); pre.className = "pull-diff";
+    pre.innerHTML = colorizeDiff(d.text || "");
+    head.onclick = () => pre.classList.toggle("open");
+    card.appendChild(head); card.appendChild(pre);
+    box.appendChild(card);
+  });
+}
+function escapeHtml(s){ return String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+function colorizeDiff(text){
+  return text.split("\n").map(line => {
+    const e = escapeHtml(line);
+    if(line.startsWith("+") && !line.startsWith("+++")) return `<span class="d-add">${e}</span>`;
+    if(line.startsWith("-") && !line.startsWith("---")) return `<span class="d-del">${e}</span>`;
+    if(line.startsWith("@@")) return `<span class="d-hunk">${e}</span>`;
+    if(line.startsWith("diff ") || line.startsWith("+++") || line.startsWith("---")) return `<span class="d-file">${e}</span>`;
+    return e;
+  }).join("\n");
 }
 // Release history of the open floor — one row per release; click to browse it.
 function renderReleases(F){
@@ -1409,36 +1664,11 @@ function renderReleases(F){
         b.textContent = `r${rel.release} ${ok}`;
         b.title = (rel.request || "") + (rel.created_at ? `  ·  ${rel.created_at}` : "");
         b.onclick = () => { for(const c of rels.children) c.classList.remove("sel");
-                            b.classList.add("sel"); loadFiles(rel.id); };
+                            b.classList.add("sel"); loadRepo(rel.id); };
         rels.appendChild(b);
       }
     })
     .catch(() => { rels.innerHTML = ""; });
-}
-// List the written files of one release id into the browser pane.
-function loadFiles(id){
-  FILES_ID = id;
-  const list = document.getElementById("files-list");
-  const view = document.getElementById("files-view");
-  document.getElementById("files-zip").href = "/api/zip/"+id;
-  list.innerHTML = ""; view.textContent = "Loading…";
-  fetch("/api/files/"+id)
-    .then(r => r.ok ? r.json() : {files:[]})
-    .then(({files}) => {
-      if(!files || !files.length){
-        list.innerHTML = "<li class='muted'>No output yet — finish a build (it writes code + docs).</li>";
-        view.textContent = ""; return;
-      }
-      view.textContent = "Select a file…";
-      for(const f of files){
-        const li = document.createElement("li");
-        li.textContent = `${f.path}  (${f.size}b)`;
-        li.title = f.path;
-        li.onclick = () => viewFile(id, f.path, li);
-        list.appendChild(li);
-      }
-    })
-    .catch(() => { list.innerHTML = "<li class='muted'>(could not list output)</li>"; view.textContent = ""; });
 }
 function viewFile(id, path, li){
   for(const c of document.getElementById("files-list").children) c.classList.remove("sel");
@@ -1656,6 +1886,8 @@ document.getElementById("cp-changes").onclick=()=>sendDecision("needs_changes");
 document.getElementById("cp-reject").onclick=()=>sendDecision("reject");
 document.getElementById("output-btn").onclick=openFiles;
 document.getElementById("files-close").onclick=hideFiles;
+document.getElementById("repos-close").onclick=closeRepoHub;
+document.getElementById("repos-new").onclick=()=>{ closeRepoHub(); showNewModal(); };
 // interview modal
 document.getElementById("iv-ask").onclick=askInterview;
 document.getElementById("iv-close").onclick=()=>document.getElementById("iv-modal").classList.add("hidden");

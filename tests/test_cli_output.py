@@ -53,7 +53,7 @@ def test_passing_run_writes_source_files(tmp_path: Path) -> None:
     assert str(out.resolve()) in result.summary()
 
 
-def test_halted_run_writes_nothing(tmp_path: Path) -> None:
+def test_halted_run_writes_a_usable_draft(tmp_path: Path) -> None:
     out = tmp_path / "generated"
     result = run(
         "build a broken service",
@@ -65,10 +65,14 @@ def test_halted_run_writes_nothing(tmp_path: Path) -> None:
 
     assert result.gate_statuses.get("test") is GateStatus.ERROR
     assert result.passed is False
-    # No accepted tree -> no write, no surfaced path.
+    # NOT shipped: there is no accepted tree.
     assert result.output_root is None
-    assert not out.exists() or not any(out.iterdir())
     assert "source tree written to" not in result.summary()
+    # But never empty-handed: a usable DRAFT (best attempt + a what's-failing note).
+    assert result.draft_root == str(out.resolve())
+    assert (out / "DRAFT-STATUS.md").is_file()
+    assert "held at the gate" in (out / "DRAFT-STATUS.md").read_text(encoding="utf-8").lower()
+    assert "DRAFT written to" in result.summary()
 
 
 def test_no_output_dir_writes_nothing(tmp_path: Path) -> None:

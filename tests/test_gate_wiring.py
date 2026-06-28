@@ -324,10 +324,12 @@ def test_zone_a_error_retries_without_latch(tmp_path, rt, runner, records, verif
     )
 
 
-# ---- 4. integrated FAIL latches; a later PASS does not auto-clear ------------
+# ---- 4. integrated FAIL: digest disqualified forever, but fix-forward bounded -
 
 
-def test_integrated_fail_latches_and_does_not_autoclear(tmp_path, rt, runner, records, verifier):
+def test_integrated_fail_latches_but_fixes_forward_then_halts_when_spent(
+    tmp_path, rt, runner, records, verifier
+):
     # Criteria omit a security_abuse criterion -> Spec FAIL on the integrated digest.
     bad_state, bad_resolve, bad_blob = _seed((_criterion("c1"),))  # no security criterion
     spec_out = run_spec_gate(
@@ -341,23 +343,31 @@ def test_integrated_fail_latches_and_does_not_autoclear(tmp_path, rt, runner, re
     )
     fail = spec_out["gates"][0]
     assert fail.status is GateStatus.FAIL
-    # run_against is an integrated tree_sha (hex digest) -> stable-FAIL latched.
+    # The failing digest is permanently disqualified (anti-gaming, gov §5).
     assert records.stable_fail_latched(fail.run_against, "spec")
 
     state_with = {**bad_state, "gates": spec_out["gates"]}
+    # WITHIN the bound: route to a FRESH attempt (fix forward) — not a dead stop.
     assert (
-        route_after_gates(state_with, _config(), boundary=SPEC_BOUNDARY, records=records) == "halt"
+        route_after_gates(state_with, _config(), boundary=SPEC_BOUNDARY, records=records) == "fix"
     )
 
-    # A later genuine PASS on the SAME digest does not auto-clear the latch.
-    assert records.stable_fail_latched(fail.run_against, "spec")
-    # Even folding a hypothetical PASS, routing still halts (latch is terminal).
+    # The latch is NEVER cleared: even a (flaky/gamed) PASS on the SAME digest does
+    # not advance — it routes to another fresh attempt, never shipping that tree.
     good_pass = fail.model_copy(update={"status": GateStatus.PASS})
-    # (Not attested for PASS; routing reads the latch regardless of channel content.)
-    still = route_after_gates(
-        {**bad_state, "gates": [good_pass]}, _config(), boundary=SPEC_BOUNDARY, records=records
+    assert records.stable_fail_latched(fail.run_against, "spec")
+    assert (
+        route_after_gates(
+            {**bad_state, "gates": [good_pass]}, _config(), boundary=SPEC_BOUNDARY, records=records
+        )
+        == "fix"
     )
-    assert still == "halt"
+
+    # Once the convergence bound is SPENT, escalate (halt) — don't loop forever.
+    spent = {"configurable": {"thread_id": RUN_ID, "fix_attempts": 3}}
+    assert (
+        route_after_gates(state_with, spent, boundary=SPEC_BOUNDARY, records=records) == "halt"
+    )
 
 
 # ---- 4b. critic-flagged security/abuse omission FAILS the Spec gate ----------
@@ -386,12 +396,17 @@ def test_critic_security_omission_fails_spec_no_pr(tmp_path, rt, runner, records
     )
     fail = spec_out["gates"][0]
     assert fail.name == "spec" and fail.status is GateStatus.FAIL
-    # Attested FAIL on an integrated digest -> latched + routes to halt (no PR).
+    # Attested FAIL on an integrated digest -> latched (digest disqualified) + routes
+    # to the bounded fix loop (fix forward into a new tree), HALT once the bound spends.
     assert merge_gates(spec_out["gates"], None) == spec_out["gates"]
     assert records.stable_fail_latched(fail.run_against, "spec")
     state_with = {**state, "gates": spec_out["gates"]}
     assert (
-        route_after_gates(state_with, _config(), boundary=SPEC_BOUNDARY, records=records) == "halt"
+        route_after_gates(state_with, _config(), boundary=SPEC_BOUNDARY, records=records) == "fix"
+    )
+    spent = {"configurable": {"thread_id": RUN_ID, "fix_attempts": 3}}
+    assert (
+        route_after_gates(state_with, spent, boundary=SPEC_BOUNDARY, records=records) == "halt"
     )
 
 
@@ -689,3 +704,32 @@ def test_stub_adapter_diff_round_trips_through_get_blob(tmp_path, rt, runner, re
     # The StubAdapter's deterministic file body was materialized into the tree.
     materialized = (tmp_path / "wd" / "app.py").read_text(encoding="utf-8")
     assert materialized.startswith("stub change for task T1")
+
+
+def test_halted_run_writes_a_usable_draft_with_failing_findings(tmp_path, verifier):
+    """A HALTED build still hands back a usable draft: the best-attempt source tree +
+    a DRAFT-STATUS.md naming what's failing — never empty hands."""
+    from foundry.cli import _write_draft_on_halt
+
+    diff = _feature_diff({"app.py": "def f():\n    return 1\n"})
+    state, resolve, resolve_blob = _seed((_criterion("c1"),), diffs=(diff,))
+
+    def _gate(name, status):
+        return GateResult(
+            name=name, status=status, decision_deterministic=True,
+            execution_deterministic=True, verdict_class=VerdictClass.EXECUTION_DETERMINISTIC,
+            run_against="a" * 64, seq=_seq(name, f"verdict:{name}"),
+        )
+
+    state = {**state, "gates": [_gate("build", GateStatus.PASS), _gate("test", GateStatus.FAIL)]}
+    out = tmp_path / "draft"
+    findings = {"test": ("FAILED tests/test_app.py::test_f", "E   assert f() == 2")}
+    draft_root = _write_draft_on_halt(
+        state, str(out), gate_findings=findings, resolve=resolve, resolve_blob=resolve_blob
+    )
+    assert draft_root is not None
+    assert (out / "app.py").is_file()                       # best-attempt source is there
+    status = (out / "DRAFT-STATUS.md").read_text(encoding="utf-8")
+    assert "held at the gate" in status.lower()             # clearly marked not shipped
+    assert "E   assert f() == 2" in status                  # what's still failing
+    assert "❌" in status and "✅" in status                 # per-gate verdicts

@@ -387,3 +387,20 @@ def test_generated_module_named_like_host_pkg_is_isolated(tmp_path, runner, reco
     )
     r = runner.run(TestGate(), "task/iso", _seq("test", "task/iso"), tmp_path)
     assert r.status is GateStatus.PASS
+
+
+def test_failing_test_gate_carries_the_failure_in_findings(tmp_path, runner, records, verifier):
+    """A red run must carry its WHY: the failing test + assertion land in the gate's
+    findings (so the fix loop can feed the SPECIFIC failure back to the engineer)."""
+    _write(
+        tmp_path,
+        "test_rw.py",
+        "def reverse_words(s):\n    return ' '.join(reversed(s.split()))\n\n\n"
+        "def test_double_spaces_preserved():\n"
+        "    assert reverse_words('a  b') == 'b  a'\n",  # impl collapses -> fails
+    )
+    r = runner.run(TestGate(), "task/fb", _seq("test", "task/fb"), tmp_path)
+    assert r.status is GateStatus.FAIL
+    blob = "\n".join(r.findings)
+    assert "test_double_spaces_preserved" in blob          # which test
+    assert "assert" in blob                                 # the assertion detail

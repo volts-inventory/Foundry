@@ -24,7 +24,7 @@ python -m foundry.cli [OPTIONS] "<one-line request>"   # build a GitHub-ready re
   --mode <assistant|gated|autonomous>  # trust posture: advisory PR · full gates+sign-off · hands-off deploy   (default: assistant)
 
 # ── Model egress & code generation (orthogonal seams) ─────────────────────────
-  --backend <mock|anthropic|claude-cli|codex|ollama-gemma>  # WHERE model calls go (the "brain")            (default: mock — keyless/deterministic)
+  --backend <mock|anthropic|openai|claude-cli|codex|ollama-gemma>  # WHERE model calls go (the "brain")      (default: mock — keyless/deterministic)
   --adapter <stub|raw-react>                                # WHAT writes the code (the "hands"); usually OMIT — it's DERIVED from --backend
                                                             #   omitted ⇒ mock→stub (no-op) · any real backend→raw-react (real code)
                                                             #   raw-react writes code via `claude -p` (claude-cli) or the Anthropic API (anthropic)
@@ -110,8 +110,8 @@ Two seams are deliberately independent, and worth internalizing before you start
 
 - Python ≥ 3.12 and [`uv`](https://docs.astral.sh/uv/).
 - Docker (only for `make up` / compose).
-- A real backend (optional): an Anthropic API key, the `claude` CLI on a Max
-  plan, the `codex` CLI, or a local Ollama.
+- A real backend (optional): an Anthropic API key, an OpenAI API key, the `claude`
+  CLI on a Max plan, the `codex` CLI, or a local Ollama.
 
 ---
 
@@ -189,10 +189,16 @@ make run REQUEST="build a todo API"       # uses anthropic
 | Backend | What it is | Required setting(s) | How to get it |
 |---|---|---|---|
 | `mock` | Keyless, deterministic stub (default) | none | — |
-| `anthropic` | Claude API | `ANTHROPIC_API_KEY` | console.anthropic.com |
+| `anthropic` | Claude API (SDK, direct) | `ANTHROPIC_API_KEY` | console.anthropic.com |
+| `openai` | OpenAI API (SDK `chat.completions`, direct) | `OPENAI_API_KEY` | platform.openai.com |
 | `claude-cli` | `claude -p` on a Max plan | `CLAUDE_CODE_OAUTH_TOKEN` | `make token` |
-| `codex` | codex CLI | `OPENAI_API_KEY` | platform.openai.com |
+| `codex` | codex CLI (`codex exec`) | `OPENAI_API_KEY` | platform.openai.com |
 | `ollama-gemma` | Local Ollama endpoint | `FOUNDRY_OLLAMA_URL` | run Ollama locally |
+
+Each provider is reachable two ways — a **direct SDK** backend and a **CLI** backend:
+Anthropic via `anthropic` (API) or `claude-cli` (`claude -p`); OpenAI via `openai`
+(API) or `codex` (`codex exec`). The direct-SDK backends keep the grammar-constrained
+verdict channel (native JSON-schema); the CLIs degrade it to fail-closed JSON parsing.
 
 Optional, any real backend — pin the exact model id per tier when your egress
 serves one the default map doesn't name (else the fail-closed drift policy
@@ -213,20 +219,24 @@ rejects the call):
 # 1. mock — keyless, deterministic (default; demos + CI). No setup.
 uv run python -m foundry.cli "build a todo API" --backend mock --out ./out
 
-# 2. anthropic — Claude API. Set ANTHROPIC_API_KEY.
+# 2. anthropic — Claude API (direct SDK). Set ANTHROPIC_API_KEY.
 export ANTHROPIC_API_KEY=sk-ant-...
 uv run python -m foundry.cli "build a todo API" --backend anthropic --out ./out
 
-# 3. claude-cli — `claude -p` on a Max subscription. Mint a token, add to .env.
+# 3. openai — OpenAI API (direct SDK chat.completions). Set OPENAI_API_KEY.
+export OPENAI_API_KEY=sk-...
+uv run python -m foundry.cli "build a todo API" --backend openai --out ./out
+
+# 4. claude-cli — `claude -p` on a Max subscription. Mint a token, add to .env.
 make token                                # logs in; prints CLAUDE_CODE_OAUTH_TOKEN
 echo "CLAUDE_CODE_OAUTH_TOKEN=<token>" >> .env
 uv run python -m foundry.cli "build a todo API" --backend claude-cli --out ./out
 
-# 4. codex — codex CLI. Set OPENAI_API_KEY.
+# 5. codex — codex CLI (codex exec). Set OPENAI_API_KEY.
 export OPENAI_API_KEY=sk-...
 uv run python -m foundry.cli "build a todo API" --backend codex --out ./out
 
-# 5. ollama-gemma — local Ollama. Point at the endpoint.
+# 6. ollama-gemma — local Ollama. Point at the endpoint.
 export FOUNDRY_OLLAMA_URL=http://localhost:11434
 uv run python -m foundry.cli "build a todo API" --backend ollama-gemma --out ./out
 ```
@@ -398,7 +408,7 @@ make clean           # remove caches + ./.run output
 | `FOUNDRY_CODING_ADAPTER` | Default adapter | derived from backend |
 | `ANTHROPIC_API_KEY` | `anthropic` backend key | — |
 | `CLAUDE_CODE_OAUTH_TOKEN` | `claude-cli` backend (via `make token`) | — |
-| `OPENAI_API_KEY` | `codex` backend key | — |
+| `OPENAI_API_KEY` | `openai` + `codex` backend key | — |
 | `FOUNDRY_OLLAMA_URL` | `ollama-gemma` endpoint | — |
 | `FOUNDRY_MODEL_T1/T2/T3` | Pin exact model id per tier | curated map |
 | `FOUNDRY_MAX_SLOTS` | Parallelism ceiling | auto |
@@ -416,7 +426,7 @@ make clean           # remove caches + ./.run output
 | Flag | Values | Default |
 |---|---|---|
 | `--mode` | `assistant` · `gated` · `autonomous` | `assistant` |
-| `--backend` | `mock` · `anthropic` · `claude-cli` · `codex` · `ollama-gemma` | `mock` |
+| `--backend` | `mock` · `anthropic` · `openai` · `claude-cli` · `codex` · `ollama-gemma` | `mock` |
 | `--adapter` | `stub` · `raw-react` | derived from `--backend` (`mock`→`stub`, real→`raw-react`) |
 | `--spec FILE\|DIR` | spec input (repeatable) | — |
 | `--packs a,b` | domain packs (`regulated` · `ml_data` · `frontend`) | — |

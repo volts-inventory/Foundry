@@ -136,13 +136,14 @@ MODES = (MODE_ASSISTANT, MODE_GATED, MODE_AUTONOMOUS)
 # is the deterministic scripted MockTransport — keyless, no network, the historical
 # smoke behavior. The others route the factory's model egress through a REAL backend
 # via the single-egress proxy (foundry/proxy/cli_transports.build_backend): "anthropic"
-# (SDK; needs ANTHROPIC_API_KEY), "claude-cli" (`claude -p`), "codex" (`codex exec`),
-# "ollama-gemma" (local Ollama). Picking a real backend makes real, metered model
-# calls; the coding substrate + materialization in THIS smoke CLI stay dev-grade
-# (StubAdapter + synthetic resolver), so --backend exercises the proxy/lineage/
-# determinism/manifest path, not a real code-writing adapter (that is a separate seam).
+# (SDK; needs ANTHROPIC_API_KEY), "openai" (SDK chat.completions; needs OPENAI_API_KEY),
+# "claude-cli" (`claude -p`), "codex" (`codex exec`), "ollama-gemma" (local Ollama).
+# Picking a real backend makes real, metered model calls; the coding substrate +
+# materialization in THIS smoke CLI stay dev-grade (StubAdapter + synthetic resolver),
+# so --backend exercises the proxy/lineage/determinism/manifest path, not a real
+# code-writing adapter (that is a separate seam).
 _MOCK_BACKEND = "mock"
-BACKENDS = (_MOCK_BACKEND, "anthropic", "claude-cli", "codex", "ollama-gemma")
+BACKENDS = (_MOCK_BACKEND, "anthropic", "openai", "claude-cli", "codex", "ollama-gemma")
 
 
 # Coding substrates (WorkerAdapter): the thing that actually writes the code for
@@ -264,9 +265,15 @@ _TIER_ENV: dict[str, str] = {
 def _default_tier_models(backend: str) -> dict[str, str]:
     """The curated default tier→model map the backend ships with (so an env
     override can overlay a partial set without dropping the other tiers)."""
-    from foundry.proxy.cli_transports import CODEX_TIER_MODELS, GEMMA_TIER_MODELS
+    from foundry.proxy.cli_transports import (
+        CODEX_TIER_MODELS,
+        GEMMA_TIER_MODELS,
+        OPENAI_TIER_MODELS,
+    )
     from foundry.proxy.model_provider_proxy import TIER_MODELS
 
+    if backend == "openai":
+        return dict(OPENAI_TIER_MODELS)
     if backend == "codex":
         return dict(CODEX_TIER_MODELS)
     if backend == "ollama-gemma":
@@ -836,7 +843,8 @@ class RunResult:
     mode: str = MODE_ASSISTANT
     """The release mode the run was driven in (assistant | gated | autonomous)."""
     backend: str = _MOCK_BACKEND
-    """The model backend the proxy used (mock | anthropic | claude-cli | codex | ollama-gemma)."""
+    """The model backend the proxy used (mock | anthropic | openai | claude-cli | codex |
+    ollama-gemma)."""
     packs: tuple[str, ...] = ()
     """The domain packs engaged (by name) — empty when no ``--packs`` were given."""
     artifact_uri: str | None = None
@@ -1656,7 +1664,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "usage: python -m foundry.cli "
             "[--mode {assistant|gated|autonomous}] [--packs name1,name2] "
-            "[--backend {mock|anthropic|claude-cli|codex|ollama-gemma}] "
+            "[--backend {mock|anthropic|openai|claude-cli|codex|ollama-gemma}] "
             "[--adapter {stub|raw-react}] "
             "[--checkpoints [all|product,design,release]] "
             "[--docs DIR] [--out DIR] [--spec FILE|DIR ...] "
@@ -1666,7 +1674,7 @@ def main(argv: list[str] | None = None) -> int:
             f"    assistant  {_TRUST_POSTURE[MODE_ASSISTANT]}\n"
             f"    gated      {_TRUST_POSTURE[MODE_GATED]}\n"
             f"    autonomous {_TRUST_POSTURE[MODE_AUTONOMOUS]}\n"
-            "  backend: mock (default — keyless, deterministic) | anthropic | "
+            "  backend: mock (default — keyless, deterministic) | anthropic | openai | "
             "claude-cli | codex | ollama-gemma (real model egress)\n"
             "  adapter (coding substrate): omitted => DERIVED from --backend "
             "(mock=>stub no-op, any real backend=>raw-react real code); override with "

@@ -320,6 +320,7 @@ dependencies = [
     { name = "anthropic" },
     { name = "langgraph" },
     { name = "langgraph-checkpoint-sqlite" },
+    { name = "openai" },
     { name = "pydantic" },
 ]
 
@@ -339,6 +340,7 @@ requires-dist = [
     { name = "anthropic", specifier = ">=0.109.1" },
     { name = "langgraph", specifier = ">=1.2.4" },
     { name = "langgraph-checkpoint-sqlite", specifier = ">=3.1.0" },
+    { name = "openai", specifier = ">=1.0" },
     { name = "pydantic", specifier = ">=2.13.4" },
 ]
 
@@ -872,6 +874,25 @@ wheels = [
 ]
 
 [[package]]
+name = "openai"
+version = "2.44.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "distro" },
+    { name = "httpx" },
+    { name = "jiter" },
+    { name = "pydantic" },
+    { name = "sniffio" },
+    { name = "tqdm" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/49/f5/7c7cb955305cb41f7f3c5fd7e0e38bf6bbf2658468863d4b7b868a5cb8df/openai-2.44.0.tar.gz", hash = "sha256:68a5a5ffad82b8ff7d451c437529fb64f7c3b8123aaf0c021966a882d9e3947d", size = 988753, upload-time = "2026-06-24T20:56:02.293Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ae/f4/561ed79fd94876160018a5e75254cfcb9b0e62d4dded9dcb20072e86d623/openai-2.44.0-py3-none-any.whl", hash = "sha256:0a2a3ab2e29aeda368700f662ff9ba0f9df17ba4c54577a64e08b8115a3cc0ad", size = 1366216, upload-time = "2026-06-24T20:55:58.882Z" },
+]
+
+[[package]]
 name = "orjson"
 version = "3.11.9"
 source = { registry = "https://pypi.org/simple" }
@@ -1388,6 +1409,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/9b/7a/c519db0aba5024f86e71e9631810bfdd6866ed2c8695bd7fa34b90e7ef59/textual-8.2.7.tar.gz", hash = "sha256:658f568ff81e30ed43890c3e07520390e5cf1b4763822006e060656b0a88f105", size = 1859249, upload-time = "2026-05-19T10:52:49.531Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a8/f5/c1e18bc0707300a0e90204343abbf7d7acd6fb7ebe03a6d4893b99a234b8/textual-8.2.7-py3-none-any.whl", hash = "sha256:4caaa13a90bc4cf9c6c862c067ccd34fe84e9c161710a2a907a8026313b6bd73", size = 731129, upload-time = "2026-05-19T10:52:51.773Z" },
+]
+
+[[package]]
+name = "tqdm"
+version = "4.68.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/87/d7/0535a28b1f5f24f6612fb3ff1e89fb1a8d160fee0f976e0aa6803862134b/tqdm-4.68.3.tar.gz", hash = "sha256:00dfa48452b6b6cfae3dd9885636c23d3422d1ec97c66d96818cbd5e0821d482", size = 170596, upload-time = "2026-06-17T07:36:52.105Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d8/8e/bb97bb0c71802080bfc8952937d174e49cfc50de5c951dd47b2496f0dcdb/tqdm-4.68.3-py3-none-any.whl", hash = "sha256:39832cc2def2789a6f29df83f172db7416cea70052c0907a57801c5f2fdccb03", size = 78337, upload-time = "2026-06-17T07:36:50.132Z" },
 ]
 
 [[package]]

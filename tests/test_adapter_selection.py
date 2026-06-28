@@ -61,6 +61,7 @@ def test_default_adapter_is_derived_from_backend() -> None:
     # AS a completion endpoint; anthropic via the Anthropic API.
     assert _default_adapter_for("mock") == "stub"
     assert _default_adapter_for("anthropic") == "raw-react"
+    assert _default_adapter_for("openai") == "raw-react"
     assert _default_adapter_for("claude-cli") == "raw-react"
     assert _default_adapter_for("codex") == "raw-react"
     assert _default_adapter_for("ollama-gemma") == "raw-react"

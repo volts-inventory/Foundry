@@ -1351,6 +1351,14 @@ function updateHud(F){
 }
 function renderElevator(){
   const el=document.getElementById("el-floors"); el.innerHTML="";
+  // Floor 0 — the GitHub home: a hub of every build's repo. Always present, even
+  // before any project exists, so the repositories are always one click away.
+  const hub=document.createElement("button");
+  hub.className="el-btn hub"+(REPOS_OPEN?" active":"");
+  hub.title="Floor 0 — repositories (every build's code)";
+  hub.innerHTML=`<span class="fl-no">0</span>⌥`;
+  hub.onclick=()=>openRepoHub();
+  el.appendChild(hub);
   for (const f of [...FLOORS.keys()].sort((a,b)=>a-b)){
     const F=FLOORS.get(f);
     const btn=document.createElement("button");
@@ -1387,22 +1395,83 @@ function selectTab(name){
 }
 function openFiles(){
   const F = FLOORS.get(ACTIVE);
+  if(!F){ openRepoHub(); return; }   // no active build — go to the Floor 0 repo hub
+  openFilesFor(F);
+}
+// Open the repo browser for any build (`meta` = {id, floor, release, request,
+// status}) — used by the active floor AND by the Floor 0 repo hub.
+function openFilesFor(meta){
   const modal = document.getElementById("files-modal");
   const list = document.getElementById("files-list");
   const view = document.getElementById("files-view");
   const rels = document.getElementById("files-releases");
   list.innerHTML = ""; view.textContent = ""; rels.innerHTML = "";
-  if(!F){ list.innerHTML = "<li class='muted'>Start a project first.</li>"; modal.classList.remove("hidden"); return; }
-  document.getElementById("files-floor").textContent = "Floor "+F.floor;
+  document.getElementById("files-floor").textContent = "Floor "+meta.floor;
   for(const t of document.querySelectorAll(".repo-tab")) t.onclick = () => selectTab(t.dataset.tab);
   selectTab("code");
   // ITERATE: start a new floor from this finished build (enabled once it's done).
   const itBtn = document.getElementById("files-iterate");
-  itBtn.style.display = (F.status === "done") ? "" : "none";
-  itBtn.onclick = () => { hideFiles(); showNewModal(F.id); };
-  renderReleases(F);                 // release history for this floor (newest first)
-  loadRepo(F.id);                    // start on the latest release's repo
+  itBtn.style.display = (meta.status === "done") ? "" : "none";
+  itBtn.onclick = () => { hideFiles(); showNewModal(meta.id); };
+  renderReleases(meta);              // release history for this floor (newest first)
+  loadRepo(meta.id);                 // start on the latest release's repo
   modal.classList.remove("hidden");
+}
+// ---- Floor 0: the repo hub (a self-hosted GitHub home) ---------------------
+let REPOS_OPEN = false;
+// A short GitHub-ish repo name slugged from the build's request line.
+function repoSlug(req){
+  const s = String(req||"project").toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"");
+  return s.split("-").filter(Boolean).slice(0,5).join("-") || "project";
+}
+// Open the hub: list every build that produced code (newest first). The catalog
+// grows as more floors finish, so each open reflects the latest set of repos.
+function openRepoHub(){
+  const modal = document.getElementById("repos-modal");
+  const list = document.getElementById("repos-list");
+  const cnt = document.getElementById("repos-count");
+  list.innerHTML = "<li class='muted'>Loading…</li>"; cnt.textContent = "";
+  modal.classList.remove("hidden");
+  REPOS_OPEN = true; renderElevator();
+  fetch("/api/builds")
+    .then(r => r.ok ? r.json() : {builds:[]})
+    .then(({builds}) => {
+      const repos = (builds||[]).filter(b => b.has_repo)
+        .sort((a,b) => String(b.created_at||"").localeCompare(String(a.created_at||"")));
+      cnt.textContent = repos.length ? `${repos.length} ${repos.length===1?"repository":"repositories"}` : "";
+      list.innerHTML = "";
+      if(!repos.length){
+        list.innerHTML = "<li class='muted'>No repositories yet — finish a build and its code lands here.</li>";
+        return;
+      }
+      for(const b of repos) list.appendChild(repoRow(b));
+    })
+    .catch(() => { list.innerHTML = "<li class='muted'>(could not load repositories)</li>"; });
+}
+function repoRow(b){
+  const li = document.createElement("li"); li.className = "repo-item";
+  const ok = b.passed ? "ok" : "bad";
+  const pill = b.passed ? "✓ passing" : "✗ failing";
+  const when = b.created_at ? String(b.created_at).slice(0,10) : "";
+  li.innerHTML =
+    `<div class="repo-row1">`+
+      `<span class="repo-name">${escapeHtml(repoSlug(b.request))}</span>`+
+      `<span class="repo-vis">store</span>`+
+      `<span class="repo-pill ${ok}">${pill}</span>`+
+    `</div>`+
+    `<div class="repo-desc">${escapeHtml(b.request||"")}</div>`+
+    `<div class="repo-meta">`+
+      `<span>⌥ floor ${b.floor}</span>`+
+      (b.release>1 ? `<span>↻ r${b.release}</span>` : ``)+
+      (when ? `<span>updated ${when}</span>` : ``)+
+    `</div>`;
+  li.onclick = () => { closeRepoHub();
+    openFilesFor({id:b.id, floor:b.floor, release:b.release, request:b.request, status:"done"}); };
+  return li;
+}
+function closeRepoHub(){
+  document.getElementById("repos-modal").classList.add("hidden");
+  REPOS_OPEN = false; renderElevator();
 }
 // Load the whole repo (tree + checks + pull-request diffs) for one release id.
 function loadRepo(id){
@@ -1797,6 +1866,8 @@ document.getElementById("cp-changes").onclick=()=>sendDecision("needs_changes");
 document.getElementById("cp-reject").onclick=()=>sendDecision("reject");
 document.getElementById("output-btn").onclick=openFiles;
 document.getElementById("files-close").onclick=hideFiles;
+document.getElementById("repos-close").onclick=closeRepoHub;
+document.getElementById("repos-new").onclick=()=>{ closeRepoHub(); showNewModal(); };
 // interview modal
 document.getElementById("iv-ask").onclick=askInterview;
 document.getElementById("iv-close").onclick=()=>document.getElementById("iv-modal").classList.add("hidden");

@@ -1171,14 +1171,12 @@ class FloorScene extends Phaser.Scene {
       const R=ROOMS[rk]; if(!R) continue;
       const people=perRoom[rk];
       const cols=Math.min(3, Math.max(1, Math.ceil(people.length/2)));
-      const cw=Math.min(48, R.w/cols-10);
       people.forEach((p,i)=>{
         const c=i%cols, r=Math.floor(i/cols);
         const x=Math.round(R.x + R.w*((c+1)/(cols+1)));
         const y=R.floorY + 34 + r*44;
         const col6=p.color.toString(16).padStart(6,"0");
         const tag=AREA_TAG[p.area]||p.area.slice(0,2).toUpperCase();
-        this.laneDecor.push(this._carpet(x, y+8, cw, p.lead?34:30, p.color, p.lead));
         const k = p.lead ? kitFor("Tech-Lead "+p.area, hashStr((this.proj.id||'f')+"TL"+p.area)) : poolKit(slot);
         k.accent=p.color;
         const ws=this.makeWorkstation(x, y+16, p.color);
@@ -1212,14 +1210,6 @@ class FloorScene extends Phaser.Scene {
     }
   }
 
-  // A small per-engineer colour CARPET — each engineer's own section, tinted by
-  // their area (fill + a brighter outline). Sits under the desk (depth 1).
-  _carpet(x, y, w, h, color, lead){
-    const c=this.add.container(x, y).setDepth(1);
-    c.add(this.add.rectangle(0, 0, Math.max(20,w), h, color, lead?0.26:0.20));
-    c.add(this.add.rectangle(0, 0, Math.max(20,w), h).setStrokeStyle(1, color, 0.55));
-    return c;
-  }
 }
 
 // =========================================================================== //

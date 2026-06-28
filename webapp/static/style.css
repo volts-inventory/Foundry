@@ -249,6 +249,7 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
 .repo-name{color:#9ab8ff;font-weight:bold;font-size:14px}
 .repo-item:hover .repo-name{color:#cfe0ff;text-decoration:underline}
 .repo-vis{font-size:10px;color:var(--dim);border:1px solid var(--line);border-radius:9px;padding:1px 8px}
+.repo-rel{font-size:10px;color:#cdbcf0;background:#2c2052;border-radius:9px;padding:1px 8px}
 .repo-pill{font-size:10px;border-radius:9px;padding:1px 8px}
 .repo-pill.ok{color:#7fe7a4;background:#1d3a26}
 .repo-pill.bad{color:#ff9a9a;background:#3a1d1d}

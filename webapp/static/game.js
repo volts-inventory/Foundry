@@ -1457,12 +1457,12 @@ function repoRow(b){
     `<div class="repo-row1">`+
       `<span class="repo-name">${escapeHtml(repoSlug(b.request))}</span>`+
       `<span class="repo-vis">store</span>`+
+      (b.release>1 ? `<span class="repo-rel" title="${b.release} releases — this project has been iterated">↻ r${b.release}</span>` : ``)+
       `<span class="repo-pill ${ok}">${pill}</span>`+
     `</div>`+
     `<div class="repo-desc">${escapeHtml(b.request||"")}</div>`+
     `<div class="repo-meta">`+
       `<span>⌥ floor ${b.floor}</span>`+
-      (b.release>1 ? `<span>↻ r${b.release}</span>` : ``)+
       (when ? `<span>updated ${when}</span>` : ``)+
     `</div>`;
   li.onclick = () => { closeRepoHub();

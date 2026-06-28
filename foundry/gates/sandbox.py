@@ -23,7 +23,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from .runner import run_grounding_command
+from .runner import GroundingUnavailable, run_grounding_command
 
 __all__ = [
     "SANDBOX_PYTEST",
@@ -37,6 +37,16 @@ __all__ = [
 # deployment can pin a digest from its own registry.
 _DEFAULT_IMAGE = "foundry-test-sandbox"
 
+# Explicit opt-OUT values: run the (weaker) in-process harness instead of a
+# container. For the hermetic test suite and hosts with no Docker daemon that
+# accept the weaker isolation — everything else gets the sandbox.
+_OPT_OUT = frozenset({"inprocess", "in-process", "none", "off", "0", "false", "no"})
+
+# ``docker run`` self-failures (daemon down, image missing, OCI/exec error): these
+# are INFRA, not a test verdict — they must fail-closed as ERROR, never a FAIL and
+# never a silent in-process run of untrusted code.
+_DOCKER_INFRA_EXITS = frozenset({125, 126, 127})
+
 # The pinned harness, run INSIDE the container. Plain pytest — the container itself
 # is the isolation (it holds none of our code); cache off (the rootfs is read-only).
 SANDBOX_PYTEST: tuple[str, ...] = (
@@ -45,8 +55,11 @@ SANDBOX_PYTEST: tuple[str, ...] = (
 
 
 def sandbox_enabled() -> bool:
-    """True iff ``FOUNDRY_GATE_SANDBOX=docker`` selects the container boundary."""
-    return os.environ.get("FOUNDRY_GATE_SANDBOX", "").strip().lower() == "docker"
+    """The Docker sandbox is the DEFAULT path for running generated tests — untrusted
+    model code is ALWAYS containerized. Disabled only when explicitly opted out via
+    ``FOUNDRY_GATE_SANDBOX`` ∈ {inprocess, none, off, …} (the hermetic suite / a host
+    with no daemon that accepts the weaker in-process isolation)."""
+    return os.environ.get("FOUNDRY_GATE_SANDBOX", "docker").strip().lower() not in _OPT_OUT
 
 
 def sandbox_image() -> str:
@@ -99,11 +112,19 @@ def run_in_sandbox(
 ) -> tuple[int, str, str]:
     """Run the pinned pytest inside the sandbox container; return ``(rc, out, err)``.
 
-    A missing ``docker`` binary / unreachable daemon surfaces (via the grounding
-    seam) as fail-closed ERROR — never a silent PASS — exactly like any other
-    missing grounding tool.
+    A missing ``docker`` binary, an unreachable daemon, or a missing image surfaces
+    as fail-closed :class:`GroundingUnavailable` (→ ERROR) — never a silent PASS and
+    never a test FAIL — exactly like any other missing grounding tool. Only the
+    CONTAINER's own pytest exit code (0/1/2…) flows back to zone B's verdict.
     """
     argv = docker_run_argv(workdir, image or sandbox_image())
     # env=None: the docker CLI inherits the host env; the CONTAINER's env is set by
     # the --env flags above (the harness pinning lives inside, not on the daemon).
-    return run_grounding_command(argv, Path(workdir), env=None, timeout_s=timeout_s)
+    rc, out, err = run_grounding_command(argv, Path(workdir), env=None, timeout_s=timeout_s)
+    if rc in _DOCKER_INFRA_EXITS:
+        raise GroundingUnavailable(
+            f"docker sandbox unavailable (docker exit {rc}); build the image "
+            f"(`docker build --target test-sandbox -t {sandbox_image()} .`) and ensure "
+            f"the daemon is running, or set FOUNDRY_GATE_SANDBOX=inprocess: {err.strip()[:200]}"
+        )
+    return rc, out, err

@@ -31,15 +31,34 @@ def test_docker_run_argv_is_fully_fenced(tmp_path: Any) -> None:
     assert argv[argv.index("img:1") + 1:] == list(SANDBOX_PYTEST)
 
 
-def test_sandbox_enabled_and_image_from_env(monkeypatch: Any) -> None:
+def test_sandbox_is_the_default_and_opt_out_disables_it(monkeypatch: Any) -> None:
+    # Default (unset) -> sandbox ON: untrusted generated code is ALWAYS containerized.
     monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)
-    assert sandbox_enabled() is False
-    monkeypatch.setenv("FOUNDRY_GATE_SANDBOX", "Docker")   # case-insensitive
     assert sandbox_enabled() is True
+    monkeypatch.setenv("FOUNDRY_GATE_SANDBOX", "docker")
+    assert sandbox_enabled() is True
+    # Only an explicit opt-out value runs the weaker in-process harness.
+    for off in ("inprocess", "in-process", "none", "off"):
+        monkeypatch.setenv("FOUNDRY_GATE_SANDBOX", off)
+        assert sandbox_enabled() is False
     monkeypatch.delenv("FOUNDRY_GATE_SANDBOX_IMAGE", raising=False)
     assert sandbox_image() == "foundry-test-sandbox"
     monkeypatch.setenv("FOUNDRY_GATE_SANDBOX_IMAGE", "reg/x@sha256:abc")
     assert sandbox_image() == "reg/x@sha256:abc"
+
+
+def test_docker_infra_failure_is_fail_closed_error(tmp_path: Any, monkeypatch: Any) -> None:
+    # A docker self-failure (daemon down=125 / image missing=125 / exec=126/127) must
+    # raise GroundingUnavailable -> ERROR, NOT a misleading test FAIL or silent run.
+    from foundry.gates.runner import GroundingUnavailable
+
+    def fake_run(argv: Any, workdir: Any, *, env: Any = None, timeout_s: float = 600.0) -> Any:
+        return (125, "", "Cannot connect to the Docker daemon")
+
+    monkeypatch.setattr(sandbox, "run_grounding_command", fake_run)
+    import pytest as _pytest
+    with _pytest.raises(GroundingUnavailable):
+        sandbox.run_in_sandbox(tmp_path)
 
 
 def test_gate_routes_to_sandbox_when_enabled(tmp_path: Any, monkeypatch: Any) -> None:
@@ -57,7 +76,7 @@ def test_gate_routes_to_sandbox_when_enabled(tmp_path: Any, monkeypatch: Any) ->
 
 
 def test_gate_in_process_harness_when_sandbox_off(tmp_path: Any, monkeypatch: Any) -> None:
-    monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)
+    monkeypatch.setenv("FOUNDRY_GATE_SANDBOX", "inprocess")   # explicit opt-out
     captured: dict[str, Any] = {}
 
     def fake_run(cmd: Any, workdir: Any, *, env: Any = None, timeout_s: float = 600.0) -> Any:

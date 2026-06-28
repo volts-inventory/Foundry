@@ -384,17 +384,24 @@ make up
 make down
 ```
 
-**Sandboxed test gate (untrusted-code isolation).** Generated code runs through the
-test gate; by default it runs in-process with the host source fenced off `sys.path`
-(so a model-named module can't collide with or reach `foundry.*`). For a hard
-boundary on real builds, run the generated tests in a throwaway container that holds
-python + pytest and *none* of our code — no network, read-only rootfs, resource caps:
+**Sandboxed test gate (untrusted-code isolation).** Generated code is **always**
+run through the test gate inside a throwaway Docker container that holds python +
+pytest and *none* of our code — no network, read-only rootfs, resource caps,
+workdir mounted read-only — so a model-generated test can't reach, import, or
+collide with `foundry.*`. This is the default, so **build the sandbox image first**
+(a separate stage of the same Dockerfile):
 
 ```bash
-# Build the minimal sandbox image (a separate stage of the same Dockerfile)
 docker build --target test-sandbox -t foundry-test-sandbox .
-# Opt in: the test gate then runs generated tests in that container
-export FOUNDRY_GATE_SANDBOX=docker
+```
+
+If the image/daemon is missing the gate **fails closed (ERROR)** — it never runs
+untrusted code unsandboxed. On a host without Docker (e.g. CI, the hermetic test
+suite, or a quick mock smoke run) opt out to the weaker in-process harness, which
+still fences the host source off `sys.path`:
+
+```bash
+export FOUNDRY_GATE_SANDBOX=inprocess
 ```
 
 ---
@@ -427,7 +434,7 @@ make clean           # remove caches + ./.run output
 | `FOUNDRY_MAX_SLOTS` | Parallelism ceiling | auto |
 | `FOUNDRY_COST_CAP_MICROUSD` | Global spend envelope | — |
 | `FOUNDRY_STATE_DIR` | Durable state dir | in-memory |
-| `FOUNDRY_GATE_SANDBOX` | Run generated tests in a Docker sandbox (`docker`) vs in-process | in-process |
+| `FOUNDRY_GATE_SANDBOX` | Test gate isolation: Docker sandbox (default) or `inprocess` to opt out | `docker` |
 | `FOUNDRY_GATE_SANDBOX_IMAGE` | Sandbox image ref (the Dockerfile `test-sandbox` stage) | `foundry-test-sandbox` |
 | `WORKSHOP_HOST` / `WORKSHOP_PORT` | UI bind address / port | `127.0.0.1` / `8765` |
 | `WORKSHOP_OUTPUT_DIR` | UI build output root | `.run/web` |

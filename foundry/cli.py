@@ -46,6 +46,7 @@ is the sole component that ever touches the outside world.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -961,6 +962,35 @@ def _invoke_streaming(app: Any, seed: FactoryState, config: RunnableConfig) -> F
     return cast("FactoryState", app.get_state(config).values)
 
 
+def _stream_segment(
+    app: Any,
+    x: Any,
+    config: RunnableConfig,
+    progress_cb: Callable[[str, str], None],
+) -> dict[str, Any]:
+    """Drive ONE graph segment with ``stream`` (updates mode), forwarding each
+    node as it completes to ``progress_cb(node, scope)`` for LIVE telemetry (so a
+    long real stage shows agents working at their desks node-by-node, not a single
+    burst at the pause). ``subgraphs=True`` surfaces the inner stage nodes; the
+    namespace's leading scope names the stage/room. Returns a dict carrying
+    ``__interrupt__`` if the segment paused, so the caller's interrupt detection
+    (:func:`_pending_interrupt`) is byte-identical to the ``invoke`` path."""
+    pending: Any = None
+    for item in app.stream(x, config, stream_mode="updates", subgraphs=True):
+        ns, chunk = item if isinstance(item, tuple) else ((), item)
+        if not isinstance(chunk, dict):
+            continue
+        if "__interrupt__" in chunk:
+            pending = chunk["__interrupt__"]
+            continue
+        scope = ":".join(str(n).split(":")[0] for n in ns) if ns else ""
+        for node in chunk:
+            # telemetry is advisory — never let a UI callback break the build
+            with contextlib.suppress(Exception):
+                progress_cb(str(node), scope)
+    return {"__interrupt__": pending} if pending else {}
+
+
 def _invoke_with_checkpoints(
     app: Any,
     seed: FactoryState,
@@ -968,6 +998,7 @@ def _invoke_with_checkpoints(
     *,
     checkpointed: bool,
     responder: CheckpointResponder | None,
+    progress_cb: Callable[[str, str], None] | None = None,
 ) -> tuple[FactoryState, str | None]:
     """Drive the compiled graph, pausing/resuming at the checkpoint boundaries.
 
@@ -977,15 +1008,27 @@ def _invoke_with_checkpoints(
     ``Command(resume=...)`` (the run is durable on the checkpointer). With NO
     responder, it stops at the first pause and returns ``(state, boundary)`` so the
     caller can resume out-of-band. The bound on the resume loop is the number of
-    checkpoint boundaries (a responder that always rejects halts immediately)."""
+    checkpoint boundaries (a responder that always rejects halts immediately).
+
+    When ``progress_cb`` is given each segment is STREAMED (per-node liveness) via
+    :func:`_stream_segment` instead of a silent ``invoke`` — same control flow,
+    same interrupt handling, plus live telemetry."""
+    def _drive(x: Any) -> Any:
+        if progress_cb is not None:
+            return _stream_segment(app, x, config, progress_cb)
+        return app.invoke(x, config)
+
     if not checkpointed:
         # Byte-identical to the historical single-invoke path: the invoke return
         # IS the terminal channel state (no interrupts on a non-checkpointed run).
         # With progress on, stream per-node so a long real build shows liveness.
+        if progress_cb is not None:
+            _stream_segment(app, seed, config, progress_cb)
+            return cast("FactoryState", app.get_state(config).values), None
         if _progress_enabled():
             return _invoke_streaming(app, seed, config), None
         return cast("FactoryState", app.invoke(seed, config)), None
-    result = app.invoke(seed, config)
+    result = _drive(seed)
 
     # Bound the loop: at most one pause per stage boundary (3) + slack.
     for _ in range(len(CHECKPOINT_BOUNDARIES) + 1):
@@ -998,7 +1041,7 @@ def _invoke_with_checkpoints(
             boundary = str(payload.get("boundary") or "")
             return cast("FactoryState", app.get_state(config).values), boundary or None
         decision = responder(payload)
-        result = app.invoke(Command(resume=decision), config)
+        result = _drive(Command(resume=decision))
     # The authoritative terminal state is the checkpointed channel view.
     return cast("FactoryState", app.get_state(config).values), None
 
@@ -1024,6 +1067,7 @@ def run(
     output_dir: str | None = None,
     checkpoints: bool | list[str | CheckpointBoundary] | None = None,
     checkpoint_responder: CheckpointResponder | None = None,
+    progress_cb: Callable[[str, str], None] | None = None,
     max_slots: int = AUTO_SLOTS_CAP,
     cost_cap_microusd: int | None = None,
     base_dir: str | None = None,
@@ -1299,6 +1343,7 @@ def run(
                 config,
                 checkpointed=bool(ckpt_set),
                 responder=checkpoint_responder,
+                progress_cb=progress_cb,
             )
         finally:
             reset_gate_write_verifier(token)

@@ -118,6 +118,33 @@ def test_resume_approve_drives_to_completion_and_opens_pr() -> None:
     assert res.gate_statuses.get("test") is GateStatus.PASS
 
 
+def test_progress_cb_streams_live_nodes_without_breaking_checkpoints() -> None:
+    """With a ``progress_cb`` the checkpointed run STREAMS each node live (so the
+    UI can seat agents at desks during the work) AND still pauses/resumes and
+    completes identically — same boundaries, same PASS, plus real node telemetry."""
+    order: list[str] = []
+    nodes: list[str] = []
+
+    def approve(payload: dict[str, Any]) -> str:
+        order.append(str(payload["boundary"]))
+        return "approve"
+
+    res = run(
+        "build a todo app",
+        checkpoints=True,
+        checkpoint_responder=approve,
+        progress_cb=lambda node, scope: nodes.append(node),
+        thread_id="ck-progress",
+    )
+    # Control flow is unchanged: same boundaries in order, ran to completion, PASS.
+    assert order == ["product", "design", "release"]
+    assert res.paused_at is None
+    assert res.passed is True
+    # Live telemetry actually fired with real agent node ids streamed per-node.
+    assert nodes, "progress_cb must receive streamed node names"
+    assert "product_manager" in nodes and "principal_architect" in nodes
+
+
 # ---- end-to-end: reject halts (no PR) ---------------------------------------
 
 

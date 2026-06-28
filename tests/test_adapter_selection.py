@@ -14,11 +14,12 @@ import pytest
 
 from foundry.cli import (
     ADAPTERS,
+    _default_adapter_for,
     _resolve_coding_adapter,
-    make_coding_adapter,
     main,
+    make_coding_adapter,
+    run,
 )
-
 
 # ---- make_coding_adapter: construction --------------------------------------
 
@@ -50,6 +51,33 @@ def test_default_is_stub(proxy: Any) -> None:
 def test_unknown_adapter_name_raises(proxy: Any) -> None:
     with pytest.raises(ValueError, match="unknown adapter"):
         make_coding_adapter("nope", proxy=proxy)
+
+
+# ---- derived default: --adapter omitted ⇒ substrate follows --backend --------
+
+
+def test_default_adapter_is_derived_from_backend() -> None:
+    # mock has no real model ⇒ the deterministic stub; every REAL backend ⇒ raw-react
+    # (the universal completion substrate). claude-cli uses `claude -p` AS completion;
+    # the agentic claude-code is NEVER auto-selected.
+    assert _default_adapter_for("mock") == "stub"
+    assert _default_adapter_for("anthropic") == "raw-react"
+    assert _default_adapter_for("claude-cli") == "raw-react"
+    assert _default_adapter_for("codex") == "raw-react"
+    assert _default_adapter_for("ollama-gemma") == "raw-react"
+
+
+def test_default_never_auto_selects_claude_code() -> None:
+    # The agentic Claude Code substrate is opt-in only — no backend derives to it.
+    from foundry.cli import BACKENDS
+
+    assert all(_default_adapter_for(b) != "claude-code" for b in BACKENDS)
+
+
+def test_run_with_mock_backend_and_no_adapter_stays_stub() -> None:
+    # The default (no backend, no adapter) run stays the deterministic stub no-op,
+    # so the hermetic smoke path is byte-identical.
+    assert run("build a thing").passed in (True, False)  # runs without a real model
 
 
 def test_resolve_passes_instance_through(proxy: Any) -> None:

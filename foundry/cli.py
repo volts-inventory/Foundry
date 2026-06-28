@@ -152,6 +152,22 @@ BACKENDS = (_MOCK_BACKEND, "anthropic", "claude-cli", "codex", "ollama-gemma")
 ADAPTERS = ("stub", "claude-code", "raw-react")
 _DEFAULT_ADAPTER = "stub"
 
+
+# When --adapter is OMITTED the coding substrate is DERIVED from the chosen backend,
+# so picking a real brain writes real code without a second flag (the historical
+# footgun: a real --backend silently no-op'd under a hardcoded stub default). `mock`
+# has no real model, so it keeps the deterministic no-op `stub` (the default run stays
+# hermetic + byte-identical). Every REAL backend defaults to `raw-react` — the
+# provider-agnostic completion substrate — so `anthropic` writes code via the Anthropic
+# API and `claude-cli` writes code via `claude -p` used purely as a completion endpoint.
+# The agentic `claude-code` substrate (runs `claude`'s OWN loop; needs the binary;
+# bypasses the proxy/lineage seam) is NEVER auto-selected — strictly opt-in via --adapter.
+def _default_adapter_for(backend: str) -> str:
+    """The coding substrate to use when ``--adapter`` is omitted, derived from
+    ``backend``: ``mock`` ⇒ ``stub`` (no real model), any real backend ⇒
+    ``raw-react`` (the universal completion substrate)."""
+    return _DEFAULT_ADAPTER if backend == _MOCK_BACKEND else "raw-react"
+
 # System-decided parallelism (no user knob): the Tech-Lead decomposes the work
 # into independently-buildable tasks, and the IC pool sizes ITSELF to that plan —
 # one worker per ready task, bounded by this SAFETY CAP so a large decomposition
@@ -1143,6 +1159,11 @@ def run(
         records = GlobalRecords()
         ckpt = FoundryCheckpointer()
     proxy = _build_proxy(backend)
+    # --adapter omitted (None) ⇒ DERIVE the substrate from the backend so a real brain
+    # writes real code (mock→stub, any real backend→raw-react). An explicit adapter —
+    # a name OR an injected WorkerAdapter instance (tests) — is never None and wins.
+    if adapter is None:
+        adapter = _default_adapter_for(backend)
     rt = AgentRuntime(
         proxy=proxy,
         adapter=_resolve_coding_adapter(adapter, proxy=proxy, thread_id=thread_id),
@@ -1604,13 +1625,15 @@ def main(argv: list[str] | None = None) -> int:
         packs: list[str] = [p.strip() for p in _packs.split(",") if p.strip()] if _packs else []
 
         # --adapter {stub|claude-code|raw-react}: the coding substrate that writes the
-        # code. Default stub (deterministic). claude-code needs the `claude` binary.
+        # code. OMITTED ⇒ DERIVED from --backend in run() (mock→stub, any real backend→
+        # raw-react) so a real backend writes real code without a second flag. The
+        # agentic `claude-code` (needs the `claude` binary) stays explicit-only.
         args, _adapter = _take_value(args, "--adapter", what="a value")
-        adapter = _adapter if _adapter is not None else _DEFAULT_ADAPTER
-        if adapter not in ADAPTERS:
+        if _adapter is not None and _adapter not in ADAPTERS:
             raise _CliUsageError(
-                f"unknown --adapter {adapter!r}; choose one of {', '.join(ADAPTERS)}"
+                f"unknown --adapter {_adapter!r}; choose one of {', '.join(ADAPTERS)}"
             )
+        adapter = _adapter  # None ⇒ run() derives it from --backend
 
         # --spec FILE|DIR (task [8]): may REPEAT to ingest several spec files/dirs.
         spec_paths: list[str] = []
@@ -1658,8 +1681,9 @@ def main(argv: list[str] | None = None) -> int:
             f"    autonomous {_TRUST_POSTURE[MODE_AUTONOMOUS]}\n"
             "  backend: mock (default — keyless, deterministic) | anthropic | "
             "claude-cli | codex | ollama-gemma (real model egress)\n"
-            "  adapter (coding substrate): stub (default — no-op) | claude-code "
-            "(real `claude -p`) | raw-react (real, any backend)\n"
+            "  adapter (coding substrate): omitted => DERIVED from --backend "
+            "(mock=>stub no-op, any real backend=>raw-react real code); override with "
+            "stub | raw-react | claude-code (agentic; needs the `claude` binary)\n"
             "  packs: regulated | ml_data | frontend "
             "(a pack may VETO an unsafe mode — fail-closed)\n"
             "  checkpoints (plan [10]): pause at stage boundaries for human "

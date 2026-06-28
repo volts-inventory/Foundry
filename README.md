@@ -25,7 +25,9 @@ python -m foundry.cli [OPTIONS] "<one-line request>"   # build a GitHub-ready re
 
 # ── Model egress & code generation (orthogonal seams) ─────────────────────────
   --backend <mock|anthropic|claude-cli|codex|ollama-gemma>  # WHERE model calls go (the "brain")            (default: mock — keyless/deterministic)
-  --adapter <stub|claude-code|raw-react>                    # WHAT writes the code (the "hands")            (default: stub — no-op; pair a real one for real code)
+  --adapter <stub|raw-react|claude-code>                    # WHAT writes the code (the "hands"); usually OMIT — it's DERIVED from --backend
+                                                            #   omitted ⇒ mock→stub (no-op) · any real backend→raw-react (real code)
+                                                            #   claude-code = agentic `claude` binary, opt-in ONLY (never auto-selected)
 
 # ── Inputs ────────────────────────────────────────────────────────────────────
   --spec <FILE|DIR>          # ground the build with a spec beyond the one-liner; REPEATABLE   (default: none)
@@ -92,12 +94,15 @@ Two seams are deliberately independent, and worth internalizing before you start
   go*. `mock` is a deterministic, keyless transport; the others route real,
   metered calls through the single-egress proxy.
 - **`--adapter`** — the coding substrate ("the hands"). It decides *what actually
-  writes the code*. `stub` is a deterministic no-op; `claude-code` and `raw-react`
-  write real code.
+  writes the code*. You rarely set this: when omitted it is **derived from the
+  backend** — `mock → stub` (no-op), any real backend → `raw-react` (real code) —
+  so choosing a real brain writes real code on its own. `claude-code` (the agentic
+  `claude` binary) is opt-in only and never auto-selected.
 
-A real backend with the default `stub` adapter exercises the proxy / lineage /
-determinism path **without** generating real code. For real code generation, pair
-a real backend with a real adapter (§5).
+> **You usually only set `--backend`.** Pick a real backend and you get real code,
+> because the adapter follows it. Reach for `--adapter` only to override — e.g.
+> `--adapter stub` to exercise the proxy/lineage path *without* generating code, or
+> `--adapter claude-code` to drive the agentic `claude` binary.
 
 ---
 
@@ -226,28 +231,47 @@ export FOUNDRY_OLLAMA_URL=http://localhost:11434
 uv run python -m foundry.cli "build a todo API" --backend ollama-gemma --out ./out
 ```
 
-`mock` writes no real code (the `stub` adapter no-ops). For real code generation,
-pair a real backend with a real adapter — see §5. In the Workshop UI, the backend
-is a dropdown; `FOUNDRY_MODEL_BACKEND` only sets which option is preselected (§9).
+`mock` writes no real code (it derives the `stub` no-op adapter). Any **real**
+backend writes real code automatically — the adapter is derived as `raw-react`, so
+you don't need a second flag (override only when you want something else; see §5).
+In the Workshop UI, the backend is a dropdown; `FOUNDRY_MODEL_BACKEND` only sets
+which option is preselected (§9).
 
 ---
 
 ## 5. Choosing a coding substrate (`--adapter`)
 
-The adapter is what actually writes the code. Default `stub`.
+The adapter is what actually writes the code. **You normally omit it** — it's
+derived from `--backend` (`mock → stub`, any real backend → `raw-react`), so a real
+backend already writes real code. Set `--adapter` only to override that default.
 
 ```bash
-# 1. stub — deterministic no-op; structure only (smoke/demo, default)
-uv run python -m foundry.cli "build a dice roller" --adapter stub --out ./out
+# 1. Derived (recommended) — omit --adapter; a real backend ⇒ raw-react writes code
+uv run python -m foundry.cli "build a dice roller" --backend anthropic --out ./out
 
-# 2. claude-code — real `claude -p` writes the files (needs the claude binary)
+# 2. Override: stub — force the deterministic no-op even on a real backend
+#    (exercises the proxy / lineage / determinism path WITHOUT generating code)
+uv run python -m foundry.cli "build a dice roller" \
+  --backend anthropic --adapter stub --out ./out
+
+# 3. Override: raw-react explicitly — the universal completion substrate over ANY
+#    backend. `--backend claude-cli` here writes code via `claude -p` (completion only).
+uv run python -m foundry.cli "build a dice roller" \
+  --backend claude-cli --adapter raw-react --out ./out
+
+# 4. Override: claude-code — the AGENTIC `claude` binary (its own loop; needs the
+#    `claude` CLI on PATH). Opt-in only; never auto-selected.
 uv run python -m foundry.cli "build a dice roller" \
   --adapter claude-code --backend claude-cli --out ./out
-
-# 3. raw-react — real code generated via whichever --backend you chose
-uv run python -m foundry.cli "build a dice roller" \
-  --adapter raw-react --backend anthropic --out ./out
 ```
+
+**The three substrates:**
+
+| Adapter | Kind | Writes code? | Notes |
+|---|---|---|---|
+| `stub` | no-op | no | derived default for `mock`; structure only |
+| `raw-react` | raw completion, **any** backend | yes | derived default for every real backend |
+| `claude-code` | agentic `claude` binary | yes | opt-in only; needs the `claude` CLI; bypasses the proxy seam |
 
 ---
 
@@ -377,7 +401,7 @@ make clean           # remove caches + ./.run output
 | Variable | Purpose | Default |
 |---|---|---|
 | `FOUNDRY_MODEL_BACKEND` | Default backend | `mock` |
-| `FOUNDRY_CODING_ADAPTER` | Default adapter | `stub` |
+| `FOUNDRY_CODING_ADAPTER` | Default adapter | derived from backend |
 | `ANTHROPIC_API_KEY` | `anthropic` backend key | — |
 | `CLAUDE_CODE_OAUTH_TOKEN` | `claude-cli` backend (via `make token`) | — |
 | `OPENAI_API_KEY` | `codex` backend key | — |
@@ -399,7 +423,7 @@ make clean           # remove caches + ./.run output
 |---|---|---|
 | `--mode` | `assistant` · `gated` · `autonomous` | `assistant` |
 | `--backend` | `mock` · `anthropic` · `claude-cli` · `codex` · `ollama-gemma` | `mock` |
-| `--adapter` | `stub` · `claude-code` · `raw-react` | `stub` |
+| `--adapter` | `stub` · `raw-react` · `claude-code` | derived from `--backend` (`mock`→`stub`, real→`raw-react`) |
 | `--spec FILE\|DIR` | spec input (repeatable) | — |
 | `--packs a,b` | domain packs (`regulated` · `ml_data` · `frontend`) | — |
 | `--docs DIR` | generated doc-set output | — |

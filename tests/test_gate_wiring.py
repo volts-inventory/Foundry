@@ -36,6 +36,7 @@ from foundry.graph.gate_wiring import (
     SPEC_BOUNDARY,
     FeatureDiffBodyError,
     PathContainmentError,
+    _parse_addition_diff,
     flake_quarantined,
     materialize_workdir,
     route_after_gates,
@@ -568,6 +569,40 @@ def test_unsupported_hunk_shape_fails_closed(tmp_path, verifier):
         materialize_workdir(
             state, tmp_path / "wd", resolve=resolve, resolve_blob=lambda u: mod
         )
+
+
+def test_real_git_style_addition_diff_is_parsed() -> None:
+    """A REAL git unified diff (what `claude -p` / the OpenAI SDK emit) round-trips:
+    the `diff --git`/`index`/`new file mode` preamble is skipped, every `+` line is
+    content, and `\\ No newline at end of file` is ignored."""
+    body = (
+        "diff --git a/pkg/reverse_words.py b/pkg/reverse_words.py\n"
+        "new file mode 100644\n"
+        "index 0000000..a1b2c3d\n"
+        "--- /dev/null\n"
+        "+++ b/pkg/reverse_words.py\n"
+        "@@ -0,0 +1,2 @@\n"
+        "+def reverse_words(s):\n"
+        "+    return ' '.join(reversed(s.split()))\n"
+        "\\ No newline at end of file\n"
+    )
+    files = _parse_addition_diff("cas://sha256/x", body)
+    assert files == {
+        "pkg/reverse_words.py": "def reverse_words(s):\n    return ' '.join(reversed(s.split()))\n"
+    }
+
+
+def test_real_git_style_multi_file_diff_splits_on_diff_git() -> None:
+    """A multi-file git diff must split on the next `diff --git`, not bleed one
+    file's preamble into the prior file's content."""
+    body = (
+        "diff --git a/app.py b/app.py\n--- /dev/null\n+++ b/app.py\n@@ -0,0 +1,1 @@\n"
+        "+X = 1\n"
+        "diff --git a/test_app.py b/test_app.py\n--- /dev/null\n+++ b/test_app.py\n"
+        "@@ -0,0 +1,1 @@\n+def test_x(): assert X == 1\n"
+    )
+    files = _parse_addition_diff("cas://sha256/x", body)
+    assert files == {"app.py": "X = 1\n", "test_app.py": "def test_x(): assert X == 1\n"}
 
 
 def test_path_traversal_rejected_before_write(tmp_path, verifier):

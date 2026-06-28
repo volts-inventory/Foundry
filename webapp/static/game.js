@@ -1686,8 +1686,10 @@ fetch("/api/config").then(r=>r.json()).then(c=>{
     sel.value=c.default_backend;
   const asel=document.getElementById("adapter-select");
   reconcileSelect(asel, c.adapters, c.default_adapter);
-  if(c.default_adapter && asel && [...asel.options].some(o=>o.value===c.default_adapter))
-    asel.value=c.default_adapter;
+  // The coding substrate is DERIVED from the backend (parity with the CLI:
+  // mock→stub, any real backend→raw-react), so a real backend writes real code
+  // without a second pick. syncAdapter() applies it unless the user overrode it.
+  syncAdapter();
   MODELS_BY_BACKEND = c.models_by_backend || {};
   updateModelNote();
   syncCostCap();
@@ -1696,7 +1698,7 @@ fetch("/api/config").then(r=>r.json()).then(c=>{
 // The USD cost cap only binds *metered* API backends (real per-token charges).
 // mock is offline, ollama is local, and claude-cli bills a flat subscription —
 // so for those a per-build USD cap is meaningless: disable + annotate the field.
-const METERED_BACKENDS = ["anthropic","codex"];
+const METERED_BACKENDS = ["anthropic","openai","codex"];
 function syncCostCap(){
   const backend = document.getElementById("backend-select").value;
   const cap = document.getElementById("cap-input");
@@ -1706,7 +1708,20 @@ function syncCostCap(){
   cap.placeholder = metered ? "no cap" : `${backend} isn't metered — no USD cost`;
   if(!metered) cap.value = "";
 }
-document.getElementById("backend-select").addEventListener("change", ()=>{ syncCostCap(); updateModelNote(); });
+// Coding substrate derived from the backend (CLI parity): mock→stub no-op, any
+// real backend→raw-react (real code). A user who manually picks an adapter pins
+// it (adapterTouched), so derivation never clobbers an explicit choice.
+function defaultAdapterFor(backend){ return backend==="mock" ? "stub" : "raw-react"; }
+let adapterTouched = false;
+function syncAdapter(){
+  const asel = document.getElementById("adapter-select");
+  if(!asel || adapterTouched) return;
+  const want = defaultAdapterFor(document.getElementById("backend-select").value);
+  if([...asel.options].some(o=>o.value===want)) asel.value = want;
+}
+{ const asel = document.getElementById("adapter-select");
+  if(asel) asel.addEventListener("change", ()=>{ adapterTouched = true; }); }
+document.getElementById("backend-select").addEventListener("change", ()=>{ syncCostCap(); syncAdapter(); updateModelNote(); });
 syncCostCap();
 
 // Autonomous mode is HANDS-OFF by definition: the trust-root admission controller

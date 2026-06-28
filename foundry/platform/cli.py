@@ -32,8 +32,11 @@ def _parser() -> argparse.ArgumentParser:
                                       "(web,api,backend,data,worker); default: inferred")
     p.add_argument("--max-parallel", type=int, default=DEFAULT_MAX_PARALLEL,
                    help=f"services built concurrently (default: {DEFAULT_MAX_PARALLEL})")
-    p.add_argument("--max-slots-per-service", type=int, default=4,
-                   help="task parallelism inside each service build (default: 4)")
+    p.add_argument("--max-slots-per-service", type=int, default=6,
+                   help="task parallelism inside each service build (default: 6)")
+    p.add_argument("--passes", type=int, default=1,
+                   help="deepening iterations per service: each pass extends the prior "
+                        "tree toward completeness (default: 1; complex services want 2-3)")
     p.add_argument("--cost-cap-microusd", type=int, default=None,
                    help="per-service spend envelope in micro-USD (metered backends)")
     p.add_argument("--plan-only", action="store_true",
@@ -75,6 +78,7 @@ def main(argv: list[str] | None = None) -> int:
         max_parallel=args.max_parallel,
         max_slots_per_service=args.max_slots_per_service,
         cost_cap_microusd=args.cost_cap_microusd,
+        passes=args.passes,
     )
     print(result.summary())
     return 0 if result.passed else 1

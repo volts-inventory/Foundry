@@ -176,8 +176,10 @@ def _default_adapter_for(backend: str) -> str:
 # guard). Effective parallelism = min(tasks the lead created, AUTO_SLOTS_CAP); a
 # single-task build still runs serially. An explicit --max-slots / FOUNDRY_MAX_SLOTS
 # only LOWERS or RAISES this ceiling for constrained/over-provisioned infra; it is
-# never required, and the default is fully automatic.
-AUTO_SLOTS_CAP = 4
+# never required, and the default is fully automatic. The ceiling itself is tunable
+# via FOUNDRY_SLOTS_CAP (default 8) so a complex, many-task build can fan out wider
+# without per-call flags.
+AUTO_SLOTS_CAP = max(1, int(os.environ.get("FOUNDRY_SLOTS_CAP") or 8))
 # Minimal system prompt for the raw-react substrate (the full task prompt — pinned
 # constraints, task, spans, "emit a unified diff" — is built by the adapter itself).
 _RAW_REACT_SOP = (
@@ -410,8 +412,10 @@ def _enforce_mode_veto(
 # Spec ingestion (task [8]). A whole-run cap on the design-spec text seeded into
 # state: bounds checkpoint size + token cost on a large doc / directory; the
 # product nodes truncate again for their prompts. Read as UTF-8, errors replaced
-# (a spec is plain input data, never executed — no new trust surface).
-_SPEC_MAX_BYTES = 512 * 1024
+# (a spec is plain input data, never executed — no new trust surface). Tunable via
+# FOUNDRY_SPEC_MAX_BYTES (default 2 MiB) so a complex build can ground itself in a
+# large design doc; raising it trades a bigger checkpoint / more tokens for depth.
+_SPEC_MAX_BYTES = max(64 * 1024, int(os.environ.get("FOUNDRY_SPEC_MAX_BYTES") or (2 * 1024 * 1024)))
 _SPEC_SUFFIXES = (".md", ".txt")
 
 # A unified-diff ADDITION blob carrying a passing test, so the integrated tree

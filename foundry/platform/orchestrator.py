@@ -32,6 +32,15 @@ from foundry.platform.stitch import stitch_monorepo
 DEFAULT_MAX_PARALLEL = 4
 
 
+# Appended to a service request on DEEPENING passes (2..N): grow the existing tree
+# toward completeness instead of re-rolling it greenfield.
+_DEEPEN_DIRECTIVE = (
+    " You are given the EXISTING codebase for this service as the starting tree. EXTEND it: "
+    "add the missing features, edge cases, error handling, and tests to bring it to a "
+    "near-complete state. Build on what's there — do not rewrite it from scratch."
+)
+
+
 def _build_one(
     svc: ServiceSpec,
     *,
@@ -42,29 +51,48 @@ def _build_one(
     work_dir: str,
     max_slots: int,
     cost_cap_microusd: int | None,
+    passes: int = 1,
 ) -> ServiceResult:
-    """Build a single service into ``work_dir/<svc.name>`` and project the result."""
-    svc_out = os.path.join(work_dir, svc.name)
-    state_dir = os.path.join(work_dir, ".state", svc.name)
-    os.makedirs(state_dir, exist_ok=True)
-    try:
-        result = run_service(
-            svc.request,
-            backend=backend,
-            mode=mode,
-            spec=spec_text or None,
-            thread_id=f"{plan_name}-{svc.name}",
-            state_dir=state_dir,
-            output_dir=svc_out,
-            docs_dir=os.path.join(svc_out, "docs"),
-            max_slots=max_slots,
-            cost_cap_microusd=cost_cap_microusd,
-        )
-    except Exception as exc:  # a service failing to build must not sink the platform
-        return ServiceResult(
-            name=svc.name, role=svc.role, passed=False, phase=f"error: {exc}",
-            source_root=None, is_draft=False, gates={},
-        )
+    """Build a service into ``work_dir`` and project the result.
+
+    ``passes`` > 1 runs deepening iterations: each pass rebuilds the service ON TOP
+    of the previous pass's tree (``base_dir``), layering depth the engine's single
+    planning pass can't reach in one shot. The LAST pass's tree is the result.
+    """
+    base: str | None = None
+    result = None
+    for p in range(1, max(1, passes) + 1):
+        svc_out = os.path.join(work_dir, svc.name if p == passes else f"{svc.name}.p{p}")
+        state_dir = os.path.join(work_dir, ".state", svc.name, f"p{p}")
+        os.makedirs(state_dir, exist_ok=True)
+        request = svc.request + (_DEEPEN_DIRECTIVE if p > 1 else "")
+        try:
+            result = run_service(
+                request,
+                backend=backend,
+                mode=mode,
+                spec=spec_text or None,
+                thread_id=f"{plan_name}-{svc.name}-p{p}",
+                state_dir=state_dir,
+                output_dir=svc_out,
+                docs_dir=os.path.join(svc_out, "docs"),
+                max_slots=max_slots,
+                cost_cap_microusd=cost_cap_microusd,
+                base_dir=base,                       # build on the prior pass's tree
+            )
+        except Exception as exc:  # a service failing to build must not sink the platform
+            return ServiceResult(
+                name=svc.name, role=svc.role, passed=False, phase=f"error: {exc}",
+                source_root=base, is_draft=bool(base), gates={},
+            )
+        out = result.output_root or result.draft_root
+        if not out:
+            break                                    # nothing produced — stop deepening
+        base = out                                   # next pass extends this tree
+
+    if result is None:
+        return ServiceResult(name=svc.name, role=svc.role, passed=False, phase="no output",
+                             source_root=None, is_draft=False, gates={})
     source = result.output_root or result.draft_root
     return ServiceResult(
         name=svc.name,
@@ -86,8 +114,9 @@ def build_platform(
     name: str | None = None,
     only: list[str] | None = None,
     max_parallel: int = DEFAULT_MAX_PARALLEL,
-    max_slots_per_service: int = 4,
+    max_slots_per_service: int = 6,
     cost_cap_microusd: int | None = None,
+    passes: int = 1,
     work_dir: str | None = None,
 ) -> PlatformResult:
     """Plan, build every service, and stitch the monorepo at ``out_dir``.
@@ -114,7 +143,7 @@ def build_platform(
                 _build_one, svc,
                 plan_name=plan.name, backend=backend, mode=mode, spec_text=spec_text,
                 work_dir=staging, max_slots=max_slots_per_service,
-                cost_cap_microusd=cost_cap_microusd,
+                cost_cap_microusd=cost_cap_microusd, passes=passes,
             ): svc
             for svc in plan.services
         }

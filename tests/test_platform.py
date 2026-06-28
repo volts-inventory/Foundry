@@ -103,6 +103,19 @@ def test_build_platform_stitches_a_monorepo(tmp_path) -> None:  # type: ignore[n
     assert {s["name"] for s in manifest["services"]} == {s.name for s in result.services}
 
 
+def test_deepening_passes_build_on_prior_tree(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    out = str(tmp_path / "deep")
+    result = build_platform(
+        "a tiny REST api", out_dir=out, backend="mock", only=["api"], passes=2,
+    )
+    assert result.passed
+    # pass 1 lands in <name>.p1, the final pass in <name>; both exist in staging
+    staging = os.path.join(out, ".platform-build")
+    assert os.path.isdir(os.path.join(staging, "api.p1"))   # first (greenfield) pass
+    assert os.path.isdir(os.path.join(staging, "api"))      # final (deepened) pass
+    assert os.path.isdir(os.path.join(out, "services", "api"))
+
+
 def test_game_platform_skips_compose_service(tmp_path) -> None:  # type: ignore[no-untyped-def]
     out = str(tmp_path / "game")
     result = build_platform("a lua based farming game like stardew", out_dir=out, backend="mock")

@@ -703,20 +703,20 @@ def route_after_gates(
 
     Returns:
 
-    * :data:`ADVANCE` — every relevant gate has a PASS verdict (and none is
-      latched); proceed to the next phase.
-    * :data:`FIX` — a FAIL or (non-flake) ERROR within the convergence bound, or
-      a relevant verdict missing entirely (defense-in-depth: never advance on an
-      absent verdict); route back to the responsible layer.
-    * :data:`HALT` — a stable-FAIL latch on the integrated digest (committed
-      cross-fork, terminal — a later PASS never auto-clears it), or the
-      ``max_fix_attempts`` convergence bound exhausted; escalate / stop.
+    * :data:`ADVANCE` — every relevant gate has a PASS verdict on a non-disqualified
+      digest; proceed to the next phase.
+    * :data:`FIX` — a FAIL / (non-flake) ERROR, a missing relevant verdict, OR a
+      stable-FAIL-latched digest, WITHIN the convergence bound; route back to the
+      responsible layer to fix FORWARD into a new tree.
+    * :data:`HALT` — the ``max_fix_attempts`` convergence bound is exhausted (escalate
+      with the best draft); a non-fixable terminal condition.
 
-    ``records`` is the cross-fork :class:`GlobalRecordsView` consulted for the
-    stable-FAIL latch (a mutable committed read, never cached). A flake-
-    quarantine ERROR (N=2 split) is treated as a transient retry, NOT a FAIL —
-    it routes to FIX within the bound, HALT once the bound is spent, but never
-    fails or advances the boundary on its own.
+    The stable-FAIL latch (committed cross-fork; ``records``) permanently DISQUALIFIES
+    the failing digest — a later PASS on that SAME tree never clears it (governance §5,
+    anti-gaming) — but it no longer ends the run on its own: the bounded fix loop lets
+    the engineers produce a NEW, passing tree (a real-shop fix-forward), and HALT fires
+    only when the bound is spent. A flake-quarantine ERROR (N=2 split) is likewise a
+    bounded retry, never a boundary FAIL/advance on its own.
     """
     gate_names = _BOUNDARY_GATES.get(boundary)
     if gate_names is None:
@@ -724,16 +724,16 @@ def route_after_gates(
 
     latest = _relevant_latest(state, gate_names)
 
-    # 1. Stable-FAIL latch is terminal — keyed on the integrated digest the
-    #    verdict ran against (monotonic, cross-fork; governance §5).
-    for g in latest.values():
-        if records.stable_fail_latched(g.run_against, g.name):
-            return HALT
-
     bound_spent = _fix_attempts(state, config) >= max_fix_attempts
 
-    # 2. A hard FAIL, or an ERROR that is not flake-quarantine, needs a fix —
-    #    or HALT if the convergence bound is exhausted.
+    # A relevant gate needs a fix when it FAILs, ERRORs, is MISSING (never advance on
+    # an absent verdict), OR its digest carries a stable-FAIL latch. A latched digest
+    # is permanently DISQUALIFIED — it can never be admitted, and a later (flaky/gamed)
+    # PASS on that SAME tree never clears it (governance §5, anti-gaming preserved). But
+    # a disqualified tree does NOT end the run: like a real shop whose CI failed, the
+    # engineers fix FORWARD into a NEW tree (a new digest the latch never touched). We
+    # therefore route to the BOUNDED fix loop and HALT only once ``max_fix_attempts`` is
+    # spent — escalate then, rather than shipping nothing on the first failure.
     needs_fix = False
     for name in gate_names:
         verdict = latest.get(name)
@@ -744,9 +744,13 @@ def route_after_gates(
             # FAIL, infra ERROR, OR flake-quarantine ERROR all route to bounded
             # retry — none advances the boundary (fail-closed).
             needs_fix = True
+        elif records.stable_fail_latched(verdict.run_against, verdict.name):
+            # A disqualified digest showing a PASS must NOT advance — route to a fresh
+            # attempt instead (the latch can never be cleared on this tree).
+            needs_fix = True
 
     if needs_fix:
         return HALT if bound_spent else FIX
 
-    # 3. All relevant gates PASS and nothing is latched.
+    # All relevant gates PASS on a non-disqualified digest.
     return ADVANCE

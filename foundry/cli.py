@@ -1062,7 +1062,7 @@ def run(
     resolve_blob: BlobResolver | None = None,
     adapter: str | Any | None = None,
     diff_body: str | None = None,
-    max_fix_attempts: int = 3,
+    max_fix_attempts: int = 5,
     docs_dir: str | None = None,
     output_dir: str | None = None,
     checkpoints: bool | list[str | CheckpointBoundary] | None = None,
@@ -1131,7 +1131,11 @@ def run(
         assurance Audit gate reads a lockfile inventory). Pass an explicit
         error/failing body to exercise the halted-run path.
     max_fix_attempts:
-        Convergence bound for the gate fix-loop.
+        Convergence bound for the gate fix-loop (default 5). On a gate FAIL/ERROR the
+        run fixes FORWARD — back to the responsible layer WITH the specific failures —
+        up to this many times before HALTing (escalate). The failed tree's digest stays
+        permanently disqualified each round (anti-gaming); only a genuinely-passing NEW
+        tree ships. Raise it for "keep working until it's green"; 0 disables retries.
     output_dir:
         When set AND the build PASSES (terminal gates pass), write a single
         **GitHub-ready repository** here: the accepted integrated source tree at
@@ -1640,7 +1644,7 @@ def main(argv: list[str] | None = None) -> int:
         args, _tid = _take_value(args, "--thread-id", what="a value")
         thread_id = _tid if _tid is not None else "cli-run"
         args, _mfa = _take_int(args, "--max-fix-attempts", minimum=1)
-        max_fix_attempts = _mfa if _mfa is not None else 3
+        max_fix_attempts = _mfa if _mfa is not None else 5
 
         # Parallelism is SYSTEM-DECIDED: the Tech-Lead decomposes the work and the
         # IC pool sizes itself to that plan (min(tasks, AUTO_SLOTS_CAP)). --max-slots

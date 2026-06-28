@@ -324,10 +324,12 @@ def test_zone_a_error_retries_without_latch(tmp_path, rt, runner, records, verif
     )
 
 
-# ---- 4. integrated FAIL latches; a later PASS does not auto-clear ------------
+# ---- 4. integrated FAIL: digest disqualified forever, but fix-forward bounded -
 
 
-def test_integrated_fail_latches_and_does_not_autoclear(tmp_path, rt, runner, records, verifier):
+def test_integrated_fail_latches_but_fixes_forward_then_halts_when_spent(
+    tmp_path, rt, runner, records, verifier
+):
     # Criteria omit a security_abuse criterion -> Spec FAIL on the integrated digest.
     bad_state, bad_resolve, bad_blob = _seed((_criterion("c1"),))  # no security criterion
     spec_out = run_spec_gate(
@@ -341,23 +343,31 @@ def test_integrated_fail_latches_and_does_not_autoclear(tmp_path, rt, runner, re
     )
     fail = spec_out["gates"][0]
     assert fail.status is GateStatus.FAIL
-    # run_against is an integrated tree_sha (hex digest) -> stable-FAIL latched.
+    # The failing digest is permanently disqualified (anti-gaming, gov §5).
     assert records.stable_fail_latched(fail.run_against, "spec")
 
     state_with = {**bad_state, "gates": spec_out["gates"]}
+    # WITHIN the bound: route to a FRESH attempt (fix forward) — not a dead stop.
     assert (
-        route_after_gates(state_with, _config(), boundary=SPEC_BOUNDARY, records=records) == "halt"
+        route_after_gates(state_with, _config(), boundary=SPEC_BOUNDARY, records=records) == "fix"
     )
 
-    # A later genuine PASS on the SAME digest does not auto-clear the latch.
-    assert records.stable_fail_latched(fail.run_against, "spec")
-    # Even folding a hypothetical PASS, routing still halts (latch is terminal).
+    # The latch is NEVER cleared: even a (flaky/gamed) PASS on the SAME digest does
+    # not advance — it routes to another fresh attempt, never shipping that tree.
     good_pass = fail.model_copy(update={"status": GateStatus.PASS})
-    # (Not attested for PASS; routing reads the latch regardless of channel content.)
-    still = route_after_gates(
-        {**bad_state, "gates": [good_pass]}, _config(), boundary=SPEC_BOUNDARY, records=records
+    assert records.stable_fail_latched(fail.run_against, "spec")
+    assert (
+        route_after_gates(
+            {**bad_state, "gates": [good_pass]}, _config(), boundary=SPEC_BOUNDARY, records=records
+        )
+        == "fix"
     )
-    assert still == "halt"
+
+    # Once the convergence bound is SPENT, escalate (halt) — don't loop forever.
+    spent = {"configurable": {"thread_id": RUN_ID, "fix_attempts": 3}}
+    assert (
+        route_after_gates(state_with, spent, boundary=SPEC_BOUNDARY, records=records) == "halt"
+    )
 
 
 # ---- 4b. critic-flagged security/abuse omission FAILS the Spec gate ----------
@@ -386,12 +396,17 @@ def test_critic_security_omission_fails_spec_no_pr(tmp_path, rt, runner, records
     )
     fail = spec_out["gates"][0]
     assert fail.name == "spec" and fail.status is GateStatus.FAIL
-    # Attested FAIL on an integrated digest -> latched + routes to halt (no PR).
+    # Attested FAIL on an integrated digest -> latched (digest disqualified) + routes
+    # to the bounded fix loop (fix forward into a new tree), HALT once the bound spends.
     assert merge_gates(spec_out["gates"], None) == spec_out["gates"]
     assert records.stable_fail_latched(fail.run_against, "spec")
     state_with = {**state, "gates": spec_out["gates"]}
     assert (
-        route_after_gates(state_with, _config(), boundary=SPEC_BOUNDARY, records=records) == "halt"
+        route_after_gates(state_with, _config(), boundary=SPEC_BOUNDARY, records=records) == "fix"
+    )
+    spent = {"configurable": {"thread_id": RUN_ID, "fix_attempts": 3}}
+    assert (
+        route_after_gates(state_with, spent, boundary=SPEC_BOUNDARY, records=records) == "halt"
     )
 
 

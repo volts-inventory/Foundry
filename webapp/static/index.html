@@ -107,8 +107,8 @@
         <p class="hint" id="parallel-note">Automatic — the tech-lead decomposes the
           work and the system runs the independent tasks in parallel.</p>
       </div>
-      <label>Auto-fix attempts <span class="hint">— retries per failing gate (default 3)</span></label>
-      <input id="fix-input" type="number" min="0" max="10" value="3" />
+      <label>Auto-fix attempts <span class="hint">— fix-forward retries until green (default 5)</span></label>
+      <input id="fix-input" type="number" min="0" max="20" value="5" />
       <label>Cost cap (USD) <span class="hint">— max model spend (metered API backends only)</span></label>
       <input id="cap-input" type="number" min="0" step="0.01" placeholder="no cap" />
       <label>Domain packs (optional, comma-separated)</label>

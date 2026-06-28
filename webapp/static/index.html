@@ -88,6 +88,7 @@
         <select id="backend-select">
           <option value="mock">mock — deterministic, offline (no key)</option>
           <option value="anthropic">anthropic — Claude API (ANTHROPIC_API_KEY)</option>
+          <option value="openai">openai — OpenAI API (OPENAI_API_KEY)</option>
           <option value="claude-cli">claude-cli — claude -p (Max subscription)</option>
           <option value="codex">codex — codex CLI (OPENAI_API_KEY)</option>
           <option value="ollama-gemma">ollama-gemma — local Ollama endpoint</option>
@@ -98,7 +99,6 @@
         <label>Coding substrate</label>
         <select id="adapter-select">
           <option value="stub">stub — deterministic no-op (smoke/demo)</option>
-          <option value="claude-code">claude-code — claude -p writes the code</option>
           <option value="raw-react">raw-react — code via the chosen backend</option>
         </select>
       </div>

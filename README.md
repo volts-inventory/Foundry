@@ -12,12 +12,106 @@ with no API key until you opt into a real model.
 
 ---
 
+## CLI at a glance
+
+Every flag, with what it does, inline. Defaults are shown in each comment — the
+bare command (no flags) is a fully working, keyless, deterministic run.
+
+```bash
+python -m foundry.cli [OPTIONS] "<one-line request>"   # build a GitHub-ready repo from one sentence
+
+# ── Release posture ───────────────────────────────────────────────────────────
+  --mode <assistant|gated|autonomous>  # trust posture: advisory PR · full gates+sign-off · hands-off deploy   (default: assistant)
+
+# ── Model egress & code generation (orthogonal seams) ─────────────────────────
+  --backend <mock|anthropic|openai|claude-cli|codex|ollama-gemma>  # WHERE model calls go (the "brain")      (default: mock — keyless/deterministic)
+  --adapter <stub|raw-react>                                # WHAT writes the code (the "hands"); usually OMIT — it's DERIVED from --backend
+                                                            #   omitted ⇒ mock→stub (no-op) · any real backend→raw-react (real code)
+                                                            #   raw-react writes code via `claude -p` (claude-cli) or the Anthropic API (anthropic)
+
+# ── Inputs ────────────────────────────────────────────────────────────────────
+  --spec <FILE|DIR>          # ground the build with a spec beyond the one-liner; REPEATABLE   (default: none)
+  --packs <name1,name2>      # engage domain packs: regulated|ml_data|frontend; a pack may VETO a mode   (default: none)
+  --docs <DIR>               # write the generated doc set (PRD / design / ops) here           (default: none)
+
+# ── Output & durable state ────────────────────────────────────────────────────
+  --out <DIR>                # write the generated repo here                                   (default: none — report only)
+  --state-dir <DIR>          # durable, restart-survivable state (overrides FOUNDRY_STATE_DIR) (default: in-memory)
+  --thread-id <NAME>         # run identity; seeds idempotency keys + resume                   (default: cli-run)
+
+# ── Budgets & flow control ────────────────────────────────────────────────────
+  --max-fix-attempts <N>     # auto-fix retries per FAILING gate (N ≥ 1)                        (default: 3)
+  --max-slots <N>            # parallelism CEILING; pool usually auto-sizes (N ≥ 1)             (default: auto)
+  --cost-cap-microusd <N>    # global spend envelope in micro-USD, for metered backends         (default: none)
+  --checkpoints [all|product,design,release]  # pause at stage boundaries (CLI auto-approves)   (default: off)
+
+# ── Subcommand: evolve an already-released repo (re-gate a change) ─────────────
+python -m foundry.cli evolve <prior-repo> "<change>" [OPTIONS]
+  --apply <DIR>              # overlay these changed files onto the prior tree
+  --guardian-approve         # authorize a protected criterion / oracle / gate edit (else blocked)
+  --strict                   # exit non-zero if the re-gate REFUSES to release (for CI)
+
+# Exit codes:  0 = passed (PR-ready)  ·  1 = halted / failed  ·  2 = usage error
+# Run with no arguments to print the full usage text:  python -m foundry.cli
+```
+
+---
+
+## Contents
+
+1. [Requirements](#requirements)
+2. [Setup](#1-setup)
+3. [Quickstart (CLI)](#2-quickstart-cli)
+4. [Picking a mode](#3-picking-a-mode)
+5. [Setting the backend (real models)](#4-setting-the-backend-real-models)
+6. [Choosing a coding substrate (`--adapter`)](#5-choosing-a-coding-substrate---adapter)
+7. [Feeding a spec](#6-feeding-a-spec)
+8. [Common flags](#7-common-flags)
+9. [Evolve an existing repo](#8-evolve-an-existing-repo)
+10. [Workshop UI](#9-workshop-ui)
+11. [Develop](#10-develop)
+12. [Configuration reference](#configuration-reference)
+
+---
+
+## How it works
+
+```
+"<one-line request>"
+        │
+        ▼
+  product ──▶ architecture ──▶ engineering ──▶ QA ──▶ security ──▶ gates
+        │            │              │            │         │          │
+        └──────── one graph; agents share state, parallelize, and re-loop ───────┘
+                                                                       │
+                                                                       ▼
+                                                          ./out  (code + docs + report)
+```
+
+Two seams are deliberately independent, and worth internalizing before you start:
+
+- **`--backend`** — the model egress ("the brain"). It decides *where model calls
+  go*. `mock` is a deterministic, keyless transport; the others route real,
+  metered calls through the single-egress proxy.
+- **`--adapter`** — the coding substrate ("the hands"). It decides *what actually
+  writes the code*. You rarely set this: when omitted it is **derived from the
+  backend** — `mock → stub` (no-op), any real backend → `raw-react` (real code) —
+  so choosing a real brain writes real code on its own. `raw-react` is the universal
+  completion substrate: it writes code via `claude -p` under `claude-cli`, and via
+  the Anthropic API under `anthropic`.
+
+> **You usually only set `--backend`.** Pick a real backend and you get real code,
+> because the adapter follows it. Reach for `--adapter` only to override — e.g.
+> `--adapter stub` to exercise the proxy/lineage path *without* generating code.
+
+---
+
 ## Requirements
 
 - Python ≥ 3.12 and [`uv`](https://docs.astral.sh/uv/).
 - Docker (only for `make up` / compose).
-- A real backend (optional): an Anthropic API key, the `claude` CLI on a Max
-  plan, the `codex` CLI, or a local Ollama.
+- A real backend (optional): an Anthropic API key, an OpenAI API key, the `claude`
+  CLI on a Max plan, the `codex` CLI, or a local Ollama.
 
 ---
 
@@ -95,10 +189,16 @@ make run REQUEST="build a todo API"       # uses anthropic
 | Backend | What it is | Required setting(s) | How to get it |
 |---|---|---|---|
 | `mock` | Keyless, deterministic stub (default) | none | — |
-| `anthropic` | Claude API | `ANTHROPIC_API_KEY` | console.anthropic.com |
+| `anthropic` | Claude API (SDK, direct) | `ANTHROPIC_API_KEY` | console.anthropic.com |
+| `openai` | OpenAI API (SDK `chat.completions`, direct) | `OPENAI_API_KEY` | platform.openai.com |
 | `claude-cli` | `claude -p` on a Max plan | `CLAUDE_CODE_OAUTH_TOKEN` | `make token` |
-| `codex` | codex CLI | `OPENAI_API_KEY` | platform.openai.com |
+| `codex` | codex CLI (`codex exec`) | `OPENAI_API_KEY` | platform.openai.com |
 | `ollama-gemma` | Local Ollama endpoint | `FOUNDRY_OLLAMA_URL` | run Ollama locally |
+
+Each provider is reachable two ways — a **direct SDK** backend and a **CLI** backend:
+Anthropic via `anthropic` (API) or `claude-cli` (`claude -p`); OpenAI via `openai`
+(API) or `codex` (`codex exec`). The direct-SDK backends keep the grammar-constrained
+verdict channel (native JSON-schema); the CLIs degrade it to fail-closed JSON parsing.
 
 Optional, any real backend — pin the exact model id per tier when your egress
 serves one the default map doesn't name (else the fail-closed drift policy
@@ -119,46 +219,63 @@ rejects the call):
 # 1. mock — keyless, deterministic (default; demos + CI). No setup.
 uv run python -m foundry.cli "build a todo API" --backend mock --out ./out
 
-# 2. anthropic — Claude API. Set ANTHROPIC_API_KEY.
+# 2. anthropic — Claude API (direct SDK). Set ANTHROPIC_API_KEY.
 export ANTHROPIC_API_KEY=sk-ant-...
 uv run python -m foundry.cli "build a todo API" --backend anthropic --out ./out
 
-# 3. claude-cli — `claude -p` on a Max subscription. Mint a token, add to .env.
+# 3. openai — OpenAI API (direct SDK chat.completions). Set OPENAI_API_KEY.
+export OPENAI_API_KEY=sk-...
+uv run python -m foundry.cli "build a todo API" --backend openai --out ./out
+
+# 4. claude-cli — `claude -p` on a Max subscription. Mint a token, add to .env.
 make token                                # logs in; prints CLAUDE_CODE_OAUTH_TOKEN
 echo "CLAUDE_CODE_OAUTH_TOKEN=<token>" >> .env
 uv run python -m foundry.cli "build a todo API" --backend claude-cli --out ./out
 
-# 4. codex — codex CLI. Set OPENAI_API_KEY.
+# 5. codex — codex CLI (codex exec). Set OPENAI_API_KEY.
 export OPENAI_API_KEY=sk-...
 uv run python -m foundry.cli "build a todo API" --backend codex --out ./out
 
-# 5. ollama-gemma — local Ollama. Point at the endpoint.
+# 6. ollama-gemma — local Ollama. Point at the endpoint.
 export FOUNDRY_OLLAMA_URL=http://localhost:11434
 uv run python -m foundry.cli "build a todo API" --backend ollama-gemma --out ./out
 ```
 
-`mock` writes no real code (the `stub` adapter no-ops). For real code generation,
-pair a real backend with a real adapter — see §5. In the Workshop UI, the backend
-is a dropdown; `FOUNDRY_MODEL_BACKEND` only sets which option is preselected (§9).
+`mock` writes no real code (it derives the `stub` no-op adapter). Any **real**
+backend writes real code automatically — the adapter is derived as `raw-react`, so
+you don't need a second flag (override only when you want something else; see §5).
+In the Workshop UI, the backend is a dropdown; `FOUNDRY_MODEL_BACKEND` only sets
+which option is preselected (§9).
 
 ---
 
 ## 5. Choosing a coding substrate (`--adapter`)
 
-The adapter is what actually writes the code. Default `stub`.
+The adapter is what actually writes the code. **You normally omit it** — it's
+derived from `--backend` (`mock → stub`, any real backend → `raw-react`), so a real
+backend already writes real code. Set `--adapter` only to override that default.
 
 ```bash
-# 1. stub — deterministic no-op; structure only (smoke/demo, default)
-uv run python -m foundry.cli "build a dice roller" --adapter stub --out ./out
+# 1. Derived (recommended) — omit --adapter; a real backend ⇒ raw-react writes code
+uv run python -m foundry.cli "build a dice roller" --backend anthropic --out ./out
 
-# 2. claude-code — real `claude -p` writes the files (needs the claude binary)
+# 2. Override: stub — force the deterministic no-op even on a real backend
+#    (exercises the proxy / lineage / determinism path WITHOUT generating code)
 uv run python -m foundry.cli "build a dice roller" \
-  --adapter claude-code --backend claude-cli --out ./out
+  --backend anthropic --adapter stub --out ./out
 
-# 3. raw-react — real code generated via whichever --backend you chose
+# 3. Override: raw-react explicitly — the universal completion substrate over ANY
+#    backend. `--backend claude-cli` here writes code via `claude -p` (completion only).
 uv run python -m foundry.cli "build a dice roller" \
-  --adapter raw-react --backend anthropic --out ./out
+  --backend claude-cli --adapter raw-react --out ./out
 ```
+
+**The two substrates:**
+
+| Adapter | Kind | Writes code? | Notes |
+|---|---|---|---|
+| `stub` | no-op | no | derived default for `mock`; structure only |
+| `raw-react` | raw completion, **any** backend | yes | derived default for every real backend; writes code via `claude -p` (`claude-cli`) or the Anthropic API (`anthropic`) |
 
 ---
 
@@ -288,10 +405,10 @@ make clean           # remove caches + ./.run output
 | Variable | Purpose | Default |
 |---|---|---|
 | `FOUNDRY_MODEL_BACKEND` | Default backend | `mock` |
-| `FOUNDRY_CODING_ADAPTER` | Default adapter | `stub` |
+| `FOUNDRY_CODING_ADAPTER` | Default adapter | derived from backend |
 | `ANTHROPIC_API_KEY` | `anthropic` backend key | — |
 | `CLAUDE_CODE_OAUTH_TOKEN` | `claude-cli` backend (via `make token`) | — |
-| `OPENAI_API_KEY` | `codex` backend key | — |
+| `OPENAI_API_KEY` | `openai` + `codex` backend key | — |
 | `FOUNDRY_OLLAMA_URL` | `ollama-gemma` endpoint | — |
 | `FOUNDRY_MODEL_T1/T2/T3` | Pin exact model id per tier | curated map |
 | `FOUNDRY_MAX_SLOTS` | Parallelism ceiling | auto |
@@ -309,15 +426,18 @@ make clean           # remove caches + ./.run output
 | Flag | Values | Default |
 |---|---|---|
 | `--mode` | `assistant` · `gated` · `autonomous` | `assistant` |
-| `--backend` | `mock` · `anthropic` · `claude-cli` · `codex` · `ollama-gemma` | `mock` |
-| `--adapter` | `stub` · `claude-code` · `raw-react` | `stub` |
+| `--backend` | `mock` · `anthropic` · `openai` · `claude-cli` · `codex` · `ollama-gemma` | `mock` |
+| `--adapter` | `stub` · `raw-react` | derived from `--backend` (`mock`→`stub`, real→`raw-react`) |
 | `--spec FILE\|DIR` | spec input (repeatable) | — |
-| `--packs a,b` | domain packs | — |
+| `--packs a,b` | domain packs (`regulated` · `ml_data` · `frontend`) | — |
+| `--docs DIR` | generated doc-set output | — |
 | `--checkpoints` | `all` · `product,design,release` | off |
-| `--max-fix-attempts N` | gate fix-loop bound | `3` |
-| `--max-slots N` | parallelism ceiling | auto |
+| `--max-fix-attempts N` | gate fix-loop bound (N ≥ 1) | `3` |
+| `--max-slots N` | parallelism ceiling (N ≥ 1) | auto |
 | `--cost-cap-microusd N` | spend envelope | — |
 | `--out DIR` | output repo | — |
 | `--state-dir DIR` / `--thread-id NAME` | durable resume | in-memory / `cli-run` |
+
+**`evolve` subcommand:** `--apply DIR` · `--guardian-approve` · `--strict`
 
 Exit codes: `0` passed · `1` halted/failed · `2` usage error.

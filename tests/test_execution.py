@@ -1,13 +1,10 @@
 """Execution layer tests: sandbox cage, adapter contract, adapters.
 
-No network, no `claude` binary required (the one real-run test is skipped
-unless the binary happens to be present, and is timeout-guarded).
+No network required — the raw-react substrate drives an injected fake proxy seam.
 """
 
 from __future__ import annotations
 
-import json
-import shutil
 import time
 from pathlib import Path
 
@@ -16,10 +13,8 @@ from pydantic import ValidationError
 
 from foundry.execution.adapter_contract import (
     AdapterResult,
-    AdapterUnavailableError,
     TaskPacket,
 )
-from foundry.execution.adapters.claude_code import ClaudeCodeAdapter
 from foundry.execution.adapters.raw_react import RawReactAdapter
 from foundry.execution.sandbox import Sandbox
 from foundry.schemas.gates import GateTriage
@@ -222,13 +217,12 @@ def test_constraints_verbatim_round_trip(tmp_path: Path):
 def test_prompt_injects_constraints_verbatim_and_first(tmp_path: Path):
     constraints = ("never use floats for money", "unicode: ⧺ §2b — décorrélation")
     packet = make_packet(tmp_path, pinned_constraints=constraints)
-    for adapter in (RawReactAdapter(lambda p: ""), ClaudeCodeAdapter()):
-        prompt = adapter.build_prompt(packet)
-        for c in constraints:
-            assert c in prompt  # byte-for-byte, never paraphrased
-        assert prompt.index(constraints[0]) < prompt.index(constraints[1])
-        assert prompt.index(constraints[1]) < prompt.index("TASK:")
-        assert prompt.index("TASK:") < prompt.index("span-A")
+    prompt = RawReactAdapter(lambda p: "").build_prompt(packet)
+    for c in constraints:
+        assert c in prompt  # byte-for-byte, never paraphrased
+    assert prompt.index(constraints[0]) < prompt.index(constraints[1])
+    assert prompt.index(constraints[1]) < prompt.index("TASK:")
+    assert prompt.index("TASK:") < prompt.index("span-A")
 
 
 # ---------------------------------------------------------------------------
@@ -299,47 +293,3 @@ def test_raw_react_unparseable_response_still_triaged(sandbox: Sandbox):
     assert sandbox.get_blob(result.diff_uri) == b""  # no diff recorded
     assert len(result.triage) == 1
     assert "unparseable" in result.triage[0].explanation
-
-
-# ---------------------------------------------------------------------------
-# ClaudeCodeAdapter
-# ---------------------------------------------------------------------------
-
-_CLAUDE_PRESENT = shutil.which("claude") is not None
-
-
-@pytest.mark.skipif(_CLAUDE_PRESENT, reason="claude binary present; unavailable path untestable")
-def test_claude_code_unavailable(sandbox: Sandbox):
-    adapter = ClaudeCodeAdapter()
-    assert adapter.available() is False
-    with pytest.raises(AdapterUnavailableError):
-        adapter.run(make_packet(sandbox.worktree), sandbox)
-
-
-def test_claude_code_missing_binary_name_unavailable():
-    assert ClaudeCodeAdapter(claude_bin="definitely-not-a-real-binary-xyz").available() is False
-
-
-def test_claude_code_full_file_snapshot_diff_for_non_git_worktree(sandbox: Sandbox):
-    # worktree fixture is not a git repo -> diff falls back to full-file snapshot
-    text = ClaudeCodeAdapter()._capture_diff(sandbox)
-    manifest = json.loads(text)
-    assert manifest["kind"] == "full-file-snapshot"
-    assert manifest["files"]["hello.py"] == "print('hello')\n"
-
-
-@pytest.mark.skipif(not _CLAUDE_PRESENT, reason="claude binary not installed")
-def test_claude_code_trivial_real_run_guarded(sandbox: Sandbox):
-    # Env is scrubbed (no credentials) and the run is timeout-guarded, so this
-    # asserts only the adapter's plumbing: it must return a well-formed
-    # AdapterResult whatever the CLI manages to do.
-    adapter = ClaudeCodeAdapter(timeout_s=60.0)
-    assert adapter.available() is True
-    packet = make_packet(
-        sandbox.worktree, task={"id": "T1", "instructions": "reply with the word ok"}
-    )
-    result = adapter.run(packet, sandbox)
-    assert isinstance(result, AdapterResult)
-    assert result.diff_uri.startswith("cas://sha256/")
-    assert result.snapshot_digest
-    assert len(result.triage) >= 1

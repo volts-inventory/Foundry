@@ -4,17 +4,19 @@ The factory runs ONE flow. The only thing a backend swaps is the proxy's
 egress seam (:class:`~foundry.proxy.model_provider_proxy.ProviderTransport`)
 together with the tier→model map and the lineage map it resolves against —
 nothing in the graph, agents, gates, or admission changes. This module adds
-three drop-in transports beside the default Anthropic SDK transport:
+four drop-in transports beside the default Anthropic SDK transport:
 
+* :class:`OpenAITransport`     — calls the OpenAI SDK ``chat.completions`` directly
+  (the first-party OpenAI API, the direct-API twin of the Anthropic SDK transport);
 * :class:`ClaudeCliTransport`  — shells ``claude -p "<prompt>" --output-format json``;
 * :class:`CodexCliTransport`   — shells ``codex exec --json -m <model> "<prompt>"``;
 * :class:`OllamaTransport`     — POSTs ``/api/chat`` to a local Ollama server
   (e.g. a ``gemma3`` model), the local/offline backend.
 
-and three presets (:func:`claude_cli_backend`, :func:`codex_backend`,
-:func:`ollama_gemma_backend`) plus :func:`build_backend` / :func:`backend_from_env`
-that return a fully-wired :class:`ModelProviderProxy` — same proxy class, same
-contract, different backend.
+and four presets (:func:`openai_backend`, :func:`claude_cli_backend`,
+:func:`codex_backend`, :func:`ollama_gemma_backend`) plus :func:`build_backend` /
+:func:`backend_from_env` that return a fully-wired :class:`ModelProviderProxy` —
+same proxy class, same contract, different backend.
 
 TRUST NOTES (honest, per arch §2b / plan §0.3) — what stays and what changes
 when the backend is not the Anthropic SDK:
@@ -69,12 +71,14 @@ __all__ = [
     "CodexCliTransport",
     "HttpPost",
     "OllamaTransport",
+    "OpenAITransport",
     "TransportError",
     "backend_from_env",
     "build_backend",
     "claude_cli_backend",
     "codex_backend",
     "ollama_gemma_backend",
+    "openai_backend",
 ]
 
 
@@ -222,7 +226,7 @@ def _to_text(value: str | bytes | None) -> str:
 
 def _lenient_json_object(text: str) -> dict[str, Any]:
     """Parse stdout to a dict: strict first, else the outermost ``{...}`` span,
-    else ``{}`` (mirrors the claude_code adapter's tolerance)."""
+    else ``{}`` (tolerant of CLI chatter around the JSON object)."""
     text = text.strip()
     if not text:
         return {}
@@ -531,7 +535,90 @@ def _find_usage(event: dict[str, Any]) -> dict[str, int] | None:
 
 
 # --------------------------------------------------------------------------- #
-# Backend 3 — Ollama (local Gemma)                                              #
+# Backend 3 — OpenAI (direct SDK, `chat.completions`)                           #
+# --------------------------------------------------------------------------- #
+
+
+class OpenAITransport:
+    """Default transport over the real OpenAI SDK (``chat.completions``).
+
+    The first-party OpenAI egress — the direct-API twin of
+    :class:`~foundry.proxy.model_provider_proxy.AnthropicTransport`. (The ``codex``
+    backend also reaches OpenAI, but through the agentic ``codex exec`` CLI; this
+    one calls the API directly, a single-shot completion.) The client and the
+    credential it resolves are built lazily on first use, so importing this module
+    never needs a key or network — tests inject a fake ``client``.
+
+    OpenAI honours ``response_format=json_schema`` (a real decoding grammar), so the
+    grammar-constrained verdict channel is PRESERVED here (like Ollama, unlike the
+    CLIs). The system block + messages are sent as real chat roles; the proxy-pinned
+    ``temperature`` (deterministic gate/judge calls) and reasoning ``effort`` ride
+    through unchanged.
+    """
+
+    def __init__(self, client: Any | None = None) -> None:
+        self._client = client
+
+    def _ensure_client(self) -> Any:
+        if self._client is None:
+            try:
+                import openai
+            except ImportError as exc:  # pragma: no cover - import guard
+                raise TransportError(
+                    "the 'openai' backend requires the openai SDK; install it "
+                    "(e.g. `uv add openai` / `pip install openai`)"
+                ) from exc
+            self._client = openai.OpenAI()
+        return self._client
+
+    def send(self, request: dict[str, Any]) -> ProviderResponse:
+        model = request.get("model")
+        if not isinstance(model, str) or not model:
+            raise TransportError("openai transport requires a pinned model id on the request")
+
+        messages: list[dict[str, str]] = []
+        sys_text = _system_text(request)
+        if sys_text:
+            messages.append({"role": "system", "content": sys_text})
+        for role, text in _message_pairs(request):
+            messages.append({"role": role, "content": text})
+
+        params: dict[str, Any] = {"model": model, "messages": messages}
+        max_tokens = request.get("max_tokens")
+        if isinstance(max_tokens, int) and max_tokens > 0:
+            params["max_completion_tokens"] = max_tokens  # reasoning-model-safe form
+        if "temperature" in request:
+            params["temperature"] = request["temperature"]
+        effort = _as_dict(request.get("output_config", {})).get("effort")
+        if isinstance(effort, str) and effort:
+            params["reasoning_effort"] = effort
+        schema = _schema_of(request)
+        if schema is not None:
+            params["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "verdict", "schema": schema, "strict": True},
+            }
+
+        response = self._ensure_client().chat.completions.create(**params)
+        choice = response.choices[0] if getattr(response, "choices", None) else None
+        text = (getattr(choice.message, "content", "") or "") if choice is not None else ""
+        usage = getattr(response, "usage", None)
+        details = getattr(usage, "prompt_tokens_details", None) if usage else None
+        return ProviderResponse(
+            served_model=str(getattr(response, "model", "") or ""),
+            request_id=str(getattr(response, "id", "") or ""),
+            text=text if isinstance(text, str) else str(text),
+            usage=_usage(
+                input_tokens=_as_int(getattr(usage, "prompt_tokens", 0)) if usage else 0,
+                output_tokens=_as_int(getattr(usage, "completion_tokens", 0)) if usage else 0,
+                cache_read=_as_int(getattr(details, "cached_tokens", 0)) if details else 0,
+            ),
+            stop_reason=str(getattr(choice, "finish_reason", "") or "stop") if choice else "stop",
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Backend 4 — Ollama (local Gemma)                                             #
 # --------------------------------------------------------------------------- #
 
 # Injectable HTTP seam (url, json-payload) -> json-response; tests fake it.
@@ -617,10 +704,11 @@ class OllamaTransport:
 # Presets — wire (transport + tier_models + lineage) into the SAME proxy        #
 # --------------------------------------------------------------------------- #
 
-BackendName = Literal["anthropic", "claude-cli", "codex", "ollama-gemma"]
+BackendName = Literal["anthropic", "openai", "claude-cli", "codex", "ollama-gemma"]
 
 # Sensible default tier→model maps per backend. Override via build_backend(...,
 # tier_models=...) to pin the exact ids you run.
+OPENAI_TIER_MODELS: dict[str, str] = {"T1": "gpt-5", "T2": "gpt-5", "T3": "gpt-5-mini"}
 CODEX_TIER_MODELS: dict[str, str] = {"T1": "gpt-5-codex", "T2": "gpt-5", "T3": "gpt-5-mini"}
 GEMMA_TIER_MODELS: dict[str, str] = {"T1": "gemma3:27b", "T2": "gemma3:12b", "T3": "gemma3:4b"}
 
@@ -639,6 +727,24 @@ def claude_cli_backend(
         transport=ClaudeCliTransport(runner=runner, timeout_s=timeout_s),
         lineage_map=LineageMap(DEFAULT_LINEAGE_ENTRIES),
         tier_models=tier_models,  # None ⇒ proxy default TIER_MODELS
+        **proxy_kwargs,
+    )
+
+
+def openai_backend(
+    *,
+    tier_models: dict[str, str] | None = None,
+    client: Any | None = None,
+    **proxy_kwargs: Any,
+) -> ModelProviderProxy:
+    """Proxy backed by the OpenAI SDK (``chat.completions``). OpenAI lineage — a
+    genuinely different ``served_family`` from Anthropic, so the ``decorrelated``
+    profile becomes meaningful. The direct-API twin of the default Anthropic SDK
+    backend; ``client`` is injectable for tests (else built lazily from the env)."""
+    return ModelProviderProxy(
+        transport=OpenAITransport(client=client),
+        lineage_map=LineageMap((*OPENAI_LINEAGE_ENTRIES, *DEFAULT_LINEAGE_ENTRIES)),
+        tier_models=tier_models or OPENAI_TIER_MODELS,
         **proxy_kwargs,
     )
 
@@ -686,6 +792,8 @@ def build_backend(name: BackendName, **kwargs: Any) -> ModelProviderProxy:
     """
     if name == "anthropic":
         return ModelProviderProxy(**kwargs)
+    if name == "openai":
+        return openai_backend(**kwargs)
     if name == "claude-cli":
         return claude_cli_backend(**kwargs)
     if name == "codex":
@@ -693,7 +801,8 @@ def build_backend(name: BackendName, **kwargs: Any) -> ModelProviderProxy:
     if name == "ollama-gemma":
         return ollama_gemma_backend(**kwargs)
     raise ValueError(
-        f"unknown backend {name!r} (expected anthropic | claude-cli | codex | ollama-gemma)"
+        f"unknown backend {name!r} "
+        "(expected anthropic | openai | claude-cli | codex | ollama-gemma)"
     )
 
 

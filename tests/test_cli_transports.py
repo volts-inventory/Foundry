@@ -27,6 +27,7 @@ from foundry.proxy.cli_transports import (
     CliResult,
     CodexCliTransport,
     OllamaTransport,
+    OpenAITransport,
     backend_from_env,
 )
 from foundry.schemas.gates import GateStatus, JudgmentProvenance
@@ -71,6 +72,37 @@ def _ollama_post(response: dict[str, Any]) -> Any:
 
     post.calls = []  # type: ignore[attr-defined]
     return post
+
+
+def _openai_client(
+    *,
+    content: str = "",
+    model: str = "gpt-5",
+    request_id: str = "req-1",
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    cached_tokens: int = 0,
+    finish_reason: str = "stop",
+) -> Any:
+    """A fake openai.OpenAI() — mimics chat.completions.create and records params."""
+    from types import SimpleNamespace
+
+    def create(**params: Any) -> Any:
+        create.calls.append(params)  # type: ignore[attr-defined]
+        usage = SimpleNamespace(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=cached_tokens),
+        )
+        choice = SimpleNamespace(
+            message=SimpleNamespace(content=content), finish_reason=finish_reason
+        )
+        return SimpleNamespace(choices=[choice], model=model, id=request_id, usage=usage)
+
+    create.calls = []  # type: ignore[attr-defined]
+    return SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -334,6 +366,76 @@ def test_ollama_transport_requires_pinned_model() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Backend — OpenAI (direct SDK, chat.completions)                              #
+# --------------------------------------------------------------------------- #
+
+
+def test_openai_completion_observes_openai_lineage() -> None:
+    client = _openai_client(
+        content="openai output", model="gpt-5", prompt_tokens=12, completion_tokens=4
+    )
+    proxy = build_backend("openai", client=client)
+    result = proxy.complete(
+        "n1", "T1", "SYS", [{"role": "user", "content": "hi"}], purpose="ideation"
+    )
+    assert result.text == "openai output"
+    assert result.served_model == "gpt-5"
+    assert result.served_family == frozenset({"openai-gpt"})  # observed, not self-reported
+    assert result.usage["output_tokens"] == 4
+    # System block + user message went as real chat roles (no flattening).
+    params = client.chat.completions.create.calls[0]
+    assert [m["role"] for m in params["messages"]] == ["system", "user"]
+    assert params["model"] == "gpt-5"
+    # max_tokens is mapped to the reasoning-model-safe max_completion_tokens.
+    assert "max_completion_tokens" in params and "max_tokens" not in params
+
+
+def test_openai_verdict_channel_sends_native_json_schema_format() -> None:
+    client = _openai_client(content=json.dumps({"status": "approve", "findings": []}))
+    proxy = build_backend("openai", client=client, signer=_signer())
+    seq = Seq("r", 1, 1, "review", 0)
+    jr = proxy.judge(
+        "review",
+        "cas://sha256/abc",
+        "sha",
+        "nonce",
+        "SOP",
+        [{"role": "user", "content": "x"}],
+        seq=seq,
+    )
+    assert jr.gate_result.status is GateStatus.PASS
+    # OpenAI keeps the grammar: the proxy's verdict schema rode in response_format.
+    params = client.chat.completions.create.calls[0]
+    schema = params["response_format"]["json_schema"]["schema"]
+    assert schema["properties"]["status"]["enum"] == ["approve", "request-changes"]
+
+
+def test_openai_gate_call_pins_effort_not_temperature() -> None:
+    # gpt-5 is a reasoning model: a deterministic gate call pins `effort` (sent as
+    # reasoning_effort) and NEVER a temperature it would reject.
+    client = _openai_client(content="ok", model="gpt-5")
+    proxy = build_backend("openai", client=client)
+    result = proxy.complete(
+        "gate_node", "T1", "SYS", [{"role": "user", "content": "x"}], purpose="gate"
+    )
+    assert result.manifest_record["sampling"].get("effort")
+    params = client.chat.completions.create.calls[0]
+    assert "reasoning_effort" in params
+    assert "temperature" not in params
+
+
+def test_openai_transport_requires_pinned_model() -> None:
+    with pytest.raises(TransportError):
+        OpenAITransport(client=_openai_client()).send({"messages": []})
+
+
+def test_openai_default_tier_models_are_gpt5() -> None:
+    proxy = build_backend("openai", client=_openai_client())
+    assert proxy.tier_models["T1"] == "gpt-5"
+    assert proxy.tier_models["T3"] == "gpt-5-mini"
+
+
+# --------------------------------------------------------------------------- #
 # config-driven selection                                                      #
 # --------------------------------------------------------------------------- #
 
@@ -346,6 +448,11 @@ def test_backend_from_env_defaults_to_anthropic() -> None:
 def test_backend_from_env_selects_named_backend() -> None:
     proxy = backend_from_env({"FOUNDRY_MODEL_BACKEND": "ollama-gemma"}, http_post=_ollama_post({}))
     assert proxy.tier_models["T1"] == "gemma3:27b"
+
+
+def test_backend_from_env_selects_openai() -> None:
+    proxy = backend_from_env({"FOUNDRY_MODEL_BACKEND": "openai"}, client=_openai_client())
+    assert proxy.tier_models["T1"] == "gpt-5"
 
 
 def test_backend_from_env_points_ollama_at_shared_endpoint() -> None:

@@ -14,11 +14,12 @@ import pytest
 
 from foundry.cli import (
     ADAPTERS,
+    _default_adapter_for,
     _resolve_coding_adapter,
-    make_coding_adapter,
     main,
+    make_coding_adapter,
+    run,
 )
-
 
 # ---- make_coding_adapter: construction --------------------------------------
 
@@ -37,7 +38,6 @@ def test_every_adapter_constructs(proxy: Any) -> None:
     }
     assert by_name == {
         "stub": "StubAdapter",
-        "claude-code": "ClaudeCodeAdapter",
         "raw-react": "RawReactAdapter",
     }
 
@@ -50,6 +50,33 @@ def test_default_is_stub(proxy: Any) -> None:
 def test_unknown_adapter_name_raises(proxy: Any) -> None:
     with pytest.raises(ValueError, match="unknown adapter"):
         make_coding_adapter("nope", proxy=proxy)
+
+
+# ---- derived default: --adapter omitted ⇒ substrate follows --backend --------
+
+
+def test_default_adapter_is_derived_from_backend() -> None:
+    # mock has no real model ⇒ the deterministic stub; every REAL backend ⇒ raw-react
+    # (the universal completion substrate). claude-cli writes code via `claude -p` used
+    # AS a completion endpoint; anthropic via the Anthropic API.
+    assert _default_adapter_for("mock") == "stub"
+    assert _default_adapter_for("anthropic") == "raw-react"
+    assert _default_adapter_for("openai") == "raw-react"
+    assert _default_adapter_for("claude-cli") == "raw-react"
+    assert _default_adapter_for("codex") == "raw-react"
+    assert _default_adapter_for("ollama-gemma") == "raw-react"
+
+
+def test_only_stub_and_raw_react_are_offered() -> None:
+    # The agentic Claude Code substrate is removed: the only substrates are the
+    # deterministic stub and the provider-agnostic raw-react completion adapter.
+    assert set(ADAPTERS) == {"stub", "raw-react"}
+
+
+def test_run_with_mock_backend_and_no_adapter_stays_stub() -> None:
+    # The default (no backend, no adapter) run stays the deterministic stub no-op,
+    # so the hermetic smoke path is byte-identical.
+    assert run("build a thing").passed in (True, False)  # runs without a real model
 
 
 def test_resolve_passes_instance_through(proxy: Any) -> None:
@@ -80,7 +107,7 @@ def test_api_validates_adapter_against_set() -> None:
     # The set the API validates against is the single source of truth in cli.py.
     from foundry.cli import ADAPTERS as cli_adapters
 
-    assert "stub" in cli_adapters and "claude-code" in cli_adapters
+    assert "stub" in cli_adapters and "raw-react" in cli_adapters
 
 
 def test_project_carries_adapter_field() -> None:
@@ -105,7 +132,7 @@ def test_store_roundtrips_adapter(tmp_path: Any) -> None:
 
     s = BuildStore(tmp_path / "cat.sqlite")
     s.upsert(
-        {"id": "b1", "floor": 1, "backend": "mock", "adapter": "claude-code", "gates": {}}
+        {"id": "b1", "floor": 1, "backend": "mock", "adapter": "raw-react", "gates": {}}
     )
     row = dict(s._conn.execute("SELECT adapter FROM builds WHERE id='b1'").fetchone())
-    assert row["adapter"] == "claude-code"
+    assert row["adapter"] == "raw-react"

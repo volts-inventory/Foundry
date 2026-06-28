@@ -116,6 +116,12 @@ def test_deepening_passes_build_on_prior_tree(tmp_path) -> None:  # type: ignore
     assert os.path.isdir(os.path.join(out, "services", "api"))
 
 
+def test_completeness_critic_mock_is_complete() -> None:
+    from foundry.platform.critic import assess_completeness
+    v = assess_completeness("a service", ".", backend="mock")
+    assert v is not None and v.complete and v.gaps == ()
+
+
 def test_auto_passes_converge_below_the_failsafe(tmp_path) -> None:  # type: ignore[no-untyped-def]
     out = str(tmp_path / "auto")
     result = build_platform(

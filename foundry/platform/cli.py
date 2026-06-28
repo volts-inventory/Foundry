@@ -40,6 +40,9 @@ def _parser() -> argparse.ArgumentParser:
                         "services stop early, complex ones run longer); or a fixed integer")
     p.add_argument("--max-passes", type=int, default=6,
                    help="failsafe ceiling on auto deepening passes per service (default: 6)")
+    p.add_argument("--no-critic", action="store_true",
+                   help="disable the LLM completeness critic; auto-deepening then stops "
+                        "on the structural plateau signal alone (mock always skips it)")
     p.add_argument("--cost-cap-microusd", type=int, default=None,
                    help="per-service spend envelope in micro-USD (metered backends)")
     p.add_argument("--plan-only", action="store_true",
@@ -84,6 +87,7 @@ def main(argv: list[str] | None = None) -> int:
         cost_cap_microusd=args.cost_cap_microusd,
         passes=passes,
         max_passes=args.max_passes,
+        critic=not args.no_critic,
     )
     print(result.summary())
     return 0 if result.passed else 1

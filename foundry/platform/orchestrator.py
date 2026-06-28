@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from foundry.cli import run as run_service
 from foundry.platform.contracts import build_contract, contract_files, contract_spec_text
+from foundry.platform.critic import assess_completeness
 from foundry.platform.planner import plan_platform
 from foundry.platform.schema import (
     PlatformPlan,
@@ -81,6 +82,7 @@ def _build_one(
     cost_cap_microusd: int | None,
     passes: int | str = "auto",
     max_passes: int = 6,
+    critic: bool = True,
 ) -> ServiceResult:
     """Build a service into ``work_dir`` and project the result.
 
@@ -96,6 +98,7 @@ def _build_one(
     cap = max(1, max_passes if auto else int(passes))
     base: str | None = None
     prev_metrics: tuple[int, int] | None = None
+    gaps: tuple[str, ...] = ()
     result = None
     used = 0
     for p in range(1, cap + 1):
@@ -105,7 +108,12 @@ def _build_one(
         svc_out = os.path.join(work_dir, svc.name if last else f"{svc.name}.p{p}")
         state_dir = os.path.join(work_dir, ".state", svc.name, f"p{p}")
         os.makedirs(state_dir, exist_ok=True)
-        request = svc.request + (_DEEPEN_DIRECTIVE if p > 1 else "")
+        directive = ""
+        if p > 1:
+            directive = _DEEPEN_DIRECTIVE
+            if gaps:  # target the rebuild at the critic's named gaps (not a blind rerun)
+                directive += " Specifically close these gaps:\n- " + "\n- ".join(gaps[:12])
+        request = svc.request + directive
         try:
             result = run_service(
                 request,
@@ -130,9 +138,17 @@ def _build_one(
             break                                    # nothing produced — stop deepening
         cur = _tree_metrics(out)
         base = out                                   # next pass extends this tree
-        # AUTO stop: verified (gates passed) AND the tree has plateaued -> "done".
-        if auto and p > 1 and result.passed and not _still_growing(prev_metrics, cur):
-            break
+        if auto:
+            # Verified first: only judge completeness on a tree that PASSED its gates.
+            if result.passed:
+                verdict = assess_completeness(svc.request, out, backend=backend) if critic else None
+                if verdict and verdict.complete:
+                    break                            # critic: technically near-complete -> done
+                if verdict is not None:
+                    gaps = verdict.gaps              # feed the named gaps into the next pass
+            # Failsafe: if the tree has plateaued (can't make progress), stop anyway.
+            if p > 1 and not _still_growing(prev_metrics, cur):
+                break
         prev_metrics = cur
 
     if result is None:
@@ -166,6 +182,7 @@ def build_platform(
     cost_cap_microusd: int | None = None,
     passes: int | str = "auto",
     max_passes: int = 6,
+    critic: bool = True,
     work_dir: str | None = None,
 ) -> PlatformResult:
     """Plan, build every service, and stitch the monorepo at ``out_dir``.
@@ -193,6 +210,7 @@ def build_platform(
                 plan_name=plan.name, backend=backend, mode=mode, spec_text=spec_text,
                 work_dir=staging, max_slots=max_slots_per_service,
                 cost_cap_microusd=cost_cap_microusd, passes=passes, max_passes=max_passes,
+                critic=critic,
             ): svc
             for svc in plan.services
         }

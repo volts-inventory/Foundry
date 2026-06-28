@@ -954,7 +954,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _new_project(self) -> None:
         # validate against the real backend + adapter sets
-        from foundry.cli import ADAPTERS, BACKENDS
+        from foundry.cli import ADAPTERS, BACKENDS, _default_adapter_for
 
         body = self._read_json()
         request = str(body.get("request", "")).strip() or "build a tiny URL-shortener service"
@@ -964,9 +964,12 @@ class Handler(BaseHTTPRequestHandler):
         backend = str(body.get("backend", "mock"))
         if backend not in BACKENDS:
             backend = "mock"
-        adapter = str(body.get("adapter", "stub"))
+        # The adapter is DERIVED from the backend when not explicitly provided (CLI
+        # parity: mock→stub, any real backend→raw-react), so a real backend writes
+        # real code without a second field. An explicit valid adapter still wins.
+        adapter = str(body.get("adapter", "")).strip()
         if adapter not in ADAPTERS:
-            adapter = "stub"
+            adapter = _default_adapter_for(backend)
         raw_packs = body.get("packs", [])
         if isinstance(raw_packs, str):
             raw_packs = raw_packs.replace(",", " ").split()

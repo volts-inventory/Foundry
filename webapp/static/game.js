@@ -1159,19 +1159,23 @@ class FloorScene extends Phaser.Scene {
       this.laneDecor.push(this.add.text(L.cx, R.y+20, tag+" ·"+L.ics,
         {fontFamily:"'PixelFont','Courier New'",fontSize:"9px",fontStyle:"bold",color:"#"+col6})
         .setOrigin(0.5,0).setDepth(28));
-      // Tech-Lead at the lane head
+      // Tech-Lead at the lane head — on its own colour carpet (slightly bigger).
+      const cols=L.w>118?2:1;
       const yLead=R.y+58;
+      const leadCW=Math.min(58, L.w-10);
+      this.laneDecor.push(this._carpet(L.cx, yLead+8, leadCW, 36, L.color, true));
       const lk=kitFor("Tech-Lead "+L.area, hashStr((this.proj.id||'f')+"TL"+L.area)); lk.accent=L.color;
       const lws=this.makeWorkstation(L.cx, yLead+16, L.color);
       const ls=this.makePerson(L.cx, yLead, lk); ls.setScale(1.25).setDepth(yLead);
       ls.home={x:L.cx,y:yLead}; ls.loungeSlot=leadSlot++; ls.seen=true; ls.inLounge=false;
       this.startWalk(ls); this.techLeadGroup.push(ls, lws);
-      // expert ICs stacked beneath, inside the lane (1–2 cols by lane width)
-      const cols=L.w>118?2:1;
+      // expert ICs stacked beneath, each in its OWN colour-carpet cell.
+      const icCW = cols>1 ? Math.min(42, L.w/2-6) : Math.min(52, L.w-12);
       for(let i=0;i<L.ics;i++){
         const c=i%cols, r=Math.floor(i/cols);
         const x = cols>1 ? Math.round(L.x0 + L.w*(0.3+0.4*c)) : L.cx;
         const y = R.floorY + 58 + r*46;
+        this.laneDecor.push(this._carpet(x, y+8, icCW, 32, L.color, false));
         const k=poolKit(icSlot); k.accent=L.color;
         const ws=this.makeWorkstation(x, y+16, L.color);
         const s=this.makePerson(x, y, k); s.setScale(1.25).setDepth(y).setAlpha(0.96);
@@ -1204,6 +1208,15 @@ class FloorScene extends Phaser.Scene {
     this.poolLabel=this.add.text(R.cx, R.y+24, "ICs ×"+n,
       {fontFamily:"'PixelFont','Courier New'",fontSize:"10px",fontStyle:"bold",color:"#ffc08a"})
       .setOrigin(0.5,0).setDepth(28);
+  }
+
+  // A small per-engineer colour CARPET — each engineer's own section, tinted by
+  // their area (fill + a brighter outline). Sits under the desk (depth 1).
+  _carpet(x, y, w, h, color, lead){
+    const c=this.add.container(x, y).setDepth(1);
+    c.add(this.add.rectangle(0, 0, Math.max(20,w), h, color, lead?0.26:0.20));
+    c.add(this.add.rectangle(0, 0, Math.max(20,w), h).setStrokeStyle(1, color, 0.55));
+    return c;
   }
 }
 

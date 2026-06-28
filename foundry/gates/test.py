@@ -49,21 +49,30 @@ _NO_TESTS_COLLECTED = 5
 # Env key naming the host paths to FENCE OFF from the pinned-harness subprocess.
 _DENY_PATHS_ENV = "FOUNDRY_GATE_DENY_PATHS"
 
-# The pinned pytest invocation, run as a bootstrap that ISOLATES generated code
-# from ours: it removes the host source checkout (``_DENY_PATHS_ENV``) from
-# ``sys.path`` and puts the workdir first BEFORE importing pytest. So a model-named
-# module that collides with a host package (e.g. ``foundry.x``) resolves to the
-# WORKDIR and can never reach — or be shadowed by — our code. (Best-effort, in
-# the shared interpreter; the Docker sandbox runner is the hard boundary.)
-_ISOLATED_PYTEST_BOOTSTRAP = (
-    "import os,sys;"
-    "deny={os.path.realpath(p) for p in os.environ.get('FOUNDRY_GATE_DENY_PATHS','')"
-    ".split(os.pathsep) if p};"
-    "sys.path[:]=[p for p in sys.path if os.path.realpath(p) not in deny];"
-    "sys.path.insert(0,os.getcwd());"
-    "from pytest import console_main;"
-    "sys.exit(console_main())"
-)
+# The pinned pytest invocation, run as a bootstrap that ISOLATES generated code from
+# ours: it cd's to the workdir, removes the host source checkout (``_DENY_PATHS_ENV``)
+# from ``sys.path`` and puts the workdir first BEFORE importing pytest — so a model-
+# named module that collides with a host package (e.g. ``foundry.x``) resolves to the
+# WORKDIR and can never reach or be shadowed by our code — then caps cpu/file/proc
+# resources. Run on its own (in-process fence) OR inside the namespace sandbox.
+_ISOLATED_PYTEST_BOOTSTRAP = """\
+import os, sys, resource
+wd = os.environ.get("FOUNDRY_GATE_WORKDIR") or os.getcwd()
+os.chdir(wd)
+_raw = os.environ.get("FOUNDRY_GATE_DENY_PATHS", "").split(os.pathsep)
+deny = {os.path.realpath(p) for p in _raw if p}
+sys.path[:] = [p for p in sys.path if os.path.realpath(p) not in deny]
+sys.path.insert(0, wd)
+for _res, _lim in ((resource.RLIMIT_CPU, (300, 300)),
+                   (resource.RLIMIT_FSIZE, (256 << 20, 256 << 20)),
+                   (resource.RLIMIT_NPROC, (1024, 1024))):
+    try:
+        resource.setrlimit(_res, _lim)
+    except Exception:
+        pass
+from pytest import console_main
+sys.exit(console_main())
+"""
 
 
 def _host_source_root() -> str | None:
@@ -137,10 +146,10 @@ class TestGate:
         self.scanner_rule_version = "pytest-harness-v1"
         self._timeout_s = timeout_s
 
-    def _env(self) -> dict[str, str]:
-        # Tell the isolating bootstrap which host paths to fence off (the source
-        # checkout root); absent ⇒ nothing stripped (normal install / no checkout).
-        extra: dict[str, str] = {}
+    def _env(self, workdir: Path) -> dict[str, str]:
+        # Tell the isolating bootstrap where to run (the workdir) and which host paths
+        # to fence off (the source checkout root); absent deny ⇒ nothing stripped.
+        extra: dict[str, str] = {"FOUNDRY_GATE_WORKDIR": str(Path(workdir).resolve())}
         root = _host_source_root()
         if root:
             extra[_DENY_PATHS_ENV] = root
@@ -149,16 +158,16 @@ class TestGate:
     # ---- zone A: pinned harness execution, raw rc + summary ---------------
 
     def _ground(self, workdir: Path) -> tuple[int, str, str]:
-        """Run the pinned harness over ``workdir``. The HARD boundary (a throwaway
-        container with none of our code) is used when ``FOUNDRY_GATE_SANDBOX=docker``;
-        otherwise the in-process isolated harness (host source fenced off sys.path)."""
+        """Run the pinned harness over ``workdir``. By default the isolated pytest runs
+        inside the namespace sandbox (no network, isolated mount/pid/ipc/uts — see
+        ``sandbox.py``); ``FOUNDRY_GATE_SANDBOX=inprocess`` runs it in-process with only
+        the sys.path fence. Either way generated code can't import or shadow ours."""
         from .sandbox import run_in_sandbox, sandbox_enabled
 
+        env = self._env(workdir)
         if sandbox_enabled():
-            return run_in_sandbox(workdir, timeout_s=self._timeout_s)
-        return run_grounding_command(
-            self.cmd, workdir, env=self._env(), timeout_s=self._timeout_s
-        )
+            return run_in_sandbox(self.cmd, workdir, env=env, timeout_s=self._timeout_s)
+        return run_grounding_command(self.cmd, workdir, env=env, timeout_s=self._timeout_s)
 
     def execute(self, workdir: Path) -> ZoneAObservation:
         rc, out, err = self._ground(workdir)

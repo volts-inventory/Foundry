@@ -1,68 +1,53 @@
-"""Docker sandbox runner for the test gate — argv construction + gate routing.
-
-No Docker daemon is needed: these prove the INVOCATION is correctly fenced and that
-the gate routes to the sandbox only when opted in (the grounding call is faked)."""
+"""Namespace (``unshare``) sandbox for the test gate — argv, routing, fail-closed,
+and a REAL end-to-end run (user namespaces are available in CI, so we exercise it)."""
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
+
+import pytest
 
 from foundry.gates import sandbox
 from foundry.gates import test as testmod
+from foundry.gates.runner import GroundingUnavailable
 from foundry.gates.sandbox import (
-    SANDBOX_PYTEST,
-    docker_run_argv,
+    UNSHARE_FLAGS,
     sandbox_enabled,
-    sandbox_image,
+    unshare_available,
+    wrap_argv,
 )
 from foundry.gates.test import TestGate
 from foundry.schemas.gates import GateStatus
 
 
-def test_docker_run_argv_is_fully_fenced(tmp_path: Any) -> None:
-    argv = docker_run_argv(tmp_path, "img:1")
-    assert argv[:3] == ["docker", "run", "--rm"]
-    # no network, read-only rootfs + workdir, writable scratch, resource caps
-    assert argv[argv.index("--network") + 1] == "none"
-    assert "--read-only" in argv
-    assert f"{tmp_path.resolve()}:/work:ro" in argv          # workdir mounted READ-ONLY
-    assert argv[argv.index("--tmpfs") + 1].startswith("/tmp")
-    assert "--memory" in argv and "--pids-limit" in argv
-    # the image precedes the inner pinned-pytest argv
-    assert argv[argv.index("img:1") + 1:] == list(SANDBOX_PYTEST)
-
-
 def test_sandbox_is_the_default_and_opt_out_disables_it(monkeypatch: Any) -> None:
-    # Default (unset) -> sandbox ON: untrusted generated code is ALWAYS containerized.
     monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)
-    assert sandbox_enabled() is True
-    monkeypatch.setenv("FOUNDRY_GATE_SANDBOX", "docker")
-    assert sandbox_enabled() is True
-    # Only an explicit opt-out value runs the weaker in-process harness.
+    assert sandbox_enabled() is True                       # default: always sandboxed
     for off in ("inprocess", "in-process", "none", "off"):
         monkeypatch.setenv("FOUNDRY_GATE_SANDBOX", off)
-        assert sandbox_enabled() is False
-    monkeypatch.delenv("FOUNDRY_GATE_SANDBOX_IMAGE", raising=False)
-    assert sandbox_image() == "foundry-test-sandbox"
-    monkeypatch.setenv("FOUNDRY_GATE_SANDBOX_IMAGE", "reg/x@sha256:abc")
-    assert sandbox_image() == "reg/x@sha256:abc"
+        assert sandbox_enabled() is False                  # explicit opt-out only
 
 
-def test_docker_infra_failure_is_fail_closed_error(tmp_path: Any, monkeypatch: Any) -> None:
-    # A docker self-failure (daemon down=125 / image missing=125 / exec=126/127) must
-    # raise GroundingUnavailable -> ERROR, NOT a misleading test FAIL or silent run.
-    from foundry.gates.runner import GroundingUnavailable
-
-    def fake_run(argv: Any, workdir: Any, *, env: Any = None, timeout_s: float = 600.0) -> Any:
-        return (125, "", "Cannot connect to the Docker daemon")
-
-    monkeypatch.setattr(sandbox, "run_grounding_command", fake_run)
-    import pytest as _pytest
-    with _pytest.raises(GroundingUnavailable):
-        sandbox.run_in_sandbox(tmp_path)
+def test_wrap_argv_uses_unprivileged_namespaces() -> None:
+    argv = wrap_argv(("python", "-c", "pass"))
+    assert argv[0] == "unshare"
+    # the load-bearing isolation flags: unprivileged userns + NO network + ns isolation
+    for flag in ("--user", "--map-root-user", "--net", "--mount", "--pid"):
+        assert flag in argv
+    assert argv[-3:] == ["python", "-c", "pass"]           # the wrapped cmd is last
+    assert tuple(argv[1:1 + len(UNSHARE_FLAGS)]) == UNSHARE_FLAGS
 
 
-def test_gate_routes_to_sandbox_when_enabled(tmp_path: Any, monkeypatch: Any) -> None:
-    monkeypatch.setenv("FOUNDRY_GATE_SANDBOX", "docker")
+def test_run_in_sandbox_fails_closed_when_unavailable(tmp_path: Any, monkeypatch: Any) -> None:
+    # No usable user namespaces -> fail-closed ERROR, never an unsandboxed run.
+    monkeypatch.setattr(sandbox, "unshare_available", lambda: False)
+    with pytest.raises(GroundingUnavailable):
+        sandbox.run_in_sandbox(("true",), tmp_path)
+
+
+def test_gate_routes_through_sandbox_when_enabled(tmp_path: Any, monkeypatch: Any) -> None:
+    monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)   # default = sandbox
+    monkeypatch.setattr(sandbox, "unshare_available", lambda: True)
     captured: dict[str, Any] = {}
 
     def fake_run(argv: Any, workdir: Any, *, env: Any = None, timeout_s: float = 600.0) -> Any:
@@ -71,12 +56,12 @@ def test_gate_routes_to_sandbox_when_enabled(tmp_path: Any, monkeypatch: Any) ->
 
     monkeypatch.setattr(sandbox, "run_grounding_command", fake_run)
     obs = TestGate().execute(tmp_path)
-    assert captured["argv"][:2] == ["docker", "run"]         # went through the sandbox
-    assert TestGate().decide(obs) is GateStatus.PASS          # parsed "1 passed" -> PASS
+    assert captured["argv"][0] == "unshare"                 # wrapped in the namespace
+    assert TestGate().decide(obs) is GateStatus.PASS
 
 
-def test_gate_in_process_harness_when_sandbox_off(tmp_path: Any, monkeypatch: Any) -> None:
-    monkeypatch.setenv("FOUNDRY_GATE_SANDBOX", "inprocess")   # explicit opt-out
+def test_gate_in_process_when_opted_out(tmp_path: Any, monkeypatch: Any) -> None:
+    monkeypatch.setenv("FOUNDRY_GATE_SANDBOX", "inprocess")
     captured: dict[str, Any] = {}
 
     def fake_run(cmd: Any, workdir: Any, *, env: Any = None, timeout_s: float = 600.0) -> Any:
@@ -85,5 +70,32 @@ def test_gate_in_process_harness_when_sandbox_off(tmp_path: Any, monkeypatch: An
 
     monkeypatch.setattr(testmod, "run_grounding_command", fake_run)
     TestGate().execute(tmp_path)
-    assert "docker" not in captured["cmd"][0]                 # NOT the container path
-    assert "-c" in captured["cmd"]                            # the isolating bootstrap
+    assert captured["cmd"][0] != "unshare"                  # NOT wrapped
+    assert "-c" in captured["cmd"]                          # the isolating bootstrap
+
+
+@pytest.mark.skipif(not unshare_available(), reason="no unprivileged user namespaces")
+def test_namespace_sandbox_really_runs_and_blocks_network(tmp_path: Any, monkeypatch: Any) -> None:
+    """End-to-end: a generated impl under ``foundry/`` (the collision case) PASSES
+    inside the real namespace sandbox, and the network is OFF (no exfiltration)."""
+    monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)   # real sandbox
+    (tmp_path / "foundry").mkdir()
+    (tmp_path / "foundry" / "text_processing.py").write_text(
+        "def reverse_words(s):\n    return ' '.join(reversed(s.split()))\n", encoding="utf-8"
+    )
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_rw.py").write_text(
+        "import socket\n"
+        "from foundry.text_processing import reverse_words\n\n\n"
+        "def test_rw():\n    assert reverse_words('a b c') == 'c b a'\n\n\n"
+        "def test_no_network():\n"
+        "    import pytest\n"
+        "    with pytest.raises(OSError):\n"
+        "        socket.create_connection(('1.1.1.1', 53), timeout=2)\n",
+        encoding="utf-8",
+    )
+    rc, out, _err = sandbox.run_in_sandbox(
+        TestGate().cmd, tmp_path, env=TestGate()._env(Path(tmp_path)), timeout_s=120.0
+    )
+    assert rc == 0, out          # both tests passed: collision resolved + network blocked
+    assert "2 passed" in out

@@ -1,21 +1,18 @@
-"""Docker sandbox runner for the test gate — the HARD isolation boundary.
+"""Namespace sandbox for running untrusted generated code — the project-wide
+isolation primitive (no Docker daemon, no image; just Linux user namespaces).
 
-The in-process pinned harness (``test.py``) fences the host source off ``sys.path``
-so generated code can't collide with ours, but it still runs in OUR interpreter, on
-OUR filesystem and network. For real builds of untrusted model code the principled
-boundary is a throwaway container that carries python + the pinned pytest and NONE
-of our code: a generated test then has no way to reach, import, or shadow the
-``foundry`` package, can't touch the network, and runs under resource caps.
+A single seam, ``run_in_sandbox(cmd, workdir)``, wraps ANY grounding command in an
+unprivileged ``unshare`` so model-generated code runs with **no network** (can't
+exfiltrate), an isolated **mount / PID / IPC / UTS** namespace, and a clean
+process-tree teardown — while the in-process pinned harness still fences our source
+off ``sys.path`` (so a generated module can't import or shadow ``foundry.*``). It is
+reusable by every gate that grounds over a workdir (test, build, e2e) and by the
+upcoming run/preview feature.
 
-Opt-in via ``FOUNDRY_GATE_SANDBOX=docker`` (the in-process harness stays the default
-so the hermetic suite — and any host without a Docker daemon — keeps working). The
-image is the ``test-sandbox`` stage of the project Dockerfile::
-
-    docker build --target test-sandbox -t foundry-test-sandbox .
-
-This module only BUILDS the invocation (a pure, unit-testable ``docker run`` argv)
-and shells it through the same grounding seam the in-process harness uses, so the
-two-zone contract (zone A observes rc/out/err; zone B decides) is unchanged.
+It is the DEFAULT (untrusted code is always sandboxed); opt out with
+``FOUNDRY_GATE_SANDBOX=inprocess`` on hosts without unprivileged user namespaces
+that accept the weaker in-process-only isolation. If the sandbox is selected but
+unavailable, grounding fails CLOSED (ERROR) — never a silent unsandboxed run.
 """
 
 from __future__ import annotations
@@ -26,105 +23,78 @@ from pathlib import Path
 from .runner import GroundingUnavailable, run_grounding_command
 
 __all__ = [
-    "SANDBOX_PYTEST",
-    "docker_run_argv",
+    "UNSHARE_FLAGS",
     "run_in_sandbox",
     "sandbox_enabled",
-    "sandbox_image",
+    "unshare_available",
+    "wrap_argv",
 ]
 
-# Default sandbox image (the Dockerfile's ``test-sandbox`` stage). Overridable so a
-# deployment can pin a digest from its own registry.
-_DEFAULT_IMAGE = "foundry-test-sandbox"
-
-# Explicit opt-OUT values: run the (weaker) in-process harness instead of a
-# container. For the hermetic test suite and hosts with no Docker daemon that
-# accept the weaker isolation — everything else gets the sandbox.
+# Explicit opt-OUT values: run WITHOUT the namespace sandbox (in-process only).
 _OPT_OUT = frozenset({"inprocess", "in-process", "none", "off", "0", "false", "no"})
 
-# ``docker run`` self-failures (daemon down, image missing, OCI/exec error): these
-# are INFRA, not a test verdict — they must fail-closed as ERROR, never a FAIL and
-# never a silent in-process run of untrusted code.
-_DOCKER_INFRA_EXITS = frozenset({125, 126, 127})
-
-# The pinned harness, run INSIDE the container. Plain pytest — the container itself
-# is the isolation (it holds none of our code); cache off (the rootfs is read-only).
-SANDBOX_PYTEST: tuple[str, ...] = (
-    "python", "-m", "pytest", "-q", "--tb=no", "-p", "no:cacheprovider",
+# Unprivileged namespace isolation (util-linux ``unshare``):
+#   --user --map-root-user  unprivileged; the caller becomes root INSIDE the userns
+#   --net                   empty network namespace -> NO network (no exfiltration)
+#   --mount --pid --uts --ipc   isolate mounts / processes / hostname / IPC
+#   --fork --kill-child     run the cmd as a child and reap the whole tree on exit
+#   --mount-proc            give the new PID namespace a correct /proc
+UNSHARE_FLAGS: tuple[str, ...] = (
+    "--user", "--map-root-user",
+    "--net", "--mount", "--pid", "--uts", "--ipc",
+    "--fork", "--kill-child", "--mount-proc",
 )
+
+_UNSHARE_BIN = "unshare"
+# Memoized capability probe (user namespaces can be kernel-disabled); None = unprobed.
+_UNSHARE_OK: bool | None = None
 
 
 def sandbox_enabled() -> bool:
-    """The Docker sandbox is the DEFAULT path for running generated tests — untrusted
-    model code is ALWAYS containerized. Disabled only when explicitly opted out via
-    ``FOUNDRY_GATE_SANDBOX`` ∈ {inprocess, none, off, …} (the hermetic suite / a host
-    with no daemon that accepts the weaker in-process isolation)."""
-    return os.environ.get("FOUNDRY_GATE_SANDBOX", "docker").strip().lower() not in _OPT_OUT
+    """The namespace sandbox is the DEFAULT for running generated code; disabled only
+    when ``FOUNDRY_GATE_SANDBOX`` is an explicit opt-out (``inprocess``/``none``/…)."""
+    return os.environ.get("FOUNDRY_GATE_SANDBOX", "sandbox").strip().lower() not in _OPT_OUT
 
 
-def sandbox_image() -> str:
-    """The sandbox image ref (``FOUNDRY_GATE_SANDBOX_IMAGE`` overrides the default)."""
-    return os.environ.get("FOUNDRY_GATE_SANDBOX_IMAGE", "").strip() or _DEFAULT_IMAGE
+def unshare_available() -> bool:
+    """True iff this host can create the unprivileged namespaces we need (memoized).
+
+    Probes with the SAME flags we run for real over ``true``, so a kernel that
+    forbids unprivileged userns / netns is detected up front — letting any later
+    non-zero exit be trusted as the *command's* verdict, not a setup failure."""
+    global _UNSHARE_OK
+    if _UNSHARE_OK is None:
+        try:
+            rc, _out, _err = run_grounding_command(
+                (_UNSHARE_BIN, *UNSHARE_FLAGS, "true"), Path("."), env=None, timeout_s=30.0
+            )
+            _UNSHARE_OK = rc == 0
+        except GroundingUnavailable:
+            _UNSHARE_OK = False  # no `unshare` binary at all
+    return _UNSHARE_OK
 
 
-def docker_run_argv(
-    workdir: Path | str,
-    image: str,
-    *,
-    inner: tuple[str, ...] = SANDBOX_PYTEST,
-    network: str = "none",
-    memory: str = "512m",
-    cpus: str = "1.0",
-    pids_limit: int = 256,
-    docker_bin: str = "docker",
-) -> list[str]:
-    """The ``docker run`` argv that runs ``inner`` in ``image`` over the workdir.
-
-    Fenced by construction: the workdir is bind-mounted READ-ONLY at ``/work``, the
-    network is OFF, the rootfs is READ-ONLY (a small writable ``tmpfs`` at ``/tmp``
-    backs ``tmp_path`` fixtures), and memory/cpu/pids are capped — so untrusted
-    generated code can't reach the host, the network, or our code. ``--rm`` makes
-    the container ephemeral.
-    """
-    work = Path(workdir).resolve()
-    return [
-        docker_bin, "run", "--rm",
-        "--network", network,
-        "--memory", memory,
-        "--cpus", cpus,
-        "--pids-limit", str(pids_limit),
-        "--read-only",
-        "--tmpfs", "/tmp:rw,size=64m",
-        "--env", "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
-        "--env", "PYTHONDONTWRITEBYTECODE=1",
-        "--volume", f"{work}:/work:ro",
-        "--workdir", "/work",
-        image,
-        *inner,
-    ]
+def wrap_argv(cmd: tuple[str, ...] | list[str]) -> list[str]:
+    """Prefix ``cmd`` with the unprivileged-namespace ``unshare`` invocation."""
+    return [_UNSHARE_BIN, *UNSHARE_FLAGS, *cmd]
 
 
 def run_in_sandbox(
+    cmd: tuple[str, ...] | list[str],
     workdir: Path | str,
     *,
-    image: str | None = None,
+    env: dict[str, str] | None = None,
     timeout_s: float = 600.0,
 ) -> tuple[int, str, str]:
-    """Run the pinned pytest inside the sandbox container; return ``(rc, out, err)``.
+    """Run ``cmd`` over ``workdir`` inside the namespace sandbox; return (rc, out, err).
 
-    A missing ``docker`` binary, an unreachable daemon, or a missing image surfaces
-    as fail-closed :class:`GroundingUnavailable` (→ ERROR) — never a silent PASS and
-    never a test FAIL — exactly like any other missing grounding tool. Only the
-    CONTAINER's own pytest exit code (0/1/2…) flows back to zone B's verdict.
-    """
-    argv = docker_run_argv(workdir, image or sandbox_image())
-    # env=None: the docker CLI inherits the host env; the CONTAINER's env is set by
-    # the --env flags above (the harness pinning lives inside, not on the daemon).
-    rc, out, err = run_grounding_command(argv, Path(workdir), env=None, timeout_s=timeout_s)
-    if rc in _DOCKER_INFRA_EXITS:
+    Fails CLOSED (``GroundingUnavailable`` → ERROR) when the sandbox can't be
+    established, so untrusted code is NEVER run unsandboxed by accident. When the
+    capability probe passes, the wrapped command's own exit code is authoritative."""
+    if not unshare_available():
         raise GroundingUnavailable(
-            f"docker sandbox unavailable (docker exit {rc}); build the image "
-            f"(`docker build --target test-sandbox -t {sandbox_image()} .`) and ensure "
-            f"the daemon is running, or set FOUNDRY_GATE_SANDBOX=inprocess: {err.strip()[:200]}"
+            "namespace sandbox unavailable (no `unshare` / unprivileged user "
+            "namespaces are kernel-disabled); set FOUNDRY_GATE_SANDBOX=inprocess to "
+            "accept in-process-only isolation"
         )
-    return rc, out, err
+    return run_grounding_command(wrap_argv(cmd), Path(workdir), env=env, timeout_s=timeout_s)

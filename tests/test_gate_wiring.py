@@ -704,3 +704,32 @@ def test_stub_adapter_diff_round_trips_through_get_blob(tmp_path, rt, runner, re
     # The StubAdapter's deterministic file body was materialized into the tree.
     materialized = (tmp_path / "wd" / "app.py").read_text(encoding="utf-8")
     assert materialized.startswith("stub change for task T1")
+
+
+def test_halted_run_writes_a_usable_draft_with_failing_findings(tmp_path, verifier):
+    """A HALTED build still hands back a usable draft: the best-attempt source tree +
+    a DRAFT-STATUS.md naming what's failing — never empty hands."""
+    from foundry.cli import _write_draft_on_halt
+
+    diff = _feature_diff({"app.py": "def f():\n    return 1\n"})
+    state, resolve, resolve_blob = _seed((_criterion("c1"),), diffs=(diff,))
+
+    def _gate(name, status):
+        return GateResult(
+            name=name, status=status, decision_deterministic=True,
+            execution_deterministic=True, verdict_class=VerdictClass.EXECUTION_DETERMINISTIC,
+            run_against="a" * 64, seq=_seq(name, f"verdict:{name}"),
+        )
+
+    state = {**state, "gates": [_gate("build", GateStatus.PASS), _gate("test", GateStatus.FAIL)]}
+    out = tmp_path / "draft"
+    findings = {"test": ("FAILED tests/test_app.py::test_f", "E   assert f() == 2")}
+    draft_root = _write_draft_on_halt(
+        state, str(out), gate_findings=findings, resolve=resolve, resolve_blob=resolve_blob
+    )
+    assert draft_root is not None
+    assert (out / "app.py").is_file()                       # best-attempt source is there
+    status = (out / "DRAFT-STATUS.md").read_text(encoding="utf-8")
+    assert "held at the gate" in status.lower()             # clearly marked not shipped
+    assert "E   assert f() == 2" in status                  # what's still failing
+    assert "❌" in status and "✅" in status                 # per-gate verdicts

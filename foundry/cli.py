@@ -727,6 +727,51 @@ def _write_output_tree(
     return str(out_root)
 
 
+def _write_draft_on_halt(
+    final_state: FactoryState,
+    output_dir: str,
+    *,
+    gate_findings: dict[str, tuple[str, ...]],
+    resolve: ArtifactResolver,
+    resolve_blob: BlobResolver,
+) -> str | None:
+    """Write a best-effort DRAFT on a HALTED run: the latest attempt's source tree
+    plus a ``DRAFT-STATUS.md`` naming what's still failing — so a held build hands back
+    a usable starting point, never empty hands. Best-effort: a tree that can't even be
+    materialized (e.g. an unparseable diff) is skipped (returns ``None``), never crashes
+    the run. Clearly marked NOT shipped — admission still rejected the tree."""
+    try:
+        draft_root = _write_output_tree(
+            final_state, output_dir, resolve=resolve, resolve_blob=resolve_blob
+        )
+    except Exception:
+        return None
+    gates = final_state.get("gates") or ()
+    statuses = {g.name: g.status for g in gates}
+    lines = [
+        "# DRAFT — held at the gate (NOT shipped)\n\n",
+        "This build did not pass every gate, so it was **not admitted/released**. The\n",
+        "source below is the best attempt — fix what's failing, then re-run.\n\n",
+        "## Gate verdicts\n\n",
+    ]
+    for name, status in statuses.items():
+        mark = "✅" if status is GateStatus.PASS else "❌"
+        lines.append(f"- {mark} **{name}**: {str(status).split('.')[-1]}\n")
+    failing = {
+        name: gate_findings.get(name, ())
+        for name, status in statuses.items()
+        if status is not GateStatus.PASS
+    }
+    if any(failing.values()):
+        lines.append("\n## What's still failing\n")
+        for name, findings in failing.items():
+            if findings:
+                body = "\n".join(findings)
+                lines.append(f"\n### {name}\n\n```\n{body}\n```\n")
+    (Path(draft_root) / "DRAFT-STATUS.md").write_text("".join(lines), encoding="utf-8")
+    return draft_root
+
+
 # ---- design-spec ingestion (task [8]) ---------------------------------------
 
 
@@ -862,6 +907,12 @@ class RunResult:
     output_root: str | None = None
     """Where the final accepted source tree was written (when ``output_dir`` is
     set AND the build passed); ``None`` on a halted run (no PASS, no write)."""
+    draft_root: str | None = None
+    """Where a best-effort DRAFT tree was written on a HALTED run (output_dir set,
+    gates not all green): the latest attempt's source + a ``DRAFT-STATUS.md`` naming
+    what's still failing — so a held build hands back a usable starting point, never
+    empty hands. ``None`` on a PASS (use ``output_root``) or when no draft could be
+    materialized."""
     checkpoints: tuple[str, ...] = ()
     """The checkpoint stage boundaries the run was driven with (plan [10]); empty
     when checkpoints were OFF (the default)."""
@@ -912,6 +963,11 @@ class RunResult:
             lines.append("no open_pr action emitted (gates did not all PASS).")
         if self.output_root:
             lines.append(f"source tree written to: {self.output_root}")
+        if self.draft_root:
+            lines.append(
+                f"DRAFT written to: {self.draft_root}  (held — see DRAFT-STATUS.md "
+                "for what's failing; not shipped)"
+            )
         if self.doc_root:
             lines.append(f"documentation set written to: {self.doc_root}")
         return "\n".join(lines)
@@ -1140,8 +1196,10 @@ def run(
         When set AND the build PASSES (terminal gates pass), write a single
         **GitHub-ready repository** here: the accepted integrated source tree at
         the root + a real ``README.md`` + the doc set under ``docs/`` + the
-        ``BUILD-MANIFEST``. Surfaced on ``RunResult.output_root``. On a halted run
-        nothing is written (no accepted tree to emit).
+        ``BUILD-MANIFEST``. Surfaced on ``RunResult.output_root``. On a HALTED run a
+        best-effort DRAFT (the latest attempt's tree + a ``DRAFT-STATUS.md`` naming
+        what's failing) is written instead, surfaced on ``RunResult.draft_root`` — so
+        a held build hands back a usable starting point, never empty hands.
     docs_dir:
         OPTIONAL. When set, ALSO write the documentation set to this SEPARATE
         directory (back-compat / docs elsewhere). When only ``output_dir`` is
@@ -1373,7 +1431,7 @@ def run(
         # On a PASSING build, materialize the FINAL accepted integrated tree
         # (reusing the SAME materialize_workdir + resolve/resolve_blob seams the
         # terminal gates ran against) and write the real source files to disk.
-        # Halted runs write nothing — there is no accepted tree to emit.
+        # A HALTED run writes a best-effort DRAFT instead (see the elif below).
         output_root = _write_output_tree(
             final_state, output_dir, resolve=resolve, resolve_blob=resolve_blob
         )
@@ -1386,6 +1444,18 @@ def run(
         if doc_sink:
             write_bundle(doc_sink[-1], output_dir)
             result = replace(result, doc_root=output_dir)
+    elif output_dir is not None and not result.passed:
+        # HALTED with an output dir: still hand back a usable DRAFT (the best attempt
+        # + a DRAFT-STATUS.md saying what's failing), so the run is never empty-handed.
+        draft_root = _write_draft_on_halt(
+            final_state, output_dir, gate_findings=result.gate_findings,
+            resolve=resolve, resolve_blob=resolve_blob,
+        )
+        if draft_root is not None:
+            result = replace(result, draft_root=draft_root)
+            if doc_sink:  # docs help orient a human finishing the draft
+                write_bundle(doc_sink[-1], output_dir)
+                result = replace(result, doc_root=output_dir)
     if docs_dir is not None and doc_sink:
         # An EXPLICIT --docs DIR still writes the bundle to that separate location
         # (back-compat / docs elsewhere). AUTHORING + the manifest already happened

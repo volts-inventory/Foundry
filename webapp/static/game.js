@@ -67,6 +67,11 @@ const ROSTER = {
 };
 const GATE_ORDER = ["spec","build","test","review","security","audit","supply_chain","e2e"];
 const AGENT_ROOM = {}; for (const rm in ROSTER) for (const nm of ROSTER[rm]) AGENT_ROOM[nm] = rm;
+// Per-area accent (shared by the org board, the Tech-Leads, and the area-expert
+// IC pool) so frontend/backend/data/… read the same colour everywhere.
+const AREA_COLOR = {frontend:0x7fd1ff, backend:0xff9b5e, data:0x7dffb0,
+                    infra:0xb59bff, security:0xff6d6d};
+const AREA_TAG = {frontend:"FE", backend:"BE", data:"DA", infra:"IN", security:"SE"};
 
 // ---- generated character sprites (our own pixel art) -----------------------
 // route1rodent-style 16x22 GBA RPG sprite: a BIG rounded hair mass (the hero) over
@@ -229,27 +234,40 @@ class FloorScene extends Phaser.Scene {
     this.sys.setVisible(this.proj.floor === ACTIVE);
   }
 
-  // Visualize the parallel IC pool (Wave C): N junior engineers building at once,
-  // bobbing in the engineering room, with an "ICs xN" count badge. n<=1 => serial.
+  // Visualize the parallel IC pool (Wave C): N engineers building at once, bobbing
+  // in the engineering room, with a count badge. n<=1 => serial. When the org areas
+  // are known (after the org event), the pool is DISTRIBUTED across them — each IC is
+  // an AREA-EXPERT engineer (frontend/backend/data/…), tinted + tagged by area, the
+  // same per-area split the Tech-Leads use. Same dynamic sizing either way.
   setPool(n){
     if (this.poolGroup) this.poolGroup.forEach(s=>s.destroy());
     if (this.poolLabel){ this.poolLabel.destroy(); this.poolLabel = null; }
     this.poolGroup = [];
+    this.poolN = n;                            // remembered so an org event can re-distribute
     if (!n || n <= 1) return;
     const R = ROOMS.engineering, count = Math.min(n, 8), cols = Math.min(count, 4);
+    const areas = (this.orgAreas||[]).map(a=>a && a.area).filter(Boolean);
     for (let i=0;i<count;i++){
       const col = i%cols, row = Math.floor(i/cols);
       const x = Math.round(R.x+30 + (R.w-60)*(cols>1 ? col/(cols-1) : 0.5));
       const y = R.floorY + 74 + row*52;                        // pool desks below the leads
+      const area = areas.length ? areas[i % areas.length] : null;   // round-robin over areas
       const k = poolKit(i);
+      if (area) k.accent = AREA_COLOR[area] || k.accent;
       const ws = this.makeWorkstation(x, y+16, k.accent);
       const s = this.makePerson(x, y, k);
       s.setScale(1.4).setDepth(y).setAlpha(0.96);   // match the leads so IC faces stay legible
+      if (area){                                     // expertise tag above the head
+        const col6 = (AREA_COLOR[area]||0xffc08a).toString(16).padStart(6,"0");
+        s.add(this.add.text(0,-17, AREA_TAG[area] || area.slice(0,2).toUpperCase(),
+          {fontFamily:"'PixelFont','Courier New'",fontSize:"8px",fontStyle:"bold",
+           color:"#"+col6}).setOrigin(0.5));
+      }
       s.home = {x,y}; s.loungeSlot = 12 + i; s.seen = true;    // can walk to the lounge too
       this.startWalk(s);                                       // ICs are busy building
       this.poolGroup.push(s, ws);
     }
-    this.poolLabel = this.add.text(R.cx, R.y+24, "ICs ×"+n,
+    this.poolLabel = this.add.text(R.cx, R.y+24, (areas.length ? "Engineers ×" : "ICs ×")+n,
       {fontFamily:"'PixelFont','Courier New'",fontSize:"10px",fontStyle:"bold",color:"#ffc08a"})
       .setOrigin(0.5,0).setDepth(28);
   }
@@ -1119,9 +1137,12 @@ class FloorScene extends Phaser.Scene {
     if (this.tlLabel){ this.tlLabel.destroy(); this.tlLabel = null; }
     this.techLeadGroup = [];
     const list = (areas||[]).filter(a=>a && a.area);
+    // Remember the real org areas and re-distribute the IC pool across them, so the
+    // area-expert engineers show up the moment the org telemetry lands.
+    this.orgAreas = list;
+    if (this.poolN) this.setPool(this.poolN);
     if (!list.length) return;
-    const areaColor = {frontend:0x7fd1ff, backend:0xff9b5e, data:0x7dffb0,
-      infra:0xb59bff, security:0xff6d6d};
+    const areaColor = AREA_COLOR;
     const R = ROOMS.engineering, n = Math.min(list.length, 5);
     for (let i=0;i<n;i++){
       const a = list[i], accent = areaColor[a.area] || 0xffd25a;

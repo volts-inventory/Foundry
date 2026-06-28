@@ -51,6 +51,15 @@ class TaskPacket(FrozenModel):
     never edited mid-run."""
 
     task: dict[str, Any]  # schema-lite task body (id, title, instructions, ...)
+    persona: str = Field(
+        default="",
+        description=(
+            "OPTIONAL area-expert role preamble (implementation/personas.py): a "
+            "frontend/backend/data/… specialist voice for THIS task's area. Rendered "
+            "AFTER the pinned constraints (which stay first + verbatim) and before the "
+            "task body. Empty == no persona (byte-identical to the pre-persona prompt)."
+        ),
+    )
     pinned_constraints: tuple[str, ...] = Field(
         default=(),
         description=(
@@ -111,6 +120,10 @@ def assemble_prompt(packet: TaskPacket, *, epilogue: str = "") -> str:
     if packet.pinned_constraints:
         parts.append("PINNED CONSTRAINTS (verbatim, non-negotiable):")
         parts.extend(packet.pinned_constraints)
+        parts.append("")
+    if packet.persona:
+        parts.append("ROLE:")
+        parts.append(packet.persona)
         parts.append("")
     parts.append("TASK:")
     parts.append(json.dumps(packet.task, indent=2, sort_keys=True, ensure_ascii=False))

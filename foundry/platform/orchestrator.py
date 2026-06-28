@@ -13,7 +13,9 @@ a per-service ``state_dir`` + ``thread_id`` so builds never collide.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any
 
 from foundry.cli import run as run_service
 from foundry.platform.contracts import build_contract, contract_files, contract_spec_text
@@ -83,6 +85,7 @@ def _build_one(
     passes: int | str = "auto",
     max_passes: int = 6,
     critic: bool = True,
+    progress_cb: Callable[[dict[str, Any]], None] | None = None,
 ) -> ServiceResult:
     """Build a service into ``work_dir`` and project the result.
 
@@ -94,6 +97,7 @@ def _build_one(
     ``max_passes`` as a failsafe. So a simple service stops after ~1-2 passes and a
     complex one runs as many as it needs — never a blind fixed rerun.
     """
+    emit = progress_cb or (lambda _e: None)
     auto = (passes == "auto")
     cap = max(1, max_passes if auto else int(passes))
     base: str | None = None
@@ -101,8 +105,10 @@ def _build_one(
     gaps: tuple[str, ...] = ()
     result = None
     used = 0
+    emit({"type": "svc_start", "service": svc.name, "role": svc.role})
     for p in range(1, cap + 1):
         used = p
+        emit({"type": "pass", "service": svc.name, "pass": p})
         last = p == cap
         # The final tree lands in <name>; intermediate passes in <name>.pN.
         svc_out = os.path.join(work_dir, svc.name if last else f"{svc.name}.p{p}")
@@ -142,6 +148,9 @@ def _build_one(
             # Verified first: only judge completeness on a tree that PASSED its gates.
             if result.passed:
                 verdict = assess_completeness(svc.request, out, backend=backend) if critic else None
+                if verdict is not None:
+                    emit({"type": "critic", "service": svc.name,
+                          "complete": verdict.complete, "gaps": list(verdict.gaps)})
                 if verdict and verdict.complete:
                     break                            # critic: technically near-complete -> done
                 if verdict is not None:
@@ -152,10 +161,10 @@ def _build_one(
         prev_metrics = cur
 
     if result is None:
+        emit({"type": "svc_done", "service": svc.name, "passed": False, "passes": used})
         return ServiceResult(name=svc.name, role=svc.role, passed=False, phase="no output",
                              source_root=None, is_draft=False, gates={}, passes=used)
-    # If the converged tree isn't at <name> (we stopped before the last slot), make
-    # sure the result points at the tree we actually kept.
+    emit({"type": "svc_done", "service": svc.name, "passed": bool(result.passed), "passes": used})
     source = result.output_root or result.draft_root
     return ServiceResult(
         name=svc.name,
@@ -183,6 +192,7 @@ def build_platform(
     passes: int | str = "auto",
     max_passes: int = 6,
     critic: bool = True,
+    progress_cb: Callable[[dict[str, Any]], None] | None = None,
     work_dir: str | None = None,
 ) -> PlatformResult:
     """Plan, build every service, and stitch the monorepo at ``out_dir``.
@@ -197,6 +207,8 @@ def build_platform(
     plan = PlatformPlan(request=plan.request, services=plan.services,
                         name=plan.name, contract=contract)
     spec_text = contract_spec_text(plan, contract)
+    emit = progress_cb or (lambda _e: None)
+    emit({"type": "plan", "name": plan.name, "services": [s.name for s in plan.services]})
 
     staging = work_dir or os.path.join(out_dir, ".platform-build")
     os.makedirs(staging, exist_ok=True)
@@ -210,7 +222,7 @@ def build_platform(
                 plan_name=plan.name, backend=backend, mode=mode, spec_text=spec_text,
                 work_dir=staging, max_slots=max_slots_per_service,
                 cost_cap_microusd=cost_cap_microusd, passes=passes, max_passes=max_passes,
-                critic=critic,
+                critic=critic, progress_cb=progress_cb,
             ): svc
             for svc in plan.services
         }
@@ -224,4 +236,5 @@ def build_platform(
     stitch_monorepo(plan, results, contract_files(plan, contract), out_dir)
 
     passed = bool(results) and all(r.passed for r in results)
+    emit({"type": "stitched", "out": out_dir, "services": len(results), "passed": passed})
     return PlatformResult(plan=plan, services=tuple(results), out_dir=out_dir, passed=passed)

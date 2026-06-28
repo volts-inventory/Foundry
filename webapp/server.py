@@ -730,6 +730,65 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     _close(p)
 
 
+def _run_platform(p: Project) -> None:
+    """A PLATFORM build on one floor: compose many services into one monorepo via
+    ``foundry.platform.build_platform`` and stream its progress to the quest log.
+    The stitched monorepo is written to ``p.out_base`` so the repo browser / Floor-0
+    hub serve it from disk (no CAS build of its own)."""
+    from foundry.platform import build_platform
+
+    _emit(p, type="project", request=p.request, mode=p.mode, backend=p.backend, slots=p.max_slots)
+    _emit(p, type="narrate", text=f"🏗  Platform build — {p.request}")
+
+    def cb(ev: dict[str, Any]) -> None:
+        t = ev.get("type")
+        if t == "plan":
+            _emit(p, type="narrate", text="📋 Services: " + ", ".join(ev.get("services") or []))
+        elif t == "svc_start":
+            _emit(p, type="narrate", text=f"▶ {ev['service']} ({ev['role']}) — building")
+        elif t == "pass" and ev.get("pass", 1) > 1:
+            _emit(p, type="narrate", text=f"   ↻ {ev['service']} — deepening pass {ev['pass']}")
+        elif t == "critic":
+            if ev.get("complete"):
+                _emit(p, type="narrate", text=f"   ✓ {ev['service']} — critic: complete")
+            else:
+                gaps = ev.get("gaps") or []
+                detail = "; ".join(gaps[:3]) if gaps else "more to do"
+                _emit(p, type="narrate", text=f"   • {ev['service']} — critic: {detail}")
+        elif t == "svc_done":
+            mark = "✓" if ev.get("passed") else "✗"
+            np = ev.get("passes", 1)
+            _emit(p, type="narrate", text=f"{mark} {ev['service']} done · {np} pass(es)")
+
+    staging = str(p.out_base.parent / f".staging-{p.id}") if p.out_base else None
+    try:
+        result = build_platform(
+            p.request, out_dir=str(p.out_base), backend=p.backend, mode=p.mode,
+            cost_cap_microusd=p.cost_cap_microusd, progress_cb=cb, work_dir=staging,
+        )
+    except Exception as exc:
+        _emit(p, type="narrate", text=f"💥 Platform error: {exc}")
+        _emit(p, type="done", passed=False, phase="error")
+        p.status = "done"
+        _persist(p)
+        _close(p)
+        return
+
+    # One "check" per service for the repo Checks tab (disk-fallback reads p.gates).
+    p.gates = {s.name: {"status": "PASS" if s.passed else "FAIL", "advisory": False}
+               for s in result.services}
+    n_files = sum(1 for f in p.out_base.rglob("*") if f.is_file()) if p.out_base else 0
+    _emit(p, type="narrate",
+          text=f"📦 Stitched monorepo — {len(result.services)} services, {n_files} files")
+    if n_files:
+        _emit(p, type="files", count=n_files)
+    _emit(p, type="done", passed=result.passed, phase="done")
+    p.passed = bool(result.passed)
+    p.status = "done"
+    _persist(p)
+    _close(p)
+
+
 # --------------------------------------------------------------------------- #
 # HTTP                                                                         #
 # --------------------------------------------------------------------------- #
@@ -1253,7 +1312,10 @@ class Handler(BaseHTTPRequestHandler):
         with _LOCK:
             _PROJECTS[pid] = p
         _persist(p)
-        threading.Thread(target=_run_factory, args=(p,), daemon=True).start()
+        # A PLATFORM build composes many services into one monorepo on this floor;
+        # a normal build is one service through the factory.
+        runner = _run_platform if bool(body.get("platform")) else _run_factory
+        threading.Thread(target=runner, args=(p,), daemon=True).start()
         self._json(200, {"id": pid, "floor": floor, "release": release_seq})
 
     def _decision(self, pid: str) -> None:

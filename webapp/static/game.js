@@ -364,18 +364,26 @@ class FloorScene extends Phaser.Scene {
     // only one, not repeated in every window).
     let pi = 0;
     for (let wx=86; wx<W-130; wx+=232){
-      const ww=80, wh=40, wy=62;
-      this.add.rectangle(wx-3, wy-3, ww+6, wh+6, PC.ink).setOrigin(0,0).setDepth(2);          // navy frame
-      this.add.rectangle(wx, wy, ww, wh, 0xbfe6f2).setOrigin(0,0).setDepth(2);                // sky
-      this.add.rectangle(wx, wy+wh*0.62, ww, wh*0.38, 0x86d29a).setOrigin(0,0).setDepth(2);   // green hill
-      const v = pi % 4;
-      if (v===0){ this.add.circle(wx+ww-16, wy+12, 6, 0xfff0a8).setDepth(2); }                // sun (one only)
-      else if (v===1){ this.add.rectangle(wx+16, wy+10, 18, 5, 0xffffff,0.9).setOrigin(0,0).setDepth(2);
-        this.add.rectangle(wx+44, wy+17, 22, 5, 0xffffff,0.8).setOrigin(0,0).setDepth(2); }    // clouds
-      else if (v===2){ this.add.rectangle(wx+18, wy+12, 7, 2, 0x33405e).setOrigin(0,0).setDepth(2);
-        this.add.rectangle(wx+30, wy+15, 7, 2, 0x33405e).setOrigin(0,0).setDepth(2); }         // distant birds
-      // v===3: plain sky + hill, no feature
-      this.add.rectangle(wx, wy, ww, 2, PC.wallHi).setOrigin(0,0).setDepth(2);                // glass glint
+      const ww=80, wh=42, wy=60, v = pi % 4;
+      // WOODEN frame: outer wood + a lit top edge + a dark inner liner (a real picture frame)
+      this.add.rectangle(wx-4, wy-4, ww+8, wh+8, 0x6b4527).setOrigin(0,0).setDepth(2);
+      this.add.rectangle(wx-4, wy-4, ww+8, 2, 0x8a5e36).setOrigin(0,0).setDepth(2);            // frame top light
+      this.add.rectangle(wx-4, wy+wh+2, ww+8, 2, 0x4a2f18).setOrigin(0,0).setDepth(2);         // frame bottom shade
+      this.add.rectangle(wx-2, wy-2, ww+4, wh+4, PC.sceneInk).setOrigin(0,0).setDepth(2);      // inner liner
+      // LANDSCAPE: banded sky + two layered hills
+      this.add.rectangle(wx, wy, ww, wh, 0xbfe6f2).setOrigin(0,0).setDepth(2);                 // sky
+      this.add.rectangle(wx, wy, ww, Math.round(wh*0.42), 0xa6d6ee).setOrigin(0,0).setDepth(2);// upper sky
+      this.add.rectangle(wx, wy+Math.round(wh*0.55), ww, Math.round(wh*0.2), 0x9ec98a).setOrigin(0,0).setDepth(2); // far hill
+      this.add.rectangle(wx, wy+Math.round(wh*0.66), ww, Math.round(wh*0.34), 0x6fae74).setOrigin(0,0).setDepth(2);// near hill
+      if (v===0){ this.add.circle(wx+ww-18, wy+13, 9, 0xfff0a8, 0.3).setDepth(2);
+        this.add.circle(wx+ww-18, wy+13, 6, 0xfff4be).setDepth(2); }                            // sun + glow
+      else if (v===1){ this.add.ellipse(wx+22, wy+13, 22, 8, 0xffffff,0.9).setDepth(2);
+        this.add.ellipse(wx+54, wy+19, 26, 8, 0xffffff,0.8).setDepth(2); }                       // clouds
+      else if (v===2){ this.add.triangle(0,0, wx+22,wy+28, wx+46,wy+28, wx+34,wy+11, 0x93a4ba).setDepth(2);
+        this.add.triangle(0,0, wx+30,wy+13, wx+38,wy+13, wx+34,wy+11, 0xffffff).setDepth(2); }   // snowy mountain
+      else { this.add.rectangle(wx+18,wy+13,6,1.5,0x33405e).setOrigin(0,0).setDepth(2);
+        this.add.rectangle(wx+28,wy+16,6,1.5,0x33405e).setOrigin(0,0).setDepth(2); }             // distant birds
+      this.add.rectangle(wx+7, wy, 3, wh, 0xffffff, 0.10).setOrigin(0,0).setDepth(2);           // glass glint
       pi++;
     }
     // soft ceiling-light pools on the floor (kept subtle, bright theme)
@@ -614,12 +622,13 @@ class FloorScene extends Phaser.Scene {
       c.add(this.add.rectangle(2,-16,16,3,0x5db8ff).setOrigin(0.5,1));
       c.add(this.add.rectangle(-6,-10,10,3,0x6fcf86).setOrigin(0.5,1));
     } else if (kind==="couch"){
-      out(0,0,52,10,0x6a4a7a);                                  // seat
-      out(0,-8,52,8,0x7a5a8a);                                  // backrest
-      c.add(this.add.rectangle(-25,-4,5,14,0x5a3a6a).setOrigin(0.5,1)); // arm L
-      c.add(this.add.rectangle(25,-4,5,14,0x5a3a6a).setOrigin(0.5,1));  // arm R
-      c.add(this.add.rectangle(-11,-3,16,4,0x8a6aa0).setOrigin(0.5,1)); // cushions
-      c.add(this.add.rectangle(11,-3,16,4,0x8a6aa0).setOrigin(0.5,1));
+      out(0,-6,52,12,0x6a4a7a);                                 // backrest (behind)
+      out(-23,-2,8,16,0x5a3a6a); out(23,-2,8,16,0x5a3a6a);      // padded arms
+      out(0,0,40,9,0x7a5a8a);                                   // seat base (front)
+      for(let i=0;i<3;i++){                                     // back + seat cushions
+        c.add(this.add.rectangle(-13+i*13,-7,11,6,0x82628f).setOrigin(0.5,1).setStrokeStyle(1,0x5a3a6a));
+        c.add(this.add.rectangle(-13+i*13,-2,11,5,0x8f6fa6).setOrigin(0.5,1).setStrokeStyle(1,0x5a3a6a)); }
+      c.add(this.add.rectangle(-22,9,3,4,0x3a2a4a).setOrigin(0.5,1)); c.add(this.add.rectangle(22,9,3,4,0x3a2a4a).setOrigin(0.5,1)); // legs
     } else if (kind==="ctable"){
       out(0,0,24,7,0x6b4a2c);                                   // coffee table
       c.add(this.add.rectangle(-5,-6,6,4,0x9adfff).setOrigin(0.5,1)); // mug
@@ -635,10 +644,12 @@ class FloorScene extends Phaser.Scene {
       c.add(this.add.rectangle(13,5,3,8,0x4a3320).setOrigin(0.5,1));
       c.add(this.add.rectangle(0,-2,30,2,0x7a5836).setOrigin(0.5,1));      // backrest slat
     } else if (kind==="tv"){
-      out(0,0,10,5,0x2a3550);                                   // stand
-      out(0,-7,34,22,0x10151f);                                 // body/bezel
-      const scr=this.add.rectangle(0,-9,26,15,0x2bd3ff,0.7).setOrigin(0.5,1); // screen
+      c.add(this.add.rectangle(0,0,18,3,0x3a3f4a).setOrigin(0.5,1));    // base
+      c.add(this.add.rectangle(0,-2,4,4,0x2a2f38).setOrigin(0.5,1));    // neck
+      out(0,-5,38,24,0x1a1e26);                                        // flat-screen bezel
+      const scr=this.add.rectangle(0,-8,32,18,0x2bd3ff,0.7).setOrigin(0.5,1); // screen
       c.add(scr);
+      c.add(this.add.rectangle(-12,-24,12,1,0x9fe8ff,0.5).setOrigin(0.5,1)); // screen glint
       this.tweens.add({targets:scr, fillAlpha:{from:0.45,to:0.8}, duration:700+Math.abs(Math.round(x))%500,
         yoyo:true, repeat:-1, ease:"Sine.inOut"});                // flicker
     } else if (kind==="vending"){
@@ -1033,7 +1044,13 @@ class FloorScene extends Phaser.Scene {
     const bob = this.add.container(0,0);
     // 0.36 x the caller's 1.4 container = ~0.5 net of the 64px frame => crisp 32px
     // (integer-friendly half-scale; non-integer scales soften pixel art).
+    // selective dark OUTLINE: a slightly-larger silhouette behind the body, tinted scene
+    // ink and kept frame-synced — gives every character a clean 1px edge so they pop.
+    const ol = this.add.sprite(0,4,"chars",ch.front[0]).setOrigin(0.5,1).setScale(0.378).setTint(PC.sceneInk);
+    bob.add(ol);
     const sprite = this.add.sprite(0,4,"chars",ch.front[0]).setOrigin(0.5,1).setScale(0.36);
+    const _sf = sprite.setFrame.bind(sprite);
+    sprite.setFrame = (f)=>{ _sf(f); ol.setFrame(f); return sprite; };   // outline mirrors the body frame
     bob.add(sprite);
     const spark = this.add.rectangle(6,-24,2,2,0xfff04a).setOrigin(0,0).setVisible(false);
     bob.add(spark);

@@ -824,6 +824,8 @@ def _run_platform(p: Project) -> None:
           text=f"📦 Stitched monorepo — {len(result.services)} services, {n_files} files")
     if n_files:
         _emit(p, type="files", count=n_files)
+    if result.passed:   # shipped — open the vault chest + celebrate, like a single build
+        _emit(p, type="release", uri=f"monorepo · {len(result.services)} services")
     _emit(p, type="done", passed=result.passed, phase="done")
     p.passed = bool(result.passed)
     p.status = "done"

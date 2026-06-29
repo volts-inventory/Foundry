@@ -364,13 +364,13 @@ class FloorScene extends Phaser.Scene {
       this.add.rectangle(R.cx, R.y+22, sw, 2, mix(accent,0xffffff,0.4)).setOrigin(0.5,0).setDepth(4);
       this.roomGlyph(key, R.cx-sw/2+5, R.y+24);
       this.add.text(R.cx+4, R.y+24, R.label, {fontFamily:"'PixelFont','Courier New',monospace",
-        fontSize:"10px", fontStyle:"bold", color:"#fbf3df"}).setOrigin(0.5,0).setDepth(4);
+        fontSize:"10px", fontStyle:"bold", color:"#fbf3df"}).setOrigin(0.5,0).setDepth(4).setResolution(3);
       const no = ORDER_NO[key];
       if (no != null){
         const bx = R.x+13, by = R.y+30;
         this.add.circle(bx, by, 8, PC.stripe, 0.98).setStrokeStyle(2, PC.wallHi).setDepth(4);
         this.add.text(bx, by, String(no), {fontFamily:"'PixelFont','Courier New'",
-          fontSize:"10px", fontStyle:"bold", color:"#fff4e0"}).setOrigin(0.5).setDepth(5);
+          fontSize:"10px", fontStyle:"bold", color:"#fff4e0"}).setOrigin(0.5).setDepth(5).setResolution(3);
       }
       this.roomGlow[key] = this.add.rectangle(R.x, R.y, R.w, R.h, 0xffe27a, 0).setOrigin(0,0).setDepth(1);
     }
@@ -645,6 +645,18 @@ class FloorScene extends Phaser.Scene {
     return c;
   }
 
+  // A name/role badge pinned over a person `s`. `filled` → solid accent pill with dark
+  // text (leads); else a dark pill with accent text (ICs / generic). Text is rendered at
+  // 3× resolution so the small pixel font stays CRISP after the canvas is scaled.
+  pinBadge(s, lbl, color, filled){
+    const pw = lbl.length*5 + 8, col6 = color.toString(16).padStart(6,"0");
+    const bg = filled ? color : 0x10182c, fg = filled ? "#10182c" : "#"+col6;
+    const edge = filled ? 0x10182c : color;
+    s.add(this.add.rectangle(0,-15,pw,10,bg,filled?0.96:0.9).setOrigin(0.5).setStrokeStyle(1,edge));
+    s.add(this.add.text(0,-15,lbl,{fontFamily:"'PixelFont','Courier New'",fontSize:"7px",
+      fontStyle:"bold",color:fg}).setOrigin(0.5).setResolution(3));
+  }
+
   // ========================= animation library ============================ //
   // Ambient life: blink + monitor flicker, always running on a floor.
   startAmbient(){
@@ -893,10 +905,8 @@ class FloorScene extends Phaser.Scene {
         a.setScale(1.4).setDepth(hy);                             // y-sort (desk occludes legs)
         // role badge over the agent so every senior role is labelled (like the eng leads)
         const rtag = ROLE_TAG[name] || name.slice(0,9).toUpperCase();
-        const acc = (kit.accent!=null ? kit.accent : 0x9fb4d8), bw = rtag.length*5+8;
-        a.add(this.add.rectangle(0,-16,bw,10,acc,0.95).setOrigin(0.5).setStrokeStyle(1,0x10182c));
-        a.add(this.add.text(0,-16,rtag,{fontFamily:"'PixelFont','Courier New'",fontSize:"7px",
-          fontStyle:"bold",color:"#10182c"}).setOrigin(0.5));
+        const acc = (kit.accent!=null ? kit.accent : 0x9fb4d8);
+        this.pinBadge(a, rtag, acc, true);
         a.home = {x:hx,y:hy}; a.room = room; a.loungeSlot = li++;
         // Start visible in the lounge (idle); stages pull each team to its desks.
         const ls = this.loungeSpot(a.loungeSlot);
@@ -1400,16 +1410,12 @@ class FloorScene extends Phaser.Scene {
         const ws=this.makeWorkstation(x, y+16, p.color);
         const s=this.makePerson(x, y, k); s.setScale(p.lead?1.32:1.18).setDepth(y).setAlpha(p.lead?1:0.94);
         if (p.lead){
-          s.add(this.add.text(0,-27,"★",{fontFamily:"'PixelFont','Courier New'",fontSize:"10px",color:"#ffd95e"})
-            .setOrigin(0.5));
-          const lbl=tag+" LEAD", pw=lbl.length*5+8;
-          s.add(this.add.rectangle(0,-15,pw,10,p.color,0.96).setOrigin(0.5).setStrokeStyle(1,0x10182c));
-          s.add(this.add.text(0,-15,lbl,{fontFamily:"'PixelFont','Courier New'",fontSize:"7px",
-            fontStyle:"bold",color:"#10182c"}).setOrigin(0.5));
+          s.add(this.add.text(0,-28,"★",{fontFamily:"'PixelFont','Courier New'",fontSize:"10px",
+            color:"#ffd95e"}).setOrigin(0.5).setResolution(3));
+          this.pinBadge(s, tag+" LEAD", p.color, true);        // filled accent badge
           if (faceUp && s.faceBack) s.faceBack();              // overseeing — faces up into the room
         } else {
-          s.add(this.add.text(0,-15, tag,
-            {fontFamily:"'PixelFont','Courier New'",fontSize:"7px",fontStyle:"bold",color:"#"+col6}).setOrigin(0.5));
+          this.pinBadge(s, tag, p.color, false);               // every IC labelled too
         }
         s.home={x,y}; s.loungeSlot=slot++; s.seen=true; s.inLounge=false;
         s.working = (this.activeRoomKey === "engineering");

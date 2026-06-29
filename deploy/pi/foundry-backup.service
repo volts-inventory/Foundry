@@ -1,0 +1,13 @@
+# One-shot backup of Foundry's durable state (paired with foundry-backup.timer).
+#   sudo cp deploy/pi/foundry-backup.{service,timer} /etc/systemd/system/
+#   sudo install -m755 deploy/pi/backup.sh /usr/local/bin/foundry-backup
+#   # add FOUNDRY_BACKUP_DST=... to /etc/foundry/foundry.env
+#   sudo systemctl daemon-reload && sudo systemctl enable --now foundry-backup.timer
+
+[Unit]
+Description=Back up Foundry Workshop durable state
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/foundry/foundry.env
+ExecStart=/usr/local/bin/foundry-backup

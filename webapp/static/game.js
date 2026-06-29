@@ -358,19 +358,19 @@ class FloorScene extends Phaser.Scene {
       if (R.virtual) continue;
       const accent = shade(R.color, 1.7);
       const t = TINT[key]; if (t) this.add.rectangle(R.x, R.y, R.w, R.h, t[0], t[1]).setOrigin(0,0).setDepth(1);
-      // label placard — a small navy sign hanging just BELOW the banded top wall
-      const sw = Math.min(R.w-12, R.label.length*7+22);
-      this.add.rectangle(R.cx, R.y+22, sw, 16, PC.ink, 0.96).setOrigin(0.5,0).setDepth(3).setStrokeStyle(2, accent);
+      // label placard — a navy sign hanging just BELOW the banded top wall (bigger sign)
+      const sw = Math.min(R.w-10, R.label.length*9+28);
+      this.add.rectangle(R.cx, R.y+22, sw, 22, PC.ink, 0.96).setOrigin(0.5,0).setDepth(3).setStrokeStyle(2, accent);
       this.add.rectangle(R.cx, R.y+22, sw, 2, mix(accent,0xffffff,0.4)).setOrigin(0.5,0).setDepth(4);
-      this.roomGlyph(key, R.cx-sw/2+5, R.y+24);
-      this.add.text(R.cx+4, R.y+24, R.label, {fontFamily:"'PixelFont','Courier New',monospace",
-        fontSize:"10px", fontStyle:"bold", color:"#fbf3df"}).setOrigin(0.5,0).setDepth(4).setResolution(3);
+      this.roomGlyph(key, R.cx-sw/2+7, R.y+27);
+      this.add.text(R.cx+6, R.y+27, R.label, {fontFamily:"'PixelFont','Courier New',monospace",
+        fontSize:"13px", fontStyle:"bold", color:"#fbf3df"}).setOrigin(0.5,0).setDepth(4).setResolution(4);
       const no = ORDER_NO[key];
       if (no != null){
-        const bx = R.x+13, by = R.y+30;
-        this.add.circle(bx, by, 8, PC.stripe, 0.98).setStrokeStyle(2, PC.wallHi).setDepth(4);
+        const bx = R.x+15, by = R.y+34;
+        this.add.circle(bx, by, 10, PC.stripe, 0.98).setStrokeStyle(2, PC.wallHi).setDepth(4);
         this.add.text(bx, by, String(no), {fontFamily:"'PixelFont','Courier New'",
-          fontSize:"10px", fontStyle:"bold", color:"#fff4e0"}).setOrigin(0.5).setDepth(5).setResolution(3);
+          fontSize:"12px", fontStyle:"bold", color:"#fff4e0"}).setOrigin(0.5).setDepth(5).setResolution(4);
       }
       this.roomGlow[key] = this.add.rectangle(R.x, R.y, R.w, R.h, 0xffe27a, 0).setOrigin(0,0).setDepth(1);
     }
@@ -616,7 +616,7 @@ class FloorScene extends Phaser.Scene {
   makeWorkstation(x, floorY, accent){
     if (accent == null) accent = 0x7fd1ff;   // monitor glow default (sprites carry their own colour)
     x = Math.round(x);
-    const c = this.add.container(x, floorY).setDepth(floorY+5).setScale(1.05);
+    const c = this.add.container(x, floorY).setDepth(floorY+5).setScale(1.3);
     const O = 0x2b2f45;                                           // navy outline
     const out = (rx,ry,w,h,col)=>{
       c.add(this.add.rectangle(rx,ry,w+2,h+2,O).setOrigin(0.5,1));
@@ -626,7 +626,7 @@ class FloorScene extends Phaser.Scene {
     // the orange round STOOL the worker sits on — a SEPARATE object drawn BEHIND/under
     // the person (lower depth than the person sprite) and just in front of the table,
     // so it reads as the person seated on it. (floorY-16 is where the person stands.)
-    const chair = this.add.container(x, floorY-16).setDepth(floorY-20);
+    const chair = this.add.container(x, floorY-16).setDepth(floorY-20).setScale(1.25);
     chair.add(this.add.ellipse(0,4,16,7,0x14304f,0.30).setOrigin(0.5,1));            // floor shadow
     chair.add(this.add.ellipse(0,2,15,8,0xe8862e).setOrigin(0.5,1).setStrokeStyle(1,O)); // seat
     chair.add(this.add.ellipse(0,0,8,3,0xffb060).setOrigin(0.5,1));                  // seat highlight
@@ -654,7 +654,7 @@ class FloorScene extends Phaser.Scene {
     const edge = filled ? 0x10182c : color;
     s.add(this.add.rectangle(0,-15,pw,10,bg,filled?0.96:0.9).setOrigin(0.5).setStrokeStyle(1,edge));
     s.add(this.add.text(0,-15,lbl,{fontFamily:"'PixelFont','Courier New'",fontSize:"7px",
-      fontStyle:"bold",color:fg}).setOrigin(0.5).setResolution(3));
+      fontStyle:"bold",color:fg}).setOrigin(0.5).setResolution(4));
   }
 
   // ========================= animation library ============================ //
@@ -892,7 +892,7 @@ class FloorScene extends Phaser.Scene {
       const names = ROSTER[room], R = ROOMS[room]; if (!R) continue;
       const cols = Math.min(names.length, 3);
       const single = names.length === 1;                         // a one-role room → centre it
-      const PX = 66, SY = R.y + 70, RP = 44;                     // SAME grid as the eng rooms
+      const PX = 84, SY = R.y + 74, RP = 56;                     // SAME grid as the eng rooms
       names.forEach((name,i)=>{
         const col = i%cols, row = Math.floor(i/cols);
         // centred columns, first row well below the room label (matches every other room)
@@ -902,7 +902,7 @@ class FloorScene extends Phaser.Scene {
         const seed = hashStr((this.proj.id||'f')+name), kit = kitFor(name, seed);
         this.makeWorkstation(hx, hy+16, kit.accent);              // desk just in front of them
         const a = this.makePerson(hx, hy, kit);
-        a.setScale(1.4).setDepth(hy);                             // y-sort (desk occludes legs)
+        a.setScale(1.68).setDepth(hy);                             // y-sort (desk occludes legs)
         // role badge over the agent so every senior role is labelled (like the eng leads)
         const rtag = ROLE_TAG[name] || name.slice(0,9).toUpperCase();
         const acc = (kit.accent!=null ? kit.accent : 0x9fb4d8);
@@ -927,7 +927,7 @@ class FloorScene extends Phaser.Scene {
     const O = ROOMS.office;
     this.lobby = {cx: Math.round(O.cx), standY: Math.round(O.y1 - 48)};   // behind his desk
     const c = this.makePerson(this.lobby.cx, this.lobby.standY, kitFor("CTO", hashStr((this.proj.id||'f')+"CTO")));
-    c.setScale(1.4).setDepth(900); c.fixedDepth = 900;   // CTO walks the floor -> always on top
+    c.setScale(1.66).setDepth(900); c.fixedDepth = 900;   // CTO walks the floor -> always on top
     c.add(this.add.text(0,-22,"CTO",{fontFamily:"'PixelFont','Courier New'",fontSize:"8px",fontStyle:"bold",color:"#ffcf52"})
       .setOrigin(0.5));
     this.cto = c;
@@ -1024,7 +1024,7 @@ class FloorScene extends Phaser.Scene {
     if (!A || !B || this._dead) return;
     const ax = Math.round(A.cx), ay = Math.round(A.standY);
     const runner = this.makePerson(ax, ay, poolKit(4));
-    runner.setScale(1.2).setDepth(945); runner.fixedDepth = 945;   // stays on top while crossing
+    runner.setScale(1.5).setDepth(945); runner.fixedDepth = 945;   // stays on top while crossing
     const pkg = this.add.container(0,-17);                          // the "work" carried in hand
     pkg.add(this.add.rectangle(0,0,12,9,0xffcf52).setStrokeStyle(1,0x7a5028));
     pkg.add(this.add.rectangle(0,-1,12,2,0xfff0a8));
@@ -1408,7 +1408,7 @@ class FloorScene extends Phaser.Scene {
         const k = p.lead ? kitFor("Tech-Lead "+p.area, hashStr((this.proj.id||'f')+"TL"+p.area)) : poolKit(slot);
         k.accent=p.color;
         const ws=this.makeWorkstation(x, y+16, p.color);
-        const s=this.makePerson(x, y, k); s.setScale(p.lead?1.32:1.18).setDepth(y).setAlpha(p.lead?1:0.94);
+        const s=this.makePerson(x, y, k); s.setScale(p.lead?1.6:1.42).setDepth(y).setAlpha(p.lead?1:0.94);
         if (p.lead){
           s.add(this.add.text(0,-28,"★",{fontFamily:"'PixelFont','Courier New'",fontSize:"10px",
             color:"#ffd95e"}).setOrigin(0.5).setResolution(3));
@@ -1425,7 +1425,7 @@ class FloorScene extends Phaser.Scene {
       };
       // ONE consistent desk grid for every room: centred columns, first row well BELOW
       // the room label so it's never covered. (PX=column pitch, SY=first-row Y, RP=row pitch.)
-      const PX=66, SY=R.y+70, RP=44;
+      const PX=84, SY=R.y+74, RP=56;
       if (!ics.length && lead){
         place(lead, R.cx, Math.round(R.y + R.h*0.52), true);   // ONLY the lead → centre the desk
       } else {
@@ -1451,7 +1451,7 @@ class FloorScene extends Phaser.Scene {
       const y=R.floorY+34+row*44;
       const k=poolKit(i);
       const ws=this.makeWorkstation(x, y+16, k.accent);
-      const s=this.makePerson(x, y, k); s.setScale(1.25).setDepth(y).setAlpha(0.96);
+      const s=this.makePerson(x, y, k); s.setScale(1.5).setDepth(y).setAlpha(0.96);
       s.home={x,y}; s.loungeSlot=12+i; s.seen=true; s.inLounge=false;
       s.working = (this.activeRoomKey === "engineering");
       this.zzzLoop(s);

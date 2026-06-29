@@ -24,7 +24,9 @@ const WALL_TOP = 118, FLOOR_BOTTOM = H - 26;
 // per-discipline rooms — FRONTEND / BACKEND / DATA — top-level sections like the
 // others, occupying row 1; all of an area's engineers live in its room.
 const CELL_W = 274, CELL_H = 196, AISLE = 34, GX0 = 40, GY0 = 132, GX1 = W - 40;
-function cellBox(c,r){ return {x: GX0 + c*(CELL_W+AISLE), y: GY0 + r*(CELL_H+AISLE), w:CELL_W, h:CELL_H}; }
+function cellBox(c,r){ const x = GX0 + c*(CELL_W+AISLE), y = GY0 + r*(CELL_H+AISLE);
+  // include derived coords so non-ROOM callers (the lounge cell) get cx/cy/x1/y1 too.
+  return {x, y, w:CELL_W, h:CELL_H, x0:x, y0:y, x1:x+CELL_W, y1:y+CELL_H, cx:x+CELL_W/2, cy:y+CELL_H/2}; }
 const GRID = {  // pipeline: product → architecture → engineering(FE/BE/DA) → qa → security → gate → vault
   product:[0,0], architecture:[1,0], qa:[2,0], security:[3,0],
   frontend:[0,1], backend:[1,1], data:[2,1], gate:[3,1],
@@ -45,7 +47,7 @@ const RBASE = {
   data:{label:"DATA",color:0x245a42}, qa:{label:"QA · REVIEW",color:0x2e5a4a},
   security:{label:"SECURITY",color:0x5a2e36},
   gate:{label:"GATE",color:0x2c4a55}, vault:{label:"VAULT",color:0x5a4a18},
-  office:{label:"CTO OFFICE",color:0x4a4030},   // the CTO's room — org chart on the wall
+  office:{label:"CTO OFFICE",color:0x4a4030},   // the CTO's room (opens on the RIGHT wall)
 };
 // Build-order numeral per room (engineering's 3 rooms share stage 3 — they run in
 // parallel; support rooms have none).
@@ -364,7 +366,9 @@ class FloorScene extends Phaser.Scene {
     // only one, not repeated in every window).
     let pi = 0;
     for (let wx=86; wx<W-130; wx+=232){
-      const ww=80, wh=42, wy=60, v = pi % 4;
+      // the SUN belongs to exactly one window (pi 0); the rest cycle the other
+      // three scenes (clouds / mountain / birds) so no scene — sun included — repeats back-to-back.
+      const ww=80, wh=42, wy=60, v = pi===0 ? 0 : 1 + ((pi-1) % 3);
       // WOODEN frame: outer wood + a lit top edge + a dark inner liner (a real picture frame)
       this.add.rectangle(wx-4, wy-4, ww+8, wh+8, 0x6b4527).setOrigin(0,0).setDepth(2);
       this.add.rectangle(wx-4, wy-4, ww+8, 2, 0x8a5e36).setOrigin(0,0).setDepth(2);            // frame top light
@@ -455,9 +459,13 @@ class FloorScene extends Phaser.Scene {
       // GATE also has a TOP entrance (from security above) so work flows security →
       // gate → vault. The VAULT is sealed except a single TOP opening under the gate.
       const topGap = key==="gate" ? cx : (key==="vault" ? Math.round(ROOMS.gate.cx) : null);
-      const botGap = key==="vault" ? null : cx;
+      // The CTO OFFICE opens on its RIGHT wall (onto the corridor), not the bottom —
+      // everyone else opens at the bottom centre. Vault is sealed bottom (top-only).
+      const rightGap = key==="office" ? Math.round(R.cy) : null;
+      const botGap = (key==="vault" || key==="office") ? null : cx;
       seg(R.x, R.y, T, R.h);                                   // left  (solid)
-      seg(R.x1 - T, R.y, T, R.h);                              // right (solid)
+      if (rightGap != null){ seg(R.x1-T, R.y, T, (rightGap-DOOR/2)-R.y); seg(R.x1-T, rightGap+DOOR/2, T, R.y1-(rightGap+DOOR/2)); }
+      else seg(R.x1 - T, R.y, T, R.h);                         // right (solid or split)
       if (topGap != null){ band(R.x, (topGap-DOOR/2)-R.x, R.y); band(topGap+DOOR/2, R.x1-(topGap+DOOR/2), R.y); }
       else band(R.x, R.w, R.y);                                // banded top (solid or split)
       if (botGap != null){ seg(R.x, R.y1-T, (botGap-DOOR/2)-R.x, T); seg(botGap+DOOR/2, R.y1-T, R.x1-(botGap+DOOR/2), T); }
@@ -520,18 +528,24 @@ class FloorScene extends Phaser.Scene {
     const top = (R)=> R.y + 26;        // just below the 20px banded top wall
     const bot = (R)=> R.y1 - TI;       // just inside the bottom wall
 
-    // LOUNGE (bottom-left): a tidy seating set — couch on the back wall, table + stools
-    // in front, TV on the bottom wall, a vending machine and plants in the corners.
+    // RECEPTION / LOUNGE: a square room-sized rug with a seating set that all FACES RIGHT
+    // (toward the entrance) — a side-profile TV, armchairs, and coffee tables on the rug,
+    // a vending machine and plants tucked into the corners.
     const L = cellBox(LOUNGE_CELL[0], LOUNGE_CELL[1]);
+    const cs = L.h - 56, cxn = Math.round(L.cx), cyn = Math.round(L.y + L.h/2 + 8);
+    this.add.rectangle(cxn, cyn, cs+10, cs+10, 0x8a4a40).setOrigin(0.5).setDepth(1);             // rug border (warm)
+    this.add.rectangle(cxn, cyn, cs, cs, 0xb9685a).setOrigin(0.5).setDepth(1);                   // rug field
+    this.add.rectangle(cxn, cyn-cs/2, cs, 2, 0xcf7a68).setOrigin(0.5,0).setDepth(1);             // top sheen
+    this.add.rectangle(cxn, cyn, cs-18, cs-18).setOrigin(0.5).setDepth(1).setStrokeStyle(2, 0xd98a78); // inner ring
     this.bm(L.cx, top(L)-2, "LOUNGE", 12, 0x8aa0c8, 0.5, 0).setDepth(4);
-    P("couch",  L.x+78, L.y+62); P("ctable", L.x+78, L.y+84);
-    P("stool",  L.x+52, L.y+90); P("stool",  L.x+104, L.y+90);
-    P("tv",     L.x+78, bot(L));
-    P("vending",L.x1-TI-12, L.y+74);
-    P("plant",  L.x+TI+6, bot(L)); P("plant", L.x1-TI-8, bot(L));
+    P("tv_r",    L.x+58, cyn+8);                                        // flat-screen, faces RIGHT
+    P("chair_r", L.x+150, cyn-20); P("chair_r", L.x+150, cyn+34);       // armchairs facing right
+    P("ctable",  L.x+198, cyn-14); P("ctable",  L.x+198, cyn+38);       // coffee tables
+    P("vending", L.x1-TI-12, L.y+74);
+    P("plant",   L.x+TI+6, bot(L)); P("plant", L.x1-TI-8, bot(L));
 
-    // CTO OFFICE (walled room, row 2): the org chart (renderOrg) on the top wall, his
-    // executive desk + chair at the bottom, plants in the corners. Labelled by the room.
+    // CTO OFFICE (walled room, row 2): his executive desk + chair at the bottom and
+    // plants in the corners (no org board — the room stays uncluttered). Opens RIGHT.
     const E = ROOMS.office;
     P("counter", E.cx, E.y1-34);                                       // executive desk (CTO stands behind)
     P("plant", E.x+TI+8, E.y1-TI); P("plant", E.x1-TI-10, E.y1-TI);    // corner plants (clear of the door)
@@ -681,6 +695,24 @@ class FloorScene extends Phaser.Scene {
       c.add(this.add.ellipse(0,-6,15,7,0x9c4a1c).setOrigin(0.5,1));             // seat rim (dark)
       c.add(this.add.ellipse(0,-7,13,6,0xe0863a).setOrigin(0.5,1));             // cushion top
       c.add(this.add.ellipse(-2,-8,6,2,0xf4a45a).setOrigin(0.5,1));             // top-left highlight
+    } else if (kind==="chair_r"){
+      // an armchair in SIDE PROFILE facing RIGHT — backrest on the left, seat to the right.
+      c.add(this.add.rectangle(-7,2,4,7,0x5a3a6a).setOrigin(0.5,1));            // back leg
+      c.add(this.add.rectangle(7,1,4,6,0x5a3a6a).setOrigin(0.5,1));             // front leg
+      out(-6,-2,5,20,0x6a4a7a);                                                 // tall backrest (left)
+      out(2,-1,18,8,0x7a5a8a);                                                  // seat block (extends right)
+      c.add(this.add.rectangle(2,-8,16,4,0x8f6fa6).setOrigin(0.5,1).setStrokeStyle(1,0x5a3a6a)); // seat cushion
+      c.add(this.add.rectangle(-3,-6,4,12,0x9a7ab0).setOrigin(0.5,1));          // backrest cushion (lit, faces right)
+    } else if (kind==="tv_r"){
+      // a flat-screen in SIDE PROFILE, the bright screen on its RIGHT face (facing right).
+      c.add(this.add.rectangle(0,0,16,3,0x3a3f4a).setOrigin(0.5,1));            // base
+      c.add(this.add.rectangle(0,-2,4,4,0x2a2f38).setOrigin(0.5,1));            // neck
+      out(-2,-5,10,24,0x1a1e26);                                               // narrow side bezel
+      const scr=this.add.rectangle(4,-7,4,18,0x2bd3ff,0.7).setOrigin(0.5,1);    // screen on the RIGHT face
+      c.add(scr);
+      c.add(this.add.rectangle(6,-22,1,16,0x9fe8ff,0.5).setOrigin(0.5,1));      // right-edge glint
+      this.tweens.add({targets:scr, fillAlpha:{from:0.45,to:0.8}, duration:700+Math.abs(Math.round(x))%500,
+        yoyo:true, repeat:-1, ease:"Sine.inOut"});                            // flicker
     }
     return c;
   }
@@ -897,22 +929,29 @@ class FloorScene extends Phaser.Scene {
   // which unlocks only when every release gate passes.
   buildGate(){
     const G = ROOMS.gate, V = ROOMS.vault, cx = Math.round(G.cx);
-    // ---- CCTV monitor bank on the office wall (camera feeds) ----
-    const bx = G.x+46, by = G.floorY+18, mon=[0x2bd3ff,0x7dffb0,0xffd95e,0x5db8ff];
+    // ---- CCTV monitors MOUNTED on the top wall (right of the GATE sign), so they read
+    // as wall-hung camera feeds — not loose blocks on the floor. ----
+    const bx = G.x1-58, by = G.y+52, mon=[0x2bd3ff,0x7dffb0,0xffd95e,0x5db8ff];
     const bank = this.add.container(bx,by).setDepth(3);
-    bank.add(this.add.rectangle(0,0,76,52,0x10151f).setStrokeStyle(2,0x2a3550));
-    for (let i=0;i<4;i++){ const sx=-18+(i%2)*36, sy=-12+Math.floor(i/2)*24;
-      bank.add(this.add.rectangle(sx,sy,30,18,mon[i],0.85));
-      bank.add(this.add.rectangle(sx,sy,30,18).setStrokeStyle(1,0x05080f)); }
-    const led=this.add.rectangle(bx+30,by-22,4,4,0xff5d6c,0.9).setDepth(3);  // REC light
+    bank.add(this.add.rectangle(0,-30,6,18,0x2a3550).setOrigin(0.5,1));        // wall mount bracket
+    bank.add(this.add.rectangle(0,0,54,34,0x10151f).setOrigin(0.5,1).setStrokeStyle(2,0x2a3550));
+    for (let i=0;i<4;i++){ const sx=-12+(i%2)*24, sy=-19+Math.floor(i/2)*16;
+      bank.add(this.add.rectangle(sx,sy,20,12,mon[i],0.85).setOrigin(0.5,1));
+      bank.add(this.add.rectangle(sx,sy,20,12).setOrigin(0.5,1).setStrokeStyle(1,0x05080f)); }
+    const led=this.add.rectangle(bx+22,by-30,4,4,0xff5d6c,0.9).setDepth(3);    // REC light
     this.tweens.add({targets:led, alpha:0.2, duration:700, yoyo:true, repeat:-1});
-    // ---- checkpoint desk / counter ----
-    const dx = cx+30, dy = G.y1-34;
-    const desk = this.add.container(dx,dy).setDepth(3);
-    desk.add(this.add.rectangle(0,0,70,16,0x394566).setOrigin(0.5,1));
-    desk.add(this.add.rectangle(0,-15,70,4,0x4a587a).setOrigin(0.5,1));      // counter top
-    desk.add(this.add.rectangle(-20,-26,18,12,0x10151f).setOrigin(0.5,1));   // terminal
-    desk.add(this.add.rectangle(-20,-28,14,8,0x2bd3ff,0.85).setOrigin(0.5,1));
+    // ---- checkpoint desk: a clear, legged counter sitting IN FRONT OF the guard, so
+    // the two read together as a manned security checkpoint. ----
+    const dx = Math.round(G.x + G.w*0.30), dy = G.y1-18;
+    const desk = this.add.container(dx,dy).setDepth(7);
+    desk.add(this.add.ellipse(0,2,72,7,PC.shadow,0.28).setOrigin(0.5,1));    // contact shadow
+    desk.add(this.add.rectangle(-28,1,5,9,0x2a3550).setOrigin(0.5,1));       // left leg
+    desk.add(this.add.rectangle(28,1,5,9,0x2a3550).setOrigin(0.5,1));        // right leg
+    desk.add(this.add.rectangle(0,-7,64,12,0x394566).setOrigin(0.5,1).setStrokeStyle(1,PC.sceneInk)); // counter front
+    desk.add(this.add.rectangle(0,-19,68,5,0x4a587a).setOrigin(0.5,1).setStrokeStyle(1,PC.sceneInk)); // counter top
+    desk.add(this.add.rectangle(0,-19,68,1,0x6a7aa0).setOrigin(0.5,1));      // top edge highlight
+    desk.add(this.add.rectangle(-18,-26,16,11,0x10151f).setOrigin(0.5,1).setStrokeStyle(1,0x05080f)); // terminal
+    desk.add(this.add.rectangle(-18,-28,12,7,0x2bd3ff,0.85).setOrigin(0.5,1)); // terminal screen
     // ---- seal the corridor gap between the GATE and the VAULT below ----
     const gapTop = G.y1, gapBot = V.y, dw = 60;          // short vertical door
     const wallC = 0x1a2030, capC = 0x2a3550;
@@ -1175,6 +1214,12 @@ class FloorScene extends Phaser.Scene {
     pts.push([tx,ty]);                                   // step into the destination
     return pts;
   }
+  // Flip ONLY the sprite (and its synced outline) for facing — never the whole
+  // container, so pinned name badges stay un-mirrored/readable while walking.
+  faceX(a, dir){
+    const t = (a && a.bob) ? a.bob : a;
+    if (t) t.scaleX = dir;
+  }
   walkTo(a, tx, ty, then){
     if (!a) return;
     if (a.moveTween) a.moveTween.stop();
@@ -1186,9 +1231,9 @@ class FloorScene extends Phaser.Scene {
     this.startWalk(a);
     let i = 0;
     const step = ()=>{
-      if (i >= pts.length){ this.stopWalk(a); a.scaleX = 1; if (a.fixedDepth==null) a.setDepth(ty); if (then) then(); return; }
+      if (i >= pts.length){ this.stopWalk(a); this.faceX(a, 1); if (a.fixedDepth==null) a.setDepth(ty); if (then) then(); return; }
       const [px,py] = pts[i++], d = Math.hypot(px-a.x, py-a.y);
-      if (Math.abs(px-a.x) > 3) a.scaleX = px < a.x ? -1 : 1;   // face travel direction
+      if (Math.abs(px-a.x) > 3) this.faceX(a, px < a.x ? -1 : 1);   // face travel direction (sprite only)
       if (a.fixedDepth == null) a.setDepth(Math.max(py, a.y) + 1);
       a.moveTween = this.tweens.add({targets:a, x:px, y:py, duration:Math.max(200, d*3.2), ease:"Sine.inOut", onComplete:step});
     };
@@ -1407,34 +1452,10 @@ class FloorScene extends Phaser.Scene {
   }
 
   renderOrg(ev){
-    // The REAL org chart (Wave E telemetry): present areas -> Tech-Lead domains.
-    if (this.orgPanel){ this.orgPanel.destroy(); }
-    const areaColor = {
-      frontend:0x7fd1ff, backend:0xff9b5e, data:0x7dffb0,
-      infra:0xb59bff, security:0xff6d6d, default:0xcccccc,
-    };
-    const areas = ev.areas || [];
-    const rowH = 16, padding = 8, headerH = 20;
-    // the company org chart, centred on the CTO OFFICE back wall
-    const B = ROOMS.office;
-    const w = Math.min(206, B.w-44), h = headerH + areas.length*rowH + padding;
-    const c = this.add.container(Math.round(B.cx - w/2), B.y+40).setDepth(28);
-    c.add(this.add.rectangle(0,0,w,h,0xfffdf3,0.98).setOrigin(0,0).setStrokeStyle(2,PC.ink));
-    c.add(this.add.rectangle(0,0,w,3,PC.stripe).setOrigin(0,0));      // board top rail (pink)
-    c.add(this.add.rectangle(w/2,-3,5,5,PC.stripe).setOrigin(0.5,0)); // pin
-    c.add(this.add.text(8,5,"ORG · PM",{fontFamily:"'PixelFont','Courier New'",fontSize:"12px",
-      fontStyle:"bold",color:"#b53129"}).setOrigin(0,0));
-    areas.forEach((a,i)=>{
-      const y = headerH + i*rowH;
-      const col = areaColor[a.area] || areaColor.default;
-      c.add(this.add.rectangle(8,y+2,9,9,col).setOrigin(0,0).setStrokeStyle(1,PC.ink));
-      const leads = (a.leads||[]).join(", ");
-      c.add(this.add.text(22,y,`${a.area}: ${leads}`,
-        {fontFamily:"'PixelFont','Courier New'",fontSize:"11px",color:"#33405e"}).setOrigin(0,0));
-    });
-    c.setAlpha(0);
-    this.tweens.add({targets:c, alpha:1, duration:300});
-    this.orgPanel = c;
+    // The org chart used to hang on the CTO office back wall, but it cluttered the
+    // room — the live org is reflected by who actually staffs each discipline room,
+    // so no board is drawn here. (Kept as a no-op; setOrg still drives the rooms.)
+    if (this.orgPanel){ this.orgPanel.destroy(); this.orgPanel = null; }
   }
 
   // Store the REAL org (areas + per-domain units), then populate the per-discipline

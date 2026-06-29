@@ -373,27 +373,32 @@ class FloorScene extends Phaser.Scene {
   // building's plan, not rugs on open space. Walls sit below the agents (depth 4)
   // so people always render in front; doorways open onto the corridors.
   buildWalls(){
-    const T = 4, DOOR = 34;          // wall thickness, doorway width
-    const seg = (x, y, w, h, c, hi) => {
+    const T = 7, DOOR = 34;          // wall thickness (chunky), doorway width
+    const FACE = PC.wall, CAP = PC.wallHi, BASE = PC.wallShade, EDGE = 0x2b2f45; // cream + navy outline
+    // A raised GBA wall: dark outline behind, cream face, bright top cap, shadowed base.
+    const seg = (x, y, w, h) => {
       if (w <= 0 || h <= 0) return;
-      this.add.rectangle(x, y, w, h, c).setOrigin(0, 0).setDepth(4);
-      this.add.rectangle(x, y, w, Math.min(2, h), hi).setOrigin(0, 0).setDepth(4);   // top bevel
+      this.add.rectangle(x-1, y-1, w+2, h+2, EDGE).setOrigin(0,0).setDepth(4);          // crisp outline
+      this.add.rectangle(x, y, w, h, FACE).setOrigin(0,0).setDepth(4);                  // cream face
+      this.add.rectangle(x, y, w, Math.min(2,h), CAP).setOrigin(0,0).setDepth(4);       // lit top cap
+      if (h > 4) this.add.rectangle(x, y+h-2, w, 2, BASE).setOrigin(0,0).setDepth(4);    // base shadow
+      if (w > 4) this.add.rectangle(x+w-2, y, 2, h, BASE).setOrigin(0,0).setDepth(4);    // right shadow
     };
-    const WALL = PC.wallShade, BEVEL = PC.wallHi;   // cream wall + bright top bevel
     for (const key in ROOMS){
       const R = ROOMS[key]; if (R.virtual) continue;
-      const c = WALL, hi = BEVEL;
       const dx = Math.round(R.cx), dy = Math.round(R.cy);
       // top + left are solid; bottom + right carry a centred doorway onto the corridor
-      seg(R.x, R.y, R.w, T, c, hi);                                   // top
-      seg(R.x, R.y, T, R.h, c, hi);                                   // left
-      seg(R.x, R.y1 - T, (dx - DOOR / 2) - R.x, T, c, hi);            // bottom (left of door)
-      seg(dx + DOOR / 2, R.y1 - T, R.x1 - (dx + DOOR / 2), T, c, hi); // bottom (right of door)
-      seg(R.x1 - T, R.y, T, (dy - DOOR / 2) - R.y, c, hi);            // right (above door)
-      seg(R.x1 - T, dy + DOOR / 2, T, R.y1 - (dy + DOOR / 2), c, hi); // right (below door)
-      // door jamb posts (a brighter nub each side of the openings)
-      const post = (x, y) => this.add.rectangle(x, y, T, 3, hi).setOrigin(0, 0).setDepth(4);
-      post(dx - DOOR / 2 - T, R.y1 - T); post(dx + DOOR / 2, R.y1 - T);
+      seg(R.x, R.y, R.w, T);                                   // top
+      seg(R.x, R.y, T, R.h);                                   // left
+      seg(R.x, R.y1 - T, (dx - DOOR / 2) - R.x, T);            // bottom (left of door)
+      seg(dx + DOOR / 2, R.y1 - T, R.x1 - (dx + DOOR / 2), T); // bottom (right of door)
+      seg(R.x1 - T, R.y, T, (dy - DOOR / 2) - R.y);            // right (above door)
+      seg(R.x1 - T, dy + DOOR / 2, T, R.y1 - (dy + DOOR / 2)); // right (below door)
+      // door jambs: a navy post + bright nub framing each opening (reads as a real frame)
+      const jamb = (x, y, w, h) => { this.add.rectangle(x, y, w, h, EDGE).setOrigin(0,0).setDepth(5);
+        this.add.rectangle(x, y, w, 2, CAP).setOrigin(0,0).setDepth(5); };
+      jamb(dx - DOOR/2 - 2, R.y1 - T, 2, T); jamb(dx + DOOR/2, R.y1 - T, 2, T);   // bottom doorway
+      jamb(R.x1 - T, dy - DOOR/2 - 2, T, 2); jamb(R.x1 - T, dy + DOOR/2, T, 2);   // right doorway
     }
   }
 
@@ -513,8 +518,8 @@ class FloorScene extends Phaser.Scene {
   makeProp(kind, x, floorY){
     x = Math.round(x);
     const c = this.add.container(x, floorY).setDepth(3);  // props (proportional to the 32px sprites)
-    const out = (rx,ry,w,h,col)=>{ // outlined pixel rect (1px black border) + 1px top-light
-      c.add(this.add.rectangle(rx,ry,w+2,h+2,0x0a0d16).setOrigin(0.5,1));
+    const out = (rx,ry,w,h,col)=>{ // outlined pixel rect (navy border) + 1px top-light
+      c.add(this.add.rectangle(rx,ry,w+2,h+2,0x2b2f45).setOrigin(0.5,1));
       c.add(this.add.rectangle(rx,ry,w,h,col).setOrigin(0.5,1));
       c.add(this.add.rectangle(rx,ry-h+1,w,1,shade(col,1.3)).setOrigin(0.5,1));   // top highlight
       c.add(this.add.rectangle(rx,ry-1,w,1,shade(col,0.6)).setOrigin(0.5,1));     // base shadow
@@ -539,10 +544,11 @@ class FloorScene extends Phaser.Scene {
       out(0,0,34,30,0x5a4326);
       for(let i=0;i<4;i++) c.add(this.add.rectangle(-12+i*8,-16,5,12,[0xff8fae,0x7fd1ff,0xffd95e,0x7dffb0][i]).setOrigin(0.5,1));
     } else if (kind==="board"){
-      out(0,-6,40,26,0x223047);
-      c.add(this.add.rectangle(-12,-22,12,3,0xffd95e).setOrigin(0.5,1));
-      c.add(this.add.rectangle(2,-16,16,3,0x7fd1ff).setOrigin(0.5,1));
-      c.add(this.add.rectangle(-6,-10,10,3,0x7dffb0).setOrigin(0.5,1));
+      out(0,-4,42,4,0x7a5028);                                   // wooden frame base
+      out(0,-6,38,24,0xd8b87a);                                  // tan corkboard
+      c.add(this.add.rectangle(-12,-22,12,3,0xe06a86).setOrigin(0.5,1));   // pinned notes
+      c.add(this.add.rectangle(2,-16,16,3,0x5db8ff).setOrigin(0.5,1));
+      c.add(this.add.rectangle(-6,-10,10,3,0x6fcf86).setOrigin(0.5,1));
     } else if (kind==="couch"){
       out(0,0,52,10,0x6a4a7a);                                  // seat
       out(0,-8,52,8,0x7a5a8a);                                  // backrest
@@ -580,19 +586,21 @@ class FloorScene extends Phaser.Scene {
     if (accent == null) accent = 0x7fd1ff;   // monitor glow default (sprites carry their own colour)
     x = Math.round(x);
     const c = this.add.container(x, floorY).setDepth(floorY+5).setScale(1.05);  // desk (proportional to the 32px sprites)
-    const O = 0x0a0d16;
+    const O = 0x2b2f45;                                           // navy outline (softer than black)
     const out = (rx,ry,w,h,col)=>{
       c.add(this.add.rectangle(rx,ry,w+2,h+2,O).setOrigin(0.5,1));
       c.add(this.add.rectangle(rx,ry,w,h,col).setOrigin(0.5,1));
+      c.add(this.add.rectangle(rx,ry-h+1,w,1,shade(col,1.25)).setOrigin(0.5,1)); // top light
     };
-    out(0,0,40,7,0x6b4a2c);                                       // desktop (smaller)
-    c.add(this.add.rectangle(-17,7,3,10,0x4a3320).setOrigin(0.5,1));
-    c.add(this.add.rectangle(17,7,3,10,0x4a3320).setOrigin(0.5,1)); // legs
-    out(-4,-7,17,12,0x10151f);                                    // monitor bezel
-    const screen = this.add.rectangle(-4,-9,12,8,shade(accent,1.25),0.92).setOrigin(0.5,1);
+    out(0,0,42,8,0x9c6b3a);                                       // wood desktop
+    c.add(this.add.rectangle(0,-7,40,1,0x7a5028).setOrigin(0.5,1));  // grain line
+    c.add(this.add.rectangle(-18,8,3,11,0x6b4a2c).setOrigin(0.5,1));
+    c.add(this.add.rectangle(18,8,3,11,0x6b4a2c).setOrigin(0.5,1));  // legs
+    out(-5,-8,18,13,0x46506b);                                    // monitor bezel (slate)
+    const screen = this.add.rectangle(-5,-10,13,9,shade(accent,1.25),0.95).setOrigin(0.5,1);
     c.add(screen);                                                // dept-tinted screen
-    c.add(this.add.rectangle(-7,-12,6,1.5,shade(accent,1.5))); c.add(this.add.rectangle(-8,-9,9,1.5,shade(accent,1.4))); // code lines
-    out(12,-1,11,3,0x2a3550);                                     // keyboard
+    c.add(this.add.rectangle(-9,-13,7,1.5,shade(accent,1.5))); c.add(this.add.rectangle(-10,-10,10,1.5,shade(accent,1.4))); // code lines
+    out(13,-1,11,3,0x46506b);                                     // keyboard
     this.screens = this.screens || []; this.screens.push(screen);
     return c;
   }

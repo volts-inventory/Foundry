@@ -731,6 +731,29 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     _close(p)
 
 
+_STAGE_ORDER = ["defining requirements", "designing the system", "implementing",
+                "testing & review", "security review", "verifying at the gate"]
+
+
+def _node_stage(node: str) -> str | None:
+    """Map a live graph node id to a readable pipeline STAGE for the platform log
+    (None for infra/non-stage nodes we don't surface)."""
+    n = (node or "").lower()
+    if any(k in n for k in ("stakeholder", "product", "criteria", "program")):
+        return "defining requirements"
+    if "architect" in n:
+        return "designing the system"
+    if "engineer" in n and ("appsec" not in n):
+        return "implementing"
+    if any(k in n for k in ("qa", "sdet", "reviewer", "writer", "tester")):
+        return "testing & review"
+    if any(k in n for k in ("appsec", "audit", "supply", "security")):
+        return "security review"
+    if "gate" in n:
+        return "verifying at the gate"
+    return None
+
+
 def _platform_opts(body: dict[str, Any]) -> dict[str, Any]:
     """Advanced platform knobs from the request body (all optional; sane defaults)."""
     def _int(key: str, default: int) -> int:
@@ -796,46 +819,64 @@ def _run_platform(p: Project) -> None:
                  "worker": "the background worker", "game": "the game"}
     svc_role = {s.name: s.role for s in plan.services}
     state: dict[str, str] = {s.name: "queued" for s in plan.services}
+    svc_stage: dict[str, str] = {}   # last pipeline stage per service (show every CHANGE)
 
     def push_prog() -> None:
         _emit(p, type="platprog", services=dict(state), total=len(state))
 
     push_prog()
 
+    def set_state(svc: str, st: str) -> None:
+        state[svc] = st
+        push_prog()
+
     def cb(ev: dict[str, Any]) -> None:
         t = ev.get("type")
         svc = ev.get("service", "")
+        pn = ev.get("pass", 1)
         if t == "plan":
             _emit(p, type="narrate", text="📋 Services: " + ", ".join(ev.get("services") or []))
         elif t == "svc_start":
             role = str(ev.get("role") or "")
             _emit(p, type="active", room=role_room.get(role, "backend"))
-            state[svc] = "building"; push_prog()
+            set_state(svc, "building")
             _emit(p, type="narrate", text=f"▶ {svc} — building {role_desc.get(role, role)}")
-        elif t == "pass" and ev.get("pass", 1) > 1:
-            state[svc] = "rebuilding"; push_prog()
+        elif t == "svc_node":
+            stage = _node_stage(str(ev.get("node") or ""))
+            last = svc_stage.get(svc)
+            if stage and stage != last:   # show every stage CHANGE (forward AND backward)
+                back = (last in _STAGE_ORDER and stage in _STAGE_ORDER
+                        and _STAGE_ORDER.index(stage) < _STAGE_ORDER.index(last))
+                svc_stage[svc] = stage
+                if back:   # regressed to an earlier stage — e.g. tests failed -> re-implement
+                    _emit(p, type="narrate", text=f"   ↩ {svc} · back to {stage}")
+                    _emit(p, type="rebuild", room=role_room.get(svc_role.get(svc, ""), "backend"))
+                else:
+                    _emit(p, type="narrate", text=f"   {svc} · {stage}")
+        elif t == "pass" and pn > 1:
+            svc_stage.pop(svc, None)   # a new pass re-runs the pipeline; let stages re-announce
+            set_state(svc, "rebuilding")
             _emit(p, type="rebuild", room=role_room.get(svc_role.get(svc, ""), "backend"))
-            _emit(p, type="narrate", text=f"   ↻ {svc} — rebuilding · pass {ev['pass']}")
+            _emit(p, type="narrate", text=f"   ↻ {svc} — rebuilding · pass {pn}")
         elif t == "pass_result":
             if ev.get("passed"):
-                state[svc] = "built"; push_prog()
-                _emit(p, type="narrate", text=f"   ✓ {svc} — built, gates green (pass {ev.get('pass', 1)})")
+                set_state(svc, "built")
+                _emit(p, type="narrate", text=f"   ✓ {svc} — built, gates green (pass {pn})")
             else:
-                state[svc] = "held"; push_prog()
-                _emit(p, type="narrate", text=f"   ✗ {svc} — held at the gate (pass {ev.get('pass', 1)})")
+                set_state(svc, "held")
+                _emit(p, type="narrate", text=f"   ✗ {svc} — held at the gate (pass {pn})")
         elif t == "critic":
             if ev.get("complete"):
-                state[svc] = "approved"; push_prog()
+                set_state(svc, "approved")
                 _emit(p, type="narrate", text=f"   ✦ {svc} — approved: technically complete")
             else:
                 gaps = ev.get("gaps") or []
                 detail = "; ".join(gaps[:3]) if gaps else "more to do"
                 _emit(p, type="narrate", text=f"   • {svc} — needs more: {detail} → rebuilding")
         elif t == "svc_done":
-            state[svc] = "done" if ev.get("passed") else "failed"; push_prog()
+            set_state(svc, "done" if ev.get("passed") else "failed")
             mark = "✓" if ev.get("passed") else "✗"
-            np = ev.get("passes", 1)
-            _emit(p, type="narrate", text=f"{mark} {svc} done · {np} pass(es)")
+            _emit(p, type="narrate", text=f"{mark} {svc} done · {ev.get('passes', 1)} pass(es)")
             for f in (ev.get("files") or [])[:8]:   # the specific pieces this service built
                 _emit(p, type="narrate", text=f"     ⊞ {svc}/{f}")
 

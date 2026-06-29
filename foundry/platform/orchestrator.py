@@ -153,6 +153,11 @@ def _build_one(
             if gaps:  # target the rebuild at the critic's named gaps (not a blind rerun)
                 directive += " Specifically close these gaps:\n- " + "\n- ".join(gaps[:12])
         request = svc.request + directive
+
+        def node_progress(node: str, scope: str) -> None:
+            # forward this service's live pipeline node up to the platform stream
+            emit({"type": "svc_node", "service": svc.name, "node": node, "scope": scope})
+
         try:
             result = run_service(
                 request,
@@ -166,6 +171,7 @@ def _build_one(
                 max_slots=max_slots,
                 cost_cap_microusd=cost_cap_microusd,
                 base_dir=base,                       # build on the prior pass's tree
+                progress_cb=node_progress,
             )
         except Exception as exc:  # a service failing to build must not sink the platform
             return ServiceResult(

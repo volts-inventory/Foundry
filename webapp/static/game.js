@@ -1224,19 +1224,30 @@ class FloorScene extends Phaser.Scene {
   engineeringLanes(){
     const list = (this.orgAreas||[]).map(a=>a&&a.area).filter(Boolean);
     if(!list.length) return null;
-    const weight={}; list.forEach(a=>weight[a]=0);
+    // Real per-area workload from the ownership map (units owned) = the IC demand.
+    const units={}; list.forEach(a=>units[a]=0);
     for(const d of (this.orgDomains||[]))
-      if(d && (d.area in weight)) weight[d.area] += (d.units&&d.units.length)?d.units.length:0;
-    let total=0; list.forEach(a=>{ if(!weight[a]) weight[a]=1; total+=weight[a]; });
-    // Headcount tracks the REAL decomposition: one IC per owned unit (sum of weights),
-    // capped by the parallelism ceiling (poolN) and a hard cap. A small ask seats a few
-    // engineers; a complex one fills the rooms — never just a flat max-pool paint.
-    const N=Math.min(total, this.poolN||8, 8), ics={};
-    if(N>0){
-      const rem=[]; let used=0;
-      list.forEach(a=>{ const raw=N*weight[a]/total; ics[a]=Math.floor(raw); used+=ics[a]; rem.push([a,raw-ics[a]]); });
-      rem.sort((p,q)=>q[1]-p[1]);
-      for(let k=0; used<N; k++,used++) ics[rem[k%rem.length][0]]++;
+      if(d && (d.area in units)) units[d.area] += (d.units&&d.units.length)?d.units.length:0;
+    // The POOL is the max number of workers on the floor. One lead per area-group is
+    // required and is drawn FROM the pool first; the slots that remain are ICs that
+    // scale with demand until the pool is full. So every body on screen is one real
+    // slot — leads + ICs never exceed the pool (poolN), and a light ask leaves the
+    // pool partly unfilled rather than inventing workers.
+    const groups=list.length;                              // 1 lead per group, required
+    const cap=Math.max(groups, this.poolN||groups);        // total worker budget (leads INCLUDED)
+    const icSlots=Math.max(0, cap-groups);                 // slots left after reserving the leads
+    const dem=list.map(a=>Math.max(0, units[a]));
+    const totalDem=dem.reduce((s,n)=>s+n,0);
+    const ics={}; list.forEach(a=>ics[a]=0);
+    if(icSlots>0 && totalDem>0){
+      if(totalDem<=icSlots){
+        list.forEach((a,i)=>{ ics[a]=dem[i]; });           // room to spare: one IC per owned unit
+      } else {                                              // oversubscribed: split slots by demand
+        const rem=[]; let used=0;
+        list.forEach((a,i)=>{ const raw=icSlots*dem[i]/totalDem; ics[a]=Math.floor(raw); used+=ics[a]; rem.push([a,raw-ics[a]]); });
+        rem.sort((p,q)=>q[1]-p[1]);
+        for(let k=0; used<icSlots && rem.length; k++,used++) ics[rem[k%rem.length][0]]++;
+      }
     }
     return list.map(a=>({area:a, ics:ics[a]||0, color:AREA_COLOR[a]||0xffc08a}));
   }

@@ -880,12 +880,13 @@ class FloorScene extends Phaser.Scene {
       const names = ROSTER[room], R = ROOMS[room]; if (!R) continue;
       const cols = Math.min(names.length, 3);
       const single = names.length === 1;                         // a one-role room → centre it
+      const PX = 66, SY = R.y + 70, RP = 44;                     // SAME grid as the eng rooms
       names.forEach((name,i)=>{
         const col = i%cols, row = Math.floor(i/cols);
-        // tight pods: fixed pitch from a left margin, centred as a block in the room
-        const blockW = (cols-1)*64, hx = R.cx - blockW/2 + col*64;
-        const hy = single ? Math.round(R.floorY + (R.h-46)*0.45)  // single role → centred desk
-                          : R.floorY + 34 + row*48;               // else stand in the room's floor
+        // centred columns, first row well below the room label (matches every other room)
+        const blockW = (cols-1)*PX, hx = single ? R.cx : R.cx - blockW/2 + col*PX;
+        const hy = single ? Math.round(R.y + R.h*0.52)            // single role → centred desk
+                          : SY + row*RP;                          // else the consistent grid
         const seed = hashStr((this.proj.id||'f')+name), kit = kitFor(name, seed);
         this.makeWorkstation(hx, hy+16, kit.accent);              // desk just in front of them
         const a = this.makePerson(hx, hy, kit);
@@ -1416,12 +1417,15 @@ class FloorScene extends Phaser.Scene {
         if (s.working) this.startWalk(s); else this.deskIdle(s);
         (p.lead?this.techLeadGroup:this.poolGroup).push(s, ws);
       };
+      // ONE consistent desk grid for every room: centred columns, first row well BELOW
+      // the room label so it's never covered. (PX=column pitch, SY=first-row Y, RP=row pitch.)
+      const PX=66, SY=R.y+70, RP=44;
       if (!ics.length && lead){
-        place(lead, R.cx, R.floorY + (R.h-46)*0.45, true);     // ONLY the lead → centre the desk
+        place(lead, R.cx, Math.round(R.y + R.h*0.52), true);   // ONLY the lead → centre the desk
       } else {
-        const c2=Math.min(3, Math.max(1, Math.ceil(ics.length/2)));
-        ics.forEach((p,i)=>{ const c=i%c2, r=Math.floor(i/c2);
-          place(p, R.x + R.w*((c+1)/(c2+1)), R.floorY + 30 + r*42, false); });   // ICs grid (upper room)
+        const c2=Math.min(3, Math.max(1, ics.length));
+        ics.forEach((p,i)=>{ const c=i%c2, r=Math.floor(i/c2), bw=(c2-1)*PX;
+          place(p, R.cx - bw/2 + c*PX, SY + r*RP, false); });   // centred IC grid (upper room)
         if (lead) place(lead, R.x1 - 50, R.y1 - 36, true);     // LEAD oversees from the bottom-right
       }
       this.engLabels.push(this.add.text(R.x1-8, R.y+8, "×"+people.length,

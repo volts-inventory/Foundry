@@ -1383,9 +1383,19 @@ class FloorScene extends Phaser.Scene {
         const k = p.lead ? kitFor("Tech-Lead "+p.area, hashStr((this.proj.id||'f')+"TL"+p.area)) : poolKit(slot);
         k.accent=p.color;
         const ws=this.makeWorkstation(x, y+16, p.color);
-        const s=this.makePerson(x, y, k); s.setScale(p.lead?1.25:1.2).setDepth(y).setAlpha(p.lead?1:0.96);
-        s.add(this.add.text(0,-15, tag,
-          {fontFamily:"'PixelFont','Courier New'",fontSize:"7px",fontStyle:"bold",color:"#"+col6}).setOrigin(0.5));
+        const s=this.makePerson(x, y, k); s.setScale(p.lead?1.32:1.18).setDepth(y).setAlpha(p.lead?1:0.94);
+        if (p.lead){
+          // LEAD marker: a gold star over the head + a filled "<AREA> LEAD" badge.
+          s.add(this.add.text(0,-27,"★",{fontFamily:"'PixelFont','Courier New'",fontSize:"10px",color:"#ffd95e"})
+            .setOrigin(0.5));
+          const lbl=tag+" LEAD", pw=lbl.length*5+8;
+          s.add(this.add.rectangle(0,-15,pw,10,p.color,0.96).setOrigin(0.5).setStrokeStyle(1,0x10182c));
+          s.add(this.add.text(0,-15,lbl,{fontFamily:"'PixelFont','Courier New'",fontSize:"7px",
+            fontStyle:"bold",color:"#10182c"}).setOrigin(0.5));
+        } else {
+          s.add(this.add.text(0,-15, tag,
+            {fontFamily:"'PixelFont','Courier New'",fontSize:"7px",fontStyle:"bold",color:"#"+col6}).setOrigin(0.5));
+        }
         s.home={x,y}; s.loungeSlot=slot++; s.seen=true; s.inLounge=false;
         s.working = (this.activeRoomKey === "engineering");   // building if the stage is live
         this.zzzLoop(s);                                       // idle engineers nap at the desk

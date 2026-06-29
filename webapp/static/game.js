@@ -1959,8 +1959,7 @@ document.getElementById("start-btn").onclick=async ()=>{
   const cap=parseFloat(document.getElementById("cap-input").value);
   if(Number.isFinite(cap) && cap>0) extra.cost_cap_usd=cap;
   if(startFromSel.value) extra.parent_id=startFromSel.value;   // iterate on a finished build
-  const platEl=document.getElementById("platform-mode");
-  if(platEl && platEl.checked) extra.platform=true;   // compose a multi-service monorepo
+  // platform vs single is INFERRED server-side from the request (multi-service => platform)
   const intake=intakeMode();
   if(startFromSel.value && !req.trim()){ alert("Describe what to change or add."); return; }
   if(intake==="spec"){

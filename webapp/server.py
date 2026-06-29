@@ -730,6 +730,18 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     _close(p)
 
 
+def _infers_platform(request: str) -> bool:
+    """True when the request decomposes into MORE THAN ONE service — i.e. it reads as
+    a multi-service app/platform (web + api + backend + data …) rather than a single
+    component (a game, a tool, one service). Drives the auto platform/single choice."""
+    try:
+        from foundry.platform import plan_platform
+
+        return len(plan_platform(request).services) >= 2
+    except Exception:
+        return False
+
+
 def _run_platform(p: Project) -> None:
     """A PLATFORM build on one floor: compose many services into one monorepo via
     ``foundry.platform.build_platform`` and stream its progress to the quest log.
@@ -1312,9 +1324,12 @@ class Handler(BaseHTTPRequestHandler):
         with _LOCK:
             _PROJECTS[pid] = p
         _persist(p)
-        # A PLATFORM build composes many services into one monorepo on this floor;
-        # a normal build is one service through the factory.
-        runner = _run_platform if bool(body.get("platform")) else _run_factory
+        # A PLATFORM build composes many services into one monorepo on this floor; a
+        # normal build is one service through the factory. INFERRED from the request
+        # (multi-service => platform), unless the caller pins it with `platform`.
+        want = body.get("platform")
+        is_platform = want if isinstance(want, bool) else _infers_platform(request)
+        runner = _run_platform if is_platform else _run_factory
         threading.Thread(target=runner, args=(p,), daemon=True).start()
         self._json(200, {"id": pid, "floor": floor, "release": release_seq})
 

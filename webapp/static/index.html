@@ -115,8 +115,7 @@
       <input id="packs-input" type="text" placeholder="regulated, ml_data, frontend" />
       <label class="check"><input type="checkbox" id="supervised" checked /> Supervised (CTO approves each checkpoint)</label>
       <p class="hint" id="supervised-hint"></p>
-      <label class="check"><input type="checkbox" id="platform-mode" /> Platform (compose many services into one monorepo)</label>
-      <p class="hint">Splits the request into web / api / backend / data services, builds and auto-deepens each, and stitches a monorepo — browse it from the repo. Use a real backend for actual code.</p>
+      <p class="hint">A multi-service request (e.g. a site with users + posts) is auto-built as a PLATFORM — split into web / api / backend / data services, each auto-deepened, then stitched into one monorepo. A single thing builds as one service.</p>
       <div class="dialog-actions">
         <button id="start-btn" class="primary">BREAK GROUND</button>
         <button id="cancel-btn">cancel</button>

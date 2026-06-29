@@ -678,13 +678,13 @@ class FloorScene extends Phaser.Scene {
 
   // A name/role badge pinned over a person `s`. `filled` → solid accent pill with dark
   // text (leads); else a dark pill with accent text (ICs / generic). BitmapText = crisp.
-  pinBadge(s, lbl, color, filled){
-    const PX=8;
+  pinBadge(s, lbl, color, filled, yy){
+    const PX=8, y = yy==null ? -15 : yy;
     const bg = filled ? color : 0x10182c, fg = filled ? 0x10182c : color;
     const edge = filled ? 0x10182c : color;
-    const t = this.bm(0,-15,lbl,PX,fg,0.5,0.5);          // proportional text → size the pill to it
+    const t = this.bm(0,y,lbl,PX,fg,0.5,0.5);            // proportional text → size the pill to it
     const pw = Math.ceil(t.width)+8;
-    s.add(this.add.rectangle(0,-15,pw,11,bg,filled?0.96:0.9).setOrigin(0.5).setStrokeStyle(1,edge));
+    s.add(this.add.rectangle(0,y,pw,11,bg,filled?0.96:0.9).setOrigin(0.5).setStrokeStyle(1,edge));
     s.add(t);
   }
 
@@ -823,6 +823,7 @@ class FloorScene extends Phaser.Scene {
     this.guardSpark = this.add.rectangle(7,-6,3,3,0x5ddc7a,0.9);// radio LED
     c.add(this.guardSpark);
     this.tweens.add({targets:this.guardSpark, alpha:0.2, duration:900, yoyo:true, repeat:-1});
+    this.pinBadge(c, "GUARD", 0xbcd0ff, true, -30);            // label the gate security guard
   }
 
   // The Gate is the RELEASE CHECKPOINT: a CCTV bank + checkpoint desk, plus a sealed
@@ -959,8 +960,7 @@ class FloorScene extends Phaser.Scene {
     this.lobby = {cx: Math.round(O.cx), standY: Math.round(O.y1 - 48)};   // behind his desk
     const c = this.makePerson(this.lobby.cx, this.lobby.standY, kitFor("CTO", hashStr((this.proj.id||'f')+"CTO")));
     c.setScale(1.66).setDepth(900); c.fixedDepth = 900;   // CTO walks the floor -> always on top
-    c.add(this.add.text(0,-22,"CTO",{fontFamily:"'PixelFont','Courier New'",fontSize:"8px",fontStyle:"bold",color:"#ffcf52"})
-      .setOrigin(0.5));
+    this.pinBadge(c, "CTO", 0xffd95e, true, -17);         // gold badge, like everyone else
     this.cto = c;
     this.tweens.add({targets:c.bob, y:-1, duration:380, yoyo:true, repeat:-1, ease:"Sine.inOut"});
   }
@@ -1056,6 +1056,7 @@ class FloorScene extends Phaser.Scene {
     const ax = Math.round(A.cx), ay = Math.round(A.standY);
     const runner = this.makePerson(ax, ay, poolKit(4));
     runner.setScale(1.5).setDepth(945); runner.fixedDepth = 945;   // stays on top while crossing
+    this.pinBadge(runner, "RUNNER", 0xffcf52, true, -17);          // label the delivery courier
     const pkg = this.add.container(0,-17);                          // the "work" carried in hand
     pkg.add(this.add.rectangle(0,0,12,9,0xffcf52).setStrokeStyle(1,0x7a5028));
     pkg.add(this.add.rectangle(0,-1,12,2,0xfff0a8));

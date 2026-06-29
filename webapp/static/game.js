@@ -29,13 +29,13 @@ const GRID = {  // pipeline: product → architecture → engineering(FE/BE/DA) 
   product:[0,0], architecture:[1,0], qa:[2,0], security:[3,0],
   frontend:[0,1], backend:[1,1], data:[2,1], gate:[3,1],
   vault:[3,2],                       // gate(3,1) sits directly above vault(3,2)
-  office:[1,2],                      // the CTO's own office (row 2, between lounge & vault)
+  office:[0,2],                      // the CTO's own office (row 2, far left)
 };
 // Pipeline ORDER (the build sequence) — drives the order numerals + the flow path.
 const PIPELINE_ORDER = ["product","architecture","frontend","backend","data","qa","security","gate","vault"];
-// (0,2) = the LOUNGE (idle agents relax here); (1,2) = a decorative ENTRANCE /
-// lobby (the org chart on the wall + where the CTO greets). No work happens in either.
-const LOUNGE_CELL = [0,2], ENTRANCE_CELL = [1,2];
+// (0,2) = the CTO OFFICE (a real room, see GRID.office); (1,2) = the LOUNGE where idle
+// agents relax. No pipeline work happens in either.
+const LOUNGE_CELL = [1,2], ENTRANCE_CELL = [1,2];
 const ENG_ROOMS = ["frontend","backend","data"];               // engineering discipline rooms
 const ENG_AREA_ROOM = {frontend:"frontend", backend:"backend", data:"data",
                        infra:"backend", security:"backend"};   // org AREA → its discipline room
@@ -319,14 +319,23 @@ class FloorScene extends Phaser.Scene {
     this.add.tileSprite(0, 50, 24, FLOOR_BOTTOM-50, "wall_base").setOrigin(0,0).setDepth(1); // left wall
     this.add.tileSprite(W-24, 50, 24, FLOOR_BOTTOM-50, "wall_base").setOrigin(0,0).setDepth(1); // right wall
     this.add.rectangle(0, FLOOR_BOTTOM, W, H-FLOOR_BOTTOM, PC.bg).setOrigin(0,0).setDepth(1);
-    // framed wall pictures along the top wall (the Center's landscape posters)
+    // framed wall pictures along the top wall — each a DIFFERENT scene (the sun is on
+    // only one, not repeated in every window).
+    let pi = 0;
     for (let wx=86; wx<W-130; wx+=232){
       const ww=80, wh=40, wy=62;
       this.add.rectangle(wx-3, wy-3, ww+6, wh+6, PC.ink).setOrigin(0,0).setDepth(2);          // navy frame
       this.add.rectangle(wx, wy, ww, wh, 0xbfe6f2).setOrigin(0,0).setDepth(2);                // sky
       this.add.rectangle(wx, wy+wh*0.62, ww, wh*0.38, 0x86d29a).setOrigin(0,0).setDepth(2);   // green hill
-      this.add.circle(wx+ww-16, wy+12, 6, 0xfff0a8).setDepth(2);                              // sun
+      const v = pi % 4;
+      if (v===0){ this.add.circle(wx+ww-16, wy+12, 6, 0xfff0a8).setDepth(2); }                // sun (one only)
+      else if (v===1){ this.add.rectangle(wx+16, wy+10, 18, 5, 0xffffff,0.9).setOrigin(0,0).setDepth(2);
+        this.add.rectangle(wx+44, wy+17, 22, 5, 0xffffff,0.8).setOrigin(0,0).setDepth(2); }    // clouds
+      else if (v===2){ this.add.rectangle(wx+18, wy+12, 7, 2, 0x33405e).setOrigin(0,0).setDepth(2);
+        this.add.rectangle(wx+30, wy+15, 7, 2, 0x33405e).setOrigin(0,0).setDepth(2); }         // distant birds
+      // v===3: plain sky + hill, no feature
       this.add.rectangle(wx, wy, ww, 2, PC.wallHi).setOrigin(0,0).setDepth(2);                // glass glint
+      pi++;
     }
     // soft ceiling-light pools on the floor (kept subtle, bright theme)
     [240,560,1140].forEach(lx=>{
@@ -1248,10 +1257,10 @@ class FloorScene extends Phaser.Scene {
     };
     const areas = ev.areas || [];
     const rowH = 16, padding = 8, headerH = 20;
-    // pin the org board on the CTO OFFICE wall (the company org chart in his room)
+    // the company org chart, centred on the CTO OFFICE back wall
     const B = ROOMS.office;
-    const w = Math.min(232, B.w-24), h = headerH + areas.length*rowH + padding;
-    const c = this.add.container(Math.round(B.x+(B.w-w)/2), B.y+44).setDepth(28);
+    const w = Math.min(206, B.w-44), h = headerH + areas.length*rowH + padding;
+    const c = this.add.container(Math.round(B.cx - w/2), B.y+40).setDepth(28);
     c.add(this.add.rectangle(0,0,w,h,0xfffdf3,0.98).setOrigin(0,0).setStrokeStyle(2,PC.ink));
     c.add(this.add.rectangle(0,0,w,3,PC.stripe).setOrigin(0,0));      // board top rail (pink)
     c.add(this.add.rectangle(w/2,-3,5,5,PC.stripe).setOrigin(0.5,0)); // pin

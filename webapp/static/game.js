@@ -259,16 +259,16 @@ const PXFONT_CHARS =
   "abcdefghijklmnopqrstuvwxyz{|}~·×";
 function buildPixelFont(scene){
   if (scene.cache.bitmapFont.exists("px")) return;
-  const CW=16, CH=20, F=16;                       // cell w/h, bake font px (Silkscreen is crisp at 8/16)
+  // RetroFont (fixed cell) renders reliably here. Keep the cell TIGHT (≈ the glyph
+  // width) and centre each glyph so the mostly-uppercase labels read evenly, not spaced.
+  const CW=11, CH=18, F=14, FONT = F+'px "PixelFont","Courier New",monospace';
   const cv = document.createElement("canvas");
   cv.width = PXFONT_CHARS.length*CW; cv.height = CH;
   const ctx = cv.getContext("2d");
-  ctx.imageSmoothingEnabled = false;
-  ctx.font = F+'px "PixelFont","Courier New",monospace';
+  ctx.imageSmoothingEnabled = false; ctx.font = FONT;
   ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillStyle = "#ffffff";
-  for (let i=0;i<PXFONT_CHARS.length;i++) ctx.fillText(PXFONT_CHARS[i], i*CW + CW/2, CH/2 + 1);
+  for (let i=0;i<PXFONT_CHARS.length;i++) ctx.fillText(PXFONT_CHARS[i], i*CW + CW/2, Math.round(CH/2)+1);
   scene.textures.addCanvas("pxfont", cv);
-  // RetroFont.Parse returns the cache entry directly — add it as-is (do NOT wrap it).
   scene.cache.bitmapFont.add("px", Phaser.GameObjects.RetroFont.Parse(scene, {
     image:"pxfont", width:CW, height:CH, chars:PXFONT_CHARS, charsPerRow:PXFONT_CHARS.length,
     offset:{x:0,y:0}, spacing:{x:0,y:0}, lineSpacing:0,
@@ -679,11 +679,13 @@ class FloorScene extends Phaser.Scene {
   // A name/role badge pinned over a person `s`. `filled` → solid accent pill with dark
   // text (leads); else a dark pill with accent text (ICs / generic). BitmapText = crisp.
   pinBadge(s, lbl, color, filled){
-    const PX=8, tw=Math.ceil(lbl.length*PX*0.8), pw=tw+8;
+    const PX=8;
     const bg = filled ? color : 0x10182c, fg = filled ? 0x10182c : color;
     const edge = filled ? 0x10182c : color;
+    const t = this.bm(0,-15,lbl,PX,fg,0.5,0.5);          // proportional text → size the pill to it
+    const pw = Math.ceil(t.width)+8;
     s.add(this.add.rectangle(0,-15,pw,11,bg,filled?0.96:0.9).setOrigin(0.5).setStrokeStyle(1,edge));
-    s.add(this.bm(0,-15,lbl,PX,fg,0.5,0.5));
+    s.add(t);
   }
 
   // ========================= animation library ============================ //

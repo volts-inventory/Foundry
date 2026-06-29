@@ -748,8 +748,31 @@ def _run_platform(p: Project) -> None:
     The stitched monorepo is written to ``p.out_base`` so the repo browser / Floor-0
     hub serve it from disk (no CAS build of its own)."""
     from foundry.platform import build_platform
+    from foundry.platform.planner import plan_platform
 
-    _emit(p, type="project", request=p.request, mode=p.mode, backend=p.backend, slots=p.max_slots)
+    # Map a service role to a discipline ROOM the floor can light up (the platform
+    # floor has no engine stage stream of its own, so we drive it ourselves).
+    role_room = {"web": "frontend", "api": "backend", "backend": "backend",
+                 "data": "data", "worker": "backend", "game": "frontend"}
+    plan = plan_platform(p.request)
+    # Synthetic org so the discipline rooms staff up (engineers per area) and the
+    # static crew sits at their desks (idle => Zzz) — instead of waiting in the lounge.
+    area_units: dict[str, list[str]] = {}
+    order: list[str] = []
+    for s in plan.services:
+        a = role_room.get(s.role, "backend")
+        if a not in area_units:
+            area_units[a] = []
+            order.append(a)
+        area_units[a].append(s.name)
+    areas = [{"area": a, "leads": [f"{a} lead"]} for a in order]
+    domains = [{"owner": a, "area": a, "units": area_units[a]} for a in order]
+    first_room = role_room.get(plan.services[0].role, "backend") if plan.services else "backend"
+
+    _emit(p, type="project", request=p.request, mode=p.mode, backend=p.backend,
+          slots=max(3, len(plan.services) + 2))
+    _emit(p, type="org", areas=areas, domains=domains)
+    _emit(p, type="active", room=first_room)   # seat everyone; first discipline works
     _emit(p, type="narrate", text=f"🏗  Platform build — {p.request}")
 
     def cb(ev: dict[str, Any]) -> None:
@@ -757,6 +780,7 @@ def _run_platform(p: Project) -> None:
         if t == "plan":
             _emit(p, type="narrate", text="📋 Services: " + ", ".join(ev.get("services") or []))
         elif t == "svc_start":
+            _emit(p, type="active", room=role_room.get(str(ev.get("role") or ""), "backend"))
             _emit(p, type="narrate", text=f"▶ {ev['service']} ({ev['role']}) — building")
         elif t == "pass" and ev.get("pass", 1) > 1:
             _emit(p, type="narrate", text=f"   ↻ {ev['service']} — deepening pass {ev['pass']}")

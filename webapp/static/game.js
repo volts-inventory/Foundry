@@ -1422,7 +1422,9 @@ function routeEvent(floor, ev){
       logTo(F, "bad", "HELD: "+ev.reason); break;
     case "done":
       F.status = "done"; F.passed = !!ev.passed; renderElevator();
-      if (S){ S.toLounge(); if (!ev.passed){ S.gloom(); S.banner("HELD AT THE GATE", 0xff5d6c); } }
+      // Build's over: everyone REST AT THEIR DESKS (idle => Zzz), not banished to the
+      // lounge. mill() still drifts a few to the break room now and then.
+      if (S){ S.staffRoom(null); if (!ev.passed){ S.gloom(); S.banner("HELD AT THE GATE", 0xff5d6c); } }
       logTo(F, ev.passed?"good":"bad",
         ev.passed?"Build complete — shipped.":"Build halted — nothing shipped."); break;
   }

@@ -113,6 +113,23 @@ develop and run on the same box. Its only gotchas are **don't let it sleep** and
 
 ## Verifying
 
+Run the acceptance harness on the target host **before** trusting a real multi-day
+job — it drives the full server process on the offline `mock` backend (no API key):
+
+```bash
+python scripts/soak_resume_check.py            # soak (RAM plateau) + resume checks
+python scripts/soak_resume_check.py --mode soak --builds 30
+```
+
+- **soak** runs N builds back-to-back and samples the server's RSS; it should
+  **plateau**, proving the log-sweeper bounds memory build-over-build (fails on
+  >50% growth — a leak).
+- **resume** starts a paused build, `kill -9`s the server, restarts it against the
+  same state dir, and asserts the build **survives and resumes** with its event
+  history intact.
+
+Manual smoke:
+
 - `curl -s localhost:8765/ -o /dev/null -w '%{http_code}\n'` → `200`.
 - Start a build from the UI; reboot the host mid-build; confirm it resumes from the
   last checkpoint (the quest log shows a "Resuming after a restart…" line).

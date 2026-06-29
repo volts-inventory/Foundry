@@ -1228,7 +1228,10 @@ class FloorScene extends Phaser.Scene {
     for(const d of (this.orgDomains||[]))
       if(d && (d.area in weight)) weight[d.area] += (d.units&&d.units.length)?d.units.length:0;
     let total=0; list.forEach(a=>{ if(!weight[a]) weight[a]=1; total+=weight[a]; });
-    const N=Math.min(this.poolN||0, 8), ics={};
+    // Headcount tracks the REAL decomposition: one IC per owned unit (sum of weights),
+    // capped by the parallelism ceiling (poolN) and a hard cap. A small ask seats a few
+    // engineers; a complex one fills the rooms — never just a flat max-pool paint.
+    const N=Math.min(total, this.poolN||8, 8), ics={};
     if(N>0){
       const rem=[]; let used=0;
       list.forEach(a=>{ const raw=N*weight[a]/total; ics[a]=Math.floor(raw); used+=ics[a]; rem.push([a,raw-ics[a]]); });

@@ -251,6 +251,30 @@ function buildSharedTextures(scene){
   }
 }
 
+// Bake the pixel TTF into a BITMAP FONT once (a glyph atlas + RetroFont data). Floor
+// labels then render as BitmapText: sampled 1:1 from the texture with NEAREST, so they
+// stay crisp at any scale instead of re-rasterising the TTF (which blurs when scaled).
+const PXFONT_CHARS =
+  " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`" +
+  "abcdefghijklmnopqrstuvwxyz{|}~·×";
+function buildPixelFont(scene){
+  if (scene.cache.bitmapFont.exists("px")) return;
+  const CW=16, CH=20, F=16;                       // cell w/h, bake font px (Silkscreen is crisp at 8/16)
+  const cv = document.createElement("canvas");
+  cv.width = PXFONT_CHARS.length*CW; cv.height = CH;
+  const ctx = cv.getContext("2d");
+  ctx.imageSmoothingEnabled = false;
+  ctx.font = F+'px "PixelFont","Courier New",monospace';
+  ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillStyle = "#ffffff";
+  for (let i=0;i<PXFONT_CHARS.length;i++) ctx.fillText(PXFONT_CHARS[i], i*CW + CW/2, CH/2 + 1);
+  scene.textures.addCanvas("pxfont", cv);
+  // RetroFont.Parse returns the cache entry directly — add it as-is (do NOT wrap it).
+  scene.cache.bitmapFont.add("px", Phaser.GameObjects.RetroFont.Parse(scene, {
+    image:"pxfont", width:CW, height:CH, chars:PXFONT_CHARS, charsPerRow:PXFONT_CHARS.length,
+    offset:{x:0,y:0}, spacing:{x:0,y:0}, lineSpacing:0,
+  }));
+}
+
 // =========================================================================== //
 //  Boot: generate ALL our own pixel art, then signal ready                    //
 // =========================================================================== //
@@ -271,7 +295,7 @@ class BootScene extends Phaser.Scene {
     const ready = (document.fonts && document.fonts.load)
       ? document.fonts.load('16px "PixelFont"').then(()=>document.fonts.ready).catch(()=>{})
       : Promise.resolve();
-    ready.then(()=>bootResolve());
+    ready.then(()=>{ try { buildPixelFont(this); } catch(e){ console.warn("pxfont", e); } bootResolve(); });
   }
 }
 
@@ -363,14 +387,12 @@ class FloorScene extends Phaser.Scene {
       this.add.rectangle(R.cx, R.y+22, sw, 22, PC.ink, 0.96).setOrigin(0.5,0).setDepth(3).setStrokeStyle(2, accent);
       this.add.rectangle(R.cx, R.y+22, sw, 2, mix(accent,0xffffff,0.4)).setOrigin(0.5,0).setDepth(4);
       this.roomGlyph(key, R.cx-sw/2+7, R.y+27);
-      this.add.text(R.cx+6, R.y+27, R.label, {fontFamily:"'PixelFont','Courier New',monospace",
-        fontSize:"13px", fontStyle:"bold", color:"#fbf3df"}).setOrigin(0.5,0).setDepth(4).setResolution(4);
+      this.bm(R.cx+6, R.y+28, R.label, 13, 0xfbf3df, 0.5, 0).setDepth(4);
       const no = ORDER_NO[key];
       if (no != null){
         const bx = R.x+15, by = R.y+34;
         this.add.circle(bx, by, 10, PC.stripe, 0.98).setStrokeStyle(2, PC.wallHi).setDepth(4);
-        this.add.text(bx, by, String(no), {fontFamily:"'PixelFont','Courier New'",
-          fontSize:"12px", fontStyle:"bold", color:"#fff4e0"}).setOrigin(0.5).setDepth(5).setResolution(4);
+        this.bm(bx, by, String(no), 13, 0xfff4e0, 0.5, 0.5).setDepth(5);
       }
       this.roomGlow[key] = this.add.rectangle(R.x, R.y, R.w, R.h, 0xffe27a, 0).setOrigin(0,0).setDepth(1);
     }
@@ -483,8 +505,7 @@ class FloorScene extends Phaser.Scene {
     // LOUNGE (bottom-left): a tidy seating set — couch on the back wall, table + stools
     // in front, TV on the bottom wall, a vending machine and plants in the corners.
     const L = cellBox(LOUNGE_CELL[0], LOUNGE_CELL[1]);
-    this.add.text(L.cx, top(L)-2, "LOUNGE", {fontFamily:"'PixelFont','Courier New',monospace",
-      fontSize:"10px", color:"#8aa0c8"}).setOrigin(0.5,0).setDepth(4);
+    this.bm(L.cx, top(L)-2, "LOUNGE", 12, 0x8aa0c8, 0.5, 0).setDepth(4);
     P("couch",  L.x+78, L.y+62); P("ctable", L.x+78, L.y+84);
     P("stool",  L.x+52, L.y+90); P("stool",  L.x+104, L.y+90);
     P("tv",     L.x+78, bot(L));
@@ -645,16 +666,24 @@ class FloorScene extends Phaser.Scene {
     return c;
   }
 
+  // Crisp pixel label via the baked BITMAP font (NEAREST-sampled — never blurs when
+  // scaled). px = display height; tint colours the white glyphs. Returns the BitmapText.
+  bm(x, y, txt, px, tint, ox, oy){
+    const t = this.add.bitmapText(0, 0, "px", txt, px);
+    if (tint!=null) t.setTint(tint);
+    ox = ox==null?0:ox; oy = oy==null?0:oy;
+    t.setPosition(Math.round(x - t.width*ox), Math.round(y - t.height*oy));  // manual origin (version-safe)
+    return t;
+  }
+
   // A name/role badge pinned over a person `s`. `filled` → solid accent pill with dark
-  // text (leads); else a dark pill with accent text (ICs / generic). Text is rendered at
-  // 3× resolution so the small pixel font stays CRISP after the canvas is scaled.
+  // text (leads); else a dark pill with accent text (ICs / generic). BitmapText = crisp.
   pinBadge(s, lbl, color, filled){
-    const pw = lbl.length*5 + 8, col6 = color.toString(16).padStart(6,"0");
-    const bg = filled ? color : 0x10182c, fg = filled ? "#10182c" : "#"+col6;
+    const PX=8, tw=Math.ceil(lbl.length*PX*0.8), pw=tw+8;
+    const bg = filled ? color : 0x10182c, fg = filled ? 0x10182c : color;
     const edge = filled ? 0x10182c : color;
-    s.add(this.add.rectangle(0,-15,pw,10,bg,filled?0.96:0.9).setOrigin(0.5).setStrokeStyle(1,edge));
-    s.add(this.add.text(0,-15,lbl,{fontFamily:"'PixelFont','Courier New'",fontSize:"7px",
-      fontStyle:"bold",color:fg}).setOrigin(0.5).setResolution(4));
+    s.add(this.add.rectangle(0,-15,pw,11,bg,filled?0.96:0.9).setOrigin(0.5).setStrokeStyle(1,edge));
+    s.add(this.bm(0,-15,lbl,PX,fg,0.5,0.5));
   }
 
   // ========================= animation library ============================ //
@@ -1434,9 +1463,7 @@ class FloorScene extends Phaser.Scene {
           place(p, R.cx - bw/2 + c*PX, SY + r*RP, false); });   // centred IC grid (upper room)
         if (lead) place(lead, R.x1 - 50, R.y1 - 36, true);     // LEAD oversees from the bottom-right
       }
-      this.engLabels.push(this.add.text(R.x1-8, R.y+8, "×"+people.length,
-        {fontFamily:"'PixelFont','Courier New'",fontSize:"9px",fontStyle:"bold",color:"#ffc08a"})
-        .setOrigin(1,0).setDepth(28));
+      this.engLabels.push(this.bm(R.x1-8, R.y+8, "×"+people.length, 11, 0xffc08a, 1, 0).setDepth(28));
     }
   }
 

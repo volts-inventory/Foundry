@@ -66,6 +66,7 @@ import json
 import os
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -546,6 +547,7 @@ class ModelProviderProxy:
         rate_limit_max_retries: int | None = None,
         rate_limit_backoff_base_s: float = 2.0,
         rate_limit_backoff_cap_s: float = 60.0,
+        manifest_max: int | None = None,
     ) -> None:
         if profile not in ("self_judge", "decorrelated"):
             raise ValueError(f"unknown profile: {profile!r}")
@@ -591,7 +593,13 @@ class ModelProviderProxy:
             sleeper=sleeper,
         )
         self._max_tokens = max_tokens
-        self._manifest: list[dict[str, Any]] = []  # append-only
+        # Per-call records. Bounded so a days-long run with tens of thousands of calls
+        # can't grow the manifest without limit; the oldest records roll off (and are
+        # counted) past the cap. FOUNDRY_MANIFEST_MAX=0 keeps the full unbounded log.
+        _mm = (manifest_max if manifest_max is not None
+               else _int_env("FOUNDRY_MANIFEST_MAX", 100_000))
+        self._manifest: deque[dict[str, Any]] = deque(maxlen=_mm if _mm > 0 else None)
+        self._manifest_dropped = 0
         self._drift_events: list[dict[str, Any]] = []
 
     # ---- read-only views ----------------------------------------------------
@@ -621,8 +629,13 @@ class ModelProviderProxy:
 
     @property
     def manifest(self) -> tuple[dict[str, Any], ...]:
-        """Append-only per-call record set (read-only view)."""
+        """Per-call record set (read-only view); bounded — see ``manifest_dropped``."""
         return tuple(self._manifest)
+
+    @property
+    def manifest_dropped(self) -> int:
+        """How many oldest records have rolled off the bounded manifest (0 = none)."""
+        return self._manifest_dropped
 
     @property
     def drift_events(self) -> tuple[dict[str, Any], ...]:
@@ -701,6 +714,8 @@ class ModelProviderProxy:
             record["drift_kind"] = drift_kind
         if sampling_note:
             record["sampling_note"] = sampling_note
+        if self._manifest.maxlen is not None and len(self._manifest) == self._manifest.maxlen:
+            self._manifest_dropped += 1     # this append rolls the oldest record off
         self._manifest.append(record)
         if drift:
             # Pinned-ID drift (arch §8): invalidates calibration baselines. The

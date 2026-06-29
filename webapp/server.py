@@ -59,6 +59,14 @@ _BUILD_GATE: threading.BoundedSemaphore | None = (
     if _MAX_CONCURRENT_BUILDS > 0 else None
 )
 
+# A server running for days accumulates one in-memory event log per build (every
+# build ever, in _PROJECTS). The full history is ALSO durable in SQLite, so once a
+# build has been FINISHED for a grace period its in-memory log is trimmed to a tail;
+# a (rare) late viewer of a finished build replays the full story from the store.
+_LOG_TAIL = _int_env("WORKSHOP_LOG_TAIL", 64)       # events kept in memory after trim
+_LOG_GRACE_S = _int_env("WORKSHOP_LOG_GRACE_S", 90)  # wait after a build ends before trimming
+_LOG_SWEEP_S = _int_env("WORKSHOP_LOG_SWEEP_S", 120)  # how often the sweeper runs (0 = off)
+
 # Where each floor's build writes its output tree + doc bundle (gitignored).
 # Override with WORKSHOP_OUTPUT_DIR (e.g. a mounted volume on a Pi).
 _OUTPUT_ROOT = Path(os.environ.get("WORKSHOP_OUTPUT_DIR", ".run/web")).resolve()
@@ -246,6 +254,8 @@ class Project:
     log: list[dict[str, Any]] = field(default_factory=list)
     cond: threading.Condition = field(default_factory=threading.Condition)
     ended: bool = False
+    ended_at: float | None = None    # monotonic time the build finished (for log sweeping)
+    log_trimmed: bool = False        # in-memory log trimmed to a tail; full history in the store
     # Checkpoint decisions: first decision for a checkpoint wins (idempotent);
     # every device still watches the resolution play (it's just another log event).
     checkpoint_seq: int = 0          # monotonic id of the LATEST checkpoint reached
@@ -535,6 +545,7 @@ def _emit(p: Project, **event: Any) -> None:
         p.log.append(event)
         if event.get("type") == "_end":
             p.ended = True
+            p.ended_at = time.monotonic()   # start the grace clock for log trimming
         p.cond.notify_all()       # wake EVERY connected stream (not just one)
     # Durably back the log so a reconnect/restart can replay the whole story.
     try:
@@ -548,6 +559,33 @@ def _emit(p: Project, **event: Any) -> None:
 def _close(p: Project) -> None:
     """Terminate the stream for every viewer (the build is over)."""
     _emit(p, type="_end")
+
+
+def _trim_finished_logs() -> None:
+    """Trim the in-memory event log of builds that finished a while ago.
+
+    The full history stays durable in SQLite, so holding every finished build's
+    whole log in RAM is pure waste on a long-lived server. We keep a short tail
+    (so the catalog/HUD code that peeks at recent events still works) and mark the
+    build so a late viewer replays from the store instead of the trimmed tail."""
+    now = time.monotonic()
+    for p in list(_PROJECTS.values()):
+        if (not p.ended or p.log_trimmed or p.ended_at is None
+                or now - p.ended_at < _LOG_GRACE_S):
+            continue
+        with p.cond:
+            if len(p.log) > _LOG_TAIL:
+                p.log = p.log[-_LOG_TAIL:]
+            p.log_trimmed = True   # stream now replays this build's history from the store
+
+
+def _log_sweeper() -> None:
+    while True:
+        time.sleep(_LOG_SWEEP_S)
+        try:
+            _trim_finished_logs()
+        except Exception:
+            pass
 
 
 def _record_decision(p: Project, decision: str, checkpoint: int | None) -> tuple[bool, bool]:
@@ -1532,6 +1570,23 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Connection", "keep-alive")
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
+        # A finished build whose in-memory log was trimmed to save RAM: replay its
+        # FULL history from the durable store (the trimmed tail isn't the whole story).
+        if p.ended and p.log_trimmed:
+            history = _STORE.events_of(pid)
+            try:
+                for idx in range(cursor, len(history)):
+                    ev = history[idx]
+                    if ev.get("type") == "_end":
+                        self.wfile.write(f"id: {idx}\nevent: end\ndata: {{}}\n\n".encode())
+                        self.wfile.flush()
+                        return
+                    self.wfile.write(f"id: {idx}\ndata: {json.dumps(ev)}\n\n".encode())
+                self.wfile.write(b"event: end\ndata: {}\n\n")   # caught up; build is over
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            return
         try:
             while True:
                 with p.cond:
@@ -1583,6 +1638,8 @@ def _lan_ip() -> str | None:
 def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
     Path(_STATE_DIR).mkdir(parents=True, exist_ok=True)   # durable factory state
     _load_persisted()   # rehydrate floors (+ resume any interrupted build) from disk
+    if _LOG_SWEEP_S > 0:   # bound RAM on a long-lived server: trim finished logs
+        threading.Thread(target=_log_sweeper, daemon=True).start()
     srv = ThreadingHTTPServer((host, port), Handler)
     shown = "localhost" if host in ("127.0.0.1", "0.0.0.0") else host
     print(f"\n  🏭  Foundry Workshop running →  http://{shown}:{port}\n")

@@ -630,6 +630,18 @@ def test_client_cache_rebuilds_after_auth_error():
     assert second is not first and len(built) == 2   # auth error dropped the client
 
 
+def test_manifest_is_bounded_and_counts_dropped():
+    transport = FakeTransport()
+    proxy = ModelProviderProxy(
+        transport, LineageMap(), ZoneBSigner(KEY, KEY_ID), profile="self_judge",
+        sleeper=lambda _s: None, manifest_max=3,
+    )
+    for _ in range(5):
+        proxy.complete("n", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
+    assert len(proxy.manifest) == 3        # capped to the most-recent 3
+    assert proxy.manifest_dropped == 2     # the 2 oldest rolled off (and were counted)
+
+
 def test_client_cache_keeps_injected_client_on_transient_error():
     from foundry.proxy.model_provider_proxy import _ClientCache
     sentinel = object()

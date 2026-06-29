@@ -216,16 +216,19 @@ function buildSharedTextures(scene){
     g.fillRect(1,1,18,2); g.fillRect(21,1,18,2); g.fillRect(11,17,18,2); g.fillRect(31,17,18,2);
     g.generateTexture(wkey,40,32); g.destroy();
   }
-  // Shared walkway floor: teal tile checker with grid seams (the Pokémon-Center floor).
+  // Shared teal floor — a QUILTED grid of small beveled tiles (the Pokémon-Center
+  // floor): each 16px tile is lit on its top-left and dark-seamed on its bottom-right,
+  // with a gentle 2-tone checker. Used EVERYWHERE (rooms + corridors are one floor).
   if (!scene.textures.exists("floor_base")){
-    const g=scene.make.graphics({add:false});
-    g.fillStyle(PC.floor,1);    g.fillRect(0,0,40,40);
-    g.fillStyle(PC.floorAlt,1); g.fillRect(20,0,20,20); g.fillRect(0,20,20,20);     // checker
-    g.fillStyle(PC.floorSeam,1);
-    g.fillRect(0,0,40,1); g.fillRect(0,0,1,40); g.fillRect(20,0,1,40); g.fillRect(0,20,40,1);
-    g.fillStyle(shade(PC.floor,1.10),1); g.fillRect(6,6,3,3); g.fillRect(26,26,3,3);   // tile sheen
-    g.fillStyle(shade(PC.floorAlt,0.9),1); g.fillRect(30,8,2,2); g.fillRect(10,30,2,2); // grain
-    g.generateTexture("floor_base",40,40); g.destroy();
+    const g=scene.make.graphics({add:false}), S=16;
+    const tile=(tx,ty,base)=>{
+      g.fillStyle(base,1); g.fillRect(tx,ty,S,S);
+      g.fillStyle(shade(base,1.12),1); g.fillRect(tx,ty,S,1); g.fillRect(tx,ty,1,S);          // lit top-left
+      g.fillStyle(shade(base,1.05),1); g.fillRect(tx+2,ty+2,2,2);                              // sheen fleck
+      g.fillStyle(PC.floorSeam,1);     g.fillRect(tx,ty+S-1,S,1); g.fillRect(tx+S-1,ty,1,S);  // dark seam
+    };
+    for(let r=0;r<3;r++) for(let c=0;c<3;c++) tile(c*S, r*S, (r+c)%2 ? PC.floorAlt : PC.floor);
+    g.generateTexture("floor_base", S*3, S*3); g.destroy();
   }
   // Perimeter wall: cream brick course (the building's outer wall).
   if (!scene.textures.exists("wall_base")){
@@ -301,18 +304,9 @@ class FloorScene extends Phaser.Scene {
     this.roomGlow = {};
     // ONE shared open floor across the whole interior
     this.add.tileSprite(24, WALL_TOP, W-48, FLOOR_BOTTOM-WALL_TOP, "floor_base").setOrigin(0,0).setDepth(0);
-    // walkable corridor aisles forming the "#" between the section cells
-    const lane=(x,y,w,h,horiz)=>{
-      this.add.rectangle(x,y,w,h,PC.floorAlt).setOrigin(0,0).setDepth(0);
-      this.add.rectangle(x,y,w,1,shade(PC.floor,1.08)).setOrigin(0,0).setDepth(0);
-      this.add.rectangle(x,y+h-1,w,1,PC.floorSeam).setOrigin(0,0).setDepth(0);
-      // dashed centre line (cream guide down the hallway)
-      const g=this.add.graphics().setDepth(0); g.fillStyle(PC.wallHi,0.45);
-      if (horiz){ for(let dx=x+6; dx<x+w-6; dx+=18) g.fillRect(dx,y+h/2-1,9,2); }
-      else { for(let dy=y+6; dy<y+h-6; dy+=18) g.fillRect(x+w/2-1,dy,2,9); }
-    };
-    for (const vx of AISLE_VX) lane(vx-AISLE/2, WALL_TOP, AISLE, FLOOR_BOTTOM-WALL_TOP, false);
-    for (const hy of AISLE_HY) lane(GX0, hy-AISLE/2, GX1-GX0, AISLE, true);
+    // Corridors are NOT a separate surface — the whole interior is the one teal floor
+    // (floor_base, laid above); the thick cream walls + their open gaps form the rooms
+    // and passages, exactly like the reference. (AISLE_VX/HY still position props.)
     // perimeter walls only (top + left + right + bottom edges)
     this.add.tileSprite(0, 50, W, WALL_TOP-50, "wall_base").setOrigin(0,0).setDepth(1);
     this.add.rectangle(0, 46, W, 6, PC.wallShade).setOrigin(0,0).setDepth(1);              // roof eave
@@ -338,35 +332,31 @@ class FloorScene extends Phaser.Scene {
       this.add.circle(lx, WALL_TOP+18, 5, 0xfff6d8, 0.95).setDepth(2).setStrokeStyle(2, PC.wallShade);
     });
     this.drawFlowPath();
-    // each section is a cream-floored ROOM, set off from the teal corridors
+    // The WHOLE floor is one teal tiled surface (the shared floor_base laid down above
+    // already covers it). Rooms are defined only by the thick cream walls + a label —
+    // no cream rugs, no borders — exactly like the reference interior.
     for (const key in ROOMS){
       const R = ROOMS[key];
-      if (R.virtual) continue;          // the engineering region isn't drawn — its discipline rooms are
-      const accent = shade(R.color, 1.7);   // a bright version of the dark RBASE hue, for trim
-      this.add.rectangle(R.x+5, R.y+6, R.w, R.h, 0x000000, 0.16).setOrigin(0,0).setDepth(0);    // soft shadow
-      this.add.tileSprite(R.x, R.y, R.w, R.h, "floor_"+key).setOrigin(0,0).setDepth(0);
+      if (R.virtual) continue;
+      const accent = shade(R.color, 1.7);
       const t = TINT[key]; if (t) this.add.rectangle(R.x, R.y, R.w, R.h, t[0], t[1]).setOrigin(0,0).setDepth(1);
-      // room trim: an accent outer band + a soft cream inner line
-      this.add.rectangle(R.x, R.y, R.w, R.h).setOrigin(0,0).setStrokeStyle(3, accent).setDepth(1);
-      this.add.rectangle(R.x+4, R.y+4, R.w-8, R.h-8).setOrigin(0,0).setStrokeStyle(1, PC.roomSeam).setDepth(1);
-      // label placard — hangs just BELOW the banded top wall (drawn in buildWalls)
+      // label placard — a small navy sign hanging just BELOW the banded top wall
       const sw = Math.min(R.w-12, R.label.length*7+22);
-      this.add.rectangle(R.cx, R.y+17, sw, 16, PC.ink, 0.96).setOrigin(0.5,0).setDepth(3).setStrokeStyle(2, accent);
-      this.add.rectangle(R.cx, R.y+17, sw, 2, mix(accent,0xffffff,0.4)).setOrigin(0.5,0).setDepth(4);
-      this.roomGlyph(key, R.cx-sw/2+5, R.y+19);   // dept identity glyph (white, shape — not just hue)
-      this.add.text(R.cx+4, R.y+19, R.label, {fontFamily:"'PixelFont','Courier New',monospace",
+      this.add.rectangle(R.cx, R.y+22, sw, 16, PC.ink, 0.96).setOrigin(0.5,0).setDepth(3).setStrokeStyle(2, accent);
+      this.add.rectangle(R.cx, R.y+22, sw, 2, mix(accent,0xffffff,0.4)).setOrigin(0.5,0).setDepth(4);
+      this.roomGlyph(key, R.cx-sw/2+5, R.y+24);
+      this.add.text(R.cx+4, R.y+24, R.label, {fontFamily:"'PixelFont','Courier New',monospace",
         fontSize:"10px", fontStyle:"bold", color:"#fbf3df"}).setOrigin(0.5,0).setDepth(4);
-      // build-order numeral badge (just below the band, left side) so the PIPELINE order reads
       const no = ORDER_NO[key];
       if (no != null){
-        const bx = R.x+13, by = R.y+25;
+        const bx = R.x+13, by = R.y+30;
         this.add.circle(bx, by, 8, PC.stripe, 0.98).setStrokeStyle(2, PC.wallHi).setDepth(4);
         this.add.text(bx, by, String(no), {fontFamily:"'PixelFont','Courier New'",
           fontSize:"10px", fontStyle:"bold", color:"#fff4e0"}).setOrigin(0.5).setDepth(5);
       }
       this.roomGlow[key] = this.add.rectangle(R.x, R.y, R.w, R.h, 0xffe27a, 0).setOrigin(0,0).setDepth(1);
     }
-    this.buildWalls();                            // interior walls + doorways — a real floor plan
+    this.buildWalls();                            // thick cream walls with open passages
     this.decorateFloor();
     this.furnish();
     this.buildAtmosphere();                       // vignette + dust motes on top
@@ -377,43 +367,39 @@ class FloorScene extends Phaser.Scene {
   // building's plan, not rugs on open space. Walls sit below the agents (depth 4)
   // so people always render in front; doorways open onto the corridors.
   buildWalls(){
-    const T = 6, DOOR = 34, BAND = 14;   // side-wall thickness, doorway, banded top-wall height
-    const FACE = PC.wall, CAP = PC.wallHi, BASE = PC.wallShade, EDGE = 0x2b2f45; // cream + navy outline
+    const T = 9, DOOR = 48, BAND = 18;   // THICK side-wall, wide open passage, tall top-wall band
+    const FACE = PC.wall, CAP = PC.wallHi, BASE = PC.wallShade, EDGE = 0x2b2f45;
     const WHITE = 0xfff8e8;
     const R0 = (x,y,w,h,c,a)=> this.add.rectangle(x,y,w,h,c,a==null?1:a).setOrigin(0,0).setDepth(4);
-    // Plain cream side wall: navy outline, cream face, lit cap, shadowed base.
+    // Plain THICK cream wall (sides + bottom): navy outline, cream face, lit cap, dark base.
     const seg = (x, y, w, h) => {
       if (w <= 0 || h <= 0) return;
       R0(x-1, y-1, w+2, h+2, EDGE); R0(x, y, w, h, FACE);
       R0(x, y, w, Math.min(2,h), CAP);
-      if (h > 4) R0(x, y+h-2, w, 2, BASE);
-      if (w > 4) R0(x+w-2, y, 2, h, BASE);
+      if (h > 5) R0(x, y+h-2, w, 2, BASE);
+      if (w > 5) R0(x+w-2, y, 2, h, BASE);
     };
-    // Pokémon-Center top wall: a banded cream wall with a white-bordered PINK STRIPE
-    // running through it and a dark baseboard where it meets the floor.
-    const band = (x, w) => (y) => {
-      R0(x-1, y-1, w+2, BAND+2, EDGE);          // outline box
-      R0(x, y,    w, 5, FACE);  R0(x, y, w, 1, CAP);   // cream upper + lit cap
-      R0(x, y+5,  w, 1, WHITE);                         // white pinline
-      R0(x, y+6,  w, 3, PC.stripe); R0(x, y+6, w, 1, PC.stripeHi);  // pink stripe + highlight
-      R0(x, y+9,  w, 1, WHITE);                         // white pinline
-      R0(x, y+10, w, 3, FACE);                          // cream lower
-      R0(x, y+13, w, 1, BASE);                          // baseboard shadow
+    // Pokémon-Center top wall: a TALL banded cream wall with a white-bordered PINK
+    // STRIPE through it and a dark baseboard. No doors — passages are plain open gaps.
+    const band = (x, w, y) => {
+      R0(x-1, y-1, w+2, BAND+2, EDGE);                              // outline box
+      R0(x, y,    w, 7, FACE);  R0(x, y, w, 1, CAP);                // cream upper + lit cap
+      R0(x, y+7,  w, 1, WHITE);                                     // white pinline
+      R0(x, y+8,  w, 4, PC.stripe); R0(x, y+8, w, 1, PC.stripeHi);  // pink stripe + highlight
+      R0(x, y+12, w, 1, WHITE);                                     // white pinline
+      R0(x, y+13, w, 4, FACE);                                      // cream lower
+      R0(x, y+17, w, 1, BASE);                                      // baseboard shadow
     };
     for (const key in ROOMS){
       const R = ROOMS[key]; if (R.virtual) continue;
       const dx = Math.round(R.cx), dy = Math.round(R.cy);
-      // side + bottom are plain cream walls (drawn first); the banded top sits over them
+      // side + bottom are thick cream walls with a WIDE OPEN GAP (no door); banded top.
       seg(R.x, R.y, T, R.h);                                   // left
-      seg(R.x, R.y1 - T, (dx - DOOR / 2) - R.x, T);            // bottom (left of door)
-      seg(dx + DOOR / 2, R.y1 - T, R.x1 - (dx + DOOR / 2), T); // bottom (right of door)
-      seg(R.x1 - T, R.y, T, (dy - DOOR / 2) - R.y);            // right (above door)
-      seg(R.x1 - T, dy + DOOR / 2, T, R.y1 - (dy + DOOR / 2)); // right (below door)
-      band(R.x, R.w)(R.y);                                     // banded striped TOP wall
-      // door jambs: a navy post framing each corridor opening
-      const jamb = (x, y, w, h) => { R0(x, y, w, h, EDGE); R0(x, y, w, Math.min(2,h), CAP); };
-      jamb(dx - DOOR/2 - 2, R.y1 - T, 2, T); jamb(dx + DOOR/2, R.y1 - T, 2, T);   // bottom doorway
-      jamb(R.x1 - T, dy - DOOR/2 - 2, T, 2); jamb(R.x1 - T, dy + DOOR/2, T, 2);   // right doorway
+      seg(R.x, R.y1 - T, (dx - DOOR / 2) - R.x, T);            // bottom (left of gap)
+      seg(dx + DOOR / 2, R.y1 - T, R.x1 - (dx + DOOR / 2), T); // bottom (right of gap)
+      seg(R.x1 - T, R.y, T, (dy - DOOR / 2) - R.y);            // right (above gap)
+      seg(R.x1 - T, dy + DOOR / 2, T, R.y1 - (dy + DOOR / 2)); // right (below gap)
+      band(R.x, R.w, R.y);                                     // banded striped TOP wall
     }
   }
 
@@ -633,22 +619,27 @@ class FloorScene extends Phaser.Scene {
   makeWorkstation(x, floorY, accent){
     if (accent == null) accent = 0x7fd1ff;   // monitor glow default (sprites carry their own colour)
     x = Math.round(x);
-    const c = this.add.container(x, floorY).setDepth(floorY+5).setScale(1.05);  // desk (proportional to the 32px sprites)
-    const O = 0x2b2f45;                                           // navy outline (softer than black)
+    const c = this.add.container(x, floorY).setDepth(floorY+5).setScale(1.05);
+    const O = 0x2b2f45;                                           // navy outline
     const out = (rx,ry,w,h,col)=>{
       c.add(this.add.rectangle(rx,ry,w+2,h+2,O).setOrigin(0.5,1));
       c.add(this.add.rectangle(rx,ry,w,h,col).setOrigin(0.5,1));
-      c.add(this.add.rectangle(rx,ry-h+1,w,1,shade(col,1.25)).setOrigin(0.5,1)); // top light
+      c.add(this.add.rectangle(rx,ry-h+1,w,1,shade(col,1.15)).setOrigin(0.5,1)); // top light
     };
-    out(0,0,42,8,0x9c6b3a);                                       // wood desktop
-    c.add(this.add.rectangle(0,-7,40,1,0x7a5028).setOrigin(0.5,1));  // grain line
-    c.add(this.add.rectangle(-18,8,3,11,0x6b4a2c).setOrigin(0.5,1));
-    c.add(this.add.rectangle(18,8,3,11,0x6b4a2c).setOrigin(0.5,1));  // legs
-    out(-5,-8,18,13,0x46506b);                                    // monitor bezel (slate)
-    const screen = this.add.rectangle(-5,-10,13,9,shade(accent,1.25),0.95).setOrigin(0.5,1);
-    c.add(screen);                                                // dept-tinted screen
-    c.add(this.add.rectangle(-9,-13,7,1.5,shade(accent,1.5))); c.add(this.add.rectangle(-10,-10,10,1.5,shade(accent,1.4))); // code lines
-    out(13,-1,11,3,0x46506b);                                     // keyboard
+    // an orange round STOOL in front of the table (the reference furniture)
+    c.add(this.add.ellipse(10,7,16,7,0x14304f,0.4).setOrigin(0.5,1));   // floor shadow
+    c.add(this.add.ellipse(10,4,14,7,0xe8862e).setOrigin(0.5,1).setStrokeStyle(1,O)); // seat
+    c.add(this.add.ellipse(10,2,7,3,0xffb060).setOrigin(0.5,1));        // seat highlight
+    // a flat GRAY table (silver top, darker legs) — the Pokémon-Center table
+    out(0,0,46,13,0xc2cad6);                                      // gray tabletop
+    c.add(this.add.rectangle(0,-12,46,1,0xe6ebf2).setOrigin(0.5,1));  // bright top edge
+    c.add(this.add.rectangle(-21,13,3,9,0x8b94a4).setOrigin(0.5,1));
+    c.add(this.add.rectangle(21,13,3,9,0x8b94a4).setOrigin(0.5,1));   // legs
+    // a small dept-tinted terminal on the table (shows live activity via `screens`)
+    out(-13,-13,15,11,0x3a4660);
+    const screen = this.add.rectangle(-13,-15,10,7,shade(accent,1.25),0.95).setOrigin(0.5,1);
+    c.add(screen);
+    c.add(this.add.rectangle(-16,-17,5,1.5,shade(accent,1.5))); c.add(this.add.rectangle(-17,-14,8,1.5,shade(accent,1.4)));
     this.screens = this.screens || []; this.screens.push(screen);
     return c;
   }

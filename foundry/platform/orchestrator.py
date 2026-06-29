@@ -142,6 +142,9 @@ def _build_one(
         out = result.output_root or result.draft_root
         if not out:
             break                                    # nothing produced — stop deepening
+        # Per-pass gate verdict: built+green ("approved") vs held at the gate.
+        emit({"type": "pass_result", "service": svc.name, "pass": p,
+              "passed": bool(result.passed), "phase": result.phase})
         cur = _tree_metrics(out)
         base = out                                   # next pass extends this tree
         if auto:

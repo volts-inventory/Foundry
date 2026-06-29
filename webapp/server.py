@@ -777,24 +777,30 @@ def _run_platform(p: Project) -> None:
 
     def cb(ev: dict[str, Any]) -> None:
         t = ev.get("type")
+        svc = ev.get("service", "")
         if t == "plan":
             _emit(p, type="narrate", text="📋 Services: " + ", ".join(ev.get("services") or []))
         elif t == "svc_start":
             _emit(p, type="active", room=role_room.get(str(ev.get("role") or ""), "backend"))
-            _emit(p, type="narrate", text=f"▶ {ev['service']} ({ev['role']}) — building")
+            _emit(p, type="narrate", text=f"▶ {svc} ({ev['role']}) — building")
         elif t == "pass" and ev.get("pass", 1) > 1:
-            _emit(p, type="narrate", text=f"   ↻ {ev['service']} — deepening pass {ev['pass']}")
+            _emit(p, type="narrate", text=f"   ↻ {svc} — rebuilding · pass {ev['pass']}")
+        elif t == "pass_result":
+            if ev.get("passed"):
+                _emit(p, type="narrate", text=f"   ✓ {svc} — built, gates green (pass {ev.get('pass', 1)})")
+            else:
+                _emit(p, type="narrate", text=f"   ✗ {svc} — held at the gate (pass {ev.get('pass', 1)})")
         elif t == "critic":
             if ev.get("complete"):
-                _emit(p, type="narrate", text=f"   ✓ {ev['service']} — critic: complete")
+                _emit(p, type="narrate", text=f"   ✦ {svc} — approved: technically complete")
             else:
                 gaps = ev.get("gaps") or []
                 detail = "; ".join(gaps[:3]) if gaps else "more to do"
-                _emit(p, type="narrate", text=f"   • {ev['service']} — critic: {detail}")
+                _emit(p, type="narrate", text=f"   • {svc} — needs more: {detail} → rebuilding")
         elif t == "svc_done":
             mark = "✓" if ev.get("passed") else "✗"
             np = ev.get("passes", 1)
-            _emit(p, type="narrate", text=f"{mark} {ev['service']} done · {np} pass(es)")
+            _emit(p, type="narrate", text=f"{mark} {svc} done · {np} pass(es)")
 
     staging = str(p.out_base.parent / f".staging-{p.id}") if p.out_base else None
     try:

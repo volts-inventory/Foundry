@@ -24,7 +24,7 @@ import shutil
 from foundry.platform.schema import PlatformPlan, ServiceResult
 
 # Conventional container port per role for the generated compose file.
-_PORT: dict[str, int] = {"web": 3000, "api": 8000, "backend": 8001, "worker": 0,
+_PORT: dict[str, int] = {"web": 3000, "backend": 8000, "worker": 0,
                          "data": 5432, "game": 0}
 
 

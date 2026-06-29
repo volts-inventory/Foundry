@@ -115,7 +115,7 @@
       <input id="packs-input" type="text" placeholder="regulated, ml_data, frontend" />
       <label class="check"><input type="checkbox" id="supervised" checked /> Supervised (CTO approves each checkpoint)</label>
       <p class="hint" id="supervised-hint"></p>
-      <p class="hint">A multi-service request (e.g. a site with users + posts) is auto-built as a PLATFORM — split into web / api / backend / data services, each auto-deepened, then stitched into one monorepo. A single thing builds as one service.</p>
+      <p class="hint">A multi-service request (e.g. a site with users + posts) is auto-built as a PLATFORM — split into web / backend / data services (the backend owns the REST API, auth &amp; domain logic), each auto-deepened, then stitched into one monorepo. A single thing builds as one service.</p>
       <details class="adv-platform">
         <summary>Advanced — platform build</summary>
         <label>Max deepening passes per service <span class="hint">— failsafe ceiling; auto stops sooner (default 6)</span></label>

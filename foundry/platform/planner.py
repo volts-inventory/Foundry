@@ -8,8 +8,9 @@ cares how the plan was produced.
 
 It adapts to the request shape:
 
-* a data-backed site/app ("a forum site that stores users") → the full SaaS spine:
-  web → api → backend(auth) → data, plus a worker when async work is implied;
+* a data-backed site/app ("a forum site that stores users") → the SaaS spine:
+  web → backend(REST API + auth + domain) → data, plus a worker when async work
+  is implied;
 * a self-contained client ("a NES-style game", "a markdown editor") → just a `web`
   service with NO backend — everything runs in the browser.
 """
@@ -25,12 +26,15 @@ from foundry.platform.schema import PlatformPlan, ServiceSpec
 _SIGNALS: dict[str, tuple[str, ...]] = {
     "web": ("web", "website", "frontend", "front-end", "react", "vue", "svelte",
             "ui", "dashboard", "spa", "next.js", "page", "site", "app"),
-    "api": ("api", "rest", "graphql", "endpoint", "service", "backend", "server"),
     "data": ("database", "db", "postgres", "mysql", "sqlite", "persistence",
              "schema", "migration"),
     "worker": ("worker", "queue", "background", "job", "cron", "async", "email",
                "notification", "pipeline"),
-    "backend": ("auth", "authentication", "login", "users", "accounts", "billing",
+    # the BACKEND owns the whole server tier: the REST API surface AND the domain
+    # logic (auth, accounts, tenancy) behind it. (There is no separate "api" role —
+    # "backend" covers the API and beyond; the data layer stays its own service.)
+    "backend": ("api", "rest", "graphql", "endpoint", "service", "backend", "server",
+                "auth", "authentication", "login", "users", "accounts", "billing",
                 "payments", "tenant", "multi-tenant", "subscription"),
 }
 
@@ -53,7 +57,7 @@ _GAME_HINTS: tuple[str, ...] = (
 _TEMPLATES: dict[str, str] = {
     "web_api": ("the {kind} WEB FRONTEND: a {fw} single-page app that calls the platform "
                 "REST API defined in the shared contract — pages, components, API client, "
-                "and auth-aware routing. Talks ONLY to the api service over HTTP."),
+                "and auth-aware routing. Talks ONLY to the backend service over HTTP."),
     "web_standalone": ("the {kind} as a self-contained {fw} web app: all UI, state and "
                        "logic run in the browser with NO backend — fully working, not a "
                        "skeleton. Include the complete feature logic and local persistence."),
@@ -62,18 +66,18 @@ _TEMPLATES: dict[str, str] = {
              "collision/physics, game states (title / play / pause / game-over), and "
              "save/load. Implement the ACTUAL gameplay — not a skeleton or a stub loop."),
     "game_online": ("the {kind} game CLIENT in {engine}: the full local game (loop, input, "
-                    "world, entities, save/load) PLUS a thin client to the platform REST API "
-                    "for online features (accounts, leaderboards, sync) per the shared contract."),
-    "api": ("the {kind} REST API service: implement every path in the shared OpenAPI "
-            "contract, with request validation, JSON responses, and auth middleware. "
-            "Persists through the data layer; exposes the contract the web app consumes."),
-    "backend": ("the {kind} core back-end / domain service: user accounts, "
-                "authentication (signup/login/session or JWT), and multi-tenant access "
-                "control. Exposes internal functions the api service calls."),
+                    "world, entities, save/load) PLUS a thin client to the platform backend's "
+                    "REST API for online features (accounts, leaderboards, sync) per the shared contract."),
+    # the backend is the WHOLE server tier: REST API surface + the domain logic behind it.
+    "backend": ("the {kind} BACK-END service — the whole server tier: implement the REST "
+                "API (every path in the shared OpenAPI contract: routing, request validation, "
+                "JSON responses, auth middleware) TOGETHER WITH the domain logic behind it — "
+                "user accounts, authentication (signup/login/session or JWT), and multi-tenant "
+                "access control. Persists through the data layer; exposes the contract the web app consumes."),
     "data": ("the {kind} DATA LAYER: the relational schema, migrations, and a typed "
              "data-access module for the entities named in the shared contract "
-             "(users, tenants, and the core domain rows). No HTTP — a library the api "
-             "and back-end import."),
+             "(users, tenants, and the core domain rows). No HTTP — a library the "
+             "back-end imports."),
     "worker": ("the {kind} background WORKER: a queue consumer that runs async jobs "
                "(emails/notifications and scheduled tasks) off the shared data layer. "
                "No HTTP surface; driven by a job queue."),
@@ -81,8 +85,8 @@ _TEMPLATES: dict[str, str] = {
 
 # Conventional dependency edges within the spine.
 _EDGES: dict[str, tuple[str, ...]] = {
-    "web": ("api",), "api": ("backend", "data"), "backend": ("data",),
-    "worker": ("data",), "data": (), "game": ("api",),
+    "web": ("backend",), "backend": ("data",),
+    "worker": ("data",), "data": (), "game": ("backend",),
 }
 
 # Appended to EVERY service request: push the engine for technical depth — a
@@ -132,7 +136,7 @@ def _is_game(low: str) -> bool:
 
 
 def _needs_backend(low: str, hits: set[str]) -> bool:
-    spine = bool(hits & {"api", "data", "backend", "worker"})
+    spine = bool(hits & {"data", "backend", "worker"})
     return spine or any(w in low for w in _BACKEND_HINTS)
 
 
@@ -141,19 +145,19 @@ def _selected_roles(request: str) -> list[str]:
     hits = {role for role, words in _SIGNALS.items() if any(w in low for w in words)}
     needs_backend = _needs_backend(low, hits)
     if _is_game(low):
-        # A game is its own engine (Lua/LÖVE, pygame…), NOT a web tier. Add an
-        # api+data backend only when the request implies online features.
-        return ["game", "api", "data"] if needs_backend else ["game"]
+        # A game is its own engine (Lua/LÖVE, pygame…), NOT a web tier. Add a
+        # backend+data tier only when the request implies online features.
+        return ["game", "backend", "data"] if needs_backend else ["game"]
     if not needs_backend and "data" not in hits and hits <= {"web"}:
         return ["web"]                       # plain self-contained web app/tool
-    hits |= {"web", "api", "data"}           # data-backed app: force the spine
-    order = ["web", "api", "backend", "data", "worker"]
+    hits |= {"web", "backend", "data"}       # data-backed app: web → backend → data
+    order = ["web", "backend", "data", "worker"]
     return [r for r in order if r in hits]
 
 
 def _web_template_key(low: str, present: set[str]) -> str:
-    if "api" in present:
-        return "web_api"                     # coupled to the platform API
+    if "backend" in present:
+        return "web_api"                     # coupled to the platform backend API
     if _is_game(low):
         return "web_game"
     return "web_standalone"
@@ -163,7 +167,7 @@ def plan_platform(request: str, *, name: str | None = None,
                   only: list[str] | None = None) -> PlatformPlan:
     """Decompose ``request`` into a :class:`PlatformPlan`.
 
-    ``only`` restricts the build to a subset of roles (e.g. ``["web", "api"]``);
+    ``only`` restricts the build to a subset of roles (e.g. ``["web", "backend"]``);
     otherwise the planner infers the right shape — full spine for a data-backed
     app, a single ``web`` service for a self-contained client/game.
     """
@@ -182,7 +186,7 @@ def plan_platform(request: str, *, name: str | None = None,
         if role == "web":
             body = _TEMPLATES[_web_template_key(low, present)].format(kind=kind, fw=fw)
         elif role == "game":
-            key = "game_online" if "api" in present else "game"
+            key = "game_online" if "backend" in present else "game"
             body = _TEMPLATES[key].format(kind=kind, engine=engine)
         else:
             body = _TEMPLATES[role].format(kind=kind, fw=fw)

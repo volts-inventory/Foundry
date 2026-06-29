@@ -63,7 +63,7 @@ def contract_spec_text(plan: PlatformPlan, contract: dict[str, object]) -> str:
     for s in plan.services:
         dep = f" → calls {', '.join(s.depends_on)}" if s.depends_on else ""
         lines.append(f"- **{s.name}** ({s.role}){dep}")
-    lines += ["", "## REST API surface (the api service exposes; the web app consumes)"]
+    lines += ["", "## REST API surface (the backend service exposes; the web app consumes)"]
     raw_paths = contract.get("paths", {})
     paths: dict[str, dict[str, object]] = raw_paths if isinstance(raw_paths, dict) else {}
     for path, ops in paths.items():

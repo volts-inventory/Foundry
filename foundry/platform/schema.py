@@ -9,11 +9,12 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 
-# The service ROLES the planner can emit. web/api/backend/data/worker are the
-# conventional SaaS tiers; `game` is a self-contained client game in its own
-# engine (Lua/LÖVE, pygame, HTML5 canvas…) that may optionally talk to an api.
-# Roles drive request templating, the monorepo layout and the generated compose.
-ROLES: tuple[str, ...] = ("web", "api", "backend", "data", "worker", "game")
+# The service ROLES the planner can emit. web / backend / data / worker are the
+# conventional SaaS tiers — the BACKEND owns the whole server tier (REST API +
+# domain logic + auth); there is no separate "api" role. `game` is a self-contained
+# client game in its own engine (Lua/LÖVE, pygame, HTML5 canvas…) that may optionally
+# talk to a backend. Roles drive request templating, the monorepo layout and compose.
+ROLES: tuple[str, ...] = ("web", "backend", "data", "worker", "game")
 
 
 @dataclass(frozen=True)
@@ -22,7 +23,7 @@ class ServiceSpec:
 
     ``request`` is the one-line request handed to ``foundry.cli.run`` for THIS
     service — the planner specializes the platform request per role. ``depends_on``
-    names sibling services it calls (web→api, api→data); it orders nothing on its
+    names sibling services it calls (web→backend, backend→data); it orders nothing on its
     own (services build in parallel) but is recorded for the contract + compose.
     """
 

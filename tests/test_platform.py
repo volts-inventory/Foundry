@@ -24,9 +24,9 @@ def _roles(plan: PlatformPlan) -> list[str]:
 
 def test_data_backed_site_gets_full_spine() -> None:
     plan = plan_platform("a website for a company that stores users and forums and posts")
-    assert _roles(plan) == ["web", "api", "backend", "data"]
+    assert _roles(plan) == ["web", "backend", "data"]
     web = plan.service("web")
-    assert web is not None and "api" in web.depends_on
+    assert web is not None and "backend" in web.depends_on
 
 
 def test_self_contained_game_is_single_game_service_in_lua() -> None:
@@ -38,10 +38,10 @@ def test_self_contained_game_is_single_game_service_in_lua() -> None:
     assert game.depends_on == ()
 
 
-def test_online_game_adds_api_and_data() -> None:
+def test_online_game_adds_backend_and_data() -> None:
     plan = plan_platform("a snake game with an online leaderboard")
-    assert _roles(plan) == ["game", "api", "data"]
-    assert plan.service("game").depends_on == ("api",)  # type: ignore[union-attr]
+    assert _roles(plan) == ["game", "backend", "data"]
+    assert plan.service("game").depends_on == ("backend",)  # type: ignore[union-attr]
 
 
 def test_engine_inferred_from_request() -> None:
@@ -54,8 +54,8 @@ def test_plain_web_app_has_no_backend() -> None:
 
 
 def test_only_filter_restricts_roles() -> None:
-    plan = plan_platform("a saas app", only=["web", "api"])
-    assert set(_roles(plan)) <= {"web", "api"}
+    plan = plan_platform("a saas app", only=["web", "backend"])
+    assert set(_roles(plan)) <= {"web", "backend"}
 
 
 def test_every_request_carries_the_depth_directive() -> None:
@@ -106,14 +106,14 @@ def test_build_platform_stitches_a_monorepo(tmp_path) -> None:  # type: ignore[n
 def test_deepening_passes_build_on_prior_tree(tmp_path) -> None:  # type: ignore[no-untyped-def]
     out = str(tmp_path / "deep")
     result = build_platform(
-        "a tiny REST api", out_dir=out, backend="mock", only=["api"], passes=2,
+        "a tiny REST api", out_dir=out, backend="mock", only=["backend"], passes=2,
     )
     assert result.passed
     # pass 1 lands in <name>.p1, the final pass in <name>; both exist in staging
     staging = os.path.join(out, ".platform-build")
-    assert os.path.isdir(os.path.join(staging, "api.p1"))   # first (greenfield) pass
-    assert os.path.isdir(os.path.join(staging, "api"))      # final (deepened) pass
-    assert os.path.isdir(os.path.join(out, "services", "api"))
+    assert os.path.isdir(os.path.join(staging, "backend.p1"))   # first (greenfield) pass
+    assert os.path.isdir(os.path.join(staging, "backend"))      # final (deepened) pass
+    assert os.path.isdir(os.path.join(out, "services", "backend"))
 
 
 def test_completeness_critic_mock_is_complete() -> None:
@@ -125,13 +125,13 @@ def test_completeness_critic_mock_is_complete() -> None:
 def test_auto_passes_converge_below_the_failsafe(tmp_path) -> None:  # type: ignore[no-untyped-def]
     out = str(tmp_path / "auto")
     result = build_platform(
-        "a tiny REST api", out_dir=out, backend="mock", only=["api"],
+        "a tiny REST api", out_dir=out, backend="mock", only=["backend"],
         passes="auto", max_passes=6,
     )
     svc = result.services[0]
     assert result.passed
     assert 1 <= svc.passes < 6          # converged on "done", did NOT hit the failsafe
-    assert os.path.isdir(os.path.join(out, "services", "api"))
+    assert os.path.isdir(os.path.join(out, "services", "backend"))
 
 
 def test_game_platform_skips_compose_service(tmp_path) -> None:  # type: ignore[no-untyped-def]

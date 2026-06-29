@@ -771,7 +771,7 @@ def _platform_opts(body: dict[str, Any]) -> dict[str, Any]:
 
 def _infers_platform(request: str) -> bool:
     """True when the request decomposes into MORE THAN ONE service — i.e. it reads as
-    a multi-service app/platform (web + api + backend + data …) rather than a single
+    a multi-service app/platform (web + backend + data …) rather than a single
     component (a game, a tool, one service). Drives the auto platform/single choice."""
     try:
         from foundry.platform import plan_platform
@@ -791,7 +791,7 @@ def _run_platform(p: Project) -> None:
 
     # Map a service role to a discipline ROOM the floor can light up (the platform
     # floor has no engine stage stream of its own, so we drive it ourselves).
-    role_room = {"web": "frontend", "api": "backend", "backend": "backend",
+    role_room = {"web": "frontend", "backend": "backend",
                  "data": "data", "worker": "backend", "game": "frontend"}
     plan = plan_platform(p.request)
     # Synthetic org so the discipline rooms staff up (engineers per area) and the
@@ -817,8 +817,9 @@ def _run_platform(p: Project) -> None:
     _emit(p, type="active", room=first_room)   # seat everyone; first discipline works
     _emit(p, type="narrate", text=f"🏗  Platform build — {p.request}")
 
-    role_desc = {"web": "the web frontend (SPA)", "api": "the REST API",
-                 "backend": "the auth & domain backend", "data": "the data layer (schema + DB)",
+    role_desc = {"web": "the web frontend (SPA)",
+                 "backend": "the back-end (REST API + auth + domain)",
+                 "data": "the data layer (schema + DB)",
                  "worker": "the background worker", "game": "the game"}
     svc_role = {s.name: s.role for s in plan.services}
     state: dict[str, str] = {s.name: "queued" for s in plan.services}

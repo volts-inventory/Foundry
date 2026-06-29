@@ -660,9 +660,9 @@ class FloorScene extends Phaser.Scene {
     const g=this.gateGeom; if (!g) return;
     const cx=g.cx, cy=(g.atop+g.abot)/2, col=pass?0x5ddc7a:0xff5d6c;
     const s=this.add.container(cx,cy).setDepth(42);
-    s.add(this.add.rectangle(0,0,58,32,0x101622,0.96).setStrokeStyle(3,col));
+    s.add(this.add.rectangle(0,0,58,32,0xfffdf3,0.98).setStrokeStyle(3,col));
     s.add(this.add.text(0,0,pass?"PASS":"FAIL",{fontFamily:"'PixelFont','Courier New',monospace",
-      fontSize:"16px",fontStyle:"bold",color:pass?"#9dffbf":"#ffb3ba"}).setOrigin(0.5));
+      fontSize:"16px",fontStyle:"bold",color:pass?"#1d7a3f":"#b53129"}).setOrigin(0.5));
     s.setScale(3.4).setAlpha(0).setAngle(-12);
     this.tweens.add({targets:s, scale:1, alpha:1, angle:-6, duration:170, ease:"Back.out",
       onComplete:()=>{ this.ring(cx,cy,col); this.burst(cx,cy,[col,0xffffff],16);
@@ -707,9 +707,9 @@ class FloorScene extends Phaser.Scene {
   }
   banner(txt,color){
     const b=this.add.container(W/2, FLOOR_TOP+40).setDepth(2200);
-    b.add(this.add.rectangle(0,0,380,48,0x0c1322,0.95).setStrokeStyle(3,color));
+    b.add(this.add.rectangle(0,0,380,48,0xfffdf3,0.98).setStrokeStyle(3,color));
     b.add(this.add.text(0,0,txt,{fontFamily:"'PixelFont','Courier New',monospace",
-      fontSize:"22px",fontStyle:"bold",color:"#ffffff"}).setOrigin(0.5));
+      fontSize:"22px",fontStyle:"bold",color:"#33405e"}).setOrigin(0.5));
     b.setScale(0.2).setAlpha(0);
     this.tweens.add({targets:b, scale:1, alpha:1, duration:300, ease:"Back.out"});
     this.time.delayedCall(2400,()=>this.tweens.add({targets:b, alpha:0, y:b.y-20, duration:400,
@@ -1134,8 +1134,8 @@ class FloorScene extends Phaser.Scene {
     const R = ROOMS[room] || ROOMS.product;
     const w = Math.max(64, label.length*7+18);
     const c = this.add.container(R.cx, R.floorY+24).setDepth(2000);
-    c.add(this.add.rectangle(0,0,w,18,0x161d31).setStrokeStyle(2,0xffcf52));
-    c.add(this.add.text(0,0,"+ "+label,{fontFamily:"'PixelFont','Courier New'",fontSize:"11px",color:"#ffe9a8"})
+    c.add(this.add.rectangle(0,0,w,18,0xfffdf3).setStrokeStyle(2,PC.ink));
+    c.add(this.add.text(0,0,"+ "+label,{fontFamily:"'PixelFont','Courier New'",fontSize:"11px",color:"#1d7a3f"})
       .setOrigin(0.5));
     this.tweens.add({targets:c, y:c.y-50, alpha:0, duration:2600, ease:"Cubic.out",
       onComplete:()=>c.destroy()});
@@ -1213,18 +1213,18 @@ class FloorScene extends Phaser.Scene {
     const B = cellBox(ENTRANCE_CELL[0], ENTRANCE_CELL[1]);
     const w = Math.min(232, B.w-24), h = headerH + areas.length*rowH + padding;
     const c = this.add.container(Math.round(B.x+(B.w-w)/2), B.y+22).setDepth(28);
-    c.add(this.add.rectangle(0,0,w,h,0x0c1322,0.92).setOrigin(0,0).setStrokeStyle(2,0xffcf52));
-    c.add(this.add.rectangle(0,0,w,2,0xffcf52,0.5).setOrigin(0,0));   // board top rail
-    c.add(this.add.rectangle(w/2,-3,5,5,0xffcf52).setOrigin(0.5,0));  // pin
-    c.add(this.add.text(8,4,"ORG · PM",{fontFamily:"'PixelFont','Courier New'",fontSize:"12px",
-      fontStyle:"bold",color:"#ffcf52"}).setOrigin(0,0));
+    c.add(this.add.rectangle(0,0,w,h,0xfffdf3,0.98).setOrigin(0,0).setStrokeStyle(2,PC.ink));
+    c.add(this.add.rectangle(0,0,w,3,PC.stripe).setOrigin(0,0));      // board top rail (pink)
+    c.add(this.add.rectangle(w/2,-3,5,5,PC.stripe).setOrigin(0.5,0)); // pin
+    c.add(this.add.text(8,5,"ORG · PM",{fontFamily:"'PixelFont','Courier New'",fontSize:"12px",
+      fontStyle:"bold",color:"#b53129"}).setOrigin(0,0));
     areas.forEach((a,i)=>{
       const y = headerH + i*rowH;
       const col = areaColor[a.area] || areaColor.default;
-      c.add(this.add.rectangle(8,y+2,9,9,col).setOrigin(0,0));
+      c.add(this.add.rectangle(8,y+2,9,9,col).setOrigin(0,0).setStrokeStyle(1,PC.ink));
       const leads = (a.leads||[]).join(", ");
       c.add(this.add.text(22,y,`${a.area}: ${leads}`,
-        {fontFamily:"'PixelFont','Courier New'",fontSize:"11px",color:"#e8eefb"}).setOrigin(0,0));
+        {fontFamily:"'PixelFont','Courier New'",fontSize:"11px",color:"#33405e"}).setOrigin(0,0));
     });
     c.setAlpha(0);
     this.tweens.add({targets:c, alpha:1, duration:300});

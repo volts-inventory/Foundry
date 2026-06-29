@@ -679,7 +679,7 @@ class FloorScene extends Phaser.Scene {
   // A name/role badge pinned over a person `s`. `filled` → solid accent pill with dark
   // text (leads); else a dark pill with accent text (ICs / generic). BitmapText = crisp.
   pinBadge(s, lbl, color, filled, yy){
-    const PX=8, y = yy==null ? -15 : yy;
+    const PX=8, y = yy==null ? -26 : yy;   // sits ABOVE the head (clear of the face)
     const bg = filled ? color : 0x10182c, fg = filled ? 0x10182c : color;
     const edge = filled ? 0x10182c : color;
     const t = this.bm(0,y,lbl,PX,fg,0.5,0.5);            // proportional text → size the pill to it
@@ -924,7 +924,7 @@ class FloorScene extends Phaser.Scene {
       const names = ROSTER[room], R = ROOMS[room]; if (!R) continue;
       const cols = Math.min(names.length, 3);
       const single = names.length === 1;                         // a one-role room → centre it
-      const PX = 84, SY = R.y + 74, RP = 56;                     // SAME grid as the eng rooms
+      const PX = 84, SY = R.y + 94, RP = 50;                     // SAME grid as the eng rooms
       names.forEach((name,i)=>{
         const col = i%cols, row = Math.floor(i/cols);
         // centred columns, first row well below the room label (matches every other room)
@@ -934,7 +934,7 @@ class FloorScene extends Phaser.Scene {
         const seed = hashStr((this.proj.id||'f')+name), kit = kitFor(name, seed);
         this.makeWorkstation(hx, hy+16, kit.accent);              // desk just in front of them
         const a = this.makePerson(hx, hy, kit);
-        a.setScale(1.68).setDepth(hy);                             // y-sort (desk occludes legs)
+        a.setScale(1.5).setDepth(hy);                             // y-sort (desk occludes legs)
         // role badge over the agent so every senior role is labelled (like the eng leads)
         const rtag = ROLE_TAG[name] || name.slice(0,9).toUpperCase();
         const acc = (kit.accent!=null ? kit.accent : 0x9fb4d8);
@@ -959,8 +959,8 @@ class FloorScene extends Phaser.Scene {
     const O = ROOMS.office;
     this.lobby = {cx: Math.round(O.cx), standY: Math.round(O.y1 - 48)};   // behind his desk
     const c = this.makePerson(this.lobby.cx, this.lobby.standY, kitFor("CTO", hashStr((this.proj.id||'f')+"CTO")));
-    c.setScale(1.66).setDepth(900); c.fixedDepth = 900;   // CTO walks the floor -> always on top
-    this.pinBadge(c, "CTO", 0xffd95e, true, -17);         // gold badge, like everyone else
+    c.setScale(1.5).setDepth(900); c.fixedDepth = 900;   // CTO walks the floor -> always on top
+    this.pinBadge(c, "CTO", 0xffd95e, true, -26);         // gold badge, above the head
     this.cto = c;
     this.tweens.add({targets:c.bob, y:-1, duration:380, yoyo:true, repeat:-1, ease:"Sine.inOut"});
   }
@@ -1055,7 +1055,7 @@ class FloorScene extends Phaser.Scene {
     if (!A || !B || this._dead) return;
     const ax = Math.round(A.cx), ay = Math.round(A.standY);
     const runner = this.makePerson(ax, ay, poolKit(4));
-    runner.setScale(1.5).setDepth(945); runner.fixedDepth = 945;   // stays on top while crossing
+    runner.setScale(1.4).setDepth(945); runner.fixedDepth = 945;   // stays on top while crossing
     this.pinBadge(runner, "RUNNER", 0xffcf52, true, -17);          // label the delivery courier
     const pkg = this.add.container(0,-17);                          // the "work" carried in hand
     pkg.add(this.add.rectangle(0,0,12,9,0xffcf52).setStrokeStyle(1,0x7a5028));
@@ -1440,9 +1440,9 @@ class FloorScene extends Phaser.Scene {
         const k = p.lead ? kitFor("Tech-Lead "+p.area, hashStr((this.proj.id||'f')+"TL"+p.area)) : poolKit(slot);
         k.accent=p.color;
         const ws=this.makeWorkstation(x, y+16, p.color);
-        const s=this.makePerson(x, y, k); s.setScale(p.lead?1.6:1.42).setDepth(y).setAlpha(p.lead?1:0.94);
+        const s=this.makePerson(x, y, k); s.setScale(p.lead?1.45:1.3).setDepth(y).setAlpha(p.lead?1:0.94);
         if (p.lead){
-          s.add(this.add.text(0,-28,"★",{fontFamily:"'PixelFont','Courier New'",fontSize:"10px",
+          s.add(this.add.text(0,-39,"★",{fontFamily:"'PixelFont','Courier New'",fontSize:"10px",
             color:"#ffd95e"}).setOrigin(0.5).setResolution(3));
           this.pinBadge(s, tag+" LEAD", p.color, true);        // filled accent badge
           if (faceUp && s.faceBack) s.faceBack();              // overseeing — faces up into the room
@@ -1457,7 +1457,7 @@ class FloorScene extends Phaser.Scene {
       };
       // ONE consistent desk grid for every room: centred columns, first row well BELOW
       // the room label so it's never covered. (PX=column pitch, SY=first-row Y, RP=row pitch.)
-      const PX=84, SY=R.y+74, RP=56;
+      const PX=84, SY=R.y+94, RP=50;
       if (!ics.length && lead){
         place(lead, R.cx, Math.round(R.y + R.h*0.52), true);   // ONLY the lead → centre the desk
       } else {
@@ -1481,7 +1481,7 @@ class FloorScene extends Phaser.Scene {
       const y=R.floorY+34+row*44;
       const k=poolKit(i);
       const ws=this.makeWorkstation(x, y+16, k.accent);
-      const s=this.makePerson(x, y, k); s.setScale(1.5).setDepth(y).setAlpha(0.96);
+      const s=this.makePerson(x, y, k); s.setScale(1.4).setDepth(y).setAlpha(0.96);
       s.home={x,y}; s.loungeSlot=12+i; s.seen=true; s.inLounge=false;
       s.working = (this.activeRoomKey === "engineering");
       this.zzzLoop(s);

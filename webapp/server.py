@@ -238,6 +238,7 @@ class Project:
     journal: list[dict[str, Any]] = field(default_factory=list)  # latest agent journal ([11])
     gates: dict[str, Any] = field(default_factory=dict)  # name -> {status,attested,advisory}
     out_base: Path | None = None  # this floor's output dir (code/ + docs/)
+    platform_opts: dict[str, Any] = field(default_factory=dict)  # platform build knobs (advanced)
 
 
 _PROJECTS: dict[str, Project] = {}
@@ -730,6 +731,21 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     _close(p)
 
 
+def _platform_opts(body: dict[str, Any]) -> dict[str, Any]:
+    """Advanced platform knobs from the request body (all optional; sane defaults)."""
+    def _int(key: str, default: int) -> int:
+        try:
+            return max(1, int(body.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+    return {
+        "max_passes": _int("max_passes", 6),
+        "critic": not bool(body.get("no_critic")),
+        "max_parallel": _int("max_parallel", 4),
+        "max_slots_per_service": _int("max_slots_per_service", 6),
+    }
+
+
 def _infers_platform(request: str) -> bool:
     """True when the request decomposes into MORE THAN ONE service — i.e. it reads as
     a multi-service app/platform (web + api + backend + data …) rather than a single
@@ -775,38 +791,62 @@ def _run_platform(p: Project) -> None:
     _emit(p, type="active", room=first_room)   # seat everyone; first discipline works
     _emit(p, type="narrate", text=f"🏗  Platform build — {p.request}")
 
+    role_desc = {"web": "the web frontend (SPA)", "api": "the REST API",
+                 "backend": "the auth & domain backend", "data": "the data layer (schema + DB)",
+                 "worker": "the background worker", "game": "the game"}
+    svc_role = {s.name: s.role for s in plan.services}
+    state: dict[str, str] = {s.name: "queued" for s in plan.services}
+
+    def push_prog() -> None:
+        _emit(p, type="platprog", services=dict(state), total=len(state))
+
+    push_prog()
+
     def cb(ev: dict[str, Any]) -> None:
         t = ev.get("type")
         svc = ev.get("service", "")
         if t == "plan":
             _emit(p, type="narrate", text="📋 Services: " + ", ".join(ev.get("services") or []))
         elif t == "svc_start":
-            _emit(p, type="active", room=role_room.get(str(ev.get("role") or ""), "backend"))
-            _emit(p, type="narrate", text=f"▶ {svc} ({ev['role']}) — building")
+            role = str(ev.get("role") or "")
+            _emit(p, type="active", room=role_room.get(role, "backend"))
+            state[svc] = "building"; push_prog()
+            _emit(p, type="narrate", text=f"▶ {svc} — building {role_desc.get(role, role)}")
         elif t == "pass" and ev.get("pass", 1) > 1:
+            state[svc] = "rebuilding"; push_prog()
+            _emit(p, type="rebuild", room=role_room.get(svc_role.get(svc, ""), "backend"))
             _emit(p, type="narrate", text=f"   ↻ {svc} — rebuilding · pass {ev['pass']}")
         elif t == "pass_result":
             if ev.get("passed"):
+                state[svc] = "built"; push_prog()
                 _emit(p, type="narrate", text=f"   ✓ {svc} — built, gates green (pass {ev.get('pass', 1)})")
             else:
+                state[svc] = "held"; push_prog()
                 _emit(p, type="narrate", text=f"   ✗ {svc} — held at the gate (pass {ev.get('pass', 1)})")
         elif t == "critic":
             if ev.get("complete"):
+                state[svc] = "approved"; push_prog()
                 _emit(p, type="narrate", text=f"   ✦ {svc} — approved: technically complete")
             else:
                 gaps = ev.get("gaps") or []
                 detail = "; ".join(gaps[:3]) if gaps else "more to do"
                 _emit(p, type="narrate", text=f"   • {svc} — needs more: {detail} → rebuilding")
         elif t == "svc_done":
+            state[svc] = "done" if ev.get("passed") else "failed"; push_prog()
             mark = "✓" if ev.get("passed") else "✗"
             np = ev.get("passes", 1)
             _emit(p, type="narrate", text=f"{mark} {svc} done · {np} pass(es)")
 
+    opts = p.platform_opts or {}
     staging = str(p.out_base.parent / f".staging-{p.id}") if p.out_base else None
     try:
         result = build_platform(
             p.request, out_dir=str(p.out_base), backend=p.backend, mode=p.mode,
             cost_cap_microusd=p.cost_cap_microusd, progress_cb=cb, work_dir=staging,
+            max_passes=int(opts.get("max_passes", 6)),
+            critic=bool(opts.get("critic", True)),
+            max_parallel=int(opts.get("max_parallel", 4)),
+            max_slots_per_service=int(opts.get("max_slots_per_service", 6)),
         )
     except Exception as exc:
         _emit(p, type="narrate", text=f"💥 Platform error: {exc}")
@@ -1361,6 +1401,8 @@ class Handler(BaseHTTPRequestHandler):
         # (multi-service => platform), unless the caller pins it with `platform`.
         want = body.get("platform")
         is_platform = want if isinstance(want, bool) else _infers_platform(request)
+        if is_platform:
+            p.platform_opts = _platform_opts(body)
         runner = _run_platform if is_platform else _run_factory
         threading.Thread(target=runner, args=(p,), daemon=True).start()
         self._json(200, {"id": pid, "floor": floor, "release": release_seq})

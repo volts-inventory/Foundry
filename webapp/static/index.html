@@ -116,6 +116,16 @@
       <label class="check"><input type="checkbox" id="supervised" checked /> Supervised (CTO approves each checkpoint)</label>
       <p class="hint" id="supervised-hint"></p>
       <p class="hint">A multi-service request (e.g. a site with users + posts) is auto-built as a PLATFORM — split into web / api / backend / data services, each auto-deepened, then stitched into one monorepo. A single thing builds as one service.</p>
+      <details class="adv-platform">
+        <summary>Advanced — platform build</summary>
+        <label>Max deepening passes per service <span class="hint">— failsafe ceiling; auto stops sooner (default 6)</span></label>
+        <input type="number" id="max-passes" min="1" value="6" />
+        <label class="check"><input type="checkbox" id="critic-on" checked /> Completeness critic <span class="hint">— judges "done" each pass; off = stop on plateau only</span></label>
+        <label>Services built at once <span class="hint">— concurrency across services (default 4)</span></label>
+        <input type="number" id="max-parallel" min="1" value="4" />
+        <label>Tasks per service <span class="hint">— parallelism within each service (default 6)</span></label>
+        <input type="number" id="max-slots-svc" min="1" value="6" />
+      </details>
       <div class="dialog-actions">
         <button id="start-btn" class="primary">BREAK GROUND</button>
         <button id="cancel-btn">cancel</button>

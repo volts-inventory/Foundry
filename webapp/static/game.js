@@ -843,6 +843,19 @@ class FloorScene extends Phaser.Scene {
     if (a.sprite && a.char){ a._wf = 0; a.sprite.setFrame(a.char.front[0]); }
   }
 
+  // A discipline room is REBUILDING (a service deepening): pulse its glow + a
+  // floating "↻ rebuilding" tag so it reads at a glance, not just in the log.
+  pulseRoom(key){
+    const R = ROOMS[key]; if(!R || R.virtual) return;
+    const g = this.roomGlow[key];
+    if(g) this.tweens.add({targets:g, fillAlpha:{from:0.0,to:0.22}, duration:260,
+                           yoyo:true, repeat:2, ease:"Sine.inOut"});
+    const t = this.add.text(R.cx, R.y+20, "↻ rebuilding",
+      {fontFamily:"'PixelFont','Courier New'",fontSize:"9px",fontStyle:"bold",color:"#ffb05a"})
+      .setOrigin(0.5,0).setDepth(2000);
+    this.tweens.add({targets:t, y:t.y-14, alpha:{from:1,to:0}, duration:1400,
+                     ease:"Sine.out", onComplete:()=>t.destroy()});
+  }
   setActiveRoom(key){
     this.activeRoom = key;
     // "engineering" is a virtual stage — light up all its discipline rooms.
@@ -1337,6 +1350,7 @@ function switchToFloor(floor){
   const F = FLOORS.get(floor);
   rebuildLog(F);
   renderGatesMini(F.gates);
+  if (F.platprog) renderPlatProg(F.platprog);   // platform floors show service chips
   updateHud(F);
   if (F.awaiting) showCheckpoint(F); else hideCheckpoint();
   renderElevator();
@@ -1354,6 +1368,13 @@ function routeEvent(floor, ev){
       if (isActive) updateHud(F);
       break;
     case "narrate": logTo(F, logClass(ev.text), ev.text); break;
+    case "platprog":               // platform: per-service progress for the HUD
+      F.platprog = ev;
+      if (isActive) renderPlatProg(ev);
+      break;
+    case "rebuild":                // a service is deepening — pulse its room
+      if (S && ev.room) S.pulseRoom(ev.room);
+      break;
     case "stage":
       if (S) S.setActiveRoom(ev.room);
       logTo(F, "gold", "── "+ev.label+" ──"); break;
@@ -1465,6 +1486,24 @@ function renderGatesMini(gates){
   for(const n of GATE_ORDER){ const g=gates[n]; if(!g) continue;
     const s=document.createElement("span"); s.className="g "+(g.status); s.textContent=n;
     el.appendChild(s);}
+}
+// Platform builds: one chip per service in the HUD, coloured by lifecycle state,
+// with a "done/total" tally. Overrides the (empty) gate chips for a platform floor.
+function renderPlatProg(pp){
+  const el=document.getElementById("gates-mini"); if(!el) return;
+  if(!pp || !pp.services){ return; }
+  el.innerHTML="";
+  const names=Object.keys(pp.services); let done=0;
+  for(const name of names){
+    const st=pp.services[name];
+    if(st==="done"||st==="approved") done++;
+    const s=document.createElement("span");
+    s.className="g plat "+st; s.textContent=name; s.title=name+" — "+st;
+    el.appendChild(s);
+  }
+  const tot=document.createElement("span");
+  tot.className="g plat-count"; tot.textContent=done+"/"+names.length+" ✓";
+  el.appendChild(tot);
 }
 function updateHud(F){
   document.getElementById("floor-tag").textContent =
@@ -1961,7 +2000,16 @@ document.getElementById("start-btn").onclick=async ()=>{
   const cap=parseFloat(document.getElementById("cap-input").value);
   if(Number.isFinite(cap) && cap>0) extra.cost_cap_usd=cap;
   if(startFromSel.value) extra.parent_id=startFromSel.value;   // iterate on a finished build
-  // platform vs single is INFERRED server-side from the request (multi-service => platform)
+  // platform vs single is INFERRED server-side from the request (multi-service => platform).
+  // These advanced knobs only take effect when the request builds as a platform.
+  const mp=parseInt((document.getElementById("max-passes")||{}).value,10);
+  if(Number.isFinite(mp) && mp>=1) extra.max_passes=mp;
+  const criticEl=document.getElementById("critic-on");
+  if(criticEl && !criticEl.checked) extra.no_critic=true;
+  const mpar=parseInt((document.getElementById("max-parallel")||{}).value,10);
+  if(Number.isFinite(mpar) && mpar>=1) extra.max_parallel=mpar;
+  const mss=parseInt((document.getElementById("max-slots-svc")||{}).value,10);
+  if(Number.isFinite(mss) && mss>=1) extra.max_slots_per_service=mss;
   const intake=intakeMode();
   if(startFromSel.value && !req.trim()){ alert("Describe what to change or add."); return; }
   if(intake==="spec"){

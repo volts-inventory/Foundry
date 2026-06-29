@@ -29,6 +29,7 @@ const GRID = {  // pipeline: product → architecture → engineering(FE/BE/DA) 
   product:[0,0], architecture:[1,0], qa:[2,0], security:[3,0],
   frontend:[0,1], backend:[1,1], data:[2,1], gate:[3,1],
   vault:[3,2],                       // gate(3,1) sits directly above vault(3,2)
+  office:[1,2],                      // the CTO's own office (row 2, between lounge & vault)
 };
 // Pipeline ORDER (the build sequence) — drives the order numerals + the flow path.
 const PIPELINE_ORDER = ["product","architecture","frontend","backend","data","qa","security","gate","vault"];
@@ -44,6 +45,7 @@ const RBASE = {
   data:{label:"DATA",color:0x245a42}, qa:{label:"QA · REVIEW",color:0x2e5a4a},
   security:{label:"SECURITY",color:0x5a2e36},
   gate:{label:"GATE",color:0x2c4a55}, vault:{label:"VAULT",color:0x5a4a18},
+  office:{label:"CTO OFFICE",color:0x4a4030},   // the CTO's room — org chart on the wall
 };
 // Build-order numeral per room (engineering's 3 rooms share stage 3 — they run in
 // parallel; support rooms have none).
@@ -477,17 +479,11 @@ class FloorScene extends Phaser.Scene {
     P("vending",L.x1-TI-12, L.y+74);
     P("plant",  L.x+TI+6, bot(L)); P("plant", L.x1-TI-8, bot(L));
 
-    // ENTRANCE (bottom-centre): reception counter + welcome mat + corner plants. The
-    // company ORG board (renderOrg) pins to the top wall here.
-    const E = cellBox(ENTRANCE_CELL[0], ENTRANCE_CELL[1]);
-    // the CTO's OFFICE — his desk (counter) + nameplate; he returns here between visits.
-    this.add.text(E.cx, E.y+E.h-68, "CTO OFFICE", {fontFamily:"'PixelFont','Courier New',monospace",
-      fontSize:"9px", fontStyle:"bold", color:"#ffcf52"}).setOrigin(0.5).setDepth(4);
-    P("counter", E.cx, E.y+E.h-52); P("stool", E.cx-24, E.y+E.h-38); P("stool", E.cx+24, E.y+E.h-38);
-    this.add.rectangle(E.cx, bot(E)+2, 74, 18, 0x2a3550, 0.55).setDepth(0).setStrokeStyle(2, 0x3e4a68);
-    this.add.text(E.cx, bot(E)-7, "WELCOME",
-      {fontFamily:"'PixelFont','Courier New'",fontSize:"7px",color:"#8aa0c8"}).setOrigin(0.5).setDepth(1);
-    P("plant", E.x+TI+6, bot(E)); P("plant", E.x1-TI-8, bot(E));   // bottom corners (clear of the org board)
+    // CTO OFFICE (walled room, row 2): the org chart (renderOrg) on the top wall, his
+    // executive desk + chair at the bottom, plants in the corners. Labelled by the room.
+    const E = ROOMS.office;
+    P("counter", E.cx, E.y1-34);                                       // executive desk (CTO stands behind)
+    P("plant", E.x+TI+8, E.y1-TI); P("plant", E.x1-TI-10, E.y1-TI);    // corner plants (clear of the door)
   }
 
   buildAtmosphere(){
@@ -897,8 +893,8 @@ class FloorScene extends Phaser.Scene {
   }
 
   buildCTO(){
-    const L = cellBox(ENTRANCE_CELL[0], ENTRANCE_CELL[1]);
-    this.lobby = {cx: Math.round(L.x+L.w/2), standY: Math.round(L.y+L.h-24)};
+    const O = ROOMS.office;
+    this.lobby = {cx: Math.round(O.cx), standY: Math.round(O.y1 - 48)};   // behind his desk
     const c = this.makePerson(this.lobby.cx, this.lobby.standY, kitFor("CTO", hashStr((this.proj.id||'f')+"CTO")));
     c.setScale(1.4).setDepth(900); c.fixedDepth = 900;   // CTO walks the floor -> always on top
     c.add(this.add.text(0,-22,"CTO",{fontFamily:"'PixelFont','Courier New'",fontSize:"8px",fontStyle:"bold",color:"#ffcf52"})
@@ -1252,10 +1248,10 @@ class FloorScene extends Phaser.Scene {
     };
     const areas = ev.areas || [];
     const rowH = 16, padding = 8, headerH = 20;
-    // pin the org board to the ENTRANCE wall (the company org chart in the lobby)
-    const B = cellBox(ENTRANCE_CELL[0], ENTRANCE_CELL[1]);
+    // pin the org board on the CTO OFFICE wall (the company org chart in his room)
+    const B = ROOMS.office;
     const w = Math.min(232, B.w-24), h = headerH + areas.length*rowH + padding;
-    const c = this.add.container(Math.round(B.x+(B.w-w)/2), B.y+22).setDepth(28);
+    const c = this.add.container(Math.round(B.x+(B.w-w)/2), B.y+44).setDepth(28);
     c.add(this.add.rectangle(0,0,w,h,0xfffdf3,0.98).setOrigin(0,0).setStrokeStyle(2,PC.ink));
     c.add(this.add.rectangle(0,0,w,3,PC.stripe).setOrigin(0,0));      // board top rail (pink)
     c.add(this.add.rectangle(w/2,-3,5,5,PC.stripe).setOrigin(0.5,0)); // pin

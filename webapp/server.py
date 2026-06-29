@@ -39,6 +39,26 @@ _AUTO_APPROVE_DELAY = 1.4  # auto-run: dwell on each checkpoint before approving
 
 _MODES = ("assistant", "gated", "autonomous")
 
+
+def _int_env(name: str, default: int) -> int:
+    """A small non-negative int from the environment (blank/garbage -> default)."""
+    try:
+        return max(0, int(os.environ.get(name) or default))
+    except (TypeError, ValueError):
+        return default
+
+
+# Cap how many builds RUN at once. Each build is a real, resource-heavy run (model
+# calls + local gate subprocesses); on a small host (a Pi) two heavy builds at once
+# can exhaust RAM. Extra builds QUEUE — their worker thread blocks on this semaphore
+# and starts as a slot frees. Tune per host: a Pi wants 1, an M-series Mac 3-4.
+# WORKSHOP_MAX_CONCURRENT_BUILDS=0 disables the cap (unbounded, the prior behaviour).
+_MAX_CONCURRENT_BUILDS = _int_env("WORKSHOP_MAX_CONCURRENT_BUILDS", 2)
+_BUILD_GATE: threading.BoundedSemaphore | None = (
+    threading.BoundedSemaphore(_MAX_CONCURRENT_BUILDS)
+    if _MAX_CONCURRENT_BUILDS > 0 else None
+)
+
 # Where each floor's build writes its output tree + doc bundle (gitignored).
 # Override with WORKSHOP_OUTPUT_DIR (e.g. a mounted volume on a Pi).
 _OUTPUT_ROOT = Path(os.environ.get("WORKSHOP_OUTPUT_DIR", ".run/web")).resolve()
@@ -370,7 +390,7 @@ def _load_persisted() -> None:
                         p.seen_uris = set()
                     p.status = "running"
                     p.ended = False
-                    threading.Thread(target=_run_factory, args=(p,),
+                    threading.Thread(target=_gated_runner, args=(_run_factory, p),
                                      kwargs={"resume": True}, daemon=True).start()
                 elif was_running:
                     # No recoverable checkpoint → close it out honestly (history kept,
@@ -578,6 +598,29 @@ def _emit_paced(p: Project, events: list[dict[str, Any]]) -> None:
     for ev in events:
         _emit(p, **ev)
         time.sleep(_STAGE_PAUSE if ev.get("type") == "stage" else _PACE)
+
+
+def _gated_runner(runner, p: Project, **kwargs: Any) -> None:
+    """Run a build under the global concurrency gate.
+
+    When all build slots are busy, the project is marked ``queued`` and this worker
+    thread blocks until a slot frees — so a small host never runs more heavy builds
+    at once than ``WORKSHOP_MAX_CONCURRENT_BUILDS``. The slot is always released, even
+    if the build raises, so a crash can't leak a permanently-held slot."""
+    if _BUILD_GATE is None:
+        runner(p, **kwargs)
+        return
+    if not _BUILD_GATE.acquire(blocking=False):
+        # Every slot busy → tell the user it's queued, then wait for one to free.
+        p.status = "queued"
+        _persist(p)
+        _emit(p, type="narrate",
+              text="⏳ All build slots are busy — queued. Starting as soon as one frees…")
+        _BUILD_GATE.acquire()
+    try:
+        runner(p, **kwargs)
+    finally:
+        _BUILD_GATE.release()
 
 
 def _run_factory(p: Project, resume: bool = False) -> None:
@@ -1451,7 +1494,7 @@ class Handler(BaseHTTPRequestHandler):
         if is_platform:
             p.platform_opts = _platform_opts(body)
         runner = _run_platform if is_platform else _run_factory
-        threading.Thread(target=runner, args=(p,), daemon=True).start()
+        threading.Thread(target=_gated_runner, args=(runner, p), daemon=True).start()
         self._json(200, {"id": pid, "floor": floor, "release": release_seq})
 
     def _decision(self, pid: str) -> None:

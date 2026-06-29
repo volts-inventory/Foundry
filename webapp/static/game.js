@@ -403,22 +403,18 @@ class FloorScene extends Phaser.Scene {
     };
     for (const key in ROOMS){
       const R = ROOMS[key]; if (R.virtual) continue;
-      const vault = key === "vault";
-      // Each room has ONE open passage (no doors). Normal rooms open at the BOTTOM
-      // centre; the VAULT is sealed except for a single TOP opening directly under the
-      // gate (next to the PASS sign) — so the only way in is down through gate/security.
-      const gx = vault ? Math.round(ROOMS.gate.cx) : Math.round(R.cx);
+      const cx = Math.round(R.cx);
+      // Openings (no doors — plain gaps): normal rooms open at the BOTTOM centre. The
+      // GATE also has a TOP entrance (from security above) so work flows security →
+      // gate → vault. The VAULT is sealed except a single TOP opening under the gate.
+      const topGap = key==="gate" ? cx : (key==="vault" ? Math.round(ROOMS.gate.cx) : null);
+      const botGap = key==="vault" ? null : cx;
       seg(R.x, R.y, T, R.h);                                   // left  (solid)
       seg(R.x1 - T, R.y, T, R.h);                              // right (solid)
-      if (vault){
-        seg(R.x, R.y1 - T, R.w, T);                            // bottom solid (sealed)
-        band(R.x, (gx - DOOR/2) - R.x, R.y);                   // banded top, left of gap
-        band(gx + DOOR/2, R.x1 - (gx + DOOR/2), R.y);          // banded top, right of gap
-      } else {
-        band(R.x, R.w, R.y);                                   // banded top (solid)
-        seg(R.x, R.y1 - T, (gx - DOOR/2) - R.x, T);            // bottom, left of gap
-        seg(gx + DOOR/2, R.y1 - T, R.x1 - (gx + DOOR/2), T);   // bottom, right of gap
-      }
+      if (topGap != null){ band(R.x, (topGap-DOOR/2)-R.x, R.y); band(topGap+DOOR/2, R.x1-(topGap+DOOR/2), R.y); }
+      else band(R.x, R.w, R.y);                                // banded top (solid or split)
+      if (botGap != null){ seg(R.x, R.y1-T, (botGap-DOOR/2)-R.x, T); seg(botGap+DOOR/2, R.y1-T, R.x1-(botGap+DOOR/2), T); }
+      else seg(R.x, R.y1 - T, R.w, T);                         // bottom (solid or split)
     }
   }
 
@@ -973,7 +969,14 @@ class FloorScene extends Phaser.Scene {
                      ease:"Sine.out", onComplete:()=>t.destroy()});
   }
   setActiveRoom(key){
+    const prev = this.activeRoom;
     this.activeRoom = key;
+    // When the build advances to the NEXT phase, a worker from the finished room carries
+    // the "work" over to the new room (the handoff). Only on a forward phase boundary.
+    const SEQ = ["product","architecture","engineering","qa","security","gate","vault"];
+    const ph = (k)=> (ENG_ROOMS.includes(k)||k==="engineering") ? "engineering" : k;
+    const oi = SEQ.indexOf(ph(prev)), ni = SEQ.indexOf(ph(key));
+    if (oi >= 0 && ni > oi) this.deliverWork(prev, key);
     // "engineering" is a virtual stage — light up all its discipline rooms.
     const lit = (k)=> k===key || (key==="engineering" && ENG_ROOMS.includes(k));
     for (const k in this.roomGlow)
@@ -985,6 +988,32 @@ class FloorScene extends Phaser.Scene {
     if (R && TEAM[key]) this.walkCTO(R.cx, R.standY);
     else if (this.lobby) this.walkCTO(this.lobby.cx, this.lobby.standY);   // gate/vault/none → office
     this.staffRoom(key);                 // everyone stays at their own desk; active room glows
+  }
+
+  // A worker from the just-finished phase carries the "work" package to the next
+  // phase's room, drops it (a pickup pops there), then heads back and leaves.
+  deliverWork(fromKey, toKey){
+    const rk = (k)=> k==="engineering" ? "backend" : k;     // virtual eng → a real room
+    const A = ROOMS[rk(fromKey)], B = ROOMS[rk(toKey)];
+    if (!A || !B || this._dead) return;
+    const ax = Math.round(A.cx), ay = Math.round(A.standY);
+    const runner = this.makePerson(ax, ay, poolKit(4));
+    runner.setScale(1.2).setDepth(945); runner.fixedDepth = 945;   // stays on top while crossing
+    const pkg = this.add.container(0,-17);                          // the "work" carried in hand
+    pkg.add(this.add.rectangle(0,0,12,9,0xffcf52).setStrokeStyle(1,0x7a5028));
+    pkg.add(this.add.rectangle(0,-1,12,2,0xfff0a8));
+    pkg.add(this.add.rectangle(0,0,2,9,0xc89b2e));
+    runner.add(pkg);
+    this.floatText(ax, ay-26, "→ "+(B.label||"next"), "#ffe6a0", 10);   // sets off with the work
+    this.walkTo(runner, Math.round(B.cx), Math.round(B.standY), ()=>{
+      if (this._dead){ runner.destroy(); return; }
+      this.burst(B.cx, B.standY-10, [0xffcf52,0xffffff], 10);
+      this.floatText(B.cx, B.standY-26, "✦ work delivered", "#ffe6a0", 10);
+      if (pkg) pkg.destroy();
+      // brief beat at the destination, then head back and leave
+      this.time.delayedCall(600, ()=>{ if (this._dead){ runner.destroy(); return; }
+        this.walkTo(runner, ax, ay, ()=>{ runner.destroy(); }); });
+    });
   }
 
   // ---- movement: desks <-> lounge -----------------------------------------

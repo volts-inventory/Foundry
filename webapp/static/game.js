@@ -570,16 +570,18 @@ class FloorScene extends Phaser.Scene {
     };
     c.add(this.add.ellipse(0,3,18,5,PC.shadow,0.22));                                   // contact shadow on the floor
     if (kind==="plant"){
-      // potted "corn plant" — a tan pot with a fan of tall green blades (GBA style)
-      out(0,0,13,9,0xcf8a46);                                   // wide tan pot
-      c.add(this.add.rectangle(0,-8,13,2,0xa86a2c).setOrigin(0.5,1));  // pot rim shadow
-      const blade=(bx,by,h,col)=>{
-        c.add(this.add.rectangle(bx,by,3,h,0x1f6e3a).setOrigin(0.5,1));   // blade outline
-        c.add(this.add.rectangle(bx,by-0.5,1.6,h-1,col).setOrigin(0.5,1)); };
-      blade(-9,-7,13,0x2f8f4e); blade(9,-7,13,0x2f8f4e);        // outer fronds
-      blade(-5,-7,21,0x37a85c); blade(5,-7,21,0x37a85c);        // mid fronds
-      blade(0,-7,28,0x44bf6a);                                   // centre frond
-      c.add(this.add.rectangle(0,-32,2,6,0x66d98a).setOrigin(0.5,1)); // tip highlight
+      // potted plant — terracotta pot (rim + soil) and a fan of SHAPED tapering leaf
+      // blades (each a 2-tone triangle), splaying out and up. Drawn back-to-front.
+      const leaf=(bx,tipx,tipy,col)=>{
+        c.add(this.add.triangle(0,0, bx-3,-9, bx+3,-9, bx+tipx, tipy, shade(col,0.7)));   // dark edge
+        c.add(this.add.triangle(0,0, bx-2,-9, bx+1,-9, bx+tipx-1, tipy+1, col));          // lit inner
+      };
+      leaf(-4,-9,-19,0x2f8f4e); leaf(4,9,-19,0x2f8f4e);         // outer (splay down-out)
+      leaf(-2,-3,-30,0x37a85c); leaf(2,3,-30,0x37a85c);         // mid
+      leaf(0,0,-37,0x4cc06f);                                    // centre (tall)
+      out(0,0,15,8,0xcf8a46);                                   // pot body (over blade bases)
+      c.add(this.add.rectangle(0,-7,17,3,0xe0a05a).setOrigin(0.5,1));  // pot rim (overhang)
+      c.add(this.add.rectangle(0,-9,12,2,0x5e3b1e).setOrigin(0.5,1));  // soil
     } else if (kind==="monitor"){
       out(0,0,6,10,0x2a3550); out(0,-9,26,18,0x10151f);
       c.add(this.add.rectangle(0,-11,20,12,0x2bd3ff,0.85).setOrigin(0.5,1)); // glowing screen
@@ -587,11 +589,24 @@ class FloorScene extends Phaser.Scene {
       out(0,0,46,14,0x6b4a2c); out(-16,-12,10,12,0x10151f); // desk + small monitor
       c.add(this.add.rectangle(-16,-14,7,7,0x7dffb0,0.8).setOrigin(0.5,1));
     } else if (kind==="rack"){
-      out(0,0,26,40,0x1b2233);
-      for(let i=0;i<5;i++) c.add(this.add.rectangle(8,-6-i*7,6,3,i%2?0x5ddc7a:0xffd95e).setOrigin(0.5,1));
+      out(0,0,28,42,0x2a3040);                                  // server cabinet (dark steel)
+      c.add(this.add.rectangle(0,-2,22,1,0x4a5266).setOrigin(0.5,1));            // door seam
+      for(let r=0;r<5;r++){                                     // 5 rack units, each w/ LEDs
+        const sy=-5-r*7;
+        c.add(this.add.rectangle(0,sy,22,5,0x1a1f2b).setOrigin(0.5,1));          // unit face
+        c.add(this.add.rectangle(0,sy,22,1,0x3a4250).setOrigin(0.5,1));          // unit top edge
+        for(let i=0;i<3;i++) c.add(this.add.rectangle(-7+i*3,sy-2,1.6,1.6,[0x5ddc7a,0xffd95e,0xff6d6d][(r+i)%3]).setOrigin(0.5,1)); // LEDs
+        c.add(this.add.rectangle(8,sy-2,5,1.6,0x6a7488).setOrigin(0.5,1));       // drive slot
+      }
     } else if (kind==="shelf"){
-      out(0,0,34,30,0x5a4326);
-      for(let i=0;i<4;i++) c.add(this.add.rectangle(-12+i*8,-16,5,12,[0xff8fae,0x7fd1ff,0xffd95e,0x7dffb0][i]).setOrigin(0.5,1));
+      out(0,0,32,34,0x6b4a2c);                                  // wooden bookcase
+      const books=[0xd96a82,0x6fb8e0,0xe0b84a,0x6fcf86,0x9b86d0,0xd86a5a];
+      for(let r=0;r<3;r++){
+        const sy=-5-r*10;
+        c.add(this.add.rectangle(0,sy,28,1,0x4a3320).setOrigin(0.5,1));          // shelf board
+        for(let i=0;i<5;i++){ const bh=7+((i+r)%3); const bc=books[(r*5+i)%books.length];
+          c.add(this.add.rectangle(-11+i*5,sy-1,4,bh,bc).setOrigin(0.5,1).setStrokeStyle(1,shade(bc,0.6))); } // books (varied height)
+      }
     } else if (kind==="board"){
       out(0,-4,42,4,0x7a5028);                                   // wooden frame base
       out(0,-6,38,24,0xd8b87a);                                  // tan corkboard
@@ -627,18 +642,29 @@ class FloorScene extends Phaser.Scene {
       this.tweens.add({targets:scr, fillAlpha:{from:0.45,to:0.8}, duration:700+Math.abs(Math.round(x))%500,
         yoyo:true, repeat:-1, ease:"Sine.inOut"});                // flicker
     } else if (kind==="vending"){
-      out(0,0,26,46,0xe6b733);                                  // yellow machine body
-      c.add(this.add.rectangle(0,-26,18,30,0x1f5fc0).setOrigin(0.5,1));          // blue display
-      c.add(this.add.rectangle(0,-26,18,30,0x66a8ff,0.35).setOrigin(0.5,1));     // glass sheen
-      for(let i=0;i<3;i++) for(let j=0;j<2;j++)
-        c.add(this.add.rectangle(-6+i*6,-30+j*12,4,7,[0xff5d6c,0x5ddc7a,0xffd95e,0xff8fae,0x7fd1ff,0xffa54a][i+j*3]).setOrigin(0.5,1)); // cans
-      c.add(this.add.rectangle(7,-9,8,5,0x14304f).setOrigin(0.5,1));             // dispenser slot
+      out(0,0,28,48,0xe6b733);                                  // yellow cabinet
+      c.add(this.add.rectangle(0,-25,24,34,PC.sceneInk).setOrigin(0.5,1));       // display frame
+      c.add(this.add.rectangle(0,-26,20,30,0x1f5fc0).setOrigin(0.5,1));          // blue interior
+      const cans=[0xff5d6c,0x5ddc7a,0xffd95e,0xff8fae,0x7fd1ff,0xffa54a,0xff6d6d,0x6fcf86,0xffd95e];
+      for(let r=0;r<3;r++){                                     // three shelves of cans
+        c.add(this.add.rectangle(0,-27-r*9,20,1,0x14406f).setOrigin(0.5,1));     // shelf line
+        for(let i=0;i<3;i++) c.add(this.add.rectangle(-6+i*6,-29-r*9,4,6,cans[r*3+i]).setOrigin(0.5,1).setStrokeStyle(1,0x14406f));
+      }
+      c.add(this.add.rectangle(-3,-26,8,30,0xbfe0ff,0.16).setOrigin(0.5,1));     // glass sheen
+      c.add(this.add.rectangle(9,-32,4,6,0xb0851e).setOrigin(0.5,1));            // coin/button panel
+      c.add(this.add.rectangle(0,-5,18,6,PC.sceneInk).setOrigin(0.5,1));         // dispenser tray
+      c.add(this.add.rectangle(0,-6,14,3,0x14406f).setOrigin(0.5,1));            // tray mouth
     } else if (kind==="counter"){
-      out(0,0,58,15,0xeae0c4);                                  // cream reception counter
-      c.add(this.add.rectangle(0,-13,58,3,0xd6473f).setOrigin(0.5,1));           // red trim band
-      out(-16,-15,16,12,0x3a4660);                              // monitor on the counter
-      c.add(this.add.rectangle(-16,-17,11,7,0x5ddc7a,0.92).setOrigin(0.5,1));    // green screen
-      c.add(this.add.rectangle(16,-6,8,5,0xff8fae).setOrigin(0.5,1));            // a Poké-ball-ish tray
+      out(0,0,58,12,0xe6dcc0);                                  // cream counter front
+      c.add(this.add.rectangle(0,-12,62,5,0xf2ead2).setOrigin(0.5,1));           // top surface (overhang)
+      c.add(this.add.rectangle(0,-16,62,1,0xfff8e8).setOrigin(0.5,1));           // top edge highlight
+      c.add(this.add.rectangle(0,-12,62,1,PC.sceneInk).setOrigin(0.5,1));        // seam under top
+      c.add(this.add.rectangle(0,-7,58,2,0xd6473f).setOrigin(0.5,1));            // red trim band
+      c.add(this.add.rectangle(-19,-1,1,9,0xcdbf9c).setOrigin(0.5,1)); c.add(this.add.rectangle(19,-1,1,9,0xcdbf9c).setOrigin(0.5,1)); // panel seams
+      c.add(this.add.rectangle(-16,-15,3,3,0x5a5650).setOrigin(0.5,1));          // terminal stand
+      out(-16,-17,15,11,0x3a4660);                              // terminal bezel
+      c.add(this.add.rectangle(-16,-19,11,7,0x5ddc7a,0.95).setOrigin(0.5,1));    // green screen
+      c.add(this.add.rectangle(16,-15,9,4,0xff8fae).setOrigin(0.5,1).setStrokeStyle(1,0xc05070)); // tray
     } else if (kind==="stool"){
       c.add(this.add.rectangle(0,-2,5,6,0xb05f24).setOrigin(0.5,1));            // post/leg
       c.add(this.add.ellipse(0,-6,15,7,0x9c4a1c).setOrigin(0.5,1));             // seat rim (dark)

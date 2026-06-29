@@ -1228,14 +1228,12 @@ class FloorScene extends Phaser.Scene {
     const units={}; list.forEach(a=>units[a]=0);
     for(const d of (this.orgDomains||[]))
       if(d && (d.area in units)) units[d.area] += (d.units&&d.units.length)?d.units.length:0;
-    // The POOL is the max number of workers on the floor. One lead per area-group is
-    // required and is drawn FROM the pool first; the slots that remain are ICs that
-    // scale with demand until the pool is full. So every body on screen is one real
-    // slot — leads + ICs never exceed the pool (poolN), and a light ask leaves the
-    // pool partly unfilled rather than inventing workers.
-    const groups=list.length;                              // 1 lead per group, required
-    const cap=Math.max(groups, this.poolN||groups);        // total worker budget (leads INCLUDED)
-    const icSlots=Math.max(0, cap-groups);                 // slots left after reserving the leads
+    // Each role gets ONE required worker (its lead persona) — the always-on baseline.
+    // On TOP of that sits the EXTRA pool (poolN): the additional workers we can afford,
+    // which management hands out across roles by demand, deploying only as many as the
+    // work needs. So total crew = (1 per role) + min(demand, extra budget): the baseline
+    // grows on its own as the architect adds teams, and the extra number is what you set.
+    const icSlots=Math.max(0, this.poolN||0);              // extra worker budget (on top of 1/role)
     const dem=list.map(a=>Math.max(0, units[a]));
     const totalDem=dem.reduce((s,n)=>s+n,0);
     const ics={}; list.forEach(a=>ics[a]=0);
@@ -2054,10 +2052,12 @@ document.getElementById("start-btn").onclick=async ()=>{
   const backend=document.getElementById("backend-select").value;
   const packs=document.getElementById("packs-input").value;
   const sup=document.getElementById("supervised").checked;
-  // Parallelism is system-decided — the server sizes the IC pool to the lead's
-  // decomposition; the client sends no worker count.
   const extra={};
   extra.adapter=document.getElementById("adapter-select").value;
+  // Extra workers: the pool ON TOP of one-per-team. Blank ⇒ the server's automatic
+  // cap. Each role always gets its baseline worker; these scale the busy teams.
+  const xw=parseInt((document.getElementById("extra-workers")||{}).value,10);
+  if(Number.isFinite(xw) && xw>=0) extra.max_slots=xw;
   const fix=parseInt(document.getElementById("fix-input").value,10);
   if(Number.isFinite(fix) && fix>=0) extra.max_fix_attempts=fix;
   const cap=parseFloat(document.getElementById("cap-input").value);

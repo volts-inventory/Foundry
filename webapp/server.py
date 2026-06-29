@@ -808,8 +808,11 @@ def _run_platform(p: Project) -> None:
     domains = [{"owner": a, "area": a, "units": area_units[a]} for a in order]
     first_room = role_room.get(plan.services[0].role, "backend") if plan.services else "backend"
 
+    # The floor's "extra workers" pool = the user's setting (p.max_slots), so the same
+    # knob drives platform and single builds. Each discipline room still gets its one
+    # baseline worker; these extras are shared out across the rooms by demand.
     _emit(p, type="project", request=p.request, mode=p.mode, backend=p.backend,
-          slots=max(3, len(plan.services) + 2))
+          slots=p.max_slots)
     _emit(p, type="org", areas=areas, domains=domains)
     _emit(p, type="active", room=first_room)   # seat everyone; first discipline works
     _emit(p, type="narrate", text=f"🏗  Platform build — {p.request}")

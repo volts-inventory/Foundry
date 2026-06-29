@@ -311,17 +311,16 @@ class AnthropicTransport:
     """
 
     def __init__(self, client: Any | None = None) -> None:
-        self._client = client
+        def _build() -> Any:
+            import anthropic
+            return anthropic.Anthropic()
+        self._cache = _ClientCache(_build, injected=client)
 
     def _ensure_client(self) -> Any:
-        if self._client is None:
-            import anthropic
-
-            self._client = anthropic.Anthropic()
-        return self._client
+        return self._cache.get()
 
     def send(self, request: dict[str, Any]) -> ProviderResponse:
-        response = self._ensure_client().messages.create(**request)
+        response = self._cache.run(lambda c: c.messages.create(**request))
         text = next(
             (block.text for block in response.content if block.type == "text"), ""
         )
@@ -391,6 +390,67 @@ def _int_env(name: str, default: int) -> int:
         return max(0, int(os.environ.get(name) or default))
     except (TypeError, ValueError):
         return default
+
+
+# Markers that mean "the credential was rejected" (vs a transient network blip). On
+# one of these the SDK client is dropped so the NEXT call rebuilds it — re-resolving
+# the credential, so a rotated key / refreshed token is picked up without a restart.
+_AUTH_ERROR_MARKERS = (
+    "unauthorized", "authentication", "invalid api key", "invalid x-api-key",
+    "expired", "credential", "401",
+)
+
+
+def _is_auth_error(exc: BaseException) -> bool:
+    """True when a transport error looks like a rejected/expired credential."""
+    status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+    if status == 401:
+        return True
+    if "authentication" in type(exc).__name__.lower():
+        return True
+    return any(m in str(exc).lower() for m in _AUTH_ERROR_MARKERS)
+
+
+class _ClientCache:
+    """Lazily build an SDK client and rebuild it after a TTL or on an auth error.
+
+    A multi-day run can outlive a credential (token expiry) or have its key rotated
+    underneath it. This cache rebuilds the client — re-resolving the credential —
+    when it goes stale (``FOUNDRY_CLIENT_TTL_S`` seconds, off by default) or right
+    after a call fails with an auth error. An injected client (tests) is used as-is
+    and never proactively refreshed."""
+
+    def __init__(self, factory: Callable[[], Any], *, ttl_s: float | None = None,
+                 clock: Callable[[], float] = time.monotonic,
+                 injected: Any | None = None) -> None:
+        self._factory = factory
+        self._client = injected
+        self._injected = injected is not None
+        self._clock = clock
+        self._built_at = clock() if injected is not None else 0.0
+        self._ttl = float(ttl_s if ttl_s is not None
+                          else _int_env("FOUNDRY_CLIENT_TTL_S", 0))
+
+    def get(self) -> Any:
+        now = self._clock()
+        stale = self._ttl > 0 and (now - self._built_at) >= self._ttl
+        if self._client is None or (stale and not self._injected):
+            self._client = self._factory()
+            self._built_at = now
+            self._injected = False
+        return self._client
+
+    def invalidate(self) -> None:
+        self._client = None
+        self._injected = False
+
+    def run(self, call: Callable[[Any], Any]) -> Any:
+        try:
+            return call(self.get())
+        except Exception as exc:
+            if _is_auth_error(exc):
+                self.invalidate()   # next call rebuilds → re-resolves the credential
+            raise
 
 
 def _classify_rate_limit(exc: BaseException) -> tuple[bool, float | None]:

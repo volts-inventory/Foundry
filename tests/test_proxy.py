@@ -594,6 +594,54 @@ def test_rate_limiter_paces_requests_per_minute():
     assert waits == [1.0]
 
 
+# ---- 5c. SDK client cache: TTL refresh + auth-error rebuild ---------------------
+
+
+def test_client_cache_rebuilds_after_ttl():
+    from foundry.proxy.model_provider_proxy import _ClientCache
+    clock = [0.0]
+    built: list[int] = []
+
+    def factory():
+        built.append(1)
+        return object()
+
+    cache = _ClientCache(factory, ttl_s=10.0, clock=lambda: clock[0])
+    a = cache.get()
+    assert cache.get() is a            # within TTL → same client, no rebuild
+    clock[0] = 11.0
+    b = cache.get()
+    assert b is not a and len(built) == 2   # past TTL → rebuilt
+
+
+def test_client_cache_rebuilds_after_auth_error():
+    from foundry.proxy.model_provider_proxy import _ClientCache
+    built: list[int] = []
+
+    def factory():
+        built.append(1)
+        return object()
+
+    cache = _ClientCache(factory)      # TTL off by default
+    first = cache.get()
+    with pytest.raises(Exception):
+        cache.run(lambda _c: (_ for _ in ()).throw(Exception("401 Unauthorized")))
+    second = cache.get()
+    assert second is not first and len(built) == 2   # auth error dropped the client
+
+
+def test_client_cache_keeps_injected_client_on_transient_error():
+    from foundry.proxy.model_provider_proxy import _ClientCache
+    sentinel = object()
+    cache = _ClientCache(lambda: object(), injected=sentinel, ttl_s=0.001,
+                         clock=lambda: 1e9)
+    # An injected client is never proactively refreshed, and a NON-auth error
+    # (a transient blip) leaves it in place for the retry layer to re-drive.
+    with pytest.raises(Exception):
+        cache.run(lambda _c: (_ for _ in ()).throw(ConnectionError("blip")))
+    assert cache.get() is sentinel
+
+
 # ---- 6. manifest: usage + cache metering ---------------------------------------
 
 

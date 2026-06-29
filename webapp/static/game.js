@@ -30,6 +30,8 @@ const GRID = {  // pipeline: product → architecture → engineering(FE/BE/DA) 
   frontend:[0,1], backend:[1,1], data:[2,1], gate:[3,1],
   vault:[3,2],                       // gate(3,1) sits directly above vault(3,2)
 };
+// Pipeline ORDER (the build sequence) — drives the order numerals + the flow path.
+const PIPELINE_ORDER = ["product","architecture","frontend","backend","data","qa","security","gate","vault"];
 // (0,2) = the LOUNGE (idle agents relax here); (1,2) = a decorative ENTRANCE /
 // lobby (the org chart on the wall + where the CTO greets). No work happens in either.
 const LOUNGE_CELL = [0,2], ENTRANCE_CELL = [1,2];
@@ -43,6 +45,10 @@ const RBASE = {
   security:{label:"SECURITY",color:0x5a2e36},
   gate:{label:"GATE",color:0x2c4a55}, vault:{label:"VAULT",color:0x5a4a18},
 };
+// Build-order numeral per room (engineering's 3 rooms share stage 3 — they run in
+// parallel; support rooms have none).
+const ORDER_NO = {product:1, architecture:2, frontend:3, backend:3, data:3,
+                  qa:4, security:5, gate:6, vault:7};
 const ROOMS = {};
 for (const k in RBASE) ROOMS[k] = Object.assign({}, RBASE[k], cellBox(GRID[k][0], GRID[k][1]));
 // Virtual "engineering" region = bbox over the discipline rooms. NOT drawn (virtual),
@@ -53,6 +59,10 @@ for (const k in RBASE) ROOMS[k] = Object.assign({}, RBASE[k], cellBox(GRID[k][0]
   const x1=Math.max(...rs.map(r=>r.x+r.w)), y1=Math.max(...rs.map(r=>r.y+r.h));
   ROOMS.engineering = {label:"ENGINEERING", color:0x5a3a2e, virtual:true, x:x0, y:y0, w:x1-x0, h:y1-y0};
 })();
+// The VAULT is the shipped-artifact destination — give it prominence by spanning the
+// bottom-right two cells (fills the corner with REAL content; it's the prize room, not filler).
+(function(){ const a = cellBox(2,2), b = cellBox(3,2);
+  Object.assign(ROOMS.vault, {x:a.x, y:a.y, w:(b.x + b.w) - a.x, h:a.h}); })();
 const ROOM_ORDER = ["product","architecture","frontend","backend","data","qa","security","gate","vault"];
 const TINT = {security:[0xff6d6d,0.05], gate:[0x6aa0ff,0.05], vault:[0xffd25a,0.06]};
 // the "#": centre-lines of the walkway aisles between columns / rows (generated)
@@ -321,12 +331,49 @@ class FloorScene extends Phaser.Scene {
       this.roomGlyph(key, R.cx-sw/2+5, R.y+8);   // dept identity glyph (white, shape — not just hue)
       this.add.text(R.cx+4, R.y+8, R.label, {fontFamily:"'PixelFont','Courier New',monospace",
         fontSize:"10px", fontStyle:"bold", color:"#eef3ff"}).setOrigin(0.5,0).setDepth(4);
+      // build-order numeral badge (top-left of the room) so the PIPELINE order reads
+      const no = ORDER_NO[key];
+      if (no != null){
+        const bx = R.x+13, by = R.y+15;
+        this.add.circle(bx, by, 8, 0x0e1422, 0.95).setStrokeStyle(2, shade(R.color,1.5)).setDepth(4);
+        this.add.text(bx, by, String(no), {fontFamily:"'PixelFont','Courier New'",
+          fontSize:"10px", fontStyle:"bold", color:"#ffe6a0"}).setOrigin(0.5).setDepth(5);
+      }
       this.roomGlow[key] = this.add.rectangle(R.x, R.y, R.w, R.h, 0xffd25a, 0).setOrigin(0,0).setDepth(1);
     }
+    this.buildWalls();                            // interior walls + doorways — a real floor plan
     this.decorateFloor();
     this.furnish();
     this.buildAtmosphere();                       // vignette + dust motes on top
     this.setActiveRoom("lobby");
+  }
+
+  // Interior WALLS around each room (with doorways) so the floor reads as a real
+  // building's plan, not rugs on open space. Walls sit below the agents (depth 4)
+  // so people always render in front; doorways open onto the corridors.
+  buildWalls(){
+    const T = 4, DOOR = 34;          // wall thickness, doorway width
+    const seg = (x, y, w, h, c, hi) => {
+      if (w <= 0 || h <= 0) return;
+      this.add.rectangle(x, y, w, h, c).setOrigin(0, 0).setDepth(4);
+      this.add.rectangle(x, y, w, Math.min(2, h), hi).setOrigin(0, 0).setDepth(4);   // top bevel
+    };
+    const WALL = 0x1b2336, BEVEL = 0x34425f;   // one structural material for every wall
+    for (const key in ROOMS){
+      const R = ROOMS[key]; if (R.virtual) continue;
+      const c = WALL, hi = BEVEL;
+      const dx = Math.round(R.cx), dy = Math.round(R.cy);
+      // top + left are solid; bottom + right carry a centred doorway onto the corridor
+      seg(R.x, R.y, R.w, T, c, hi);                                   // top
+      seg(R.x, R.y, T, R.h, c, hi);                                   // left
+      seg(R.x, R.y1 - T, (dx - DOOR / 2) - R.x, T, c, hi);            // bottom (left of door)
+      seg(dx + DOOR / 2, R.y1 - T, R.x1 - (dx + DOOR / 2), T, c, hi); // bottom (right of door)
+      seg(R.x1 - T, R.y, T, (dy - DOOR / 2) - R.y, c, hi);            // right (above door)
+      seg(R.x1 - T, dy + DOOR / 2, T, R.y1 - (dy + DOOR / 2), c, hi); // right (below door)
+      // door jamb posts (a brighter nub each side of the openings)
+      const post = (x, y) => this.add.rectangle(x, y, T, 3, hi).setOrigin(0, 0).setDepth(4);
+      post(dx - DOOR / 2 - T, R.y1 - T); post(dx + DOOR / 2, R.y1 - T);
+    }
   }
 
   // A ~10px WHITE department glyph on the plaque so rooms are identifiable by SHAPE
@@ -366,13 +413,15 @@ class FloorScene extends Phaser.Scene {
     cloud(160,18,90,0.5); cloud(520,30,130,0.4); cloud(900,14,80,0.5);
   }
 
-  drawFlowPath(){   // faint dotted line winding through the build order
-    const g = this.add.graphics().setDepth(0); g.lineStyle(2, 0xffcf52, 0.16);
-    let started = false;
-    for (const k of ROOM_ORDER){ const R = ROOMS[k]; if(!R) continue;
-      if (!started){ g.beginPath(); g.moveTo(R.cx, R.cy); started = true; } else g.lineTo(R.cx, R.cy);
-    }
+  drawFlowPath(){   // faint guide line through the build STAGES (engineering as one waypoint)
+    const stages = ["product","architecture","engineering","qa","security","gate","vault"];
+    const pts = stages.map(k=>ROOMS[k]).filter(Boolean).map(R=>({x:R.cx, y:R.cy}));
+    const g = this.add.graphics().setDepth(0); g.lineStyle(2, 0xffcf52, 0.18);
+    g.beginPath(); g.moveTo(pts[0].x, pts[0].y);
+    for (let i=1;i<pts.length;i++) g.lineTo(pts[i].x, pts[i].y);
     g.strokePath();
+    // a small arrowhead dot at each stage so the DIRECTION of the flow reads
+    for (const pt of pts) this.add.circle(pt.x, pt.y, 2.5, 0xffcf52, 0.3).setDepth(0);
   }
 
   decorateFloor(){   // ORDERLY, grid-aligned decor along the corridors

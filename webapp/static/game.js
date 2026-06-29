@@ -199,6 +199,8 @@ function buildSharedTextures(scene){
     g.fillStyle(alt,1);  g.fillRect(20,0,20,20); g.fillRect(0,20,20,20);            // checker
     g.fillStyle(PC.roomSeam,1); g.fillRect(0,0,40,1); g.fillRect(0,0,1,40);          // tile seams
     g.fillStyle(PC.roomSeam,1); g.fillRect(20,0,1,40); g.fillRect(0,20,40,1);
+    g.fillStyle(shade(base,1.05),1); g.fillRect(7,6,2,2); g.fillRect(27,25,2,2);     // light fleck
+    g.fillStyle(PC.roomSeam,1);      g.fillRect(31,9,2,2); g.fillRect(11,31,2,2);     // dark fleck
     g.generateTexture(tkey,40,40); g.destroy();
   }
   // Per-room interior wall tile: cream face with a shaded lower course + bright top.
@@ -221,6 +223,8 @@ function buildSharedTextures(scene){
     g.fillStyle(PC.floorAlt,1); g.fillRect(20,0,20,20); g.fillRect(0,20,20,20);     // checker
     g.fillStyle(PC.floorSeam,1);
     g.fillRect(0,0,40,1); g.fillRect(0,0,1,40); g.fillRect(20,0,1,40); g.fillRect(0,20,40,1);
+    g.fillStyle(shade(PC.floor,1.10),1); g.fillRect(6,6,3,3); g.fillRect(26,26,3,3);   // tile sheen
+    g.fillStyle(shade(PC.floorAlt,0.9),1); g.fillRect(30,8,2,2); g.fillRect(10,30,2,2); // grain
     g.generateTexture("floor_base",40,40); g.destroy();
   }
   // Perimeter wall: cream brick course (the building's outer wall).
@@ -345,17 +349,17 @@ class FloorScene extends Phaser.Scene {
       // room trim: an accent outer band + a soft cream inner line
       this.add.rectangle(R.x, R.y, R.w, R.h).setOrigin(0,0).setStrokeStyle(3, accent).setDepth(1);
       this.add.rectangle(R.x+4, R.y+4, R.w-8, R.h-8).setOrigin(0,0).setStrokeStyle(1, PC.roomSeam).setDepth(1);
-      // floating label plaque (navy signpost: cream label + accent dot)
+      // label placard — hangs just BELOW the banded top wall (drawn in buildWalls)
       const sw = Math.min(R.w-12, R.label.length*7+22);
-      this.add.rectangle(R.cx, R.y+6, sw, 16, PC.ink, 0.96).setOrigin(0.5,0).setDepth(3).setStrokeStyle(2, accent);
-      this.add.rectangle(R.cx, R.y+6, sw, 2, mix(accent,0xffffff,0.4)).setOrigin(0.5,0).setDepth(4);
-      this.roomGlyph(key, R.cx-sw/2+5, R.y+8);   // dept identity glyph (white, shape — not just hue)
-      this.add.text(R.cx+4, R.y+8, R.label, {fontFamily:"'PixelFont','Courier New',monospace",
+      this.add.rectangle(R.cx, R.y+17, sw, 16, PC.ink, 0.96).setOrigin(0.5,0).setDepth(3).setStrokeStyle(2, accent);
+      this.add.rectangle(R.cx, R.y+17, sw, 2, mix(accent,0xffffff,0.4)).setOrigin(0.5,0).setDepth(4);
+      this.roomGlyph(key, R.cx-sw/2+5, R.y+19);   // dept identity glyph (white, shape — not just hue)
+      this.add.text(R.cx+4, R.y+19, R.label, {fontFamily:"'PixelFont','Courier New',monospace",
         fontSize:"10px", fontStyle:"bold", color:"#fbf3df"}).setOrigin(0.5,0).setDepth(4);
-      // build-order numeral badge (top-left of the room) so the PIPELINE order reads
+      // build-order numeral badge (just below the band, left side) so the PIPELINE order reads
       const no = ORDER_NO[key];
       if (no != null){
-        const bx = R.x+13, by = R.y+15;
+        const bx = R.x+13, by = R.y+25;
         this.add.circle(bx, by, 8, PC.stripe, 0.98).setStrokeStyle(2, PC.wallHi).setDepth(4);
         this.add.text(bx, by, String(no), {fontFamily:"'PixelFont','Courier New'",
           fontSize:"10px", fontStyle:"bold", color:"#fff4e0"}).setOrigin(0.5).setDepth(5);
@@ -373,30 +377,41 @@ class FloorScene extends Phaser.Scene {
   // building's plan, not rugs on open space. Walls sit below the agents (depth 4)
   // so people always render in front; doorways open onto the corridors.
   buildWalls(){
-    const T = 7, DOOR = 34;          // wall thickness (chunky), doorway width
+    const T = 6, DOOR = 34, BAND = 14;   // side-wall thickness, doorway, banded top-wall height
     const FACE = PC.wall, CAP = PC.wallHi, BASE = PC.wallShade, EDGE = 0x2b2f45; // cream + navy outline
-    // A raised GBA wall: dark outline behind, cream face, bright top cap, shadowed base.
+    const WHITE = 0xfff8e8;
+    const R0 = (x,y,w,h,c,a)=> this.add.rectangle(x,y,w,h,c,a==null?1:a).setOrigin(0,0).setDepth(4);
+    // Plain cream side wall: navy outline, cream face, lit cap, shadowed base.
     const seg = (x, y, w, h) => {
       if (w <= 0 || h <= 0) return;
-      this.add.rectangle(x-1, y-1, w+2, h+2, EDGE).setOrigin(0,0).setDepth(4);          // crisp outline
-      this.add.rectangle(x, y, w, h, FACE).setOrigin(0,0).setDepth(4);                  // cream face
-      this.add.rectangle(x, y, w, Math.min(2,h), CAP).setOrigin(0,0).setDepth(4);       // lit top cap
-      if (h > 4) this.add.rectangle(x, y+h-2, w, 2, BASE).setOrigin(0,0).setDepth(4);    // base shadow
-      if (w > 4) this.add.rectangle(x+w-2, y, 2, h, BASE).setOrigin(0,0).setDepth(4);    // right shadow
+      R0(x-1, y-1, w+2, h+2, EDGE); R0(x, y, w, h, FACE);
+      R0(x, y, w, Math.min(2,h), CAP);
+      if (h > 4) R0(x, y+h-2, w, 2, BASE);
+      if (w > 4) R0(x+w-2, y, 2, h, BASE);
+    };
+    // Pokémon-Center top wall: a banded cream wall with a white-bordered PINK STRIPE
+    // running through it and a dark baseboard where it meets the floor.
+    const band = (x, w) => (y) => {
+      R0(x-1, y-1, w+2, BAND+2, EDGE);          // outline box
+      R0(x, y,    w, 5, FACE);  R0(x, y, w, 1, CAP);   // cream upper + lit cap
+      R0(x, y+5,  w, 1, WHITE);                         // white pinline
+      R0(x, y+6,  w, 3, PC.stripe); R0(x, y+6, w, 1, PC.stripeHi);  // pink stripe + highlight
+      R0(x, y+9,  w, 1, WHITE);                         // white pinline
+      R0(x, y+10, w, 3, FACE);                          // cream lower
+      R0(x, y+13, w, 1, BASE);                          // baseboard shadow
     };
     for (const key in ROOMS){
       const R = ROOMS[key]; if (R.virtual) continue;
       const dx = Math.round(R.cx), dy = Math.round(R.cy);
-      // top + left are solid; bottom + right carry a centred doorway onto the corridor
-      seg(R.x, R.y, R.w, T);                                   // top
+      // side + bottom are plain cream walls (drawn first); the banded top sits over them
       seg(R.x, R.y, T, R.h);                                   // left
       seg(R.x, R.y1 - T, (dx - DOOR / 2) - R.x, T);            // bottom (left of door)
       seg(dx + DOOR / 2, R.y1 - T, R.x1 - (dx + DOOR / 2), T); // bottom (right of door)
       seg(R.x1 - T, R.y, T, (dy - DOOR / 2) - R.y);            // right (above door)
       seg(R.x1 - T, dy + DOOR / 2, T, R.y1 - (dy + DOOR / 2)); // right (below door)
-      // door jambs: a navy post + bright nub framing each opening (reads as a real frame)
-      const jamb = (x, y, w, h) => { this.add.rectangle(x, y, w, h, EDGE).setOrigin(0,0).setDepth(5);
-        this.add.rectangle(x, y, w, 2, CAP).setOrigin(0,0).setDepth(5); };
+      band(R.x, R.w)(R.y);                                     // banded striped TOP wall
+      // door jambs: a navy post framing each corridor opening
+      const jamb = (x, y, w, h) => { R0(x, y, w, h, EDGE); R0(x, y, w, Math.min(2,h), CAP); };
       jamb(dx - DOOR/2 - 2, R.y1 - T, 2, T); jamb(dx + DOOR/2, R.y1 - T, 2, T);   // bottom doorway
       jamb(R.x1 - T, dy - DOOR/2 - 2, T, 2); jamb(R.x1 - T, dy + DOOR/2, T, 2);   // right doorway
     }
@@ -453,16 +468,26 @@ class FloorScene extends Phaser.Scene {
 
   decorateFloor(){   // ORDERLY, grid-aligned decor along the corridors
     const P=(k,x,y)=>this.makeProp(k, x, y);
+    // Pokémon-style warp mats: a flat cyan diamond on the floor at each room doorway.
+    const warp=(x,y)=>{
+      this.add.rectangle(x,y,22,22,0x29657f).setAngle(45).setDepth(1);   // dark rim
+      this.add.rectangle(x,y,15,15,0x5cc6e0).setAngle(45).setDepth(1);   // cyan
+      this.add.rectangle(x,y,7,7,0xeafcff).setAngle(45).setDepth(1);     // light centre
+    };
+    for (const key in ROOMS){ const R=ROOMS[key]; if(R.virtual) continue;
+      warp(Math.round(R.cx), R.y1-3); }                                  // at each bottom doorway
     // a potted plant at each of the 4 corridor intersections of the "#"
     for (const x of AISLE_VX) for (const y of AISLE_HY) P("plant", x, y+6);
-    // a water cooler tucked at each corridor mouth (symmetric)
-    P("cooler", AISLE_VX[0], WALL_TOP+24); P("cooler", AISLE_VX[1], WALL_TOP+24);
+    // a vending machine + cooler at the corridor mouths (colour pop, symmetric)
+    P("vending", AISLE_VX[0], WALL_TOP+30); P("cooler", AISLE_VX[1], WALL_TOP+24);
+    P("vending", AISLE_VX[2], WALL_TOP+30);
     // the LOUNGE (bottom-left): couch, TV, coffee table, water cooler — where idle
     // leads sit, nap and mill about between stages (see loungeArrive / mill).
     const L = cellBox(LOUNGE_CELL[0], LOUNGE_CELL[1]);
     this.add.text(L.x+L.w/2, L.y+8, "LOUNGE", {fontFamily:"'PixelFont','Courier New',monospace",
       fontSize:"10px", color:"#8aa0c8"}).setOrigin(0.5,0).setDepth(4);
     P("couch", L.x+44, L.y+L.h-30); P("ctable", L.x+44, L.y+L.h-6);
+    P("stool", L.x+18, L.y+L.h-8); P("stool", L.x+72, L.y+L.h-8);   // round stools
     P("tv", L.x+L.w-44, L.y+50); P("cooler", L.x+L.w-28, L.y+L.h-14);
     P("plant", L.x+22, L.y+48);
     // the ENTRANCE (bottom-centre): a purely decorative lobby — welcome mat, plants,
@@ -474,6 +499,7 @@ class FloorScene extends Phaser.Scene {
       .setStrokeStyle(2, 0x3e4a68);
     this.add.text(E.x+E.w/2, E.y+E.h-16, "WELCOME",
       {fontFamily:"'PixelFont','Courier New'",fontSize:"7px",color:"#8aa0c8"}).setOrigin(0.5).setDepth(1);
+    P("counter", E.cx, E.y+E.h-44); P("stool", E.cx-22, E.y+E.h-30); P("stool", E.cx+22, E.y+E.h-30);
     P("plant", E.x+24, E.y+E.h-20); P("plant", E.x+E.w-24, E.y+E.h-20);
   }
 
@@ -525,12 +551,16 @@ class FloorScene extends Phaser.Scene {
       c.add(this.add.rectangle(rx,ry-1,w,1,shade(col,0.6)).setOrigin(0.5,1));     // base shadow
     };
     if (kind==="plant"){
-      const v = Math.abs(Math.round(x))%3;
-      out(0,0,8,12,0x6a4a2a);                                   // pot (now top-lit by `out`)
-      if (v===0){ out(0,-10,18,16,0x2f8f4e); out(-4,-18,10,12,0x37a85c); }     // bushy
-      else if (v===1){ out(0,-12,12,22,0x2f8f4e); out(0,-24,8,10,0x37a85c); }  // tall
-      else { out(0,-9,22,12,0x2f8f4e); out(2,-15,10,8,0x37a85c); }             // round
-      c.add(this.add.rectangle(-4,-13,2,7,shade(0x37a85c,1.35)).setOrigin(0.5,1)); // leaf highlight
+      // potted "corn plant" — a tan pot with a fan of tall green blades (GBA style)
+      out(0,0,13,9,0xcf8a46);                                   // wide tan pot
+      c.add(this.add.rectangle(0,-8,13,2,0xa86a2c).setOrigin(0.5,1));  // pot rim shadow
+      const blade=(bx,by,h,col)=>{
+        c.add(this.add.rectangle(bx,by,3,h,0x1f6e3a).setOrigin(0.5,1));   // blade outline
+        c.add(this.add.rectangle(bx,by-0.5,1.6,h-1,col).setOrigin(0.5,1)); };
+      blade(-9,-7,13,0x2f8f4e); blade(9,-7,13,0x2f8f4e);        // outer fronds
+      blade(-5,-7,21,0x37a85c); blade(5,-7,21,0x37a85c);        // mid fronds
+      blade(0,-7,28,0x44bf6a);                                   // centre frond
+      c.add(this.add.rectangle(0,-32,2,6,0x66d98a).setOrigin(0.5,1)); // tip highlight
     } else if (kind==="monitor"){
       out(0,0,6,10,0x2a3550); out(0,-9,26,18,0x10151f);
       c.add(this.add.rectangle(0,-11,20,12,0x2bd3ff,0.85).setOrigin(0.5,1)); // glowing screen
@@ -577,6 +607,24 @@ class FloorScene extends Phaser.Scene {
       c.add(scr);
       this.tweens.add({targets:scr, fillAlpha:{from:0.45,to:0.8}, duration:700+Math.abs(Math.round(x))%500,
         yoyo:true, repeat:-1, ease:"Sine.inOut"});                // flicker
+    } else if (kind==="vending"){
+      out(0,0,26,46,0xe6b733);                                  // yellow machine body
+      c.add(this.add.rectangle(0,-26,18,30,0x1f5fc0).setOrigin(0.5,1));          // blue display
+      c.add(this.add.rectangle(0,-26,18,30,0x66a8ff,0.35).setOrigin(0.5,1));     // glass sheen
+      for(let i=0;i<3;i++) for(let j=0;j<2;j++)
+        c.add(this.add.rectangle(-6+i*6,-30+j*12,4,7,[0xff5d6c,0x5ddc7a,0xffd95e,0xff8fae,0x7fd1ff,0xffa54a][i+j*3]).setOrigin(0.5,1)); // cans
+      c.add(this.add.rectangle(7,-9,8,5,0x14304f).setOrigin(0.5,1));             // dispenser slot
+    } else if (kind==="counter"){
+      out(0,0,58,15,0xeae0c4);                                  // cream reception counter
+      c.add(this.add.rectangle(0,-13,58,3,0xd6473f).setOrigin(0.5,1));           // red trim band
+      out(-16,-15,16,12,0x3a4660);                              // monitor on the counter
+      c.add(this.add.rectangle(-16,-17,11,7,0x5ddc7a,0.92).setOrigin(0.5,1));    // green screen
+      c.add(this.add.rectangle(16,-6,8,5,0xff8fae).setOrigin(0.5,1));            // a Poké-ball-ish tray
+    } else if (kind==="stool"){
+      c.add(this.add.ellipse(0,-1,14,6,0x14304f,0.5).setOrigin(0.5,1));          // floor shadow
+      out(0,-2,11,5,0xc86a24);                                  // orange post
+      c.add(this.add.ellipse(0,-7,13,6,0xf0a44e).setOrigin(0.5,1));              // round seat
+      c.add(this.add.ellipse(0,-8,7,3,0xffc784).setOrigin(0.5,1));              // seat highlight
     }
     return c;
   }

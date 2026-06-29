@@ -152,12 +152,12 @@ function mix(a,b,t){
 // walls with a pink stripe, navy ink. Room identity is a soft cream-tint of the
 // area accent so the backend-driven rooms still read distinct.
 const PC = {
-  floor:0x69d2c1, floorAlt:0x57bfae, floorSeam:0x3f9d92,   // teal walkway tiles
-  room:0xf3ead0, roomAlt:0xe9dcbe, roomSeam:0xcdbd98,       // cream room-floor tiles
-  wall:0xf0e6cc, wallHi:0xfff8e8, wallShade:0xd6c5a0,       // cream wall face
+  // SWAPPED: the FLOOR is the cream tile, the WALLS are teal (with the pink stripe).
+  floor:0xf0e6cc, floorAlt:0xe4d6b4, floorSeam:0xcbb992,   // cream floor tiles
+  room:0xf3ead0, roomAlt:0xe9dcbe, roomSeam:0xcdbd98,       // (room tiles, unused now)
+  wall:0x69d2c1, wallHi:0x9ce8dd, wallShade:0x49a99a,       // teal wall face
   stripe:0xe06a86, stripeHi:0xf3a8bb,                       // pink wall trim
   ink:0x33405e, line:0x2c4a8c,                              // navy text / borders
-  warp:0xe4ebf6, warpEdge:0x6f86c8,                         // warp-mat (door tile)
   bg:0x0a1416,                                              // dark letterbox around the building
 };
 
@@ -367,11 +367,11 @@ class FloorScene extends Phaser.Scene {
   // building's plan, not rugs on open space. Walls sit below the agents (depth 4)
   // so people always render in front; doorways open onto the corridors.
   buildWalls(){
-    const T = 9, DOOR = 48, BAND = 18;   // THICK side-wall, wide open passage, tall top-wall band
-    const FACE = PC.wall, CAP = PC.wallHi, BASE = PC.wallShade, EDGE = 0x2b2f45;
+    const T = 12, DOOR = 48, BAND = 20;   // THICK teal walls, wide open passage, tall top band
+    const FACE = PC.wall, CAP = PC.wallHi, BASE = PC.wallShade, EDGE = 0x244a44;
     const WHITE = 0xfff8e8;
     const R0 = (x,y,w,h,c,a)=> this.add.rectangle(x,y,w,h,c,a==null?1:a).setOrigin(0,0).setDepth(4);
-    // Plain THICK cream wall (sides + bottom): navy outline, cream face, lit cap, dark base.
+    // Plain THICK teal wall: dark outline, teal face, lit cap, shadowed base.
     const seg = (x, y, w, h) => {
       if (w <= 0 || h <= 0) return;
       R0(x-1, y-1, w+2, h+2, EDGE); R0(x, y, w, h, FACE);
@@ -379,27 +379,35 @@ class FloorScene extends Phaser.Scene {
       if (h > 5) R0(x, y+h-2, w, 2, BASE);
       if (w > 5) R0(x+w-2, y, 2, h, BASE);
     };
-    // Pokémon-Center top wall: a TALL banded cream wall with a white-bordered PINK
-    // STRIPE through it and a dark baseboard. No doors — passages are plain open gaps.
+    // Top wall: a TALL banded teal wall with a white-bordered PINK STRIPE + baseboard.
     const band = (x, w, y) => {
-      R0(x-1, y-1, w+2, BAND+2, EDGE);                              // outline box
-      R0(x, y,    w, 7, FACE);  R0(x, y, w, 1, CAP);                // cream upper + lit cap
-      R0(x, y+7,  w, 1, WHITE);                                     // white pinline
-      R0(x, y+8,  w, 4, PC.stripe); R0(x, y+8, w, 1, PC.stripeHi);  // pink stripe + highlight
-      R0(x, y+12, w, 1, WHITE);                                     // white pinline
-      R0(x, y+13, w, 4, FACE);                                      // cream lower
-      R0(x, y+17, w, 1, BASE);                                      // baseboard shadow
+      if (w <= 0) return;
+      R0(x-1, y-1, w+2, BAND+2, EDGE);
+      R0(x, y,    w, 8, FACE);  R0(x, y, w, 1, CAP);                // teal upper + lit cap
+      R0(x, y+8,  w, 1, WHITE);                                     // white pinline
+      R0(x, y+9,  w, 5, PC.stripe); R0(x, y+9, w, 1, PC.stripeHi);  // pink stripe + highlight
+      R0(x, y+14, w, 1, WHITE);                                     // white pinline
+      R0(x, y+15, w, 4, FACE);                                      // teal lower
+      R0(x, y+19, w, 1, BASE);                                      // baseboard shadow
     };
     for (const key in ROOMS){
       const R = ROOMS[key]; if (R.virtual) continue;
-      const dx = Math.round(R.cx), dy = Math.round(R.cy);
-      // side + bottom are thick cream walls with a WIDE OPEN GAP (no door); banded top.
-      seg(R.x, R.y, T, R.h);                                   // left
-      seg(R.x, R.y1 - T, (dx - DOOR / 2) - R.x, T);            // bottom (left of gap)
-      seg(dx + DOOR / 2, R.y1 - T, R.x1 - (dx + DOOR / 2), T); // bottom (right of gap)
-      seg(R.x1 - T, R.y, T, (dy - DOOR / 2) - R.y);            // right (above gap)
-      seg(R.x1 - T, dy + DOOR / 2, T, R.y1 - (dy + DOOR / 2)); // right (below gap)
-      band(R.x, R.w, R.y);                                     // banded striped TOP wall
+      const vault = key === "vault";
+      // Each room has ONE open passage (no doors). Normal rooms open at the BOTTOM
+      // centre; the VAULT is sealed except for a single TOP opening directly under the
+      // gate (next to the PASS sign) — so the only way in is down through gate/security.
+      const gx = vault ? Math.round(ROOMS.gate.cx) : Math.round(R.cx);
+      seg(R.x, R.y, T, R.h);                                   // left  (solid)
+      seg(R.x1 - T, R.y, T, R.h);                              // right (solid)
+      if (vault){
+        seg(R.x, R.y1 - T, R.w, T);                            // bottom solid (sealed)
+        band(R.x, (gx - DOOR/2) - R.x, R.y);                   // banded top, left of gap
+        band(gx + DOOR/2, R.x1 - (gx + DOOR/2), R.y);          // banded top, right of gap
+      } else {
+        band(R.x, R.w, R.y);                                   // banded top (solid)
+        seg(R.x, R.y1 - T, (gx - DOOR/2) - R.x, T);            // bottom, left of gap
+        seg(gx + DOOR/2, R.y1 - T, R.x1 - (gx + DOOR/2), T);   // bottom, right of gap
+      }
     }
   }
 
@@ -452,41 +460,31 @@ class FloorScene extends Phaser.Scene {
     for (const pt of pts) this.add.circle(pt.x, pt.y, 2.5, 0xffcf52, 0.3).setDepth(0);
   }
 
-  decorateFloor(){   // ORDERLY, grid-aligned decor along the corridors
+  decorateFloor(){   // DELIBERATE decor — everything tucked against a wall, symmetric.
     const P=(k,x,y)=>this.makeProp(k, x, y);
-    // Pokémon-style warp mats: a flat cyan diamond on the floor at each room doorway.
-    const warp=(x,y)=>{
-      this.add.rectangle(x,y,22,22,0x29657f).setAngle(45).setDepth(1);   // dark rim
-      this.add.rectangle(x,y,15,15,0x5cc6e0).setAngle(45).setDepth(1);   // cyan
-      this.add.rectangle(x,y,7,7,0xeafcff).setAngle(45).setDepth(1);     // light centre
-    };
-    for (const key in ROOMS){ const R=ROOMS[key]; if(R.virtual) continue;
-      warp(Math.round(R.cx), R.y1-3); }                                  // at each bottom doorway
-    // a potted plant at each of the 4 corridor intersections of the "#"
-    for (const x of AISLE_VX) for (const y of AISLE_HY) P("plant", x, y+6);
-    // a vending machine + cooler at the corridor mouths (colour pop, symmetric)
-    P("vending", AISLE_VX[0], WALL_TOP+30); P("cooler", AISLE_VX[1], WALL_TOP+24);
-    P("vending", AISLE_VX[2], WALL_TOP+30);
-    // the LOUNGE (bottom-left): couch, TV, coffee table, water cooler — where idle
-    // leads sit, nap and mill about between stages (see loungeArrive / mill).
+    const TI = 16;            // inset from a wall face (walls are 12px thick)
+    const top = (R)=> R.y + 26;        // just below the 20px banded top wall
+    const bot = (R)=> R.y1 - TI;       // just inside the bottom wall
+
+    // LOUNGE (bottom-left): a tidy seating set — couch on the back wall, table + stools
+    // in front, TV on the bottom wall, a vending machine and plants in the corners.
     const L = cellBox(LOUNGE_CELL[0], LOUNGE_CELL[1]);
-    this.add.text(L.x+L.w/2, L.y+8, "LOUNGE", {fontFamily:"'PixelFont','Courier New',monospace",
+    this.add.text(L.cx, top(L)-2, "LOUNGE", {fontFamily:"'PixelFont','Courier New',monospace",
       fontSize:"10px", color:"#8aa0c8"}).setOrigin(0.5,0).setDepth(4);
-    P("couch", L.x+44, L.y+L.h-30); P("ctable", L.x+44, L.y+L.h-6);
-    P("stool", L.x+18, L.y+L.h-8); P("stool", L.x+72, L.y+L.h-8);   // round stools
-    P("tv", L.x+L.w-44, L.y+50); P("cooler", L.x+L.w-28, L.y+L.h-14);
-    P("plant", L.x+22, L.y+48);
-    // the ENTRANCE (bottom-centre): a purely decorative lobby — welcome mat, plants,
-    // and the company ORG chart on the wall (renderOrg pins here). No work happens here.
+    P("couch",  L.x+78, L.y+62); P("ctable", L.x+78, L.y+84);
+    P("stool",  L.x+52, L.y+90); P("stool",  L.x+104, L.y+90);
+    P("tv",     L.x+78, bot(L));
+    P("vending",L.x1-TI-12, L.y+74);
+    P("plant",  L.x+TI+6, bot(L)); P("plant", L.x1-TI-8, bot(L));
+
+    // ENTRANCE (bottom-centre): reception counter + welcome mat + corner plants. The
+    // company ORG board (renderOrg) pins to the top wall here.
     const E = cellBox(ENTRANCE_CELL[0], ENTRANCE_CELL[1]);
-    this.add.text(E.x+E.w/2, E.y+8, "ENTRANCE", {fontFamily:"'PixelFont','Courier New',monospace",
-      fontSize:"10px", color:"#8aa0c8"}).setOrigin(0.5,0).setDepth(4);
-    this.add.rectangle(E.x+E.w/2, E.y+E.h-16, 74, 22, 0x2a3550, 0.55).setDepth(0)
-      .setStrokeStyle(2, 0x3e4a68);
-    this.add.text(E.x+E.w/2, E.y+E.h-16, "WELCOME",
+    P("counter", E.cx, E.y+E.h-52); P("stool", E.cx-24, E.y+E.h-38); P("stool", E.cx+24, E.y+E.h-38);
+    this.add.rectangle(E.cx, bot(E)+2, 74, 18, 0x2a3550, 0.55).setDepth(0).setStrokeStyle(2, 0x3e4a68);
+    this.add.text(E.cx, bot(E)-7, "WELCOME",
       {fontFamily:"'PixelFont','Courier New'",fontSize:"7px",color:"#8aa0c8"}).setOrigin(0.5).setDepth(1);
-    P("counter", E.cx, E.y+E.h-44); P("stool", E.cx-22, E.y+E.h-30); P("stool", E.cx+22, E.y+E.h-30);
-    P("plant", E.x+24, E.y+E.h-20); P("plant", E.x+E.w-24, E.y+E.h-20);
+    P("plant", E.x+TI+6, bot(E)); P("plant", E.x1-TI-8, bot(E));   // bottom corners (clear of the org board)
   }
 
   buildAtmosphere(){
@@ -503,27 +501,15 @@ class FloorScene extends Phaser.Scene {
 
   // Procedural pixel furniture so each room reads like a furnished interior.
   furnish(){
-    // ambient props at room EDGES (the working desks are per-lead, in the floor)
+    // ONE themed prop per room, tucked into the same top-right corner against the wall
+    // (consistent, never random). The working desks are placed per-lead by the floor.
     const props = {
-      product:     [["board",0.10],["plant",0.92]],
-      architecture:[["board",0.10],["shelf",0.90]],
-      frontend:    [["rack",0.92]],
-      backend:     [["rack",0.92]],
-      data:        [["shelf",0.92]],
-      qa:          [["shelf",0.07],["plant",0.95]],
-      security:    [["rack",0.08],["shelf",0.92]],
+      product:"board", architecture:"shelf", frontend:"rack", backend:"rack",
+      data:"shelf", qa:"shelf", security:"rack",
     };
     for (const key in props){
       const R = ROOMS[key]; if(!R) continue;
-      for (const [kind,fx] of props[key]) this.makeProp(kind, R.x + R.w*fx, R.floorY+6);
-    }
-    // the lounge: a couch + coffee table + plants — where idle folks hang out
-    const L = ROOMS.lounge;
-    if (L){
-      this.makeProp("plant", L.x + 14, L.floorY+6);
-      this.makeProp("couch", L.cx, L.floorY + 34);
-      this.makeProp("ctable", L.cx, L.floorY + 76);
-      this.makeProp("plant", L.x1 - 14, L.floorY+6);
+      this.makeProp(props[key], R.x1 - 22, R.y + 34);
     }
   }
 
@@ -626,10 +612,10 @@ class FloorScene extends Phaser.Scene {
       c.add(this.add.rectangle(rx,ry,w,h,col).setOrigin(0.5,1));
       c.add(this.add.rectangle(rx,ry-h+1,w,1,shade(col,1.15)).setOrigin(0.5,1)); // top light
     };
-    // an orange round STOOL in front of the table (the reference furniture)
-    c.add(this.add.ellipse(10,7,16,7,0x14304f,0.4).setOrigin(0.5,1));   // floor shadow
-    c.add(this.add.ellipse(10,4,14,7,0xe8862e).setOrigin(0.5,1).setStrokeStyle(1,O)); // seat
-    c.add(this.add.ellipse(10,2,7,3,0xffb060).setOrigin(0.5,1));        // seat highlight
+    // an orange round STOOL tucked at the FRONT-CENTRE of the table (the reference look)
+    c.add(this.add.ellipse(0,12,16,7,0x14304f,0.35).setOrigin(0.5,1));  // floor shadow
+    c.add(this.add.ellipse(0,10,14,7,0xe8862e).setOrigin(0.5,1).setStrokeStyle(1,O)); // seat
+    c.add(this.add.ellipse(0,8,7,3,0xffb060).setOrigin(0.5,1));         // seat highlight
     // a flat GRAY table (silver top, darker legs) — the Pokémon-Center table
     out(0,0,46,13,0xc2cad6);                                      // gray tabletop
     c.add(this.add.rectangle(0,-12,46,1,0xe6ebf2).setOrigin(0.5,1));  // bright top edge

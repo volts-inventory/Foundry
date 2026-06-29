@@ -162,11 +162,13 @@ function mix(a,b,t){
 // area accent so the backend-driven rooms still read distinct.
 const PC = {
   // WARM scheme: a tan tiled FLOOR with terracotta/BRICK walls and a cream stripe.
-  floor:0xe8d2a8, floorAlt:0xddc395, floorSeam:0xc2a878,   // tan floor tiles
+  // (GBA art-direction pass: quieter floor checker, cooler shadows, one scene ink.)
+  floor:0xe8d2a8, floorAlt:0xe2c99e, floorSeam:0xcdb99a,   // tan floor — checker ~6% off, seam whispers
   room:0xf3ead0, roomAlt:0xe9dcbe, roomSeam:0xcdbd98,       // (room tiles, unused now)
-  wall:0xc2614a, wallHi:0xdb8268, wallShade:0x9c4636,       // brick wall face
-  stripe:0xf2e8cc, stripeHi:0xfffaf0,                       // cream wall trim
-  ink:0x33405e, line:0x2c4a8c,                              // navy text / borders
+  wall:0xc2614a, wallHi:0xcf7158, wallShade:0x8a4248,       // brick face — softer cap, rose-cooled shade
+  stripe:0xf2e8cc, stripeHi:0xfffaf0,                       // cream wall trim (the anchor light)
+  ink:0x33405e, line:0x2c4a8c,                              // navy TEXT ink
+  sceneInk:0x241d2e, shadow:0x1a1726,                       // one outline ink + one cool cast-shadow
   bg:0x140d0a,                                              // dark warm letterbox around the building
 };
 
@@ -231,10 +233,10 @@ function buildSharedTextures(scene){
   if (!scene.textures.exists("floor_base")){
     const g=scene.make.graphics({add:false}), S=16;
     const tile=(tx,ty,base)=>{
+      // QUIET floor: one flat tan + a single whisper-seam (no per-tile highlight/fleck) so
+      // the floor recedes and the characters win the contrast battle.
       g.fillStyle(base,1); g.fillRect(tx,ty,S,S);
-      g.fillStyle(shade(base,1.12),1); g.fillRect(tx,ty,S,1); g.fillRect(tx,ty,1,S);          // lit top-left
-      g.fillStyle(shade(base,1.05),1); g.fillRect(tx+2,ty+2,2,2);                              // sheen fleck
-      g.fillStyle(PC.floorSeam,1);     g.fillRect(tx,ty+S-1,S,1); g.fillRect(tx+S-1,ty,1,S);  // dark seam
+      g.fillStyle(PC.floorSeam,1); g.fillRect(tx,ty+S-1,S,1); g.fillRect(tx+S-1,ty,1,S);
     };
     for(let r=0;r<3;r++) for(let c=0;c<3;c++) tile(c*S, r*S, (r+c)%2 ? PC.floorAlt : PC.floor);
     g.generateTexture("floor_base", S*3, S*3); g.destroy();
@@ -625,10 +627,10 @@ class FloorScene extends Phaser.Scene {
       c.add(this.add.rectangle(-16,-17,11,7,0x5ddc7a,0.92).setOrigin(0.5,1));    // green screen
       c.add(this.add.rectangle(16,-6,8,5,0xff8fae).setOrigin(0.5,1));            // a Poké-ball-ish tray
     } else if (kind==="stool"){
-      c.add(this.add.ellipse(0,-1,14,6,0x14304f,0.5).setOrigin(0.5,1));          // floor shadow
+      c.add(this.add.ellipse(0,-1,14,6,PC.shadow,0.4).setOrigin(0.5,1));         // cool floor shadow
       out(0,-2,11,5,0xc86a24);                                  // orange post
-      c.add(this.add.ellipse(0,-7,13,6,0xf0a44e).setOrigin(0.5,1));              // round seat
-      c.add(this.add.ellipse(0,-8,7,3,0xffc784).setOrigin(0.5,1));              // seat highlight
+      c.add(this.add.ellipse(0,-7,13,6,0xe0863a).setOrigin(0.5,1).setStrokeStyle(1,0x9c4a1c)); // seat (own-hue outline)
+      c.add(this.add.ellipse(0,-9,6,2,0xffc784).setOrigin(0.5,1));              // top-left lit edge
     }
     return c;
   }
@@ -648,8 +650,8 @@ class FloorScene extends Phaser.Scene {
     // the person (lower depth than the person sprite) and just in front of the table,
     // so it reads as the person seated on it. (floorY-16 is where the person stands.)
     const chair = this.add.container(x, floorY-16).setDepth(floorY-20).setScale(1.25);
-    chair.add(this.add.ellipse(0,4,16,7,0x14304f,0.30).setOrigin(0.5,1));            // floor shadow
-    chair.add(this.add.ellipse(0,2,15,8,0xe8862e).setOrigin(0.5,1).setStrokeStyle(1,O)); // seat
+    chair.add(this.add.ellipse(0,4,16,7,PC.shadow,0.32).setOrigin(0.5,1));           // cool floor shadow
+    chair.add(this.add.ellipse(0,2,15,8,0xe0863a).setOrigin(0.5,1).setStrokeStyle(1,0x9c4a1c)); // seat (own-hue outline)
     chair.add(this.add.ellipse(0,0,8,3,0xffb060).setOrigin(0.5,1));                  // seat highlight
     c.chair = chair;     // tracked for teardown by the workstation it belongs to
     // a flat GRAY table (silver top, darker legs) — the Pokémon-Center table
@@ -680,11 +682,14 @@ class FloorScene extends Phaser.Scene {
   // text (leads); else a dark pill with accent text (ICs / generic). BitmapText = crisp.
   pinBadge(s, lbl, color, filled, yy){
     const PX=8, y = yy==null ? -26 : yy;   // sits ABOVE the head (clear of the face)
-    const bg = filled ? color : 0x10182c, fg = filled ? 0x10182c : color;
-    const edge = filled ? 0x10182c : color;
+    const bg = filled ? color : 0x2a2230, fg = filled ? 0x241d2e : color;  // OPAQUE solid placard
     const t = this.bm(0,y,lbl,PX,fg,0.5,0.5);            // proportional text → size the pill to it
     const pw = Math.ceil(t.width)+8;
-    s.add(this.add.rectangle(0,y,pw,11,bg,filled?0.96:0.9).setOrigin(0.5).setStrokeStyle(1,edge));
+    // a 2px pin tail so the badge reads as belonging to THIS character (not a floating tooltip)
+    s.add(this.add.rectangle(0,y+5,2,4,PC.sceneInk).setOrigin(0.5,0));
+    // opaque placard: cool-ink shadow base + the solid face (1px ink outline) + the text on top
+    s.add(this.add.rectangle(0,y+1,pw,11,PC.sceneInk).setOrigin(0.5));
+    s.add(this.add.rectangle(0,y,pw-2,9,bg).setOrigin(0.5).setStrokeStyle(1,PC.sceneInk));
     s.add(t);
   }
 
@@ -811,7 +816,7 @@ class FloorScene extends Phaser.Scene {
   buildGuardian(){
     const R = ROOMS.gate, x = Math.round(R.x + R.w*0.30), y = R.y1-30;
     const c = this.add.container(x,y).setDepth(6);
-    c.add(this.add.ellipse(0,9,18,5,0x000000,0.28));            // shadow
+    c.add(this.add.ellipse(0,9,18,5,PC.shadow,0.30));           // cool cast shadow
     c.add(this.add.rectangle(0,0,14,16,0x2b3350));              // torso (navy uniform)
     c.add(this.add.rectangle(0,2,14,2,0x1a2030));               // belt line
     c.add(this.add.rectangle(-4,-4,3,3,0xffd95e));              // brass badge
@@ -883,7 +888,7 @@ class FloorScene extends Phaser.Scene {
     this.chestGlow = this.add.rectangle(x,y-20,120,120,0xffd25a,0.10).setDepth(4);
     this.tweens.add({targets:this.chestGlow, fillAlpha:{from:0.06,to:0.14}, duration:2200, yoyo:true, repeat:-1});
     const c = this.add.container(x,y).setDepth(5).setScale(1.3);
-    c.add(this.add.ellipse(0,15,40,8,0x000000,0.3));
+    c.add(this.add.ellipse(0,15,40,8,PC.shadow,0.32));
     c.add(this.add.rectangle(0,3,36,18,0x7a3b1a));
     c.add(this.add.rectangle(0,9,36,6,0x5a2c12));
     this.chestClosed = this.add.container(0,0);
@@ -975,7 +980,7 @@ class FloorScene extends Phaser.Scene {
     const ci = opt.ci != null ? opt.ci : 0;
     const ch = CHARACTERS[((ci % CHARACTERS.length) + CHARACTERS.length) % CHARACTERS.length];
     const c = this.add.container(x,y).setDepth(10);
-    c.add(this.add.ellipse(0,3,11,4,0x000000,0.30));        // shadow under the feet
+    c.add(this.add.ellipse(0,3,11,4,PC.shadow,0.32));       // cool shadow under the feet
     const bob = this.add.container(0,0);
     // 0.36 x the caller's 1.4 container = ~0.5 net of the 64px frame => crisp 32px
     // (integer-friendly half-scale; non-integer scales soften pixel art).
@@ -1290,7 +1295,7 @@ class FloorScene extends Phaser.Scene {
       const sx = ax+12+i*26, sy = atop-12;
       if (!this.gatePips[n]){
         const c = this.add.container(sx, sy).setDepth(6);
-        c.add(this.add.rectangle(10,4,20,18,0x000000));
+        c.add(this.add.rectangle(10,4,20,18,PC.sceneInk));
         c.add(this.add.text(10,3,"",{fontFamily:"'PixelFont','Courier New'",fontSize:"12px",
           fontStyle:"bold",color:"#fff"}).setOrigin(0.5));
         c.add(this.add.rectangle(17,-3,5,5,0xffcf52).setVisible(false));

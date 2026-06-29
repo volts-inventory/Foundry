@@ -152,13 +152,13 @@ function mix(a,b,t){
 // walls with a pink stripe, navy ink. Room identity is a soft cream-tint of the
 // area accent so the backend-driven rooms still read distinct.
 const PC = {
-  // SWAPPED: the FLOOR is the cream tile, the WALLS are teal (with the pink stripe).
-  floor:0xf0e6cc, floorAlt:0xe4d6b4, floorSeam:0xcbb992,   // cream floor tiles
+  // WARM scheme: a tan tiled FLOOR with terracotta/BRICK walls and a cream stripe.
+  floor:0xe8d2a8, floorAlt:0xddc395, floorSeam:0xc2a878,   // tan floor tiles
   room:0xf3ead0, roomAlt:0xe9dcbe, roomSeam:0xcdbd98,       // (room tiles, unused now)
-  wall:0x69d2c1, wallHi:0x9ce8dd, wallShade:0x49a99a,       // teal wall face
-  stripe:0xe06a86, stripeHi:0xf3a8bb,                       // pink wall trim
+  wall:0xc2614a, wallHi:0xdb8268, wallShade:0x9c4636,       // brick wall face
+  stripe:0xf2e8cc, stripeHi:0xfffaf0,                       // cream wall trim
   ink:0x33405e, line:0x2c4a8c,                              // navy text / borders
-  bg:0x0a1416,                                              // dark letterbox around the building
+  bg:0x140d0a,                                              // dark warm letterbox around the building
 };
 
 // ---- text wrapping (shared) -----------------------------------------------
@@ -367,9 +367,9 @@ class FloorScene extends Phaser.Scene {
   // building's plan, not rugs on open space. Walls sit below the agents (depth 4)
   // so people always render in front; doorways open onto the corridors.
   buildWalls(){
-    const T = 12, DOOR = 48, BAND = 20;   // THICK teal walls, wide open passage, tall top band
-    const FACE = PC.wall, CAP = PC.wallHi, BASE = PC.wallShade, EDGE = 0x244a44;
-    const WHITE = 0xfff8e8;
+    const T = 12, DOOR = 48, BAND = 20;   // THICK brick walls, wide open passage, tall top band
+    const FACE = PC.wall, CAP = PC.wallHi, BASE = PC.wallShade, EDGE = 0x4a2018;
+    const WHITE = 0x7a3526;   // dark-brick line framing the cream stripe
     const R0 = (x,y,w,h,c,a)=> this.add.rectangle(x,y,w,h,c,a==null?1:a).setOrigin(0,0).setDepth(4);
     // Plain THICK teal wall: dark outline, teal face, lit cap, shadowed base.
     const seg = (x, y, w, h) => {

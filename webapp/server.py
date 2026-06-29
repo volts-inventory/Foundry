@@ -836,6 +836,8 @@ def _run_platform(p: Project) -> None:
             mark = "✓" if ev.get("passed") else "✗"
             np = ev.get("passes", 1)
             _emit(p, type="narrate", text=f"{mark} {svc} done · {np} pass(es)")
+            for f in (ev.get("files") or [])[:8]:   # the specific pieces this service built
+                _emit(p, type="narrate", text=f"     ⊞ {svc}/{f}")
 
     opts = p.platform_opts or {}
     staging = str(p.out_base.parent / f".staging-{p.id}") if p.out_base else None

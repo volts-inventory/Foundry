@@ -60,6 +60,39 @@ def _tree_metrics(path: str) -> tuple[int, int]:
     return n, total
 
 
+_NON_FEATURE = {"readme.md", "build-manifest.json", "build-manifest.md", "go.mod",
+                "package.json", "dockerfile", "makefile", ".gitignore", "requirements.txt"}
+
+
+def _key_files(path: str, limit: int = 8) -> list[str]:
+    """The specific feature files a service produced — basenames of its code, minus
+    tests/config/docs, so the log can say WHAT was built (Login.tsx, home.py, …).
+    On a real backend these read as the actual pieces; on mock they're stubs."""
+    names: list[str] = []
+    for _root, dirs, files in os.walk(path):
+        if "docs" in dirs:
+            dirs.remove("docs")
+        for f in sorted(files):
+            low = f.lower()
+            if low in _NON_FEATURE or low.startswith("test") or "test" in low:
+                continue
+            if not f.endswith(_CODE_SUFFIXES):
+                continue
+            names.append(f)
+    # de-dup, keep order, cap
+    seen: set[str] = set()
+    out: list[str] = []
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out[:limit]
+
+
+_CODE_SUFFIXES = (".py", ".go", ".js", ".ts", ".tsx", ".jsx", ".lua", ".sql", ".rs",
+                  ".java", ".rb", ".css", ".html", ".vue", ".svelte")
+
+
 def _still_growing(prev: tuple[int, int] | None, cur: tuple[int, int]) -> bool:
     """Did this pass add MEANINGFUL new code vs the previous one? New files, or a
     >5% (and >256 B) increase in code bytes. False => the service has plateaued."""
@@ -167,8 +200,9 @@ def _build_one(
         emit({"type": "svc_done", "service": svc.name, "passed": False, "passes": used})
         return ServiceResult(name=svc.name, role=svc.role, passed=False, phase="no output",
                              source_root=None, is_draft=False, gates={}, passes=used)
-    emit({"type": "svc_done", "service": svc.name, "passed": bool(result.passed), "passes": used})
     source = result.output_root or result.draft_root
+    emit({"type": "svc_done", "service": svc.name, "passed": bool(result.passed),
+          "passes": used, "files": _key_files(source) if source else []})
     return ServiceResult(
         name=svc.name,
         role=svc.role,

@@ -67,13 +67,15 @@ _TEMPLATES: dict[str, str] = {
              "save/load. Implement the ACTUAL gameplay — not a skeleton or a stub loop."),
     "game_online": ("the {kind} game CLIENT in {engine}: the full local game (loop, input, "
                     "world, entities, save/load) PLUS a thin client to the platform backend's "
-                    "REST API for online features (accounts, leaderboards, sync) per the shared contract."),
+                    "REST API for online features (accounts, leaderboards, sync) per the "
+                    "shared contract."),
     # the backend is the WHOLE server tier: REST API surface + the domain logic behind it.
     "backend": ("the {kind} BACK-END service — the whole server tier: implement the REST "
                 "API (every path in the shared OpenAPI contract: routing, request validation, "
                 "JSON responses, auth middleware) TOGETHER WITH the domain logic behind it — "
                 "user accounts, authentication (signup/login/session or JWT), and multi-tenant "
-                "access control. Persists through the data layer; exposes the contract the web app consumes."),
+                "access control. Persists through the data layer; exposes the contract the web "
+                "app consumes."),
     "data": ("the {kind} DATA LAYER: the relational schema, migrations, and a typed "
              "data-access module for the entities named in the shared contract "
              "(users, tenants, and the core domain rows). No HTTP — a library the "

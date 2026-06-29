@@ -480,6 +480,9 @@ class FloorScene extends Phaser.Scene {
     // ENTRANCE (bottom-centre): reception counter + welcome mat + corner plants. The
     // company ORG board (renderOrg) pins to the top wall here.
     const E = cellBox(ENTRANCE_CELL[0], ENTRANCE_CELL[1]);
+    // the CTO's OFFICE — his desk (counter) + nameplate; he returns here between visits.
+    this.add.text(E.cx, E.y+E.h-68, "CTO OFFICE", {fontFamily:"'PixelFont','Courier New',monospace",
+      fontSize:"9px", fontStyle:"bold", color:"#ffcf52"}).setOrigin(0.5).setDepth(4);
     P("counter", E.cx, E.y+E.h-52); P("stool", E.cx-24, E.y+E.h-38); P("stool", E.cx+24, E.y+E.h-38);
     this.add.rectangle(E.cx, bot(E)+2, 74, 18, 0x2a3550, 0.55).setDepth(0).setStrokeStyle(2, 0x3e4a68);
     this.add.text(E.cx, bot(E)-7, "WELCOME",
@@ -612,10 +615,14 @@ class FloorScene extends Phaser.Scene {
       c.add(this.add.rectangle(rx,ry,w,h,col).setOrigin(0.5,1));
       c.add(this.add.rectangle(rx,ry-h+1,w,1,shade(col,1.15)).setOrigin(0.5,1)); // top light
     };
-    // an orange round STOOL tucked at the FRONT-CENTRE of the table (the reference look)
-    c.add(this.add.ellipse(0,12,16,7,0x14304f,0.35).setOrigin(0.5,1));  // floor shadow
-    c.add(this.add.ellipse(0,10,14,7,0xe8862e).setOrigin(0.5,1).setStrokeStyle(1,O)); // seat
-    c.add(this.add.ellipse(0,8,7,3,0xffb060).setOrigin(0.5,1));         // seat highlight
+    // the orange round STOOL the worker sits on — a SEPARATE object drawn BEHIND/under
+    // the person (lower depth than the person sprite) and just in front of the table,
+    // so it reads as the person seated on it. (floorY-16 is where the person stands.)
+    const chair = this.add.container(x, floorY-16).setDepth(floorY-20);
+    chair.add(this.add.ellipse(0,4,16,7,0x14304f,0.30).setOrigin(0.5,1));            // floor shadow
+    chair.add(this.add.ellipse(0,2,15,8,0xe8862e).setOrigin(0.5,1).setStrokeStyle(1,O)); // seat
+    chair.add(this.add.ellipse(0,0,8,3,0xffb060).setOrigin(0.5,1));                  // seat highlight
+    c.chair = chair;     // tracked for teardown by the workstation it belongs to
     // a flat GRAY table (silver top, darker legs) — the Pokémon-Center table
     out(0,0,46,13,0xc2cad6);                                      // gray tabletop
     c.add(this.add.rectangle(0,-12,46,1,0xe6ebf2).setOrigin(0.5,1));  // bright top edge
@@ -966,9 +973,12 @@ class FloorScene extends Phaser.Scene {
     const lit = (k)=> k===key || (key==="engineering" && ENG_ROOMS.includes(k));
     for (const k in this.roomGlow)
       this.tweens.add({targets:this.roomGlow[k], fillAlpha:(lit(k)?0.10:0), duration:420});
+    // The CTO VISITS the working group on each phase shift — but never camps in the
+    // gate/vault (those aren't teams). For those (and the lobby) he returns to his office.
+    const TEAM = {product:1,architecture:1,engineering:1,frontend:1,backend:1,data:1,qa:1,security:1};
     const R = ROOMS[key];
-    if (R) this.walkCTO(R.cx, R.standY);
-    else if (this.lobby) this.walkCTO(this.lobby.cx, this.lobby.standY);
+    if (R && TEAM[key]) this.walkCTO(R.cx, R.standY);
+    else if (this.lobby) this.walkCTO(this.lobby.cx, this.lobby.standY);   // gate/vault/none → office
     this.staffRoom(key);                 // everyone stays at their own desk; active room glows
   }
 
@@ -1307,7 +1317,8 @@ class FloorScene extends Phaser.Scene {
 
   // Seat the engineers in their discipline ROOMS from current org + pool state.
   layoutEngineering(){
-    const kill=(s)=>{ if(!s) return; s._dead=true; if(s.zzzEv){ s.zzzEv.remove(); s.zzzEv=null; } s.destroy(); };
+    const kill=(s)=>{ if(!s) return; s._dead=true; if(s.zzzEv){ s.zzzEv.remove(); s.zzzEv=null; }
+      if(s.chair){ s.chair.destroy(); s.chair=null; } s.destroy(); };
     if(this.techLeadGroup) this.techLeadGroup.forEach(kill);
     if(this.poolGroup) this.poolGroup.forEach(kill);
     if(this.poolLabel){ this.poolLabel.destroy(); this.poolLabel=null; }

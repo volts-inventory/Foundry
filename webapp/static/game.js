@@ -558,12 +558,17 @@ class FloorScene extends Phaser.Scene {
   makeProp(kind, x, floorY){
     x = Math.round(x);
     const c = this.add.container(x, floorY).setDepth(3);  // props (proportional to the 32px sprites)
-    const out = (rx,ry,w,h,col)=>{ // outlined pixel rect (navy border) + 1px top-light
-      c.add(this.add.rectangle(rx,ry,w+2,h+2,0x2b2f45).setOrigin(0.5,1));
-      c.add(this.add.rectangle(rx,ry,w,h,col).setOrigin(0.5,1));
-      c.add(this.add.rectangle(rx,ry-h+1,w,1,shade(col,1.3)).setOrigin(0.5,1));   // top highlight
-      c.add(this.add.rectangle(rx,ry-1,w,1,shade(col,0.6)).setOrigin(0.5,1));     // base shadow
+    // CRAFTED block: one scene-ink outline + top-LEFT light (top+left edges) + bottom-RIGHT
+    // shade (bottom+right edges). One light direction for every prop (the "drawn" look).
+    const out = (rx,ry,w,h,col)=>{
+      c.add(this.add.rectangle(rx,ry,w+2,h+2,PC.sceneInk).setOrigin(0.5,1));            // ink outline
+      c.add(this.add.rectangle(rx,ry,w,h,col).setOrigin(0.5,1));                        // face
+      c.add(this.add.rectangle(rx,ry-h+1,w,1,shade(col,1.22)).setOrigin(0.5,1));        // top light
+      c.add(this.add.rectangle(rx-w/2,ry,1,h,shade(col,1.12)).setOrigin(0,1));          // left light
+      c.add(this.add.rectangle(rx,ry-1,w,1,shade(col,0.80)).setOrigin(0.5,1));          // bottom shade
+      c.add(this.add.rectangle(rx+w/2-1,ry,1,h,shade(col,0.84)).setOrigin(0,1));        // right shade
     };
+    c.add(this.add.ellipse(0,3,18,5,PC.shadow,0.22));                                   // contact shadow on the floor
     if (kind==="plant"){
       // potted "corn plant" — a tan pot with a fan of tall green blades (GBA style)
       out(0,0,13,9,0xcf8a46);                                   // wide tan pot
@@ -635,10 +640,10 @@ class FloorScene extends Phaser.Scene {
       c.add(this.add.rectangle(-16,-17,11,7,0x5ddc7a,0.92).setOrigin(0.5,1));    // green screen
       c.add(this.add.rectangle(16,-6,8,5,0xff8fae).setOrigin(0.5,1));            // a Poké-ball-ish tray
     } else if (kind==="stool"){
-      c.add(this.add.ellipse(0,-1,14,6,PC.shadow,0.4).setOrigin(0.5,1));         // cool floor shadow
-      out(0,-2,11,5,0xc86a24);                                  // orange post
-      c.add(this.add.ellipse(0,-7,13,6,0xe0863a).setOrigin(0.5,1).setStrokeStyle(1,0x9c4a1c)); // seat (own-hue outline)
-      c.add(this.add.ellipse(0,-9,6,2,0xffc784).setOrigin(0.5,1));              // top-left lit edge
+      c.add(this.add.rectangle(0,-2,5,6,0xb05f24).setOrigin(0.5,1));            // post/leg
+      c.add(this.add.ellipse(0,-6,15,7,0x9c4a1c).setOrigin(0.5,1));             // seat rim (dark)
+      c.add(this.add.ellipse(0,-7,13,6,0xe0863a).setOrigin(0.5,1));             // cushion top
+      c.add(this.add.ellipse(-2,-8,6,2,0xf4a45a).setOrigin(0.5,1));             // top-left highlight
     }
     return c;
   }
@@ -648,30 +653,40 @@ class FloorScene extends Phaser.Scene {
     if (accent == null) accent = 0x7fd1ff;   // monitor glow default (sprites carry their own colour)
     x = Math.round(x);
     const c = this.add.container(x, floorY).setDepth(floorY+5).setScale(1.3);
-    const O = 0x2b2f45;                                           // navy outline
-    const out = (rx,ry,w,h,col)=>{
+    const O = PC.sceneInk;                                        // one scene ink outline
+    const out = (rx,ry,w,h,col)=>{   // crafted block: ink outline + top-left light + br-shade
       c.add(this.add.rectangle(rx,ry,w+2,h+2,O).setOrigin(0.5,1));
       c.add(this.add.rectangle(rx,ry,w,h,col).setOrigin(0.5,1));
-      c.add(this.add.rectangle(rx,ry-h+1,w,1,shade(col,1.15)).setOrigin(0.5,1)); // top light
+      c.add(this.add.rectangle(rx,ry-h+1,w,1,shade(col,1.18)).setOrigin(0.5,1));
+      c.add(this.add.rectangle(rx-w/2,ry,1,h,shade(col,1.1)).setOrigin(0,1));
+      c.add(this.add.rectangle(rx,ry-1,w,1,shade(col,0.82)).setOrigin(0.5,1));
+      c.add(this.add.rectangle(rx+w/2-1,ry,1,h,shade(col,0.86)).setOrigin(0,1));
     };
     // the orange round STOOL the worker sits on — a SEPARATE object drawn BEHIND/under
     // the person (lower depth than the person sprite) and just in front of the table,
     // so it reads as the person seated on it. (floorY-16 is where the person stands.)
     const chair = this.add.container(x, floorY-16).setDepth(floorY-20).setScale(1.25);
-    chair.add(this.add.ellipse(0,4,16,7,PC.shadow,0.32).setOrigin(0.5,1));           // cool floor shadow
-    chair.add(this.add.ellipse(0,2,15,8,0xe0863a).setOrigin(0.5,1).setStrokeStyle(1,0x9c4a1c)); // seat (own-hue outline)
-    chair.add(this.add.ellipse(0,0,8,3,0xffb060).setOrigin(0.5,1));                  // seat highlight
+    chair.add(this.add.ellipse(0,5,16,6,PC.shadow,0.30).setOrigin(0.5,1));           // contact shadow
+    chair.add(this.add.rectangle(0,3,5,5,0xb05f24).setOrigin(0.5,1));                // post/leg
+    chair.add(this.add.ellipse(0,-1,16,8,0x9c4a1c).setOrigin(0.5,1));                // seat rim (dark)
+    chair.add(this.add.ellipse(0,-2,14,7,0xe0863a).setOrigin(0.5,1));                // cushion top
+    chair.add(this.add.ellipse(-2,-3,7,3,0xf4a45a).setOrigin(0.5,1));                // top-left highlight
     c.chair = chair;     // tracked for teardown by the workstation it belongs to
-    // a flat GRAY table (silver top, darker legs) — the Pokémon-Center table
-    out(0,0,46,13,0xc2cad6);                                      // gray tabletop
-    c.add(this.add.rectangle(0,-12,46,1,0xe6ebf2).setOrigin(0.5,1));  // bright top edge
-    c.add(this.add.rectangle(-21,13,3,9,0x8b94a4).setOrigin(0.5,1));
-    c.add(this.add.rectangle(21,13,3,9,0x8b94a4).setOrigin(0.5,1));   // legs
-    // a small dept-tinted terminal on the table (shows live activity via `screens`)
-    out(-13,-13,15,11,0x3a4660);
-    const screen = this.add.rectangle(-13,-15,10,7,shade(accent,1.25),0.95).setOrigin(0.5,1);
+    // a GRAY PC COUNTER: a front face + a lighter top surface (reads 3D), legs, a seam.
+    out(0,0,46,8,0xb0aaa2);                                       // front face (warm gray)
+    c.add(this.add.rectangle(0,-8,48,5,0xc8c3bb).setOrigin(0.5,1));   // top surface (lighter, overhang)
+    c.add(this.add.rectangle(0,-12,48,1,0xe4e0d8).setOrigin(0.5,1));  // top edge highlight
+    c.add(this.add.rectangle(0,-8,48,1,PC.sceneInk).setOrigin(0.5,1));// seam under the top surface
+    c.add(this.add.rectangle(-21,8,3,7,0x837d75).setOrigin(0.5,1));
+    c.add(this.add.rectangle(21,8,3,7,0x837d75).setOrigin(0.5,1));    // legs
+    // a MONITOR on the counter: stand + dark bezel + dept-tinted screen (live activity)
+    c.add(this.add.rectangle(-13,-12,4,3,0x5a5650).setOrigin(0.5,1));// stand
+    out(-13,-14,15,11,0x44485a);                                 // bezel (slate)
+    const screen = this.add.rectangle(-13,-16,11,7,shade(accent,1.22),0.97).setOrigin(0.5,1);
     c.add(screen);
-    c.add(this.add.rectangle(-16,-17,5,1.5,shade(accent,1.5))); c.add(this.add.rectangle(-17,-14,8,1.5,shade(accent,1.4)));
+    c.add(this.add.rectangle(-16,-18,5,1,shade(accent,1.5))); c.add(this.add.rectangle(-17,-15,8,1,shade(accent,1.4)));
+    // a small KEYBOARD on the counter top
+    out(13,-9,13,3,0x9a958d); c.add(this.add.rectangle(13,-11,13,1,0xc4bfb6).setOrigin(0.5,1));
     this.screens = this.screens || []; this.screens.push(screen);
     return c;
   }

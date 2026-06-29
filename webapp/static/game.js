@@ -232,23 +232,31 @@ function buildSharedTextures(scene){
   // with a gentle 2-tone checker. Used EVERYWHERE (rooms + corridors are one floor).
   if (!scene.textures.exists("floor_base")){
     const g=scene.make.graphics({add:false}), S=16;
+    // QUILTED tile: each square is a slightly RAISED ceramic tile — a lit top-left bevel,
+    // a soft inner shade curving to the bottom-right, and a darker groove seam between
+    // tiles. Subtle enough to read as one tan floor, detailed enough to look drawn.
     const tile=(tx,ty,base)=>{
-      // QUIET floor: one flat tan + a single whisper-seam (no per-tile highlight/fleck) so
-      // the floor recedes and the characters win the contrast battle.
-      g.fillStyle(base,1); g.fillRect(tx,ty,S,S);
-      g.fillStyle(PC.floorSeam,1); g.fillRect(tx,ty+S-1,S,1); g.fillRect(tx+S-1,ty,1,S);
+      g.fillStyle(base,1);                  g.fillRect(tx,ty,S,S);
+      g.fillStyle(shade(base,1.06),1);      g.fillRect(tx,ty,S-1,1); g.fillRect(tx,ty,1,S-1);     // top-left bevel
+      g.fillStyle(shade(base,1.10),1);      g.fillRect(tx,ty,2,2);                                 // bright corner
+      g.fillStyle(shade(base,0.95),1);      g.fillRect(tx+2,ty+S-2,S-3,1); g.fillRect(tx+S-2,ty+2,1,S-3); // inner soft shade
+      g.fillStyle(PC.floorSeam,1);          g.fillRect(tx,ty+S-1,S,1); g.fillRect(tx+S-1,ty,1,S);  // groove seam
     };
-    for(let r=0;r<3;r++) for(let c=0;c<3;c++) tile(c*S, r*S, (r+c)%2 ? PC.floorAlt : PC.floor);
-    g.generateTexture("floor_base", S*3, S*3); g.destroy();
+    for(let r=0;r<4;r++) for(let c=0;c<4;c++) tile(c*S, r*S, (r+c)%2 ? PC.floorAlt : PC.floor);
+    g.generateTexture("floor_base", S*4, S*4); g.destroy();
   }
-  // Perimeter wall: cream brick course (the building's outer wall).
+  // Perimeter wall — CLEAN brick: even courses, quiet cool mortar, a 1px lit top edge
+  // and a 1px shaded bottom edge per brick (top-left light). Reads as drawn masonry.
   if (!scene.textures.exists("wall_base")){
     const g=scene.make.graphics({add:false});
-    g.fillStyle(PC.wallShade,1); g.fillRect(0,0,40,32);
-    g.fillStyle(PC.wall,1);
-    g.fillRect(1,1,18,14); g.fillRect(21,1,18,14); g.fillRect(-9,17,18,14); g.fillRect(11,17,18,14); g.fillRect(31,17,18,14);
-    g.fillStyle(PC.wallHi,1);
-    g.fillRect(1,1,18,2); g.fillRect(21,1,18,2); g.fillRect(11,17,18,2); g.fillRect(31,17,18,2);
+    g.fillStyle(PC.wallShade,1); g.fillRect(0,0,40,32);                       // mortar bed
+    const brick=(bx,by,bw)=>{
+      g.fillStyle(PC.wall,1);            g.fillRect(bx,by,bw,13);
+      g.fillStyle(PC.wallHi,1);          g.fillRect(bx,by,bw,1);              // lit top edge
+      g.fillStyle(shade(PC.wall,0.88),1);g.fillRect(bx,by+12,bw,1);          // shaded bottom edge
+    };
+    brick(1,1,17); brick(20,1,17);                                           // course 1
+    brick(-8,17,17); brick(11,17,17); brick(30,17,17);                       // course 2 (half-offset)
     g.generateTexture("wall_base",40,32); g.destroy();
   }
 }

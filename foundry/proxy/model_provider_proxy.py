@@ -63,8 +63,11 @@ served capability silently degraded. That is flagged as drift (kind
 from __future__ import annotations
 
 import json
+import os
+import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import StrEnum
 from fnmatch import fnmatchcase
@@ -372,6 +375,95 @@ class _RetryPolicy:
         self.sleeper(delay)
 
 
+# Words/codes in a transport error that mean "the PROVIDER throttled us" (HTTP 429,
+# Anthropic 529 overloaded, quota). Rate-limit errors are NOT failures of the pinned
+# model — they're transient and must be waited out (honoring Retry-After), on a
+# SEPARATE, more generous budget than a real transport failure.
+_RATE_LIMIT_MARKERS = (
+    "rate limit", "rate_limit", "ratelimit", "too many requests",
+    "429", "529", "overloaded", "quota exceeded", "throttl",
+)
+
+
+def _int_env(name: str, default: int) -> int:
+    """A non-negative int from the environment (blank/garbage -> default)."""
+    try:
+        return max(0, int(os.environ.get(name) or default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _classify_rate_limit(exc: BaseException) -> tuple[bool, float | None]:
+    """(is_rate_limited, retry_after_seconds_or_None) for a transport exception.
+
+    Detects across SDK error shapes (a ``status_code``/``status`` of 429/529, a
+    ``RateLimit``/``Overloaded`` class name) and as a last resort the message text,
+    and pulls a ``Retry-After`` header value when the provider supplied one."""
+    status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+    is_rl = status in (429, 529)
+    if not is_rl:
+        name = type(exc).__name__.lower()
+        if "ratelimit" in name or "overloaded" in name:
+            is_rl = True
+    if not is_rl and any(m in str(exc).lower() for m in _RATE_LIMIT_MARKERS):
+        is_rl = True
+    if not is_rl:
+        return False, None
+    # Honor Retry-After (seconds) when the provider gave one.
+    headers = getattr(getattr(exc, "response", None), "headers", None)
+    if headers is not None:
+        try:
+            getter = headers.get if hasattr(headers, "get") else (lambda *_: None)
+            ra = getter("retry-after") or getter("Retry-After")
+            if ra is not None:
+                return True, max(0.0, float(ra))
+        except (TypeError, ValueError):
+            pass
+    return True, None
+
+
+class _RateLimiter:
+    """Optional client-side throttle in front of every model egress.
+
+    Two independent knobs, both OFF (no-op) by default so behaviour is unchanged
+    unless an operator opts in:
+
+    * ``max_rpm`` — paces requests to at most N per minute (a reserved-slot pacer,
+      so concurrent callers space out instead of bursting past the provider's RPM);
+    * ``max_concurrent`` — caps simultaneous in-flight calls (a semaphore).
+
+    Thread-safe: model calls fan out across worker threads, so the pacer reserves
+    its next slot under a lock, then sleeps OUTSIDE the lock to keep concurrency."""
+
+    def __init__(self, max_rpm: int = 0, max_concurrent: int = 0, *,
+                 sleeper: Callable[[float], None] = time.sleep,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self._min_interval = 60.0 / max_rpm if max_rpm > 0 else 0.0
+        self._sem = threading.Semaphore(max_concurrent) if max_concurrent > 0 else None
+        self._lock = threading.Lock()
+        self._next_allowed = 0.0
+        self._sleeper = sleeper
+        self._clock = clock
+
+    @contextmanager
+    def slot(self) -> Iterator[None]:
+        if self._sem is not None:
+            self._sem.acquire()
+        try:
+            if self._min_interval > 0:
+                with self._lock:
+                    now = self._clock()
+                    start = max(now, self._next_allowed)
+                    self._next_allowed = start + self._min_interval
+                    wait = start - now
+                if wait > 0:
+                    self._sleeper(wait)
+            yield
+        finally:
+            if self._sem is not None:
+                self._sem.release()
+
+
 class ModelProviderProxy:
     """Single egress, lineage observer, manifest writer, judgment stamper."""
 
@@ -389,6 +481,11 @@ class ModelProviderProxy:
         backoff_base_s: float = 0.5,
         sleeper: Callable[[float], None] = time.sleep,
         max_tokens: int = _DEFAULT_MAX_TOKENS,
+        max_rpm: int | None = None,
+        max_concurrent_calls: int | None = None,
+        rate_limit_max_retries: int | None = None,
+        rate_limit_backoff_base_s: float = 2.0,
+        rate_limit_backoff_cap_s: float = 60.0,
     ) -> None:
         if profile not in ("self_judge", "decorrelated"):
             raise ValueError(f"unknown profile: {profile!r}")
@@ -415,6 +512,24 @@ class ModelProviderProxy:
         if not self._tier_models:
             raise ValueError("tier_models must define at least one tier")
         self._retry = _RetryPolicy(max_retries, backoff_base_s, sleeper)
+        # Rate-limit (429/529) handling: a separate, more generous retry budget that
+        # honors Retry-After, so a long run rides out provider throttling instead of
+        # failing closed on it. Defaults come from the environment (off-by-default for
+        # the throttle, 6 waits for the budget) but stay injectable for tests.
+        self._rl_sleeper = sleeper
+        self._rl_max_retries = (
+            rate_limit_max_retries if rate_limit_max_retries is not None
+            else _int_env("FOUNDRY_RATE_LIMIT_RETRIES", 6)
+        )
+        self._rl_backoff_base_s = rate_limit_backoff_base_s
+        self._rl_backoff_cap_s = rate_limit_backoff_cap_s
+        self._limiter = _RateLimiter(
+            max_rpm=(max_rpm if max_rpm is not None
+                     else _int_env("FOUNDRY_MAX_RPM", 0)),
+            max_concurrent=(max_concurrent_calls if max_concurrent_calls is not None
+                            else _int_env("FOUNDRY_MAX_CONCURRENT_CALLS", 0)),
+            sleeper=sleeper,
+        )
         self._max_tokens = max_tokens
         self._manifest: list[dict[str, Any]] = []  # append-only
         self._drift_events: list[dict[str, Any]] = []
@@ -729,15 +844,34 @@ class ModelProviderProxy:
         judgment nodes pause-and-escalate instead of degrading silently
         (arch §2b/§8).
         """
-        attempt = 0
+        attempt = 0          # real transport failures (bounded, fail-closed)
+        rl_attempt = 0       # provider throttling (separate, more generous budget)
         while True:
             try:
-                response = self._transport.send(request)
+                with self._limiter.slot():
+                    response = self._transport.send(request)
                 parsed = (
                     _extract_json_object(response.text) if schema is not None else None
                 )
                 return response, parsed
             except Exception as exc:
+                is_rl, retry_after = _classify_rate_limit(exc)
+                if is_rl:
+                    # Provider throttled us — wait it out on the rate-limit budget,
+                    # honoring Retry-After; only fail closed after that budget too.
+                    if rl_attempt >= self._rl_max_retries:
+                        raise ProxyUnavailable(
+                            f"provider rate-limited after {rl_attempt + 1} wait(s); "
+                            "judgment nodes must pause-and-escalate"
+                        ) from exc
+                    backoff = min(
+                        self._rl_backoff_cap_s,
+                        self._rl_backoff_base_s * (2**rl_attempt),
+                    )
+                    delay = retry_after if retry_after is not None else backoff
+                    self._rl_sleeper(min(delay, self._rl_backoff_cap_s))
+                    rl_attempt += 1
+                    continue
                 if attempt >= self._retry.max_retries:
                     raise ProxyUnavailable(
                         f"provider transport failed after {attempt + 1} attempt(s); "

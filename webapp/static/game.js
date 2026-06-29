@@ -99,6 +99,13 @@ const AGENT_ROOM = {}; for (const rm in ROSTER) for (const nm of ROSTER[rm]) AGE
 const AREA_COLOR = {frontend:0x7fd1ff, backend:0xff9b5e, data:0x7dffb0,
                     infra:0xb59bff, security:0xff6d6d};
 const AREA_TAG = {frontend:"FE", backend:"BE", data:"DA", infra:"IN", security:"SE"};
+// short role tags for the named static-room agents (the senior roles), shown on a badge.
+const ROLE_TAG = {
+  "Stakeholder Proxy":"STAKEHLDR", "Product Manager":"PROD MGR", "Criteria Critic":"CRITIC",
+  "Program Manager":"PROG MGR", "Principal Architect":"ARCHITECT", "QA Engineer":"QA ENG",
+  "SDET":"SDET", "Reviewer":"REVIEWER", "Technical Writer":"WRITER", "AppSec Engineer":"APPSEC",
+  "Audit & Compliance":"AUDIT", "Supply-chain Reviewer":"SUPPLY",
+};
 
 // ---- generated character sprites (our own pixel art) -----------------------
 // route1rodent-style 16x22 GBA RPG sprite: a BIG rounded hair mass (the hero) over
@@ -872,15 +879,23 @@ class FloorScene extends Phaser.Scene {
     for (const room in ROSTER){
       const names = ROSTER[room], R = ROOMS[room]; if (!R) continue;
       const cols = Math.min(names.length, 3);
+      const single = names.length === 1;                         // a one-role room → centre it
       names.forEach((name,i)=>{
         const col = i%cols, row = Math.floor(i/cols);
         // tight pods: fixed pitch from a left margin, centred as a block in the room
         const blockW = (cols-1)*64, hx = R.cx - blockW/2 + col*64;
-        const hy = R.floorY + 34 + row*48;          // stand in the room's floor
+        const hy = single ? Math.round(R.floorY + (R.h-46)*0.45)  // single role → centred desk
+                          : R.floorY + 34 + row*48;               // else stand in the room's floor
         const seed = hashStr((this.proj.id||'f')+name), kit = kitFor(name, seed);
         this.makeWorkstation(hx, hy+16, kit.accent);              // desk just in front of them
         const a = this.makePerson(hx, hy, kit);
         a.setScale(1.4).setDepth(hy);                             // y-sort (desk occludes legs)
+        // role badge over the agent so every senior role is labelled (like the eng leads)
+        const rtag = ROLE_TAG[name] || name.slice(0,9).toUpperCase();
+        const acc = (kit.accent!=null ? kit.accent : 0x9fb4d8), bw = rtag.length*5+8;
+        a.add(this.add.rectangle(0,-16,bw,10,acc,0.95).setOrigin(0.5).setStrokeStyle(1,0x10182c));
+        a.add(this.add.text(0,-16,rtag,{fontFamily:"'PixelFont','Courier New'",fontSize:"7px",
+          fontStyle:"bold",color:"#10182c"}).setOrigin(0.5));
         a.home = {x:hx,y:hy}; a.room = room; a.loungeSlot = li++;
         // Start visible in the lounge (idle); stages pull each team to its desks.
         const ls = this.loungeSpot(a.loungeSlot);
@@ -1373,11 +1388,10 @@ class FloorScene extends Phaser.Scene {
     for(const rk in perRoom){
       const R=ROOMS[rk]; if(!R) continue;
       const people=perRoom[rk];
-      const cols=Math.min(3, Math.max(1, Math.ceil(people.length/2)));
-      people.forEach((p,i)=>{
-        const c=i%cols, r=Math.floor(i/cols);
-        const x=Math.round(R.x + R.w*((c+1)/(cols+1)));
-        const y=R.floorY + 34 + r*44;
+      const lead=people.find(p=>p.lead), ics=people.filter(p=>!p.lead);
+      // create one seated worker (+desk) at (x,y); leads get the star + "<AREA> LEAD" badge.
+      const place=(p, x, y, faceUp)=>{
+        x=Math.round(x); y=Math.round(y);
         const col6=p.color.toString(16).padStart(6,"0");
         const tag=AREA_TAG[p.area]||p.area.slice(0,2).toUpperCase();
         const k = p.lead ? kitFor("Tech-Lead "+p.area, hashStr((this.proj.id||'f')+"TL"+p.area)) : poolKit(slot);
@@ -1385,23 +1399,31 @@ class FloorScene extends Phaser.Scene {
         const ws=this.makeWorkstation(x, y+16, p.color);
         const s=this.makePerson(x, y, k); s.setScale(p.lead?1.32:1.18).setDepth(y).setAlpha(p.lead?1:0.94);
         if (p.lead){
-          // LEAD marker: a gold star over the head + a filled "<AREA> LEAD" badge.
           s.add(this.add.text(0,-27,"★",{fontFamily:"'PixelFont','Courier New'",fontSize:"10px",color:"#ffd95e"})
             .setOrigin(0.5));
           const lbl=tag+" LEAD", pw=lbl.length*5+8;
           s.add(this.add.rectangle(0,-15,pw,10,p.color,0.96).setOrigin(0.5).setStrokeStyle(1,0x10182c));
           s.add(this.add.text(0,-15,lbl,{fontFamily:"'PixelFont','Courier New'",fontSize:"7px",
             fontStyle:"bold",color:"#10182c"}).setOrigin(0.5));
+          if (faceUp && s.faceBack) s.faceBack();              // overseeing — faces up into the room
         } else {
           s.add(this.add.text(0,-15, tag,
             {fontFamily:"'PixelFont','Courier New'",fontSize:"7px",fontStyle:"bold",color:"#"+col6}).setOrigin(0.5));
         }
         s.home={x,y}; s.loungeSlot=slot++; s.seen=true; s.inLounge=false;
-        s.working = (this.activeRoomKey === "engineering");   // building if the stage is live
-        this.zzzLoop(s);                                       // idle engineers nap at the desk
+        s.working = (this.activeRoomKey === "engineering");
+        this.zzzLoop(s);
         if (s.working) this.startWalk(s); else this.deskIdle(s);
         (p.lead?this.techLeadGroup:this.poolGroup).push(s, ws);
-      });
+      };
+      if (!ics.length && lead){
+        place(lead, R.cx, R.floorY + (R.h-46)*0.45, true);     // ONLY the lead → centre the desk
+      } else {
+        const c2=Math.min(3, Math.max(1, Math.ceil(ics.length/2)));
+        ics.forEach((p,i)=>{ const c=i%c2, r=Math.floor(i/c2);
+          place(p, R.x + R.w*((c+1)/(c2+1)), R.floorY + 30 + r*42, false); });   // ICs grid (upper room)
+        if (lead) place(lead, R.x1 - 50, R.y1 - 36, true);     // LEAD oversees from the bottom-right
+      }
       this.engLabels.push(this.add.text(R.x1-8, R.y+8, "×"+people.length,
         {fontFamily:"'PixelFont','Courier New'",fontSize:"9px",fontStyle:"bold",color:"#ffc08a"})
         .setOrigin(1,0).setDepth(28));

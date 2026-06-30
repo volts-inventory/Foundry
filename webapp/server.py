@@ -1672,8 +1672,25 @@ class Handler(BaseHTTPRequestHandler):
         """Clear ALL floors & repos: drop the in-memory floors, reset the floor
         counter, and wipe the durable catalog (builds + event logs + seen-uris) so a
         restart rehydrates nothing. Behind the mutation guard. The content-addressed
-        store on disk is left as-is — it is unreferenced once the catalog is empty."""
+        store on disk is left as-is — it is unreferenced once the catalog is empty.
+
+        REFUSES while a build is still active: an in-flight build holds its own
+        Project reference and keeps writing to the catalog on each emit, so wiping
+        mid-build would resurrect that build's row (and the build would become
+        undecidable — gone from _PROJECTS but still running). Fail-closed: wait for
+        builds to finish (or reload) before clearing."""
         with _LOCK:
+            active = [
+                p.id for p in _PROJECTS.values()
+                if p.status in ("running", "queued") and not p.ended
+            ]
+            if active:
+                self._json(409, {
+                    "error": f"{len(active)} build(s) still running — let them "
+                             "finish (or reload), then clear.",
+                    "running": active,
+                })
+                return
             _PROJECTS.clear()
             _FLOOR[0] = 0
         try:

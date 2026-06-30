@@ -273,6 +273,8 @@ def make_principal_architect_node(
 def _build_adrs(raw: Any, seq: Seq, *, store: ArtifactStore | None = None) -> list[ADR]:
     out: list[ADR] = []
     for i, item in enumerate(raw or ()):
+        if not isinstance(item, dict):
+            continue  # CLI backends don't grammar-enforce the schema; skip a non-object
         out.append(
             ADR(
                 id=str(item.get("id", f"ADR-{i:03d}")),
@@ -291,6 +293,8 @@ def _build_adrs(raw: Any, seq: Seq, *, store: ArtifactStore | None = None) -> li
 def _build_interfaces(raw: Any, seq: Seq) -> list[InterfaceContract]:
     out: list[InterfaceContract] = []
     for i, item in enumerate(raw or ()):
+        if not isinstance(item, dict):
+            continue  # CLI backends don't grammar-enforce the schema; skip a non-object
         out.append(
             InterfaceContract(
                 name=str(item.get("name", f"iface-{i}")),
@@ -305,6 +309,8 @@ def _build_interfaces(raw: Any, seq: Seq) -> list[InterfaceContract]:
 def _build_constraints(raw: Any, seq: Seq) -> list[PinnedConstraint]:
     out: list[PinnedConstraint] = []
     for i, item in enumerate(raw or ()):
+        if not isinstance(item, dict):
+            continue  # CLI backends don't grammar-enforce the schema; skip a non-object
         scope = ConstraintScope(str(item.get("scope", "local")))
         out.append(
             PinnedConstraint(

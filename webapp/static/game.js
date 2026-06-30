@@ -2399,7 +2399,11 @@ document.getElementById("repos-clear").onclick=async ()=>{
   if(!confirm("Clear ALL floors and repositories? This wipes every build from the catalog and cannot be undone.")) return;
   try{
     const r = await fetch("/api/reset", {method:"POST", headers:postHeaders()});
-    if(!r.ok){ alert("Clear failed ("+r.status+")."); return; }
+    if(!r.ok){
+      const d = await r.json().catch(()=>({}));
+      alert(d.error || ("Clear failed ("+r.status+")."));   // e.g. builds still running
+      return;
+    }
     location.reload();   // floors/repos are gone server-side — rebuild the empty UI
   }catch(_){ alert("Clear failed — could not reach the server."); }
 };

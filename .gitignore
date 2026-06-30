@@ -41,6 +41,3 @@ mutants/
 /webapp/static/assets/sprites/*
 !/webapp/static/assets/sprites/characters.png
 !/webapp/static/assets/sprites/CREDITS.md
-
-# Local env (copied from foundry.{mac,linux}.env.example; may hold secrets)
-foundry.env

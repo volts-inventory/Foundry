@@ -18,16 +18,17 @@ Open **Terminal**, go to this folder, and run (Mac shown; Linux uses
 `foundry.linux.env.example`):
 
 ```bash
-cd ~/Coders                                     # wherever you cloned it
-cp foundry.mac.env.example foundry.env          # 1. Mac preset — Claude Code, localhost
-make token                                      # 2. mint a Claude Code token (Max plan)
-open -e foundry.env                             #    …paste it as CLAUDE_CODE_OAUTH_TOKEN
-./run.sh                                        # 3. start it → http://localhost:8765
+cd ~/Coders                              # wherever you cloned it
+cp foundry.mac.env.example .env          # 1. Mac preset — Claude Code, localhost
+make token                               # 2. mint a Claude Code token (Max plan)
+open -e .env                             #    …paste it as CLAUDE_CODE_OAUTH_TOKEN
+uv run python -m webapp.server           # 3. start it → http://localhost:8765
 ```
 
-The Mac preset runs on **Claude Code** (`claude -p`, your Max plan — no API billing).
-Prefer the metered API instead? Set `FOUNDRY_MODEL_BACKEND=anthropic` and an
-`ANTHROPIC_API_KEY` in the env file (see §4).
+The server loads `.env` on startup, so that's the whole run command — no wrapper
+(`make serve` is just an alias for it). The Mac preset runs on **Claude Code**
+(`claude -p`, your Max plan — no API billing); prefer the metered API instead? Set
+`FOUNDRY_MODEL_BACKEND=anthropic` and an `ANTHROPIC_API_KEY` in `.env` (see §4).
 
 Leave the Terminal window open while it runs. To keep it running after closing the
 window, see [§10](#10-run-it-as-a-long-lived-server).
@@ -408,24 +409,26 @@ export FOUNDRY_GATE_SANDBOX=inprocess
 The Workshop is built to run unattended for long, complex builds — including
 **multi-day runs** — and to **survive restarts**: with a durable state dir it
 resumes an in-flight build from its last checkpoint, and the SSE event log replays
-in full on reconnect. Launch it with `run.sh` and a host preset:
+in full on reconnect. Configure a `.env` and start it with `make serve` (the server
+loads `.env` itself):
 
 ```bash
-cp foundry.mac.env.example foundry.env    # Mac   (Linux/Pi: foundry.linux.env.example)
-$EDITOR foundry.env                       # set your token/key + any tuning
-./run.sh                                  # foreground; Ctrl-C to stop
+cp foundry.mac.env.example .env    # Mac   (Linux/Pi: foundry.linux.env.example)
+$EDITOR .env                       # set your token/key + any tuning
+uv run python -m webapp.server     # foreground; Ctrl-C to stop
 ```
 
 Keep it running after you close the terminal with tmux or nohup:
 
 ```bash
-tmux new -s foundry './run.sh'            # reattach later: tmux attach -t foundry
-nohup ./run.sh > ~/foundry.log 2>&1 &     # detached; kill the PID to stop
+tmux new -s foundry 'uv run python -m webapp.server'        # reattach: tmux attach -t foundry
+nohup uv run python -m webapp.server > ~/foundry.log 2>&1 & # detached; kill the PID to stop
 ```
 
-`run.sh` has no supervisor — if it crashes or the host reboots, just re-run it and
+There's no supervisor — if it crashes or the host reboots, just start it again and
 the server **resumes from its durable checkpoint** (so you lose no build). For
-truly hands-off auto-restart, wrap it in your own systemd unit / launchd agent.
+hands-off auto-restart, wrap it in your own systemd unit / launchd agent. On a Mac
+that mustn't sleep mid-run, prefix with `caffeinate -is`.
 
 For a long run, set a **cost cap**, size `WORKSHOP_MAX_CONCURRENT_BUILDS` to your
 host (Pi `1`, M-series Mac `3–4`), and — if your plan needs it — the provider

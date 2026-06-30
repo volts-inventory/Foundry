@@ -34,12 +34,16 @@ from webapp.store import BuildStore
 
 
 def _load_env_file() -> bool:
-    """Load `KEY=VALUE` lines from a local `.env` into the environment (without
-    overriding anything already set), so the server picks up your config on its own —
-    no wrapper script needed. Returns True iff a `.env` was found. Values may use
-    `$HOME` / `~`. Run via `make serve` and Make also loads `.env`; this makes a bare
-    `python -m webapp.server` behave the same."""
+    """Load `KEY=VALUE` lines from a local `.env` into the environment so the server
+    picks up your config on its own — no wrapper script needed. Returns True iff a
+    `.env` was found. Values may use `$HOME` / `~`.
+
+    Precedence: a var ALREADY set in the real process environment wins (an explicit
+    `export` / shell override is never clobbered). WITHIN the file, the LAST line for
+    a key wins — so `echo "KEY=value" >> .env` reliably overrides an earlier line
+    (e.g. a preset's placeholder)."""
     root = Path(__file__).resolve().parent.parent
+    preexisting = set(os.environ)            # real-env vars win over the file
     for cand in (Path.cwd() / ".env", root / ".env"):
         if not cand.is_file():
             continue
@@ -48,9 +52,10 @@ def _load_env_file() -> bool:
             if not line or line.startswith("#") or "=" not in line:
                 continue
             key, _, val = line.partition("=")
+            key = key.strip()
             val = os.path.expandvars(os.path.expanduser(val.strip().strip('"').strip("'")))
-            if key.strip():
-                os.environ.setdefault(key.strip(), val)
+            if key and key not in preexisting:   # last file line for a key wins
+                os.environ[key] = val
         return True
     return False
 

@@ -45,6 +45,39 @@ Set `FOUNDRY_WORKSHOP_TOKEN` whenever you bind beyond localhost (`WORKSHOP_HOST=
 
 ---
 
+## Run on demand (no service)
+
+Don't want a service? Just launch it by hand when you need it. `deploy/run.sh`
+sources `deploy/foundry.env`, keeps a Mac awake (`caffeinate`), and runs the server
+in the foreground:
+
+```bash
+cp deploy/foundry.env.example deploy/foundry.env && $EDITOR deploy/foundry.env
+./deploy/run.sh                      # foreground; Ctrl-C to stop
+```
+
+To keep it running after you close the terminal, use **tmux/screen** (recommended —
+you can reattach to watch the floor + logs) or **nohup**:
+
+```bash
+# tmux: detach with Ctrl-b d, reattach later with `tmux attach -t foundry`
+tmux new -s foundry './deploy/run.sh'
+
+# nohup: fully detached; logs to a file; stop by killing the PID
+nohup ./deploy/run.sh > ~/foundry.log 2>&1 &
+echo $! > ~/foundry.pid              # ...later:  kill "$(cat ~/foundry.pid)"
+```
+
+**On-demand vs a service.** The only thing a service (systemd/launchd) adds is
+**auto-restart on crash/reboot**. On-demand keeps everything else — and because the
+server **resumes any in-flight build from its durable checkpoint on the next
+start**, you just re-run `./deploy/run.sh` after a crash and it picks up where it
+left off (durable state must be on storage that survived). For a truly unattended
+multi-day job, a service is nicer; for "start it when I want, stop it when I'm
+done," on-demand is all you need.
+
+---
+
 ## Raspberry Pi (systemd)
 
 ```bash

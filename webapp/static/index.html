@@ -90,8 +90,7 @@
       <div class="row">
         <label>Mode</label>
         <select id="mode-select">
-          <option value="assistant">assistant — PR for a human</option>
-          <option value="gated">gated — sign-off + evidence pack</option>
+          <option value="gated">gated — CTO signs off in the floor screen + evidence pack</option>
           <option value="autonomous">autonomous — build · admit · deploy</option>
         </select>
       </div>
@@ -197,9 +196,9 @@
         <div id="pulls-list" class="pulls-list"></div>
       </div>
       <div class="repo-pane hidden" data-pane="signoffs">
-        <p class="cp-note">Recorded human approvals (Design / Release). Gated &amp;
-          autonomous builds record these; assistant builds have none. Exported with
-          the build as <code>.foundry/evidence.json</code> + <code>EVIDENCE.md</code>.</p>
+        <p class="cp-note">Recorded CTO approvals (Design / Release), signed off right
+          here in the floor screen — never in Git. Exported with the build as
+          <code>.foundry/evidence.json</code> + <code>EVIDENCE.md</code>.</p>
         <ul id="signoffs-list" class="checks-list"></ul>
       </div>
       <div class="dialog-actions">

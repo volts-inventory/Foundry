@@ -1557,9 +1557,13 @@ class Handler(BaseHTTPRequestHandler):
 
         body = self._read_json()
         request = str(body.get("request", "")).strip() or "build a tiny URL-shortener service"
-        mode = str(body.get("mode", "assistant"))
+        # The Workshop offers only gated / autonomous (both approve in the floor
+        # screen — no external Git merge). `assistant` stays a valid ENGINE/CLI mode
+        # for back-compat, but a UI build defaults to gated and never silently runs
+        # the advisory-PR posture.
+        mode = str(body.get("mode", "gated"))
         if mode not in _MODES:
-            mode = "assistant"
+            mode = "gated"
         backend = str(body.get("backend", "mock"))
         if backend not in BACKENDS:
             backend = "mock"

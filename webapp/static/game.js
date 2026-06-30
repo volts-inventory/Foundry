@@ -2097,7 +2097,7 @@ function renderSignOffs(sign_offs){
   ul.innerHTML = "";
   cnt.textContent = sign_offs.length ? String(sign_offs.length) : "";
   if(!sign_offs.length){
-    ul.innerHTML = "<li class='muted'>No sign-offs — assistant build, or none recorded.</li>";
+    ul.innerHTML = "<li class='muted'>No sign-offs recorded yet — the CTO signs off at the Design &amp; Release checkpoints.</li>";
     return;
   }
   for(const s of sign_offs){
@@ -2484,7 +2484,8 @@ syncCostCap();
 // Autonomous mode is HANDS-OFF by definition: the trust-root admission controller
 // is the sole release gate (build · admit · deploy, no human sign-off). So when
 // `autonomous` is picked, supervision (per-checkpoint human approval) is forced
-// OFF — keeping it on would pause an unattended build. assistant/gated re-enable it.
+// OFF — keeping it on would pause an unattended build. gated re-enables it so the
+// CTO drives the Design/Release checkpoints in the floor screen.
 function syncMode(){
   const mode = document.getElementById("mode-select").value;
   const sup = document.getElementById("supervised");
@@ -2496,7 +2497,7 @@ function syncMode(){
     if(hint) hint.textContent = "Autonomous is hands-off — admission is the sole release gate; no checkpoint approvals.";
   } else {
     sup.disabled = false;
-    if(hint) hint.textContent = "";
+    if(hint) hint.textContent = "Gated — the CTO approves the Design & Release checkpoints right here in the floor screen (no Git merge).";
   }
 }
 document.getElementById("mode-select").addEventListener("change", syncMode);

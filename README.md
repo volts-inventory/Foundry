@@ -391,21 +391,30 @@ export FOUNDRY_GATE_SANDBOX=inprocess
 The Workshop is built to run unattended for long, complex builds — including
 **multi-day runs** — and to **survive restarts**: with a durable state dir it
 resumes an in-flight build from its last checkpoint, and the SSE event log replays
-in full on reconnect. The [`deploy/`](deploy/) kit brings it up as an always-on
-service on either a **Raspberry Pi** (systemd) or an **Apple-silicon Mac**
-(launchd), sharing one env file.
+in full on reconnect. The [`deploy/`](deploy/) kit ships one shared env file and two
+ways to run it — **on demand** (launch by hand) or as a **service** (auto-restart on
+crash/reboot) on a **Raspberry Pi** (systemd) or **Apple-silicon Mac** (launchd).
 
 ```bash
 # 1. One shared config; edit token, key, paths, per-host tuning
 cp deploy/foundry.env.example deploy/foundry.env
 
-# 2. Install the service for your host (see deploy/README.md for the walkthrough)
-#    Pi  → deploy/pi/foundry-workshop.service     (systemd, Restart=always)
-#    Mac → deploy/mac/com.foundry.workshop.plist  (launchd, KeepAlive + caffeinate)
+# 2a. On demand — no service. Foreground (Ctrl-C to stop); use tmux/nohup to detach.
+./deploy/run.sh
+
+# 2b. …or as a managed service (see deploy/README.md for the walkthrough)
+#     Pi  → deploy/pi/foundry-workshop.service     (systemd, Restart=always)
+#     Mac → deploy/mac/com.foundry.workshop.plist  (launchd, KeepAlive + caffeinate)
 
 # 3. Validate the host BEFORE a real multi-day job — offline mock backend, no key:
 python scripts/soak_resume_check.py   # RAM-plateau soak + kill/restart resume check
 ```
+
+> **On demand vs a service:** a service only adds **auto-restart on crash/reboot**.
+> On demand keeps everything else — and since the server **resumes from its durable
+> checkpoint on the next start**, you just re-run `./deploy/run.sh` after a crash and
+> it picks up where it left off. Services suit truly unattended runs; on demand suits
+> "start it when I want, stop it when I'm done."
 
 For a long run, use a **hosted** backend with a **cost cap**, set
 `WORKSHOP_MAX_CONCURRENT_BUILDS` to your host's size (Pi `1`, M-series Mac `3–4`),

@@ -106,8 +106,15 @@ sleeps the machine regardless of `caffeinate`), or run clamshell on AC with an
 external display. Back up `FOUNDRY_STATE_DIR` with Time Machine or `rsync`.
 
 The Mac is the more capable host — more RAM/cores, fast durable SSD, and you can
-develop and run on the same box. Its only gotchas are **don't let it sleep** and
-**launchd instead of systemd**.
+develop and run on the same box. Its gotchas are **don't let it sleep**, **launchd
+instead of systemd**, and the **gate sandbox**:
+
+> **Gate sandbox on macOS.** Generated tests run in a Linux namespace sandbox
+> (`unshare`, no network) by default — which macOS doesn't have, so the test gate
+> **fails closed** on a Mac. Set `FOUNDRY_GATE_SANDBOX=inprocess` to run them
+> `sys.path`-fenced instead, but note that drops the network/namespace isolation a
+> Linux host gets — generated test code then runs in your user environment with
+> network access. For untrusted builds, prefer the Pi (or any Linux host).
 
 ---
 

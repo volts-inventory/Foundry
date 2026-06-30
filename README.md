@@ -69,8 +69,9 @@ python -m foundry.cli evolve <prior-repo> "<change>" [OPTIONS]
 8. [Common flags](#7-common-flags)
 9. [Evolve an existing repo](#8-evolve-an-existing-repo)
 10. [Workshop UI](#9-workshop-ui)
-11. [Develop](#10-develop)
-12. [Configuration reference](#configuration-reference)
+11. [Run it as a long-lived server](#10-run-it-as-a-long-lived-server)
+12. [Develop](#11-develop)
+13. [Configuration reference](#configuration-reference)
 
 ---
 
@@ -385,7 +386,45 @@ export FOUNDRY_GATE_SANDBOX=inprocess
 
 ---
 
-## 10. Develop
+## 10. Run it as a long-lived server
+
+The Workshop is built to run unattended for long, complex builds — including
+**multi-day runs** — and to **survive restarts**: with a durable state dir it
+resumes an in-flight build from its last checkpoint, and the SSE event log replays
+in full on reconnect. The [`deploy/`](deploy/) kit brings it up as an always-on
+service on either a **Raspberry Pi** (systemd) or an **Apple-silicon Mac**
+(launchd), sharing one env file.
+
+```bash
+# 1. One shared config; edit token, key, paths, per-host tuning
+cp deploy/foundry.env.example deploy/foundry.env
+
+# 2. Install the service for your host (see deploy/README.md for the walkthrough)
+#    Pi  → deploy/pi/foundry-workshop.service     (systemd, Restart=always)
+#    Mac → deploy/mac/com.foundry.workshop.plist  (launchd, KeepAlive + caffeinate)
+
+# 3. Validate the host BEFORE a real multi-day job — offline mock backend, no key:
+python scripts/soak_resume_check.py   # RAM-plateau soak + kill/restart resume check
+```
+
+For a long run, use a **hosted** backend with a **cost cap**, set
+`WORKSHOP_MAX_CONCURRENT_BUILDS` to your host's size (Pi `1`, M-series Mac `3–4`),
+and — if your plan needs it — the provider throttle (`FOUNDRY_MAX_RPM`). The server
+**bounds its own memory** over time (finished builds' in-memory logs are trimmed; the
+proxy manifest is capped) and the **SDK client auto-refreshes** so a rotated/expired
+credential doesn't end the run.
+
+> **macOS:** the gate sandbox is Linux-only (`unshare`), so on a Mac the test gate
+> **fails closed** unless you set `FOUNDRY_GATE_SANDBOX=inprocess` — which runs
+> generated tests `sys.path`-fenced but **without** the network/namespace isolation
+> a Linux host gets. Prefer the Pi (or any Linux host) when running untrusted builds.
+
+See **[deploy/README.md](deploy/README.md)** for storage durability (SD vs SSD),
+tmpfs/zram tuning, backups, and the full per-host checklist.
+
+---
+
+## 11. Develop
 
 ```bash
 make lint            # ruff
@@ -416,7 +455,20 @@ make clean           # remove caches + ./.run output
 | `FOUNDRY_GATE_SANDBOX` | Run generated tests in a namespace sandbox (default) or `inprocess` to opt out | sandbox |
 | `WORKSHOP_HOST` / `WORKSHOP_PORT` | UI bind address / port | `127.0.0.1` / `8765` |
 | `WORKSHOP_OUTPUT_DIR` | UI build output root | `.run/web` |
+| `WORKSHOP_STATE_DIR` | UI durable state dir (resume) | `WORKSHOP_OUTPUT_DIR/state` |
 | `FOUNDRY_WORKSHOP_TOKEN` | Shared token for UI mutations | off (localhost-only) |
+
+**Long-lived server** (see [deploy/](deploy/) — for a Pi/Mac running for days):
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `WORKSHOP_MAX_CONCURRENT_BUILDS` | Cap builds running at once; extras queue | `2` (Pi `1`, Mac `3–4`) |
+| `FOUNDRY_MAX_RPM` | Client-side requests/min throttle (`0` = off) | `0` |
+| `FOUNDRY_MAX_CONCURRENT_CALLS` | Cap simultaneous model calls (`0` = off) | `0` |
+| `FOUNDRY_RATE_LIMIT_RETRIES` | Waits to ride out a 429/529 burst | `6` |
+| `FOUNDRY_CLIENT_TTL_S` | Rebuild SDK client every N s — credential refresh (`0` = off) | `0` |
+| `FOUNDRY_MANIFEST_MAX` | Cap proxy per-call manifest (`0` = unbounded) | `100000` |
+| `WORKSHOP_LOG_TAIL` / `WORKSHOP_LOG_GRACE_S` / `WORKSHOP_LOG_SWEEP_S` | Finished-build log trim: tail kept · grace before trim · sweep interval (`0` = off) | `64` · `90` · `120` |
 
 > Don't set both `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` — the key
 > outranks the token and bills the API.

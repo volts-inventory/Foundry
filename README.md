@@ -23,16 +23,23 @@ python -m venv .venv && source .venv/bin/activate    # 1. install the project (o
 pip install -e .
 cp foundry.mac.env.example .env          # 2. Mac preset — Claude Code, localhost
 
-# 3. Only if you're NOT already logged into Claude Code, authenticate once:
-# claude setup-token
-# echo "CLAUDE_CODE_OAUTH_TOKEN=<token>" >> .env    # paste in place of <token>
+# 3. Auth for claude-cli — pick ONE (skip if you're already logged in here):
+#   a) Log in on THIS machine — session cached on disk, auto-refreshes, nothing to paste:
+# claude /login
+#   b) Or mint a portable token and store it in .env — for headless boxes, CI, a Pi:
+# claude setup-token                              # prints CLAUDE_CODE_OAUTH_TOKEN
+# echo "CLAUDE_CODE_OAUTH_TOKEN=<token>" >> .env  # paste in place of <token>
 
 python -m webapp.server                  # 4. start it → http://localhost:8765
 ```
 
 The server loads `.env` on startup, so that's the whole run command — no wrapper. The
-Mac preset runs on **Claude Code** (`claude -p`, your Max plan — no API billing) and
-uses your existing Claude Code login. Prefer the metered API instead? Set
+Mac preset runs on **Claude Code** (`claude -p`, your Max plan — no API billing). For
+auth you have two equivalent options: **log in on the machine** (`claude /login` — a
+session cached on disk that the CLI auto-refreshes), or **generate a token** (`claude
+setup-token`) and store it in `.env` as `CLAUDE_CODE_OAUTH_TOKEN` (handy for a headless
+host or CI, where there's no interactive login to lean on). If you're already logged in,
+you need neither — `claude -p` reuses that session. Prefer the metered API instead? Set
 `FOUNDRY_MODEL_BACKEND=anthropic` and an `ANTHROPIC_API_KEY` in `.env` (see §4).
 
 Leave the Terminal window open while it runs. To keep it running after closing the
@@ -223,7 +230,7 @@ echo "FOUNDRY_MODEL_BACKEND=anthropic" >> .env
 
 | Backend | What it is | Required setting(s) | How to get it |
 |---|---|---|---|
-| `claude-cli` | `claude -p` on a Max plan (no API billing) | `CLAUDE_CODE_OAUTH_TOKEN` | `claude setup-token` |
+| `claude-cli` | `claude -p` on a Max plan (no API billing) | machine login **or** `CLAUDE_CODE_OAUTH_TOKEN` | `claude /login` (session on disk) or `claude setup-token` (token → `.env`) |
 | `anthropic` | Claude API (SDK, direct) | `ANTHROPIC_API_KEY` | console.anthropic.com |
 | `openai` | OpenAI API (SDK `chat.completions`, direct) | `OPENAI_API_KEY` | platform.openai.com |
 | `codex` | codex CLI (`codex exec`) | `OPENAI_API_KEY` | platform.openai.com |
@@ -250,7 +257,10 @@ rejects the call):
 ### Per-backend setup (credentials)
 
 ```bash
-# 1. claude-cli — `claude -p` on a Max subscription. Mint a token, add to .env.
+# 1. claude-cli — `claude -p` on a Max subscription. Auth two ways (pick one):
+#    a) log in on this machine — session cached on disk, nothing to paste:
+claude /login
+#    b) or mint a portable token and store it in .env — for headless hosts / CI:
 claude setup-token                        # logs in; prints CLAUDE_CODE_OAUTH_TOKEN
 echo "CLAUDE_CODE_OAUTH_TOKEN=<token>" >> .env
 python -m foundry.cli "build a todo API" --backend claude-cli --out ./out

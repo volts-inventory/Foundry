@@ -141,17 +141,14 @@ Two seams are deliberately independent, and worth internalizing before you start
 ## 1. Setup
 
 ```bash
-# 1. Create a virtualenv and install the project + dev tools, editable
+# Create a virtualenv and install the project (editable)
 python -m venv .venv && source .venv/bin/activate
-pip install -e .                              # the app + its runtime deps
-pip install pytest pytest-xdist mypy ruff     # dev tooling (for the checks below)
-
-# 2. Verify the toolchain (lint + typecheck + tests)
-ruff check . && mypy foundry webapp && pytest -n auto -q
+pip install -e .
 ```
 
 > Keep the venv activated (`source .venv/bin/activate`) so the `python …` commands
-> below run with the project's dependencies.
+> below run with the project's dependencies. (Contributors: see [Develop](#11-develop)
+> for the lint/typecheck/test tooling.)
 
 ---
 
@@ -452,6 +449,7 @@ Pi's tmpfs/backup notes).
 ## 11. Develop
 
 ```bash
+pip install pytest pytest-xdist mypy ruff                # one-time: dev tooling
 ruff check .                                              # lint
 ruff check --fix . && ruff format .                      # autofix + format
 mypy foundry webapp                                      # typecheck (strict)

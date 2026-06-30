@@ -137,7 +137,7 @@ Two seams are deliberately independent, and worth internalizing before you start
 
 ## Requirements
 
-- Python ≥ 3.12.
+- Python ≥ 3.11.
 - A real backend (optional): an Anthropic API key, an OpenAI API key, the `claude`
   CLI on a Max plan, the `codex` CLI, or a local Ollama.
 

@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from contextvars import ContextVar
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 from foundry.schemas.architecture import PinnedConstraint
 from foundry.schemas.base import ExternalAction
@@ -100,7 +100,10 @@ def _active_verifier() -> GateWriteVerifier:
     return _verifier.get(_REJECT_ALL)
 
 
-def _iter[T](a: Iterable[T] | None, b: Iterable[T] | None) -> Iterable[T]:
+T = TypeVar("T")
+
+
+def _iter(a: Iterable[T] | None, b: Iterable[T] | None) -> Iterable[T]:
     if a:
         yield from a
     if b:
@@ -110,7 +113,7 @@ def _iter[T](a: Iterable[T] | None, b: Iterable[T] | None) -> Iterable[T]:
 # ---- generic keyed unions ---------------------------------------------------
 
 
-def union[T](a: list[T] | None, b: list[T] | None) -> list[T]:
+def union(a: list[T] | None, b: list[T] | None) -> list[T]:
     """Deduped order-stable-by-key union for plain values (e.g. capabilities)."""
     out: dict[T, None] = {}
     for x in _iter(a, b):
@@ -118,7 +121,7 @@ def union[T](a: list[T] | None, b: list[T] | None) -> list[T]:
     return list(out)
 
 
-def make_union_by_key[T](
+def make_union_by_key(
     key: Callable[[T], object],
 ) -> Callable[[list[T] | None, list[T] | None], list[T]]:
     """Keyed set-union; later-by-Seq wins when both carry a `seq` attribute,

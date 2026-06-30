@@ -2,7 +2,7 @@
 name = "foundry"
 version = "0.1.0"
 description = "Foundry — graph-based multi-agent software factory"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = [
     "anthropic>=0.109.1",
     "langgraph>=1.2.4",
@@ -47,7 +47,7 @@ python_classes = ["Test_*"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
@@ -58,7 +58,7 @@ ignore = ["RUF002", "RUF003"]
 # Type checker — the static-analysis quality bar (ARCHITECTURE.md QUALITY BARS).
 # `--ignore-missing-imports` is expressed here so `mypy foundry tests` is the gate.
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.11"
 ignore_missing_imports = true
 warn_unused_ignores = true
 warn_redundant_casts = true

@@ -319,6 +319,17 @@ class TwoZoneGateRunner:
         self._seal_key = seal_key
 
     @property
+    def seal_key(self) -> bytes | None:
+        """The zone-A observation-sealing key (or ``None`` on an unsealed channel).
+
+        Exposed so the trusted gate-wiring can construct each :class:`GateImpl`
+        with the SAME key the runner verifies against — zone A seals its own
+        observation in its own custody, zone B (this runner) re-derives the tag.
+        This is the seal (channel-integrity) key only; the signing credential is
+        never exposed and never reaches a gate."""
+        return self._seal_key
+
+    @property
     def records(self) -> GlobalRecords:
         """The cross-fork :class:`GlobalRecords` (read-only view of the owner).
 

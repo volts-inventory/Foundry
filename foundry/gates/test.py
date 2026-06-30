@@ -145,6 +145,7 @@ class TestGate:
         mutant_rotation_id: int = 0,
         discriminator: TestSuiteDiscriminator | None = None,
         timeout_s: float = 600.0,
+        seal_key: bytes | None = None,
     ) -> None:
         # Default: the ISOLATED pinned harness (fences the host source off sys.path
         # so generated modules can't collide with / reach ours). An explicit cmd is
@@ -167,6 +168,7 @@ class TestGate:
         )
         self.scanner_rule_version = "pytest-harness-v1"
         self._timeout_s = timeout_s
+        self._seal_key = seal_key  # zone-A observation seal (None ⇒ unsealed channel)
 
     def _env(self, workdir: Path) -> dict[str, str]:
         # Tell the isolating bootstrap where to run (the workdir) and which host paths
@@ -218,6 +220,7 @@ class TestGate:
             stderr=err,
             findings=findings,
             structured=structured,
+            seal_key=self._seal_key,
         )
 
     # ---- zone B: pure decision over rc + counts ----------------------------

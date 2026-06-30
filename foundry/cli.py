@@ -1276,7 +1276,12 @@ def run(
         cas=store,
     )
 
-    runner = TwoZoneGateRunner(_zone_b_signer(), records, _SCANNER_REV, _LINEAGE_REV)
+    # Seal the zone-A observation channel (fail-closed forged-results hardening):
+    # the gate-wiring builds each gate with `runner.seal_key`, so the observation a
+    # gate produces is sealed under the same per-run key the runner verifies.
+    runner = TwoZoneGateRunner(
+        _zone_b_signer(), records, _SCANNER_REV, _LINEAGE_REV, seal_key=os.urandom(32)
+    )
 
     # -- materialization seam (Phase-1 2b) ------------------------------------
     # The `mock` smoke backend uses the synthetic SUP7 doubles: with the

@@ -224,22 +224,30 @@ def _assurance_gates(
     tier: TierDecision | None,
     *,
     allow_build_changes: bool,
+    seal_key: bytes | None = None,
 ) -> list[tuple[str, GateImpl]]:
     """The (node_id, gate) pairs to run for this tier — floor + scaled depth.
 
     Mirrors :func:`assurance_gate_set`: Security + Audit ALWAYS (the integrity
     floor); Supply-chain at STANDARD+; E2E at HIGH. The Security gate runs its
     pure-python secret scan — real machine grounding, no external binary.
+
+    ``seal_key`` (the runner's zone-A observation seal) is handed to each gate so
+    it seals its observation under the same key the runner verifies against.
     """
     selected = assurance_gate_set(tier)
     builders: dict[str, tuple[str, GateImpl]] = {
-        "security": (_SECURITY_NODE, SecurityGate()),
-        "audit": (_AUDIT_NODE, AuditGate()),
+        "security": (_SECURITY_NODE, SecurityGate(seal_key=seal_key)),
+        "audit": (_AUDIT_NODE, AuditGate(seal_key=seal_key)),
         "supply_chain": (
             _SUPPLY_CHAIN_NODE,
-            SupplyChainGate(diff_filename=DIFF_FILENAME, allow_build_changes=allow_build_changes),
+            SupplyChainGate(
+                diff_filename=DIFF_FILENAME,
+                allow_build_changes=allow_build_changes,
+                seal_key=seal_key,
+            ),
         ),
-        "e2e": (_E2E_NODE, E2EGate()),
+        "e2e": (_E2E_NODE, E2EGate(seal_key=seal_key)),
     }
     return [builders[name] for name in selected]
 
@@ -274,7 +282,9 @@ def run_assurance_gates(
         state, workdir, resolve=resolve, resolve_blob=resolve_blob
     )
     results = []
-    for node_id, gate in _assurance_gates(tier, allow_build_changes=allow_build_changes):
+    for node_id, gate in _assurance_gates(
+        tier, allow_build_changes=allow_build_changes, seal_key=runner.seal_key
+    ):
         seq = rt.seq(config, node_id, f"verdict:{gate.name}")
         results.append(runner.run(gate, run_against, seq, workdir))
     return {"gates": results}

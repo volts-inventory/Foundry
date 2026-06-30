@@ -423,7 +423,9 @@ def build_assurance_subgraph(
             state, workdir, resolve=resolve, resolve_blob=resolve_blob
         )
         results = []
-        for node_id, gate in _assurance_gates(run_tier, allow_build_changes=False):
+        for node_id, gate in _assurance_gates(
+            run_tier, allow_build_changes=False, seal_key=runner.seal_key
+        ):
             if gate.name not in scoped:
                 continue  # unaffected -> reuse the prior attested verdict (no re-run)
             seq = rt.seq(config, node_id, f"verdict:{gate.name}")

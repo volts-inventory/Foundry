@@ -64,9 +64,11 @@ class SpecGate:
         criteria_filename: str = "criteria.json",
         *,
         require_security_criterion: bool = True,
+        seal_key: bytes | None = None,
     ) -> None:
         self._criteria_filename = criteria_filename
         self._require_security_criterion = require_security_criterion
+        self._seal_key = seal_key  # zone-A observation seal (None ⇒ unsealed channel)
 
     # ---- zone A: raw read + parse only ------------------------------------
 
@@ -76,6 +78,7 @@ class SpecGate:
             return observe(
                 self.name,
                 structured={"parse_ok": False, "error": f"missing {self._criteria_filename}"},
+                seal_key=self._seal_key,
             )
         try:
             doc = json.loads(path.read_text(encoding="utf-8"))
@@ -84,6 +87,7 @@ class SpecGate:
                 self.name,
                 structured={"parse_ok": False, "error": f"unparseable criteria: {exc}"},
                 findings=(f"unparseable {self._criteria_filename}: {exc}",),
+                seal_key=self._seal_key,
             )
         # Descriptive (non-verdict) observations of the parsed criteria so a FAIL
         # is diagnosable (which criterion / which missing field / no abuse case).
@@ -93,6 +97,7 @@ class SpecGate:
             self.name,
             structured={"parse_ok": True, "doc": doc},
             findings=self._describe(doc),
+            seal_key=self._seal_key,
         )
 
     # ---- zone B: pure completeness rules over the raw payload --------------

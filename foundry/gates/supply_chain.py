@@ -62,9 +62,11 @@ class SupplyChainGate:
         *,
         diff_filename: str = "changes.diff",
         allow_build_changes: bool = False,
+        seal_key: bytes | None = None,
     ) -> None:
         self._diff_filename = diff_filename
         self._allow_build_changes = allow_build_changes
+        self._seal_key = seal_key  # zone-A observation seal (None ⇒ unsealed channel)
 
     # ---- zone A: read the diff text + collect raw policy hits ---------------
 
@@ -100,6 +102,7 @@ class SupplyChainGate:
                 "privilege_hit_count": len(privilege_hits),
                 "new_source_count": len(new_sources),
             },
+            seal_key=self._seal_key,
         )
 
     # ---- zone B: any unauthorized high-privilege change ⇒ FAIL -------------

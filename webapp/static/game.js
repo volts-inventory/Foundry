@@ -1971,7 +1971,7 @@ function loadRepo(id){
   document.getElementById("repo-sha").textContent = "";
   document.getElementById("repo-src").textContent = "";
   fetch("/api/repo/"+id)
-    .then(r => r.ok ? r.json() : {files:[],checks:[],diffs:[]})
+    .then(r => r.ok ? r.json() : {files:[],checks:[],diffs:[],sign_offs:[]})
     .then(repo => { renderRepo(id, repo); })
     .catch(() => { list.innerHTML = "<li class='muted'>(could not load repo)</li>"; view.textContent = ""; });
 }
@@ -1984,6 +1984,7 @@ function renderRepo(id, repo){
   renderTree(id, repo.files || []);
   renderChecks(repo.checks || []);
   renderPulls(repo.diffs || []);
+  renderSignOffs(repo.sign_offs || []);
 }
 function renderTree(id, files){
   FILES_TREE = files || [];
@@ -2085,6 +2086,32 @@ function renderChecks(checks){
     if(c.findings && c.findings.length){
       html += `<div class="ck-findings">`+ c.findings.map(escapeHtml).join("<br>") +`</div>`;
     }
+    li.innerHTML = html;
+    ul.appendChild(li);
+  }
+}
+function renderSignOffs(sign_offs){
+  const ul = document.getElementById("signoffs-list");
+  const cnt = document.getElementById("signoffs-count");
+  if(!ul) return;
+  ul.innerHTML = "";
+  cnt.textContent = sign_offs.length ? String(sign_offs.length) : "";
+  if(!sign_offs.length){
+    ul.innerHTML = "<li class='muted'>No sign-offs — assistant build, or none recorded.</li>";
+    return;
+  }
+  for(const s of sign_offs){
+    const li = document.createElement("li");
+    li.className = "check " + (s.approved ? "ok" : "bad");
+    const icon = s.approved ? "✓" : "✕";
+    const who = [s.approver, s.role].filter(Boolean).map(escapeHtml).join(" · ") || "(unnamed)";
+    const prov = s.provenance ? ` <span class='adv'>${escapeHtml(s.provenance)}</span>` : "";
+    let html = `<span class="ck-icon">${icon}</span><span class="ck-name">${escapeHtml(s.point||"sign-off")}</span>`+
+               `<span class="ck-status">${who}</span>${prov}`;
+    const detail = [];
+    if(s.evidence_hash) detail.push("evidence "+escapeHtml(String(s.evidence_hash).slice(0,16)));
+    if(s.note) detail.push(escapeHtml(s.note));
+    if(detail.length) html += `<div class="ck-findings">`+ detail.join("<br>") +`</div>`;
     li.innerHTML = html;
     ul.appendChild(li);
   }
@@ -2368,6 +2395,14 @@ document.getElementById("output-btn").onclick=openFiles;
 document.getElementById("files-close").onclick=hideFiles;
 document.getElementById("repos-close").onclick=closeRepoHub;
 document.getElementById("repos-new").onclick=()=>{ closeRepoHub(); showNewModal(); };
+document.getElementById("repos-clear").onclick=async ()=>{
+  if(!confirm("Clear ALL floors and repositories? This wipes every build from the catalog and cannot be undone.")) return;
+  try{
+    const r = await fetch("/api/reset", {method:"POST", headers:postHeaders()});
+    if(!r.ok){ alert("Clear failed ("+r.status+")."); return; }
+    location.reload();   // floors/repos are gone server-side — rebuild the empty UI
+  }catch(_){ alert("Clear failed — could not reach the server."); }
+};
 // interview modal
 document.getElementById("iv-ask").onclick=askInterview;
 document.getElementById("iv-close").onclick=()=>document.getElementById("iv-modal").classList.add("hidden");

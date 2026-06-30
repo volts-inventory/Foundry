@@ -160,6 +160,7 @@
       <ul id="repos-list" class="repos-list"></ul>
       <div class="dialog-actions">
         <button id="repos-new" class="primary">＋ NEW PROJECT</button>
+        <button id="repos-clear" class="danger" title="Wipe every floor and repository">⌦ Clear all</button>
         <button id="repos-close">close</button>
       </div>
     </div>
@@ -180,6 +181,7 @@
         <button class="repo-tab sel" data-tab="code">⊞ Code</button>
         <button class="repo-tab" data-tab="checks">✓ Checks <span id="checks-count" class="tab-count"></span></button>
         <button class="repo-tab" data-tab="pulls">⇄ Pull requests <span id="pulls-count" class="tab-count"></span></button>
+        <button class="repo-tab" data-tab="signoffs">✍ Sign-offs <span id="signoffs-count" class="tab-count"></span></button>
       </div>
       <div class="repo-pane" data-pane="code">
         <nav id="files-crumb" class="files-crumb"></nav>
@@ -193,6 +195,12 @@
       </div>
       <div class="repo-pane hidden" data-pane="pulls">
         <div id="pulls-list" class="pulls-list"></div>
+      </div>
+      <div class="repo-pane hidden" data-pane="signoffs">
+        <p class="cp-note">Recorded human approvals (Design / Release). Gated &amp;
+          autonomous builds record these; assistant builds have none. Exported with
+          the build as <code>.foundry/evidence.json</code> + <code>EVIDENCE.md</code>.</p>
+        <ul id="signoffs-list" class="checks-list"></ul>
       </div>
       <div class="dialog-actions">
         <a id="files-zip" class="btn-link" href="#" download>⭳ Export .zip</a>

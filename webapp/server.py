@@ -511,6 +511,95 @@ def _invalidate_repo(pid: str) -> None:
         _REPO_CACHE.pop(pid, None)
 
 
+def _sign_offs_payload(repo: "Repo | None") -> list[dict[str, Any]]:
+    """The repo's recorded sign-offs as JSON rows (empty for an assistant build)."""
+    return [
+        {"point": s.point, "approver": s.approver, "role": s.role,
+         "approved": s.approved, "provenance": s.provenance,
+         "state_sha": s.state_sha, "evidence_hash": s.evidence_hash, "note": s.note}
+        for s in (repo.sign_offs if repo else ())
+    ]
+
+
+def _evidence_files(pid: str) -> dict[str, bytes]:
+    """The evidence sidecar for a build's export: gate verdicts + recorded
+    sign-offs, as a machine-readable ``.foundry/evidence.json`` and a readable
+    ``EVIDENCE.md``. Returns ``{}`` when there is nothing to attest yet.
+
+    This is an EXPORT-time sidecar — built from the attested gate/sign-off records
+    as-is and added ALONGSIDE the materialized tree, never mixed into it, so the
+    bytes the gates ran against are unchanged."""
+    repo = _read_repo_cached(pid)
+    p = _PROJECTS.get(pid)
+    checks = (
+        [{"name": c.name, "status": c.status, "ok": c.ok,
+          "advisory": c.advisory, "findings": list(c.findings)} for c in repo.checks]
+        if repo else
+        [{"name": n, "status": str(g.get("status", "")).split(".")[-1].lower(),
+          "ok": str(g.get("status", "")).split(".")[-1].lower() == "pass",
+          "advisory": bool(g.get("advisory")), "findings": []}
+         for n, g in (p.gates.items() if p else [])]
+    )
+    sign_offs = _sign_offs_payload(repo)
+    if not checks and not sign_offs:
+        return {}
+    doc = {
+        "build_id": pid,
+        "request": p.request if p else "",
+        "mode": p.mode if p else "",
+        "backend": p.backend if p else "",
+        "passed": bool(p.passed) if p else None,
+        "tree_sha": repo.tree_sha if repo else None,
+        "gates": checks,
+        "sign_offs": sign_offs,
+    }
+    md = _evidence_markdown(doc)
+    return {
+        ".foundry/evidence.json": (json.dumps(doc, indent=2) + "\n").encode("utf-8"),
+        "EVIDENCE.md": md.encode("utf-8"),
+    }
+
+
+def _evidence_markdown(doc: dict[str, Any]) -> str:
+    """A human-readable rendering of the evidence doc for ``EVIDENCE.md``."""
+    lines = [
+        "# Evidence pack",
+        "",
+        f"- **Build**: `{doc['build_id']}`",
+        f"- **Request**: {doc.get('request') or '(none)'}",
+        f"- **Mode**: {doc.get('mode') or '(unknown)'}",
+        f"- **Backend**: {doc.get('backend') or '(unknown)'}",
+    ]
+    if doc.get("tree_sha"):
+        lines.append(f"- **Tree sha**: `{doc['tree_sha']}`")
+    if doc.get("passed") is not None:
+        lines.append(f"- **Result**: {'PASSED' if doc['passed'] else 'not passed'}")
+    lines += ["", "## Gate checks", ""]
+    if doc["gates"]:
+        for g in doc["gates"]:
+            mark = "✓" if g["ok"] else "✗"
+            adv = " _(advisory)_" if g.get("advisory") else ""
+            lines.append(f"- {mark} **{g['name']}** — {g['status']}{adv}")
+            for f in g.get("findings") or ():
+                lines.append(f"    - {f}")
+    else:
+        lines.append("- _(no gate verdicts recorded)_")
+    lines += ["", "## Sign-offs", ""]
+    if doc["sign_offs"]:
+        for s in doc["sign_offs"]:
+            mark = "✓" if s["approved"] else "✗"
+            who = " · ".join(x for x in (s.get("approver"), s.get("role")) if x) or "(unnamed)"
+            lines.append(f"- {mark} **{s['point']}** — {who} _(provenance: {s.get('provenance') or 'n/a'})_")
+            if s.get("evidence_hash"):
+                lines.append(f"    - evidence hash: `{s['evidence_hash']}`")
+            if s.get("note"):
+                lines.append(f"    - note: {s['note']}")
+    else:
+        lines.append("- _(no human sign-offs — assistant mode, or none recorded)_")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _lineage_ids(pid: str) -> list[str]:
     """The build's ancestry oldest→newest (root … pid) via ``parent_id`` in the
     catalog — so a release's full tree is the parent's tree + this release's diffs."""
@@ -1195,7 +1284,7 @@ class Handler(BaseHTTPRequestHandler):
                 for n, g in (p.gates.items() if p else [])
             ]
             self._json(200, {"source": "disk", "tree_sha": None, "files": files,
-                             "checks": checks, "diffs": []})
+                             "checks": checks, "diffs": [], "sign_offs": []})
             return
         files = [{"path": p, "size": len(b)} for p, b in sorted((tree or {}).items())]
         checks = [
@@ -1209,7 +1298,8 @@ class Handler(BaseHTTPRequestHandler):
         ]
         self._json(200, {"source": "store",
                          "tree_sha": repo.tree_sha if repo else None,
-                         "files": files, "checks": checks, "diffs": diffs})
+                         "files": files, "checks": checks, "diffs": diffs,
+                         "sign_offs": _sign_offs_payload(repo)})
 
     def _resolve_within(self, base: Path, rel: str) -> Path | None:
         """Resolve ``rel`` under ``base``, fail-closed on traversal/symlink escape."""
@@ -1268,6 +1358,10 @@ class Handler(BaseHTTPRequestHandler):
                 for f in sorted(base.rglob("*")) if f.is_file()
             }
             name = base.name
+        # Export-time sidecar: ship the attested gate verdicts + recorded sign-offs
+        # alongside the tree (a sibling .foundry/evidence.json + EVIDENCE.md), never
+        # mixed INTO the materialized tree the gates ran against.
+        tree = {**tree, **_evidence_files(pid)}
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for rel, data in sorted(tree.items()):
@@ -1288,6 +1382,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/projects":
             self._new_project()
+        elif path == "/api/reset":
+            self._reset()
         elif path == "/api/ideate":
             self._ideate()
         elif path.startswith("/api/decision/"):
@@ -1553,7 +1649,10 @@ class Handler(BaseHTTPRequestHandler):
         )
         with _LOCK:
             _PROJECTS[pid] = p
-        _persist(p)
+        # NOTE: do NOT catalog the build here. A floor is persisted only once the
+        # build ACTUALLY starts — the runner's first `project` event (in _PERSIST_ON)
+        # upserts it. So a created-but-never-run project leaves no floor to restore
+        # on restart (the response below carries the floor/release in-memory anyway).
         # A PLATFORM build composes many services into one monorepo on this floor; a
         # normal build is one service through the factory. INFERRED from the request
         # (multi-service => platform), unless the caller pins it with `platform`.
@@ -1564,6 +1663,22 @@ class Handler(BaseHTTPRequestHandler):
         runner = _run_platform if is_platform else _run_factory
         threading.Thread(target=_gated_runner, args=(runner, p), daemon=True).start()
         self._json(200, {"id": pid, "floor": floor, "release": release_seq})
+
+    def _reset(self) -> None:
+        """Clear ALL floors & repos: drop the in-memory floors, reset the floor
+        counter, and wipe the durable catalog (builds + event logs + seen-uris) so a
+        restart rehydrates nothing. Behind the mutation guard. The content-addressed
+        store on disk is left as-is — it is unreferenced once the catalog is empty."""
+        with _LOCK:
+            _PROJECTS.clear()
+            _FLOOR[0] = 0
+        try:
+            _STORE.clear_all()
+        except Exception:
+            pass
+        with _REPO_CACHE_LOCK:
+            _REPO_CACHE.clear()
+        self._json(200, {"ok": True})
 
     def _decision(self, pid: str) -> None:
         body = self._read_json()

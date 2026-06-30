@@ -29,14 +29,14 @@ def test_clear_all_wipes_builds_events_and_seen(tmp_path: Path) -> None:
     store.add_seen("a", {"cas://x", "cas://y"})
 
     # Catalogued before the reset.
-    assert {r["id"] for r in store.all()} == {"a", "b"}
+    assert {r["id"] for r in store.latest_per_floor()} == {"a", "b"}
     assert store.events_of("a") and store.seen_of("a")
     assert store.max_floor() == 2
 
     store.clear_all()
 
     # Nothing survives — a restart would rehydrate no floors.
-    assert store.all() == []
+    assert store.latest_per_floor() == []
     assert store.events_of("a") == []
     assert store.seen_of("a") == set()
     assert store.max_floor() == 0

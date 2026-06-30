@@ -101,11 +101,11 @@
           <option value="raw-react">raw-react — code via the chosen backend</option>
         </select>
       </div>
-      <label>Extra workers <span class="hint">— on top of one per team; management
-        assigns them where the work is (blank = automatic)</span></label>
-      <input id="extra-workers" type="number" min="0" max="32" placeholder="auto" />
-      <p class="hint" id="parallel-note">Every discipline always gets one worker; these
-        extras are the pool the leads share out by demand, and run in parallel.</p>
+      <label>Worker pool <span class="hint">— max parallel IC workers (blank = automatic)</span></label>
+      <input id="extra-workers" type="number" min="1" max="32" placeholder="auto" />
+      <p class="hint" id="parallel-note">The ceiling on how many implementation workers run
+        at once — the leads share this pool by demand. Effective parallelism is
+        min(tasks created, this cap); each discipline still gets at least one.</p>
       <label>Auto-fix attempts <span class="hint">— fix-forward retries until green (default 5)</span></label>
       <input id="fix-input" type="number" min="0" max="20" value="5" />
       <label>Cost cap (USD) <span class="hint">— max model spend (metered API backends only)</span></label>

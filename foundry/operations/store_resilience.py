@@ -113,16 +113,42 @@ class PoisonedCheckpointError(RuntimeError):
 # ===========================================================================
 
 
+# `sqlite3.OperationalError` is overloaded: it covers BOTH transient
+# unavailability (database locked/busy, unable to open the file — the Postgres
+# connection-error analogue) AND genuine PROGRAMMING/CORRUPTION faults (missing
+# table/column/function, malformed SQL). The former is an outage to pause on; the
+# latter must FAIL LOUD, never be masked as a benign $0/hr pause. We default an
+# OperationalError to "outage" (preserving the resilient behavior for any
+# unrecognized transient message) but carve out the substrings that mean a real
+# bug or corruption. (Corruption like "disk image is malformed" / "file is not a
+# database" surfaces as the parent ``sqlite3.DatabaseError``, not OperationalError,
+# so it already falls through to a re-raise.)
+_FATAL_SQLITE_SIGNS: tuple[str, ...] = (
+    "no such table",
+    "no such column",
+    "no such function",
+    "no such module",
+    "syntax error",
+    "has no column named",
+    "ambiguous column name",
+)
+
+
 def _store_is_unavailable(exc: BaseException) -> bool:
     """A store-unavailability signal vs an ordinary error.
 
-    Either an explicit :class:`StoreUnavailable`, or the
-    ``sqlite3.OperationalError`` the dev backend raises when the database file
-    is locked / unreachable (the Postgres connection-error analogue). Any other
-    exception is a genuine run error — NOT an outage — and is re-raised by the
-    seam so it is not silently masked as a pause.
+    Either an explicit :class:`StoreUnavailable`, or a transient
+    ``sqlite3.OperationalError`` (locked / unreachable). An OperationalError whose
+    message names a schema/SQL fault (see :data:`_FATAL_SQLITE_SIGNS`) is a genuine
+    bug, NOT an outage, and is re-raised by the seam so it is not silently masked as
+    a pause. Any other exception type is likewise a genuine run error.
     """
-    return isinstance(exc, (StoreUnavailable, sqlite3.OperationalError))
+    if isinstance(exc, StoreUnavailable):
+        return True
+    if isinstance(exc, sqlite3.OperationalError):
+        msg = str(exc).lower()
+        return not any(sign in msg for sign in _FATAL_SQLITE_SIGNS)
+    return False
 
 
 def on_store_unavailable(

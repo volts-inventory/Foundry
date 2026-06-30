@@ -1731,13 +1731,12 @@ function routeEvent(floor, ev){
         `GATE ${ev.name.toUpperCase()}: ${ev.status.toUpperCase()}${ev.attested?" (signed)":""}`);
       break;
     case "org":
-      F.org = ev;
       if (S){ S.renderOrg(ev); S.setOrg(ev.areas, ev.domains);
         if (S.activeRoomKey) S.staffRoom(S.activeRoomKey); }   // lane-lay engineering by area
       logTo(F, "gold", "ORG · "+(ev.areas||[]).map(a=>`${a.area}(${(a.leads||[]).length})`).join("  "));
       break;
     case "files":
-      F.hasFiles = ev.count; break;
+      break;   // file count is read live from the repo view, not cached on F
     case "checkpoint":
       F.cp = {title:ev.title, summary:ev.summary, boundary:ev.boundary}; break;
     case "await_decision":

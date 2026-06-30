@@ -253,6 +253,29 @@ def test_audit_chain_detects_deleted_interior_row(cp):
     assert verify_audit_chain(cp.conn) is False
 
 
+def test_audit_chain_detects_tail_truncation(cp):
+    # Deleting the most-recent rows leaves an otherwise-valid prefix — the link
+    # checks alone accept it, but the head/count anchor does not.
+    for i in range(5):
+        append_audit(cp.conn, {"i": i})
+    assert verify_audit_chain(cp.conn) is True
+    cp.conn.execute(  # drop the latest 2 rows out of band
+        "DELETE FROM worm_audit WHERE id IN "
+        "(SELECT id FROM worm_audit ORDER BY id DESC LIMIT 2)"
+    )
+    assert verify_audit_chain(cp.conn) is False  # head/count no longer match the anchor
+
+
+def test_audit_chain_detects_anchor_deletion(cp):
+    # Wiping the chain AND its anchor must still fail closed (not read as empty).
+    for i in range(3):
+        append_audit(cp.conn, {"i": i})
+    cp.conn.execute("DELETE FROM worm_audit")
+    assert verify_audit_chain(cp.conn) is False  # anchor still says n=3
+    cp.conn.execute("DELETE FROM worm_audit_head")
+    assert verify_audit_chain(cp.conn) is True   # genuinely empty: no chain, no anchor
+
+
 def test_concurrent_chain_fork_fails_closed(cp):
     """UNIQUE(prev_hash): two appenders off the SAME head can't both land — the
     second INSERT raises instead of silently branching the WORM chain."""

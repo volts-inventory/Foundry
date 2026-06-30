@@ -113,13 +113,6 @@ class BuildStore:
         d["supervised"] = bool(d.get("supervised"))
         return d
 
-    def all(self) -> list[dict[str, Any]]:
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM builds ORDER BY floor ASC"
-            ).fetchall()
-        return [self._decode(r) for r in rows]
-
     def latest_per_floor(self) -> list[dict[str, Any]]:
         """The newest release of every floor (one row per project) — for rehydrate."""
         with self._lock:

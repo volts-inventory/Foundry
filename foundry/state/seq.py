@@ -31,9 +31,6 @@ class Seq(NamedTuple):
     node_id: str
     local: int
 
-    def same_run(self, other: Seq) -> bool:
-        return self.run_id == other.run_id
-
 
 class EpochCounter:
     """Durable per-(run, key) resume-generation counter, in-memory protocol.
@@ -45,9 +42,6 @@ class EpochCounter:
 
     def __init__(self) -> None:
         self._epochs: dict[tuple[str, str], int] = {}
-
-    def current(self, run_id: str, key: str) -> int:
-        return self._epochs.get((run_id, key), 0)
 
     def bump(self, run_id: str, key: str) -> int:
         """Increment and return the new epoch for a (re-)execution of `key`."""

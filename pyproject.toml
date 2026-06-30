@@ -38,7 +38,7 @@ addopts = "-q -n auto"
 markers = [
     # Whole-pipeline end-to-end factory passes (each compiles + runs the full
     # graph). They dominate wall time, so `pytest -m "not slow"` is the fast
-    # inner-loop; `make check` / CI still runs everything.
+    # inner-loop; a plain `pytest` / CI still runs everything.
     "slow: full end-to-end factory-graph integration test",
 ]
 # Production classes named Test* (TestGate, TestPlan, TestReport) are domain

@@ -20,7 +20,7 @@ Open **Terminal**, go to this folder, and run (Mac shown; Linux uses
 ```bash
 cd ~/Coders                              # wherever you cloned it
 cp foundry.mac.env.example .env          # 1. Mac preset — Claude Code, localhost
-make token                               # 2. mint a Claude Code token (Max plan)
+claude setup-token                       # 2. mint a Claude Code token (Max plan)
 open -e .env                             #    …paste it as CLAUDE_CODE_OAUTH_TOKEN
 python -m webapp.server           # 3. start it → http://localhost:8765
 ```
@@ -141,12 +141,13 @@ Two seams are deliberately independent, and worth internalizing before you start
 ## 1. Setup
 
 ```bash
-# 1. Create a virtualenv and install the project (+ deps), editable
+# 1. Create a virtualenv and install the project + dev tools, editable
 python -m venv .venv && source .venv/bin/activate
-pip install -e .
+pip install -e .                              # the app + its runtime deps
+pip install pytest pytest-xdist mypy ruff     # dev tooling (for the checks below)
 
 # 2. Verify the toolchain (lint + typecheck + tests)
-make check
+ruff check . && mypy foundry webapp && pytest -n auto -q
 ```
 
 > Keep the venv activated (`source .venv/bin/activate`) so the `python …` commands
@@ -162,15 +163,12 @@ Each command writes a complete repo to `--out` and prints a pass/fail report.
 # 1. Simplest possible run (assistant mode) → repo in ./out
 python -m foundry.cli "build a tiny URL-shortener service" --backend claude-cli --out ./out
 
-# 2. Same thing via make (REQUEST/OUT are overridable vars)
-make run REQUEST="build a CSV-to-JSON converter CLI" OUT=./out
-
-# 3. Inspect the result
+# 2. Inspect the result
 ls ./out                 # source tree at the root
 cat ./out/README.md      # generated README
 ls ./out/docs            # PRD, design, ops docs
 
-# 4. Exit code tells you what happened
+# 3. Exit code tells you what happened
 echo $?                  # 0 = passed (PR-ready) · 1 = halted · 2 = usage error
 ```
 
@@ -205,17 +203,17 @@ python -m foundry.cli "build a todo API" --backend anthropic --out ./out
 export FOUNDRY_MODEL_BACKEND=anthropic
 python -m foundry.cli "build a todo API" --out ./out      # uses anthropic
 
-# 3. Persistently — put it in .env (read by make)
-make env                                  # scaffold .env if missing
+# 3. Persistently — put it in .env (the Workshop server loads it on startup; for the
+#    CLI, export it as in #2 or pass --backend)
+cp foundry.mac.env.example .env           # or foundry.linux.env.example
 echo "FOUNDRY_MODEL_BACKEND=anthropic" >> .env
-make run REQUEST="build a todo API"       # uses anthropic
 ```
 
 ### Backend settings
 
 | Backend | What it is | Required setting(s) | How to get it |
 |---|---|---|---|
-| `claude-cli` | `claude -p` on a Max plan (no API billing) | `CLAUDE_CODE_OAUTH_TOKEN` | `make token` |
+| `claude-cli` | `claude -p` on a Max plan (no API billing) | `CLAUDE_CODE_OAUTH_TOKEN` | `claude setup-token` |
 | `anthropic` | Claude API (SDK, direct) | `ANTHROPIC_API_KEY` | console.anthropic.com |
 | `openai` | OpenAI API (SDK `chat.completions`, direct) | `OPENAI_API_KEY` | platform.openai.com |
 | `codex` | codex CLI (`codex exec`) | `OPENAI_API_KEY` | platform.openai.com |
@@ -243,7 +241,7 @@ rejects the call):
 
 ```bash
 # 1. claude-cli — `claude -p` on a Max subscription. Mint a token, add to .env.
-make token                                # logs in; prints CLAUDE_CODE_OAUTH_TOKEN
+claude setup-token                        # logs in; prints CLAUDE_CODE_OAUTH_TOKEN
 echo "CLAUDE_CODE_OAUTH_TOKEN=<token>" >> .env
 python -m foundry.cli "build a todo API" --backend claude-cli --out ./out
 
@@ -308,7 +306,7 @@ directory and may repeat.
 
 ```bash
 # 1. Co-generate a spec from your request, then edit it
-make spec REQUEST="build a feature-flag service"   # → writes spec.md
+python -m foundry.ideation "build a feature-flag service" > spec.md
 $EDITOR spec.md
 
 # 2. Build from that spec
@@ -454,13 +452,13 @@ Pi's tmpfs/backup notes).
 ## 11. Develop
 
 ```bash
-make lint            # ruff
-make fix             # ruff autofix + format
-make typecheck       # mypy (strict)
-make test            # full suite, parallel
-make test-fast       # skips slow end-to-end factory passes
-make check           # lint + typecheck + test (the CI gate)
-make clean           # remove caches + ./.run output
+ruff check .                                              # lint
+ruff check --fix . && ruff format .                      # autofix + format
+mypy foundry webapp                                      # typecheck (strict)
+pytest -n auto -q                                        # full suite, parallel
+pytest -n auto -q -m "not slow"                          # fast inner loop (skips slow e2e)
+ruff check . && mypy foundry webapp && pytest -n auto -q  # the full gate
+rm -rf .pytest_cache .mypy_cache .ruff_cache ./.run spec.md  # clean caches + output
 ```
 
 ---
@@ -472,7 +470,7 @@ make clean           # remove caches + ./.run output
 | `FOUNDRY_MODEL_BACKEND` | Default backend | set one (e.g. `claude-cli`) |
 | `FOUNDRY_CODING_ADAPTER` | Default adapter | derived from backend |
 | `ANTHROPIC_API_KEY` | `anthropic` backend key | — |
-| `CLAUDE_CODE_OAUTH_TOKEN` | `claude-cli` backend (via `make token`) | — |
+| `CLAUDE_CODE_OAUTH_TOKEN` | `claude-cli` backend (via `claude setup-token`) | — |
 | `OPENAI_API_KEY` | `openai` + `codex` backend key | — |
 | `FOUNDRY_OLLAMA_URL` | `ollama-gemma` endpoint | — |
 | `FOUNDRY_MODEL_T1/T2/T3` | Pin exact model id per tier | curated map |

@@ -27,10 +27,9 @@ To run it for real / long-term (own machine, your model key), use the launcher �
 it loads your settings, keeps a Mac awake, and runs until you press Ctrl-C:
 
 ```bash
-cp deploy/foundry.env.example deploy/foundry.env   # 1. make your settings file (once)
-open -e deploy/foundry.env                          # 2. set backend + API key; on a
-                                                    #    Mac uncomment FOUNDRY_GATE_SANDBOX=inprocess
-./deploy/run.sh                                     # 3. start it → http://localhost:8765
+cp deploy/foundry.mac.env.example deploy/foundry.env   # 1. Mac preset (Pi: foundry.pi.env.example)
+open -e deploy/foundry.env                              # 2. paste your ANTHROPIC_API_KEY
+./deploy/run.sh                                         # 3. start it → http://localhost:8765
 ```
 
 Leave the Terminal window open while it runs. To keep it running after closing the
@@ -423,8 +422,8 @@ ways to run it — **on demand** (launch by hand) or as a **service** (auto-rest
 crash/reboot) on a **Raspberry Pi** (systemd) or **Apple-silicon Mac** (launchd).
 
 ```bash
-# 1. One shared config; edit token, key, paths, per-host tuning
-cp deploy/foundry.env.example deploy/foundry.env
+# 1. Copy the preset for your host (values pre-filled); paste your API key
+cp deploy/foundry.mac.env.example deploy/foundry.env   # Mac   (Pi: foundry.pi.env.example)
 
 # 2a. On demand — no service. Foreground (Ctrl-C to stop); use tmux/nohup to detach.
 ./deploy/run.sh

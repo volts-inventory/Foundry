@@ -29,7 +29,17 @@ and keep parallelism modest.
 
 ## Shared config
 
-Copy `foundry.env.example` → `foundry.env` and edit it once. Key values:
+Start from the **preset for your host** (values pre-filled — you mainly paste an API
+key), or the fully-annotated `foundry.env.example` if you want to set everything by hand:
+
+```bash
+cp deploy/foundry.mac.env.example deploy/foundry.env   # Mac laptop
+cp deploy/foundry.pi.env.example  deploy/foundry.env   # Raspberry Pi / Linux
+cp deploy/foundry.env.example     deploy/foundry.env   # generic, fully annotated
+```
+
+The presets already encode the per-host differences below; the table is just so you
+know what they set (and what to tweak):
 
 | Setting | Pi (8 GB) | Mac (M-series, 24 GB) |
 |---|---|---|

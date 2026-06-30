@@ -22,11 +22,11 @@ cd ~/Coders                              # wherever you cloned it
 cp foundry.mac.env.example .env          # 1. Mac preset — Claude Code, localhost
 make token                               # 2. mint a Claude Code token (Max plan)
 open -e .env                             #    …paste it as CLAUDE_CODE_OAUTH_TOKEN
-uv run python -m webapp.server           # 3. start it → http://localhost:8765
+python -m webapp.server           # 3. start it → http://localhost:8765
 ```
 
-The server loads `.env` on startup, so that's the whole run command — no wrapper
-(`make serve` is just an alias for it). The Mac preset runs on **Claude Code**
+The server loads `.env` on startup, so that's the whole run command — no wrapper.
+The Mac preset runs on **Claude Code**
 (`claude -p`, your Max plan — no API billing); prefer the metered API instead? Set
 `FOUNDRY_MODEL_BACKEND=anthropic` and an `ANTHROPIC_API_KEY` in `.env` (see §4).
 
@@ -132,7 +132,7 @@ Two seams are deliberately independent, and worth internalizing before you start
 
 ## Requirements
 
-- Python ≥ 3.12 and [`uv`](https://docs.astral.sh/uv/).
+- Python ≥ 3.12.
 - A real backend (optional): an Anthropic API key, an OpenAI API key, the `claude`
   CLI on a Max plan, the `codex` CLI, or a local Ollama.
 
@@ -141,12 +141,16 @@ Two seams are deliberately independent, and worth internalizing before you start
 ## 1. Setup
 
 ```bash
-# 1. Install deps + the project into a local venv
-make setup            # == uv sync
+# 1. Create a virtualenv and install the project (+ deps), editable
+python -m venv .venv && source .venv/bin/activate
+pip install -e .
 
 # 2. Verify the toolchain (lint + typecheck + tests)
 make check
 ```
+
+> Keep the venv activated (`source .venv/bin/activate`) so the `python …` commands
+> below run with the project's dependencies.
 
 ---
 
@@ -156,7 +160,7 @@ Each command writes a complete repo to `--out` and prints a pass/fail report.
 
 ```bash
 # 1. Simplest possible run (assistant mode) → repo in ./out
-uv run python -m foundry.cli "build a tiny URL-shortener service" --backend claude-cli --out ./out
+python -m foundry.cli "build a tiny URL-shortener service" --backend claude-cli --out ./out
 
 # 2. Same thing via make (REQUEST/OUT are overridable vars)
 make run REQUEST="build a CSV-to-JSON converter CLI" OUT=./out
@@ -178,13 +182,13 @@ echo $?                  # 0 = passed (PR-ready) · 1 = halted · 2 = usage erro
 
 ```bash
 # 1. assistant — advisory review; emits a PR for a human to merge (default)
-uv run python -m foundry.cli "build a markdown linter" --mode assistant --out ./out
+python -m foundry.cli "build a markdown linter" --mode assistant --out ./out
 
 # 2. gated — full gate set + recorded human sign-off + WORM evidence pack
-uv run python -m foundry.cli "build a payments webhook handler" --mode gated --out ./out
+python -m foundry.cli "build a payments webhook handler" --mode gated --out ./out
 
 # 3. autonomous — hands-off build → admit → deploy; admission is the only gate
-uv run python -m foundry.cli "build a status-page service" --mode autonomous --out ./out
+python -m foundry.cli "build a status-page service" --mode autonomous --out ./out
 ```
 
 ---
@@ -195,11 +199,11 @@ A backend is the model egress. Set it three ways — last one wins:
 
 ```bash
 # 1. Per command — the --backend flag (overrides everything)
-uv run python -m foundry.cli "build a todo API" --backend anthropic --out ./out
+python -m foundry.cli "build a todo API" --backend anthropic --out ./out
 
 # 2. For the shell session — the FOUNDRY_MODEL_BACKEND env var
 export FOUNDRY_MODEL_BACKEND=anthropic
-uv run python -m foundry.cli "build a todo API" --out ./out      # uses anthropic
+python -m foundry.cli "build a todo API" --out ./out      # uses anthropic
 
 # 3. Persistently — put it in .env (read by make)
 make env                                  # scaffold .env if missing
@@ -241,23 +245,23 @@ rejects the call):
 # 1. claude-cli — `claude -p` on a Max subscription. Mint a token, add to .env.
 make token                                # logs in; prints CLAUDE_CODE_OAUTH_TOKEN
 echo "CLAUDE_CODE_OAUTH_TOKEN=<token>" >> .env
-uv run python -m foundry.cli "build a todo API" --backend claude-cli --out ./out
+python -m foundry.cli "build a todo API" --backend claude-cli --out ./out
 
 # 2. anthropic — Claude API (direct SDK). Set ANTHROPIC_API_KEY.
 export ANTHROPIC_API_KEY=sk-ant-...
-uv run python -m foundry.cli "build a todo API" --backend anthropic --out ./out
+python -m foundry.cli "build a todo API" --backend anthropic --out ./out
 
 # 3. openai — OpenAI API (direct SDK chat.completions). Set OPENAI_API_KEY.
 export OPENAI_API_KEY=sk-...
-uv run python -m foundry.cli "build a todo API" --backend openai --out ./out
+python -m foundry.cli "build a todo API" --backend openai --out ./out
 
 # 4. codex — codex CLI (codex exec). Set OPENAI_API_KEY.
 export OPENAI_API_KEY=sk-...
-uv run python -m foundry.cli "build a todo API" --backend codex --out ./out
+python -m foundry.cli "build a todo API" --backend codex --out ./out
 
 # 5. ollama-gemma — local Ollama. Point at the endpoint.
 export FOUNDRY_OLLAMA_URL=http://localhost:11434
-uv run python -m foundry.cli "build a todo API" --backend ollama-gemma --out ./out
+python -m foundry.cli "build a todo API" --backend ollama-gemma --out ./out
 ```
 
 Any backend writes real code automatically — the adapter is derived as `raw-react`,
@@ -275,16 +279,16 @@ writes real code. Set `--adapter` only to override that default.
 
 ```bash
 # 1. Derived (recommended) — omit --adapter; a real backend ⇒ raw-react writes code
-uv run python -m foundry.cli "build a dice roller" --backend anthropic --out ./out
+python -m foundry.cli "build a dice roller" --backend anthropic --out ./out
 
 # 2. Override: stub — force the deterministic no-op even on a real backend
 #    (exercises the proxy / lineage / determinism path WITHOUT generating code)
-uv run python -m foundry.cli "build a dice roller" \
+python -m foundry.cli "build a dice roller" \
   --backend anthropic --adapter stub --out ./out
 
 # 3. Override: raw-react explicitly — the universal completion substrate over ANY
 #    backend. `--backend claude-cli` here writes code via `claude -p` (completion only).
-uv run python -m foundry.cli "build a dice roller" \
+python -m foundry.cli "build a dice roller" \
   --backend claude-cli --adapter raw-react --out ./out
 ```
 
@@ -308,10 +312,10 @@ make spec REQUEST="build a feature-flag service"   # → writes spec.md
 $EDITOR spec.md
 
 # 2. Build from that spec
-uv run python -m foundry.cli "build a feature-flag service" --spec spec.md --out ./out
+python -m foundry.cli "build a feature-flag service" --spec spec.md --out ./out
 
 # 3. Ingest multiple spec files / a docs folder
-uv run python -m foundry.cli "port the billing module" \
+python -m foundry.cli "port the billing module" \
   --spec requirements.md --spec ./design-docs --out ./out
 ```
 
@@ -321,29 +325,29 @@ uv run python -m foundry.cli "port the billing module" \
 
 ```bash
 # 1. Domain packs — engage extra guidance/governance (a pack can veto a mode)
-uv run python -m foundry.cli "build a clinical intake form" \
+python -m foundry.cli "build a clinical intake form" \
   --packs regulated,ml_data --out ./out
 
 # 2. Auto-fix budget — retries per failing gate (default 3)
-uv run python -m foundry.cli "build a parser" --max-fix-attempts 5 --out ./out
+python -m foundry.cli "build a parser" --max-fix-attempts 5 --out ./out
 
 # 3. Cost ceiling — global spend envelope in micro-USD (metered backends)
-uv run python -m foundry.cli "build a parser" \
+python -m foundry.cli "build a parser" \
   --backend anthropic --cost-cap-microusd 500000 --out ./out      # $0.50
 
 # 4. Parallelism ceiling — usually auto; lower it on a constrained box
-uv run python -m foundry.cli "build a parser" --max-slots 2 --out ./out
+python -m foundry.cli "build a parser" --max-slots 2 --out ./out
 
 # 5. Checkpoints — pause at stage boundaries (CLI auto-approves all)
-uv run python -m foundry.cli "build a parser" --checkpoints all --out ./out
-uv run python -m foundry.cli "build a parser" --checkpoints product,release --out ./out
+python -m foundry.cli "build a parser" --checkpoints all --out ./out
+python -m foundry.cli "build a parser" --checkpoints product,release --out ./out
 
 # 6. Durable state — survive restarts / resume by thread id
-uv run python -m foundry.cli "build a parser" \
+python -m foundry.cli "build a parser" \
   --state-dir ./.state --thread-id parser-v1 --out ./out
 
 # 7. See every flag
-uv run python -m foundry.cli        # prints full usage
+python -m foundry.cli        # prints full usage
 ```
 
 ---
@@ -355,14 +359,14 @@ Re-enter a released codebase as a maintained change: re-verify, re-gate, re-admi
 
 ```bash
 # 1. Apply a change overlaid on the prior tree
-uv run python -m foundry.cli evolve ./out "add per-IP rate limiting" --apply ./changes
+python -m foundry.cli evolve ./out "add per-IP rate limiting" --apply ./changes
 
 # 2. Approve a protected criterion/oracle/gate edit (otherwise blocked)
-uv run python -m foundry.cli evolve ./out "loosen the auth gate" \
+python -m foundry.cli evolve ./out "loosen the auth gate" \
   --apply ./changes --guardian-approve
 
 # 3. Hard-fail in CI when the re-gate refuses to release
-uv run python -m foundry.cli evolve ./out "add caching" --apply ./changes --strict
+python -m foundry.cli evolve ./out "add caching" --apply ./changes --strict
 echo $?                              # non-zero if NOT released
 ```
 
@@ -375,17 +379,17 @@ projects; iterate to add releases; browse output and release history; approve,
 request changes, or reject at checkpoints.
 
 ```bash
-# 1. Serve it on http://localhost:8765  (or: make serve)
-uv run python -m webapp.server
+# 1. Serve it on http://localhost:8765 (it loads .env on startup)
+python -m webapp.server
 
 # 2. Expose it to your LAN
-WORKSHOP_HOST=0.0.0.0 uv run python -m webapp.server
+WORKSHOP_HOST=0.0.0.0 python -m webapp.server
 
 # 3. Default to a real backend in the UI picker
-FOUNDRY_MODEL_BACKEND=claude-cli uv run python -m webapp.server
+FOUNDRY_MODEL_BACKEND=claude-cli python -m webapp.server
 
 # 4. Require a shared token for any mutating action
-FOUNDRY_WORKSHOP_TOKEN=secret uv run python -m webapp.server
+FOUNDRY_WORKSHOP_TOKEN=secret python -m webapp.server
 #    then open  http://localhost:8765/?token=secret
 ```
 
@@ -409,20 +413,20 @@ export FOUNDRY_GATE_SANDBOX=inprocess
 The Workshop is built to run unattended for long, complex builds — including
 **multi-day runs** — and to **survive restarts**: with a durable state dir it
 resumes an in-flight build from its last checkpoint, and the SSE event log replays
-in full on reconnect. Configure a `.env` and start it with `make serve` (the server
-loads `.env` itself):
+in full on reconnect. Configure a `.env` and start it with `python -m webapp.server`
+(the server loads `.env` itself):
 
 ```bash
 cp foundry.mac.env.example .env    # Mac   (Linux/Pi: foundry.linux.env.example)
 $EDITOR .env                       # set your token/key + any tuning
-uv run python -m webapp.server     # foreground; Ctrl-C to stop
+python -m webapp.server     # foreground; Ctrl-C to stop
 ```
 
 Keep it running after you close the terminal with tmux or nohup:
 
 ```bash
-tmux new -s foundry 'uv run python -m webapp.server'        # reattach: tmux attach -t foundry
-nohup uv run python -m webapp.server > ~/foundry.log 2>&1 & # detached; kill the PID to stop
+tmux new -s foundry 'python -m webapp.server'        # reattach: tmux attach -t foundry
+nohup python -m webapp.server > ~/foundry.log 2>&1 & # detached; kill the PID to stop
 ```
 
 There's no supervisor — if it crashes or the host reboots, just start it again and

@@ -22,7 +22,7 @@ cd ~/Coders                              # wherever you cloned it
 cp foundry.mac.env.example .env          # 1. Mac preset — Claude Code, localhost
 claude setup-token                       # 2. mint a Claude Code token (Max plan)
 open -e .env                             #    …paste it as CLAUDE_CODE_OAUTH_TOKEN
-python -m webapp.server           # 3. start it → http://localhost:8765
+python -m webapp.server                  # 3. start it → http://localhost:8765
 ```
 
 The server loads `.env` on startup, so that's the whole run command — no wrapper.
@@ -53,7 +53,7 @@ python -m foundry.cli [OPTIONS] "<one-line request>"   # build a GitHub-ready re
                                                             #   raw-react writes code via `claude -p` (claude-cli) or the Anthropic API (anthropic)
 
 # ── Inputs ────────────────────────────────────────────────────────────────────
-  --spec <FILE|DIR>          # ground the build with a spec beyond the one-liner; REPEATABLE   (default: none)
+  --spec <FILE|DIR>          # ground the build with a spec (or run from a spec ALONE, no one-liner); REPEATABLE   (default: none)
   --packs <name1,name2>      # engage domain packs: regulated|ml_data|frontend; a pack may VETO a mode   (default: none)
   --docs <DIR>               # write the generated doc set (PRD / design / ops) here           (default: none)
 
@@ -63,7 +63,7 @@ python -m foundry.cli [OPTIONS] "<one-line request>"   # build a GitHub-ready re
   --thread-id <NAME>         # run identity; seeds idempotency keys + resume                   (default: cli-run)
 
 # ── Budgets & flow control ────────────────────────────────────────────────────
-  --max-fix-attempts <N>     # auto-fix retries per FAILING gate (N ≥ 1)                        (default: 3)
+  --max-fix-attempts <N>     # auto-fix retries per FAILING gate (N ≥ 1)                        (default: 5)
   --max-slots <N>            # parallelism CEILING; pool usually auto-sizes (N ≥ 1)             (default: auto)
   --cost-cap-microusd <N>    # global spend envelope in micro-USD, for metered backends         (default: none)
   --checkpoints [all|product,design,release]  # pause at stage boundaries (CLI auto-approves)   (default: off)
@@ -160,12 +160,20 @@ Each command writes a complete repo to `--out` and prints a pass/fail report.
 # 1. Simplest possible run (assistant mode) → repo in ./out
 python -m foundry.cli "build a tiny URL-shortener service" --backend claude-cli --out ./out
 
-# 2. Inspect the result
+# 2. A richer, multi-feature ask — one detailed sentence is fine
+python -m foundry.cli "a multi-tenant URL shortener with custom slugs, link expiry, \
+per-account API keys, click analytics with daily rollups, and per-IP abuse \
+rate-limiting" --backend claude-cli --mode gated --out ./out
+
+# 3. …or build straight from a design spec — no one-liner needed
+python -m foundry.cli --spec ./spec.md --backend claude-cli --out ./out
+
+# 4. Inspect the result
 ls ./out                 # source tree at the root
 cat ./out/README.md      # generated README
 ls ./out/docs            # PRD, design, ops docs
 
-# 3. Exit code tells you what happened
+# 5. Exit code tells you what happened
 echo $?                  # 0 = passed (PR-ready) · 1 = halted · 2 = usage error
 ```
 
@@ -306,7 +314,7 @@ directory and may repeat.
 python -m foundry.ideation "build a feature-flag service" > spec.md
 $EDITOR spec.md
 
-# 2. Build from that spec
+# 2. Build from that spec (the one-liner is optional — `--spec spec.md` alone works)
 python -m foundry.cli "build a feature-flag service" --spec spec.md --out ./out
 
 # 3. Ingest multiple spec files / a docs folder
@@ -507,7 +515,7 @@ rm -rf .pytest_cache .mypy_cache .ruff_cache ./.run spec.md  # clean caches + ou
 | `--packs a,b` | domain packs (`regulated` · `ml_data` · `frontend`) | — |
 | `--docs DIR` | generated doc-set output | — |
 | `--checkpoints` | `all` · `product,design,release` | off |
-| `--max-fix-attempts N` | gate fix-loop bound (N ≥ 1) | `3` |
+| `--max-fix-attempts N` | gate fix-loop bound (N ≥ 1) | `5` |
 | `--max-slots N` | parallelism ceiling (N ≥ 1) | auto |
 | `--cost-cap-microusd N` | spend envelope | — |
 | `--out DIR` | output repo | — |

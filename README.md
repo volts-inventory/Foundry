@@ -19,10 +19,12 @@ Open **Terminal**, go to this folder, and run (Mac shown; Linux uses
 
 ```bash
 cd ~/Coders                              # wherever you cloned it
-cp foundry.mac.env.example .env          # 1. Mac preset — Claude Code, localhost
-claude setup-token                       # 2. mint a Claude Code token (Max plan)
+python -m venv .venv && source .venv/bin/activate    # 1. install the project (once)
+pip install -e .
+cp foundry.mac.env.example .env          # 2. Mac preset — Claude Code, localhost
+claude setup-token                       # 3. mint a Claude Code token (Max plan)
 open -e .env                             #    …paste it as CLAUDE_CODE_OAUTH_TOKEN
-python -m webapp.server                  # 3. start it → http://localhost:8765
+python -m webapp.server                  # 4. start it → http://localhost:8765
 ```
 
 The server loads `.env` on startup, so that's the whole run command — no wrapper.
@@ -331,7 +333,7 @@ python -m foundry.cli "port the billing module" \
 python -m foundry.cli "build a clinical intake form" \
   --packs regulated,ml_data --out ./out
 
-# 2. Auto-fix budget — retries per failing gate (default 3)
+# 2. Auto-fix budget — retries per failing gate (default 5)
 python -m foundry.cli "build a parser" --max-fix-attempts 5 --out ./out
 
 # 3. Cost ceiling — global spend envelope in micro-USD (metered backends)

@@ -32,6 +32,31 @@ from webapp.events import events_for_payload, events_for_result, live_event_for_
 from webapp.repo import Repo, RepoUnavailable, read_repo
 from webapp.store import BuildStore
 
+
+def _load_env_file() -> bool:
+    """Load `KEY=VALUE` lines from a local `.env` into the environment (without
+    overriding anything already set), so the server picks up your config on its own —
+    no wrapper script needed. Returns True iff a `.env` was found. Values may use
+    `$HOME` / `~`. Run via `make serve` and Make also loads `.env`; this makes a bare
+    `python -m webapp.server` behave the same."""
+    root = Path(__file__).resolve().parent.parent
+    for cand in (Path.cwd() / ".env", root / ".env"):
+        if not cand.is_file():
+            continue
+        for raw in cand.read_text().splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            val = os.path.expandvars(os.path.expanduser(val.strip().strip('"').strip("'")))
+            if key.strip():
+                os.environ.setdefault(key.strip(), val)
+        return True
+    return False
+
+
+_ENV_FILE_FOUND = _load_env_file()   # before the config constants below read os.environ
+
 _STATIC = Path(__file__).parent / "static"
 _PACE = 0.5          # seconds between paced game events
 _STAGE_PAUSE = 0.9   # extra beat when a new stage opens
@@ -1636,6 +1661,10 @@ def _lan_ip() -> str | None:
 
 
 def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
+    if not _ENV_FILE_FOUND:
+        print("\n  ⚠  No .env found — set one up so your backend + key are configured:")
+        print("       cp foundry.mac.env.example .env    # Mac  (Linux: foundry.linux.env.example)")
+        print("       …then edit .env (token/key) and start again.\n")
     Path(_STATE_DIR).mkdir(parents=True, exist_ok=True)   # durable factory state
     _load_persisted()   # rehydrate floors (+ resume any interrupted build) from disk
     if _LOG_SWEEP_S > 0:   # bound RAM on a long-lived server: trim finished logs

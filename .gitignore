@@ -41,6 +41,3 @@ mutants/
 /webapp/static/assets/sprites/*
 !/webapp/static/assets/sprites/characters.png
 !/webapp/static/assets/sprites/CREDITS.md
-
-# Local deploy env (copied from deploy/foundry.env.example; may hold secrets)
-deploy/foundry.env

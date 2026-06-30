@@ -9,6 +9,7 @@ build without a stale click leaking into the next pause.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 
@@ -166,6 +167,27 @@ def test_finished_log_trimmed_but_store_keeps_full_history(store, monkeypatch):
     assert done.log_trimmed and len(done.log) == 2             # finished: trimmed to tail
     full = store.events_of("p2")                               # full story still durable
     assert len(full) == 7 and full[-1]["type"] == "_end"
+
+
+def test_load_env_file_last_line_wins_and_real_env_wins(tmp_path, monkeypatch):
+    # A `.env` where a key appears twice (a preset placeholder, then an
+    # `echo "KEY=v" >> .env` append) → the LAST line wins. A var already set in the
+    # real process environment is never clobbered by the file.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "CLAUDE_CODE_OAUTH_TOKEN=\n"             # preset placeholder (empty)
+        "CLAUDE_CODE_OAUTH_TOKEN=real-token\n"   # appended later → should win
+        "FOUNDRY_MODEL_BACKEND=claude-cli\n"
+        "WORKSHOP_PORT=9999\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("FOUNDRY_MODEL_BACKEND", raising=False)
+    monkeypatch.setenv("WORKSHOP_PORT", "8080")   # real env must win over the file
+    assert server._load_env_file() is True
+    assert os.environ["CLAUDE_CODE_OAUTH_TOKEN"] == "real-token"   # last line wins
+    assert os.environ["FOUNDRY_MODEL_BACKEND"] == "claude-cli"
+    assert os.environ["WORKSHOP_PORT"] == "8080"                   # real env preserved
 
 
 def test_durable_state_dir_defaults_on_under_output_root():

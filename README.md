@@ -423,9 +423,6 @@ cp deploy/foundry.mac.env.example deploy/foundry.env   # Mac   (Pi: foundry.pi.e
 # 2b. …or as a managed service (see deploy/README.md for the walkthrough)
 #     Pi  → deploy/pi/foundry-workshop.service     (systemd, Restart=always)
 #     Mac → deploy/mac/com.foundry.workshop.plist  (launchd, KeepAlive + caffeinate)
-
-# 3. Validate the host BEFORE a real multi-day job — offline, no key needed:
-python scripts/soak_resume_check.py   # RAM-plateau soak + kill/restart resume check
 ```
 
 > **On demand vs a service:** a service only adds **auto-restart on crash/reboot**.

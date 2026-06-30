@@ -102,11 +102,11 @@
           <option value="raw-react">raw-react — code via the chosen backend</option>
         </select>
       </div>
-      <div class="row">
-        <label>Parallelism</label>
-        <p class="hint" id="parallel-note">Automatic — the tech-lead decomposes the
-          work and the system runs the independent tasks in parallel.</p>
-      </div>
+      <label>Extra workers <span class="hint">— on top of one per team; management
+        assigns them where the work is (blank = automatic)</span></label>
+      <input id="extra-workers" type="number" min="0" max="32" placeholder="auto" />
+      <p class="hint" id="parallel-note">Every discipline always gets one worker; these
+        extras are the pool the leads share out by demand, and run in parallel.</p>
       <label>Auto-fix attempts <span class="hint">— fix-forward retries until green (default 5)</span></label>
       <input id="fix-input" type="number" min="0" max="20" value="5" />
       <label>Cost cap (USD) <span class="hint">— max model spend (metered API backends only)</span></label>
@@ -115,6 +115,17 @@
       <input id="packs-input" type="text" placeholder="regulated, ml_data, frontend" />
       <label class="check"><input type="checkbox" id="supervised" checked /> Supervised (CTO approves each checkpoint)</label>
       <p class="hint" id="supervised-hint"></p>
+      <p class="hint">A multi-service request (e.g. a site with users + posts) is auto-built as a PLATFORM — split into web / backend / data services (the backend owns the REST API, auth &amp; domain logic), each auto-deepened, then stitched into one monorepo. A single thing builds as one service.</p>
+      <details class="adv-platform">
+        <summary>Advanced — platform build</summary>
+        <label>Max deepening passes per service <span class="hint">— failsafe ceiling; auto stops sooner (default 6)</span></label>
+        <input type="number" id="max-passes" min="1" value="6" />
+        <label class="check"><input type="checkbox" id="critic-on" checked /> Completeness critic <span class="hint">— judges "done" each pass; off = stop on plateau only</span></label>
+        <label>Services built at once <span class="hint">— concurrency across services (default 4)</span></label>
+        <input type="number" id="max-parallel" min="1" value="4" />
+        <label>Tasks per service <span class="hint">— parallelism within each service (default 6)</span></label>
+        <input type="number" id="max-slots-svc" min="1" value="6" />
+      </details>
       <div class="dialog-actions">
         <button id="start-btn" class="primary">BREAK GROUND</button>
         <button id="cancel-btn">cancel</button>

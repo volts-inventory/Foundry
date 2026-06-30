@@ -61,6 +61,7 @@ from foundry.proxy.lineage import (
 from foundry.proxy.model_provider_proxy import (
     ModelProviderProxy,
     ProviderResponse,
+    _ClientCache,
 )
 
 __all__ = [
@@ -557,10 +558,7 @@ class OpenAITransport:
     """
 
     def __init__(self, client: Any | None = None) -> None:
-        self._client = client
-
-    def _ensure_client(self) -> Any:
-        if self._client is None:
+        def _build() -> Any:
             try:
                 import openai
             except ImportError as exc:  # pragma: no cover - import guard
@@ -568,8 +566,11 @@ class OpenAITransport:
                     "the 'openai' backend requires the openai SDK; install it "
                     "(e.g. `uv add openai` / `pip install openai`)"
                 ) from exc
-            self._client = openai.OpenAI()
-        return self._client
+            return openai.OpenAI()
+        self._cache = _ClientCache(_build, injected=client)
+
+    def _ensure_client(self) -> Any:
+        return self._cache.get()
 
     def send(self, request: dict[str, Any]) -> ProviderResponse:
         model = request.get("model")
@@ -599,7 +600,7 @@ class OpenAITransport:
                 "json_schema": {"name": "verdict", "schema": schema, "strict": True},
             }
 
-        response = self._ensure_client().chat.completions.create(**params)
+        response = self._cache.run(lambda c: c.chat.completions.create(**params))
         choice = response.choices[0] if getattr(response, "choices", None) else None
         text = (getattr(choice.message, "content", "") or "") if choice is not None else ""
         usage = getattr(response, "usage", None)

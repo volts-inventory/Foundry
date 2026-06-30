@@ -39,6 +39,18 @@ body{
 .gates-mini .g{padding:1px 6px;border-radius:3px;border:2px solid var(--line);font-size:11px}
 .gates-mini .g.pass{border-color:var(--green);color:var(--green)}
 .gates-mini .g.fail{border-color:var(--red);color:var(--red)}
+/* platform per-service chips, coloured by lifecycle state */
+.gates-mini .g.plat{text-transform:none}
+.gates-mini .g.plat.queued{border-color:var(--line);color:var(--dim)}
+.gates-mini .g.plat.building,.gates-mini .g.plat.rebuilding{border-color:#d9a23a;color:#ffcf7a}
+.gates-mini .g.plat.built{border-color:#5db8ff;color:#9bd0ff}
+.gates-mini .g.plat.approved,.gates-mini .g.plat.done{border-color:var(--green);color:#9dffbf}
+.gates-mini .g.plat.held,.gates-mini .g.plat.failed{border-color:var(--red);color:#ffb3ba}
+.gates-mini .g.plat-count{border-color:var(--gold);color:var(--gold);font-weight:bold}
+/* advanced platform options (collapsible) in the New Project dialog */
+.adv-platform{margin-top:10px;border:2px solid var(--line);border-radius:6px;padding:6px 10px}
+.adv-platform summary{cursor:pointer;color:var(--dim);font-size:12px;font-weight:bold;text-transform:uppercase}
+.adv-platform[open] summary{color:var(--ink);margin-bottom:6px}
 button{
   font-family:inherit;text-transform:uppercase;cursor:pointer;white-space:nowrap;
   background:#24304f;color:var(--ink);border:3px solid var(--line);

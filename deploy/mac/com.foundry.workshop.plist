@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Foundry Workshop launchd agent (macOS).
+
+  1. Edit the two REPO paths below to your checkout, then:
+       cp deploy/foundry.env.example ~/.config/foundry/foundry.env   # edit it
+       chmod +x deploy/mac/run-workshop.sh
+       cp deploy/mac/com.foundry.workshop.plist ~/Library/LaunchAgents/
+       launchctl load -w ~/Library/LaunchAgents/com.foundry.workshop.plist
+  2. Stop:   launchctl unload -w ~/Library/LaunchAgents/com.foundry.workshop.plist
+  3. Logs:   tail -f /tmp/foundry-workshop.{out,err}
+
+  KeepAlive=true is the macOS equivalent of systemd Restart=always: launchd
+  relaunches the server if it exits, and the server resumes any in-flight build
+  from its last checkpoint.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.foundry.workshop</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <!-- >>> set this to the absolute path of run-workshop.sh in your checkout <<< -->
+    <string>/Users/CHANGEME/Coders/deploy/mac/run-workshop.sh</string>
+  </array>
+
+  <!-- >>> your repo checkout <<< -->
+  <key>WorkingDirectory</key>
+  <string>/Users/CHANGEME/Coders</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/foundry-workshop.out</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/foundry-workshop.err</string>
+</dict>
+</plist>

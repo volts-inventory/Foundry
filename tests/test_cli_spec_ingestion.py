@@ -114,17 +114,19 @@ def test_load_spec_empty_dir_raises(tmp_path: Path) -> None:
 
 
 def test_load_spec_caps_large_text() -> None:
-    huge = "x" * (2 * 1024 * 1024)
+    from foundry.cli import _SPEC_MAX_BYTES
+    huge = "x" * (_SPEC_MAX_BYTES * 2)
     out = _load_spec(huge)
-    assert len(out.encode("utf-8")) <= 512 * 1024
+    assert len(out.encode("utf-8")) <= _SPEC_MAX_BYTES
 
 
 def test_load_spec_caps_large_multibyte_text_on_bytes() -> None:
     """The cap is on ENCODED BYTES, so a multibyte spec is bounded too (not just
     ASCII) — and the truncation never leaves a partial UTF-8 char."""
-    huge = "€" * (512 * 1024)  # 3 bytes each -> ~1.5 MB
+    from foundry.cli import _SPEC_MAX_BYTES
+    huge = "€" * _SPEC_MAX_BYTES  # 3 bytes each -> ~3x the cap
     out = _load_spec(huge)
-    assert len(out.encode("utf-8")) <= 512 * 1024  # truly byte-bounded
+    assert len(out.encode("utf-8")) <= _SPEC_MAX_BYTES  # truly byte-bounded
     out.encode("utf-8")  # decodes cleanly (no partial trailing char)
 
 

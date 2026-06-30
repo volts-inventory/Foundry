@@ -147,6 +147,27 @@ def test_load_persisted_replays_finished_build(store, monkeypatch):
     assert p.ended                      # a late viewer replays then ends at once
 
 
+def test_finished_log_trimmed_but_store_keeps_full_history(store, monkeypatch):
+    # A long-lived server trims finished builds' in-memory logs (RAM), but the FULL
+    # history stays durable so a late viewer still replays the whole story.
+    monkeypatch.setattr(server, "_LOG_TAIL", 2)
+    monkeypatch.setattr(server, "_LOG_GRACE_S", 0)     # eligible as soon as it ends
+    running = _project()
+    done = Project(id="p2", request="r", mode="assistant", supervised=True, floor=2)
+    monkeypatch.setattr(server, "_PROJECTS", {"p1": running, "p2": done})
+    for i in range(6):
+        _emit(running, type="narrate", text=f"e{i}")     # still running
+        _emit(done, type="narrate", text=f"d{i}")
+    _close(done)                                          # appends _end, stamps ended_at
+
+    server._trim_finished_logs()
+
+    assert not running.log_trimmed and len(running.log) == 6   # in-flight: untouched
+    assert done.log_trimmed and len(done.log) == 2             # finished: trimmed to tail
+    full = store.events_of("p2")                               # full story still durable
+    assert len(full) == 7 and full[-1]["type"] == "_end"
+
+
 def test_durable_state_dir_defaults_on_under_output_root():
     # The Workshop turns durable state ON by default (CLI leaves it off) so a build
     # survives a restart. The constant resolves to a real, non-empty path.

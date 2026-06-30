@@ -39,6 +39,34 @@ _AUTO_APPROVE_DELAY = 1.4  # auto-run: dwell on each checkpoint before approving
 
 _MODES = ("assistant", "gated", "autonomous")
 
+
+def _int_env(name: str, default: int) -> int:
+    """A small non-negative int from the environment (blank/garbage -> default)."""
+    try:
+        return max(0, int(os.environ.get(name) or default))
+    except (TypeError, ValueError):
+        return default
+
+
+# Cap how many builds RUN at once. Each build is a real, resource-heavy run (model
+# calls + local gate subprocesses); on a small host (a Pi) two heavy builds at once
+# can exhaust RAM. Extra builds QUEUE — their worker thread blocks on this semaphore
+# and starts as a slot frees. Tune per host: a Pi wants 1, an M-series Mac 3-4.
+# WORKSHOP_MAX_CONCURRENT_BUILDS=0 disables the cap (unbounded, the prior behaviour).
+_MAX_CONCURRENT_BUILDS = _int_env("WORKSHOP_MAX_CONCURRENT_BUILDS", 2)
+_BUILD_GATE: threading.BoundedSemaphore | None = (
+    threading.BoundedSemaphore(_MAX_CONCURRENT_BUILDS)
+    if _MAX_CONCURRENT_BUILDS > 0 else None
+)
+
+# A server running for days accumulates one in-memory event log per build (every
+# build ever, in _PROJECTS). The full history is ALSO durable in SQLite, so once a
+# build has been FINISHED for a grace period its in-memory log is trimmed to a tail;
+# a (rare) late viewer of a finished build replays the full story from the store.
+_LOG_TAIL = _int_env("WORKSHOP_LOG_TAIL", 64)       # events kept in memory after trim
+_LOG_GRACE_S = _int_env("WORKSHOP_LOG_GRACE_S", 90)  # wait after a build ends before trimming
+_LOG_SWEEP_S = _int_env("WORKSHOP_LOG_SWEEP_S", 120)  # how often the sweeper runs (0 = off)
+
 # Where each floor's build writes its output tree + doc bundle (gitignored).
 # Override with WORKSHOP_OUTPUT_DIR (e.g. a mounted volume on a Pi).
 _OUTPUT_ROOT = Path(os.environ.get("WORKSHOP_OUTPUT_DIR", ".run/web")).resolve()
@@ -226,6 +254,8 @@ class Project:
     log: list[dict[str, Any]] = field(default_factory=list)
     cond: threading.Condition = field(default_factory=threading.Condition)
     ended: bool = False
+    ended_at: float | None = None    # monotonic time the build finished (for log sweeping)
+    log_trimmed: bool = False        # in-memory log trimmed to a tail; full history in the store
     # Checkpoint decisions: first decision for a checkpoint wins (idempotent);
     # every device still watches the resolution play (it's just another log event).
     checkpoint_seq: int = 0          # monotonic id of the LATEST checkpoint reached
@@ -238,6 +268,7 @@ class Project:
     journal: list[dict[str, Any]] = field(default_factory=list)  # latest agent journal ([11])
     gates: dict[str, Any] = field(default_factory=dict)  # name -> {status,attested,advisory}
     out_base: Path | None = None  # this floor's output dir (code/ + docs/)
+    platform_opts: dict[str, Any] = field(default_factory=dict)  # platform build knobs (advanced)
 
 
 _PROJECTS: dict[str, Project] = {}
@@ -369,7 +400,7 @@ def _load_persisted() -> None:
                         p.seen_uris = set()
                     p.status = "running"
                     p.ended = False
-                    threading.Thread(target=_run_factory, args=(p,),
+                    threading.Thread(target=_gated_runner, args=(_run_factory, p),
                                      kwargs={"resume": True}, daemon=True).start()
                 elif was_running:
                     # No recoverable checkpoint → close it out honestly (history kept,
@@ -514,6 +545,7 @@ def _emit(p: Project, **event: Any) -> None:
         p.log.append(event)
         if event.get("type") == "_end":
             p.ended = True
+            p.ended_at = time.monotonic()   # start the grace clock for log trimming
         p.cond.notify_all()       # wake EVERY connected stream (not just one)
     # Durably back the log so a reconnect/restart can replay the whole story.
     try:
@@ -527,6 +559,33 @@ def _emit(p: Project, **event: Any) -> None:
 def _close(p: Project) -> None:
     """Terminate the stream for every viewer (the build is over)."""
     _emit(p, type="_end")
+
+
+def _trim_finished_logs() -> None:
+    """Trim the in-memory event log of builds that finished a while ago.
+
+    The full history stays durable in SQLite, so holding every finished build's
+    whole log in RAM is pure waste on a long-lived server. We keep a short tail
+    (so the catalog/HUD code that peeks at recent events still works) and mark the
+    build so a late viewer replays from the store instead of the trimmed tail."""
+    now = time.monotonic()
+    for p in list(_PROJECTS.values()):
+        if (not p.ended or p.log_trimmed or p.ended_at is None
+                or now - p.ended_at < _LOG_GRACE_S):
+            continue
+        with p.cond:
+            if len(p.log) > _LOG_TAIL:
+                p.log = p.log[-_LOG_TAIL:]
+            p.log_trimmed = True   # stream now replays this build's history from the store
+
+
+def _log_sweeper() -> None:
+    while True:
+        time.sleep(_LOG_SWEEP_S)
+        try:
+            _trim_finished_logs()
+        except Exception:
+            pass
 
 
 def _record_decision(p: Project, decision: str, checkpoint: int | None) -> tuple[bool, bool]:
@@ -577,6 +636,29 @@ def _emit_paced(p: Project, events: list[dict[str, Any]]) -> None:
     for ev in events:
         _emit(p, **ev)
         time.sleep(_STAGE_PAUSE if ev.get("type") == "stage" else _PACE)
+
+
+def _gated_runner(runner, p: Project, **kwargs: Any) -> None:
+    """Run a build under the global concurrency gate.
+
+    When all build slots are busy, the project is marked ``queued`` and this worker
+    thread blocks until a slot frees — so a small host never runs more heavy builds
+    at once than ``WORKSHOP_MAX_CONCURRENT_BUILDS``. The slot is always released, even
+    if the build raises, so a crash can't leak a permanently-held slot."""
+    if _BUILD_GATE is None:
+        runner(p, **kwargs)
+        return
+    if not _BUILD_GATE.acquire(blocking=False):
+        # Every slot busy → tell the user it's queued, then wait for one to free.
+        p.status = "queued"
+        _persist(p)
+        _emit(p, type="narrate",
+              text="⏳ All build slots are busy — queued. Starting as soon as one frees…")
+        _BUILD_GATE.acquire()
+    try:
+        runner(p, **kwargs)
+    finally:
+        _BUILD_GATE.release()
 
 
 def _run_factory(p: Project, resume: bool = False) -> None:
@@ -727,6 +809,195 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     p.passed = bool(result.passed)
     p.status = "done"
     _persist(p)              # catalog the FINAL status/passed (after they're set)
+    _close(p)
+
+
+_STAGE_ORDER = ["defining requirements", "designing the system", "implementing",
+                "testing & review", "security review", "verifying at the gate"]
+
+
+def _node_stage(node: str) -> str | None:
+    """Map a live graph node id to a readable pipeline STAGE for the platform log
+    (None for infra/non-stage nodes we don't surface)."""
+    n = (node or "").lower()
+    if any(k in n for k in ("stakeholder", "product", "criteria", "program")):
+        return "defining requirements"
+    if "architect" in n:
+        return "designing the system"
+    if "engineer" in n and ("appsec" not in n):
+        return "implementing"
+    if any(k in n for k in ("qa", "sdet", "reviewer", "writer", "tester")):
+        return "testing & review"
+    if any(k in n for k in ("appsec", "audit", "supply", "security")):
+        return "security review"
+    if "gate" in n:
+        return "verifying at the gate"
+    return None
+
+
+def _platform_opts(body: dict[str, Any]) -> dict[str, Any]:
+    """Advanced platform knobs from the request body (all optional; sane defaults)."""
+    def _int(key: str, default: int) -> int:
+        try:
+            return max(1, int(body.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+    return {
+        "max_passes": _int("max_passes", 6),
+        "critic": not bool(body.get("no_critic")),
+        "max_parallel": _int("max_parallel", 4),
+        "max_slots_per_service": _int("max_slots_per_service", 6),
+    }
+
+
+def _infers_platform(request: str) -> bool:
+    """True when the request decomposes into MORE THAN ONE service — i.e. it reads as
+    a multi-service app/platform (web + backend + data …) rather than a single
+    component (a game, a tool, one service). Drives the auto platform/single choice."""
+    try:
+        from foundry.platform import plan_platform
+
+        return len(plan_platform(request).services) >= 2
+    except Exception:
+        return False
+
+
+def _run_platform(p: Project) -> None:
+    """A PLATFORM build on one floor: compose many services into one monorepo via
+    ``foundry.platform.build_platform`` and stream its progress to the quest log.
+    The stitched monorepo is written to ``p.out_base`` so the repo browser / Floor-0
+    hub serve it from disk (no CAS build of its own)."""
+    from foundry.platform import build_platform
+    from foundry.platform.planner import plan_platform
+
+    # Map a service role to a discipline ROOM the floor can light up (the platform
+    # floor has no engine stage stream of its own, so we drive it ourselves).
+    role_room = {"web": "frontend", "backend": "backend",
+                 "data": "data", "worker": "backend", "game": "frontend"}
+    plan = plan_platform(p.request)
+    # Synthetic org so the discipline rooms staff up (engineers per area) and the
+    # static crew sits at their desks (idle => Zzz) — instead of waiting in the lounge.
+    area_units: dict[str, list[str]] = {}
+    order: list[str] = []
+    for s in plan.services:
+        a = role_room.get(s.role, "backend")
+        if a not in area_units:
+            area_units[a] = []
+            order.append(a)
+        area_units[a].append(s.name)
+    areas = [{"area": a, "leads": [f"{a} lead"]} for a in order]
+    domains = [{"owner": a, "area": a, "units": area_units[a]} for a in order]
+    first_room = role_room.get(plan.services[0].role, "backend") if plan.services else "backend"
+
+    # The floor's "extra workers" pool = the user's setting (p.max_slots), so the same
+    # knob drives platform and single builds. Each discipline room still gets its one
+    # baseline worker; these extras are shared out across the rooms by demand.
+    _emit(p, type="project", request=p.request, mode=p.mode, backend=p.backend,
+          slots=p.max_slots)
+    _emit(p, type="org", areas=areas, domains=domains)
+    _emit(p, type="active", room=first_room)   # seat everyone; first discipline works
+    _emit(p, type="narrate", text=f"🏗  Platform build — {p.request}")
+
+    role_desc = {"web": "the web frontend (SPA)",
+                 "backend": "the back-end (REST API + auth + domain)",
+                 "data": "the data layer (schema + DB)",
+                 "worker": "the background worker", "game": "the game"}
+    svc_role = {s.name: s.role for s in plan.services}
+    state: dict[str, str] = {s.name: "queued" for s in plan.services}
+    svc_stage: dict[str, str] = {}   # last pipeline stage per service (show every CHANGE)
+
+    def push_prog() -> None:
+        _emit(p, type="platprog", services=dict(state), total=len(state))
+
+    push_prog()
+
+    def set_state(svc: str, st: str) -> None:
+        state[svc] = st
+        push_prog()
+
+    def cb(ev: dict[str, Any]) -> None:
+        t = ev.get("type")
+        svc = ev.get("service", "")
+        pn = ev.get("pass", 1)
+        if t == "plan":
+            _emit(p, type="narrate", text="📋 Services: " + ", ".join(ev.get("services") or []))
+        elif t == "svc_start":
+            role = str(ev.get("role") or "")
+            _emit(p, type="active", room=role_room.get(role, "backend"))
+            set_state(svc, "building")
+            _emit(p, type="narrate", text=f"▶ {svc} — building {role_desc.get(role, role)}")
+        elif t == "svc_node":
+            stage = _node_stage(str(ev.get("node") or ""))
+            last = svc_stage.get(svc)
+            if stage and stage != last:   # show every stage CHANGE (forward AND backward)
+                back = (last in _STAGE_ORDER and stage in _STAGE_ORDER
+                        and _STAGE_ORDER.index(stage) < _STAGE_ORDER.index(last))
+                svc_stage[svc] = stage
+                if back:   # regressed to an earlier stage — e.g. tests failed -> re-implement
+                    _emit(p, type="narrate", text=f"   ↩ {svc} · back to {stage}")
+                    _emit(p, type="rebuild", room=role_room.get(svc_role.get(svc, ""), "backend"))
+                else:
+                    _emit(p, type="narrate", text=f"   {svc} · {stage}")
+        elif t == "pass" and pn > 1:
+            svc_stage.pop(svc, None)   # a new pass re-runs the pipeline; let stages re-announce
+            set_state(svc, "rebuilding")
+            _emit(p, type="rebuild", room=role_room.get(svc_role.get(svc, ""), "backend"))
+            _emit(p, type="narrate", text=f"   ↻ {svc} — rebuilding · pass {pn}")
+        elif t == "pass_result":
+            if ev.get("passed"):
+                set_state(svc, "built")
+                _emit(p, type="narrate", text=f"   ✓ {svc} — built, gates green (pass {pn})")
+            else:
+                set_state(svc, "held")
+                _emit(p, type="narrate", text=f"   ✗ {svc} — held at the gate (pass {pn})")
+        elif t == "critic":
+            if ev.get("complete"):
+                set_state(svc, "approved")
+                _emit(p, type="narrate", text=f"   ✦ {svc} — approved: technically complete")
+            else:
+                gaps = ev.get("gaps") or []
+                detail = "; ".join(gaps[:3]) if gaps else "more to do"
+                _emit(p, type="narrate", text=f"   • {svc} — needs more: {detail} → rebuilding")
+        elif t == "svc_done":
+            set_state(svc, "done" if ev.get("passed") else "failed")
+            mark = "✓" if ev.get("passed") else "✗"
+            _emit(p, type="narrate", text=f"{mark} {svc} done · {ev.get('passes', 1)} pass(es)")
+            for f in (ev.get("files") or [])[:8]:   # the specific pieces this service built
+                _emit(p, type="narrate", text=f"     ⊞ {svc}/{f}")
+
+    opts = p.platform_opts or {}
+    staging = str(p.out_base.parent / f".staging-{p.id}") if p.out_base else None
+    try:
+        result = build_platform(
+            p.request, out_dir=str(p.out_base), backend=p.backend, mode=p.mode,
+            cost_cap_microusd=p.cost_cap_microusd, progress_cb=cb, work_dir=staging,
+            max_passes=int(opts.get("max_passes", 6)),
+            critic=bool(opts.get("critic", True)),
+            max_parallel=int(opts.get("max_parallel", 4)),
+            max_slots_per_service=int(opts.get("max_slots_per_service", 6)),
+        )
+    except Exception as exc:
+        _emit(p, type="narrate", text=f"💥 Platform error: {exc}")
+        _emit(p, type="done", passed=False, phase="error")
+        p.status = "done"
+        _persist(p)
+        _close(p)
+        return
+
+    # One "check" per service for the repo Checks tab (disk-fallback reads p.gates).
+    p.gates = {s.name: {"status": "PASS" if s.passed else "FAIL", "advisory": False}
+               for s in result.services}
+    n_files = sum(1 for f in p.out_base.rglob("*") if f.is_file()) if p.out_base else 0
+    _emit(p, type="narrate",
+          text=f"📦 Stitched monorepo — {len(result.services)} services, {n_files} files")
+    if n_files:
+        _emit(p, type="files", count=n_files)
+    if result.passed:   # shipped — open the vault chest + celebrate, like a single build
+        _emit(p, type="release", uri=f"monorepo · {len(result.services)} services")
+    _emit(p, type="done", passed=result.passed, phase="done")
+    p.passed = bool(result.passed)
+    p.status = "done"
+    _persist(p)
     _close(p)
 
 
@@ -1253,7 +1524,15 @@ class Handler(BaseHTTPRequestHandler):
         with _LOCK:
             _PROJECTS[pid] = p
         _persist(p)
-        threading.Thread(target=_run_factory, args=(p,), daemon=True).start()
+        # A PLATFORM build composes many services into one monorepo on this floor; a
+        # normal build is one service through the factory. INFERRED from the request
+        # (multi-service => platform), unless the caller pins it with `platform`.
+        want = body.get("platform")
+        is_platform = want if isinstance(want, bool) else _infers_platform(request)
+        if is_platform:
+            p.platform_opts = _platform_opts(body)
+        runner = _run_platform if is_platform else _run_factory
+        threading.Thread(target=_gated_runner, args=(runner, p), daemon=True).start()
         self._json(200, {"id": pid, "floor": floor, "release": release_seq})
 
     def _decision(self, pid: str) -> None:
@@ -1291,6 +1570,23 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Connection", "keep-alive")
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
+        # A finished build whose in-memory log was trimmed to save RAM: replay its
+        # FULL history from the durable store (the trimmed tail isn't the whole story).
+        if p.ended and p.log_trimmed:
+            history = _STORE.events_of(pid)
+            try:
+                for idx in range(cursor, len(history)):
+                    ev = history[idx]
+                    if ev.get("type") == "_end":
+                        self.wfile.write(f"id: {idx}\nevent: end\ndata: {{}}\n\n".encode())
+                        self.wfile.flush()
+                        return
+                    self.wfile.write(f"id: {idx}\ndata: {json.dumps(ev)}\n\n".encode())
+                self.wfile.write(b"event: end\ndata: {}\n\n")   # caught up; build is over
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            return
         try:
             while True:
                 with p.cond:
@@ -1342,6 +1638,8 @@ def _lan_ip() -> str | None:
 def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
     Path(_STATE_DIR).mkdir(parents=True, exist_ok=True)   # durable factory state
     _load_persisted()   # rehydrate floors (+ resume any interrupted build) from disk
+    if _LOG_SWEEP_S > 0:   # bound RAM on a long-lived server: trim finished logs
+        threading.Thread(target=_log_sweeper, daemon=True).start()
     srv = ThreadingHTTPServer((host, port), Handler)
     shown = "localhost" if host in ("127.0.0.1", "0.0.0.0") else host
     print(f"\n  🏭  Foundry Workshop running →  http://{shown}:{port}\n")

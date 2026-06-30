@@ -1,0 +1,35 @@
+# Foundry Workshop build server (Raspberry Pi / any systemd Linux host).
+#
+# Install:
+#   sudo cp deploy/pi/foundry-workshop.service /etc/systemd/system/
+#   sudo mkdir -p /etc/foundry && sudo cp deploy/foundry.env.example /etc/foundry/foundry.env
+#   sudo nano /etc/foundry/foundry.env          # set token, key, paths
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now foundry-workshop
+#
+# Notes:
+#  * Set ExecStart's `uv` to its ABSOLUTE path (systemd's PATH is minimal):
+#      which uv      ->  e.g. /home/pi/.local/bin/uv  or /usr/local/bin/uv
+#  * Restart=always + the server's own resume-on-start means a crash/reboot
+#    self-heals: any build that was running picks up from its last checkpoint.
+
+[Unit]
+Description=Foundry Workshop build server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/opt/Coders
+EnvironmentFile=/etc/foundry/foundry.env
+# >>> set this to `which uv` on your host <<<
+ExecStart=/home/pi/.local/bin/uv run python -m webapp.server
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+# Prefer the OOM killer to reap a runaway gate SUBPROCESS, not the server itself.
+OOMScoreAdjust=-600
+
+[Install]
+WantedBy=multi-user.target

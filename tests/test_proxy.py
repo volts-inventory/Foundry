@@ -505,6 +505,155 @@ def test_transient_failure_recovers_within_retry_budget():
     assert delays == [0.5]
 
 
+# ---- 5b. provider rate-limiting: separate budget, honors Retry-After ------------
+
+
+class _FakeHeaders:
+    def __init__(self, mapping: dict[str, str]) -> None:
+        self._m = mapping
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._m.get(key, default)
+
+
+class _RateLimitError(Exception):
+    """An SDK-shaped 429 with an optional Retry-After header."""
+
+    def __init__(self, retry_after: float | None = None) -> None:
+        super().__init__("429 Too Many Requests")
+        self.status_code = 429
+        if retry_after is not None:
+            self.response = type("R", (), {"headers": _FakeHeaders(
+                {"retry-after": str(retry_after)})})()
+
+
+@dataclass
+class _RateLimitTransport:
+    """Raises a 429 ``rl_times`` times, then serves normally."""
+
+    rl_times: int = 0
+    retry_after: float | None = None
+    text: str = APPROVE_JSON
+    attempts: int = 0
+    requests: list[dict[str, Any]] = field(default_factory=list)
+
+    def send(self, request: dict[str, Any]) -> ProviderResponse:
+        self.attempts += 1
+        if self.rl_times > 0:
+            self.rl_times -= 1
+            raise _RateLimitError(retry_after=self.retry_after)
+        self.requests.append(request)
+        return ProviderResponse(
+            served_model=request["model"], request_id="req_rl",
+            text=self.text, usage=dict(USAGE), stop_reason="end_turn",
+        )
+
+
+def _rl_proxy(transport: Any, *, sleeper: Any, rl_retries: int = 6,
+              rl_base: float = 2.0) -> ModelProviderProxy:
+    return ModelProviderProxy(
+        transport, LineageMap(), ZoneBSigner(KEY, KEY_ID), profile="self_judge",
+        sleeper=sleeper, rate_limit_max_retries=rl_retries,
+        rate_limit_backoff_base_s=rl_base,
+    )
+
+
+def test_rate_limit_recovers_and_honors_retry_after():
+    delays: list[float] = []
+    transport = _RateLimitTransport(rl_times=2, retry_after=7.0)
+    proxy = _rl_proxy(transport, sleeper=delays.append)
+    result = proxy.complete(
+        "n", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate"
+    )
+    assert result.text == APPROVE_JSON
+    assert transport.attempts == 3            # 2 throttled + 1 success
+    assert delays == [7.0, 7.0]               # honored Retry-After, not 0.5/1.0
+
+
+def test_rate_limit_uses_separate_more_generous_budget():
+    # A 429 storm must NOT escalate after the generic 2-retry budget; it rides the
+    # rate-limit budget (here 4) with its own exponential backoff.
+    delays: list[float] = []
+    transport = _RateLimitTransport(rl_times=99)
+    proxy = _rl_proxy(transport, sleeper=delays.append, rl_retries=4, rl_base=2.0)
+    with pytest.raises(ProxyUnavailable):
+        proxy.complete("n", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
+    assert transport.attempts == 5            # initial + 4 rate-limit waits
+    assert delays == [2.0, 4.0, 8.0, 16.0]    # exponential, capped at 60s
+
+
+def test_rate_limiter_paces_requests_per_minute():
+    from foundry.proxy.model_provider_proxy import _RateLimiter
+    waits: list[float] = []
+    clock = [0.0]
+    rl = _RateLimiter(max_rpm=60, sleeper=waits.append, clock=lambda: clock[0])
+    with rl.slot():
+        pass                                  # first call: no wait
+    with rl.slot():
+        pass                                  # clock hasn't moved → must space by 1s
+    assert waits == [1.0]
+
+
+# ---- 5c. SDK client cache: TTL refresh + auth-error rebuild ---------------------
+
+
+def test_client_cache_rebuilds_after_ttl():
+    from foundry.proxy.model_provider_proxy import _ClientCache
+    clock = [0.0]
+    built: list[int] = []
+
+    def factory():
+        built.append(1)
+        return object()
+
+    cache = _ClientCache(factory, ttl_s=10.0, clock=lambda: clock[0])
+    a = cache.get()
+    assert cache.get() is a            # within TTL → same client, no rebuild
+    clock[0] = 11.0
+    b = cache.get()
+    assert b is not a and len(built) == 2   # past TTL → rebuilt
+
+
+def test_client_cache_rebuilds_after_auth_error():
+    from foundry.proxy.model_provider_proxy import _ClientCache
+    built: list[int] = []
+
+    def factory():
+        built.append(1)
+        return object()
+
+    cache = _ClientCache(factory)      # TTL off by default
+    first = cache.get()
+    with pytest.raises(Exception):
+        cache.run(lambda _c: (_ for _ in ()).throw(Exception("401 Unauthorized")))
+    second = cache.get()
+    assert second is not first and len(built) == 2   # auth error dropped the client
+
+
+def test_manifest_is_bounded_and_counts_dropped():
+    transport = FakeTransport()
+    proxy = ModelProviderProxy(
+        transport, LineageMap(), ZoneBSigner(KEY, KEY_ID), profile="self_judge",
+        sleeper=lambda _s: None, manifest_max=3,
+    )
+    for _ in range(5):
+        proxy.complete("n", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
+    assert len(proxy.manifest) == 3        # capped to the most-recent 3
+    assert proxy.manifest_dropped == 2     # the 2 oldest rolled off (and were counted)
+
+
+def test_client_cache_keeps_injected_client_on_transient_error():
+    from foundry.proxy.model_provider_proxy import _ClientCache
+    sentinel = object()
+    cache = _ClientCache(lambda: object(), injected=sentinel, ttl_s=0.001,
+                         clock=lambda: 1e9)
+    # An injected client is never proactively refreshed, and a NON-auth error
+    # (a transient blip) leaves it in place for the retry layer to re-drive.
+    with pytest.raises(Exception):
+        cache.run(lambda _c: (_ for _ in ()).throw(ConnectionError("blip")))
+    assert cache.get() is sentinel
+
+
 # ---- 6. manifest: usage + cache metering ---------------------------------------
 
 

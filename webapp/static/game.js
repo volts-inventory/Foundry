@@ -20,30 +20,58 @@ const FLOOR_TOP = 100, FLOOR_BOT = H - 40;   // general playfield bounds (rooms 
 // One open level; the elevator switches PROJECTS. Aisles between cells are corridors
 // people walk along; sections are coloured floor rugs in the cells.
 const WALL_TOP = 118, FLOOR_BOTTOM = H - 26;
-const CELL_W = 368, CELL_H = 196, AISLE = 48, GX0 = 40, GY0 = 132, GX1 = W - 40;
-function cellBox(c,r){ return {x: GX0 + c*(CELL_W+AISLE), y: GY0 + r*(CELL_H+AISLE), w:CELL_W, h:CELL_H}; }
-const GRID = {  // rooms mirror the pipeline, read left->right, top->bottom:
-  // product -> architecture -> engineering -> qa -> security -> gate -> vault.
-  product:[0,0], architecture:[1,0], engineering:[2,0],
-  qa:[0,1], security:[1,1], gate:[2,1],
-  vault:[2,2],                       // gate(2,1) sits directly above vault(2,2)
+// 4×3 grid of (smaller) section-cells. The engineering stage is split into its OWN
+// per-discipline rooms — FRONTEND / BACKEND / DATA — top-level sections like the
+// others, occupying row 1; all of an area's engineers live in its room.
+const CELL_W = 274, CELL_H = 196, AISLE = 34, GX0 = 40, GY0 = 132, GX1 = W - 40;
+function cellBox(c,r){ const x = GX0 + c*(CELL_W+AISLE), y = GY0 + r*(CELL_H+AISLE);
+  // include derived coords so non-ROOM callers (the lounge cell) get cx/cy/x1/y1 too.
+  return {x, y, w:CELL_W, h:CELL_H, x0:x, y0:y, x1:x+CELL_W, y1:y+CELL_H, cx:x+CELL_W/2, cy:y+CELL_H/2}; }
+const GRID = {  // pipeline: product → architecture → engineering(FE/BE/DA) → qa → security → gate → vault
+  product:[0,0], architecture:[1,0], qa:[2,0], security:[3,0],
+  frontend:[0,1], backend:[1,1], data:[2,1], gate:[3,1],
+  vault:[3,2],                       // gate(3,1) sits directly above vault(3,2)
+  office:[0,2],                      // the CTO's own office (row 2, far left)
 };
-// (0,2) = the LOUNGE (idle agents relax here); (1,2) = a decorative ENTRANCE /
-// lobby (the org chart on the wall + where the CTO greets). No work happens in either.
-const LOUNGE_CELL = [0,2], ENTRANCE_CELL = [1,2];
+// Pipeline ORDER (the build sequence) — drives the order numerals + the flow path.
+const PIPELINE_ORDER = ["product","architecture","frontend","backend","data","qa","security","gate","vault"];
+// (0,2) = the CTO OFFICE (a real room, see GRID.office); (1,2) = the LOUNGE where idle
+// agents relax. No pipeline work happens in either.
+const LOUNGE_CELL = [1,2], ENTRANCE_CELL = [1,2];
+const ENG_ROOMS = ["frontend","backend","data"];               // engineering discipline rooms
+const ENG_AREA_ROOM = {frontend:"frontend", backend:"backend", data:"data",
+                       infra:"backend", security:"backend"};   // org AREA → its discipline room
 const RBASE = {
   product:{label:"PRODUCT",color:0x2e3b5a}, architecture:{label:"ARCHITECTURE",color:0x3a2e5a},
-  engineering:{label:"ENGINEERING",color:0x5a3a2e}, qa:{label:"QA · REVIEW",color:0x2e5a4a},
+  frontend:{label:"FRONTEND",color:0x243f5a}, backend:{label:"BACKEND",color:0x5a4524},
+  data:{label:"DATA",color:0x245a42}, qa:{label:"QA · REVIEW",color:0x2e5a4a},
   security:{label:"SECURITY",color:0x5a2e36},
   gate:{label:"GATE",color:0x2c4a55}, vault:{label:"VAULT",color:0x5a4a18},
+  office:{label:"CTO OFFICE",color:0x4a4030},   // the CTO's room (opens on the RIGHT wall)
 };
+// Build-order numeral per room (engineering's 3 rooms share stage 3 — they run in
+// parallel; support rooms have none).
+const ORDER_NO = {product:1, architecture:2, frontend:3, backend:3, data:3,
+                  qa:4, security:5, gate:6, vault:7};
 const ROOMS = {};
 for (const k in RBASE) ROOMS[k] = Object.assign({}, RBASE[k], cellBox(GRID[k][0], GRID[k][1]));
-const ROOM_ORDER = ["product","architecture","engineering","qa","security","gate","vault"];
+// Virtual "engineering" region = bbox over the discipline rooms. NOT drawn (virtual),
+// but present so server events keyed to room "engineering" (stage glow / pickups /
+// bursts) still resolve to a sensible position.
+(function(){ const rs = ENG_ROOMS.map(k=>ROOMS[k]);
+  const x0=Math.min(...rs.map(r=>r.x)), y0=Math.min(...rs.map(r=>r.y));
+  const x1=Math.max(...rs.map(r=>r.x+r.w)), y1=Math.max(...rs.map(r=>r.y+r.h));
+  ROOMS.engineering = {label:"ENGINEERING", color:0x5a3a2e, virtual:true, x:x0, y:y0, w:x1-x0, h:y1-y0};
+})();
+// The VAULT is the shipped-artifact destination — give it prominence by spanning the
+// bottom-right two cells (fills the corner with REAL content; it's the prize room, not filler).
+(function(){ const a = cellBox(2,2), b = cellBox(3,2);
+  Object.assign(ROOMS.vault, {x:a.x, y:a.y, w:(b.x + b.w) - a.x, h:a.h}); })();
+const ROOM_ORDER = ["product","architecture","frontend","backend","data","qa","security","gate","vault"];
 const TINT = {security:[0xff6d6d,0.05], gate:[0x6aa0ff,0.05], vault:[0xffd25a,0.06]};
-// the "#": centre-lines of the walkway aisles between columns / rows
-const AISLE_VX = [GX0+CELL_W+AISLE/2, GX0+2*CELL_W+AISLE+AISLE/2];
-const AISLE_HY = [GY0+CELL_H+AISLE/2, GY0+2*CELL_H+AISLE+AISLE/2];
+// the "#": centre-lines of the walkway aisles between columns / rows (generated)
+const AISLE_VX = [0,1,2].map(c => GX0 + (c+1)*CELL_W + c*AISLE + AISLE/2);
+const AISLE_HY = [0,1].map(r => GY0 + (r+1)*CELL_H + r*AISLE + AISLE/2);
 (function layout(){ for (const k in ROOMS){ const R = ROOMS[k];
   R.key=k; R.x0=R.x; R.x1=R.x+R.w; R.y1=R.y+R.h; R.cx=R.x+R.w/2; R.cy=R.y+R.h/2;
   R.wallH=0; R.floorY=R.y+18; R.standY=R.y1-14;
@@ -61,12 +89,25 @@ const COLORS = {
 const ROSTER = {
   product:["Stakeholder Proxy","Product Manager","Criteria Critic","Program Manager"],
   architecture:["Principal Architect"],
-  engineering:["Senior Engineer","Junior Engineer"],
+  // engineering is NOT a static room: its engineers are placed per-discipline
+  // (frontend/backend/data) from the live org telemetry (layoutEngineering).
   qa:["QA Engineer","SDET","Reviewer","Technical Writer"],
   security:["AppSec Engineer","Audit & Compliance","Supply-chain Reviewer"],
 };
 const GATE_ORDER = ["spec","build","test","review","security","audit","supply_chain","e2e"];
 const AGENT_ROOM = {}; for (const rm in ROSTER) for (const nm of ROSTER[rm]) AGENT_ROOM[nm] = rm;
+// Per-area accent (shared by the org board, the Tech-Leads, and the area-expert
+// IC pool) so frontend/backend/data/… read the same colour everywhere.
+const AREA_COLOR = {frontend:0x7fd1ff, backend:0xff9b5e, data:0x7dffb0,
+                    infra:0xb59bff, security:0xff6d6d};
+const AREA_TAG = {frontend:"FE", backend:"BE", data:"DA", infra:"IN", security:"SE"};
+// short role tags for the named static-room agents (the senior roles), shown on a badge.
+const ROLE_TAG = {
+  "Stakeholder Proxy":"STAKEHLDR", "Product Manager":"PROD MGR", "Criteria Critic":"CRITIC",
+  "Program Manager":"PROG MGR", "Principal Architect":"ARCHITECT", "QA Engineer":"QA ENG",
+  "SDET":"SDET", "Reviewer":"REVIEWER", "Technical Writer":"WRITER", "AppSec Engineer":"APPSEC",
+  "Audit & Compliance":"AUDIT", "Supply-chain Reviewer":"SUPPLY",
+};
 
 // ---- generated character sprites (our own pixel art) -----------------------
 // route1rodent-style 16x22 GBA RPG sprite: a BIG rounded hair mass (the hero) over
@@ -109,6 +150,29 @@ function shade(color,f){
   const b=Math.min(255,Math.round((color&255)*f));
   return (r<<16)|(g<<8)|b;
 }
+// linear blend between two packed colours (t=0 → a, t=1 → b)
+function mix(a,b,t){
+  const ar=(a>>16)&255, ag=(a>>8)&255, ab=a&255;
+  const br=(b>>16)&255, bg=(b>>8)&255, bb=b&255;
+  const r=Math.round(ar+(br-ar)*t), g=Math.round(ag+(bg-ag)*t), bl=Math.round(ab+(bb-ab)*t);
+  return (r<<16)|(g<<8)|bl;
+}
+
+// ── GBA Pokémon-Center bright palette ──────────────────────────────────────
+// One source of truth for the whole-floor reskin: a teal tiled floor, cream
+// walls with a pink stripe, navy ink. Room identity is a soft cream-tint of the
+// area accent so the backend-driven rooms still read distinct.
+const PC = {
+  // WARM scheme: a tan tiled FLOOR with terracotta/BRICK walls and a cream stripe.
+  // (GBA art-direction pass: quieter floor checker, cooler shadows, one scene ink.)
+  floor:0xe8d2a8, floorAlt:0xe2c99e, floorSeam:0xcdb99a,   // tan floor — checker ~6% off, seam whispers
+  room:0xf3ead0, roomAlt:0xe9dcbe, roomSeam:0xcdbd98,       // (room tiles, unused now)
+  wall:0xc2614a, wallHi:0xcf7158, wallShade:0x8a4248,       // brick face — softer cap, rose-cooled shade
+  stripe:0xf2e8cc, stripeHi:0xfffaf0,                       // cream wall trim (the anchor light)
+  ink:0x33405e, line:0x2c4a8c,                              // navy TEXT ink
+  sceneInk:0x241d2e, shadow:0x1a1726,                       // one outline ink + one cool cast-shadow
+  bg:0x140d0a,                                              // dark warm letterbox around the building
+};
 
 // ---- text wrapping (shared) -----------------------------------------------
 function wrap(t,n){
@@ -137,47 +201,90 @@ function buildSharedTextures(scene){
     rg.addColorStop(0,"rgba(0,0,0,0)"); rg.addColorStop(1,"rgba(0,0,0,1)");
     g.fillStyle = rg; g.fillRect(0,0,256,256); scene.textures.addCanvas("vignette", cv);
   }
+  // Per-room floor: cream tile checker, lightly tinted by the room's accent so each
+  // discipline still reads distinct (a pale teal/amber/green wash on the cream).
   for (const key in ROOMS){
     const tkey = "floor_"+key;
     if (scene.textures.exists(tkey)) continue;
     const R = ROOMS[key]; const g = scene.make.graphics({add:false});
-    g.fillStyle(shade(R.color,0.60),1); g.fillRect(0,0,40,40);              // base (lifted)
-    g.fillStyle(shade(R.color,0.76),1); g.fillRect(20,0,20,20); g.fillRect(0,20,20,20);
-    g.fillStyle(shade(R.color,0.95),1); g.fillRect(6,6,2,2); g.fillRect(28,14,2,2); g.fillRect(14,30,2,2); // bright speckle
-    g.fillStyle(shade(R.color,0.45),1); g.fillRect(32,33,2,2); g.fillRect(11,18,2,2);  // dark speckle
+    const base = mix(PC.room, R.color, 0.07), alt = mix(PC.roomAlt, R.color, 0.10);
+    g.fillStyle(base,1); g.fillRect(0,0,40,40);
+    g.fillStyle(alt,1);  g.fillRect(20,0,20,20); g.fillRect(0,20,20,20);            // checker
+    g.fillStyle(PC.roomSeam,1); g.fillRect(0,0,40,1); g.fillRect(0,0,1,40);          // tile seams
+    g.fillStyle(PC.roomSeam,1); g.fillRect(20,0,1,40); g.fillRect(0,20,40,1);
+    g.fillStyle(shade(base,1.05),1); g.fillRect(7,6,2,2); g.fillRect(27,25,2,2);     // light fleck
+    g.fillStyle(PC.roomSeam,1);      g.fillRect(31,9,2,2); g.fillRect(11,31,2,2);     // dark fleck
     g.generateTexture(tkey,40,40); g.destroy();
   }
-  // Wall tile per room: a darker brick course (offset rows + mortar + highlight).
+  // Per-room interior wall tile: cream face with a shaded lower course + bright top.
   for (const key in ROOMS){
     const wkey = "wall_"+key;
     if (scene.textures.exists(wkey)) continue;
-    const R = ROOMS[key]; const g = scene.make.graphics({add:false});
-    const brick = shade(R.color,0.30), mortar = shade(R.color,0.18), hi = shade(R.color,0.40);
-    g.fillStyle(mortar,1); g.fillRect(0,0,40,32);
-    g.fillStyle(brick,1);
-    g.fillRect(1,1,18,14); g.fillRect(21,1,18,14);       // top course
-    g.fillRect(-9,17,18,14); g.fillRect(11,17,18,14); g.fillRect(31,17,18,14);  // offset course
-    g.fillStyle(hi,1);                                    // top-edge highlight per brick
+    const g = scene.make.graphics({add:false});
+    g.fillStyle(PC.wallShade,1); g.fillRect(0,0,40,32);
+    g.fillStyle(PC.wall,1);
+    g.fillRect(1,1,18,14); g.fillRect(21,1,18,14);
+    g.fillRect(-9,17,18,14); g.fillRect(11,17,18,14); g.fillRect(31,17,18,14);
+    g.fillStyle(PC.wallHi,1);
     g.fillRect(1,1,18,2); g.fillRect(21,1,18,2); g.fillRect(11,17,18,2); g.fillRect(31,17,18,2);
     g.generateTexture(wkey,40,32); g.destroy();
   }
-  // neutral shared-floor + perimeter-wall tiles (open-plan look)
+  // Shared teal floor — a QUILTED grid of small beveled tiles (the Pokémon-Center
+  // floor): each 16px tile is lit on its top-left and dark-seamed on its bottom-right,
+  // with a gentle 2-tone checker. Used EVERYWHERE (rooms + corridors are one floor).
   if (!scene.textures.exists("floor_base")){
-    const base=0x232a3c, g=scene.make.graphics({add:false});
-    g.fillStyle(shade(base,1.0),1); g.fillRect(0,0,40,40);
-    g.fillStyle(shade(base,1.14),1); g.fillRect(20,0,20,20); g.fillRect(0,20,20,20);
-    g.fillStyle(shade(base,0.82),1); g.fillRect(0,0,40,1); g.fillRect(0,0,1,40);   // tile seams
-    g.generateTexture("floor_base",40,40); g.destroy();
+    const g=scene.make.graphics({add:false}), S=16;
+    // QUILTED tile: each square is a slightly RAISED ceramic tile — a lit top-left bevel,
+    // a soft inner shade curving to the bottom-right, and a darker groove seam between
+    // tiles. Subtle enough to read as one tan floor, detailed enough to look drawn.
+    const tile=(tx,ty,base)=>{
+      g.fillStyle(base,1);                  g.fillRect(tx,ty,S,S);
+      g.fillStyle(shade(base,1.06),1);      g.fillRect(tx,ty,S-1,1); g.fillRect(tx,ty,1,S-1);     // top-left bevel
+      g.fillStyle(shade(base,1.10),1);      g.fillRect(tx,ty,2,2);                                 // bright corner
+      g.fillStyle(shade(base,0.95),1);      g.fillRect(tx+2,ty+S-2,S-3,1); g.fillRect(tx+S-2,ty+2,1,S-3); // inner soft shade
+      g.fillStyle(PC.floorSeam,1);          g.fillRect(tx,ty+S-1,S,1); g.fillRect(tx+S-1,ty,1,S);  // groove seam
+    };
+    for(let r=0;r<4;r++) for(let c=0;c<4;c++) tile(c*S, r*S, (r+c)%2 ? PC.floorAlt : PC.floor);
+    g.generateTexture("floor_base", S*4, S*4); g.destroy();
   }
+  // Perimeter wall — CLEAN brick: even courses, quiet cool mortar, a 1px lit top edge
+  // and a 1px shaded bottom edge per brick (top-left light). Reads as drawn masonry.
   if (!scene.textures.exists("wall_base")){
-    const base=0x1b2236, g=scene.make.graphics({add:false});
-    g.fillStyle(shade(base,0.7),1); g.fillRect(0,0,40,32);
-    g.fillStyle(shade(base,1.0),1);
-    g.fillRect(1,1,18,14); g.fillRect(21,1,18,14); g.fillRect(-9,17,18,14); g.fillRect(11,17,18,14); g.fillRect(31,17,18,14);
-    g.fillStyle(shade(base,1.3),1);
-    g.fillRect(1,1,18,2); g.fillRect(21,1,18,2); g.fillRect(11,17,18,2); g.fillRect(31,17,18,2);
+    const g=scene.make.graphics({add:false});
+    g.fillStyle(PC.wallShade,1); g.fillRect(0,0,40,32);                       // mortar bed
+    const brick=(bx,by,bw)=>{
+      g.fillStyle(PC.wall,1);            g.fillRect(bx,by,bw,13);
+      g.fillStyle(PC.wallHi,1);          g.fillRect(bx,by,bw,1);              // lit top edge
+      g.fillStyle(shade(PC.wall,0.88),1);g.fillRect(bx,by+12,bw,1);          // shaded bottom edge
+    };
+    brick(1,1,17); brick(20,1,17);                                           // course 1
+    brick(-8,17,17); brick(11,17,17); brick(30,17,17);                       // course 2 (half-offset)
     g.generateTexture("wall_base",40,32); g.destroy();
   }
+}
+
+// Bake the pixel TTF into a BITMAP FONT once (a glyph atlas + RetroFont data). Floor
+// labels then render as BitmapText: sampled 1:1 from the texture with NEAREST, so they
+// stay crisp at any scale instead of re-rasterising the TTF (which blurs when scaled).
+const PXFONT_CHARS =
+  " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`" +
+  "abcdefghijklmnopqrstuvwxyz{|}~·×";
+function buildPixelFont(scene){
+  if (scene.cache.bitmapFont.exists("px")) return;
+  // RetroFont (fixed cell) renders reliably here. Keep the cell TIGHT (≈ the glyph
+  // width) and centre each glyph so the mostly-uppercase labels read evenly, not spaced.
+  const CW=11, CH=18, F=14, FONT = F+'px "PixelFont","Courier New",monospace';
+  const cv = document.createElement("canvas");
+  cv.width = PXFONT_CHARS.length*CW; cv.height = CH;
+  const ctx = cv.getContext("2d");
+  ctx.imageSmoothingEnabled = false; ctx.font = FONT;
+  ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillStyle = "#ffffff";
+  for (let i=0;i<PXFONT_CHARS.length;i++) ctx.fillText(PXFONT_CHARS[i], i*CW + CW/2, Math.round(CH/2)+1);
+  scene.textures.addCanvas("pxfont", cv);
+  scene.cache.bitmapFont.add("px", Phaser.GameObjects.RetroFont.Parse(scene, {
+    image:"pxfont", width:CW, height:CH, chars:PXFONT_CHARS, charsPerRow:PXFONT_CHARS.length,
+    offset:{x:0,y:0}, spacing:{x:0,y:0}, lineSpacing:0,
+  }));
 }
 
 // =========================================================================== //
@@ -200,7 +307,7 @@ class BootScene extends Phaser.Scene {
     const ready = (document.fonts && document.fonts.load)
       ? document.fonts.load('16px "PixelFont"').then(()=>document.fonts.ready).catch(()=>{})
       : Promise.resolve();
-    ready.then(()=>bootResolve());
+    ready.then(()=>{ try { buildPixelFont(this); } catch(e){ console.warn("pxfont", e); } bootResolve(); });
   }
 }
 
@@ -211,7 +318,7 @@ class FloorScene extends Phaser.Scene {
   init(data){ this.proj = data || {}; }
 
   create(){
-    this.cameras.main.setBackgroundColor(0x0a0f1c);
+    this.cameras.main.setBackgroundColor(PC.bg);
     this.agents = new Map();
     this.gates = {};
     this.gatePips = {};
@@ -229,29 +336,12 @@ class FloorScene extends Phaser.Scene {
     this.sys.setVisible(this.proj.floor === ACTIVE);
   }
 
-  // Visualize the parallel IC pool (Wave C): N junior engineers building at once,
-  // bobbing in the engineering room, with an "ICs xN" count badge. n<=1 => serial.
+  // The IC pool size (Wave C) — the number of engineers building at once. Stored,
+  // then the engineering room is (re)laid out: per-area lanes once the org is known,
+  // a flat pool until then. n<=1 => serial (no pool).
   setPool(n){
-    if (this.poolGroup) this.poolGroup.forEach(s=>s.destroy());
-    if (this.poolLabel){ this.poolLabel.destroy(); this.poolLabel = null; }
-    this.poolGroup = [];
-    if (!n || n <= 1) return;
-    const R = ROOMS.engineering, count = Math.min(n, 8), cols = Math.min(count, 4);
-    for (let i=0;i<count;i++){
-      const col = i%cols, row = Math.floor(i/cols);
-      const x = Math.round(R.x+30 + (R.w-60)*(cols>1 ? col/(cols-1) : 0.5));
-      const y = R.floorY + 74 + row*52;                        // pool desks below the leads
-      const k = poolKit(i);
-      const ws = this.makeWorkstation(x, y+16, k.accent);
-      const s = this.makePerson(x, y, k);
-      s.setScale(1.4).setDepth(y).setAlpha(0.96);   // match the leads so IC faces stay legible
-      s.home = {x,y}; s.loungeSlot = 12 + i; s.seen = true;    // can walk to the lounge too
-      this.startWalk(s);                                       // ICs are busy building
-      this.poolGroup.push(s, ws);
-    }
-    this.poolLabel = this.add.text(R.cx, R.y+24, "ICs ×"+n,
-      {fontFamily:"'PixelFont','Courier New'",fontSize:"10px",fontStyle:"bold",color:"#ffc08a"})
-      .setOrigin(0.5,0).setDepth(28);
+    this.poolN = n;
+    this.layoutEngineering();
   }
 
   buildRooms(){
@@ -259,76 +349,134 @@ class FloorScene extends Phaser.Scene {
     this.roomGlow = {};
     // ONE shared open floor across the whole interior
     this.add.tileSprite(24, WALL_TOP, W-48, FLOOR_BOTTOM-WALL_TOP, "floor_base").setOrigin(0,0).setDepth(0);
-    // walkable corridor aisles forming the "#" between the section cells
-    const lane=(x,y,w,h,horiz)=>{
-      this.add.rectangle(x,y,w,h,0x303a55).setOrigin(0,0).setDepth(0);
-      this.add.rectangle(x,y,w,1,0x3e4a68).setOrigin(0,0).setDepth(0);
-      this.add.rectangle(x,y+h-1,w,1,0x1d2438).setOrigin(0,0).setDepth(0);
-      // dashed centre line
-      const g=this.add.graphics().setDepth(0); g.fillStyle(0x4a587a,0.5);
-      if (horiz){ for(let dx=x+6; dx<x+w-6; dx+=18) g.fillRect(dx,y+h/2-1,9,2); }
-      else { for(let dy=y+6; dy<y+h-6; dy+=18) g.fillRect(x+w/2-1,dy,2,9); }
-    };
-    for (const vx of AISLE_VX) lane(vx-AISLE/2, WALL_TOP, AISLE, FLOOR_BOTTOM-WALL_TOP, false);
-    for (const hy of AISLE_HY) lane(GX0, hy-AISLE/2, GX1-GX0, AISLE, true);
+    // Corridors are NOT a separate surface — the whole interior is the one teal floor
+    // (floor_base, laid above); the thick cream walls + their open gaps form the rooms
+    // and passages, exactly like the reference. (AISLE_VX/HY still position props.)
     // perimeter walls only (top + left + right + bottom edges)
     this.add.tileSprite(0, 50, W, WALL_TOP-50, "wall_base").setOrigin(0,0).setDepth(1);
-    this.add.rectangle(0, 46, W, 6, 0x2a3550).setOrigin(0,0).setDepth(1);                 // roof eave
-    this.add.rectangle(0, WALL_TOP-4, W, 4, 0x0a0d16).setOrigin(0,0).setDepth(1);          // baseboard
-    this.add.rectangle(0, 50, 24, FLOOR_BOTTOM-50, 0x141a2c).setOrigin(0,0).setDepth(1);
-    this.add.rectangle(W-24, 50, 24, FLOOR_BOTTOM-50, 0x141a2c).setOrigin(0,0).setDepth(1);
-    this.add.rectangle(0, FLOOR_BOTTOM, W, H-FLOOR_BOTTOM, 0x0e1322).setOrigin(0,0).setDepth(1);
-    // windows in the top wall (NO sun) + god-rays into the floor
-    for (let wx=80; wx<W-110; wx+=210){
-      const ww=78, wh=44, wy=60;
-      this.add.rectangle(wx, wy, ww+6, wh+6, 0x10182c).setOrigin(0,0).setDepth(2);
-      const glow=this.add.rectangle(wx+3, wy+3, ww, wh, 0x284a70).setOrigin(0,0).setDepth(2);
-      this.add.rectangle(wx+3, wy+3, ww, wh*0.5, 0x3a6ea0).setOrigin(0,0).setDepth(2);     // sky band, no sun
-      this.add.rectangle(wx+2+ww/2, wy+3, 2, wh, 0x10182c).setOrigin(0,0).setDepth(2);
-      this.add.rectangle(wx+3, wy+3+wh/2, ww, 2, 0x10182c).setOrigin(0,0).setDepth(2);
-      this.tweens.add({targets:glow, fillAlpha:{from:0.8,to:1}, duration:3000, yoyo:true, repeat:-1});
-      const ray=this.add.triangle(wx+ww/2+3, wy+wh+4, -ww*0.5,170, ww*0.5,170, 0,0, 0xbfd2ff, 0.08).setDepth(0);
-      this.tweens.add({targets:ray, alpha:{from:0.05,to:0.12}, duration:3600, yoyo:true, repeat:-1});
+    this.add.rectangle(0, 46, W, 6, PC.wallShade).setOrigin(0,0).setDepth(1);              // roof eave
+    // the signature pink stripe runs along the top wall (with a lighter highlight line)
+    this.add.rectangle(0, WALL_TOP-16, W, 7, PC.stripe).setOrigin(0,0).setDepth(1);
+    this.add.rectangle(0, WALL_TOP-16, W, 2, PC.stripeHi).setOrigin(0,0).setDepth(1);
+    this.add.rectangle(0, WALL_TOP-4, W, 4, PC.wallShade).setOrigin(0,0).setDepth(1);       // baseboard
+    this.add.tileSprite(0, 50, 24, FLOOR_BOTTOM-50, "wall_base").setOrigin(0,0).setDepth(1); // left wall
+    this.add.tileSprite(W-24, 50, 24, FLOOR_BOTTOM-50, "wall_base").setOrigin(0,0).setDepth(1); // right wall
+    this.add.rectangle(0, FLOOR_BOTTOM, W, H-FLOOR_BOTTOM, PC.bg).setOrigin(0,0).setDepth(1);
+    // framed wall pictures along the top wall — each a DIFFERENT scene (the sun is on
+    // only one, not repeated in every window).
+    let pi = 0;
+    for (let wx=86; wx<W-130; wx+=232){
+      // the SUN belongs to exactly one window (pi 0); the rest cycle the other
+      // three scenes (clouds / mountain / birds) so no scene — sun included — repeats back-to-back.
+      const ww=80, wh=42, wy=60, v = pi===0 ? 0 : 1 + ((pi-1) % 3);
+      // WOODEN frame: outer wood + a lit top edge + a dark inner liner (a real picture frame)
+      this.add.rectangle(wx-4, wy-4, ww+8, wh+8, 0x6b4527).setOrigin(0,0).setDepth(2);
+      this.add.rectangle(wx-4, wy-4, ww+8, 2, 0x8a5e36).setOrigin(0,0).setDepth(2);            // frame top light
+      this.add.rectangle(wx-4, wy+wh+2, ww+8, 2, 0x4a2f18).setOrigin(0,0).setDepth(2);         // frame bottom shade
+      this.add.rectangle(wx-2, wy-2, ww+4, wh+4, PC.sceneInk).setOrigin(0,0).setDepth(2);      // inner liner
+      // LANDSCAPE: banded sky + two layered hills
+      this.add.rectangle(wx, wy, ww, wh, 0xbfe6f2).setOrigin(0,0).setDepth(2);                 // sky
+      this.add.rectangle(wx, wy, ww, Math.round(wh*0.42), 0xa6d6ee).setOrigin(0,0).setDepth(2);// upper sky
+      this.add.rectangle(wx, wy+Math.round(wh*0.55), ww, Math.round(wh*0.2), 0x9ec98a).setOrigin(0,0).setDepth(2); // far hill
+      this.add.rectangle(wx, wy+Math.round(wh*0.66), ww, Math.round(wh*0.34), 0x6fae74).setOrigin(0,0).setDepth(2);// near hill
+      if (v===0){ this.add.circle(wx+ww-18, wy+13, 9, 0xfff0a8, 0.3).setDepth(2);
+        this.add.circle(wx+ww-18, wy+13, 6, 0xfff4be).setDepth(2); }                            // sun + glow
+      else if (v===1){ this.add.ellipse(wx+22, wy+13, 22, 8, 0xffffff,0.9).setDepth(2);
+        this.add.ellipse(wx+54, wy+19, 26, 8, 0xffffff,0.8).setDepth(2); }                       // clouds
+      else if (v===2){ this.add.triangle(0,0, wx+22,wy+28, wx+46,wy+28, wx+34,wy+11, 0x93a4ba).setDepth(2);
+        this.add.triangle(0,0, wx+30,wy+13, wx+38,wy+13, wx+34,wy+11, 0xffffff).setDepth(2); }   // snowy mountain
+      else { this.add.rectangle(wx+18,wy+13,6,1.5,0x33405e).setOrigin(0,0).setDepth(2);
+        this.add.rectangle(wx+28,wy+16,6,1.5,0x33405e).setOrigin(0,0).setDepth(2); }             // distant birds
+      this.add.rectangle(wx+7, wy, 3, wh, 0xffffff, 0.10).setOrigin(0,0).setDepth(2);           // glass glint
+      pi++;
     }
-    // a few hanging lamps over the open floor — each casts a warm pool on the floor
-    [240,560,1140].forEach(lx=>{ this.add.rectangle(lx, WALL_TOP, 1, 16, 0x2a2f40).setOrigin(0,0).setDepth(2);
-      this.add.ellipse(lx, WALL_TOP+92, 96, 34, 0xffe6a0, 0.08).setDepth(0);   // warm floor pool
-      this.add.circle(lx, WALL_TOP+20, 4, 0xffe6a0, 0.95).setDepth(2);
-      this.add.circle(lx, WALL_TOP+20, 10, 0xffe6a0, 0.10).setDepth(2); });
+    // soft ceiling-light pools on the floor (kept subtle, bright theme)
+    [240,560,1140].forEach(lx=>{
+      this.add.ellipse(lx, WALL_TOP+92, 110, 38, 0xffffff, 0.06).setDepth(0);
+      this.add.circle(lx, WALL_TOP+18, 5, 0xfff6d8, 0.95).setDepth(2).setStrokeStyle(2, PC.wallShade);
+    });
     this.drawFlowPath();
-    // each section is a soft RUG on the shared floor (no walls)
-    const cc = 0x232a3c;   // base-floor colour for chamfered corners
+    // The WHOLE floor is one teal tiled surface (the shared floor_base laid down above
+    // already covers it). Rooms are defined only by the thick cream walls + a label —
+    // no cream rugs, no borders — exactly like the reference interior.
     for (const key in ROOMS){
       const R = ROOMS[key];
-      this.add.rectangle(R.x+5, R.y+6, R.w, R.h, 0x000000, 0.22).setOrigin(0,0).setDepth(0);    // soft shadow
-      this.add.tileSprite(R.x, R.y, R.w, R.h, "floor_"+key).setOrigin(0,0).setDepth(0).setAlpha(0.95);
-      this.add.rectangle(R.x, R.y, R.w, R.h, shade(R.color,1.7), 0.16).setOrigin(0,0).setDepth(1); // brighten/pop
+      if (R.virtual) continue;
+      const accent = shade(R.color, 1.7);
       const t = TINT[key]; if (t) this.add.rectangle(R.x, R.y, R.w, R.h, t[0], t[1]).setOrigin(0,0).setDepth(1);
-      // rug trim: light outer band + dark inner line
-      this.add.rectangle(R.x, R.y, R.w, R.h).setOrigin(0,0).setStrokeStyle(3, shade(R.color,1.25)).setDepth(1);
-      this.add.rectangle(R.x+4, R.y+4, R.w-8, R.h-8).setOrigin(0,0).setStrokeStyle(1, shade(R.color,0.55)).setDepth(1);
-      // chamfer the 4 corners so rugs read as rounded
-      [[R.x,R.y],[R.x1-3,R.y],[R.x,R.y1-3],[R.x1-3,R.y1-3]].forEach(([px,py])=>{
-        this.add.rectangle(px,py,3,1,cc).setOrigin(0,0).setDepth(1); this.add.rectangle(px,py,1,3,cc).setOrigin(0,0).setDepth(1); });
-      // floating label plaque (rounded look: dark body + light top edge + dept dot)
-      const sw = Math.min(R.w-12, R.label.length*7+22);
-      this.add.rectangle(R.cx, R.y+6, sw, 16, 0x0e1422, 0.92).setOrigin(0.5,0).setDepth(3).setStrokeStyle(1, shade(R.color,1.1));
-      this.add.rectangle(R.cx, R.y+6, sw, 2, shade(R.color,1.3)).setOrigin(0.5,0).setDepth(4);
-      this.roomGlyph(key, R.cx-sw/2+5, R.y+8);   // dept identity glyph (white, shape — not just hue)
-      this.add.text(R.cx+4, R.y+8, R.label, {fontFamily:"'PixelFont','Courier New',monospace",
-        fontSize:"10px", fontStyle:"bold", color:"#eef3ff"}).setOrigin(0.5,0).setDepth(4);
-      this.roomGlow[key] = this.add.rectangle(R.x, R.y, R.w, R.h, 0xffd25a, 0).setOrigin(0,0).setDepth(1);
+      // label placard — a navy sign hanging just BELOW the banded top wall (bigger sign)
+      const sw = Math.min(R.w-10, R.label.length*9+28);
+      this.add.rectangle(R.cx, R.y+22, sw, 22, PC.ink, 0.96).setOrigin(0.5,0).setDepth(3).setStrokeStyle(2, accent);
+      this.add.rectangle(R.cx, R.y+22, sw, 2, mix(accent,0xffffff,0.4)).setOrigin(0.5,0).setDepth(4);
+      this.roomGlyph(key, R.cx-sw/2+7, R.y+27);
+      this.bm(R.cx+6, R.y+28, R.label, 13, 0xfbf3df, 0.5, 0).setDepth(4);
+      const no = ORDER_NO[key];
+      if (no != null){
+        const bx = R.x+15, by = R.y+34;
+        this.add.circle(bx, by, 10, PC.stripe, 0.98).setStrokeStyle(2, PC.wallHi).setDepth(4);
+        this.bm(bx, by, String(no), 13, 0xfff4e0, 0.5, 0.5).setDepth(5);
+      }
+      this.roomGlow[key] = this.add.rectangle(R.x, R.y, R.w, R.h, 0xffe27a, 0).setOrigin(0,0).setDepth(1);
     }
+    this.buildWalls();                            // thick cream walls with open passages
     this.decorateFloor();
     this.furnish();
     this.buildAtmosphere();                       // vignette + dust motes on top
     this.setActiveRoom("lobby");
   }
 
+  // Interior WALLS around each room (with doorways) so the floor reads as a real
+  // building's plan, not rugs on open space. Walls sit below the agents (depth 4)
+  // so people always render in front; doorways open onto the corridors.
+  buildWalls(){
+    const T = 12, DOOR = 48, BAND = 20;   // THICK brick walls, wide open passage, tall top band
+    const FACE = PC.wall, CAP = PC.wallHi, BASE = PC.wallShade, EDGE = 0x4a2018;
+    const WHITE = 0x7a3526;   // dark-brick line framing the cream stripe
+    const R0 = (x,y,w,h,c,a)=> this.add.rectangle(x,y,w,h,c,a==null?1:a).setOrigin(0,0).setDepth(4);
+    // Plain THICK teal wall: dark outline, teal face, lit cap, shadowed base.
+    const seg = (x, y, w, h) => {
+      if (w <= 0 || h <= 0) return;
+      R0(x-1, y-1, w+2, h+2, EDGE); R0(x, y, w, h, FACE);
+      R0(x, y, w, Math.min(2,h), CAP);
+      if (h > 5) R0(x, y+h-2, w, 2, BASE);
+      if (w > 5) R0(x+w-2, y, 2, h, BASE);
+    };
+    // Top wall: a TALL banded teal wall with a white-bordered PINK STRIPE + baseboard.
+    const band = (x, w, y) => {
+      if (w <= 0) return;
+      R0(x-1, y-1, w+2, BAND+2, EDGE);
+      R0(x, y,    w, 8, FACE);  R0(x, y, w, 1, CAP);                // teal upper + lit cap
+      R0(x, y+8,  w, 1, WHITE);                                     // white pinline
+      R0(x, y+9,  w, 5, PC.stripe); R0(x, y+9, w, 1, PC.stripeHi);  // pink stripe + highlight
+      R0(x, y+14, w, 1, WHITE);                                     // white pinline
+      R0(x, y+15, w, 4, FACE);                                      // teal lower
+      R0(x, y+19, w, 1, BASE);                                      // baseboard shadow
+    };
+    for (const key in ROOMS){
+      const R = ROOMS[key]; if (R.virtual) continue;
+      const cx = Math.round(R.cx);
+      // Openings (no doors — plain gaps): normal rooms open at the BOTTOM centre. The
+      // GATE also has a TOP entrance (from security above) so work flows security →
+      // gate → vault. The VAULT is sealed except a single TOP opening under the gate.
+      const topGap = key==="gate" ? cx : (key==="vault" ? Math.round(ROOMS.gate.cx) : null);
+      // The CTO OFFICE opens on its RIGHT wall (onto the corridor), not the bottom —
+      // everyone else opens at the bottom centre. Vault is sealed bottom (top-only).
+      const rightGap = key==="office" ? Math.round(R.cy) : null;
+      const botGap = (key==="vault" || key==="office") ? null : cx;
+      seg(R.x, R.y, T, R.h);                                   // left  (solid)
+      if (rightGap != null){ seg(R.x1-T, R.y, T, (rightGap-DOOR/2)-R.y); seg(R.x1-T, rightGap+DOOR/2, T, R.y1-(rightGap+DOOR/2)); }
+      else seg(R.x1 - T, R.y, T, R.h);                         // right (solid or split)
+      if (topGap != null){ band(R.x, (topGap-DOOR/2)-R.x, R.y); band(topGap+DOOR/2, R.x1-(topGap+DOOR/2), R.y); }
+      else band(R.x, R.w, R.y);                                // banded top (solid or split)
+      if (botGap != null){ seg(R.x, R.y1-T, (botGap-DOOR/2)-R.x, T); seg(botGap+DOOR/2, R.y1-T, R.x1-(botGap+DOOR/2), T); }
+      else seg(R.x, R.y1 - T, R.w, T);                         // bottom (solid or split)
+    }
+  }
+
   // A ~10px WHITE department glyph on the plaque so rooms are identifiable by SHAPE
   // (colour-blind / grayscale safe), not hue. (x,y)=top-left. High contrast on dark.
   roomGlyph(key, x, y){
-    const W = 0xffffff, D = 0x0e1422;     // white glyph, plaque-dark cut-outs
+    const W = 0xffffff, D = PC.ink;     // white glyph, navy plaque cut-outs
     const p = (dx,dy,w,h,c)=> this.add.rectangle(x+dx, y+dy, w, h, c).setOrigin(0,0).setDepth(4);
     const M = (rects)=> rects.forEach(([dx,dy,w,h,k])=> p(dx,dy,w,h, k?W:D));
     switch(key){
@@ -354,47 +502,53 @@ class FloorScene extends Phaser.Scene {
     }
   }
 
-  buildSky(){   // roof + a thin night-sky strip above the building — NO sun
-    this.add.rectangle(0,0,W,H,0x0c1020).setOrigin(0,0).setDepth(-2);
-    [[0,0x10182e],[22,0x1c2742]].forEach(([y,c])=>this.add.rectangle(0,y,W,52-y,c).setOrigin(0,0).setDepth(-1));
-    const cloud=(cx,cy,cw,a)=>{ const c=this.add.rectangle(cx,cy,cw,7,0x2a3a58,a).setOrigin(0,0).setDepth(-1);
+  buildSky(){   // dark letterbox + a slim cream roof-cap above the building
+    this.add.rectangle(0,0,W,H,PC.bg).setOrigin(0,0).setDepth(-2);
+    this.add.rectangle(0,44,W,8,PC.wallShade).setOrigin(0,0).setDepth(-1);     // roof cap
+    this.add.rectangle(0,44,W,2,PC.wallHi).setOrigin(0,0).setDepth(-1);
+    const cloud=(cx,cy,cw,a)=>{ const c=this.add.rectangle(cx,cy,cw,6,0x1a2e30,a).setOrigin(0,0).setDepth(-1);
       this.tweens.add({targets:c, x:cx+60, duration:22000, yoyo:true, repeat:-1, ease:"Sine.inOut"}); };
     cloud(160,18,90,0.5); cloud(520,30,130,0.4); cloud(900,14,80,0.5);
   }
 
-  drawFlowPath(){   // faint dotted line winding through the build order
-    const g = this.add.graphics().setDepth(0); g.lineStyle(2, 0xffcf52, 0.16);
-    let started = false;
-    for (const k of ROOM_ORDER){ const R = ROOMS[k]; if(!R) continue;
-      if (!started){ g.beginPath(); g.moveTo(R.cx, R.cy); started = true; } else g.lineTo(R.cx, R.cy);
-    }
+  drawFlowPath(){   // faint guide line through the build STAGES (engineering as one waypoint)
+    const stages = ["product","architecture","engineering","qa","security","gate","vault"];
+    const pts = stages.map(k=>ROOMS[k]).filter(Boolean).map(R=>({x:R.cx, y:R.cy}));
+    const g = this.add.graphics().setDepth(0); g.lineStyle(2, 0xffcf52, 0.18);
+    g.beginPath(); g.moveTo(pts[0].x, pts[0].y);
+    for (let i=1;i<pts.length;i++) g.lineTo(pts[i].x, pts[i].y);
     g.strokePath();
+    // a small arrowhead dot at each stage so the DIRECTION of the flow reads
+    for (const pt of pts) this.add.circle(pt.x, pt.y, 2.5, 0xffcf52, 0.3).setDepth(0);
   }
 
-  decorateFloor(){   // ORDERLY, grid-aligned decor along the corridors
+  decorateFloor(){   // DELIBERATE decor — everything tucked against a wall, symmetric.
     const P=(k,x,y)=>this.makeProp(k, x, y);
-    // a potted plant at each of the 4 corridor intersections of the "#"
-    for (const x of AISLE_VX) for (const y of AISLE_HY) P("plant", x, y+6);
-    // a water cooler tucked at each corridor mouth (symmetric)
-    P("cooler", AISLE_VX[0], WALL_TOP+24); P("cooler", AISLE_VX[1], WALL_TOP+24);
-    // the LOUNGE (bottom-left): couch, TV, coffee table, water cooler — where idle
-    // leads sit, nap and mill about between stages (see loungeArrive / mill).
+    const TI = 16;            // inset from a wall face (walls are 12px thick)
+    const top = (R)=> R.y + 26;        // just below the 20px banded top wall
+    const bot = (R)=> R.y1 - TI;       // just inside the bottom wall
+
+    // RECEPTION / LOUNGE: a square room-sized rug with a seating set that all FACES RIGHT
+    // (toward the entrance) — a side-profile TV, armchairs, and coffee tables on the rug,
+    // a vending machine and plants tucked into the corners.
     const L = cellBox(LOUNGE_CELL[0], LOUNGE_CELL[1]);
-    this.add.text(L.x+L.w/2, L.y+8, "LOUNGE", {fontFamily:"'PixelFont','Courier New',monospace",
-      fontSize:"10px", color:"#8aa0c8"}).setOrigin(0.5,0).setDepth(4);
-    P("couch", L.x+44, L.y+L.h-30); P("ctable", L.x+44, L.y+L.h-6);
-    P("tv", L.x+L.w-44, L.y+50); P("cooler", L.x+L.w-28, L.y+L.h-14);
-    P("plant", L.x+22, L.y+48);
-    // the ENTRANCE (bottom-centre): a purely decorative lobby — welcome mat, plants,
-    // and the company ORG chart on the wall (renderOrg pins here). No work happens here.
-    const E = cellBox(ENTRANCE_CELL[0], ENTRANCE_CELL[1]);
-    this.add.text(E.x+E.w/2, E.y+8, "ENTRANCE", {fontFamily:"'PixelFont','Courier New',monospace",
-      fontSize:"10px", color:"#8aa0c8"}).setOrigin(0.5,0).setDepth(4);
-    this.add.rectangle(E.x+E.w/2, E.y+E.h-16, 74, 22, 0x2a3550, 0.55).setDepth(0)
-      .setStrokeStyle(2, 0x3e4a68);
-    this.add.text(E.x+E.w/2, E.y+E.h-16, "WELCOME",
-      {fontFamily:"'PixelFont','Courier New'",fontSize:"7px",color:"#8aa0c8"}).setOrigin(0.5).setDepth(1);
-    P("plant", E.x+24, E.y+E.h-20); P("plant", E.x+E.w-24, E.y+E.h-20);
+    const cs = L.h - 56, cxn = Math.round(L.cx), cyn = Math.round(L.y + L.h/2 + 8);
+    this.add.rectangle(cxn, cyn, cs+10, cs+10, 0x8a4a40).setOrigin(0.5).setDepth(1);             // rug border (warm)
+    this.add.rectangle(cxn, cyn, cs, cs, 0xb9685a).setOrigin(0.5).setDepth(1);                   // rug field
+    this.add.rectangle(cxn, cyn-cs/2, cs, 2, 0xcf7a68).setOrigin(0.5,0).setDepth(1);             // top sheen
+    this.add.rectangle(cxn, cyn, cs-18, cs-18).setOrigin(0.5).setDepth(1).setStrokeStyle(2, 0xd98a78); // inner ring
+    this.bm(L.cx, top(L)-2, "LOUNGE", 12, 0x8aa0c8, 0.5, 0).setDepth(4);
+    P("tv_r",    L.x+58, cyn+8);                                        // flat-screen, faces RIGHT
+    P("chair_r", L.x+150, cyn-20); P("chair_r", L.x+150, cyn+34);       // armchairs facing right
+    P("ctable",  L.x+198, cyn-14); P("ctable",  L.x+198, cyn+38);       // coffee tables
+    P("vending", L.x1-TI-12, L.y+74);
+    P("plant",   L.x+TI+6, bot(L)); P("plant", L.x1-TI-8, bot(L));
+
+    // CTO OFFICE (walled room, row 2): his executive desk + chair at the bottom and
+    // plants in the corners (no org board — the room stays uncluttered). Opens RIGHT.
+    const E = ROOMS.office;
+    P("counter", E.cx, E.y1-34);                                       // executive desk (CTO stands behind)
+    P("plant", E.x+TI+8, E.y1-TI); P("plant", E.x1-TI-10, E.y1-TI);    // corner plants (clear of the door)
   }
 
   buildAtmosphere(){
@@ -411,44 +565,45 @@ class FloorScene extends Phaser.Scene {
 
   // Procedural pixel furniture so each room reads like a furnished interior.
   furnish(){
-    // ambient props at room EDGES (the working desks are per-lead, in the floor)
+    // ONE themed prop per room, tucked into the same top-right corner against the wall
+    // (consistent, never random). The working desks are placed per-lead by the floor.
     const props = {
-      product:     [["board",0.10],["plant",0.92]],
-      architecture:[["board",0.10],["board",0.52],["shelf",0.90]],
-      engineering: [["rack",0.07],["plant",0.94]],
-      qa:          [["shelf",0.07],["plant",0.95]],
-      security:    [["rack",0.08],["shelf",0.92]],
+      product:"board", architecture:"shelf", frontend:"rack", backend:"rack",
+      data:"shelf", qa:"shelf", security:"rack",
     };
     for (const key in props){
       const R = ROOMS[key]; if(!R) continue;
-      for (const [kind,fx] of props[key]) this.makeProp(kind, R.x + R.w*fx, R.floorY+6);
-    }
-    // the lounge: a couch + coffee table + plants — where idle folks hang out
-    const L = ROOMS.lounge;
-    if (L){
-      this.makeProp("plant", L.x + 14, L.floorY+6);
-      this.makeProp("couch", L.cx, L.floorY + 34);
-      this.makeProp("ctable", L.cx, L.floorY + 76);
-      this.makeProp("plant", L.x1 - 14, L.floorY+6);
+      this.makeProp(props[key], R.x1 - 22, R.y + 34);
     }
   }
 
   makeProp(kind, x, floorY){
     x = Math.round(x);
     const c = this.add.container(x, floorY).setDepth(3);  // props (proportional to the 32px sprites)
-    const out = (rx,ry,w,h,col)=>{ // outlined pixel rect (1px black border) + 1px top-light
-      c.add(this.add.rectangle(rx,ry,w+2,h+2,0x0a0d16).setOrigin(0.5,1));
-      c.add(this.add.rectangle(rx,ry,w,h,col).setOrigin(0.5,1));
-      c.add(this.add.rectangle(rx,ry-h+1,w,1,shade(col,1.3)).setOrigin(0.5,1));   // top highlight
-      c.add(this.add.rectangle(rx,ry-1,w,1,shade(col,0.6)).setOrigin(0.5,1));     // base shadow
+    // CRAFTED block: one scene-ink outline + top-LEFT light (top+left edges) + bottom-RIGHT
+    // shade (bottom+right edges). One light direction for every prop (the "drawn" look).
+    const out = (rx,ry,w,h,col)=>{
+      c.add(this.add.rectangle(rx,ry,w+2,h+2,PC.sceneInk).setOrigin(0.5,1));            // ink outline
+      c.add(this.add.rectangle(rx,ry,w,h,col).setOrigin(0.5,1));                        // face
+      c.add(this.add.rectangle(rx,ry-h+1,w,1,shade(col,1.22)).setOrigin(0.5,1));        // top light
+      c.add(this.add.rectangle(rx-w/2,ry,1,h,shade(col,1.12)).setOrigin(0,1));          // left light
+      c.add(this.add.rectangle(rx,ry-1,w,1,shade(col,0.80)).setOrigin(0.5,1));          // bottom shade
+      c.add(this.add.rectangle(rx+w/2-1,ry,1,h,shade(col,0.84)).setOrigin(0,1));        // right shade
     };
+    c.add(this.add.ellipse(0,3,18,5,PC.shadow,0.22));                                   // contact shadow on the floor
     if (kind==="plant"){
-      const v = Math.abs(Math.round(x))%3;
-      out(0,0,8,12,0x6a4a2a);                                   // pot (now top-lit by `out`)
-      if (v===0){ out(0,-10,18,16,0x2f8f4e); out(-4,-18,10,12,0x37a85c); }     // bushy
-      else if (v===1){ out(0,-12,12,22,0x2f8f4e); out(0,-24,8,10,0x37a85c); }  // tall
-      else { out(0,-9,22,12,0x2f8f4e); out(2,-15,10,8,0x37a85c); }             // round
-      c.add(this.add.rectangle(-4,-13,2,7,shade(0x37a85c,1.35)).setOrigin(0.5,1)); // leaf highlight
+      // potted plant — terracotta pot (rim + soil) and a fan of SHAPED tapering leaf
+      // blades (each a 2-tone triangle), splaying out and up. Drawn back-to-front.
+      const leaf=(bx,tipx,tipy,col)=>{
+        c.add(this.add.triangle(0,0, bx-3,-9, bx+3,-9, bx+tipx, tipy, shade(col,0.7)));   // dark edge
+        c.add(this.add.triangle(0,0, bx-2,-9, bx+1,-9, bx+tipx-1, tipy+1, col));          // lit inner
+      };
+      leaf(-4,-9,-19,0x2f8f4e); leaf(4,9,-19,0x2f8f4e);         // outer (splay down-out)
+      leaf(-2,-3,-30,0x37a85c); leaf(2,3,-30,0x37a85c);         // mid
+      leaf(0,0,-37,0x4cc06f);                                    // centre (tall)
+      out(0,0,15,8,0xcf8a46);                                   // pot body (over blade bases)
+      c.add(this.add.rectangle(0,-7,17,3,0xe0a05a).setOrigin(0.5,1));  // pot rim (overhang)
+      c.add(this.add.rectangle(0,-9,12,2,0x5e3b1e).setOrigin(0.5,1));  // soil
     } else if (kind==="monitor"){
       out(0,0,6,10,0x2a3550); out(0,-9,26,18,0x10151f);
       c.add(this.add.rectangle(0,-11,20,12,0x2bd3ff,0.85).setOrigin(0.5,1)); // glowing screen
@@ -456,23 +611,38 @@ class FloorScene extends Phaser.Scene {
       out(0,0,46,14,0x6b4a2c); out(-16,-12,10,12,0x10151f); // desk + small monitor
       c.add(this.add.rectangle(-16,-14,7,7,0x7dffb0,0.8).setOrigin(0.5,1));
     } else if (kind==="rack"){
-      out(0,0,26,40,0x1b2233);
-      for(let i=0;i<5;i++) c.add(this.add.rectangle(8,-6-i*7,6,3,i%2?0x5ddc7a:0xffd95e).setOrigin(0.5,1));
+      out(0,0,28,42,0x2a3040);                                  // server cabinet (dark steel)
+      c.add(this.add.rectangle(0,-2,22,1,0x4a5266).setOrigin(0.5,1));            // door seam
+      for(let r=0;r<5;r++){                                     // 5 rack units, each w/ LEDs
+        const sy=-5-r*7;
+        c.add(this.add.rectangle(0,sy,22,5,0x1a1f2b).setOrigin(0.5,1));          // unit face
+        c.add(this.add.rectangle(0,sy,22,1,0x3a4250).setOrigin(0.5,1));          // unit top edge
+        for(let i=0;i<3;i++) c.add(this.add.rectangle(-7+i*3,sy-2,1.6,1.6,[0x5ddc7a,0xffd95e,0xff6d6d][(r+i)%3]).setOrigin(0.5,1)); // LEDs
+        c.add(this.add.rectangle(8,sy-2,5,1.6,0x6a7488).setOrigin(0.5,1));       // drive slot
+      }
     } else if (kind==="shelf"){
-      out(0,0,34,30,0x5a4326);
-      for(let i=0;i<4;i++) c.add(this.add.rectangle(-12+i*8,-16,5,12,[0xff8fae,0x7fd1ff,0xffd95e,0x7dffb0][i]).setOrigin(0.5,1));
+      out(0,0,32,34,0x6b4a2c);                                  // wooden bookcase
+      const books=[0xd96a82,0x6fb8e0,0xe0b84a,0x6fcf86,0x9b86d0,0xd86a5a];
+      for(let r=0;r<3;r++){
+        const sy=-5-r*10;
+        c.add(this.add.rectangle(0,sy,28,1,0x4a3320).setOrigin(0.5,1));          // shelf board
+        for(let i=0;i<5;i++){ const bh=7+((i+r)%3); const bc=books[(r*5+i)%books.length];
+          c.add(this.add.rectangle(-11+i*5,sy-1,4,bh,bc).setOrigin(0.5,1).setStrokeStyle(1,shade(bc,0.6))); } // books (varied height)
+      }
     } else if (kind==="board"){
-      out(0,-6,40,26,0x223047);
-      c.add(this.add.rectangle(-12,-22,12,3,0xffd95e).setOrigin(0.5,1));
-      c.add(this.add.rectangle(2,-16,16,3,0x7fd1ff).setOrigin(0.5,1));
-      c.add(this.add.rectangle(-6,-10,10,3,0x7dffb0).setOrigin(0.5,1));
+      out(0,-4,42,4,0x7a5028);                                   // wooden frame base
+      out(0,-6,38,24,0xd8b87a);                                  // tan corkboard
+      c.add(this.add.rectangle(-12,-22,12,3,0xe06a86).setOrigin(0.5,1));   // pinned notes
+      c.add(this.add.rectangle(2,-16,16,3,0x5db8ff).setOrigin(0.5,1));
+      c.add(this.add.rectangle(-6,-10,10,3,0x6fcf86).setOrigin(0.5,1));
     } else if (kind==="couch"){
-      out(0,0,52,10,0x6a4a7a);                                  // seat
-      out(0,-8,52,8,0x7a5a8a);                                  // backrest
-      c.add(this.add.rectangle(-25,-4,5,14,0x5a3a6a).setOrigin(0.5,1)); // arm L
-      c.add(this.add.rectangle(25,-4,5,14,0x5a3a6a).setOrigin(0.5,1));  // arm R
-      c.add(this.add.rectangle(-11,-3,16,4,0x8a6aa0).setOrigin(0.5,1)); // cushions
-      c.add(this.add.rectangle(11,-3,16,4,0x8a6aa0).setOrigin(0.5,1));
+      out(0,-6,52,12,0x6a4a7a);                                 // backrest (behind)
+      out(-23,-2,8,16,0x5a3a6a); out(23,-2,8,16,0x5a3a6a);      // padded arms
+      out(0,0,40,9,0x7a5a8a);                                   // seat base (front)
+      for(let i=0;i<3;i++){                                     // back + seat cushions
+        c.add(this.add.rectangle(-13+i*13,-7,11,6,0x82628f).setOrigin(0.5,1).setStrokeStyle(1,0x5a3a6a));
+        c.add(this.add.rectangle(-13+i*13,-2,11,5,0x8f6fa6).setOrigin(0.5,1).setStrokeStyle(1,0x5a3a6a)); }
+      c.add(this.add.rectangle(-22,9,3,4,0x3a2a4a).setOrigin(0.5,1)); c.add(this.add.rectangle(22,9,3,4,0x3a2a4a).setOrigin(0.5,1)); // legs
     } else if (kind==="ctable"){
       out(0,0,24,7,0x6b4a2c);                                   // coffee table
       c.add(this.add.rectangle(-5,-6,6,4,0x9adfff).setOrigin(0.5,1)); // mug
@@ -488,12 +658,61 @@ class FloorScene extends Phaser.Scene {
       c.add(this.add.rectangle(13,5,3,8,0x4a3320).setOrigin(0.5,1));
       c.add(this.add.rectangle(0,-2,30,2,0x7a5836).setOrigin(0.5,1));      // backrest slat
     } else if (kind==="tv"){
-      out(0,0,10,5,0x2a3550);                                   // stand
-      out(0,-7,34,22,0x10151f);                                 // body/bezel
-      const scr=this.add.rectangle(0,-9,26,15,0x2bd3ff,0.7).setOrigin(0.5,1); // screen
+      c.add(this.add.rectangle(0,0,18,3,0x3a3f4a).setOrigin(0.5,1));    // base
+      c.add(this.add.rectangle(0,-2,4,4,0x2a2f38).setOrigin(0.5,1));    // neck
+      out(0,-5,38,24,0x1a1e26);                                        // flat-screen bezel
+      const scr=this.add.rectangle(0,-8,32,18,0x2bd3ff,0.7).setOrigin(0.5,1); // screen
       c.add(scr);
+      c.add(this.add.rectangle(-12,-24,12,1,0x9fe8ff,0.5).setOrigin(0.5,1)); // screen glint
       this.tweens.add({targets:scr, fillAlpha:{from:0.45,to:0.8}, duration:700+Math.abs(Math.round(x))%500,
         yoyo:true, repeat:-1, ease:"Sine.inOut"});                // flicker
+    } else if (kind==="vending"){
+      out(0,0,28,48,0xe6b733);                                  // yellow cabinet
+      c.add(this.add.rectangle(0,-25,24,34,PC.sceneInk).setOrigin(0.5,1));       // display frame
+      c.add(this.add.rectangle(0,-26,20,30,0x1f5fc0).setOrigin(0.5,1));          // blue interior
+      const cans=[0xff5d6c,0x5ddc7a,0xffd95e,0xff8fae,0x7fd1ff,0xffa54a,0xff6d6d,0x6fcf86,0xffd95e];
+      for(let r=0;r<3;r++){                                     // three shelves of cans
+        c.add(this.add.rectangle(0,-27-r*9,20,1,0x14406f).setOrigin(0.5,1));     // shelf line
+        for(let i=0;i<3;i++) c.add(this.add.rectangle(-6+i*6,-29-r*9,4,6,cans[r*3+i]).setOrigin(0.5,1).setStrokeStyle(1,0x14406f));
+      }
+      c.add(this.add.rectangle(-3,-26,8,30,0xbfe0ff,0.16).setOrigin(0.5,1));     // glass sheen
+      c.add(this.add.rectangle(9,-32,4,6,0xb0851e).setOrigin(0.5,1));            // coin/button panel
+      c.add(this.add.rectangle(0,-5,18,6,PC.sceneInk).setOrigin(0.5,1));         // dispenser tray
+      c.add(this.add.rectangle(0,-6,14,3,0x14406f).setOrigin(0.5,1));            // tray mouth
+    } else if (kind==="counter"){
+      out(0,0,58,12,0xe6dcc0);                                  // cream counter front
+      c.add(this.add.rectangle(0,-12,62,5,0xf2ead2).setOrigin(0.5,1));           // top surface (overhang)
+      c.add(this.add.rectangle(0,-16,62,1,0xfff8e8).setOrigin(0.5,1));           // top edge highlight
+      c.add(this.add.rectangle(0,-12,62,1,PC.sceneInk).setOrigin(0.5,1));        // seam under top
+      c.add(this.add.rectangle(0,-7,58,2,0xd6473f).setOrigin(0.5,1));            // red trim band
+      c.add(this.add.rectangle(-19,-1,1,9,0xcdbf9c).setOrigin(0.5,1)); c.add(this.add.rectangle(19,-1,1,9,0xcdbf9c).setOrigin(0.5,1)); // panel seams
+      c.add(this.add.rectangle(-16,-15,3,3,0x5a5650).setOrigin(0.5,1));          // terminal stand
+      out(-16,-17,15,11,0x3a4660);                              // terminal bezel
+      c.add(this.add.rectangle(-16,-19,11,7,0x5ddc7a,0.95).setOrigin(0.5,1));    // green screen
+      c.add(this.add.rectangle(16,-15,9,4,0xff8fae).setOrigin(0.5,1).setStrokeStyle(1,0xc05070)); // tray
+    } else if (kind==="stool"){
+      c.add(this.add.rectangle(0,-2,5,6,0xb05f24).setOrigin(0.5,1));            // post/leg
+      c.add(this.add.ellipse(0,-6,15,7,0x9c4a1c).setOrigin(0.5,1));             // seat rim (dark)
+      c.add(this.add.ellipse(0,-7,13,6,0xe0863a).setOrigin(0.5,1));             // cushion top
+      c.add(this.add.ellipse(-2,-8,6,2,0xf4a45a).setOrigin(0.5,1));             // top-left highlight
+    } else if (kind==="chair_r"){
+      // an armchair in SIDE PROFILE facing RIGHT — backrest on the left, seat to the right.
+      c.add(this.add.rectangle(-7,2,4,7,0x5a3a6a).setOrigin(0.5,1));            // back leg
+      c.add(this.add.rectangle(7,1,4,6,0x5a3a6a).setOrigin(0.5,1));             // front leg
+      out(-6,-2,5,20,0x6a4a7a);                                                 // tall backrest (left)
+      out(2,-1,18,8,0x7a5a8a);                                                  // seat block (extends right)
+      c.add(this.add.rectangle(2,-8,16,4,0x8f6fa6).setOrigin(0.5,1).setStrokeStyle(1,0x5a3a6a)); // seat cushion
+      c.add(this.add.rectangle(-3,-6,4,12,0x9a7ab0).setOrigin(0.5,1));          // backrest cushion (lit, faces right)
+    } else if (kind==="tv_r"){
+      // a flat-screen in SIDE PROFILE, the bright screen on its RIGHT face (facing right).
+      c.add(this.add.rectangle(0,0,16,3,0x3a3f4a).setOrigin(0.5,1));            // base
+      c.add(this.add.rectangle(0,-2,4,4,0x2a2f38).setOrigin(0.5,1));            // neck
+      out(-2,-5,10,24,0x1a1e26);                                               // narrow side bezel
+      const scr=this.add.rectangle(4,-7,4,18,0x2bd3ff,0.7).setOrigin(0.5,1);    // screen on the RIGHT face
+      c.add(scr);
+      c.add(this.add.rectangle(6,-22,1,16,0x9fe8ff,0.5).setOrigin(0.5,1));      // right-edge glint
+      this.tweens.add({targets:scr, fillAlpha:{from:0.45,to:0.8}, duration:700+Math.abs(Math.round(x))%500,
+        yoyo:true, repeat:-1, ease:"Sine.inOut"});                            // flicker
     }
     return c;
   }
@@ -502,22 +721,68 @@ class FloorScene extends Phaser.Scene {
   makeWorkstation(x, floorY, accent){
     if (accent == null) accent = 0x7fd1ff;   // monitor glow default (sprites carry their own colour)
     x = Math.round(x);
-    const c = this.add.container(x, floorY).setDepth(floorY+5).setScale(1.05);  // desk (proportional to the 32px sprites)
-    const O = 0x0a0d16;
-    const out = (rx,ry,w,h,col)=>{
+    const c = this.add.container(x, floorY).setDepth(floorY+5).setScale(1.3);
+    const O = PC.sceneInk;                                        // one scene ink outline
+    const out = (rx,ry,w,h,col)=>{   // crafted block: ink outline + top-left light + br-shade
       c.add(this.add.rectangle(rx,ry,w+2,h+2,O).setOrigin(0.5,1));
       c.add(this.add.rectangle(rx,ry,w,h,col).setOrigin(0.5,1));
+      c.add(this.add.rectangle(rx,ry-h+1,w,1,shade(col,1.18)).setOrigin(0.5,1));
+      c.add(this.add.rectangle(rx-w/2,ry,1,h,shade(col,1.1)).setOrigin(0,1));
+      c.add(this.add.rectangle(rx,ry-1,w,1,shade(col,0.82)).setOrigin(0.5,1));
+      c.add(this.add.rectangle(rx+w/2-1,ry,1,h,shade(col,0.86)).setOrigin(0,1));
     };
-    out(0,0,40,7,0x6b4a2c);                                       // desktop (smaller)
-    c.add(this.add.rectangle(-17,7,3,10,0x4a3320).setOrigin(0.5,1));
-    c.add(this.add.rectangle(17,7,3,10,0x4a3320).setOrigin(0.5,1)); // legs
-    out(-4,-7,17,12,0x10151f);                                    // monitor bezel
-    const screen = this.add.rectangle(-4,-9,12,8,shade(accent,1.25),0.92).setOrigin(0.5,1);
-    c.add(screen);                                                // dept-tinted screen
-    c.add(this.add.rectangle(-7,-12,6,1.5,shade(accent,1.5))); c.add(this.add.rectangle(-8,-9,9,1.5,shade(accent,1.4))); // code lines
-    out(12,-1,11,3,0x2a3550);                                     // keyboard
+    // the orange round STOOL the worker sits on — a SEPARATE object drawn BEHIND/under
+    // the person (lower depth than the person sprite) and just in front of the table,
+    // so it reads as the person seated on it. (floorY-16 is where the person stands.)
+    const chair = this.add.container(x, floorY-16).setDepth(floorY-20).setScale(1.25);
+    chair.add(this.add.ellipse(0,5,16,6,PC.shadow,0.30).setOrigin(0.5,1));           // contact shadow
+    chair.add(this.add.rectangle(0,3,5,5,0xb05f24).setOrigin(0.5,1));                // post/leg
+    chair.add(this.add.ellipse(0,-1,16,8,0x9c4a1c).setOrigin(0.5,1));                // seat rim (dark)
+    chair.add(this.add.ellipse(0,-2,14,7,0xe0863a).setOrigin(0.5,1));                // cushion top
+    chair.add(this.add.ellipse(-2,-3,7,3,0xf4a45a).setOrigin(0.5,1));                // top-left highlight
+    c.chair = chair;     // tracked for teardown by the workstation it belongs to
+    // a GRAY PC COUNTER: a front face + a lighter top surface (reads 3D), legs, a seam.
+    out(0,0,46,8,0xb0aaa2);                                       // front face (warm gray)
+    c.add(this.add.rectangle(0,-8,48,5,0xc8c3bb).setOrigin(0.5,1));   // top surface (lighter, overhang)
+    c.add(this.add.rectangle(0,-12,48,1,0xe4e0d8).setOrigin(0.5,1));  // top edge highlight
+    c.add(this.add.rectangle(0,-8,48,1,PC.sceneInk).setOrigin(0.5,1));// seam under the top surface
+    c.add(this.add.rectangle(-21,8,3,7,0x837d75).setOrigin(0.5,1));
+    c.add(this.add.rectangle(21,8,3,7,0x837d75).setOrigin(0.5,1));    // legs
+    // a MONITOR on the counter: stand + dark bezel + dept-tinted screen (live activity)
+    c.add(this.add.rectangle(-13,-12,4,3,0x5a5650).setOrigin(0.5,1));// stand
+    out(-13,-14,15,11,0x44485a);                                 // bezel (slate)
+    const screen = this.add.rectangle(-13,-16,11,7,shade(accent,1.22),0.97).setOrigin(0.5,1);
+    c.add(screen);
+    c.add(this.add.rectangle(-16,-18,5,1,shade(accent,1.5))); c.add(this.add.rectangle(-17,-15,8,1,shade(accent,1.4)));
+    // a small KEYBOARD on the counter top
+    out(13,-9,13,3,0x9a958d); c.add(this.add.rectangle(13,-11,13,1,0xc4bfb6).setOrigin(0.5,1));
     this.screens = this.screens || []; this.screens.push(screen);
     return c;
+  }
+
+  // Crisp pixel label via the baked BITMAP font (NEAREST-sampled — never blurs when
+  // scaled). px = display height; tint colours the white glyphs. Returns the BitmapText.
+  bm(x, y, txt, px, tint, ox, oy){
+    const t = this.add.bitmapText(0, 0, "px", txt, px);
+    if (tint!=null) t.setTint(tint);
+    ox = ox==null?0:ox; oy = oy==null?0:oy;
+    t.setPosition(Math.round(x - t.width*ox), Math.round(y - t.height*oy));  // manual origin (version-safe)
+    return t;
+  }
+
+  // A name/role badge pinned over a person `s`. `filled` → solid accent pill with dark
+  // text (leads); else a dark pill with accent text (ICs / generic). BitmapText = crisp.
+  pinBadge(s, lbl, color, filled, yy){
+    const PX=8, y = yy==null ? -26 : yy;   // sits ABOVE the head (clear of the face)
+    const bg = filled ? color : 0x2a2230, fg = filled ? 0x241d2e : color;  // OPAQUE solid placard
+    const t = this.bm(0,y,lbl,PX,fg,0.5,0.5);            // proportional text → size the pill to it
+    const pw = Math.ceil(t.width)+8;
+    // a 2px pin tail so the badge reads as belonging to THIS character (not a floating tooltip)
+    s.add(this.add.rectangle(0,y+5,2,4,PC.sceneInk).setOrigin(0.5,0));
+    // opaque placard: cool-ink shadow base + the solid face (1px ink outline) + the text on top
+    s.add(this.add.rectangle(0,y+1,pw,11,PC.sceneInk).setOrigin(0.5));
+    s.add(this.add.rectangle(0,y,pw-2,9,bg).setOrigin(0.5).setStrokeStyle(1,PC.sceneInk));
+    s.add(t);
   }
 
   // ========================= animation library ============================ //
@@ -583,9 +848,9 @@ class FloorScene extends Phaser.Scene {
     const g=this.gateGeom; if (!g) return;
     const cx=g.cx, cy=(g.atop+g.abot)/2, col=pass?0x5ddc7a:0xff5d6c;
     const s=this.add.container(cx,cy).setDepth(42);
-    s.add(this.add.rectangle(0,0,58,32,0x101622,0.96).setStrokeStyle(3,col));
+    s.add(this.add.rectangle(0,0,58,32,0xfffdf3,0.98).setStrokeStyle(3,col));
     s.add(this.add.text(0,0,pass?"PASS":"FAIL",{fontFamily:"'PixelFont','Courier New',monospace",
-      fontSize:"16px",fontStyle:"bold",color:pass?"#9dffbf":"#ffb3ba"}).setOrigin(0.5));
+      fontSize:"16px",fontStyle:"bold",color:pass?"#1d7a3f":"#b53129"}).setOrigin(0.5));
     s.setScale(3.4).setAlpha(0).setAngle(-12);
     this.tweens.add({targets:s, scale:1, alpha:1, angle:-6, duration:170, ease:"Back.out",
       onComplete:()=>{ this.ring(cx,cy,col); this.burst(cx,cy,[col,0xffffff],16);
@@ -630,9 +895,9 @@ class FloorScene extends Phaser.Scene {
   }
   banner(txt,color){
     const b=this.add.container(W/2, FLOOR_TOP+40).setDepth(2200);
-    b.add(this.add.rectangle(0,0,380,48,0x0c1322,0.95).setStrokeStyle(3,color));
+    b.add(this.add.rectangle(0,0,380,48,0xfffdf3,0.98).setStrokeStyle(3,color));
     b.add(this.add.text(0,0,txt,{fontFamily:"'PixelFont','Courier New',monospace",
-      fontSize:"22px",fontStyle:"bold",color:"#ffffff"}).setOrigin(0.5));
+      fontSize:"22px",fontStyle:"bold",color:"#33405e"}).setOrigin(0.5));
     b.setScale(0.2).setAlpha(0);
     this.tweens.add({targets:b, scale:1, alpha:1, duration:300, ease:"Back.out"});
     this.time.delayedCall(2400,()=>this.tweens.add({targets:b, alpha:0, y:b.y-20, duration:400,
@@ -643,7 +908,7 @@ class FloorScene extends Phaser.Scene {
   buildGuardian(){
     const R = ROOMS.gate, x = Math.round(R.x + R.w*0.30), y = R.y1-30;
     const c = this.add.container(x,y).setDepth(6);
-    c.add(this.add.ellipse(0,9,18,5,0x000000,0.28));            // shadow
+    c.add(this.add.ellipse(0,9,18,5,PC.shadow,0.30));           // cool cast shadow
     c.add(this.add.rectangle(0,0,14,16,0x2b3350));              // torso (navy uniform)
     c.add(this.add.rectangle(0,2,14,2,0x1a2030));               // belt line
     c.add(this.add.rectangle(-4,-4,3,3,0xffd95e));              // brass badge
@@ -655,6 +920,7 @@ class FloorScene extends Phaser.Scene {
     this.guardSpark = this.add.rectangle(7,-6,3,3,0x5ddc7a,0.9);// radio LED
     c.add(this.guardSpark);
     this.tweens.add({targets:this.guardSpark, alpha:0.2, duration:900, yoyo:true, repeat:-1});
+    this.pinBadge(c, "GUARD", 0xbcd0ff, true, -30);            // label the gate security guard
   }
 
   // The Gate is the RELEASE CHECKPOINT: a CCTV bank + checkpoint desk, plus a sealed
@@ -663,22 +929,29 @@ class FloorScene extends Phaser.Scene {
   // which unlocks only when every release gate passes.
   buildGate(){
     const G = ROOMS.gate, V = ROOMS.vault, cx = Math.round(G.cx);
-    // ---- CCTV monitor bank on the office wall (camera feeds) ----
-    const bx = G.x+46, by = G.floorY+18, mon=[0x2bd3ff,0x7dffb0,0xffd95e,0x5db8ff];
+    // ---- CCTV monitors MOUNTED on the top wall (right of the GATE sign), so they read
+    // as wall-hung camera feeds — not loose blocks on the floor. ----
+    const bx = G.x1-58, by = G.y+52, mon=[0x2bd3ff,0x7dffb0,0xffd95e,0x5db8ff];
     const bank = this.add.container(bx,by).setDepth(3);
-    bank.add(this.add.rectangle(0,0,76,52,0x10151f).setStrokeStyle(2,0x2a3550));
-    for (let i=0;i<4;i++){ const sx=-18+(i%2)*36, sy=-12+Math.floor(i/2)*24;
-      bank.add(this.add.rectangle(sx,sy,30,18,mon[i],0.85));
-      bank.add(this.add.rectangle(sx,sy,30,18).setStrokeStyle(1,0x05080f)); }
-    const led=this.add.rectangle(bx+30,by-22,4,4,0xff5d6c,0.9).setDepth(3);  // REC light
+    bank.add(this.add.rectangle(0,-30,6,18,0x2a3550).setOrigin(0.5,1));        // wall mount bracket
+    bank.add(this.add.rectangle(0,0,54,34,0x10151f).setOrigin(0.5,1).setStrokeStyle(2,0x2a3550));
+    for (let i=0;i<4;i++){ const sx=-12+(i%2)*24, sy=-19+Math.floor(i/2)*16;
+      bank.add(this.add.rectangle(sx,sy,20,12,mon[i],0.85).setOrigin(0.5,1));
+      bank.add(this.add.rectangle(sx,sy,20,12).setOrigin(0.5,1).setStrokeStyle(1,0x05080f)); }
+    const led=this.add.rectangle(bx+22,by-30,4,4,0xff5d6c,0.9).setDepth(3);    // REC light
     this.tweens.add({targets:led, alpha:0.2, duration:700, yoyo:true, repeat:-1});
-    // ---- checkpoint desk / counter ----
-    const dx = cx+30, dy = G.y1-34;
-    const desk = this.add.container(dx,dy).setDepth(3);
-    desk.add(this.add.rectangle(0,0,70,16,0x394566).setOrigin(0.5,1));
-    desk.add(this.add.rectangle(0,-15,70,4,0x4a587a).setOrigin(0.5,1));      // counter top
-    desk.add(this.add.rectangle(-20,-26,18,12,0x10151f).setOrigin(0.5,1));   // terminal
-    desk.add(this.add.rectangle(-20,-28,14,8,0x2bd3ff,0.85).setOrigin(0.5,1));
+    // ---- checkpoint desk: a clear, legged counter sitting IN FRONT OF the guard, so
+    // the two read together as a manned security checkpoint. ----
+    const dx = Math.round(G.x + G.w*0.30), dy = G.y1-18;
+    const desk = this.add.container(dx,dy).setDepth(7);
+    desk.add(this.add.ellipse(0,2,72,7,PC.shadow,0.28).setOrigin(0.5,1));    // contact shadow
+    desk.add(this.add.rectangle(-28,1,5,9,0x2a3550).setOrigin(0.5,1));       // left leg
+    desk.add(this.add.rectangle(28,1,5,9,0x2a3550).setOrigin(0.5,1));        // right leg
+    desk.add(this.add.rectangle(0,-7,64,12,0x394566).setOrigin(0.5,1).setStrokeStyle(1,PC.sceneInk)); // counter front
+    desk.add(this.add.rectangle(0,-19,68,5,0x4a587a).setOrigin(0.5,1).setStrokeStyle(1,PC.sceneInk)); // counter top
+    desk.add(this.add.rectangle(0,-19,68,1,0x6a7aa0).setOrigin(0.5,1));      // top edge highlight
+    desk.add(this.add.rectangle(-18,-26,16,11,0x10151f).setOrigin(0.5,1).setStrokeStyle(1,0x05080f)); // terminal
+    desk.add(this.add.rectangle(-18,-28,12,7,0x2bd3ff,0.85).setOrigin(0.5,1)); // terminal screen
     // ---- seal the corridor gap between the GATE and the VAULT below ----
     const gapTop = G.y1, gapBot = V.y, dw = 60;          // short vertical door
     const wallC = 0x1a2030, capC = 0x2a3550;
@@ -714,7 +987,7 @@ class FloorScene extends Phaser.Scene {
     this.chestGlow = this.add.rectangle(x,y-20,120,120,0xffd25a,0.10).setDepth(4);
     this.tweens.add({targets:this.chestGlow, fillAlpha:{from:0.06,to:0.14}, duration:2200, yoyo:true, repeat:-1});
     const c = this.add.container(x,y).setDepth(5).setScale(1.3);
-    c.add(this.add.ellipse(0,15,40,8,0x000000,0.3));
+    c.add(this.add.ellipse(0,15,40,8,PC.shadow,0.32));
     c.add(this.add.rectangle(0,3,36,18,0x7a3b1a));
     c.add(this.add.rectangle(0,9,36,6,0x5a2c12));
     this.chestClosed = this.add.container(0,0);
@@ -754,15 +1027,22 @@ class FloorScene extends Phaser.Scene {
     for (const room in ROSTER){
       const names = ROSTER[room], R = ROOMS[room]; if (!R) continue;
       const cols = Math.min(names.length, 3);
+      const single = names.length === 1;                         // a one-role room → centre it
+      const PX = 84, SY = R.y + 94, RP = 50;                     // SAME grid as the eng rooms
       names.forEach((name,i)=>{
         const col = i%cols, row = Math.floor(i/cols);
-        // tight pods: fixed pitch from a left margin, centred as a block in the room
-        const blockW = (cols-1)*64, hx = R.cx - blockW/2 + col*64;
-        const hy = R.floorY + 34 + row*48;          // stand in the room's floor
+        // centred columns, first row well below the room label (matches every other room)
+        const blockW = (cols-1)*PX, hx = single ? R.cx : R.cx - blockW/2 + col*PX;
+        const hy = single ? Math.round(R.y + R.h*0.52)            // single role → centred desk
+                          : SY + row*RP;                          // else the consistent grid
         const seed = hashStr((this.proj.id||'f')+name), kit = kitFor(name, seed);
         this.makeWorkstation(hx, hy+16, kit.accent);              // desk just in front of them
         const a = this.makePerson(hx, hy, kit);
-        a.setScale(1.4).setDepth(hy);                             // y-sort (desk occludes legs)
+        a.setScale(1.5).setDepth(hy);                             // y-sort (desk occludes legs)
+        // role badge over the agent so every senior role is labelled (like the eng leads)
+        const rtag = ROLE_TAG[name] || name.slice(0,9).toUpperCase();
+        const acc = (kit.accent!=null ? kit.accent : 0x9fb4d8);
+        this.pinBadge(a, rtag, acc, true);
         a.home = {x:hx,y:hy}; a.room = room; a.loungeSlot = li++;
         // Start visible in the lounge (idle); stages pull each team to its desks.
         const ls = this.loungeSpot(a.loungeSlot);
@@ -780,12 +1060,11 @@ class FloorScene extends Phaser.Scene {
   }
 
   buildCTO(){
-    const L = cellBox(ENTRANCE_CELL[0], ENTRANCE_CELL[1]);
-    this.lobby = {cx: Math.round(L.x+L.w/2), standY: Math.round(L.y+L.h-24)};
+    const O = ROOMS.office;
+    this.lobby = {cx: Math.round(O.cx), standY: Math.round(O.y1 - 48)};   // behind his desk
     const c = this.makePerson(this.lobby.cx, this.lobby.standY, kitFor("CTO", hashStr((this.proj.id||'f')+"CTO")));
-    c.setScale(1.4).setDepth(900); c.fixedDepth = 900;   // CTO walks the floor -> always on top
-    c.add(this.add.text(0,-22,"CTO",{fontFamily:"'PixelFont','Courier New'",fontSize:"8px",fontStyle:"bold",color:"#ffcf52"})
-      .setOrigin(0.5));
+    c.setScale(1.5).setDepth(900); c.fixedDepth = 900;   // CTO walks the floor -> always on top
+    this.pinBadge(c, "CTO", 0xffd95e, true, -26);         // gold badge, above the head
     this.cto = c;
     this.tweens.add({targets:c.bob, y:-1, duration:380, yoyo:true, repeat:-1, ease:"Sine.inOut"});
   }
@@ -800,11 +1079,17 @@ class FloorScene extends Phaser.Scene {
     const ci = opt.ci != null ? opt.ci : 0;
     const ch = CHARACTERS[((ci % CHARACTERS.length) + CHARACTERS.length) % CHARACTERS.length];
     const c = this.add.container(x,y).setDepth(10);
-    c.add(this.add.ellipse(0,3,11,4,0x000000,0.30));        // shadow under the feet
+    c.add(this.add.ellipse(0,3,11,4,PC.shadow,0.32));       // cool shadow under the feet
     const bob = this.add.container(0,0);
     // 0.36 x the caller's 1.4 container = ~0.5 net of the 64px frame => crisp 32px
     // (integer-friendly half-scale; non-integer scales soften pixel art).
+    // selective dark OUTLINE: a slightly-larger silhouette behind the body, tinted scene
+    // ink and kept frame-synced — gives every character a clean 1px edge so they pop.
+    const ol = this.add.sprite(0,4,"chars",ch.front[0]).setOrigin(0.5,1).setScale(0.378).setTint(PC.sceneInk);
+    bob.add(ol);
     const sprite = this.add.sprite(0,4,"chars",ch.front[0]).setOrigin(0.5,1).setScale(0.36);
+    const _sf = sprite.setFrame.bind(sprite);
+    sprite.setFrame = (f)=>{ _sf(f); ol.setFrame(f); return sprite; };   // outline mirrors the body frame
     bob.add(sprite);
     const spark = this.add.rectangle(6,-24,2,2,0xfff04a).setOrigin(0,0).setVisible(false);
     bob.add(spark);
@@ -837,14 +1122,66 @@ class FloorScene extends Phaser.Scene {
     if (a.sprite && a.char){ a._wf = 0; a.sprite.setFrame(a.char.front[0]); }
   }
 
+  // A discipline room is REBUILDING (a service deepening): pulse its glow + a
+  // floating "↻ rebuilding" tag so it reads at a glance, not just in the log.
+  pulseRoom(key){
+    const R = ROOMS[key]; if(!R || R.virtual) return;
+    const g = this.roomGlow[key];
+    if(g) this.tweens.add({targets:g, fillAlpha:{from:0.0,to:0.22}, duration:260,
+                           yoyo:true, repeat:2, ease:"Sine.inOut"});
+    const t = this.add.text(R.cx, R.y+20, "↻ rebuilding",
+      {fontFamily:"'PixelFont','Courier New'",fontSize:"9px",fontStyle:"bold",color:"#ffb05a"})
+      .setOrigin(0.5,0).setDepth(2000);
+    this.tweens.add({targets:t, y:t.y-14, alpha:{from:1,to:0}, duration:1400,
+                     ease:"Sine.out", onComplete:()=>t.destroy()});
+  }
   setActiveRoom(key){
+    const prev = this.activeRoom;
     this.activeRoom = key;
+    // When the build advances to the NEXT phase, a worker from the finished room carries
+    // the "work" over to the new room (the handoff). Only on a forward phase boundary.
+    const SEQ = ["product","architecture","engineering","qa","security","gate","vault"];
+    const ph = (k)=> (ENG_ROOMS.includes(k)||k==="engineering") ? "engineering" : k;
+    const oi = SEQ.indexOf(ph(prev)), ni = SEQ.indexOf(ph(key));
+    if (oi >= 0 && ni > oi) this.deliverWork(prev, key);
+    // "engineering" is a virtual stage — light up all its discipline rooms.
+    const lit = (k)=> k===key || (key==="engineering" && ENG_ROOMS.includes(k));
     for (const k in this.roomGlow)
-      this.tweens.add({targets:this.roomGlow[k], fillAlpha:(k===key?0.10:0), duration:420});
+      this.tweens.add({targets:this.roomGlow[k], fillAlpha:(lit(k)?0.10:0), duration:420});
+    // The CTO VISITS the working group on each phase shift — but never camps in the
+    // gate/vault (those aren't teams). For those (and the lobby) he returns to his office.
+    const TEAM = {product:1,architecture:1,engineering:1,frontend:1,backend:1,data:1,qa:1,security:1};
     const R = ROOMS[key];
-    if (R) this.walkCTO(R.cx, R.standY);
-    else if (this.lobby) this.walkCTO(this.lobby.cx, this.lobby.standY);
+    if (R && TEAM[key]) this.walkCTO(R.cx, R.standY);
+    else if (this.lobby) this.walkCTO(this.lobby.cx, this.lobby.standY);   // gate/vault/none → office
     this.staffRoom(key);                 // everyone stays at their own desk; active room glows
+  }
+
+  // A worker from the just-finished phase carries the "work" package to the next
+  // phase's room, drops it (a pickup pops there), then heads back and leaves.
+  deliverWork(fromKey, toKey){
+    const rk = (k)=> k==="engineering" ? "backend" : k;     // virtual eng → a real room
+    const A = ROOMS[rk(fromKey)], B = ROOMS[rk(toKey)];
+    if (!A || !B || this._dead) return;
+    const ax = Math.round(A.cx), ay = Math.round(A.standY);
+    const runner = this.makePerson(ax, ay, poolKit(4));
+    runner.setScale(1.4).setDepth(945); runner.fixedDepth = 945;   // stays on top while crossing
+    this.pinBadge(runner, "RUNNER", 0xffcf52, true, -17);          // label the delivery courier
+    const pkg = this.add.container(0,-17);                          // the "work" carried in hand
+    pkg.add(this.add.rectangle(0,0,12,9,0xffcf52).setStrokeStyle(1,0x7a5028));
+    pkg.add(this.add.rectangle(0,-1,12,2,0xfff0a8));
+    pkg.add(this.add.rectangle(0,0,2,9,0xc89b2e));
+    runner.add(pkg);
+    this.floatText(ax, ay-26, "→ "+(B.label||"next"), "#ffe6a0", 10);   // sets off with the work
+    this.walkTo(runner, Math.round(B.cx), Math.round(B.standY), ()=>{
+      if (this._dead){ runner.destroy(); return; }
+      this.burst(B.cx, B.standY-10, [0xffcf52,0xffffff], 10);
+      this.floatText(B.cx, B.standY-26, "✦ work delivered", "#ffe6a0", 10);
+      if (pkg) pkg.destroy();
+      // brief beat at the destination, then head back and leave
+      this.time.delayedCall(600, ()=>{ if (this._dead){ runner.destroy(); return; }
+        this.walkTo(runner, ax, ay, ()=>{ runner.destroy(); }); });
+    });
   }
 
   // ---- movement: desks <-> lounge -----------------------------------------
@@ -877,6 +1214,12 @@ class FloorScene extends Phaser.Scene {
     pts.push([tx,ty]);                                   // step into the destination
     return pts;
   }
+  // Flip ONLY the sprite (and its synced outline) for facing — never the whole
+  // container, so pinned name badges stay un-mirrored/readable while walking.
+  faceX(a, dir){
+    const t = (a && a.bob) ? a.bob : a;
+    if (t) t.scaleX = dir;
+  }
   walkTo(a, tx, ty, then){
     if (!a) return;
     if (a.moveTween) a.moveTween.stop();
@@ -888,9 +1231,9 @@ class FloorScene extends Phaser.Scene {
     this.startWalk(a);
     let i = 0;
     const step = ()=>{
-      if (i >= pts.length){ this.stopWalk(a); a.scaleX = 1; if (a.fixedDepth==null) a.setDepth(ty); if (then) then(); return; }
+      if (i >= pts.length){ this.stopWalk(a); this.faceX(a, 1); if (a.fixedDepth==null) a.setDepth(ty); if (then) then(); return; }
       const [px,py] = pts[i++], d = Math.hypot(px-a.x, py-a.y);
-      if (Math.abs(px-a.x) > 3) a.scaleX = px < a.x ? -1 : 1;   // face travel direction
+      if (Math.abs(px-a.x) > 3) this.faceX(a, px < a.x ? -1 : 1);   // face travel direction (sprite only)
       if (a.fixedDepth == null) a.setDepth(Math.max(py, a.y) + 1);
       a.moveTween = this.tweens.add({targets:a, x:px, y:py, duration:Math.max(200, d*3.2), ease:"Sine.inOut", onComplete:step});
     };
@@ -907,18 +1250,28 @@ class FloorScene extends Phaser.Scene {
     if (!a || !a.inLounge) return;
     this.clearLounge(a);
     a.loungeBusy = mode;
-    if (mode === "sleep"){ if (a.faceFront) a.faceFront(); this.sleepZzz(a);
+    if (mode === "sleep"){ if (a.faceFront) a.faceFront(); this.zzzLoop(a);
       a.napTween = this.tweens.add({targets:a.bob, y:{from:0,to:-1.5}, duration:2200,
         yoyo:true, repeat:-1, ease:"Sine.inOut"}); }
     else if (mode === "sit"){ if (a.faceFront) a.faceFront(); this.deskIdle(a); }
   }
-  sleepZzz(a){
-    if (a.zzzEv) return;
-    a.zzzEv = this.time.addEvent({delay:1500, loop:true, callback:()=>{
-      if (!a.inLounge || a.loungeBusy !== "sleep") return;
-      const t = this.add.text(a.x+8, a.y-22, "z",
-        {fontFamily:"'PixelFont','Courier New'",fontSize:"10px",color:"#9fb4d8"}).setDepth(2000);
-      this.tweens.add({targets:t, y:t.y-18, x:t.x+8, alpha:{from:0.9,to:0}, duration:1600,
+  // Is this person at rest RIGHT NOW (so a Zzz should float up)? — either napping in
+  // the lounge, or sitting idle at their desk (off-stage, not currently working).
+  restingNow(a){
+    if (!a || !a.seen || (a.moveTween && a.moveTween.isPlaying())) return false;
+    if (a.inLounge) return a.loungeBusy === "sleep";
+    return !a.working;                         // at desk, but their stage isn't active
+  }
+  // One persistent Zzz emitter per person; the gate decides when it actually shows.
+  zzzLoop(a){
+    if (!a || a.zzzEv) return;
+    // Stagger each sleeper's first puff so the Zzz don't all blink in unison.
+    a.zzzEv = this.time.addEvent({delay:1700, loop:true, startAt:Math.floor(Math.random()*1700), callback:()=>{
+      if (a._dead || !this.restingNow(a)) return;
+      const t = this.add.text(a.x+8, a.y-20, "Zzz",
+        {fontFamily:"'PixelFont','Courier New'",fontSize:"11px",fontStyle:"bold",color:"#bcd6ff"})
+        .setOrigin(0,1).setDepth(2000);
+      this.tweens.add({targets:t, y:t.y-16, x:t.x+6, alpha:{from:0.95,to:0}, duration:1600,
         ease:"Sine.out", onComplete:()=>t.destroy()});
     }});
   }
@@ -926,25 +1279,38 @@ class FloorScene extends Phaser.Scene {
     if (!a) return;
     a.loungeBusy = null;
     if (a.napTween){ a.napTween.stop(); a.napTween = null; if (a.bob) a.bob.y = 0; }
-    if (a.zzzEv){ a.zzzEv.remove(); a.zzzEv = null; }
-    this.stopDeskIdle(a);
+    this.stopDeskIdle(a);   // the Zzz emitter (a.zzzEv) is PERSISTENT — gated by restingNow
   }
-  gotoDesk(a){ if (!a) return; a.inLounge = false; this.clearLounge(a);
+  gotoDesk(a){ this.deskRest(a, true); }
+  // Park a person at their desk. ``working`` true => their stage is active (heads-down,
+  // no Zzz); false => idle at the desk (a Zzz floats up). Nobody leaves for the lounge
+  // just because their stage is off — they wait it out at their own desk.
+  deskRest(a, working, busy){
+    if (!a || !a.home) return;
+    a.working = working; a.inLounge = false; this.clearLounge(a);
     if (!a.seen){ a.seen = true; a.setAlpha(1); }
-    if (a.home) this.walkTo(a, a.home.x, a.home.y, ()=>{ if (a.faceBack) a.faceBack(); this.deskIdle(a); }); }
+    this.zzzLoop(a);                       // idempotent; the gate shows it only when idle
+    const settle = ()=>{
+      if (a.faceBack) a.faceBack();
+      if (working && busy) this.startWalk(a);   // engineers actively building = busy bob
+      else { this.stopWalk(a); this.deskIdle(a); }
+    };
+    const here = Math.abs(a.x-a.home.x) < 2 && Math.abs(a.y-a.home.y) < 2;
+    if (here) settle(); else this.walkTo(a, a.home.x, a.home.y, settle);
+  }
   staffRoom(key){
     this.activeRoomKey = key;
-    const hasTeam = !!ROSTER[key];
+    const working = (room)=> !!room && (room===key || (key==="engineering" && ENG_ROOMS.includes(room)));
+    // Everyone goes to their OWN desk — working (heads-down) or idle (a Zzz floats up).
+    // Nobody parks in the lounge just because their stage is off; mill() lets a few
+    // drift there at random between stages.
     for (const [name,a] of this.agents){
-      if (hasTeam && AGENT_ROOM[name] === key) this.gotoDesk(a);
-      else if (a.seen) this.gotoLounge(a);
+      if (a.seen) this.deskRest(a, working(AGENT_ROOM[name]));
     }
-    // IC pool + per-area Tech-Leads belong to engineering: at their desks while
-    // engineering is active, otherwise off to the lounge with everyone else.
+    const engActive = key === "engineering";
     for (const s of [...(this.poolGroup||[]), ...(this.techLeadGroup||[])]){
-      if (!s || !s.bob) continue;
-      if (key === 'engineering' && s.home) this.walkTo(s, s.home.x, s.home.y, ()=>{ if (s.faceBack) s.faceBack(); });
-      else this.gotoLounge(s); }
+      if (s && s.bob) this.deskRest(s, engActive, engActive);
+    }
   }
   toLounge(){   // everyone hangs out (checkpoints / done)
     for (const [,a] of this.agents) if (a.seen) this.gotoLounge(a);
@@ -955,8 +1321,13 @@ class FloorScene extends Phaser.Scene {
     const move = (a)=>{ if (a && a.seen && a.inLounge && a.loungeBusy === "wander"
         && !a.moveTween?.isPlaying() && Math.random()<0.5){
       this.walkTo(a, B.x+26+Math.random()*(B.w-52), B.y+58+Math.random()*(B.h-86)); } };
-    for (const [,a] of this.agents) move(a);
-    for (const s of [...(this.poolGroup||[]), ...(this.techLeadGroup||[])]) move(s);
+    // Idle desk folks only OCCASIONALLY drift off to the lounge (and drift back) —
+    // the floor stays populated; the break room is the exception, not the rule.
+    const drift = (a)=>{ if (!a || !a.seen || (a.moveTween && a.moveTween.isPlaying())) return;
+      if (!a.inLounge && !a.working && Math.random() < 0.04) this.gotoLounge(a);
+      else if (a.inLounge && Math.random() < 0.12) this.deskRest(a, false); };
+    for (const [,a] of this.agents){ move(a); drift(a); }
+    for (const s of [...(this.poolGroup||[]), ...(this.techLeadGroup||[])]){ move(s); drift(s); }
   }
 
   walkCTO(tx, ty){   // routes along the corridors like everyone else
@@ -1014,8 +1385,8 @@ class FloorScene extends Phaser.Scene {
     const R = ROOMS[room] || ROOMS.product;
     const w = Math.max(64, label.length*7+18);
     const c = this.add.container(R.cx, R.floorY+24).setDepth(2000);
-    c.add(this.add.rectangle(0,0,w,18,0x161d31).setStrokeStyle(2,0xffcf52));
-    c.add(this.add.text(0,0,"+ "+label,{fontFamily:"'PixelFont','Courier New'",fontSize:"11px",color:"#ffe9a8"})
+    c.add(this.add.rectangle(0,0,w,18,0xfffdf3).setStrokeStyle(2,PC.ink));
+    c.add(this.add.text(0,0,"+ "+label,{fontFamily:"'PixelFont','Courier New'",fontSize:"11px",color:"#1d7a3f"})
       .setOrigin(0.5));
     this.tweens.add({targets:c, y:c.y-50, alpha:0, duration:2600, ease:"Cubic.out",
       onComplete:()=>c.destroy()});
@@ -1035,7 +1406,7 @@ class FloorScene extends Phaser.Scene {
       const sx = ax+12+i*26, sy = atop-12;
       if (!this.gatePips[n]){
         const c = this.add.container(sx, sy).setDepth(6);
-        c.add(this.add.rectangle(10,4,20,18,0x000000));
+        c.add(this.add.rectangle(10,4,20,18,PC.sceneInk));
         c.add(this.add.text(10,3,"",{fontFamily:"'PixelFont','Courier New'",fontSize:"12px",
           fontStyle:"bold",color:"#fff"}).setOrigin(0.5));
         c.add(this.add.rectangle(17,-3,5,5,0xffcf52).setVisible(false));
@@ -1081,67 +1452,136 @@ class FloorScene extends Phaser.Scene {
   }
 
   renderOrg(ev){
-    // The REAL org chart (Wave E telemetry): present areas -> Tech-Lead domains.
-    if (this.orgPanel){ this.orgPanel.destroy(); }
-    const areaColor = {
-      frontend:0x7fd1ff, backend:0xff9b5e, data:0x7dffb0,
-      infra:0xb59bff, security:0xff6d6d, default:0xcccccc,
-    };
-    const areas = ev.areas || [];
-    const rowH = 16, padding = 8, headerH = 20;
-    // pin the org board to the ENTRANCE wall (the company org chart in the lobby)
-    const B = cellBox(ENTRANCE_CELL[0], ENTRANCE_CELL[1]);
-    const w = Math.min(232, B.w-24), h = headerH + areas.length*rowH + padding;
-    const c = this.add.container(Math.round(B.x+(B.w-w)/2), B.y+22).setDepth(28);
-    c.add(this.add.rectangle(0,0,w,h,0x0c1322,0.92).setOrigin(0,0).setStrokeStyle(2,0xffcf52));
-    c.add(this.add.rectangle(0,0,w,2,0xffcf52,0.5).setOrigin(0,0));   // board top rail
-    c.add(this.add.rectangle(w/2,-3,5,5,0xffcf52).setOrigin(0.5,0));  // pin
-    c.add(this.add.text(8,4,"ORG · PM",{fontFamily:"'PixelFont','Courier New'",fontSize:"12px",
-      fontStyle:"bold",color:"#ffcf52"}).setOrigin(0,0));
-    areas.forEach((a,i)=>{
-      const y = headerH + i*rowH;
-      const col = areaColor[a.area] || areaColor.default;
-      c.add(this.add.rectangle(8,y+2,9,9,col).setOrigin(0,0));
-      const leads = (a.leads||[]).join(", ");
-      c.add(this.add.text(22,y,`${a.area}: ${leads}`,
-        {fontFamily:"'PixelFont','Courier New'",fontSize:"11px",color:"#e8eefb"}).setOrigin(0,0));
-    });
-    c.setAlpha(0);
-    this.tweens.add({targets:c, alpha:1, duration:300});
-    this.orgPanel = c;
+    // The org chart used to hang on the CTO office back wall, but it cluttered the
+    // room — the live org is reflected by who actually staffs each discipline room,
+    // so no board is drawn here. (Kept as a no-op; setOrg still drives the rooms.)
+    if (this.orgPanel){ this.orgPanel.destroy(); this.orgPanel = null; }
   }
 
-  // Fan-out (Wave D/E): the senior engineer re-instantiates as one "Tech-Lead ·
-  // {area}" per org area. Draw one sprite per area in the engineering room, tinted
-  // by area, so the floor headcount reflects the REAL per-area leads (not just one).
-  renderTechLeads(areas){
-    if (this.techLeadGroup) this.techLeadGroup.forEach(s=>s.destroy());
-    if (this.tlLabel){ this.tlLabel.destroy(); this.tlLabel = null; }
-    this.techLeadGroup = [];
-    const list = (areas||[]).filter(a=>a && a.area);
-    if (!list.length) return;
-    const areaColor = {frontend:0x7fd1ff, backend:0xff9b5e, data:0x7dffb0,
-      infra:0xb59bff, security:0xff6d6d};
-    const R = ROOMS.engineering, n = Math.min(list.length, 5);
-    for (let i=0;i<n;i++){
-      const a = list[i], accent = areaColor[a.area] || 0xffd25a;
-      const x = Math.round(R.x+34 + (R.w-68)*(n>1 ? i/(n-1) : 0.5)), y = R.y1 - 30;
-      const k = kitFor("Tech-Lead "+a.area, hashStr((this.proj.id||'f')+"TL"+a.area));
-      k.accent = accent;
-      const ws = this.makeWorkstation(x, y+16, accent);
-      const s = this.makePerson(x, y, k);
-      s.setScale(1.3).setDepth(y);
-      s.home = {x,y}; s.loungeSlot = 24 + i; s.seen = true; s.inLounge = false;
-      s.add(this.add.text(0,-19, a.area.slice(0,2).toUpperCase(),
-        {fontFamily:"'PixelFont','Courier New'",fontSize:"8px",fontStyle:"bold",
-         color:"#"+accent.toString(16).padStart(6,"0")}).setOrigin(0.5));
-      this.startWalk(s);
-      this.techLeadGroup.push(s, ws);
-    }
-    this.tlLabel = this.add.text(R.cx, R.y1-48, "Tech-Leads ×"+n,
-      {fontFamily:"'PixelFont','Courier New'",fontSize:"9px",fontStyle:"bold",color:"#9bd0ff"})
-      .setOrigin(0.5,0).setDepth(28);
+  // Store the REAL org (areas + per-domain units), then populate the per-discipline
+  // engineering ROOMS: all of an area's engineers — its Tech-Lead + expert ICs — live
+  // in that area's room (frontend/backend/data), each on a colour carpet.
+  setOrg(areas, domains){
+    this.orgAreas = (areas||[]).filter(a=>a && a.area);
+    this.orgDomains = domains||[];
+    this.layoutEngineering();
   }
+
+  // Per-area engineer counts: the IC pool distributed across the present areas ∝
+  // each area's unit weight (largest-remainder, ≥1 where the pool allows). null when
+  // there's no org telemetry yet.
+  engineeringLanes(){
+    const list = (this.orgAreas||[]).map(a=>a&&a.area).filter(Boolean);
+    if(!list.length) return null;
+    // Real per-area workload from the ownership map (units owned) = the IC demand.
+    const units={}; list.forEach(a=>units[a]=0);
+    for(const d of (this.orgDomains||[]))
+      if(d && (d.area in units)) units[d.area] += (d.units&&d.units.length)?d.units.length:0;
+    // Each role gets ONE required worker (its lead persona) — the always-on baseline.
+    // On TOP of that sits the EXTRA pool (poolN): the additional workers we can afford,
+    // which management hands out across roles by demand, deploying only as many as the
+    // work needs. So total crew = (1 per role) + min(demand, extra budget): the baseline
+    // grows on its own as the architect adds teams, and the extra number is what you set.
+    const icSlots=Math.max(0, this.poolN||0);              // extra worker budget (on top of 1/role)
+    const dem=list.map(a=>Math.max(0, units[a]));
+    const totalDem=dem.reduce((s,n)=>s+n,0);
+    const ics={}; list.forEach(a=>ics[a]=0);
+    if(icSlots>0 && totalDem>0){
+      if(totalDem<=icSlots){
+        list.forEach((a,i)=>{ ics[a]=dem[i]; });           // room to spare: one IC per owned unit
+      } else {                                              // oversubscribed: split slots by demand
+        const rem=[]; let used=0;
+        list.forEach((a,i)=>{ const raw=icSlots*dem[i]/totalDem; ics[a]=Math.floor(raw); used+=ics[a]; rem.push([a,raw-ics[a]]); });
+        rem.sort((p,q)=>q[1]-p[1]);
+        for(let k=0; used<icSlots && rem.length; k++,used++) ics[rem[k%rem.length][0]]++;
+      }
+    }
+    return list.map(a=>({area:a, ics:ics[a]||0, color:AREA_COLOR[a]||0xffc08a}));
+  }
+
+  // Seat the engineers in their discipline ROOMS from current org + pool state.
+  layoutEngineering(){
+    const kill=(s)=>{ if(!s) return; s._dead=true; if(s.zzzEv){ s.zzzEv.remove(); s.zzzEv=null; }
+      if(s.chair){ s.chair.destroy(); s.chair=null; } s.destroy(); };
+    if(this.techLeadGroup) this.techLeadGroup.forEach(kill);
+    if(this.poolGroup) this.poolGroup.forEach(kill);
+    if(this.poolLabel){ this.poolLabel.destroy(); this.poolLabel=null; }
+    if(this.engLabels) this.engLabels.forEach(o=>o.destroy());
+    if(this.laneDecor) this.laneDecor.forEach(o=>o.destroy());
+    this.techLeadGroup=[]; this.poolGroup=[]; this.laneDecor=[]; this.engLabels=[];
+
+    const dist=this.engineeringLanes();
+    if(!dist){ this._flatPool(); return; }
+    // Bucket each area's people (1 Tech-Lead + its ICs) into its discipline room.
+    const perRoom={};
+    for(const d of dist){
+      const rk=ENG_AREA_ROOM[d.area]||"backend";
+      (perRoom[rk]=perRoom[rk]||[]).push({area:d.area, color:d.color, lead:true});
+      for(let i=0;i<d.ics;i++) perRoom[rk].push({area:d.area, color:d.color, lead:false});
+    }
+    let slot=12;
+    for(const rk in perRoom){
+      const R=ROOMS[rk]; if(!R) continue;
+      const people=perRoom[rk];
+      const lead=people.find(p=>p.lead), ics=people.filter(p=>!p.lead);
+      // create one seated worker (+desk) at (x,y); leads get the star + "<AREA> LEAD" badge.
+      const place=(p, x, y, faceUp)=>{
+        x=Math.round(x); y=Math.round(y);
+        const col6=p.color.toString(16).padStart(6,"0");
+        const tag=AREA_TAG[p.area]||p.area.slice(0,2).toUpperCase();
+        const k = p.lead ? kitFor("Tech-Lead "+p.area, hashStr((this.proj.id||'f')+"TL"+p.area)) : poolKit(slot);
+        k.accent=p.color;
+        const ws=this.makeWorkstation(x, y+16, p.color);
+        const s=this.makePerson(x, y, k); s.setScale(p.lead?1.45:1.3).setDepth(y).setAlpha(p.lead?1:0.94);
+        if (p.lead){
+          s.add(this.add.text(0,-39,"★",{fontFamily:"'PixelFont','Courier New'",fontSize:"10px",
+            color:"#ffd95e"}).setOrigin(0.5).setResolution(3));
+          this.pinBadge(s, tag+" LEAD", p.color, true);        // filled accent badge
+          if (faceUp && s.faceBack) s.faceBack();              // overseeing — faces up into the room
+        } else {
+          this.pinBadge(s, tag, p.color, false);               // every IC labelled too
+        }
+        s.home={x,y}; s.loungeSlot=slot++; s.seen=true; s.inLounge=false;
+        s.working = (this.activeRoomKey === "engineering");
+        this.zzzLoop(s);
+        if (s.working) this.startWalk(s); else this.deskIdle(s);
+        (p.lead?this.techLeadGroup:this.poolGroup).push(s, ws);
+      };
+      // ONE consistent desk grid for every room: centred columns, first row well BELOW
+      // the room label so it's never covered. (PX=column pitch, SY=first-row Y, RP=row pitch.)
+      const PX=84, SY=R.y+94, RP=50;
+      if (!ics.length && lead){
+        place(lead, R.cx, Math.round(R.y + R.h*0.52), true);   // ONLY the lead → centre the desk
+      } else {
+        const c2=Math.min(3, Math.max(1, ics.length));
+        ics.forEach((p,i)=>{ const c=i%c2, r=Math.floor(i/c2), bw=(c2-1)*PX;
+          place(p, R.cx - bw/2 + c*PX, SY + r*RP, false); });   // centred IC grid (upper room)
+        if (lead) place(lead, R.x1 - 50, R.y1 - 36, true);     // LEAD oversees from the bottom-right
+      }
+      this.engLabels.push(this.bm(R.x1-8, R.y+8, "×"+people.length, 11, 0xffc08a, 1, 0).setDepth(28));
+    }
+  }
+
+  // No org telemetry yet — a flat pool in the BACKEND room (default engineering room).
+  _flatPool(){
+    const n=this.poolN; if(!n || n<=1) return;
+    const R=ROOMS.backend; if(!R) return;
+    const count=Math.min(n,8), cols=Math.min(count,3);
+    for(let i=0;i<count;i++){
+      const col=i%cols, row=Math.floor(i/cols);
+      const x=Math.round(R.x + R.w*((col+1)/(cols+1)));
+      const y=R.floorY+34+row*44;
+      const k=poolKit(i);
+      const ws=this.makeWorkstation(x, y+16, k.accent);
+      const s=this.makePerson(x, y, k); s.setScale(1.4).setDepth(y).setAlpha(0.96);
+      s.home={x,y}; s.loungeSlot=12+i; s.seen=true; s.inLounge=false;
+      s.working = (this.activeRoomKey === "engineering");
+      this.zzzLoop(s);
+      if (s.working) this.startWalk(s); else this.deskIdle(s);
+      this.poolGroup.push(s, ws);
+    }
+  }
+
 }
 
 // =========================================================================== //
@@ -1235,6 +1675,7 @@ function switchToFloor(floor){
   const F = FLOORS.get(floor);
   rebuildLog(F);
   renderGatesMini(F.gates);
+  if (F.platprog) renderPlatProg(F.platprog);   // platform floors show service chips
   updateHud(F);
   if (F.awaiting) showCheckpoint(F); else hideCheckpoint();
   renderElevator();
@@ -1252,6 +1693,13 @@ function routeEvent(floor, ev){
       if (isActive) updateHud(F);
       break;
     case "narrate": logTo(F, logClass(ev.text), ev.text); break;
+    case "platprog":               // platform: per-service progress for the HUD
+      F.platprog = ev;
+      if (isActive) renderPlatProg(ev);
+      break;
+    case "rebuild":                // a service is deepening — pulse its room
+      if (S && ev.room) S.pulseRoom(ev.room);
+      break;
     case "stage":
       if (S) S.setActiveRoom(ev.room);
       logTo(F, "gold", "── "+ev.label+" ──"); break;
@@ -1284,8 +1732,8 @@ function routeEvent(floor, ev){
       break;
     case "org":
       F.org = ev;
-      if (S){ S.renderOrg(ev); S.renderTechLeads(ev.areas);
-        if (S.activeRoomKey) S.staffRoom(S.activeRoomKey); }   // place new TLs by active stage
+      if (S){ S.renderOrg(ev); S.setOrg(ev.areas, ev.domains);
+        if (S.activeRoomKey) S.staffRoom(S.activeRoomKey); }   // lane-lay engineering by area
       logTo(F, "gold", "ORG · "+(ev.areas||[]).map(a=>`${a.area}(${(a.leads||[]).length})`).join("  "));
       break;
     case "files":
@@ -1320,7 +1768,9 @@ function routeEvent(floor, ev){
       logTo(F, "bad", "HELD: "+ev.reason); break;
     case "done":
       F.status = "done"; F.passed = !!ev.passed; renderElevator();
-      if (S){ S.toLounge(); if (!ev.passed){ S.gloom(); S.banner("HELD AT THE GATE", 0xff5d6c); } }
+      // Build's over: everyone REST AT THEIR DESKS (idle => Zzz), not banished to the
+      // lounge. mill() still drifts a few to the break room now and then.
+      if (S){ S.staffRoom(null); if (!ev.passed){ S.gloom(); S.banner("HELD AT THE GATE", 0xff5d6c); } }
       logTo(F, ev.passed?"good":"bad",
         ev.passed?"Build complete — shipped.":"Build halted — nothing shipped."); break;
   }
@@ -1361,6 +1811,24 @@ function renderGatesMini(gates){
   for(const n of GATE_ORDER){ const g=gates[n]; if(!g) continue;
     const s=document.createElement("span"); s.className="g "+(g.status); s.textContent=n;
     el.appendChild(s);}
+}
+// Platform builds: one chip per service in the HUD, coloured by lifecycle state,
+// with a "done/total" tally. Overrides the (empty) gate chips for a platform floor.
+function renderPlatProg(pp){
+  const el=document.getElementById("gates-mini"); if(!el) return;
+  if(!pp || !pp.services){ return; }
+  el.innerHTML="";
+  const names=Object.keys(pp.services); let done=0;
+  for(const name of names){
+    const st=pp.services[name];
+    if(st==="done"||st==="approved") done++;
+    const s=document.createElement("span");
+    s.className="g plat "+st; s.textContent=name; s.title=name+" — "+st;
+    el.appendChild(s);
+  }
+  const tot=document.createElement("span");
+  tot.className="g plat-count"; tot.textContent=done+"/"+names.length+" ✓";
+  el.appendChild(tot);
 }
 function updateHud(F){
   document.getElementById("floor-tag").textContent =
@@ -1848,15 +2316,27 @@ document.getElementById("start-btn").onclick=async ()=>{
   const backend=document.getElementById("backend-select").value;
   const packs=document.getElementById("packs-input").value;
   const sup=document.getElementById("supervised").checked;
-  // Parallelism is system-decided — the server sizes the IC pool to the lead's
-  // decomposition; the client sends no worker count.
   const extra={};
   extra.adapter=document.getElementById("adapter-select").value;
+  // Extra workers: the pool ON TOP of one-per-team. Blank ⇒ the server's automatic
+  // cap. Each role always gets its baseline worker; these scale the busy teams.
+  const xw=parseInt((document.getElementById("extra-workers")||{}).value,10);
+  if(Number.isFinite(xw) && xw>=0) extra.max_slots=xw;
   const fix=parseInt(document.getElementById("fix-input").value,10);
   if(Number.isFinite(fix) && fix>=0) extra.max_fix_attempts=fix;
   const cap=parseFloat(document.getElementById("cap-input").value);
   if(Number.isFinite(cap) && cap>0) extra.cost_cap_usd=cap;
   if(startFromSel.value) extra.parent_id=startFromSel.value;   // iterate on a finished build
+  // platform vs single is INFERRED server-side from the request (multi-service => platform).
+  // These advanced knobs only take effect when the request builds as a platform.
+  const mp=parseInt((document.getElementById("max-passes")||{}).value,10);
+  if(Number.isFinite(mp) && mp>=1) extra.max_passes=mp;
+  const criticEl=document.getElementById("critic-on");
+  if(criticEl && !criticEl.checked) extra.no_critic=true;
+  const mpar=parseInt((document.getElementById("max-parallel")||{}).value,10);
+  if(Number.isFinite(mpar) && mpar>=1) extra.max_parallel=mpar;
+  const mss=parseInt((document.getElementById("max-slots-svc")||{}).value,10);
+  if(Number.isFinite(mss) && mss>=1) extra.max_slots_per_service=mss;
   const intake=intakeMode();
   if(startFromSel.value && !req.trim()){ alert("Describe what to change or add."); return; }
   if(intake==="spec"){

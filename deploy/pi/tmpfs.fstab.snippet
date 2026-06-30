@@ -1,0 +1,11 @@
+# Foundry build scratch in RAM — protects the SD card from gate/test churn
+# (node_modules, build output) and is much faster than the card.
+#
+# Append this line to /etc/fstab, then:  sudo mkdir -p /var/foundry-tmp && sudo mount /var/foundry-tmp
+# Set TMPDIR=/var/foundry-tmp in foundry.env so the sandbox writes here.
+#
+# Size guide: ~3G on an 8 GB Pi 5 leaves headroom for the OS + orchestrator +
+# running test processes. A capped tmpfs means a runaway build fills the tmpfs
+# (and that build fails) instead of OOM-ing the whole machine.
+
+tmpfs  /var/foundry-tmp  tmpfs  size=3G,mode=1777,noatime,nosuid,nodev  0  0

@@ -14,15 +14,15 @@ OpenAI APIs — and it writes real code. Examples below use `claude-cli`.
 
 ## Quick start — run the Workshop locally
 
-Open **Terminal**, go to this folder, and run (Mac shown; Pi uses
-`foundry.pi.env.example`):
+Open **Terminal**, go to this folder, and run (Mac shown; Linux uses
+`foundry.linux.env.example`):
 
 ```bash
-cd ~/Coders                                            # wherever you cloned it
-cp deploy/foundry.mac.env.example deploy/foundry.env   # 1. Mac preset — Claude Code, localhost
-make token                                             # 2. mint a Claude Code token (Max plan)
-open -e deploy/foundry.env                             #    …paste it as CLAUDE_CODE_OAUTH_TOKEN
-./deploy/run.sh                                        # 3. start it → http://localhost:8765
+cd ~/Coders                                     # wherever you cloned it
+cp foundry.mac.env.example foundry.env          # 1. Mac preset — Claude Code, localhost
+make token                                      # 2. mint a Claude Code token (Max plan)
+open -e foundry.env                             #    …paste it as CLAUDE_CODE_OAUTH_TOKEN
+./run.sh                                        # 3. start it → http://localhost:8765
 ```
 
 The Mac preset runs on **Claude Code** (`claude -p`, your Max plan — no API billing).
@@ -30,8 +30,7 @@ Prefer the metered API instead? Set `FOUNDRY_MODEL_BACKEND=anthropic` and an
 `ANTHROPIC_API_KEY` in the env file (see §4).
 
 Leave the Terminal window open while it runs. To keep it running after closing the
-window, or to set it up as an auto-restarting service, see
-[§10](#10-run-it-as-a-long-lived-server) and [`deploy/README.md`](deploy/README.md).
+window, see [§10](#10-run-it-as-a-long-lived-server).
 
 ---
 
@@ -409,42 +408,39 @@ export FOUNDRY_GATE_SANDBOX=inprocess
 The Workshop is built to run unattended for long, complex builds — including
 **multi-day runs** — and to **survive restarts**: with a durable state dir it
 resumes an in-flight build from its last checkpoint, and the SSE event log replays
-in full on reconnect. The [`deploy/`](deploy/) kit ships one shared env file and two
-ways to run it — **on demand** (launch by hand) or as a **service** (auto-restart on
-crash/reboot) on a **Raspberry Pi** (systemd) or **Apple-silicon Mac** (launchd).
+in full on reconnect. Launch it with `run.sh` and a host preset:
 
 ```bash
-# 1. Copy the preset for your host (values pre-filled); paste your API key
-cp deploy/foundry.mac.env.example deploy/foundry.env   # Mac   (Pi: foundry.pi.env.example)
-
-# 2a. On demand — no service. Foreground (Ctrl-C to stop); use tmux/nohup to detach.
-./deploy/run.sh
-
-# 2b. …or as a managed service (see deploy/README.md for the walkthrough)
-#     Pi  → deploy/pi/foundry-workshop.service     (systemd, Restart=always)
-#     Mac → deploy/mac/com.foundry.workshop.plist  (launchd, KeepAlive + caffeinate)
+cp foundry.mac.env.example foundry.env    # Mac   (Linux/Pi: foundry.linux.env.example)
+$EDITOR foundry.env                       # set your token/key + any tuning
+./run.sh                                  # foreground; Ctrl-C to stop
 ```
 
-> **On demand vs a service:** a service only adds **auto-restart on crash/reboot**.
-> On demand keeps everything else — and since the server **resumes from its durable
-> checkpoint on the next start**, you just re-run `./deploy/run.sh` after a crash and
-> it picks up where it left off. Services suit truly unattended runs; on demand suits
-> "start it when I want, stop it when I'm done."
+Keep it running after you close the terminal with tmux or nohup:
 
-For a long run, use a **hosted** backend with a **cost cap**, set
-`WORKSHOP_MAX_CONCURRENT_BUILDS` to your host's size (Pi `1`, M-series Mac `3–4`),
-and — if your plan needs it — the provider throttle (`FOUNDRY_MAX_RPM`). The server
-**bounds its own memory** over time (finished builds' in-memory logs are trimmed; the
-proxy manifest is capped) and the **SDK client auto-refreshes** so a rotated/expired
-credential doesn't end the run.
+```bash
+tmux new -s foundry './run.sh'            # reattach later: tmux attach -t foundry
+nohup ./run.sh > ~/foundry.log 2>&1 &     # detached; kill the PID to stop
+```
+
+`run.sh` has no supervisor — if it crashes or the host reboots, just re-run it and
+the server **resumes from its durable checkpoint** (so you lose no build). For
+truly hands-off auto-restart, wrap it in your own systemd unit / launchd agent.
+
+For a long run, set a **cost cap**, size `WORKSHOP_MAX_CONCURRENT_BUILDS` to your
+host (Pi `1`, M-series Mac `3–4`), and — if your plan needs it — the provider
+throttle (`FOUNDRY_MAX_RPM`). The server **bounds its own memory** over time
+(finished builds' in-memory logs are trimmed; the proxy manifest is capped) and the
+**SDK client auto-refreshes** so a rotated/expired credential doesn't end the run.
 
 > **macOS:** the gate sandbox is Linux-only (`unshare`), so on a Mac the test gate
 > **fails closed** unless you set `FOUNDRY_GATE_SANDBOX=inprocess` — which runs
 > generated tests `sys.path`-fenced but **without** the network/namespace isolation
 > a Linux host gets. Prefer the Pi (or any Linux host) when running untrusted builds.
 
-See **[deploy/README.md](deploy/README.md)** for storage durability (SD vs SSD),
-tmpfs/zram tuning, backups, and the full per-host checklist.
+The two host presets — `foundry.mac.env.example` and `foundry.linux.env.example` —
+are annotated with per-host tuning (paths, sizing, the macOS sandbox flag, and a
+Pi's tmpfs/backup notes).
 
 ---
 
@@ -482,7 +478,7 @@ make clean           # remove caches + ./.run output
 | `WORKSHOP_STATE_DIR` | UI durable state dir (resume) | `WORKSHOP_OUTPUT_DIR/state` |
 | `FOUNDRY_WORKSHOP_TOKEN` | Shared token for UI mutations | off (localhost-only) |
 
-**Long-lived server** (see [deploy/](deploy/) — for a Pi/Mac running for days):
+**Long-lived server** (for a Pi/Mac running for days; see the host env presets):
 
 | Variable | Purpose | Default |
 |---|---|---|

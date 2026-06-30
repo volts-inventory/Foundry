@@ -22,22 +22,18 @@ cd ~/Coders                              # wherever you cloned it
 python -m venv .venv && source .venv/bin/activate    # 1. install the project (once)
 pip install -e .
 cp foundry.mac.env.example .env          # 2. Mac preset — Claude Code, localhost
-python -m webapp.server                  # 3. start it → http://localhost:8765
+
+# 3. Only if you're NOT already logged into Claude Code, authenticate once:
+# claude setup-token
+# echo "CLAUDE_CODE_OAUTH_TOKEN=<token>" >> .env    # paste in place of <token>
+
+python -m webapp.server                  # 4. start it → http://localhost:8765
 ```
 
 The server loads `.env` on startup, so that's the whole run command — no wrapper. The
-Mac preset runs on **Claude Code** (`claude -p`, your Max plan — no API billing).
-
-**Already signed into Claude Code?** You're done — `claude -p` uses that login.
-Otherwise authenticate once (or run `claude login`):
-
-```bash
-claude setup-token                                # prints a token
-echo "CLAUDE_CODE_OAUTH_TOKEN=<token>" >> .env    # append it (paste in place of <token>)
-```
-
-Prefer the metered API instead? Set `FOUNDRY_MODEL_BACKEND=anthropic` and an
-`ANTHROPIC_API_KEY` in `.env` (see §4).
+Mac preset runs on **Claude Code** (`claude -p`, your Max plan — no API billing) and
+uses your existing Claude Code login. Prefer the metered API instead? Set
+`FOUNDRY_MODEL_BACKEND=anthropic` and an `ANTHROPIC_API_KEY` in `.env` (see §4).
 
 Leave the Terminal window open while it runs. To keep it running after closing the
 window, see [§10](#10-run-it-as-a-long-lived-server).

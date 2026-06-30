@@ -42,6 +42,18 @@
   <div id="new-modal" class="overlay hidden">
     <div class="dialog">
       <h2>▶ START A BUILD</h2>
+      <div class="row">
+        <label>Backend</label>
+        <select id="backend-select">
+          <option value="mock">mock — deterministic, offline (no key)</option>
+          <option value="anthropic">anthropic — Claude API (ANTHROPIC_API_KEY)</option>
+          <option value="openai">openai — OpenAI API (OPENAI_API_KEY)</option>
+          <option value="claude-cli">claude-cli — claude -p (Max subscription)</option>
+          <option value="codex">codex — codex CLI (OPENAI_API_KEY)</option>
+          <option value="ollama-gemma">ollama-gemma — local Ollama endpoint</option>
+        </select>
+      </div>
+      <p class="hint" id="model-note"></p>
       <label>Start from <span class="hint">— a fresh build, or iterate on a finished one</span></label>
       <select id="startfrom-select"><option value="">✦ Fresh build</option></select>
       <label id="req-label">What should the factory build? <span class="hint">— a sentence, or a full brief</span></label>
@@ -83,18 +95,6 @@
           <option value="autonomous">autonomous — build · admit · deploy</option>
         </select>
       </div>
-      <div class="row">
-        <label>Backend</label>
-        <select id="backend-select">
-          <option value="mock">mock — deterministic, offline (no key)</option>
-          <option value="anthropic">anthropic — Claude API (ANTHROPIC_API_KEY)</option>
-          <option value="openai">openai — OpenAI API (OPENAI_API_KEY)</option>
-          <option value="claude-cli">claude-cli — claude -p (Max subscription)</option>
-          <option value="codex">codex — codex CLI (OPENAI_API_KEY)</option>
-          <option value="ollama-gemma">ollama-gemma — local Ollama endpoint</option>
-        </select>
-      </div>
-      <p class="hint" id="model-note"></p>
       <div class="row">
         <label>Coding substrate</label>
         <select id="adapter-select">

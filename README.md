@@ -7,30 +7,27 @@ writes a GitHub-ready repo (code + docs). Use it two ways:
 - **CLI** — `python -m foundry.cli "<request>"` → a repo on disk.
 - **Workshop UI** — a localhost web app that drives the same factory as a game.
 
-Defaults are keyless and deterministic (`mock` backend), so everything below runs
-with no API key until you opt into a real model.
+Pick a model backend — Claude Code (`claude -p`, a Max plan) or the Anthropic /
+OpenAI APIs — and it writes real code. Examples below use `claude-cli`.
 
 ---
 
 ## Quick start — run the Workshop locally
 
-Open **Terminal**, go to this folder, and run:
+Open **Terminal**, go to this folder, and run (Mac shown; Pi uses
+`foundry.pi.env.example`):
 
 ```bash
-cd ~/Coders                                   # wherever you cloned it
-
-# Try it right now — keyless, no setup. Opens on http://localhost:8765
-make serve                                    # (== uv run python -m webapp.server)
+cd ~/Coders                                            # wherever you cloned it
+cp deploy/foundry.mac.env.example deploy/foundry.env   # 1. Mac preset — Claude Code, localhost
+make token                                             # 2. mint a Claude Code token (Max plan)
+open -e deploy/foundry.env                             #    …paste it as CLAUDE_CODE_OAUTH_TOKEN
+./deploy/run.sh                                        # 3. start it → http://localhost:8765
 ```
 
-To run it for real / long-term (own machine, your model key), use the launcher —
-it loads your settings, keeps a Mac awake, and runs until you press Ctrl-C:
-
-```bash
-cp deploy/foundry.mac.env.example deploy/foundry.env   # 1. Mac preset (Pi: foundry.pi.env.example)
-open -e deploy/foundry.env                              # 2. paste your ANTHROPIC_API_KEY
-./deploy/run.sh                                         # 3. start it → http://localhost:8765
-```
+The Mac preset runs on **Claude Code** (`claude -p`, your Max plan — no API billing).
+Prefer the metered API instead? Set `FOUNDRY_MODEL_BACKEND=anthropic` and an
+`ANTHROPIC_API_KEY` in the env file (see §4).
 
 Leave the Terminal window open while it runs. To keep it running after closing the
 window, or to set it up as an auto-restarting service, see
@@ -40,8 +37,8 @@ window, or to set it up as an auto-restarting service, see
 
 ## CLI at a glance
 
-Every flag, with what it does, inline. Defaults are shown in each comment — the
-bare command (no flags) is a fully working, keyless, deterministic run.
+Every flag, with what it does, inline. Defaults are shown in each comment. Set a
+`--backend` (the model egress) so it writes real code.
 
 ```bash
 python -m foundry.cli [OPTIONS] "<one-line request>"   # build a GitHub-ready repo from one sentence
@@ -50,9 +47,9 @@ python -m foundry.cli [OPTIONS] "<one-line request>"   # build a GitHub-ready re
   --mode <assistant|gated|autonomous>  # trust posture: advisory PR · full gates+sign-off · hands-off deploy   (default: assistant)
 
 # ── Model egress & code generation (orthogonal seams) ─────────────────────────
-  --backend <mock|anthropic|openai|claude-cli|codex|ollama-gemma>  # WHERE model calls go (the "brain")      (default: mock — keyless/deterministic)
+  --backend <claude-cli|anthropic|openai|codex|ollama-gemma>  # WHERE model calls go (the "brain")   (set one; e.g. claude-cli)
   --adapter <stub|raw-react>                                # WHAT writes the code (the "hands"); usually OMIT — it's DERIVED from --backend
-                                                            #   omitted ⇒ mock→stub (no-op) · any real backend→raw-react (real code)
+                                                            #   omitted ⇒ any backend→raw-react (real code); stub is no-op
                                                             #   raw-react writes code via `claude -p` (claude-cli) or the Anthropic API (anthropic)
 
 # ── Inputs ────────────────────────────────────────────────────────────────────
@@ -118,12 +115,12 @@ python -m foundry.cli evolve <prior-repo> "<change>" [OPTIONS]
 Two seams are deliberately independent, and worth internalizing before you start:
 
 - **`--backend`** — the model egress ("the brain"). It decides *where model calls
-  go*. `mock` is a deterministic, keyless transport; the others route real,
-  metered calls through the single-egress proxy.
+  go* — Claude Code (`claude -p`) or the Anthropic/OpenAI APIs — all routed through
+  the single-egress proxy.
 - **`--adapter`** — the coding substrate ("the hands"). It decides *what actually
   writes the code*. You rarely set this: when omitted it is **derived from the
-  backend** — `mock → stub` (no-op), any real backend → `raw-react` (real code) —
-  so choosing a real brain writes real code on its own. `raw-react` is the universal
+  backend** — any backend → `raw-react` (real code) — so choosing a brain writes real
+  code on its own. (`stub` is a no-op substrate.) `raw-react` is the universal
   completion substrate: it writes code via `claude -p` under `claude-cli`, and via
   the Anthropic API under `anthropic`.
 
@@ -158,8 +155,8 @@ make check
 Each command writes a complete repo to `--out` and prints a pass/fail report.
 
 ```bash
-# 1. Simplest possible run (mock backend, assistant mode) → repo in ./out
-uv run python -m foundry.cli "build a tiny URL-shortener service" --out ./out
+# 1. Simplest possible run (assistant mode) → repo in ./out
+uv run python -m foundry.cli "build a tiny URL-shortener service" --backend claude-cli --out ./out
 
 # 2. Same thing via make (REQUEST/OUT are overridable vars)
 make run REQUEST="build a CSV-to-JSON converter CLI" OUT=./out
@@ -194,7 +191,7 @@ uv run python -m foundry.cli "build a status-page service" --mode autonomous --o
 
 ## 4. Setting the backend (real models)
 
-A backend is the model egress. Default `mock`. Set it three ways — last one wins:
+A backend is the model egress. Set it three ways — last one wins:
 
 ```bash
 # 1. Per command — the --backend flag (overrides everything)
@@ -214,10 +211,9 @@ make run REQUEST="build a todo API"       # uses anthropic
 
 | Backend | What it is | Required setting(s) | How to get it |
 |---|---|---|---|
-| `mock` | Keyless, deterministic stub (default) | none | — |
+| `claude-cli` | `claude -p` on a Max plan (no API billing) | `CLAUDE_CODE_OAUTH_TOKEN` | `make token` |
 | `anthropic` | Claude API (SDK, direct) | `ANTHROPIC_API_KEY` | console.anthropic.com |
 | `openai` | OpenAI API (SDK `chat.completions`, direct) | `OPENAI_API_KEY` | platform.openai.com |
-| `claude-cli` | `claude -p` on a Max plan | `CLAUDE_CODE_OAUTH_TOKEN` | `make token` |
 | `codex` | codex CLI (`codex exec`) | `OPENAI_API_KEY` | platform.openai.com |
 | `ollama-gemma` | Local Ollama endpoint | `FOUNDRY_OLLAMA_URL` | run Ollama locally |
 
@@ -242,8 +238,10 @@ rejects the call):
 ### Per-backend setup (credentials)
 
 ```bash
-# 1. mock — keyless, deterministic (default; demos + CI). No setup.
-uv run python -m foundry.cli "build a todo API" --backend mock --out ./out
+# 1. claude-cli — `claude -p` on a Max subscription. Mint a token, add to .env.
+make token                                # logs in; prints CLAUDE_CODE_OAUTH_TOKEN
+echo "CLAUDE_CODE_OAUTH_TOKEN=<token>" >> .env
+uv run python -m foundry.cli "build a todo API" --backend claude-cli --out ./out
 
 # 2. anthropic — Claude API (direct SDK). Set ANTHROPIC_API_KEY.
 export ANTHROPIC_API_KEY=sk-ant-...
@@ -253,23 +251,17 @@ uv run python -m foundry.cli "build a todo API" --backend anthropic --out ./out
 export OPENAI_API_KEY=sk-...
 uv run python -m foundry.cli "build a todo API" --backend openai --out ./out
 
-# 4. claude-cli — `claude -p` on a Max subscription. Mint a token, add to .env.
-make token                                # logs in; prints CLAUDE_CODE_OAUTH_TOKEN
-echo "CLAUDE_CODE_OAUTH_TOKEN=<token>" >> .env
-uv run python -m foundry.cli "build a todo API" --backend claude-cli --out ./out
-
-# 5. codex — codex CLI (codex exec). Set OPENAI_API_KEY.
+# 4. codex — codex CLI (codex exec). Set OPENAI_API_KEY.
 export OPENAI_API_KEY=sk-...
 uv run python -m foundry.cli "build a todo API" --backend codex --out ./out
 
-# 6. ollama-gemma — local Ollama. Point at the endpoint.
+# 5. ollama-gemma — local Ollama. Point at the endpoint.
 export FOUNDRY_OLLAMA_URL=http://localhost:11434
 uv run python -m foundry.cli "build a todo API" --backend ollama-gemma --out ./out
 ```
 
-`mock` writes no real code (it derives the `stub` no-op adapter). Any **real**
-backend writes real code automatically — the adapter is derived as `raw-react`, so
-you don't need a second flag (override only when you want something else; see §5).
+Any backend writes real code automatically — the adapter is derived as `raw-react`,
+so you don't need a second flag (override only when you want something else; see §5).
 In the Workshop UI, the backend is a dropdown; `FOUNDRY_MODEL_BACKEND` only sets
 which option is preselected (§9).
 
@@ -278,8 +270,8 @@ which option is preselected (§9).
 ## 5. Choosing a coding substrate (`--adapter`)
 
 The adapter is what actually writes the code. **You normally omit it** — it's
-derived from `--backend` (`mock → stub`, any real backend → `raw-react`), so a real
-backend already writes real code. Set `--adapter` only to override that default.
+derived from `--backend` (any backend → `raw-react`), so picking a backend already
+writes real code. Set `--adapter` only to override that default.
 
 ```bash
 # 1. Derived (recommended) — omit --adapter; a real backend ⇒ raw-react writes code
@@ -300,8 +292,8 @@ uv run python -m foundry.cli "build a dice roller" \
 
 | Adapter | Kind | Writes code? | Notes |
 |---|---|---|---|
-| `stub` | no-op | no | derived default for `mock`; structure only |
-| `raw-react` | raw completion, **any** backend | yes | derived default for every real backend; writes code via `claude -p` (`claude-cli`) or the Anthropic API (`anthropic`) |
+| `stub` | no-op | no | structure only (smoke/CI; exercises the proxy without generating code) |
+| `raw-react` | raw completion, **any** backend | yes | the derived default; writes code via `claude -p` (`claude-cli`) or the Anthropic API (`anthropic`) |
 
 ---
 
@@ -432,7 +424,7 @@ cp deploy/foundry.mac.env.example deploy/foundry.env   # Mac   (Pi: foundry.pi.e
 #     Pi  → deploy/pi/foundry-workshop.service     (systemd, Restart=always)
 #     Mac → deploy/mac/com.foundry.workshop.plist  (launchd, KeepAlive + caffeinate)
 
-# 3. Validate the host BEFORE a real multi-day job — offline mock backend, no key:
+# 3. Validate the host BEFORE a real multi-day job — offline, no key needed:
 python scripts/soak_resume_check.py   # RAM-plateau soak + kill/restart resume check
 ```
 
@@ -477,7 +469,7 @@ make clean           # remove caches + ./.run output
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `FOUNDRY_MODEL_BACKEND` | Default backend | `mock` |
+| `FOUNDRY_MODEL_BACKEND` | Default backend | set one (e.g. `claude-cli`) |
 | `FOUNDRY_CODING_ADAPTER` | Default adapter | derived from backend |
 | `ANTHROPIC_API_KEY` | `anthropic` backend key | — |
 | `CLAUDE_CODE_OAUTH_TOKEN` | `claude-cli` backend (via `make token`) | — |
@@ -513,8 +505,8 @@ make clean           # remove caches + ./.run output
 | Flag | Values | Default |
 |---|---|---|
 | `--mode` | `assistant` · `gated` · `autonomous` | `assistant` |
-| `--backend` | `mock` · `anthropic` · `openai` · `claude-cli` · `codex` · `ollama-gemma` | `mock` |
-| `--adapter` | `stub` · `raw-react` | derived from `--backend` (`mock`→`stub`, real→`raw-react`) |
+| `--backend` | `claude-cli` · `anthropic` · `openai` · `codex` · `ollama-gemma` | set one (e.g. `claude-cli`) |
+| `--adapter` | `stub` · `raw-react` | derived from `--backend` (any backend → `raw-react`) |
 | `--spec FILE\|DIR` | spec input (repeatable) | — |
 | `--packs a,b` | domain packs (`regulated` · `ml_data` · `frontend`) | — |
 | `--docs DIR` | generated doc-set output | — |

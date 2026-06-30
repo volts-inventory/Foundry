@@ -24,7 +24,7 @@ relax integrity, only ratchet it up.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, TypeVar
 
 from foundry.domains.contract import (
     ApproverPolicy,
@@ -43,7 +43,11 @@ if TYPE_CHECKING:
     from typing import Any
 
 
-class _Monotone[P](Protocol):  # structural shape every policy satisfies
+P = TypeVar("P")
+T = TypeVar("T", bound="_Monotone[Any]")
+
+
+class _Monotone(Protocol[P]):  # structural shape every policy satisfies
     """A policy axis: a strictest-wins ``tighten`` join + a ``relaxes`` floor probe."""
 
     def tighten(self, other: P, /) -> P: ...
@@ -206,7 +210,7 @@ class PackRegistry:
         )
 
 
-def _fold[T: _Monotone[Any]](
+def _fold(
     identity: T,
     packs: Sequence[DomainPackContract],
     hook: Callable[[DomainPackContract], T],

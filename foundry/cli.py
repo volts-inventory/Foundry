@@ -1670,6 +1670,17 @@ def _take_int(
     return args, value
 
 
+def _request_from_spec(spec_text: str) -> str:
+    """Derive a one-line request from a spec's text — its first heading / non-blank
+    line — so a build can run from ``--spec FILE`` alone (no positional request).
+    Falls back to a generic line if the spec has no usable heading."""
+    for line in spec_text.splitlines():
+        s = line.strip().lstrip("#").strip()
+        if s:
+            return s[:200]
+    return "Build the system described in the provided spec."
+
+
 def main(argv: list[str] | None = None) -> int:
     """``python -m foundry.cli "build a ..."`` — run the smoke path, print a report.
 
@@ -1783,45 +1794,49 @@ def main(argv: list[str] | None = None) -> int:
         else:
             checkpoints = True
             args = args[:i] + args[i + 1 :]
-    if not args:
-        print(
-            "usage: python -m foundry.cli "
-            "[--mode {assistant|gated|autonomous}] [--packs name1,name2] "
-            "[--backend {mock|anthropic|openai|claude-cli|codex|ollama-gemma}] "
-            "[--adapter {stub|raw-react}] "
-            "[--checkpoints [all|product,design,release]] "
-            "[--docs DIR] [--out DIR] [--spec FILE|DIR ...] "
-            "[--state-dir DIR] [--thread-id NAME] [--max-fix-attempts N] "
-            '"<one-line request>"\n'
-            "  modes (lifecycle.md §4 deployment-trust):\n"
-            f"    assistant  {_TRUST_POSTURE[MODE_ASSISTANT]}\n"
-            f"    gated      {_TRUST_POSTURE[MODE_GATED]}\n"
-            f"    autonomous {_TRUST_POSTURE[MODE_AUTONOMOUS]}\n"
-            "  backend: mock (default — keyless, deterministic) | anthropic | openai | "
-            "claude-cli | codex | ollama-gemma (real model egress)\n"
-            "  adapter (coding substrate): omitted => DERIVED from --backend "
-            "(mock=>stub no-op, any real backend=>raw-react real code); override with "
-            "stub | raw-react\n"
-            "  packs: regulated | ml_data | frontend "
-            "(a pack may VETO an unsafe mode — fail-closed)\n"
-            "  checkpoints (plan [10]): pause at stage boundaries for human "
-            "verification; an approve can NEVER turn a gate FAIL into a release",
-            file=sys.stderr,
-        )
-        return 2
-    request = " ".join(args).strip()
-    if not request:
-        print("error: request must be non-empty", file=sys.stderr)
-        return 2
-
-    # Resolve --spec paths to text HERE so a missing/empty path is reported as a
-    # clean usage error (exit 2) and a deep ValueError from the run itself is not
-    # masked. The resolved text is handed to run() (which seeds it onto `spec`).
+    # Resolve --spec paths to text FIRST: a spec can STAND IN for the one-line
+    # request (run from just `--spec FILE`), so we resolve it before deciding whether
+    # a positional request is required. A missing/empty path is a clean usage error
+    # (exit 2); a deep ValueError from the run itself is not masked. The resolved text
+    # is handed to run() (which seeds it onto `spec`).
     try:
         spec_text = _load_spec(spec_paths) if spec_paths else None
     except (FileNotFoundError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+
+    # The one-line request is OPTIONAL when a --spec is given: with no request we
+    # derive one from the spec; with NEITHER a request nor a spec, print usage.
+    request = " ".join(args).strip()
+    if not request:
+        if spec_text:
+            request = _request_from_spec(spec_text)
+        else:
+            print(
+                "usage: python -m foundry.cli "
+                "[--mode {assistant|gated|autonomous}] [--packs name1,name2] "
+                "[--backend {mock|anthropic|openai|claude-cli|codex|ollama-gemma}] "
+                "[--adapter {stub|raw-react}] "
+                "[--checkpoints [all|product,design,release]] "
+                "[--docs DIR] [--out DIR] [--spec FILE|DIR ...] "
+                "[--state-dir DIR] [--thread-id NAME] [--max-fix-attempts N] "
+                '["<one-line request>"]   (optional when --spec is given)\n'
+                "  modes (lifecycle.md §4 deployment-trust):\n"
+                f"    assistant  {_TRUST_POSTURE[MODE_ASSISTANT]}\n"
+                f"    gated      {_TRUST_POSTURE[MODE_GATED]}\n"
+                f"    autonomous {_TRUST_POSTURE[MODE_AUTONOMOUS]}\n"
+                "  backend: mock (default — keyless, deterministic) | anthropic | openai | "
+                "claude-cli | codex | ollama-gemma (real model egress)\n"
+                "  adapter (coding substrate): omitted => DERIVED from --backend "
+                "(mock=>stub no-op, any real backend=>raw-react real code); override with "
+                "stub | raw-react\n"
+                "  packs: regulated | ml_data | frontend "
+                "(a pack may VETO an unsafe mode — fail-closed)\n"
+                "  checkpoints (plan [10]): pause at stage boundaries for human "
+                "verification; an approve can NEVER turn a gate FAIL into a release",
+                file=sys.stderr,
+            )
+            return 2
 
     # A shell --checkpoints run uses an APPROVE-ALL responder so it completes
     # without interactive stdin (a human partner inspects + decides via the

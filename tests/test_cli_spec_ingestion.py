@@ -214,6 +214,25 @@ def test_main_spec_flag_repeatable(tmp_path: Path) -> None:
     assert code == 0
 
 
+def test_main_spec_only_no_request_runs(tmp_path: Path) -> None:
+    # A spec FILE can stand in for the one-line request — `--spec FILE` with no
+    # positional request still builds (the request is derived from the spec).
+    spec_file = tmp_path / "design.md"
+    spec_file.write_text(_SPEC_TEXT, encoding="utf-8")
+    assert main(["--spec", str(spec_file)]) == 0
+
+
+def test_request_from_spec_uses_first_heading() -> None:
+    from foundry.cli import _request_from_spec
+    assert _request_from_spec(_SPEC_TEXT) == "Link Shortener — Design Spec"
+    assert _request_from_spec("\n\n  \n") == "Build the system described in the provided spec."
+
+
+def test_main_no_args_is_usage_error() -> None:
+    # Neither a request nor a spec → usage error (exit 2).
+    assert main([]) == 2
+
+
 def test_main_spec_flag_requires_argument() -> None:
     assert main(["--spec"]) == 2
 

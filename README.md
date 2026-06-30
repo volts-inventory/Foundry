@@ -12,6 +12,33 @@ with no API key until you opt into a real model.
 
 ---
 
+## Quick start — run the Workshop locally
+
+Open **Terminal**, go to this folder, and run:
+
+```bash
+cd ~/Coders                                   # wherever you cloned it
+
+# Try it right now — keyless, no setup. Opens on http://localhost:8765
+make serve                                    # (== uv run python -m webapp.server)
+```
+
+To run it for real / long-term (own machine, your model key), use the launcher —
+it loads your settings, keeps a Mac awake, and runs until you press Ctrl-C:
+
+```bash
+cp deploy/foundry.env.example deploy/foundry.env   # 1. make your settings file (once)
+open -e deploy/foundry.env                          # 2. set backend + API key; on a
+                                                    #    Mac uncomment FOUNDRY_GATE_SANDBOX=inprocess
+./deploy/run.sh                                     # 3. start it → http://localhost:8765
+```
+
+Leave the Terminal window open while it runs. To keep it running after closing the
+window, or to set it up as an auto-restarting service, see
+[§10](#10-run-it-as-a-long-lived-server) and [`deploy/README.md`](deploy/README.md).
+
+---
+
 ## CLI at a glance
 
 Every flag, with what it does, inline. Defaults are shown in each comment — the

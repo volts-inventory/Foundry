@@ -206,7 +206,10 @@ _LEADS_SOP = (
     "important clarifying question, surface a risk, or propose a concrete "
     "capability / acceptance criterion. Then output spec_markdown: the CURRENT best "
     "full draft spec (goals, constraints, interfaces, acceptance criteria) "
-    "reflecting the whole conversation so far. Reply with JSON only."
+    "reflecting the whole conversation so far. If a prior spec and a summary of "
+    "what a previous build already produced are given, treat the spec as the "
+    "target and focus the new round on the GAPS and the requested changes — do "
+    "not re-propose what is already built. Reply with JSON only."
 )
 _CHAT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -512,6 +515,35 @@ def _read_repo_cached(pid: str) -> Repo | None:
 def _invalidate_repo(pid: str) -> None:
     with _REPO_CACHE_LOCK:
         _REPO_CACHE.pop(pid, None)
+
+
+def _build_summary(pid: str) -> str:
+    """A concise 'what the last build actually produced' digest — gate outcomes,
+    implemented features, and the file manifest — so an iterate knows what is
+    already DONE (vs. what the accumulated spec still calls for). Empty string when
+    there's nothing readable yet."""
+    rec = _STORE.get(pid) or {}
+    repo = _read_repo_cached(pid)
+    lines: list[str] = []
+    passed = rec.get("passed")
+    if passed is not None:
+        verdict = "passed the gates" if passed else "did NOT pass the gates"
+        lines.append(f"Release r{rec.get('release_seq', '?')} {verdict}.")
+    if repo is not None:
+        if repo.checks:
+            checks = ", ".join(f"{c.name} {'PASS' if c.ok else c.status.upper()}" for c in repo.checks)
+            lines.append(f"Gate checks: {checks}.")
+        feats = [d.summary for d in repo.diffs if d.summary and d.summary != "(feature diff)"]
+        if feats:
+            shown = "; ".join(feats[:12])
+            lines.append("Implemented: " + shown + ("…" if len(feats) > 12 else "") + ".")
+        if repo.files:
+            paths = [f.path for f in repo.files]
+            top = sorted({p.split("/")[0] for p in paths})
+            lines.append(f"{len(paths)} file(s) across: {', '.join(top[:20])}.")
+    if not lines:
+        return ""
+    return "## What the last build actually produced\n\n" + "\n".join(f"- {ln}" for ln in lines)
 
 
 def _sign_offs_payload(repo: "Repo | None") -> list[dict[str, Any]]:
@@ -1445,15 +1477,16 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, {"builds": builds})
 
     def _get_spec(self, pid: str) -> None:
-        """The saved spec text for a build. The UI fetches the PARENT's spec when
-        you iterate, pre-filling the converse draft so the new release EXTENDS the
-        prior spec instead of starting from a blank one."""
+        """The saved spec + a 'what was built' digest for a build. On iterate the UI
+        pre-fills the converse draft with the parent's ``spec`` (what it SHOULD be)
+        and seeds the round-table with ``built`` (what was actually COMPLETED), so
+        the leads reason about the remaining gap."""
         p = _PROJECTS.get(pid)
         spec = p.spec_text if p is not None else ""
         if not spec:
             rec = _STORE.get(pid)
             spec = str((rec or {}).get("spec_text") or "")
-        self._json(200, {"id": pid, "spec": spec})
+        self._json(200, {"id": pid, "spec": spec, "built": _build_summary(pid)})
 
     def _list_releases(self, floor_s: str) -> None:
         """Every release of one floor (project), newest first — release history."""
@@ -1548,11 +1581,18 @@ class Handler(BaseHTTPRequestHandler):
         # spec) primes the round-table so it EXTENDS that spec instead of drafting
         # from scratch. Recorded as prior context + the current draft.
         base_spec = str(body.get("base_spec", "")).strip()
-        if base_spec and not chat["history"] and not chat["spec"]:
-            chat["spec"] = base_spec
-            chat["history"].append(
-                {"role": "lead", "text": f"[Prior spec to extend]\n{base_spec}"}
-            )
+        base_built = str(body.get("base_built", "")).strip()
+        if (base_spec or base_built) and not chat["history"] and not chat["spec"]:
+            if base_spec:
+                chat["spec"] = base_spec
+                chat["history"].append(
+                    {"role": "lead", "text": f"[Prior spec to extend]\n{base_spec}"}
+                )
+            if base_built:
+                chat["history"].append(
+                    {"role": "lead", "text": f"[What was already built — focus the "
+                                             f"new work on the gaps]\n{base_built}"}
+                )
         if message:
             chat["history"].append({"role": "user", "text": message})
         try:

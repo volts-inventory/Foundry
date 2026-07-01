@@ -53,11 +53,13 @@ class E2EGate:
         *,
         mutant_rotation_id: int = 0,
         timeout_s: float = 600.0,
+        seal_key: bytes | None = None,
     ) -> None:
         self.cmd = cmd or (sys.executable, "-m", "pytest", "-q", "--tb=no")
         self.mutant_rotation_id = mutant_rotation_id
         self.scanner_rule_version = "e2e-harness-v1"
         self._timeout_s = timeout_s
+        self._seal_key = seal_key  # zone-A observation seal (None ⇒ unsealed channel)
 
     # ---- zone A: N pinned-env runs, raw exit-code pair ----------------------
 
@@ -80,6 +82,7 @@ class E2EGate:
                 "pinned_env": PINNED_ENV,
                 "summaries": [parse_pytest_summary(o) for o in outs],
             },
+            seal_key=self._seal_key,
         )
 
     # ---- zone B: deterministic N=2 flake rule -------------------------------

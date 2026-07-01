@@ -61,8 +61,10 @@ class AuditGate:
         self,
         *,
         license_allowlist: frozenset[str] | None = None,
+        seal_key: bytes | None = None,
     ) -> None:
         self._allowlist = license_allowlist or DEFAULT_LICENSE_ALLOWLIST
+        self._seal_key = seal_key  # zone-A observation seal (None ⇒ unsealed channel)
 
     # ---- zone A: collect lockfile bytes + raw license markers --------------
 
@@ -93,6 +95,7 @@ class AuditGate:
                 "inventory_derivable": bool(lockfiles),
                 "sbom_digest": sbom_digest,
             },
+            seal_key=self._seal_key,
         )
 
     def _lockfile_paths(self, workdir: Path) -> list[str]:

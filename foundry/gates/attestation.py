@@ -37,8 +37,6 @@ HMACs over immutable records):
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 from collections import OrderedDict
 
 from foundry.canonical import canonical_bytes
@@ -51,14 +49,7 @@ from foundry.schemas.gates import GateResult
 from foundry.schemas.security import SLSAProvenance
 from foundry.state.global_records import GlobalRecordsView
 
-_SCHEME = "hmac256"  # the dev-default scheme name (see foundry.gates.signing)
 _DEFAULT_CACHE_SIZE = 4096
-
-
-def _mac(key: bytes, payload: bytes) -> str:
-    """The single HMAC entry point (HMAC-SHA256 hex). Module-level so tests
-    can observe (re)computation."""
-    return hmac.new(key, payload, hashlib.sha256).hexdigest()
 
 
 def _attestation_payload(g: GateResult) -> bytes:

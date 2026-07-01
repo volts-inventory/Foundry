@@ -48,14 +48,22 @@ def _compose(plan: PlatformPlan, results: list[ServiceResult]) -> str:
         if svc.role == "game":
             continue                          # a native game, not a container
         if svc.role == "data":
+            # Keyed on svc.name (NOT a hardcoded "data") so a planner that names
+            # the data service differently stays consistent with the tree at
+            # services/<name>/ and with other services' depends_on references.
+            port = _PORT["data"]
             lines += [
-                "  data:",
+                f"  {svc.name}:",
                 "    image: postgres:16",
                 "    environment:",
                 "      POSTGRES_PASSWORD: dev",
                 "      POSTGRES_DB: app",
-                "    ports:", '      - "5432:5432"',
+                "    ports:", f'      - "{port}:{port}"',
             ]
+            dep = [d for d in svc.depends_on if d in built]
+            if dep:
+                lines.append("    depends_on:")
+                lines += [f"      - {d}" for d in dep]
             continue
         lines += [
             f"  {svc.name}:",

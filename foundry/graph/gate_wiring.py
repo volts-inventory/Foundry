@@ -539,7 +539,7 @@ def run_spec_gate(
     """
     run_against = materialize_workdir(state, workdir, resolve=resolve, resolve_blob=resolve_blob)
     result = _run_gate(
-        SpecGate(),
+        SpecGate(seal_key=runner.seal_key),
         rt=rt,
         runner=runner,
         config=config,
@@ -585,7 +585,7 @@ def run_build_test_gates(
     """
     run_against = materialize_workdir(state, workdir, resolve=resolve, resolve_blob=resolve_blob)
     build = _run_gate(
-        BuildGate(),
+        BuildGate(seal_key=runner.seal_key),
         rt=rt,
         runner=runner,
         config=config,
@@ -600,7 +600,7 @@ def run_build_test_gates(
     # Test gate (back-compat).
     discriminator = discriminator_factory() if discriminator_factory is not None else None
     test = _run_gate(
-        TestGate(min_passed=min_passed, discriminator=discriminator),
+        TestGate(min_passed=min_passed, discriminator=discriminator, seal_key=runner.seal_key),
         rt=rt,
         runner=runner,
         config=config,

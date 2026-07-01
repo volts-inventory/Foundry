@@ -157,12 +157,11 @@ def _selected_roles(request: str) -> list[str]:
     return [r for r in order if r in hits]
 
 
-def _web_template_key(low: str, present: set[str]) -> str:
-    if "backend" in present:
-        return "web_api"                     # coupled to the platform backend API
-    if _is_game(low):
-        return "web_game"
-    return "web_standalone"
+def _web_template_key(present: set[str]) -> str:
+    """The web-frontend template key. A game is never built under the ``web`` role
+    (``_selected_roles`` routes games to the ``game``/``game_online`` template), so
+    the only choice here is API-coupled vs. self-contained."""
+    return "web_api" if "backend" in present else "web_standalone"
 
 
 def plan_platform(request: str, *, name: str | None = None,
@@ -186,7 +185,7 @@ def plan_platform(request: str, *, name: str | None = None,
     services: list[ServiceSpec] = []
     for role in roles:
         if role == "web":
-            body = _TEMPLATES[_web_template_key(low, present)].format(kind=kind, fw=fw)
+            body = _TEMPLATES[_web_template_key(present)].format(kind=kind, fw=fw)
         elif role == "game":
             key = "game_online" if "backend" in present else "game"
             body = _TEMPLATES[key].format(kind=kind, engine=engine)

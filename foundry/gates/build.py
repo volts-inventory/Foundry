@@ -36,9 +36,11 @@ class BuildGate:
         cmd: tuple[str, ...] | None = None,
         *,
         timeout_s: float = 600.0,
+        seal_key: bytes | None = None,
     ) -> None:
         self.cmd = cmd or (sys.executable, "-m", "compileall", "-q", ".")
         self._timeout_s = timeout_s
+        self._seal_key = seal_key  # zone-A observation seal (None ⇒ unsealed channel)
         # Class-2 reuse-key bindings (§1f). Build has no held-out mutant
         # machinery; the ids are still bound so the key shape is uniform.
         self.mutant_rotation_id = 0
@@ -54,6 +56,7 @@ class BuildGate:
             stdout=out,
             stderr=err,
             structured={"cmd": list(self.cmd)},
+            seal_key=self._seal_key,
         )
 
     # ---- zone B: pure decision over the observed exit code -----------------

@@ -113,13 +113,6 @@ class BuildStore:
         d["supervised"] = bool(d.get("supervised"))
         return d
 
-    def all(self) -> list[dict[str, Any]]:
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM builds ORDER BY floor ASC"
-            ).fetchall()
-        return [self._decode(r) for r in rows]
-
     def latest_per_floor(self) -> list[dict[str, Any]]:
         """The newest release of every floor (one row per project) — for rehydrate."""
         with self._lock:
@@ -193,6 +186,19 @@ class BuildStore:
             except (TypeError, ValueError):
                 continue
         return out
+
+    def clear_all(self) -> None:
+        """Wipe every catalogued build, its event log, and its seen-uri set.
+
+        Backs the Workshop's 'clear all floors & repos' reset — after this the
+        catalog is empty, so a restart rehydrates no floors and the repo hub is
+        bare. The content-addressed store on disk is left untouched (it is
+        unreferenced once the rows are gone, and never surfaced without a row)."""
+        with self._lock:
+            self._conn.execute("DELETE FROM builds")
+            self._conn.execute("DELETE FROM events")
+            self._conn.execute("DELETE FROM seen_uris")
+            self._conn.commit()
 
     def add_seen(self, project_id: str, uris: set[str]) -> None:
         """Record the artifact handles a build has surfaced (idempotent)."""

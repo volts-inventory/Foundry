@@ -192,6 +192,28 @@ def test_adrs_carry_rejected_alternatives() -> None:
     assert all(a.status == "accepted" for a in adrs)
 
 
+def test_architect_builders_skip_non_dict_items() -> None:
+    # CLI backends (the default claude-cli) instruct JSON-only output but do NOT
+    # grammar-enforce the nested schema, so a reply can carry array items that are
+    # bare strings instead of objects. The builders must skip those, not crash with
+    # AttributeError mid-graph (mirrors the isinstance guard in the quality nodes).
+    from foundry.agents.architecture.principal_architect import (
+        _build_adrs,
+        _build_constraints,
+        _build_interfaces,
+    )
+
+    rt = make_runtime()
+    seq = rt.seq(config_for("run-A"), ARCHITECT_NODE_ID, "artifact:adrs")
+    # A mix of a valid object and junk (string, None) the model might emit.
+    adrs = _build_adrs([{"id": "ADR-1", "title": "ok"}, "stray text", None], seq)
+    assert [a.id for a in adrs] == ["ADR-1"]
+    ifaces = _build_interfaces([{"name": "api"}, "not-an-object"], seq)
+    assert [i.name for i in ifaces] == ["api"]
+    cons = _build_constraints([{"id": "PC-1", "text": "t"}, 42], seq)
+    assert [c.id for c in cons] == ["PC-1"]
+
+
 def test_constraint_seqs_are_distinct_per_record() -> None:
     rt = make_runtime()
     node = make_principal_architect_node(rt)

@@ -46,7 +46,6 @@ import os
 import sqlite3
 from pathlib import Path
 
-from foundry.durability.artifact_store import ArtifactStore
 from foundry.durability.checkpointer import FoundryCheckpointer, make_checkpointer
 from foundry.durability.fs_artifact_store import FilesystemArtifactStore
 from foundry.state.global_records import GlobalRecords
@@ -54,7 +53,6 @@ from foundry.state.global_records import GlobalRecords
 __all__ = [
     "STATE_DIR_ENV",
     "DurableBackends",
-    "default_backends",
     "durable_backends",
     "state_dir_from_env",
 ]
@@ -149,10 +147,3 @@ def durable_backends(state_dir: str | Path) -> DurableBackends:
     )
 
 
-def default_backends() -> tuple[FoundryCheckpointer, GlobalRecords, ArtifactStore]:
-    """The historical IN-MEMORY backends (``:memory:`` + in-memory dicts).
-
-    Byte-identical to the wiring callers used before the durability seam — the
-    default path when :data:`STATE_DIR_ENV` is unset.
-    """
-    return FoundryCheckpointer(), GlobalRecords(), ArtifactStore()

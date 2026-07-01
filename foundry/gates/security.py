@@ -53,8 +53,9 @@ class SecurityGate:
     decision_deterministic = True
     execution_deterministic = True
 
-    def __init__(self, *, mutant_rotation_id: int = 0) -> None:
+    def __init__(self, *, mutant_rotation_id: int = 0, seal_key: bytes | None = None) -> None:
         self.mutant_rotation_id = mutant_rotation_id
+        self._seal_key = seal_key  # zone-A observation seal (None ⇒ unsealed channel)
         # Rule-set version bound into the class-2 reuse key (§1f) — fixed at
         # construction so reuse_key() is stable independent of execution.
         self.scanner_rule_version = _DEV_RULE_VERSION
@@ -87,6 +88,7 @@ class SecurityGate:
                 "rule_version": _DEV_RULE_VERSION,
                 "files_scanned": scanned,
             },
+            seal_key=self._seal_key,
         )
 
     # ---- zone B: findings present ⇒ FAIL ------------------------------------

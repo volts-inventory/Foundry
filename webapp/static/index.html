@@ -90,8 +90,7 @@
       <div class="row">
         <label>Mode</label>
         <select id="mode-select">
-          <option value="assistant">assistant — PR for a human</option>
-          <option value="gated">gated — sign-off + evidence pack</option>
+          <option value="gated">gated — CTO signs off in the floor screen + evidence pack</option>
           <option value="autonomous">autonomous — build · admit · deploy</option>
         </select>
       </div>
@@ -102,11 +101,11 @@
           <option value="raw-react">raw-react — code via the chosen backend</option>
         </select>
       </div>
-      <label>Extra workers <span class="hint">— on top of one per team; management
-        assigns them where the work is (blank = automatic)</span></label>
-      <input id="extra-workers" type="number" min="0" max="32" placeholder="auto" />
-      <p class="hint" id="parallel-note">Every discipline always gets one worker; these
-        extras are the pool the leads share out by demand, and run in parallel.</p>
+      <label>Worker pool <span class="hint">— max parallel IC workers (blank = automatic)</span></label>
+      <input id="extra-workers" type="number" min="1" max="32" placeholder="auto" />
+      <p class="hint" id="parallel-note">The ceiling on how many implementation workers run
+        at once — the leads share this pool by demand. Effective parallelism is
+        min(tasks created, this cap); each discipline still gets at least one.</p>
       <label>Auto-fix attempts <span class="hint">— fix-forward retries until green (default 5)</span></label>
       <input id="fix-input" type="number" min="0" max="20" value="5" />
       <label>Cost cap (USD) <span class="hint">— max model spend (metered API backends only)</span></label>
@@ -160,6 +159,7 @@
       <ul id="repos-list" class="repos-list"></ul>
       <div class="dialog-actions">
         <button id="repos-new" class="primary">＋ NEW PROJECT</button>
+        <button id="repos-clear" class="danger" title="Wipe every floor and repository">⌦ Clear all</button>
         <button id="repos-close">close</button>
       </div>
     </div>
@@ -180,6 +180,7 @@
         <button class="repo-tab sel" data-tab="code">⊞ Code</button>
         <button class="repo-tab" data-tab="checks">✓ Checks <span id="checks-count" class="tab-count"></span></button>
         <button class="repo-tab" data-tab="pulls">⇄ Pull requests <span id="pulls-count" class="tab-count"></span></button>
+        <button class="repo-tab" data-tab="signoffs">✍ Sign-offs <span id="signoffs-count" class="tab-count"></span></button>
       </div>
       <div class="repo-pane" data-pane="code">
         <nav id="files-crumb" class="files-crumb"></nav>
@@ -193,6 +194,12 @@
       </div>
       <div class="repo-pane hidden" data-pane="pulls">
         <div id="pulls-list" class="pulls-list"></div>
+      </div>
+      <div class="repo-pane hidden" data-pane="signoffs">
+        <p class="cp-note">Recorded CTO approvals (Design / Release), signed off right
+          here in the floor screen — never in Git. Exported with the build as
+          <code>.foundry/evidence.json</code> + <code>EVIDENCE.md</code>.</p>
+        <ul id="signoffs-list" class="checks-list"></ul>
       </div>
       <div class="dialog-actions">
         <a id="files-zip" class="btn-link" href="#" download>⭳ Export .zip</a>

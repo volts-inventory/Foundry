@@ -52,6 +52,7 @@ no agent code beyond the gates' own grounding) — equal inputs yield an equal
 
 from __future__ import annotations
 
+import os
 import tempfile
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -117,14 +118,16 @@ _COMPONENTS = (SBOMComponent(name="libfoo", version="1.2.3", digest=_MAT, licens
 
 # The default re-gate set — the M1 gate family + the assurance Audit/Security
 # gates (the SAME impls a fresh build runs). The whole set must RE-PASS to
-# release; the change-proportional plan decides which actually RE-RUN.
-_DEFAULT_GATES: tuple[GateImpl, ...] = (
-    SpecGate(),
-    BuildGate(),
-    TestGate(min_passed=1),
-    AuditGate(),
-    SecurityGate(),
-)
+# release; the change-proportional plan decides which actually RE-RUN. Built via a
+# factory so the gates can be sealed under the runner's zone-A observation key.
+def _default_gates(seal_key: bytes | None = None) -> tuple[GateImpl, ...]:
+    return (
+        SpecGate(seal_key=seal_key),
+        BuildGate(seal_key=seal_key),
+        TestGate(min_passed=1, seal_key=seal_key),
+        AuditGate(seal_key=seal_key),
+        SecurityGate(seal_key=seal_key),
+    )
 
 # The protected-criteria globs the Guardian polices in the evolution route. The
 # Spec gate's grounding input is the integrated ``criteria.json`` file (the SAME
@@ -388,13 +391,19 @@ def evolve(
     """
     from foundry.trust_root import AdmissionController, TrustedBuilder
 
-    gate_list = tuple(gates) if gates is not None else _DEFAULT_GATES
+    # Seal the zone-A observation channel (fail-closed forged-results hardening).
+    # Only the default gate set is built under our key; caller-supplied gates own
+    # their own sealing, so we run those UNSEALED to avoid a key mismatch.
+    seal_key = os.urandom(32) if gates is None else None
+    gate_list = tuple(gates) if gates is not None else _default_gates(seal_key)
     prior_root = Path(prior_dir)
     run_id = "evolve-run"
 
     records = GlobalRecords()
     signer = ZoneBSigner(_KEY, _KEY_ID)
-    runner = TwoZoneGateRunner(signer, records, _SCANNER_REV, _LINEAGE_REV)
+    runner = TwoZoneGateRunner(
+        signer, records, _SCANNER_REV, _LINEAGE_REV, seal_key=seal_key
+    )
     verifier = DevGateWriteVerifier(_KEY, _KEY_ID, records)
     admission = AdmissionController(builder_id=_BUILDER_ID)
 

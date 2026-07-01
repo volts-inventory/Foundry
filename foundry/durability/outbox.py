@@ -107,6 +107,18 @@ CREATE TABLE IF NOT EXISTS worm_audit (
 -- cleanly on any honest existing DB and only errors on one already forked, which
 -- is the corruption we want surfaced, not hidden.)
 CREATE UNIQUE INDEX IF NOT EXISTS ux_worm_audit_prev_hash ON worm_audit (prev_hash);
+
+-- Single-row head anchor (id pinned to 0): the current chain head + row count,
+-- updated transactionally with every append. Link/hash checks alone catch
+-- interior edits and forks, but a TAIL truncation (deleting the most-recent N
+-- rows) leaves a still-valid prefix. Anchoring the head + count makes that
+-- truncation detectable: a chain that no longer ends at the anchored head, or is
+-- shorter than the anchored count, fails verification.
+CREATE TABLE IF NOT EXISTS worm_audit_head (
+    id    INTEGER PRIMARY KEY CHECK (id = 0),
+    head  TEXT NOT NULL,
+    n     INTEGER NOT NULL
+);
 """
 
 
@@ -119,6 +131,22 @@ def ensure_outbox_schema(conn: sqlite3.Connection) -> None:
     calls it eagerly).
     """
     conn.executescript(_SCHEMA)
+    # Backfill the head anchor for a pre-existing chain (upgraded in place): if
+    # rows exist but no anchor does, seed it from the current head + count so
+    # tail-truncation detection is armed from here forward. (We cannot retro-
+    # detect a truncation that happened BEFORE the upgrade — only seal the
+    # current honest state.)
+    head = conn.execute(
+        "SELECT hash FROM worm_audit ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if head is not None and conn.execute(
+        "SELECT 1 FROM worm_audit_head WHERE id = 0"
+    ).fetchone() is None:
+        n = conn.execute("SELECT COUNT(*) FROM worm_audit").fetchone()[0]
+        conn.execute(
+            "INSERT INTO worm_audit_head (id, head, n) VALUES (0, ?, ?)",
+            (head[0], n),
+        )
 
 
 def _now() -> str:
@@ -151,14 +179,29 @@ def append_audit(conn: sqlite3.Connection, event: dict) -> str:
         "INSERT INTO worm_audit (event, prev_hash, hash) VALUES (?, ?, ?)",
         (event_text, prev_hash, new_hash),
     )
+    # Advance the head anchor in the SAME transaction (head + count), so a later
+    # out-of-band tail truncation no longer matches the anchored head/length.
+    conn.execute(
+        "INSERT INTO worm_audit_head (id, head, n) VALUES (0, ?, 1) "
+        "ON CONFLICT(id) DO UPDATE SET head = excluded.head, n = worm_audit_head.n + 1",
+        (new_hash,),
+    )
     return new_hash
 
 
 def verify_audit_chain(conn: sqlite3.Connection) -> bool:
-    """Recompute the chain; False on any broken link or recomputed-hash
-    mismatch (i.e. any UPDATE/DELETE tampering of event, prev_hash, hash,
-    or a deleted/reordered interior row)."""
+    """Recompute the chain; False on any tampering.
+
+    Catches interior edits / deletes / reordering (a broken link or a
+    recomputed-hash mismatch) AND **tail truncation**: the recomputed head and
+    row count must match the single-row ``worm_audit_head`` anchor (advanced
+    transactionally on every append). A non-empty chain with NO anchor — or one
+    whose head/length no longer matches the anchor — fails closed, since deleting
+    the most-recent rows leaves an otherwise-valid prefix the link checks alone
+    would accept.
+    """
     prev = _GENESIS
+    n = 0
     for event_text, prev_hash, hash_ in conn.execute(
         "SELECT event, prev_hash, hash FROM worm_audit ORDER BY id ASC"
     ):
@@ -167,7 +210,16 @@ def verify_audit_chain(conn: sqlite3.Connection) -> bool:
         if _chain_hash(prev_hash, event_text) != hash_:
             return False
         prev = hash_
-    return True
+        n += 1
+    anchor = conn.execute(
+        "SELECT head, n FROM worm_audit_head WHERE id = 0"
+    ).fetchone()
+    if anchor is None:
+        # No anchor is valid ONLY for an empty chain; a non-empty chain must carry
+        # its head anchor (post-migration every append writes one), so its absence
+        # means the anchor — and likely the tail — was deleted out of band.
+        return n == 0
+    return anchor[0] == prev and anchor[1] == n
 
 
 def enqueue(conn: sqlite3.Connection, action: ExternalAction, payload: dict) -> None:

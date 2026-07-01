@@ -2252,6 +2252,16 @@ function syncStartFrom(){
   if(iterating && (req.value.trim()===""||req.value.trim()===SEED_REQ)){
     req.value=""; req.placeholder="e.g. add link expiry + custom slugs, and rate-limit by IP";
   }
+  // Iterate → pre-fill the converse draft with the PARENT's saved spec, so a new
+  // conversation with the leads EXTENDS it (and the release saves it cumulatively).
+  // Guarded by !chatDraft so it never clobbers an in-progress draft.
+  if(iterating && !chatDraft.trim()){
+    fetch("/api/spec/"+startFromSel.value).then(r=>r.ok?r.json():{spec:""})
+      .then(d=>{ if(typeof d.spec==="string" && d.spec.trim() && !chatDraft.trim()){
+        chatDraft=d.spec;
+        const el=document.getElementById("chat-spec"); if(el) el.textContent=chatDraft;
+      }}).catch(()=>{});
+  }
 }
 startFromSel.addEventListener("change", syncStartFrom);
 function showNewModal(parentId){
@@ -2315,8 +2325,11 @@ function sendChat(){
   appendChatTurn("user", msg);
   appendChatTurn("system", "…leads are thinking…");
   const backend = document.getElementById("backend-select").value;
+  // On the FIRST turn of an iterate, seed the session with the inherited spec
+  // (pre-filled into chatDraft) so the leads EXTEND it rather than start blank.
+  const seed = (!chatSession && chatDraft.trim()) ? chatDraft : undefined;
   fetch("/api/ideate", {method:"POST", headers:postHeaders(),
-    body: JSON.stringify({session:chatSession, message:msg, backend})})
+    body: JSON.stringify({session:chatSession, message:msg, backend, base_spec:seed})})
    .then(r=>r.json())
    .then(d=>{
      // drop the "thinking…" placeholder

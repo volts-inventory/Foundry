@@ -266,6 +266,7 @@ class Project:
     adapter: str = "stub"  # coding substrate (see foundry.cli.ADAPTERS)
     packs: list[str] = field(default_factory=list)
     spec: str | None = None  # literal spec text OR a dir of uploaded docs (run(spec=))
+    spec_text: str = ""  # the literal spec (converse/paste), cataloged so an iterate inherits + extends it
     max_slots: int = 4  # IC-pool CEILING (= cli.AUTO_SLOTS_CAP); the system sizes
     # actual parallelism to the lead's decomposition (min(tasks, this)).
     cost_cap_microusd: int | None = None  # global spend envelope (Wave D)
@@ -361,6 +362,7 @@ def _build_record(p: "Project") -> dict[str, Any]:
         "passed": p.passed, "gates": p.gates,
         "out_base": str(p.out_base) if p.out_base else None,
         "created_at": p.created_at,
+        "spec_text": p.spec_text,
     }
 
 
@@ -408,6 +410,7 @@ def _load_persisted() -> None:
                     parent_id=row.get("parent_id"),
                     out_base=Path(ob) if ob else None,
                     created_at=str(row.get("created_at") or ""),
+                    spec_text=str(row.get("spec_text") or ""),
                 )
                 try:
                     p.log = _STORE.events_of(p.id)   # the durable replay log
@@ -1193,6 +1196,9 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/repo/"):
             self._repo_meta(path.rsplit("/", 1)[-1])
             return
+        if path.startswith("/api/spec/"):
+            self._get_spec(path.rsplit("/", 1)[-1])
+            return
         if path.startswith("/api/files/"):
             self._list_files(path.rsplit("/", 1)[-1])
             return
@@ -1438,6 +1444,17 @@ class Handler(BaseHTTPRequestHandler):
         ]
         self._json(200, {"builds": builds})
 
+    def _get_spec(self, pid: str) -> None:
+        """The saved spec text for a build. The UI fetches the PARENT's spec when
+        you iterate, pre-filling the converse draft so the new release EXTENDS the
+        prior spec instead of starting from a blank one."""
+        p = _PROJECTS.get(pid)
+        spec = p.spec_text if p is not None else ""
+        if not spec:
+            rec = _STORE.get(pid)
+            spec = str((rec or {}).get("spec_text") or "")
+        self._json(200, {"id": pid, "spec": spec})
+
     def _list_releases(self, floor_s: str) -> None:
         """Every release of one floor (project), newest first — release history."""
         try:
@@ -1527,6 +1544,15 @@ class Handler(BaseHTTPRequestHandler):
         if backend not in BACKENDS:
             backend = "mock"
         chat = _CHATS.setdefault(session, {"history": [], "spec": ""})
+        # Iterate seed: on a NEW session, an inherited base spec (the parent's saved
+        # spec) primes the round-table so it EXTENDS that spec instead of drafting
+        # from scratch. Recorded as prior context + the current draft.
+        base_spec = str(body.get("base_spec", "")).strip()
+        if base_spec and not chat["history"] and not chat["spec"]:
+            chat["spec"] = base_spec
+            chat["history"].append(
+                {"role": "lead", "text": f"[Prior spec to extend]\n{base_spec}"}
+            )
         if message:
             chat["history"].append({"role": "user", "text": message})
         try:
@@ -1627,9 +1653,17 @@ class Handler(BaseHTTPRequestHandler):
             release_seq = 1
         pid = uuid.uuid4().hex[:12]
         out_base = _OUTPUT_ROOT / f"floor-{floor}" / f"r{release_seq}"
-        # Spec input: pasted text (literal), else an uploaded docs-zip (a dir),
-        # else the PARENT's design docs (iterate), else None (request alone).
-        spec: str | None = spec_text or None
+        # Spec text is SAVED per build and INHERITED on iterate: a new release with
+        # no fresh spec reuses the parent's saved spec; with a fresh spec (the
+        # converse draft is pre-filled from the parent, so it already carries the
+        # prior spec PLUS this round's additions) that extended draft supersedes it.
+        # Either way the release's spec_text is the cumulative spec, saved for the
+        # NEXT iterate to build on.
+        parent_spec_text = str(parent.get("spec_text") or "") if parent else ""
+        effective_spec_text = spec_text or parent_spec_text
+        # Spec input: the effective spec TEXT (literal), else an uploaded docs-zip (a
+        # dir), else the PARENT's design docs (iterate), else None (request alone).
+        spec: str | None = effective_spec_text or None
         if spec is None and isinstance(spec_zip_b64, str) and spec_zip_b64.strip():
             try:
                 spec_dir = out_base / "spec-in"
@@ -1648,6 +1682,7 @@ class Handler(BaseHTTPRequestHandler):
         p = Project(
             id=pid, request=request, mode=mode, supervised=supervised, floor=floor,
             release_seq=release_seq, backend=backend, adapter=adapter, packs=packs, spec=spec,
+            spec_text=effective_spec_text,
             out_base=out_base, max_slots=max_slots, cost_cap_microusd=cost_cap_microusd,
             max_fix_attempts=max_fix_attempts, parent_id=parent_id, base_dir=base_dir,
         )

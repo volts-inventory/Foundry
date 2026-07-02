@@ -173,10 +173,11 @@ Two seams are deliberately independent, and worth internalizing before you start
   the single-egress proxy.
 - **`--adapter`** — the coding substrate ("the hands"). It decides *what actually
   writes the code*. You rarely set this: when omitted it is **derived from the
-  backend** — any backend → `raw-react` (real code) — so choosing a brain writes real
-  code on its own. (`stub` is a no-op substrate.) `raw-react` is the universal
-  completion substrate: it writes code via `claude -p` under `claude-cli`, and via
-  the Anthropic API under `anthropic`.
+  backend** — `claude-cli` → `claude-code` (the AGENTIC substrate: claude edits,
+  builds, and tests multi-turn inside the task sandbox), other real backends →
+  `raw-react` (one completion → one diff). (`stub` is a no-op substrate;
+  `proxy-agent` is the agentic loop routed through the proxy for any backend,
+  keeping credentials outside the sandbox.)
 
 > **You usually only set `--backend`.** Pick a real backend and you get real code,
 > because the adapter follows it. Reach for `--adapter` only to override — e.g.
@@ -485,12 +486,15 @@ cd ~/moon-colony/m05 && pip install pygame && python main.py
    and its predecessors' code); the gate row shows **build / test / smoke**
    pills — smoke red means the game didn't survive its 120 headless frames,
    and the failure feeds the next fix attempt automatically.
-4. On green you sign off; then the Autopilot narration appears: *"Autopilot
-   chose 'save slots' (retention) — panel scores: staff_engineer=8,
-   usability_designer=9, product_designer=7, qa_lead=8. Building release 2…"*
-   Each iteration lands as the next release on the SAME floor with the ballot
-   in its log. If the panel declines everything, the loop stops and the floor
-   waits for you to iterate manually.
+4. On green you sign off; then the panel's pick surfaces as an **AUTOPILOT
+   PROPOSAL checkpoint** on the next release: *"save slots — retention (panel:
+   staff_engineer=8, usability_designer=9, product_designer=7, qa_lead=8)"*,
+   with the next-iteration request in an editable box. **Approve** builds it
+   as proposed; **Request changes** builds YOUR edited text instead (both
+   versions logged); **Reject** stops the loop. Walk away and it auto-approves
+   — the AI keeps driving. Each iteration lands as the next release on the
+   SAME floor with the ballot in its log; if the panel declines everything,
+   the loop stops and the floor waits for you to iterate manually.
 5. Open **REPO** to browse or export the tree — or grab the zip and
    `python main.py`.
 
@@ -535,12 +539,15 @@ declines everything, the loop STOPS and hands steering back to you — it never
 builds what the panel refused.
 
 **Who's in charge, per mode:** in `autonomous` mode both loops run with zero
-human contact (the trust-root chain releases). In `gated`/supervised mode the
-AI still does all the work and drives the loop — checkpoints and sign-offs
-surface to you, and every autopilot iteration lands as a release on the same
-Workshop floor with the panel's ballot recorded, so you can audit WHY each
-change was chosen. Human steering directives become pinned constraints on all
-future iterations (tighten-only).
+human contact (the trust-root chain releases; the panel's winner builds
+directly). In `gated`/supervised mode the AI still does all the work and
+drives the loop — the panel's pick first surfaces as a **proposal checkpoint**
+(approve / edit-the-request-then-approve / reject, with the same auto-approve
+timeout as every checkpoint so an absent human never stalls it), then the
+build's stage checkpoints and sign-offs surface as usual. Every iteration
+lands as a release on the same Workshop floor with the panel's ballot
+recorded, so you can audit WHY each change was chosen. Human steering
+directives become pinned constraints on all future iterations (tighten-only).
 
 In the **Workshop UI**, set the **Autopilot** field (self-iterations, 0 = off)
 when creating a project — each green build then spawns the panel-chosen next
@@ -647,7 +654,7 @@ rm -rf .pytest_cache .mypy_cache .ruff_cache ./.run spec.md  # clean caches + ou
 | Variable | Purpose | Default |
 |---|---|---|
 | `FOUNDRY_MODEL_BACKEND` | Default backend | set one (e.g. `claude-cli`) |
-| `FOUNDRY_CODING_ADAPTER` | Default adapter | derived from backend |
+| `FOUNDRY_CODING_ADAPTER` | Default adapter | derived from backend (`claude-cli`→`claude-code`) |
 | `ANTHROPIC_API_KEY` | `anthropic` backend key | — |
 | `CLAUDE_CODE_OAUTH_TOKEN` | `claude-cli` backend (via `claude setup-token`) | — |
 | `OPENAI_API_KEY` | `openai` + `codex` backend key | — |

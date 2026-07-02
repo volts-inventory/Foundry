@@ -1741,6 +1741,9 @@ function routeEvent(floor, ev){
       F.cp = {title:ev.title, summary:ev.summary, boundary:ev.boundary}; break;
     case "await_decision":
       F.awaiting = true; F.cpIndex = ev.checkpoint;
+      // Autopilot PROPOSAL: carry the panel's request so the modal offers an edit box.
+      if (ev.boundary === "autopilot_proposal")
+        F.cp = Object.assign({}, F.cp, {boundary: ev.boundary, request: ev.request || ""});
       if (Array.isArray(ev.journal)) F.journal = ev.journal;
       renderElevator();
       if (S){ S.spotlightCTO(true); S.toLounge(); }   // team hangs out while CTO decides
@@ -1866,6 +1869,14 @@ function showCheckpoint(F){
   const cp = (F && F.cp) || {title:"CHECKPOINT", summary:""};
   document.getElementById("cp-title").textContent="CHECKPOINT · "+(cp.title||"");
   document.getElementById("cp-summary").textContent=cp.summary||"";
+  // Autopilot proposal: surface the panel's request as an EDITABLE next-iteration
+  // request (approve = as-is; request-changes = build the edited text; reject = stop).
+  const wrap = document.getElementById("cp-edit-wrap");
+  if (wrap){
+    const isProposal = cp.boundary === "autopilot_proposal";
+    wrap.classList.toggle("hidden", !isProposal);
+    if (isProposal) document.getElementById("cp-edit").value = cp.request || "";
+  }
   document.getElementById("cp-modal").classList.remove("hidden");
 }
 function hideCheckpoint(){ document.getElementById("cp-modal").classList.add("hidden"); }
@@ -2178,8 +2189,14 @@ function hideFiles(){ document.getElementById("files-modal").classList.add("hidd
 function sendDecision(decision){
   const F = FLOORS.get(ACTIVE);
   if (!F){ hideCheckpoint(); return; }
+  const body = {decision, checkpoint: F.cpIndex};
+  const wrap = document.getElementById("cp-edit-wrap");
+  if (wrap && !wrap.classList.contains("hidden")){
+    const edit = (document.getElementById("cp-edit").value || "").trim();
+    if (edit) body.request_edit = edit;   // the human's amended next-iteration request
+  }
   fetch("/api/decision/"+F.id, {method:"POST", headers:postHeaders(),
-    body: JSON.stringify({decision, checkpoint: F.cpIndex})});
+    body: JSON.stringify(body)});
   F.awaiting = false; renderElevator(); hideCheckpoint();
 }
 

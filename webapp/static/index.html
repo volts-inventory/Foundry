@@ -142,6 +142,10 @@
       <h2 id="cp-title">CHECKPOINT</h2>
       <p id="cp-summary"></p>
       <p class="cp-note">An approve only lets the build reach the gates — it can never ship a failing build. Request changes to send the work back for another pass.</p>
+      <div id="cp-edit-wrap" class="hidden">
+        <label>Next-iteration request <span class="hint">— edit before approving; REQUEST CHANGES builds YOUR text instead of the panel's</span></label>
+        <textarea id="cp-edit" rows="3"></textarea>
+      </div>
       <div class="dialog-actions">
         <button id="cp-approve" class="primary">APPROVE</button>
         <button id="cp-changes" class="warn">REQUEST CHANGES</button>

@@ -304,6 +304,9 @@ class Project:
     checkpoint_seq: int = 0          # monotonic id of the LATEST checkpoint reached
     pending_checkpoint: int | None = None  # the checkpoint awaiting a decision, if any
     decision_for: dict[int, str] = field(default_factory=dict)  # checkpoint id -> decision
+    decision_edit: dict[int, str] = field(default_factory=dict)  # checkpoint id -> edited text
+    # (the autopilot PROPOSAL checkpoint uses id -1 so it never collides with the
+    #  in-build stage checkpoints, which index from 0)
     seen_uris: set[str] = field(default_factory=set)
     status: str = "running"
     passed: bool = False  # final verdict (for elevator/reload rehydration)
@@ -751,13 +754,17 @@ def _log_sweeper() -> None:
             pass
 
 
-def _record_decision(p: Project, decision: str, checkpoint: int | None) -> tuple[bool, bool]:
+def _record_decision(
+    p: Project, decision: str, checkpoint: int | None, *, edit: str = ""
+) -> tuple[bool, bool]:
     """Record a checkpoint decision, FIRST-wins. Returns ``(applied, stale)``.
 
     ``stale`` is True when the decision names no current pause (already resolved,
     or a different checkpoint than the one awaiting) — a no-op. ``applied`` is True
     only for the FIRST decision on the awaiting checkpoint; later/duplicate clicks
-    from any device return ``(False, False)`` and simply watch the resolution play."""
+    from any device return ``(False, False)`` and simply watch the resolution play.
+    ``edit`` carries the human's amended text for an autopilot PROPOSAL checkpoint
+    (recorded only with the winning decision — a stale edit never applies)."""
     with p.cond:
         cidx = p.pending_checkpoint
         if checkpoint is not None and checkpoint != cidx:
@@ -767,6 +774,8 @@ def _record_decision(p: Project, decision: str, checkpoint: int | None) -> tuple
         if cidx in p.decision_for:
             return (False, False)         # someone already decided this one
         p.decision_for[cidx] = decision
+        if edit.strip():
+            p.decision_edit[cidx] = edit.strip()
         p.cond.notify_all()
         return (True, False)
 
@@ -1019,10 +1028,20 @@ def _maybe_autopilot_next(p: Project) -> None:
         ballots = ", ".join(
             f"{v.panelist}={v.scores[decision.winner_index]}" for v in decision.votes
         )
-        child = _spawn_iteration(p, request, p.autopilot_budget - 1)
+        proposal = None
+        if p.supervised:
+            # Gated/supervised: the IDEA itself is a checkpoint (approve /
+            # edit-then-approve / reject) BEFORE any model spend on the build.
+            proposal = {
+                "title": w.title, "rationale": w.rationale, "scope": w.scope,
+                "ballots": ballots, "request": request,
+            }
+        child = _spawn_iteration(p, request, p.autopilot_budget - 1, proposal=proposal)
         _emit(child, type="narrate",
               text=f"🧭 Autopilot chose “{w.title}” ({w.rationale}) — panel scores: "
-                   f"{ballots}. Building release {child.release_seq}…")
+                   f"{ballots}."
+                   + (" Awaiting your proposal decision…" if proposal
+                      else f" Building release {child.release_seq}…"))
 
     threading.Thread(target=_step, daemon=True).start()
 
@@ -1051,11 +1070,20 @@ def _autopilot_stop_note(p: Project, note: str) -> None:
     p.autopilot_note = note
 
 
-def _spawn_iteration(parent: Project, request: str, budget: int) -> Project:
+def _spawn_iteration(
+    parent: Project, request: str, budget: int, *, proposal: dict[str, Any] | None = None
+) -> Project:
     """Create + start the next release on the parent's floor (the same shape the
     POST /api/projects iterate path builds): spec inherited, base tree overlaid
     from the parent's CAS lineage inside _run_factory, mode/supervision inherited
-    so autonomous stays hands-off and gated keeps its human checkpoints."""
+    so autonomous stays hands-off and gated keeps its human checkpoints.
+
+    ``proposal`` (supervised floors): the build FIRST pauses on a PROPOSAL
+    checkpoint — the panel's chosen idea surfaces as approve / edit-then-approve
+    (the human's text becomes the request, both versions logged) / reject (the
+    loop stops, nothing is built). Uses the same first-decision-wins seam as the
+    stage checkpoints, id ``-1``, with the same auto-approve timeout so an absent
+    human never stalls the loop."""
     with _LOCK:
         release_seq = _STORE.max_release(parent.floor) + 1
     pid = uuid.uuid4().hex[:12]
@@ -1071,8 +1099,56 @@ def _spawn_iteration(parent: Project, request: str, budget: int) -> Project:
     )
     with _LOCK:
         _PROJECTS[pid] = p
-    threading.Thread(target=_gated_runner, args=(_run_factory, p), daemon=True).start()
+
+    def _runner() -> None:
+        if proposal is not None and not _proposal_approved(p, proposal):
+            return  # rejected: nothing built, the floor waits for manual steering
+        _gated_runner(_run_factory, p)
+
+    threading.Thread(target=_runner, daemon=True).start()
     return p
+
+
+_PROPOSAL_CHECKPOINT = -1  # never collides with the in-build stage checkpoints (0..)
+
+
+def _proposal_approved(p: Project, proposal: dict[str, Any]) -> bool:
+    """Surface the autopilot proposal as a decision; apply the human's verdict.
+
+    approve ⇒ build as proposed; needs_changes + edited text ⇒ the edit BECOMES
+    the request (both versions narrated — the audit trail keeps who chose what);
+    reject ⇒ stop (persisted halt, autopilot note). Timeout auto-approves, same
+    as every other checkpoint, so the AI keeps driving an unattended floor."""
+    with p.cond:
+        p.pending_checkpoint = _PROPOSAL_CHECKPOINT
+    _emit(p, type="checkpoint", boundary="autopilot_proposal",
+          title="AUTOPILOT PROPOSAL",
+          summary=f"{proposal['title']} — {proposal['rationale']} "
+                  f"(panel: {proposal['ballots']})")
+    _emit(p, type="await_decision", boundary="autopilot_proposal",
+          checkpoint=_PROPOSAL_CHECKPOINT, request=proposal["request"],
+          title=proposal["title"], scope=proposal["scope"], ballots=proposal["ballots"])
+    decision = _await_decision(p, _PROPOSAL_CHECKPOINT)
+    edit = p.decision_edit.get(_PROPOSAL_CHECKPOINT, "").strip()
+    with p.cond:
+        p.pending_checkpoint = None
+    _emit(p, type="resolved", boundary="autopilot_proposal", decision=decision)
+    if decision == "reject":
+        _emit(p, type="narrate", text="🛑 Proposal rejected — autopilot stopped. "
+                                      "Iterate manually to continue this floor.")
+        _emit(p, type="done", passed=False, phase="proposal_rejected")
+        p.status = "done"
+        p.autopilot_note = "autopilot stopped: proposal rejected by the human"
+        _persist(p)
+        _close(p)
+        return False
+    if decision == "needs_changes" and edit:
+        _emit(p, type="narrate",
+              text=f"✏️ Human amended the proposal. Panel proposed: “{p.request}” — "
+                   f"building instead: “{edit}”")
+        p.request = edit
+    _emit(p, type="narrate", text=f"✅ Proposal approved — building release {p.release_seq}…")
+    return True
 
 
 _STAGE_ORDER = ["defining requirements", "designing the system", "implementing",
@@ -1910,7 +1986,10 @@ class Handler(BaseHTTPRequestHandler):
             checkpoint = int(cp) if cp is not None else None
         except (TypeError, ValueError):
             checkpoint = None
-        applied, stale = _record_decision(p, decision, checkpoint)
+        # `request_edit` carries the human's amended next-iteration request for an
+        # autopilot PROPOSAL checkpoint (ignored by the stage checkpoints).
+        edit = str(body.get("request_edit", "") or "")[:4000]
+        applied, stale = _record_decision(p, decision, checkpoint, edit=edit)
         self._json(200, {"ok": not stale, "applied": applied, "stale": stale})
 
     def _stream(self, pid: str) -> None:

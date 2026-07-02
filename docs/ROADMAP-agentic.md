@@ -1,12 +1,24 @@
 # Roadmap: from gated slices to large autonomous builds
 
-> **Status (2026-07):** Phase 1a/1b/1d SHIPPED (`ClaudeCodeAdapter`, typed
-> sandbox credential grant, `claude-cli` → `claude-code` derivation, dual
-> Max/API billing). Phase 4 SHIPPED (criteria/design/unit spans in the
-> packet). Phase 2 applier SHIPPED (writes + deletes + context-verified
-> patches at the integration boundary); the shared-evolving-tree scheduling
-> half (tasks basing on the current merged tree, topological waves, real
-> conflict resolution) remains. Phase 1c, 3, 5, 6 not started.
+> **Status (2026-07): ALL SIX PHASES SHIPPED.**
+> 1a/1b/1d — `ClaudeCodeAdapter` (agentic `claude` in-sandbox), typed
+> credential grant (model-auth only; `AWS_*` never grantable), dual Max/API
+> billing, `claude-cli` → `claude-code` derivation. 1c — `ProxyAgentAdapter`
+> (multi-turn ReAct through the mediating proxy; trust story intact, any
+> backend). 2 — full patch application (writes/deletes/context-verified
+> patches) + the serial shared evolving tree (each task builds on its
+> predecessors' slices). 3 — verification profiles (python / node-web /
+> phaser-web / pygame / love2d / crypto / iac-terraform) + `SmokeGate`
+> runtime boot + smoke-aware boundary; `run(profile=...)`. 4 — criteria/
+> design/unit spans in the codegen packet. 5 — `foundry milestones`
+> subcommand: planned milestone list, full factory per milestone, released
+> trees chained via `base_dir`, per-milestone resume. 6 — `game`/`crypto`/
+> `infra` tighten-only packs (playability HITL, gated-only crypto release,
+> plan-review HITL + no hands-off deploy).
+> Remaining (deliberately): pooled-path sibling visibility (parallel waves +
+> real conflict resolution), asset generation/curation, browser-real Phaser
+> smoke (Playwright), and rung-by-rung benchmark validation (the ladder
+> below).
 
 Goal: Foundry should be able to build a large, complex, iteratively-grown
 project — **any** domain: the benchmark target is a full Stardew-style 2D game

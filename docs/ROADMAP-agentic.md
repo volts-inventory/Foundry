@@ -1,11 +1,15 @@
 # Roadmap: from gated slices to large autonomous builds
 
 Goal: Foundry should be able to build a large, complex, iteratively-grown
-project — the benchmark target is a **full Stardew-style 2D game** (graphics,
-gameplay systems, economy, save/load) — either gated or autonomously, with good
-results, on **either** a Max subscription (`claude -p`, no API billing) **or**
-the metered Anthropic API. The choice of billing path must be a config swap,
-never a code change.
+project — **any** domain: the benchmark target is a full Stardew-style 2D game
+(graphics, gameplay systems, economy, save/load), but the same pipeline must
+carry encryption software, AWS infrastructure, and other complex systems —
+either gated or autonomously, with good results, on **either** a Max
+subscription (`claude -p`, no API billing) **or** the metered Anthropic API.
+The choice of billing path must be a config swap, never a code change.
+Domain-specificity is confined to two seams: the **verification profile**
+(Phase 3) and the **domain pack** (Phase 6); Phases 1–2 and 4–5 are
+domain-agnostic by construction.
 
 ## Where the ceiling is today (assessment, 2026-07)
 
@@ -77,6 +81,23 @@ both paths**; the difference is only what auth reaches the subprocess:
   backends ("the credential locus moves"). Network denial for the subprocess
   is correspondingly relaxed to "Anthropic egress only" (dev-grade: documented;
   production: netns allowlist).
+- **Credential typology — the grant is typed, and only one type ever enters
+  the cage.** Generalizing beyond games (crypto software, AWS infra) forces a
+  distinction the mechanism must encode:
+  - *Model-auth grant* (`CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` /
+    `HOME` passthrough): the ONLY grant admissible during the
+    untrusted-execution phase. Blast radius = model spend/quota.
+  - *Target-system credentials* (`AWS_*`, deploy keys, kubeconfigs, signing
+    keys): **never enter the sandbox**, ever. Generated code must not be able
+    to touch real infrastructure. These belong exclusively to the
+    **credentialed phase** the architecture already defines (`sandbox.py`
+    docstring: the sandbox is destroyed and rebuilt between the untrusted
+    phase and any credentialed phase) — i.e. `terraform apply`/deploy runs as
+    a trusted post-gate step, driven by Foundry itself, only after gates pass
+    and per the mode posture (`assistant`/`gated` = human sign-off before
+    apply; `autonomous` hands-off deploy only where a pack doesn't veto it).
+    The deny patterns already block `AWS_*` — that stays absolute; every
+    grant issued is stamped with its type in the evidence pack.
 - **Cost enforcement per path:** metered runs keep `cost_budget_microusd`
   enforced from envelope `total_cost_usd`. Subscription runs report ~0 cost, so
   the binding budgets become `turn_budget` + the sandbox wall-clock cap —
@@ -129,10 +150,13 @@ first created, and the merged tree passes gates.
 
 ---
 
-## Phase 3 — Stack-appropriate gates ("green" must mean "it runs")
+## Phase 3 — Verification profiles ("green" must mean "it works")
 
-The two-zone runner already takes pinned commands; add per-stack `GateImpl`s
-selected from the planner's engine inference:
+Domain-neutral framing: the two-zone runner already takes pinned commands, so
+gates become **verification profiles** — a named bundle of build/test/E2E/
+security `GateImpl`s selected from the planner's stack inference, pinned at
+architecture time, recorded in the manifest. Games are just one profile; the
+same seam carries any complex software.
 
 - **web/React:** `npm ci && npm run build` (build gate), `npm test`
   (test gate), Playwright + bundled Chromium smoke (E2E).
@@ -143,12 +167,27 @@ selected from the planner's engine inference:
   logic.
 - **LÖVE/Godot:** gate on toolchain presence (`love .` / `godot --headless`);
   fail closed with a clear "toolchain missing" ERROR, never a silent pass.
-- Keep pytest/compileall as the Python default. Gate selection = pinned at
-  architecture time from the plan's engine choice, recorded in the manifest.
+- **crypto/encryption software:** policy gate — generated code MUST use vetted
+  primitives (`cryptography`, libsodium, age); hand-rolled ciphers/modes and
+  weak algorithms (ECB, MD5/SHA-1-for-auth, static IVs) fail closed via
+  pattern/AST rules in an extended SecurityGate. Correctness gates: known-
+  answer test vectors (NIST/RFC KATs) for every primitive touched, plus
+  property-based round-trip and tamper-detection tests (encrypt→decrypt
+  identity; modified ciphertext MUST fail authentication). Deterministic and
+  perfectly suited to the two-zone runner.
+- **AWS/IaC (Terraform, CDK, CloudFormation):** build gate =
+  `terraform fmt -check && terraform validate` (or `cdk synth`); security
+  gate = policy-as-code scan (checkov/tfsec/OPA — public S3, wildcard IAM,
+  unencrypted stores fail closed); E2E gate = `terraform plan` against
+  LocalStack or a sandbox account, asserting the plan applies cleanly and
+  matches declared resources. **`terraform apply` is NOT a gate** — deploy is
+  a post-gate, credentialed-phase action governed by mode (see below).
+- Keep pytest/compileall as the Python default profile.
 
 **Exit criteria:** a generated Phaser game that throws on frame 1 **fails**
 the E2E gate; one that runs 500 ticks passes, with a screenshot in the
-evidence pack.
+evidence pack. A generated crypto module with a hardcoded IV fails the policy
+gate; a Terraform stack with a public S3 bucket fails the policy scan.
 
 ---
 
@@ -190,16 +229,23 @@ Today the only "keep going" mechanism is the deepening loop (≤6 passes) and
 
 ---
 
-## Phase 6 — Assets & a `game` domain pack
+## Phase 6 — Assets & domain packs (game, crypto, infra)
 
 - **Assets first as curation, not generation:** a pinned CC0 asset-pack step
   (sprites/tilesets/audio) fetched at build time with digests recorded in the
   manifest; generation (sprite synthesis) later, behind the same seam.
-- **`game` domain pack** (`registry.register()` + `_PACK_FACTORIES`): packs
-  can only tighten, so it contributes governance — mandatory playability HITL
-  (modeled on the frontend pack's perceptual HITL), a required runtime-gate
-  key, and a mode veto for `autonomous` until Phase 3 gates exist for the
-  chosen engine. Capability itself lives in Phases 1–3, not the pack.
+- **Domain packs** (`registry.register()` + `_PACK_FACTORIES`): packs can only
+  tighten, so each contributes governance; capability lives in Phases 1–3.
+  - `game`: mandatory playability HITL (modeled on the frontend pack's
+    perceptual HITL), a required runtime-gate key, mode veto for `autonomous`
+    until Phase 3 gates exist for the chosen engine.
+  - `crypto`: requires the crypto verification profile (KAT + policy gates),
+    security-specialist approver-of-record, mode veto on `autonomous` release
+    of anything exporting a cryptographic API — human sign-off always.
+  - `infra`: requires the IaC profile, plan-artifact HITL before any apply,
+    approver-of-record for production targets, egress profile pinning deploys
+    to the credentialed phase (see Phase 1b credential typology). The existing
+    `RegulatedPack` is the template for all three.
 
 ---
 

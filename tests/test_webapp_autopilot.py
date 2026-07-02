@@ -73,6 +73,31 @@ def test_green_build_with_budget_spawns_panel_chosen_child(monkeypatch: Any) -> 
     assert wait_for(lambda: child.status == "done", timeout=120)
 
 
+def test_gated_supervised_child_inherits_human_checkpoints(monkeypatch: Any) -> None:
+    # BOTH modes get the Director+panel: a gated/supervised parent spawns a
+    # gated/supervised child — the AI keeps driving, the human keeps their
+    # checkpoint/sign-off intervention points.
+    decision = PanelDecision(
+        winner=Candidate(title="npc dialog", rationale="depth", scope="3 npcs"),
+        winner_index=0, mean_scores=(7.0,),
+        votes=(PanelVote(panelist="qa_lead", scores=(7,)),),
+    )
+    import foundry.lifecycle.autopilot as ap
+
+    monkeypatch.setattr(ap, "propose_candidates", lambda *a, **k: [decision.winner])
+    monkeypatch.setattr(ap, "run_panel", lambda *a, **k: list(decision.votes))
+    monkeypatch.setattr(ap, "tally", lambda *a, **k: decision)
+
+    p = finished_project(autopilot_budget=1, mode="gated", supervised=True)
+    before = set(server._PROJECTS)
+    _maybe_autopilot_next(p)
+    assert wait_for(lambda: set(server._PROJECTS) - before), "no child spawned"
+    child = server._PROJECTS[(set(server._PROJECTS) - before).pop()]
+    assert child.mode == "gated" and child.supervised is True  # human stays in the loop
+    assert child.autopilot_budget == 0  # last iteration: the loop ends after this
+    assert wait_for(lambda: child.status == "done", timeout=120)
+
+
 def test_panel_decline_stops_with_a_recorded_note(monkeypatch: Any) -> None:
     import foundry.lifecycle.autopilot as ap
 

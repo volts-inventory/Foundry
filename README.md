@@ -143,7 +143,8 @@ python -m foundry.cli autopilot "<target>" --out DIR [OPTIONS]
 7. [Feeding a spec](#6-feeding-a-spec)
 8. [Common flags](#7-common-flags)
 9. [Evolve an existing repo](#8-evolve-an-existing-repo)
-10. [Full autonomy: milestones & autopilot](#full-autonomy-milestones--autopilot)
+10. [Worked example — the moon-colony game](#worked-example--the-moon-colony-game)
+11. [Full autonomy: milestones & autopilot](#full-autonomy-milestones--autopilot)
 11. [Workshop UI](#9-workshop-ui)
 11. [Run it as a long-lived server](#10-run-it-as-a-long-lived-server)
 12. [Develop](#11-develop)
@@ -433,6 +434,69 @@ python -m foundry.cli evolve ./out "loosen the auth gate" \
 python -m foundry.cli evolve ./out "add caching" --apply ./changes --strict
 echo $?                              # non-zero if NOT released
 ```
+
+---
+
+## Worked example — the moon-colony game
+
+One target, both surfaces: **"a stardew-style farming game about colonizing
+the moon, pygame"**.
+
+### CLI
+
+```bash
+# 1. One gated increment (the walking skeleton), on your Max plan:
+python -m foundry.cli "a stardew-style farming game about colonizing the moon, pygame" \
+  --backend claude-cli --mode gated --out ~/moon-colony \
+  --state-dir ~/foundry/state --packs game
+#    the request selects the PYGAME verification profile automatically: build =
+#    compileall, test = pytest, smoke = `python smoke.py` (the game must boot
+#    headless and survive 120 frames or the boundary routes back to fix)
+
+# 2. The whole game, milestone by milestone (engine → world → farming →
+#    economy → save/load — the model plans the ladder), fully unattended:
+python -m foundry.cli milestones \
+  "a stardew-style farming game about colonizing the moon, pygame" \
+  --out ~/moon-colony --backend claude-cli --mode autonomous \
+  --state-dir ~/foundry/state
+#    each milestone releases into ~/moon-colony/mNN and seeds the next; a kill
+#    resumes at the milestone it died in; the first red gate stops the ladder
+
+# 3. Keep improving it after the target is met — the Director proposes,
+#    the software/usability panel votes, the winner builds next:
+python -m foundry.cli autopilot \
+  "a stardew-style farming game about colonizing the moon, pygame" \
+  --out ~/moon-colony-iterations --backend claude-cli --iterations 5
+
+# 4. Play it:
+cd ~/moon-colony/m05 && pip install pygame && python main.py
+```
+
+### Workshop UI
+
+1. `python -m webapp.server` → http://localhost:8765 → **New project**.
+2. Request: *a stardew-style farming game about colonizing the moon, pygame*.
+   Backend **claude-cli** (the substrate auto-flips to **claude-code**, the
+   agentic coder on your Max plan). Packs: **game** — playability now requires
+   YOUR recorded sign-off and hands-off release is vetoed. Mode **gated**,
+   Supervised on. **Autopilot: 5**.
+3. Watch the floor: requirements → design checkpoints ask for your approve;
+   the engineers build in sandboxes (each task sees the spec, the criteria,
+   and its predecessors' code); the gate row shows **build / test / smoke**
+   pills — smoke red means the game didn't survive its 120 headless frames,
+   and the failure feeds the next fix attempt automatically.
+4. On green you sign off; then the Autopilot narration appears: *"Autopilot
+   chose 'save slots' (retention) — panel scores: staff_engineer=8,
+   usability_designer=9, product_designer=7, qa_lead=8. Building release 2…"*
+   Each iteration lands as the next release on the SAME floor with the ballot
+   in its log. If the panel declines everything, the loop stops and the floor
+   waits for you to iterate manually.
+5. Open **REPO** to browse or export the tree — or grab the zip and
+   `python main.py`.
+
+Same flow with **mode autonomous + Supervised off**: no checkpoints, no
+sign-offs, the trust-root chain releases, and you come back to five stacked
+releases with the panel's reasoning recorded on each.
 
 ---
 

@@ -389,9 +389,13 @@ def autopilot(
         evidence = "\n".join(
             f"iteration {r.index}: RELEASED — {r.request}" for r in records if r.passed
         )
-        candidates = propose_candidates(proxy, target, evidence)
-        votes = run_panel(proxy, target, evidence, candidates, panel=panel)
-        decision = tally(candidates, votes, min_score=min_score)
+        try:
+            candidates = propose_candidates(proxy, target, evidence)
+            votes = run_panel(proxy, target, evidence, candidates, panel=panel)
+            decision = tally(candidates, votes, min_score=min_score)
+        except Exception as exc:  # ideation is ADVISORY: stop gracefully, never crash
+            stopped = f"ideation failed after iteration {i} ({exc}) — released work stands"
+            break
         if decision.declined:
             stopped = "panel declined every candidate — human steering needed"
             break

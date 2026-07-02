@@ -98,7 +98,9 @@
         <label>Coding substrate</label>
         <select id="adapter-select">
           <option value="stub">stub — deterministic no-op (smoke/demo)</option>
-          <option value="raw-react">raw-react — code via the chosen backend</option>
+          <option value="raw-react">raw-react — one completion per task via the chosen backend</option>
+          <option value="claude-code">claude-code — AGENTIC: claude edits/builds/tests in the sandbox (Max plan or API)</option>
+          <option value="proxy-agent">proxy-agent — agentic loop through the proxy (any backend, key stays outside)</option>
         </select>
       </div>
       <label>Worker pool <span class="hint">— max parallel IC workers (blank = automatic)</span></label>
@@ -111,7 +113,7 @@
       <label>Cost cap (USD) <span class="hint">— max model spend (metered API backends only)</span></label>
       <input id="cap-input" type="number" min="0" step="0.01" placeholder="no cap" />
       <label>Domain packs (optional, comma-separated)</label>
-      <input id="packs-input" type="text" placeholder="regulated, ml_data, frontend" />
+      <input id="packs-input" type="text" placeholder="regulated, ml_data, frontend, game, crypto, infra" />
       <label class="check"><input type="checkbox" id="supervised" checked /> Supervised (CTO approves each checkpoint)</label>
       <p class="hint" id="supervised-hint"></p>
       <p class="hint">A multi-service request (e.g. a site with users + posts) is auto-built as a PLATFORM — split into web / backend / data services (the backend owns the REST API, auth &amp; domain logic), each auto-deepened, then stitched into one monorepo. A single thing builds as one service.</p>

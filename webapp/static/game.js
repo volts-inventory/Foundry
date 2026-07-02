@@ -94,7 +94,7 @@ const ROSTER = {
   qa:["QA Engineer","SDET","Reviewer","Technical Writer"],
   security:["AppSec Engineer","Audit & Compliance","Supply-chain Reviewer"],
 };
-const GATE_ORDER = ["spec","build","test","review","security","audit","supply_chain","e2e"];
+const GATE_ORDER = ["spec","build","test","smoke","review","security","audit","supply_chain","e2e"];
 const AGENT_ROOM = {}; for (const rm in ROSTER) for (const nm of ROSTER[rm]) AGENT_ROOM[nm] = rm;
 // Per-area accent (shared by the org board, the Tech-Leads, and the area-expert
 // IC pool) so frontend/backend/data/… read the same colour everywhere.
@@ -2489,10 +2489,15 @@ function syncCostCap(){
   cap.placeholder = metered ? "no cap" : `${backend} isn't metered — no USD cost`;
   if(!metered) cap.value = "";
 }
-// Coding substrate derived from the backend (CLI parity): mock→stub no-op, any
-// real backend→raw-react (real code). A user who manually picks an adapter pins
-// it (adapterTouched), so derivation never clobbers an explicit choice.
-function defaultAdapterFor(backend){ return backend==="mock" ? "stub" : "raw-react"; }
+// Coding substrate derived from the backend (CLI parity): mock→stub no-op,
+// claude-cli→claude-code (AGENTIC: claude edits/builds/tests inside the task
+// sandbox), other real backends→raw-react (one completion → one diff). A user who
+// manually picks an adapter pins it (adapterTouched), so derivation never
+// clobbers an explicit choice.
+function defaultAdapterFor(backend){
+  if(backend==="mock") return "stub";
+  return backend==="claude-cli" ? "claude-code" : "raw-react";
+}
 let adapterTouched = false;
 function syncAdapter(){
   const asel = document.getElementById("adapter-select");

@@ -138,8 +138,9 @@ def test_deletion_and_binary_are_triaged_not_dropped(source_dir: Path) -> None:
         result = adapter.run(make_packet(sb.worktree), sb)
         body = json.loads(sb.get_blob(result.diff_uri))
     assert body["files"] == {}
+    assert body["deleted"] == ["gone.py"]  # integration unlinks it (Phase 2)
     notes = [t.explanation for t in result.triage]
-    assert any("gone.py" in n and "NOT integrated" in n for n in notes)
+    assert any("gone.py" in n and "deleted" in n for n in notes)
     assert any("img.png" in n and "binary" in n for n in notes)
 
 

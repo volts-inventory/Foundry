@@ -20,8 +20,9 @@ Contract mapping:
   (``{"kind": "full-file-snapshot", "files": {path: content}}``) — the exact
   body shape ``gate_wiring._diff_files`` materializes directly, which is what
   lets MODIFIED files integrate (the additions-only unified-diff parser is not
-  in this path). Deletions and non-UTF-8 (binary) files are surfaced as triage
-  notes, not silently dropped (Phase 2 extends integration to consume them).
+  in this path). Deletions ride the snapshot's ``deleted`` list (integration
+  unlinks them); non-UTF-8 (binary) files are surfaced as triage notes, not
+  silently dropped (the asset pipeline is ROADMAP Phase 6).
 * **lineage** — the served model is observed from the envelope's ``modelUsage``
   and carried in ``adapter_self_reported_model``; it stays IGNORED for lineage
   per arch §2b (with a CLI substrate the credential locus moves into the cage —
@@ -262,11 +263,10 @@ class ClaudeCodeAdapter:
             summary = raw if isinstance(raw, str) else ""
 
         authored, deleted, skipped_binary = changed_files(before, after)
-        blob = json.dumps(
-            {"kind": "full-file-snapshot", "files": authored},
-            sort_keys=True,
-            ensure_ascii=False,
-        )
+        payload: dict[str, Any] = {"kind": "full-file-snapshot", "files": authored}
+        if deleted:
+            payload["deleted"] = deleted  # integration unlinks these (Phase 2)
+        blob = json.dumps(payload, sort_keys=True, ensure_ascii=False)
         diff_uri = sandbox.put_blob(blob.encode("utf-8"))
 
         notes = self._triage_notes(summary, sandbox, deleted, skipped_binary, envelope)
@@ -309,7 +309,7 @@ class ClaudeCodeAdapter:
             if line.strip().startswith("TRIAGE:")
         ]
         for path in deleted:
-            notes.append(f"deleted in worktree but NOT integrated (Phase-2 gap): {path}")
+            notes.append(f"deleted from the tree slice: {path}")
         for path in skipped_binary:
             notes.append(f"non-UTF-8 (binary) file skipped from snapshot slice: {path}")
         cost = envelope.get("total_cost_usd")

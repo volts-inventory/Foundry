@@ -172,6 +172,12 @@ def _build_one(
                 cost_cap_microusd=cost_cap_microusd,
                 base_dir=base,                       # build on the prior pass's tree
                 progress_cb=node_progress,
+                # The platform path owns per-service verification via its
+                # deepening/critic loop + service templates; the single-repo
+                # stack-profile inference (ROADMAP Phase 3) stays off here so a
+                # "React web" service request doesn't pin npm gates against a
+                # dev-grade skeleton tree.
+                profile=None,
             )
         except Exception as exc:  # a service failing to build must not sink the platform
             return ServiceResult(

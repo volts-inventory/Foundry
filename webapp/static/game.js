@@ -2252,6 +2252,21 @@ function syncStartFrom(){
   if(iterating && (req.value.trim()===""||req.value.trim()===SEED_REQ)){
     req.value=""; req.placeholder="e.g. add link expiry + custom slugs, and rate-limit by IP";
   }
+  // Iterate → pre-fill the converse draft with the PARENT's saved spec, so a new
+  // conversation with the leads EXTENDS it (and the release saves it cumulatively).
+  // Guarded by !chatDraft so it never clobbers an in-progress draft.
+  if(iterating){
+    fetch("/api/spec/"+startFromSel.value).then(r=>r.ok?r.json():{spec:"",built:""})
+      .then(d=>{
+        if(typeof d.spec==="string" && d.spec.trim() && !chatDraft.trim()){
+          chatDraft=d.spec;
+          const el=document.getElementById("chat-spec"); if(el) el.textContent=chatDraft;
+        }
+        iterBuilt = (typeof d.built==="string") ? d.built : "";   // seeds the leads on iterate
+      }).catch(()=>{});
+  } else {
+    iterBuilt = "";
+  }
 }
 startFromSel.addEventListener("change", syncStartFrom);
 function showNewModal(parentId){
@@ -2296,7 +2311,7 @@ for(const r of document.querySelectorAll('input[name="intake"]')){
   });
 }
 // ---- spec chat with the leads (intake mode "chat") -------------------------
-let chatSession = null, chatDraft = "";
+let chatSession = null, chatDraft = "", iterBuilt = "";
 function appendChatTurn(role, text){
   const log = document.getElementById("chat-log");
   const cls = role === "user" ? "user" : (role === "system" ? "system" : "lead");
@@ -2315,8 +2330,14 @@ function sendChat(){
   appendChatTurn("user", msg);
   appendChatTurn("system", "…leads are thinking…");
   const backend = document.getElementById("backend-select").value;
+  // On the FIRST turn of an iterate, seed the session with the inherited spec
+  // (what it SHOULD be) and what the last build actually produced (what's DONE),
+  // so the leads EXTEND the spec and focus the new work on the gaps.
+  const seedSpec  = (!chatSession && chatDraft.trim()) ? chatDraft : undefined;
+  const seedBuilt = (!chatSession && iterBuilt.trim()) ? iterBuilt : undefined;
   fetch("/api/ideate", {method:"POST", headers:postHeaders(),
-    body: JSON.stringify({session:chatSession, message:msg, backend})})
+    body: JSON.stringify({session:chatSession, message:msg, backend,
+                          base_spec:seedSpec, base_built:seedBuilt})})
    .then(r=>r.json())
    .then(d=>{
      // drop the "thinking…" placeholder
@@ -2379,7 +2400,7 @@ document.getElementById("start-btn").onclick=async ()=>{
   newModal.classList.add("hidden");
   newProject(req, mode, sup, backend, packs, extra);
   // reset the chat for the next project
-  chatSession=null; chatDraft="";
+  chatSession=null; chatDraft=""; iterBuilt="";
   document.getElementById("chat-log").innerHTML="";
   document.getElementById("chat-spec").textContent="(nothing yet)";
 };

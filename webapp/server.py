@@ -206,7 +206,10 @@ _LEADS_SOP = (
     "important clarifying question, surface a risk, or propose a concrete "
     "capability / acceptance criterion. Then output spec_markdown: the CURRENT best "
     "full draft spec (goals, constraints, interfaces, acceptance criteria) "
-    "reflecting the whole conversation so far. Reply with JSON only."
+    "reflecting the whole conversation so far. If a prior spec and a summary of "
+    "what a previous build already produced are given, treat the spec as the "
+    "target and focus the new round on the GAPS and the requested changes — do "
+    "not re-propose what is already built. Reply with JSON only."
 )
 _CHAT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -266,6 +269,7 @@ class Project:
     adapter: str = "stub"  # coding substrate (see foundry.cli.ADAPTERS)
     packs: list[str] = field(default_factory=list)
     spec: str | None = None  # literal spec text OR a dir of uploaded docs (run(spec=))
+    spec_text: str = ""  # the literal spec (converse/paste), cataloged so an iterate inherits + extends it
     max_slots: int = 4  # IC-pool CEILING (= cli.AUTO_SLOTS_CAP); the system sizes
     # actual parallelism to the lead's decomposition (min(tasks, this)).
     cost_cap_microusd: int | None = None  # global spend envelope (Wave D)
@@ -361,6 +365,7 @@ def _build_record(p: "Project") -> dict[str, Any]:
         "passed": p.passed, "gates": p.gates,
         "out_base": str(p.out_base) if p.out_base else None,
         "created_at": p.created_at,
+        "spec_text": p.spec_text,
     }
 
 
@@ -408,6 +413,7 @@ def _load_persisted() -> None:
                     parent_id=row.get("parent_id"),
                     out_base=Path(ob) if ob else None,
                     created_at=str(row.get("created_at") or ""),
+                    spec_text=str(row.get("spec_text") or ""),
                 )
                 try:
                     p.log = _STORE.events_of(p.id)   # the durable replay log
@@ -509,6 +515,35 @@ def _read_repo_cached(pid: str) -> Repo | None:
 def _invalidate_repo(pid: str) -> None:
     with _REPO_CACHE_LOCK:
         _REPO_CACHE.pop(pid, None)
+
+
+def _build_summary(pid: str) -> str:
+    """A concise 'what the last build actually produced' digest — gate outcomes,
+    implemented features, and the file manifest — so an iterate knows what is
+    already DONE (vs. what the accumulated spec still calls for). Empty string when
+    there's nothing readable yet."""
+    rec = _STORE.get(pid) or {}
+    repo = _read_repo_cached(pid)
+    lines: list[str] = []
+    passed = rec.get("passed")
+    if passed is not None:
+        verdict = "passed the gates" if passed else "did NOT pass the gates"
+        lines.append(f"Release r{rec.get('release_seq', '?')} {verdict}.")
+    if repo is not None:
+        if repo.checks:
+            checks = ", ".join(f"{c.name} {'PASS' if c.ok else c.status.upper()}" for c in repo.checks)
+            lines.append(f"Gate checks: {checks}.")
+        feats = [d.summary for d in repo.diffs if d.summary and d.summary != "(feature diff)"]
+        if feats:
+            shown = "; ".join(feats[:12])
+            lines.append("Implemented: " + shown + ("…" if len(feats) > 12 else "") + ".")
+        if repo.files:
+            paths = [f.path for f in repo.files]
+            top = sorted({p.split("/")[0] for p in paths})
+            lines.append(f"{len(paths)} file(s) across: {', '.join(top[:20])}.")
+    if not lines:
+        return ""
+    return "## What the last build actually produced\n\n" + "\n".join(f"- {ln}" for ln in lines)
 
 
 def _sign_offs_payload(repo: "Repo | None") -> list[dict[str, Any]]:
@@ -1193,6 +1228,9 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/repo/"):
             self._repo_meta(path.rsplit("/", 1)[-1])
             return
+        if path.startswith("/api/spec/"):
+            self._get_spec(path.rsplit("/", 1)[-1])
+            return
         if path.startswith("/api/files/"):
             self._list_files(path.rsplit("/", 1)[-1])
             return
@@ -1438,6 +1476,18 @@ class Handler(BaseHTTPRequestHandler):
         ]
         self._json(200, {"builds": builds})
 
+    def _get_spec(self, pid: str) -> None:
+        """The saved spec + a 'what was built' digest for a build. On iterate the UI
+        pre-fills the converse draft with the parent's ``spec`` (what it SHOULD be)
+        and seeds the round-table with ``built`` (what was actually COMPLETED), so
+        the leads reason about the remaining gap."""
+        p = _PROJECTS.get(pid)
+        spec = p.spec_text if p is not None else ""
+        if not spec:
+            rec = _STORE.get(pid)
+            spec = str((rec or {}).get("spec_text") or "")
+        self._json(200, {"id": pid, "spec": spec, "built": _build_summary(pid)})
+
     def _list_releases(self, floor_s: str) -> None:
         """Every release of one floor (project), newest first — release history."""
         try:
@@ -1527,6 +1577,22 @@ class Handler(BaseHTTPRequestHandler):
         if backend not in BACKENDS:
             backend = "mock"
         chat = _CHATS.setdefault(session, {"history": [], "spec": ""})
+        # Iterate seed: on a NEW session, an inherited base spec (the parent's saved
+        # spec) primes the round-table so it EXTENDS that spec instead of drafting
+        # from scratch. Recorded as prior context + the current draft.
+        base_spec = str(body.get("base_spec", "")).strip()
+        base_built = str(body.get("base_built", "")).strip()
+        if (base_spec or base_built) and not chat["history"] and not chat["spec"]:
+            if base_spec:
+                chat["spec"] = base_spec
+                chat["history"].append(
+                    {"role": "lead", "text": f"[Prior spec to extend]\n{base_spec}"}
+                )
+            if base_built:
+                chat["history"].append(
+                    {"role": "lead", "text": f"[What was already built — focus the "
+                                             f"new work on the gaps]\n{base_built}"}
+                )
         if message:
             chat["history"].append({"role": "user", "text": message})
         try:
@@ -1627,9 +1693,17 @@ class Handler(BaseHTTPRequestHandler):
             release_seq = 1
         pid = uuid.uuid4().hex[:12]
         out_base = _OUTPUT_ROOT / f"floor-{floor}" / f"r{release_seq}"
-        # Spec input: pasted text (literal), else an uploaded docs-zip (a dir),
-        # else the PARENT's design docs (iterate), else None (request alone).
-        spec: str | None = spec_text or None
+        # Spec text is SAVED per build and INHERITED on iterate: a new release with
+        # no fresh spec reuses the parent's saved spec; with a fresh spec (the
+        # converse draft is pre-filled from the parent, so it already carries the
+        # prior spec PLUS this round's additions) that extended draft supersedes it.
+        # Either way the release's spec_text is the cumulative spec, saved for the
+        # NEXT iterate to build on.
+        parent_spec_text = str(parent.get("spec_text") or "") if parent else ""
+        effective_spec_text = spec_text or parent_spec_text
+        # Spec input: the effective spec TEXT (literal), else an uploaded docs-zip (a
+        # dir), else the PARENT's design docs (iterate), else None (request alone).
+        spec: str | None = effective_spec_text or None
         if spec is None and isinstance(spec_zip_b64, str) and spec_zip_b64.strip():
             try:
                 spec_dir = out_base / "spec-in"
@@ -1648,6 +1722,7 @@ class Handler(BaseHTTPRequestHandler):
         p = Project(
             id=pid, request=request, mode=mode, supervised=supervised, floor=floor,
             release_seq=release_seq, backend=backend, adapter=adapter, packs=packs, spec=spec,
+            spec_text=effective_spec_text,
             out_base=out_base, max_slots=max_slots, cost_cap_microusd=cost_cap_microusd,
             max_fix_attempts=max_fix_attempts, parent_id=parent_id, base_dir=base_dir,
         )

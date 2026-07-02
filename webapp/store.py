@@ -16,6 +16,7 @@ it (``pull the referenced repo from the database`` = look up the row, read its
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import threading
@@ -39,7 +40,8 @@ CREATE TABLE IF NOT EXISTS builds (
   passed           INTEGER,
   gates            TEXT,   -- json: {name: {status, attested, advisory}}
   out_base         TEXT,
-  created_at       TEXT
+  created_at       TEXT,
+  spec_text        TEXT    -- literal spec (converse/paste); inherited + extended on iterate
 );
 -- The append-only game-event log per build (the SSE stream's durable backing).
 -- Persisting it lets ANY device replay a build's whole story after a reconnect or
@@ -63,7 +65,7 @@ CREATE TABLE IF NOT EXISTS seen_uris (
 _COLS = (
     "id", "floor", "release_seq", "parent_id", "request", "mode", "backend",
     "adapter", "supervised", "slots", "max_fix_attempts", "status", "passed",
-    "gates", "out_base", "created_at",
+    "gates", "out_base", "created_at", "spec_text",
 )
 
 
@@ -86,8 +88,11 @@ class BuildStore:
         """Add columns introduced after a DB was first created (CREATE TABLE IF NOT
         EXISTS never alters an existing table). Idempotent; runs under the lock."""
         have = {r["name"] for r in self._conn.execute("PRAGMA table_info(builds)")}
-        if "adapter" not in have:
-            self._conn.execute("ALTER TABLE builds ADD COLUMN adapter TEXT")
+        for col in ("adapter", "spec_text"):
+            if col not in have:
+                # suppress: another connection may add it first (shared-file race) — idempotent
+                with contextlib.suppress(sqlite3.OperationalError):
+                    self._conn.execute(f"ALTER TABLE builds ADD COLUMN {col} TEXT")
 
     def upsert(self, rec: dict[str, Any]) -> None:
         """Insert or replace one build row. ``gates`` is JSON-encoded."""

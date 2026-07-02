@@ -1,5 +1,13 @@
 # Roadmap: from gated slices to large autonomous builds
 
+> **Status (2026-07):** Phase 1a/1b/1d SHIPPED (`ClaudeCodeAdapter`, typed
+> sandbox credential grant, `claude-cli` → `claude-code` derivation, dual
+> Max/API billing). Phase 4 SHIPPED (criteria/design/unit spans in the
+> packet). Phase 2 applier SHIPPED (writes + deletes + context-verified
+> patches at the integration boundary); the shared-evolving-tree scheduling
+> half (tasks basing on the current merged tree, topological waves, real
+> conflict resolution) remains. Phase 1c, 3, 5, 6 not started.
+
 Goal: Foundry should be able to build a large, complex, iteratively-grown
 project — **any** domain: the benchmark target is a full Stardew-style 2D game
 (graphics, gameplay systems, economy, save/load), but the same pipeline must

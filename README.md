@@ -60,9 +60,9 @@ python -m foundry.cli [OPTIONS] "<one-line request>"   # build a GitHub-ready re
 
 # ── Model egress & code generation (orthogonal seams) ─────────────────────────
   --backend <claude-cli|anthropic|openai|codex|ollama-gemma>  # WHERE model calls go (the "brain")   (set one; e.g. claude-cli)
-  --adapter <stub|raw-react>                                # WHAT writes the code (the "hands"); usually OMIT — it's DERIVED from --backend
-                                                            #   omitted ⇒ any backend→raw-react (real code); stub is no-op
-                                                            #   raw-react writes code via `claude -p` (claude-cli) or the Anthropic API (anthropic)
+  --adapter <stub|raw-react|claude-code>                    # WHAT writes the code (the "hands"); usually OMIT — it's DERIVED from --backend
+                                                            #   omitted ⇒ claude-cli→claude-code (AGENTIC: edits/builds/tests in the sandbox),
+                                                            #   other real backends→raw-react (one completion → one diff); stub is no-op
 
 # ── Inputs ────────────────────────────────────────────────────────────────────
   --spec <FILE|DIR>          # ground the build with a spec (or run from a spec ALONE, no one-liner); REPEATABLE   (default: none)
@@ -282,7 +282,8 @@ export FOUNDRY_OLLAMA_URL=http://localhost:11434
 python -m foundry.cli "build a todo API" --backend ollama-gemma --out ./out
 ```
 
-Any backend writes real code automatically — the adapter is derived as `raw-react`,
+Any backend writes real code automatically — the adapter is derived from the
+backend (`claude-cli` → the agentic `claude-code`; other real backends → `raw-react`),
 so you don't need a second flag (override only when you want something else; see §5).
 In the Workshop UI, the backend is a dropdown; `FOUNDRY_MODEL_BACKEND` only sets
 which option is preselected (§9).
@@ -292,30 +293,34 @@ which option is preselected (§9).
 ## 5. Choosing a coding substrate (`--adapter`)
 
 The adapter is what actually writes the code. **You normally omit it** — it's
-derived from `--backend` (any backend → `raw-react`), so picking a backend already
-writes real code. Set `--adapter` only to override that default.
+derived from `--backend` (`claude-cli` → `claude-code` agentic; other real backends →
+`raw-react`), so picking a backend already writes real code. Set `--adapter` only to
+override that default. `FOUNDRY_CODING_ADAPTER` overrides the derivation env-side.
 
 ```bash
-# 1. Derived (recommended) — omit --adapter; a real backend ⇒ raw-react writes code
-python -m foundry.cli "build a dice roller" --backend anthropic --out ./out
+# 1. Derived (recommended) — omit --adapter; claude-cli ⇒ the AGENTIC claude-code
+#    substrate: claude runs multi-turn INSIDE the task sandbox, editing files and
+#    running builds/tests itself (your Max plan or an API key — see the auth note).
+python -m foundry.cli "build a dice roller" --backend claude-cli --out ./out
 
 # 2. Override: stub — force the deterministic no-op even on a real backend
 #    (exercises the proxy / lineage / determinism path WITHOUT generating code)
 python -m foundry.cli "build a dice roller" \
   --backend anthropic --adapter stub --out ./out
 
-# 3. Override: raw-react explicitly — the universal completion substrate over ANY
-#    backend. `--backend claude-cli` here writes code via `claude -p` (completion only).
+# 3. Override: raw-react — the universal one-completion substrate over ANY backend.
+#    `--backend claude-cli` here writes code via `claude -p` used AS a completion.
 python -m foundry.cli "build a dice roller" \
   --backend claude-cli --adapter raw-react --out ./out
 ```
 
-**The two substrates:**
+**The three substrates:**
 
 | Adapter | Kind | Writes code? | Notes |
 |---|---|---|---|
 | `stub` | no-op | no | structure only (smoke/CI; exercises the proxy without generating code) |
-| `raw-react` | raw completion, **any** backend | yes | the derived default; writes code via `claude -p` (`claude-cli`) or the Anthropic API (`anthropic`) |
+| `raw-react` | raw completion, **any** backend | yes | one completion → one diff; writes code via `claude -p` (`claude-cli`) or the Anthropic API (`anthropic`) |
+| `claude-code` | **agentic**, `claude` CLI | yes | the derived default for `claude-cli`: multi-turn inside the task sandbox — edits files, runs builds/tests, iterates. Auth via the sandbox's typed model-auth grant: your cached `claude /login` session or `CLAUDE_CODE_OAUTH_TOKEN` (Max plan, no API billing), or `ANTHROPIC_API_KEY` (metered). Target-system credentials (`AWS_*`, deploy keys) can never enter the sandbox. |
 
 ---
 
@@ -525,7 +530,7 @@ rm -rf .pytest_cache .mypy_cache .ruff_cache ./.run spec.md  # clean caches + ou
 |---|---|---|
 | `--mode` | `assistant` · `gated` · `autonomous` | `assistant` |
 | `--backend` | `claude-cli` · `anthropic` · `openai` · `codex` · `ollama-gemma` | set one (e.g. `claude-cli`) |
-| `--adapter` | `stub` · `raw-react` | derived from `--backend` (any backend → `raw-react`) |
+| `--adapter` | `stub` · `raw-react` · `claude-code` | derived from `--backend` (`claude-cli` → `claude-code`; other real backends → `raw-react`) |
 | `--spec FILE\|DIR` | spec input (repeatable) | — |
 | `--packs a,b` | domain packs (`regulated` · `ml_data` · `frontend`) | — |
 | `--docs DIR` | generated doc-set output | — |

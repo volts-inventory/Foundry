@@ -39,6 +39,7 @@ def test_every_adapter_constructs(proxy: Any) -> None:
     assert by_name == {
         "stub": "StubAdapter",
         "raw-react": "RawReactAdapter",
+        "claude-code": "ClaudeCodeAdapter",
     }
 
 
@@ -55,22 +56,33 @@ def test_unknown_adapter_name_raises(proxy: Any) -> None:
 # ---- derived default: --adapter omitted ⇒ substrate follows --backend --------
 
 
-def test_default_adapter_is_derived_from_backend() -> None:
-    # mock has no real model ⇒ the deterministic stub; every REAL backend ⇒ raw-react
-    # (the universal completion substrate). claude-cli writes code via `claude -p` used
-    # AS a completion endpoint; anthropic via the Anthropic API.
+def test_default_adapter_is_derived_from_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    # mock has no real model ⇒ the deterministic stub. claude-cli — whose substrate
+    # binary IS Claude Code — derives the AGENTIC claude-code adapter (ROADMAP 1a/1d:
+    # same binary, same auth, multi-turn inner loop). Every other real backend ⇒
+    # raw-react (the universal completion substrate).
+    monkeypatch.delenv("FOUNDRY_CODING_ADAPTER", raising=False)
     assert _default_adapter_for("mock") == "stub"
     assert _default_adapter_for("anthropic") == "raw-react"
     assert _default_adapter_for("openai") == "raw-react"
-    assert _default_adapter_for("claude-cli") == "raw-react"
+    assert _default_adapter_for("claude-cli") == "claude-code"
     assert _default_adapter_for("codex") == "raw-react"
     assert _default_adapter_for("ollama-gemma") == "raw-react"
 
 
-def test_only_stub_and_raw_react_are_offered() -> None:
-    # The agentic Claude Code substrate is removed: the only substrates are the
-    # deterministic stub and the provider-agnostic raw-react completion adapter.
-    assert set(ADAPTERS) == {"stub", "raw-react"}
+def test_foundry_adapter_env_overrides_derivation(monkeypatch: pytest.MonkeyPatch) -> None:
+    # FOUNDRY_CODING_ADAPTER (a known adapter name) overrides the backend derivation —
+    # config-side opt-out of the agentic default without a per-call flag.
+    monkeypatch.setenv("FOUNDRY_CODING_ADAPTER", "raw-react")
+    assert _default_adapter_for("claude-cli") == "raw-react"
+    monkeypatch.setenv("FOUNDRY_CODING_ADAPTER", "bogus")  # unknown ⇒ ignored, derivation wins
+    assert _default_adapter_for("claude-cli") == "claude-code"
+
+
+def test_offered_adapters() -> None:
+    # Three substrates: the deterministic stub, the provider-agnostic raw-react
+    # completion adapter, and the agentic claude-code substrate (ROADMAP Phase 1a).
+    assert set(ADAPTERS) == {"stub", "raw-react", "claude-code"}
 
 
 def test_run_with_mock_backend_and_no_adapter_stays_stub() -> None:

@@ -301,6 +301,23 @@ def execution_task_for(
     )
 
 
+def _sandbox_for(rt: AgentRuntime, source_dir: str, snapshot_store: str | None) -> Sandbox:
+    """Build the per-task Sandbox honoring the adapter's DECLARED model-auth needs.
+
+    An agentic CLI substrate (claude-code) declares ``credential_grant`` /
+    ``home_passthrough`` on the adapter; the Sandbox validates the grant
+    fail-closed against ``GRANTABLE_MODEL_AUTH`` (ROADMAP Phase 1b — model-auth
+    only, target-system credentials can never be granted). Adapters that declare
+    nothing (stub, raw-react) get the fully-scrubbed cage, byte-identical to
+    before."""
+    return Sandbox(
+        source_dir,
+        snapshot_store=snapshot_store,
+        credential_grant=tuple(getattr(rt.adapter, "credential_grant", ()) or ()),
+        home_passthrough=bool(getattr(rt.adapter, "home_passthrough", False)),
+    )
+
+
 def _run_one_task(
     rt: AgentRuntime,
     task: Task,
@@ -322,7 +339,7 @@ def _run_one_task(
     then keys the diff by ``content_digest`` (L7) so a re-run re-derives the same
     key and the keyed-union channels coalesce the supersession."""
     assert rt.adapter is not None  # guaranteed by the factory's guard
-    sandbox = Sandbox(source_dir, snapshot_store=snapshot_store)
+    sandbox = _sandbox_for(rt, source_dir, snapshot_store)
     try:
         base = sandbox.snapshot() if base_snapshot is None else sandbox.restore(base_snapshot)
         packet = _build_packet(
@@ -505,7 +522,7 @@ def _run_tasks_pooled(
         return base_first
 
     def make_sandbox(etask: ExecutionTask) -> Sandbox:
-        sandbox = Sandbox(source_dir, snapshot_store=snapshot_store)
+        sandbox = _sandbox_for(rt, source_dir, snapshot_store)
         prior = recorded.get(str(etask.packet.task.get("id")))
         if prior is not None:
             sandbox.restore(prior)  # retry: reset to base so the diff supersedes (L4)

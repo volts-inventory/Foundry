@@ -149,10 +149,12 @@ BACKENDS = (_MOCK_BACKEND, "anthropic", "openai", "claude-cli", "codex", "ollama
 
 # Coding substrates (WorkerAdapter): the thing that actually writes the code for
 # each task. `stub` is the deterministic no-op (the smoke default); `raw-react` is a
-# provider-agnostic single-loop substrate over the model backend (real code, any
-# backend) — over `claude-cli` it writes code via `claude -p` (completion only), over
-# `anthropic` via the Anthropic API.
-ADAPTERS = ("stub", "raw-react")
+# provider-agnostic single-loop substrate over the model backend (one completion ->
+# one diff, any backend); `claude-code` is the AGENTIC substrate (ROADMAP Phase 1a) —
+# it runs the `claude` CLI multi-turn INSIDE the task sandbox, where it edits files
+# and runs builds/tests itself, and authenticates via the sandbox's typed model-auth
+# grant (Max login/token = no API billing, or ANTHROPIC_API_KEY = metered).
+ADAPTERS = ("stub", "raw-react", "claude-code")
 _DEFAULT_ADAPTER = "stub"
 
 
@@ -160,14 +162,24 @@ _DEFAULT_ADAPTER = "stub"
 # so picking a real brain writes real code without a second flag (the historical
 # footgun: a real --backend silently no-op'd under a hardcoded stub default). `mock`
 # has no real model, so it keeps the deterministic no-op `stub` (the default run stays
-# hermetic + byte-identical). Every REAL backend defaults to `raw-react` — the
-# provider-agnostic completion substrate — so `anthropic` writes code via the Anthropic
-# API and `claude-cli` writes code via `claude -p` used purely as a completion endpoint.
+# hermetic + byte-identical). `claude-cli` — the backend whose substrate binary IS
+# Claude Code — defaults to the agentic `claude-code` adapter (the roadmap's biggest
+# quality lever; same binary, same auth). Every other real backend defaults to
+# `raw-react`, the provider-agnostic completion substrate. FOUNDRY_CODING_ADAPTER
+# (the same env var the Workshop UI reads) overrides the derivation env-side; an
+# explicit --adapter always wins.
 def _default_adapter_for(backend: str) -> str:
     """The coding substrate to use when ``--adapter`` is omitted, derived from
-    ``backend``: ``mock`` ⇒ ``stub`` (no real model), any real backend ⇒
-    ``raw-react`` (the universal completion substrate)."""
-    return _DEFAULT_ADAPTER if backend == _MOCK_BACKEND else "raw-react"
+    ``backend``: ``mock`` ⇒ ``stub`` (no real model), ``claude-cli`` ⇒
+    ``claude-code`` (agentic, same binary + auth), any other real backend ⇒
+    ``raw-react`` (the universal completion substrate). ``FOUNDRY_CODING_ADAPTER``
+    (when set to a known adapter) overrides the derivation."""
+    env = os.environ.get("FOUNDRY_CODING_ADAPTER", "").strip().lower()
+    if env in ADAPTERS:
+        return env
+    if backend == _MOCK_BACKEND:
+        return _DEFAULT_ADAPTER
+    return "claude-code" if backend == "claude-cli" else "raw-react"
 
 # System-decided parallelism (no user knob): the Tech-Lead decomposes the work
 # into independently-buildable tasks, and the IC pool sizes ITSELF to that plan —
@@ -217,6 +229,14 @@ def make_coding_adapter(
             )
 
         return RawReactAdapter(complete_fn=_complete, run_id=thread_id)
+    if name == "claude-code":
+        from foundry.execution.adapters.claude_code import ClaudeCodeAdapter
+
+        # Agentic substrate: the CLI holds its own auth (via the sandbox's typed
+        # model-auth grant), so no proxy closure is threaded here — the proxy
+        # stays the egress for the AGENT layers; the coding substrate's lineage
+        # self-report is carried but IGNORED (arch §2b, documented trade).
+        return ClaudeCodeAdapter(run_id=thread_id)
     raise ValueError(f"unknown adapter {name!r}; choose one of {', '.join(ADAPTERS)}")
 
 
@@ -1759,9 +1779,10 @@ def main(argv: list[str] | None = None) -> int:
         args, _packs = _take_value(args, "--packs", what="a comma-separated list")
         packs: list[str] = [p.strip() for p in _packs.split(",") if p.strip()] if _packs else []
 
-        # --adapter {stub|raw-react}: the coding substrate that writes the code.
-        # OMITTED ⇒ DERIVED from --backend in run() (mock→stub, any real backend→
-        # raw-react) so a real backend writes real code without a second flag.
+        # --adapter {stub|raw-react|claude-code}: the coding substrate that writes
+        # the code. OMITTED ⇒ DERIVED from --backend in run() (mock→stub,
+        # claude-cli→claude-code agentic, other real backends→raw-react) so a real
+        # backend writes real code without a second flag.
         args, _adapter = _take_value(args, "--adapter", what="a value")
         if _adapter is not None and _adapter not in ADAPTERS:
             raise _CliUsageError(
@@ -1821,7 +1842,7 @@ def main(argv: list[str] | None = None) -> int:
                 "usage: python -m foundry.cli "
                 "[--mode {assistant|gated|autonomous}] [--packs name1,name2] "
                 "[--backend {mock|anthropic|openai|claude-cli|codex|ollama-gemma}] "
-                "[--adapter {stub|raw-react}] "
+                "[--adapter {stub|raw-react|claude-code}] "
                 "[--checkpoints [all|product,design,release]] "
                 "[--docs DIR] [--out DIR] [--spec FILE|DIR ...] "
                 "[--state-dir DIR] [--thread-id NAME] [--max-fix-attempts N] "
@@ -1833,8 +1854,8 @@ def main(argv: list[str] | None = None) -> int:
                 "  backend: mock (default — keyless, deterministic) | anthropic | openai | "
                 "claude-cli | codex | ollama-gemma (real model egress)\n"
                 "  adapter (coding substrate): omitted => DERIVED from --backend "
-                "(mock=>stub no-op, any real backend=>raw-react real code); override with "
-                "stub | raw-react\n"
+                "(mock=>stub no-op, claude-cli=>claude-code AGENTIC, other real "
+                "backends=>raw-react); override with stub | raw-react | claude-code\n"
                 "  packs: regulated | ml_data | frontend "
                 "(a pack may VETO an unsafe mode — fail-closed)\n"
                 "  checkpoints (plan [10]): pause at stage boundaries for human "

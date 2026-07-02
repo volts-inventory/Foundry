@@ -263,3 +263,36 @@ Today the only "keep going" mechanism is the deepening loop (≤6 passes) and
 Recommended start: **1a + 1b**, with **3 (Phaser gate)** and **4** in
 parallel; then 2; then 5. The Stardew-style benchmark becomes runnable
 end-to-end after Phase 5, playable after Phase 6.
+
+---
+
+## Target portfolio & benchmark ladder
+
+The factory is built ONCE (Phases 1–5); breadth comes from adding
+verification profiles + packs (Phases 3/6), one per rung. Each rung below is
+a real project the factory must build end-to-end before claiming the rung —
+ordered so every rung adds exactly one new capability, and earlier rungs
+become regression benchmarks for factory changes (their conformance suites
+give an objective quality score for tuning the factory itself).
+
+| # | Benchmark project | New capability proven | Profile / pack |
+|---|---|---|---|
+| 1 | CHIP-8 emulator (public test ROMs) | agentic adapter + multi-file edits (Phases 1–2) | `python` default |
+| 2 | Small DSL / transpiler w/ conformance suite | milestone loop on a pure-logic target (Phase 5) | `python` default |
+| 3 | CLI dev tool (log analyzer / migration tool) | fixture-execution gates | `cli` |
+| 4 | REST API service + ephemeral DB | contract tests, integration E2E | `web-service` (planner's SaaS spine) |
+| 5 | ETL pipeline w/ golden datasets | schema/idempotency gates | `data` + `ml_data` pack |
+| 6 | Constraint solver (roster/timetable) | invariant + known-optimal gates | `python` default |
+| 7 | Text roguelike | game-state-machine gates, save/load | `game` (text tier) |
+| 8 | **Stardew-style moon-colony game (Phaser)** | headless-browser runtime gates, assets, playability HITL | `game` + Phase 6 assets |
+| 9 | File-encryption tool / password vault | KAT + crypto-policy gates, crypto pack veto | `crypto` |
+| 10 | Terraform AWS stack (multi-service) | plan/policy gates, credentialed-phase deploy | `infra` |
+| 11 | Rich-UI web app (dashboard/notes) | screenshot-diff + perceptual HITL at scale | `web-ui` + frontend pack |
+| 12 | Foundry writes a new verification profile for itself | self-extension under guardian approval | `regulated`-style gating |
+
+Rungs 1–2 are the Phase-1/2/5 acceptance tests. Rungs 3–7 are cheap
+(profiles reuse the two-zone runner; mostly pinned-command bundles). Rung 8
+is the flagship. Rungs 9–10 are governance-heavy (packs + credential
+typology). Rung 12 is deliberately last: the factory extending its own gates
+is the highest-leverage and highest-trust step, and must ride on a mature
+guardian/evidence flow.

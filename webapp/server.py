@@ -277,6 +277,15 @@ class Project:
     release_seq: int = 1  # 1,2,3… within the floor; each iterate adds a release
     parent_id: str | None = None  # lineage: the release this one iterates on
     base_dir: str | None = None  # prior code seeded as the base tree (iterate)
+    autopilot_note: str = ""  # why the autopilot loop stopped (surfaced via the API)
+    # Autopilot (lifecycle.autopilot): remaining self-iterations AFTER this build.
+    # >0 and gates green ⇒ the Director proposes, the software/usability panel
+    # votes (deterministic tally), and the winner is spawned as the next release
+    # with budget-1. The AI drives in EVERY mode: autonomous children run with no
+    # human contact; gated/supervised children keep their checkpoints + sign-offs
+    # surfacing to the human (auto-approve timeout keeps the loop moving). A panel
+    # DECLINE stops the loop fail-closed (human steering wanted).
+    autopilot_budget: int = 0
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -962,8 +971,108 @@ def _run_factory(p: Project, resume: bool = False) -> None:
               text=f"📂 {n_files} file(s) in the repo — open REPO to browse the store.")
     p.passed = bool(result.passed)
     p.status = "done"
+    if p.passed and p.autopilot_budget > 0:
+        _emit(p, type="narrate",
+              text=f"🧭 Autopilot: {p.autopilot_budget} iteration(s) left — the Director "
+                   "and panel are choosing the next action…")
     _persist(p)              # catalog the FINAL status/passed (after they're set)
     _close(p)
+    _maybe_autopilot_next(p)
+
+
+def _maybe_autopilot_next(p: Project) -> None:
+    """Autopilot step (lifecycle.autopilot): after a GREEN build with budget left,
+    Director → panel → deterministic tally → spawn the winner as the next release.
+
+    Runs in its own thread (the build thread is done); a panel DECLINE or any
+    ideation failure stops the loop fail-closed — nothing is built that the
+    panel did not choose. The child inherits mode/supervision: autonomous keeps
+    zero human contact; gated keeps its checkpoints + sign-offs."""
+    if not (p.passed and p.autopilot_budget > 0):
+        return
+
+    def _step() -> None:
+        from foundry.cli import _build_proxy
+        from foundry.lifecycle.autopilot import propose_candidates, run_panel, tally
+
+        target = _root_request(p)
+        evidence = "\n".join(
+            f"release {i + 1}: {req}" for i, req in enumerate(_lineage_requests(p.id))
+        )
+        try:
+            proxy = _build_proxy(p.backend)
+            candidates = propose_candidates(proxy, target, evidence)
+            votes = run_panel(proxy, target, evidence, candidates)
+            decision = tally(candidates, votes)
+        except Exception as exc:  # ideation is advisory: fail-closed, never a crash-loop
+            _autopilot_stop_note(p, f"autopilot stopped: ideation failed ({exc})")
+            return
+        if decision.declined or decision.winner is None:
+            _autopilot_stop_note(
+                p, "autopilot stopped: the panel declined every candidate — "
+                   "human steering wanted (iterate manually to continue)")
+            return
+        w = decision.winner
+        request = f"{target} — NEXT ITERATION: {w.title}. {w.scope}"
+        if decision.amendments:
+            request += " PANEL AMENDMENTS (honor these): " + " | ".join(decision.amendments)
+        ballots = ", ".join(
+            f"{v.panelist}={v.scores[decision.winner_index]}" for v in decision.votes
+        )
+        child = _spawn_iteration(p, request, p.autopilot_budget - 1)
+        _emit(child, type="narrate",
+              text=f"🧭 Autopilot chose “{w.title}” ({w.rationale}) — panel scores: "
+                   f"{ballots}. Building release {child.release_seq}…")
+
+    threading.Thread(target=_step, daemon=True).start()
+
+
+def _root_request(p: Project) -> str:
+    """The floor's ORIGINAL target (the root of the lineage), so every autopilot
+    iteration steers toward the same goal instead of drifting off the last title."""
+    chain = _lineage_ids(p.id)
+    root = _STORE.get(chain[0]) if chain else None
+    return str((root or {}).get("request") or p.request)
+
+
+def _lineage_requests(pid: str) -> list[str]:
+    out: list[str] = []
+    for anc in _lineage_ids(pid):
+        rec = _STORE.get(anc)
+        if rec and rec.get("request"):
+            out.append(str(rec["request"]))
+    return out
+
+
+def _autopilot_stop_note(p: Project, note: str) -> None:
+    """The build stream is already closed — record WHY the loop stopped where the
+    projects API can show it (and the server log can grep it)."""
+    print(f"[autopilot] floor {p.floor} r{p.release_seq}: {note}")
+    p.autopilot_note = note
+
+
+def _spawn_iteration(parent: Project, request: str, budget: int) -> Project:
+    """Create + start the next release on the parent's floor (the same shape the
+    POST /api/projects iterate path builds): spec inherited, base tree overlaid
+    from the parent's CAS lineage inside _run_factory, mode/supervision inherited
+    so autonomous stays hands-off and gated keeps its human checkpoints."""
+    with _LOCK:
+        release_seq = _STORE.max_release(parent.floor) + 1
+    pid = uuid.uuid4().hex[:12]
+    p = Project(
+        id=pid, request=request, mode=parent.mode, supervised=parent.supervised,
+        floor=parent.floor, release_seq=release_seq, backend=parent.backend,
+        adapter=parent.adapter, packs=list(parent.packs),
+        spec=parent.spec_text or None, spec_text=parent.spec_text,
+        out_base=_OUTPUT_ROOT / f"floor-{parent.floor}" / f"r{release_seq}",
+        max_slots=parent.max_slots, cost_cap_microusd=parent.cost_cap_microusd,
+        max_fix_attempts=parent.max_fix_attempts, parent_id=parent.id,
+        autopilot_budget=max(0, budget),
+    )
+    with _LOCK:
+        _PROJECTS[pid] = p
+    threading.Thread(target=_gated_runner, args=(_run_factory, p), daemon=True).start()
+    return p
 
 
 _STAGE_ORDER = ["defining requirements", "designing the system", "implementing",
@@ -1452,7 +1561,8 @@ class Handler(BaseHTTPRequestHandler):
              "backend": p.backend, "adapter": p.adapter,
              "supervised": p.supervised, "slots": p.max_slots,
              "status": p.status, "passed": p.passed, "awaiting": p.awaiting,
-             "gates": p.gates, "parent_id": p.parent_id}
+             "gates": p.gates, "parent_id": p.parent_id,
+             "autopilot_budget": p.autopilot_budget, "autopilot_note": p.autopilot_note}
             for p in sorted(by_floor.values(), key=lambda x: x.floor)
         ]
         self._json(200, {"projects": rows})
@@ -1719,12 +1829,19 @@ class Handler(BaseHTTPRequestHandler):
                 spec = str(pdocs)            # ground the release in the prior design
             if pcode.is_dir():
                 base_dir = str(pcode)        # seed the base tree with the prior code
+        # Autopilot budget: how many SELF-ITERATIONS follow this build (0 = off).
+        # The AI drives in every mode; gated keeps its human checkpoints.
+        try:
+            autopilot_budget = max(0, min(20, int(body.get("autopilot", 0) or 0)))
+        except (TypeError, ValueError):
+            autopilot_budget = 0
         p = Project(
             id=pid, request=request, mode=mode, supervised=supervised, floor=floor,
             release_seq=release_seq, backend=backend, adapter=adapter, packs=packs, spec=spec,
             spec_text=effective_spec_text,
             out_base=out_base, max_slots=max_slots, cost_cap_microusd=cost_cap_microusd,
             max_fix_attempts=max_fix_attempts, parent_id=parent_id, base_dir=base_dir,
+            autopilot_budget=autopilot_budget,
         )
         with _LOCK:
             _PROJECTS[pid] = p

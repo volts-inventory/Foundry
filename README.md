@@ -1,11 +1,36 @@
 # Foundry
 
-A graph-based, multi-agent software factory. Give it a one-line request; it runs
-a full product → architecture → engineering → QA → security → gates pipeline and
+A graph-based, multi-agent software factory. Give it a one-line request — "a
+stardew-style farming game about colonizing the moon", "a file-encryption
+vault", "a terraform stack for a three-tier app" — and it runs a full
+product → architecture → engineering → QA → security → gates pipeline and
 writes a GitHub-ready repo (code + docs). Use it two ways:
 
 - **CLI** — `python -m foundry.cli "<request>"` → a repo on disk.
 - **Workshop UI** — a localhost web app that drives the same factory as a game.
+
+**What makes it a factory, not a script:**
+
+- **Agentic coding substrates.** Each implementation task runs a real
+  multi-turn coding agent inside an isolated sandbox: `claude-code` (the
+  `claude` CLI edits files and runs builds/tests itself — your Max plan, no API
+  billing, or an API key) or `proxy-agent` (the same agency through the
+  mediating proxy, any backend, credentials never enter the sandbox).
+- **Gates that mean it works.** Verification profiles pin stack-appropriate
+  gate commands — pytest/compileall for Python, npm build/test for web, a
+  runtime SMOKE gate for games ("boots and survives N ticks"), KAT/property
+  suites for crypto, fmt/validate for Terraform. Verdicts are deterministic,
+  signed, and fail-closed; an approval can never override a red gate.
+- **Long-horizon autonomy.** The `milestones` loop plans an ordered ladder and
+  builds it increment by increment, each released tree seeding the next; the
+  `autopilot` loop goes further — a Director proposes candidate next actions,
+  a software/usability panel votes, and the winner becomes the next release.
+  Both stop fail-closed (gate refusal, panel decline) and resume after a kill.
+- **Governance that scales with risk.** Domain packs (regulated, ml_data,
+  frontend, game, crypto, infra) tighten the floor per domain: a game release
+  requires a human playability sign-off; crypto releases are gated-only with a
+  human approver; infra never hands-off deploys. Only model-auth credentials
+  can ever enter the build sandbox — cloud/deploy keys structurally cannot.
 
 Pick a model backend — Claude Code (`claude -p`, a Max plan) or the Anthropic /
 OpenAI APIs — and it writes real code. Examples below use `claude-cli`.
@@ -66,7 +91,7 @@ python -m foundry.cli [OPTIONS] "<one-line request>"   # build a GitHub-ready re
 
 # ── Inputs ────────────────────────────────────────────────────────────────────
   --spec <FILE|DIR>          # ground the build with a spec (or run from a spec ALONE, no one-liner); REPEATABLE   (default: none)
-  --packs <name1,name2>      # engage domain packs: regulated|ml_data|frontend; a pack may VETO a mode   (default: none)
+  --packs <name1,name2>      # domain packs: regulated|ml_data|frontend|game|crypto|infra; a pack may VETO a mode   (default: none)
   --docs <DIR>               # write the generated doc set (PRD / design / ops) here           (default: none)
 
 # ── Output & durable state ────────────────────────────────────────────────────
@@ -86,6 +111,21 @@ python -m foundry.cli evolve <prior-repo> "<change>" [OPTIONS]
   --guardian-approve         # authorize a protected criterion / oracle / gate edit (else blocked)
   --strict                   # exit non-zero if the re-gate REFUSES to release (for CI)
 
+# ── Subcommand: build a BIG target milestone-by-milestone ──────────────────────
+python -m foundry.cli milestones "<big target>" --out DIR [OPTIONS]
+  --milestones "a; b; c"     # explicit ordered plan (omit ⇒ the model plans the ladder)
+  --max-milestones <N>       # plan/run at most N increments                     (default: 8)
+  # each milestone runs the FULL gated factory; its RELEASED tree seeds the next;
+  # stops fail-closed at the first gate refusal; resumable per milestone
+
+# ── Subcommand: autopilot — Director proposes, a design panel votes ────────────
+python -m foundry.cli autopilot "<target>" --out DIR [OPTIONS]
+  --iterations <N>           # self-iterations after the first release           (default: 3)
+  # between releases: the Director drafts candidate next actions, a panel (staff
+  # engineer, usability designer, product designer, QA lead) scores + vetoes them
+  # (deterministic tally), the winner builds next; a panel DECLINE stops the loop
+  # and hands steering back to you
+
 # Exit codes:  0 = passed (PR-ready)  ·  1 = halted / failed  ·  2 = usage error
 # Run with no arguments to print the full usage text:  python -m foundry.cli
 ```
@@ -103,7 +143,8 @@ python -m foundry.cli evolve <prior-repo> "<change>" [OPTIONS]
 7. [Feeding a spec](#6-feeding-a-spec)
 8. [Common flags](#7-common-flags)
 9. [Evolve an existing repo](#8-evolve-an-existing-repo)
-10. [Workshop UI](#9-workshop-ui)
+10. [Full autonomy: milestones & autopilot](#full-autonomy-milestones--autopilot)
+11. [Workshop UI](#9-workshop-ui)
 11. [Run it as a long-lived server](#10-run-it-as-a-long-lived-server)
 12. [Develop](#11-develop)
 13. [Configuration reference](#configuration-reference)
@@ -392,6 +433,54 @@ python -m foundry.cli evolve ./out "loosen the auth gate" \
 python -m foundry.cli evolve ./out "add caching" --apply ./changes --strict
 echo $?                              # non-zero if NOT released
 ```
+
+---
+
+## Full autonomy: milestones & autopilot
+
+Two loops turn one sentence into a large, iteratively-grown system with the AI
+driving. Both chain RELEASED trees only (every increment passes the same gates
+as any run), both stop fail-closed, and both resume after a kill via
+`--state-dir`.
+
+**Milestones** — grow toward a FIXED target:
+
+```bash
+python -m foundry.cli milestones "stardew-style moon colony game, pygame" \
+  --out ~/game --backend claude-cli --mode autonomous --state-dir ~/foundry/state
+```
+
+The model plans the ladder (engine loop → world → farming → economy →
+save/load), then runs the full factory per milestone, seeding each release as
+the next milestone's base tree. Stops at the first gate refusal.
+
+**Autopilot** — keep improving BEYOND the target:
+
+```bash
+python -m foundry.cli autopilot "stardew-style moon colony game, pygame" \
+  --out ~/game --backend claude-cli --iterations 5
+```
+
+Between releases a **Director** proposes 3 candidate next actions and a
+**review panel** — a staff software engineer, a usability designer, a
+product/game designer, and a QA lead — scores each 0-10 with optional vetoes
+and amendments. The tally is deterministic (majority veto kills; highest mean
+above the floor wins; ties break stably), the winner becomes the next
+iteration's request, and amendments ride along as steering notes. If the panel
+declines everything, the loop STOPS and hands steering back to you — it never
+builds what the panel refused.
+
+**Who's in charge, per mode:** in `autonomous` mode both loops run with zero
+human contact (the trust-root chain releases). In `gated`/supervised mode the
+AI still does all the work and drives the loop — checkpoints and sign-offs
+surface to you, and every autopilot iteration lands as a release on the same
+Workshop floor with the panel's ballot recorded, so you can audit WHY each
+change was chosen. Human steering directives become pinned constraints on all
+future iterations (tighten-only).
+
+In the **Workshop UI**, set the **Autopilot** field (self-iterations, 0 = off)
+when creating a project — each green build then spawns the panel-chosen next
+release on the same floor automatically.
 
 ---
 

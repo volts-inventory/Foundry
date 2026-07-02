@@ -2365,6 +2365,8 @@ document.getElementById("start-btn").onclick=async ()=>{
   const sup=document.getElementById("supervised").checked;
   const extra={};
   extra.adapter=document.getElementById("adapter-select").value;
+  { const ap=document.getElementById("autopilot-input");
+    const n=ap?parseInt(ap.value,10):0; if(Number.isFinite(n)&&n>0) extra.autopilot=n; }
   // Extra workers: the pool ON TOP of one-per-team. Blank ⇒ the server's automatic
   // cap. Each role always gets its baseline worker; these scale the busy teams.
   const xw=parseInt((document.getElementById("extra-workers")||{}).value,10);

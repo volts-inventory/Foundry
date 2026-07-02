@@ -112,6 +112,8 @@
       <input id="fix-input" type="number" min="0" max="20" value="5" />
       <label>Cost cap (USD) <span class="hint">— max model spend (metered API backends only)</span></label>
       <input id="cap-input" type="number" min="0" step="0.01" placeholder="no cap" />
+      <label>Autopilot <span class="hint">— self-iterations after a green build (0 = off): a Director proposes, a software/usability panel votes, the winner builds next</span></label>
+      <input id="autopilot-input" type="number" min="0" max="20" value="0" />
       <label>Domain packs (optional, comma-separated)</label>
       <input id="packs-input" type="text" placeholder="regulated, ml_data, frontend, game, crypto, infra" />
       <label class="check"><input type="checkbox" id="supervised" checked /> Supervised (CTO approves each checkpoint)</label>

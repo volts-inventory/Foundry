@@ -1621,6 +1621,61 @@ def _read_overlay(overlay_dir: str) -> dict[str, str | None]:
     return changes
 
 
+def _autopilot_main(args: list[str]) -> int:
+    """`foundry autopilot "<target>" --out DIR [...]` — Director + design panel.
+
+    Builds the target, then loops: the Director proposes candidate next actions,
+    a software/usability panel scores + vetoes them (deterministic tally), and
+    the winner becomes the next gated iteration. Exit 0 iff every iteration
+    released; 1 when the loop stopped (gate refusal / panel decline / budget).
+    """
+    try:
+        args, out_dir = _take_value(args, "--out", what="a directory argument")
+        args, _mode = _take_value(args, "--mode", what="a value")
+        mode = _mode if _mode is not None else MODE_ASSISTANT
+        if mode not in MODES:
+            raise _CliUsageError(f"unknown --mode {_mode!r}")
+        args, _backend = _take_value(args, "--backend", what="a value")
+        backend = _backend if _backend is not None else _MOCK_BACKEND
+        if backend not in BACKENDS:
+            raise _CliUsageError(f"unknown --backend {_backend!r}")
+        args, _adapter = _take_value(args, "--adapter", what="a value")
+        if _adapter is not None and _adapter not in ADAPTERS:
+            raise _CliUsageError(f"unknown --adapter {_adapter!r}")
+        args, state_dir = _take_value(args, "--state-dir", what="a directory argument")
+        args, _thread = _take_value(args, "--thread-id", what="a value")
+        args, _iters = _take_value(args, "--iterations", what="an integer")
+        request = " ".join(args).strip()
+        if not request or not out_dir:
+            raise _CliUsageError(
+                'usage: python -m foundry.cli autopilot "<target>" --out DIR '
+                "[--iterations N] [--backend B] [--adapter A] [--mode M] "
+                "[--state-dir DIR] [--thread-id NAME]"
+            )
+        iterations = int(_iters) if _iters else 3
+    except (_CliUsageError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    from foundry.lifecycle.autopilot import autopilot
+
+    report = autopilot(
+        request,
+        out_dir=out_dir,
+        iterations=iterations,
+        proxy=_build_proxy(backend),
+        thread_id=_thread or "autopilot",
+        mode=mode,
+        backend=backend,
+        adapter=_adapter,
+        state_dir=state_dir,
+    )
+    print(report.summary())
+    if report.released_dir:
+        print(f"released:  {report.released_dir}")
+    return 0 if all(r.passed for r in report.iterations) else 1
+
+
 def _milestones_main(args: list[str]) -> int:
     """`foundry milestones "<big target>" --out DIR [...]` — the Phase-5 loop.
 
@@ -1822,6 +1877,10 @@ def main(argv: list[str] | None = None) -> int:
     # milestone, chaining each released tree as the next milestone's base.
     if args and args[0] == "milestones":
         return _milestones_main(args[1:])
+    # The autopilot route: Director proposes, a software/usability panel votes,
+    # the winner becomes the next gated iteration (fail-closed on panel decline).
+    if args and args[0] == "autopilot":
+        return _autopilot_main(args[1:])
     # Simple value flags parse through `_take_value`/`_take_int` (H5: one helper
     # instead of 13 copy-pasted index/slice blocks); a usage error raises and is
     # rendered identically below. Comments mark the non-obvious semantics.
@@ -1959,7 +2018,7 @@ def main(argv: list[str] | None = None) -> int:
                 "  adapter (coding substrate): omitted => DERIVED from --backend "
                 "(mock=>stub no-op, claude-cli=>claude-code AGENTIC, other real "
                 "backends=>raw-react); override with stub | raw-react | claude-code\n"
-                "  packs: regulated | ml_data | frontend "
+                "  packs: regulated | ml_data | frontend | game | crypto | infra "
                 "(a pack may VETO an unsafe mode — fail-closed)\n"
                 "  checkpoints (plan [10]): pause at stage boundaries for human "
                 "verification; an approve can NEVER turn a gate FAIL into a release",

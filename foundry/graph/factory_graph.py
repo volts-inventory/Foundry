@@ -120,6 +120,7 @@ if TYPE_CHECKING:
     from foundry.domains.registry import PackRegistry
     from foundry.gates.attestation import DevGateWriteVerifier
     from foundry.gates.discriminator import DiscriminatorFactory
+    from foundry.gates.profiles import VerificationProfile
     from foundry.gates.runner import TwoZoneGateRunner
     from foundry.graph.gate_wiring import BlobResolver
     from foundry.schemas.base import Artifact
@@ -618,6 +619,7 @@ def build_factory_graph(
     deployer: Deployer | None = None,
     gate_verifier: DevGateWriteVerifier | None = None,
     discriminator_factory: DiscriminatorFactory | None = None,
+    profile: VerificationProfile | None = None,
     pack_registry: PackRegistry | None = None,
     doc_sink: MutableSequence[DocumentationBundle] | None = None,
     checkpoints: bool | Sequence[str | CheckpointBoundary] | None = None,
@@ -744,6 +746,7 @@ def build_factory_graph(
         max_fix_attempts=max_fix_attempts,
         mode=mode,
         discriminator_factory=discriminator_factory,
+        profile=profile,
         pack_registry=pack_registry,
         checkpoints=checkpoints,
         max_slots=max_slots,

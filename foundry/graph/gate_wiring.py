@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
 
     from foundry.gates.discriminator import DiscriminatorFactory
+    from foundry.gates.profiles import VerificationProfile
     from foundry.gates.runner import GateImpl, TwoZoneGateRunner
     from foundry.schemas.base import Artifact
     from foundry.state.factory_state import FactoryState
@@ -82,6 +83,7 @@ if TYPE_CHECKING:
     BlobResolver = Callable[[str], "bytes | str"]
 
 __all__ = [
+    "BUILD_TEST_SMOKE_BOUNDARY",
     "CRITERIA_CRITIQUE_KIND",
     "CRITERION_KIND",
     "FEATURE_DIFF_KIND",
@@ -729,6 +731,7 @@ def materialize_workdir(
 _SPEC_NODE = "spec_gate"
 _BUILD_NODE = "build_gate"
 _TEST_NODE = "test_gate"
+_SMOKE_NODE = "smoke_gate"
 
 
 def _run_gate(
@@ -793,8 +796,10 @@ def run_build_test_gates(
     workdir: Path,
     min_passed: int = 1,
     discriminator_factory: DiscriminatorFactory | None = None,
+    profile: VerificationProfile | None = None,
 ) -> dict[str, Any]:
-    """Run the Build + Test gates at an implementation / quality exit boundary.
+    """Run the Build + Test (+ profile Smoke) gates at an implementation /
+    quality exit boundary.
 
     Materializes the integrated tree (code + test sources + criteria.json) into
     ``workdir`` ONCE and runs :class:`BuildGate` then :class:`TestGate` against
@@ -816,8 +821,13 @@ def run_build_test_gates(
     discriminator is wired and a green + adequate suite suffices.
     """
     run_against = materialize_workdir(state, workdir, resolve=resolve, resolve_blob=resolve_blob)
+    # Profile-pinned commands (ROADMAP Phase 3): a stack-appropriate profile
+    # swaps WHAT the gates execute, never the two-zone trust seam. None keeps
+    # each gate's historical default — byte-identical to the pre-profile factory.
+    build_cmd = profile.build_cmd if profile is not None else None
+    test_cmd = profile.test_cmd if profile is not None else None
     build = _run_gate(
-        BuildGate(seal_key=runner.seal_key),
+        BuildGate(cmd=build_cmd, seal_key=runner.seal_key),
         rt=rt,
         runner=runner,
         config=config,
@@ -831,8 +841,17 @@ def run_build_test_gates(
     # the unit test. Absent a factory the gate is the legacy adequacy-floor-only
     # Test gate (back-compat).
     discriminator = discriminator_factory() if discriminator_factory is not None else None
+    # A profile-pinned FOREIGN test harness (npm test / terraform validate) has no
+    # pytest summary to count, so the adequacy floor drops to exit-code-only there
+    # (min_passed=0; the floor is pytest-specific). The python default keeps it.
+    effective_min = 0 if test_cmd is not None else min_passed
     test = _run_gate(
-        TestGate(min_passed=min_passed, discriminator=discriminator, seal_key=runner.seal_key),
+        TestGate(
+            cmd=test_cmd,
+            min_passed=effective_min,
+            discriminator=discriminator,
+            seal_key=runner.seal_key,
+        ),
         rt=rt,
         runner=runner,
         config=config,
@@ -840,7 +859,22 @@ def run_build_test_gates(
         workdir=workdir,
         node_id=_TEST_NODE,
     )
-    return {"gates": [build, test]}
+    gates = [build, test]
+    if profile is not None and profile.smoke_cmd is not None:
+        from foundry.gates.smoke import SmokeGate
+
+        gates.append(
+            _run_gate(
+                SmokeGate(profile.smoke_cmd, seal_key=runner.seal_key),
+                rt=rt,
+                runner=runner,
+                config=config,
+                run_against=run_against,
+                workdir=workdir,
+                node_id=_SMOKE_NODE,
+            )
+        )
+    return {"gates": gates}
 
 
 # ---- routing predicate (fail-closed, convergence-bounded) -------------------
@@ -848,10 +882,15 @@ def run_build_test_gates(
 # Which gate verdicts each phase boundary is responsible for.
 SPEC_BOUNDARY = "spec"
 BUILD_TEST_BOUNDARY = "build_test"
+# Profile boundary variant (ROADMAP Phase 3): when the run's verification
+# profile pins a smoke (runtime boot) command, the boundary is also responsible
+# for the "smoke" verdict — a missing/FAILed smoke can never advance.
+BUILD_TEST_SMOKE_BOUNDARY = "build_test_smoke"
 
 _BOUNDARY_GATES: dict[str, frozenset[str]] = {
     SPEC_BOUNDARY: frozenset({"spec"}),
     BUILD_TEST_BOUNDARY: frozenset({"build", "test"}),
+    BUILD_TEST_SMOKE_BOUNDARY: frozenset({"build", "test", "smoke"}),
 }
 
 # Routing outcomes.

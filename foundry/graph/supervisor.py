@@ -114,6 +114,7 @@ from foundry.graph.gate_wiring import (
     BUILD_TEST_BOUNDARY,
     SPEC_BOUNDARY,
     route_after_gates,
+    BUILD_TEST_SMOKE_BOUNDARY,
     run_build_test_gates,
     run_spec_gate,
 )
@@ -141,6 +142,7 @@ if TYPE_CHECKING:
     from foundry.context import SymbolIndex
     from foundry.domains.registry import PackRegistry
     from foundry.gates.discriminator import DiscriminatorFactory
+    from foundry.gates.profiles import VerificationProfile
     from foundry.gates.runner import TwoZoneGateRunner
     from foundry.graph.gate_wiring import BlobResolver
 
@@ -394,6 +396,7 @@ def build_supervisor_graph(
     max_fix_attempts: int = 3,
     mode: str = MODE_ASSISTANT,
     discriminator_factory: DiscriminatorFactory | None = None,
+    profile: VerificationProfile | None = None,
     pack_registry: PackRegistry | None = None,
     checkpoints: bool | Sequence[str | CheckpointBoundary] | None = None,
     max_slots: int = 1,
@@ -649,6 +652,14 @@ def build_supervisor_graph(
         _bump_on_non_advance(state, config, out, boundary=SPEC_BOUNDARY)
         return out
 
+    # A profile that pins a smoke (runtime boot) command widens the boundary's
+    # responsible verdict set to {build, test, smoke} (ROADMAP Phase 3).
+    bt_boundary = (
+        BUILD_TEST_SMOKE_BOUNDARY
+        if profile is not None and profile.smoke_cmd is not None
+        else BUILD_TEST_BOUNDARY
+    )
+
     def build_test_gate(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         out = run_build_test_gates(
             state,
@@ -659,9 +670,10 @@ def build_supervisor_graph(
             resolve_blob=resolve_blob,
             workdir=_gate_workdir("build_test_gate"),
             discriminator_factory=discriminator_factory,
+            profile=profile,
         )
         out["phase"] = _BUILD_TEST_GATE
-        _bump_on_non_advance(state, config, out, boundary=BUILD_TEST_BOUNDARY)
+        _bump_on_non_advance(state, config, out, boundary=bt_boundary)
         return out
 
     # -- bounded re-verification (fix) nodes ----------------------------------
@@ -688,7 +700,7 @@ def build_supervisor_graph(
         return route_after_gates(
             state,
             config,
-            boundary=BUILD_TEST_BOUNDARY,
+            boundary=bt_boundary,
             records=runner.records,
             max_fix_attempts=max_fix_attempts,
         )

@@ -45,6 +45,7 @@ What this node is careful about (the contract, LEARNINGS L4/L5/L7, arch §2/§2b
 from __future__ import annotations
 
 import json
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from foundry.agents._runtime import AgentRuntime, NodeFn
@@ -395,6 +396,55 @@ def execution_task_for(
     )
 
 
+def _apply_overlay(worktree: Path, overlay: Mapping[str, str | None]) -> None:
+    """Write predecessor slices onto a fresh clone (content ⇒ write, None ⇒
+    delete). Paths are containment-checked defensively even though they come
+    from our own CAS (same posture as the integration boundary, D-R1-03)."""
+    root = worktree.resolve()
+    for rel, content in sorted(overlay.items()):
+        pure = PurePosixPath(rel)
+        if pure.is_absolute() or ".." in pure.parts:
+            raise ValueError(f"overlay path {rel!r} escapes the worktree")
+        target = (root / pure).resolve()
+        if not str(target).startswith(str(root)):
+            raise ValueError(f"overlay path {rel!r} escapes the worktree")
+        if content is None:
+            if target.is_file():
+                target.unlink()
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+
+def _slice_of(rt: AgentRuntime, writes: dict[str, Any]) -> dict[str, str | None]:
+    """The tree slice ONE finished task contributes, for the next task's overlay.
+
+    Reconstitutes the just-minted FeatureDiff body from ``rt.cas`` and parses it
+    with the SAME op parser the integration boundary uses (``_diff_ops``), so
+    sibling visibility and final integration agree. Modification-hunk patches are
+    NOT projected into the overlay (they need the integrated file; the boundary
+    still applies them — only sibling VISIBILITY of a patch lags). Empty when no
+    CAS is wired (synthetic-resolver tests: overlay off, path unchanged)."""
+    if rt.cas is None:
+        return {}
+    from foundry.graph.gate_wiring import FeatureDiffBodyError, _diff_ops
+
+    artifacts = writes.get("artifacts") or []
+    if not artifacts:
+        return {}
+    diff = rt.cas.resolve(artifacts[0])
+    try:
+        ops = _diff_ops(diff, rt.cas.resolve_blob)
+    except FeatureDiffBodyError:
+        # Overlay is best-effort VISIBILITY; the integration boundary stays the
+        # authoritative (fail-closed) applier of this body.
+        return {}
+    out: dict[str, str | None] = dict(ops.writes)
+    for rel in ops.deletes:
+        out[rel] = None
+    return out
+
+
 def _sandbox_for(rt: AgentRuntime, source_dir: str, snapshot_store: str | None) -> Sandbox:
     """Build the per-task Sandbox honoring the adapter's DECLARED model-auth needs.
 
@@ -426,17 +476,33 @@ def _run_one_task(
     prior_failures: tuple[str, ...] = (),
     persona: str = "",
     retrieved_spans: tuple[str, ...] = (),
+    overlay: Mapping[str, str | None] | None = None,
 ) -> dict[str, Any]:
     """Run the adapter for ONE task in a fresh sandbox; return its channel writes.
 
     A FRESH ``Sandbox`` per task (arch §2(d): no reuse). Establishes / resets to
     the base tree FIRST (idempotent retry = supersession, L4), runs the adapter,
     then keys the diff by ``content_digest`` (L7) so a re-run re-derives the same
-    key and the keyed-union channels coalesce the supersession."""
+    key and the keyed-union channels coalesce the supersession.
+
+    ``overlay`` (ROADMAP Phase 2b — the shared evolving tree): the accumulated
+    slices of EARLIER tasks in this node invocation (merge order), written onto
+    the fresh clone BEFORE the base snapshot is taken, so this task builds ON the
+    code its predecessors authored instead of blind against the scaffold. Because
+    it precedes ``snapshot()``, the recorded base (and thus the idempotency key)
+    reflects what the task actually saw — a retry resets to the SAME overlaid
+    base, and a change in a predecessor's output supersedes correctly. A retry
+    presenting a recorded ``base_snapshot`` skips the overlay (that base is
+    already authoritative)."""
     assert rt.adapter is not None  # guaranteed by the factory's guard
     sandbox = _sandbox_for(rt, source_dir, snapshot_store)
     try:
-        base = sandbox.snapshot() if base_snapshot is None else sandbox.restore(base_snapshot)
+        if base_snapshot is None:
+            if overlay:
+                _apply_overlay(sandbox.worktree, overlay)
+            base = sandbox.snapshot()
+        else:
+            base = sandbox.restore(base_snapshot)
         packet = _build_packet(
             task,
             constraints,
@@ -778,6 +844,11 @@ def make_junior_engineer_node(
                 spans_by_task=spans_by_task,
             )
         merged: dict[str, Any] = {}
+        # The shared evolving tree (ROADMAP Phase 2b): each SERIAL task builds on
+        # its predecessors' slices (merge order), later-by-Seq winning exactly as
+        # at the integration boundary. The pooled path stays independent by design
+        # (parallel siblings can't see each other mid-flight).
+        overlay: dict[str, str | None] = {}
         for task in tasks:
             writes = _run_one_task(
                 rt,
@@ -792,7 +863,9 @@ def make_junior_engineer_node(
                 prior_failures=prior_failures,
                 persona=persona_by_task.get(task.id, ""),
                 retrieved_spans=spans_by_task.get(task.id, ()),
+                overlay=overlay,
             )
+            overlay.update(_slice_of(rt, writes))
             for channel, records in writes.items():
                 merged.setdefault(channel, []).extend(records)
         return merged

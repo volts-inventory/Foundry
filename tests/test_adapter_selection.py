@@ -40,6 +40,7 @@ def test_every_adapter_constructs(proxy: Any) -> None:
         "stub": "StubAdapter",
         "raw-react": "RawReactAdapter",
         "claude-code": "ClaudeCodeAdapter",
+        "proxy-agent": "ProxyAgentAdapter",
     }
 
 
@@ -80,9 +81,10 @@ def test_foundry_adapter_env_overrides_derivation(monkeypatch: pytest.MonkeyPatc
 
 
 def test_offered_adapters() -> None:
-    # Three substrates: the deterministic stub, the provider-agnostic raw-react
-    # completion adapter, and the agentic claude-code substrate (ROADMAP Phase 1a).
-    assert set(ADAPTERS) == {"stub", "raw-react", "claude-code"}
+    # Four substrates: the deterministic stub, the provider-agnostic raw-react
+    # completion adapter, the agentic claude-code substrate (ROADMAP 1a), and the
+    # proxy-mediated agentic loop (ROADMAP 1c — trust story intact, any backend).
+    assert set(ADAPTERS) == {"stub", "raw-react", "claude-code", "proxy-agent"}
 
 
 def test_run_with_mock_backend_and_no_adapter_stays_stub() -> None:

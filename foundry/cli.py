@@ -154,7 +154,7 @@ BACKENDS = (_MOCK_BACKEND, "anthropic", "openai", "claude-cli", "codex", "ollama
 # it runs the `claude` CLI multi-turn INSIDE the task sandbox, where it edits files
 # and runs builds/tests itself, and authenticates via the sandbox's typed model-auth
 # grant (Max login/token = no API billing, or ANTHROPIC_API_KEY = metered).
-ADAPTERS = ("stub", "raw-react", "claude-code")
+ADAPTERS = ("stub", "raw-react", "claude-code", "proxy-agent")
 _DEFAULT_ADAPTER = "stub"
 
 
@@ -237,6 +237,23 @@ def make_coding_adapter(
         # stays the egress for the AGENT layers; the coding substrate's lineage
         # self-report is carried but IGNORED (arch §2b, documented trade).
         return ClaudeCodeAdapter(run_id=thread_id)
+    if name == "proxy-agent":
+        from foundry.execution.adapters.proxy_agent import ProxyAgentAdapter
+
+        # The trust-preserving agentic loop (ROADMAP 1c): multi-turn, but every
+        # call rides the mediating proxy — sole credential holder, any backend.
+        def _agent_complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
+            result = proxy.complete(
+                "junior_engineer",
+                "T1",
+                _RAW_REACT_SOP,
+                list(messages),
+                purpose="ideation",
+                schema=schema,
+            )
+            return result.text or "", result.parsed
+
+        return ProxyAgentAdapter(complete_fn=_agent_complete, run_id=thread_id)
     raise ValueError(f"unknown adapter {name!r}; choose one of {', '.join(ADAPTERS)}")
 
 
@@ -1396,6 +1413,12 @@ def run(
             if base.is_dir():
                 shutil.copytree(base, source_dir, dirs_exist_ok=True)
         try:
+            # Verification profile (ROADMAP Phase 3): stack-appropriate pinned
+            # gate commands inferred from the request + spec. Unrecognized stacks
+            # stay on the `python` profile — gates byte-identical to before.
+            from foundry.gates.profiles import profile_for_request
+
+            profile = profile_for_request(f"{request}\n{spec_text or ''}")
             app = build_factory_graph(
                 rt,
                 runner=runner,
@@ -1409,6 +1432,7 @@ def run(
                 admission=admission,
                 deployer=deployer,
                 gate_verifier=gate_verifier,
+                profile=profile,
                 pack_registry=pack_registry,
                 # Author the doc set when EITHER a separate --docs dir OR an --out
                 # tree is requested (the docs land inside the --out repo, below).

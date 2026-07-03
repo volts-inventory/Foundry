@@ -191,6 +191,7 @@ def events_for_payload(
     kind_of = {str(a.get("uri", "")): str(a.get("kind", "")) for a in payload.get("artifacts", [])}
     kind_total: Counter[str] = Counter(kind_of[u] for u in new_uris)
     kind_seen: Counter[str] = Counter()
+    spoken: set[tuple[str, str]] = set()   # (room, agent) that already got a say
     for a in payload.get("artifacts", []):
         uri = str(a.get("uri", ""))
         if not uri or uri in seen_uris:
@@ -207,11 +208,15 @@ def events_for_payload(
             "type": "artifact", "room": aroom, "agent": agent, "kind": kind,
             "label": label,
         })
-        # Attach a speech bubble for this agent if the journal had one.
-        for s in say_by_room.get(aroom, []):
-            if s["agent"] == agent:
-                out.append({"type": "say", **s})
-                break
+        # Attach a speech bubble for this agent if the journal had one — once per
+        # agent per pause, not once per artifact (an agent with three artifacts
+        # would otherwise repeat the same line three times in the quest log).
+        if (aroom, agent) not in spoken:
+            for s in say_by_room.get(aroom, []):
+                if s["agent"] == agent:
+                    spoken.add((aroom, agent))
+                    out.append({"type": "say", **s})
+                    break
 
     # Advisory gate context so far (status only — the gates still decide).
     for g in payload.get("gates", []):
@@ -227,19 +232,33 @@ def events_for_payload(
     return out
 
 
+# Pipeline order for the closing gate recap (unknown gates sort after, by name) —
+# reads as the build sequence, not an alphabet.
+_GATE_SEQ = {n: i for i, n in enumerate(
+    ("spec", "build", "test", "smoke", "review", "security",
+     "audit", "supply_chain", "e2e"))}
+
+
 def events_for_result(result: dict[str, Any]) -> list[dict[str, Any]]:
     """Closing game events from the final RunResult: the signed gate verdicts, then
     the chest opening (release) or the red door (halt)."""
     out: list[dict[str, Any]] = []
-    for name, status in sorted((result.get("gate_statuses") or {}).items()):
+    statuses = (result.get("gate_statuses") or {}).items()
+    ordered = sorted(statuses, key=lambda kv: (_GATE_SEQ.get(kv[0], len(_GATE_SEQ)), kv[0]))
+    for name, status in ordered:
         out.append({"type": "gate", "name": name, "status": _norm_status(status),
                     "attested": True, "advisory": False})
     if result.get("passed"):
         out.append({"type": "release", "uri": result.get("artifact_uri") or "",
                     "mode": result.get("mode", "assistant")})
     else:
+        # Name the gate(s) that stopped the build — "a gate did not PASS" makes
+        # the reader scan the whole verdict list to find out which.
+        bad = [f"{n} gate: {_norm_status(s).upper()}"
+               for n, s in ordered if _norm_status(s) != "pass"]
         out.append({"type": "halt", "phase": result.get("phase", "unknown"),
-                    "reason": "a gate did not PASS — the build is held (fail-closed)"})
+                    "reason": ("; ".join(bad) + " (fail-closed — nothing shipped)")
+                    if bad else "a gate did not PASS (fail-closed — nothing shipped)"})
     out.append({"type": "done", "passed": bool(result.get("passed")),
                 "phase": result.get("phase", "unknown")})
     return out

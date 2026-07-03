@@ -1684,6 +1684,7 @@ function switchToFloor(floor){
 // ---- per-floor event routing ----------------------------------------------
 // What a live agent is DOING, by room — the quest log narrates it while they work.
 const ACTIVE_VERB = {product:"planning", architecture:"designing", engineering:"writing code",
+  frontend:"building", backend:"building", data:"building",
   qa:"testing", security:"reviewing", gate:"running the gates", vault:"shipping"};
 function routeEvent(floor, ev){
   const F = FLOORS.get(floor); if (!F) return;
@@ -1692,6 +1693,8 @@ function routeEvent(floor, ev){
     case "project":
       F.request = ev.request; F.mode = ev.mode; F.backend = ev.backend || F.backend;
       F.slots = ev.slots || 1;
+      F.roomsLogged = new Set();   // fresh release -> room banners fire again
+      F.closed = false;            // no terminal line logged yet for this release
       if (S) S.setPool(F.slots);
       if (isActive) updateHud(F);
       break;
@@ -1704,8 +1707,11 @@ function routeEvent(floor, ev){
       if (S && ev.room) S.pulseRoom(ev.room);
       break;
     case "stage":
+      // Fires at the checkpoint pause — i.e. AFTER the stage's work ran (the room
+      // banner from the first `active` event is what marks the stage starting).
+      // So this line introduces the stage's deliverables recap, not the stage.
       if (S) S.setActiveRoom(ev.room);
-      logTo(F, "gold", "── "+ev.label+" ──"); break;
+      logTo(F, "gold", ev.label+" — deliverables:"); break;
     case "agent": if (S) S.agentWork(ev.agent); break;
     case "active":
       // LIVE per-node telemetry: a real graph node is executing RIGHT NOW. Seat
@@ -1715,6 +1721,15 @@ function routeEvent(floor, ev){
       if (S){
         if (S.activeRoom !== ev.room) S.setActiveRoom(ev.room);
         if (ev.agent) S.agentWork(ev.agent);
+      }
+      // First time work reaches a room this release -> a banner marks the phase
+      // STARTING (the `stage` recap only arrives when the phase is already done).
+      if (ev.room && ROOMS[ev.room]){
+        if (!F.roomsLogged) F.roomsLogged = new Set();
+        if (!F.roomsLogged.has(ev.room)){
+          F.roomsLogged.add(ev.room);
+          logTo(F, "gold", "── "+ROOMS[ev.room].label+" ──");
+        }
       }
       // …and NARRATE it, so the quest log always shows the build grinding even
       // before the first artifact lands (repeats coalesce into one ×N ticker).
@@ -1741,7 +1756,8 @@ function routeEvent(floor, ev){
     case "org":
       if (S){ S.renderOrg(ev); S.setOrg(ev.areas, ev.domains);
         if (S.activeRoomKey) S.staffRoom(S.activeRoomKey); }   // lane-lay engineering by area
-      logTo(F, "gold", "ORG · "+(ev.areas||[]).map(a=>`${a.area}(${(a.leads||[]).length})`).join("  "));
+      logTo(F, "gold", "Org formed — "+
+        (ev.areas||[]).map(a=>`${a.area} ×${(a.leads||[]).length}`).join(" · "));
       break;
     case "files":
       break;   // file count is read live from the repo view, not cached on F
@@ -1754,6 +1770,7 @@ function routeEvent(floor, ev){
         F.cp = Object.assign({}, F.cp, {boundary: ev.boundary, request: ev.request || ""});
       if (Array.isArray(ev.journal)) F.journal = ev.journal;
       renderElevator();
+      logTo(F, "hot", "CHECKPOINT — waiting for a human decision…");
       if (S){ S.spotlightCTO(true); S.toLounge(); }   // team hangs out while CTO decides
       if (isActive) showCheckpoint(F); break;
     case "resolved":
@@ -1772,16 +1789,28 @@ function routeEvent(floor, ev){
       if (isActive) hideCheckpoint(); break;
     case "release":
       if (S){ S.openGateAndChest(); S.stampGate(true); S.celebrate(); S.banner("SHIPPED!", 0x5ddc7a); }
-      logTo(F, "gold", "RELEASED -> "+(ev.uri||"artifact")); break;
+      F.closed = true;
+      logTo(F, "good", "RELEASED — the vault opens. Shipped!"); break;
     case "halt":
       if (S){ S.flashGate(); S.stampGate(false); }
-      logTo(F, "bad", "HELD: "+ev.reason); break;
+      F.closed = true;
+      // Say WHY the build stopped, in the failure's own terms — a crash and a
+      // red gate are different stories.
+      { const head = ev.phase === "error" ? "BUILD ERROR" :
+                     ev.phase === "interrupted" ? "INTERRUPTED" : "HELD AT THE GATE";
+        logTo(F, "bad", head+" — "+(ev.reason||"")); }
+      break;
     case "done":
       F.status = "done"; F.passed = !!ev.passed; renderElevator();
       // Build's over: nobody is working, so the whole crew relaxes in the LOUNGE.
       if (S){ S.staffRoom(null); if (!ev.passed){ S.gloom(); S.banner("HELD AT THE GATE", 0xff5d6c); } }
-      logTo(F, ev.passed?"good":"bad",
-        ev.passed?"Build complete — shipped.":"Build halted — nothing shipped."); break;
+      // The release/halt line above is the terminal story; only add one here if
+      // this build ended some OTHER way (e.g. a platform build with no halt event).
+      if (!F.closed && ev.phase !== "proposal_rejected")
+        logTo(F, ev.passed?"good":"bad",
+          ev.passed?"Build complete — shipped.":"Build finished — nothing shipped.");
+      F.closed = true;
+      break;
   }
 }
 
@@ -1794,8 +1823,10 @@ function logClass(t){   // classify BEFORE stripping, so server emoji still tint
   if(/📋|🏭|🧑|mode|stage|crew/i.test(t)) return "hot";
   return "";
 }
-// strip any emoji so the QUEST LOG is pure bitmap-font text (matches the pixel UI)
-const EMOJI_RE = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{2300}-\u{23FF}\u{2190}-\u{21FF}️]/gu;
+// strip any emoji so the QUEST LOG is pure bitmap-font text (matches the pixel UI).
+// ‍ (ZWJ) + ️ (variation selector) included so composed emoji like 🧑‍💼
+// vanish entirely instead of leaving an invisible joiner behind.
+const EMOJI_RE = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{2300}-\u{23FF}\u{2190}-\u{21FF}‍️]/gu;
 function deEmoji(t){ return (t==null?"":(""+t)).replace(EMOJI_RE,"").replace(/^\s+/,""); }
 function appendLogDom(cls,text){
   const ul=document.getElementById("log");
@@ -1805,21 +1836,27 @@ function appendLogDom(cls,text){
 }
 // Consecutive near-duplicate lines COALESCE into one ticking entry instead of
 // flooding the log: a numbered run ("Acceptance Criterion #1…#32 · PM") keeps one
-// line whose number ticks up; exact repeats gain a ×N tally.
+// line whose number ticks up; exact repeats gain a ×N tally. "▸ …" activity lines
+// go further: between substantive events the log keeps only ONE such line — the
+// CURRENT worker — so a long fix loop reads as a moving status, not a wall.
 function logKey(t){ return deEmoji(t).replace(/#\d+/g, "#*"); }
 function logLine(e){ return (e.n > 1 && !/#\d+/.test(e.text)) ? `${e.text}  ×${e.n}` : e.text; }
 function logTo(F, cls, text){
   const last = F.log[F.log.length-1];
-  if (last && last.cls === cls && logKey(last.text) === logKey(text)){
-    last.n = (last.n||1) + 1; last.text = text;      // tick the existing line in place
+  const act = text.startsWith("▸");
+  const dup = last && last.cls === cls && logKey(last.text) === logKey(text);
+  if (dup || (act && last && last.act)){
+    if (dup){ last.n = (last.n||1) + 1; }            // tick the existing line…
+    else { last.n = 1; last.cls = cls; }             // …or swap in the new worker
+    last.text = text; last.act = act;
     if (F.floor === ACTIVE){
       const ul = document.getElementById("log");
       if (ul.lastChild){ ul.lastChild.textContent = deEmoji(logLine(last));
-        ul.scrollTop = ul.scrollHeight; }
+        ul.lastChild.className = last.cls; ul.scrollTop = ul.scrollHeight; }
     }
     return;
   }
-  F.log.push({cls, text, n:1});
+  F.log.push({cls, text, n:1, act});
   if (F.log.length > 200) F.log.shift();
   if (F.floor === ACTIVE) appendLogDom(cls, logLine({text, n:1}));
 }

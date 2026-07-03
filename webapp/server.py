@@ -933,7 +933,8 @@ def _run_factory(p: Project, resume: bool = False) -> None:
         finally:
             base_stack.close()  # run() copies base_dir into its sandbox synchronously
     except Exception as exc:
-        _emit(p, type="narrate", text=f"💥 Build error: {exc}")
+        # The halt event carries the exception; the client renders it as the one
+        # terminal "BUILD ERROR — …" line (no duplicate narrate).
         _emit(p, type="halt", phase="error", reason=str(exc))
         _emit(p, type="done", passed=False, phase="error")
         p.status = "done"
@@ -962,11 +963,9 @@ def _run_factory(p: Project, resume: bool = False) -> None:
         "artifact_uri": result.artifact_uri,
         "gate_statuses": {k: str(v) for k, v in result.gate_statuses.items()},
     }
+    # events_for_result already ends the story (release or halt + done) — the
+    # client logs the one terminal line from those; no duplicate narrate here.
     _emit_paced(p, events_for_result(result_dict))
-    if result.passed:
-        _emit(p, type="narrate", text="💰 Gates all green — the vault opens. Shipped!")
-    else:
-        _emit(p, type="narrate", text="🚫 Held at the gate (fail-closed). Nothing shipped.")
     # Surface the repo (read from the store) for in-page browsing / export. The tree
     # is materialized from the CAS — no output directory required.
     _invalidate_repo(p.id)

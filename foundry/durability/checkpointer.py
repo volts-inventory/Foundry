@@ -40,17 +40,40 @@ commits in ONE SQLite transaction, or none of it does.
 
 from __future__ import annotations
 
+import importlib
 import os
+import pkgutil
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from inspect import isclass
 from pathlib import Path
 
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from foundry.durability.outbox import ensure_outbox_schema
 
 __all__ = ["FoundryCheckpointer", "make_checkpointer"]
+
+
+def _schema_allowlist() -> list[type]:
+    """Every class defined in a ``foundry.schemas.*`` module — the typed state
+    that lands in checkpoints. Registered explicitly with the checkpoint
+    serializer so LangGraph's msgpack deserializer reconstructs them without
+    the "unregistered type" warning (and keeps working once unregistered
+    types are blocked by default). Collected dynamically so a new schema
+    module/class never needs a hand-maintained list here."""
+    import foundry.schemas as schemas_pkg
+
+    out: list[type] = []
+    for info in pkgutil.iter_modules(schemas_pkg.__path__):
+        mod = importlib.import_module(f"{schemas_pkg.__name__}.{info.name}")
+        out.extend(
+            obj for obj in vars(mod).values()
+            if isclass(obj) and obj.__module__ == mod.__name__
+        )
+    return out
 
 
 class _SuperstepConnection(sqlite3.Connection):
@@ -86,7 +109,10 @@ class FoundryCheckpointer:
         )
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
-        self.saver = SqliteSaver(self.conn)
+        self.saver = SqliteSaver(
+            self.conn,
+            serde=JsonPlusSerializer(allowed_msgpack_modules=_schema_allowlist()),
+        )
         # DDL (executescript ⇒ implicit COMMIT) must run OUTSIDE supersteps:
         self.saver.setup()
         ensure_outbox_schema(self.conn)

@@ -1068,24 +1068,37 @@ def _stream_segment(
     config: RunnableConfig,
     progress_cb: Callable[[str, str], None],
 ) -> dict[str, Any]:
-    """Drive ONE graph segment with ``stream`` (updates mode), forwarding each
-    node as it completes to ``progress_cb(node, scope)`` for LIVE telemetry (so a
-    long real stage shows agents working at their desks node-by-node, not a single
-    burst at the pause). ``subgraphs=True`` surfaces the inner stage nodes; the
-    namespace's leading scope names the stage/room. Returns a dict carrying
-    ``__interrupt__`` if the segment paused, so the caller's interrupt detection
+    """Drive ONE graph segment with ``stream``, forwarding each node to
+    ``progress_cb(node, scope)`` for LIVE telemetry (so a long real stage shows
+    agents working at their desks node-by-node, not a single burst at the pause).
+
+    Streams TWO modes: ``debug`` task events fire when a node STARTS — so a
+    node whose model call runs for minutes narrates liveness the moment it
+    begins, not only when it returns — and ``updates`` fires on completion and
+    carries the ``__interrupt__`` marker for the checkpoint pauses.
+    ``subgraphs=True`` surfaces the inner stage nodes; the namespace's leading
+    scope names the stage/room. Returns a dict carrying ``__interrupt__`` if
+    the segment paused, so the caller's interrupt detection
     (:func:`_pending_interrupt`) is byte-identical to the ``invoke`` path."""
     pending: Any = None
-    for item in app.stream(x, config, stream_mode="updates", subgraphs=True):
-        ns, chunk = item if isinstance(item, tuple) else ((), item)
+    for ns, mode, chunk in app.stream(
+        x, config, stream_mode=["updates", "debug"], subgraphs=True
+    ):
         if not isinstance(chunk, dict):
+            continue
+        scope = ":".join(str(n).split(":")[0] for n in ns) if ns else ""
+        if mode == "debug":
+            if chunk.get("type") == "task":     # node STARTED executing right now
+                node = str((chunk.get("payload") or {}).get("name", ""))
+                if node and not node.startswith("__"):
+                    # telemetry is advisory — never let a UI callback break the build
+                    with contextlib.suppress(Exception):
+                        progress_cb(node, scope)
             continue
         if "__interrupt__" in chunk:
             pending = chunk["__interrupt__"]
             continue
-        scope = ":".join(str(n).split(":")[0] for n in ns) if ns else ""
         for node in chunk:
-            # telemetry is advisory — never let a UI callback break the build
             with contextlib.suppress(Exception):
                 progress_cb(str(node), scope)
     return {"__interrupt__": pending} if pending else {}

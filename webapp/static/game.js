@@ -1301,15 +1301,16 @@ class FloorScene extends Phaser.Scene {
   staffRoom(key){
     this.activeRoomKey = key;
     const working = (room)=> !!room && (room===key || (key==="engineering" && ENG_ROOMS.includes(room)));
-    // Everyone goes to their OWN desk — working (heads-down) or idle (a Zzz floats up).
-    // Nobody parks in the lounge just because their stage is off; mill() lets a few
-    // drift there at random between stages.
+    // The active stage's crew sits at their OWN desks, heads-down. Everyone else
+    // waits it out in the LOUNGE — a room only ever shows people actually working.
     for (const [name,a] of this.agents){
-      if (a.seen) this.deskRest(a, working(AGENT_ROOM[name]));
+      if (!a.seen) continue;
+      if (working(AGENT_ROOM[name])) this.deskRest(a, true); else this.gotoLounge(a);
     }
     const engActive = key === "engineering";
     for (const s of [...(this.poolGroup||[]), ...(this.techLeadGroup||[])]){
-      if (s && s.bob) this.deskRest(s, engActive, engActive);
+      if (!s || !s.bob) continue;
+      if (engActive) this.deskRest(s, true, true); else this.gotoLounge(s);
     }
   }
   toLounge(){   // everyone hangs out (checkpoints / done)
@@ -1321,11 +1322,10 @@ class FloorScene extends Phaser.Scene {
     const move = (a)=>{ if (a && a.seen && a.inLounge && a.loungeBusy === "wander"
         && !a.moveTween?.isPlaying() && Math.random()<0.5){
       this.walkTo(a, B.x+26+Math.random()*(B.w-52), B.y+58+Math.random()*(B.h-86)); } };
-    // Idle desk folks only OCCASIONALLY drift off to the lounge (and drift back) —
-    // the floor stays populated; the break room is the exception, not the rule.
+    // Off-duty stragglers (revealed mid-stage, done animating, …) head to the
+    // lounge and STAY there — idle workers wait in the break room, not at desks.
     const drift = (a)=>{ if (!a || !a.seen || (a.moveTween && a.moveTween.isPlaying())) return;
-      if (!a.inLounge && !a.working && Math.random() < 0.04) this.gotoLounge(a);
-      else if (a.inLounge && Math.random() < 0.12) this.deskRest(a, false); };
+      if (!a.inLounge && !a.working) this.gotoLounge(a); };
     for (const [,a] of this.agents){ move(a); drift(a); }
     for (const s of [...(this.poolGroup||[]), ...(this.techLeadGroup||[])]){ move(s); drift(s); }
   }
@@ -1682,6 +1682,9 @@ function switchToFloor(floor){
 }
 
 // ---- per-floor event routing ----------------------------------------------
+// What a live agent is DOING, by room — the quest log narrates it while they work.
+const ACTIVE_VERB = {product:"planning", architecture:"designing", engineering:"writing code",
+  qa:"testing", security:"reviewing", gate:"running the gates", vault:"shipping"};
 function routeEvent(floor, ev){
   const F = FLOORS.get(floor); if (!F) return;
   const S = F.scene, isActive = floor === ACTIVE;
@@ -1713,6 +1716,11 @@ function routeEvent(floor, ev){
         if (S.activeRoom !== ev.room) S.setActiveRoom(ev.room);
         if (ev.agent) S.agentWork(ev.agent);
       }
+      // …and NARRATE it, so the quest log always shows the build grinding even
+      // before the first artifact lands (repeats coalesce into one ×N ticker).
+      { const verb = ACTIVE_VERB[ev.room] || "working";
+        const who = ev.agent || `The ${ev.room||"office"} crew`;
+        logTo(F, "", `▸ ${who} is ${verb}…`); }
       break;
     case "say":
       if (S) S.agentSay(ev.agent, ev.text);
@@ -1770,8 +1778,7 @@ function routeEvent(floor, ev){
       logTo(F, "bad", "HELD: "+ev.reason); break;
     case "done":
       F.status = "done"; F.passed = !!ev.passed; renderElevator();
-      // Build's over: everyone REST AT THEIR DESKS (idle => Zzz), not banished to the
-      // lounge. mill() still drifts a few to the break room now and then.
+      // Build's over: nobody is working, so the whole crew relaxes in the LOUNGE.
       if (S){ S.staffRoom(null); if (!ev.passed){ S.gloom(); S.banner("HELD AT THE GATE", 0xff5d6c); } }
       logTo(F, ev.passed?"good":"bad",
         ev.passed?"Build complete — shipped.":"Build halted — nothing shipped."); break;
@@ -1796,15 +1803,30 @@ function appendLogDom(cls,text){
   ul.appendChild(li); ul.scrollTop=ul.scrollHeight;
   while(ul.children.length>200) ul.removeChild(ul.firstChild);
 }
+// Consecutive near-duplicate lines COALESCE into one ticking entry instead of
+// flooding the log: a numbered run ("Acceptance Criterion #1…#32 · PM") keeps one
+// line whose number ticks up; exact repeats gain a ×N tally.
+function logKey(t){ return deEmoji(t).replace(/#\d+/g, "#*"); }
+function logLine(e){ return (e.n > 1 && !/#\d+/.test(e.text)) ? `${e.text}  ×${e.n}` : e.text; }
 function logTo(F, cls, text){
-  F.log.push({cls,text});
+  const last = F.log[F.log.length-1];
+  if (last && last.cls === cls && logKey(last.text) === logKey(text)){
+    last.n = (last.n||1) + 1; last.text = text;      // tick the existing line in place
+    if (F.floor === ACTIVE){
+      const ul = document.getElementById("log");
+      if (ul.lastChild){ ul.lastChild.textContent = deEmoji(logLine(last));
+        ul.scrollTop = ul.scrollHeight; }
+    }
+    return;
+  }
+  F.log.push({cls, text, n:1});
   if (F.log.length > 200) F.log.shift();
-  if (F.floor === ACTIVE) appendLogDom(cls, text);
+  if (F.floor === ACTIVE) appendLogDom(cls, logLine({text, n:1}));
 }
 function rebuildLog(F){
   const ul=document.getElementById("log"); ul.innerHTML="";
-  for (const {cls,text} of F.log){
-    const li=document.createElement("li"); li.className=cls; li.textContent=deEmoji(text); ul.appendChild(li);
+  for (const e of F.log){
+    const li=document.createElement("li"); li.className=e.cls; li.textContent=deEmoji(logLine(e)); ul.appendChild(li);
   }
   ul.scrollTop = ul.scrollHeight;
 }

@@ -87,6 +87,7 @@ designer, QA lead — scores each 0-10 with optional vetoes and amendments. The
 tally is deterministic (majority veto kills; highest mean above the floor
 wins), the winner builds next, and the ballot is recorded on each release. If
 the panel declines everything, the loop stops and hands steering back to you.
+Like the milestone ladder, the output is one git repository (tagged `i01`…).
 
 ## 4. Play it
 

@@ -1652,7 +1652,7 @@ def _autopilot_main(args: list[str]) -> int:
             raise _CliUsageError(
                 'usage: python -m foundry.cli autopilot "<target>" --out DIR '
                 "[--iterations N] [--backend B] [--adapter A] [--mode M] "
-                "[--state-dir DIR] [--thread-id NAME]"
+                "[--state-dir DIR] [--thread-id NAME] [--no-git]"
             )
         iterations = int(_iters) if _iters else 3
     except (_CliUsageError, ValueError) as exc:
@@ -1713,7 +1713,7 @@ def _milestones_main(args: list[str]) -> int:
             raise _CliUsageError(
                 'usage: python -m foundry.cli milestones "<big target>" --out DIR '
                 "[--milestones 'a; b; c'] [--backend B] [--adapter A] [--mode M] "
-                "[--state-dir DIR] [--thread-id NAME] [--max-milestones N]"
+                "[--state-dir DIR] [--thread-id NAME] [--max-milestones N] [--no-git]"
             )
         max_milestones = int(_max) if _max else 8
     except (_CliUsageError, ValueError) as exc:

@@ -568,7 +568,12 @@ release on the same floor automatically.
 
 A localhost web app that runs the real factory and visualizes it. Floors are
 projects; iterate to add releases; browse output and release history; approve,
-request changes, or reject at checkpoints.
+request changes, or reject at checkpoints. The **Autopilot** field on project
+creation (0-20) makes each green build spawn the panel-chosen next release on
+the same floor — on a supervised floor the idea first pauses as an **AUTOPILOT
+PROPOSAL** checkpoint with an editable request (approve / edit-then-approve /
+reject). The REPO modal exports any release as a **.zip** or the whole floor
+lineage as **one git repository** (⎇ Git repo — a tagged commit per release).
 
 ```bash
 # 1. Serve it on http://localhost:8765 (it loads .env on startup)

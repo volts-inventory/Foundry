@@ -5,7 +5,7 @@ game** with Foundry on a Claude Max plan (`claude -p`, no API billing). Two
 commands, run back-to-back, fully unattended. Works the same with
 `ANTHROPIC_API_KEY` (metered) — no command changes.
 
-**Prerequisites:** the [Setup](../README.md#1-setup) steps done once, the
+**Prerequisites:** the [Setup](README.md#1-setup) steps done once, the
 `claude` CLI installed and authenticated (`claude /login`, or
 `CLAUDE_CODE_OAUTH_TOKEN` in `.env` for a headless box).
 
@@ -63,7 +63,8 @@ What happens, unattended:
   runtime **smoke gate** (`python smoke.py`: the game must boot headless with
   `SDL_VIDEODRIVER=dummy` and survive ≥120 frames, or the boundary routes back
   to fix with the failure in the next attempt's prompt);
-- each **released** tree lands in `~/moon-colony/mNN` and seeds the next
+- each **released** increment becomes a tagged commit (staged under
+  `~/moon-colony/.stages/mNN`) and seeds the next
   milestone; the ladder **stops fail-closed** at the first milestone the gates
   refuse — everything below it is still a released, working game.
 

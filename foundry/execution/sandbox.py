@@ -102,7 +102,7 @@ _DENIED_EXACT: frozenset[str] = frozenset({"SSH_AUTH_SOCK", "GH_TOKEN", "NETRC"}
 # The single env var through which a sandbox tells an adapter its ONLY egress.
 PROXY_ENV_VAR = "FOUNDRY_PROXY_ENDPOINT"
 
-# ---- typed credential grant (docs/ROADMAP-agentic.md Phase 1b) ---------------
+# ---- typed credential grant (model-auth only; see README adapter docs) -------
 #
 # The ONLY credential class that may ever enter the cage is MODEL AUTH — what an
 # agentic CLI substrate (Claude Code) needs to authenticate its own model calls.

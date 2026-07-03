@@ -225,7 +225,7 @@ def _retrieved_spans(
     state: FactoryState, resolve: ArtifactResolver | None, task: Task
 ) -> tuple[str, ...]:
     """Ground THIS task's codegen call in the spec context it traces to.
-    (docs/ROADMAP-agentic.md Phase 4 — the coder must see the spec, not a handle.)
+    (context-grounding: the coder must see the spec, not a handle.)
 
     Until now the packet's ``retrieved_spans`` was always empty and ``spec_uri``
     is a synthetic content-address (no stored body), so the coding substrate saw

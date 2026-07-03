@@ -447,7 +447,7 @@ echo $?                              # non-zero if NOT released
 
 > The complete unattended runbook — spec template, both loops, resume, and
 > first-run expectations — lives in
-> **[docs/BUILD-A-FULL-GAME.md](docs/BUILD-A-FULL-GAME.md)**.
+> **[BUILD-A-FULL-GAME.md](BUILD-A-FULL-GAME.md)**.
 
 One target, both surfaces: **"a stardew-style farming game about colonizing
 the moon, pygame"**.

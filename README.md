@@ -115,12 +115,16 @@ python -m foundry.cli evolve <prior-repo> "<change>" [OPTIONS]
 python -m foundry.cli milestones "<big target>" --out DIR [OPTIONS]
   --milestones "a; b; c"     # explicit ordered plan (omit ⇒ the model plans the ladder)
   --max-milestones <N>       # plan/run at most N increments                     (default: 8)
+  --git                      # ALSO project released increments into <out>/repo — one git
+                             # repository, one tagged commit per milestone (a VIEW; the
+                             # content-addressed store stays the source of truth)
   # each milestone runs the FULL gated factory; its RELEASED tree seeds the next;
   # stops fail-closed at the first gate refusal; resumable per milestone
 
 # ── Subcommand: autopilot — Director proposes, a design panel votes ────────────
 python -m foundry.cli autopilot "<target>" --out DIR [OPTIONS]
   --iterations <N>           # self-iterations after the first release           (default: 3)
+  --git                      # ALSO project released iterations into <out>/repo (tagged commits)
   # between releases: the Director drafts candidate next actions, a panel (staff
   # engineer, usability designer, product designer, QA lead) scores + vetoes them
   # (deterministic tally), the winner builds next; a panel DECLINE stops the loop

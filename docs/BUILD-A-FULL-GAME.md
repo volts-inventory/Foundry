@@ -43,8 +43,13 @@ python -m foundry.cli milestones \
   --spec ~/moon-spec.md --out ~/moon-colony \
   --backend claude-cli --adapter claude-code --mode autonomous \
   --max-milestones 10 --max-slots 4 --max-fix-attempts 8 \
-  --state-dir ~/foundry/state --thread-id moon-colony
+  --state-dir ~/foundry/state --thread-id moon-colony --git
 ```
+
+`--git` additionally projects the released increments into ONE git repository
+at `~/moon-colony/repo` — each milestone a tagged commit (`git diff m04..m05`,
+`git checkout m03` to play an earlier increment, push it anywhere). Without it
+you get sibling `mNN` folders (full standalone snapshots, no git required).
 
 What happens, unattended:
 

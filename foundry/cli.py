@@ -1645,6 +1645,8 @@ def _autopilot_main(args: list[str]) -> int:
         args, state_dir = _take_value(args, "--state-dir", what="a directory argument")
         args, _thread = _take_value(args, "--thread-id", what="a value")
         args, _iters = _take_value(args, "--iterations", what="an integer")
+        want_git = "--git" in args
+        args = [a for a in args if a != "--git"]
         request = " ".join(args).strip()
         if not request or not out_dir:
             raise _CliUsageError(
@@ -1673,6 +1675,9 @@ def _autopilot_main(args: list[str]) -> int:
     print(report.summary())
     if report.released_dir:
         print(f"released:  {report.released_dir}")
+    if want_git and report.released_dir:
+        _export_git(out_dir, [(f"i{r.index:02d}", r.out_dir, r.request[:72])
+                              for r in report.iterations if r.passed])
     return 0 if all(r.passed for r in report.iterations) else 1
 
 
@@ -1700,6 +1705,8 @@ def _milestones_main(args: list[str]) -> int:
         args, state_dir = _take_value(args, "--state-dir", what="a directory argument")
         args, _thread = _take_value(args, "--thread-id", what="a value")
         args, _max = _take_value(args, "--max-milestones", what="an integer")
+        want_git = "--git" in args
+        args = [a for a in args if a != "--git"]
         request = " ".join(args).strip()
         if not request or not out_dir:
             raise _CliUsageError(
@@ -1731,7 +1738,30 @@ def _milestones_main(args: list[str]) -> int:
     print(report.summary())
     if report.released_dir:
         print(f"released:  {report.released_dir}")
+    if want_git and report.released_dir:
+        _export_git(out_dir, [(f"m{r.index:02d}", r.out_dir, r.title)
+                              for r in report.results if r.passed])
     return 0 if report.passed else 1
+
+
+def _export_git(out_dir: str, released: list[tuple[str, str, str]]) -> None:
+    """Project the released increments into ONE git repo at <out>/repo (a VIEW —
+    the CAS/verdicts are untouched). Failure is reported, never fatal: the
+    released trees stand either way."""
+    from pathlib import Path
+
+    from foundry.lifecycle.git_export import GitExportError, ReleaseExport, export_lineage
+
+    try:
+        head = export_lineage(
+            Path(out_dir) / "repo",
+            [ReleaseExport(tag=tag, tree_dir=Path(d), message=title)
+             for tag, d, title in released],
+        )
+        print(f"git repo:  {Path(out_dir) / 'repo'}  (HEAD {head[:12]}, "
+              f"{len(released)} tagged commit(s))")
+    except GitExportError as exc:
+        print(f"git export skipped: {exc}", file=sys.stderr)
 
 
 def _evolve_main(args: list[str]) -> int:

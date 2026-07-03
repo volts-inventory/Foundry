@@ -2550,8 +2550,10 @@ fetch("/api/config").then(r=>r.json()).then(c=>{
   const asel=document.getElementById("adapter-select");
   reconcileSelect(asel, c.adapters, c.default_adapter);
   // The coding substrate is DERIVED from the backend (parity with the CLI:
-  // mock→stub, any real backend→raw-react), so a real backend writes real code
-  // without a second pick. syncAdapter() applies it unless the user overrode it.
+  // mock→stub, claude-cli→claude-code, anthropic/openai→proxy-agent, others→
+  // raw-react), so a real backend writes real code — agentically for the
+  // first-party paths — without a second pick. syncAdapter() applies it unless
+  // the user overrode it.
   syncAdapter();
   MODELS_BY_BACKEND = c.models_by_backend || {};
   updateModelNote();
@@ -2573,12 +2575,14 @@ function syncCostCap(){
 }
 // Coding substrate derived from the backend (CLI parity): mock→stub no-op,
 // claude-cli→claude-code (AGENTIC: claude edits/builds/tests inside the task
-// sandbox), other real backends→raw-react (one completion → one diff). A user who
-// manually picks an adapter pins it (adapterTouched), so derivation never
-// clobbers an explicit choice.
+// sandbox), anthropic/openai→proxy-agent (AGENTIC multi-turn loop through the
+// mediating proxy — sole credential holder), other real backends→raw-react
+// (one completion → one diff). A user who manually picks an adapter pins it
+// (adapterTouched), so derivation never clobbers an explicit choice.
 function defaultAdapterFor(backend){
   if(backend==="mock") return "stub";
-  return backend==="claude-cli" ? "claude-code" : "raw-react";
+  if(backend==="claude-cli") return "claude-code";
+  return (backend==="anthropic"||backend==="openai") ? "proxy-agent" : "raw-react";
 }
 let adapterTouched = false;
 function syncAdapter(){

@@ -85,9 +85,10 @@ python -m foundry.cli [OPTIONS] "<one-line request>"   # build a GitHub-ready re
 
 # ── Model egress & code generation (orthogonal seams) ─────────────────────────
   --backend <claude-cli|anthropic|openai|codex|ollama-gemma>  # WHERE model calls go (the "brain")   (set one; e.g. claude-cli)
-  --adapter <stub|raw-react|claude-code>                    # WHAT writes the code (the "hands"); usually OMIT — it's DERIVED from --backend
+  --adapter <stub|raw-react|claude-code|proxy-agent>        # WHAT writes the code (the "hands"); usually OMIT — it's DERIVED from --backend
                                                             #   omitted ⇒ claude-cli→claude-code (AGENTIC: edits/builds/tests in the sandbox),
-                                                            #   other real backends→raw-react (one completion → one diff); stub is no-op
+                                                            #   anthropic/openai→proxy-agent (AGENTIC through the proxy),
+                                                            #   codex/ollama-gemma→raw-react (one completion → one diff); stub is no-op
 
 # ── Inputs ────────────────────────────────────────────────────────────────────
   --spec <FILE|DIR>          # ground the build with a spec (or run from a spec ALONE, no one-liner); REPEATABLE   (default: none)
@@ -179,10 +180,11 @@ Two seams are deliberately independent, and worth internalizing before you start
 - **`--adapter`** — the coding substrate ("the hands"). It decides *what actually
   writes the code*. You rarely set this: when omitted it is **derived from the
   backend** — `claude-cli` → `claude-code` (the AGENTIC substrate: claude edits,
-  builds, and tests multi-turn inside the task sandbox), other real backends →
-  `raw-react` (one completion → one diff). (`stub` is a no-op substrate;
-  `proxy-agent` is the agentic loop routed through the proxy for any backend,
-  keeping credentials outside the sandbox.)
+  builds, and tests multi-turn inside the task sandbox), `anthropic`/`openai` →
+  `proxy-agent` (the AGENTIC multi-turn loop routed through the mediating proxy,
+  keeping credentials outside the sandbox — works over any backend if picked
+  explicitly), `codex`/`ollama-gemma` → `raw-react` (one completion → one diff).
+  (`stub` is a no-op substrate.)
 
 > **You usually only set `--backend`.** Pick a real backend and you get real code,
 > because the adapter follows it. Reach for `--adapter` only to override — e.g.
@@ -331,8 +333,9 @@ python -m foundry.cli "build a todo API" --backend ollama-gemma --out ./out
 ```
 
 Any backend writes real code automatically — the adapter is derived from the
-backend (`claude-cli` → the agentic `claude-code`; other real backends → `raw-react`),
-so you don't need a second flag (override only when you want something else; see §5).
+backend (`claude-cli` → the agentic `claude-code`; `anthropic`/`openai` → the
+agentic `proxy-agent`; `codex`/`ollama-gemma` → `raw-react`), so you don't need a
+second flag (override only when you want something else; see §5).
 In the Workshop UI, the backend is a dropdown; `FOUNDRY_MODEL_BACKEND` only sets
 which option is preselected (§9).
 
@@ -341,9 +344,11 @@ which option is preselected (§9).
 ## 5. Choosing a coding substrate (`--adapter`)
 
 The adapter is what actually writes the code. **You normally omit it** — it's
-derived from `--backend` (`claude-cli` → `claude-code` agentic; other real backends →
-`raw-react`), so picking a backend already writes real code. Set `--adapter` only to
-override that default. `FOUNDRY_CODING_ADAPTER` overrides the derivation env-side.
+derived from `--backend` (`claude-cli` → `claude-code` agentic; `anthropic`/`openai`
+→ `proxy-agent` agentic; `codex`/`ollama-gemma` → `raw-react`), so picking a backend
+already writes real code — and every first-party API path is agentic out of the box.
+Set `--adapter` only to override that default. `FOUNDRY_CODING_ADAPTER` overrides
+the derivation env-side.
 
 ```bash
 # 1. Derived (recommended) — omit --adapter; claude-cli ⇒ the AGENTIC claude-code
@@ -362,13 +367,14 @@ python -m foundry.cli "build a dice roller" \
   --backend claude-cli --adapter raw-react --out ./out
 ```
 
-**The three substrates:**
+**The four substrates:**
 
 | Adapter | Kind | Writes code? | Notes |
 |---|---|---|---|
 | `stub` | no-op | no | structure only (smoke/CI; exercises the proxy without generating code) |
-| `raw-react` | raw completion, **any** backend | yes | one completion → one diff; writes code via `claude -p` (`claude-cli`) or the Anthropic API (`anthropic`) |
+| `raw-react` | raw completion, **any** backend | yes | one completion → one diff; writes code via `claude -p` (`claude-cli`) or the Anthropic API (`anthropic`). NOT agentic — no file edits, no test runs; kept as the lowest-common-denominator substrate and the conservative default for `codex`/`ollama-gemma` |
 | `claude-code` | **agentic**, `claude` CLI | yes | the derived default for `claude-cli`: multi-turn inside the task sandbox — edits files, runs builds/tests, iterates. Auth via the sandbox's typed model-auth grant: your cached `claude /login` session or `CLAUDE_CODE_OAUTH_TOKEN` (Max plan, no API billing), or `ANTHROPIC_API_KEY` (metered). Target-system credentials (`AWS_*`, deploy keys) can never enter the sandbox. |
+| `proxy-agent` | **agentic**, **any** backend | yes | the derived default for `anthropic`/`openai`: a multi-turn ReAct loop (write/read/delete/run/done) executed against the sandbox, with EVERY model call routed through the mediating proxy — the proxy stays the sole credential holder; nothing enters the sandbox. Pick it explicitly to run `codex`/`ollama-gemma` agentically too. |
 
 ---
 
@@ -704,7 +710,7 @@ rm -rf .pytest_cache .mypy_cache .ruff_cache ./.run spec.md  # clean caches + ou
 |---|---|---|
 | `--mode` | `assistant` · `gated` · `autonomous` | `assistant` |
 | `--backend` | `claude-cli` · `anthropic` · `openai` · `codex` · `ollama-gemma` | set one (e.g. `claude-cli`) |
-| `--adapter` | `stub` · `raw-react` · `claude-code` | derived from `--backend` (`claude-cli` → `claude-code`; other real backends → `raw-react`) |
+| `--adapter` | `stub` · `raw-react` · `claude-code` · `proxy-agent` | derived from `--backend` (`claude-cli` → `claude-code`; `anthropic`/`openai` → `proxy-agent`; `codex`/`ollama-gemma` → `raw-react`) |
 | `--spec FILE\|DIR` | spec input (repeatable) | — |
 | `--packs a,b` | domain packs (`regulated` · `ml_data` · `frontend`) | — |
 | `--docs DIR` | generated doc-set output | — |

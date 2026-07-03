@@ -60,12 +60,14 @@ def test_unknown_adapter_name_raises(proxy: Any) -> None:
 def test_default_adapter_is_derived_from_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     # mock has no real model ⇒ the deterministic stub. claude-cli — whose substrate
     # binary IS Claude Code — derives the AGENTIC claude-code adapter (ROADMAP 1a/1d:
-    # same binary, same auth, multi-turn inner loop). Every other real backend ⇒
-    # raw-react (the universal completion substrate).
+    # same binary, same auth, multi-turn inner loop). The metered API backends
+    # (anthropic/openai) derive the AGENTIC proxy-agent loop (ROADMAP 1c — proxy
+    # stays the sole credential holder). The CLI/local backends keep raw-react
+    # (one completion → one diff), the conservative single-shot default.
     monkeypatch.delenv("FOUNDRY_CODING_ADAPTER", raising=False)
     assert _default_adapter_for("mock") == "stub"
-    assert _default_adapter_for("anthropic") == "raw-react"
-    assert _default_adapter_for("openai") == "raw-react"
+    assert _default_adapter_for("anthropic") == "proxy-agent"
+    assert _default_adapter_for("openai") == "proxy-agent"
     assert _default_adapter_for("claude-cli") == "claude-code"
     assert _default_adapter_for("codex") == "raw-react"
     assert _default_adapter_for("ollama-gemma") == "raw-react"

@@ -1425,6 +1425,9 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/zip/"):
             self._zip_output(path.rsplit("/", 1)[-1])
             return
+        if path.startswith("/api/gitzip/"):
+            self._gitzip(path.rsplit("/", 1)[-1])
+            return
         if not path.startswith("/api"):
             self._serve_static(path)  # e.g. /favicon.ico
             return
@@ -1593,6 +1596,56 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/zip")
         self.send_header("Content-Disposition", f'attachment; filename="{name}.zip"')
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _gitzip(self, pid: str) -> None:
+        """Export the FLOOR LINEAGE as one git repository, zipped: each ancestor
+        release becomes a tagged commit (r01..rNN) via the same deterministic
+        export_lineage the CLI uses — the store stays the source of truth."""
+        import io
+        import tempfile
+        import zipfile
+
+        from foundry.lifecycle.git_export import (
+            GitExportError, ReleaseExport, export_lineage,
+        )
+
+        chain = _lineage_ids(pid)
+        if not chain:
+            self._json(404, {"error": "no lineage"})
+            return
+        try:
+            with tempfile.TemporaryDirectory(prefix="foundry-gitzip-") as td:
+                releases = []
+                for i, anc in enumerate(chain, start=1):
+                    tree = _overlay_tree(anc)  # full repo AT that release
+                    if not tree:
+                        continue
+                    tdir = Path(td) / f"r{i:02d}"
+                    for rel, data in tree.items():
+                        target = tdir / rel
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(data)
+                    rec = _STORE.get(anc) or {}
+                    releases.append(ReleaseExport(
+                        tag=f"r{i:02d}", tree_dir=tdir,
+                        message=str(rec.get("request") or anc)[:200]))
+                repo = Path(td) / "repo"
+                export_lineage(repo, releases)
+                buf = io.BytesIO()
+                with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for f in sorted(repo.rglob("*")):
+                        if f.is_file():
+                            zf.write(f, f.relative_to(repo))
+                payload = buf.getvalue()
+        except GitExportError as exc:
+            self._json(503, {"error": f"git export unavailable: {exc}"})
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Disposition", f'attachment; filename="{pid}-git.zip"')
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)

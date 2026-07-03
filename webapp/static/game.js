@@ -1911,6 +1911,8 @@ function openFilesFor(meta){
   const itBtn = document.getElementById("files-iterate");
   itBtn.style.display = (meta.status === "done") ? "" : "none";
   itBtn.onclick = () => { hideFiles(); showNewModal(meta.id); };
+  const gz = document.getElementById("files-gitzip");
+  if (gz) gz.href = "/api/gitzip/" + meta.id;   // whole-floor lineage as ONE git repo
   renderReleases(meta);              // release history for this floor (newest first)
   loadRepo(meta.id);                 // start on the latest release's repo
   modal.classList.remove("hidden");
@@ -1977,6 +1979,8 @@ function loadRepo(id){
   const list = document.getElementById("files-list");
   const view = document.getElementById("files-view");
   document.getElementById("files-zip").href = "/api/zip/"+id;
+  { const gz = document.getElementById("files-gitzip");
+    if (gz) gz.href = "/api/gitzip/"+id; }   // lineage repo up to THIS release
   list.innerHTML = ""; view.textContent = "Loading…";
   document.getElementById("repo-sha").textContent = "";
   document.getElementById("repo-src").textContent = "";

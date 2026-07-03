@@ -40,6 +40,8 @@ What this module is careful about (the invariants the next waves reuse):
 from __future__ import annotations
 
 import json
+import re
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
@@ -59,6 +61,7 @@ if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
 
     from foundry.gates.discriminator import DiscriminatorFactory
+    from foundry.gates.profiles import VerificationProfile
     from foundry.gates.runner import GateImpl, TwoZoneGateRunner
     from foundry.schemas.base import Artifact
     from foundry.state.factory_state import FactoryState
@@ -80,6 +83,7 @@ if TYPE_CHECKING:
     BlobResolver = Callable[[str], "bytes | str"]
 
 __all__ = [
+    "BUILD_TEST_SMOKE_BOUNDARY",
     "CRITERIA_CRITIQUE_KIND",
     "CRITERION_KIND",
     "FEATURE_DIFF_KIND",
@@ -355,15 +359,51 @@ def _parse_addition_diff(diff_uri: str, body: str) -> dict[str, str]:
     return files
 
 
-def _diff_files(diff: FeatureDiff, resolve_blob: BlobResolver) -> dict[str, str]:
-    """The path->content slice a FeatureDiff contributes to the worktree.
+# ---- full patch application (ROADMAP Phase 2) --------------------------------
+#
+# The materialized tree is grown by applying each FeatureDiff's OPS in Seq order:
+# whole-file WRITES (additions / snapshot slices), DELETES, and context-verified
+# PATCHES to files earlier diffs contributed. Everything unrecognized stays
+# fail-closed (governance §1b) — a hunk that cannot be applied EXACTLY raises,
+# it is never fuzzily guessed (the gate fix loop retries with the failure).
+
+
+@dataclass(frozen=True, slots=True)
+class _Hunk:
+    """One ``@@ -l[,n] +l[,n] @@`` hunk: (tag, line) pairs, tag ∈ {' ', '-', '+'}."""
+
+    old_start: int  # 1-based line number in the ORIGINAL file
+    lines: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _DiffOps:
+    """Everything ONE FeatureDiff contributes to the integrated tree."""
+
+    writes: dict[str, str]  # path -> full new content (additions / snapshot)
+    deletes: tuple[str, ...] = ()  # paths removed from the tree
+    patches: dict[str, tuple[_Hunk, ...]] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:  # dataclass default for a mutable field
+        if self.patches is None:
+            object.__setattr__(self, "patches", {})
+
+
+def _diff_ops(diff: FeatureDiff, resolve_blob: BlobResolver) -> _DiffOps:
+    """Parse a FeatureDiff body into its integration OPS.
 
     The diff BODY lives out-of-band behind ``diff.diff_uri`` (DS9) as a raw blob
-    written by the adapter via ``sandbox.put_blob`` — a UNIFIED-DIFF string read
-    back through the :data:`BlobResolver` seam (``sandbox.get_blob``) as ``bytes``
-    (a ``str`` is also tolerated). We parse it into the relative-POSIX-path ->
-    file-content mapping the gates compile/run. Fail-closed on a body that is
-    neither bytes nor str, or an unsupported hunk shape.
+    written by the adapter via ``sandbox.put_blob``, read back through the
+    :data:`BlobResolver` seam. Three producer shapes round-trip:
+
+    * a ``full-file-snapshot`` JSON body (agentic adapters): its ``files`` map is
+      the write set verbatim and its optional ``deleted`` list is the delete set;
+    * the additions-only unified diff (StubAdapter's synthetic shape + simple real
+      diffs) — parsed by the LEGACY lenient parser first, byte-identical behavior;
+    * a REAL unified diff with modification/deletion sections — parsed by the
+      strict full parser (:func:`_parse_patch_diff`): additions become writes,
+      ``+++ /dev/null`` sections become deletes, modification hunks become
+      context-verified patches. Renames stay fail-closed (unsupported).
     """
     body = resolve_blob(diff.diff_uri)
     if isinstance(body, bytes):
@@ -375,16 +415,185 @@ def _diff_files(diff: FeatureDiff, resolve_blob: BlobResolver) -> dict[str, str]
             f"FeatureDiff body for {diff.diff_uri!r} resolved to "
             f"{type(body).__name__}, expected the diff/snapshot blob (bytes|str)"
         )
-    # A coding adapter may emit a full-file SNAPSHOT —
-    # {"kind":"full-file-snapshot","files":{path:content}} — the exact file set the
-    # agent authored in its worktree (DS9). It is the integrated tree slice directly,
-    # so consume it as-is; the synthetic StubAdapter unified-diff
-    # format falls through to the addition-hunk parser. Both round-trip the same
-    # path->content contract the gates compile/run.
     snapshot = _maybe_snapshot_files(diff.diff_uri, text)
     if snapshot is not None:
-        return snapshot
-    return _parse_addition_diff(diff.diff_uri, text)
+        return _DiffOps(writes=snapshot, deletes=_snapshot_deleted(diff.diff_uri, text))
+    try:
+        return _DiffOps(writes=_parse_addition_diff(diff.diff_uri, text))
+    except FeatureDiffBodyError:
+        # Not a pure-additions body: parse as a full patch (mods/deletes). If THIS
+        # also rejects, its error names the real unsupported shape.
+        return _parse_patch_diff(diff.diff_uri, text)
+
+
+def _snapshot_deleted(diff_uri: str, text: str) -> tuple[str, ...]:
+    """The optional ``deleted`` list of a full-file-snapshot body (fail-closed on
+    a malformed shape; absent ⇒ empty)."""
+    obj = json.loads(text)
+    deleted = obj.get("deleted", [])
+    if not isinstance(deleted, list) or not all(isinstance(p, str) for p in deleted):
+        raise FeatureDiffBodyError(
+            f"FeatureDiff body for {diff_uri!r}: full-file-snapshot 'deleted' must "
+            f"be a list of paths"
+        )
+    return tuple(deleted)
+
+
+_HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@")
+
+# Preamble lines a real `git diff` emits between file sections; they carry no
+# content. `rename`/`copy` sections are NOT skippable — they change tree shape in
+# a way this applier does not support, so they fail closed below.
+_PATCH_PREAMBLE_PREFIXES = (
+    "diff --git ", "index ", "new file mode ", "deleted file mode ",
+    "old mode ", "new mode ",
+)
+
+
+def _parse_patch_diff(diff_uri: str, body: str) -> _DiffOps:
+    """STRICT full unified-diff parser: additions, deletions, and modification
+    hunks (context-verified at apply time). Fail-closed on renames/copies, missing
+    headers, malformed hunks, or tags outside {' ', '+', '-', '\\'}."""
+    writes: dict[str, str] = {}
+    deletes: list[str] = []
+    patches: dict[str, tuple[_Hunk, ...]] = {}
+    lines = body.splitlines(keepends=True)
+    i, n = 0, len(lines)
+    saw_section = False
+    while i < n:
+        stripped = lines[i].rstrip("\n")
+        if stripped == "" or stripped.startswith(_PATCH_PREAMBLE_PREFIXES):
+            i += 1
+            continue
+        if stripped.startswith(("rename from ", "rename to ", "copy from ", "copy to ")):
+            raise FeatureDiffBodyError(
+                f"FeatureDiff body for {diff_uri!r}: rename/copy sections are not "
+                f"supported by the applier — emit a delete + an addition instead"
+            )
+        if not stripped.startswith("--- "):
+            raise FeatureDiffBodyError(
+                f"FeatureDiff body for {diff_uri!r}: unexpected line {stripped!r} "
+                f"between file sections"
+            )
+        old = stripped[len("--- ") :].strip()
+        i += 1
+        if i >= n or not lines[i].startswith("+++ "):
+            raise FeatureDiffBodyError(
+                f"FeatureDiff body for {diff_uri!r}: '--- {old}' not followed by a "
+                f"'+++' header"
+            )
+        new = lines[i].rstrip("\n")[len("+++ ") :].strip()
+        i += 1
+        old_rel = old[2:] if old.startswith("a/") else old
+        new_rel = new[2:] if new.startswith("b/") else new
+        saw_section = True
+
+        hunks: list[_Hunk] = []
+        while i < n and (m := _HUNK_HEADER_RE.match(lines[i].rstrip("\n"))):
+            i += 1
+            old_start = int(m.group(1))
+            hunk_lines: list[tuple[str, str]] = []
+            while i < n:
+                line = lines[i]
+                tag = line[0] if line.rstrip("\n") else " "
+                if line.rstrip("\n").startswith(("--- ", "diff --git ")) or (
+                    _HUNK_HEADER_RE.match(line.rstrip("\n"))
+                ):
+                    break
+                if tag == "\\":  # `\ No newline at end of file`: previous line has no \n
+                    if hunk_lines:
+                        t, prev = hunk_lines[-1]
+                        hunk_lines[-1] = (t, prev.rstrip("\n"))
+                    i += 1
+                    continue
+                if tag not in (" ", "+", "-"):
+                    raise FeatureDiffBodyError(
+                        f"FeatureDiff body for {diff_uri!r}: unsupported hunk line "
+                        f"tag {tag!r} in section for {new_rel or old_rel!r}"
+                    )
+                hunk_lines.append((tag, line[1:] if len(line) > 1 or tag != " " else ""))
+                i += 1
+            hunks.append(_Hunk(old_start=old_start, lines=tuple(hunk_lines)))
+
+        if old == _DEV_NULL and new != _DEV_NULL:
+            # Addition: the new file is exactly the '+' lines.
+            content = "".join(t for tag, t in _all_hunk_lines(hunks) if tag == "+")
+            writes[_require_rel(diff_uri, new_rel)] = content
+        elif old != _DEV_NULL and new == _DEV_NULL:
+            deletes.append(_require_rel(diff_uri, old_rel))
+        elif old != _DEV_NULL and new != _DEV_NULL:
+            if old_rel != new_rel:
+                raise FeatureDiffBodyError(
+                    f"FeatureDiff body for {diff_uri!r}: rename ({old_rel!r} -> "
+                    f"{new_rel!r}) is not supported — emit a delete + an addition"
+                )
+            if not hunks:
+                raise FeatureDiffBodyError(
+                    f"FeatureDiff body for {diff_uri!r}: modification of {new_rel!r} "
+                    f"has no hunks"
+                )
+            patches[_require_rel(diff_uri, new_rel)] = tuple(hunks)
+        else:
+            raise FeatureDiffBodyError(
+                f"FeatureDiff body for {diff_uri!r}: '--- /dev/null' + "
+                f"'+++ /dev/null' section is meaningless"
+            )
+    if not saw_section:
+        raise FeatureDiffBodyError(
+            f"FeatureDiff body for {diff_uri!r} parsed to no file sections — "
+            f"empty/invalid diff"
+        )
+    return _DiffOps(writes=writes, deletes=tuple(deletes), patches=patches)
+
+
+def _all_hunk_lines(hunks: list[_Hunk]) -> list[tuple[str, str]]:
+    return [pair for h in hunks for pair in h.lines]
+
+
+def _require_rel(diff_uri: str, rel: str) -> str:
+    if not rel:
+        raise FeatureDiffBodyError(
+            f"FeatureDiff body for {diff_uri!r}: empty path in a file-section header"
+        )
+    return rel
+
+
+def _apply_hunks(original: str, hunks: tuple[_Hunk, ...], *, diff_uri: str, rel: str) -> str:
+    """Apply modification hunks to ``original`` with EXACT context verification.
+
+    Strict + fail-closed: every context (' ') and removal ('-') line must match
+    the original at the position the hunk header names — no fuzzing, no offset
+    search. A mismatch raises :class:`FeatureDiffBodyError`; the gate fix loop
+    (not a guess) is the recovery path. Hunks must be in ascending order.
+    """
+    src = original.splitlines(keepends=True)
+    out: list[str] = []
+    pos = 0
+    for hunk in hunks:
+        start = hunk.old_start - 1
+        if start < pos:
+            raise FeatureDiffBodyError(
+                f"FeatureDiff body for {diff_uri!r}: overlapping/unordered hunks "
+                f"for {rel!r}"
+            )
+        out.extend(src[pos:start])
+        pos = start
+        for tag, text in hunk.lines:
+            if tag == "+":
+                out.append(text)
+                continue
+            if pos >= len(src) or src[pos].rstrip("\n") != text.rstrip("\n"):
+                got = src[pos].rstrip("\n") if pos < len(src) else "<EOF>"
+                raise FeatureDiffBodyError(
+                    f"FeatureDiff body for {diff_uri!r}: hunk context mismatch in "
+                    f"{rel!r} at line {pos + 1}: expected {text.rstrip(chr(10))!r}, "
+                    f"found {got!r} — refusing to apply (fail-closed, no fuzz)"
+                )
+            if tag == " ":
+                out.append(src[pos])
+            pos += 1
+    out.extend(src[pos:])
+    return "".join(out)
 
 
 def _maybe_snapshot_files(diff_uri: str, text: str) -> dict[str, str] | None:
@@ -434,21 +643,46 @@ def _contained_target(dest: Path, rel: str) -> Path:
 def _write_sources(
     dest: Path, state: FactoryState, resolve: ArtifactResolver, resolve_blob: BlobResolver
 ) -> None:
-    """Materialize every FeatureDiff's files into ``dest`` (later-by-Seq wins).
+    """Materialize every FeatureDiff's OPS into ``dest`` (later-by-Seq wins).
 
     Diffs are applied in ``Seq`` order so a retried diff (higher epoch, L4)
     overwrites the predecessor it supersedes — the worktree reflects the
     integrated latest, deterministically and fold-order-independently. Each diff
-    body is resolved through the :data:`BlobResolver` seam and parsed; every
-    target path is containment-checked (D-R1-03) before any write.
+    body is resolved through the :data:`BlobResolver` seam and parsed into ops
+    (ROADMAP Phase 2: writes + deletes + context-verified patches); every target
+    path is containment-checked (D-R1-03) before any write/unlink.
+
+    * WRITE: whole-file content, parents created.
+    * DELETE: unlink if present. Absent is NOT an error — a slice's delete may
+      target a base-tree file that never entered the materialized overlay; the
+      overlay semantic is "this path contributes nothing".
+    * PATCH: the target must already exist in ``dest`` (written by a prior diff
+      in Seq order) and every hunk must apply EXACTLY — else fail-closed.
     """
     diff_artifacts = sorted(_of_kind(state, FEATURE_DIFF_KIND), key=lambda a: a.seq)
     for artifact in diff_artifacts:
         diff = _resolve_typed(artifact, resolve, FeatureDiff, FEATURE_DIFF_KIND)
-        for rel, content in _diff_files(diff, resolve_blob).items():
+        ops = _diff_ops(diff, resolve_blob)
+        for rel, content in ops.writes.items():
             target = _contained_target(dest, rel)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
+        for rel in ops.deletes:
+            target = _contained_target(dest, rel)
+            if target.is_file():
+                target.unlink()
+        for rel, hunks in ops.patches.items():
+            target = _contained_target(dest, rel)
+            if not target.is_file():
+                raise FeatureDiffBodyError(
+                    f"FeatureDiff body for {diff.diff_uri!r}: modification hunks "
+                    f"target {rel!r}, which is not in the integrated tree — "
+                    f"refusing a blind patch (fail-closed)"
+                )
+            patched = _apply_hunks(
+                target.read_text(encoding="utf-8"), hunks, diff_uri=diff.diff_uri, rel=rel
+            )
+            target.write_text(patched, encoding="utf-8")
 
 
 def materialize_workdir(
@@ -497,6 +731,7 @@ def materialize_workdir(
 _SPEC_NODE = "spec_gate"
 _BUILD_NODE = "build_gate"
 _TEST_NODE = "test_gate"
+_SMOKE_NODE = "smoke_gate"
 
 
 def _run_gate(
@@ -561,8 +796,10 @@ def run_build_test_gates(
     workdir: Path,
     min_passed: int = 1,
     discriminator_factory: DiscriminatorFactory | None = None,
+    profile: VerificationProfile | None = None,
 ) -> dict[str, Any]:
-    """Run the Build + Test gates at an implementation / quality exit boundary.
+    """Run the Build + Test (+ profile Smoke) gates at an implementation /
+    quality exit boundary.
 
     Materializes the integrated tree (code + test sources + criteria.json) into
     ``workdir`` ONCE and runs :class:`BuildGate` then :class:`TestGate` against
@@ -584,8 +821,13 @@ def run_build_test_gates(
     discriminator is wired and a green + adequate suite suffices.
     """
     run_against = materialize_workdir(state, workdir, resolve=resolve, resolve_blob=resolve_blob)
+    # Profile-pinned commands (ROADMAP Phase 3): a stack-appropriate profile
+    # swaps WHAT the gates execute, never the two-zone trust seam. None keeps
+    # each gate's historical default — byte-identical to the pre-profile factory.
+    build_cmd = profile.build_cmd if profile is not None else None
+    test_cmd = profile.test_cmd if profile is not None else None
     build = _run_gate(
-        BuildGate(seal_key=runner.seal_key),
+        BuildGate(cmd=build_cmd, seal_key=runner.seal_key),
         rt=rt,
         runner=runner,
         config=config,
@@ -599,8 +841,17 @@ def run_build_test_gates(
     # the unit test. Absent a factory the gate is the legacy adequacy-floor-only
     # Test gate (back-compat).
     discriminator = discriminator_factory() if discriminator_factory is not None else None
+    # A profile-pinned FOREIGN test harness (npm test / terraform validate) has no
+    # pytest summary to count, so the adequacy floor drops to exit-code-only there
+    # (min_passed=0; the floor is pytest-specific). The python default keeps it.
+    effective_min = 0 if test_cmd is not None else min_passed
     test = _run_gate(
-        TestGate(min_passed=min_passed, discriminator=discriminator, seal_key=runner.seal_key),
+        TestGate(
+            cmd=test_cmd,
+            min_passed=effective_min,
+            discriminator=discriminator,
+            seal_key=runner.seal_key,
+        ),
         rt=rt,
         runner=runner,
         config=config,
@@ -608,7 +859,22 @@ def run_build_test_gates(
         workdir=workdir,
         node_id=_TEST_NODE,
     )
-    return {"gates": [build, test]}
+    gates = [build, test]
+    if profile is not None and profile.smoke_cmd is not None:
+        from foundry.gates.smoke import SmokeGate
+
+        gates.append(
+            _run_gate(
+                SmokeGate(profile.smoke_cmd, seal_key=runner.seal_key),
+                rt=rt,
+                runner=runner,
+                config=config,
+                run_against=run_against,
+                workdir=workdir,
+                node_id=_SMOKE_NODE,
+            )
+        )
+    return {"gates": gates}
 
 
 # ---- routing predicate (fail-closed, convergence-bounded) -------------------
@@ -616,10 +882,15 @@ def run_build_test_gates(
 # Which gate verdicts each phase boundary is responsible for.
 SPEC_BOUNDARY = "spec"
 BUILD_TEST_BOUNDARY = "build_test"
+# Profile boundary variant (ROADMAP Phase 3): when the run's verification
+# profile pins a smoke (runtime boot) command, the boundary is also responsible
+# for the "smoke" verdict — a missing/FAILed smoke can never advance.
+BUILD_TEST_SMOKE_BOUNDARY = "build_test_smoke"
 
 _BOUNDARY_GATES: dict[str, frozenset[str]] = {
     SPEC_BOUNDARY: frozenset({"spec"}),
     BUILD_TEST_BOUNDARY: frozenset({"build", "test"}),
+    BUILD_TEST_SMOKE_BOUNDARY: frozenset({"build", "test", "smoke"}),
 }
 
 # Routing outcomes.

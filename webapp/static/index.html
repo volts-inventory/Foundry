@@ -98,7 +98,9 @@
         <label>Coding substrate</label>
         <select id="adapter-select">
           <option value="stub">stub — deterministic no-op (smoke/demo)</option>
-          <option value="raw-react">raw-react — code via the chosen backend</option>
+          <option value="raw-react">raw-react — one completion per task via the chosen backend</option>
+          <option value="claude-code">claude-code — AGENTIC: claude edits/builds/tests in the sandbox (Max plan or API)</option>
+          <option value="proxy-agent">proxy-agent — agentic loop through the proxy (any backend, key stays outside)</option>
         </select>
       </div>
       <label>Worker pool <span class="hint">— max parallel IC workers (blank = automatic)</span></label>
@@ -110,8 +112,10 @@
       <input id="fix-input" type="number" min="0" max="20" value="5" />
       <label>Cost cap (USD) <span class="hint">— max model spend (metered API backends only)</span></label>
       <input id="cap-input" type="number" min="0" step="0.01" placeholder="no cap" />
+      <label>Autopilot <span class="hint">— self-iterations after a green build (0 = off): a Director proposes, a software/usability panel votes, the winner builds next</span></label>
+      <input id="autopilot-input" type="number" min="0" max="20" value="0" />
       <label>Domain packs (optional, comma-separated)</label>
-      <input id="packs-input" type="text" placeholder="regulated, ml_data, frontend" />
+      <input id="packs-input" type="text" placeholder="regulated, ml_data, frontend, game, crypto, infra" />
       <label class="check"><input type="checkbox" id="supervised" checked /> Supervised (CTO approves each checkpoint)</label>
       <p class="hint" id="supervised-hint"></p>
       <p class="hint">A multi-service request (e.g. a site with users + posts) is auto-built as a PLATFORM — split into web / backend / data services (the backend owns the REST API, auth &amp; domain logic), each auto-deepened, then stitched into one monorepo. A single thing builds as one service.</p>
@@ -138,6 +142,10 @@
       <h2 id="cp-title">CHECKPOINT</h2>
       <p id="cp-summary"></p>
       <p class="cp-note">An approve only lets the build reach the gates — it can never ship a failing build. Request changes to send the work back for another pass.</p>
+      <div id="cp-edit-wrap" class="hidden">
+        <label>Next-iteration request <span class="hint">— edit before approving; REQUEST CHANGES builds YOUR text instead of the panel's</span></label>
+        <textarea id="cp-edit" rows="3"></textarea>
+      </div>
       <div class="dialog-actions">
         <button id="cp-approve" class="primary">APPROVE</button>
         <button id="cp-changes" class="warn">REQUEST CHANGES</button>
@@ -203,6 +211,7 @@
       </div>
       <div class="dialog-actions">
         <a id="files-zip" class="btn-link" href="#" download>⭳ Export .zip</a>
+        <a id="files-gitzip" class="btn-link" href="#" title="One git repo of the whole floor: each release a tagged commit (r01..rNN)">⎇ Git repo</a>
         <button id="files-iterate" class="primary">⎘ ITERATE</button>
         <button id="files-close">close</button>
       </div>

@@ -65,7 +65,7 @@ from pathlib import Path
 
 from foundry.state.tree_sha import normalized_source_tree
 
-__all__ = ["DEFAULT_ENV_ALLOWLIST", "Sandbox", "SandboxResult"]
+__all__ = ["DEFAULT_ENV_ALLOWLIST", "GRANTABLE_MODEL_AUTH", "Sandbox", "SandboxResult"]
 
 # Allowlist, not denylist: nothing is inherited unless named here (and even
 # named vars are re-checked against the credential deny patterns below).
@@ -101,6 +101,24 @@ _DENIED_EXACT: frozenset[str] = frozenset({"SSH_AUTH_SOCK", "GH_TOKEN", "NETRC"}
 
 # The single env var through which a sandbox tells an adapter its ONLY egress.
 PROXY_ENV_VAR = "FOUNDRY_PROXY_ENDPOINT"
+
+# ---- typed credential grant (model-auth only; see README adapter docs) -------
+#
+# The ONLY credential class that may ever enter the cage is MODEL AUTH — what an
+# agentic CLI substrate (Claude Code) needs to authenticate its own model calls.
+# Blast radius = model spend/quota. TARGET-SYSTEM credentials (AWS_*, deploy
+# keys, signing keys) are NEVER grantable: generated code must not be able to
+# touch real infrastructure; those belong exclusively to the credentialed phase
+# (arch §2(d) — the sandbox is destroyed and rebuilt between phases). The grant
+# is an explicit, name-by-name allowlist checked against this frozen set — a
+# caller asking for anything else fails closed at construction, before any
+# subprocess exists.
+GRANTABLE_MODEL_AUTH: frozenset[str] = frozenset(
+    {
+        "CLAUDE_CODE_OAUTH_TOKEN",  # Max-plan token (claude setup-token) — no API billing
+        "ANTHROPIC_API_KEY",  # metered Anthropic API
+    }
+)
 
 
 def _denied(name: str) -> bool:
@@ -159,6 +177,18 @@ class Sandbox:
         ephemeral dir inside the sandbox root (dies with `destroy()`); pass a
         durable path so turn snapshots survive the destroy/rebuild between
         untrusted and credentialed phases.
+    credential_grant:
+        TYPED model-auth grant (ROADMAP Phase 1b): env var names to admit into
+        the child env DESPITE the credential deny patterns, checked fail-closed
+        against :data:`GRANTABLE_MODEL_AUTH` — only model-auth class is ever
+        admissible; ``AWS_*``/target-system credentials cannot be granted, ever.
+        This is what lets an agentic CLI substrate (Claude Code) authenticate
+        inside the cage. Empty (default) keeps the env fully scrubbed.
+    home_passthrough:
+        Copy the invoking user's ``~/.claude`` (+ ``~/.claude.json``) into the
+        sandbox-local HOME so a cached ``claude /login`` session authenticates
+        inside the cage. A COPY, never a bind: untrusted task code can corrupt
+        at most a throwaway copy of the session, not the real login state.
     """
 
     def __init__(
@@ -170,18 +200,33 @@ class Sandbox:
         cpu_seconds: int | None = None,
         env_allowlist: Sequence[str] = DEFAULT_ENV_ALLOWLIST,
         snapshot_store: Path | str | None = None,
+        credential_grant: Sequence[str] = (),
+        home_passthrough: bool = False,
     ) -> None:
         self.proxy_endpoint = proxy_endpoint
         self._wall_clock_timeout_s = wall_clock_timeout_s
         self._cpu_seconds = cpu_seconds
         self._env_allowlist = tuple(env_allowlist)
         self._destroyed = False
+        # Fail-closed BEFORE any subprocess exists: only model-auth is grantable.
+        ungrantable = [n for n in credential_grant if n not in GRANTABLE_MODEL_AUTH]
+        if ungrantable:
+            raise ValueError(
+                f"credential_grant {ungrantable!r} is not grantable: only model-auth "
+                f"credentials ({', '.join(sorted(GRANTABLE_MODEL_AUTH))}) may enter "
+                f"the sandbox; target-system credentials belong to the credentialed "
+                f"phase (arch §2(d), ROADMAP Phase 1b)"
+            )
+        self._credential_grant = tuple(dict.fromkeys(credential_grant))
+        self._home_passthrough = bool(home_passthrough)
 
         self._root = Path(tempfile.mkdtemp(prefix="foundry-sandbox-"))
         self.worktree = self._root / "worktree"
         self._home = self._root / "home"  # HOME redirect: no ~/.aws, ~/.netrc, ...
         self._home.mkdir()
         shutil.copytree(Path(source_dir), self.worktree, symlinks=True)
+        if self._home_passthrough:
+            self._copy_claude_session()
 
         store = self._root / "store" if snapshot_store is None else Path(snapshot_store)
         self._snapshots_dir = store / "snapshots"
@@ -196,7 +241,11 @@ class Sandbox:
 
         Nothing from os.environ is inherited unless allowlisted AND not
         matching a credential pattern; extra_env is deny-filtered too, so an
-        adapter cannot be handed a credential even by a buggy caller.
+        adapter cannot be handed a credential even by a buggy caller. The ONE
+        exception is the constructor's typed ``credential_grant`` — model-auth
+        names validated against :data:`GRANTABLE_MODEL_AUTH` at construction —
+        admitted LAST so the grant is explicit, auditable, and never widened by
+        ``extra_env``.
         """
         env: dict[str, str] = {}
         for name in self._env_allowlist:
@@ -209,7 +258,41 @@ class Sandbox:
         for name, value in (extra_env or {}).items():
             if not _denied(name):
                 env[name] = value
+        for name in self._credential_grant:  # typed grant: model-auth only
+            if name in os.environ:
+                env[name] = os.environ[name]
         return env
+
+    @property
+    def credential_grant_record(self) -> tuple[str, ...]:
+        """What entered the cage — for the evidence pack, never a secret VALUE.
+
+        The granted model-auth var names that are actually present in the
+        parent env (a requested-but-unset name never entered), plus a
+        ``home:~/.claude`` marker when the login-session copy was made.
+        """
+        record = [n for n in self._credential_grant if n in os.environ]
+        if self._home_passthrough and self._claude_session_copied:
+            record.append("home:~/.claude")
+        return tuple(record)
+
+    def _copy_claude_session(self) -> None:
+        """COPY the user's cached ``claude`` login session into the sandbox HOME.
+
+        A copy, never a bind-mount: task code can corrupt at most the throwaway
+        copy. Missing sources are fine (nothing to pass through — the CLI will
+        act logged-out unless an env grant supplies a token instead).
+        """
+        self._claude_session_copied = False
+        real_home = Path(os.path.expanduser("~"))
+        src_dir = real_home / ".claude"
+        if src_dir.is_dir():
+            shutil.copytree(src_dir, self._home / ".claude", symlinks=False)
+            self._claude_session_copied = True
+        src_json = real_home / ".claude.json"
+        if src_json.is_file():
+            shutil.copy2(src_json, self._home / ".claude.json")
+            self._claude_session_copied = True
 
     # -- execution -----------------------------------------------------------
 

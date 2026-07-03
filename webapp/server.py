@@ -277,6 +277,15 @@ class Project:
     release_seq: int = 1  # 1,2,3… within the floor; each iterate adds a release
     parent_id: str | None = None  # lineage: the release this one iterates on
     base_dir: str | None = None  # prior code seeded as the base tree (iterate)
+    autopilot_note: str = ""  # why the autopilot loop stopped (surfaced via the API)
+    # Autopilot (lifecycle.autopilot): remaining self-iterations AFTER this build.
+    # >0 and gates green ⇒ the Director proposes, the software/usability panel
+    # votes (deterministic tally), and the winner is spawned as the next release
+    # with budget-1. The AI drives in EVERY mode: autonomous children run with no
+    # human contact; gated/supervised children keep their checkpoints + sign-offs
+    # surfacing to the human (auto-approve timeout keeps the loop moving). A panel
+    # DECLINE stops the loop fail-closed (human steering wanted).
+    autopilot_budget: int = 0
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -295,6 +304,9 @@ class Project:
     checkpoint_seq: int = 0          # monotonic id of the LATEST checkpoint reached
     pending_checkpoint: int | None = None  # the checkpoint awaiting a decision, if any
     decision_for: dict[int, str] = field(default_factory=dict)  # checkpoint id -> decision
+    decision_edit: dict[int, str] = field(default_factory=dict)  # checkpoint id -> edited text
+    # (the autopilot PROPOSAL checkpoint uses id -1 so it never collides with the
+    #  in-build stage checkpoints, which index from 0)
     seen_uris: set[str] = field(default_factory=set)
     status: str = "running"
     passed: bool = False  # final verdict (for elevator/reload rehydration)
@@ -742,13 +754,17 @@ def _log_sweeper() -> None:
             pass
 
 
-def _record_decision(p: Project, decision: str, checkpoint: int | None) -> tuple[bool, bool]:
+def _record_decision(
+    p: Project, decision: str, checkpoint: int | None, *, edit: str = ""
+) -> tuple[bool, bool]:
     """Record a checkpoint decision, FIRST-wins. Returns ``(applied, stale)``.
 
     ``stale`` is True when the decision names no current pause (already resolved,
     or a different checkpoint than the one awaiting) — a no-op. ``applied`` is True
     only for the FIRST decision on the awaiting checkpoint; later/duplicate clicks
-    from any device return ``(False, False)`` and simply watch the resolution play."""
+    from any device return ``(False, False)`` and simply watch the resolution play.
+    ``edit`` carries the human's amended text for an autopilot PROPOSAL checkpoint
+    (recorded only with the winning decision — a stale edit never applies)."""
     with p.cond:
         cidx = p.pending_checkpoint
         if checkpoint is not None and checkpoint != cidx:
@@ -758,6 +774,8 @@ def _record_decision(p: Project, decision: str, checkpoint: int | None) -> tuple
         if cidx in p.decision_for:
             return (False, False)         # someone already decided this one
         p.decision_for[cidx] = decision
+        if edit.strip():
+            p.decision_edit[cidx] = edit.strip()
         p.cond.notify_all()
         return (True, False)
 
@@ -962,8 +980,175 @@ def _run_factory(p: Project, resume: bool = False) -> None:
               text=f"📂 {n_files} file(s) in the repo — open REPO to browse the store.")
     p.passed = bool(result.passed)
     p.status = "done"
+    if p.passed and p.autopilot_budget > 0:
+        _emit(p, type="narrate",
+              text=f"🧭 Autopilot: {p.autopilot_budget} iteration(s) left — the Director "
+                   "and panel are choosing the next action…")
     _persist(p)              # catalog the FINAL status/passed (after they're set)
     _close(p)
+    _maybe_autopilot_next(p)
+
+
+def _maybe_autopilot_next(p: Project) -> None:
+    """Autopilot step (lifecycle.autopilot): after a GREEN build with budget left,
+    Director → panel → deterministic tally → spawn the winner as the next release.
+
+    Runs in its own thread (the build thread is done); a panel DECLINE or any
+    ideation failure stops the loop fail-closed — nothing is built that the
+    panel did not choose. The child inherits mode/supervision: autonomous keeps
+    zero human contact; gated keeps its checkpoints + sign-offs."""
+    if not (p.passed and p.autopilot_budget > 0):
+        return
+
+    def _step() -> None:
+        from foundry.cli import _build_proxy
+        from foundry.lifecycle.autopilot import propose_candidates, run_panel, tally
+
+        target = _root_request(p)
+        evidence = "\n".join(
+            f"release {i + 1}: {req}" for i, req in enumerate(_lineage_requests(p.id))
+        )
+        try:
+            proxy = _build_proxy(p.backend)
+            candidates = propose_candidates(proxy, target, evidence)
+            votes = run_panel(proxy, target, evidence, candidates)
+            decision = tally(candidates, votes)
+        except Exception as exc:  # ideation is advisory: fail-closed, never a crash-loop
+            _autopilot_stop_note(p, f"autopilot stopped: ideation failed ({exc})")
+            return
+        if decision.declined or decision.winner is None:
+            _autopilot_stop_note(
+                p, "autopilot stopped: the panel declined every candidate — "
+                   "human steering wanted (iterate manually to continue)")
+            return
+        w = decision.winner
+        request = f"{target} — NEXT ITERATION: {w.title}. {w.scope}"
+        if decision.amendments:
+            request += " PANEL AMENDMENTS (honor these): " + " | ".join(decision.amendments)
+        ballots = ", ".join(
+            f"{v.panelist}={v.scores[decision.winner_index]}" for v in decision.votes
+        )
+        proposal = None
+        if p.supervised:
+            # Gated/supervised: the IDEA itself is a checkpoint (approve /
+            # edit-then-approve / reject) BEFORE any model spend on the build.
+            proposal = {
+                "title": w.title, "rationale": w.rationale, "scope": w.scope,
+                "ballots": ballots, "request": request,
+            }
+        child = _spawn_iteration(p, request, p.autopilot_budget - 1, proposal=proposal)
+        _emit(child, type="narrate",
+              text=f"🧭 Autopilot chose “{w.title}” ({w.rationale}) — panel scores: "
+                   f"{ballots}."
+                   + (" Awaiting your proposal decision…" if proposal
+                      else f" Building release {child.release_seq}…"))
+
+    threading.Thread(target=_step, daemon=True).start()
+
+
+def _root_request(p: Project) -> str:
+    """The floor's ORIGINAL target (the root of the lineage), so every autopilot
+    iteration steers toward the same goal instead of drifting off the last title."""
+    chain = _lineage_ids(p.id)
+    root = _STORE.get(chain[0]) if chain else None
+    return str((root or {}).get("request") or p.request)
+
+
+def _lineage_requests(pid: str) -> list[str]:
+    out: list[str] = []
+    for anc in _lineage_ids(pid):
+        rec = _STORE.get(anc)
+        if rec and rec.get("request"):
+            out.append(str(rec["request"]))
+    return out
+
+
+def _autopilot_stop_note(p: Project, note: str) -> None:
+    """The build stream is already closed — record WHY the loop stopped where the
+    projects API can show it (and the server log can grep it)."""
+    print(f"[autopilot] floor {p.floor} r{p.release_seq}: {note}")
+    p.autopilot_note = note
+
+
+def _spawn_iteration(
+    parent: Project, request: str, budget: int, *, proposal: dict[str, Any] | None = None
+) -> Project:
+    """Create + start the next release on the parent's floor (the same shape the
+    POST /api/projects iterate path builds): spec inherited, base tree overlaid
+    from the parent's CAS lineage inside _run_factory, mode/supervision inherited
+    so autonomous stays hands-off and gated keeps its human checkpoints.
+
+    ``proposal`` (supervised floors): the build FIRST pauses on a PROPOSAL
+    checkpoint — the panel's chosen idea surfaces as approve / edit-then-approve
+    (the human's text becomes the request, both versions logged) / reject (the
+    loop stops, nothing is built). Uses the same first-decision-wins seam as the
+    stage checkpoints, id ``-1``, with the same auto-approve timeout so an absent
+    human never stalls the loop."""
+    with _LOCK:
+        release_seq = _STORE.max_release(parent.floor) + 1
+    pid = uuid.uuid4().hex[:12]
+    p = Project(
+        id=pid, request=request, mode=parent.mode, supervised=parent.supervised,
+        floor=parent.floor, release_seq=release_seq, backend=parent.backend,
+        adapter=parent.adapter, packs=list(parent.packs),
+        spec=parent.spec_text or None, spec_text=parent.spec_text,
+        out_base=_OUTPUT_ROOT / f"floor-{parent.floor}" / f"r{release_seq}",
+        max_slots=parent.max_slots, cost_cap_microusd=parent.cost_cap_microusd,
+        max_fix_attempts=parent.max_fix_attempts, parent_id=parent.id,
+        autopilot_budget=max(0, budget),
+    )
+    with _LOCK:
+        _PROJECTS[pid] = p
+
+    def _runner() -> None:
+        if proposal is not None and not _proposal_approved(p, proposal):
+            return  # rejected: nothing built, the floor waits for manual steering
+        _gated_runner(_run_factory, p)
+
+    threading.Thread(target=_runner, daemon=True).start()
+    return p
+
+
+_PROPOSAL_CHECKPOINT = -1  # never collides with the in-build stage checkpoints (0..)
+
+
+def _proposal_approved(p: Project, proposal: dict[str, Any]) -> bool:
+    """Surface the autopilot proposal as a decision; apply the human's verdict.
+
+    approve ⇒ build as proposed; needs_changes + edited text ⇒ the edit BECOMES
+    the request (both versions narrated — the audit trail keeps who chose what);
+    reject ⇒ stop (persisted halt, autopilot note). Timeout auto-approves, same
+    as every other checkpoint, so the AI keeps driving an unattended floor."""
+    with p.cond:
+        p.pending_checkpoint = _PROPOSAL_CHECKPOINT
+    _emit(p, type="checkpoint", boundary="autopilot_proposal",
+          title="AUTOPILOT PROPOSAL",
+          summary=f"{proposal['title']} — {proposal['rationale']} "
+                  f"(panel: {proposal['ballots']})")
+    _emit(p, type="await_decision", boundary="autopilot_proposal",
+          checkpoint=_PROPOSAL_CHECKPOINT, request=proposal["request"],
+          title=proposal["title"], scope=proposal["scope"], ballots=proposal["ballots"])
+    decision = _await_decision(p, _PROPOSAL_CHECKPOINT)
+    edit = p.decision_edit.get(_PROPOSAL_CHECKPOINT, "").strip()
+    with p.cond:
+        p.pending_checkpoint = None
+    _emit(p, type="resolved", boundary="autopilot_proposal", decision=decision)
+    if decision == "reject":
+        _emit(p, type="narrate", text="🛑 Proposal rejected — autopilot stopped. "
+                                      "Iterate manually to continue this floor.")
+        _emit(p, type="done", passed=False, phase="proposal_rejected")
+        p.status = "done"
+        p.autopilot_note = "autopilot stopped: proposal rejected by the human"
+        _persist(p)
+        _close(p)
+        return False
+    if decision == "needs_changes" and edit:
+        _emit(p, type="narrate",
+              text=f"✏️ Human amended the proposal. Panel proposed: “{p.request}” — "
+                   f"building instead: “{edit}”")
+        p.request = edit
+    _emit(p, type="narrate", text=f"✅ Proposal approved — building release {p.release_seq}…")
+    return True
 
 
 _STAGE_ORDER = ["defining requirements", "designing the system", "implementing",
@@ -1240,6 +1425,9 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/zip/"):
             self._zip_output(path.rsplit("/", 1)[-1])
             return
+        if path.startswith("/api/gitzip/"):
+            self._gitzip(path.rsplit("/", 1)[-1])
+            return
         if not path.startswith("/api"):
             self._serve_static(path)  # e.g. /favicon.ico
             return
@@ -1412,6 +1600,56 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+    def _gitzip(self, pid: str) -> None:
+        """Export the FLOOR LINEAGE as one git repository, zipped: each ancestor
+        release becomes a tagged commit (r01..rNN) via the same deterministic
+        export_lineage the CLI uses — the store stays the source of truth."""
+        import io
+        import tempfile
+        import zipfile
+
+        from foundry.lifecycle.git_export import (
+            GitExportError, ReleaseExport, export_lineage,
+        )
+
+        chain = _lineage_ids(pid)
+        if not chain:
+            self._json(404, {"error": "no lineage"})
+            return
+        try:
+            with tempfile.TemporaryDirectory(prefix="foundry-gitzip-") as td:
+                releases = []
+                for i, anc in enumerate(chain, start=1):
+                    tree = _overlay_tree(anc)  # full repo AT that release
+                    if not tree:
+                        continue
+                    tdir = Path(td) / f"r{i:02d}"
+                    for rel, data in tree.items():
+                        target = tdir / rel
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(data)
+                    rec = _STORE.get(anc) or {}
+                    releases.append(ReleaseExport(
+                        tag=f"r{i:02d}", tree_dir=tdir,
+                        message=str(rec.get("request") or anc)[:200]))
+                repo = Path(td) / "repo"
+                export_lineage(repo, releases)
+                buf = io.BytesIO()
+                with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for f in sorted(repo.rglob("*")):
+                        if f.is_file():
+                            zf.write(f, f.relative_to(repo))
+                payload = buf.getvalue()
+        except GitExportError as exc:
+            self._json(503, {"error": f"git export unavailable: {exc}"})
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Disposition", f'attachment; filename="{pid}-git.zip"')
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
     def do_POST(self) -> None:
         path = self.path.split("?", 1)[0]
         denied = _authorize_mutation(self.headers, _AUTH_TOKEN)
@@ -1452,7 +1690,8 @@ class Handler(BaseHTTPRequestHandler):
              "backend": p.backend, "adapter": p.adapter,
              "supervised": p.supervised, "slots": p.max_slots,
              "status": p.status, "passed": p.passed, "awaiting": p.awaiting,
-             "gates": p.gates, "parent_id": p.parent_id}
+             "gates": p.gates, "parent_id": p.parent_id,
+             "autopilot_budget": p.autopilot_budget, "autopilot_note": p.autopilot_note}
             for p in sorted(by_floor.values(), key=lambda x: x.floor)
         ]
         self._json(200, {"projects": rows})
@@ -1719,12 +1958,19 @@ class Handler(BaseHTTPRequestHandler):
                 spec = str(pdocs)            # ground the release in the prior design
             if pcode.is_dir():
                 base_dir = str(pcode)        # seed the base tree with the prior code
+        # Autopilot budget: how many SELF-ITERATIONS follow this build (0 = off).
+        # The AI drives in every mode; gated keeps its human checkpoints.
+        try:
+            autopilot_budget = max(0, min(20, int(body.get("autopilot", 0) or 0)))
+        except (TypeError, ValueError):
+            autopilot_budget = 0
         p = Project(
             id=pid, request=request, mode=mode, supervised=supervised, floor=floor,
             release_seq=release_seq, backend=backend, adapter=adapter, packs=packs, spec=spec,
             spec_text=effective_spec_text,
             out_base=out_base, max_slots=max_slots, cost_cap_microusd=cost_cap_microusd,
             max_fix_attempts=max_fix_attempts, parent_id=parent_id, base_dir=base_dir,
+            autopilot_budget=autopilot_budget,
         )
         with _LOCK:
             _PROJECTS[pid] = p
@@ -1793,7 +2039,10 @@ class Handler(BaseHTTPRequestHandler):
             checkpoint = int(cp) if cp is not None else None
         except (TypeError, ValueError):
             checkpoint = None
-        applied, stale = _record_decision(p, decision, checkpoint)
+        # `request_edit` carries the human's amended next-iteration request for an
+        # autopilot PROPOSAL checkpoint (ignored by the stage checkpoints).
+        edit = str(body.get("request_edit", "") or "")[:4000]
+        applied, stale = _record_decision(p, decision, checkpoint, edit=edit)
         self._json(200, {"ok": not stale, "applied": applied, "stale": stale})
 
     def _stream(self, pid: str) -> None:

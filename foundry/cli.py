@@ -149,10 +149,12 @@ BACKENDS = (_MOCK_BACKEND, "anthropic", "openai", "claude-cli", "codex", "ollama
 
 # Coding substrates (WorkerAdapter): the thing that actually writes the code for
 # each task. `stub` is the deterministic no-op (the smoke default); `raw-react` is a
-# provider-agnostic single-loop substrate over the model backend (real code, any
-# backend) — over `claude-cli` it writes code via `claude -p` (completion only), over
-# `anthropic` via the Anthropic API.
-ADAPTERS = ("stub", "raw-react")
+# provider-agnostic single-loop substrate over the model backend (one completion ->
+# one diff, any backend); `claude-code` is the AGENTIC substrate (ROADMAP Phase 1a) —
+# it runs the `claude` CLI multi-turn INSIDE the task sandbox, where it edits files
+# and runs builds/tests itself, and authenticates via the sandbox's typed model-auth
+# grant (Max login/token = no API billing, or ANTHROPIC_API_KEY = metered).
+ADAPTERS = ("stub", "raw-react", "claude-code", "proxy-agent")
 _DEFAULT_ADAPTER = "stub"
 
 
@@ -160,14 +162,24 @@ _DEFAULT_ADAPTER = "stub"
 # so picking a real brain writes real code without a second flag (the historical
 # footgun: a real --backend silently no-op'd under a hardcoded stub default). `mock`
 # has no real model, so it keeps the deterministic no-op `stub` (the default run stays
-# hermetic + byte-identical). Every REAL backend defaults to `raw-react` — the
-# provider-agnostic completion substrate — so `anthropic` writes code via the Anthropic
-# API and `claude-cli` writes code via `claude -p` used purely as a completion endpoint.
+# hermetic + byte-identical). `claude-cli` — the backend whose substrate binary IS
+# Claude Code — defaults to the agentic `claude-code` adapter (the roadmap's biggest
+# quality lever; same binary, same auth). Every other real backend defaults to
+# `raw-react`, the provider-agnostic completion substrate. FOUNDRY_CODING_ADAPTER
+# (the same env var the Workshop UI reads) overrides the derivation env-side; an
+# explicit --adapter always wins.
 def _default_adapter_for(backend: str) -> str:
     """The coding substrate to use when ``--adapter`` is omitted, derived from
-    ``backend``: ``mock`` ⇒ ``stub`` (no real model), any real backend ⇒
-    ``raw-react`` (the universal completion substrate)."""
-    return _DEFAULT_ADAPTER if backend == _MOCK_BACKEND else "raw-react"
+    ``backend``: ``mock`` ⇒ ``stub`` (no real model), ``claude-cli`` ⇒
+    ``claude-code`` (agentic, same binary + auth), any other real backend ⇒
+    ``raw-react`` (the universal completion substrate). ``FOUNDRY_CODING_ADAPTER``
+    (when set to a known adapter) overrides the derivation."""
+    env = os.environ.get("FOUNDRY_CODING_ADAPTER", "").strip().lower()
+    if env in ADAPTERS:
+        return env
+    if backend == _MOCK_BACKEND:
+        return _DEFAULT_ADAPTER
+    return "claude-code" if backend == "claude-cli" else "raw-react"
 
 # System-decided parallelism (no user knob): the Tech-Lead decomposes the work
 # into independently-buildable tasks, and the IC pool sizes ITSELF to that plan —
@@ -217,6 +229,31 @@ def make_coding_adapter(
             )
 
         return RawReactAdapter(complete_fn=_complete, run_id=thread_id)
+    if name == "claude-code":
+        from foundry.execution.adapters.claude_code import ClaudeCodeAdapter
+
+        # Agentic substrate: the CLI holds its own auth (via the sandbox's typed
+        # model-auth grant), so no proxy closure is threaded here — the proxy
+        # stays the egress for the AGENT layers; the coding substrate's lineage
+        # self-report is carried but IGNORED (arch §2b, documented trade).
+        return ClaudeCodeAdapter(run_id=thread_id)
+    if name == "proxy-agent":
+        from foundry.execution.adapters.proxy_agent import ProxyAgentAdapter
+
+        # The trust-preserving agentic loop (ROADMAP 1c): multi-turn, but every
+        # call rides the mediating proxy — sole credential holder, any backend.
+        def _agent_complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
+            result = proxy.complete(
+                "junior_engineer",
+                "T1",
+                _RAW_REACT_SOP,
+                list(messages),
+                purpose="ideation",
+                schema=schema,
+            )
+            return result.text or "", result.parsed
+
+        return ProxyAgentAdapter(complete_fn=_agent_complete, run_id=thread_id)
     raise ValueError(f"unknown adapter {name!r}; choose one of {', '.join(ADAPTERS)}")
 
 
@@ -336,11 +373,14 @@ def _pack_factories() -> dict[str, Callable[[], DomainPackContract]]:
     import cost / no new surface on the default path).
     """
     if not _PACK_FACTORIES:
+        from foundry.domains.packs.crypto import CryptoPack
         from foundry.domains.packs.frontend import FrontendPack
+        from foundry.domains.packs.game import GamePack
+        from foundry.domains.packs.infra import InfraPack
         from foundry.domains.packs.ml_data import MLDataPack
         from foundry.domains.packs.regulated import RegulatedPack
 
-        for cls in (RegulatedPack, MLDataPack, FrontendPack):
+        for cls in (RegulatedPack, MLDataPack, FrontendPack, GamePack, CryptoPack, InfraPack):
             _PACK_FACTORIES[cls().name] = cls
     return _PACK_FACTORIES
 
@@ -1131,6 +1171,7 @@ def run(
     max_slots: int = AUTO_SLOTS_CAP,
     cost_cap_microusd: int | None = None,
     base_dir: str | None = None,
+    profile: str | None = "auto",
 ) -> RunResult:
     """Run ``request`` end-to-end through the compiled factory graph (smoke path).
 
@@ -1376,6 +1417,23 @@ def run(
             if base.is_dir():
                 shutil.copytree(base, source_dir, dirs_exist_ok=True)
         try:
+            # Verification profile (ROADMAP Phase 3): stack-appropriate pinned
+            # gate commands. "auto" (default) infers from the request + spec;
+            # None keeps the historical python defaults (the platform
+            # orchestrator opts out — its deepening loop owns per-service
+            # verification); a profile NAME pins that profile explicitly.
+            from foundry.gates.profiles import PROFILES, profile_for_request
+
+            if profile == "auto":
+                run_profile = profile_for_request(f"{request}\n{spec_text or ''}")
+            elif profile is None:
+                run_profile = None
+            else:
+                if profile not in PROFILES:
+                    raise ValueError(
+                        f"unknown profile {profile!r}; choose one of {sorted(PROFILES)}"
+                    )
+                run_profile = PROFILES[profile]
             app = build_factory_graph(
                 rt,
                 runner=runner,
@@ -1389,6 +1447,7 @@ def run(
                 admission=admission,
                 deployer=deployer,
                 gate_verifier=gate_verifier,
+                profile=run_profile,
                 pack_registry=pack_registry,
                 # Author the doc set when EITHER a separate --docs dir OR an --out
                 # tree is requested (the docs land inside the --out repo, below).
@@ -1562,6 +1621,152 @@ def _read_overlay(overlay_dir: str) -> dict[str, str | None]:
     return changes
 
 
+def _autopilot_main(args: list[str]) -> int:
+    """`foundry autopilot "<target>" --out DIR [...]` — Director + design panel.
+
+    Builds the target, then loops: the Director proposes candidate next actions,
+    a software/usability panel scores + vetoes them (deterministic tally), and
+    the winner becomes the next gated iteration. Exit 0 iff every iteration
+    released; 1 when the loop stopped (gate refusal / panel decline / budget).
+    """
+    try:
+        args, out_dir = _take_value(args, "--out", what="a directory argument")
+        args, _mode = _take_value(args, "--mode", what="a value")
+        mode = _mode if _mode is not None else MODE_ASSISTANT
+        if mode not in MODES:
+            raise _CliUsageError(f"unknown --mode {_mode!r}")
+        args, _backend = _take_value(args, "--backend", what="a value")
+        backend = _backend if _backend is not None else _MOCK_BACKEND
+        if backend not in BACKENDS:
+            raise _CliUsageError(f"unknown --backend {_backend!r}")
+        args, _adapter = _take_value(args, "--adapter", what="a value")
+        if _adapter is not None and _adapter not in ADAPTERS:
+            raise _CliUsageError(f"unknown --adapter {_adapter!r}")
+        args, state_dir = _take_value(args, "--state-dir", what="a directory argument")
+        args, _thread = _take_value(args, "--thread-id", what="a value")
+        args, _iters = _take_value(args, "--iterations", what="an integer")
+        no_git = "--no-git" in args
+        args = [a for a in args if a not in ("--git", "--no-git")]  # --git = default
+        request = " ".join(args).strip()
+        if not request or not out_dir:
+            raise _CliUsageError(
+                'usage: python -m foundry.cli autopilot "<target>" --out DIR '
+                "[--iterations N] [--backend B] [--adapter A] [--mode M] "
+                "[--state-dir DIR] [--thread-id NAME] [--no-git]"
+            )
+        iterations = int(_iters) if _iters else 3
+    except (_CliUsageError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    from foundry.lifecycle.autopilot import autopilot
+
+    stage_dir = out_dir if no_git else str(Path(out_dir) / ".stages")
+    report = autopilot(
+        request,
+        out_dir=stage_dir,
+        iterations=iterations,
+        proxy=_build_proxy(backend),
+        thread_id=_thread or "autopilot",
+        mode=mode,
+        backend=backend,
+        adapter=_adapter,
+        state_dir=state_dir,
+    )
+    print(report.summary())
+    if report.released_dir:
+        print(f"released:  {report.released_dir}")
+    if not no_git and report.released_dir:
+        _export_git(out_dir, [(f"i{r.index:02d}", r.out_dir, r.request[:72])
+                              for r in report.iterations if r.passed])
+    return 0 if all(r.passed for r in report.iterations) else 1
+
+
+def _milestones_main(args: list[str]) -> int:
+    """`foundry milestones "<big target>" --out DIR [...]` — the Phase-5 loop.
+
+    Plans (or takes ``--milestones "a; b; c"`` verbatim) and runs the full
+    factory per milestone, chaining released trees. Exit 0 iff EVERY milestone
+    released; 1 when the loop stopped at a gate refusal; 2 on usage error.
+    """
+    try:
+        args, out_dir = _take_value(args, "--out", what="a directory argument")
+        args, _mode = _take_value(args, "--mode", what="a value")
+        mode = _mode if _mode is not None else MODE_ASSISTANT
+        if mode not in MODES:
+            raise _CliUsageError(f"unknown --mode {_mode!r}")
+        args, _backend = _take_value(args, "--backend", what="a value")
+        backend = _backend if _backend is not None else _MOCK_BACKEND
+        if backend not in BACKENDS:
+            raise _CliUsageError(f"unknown --backend {_backend!r}")
+        args, _adapter = _take_value(args, "--adapter", what="a value")
+        if _adapter is not None and _adapter not in ADAPTERS:
+            raise _CliUsageError(f"unknown --adapter {_adapter!r}")
+        args, plan_arg = _take_value(args, "--milestones", what="a '; '-separated list")
+        args, state_dir = _take_value(args, "--state-dir", what="a directory argument")
+        args, _thread = _take_value(args, "--thread-id", what="a value")
+        args, _max = _take_value(args, "--max-milestones", what="an integer")
+        no_git = "--no-git" in args
+        args = [a for a in args if a not in ("--git", "--no-git")]  # --git = default
+        request = " ".join(args).strip()
+        if not request or not out_dir:
+            raise _CliUsageError(
+                'usage: python -m foundry.cli milestones "<big target>" --out DIR '
+                "[--milestones 'a; b; c'] [--backend B] [--adapter A] [--mode M] "
+                "[--state-dir DIR] [--thread-id NAME] [--max-milestones N] [--no-git]"
+            )
+        max_milestones = int(_max) if _max else 8
+    except (_CliUsageError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    from foundry.lifecycle.milestones import run_milestones
+
+    explicit = [m.strip() for m in (plan_arg or "").split(";") if m.strip()] or None
+    proxy = None if explicit else _build_proxy(backend)
+    stage_dir = out_dir if no_git else str(Path(out_dir) / ".stages")
+    report = run_milestones(
+        request,
+        out_dir=stage_dir,
+        milestones=explicit,
+        proxy=proxy,
+        thread_id=_thread or "milestones",
+        max_milestones=max_milestones,
+        mode=mode,
+        backend=backend,
+        adapter=_adapter,
+        state_dir=state_dir,
+    )
+    print(report.summary())
+    if report.released_dir:
+        print(f"released:  {report.released_dir}")
+    if not no_git and report.released_dir:
+        _export_git(out_dir, [(f"m{r.index:02d}", r.out_dir, r.title)
+                              for r in report.results if r.passed])
+    return 0 if report.passed else 1
+
+
+def _export_git(out_dir: str, released: list[tuple[str, str, str]]) -> None:
+    """Project the released increments into ONE git repo at <out>/repo (a VIEW —
+    the CAS/verdicts are untouched). Failure is reported, never fatal: the
+    released trees stand either way."""
+    from pathlib import Path
+
+    from foundry.lifecycle.git_export import GitExportError, ReleaseExport, export_lineage
+
+    try:
+        head = export_lineage(
+            out_dir,  # <out> IS the repo; increments stage under <out>/.stages
+            [ReleaseExport(tag=tag, tree_dir=Path(d), message=title)
+             for tag, d, title in released],
+        )
+        print(f"git repo:  {out_dir}  (HEAD {head[:12]}, "
+              f"{len(released)} tagged commit(s); increments in .stages/)")
+    except GitExportError as exc:
+        print(f"git export skipped ({exc}) — increments stand in "
+              f"{Path(out_dir) / '.stages'}", file=sys.stderr)
+
+
 def _evolve_main(args: list[str]) -> int:
     """``foundry evolve <prior repo> "<change>" --apply OVERLAY`` (task [12]).
 
@@ -1694,11 +1899,21 @@ def main(argv: list[str] | None = None) -> int:
     """
     args = sys.argv[1:] if argv is None else argv
     # The evolution route (task [12]): `foundry evolve <prior repo> "<change>"`
+    # (see the `evolve` dispatch below; `milestones` follows the same shape.)
     # re-enters an EXISTING released codebase as a maintained change (re-gate +
     # re-admit, fail-closed). Dispatched as a leading subcommand so the greenfield
     # path stays byte-identical (the default — no subcommand — is unchanged).
     if args and args[0] == "evolve":
         return _evolve_main(args[1:])
+    # The milestone route (ROADMAP Phase 5): `foundry milestones "<big target>"
+    # --out DIR` plans an ordered milestone list and runs the FULL factory per
+    # milestone, chaining each released tree as the next milestone's base.
+    if args and args[0] == "milestones":
+        return _milestones_main(args[1:])
+    # The autopilot route: Director proposes, a software/usability panel votes,
+    # the winner becomes the next gated iteration (fail-closed on panel decline).
+    if args and args[0] == "autopilot":
+        return _autopilot_main(args[1:])
     # Simple value flags parse through `_take_value`/`_take_int` (H5: one helper
     # instead of 13 copy-pasted index/slice blocks); a usage error raises and is
     # rendered identically below. Comments mark the non-obvious semantics.
@@ -1759,9 +1974,10 @@ def main(argv: list[str] | None = None) -> int:
         args, _packs = _take_value(args, "--packs", what="a comma-separated list")
         packs: list[str] = [p.strip() for p in _packs.split(",") if p.strip()] if _packs else []
 
-        # --adapter {stub|raw-react}: the coding substrate that writes the code.
-        # OMITTED ⇒ DERIVED from --backend in run() (mock→stub, any real backend→
-        # raw-react) so a real backend writes real code without a second flag.
+        # --adapter {stub|raw-react|claude-code}: the coding substrate that writes
+        # the code. OMITTED ⇒ DERIVED from --backend in run() (mock→stub,
+        # claude-cli→claude-code agentic, other real backends→raw-react) so a real
+        # backend writes real code without a second flag.
         args, _adapter = _take_value(args, "--adapter", what="a value")
         if _adapter is not None and _adapter not in ADAPTERS:
             raise _CliUsageError(
@@ -1821,7 +2037,7 @@ def main(argv: list[str] | None = None) -> int:
                 "usage: python -m foundry.cli "
                 "[--mode {assistant|gated|autonomous}] [--packs name1,name2] "
                 "[--backend {mock|anthropic|openai|claude-cli|codex|ollama-gemma}] "
-                "[--adapter {stub|raw-react}] "
+                "[--adapter {stub|raw-react|claude-code}] "
                 "[--checkpoints [all|product,design,release]] "
                 "[--docs DIR] [--out DIR] [--spec FILE|DIR ...] "
                 "[--state-dir DIR] [--thread-id NAME] [--max-fix-attempts N] "
@@ -1833,9 +2049,9 @@ def main(argv: list[str] | None = None) -> int:
                 "  backend: mock (default — keyless, deterministic) | anthropic | openai | "
                 "claude-cli | codex | ollama-gemma (real model egress)\n"
                 "  adapter (coding substrate): omitted => DERIVED from --backend "
-                "(mock=>stub no-op, any real backend=>raw-react real code); override with "
-                "stub | raw-react\n"
-                "  packs: regulated | ml_data | frontend "
+                "(mock=>stub no-op, claude-cli=>claude-code AGENTIC, other real "
+                "backends=>raw-react); override with stub | raw-react | claude-code\n"
+                "  packs: regulated | ml_data | frontend | game | crypto | infra "
                 "(a pack may VETO an unsafe mode — fail-closed)\n"
                 "  checkpoints (plan [10]): pause at stage boundaries for human "
                 "verification; an approve can NEVER turn a gate FAIL into a release",

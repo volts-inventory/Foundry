@@ -44,18 +44,25 @@ What this node is careful about (the contract, LEARNINGS L4/L5/L7, arch §2/§2b
 
 from __future__ import annotations
 
+import json
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from foundry.agents._runtime import AgentRuntime, NodeFn
 from foundry.agents.implementation.personas import persona_for
-from foundry.agents.implementation.senior_engineer import OWNERSHIP_KIND, task_id_for_unit
+from foundry.agents.implementation.senior_engineer import (
+    DESIGN_KIND,
+    OWNERSHIP_KIND,
+    task_id_for_unit,
+)
 from foundry.canonical import content_digest
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
 from foundry.execution.sandbox import Sandbox
-from foundry.schemas.architecture import OwnershipMap, PinnedConstraint
+from foundry.schemas.architecture import OwnershipMap, PinnedConstraint, SystemDesign
 from foundry.schemas.base import Artifact, BudgetLedger
 from foundry.schemas.gates import GateStatus
 from foundry.schemas.implementation import FeatureDiff, Task, TaskStatus
+from foundry.schemas.product import AcceptanceCriterion
 from foundry.state.reducers import live_constraints
 
 if TYPE_CHECKING:
@@ -200,6 +207,89 @@ def _persona_by_task(state: FactoryState, resolve: ArtifactResolver | None) -> d
     return {tid: persona_for(area) for tid, area in _area_by_task_id(ownership).items()}
 
 
+# Kind literal for AcceptanceCriterion handles (matches gate_wiring.CRITERION_KIND;
+# duplicated here so the implementation layer never imports the graph layer).
+_CRITERION_KIND = "acceptance_criterion"
+
+# Per-span character cap: context enrichment must never blow the prompt up (the
+# product layer already truncates specs at 24k chars); a criterion/design summary
+# that exceeds this is cut with an explicit marker rather than silently.
+_SPAN_CHAR_CAP = 4_000
+
+
+def _capped(text: str) -> str:
+    return text if len(text) <= _SPAN_CHAR_CAP else text[: _SPAN_CHAR_CAP] + " …[truncated]"
+
+
+def _retrieved_spans(
+    state: FactoryState, resolve: ArtifactResolver | None, task: Task
+) -> tuple[str, ...]:
+    """Ground THIS task's codegen call in the spec context it traces to.
+    (context-grounding: the coder must see the spec, not a handle.)
+
+    Until now the packet's ``retrieved_spans`` was always empty and ``spec_uri``
+    is a synthetic content-address (no stored body), so the coding substrate saw
+    only the pinned constraints + a task id. This resolves, through the SAME typed
+    ``resolve`` seam the ownership read uses:
+
+    * the OWNERSHIP UNIT the task implements (recovered content-identity-
+      preservingly via ``task_id_for_unit``, exactly like the budget lineage);
+    * the ACCEPTANCE CRITERIA bodies for ``task.criterion_ids`` (sorted by id,
+      newest-by-Seq per id, so the packet is byte-stable across folds/resume);
+    * the SYSTEM DESIGN summary (newest by Seq): title, components, interfaces.
+
+    Deterministic order + per-span cap keep the packet content-stable (the pool's
+    content-addressed task id derives from it). ``resolve`` unwired ⇒ empty, the
+    packet stays byte-identical to the pre-enrichment path.
+    """
+    if resolve is None:
+        return ()
+    spans: list[str] = []
+    ownership_handles = [a for a in (state.get("artifacts") or ()) if a.kind == OWNERSHIP_KIND]
+    if ownership_handles:
+        body = resolve(max(ownership_handles, key=lambda a: a.seq))
+        if isinstance(body, OwnershipMap):
+            for unit, owner in sorted(body.owners.items()):
+                if task_id_for_unit(unit) == task.id:
+                    spans.append(
+                        f"OWNERSHIP UNIT: this task implements {unit!r} "
+                        f"(owner: {owner}, area: {body.area_of(owner)})"
+                    )
+                    break
+    wanted = set(task.criterion_ids)
+    if wanted:
+        newest: dict[str, tuple[Any, AcceptanceCriterion]] = {}
+        for handle in (a for a in (state.get("artifacts") or ()) if a.kind == _CRITERION_KIND):
+            body = resolve(handle)
+            if isinstance(body, AcceptanceCriterion) and body.id in wanted:
+                prior = newest.get(body.id)
+                if prior is None or handle.seq > prior[0]:
+                    newest[body.id] = (handle.seq, body)
+        for cid in sorted(newest):
+            c = newest[cid][1]
+            oracle = f" [oracle: {c.oracle_hint}]" if c.oracle_hint else ""
+            spans.append(_capped(f"ACCEPTANCE CRITERION {c.id}: {c.text}{oracle}"))
+    design_handles = [a for a in (state.get("artifacts") or ()) if a.kind == DESIGN_KIND]
+    if design_handles:
+        body = resolve(max(design_handles, key=lambda a: a.seq))
+        if isinstance(body, SystemDesign):
+            spans.append(
+                _capped(
+                    "SYSTEM DESIGN: "
+                    + json.dumps(
+                        {
+                            "title": body.title,
+                            "components": list(body.components),
+                            "interfaces": list(body.interface_ids),
+                        },
+                        sort_keys=True,
+                        ensure_ascii=False,
+                    )
+                )
+            )
+    return tuple(spans)
+
+
 def _prior_failures(state: FactoryState) -> tuple[str, ...]:
     """Findings from any gate that FAILED/ERRORed on the previous pass — fed back to
     the engineer (via the TaskPacket) so a fix attempt targets the SPECIFIC failure
@@ -221,14 +311,16 @@ def _build_packet(
     cost_budget_microusd: int,
     prior_failures: tuple[str, ...] = (),
     persona: str = "",
+    retrieved_spans: tuple[str, ...] = (),
 ) -> TaskPacket:
     """Assemble the immutable packet: pinned constraints VERBATIM + FIRST.
 
     The constraint texts are placed in ``pinned_constraints`` byte-for-byte (no
     paraphrase, no reorder behind the task body); ``assemble_prompt`` renders
-    them first. The proxy endpoint is intentionally NOT handed to the adapter
-    here (egress stays None) — the StubAdapter holds no egress and the dev
-    sandbox's network denial is "nothing to talk to"."""
+    them first. ``retrieved_spans`` grounds the call in the criteria/design the
+    task traces to (ROADMAP Phase 4). The proxy endpoint is intentionally NOT
+    handed to the adapter here (egress stays None) — the StubAdapter holds no
+    egress and the dev sandbox's network denial is "nothing to talk to"."""
     return TaskPacket(
         task={
             "id": task.id,
@@ -239,6 +331,7 @@ def _build_packet(
         },
         persona=persona,  # area-expert role preamble (empty == unchanged prompt)
         pinned_constraints=pinned_texts(constraints),  # VERBATIM + FIRST (arch §2)
+        retrieved_spans=retrieved_spans,  # spec grounding (empty == unchanged prompt)
         prior_failures=prior_failures,
         worktree_path=str(sandbox.worktree),
         turn_budget=turn_budget,
@@ -258,6 +351,7 @@ def execution_task_for(
     cost_budget_microusd: int = _DEFAULT_COST_BUDGET_MICROUSD,
     prior_failures: tuple[str, ...] = (),
     persona: str = "",
+    retrieved_spans: tuple[str, ...] = (),
 ) -> ExecutionTask:
     """OPT-IN seam (additive — NOT on the default path): build the durable
     :class:`~foundry.execution.work_pool.ExecutionTask` that would dispatch THIS
@@ -287,6 +381,7 @@ def execution_task_for(
         },
         persona=persona,  # area-expert role preamble (empty == unchanged prompt)
         pinned_constraints=pinned_texts(constraints),  # VERBATIM + FIRST (arch §2)
+        retrieved_spans=retrieved_spans,  # spec grounding (empty == unchanged prompt)
         prior_failures=prior_failures,
         worktree_path=worktree_path,
         turn_budget=turn_budget,
@@ -298,6 +393,72 @@ def execution_task_for(
         adapter=adapter,
         lineage=lineage,
         est_cost_microusd=cost_budget_microusd,
+    )
+
+
+def _apply_overlay(worktree: Path, overlay: Mapping[str, str | None]) -> None:
+    """Write predecessor slices onto a fresh clone (content ⇒ write, None ⇒
+    delete). Paths are containment-checked defensively even though they come
+    from our own CAS (same posture as the integration boundary, D-R1-03)."""
+    root = worktree.resolve()
+    for rel, content in sorted(overlay.items()):
+        pure = PurePosixPath(rel)
+        if pure.is_absolute() or ".." in pure.parts:
+            raise ValueError(f"overlay path {rel!r} escapes the worktree")
+        target = (root / pure).resolve()
+        if not str(target).startswith(str(root)):
+            raise ValueError(f"overlay path {rel!r} escapes the worktree")
+        if content is None:
+            if target.is_file():
+                target.unlink()
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+
+def _slice_of(rt: AgentRuntime, writes: dict[str, Any]) -> dict[str, str | None]:
+    """The tree slice ONE finished task contributes, for the next task's overlay.
+
+    Reconstitutes the just-minted FeatureDiff body from ``rt.cas`` and parses it
+    with the SAME op parser the integration boundary uses (``_diff_ops``), so
+    sibling visibility and final integration agree. Modification-hunk patches are
+    NOT projected into the overlay (they need the integrated file; the boundary
+    still applies them — only sibling VISIBILITY of a patch lags). Empty when no
+    CAS is wired (synthetic-resolver tests: overlay off, path unchanged)."""
+    if rt.cas is None:
+        return {}
+    from foundry.graph.gate_wiring import FeatureDiffBodyError, _diff_ops
+
+    artifacts = writes.get("artifacts") or []
+    if not artifacts:
+        return {}
+    diff = rt.cas.resolve(artifacts[0])
+    try:
+        ops = _diff_ops(diff, rt.cas.resolve_blob)
+    except FeatureDiffBodyError:
+        # Overlay is best-effort VISIBILITY; the integration boundary stays the
+        # authoritative (fail-closed) applier of this body.
+        return {}
+    out: dict[str, str | None] = dict(ops.writes)
+    for rel in ops.deletes:
+        out[rel] = None
+    return out
+
+
+def _sandbox_for(rt: AgentRuntime, source_dir: str, snapshot_store: str | None) -> Sandbox:
+    """Build the per-task Sandbox honoring the adapter's DECLARED model-auth needs.
+
+    An agentic CLI substrate (claude-code) declares ``credential_grant`` /
+    ``home_passthrough`` on the adapter; the Sandbox validates the grant
+    fail-closed against ``GRANTABLE_MODEL_AUTH`` (ROADMAP Phase 1b — model-auth
+    only, target-system credentials can never be granted). Adapters that declare
+    nothing (stub, raw-react) get the fully-scrubbed cage, byte-identical to
+    before."""
+    return Sandbox(
+        source_dir,
+        snapshot_store=snapshot_store,
+        credential_grant=tuple(getattr(rt.adapter, "credential_grant", ()) or ()),
+        home_passthrough=bool(getattr(rt.adapter, "home_passthrough", False)),
     )
 
 
@@ -314,17 +475,34 @@ def _run_one_task(
     cost_budget_microusd: int,
     prior_failures: tuple[str, ...] = (),
     persona: str = "",
+    retrieved_spans: tuple[str, ...] = (),
+    overlay: Mapping[str, str | None] | None = None,
 ) -> dict[str, Any]:
     """Run the adapter for ONE task in a fresh sandbox; return its channel writes.
 
     A FRESH ``Sandbox`` per task (arch §2(d): no reuse). Establishes / resets to
     the base tree FIRST (idempotent retry = supersession, L4), runs the adapter,
     then keys the diff by ``content_digest`` (L7) so a re-run re-derives the same
-    key and the keyed-union channels coalesce the supersession."""
+    key and the keyed-union channels coalesce the supersession.
+
+    ``overlay`` (ROADMAP Phase 2b — the shared evolving tree): the accumulated
+    slices of EARLIER tasks in this node invocation (merge order), written onto
+    the fresh clone BEFORE the base snapshot is taken, so this task builds ON the
+    code its predecessors authored instead of blind against the scaffold. Because
+    it precedes ``snapshot()``, the recorded base (and thus the idempotency key)
+    reflects what the task actually saw — a retry resets to the SAME overlaid
+    base, and a change in a predecessor's output supersedes correctly. A retry
+    presenting a recorded ``base_snapshot`` skips the overlay (that base is
+    already authoritative)."""
     assert rt.adapter is not None  # guaranteed by the factory's guard
-    sandbox = Sandbox(source_dir, snapshot_store=snapshot_store)
+    sandbox = _sandbox_for(rt, source_dir, snapshot_store)
     try:
-        base = sandbox.snapshot() if base_snapshot is None else sandbox.restore(base_snapshot)
+        if base_snapshot is None:
+            if overlay:
+                _apply_overlay(sandbox.worktree, overlay)
+            base = sandbox.snapshot()
+        else:
+            base = sandbox.restore(base_snapshot)
         packet = _build_packet(
             task,
             constraints,
@@ -333,6 +511,7 @@ def _run_one_task(
             cost_budget_microusd=cost_budget_microusd,
             prior_failures=prior_failures,
             persona=persona,
+            retrieved_spans=retrieved_spans,
         )
         result: AdapterResult = rt.adapter.run(packet, sandbox)
         _mirror_diff_blob(rt, sandbox, result)  # while the sandbox is alive
@@ -444,6 +623,7 @@ def _run_tasks_pooled(
     domain_area: Mapping[str, str],
     prior_failures: tuple[str, ...] = (),
     persona_by_task: Mapping[str, str] | None = None,
+    spans_by_task: Mapping[str, tuple[str, ...]] | None = None,
 ) -> dict[str, Any]:
     """Run the ready tasks' adapter work in PARALLEL through a bounded
     :class:`LocalWorkPool` (``max_slots`` physical slots), then post-process the
@@ -505,7 +685,7 @@ def _run_tasks_pooled(
         return base_first
 
     def make_sandbox(etask: ExecutionTask) -> Sandbox:
-        sandbox = Sandbox(source_dir, snapshot_store=snapshot_store)
+        sandbox = _sandbox_for(rt, source_dir, snapshot_store)
         prior = recorded.get(str(etask.packet.task.get("id")))
         if prior is not None:
             sandbox.restore(prior)  # retry: reset to base so the diff supersedes (L4)
@@ -536,6 +716,7 @@ def _run_tasks_pooled(
                 cost_budget_microusd=cost_budget_microusd,
                 prior_failures=prior_failures,
                 persona=(persona_by_task or {}).get(task.id, ""),  # area-expert voice
+                retrieved_spans=(spans_by_task or {}).get(task.id, ()),  # spec grounding
             )
             try:
                 submitted[task.id] = pool.submit(etask)
@@ -628,6 +809,9 @@ def make_junior_engineer_node(
         # Area-expert persona per task (option-2): a frontend task is written by a
         # frontend specialist, etc. Empty map when no ownership/resolver is wired.
         persona_by_task = _persona_by_task(state, resolve)
+        # Spec grounding per task (ROADMAP Phase 4): the criteria/design/unit spans
+        # this task traces to. Empty when no resolver is wired (unchanged prompt).
+        spans_by_task = {t.id: _retrieved_spans(state, resolve, t) for t in tasks}
         # Branch-per-task: each task builds in its own fresh sandbox on its own
         # task/<id> branch. >1 task ⇒ the adapter runs fan out across the IC pool
         # (Wave C); a single task runs serially (the original path).
@@ -657,8 +841,14 @@ def make_junior_engineer_node(
                 domain_area=domain_area,
                 prior_failures=prior_failures,
                 persona_by_task=persona_by_task,
+                spans_by_task=spans_by_task,
             )
         merged: dict[str, Any] = {}
+        # The shared evolving tree (ROADMAP Phase 2b): each SERIAL task builds on
+        # its predecessors' slices (merge order), later-by-Seq winning exactly as
+        # at the integration boundary. The pooled path stays independent by design
+        # (parallel siblings can't see each other mid-flight).
+        overlay: dict[str, str | None] = {}
         for task in tasks:
             writes = _run_one_task(
                 rt,
@@ -672,7 +862,10 @@ def make_junior_engineer_node(
                 cost_budget_microusd=cost_budget_microusd,
                 prior_failures=prior_failures,
                 persona=persona_by_task.get(task.id, ""),
+                retrieved_spans=spans_by_task.get(task.id, ()),
+                overlay=overlay,
             )
+            overlay.update(_slice_of(rt, writes))
             for channel, records in writes.items():
                 merged.setdefault(channel, []).extend(records)
         return merged

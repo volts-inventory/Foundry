@@ -94,7 +94,7 @@ const ROSTER = {
   qa:["QA Engineer","SDET","Reviewer","Technical Writer"],
   security:["AppSec Engineer","Audit & Compliance","Supply-chain Reviewer"],
 };
-const GATE_ORDER = ["spec","build","test","review","security","audit","supply_chain","e2e"];
+const GATE_ORDER = ["spec","build","test","smoke","review","security","audit","supply_chain","e2e"];
 const AGENT_ROOM = {}; for (const rm in ROSTER) for (const nm of ROSTER[rm]) AGENT_ROOM[nm] = rm;
 // Per-area accent (shared by the org board, the Tech-Leads, and the area-expert
 // IC pool) so frontend/backend/data/… read the same colour everywhere.
@@ -1741,6 +1741,9 @@ function routeEvent(floor, ev){
       F.cp = {title:ev.title, summary:ev.summary, boundary:ev.boundary}; break;
     case "await_decision":
       F.awaiting = true; F.cpIndex = ev.checkpoint;
+      // Autopilot PROPOSAL: carry the panel's request so the modal offers an edit box.
+      if (ev.boundary === "autopilot_proposal")
+        F.cp = Object.assign({}, F.cp, {boundary: ev.boundary, request: ev.request || ""});
       if (Array.isArray(ev.journal)) F.journal = ev.journal;
       renderElevator();
       if (S){ S.spotlightCTO(true); S.toLounge(); }   // team hangs out while CTO decides
@@ -1866,6 +1869,14 @@ function showCheckpoint(F){
   const cp = (F && F.cp) || {title:"CHECKPOINT", summary:""};
   document.getElementById("cp-title").textContent="CHECKPOINT · "+(cp.title||"");
   document.getElementById("cp-summary").textContent=cp.summary||"";
+  // Autopilot proposal: surface the panel's request as an EDITABLE next-iteration
+  // request (approve = as-is; request-changes = build the edited text; reject = stop).
+  const wrap = document.getElementById("cp-edit-wrap");
+  if (wrap){
+    const isProposal = cp.boundary === "autopilot_proposal";
+    wrap.classList.toggle("hidden", !isProposal);
+    if (isProposal) document.getElementById("cp-edit").value = cp.request || "";
+  }
   document.getElementById("cp-modal").classList.remove("hidden");
 }
 function hideCheckpoint(){ document.getElementById("cp-modal").classList.add("hidden"); }
@@ -1900,6 +1911,8 @@ function openFilesFor(meta){
   const itBtn = document.getElementById("files-iterate");
   itBtn.style.display = (meta.status === "done") ? "" : "none";
   itBtn.onclick = () => { hideFiles(); showNewModal(meta.id); };
+  const gz = document.getElementById("files-gitzip");
+  if (gz) gz.href = "/api/gitzip/" + meta.id;   // whole-floor lineage as ONE git repo
   renderReleases(meta);              // release history for this floor (newest first)
   loadRepo(meta.id);                 // start on the latest release's repo
   modal.classList.remove("hidden");
@@ -1966,6 +1979,8 @@ function loadRepo(id){
   const list = document.getElementById("files-list");
   const view = document.getElementById("files-view");
   document.getElementById("files-zip").href = "/api/zip/"+id;
+  { const gz = document.getElementById("files-gitzip");
+    if (gz) gz.href = "/api/gitzip/"+id; }   // lineage repo up to THIS release
   list.innerHTML = ""; view.textContent = "Loading…";
   document.getElementById("repo-sha").textContent = "";
   document.getElementById("repo-src").textContent = "";
@@ -2178,8 +2193,14 @@ function hideFiles(){ document.getElementById("files-modal").classList.add("hidd
 function sendDecision(decision){
   const F = FLOORS.get(ACTIVE);
   if (!F){ hideCheckpoint(); return; }
+  const body = {decision, checkpoint: F.cpIndex};
+  const wrap = document.getElementById("cp-edit-wrap");
+  if (wrap && !wrap.classList.contains("hidden")){
+    const edit = (document.getElementById("cp-edit").value || "").trim();
+    if (edit) body.request_edit = edit;   // the human's amended next-iteration request
+  }
   fetch("/api/decision/"+F.id, {method:"POST", headers:postHeaders(),
-    body: JSON.stringify({decision, checkpoint: F.cpIndex})});
+    body: JSON.stringify(body)});
   F.awaiting = false; renderElevator(); hideCheckpoint();
 }
 
@@ -2365,6 +2386,8 @@ document.getElementById("start-btn").onclick=async ()=>{
   const sup=document.getElementById("supervised").checked;
   const extra={};
   extra.adapter=document.getElementById("adapter-select").value;
+  { const ap=document.getElementById("autopilot-input");
+    const n=ap?parseInt(ap.value,10):0; if(Number.isFinite(n)&&n>0) extra.autopilot=n; }
   // Extra workers: the pool ON TOP of one-per-team. Blank ⇒ the server's automatic
   // cap. Each role always gets its baseline worker; these scale the busy teams.
   const xw=parseInt((document.getElementById("extra-workers")||{}).value,10);
@@ -2489,10 +2512,15 @@ function syncCostCap(){
   cap.placeholder = metered ? "no cap" : `${backend} isn't metered — no USD cost`;
   if(!metered) cap.value = "";
 }
-// Coding substrate derived from the backend (CLI parity): mock→stub no-op, any
-// real backend→raw-react (real code). A user who manually picks an adapter pins
-// it (adapterTouched), so derivation never clobbers an explicit choice.
-function defaultAdapterFor(backend){ return backend==="mock" ? "stub" : "raw-react"; }
+// Coding substrate derived from the backend (CLI parity): mock→stub no-op,
+// claude-cli→claude-code (AGENTIC: claude edits/builds/tests inside the task
+// sandbox), other real backends→raw-react (one completion → one diff). A user who
+// manually picks an adapter pins it (adapterTouched), so derivation never
+// clobbers an explicit choice.
+function defaultAdapterFor(backend){
+  if(backend==="mock") return "stub";
+  return backend==="claude-cli" ? "claude-code" : "raw-react";
+}
 let adapterTouched = false;
 function syncAdapter(){
   const asel = document.getElementById("adapter-select");

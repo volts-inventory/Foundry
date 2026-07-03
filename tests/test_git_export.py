@@ -75,11 +75,22 @@ def test_refuses_dirty_dest_and_empty_lineage(tmp_path: Path) -> None:
 def test_milestones_cli_git_flag(tmp_path: Path) -> None:
     from foundry.cli import main
 
+    # git output is the DEFAULT: <out> is the repo; increments hide in .stages/.
     rc = main([
         "milestones", "build a thing", "--out", str(tmp_path / "out"),
-        "--milestones", "skeleton; increment", "--git",
+        "--milestones", "skeleton; increment",
     ])
     assert rc == 0
-    repo = tmp_path / "out" / "repo"
+    repo = tmp_path / "out"
     assert (repo / ".git").is_dir()
     assert git(repo, "tag") == "m01\nm02"
+    assert (repo / ".stages" / "m01").is_dir()  # durable staging for resume
+    assert git(repo, "status", "--porcelain") == ""  # .stages excluded from the tree
+    # --no-git restores the plain sibling-folder layout (no git required).
+    rc = main([
+        "milestones", "build a thing", "--out", str(tmp_path / "plain"),
+        "--milestones", "skeleton", "--no-git",
+    ])
+    assert rc == 0
+    assert (tmp_path / "plain" / "m01").is_dir()
+    assert not (tmp_path / "plain" / ".git").exists()

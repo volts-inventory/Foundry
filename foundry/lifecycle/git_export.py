@@ -77,16 +77,22 @@ def export_lineage(dest: Path | str, releases: Sequence[ReleaseExport]) -> str:
         raise GitExportError("nothing to export: no released increments")
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
-    if any(p.name != ".git" for p in dest.iterdir()):
+    if any(p.name not in (".git", ".stages") for p in dest.iterdir()):
         raise GitExportError(f"refusing to export into non-empty directory {dest}")
     _git(dest, "init", "-q", "-b", "main")
+    # The hidden .stages/ dir (the loop's durable per-increment trees, needed for
+    # resume) lives INSIDE the repo dir but never enters history: repo-local
+    # exclude, so tree SHAs are unaffected.
+    exclude = dest / ".git" / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    exclude.write_text(".stages/\n")
     head = ""
     for i, rel in enumerate(releases):
         if not rel.tree_dir.is_dir():
             raise GitExportError(f"release {rel.tag!r}: tree dir {rel.tree_dir} missing")
         # Sync the worktree to EXACTLY this release's tree (deletions included).
         for existing in dest.iterdir():
-            if existing.name == ".git":
+            if existing.name in (".git", ".stages"):
                 continue
             shutil.rmtree(existing) if existing.is_dir() else existing.unlink()
         for src in sorted(rel.tree_dir.rglob("*")):

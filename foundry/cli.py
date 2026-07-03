@@ -1645,8 +1645,8 @@ def _autopilot_main(args: list[str]) -> int:
         args, state_dir = _take_value(args, "--state-dir", what="a directory argument")
         args, _thread = _take_value(args, "--thread-id", what="a value")
         args, _iters = _take_value(args, "--iterations", what="an integer")
-        want_git = "--git" in args
-        args = [a for a in args if a != "--git"]
+        no_git = "--no-git" in args
+        args = [a for a in args if a not in ("--git", "--no-git")]  # --git = default
         request = " ".join(args).strip()
         if not request or not out_dir:
             raise _CliUsageError(
@@ -1661,9 +1661,10 @@ def _autopilot_main(args: list[str]) -> int:
 
     from foundry.lifecycle.autopilot import autopilot
 
+    stage_dir = out_dir if no_git else str(Path(out_dir) / ".stages")
     report = autopilot(
         request,
-        out_dir=out_dir,
+        out_dir=stage_dir,
         iterations=iterations,
         proxy=_build_proxy(backend),
         thread_id=_thread or "autopilot",
@@ -1675,7 +1676,7 @@ def _autopilot_main(args: list[str]) -> int:
     print(report.summary())
     if report.released_dir:
         print(f"released:  {report.released_dir}")
-    if want_git and report.released_dir:
+    if not no_git and report.released_dir:
         _export_git(out_dir, [(f"i{r.index:02d}", r.out_dir, r.request[:72])
                               for r in report.iterations if r.passed])
     return 0 if all(r.passed for r in report.iterations) else 1
@@ -1705,8 +1706,8 @@ def _milestones_main(args: list[str]) -> int:
         args, state_dir = _take_value(args, "--state-dir", what="a directory argument")
         args, _thread = _take_value(args, "--thread-id", what="a value")
         args, _max = _take_value(args, "--max-milestones", what="an integer")
-        want_git = "--git" in args
-        args = [a for a in args if a != "--git"]
+        no_git = "--no-git" in args
+        args = [a for a in args if a not in ("--git", "--no-git")]  # --git = default
         request = " ".join(args).strip()
         if not request or not out_dir:
             raise _CliUsageError(
@@ -1723,9 +1724,10 @@ def _milestones_main(args: list[str]) -> int:
 
     explicit = [m.strip() for m in (plan_arg or "").split(";") if m.strip()] or None
     proxy = None if explicit else _build_proxy(backend)
+    stage_dir = out_dir if no_git else str(Path(out_dir) / ".stages")
     report = run_milestones(
         request,
-        out_dir=out_dir,
+        out_dir=stage_dir,
         milestones=explicit,
         proxy=proxy,
         thread_id=_thread or "milestones",
@@ -1738,7 +1740,7 @@ def _milestones_main(args: list[str]) -> int:
     print(report.summary())
     if report.released_dir:
         print(f"released:  {report.released_dir}")
-    if want_git and report.released_dir:
+    if not no_git and report.released_dir:
         _export_git(out_dir, [(f"m{r.index:02d}", r.out_dir, r.title)
                               for r in report.results if r.passed])
     return 0 if report.passed else 1
@@ -1754,14 +1756,15 @@ def _export_git(out_dir: str, released: list[tuple[str, str, str]]) -> None:
 
     try:
         head = export_lineage(
-            Path(out_dir) / "repo",
+            out_dir,  # <out> IS the repo; increments stage under <out>/.stages
             [ReleaseExport(tag=tag, tree_dir=Path(d), message=title)
              for tag, d, title in released],
         )
-        print(f"git repo:  {Path(out_dir) / 'repo'}  (HEAD {head[:12]}, "
-              f"{len(released)} tagged commit(s))")
+        print(f"git repo:  {out_dir}  (HEAD {head[:12]}, "
+              f"{len(released)} tagged commit(s); increments in .stages/)")
     except GitExportError as exc:
-        print(f"git export skipped: {exc}", file=sys.stderr)
+        print(f"git export skipped ({exc}) — increments stand in "
+              f"{Path(out_dir) / '.stages'}", file=sys.stderr)
 
 
 def _evolve_main(args: list[str]) -> int:

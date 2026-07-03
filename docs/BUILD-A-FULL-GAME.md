@@ -43,13 +43,14 @@ python -m foundry.cli milestones \
   --spec ~/moon-spec.md --out ~/moon-colony \
   --backend claude-cli --adapter claude-code --mode autonomous \
   --max-milestones 10 --max-slots 4 --max-fix-attempts 8 \
-  --state-dir ~/foundry/state --thread-id moon-colony --git
+  --state-dir ~/foundry/state --thread-id moon-colony
 ```
 
-`--git` additionally projects the released increments into ONE git repository
-at `~/moon-colony/repo` — each milestone a tagged commit (`git diff m04..m05`,
-`git checkout m03` to play an earlier increment, push it anywhere). Without it
-you get sibling `mNN` folders (full standalone snapshots, no git required).
+The output IS a git repository: `~/moon-colony` with one tagged commit per
+milestone (`git diff m04..m05`, `git checkout m03` to play an earlier
+increment, push it anywhere). The per-increment trees stage under
+`~/moon-colony/.stages/` (durable — resume needs them; excluded from the repo
+tree). Pass `--no-git` for plain sibling `mNN` folders instead (no git needed).
 
 What happens, unattended:
 
@@ -89,7 +90,8 @@ the panel declines everything, the loop stops and hands steering back to you.
 ## 4. Play it
 
 ```bash
-cd ~/moon-colony/m10        # or the highest mNN that exists
+cd ~/moon-colony            # the repo HEAD is the latest release
+# (or: git checkout m03 — play any earlier increment)
 pip install pygame
 python main.py
 ```

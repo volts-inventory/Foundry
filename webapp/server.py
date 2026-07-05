@@ -1214,8 +1214,8 @@ def _run_platform(p: Project) -> None:
     role_room = {"web": "frontend", "backend": "backend",
                  "data": "data", "worker": "backend", "game": "frontend"}
     plan = plan_platform(p.request)
-    # Synthetic org so the discipline rooms staff up (engineers per area) and the
-    # static crew sits at their desks (idle => Zzz) — instead of waiting in the lounge.
+    # Synthetic org so the discipline rooms staff up (engineers per area); whoever
+    # isn't working the active stage waits in the lounge until their room lights up.
     area_units: dict[str, list[str]] = {}
     order: list[str] = []
     for s in plan.services:

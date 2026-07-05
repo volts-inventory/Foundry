@@ -1241,7 +1241,7 @@ class FloorScene extends Phaser.Scene {
   }
   // Off duty -> walk to the lounge (so a room only ever shows people actually
   // working that stage; idle leads physically wait it out in the break area).
-  gotoLounge(a){ if (!a || !a.seen) return; a.inLounge = true;
+  gotoLounge(a){ if (!a || !a.seen) return; a.inLounge = true; a.working = false;
     if (a.faceFront) a.faceFront(); this.stopDeskIdle(a);
     const s = this.loungeSpot(a.loungeSlot||0);
     this.walkTo(a, s.x + (Math.random()*10-5), s.y, ()=> this.loungeArrive(a, s.mode)); }
@@ -1255,12 +1255,12 @@ class FloorScene extends Phaser.Scene {
         yoyo:true, repeat:-1, ease:"Sine.inOut"}); }
     else if (mode === "sit"){ if (a.faceFront) a.faceFront(); this.deskIdle(a); }
   }
-  // Is this person at rest RIGHT NOW (so a Zzz should float up)? — either napping in
-  // the lounge, or sitting idle at their desk (off-stage, not currently working).
+  // Is this person at rest RIGHT NOW (so a Zzz should float up)? — ONLY when napping
+  // in the lounge. Desks are for active work; nobody sleeps at their workstation.
   restingNow(a){
     if (!a || !a.seen || (a.moveTween && a.moveTween.isPlaying())) return false;
     if (a.inLounge) return a.loungeBusy === "sleep";
-    return !a.working;                         // at desk, but their stage isn't active
+    return false;                              // at a desk => never show Zzz
   }
   // One persistent Zzz emitter per person; the gate decides when it actually shows.
   zzzLoop(a){
@@ -1283,8 +1283,8 @@ class FloorScene extends Phaser.Scene {
   }
   gotoDesk(a){ this.deskRest(a, true); }
   // Park a person at their desk. ``working`` true => their stage is active (heads-down,
-  // no Zzz); false => idle at the desk (a Zzz floats up). Nobody leaves for the lounge
-  // just because their stage is off — they wait it out at their own desk.
+  // no Zzz). Desks are for ACTIVE work only — anyone whose stage is off belongs in the
+  // lounge (staffRoom routes them there), so ``working:false`` is just a transient state.
   deskRest(a, working, busy){
     if (!a || !a.home) return;
     a.working = working; a.inLounge = false; this.clearLounge(a);
@@ -1301,31 +1301,32 @@ class FloorScene extends Phaser.Scene {
   staffRoom(key){
     this.activeRoomKey = key;
     const working = (room)=> !!room && (room===key || (key==="engineering" && ENG_ROOMS.includes(room)));
-    // Everyone goes to their OWN desk — working (heads-down) or idle (a Zzz floats up).
-    // Nobody parks in the lounge just because their stage is off; mill() lets a few
-    // drift there at random between stages.
+    // Desks are for ACTIVE work only: whoever's stage is on goes heads-down at their
+    // own desk; everyone else waits it out in the lounge (sit / nap / mill).
     for (const [name,a] of this.agents){
-      if (a.seen) this.deskRest(a, working(AGENT_ROOM[name]));
+      if (!a.seen) continue;
+      if (working(AGENT_ROOM[name])) this.deskRest(a, true); else this.gotoLounge(a);
     }
     const engActive = key === "engineering";
     for (const s of [...(this.poolGroup||[]), ...(this.techLeadGroup||[])]){
-      if (s && s.bob) this.deskRest(s, engActive, engActive);
+      if (!s || !s.bob) continue;
+      if (engActive) this.deskRest(s, true, true); else this.gotoLounge(s);
     }
   }
   toLounge(){   // everyone hangs out (checkpoints / done)
     for (const [,a] of this.agents) if (a.seen) this.gotoLounge(a);
-    for (const s of (this.poolGroup||[])) if (s && s.bob) this.gotoLounge(s);
+    for (const s of [...(this.poolGroup||[]), ...(this.techLeadGroup||[])])
+      if (s && s.bob) this.gotoLounge(s);
   }
   mill(){       // gentle wander for the lounge "wander" folks (sitters/sleepers stay put)
     const B = cellBox(LOUNGE_CELL[0], LOUNGE_CELL[1]);
     const move = (a)=>{ if (a && a.seen && a.inLounge && a.loungeBusy === "wander"
         && !a.moveTween?.isPlaying() && Math.random()<0.5){
       this.walkTo(a, B.x+26+Math.random()*(B.w-52), B.y+58+Math.random()*(B.h-86)); } };
-    // Idle desk folks only OCCASIONALLY drift off to the lounge (and drift back) —
-    // the floor stays populated; the break room is the exception, not the rule.
+    // Safety net: anyone idle who somehow ended up at a desk heads to the lounge —
+    // desks are only ever occupied by people actively working their stage.
     const drift = (a)=>{ if (!a || !a.seen || (a.moveTween && a.moveTween.isPlaying())) return;
-      if (!a.inLounge && !a.working && Math.random() < 0.04) this.gotoLounge(a);
-      else if (a.inLounge && Math.random() < 0.12) this.deskRest(a, false); };
+      if (!a.inLounge && !a.working) this.gotoLounge(a); };
     for (const [,a] of this.agents){ move(a); drift(a); }
     for (const s of [...(this.poolGroup||[]), ...(this.techLeadGroup||[])]){ move(s); drift(s); }
   }
@@ -1544,7 +1545,12 @@ class FloorScene extends Phaser.Scene {
         s.home={x,y}; s.loungeSlot=slot++; s.seen=true; s.inLounge=false;
         s.working = (this.activeRoomKey === "engineering");
         this.zzzLoop(s);
-        if (s.working) this.startWalk(s); else this.deskIdle(s);
+        if (s.working) this.startWalk(s);
+        else {                                 // not on the clock -> spawn in the lounge
+          const ls=this.loungeSpot(s.loungeSlot);
+          s.inLounge=true; s.setPosition(ls.x, ls.y).setDepth(ls.y);
+          this.loungeArrive(s, ls.mode);
+        }
         (p.lead?this.techLeadGroup:this.poolGroup).push(s, ws);
       };
       // ONE consistent desk grid for every room: centred columns, first row well BELOW
@@ -1577,7 +1583,12 @@ class FloorScene extends Phaser.Scene {
       s.home={x,y}; s.loungeSlot=12+i; s.seen=true; s.inLounge=false;
       s.working = (this.activeRoomKey === "engineering");
       this.zzzLoop(s);
-      if (s.working) this.startWalk(s); else this.deskIdle(s);
+      if (s.working) this.startWalk(s);
+      else {                                   // not on the clock -> spawn in the lounge
+        const ls=this.loungeSpot(s.loungeSlot);
+        s.inLounge=true; s.setPosition(ls.x, ls.y).setDepth(ls.y);
+        this.loungeArrive(s, ls.mode);
+      }
       this.poolGroup.push(s, ws);
     }
   }
@@ -1770,8 +1781,8 @@ function routeEvent(floor, ev){
       logTo(F, "bad", "HELD: "+ev.reason); break;
     case "done":
       F.status = "done"; F.passed = !!ev.passed; renderElevator();
-      // Build's over: everyone REST AT THEIR DESKS (idle => Zzz), not banished to the
-      // lounge. mill() still drifts a few to the break room now and then.
+      // Build's over: nobody is working, so everyone heads to the LOUNGE
+      // (staffRoom(null) marks no room active and routes idle folks there).
       if (S){ S.staffRoom(null); if (!ev.passed){ S.gloom(); S.banner("HELD AT THE GATE", 0xff5d6c); } }
       logTo(F, ev.passed?"good":"bad",
         ev.passed?"Build complete — shipped.":"Build halted — nothing shipped."); break;

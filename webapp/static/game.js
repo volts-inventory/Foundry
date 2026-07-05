@@ -1303,17 +1303,19 @@ class FloorScene extends Phaser.Scene {
   }
   staffRoom(key){
     this.activeRoomKey = key;
+    // A room is "on" when it IS the active key, or the virtual "engineering" stage
+    // is on and it's a discipline room. Platform builds activate ONE discipline at
+    // a time (key = frontend/backend/data), so pool workers match on THEIR room.
     const working = (room)=> !!room && (room===key || (key==="engineering" && ENG_ROOMS.includes(room)));
     // Desks are for ACTIVE work only: whoever's stage is on goes heads-down at their
-    // own desk; everyone else waits it out in the lounge (sit / nap / mill).
+    // own desk; everyone else waits it out in the lounge.
     for (const [name,a] of this.agents){
       if (!a.seen) continue;
       if (working(AGENT_ROOM[name])) this.deskRest(a, true); else this.gotoLounge(a);
     }
-    const engActive = key === "engineering";
     for (const s of [...(this.poolGroup||[]), ...(this.techLeadGroup||[])]){
       if (!s || !s.bob) continue;
-      if (engActive) this.deskRest(s, true, true); else this.gotoLounge(s);
+      if (working(s.room)) this.deskRest(s, true, true); else this.gotoLounge(s);
     }
   }
   toLounge(){   // everyone hangs out (checkpoints / done)
@@ -1541,8 +1543,8 @@ class FloorScene extends Phaser.Scene {
         } else {
           this.pinBadge(s, tag, p.color, false);               // every IC labelled too
         }
-        s.home={x,y}; s.loungeSlot=slot++; s.seen=true; s.inLounge=false;
-        s.working = (this.activeRoomKey === "engineering");
+        s.home={x,y}; s.room=rk; s.loungeSlot=slot++; s.seen=true; s.inLounge=false;
+        s.working = (this.activeRoomKey === "engineering" || this.activeRoomKey === rk);
         this.zzzLoop(s);
         if (s.working) this.startWalk(s);
         else {                                 // not on the clock -> spawn in the lounge
@@ -1579,8 +1581,8 @@ class FloorScene extends Phaser.Scene {
       const k=poolKit(i);
       const ws=this.makeWorkstation(x, y+16, k.accent);
       const s=this.makePerson(x, y, k); s.setScale(1.4).setDepth(y).setAlpha(0.96);
-      s.home={x,y}; s.loungeSlot=12+i; s.seen=true; s.inLounge=false;
-      s.working = (this.activeRoomKey === "engineering");
+      s.home={x,y}; s.room="backend"; s.loungeSlot=12+i; s.seen=true; s.inLounge=false;
+      s.working = (this.activeRoomKey === "engineering" || this.activeRoomKey === "backend");
       this.zzzLoop(s);
       if (s.working) this.startWalk(s);
       else {                                   // not on the clock -> spawn in the lounge

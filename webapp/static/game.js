@@ -1154,7 +1154,7 @@ class FloorScene extends Phaser.Scene {
     const R = ROOMS[key];
     if (R && TEAM[key]) this.walkCTO(R.cx, R.standY);
     else if (this.lobby) this.walkCTO(this.lobby.cx, this.lobby.standY);   // gate/vault/none → office
-    this.staffRoom(key);                 // everyone stays at their own desk; active room glows
+    this.staffRoom(key);                 // active team to desks; everyone else to the lounge
   }
 
   // A worker from the just-finished phase carries the "work" package to the next

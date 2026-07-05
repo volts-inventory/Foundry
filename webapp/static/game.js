@@ -1189,21 +1189,21 @@ class FloorScene extends Phaser.Scene {
   // Every mode is STATIONARY: people walk only with purpose (stage on -> desk,
   // stage off -> lounge); nobody paces around at random.
   loungeMode(i){ return ["sit","stand","sleep","stand","sit","stand"][i % 6]; }
-  // Idle agents relax in the LOUNGE (bottom-left). Their FIXED spot depends on what
-  // they're doing: sitters by the couch (lower-left), sleepers in the nap corner
-  // (lower-right), standers spread across the upper area.
+  // Idle agents relax in the LOUNGE (bottom-left) at FIXED spots. Sleepers get the
+  // nap corner (lower-right); everyone else stands in ONE tidy lineup grid sized so
+  // the pinned name badges never overlap: wide columns plus a per-column vertical
+  // stagger (badges are wider than the people under them).
   loungeSpot(i){
     const B = cellBox(LOUNGE_CELL[0], LOUNGE_CELL[1]);
     const mode = this.loungeMode(i);
-    if (mode === "sit"){
-      const k = Math.floor(i/6);
-      return { x: B.x + 32 + (i%3)*26, y: B.y + B.h - 36 - k*16, mode };
-    }
     if (mode === "sleep"){
-      return { x: B.x + B.w - 40 - (Math.floor(i/6)%2)*22, y: B.y + B.h - 28, mode };
+      const k = Math.floor(i/6) % 3;
+      return { x: B.x + B.w - 36 - k*30, y: B.y + B.h - 24 - k*8, mode };
     }
-    const per = 4, col = i%per, row = Math.floor(i/per) % 2;
-    return { x: B.x + 30 + col*((B.w-60)/(per-1)), y: B.y + 60 + row*30, mode };
+    // j = index among NON-sleepers (slots with i%6===2 nap), so the grid has no gaps.
+    const j = i - Math.floor(i/6) - ((i%6) > 2 ? 1 : 0);
+    const col = j % 4, row = Math.floor(j/4) % 4;
+    return { x: B.x + 30 + col*64, y: B.y + 44 + row*40 + (col%2)*18, mode };
   }
   // shortest path along the "#" corridors: exit to the nearest aisle, run the aisles,
   // then step into the destination. (Within-room moves stay direct — handled in walkTo.)
@@ -1729,11 +1729,14 @@ function routeEvent(floor, ev){
         if (S.activeRoom !== ev.room) S.setActiveRoom(ev.room);
         if (ev.agent) S.agentWork(ev.agent);
       }
-      // Live node telemetry doubles as quest-log progress: on a room CHANGE, drop a
-      // line so a long real stage visibly advances between checkpoint banners.
-      if (ev.live && ev.room && F.liveRoom !== ev.room){
-        F.liveRoom = ev.room;
-        logTo(F, "hot", "▸ "+ev.room.toUpperCase()+" · at work");
+      // Live node telemetry doubles as quest-log progress: whenever the WORKER or
+      // room changes, drop a line — so a long real stage reads as a sequence of
+      // hand-offs ("▸ PRODUCT · Product Manager working") instead of silence
+      // between checkpoint banners.
+      if (ev.live && ev.room &&
+          (F.liveRoom !== ev.room || (ev.agent && F.liveAgent !== ev.agent))){
+        F.liveRoom = ev.room; F.liveAgent = ev.agent || F.liveAgent;
+        logTo(F, "hot", "▸ "+ev.room.toUpperCase()+(ev.agent ? " · "+ev.agent : "")+" working");
       }
       break;
     case "say":

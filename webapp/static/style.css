@@ -132,7 +132,14 @@ button.warn{background:#5a4a18;border-color:var(--gold);color:#fff6da}
 }
 .log-title{padding:8px 12px;border-bottom:2px solid var(--gold);color:var(--gold);
   background:rgba(255,207,82,.06);text-shadow:1px 1px 0 #0a0f1c;
-  text-transform:uppercase;font-size:12px;font-weight:bold;flex:0 0 auto}
+  text-transform:uppercase;font-size:12px;font-weight:bold;flex:0 0 auto;
+  display:flex;align-items:center;gap:8px}
+/* stream-health chip: green pulsing dot while the SSE heartbeat is fresh */
+.log-live{margin-left:auto;font-size:9px;letter-spacing:1px;color:var(--dim);
+  text-shadow:none;font-weight:normal}
+.log-live.on{color:var(--green)}
+.log-live.on::before{content:"●";margin-right:4px;animation:pulse 1.6s infinite;display:inline-block}
+.log-live.stale{color:var(--gold)}
 #log{list-style:none;margin:0;padding:8px 10px;overflow-y:auto;font-size:12px;line-height:1.5}
 #log li{padding:3px 0;border-bottom:1px dashed #1f2942;color:var(--dim);animation:pop .25s;
   overflow-wrap:anywhere;word-break:break-word}

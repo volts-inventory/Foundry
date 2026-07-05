@@ -1642,7 +1642,10 @@ async function newProject(req, mode, supervised, backend, packs, extra){
   const slots = (extra && extra.max_slots) || 1;
   const openStream = (F) => {
     const es = new EventSource("/api/stream/"+resp.id);
-    es.onmessage = e => { try { routeEvent(floor, JSON.parse(e.data)); } catch(_){} };
+    F.lastBeat = Date.now();
+    es.onmessage = e => { F.lastBeat = Date.now();
+      try { routeEvent(floor, JSON.parse(e.data)); } catch(_){} };
+    es.addEventListener("ka", ()=>{ F.lastBeat = Date.now(); updateLiveDot(); });
     es.addEventListener("end", ()=>es.close());
     F.es = es;
   };
@@ -1678,6 +1681,7 @@ function switchToFloor(floor){
   const w = document.getElementById("wipe");      // chunky Zelda-style screen wipe
   if (w){ w.classList.remove("go"); void w.offsetWidth; w.classList.add("go"); }
   ACTIVE = floor;
+  updateLiveDot();
   for (const f of FLOORS.keys()){
     const sc = GAME.scene.getScene(floorKey(f));
     if (sc && sc.sys) sc.sys.setVisible(f === floor);
@@ -1723,6 +1727,12 @@ function routeEvent(floor, ev){
       if (S){
         if (S.activeRoom !== ev.room) S.setActiveRoom(ev.room);
         if (ev.agent) S.agentWork(ev.agent);
+      }
+      // Live node telemetry doubles as quest-log progress: on a room CHANGE, drop a
+      // line so a long real stage visibly advances between checkpoint banners.
+      if (ev.live && ev.room && F.liveRoom !== ev.room){
+        F.liveRoom = ev.room;
+        logTo(F, "hot", "▸ "+ev.room.toUpperCase()+" · at work");
       }
       break;
     case "say":
@@ -1801,6 +1811,20 @@ function logClass(t){   // classify BEFORE stripping, so server emoji still tint
 // strip any emoji so the QUEST LOG is pure bitmap-font text (matches the pixel UI)
 const EMOJI_RE = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{2300}-\u{23FF}\u{2190}-\u{21FF}️]/gu;
 function deEmoji(t){ return (t==null?"":(""+t)).replace(EMOJI_RE,"").replace(/^\s+/,""); }
+// Stream-health dot in the QUEST LOG title. The server sends a named `ka`
+// heartbeat every ~15s of idle (real events count too), so "no traffic for 40s"
+// means the stream is actually down — not just a long, quiet model call.
+function updateLiveDot(){
+  const el = document.getElementById("log-live"); if (!el) return;
+  const F = FLOORS.get(ACTIVE);
+  if (!F || F.status !== "running"){ el.className="log-live"; el.textContent=""; return; }
+  const fresh = F.lastBeat && (Date.now() - F.lastBeat) < 40000;
+  el.className = "log-live " + (fresh ? "on" : "stale");
+  el.textContent = fresh ? "LIVE" : "RECONNECTING…";
+  el.title = fresh ? "Stream connected — quiet stretches are the model thinking."
+                   : "No data for 40s — check the connection / server.";
+}
+setInterval(updateLiveDot, 5000);
 function appendLogDom(cls,text){
   const ul=document.getElementById("log");
   const li=document.createElement("li"); li.className=cls; li.textContent=deEmoji(text);
@@ -2582,7 +2606,10 @@ function adoptFloor(row){
     {floor:row.floor, id:row.id, request:row.request, mode:row.mode, slots:F.slots});
   if (row.status !== "done"){          // running build: reconnect its live stream
     const es = new EventSource("/api/stream/"+row.id);
-    es.onmessage = e => { try { routeEvent(row.floor, JSON.parse(e.data)); } catch(_){} };
+    F.lastBeat = Date.now();
+    es.onmessage = e => { F.lastBeat = Date.now();
+      try { routeEvent(row.floor, JSON.parse(e.data)); } catch(_){} };
+    es.addEventListener("ka", ()=>{ F.lastBeat = Date.now(); updateLiveDot(); });
     es.addEventListener("end", ()=>es.close());
     F.es = es;
   }

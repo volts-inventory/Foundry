@@ -797,7 +797,7 @@ class FloorScene extends Phaser.Scene {
       const sc = s[(this._sf = (this._sf||0)+1) % s.length];
       if (sc) this.tweens.add({targets:sc, alpha:{from:0.6,to:0.95}, duration:150, yoyo:true});
     }});
-    this.time.addEvent({delay:2600, loop:true, callback:()=>this.mill()});  // lounge wander
+    this.time.addEvent({delay:2600, loop:true, callback:()=>this.mill()});  // idle->lounge safety sweep
   }
   blink(a){
     if (!a || !a.eyes) return;
@@ -1185,23 +1185,25 @@ class FloorScene extends Phaser.Scene {
   }
 
   // ---- movement: desks <-> lounge -----------------------------------------
-  // What each idle lead does in the lounge — a stable mix by slot: sit, nap, mill.
-  loungeMode(i){ return ["sit","wander","sleep","wander","sit","wander"][i % 6]; }
-  // Idle agents relax in the LOUNGE (bottom-left). Their spot depends on what they're
-  // doing: sitters by the couch (lower-left), sleepers in the nap corner (lower-right),
-  // wanderers loosely spread up top (mill() nudges them around).
+  // What each idle lead does in the lounge — a stable mix by slot: sit, stand, nap.
+  // Every mode is STATIONARY: people walk only with purpose (stage on -> desk,
+  // stage off -> lounge); nobody paces around at random.
+  loungeMode(i){ return ["sit","stand","sleep","stand","sit","stand"][i % 6]; }
+  // Idle agents relax in the LOUNGE (bottom-left) at FIXED spots. Sleepers get the
+  // nap corner (lower-right); everyone else stands in ONE tidy lineup grid sized so
+  // the pinned name badges never overlap: wide columns plus a per-column vertical
+  // stagger (badges are wider than the people under them).
   loungeSpot(i){
     const B = cellBox(LOUNGE_CELL[0], LOUNGE_CELL[1]);
     const mode = this.loungeMode(i);
-    if (mode === "sit"){
-      const k = Math.floor(i/6);
-      return { x: B.x + 32 + (i%3)*26, y: B.y + B.h - 36 - k*16, mode };
-    }
     if (mode === "sleep"){
-      return { x: B.x + B.w - 40 - (Math.floor(i/6)%2)*22, y: B.y + B.h - 28, mode };
+      const k = Math.floor(i/6) % 3;
+      return { x: B.x + B.w - 36 - k*30, y: B.y + B.h - 24 - k*8, mode };
     }
-    const per = 4, col = i%per, row = Math.floor(i/per) % 2;
-    return { x: B.x + 30 + col*((B.w-60)/(per-1)), y: B.y + 60 + row*30, mode };
+    // j = index among NON-sleepers (slots with i%6===2 nap), so the grid has no gaps.
+    const j = i - Math.floor(i/6) - ((i%6) > 2 ? 1 : 0);
+    const col = j % 4, row = Math.floor(j/4) % 4;
+    return { x: B.x + 30 + col*64, y: B.y + 44 + row*40 + (col%2)*18, mode };
   }
   // shortest path along the "#" corridors: exit to the nearest aisle, run the aisles,
   // then step into the destination. (Within-room moves stay direct — handled in walkTo.)
@@ -1244,8 +1246,9 @@ class FloorScene extends Phaser.Scene {
   gotoLounge(a){ if (!a || !a.seen) return; a.inLounge = true; a.working = false;
     if (a.faceFront) a.faceFront(); this.stopDeskIdle(a);
     const s = this.loungeSpot(a.loungeSlot||0);
-    this.walkTo(a, s.x + (Math.random()*10-5), s.y, ()=> this.loungeArrive(a, s.mode)); }
-  // Once parked in the lounge, do something: nap (with Zzz), sit and breathe, or mill.
+    this.walkTo(a, s.x, s.y, ()=> this.loungeArrive(a, s.mode)); }
+  // Once parked in the lounge, settle IN PLACE: nap (with Zzz) or sit/stand and
+  // breathe. Nobody moves again until their stage calls them back to a desk.
   loungeArrive(a, mode){
     if (!a || !a.inLounge) return;
     this.clearLounge(a);
@@ -1253,7 +1256,7 @@ class FloorScene extends Phaser.Scene {
     if (mode === "sleep"){ if (a.faceFront) a.faceFront(); this.zzzLoop(a);
       a.napTween = this.tweens.add({targets:a.bob, y:{from:0,to:-1.5}, duration:2200,
         yoyo:true, repeat:-1, ease:"Sine.inOut"}); }
-    else if (mode === "sit"){ if (a.faceFront) a.faceFront(); this.deskIdle(a); }
+    else { if (a.faceFront) a.faceFront(); this.deskIdle(a); }
   }
   // Is this person at rest RIGHT NOW (so a Zzz should float up)? — ONLY when napping
   // in the lounge. Desks are for active work; nobody sleeps at their workstation.
@@ -1300,17 +1303,19 @@ class FloorScene extends Phaser.Scene {
   }
   staffRoom(key){
     this.activeRoomKey = key;
+    // A room is "on" when it IS the active key, or the virtual "engineering" stage
+    // is on and it's a discipline room. Platform builds activate ONE discipline at
+    // a time (key = frontend/backend/data), so pool workers match on THEIR room.
     const working = (room)=> !!room && (room===key || (key==="engineering" && ENG_ROOMS.includes(room)));
     // Desks are for ACTIVE work only: whoever's stage is on goes heads-down at their
-    // own desk; everyone else waits it out in the lounge (sit / nap / mill).
+    // own desk; everyone else waits it out in the lounge.
     for (const [name,a] of this.agents){
       if (!a.seen) continue;
       if (working(AGENT_ROOM[name])) this.deskRest(a, true); else this.gotoLounge(a);
     }
-    const engActive = key === "engineering";
     for (const s of [...(this.poolGroup||[]), ...(this.techLeadGroup||[])]){
       if (!s || !s.bob) continue;
-      if (engActive) this.deskRest(s, true, true); else this.gotoLounge(s);
+      if (working(s.room)) this.deskRest(s, true, true); else this.gotoLounge(s);
     }
   }
   toLounge(){   // everyone hangs out (checkpoints / done)
@@ -1318,17 +1323,13 @@ class FloorScene extends Phaser.Scene {
     for (const s of [...(this.poolGroup||[]), ...(this.techLeadGroup||[])])
       if (s && s.bob) this.gotoLounge(s);
   }
-  mill(){       // gentle wander for the lounge "wander" folks (sitters/sleepers stay put)
-    const B = cellBox(LOUNGE_CELL[0], LOUNGE_CELL[1]);
-    const move = (a)=>{ if (a && a.seen && a.inLounge && a.loungeBusy === "wander"
-        && !a.moveTween?.isPlaying() && Math.random()<0.5){
-      this.walkTo(a, B.x+26+Math.random()*(B.w-52), B.y+58+Math.random()*(B.h-86)); } };
-    // Safety net: anyone idle who somehow ended up at a desk heads to the lounge —
-    // desks are only ever occupied by people actively working their stage.
+  mill(){   // NO idle wandering — this sweep is only the desk->lounge safety net:
+    // anyone idle who somehow ended up at a desk walks to the lounge, so desks
+    // are only ever occupied by people actively working their stage.
     const drift = (a)=>{ if (!a || !a.seen || (a.moveTween && a.moveTween.isPlaying())) return;
       if (!a.inLounge && !a.working) this.gotoLounge(a); };
-    for (const [,a] of this.agents){ move(a); drift(a); }
-    for (const s of [...(this.poolGroup||[]), ...(this.techLeadGroup||[])]){ move(s); drift(s); }
+    for (const [,a] of this.agents) drift(a);
+    for (const s of [...(this.poolGroup||[]), ...(this.techLeadGroup||[])]) drift(s);
   }
 
   walkCTO(tx, ty){   // routes along the corridors like everyone else
@@ -1542,8 +1543,8 @@ class FloorScene extends Phaser.Scene {
         } else {
           this.pinBadge(s, tag, p.color, false);               // every IC labelled too
         }
-        s.home={x,y}; s.loungeSlot=slot++; s.seen=true; s.inLounge=false;
-        s.working = (this.activeRoomKey === "engineering");
+        s.home={x,y}; s.room=rk; s.loungeSlot=slot++; s.seen=true; s.inLounge=false;
+        s.working = (this.activeRoomKey === "engineering" || this.activeRoomKey === rk);
         this.zzzLoop(s);
         if (s.working) this.startWalk(s);
         else {                                 // not on the clock -> spawn in the lounge
@@ -1580,8 +1581,8 @@ class FloorScene extends Phaser.Scene {
       const k=poolKit(i);
       const ws=this.makeWorkstation(x, y+16, k.accent);
       const s=this.makePerson(x, y, k); s.setScale(1.4).setDepth(y).setAlpha(0.96);
-      s.home={x,y}; s.loungeSlot=12+i; s.seen=true; s.inLounge=false;
-      s.working = (this.activeRoomKey === "engineering");
+      s.home={x,y}; s.room="backend"; s.loungeSlot=12+i; s.seen=true; s.inLounge=false;
+      s.working = (this.activeRoomKey === "engineering" || this.activeRoomKey === "backend");
       this.zzzLoop(s);
       if (s.working) this.startWalk(s);
       else {                                   // not on the clock -> spawn in the lounge
@@ -1642,7 +1643,10 @@ async function newProject(req, mode, supervised, backend, packs, extra){
   const slots = (extra && extra.max_slots) || 1;
   const openStream = (F) => {
     const es = new EventSource("/api/stream/"+resp.id);
-    es.onmessage = e => { try { routeEvent(floor, JSON.parse(e.data)); } catch(_){} };
+    F.lastBeat = Date.now();
+    es.onmessage = e => { F.lastBeat = Date.now();
+      try { routeEvent(floor, JSON.parse(e.data)); } catch(_){} };
+    es.addEventListener("ka", ()=>{ F.lastBeat = Date.now(); updateLiveDot(); });
     es.addEventListener("end", ()=>es.close());
     F.es = es;
   };
@@ -1678,6 +1682,7 @@ function switchToFloor(floor){
   const w = document.getElementById("wipe");      // chunky Zelda-style screen wipe
   if (w){ w.classList.remove("go"); void w.offsetWidth; w.classList.add("go"); }
   ACTIVE = floor;
+  updateLiveDot();
   for (const f of FLOORS.keys()){
     const sc = GAME.scene.getScene(floorKey(f));
     if (sc && sc.sys) sc.sys.setVisible(f === floor);
@@ -1723,6 +1728,15 @@ function routeEvent(floor, ev){
       if (S){
         if (S.activeRoom !== ev.room) S.setActiveRoom(ev.room);
         if (ev.agent) S.agentWork(ev.agent);
+      }
+      // Live node telemetry doubles as quest-log progress: whenever the WORKER or
+      // room changes, drop a line — so a long real stage reads as a sequence of
+      // hand-offs ("▸ PRODUCT · Product Manager working") instead of silence
+      // between checkpoint banners.
+      if (ev.live && ev.room &&
+          (F.liveRoom !== ev.room || (ev.agent && F.liveAgent !== ev.agent))){
+        F.liveRoom = ev.room; F.liveAgent = ev.agent || F.liveAgent;
+        logTo(F, "hot", "▸ "+ev.room.toUpperCase()+(ev.agent ? " · "+ev.agent : "")+" working");
       }
       break;
     case "say":
@@ -1801,6 +1815,20 @@ function logClass(t){   // classify BEFORE stripping, so server emoji still tint
 // strip any emoji so the QUEST LOG is pure bitmap-font text (matches the pixel UI)
 const EMOJI_RE = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{2300}-\u{23FF}\u{2190}-\u{21FF}️]/gu;
 function deEmoji(t){ return (t==null?"":(""+t)).replace(EMOJI_RE,"").replace(/^\s+/,""); }
+// Stream-health dot in the QUEST LOG title. The server sends a named `ka`
+// heartbeat every ~15s of idle (real events count too), so "no traffic for 40s"
+// means the stream is actually down — not just a long, quiet model call.
+function updateLiveDot(){
+  const el = document.getElementById("log-live"); if (!el) return;
+  const F = FLOORS.get(ACTIVE);
+  if (!F || F.status !== "running"){ el.className="log-live"; el.textContent=""; return; }
+  const fresh = F.lastBeat && (Date.now() - F.lastBeat) < 40000;
+  el.className = "log-live " + (fresh ? "on" : "stale");
+  el.textContent = fresh ? "LIVE" : "RECONNECTING…";
+  el.title = fresh ? "Stream connected — quiet stretches are the model thinking."
+                   : "No data for 40s — check the connection / server.";
+}
+setInterval(updateLiveDot, 5000);
 function appendLogDom(cls,text){
   const ul=document.getElementById("log");
   const li=document.createElement("li"); li.className=cls; li.textContent=deEmoji(text);
@@ -2582,7 +2610,10 @@ function adoptFloor(row){
     {floor:row.floor, id:row.id, request:row.request, mode:row.mode, slots:F.slots});
   if (row.status !== "done"){          // running build: reconnect its live stream
     const es = new EventSource("/api/stream/"+row.id);
-    es.onmessage = e => { try { routeEvent(row.floor, JSON.parse(e.data)); } catch(_){} };
+    F.lastBeat = Date.now();
+    es.onmessage = e => { F.lastBeat = Date.now();
+      try { routeEvent(row.floor, JSON.parse(e.data)); } catch(_){} };
+    es.addEventListener("ka", ()=>{ F.lastBeat = Date.now(); updateLiveDot(); });
     es.addEventListener("end", ()=>es.close());
     F.es = es;
   }

@@ -32,7 +32,7 @@
       <div id="game"></div>
       <div id="wipe" aria-hidden="true"></div>
       <aside id="log-panel">
-        <div class="log-title">QUEST LOG</div>
+        <div class="log-title">QUEST LOG <span id="log-live" class="log-live"></span></div>
         <ul id="log"></ul>
       </aside>
     </main>
@@ -48,7 +48,7 @@
           <option value="mock">mock — deterministic, offline (no key)</option>
           <option value="anthropic">anthropic — Claude API (ANTHROPIC_API_KEY)</option>
           <option value="openai">openai — OpenAI API (OPENAI_API_KEY)</option>
-          <option value="claude-cli">claude-cli — claude -p (Max subscription)</option>
+          <option value="claude-cli" selected>claude-cli — claude -p (Max subscription)</option>
           <option value="codex">codex — codex CLI (OPENAI_API_KEY)</option>
           <option value="ollama-gemma">ollama-gemma — local Ollama endpoint</option>
         </select>
@@ -58,19 +58,27 @@
       <select id="startfrom-select"><option value="">✦ Fresh build</option></select>
       <label id="req-label">What should the factory build? <span class="hint">— a sentence, or a full brief</span></label>
       <textarea id="req-input" rows="3"
-        placeholder="e.g. a URL shortener with custom slugs, link expiry, and per-IP abuse rate-limiting">build a tiny URL-shortener service</textarea>
+        placeholder="e.g. a URL shortener with custom slugs, link expiry, and per-IP abuse rate-limiting">a complete stardew-style farming game about colonizing the moon, pygame</textarea>
 
       <label>How do you want to feed the spec? <span class="hint">— the request alone is enough; these add detail</span></label>
       <div class="intake-modes" id="intake-modes">
-        <label><input type="radio" name="intake" value="idea" checked /> Idea only</label>
-        <label><input type="radio" name="intake" value="spec" /> Paste spec</label>
+        <label><input type="radio" name="intake" value="idea" /> Idea only</label>
+        <label><input type="radio" name="intake" value="spec" checked /> Paste spec</label>
         <label><input type="radio" name="intake" value="zip" /> Upload .zip</label>
         <label><input type="radio" name="intake" value="chat" /> Work it out with the leads</label>
       </div>
-      <div class="intake-panel hidden" data-mode="spec">
+      <div class="intake-panel" data-mode="spec">
         <label>Full spec (markdown / text) — grounds the PRD</label>
         <textarea id="spec-text" rows="7"
-          placeholder="# Spec&#10;&#10;Goals, constraints, interfaces, acceptance criteria…"></textarea>
+          placeholder="# Spec&#10;&#10;Goals, constraints, interfaces, acceptance criteria…">A complete stardew-valley-style 2D farming/life sim in pygame, set on the moon.
+Must include: tile-based moon surface with a scrolling camera; day/night + sol
+cycle; player movement and tool use; tilling, planting, watering, and harvesting
+at least 6 crop types with growth stages; oxygen/energy management; a colony hub
+with at least 4 NPCs with daily schedules and dialog; an economy (sell crops,
+buy seeds/upgrades at a store); base-building (place/upgrade modules);
+save/load with 3 slots; a title screen, pause menu, and controls screen;
+sound hooks (procedural or silent-safe); keyboard controls documented in-game.
+Code-drawn graphics (shapes/procedural tiles) are fine — no external assets.</textarea>
       </div>
       <div class="intake-panel hidden" data-mode="zip">
         <label>Zip of <code>.md</code> / <code>.txt</code> docs — read as the spec</label>
@@ -104,18 +112,18 @@
         </select>
       </div>
       <label>Worker pool <span class="hint">— max parallel IC workers (blank = automatic)</span></label>
-      <input id="extra-workers" type="number" min="1" max="32" placeholder="auto" />
+      <input id="extra-workers" type="number" min="1" max="32" placeholder="auto" value="4" />
       <p class="hint" id="parallel-note">The ceiling on how many implementation workers run
         at once — the leads share this pool by demand. Effective parallelism is
         min(tasks created, this cap); each discipline still gets at least one.</p>
       <label>Auto-fix attempts <span class="hint">— fix-forward retries until green (default 5)</span></label>
-      <input id="fix-input" type="number" min="0" max="20" value="5" />
+      <input id="fix-input" type="number" min="0" max="20" value="8" />
       <label>Cost cap (USD) <span class="hint">— max model spend (metered API backends only)</span></label>
       <input id="cap-input" type="number" min="0" step="0.01" placeholder="no cap" />
       <label>Autopilot <span class="hint">— self-iterations after a green build (0 = off): a Director proposes, a software/usability panel votes, the winner builds next</span></label>
-      <input id="autopilot-input" type="number" min="0" max="20" value="0" />
+      <input id="autopilot-input" type="number" min="0" max="20" value="5" />
       <label>Domain packs (optional, comma-separated)</label>
-      <input id="packs-input" type="text" placeholder="regulated, ml_data, frontend, game, crypto, infra" />
+      <input id="packs-input" type="text" placeholder="regulated, ml_data, frontend, game, crypto, infra" value="game" />
       <label class="check"><input type="checkbox" id="supervised" checked /> Supervised (CTO approves each checkpoint)</label>
       <p class="hint" id="supervised-hint"></p>
       <p class="hint">A multi-service request (e.g. a site with users + posts) is auto-built as a PLATFORM — split into web / backend / data services (the backend owns the REST API, auth &amp; domain logic), each auto-deepened, then stitched into one monorepo. A single thing builds as one service.</p>

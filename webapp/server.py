@@ -851,6 +851,16 @@ def _run_factory(p: Project, resume: bool = False) -> None:
               backend=p.backend, slots=p.max_slots)
         _emit(p, type="narrate", text=f"📋 New project on Floor {p.floor}: {p.request!r}")
         _emit(p, type="narrate", text=f"🏭 Mode: {p.mode}. The crew reports for duty…")
+        if p.backend != "mock":
+            # Real backends: the first graph node is one long model call, and node
+            # telemetry only streams as nodes COMPLETE — warn that the quiet is normal.
+            _emit(p, type="narrate",
+                  text="🧠 Drafting has begun — real model calls can be quiet for "
+                       "several minutes; rooms light up as each step lands.")
+    # The build ALWAYS opens with product/intake work, but live node telemetry only
+    # fires as nodes COMPLETE — seat the product team NOW so the floor shows the
+    # work already grinding instead of an all-lounge office.
+    _emit(p, type="active", room="product", agent="", live=True)
     time.sleep(_PACE)
 
     def responder(payload: dict[str, Any]) -> str:
@@ -910,6 +920,35 @@ def _run_factory(p: Project, resume: bool = False) -> None:
             tempfile.TemporaryDirectory(prefix="foundry-base-")))
         if _materialize_base_dir(p.parent_id, scratch):
             base_dir = str(scratch)
+    # Quiet-watchdog: on a REAL backend, if no event lands for a long stretch (and
+    # we're not paused at a checkpoint), say so in the quest log — otherwise a hung
+    # CLI (auth prompt, wall-clock cap + silent retries) looks identical to a long
+    # model call and the viewer just sees the crew loafing in the lounge.
+    wd_stop = threading.Event()
+
+    def _quiet_watchdog() -> None:
+        quiet_min = 0
+        last_len = len(p.log)
+        while not wd_stop.wait(60):
+            if p.ended:
+                return
+            if len(p.log) != last_len:
+                last_len, quiet_min = len(p.log), 0
+                continue
+            if p.awaiting:            # checkpoint pause: quiet is expected
+                continue
+            quiet_min += 1
+            if quiet_min in (5, 15, 30):
+                _emit(p, type="narrate",
+                      text=f"⏳ No step has finished in {quiet_min} min. Long "
+                           "thinking is normal, but if this keeps up check the "
+                           "server terminal — and that the backend CLI answers "
+                           "(e.g. `claude -p \"hi\"`) on the host.")
+                last_len = len(p.log)
+
+    if p.backend != "mock":
+        threading.Thread(target=_quiet_watchdog, daemon=True,
+                         name=f"quiet-watchdog-{p.id}").start()
     try:
         try:
             result = run(
@@ -931,6 +970,7 @@ def _run_factory(p: Project, resume: bool = False) -> None:
                 output_dir=str(code_dir) if code_dir else None,
             )
         finally:
+            wd_stop.set()
             base_stack.close()  # run() copies base_dir into its sandbox synchronously
     except Exception as exc:
         _emit(p, type="narrate", text=f"💥 Build error: {exc}")
@@ -2090,7 +2130,10 @@ class Handler(BaseHTTPRequestHandler):
                         self.wfile.write(b"event: end\ndata: {}\n\n")
                         self.wfile.flush()
                         return
-                    self.wfile.write(b": keep-alive\n\n")  # comment frame
+                    # Named event (not a comment frame) so the CLIENT can see the
+                    # heartbeat too and show a live/stalled indicator. No `id:` —
+                    # it must not advance the Last-Event-ID resume cursor.
+                    self.wfile.write(b"event: ka\ndata: {}\n\n")
                     self.wfile.flush()
                     continue
                 for idx, ev in enumerate(batch, start=cursor):

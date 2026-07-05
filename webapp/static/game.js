@@ -797,7 +797,7 @@ class FloorScene extends Phaser.Scene {
       const sc = s[(this._sf = (this._sf||0)+1) % s.length];
       if (sc) this.tweens.add({targets:sc, alpha:{from:0.6,to:0.95}, duration:150, yoyo:true});
     }});
-    this.time.addEvent({delay:2600, loop:true, callback:()=>this.mill()});  // lounge wander
+    this.time.addEvent({delay:2600, loop:true, callback:()=>this.mill()});  // idle->lounge safety sweep
   }
   blink(a){
     if (!a || !a.eyes) return;
@@ -1185,11 +1185,13 @@ class FloorScene extends Phaser.Scene {
   }
 
   // ---- movement: desks <-> lounge -----------------------------------------
-  // What each idle lead does in the lounge — a stable mix by slot: sit, nap, mill.
-  loungeMode(i){ return ["sit","wander","sleep","wander","sit","wander"][i % 6]; }
-  // Idle agents relax in the LOUNGE (bottom-left). Their spot depends on what they're
-  // doing: sitters by the couch (lower-left), sleepers in the nap corner (lower-right),
-  // wanderers loosely spread up top (mill() nudges them around).
+  // What each idle lead does in the lounge — a stable mix by slot: sit, stand, nap.
+  // Every mode is STATIONARY: people walk only with purpose (stage on -> desk,
+  // stage off -> lounge); nobody paces around at random.
+  loungeMode(i){ return ["sit","stand","sleep","stand","sit","stand"][i % 6]; }
+  // Idle agents relax in the LOUNGE (bottom-left). Their FIXED spot depends on what
+  // they're doing: sitters by the couch (lower-left), sleepers in the nap corner
+  // (lower-right), standers spread across the upper area.
   loungeSpot(i){
     const B = cellBox(LOUNGE_CELL[0], LOUNGE_CELL[1]);
     const mode = this.loungeMode(i);
@@ -1244,8 +1246,9 @@ class FloorScene extends Phaser.Scene {
   gotoLounge(a){ if (!a || !a.seen) return; a.inLounge = true; a.working = false;
     if (a.faceFront) a.faceFront(); this.stopDeskIdle(a);
     const s = this.loungeSpot(a.loungeSlot||0);
-    this.walkTo(a, s.x + (Math.random()*10-5), s.y, ()=> this.loungeArrive(a, s.mode)); }
-  // Once parked in the lounge, do something: nap (with Zzz), sit and breathe, or mill.
+    this.walkTo(a, s.x, s.y, ()=> this.loungeArrive(a, s.mode)); }
+  // Once parked in the lounge, settle IN PLACE: nap (with Zzz) or sit/stand and
+  // breathe. Nobody moves again until their stage calls them back to a desk.
   loungeArrive(a, mode){
     if (!a || !a.inLounge) return;
     this.clearLounge(a);
@@ -1253,7 +1256,7 @@ class FloorScene extends Phaser.Scene {
     if (mode === "sleep"){ if (a.faceFront) a.faceFront(); this.zzzLoop(a);
       a.napTween = this.tweens.add({targets:a.bob, y:{from:0,to:-1.5}, duration:2200,
         yoyo:true, repeat:-1, ease:"Sine.inOut"}); }
-    else if (mode === "sit"){ if (a.faceFront) a.faceFront(); this.deskIdle(a); }
+    else { if (a.faceFront) a.faceFront(); this.deskIdle(a); }
   }
   // Is this person at rest RIGHT NOW (so a Zzz should float up)? — ONLY when napping
   // in the lounge. Desks are for active work; nobody sleeps at their workstation.
@@ -1318,17 +1321,13 @@ class FloorScene extends Phaser.Scene {
     for (const s of [...(this.poolGroup||[]), ...(this.techLeadGroup||[])])
       if (s && s.bob) this.gotoLounge(s);
   }
-  mill(){       // gentle wander for the lounge "wander" folks (sitters/sleepers stay put)
-    const B = cellBox(LOUNGE_CELL[0], LOUNGE_CELL[1]);
-    const move = (a)=>{ if (a && a.seen && a.inLounge && a.loungeBusy === "wander"
-        && !a.moveTween?.isPlaying() && Math.random()<0.5){
-      this.walkTo(a, B.x+26+Math.random()*(B.w-52), B.y+58+Math.random()*(B.h-86)); } };
-    // Safety net: anyone idle who somehow ended up at a desk heads to the lounge —
-    // desks are only ever occupied by people actively working their stage.
+  mill(){   // NO idle wandering — this sweep is only the desk->lounge safety net:
+    // anyone idle who somehow ended up at a desk walks to the lounge, so desks
+    // are only ever occupied by people actively working their stage.
     const drift = (a)=>{ if (!a || !a.seen || (a.moveTween && a.moveTween.isPlaying())) return;
       if (!a.inLounge && !a.working) this.gotoLounge(a); };
-    for (const [,a] of this.agents){ move(a); drift(a); }
-    for (const s of [...(this.poolGroup||[]), ...(this.techLeadGroup||[])]){ move(s); drift(s); }
+    for (const [,a] of this.agents) drift(a);
+    for (const s of [...(this.poolGroup||[]), ...(this.techLeadGroup||[])]) drift(s);
   }
 
   walkCTO(tx, ty){   // routes along the corridors like everyone else

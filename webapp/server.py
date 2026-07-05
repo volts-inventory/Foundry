@@ -857,6 +857,10 @@ def _run_factory(p: Project, resume: bool = False) -> None:
             _emit(p, type="narrate",
                   text="🧠 Drafting has begun — real model calls can be quiet for "
                        "several minutes; rooms light up as each step lands.")
+    # The build ALWAYS opens with product/intake work, but live node telemetry only
+    # fires as nodes COMPLETE — seat the product team NOW so the floor shows the
+    # work already grinding instead of an all-lounge office.
+    _emit(p, type="active", room="product", agent="", live=True)
     time.sleep(_PACE)
 
     def responder(payload: dict[str, Any]) -> str:

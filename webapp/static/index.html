@@ -103,6 +103,20 @@ Code-drawn graphics (shapes/procedural tiles) are fine — no external assets.</
         </select>
       </div>
       <div class="row">
+        <label>Build as</label>
+        <select id="build-select">
+          <option value="milestones" selected>milestone ladder — releasable increments (best for big specs)</option>
+          <option value="single">single build — the whole spec at once</option>
+        </select>
+      </div>
+      <div id="milestones-opts">
+        <label>Max milestones <span class="hint">— ladder length cap; the planner may use fewer</span></label>
+        <input id="max-milestones" type="number" min="1" max="12" value="10" />
+        <label>Explicit ladder <span class="hint">— optional, one milestone per line; blank = the model plans it</span></label>
+        <textarea id="milestones-text" rows="3"
+          placeholder="engine loop + player movement&#10;tilemap world + camera&#10;farming (6 crops, growth stages)"></textarea>
+      </div>
+      <div class="row">
         <label>Coding substrate</label>
         <select id="adapter-select">
           <option value="stub">stub — deterministic no-op (smoke/demo)</option>

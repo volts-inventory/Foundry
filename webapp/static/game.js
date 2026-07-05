@@ -1641,15 +1641,7 @@ async function newProject(req, mode, supervised, backend, packs, extra){
   const floor = resp.floor;
   const release = resp.release || 1;
   const slots = (extra && extra.max_slots) || 1;
-  const openStream = (F) => {
-    const es = new EventSource("/api/stream/"+resp.id);
-    F.lastBeat = Date.now();
-    es.onmessage = e => { F.lastBeat = Date.now();
-      try { routeEvent(floor, JSON.parse(e.data)); } catch(_){} };
-    es.addEventListener("ka", ()=>{ F.lastBeat = Date.now(); updateLiveDot(); });
-    es.addEventListener("end", ()=>es.close());
-    F.es = es;
-  };
+  const openStream = (F) => openFloorStream(F);
   const existing = FLOORS.get(floor);
   if (existing){
     // NEW RELEASE on an existing project: reset per-release state + replay the scene.
@@ -2446,6 +2438,18 @@ document.getElementById("start-btn").onclick=async ()=>{
   if(Number.isFinite(mpar) && mpar>=1) extra.max_parallel=mpar;
   const mss=parseInt((document.getElementById("max-slots-svc")||{}).value,10);
   if(Number.isFinite(mss) && mss>=1) extra.max_slots_per_service=mss;
+  // Milestone ladder: plan-and-chain releasable increments (one release per rung).
+  // Iterating on a finished build stays a single release, so the ladder select
+  // only applies to fresh builds.
+  { const bs=document.getElementById("build-select");
+    if(bs && bs.value==="milestones" && !startFromSel.value){
+      extra.build="milestones";
+      const mm=parseInt((document.getElementById("max-milestones")||{}).value,10);
+      extra.max_milestones=(Number.isFinite(mm)&&mm>=1)?Math.min(mm,12):10;
+      const lines=(document.getElementById("milestones-text").value||"")
+        .split("\n").map(s=>s.trim()).filter(Boolean);
+      if(lines.length) extra.milestones=lines;
+    } }
   const intake=intakeMode();
   if(startFromSel.value && !req.trim()){ alert("Describe what to change or add."); return; }
   if(intake==="spec"){
@@ -2468,6 +2472,9 @@ document.getElementById("start-btn").onclick=async ()=>{
 };
 document.getElementById("req-input").addEventListener("input", updateSlotHint);
 document.getElementById("packs-input").addEventListener("input", updateSlotHint);
+// Build-as select: the milestone options only make sense for the ladder.
+{ const bs=document.getElementById("build-select"), mo=document.getElementById("milestones-opts");
+  if(bs && mo) bs.addEventListener("change", ()=>mo.classList.toggle("hidden", bs.value!=="milestones")); }
 document.getElementById("chat-send").onclick=sendChat;
 document.getElementById("chat-msg").addEventListener("keydown",(e)=>{ if(e.key==="Enter"){ e.preventDefault(); sendChat(); }});
 document.getElementById("cp-approve").onclick=()=>sendDecision("approve");
@@ -2609,13 +2616,51 @@ function adoptFloor(row){
   GAME.scene.add(floorKey(row.floor), FloorScene, true,
     {floor:row.floor, id:row.id, request:row.request, mode:row.mode, slots:F.slots});
   if (row.status !== "done"){          // running build: reconnect its live stream
-    const es = new EventSource("/api/stream/"+row.id);
-    F.lastBeat = Date.now();
-    es.onmessage = e => { F.lastBeat = Date.now();
-      try { routeEvent(row.floor, JSON.parse(e.data)); } catch(_){} };
-    es.addEventListener("ka", ()=>{ F.lastBeat = Date.now(); updateLiveDot(); });
-    es.addEventListener("end", ()=>es.close());
-    F.es = es;
+    openFloorStream(F);
+  }
+}
+// ONE live stream per floor, shared by every path (new build / rehydrate / next
+// release). When the stream ENDS, the server may immediately spawn the floor's
+// NEXT release (a milestone-ladder rung or an autopilot iteration) — follow along
+// by briefly polling for a newer release and adopting it in place, so an open tab
+// streams a whole overnight ladder without a refresh.
+function openFloorStream(F){
+  const es = new EventSource("/api/stream/"+F.id);
+  F.lastBeat = Date.now();
+  es.onmessage = e => { F.lastBeat = Date.now();
+    try { routeEvent(F.floor, JSON.parse(e.data)); } catch(_){} };
+  es.addEventListener("ka", ()=>{ F.lastBeat = Date.now(); updateLiveDot(); });
+  es.addEventListener("end", ()=>{ es.close(); adoptNextRelease(F); });
+  F.es = es;
+}
+async function adoptNextRelease(F){
+  // Poll for ~5 minutes (autopilot's Director/panel deliberation can take a while
+  // on a real backend; a ladder rung spawns in seconds), then give up quietly.
+  for (let tries = 0; tries < 60; tries++){
+    await new Promise(r=>setTimeout(r, 5000));
+    let rows;
+    try { rows = (await fetch("/api/projects").then(r=>r.json())).projects; }
+    catch(_){ continue; }
+    const row = (rows||[]).find(r=>r.floor===F.floor);
+    if (!row || row.id === F.id){
+      if (row && row.status === "done") return;   // floor truly finished
+      continue;
+    }
+    // A fresh release took over the floor: reset per-release state and reconnect
+    // (the same shape newProject's iterate path uses).
+    if (F.es){ try{ F.es.close(); }catch(_){} }
+    Object.assign(F, {
+      id:row.id, release:row.release||F.release+1, releases:(F.releases||1)+1,
+      request:row.request, log:[], gates:{}, org:null, cp:null, awaiting:false,
+      status:"running", passed:false, journal:[], seenUris:new Set(),
+      liveRoom:null, liveAgent:null,
+    });
+    const sc = GAME.scene.getScene(floorKey(F.floor));
+    if (sc) sc.scene.restart({floor:F.floor, id:row.id, request:row.request, mode:row.mode, slots:F.slots});
+    renderElevator();
+    if (F.floor === ACTIVE) updateHud(F);
+    openFloorStream(F);
+    return;
   }
 }
 async function rehydrate(){

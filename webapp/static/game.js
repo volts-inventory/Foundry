@@ -2593,12 +2593,21 @@ function syncMode(){
     sup.checked = false;
     sup.disabled = true;
     if(hint) hint.textContent = "Autonomous is hands-off — admission is the sole release gate; no checkpoint approvals.";
+    // Some packs VETO hands-off release (game: the class-5 playability gate needs
+    // a human; regulated: compliance sign-off). Warn HERE instead of letting the
+    // server refuse the build with a cryptic mode-veto error.
+    const packs=(document.getElementById("packs-input").value||"").toLowerCase();
+    const veto=["game","regulated"].filter(pk=>packs.includes(pk));
+    if(hint && veto.length)
+      hint.textContent = "⚠ The "+veto.join(" + ")+" pack(s) VETO autonomous (their sign-offs "
+        + "need a human) — the build will refuse to start. Switch to gated, or clear the pack.";
   } else {
     sup.disabled = false;
     if(hint) hint.textContent = "Gated — the CTO approves the Design & Release checkpoints right here in the floor screen (no Git merge).";
   }
 }
 document.getElementById("mode-select").addEventListener("change", syncMode);
+document.getElementById("packs-input").addEventListener("input", syncMode);
 syncMode();
 
 // Rehydrate on (re)load: floors run server-side independently of this tab, so a

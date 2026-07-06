@@ -125,6 +125,15 @@ Code-drawn graphics (shapes/procedural tiles) are fine — no external assets.</
           <option value="proxy-agent">proxy-agent — agentic loop through the proxy (any backend, key stays outside)</option>
         </select>
       </div>
+      <div class="row">
+        <label>Stack</label>
+        <select id="profile-select">
+          <option value="auto" selected>auto — infer language/gates from the request</option>
+        </select>
+      </div>
+      <p class="hint">The stack pins the verification gates (build/test/smoke commands).
+        Non-Python stacks need their toolchain installed on the server — a missing
+        toolchain fails the gate loudly, it never fakes a pass.</p>
       <label>Worker pool <span class="hint">— max parallel IC workers (blank = automatic)</span></label>
       <input id="extra-workers" type="number" min="1" max="32" placeholder="auto" value="4" />
       <p class="hint" id="parallel-note">The ceiling on how many implementation workers run

@@ -107,6 +107,49 @@ PROFILES: dict[str, VerificationProfile] = {
             "modes, or KDFs; no ECB; no static IVs/nonces."
         ),
     ),
+    "go": VerificationProfile(
+        name="go",
+        build_cmd=_sh("go vet ./... && go build ./..."),
+        test_cmd=_sh("go test ./..."),
+        contract_text=(
+            "GATES: build = `go vet ./... && go build ./...`; test = `go test "
+            "./...` — a go.mod MUST exist at the repo root and >=1 test must pass."
+        ),
+        notes=("requires the go toolchain on the host; missing => ERROR, never PASS",),
+    ),
+    "rust": VerificationProfile(
+        name="rust",
+        build_cmd=_sh("cargo build --quiet"),
+        test_cmd=_sh("cargo test --quiet"),
+        contract_text=(
+            "GATES: build = `cargo build`; test = `cargo test` — a Cargo.toml MUST "
+            "exist at the repo root and >=1 test must pass."
+        ),
+        notes=("requires cargo on the host; missing => ERROR, never PASS",),
+    ),
+    "dotnet": VerificationProfile(
+        name="dotnet",
+        build_cmd=_sh("dotnet build --nologo -v q"),
+        test_cmd=_sh("dotnet test --nologo -v q"),
+        contract_text=(
+            "GATES: build = `dotnet build`; test = `dotnet test` — a .sln or "
+            ".csproj MUST exist at the repo root and >=1 test must pass. For a "
+            "MonoGame target ALSO ship a headless smoke entry (dummy video "
+            "driver); a real boot gate for MonoGame is a production concern."
+        ),
+        notes=("requires the dotnet SDK on the host; missing => ERROR, never PASS",
+               "MonoGame headless smoke is a production concern (mirrors love2d)"),
+    ),
+    "java-maven": VerificationProfile(
+        name="java-maven",
+        build_cmd=_sh("mvn -q -B -DskipTests package"),
+        test_cmd=_sh("mvn -q -B test"),
+        contract_text=(
+            "GATES: build = `mvn -B -DskipTests package`; test = `mvn -B test` — "
+            "a pom.xml MUST exist at the repo root and >=1 test must pass."
+        ),
+        notes=("requires maven + a JDK on the host; missing => ERROR, never PASS",),
+    ),
     "iac-terraform": VerificationProfile(
         name="iac-terraform",
         build_cmd=_sh("terraform fmt -check -recursive"),
@@ -139,6 +182,13 @@ _IAC_WORDS = (
 )
 _NODE_WORDS = ("react", "next.js", "nextjs", "vue", "svelte", "node.js", "nodejs",
                "typescript", "javascript")
+_DOTNET_WORDS = ("c#", "csharp", ".net", "dotnet", "monogame", "asp.net", "xna")
+_RUST_WORDS = ("rust", "cargo", "actix", "tokio", "bevy")
+_JAVA_WORDS = ("java ", "java,", "java.", "spring boot", "springboot", "maven",
+               "libgdx")
+# "go" is too short to match bare — require the unambiguous forms.
+_GO_WORDS = ("golang", "go api", "go service", "go server", "go cli",
+             "go backend", "go microservice", "in go", "with go", "ebitengine")
 
 
 def profile_for_request(request: str) -> VerificationProfile:
@@ -157,9 +207,25 @@ def profile_for_request(request: str) -> VerificationProfile:
     if any(w in low for w in _GAME_WORDS):
         if any(w in low for w in ("pygame", "python game", "python")):
             return PROFILES["pygame"]
+        if any(w in low for w in _DOTNET_WORDS):        # MonoGame / C# / XNA game
+            return PROFILES["dotnet"]
+        if any(w in low for w in _RUST_WORDS):          # Bevy / Rust game
+            return PROFILES["rust"]
+        if any(w in low for w in _GO_WORDS):            # Ebitengine / Go game
+            return PROFILES["go"]
+        if any(w in low for w in _JAVA_WORDS):          # libGDX / Java game
+            return PROFILES["java-maven"]
         if any(w in low for w in ("phaser", "html5", "canvas", "browser", "javascript", "web")):
             return PROFILES["phaser-web"]
         return PROFILES["love2d"]
+    if any(w in low for w in _DOTNET_WORDS):
+        return PROFILES["dotnet"]
+    if any(w in low for w in _RUST_WORDS):
+        return PROFILES["rust"]
+    if any(w in low for w in _GO_WORDS):
+        return PROFILES["go"]
+    if any(w in low for w in _JAVA_WORDS):
+        return PROFILES["java-maven"]
     if any(w in low for w in _NODE_WORDS):
         return PROFILES["node-web"]
     return PROFILES["python"]

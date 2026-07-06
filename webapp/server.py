@@ -336,6 +336,7 @@ class Project:
     gates: dict[str, Any] = field(default_factory=dict)  # name -> {status,attested,advisory}
     out_base: Path | None = None  # this floor's output dir (code/ + docs/)
     platform_opts: dict[str, Any] = field(default_factory=dict)  # platform build knobs (advanced)
+    profile: str = "auto"  # verification profile / stack ("auto" = infer from request)
     # Milestone ladder (BUILD-A-FULL-GAME.md §2, in the Workshop): each rung runs as
     # a RELEASE on this floor, chained on the prior rung's released tree. Continuation
     # state is in-memory (same posture as autopilot_budget) — a restart mid-ladder
@@ -1155,6 +1156,7 @@ def _run_factory(p: Project, resume: bool = False) -> None:
                 checkpoints=True,
                 checkpoint_responder=responder,
                 output_dir=str(code_dir) if code_dir else None,
+                profile=p.profile or "auto",  # stack picked in the UI ("auto" = infer)
             )
         finally:
             wd_stop.set()
@@ -1349,6 +1351,7 @@ def _spawn_iteration(
         max_fix_attempts=parent.max_fix_attempts, parent_id=parent.id,
         autopilot_budget=max(0, budget),
     )
+    p.profile = parent.profile
     with _LOCK:
         _PROJECTS[pid] = p
 
@@ -1422,6 +1425,7 @@ def _spawn_milestone_next(parent: Project) -> Project:
     p.milestone_plan = plan
     p.milestone_index = i
     p.milestone_root = parent.milestone_root
+    p.profile = parent.profile
     with _LOCK:
         _PROJECTS[pid] = p
     threading.Thread(target=_gated_runner, args=(_run_factory, p), daemon=True).start()
@@ -1776,9 +1780,15 @@ class Handler(BaseHTTPRequestHandler):
             default_slots = max(1, int(os.environ.get("FOUNDRY_MAX_SLOTS", "1") or "1"))
         except ValueError:
             default_slots = 1
+        try:
+            from foundry.gates.profiles import PROFILES
+            profiles = sorted(PROFILES)
+        except Exception:
+            profiles = []
         self._json(200, {
             "default_backend": default, "backends": list(BACKENDS),
             "default_adapter": default_adapter, "adapters": list(ADAPTERS),
+            "profiles": profiles,
             "default_max_slots": default_slots, "models": models,
             "models_by_backend": models_by_backend,
         })
@@ -2293,6 +2303,11 @@ class Handler(BaseHTTPRequestHandler):
             max_fix_attempts=max_fix_attempts, parent_id=parent_id, base_dir=base_dir,
             autopilot_budget=autopilot_budget,
         )
+        # Verification profile / stack: "auto" (default) infers from the request;
+        # a named profile pins the gate commands (validated by run(), which
+        # rejects unknown names fail-closed before any model spend).
+        prof = str(body.get("profile") or "auto").strip().lower()
+        p.profile = prof or "auto"
         # Milestone ladder (build="milestones"): plan-and-chain releasable rungs.
         # An explicit list (one per line in the UI) skips the planner entirely.
         if str(body.get("build") or "").strip().lower() == "milestones":

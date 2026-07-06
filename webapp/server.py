@@ -841,6 +841,87 @@ def _emit_paced(p: Project, events: list[dict[str, Any]]) -> None:
         time.sleep(_STAGE_PAUSE if ev.get("type") == "stage" else _PACE)
 
 
+_ADVISOR_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": ["approve", "request-changes"]},
+        "findings": {"type": "array", "items": {"type": "string"}, "maxItems": 4},
+    },
+    "required": ["verdict"],
+    "additionalProperties": False,
+}
+
+_ADVISOR_SOP = (
+    "You are a domain-expert reviewer advising a human release approver. You are "
+    "given a DOMAIN RUBRIC and the release evidence. Review STRICTLY against the "
+    "rubric and reply with JSON only: verdict 'approve' or 'request-changes', "
+    "plus up to 4 short findings the human should look at."
+)
+
+
+def _advisory_judgments(p: Project, payload: dict[str, Any], boundary: str) -> list[dict[str, Any]]:
+    """The gated-mode counterpart of the autonomous AI judge (ADVISORY, fail-soft).
+
+    At the RELEASE checkpoint, run each engaged pack's judgment rubric through
+    the backend and return [{domain, verdict, findings}] for the approval dialog
+    — the same expert panel that would decide an autonomous release, informing
+    (never replacing) the human's sign-off. Advisory only: any failure returns
+    what it has; the checkpoint proceeds regardless."""
+    if boundary != "release" or p.backend == "mock" or not p.packs:
+        return []
+    try:
+        from foundry.cli import _build_pack_registry, _build_proxy
+
+        registry, caps = _build_pack_registry(list(p.packs))
+        # Rubrics are declared on the AUTONOMOUS view (that's where the AI fills
+        # the judgment slot); compose that view to EXTRACT them for advisory use.
+        view = {"required_capabilities": sorted(caps), "mode": "autonomous"}
+        rubrics = dict(registry.compose(view).ai_judge.rubrics)
+        if not rubrics:
+            return []
+        _emit(p, type="narrate",
+              text="🧑‍⚖️ AI experts reviewing the release before your sign-off…")
+        proxy = _build_proxy(p.backend)
+        gates = payload.get("gates") or ()
+        gate_lines = "\n".join(
+            f"- {g.get('name', '?')}: {g.get('status', '?')}" for g in gates
+            if isinstance(g, dict)
+        ) or "(none recorded on this payload)"
+        arts = payload.get("artifacts") or ()
+        kinds: dict[str, int] = {}
+        for a in arts:
+            if isinstance(a, dict):
+                kinds[str(a.get("kind", "?"))] = kinds.get(str(a.get("kind", "?")), 0) + 1
+        evidence = (
+            f"REQUEST: {p.request[:800]}\nGATES:\n{gate_lines}\n"
+            f"ARTIFACTS: {', '.join(f'{k}×{n}' for k, n in sorted(kinds.items())) or '(none)'}"
+        )
+        out: list[dict[str, Any]] = []
+        for domain in sorted(rubrics):
+            try:
+                result = proxy.complete(
+                    "release_advisor", "T2", _ADVISOR_SOP,
+                    [{"role": "user",
+                      "content": (f"DOMAIN: {domain}\nRUBRIC:\n{rubrics[domain]}\n\n"
+                                  f"RELEASE EVIDENCE:\n{evidence}\n\nAdvise the approver.")}],
+                    purpose="ideation", schema=_ADVISOR_SCHEMA,
+                )
+                parsed = result.parsed if isinstance(result.parsed, dict) else {}
+                verdict = str(parsed.get("verdict") or "request-changes")
+                findings = [str(f)[:200] for f in (parsed.get("findings") or [])][:4]
+            except Exception as exc:
+                verdict, findings = "unavailable", [f"advisor error: {exc}"][:1]
+            out.append({"domain": domain, "verdict": verdict, "findings": findings})
+            icon = "✅" if verdict == "approve" else ("⚠️" if verdict == "request-changes" else "❔")
+            _emit(p, type="narrate",
+                  text=f"🧑‍⚖️ {domain}: {icon} {verdict.upper()}"
+                       + (f" — {findings[0]}" if findings else ""))
+        return out
+    except Exception as exc:
+        print(f"[advisors] floor {p.floor}: advisory panel failed: {exc}")
+        return []
+
+
 def _gated_runner(runner, p: Project, **kwargs: Any) -> None:
     """Run a build under the global concurrency gate.
 
@@ -944,6 +1025,10 @@ def _run_factory(p: Project, resume: bool = False) -> None:
             p.journal = jrnl
         boundary = str(payload.get("boundary", "stage"))
         if p.supervised:
+            # GATED gets the same AI experts autonomous does — but ADVISORY: they
+            # review the release evidence BEFORE the human's checkpoint and their
+            # verdicts ride into the approval dialog. The human stays the judge.
+            advisors = _advisory_judgments(p, payload, boundary)
             with p.cond:
                 p.checkpoint_seq += 1
                 cidx = p.checkpoint_seq
@@ -952,7 +1037,7 @@ def _run_factory(p: Project, resume: bool = False) -> None:
             # `checkpoint` lets any device's decision name WHICH pause it answers,
             # so a stale/duplicate click can't leak into the next checkpoint.
             _emit(p, type="await_decision", boundary=boundary, checkpoint=cidx,
-                  journal=p.journal)
+                  journal=p.journal, advisors=advisors)
             decision = _await_decision(p, cidx)
         else:
             time.sleep(_AUTO_APPROVE_DELAY)

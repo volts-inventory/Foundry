@@ -1758,6 +1758,8 @@ function routeEvent(floor, ev){
       F.cp = {title:ev.title, summary:ev.summary, boundary:ev.boundary}; break;
     case "await_decision":
       F.awaiting = true; F.cpIndex = ev.checkpoint;
+      // AI expert advisors (gated release checkpoint): ride into the modal.
+      F.cp = Object.assign({}, F.cp, {advisors: ev.advisors || []});
       // Autopilot PROPOSAL: carry the panel's request so the modal offers an edit box.
       if (ev.boundary === "autopilot_proposal")
         F.cp = Object.assign({}, F.cp, {boundary: ev.boundary, request: ev.request || ""});
@@ -1900,6 +1902,27 @@ function showCheckpoint(F){
   const cp = (F && F.cp) || {title:"CHECKPOINT", summary:""};
   document.getElementById("cp-title").textContent="CHECKPOINT · "+(cp.title||"");
   document.getElementById("cp-summary").textContent=cp.summary||"";
+  // AI expert advisors (the same panel that judges autonomous releases, here
+  // ADVISORY): show each domain's verdict + findings above the buttons.
+  const adv = document.getElementById("cp-advisors");
+  if (adv){
+    const list = cp.advisors || [];
+    adv.classList.toggle("hidden", !list.length);
+    adv.innerHTML = "";
+    for (const a of list){
+      const row = document.createElement("div");
+      row.className = "cp-advisor " + (a.verdict==="approve" ? "ok" : (a.verdict==="request-changes" ? "warn" : "na"));
+      const head = document.createElement("div"); head.className = "adv-head";
+      head.textContent = (a.verdict==="approve" ? "✅ " : (a.verdict==="request-changes" ? "⚠ " : "❔ "))
+        + a.domain.toUpperCase() + " · " + (a.verdict||"?").toUpperCase();
+      row.appendChild(head);
+      for (const f of (a.findings||[])){
+        const li = document.createElement("div"); li.className = "adv-finding"; li.textContent = "· " + f;
+        row.appendChild(li);
+      }
+      adv.appendChild(row);
+    }
+  }
   // Autopilot proposal: surface the panel's request as an EDITABLE next-iteration
   // request (approve = as-is; request-changes = build the edited text; reject = stop).
   const wrap = document.getElementById("cp-edit-wrap");

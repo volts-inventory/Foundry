@@ -315,6 +315,16 @@ class Project:
     gates: dict[str, Any] = field(default_factory=dict)  # name -> {status,attested,advisory}
     out_base: Path | None = None  # this floor's output dir (code/ + docs/)
     platform_opts: dict[str, Any] = field(default_factory=dict)  # platform build knobs (advanced)
+    # Milestone ladder (BUILD-A-FULL-GAME.md §2, in the Workshop): each rung runs as
+    # a RELEASE on this floor, chained on the prior rung's released tree. Continuation
+    # state is in-memory (same posture as autopilot_budget) — a restart mid-ladder
+    # keeps every released rung browsable but doesn't auto-spawn the next one.
+    milestones_on: bool = False
+    milestone_max: int = 10
+    milestone_explicit: list[str] = field(default_factory=list)  # human-authored plan
+    milestone_plan: list[str] | None = None   # the full ordered ladder (set at rung 1)
+    milestone_index: int = 0                  # 1-based rung THIS release implements
+    milestone_root: str = ""                  # the original target request
 
 
 _PROJECTS: dict[str, Project] = {}
@@ -863,6 +873,41 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     _emit(p, type="active", room="product", agent="", live=True)
     time.sleep(_PACE)
 
+    # ---- milestone ladder: plan once (rung 1), then run THIS rung ------------- #
+    run_request, run_spec = p.request, p.spec
+    if p.milestones_on:
+        if not p.milestone_plan:                      # rung 1 plans the ladder
+            p.milestone_root = p.milestone_root or p.request
+            plan = [m for m in p.milestone_explicit if m][: p.milestone_max]
+            if not plan and p.backend == "mock":      # mock has no planner model
+                plan = ["walking skeleton — the core loop end to end",
+                        "core features on the skeleton",
+                        "polish, docs and hardening"][: p.milestone_max]
+            if not plan:
+                _emit(p, type="narrate", text="🪜 Planning the milestone ladder…")
+                try:
+                    from foundry.cli import _build_proxy
+                    from foundry.lifecycle.milestones import plan_milestones
+                    plan = plan_milestones(p.request, _build_proxy(p.backend),
+                                           max_milestones=p.milestone_max)
+                except Exception as exc:
+                    _emit(p, type="narrate", text=f"💥 Milestone planning failed: {exc}")
+                    _emit(p, type="done", passed=False, phase="plan")
+                    p.status = "done"
+                    _persist(p)
+                    _close(p)
+                    return
+            p.milestone_plan = plan
+            p.milestone_index = 1
+            _emit(p, type="narrate",
+                  text=f"🪜 Milestone ladder ({len(plan)}):  "
+                       + "  ·  ".join(f"{k + 1}. {t}" for k, t in enumerate(plan)))
+        _emit_ladder_prog(p)
+        _emit(p, type="narrate",
+              text=f"🪜 MILESTONE {p.milestone_index}/{len(p.milestone_plan)}: "
+                   f"{p.milestone_plan[p.milestone_index - 1]}")
+        run_request, run_spec = _milestone_run_args(p)
+
     def responder(payload: dict[str, Any]) -> str:
         # The REAL stage payload -> paced game events, then the CTO's call.
         _emit_paced(p, events_for_payload(payload, p.seen_uris))
@@ -952,13 +997,13 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     try:
         try:
             result = run(
-                p.request,
+                run_request,                  # = p.request, or this rung's milestone framing
                 progress_cb=progress,
                 mode=p.mode,
                 backend=p.backend,            # real backend per project (not always mock)
                 adapter=p.adapter,            # coding substrate (stub/raw-react)
                 packs=p.packs or None,        # optional domain packs (regulated/ml_data/frontend)
-                spec=p.spec,                  # pasted spec text OR uploaded docs dir (additive)
+                spec=run_spec,                # pasted spec text OR uploaded docs dir (additive)
                 max_slots=p.max_slots,        # IC-pool parallelism (Wave C) + budget tree (Wave D)
                 cost_cap_microusd=p.cost_cap_microusd,
                 max_fix_attempts=p.max_fix_attempts,
@@ -1020,12 +1065,33 @@ def _run_factory(p: Project, resume: bool = False) -> None:
               text=f"📂 {n_files} file(s) in the repo — open REPO to browse the store.")
     p.passed = bool(result.passed)
     p.status = "done"
-    if p.passed and p.autopilot_budget > 0:
+    # Milestone ladder: update the rung chips, then either chain the next rung as a
+    # new release (fail-closed: only on a PASS) or close the ladder out.
+    ladder_more = False
+    if p.milestones_on and p.milestone_plan:
+        i, n = p.milestone_index, len(p.milestone_plan)
+        _emit_ladder_prog(p, current="done" if p.passed else "failed")
+        if p.passed and i < n:
+            ladder_more = True
+            _emit(p, type="narrate",
+                  text=f"🪜 Milestone {i}/{n} released — starting {i + 1}/{n}: "
+                       f"{p.milestone_plan[i]}…")
+        elif p.passed:
+            _emit(p, type="narrate",
+                  text=f"🪜 All {n} milestones released — the ladder is complete.")
+        else:
+            _emit(p, type="narrate",
+                  text=f"🪜 Ladder stopped fail-closed at milestone {i}/{n} — every "
+                       "released rung below it is still playable/browsable.")
+    if p.passed and not ladder_more and p.autopilot_budget > 0:
         _emit(p, type="narrate",
               text=f"🧭 Autopilot: {p.autopilot_budget} iteration(s) left — the Director "
                    "and panel are choosing the next action…")
     _persist(p)              # catalog the FINAL status/passed (after they're set)
     _close(p)
+    if ladder_more:
+        _spawn_milestone_next(p)     # the next rung streams as the floor's next release
+        return
     _maybe_autopilot_next(p)
 
 
@@ -1146,6 +1212,73 @@ def _spawn_iteration(
         _gated_runner(_run_factory, p)
 
     threading.Thread(target=_runner, daemon=True).start()
+    return p
+
+
+# ---- milestone ladder (Workshop): each rung = one release on the floor ------- #
+
+def _milestone_run_args(p: Project) -> tuple[str, str]:
+    """(request, spec) for THIS rung — mirrors ``foundry.lifecycle.milestones``'s
+    composition so a Workshop ladder builds the same way the CLI one does. The
+    user's own spec text (if any) rides on top of the plan framing."""
+    plan = p.milestone_plan or []
+    i, n = p.milestone_index, len(plan)
+    title = plan[i - 1]
+    plan_text = "\n".join(f"{k + 1}. {t}" for k, t in enumerate(plan))
+    req = f"{p.milestone_root} — MILESTONE {i}/{n}: {title}"
+    spec = (
+        f"OVERALL TARGET:\n{p.milestone_root}\n\nMILESTONE PLAN:\n{plan_text}\n\n"
+        f"THIS BUILD implements ONLY milestone {i}: {title}. Build on the "
+        "existing base tree; do not regress released behavior (the prior "
+        "criteria ride as the regression floor)."
+    )
+    if p.spec_text:
+        spec = f"{p.spec_text}\n\n{spec}"
+    return req, spec
+
+
+def _emit_ladder_prog(p: Project, *, current: str = "building") -> None:
+    """Ladder progress as the HUD's per-unit chips (reuses the platform chip row):
+    m01..mNN coloured done / building / failed / queued. ``current`` is THIS
+    rung's state (building while running; done/failed at its finish)."""
+    plan = p.milestone_plan or []
+    i = p.milestone_index
+    state = {
+        f"m{k:02d}": ("done" if k < i else (current if k == i else "queued"))
+        for k in range(1, len(plan) + 1)
+    }
+    _emit(p, type="platprog", services=state, total=len(state))
+
+
+def _spawn_milestone_next(parent: Project) -> Project:
+    """Start the NEXT rung as a new release on the parent's floor (the same shape
+    as _spawn_iteration): the parent's released tree is the base via the CAS
+    lineage, mode/supervision/autopilot budget carry over, and the rung's
+    request/spec are composed in _run_factory from the inherited plan."""
+    plan = list(parent.milestone_plan or [])
+    i = parent.milestone_index + 1
+    with _LOCK:
+        release_seq = _STORE.max_release(parent.floor) + 1
+    pid = uuid.uuid4().hex[:12]
+    p = Project(
+        id=pid,
+        request=f"{parent.milestone_root} — MILESTONE {i}/{len(plan)}: {plan[i - 1]}",
+        mode=parent.mode, supervised=parent.supervised,
+        floor=parent.floor, release_seq=release_seq, backend=parent.backend,
+        adapter=parent.adapter, packs=list(parent.packs),
+        spec=parent.spec_text or None, spec_text=parent.spec_text,
+        out_base=_OUTPUT_ROOT / f"floor-{parent.floor}" / f"r{release_seq}",
+        max_slots=parent.max_slots, cost_cap_microusd=parent.cost_cap_microusd,
+        max_fix_attempts=parent.max_fix_attempts, parent_id=parent.id,
+        autopilot_budget=parent.autopilot_budget,
+    )
+    p.milestones_on = True
+    p.milestone_plan = plan
+    p.milestone_index = i
+    p.milestone_root = parent.milestone_root
+    with _LOCK:
+        _PROJECTS[pid] = p
+    threading.Thread(target=_gated_runner, args=(_run_factory, p), daemon=True).start()
     return p
 
 
@@ -2012,6 +2145,19 @@ class Handler(BaseHTTPRequestHandler):
             max_fix_attempts=max_fix_attempts, parent_id=parent_id, base_dir=base_dir,
             autopilot_budget=autopilot_budget,
         )
+        # Milestone ladder (build="milestones"): plan-and-chain releasable rungs.
+        # An explicit list (one per line in the UI) skips the planner entirely.
+        if str(body.get("build") or "").strip().lower() == "milestones":
+            p.milestones_on = True
+            p.milestone_root = request
+            try:
+                p.milestone_max = max(1, min(12, int(body.get("max_milestones", 10) or 10)))
+            except (TypeError, ValueError):
+                p.milestone_max = 10
+            raw_plan = body.get("milestones")
+            if isinstance(raw_plan, list):
+                p.milestone_explicit = [str(m).strip()[:300] for m in raw_plan
+                                        if str(m).strip()][:12]
         with _LOCK:
             _PROJECTS[pid] = p
         # NOTE: do NOT catalog the build here. A floor is persisted only once the
@@ -2023,6 +2169,8 @@ class Handler(BaseHTTPRequestHandler):
         # (multi-service => platform), unless the caller pins it with `platform`.
         want = body.get("platform")
         is_platform = want if isinstance(want, bool) else _infers_platform(request)
+        if p.milestones_on:
+            is_platform = False   # a ladder chains single-service releases
         if is_platform:
             p.platform_opts = _platform_opts(body)
         runner = _run_platform if is_platform else _run_factory

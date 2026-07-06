@@ -105,7 +105,12 @@ python main.py
 **Gated, with you approving each idea (Workshop UI):** start
 `python -m webapp.server`, create the project with backend `claude-cli`
 (substrate auto-selects `claude-code`), packs `game`, mode **gated**,
-Supervised on, **Autopilot: 5**. Each panel pick pauses as an **AUTOPILOT
+Supervised on, **Autopilot: 5**. The dialog opens pre-filled with this
+recipe, and **Build as: milestone ladder** (the default) runs §2's ladder
+right in the Workshop — each rung is a release on the floor (the HUD's
+`m01…mNN` chips track it, and it stops fail-closed at the first refused
+rung). Paste an explicit ladder (one milestone per line) to skip the
+planner, or pick *single build* to build the whole spec at once. Each panel pick pauses as an **AUTOPILOT
 PROPOSAL** checkpoint — approve it, **edit the request in place** and approve
 your version, or reject to stop the loop. Stage checkpoints and the
 playability sign-off surface as usual; walking away auto-approves, so the AI

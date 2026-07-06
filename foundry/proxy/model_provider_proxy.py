@@ -64,6 +64,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 from collections import deque
@@ -382,6 +383,11 @@ class _RetryPolicy:
 _RATE_LIMIT_MARKERS = (
     "rate limit", "rate_limit", "ratelimit", "too many requests",
     "429", "529", "overloaded", "quota exceeded", "throttl",
+    # Subscription-window exhaustion (Claude Max via the claude CLI): the CLI
+    # reports "Claude AI usage limit reached|<reset-epoch>". It is transient —
+    # the window resets — so it must ride the rate-limit budget, not fail the
+    # run after 3 quick transport retries.
+    "usage limit",
 )
 
 
@@ -480,6 +486,17 @@ def _classify_rate_limit(exc: BaseException) -> tuple[bool, float | None]:
                 return True, max(0.0, float(ra))
         except (TypeError, ValueError):
             pass
+    # The claude CLI's usage-limit message carries the reset time as a unix epoch
+    # ("Claude AI usage limit reached|1751826000") — turn it into an explicit
+    # wait-until-reset (plus slack for clock skew) so a Max-window exhaustion is
+    # ridden out in ONE long wait instead of six useless 60-second ones.
+    text = str(exc)
+    if "usage limit" in text.lower():
+        m = re.search(r"\b(1[6-9]\d{8}|2\d{9})\b", text)   # a plausible unix epoch
+        if m:
+            until = float(m.group(1)) - time.time()
+            if 0 < until < 48 * 3600:
+                return True, until + 30.0
     return True, None
 
 
@@ -585,6 +602,12 @@ class ModelProviderProxy:
         )
         self._rl_backoff_base_s = rate_limit_backoff_base_s
         self._rl_backoff_cap_s = rate_limit_backoff_cap_s
+        # Ceiling for ONE explicit wait-until-reset (Retry-After / a usage-window
+        # epoch). Distinct from the backoff cap: implicit throttling backs off in
+        # ≤60s steps; an explicit reset hours away is honored up to this bound.
+        self._rl_max_wait_s = float(
+            _int_env("FOUNDRY_RATE_LIMIT_MAX_WAIT_S", 6 * 3600)
+        )
         self._limiter = _RateLimiter(
             max_rpm=(max_rpm if max_rpm is not None
                      else _int_env("FOUNDRY_MAX_RPM", 0)),
@@ -943,8 +966,21 @@ class ModelProviderProxy:
                         self._rl_backoff_cap_s,
                         self._rl_backoff_base_s * (2**rl_attempt),
                     )
-                    delay = retry_after if retry_after is not None else backoff
-                    self._rl_sleeper(min(delay, self._rl_backoff_cap_s))
+                    if retry_after is not None:
+                        # An EXPLICIT reset/Retry-After (e.g. a Max-plan usage
+                        # window) may be hours away — honor it past the backoff
+                        # cap, bounded by the max-wait ceiling, so an overnight
+                        # run sleeps through the window instead of failing.
+                        wait = min(retry_after, self._rl_max_wait_s)
+                    else:
+                        wait = backoff
+                    if wait >= 300:
+                        resume_at = time.strftime(
+                            "%H:%M", time.localtime(time.time() + wait))
+                        print(f"[proxy] provider limit hit — waiting "
+                              f"{wait / 60:.0f} min (resuming ~{resume_at}) "
+                              f"[wait {rl_attempt + 1}/{self._rl_max_retries}]")
+                    self._rl_sleeper(wait)
                     rl_attempt += 1
                     continue
                 if attempt >= self._retry.max_retries:

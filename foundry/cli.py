@@ -432,7 +432,10 @@ def _enforce_mode_veto(
     posture that actually ran."""
     from foundry.domains.governance_hooks import resolve_effective_mode_tier
 
-    request_view = {"required_capabilities": sorted(capabilities)}
+    # The view carries the requested mode so mode-aware packs (game/infra/crypto
+    # relax their human-only requirements for a declared-autonomous run) compose
+    # the same policy here as at the release boundary.
+    request_view = {"required_capabilities": sorted(capabilities), "mode": requested_mode}
     policy = registry.compose(request_view)
     eff = resolve_effective_mode_tier(
         policy.mode_tier,

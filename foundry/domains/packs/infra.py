@@ -27,8 +27,8 @@ from foundry.domains.contract import (
     ModeTierPolicy,
     PerceptualHITLPolicy,
     VerdictClassPolicy,
+    request_is_autonomous,
 )
-from foundry.domains.governance_hooks import MODE_AUTONOMOUS
 from foundry.schemas.gates import VerdictClass
 
 if TYPE_CHECKING:
@@ -58,20 +58,19 @@ class InfraPack(BaseDomainPack):
         return bool(request_capabilities(request) & self.capabilities)
 
     def mode_tier_policy(self, request: Mapping[str, Any]) -> ModeTierPolicy:
-        if not self._engaged(request):
+        """Human-reviewed release in the human-in-the-loop modes; AUTONOMOUS is
+        reachable by operator choice and releases on the machine gates alone."""
+        if not self._engaged(request) or request_is_autonomous(request):
             return ModeTierPolicy.identity()
-        return ModeTierPolicy(
-            vetoed_modes=frozenset({MODE_AUTONOMOUS}),
-            force_human_release=True,
-        )
+        return ModeTierPolicy(force_human_release=True)
 
     def approver_of_record(self, request: Mapping[str, Any]) -> ApproverPolicy:
-        if not self._engaged(request):
+        if not self._engaged(request) or request_is_autonomous(request):
             return ApproverPolicy.identity()
         return ApproverPolicy(bound_artifact_classes=INFRA_ARTIFACT_CLASSES)
 
     def assign_verdict_class(self, request: Mapping[str, Any]) -> VerdictClassPolicy:
-        if not self._engaged(request):
+        if not self._engaged(request) or request_is_autonomous(request):
             return VerdictClassPolicy.identity()
         return VerdictClassPolicy(
             classes={key: VerdictClass.HUMAN_WITNESSED for key in INFRA_CLASS4_KEYS}

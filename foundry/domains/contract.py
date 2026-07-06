@@ -482,3 +482,14 @@ def request_capabilities(request: Mapping[str, Any]) -> frozenset[str]:
     """
     raw: Iterable[Any] = request.get("required_capabilities") or ()
     return frozenset(str(c).lower() for c in raw)
+
+
+def request_is_autonomous(request: Mapping[str, Any]) -> bool:
+    """True iff the request view carries an AUTONOMOUS run mode (helper for packs
+    whose human-in-the-loop requirements only bind when a human is in the loop).
+
+    Views without a ``mode`` key (e.g. the CLI's capability-only pre-check) read
+    as NOT autonomous — the strict interpretation, so a pack conditioning on this
+    can only relax for a run that explicitly declared hands-off mode.
+    """
+    return str(request.get("mode") or "").lower() == "autonomous"

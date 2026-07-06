@@ -16,6 +16,7 @@ import contextlib
 import hmac
 import json
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -54,6 +55,11 @@ def _load_env_file() -> bool:
                 continue
             key, _, val = line.partition("=")
             key = key.strip()
+            # Inline comments: the shipped presets annotate values on the SAME line
+            # (`FOUNDRY_MODEL_T1=claude-opus-4-8   # heaviest reasoning`). Without
+            # stripping them, the comment becomes PART of the value — poisoning
+            # model ids, tokens, and paths with garbage that fails every CLI call.
+            val = re.split(r"\s#", val, maxsplit=1)[0]
             val = os.path.expandvars(os.path.expanduser(val.strip().strip('"').strip("'")))
             if not key or key in preexisting:    # last file line for a key wins
                 continue

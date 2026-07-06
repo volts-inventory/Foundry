@@ -17,6 +17,7 @@ import hmac
 import json
 import os
 import re
+import sys
 import shutil
 import tempfile
 import threading
@@ -2351,7 +2352,17 @@ def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
     _load_persisted()   # rehydrate floors (+ resume any interrupted build) from disk
     if _LOG_SWEEP_S > 0:   # bound RAM on a long-lived server: trim finished logs
         threading.Thread(target=_log_sweeper, daemon=True).start()
-    srv = ThreadingHTTPServer((host, port), Handler)
+    class _QuietServer(ThreadingHTTPServer):
+        def handle_error(self, request, client_address):  # noqa: N802 (stdlib API)
+            # Phones/tabs drop SSE streams constantly (backgrounding, reload) —
+            # stdlib prints a full traceback per dropped socket, which reads like
+            # a server crash. Swallow disconnects; real errors still print.
+            exc = sys.exc_info()[1]
+            if isinstance(exc, (BrokenPipeError, ConnectionResetError, TimeoutError)):
+                return
+            super().handle_error(request, client_address)
+
+    srv = _QuietServer((host, port), Handler)
     shown = "localhost" if host in ("127.0.0.1", "0.0.0.0") else host
     print(f"\n  🏭  Foundry Workshop running →  http://{shown}:{port}\n")
     print(f"      durable state: {_STATE_DIR}  (builds survive a restart)")

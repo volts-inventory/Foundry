@@ -16,10 +16,12 @@ import contextlib
 import hmac
 import json
 import os
+import re
 import shutil
 import tempfile
 import threading
 import time
+import traceback
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -53,9 +55,27 @@ def _load_env_file() -> bool:
                 continue
             key, _, val = line.partition("=")
             key = key.strip()
+            # Inline comments: the shipped presets annotate values on the SAME line
+            # (`FOUNDRY_MODEL_T1=claude-opus-4-8   # heaviest reasoning`). Without
+            # stripping them, the comment becomes PART of the value — poisoning
+            # model ids, tokens, and paths with garbage that fails every CLI call.
+            val = re.split(r"\s#", val, maxsplit=1)[0]
             val = os.path.expandvars(os.path.expanduser(val.strip().strip('"').strip("'")))
-            if key and key not in preexisting:   # last file line for a key wins
-                os.environ[key] = val
+            if not key or key in preexisting:    # last file line for a key wins
+                continue
+            # A blank `KEY=` placeholder (the presets ship CLAUDE_CODE_OAUTH_TOKEN=
+            # empty) must NOT inject a present-but-empty env var: the claude CLI
+            # subprocess sees the var EXISTS, tries token auth with an empty token,
+            # and fails — while the same command works fine in the user's own shell.
+            if not val:
+                continue
+            # TMPDIR pointing at a directory that doesn't exist (the Linux preset's
+            # tmpfs before its fstab entry) breaks every subprocess spawn with an
+            # opaque transport error — warn and skip instead.
+            if key == "TMPDIR" and not os.path.isdir(val):
+                print(f"[env] ignoring TMPDIR={val!r} from .env — directory does not exist")
+                continue
+            os.environ[key] = val
         return True
     return False
 
@@ -891,6 +911,8 @@ def _run_factory(p: Project, resume: bool = False) -> None:
                     plan = plan_milestones(p.request, _build_proxy(p.backend),
                                            max_milestones=p.milestone_max)
                 except Exception as exc:
+                    print(f"[milestones] floor {p.floor} planning failed: {exc}")
+                    traceback.print_exc()
                     _emit(p, type="narrate", text=f"💥 Milestone planning failed: {exc}")
                     _emit(p, type="done", passed=False, phase="plan")
                     p.status = "done"
@@ -1018,6 +1040,10 @@ def _run_factory(p: Project, resume: bool = False) -> None:
             wd_stop.set()
             base_stack.close()  # run() copies base_dir into its sandbox synchronously
     except Exception as exc:
+        # Print the full traceback to the SERVER terminal too — the quest-log line
+        # is a one-line summary, and "no error in the terminal" must never mislead.
+        print(f"[build] floor {p.floor} r{p.release_seq} failed: {exc}")
+        traceback.print_exc()
         _emit(p, type="narrate", text=f"💥 Build error: {exc}")
         _emit(p, type="halt", phase="error", reason=str(exc))
         _emit(p, type="done", passed=False, phase="error")

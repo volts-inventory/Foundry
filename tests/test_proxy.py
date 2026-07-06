@@ -582,6 +582,54 @@ def test_rate_limit_uses_separate_more_generous_budget():
     assert delays == [2.0, 4.0, 8.0, 16.0]    # exponential, capped at 60s
 
 
+def test_usage_limit_classified_and_waits_until_reset():
+    """A Claude Max usage-window exhaustion ("usage limit reached|<epoch>") is a
+    RATE-LIMIT (not a hard transport failure), and the reset epoch becomes ONE
+    explicit long wait — past the 60s backoff cap — instead of six useless
+    short retries followed by a crashed run."""
+    import time as _time
+
+    reset = int(_time.time()) + 2 * 3600          # window resets in 2 hours
+
+    @dataclass
+    class _UsageLimitTransport:
+        rl_times: int = 1
+        attempts: int = 0
+        requests: list[dict[str, Any]] = field(default_factory=list)
+
+        def send(self, request: dict[str, Any]) -> ProviderResponse:
+            self.attempts += 1
+            if self.rl_times > 0:
+                self.rl_times -= 1
+                raise RuntimeError(
+                    f"claude CLI reported is_error: Claude AI usage limit reached|{reset}"
+                )
+            self.requests.append(request)
+            return ProviderResponse(
+                served_model=request["model"], request_id="req_ul",
+                text=APPROVE_JSON, usage=dict(USAGE), stop_reason="end_turn",
+            )
+
+    delays: list[float] = []
+    transport = _UsageLimitTransport()
+    proxy = _rl_proxy(transport, sleeper=delays.append)
+    result = proxy.complete(
+        "n", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate"
+    )
+    assert result.text == APPROVE_JSON
+    assert transport.attempts == 2                # 1 limited + 1 success after reset
+    assert len(delays) == 1
+    assert 3600 < delays[0] <= 2 * 3600 + 60      # slept ~until the reset, one wait
+
+
+def test_usage_limit_without_epoch_rides_backoff():
+    """No parseable reset time -> still classified rate-limited, normal backoff."""
+    from foundry.proxy.model_provider_proxy import _classify_rate_limit
+
+    is_rl, ra = _classify_rate_limit(RuntimeError("Claude AI usage limit reached"))
+    assert is_rl is True and ra is None
+
+
 def test_rate_limiter_paces_requests_per_minute():
     from foundry.proxy.model_provider_proxy import _RateLimiter
     waits: list[float] = []

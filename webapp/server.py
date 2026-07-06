@@ -922,6 +922,38 @@ def _advisory_judgments(p: Project, payload: dict[str, Any], boundary: str) -> l
         return []
 
 
+_RL_HOOKED = [False]
+
+
+def _hook_rate_limit_waits() -> None:
+    """Surface long provider-limit waits (a Claude Max window, a Retry-After) in
+    the UI: the proxy fires its advisory ``on_rate_limit_wait`` observer and we
+    broadcast a ``limitwait`` event + quest-log line to EVERY running floor —
+    the account limit throttles all of them, not one. Registered once, lazily
+    (with the first build), so server boot never imports the proxy stack."""
+    if _RL_HOOKED[0]:
+        return
+    _RL_HOOKED[0] = True
+    try:
+        from foundry.proxy import model_provider_proxy as _mpp
+    except Exception:
+        return
+
+    def _on_wait(wait_s: float, resume_epoch: float, explicit: bool) -> None:
+        if wait_s < 120:                     # short backoff blips stay invisible
+            return
+        hhmm = time.strftime("%H:%M", time.localtime(resume_epoch))
+        with _LOCK:
+            running = [q for q in _PROJECTS.values() if q.status == "running"]
+        for q in running:
+            _emit(q, type="limitwait", seconds=int(wait_s), until=int(resume_epoch))
+            _emit(q, type="narrate",
+                  text=f"⏸ Provider usage limit reached — the build is waiting it "
+                       f"out and resumes ~{hhmm}. Nothing is lost.")
+
+    _mpp.on_rate_limit_wait = _on_wait
+
+
 def _gated_runner(runner, p: Project, **kwargs: Any) -> None:
     """Run a build under the global concurrency gate.
 
@@ -954,6 +986,8 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     re-emitting the history it already streamed."""
     # Imported here so the server starts fast and a missing dep never blocks boot.
     from foundry.cli import run
+
+    _hook_rate_limit_waits()
 
     if resume:
         _emit(p, type="narrate",
@@ -1493,6 +1527,8 @@ def _run_platform(p: Project) -> None:
     hub serve it from disk (no CAS build of its own)."""
     from foundry.platform import build_platform
     from foundry.platform.planner import plan_platform
+
+    _hook_rate_limit_waits()
 
     # Map a service role to a discipline ROOM the floor can light up (the platform
     # floor has no engine stage stream of its own, so we drive it ourselves).

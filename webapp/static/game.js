@@ -1701,6 +1701,9 @@ function routeEvent(floor, ev){
       if (isActive) updateHud(F);
       break;
     case "narrate": logTo(F, logClass(ev.text), ev.text); break;
+    case "limitwait":              // provider usage limit: global pause banner
+      showLimitToast(ev.until);
+      break;
     case "platprog":               // platform: per-service progress for the HUD
       F.platprog = ev;
       if (isActive) renderPlatProg(ev);
@@ -1809,6 +1812,35 @@ function logClass(t){   // classify BEFORE stripping, so server emoji still tint
 // strip any emoji so the QUEST LOG is pure bitmap-font text (matches the pixel UI)
 const EMOJI_RE = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{2300}-\u{23FF}\u{2190}-\u{21FF}️]/gu;
 function deEmoji(t){ return (t==null?"":(""+t)).replace(EMOJI_RE,"").replace(/^\s+/,""); }
+// Provider-limit pause banner: the account's usage window ran out and the build
+// is sleeping until it resets. One global toast (the limit throttles every
+// floor), live countdown, dismissible, auto-clears at the resume time. Replayed
+// stale events are ignored (until <= now).
+function showLimitToast(until){
+  const now = Date.now()/1000;
+  if (!until || until <= now) return;
+  let t = document.getElementById("limit-toast");
+  if (!t){
+    t = document.createElement("div"); t.id = "limit-toast";
+    const msg = document.createElement("span"); msg.id = "limit-toast-msg";
+    const x = document.createElement("button"); x.textContent = "✕";
+    x.onclick = ()=>{ if (t._iv) clearInterval(t._iv); t.remove(); };
+    t.appendChild(msg); t.appendChild(x);
+    document.body.appendChild(t);
+  }
+  t._until = Math.max(t._until || 0, until);
+  const upd = ()=>{
+    const left = t._until - Date.now()/1000;
+    if (left <= 0){ if (t._iv) clearInterval(t._iv); t.remove(); return; }
+    const hhmm = new Date(t._until*1000).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+    const el = document.getElementById("limit-toast-msg");
+    if (el) el.textContent = "⏸ USAGE LIMIT — BUILD PAUSED · resumes ~"+hhmm
+      +" ("+Math.ceil(left/60)+" min)";
+  };
+  upd();
+  if (!t._iv) t._iv = setInterval(upd, 30000);
+}
+
 // Stream-health dot in the QUEST LOG title. The server sends a named `ka`
 // heartbeat every ~15s of idle (real events count too), so "no traffic for 40s"
 // means the stream is actually down — not just a long, quiet model call.

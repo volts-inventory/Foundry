@@ -842,6 +842,59 @@ def _emit_paced(p: Project, events: list[dict[str, Any]]) -> None:
         time.sleep(_STAGE_PAUSE if ev.get("type") == "stage" else _PACE)
 
 
+_STACK_SOP = (
+    "You are a principal architect choosing the implementation stack for a new "
+    "build. You are given the request, the spec, and the stacks whose toolchains "
+    "are INSTALLED on this host (each with the exact gates it pins). Pick the "
+    "best-fit stack: prefer the simplest one that satisfies the spec, respect any "
+    "stack the request names explicitly, and never pick a stack the spec's "
+    "requirements can't meet. Reply with JSON only."
+)
+
+
+def _choose_stack(p: Project) -> tuple[str, str] | None:
+    """Architect-driven stack selection for profile="auto" (real backends only).
+
+    Offers ONLY the stacks whose toolchains are installed on this host and asks
+    the backend to choose; returns (profile_name, reason) or None (fail-soft →
+    the keyword inference in foundry.gates.profiles decides, as before)."""
+    if p.backend == "mock":
+        return None
+    try:
+        from foundry.cli import _build_proxy
+        from foundry.gates.profiles import PROFILES, installed_profiles
+
+        avail = installed_profiles()
+        if len(avail) <= 1:
+            return None
+        menu = "\n".join(f"- {n}: {PROFILES[n].contract_text}" for n in avail)
+        schema = {
+            "type": "object",
+            "properties": {
+                "profile": {"type": "string", "enum": avail},
+                "reason": {"type": "string"},
+            },
+            "required": ["profile", "reason"],
+            "additionalProperties": False,
+        }
+        result = _build_proxy(p.backend).complete(
+            "principal_architect", "T1", _STACK_SOP,
+            [{"role": "user",
+              "content": (f"REQUEST:\n{p.request}\n\nSPEC:\n{(p.spec_text or '')[:2000]}"
+                          f"\n\nINSTALLED STACKS (pick one):\n{menu}")}],
+            purpose="ideation", schema=schema,
+        )
+        parsed = result.parsed if isinstance(result.parsed, dict) else None
+        if parsed is None:
+            parsed = json.loads(result.text or "{}")
+        name = str(parsed.get("profile") or "")
+        if name in avail:
+            return name, str(parsed.get("reason") or "")[:300]
+    except Exception as exc:
+        print(f"[stack] architect selection failed (keyword inference instead): {exc}")
+    return None
+
+
 _ADVISOR_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -1009,6 +1062,19 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     # work already grinding instead of an all-lounge office.
     _emit(p, type="active", room="product", agent="", live=True)
     time.sleep(_PACE)
+
+    # Stack = auto on a real backend: the Principal Architect picks the stack from
+    # the toolchains actually installed on this host; the chosen profile pins the
+    # gates for THIS build and every child (iterate / autopilot / ladder rung).
+    if (p.profile or "auto") == "auto":
+        chosen = _choose_stack(p)
+        if chosen:
+            p.profile = chosen[0]
+            _emit(p, type="active", room="architecture", agent="Principal Architect",
+                  live=True)
+            _emit(p, type="narrate",
+                  text=f"🏗 Principal Architect chose the stack: {chosen[0]}"
+                       + (f" — {chosen[1]}" if chosen[1] else ""))
 
     # ---- milestone ladder: plan once (rung 1), then run THIS rung ------------- #
     run_request, run_spec = p.request, p.spec

@@ -27,7 +27,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass, field
 
-__all__ = ["PROFILES", "VerificationProfile", "profile_for_request"]
+__all__ = ["PROFILES", "VerificationProfile", "installed_profiles", "profile_for_request"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +216,40 @@ _JAVA_WORDS = ("java ", "java,", "java.", "spring boot", "springboot", "maven",
 # "go" is too short to match bare — require the unambiguous forms.
 _GO_WORDS = ("golang", "go api", "go service", "go server", "go cli",
              "go backend", "go microservice", "in go", "with go", "ebitengine")
+
+
+# Binaries each profile's pinned gates shell out to. A profile whose toolchain is
+# absent still RUNS (fail-closed ERROR at the gate) — this map exists so a STACK
+# CHOOSER (the Architect picking for "auto") only offers stacks that can actually
+# go green on this host. Python-based profiles need only the interpreter.
+_REQUIRED_BINARIES: dict[str, tuple[str, ...]] = {
+    "node-web": ("node", "npm"),
+    "phaser-web": ("node", "npm"),
+    "love2d": ("luac",),
+    "go": ("go",),
+    "rust": ("cargo",),
+    "dotnet": ("dotnet",),
+    "java-maven": ("mvn", "java"),
+    "iac-terraform": ("terraform",),
+}
+
+
+def installed_profiles() -> list[str]:
+    """Profile names whose toolchains are PRESENT on this host (sorted).
+
+    ``pygame`` additionally requires the pygame package (its smoke imports it).
+    Python-only profiles are always available (we are running under Python)."""
+    import importlib.util
+    import shutil
+
+    out = []
+    for name in PROFILES:
+        if not all(shutil.which(b) for b in _REQUIRED_BINARIES.get(name, ())):
+            continue
+        if name == "pygame" and importlib.util.find_spec("pygame") is None:
+            continue
+        out.append(name)
+    return sorted(out)
 
 
 def profile_for_request(request: str) -> VerificationProfile:

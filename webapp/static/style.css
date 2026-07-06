@@ -339,6 +339,13 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
 .d-file{color:#d9c27a}
 .muted{color:var(--dim)}
 
+/* ---- provider-limit pause banner ------------------------------------------ */
+#limit-toast{position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:80;
+  display:flex;align-items:center;gap:10px;background:#3a2a10;border:3px solid var(--gold);
+  border-radius:8px;padding:8px 12px;color:#ffe6a3;font-size:12px;font-weight:bold;
+  box-shadow:0 4px 0 #0c1322;max-width:92vw;text-transform:uppercase}
+#limit-toast button{padding:2px 8px;font-size:11px;min-height:0}
+
 /* ---- Mobile / narrow-screen layout --------------------------------------- */
 /* Stack the desktop three-pane (elevator | game | log) into a column: a
    horizontal floor strip on top, the game in the middle (canvas auto-scales via

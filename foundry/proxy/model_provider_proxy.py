@@ -140,6 +140,12 @@ _STATUS_BY_VERDICT = {
     "request-changes": GateStatus.FAIL,
 }
 
+# Optional observer for rate-limit waits (advisory, fail-soft): a host app (the
+# Workshop) sets this to surface "usage limit hit — resuming ~HH:MM" in its UI.
+# Called as on_rate_limit_wait(wait_seconds, resume_epoch, explicit) from the
+# retrying thread; exceptions are swallowed — telemetry never breaks a build.
+on_rate_limit_wait: Callable[[float, float, bool], None] | None = None
+
 
 @dataclass(frozen=True, slots=True)
 class SamplingPolicy:
@@ -980,6 +986,13 @@ class ModelProviderProxy:
                         print(f"[proxy] provider limit hit — waiting "
                               f"{wait / 60:.0f} min (resuming ~{resume_at}) "
                               f"[wait {rl_attempt + 1}/{self._rl_max_retries}]")
+                    if on_rate_limit_wait is not None:
+                        try:
+                            on_rate_limit_wait(
+                                wait, time.time() + wait, retry_after is not None
+                            )
+                        except Exception:  # noqa: S110 — advisory telemetry only
+                            pass
                     self._rl_sleeper(wait)
                     rl_attempt += 1
                     continue

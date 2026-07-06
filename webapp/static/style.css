@@ -210,6 +210,15 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
 .dialog label.check input{width:auto}
 .dialog-actions{display:flex;gap:10px;margin-top:18px;align-items:center}
 .cp-note{color:var(--dim);font-size:11px;margin:6px 0 0}   /* roman: Silkscreen oblique is rough */
+/* AI expert advisors in the checkpoint modal (gated release sign-off) */
+.cp-advisors{display:flex;flex-direction:column;gap:6px;margin:8px 0 2px;max-height:32vh;overflow-y:auto}
+.cp-advisor{border:2px solid var(--line);border-radius:6px;padding:6px 9px;background:#0e1626}
+.cp-advisor.ok{border-color:#2c5a3c}
+.cp-advisor.warn{border-color:#6b5a1f}
+.cp-advisor .adv-head{font-size:11px;font-weight:bold;color:var(--ink);text-transform:uppercase}
+.cp-advisor.ok .adv-head{color:#9dffbf}
+.cp-advisor.warn .adv-head{color:#ffe6a3}
+.cp-advisor .adv-finding{font-size:11px;color:var(--dim);margin-top:3px;line-height:1.4}
 #cp-summary{color:var(--ink);font-size:14px;margin:4px 0}
 
 /* ---- suggest-N row ---- */

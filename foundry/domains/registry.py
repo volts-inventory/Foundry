@@ -27,6 +27,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Protocol, TypeVar
 
 from foundry.domains.contract import (
+    AIJudgePolicy,
     ApproverPolicy,
     ComputePolicy,
     DomainPackContract,
@@ -61,7 +62,7 @@ __all__ = [
 
 
 class ComposedPolicy:
-    """The seven composed (strictest-wins) policies for one routed request.
+    """The eight composed (strictest-wins) policies for one routed request.
 
     A plain immutable bundle — one composed policy per hook. Produced by
     :meth:`PackRegistry.compose`; consumed by the graph wiring (T-M5-08) to apply
@@ -69,6 +70,7 @@ class ComposedPolicy:
     """
 
     __slots__ = (
+        "ai_judge",
         "approver",
         "compute",
         "egress",
@@ -88,6 +90,7 @@ class ComposedPolicy:
         approver: ApproverPolicy,
         egress: EgressPolicy,
         perceptual_hitl: PerceptualHITLPolicy,
+        ai_judge: AIJudgePolicy | None = None,
     ) -> None:
         self.verdict_class = verdict_class
         self.state_inputs = state_inputs
@@ -96,6 +99,7 @@ class ComposedPolicy:
         self.approver = approver
         self.egress = egress
         self.perceptual_hitl = perceptual_hitl
+        self.ai_judge = ai_judge if ai_judge is not None else AIJudgePolicy.identity()
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, ComposedPolicy):
@@ -206,6 +210,9 @@ class PackRegistry:
             egress=_fold(EgressPolicy.identity(), packs, lambda p: p.egress_profile(view)),
             perceptual_hitl=_fold(
                 PerceptualHITLPolicy.identity(), packs, lambda p: p.perceptual_hitl(view)
+            ),
+            ai_judge=_fold(
+                AIJudgePolicy.identity(), packs, lambda p: p.ai_judgment(view)
             ),
         )
 

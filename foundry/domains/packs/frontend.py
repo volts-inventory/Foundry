@@ -43,9 +43,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from foundry.domains.contract import (
+    AIJudgePolicy,
     BaseDomainPack,
     PerceptualHITLPolicy,
     VerdictClassPolicy,
+    request_is_autonomous,
 )
 from foundry.schemas.base import FrozenModel
 from foundry.schemas.gates import VerdictClass
@@ -215,12 +217,28 @@ class FrontendPack(BaseDomainPack):
         zone-B-signed rendered bundle, fail-closed). Demanding HITL on these
         capabilities + the rendered evidence bundle only tightens.
         """
-        if not self._engaged(request):
+        if not self._engaged(request) or request_is_autonomous(request):
             return PerceptualHITLPolicy.identity()
         return PerceptualHITLPolicy(
             hitl_required_capabilities=self.capabilities,
             require_rendered_evidence=True,
         )
+
+    def ai_judgment(self, request: Mapping[str, Any]) -> AIJudgePolicy:
+        """The AUTONOMOUS stand-in for the human visual sign-off: an AI UX
+        reviewer judges the release evidence instead of the slot being skipped."""
+        if not self._engaged(request) or not request_is_autonomous(request):
+            return AIJudgePolicy.identity()
+        return AIJudgePolicy(rubrics={
+            "visual_ux": (
+                "Judge this FRONTEND release as a senior UX reviewer. Approve "
+                "ONLY if the evidence shows the promised screens/flows exist and "
+                "render (not stubs), the visual-regression gate ran clean or its "
+                "deltas are explainable, and nothing suggests broken layout, "
+                "unreachable controls, or missing accessibility basics. Refuse "
+                "if rendered evidence is absent."
+            ),
+        })
 
     def assign_verdict_class(self, request: Mapping[str, Any]) -> VerdictClassPolicy:
         """Hook 1 — assign the three frontend gate keys their verdict class (domains.md §1).

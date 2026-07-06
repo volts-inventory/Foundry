@@ -10,13 +10,13 @@ Tighten-only hooks (composes strictest-wins with any other engaged pack):
 * **class-5 playability HITL** (``perceptual_hitl`` + ``assign_verdict_class``)
   — modeled directly on the frontend pack's visual HITL: a game release is
   perceptual (feel / pacing / controls) and is NEVER auto-approved; a recorded
-  human sign-off over the rendered/smoke evidence is mandatory.
+  human sign-off over the rendered/smoke evidence is mandatory in the
+  human-in-the-loop modes (assistant/gated). An AUTONOMOUS run has no human to
+  sign, so by operator choice the sign-off does not bind there — the class-2
+  runtime smoke gate is the hands-off release floor.
 * **class-2 runtime gate key** (``assign_verdict_class``) — the profile's smoke
   ("boots and survives N ticks") verdict is named as an execution-deterministic
   key so a boundary that never ran the game cannot claim the grounding.
-* **mode veto** (``mode_tier_policy``) — ``autonomous`` (hands-off deploy) is
-  vetoed: a game whose playability gate is class-5 human cannot hands-off
-  release; ``assistant``/``gated`` stay reachable.
 """
 
 from __future__ import annotations
@@ -24,12 +24,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from foundry.domains.contract import (
+    AIJudgePolicy,
     BaseDomainPack,
     ModeTierPolicy,
     PerceptualHITLPolicy,
     VerdictClassPolicy,
+    request_is_autonomous,
 )
-from foundry.domains.governance_hooks import MODE_AUTONOMOUS
 from foundry.schemas.gates import VerdictClass
 
 if TYPE_CHECKING:
@@ -46,7 +47,7 @@ RUNTIME_SMOKE_GATE = "smoke"  # class 2 — the profile's boot-and-run verdict
 
 
 class GamePack(BaseDomainPack):
-    """Playability HITL + runtime-gate grounding + autonomous-release veto."""
+    """Playability HITL (human modes) + runtime-gate grounding."""
 
     name = "game"
     capabilities = GAME_CAPABILITIES
@@ -58,8 +59,12 @@ class GamePack(BaseDomainPack):
 
     def perceptual_hitl(self, request: Mapping[str, Any]) -> PerceptualHITLPolicy:
         """A game release requires a recorded human PLAYABILITY sign-off (class 5)
-        over rendered/smoke evidence — taste and feel are never auto-approved."""
-        if not self._engaged(request):
+        over rendered/smoke evidence — taste and feel are never auto-approved.
+
+        AUTONOMOUS runs are exempt by operator choice: hands-off mode has no human
+        to sign, so the class-2 runtime smoke gate is the release floor there and
+        playability judgment moves to whoever plays the released build."""
+        if not self._engaged(request) or request_is_autonomous(request):
             return PerceptualHITLPolicy.identity()
         return PerceptualHITLPolicy(
             hitl_required_capabilities=self.capabilities,
@@ -77,8 +82,27 @@ class GamePack(BaseDomainPack):
         )
 
     def mode_tier_policy(self, request: Mapping[str, Any]) -> ModeTierPolicy:
-        """VETO hands-off release: a class-5 playability gate cannot be satisfied
-        by a machine, so `autonomous` is unreachable for game requests."""
-        if not self._engaged(request):
-            return ModeTierPolicy.identity()
-        return ModeTierPolicy(vetoed_modes=frozenset({MODE_AUTONOMOUS}))
+        """No mode veto: `autonomous` is reachable for game requests. The class-5
+        playability sign-off binds HUMAN-in-the-loop modes (see perceptual_hitl);
+        a hands-off run is judged by the AI playability expert instead
+        (see ai_judgment)."""
+        return ModeTierPolicy.identity()
+
+    def ai_judgment(self, request: Mapping[str, Any]) -> AIJudgePolicy:
+        """The AUTONOMOUS stand-in for the human playability sign-off: an AI
+        expert judges the release evidence against the playability rubric.
+        Weaker than a human playing the game — but strictly stronger than the
+        nothing that would otherwise fill the slot in a hands-off run."""
+        if not self._engaged(request) or not request_is_autonomous(request):
+            return AIJudgePolicy.identity()
+        return AIJudgePolicy(rubrics={
+            "playability": (
+                "Judge this GAME release as a veteran game designer + QA lead. "
+                "Approve ONLY if the evidence shows: the game actually boots and "
+                "survives the runtime smoke gate; the core play loop the request/"
+                "spec promises is present (not stubbed); controls/menus the spec "
+                "names exist; and no gate evidence suggests crash-on-interact or "
+                "unfinishable state. Refuse if the release looks like a skeleton, "
+                "a menu with no game, or the smoke evidence is missing."
+            ),
+        })

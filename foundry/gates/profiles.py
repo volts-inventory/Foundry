@@ -54,13 +54,27 @@ PROFILES: dict[str, VerificationProfile] = {
             "must pass)."
         ),
     ),
+    "python-app": VerificationProfile(
+        name="python-app",
+        smoke_cmd=(sys.executable, "smoke.py"),
+        contract_text=(
+            "GATES: build = compileall; test = pytest; smoke = `python smoke.py` — "
+            "the repo MUST ship smoke.py that exercises the REAL app headless "
+            "(start the service and hit one real endpoint in-process, or run the "
+            "CLI end-to-end on sample input) and exits 0 only on success."
+        ),
+    ),
     "node-web": VerificationProfile(
         name="node-web",
         build_cmd=_sh("npm ci --no-audit --no-fund && npm run build --if-present"),
         test_cmd=_sh("npm test --silent"),
+        smoke_cmd=("node", "smoke.mjs"),
         contract_text=(
-            "GATES: build = `npm ci && npm run build`; test = `npm test` (the "
-            "package.json MUST define working build/test scripts)."
+            "GATES: build = `npm ci && npm run build`; test = `npm test`; smoke = "
+            "`node smoke.mjs` (the package.json MUST define working build/test "
+            "scripts, and the repo MUST ship smoke.mjs that boots the REAL app "
+            "headless — start the server and hit one real route in-process, or "
+            "run the CLI end-to-end — and exits 0 only on success)."
         ),
     ),
     "phaser-web": VerificationProfile(
@@ -111,9 +125,14 @@ PROFILES: dict[str, VerificationProfile] = {
         name="go",
         build_cmd=_sh("go vet ./... && go build ./..."),
         test_cmd=_sh("go test ./..."),
+        smoke_cmd=_sh("go run ./smoke"),
         contract_text=(
             "GATES: build = `go vet ./... && go build ./...`; test = `go test "
-            "./...` — a go.mod MUST exist at the repo root and >=1 test must pass."
+            "./...`; smoke = `go run ./smoke` — a go.mod MUST exist at the repo "
+            "root, >=1 test must pass, and the repo MUST ship a ./smoke package "
+            "(main) that exercises the REAL app headless (boot the server and hit "
+            "one real endpoint in-process, or run the CLI end-to-end) and exits 0 "
+            "only on success."
         ),
         notes=("requires the go toolchain on the host; missing => ERROR, never PASS",),
     ),
@@ -121,9 +140,12 @@ PROFILES: dict[str, VerificationProfile] = {
         name="rust",
         build_cmd=_sh("cargo build --quiet"),
         test_cmd=_sh("cargo test --quiet"),
+        smoke_cmd=_sh("cargo run --quiet --bin smoke"),
         contract_text=(
-            "GATES: build = `cargo build`; test = `cargo test` — a Cargo.toml MUST "
-            "exist at the repo root and >=1 test must pass."
+            "GATES: build = `cargo build`; test = `cargo test`; smoke = `cargo run "
+            "--bin smoke` — a Cargo.toml MUST exist at the repo root, >=1 test "
+            "must pass, and the crate MUST ship a `smoke` bin (src/bin/smoke.rs) "
+            "that exercises the REAL app headless and exits 0 only on success."
         ),
         notes=("requires cargo on the host; missing => ERROR, never PASS",),
     ),
@@ -131,22 +153,27 @@ PROFILES: dict[str, VerificationProfile] = {
         name="dotnet",
         build_cmd=_sh("dotnet build --nologo -v q"),
         test_cmd=_sh("dotnet test --nologo -v q"),
+        smoke_cmd=_sh("dotnet run --project Smoke"),
         contract_text=(
-            "GATES: build = `dotnet build`; test = `dotnet test` — a .sln or "
-            ".csproj MUST exist at the repo root and >=1 test must pass. For a "
-            "MonoGame target ALSO ship a headless smoke entry (dummy video "
-            "driver); a real boot gate for MonoGame is a production concern."
+            "GATES: build = `dotnet build`; test = `dotnet test`; smoke = `dotnet "
+            "run --project Smoke` — a .sln or .csproj MUST exist at the repo root, "
+            ">=1 test must pass, and the solution MUST ship a Smoke console "
+            "project that exercises the REAL app headless (for MonoGame: dummy "
+            "video driver, advance the game loop) and exits 0 only on success."
         ),
-        notes=("requires the dotnet SDK on the host; missing => ERROR, never PASS",
-               "MonoGame headless smoke is a production concern (mirrors love2d)"),
+        notes=("requires the dotnet SDK on the host; missing => ERROR, never PASS",),
     ),
     "java-maven": VerificationProfile(
         name="java-maven",
         build_cmd=_sh("mvn -q -B -DskipTests package"),
         test_cmd=_sh("mvn -q -B test"),
+        smoke_cmd=_sh("mvn -q -B -DskipTests compile && java -cp target/classes Smoke"),
         contract_text=(
-            "GATES: build = `mvn -B -DskipTests package`; test = `mvn -B test` — "
-            "a pom.xml MUST exist at the repo root and >=1 test must pass."
+            "GATES: build = `mvn -B -DskipTests package`; test = `mvn -B test`; "
+            "smoke = `java -cp target/classes Smoke` (after compile) — a pom.xml "
+            "MUST exist at the repo root, >=1 test must pass, and the repo MUST "
+            "ship a Smoke class (default package) whose main() exercises the REAL "
+            "app headless and exits 0 only on success."
         ),
         notes=("requires maven + a JDK on the host; missing => ERROR, never PASS",),
     ),

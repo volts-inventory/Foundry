@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from foundry.domains.contract import (
+    AIJudgePolicy,
     ApproverPolicy,
     BaseDomainPack,
     EgressPolicy,
@@ -59,10 +60,27 @@ class InfraPack(BaseDomainPack):
 
     def mode_tier_policy(self, request: Mapping[str, Any]) -> ModeTierPolicy:
         """Human-reviewed release in the human-in-the-loop modes; AUTONOMOUS is
-        reachable by operator choice and releases on the machine gates alone."""
+        reachable by operator choice and is judged by the AI infra expert
+        instead (see ai_judgment)."""
         if not self._engaged(request) or request_is_autonomous(request):
             return ModeTierPolicy.identity()
         return ModeTierPolicy(force_human_release=True)
+
+    def ai_judgment(self, request: Mapping[str, Any]) -> AIJudgePolicy:
+        """The AUTONOMOUS stand-in for the human plan review: an AI SRE judges
+        the release evidence for blast radius and irreversibility."""
+        if not self._engaged(request) or not request_is_autonomous(request):
+            return AIJudgePolicy.identity()
+        return AIJudgePolicy(rubrics={
+            "infra_plan_review": (
+                "Judge this INFRASTRUCTURE release as a senior SRE reviewing a "
+                "change plan. Approve ONLY if the evidence shows no destructive "
+                "or irreversible operations (deletes/replaces of stateful "
+                "resources, wide-open security groups, disabled backups), no "
+                "hardcoded secrets, and gates that actually validated the plan. "
+                "Refuse on any sign of unbounded blast radius."
+            ),
+        })
 
     def approver_of_record(self, request: Mapping[str, Any]) -> ApproverPolicy:
         if not self._engaged(request) or request_is_autonomous(request):
@@ -78,8 +96,9 @@ class InfraPack(BaseDomainPack):
 
     def perceptual_hitl(self, request: Mapping[str, Any]) -> PerceptualHITLPolicy:
         """The plan-review HITL: a human reviews the PLAN evidence bundle before
-        any apply — reuses the recorded-sign-off seam (never auto-approved)."""
-        if not self._engaged(request):
+        any apply — reuses the recorded-sign-off seam (never auto-approved).
+        AUTONOMOUS runs are judged by the AI infra expert instead."""
+        if not self._engaged(request) or request_is_autonomous(request):
             return PerceptualHITLPolicy.identity()
         return PerceptualHITLPolicy(
             hitl_required_capabilities=self.capabilities,

@@ -109,6 +109,59 @@ def test_infra_pack_autonomous_drops_human_requirements() -> None:
     assert pack.assign_verdict_class(INFRA_REQ_AUTO).classes == {}
 
 
+# ---- the AI judge fills the autonomous judgment slot (hook 8) ---------------------
+
+
+def test_ai_judgment_rubrics_fill_the_autonomous_judgment_slot() -> None:
+    """The universal rule: a HUMAN judges in the human modes (HITL/approver
+    hooks); in a declared-AUTONOMOUS run an AI expert fills the same slot."""
+    from foundry.domains.packs.frontend import FrontendPack
+
+    cases = (
+        (GamePack(), GAME_REQ_AUTO, GAME_REQ, "playability"),
+        (InfraPack(), INFRA_REQ_AUTO, INFRA_REQ, "infra_plan_review"),
+        (CryptoPack(), CRYPTO_REQ_AUTO, CRYPTO_REQ, "crypto_review"),
+        (FrontendPack(),
+         {"required_capabilities": ["ui"], "mode": "autonomous"},
+         {"required_capabilities": ["ui"]},
+         "visual_ux"),
+    )
+    for pack, req_auto, req_human, domain in cases:
+        assert domain in pack.ai_judgment(req_auto).rubrics, pack.name
+        assert pack.ai_judgment(req_auto).required is True
+        assert pack.ai_judgment(req_human).rubrics == {}   # a human judges there
+        assert pack.ai_judgment(PLAIN_REQ).rubrics == {}   # off-capability
+
+
+def test_release_admission_defers_to_the_ai_judge_in_autonomous() -> None:
+    """pack_release_admitted: rubric demanded ⇒ the judge decides; no judge
+    wired or a refusal ⇒ no release (fail-closed)."""
+    from foundry.domains.registry import PackRegistry
+    from foundry.graph.factory_graph import pack_release_admitted
+
+    registry = PackRegistry()
+    registry.register(GamePack())
+    state = {"required_capabilities": ["game"], "mode": "autonomous"}
+    config = {"configurable": {"thread_id": "t-ai-judge"}}
+    seen: list[list[str]] = []
+
+    def approve(s, c, rubrics):  # noqa: ANN001, ANN202
+        seen.append(sorted(rubrics))
+        return True
+
+    assert pack_release_admitted(
+        state, config, registry, requested_mode="autonomous", ai_judge=approve
+    ) is True
+    assert seen == [["playability"]]
+    assert pack_release_admitted(
+        state, config, registry, requested_mode="autonomous",
+        ai_judge=lambda s, c, r: False,
+    ) is False
+    assert pack_release_admitted(
+        state, config, registry, requested_mode="autonomous", ai_judge=None
+    ) is False
+
+
 # ---- registry / CLI integration ----------------------------------------------------
 
 

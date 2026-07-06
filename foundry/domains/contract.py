@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     from typing import Any
 
 __all__ = [
+    "AIJudgePolicy",
     "ApproverPolicy",
     "BaseDomainPack",
     "ComputePolicy",
@@ -67,6 +68,7 @@ __all__ = [
     "TightenError",
     "VerdictClassPolicy",
     "request_capabilities",
+    "request_is_autonomous",
 ]
 
 
@@ -379,6 +381,49 @@ class PerceptualHITLPolicy(FrozenModel):
         return False
 
 
+class AIJudgePolicy(FrozenModel):
+    """Hook 8 — AI-expert release judgment for hands-off (AUTONOMOUS) runs.
+
+    The universal rule: in the human-in-the-loop modes a HUMAN is the judge (the
+    perceptual HITL / approver-of-record hooks); in a declared-autonomous run an
+    AI EXPERT fills the same judgment slot instead of it being skipped. A pack
+    declares per-DOMAIN rubrics (``domain -> what the judge must evaluate``); the
+    release boundary runs each rubric through the proxy's TRUSTED judgment path
+    (grammar-constrained verdict, proxy-stamped binding to the exact subject +
+    state_sha) and admits only if EVERY domain approves — fail-closed.
+
+    The join unions the rubric map (judging more domains only tightens); two
+    packs contributing rubrics for the SAME domain concatenate them.
+    """
+
+    rubrics: dict[str, str] = Field(default_factory=dict)
+
+    @property
+    def required(self) -> bool:
+        return bool(self.rubrics)
+
+    @classmethod
+    def identity(cls) -> AIJudgePolicy:
+        return cls()
+
+    def tighten(self, other: AIJudgePolicy) -> AIJudgePolicy:
+        merged = dict(self.rubrics)
+        for domain, rubric in other.rubrics.items():
+            prior = merged.get(domain)
+            if prior and rubric and rubric not in prior:
+                merged[domain] = f"{prior}\n\n{rubric}"
+            else:
+                merged[domain] = rubric or prior or ""
+        return AIJudgePolicy(rubrics=merged)
+
+    def relaxes(self, floor: AIJudgePolicy) -> bool:
+        """Always ``False`` — a union axis: contributing a rubric can only add
+        scrutiny, never drop another pack's demand (``tighten`` keeps every
+        domain's rubric)."""
+        del floor
+        return False
+
+
 @runtime_checkable
 class DomainPackContract(Protocol):
     """Structural contract every pack satisfies (domains.md §4).
@@ -400,7 +445,7 @@ class DomainPackContract(Protocol):
         """The capabilities this pack engages on (routing key, registry)."""
         ...
 
-    # --- the seven core hooks (domains.md §4) --------------------------------
+    # --- the eight core hooks (domains.md §4) ---------------------------------
 
     def assign_verdict_class(self, request: Mapping[str, Any]) -> VerdictClassPolicy:
         """Hook 1 — verdict-class assignment per criterion/gate (classes 1-5)."""
@@ -428,6 +473,10 @@ class DomainPackContract(Protocol):
 
     def perceptual_hitl(self, request: Mapping[str, Any]) -> PerceptualHITLPolicy:
         """Hook 7 — mandatory perceptual HITL + rendered-evidence bundle."""
+        ...
+
+    def ai_judgment(self, request: Mapping[str, Any]) -> AIJudgePolicy:
+        """Hook 8 — AI-expert release judgment rubrics for AUTONOMOUS runs."""
         ...
 
 
@@ -472,6 +521,9 @@ class BaseDomainPack:
 
     def perceptual_hitl(self, request: Mapping[str, Any]) -> PerceptualHITLPolicy:
         return PerceptualHITLPolicy.identity()
+
+    def ai_judgment(self, request: Mapping[str, Any]) -> AIJudgePolicy:
+        return AIJudgePolicy.identity()
 
 
 def request_capabilities(request: Mapping[str, Any]) -> frozenset[str]:

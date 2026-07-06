@@ -323,6 +323,7 @@ def pack_release_admitted(
     pack_registry: PackRegistry | None,
     *,
     requested_mode: str,
+    ai_judge: Any = None,
 ) -> bool:
     """Fail-closed: does the composed domain-pack policy ADMIT this release? (T-M5-08)
 
@@ -375,7 +376,100 @@ def pack_release_admitted(
             server_nonce=nonce,
         ):
             return False
+
+    # -- AI-expert judgment (autonomous): the machine stand-in for the human ----
+    # sign-offs. In a declared-autonomous run the packs contribute per-domain
+    # RUBRICS instead of human sign-off demands; each is judged through the
+    # proxy's TRUSTED judgment path and EVERY domain must approve — fail-closed
+    # (no judge wired / judge error / refusal ⇒ no release).
+    if policy.ai_judge.required:
+        if ai_judge is None:
+            return False
+        if not ai_judge(state, config, dict(policy.ai_judge.rubrics)):
+            return False
     return True
+
+
+_AI_JUDGE_SOP = (
+    "You are the release judge for a hands-off (autonomous) software factory. "
+    "You are given a DOMAIN RUBRIC and the release evidence (the request, gate "
+    "verdicts, artifact inventory). Judge STRICTLY against the rubric; when the "
+    "evidence is insufficient to satisfy it, refuse (fail-closed). Reply with "
+    "JSON only: status 'approve' or 'request-changes', plus findings."
+)
+
+
+def _ai_judge_evidence(state: FactoryState) -> str:
+    """A compact, model-readable release-evidence digest for the AI judge."""
+    lines = [f"REQUEST: {str(state.get('request') or '')[:800]}"]
+    gates = list(state.get("gates") or ())
+    if gates:
+        lines.append("GATES:")
+        for g in gates[-24:]:
+            name = getattr(g, "name", None) or (g.get("name") if isinstance(g, dict) else "?")
+            status = getattr(g, "status", None) or (g.get("status") if isinstance(g, dict) else "?")
+            lines.append(f"- {name}: {status}")
+    arts = list(state.get("artifacts") or ())
+    if arts:
+        kinds: dict[str, int] = {}
+        for a in arts:
+            kind = str(getattr(a, "kind", None) or (a.get("kind") if isinstance(a, dict) else "?"))
+            kinds[kind] = kinds.get(kind, 0) + 1
+        lines.append("ARTIFACTS: " + ", ".join(f"{k}×{n}" for k, n in sorted(kinds.items())))
+    return "\n".join(lines)
+
+
+def make_pack_ai_judge(rt: AgentRuntime) -> Any:
+    """Build the release AI judge over the proxy's TRUSTED judgment path.
+
+    Each (state_sha, domain) verdict is judged ONCE and memoized — the emit
+    guards may re-evaluate, and a judgment must not be re-billed or flip between
+    evaluations of the same release. The verdict is a proxy-stamped GateResult
+    (grammar-constrained status, signed binding to subject + state_sha), so a
+    compromised adapter cannot forge an approval — the same anti-spoofing the
+    human sign-off path has."""
+    verdicts: dict[tuple[str, str], bool] = {}
+
+    def judge(state: FactoryState, config: RunnableConfig, rubrics: dict[str, str]) -> bool:
+        subject = newest_artifact_uri(state, DESIGN_KIND) or "artifact://release"
+        sha = state_sha(config)
+        for domain in sorted(rubrics):
+            key = (sha, domain)
+            if key not in verdicts:
+                nonce = sign_off_nonce(config, f"ai_judge_{domain}", subject, sha)
+                seq = rt.seq(config, "release_ai_judge", f"judge:{domain}")
+                try:
+                    res = rt.proxy.judge(
+                        "release_ai_judge",
+                        subject,
+                        sha,
+                        nonce,
+                        _AI_JUDGE_SOP,
+                        [{
+                            "role": "user",
+                            "content": (
+                                f"DOMAIN: {domain}\nRUBRIC:\n{rubrics[domain]}\n\n"
+                                f"RELEASE EVIDENCE:\n{_ai_judge_evidence(state)}\n\n"
+                                "Judge this release against the rubric."
+                            ),
+                        }],
+                        seq=seq,
+                        tier="T1",
+                        gate_name=f"ai_judge_{domain}",
+                    )
+                    verdicts[key] = res.gate_result.status is GateStatus.PASS
+                    findings = "; ".join(res.gate_result.findings[:3])
+                except Exception as exc:  # fail-closed: an unjudgeable release is refused
+                    verdicts[key] = False
+                    findings = f"judge error: {exc}"
+                print(f"[ai-judge] {domain}: "
+                      f"{'APPROVED' if verdicts[key] else 'REFUSED'}"
+                      f"{' — ' + findings if findings else ''}")
+            if not verdicts[key]:
+                return False
+        return True
+
+    return judge
 
 
 def _perceptual_hitl_satisfied(
@@ -735,6 +829,11 @@ def build_factory_graph(
             "autonomous mode requires builder, admission, deployer, and "
             "gate_verifier (the trust-root chain build → admit → deploy)"
         )
+    # The AI release judge (hook 8): in a declared-autonomous run the packs'
+    # human-judgment slots are filled by an AI expert through the proxy's trusted
+    # judgment path instead of being skipped. Built once per compiled graph so
+    # its per-(state_sha, domain) verdict memo spans the emit guards.
+    pack_ai_judge = make_pack_ai_judge(rt) if pack_registry is not None else None
 
     supervisor = build_supervisor_graph(
         rt,
@@ -776,7 +875,8 @@ def build_factory_graph(
             # never make a FAILing gate pass (the terminal-gate guard above is
             # independent and unchanged).
             return {"phase": "halted"}
-        if not pack_release_admitted(state, config, pack_registry, requested_mode=mode):
+        if not pack_release_admitted(state, config, pack_registry, requested_mode=mode,
+                                      ai_judge=pack_ai_judge):
             # An engaged domain pack TIGHTENS the release (a recorded human
             # approver-of-record / perceptual HITL is required) and is unmet —
             # fail-closed: open NOTHING (tighten-only; packs never relax).
@@ -833,7 +933,8 @@ def build_factory_graph(
             # can never turn a gate FAIL into a release (gated_release_admitted is
             # independent and unchanged).
             return {"phase": "halted"}
-        if not pack_release_admitted(state, config, pack_registry, requested_mode=mode):
+        if not pack_release_admitted(state, config, pack_registry, requested_mode=mode,
+                                      ai_judge=pack_ai_judge):
             # An engaged domain pack TIGHTENS the release beyond the self-judge
             # Release sign-off (a recorded HUMAN approver-of-record / perceptual
             # HITL is required) and is unmet — fail-closed: no PR, no pack release.
@@ -948,7 +1049,7 @@ def build_factory_graph(
         # deploy NOTHING.
         veto_seq = rt.seq(config, _EMIT, "pack:autonomous_reachable")
         if not pack_release_admitted(
-            state, config, pack_registry, requested_mode=mode
+            state, config, pack_registry, requested_mode=mode, ai_judge=pack_ai_judge
         ) or not autonomous_pack_reachable(
             state, pack_registry, requested_mode=mode, seq=veto_seq
         ):

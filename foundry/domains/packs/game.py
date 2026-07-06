@@ -24,6 +24,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from foundry.domains.contract import (
+    AIJudgePolicy,
     BaseDomainPack,
     ModeTierPolicy,
     PerceptualHITLPolicy,
@@ -83,5 +84,25 @@ class GamePack(BaseDomainPack):
     def mode_tier_policy(self, request: Mapping[str, Any]) -> ModeTierPolicy:
         """No mode veto: `autonomous` is reachable for game requests. The class-5
         playability sign-off binds HUMAN-in-the-loop modes (see perceptual_hitl);
-        a hands-off run releases on the machine gates (build/tests/smoke) alone."""
+        a hands-off run is judged by the AI playability expert instead
+        (see ai_judgment)."""
         return ModeTierPolicy.identity()
+
+    def ai_judgment(self, request: Mapping[str, Any]) -> AIJudgePolicy:
+        """The AUTONOMOUS stand-in for the human playability sign-off: an AI
+        expert judges the release evidence against the playability rubric.
+        Weaker than a human playing the game — but strictly stronger than the
+        nothing that would otherwise fill the slot in a hands-off run."""
+        if not self._engaged(request) or not request_is_autonomous(request):
+            return AIJudgePolicy.identity()
+        return AIJudgePolicy(rubrics={
+            "playability": (
+                "Judge this GAME release as a veteran game designer + QA lead. "
+                "Approve ONLY if the evidence shows: the game actually boots and "
+                "survives the runtime smoke gate; the core play loop the request/"
+                "spec promises is present (not stubbed); controls/menus the spec "
+                "names exist; and no gate evidence suggests crash-on-interact or "
+                "unfinishable state. Refuse if the release looks like a skeleton, "
+                "a menu with no game, or the smoke evidence is missing."
+            ),
+        })

@@ -336,6 +336,7 @@ class Project:
     gates: dict[str, Any] = field(default_factory=dict)  # name -> {status,attested,advisory}
     out_base: Path | None = None  # this floor's output dir (code/ + docs/)
     platform_opts: dict[str, Any] = field(default_factory=dict)  # platform build knobs (advanced)
+    profile: str = "auto"  # verification profile / stack ("auto" = infer from request)
     # Milestone ladder (BUILD-A-FULL-GAME.md §2, in the Workshop): each rung runs as
     # a RELEASE on this floor, chained on the prior rung's released tree. Continuation
     # state is in-memory (same posture as autopilot_budget) — a restart mid-ladder
@@ -841,6 +842,59 @@ def _emit_paced(p: Project, events: list[dict[str, Any]]) -> None:
         time.sleep(_STAGE_PAUSE if ev.get("type") == "stage" else _PACE)
 
 
+_STACK_SOP = (
+    "You are a principal architect choosing the implementation stack for a new "
+    "build. You are given the request, the spec, and the stacks whose toolchains "
+    "are INSTALLED on this host (each with the exact gates it pins). Pick the "
+    "best-fit stack: prefer the simplest one that satisfies the spec, respect any "
+    "stack the request names explicitly, and never pick a stack the spec's "
+    "requirements can't meet. Reply with JSON only."
+)
+
+
+def _choose_stack(p: Project) -> tuple[str, str] | None:
+    """Architect-driven stack selection for profile="auto" (real backends only).
+
+    Offers ONLY the stacks whose toolchains are installed on this host and asks
+    the backend to choose; returns (profile_name, reason) or None (fail-soft →
+    the keyword inference in foundry.gates.profiles decides, as before)."""
+    if p.backend == "mock":
+        return None
+    try:
+        from foundry.cli import _build_proxy
+        from foundry.gates.profiles import PROFILES, installed_profiles
+
+        avail = installed_profiles()
+        if len(avail) <= 1:
+            return None
+        menu = "\n".join(f"- {n}: {PROFILES[n].contract_text}" for n in avail)
+        schema = {
+            "type": "object",
+            "properties": {
+                "profile": {"type": "string", "enum": avail},
+                "reason": {"type": "string"},
+            },
+            "required": ["profile", "reason"],
+            "additionalProperties": False,
+        }
+        result = _build_proxy(p.backend).complete(
+            "principal_architect", "T1", _STACK_SOP,
+            [{"role": "user",
+              "content": (f"REQUEST:\n{p.request}\n\nSPEC:\n{(p.spec_text or '')[:2000]}"
+                          f"\n\nINSTALLED STACKS (pick one):\n{menu}")}],
+            purpose="ideation", schema=schema,
+        )
+        parsed = result.parsed if isinstance(result.parsed, dict) else None
+        if parsed is None:
+            parsed = json.loads(result.text or "{}")
+        name = str(parsed.get("profile") or "")
+        if name in avail:
+            return name, str(parsed.get("reason") or "")[:300]
+    except Exception as exc:
+        print(f"[stack] architect selection failed (keyword inference instead): {exc}")
+    return None
+
+
 _ADVISOR_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -1009,6 +1063,19 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     _emit(p, type="active", room="product", agent="", live=True)
     time.sleep(_PACE)
 
+    # Stack = auto on a real backend: the Principal Architect picks the stack from
+    # the toolchains actually installed on this host; the chosen profile pins the
+    # gates for THIS build and every child (iterate / autopilot / ladder rung).
+    if (p.profile or "auto") == "auto":
+        chosen = _choose_stack(p)
+        if chosen:
+            p.profile = chosen[0]
+            _emit(p, type="active", room="architecture", agent="Principal Architect",
+                  live=True)
+            _emit(p, type="narrate",
+                  text=f"🏗 Principal Architect chose the stack: {chosen[0]}"
+                       + (f" — {chosen[1]}" if chosen[1] else ""))
+
     # ---- milestone ladder: plan once (rung 1), then run THIS rung ------------- #
     run_request, run_spec = p.request, p.spec
     if p.milestones_on:
@@ -1155,6 +1222,7 @@ def _run_factory(p: Project, resume: bool = False) -> None:
                 checkpoints=True,
                 checkpoint_responder=responder,
                 output_dir=str(code_dir) if code_dir else None,
+                profile=p.profile or "auto",  # stack picked in the UI ("auto" = infer)
             )
         finally:
             wd_stop.set()
@@ -1349,6 +1417,7 @@ def _spawn_iteration(
         max_fix_attempts=parent.max_fix_attempts, parent_id=parent.id,
         autopilot_budget=max(0, budget),
     )
+    p.profile = parent.profile
     with _LOCK:
         _PROJECTS[pid] = p
 
@@ -1422,6 +1491,7 @@ def _spawn_milestone_next(parent: Project) -> Project:
     p.milestone_plan = plan
     p.milestone_index = i
     p.milestone_root = parent.milestone_root
+    p.profile = parent.profile
     with _LOCK:
         _PROJECTS[pid] = p
     threading.Thread(target=_gated_runner, args=(_run_factory, p), daemon=True).start()
@@ -1776,9 +1846,15 @@ class Handler(BaseHTTPRequestHandler):
             default_slots = max(1, int(os.environ.get("FOUNDRY_MAX_SLOTS", "1") or "1"))
         except ValueError:
             default_slots = 1
+        try:
+            from foundry.gates.profiles import PROFILES
+            profiles = sorted(PROFILES)
+        except Exception:
+            profiles = []
         self._json(200, {
             "default_backend": default, "backends": list(BACKENDS),
             "default_adapter": default_adapter, "adapters": list(ADAPTERS),
+            "profiles": profiles,
             "default_max_slots": default_slots, "models": models,
             "models_by_backend": models_by_backend,
         })
@@ -2293,6 +2369,11 @@ class Handler(BaseHTTPRequestHandler):
             max_fix_attempts=max_fix_attempts, parent_id=parent_id, base_dir=base_dir,
             autopilot_budget=autopilot_budget,
         )
+        # Verification profile / stack: "auto" (default) infers from the request;
+        # a named profile pins the gate commands (validated by run(), which
+        # rejects unknown names fail-closed before any model spend).
+        prof = str(body.get("profile") or "auto").strip().lower()
+        p.profile = prof or "auto"
         # Milestone ladder (build="milestones"): plan-and-chain releasable rungs.
         # An explicit list (one per line in the UI) skips the planner entirely.
         if str(body.get("build") or "").strip().lower() == "milestones":

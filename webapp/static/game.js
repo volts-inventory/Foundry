@@ -2505,6 +2505,8 @@ document.getElementById("start-btn").onclick=async ()=>{
         .split("\n").map(s=>s.trim()).filter(Boolean);
       if(lines.length) extra.milestones=lines;
     } }
+  { const ps=document.getElementById("profile-select");
+    if (ps && ps.value && ps.value!=="auto") extra.profile=ps.value; }
   const intake=intakeMode();
   if(startFromSel.value && !req.trim()){ alert("Describe what to change or add."); return; }
   if(intake==="spec"){
@@ -2591,6 +2593,13 @@ fetch("/api/config").then(r=>r.json()).then(c=>{
     sel.value=c.default_backend;
   const asel=document.getElementById("adapter-select");
   reconcileSelect(asel, c.adapters, c.default_adapter);
+  // Stack picker: "auto" + every verification profile the server ships.
+  { const ps=document.getElementById("profile-select");
+    if (ps && Array.isArray(c.profiles)){
+      for (const name of c.profiles){
+        const o=document.createElement("option"); o.value=name; o.textContent=name;
+        ps.appendChild(o);
+      } } }
   // The coding substrate is DERIVED from the backend (parity with the CLI:
   // mock→stub, any real backend→raw-react), so a real backend writes real code
   // without a second pick. syncAdapter() applies it unless the user overrode it.

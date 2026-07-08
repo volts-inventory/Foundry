@@ -382,18 +382,23 @@ class _RetryPolicy:
         self.sleeper(delay)
 
 
-# Words/codes in a transport error that mean "the PROVIDER throttled us" (HTTP 429,
-# Anthropic 529 overloaded, quota). Rate-limit errors are NOT failures of the pinned
-# model — they're transient and must be waited out (honoring Retry-After), on a
-# SEPARATE, more generous budget than a real transport failure.
+# Words/codes in a transport error that mean "the PROVIDER threw us back" — a
+# throttle (HTTP 429, Anthropic 529 overloaded, quota), a subscription-window
+# limit, OR a transient stall (a timeout / wall-clock hard-kill). None of these
+# is a failure of the pinned model: they're TRANSIENT and must be waited out on a
+# SEPARATE, more generous (but still bounded) budget than a real transport failure
+# — so one hiccup can't kill a multi-hour overnight run.
 _RATE_LIMIT_MARKERS = (
     "rate limit", "rate_limit", "ratelimit", "too many requests",
     "429", "529", "overloaded", "quota exceeded", "throttl",
     # Subscription-window exhaustion (Claude Max via the claude CLI): the CLI
-    # reports "Claude AI usage limit reached|<reset-epoch>". It is transient —
-    # the window resets — so it must ride the rate-limit budget, not fail the
-    # run after 3 quick transport retries.
-    "usage limit",
+    # reports "Claude AI usage limit reached|<reset-epoch>", but ALSO — and this
+    # is the case that silently killed overnight runs — often just STALLS when the
+    # window is spent, so the subprocess is hard-killed at the wall-clock cap. A
+    # bare timeout/hard-kill is transient by nature (a wedged prompt still fails
+    # closed after the bounded budget), so it rides the generous budget too.
+    "usage limit", "limit reached", "limit will reset",
+    "hard-killed at wall-clock cap", "timed out", "timeout",
 )
 
 

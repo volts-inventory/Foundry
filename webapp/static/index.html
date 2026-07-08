@@ -58,7 +58,7 @@
       <select id="startfrom-select"><option value="">✦ Fresh build</option></select>
       <label id="req-label">What should the factory build? <span class="hint">— a sentence, or a full brief</span></label>
       <textarea id="req-input" rows="3"
-        placeholder="e.g. a URL shortener with custom slugs, link expiry, and per-IP abuse rate-limiting">a complete stardew-style farming game about colonizing the moon</textarea>
+        placeholder="e.g. a URL shortener with custom slugs, link expiry, and per-IP abuse rate-limiting">a small programming language: a tree-walking interpreter with a REPL — variables, functions and closures, conditionals, loops, arithmetic, strings, arrays, hashes, and a small standard library</textarea>
 
       <label>How do you want to feed the spec? <span class="hint">— the request alone is enough; these add detail</span></label>
       <div class="intake-modes" id="intake-modes">
@@ -70,15 +70,21 @@
       <div class="intake-panel" data-mode="spec">
         <label>Full spec (markdown / text) — grounds the PRD</label>
         <textarea id="spec-text" rows="7"
-          placeholder="# Spec&#10;&#10;Goals, constraints, interfaces, acceptance criteria…">A complete stardew-valley-style 2D farming/life sim, set on the moon.
-Must include: tile-based moon surface with a scrolling camera; day/night + sol
-cycle; player movement and tool use; tilling, planting, watering, and harvesting
-at least 6 crop types with growth stages; oxygen/energy management; a colony hub
-with at least 4 NPCs with daily schedules and dialog; an economy (sell crops,
-buy seeds/upgrades at a store); base-building (place/upgrade modules);
-save/load with 3 slots; a title screen, pause menu, and controls screen;
-sound hooks (procedural or silent-safe); keyboard controls documented in-game.
-Code-drawn graphics (shapes/procedural tiles) are fine — no external assets.</textarea>
+          placeholder="# Spec&#10;&#10;Goals, constraints, interfaces, acceptance criteria…">A small dynamically-typed programming language: a tree-walking interpreter,
+an interactive REPL, and a file runner. Build it as a clean pipeline —
+a lexer (tokens), a Pratt parser (precedence-climbing AST), and an evaluator.
+Language: integers, booleans, strings, arrays, and hash maps; arithmetic,
+comparison, and boolean operators with correct precedence; let-bindings and
+assignment; if/else expressions; while loops; first-class functions with
+closures and recursion; a small standard library (len, print, push, first,
+last, map, reduce); parse and runtime errors that report a line number.
+The REPL evaluates a line at a time; the runner executes a source file.
+Tests MUST cover the lexer (token streams), the parser (AST shapes), and the
+evaluator (program → value): arithmetic and precedence, closures and recursion
+(e.g. a recursive fibonacci), string/array/hash operations, and error cases
+(unbound identifier, type mismatch). The smoke entry runs a bundled example
+program end to end and exits 0 only if its printed output matches expected.
+Pure logic — no external services or assets.</textarea>
       </div>
       <div class="intake-panel hidden" data-mode="zip">
         <label>Zip of <code>.md</code> / <code>.txt</code> docs — read as the spec</label>
@@ -111,10 +117,15 @@ Code-drawn graphics (shapes/procedural tiles) are fine — no external assets.</
       </div>
       <div id="milestones-opts">
         <label>Max milestones <span class="hint">— ladder length cap; the planner may use fewer</span></label>
-        <input id="max-milestones" type="number" min="1" max="12" value="10" />
+        <input id="max-milestones" type="number" min="1" max="12" value="6" />
         <label>Explicit ladder <span class="hint">— optional, one milestone per line; blank = the model plans it</span></label>
-        <textarea id="milestones-text" rows="3"
-          placeholder="engine loop + player movement&#10;tilemap world + camera&#10;farming (6 crops, growth stages)"></textarea>
+        <textarea id="milestones-text" rows="6"
+          placeholder="lexer + token stream + REPL skeleton&#10;Pratt parser → AST for expressions and let-bindings">lexer + token stream + a REPL skeleton
+Pratt parser → AST for expressions and let-bindings
+evaluator: arithmetic, booleans, variables, if/else
+first-class functions, closures, and recursion
+strings, arrays, hashes, and a small standard library
+while loops, line-numbered error handling, and the file runner</textarea>
       </div>
       <div class="row">
         <label>Coding substrate</label>
@@ -144,9 +155,9 @@ Code-drawn graphics (shapes/procedural tiles) are fine — no external assets.</
       <label>Cost cap (USD) <span class="hint">— max model spend (metered API backends only)</span></label>
       <input id="cap-input" type="number" min="0" step="0.01" placeholder="no cap" />
       <label>Autopilot <span class="hint">— self-iterations after a green build (0 = off): a Director proposes, a software/usability panel votes, the winner builds next</span></label>
-      <input id="autopilot-input" type="number" min="0" max="20" value="5" />
+      <input id="autopilot-input" type="number" min="0" max="20" value="0" />
       <label>Domain packs (optional, comma-separated)</label>
-      <input id="packs-input" type="text" placeholder="regulated, ml_data, frontend, game, crypto, infra" value="game" />
+      <input id="packs-input" type="text" placeholder="regulated, ml_data, frontend, game, crypto, infra" />
       <label class="check"><input type="checkbox" id="supervised" checked /> Supervised (CTO approves each checkpoint)</label>
       <p class="hint" id="supervised-hint"></p>
       <p class="hint">A multi-service request (e.g. a site with users + posts) is auto-built as a PLATFORM — split into web / backend / data services (the backend owns the REST API, auth &amp; domain logic), each auto-deepened, then stitched into one monorepo. A single thing builds as one service.</p>

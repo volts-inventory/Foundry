@@ -42,6 +42,16 @@ def test_state_dir_param_overrides_env(tmp_path, monkeypatch) -> None:
 # ---- --max-fix-attempts -----------------------------------------------------
 
 
+def test_profile_flag_pins_a_known_stack() -> None:
+    # a valid --profile runs clean (mock backend, stub gates)
+    assert main(["--profile", "python-app", "build a thing"]) == 0
+
+
+def test_profile_flag_rejects_unknown_stack() -> None:
+    # fail-closed: an unknown stack is a usage error, never a silent fallback
+    assert main(["--profile", "cobol", "build a thing"]) == 2
+
+
 def test_max_fix_attempts_rejects_non_integer() -> None:
     assert main(["--max-fix-attempts", "abc", "build a thing"]) == 2
 

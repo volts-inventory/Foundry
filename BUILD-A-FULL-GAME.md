@@ -5,6 +5,16 @@ game** with Foundry on a Claude Max plan (`claude -p`, no API billing). Two
 commands, run back-to-back, fully unattended. Works the same with
 `ANTHROPIC_API_KEY` (metered) — no command changes.
 
+> **Any stack, not just pygame.** The factory ships verification profiles for
+> pygame, phaser-web (HTML5), LÖVE, and — for a non-game or a differently-built
+> game — Node, Go, Rust, C#/.NET (MonoGame), and Java. Pick one with
+> `--profile <stack>` on the CLI or the **Stack** dropdown in the Workshop; leave
+> it on **auto** and the Principal Architect chooses from the toolchains
+> installed on your host. This recipe uses **pygame** because it has the most
+> battle-tested runtime *smoke* gate (boots headless, survives 120 frames) and
+> needs no asset pipeline — swap the profile and the same flow builds the game in
+> another engine, provided that toolchain is installed and the spec fits it.
+
 **Prerequisites:** the [Setup](README.md#1-setup) steps done once, the
 `claude` CLI installed and authenticated (`claude /login`, or
 `CLAUDE_CODE_OAUTH_TOKEN` in `.env` for a headless box).
@@ -13,13 +23,15 @@ commands, run back-to-back, fully unattended. Works the same with
 
 ## 1. Write the spec — "full" is whatever you write here
 
-The request line picks the stack; the **spec defines completeness**. The
-acceptance criteria, the milestone ladder, and the gates all derive from it —
-the richer this file, the fuller the game.
+The **spec defines completeness** and `--profile` (or auto) picks the stack. The
+acceptance criteria, the milestone ladder, and the gates all derive from the
+spec — the richer this file, the fuller the game. Keep the spec about *what* the
+game is; leave the *engine* to `--profile` so you can retarget without rewriting
+the brief.
 
 ```bash
 cat > ~/moon-spec.md <<'EOF'
-A complete stardew-valley-style 2D farming/life sim in pygame, set on the moon.
+A complete stardew-valley-style 2D farming/life sim, set on the moon.
 Must include: tile-based moon surface with a scrolling camera; day/night + sol
 cycle; player movement and tool use; tilling, planting, watering, and harvesting
 at least 6 crop types with growth stages; oxygen/energy management; a colony hub
@@ -39,12 +51,18 @@ EOF
 
 ```bash
 python -m foundry.cli milestones \
-  "a complete stardew-style farming game about colonizing the moon, pygame" \
-  --spec ~/moon-spec.md --out ~/moon-colony \
+  "a complete stardew-style farming game about colonizing the moon" \
+  --spec ~/moon-spec.md --out ~/moon-colony --profile pygame \
   --backend claude-cli --adapter claude-code --mode autonomous \
   --max-milestones 10 --max-slots 4 --max-fix-attempts 8 \
   --state-dir ~/foundry/state --thread-id moon-colony
 ```
+
+> `--profile pygame` pins the stack. Drop the flag (or `--profile auto`) to let
+> the Architect pick from your installed toolchains, or name another stack —
+> `--profile phaser-web` (HTML5), `dotnet` (MonoGame/C#), `love2d`, `go`, `rust`,
+> `java-maven`. Each pins its own build/test/smoke gates; a stack whose toolchain
+> isn't installed fails the gate loudly rather than faking a pass.
 
 The output IS a git repository: `~/moon-colony` with one tagged commit per
 milestone (`git diff m04..m05`, `git checkout m03` to play an earlier
@@ -58,11 +76,13 @@ What happens, unattended:
   NPCs/dialog → economy → base-building → save/load → polish);
 - each milestone runs the **full gated factory**: agentic `claude` sessions
   implement the tasks inside sandboxes (each task sees the spec, its
-  acceptance criteria, and its predecessors' code), and the request selects the
-  **pygame verification profile** — build (compileall), tests (pytest), and a
+  acceptance criteria, and its predecessors' code), and `--profile` selects the
+  **verification gates** — for pygame: build (compileall), tests (pytest), and a
   runtime **smoke gate** (`python smoke.py`: the game must boot headless with
   `SDL_VIDEODRIVER=dummy` and survive ≥120 frames, or the boundary routes back
-  to fix with the failure in the next attempt's prompt);
+  to fix with the failure in the next attempt's prompt). Every stack ships an
+  equivalent smoke gate (a real headless boot of the built app), so "green means
+  it runs" holds whichever engine you pick;
 - each **released** increment becomes a tagged commit (staged under
   `~/moon-colony/.stages/mNN`) and seeds the next
   milestone; the ladder **stops fail-closed** at the first milestone the gates
@@ -76,9 +96,9 @@ turn budgets + wall-clock hard-kills bound each task.
 
 ```bash
 python -m foundry.cli autopilot \
-  "a complete stardew-style farming game about colonizing the moon, pygame" \
+  "a complete stardew-style farming game about colonizing the moon" \
   --out ~/moon-colony-plus --backend claude-cli --adapter claude-code \
-  --mode autonomous --iterations 5 --state-dir ~/foundry/state
+  --mode autonomous --iterations 5 --profile pygame --state-dir ~/foundry/state
 ```
 
 Between releases, a **Director** proposes 3 candidate next actions and a
@@ -94,8 +114,8 @@ Like the milestone ladder, the output is one git repository (tagged `i01`…).
 ```bash
 cd ~/moon-colony            # the repo HEAD is the latest release
 # (or: git checkout m03 — play any earlier increment)
-pip install pygame
-python main.py
+pip install pygame          # pygame build; another --profile ships its own run step
+python main.py              # (README quickstart notes per-stack run commands)
 ```
 
 ---
@@ -105,7 +125,9 @@ python main.py
 **Gated, with you approving each idea (Workshop UI):** start
 `python -m webapp.server`, create the project with backend `claude-cli`
 (substrate auto-selects `claude-code`), packs `game`, mode **gated**,
-Supervised on, **Autopilot: 5**. The dialog opens pre-filled with this
+Supervised on, **Autopilot: 5**, and **Stack: auto** (the Architect picks the
+engine from your installed toolchains — or pick `pygame` / another stack
+explicitly). The dialog opens pre-filled with this
 recipe, and **Build as: milestone ladder** (the default) runs §2's ladder
 right in the Workshop — each rung is a release on the floor (the HUD's
 `m01…mNN` chips track it, and it stops fail-closed at the first refused

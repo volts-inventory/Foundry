@@ -58,7 +58,7 @@
       <select id="startfrom-select"><option value="">✦ Fresh build</option></select>
       <label id="req-label">What should the factory build? <span class="hint">— a sentence, or a full brief</span></label>
       <textarea id="req-input" rows="3"
-        placeholder="e.g. a URL shortener with custom slugs, link expiry, and per-IP abuse rate-limiting">a small programming language: a tree-walking interpreter with a REPL — variables, functions and closures, conditionals, loops, arithmetic, strings, arrays, hashes, and a small standard library</textarea>
+        placeholder="e.g. a URL shortener with custom slugs, link expiry, and per-IP abuse rate-limiting">an onion-routing anonymity network (Tor-style): layered encryption, relay nodes, circuit construction, and anonymous end-to-end message delivery — built and verified entirely in-process</textarea>
 
       <label>How do you want to feed the spec? <span class="hint">— the request alone is enough; these add detail</span></label>
       <div class="intake-modes" id="intake-modes">
@@ -70,21 +70,26 @@
       <div class="intake-panel" data-mode="spec">
         <label>Full spec (markdown / text) — grounds the PRD</label>
         <textarea id="spec-text" rows="7"
-          placeholder="# Spec&#10;&#10;Goals, constraints, interfaces, acceptance criteria…">A small dynamically-typed programming language: a tree-walking interpreter,
-an interactive REPL, and a file runner. Build it as a clean pipeline —
-a lexer (tokens), a Pratt parser (precedence-climbing AST), and an evaluator.
-Language: integers, booleans, strings, arrays, and hash maps; arithmetic,
-comparison, and boolean operators with correct precedence; let-bindings and
-assignment; if/else expressions; while loops; first-class functions with
-closures and recursion; a small standard library (len, print, push, first,
-last, map, reduce); parse and runtime errors that report a line number.
-The REPL evaluates a line at a time; the runner executes a source file.
-Tests MUST cover the lexer (token streams), the parser (AST shapes), and the
-evaluator (program → value): arithmetic and precedence, closures and recursion
-(e.g. a recursive fibonacci), string/array/hash operations, and error cases
-(unbound identifier, type mismatch). The smoke entry runs a bundled example
-program end to end and exits 0 only if its printed output matches expected.
-Pure logic — no external services or assets.</textarea>
+          placeholder="# Spec&#10;&#10;Goals, constraints, interfaces, acceptance criteria…">An onion-routing anonymity network modeled on Tor's core, built and verified
+entirely IN-PROCESS (in-memory relay nodes — no real sockets), so it is fully
+deterministic and testable.
+Core idea: a message is wrapped in successive layers of encryption, one per
+relay on a chosen circuit; each relay peels exactly ONE layer and learns only
+the NEXT hop — never the origin, the final destination, or the payload. Use
+vetted primitives (a standard AES/NaCl library); never hand-roll ciphers.
+Build: (1) a layered "onion" envelope — wrap a payload for an ordered list of
+relay public keys, and a relay-side peel that removes one layer; (2) a Relay
+that receives a cell, peels its layer, and forwards to the next hop; (3) circuit
+construction — pick N relays from a directory and build the layered path; (4) a
+Client that onion-wraps a message for a full circuit and an exit that delivers
+it; (5) a relay Directory (register/lookup by id + public key) with random
+circuit selection; (6) return replies along the same circuit, plus integrity
+(a tampered cell is rejected).
+Tests MUST assert: round-trip (wrap → peel through the whole circuit → original
+message); that each relay sees ONLY its next hop (origin/destination
+unlinkability); tamper detection (a modified layer fails); and circuits of
+varying length. The smoke entry builds a 3-relay circuit, sends an anonymous
+message end to end, and exits 0 only if it arrives intact.</textarea>
       </div>
       <div class="intake-panel hidden" data-mode="zip">
         <label>Zip of <code>.md</code> / <code>.txt</code> docs — read as the spec</label>
@@ -120,12 +125,12 @@ Pure logic — no external services or assets.</textarea>
         <input id="max-milestones" type="number" min="1" max="12" value="6" />
         <label>Explicit ladder <span class="hint">— optional, one milestone per line; blank = the model plans it</span></label>
         <textarea id="milestones-text" rows="6"
-          placeholder="lexer + token stream + REPL skeleton&#10;Pratt parser → AST for expressions and let-bindings">lexer + token stream + a REPL skeleton
-Pratt parser → AST for expressions and let-bindings
-evaluator: arithmetic, booleans, variables, if/else
-first-class functions, closures, and recursion
-strings, arrays, hashes, and a small standard library
-while loops, line-numbered error handling, and the file runner</textarea>
+          placeholder="onion envelope: wrap for N relay keys + single-layer peel&#10;a Relay: receive a cell, peel one layer, forward to the next hop">layered onion envelope: wrap a payload for N relay keys + single-layer peel
+a Relay node: receive a cell, peel one layer, forward to the next hop
+circuit construction over a relay directory (register/lookup + random select)
+a Client + exit: onion-wrap for a full circuit and deliver end to end
+return replies along the same circuit (bidirectional cells)
+integrity + unlinkability tests, tamper detection, and the demo runner</textarea>
       </div>
       <div class="row">
         <label>Coding substrate</label>

@@ -28,8 +28,11 @@ if TYPE_CHECKING:
     from foundry.agents._runtime import AgentRuntime, NodeFn
     from foundry.state.factory_state import FactoryState
 
+import os as _os  # noqa: E402
+
 _NODE_ID = "supply_chain_reviewer"
-_TIER = "T1"
+# Defaults to Opus (T1); FOUNDRY_SECURITY_TIER=T2 opts into Sonnet (frugal).
+_TIER = _os.environ.get("FOUNDRY_SECURITY_TIER", "T1").strip() or "T1"
 _SUPPLY_CHAIN_GATE = "supply_chain"
 
 SOP = (

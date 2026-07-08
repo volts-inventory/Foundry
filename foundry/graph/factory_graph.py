@@ -70,6 +70,7 @@ is added as a compiled graph, which ``add_node`` accepts directly.
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.runnables import RunnableConfig
@@ -454,7 +455,10 @@ def make_pack_ai_judge(rt: AgentRuntime) -> Any:
                             ),
                         }],
                         seq=seq,
-                        tier="T1",
+                        # Evidence-vs-rubric judgment: Sonnet (T2) is ample and
+                        # this runs on every autonomous release. FOUNDRY_REVIEW_TIER
+                        # restores Opus for the review/judge calls together.
+                        tier=os.environ.get("FOUNDRY_REVIEW_TIER", "T2").strip() or "T2",
                         gate_name=f"ai_judge_{domain}",
                     )
                     verdicts[key] = res.gate_result.status is GateStatus.PASS

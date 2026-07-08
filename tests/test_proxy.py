@@ -630,6 +630,21 @@ def test_usage_limit_without_epoch_rides_backoff():
     assert is_rl is True and ra is None
 
 
+def test_cli_hang_and_timeout_ride_the_transient_budget():
+    """A spent Max window often STALLS the claude CLI instead of printing a limit,
+    so it's hard-killed at the wall-clock cap. That (and a bare timeout) must ride
+    the generous bounded budget, not fail the run after 3 quick transport attempts
+    — while a genuine non-transient error still fails closed."""
+    from foundry.proxy.model_provider_proxy import _classify_rate_limit
+
+    assert _classify_rate_limit(RuntimeError("claude CLI hard-killed at wall-clock cap"))[0]
+    assert _classify_rate_limit(TimeoutError("command timed out after 300s"))[0]
+    assert _classify_rate_limit(RuntimeError("5-hour limit reached"))[0]
+    # NOT transient: a real config/transport error still fails hard (no waiting)
+    assert _classify_rate_limit(RuntimeError("connection refused"))[0] is False
+    assert _classify_rate_limit(RuntimeError("claude CLI exit 1: invalid model id"))[0] is False
+
+
 def test_rate_limiter_paces_requests_per_minute():
     from foundry.proxy.model_provider_proxy import _RateLimiter
     waits: list[float] = []

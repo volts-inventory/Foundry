@@ -320,6 +320,11 @@ class Project:
     ended: bool = False
     ended_at: float | None = None    # monotonic time the build finished (for log sweeping)
     log_trimmed: bool = False        # in-memory log trimmed to a tail; full history in the store
+    # Auto-resume budget for TRANSIENT provider failures (ProxyUnavailable — a
+    # pause-and-escalate, not a build failure): the build backs off and resumes
+    # from its durable checkpoint instead of dying, so an overnight run survives a
+    # usage-window exhaustion / provider outage. Decrements per outer retry.
+    autoresume_left: int = 6
     # Checkpoint decisions: first decision for a checkpoint wins (idempotent);
     # every device still watches the resolution play (it's just another log event).
     checkpoint_seq: int = 0          # monotonic id of the LATEST checkpoint reached
@@ -1232,6 +1237,29 @@ def _run_factory(p: Project, resume: bool = False) -> None:
         # is a one-line summary, and "no error in the terminal" must never mislead.
         print(f"[build] floor {p.floor} r{p.release_seq} failed: {exc}")
         traceback.print_exc()
+        # A TRANSIENT provider failure (ProxyUnavailable — the proxy already rode
+        # its bounded retry/rate-limit budget and is telling judgment nodes to
+        # "pause-and-escalate") is NOT a build failure: the durable checkpoint is
+        # intact, so back off and RESUME from it rather than losing an overnight
+        # run. Bounded (autoresume_left) with growing backoff so a spent Max
+        # window / provider outage is ridden out, not hammered.
+        transient = "ProxyUnavailable" in type(exc).__name__ or "pause-and-escalate" in str(exc)
+        if transient and p.autoresume_left > 0 and _has_durable_checkpoint(p.id):
+            idx = 6 - p.autoresume_left
+            p.autoresume_left -= 1
+            wait = min(3600, 300 * (2**idx))     # 5,10,20,40,60,60 min
+            resume_at = time.strftime("%H:%M", time.localtime(time.time() + wait))
+            _emit(p, type="narrate",
+                  text=f"⏸ Provider unavailable ({exc}). Auto-resuming from the last "
+                       f"checkpoint ~{resume_at} — nothing is lost.")
+            _emit(p, type="limitwait", seconds=int(wait), until=int(time.time() + wait))
+            _persist(p)                          # status stays "running": a restart resumes too
+            time.sleep(wait)
+            with _LOCK:
+                alive = _PROJECTS.get(p.id) is p  # a Clear-all during the wait removes it
+            if not alive:
+                return
+            return _run_factory(p, resume=True)  # re-enter from the durable checkpoint
         _emit(p, type="narrate", text=f"💥 Build error: {exc}")
         _emit(p, type="halt", phase="error", reason=str(exc))
         _emit(p, type="done", passed=False, phase="error")

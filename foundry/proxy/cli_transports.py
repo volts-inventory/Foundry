@@ -45,6 +45,7 @@ when the backend is not the Anthropic SDK:
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Sequence
@@ -142,11 +143,18 @@ def _schema_of(request: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def _flatten_to_prompt(request: dict[str, Any]) -> str:
+def _env_truthy(name: str) -> bool:
+    return str(os.environ.get(name, "")).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _flatten_to_prompt(request: dict[str, Any], *, include_system: bool = True) -> str:
     """System + messages → one prompt. Appends a json-only instruction when the
-    proxy attached a schema (the CLIs have no native grammar constraint)."""
+    proxy attached a schema (the CLIs have no native grammar constraint).
+
+    ``include_system=False`` omits the system SOP — used when the caller routes it
+    through the CLI's ``--append-system-prompt`` (so it can be prompt-cached)."""
     parts: list[str] = []
-    sys_text = _system_text(request)
+    sys_text = _system_text(request) if include_system else ""
     if sys_text:
         parts.append(sys_text)
     for role, text in _message_pairs(request):
@@ -275,8 +283,24 @@ class ClaudeCliTransport:
         self._extra_args = tuple(extra_args)
 
     def send(self, request: dict[str, Any]) -> ProviderResponse:
-        prompt = _flatten_to_prompt(request)
+        # Token-cost lever (opt-in): the stable per-role SOP is the big prefix that
+        # repeats across many calls (every reviewer call shares the reviewer SOP;
+        # every fix-loop retry re-sends it). Flattening it into the `-p` user string
+        # makes it a fresh, uncacheable message each call. Routed through the CLI's
+        # `--append-system-prompt` instead, Claude Code marks it cacheable, so those
+        # byte-identical prefixes hit Anthropic's prompt cache across invocations
+        # (5-min TTL). Off by default (a `claude` too old to support the flag would
+        # error); FOUNDRY_CLI_CACHE_SYSTEM=1 turns it on — verify with the manifest's
+        # cache-read tokens.
+        cache_system = _env_truthy("FOUNDRY_CLI_CACHE_SYSTEM")
+        sys_text = _system_text(request)
+        if cache_system and sys_text:
+            prompt = _flatten_to_prompt(request, include_system=False)
+        else:
+            prompt = _flatten_to_prompt(request)
         argv = [self._bin, "-p", prompt, "--output-format", "json"]
+        if cache_system and sys_text:
+            argv += ["--append-system-prompt", sys_text]
         model = request.get("model")
         if isinstance(model, str) and model:
             argv += ["--model", model]

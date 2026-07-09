@@ -883,7 +883,7 @@ def _choose_stack(p: Project) -> tuple[str, str] | None:
             "additionalProperties": False,
         }
         result = _build_proxy(p.backend).complete(
-            "principal_architect", "T1", _STACK_SOP,
+            "principal_architect", "T2", _STACK_SOP,  # one structural pick; Sonnet is ample
             [{"role": "user",
               "content": (f"REQUEST:\n{p.request}\n\nSPEC:\n{(p.spec_text or '')[:2000]}"
                           f"\n\nINSTALLED STACKS (pick one):\n{menu}")}],

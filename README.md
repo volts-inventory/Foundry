@@ -450,46 +450,53 @@ echo $?                              # non-zero if NOT released
 > **[BUILD-A-FULL-GAME.md](BUILD-A-FULL-GAME.md)**.
 
 One target, both surfaces: **"a stardew-style farming game about colonizing
-the moon, pygame"**.
+the moon"** — the stack is a knob (`--profile`, or auto = the Architect picks
+from your installed toolchains), not baked into the request. This example pins
+**pygame** (the most battle-tested runtime smoke gate); swap `--profile` for
+`phaser-web` / `dotnet` / `love2d` / `go` / `rust` / `java-maven` — or a non-game
+build — and the same flow applies.
 
 ### CLI
 
 ```bash
 # 1. One gated increment (the walking skeleton), on your Max plan:
-python -m foundry.cli "a stardew-style farming game about colonizing the moon, pygame" \
-  --backend claude-cli --mode gated --out ~/moon-colony \
+python -m foundry.cli "a stardew-style farming game about colonizing the moon" \
+  --backend claude-cli --mode gated --out ~/moon-colony --profile pygame \
   --state-dir ~/foundry/state --packs game
-#    the request selects the PYGAME verification profile automatically: build =
-#    compileall, test = pytest, smoke = `python smoke.py` (the game must boot
-#    headless and survive 120 frames or the boundary routes back to fix)
+#    --profile pygame pins the gates: build = compileall, test = pytest, smoke =
+#    `python smoke.py` (the game must boot headless and survive 120 frames or the
+#    boundary routes back to fix). Drop --profile (or --profile auto) to let the
+#    Architect choose the stack; every stack ships an equivalent boot smoke gate.
 
 # 2. The whole game, milestone by milestone (engine → world → farming →
 #    economy → save/load — the model plans the ladder), fully unattended:
 python -m foundry.cli milestones \
-  "a stardew-style farming game about colonizing the moon, pygame" \
+  "a stardew-style farming game about colonizing the moon" \
   --out ~/moon-colony --backend claude-cli --mode autonomous \
-  --state-dir ~/foundry/state
+  --profile pygame --state-dir ~/foundry/state
 #    each milestone releases into ~/moon-colony/mNN and seeds the next; a kill
 #    resumes at the milestone it died in; the first red gate stops the ladder
 
 # 3. Keep improving it after the target is met — the Director proposes,
 #    the software/usability panel votes, the winner builds next:
 python -m foundry.cli autopilot \
-  "a stardew-style farming game about colonizing the moon, pygame" \
-  --out ~/moon-colony-iterations --backend claude-cli --iterations 5
+  "a stardew-style farming game about colonizing the moon" \
+  --out ~/moon-colony-iterations --backend claude-cli --iterations 5 --profile pygame
 
-# 4. Play it:
+# 4. Play it (per-stack run step — pygame shown):
 cd ~/moon-colony/m05 && pip install pygame && python main.py
 ```
 
 ### Workshop UI
 
 1. `python -m webapp.server` → http://localhost:8765 → **New project**.
-2. Request: *a stardew-style farming game about colonizing the moon, pygame*.
-   Backend **claude-cli** (the substrate auto-flips to **claude-code**, the
-   agentic coder on your Max plan). Packs: **game** — playability now requires
-   YOUR recorded sign-off and hands-off release is vetoed. Mode **gated**,
-   Supervised on. **Autopilot: 5**.
+2. Request: *a stardew-style farming game about colonizing the moon*. **Stack:
+   auto** (the Architect picks the engine from your installed toolchains — or
+   choose `pygame`/another explicitly). Backend **claude-cli** (the substrate
+   auto-flips to **claude-code**, the agentic coder on your Max plan). Packs:
+   **game** — in gated mode playability requires YOUR recorded sign-off; in
+   autonomous an AI playability expert judges the release instead. Mode
+   **gated**, Supervised on. **Autopilot: 5**.
 3. Watch the floor: requirements → design checkpoints ask for your approve;
    the engineers build in sandboxes (each task sees the spec, the criteria,
    and its predecessors' code); the gate row shows **build / test / smoke**
@@ -523,8 +530,9 @@ as any run), both stop fail-closed, and both resume after a kill via
 **Milestones** — grow toward a FIXED target:
 
 ```bash
-python -m foundry.cli milestones "stardew-style moon colony game, pygame" \
-  --out ~/game --backend claude-cli --mode autonomous --state-dir ~/foundry/state
+python -m foundry.cli milestones "stardew-style moon colony game" \
+  --out ~/game --backend claude-cli --mode autonomous --profile pygame \
+  --state-dir ~/foundry/state
 ```
 
 The model plans the ladder (engine loop → world → farming → economy →
@@ -534,8 +542,8 @@ the next milestone's base tree. Stops at the first gate refusal.
 **Autopilot** — keep improving BEYOND the target:
 
 ```bash
-python -m foundry.cli autopilot "stardew-style moon colony game, pygame" \
-  --out ~/game --backend claude-cli --iterations 5
+python -m foundry.cli autopilot "stardew-style moon colony game" \
+  --out ~/game --backend claude-cli --iterations 5 --profile pygame
 ```
 
 Between releases a **Director** proposes 3 candidate next actions and a

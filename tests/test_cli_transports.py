@@ -162,6 +162,34 @@ def test_claude_cli_completion_observes_model_and_flattens_prompt() -> None:
     assert "SYS-SOP" in joined and "do the thing" in joined
 
 
+def test_claude_cli_cache_system_routes_sop_through_append_flag(monkeypatch) -> None:
+    """FOUNDRY_CLI_CACHE_SYSTEM=1 sends the stable SOP via --append-system-prompt
+    (so Claude Code can prompt-cache it across calls) and keeps it OUT of the -p
+    user string; default OFF flattens it in as before."""
+    payload = {"type": "result", "subtype": "success", "result": "ok",
+               "modelUsage": {"claude-opus-4-8": {"inputTokens": 1, "outputTokens": 1}}}
+
+    # default OFF: SOP in the -p prompt, no append flag
+    monkeypatch.delenv("FOUNDRY_CLI_CACHE_SYSTEM", raising=False)
+    off = _claude_runner(payload)
+    build_backend("claude-cli", runner=off).complete(
+        "n", "T2", "STABLE-SOP", [{"role": "user", "content": "volatile"}], purpose="ideation")
+    argv_off = off.calls[0]
+    assert "--append-system-prompt" not in argv_off
+    assert "STABLE-SOP" in argv_off[argv_off.index("-p") + 1]
+
+    # ON: SOP via --append-system-prompt, NOT duplicated into -p
+    monkeypatch.setenv("FOUNDRY_CLI_CACHE_SYSTEM", "1")
+    on = _claude_runner(payload)
+    build_backend("claude-cli", runner=on).complete(
+        "n", "T2", "STABLE-SOP", [{"role": "user", "content": "volatile"}], purpose="ideation")
+    argv_on = on.calls[0]
+    assert "--append-system-prompt" in argv_on
+    assert argv_on[argv_on.index("--append-system-prompt") + 1] == "STABLE-SOP"
+    prompt = argv_on[argv_on.index("-p") + 1]
+    assert "STABLE-SOP" not in prompt and "volatile" in prompt
+
+
 def test_claude_cli_verdict_path_parses_and_stamps_verifiable_binding() -> None:
     verdict = json.dumps({"status": "request-changes", "findings": ["nit"]})
     runner = _claude_runner(

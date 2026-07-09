@@ -35,8 +35,12 @@ if TYPE_CHECKING:
     from foundry.agents._runtime import AgentRuntime, NodeFn
     from foundry.state.factory_state import FactoryState
 
+import os as _os  # noqa: E402
+
 _NODE_ID = "appsec_engineer"
-_TIER = "T1"
+# Security review defaults to Opus (T1) — don't cheap out on the security floor.
+# FOUNDRY_SECURITY_TIER=T2 opts into Sonnet for a frugal hobby build.
+_TIER = _os.environ.get("FOUNDRY_SECURITY_TIER", "T1").strip() or "T1"
 _SECURITY_GATE = "security"
 
 SOP = (

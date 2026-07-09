@@ -58,7 +58,7 @@
       <select id="startfrom-select"><option value="">✦ Fresh build</option></select>
       <label id="req-label">What should the factory build? <span class="hint">— a sentence, or a full brief</span></label>
       <textarea id="req-input" rows="3"
-        placeholder="e.g. a URL shortener with custom slugs, link expiry, and per-IP abuse rate-limiting">a complete stardew-style farming game about colonizing the moon, pygame</textarea>
+        placeholder="e.g. a URL shortener with custom slugs, link expiry, and per-IP abuse rate-limiting">a Private Information Retrieval (PIR) system: fetch record i from a database without any server learning which record you asked for — information-theoretic 2-server PIR plus a single-server homomorphic variant, verified in-process</textarea>
 
       <label>How do you want to feed the spec? <span class="hint">— the request alone is enough; these add detail</span></label>
       <div class="intake-modes" id="intake-modes">
@@ -70,15 +70,26 @@
       <div class="intake-panel" data-mode="spec">
         <label>Full spec (markdown / text) — grounds the PRD</label>
         <textarea id="spec-text" rows="7"
-          placeholder="# Spec&#10;&#10;Goals, constraints, interfaces, acceptance criteria…">A complete stardew-valley-style 2D farming/life sim in pygame, set on the moon.
-Must include: tile-based moon surface with a scrolling camera; day/night + sol
-cycle; player movement and tool use; tilling, planting, watering, and harvesting
-at least 6 crop types with growth stages; oxygen/energy management; a colony hub
-with at least 4 NPCs with daily schedules and dialog; an economy (sell crops,
-buy seeds/upgrades at a store); base-building (place/upgrade modules);
-save/load with 3 slots; a title screen, pause menu, and controls screen;
-sound hooks (procedural or silent-safe); keyboard controls documented in-game.
-Code-drawn graphics (shapes/procedural tiles) are fine — no external assets.</textarea>
+          placeholder="# Spec&#10;&#10;Goals, constraints, interfaces, acceptance criteria…">A Private Information Retrieval (PIR) system: a client fetches record i from a
+database WITHOUT any server learning which record was requested. Built and
+verified entirely IN-PROCESS (in-memory servers — no sockets), so it is fully
+deterministic and testable.
+Core — information-theoretic 2-server PIR: the database is replicated on two
+non-colluding servers. To fetch index i from an n-record DB, the client draws a
+uniformly random bit-vector r of length n, forms r' = r XOR e_i (e_i selects i),
+and sends r to server 1 and r' to server 2. Each server XORs the records whose
+bit is set in its vector and returns that block; the client XORs the two answers
+to recover record i. Each server sees only a uniformly random vector, so neither
+learns i.
+Single-server variant: an additive-homomorphic scheme (e.g. Paillier) — the
+client sends an encrypted selection vector, the server computes the homomorphic
+dot product with the records, the client decrypts record i. Use vetted crypto
+primitives; never hand-roll a cipher.
+Tests MUST assert: correctness (recovered == DB[i]) across indices and DB sizes;
+PRIVACY — each server's received query is independent of i (the 2-server share
+is uniform; the single-server ciphertext leaks nothing about i); multi-block
+records. The smoke entry privately fetches a record and exits 0 only if it
+matches the true record.</textarea>
       </div>
       <div class="intake-panel hidden" data-mode="zip">
         <label>Zip of <code>.md</code> / <code>.txt</code> docs — read as the spec</label>
@@ -111,10 +122,15 @@ Code-drawn graphics (shapes/procedural tiles) are fine — no external assets.</
       </div>
       <div id="milestones-opts">
         <label>Max milestones <span class="hint">— ladder length cap; the planner may use fewer</span></label>
-        <input id="max-milestones" type="number" min="1" max="12" value="10" />
+        <input id="max-milestones" type="number" min="1" max="12" value="6" />
         <label>Explicit ladder <span class="hint">— optional, one milestone per line; blank = the model plans it</span></label>
-        <textarea id="milestones-text" rows="3"
-          placeholder="engine loop + player movement&#10;tilemap world + camera&#10;farming (6 crops, growth stages)"></textarea>
+        <textarea id="milestones-text" rows="6"
+          placeholder="record store + XOR combiner over a selection vector&#10;2-server query split: random share r and r XOR e_i">record store: fixed-size records + an XOR combiner over a selection vector
+2-server query split: a uniform random share r and r' = r XOR e_i for index i
+server answer + client reconstruct: each server XORs its selected records; client XORs both → record i
+correctness across indices, variable DB sizes, and multi-block records
+privacy tests: each server's query vector is independent of i (unlinkability)
+single-server additive-homomorphic (Paillier) variant + the demo runner</textarea>
       </div>
       <div class="row">
         <label>Coding substrate</label>
@@ -139,14 +155,14 @@ Code-drawn graphics (shapes/procedural tiles) are fine — no external assets.</
       <p class="hint" id="parallel-note">The ceiling on how many implementation workers run
         at once — the leads share this pool by demand. Effective parallelism is
         min(tasks created, this cap); each discipline still gets at least one.</p>
-      <label>Auto-fix attempts <span class="hint">— fix-forward retries until green (default 5)</span></label>
-      <input id="fix-input" type="number" min="0" max="20" value="8" />
+      <label>Auto-fix attempts <span class="hint">— fix-forward retries until green; each retry is a full agentic pass, so this is the biggest token lever (default 5)</span></label>
+      <input id="fix-input" type="number" min="0" max="20" value="5" />
       <label>Cost cap (USD) <span class="hint">— max model spend (metered API backends only)</span></label>
       <input id="cap-input" type="number" min="0" step="0.01" placeholder="no cap" />
       <label>Autopilot <span class="hint">— self-iterations after a green build (0 = off): a Director proposes, a software/usability panel votes, the winner builds next</span></label>
-      <input id="autopilot-input" type="number" min="0" max="20" value="5" />
+      <input id="autopilot-input" type="number" min="0" max="20" value="0" />
       <label>Domain packs (optional, comma-separated)</label>
-      <input id="packs-input" type="text" placeholder="regulated, ml_data, frontend, game, crypto, infra" value="game" />
+      <input id="packs-input" type="text" placeholder="regulated, ml_data, frontend, game, crypto, infra" />
       <label class="check"><input type="checkbox" id="supervised" checked /> Supervised (CTO approves each checkpoint)</label>
       <p class="hint" id="supervised-hint"></p>
       <p class="hint">A multi-service request (e.g. a site with users + posts) is auto-built as a PLATFORM — split into web / backend / data services (the backend owns the REST API, auth &amp; domain logic), each auto-deepened, then stitched into one monorepo. A single thing builds as one service.</p>

@@ -1648,6 +1648,7 @@ def _autopilot_main(args: list[str]) -> int:
         args, state_dir = _take_value(args, "--state-dir", what="a directory argument")
         args, _thread = _take_value(args, "--thread-id", what="a value")
         args, _iters = _take_value(args, "--iterations", what="an integer")
+        args, _profile = _take_value(args, "--profile", what="a stack name")
         no_git = "--no-git" in args
         args = [a for a in args if a not in ("--git", "--no-git")]  # --git = default
         request = " ".join(args).strip()
@@ -1675,6 +1676,7 @@ def _autopilot_main(args: list[str]) -> int:
         backend=backend,
         adapter=_adapter,
         state_dir=state_dir,
+        profile=(_profile if _profile is not None else "auto"),
     )
     print(report.summary())
     if report.released_dir:
@@ -1709,6 +1711,7 @@ def _milestones_main(args: list[str]) -> int:
         args, state_dir = _take_value(args, "--state-dir", what="a directory argument")
         args, _thread = _take_value(args, "--thread-id", what="a value")
         args, _max = _take_value(args, "--max-milestones", what="an integer")
+        args, _profile = _take_value(args, "--profile", what="a stack name")
         no_git = "--no-git" in args
         args = [a for a in args if a not in ("--git", "--no-git")]  # --git = default
         request = " ".join(args).strip()
@@ -1739,6 +1742,7 @@ def _milestones_main(args: list[str]) -> int:
         backend=backend,
         adapter=_adapter,
         state_dir=state_dir,
+        profile=(_profile if _profile is not None else "auto"),
     )
     print(report.summary())
     if report.released_dir:
@@ -1977,6 +1981,14 @@ def main(argv: list[str] | None = None) -> int:
         args, _packs = _take_value(args, "--packs", what="a comma-separated list")
         packs: list[str] = [p.strip() for p in _packs.split(",") if p.strip()] if _packs else []
 
+        # --profile NAME: the verification stack (pinned build/test/smoke commands).
+        # OMITTED ⇒ "auto" (infer the stack from the request/spec keywords). A NAME
+        # pins it (run() rejects an unknown name fail-closed). "none" keeps the bare
+        # python defaults. Choices: python | python-app | node-web | pygame |
+        # phaser-web | love2d | go | rust | dotnet | java-maven | crypto | iac-terraform.
+        args, _profile = _take_value(args, "--profile", what="a stack name")
+        profile = _profile if _profile is not None else "auto"
+
         # --adapter {stub|raw-react|claude-code}: the coding substrate that writes
         # the code. OMITTED ⇒ DERIVED from --backend in run() (mock→stub,
         # claude-cli→claude-code agentic, other real backends→raw-react) so a real
@@ -2089,6 +2101,7 @@ def main(argv: list[str] | None = None) -> int:
             checkpoint_responder=responder,
             max_slots=max_slots,
             cost_cap_microusd=cost_cap_microusd,
+            profile=(None if profile == "none" else profile),
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)

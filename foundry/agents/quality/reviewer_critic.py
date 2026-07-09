@@ -45,6 +45,14 @@ if TYPE_CHECKING:
 _NODE_ID = "reviewer_critic"
 _GATE_NAME = "review"  # a JUDGMENT_VERDICTS gate (reducers.py)
 
+# The code-review JUDGE runs every release AND every fix-loop iteration, so its
+# tier is a recurring cost. Sonnet (T2) is a strong reviewer; that's the default
+# cost/value pick (tiers are a cost choice — arch §8). Restore Opus review with
+# FOUNDRY_REVIEW_TIER=T1 when you want the heaviest reasoning on the review gate.
+import os as _os  # noqa: E402
+
+_REVIEW_TIER = _os.environ.get("FOUNDRY_REVIEW_TIER", "T2").strip() or "T2"
+
 # The kind the Junior Engineer stamps on the diff handle it emits to ``artifacts``
 # (foundry/agents/implementation/junior_engineer.py) — the artifact this reviewer
 # judges when the runner has not pinned an explicit subject on the config.
@@ -164,7 +172,7 @@ def make_reviewer_critic_node(rt: AgentRuntime) -> NodeFn:
                 }
             ],
             seq=seq,
-            tier="T1",
+            tier=_REVIEW_TIER,
             gate_name=_GATE_NAME,
         )
 

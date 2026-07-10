@@ -76,6 +76,11 @@ DEFAULT_ENV_ALLOWLIST: tuple[str, ...] = (
     "LC_CTYPE",
     "TERM",
     "TZ",
+    # Not a credential — a sandbox-mode flag. Lets an agentic CLI (claude) accept
+    # --dangerously-skip-permissions when the factory itself runs as root (CI /
+    # containers), where the CLI otherwise refuses that flag. Only ever passed
+    # through when the PARENT sets it, and it carries no secret.
+    "IS_SANDBOX",
 )
 
 # Defense-in-depth: even explicitly-passed extra_env may not smuggle these in.

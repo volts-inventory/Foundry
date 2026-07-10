@@ -1149,6 +1149,71 @@ def _invoke_with_checkpoints(
     return cast("FactoryState", app.get_state(config).values), None
 
 
+def _is_transient_proxy_failure(exc: BaseException) -> bool:
+    """True for a ProxyUnavailable / pause-and-escalate — the proxy already rode
+    its bounded retry + rate-limit budget and is telling judgment nodes to pause,
+    NOT a real build failure. Same predicate the Workshop server uses."""
+    return "ProxyUnavailable" in type(exc).__name__ or "pause-and-escalate" in str(exc)
+
+
+def _invoke_with_autoresume(
+    app: Any,
+    seed: FactoryState,
+    config: RunnableConfig,
+    *,
+    checkpointed: bool,
+    responder: CheckpointResponder | None,
+    progress_cb: Callable[[str, str], None] | None,
+    resumable: bool,
+) -> tuple[FactoryState, str | None]:
+    """Wrap :func:`_invoke_with_checkpoints` so a TRANSIENT provider failure does
+    not kill a DURABLE run. A spent Max usage/session window (or a provider blip)
+    surfaces as ProxyUnavailable; the durable checkpoint is intact, so back off
+    and RE-INVOKE — langgraph continues the graph from its last superstep.
+
+    This mirrors the Workshop server's in-process auto-resume
+    (``webapp/server.py``) so an unattended ``foundry run``/``milestones
+    --state-dir …`` survives a window reset instead of dying and needing a manual
+    restart. Bounded with a growing backoff (5,10,20,40,60,60 min). A NON-durable
+    run has no checkpoint to resume from, so the budget is 0 and behaviour is
+    byte-identical to a bare invoke. Tunable via ``FOUNDRY_CLI_AUTORESUME``
+    (default 6; 0 disables)."""
+    import time
+
+    budget = 0
+    if resumable:
+        try:
+            budget = max(0, int(os.environ.get("FOUNDRY_CLI_AUTORESUME") or 6))
+        except (TypeError, ValueError):
+            budget = 6
+    used = 0
+    while True:
+        try:
+            return _invoke_with_checkpoints(
+                app,
+                seed,
+                config,
+                checkpointed=checkpointed,
+                responder=responder,
+                progress_cb=progress_cb,
+            )
+        except Exception as exc:  # noqa: BLE001 — re-raised unless transient+budget
+            if used >= budget or not _is_transient_proxy_failure(exc):
+                raise
+            wait = min(3600, 300 * (2**used))  # 5,10,20,40,60,60 min
+            used += 1
+            resume_at = time.strftime("%H:%M", time.localtime(time.time() + wait))
+            print(
+                f"[autoresume] transient provider failure ({type(exc).__name__}) "
+                f"— waiting {wait // 60} min (resuming ~{resume_at}) "
+                f"[{used}/{budget}]. The durable checkpoint is intact; nothing is "
+                f"lost.",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(wait)
+
+
 # ---- the smoke run ----------------------------------------------------------
 
 
@@ -1470,13 +1535,14 @@ def run(
             # / HITL fires off required_capabilities). Default run: never set.
             if pack_capabilities:
                 seed["required_capabilities"] = sorted(pack_capabilities)
-            final, paused_at = _invoke_with_checkpoints(
+            final, paused_at = _invoke_with_autoresume(
                 app,
                 seed,
                 config,
                 checkpointed=bool(ckpt_set),
                 responder=checkpoint_responder,
                 progress_cb=progress_cb,
+                resumable=(durable is not None),
             )
         finally:
             reset_gate_write_verifier(token)

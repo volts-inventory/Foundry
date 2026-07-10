@@ -40,7 +40,7 @@ from foundry.state.factory_state import FactoryState
 if TYPE_CHECKING:
     from foundry.agents._runtime import AgentRuntime
 
-__all__ = ["build_product_subgraph"]
+__all__ = ["build_product_subgraph", "make_criteria_revision_router"]
 
 # The concrete LangGraph node signature (same shape as NodeFn).
 _Node = Callable[[FactoryState, RunnableConfig], dict[str, Any]]
@@ -50,6 +50,59 @@ _STAKEHOLDER_PROXY = "stakeholder_proxy"
 _PRODUCT_MANAGER = "product_manager"
 _CRITERIA_CRITIC = "criteria_completeness_critic"
 _ENG_PROGRAM_MGR = "eng_program_mgr"
+
+# Bounded planning self-correction: the PM re-runs at most this many times in
+# response to a blocking criteria critique. The count of ``criteria_findings``
+# artifacts equals the number of PM/critic passes so far (they alternate 1:1), so
+# the router loops while that count is <= this bound and stops after — a hard
+# termination guarantee independent of what the model keeps flagging.
+_MAX_PM_REVISIONS = 2
+
+
+def _latest_critique(state: FactoryState, rt: AgentRuntime) -> Any | None:
+    """Resolve the most-recent ``CriteriaCritique`` on the artifacts channel
+    (None if none yet, or if it cannot be resolved — a degenerate view that the
+    router treats as non-blocking, so a resolution hiccup never traps the loop)."""
+    if rt.cas is None:
+        return None
+    crits = [
+        a
+        for a in (state.get("artifacts") or ())
+        if getattr(a, "kind", None) == "criteria_findings"
+    ]
+    if not crits:
+        return None
+    try:
+        return rt.cas.resolve(max(crits, key=lambda a: a.seq))
+    except Exception:
+        return None
+
+
+def _num_critiques(state: FactoryState) -> int:
+    """How many critic passes have run (== PM passes; they alternate 1:1)."""
+    return sum(
+        1
+        for a in (state.get("artifacts") or ())
+        if getattr(a, "kind", None) == "criteria_findings"
+    )
+
+
+def make_criteria_revision_router(rt: AgentRuntime) -> Callable[[FactoryState], str]:
+    """Route after the Criteria-Completeness Critic: loop back to the PM to revise
+    when the latest critique flags an applicable security/abuse omission AND the
+    revision budget is not spent; otherwise advance to eng_pm. Reads the critique
+    from the ``artifacts`` channel (post-reduction), so it sees the pass the critic
+    just wrote. Fail-open to eng_pm keeps the signed Spec gate as the sole verdict
+    authority (L5) — the router only decides whether to give the PM another try."""
+
+    def _route(state: FactoryState) -> str:
+        critique = _latest_critique(state, rt)
+        blocking = bool(critique is not None and critique.spec_gate_blocking())
+        if blocking and _num_critiques(state) <= _MAX_PM_REVISIONS:
+            return _PRODUCT_MANAGER
+        return _ENG_PROGRAM_MGR
+
+    return _route
 
 
 def build_product_subgraph(rt: AgentRuntime) -> StateGraph[FactoryState]:
@@ -67,6 +120,8 @@ def build_product_subgraph(rt: AgentRuntime) -> StateGraph[FactoryState]:
     pm: _Node = make_product_manager_node(rt)
     critic: _Node = make_criteria_completeness_critic_node(rt)
     eng_pm: _Node = make_eng_program_mgr_node(rt)
+
+    route_after_critic = make_criteria_revision_router(rt)
 
     # The factory closures are typed as the ``_Node`` alias; LangGraph's
     # ``add_node`` resolves its node argument against the ``_NodeWithConfig``
@@ -94,6 +149,18 @@ def build_product_subgraph(rt: AgentRuntime) -> StateGraph[FactoryState]:
     g.add_edge(START, _STAKEHOLDER_PROXY)
     g.add_edge(_STAKEHOLDER_PROXY, _PRODUCT_MANAGER)
     g.add_edge(_PRODUCT_MANAGER, _CRITERIA_CRITIC)
-    g.add_edge(_CRITERIA_CRITIC, _ENG_PROGRAM_MGR)
+    # Bounded planning self-correction (autonomous mode never stalls at a fixable
+    # Spec-gate omission): when the Criteria-Completeness Critic flags an
+    # APPLICABLE security/abuse omission, loop back to the PM (which sees the
+    # critique and adds the missing criteria) up to _MAX_PM_REVISIONS times;
+    # otherwise proceed. A non-blocking critique goes straight to eng_pm, so the
+    # historical linear SOP path (and its tests) is unchanged. The bound
+    # guarantees termination — after the last allowed revision the layer proceeds
+    # and the signed Spec gate downstream still owns the actual verdict (L5).
+    g.add_conditional_edges(
+        _CRITERIA_CRITIC,
+        route_after_critic,
+        {_PRODUCT_MANAGER: _PRODUCT_MANAGER, _ENG_PROGRAM_MGR: _ENG_PROGRAM_MGR},
+    )
     g.add_edge(_ENG_PROGRAM_MGR, END)
     return g

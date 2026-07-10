@@ -111,6 +111,79 @@ def _intent_text(state: FactoryState) -> str:
     )
 
 
+def _latest_critique(state: FactoryState, rt: AgentRuntime) -> Any | None:
+    """The most-recent ``CriteriaCritique`` on the artifacts channel, or None. On
+    a revision pass (the product subgraph loops the PM back when the critic flags a
+    blocking omission) this carries the gaps to close; on the first pass there is
+    none. Best-effort resolution — an unreadable handle yields None."""
+    if rt.cas is None:
+        return None
+    crits = [
+        a
+        for a in (state.get("artifacts") or ())
+        if getattr(a, "kind", None) == "criteria_findings"
+    ]
+    if not crits:
+        return None
+    try:
+        return rt.cas.resolve(max(crits, key=lambda a: a.seq))
+    except Exception:
+        return None
+
+
+def _prior_criteria_text(state: FactoryState, rt: AgentRuntime) -> str:
+    """The PM's previously declared criteria, rendered so a revision pass can
+    reproduce them verbatim (stable ids) and ADD to them rather than replace."""
+    if rt.cas is None:
+        return ""
+    lines: list[str] = []
+    for a in state.get("artifacts") or ():
+        if getattr(a, "kind", None) != "acceptance_criterion":
+            continue
+        try:
+            c = rt.cas.resolve(a)
+        except Exception:
+            continue
+        lines.append(
+            f"- id={getattr(c, 'id', '?')} | {getattr(c, 'text', '')} "
+            f"(criticality={getattr(c, 'criticality', 'normal')}; "
+            f"oracle_hint={getattr(c, 'oracle_hint', '')!r}; "
+            f"security_abuse={getattr(c, 'security_abuse', False)})"
+        )
+    return "\n".join(lines)
+
+
+def _revision_directive(state: FactoryState, rt: AgentRuntime) -> str:
+    """When a prior critique flagged gaps, an explicit REVISION block instructing
+    the PM to reproduce every existing criterion (same ids) and add criteria that
+    close each gap — empty on the first pass, so the first prompt is unchanged."""
+    critique = _latest_critique(state, rt)
+    if critique is None:
+        return ""
+    omissions = tuple(o for o in getattr(critique, "security_abuse_omissions", ()) if str(o).strip())
+    missing = tuple(m for m in getattr(critique, "missing", ()) if str(m).strip())
+    if not omissions and not missing:
+        return ""
+    gaps: list[str] = []
+    if omissions:
+        gaps.append(
+            "SECURITY/ABUSE omissions — author one acceptance criterion for EACH, "
+            "with security_abuse=true and a runner-evaluable (often NEGATIVE) "
+            "oracle_hint: " + "; ".join(omissions)
+        )
+    if missing:
+        gaps.append("Missing / under-specified criteria: " + "; ".join(missing))
+    prior = _prior_criteria_text(state, rt)
+    return (
+        "\n\nREVISION PASS — an independent reviewer found your previous acceptance "
+        "criteria INCOMPLETE. Return the FULL criteria set: reproduce every "
+        "criterion below verbatim (keep the same id) AND add new criteria that "
+        "close every gap. Do not drop, renumber, or weaken existing criteria.\n"
+        f"Previously declared criteria:\n{prior or '(none resolved)'}\n\n"
+        "Gaps you MUST close:\n- " + "\n- ".join(gaps)
+    )
+
+
 def _build_criteria(raw: Any, seq: Seq) -> list[AcceptanceCriterion]:
     """One AcceptanceCriterion per model item — id/oracle_hint/security_abuse
     are load-bearing traceability fields, so they are always populated."""
@@ -136,11 +209,12 @@ def make_product_manager_node(rt: AgentRuntime) -> NodeFn:
     def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         prd_seq = rt.seq(config, _NODE_ID, "artifact:prd")
         criteria_seq = rt.seq(config, _NODE_ID, "artifact:acceptance_criteria")
+        user_content = _intent_text(state) + _revision_directive(state, rt)
         result = rt.proxy.complete(
             _NODE_ID,
             _TIER,
             SOP,
-            [{"role": "user", "content": _intent_text(state)}],
+            [{"role": "user", "content": user_content}],
             purpose="ideation",
             schema=_SCHEMA,
         )

@@ -69,6 +69,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -398,6 +399,13 @@ _RATE_LIMIT_MARKERS = (
     # bare timeout/hard-kill is transient by nature (a wedged prompt still fails
     # closed after the bounded budget), so it rides the generous budget too.
     "usage limit", "limit reached", "limit will reset",
+    # Claude Max via the claude CLI also reports a spent 5-hour window as
+    # "You've hit your session limit · resets 8am (UTC)" — a DIFFERENT phrase
+    # from "usage limit", and the one that hard-crashed the overnight PIR run
+    # (it wasn't classified as a throttle, so it burned the 3-attempt transport
+    # budget and raised). It is the same transient subscription-window
+    # exhaustion, so it rides the generous rate-limit budget too.
+    "session limit",
     "hard-killed at wall-clock cap", "timed out", "timeout",
 )
 
@@ -471,6 +479,38 @@ class _ClientCache:
             raise
 
 
+def _seconds_until_clock_reset(text: str) -> float | None:
+    """Seconds until a wall-clock reset named in a limit message, or None.
+
+    The claude CLI's session-limit message states the reset as a clock time in
+    UTC ("resets 8am (UTC)", "resets at 14:30") rather than a unix epoch. Parse
+    the hour (12h am/pm or 24h) and return the seconds until the NEXT occurrence
+    of that UTC time (today if still ahead, else tomorrow), plus a little slack
+    for clock skew. Anything unparseable yields None so the caller falls back to
+    plain backoff."""
+    m = re.search(
+        r"reset(?:s|ting)?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)?",
+        text,
+        re.IGNORECASE,
+    )
+    if not m:
+        return None
+    hour = int(m.group(1))
+    minute = int(m.group(2) or 0)
+    ampm = (m.group(3) or "").replace(".", "").lower()
+    if ampm == "pm" and hour != 12:
+        hour += 12
+    elif ampm == "am" and hour == 12:
+        hour = 0
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    now = datetime.now(timezone.utc)
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return (target - now).total_seconds() + 30.0
+
+
 def _classify_rate_limit(exc: BaseException) -> tuple[bool, float | None]:
     """(is_rate_limited, retry_after_seconds_or_None) for a transport exception.
 
@@ -508,6 +548,14 @@ def _classify_rate_limit(exc: BaseException) -> tuple[bool, float | None]:
             until = float(m.group(1)) - time.time()
             if 0 < until < 48 * 3600:
                 return True, until + 30.0
+    # The session-limit message carries a wall-CLOCK reset, not an epoch
+    # ("session limit · resets 8am (UTC)"). Turn that into an explicit
+    # wait-until-that-hour so the window is ridden out in ONE long sleep (bounded
+    # by the max-wait ceiling upstream) instead of a burst of short backoffs.
+    if "session limit" in text.lower() or "usage limit" in text.lower():
+        secs = _seconds_until_clock_reset(text)
+        if secs is not None and 0 < secs < 48 * 3600:
+            return True, secs
     return True, None
 
 

@@ -27,6 +27,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph
 
 from foundry.agents import AgentRuntime
+from foundry.durability.artifact_store import ArtifactStore
 from foundry.gates.attestation import ZoneBSigner
 from foundry.graph.subgraphs.product import build_product_subgraph
 from foundry.proxy import ModelProviderProxy
@@ -98,9 +99,11 @@ def _transport() -> MockTransport:
     )
 
 
-def _runtime(transport: MockTransport | None = None) -> AgentRuntime:
+def _runtime(
+    transport: MockTransport | None = None, cas: ArtifactStore | None = None
+) -> AgentRuntime:
     proxy = ModelProviderProxy(transport or _transport(), signer=ZoneBSigner(KEY, KEY_ID))
-    return AgentRuntime(proxy=proxy)
+    return AgentRuntime(proxy=proxy, cas=cas)
 
 
 def _config(run_id: str = "run-product-subgraph", step: int = 1) -> RunnableConfig:
@@ -180,3 +183,98 @@ def test_product_subgraph_propagates_required_capabilities() -> None:
     app = build_product_subgraph(_runtime()).compile()
     final: FactoryState = app.invoke({"request": "build a todo app"}, _config())
     assert final.get("required_capabilities") == ["ui"]
+
+
+# ---- bounded planning self-correction (Spec-gate revision loop) --------------
+
+PRD_MISSING_SECURITY: dict[str, Any] = {
+    "title": "Todo service",
+    "prd_body": "Users add and list todos.",
+    "required_capabilities": ["ui"],
+    "acceptance_criteria": [
+        {
+            "id": "AC-001",
+            "text": "Given a user, When they add a todo, Then it appears.",
+            "criticality": "normal",
+            "oracle_hint": "POST then GET returns the item",
+            "security_abuse": False,
+        }
+    ],
+}
+
+PRD_REVISED_WITH_SECURITY: dict[str, Any] = {
+    "title": "Todo service",
+    "prd_body": "Users add and list todos; malformed input is rejected.",
+    "required_capabilities": ["ui"],
+    "acceptance_criteria": [
+        {
+            "id": "AC-001",
+            "text": "Given a user, When they add a todo, Then it appears.",
+            "criticality": "normal",
+            "oracle_hint": "POST then GET returns the item",
+            "security_abuse": False,
+        },
+        {
+            "id": "AC-002",
+            "text": "Given a malformed payload, When it hits /todos, Then 400 (no crash).",
+            "criticality": "high-risk",
+            "oracle_hint": "invalid body returns 400; negative oracle",
+            "security_abuse": True,
+        },
+    ],
+}
+
+CRITIQUE_BLOCKING: dict[str, Any] = {
+    "missing": [],
+    "security_abuse_omissions": ["malformed-input handling on the write path"],
+}
+
+
+def test_product_subgraph_revises_on_blocking_critique() -> None:
+    """A BLOCKING critique loops the PM back once; on the revised (clean) pass the
+    layer advances to eng_pm and completes — autonomous planning self-correction,
+    never a stall at a fixable Spec-gate omission."""
+    transport = MockTransport(
+        completions=[
+            json.dumps(INTENT_PAYLOAD),
+            json.dumps(PRD_MISSING_SECURITY),
+            json.dumps(CRITIQUE_BLOCKING),  # flags a security omission -> revise
+            json.dumps(PRD_REVISED_WITH_SECURITY),  # PM adds the missing criterion
+            json.dumps({"missing": [], "security_abuse_omissions": []}),  # clean
+            json.dumps(SPRINT_PAYLOAD),
+        ]
+    )
+    app = build_product_subgraph(_runtime(transport, cas=ArtifactStore())).compile()
+    final: FactoryState = app.invoke({"request": "build a todo app"}, _config())
+
+    # intent, pm, critic, pm(revised), critic(clean), sprint == 6 model calls.
+    assert len(transport.requests) == 6
+    sops = ["".join(b["text"] for b in req["system"]) for req in transport.requests]
+    assert sum(1 for x in sops if "You are the Product Manager" in x) == 2  # PM re-ran once
+    # The layer converged: it produced the sprint plan (reached eng_pm) ...
+    assert any(a.kind == "sprint_plan" for a in _artifacts(final))
+    # ... and the revised criteria set includes the security/abuse criterion.
+    assert sum(1 for a in _artifacts(final) if a.kind == "acceptance_criterion") >= 3
+    # The final (clean) critique carries no omissions.
+    assert not final.get("gates")  # still no verdict minted in the layer (L5)
+
+
+def test_product_subgraph_revision_loop_is_bounded() -> None:
+    """If the critic keeps flagging omissions, the loop STILL terminates at the
+    revision bound and advances to eng_pm (the signed Spec gate downstream owns
+    the verdict — the layer never spins forever)."""
+    # Every critic pass flags a blocking omission; enough payloads for the bound.
+    completions = [json.dumps(INTENT_PAYLOAD)]
+    for _ in range(6):
+        completions.append(json.dumps(PRD_MISSING_SECURITY))
+        completions.append(json.dumps(CRITIQUE_BLOCKING))
+    completions.append(json.dumps(SPRINT_PAYLOAD))
+    transport = MockTransport(completions=completions)
+    app = build_product_subgraph(_runtime(transport, cas=ArtifactStore())).compile()
+    final: FactoryState = app.invoke({"request": "build a todo app"}, _config())
+
+    # It terminated (reached eng_pm) rather than exhausting recursion.
+    assert any(a.kind == "sprint_plan" for a in _artifacts(final))
+    # PM ran the initial pass + at most _MAX_PM_REVISIONS revisions (== 3 total).
+    sops = ["".join(b["text"] for b in req["system"]) for req in transport.requests]
+    assert sum(1 for x in sops if "You are the Product Manager" in x) == 3

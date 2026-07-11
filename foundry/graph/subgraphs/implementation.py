@@ -2,9 +2,10 @@ r"""Implementation (Layer 3) role subgraph (T-M1-10).
 
 Composes the Layer-3 agent node factories into an UNCOMPILED
 ``StateGraph(FactoryState)`` the supervisor mounts at the implementation phase
-boundary. Topology (agents.md Layer 3 SOP):
+boundary. Topology (agents.md Layer 3 SOP) — org fan-out lifted to the graph, one
+LEAD (decompose) + ENGINEER (build) node per discipline lane:
 
-    START -> senior_engineer (decompose) -> junior_engineer (build ready tasks) -> END
+    START -> {fe,be,da}_lead (decompose) -> {fe,be,da}_engineer (build) -> END
 
 The Senior Engineer (T1) reads the SystemDesign + OwnershipMap off
 ``state["artifacts"]`` (by ``Artifact.kind``, reconstituted through the injected
@@ -42,8 +43,7 @@ from foundry.agents.implementation import (
     make_junior_engineer_node,
     make_senior_engineer_node,
 )
-from foundry.agents.implementation.junior_engineer import NODE_ID as JUNIOR_NODE_ID
-from foundry.agents.implementation.senior_engineer import NODE_ID as SENIOR_NODE_ID
+from foundry.schemas.architecture import ENGINEERING_LANES
 from foundry.state.factory_state import FactoryState
 
 if TYPE_CHECKING:
@@ -95,36 +95,50 @@ def build_implementation_subgraph(
     """
     g: StateGraph[FactoryState] = StateGraph(FactoryState)
 
-    senior: _Node = make_senior_engineer_node(rt, resolve=resolve, tier=tier)
-    junior: _Node = make_junior_engineer_node(
-        rt,
-        source_dir=source_dir,
-        snapshot_store=snapshot_store,
-        turn_budget=turn_budget,
-        cost_budget_microusd=cost_budget_microusd,
-        max_slots=max_slots,
-        cost_cap_microusd=cost_cap_microusd,
-        resolve=resolve,  # per-area budget lineage from the OwnershipMap (Wave D)
-    )
-
     # The factory closures are typed as the ``_Node`` alias; LangGraph's
     # ``add_node`` resolves its node argument against the ``_NodeWithConfig``
     # Protocol, and mypy cannot bind that Protocol's contravariant ``NodeInputT``
     # TypeVar through an opaque ``Callable`` alias (only through a named, concrete
-    # ``def``). Re-express each as a thin concrete wrapper to restore structural
-    # matching WITHOUT a private import or ``cast`` (mirrors the architecture
-    # subgraph; full type-checking preserved).
-    def _senior(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
-        return senior(state, config)
+    # ``def``). ``_wrap`` returns a concrete ``def`` per node to restore structural
+    # matching WITHOUT a private import or ``cast`` (mirrors the architecture subgraph).
+    def _wrap(fn: _Node) -> _Node:
+        def _n(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+            return fn(state, config)
+        return _n
 
-    def _junior(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
-        return junior(state, config)
+    # Org fan-out lifted to the GRAPH: one LEAD node (decompose) + one ENGINEER node
+    # (build) per discipline LANE (frontend/backend/data). The leads run first (canonical
+    # order), then the engineers — same "decompose all, then build all" phasing as the
+    # single-node Senior->Junior, but now each lane is a DISTINCT node so the telemetry
+    # (and the office) can tell FE-lead / BE-engineer / … apart. Every owner/task folds
+    # into exactly one lane (``lane_of_area``: infra+security -> backend), so nothing is
+    # decomposed or built twice, and task identity/seq/merge are unchanged (see the two
+    # node factories). Empty lanes (no owner) simply write nothing.
+    lead_ids: list[str] = []
+    eng_ids: list[str] = []
+    for _lane in ENGINEERING_LANES:
+        lead = make_senior_engineer_node(rt, resolve=resolve, tier=tier, lane=_lane)
+        eng = make_junior_engineer_node(
+            rt,
+            source_dir=source_dir,
+            snapshot_store=snapshot_store,
+            turn_budget=turn_budget,
+            cost_budget_microusd=cost_budget_microusd,
+            max_slots=max_slots,
+            cost_cap_microusd=cost_cap_microusd,
+            resolve=resolve,  # per-area budget lineage from the OwnershipMap (Wave D)
+            lane=_lane,
+        )
+        lead_id, eng_id = f"{_lane}_lead", f"{_lane}_engineer"
+        g.add_node(lead_id, _wrap(lead))
+        g.add_node(eng_id, _wrap(eng))
+        lead_ids.append(lead_id)
+        eng_ids.append(eng_id)
 
-    g.add_node(SENIOR_NODE_ID, _senior)
-    g.add_node(JUNIOR_NODE_ID, _junior)
-
-    g.add_edge(START, SENIOR_NODE_ID)
-    g.add_edge(SENIOR_NODE_ID, JUNIOR_NODE_ID)
-    g.add_edge(JUNIOR_NODE_ID, END)
+    # START -> (fe/be/da lead) -> (fe/be/da engineer) -> END, in a single deterministic
+    # chain: leads decompose in lane order, then engineers build in lane order.
+    chain = [START, *lead_ids, *eng_ids, END]
+    for _a, _b in zip(chain, chain[1:]):
+        g.add_edge(_a, _b)
 
     return g

@@ -33,7 +33,12 @@
       <div id="wipe" aria-hidden="true"></div>
       <aside id="log-panel">
         <div class="log-title">QUEST LOG <span id="log-live" class="log-live"></span></div>
+        <div class="log-tabs">
+          <button class="log-tab sel" data-tab="live">● Live</button>
+          <button class="log-tab" data-tab="progress">≡ Progress</button>
+        </div>
         <ul id="log"></ul>
+        <ul id="progress" style="display:none"></ul>
       </aside>
     </main>
   </div>
@@ -42,6 +47,11 @@
   <div id="new-modal" class="overlay hidden">
     <div class="dialog">
       <h2>▶ START A BUILD</h2>
+      <div class="row">
+        <label>Preset <span class="hint">— load an example; fills every setting below</span></label>
+        <select id="preset-select"></select>
+      </div>
+      <p class="hint" id="preset-note"></p>
       <div class="row">
         <label>Backend</label>
         <select id="backend-select">

@@ -124,16 +124,22 @@ def test_progress_cb_streams_live_nodes_without_breaking_checkpoints() -> None:
     completes identically — same boundaries, same PASS, plus real node telemetry."""
     order: list[str] = []
     nodes: list[str] = []
+    phases: list[str] = []
 
     def approve(payload: dict[str, Any]) -> str:
         order.append(str(payload["boundary"]))
         return "approve"
 
+    def on_progress(node: str, scope: str, *, phase: str = "finish",
+                    result: object = None) -> None:
+        nodes.append(node)
+        phases.append(phase)
+
     res = run(
         "build a todo app",
         checkpoints=True,
         checkpoint_responder=approve,
-        progress_cb=lambda node, scope: nodes.append(node),
+        progress_cb=on_progress,
         thread_id="ck-progress",
     )
     # Control flow is unchanged: same boundaries in order, ran to completion, PASS.
@@ -143,6 +149,8 @@ def test_progress_cb_streams_live_nodes_without_breaking_checkpoints() -> None:
     # Live telemetry actually fired with real agent node ids streamed per-node.
     assert nodes, "progress_cb must receive streamed node names"
     assert "product_manager" in nodes and "principal_architect" in nodes
+    # Both edges stream now: a node is seated on START and cleared on FINISH.
+    assert "start" in phases and "finish" in phases
 
 
 # ---- end-to-end: reject halts (no PR) ---------------------------------------

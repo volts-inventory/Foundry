@@ -23,12 +23,14 @@ from foundry.proxy import (
     build_backend,
 )
 from foundry.proxy.cli_transports import (
+    _CLAUDE_CAP_CACHE,
     ClaudeCliTransport,
     CliResult,
     CodexCliTransport,
     OllamaTransport,
     OpenAITransport,
     backend_from_env,
+    reset_claude_cap_cache,
 )
 from foundry.schemas.gates import GateStatus, JudgmentProvenance
 from foundry.state.global_records import GlobalRecords
@@ -40,6 +42,18 @@ KEY_ID = "dev-key-cli"
 
 def _signer() -> ZoneBSigner:
     return ZoneBSigner(key=KEY, key_id=KEY_ID)
+
+
+@pytest.fixture(autouse=True)
+def _claude_cap_cache_isolation():
+    """Prompt caching is always-on and probes `claude --version` once per binary.
+    Pre-seed the default `claude` bin as capable so unrelated claude-cli tests don't
+    see the probe consume a `runner.calls[0]` slot; tests that exercise the probe use
+    a distinct bin. Reset around every test so nothing leaks."""
+    reset_claude_cap_cache()
+    _CLAUDE_CAP_CACHE["claude"] = True
+    yield
+    reset_claude_cap_cache()
 
 
 # --------------------------------------------------------------------------- #
@@ -162,32 +176,61 @@ def test_claude_cli_completion_observes_model_and_flattens_prompt() -> None:
     assert "SYS-SOP" in joined and "do the thing" in joined
 
 
-def test_claude_cli_cache_system_routes_sop_through_append_flag(monkeypatch) -> None:
-    """FOUNDRY_CLI_CACHE_SYSTEM=1 sends the stable SOP via --append-system-prompt
-    (so Claude Code can prompt-cache it across calls) and keeps it OUT of the -p
-    user string; default OFF flattens it in as before."""
+def _versioned_claude_runner(version: str, payload: dict[str, Any]) -> Any:
+    """Fake `claude` that answers `--version` with a version banner and every other
+    argv with the completion `payload` (so one runner serves the probe + the call)."""
+    def run(argv: Sequence[str], timeout_s: float | None) -> CliResult:
+        run.calls.append(list(argv))  # type: ignore[attr-defined]
+        if "--version" in argv:
+            return CliResult(0, f"{version} (Claude Code)")
+        return CliResult(0, json.dumps(payload))
+
+    run.calls = []  # type: ignore[attr-defined]
+    return run
+
+
+def _claude_request(sop: str, user: str, model: str = "claude-opus-4-8") -> dict[str, Any]:
+    """A request in the shape the proxy hands the transport (system as a cached
+    text block, volatile content in messages)."""
+    return {
+        "model": model,
+        "system": [{"type": "text", "text": sop, "cache_control": {"type": "ephemeral"}}],
+        "messages": [{"role": "user", "content": user}],
+    }
+
+
+def test_claude_cli_always_routes_sop_through_append_flag_for_caching() -> None:
+    """Prompt caching is ALWAYS ON (not a setting): the stable SOP rides on
+    --append-system-prompt (so Claude Code prompt-caches it) and is kept OUT of the
+    -p user string, on a new-enough binary. The version probe runs once per binary."""
     payload = {"type": "result", "subtype": "success", "result": "ok",
                "modelUsage": {"claude-opus-4-8": {"inputTokens": 1, "outputTokens": 1}}}
+    runner = _versioned_claude_runner("2.5.1", payload)
+    tx = ClaudeCliTransport(claude_bin="claude-modern", runner=runner)
 
-    # default OFF: SOP in the -p prompt, no append flag
-    monkeypatch.delenv("FOUNDRY_CLI_CACHE_SYSTEM", raising=False)
-    off = _claude_runner(payload)
-    build_backend("claude-cli", runner=off).complete(
-        "n", "T2", "STABLE-SOP", [{"role": "user", "content": "volatile"}], purpose="ideation")
-    argv_off = off.calls[0]
-    assert "--append-system-prompt" not in argv_off
-    assert "STABLE-SOP" in argv_off[argv_off.index("-p") + 1]
+    tx.send(_claude_request("STABLE-SOP", "volatile"))
+    tx.send(_claude_request("STABLE-SOP", "again"))
 
-    # ON: SOP via --append-system-prompt, NOT duplicated into -p
-    monkeypatch.setenv("FOUNDRY_CLI_CACHE_SYSTEM", "1")
-    on = _claude_runner(payload)
-    build_backend("claude-cli", runner=on).complete(
-        "n", "T2", "STABLE-SOP", [{"role": "user", "content": "volatile"}], purpose="ideation")
-    argv_on = on.calls[0]
-    assert "--append-system-prompt" in argv_on
-    assert argv_on[argv_on.index("--append-system-prompt") + 1] == "STABLE-SOP"
-    prompt = argv_on[argv_on.index("-p") + 1]
+    version_calls = [c for c in runner.calls if "--version" in c]
+    assert len(version_calls) == 1  # probed once, cached thereafter
+    call = next(c for c in runner.calls if "-p" in c)
+    assert "--append-system-prompt" in call
+    assert call[call.index("--append-system-prompt") + 1] == "STABLE-SOP"
+    prompt = call[call.index("-p") + 1]
     assert "STABLE-SOP" not in prompt and "volatile" in prompt
+
+
+def test_claude_cli_rejects_a_binary_too_old_for_append_system_prompt() -> None:
+    """A `claude` below the floor fails closed with an upgrade instruction rather
+    than silently dropping caching — the minimum version is a hard REQUIREMENT."""
+    payload = {"type": "result", "subtype": "success", "result": "ok",
+               "modelUsage": {"claude-opus-4-8": {"inputTokens": 1, "outputTokens": 1}}}
+    runner = _versioned_claude_runner("0.2.9", payload)
+    tx = ClaudeCliTransport(claude_bin="claude-ancient", runner=runner)
+
+    with pytest.raises(TransportError) as exc:
+        tx.send(_claude_request("STABLE-SOP", "x"))
+    assert "upgrade" in str(exc.value).lower() or "too old" in str(exc.value).lower()
 
 
 def test_claude_cli_verdict_path_parses_and_stamps_verifiable_binding() -> None:

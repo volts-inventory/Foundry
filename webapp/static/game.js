@@ -323,6 +323,9 @@ class FloorScene extends Phaser.Scene {
     this.gates = {};
     this.gatePips = {};
     this.activeRoom = "lobby";
+    this.liveRooms = new Set();      // rooms with a node in-flight (concurrent stages)
+    this.workingAgents = new Set();  // named agents whose node is running RIGHT NOW
+    this.roomInflight = {};          // room -> count of in-flight nodes (ref-count)
     this.buildRooms();
     this.buildGate();
     this.buildChest();
@@ -1135,17 +1138,34 @@ class FloorScene extends Phaser.Scene {
     this.tweens.add({targets:t, y:t.y-14, alpha:{from:1,to:0}, duration:1400,
                      ease:"Sine.out", onComplete:()=>t.destroy()});
   }
-  setActiveRoom(key){
+  // A room "seats its crew" when it's in the LIVE set — the rooms currently producing
+  // node telemetry. The real build runs stages concurrently (engineering can still be
+  // heads-down while QA reviews), so this is a SET, not one active room: a room joins
+  // on its `active` event and every live room stays staffed at once. Engineering is a
+  // virtual stage — when it's live, all three discipline rooms count.
+  roomLive(room){
+    const L = this.liveRooms;
+    return !!room && !!L && (L.has(room) || (L.has("engineering") && ENG_ROOMS.includes(room)));
+  }
+  // key = the PRIMARY (most recent) room: drives the glow, the CTO visit and the
+  // forward-phase handoff. reset=true (a new phase boundary) clears the live set first,
+  // so a fresh phase doesn't inherit the prior phase's crew.
+  setActiveRoom(key, reset=false){
     const prev = this.activeRoom;
     this.activeRoom = key;
+    this.liveRooms = this.liveRooms || new Set();
+    if (reset){                            // new phase → start the crew fresh
+      this.liveRooms.clear(); this.workingAgents.clear(); this.roomInflight = {};
+    }
+    if (key) this.liveRooms.add(key);      // this room is now producing work
     // When the build advances to the NEXT phase, a worker from the finished room carries
     // the "work" over to the new room (the handoff). Only on a forward phase boundary.
     const SEQ = ["product","architecture","engineering","qa","security","gate","vault"];
     const ph = (k)=> (ENG_ROOMS.includes(k)||k==="engineering") ? "engineering" : k;
     const oi = SEQ.indexOf(ph(prev)), ni = SEQ.indexOf(ph(key));
     if (oi >= 0 && ni > oi) this.deliverWork(prev, key);
-    // "engineering" is a virtual stage — light up all its discipline rooms.
-    const lit = (k)=> k===key || (key==="engineering" && ENG_ROOMS.includes(k));
+    // Glow EVERY live room (concurrent stages all lit), not just the primary.
+    const lit = (k)=> this.roomLive(k);
     for (const k in this.roomGlow)
       this.tweens.add({targets:this.roomGlow[k], fillAlpha:(lit(k)?0.10:0), duration:420});
     // The CTO VISITS the working group on each phase shift — but never camps in the
@@ -1301,22 +1321,73 @@ class FloorScene extends Phaser.Scene {
     const here = Math.abs(a.x-a.home.x) < 2 && Math.abs(a.y-a.home.y) < 2;
     if (here) settle(); else this.walkTo(a, a.home.x, a.home.y, settle);
   }
+  // Live per-node telemetry: a node just STARTED (seat its agent for the whole model
+  // call) or FINISHED (clear them). Ref-counts in-flight nodes per room so a room's crew
+  // only sits while it genuinely has work running. Legacy "pulse" (no phase) just marks
+  // the room live — a pre-seat before real start/finish telemetry takes over.
+  nodeTelemetry(room, agent, phase){
+    if (!room) return;
+    if (phase === "finish"){
+      if (agent) this.workingAgents.delete(agent);
+      this.roomInflight[room] = Math.max(0, (this.roomInflight[room]||0) - 1);
+      if (this.roomInflight[room] === 0) this.liveRooms.delete(room);  // no work left here
+      this.restaff();
+      return;
+    }
+    this.liveRooms.add(room);
+    if (agent) this.workingAgents.add(agent);
+    if (phase === "start") this.roomInflight[room] = (this.roomInflight[room]||0) + 1;
+    // The primary room (glow + CTO visit) follows the most recent start; re-seat either way.
+    if (this.activeRoom !== room) this.setActiveRoom(room); else this.restaff();
+    if (agent) this.agentWork(agent);   // the seated agent visibly types
+  }
   staffRoom(key){
     this.activeRoomKey = key;
-    // A room is "on" when it IS the active key, or the virtual "engineering" stage
-    // is on and it's a discipline room. Platform builds activate ONE discipline at
-    // a time (key = frontend/backend/data), so pool workers match on THEIR room.
-    const working = (room)=> !!room && (room===key || (key==="engineering" && ENG_ROOMS.includes(room)));
-    // Desks are for ACTIVE work only: whoever's stage is on goes heads-down at their
-    // own desk; everyone else waits it out in the lounge.
+    if (key === null){        // build over / no stage → nobody working
+      this.liveRooms.clear(); this.workingAgents.clear(); this.roomInflight = {};
+    } else {
+      this.liveRooms.add(key);
+    }
+    this.restaff();
+  }
+  // Seat everyone by the CURRENT live/working sets — pure, no mutation (so a `finish`
+  // can re-seat without re-marking its room live). A named-agent room seats only the
+  // agents actually in-flight; if the room is live but none are named yet (a room-only
+  // pulse), its whole crew sits as a fallback.
+  //
+  // ENGINEERING has a real lead/IC split that the graph reports: the Senior Engineer
+  // node (the LEAD — decomposes the work) and the Junior Engineer node (the ICs — build
+  // the code). So the area Tech-LEADS sit while the Senior is in-flight; the IC POOL sits
+  // while the Junior is. (Per-AREA — frontend vs backend — isn't in the telemetry: both
+  // nodes run once across every area, so all disciplines light together.)
+  restaff(){
+    const namedIn = (rm)=>{ for (const a of this.workingAgents) if (AGENT_ROOM[a]===rm) return true; return false; };
     for (const [name,a] of this.agents){
       if (!a.seen) continue;
-      if (working(AGENT_ROOM[name])) this.deskRest(a, true); else this.gotoLounge(a);
+      const rm = AGENT_ROOM[name];
+      const onDesk = this.roomLive(rm) && (this.workingAgents.has(name) || !namedIn(rm));
+      if (onDesk) this.deskRest(a, true); else this.gotoLounge(a);
     }
-    for (const s of [...(this.poolGroup||[]), ...(this.techLeadGroup||[])]){
-      if (!s || !s.bob) continue;
-      if (working(s.room)) this.deskRest(s, true, true); else this.gotoLounge(s);
-    }
+    // Per-lane lead/IC seating from the distinct telemetry: each discipline room's LEAD
+    // sprite sits while its lane's lead node runs ("Frontend Lead" …), its IC sprites
+    // while its lane's engineer node runs ("Frontend Engineer" …). Legacy single-node
+    // builds (room "engineering" + "Senior/Junior Engineer") still work: the Senior lights
+    // every lane's leads, the Junior every lane's ICs. When a room is live but nothing is
+    // named (a room-only pulse), its whole crew sits as a fallback.
+    const wa = this.workingAgents, CAP = {frontend:"Frontend", backend:"Backend", data:"Data"};
+    const anyEngNamed = wa.has("Senior Engineer") || wa.has("Junior Engineer")
+      || ENG_ROOMS.some(r => wa.has(CAP[r]+" Lead") || wa.has(CAP[r]+" Engineer"));
+    const leadUp = (room)=> wa.has((CAP[room]||"")+" Lead") || wa.has("Senior Engineer") || !anyEngNamed;
+    const engUp  = (room)=> wa.has((CAP[room]||"")+" Engineer") || wa.has("Junior Engineer") || !anyEngNamed;
+    const seat = (group, wants)=>{
+      for (const s of (group||[])){
+        if (!s || !s.bob) continue;        // group arrays also hold workstations (no .bob)
+        if (this.roomLive(s.room) && wants(s.room)) this.deskRest(s, true, true);
+        else this.gotoLounge(s);
+      }
+    };
+    seat(this.techLeadGroup, leadUp);      // each lane's LEAD works while its lead node runs
+    seat(this.poolGroup, engUp);           // each lane's ICs work while its engineer node runs
   }
   toLounge(){   // everyone hangs out (checkpoints / done)
     for (const [,a] of this.agents) if (a.seen) this.gotoLounge(a);
@@ -1512,14 +1583,21 @@ class FloorScene extends Phaser.Scene {
     if(this.laneDecor) this.laneDecor.forEach(o=>o.destroy());
     this.techLeadGroup=[]; this.poolGroup=[]; this.laneDecor=[]; this.engLabels=[];
 
-    const dist=this.engineeringLanes();
-    if(!dist){ this._flatPool(); return; }
+    const dist=this.engineeringLanes()||[];
     // Bucket each area's people (1 Tech-Lead + its ICs) into its discipline room.
     const perRoom={};
     for(const d of dist){
       const rk=ENG_AREA_ROOM[d.area]||"backend";
       (perRoom[rk]=perRoom[rk]||[]).push({area:d.area, color:d.color, lead:true});
       for(let i=0;i<d.ics;i++) perRoom[rk].push({area:d.area, color:d.color, lead:false});
+    }
+    // ALWAYS staff the three discipline lanes (frontend/backend/data) — the build graph
+    // now has a lead + engineer node per lane, so each room shows its pair even when the
+    // architect assigned that lane no ownership units (an empty lane just never lights).
+    for(const rk of ENG_ROOMS){
+      if(perRoom[rk] && perRoom[rk].length) continue;
+      const col=AREA_COLOR[rk]||0xffc08a;
+      perRoom[rk]=[{area:rk, color:col, lead:true}, {area:rk, color:col, lead:false}];
     }
     let slot=12;
     for(const rk in perRoom){
@@ -1544,7 +1622,7 @@ class FloorScene extends Phaser.Scene {
           this.pinBadge(s, tag, p.color, false);               // every IC labelled too
         }
         s.home={x,y}; s.room=rk; s.loungeSlot=slot++; s.seen=true; s.inLounge=false;
-        s.working = (this.activeRoomKey === "engineering" || this.activeRoomKey === rk);
+        s.working = this.roomLive(rk);
         this.zzzLoop(s);
         if (s.working) this.startWalk(s);
         else {                                 // not on the clock -> spawn in the lounge
@@ -1582,7 +1660,7 @@ class FloorScene extends Phaser.Scene {
       const ws=this.makeWorkstation(x, y+16, k.accent);
       const s=this.makePerson(x, y, k); s.setScale(1.4).setDepth(y).setAlpha(0.96);
       s.home={x,y}; s.room="backend"; s.loungeSlot=12+i; s.seen=true; s.inLounge=false;
-      s.working = (this.activeRoomKey === "engineering" || this.activeRoomKey === "backend");
+      s.working = this.roomLive("backend");
       this.zzzLoop(s);
       if (s.working) this.startWalk(s);
       else {                                   // not on the clock -> spawn in the lounge
@@ -1648,7 +1726,7 @@ async function newProject(req, mode, supervised, backend, packs, extra){
     if (existing.es){ try{ existing.es.close(); }catch(_){} }
     Object.assign(existing, {
       id:resp.id, release, releases:(existing.releases||1)+1, request:req, mode, backend,
-      log:[], gates:{}, org:null, cp:null, awaiting:false, status:"running", passed:false,
+      log:[], progress:[], gates:{}, org:null, cp:null, awaiting:false, status:"running", passed:false,
       slots, journal:[], seenUris:new Set(),
     });
     const sc = GAME.scene.getScene(floorKey(floor));
@@ -1661,7 +1739,7 @@ async function newProject(req, mode, supervised, backend, packs, extra){
   // NEW PROJECT: a fresh floor.
   const F = {
     id: resp.id, floor, release, releases:1, request:req, mode, backend, scene:null,
-    log:[], gates:{}, org:null, cp:null, awaiting:false, status:"running", passed:false,
+    log:[], progress:[], gates:{}, org:null, cp:null, awaiting:false, status:"running", passed:false,
     slots, journal:[], seenUris:new Set(),
   };
   FLOORS.set(floor, F);
@@ -1682,6 +1760,7 @@ function switchToFloor(floor){
   GAME.scene.bringToTop(floorKey(floor));
   const F = FLOORS.get(floor);
   rebuildLog(F);
+  rebuildProgress(F);
   renderGatesMini(F.gates);
   if (F.platprog) renderPlatProg(F.platprog);   // platform floors show service chips
   updateHud(F);
@@ -1700,7 +1779,7 @@ function routeEvent(floor, ev){
       if (S) S.setPool(F.slots);
       if (isActive) updateHud(F);
       break;
-    case "narrate": logTo(F, logClass(ev.text), ev.text); break;
+    case "narrate": logNarrate(F, ev.text); break;
     case "limitwait":              // provider usage limit: global pause banner
       showLimitToast(ev.until);
       break;
@@ -1712,35 +1791,33 @@ function routeEvent(floor, ev){
       if (S && ev.room) S.pulseRoom(ev.room);
       break;
     case "stage":
-      if (S) S.setActiveRoom(ev.room);
-      logTo(F, "gold", "── "+ev.label+" ──"); break;
+      if (S) S.setActiveRoom(ev.room, true);   // new phase boundary → reset the live crew
+      resetStage(F);                            // new stage → fresh artifact/journal buckets
+      logTo(F, "gold", "── "+ev.label+" ──"); break;   // Progress gets the stage's ✓ cap at its checkpoint
     case "agent": if (S) S.agentWork(ev.agent); break;
-    case "active":
-      // LIVE per-node telemetry: a real graph node is executing RIGHT NOW. Seat
-      // that stage's crew at their desks (only re-walk on a room CHANGE — cheap)
-      // and put the named agent heads-down. This is what fills the office DURING
-      // the work instead of the retroactive burst at the checkpoint.
-      if (S){
-        if (S.activeRoom !== ev.room) S.setActiveRoom(ev.room);
-        if (ev.agent) S.agentWork(ev.agent);
-      }
-      // Live node telemetry doubles as quest-log progress: whenever the WORKER or
-      // room changes, drop a line — so a long real stage reads as a sequence of
-      // hand-offs ("▸ PRODUCT · Product Manager working") instead of silence
-      // between checkpoint banners.
-      if (ev.live && ev.room &&
-          (F.liveRoom !== ev.room || (ev.agent && F.liveAgent !== ev.agent))){
-        F.liveRoom = ev.room; F.liveAgent = ev.agent || F.liveAgent;
-        logTo(F, "hot", "▸ "+ev.room.toUpperCase()+(ev.agent ? " · "+ev.agent : "")+" working");
+    case "active": {
+      // LIVE per-node telemetry: a real graph node STARTED (seat its agent for the whole
+      // model call) or FINISHED (clear them, with a summary). Only in-flight agents sit,
+      // so the office shows who is genuinely working RIGHT NOW — not the whole room.
+      const phase = ev.phase || "pulse";     // legacy no-phase "active" = a room pre-seat
+      if (S) S.nodeTelemetry(ev.room, ev.agent, phase);
+      if (phase === "finish"){
+        if (ev.agent) agentActivity(F, ev.room, ev.agent, true, ev.summary);   // box → done
+        else if (ev.summary) logTo(F, "good", "✓ "+ev.summary);
+      } else if (phase !== "pulse" && ev.agent){
+        agentActivity(F, ev.room, ev.agent, false);   // START opens the agent's box (its header)
+        F.liveRoom = ev.room; F.liveAgent = ev.agent;
       }
       break;
+    }
     case "say":
       if (S) S.agentSay(ev.agent, ev.text);
+      logSay(F, ev);   // fold the journal note onto the agent's artifact group + stage summary
       if (ev.concern) logTo(F, "", `${ev.agent}: "${ev.concern}"`); break;
     case "artifact":
       if (S){ S.spawnPickup(ev.room, ev.label); const pa=S.agents.get(ev.agent);
         if (pa){ S.hop(pa,1); const R=ROOMS[ev.room]; if(R) S.burst(R.cx, R.floorY+20, [0xffd95e,0xffffff], 8); } }
-      logTo(F, "good", "+ "+ev.label+"  ·  "+ev.agent); break;
+      logArtifact(F, ev); break;   // same-kind artifacts collapse into one expandable row
     case "gate":
       F.gates[ev.name] = {status:ev.status, attested:ev.attested, advisory:ev.advisory};
       if (S){ S.setGate(ev.name, F.gates[ev.name]);
@@ -1757,8 +1834,23 @@ function routeEvent(floor, ev){
       break;
     case "files":
       break;   // file count is read live from the repo view, not cached on F
-    case "checkpoint":
-      F.cp = {title:ev.title, summary:ev.summary, boundary:ev.boundary}; break;
+    case "checkpoint": {
+      F.cp = {title:ev.title, summary:ev.summary, boundary:ev.boundary};
+      // Stage outcome -> the Progress tab as a COLLAPSIBLE row: the summary states what
+      // was completed (the artifact breakdown), and expanding lists it + the agents'
+      // journal notes (what specifically each lead produced) + the raw count.
+      const bd = kindBreakdown(F.stageArts);
+      const desc = (ev.summary||"").trim();   // T3 descriptive caption of the stage
+      const head = "✓ "+(ev.title||ev.boundary||"stage")+" finished"
+        + (desc ? " — "+desc : (bd.length ? " — "+bd.join(" · ") : ""));
+      // Body: the itemised breakdown + each agent's descriptive caption (not a repeat of
+      // the header — the header is the T3 prose, the body is the specifics).
+      const lines=[];
+      if(bd.length) lines.push("Produced: "+bd.join(", "));
+      const says=F.stageSays||{};
+      for(const ag in says) lines.push(ag+" — "+says[ag]);
+      logProgress(F, "good", head, lines); break;
+    }
     case "await_decision":
       F.awaiting = true; F.cpIndex = ev.checkpoint;
       // AI expert advisors (gated release checkpoint): ride into the modal.
@@ -1770,33 +1862,39 @@ function routeEvent(floor, ev){
       renderElevator();
       if (S){ S.spotlightCTO(true); S.toLounge(); }   // team hangs out while CTO decides
       if (isActive) showCheckpoint(F); break;
-    case "resolved":
+    case "resolved": {
       F.awaiting = false; renderElevator();
+      // three-way verdict: approve (green) · needs_changes (gold) · reject (red)
+      const ap = ev.decision === "approve", ch = ev.decision === "needs_changes";
+      const txt = ap?"APPROVED":(ch?"CHANGES":"REJECTED");
+      logProgress(F, ap?"good":(ch?"hot":"bad"), "CTO "+txt);
       if (S){ S.spotlightCTO(false);
         if (S.activeRoomKey) S.staffRoom(S.activeRoomKey);   // back to work
-        // three-way verdict: approve (green) · needs_changes (gold) · reject (red)
-        const ap = ev.decision === "approve", ch = ev.decision === "needs_changes";
         const col = ap?0x5ddc7a:(ch?0xffcf52:0xff5d6c);
         const hex = ap?"#9dffbf":(ch?"#ffe6a3":"#ffb3ba");
-        const txt = ap?"APPROVED":(ch?"CHANGES":"REJECTED");
         S.hop(S.cto, ap?2:1); S.ring(S.cto.x, S.cto.y-10, col);
         S.burst(S.cto.x, S.cto.y-10, [col,0xffffff], 12);
         S.floatText(S.cto.x, S.cto.y-30, txt, hex, 13);
         if (ev.decision === "reject") S.shake(280,0.01); }
       if (isActive) hideCheckpoint(); break;
+    }
     case "release":
       if (S){ S.openGateAndChest(); S.stampGate(true); S.celebrate(); S.banner("SHIPPED!", 0x5ddc7a); }
-      logTo(F, "gold", "RELEASED -> "+(ev.uri||"artifact")); break;
+      logTo(F, "gold", "RELEASED -> "+(ev.uri||"artifact"));
+      logProgress(F, "good", "★ SHIPPED — "+(ev.uri||"artifact")); break;
     case "halt":
       if (S){ S.flashGate(); S.stampGate(false); }
-      logTo(F, "bad", "HELD: "+ev.reason); break;
+      logTo(F, "bad", "HELD: "+ev.reason);
+      logProgress(F, "bad", "✕ HELD — "+ev.reason); break;
     case "done":
       F.status = "done"; F.passed = !!ev.passed; renderElevator();
       // Build's over: nobody is working, so everyone heads to the LOUNGE
       // (staffRoom(null) marks no room active and routes idle folks there).
       if (S){ S.staffRoom(null); if (!ev.passed){ S.gloom(); S.banner("HELD AT THE GATE", 0xff5d6c); } }
       logTo(F, ev.passed?"good":"bad",
-        ev.passed?"Build complete — shipped.":"Build halted — nothing shipped."); break;
+        ev.passed?"Build complete — shipped.":"Build halted — nothing shipped.");
+      logProgress(F, ev.passed?"good":"bad",
+        ev.passed?"■ Build complete — shipped.":"■ Build halted — nothing shipped."); break;
   }
 }
 
@@ -1855,23 +1953,153 @@ function updateLiveDot(){
                    : "No data for 40s — check the connection / server.";
 }
 setInterval(updateLiveDot, 5000);
-function appendLogDom(cls,text){
-  const ul=document.getElementById("log");
-  const li=document.createElement("li"); li.className=cls; li.textContent=deEmoji(text);
-  ul.appendChild(li); ul.scrollTop=ul.scrollHeight;
-  while(ul.children.length>200) ul.removeChild(ul.firstChild);
+// A log/progress row. With no `lines` it's a plain <li>; with `lines` it's a
+// collapsible <details> whose SUMMARY (always visible, even collapsed) carries the
+// short "what was completed" statement, and whose body lists the specifics.
+function rowNode(cls, headline, lines){
+  const li=document.createElement("li"); li.className=cls;
+  if(!lines || !lines.length){ li.textContent=deEmoji(headline); return li; }
+  const d=document.createElement("details");
+  const s=document.createElement("summary"); s.textContent=deEmoji(headline); d.appendChild(s);
+  const ul=document.createElement("ul"); ul.className="row-detail";
+  for(const ln of lines){ const l=document.createElement("li"); l.textContent=deEmoji(ln); ul.appendChild(l); }
+  d.appendChild(ul); li.appendChild(d); return li;
 }
-function logTo(F, cls, text){
-  F.log.push({cls,text});
-  if (F.log.length > 200) F.log.shift();
-  if (F.floor === ACTIVE) appendLogDom(cls, text);
+function artBase(label){ return (String(label||"").replace(/\s*#\d+\s*$/,"").trim()) || "Artifact"; }
+function appendLogDom(cls, text, lines){
+  const ul=document.getElementById("log"); if(!ul) return;
+  ul.appendChild(rowNode(cls, text, lines)); ul.scrollTop=ul.scrollHeight;
+  while(ul.children.length>240) ul.removeChild(ul.firstChild);
 }
+function logTo(F, cls, text, lines){
+  F.log.push({cls, text, lines:(lines&&lines.length)?lines:null});
+  if (F.log.length > 240) F.log.shift();
+  if (F.floor === ACTIVE) appendLogDom(cls, text, lines);
+}
+// A narrate line. If an agent is CURRENTLY working (and this isn't a system/status
+// message), it's that agent's output — fold it into their box body. Otherwise it's a
+// standalone system line (collapsible if long).
+const _SYS_NARRATE=/no step|usage limit|sleeping|paused|reconnect|drafting has begun|reports for duty|new project on floor|mode:/i;
+function logNarrate(F, text){
+  const t=String(text||"").trim();
+  if(F.curAgent && F._agrp && F._agrp[F.curAgent] && !_SYS_NARRATE.test(t)){
+    const g=F._agrp[F.curAgent]; g.narrates.push(deEmoji(t));
+    if(F.floor===ACTIVE) refreshAgentBox(g);
+    return;
+  }
+  const cls=logClass(t);
+  let head=t, detail="";
+  const d=t.indexOf(" — ");
+  if(d>0 && (t.length-d)>32){ head=t.slice(0,d); detail=t.slice(d+3).trim(); }
+  else if(t.length>110){ const p=t.slice(0,110).lastIndexOf(". ");
+    const cut=p>40?p+1:110; head=t.slice(0,cut).trim(); detail=t.slice(cut).trim(); }
+  logTo(F, cls, head, detail ? [detail] : null);
+}
+// Group a set of {base} items into "PRD · Acceptance Criterion ×18 · Sprint Plan".
+function kindBreakdown(items){
+  const order=[], c={};
+  for(const it of (items||[])){ const b=it.base; if(!(b in c)){ order.push(b); c[b]=0; } c[b]++; }
+  return order.map(b=> b+(c[b]>1?" ×"+c[b]:""));
+}
+// EVENT LOG = one bordered BOX per agent. The box HEADER is the activity line
+// ("▸ PRODUCT · Product Manager working" → "✓ …" when done); the BODY holds that agent's
+// response — a descriptive caption (their T3/journal note) plus what they produced (their
+// narrate output and each artifact with its content one-liner). One border around the
+// whole thing; the response is shown, not hidden behind a disclosure.
+function agentHeadText(g){
+  return (g.done?"✓ ":"▸ ")+(g.room?g.room.toUpperCase()+" · ":"")+g.agent+(g.done?"":" working");
+}
+function renderAgentBox(g){
+  const li=document.createElement("li"); li.className="agent-box"+(g.done?" done":"");
+  const head=document.createElement("div"); head.className="agent-head";
+  head.textContent=deEmoji(agentHeadText(g)); li.appendChild(head);
+  const cap=g.cap||g.fallback;
+  const body=(cap?1:0)+g.narrates.length+g.items.length;
+  if(body){
+    const bd=document.createElement("div"); bd.className="agent-body";
+    if(cap){ const c=document.createElement("div"); c.className="agent-cap"; c.textContent=deEmoji(cap); bd.appendChild(c); }
+    for(const nr of g.narrates){ const d=document.createElement("div"); d.className="agent-item"; d.textContent=deEmoji(nr); bd.appendChild(d); }
+    for(const it of g.items){ const d=document.createElement("div"); d.className="agent-item";
+      d.textContent=deEmoji(it.label+(it.detail?" — "+it.detail:"")); bd.appendChild(d); }
+    li.appendChild(bd);
+  }
+  return li;
+}
+function refreshAgentBox(g){ if(g.el){ const n=renderAgentBox(g); g.el.replaceWith(n); g.el=n; } }
+// Find-or-create the agent's box (keyed by agent for the whole build), appended in the
+// order the agent first became active — so the box header IS the "… working" line and
+// its body fills in beneath as the agent narrates / finishes / its artifacts land.
+function agentBox(F, agent){
+  F._agrp=F._agrp||{};
+  let g=F._agrp[agent];
+  if(!g){
+    g={box:true, agent, room:"", done:false, cap:"", fallback:"", narrates:[], items:[]};
+    F._agrp[agent]=g; F.log.push(g); if(F.log.length>240) F.log.shift();
+    if(F.floor===ACTIVE){ const ul=document.getElementById("log"); g.el=renderAgentBox(g);
+      ul.appendChild(g.el); ul.scrollTop=ul.scrollHeight; }
+  }
+  return g;
+}
+// active telemetry: START opens the agent's box (header shows "… working"); FINISH marks
+// it done and seeds a fallback caption (the T3 caption overrides it later, via `say`).
+function agentActivity(F, room, agent, done, summary){
+  if(!agent) return;
+  const g=agentBox(F, agent);
+  if(room) g.room=room;
+  if(done){ g.done=true; if(summary && !g.fallback) g.fallback=summary; }
+  else F.curAgent=agent;
+  if(F.floor===ACTIVE) refreshAgentBox(g);
+}
+// An artifact: fold its CONTENT into its producing agent's box body.
+function logArtifact(F, ev){
+  const base=artBase(ev.label), agent=ev.agent||"(system)", detail=ev.detail||"";
+  (F.stageArts=F.stageArts||[]).push({kind:ev.kind||base, base, label:ev.label, agent, detail});
+  const g=agentBox(F, agent);
+  g.items.push({base, label:ev.label, detail});
+  if(F.floor===ACTIVE) refreshAgentBox(g);
+}
+// A journal note (or its T3 caption): the descriptive response line for the agent's box.
+function logSay(F, ev){
+  F.stageSays=F.stageSays||{};
+  if(ev.text) F.stageSays[ev.agent]=ev.text;
+  const g=(F._agrp||{})[ev.agent];
+  if(g && ev.text && g.cap!==ev.text){ g.cap=ev.text; if(F.floor===ACTIVE) refreshAgentBox(g); }
+}
+// New STAGE: reset only the per-stage buckets that feed the PROGRESS summary; the agent
+// boxes are build-global (each agent appears once, filling in as its work lands).
+function resetStage(F){ F.stageArts=[]; F.stageSays={}; }
 function rebuildLog(F){
   const ul=document.getElementById("log"); ul.innerHTML="";
-  for (const {cls,text} of F.log){
-    const li=document.createElement("li"); li.className=cls; li.textContent=deEmoji(text); ul.appendChild(li);
+  for (const e of F.log){
+    if(e.box){ e.el=renderAgentBox(e); ul.appendChild(e.el); }
+    else ul.appendChild(rowNode(e.cls, e.text, e.lines||null));
   }
   ul.scrollTop = ul.scrollHeight;
+}
+// The high-level PROGRESS tab: one collapsible row per stage / milestone. The summary
+// carries the short "what was completed" statement; expanding shows the specifics.
+function logProgress(F, cls, text, lines){
+  (F.progress = F.progress || []).push({cls,text,lines:(lines&&lines.length)?lines:null});
+  if (F.progress.length > 160) F.progress.shift();
+  if (F.floor === ACTIVE){
+    const ul=document.getElementById("progress"); if (!ul) return;
+    ul.appendChild(rowNode(cls, text, lines)); ul.scrollTop=ul.scrollHeight;
+    while(ul.children.length>160) ul.removeChild(ul.firstChild);
+  }
+}
+function rebuildProgress(F){
+  const ul=document.getElementById("progress"); if (!ul) return; ul.innerHTML="";
+  for (const e of (F.progress||[])) ul.appendChild(rowNode(e.cls, e.text, e.lines));
+  ul.scrollTop = ul.scrollHeight;
+}
+// Switch the quest-log panel between the LIVE feed and the PROGRESS skim.
+function selectLogTab(tab){
+  const F = FLOORS.get(ACTIVE);
+  document.querySelectorAll(".log-tab").forEach(b=>b.classList.toggle("sel", b.dataset.tab===tab));
+  const live=document.getElementById("log"), prog=document.getElementById("progress");
+  if (live) live.style.display = tab==="progress" ? "none" : "";
+  if (prog) prog.style.display = tab==="progress" ? "" : "none";
+  if (F && tab==="progress") rebuildProgress(F);
 }
 function renderGatesMini(gates){
   const el=document.getElementById("gates-mini"); el.innerHTML="";
@@ -2335,6 +2563,99 @@ const newModal=document.getElementById("new-modal");
 document.getElementById("new-btn").onclick=()=>showNewModal();
 document.getElementById("cancel-btn").onclick=()=>newModal.classList.add("hidden");
 
+// ---- Presets: one-click example builds that fill every spec-side setting -------
+// The PIR entry reuses the modal's HTML defaults (one source of truth); the rest are
+// defined inline. A preset sets the SPEC side (request/spec/mode/build/ladder/stack/
+// packs/workers/fix/autopilot) but NOT backend/adapter — those are host-dependent and
+// the server already reconciles them from /api/config.
+const _pirReq = (document.getElementById("req-input")||{}).value || "";
+const _pirSpec = (document.getElementById("spec-text")||{}).value || "";
+const _pirLadder = (document.getElementById("milestones-text")||{}).value || "";
+const MOON_SPEC =
+`A complete stardew-valley-style 2D farming/life sim, set on the moon.
+Must include: tile-based moon surface with a scrolling camera; day/night + sol
+cycle; player movement and tool use; tilling, planting, watering, and harvesting
+at least 6 crop types with growth stages; oxygen/energy management; a colony hub
+with at least 4 NPCs with daily schedules and dialog; an economy (sell crops,
+buy seeds/upgrades at a store); base-building (place/upgrade modules); save/load
+with 3 slots; a title screen, pause menu, and controls screen; sound hooks
+(procedural or silent-safe); keyboard controls documented in-game. Code-drawn
+graphics (shapes/procedural tiles) are fine — no external assets.`;
+const PRESETS = [
+  { id:"custom", label:"— Custom (blank) —",
+    note:"A blank slate — describe your own build.",
+    request:"", intake:"idea", spec:"", mode:"autonomous", build:"single",
+    maxMilestones:6, milestones:"", profile:"auto", packs:"", workers:4, fix:5, autopilot:0 },
+  { id:"pir", label:"PIR system · cryptography (complex)",
+    note:"Information-theoretic 2-server + homomorphic single-server PIR, verified in-process.",
+    request:_pirReq, intake:"spec", spec:_pirSpec, mode:"gated", build:"milestones",
+    maxMilestones:6, milestones:_pirLadder, profile:"auto", packs:"crypto",
+    workers:4, fix:5, autopilot:0 },
+  { id:"moon", label:"Moon Colony farming game · pygame (very complex)",
+    note:"The BUILD-A-FULL-GAME recipe: a complete Stardew-style sim as a milestone ladder.",
+    request:"a complete stardew-style farming game about colonizing the moon",
+    intake:"spec", spec:MOON_SPEC, mode:"gated", build:"milestones", maxMilestones:10,
+    milestones:"", profile:"pygame", packs:"game", workers:4, fix:8, autopilot:5 },
+  { id:"urlshort", label:"URL shortener · web service (simple)",
+    note:"A small single service — quick end-to-end build.",
+    request:"a URL shortener service with custom slugs, link expiry, click analytics, and per-IP abuse rate-limiting",
+    intake:"idea", spec:"", mode:"autonomous", build:"single", maxMilestones:6,
+    milestones:"", profile:"auto", packs:"", workers:4, fix:5, autopilot:0 },
+  { id:"chip8", label:"CHIP-8 emulator · systems (simple)",
+    note:"Cheap pipeline validation — objectively scoreable against public test ROMs.",
+    request:"a CHIP-8 emulator in Python with pytest tests against public test ROMs",
+    intake:"idea", spec:"", mode:"autonomous", build:"single", maxMilestones:6,
+    milestones:"", profile:"auto", packs:"", workers:4, fix:6, autopilot:0 },
+  { id:"taskmgr", label:"Team task manager · web+API+DB platform (complex)",
+    note:"Multi-service — auto-built as a platform (web / backend / data), stitched into one repo.",
+    request:"a team task manager: users sign up and log in, create projects, add tasks with assignees, due dates and labels, comment on tasks, and switch between a board and a list view — a REST API, a web UI, and a database",
+    intake:"idea", spec:"", mode:"gated", build:"single", maxMilestones:6,
+    milestones:"", profile:"auto", packs:"frontend", workers:6, fix:6, autopilot:0 },
+  { id:"ssg", label:"Static-site generator · CLI tool (simple)",
+    note:"A command-line tool + library — a different shape of software.",
+    request:"a command-line static-site generator: turn a folder of Markdown with front-matter into a linked HTML site with a table of contents, page templates, and a live-reload dev server",
+    intake:"idea", spec:"", mode:"autonomous", build:"single", maxMilestones:6,
+    milestones:"", profile:"auto", packs:"", workers:4, fix:5, autopilot:0 },
+  { id:"chat", label:"Real-time chat · WebSocket platform (complex)",
+    note:"Rooms, presence and typing over WebSockets — web client + realtime backend + DB.",
+    request:"a real-time group chat app: named rooms, user presence, typing indicators, persistent message history and search, and auth — a WebSocket backend, a web client, and a database",
+    intake:"idea", spec:"", mode:"gated", build:"single", maxMilestones:6,
+    milestones:"", profile:"auto", packs:"frontend", workers:6, fix:6, autopilot:0 },
+];
+function _setSelIfPresent(id, val){
+  const s=document.getElementById(id); if(!s) return;
+  if([...s.options].some(o=>o.value===val)){ s.value=val; s.dispatchEvent(new Event("change")); }
+}
+function applyPreset(id){
+  const p=PRESETS.find(x=>x.id===id); if(!p) return;
+  const note=document.getElementById("preset-note"); if(note) note.textContent=p.note||"";
+  const set=(elId,val)=>{ const e=document.getElementById(elId); if(e) e.value=val; };
+  set("req-input", p.request||"");
+  set("spec-text", p.spec||"");
+  set("milestones-text", p.milestones||"");
+  set("max-milestones", p.maxMilestones!=null?p.maxMilestones:6);
+  set("packs-input", p.packs||"");
+  set("extra-workers", p.workers!=null?p.workers:"");
+  set("fix-input", p.fix!=null?p.fix:5);
+  set("autopilot-input", p.autopilot!=null?p.autopilot:0);
+  _setSelIfPresent("mode-select", p.mode||"autonomous");
+  _setSelIfPresent("build-select", p.build||"single");   // change event toggles the ladder opts
+  _setSelIfPresent("profile-select", p.profile||"auto");
+  // intake radio: reveal the matching panel (idea hides the spec box, spec shows it).
+  const rb=document.querySelector(`input[name="intake"][value="${p.intake||"idea"}"]`);
+  if(rb){ rb.checked=true; rb.dispatchEvent(new Event("change")); }
+  if(typeof updateSlotHint==="function") updateSlotHint();
+  if(typeof syncMode==="function") syncMode();
+}
+{ const ps=document.getElementById("preset-select");
+  if(ps){
+    for(const p of PRESETS){ const o=document.createElement("option"); o.value=p.id; o.textContent=p.label; ps.appendChild(o); }
+    ps.value="pir";   // the modal's HTML defaults already show the PIR demo
+    const pn=document.getElementById("preset-note");
+    if(pn){ const cur=PRESETS.find(x=>x.id==="pir"); if(cur) pn.textContent=cur.note; }
+    ps.addEventListener("change", ()=>applyPreset(ps.value));
+  } }
+
 // ---- "Start from": fresh build, or iterate on a finished build -------------
 const startFromSel=document.getElementById("startfrom-select");
 const REQ_FRESH='What should the factory build? <span class="hint">— a sentence, or a full brief</span>';
@@ -2538,6 +2859,7 @@ document.getElementById("cp-approve").onclick=()=>sendDecision("approve");
 document.getElementById("cp-changes").onclick=()=>sendDecision("needs_changes");
 document.getElementById("cp-reject").onclick=()=>sendDecision("reject");
 document.getElementById("output-btn").onclick=openFiles;
+for (const t of document.querySelectorAll(".log-tab")) t.onclick = () => selectLogTab(t.dataset.tab);
 document.getElementById("files-close").onclick=hideFiles;
 document.getElementById("repos-close").onclick=closeRepoHub;
 document.getElementById("repos-new").onclick=()=>{ closeRepoHub(); showNewModal(); };
@@ -2682,7 +3004,7 @@ function adoptFloor(row){
   const F = {
     id:row.id, floor:row.floor, release:row.release||1, releases:row.releases||1,
     request:row.request, mode:row.mode, backend:row.backend,
-    scene:null, log:[], gates:row.gates||{}, org:null, cp:null, awaiting:!!row.awaiting,
+    scene:null, log:[], progress:[], gates:row.gates||{}, org:null, cp:null, awaiting:!!row.awaiting,
     status:row.status, passed:!!row.passed, slots:row.slots||1, journal:[], seenUris:new Set(),
   };
   FLOORS.set(row.floor, F);

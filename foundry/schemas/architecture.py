@@ -176,6 +176,22 @@ class OwnershipMap(FrozenModel):
 CANONICAL_AREAS: tuple[str, ...] = ("frontend", "backend", "data", "infra", "security")
 _DEFAULT_AREA = "backend"
 
+#: The three engineering DISCIPLINE LANES the implementation subgraph fans out over
+#: (one lead node + one engineer node each). Every canonical area folds into exactly
+#: one lane, so every owner/task is covered by exactly one lane node: ``infra`` and
+#: ``security`` join ``backend`` (matching the office's discipline rooms). Fixed order.
+ENGINEERING_LANES: tuple[str, ...] = ("frontend", "backend", "data")
+_AREA_TO_LANE: dict[str, str] = {
+    "frontend": "frontend", "backend": "backend", "data": "data",
+    "infra": "backend", "security": "backend",
+}
+
+
+def lane_of_area(area: str) -> str:
+    """Discipline LANE (frontend/backend/data) an area folds into — a total map, so
+    every owner lands in exactly one lane node (unknown/infra/security -> backend)."""
+    return _AREA_TO_LANE.get(area, "backend")
+
 #: (area, keywords) in PRECEDENCE order — first match wins (most-specific first).
 #: Matching is WHOLE-TOKEN ONLY (a path is split into tokens on /_-. and each
 #: keyword must equal a token). No substring matching: it false-fires on real

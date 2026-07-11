@@ -154,8 +154,13 @@ def _build_one(
                 directive += " Specifically close these gaps:\n- " + "\n- ".join(gaps[:12])
         request = svc.request + directive
 
-        def node_progress(node: str, scope: str) -> None:
-            # forward this service's live pipeline node up to the platform stream
+        def node_progress(node: str, scope: str, *, phase: str = "finish",
+                          result: object = None) -> None:
+            # forward this service's live pipeline node up to the platform stream. The
+            # factory streams a node twice now (start + finish); forward COMPLETIONS only
+            # so the platform stage log ticks once per node, as it did before.
+            if phase != "finish":
+                return
             emit({"type": "svc_node", "service": svc.name, "node": node, "scope": scope})
 
         try:

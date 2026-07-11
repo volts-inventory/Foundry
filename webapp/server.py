@@ -900,6 +900,69 @@ def _choose_stack(p: Project) -> tuple[str, str] | None:
     return None
 
 
+# One cheap T3 pass per checkpoint turns the raw artifact list into human captions: a
+# descriptive one-liner for the STAGE and for EACH agent's output. Fed into the quest-log
+# blocks (the log's per-agent headers) and the Progress tab (the stage header) so they
+# read as "what actually got done", not a repeat of the artifact-kind names.
+_SUMMARY_SOP = (
+    "You write terse, factual build-log captions for an autonomous software factory. "
+    "Given the artifacts produced at ONE stage, write ONE concise, SPECIFIC sentence for "
+    "the stage overall and ONE for each agent's output. Say WHAT was decided or built "
+    "(capabilities, key decisions, coverage) — never merely restate artifact-type names. "
+    "No preamble, no markdown, no trailing period needed; each <= 20 words."
+)
+_SUMMARY_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "stage": {"type": "string"},
+        "agents": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"agent": {"type": "string"}, "summary": {"type": "string"}},
+                "required": ["agent", "summary"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["stage", "agents"],
+    "additionalProperties": False,
+}
+
+
+def _summarize_stage(p: "Project", payload: dict[str, Any]) -> dict[str, Any] | None:
+    """A cheap T3 caption pass over a checkpoint's artifacts. Returns
+    ``{"stage": str, "agents": {agent_name: str}}`` or None (advisory — any failure
+    just falls back to the mechanical breakdown)."""
+    from foundry.cli import _build_proxy
+    from webapp.events import _origin
+
+    arts = payload.get("artifacts") or []
+    if not arts:
+        return None
+    by_agent: dict[str, list[str]] = {}
+    for a in arts:
+        kind = str(a.get("kind", ""))
+        agent, _room = _origin(kind, str(a.get("produced_by", "")))
+        detail = str(a.get("detail", "")).strip()
+        by_agent.setdefault(agent, []).append(f"{kind}: {detail}" if detail else kind)
+    lines = [f"{agent}: " + "; ".join(items[:10])[:1200] for agent, items in by_agent.items()]
+    prompt = (f"STAGE: {payload.get('boundary', '')}\n\nARTIFACTS BY AGENT:\n"
+              + "\n".join(lines))[:6000]
+    result = _build_proxy(p.backend).complete(
+        "stage_summarizer", "T3", _SUMMARY_SOP,
+        [{"role": "user", "content": prompt}], purpose="ideation", schema=_SUMMARY_SCHEMA,
+    )
+    parsed = result.parsed if isinstance(result.parsed, dict) else json.loads(result.text or "{}")
+    agents: dict[str, str] = {}
+    for e in (parsed.get("agents") or []):
+        nm, sm = str(e.get("agent", "")).strip(), str(e.get("summary", "")).strip()
+        if nm and sm:
+            agents[nm] = sm
+    stage = str(parsed.get("stage", "")).strip()
+    return {"stage": stage, "agents": agents} if (stage or agents) else None
+
+
 _ADVISOR_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -1119,8 +1182,15 @@ def _run_factory(p: Project, resume: bool = False) -> None:
         run_request, run_spec = _milestone_run_args(p)
 
     def responder(payload: dict[str, Any]) -> str:
-        # The REAL stage payload -> paced game events, then the CTO's call.
-        _emit_paced(p, events_for_payload(payload, p.seen_uris))
+        # The REAL stage payload -> paced game events, then the CTO's call. A cheap T3
+        # caption pass first, so the log/progress blocks describe what was DONE (advisory
+        # — any failure falls back to the mechanical artifact breakdown).
+        summaries = None
+        try:
+            summaries = _summarize_stage(p, payload)
+        except Exception as exc:
+            print(f"[summary] floor {p.floor} caption pass failed: {exc}")
+        _emit_paced(p, events_for_payload(payload, p.seen_uris, summaries))
         try:                          # persist the dedup set so a resume won't replay
             _STORE.add_seen(p.id, p.seen_uris)
         except Exception:
@@ -1160,8 +1230,9 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     # LIVE per-node telemetry: as each real graph node executes, seat its agent at
     # the desk in real time (not the retroactive burst at the checkpoint). Emitted
     # immediately (unpaced) so the floor reflects the build actually grinding.
-    def progress(node: str, scope: str) -> None:
-        ev = live_event_for_node(node, scope)
+    def progress(node: str, scope: str, *, phase: str = "finish",
+                 result: object = None) -> None:
+        ev = live_event_for_node(node, scope, phase, result)
         if ev is not None:
             _emit(p, **ev)
 

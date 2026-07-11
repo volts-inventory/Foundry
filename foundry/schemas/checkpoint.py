@@ -175,6 +175,84 @@ def _org_section(state: FactoryState, resolve: ArtifactResolver | None) -> dict[
         return None
 
 
+def _artifact_detail(kind: str, body: object) -> str | None:
+    """A SHORT, human one-line summary of an artifact's CONTENT for the advisory
+    display (never the full body — L4): the PRD's title, an acceptance criterion's
+    text, the sprint plan's milestone count, etc. Best-effort and defensive — returns
+    None when nothing useful is extractable (the row then shows just its label)."""
+    def s(attr: str) -> str | None:
+        v = getattr(body, attr, None)
+        return v.strip() if isinstance(v, str) and v.strip() else None
+
+    def count(attr: str) -> int:
+        v = getattr(body, attr, None)
+        try:
+            return len(v)  # type: ignore[arg-type]
+        except Exception:
+            return 0
+
+    out: str | None = None
+    if kind == "acceptance_criterion":
+        out = s("text")
+        crit = s("criticality")
+        if out and crit:
+            out = f"[{crit}] {out}"
+    elif kind == "prd":
+        caps = count("required_capabilities")
+        out = (s("title") or "PRD") + (f" — {caps} capabilities" if caps else "")
+    elif kind == "intent_brief":
+        out = s("intent")
+        mh = count("must_haves")
+        if out and mh:
+            out = f"{out} ({mh} must-haves)"
+    elif kind == "sprint_plan":
+        out = f"{count('milestones')} milestone(s)"
+        dd = s("done_definition")
+        if dd:
+            out += f" — done when: {dd}"
+    elif kind == "system_design":
+        comps = count("components")
+        out = (s("title") or "System Design") + (f" — {comps} components" if comps else "")
+    elif kind == "adr":
+        out = s("title") or s("decision")
+    elif kind == "interface_contract":
+        out = s("name")
+        cons = count("consumers")
+        if out and cons:
+            out = f"{out} ({cons} consumers)"
+    elif kind == "ownership_map":
+        owners = getattr(body, "owners", None) or {}
+        try:
+            out = f"{len(set(owners.values()))} domain(s) across {len(owners)} unit(s)"
+        except Exception:
+            out = None
+    elif kind == "test_plan":
+        out = f"{count('test_criteria')} test criteria"
+    elif kind == "test_report":
+        out = f"{getattr(body, 'passed', 0)} passed / {getattr(body, 'failed', 0)} failed"
+    elif kind == "e2e_report":
+        out = (f"{getattr(body, 'scenarios_passed', 0)} scenarios passed / "
+               f"{getattr(body, 'scenarios_failed', 0)} failed")
+    elif kind == "threat_model":
+        out = f"{count('oracle_bindings')} oracle bindings, {count('residual_item_ids')} residual items"
+    elif kind == "audit_finding":
+        out = f"severity {getattr(body, 'severity', '?')} — {count('findings')} finding(s)"
+    elif kind == "supply_chain_report":
+        pv = count("policy_violations")
+        out = f"{pv} policy violation(s)" if pv else "clean supply-chain scan"
+    if not out:  # generic fallback: the first descriptive string field on the body
+        for attr in ("title", "name", "text", "summary", "intent", "decision", "description"):
+            out = s(attr)
+            if out:
+                break
+    if not out:
+        return None
+    out = " ".join(str(out).split())  # collapse whitespace to one line
+    if len(out) > 200:  # trim at a WORD boundary, never mid-word
+        out = out[:200].rsplit(" ", 1)[0] + "…"
+    return out
+
+
 def inspection_payload(
     state: FactoryState,
     *,
@@ -194,10 +272,17 @@ def inspection_payload(
     The payload is a plain JSON-able dict so it can ride the LangGraph
     ``interrupt()`` value out to the caller, who renders it and feeds back a
     :class:`CheckpointDecision` via ``Command(resume=...)``."""
-    artifacts = [
-        {"kind": a.kind, "uri": a.uri, "produced_by": a.produced_by}
-        for a in (state.get("artifacts") or ())
-    ]
+    artifacts = []
+    for a in (state.get("artifacts") or ()):
+        entry: dict[str, object] = {"kind": a.kind, "uri": a.uri, "produced_by": a.produced_by}
+        if resolve is not None:  # advisory CONTENT one-liner (never the full body, L4)
+            try:
+                detail = _artifact_detail(a.kind, resolve(a))
+                if detail:
+                    entry["detail"] = detail
+            except Exception:
+                pass
+        artifacts.append(entry)
     gates = [
         {"name": g.name, "status": str(g.status), "run_against": g.run_against}
         for g in (state.get("gates") or ())

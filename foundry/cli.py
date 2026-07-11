@@ -1065,32 +1065,60 @@ def _invoke_streaming(app: Any, seed: FactoryState, config: RunnableConfig) -> F
     return cast("FactoryState", app.get_state(config).values)
 
 
+def _unpack_stream_item(item: Any) -> tuple[tuple[Any, ...], str, Any]:
+    """Normalise a ``.stream`` item to ``(namespace, mode, payload)`` across the
+    shapes langgraph yields: with ``subgraphs=True`` and a LIST of stream modes it
+    is ``(namespace, mode, payload)``; with one mode ``(namespace, payload)``;
+    without subgraphs ``(mode, payload)`` or bare ``payload``. Defaults the mode to
+    ``"updates"`` so an unexpected shape still flows down the completion path."""
+    if isinstance(item, tuple):
+        if len(item) == 3:
+            return item[0], str(item[1]), item[2]
+        if len(item) == 2:
+            a, b = item
+            if isinstance(a, tuple):          # (namespace, payload) — single mode
+                return a, "updates", b
+            return (), str(a), b              # (mode, payload) — no subgraphs
+    return (), "updates", item
+
+
 def _stream_segment(
     app: Any,
     x: Any,
     config: RunnableConfig,
-    progress_cb: Callable[[str, str], None],
+    progress_cb: Callable[..., None],
 ) -> dict[str, Any]:
-    """Drive ONE graph segment with ``stream`` (updates mode), forwarding each
-    node as it completes to ``progress_cb(node, scope)`` for LIVE telemetry (so a
-    long real stage shows agents working at their desks node-by-node, not a single
-    burst at the pause). ``subgraphs=True`` surfaces the inner stage nodes; the
-    namespace's leading scope names the stage/room. Returns a dict carrying
-    ``__interrupt__`` if the segment paused, so the caller's interrupt detection
-    (:func:`_pending_interrupt`) is byte-identical to the ``invoke`` path."""
+    """Drive ONE graph segment with ``stream``, forwarding each node's START and
+    FINISH to ``progress_cb(node, scope, phase=..., result=...)`` for LIVE telemetry
+    (so the floor seats an agent the moment its node begins — through the whole model
+    call — and clears it, with a summary, when the node completes; not a single burst
+    at the pause).
+
+    ``stream_mode=["updates", "tasks"]`` gives both edges: the ``tasks`` mode emits a
+    task event on start (no ``result``) and on finish (carries ``result``), while the
+    ``updates`` mode still surfaces ``__interrupt__`` for the pause. ``subgraphs=True``
+    surfaces the inner stage nodes; the namespace's leading scope names the stage/room.
+    Returns a dict carrying ``__interrupt__`` if the segment paused, so the caller's
+    interrupt detection (:func:`_pending_interrupt`) is byte-identical to ``invoke``.
+    (Requires langgraph's ``tasks`` stream mode — present since the pinned 1.x line.)"""
     pending: Any = None
-    for item in app.stream(x, config, stream_mode="updates", subgraphs=True):
-        ns, chunk = item if isinstance(item, tuple) else ((), item)
-        if not isinstance(chunk, dict):
-            continue
-        if "__interrupt__" in chunk:
-            pending = chunk["__interrupt__"]
-            continue
+    for item in app.stream(x, config, stream_mode=["updates", "tasks"], subgraphs=True):
+        ns, mode, payload = _unpack_stream_item(item)
         scope = ":".join(str(n).split(":")[0] for n in ns) if ns else ""
-        for node in chunk:
+        if mode == "updates":
+            # 'updates' is used ONLY for the pause signal now (start/finish come from
+            # 'tasks'); a segment paused iff its update carries an interrupt.
+            if isinstance(payload, dict) and "__interrupt__" in payload:
+                pending = payload["__interrupt__"]
+            continue
+        if mode == "tasks" and isinstance(payload, dict) and payload.get("name"):
+            node = str(payload["name"])
+            finished = ("result" in payload) or ("error" in payload)
+            phase = "finish" if finished else "start"
+            result = payload.get("result") if finished else None
             # telemetry is advisory — never let a UI callback break the build
             with contextlib.suppress(Exception):
-                progress_cb(str(node), scope)
+                progress_cb(node, scope, phase=phase, result=result)
     return {"__interrupt__": pending} if pending else {}
 
 
@@ -1101,7 +1129,7 @@ def _invoke_with_checkpoints(
     *,
     checkpointed: bool,
     responder: CheckpointResponder | None,
-    progress_cb: Callable[[str, str], None] | None = None,
+    progress_cb: Callable[..., None] | None = None,
 ) -> tuple[FactoryState, str | None]:
     """Drive the compiled graph, pausing/resuming at the checkpoint boundaries.
 
@@ -1163,7 +1191,7 @@ def _invoke_with_autoresume(
     *,
     checkpointed: bool,
     responder: CheckpointResponder | None,
-    progress_cb: Callable[[str, str], None] | None,
+    progress_cb: Callable[..., None] | None,
     resumable: bool,
 ) -> tuple[FactoryState, str | None]:
     """Wrap :func:`_invoke_with_checkpoints` so a TRANSIENT provider failure does
@@ -1235,7 +1263,7 @@ def run(
     output_dir: str | None = None,
     checkpoints: bool | list[str | CheckpointBoundary] | None = None,
     checkpoint_responder: CheckpointResponder | None = None,
-    progress_cb: Callable[[str, str], None] | None = None,
+    progress_cb: Callable[..., None] | None = None,
     max_slots: int = AUTO_SLOTS_CAP,
     cost_cap_microusd: int | None = None,
     base_dir: str | None = None,

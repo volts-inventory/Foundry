@@ -45,7 +45,7 @@ when the backend is not the Anthropic SDK:
 from __future__ import annotations
 
 import json
-import os
+import re
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Sequence
@@ -141,10 +141,6 @@ def _schema_of(request: dict[str, Any]) -> dict[str, Any] | None:
         schema = fmt.get("schema")
         return schema if isinstance(schema, dict) else None
     return None
-
-
-def _env_truthy(name: str) -> bool:
-    return str(os.environ.get(name, "")).strip().lower() in ("1", "true", "yes", "on")
 
 
 def _flatten_to_prompt(request: dict[str, Any], *, include_system: bool = True) -> str:
@@ -260,6 +256,30 @@ def _lenient_json_object(text: str) -> dict[str, Any]:
 # Backend 1 — Claude Code CLI (`claude -p`)                                     #
 # --------------------------------------------------------------------------- #
 
+# Prompt caching (routing the stable SOP through `--append-system-prompt`) is the
+# primary token-cost lever and is ALWAYS ON — it is not a setting. The only thing
+# that could make it fail is a `claude` too old to know the flag, so we make a new
+# enough binary a REQUIREMENT instead of degrading silently: probe the version once
+# per process and fail closed with an upgrade instruction if it's below the floor.
+# `--append-system-prompt` has shipped since long before this floor; the floor's job
+# is only to reject a genuinely ancient pre-1.0 binary. Raise it if you pin higher.
+_MIN_CLAUDE_VERSION = (1, 0, 0)
+_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+# Process-global capability cache, keyed by binary path — one `--version` probe per
+# distinct `claude` binary, not one per checkpoint (a fresh transport is built per
+# proxy, and a proxy is built per stage). Reset in tests via `reset_claude_cap_cache`.
+_CLAUDE_CAP_CACHE: dict[str, bool] = {}
+
+
+def reset_claude_cap_cache() -> None:
+    """Clear the per-process `claude --version` capability cache (test seam)."""
+    _CLAUDE_CAP_CACHE.clear()
+
+
+def _parse_claude_version(text: str) -> tuple[int, int, int] | None:
+    m = _VERSION_RE.search(text or "")
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
+
 
 class ClaudeCliTransport:
     """``claude -p "<prompt>" --output-format json --model <id>``.
@@ -282,24 +302,44 @@ class ClaudeCliTransport:
         self._timeout_s = timeout_s
         self._extra_args = tuple(extra_args)
 
+    def _cache_supported(self) -> bool:
+        """Probe (once per process, per binary) that `claude` is new enough to
+        accept `--append-system-prompt`. A parseable version BELOW the floor is a
+        hard error that tells the operator exactly how to fix it; an UNPARSEABLE
+        `--version` is treated as modern so a probe quirk never bricks a run."""
+        cached = _CLAUDE_CAP_CACHE.get(self._bin)
+        if cached is not None:
+            return cached
+        result = self._run([self._bin, "--version"], min(self._timeout_s or 30.0, 30.0))
+        version = _parse_claude_version(result.stdout)
+        if version is not None and version < _MIN_CLAUDE_VERSION:
+            floor = ".".join(map(str, _MIN_CLAUDE_VERSION))
+            got = ".".join(map(str, version))
+            raise TransportError(
+                f"claude {got} is too old: prompt caching needs --append-system-prompt "
+                f"(>= {floor}). Upgrade with `npm i -g @anthropic-ai/claude-code`."
+            )
+        _CLAUDE_CAP_CACHE[self._bin] = True
+        return True
+
     def send(self, request: dict[str, Any]) -> ProviderResponse:
-        # Token-cost lever (opt-in): the stable per-role SOP is the big prefix that
-        # repeats across many calls (every reviewer call shares the reviewer SOP;
-        # every fix-loop retry re-sends it). Flattening it into the `-p` user string
-        # makes it a fresh, uncacheable message each call. Routed through the CLI's
-        # `--append-system-prompt` instead, Claude Code marks it cacheable, so those
-        # byte-identical prefixes hit Anthropic's prompt cache across invocations
-        # (5-min TTL). Off by default (a `claude` too old to support the flag would
-        # error); FOUNDRY_CLI_CACHE_SYSTEM=1 turns it on — verify with the manifest's
-        # cache-read tokens.
-        cache_system = _env_truthy("FOUNDRY_CLI_CACHE_SYSTEM")
+        # Token-cost lever (ALWAYS ON, not a setting): the stable per-role SOP is the
+        # big prefix that repeats across many calls (every reviewer call shares the
+        # reviewer SOP; every fix-loop retry re-sends it). Flattened into the `-p`
+        # user string it is a fresh, uncacheable message each call. Routed through the
+        # CLI's `--append-system-prompt` instead, Claude Code marks it cacheable, so
+        # those byte-identical prefixes hit Anthropic's prompt cache across invocations
+        # (5-min TTL) — verify with the manifest's cache-read tokens. A `claude` too
+        # old for the flag is rejected up front by `_cache_supported` (probe once), so
+        # this never degrades silently. The probe only runs when there's a SOP to cache.
         sys_text = _system_text(request)
-        if cache_system and sys_text:
+        cache_system = bool(sys_text) and self._cache_supported()
+        if cache_system:
             prompt = _flatten_to_prompt(request, include_system=False)
         else:
             prompt = _flatten_to_prompt(request)
         argv = [self._bin, "-p", prompt, "--output-format", "json"]
-        if cache_system and sys_text:
+        if cache_system:
             argv += ["--append-system-prompt", sys_text]
         model = request.get("model")
         if isinstance(model, str) and model:

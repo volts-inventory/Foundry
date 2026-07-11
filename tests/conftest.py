@@ -32,8 +32,19 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
 
 @pytest.fixture(autouse=True)
 def _in_process_test_gate(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The Docker sandbox is the PRODUCTION default for running generated tests, but
-    the hermetic suite has no daemon — so default every test to the in-process gate
-    harness. A test that specifically exercises the sandbox path opts back in with
-    ``monkeypatch.setenv("FOUNDRY_GATE_SANDBOX", "docker")``."""
+    """Keep the suite hermetic regardless of the developer's environment:
+
+    * The Docker sandbox is the PRODUCTION default for running generated tests, but
+      the hermetic suite has no daemon — so default every test to the in-process gate
+      harness. A test that specifically exercises the sandbox path opts back in with
+      ``monkeypatch.setenv("FOUNDRY_GATE_SANDBOX", "docker")``.
+    * Pin the model backend to the deterministic scripted ``mock``. Importing
+      ``webapp.server`` runs ``_load_env_file()`` at module load, which reads the
+      repo ``.env`` — on a dev box that sets ``FOUNDRY_MODEL_BACKEND=claude-cli``,
+      which would otherwise leak into ``main()``/``run()`` calls and spawn REAL
+      ``claude -p`` subprocesses (network-bound; they hang where the binary exists).
+      A test that wants a real/other backend overrides with its own
+      ``monkeypatch.setenv("FOUNDRY_MODEL_BACKEND", ...)`` or an explicit ``env=``.
+    """
     monkeypatch.setenv("FOUNDRY_GATE_SANDBOX", "inprocess")
+    monkeypatch.setenv("FOUNDRY_MODEL_BACKEND", "mock")

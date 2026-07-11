@@ -48,3 +48,10 @@ def _in_process_test_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setenv("FOUNDRY_GATE_SANDBOX", "inprocess")
     monkeypatch.setenv("FOUNDRY_MODEL_BACKEND", "mock")
+    # Same .env-leak class as the backend above: a dev `.env` (loaded process-wide
+    # by webapp.server's import-time _load_env_file()) may set
+    # FOUNDRY_CODING_ADAPTER=claude-code, which _default_adapter_for() lets OVERRIDE
+    # the mock->stub derivation — so a mock build would run the real claude-code
+    # coding adapter, author no FeatureDiff, and materialize an empty tree. Pin the
+    # deterministic stub substrate; a test wanting a real adapter overrides it.
+    monkeypatch.setenv("FOUNDRY_CODING_ADAPTER", "stub")

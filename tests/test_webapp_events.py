@@ -5,15 +5,21 @@ from webapp.events import events_for_payload, events_for_result, live_event_for_
 
 
 def test_live_event_for_node_seats_the_agent_at_its_desk() -> None:
-    # A named agent node -> a LIVE "active" event seating that agent in its room.
-    ev = live_event_for_node("principal_architect", "architecture")
+    # START: a named agent node seats that agent in its room for the whole model call.
+    ev = live_event_for_node("principal_architect", "architecture", "start")
     assert ev == {"type": "active", "room": "architecture", "agent": "Principal Architect",
-                  "live": True}
+                  "live": True, "phase": "start"}
+    # FINISH: clears the agent and carries a human summary of what the step produced.
+    fin = live_event_for_node("principal_architect", "architecture", "finish")
+    assert fin["phase"] == "finish"
+    assert fin["room"] == "architecture" and fin["agent"] == "Principal Architect"
+    assert "Principal Architect" in fin["summary"] and fin["summary"] != "Principal Architect"
     # An unnamed node falls back to the subgraph scope -> room (room still lights).
-    ev2 = live_event_for_node("some_infra_node", "engineering")
-    assert ev2 == {"type": "active", "room": "engineering", "agent": "", "live": True}
+    ev2 = live_event_for_node("some_infra_node", "engineering", "start")
+    assert ev2 == {"type": "active", "room": "engineering", "agent": "", "live": True,
+                   "phase": "start"}
     # A node with neither a known agent nor a room scope -> no desk to light.
-    assert live_event_for_node("__start__", "") is None
+    assert live_event_for_node("__start__", "", "start") is None
 
 
 def test_payload_maps_artifacts_journal_and_checkpoint() -> None:

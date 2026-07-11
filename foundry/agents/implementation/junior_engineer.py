@@ -58,7 +58,12 @@ from foundry.agents.implementation.senior_engineer import (
 from foundry.canonical import content_digest
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
 from foundry.execution.sandbox import Sandbox
-from foundry.schemas.architecture import OwnershipMap, PinnedConstraint, SystemDesign
+from foundry.schemas.architecture import (
+    OwnershipMap,
+    PinnedConstraint,
+    SystemDesign,
+    lane_of_area,
+)
 from foundry.schemas.base import Artifact, BudgetLedger
 from foundry.schemas.gates import GateStatus
 from foundry.schemas.implementation import FeatureDiff, Task, TaskStatus
@@ -624,6 +629,7 @@ def _run_tasks_pooled(
     prior_failures: tuple[str, ...] = (),
     persona_by_task: Mapping[str, str] | None = None,
     spans_by_task: Mapping[str, tuple[str, ...]] | None = None,
+    weight_tasks: Sequence[Task] | None = None,
 ) -> dict[str, Any]:
     """Run the ready tasks' adapter work in PARALLEL through a bounded
     :class:`LocalWorkPool` (``max_slots`` physical slots), then post-process the
@@ -660,8 +666,12 @@ def _run_tasks_pooled(
 
     # Per-domain task weights + each domain's area, so the global cap can flow down
     # the PM -> area -> domain tree; Σ(domain quotas) ≤ Σ(area quotas) ≤ global cap.
+    # The weight spans the WHOLE ready set (``weight_tasks``), not just the tasks THIS
+    # node builds — so a per-lane engineer node derives the SAME per-domain quotas it
+    # would in one node (the cap is split across every area once), then meters only its
+    # own lane's tasks against them. Defaults to ``tasks`` (single-node = unchanged).
     domain_weight: dict[str, int] = {}
-    for task in tasks:
+    for task in (weight_tasks if weight_tasks is not None else tasks):
         domain_weight[lineage_of(task)] = domain_weight.get(lineage_of(task), 0) + 1
     global_cap = 0 if cost_cap_microusd is None else cost_cap_microusd
     lineage_quotas = allocate_budget_tree(domain_area, domain_weight, global_cap)
@@ -748,6 +758,7 @@ def make_junior_engineer_node(
     max_slots: int = 1,
     cost_cap_microusd: int | None = None,
     resolve: ArtifactResolver | None = None,
+    lane: str | None = None,
 ) -> NodeFn:
     """Build the Junior Engineer node.
 
@@ -785,6 +796,16 @@ def make_junior_engineer_node(
         reconstitute the OwnershipMap so each task's budget ``lineage`` is its
         AREA (Wave D). ``None`` keeps a single ``"default"`` lineage (Wave C
         behaviour). DATA (which ownership) is read from ``state`` inside the node.
+    lane:
+        Discipline LANE (``frontend``/``backend``/``data``) this node builds. When set,
+        the node builds ONLY the tasks whose owning area folds into this lane
+        (:func:`lane_of_area`), but derives the per-domain budget quotas from the WHOLE
+        ready set (so the global cap is still split across every area exactly once — no
+        lane gets the full cap). Task identity, seq and ``produced_by`` stay on the
+        shared internal ``NODE_ID`` (unchanged content-addressing); the distinct per-lane
+        TELEMETRY comes from the graph node NAME the subgraph registers. Each task is
+        owned by one area in one lane, so no task is built twice. ``None`` (default) =
+        build every ready task in one node (byte-identical legacy).
     """
     if rt.adapter is None:
         raise ValueError(
@@ -794,7 +815,19 @@ def make_junior_engineer_node(
 
     def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         constraints: Sequence[PinnedConstraint] = state.get("pinned_constraints") or ()
-        tasks = ready_tasks(state)
+        all_tasks = ready_tasks(state)
+        # Lane scoping: build only THIS lane's tasks, but keep the full ready set for
+        # budget weighting (below). A task's lane = the lane its owning area folds into;
+        # with no ownership wired (resolver absent) every task defaults to the backend
+        # lane, so exactly one lane node builds it — never duplicated across lane nodes.
+        if lane is not None:
+            ownership = _read_ownership(state, resolve) if resolve is not None else None
+            area_by_tid = _area_by_task_id(ownership) if ownership is not None else {}
+            def _task_lane(tid: str) -> str:
+                return lane_of_area(area_by_tid.get(tid, "backend"))
+            tasks = [t for t in all_tasks if _task_lane(t.id) == lane]
+        else:
+            tasks = all_tasks
         # Fix loop: on a re-entry after a failed gate, feed the SPECIFIC failure back
         # to the engineer (empty on the first pass) so it fixes that instead of re-rolling.
         prior_failures = _prior_failures(state)
@@ -806,6 +839,12 @@ def make_junior_engineer_node(
         # fans N adapter runs across the pool automatically (≤ the cap). Nobody sets
         # a worker count: the system reads it off the lead's plan.
         effective_slots = min(len(tasks), max_slots) if tasks else 1
+        # A lane node under a cost cap MUST meter even a lone task: the per-domain
+        # quota/ledger live only on the pooled path, so a single-task lane on the serial
+        # path would slip its budget (a data lane's one task escaping its starved
+        # sub-cap). Force the pooled path for a capped lane build; the legacy single-node
+        # run (lane is None) keeps the original serial/pooled selection untouched.
+        force_pool = lane is not None and cost_cap_microusd is not None and bool(tasks)
         # Area-expert persona per task (option-2): a frontend task is written by a
         # frontend specialist, etc. Empty map when no ownership/resolver is wired.
         persona_by_task = _persona_by_task(state, resolve)
@@ -815,7 +854,7 @@ def make_junior_engineer_node(
         # Branch-per-task: each task builds in its own fresh sandbox on its own
         # task/<id> branch. >1 task ⇒ the adapter runs fan out across the IC pool
         # (Wave C); a single task runs serially (the original path).
-        if effective_slots > 1:
+        if effective_slots > 1 or force_pool:
             # Per-domain budget lineage + each domain's area (Wave D), derived from
             # the OwnershipMap when a resolver is wired; else a single "default".
             domain_by_task: dict[str, str] = {}
@@ -842,6 +881,7 @@ def make_junior_engineer_node(
                 prior_failures=prior_failures,
                 persona_by_task=persona_by_task,
                 spans_by_task=spans_by_task,
+                weight_tasks=all_tasks,  # per-domain quotas span EVERY lane, not just this one
             )
         merged: dict[str, Any] = {}
         # The shared evolving tree (ROADMAP Phase 2b): each SERIAL task builds on

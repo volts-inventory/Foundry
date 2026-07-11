@@ -32,8 +32,17 @@ AGENT_BY_NODE: dict[str, tuple[str, str]] = {
     "criteria_completeness_critic": ("Criteria Critic", "product"),
     "eng_program_mgr": ("Program Manager", "product"),
     "principal_architect": ("Principal Architect", "architecture"),
+    # Implementation fans out into a LEAD (decompose) + ENGINEER (build) node per
+    # discipline lane, so each lights its own room + role. Legacy single-node ids kept
+    # so an OLD build's replayed telemetry still seats someone.
     "senior_engineer": ("Senior Engineer", "engineering"),
     "junior_engineer": ("Junior Engineer", "engineering"),
+    "frontend_lead": ("Frontend Lead", "frontend"),
+    "frontend_engineer": ("Frontend Engineer", "frontend"),
+    "backend_lead": ("Backend Lead", "backend"),
+    "backend_engineer": ("Backend Engineer", "backend"),
+    "data_lead": ("Data Lead", "data"),
+    "data_engineer": ("Data Engineer", "data"),
     "qa_engineer": ("QA Engineer", "qa"),
     "sdet": ("SDET", "qa"),
     "reviewer_critic": ("Reviewer", "qa"),
@@ -113,26 +122,66 @@ def _origin(kind: str, produced_by: str) -> tuple[str, str]:
     return (produced_by.replace("_", " ").title() or "Agent", "engineering")
 
 
-def live_event_for_node(node: str, scope: str) -> dict[str, Any] | None:
-    """A LIVE "this agent is at its desk working RIGHT NOW" event for a graph node
-    that just executed in the real run (streamed per-node, not the checkpoint burst).
+# A short, human "what this node just did" line for the quest log (task completion).
+# Keyed by node id; falls back to the agent name when a node isn't listed here.
+_NODE_SUMMARY: dict[str, str] = {
+    "stakeholder_proxy": "clarified the intent brief",
+    "product_manager": "wrote the PRD & acceptance criteria",
+    "criteria_completeness_critic": "critiqued the acceptance criteria",
+    "eng_program_mgr": "drafted the sprint plan",
+    "principal_architect": "produced the system design & interface contracts",
+    "senior_engineer": "decomposed the design into ownership-ordered tasks",
+    "junior_engineer": "built the feature diffs (code) across the task set",
+    "frontend_lead": "decomposed the frontend work into tasks",
+    "frontend_engineer": "built the frontend feature diffs (code)",
+    "backend_lead": "decomposed the backend work into tasks",
+    "backend_engineer": "built the backend feature diffs (code)",
+    "data_lead": "decomposed the data-layer work into tasks",
+    "data_engineer": "built the data-layer feature diffs (code)",
+    "qa_engineer": "ran the test plan",
+    "sdet": "ran the end-to-end checks",
+    "reviewer_critic": "reviewed the change",
+    "appsec_engineer": "built the threat model",
+    "audit_compliance": "checked audit & compliance",
+    "supply_chain_reviewer": "reviewed the supply chain",
+}
 
-    Maps the node id -> (agent, room) so the canvas seats that agent at its desk and
-    keeps them working until the stage's checkpoint. Falls back to the subgraph
-    ``scope`` -> room when the node isn't a named agent (so a stage still lights the
-    right room). Returns ``None`` for infra/non-agent nodes with no desk to light."""
+
+def live_event_for_node(
+    node: str, scope: str, phase: str = "finish", result: Any = None
+) -> dict[str, Any] | None:
+    """A LIVE "this agent's node is executing / just finished" event for a real graph
+    node, streamed per-node (start AND finish), not the retroactive checkpoint burst.
+
+    ``phase="start"`` seats the agent at their desk for the WHOLE model call; ``"finish"``
+    clears them and carries a ``summary`` of what the step produced (for the quest log).
+    Maps the node id -> (agent, room). Falls back to the subgraph ``scope`` -> room when
+    the node isn't a named agent (so a stage still lights the right room). Returns
+    ``None`` for infra/non-agent nodes with no desk to light."""
     who = AGENT_BY_NODE.get(node)
     if who is not None:
         agent, room = who
-        return {"type": "active", "room": room, "agent": agent, "live": True}
-    room = _BOUNDARY_ROOM.get(scope) or (scope if scope in ROOMS else "")
-    if room:
-        return {"type": "active", "room": room, "agent": "", "live": True}
-    return None
+    else:
+        room = _BOUNDARY_ROOM.get(scope) or (scope if scope in ROOMS else "")
+        if not room:
+            return None
+        agent = ""
+    ev: dict[str, Any] = {
+        "type": "active", "room": room, "agent": agent, "live": True, "phase": phase,
+    }
+    if phase == "finish":
+        verb = _NODE_SUMMARY.get(node)
+        if not verb and agent:
+            verb = "finished its step"
+        if verb:
+            ev["summary"] = f"{agent} {verb}" if agent else verb
+    return ev
 
 
 def events_for_payload(
-    payload: dict[str, Any], seen_uris: set[str]
+    payload: dict[str, Any],
+    seen_uris: set[str],
+    summaries: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Game events for ONE checkpoint pause (the REAL inspection payload).
 
@@ -140,7 +189,12 @@ def events_for_payload(
     bubble from the agent journal) for each NEW artifact since the last pause, the
     advisory gate badges so far, and the ``checkpoint`` dialog itself. ``seen_uris``
     is mutated so a re-emitted handle never double-fires (idempotent, like the
-    channel folds the data came from)."""
+    channel folds the data came from).
+
+    ``summaries`` (optional, from the T3 caption pass) supplies a descriptive
+    ``stage`` line for the checkpoint and per-``agent`` captions that override the raw
+    journal text on the speech bubbles / log block headers."""
+    agent_caps: dict[str, str] = dict((summaries or {}).get("agents") or {})
     boundary = str(payload.get("boundary", ""))
     room = _BOUNDARY_ROOM.get(boundary, "product")
     out: list[dict[str, Any]] = [
@@ -172,7 +226,8 @@ def events_for_payload(
     for e in payload.get("agent_journal", []):
         agent, jroom = AGENT_BY_NODE.get(str(e.get("node_id", "")),
                                          (str(e.get("role", "agent")).title(), room))
-        bubble = str(e.get("summary", "")).strip()
+        # Prefer the T3 caption (descriptive, concise) over the raw journal text.
+        bubble = agent_caps.get(agent) or str(e.get("summary", "")).strip()
         concerns = [str(c) for c in (e.get("concerns") or []) if str(c).strip()]
         say_by_room.setdefault(jroom, []).append(
             {"agent": agent, "room": jroom, "text": bubble or "Working…",
@@ -205,7 +260,7 @@ def events_for_payload(
         out.append({"type": "agent", "room": aroom, "agent": agent, "action": "work"})
         out.append({
             "type": "artifact", "room": aroom, "agent": agent, "kind": kind,
-            "label": label,
+            "label": label, "detail": str(a.get("detail", "")),  # advisory content one-liner
         })
         # Attach a speech bubble for this agent if the journal had one.
         for s in say_by_room.get(aroom, []):
@@ -219,10 +274,11 @@ def events_for_payload(
                     "status": _norm_status(g.get("status")), "attested": True,
                     "advisory": True})
 
+    stage_caption = str((summaries or {}).get("stage") or "").strip()
     out.append({
         "type": "checkpoint", "boundary": boundary, "room": room,
         "title": _BOUNDARY_TITLE.get(boundary, boundary.title()),
-        "summary": _checkpoint_summary(payload),
+        "summary": stage_caption or _checkpoint_summary(payload),  # T3 caption, else counts
     })
     return out
 
@@ -258,4 +314,11 @@ def _checkpoint_summary(payload: dict[str, Any]) -> str:
     n_art = len(payload.get("artifacts", []))
     gates = payload.get("gates", [])
     n_pass = sum(1 for g in gates if _norm_status(g.get("status")) == "pass")
-    return f"{n_art} artifacts produced · {n_pass}/{len(gates)} gates green so far"
+    n_fail = sum(1 for g in gates if _norm_status(g.get("status")) == "fail")
+    parts = [f"{n_art} artifacts produced"]
+    if gates:
+        seg = f"{n_pass}/{len(gates)} gates green"
+        if n_fail:
+            seg += f" · {n_fail} failing"
+        parts.append(seg)
+    return " · ".join(parts)

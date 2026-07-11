@@ -50,7 +50,7 @@ from typing import TYPE_CHECKING, Any
 from foundry.agents._common import journal_entry
 from foundry.agents._runtime import AgentRuntime, NodeFn
 from foundry.canonical import content_digest
-from foundry.schemas.architecture import OwnershipMap, SystemDesign
+from foundry.schemas.architecture import OwnershipMap, SystemDesign, lane_of_area
 from foundry.schemas.implementation import ConflictResolution, Task
 
 if TYPE_CHECKING:
@@ -180,6 +180,7 @@ def make_senior_engineer_node(
     *,
     resolve: ArtifactResolver,
     tier: str = "T1",
+    lane: str | None = None,
 ) -> NodeFn:
     """Build the Senior Engineer node.
 
@@ -194,12 +195,26 @@ def make_senior_engineer_node(
     tier:
         Model tier for the decomposition call (T1 default — defects are born in
         implementation, agents.md Layer 3).
+    lane:
+        Discipline LANE (``frontend``/``backend``/``data``) this node owns. When set,
+        the node decomposes ONLY the Tech-Leads whose area folds into this lane
+        (:func:`lane_of_area`), so the org fan-out becomes distinct per-lane GRAPH
+        nodes. The task id/seq/branch stay keyed off the unit and its GLOBAL merge
+        index (``index_of`` spans the whole OwnershipMap) AND the shared internal
+        ``NODE_ID``, so scoping changes only WHICH graph node proposes a task — never
+        its identity, seq, order, or the keyed-union merge. Each unit is owned by
+        exactly one lead in exactly one lane, so no two lane nodes collide on a seq
+        key. ``None`` (default) = the whole map in one node (byte-identical legacy).
+
+    The distinct per-lane TELEMETRY comes from the graph node NAME the subgraph
+    registers (``frontend_senior`` …), NOT from this closure — the internal
+    ``NODE_ID`` stays ``senior_engineer`` so content-addressing is unchanged.
     """
 
     def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         design, ownership = _read_design_and_ownership(state, resolve)
         order = ownership.merge_order()
-        index_of = {unit: i for i, unit in enumerate(order)}
+        index_of = {unit: i for i, unit in enumerate(order)}  # GLOBAL, spans all lanes
 
         # ONE Tech-Lead per domain (each OwnershipMap owner; Wave A
         # `OwnershipMap.leads()`): a lead decomposes ONLY its own ownership units,
@@ -216,6 +231,8 @@ def make_senior_engineer_node(
         tasks: list[dict[str, Any]] = []
         notes: list[JournalEntry] = []
         for lead in ownership.leads():
+            if lane is not None and lane_of_area(ownership.area_of(lead)) != lane:
+                continue  # another lane's node decomposes this Tech-Lead
             units = ownership.units_of(lead)
             prompt = json.dumps(
                 {

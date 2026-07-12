@@ -185,9 +185,18 @@ def test_load_env_file_last_line_wins_and_real_env_wins(tmp_path, monkeypatch):
     monkeypatch.delenv("FOUNDRY_MODEL_BACKEND", raising=False)
     monkeypatch.setenv("WORKSHOP_PORT", "8080")   # real env must win over the file
     assert server._load_env_file() is True
-    assert os.environ["CLAUDE_CODE_OAUTH_TOKEN"] == "real-token"   # last line wins
-    assert os.environ["FOUNDRY_MODEL_BACKEND"] == "claude-cli"
-    assert os.environ["WORKSHOP_PORT"] == "8080"                   # real env preserved
+    try:
+        assert os.environ["CLAUDE_CODE_OAUTH_TOKEN"] == "real-token"   # last line wins
+        assert os.environ["FOUNDRY_MODEL_BACKEND"] == "claude-cli"
+        assert os.environ["WORKSHOP_PORT"] == "8080"                   # real env preserved
+    finally:
+        # _load_env_file() writes straight into os.environ. monkeypatch.delenv(
+        # raising=False) on an already-absent var records nothing to restore, so
+        # without this these would LEAK into later tests — a stray
+        # FOUNDRY_MODEL_BACKEND=claude-cli makes a subsequent main() spin up a REAL
+        # `claude -p` that hangs on a box with the binary installed.
+        os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+        os.environ.pop("FOUNDRY_MODEL_BACKEND", None)
 
 
 def test_durable_state_dir_defaults_on_under_output_root():

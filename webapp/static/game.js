@@ -1727,7 +1727,7 @@ async function newProject(req, mode, supervised, backend, packs, extra){
     Object.assign(existing, {
       id:resp.id, release, releases:(existing.releases||1)+1, request:req, mode, backend,
       log:[], progress:[], gates:{}, org:null, cp:null, awaiting:false, status:"running", passed:false,
-      slots, journal:[], seenUris:new Set(),
+      slots, journal:[], seenUris:new Set(), _agrp:null, _svc:null,
     });
     const sc = GAME.scene.getScene(floorKey(floor));
     if (sc) sc.scene.restart({floor, id:resp.id, request:req, mode, slots});
@@ -1780,6 +1780,7 @@ function routeEvent(floor, ev){
       if (isActive) updateHud(F);
       break;
     case "narrate": logNarrate(F, ev.text); break;
+    case "svc": logService(F, ev); break;   // platform: one box per service, updated in place
     case "limitwait":              // provider usage limit: global pause banner
       showLimitToast(ev.until);
       break;
@@ -2068,10 +2069,73 @@ function logSay(F, ev){
 // New STAGE: reset only the per-stage buckets that feed the PROGRESS summary; the agent
 // boxes are build-global (each agent appears once, filling in as its work lands).
 function resetStage(F){ F.stageArts=[]; F.stageSays={}; }
+// ---- Platform SERVICE boxes: one bordered box per service (web/backend/data) --
+// A platform build streams each service's pipeline as `svc` events. The box is OPENED
+// (empty) when the service launches, its HEADER tracks the live stage, and its BODY
+// fills with the pass/rebuild/critic notes + the files it built when it finishes — so
+// one service reads as ONE event, not a growing run of flat per-stage lines.
+function svcHeadText(g){
+  const name=(g.service||"service").toUpperCase();
+  if(g.done) return (g.passed?"✓ ":"✗ ")+name+" — "+(g.passed?"built":"held at the gate")
+    +(g.passes?" · "+g.passes+" pass"+(g.passes>1?"es":""):"");
+  const stage=g.stage?" · "+g.stage:" · building";
+  return "▸ "+name+stage+(g.pass>1?" · pass "+g.pass:"");
+}
+function renderSvcBox(g){
+  const li=document.createElement("li");
+  li.className="agent-box svc-box"+(g.done?(g.passed?" done":" held"):"");
+  const head=document.createElement("div"); head.className="agent-head";
+  head.textContent=deEmoji(svcHeadText(g)); li.appendChild(head);
+  const lines=[];
+  if(!g.done && g.desc) lines.push(g.desc);            // launch caption, until it finishes
+  for(const n of g.notes) lines.push(n);
+  for(const f of g.files) lines.push("⊞ "+g.service+"/"+f);
+  if(lines.length){
+    const bd=document.createElement("div"); bd.className="agent-body";
+    for(const ln of lines){ const d=document.createElement("div"); d.className="agent-item";
+      d.textContent=deEmoji(ln); bd.appendChild(d); }
+    li.appendChild(bd);
+  }
+  return li;
+}
+function refreshSvcBox(g){ if(g.el){ const n=renderSvcBox(g); g.el.replaceWith(n); g.el=n; } }
+// Find-or-create a service's box (keyed by service name), appended in first-seen order.
+function svcBox(F, svc){
+  F._svc=F._svc||{};
+  let g=F._svc[svc];
+  if(!g){
+    g={svcbox:true, service:svc, stage:"", pass:1, desc:"", notes:[], files:[],
+       done:false, passed:false, passes:0};
+    F._svc[svc]=g; F.log.push(g); if(F.log.length>240) F.log.shift();
+    if(F.floor===ACTIVE){ const ul=document.getElementById("log"); if(ul){
+      g.el=renderSvcBox(g); ul.appendChild(g.el); ul.scrollTop=ul.scrollHeight; } }
+  }
+  return g;
+}
+// Apply one `svc` event to its box: open at launch, update the header live, populate
+// the body (notes + built files) as it rebuilds / finishes.
+function logService(F, ev){
+  const g=svcBox(F, ev.service||"service");
+  switch(ev.phase){
+    case "start":   g.desc=ev.desc||""; break;
+    case "stage":   g.stage=ev.stage||g.stage;
+                    if(ev.back) g.notes.push("↩ back to "+(ev.stage||"an earlier stage")); break;
+    case "rebuild": g.pass=ev.passno||(g.pass+1); g.stage="";
+                    g.notes.push("↻ rebuilding · pass "+g.pass); break;
+    case "pass_result": g.notes.push((ev.passed?"✓":"✗")+" pass "+(ev.passno||g.pass)
+                    +(ev.passed?" — gates green":" — held at the gate")); break;
+    case "critic":  g.notes.push(ev.complete?"✦ approved: technically complete"
+                    :"• needs more: "+(ev.detail||"more to do")); break;
+    case "done":    g.done=true; g.passed=!!ev.passed; g.passes=ev.passes||g.pass;
+                    for(const f of (ev.files||[])) g.files.push(f); break;
+  }
+  if(F.floor===ACTIVE) refreshSvcBox(g);
+}
 function rebuildLog(F){
   const ul=document.getElementById("log"); ul.innerHTML="";
   for (const e of F.log){
     if(e.box){ e.el=renderAgentBox(e); ul.appendChild(e.el); }
+    else if(e.svcbox){ e.el=renderSvcBox(e); ul.appendChild(e.el); }
     else ul.appendChild(rowNode(e.cls, e.text, e.lines||null));
   }
   ul.scrollTop = ul.scrollHeight;
@@ -3048,7 +3112,7 @@ async function adoptNextRelease(F){
       id:row.id, release:row.release||F.release+1, releases:(F.releases||1)+1,
       request:row.request, log:[], gates:{}, org:null, cp:null, awaiting:false,
       status:"running", passed:false, journal:[], seenUris:new Set(),
-      liveRoom:null, liveAgent:null,
+      liveRoom:null, liveAgent:null, _agrp:null, _svc:null,
     });
     const sc = GAME.scene.getScene(floorKey(F.floor));
     if (sc) sc.scene.restart({floor:F.floor, id:row.id, request:row.request, mode:row.mode, slots:F.slots});

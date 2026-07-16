@@ -1727,7 +1727,7 @@ async function newProject(req, mode, supervised, backend, packs, extra){
     Object.assign(existing, {
       id:resp.id, release, releases:(existing.releases||1)+1, request:req, mode, backend,
       log:[], progress:[], gates:{}, org:null, cp:null, awaiting:false, status:"running", passed:false,
-      slots, journal:[], seenUris:new Set(), _agrp:null, _svc:null,
+      slots, journal:[], seenUris:new Set(), _agrp:null, _svcOpen:null,
     });
     const sc = GAME.scene.getScene(floorKey(floor));
     if (sc) sc.scene.restart({floor, id:resp.id, request:req, mode, slots});
@@ -2069,27 +2069,28 @@ function logSay(F, ev){
 // New STAGE: reset only the per-stage buckets that feed the PROGRESS summary; the agent
 // boxes are build-global (each agent appears once, filling in as its work lands).
 function resetStage(F){ F.stageArts=[]; F.stageSays={}; }
-// ---- Platform SERVICE boxes: one bordered box per service (web/backend/data) --
-// A platform build streams each service's pipeline as `svc` events. The box is OPENED
-// (empty) when the service launches, its HEADER tracks the live stage, and its BODY
-// fills with the pass/rebuild/critic notes + the files it built when it finishes — so
-// one service reads as ONE event, not a growing run of flat per-stage lines.
-function svcHeadText(g){
-  const name=(g.service||"service").toUpperCase();
-  if(g.done) return (g.passed?"✓ ":"✗ ")+name+" — "+(g.passed?"built":"held at the gate")
-    +(g.passes?" · "+g.passes+" pass"+(g.passes>1?"es":""):"");
-  const stage=g.stage?" · "+g.stage:" · building";
-  return "▸ "+name+stage+(g.pass>1?" · pass "+g.pass:"");
-}
-function renderSvcBox(g){
+// ---- Platform EVENT boxes: one bordered box PER pipeline event -----------------
+// A platform build streams each service's pipeline as `svc` events. Each event is its
+// OWN box (not one box per service): a stage OPENS a box when it starts (header
+// "▸ WEB · designing the system", empty body) and the box is FINALISED with what it
+// did (green "✓ …" header + a one-line body) when that stage ends. Service kickoff,
+// each pass result, rebuilds, critiques and the service's completion each land as
+// their own box too — so the log reads as a running list of started/finished events.
+const _STAGE_DID = {
+  "defining requirements":"wrote the PRD & acceptance criteria",
+  "designing the system":"produced the system design & interface contract",
+  "implementing":"built the feature diffs (code)",
+  "testing & review":"ran the tests & review",
+  "security review":"ran the security review",
+  "verifying at the gate":"checked the gates",
+};
+function renderEvBox(g){
   const li=document.createElement("li");
-  li.className="agent-box svc-box"+(g.done?(g.passed?" done":" held"):"");
+  li.className="agent-box ev-box"+(g.tone==="good"?" done":g.tone==="bad"?" held":"");
   const head=document.createElement("div"); head.className="agent-head";
-  head.textContent=deEmoji(svcHeadText(g)); li.appendChild(head);
-  const lines=[];
-  if(!g.done && g.desc) lines.push(g.desc);            // launch caption, until it finishes
-  for(const n of g.notes) lines.push(n);
-  for(const f of g.files) lines.push("⊞ "+g.service+"/"+f);
+  const h=g.kind==="stage" ? ((g.done?"✓ ":"▸ ")+g.title) : g.title;
+  head.textContent=deEmoji(h); li.appendChild(head);
+  const lines=[]; if(g.did) lines.push(g.did); for(const b of (g.body||[])) lines.push(b);
   if(lines.length){
     const bd=document.createElement("div"); bd.className="agent-body";
     for(const ln of lines){ const d=document.createElement("div"); d.className="agent-item";
@@ -2098,44 +2099,69 @@ function renderSvcBox(g){
   }
   return li;
 }
-function refreshSvcBox(g){ if(g.el){ const n=renderSvcBox(g); g.el.replaceWith(n); g.el=n; } }
-// Find-or-create a service's box (keyed by service name), appended in first-seen order.
-function svcBox(F, svc){
-  F._svc=F._svc||{};
-  let g=F._svc[svc];
-  if(!g){
-    g={svcbox:true, service:svc, stage:"", pass:1, desc:"", notes:[], files:[],
-       done:false, passed:false, passes:0};
-    F._svc[svc]=g; F.log.push(g); if(F.log.length>240) F.log.shift();
-    if(F.floor===ACTIVE){ const ul=document.getElementById("log"); if(ul){
-      g.el=renderSvcBox(g); ul.appendChild(g.el); ul.scrollTop=ul.scrollHeight; } }
-  }
+function refreshEvBox(g){ if(g.el){ const n=renderEvBox(g); g.el.replaceWith(n); g.el=n; } }
+// Append one event box (find-or-create nothing — every event is a fresh box).
+function pushEvBox(F, g){
+  g.evbox=true; g.did=g.did||""; g.body=g.body||[];
+  F.log.push(g); if(F.log.length>240) F.log.shift();
+  if(F.floor===ACTIVE){ const ul=document.getElementById("log"); if(ul){
+    g.el=renderEvBox(g); ul.appendChild(g.el); ul.scrollTop=ul.scrollHeight; } }
   return g;
 }
-// Apply one `svc` event to its box: open at launch, update the header live, populate
-// the body (notes + built files) as it rebuilds / finishes.
+// Finalise a service's currently-open STAGE box: mark it done + say what it did.
+function closeStageBox(F, svc){
+  const g=(F._svcOpen||{})[svc];
+  if(g && !g.done){ g.done=true; g.tone="good";
+    if(!g.did) g.did=_STAGE_DID[g.stageKey]||"completed the step";
+    if(F.floor===ACTIVE) refreshEvBox(g); }
+  if(F._svcOpen) F._svcOpen[svc]=null;
+}
+// Apply one `svc` event → its OWN box (started header, then finished content).
 function logService(F, ev){
-  const g=svcBox(F, ev.service||"service");
+  const svc=ev.service||"service", SVC=svc.toUpperCase();
+  F._svcOpen=F._svcOpen||{};
   switch(ev.phase){
-    case "start":   g.desc=ev.desc||""; break;
-    case "stage":   g.stage=ev.stage||g.stage;
-                    if(ev.back) g.notes.push("↩ back to "+(ev.stage||"an earlier stage")); break;
-    case "rebuild": g.pass=ev.passno||(g.pass+1); g.stage="";
-                    g.notes.push("↻ rebuilding · pass "+g.pass); break;
-    case "pass_result": g.notes.push((ev.passed?"✓":"✗")+" pass "+(ev.passno||g.pass)
-                    +(ev.passed?" — gates green":" — held at the gate")); break;
-    case "critic":  g.notes.push(ev.complete?"✦ approved: technically complete"
-                    :"• needs more: "+(ev.detail||"more to do")); break;
-    case "done":    g.done=true; g.passed=!!ev.passed; g.passes=ev.passes||g.pass;
-                    for(const f of (ev.files||[])) g.files.push(f); break;
+    case "start":
+      pushEvBox(F, {kind:"marker", tone:"", done:true,
+        title:"▶ "+SVC+" — building"+(ev.desc?" "+ev.desc:"")});
+      break;
+    case "stage": {                       // a stage STARTED → open its box
+      closeStageBox(F, svc);              // the previous stage FINISHED
+      F._svcOpen[svc]=pushEvBox(F, {kind:"stage", tone:"", done:false,
+        title:SVC+" · "+ev.stage, stageKey:ev.stage});
+      break;
+    }
+    case "rebuild":
+      closeStageBox(F, svc);
+      pushEvBox(F, {kind:"marker", tone:"", done:true,
+        title:"↻ "+SVC+" — rebuilding · pass "+(ev.passno||"?")});
+      break;
+    case "pass_result":
+      closeStageBox(F, svc);
+      pushEvBox(F, {kind:"marker", tone:ev.passed?"good":"bad", done:true,
+        title:(ev.passed?"✓ ":"✗ ")+SVC+" — pass "+(ev.passno||"?")
+          +(ev.passed?" · gates green":" · held at the gate")});
+      break;
+    case "critic":
+      pushEvBox(F, {kind:"marker", tone:ev.complete?"good":"", done:true,
+        title:ev.complete? "✦ "+SVC+" — approved: technically complete"
+          : "• "+SVC+" — needs more work",
+        did: ev.complete? "" : (ev.detail||"")});
+      break;
+    case "done":
+      closeStageBox(F, svc);
+      pushEvBox(F, {kind:"marker", tone:ev.passed?"good":"bad", done:true,
+        title:(ev.passed?"✓ ":"✗ ")+SVC+" — "+(ev.passed?"built":"held at the gate")
+          +" · "+(ev.passes||1)+" pass"+((ev.passes||1)>1?"es":""),
+        body:(ev.files||[]).map(f=>"⊞ "+svc+"/"+f)});
+      break;
   }
-  if(F.floor===ACTIVE) refreshSvcBox(g);
 }
 function rebuildLog(F){
   const ul=document.getElementById("log"); ul.innerHTML="";
   for (const e of F.log){
     if(e.box){ e.el=renderAgentBox(e); ul.appendChild(e.el); }
-    else if(e.svcbox){ e.el=renderSvcBox(e); ul.appendChild(e.el); }
+    else if(e.evbox){ e.el=renderEvBox(e); ul.appendChild(e.el); }
     else ul.appendChild(rowNode(e.cls, e.text, e.lines||null));
   }
   ul.scrollTop = ul.scrollHeight;
@@ -3112,7 +3138,7 @@ async function adoptNextRelease(F){
       id:row.id, release:row.release||F.release+1, releases:(F.releases||1)+1,
       request:row.request, log:[], gates:{}, org:null, cp:null, awaiting:false,
       status:"running", passed:false, journal:[], seenUris:new Set(),
-      liveRoom:null, liveAgent:null, _agrp:null, _svc:null,
+      liveRoom:null, liveAgent:null, _agrp:null, _svcOpen:null,
     });
     const sc = GAME.scene.getScene(floorKey(F.floor));
     if (sc) sc.scene.restart({floor:F.floor, id:row.id, request:row.request, mode:row.mode, slots:F.slots});

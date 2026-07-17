@@ -1770,6 +1770,16 @@ def _run_platform(p: Project) -> None:
                 _emit(p, type="svc", service=svc, phase="stage", stage=stage, back=back)
                 if back:   # regressed to an earlier stage — e.g. tests failed -> re-implement
                     _emit(p, type="rebuild", room=role_room.get(svc_role.get(svc, ""), "backend"))
+            # Enrich the service's current stage box with what this node SPECIFICALLY did
+            # (its journal summary + assumptions/concerns/artifacts), revealed by the box
+            # caret. Advisory — only fires for nodes that recorded a journal note/artifacts.
+            det = ev.get("detail")
+            if isinstance(det, dict) and (det.get("summary") or det.get("artifacts")):
+                _emit(p, type="svc", service=svc, phase="note",
+                      summary=str(det.get("summary") or ""), role=str(det.get("role") or ""),
+                      assumptions=det.get("assumptions") or [],
+                      concerns=det.get("concerns") or [],
+                      artifacts=det.get("artifacts") or [])
         elif t == "pass" and pn > 1:
             svc_stage.pop(svc, None)   # a new pass re-runs the pipeline; let stages re-announce
             set_state(svc, "rebuilding")

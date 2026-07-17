@@ -93,6 +93,43 @@ _CODE_SUFFIXES = (".py", ".go", ".js", ".ts", ".tsx", ".jsx", ".lua", ".sql", ".
                   ".java", ".rb", ".css", ".html", ".vue", ".svelte")
 
 
+def _node_detail(result: object) -> dict[str, Any] | None:
+    """A SPECIFIC one-liner (+ assumptions / concerns / artifact kinds) for a finished
+    node, pulled from its channel-update result for the platform event log. The agent's
+    own ``agent_journal`` summary is the specific "what it did" line (e.g. "Authored PRD
+    'X' with 8 acceptance criteria"); artifact kinds give a produced-count breakdown.
+    Advisory only — any shape we don't recognise returns None and the log falls back to
+    the generic stage description."""
+    if not isinstance(result, dict):
+        return None
+
+    def _get(obj: object, attr: str) -> Any:
+        if isinstance(obj, dict):
+            return obj.get(attr)
+        return getattr(obj, attr, None)
+
+    out: dict[str, Any] = {}
+    journal = result.get("agent_journal") or ()
+    if journal:
+        note = journal[-1]                      # this node's note (the last one it added)
+        summ = _get(note, "summary")
+        if summ:
+            out["summary"] = str(summ)[:220]
+            out["role"] = str(_get(note, "role") or "")
+            out["assumptions"] = [str(a) for a in (_get(note, "assumptions") or ())][:4]
+            out["concerns"] = [str(c) for c in (_get(note, "concerns") or ())][:4]
+    arts = result.get("artifacts") or ()
+    if arts:
+        counts: dict[str, int] = {}
+        for a in arts:
+            kind = _get(a, "kind")
+            if kind:
+                counts[str(kind)] = counts.get(str(kind), 0) + 1
+        if counts:
+            out["artifacts"] = [{"kind": k, "n": n} for k, n in counts.items()]
+    return out or None
+
+
 def _still_growing(prev: tuple[int, int] | None, cur: tuple[int, int]) -> bool:
     """Did this pass add MEANINGFUL new code vs the previous one? New files, or a
     >5% (and >256 B) increase in code bytes. False => the service has plateaued."""
@@ -158,10 +195,17 @@ def _build_one(
                           result: object = None) -> None:
             # forward this service's live pipeline node up to the platform stream. The
             # factory streams a node twice now (start + finish); forward COMPLETIONS only
-            # so the platform stage log ticks once per node, as it did before.
+            # so the platform stage log ticks once per node, as it did before. The node's
+            # result carries its journal summary + artifacts, forwarded as `detail` so the
+            # event log can say SPECIFICALLY what the node did (not just the stage name).
             if phase != "finish":
                 return
-            emit({"type": "svc_node", "service": svc.name, "node": node, "scope": scope})
+            ev: dict[str, Any] = {"type": "svc_node", "service": svc.name,
+                                  "node": node, "scope": scope}
+            detail = _node_detail(result)
+            if detail:
+                ev["detail"] = detail
+            emit(ev)
 
         try:
             result = run_service(

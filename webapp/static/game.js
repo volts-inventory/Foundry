@@ -2084,39 +2084,60 @@ const _STAGE_DID = {
   "security review":"ran the security review",
   "verifying at the gate":"checked the gates",
 };
+// The "more details" that live behind a box's caret — the specifics the agent recorded.
+function _evExtras(g){
+  const x=[];
+  for(const a of (g.assumptions||[])) x.push("• "+a);
+  for(const c of (g.concerns||[])) x.push("⚠ "+c);
+  for(const a of (g.arts||[])) x.push("⊞ "+String(a.kind||"").replace(/_/g," ")+(a.n>1?" ×"+a.n:""));
+  for(const b of (g.body||[])) x.push(b);
+  return x;
+}
 function renderEvBox(g){
   const li=document.createElement("li");
   li.className="agent-box ev-box"+(g.tone==="good"?" done":g.tone==="bad"?" held":"");
-  const head=document.createElement("div"); head.className="agent-head";
-  const h=g.kind==="stage" ? ((g.done?"✓ ":"▸ ")+g.title) : g.title;
-  head.textContent=deEmoji(h); li.appendChild(head);
-  const lines=[]; if(g.did) lines.push(g.did); for(const b of (g.body||[])) lines.push(b);
-  if(lines.length){
+  const headText = g.kind==="stage" ? ((g.done?"✓ ":"▸ ")+g.title) : g.title;
+  const main = g.summary || g.did || "";     // the SPECIFIC, always-visible context line
+  const extras = _evExtras(g);               // the MORE details, revealed by the caret
+  if(extras.length){                          // collapsible: a chevron opens the specifics
+    const d=document.createElement("details"); d.className="ev-det";
+    const s=document.createElement("summary"); s.className="ev-head";
+    s.textContent=deEmoji(headText+(main?" — "+main:""));
+    d.appendChild(s);
     const bd=document.createElement("div"); bd.className="agent-body";
-    for(const ln of lines){ const d=document.createElement("div"); d.className="agent-item";
-      d.textContent=deEmoji(ln); bd.appendChild(d); }
-    li.appendChild(bd);
+    for(const ln of extras){ const e=document.createElement("div"); e.className="agent-item";
+      e.textContent=deEmoji(ln); bd.appendChild(e); }
+    d.appendChild(bd); li.appendChild(d);
+  } else {                                     // no extra specifics → header (+ the main line)
+    const head=document.createElement("div"); head.className="agent-head";
+    head.textContent=deEmoji(headText); li.appendChild(head);
+    if(main){ const bd=document.createElement("div"); bd.className="agent-body";
+      const e=document.createElement("div"); e.className="agent-item"; e.textContent=deEmoji(main);
+      bd.appendChild(e); li.appendChild(bd); }
   }
   return li;
 }
 function refreshEvBox(g){ if(g.el){ const n=renderEvBox(g); g.el.replaceWith(n); g.el=n; } }
-// Append one event box (find-or-create nothing — every event is a fresh box).
+// Append one event box (every event is a fresh box).
 function pushEvBox(F, g){
-  g.evbox=true; g.did=g.did||""; g.body=g.body||[];
+  g.evbox=true; g.body=g.body||[]; g.assumptions=g.assumptions||[]; g.concerns=g.concerns||[]; g.arts=g.arts||[];
   F.log.push(g); if(F.log.length>240) F.log.shift();
   if(F.floor===ACTIVE){ const ul=document.getElementById("log"); if(ul){
     g.el=renderEvBox(g); ul.appendChild(g.el); ul.scrollTop=ul.scrollHeight; } }
   return g;
 }
-// Finalise a service's currently-open STAGE box: mark it done + say what it did.
+// Finalise a service's open STAGE box: mark done + (if no specific summary landed) say
+// generically what the stage did.
 function closeStageBox(F, svc){
   const g=(F._svcOpen||{})[svc];
   if(g && !g.done){ g.done=true; g.tone="good";
-    if(!g.did) g.did=_STAGE_DID[g.stageKey]||"completed the step";
+    if(!g.summary && !g.did) g.did=_STAGE_DID[g.stageKey]||"completed the step";
     if(F.floor===ACTIVE) refreshEvBox(g); }
   if(F._svcOpen) F._svcOpen[svc]=null;
 }
-// Apply one `svc` event → its OWN box (started header, then finished content).
+// Apply one `svc` event → its OWN box (started header, then finished content). A `note`
+// enriches the service's currently-open box with the agent's SPECIFIC summary and the
+// assumptions / concerns / artifacts it produced (the latter revealed by the caret).
 function logService(F, ev){
   const svc=ev.service||"service", SVC=svc.toUpperCase();
   F._svcOpen=F._svcOpen||{};
@@ -2129,6 +2150,16 @@ function logService(F, ev){
       closeStageBox(F, svc);              // the previous stage FINISHED
       F._svcOpen[svc]=pushEvBox(F, {kind:"stage", tone:"", done:false,
         title:SVC+" · "+ev.stage, stageKey:ev.stage});
+      break;
+    }
+    case "note": {                        // a node inside the open stage said what it did
+      const g=(F._svcOpen||{})[svc]; if(!g) break;
+      if(ev.summary) g.summary=ev.summary;
+      for(const a of (ev.assumptions||[])) if(g.assumptions.indexOf(a)<0) g.assumptions.push(a);
+      for(const c of (ev.concerns||[])) if(g.concerns.indexOf(c)<0) g.concerns.push(c);
+      for(const a of (ev.artifacts||[])){ const k=a.kind||""; if(!k) continue;
+        const cur=g.arts.find(x=>x.kind===k); if(cur) cur.n=Math.max(cur.n, a.n||1); else g.arts.push({kind:k, n:a.n||1}); }
+      if(F.floor===ACTIVE) refreshEvBox(g);
       break;
     }
     case "rebuild":

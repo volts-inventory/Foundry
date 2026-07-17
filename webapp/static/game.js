@@ -2076,14 +2076,6 @@ function resetStage(F){ F.stageArts=[]; F.stageSays={}; }
 // did (green "✓ …" header + a one-line body) when that stage ends. Service kickoff,
 // each pass result, rebuilds, critiques and the service's completion each land as
 // their own box too — so the log reads as a running list of started/finished events.
-const _STAGE_DID = {
-  "defining requirements":"wrote the PRD & acceptance criteria",
-  "designing the system":"produced the system design & interface contract",
-  "implementing":"built the feature diffs (code)",
-  "testing & review":"ran the tests & review",
-  "security review":"ran the security review",
-  "verifying at the gate":"checked the gates",
-};
 // The "more details" that live behind a box's caret — the specifics the agent recorded.
 function _evExtras(g){
   const x=[];
@@ -2096,7 +2088,8 @@ function _evExtras(g){
 function renderEvBox(g){
   const li=document.createElement("li");
   li.className="agent-box ev-box"+(g.tone==="good"?" done":g.tone==="bad"?" held":"");
-  const headText = g.kind==="stage" ? ((g.done?"✓ ":"▸ ")+g.title) : g.title;
+  const live = (g.kind==="agent"||g.kind==="stage");   // ▸ while working, ✓ once done
+  const headText = live ? ((g.done?"✓ ":"▸ ")+g.title) : g.title;
   const main = g.summary || g.did || "";     // the SPECIFIC, always-visible context line
   const extras = _evExtras(g);               // the MORE details, revealed by the caret
   if(extras.length){                          // collapsible: a chevron opens the specifics
@@ -2126,18 +2119,25 @@ function pushEvBox(F, g){
     g.el=renderEvBox(g); ul.appendChild(g.el); ul.scrollTop=ul.scrollHeight; } }
   return g;
 }
-// Finalise a service's open STAGE box: mark done + (if no specific summary landed) say
-// generically what the stage did.
-function closeStageBox(F, svc){
-  const g=(F._svcOpen||{})[svc];
-  if(g && !g.done){ g.done=true; g.tone="good";
-    if(!g.summary && !g.did) g.did=_STAGE_DID[g.stageKey]||"completed the step";
-    if(F.floor===ACTIVE) refreshEvBox(g); }
-  if(F._svcOpen) F._svcOpen[svc]=null;
+// Fold an agent's reported specifics (journal summary + assumptions/concerns/artifacts)
+// into its box.
+function _mergeNote(g, ev){
+  if(ev.summary) g.summary=ev.summary;
+  for(const a of (ev.assumptions||[])) if(g.assumptions.indexOf(a)<0) g.assumptions.push(a);
+  for(const c of (ev.concerns||[])) if(g.concerns.indexOf(c)<0) g.concerns.push(c);
+  for(const a of (ev.artifacts||[])){ const k=a.kind||""; if(!k) continue;
+    const cur=g.arts.find(x=>x.kind===k); if(cur) cur.n=Math.max(cur.n, a.n||1); else g.arts.push({kind:k, n:a.n||1}); }
 }
-// Apply one `svc` event → its OWN box (started header, then finished content). A `note`
-// enriches the service's currently-open box with the agent's SPECIFIC summary and the
-// assumptions / concerns / artifacts it produced (the latter revealed by the caret).
+// Finalise any of a service's still-open agent boxes (e.g. when a pass or the build ends).
+function closeOpenAgents(F, svc){
+  const o=F._svcOpen||{}, pfx=svc+"|";
+  for(const k in o){ const g=o[k];
+    if(k.indexOf(pfx)===0 && g && !g.done){ g.done=true; g.tone="good"; if(F.floor===ACTIVE) refreshEvBox(g); o[k]=null; } }
+}
+// Apply one `svc` event → a box. EACH AGENT ACTION is its own box: it opens ("▸ working")
+// when the agent's node starts and fills ("✓ …") with what it did when the node finishes —
+// its journal summary (else a role verb), with assumptions/concerns/artifacts behind the
+// caret. Service kickoff, passes, rebuilds, the critic and completion are their own boxes.
 function logService(F, ev){
   const svc=ev.service||"service", SVC=svc.toUpperCase();
   F._svcOpen=F._svcOpen||{};
@@ -2146,29 +2146,30 @@ function logService(F, ev){
       pushEvBox(F, {kind:"marker", tone:"", done:true,
         title:"▶ "+SVC+" — building"+(ev.desc?" "+ev.desc:"")});
       break;
-    case "stage": {                       // a stage STARTED → open its box
-      closeStageBox(F, svc);              // the previous stage FINISHED
-      F._svcOpen[svc]=pushEvBox(F, {kind:"stage", tone:"", done:false,
-        title:SVC+" · "+ev.stage, stageKey:ev.stage});
+    case "agent_start": {                 // an agent BEGAN its step → open its box
+      const key=svc+"|"+(ev.node||ev.agent);
+      F._svcOpen[key]=pushEvBox(F, {kind:"agent", tone:"", done:false,
+        title:SVC+" · "+(ev.agent||"agent")});
       break;
     }
-    case "note": {                        // a node inside the open stage said what it did
-      const g=(F._svcOpen||{})[svc]; if(!g) break;
-      if(ev.summary) g.summary=ev.summary;
-      for(const a of (ev.assumptions||[])) if(g.assumptions.indexOf(a)<0) g.assumptions.push(a);
-      for(const c of (ev.concerns||[])) if(g.concerns.indexOf(c)<0) g.concerns.push(c);
-      for(const a of (ev.artifacts||[])){ const k=a.kind||""; if(!k) continue;
-        const cur=g.arts.find(x=>x.kind===k); if(cur) cur.n=Math.max(cur.n, a.n||1); else g.arts.push({kind:k, n:a.n||1}); }
+    case "agent_done": {                  // the agent FINISHED → fill its box with what it did
+      const key=svc+"|"+(ev.node||ev.agent);
+      let g=(F._svcOpen||{})[key];
+      if(!g) g=pushEvBox(F, {kind:"agent", tone:"", done:false, title:SVC+" · "+(ev.agent||"agent")});
+      _mergeNote(g, ev);
+      if(!g.summary && ev.did) g.summary=ev.did;   // fall back to the role verb
+      g.done=true; g.tone="good";
+      if(F._svcOpen) F._svcOpen[key]=null;
       if(F.floor===ACTIVE) refreshEvBox(g);
       break;
     }
     case "rebuild":
-      closeStageBox(F, svc);
+      closeOpenAgents(F, svc);
       pushEvBox(F, {kind:"marker", tone:"", done:true,
         title:"↻ "+SVC+" — rebuilding · pass "+(ev.passno||"?")});
       break;
     case "pass_result":
-      closeStageBox(F, svc);
+      closeOpenAgents(F, svc);
       pushEvBox(F, {kind:"marker", tone:ev.passed?"good":"bad", done:true,
         title:(ev.passed?"✓ ":"✗ ")+SVC+" — pass "+(ev.passno||"?")
           +(ev.passed?" · gates green":" · held at the gate")});
@@ -2180,7 +2181,7 @@ function logService(F, ev){
         did: ev.complete? "" : (ev.detail||"")});
       break;
     case "done":
-      closeStageBox(F, svc);
+      closeOpenAgents(F, svc);
       pushEvBox(F, {kind:"marker", tone:ev.passed?"good":"bad", done:true,
         title:(ev.passed?"✓ ":"✗ ")+SVC+" — "+(ev.passed?"built":"held at the gate")
           +" · "+(ev.passes||1)+" pass"+((ev.passes||1)>1?"es":""),

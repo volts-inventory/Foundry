@@ -193,18 +193,17 @@ def _build_one(
 
         def node_progress(node: str, scope: str, *, phase: str = "finish",
                           result: object = None) -> None:
-            # forward this service's live pipeline node up to the platform stream. The
-            # factory streams a node twice now (start + finish); forward COMPLETIONS only
-            # so the platform stage log ticks once per node, as it did before. The node's
-            # result carries its journal summary + artifacts, forwarded as `detail` so the
-            # event log can say SPECIFICALLY what the node did (not just the stage name).
-            if phase != "finish":
-                return
+            # forward this service's live pipeline node up to the platform stream, BOTH
+            # edges: START (the agent begins its step → its box opens "working") and
+            # FINISH (the box fills with what it did). The finish carries the node's
+            # `detail` — its journal summary + assumptions/concerns + artifact kinds — so
+            # each agent-action box says SPECIFICALLY what that agent did.
             ev: dict[str, Any] = {"type": "svc_node", "service": svc.name,
-                                  "node": node, "scope": scope}
-            detail = _node_detail(result)
-            if detail:
-                ev["detail"] = detail
+                                  "node": node, "scope": scope, "phase": phase}
+            if phase == "finish":
+                detail = _node_detail(result)
+                if detail:
+                    ev["detail"] = detail
             emit(ev)
 
         try:

@@ -1582,7 +1582,7 @@ def run(
                         details: list[dict[str, str]] = []
                         for a in list(result["artifacts"])[:24]:
                             try:
-                                d = _artifact_detail(a.kind, _rv(a))
+                                d = _artifact_detail(a.kind, _rv(a), max_len=600)
                             except Exception:
                                 d = None
                             details.append(

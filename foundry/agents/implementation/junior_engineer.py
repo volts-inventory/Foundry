@@ -48,6 +48,7 @@ import json
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
+from foundry.agents._common import journal_entry
 from foundry.agents._runtime import AgentRuntime, NodeFn
 from foundry.agents.implementation.personas import persona_for
 from foundry.agents.implementation.senior_engineer import (
@@ -76,6 +77,7 @@ if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
 
     from foundry.execution.work_pool import ExecutionTask
+    from foundry.schemas.journal import JournalEntry
     from foundry.state.factory_state import FactoryState
 
     # Reconstitutes a typed body from its content-addressed handle (the same INFRA
@@ -748,6 +750,40 @@ def _run_tasks_pooled(
     return merged
 
 
+def _engineer_note(
+    rt: AgentRuntime,
+    config: RunnableConfig,
+    tasks: Sequence[Task],
+    state: FactoryState,
+    resolve: ArtifactResolver | None,
+    lane: str | None,
+) -> JournalEntry | None:
+    """A prose "what this engineer built" journal entry for the event log / interview
+    affordance: the distinct feature DOMAINS its tasks implement (the Tech-Lead's
+    ownership decomposition names — e.g. "web-router, web-auth"), else just the task
+    count. STRICTLY ADVISORY (plan [11]) — never read by a gate."""
+    n = len(tasks)
+    if n == 0:
+        return None
+    domains: list[str] = []
+    if resolve is not None:
+        own = _read_ownership(state, resolve)
+        if own is not None:
+            dbt = _domain_by_task_id(own)
+            for t in tasks:
+                d = dbt.get(t.id)
+                if d and d not in domains:
+                    domains.append(d)
+    summary = f"Implemented {n} task{'s' if n != 1 else ''}"
+    if domains:
+        summary += ": " + ", ".join(domains[:4]) + (" …" if len(domains) > 4 else "")
+    role = f"{lane.title()} Engineer" if lane else "Junior Engineer"
+    return journal_entry(
+        node_id=NODE_ID, role=role, seq=rt.seq(config, NODE_ID, "journal"),
+        summary=summary,
+    )
+
+
 def make_junior_engineer_node(
     rt: AgentRuntime,
     *,
@@ -828,6 +864,9 @@ def make_junior_engineer_node(
             tasks = [t for t in all_tasks if _task_lane(t.id) == lane]
         else:
             tasks = all_tasks
+        # Advisory journal note: a prose "what this engineer built" line (the feature
+        # domains its tasks implement) for the event log / interview affordance.
+        jnote = _engineer_note(rt, config, tasks, state, resolve, lane)
         # Fix loop: on a re-entry after a failed gate, feed the SPECIFIC failure back
         # to the engineer (empty on the first pass) so it fixes that instead of re-rolling.
         prior_failures = _prior_failures(state)
@@ -864,7 +903,7 @@ def make_junior_engineer_node(
                 if ownership is not None:
                     domain_by_task = _domain_by_task_id(ownership)
                     domain_area = {owner: ownership.area_of(owner) for owner in ownership.leads()}
-            return _run_tasks_pooled(
+            pooled = _run_tasks_pooled(
                 rt,
                 tasks,
                 constraints,
@@ -883,6 +922,9 @@ def make_junior_engineer_node(
                 spans_by_task=spans_by_task,
                 weight_tasks=all_tasks,  # per-domain quotas span EVERY lane, not just this one
             )
+            if jnote is not None:
+                pooled.setdefault("agent_journal", []).append(jnote)
+            return pooled
         merged: dict[str, Any] = {}
         # The shared evolving tree (ROADMAP Phase 2b): each SERIAL task builds on
         # its predecessors' slices (merge order), later-by-Seq winning exactly as
@@ -908,6 +950,8 @@ def make_junior_engineer_node(
             overlay.update(_slice_of(rt, writes))
             for channel, records in writes.items():
                 merged.setdefault(channel, []).extend(records)
+        if jnote is not None:
+            merged.setdefault("agent_journal", []).append(jnote)
         return merged
 
     return _node

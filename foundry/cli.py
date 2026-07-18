@@ -1574,6 +1574,58 @@ def run(
             if progress_cb is not None:
                 from foundry.schemas.checkpoint import _artifact_detail
 
+                def _feature_diff_stat(body: object) -> str | None:
+                    # An engineer's "what I built": the FeatureDiff handle has no content
+                    # fields, so resolve its diff BLOB and summarise it — changed files +
+                    # size. claude-code / proxy adapters store a JSON full-file snapshot
+                    # ({"files": {path: content}, "deleted": [...]}); raw-react stores a
+                    # unified diff. Handle both; return None (→ bare "feature diff") on
+                    # anything unrecognised.
+                    uri = getattr(body, "diff_uri", None)
+                    if not uri:
+                        return None
+                    raw = resolve_blob(uri)
+                    text = (raw.decode("utf-8", "replace")
+                            if isinstance(raw, (bytes, bytearray)) else str(raw))
+                    snap: Any = None
+                    try:
+                        snap = json.loads(text)
+                    except Exception:
+                        snap = None
+                    if isinstance(snap, dict) and isinstance(snap.get("files"), dict):
+                        files = list(snap["files"])
+                        deleted = snap.get("deleted") or []
+                        lines = sum(c.count("\n") + 1 for c in snap["files"].values()
+                                    if isinstance(c, str))
+                        names = ", ".join(os.path.basename(f) for f in files[:6])
+                        if len(files) > 6:
+                            names += " …"
+                        parts = [f"{len(files)} file(s)"]
+                        if lines:
+                            parts.append(f"~{lines} lines")
+                        if deleted:
+                            parts.append(f"{len(deleted)} deleted")
+                        stat = ", ".join(parts)
+                        return f"{stat} — {names}" if names else stat
+                    files_u: list[str] = []
+                    adds = dels = 0
+                    for ln in text.splitlines():
+                        if ln.startswith("+++ "):
+                            pth = ln[4:].strip()
+                            if pth and pth != "/dev/null":
+                                files_u.append(pth[2:] if pth[:2] in ("a/", "b/") else pth)
+                        elif ln.startswith("+") and not ln.startswith("+++"):
+                            adds += 1
+                        elif ln.startswith("-") and not ln.startswith("---"):
+                            dels += 1
+                    if not (files_u or adds or dels):
+                        return None
+                    names = ", ".join(os.path.basename(f) for f in files_u[:6])
+                    if len(files_u) > 6:
+                        names += " …"
+                    stat = f"{len(files_u)} file(s) +{adds}/-{dels}"
+                    return f"{stat} — {names}" if names else stat
+
                 def drive_pc(
                     node: str, scope: str, *, phase: str = "finish",
                     result: object = None, _pc: Any = progress_cb, _rv: Any = resolve,
@@ -1581,13 +1633,14 @@ def run(
                     if phase == "finish" and isinstance(result, dict) and result.get("artifacts"):
                         details: list[dict[str, str]] = []
                         for a in list(result["artifacts"])[:24]:
+                            kind = str(getattr(a, "kind", ""))
                             try:
-                                d = _artifact_detail(a.kind, _rv(a), max_len=600)
+                                body = _rv(a)
+                                d = (_feature_diff_stat(body) if kind == "feature_diff"
+                                     else _artifact_detail(kind, body, max_len=600))
                             except Exception:
                                 d = None
-                            details.append(
-                                {"kind": str(getattr(a, "kind", "")), "detail": str(d or "")}
-                            )
+                            details.append({"kind": kind, "detail": str(d or "")})
                         if details:
                             result = {**result, "_art_details": details}
                     _pc(node, scope, phase=phase, result=result)

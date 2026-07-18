@@ -1563,13 +1563,42 @@ def run(
             # / HITL fires off required_capabilities). Default run: never set.
             if pack_capabilities:
                 seed["required_capabilities"] = sorted(pack_capabilities)
+            # LIVE artifact CONTENT for per-node telemetry: resolve each finishing
+            # node's artifacts through the run's store and attach a short content
+            # one-liner per handle (the PRD's title, an acceptance criterion's text,
+            # a design's components …). This is what lets a live event log show WHAT
+            # each agent produced, not just the artifact kind. Advisory + best-effort:
+            # any resolve/format failure is swallowed (the handle just carries no
+            # detail). Only wired when a progress_cb is attached.
+            drive_pc = progress_cb
+            if progress_cb is not None:
+                from foundry.schemas.checkpoint import _artifact_detail
+
+                def drive_pc(
+                    node: str, scope: str, *, phase: str = "finish",
+                    result: object = None, _pc: Any = progress_cb, _rv: Any = resolve,
+                ) -> None:
+                    if phase == "finish" and isinstance(result, dict) and result.get("artifacts"):
+                        details: list[dict[str, str]] = []
+                        for a in list(result["artifacts"])[:24]:
+                            try:
+                                d = _artifact_detail(a.kind, _rv(a))
+                            except Exception:
+                                d = None
+                            details.append(
+                                {"kind": str(getattr(a, "kind", "")), "detail": str(d or "")}
+                            )
+                        if details:
+                            result = {**result, "_art_details": details}
+                    _pc(node, scope, phase=phase, result=result)
+
             final, paused_at = _invoke_with_autoresume(
                 app,
                 seed,
                 config,
                 checkpointed=bool(ckpt_set),
                 responder=checkpoint_responder,
-                progress_cb=progress_cb,
+                progress_cb=drive_pc,
                 resumable=(durable is not None),
             )
         finally:

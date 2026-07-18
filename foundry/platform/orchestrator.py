@@ -118,10 +118,22 @@ def _node_detail(result: object) -> dict[str, Any] | None:
             out["role"] = str(_get(note, "role") or "")
             out["assumptions"] = [str(a) for a in (_get(note, "assumptions") or ())][:4]
             out["concerns"] = [str(c) for c in (_get(note, "concerns") or ())][:4]
-    arts = result.get("artifacts") or ()
-    if arts:
+    # Prefer the RESOLVED artifact content (attached upstream in cli.run): the actual
+    # thing each artifact says — a criterion's text, the design's components, an ADR's
+    # decision — so the event log shows WHAT was produced, not just the kind.
+    ad = result.get("_art_details")
+    if ad:
+        arts_c: list[dict[str, str]] = []
+        for a in ad:
+            kind = str(_get(a, "kind") or "")
+            det = str(_get(a, "detail") or "")
+            if kind or det:
+                arts_c.append({"kind": kind, "detail": det})
+        if arts_c:
+            out["artifacts"] = arts_c[:12]
+    else:  # fallback: bare kind + count (no store to resolve content one-liners)
         counts: dict[str, int] = {}
-        for a in arts:
+        for a in result.get("artifacts") or ():
             kind = _get(a, "kind")
             if kind:
                 counts[str(kind)] = counts.get(str(kind), 0) + 1

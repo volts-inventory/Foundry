@@ -2079,9 +2079,13 @@ function resetStage(F){ F.stageArts=[]; F.stageSays={}; }
 // The "more details" that live behind a box's caret — the specifics the agent recorded.
 function _evExtras(g){
   const x=[];
-  for(const a of (g.assumptions||[])) x.push("• "+a);
+  for(const a of (g.arts||[])){                 // WHAT the agent produced, content first
+    const label=String(a.kind||"").replace(/_/g," ");
+    if(a.detail) x.push("⊞ "+label+": "+a.detail);
+    else x.push("⊞ "+label+(a.n>1?" ×"+a.n:""));
+  }
   for(const c of (g.concerns||[])) x.push("⚠ "+c);
-  for(const a of (g.arts||[])) x.push("⊞ "+String(a.kind||"").replace(/_/g," ")+(a.n>1?" ×"+a.n:""));
+  for(const a of (g.assumptions||[])) x.push("• "+a);
   for(const b of (g.body||[])) x.push(b);
   return x;
 }
@@ -2123,10 +2127,11 @@ function pushEvBox(F, g){
 // into its box.
 function _mergeNote(g, ev){
   if(ev.summary) g.summary=ev.summary;
-  for(const a of (ev.assumptions||[])) if(g.assumptions.indexOf(a)<0) g.assumptions.push(a);
   for(const c of (ev.concerns||[])) if(g.concerns.indexOf(c)<0) g.concerns.push(c);
-  for(const a of (ev.artifacts||[])){ const k=a.kind||""; if(!k) continue;
-    const cur=g.arts.find(x=>x.kind===k); if(cur) cur.n=Math.max(cur.n, a.n||1); else g.arts.push({kind:k, n:a.n||1}); }
+  for(const a of (ev.assumptions||[])) if(g.assumptions.indexOf(a)<0) g.assumptions.push(a);
+  // Each agent box gets ONE note carrying its produced artifacts (kind + content
+  // one-liner) — set them directly (the last note wins if a node re-runs).
+  if(ev.artifacts && ev.artifacts.length) g.arts=ev.artifacts.slice(0, 12);
 }
 // Finalise any of a service's still-open agent boxes (e.g. when a pass or the build ends).
 function closeOpenAgents(F, svc){

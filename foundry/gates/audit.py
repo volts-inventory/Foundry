@@ -34,11 +34,32 @@ DEFAULT_LICENSE_ALLOWLIST: frozenset[str] = frozenset(
     {"mit", "bsd-2-clause", "bsd-3-clause", "apache-2.0", "isc", "psf", "python-2.0", "0bsd"}
 )
 
-#: Lockfiles the inventory is rederived from, in canonical order.
+#: Lockfiles / dependency manifests the inventory is rederived from, in canonical
+#: order. Kept stack-agnostic so a non-Python/Node build (Go, Rust, JVM, Ruby, PHP)
+#: can ground its SBOM too — otherwise the gate fail-closes to ERROR on those stacks
+#: for want of a recognized manifest. Presence grounds the inventory; the license
+#: marker scan below is best-effort (files without inline markers simply add no
+#: findings). ``requirements*.txt`` is matched by glob (see ``_REQUIREMENTS_GLOB``).
 _LOCKFILE_NAMES: tuple[str, ...] = (
+    # Python
     "uv.lock",
     "poetry.lock",
+    "Pipfile.lock",
+    # Node
     "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    # Go (go.mod always present; go.sum only once there are deps)
+    "go.mod",
+    "go.sum",
+    # Rust
+    "Cargo.lock",
+    # JVM
+    "pom.xml",
+    "gradle.lockfile",
+    # Ruby / PHP
+    "Gemfile.lock",
+    "composer.lock",
 )
 _REQUIREMENTS_GLOB = "requirements*.txt"
 _MAX_LOCKFILE_BYTES = 5_000_000

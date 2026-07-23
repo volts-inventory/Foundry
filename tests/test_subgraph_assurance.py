@@ -360,9 +360,11 @@ def test_gate_error_drives_bounded_rework_loop_that_terminates() -> None:
     records = GlobalRecords()
     token = _install(records)
     try:
-        # No uv.lock -> the Audit gate ERRORs (inventory not rederivable, fail-
-        # closed). ERROR never latches (DS7) -> bounded fix -> halt.
-        files = {"app.py": _GOOD_MODULE, "test_app.py": _PASSING_TEST}
+        # A non-Python, asset-only tree ships no manifest and the trusted-side
+        # scaffold has no imports to derive one from, so the Audit gate's inventory
+        # stays non-rederivable and it fail-closes to ERROR. ERROR never latches
+        # (DS7) -> bounded fix -> halt.
+        files = {"README.md": "# app\n", "data.txt": "hello world\n"}
         diff = _feature_diff(files)
         criteria = (_criterion("c1"),)
         state, resolve, resolve_blob = _seed(criteria, (diff,), subject_uri=_SUBJECT_URI)

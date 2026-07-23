@@ -27,7 +27,7 @@ from foundry.schemas.gates import GateStatus, VerdictClass
 
 from .runner import ZoneAObservation, observe
 
-__all__ = ["DEFAULT_LICENSE_ALLOWLIST", "AuditGate"]
+__all__ = ["DEFAULT_LICENSE_ALLOWLIST", "AuditGate", "recognized_manifests"]
 
 #: Pinned, permissive-license allowlist (SPDX-style identifiers, lowercased).
 DEFAULT_LICENSE_ALLOWLIST: frozenset[str] = frozenset(
@@ -63,6 +63,22 @@ _LOCKFILE_NAMES: tuple[str, ...] = (
 )
 _REQUIREMENTS_GLOB = "requirements*.txt"
 _MAX_LOCKFILE_BYTES = 5_000_000
+
+
+def recognized_manifests(workdir: Path) -> list[str]:
+    """Names of the recognized dependency manifests present at ``workdir`` root.
+
+    The single source of truth for "is there a manifest the audit can ground its
+    SBOM in": a fixed lockfile name (:data:`_LOCKFILE_NAMES`) or a
+    ``requirements*.txt`` glob match, ROOT ONLY (a vendored lockfile deep in the
+    tree is not the project's manifest). Both :class:`AuditGate` (to decide
+    derivability) and the trusted-side materializer's manifest scaffold read
+    through THIS function, so the scaffold writes one iff the gate would have
+    ERRORed for want of it.
+    """
+    names = [n for n in _LOCKFILE_NAMES if (workdir / n).is_file()]
+    names += [p.name for p in workdir.glob(_REQUIREMENTS_GLOB) if p.is_file()]
+    return names
 
 # A license marker line: "license: <id>" / "License-Expression: <id>" etc.
 _LICENSE_MARKER = re.compile(
@@ -120,9 +136,7 @@ class AuditGate:
         )
 
     def _lockfile_paths(self, workdir: Path) -> list[str]:
-        names = [n for n in _LOCKFILE_NAMES if (workdir / n).is_file()]
-        names += [p.name for p in workdir.glob(_REQUIREMENTS_GLOB) if p.is_file()]
-        return names
+        return recognized_manifests(workdir)
 
     # ---- zone B: derivable + no denied license ⇒ PASS ----------------------
 

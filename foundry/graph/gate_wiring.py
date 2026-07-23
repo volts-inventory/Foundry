@@ -737,7 +737,7 @@ def _python_third_party_requirements(dest: Path) -> list[str] | None:
     # of one of these resolves locally and is NOT a third-party dependency.
     local = {p.name for p in dest.iterdir() if p.is_dir()}
     local |= {p.stem for p in dest.glob("*.py")}
-    stdlib = getattr(sys, "stdlib_module_names", frozenset())
+    stdlib = sys.stdlib_module_names  # guaranteed on the pinned floor (requires-python >=3.11)
     imported: set[str] = set()
     for path in py_files:
         try:

@@ -1,4 +1,8 @@
 "use strict";
+// Runtime base path (mount prefix). index.html sets window.__FOUNDRY_BASE__ to "/" when unmounted,
+// or e.g. "/foundry/" behind a path-routing reverse proxy; every /api and /static URL below is
+// resolved against it so the frontend works at the root or under a sub-path with no other changes.
+const FB_BASE = (typeof window !== "undefined" && window.__FOUNDRY_BASE__ && window.__FOUNDRY_BASE__.charAt(0) === "/") ? window.__FOUNDRY_BASE__ : "/";
 /* Foundry Workshop — Phaser 3 pixel factory, multi-floor (one floor per project).
  *
  * The engine owns the scene graph, tweens, particles, depth-sorting and timed
@@ -298,7 +302,7 @@ class BootScene extends Phaser.Scene {
   preload(){
     // route1rodent 16x16 RPG sprites (CC BY-SA 4.0) — see assets/sprites/CREDITS.md.
     // Re-tiled to a clean 13x6 grid of 64px frames.
-    this.load.spritesheet("chars", "/static/assets/sprites/characters.png",
+    this.load.spritesheet("chars", FB_BASE + "static/assets/sprites/characters.png",
       {frameWidth:64, frameHeight:64});
   }
   create(){
@@ -1710,7 +1714,7 @@ async function newProject(req, mode, supervised, backend, packs, extra){
   await bootReady;  // shared textures must exist before a FloorScene builds
   let resp;
   try {
-    resp = await fetch("/api/projects", {
+    resp = await fetch(FB_BASE + "api/projects", {
       method:"POST", headers:postHeaders(),
       body: JSON.stringify({request:req, mode, supervised, backend, packs, ...(extra||{})}),
     }).then(r=>r.json());
@@ -2226,7 +2230,7 @@ function openFilesFor(meta){
   itBtn.style.display = (meta.status === "done") ? "" : "none";
   itBtn.onclick = () => { hideFiles(); showNewModal(meta.id); };
   const gz = document.getElementById("files-gitzip");
-  if (gz) gz.href = "/api/gitzip/" + meta.id;   // whole-floor lineage as ONE git repo
+  if (gz) gz.href = FB_BASE + "api/gitzip/" + meta.id;   // whole-floor lineage as ONE git repo
   renderReleases(meta);              // release history for this floor (newest first)
   loadRepo(meta.id);                 // start on the latest release's repo
   modal.classList.remove("hidden");
@@ -2247,7 +2251,7 @@ function openRepoHub(){
   list.innerHTML = "<li class='muted'>Loading…</li>"; cnt.textContent = "";
   modal.classList.remove("hidden");
   REPOS_OPEN = true; renderElevator();
-  fetch("/api/builds")
+  fetch(FB_BASE + "api/builds")
     .then(r => r.ok ? r.json() : {builds:[]})
     .then(({builds}) => {
       const repos = (builds||[]).filter(b => b.has_repo)
@@ -2292,13 +2296,13 @@ function loadRepo(id){
   FILES_ID = id;
   const list = document.getElementById("files-list");
   const view = document.getElementById("files-view");
-  document.getElementById("files-zip").href = "/api/zip/"+id;
+  document.getElementById("files-zip").href = FB_BASE + "api/zip/"+id;
   { const gz = document.getElementById("files-gitzip");
-    if (gz) gz.href = "/api/gitzip/"+id; }   // lineage repo up to THIS release
+    if (gz) gz.href = FB_BASE + "api/gitzip/"+id; }   // lineage repo up to THIS release
   list.innerHTML = ""; view.textContent = "Loading…";
   document.getElementById("repo-sha").textContent = "";
   document.getElementById("repo-src").textContent = "";
-  fetch("/api/repo/"+id)
+  fetch(FB_BASE + "api/repo/"+id)
     .then(r => r.ok ? r.json() : {files:[],checks:[],diffs:[],sign_offs:[]})
     .then(repo => { renderRepo(id, repo); })
     .catch(() => { list.innerHTML = "<li class='muted'>(could not load repo)</li>"; view.textContent = ""; });
@@ -2475,7 +2479,7 @@ function colorizeDiff(text){
 // Release history of the open floor — one row per release; click to browse it.
 function renderReleases(F){
   const rels = document.getElementById("files-releases");
-  fetch("/api/releases/"+F.floor)
+  fetch(FB_BASE + "api/releases/"+F.floor)
     .then(r => r.ok ? r.json() : {releases:[]})
     .then(({releases}) => {
       rels.innerHTML = "";
@@ -2498,7 +2502,7 @@ function viewFile(id, path, li){
   if(li) li.classList.add("sel");
   const view = document.getElementById("files-view");
   view.textContent = "Loading…";
-  fetch("/api/file/"+id+"?path="+encodeURIComponent(path))
+  fetch(FB_BASE + "api/file/"+id+"?path="+encodeURIComponent(path))
     .then(r => r.text())
     .then(t => { view.textContent = t || "(empty file)"; })
     .catch(() => { view.textContent = "(could not load file)"; });
@@ -2513,7 +2517,7 @@ function sendDecision(decision){
     const edit = (document.getElementById("cp-edit").value || "").trim();
     if (edit) body.request_edit = edit;   // the human's amended next-iteration request
   }
-  fetch("/api/decision/"+F.id, {method:"POST", headers:postHeaders(),
+  fetch(FB_BASE + "api/decision/"+F.id, {method:"POST", headers:postHeaders(),
     body: JSON.stringify(body)});
   F.awaiting = false; renderElevator(); hideCheckpoint();
 }
@@ -2552,7 +2556,7 @@ function askInterview(){
   const q = document.getElementById("iv-question").value.trim();
   const ans = document.getElementById("iv-answer");
   ans.classList.remove("hidden"); ans.textContent = "…asking "+IV_TARGET.role+"…";
-  fetch("/api/interview/"+IV_TARGET.id,{method:"POST",headers:postHeaders(),
+  fetch(FB_BASE + "api/interview/"+IV_TARGET.id,{method:"POST",headers:postHeaders(),
     body:JSON.stringify({role:IV_TARGET.role, question:q})})
    .then(r=>r.json()).then(d=>{ ans.textContent = d.answer || "(no answer)"; })
    .catch(()=>{ ans.textContent = "(interview request failed)"; });
@@ -2663,7 +2667,7 @@ const REQ_ITER='What to change or add? <span class="hint">— the agents build o
 const SEED_REQ='build a tiny URL-shortener service';
 async function loadStartFrom(){
   let builds=[];
-  try{ const r=await fetch("/api/builds"); builds=((await r.json())||{}).builds||[]; }catch(_){}
+  try{ const r=await fetch(FB_BASE + "api/builds"); builds=((await r.json())||{}).builds||[]; }catch(_){}
   startFromSel.innerHTML='<option value="">✦ Fresh build</option>';
   for(const b of builds){
     if(b.has_repo===false) continue;
@@ -2684,7 +2688,7 @@ function syncStartFrom(){
   // conversation with the leads EXTENDS it (and the release saves it cumulatively).
   // Guarded by !chatDraft so it never clobbers an in-progress draft.
   if(iterating){
-    fetch("/api/spec/"+startFromSel.value).then(r=>r.ok?r.json():{spec:"",built:""})
+    fetch(FB_BASE + "api/spec/"+startFromSel.value).then(r=>r.ok?r.json():{spec:"",built:""})
       .then(d=>{
         if(typeof d.spec==="string" && d.spec.trim() && !chatDraft.trim()){
           chatDraft=d.spec;
@@ -2718,7 +2722,7 @@ function updateSlotHint(){
     const packs = (document.getElementById("packs-input").value || "")
       .split(",").map(s=>s.trim()).filter(Boolean);
     if(!note || !request){ if(note) note.textContent = PARALLEL_BASE; return; }
-    fetch("/api/suggest-slots",{method:"POST",headers:postHeaders(),
+    fetch(FB_BASE + "api/suggest-slots",{method:"POST",headers:postHeaders(),
       body:JSON.stringify({request, packs})})
      .then(r=>r.ok?r.json():null)
      .then(d=>{
@@ -2763,7 +2767,7 @@ function sendChat(){
   // so the leads EXTEND the spec and focus the new work on the gaps.
   const seedSpec  = (!chatSession && chatDraft.trim()) ? chatDraft : undefined;
   const seedBuilt = (!chatSession && iterBuilt.trim()) ? iterBuilt : undefined;
-  fetch("/api/ideate", {method:"POST", headers:postHeaders(),
+  fetch(FB_BASE + "api/ideate", {method:"POST", headers:postHeaders(),
     body: JSON.stringify({session:chatSession, message:msg, backend,
                           base_spec:seedSpec, base_built:seedBuilt})})
    .then(r=>r.json())
@@ -2866,7 +2870,7 @@ document.getElementById("repos-new").onclick=()=>{ closeRepoHub(); showNewModal(
 document.getElementById("repos-clear").onclick=async ()=>{
   if(!confirm("Clear ALL floors and repositories? This wipes every build from the catalog and cannot be undone.")) return;
   try{
-    const r = await fetch("/api/reset", {method:"POST", headers:postHeaders()});
+    const r = await fetch(FB_BASE + "api/reset", {method:"POST", headers:postHeaders()});
     if(!r.ok){
       const d = await r.json().catch(()=>({}));
       alert(d.error || ("Clear failed ("+r.status+")."));   // e.g. builds still running
@@ -2907,7 +2911,7 @@ function updateModelNote(){
     ? "mock runs no real model — deterministic, offline." : ""; return; }
   note.textContent = "Models · " + Object.entries(m).map(([t,id])=>`${t}: ${id}`).join("  ·  ");
 }
-fetch("/api/config").then(r=>r.json()).then(c=>{
+fetch(FB_BASE + "api/config").then(r=>r.json()).then(c=>{
   if(!c) return;
   const sel=document.getElementById("backend-select");
   reconcileSelect(sel, c.backends, c.default_backend);
@@ -3020,7 +3024,7 @@ function adoptFloor(row){
 // by briefly polling for a newer release and adopting it in place, so an open tab
 // streams a whole overnight ladder without a refresh.
 function openFloorStream(F){
-  const es = new EventSource("/api/stream/"+F.id);
+  const es = new EventSource(FB_BASE + "api/stream/"+F.id);
   F.lastBeat = Date.now();
   es.onmessage = e => { F.lastBeat = Date.now();
     try { routeEvent(F.floor, JSON.parse(e.data)); } catch(_){} };
@@ -3034,7 +3038,7 @@ async function adoptNextRelease(F){
   for (let tries = 0; tries < 60; tries++){
     await new Promise(r=>setTimeout(r, 5000));
     let rows;
-    try { rows = (await fetch("/api/projects").then(r=>r.json())).projects; }
+    try { rows = (await fetch(FB_BASE + "api/projects").then(r=>r.json())).projects; }
     catch(_){ continue; }
     const row = (rows||[]).find(r=>r.floor===F.floor);
     if (!row || row.id === F.id){
@@ -3061,7 +3065,7 @@ async function adoptNextRelease(F){
 async function rehydrate(){
   await bootReady;  // shared textures must exist before a FloorScene builds
   try {
-    const {projects} = await fetch("/api/projects").then(r=>r.json());
+    const {projects} = await fetch(FB_BASE + "api/projects").then(r=>r.json());
     if(!projects || !projects.length){ newModal.classList.remove("hidden"); return; }
     for(const row of projects) adoptFloor(row);
     switchToFloor(projects[projects.length-1].floor);

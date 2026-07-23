@@ -84,6 +84,21 @@ def _load_env_file() -> bool:
 _ENV_FILE_FOUND = _load_env_file()   # before the config constants below read os.environ
 
 _STATIC = Path(__file__).parent / "static"
+
+
+def _normalize_base_path(raw: str) -> str:
+    """Normalize a mount prefix to "" (root) or "/segment" with a leading slash, no trailing slash."""
+    trimmed = (raw or "").strip().strip("/")
+    return f"/{trimmed}" if trimmed else ""
+
+
+# Optional sub-path mount (e.g. FOUNDRY_BASE_PATH=/foundry) so the Workshop can live behind a
+# path-routing reverse proxy without subdomains. Empty ⇒ served at the root (behaviour unchanged).
+_BASE_PATH = _normalize_base_path(os.environ.get("FOUNDRY_BASE_PATH", ""))
+# The base as the browser sees it (leading + trailing slash). Injected into index.html so the
+# frontend resolves /api and /static under the same prefix.
+_WEB_BASE = f"{_BASE_PATH}/" if _BASE_PATH else "/"
+
 _PACE = 0.5          # seconds between paced game events
 _STAGE_PAUSE = 0.9   # extra beat when a new stage opens
 _AUTO_APPROVE_DELAY = 1.4  # auto-run: dwell on each checkpoint before approving
@@ -1870,6 +1885,10 @@ class Handler(BaseHTTPRequestHandler):
             ".css": "text/css", ".png": "image/png", ".ico": "image/x-icon",
         }.get(target.suffix, "application/octet-stream")
         data = target.read_bytes()
+        if target.name == "index.html":
+            # Inject the runtime base (a no-op "/" when unmounted) so the frontend resolves its
+            # /static and /api URLs under whatever prefix the app is mounted at.
+            data = data.replace(b"__BASE__", _WEB_BASE.encode("utf-8"))
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
@@ -1877,7 +1896,28 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     # -- routes -----------------------------------------------------------------
+    def _strip_base(self) -> bool:
+        """Strip the configured base prefix from ``self.path`` so all routing below is written for
+        the root. Returns False (after a 404) for a request outside the base. No-op when unset."""
+        base = _BASE_PATH
+        if not base:
+            return True
+        p = self.path
+        if p == base:
+            self.path = "/"
+            return True
+        if p.startswith(base + "/"):
+            self.path = p[len(base):]          # keep the leading slash of the remainder
+            return True
+        if p.startswith(base + "?"):
+            self.path = "/" + p[len(base):]    # "/foundry?x=1" -> "/?x=1"
+            return True
+        self._json(404, {"error": "not found"})
+        return False
+
     def do_GET(self) -> None:
+        if not self._strip_base():
+            return
         path = self.path.split("?", 1)[0]
         if path.startswith("/api/stream/"):
             self._stream(path.rsplit("/", 1)[-1])
@@ -2147,6 +2187,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def do_POST(self) -> None:
+        if not self._strip_base():
+            return
         path = self.path.split("?", 1)[0]
         denied = _authorize_mutation(self.headers, _AUTH_TOKEN)
         if denied is not None:

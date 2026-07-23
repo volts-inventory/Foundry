@@ -1677,6 +1677,37 @@ def _node_stage(node: str) -> str | None:
     return None
 
 
+def _agent_for_node(node: str) -> str | None:
+    """The human agent ROLE for a graph node id (exact id, else substring for a
+    namespaced/lane-suffixed name), or None for infra/router nodes that aren't an agent
+    action worth its own log box."""
+    from webapp.events import AGENT_BY_NODE
+
+    n = node or ""
+    who = AGENT_BY_NODE.get(n)
+    if who:
+        return who[0]
+    for key, (agent, _room) in AGENT_BY_NODE.items():
+        if key in n:
+            return agent
+    return None
+
+
+def _node_verb(node: str) -> str:
+    """A short 'what this agent did' verb for a node id (exact, else substring) — the
+    generic fallback when a node recorded no specific journal summary."""
+    from webapp.events import _NODE_SUMMARY
+
+    n = node or ""
+    verb = _NODE_SUMMARY.get(n)
+    if verb:
+        return verb
+    for key, v in _NODE_SUMMARY.items():
+        if key in n:
+            return v
+    return "did its step"
+
+
 def _platform_opts(body: dict[str, Any]) -> dict[str, Any]:
     """Advanced platform knobs from the request body (all optional; sane defaults)."""
     def _int(key: str, default: int) -> int:
@@ -1763,51 +1794,72 @@ def _run_platform(p: Project) -> None:
         t = ev.get("type")
         svc = ev.get("service", "")
         pn = ev.get("pass", 1)
+        # Each service is ONE box in the quest log: `svc` events open it (empty) at
+        # svc_start, update it in place as its pipeline advances / regresses / rebuilds,
+        # and populate its body when it finishes — instead of a growing flat list of
+        # per-stage narrate lines (which read as one event spilling across many rows).
         if t == "plan":
             _emit(p, type="narrate", text="📋 Services: " + ", ".join(ev.get("services") or []))
         elif t == "svc_start":
             role = str(ev.get("role") or "")
             _emit(p, type="active", room=role_room.get(role, "backend"))
             set_state(svc, "building")
-            _emit(p, type="narrate", text=f"▶ {svc} — building {role_desc.get(role, role)}")
+            _emit(p, type="svc", service=svc, phase="start", role=role,
+                  desc=role_desc.get(role, role))
         elif t == "svc_node":
-            stage = _node_stage(str(ev.get("node") or ""))
+            node = str(ev.get("node") or "")
+            # Canvas: pulse the service's room when its pipeline REGRESSES to an earlier
+            # stage (tests failed -> re-implement). The event log below is per-agent, but
+            # the floor animation still tracks the coarse stage.
+            stage = _node_stage(node)
             last = svc_stage.get(svc)
-            if stage and stage != last:   # show every stage CHANGE (forward AND backward)
+            if stage and stage != last:
                 back = (last in _STAGE_ORDER and stage in _STAGE_ORDER
                         and _STAGE_ORDER.index(stage) < _STAGE_ORDER.index(last))
                 svc_stage[svc] = stage
-                if back:   # regressed to an earlier stage — e.g. tests failed -> re-implement
-                    _emit(p, type="narrate", text=f"   ↩ {svc} · back to {stage}")
+                if back:
                     _emit(p, type="rebuild", room=role_room.get(svc_role.get(svc, ""), "backend"))
+            # Log: ONE box per AGENT action. The node opens its box on START ("▸ working")
+            # and fills it on FINISH — the agent's journal summary (else a role verb) as the
+            # box line, with its assumptions/concerns/artifacts behind the box caret. Infra
+            # / router nodes (no agent) don't get a box.
+            agent = _agent_for_node(node)
+            if agent:
+                if ev.get("phase") == "start":
+                    _emit(p, type="svc", service=svc, phase="agent_start",
+                          agent=agent, node=node)
                 else:
-                    _emit(p, type="narrate", text=f"   {svc} · {stage}")
+                    det_raw = ev.get("detail")
+                    det = det_raw if isinstance(det_raw, dict) else {}
+                    _emit(p, type="svc", service=svc, phase="agent_done",
+                          agent=agent, node=node,
+                          summary=str(det.get("summary") or ""), did=_node_verb(node),
+                          assumptions=det.get("assumptions") or [],
+                          concerns=det.get("concerns") or [],
+                          artifacts=det.get("artifacts") or [])
         elif t == "pass" and pn > 1:
             svc_stage.pop(svc, None)   # a new pass re-runs the pipeline; let stages re-announce
             set_state(svc, "rebuilding")
             _emit(p, type="rebuild", room=role_room.get(svc_role.get(svc, ""), "backend"))
-            _emit(p, type="narrate", text=f"   ↻ {svc} — rebuilding · pass {pn}")
+            _emit(p, type="svc", service=svc, phase="rebuild", passno=pn)
         elif t == "pass_result":
-            if ev.get("passed"):
-                set_state(svc, "built")
-                _emit(p, type="narrate", text=f"   ✓ {svc} — built, gates green (pass {pn})")
-            else:
-                set_state(svc, "held")
-                _emit(p, type="narrate", text=f"   ✗ {svc} — held at the gate (pass {pn})")
+            passed = bool(ev.get("passed"))
+            set_state(svc, "built" if passed else "held")
+            _emit(p, type="svc", service=svc, phase="pass_result", passed=passed, passno=pn)
         elif t == "critic":
             if ev.get("complete"):
                 set_state(svc, "approved")
-                _emit(p, type="narrate", text=f"   ✦ {svc} — approved: technically complete")
+                _emit(p, type="svc", service=svc, phase="critic", complete=True)
             else:
                 gaps = ev.get("gaps") or []
                 detail = "; ".join(gaps[:3]) if gaps else "more to do"
-                _emit(p, type="narrate", text=f"   • {svc} — needs more: {detail} → rebuilding")
+                _emit(p, type="svc", service=svc, phase="critic", complete=False, detail=detail)
         elif t == "svc_done":
-            set_state(svc, "done" if ev.get("passed") else "failed")
-            mark = "✓" if ev.get("passed") else "✗"
-            _emit(p, type="narrate", text=f"{mark} {svc} done · {ev.get('passes', 1)} pass(es)")
-            for f in (ev.get("files") or [])[:8]:   # the specific pieces this service built
-                _emit(p, type="narrate", text=f"     ⊞ {svc}/{f}")
+            passed = bool(ev.get("passed"))
+            set_state(svc, "done" if passed else "failed")
+            _emit(p, type="svc", service=svc, phase="done", passed=passed,
+                  passes=int(ev.get("passes", 1)),
+                  files=[str(f) for f in (ev.get("files") or [])[:8]])
 
     opts = p.platform_opts or {}
     staging = str(p.out_base.parent / f".staging-{p.id}") if p.out_base else None

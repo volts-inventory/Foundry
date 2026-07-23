@@ -437,10 +437,16 @@ def test_low_tier_still_catches_vulnerability(tmp_path, rt, runner, records, ver
 
 
 def test_audit_error_retries_without_latch(tmp_path, rt, runner, records, verifier):
-    """No lockfile -> Audit inventory not rederivable -> signed ERROR -> fix, no latch."""
+    """No manifest AND none derivable -> Audit signed ERROR -> fix, no latch.
+
+    A non-Python, asset-only tree ships no recognized manifest and the
+    trusted-side manifest scaffold has no imports to derive one from, so the
+    Audit inventory stays non-rederivable and the gate fail-closes to ERROR.
+    (A Python tree would instead be grounded by the scaffold — see
+    :mod:`tests.test_gate_wiring` manifest-scaffold coverage.)
+    """
     criteria = (_criterion("c1"),)
-    # No uv.lock / requirements -> Audit gate ERRORs (fail-closed, not a verdict).
-    files = {"app.py": _GOOD_MODULE, "test_app.py": _PASSING_TEST}
+    files = {"README.md": "# app\n", "data.txt": "hello world\n"}
     diff, uri, blob = _feature_diff(files)
     state, resolve, resolve_blob = _seed(criteria, ((diff, uri, blob),))
 

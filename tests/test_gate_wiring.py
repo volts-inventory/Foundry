@@ -636,6 +636,62 @@ def test_path_traversal_rejected_before_write(tmp_path, verifier):
     assert not (tmp_path / "escape.py").exists()
 
 
+def test_manifest_scaffold_grounds_pure_python_tree(tmp_path, verifier):
+    """A pure-stdlib Python tree with a test suite and no engineer manifest gets a
+    generated ``requirements.txt`` so the Audit gate can ground its SBOM."""
+    from foundry.gates.audit import AuditGate, recognized_manifests
+    from foundry.schemas.gates import GateStatus
+
+    criteria = (_criterion("c1"),)
+    files = {"app.py": "import json\n\nVALUE = 42\n", "test_app.py": _PASSING_TEST}
+    diff, uri, blob = _feature_diff(files)
+    state, resolve, resolve_blob = _seed(criteria, ((diff, uri, blob),))
+
+    dest = tmp_path / "wd"
+    materialize_workdir(state, dest, resolve=resolve, resolve_blob=resolve_blob)
+
+    assert recognized_manifests(dest) == ["requirements.txt"]
+    manifest = (dest / "requirements.txt").read_text()
+    assert "pytest" in manifest  # the test runner is pinned as a dev dependency
+    obs = AuditGate().execute(dest)
+    assert obs.structured["inventory_derivable"] is True
+    assert AuditGate().decide(obs) is GateStatus.PASS
+
+
+def test_manifest_scaffold_leaves_engineer_manifest_untouched(tmp_path, verifier):
+    """When the engineers already shipped a manifest, the scaffold audits THEIRS."""
+    from foundry.gates.audit import recognized_manifests
+
+    criteria = (_criterion("c1"),)
+    engineered = "requests==2.31.0\n"
+    files = {"app.py": "import requests\n", "requirements.txt": engineered}
+    diff, uri, blob = _feature_diff(files)
+    state, resolve, resolve_blob = _seed(criteria, ((diff, uri, blob),))
+
+    dest = tmp_path / "wd"
+    materialize_workdir(state, dest, resolve=resolve, resolve_blob=resolve_blob)
+
+    assert recognized_manifests(dest) == ["requirements.txt"]
+    assert (dest / "requirements.txt").read_text() == engineered  # untouched
+
+
+def test_manifest_scaffold_skips_non_python_tree(tmp_path, verifier):
+    """A non-Python (asset-only) tree has no imports to derive from — no manifest is
+    fabricated, so the Audit gate legitimately stays ungrounded (ERROR upstream)."""
+    from foundry.gates.audit import recognized_manifests
+
+    criteria = (_criterion("c1"),)
+    files = {"README.md": "# app\n", "data.txt": "hello\n"}
+    diff, uri, blob = _feature_diff(files)
+    state, resolve, resolve_blob = _seed(criteria, ((diff, uri, blob),))
+
+    dest = tmp_path / "wd"
+    materialize_workdir(state, dest, resolve=resolve, resolve_blob=resolve_blob)
+
+    assert recognized_manifests(dest) == []
+    assert not (dest / "requirements.txt").exists()
+
+
 # ---- the GENUINE producer -> consumer contract: real StubAdapter diff --------
 
 

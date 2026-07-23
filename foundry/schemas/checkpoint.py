@@ -175,11 +175,15 @@ def _org_section(state: FactoryState, resolve: ArtifactResolver | None) -> dict[
         return None
 
 
-def _artifact_detail(kind: str, body: object) -> str | None:
+def _artifact_detail(kind: str, body: object, *, max_len: int = 200) -> str | None:
     """A SHORT, human one-line summary of an artifact's CONTENT for the advisory
     display (never the full body — L4): the PRD's title, an acceptance criterion's
     text, the sprint plan's milestone count, etc. Best-effort and defensive — returns
-    None when nothing useful is extractable (the row then shows just its label)."""
+    None when nothing useful is extractable (the row then shows just its label).
+
+    ``max_len`` caps the returned string (trimmed at a word boundary with an ellipsis);
+    callers that render into more space (e.g. the live event log's expandable box) pass
+    a larger value so a long intent/criterion isn't cut mid-thought."""
     def s(attr: str) -> str | None:
         v = getattr(body, attr, None)
         return v.strip() if isinstance(v, str) and v.strip() else None
@@ -248,8 +252,8 @@ def _artifact_detail(kind: str, body: object) -> str | None:
     if not out:
         return None
     out = " ".join(str(out).split())  # collapse whitespace to one line
-    if len(out) > 200:  # trim at a WORD boundary, never mid-word
-        out = out[:200].rsplit(" ", 1)[0] + "…"
+    if len(out) > max_len:  # trim at a WORD boundary, never mid-word
+        out = out[:max_len].rsplit(" ", 1)[0] + "…"
     return out
 
 

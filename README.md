@@ -595,8 +595,16 @@ FOUNDRY_MODEL_BACKEND=claude-cli python -m webapp.server
 
 # 4. Require a shared token for any mutating action
 FOUNDRY_WORKSHOP_TOKEN=secret python -m webapp.server
-#    then open  http://localhost:8765/?token=secret
+#    then open  http://localhost:8765/?token=secret   <- the ?token= is required
+
+# 5. Mount it under a sub-path, to share an origin with other apps
+FOUNDRY_BASE_PATH=/foundry python -m webapp.server    # served at /foundry
 ```
+
+> **The `?token=` is not optional.** The UI reads the token from the page URL's
+> query string and sends it as `X-Workshop-Token`; open the page without it and
+> every mutating action returns `403 missing or invalid workshop token`. See
+> "Behind a reverse proxy" below before putting this behind a gateway login.
 
 **Sandboxed test gate (untrusted-code isolation).** Generated tests run inside a
 **namespace sandbox** by default — an unprivileged Linux `unshare` (user + net +
@@ -654,6 +662,32 @@ The two host presets — `foundry.mac.env.example` and `foundry.linux.env.exampl
 are annotated with per-host tuning (paths, sizing, the macOS sandbox flag, and a
 Pi's tmpfs/backup notes).
 
+### Behind a reverse proxy
+
+`FOUNDRY_BASE_PATH=/foundry` mounts the whole Workshop under a prefix, so it can
+share one origin with other apps — no subdomain, and nothing for the proxy to
+rewrite. The server strips the prefix internally and injects it into `index.html`,
+so the UI resolves its own `/static` and `/api` URLs under it; requests outside the
+prefix 404. The SSE build stream moves with everything else, to
+`<base>/api/stream/<build-id>` — forward it unbuffered.
+
+**Picking an auth model.** Foundry has no user accounts: `FOUNDRY_WORKSHOP_TOKEN`
+is one shared secret gating state-changing routes, and the separate `Origin`/`Host`
+same-origin check (always on, token or not) blocks cross-site POSTs. So:
+
+- **Proxy that already logs people in** (a gateway with its own session): leave the
+  token **unset**. The gateway is the stronger control — named accounts you can
+  revoke individually, rather than one secret pasted into a URL where it lands in
+  browser history, proxy logs and `Referer` headers. Setting the token *and* a
+  gateway just breaks the UI: people arrive via a plain link with no `?token=`, so
+  every build 403s. Keep the port unpublished so the proxy is the only route in.
+- **Proxy that doesn't authenticate** (or a bare LAN bind): set the token and reach
+  the UI at `<base>/?token=…`.
+
+Foundry has no per-user identity either way — whoever gets in shares one Workshop
+and sees the same builds. If your gateway forwards a username header, nothing here
+reads it.
+
 ---
 
 ## 11. Develop
@@ -689,7 +723,8 @@ rm -rf .pytest_cache .mypy_cache .ruff_cache ./.run spec.md  # clean caches + ou
 | `WORKSHOP_HOST` / `WORKSHOP_PORT` | UI bind address / port | `127.0.0.1` / `8765` |
 | `WORKSHOP_OUTPUT_DIR` | UI build output root | `.run/web` |
 | `WORKSHOP_STATE_DIR` | UI durable state dir (resume) | `WORKSHOP_OUTPUT_DIR/state` |
-| `FOUNDRY_WORKSHOP_TOKEN` | Shared token for UI mutations | off (localhost-only) |
+| `FOUNDRY_WORKSHOP_TOKEN` | Shared token for UI mutations; the UI sends it only when the page URL carries `?token=…` | off (localhost-only) |
+| `FOUNDRY_BASE_PATH` | Mount the Workshop under a sub-path, e.g. `/foundry` | root |
 
 **Long-lived server** (for a Pi/Mac running for days; see the host env presets):
 

@@ -593,10 +593,24 @@ WORKSHOP_HOST=0.0.0.0 python -m webapp.server
 # 3. Default to a real backend in the UI picker
 FOUNDRY_MODEL_BACKEND=claude-cli python -m webapp.server
 
-# 4. Require a shared token for any mutating action
+# 4. Mount it under a sub-path, to share an origin with other apps
+FOUNDRY_BASE_PATH=/foundry python -m webapp.server    # served at /foundry
+
+# 5. No-proxy LAN exposure only: gate mutations behind a shared token
 FOUNDRY_WORKSHOP_TOKEN=secret python -m webapp.server
-#    then open  http://localhost:8765/?token=secret
+#    then open  http://localhost:8765/?token=secret   <- the ?token= is required
 ```
+
+**There is no login.** Run it from this repo and the Workshop is open — it's a
+localhost tool, and that's deliberate. If you need it guarded, put a reverse proxy
+that authenticates in front of it rather than reaching for the token; see "Behind
+a reverse proxy" below.
+
+> **If you do set the token, the `?token=` is not optional.** The UI reads it from
+> the page URL's query string and sends it as `X-Workshop-Token`; open the page
+> without it and every mutating action returns
+> `403 missing or invalid workshop token`. This is why the token must stay unset
+> behind a gateway login.
 
 **Sandboxed test gate (untrusted-code isolation).** Generated tests run inside a
 **namespace sandbox** by default — an unprivileged Linux `unshare` (user + net +
@@ -654,6 +668,37 @@ The two host presets — `foundry.mac.env.example` and `foundry.linux.env.exampl
 are annotated with per-host tuning (paths, sizing, the macOS sandbox flag, and a
 Pi's tmpfs/backup notes).
 
+### Behind a reverse proxy
+
+`FOUNDRY_BASE_PATH=/foundry` mounts the whole Workshop under a prefix, so it can
+share one origin with other apps — no subdomain, and nothing for the proxy to
+rewrite. The server strips the prefix internally and injects it into `index.html`,
+so the UI resolves its own `/static` and `/api` URLs under it; requests outside the
+prefix 404. The SSE build stream moves with everything else, to
+`<base>/api/stream/<build-id>` — forward it unbuffered.
+
+**Auth belongs to the proxy, not to Foundry.** Run straight from this repo and
+there is **no login and no token** — `python -m webapp.server` comes up open, which
+is the point: it's a localhost tool. There are no user accounts, no sessions and
+no identity of any kind, and none are planned. The only always-on check is the
+`Origin`/`Host` same-origin guard, which stops another website POSTing to your
+workshop; it never asks a human for anything.
+
+So when you put a gateway in front, **let the gateway do the authenticating and
+leave `FOUNDRY_WORKSHOP_TOKEN` unset.** A gateway gives you named accounts you can
+revoke one at a time, which one shared secret can't. Setting the token as well
+doesn't harden anything — it just breaks the UI, because people arrive on a plain
+link with no `?token=` and every build 403s. Keep the port unpublished so the proxy
+is the only way in.
+
+`FOUNDRY_WORKSHOP_TOKEN` exists for the one case with no proxy at all: a raw
+`WORKSHOP_HOST=0.0.0.0` bind on a network you don't trust. Then set it and open
+`<base>/?token=…`. Prefer a gateway if you have one.
+
+Foundry has no per-user identity in any of these setups — whoever gets in shares
+one Workshop and sees the same builds. If your gateway forwards a username header,
+nothing here reads it.
+
 ---
 
 ## 11. Develop
@@ -689,7 +734,8 @@ rm -rf .pytest_cache .mypy_cache .ruff_cache ./.run spec.md  # clean caches + ou
 | `WORKSHOP_HOST` / `WORKSHOP_PORT` | UI bind address / port | `127.0.0.1` / `8765` |
 | `WORKSHOP_OUTPUT_DIR` | UI build output root | `.run/web` |
 | `WORKSHOP_STATE_DIR` | UI durable state dir (resume) | `WORKSHOP_OUTPUT_DIR/state` |
-| `FOUNDRY_WORKSHOP_TOKEN` | Shared token for UI mutations | off (localhost-only) |
+| `FOUNDRY_WORKSHOP_TOKEN` | Shared token for UI mutations, for a no-proxy LAN bind; the UI sends it only when the page URL carries `?token=…`, so leave it unset behind a gateway | off — no login by default |
+| `FOUNDRY_BASE_PATH` | Mount the Workshop under a sub-path, e.g. `/foundry` | root |
 
 **Long-lived server** (for a Pi/Mac running for days; see the host env presets):
 

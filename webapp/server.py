@@ -150,6 +150,12 @@ _WRITE_DISK = (os.environ.get("WORKSHOP_WRITE_DISK", "").strip().lower()
 # page from POSTing to a localhost workshop (CSRF) even with no token set.
 _AUTH_TOKEN = os.environ.get("FOUNDRY_WORKSHOP_TOKEN") or None
 
+# Session login (webapp/auth.py). ON unless FOUNDRY_AUTH=off: what is behind
+# this door spends real money and executes generated code, so an open default
+# was the wrong way round. The token above still works for scripts and now
+# satisfies the session check too, so automation needs no cookie jar.
+from webapp import auth as _auth
+
 
 def _authorize_mutation(headers: Any, token: str | None) -> str | None:
     """Return a denial reason for a state-changing request, or None if allowed.
@@ -1911,6 +1917,68 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, UnicodeDecodeError):
             return {}
 
+    # -- sign-in ---------------------------------------------------------------
+
+    def _signed_in(self) -> bool:
+        """A valid session cookie, or the shared token a script would send.
+
+        Accepting the token here keeps FOUNDRY_WORKSHOP_TOKEN a complete answer
+        for curl and CI: they were never going to hold a cookie.
+        """
+        if not _auth.enabled():
+            return True
+        if _AUTH_TOKEN:
+            provided = self.headers.get("X-Workshop-Token") or ""
+            if hmac.compare_digest(provided, _AUTH_TOKEN):
+                return True
+        return _auth.valid_session(_auth.session_from_cookies(self.headers.get("Cookie")))
+
+    def _client_addr(self) -> str:
+        return self.client_address[0] if self.client_address else "?"
+
+    def _json_with_session(self, code: int, payload: Any) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Set-Cookie", _auth.cookie_header(_auth.issue_session()))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _login(self) -> None:
+        client = self._client_addr()
+        wait = _auth.throttled(client)
+        if wait:
+            # Same answer whatever the credentials were, so a blocked client
+            # cannot use this to test a password.
+            self._json(429, {"error": f"too many attempts — wait {wait}s"})
+            return
+        body = self._read_json()
+        user = str(body.get("username", "")).strip()
+        password = str(body.get("password", ""))
+        if user != _auth.username() or not _auth.check_password(password):
+            _auth.note_failure(client)
+            # One message for both halves: naming which was wrong tells an
+            # attacker which one to keep working on.
+            self._json(401, {"error": "Wrong username or password."})
+            return
+        _auth.clear_failures(client)
+        self._json_with_session(200, {"must_change": _auth.must_change()})
+
+    def _change_password(self) -> None:
+        body = self._read_json()
+        if not _auth.check_password(str(body.get("current", ""))):
+            _auth.note_failure(self._client_addr())
+            self._json(401, {"error": "Current password is wrong."})
+            return
+        ok, problem = _auth.set_password(str(body.get("new", "")))
+        if not ok:
+            self._json(400, {"error": problem})
+            return
+        # The change bumped the token version, so this request's own cookie is
+        # already stale. Hand back a fresh one rather than bouncing to login.
+        self._json_with_session(200, {"ok": True})
+
     def _serve_static(self, rel: str) -> None:
         rel = rel.lstrip("/") or "index.html"
         target = (_STATIC / rel).resolve()
@@ -1920,6 +1988,9 @@ class Handler(BaseHTTPRequestHandler):
         ctype = {
             ".html": "text/html", ".js": "application/javascript",
             ".css": "text/css", ".png": "image/png", ".ico": "image/x-icon",
+            # A manifest served as octet-stream is silently ignored by the
+            # browser, and the home-screen shortcut falls back to a screenshot.
+            ".webmanifest": "application/manifest+json", ".svg": "image/svg+xml",
         }.get(target.suffix, "application/octet-stream")
         data = target.read_bytes()
         self.send_response(200)
@@ -1931,6 +2002,27 @@ class Handler(BaseHTTPRequestHandler):
     # -- routes -----------------------------------------------------------------
     def do_GET(self) -> None:
         path = self.path.split("?", 1)[0]
+
+        # Everything is behind the login. The sign-in page and the icons it
+        # references are the exceptions — all static, all carrying no state.
+        if not self._signed_in():
+            if path in ("/", "/index.html", "/login.html"):
+                self._serve_static("login.html")
+                return
+            if path in ("/icon.svg", "/icon-180.png", "/icon-192.png",
+                        "/icon-512.png", "/manifest.webmanifest", "/favicon.ico"):
+                self._serve_static(path)
+                return
+            self._json(401, {"error": "sign in"})
+            return
+
+        # Signed in, but still on the seeded password: the POST guard already
+        # refuses every build, so send them somewhere that says why rather than
+        # to a Workshop whose buttons all fail.
+        if _auth.enabled() and _auth.must_change() and path in ("/", "/index.html"):
+            self._serve_static("change-password.html")
+            return
+
         if path.startswith("/api/stream/"):
             self._stream(path.rsplit("/", 1)[-1])
             return
@@ -2199,6 +2291,29 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def do_POST(self) -> None:
+        _p = self.path.split("?", 1)[0]
+        if _p == "/api/login":
+            self._login()
+            return
+        if _p == "/api/logout":
+            self.send_response(204)
+            self.send_header("Set-Cookie", _auth.cookie_header("", max_age=0))
+            self.end_headers()
+            return
+        if not self._signed_in():
+            self._json(401, {"error": "sign in"})
+            return
+        if _p == "/api/password":
+            self._change_password()
+            return
+        # A seeded default password is not a password. Nothing that spends money
+        # or runs generated code happens until it has been replaced.
+        if _auth.enabled() and _auth.must_change() and _p != "/api/password":
+            self._json(403, {"error": "change the default password first"})
+            return
+        return self._do_POST_inner()
+
+    def _do_POST_inner(self) -> None:
         path = self.path.split("?", 1)[0]
         denied = _authorize_mutation(self.headers, _AUTH_TOKEN)
         if denied is not None:
@@ -2702,6 +2817,14 @@ def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
         print("       cp foundry.mac.env.example .env    # Mac  (Linux: foundry.linux.env.example)")
         print("       …then edit .env (token/key) and start again.\n")
     Path(_STATE_DIR).mkdir(parents=True, exist_ok=True)   # durable factory state
+    if _auth.enabled():
+        _auth.ensure_seeded()
+        if _auth.must_change():
+            print(f"\n  🔑 Sign in as {_auth.username()!r} / {_auth.SEED_PASSWORD!r} — "
+                  "you'll be made to change it before any build can start.\n")
+    else:
+        print("\n  ⚠  FOUNDRY_AUTH=off — the Workshop is open to anyone who can "
+              "reach this port, and it spends money.\n")
     _load_persisted()   # rehydrate floors (+ resume any interrupted build) from disk
     if _LOG_SWEEP_S > 0:   # bound RAM on a long-lived server: trim finished logs
         threading.Thread(target=_log_sweeper, daemon=True).start()

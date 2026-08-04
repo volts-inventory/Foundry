@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Foundry Workshop — sign in</title>
+<link rel="icon" type="image/svg+xml" href="/icon.svg" />
+<link rel="apple-touch-icon" sizes="180x180" href="/icon-180.png" />
+<meta name="theme-color" content="#0e1320" />
+<style>
+  :root { --bg:#0e1320; --card:#151b2b; --line:#26304a; --ink:#e6edf3; --muted:#8b97ad; --gold:#ffcf52; --bad:#f85149; }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; display:grid; place-items:center; padding:2rem 1.25rem;
+         background:var(--bg); color:var(--ink);
+         font:16px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  form { width:min(23rem,100%); background:var(--card); border:1px solid var(--line);
+         border-radius:14px; padding:1.6rem 1.5rem; }
+  .logo { font-weight:700; letter-spacing:.18em; color:var(--gold); font-size:.8rem; }
+  h1 { margin:.4rem 0 .3rem; font-size:1.3rem; letter-spacing:-.02em; }
+  .sub { margin:0 0 1.4rem; color:var(--muted); font-size:.875rem; }
+  label { display:block; font-size:.8rem; color:var(--muted); margin-bottom:.3rem; }
+  input { width:100%; font:inherit; padding:.55rem .7rem; margin-bottom:1rem;
+          border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--ink); }
+  input:focus { outline:2px solid var(--gold); outline-offset:-1px; }
+  button { width:100%; font:inherit; font-weight:700; padding:.6rem 1rem; border-radius:8px;
+           border:1px solid var(--gold); background:var(--gold); color:#1a1400; cursor:pointer; }
+  button:hover { filter:brightness(1.08); }
+  button:disabled { opacity:.6; cursor:default; }
+  .err { color:var(--bad); font-size:.85rem; margin:0 0 1rem; min-height:1.2em; }
+  .foot { margin:1.2rem 0 0; color:var(--muted); font-size:.78rem; }
+  .foot strong { color:var(--gold); font-weight:600; }
+</style>
+</head>
+<body>
+<form id="form" autocomplete="on">
+  <div class="logo">FOUNDRY</div>
+  <h1>Workshop</h1>
+  <p class="sub">Sign in to start builds.</p>
+
+  <p class="err" id="err"></p>
+
+  <label for="u">Username</label>
+  <input id="u" name="username" autocomplete="username" autofocus required>
+
+  <label for="p">Password</label>
+  <input id="p" name="password" type="password" autocomplete="current-password" required>
+
+  <button id="go" type="submit">Sign in</button>
+
+  <p class="foot">
+    First time? It's <strong>admin</strong> / <strong>changeme</strong>, and you'll
+    be made to change it before any build can start.
+  </p>
+</form>
+
+<script>
+const form = document.getElementById("form"), err = document.getElementById("err"), go = document.getElementById("go");
+form.onsubmit = async (event) => {
+  event.preventDefault();
+  err.textContent = ""; go.disabled = true; go.textContent = "Checking\u2026";
+  try {
+    const response = await fetch("/api/login", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: document.getElementById("u").value,
+                             password: document.getElementById("p").value }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || ("HTTP " + response.status));
+    location.reload();
+  } catch (e) {
+    err.textContent = e.message; go.disabled = false; go.textContent = "Sign in";
+    document.getElementById("p").value = ""; document.getElementById("p").focus();
+  }
+};
+</script>
+</body>
+</html>

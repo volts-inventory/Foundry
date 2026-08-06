@@ -35,8 +35,10 @@ const GRID = {  // pipeline: product → architecture → engineering(FE/BE/DA) 
 };
 // Pipeline ORDER (the build sequence) — drives the order numerals + the flow path.
 const PIPELINE_ORDER = ["product","architecture","frontend","backend","data","qa","security","gate","vault"];
-// (0,2) = the CTO OFFICE (a real room, see GRID.office); (1,2) = the LOUNGE where idle
-// agents relax. No pipeline work happens in either.
+// (0,2) = the CTO OFFICE (a real room, see GRID.office); (1,2) = the RECEPTION /
+// LOUNGE. No pipeline work happens in either — and nobody is ever SENT to the
+// lounge: every agent lives at their own desk (see "presence" below), so it's the
+// entrance + a furnished break room, not a holding pen for idle staff.
 const LOUNGE_CELL = [1,2], ENTRANCE_CELL = [1,2];
 const ENG_ROOMS = ["frontend","backend","data"];               // engineering discipline rooms
 const ENG_AREA_ROOM = {frontend:"frontend", backend:"backend", data:"data",
@@ -108,6 +110,34 @@ const ROLE_TAG = {
   "SDET":"SDET", "Reviewer":"REVIEWER", "Technical Writer":"WRITER", "AppSec Engineer":"APPSEC",
   "Audit & Compliance":"AUDIT", "Supply-chain Reviewer":"SUPPLY",
 };
+
+// ---- presence: everybody lives at their own desk ---------------------------
+// Nobody is ever herded off to a break room. An agent is ALWAYS at their own
+// workstation; the only thing that changes is their POSTURE:
+//   working  -> turned to the monitor (back of head), typing, code glyphs
+//   off duty -> turned around, settled into an idle MOOD + the odd chat bubble
+// Which group is actually live is read off the CTO — he goes and stands with
+// them (see sendCTO), so "where the boss is" == "where the work is".
+//
+// A mood is stable for the whole idle spell (and per person), so the floor has
+// a recognisable cast: the same one naps, the same one is always on a coffee
+// run. It re-rolls only when they come off the clock again.
+const IDLE_MOODS = ["nap","happy","chat","bored","coffee","tunes","stretch"];
+const IDLE_CHATTER = {
+  nap:    ["zzz...", "five more minutes", "...", "just resting my eyes"],
+  happy:  ["that one shipped clean", "green across the board", "good build :)", "nailed it"],
+  chat:   ["seen the latest diff?", "who owns that module?", "standup after this?",
+           "nice catch earlier", "coffee machine's fixed!"],
+  bored:  ["waiting on the gate...", "nothing queued for me", "*drums on desk*", "sigh",
+           "anyone need a hand?"],
+  coffee: ["coffee run?", "third refill today", "need caffeine", "kettle's on"],
+  tunes:  ["~ headphones on ~", "new playlist, no notes", "~ ~ ~", "this track though"],
+  stretch:["*stretches*", "my back...", "twelve steps today", "standing desk next sprint"],
+};
+// What the CTO says as he arrives to oversee whichever group just went live.
+const CTO_LINES = ["how's it looking?", "keep going, this is good", "what's blocking you?",
+                   "I'll be right here", "show me when it's ready"];
+const pick = (arr)=> arr[Math.floor(Math.random()*arr.length)];
 
 // ---- generated character sprites (our own pixel art) -----------------------
 // route1rodent-style 16x22 GBA RPG sprite: a BIG rounded hair mass (the hero) over
@@ -326,6 +356,9 @@ class FloorScene extends Phaser.Scene {
     this.liveRooms = new Set();      // rooms with a node in-flight (concurrent stages)
     this.workingAgents = new Set();  // named agents whose node is running RIGHT NOW
     this.roomInflight = {};          // room -> count of in-flight nodes (ref-count)
+    this.ctoRoom = null;             // the room the CTO is overseeing = the active group
+    // per-floor offset into IDLE_MOODS so the napper isn't the same person on every floor
+    this._moodSeed = hashStr(this.proj.id || "f") % IDLE_MOODS.length;
     this.buildRooms();
     this.buildGate();
     this.buildChest();
@@ -800,7 +833,8 @@ class FloorScene extends Phaser.Scene {
       const sc = s[(this._sf = (this._sf||0)+1) % s.length];
       if (sc) this.tweens.add({targets:sc, alpha:{from:0.6,to:0.95}, duration:150, yoyo:true});
     }});
-    this.time.addEvent({delay:2600, loop:true, callback:()=>this.mill()});  // idle->lounge safety sweep
+    this.time.addEvent({delay:2600, loop:true, callback:()=>this.deskSweep()});  // stay-at-your-desk sweep
+    this.time.addEvent({delay:1600, loop:true, callback:()=>this.chatter()});    // idle chat bubbles
   }
   blink(a){
     if (!a || !a.eyes) return;
@@ -1026,7 +1060,7 @@ class FloorScene extends Phaser.Scene {
   }
 
   buildAgents(){
-    let li = 0;                                    // global lounge-slot index
+    let li = 0;                                    // global idle-mood slot index
     for (const room in ROSTER){
       const names = ROSTER[room], R = ROOMS[room]; if (!R) continue;
       const cols = Math.min(names.length, 3);
@@ -1046,11 +1080,11 @@ class FloorScene extends Phaser.Scene {
         const rtag = ROLE_TAG[name] || name.slice(0,9).toUpperCase();
         const acc = (kit.accent!=null ? kit.accent : 0x9fb4d8);
         this.pinBadge(a, rtag, acc, true);
-        a.home = {x:hx,y:hy}; a.room = room; a.loungeSlot = li++;
-        // Start visible in the lounge (idle); stages pull each team to its desks.
-        const ls = this.loungeSpot(a.loungeSlot);
-        a.setPosition(ls.x, ls.y).setAlpha(1).setDepth(ls.y);
-        a.seen = true; a.inLounge = true; a.bubble = null;
+        a.home = {x:hx,y:hy}; a.room = room; a.idleSlot = li++;
+        // Everyone starts AT their own desk, off the clock: stages just turn them
+        // round to the monitor. Nobody is ever staged in the lounge.
+        a.setAlpha(1); a.seen = true; a.bubble = null;
+        this.standDown(a);
         // Clickable -> interview this lead (their journal + a question), advisory.
         a.setInteractive(new Phaser.Geom.Rectangle(-8,-15,16,22), Phaser.Geom.Rectangle.Contains);
         a.on("pointerdown", ()=> openInterview(name));
@@ -1068,6 +1102,12 @@ class FloorScene extends Phaser.Scene {
     const c = this.makePerson(this.lobby.cx, this.lobby.standY, kitFor("CTO", hashStr((this.proj.id||'f')+"CTO")));
     c.setScale(1.5).setDepth(900); c.fixedDepth = 900;   // CTO walks the floor -> always on top
     this.pinBadge(c, "CTO", 0xffd95e, true, -26);         // gold badge, above the head
+    // A pulsing gold pool of light under his feet. Everyone else is permanently at a
+    // desk, so HE is the active-group indicator — this makes him findable at a glance.
+    const pool = this.add.ellipse(0, 4, 40, 16, 0xffd95e, 0.34);
+    c.addAt(pool, 0);                                    // under the body (and its shadow)
+    this.tweens.add({targets:pool, scaleX:{from:0.80,to:1.16}, scaleY:{from:0.80,to:1.16},
+      alpha:{from:0.42,to:0.18}, duration:1200, yoyo:true, repeat:-1, ease:"Sine.inOut"});
     this.cto = c;
     this.tweens.add({targets:c.bob, y:-1, duration:380, yoyo:true, repeat:-1, ease:"Sine.inOut"});
   }
@@ -1164,17 +1204,50 @@ class FloorScene extends Phaser.Scene {
     const ph = (k)=> (ENG_ROOMS.includes(k)||k==="engineering") ? "engineering" : k;
     const oi = SEQ.indexOf(ph(prev)), ni = SEQ.indexOf(ph(key));
     if (oi >= 0 && ni > oi) this.deliverWork(prev, key);
-    // Glow EVERY live room (concurrent stages all lit), not just the primary.
-    const lit = (k)=> this.roomLive(k);
-    for (const k in this.roomGlow)
-      this.tweens.add({targets:this.roomGlow[k], fillAlpha:(lit(k)?0.10:0), duration:420});
-    // The CTO VISITS the working group on each phase shift — but never camps in the
-    // gate/vault (those aren't teams). For those (and the lobby) he returns to his office.
+    // The CTO GOES AND STANDS WITH the group that's live — since everyone else is
+    // permanently at their own desk, he's the thing that tells you at a glance WHICH
+    // group is working. He never camps in the gate/vault (not teams): for those, and
+    // for no stage at all, he walks back to his office.
     const TEAM = {product:1,architecture:1,engineering:1,frontend:1,backend:1,data:1,qa:1,security:1};
-    const R = ROOMS[key];
-    if (R && TEAM[key]) this.walkCTO(R.cx, R.standY);
-    else if (this.lobby) this.walkCTO(this.lobby.cx, this.lobby.standY);   // gate/vault/none → office
-    this.staffRoom(key);                 // active team to desks; everyone else to the lounge
+    this.sendCTO(TEAM[key] && ROOMS[key] ? key : null);
+    this.staffRoom(key);                 // the live crew heads-down; everyone else off duty
+  }
+
+  // Walk the CTO to the room he's overseeing (null → back to his office) and mark it.
+  // `ctoRoom` also drives the brightest room glow, so his room reads as THE active one.
+  sendCTO(key){
+    const R = key ? ROOMS[key] : null;
+    // A VIRTUAL stage (engineering) has no room of its own — stand in a live lane, and
+    // let ctoRoom name that REAL room so the glow marks exactly where he is.
+    const T = (R && R.virtual) ? ROOMS[ENG_ROOMS.find(r=>this.roomLive(r)) || "backend"] : R;
+    const prev = this.ctoRoom;
+    this.ctoRoom = T ? T.key : null;
+    this.paintGlow();
+    if (!this.cto || !this.lobby) return;
+    const tx = Math.round(T ? T.cx : this.lobby.cx);
+    const ty = Math.round(T ? T.standY : this.lobby.standY);
+    if (Math.abs(this.cto.x-tx) < 4 && Math.abs(this.cto.y-ty) < 4) return;   // already there
+    this.walkTo(this.cto, tx, ty, ()=>{
+      if (this._dead) return;
+      // overseeing a team → faces up into the room, watching them work; in his own
+      // office he faces the door instead.
+      if (T){ if (this.cto.faceBack) this.cto.faceBack(); }
+      else if (this.cto.faceFront) this.cto.faceFront();
+      if (!T || T.key === prev) return;
+      this.floatText(tx, ty-34, "◆ "+(T.label || T.key), "#ffe6a0", 11);
+      this.showBubble(this.cto, pick(CTO_LINES), 3200, true);
+    });
+  }
+  // Room glow: every LIVE room is lit, and the room the CTO is standing in is lit
+  // brightest — so "where the boss is" is unmistakably "where the work is".
+  paintGlow(){
+    for (const k in this.roomGlow){
+      const g = this.roomGlow[k];
+      const on = this.roomLive(k) ? (k === this.ctoRoom ? 0.20 : 0.10)
+                                  : (k === this.ctoRoom ? 0.12 : 0);
+      this.tweens.killTweensOf(g);          // one fade at a time (restaff can re-paint often)
+      this.tweens.add({targets:g, fillAlpha:on, duration:420});
+    }
   }
 
   // A worker from the just-finished phase carries the "work" package to the next
@@ -1204,27 +1277,10 @@ class FloorScene extends Phaser.Scene {
     });
   }
 
-  // ---- movement: desks <-> lounge -----------------------------------------
-  // What each idle lead does in the lounge — a stable mix by slot: sit, stand, nap.
-  // Every mode is STATIONARY: people walk only with purpose (stage on -> desk,
-  // stage off -> lounge); nobody paces around at random.
-  loungeMode(i){ return ["sit","stand","sleep","stand","sit","stand"][i % 6]; }
-  // Idle agents relax in the LOUNGE (bottom-left) at FIXED spots. Sleepers get the
-  // nap corner (lower-right); everyone else stands in ONE tidy lineup grid sized so
-  // the pinned name badges never overlap: wide columns plus a per-column vertical
-  // stagger (badges are wider than the people under them).
-  loungeSpot(i){
-    const B = cellBox(LOUNGE_CELL[0], LOUNGE_CELL[1]);
-    const mode = this.loungeMode(i);
-    if (mode === "sleep"){
-      const k = Math.floor(i/6) % 3;
-      return { x: B.x + B.w - 36 - k*30, y: B.y + B.h - 24 - k*8, mode };
-    }
-    // j = index among NON-sleepers (slots with i%6===2 nap), so the grid has no gaps.
-    const j = i - Math.floor(i/6) - ((i%6) > 2 ? 1 : 0);
-    const col = j % 4, row = Math.floor(j/4) % 4;
-    return { x: B.x + 30 + col*64, y: B.y + 44 + row*40 + (col%2)*18, mode };
-  }
+  // ---- presence: nobody ever leaves their desk ----------------------------
+  // The idle MOOD for a desk slot — stable per person, offset per floor. This is
+  // the whole cast of off-duty behaviour: one naps, one's happy, one's bored…
+  idleMood(i){ return IDLE_MOODS[(i + (this._moodSeed||0)) % IDLE_MOODS.length]; }
   // shortest path along the "#" corridors: exit to the nearest aisle, run the aisles,
   // then step into the destination. (Within-room moves stay direct — handled in walkTo.)
   corridorRoute(sx,sy,tx,ty){
@@ -1261,30 +1317,41 @@ class FloorScene extends Phaser.Scene {
     };
     step();
   }
-  // Off duty -> walk to the lounge (so a room only ever shows people actually
-  // working that stage; idle leads physically wait it out in the break area).
-  gotoLounge(a){ if (!a || !a.seen) return; a.inLounge = true; a.working = false;
-    if (a.faceFront) a.faceFront(); this.stopDeskIdle(a);
-    const s = this.loungeSpot(a.loungeSlot||0);
-    this.walkTo(a, s.x, s.y, ()=> this.loungeArrive(a, s.mode)); }
-  // Once parked in the lounge, settle IN PLACE: nap (with Zzz) or sit/stand and
-  // breathe. Nobody moves again until their stage calls them back to a desk.
-  loungeArrive(a, mode){
-    if (!a || !a.inLounge) return;
-    this.clearLounge(a);
-    a.loungeBusy = mode;
-    if (mode === "sleep"){ if (a.faceFront) a.faceFront(); this.zzzLoop(a);
+  // Off duty — and they STAY at their own desk. They just swivel round (away from
+  // the monitor) and settle into their mood. Only re-rolls the mood on a genuine
+  // busy->idle transition, so restaff() churn can't make anyone twitch.
+  standDown(a){
+    if (!a || !a.seen || !a.home) return;
+    if (a.idle && !a.working && a.atDesk) return;      // already settled — leave them be
+    a.working = false; a.atDesk = true;
+    this.clearBubble(a, true);
+    a.idle = this.idleMood((a.idleSlot||0) + (a.moodBump = (a.moodBump||0)+1));
+    const settle = ()=> this.idleSettle(a);
+    const here = Math.abs(a.x-a.home.x) < 2 && Math.abs(a.y-a.home.y) < 2;
+    if (here) settle(); else this.walkTo(a, a.home.x, a.home.y, settle);
+  }
+  // Settle IN PLACE at the desk: nappers slump with a slow Zzz, everyone else turns
+  // to face the room and breathes. Nobody walks again until their stage calls them.
+  idleSettle(a){
+    if (!a || a.working || !a.idle) return;
+    this.stopWalk(a);
+    if (a.napTween){ a.napTween.stop(); a.napTween = null; }
+    if (a.faceFront) a.faceFront();                    // swivelled away from the screen
+    this.zzzLoop(a);                                   // gated by restingNow()
+    if (a.idle === "nap"){
+      if (a.bob) a.bob.y = 0;
+      this.stopDeskIdle(a);
       a.napTween = this.tweens.add({targets:a.bob, y:{from:0,to:-1.5}, duration:2200,
-        yoyo:true, repeat:-1, ease:"Sine.inOut"}); }
-    else { if (a.faceFront) a.faceFront(); this.deskIdle(a); }
+        yoyo:true, repeat:-1, ease:"Sine.inOut"});
+    } else this.deskIdle(a);
   }
-  // Is this person at rest RIGHT NOW (so a Zzz should float up)? — ONLY when napping
-  // in the lounge. Desks are for active work; nobody sleeps at their workstation.
-  restingNow(a){
-    if (!a || !a.seen || (a.moveTween && a.moveTween.isPlaying())) return false;
-    if (a.inLounge) return a.loungeBusy === "sleep";
-    return false;                              // at a desk => never show Zzz
+  // Idle RIGHT NOW = parked at their desk, off the clock, not mid-walk.
+  idleNow(a){
+    return !!a && !!a.seen && !a.working && !!a.atDesk && !!a.idle
+      && !(a.moveTween && a.moveTween.isPlaying());
   }
+  // Is this person at rest (so a Zzz should float up)? — only the desk nappers.
+  restingNow(a){ return this.idleNow(a) && a.idle === "nap"; }
   // One persistent Zzz emitter per person; the gate decides when it actually shows.
   zzzLoop(a){
     if (!a || a.zzzEv) return;
@@ -1298,19 +1365,20 @@ class FloorScene extends Phaser.Scene {
         ease:"Sine.out", onComplete:()=>t.destroy()});
     }});
   }
-  clearLounge(a){
+  // Drop the idle mood + its animation (called when someone goes ON the clock).
+  clearIdle(a){
     if (!a) return;
-    a.loungeBusy = null;
+    a.idle = null;
     if (a.napTween){ a.napTween.stop(); a.napTween = null; if (a.bob) a.bob.y = 0; }
     this.stopDeskIdle(a);   // the Zzz emitter (a.zzzEv) is PERSISTENT — gated by restingNow
   }
   gotoDesk(a){ this.deskRest(a, true); }
-  // Park a person at their desk. ``working`` true => their stage is active (heads-down,
-  // no Zzz). Desks are for ACTIVE work only — anyone whose stage is off belongs in the
-  // lounge (staffRoom routes them there), so ``working:false`` is just a transient state.
+  // Put a person to WORK at their desk: heads-down at the monitor, no mood, no Zzz.
+  // Everyone is at their desk either way (standDown is the off-duty half of this) —
+  // ``working`` only decides which way they're facing and whether they're typing.
   deskRest(a, working, busy){
     if (!a || !a.home) return;
-    a.working = working; a.inLounge = false; this.clearLounge(a);
+    a.working = working; a.atDesk = true; this.clearIdle(a); this.clearBubble(a, true);
     if (!a.seen){ a.seen = true; a.setAlpha(1); }
     this.zzzLoop(a);                       // idempotent; the gate shows it only when idle
     const settle = ()=>{
@@ -1366,7 +1434,7 @@ class FloorScene extends Phaser.Scene {
       if (!a.seen) continue;
       const rm = AGENT_ROOM[name];
       const onDesk = this.roomLive(rm) && (this.workingAgents.has(name) || !namedIn(rm));
-      if (onDesk) this.deskRest(a, true); else this.gotoLounge(a);
+      if (onDesk) this.deskRest(a, true); else this.standDown(a);
     }
     // Per-lane lead/IC seating from the distinct telemetry: each discipline room's LEAD
     // sprite sits while its lane's lead node runs ("Frontend Lead" …), its IC sprites
@@ -1383,29 +1451,47 @@ class FloorScene extends Phaser.Scene {
       for (const s of (group||[])){
         if (!s || !s.bob) continue;        // group arrays also hold workstations (no .bob)
         if (this.roomLive(s.room) && wants(s.room)) this.deskRest(s, true, true);
-        else this.gotoLounge(s);
+        else this.standDown(s);
       }
     };
     seat(this.techLeadGroup, leadUp);      // each lane's LEAD works while its lead node runs
     seat(this.poolGroup, engUp);           // each lane's ICs work while its engineer node runs
+    this.paintGlow();                      // and re-light the rooms for the new live set
   }
-  toLounge(){   // everyone hangs out (checkpoints / done)
-    for (const [,a] of this.agents) if (a.seen) this.gotoLounge(a);
+  // Every person on the floor (named leads + the engineering lanes), one iterator.
+  *everyone(){
+    for (const [,a] of this.agents) if (a && a.seen) yield a;
     for (const s of [...(this.poolGroup||[]), ...(this.techLeadGroup||[])])
-      if (s && s.bob) this.gotoLounge(s);
+      if (s && s.bob && s.seen) yield s;    // the group arrays also hold workstations
   }
-  mill(){   // NO idle wandering — this sweep is only the desk->lounge safety net:
-    // anyone idle who somehow ended up at a desk walks to the lounge, so desks
-    // are only ever occupied by people actively working their stage.
-    const drift = (a)=>{ if (!a || !a.seen || (a.moveTween && a.moveTween.isPlaying())) return;
-      if (!a.inLounge && !a.working) this.gotoLounge(a); };
-    for (const [,a] of this.agents) drift(a);
-    for (const s of [...(this.poolGroup||[]), ...(this.techLeadGroup||[])]) drift(s);
+  standDownAll(){   // whole floor off the clock (checkpoints / done) — still at their desks
+    for (const a of this.everyone()) this.standDown(a);
   }
-
-  walkCTO(tx, ty){   // routes along the corridors like everyone else
-    if (!this.cto) return;
-    this.walkTo(this.cto, tx, (ty==null ? this.cto.y : ty));
+  deskSweep(){   // NOBODY roams: the sweep just walks anyone off-duty back to their own
+    // desk if some animation left them adrift, and re-settles anyone with no mood.
+    for (const a of this.everyone()){
+      if (a.working || (a.moveTween && a.moveTween.isPlaying())) continue;
+      if (!a.home) continue;
+      const away = Math.abs(a.x-a.home.x) > 2 || Math.abs(a.y-a.home.y) > 2;
+      if (away || !a.idle){ a.idle = null; this.standDown(a); }
+    }
+  }
+  // Ambient chat: every tick, ONE off-duty person may float a bubble that matches
+  // their mood — the nappers mumble, the bored sigh, the happy ones gloat. Capped
+  // and randomly skipped so the floor murmurs instead of shouting in unison, and it
+  // never speaks over a real telemetry line (agentSay owns those bubbles).
+  chatter(){
+    if (this._dead || !this.sys.isVisible()) return;    // only the floor you're looking at
+    const pool = [];
+    let live = 0;
+    for (const a of this.everyone()){
+      if (a.bubble) live++;
+      else if (this.idleNow(a)) pool.push(a);
+    }
+    if (!pool.length || live >= 4) return;              // a murmur, never a shouting match
+    if (Math.random() < 0.25) return;                   // uneven cadence, not a metronome
+    const a = pick(pool);
+    this.showBubble(a, pick(IDLE_CHATTER[a.idle] || IDLE_CHATTER.chat), 2800, true);
   }
 
   reveal(name){
@@ -1431,13 +1517,30 @@ class FloorScene extends Phaser.Scene {
   agentSay(name, text){
     const a = this.reveal(name); if (!a) return;
     this.agentWork(name);
-    if (a.bubble){ a.bubble.destroy(); a.bubble = null; }
-    if (a.bubbleTimer){ a.bubbleTimer.remove(); a.bubbleTimer = null; }
+    this.showBubble(a, text, 5200, false);   // real telemetry — outranks idle chatter
+  }
+
+  // Show a speech bubble over anyone (agents, engineers, the CTO). `ambient` marks it
+  // as idle flavour: ambient chatter never overwrites a real line, and is dropped the
+  // moment its owner is called back to work.
+  showBubble(a, text, ms, ambient){
+    if (!a || this._dead) return;
+    if (ambient && a.bubble) return;                        // don't talk over what's up
+    this.clearBubble(a);
     a.bubble = this.makeBubble(a, text);
-    a.bubbleTimer = this.time.delayedCall(5200, ()=>{
-      if (a.bubble){ this.tweens.add({targets:a.bubble, alpha:0, duration:250,
-        onComplete:()=>{ if(a.bubble){a.bubble.destroy(); a.bubble=null;} }}); }
+    a.bubbleAmbient = !!ambient;
+    a.bubbleTimer = this.time.delayedCall(ms || 5200, ()=>{
+      a.bubbleTimer = null;
+      if (!a.bubble) return;
+      this.tweens.add({targets:a.bubble, alpha:0, duration:250,
+        onComplete:()=>{ if (a.bubble){ a.bubble.destroy(); a.bubble = null; } }});
     });
+  }
+  clearBubble(a, ambientOnly){
+    if (!a || !a.bubble) return;
+    if (ambientOnly && !a.bubbleAmbient) return;            // leave a real line alone
+    if (a.bubbleTimer){ a.bubbleTimer.remove(); a.bubbleTimer = null; }
+    a.bubble.destroy(); a.bubble = null; a.bubbleAmbient = false;
   }
 
   makeBubble(a, text){
@@ -1621,15 +1724,11 @@ class FloorScene extends Phaser.Scene {
         } else {
           this.pinBadge(s, tag, p.color, false);               // every IC labelled too
         }
-        s.home={x,y}; s.room=rk; s.loungeSlot=slot++; s.seen=true; s.inLounge=false;
-        s.working = this.roomLive(rk);
+        s.home={x,y}; s.room=rk; s.idleSlot=slot++; s.seen=true; s.atDesk=true;
         this.zzzLoop(s);
-        if (s.working) this.startWalk(s);
-        else {                                 // not on the clock -> spawn in the lounge
-          const ls=this.loungeSpot(s.loungeSlot);
-          s.inLounge=true; s.setPosition(ls.x, ls.y).setDepth(ls.y);
-          this.loungeArrive(s, ls.mode);
-        }
+        // Spawn AT the desk either way — heads-down if this lane is live, otherwise
+        // turned round with an idle mood.
+        if (this.roomLive(rk)) this.deskRest(s, true, true); else this.standDown(s);
         (p.lead?this.techLeadGroup:this.poolGroup).push(s, ws);
       };
       // ONE consistent desk grid for every room: centred columns, first row well BELOW
@@ -1659,15 +1758,10 @@ class FloorScene extends Phaser.Scene {
       const k=poolKit(i);
       const ws=this.makeWorkstation(x, y+16, k.accent);
       const s=this.makePerson(x, y, k); s.setScale(1.4).setDepth(y).setAlpha(0.96);
-      s.home={x,y}; s.room="backend"; s.loungeSlot=12+i; s.seen=true; s.inLounge=false;
-      s.working = this.roomLive("backend");
+      s.home={x,y}; s.room="backend"; s.idleSlot=12+i; s.seen=true; s.atDesk=true;
       this.zzzLoop(s);
-      if (s.working) this.startWalk(s);
-      else {                                   // not on the clock -> spawn in the lounge
-        const ls=this.loungeSpot(s.loungeSlot);
-        s.inLounge=true; s.setPosition(ls.x, ls.y).setDepth(ls.y);
-        this.loungeArrive(s, ls.mode);
-      }
+      // At the desk either way: heads-down while backend is live, else an idle mood.
+      if (this.roomLive("backend")) this.deskRest(s, true, true); else this.standDown(s);
       this.poolGroup.push(s, ws);
     }
   }
@@ -1861,7 +1955,7 @@ function routeEvent(floor, ev){
         F.cp = Object.assign({}, F.cp, {boundary: ev.boundary, request: ev.request || ""});
       if (Array.isArray(ev.journal)) F.journal = ev.journal;
       renderElevator();
-      if (S){ S.spotlightCTO(true); S.toLounge(); }   // team hangs out while CTO decides
+      if (S){ S.spotlightCTO(true); S.standDownAll(); }   // whole floor off duty while the CTO decides
       if (isActive) showCheckpoint(F); break;
     case "resolved": {
       F.awaiting = false; renderElevator();

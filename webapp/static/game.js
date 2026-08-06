@@ -2043,7 +2043,9 @@ function updateLiveDot(){
   if (!F || F.status !== "running"){ el.className="log-live"; el.textContent=""; return; }
   const fresh = F.lastBeat && (Date.now() - F.lastBeat) < 40000;
   el.className = "log-live " + (fresh ? "on" : "stale");
-  el.textContent = fresh ? "LIVE" : "RECONNECTING…";
+  // Healthy = just the pulsing dot (the ● LIVE tab right below already says the
+  // word, and two "LIVE"s side by side read as one broken label). Trouble is loud.
+  el.textContent = fresh ? "" : "RECONNECTING…";
   el.title = fresh ? "Stream connected — quiet stretches are the model thinking."
                    : "No data for 40s — check the connection / server.";
 }

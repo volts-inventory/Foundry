@@ -19,6 +19,10 @@
 <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
+  <!-- ONE grid, two arrangements (see style.css):
+         desktop  → [hud] over [elevator | game | log]
+         portrait → [game] over [control bar] over [log]  (the display comes first,
+                    the chrome sits between it and the quest log) -->
   <div id="app">
     <header id="hud">
       <div class="hud-left">
@@ -27,31 +31,36 @@
         <span class="proj" id="proj-tag">no project</span>
         <span class="mode" id="mode-tag"></span>
       </div>
+      <!-- stage / per-service chips: their own group so narrow screens can give
+           them a single horizontally-scrolling row instead of wrapping to three -->
+      <div class="hud-mid"><span class="gates-mini" id="gates-mini"></span></div>
       <div class="hud-right">
-        <span class="gates-mini" id="gates-mini"></span>
+        <!-- `.lbl-long` is dropped on narrow screens so both actions still fit on
+             one line beside the floor tag (⌥ REPO · ▶ NEW). -->
         <button id="output-btn">⌥ REPO</button>
-        <button id="new-btn">▶ NEW PROJECT</button>
+        <button id="new-btn">▶ NEW<span class="lbl-long"> PROJECT</span></button>
       </div>
     </header>
 
-    <main id="stage">
-      <!-- Elevator: one button per floor (project). Click to ride to that floor. -->
-      <nav id="elevator" aria-label="floors">
-        <div class="el-head">▲<br>EL<br>▼</div>
-        <div id="el-floors"></div>
-      </nav>
-      <div id="game"></div>
-      <div id="wipe" aria-hidden="true"></div>
-      <aside id="log-panel">
-        <div class="log-title">QUEST LOG <span id="log-live" class="log-live"></span></div>
-        <div class="log-tabs">
-          <button class="log-tab sel" data-tab="live">● Live</button>
-          <button class="log-tab" data-tab="progress">≡ Progress</button>
-        </div>
-        <ul id="log"></ul>
-        <ul id="progress" style="display:none"></ul>
-      </aside>
-    </main>
+    <!-- Elevator: one button per floor (project). Click to ride to that floor. -->
+    <nav id="elevator" aria-label="floors">
+      <div class="el-head">▲<br>EL<br>▼</div>
+      <div id="el-floors"></div>
+    </nav>
+
+    <!-- The wipe lives INSIDE the display box, so a floor change sweeps the floor
+         itself and never the surrounding chrome. -->
+    <main id="game"><div id="wipe" aria-hidden="true"></div></main>
+
+    <aside id="log-panel">
+      <div class="log-title">QUEST LOG <span id="log-live" class="log-live"></span></div>
+      <div class="log-tabs">
+        <button class="log-tab sel" data-tab="live">● Live</button>
+        <button class="log-tab" data-tab="progress">≡ Progress</button>
+      </div>
+      <ul id="log"></ul>
+      <ul id="progress" style="display:none"></ul>
+    </aside>
   </div>
 
   <!-- New-project dialog -->

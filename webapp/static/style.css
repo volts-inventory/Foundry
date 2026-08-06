@@ -18,10 +18,20 @@ body{
 }
 /* 100dvh tracks iOS Safari's REAL visible viewport (100vh includes the collapsed
    URL bar and pushes the bottom of the app off-screen); safe-area padding keeps
-   the chrome clear of the notch / home indicator with viewport-fit=cover. */
-#app{display:flex;flex-direction:column;height:100vh;height:100dvh;
+   the chrome clear of the notch / home indicator with viewport-fit=cover.
+   ONE grid holds the four panes (hud / elevator / game / log) so a media query can
+   re-arrange them by NAME instead of reordering the DOM: desktop hangs the hud
+   across the top of a three-column stage, portrait stacks the display first with
+   the controls tucked between it and the quest log. */
+#app{display:grid;height:100vh;height:100dvh;
+  grid-template-columns:66px minmax(0,1fr) 264px;
+  grid-template-rows:auto minmax(0,1fr);
+  grid-template-areas:
+    "hud hud  hud"
+    "el  game log";
   padding:env(safe-area-inset-top) env(safe-area-inset-right)
           env(safe-area-inset-bottom) env(safe-area-inset-left)}
+#hud{grid-area:hud} #elevator{grid-area:el} #game{grid-area:game} #log-panel{grid-area:log}
 
 /* ---- HUD (themed: pixel frame + gold accent) ---- */
 #hud{
@@ -35,13 +45,19 @@ body{
 /* hud-left absorbs the slack and lets the project title ellipsis; hud-right
    (buttons) never shrinks. Keeps everything on one row from ~820px up. */
 .hud-left{display:flex;align-items:center;gap:12px;min-width:0;flex:1 1 auto}
+.hud-mid{display:flex;align-items:center;min-width:0;flex:0 1 auto;
+  overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
+.hud-mid::-webkit-scrollbar{display:none}
 .hud-right{display:flex;align-items:center;gap:12px;flex:0 0 auto}
 .logo{font-weight:bold;color:var(--gold);font-size:16px;white-space:nowrap;text-shadow:0 0 8px rgba(255,207,82,.4), 2px 2px 0 #0a0f1c}
 .elevator{color:var(--blue);border:2px solid var(--blue);border-radius:4px;padding:2px 8px;font-weight:bold;white-space:nowrap}
 .proj{color:var(--ink);max-width:46vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .mode{color:var(--dim);white-space:nowrap}
-.gates-mini{display:flex;gap:5px}
-.gates-mini .g{padding:1px 6px;border-radius:3px;border:2px solid var(--line);font-size:11px}
+/* Stage / per-service chips: ONE line that scrolls sideways when a long milestone
+   ladder outgrows the bar — never wrapping (a wrapped "0/6 ✓" tally reads broken). */
+.gates-mini{display:flex;gap:5px;flex-wrap:nowrap}
+.gates-mini .g{padding:1px 6px;border-radius:3px;border:2px solid var(--line);font-size:11px;
+  white-space:nowrap}
 .gates-mini .g.pass{border-color:var(--green);color:var(--green)}
 .gates-mini .g.fail{border-color:var(--red);color:var(--red)}
 /* platform per-service chips, coloured by lifecycle state */
@@ -69,9 +85,9 @@ button.warn{background:#5a4a18;border-color:var(--gold);color:#fff6da}
 #new-btn{background:#5a4a18;border-color:var(--gold);color:#fff6da}
 
 /* ---- Stage ---- */
-#stage{display:flex;flex:1 1 auto;min-height:0;position:relative}
-/* Zelda-style screen wipe on floor change (chunky stepped sweep) */
-#wipe{position:absolute;top:0;bottom:0;left:66px;right:264px;background:#0a0f1c;
+/* Zelda-style screen wipe on floor change (chunky stepped sweep). It's a child of
+   the display box, so it covers exactly the floor — never the log or the chrome. */
+#wipe{position:absolute;inset:0;background:#0a0f1c;
   transform:scaleX(0);transform-origin:left;pointer-events:none;z-index:40}
 #wipe.go{animation:wipe .42s steps(9) forwards}
 @keyframes wipe{
@@ -83,8 +99,8 @@ button.warn{background:#5a4a18;border-color:var(--gold);color:#fff6da}
 
 /* ---- Elevator (floor switcher) ---- */
 #elevator{
-  flex:0 0 66px;background:var(--panel);border-right:3px solid var(--line);
-  display:flex;flex-direction:column;min-height:0;
+  background:var(--panel);border-right:3px solid var(--line);
+  display:flex;flex-direction:column;min-height:0;min-width:0;
 }
 .el-head{
   text-align:center;color:var(--blue);font-size:10px;font-weight:bold;line-height:1.25;
@@ -117,18 +133,18 @@ button.warn{background:#5a4a18;border-color:var(--gold);color:#fff6da}
 .el-btn.hub:hover{color:#fff;border-color:var(--blue)}
 .el-btn.hub.active{color:var(--gold);border-color:var(--gold);background:#2a2410}
 #game{
-  flex:1 1 auto;min-width:0;height:100%;display:flex;
+  position:relative;min-width:0;min-height:0;display:flex;
   align-items:center;justify-content:center;background:#0a0f1c;overflow:hidden;
 }
 #game canvas{
   image-rendering:pixelated;image-rendering:crisp-edges;max-width:100%;max-height:100%;
 }
 #log-panel{
-  flex:0 0 264px;width:264px;min-width:0;max-width:264px;
+  min-width:0;min-height:0;
   background:linear-gradient(180deg,#161d31 0%,#10182a 100%);
   border-left:3px solid var(--gold);
   box-shadow:inset 4px 0 0 rgba(0,0,0,.3);
-  display:flex;flex-direction:column;min-height:0;
+  display:flex;flex-direction:column;
 }
 .log-title{padding:8px 12px;border-bottom:2px solid var(--gold);color:var(--gold);
   background:rgba(255,207,82,.06);text-shadow:1px 1px 0 #0a0f1c;
@@ -143,9 +159,13 @@ button.warn{background:#5a4a18;border-color:var(--gold);color:#fff6da}
 /* two views share the list styling: LIVE (blow-by-blow) and PROGRESS (per-stage skim) */
 .log-tabs{display:flex;flex:0 0 auto;border-bottom:2px solid var(--gold);
   background:rgba(255,207,82,.04)}
-.log-tab{flex:1;padding:6px 8px;background:none;border:none;cursor:pointer;
+/* square, flush tabs: they inherit from `button`, so the radius + drop shadow have
+   to be reset or the 2px underline renders as a rounded stub poking below the bar. */
+.log-tab{flex:1;padding:6px 8px;background:none;border:none;border-radius:0;
+  box-shadow:none;cursor:pointer;
   font-family:inherit;font-size:10px;letter-spacing:1px;text-transform:uppercase;
   color:var(--dim);border-bottom:2px solid transparent;margin-bottom:-2px}
+.log-tab:active{transform:none;box-shadow:none}
 .log-tab:hover{color:var(--ink)}
 .log-tab.sel{color:var(--gold);border-bottom-color:var(--gold)}
 #log,#progress{list-style:none;margin:0;padding:8px 10px;overflow-y:auto;flex:1 1 auto;
@@ -407,52 +427,80 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
 #limit-toast button{padding:2px 8px;font-size:11px;min-height:0}
 
 /* ---- Mobile / narrow-screen layout --------------------------------------- */
-/* Stack the desktop three-pane (elevator | game | log) into a column: a
-   horizontal floor strip on top, the game in the middle (canvas auto-scales via
-   Phaser Scale.FIT), and a short quest-log drawer at the bottom.
-   PORTRAIT only — a rotated phone (e.g. iPhone landscape is 844-932px wide, so
-   it clears this width test) keeps the row layout and gets the compact-landscape
-   tweaks below instead; stacking three rows into ~390px of height is unusable. */
+/* Portrait phones get a different ARRANGEMENT, not just a squeeze:
+     ┌──────────────┐
+     │   the floor  │  the display leads — sized to the canvas aspect, so there is
+     ├──────────────┤  no letterbox and no dead black band around it
+     │ control bar  │  floor · project · REPO/NEW  +  stage chips  +  floor pills
+     ├──────────────┤  (mid-screen = thumb reach, and it separates game from log)
+     │  quest log   │  everything left over — the log is what you actually read
+     └──────────────┘
+   PORTRAIT only — a rotated phone (iPhone landscape is 844-932px wide, so it
+   clears this width test) keeps the desktop rows and gets the compact-landscape
+   tweaks below; stacking three bands into ~390px of height is unusable. */
 @media (max-width: 820px) and (orientation: portrait){
-  #hud{flex-wrap:wrap;gap:6px 10px;padding:6px 10px;font-size:11px}
-  .hud-left,.hud-right{flex-wrap:wrap;gap:8px}
-  /* content-sized flex-basis never wraps its children — pin the right cluster
-     (stage chips + buttons) to the row width so it wraps instead of overflowing */
-  .hud-right{flex:1 1 100%;min-width:0;justify-content:flex-start}
-  .gates-mini{flex-wrap:wrap}
-  .logo{font-size:14px}
-  .proj{max-width:60vw;font-size:11px}   /* truncates with ellipsis (already set) */
-  #new-btn{padding:6px 10px}
+  #app{
+    grid-template-columns:minmax(0,1fr);
+    grid-template-rows:auto auto auto minmax(0,1fr);
+    grid-template-areas:"game" "hud" "el" "log";
+  }
 
-  #stage{flex-direction:column}
+  /* The display: exactly the canvas aspect (Phaser Scale.FIT then fills it edge to
+     edge), so the old centred-with-black-bars gap is gone. Capped so a short phone
+     still leaves room for the log. */
+  #game{width:100%;aspect-ratio:1280/840;max-height:46dvh;
+    border-bottom:3px solid var(--gold)}
 
-  /* elevator: vertical rail -> horizontal scrollable strip on top */
+  /* ---- the control bar: hud rows + floor pills read as ONE band ----
+     row 1  FOUNDRY · FLOOR 2 · r3            [⌥] [▶ NEW]
+     row 2  the request line, ellipsised      · gated · mock
+     row 3  stage chips (scrolls sideways)
+     row 4  floor pills (scrolls sideways)                                     */
+  #hud{
+    display:grid;grid-template-columns:minmax(0,1fr) auto;
+    grid-template-areas:"id act" "chips chips";
+    align-items:center;gap:5px 10px;padding:7px 10px 6px;font-size:11px;
+    border-bottom:none;box-shadow:none;
+  }
+  .hud-left{grid-area:id;gap:4px 8px;flex-wrap:wrap}
+  .hud-right{grid-area:act;justify-self:end;gap:7px}
+  /* stage / per-service chips: ONE horizontally scrolling line, so a 12-milestone
+     ladder can't grow the bar to three rows */
+  .hud-mid{grid-area:chips;-webkit-overflow-scrolling:touch}
+  .hud-mid:has(.gates-mini:empty){display:none}   /* no chips -> no empty row */
+  .logo{font-size:13px}
+  /* the request gets the identity block's whole second line to ellipsise in */
+  .proj{flex:1 1 100%;max-width:none;font-size:11px;color:var(--dim)}
+  /* `· gated · mock` is static per floor and the least useful thing in the bar —
+     dropping it is what keeps this to two lines instead of three. It's still on the
+     desktop bar and in the build dialog. */
+  .mode{display:none}
+  #hud button{padding:7px 9px;font-size:11px}
+  .lbl-long{display:none}                     /* ⌥ REPO -> ⌥ , NEW PROJECT -> NEW */
+
+  /* elevator: vertical rail -> horizontal scrolling strip. No panel background or
+     top border, so it reads as the last row OF the bar rather than a second bar. */
   #elevator{
-    flex:0 0 auto;width:100%;flex-direction:row;
-    border-right:none;border-bottom:3px solid var(--line);overflow-x:auto;overflow-y:hidden;
+    flex-direction:row;background:none;border-right:none;
+    border-top:1px solid rgba(160,190,255,.10);border-bottom:3px solid var(--gold);
+    overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;
   }
   .el-head{display:none}
-  #el-floors{flex-direction:row;padding:6px 8px;gap:6px}
-  .el-btn{padding:6px 10px;white-space:nowrap}
+  #el-floors{flex-direction:row;padding:5px 8px;gap:6px}
+  .el-btn{padding:5px 11px;white-space:nowrap}
   .el-btn .fl-no{display:inline;font-size:13px}
 
-  /* game gets the main area; log becomes a bottom drawer. The log's height must
-     be a FIRM flex-basis — with basis:auto the game's flex-grow swallows all the
-     slack and the log collapses to just its title bar. */
-  #game{flex:1 1 auto;min-height:0}
-  #log-panel{
-    flex:0 0 clamp(120px,26vh,260px);width:100%;max-width:none;max-height:none;
-    border-left:none;border-top:3px solid var(--line);
-  }
-  #log{flex:1 1 auto;min-height:0}
+  /* the log owns the rest of the screen (no fixed drawer height any more), and its
+     own chrome is trimmed to one thin title line + the tabs */
+  #log-panel{border-left:none;border-top:none}
+  .log-title{padding:4px 10px;font-size:10px}
+  .log-tab{padding:8px 8px}                   /* touch target, minus the title bulk */
+  #log,#progress{font-size:12px;padding:7px 10px}
 
   /* file browser stacks: list above, viewer below */
   .files-body{flex-direction:column;height:auto}
   #files-list{flex:0 0 auto;max-height:22vh}
   #files-view{min-height:30vh}
-
-  /* the floor-change wipe spans the full width (no side rails in this layout) */
-  #wipe{left:0;right:0}
 
   /* dialogs: use (almost) the full phone width and trim the padding — the pixel
      font is chunky, so every horizontal pixel counts on a 390px screen */
@@ -460,21 +508,26 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
   .dialog h2{font-size:15px;margin-bottom:10px}
 }
 
+/* Very small phones (≤360px): the wordmark is the first thing to go — the FLOOR
+   chip is identity enough once the bar is this tight. */
+@media (max-width: 360px) and (orientation: portrait){
+  .logo{display:none}
+}
+
 /* ---- Compact landscape (phone rotated: plenty of width, ~390px of height) --- */
 /* Keep the desktop row layout (elevator | game | log) but slim every band of
    chrome so the floor itself gets the height. */
 @media (max-height: 520px) and (orientation: landscape){
+  #app{grid-template-columns:54px minmax(0,1fr) 190px}
   #hud{padding:4px 10px;font-size:11px;gap:8px}
   .logo{font-size:13px}
+  .mode{display:none}          /* static per floor — the chips need the width more */
   .elevator{padding:1px 6px}
   #hud button{padding:4px 8px;font-size:11px}
-  #elevator{flex:0 0 54px}
   .el-btn{padding:5px 3px;font-size:10px}
   .el-btn .fl-no{font-size:13px}
-  #log-panel{flex:0 0 190px;width:190px;max-width:190px}
   .log-title{padding:5px 10px;font-size:11px}
   #log{font-size:11px;padding:6px 8px}
-  #wipe{left:54px;right:190px}
   /* dialogs scroll inside ~390px of height — trim the chrome so more form fits */
   .dialog{padding:12px 16px;max-height:96vh;max-height:96dvh}
   .dialog h2{font-size:15px;margin-bottom:8px}

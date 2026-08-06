@@ -1955,7 +1955,8 @@ function routeEvent(floor, ev){
         if (pa){ S.hop(pa,1); const R=ROOMS[ev.room]; if(R) S.burst(R.cx, R.floorY+20, [0xffd95e,0xffffff], 8); } }
       logArtifact(F, ev); break;   // same-kind artifacts collapse into one expandable row
     case "gate":
-      F.gates[ev.name] = {status:ev.status, attested:ev.attested, advisory:ev.advisory};
+      F.gates[ev.name] = {status:ev.status, attested:ev.attested, advisory:ev.advisory,
+                          run_against:ev.run_against||""};
       if (S){ S.setGate(ev.name, F.gates[ev.name]);
         const g=S.gateGeom; if(g){ const col=ev.status==="pass"?0x5ddc7a:0xff5d6c;
           S.ring(g.cx,(g.atop+g.abot)/2,col); S.burst(g.cx,(g.atop+g.abot)/2,[col,0xffffff],8); } }
@@ -1971,7 +1972,11 @@ function routeEvent(floor, ev){
     case "files":
       break;   // file count is read live from the repo view, not cached on F
     case "checkpoint": {
-      F.cp = {title:ev.title, summary:ev.summary, boundary:ev.boundary};
+      // `phase`/`route`/`state_sha` are the pause's provenance (WHERE in the pipeline,
+      // WHICH state); `actions` is the per-button consequence copy from the server.
+      F.cp = {title:ev.title, summary:ev.summary, boundary:ev.boundary,
+              phase:ev.phase||"", route:ev.route||"", state_sha:ev.state_sha||"",
+              actions:ev.actions||null};
       // Stage outcome -> the Progress tab as a COLLAPSIBLE row: the summary states what
       // was completed (the artifact breakdown), and expanding lists it + the agents'
       // journal notes (what specifically each lead produced) + the raw count.
@@ -1989,8 +1994,14 @@ function routeEvent(floor, ev){
     }
     case "await_decision":
       F.awaiting = true; F.cpIndex = ev.checkpoint;
-      // AI expert advisors (gated release checkpoint): ride into the modal.
-      F.cp = Object.assign({}, F.cp, {advisors: ev.advisors || []});
+      // AI expert advisors (gated release checkpoint): ride into the modal. The
+      // NOTE says why the panel is absent when it is — an empty panel must not read
+      // as "everyone approved". `spend` is the advisory cost/elapsed context.
+      F.cp = Object.assign({}, F.cp, {advisors: ev.advisors || [],
+                                      advisorsNote: ev.advisors_note || "",
+                                      spend: ev.spend || null,
+                                      // the stage's artifacts are frozen at the pause
+                                      arts: (F.stageArts || []).slice()});
       // Autopilot PROPOSAL: carry the panel's request so the modal offers an edit box.
       if (ev.boundary === "autopilot_proposal")
         F.cp = Object.assign({}, F.cp, {boundary: ev.boundary, request: ev.request || ""});
@@ -2214,6 +2225,7 @@ function logAct(F, ev){
 function logArtifact(F, ev){
   const base=artBase(ev.label), agent=ev.agent||"(system)", detail=ev.detail||"";
   (F.stageArts=F.stageArts||[]).push({kind:ev.kind||base, base, label:ev.label, agent, detail});
+  if((ev.kind||"")==="feature_diff") F.hasCode=true;   // code exists -> the checkpoint can offer to show it
   const g=agentBox(F, agent);
   g.items.push({base, label:ev.label, detail});
   if(F.floor===ACTIVE) refreshAgentBox(g);
@@ -2444,10 +2456,197 @@ function renderElevator(){
 }
 
 // ---- checkpoint modal (per active floor) -----------------------------------
+// The dialog's job is not to announce a pause — it is to hand over enough evidence
+// to answer "continue or not?" without leaving it. Everything below is already in
+// hand when the pause fires (gate verdicts, the agents' own concerns, each
+// artifact's content one-liner); the dialog used to drop all of it and show one
+// sentence. Order is by decisiveness: gates, then flags, then what landed.
+
+// "4m 12s" / "1h 06m" — an elapsed count a human reads at a glance.
+function fmtDur(s){
+  s = Math.max(0, Math.round(Number(s)||0));
+  if (s < 60) return s+"s";
+  const m = Math.floor(s/60), r = s%60;
+  if (m < 60) return m+"m "+String(r).padStart(2,"0")+"s";
+  return Math.floor(m/60)+"h "+String(m%60).padStart(2,"0")+"m";
+}
+// "12.4k" — token counts, short.
+function fmtNum(n){
+  n = Number(n)||0;
+  return n >= 1000 ? (n/1000).toFixed(n >= 10000 ? 0 : 1)+"k" : String(n);
+}
+// Does an artifact's content one-liner describe a NON-ZERO problem? The details are
+// generated strings ("3 failed", "severity high — 2 finding(s)", "0 policy
+// violation(s)"), so a zero count must not be flagged as trouble.
+function artIsRisk(detail){
+  const d = String(detail||"").toLowerCase();
+  if (/\b0 (failed|finding|policy violation|residual)/.test(d)) return false;
+  if (/\b([1-9]\d*) (failed|finding|policy violation)/.test(d)) return true;
+  return /severity (high|critical)/.test(d);
+}
+function chip(parent, text, cls){
+  const s = document.createElement("span");
+  s.className = "cp-chip" + (cls ? " "+cls : "");
+  s.textContent = text;
+  parent.appendChild(s);
+  return s;
+}
+// Cost + elapsed for the work behind THIS pause (advisory; the server meters it).
+// `shared` means other builds ran concurrently against the one global egress, so the
+// token figure is an upper bound — say so rather than quietly overstating.
+function renderCpMeta(F, cp){
+  const el = document.getElementById("cp-meta"); if(!el) return;
+  el.innerHTML = "";
+  const sp = cp.spend;
+  if (!sp){ el.classList.add("hidden"); return; }
+  el.classList.remove("hidden");
+  chip(el, "this stage " + fmtDur(sp.stage_s));
+  chip(el, "build " + fmtDur(sp.build_s));
+  if (sp.stage_calls) chip(el, sp.stage_calls + " model call" + (sp.stage_calls===1?"":"s"));
+  if (sp.stage_tokens) chip(el, fmtNum(sp.stage_tokens) + " tokens" + (sp.shared ? "*" : ""));
+  if (sp.cap_usd) chip(el, "cap $" + sp.cap_usd);
+  if (sp.shared) chip(el, "*shared with " + sp.builds + " running builds", "dim");
+}
+
+// The gate verdicts SO FAR — the single most decision-relevant thing at a pause, and
+// the one the dialog never showed. Failing gates are named in full underneath; a
+// green strip alone can hide WHICH gate is red behind a colour.
+function renderCpGates(F){
+  const el = document.getElementById("cp-gates"); if(!el) return;
+  el.innerHTML = "";
+  const gates = (F && F.gates) || {};
+  const names = GATE_ORDER.filter(n => gates[n]);
+  if (!names.length){ el.classList.add("hidden"); return; }
+  el.classList.remove("hidden");
+  const strip = document.createElement("div"); strip.className = "cp-gate-strip";
+  const bad = [];
+  for (const n of names){
+    const g = gates[n];
+    const s = document.createElement("span");
+    s.className = "g " + (g.status || "");
+    s.textContent = n;
+    if (g.run_against) s.title = "run against " + String(g.run_against).slice(0,12);
+    strip.appendChild(s);
+    if (g.status === "fail" || g.status === "error") bad.push(n);
+  }
+  el.appendChild(strip);
+  const line = document.createElement("div");
+  line.className = "cp-gate-line " + (bad.length ? "bad" : "ok");
+  line.textContent = bad.length
+    ? "✕ not green: " + bad.join(", ").toUpperCase()
+      + " — approving cannot pass these; they must go green before anything ships"
+    : "✓ " + names.length + " gate" + (names.length===1?"":"s") + " green so far";
+  el.appendChild(line);
+}
+
+// What the agents themselves flagged: `concerns` from the advisory journal, plus
+// anyone reporting low confidence. Zero extra model calls — the payload already
+// carries it, and it was previously reachable only by clicking each lead.
+function renderCpFlags(F){
+  const el = document.getElementById("cp-flags"); if(!el) return;
+  el.innerHTML = "";
+  const rows = [];
+  for (const e of ((F && F.journal) || [])){
+    const role = e.role || e.node_id || "agent";
+    for (const c of (e.concerns || [])) if (String(c).trim()) rows.push({role, text:String(c), kind:"concern"});
+    if (typeof e.confidence === "number" && e.confidence < 0.6)
+      rows.push({role, text:"low confidence ("+e.confidence.toFixed(2)+") in this step", kind:"conf"});
+  }
+  if (!rows.length){ el.classList.add("hidden"); return; }
+  el.classList.remove("hidden");
+  const head = document.createElement("div");
+  head.className = "cp-flags-head";
+  head.textContent = "⚠ " + rows.length + " thing" + (rows.length===1?"":"s") + " the crew flagged";
+  el.appendChild(head);
+  for (const r of rows.slice(0, 8)){
+    const d = document.createElement("div"); d.className = "cp-flag "+r.kind;
+    d.textContent = "· " + r.role + " — " + r.text;
+    el.appendChild(d);
+  }
+  if (rows.length > 8){
+    const more = document.createElement("div"); more.className = "cp-flag dim";
+    more.textContent = "· +" + (rows.length-8) + " more (click a lead to interview them)";
+    el.appendChild(more);
+  }
+}
+
+// What actually landed this stage, with each artifact's CONTENT one-liner ("12
+// passed / 3 failed", "severity high — 2 finding(s)") rather than a bare count.
+// Anything describing a non-zero failure sorts to the top and is coloured.
+function renderCpArts(F, cp){
+  const wrap = document.getElementById("cp-arts-wrap");
+  const el = document.getElementById("cp-arts");
+  const count = document.getElementById("cp-arts-count");
+  if (!wrap || !el) return;
+  el.innerHTML = "";
+  const arts = (cp.arts && cp.arts.length) ? cp.arts : ((F && F.stageArts) || []);
+  if (!arts.length){ wrap.classList.add("hidden"); return; }
+  wrap.classList.remove("hidden");
+  const risky = arts.filter(a => artIsRisk(a.detail));
+  if (count) count.textContent = "— " + arts.length + " artifact" + (arts.length===1?"":"s")
+    + (risky.length ? " · " + risky.length + " needing a look" : "");
+  // Risky first, original order preserved within each group.
+  wrap.open = risky.length > 0;      // auto-expand only when there is something to see
+  for (const a of risky.concat(arts.filter(x => !artIsRisk(x.detail)))){
+    const row = document.createElement("div");
+    row.className = "cp-art" + (artIsRisk(a.detail) ? " risk" : "");
+    const lab = document.createElement("span"); lab.className = "cp-art-label";
+    lab.textContent = a.label || a.base || a.kind || "artifact";
+    row.appendChild(lab);
+    if (a.detail){
+      const det = document.createElement("span"); det.className = "cp-art-detail";
+      det.textContent = " — " + a.detail;
+      row.appendChild(det);
+    }
+    el.appendChild(row);
+  }
+}
+
+// WHERE this pause is and WHICH state it decides on — provenance the payload always
+// carried and the dialog dropped.
+function renderCpProvenance(cp){
+  const el = document.getElementById("cp-prov"); if(!el) return;
+  const bits = [];
+  if (cp.phase) bits.push("phase " + cp.phase);
+  if (cp.route) bits.push("route " + cp.route);
+  if (cp.state_sha) bits.push("state " + String(cp.state_sha).slice(0, 12));
+  el.textContent = bits.join("  ·  ");
+  el.classList.toggle("hidden", !bits.length);
+}
+
+// Per-button consequence copy + the "go read the code" escape hatch.
+function renderCpActions(F, cp){
+  const acts = cp.actions || null;
+  const set = (id, text) => {
+    const el = document.getElementById(id); if(!el) return;
+    el.textContent = text || "";
+    el.classList.toggle("hidden", !text);
+  };
+  set("cp-approve-sub", acts && acts.approve);
+  set("cp-changes-sub", acts && acts.changes);
+  set("cp-reject-sub",  acts && acts.reject);
+  // Reviewing the actual diff is the strongest evidence there is — but only offer it
+  // once code exists (nothing is written at the product/design pauses).
+  const code = document.getElementById("cp-code");
+  if (code){
+    // A reloaded floor has no per-stage artifact history, so the release boundary
+    // (where code always exists by definition) counts too.
+    const has = !!(F && (F.hasCode || cp.boundary === "release"));
+    code.classList.toggle("hidden", !has);
+    code.onclick = () => { if (F) openFilesFor(F); };   // same shape openFiles() passes
+  }
+}
+
 function showCheckpoint(F){
   const cp = (F && F.cp) || {title:"CHECKPOINT", summary:""};
   document.getElementById("cp-title").textContent="CHECKPOINT · "+(cp.title||"");
   document.getElementById("cp-summary").textContent=cp.summary||"";
+  renderCpMeta(F, cp);
+  renderCpGates(F);
+  renderCpFlags(F);
+  renderCpArts(F, cp);
+  renderCpProvenance(cp);
+  renderCpActions(F, cp);
   // AI expert advisors (the same panel that judges autonomous releases, here
   // ADVISORY): show each domain's verdict + findings above the buttons.
   const adv = document.getElementById("cp-advisors");
@@ -2468,6 +2667,13 @@ function showCheckpoint(F){
       }
       adv.appendChild(row);
     }
+  }
+  // No panel is NOT a clean bill of health — say which it is.
+  const advNote = document.getElementById("cp-adv-note");
+  if (advNote){
+    const note = (cp.advisors && cp.advisors.length) ? "" : (cp.advisorsNote || "");
+    advNote.textContent = note;
+    advNote.classList.toggle("hidden", !note);
   }
   // Autopilot proposal: surface the panel's request as an EDITABLE next-iteration
   // request (approve = as-is; request-changes = build the edited text; reject = stop).

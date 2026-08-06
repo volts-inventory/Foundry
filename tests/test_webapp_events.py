@@ -152,3 +152,64 @@ def test_result_halt_on_fail() -> None:
                              "artifact_uri": None, "gate_statuses": {"test": "GateStatus.FAIL"}})
     assert any(e["type"] == "halt" for e in evs)
     assert not any(e["type"] == "release" for e in evs)
+
+
+def test_checkpoint_carries_provenance_and_button_consequences() -> None:
+    # The approval dialog used to get a title and one sentence. The payload always
+    # carried WHERE the pause is and WHICH state it decides on — carry it through.
+    payload = {
+        "boundary": "design",
+        "phase": "architecture",
+        "route": "gated",
+        "state_sha": "abc123def456789",
+        "artifacts": [],
+        "gates": [],
+    }
+    cp = next(e for e in events_for_payload(payload, set()) if e["type"] == "checkpoint")
+    assert cp["phase"] == "architecture"
+    assert cp["route"] == "gated"
+    assert cp["state_sha"] == "abc123def456789"
+    # Each button says what it DOES, per boundary — "approve" never claims to ship.
+    assert "engineering" in cp["actions"]["approve"]
+    assert "ship" not in cp["actions"]["approve"]
+    assert "nothing ships" in cp["actions"]["reject"]
+
+
+def test_missing_provenance_degrades_to_empty_not_none() -> None:
+    # An older/leaner payload must not put "None" strings in front of a human.
+    cp = next(e for e in events_for_payload({"boundary": "product"}, set())
+              if e["type"] == "checkpoint")
+    assert cp["phase"] == "" and cp["route"] == "" and cp["state_sha"] == ""
+    assert cp["actions"]["approve"]      # copy is always present
+
+
+def test_checkpoint_actions_differ_per_boundary() -> None:
+    from webapp.events import checkpoint_actions
+
+    assert checkpoint_actions("product")["approve"] != checkpoint_actions("design")["approve"]
+    assert "gates" in checkpoint_actions("release")["approve"]
+    # The autopilot proposal decides a whole NEXT release — all three differ there.
+    prop = checkpoint_actions("autopilot_proposal")
+    assert "next release" in prop["approve"]
+    assert "edited" in prop["changes"]
+    assert "autopilot" in prop["reject"]
+    # An unknown boundary still yields true, generic copy (never a KeyError).
+    unknown = checkpoint_actions("something_new")
+    assert unknown["approve"] and unknown["changes"] and unknown["reject"]
+
+
+def test_gate_events_carry_the_tree_they_ran_against() -> None:
+    # A red gate at a checkpoint is only readable if you can tell a stale verdict
+    # from a current one — `run_against` names the tree it was produced over.
+    payload = {
+        "boundary": "release",
+        "artifacts": [],
+        "gates": [{"name": "test", "status": "GateStatus.FAIL", "run_against": "sha-777"}],
+    }
+    gate = next(e for e in events_for_payload(payload, set()) if e["type"] == "gate")
+    assert gate["status"] == "fail" and gate["run_against"] == "sha-777"
+    # A payload without it degrades to "" (the dialog just omits the tooltip).
+    bare = {"boundary": "release", "artifacts": [],
+            "gates": [{"name": "test", "status": "pass"}]}
+    bare_gate = next(e for e in events_for_payload(bare, set()) if e["type"] == "gate")
+    assert bare_gate["run_against"] == ""

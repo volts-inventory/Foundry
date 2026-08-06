@@ -178,6 +178,40 @@ _BOUNDARY_TITLE: dict[str, str] = {
     "release": "Build, Test & Review",
 }
 
+# What each button at a checkpoint actually DOES, per boundary — the modal prints
+# these under the buttons so the choice is not guessed from a verb. APPROVE names
+# the work it unblocks (never "ships it": approve can only let the build REACH the
+# gates); REQUEST CHANGES names the rework pass it costs; REJECT is terminal
+# everywhere. An unknown boundary falls back to generic-but-true copy.
+_BOUNDARY_NEXT: dict[str, str] = {
+    "product": "architecture & design starts",
+    "design": "engineering starts building",
+    "release": "the signed release gates run",
+}
+_BOUNDARY_REWORK: dict[str, str] = {
+    "product": "another spec pass",
+    "design": "another design pass",
+    "release": "a fix-forward rebuild",
+}
+# The autopilot PROPOSAL pause is not a stage boundary — it decides whether a whole
+# NEXT release gets built, so all three buttons mean something different there.
+_PROPOSAL_ACTIONS: dict[str, str] = {
+    "approve": "builds the proposal as the next release",
+    "changes": "builds YOUR edited request instead",
+    "reject": "stops autopilot — the floor stays where it is",
+}
+
+
+def checkpoint_actions(boundary: str) -> dict[str, str]:
+    """Per-button consequence copy for the checkpoint dialog (pure, display-only)."""
+    if boundary == "autopilot_proposal":
+        return dict(_PROPOSAL_ACTIONS)
+    return {
+        "approve": _BOUNDARY_NEXT.get(boundary, "the build continues"),
+        "changes": _BOUNDARY_REWORK.get(boundary, "another pass") + " — costs a full rerun",
+        "reject": "stops the build — nothing ships",
+    }
+
 
 def _origin(kind: str, produced_by: str) -> tuple[str, str]:
     """(agent label, room) that produced an artifact of ``kind``."""
@@ -347,16 +381,24 @@ def events_for_payload(
                 break
 
     # Advisory gate context so far (status only — the gates still decide).
+    # `run_against` names the TREE the verdict was produced over, so a human reading
+    # a red gate at the checkpoint can tell a stale verdict from a current one.
     for g in payload.get("gates", []):
         out.append({"type": "gate", "name": str(g.get("name", "")),
                     "status": _norm_status(g.get("status")), "attested": True,
-                    "advisory": True})
+                    "advisory": True, "run_against": str(g.get("run_against", ""))})
 
     stage_caption = str((summaries or {}).get("stage") or "").strip()
     out.append({
         "type": "checkpoint", "boundary": boundary, "room": room,
         "title": _BOUNDARY_TITLE.get(boundary, boundary.title()),
         "summary": stage_caption or _checkpoint_summary(payload),  # T3 caption, else counts
+        # Provenance the payload already carries and the dialog used to drop: WHERE
+        # in the pipeline this pause is, and WHICH state the decision is about.
+        "phase": str(payload.get("phase") or ""),
+        "route": str(payload.get("route") or ""),
+        "state_sha": str(payload.get("state_sha") or ""),
+        "actions": checkpoint_actions(boundary),
     })
     return out
 

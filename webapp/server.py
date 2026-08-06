@@ -24,6 +24,7 @@ import threading
 import time
 import traceback
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -31,7 +32,12 @@ from pathlib import Path
 from typing import Any
 
 from foundry.schemas.architecture import CANONICAL_AREAS
-from webapp.events import events_for_payload, events_for_result, live_event_for_node
+from webapp.events import (
+    checkpoint_actions,
+    events_for_payload,
+    events_for_result,
+    live_event_for_node,
+)
 from webapp.repo import Repo, RepoUnavailable, read_repo
 from webapp.store import BuildStore
 
@@ -345,6 +351,14 @@ class Project:
     # (the autopilot PROPOSAL checkpoint uses id -1 so it never collides with the
     #  in-build stage checkpoints, which index from 0)
     seen_uris: set[str] = field(default_factory=set)
+    # Checkpoint COST context (advisory): what the work behind this pause consumed, so
+    # "continue or not?" is answered against real spend, not a guess. Monotonic clocks
+    # (never wall time — a clock step must not produce a negative duration) and a
+    # snapshot of the global usage meter taken at build start and at each pause.
+    start_mono: float = field(default_factory=time.monotonic)
+    cp_mono: float | None = None            # monotonic time of the LAST checkpoint
+    usage_mark: dict[str, int] = field(default_factory=dict)   # meter at build start
+    usage_cp: dict[str, int] = field(default_factory=dict)     # meter at the last pause
     # Steps running RIGHT NOW: "who/what" -> monotonic start. Fed by the live per-node
     # telemetry so the quiet-watchdog can name what a long silence is waiting ON,
     # instead of just reporting that nothing has landed. Runtime-only (not persisted).
@@ -1136,6 +1150,99 @@ def _hook_rate_limit_waits() -> None:
     _mpp.on_rate_limit_wait = _on_wait
 
 
+# ---- advisory usage meter (what a stage cost) --------------------------------- #
+# The proxy's usage observer is GLOBAL (one egress serves every floor), so the meter
+# it feeds is global too. A project reads it as a DELTA between two snapshots — its
+# own start, and its last checkpoint — which is exact while one build runs (the
+# localhost norm) and an upper bound when several do. `_running_builds()` tells the
+# dialog which case it is, so the number is never presented as more precise than it
+# is. Advisory only: nothing reads this back into a build.
+_USAGE: dict[str, int] = {"calls": 0, "input": 0, "output": 0, "cache_read": 0}
+_USAGE_LOCK = threading.Lock()
+_USAGE_HOOKED = [False]
+
+
+def _hook_usage_meter() -> None:
+    """Register the proxy's per-call usage observer (once, lazily). Fail-soft: if the
+    proxy can't be imported the meter simply stays at zero and the dialog omits it."""
+    if _USAGE_HOOKED[0]:
+        return
+    _USAGE_HOOKED[0] = True
+    try:
+        from foundry.proxy import model_provider_proxy as _mpp
+    except Exception:
+        return
+
+    def _on_usage(_node_id: str, _tier: str, usage: Mapping[str, int]) -> None:
+        with _USAGE_LOCK:
+            _USAGE["calls"] += 1
+            _USAGE["input"] += int(usage.get("input_tokens", 0) or 0)
+            _USAGE["output"] += int(usage.get("output_tokens", 0) or 0)
+            _USAGE["cache_read"] += int(usage.get("cache_read_input_tokens", 0) or 0)
+
+    _mpp.on_call_usage = _on_usage
+
+
+def _usage_snapshot() -> dict[str, int]:
+    with _USAGE_LOCK:
+        return dict(_USAGE)
+
+
+def _usage_since(mark: Mapping[str, int]) -> dict[str, int]:
+    """Meter delta since ``mark`` (an earlier snapshot). Clamped at zero so a meter
+    reset (a server restart between snapshots) reads as 0, never as a negative."""
+    now = _usage_snapshot()
+    return {k: max(0, now.get(k, 0) - int(mark.get(k, 0))) for k in now}
+
+
+def _running_builds() -> int:
+    with _LOCK:
+        return sum(1 for q in _PROJECTS.values() if q.status == "running")
+
+
+def _checkpoint_spend(p: Project) -> dict[str, Any]:
+    """The advisory cost/elapsed block that rides into the approval dialog.
+
+    ``stage`` covers the work since the previous pause (what the human is being asked
+    to judge); ``build`` covers this run since it started. ``shared`` marks the case
+    where other builds ran concurrently, so the token figures are an upper bound."""
+    now = time.monotonic()
+    stage_usage = _usage_since(p.usage_cp or p.usage_mark)
+    build_usage = _usage_since(p.usage_mark)
+    n_running = _running_builds()
+    spend: dict[str, Any] = {
+        "stage_s": int(max(0.0, now - (p.cp_mono or p.start_mono))),
+        "build_s": int(max(0.0, now - p.start_mono)),
+        "stage_calls": stage_usage.get("calls", 0),
+        "build_calls": build_usage.get("calls", 0),
+        "stage_tokens": stage_usage.get("input", 0) + stage_usage.get("output", 0),
+        "build_tokens": build_usage.get("input", 0) + build_usage.get("output", 0),
+        "shared": n_running > 1,
+        "builds": n_running,
+    }
+    if p.cost_cap_microusd:
+        spend["cap_usd"] = round(p.cost_cap_microusd / 1_000_000, 2)
+    return spend
+
+
+def _advisor_note(p: Project, boundary: str, advisors: list[dict[str, Any]]) -> str:
+    """Why the expert panel is absent, when it is.
+
+    An empty panel used to render as nothing at all, which reads exactly like "every
+    advisor approved". Naming the reason keeps silence from looking like consent."""
+    if advisors:
+        return ""
+    if boundary != "release":
+        return ("No expert panel at this checkpoint — the panel reviews release "
+                "evidence only.")
+    if p.backend == "mock":
+        return "No expert panel — the mock backend can't convene advisors."
+    if not p.packs:
+        return "No expert panel — no domain packs are engaged for this build."
+    return ("The expert panel returned no verdict (advisory only — the gates still "
+            "decide).")
+
+
 def _gated_runner(runner, p: Project, **kwargs: Any) -> None:
     """Run a build under the global concurrency gate.
 
@@ -1170,6 +1277,14 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     from foundry.cli import run
 
     _hook_rate_limit_waits()
+    _hook_usage_meter()
+    # Baseline the cost/elapsed context for THIS session's checkpoints. A resume
+    # re-baselines (the meter is in-memory and a restart zeroed it), so the dialog
+    # reports "since the build resumed" rather than an invented total.
+    p.start_mono = time.monotonic()
+    p.cp_mono = None
+    p.usage_mark = _usage_snapshot()
+    p.usage_cp = {}
 
     if resume:
         _emit(p, type="narrate",
@@ -1273,8 +1388,14 @@ def _run_factory(p: Project, resume: bool = False) -> None:
             # `checkpoint` lets any device's decision name WHICH pause it answers,
             # so a stale/duplicate click can't leak into the next checkpoint.
             _emit(p, type="await_decision", boundary=boundary, checkpoint=cidx,
-                  journal=p.journal, advisors=advisors)
+                  journal=p.journal, advisors=advisors,
+                  advisors_note=_advisor_note(p, boundary, advisors),
+                  spend=_checkpoint_spend(p))
             decision = _await_decision(p, cidx)
+            # The next pause measures from THIS one (the stage the human just judged
+            # is closed), whichever way they decided.
+            p.cp_mono = time.monotonic()
+            p.usage_cp = _usage_snapshot()
         else:
             time.sleep(_AUTO_APPROVE_DELAY)
             decision = "approve"
@@ -1706,10 +1827,12 @@ def _proposal_approved(p: Project, proposal: dict[str, Any]) -> bool:
     _emit(p, type="checkpoint", boundary="autopilot_proposal",
           title="AUTOPILOT PROPOSAL",
           summary=f"{proposal['title']} — {proposal['rationale']} "
-                  f"(panel: {proposal['ballots']})")
+                  f"(panel: {proposal['ballots']})",
+          actions=checkpoint_actions("autopilot_proposal"))
     _emit(p, type="await_decision", boundary="autopilot_proposal",
           checkpoint=_PROPOSAL_CHECKPOINT, request=proposal["request"],
-          title=proposal["title"], scope=proposal["scope"], ballots=proposal["ballots"])
+          title=proposal["title"], scope=proposal["scope"], ballots=proposal["ballots"],
+          spend=_checkpoint_spend(p))
     decision = _await_decision(p, _PROPOSAL_CHECKPOINT)
     edit = p.decision_edit.get(_PROPOSAL_CHECKPOINT, "").strip()
     with p.cond:

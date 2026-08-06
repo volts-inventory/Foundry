@@ -312,3 +312,31 @@ def test_inflight_is_tracked_by_node_id_not_label():
     fin = live_event_for_node("build_test_gate", "factory", "finish")
     assert start is not None and fin is not None
     assert "step" in start and "step" not in fin        # the asymmetry that caused it
+
+
+# --- live activity from inside a step (throttling) ---------------------------- #
+
+def test_activity_is_throttled_deduped_and_capped_per_step():
+    # Every reported line is an SSE frame to every connected device, and an agentic pass
+    # can fire tool calls many times a second — so the stream is bounded, not raw.
+    p = _project()
+    t = 500.0
+    assert server.take_activity(p, "editing src/store.py", now=t) == "editing src/store.py"
+    # an immediate repeat says nothing new
+    assert server.take_activity(p, "editing src/store.py", now=t + 99) is None
+    # blank / whitespace-only is never a line
+    assert server.take_activity(p, "   ", now=t + 99) is None
+    # too soon after the last accepted line
+    assert server.take_activity(p, "running pytest", now=t + 0.5) is None
+    # far enough apart -> reported, and whitespace is collapsed to one line
+    assert server.take_activity(p, "running\n  pytest -q", now=t + 99) == "running pytest -q"
+
+    # per-step ceiling: after the cap it goes quiet until the next step resets it
+    p2 = _project()
+    accepted = 0
+    for i in range(server._ACT_MAX_PER_STEP + 25):
+        if server.take_activity(p2, f"editing file{i}.py", now=1000.0 + i * 10) is not None:
+            accepted += 1
+    assert accepted == server._ACT_MAX_PER_STEP
+    p2.act_count, p2.act_text, p2.act_last = 0, "", 0.0        # what a step start does
+    assert server.take_activity(p2, "editing again.py", now=9000.0) is not None

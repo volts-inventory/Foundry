@@ -205,6 +205,7 @@ def make_coding_adapter(
     *,
     proxy: ModelProviderProxy,
     thread_id: str = "cli-run",
+    activity_cb: Callable[[str], None] | None = None,
 ) -> Any:
     """Construct the selected coding substrate (``ADAPTERS``). ``None`` ⇒ the
     deterministic ``stub`` (back-compat). ``raw-react`` drives the chosen model
@@ -236,7 +237,10 @@ def make_coding_adapter(
         # model-auth grant), so no proxy closure is threaded here — the proxy
         # stays the egress for the AGENT layers; the coding substrate's lineage
         # self-report is carried but IGNORED (arch §2b, documented trade).
-        return ClaudeCodeAdapter(run_id=thread_id)
+        # `activity_cb` (optional) streams what the agent is DOING inside one step —
+        # a step is a single blocking CLI call, so without it a multi-minute agentic
+        # pass reports nothing until it returns.
+        return ClaudeCodeAdapter(run_id=thread_id, on_activity=activity_cb)
     if name == "proxy-agent":
         from foundry.execution.adapters.proxy_agent import ProxyAgentAdapter
 
@@ -258,12 +262,17 @@ def make_coding_adapter(
 
 
 def _resolve_coding_adapter(
-    adapter: str | Any | None, *, proxy: ModelProviderProxy, thread_id: str
+    adapter: str | Any | None,
+    *,
+    proxy: ModelProviderProxy,
+    thread_id: str,
+    activity_cb: Callable[[str], None] | None = None,
 ) -> Any:
     """A WorkerAdapter instance passes through (tests inject one); a name (or None)
     is constructed via :func:`make_coding_adapter`."""
     if adapter is None or isinstance(adapter, str):
-        return make_coding_adapter(adapter, proxy=proxy, thread_id=thread_id)
+        return make_coding_adapter(adapter, proxy=proxy, thread_id=thread_id,
+                                   activity_cb=activity_cb)
     return adapter
 
 
@@ -1264,6 +1273,7 @@ def run(
     checkpoints: bool | list[str | CheckpointBoundary] | None = None,
     checkpoint_responder: CheckpointResponder | None = None,
     progress_cb: Callable[..., None] | None = None,
+    activity_cb: Callable[[str], None] | None = None,
     max_slots: int = AUTO_SLOTS_CAP,
     cost_cap_microusd: int | None = None,
     base_dir: str | None = None,
@@ -1409,7 +1419,8 @@ def run(
         adapter = _default_adapter_for(backend)
     rt = AgentRuntime(
         proxy=proxy,
-        adapter=_resolve_coding_adapter(adapter, proxy=proxy, thread_id=thread_id),
+        adapter=_resolve_coding_adapter(adapter, proxy=proxy, thread_id=thread_id,
+                                        activity_cb=activity_cb),
         cas=store,
     )
 

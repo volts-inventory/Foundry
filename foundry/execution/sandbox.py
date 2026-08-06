@@ -59,7 +59,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -309,12 +309,20 @@ class Sandbox:
         cpu_seconds: int | None = None,
         extra_env: Mapping[str, str] | None = None,
         input_text: str | None = None,
+        on_stdout_line: Callable[[str], None] | None = None,
     ) -> SandboxResult:
         """Run a command with cwd=worktree, scrubbed env, own session.
 
         On wall-clock breach the ENTIRE process group is SIGKILLed (dev
         stand-in for the cgroup hard-kill, arch §2 (b)); RLIMIT_CPU is set in
         the child via preexec_fn when a CPU cap applies.
+
+        ``on_stdout_line`` opts into STREAMING: each stdout line is handed over as it
+        arrives (for live progress out of a long agentic run) and still accumulated, so
+        the returned ``stdout`` is byte-identical to the buffered path. The wall-clock
+        cap is enforced by a timer that kills the process group on schedule — never by
+        the read loop — so a child that stops writing cannot outlive its budget. The
+        callback is advisory: an exception from it can't touch the run.
         """
         self._check_alive()
         argv = ["/bin/sh", "-c", cmd] if isinstance(cmd, str) else list(cmd)
@@ -337,16 +345,21 @@ class Sandbox:
             start_new_session=True,  # own process group: killable as a unit
             preexec_fn=_preexec,
         )
-        timed_out = False
-        try:
-            stdout, stderr = proc.communicate(input=input_text, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            # start_new_session=True => pgid == pid; kill the whole group so
-            # grandchildren cannot outlive the budget breach.
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(proc.pid, signal.SIGKILL)
-            stdout, stderr = proc.communicate()
+        if on_stdout_line is not None:
+            stdout, stderr, timed_out = self._stream_output(
+                proc, timeout, input_text, on_stdout_line
+            )
+        else:
+            timed_out = False
+            try:
+                stdout, stderr = proc.communicate(input=input_text, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                # start_new_session=True => pgid == pid; kill the whole group so
+                # grandchildren cannot outlive the budget breach.
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                stdout, stderr = proc.communicate()
         return SandboxResult(
             returncode=proc.returncode,
             stdout=stdout or "",
@@ -354,6 +367,61 @@ class Sandbox:
             timed_out=timed_out,
             wall_clock_s=time.monotonic() - start,
         )
+
+    def _kill_group(self, proc: subprocess.Popen[str]) -> None:
+        """SIGKILL the child's whole process group (pgid == pid: start_new_session)."""
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
+
+    def _stream_output(
+        self,
+        proc: subprocess.Popen[str],
+        timeout: float,
+        input_text: str | None,
+        on_line: Callable[[str], None],
+    ) -> tuple[str, str, bool]:
+        """Read stdout line-by-line (feeding ``on_line``) and return
+        ``(stdout, stderr, timed_out)``.
+
+        The cap is a TIMER, not a read deadline: it fires on schedule whether or not
+        the child is writing, so streaming can never extend the wall-clock budget.
+        stderr is drained on its own thread — a chatty stderr would otherwise fill its
+        pipe and deadlock the child while we block on stdout.
+        """
+        timed_out = threading.Event()
+
+        def _on_deadline() -> None:
+            timed_out.set()
+            self._kill_group(proc)
+
+        killer = threading.Timer(timeout, _on_deadline)
+        killer.daemon = True
+        killer.start()
+        err: list[str] = []
+
+        def _drain_err() -> None:
+            with contextlib.suppress(Exception):
+                if proc.stderr is not None:
+                    err.append(proc.stderr.read())
+
+        err_thread = threading.Thread(target=_drain_err, daemon=True)
+        err_thread.start()
+        out: list[str] = []
+        try:
+            if input_text is not None and proc.stdin is not None:
+                with contextlib.suppress(Exception):
+                    proc.stdin.write(input_text)
+                    proc.stdin.close()
+            if proc.stdout is not None:
+                for line in proc.stdout:          # yields as the child flushes
+                    out.append(line)
+                    with contextlib.suppress(Exception):
+                        on_line(line)             # advisory: never break the run
+            proc.wait()
+        finally:
+            killer.cancel()
+            err_thread.join(timeout=2.0)
+        return "".join(out), "".join(err), timed_out.is_set()
 
     # -- turn snapshots (arch §2 atomicity, §5) --------------------------------
 

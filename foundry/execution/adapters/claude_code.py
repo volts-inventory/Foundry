@@ -48,6 +48,7 @@ level permission UX. Nothing outside the worktree is writable in production
 
 from __future__ import annotations
 
+import contextlib
 import json
 import shutil
 from pathlib import Path
@@ -69,7 +70,9 @@ if TYPE_CHECKING:
     # The injectable exec seam: (sandbox, argv, timeout_s) -> SandboxResult.
     # Default runs through Sandbox.run (the cage); tests inject a fake that
     # writes files into sandbox.worktree and returns a canned envelope.
-    SandboxExec = Callable[[Sandbox, Sequence[str], float | None], SandboxResult]
+    # A seam used WITH `on_activity` must also accept the `on_stdout_line` keyword
+    # (that's the streaming path); one without it keeps the 3-argument shape.
+    SandboxExec = Callable[..., SandboxResult]
 
 __all__ = ["ClaudeCodeAdapter", "changed_files", "walk_worktree"]
 
@@ -129,8 +132,101 @@ def changed_files(
     return authored, deleted, skipped_binary
 
 
-def _default_exec(sandbox: Sandbox, argv: Sequence[str], timeout_s: float | None) -> SandboxResult:
-    return sandbox.run(list(argv), timeout_s=timeout_s)
+def _default_exec(
+    sandbox: Sandbox,
+    argv: Sequence[str],
+    timeout_s: float | None,
+    on_stdout_line: Callable[[str], None] | None = None,
+) -> SandboxResult:
+    return sandbox.run(list(argv), timeout_s=timeout_s, on_stdout_line=on_stdout_line)
+
+
+# ---- live activity: what the agent is doing INSIDE one step ------------------
+# A step is one blocking CLI call, so without this the whole agentic pass — every
+# edit, every test run, sometimes tens of minutes — reports nothing until it exits.
+# Streaming turns each tool call into one short phrase.
+#
+# The phrase is built from a STRICT allowlist of argument fields (paths, commands,
+# patterns), never from the content-bearing ones. `content` / `new_string` / `old_string`
+# carry whole file bodies — those must never leave the sandbox on a progress channel.
+_ACTIVITY_VERB: dict[str, str] = {
+    "Edit": "editing", "MultiEdit": "editing", "Write": "writing", "NotebookEdit": "editing",
+    "Read": "reading", "Bash": "running", "Glob": "looking for", "Grep": "searching for",
+    "WebFetch": "fetching", "WebSearch": "searching the web for", "Task": "delegating",
+    "TodoWrite": "planning",
+}
+_ACTIVITY_ARG: tuple[str, ...] = ("file_path", "path", "notebook_path", "command",
+                                  "pattern", "query", "url")
+_ACTIVITY_MAX = 72          # one short line — never a payload
+
+
+def _activity_phrase(tool: str, args: Any) -> str | None:
+    """`editing src/store.py` / `running pytest -q` for one tool call, or None when
+    there's nothing safe and useful to say."""
+    verb = _ACTIVITY_VERB.get(tool)
+    if not verb:
+        # An unknown/MCP tool: name it, never its arguments (unknown shape = unknown risk).
+        return f"using {tool}" if tool else None
+    detail = ""
+    if isinstance(args, dict):
+        for key in _ACTIVITY_ARG:
+            val = args.get(key)
+            if isinstance(val, str) and val.strip():
+                detail = " ".join(val.split())          # collapse newlines/tabs
+                break
+    if not detail:
+        return verb if tool != "Bash" else "running a command"
+    if len(detail) > _ACTIVITY_MAX:
+        detail = detail[: _ACTIVITY_MAX - 1] + "…"
+    return f"{verb} {detail}"
+
+
+def _stream_activities(line: str) -> list[str]:
+    """Activity phrases from ONE stream-json line (NDJSON from ``claude -p``).
+
+    Tolerant by design: an unparseable or unrecognised line yields nothing, so a
+    format change degrades to silence instead of breaking a build.
+    """
+    text = line.strip()
+    if not text.startswith("{"):
+        return []
+    try:
+        obj = json.loads(text)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(obj, dict) or obj.get("type") != "assistant":
+        return []
+    msg = obj.get("message")
+    blocks = msg.get("content") if isinstance(msg, dict) else None
+    if not isinstance(blocks, list):
+        return []
+    out: list[str] = []
+    for blk in blocks:
+        if isinstance(blk, dict) and blk.get("type") == "tool_use":
+            phrase = _activity_phrase(str(blk.get("name") or ""), blk.get("input"))
+            if phrase:
+                out.append(phrase)
+    return out
+
+
+def _stream_envelope(stdout: str) -> dict[str, Any]:
+    """The final ``result`` object out of a stream-json stdout (NDJSON).
+
+    Same shape the non-streaming ``--output-format json`` returns, so everything
+    downstream (summary, is_error, num_turns, model self-report) is unchanged.
+    """
+    envelope: dict[str, Any] = {}
+    for line in stdout.splitlines():
+        text = line.strip()
+        if not text.startswith("{"):
+            continue
+        try:
+            obj = json.loads(text)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(obj, dict) and obj.get("type") == "result":
+            envelope = obj          # keep the LAST one
+    return envelope or _lenient_json_object(stdout)
 
 
 def _lenient_json_object(text: str) -> dict[str, Any]:
@@ -203,6 +299,7 @@ class ClaudeCodeAdapter:
         timeout_s: float | None = 1800.0,
         exec_fn: SandboxExec | None = None,
         extra_args: Sequence[str] = (),
+        on_activity: Callable[[str], None] | None = None,
     ) -> None:
         self._bin = claude_bin
         self._run_id = run_id
@@ -211,6 +308,20 @@ class ClaudeCodeAdapter:
         self._timeout_s = timeout_s
         self._exec: SandboxExec = exec_fn or _default_exec
         self._extra_args = tuple(extra_args)
+        # Opt-in live progress. Passing it switches the CLI to stream-json so each
+        # tool call can be reported while the step runs; without it the argv, the
+        # parsing and the result are exactly as before.
+        self._on_activity = on_activity
+
+    def _pump_activity(self, line: str) -> None:
+        """One stdout line -> zero or more activity phrases -> the listener. Advisory:
+        a listener that raises can never affect the build."""
+        cb = self._on_activity
+        if cb is None:
+            return
+        for phrase in _stream_activities(line):
+            with contextlib.suppress(Exception):
+                cb(phrase)
 
     def available(self) -> bool:
         return shutil.which(self._bin) is not None
@@ -219,12 +330,16 @@ class ClaudeCodeAdapter:
         return assemble_prompt(packet, epilogue=_EPILOGUE)
 
     def _argv(self, packet: TaskPacket) -> list[str]:
+        # stream-json (NDJSON, one object per event) only when someone is listening;
+        # it needs --verbose, and the final `result` object carries the same envelope
+        # the plain json format returns.
+        fmt = ["stream-json", "--verbose"] if self._on_activity else ["json"]
         argv = [
             self._bin,
             "-p",
             self.build_prompt(packet),
             "--output-format",
-            "json",
+            *fmt,
             "--max-turns",
             str(max(1, packet.turn_budget)),
             # The SANDBOX is the enforcement boundary (arch §2), not the CLI's
@@ -243,10 +358,20 @@ class ClaudeCodeAdapter:
                 f"(install Claude Code, or pick --adapter raw-react)"
             )
         before = walk_worktree(sandbox.worktree)
-        result = self._exec(sandbox, self._argv(packet), self._timeout_s)
+        if self._on_activity is not None:
+            # STREAMING: each stdout line is an event; report the tool calls as they
+            # happen. `on_stdout_line` is only passed in this branch, so a custom
+            # exec seam that predates it is untouched unless it opts into activity.
+            result = self._exec(
+                sandbox, self._argv(packet), self._timeout_s,
+                on_stdout_line=self._pump_activity,
+            )
+        else:
+            result = self._exec(sandbox, self._argv(packet), self._timeout_s)
         after = walk_worktree(sandbox.worktree)
 
-        envelope = _lenient_json_object(result.stdout)
+        envelope = (_stream_envelope(result.stdout) if self._on_activity is not None
+                    else _lenient_json_object(result.stdout))
         if result.timed_out:
             # Budget breach, never a verdict: record what was authored so far —
             # the gates decide whether the partial tree passes.

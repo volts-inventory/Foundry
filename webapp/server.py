@@ -87,6 +87,11 @@ _STATIC = Path(__file__).parent / "static"
 _PACE = 0.5          # seconds between paced game events
 _STAGE_PAUSE = 0.9   # extra beat when a new stage opens
 _AUTO_APPROVE_DELAY = 1.4  # auto-run: dwell on each checkpoint before approving
+# Live activity from inside an agentic step (each edit / command the substrate runs).
+# Bounded on BOTH axes: a floor is readable at ~1 line every 2s, and one step can't
+# flood the log (or every connected device's stream) with hundreds of tool calls.
+_ACT_MIN_GAP = 2.0          # seconds between reported activities
+_ACT_MAX_PER_STEP = 40      # then one "still working" line and silence for that step
 
 _MODES = ("assistant", "gated", "autonomous")
 
@@ -344,6 +349,15 @@ class Project:
     # telemetry so the quiet-watchdog can name what a long silence is waiting ON,
     # instead of just reporting that nothing has landed. Runtime-only (not persisted).
     inflight: dict[str, tuple[str, float]] = field(default_factory=dict)
+    # Live ACTIVITY attribution + throttle. The coding substrate reports what it is
+    # doing (editing x, running y) but not which lane it belongs to, so activity is
+    # attributed to the most recently started step — right in the common case, and at
+    # worst it names the wrong lane while several run at once.
+    act_room: str = ""
+    act_agent: str = ""
+    act_last: float = 0.0            # monotonic time of the last emitted activity
+    act_count: int = 0               # emitted this step (capped; reset on each start)
+    act_text: str = ""               # last phrase (collapses immediate repeats)
     status: str = "running"
     passed: bool = False  # final verdict (for elevator/reload rehydration)
     awaiting: bool = False  # at a checkpoint right now (badge survives reload)
@@ -742,6 +756,26 @@ def _materialize_base_dir(parent_id: str, dest: Path) -> bool:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
     return True
+
+
+def take_activity(p: Project, text: str, now: float | None = None) -> str | None:
+    """The activity line to report for ``text``, or ``None`` to drop it.
+
+    A long agentic pass fires tool calls faster than anyone can read, and every one
+    reported costs an SSE frame to every connected device — so this is bounded on
+    three axes: blank/duplicate lines, a minimum gap, and a per-step ceiling. Accepting
+    a line advances the throttle state (reset on each step start).
+    """
+    line = " ".join(str(text or "").split())
+    if not line:
+        return None
+    t = time.monotonic() if now is None else now
+    if line == p.act_text or p.act_count >= _ACT_MAX_PER_STEP:
+        return None                       # an immediate repeat, or this step said enough
+    if p.act_last and (t - p.act_last) < _ACT_MIN_GAP:
+        return None                       # too soon after the last one
+    p.act_last, p.act_count, p.act_text = t, p.act_count + 1, line
+    return line
 
 
 def waiting_on(p: Project, now: float | None = None, cap: int = 3) -> str:
@@ -1267,9 +1301,24 @@ def _run_factory(p: Project, resume: bool = False) -> None:
         if phase == "start":
             label = str(ev.get("agent") or ev.get("step") or node.replace("_", " "))
             p.inflight[node] = (label, time.monotonic())
+            # attribute any activity that arrives during this step, and give it a
+            # fresh per-step budget
+            p.act_room = str(ev.get("room") or "")
+            p.act_agent = str(ev.get("agent") or "")
+            p.act_count, p.act_text = 0, ""
         else:
             p.inflight.pop(node, None)
         _emit(p, **ev)
+
+    def activity(text: str) -> None:
+        """One line of "what the agent is doing right now", from inside a step."""
+        line = take_activity(p, text)
+        if line is None:
+            return
+        _emit(p, type="act", room=p.act_room, agent=p.act_agent, text=line)
+        if p.act_count == _ACT_MAX_PER_STEP:
+            _emit(p, type="act", room=p.act_room, agent=p.act_agent,
+                  text="… (still working; further tool calls not listed)")
 
     # The code lives in the durable CAS — the build needs NO output directory. We
     # only write a disk tree when WORKSHOP_WRITE_DISK opts in (an export cache);
@@ -1328,6 +1377,7 @@ def _run_factory(p: Project, resume: bool = False) -> None:
             result = run(
                 run_request,                  # = p.request, or this rung's milestone framing
                 progress_cb=progress,
+                activity_cb=activity,         # what the agent is doing INSIDE a step
                 mode=p.mode,
                 backend=p.backend,            # real backend per project (not always mock)
                 adapter=p.adapter,            # coding substrate (stub/raw-react)

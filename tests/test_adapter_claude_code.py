@@ -312,3 +312,114 @@ def test_changed_files_partitions_correctly() -> None:
     assert authored == {"mod.py": "NEW\n", "new.py": "N\n"}
     assert deleted == ["gone.py"]
     assert skipped == ["bin.dat"]
+
+
+# ---- live activity: streaming what the agent does INSIDE one step -------------
+
+
+def _assistant(*tools: tuple[str, dict[str, Any]]) -> str:
+    """One stream-json `assistant` line carrying tool_use blocks."""
+    blocks = [{"type": "tool_use", "name": n, "input": i} for n, i in tools]
+    return json.dumps({"type": "assistant", "message": {"content": blocks}})
+
+
+def test_activity_phrases_name_the_tool_and_its_target() -> None:
+    from foundry.execution.adapters.claude_code import _stream_activities
+
+    assert _stream_activities(_assistant(("Edit", {"file_path": "src/store.py"}))) == [
+        "editing src/store.py"
+    ]
+    assert _stream_activities(_assistant(("Bash", {"command": "pytest -q"}))) == [
+        "running pytest -q"
+    ]
+    # several tool calls in one message -> one phrase each, in order
+    assert _stream_activities(_assistant(("Read", {"file_path": "a.md"}),
+                                         ("Grep", {"pattern": "def main"}))) == [
+        "reading a.md", "searching for def main"
+    ]
+    # an unknown/MCP tool is NAMED but its arguments are never echoed (unknown shape)
+    assert _stream_activities(_assistant(("mcp__x__do", {"secret": "s3cr3t"}))) == [
+        "using mcp__x__do"
+    ]
+    # non-assistant lines, junk and partial lines are silently ignored
+    for line in ('{"type":"system","subtype":"init"}', "not json", "", "{",
+                 json.dumps({"type": "result", "result": "done"})):
+        assert _stream_activities(line) == []
+
+
+def test_activity_never_leaks_file_contents_or_long_payloads() -> None:
+    from foundry.execution.adapters.claude_code import _stream_activities
+
+    secret = "API_KEY = 'sk-live-DO-NOT-LEAK'\n" * 40
+    line = _assistant(("Write", {"file_path": "src/settings.py", "content": secret}))
+    phrases = _stream_activities(line)
+    assert phrases == ["writing src/settings.py"]
+    assert "sk-live" not in phrases[0] and "API_KEY" not in phrases[0]
+    # Edit's old/new strings are content too — never reported
+    edit = _assistant(("Edit", {"file_path": "a.py", "old_string": secret,
+                                "new_string": secret}))
+    assert _stream_activities(edit) == ["editing a.py"]
+    # and any allowlisted field is truncated to one short line
+    long_cmd = _assistant(("Bash", {"command": "x " * 200}))
+    out = _stream_activities(long_cmd)[0]
+    assert len(out) < 90 and out.endswith("…")
+
+
+def test_streaming_run_reports_activity_and_still_parses_the_envelope(tmp_path) -> None:
+    """With `on_activity` the CLI is asked for stream-json, each tool call is reported
+    as it arrives, and the final `result` object is read exactly like the plain json
+    envelope — same summary, same turn count."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "seed.py").write_text("SEED = 1\n")
+    stdout = "\n".join([
+        json.dumps({"type": "system", "subtype": "init"}),
+        _assistant(("Read", {"file_path": "seed.py"})),
+        _assistant(("Write", {"file_path": "impl.py", "content": "IMPL = 1\n"})),
+        _assistant(("Bash", {"command": "pytest -q"})),
+        envelope(),                     # the same result object as the json format
+    ]) + "\n"
+
+    seen_argv: list[Any] = []
+    streamed: list[str] = []
+
+    def _exec(sandbox: Sandbox, argv: Any, timeout_s: Any, on_stdout_line=None):
+        seen_argv.append(list(argv))
+        (sandbox.worktree / "impl.py").write_text("IMPL = 1\n")
+        for line in stdout.splitlines(keepends=True):
+            if on_stdout_line is not None:
+                on_stdout_line(line)
+        return SandboxResult(returncode=0, stdout=stdout, stderr="", timed_out=False,
+                             wall_clock_s=1.0)
+
+    adapter = ClaudeCodeAdapter(exec_fn=_exec, on_activity=streamed.append)
+    with Sandbox(src) as sandbox:
+        result = adapter.run(make_packet(sandbox.worktree), sandbox)
+
+    assert streamed == ["reading seed.py", "writing impl.py", "running pytest -q"]
+    argv = seen_argv[0]
+    assert "stream-json" in argv and "--verbose" in argv and "json" not in argv
+    # the envelope still drives the outcome
+    assert result.turns_used == 4
+    assert any("config default is a guess" in t.explanation for t in result.triage)
+
+
+def test_without_a_listener_nothing_changes(tmp_path) -> None:
+    """No `on_activity` => the plain json format and the buffered exec seam, byte for
+    byte what it was before streaming existed (a 3-arg exec_fn still works)."""
+    src = tmp_path / "src"
+    src.mkdir()
+    seen_argv: list[Any] = []
+
+    def _exec(sandbox: Sandbox, argv: Any, timeout_s: Any) -> SandboxResult:
+        seen_argv.append(list(argv))
+        (sandbox.worktree / "a.py").write_text("A = 1\n")
+        return SandboxResult(returncode=0, stdout=envelope(), stderr="", timed_out=False,
+                             wall_clock_s=1.0)
+
+    adapter = ClaudeCodeAdapter(exec_fn=_exec)
+    with Sandbox(src) as sandbox:
+        result = adapter.run(make_packet(sandbox.worktree), sandbox)
+    argv = seen_argv[0]
+    assert "json" in argv and "stream-json" not in argv and "--verbose" not in argv
+    assert result.turns_used == 4

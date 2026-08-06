@@ -1520,6 +1520,33 @@ class FloorScene extends Phaser.Scene {
     this.showBubble(a, text, 5200, false);   // real telemetry — outranks idle chatter
   }
 
+  // Live activity from inside a step ("editing src/store.py"): a short bubble + a
+  // typing beat, so the sprite visibly does the thing. Ambient-priority — a real
+  // journal line (agentSay) always wins the bubble.
+  agentAct(name, text, room){
+    const a = this.actorFor(name, room);
+    if (!a) return;
+    this.codeGlyph(a);
+    this.showBubble(a, text, 2600, true);
+  }
+  // Name (or failing that, room) -> a sprite. The static rooms have a name->sprite
+  // map; the engineering lanes don't — "Backend Engineer" is an IC in the backend
+  // room and "Backend Lead" its lead — so those resolve by lane, and anything else
+  // falls back to whoever is at a desk in the reported room.
+  actorFor(name, room){
+    const direct = this.agents.get(name);
+    if (direct) return direct;
+    const m = /^(Frontend|Backend|Data) (Lead|Engineer)$/.exec(name || "");
+    const pick = (group, rm) => (group||[]).find(s => s && s.bob && s.room === rm) || null;
+    if (m){
+      const hit = pick(m[2] === "Lead" ? this.techLeadGroup : this.poolGroup,
+                       m[1].toLowerCase());
+      if (hit) return hit;
+    }
+    if (!room) return null;
+    return pick(this.poolGroup, room) || pick(this.techLeadGroup, room);
+  }
+
   // Show a speech bubble over anyone (agents, engineers, the CTO). `ambient` marks it
   // as idle flavour: ambient chatter never overwrites a real line, and is dropped the
   // moment its owner is called back to work.
@@ -1898,13 +1925,27 @@ function routeEvent(floor, ev){
       if (S) S.nodeTelemetry(ev.room, ev.agent, phase);
       if (phase === "finish"){
         if (ev.agent) agentActivity(F, ev.room, ev.agent, true, ev.summary);   // box → done
+        else if (ev.step) logTo(F, "good", "✓ "+ev.step);
         else if (ev.summary) logTo(F, "good", "✓ "+ev.summary);
       } else if (phase !== "pulse" && ev.agent){
         agentActivity(F, ev.room, ev.agent, false);   // START opens the agent's box (its header)
         F.liveRoom = ev.room; F.liveAgent = ev.agent;
+      } else if (phase !== "pulse" && ev.step){
+        // A desk-less STEP (a gate run, a fix-forward pass, the doc pass). These used
+        // to move the floor and log nothing, which is what made the log look asleep
+        // while the crew visibly re-staffed around it.
+        logTo(F, "hot", "⋯ "+ev.step);
+        F.liveRoom = ev.room;
       }
       break;
     }
+    case "act":
+      // LIVE ACTIVITY from inside a step: one short phrase per tool call the coding
+      // substrate runs ("editing src/store.py", "running pytest -q"). A step is one
+      // blocking call, so this is the only thing that reports while it's in flight.
+      logAct(F, ev);
+      if (S) S.agentAct(ev.agent, ev.text, ev.room);
+      break;
     case "say":
       if (S) S.agentSay(ev.agent, ev.text);
       logSay(F, ev);   // fold the journal note onto the agent's artifact group + stage summary
@@ -2111,11 +2152,15 @@ function renderAgentBox(g){
   const head=document.createElement("div"); head.className="agent-head";
   head.textContent=deEmoji(agentHeadText(g)); li.appendChild(head);
   const cap=g.cap||g.fallback;
-  const body=(cap?1:0)+g.narrates.length+g.items.length;
+  const acts=(g.done?[]:(g.acts||[]));      // live activity only while the step runs
+  const body=(cap?1:0)+g.narrates.length+g.items.length+acts.length;
   if(body){
     const bd=document.createElement("div"); bd.className="agent-body";
     if(cap){ const c=document.createElement("div"); c.className="agent-cap"; c.textContent=deEmoji(cap); bd.appendChild(c); }
     for(const nr of g.narrates){ const d=document.createElement("div"); d.className="agent-item"; d.textContent=deEmoji(nr); bd.appendChild(d); }
+    // what it's doing RIGHT NOW, newest last (dropped once the step reports its result)
+    for(const a of acts){ const d=document.createElement("div"); d.className="agent-item act";
+      d.textContent="· "+deEmoji(a); bd.appendChild(d); }
     for(const it of g.items){ const d=document.createElement("div"); d.className="agent-item";
       d.textContent=deEmoji(it.label+(it.detail?" — "+it.detail:"")); bd.appendChild(d); }
     li.appendChild(bd);
@@ -2146,6 +2191,24 @@ function agentActivity(F, room, agent, done, summary){
   if(done){ g.done=true; if(summary && !g.fallback) g.fallback=summary; }
   else F.curAgent=agent;
   if(F.floor===ACTIVE) refreshAgentBox(g);
+}
+// LIVE activity inside a step: fold it into the working agent's OPEN box, so the box
+// grows as the agent works ("· editing src/store.py") instead of the log sitting still
+// for the whole call. No open box (an infra step, or a finished agent) -> a dim line.
+// Only the last few are kept per box: the point is "it's moving", not a full transcript.
+function logAct(F, ev){
+  const t = String(ev.text || "").trim(); if(!t) return;
+  // Only the agent the SERVER attributed it to — an empty agent means the running step
+  // has no desk (a gate, a fix pass), so it must not be filed under whoever went last.
+  const g = ev.agent && F._agrp && F._agrp[ev.agent];
+  if (g && !g.done){
+    g.acts = g.acts || [];
+    g.acts.push(t);
+    if (g.acts.length > 6) g.acts.shift();
+    if (F.floor === ACTIVE) refreshAgentBox(g);
+    return;
+  }
+  logTo(F, "", "· "+t);
 }
 // An artifact: fold its CONTENT into its producing agent's box body.
 function logArtifact(F, ev){

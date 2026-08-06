@@ -308,3 +308,46 @@ def test_raw_react_unparseable_response_still_triaged(sandbox: Sandbox):
     assert sandbox.get_blob(result.diff_uri) == b""  # no diff recorded
     assert len(result.triage) == 1
     assert "unparseable" in result.triage[0].explanation
+
+
+# ---------------------------------------------------------------------------
+# Sandbox: streaming stdout (live progress out of a long agentic run)
+# ---------------------------------------------------------------------------
+
+
+def test_streaming_yields_lines_as_they_arrive_and_still_returns_full_stdout(sandbox: Sandbox):
+    seen: list[str] = []
+    res = sandbox.run(
+        ["/bin/sh", "-c", "printf 'one\\ntwo\\nthree\\n'; printf 'to-err\\n' >&2"],
+        on_stdout_line=seen.append,
+    )
+    assert [s.strip() for s in seen] == ["one", "two", "three"]
+    assert res.stdout == "one\ntwo\nthree\n"      # identical to the buffered path
+    assert res.stderr.strip() == "to-err"
+    assert res.ok and not res.timed_out
+
+
+def test_streaming_still_enforces_the_wall_clock_cap(sandbox: Sandbox):
+    # The cap must be a TIMER, not a read deadline: this child prints one line and then
+    # goes silent forever, so a loop that only checked the clock between lines would
+    # block past the budget.
+    seen: list[str] = []
+    start = time.monotonic()
+    res = sandbox.run(
+        ["/bin/sh", "-c", "printf 'started\\n'; sleep 30"],
+        timeout_s=1.0,
+        on_stdout_line=seen.append,
+    )
+    elapsed = time.monotonic() - start
+    assert res.timed_out and not res.ok
+    assert elapsed < 5.0                          # killed at the cap, not after 30s
+    assert [s.strip() for s in seen] == ["started"]   # what it managed to say is kept
+
+
+def test_streaming_callback_errors_cannot_break_the_run(sandbox: Sandbox):
+    # Progress reporting is advisory — a listener that throws must not fail the command.
+    def _boom(_line: str) -> None:
+        raise RuntimeError("listener exploded")
+
+    res = sandbox.run(["/bin/sh", "-c", "printf 'a\\nb\\n'"], on_stdout_line=_boom)
+    assert res.ok and res.stdout == "a\nb\n"

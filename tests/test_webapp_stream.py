@@ -274,3 +274,69 @@ def test_load_persisted_closes_interrupted_build(store, monkeypatch):
     monkeypatch.setattr(server, "_PROJECTS", {})
     server._load_persisted()
     assert len(server._STORE.events_of("run1")) == before
+
+
+# --- what a long silence is waiting on --------------------------------------- #
+
+def test_waiting_on_names_the_longest_running_steps_first():
+    # The quiet-watchdog used to report only that nothing had landed. It now names the
+    # in-flight steps (fed by the live per-node telemetry) so a five-minute silence
+    # says WHO it is waiting on — a long agentic step reads as normal, and a genuine
+    # stall (nothing in flight at all) is distinguishable from it.
+    p = _project()
+    now = 1000.0
+    p.inflight = {
+        "backend_engineer": ("Backend Engineer", now - 7 * 60),
+        "build_test_gate": ("running the BUILD / TEST gates", now - 2 * 60),
+    }
+    line = server.waiting_on(p, now=now)
+    assert line == "Backend Engineer (7 min) · running the BUILD / TEST gates (2 min)"
+
+    # Capped, with the overflow counted rather than dropped silently.
+    p.inflight = {f"n{i}": (f"step {i}", now - (10 - i) * 60) for i in range(5)}
+    capped = server.waiting_on(p, now=now, cap=3)
+    assert capped.startswith("step 0 (10 min)") and capped.endswith("+2 more")
+
+    # Nothing in flight -> empty, which is what makes the watchdog escalate its wording.
+    p.inflight = {}
+    assert server.waiting_on(p, now=now) == ""
+
+
+def test_inflight_is_tracked_by_node_id_not_label():
+    # A finish event can carry no label at all (a gate's outcome is reported by its own
+    # `gate` event), so the in-flight set has to be keyed by node id — keying by label
+    # would leak an entry per gate run and the watchdog would name steps long finished.
+    from webapp.events import live_event_for_node
+
+    start = live_event_for_node("build_test_gate", "factory", "start")
+    fin = live_event_for_node("build_test_gate", "factory", "finish")
+    assert start is not None and fin is not None
+    assert "step" in start and "step" not in fin        # the asymmetry that caused it
+
+
+# --- live activity from inside a step (throttling) ---------------------------- #
+
+def test_activity_is_throttled_deduped_and_capped_per_step():
+    # Every reported line is an SSE frame to every connected device, and an agentic pass
+    # can fire tool calls many times a second — so the stream is bounded, not raw.
+    p = _project()
+    t = 500.0
+    assert server.take_activity(p, "editing src/store.py", now=t) == "editing src/store.py"
+    # an immediate repeat says nothing new
+    assert server.take_activity(p, "editing src/store.py", now=t + 99) is None
+    # blank / whitespace-only is never a line
+    assert server.take_activity(p, "   ", now=t + 99) is None
+    # too soon after the last accepted line
+    assert server.take_activity(p, "running pytest", now=t + 0.5) is None
+    # far enough apart -> reported, and whitespace is collapsed to one line
+    assert server.take_activity(p, "running\n  pytest -q", now=t + 99) == "running pytest -q"
+
+    # per-step ceiling: after the cap it goes quiet until the next step resets it
+    p2 = _project()
+    accepted = 0
+    for i in range(server._ACT_MAX_PER_STEP + 25):
+        if server.take_activity(p2, f"editing file{i}.py", now=1000.0 + i * 10) is not None:
+            accepted += 1
+    assert accepted == server._ACT_MAX_PER_STEP
+    p2.act_count, p2.act_text, p2.act_last = 0, "", 0.0        # what a step start does
+    assert server.take_activity(p2, "editing again.py", now=9000.0) is not None

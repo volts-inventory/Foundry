@@ -22,6 +22,47 @@ def test_live_event_for_node_seats_the_agent_at_its_desk() -> None:
     assert live_event_for_node("__start__", "", "start") is None
 
 
+def test_infra_steps_are_reported_even_with_no_agent_and_no_scope() -> None:
+    # The gate runners and fix-forward passes are TOP-LEVEL nodes, so the stream gives
+    # them an EMPTY scope. They used to drop out entirely — no room, no log line — which
+    # left the quest log blank through the slowest part of a build.
+    gate = live_event_for_node("build_test_gate", "", "start")
+    assert gate is not None
+    assert gate["room"] == "gate" and gate["agent"] == ""
+    assert "BUILD" in gate["step"]
+    # A gate's OUTCOME is already reported by its own `gate` event, so the finish of the
+    # runner carries no duplicate label (the event still fires, to clear the room).
+    assert "step" not in live_event_for_node("build_test_gate", "", "finish")  # type: ignore[operator]
+
+    # A fix-forward retry is the longest silence in a real build: labelled both ways.
+    fix = live_event_for_node("build_test_fix", "", "start")
+    assert fix is not None and fix["room"] == "engineering"
+    assert "fix-forward" in fix["step"]
+    done = live_event_for_node("build_test_fix", "", "finish")
+    assert done is not None and done["step"] == "rebuild finished"
+
+    # Named agents are unchanged — they still open an agent box, never a step line.
+    named = live_event_for_node("sdet", "quality", "finish")
+    assert named is not None and "step" not in named and "SDET" in named["summary"]
+
+
+def test_subgraph_scopes_all_resolve_to_a_room() -> None:
+    # The scope the graph stream actually hands us is a colon-joined namespace PATH
+    # ("factory:implementation"), not a bare stage name — these are the real strings
+    # observed from a run. Matching the whole string resolved nothing, so every
+    # unnamed step inside a stage was dropped.
+    for scope, room in (("factory:implementation", "engineering"),
+                        ("factory:quality", "qa"),
+                        ("factory:assurance", "security"),
+                        ("factory:architecture", "architecture"),
+                        ("factory:product", "product"),
+                        ("implementation", "engineering")):    # bare form still works
+        ev = live_event_for_node("some_unnamed_node", scope, "start")
+        assert ev is not None and ev["room"] == room, scope
+    # A scope naming no stage at all still yields nothing to light.
+    assert live_event_for_node("some_unnamed_node", "factory", "start") is None
+
+
 def test_payload_maps_artifacts_journal_and_checkpoint() -> None:
     payload = {
         "boundary": "product",

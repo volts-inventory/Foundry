@@ -227,6 +227,9 @@ li.agent-box.done .agent-head{color:var(--green);background:rgba(93,220,122,.08)
 .agent-cap{color:var(--ink);margin:1px 0 4px;overflow-wrap:anywhere;word-break:break-word}
 .agent-item{color:var(--dim);font-size:11px;line-height:1.5;padding:2px 0 2px 9px;
   border-left:2px solid #2f3c5c;margin:3px 0;overflow-wrap:anywhere;word-break:break-word}
+/* live activity inside a step (what the agent is doing right now) — quieter than the
+   agent's own narration, and marked as in-progress rather than recorded */
+.agent-item.act{color:#7f93b8;border-left-color:#3d4d73;font-style:normal}
 @keyframes pop{from{opacity:0;transform:translateX(8px)}to{opacity:1}}
 
 /* ---- Dialogs ---- */

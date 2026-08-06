@@ -106,6 +106,72 @@ _BOUNDARY_ROOM: dict[str, str] = {
     "design": "architecture",
     "release": "qa",
 }
+# Subgraph SCOPE -> room, for a node inside a stage that isn't a named agent. Without
+# the implementation/quality/assurance entries those steps resolved to no room at all
+# and vanished from the floor AND the log.
+_SCOPE_ROOM: dict[str, str] = {
+    **_BOUNDARY_ROOM,
+    "architecture": "architecture",
+    "implementation": "engineering",
+    "quality": "qa",
+    "assurance": "security",
+}
+
+
+def _room_for_scope(scope: str) -> str:
+    """Room for a graph-stream scope, or "" if it names none.
+
+    ``scope`` is the graph's namespace PATH, colon-joined outermost-first — the real
+    values are ``"factory"``, ``"factory:implementation"``, ``"factory:quality"``… so it
+    has to be matched per segment (innermost stage first), never as a whole string.
+    """
+    for seg in reversed(scope.split(":")):
+        room = _SCOPE_ROOM.get(seg) or (seg if seg in ROOMS else "")
+        if room:
+            return room
+    return ""
+# INFRA steps — real graph nodes with no desk to sit at. They used to be invisible:
+# most are registered on the TOP-LEVEL graph, where the stream namespace is empty, so
+# `scope` was "" and the event was dropped entirely. That silence covered the slowest
+# work in a build (the fix-forward passes are full agentic retries) and left the quest
+# log blank while the floor visibly re-staffed around it.
+#
+# node -> (room, label while running, label when done). A ``None`` done-label means
+# ANOTHER event already reports the outcome — the gate runners emit their own
+# pass/fail verdict, so announcing the finish twice would just be noise.
+_INFRA_NODE: dict[str, tuple[str, str, str | None]] = {
+    "triage": ("product", "sorting the request into a build plan", "build plan ready"),
+    # gate runners (top-level + inside the assurance/quality subgraphs)
+    "spec_gate": ("gate", "running the SPEC gate", None),
+    "build_gate": ("gate", "running the BUILD gate", None),
+    "test_gate": ("gate", "running the TEST gate", None),
+    "smoke_gate": ("gate", "running the SMOKE gate", None),
+    "build_test_gate": ("gate", "running the BUILD / TEST gates", None),
+    "assurance_gate": ("gate", "running the ASSURANCE gates", None),
+    "review": ("gate", "running the REVIEW gate", None),
+    "security_gate": ("gate", "running the SECURITY gate", None),
+    "audit_gate": ("gate", "running the AUDIT gate", None),
+    "supply_chain_gate": ("gate", "running the SUPPLY-CHAIN gate", None),
+    # fix-forward retries: the longest silences in a real build — each is a full
+    # agentic pass over the failing tree
+    "spec_fix": ("product", "fix-forward — reworking the spec after a gate failure",
+                 "spec rework finished"),
+    "build_test_fix": ("engineering", "fix-forward — rebuilding after a gate failure",
+                       "rebuild finished"),
+    "assurance_fix": ("engineering", "fix-forward — clearing the assurance findings",
+                      "assurance fixes finished"),
+    # the doc pass + the evidence packs behind each sign-off
+    "docs": ("qa", "writing the runbook & release docs", "docs written"),
+    "design_sign_off": ("gate", "assembling the design evidence", None),
+    "release_sign_off": ("gate", "assembling the release evidence", None),
+}
+# Conditional-architecture agents that have no sprite on the floor — they still get a
+# step line so the log doesn't skip them. (agent name, room, running, done)
+_INFRA_NODE.update({
+    "domain_specialist": ("architecture", "domain specialist reviewing the design",
+                          "domain review finished"),
+    "ux_design": ("architecture", "UX pass over the interface", "UX pass finished"),
+})
 _BOUNDARY_TITLE: dict[str, str] = {
     "product": "Product & Requirements",
     "design": "Architecture & Design",
@@ -155,21 +221,33 @@ def live_event_for_node(
 
     ``phase="start"`` seats the agent at their desk for the WHOLE model call; ``"finish"``
     clears them and carries a ``summary`` of what the step produced (for the quest log).
-    Maps the node id -> (agent, room). Falls back to the subgraph ``scope`` -> room when
-    the node isn't a named agent (so a stage still lights the right room). Returns
-    ``None`` for infra/non-agent nodes with no desk to light."""
+
+    Resolution order: the node id -> (agent, room) for a named lead; else the
+    :data:`_INFRA_NODE` table, which gives desk-less steps (gates, fix-forward passes,
+    the doc pass) a room and a ``step`` label so they show up in the log too; else the
+    subgraph ``scope`` -> room, so an unmapped step at least lights the right room.
+    Returns ``None`` only for pure plumbing with neither a room nor a label."""
     who = AGENT_BY_NODE.get(node)
+    infra = None if who is not None else _INFRA_NODE.get(node)
     if who is not None:
         agent, room = who
+    elif infra is not None:
+        room, agent = infra[0], ""
     else:
-        room = _BOUNDARY_ROOM.get(scope) or (scope if scope in ROOMS else "")
+        room = _room_for_scope(scope)
         if not room:
             return None
         agent = ""
     ev: dict[str, Any] = {
         "type": "active", "room": room, "agent": agent, "live": True, "phase": phase,
     }
-    if phase == "finish":
+    if infra is not None:
+        # A desk-less step: `step` is what the quest log prints (no agent box). The
+        # done-label is None where another event already reports the outcome.
+        label = infra[2] if phase == "finish" else infra[1]
+        if label:
+            ev["step"] = label
+    elif phase == "finish":
         verb = _NODE_SUMMARY.get(node)
         if not verb and agent:
             verb = "finished its step"

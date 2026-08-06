@@ -340,6 +340,10 @@ class Project:
     # (the autopilot PROPOSAL checkpoint uses id -1 so it never collides with the
     #  in-build stage checkpoints, which index from 0)
     seen_uris: set[str] = field(default_factory=set)
+    # Steps running RIGHT NOW: "who/what" -> monotonic start. Fed by the live per-node
+    # telemetry so the quiet-watchdog can name what a long silence is waiting ON,
+    # instead of just reporting that nothing has landed. Runtime-only (not persisted).
+    inflight: dict[str, tuple[str, float]] = field(default_factory=dict)
     status: str = "running"
     passed: bool = False  # final verdict (for elevator/reload rehydration)
     awaiting: bool = False  # at a checkpoint right now (badge survives reload)
@@ -738,6 +742,22 @@ def _materialize_base_dir(parent_id: str, dest: Path) -> bool:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
     return True
+
+
+def waiting_on(p: Project, now: float | None = None, cap: int = 3) -> str:
+    """What the build is waiting ON, longest-running first — e.g.
+    ``"Backend Engineer (7 min) · running the TEST gate (2 min)"``.
+
+    Reads the live in-flight set fed by the per-node telemetry. Empty string when
+    nothing is reported in flight (which is itself the interesting case: a real stall).
+    """
+    t = time.monotonic() if now is None else now
+    items = sorted(p.inflight.values(), key=lambda it: it[1])
+    parts = [f"{label} ({max(1, round((t - started) / 60))} min)"
+             for label, started in items[:cap]]
+    if len(items) > cap:
+        parts.append(f"+{len(items) - cap} more")
+    return " · ".join(parts)
 
 
 def _emit(p: Project, **event: Any) -> None:
@@ -1239,8 +1259,17 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     def progress(node: str, scope: str, *, phase: str = "finish",
                  result: object = None) -> None:
         ev = live_event_for_node(node, scope, phase, result)
-        if ev is not None:
-            _emit(p, **ev)
+        if ev is None:
+            return
+        # Track what's in flight so the quiet-watchdog can say WHAT a long silence is
+        # waiting on. Keyed by NODE id (a finish event may carry no label at all, so
+        # keying by the label would leak entries). Best-effort bookkeeping only.
+        if phase == "start":
+            label = str(ev.get("agent") or ev.get("step") or node.replace("_", " "))
+            p.inflight[node] = (label, time.monotonic())
+        else:
+            p.inflight.pop(node, None)
+        _emit(p, **ev)
 
     # The code lives in the durable CAS — the build needs NO output directory. We
     # only write a disk tree when WORKSHOP_WRITE_DISK opts in (an export cache);
@@ -1257,9 +1286,11 @@ def _run_factory(p: Project, resume: bool = False) -> None:
         if _materialize_base_dir(p.parent_id, scratch):
             base_dir = str(scratch)
     # Quiet-watchdog: on a REAL backend, if no event lands for a long stretch (and
-    # we're not paused at a checkpoint), say so in the quest log — otherwise a hung
-    # CLI (auth prompt, wall-clock cap + silent retries) looks identical to a long
-    # model call and the viewer just sees the crew loafing in the lounge.
+    # we're not paused at a checkpoint), report WHO the build is waiting on. A single
+    # agentic step is legitimately minutes long, so the first tick is a status line,
+    # not an alarm — the "something may be wrong" advice waits until it really drags.
+    # (Without this, a hung CLI — auth prompt, wall-clock cap + silent retries — looks
+    # exactly like a long model call.)
     wd_stop = threading.Event()
 
     def _quiet_watchdog() -> None:
@@ -1275,11 +1306,18 @@ def _run_factory(p: Project, resume: bool = False) -> None:
                 continue
             quiet_min += 1
             if quiet_min in (5, 15, 30):
-                _emit(p, type="narrate",
-                      text=f"⏳ No step has finished in {quiet_min} min. Long "
-                           "thinking is normal, but if this keeps up check the "
-                           "server terminal — and that the backend CLI answers "
-                           "(e.g. `claude -p \"hi\"`) on the host.")
+                busy = waiting_on(p)
+                if busy:
+                    text = (f"⏳ Still working — {busy}. Agentic steps report only when "
+                            "they finish, so a long quiet stretch here is normal.")
+                else:
+                    text = (f"⏳ No step has started or finished in {quiet_min} min "
+                            "and nothing is reported in flight.")
+                if quiet_min >= 15:
+                    text += (f" It has been {quiet_min} min — if this keeps up check "
+                             "the server terminal, and that the backend CLI answers "
+                             "(e.g. `claude -p \"hi\"`) on the host.")
+                _emit(p, type="narrate", text=text)
                 last_len = len(p.log)
 
     if p.backend != "mock":

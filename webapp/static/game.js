@@ -1898,10 +1898,17 @@ function routeEvent(floor, ev){
       if (S) S.nodeTelemetry(ev.room, ev.agent, phase);
       if (phase === "finish"){
         if (ev.agent) agentActivity(F, ev.room, ev.agent, true, ev.summary);   // box → done
+        else if (ev.step) logTo(F, "good", "✓ "+ev.step);
         else if (ev.summary) logTo(F, "good", "✓ "+ev.summary);
       } else if (phase !== "pulse" && ev.agent){
         agentActivity(F, ev.room, ev.agent, false);   // START opens the agent's box (its header)
         F.liveRoom = ev.room; F.liveAgent = ev.agent;
+      } else if (phase !== "pulse" && ev.step){
+        // A desk-less STEP (a gate run, a fix-forward pass, the doc pass). These used
+        // to move the floor and log nothing, which is what made the log look asleep
+        // while the crew visibly re-staffed around it.
+        logTo(F, "hot", "⋯ "+ev.step);
+        F.liveRoom = ev.room;
       }
       break;
     }

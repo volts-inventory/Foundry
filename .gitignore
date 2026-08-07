@@ -16,8 +16,10 @@ dist/
 .mutmut-cache
 mutants/
 
-# Claude Code local state: agent worktrees, settings (never commit)
-.claude/
+# Claude Code: share agents/commands/skills/settings.json across the team;
+# keep only per-machine local state out of git.
+.claude/settings.local.json
+.claude/worktrees/
 
 # Secrets + Makefile/CLI run artifacts (never commit). NOTE: /build/ is the
 # project's tracked planning-doc dir — do NOT ignore it; run output goes to /.run/.

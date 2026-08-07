@@ -40,6 +40,14 @@ How:
 
 Don't consult it for typos, formatting, renames, test scaffolding, file reads, or anything already specified precisely.
 
+# Plan before executing
+
+For anything hitting a consult-trigger above (multi-file, ambiguous, a real
+tradeoff) — or any task where the shape of the solution isn't obvious yet —
+use Plan Mode before touching code. A cheap, sharp plan produces a smaller,
+cleaner implementation than editing your way to one. Skip it for anything
+already specified precisely; planning a typo fix is waste, not rigor.
+
 # Definition of done
 
 Before saying a task is done, run this repo's recorded dev commands (see
@@ -56,6 +64,18 @@ When delegating work to subagents (Agent tool, Workflow tool):
 - Model routing: default delegated work to this session's own tier. Downgrade to a cheaper model only for a specific, well-understood mechanical category — search/grep, boilerplate scaffolding, structural checks — never for anything requiring judgment.
 - Skills don't propagate to subagents automatically. Reference the skill file in the delegation prompt instead of restating its contents inline.
 - Background tasks: wait for the completion notification. If asked for status mid-flight, answer from what's already known — don't re-poll for output, which can pull the whole raw transcript back into context.
+
+# Reuse before reinventing
+
+Before solving a task from scratch, check whether an available skill,
+subagent, or slash command already covers it — most surface themselves
+automatically off their own description, so a quick scan is usually enough.
+Compounding capability beats re-deriving the same solution every session.
+
+If you author a project skill with side effects (commit, deploy, send a
+message), set `disable-model-invocation: true` in its frontmatter so it
+only runs on explicit invocation, never auto-triggered off a description
+match.
 
 # Debugging discipline
 

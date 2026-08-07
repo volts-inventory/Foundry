@@ -56,6 +56,21 @@ explicitly instead of claiming success. Never delete, skip, or weaken a
 test just to make the suite pass — fix the code or say the test caught a
 real problem.
 
+A failing lint/typecheck/test result blocks "done," full stop — not a
+judgment call, not "probably unrelated." New functionality gets a new or
+updated test alongside it, not just a promise the old ones still pass.
+
+# Review gates
+
+Before calling done a change that touches 3+ files, or anything security/
+auth/secrets/input-handling related: run the `code-review` skill
+(self-review), and `security-review` too for the security-sensitive case.
+If a skill isn't available in this session, do the equivalent check
+yourself — read the diff for correctness/simplification issues, or for
+injection, auth, and secrets handling — rather than skipping the check
+because the automation isn't there. The gate is the discipline; the skill
+is just how you save time running it.
+
 # Subagent delegation
 
 When delegating work to subagents (Agent tool, Workflow tool):

@@ -70,7 +70,7 @@ import time
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
 from fnmatch import fnmatchcase
@@ -146,6 +146,14 @@ _STATUS_BY_VERDICT = {
 # Called as on_rate_limit_wait(wait_seconds, resume_epoch, explicit) from the
 # retrying thread; exceptions are swallowed — telemetry never breaks a build.
 on_rate_limit_wait: Callable[[float, float, bool], None] | None = None
+
+# Optional observer for per-call token usage (advisory, fail-soft): a host app (the
+# Workshop) sets this to meter what a run has consumed so far, so a human pausing at
+# a checkpoint can see the cost of the work behind them. Called as
+# on_call_usage(node_id, tier, usage) once per SUCCESSFUL call, from the calling
+# thread; exceptions are swallowed — telemetry never breaks a build. It observes
+# only: nothing here can influence a request, a verdict, or a budget decision.
+on_call_usage: Callable[[str, str, Mapping[str, int]], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -799,6 +807,11 @@ class ModelProviderProxy:
         if self._manifest.maxlen is not None and len(self._manifest) == self._manifest.maxlen:
             self._manifest_dropped += 1     # this append rolls the oldest record off
         self._manifest.append(record)
+        if on_call_usage is not None:
+            # Advisory usage meter (the Workshop shows "what this stage cost" at a
+            # checkpoint). Fail-soft: a broken observer must never fail a real call.
+            with suppress(Exception):
+                on_call_usage(node_id, tier, dict(response.usage))
         if drift:
             # Pinned-ID drift (arch §8): invalidates calibration baselines. The
             # event is ALWAYS recorded (advisory or fail-closed); the policy only

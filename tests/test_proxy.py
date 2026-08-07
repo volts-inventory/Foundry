@@ -764,3 +764,59 @@ def test_self_judge_profile_replaces_disjointness_with_stamp():
     # No exception: the check is replaced by the recorded SELF stamp (plan §0.2).
     proxy.assert_disjoint(frozenset({"anthropic-claude"}), frozenset({"anthropic-claude"}))
     assert judge_once(proxy).gate_result.judgment_provenance == JudgmentProvenance.SELF
+
+
+# ---- 8. advisory usage observer -------------------------------------------------
+
+
+def test_on_call_usage_observer_meters_every_successful_call():
+    # The Workshop meters what a stage cost so a human pausing at a checkpoint can
+    # judge "continue or not?" against real spend. Advisory: observe only.
+    from foundry.proxy import model_provider_proxy as mpp
+
+    seen: list[tuple[str, str, dict[str, int]]] = []
+    proxy, _ = make_proxy()
+    prev = mpp.on_call_usage
+    mpp.on_call_usage = lambda node, tier, usage: seen.append((node, tier, dict(usage)))
+    try:
+        proxy.complete("n0", "T3", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
+        proxy.complete("n1", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
+    finally:
+        mpp.on_call_usage = prev
+    assert [(n, t) for n, t, _ in seen] == [("n0", "T3"), ("n1", "T2")]
+    assert seen[0][2] == USAGE          # the real per-call usage, not a summary
+
+
+def test_on_call_usage_observer_never_breaks_a_call():
+    # Telemetry is not load-bearing: a raising observer must not fail the call.
+    from foundry.proxy import model_provider_proxy as mpp
+
+    def boom(_node, _tier, _usage):
+        raise RuntimeError("observer is broken")
+
+    proxy, _ = make_proxy()
+    prev = mpp.on_call_usage
+    mpp.on_call_usage = boom
+    try:
+        result = proxy.complete("n0", "T3", "SOP", [{"role": "user", "content": "x"}],
+                                purpose="gate")
+    finally:
+        mpp.on_call_usage = prev
+    assert result.usage == USAGE        # the call completed normally
+
+
+def test_failed_call_meters_nothing():
+    # A call that never reaches a response has no usage to report.
+    from foundry.proxy import model_provider_proxy as mpp
+
+    seen: list[str] = []
+    proxy, _ = make_proxy(FakeTransport(fail_times=99), max_retries=1)
+    prev = mpp.on_call_usage
+    mpp.on_call_usage = lambda node, _tier, _usage: seen.append(node)
+    try:
+        with pytest.raises(ProxyUnavailable):
+            proxy.complete("n0", "T3", "SOP", [{"role": "user", "content": "x"}],
+                           purpose="gate")
+    finally:
+        mpp.on_call_usage = prev
+    assert seen == []

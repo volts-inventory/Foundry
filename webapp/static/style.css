@@ -56,10 +56,13 @@ body{
 /* Stage / per-service chips: ONE line that scrolls sideways when a long milestone
    ladder outgrows the bar — never wrapping (a wrapped "0/6 ✓" tally reads broken). */
 .gates-mini{display:flex;gap:5px;flex-wrap:nowrap}
-.gates-mini .g{padding:1px 6px;border-radius:3px;border:2px solid var(--line);font-size:11px;
-  white-space:nowrap}
-.gates-mini .g.pass{border-color:var(--green);color:var(--green)}
-.gates-mini .g.fail{border-color:var(--red);color:var(--red)}
+/* The checkpoint dialog reuses these pills (same verdicts, same colours) — it just
+   wraps them instead of scrolling, since the dialog has the width to show them all. */
+.gates-mini .g,.cp-gate-strip .g{padding:1px 6px;border-radius:3px;border:2px solid var(--line);
+  font-size:11px;white-space:nowrap}
+.gates-mini .g.pass,.cp-gate-strip .g.pass{border-color:var(--green);color:var(--green)}
+.gates-mini .g.fail,.cp-gate-strip .g.fail{border-color:var(--red);color:var(--red)}
+.gates-mini .g.error,.cp-gate-strip .g.error{border-color:#d9a23a;color:#ffcf7a}
 /* platform per-service chips, coloured by lifecycle state */
 .gates-mini .g.plat{text-transform:none}
 .gates-mini .g.plat.queued{border-color:var(--line);color:var(--dim)}
@@ -303,6 +306,51 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
 .cp-advisor.warn .adv-head{color:#ffe6a3}
 .cp-advisor .adv-finding{font-size:11px;color:var(--dim);margin-top:3px;line-height:1.4}
 #cp-summary{color:var(--ink);font-size:14px;margin:4px 0}
+
+/* ---- checkpoint evidence: cost, gates, flags, artifacts, provenance ---- */
+/* Cost/elapsed chips */
+.cp-meta{display:flex;flex-wrap:wrap;gap:5px;margin:8px 0 2px}
+.cp-meta:empty{display:none}
+.cp-chip{border:2px solid var(--line);border-radius:5px;padding:2px 7px;
+  font-size:10px;color:var(--dim);background:#0e1626;text-transform:uppercase}
+.cp-chip.dim{border-color:transparent;background:transparent;text-transform:none}
+/* Gate verdicts so far: the strip, then the failures named in words */
+.cp-gates{margin:9px 0 2px}
+.cp-gate-strip{display:flex;flex-wrap:wrap;gap:4px}
+.cp-gate-line{font-size:11px;margin-top:5px;line-height:1.4}
+.cp-gate-line.ok{color:#9dffbf}
+.cp-gate-line.bad{color:#ff9b9b}
+/* What the crew flagged (journal concerns + low confidence) */
+.cp-flags{border:2px solid #6b5a1f;border-radius:6px;padding:6px 9px;margin:9px 0 2px;
+  background:#191506;max-height:22vh;overflow-y:auto}
+.cp-flags-head{font-size:11px;font-weight:bold;color:#ffe6a3;text-transform:uppercase}
+.cp-flag{font-size:11px;color:var(--dim);margin-top:3px;line-height:1.4}
+.cp-flag.concern{color:#ffd9a3}
+.cp-flag.dim{color:var(--dim)}
+/* What landed this stage (collapsible; auto-open when something needs a look) */
+.cp-details{margin:9px 0 2px}
+.cp-details>summary{cursor:pointer;color:var(--gold);font-size:12px;text-transform:uppercase}
+.cp-arts{max-height:26vh;overflow-y:auto;margin-top:6px;
+  border:2px solid var(--line);border-radius:6px;background:#0e1626;padding:6px 9px}
+.cp-art{font-size:11px;color:var(--dim);margin:2px 0;line-height:1.4}
+.cp-art-label{color:var(--ink)}
+.cp-art.risk .cp-art-label,.cp-art.risk .cp-art-detail{color:#ff9b9b}
+/* Provenance of the pause (phase · route · state sha) */
+.cp-prov{color:var(--dim);font-size:10px;margin-top:10px;opacity:.8;
+  word-break:break-all;text-transform:uppercase}
+.cp-prov:empty{display:none}
+/* Buttons carry what they DO, under the verb. The row is STICKY: the evidence
+   above can outgrow a phone screen, and the decision must never be the thing you
+   have to scroll to find. */
+.cp-actions{position:sticky;bottom:-20px;background:var(--panel);z-index:2;
+  padding:14px 0 6px;margin-top:8px;box-shadow:0 -10px 12px -4px var(--panel);
+  align-items:stretch}   /* equal heights: a taller button must not poke out of the band */
+.cp-actions button{display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:2px;flex:1;min-width:0;text-align:center}
+.cp-actions .btn-sub{font-size:9px;font-weight:normal;opacity:.85;
+  text-transform:none;line-height:1.25;white-space:normal}
+.cp-review{margin-top:8px}
+#cp-code{background:#1b3a4a;border-color:var(--blue);color:#dff2ff;font-size:11px}
 
 /* ---- suggest-N row ---- */
 .slots-row{display:flex;align-items:center;gap:8px}

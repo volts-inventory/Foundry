@@ -218,16 +218,34 @@ single-server additive-homomorphic (Paillier) variant + the demo runner</textare
     <div class="dialog cp">
       <h2 id="cp-title">CHECKPOINT</h2>
       <p id="cp-summary"></p>
+      <!-- Evidence for the decision, most decisive first: what the gates say, what
+           the agents flagged, what actually landed, what the advisors think. -->
+      <div id="cp-meta" class="cp-meta"></div>
+      <div id="cp-gates" class="cp-gates hidden"></div>
+      <div id="cp-flags" class="cp-flags hidden"></div>
+      <details id="cp-arts-wrap" class="cp-details hidden">
+        <summary>What landed this stage <span id="cp-arts-count" class="hint"></span></summary>
+        <div id="cp-arts" class="cp-arts"></div>
+      </details>
       <div id="cp-advisors" class="cp-advisors hidden"></div>
+      <p id="cp-adv-note" class="cp-note hidden"></p>
       <p class="cp-note">An approve only lets the build reach the gates — it can never ship a failing build. Request changes to send the work back for another pass.</p>
       <div id="cp-edit-wrap" class="hidden">
         <label>Next-iteration request <span class="hint">— edit before approving; REQUEST CHANGES builds YOUR text instead of the panel's</span></label>
         <textarea id="cp-edit" rows="3"></textarea>
       </div>
-      <div class="dialog-actions">
-        <button id="cp-approve" class="primary">APPROVE</button>
-        <button id="cp-changes" class="warn">REQUEST CHANGES</button>
-        <button id="cp-reject" class="danger">REJECT</button>
+      <div id="cp-prov" class="cp-prov"></div>
+      <!-- Reading the diff is evidence-gathering, so it sits with the evidence —
+           above the decision, not competing with it. -->
+      <div class="dialog-actions cp-review">
+        <button id="cp-code">⌥ REVIEW THE CODE</button>
+      </div>
+      <!-- Sticky: the evidence above can outgrow a phone screen, and the decision
+           must never be the thing you have to scroll to find. -->
+      <div class="dialog-actions cp-actions">
+        <button id="cp-approve" class="primary">APPROVE<span class="btn-sub" id="cp-approve-sub"></span></button>
+        <button id="cp-changes" class="warn">REQUEST CHANGES<span class="btn-sub" id="cp-changes-sub"></span></button>
+        <button id="cp-reject" class="danger">REJECT<span class="btn-sub" id="cp-reject-sub"></span></button>
       </div>
     </div>
   </div>

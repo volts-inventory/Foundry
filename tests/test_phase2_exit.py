@@ -38,10 +38,13 @@ GENUINELY end-to-end (no stand-in beyond the mock-model + dev-HMAC trust roots):
     ``reverification_plan`` is fed REAL runner-attested priors from the live runner
     over a materialized tree (a cosmetic change re-runs a STRICT subset; a lockfile
     change re-runs the bound gates) — a genuine producer→planner contract.
-  * The bounded-rework loop for criterion (d): a real Gated run on a diff that makes
-    the assurance Audit gate ERROR routes to the bounded fix loop and TERMINATES
-    within ``max_fix_attempts`` (reaches a terminal phase, no ``GraphRecursionError``,
-    no PR) — the bound is the SHIPPED supervisor/assurance mechanism, run live.
+  * The bounded-rework loop for criterion (d): a real Gated run on a diff whose test
+    suite cannot be collected makes the Test gate ERROR, routes to the bounded fix
+    loop and TERMINATES within ``max_fix_attempts`` (reaches a terminal phase, no
+    ``GraphRecursionError``, no PR) — the bound is the SHIPPED supervisor mechanism,
+    run live. Unlike the subgraph-scoped bounded-loop tests, this also asserts the
+    RELEASE side of a bound-exhausted halt (no admission, no PR, no sign-off), a
+    different terminal route from the latched stable-FAIL halt in criterion (a).
   * The HITL-volume measure for criterion (e): the count of ``SignOffRecord``s on
     the live ``sign_offs`` channel is the observable, measurable HITL volume.
   * The verifiable evidence pack for criterion 6: the emitted open_pr carries an
@@ -235,13 +238,22 @@ _VULN_DIFF = (
     "+def test_ok():\n    assert 1 + 1 == 2\n"
     '--- /dev/null\n+++ b/uv.lock\n@@ -0,0 +1,2 @@\n+name = "pkg"\n    license = "MIT"\n'
 )
-# A diff with NO lockfile: the assurance Audit gate cannot rederive its inventory
-# -> attested ERROR (infra, NOT a verdict; never latches) -> the assurance boundary
-# routes to a BOUNDED fix loop, then HALTs once max_fix_attempts is spent (AW4/SUP5).
-_NO_LOCKFILE_DIFF = (
+# A diff whose test suite cannot even be COLLECTED (it imports a module that does
+# not exist): the Test gate is an attested ERROR (infra, NOT a verdict; never
+# latches) -> the boundary routes to a BOUNDED fix loop, then HALTs once
+# max_fix_attempts is spent (AW4/SUP5).
+#
+# This used to force the ERROR by shipping no lockfile, so the Audit gate could not
+# rederive its SBOM inventory. That premise is gone: the trusted-side materialization
+# seam now scaffolds a requirements.txt for any Python tree that ships no manifest
+# (gate_wiring._scaffold_manifest), so the audit grounds and PASSes. An uncollectable
+# suite is a durable ERROR with no such escape hatch, and criterion (d) is about the
+# BOUND, not about which gate produced the error.
+_ERROR_DIFF = (
     "--- /dev/null\n+++ b/app.py\n@@ -0,0 +1,1 @@\n+VALUE = 42\n"
-    "--- /dev/null\n+++ b/test_app.py\n@@ -0,0 +1,2 @@\n"
-    "+def test_ok():\n    assert 1 + 1 == 2\n"
+    "--- /dev/null\n+++ b/test_app.py\n@@ -0,0 +1,3 @@\n"
+    "+import this_module_does_not_exist_xyz\n\n\ndef test_x():\n    assert True\n"
+    '--- /dev/null\n+++ b/uv.lock\n@@ -0,0 +1,2 @@\n+name = "pkg"\n    license = "MIT"\n'
 )
 
 
@@ -638,28 +650,39 @@ def test_exit_c_lockfile_change_invalidates_the_bound_gates(tmp_path: Any) -> No
 
 
 def test_exit_d_persistently_failing_run_halts_within_caps_no_pr(tmp_path: Any) -> None:
-    """A persistently-ERRORing assurance run HALTS within ``max_fix_attempts`` — it
-    TERMINATES (reaches a terminal state, no GraphRecursionError / hang) and emits
-    no PR.
+    """A persistently-ERRORing run HALTS within ``max_fix_attempts`` — it TERMINATES
+    (reaches a terminal state, no GraphRecursionError / hang) and emits no PR.
 
-    A diff with NO lockfile makes the assurance Audit gate ERROR (inventory not
-    rederivable). An ERROR never latches (infra, DS7) so it routes to the BOUNDED
-    fix loop; the bound (max_fix_attempts=1, raised internally by the supervisor)
-    is exhausted -> the boundary HALTs. The proof it terminates is that ``invoke``
-    RETURNS a terminal state rather than raising ``GraphRecursionError`` on an
-    infinite loop. GENUINELY end-to-end (the SHIPPED bounded mechanism, run live)."""
+    A diff whose suite cannot be collected makes the Test gate ERROR. An ERROR never
+    latches (infra, DS7) so it routes to the BOUNDED fix loop; the bound
+    (max_fix_attempts=1, raised internally by the supervisor) is exhausted -> the
+    boundary HALTs. The proof it terminates is that ``invoke`` RETURNS a terminal
+    state rather than raising ``GraphRecursionError`` on an infinite loop. GENUINELY
+    end-to-end (the SHIPPED bounded mechanism, run live).
+
+    What this adds over the subgraph-scoped bounded-loop tests
+    (test_subgraph_assurance, test_supervisor) is the RELEASE side of a
+    bound-exhausted halt, through the whole Gated pipeline: no PR, no admission, no
+    release sign-off. The other no-PR coverage halts on a LATCHED stable-FAIL, which
+    reaches the terminal state by a different route."""
     final, records = _run_gated(
-        tmp_path, "run-rework", diff_body=_NO_LOCKFILE_DIFF, max_fix_attempts=1
+        tmp_path, "run-rework", diff_body=_ERROR_DIFF, max_fix_attempts=1
     )
 
-    # The assurance Audit gate ERRORed (no lockfile inventory) — runner-attested.
-    audit = next((g for g in final["gates"] if g.name == "audit"), None)
-    assert audit is not None
-    assert audit.status is GateStatus.ERROR
-    assert audit.runner_attestation is not None
+    # The Test gate ERRORed (the suite does not import) — runner-attested.
+    test_gate = next((g for g in final["gates"] if g.name == "test"), None)
+    assert test_gate is not None
+    assert test_gate.status is GateStatus.ERROR
+    assert test_gate.runner_attestation is not None
     # ERROR never latches (infra, not a verdict) — so this halted on the BOUND, not
     # a stable-FAIL latch. The bounded loop terminated rather than looping forever.
-    assert not records.stable_fail_latched(audit.run_against, "audit")
+    assert not records.stable_fail_latched(test_gate.run_against, "test")
+    # The BOUND is what stopped it: the fix counter was actually bumped and spent,
+    # and the run reached a terminal phase. Without these the test would still pass
+    # if the error stopped routing to the fix loop at all — which is precisely how
+    # the previous fixture rotted silently when the audit gate stopped ERRORing.
+    assert final["budget"].fix_attempts_since_all_green >= 1
+    assert final["phase"] == "halted"
 
     # Terminated (no PR; the release was never admitted).
     assert gated_release_admitted(final, _config("run-rework")) is False

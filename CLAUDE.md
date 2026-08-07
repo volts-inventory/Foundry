@@ -42,6 +42,10 @@ How to escalate:
 
 Don't escalate typos, formatting, renames, test scaffolding, file reads, or anything already specified precisely.
 
+# Debugging discipline
+
+After a fix attempt fails, don't immediately layer a second patch on top of it if you don't understand why it failed — revert to the last known-good state, re-diagnose from there, then apply one fix at a time. A clean, understood attempt beats a stack of confused patches. If the next clean attempt also fails, that's the "two failed fix attempts" trigger above: escalate.
+
 # Git hygiene
 
 - New commits, not amends — unless explicitly asked to amend.
@@ -61,3 +65,5 @@ Don't escalate typos, formatting, renames, test scaffolding, file reads, or anyt
 If this file has no "Dev commands" section: find this repo's actual build/lint/test commands (README, CONTRIBUTING, Makefile, package.json scripts, pyproject.toml, etc.) and add a "Dev commands" section here recording them verbatim. Do this once, before starting the first task of a session — don't re-derive it once the section exists.
 
 If you notice a hard invariant while working — something that would break correctness, state, or a contract if violated, and isn't written down anywhere yet — propose adding it to this file rather than silently writing it in yourself.
+
+If you or the user catch a mistake worth not repeating — a wrong assumption, a broken convention, a footgun specific to this repo — add a one-line rule to this file on the spot. Don't rely on remembering it next session.

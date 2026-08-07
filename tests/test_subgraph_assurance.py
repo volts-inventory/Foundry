@@ -353,7 +353,7 @@ def test_request_changes_drives_bounded_rework_loop_that_terminates() -> None:
     assert final.get("phase") in {"assurance_fix", "assurance_gate"}
 
 
-# ---- ERROR (no lockfile) also drives a bounded loop that terminates -----------
+# ---- ERROR (ungroundable SBOM) also drives a bounded loop that terminates -----
 
 
 def test_gate_error_drives_bounded_rework_loop_that_terminates() -> None:

@@ -42,6 +42,15 @@ How to escalate:
 
 Don't escalate typos, formatting, renames, test scaffolding, file reads, or anything already specified precisely.
 
+# Subagent delegation
+
+When delegating work to subagents (Agent tool, Workflow tool):
+
+- Cap parallel fan-out at 2-4 subagents per wave. More independent subtasks than that? Group them by shared files/subsystem/convention until the wave count fits — fewer, coherent chunks beat maximum parallelism; each subagent pays its own orientation cost.
+- Model routing: default delegated work to Opus. Downgrade a specific, well-understood category of mechanical work (search, scaffolding, structural checks) to a cheaper model only once you've confirmed it doesn't need equivalent reasoning quality — don't downgrade by default.
+- Skills don't propagate to subagents automatically. Reference the skill file in the delegation prompt instead of restating its contents inline.
+- Background tasks: wait for the completion notification. If asked for status mid-flight, answer from what's already known — don't re-poll for output, which can pull the whole raw transcript back into context.
+
 # Debugging discipline
 
 After a fix attempt fails, don't immediately layer a second patch on top of it if you don't understand why it failed — revert to the last known-good state, re-diagnose from there, then apply one fix at a time. A clean, understood attempt beats a stack of confused patches. If the next clean attempt also fails, that's the "two failed fix attempts" trigger above: escalate.

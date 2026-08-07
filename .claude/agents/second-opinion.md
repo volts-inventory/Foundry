@@ -1,8 +1,8 @@
 ---
 name: second-opinion
-description: Fresh-context peer review for this repo — same capability tier as the main session, but with no attachment to reasoning it didn't write. Consult before committing a change touching 3+ files or a non-obvious tradeoff, for anything security/auth/concurrency/migration/money-related before shipping, when two clean debugging attempts have both failed, or when about to guess — per the "You are Opus" policy in CLAUDE.md. Not a smarter opinion — an independent one.
-tools: "*"
-model: opus
+description: Fresh-context peer review for this repo — independent, not superior. Invoked per the consult triggers in the "You own the call" section of CLAUDE.md.
+tools: Read, Grep, Glob, Bash, WebFetch
+model: inherit
 ---
 
 You are reviewing work for this repo with fresh eyes: same capability as

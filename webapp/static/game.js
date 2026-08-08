@@ -137,6 +137,11 @@ const IDLE_CHATTER = {
 // What the CTO says as he arrives to oversee whichever group just went live.
 const CTO_LINES = ["how's it looking?", "keep going, this is good", "what's blocking you?",
                    "I'll be right here", "show me when it's ready"];
+// The CTO walks a BEAT rather than being leashed to the newest event: he stands with one
+// live team for a spell, then moves on to the next room that has work. Rooms he can stand
+// in, in floor order (the gate/vault/his office aren't teams).
+const PATROL_ROOMS = ["product","architecture","frontend","backend","data","qa","security"];
+const CTO_DWELL_MS = [7000, 13000];   // how long he oversees one room before moving on
 const pick = (arr)=> arr[Math.floor(Math.random()*arr.length)];
 
 // ---- generated character sprites (our own pixel art) -----------------------
@@ -354,7 +359,10 @@ class FloorScene extends Phaser.Scene {
     this.gatePips = {};
     this.activeRoom = "lobby";
     this.liveRooms = new Set();      // rooms with a node in-flight (concurrent stages)
-    this.workingAgents = new Set();  // named agents whose node is running RIGHT NOW
+    // agent name -> how many of its nodes are in flight. A COUNT, not a set: a platform
+    // build runs several services at once, so the same role ("Frontend Lead") can be
+    // mid-call twice — one service finishing must not unseat the other.
+    this.workingAgents = new Map();
     this.roomInflight = {};          // room -> count of in-flight nodes (ref-count)
     this.ctoRoom = null;             // the room the CTO is overseeing = the active group
     // per-floor offset into IDLE_MOODS so the napper isn't the same person on every floor
@@ -833,6 +841,7 @@ class FloorScene extends Phaser.Scene {
       const sc = s[(this._sf = (this._sf||0)+1) % s.length];
       if (sc) this.tweens.add({targets:sc, alpha:{from:0.6,to:0.95}, duration:150, yoyo:true});
     }});
+    this.time.addEvent({delay:1500, loop:true, callback:()=>this.ctoPatrol()});  // the CTO's rounds
     this.time.addEvent({delay:2600, loop:true, callback:()=>this.deskSweep()});  // stay-at-your-desk sweep
     this.time.addEvent({delay:1600, loop:true, callback:()=>this.chatter()});    // idle chat bubbles
   }
@@ -896,6 +905,7 @@ class FloorScene extends Phaser.Scene {
   }
   // checkpoint spotlight + bouncing "?" over the CTO
   spotlightCTO(on){
+    this.ctoHold = !!on;        // he's deciding, not doing his rounds — pause the patrol
     if (this.spot){ this.spot.destroy(); this.spot=null; }
     if (this.qmark){ this.qmark.destroy(); this.qmark=null; }
     if (!on || !this.cto) return;
@@ -1204,13 +1214,29 @@ class FloorScene extends Phaser.Scene {
     const ph = (k)=> (ENG_ROOMS.includes(k)||k==="engineering") ? "engineering" : k;
     const oi = SEQ.indexOf(ph(prev)), ni = SEQ.indexOf(ph(key));
     if (oi >= 0 && ni > oi) this.deliverWork(prev, key);
-    // The CTO GOES AND STANDS WITH the group that's live — since everyone else is
-    // permanently at their own desk, he's the thing that tells you at a glance WHICH
-    // group is working. He never camps in the gate/vault (not teams): for those, and
-    // for no stage at all, he walks back to his office.
-    const TEAM = {product:1,architecture:1,engineering:1,frontend:1,backend:1,data:1,qa:1,security:1};
-    this.sendCTO(TEAM[key] && ROOMS[key] ? key : null);
+    // The CTO GOES AND STANDS WITH a group that's live — since everyone else is
+    // permanently at their own desk, he's the thing that tells you at a glance WHERE the
+    // work is. He does NOT jump to every newest event (with several rooms live that just
+    // teleports him around): the patrol picks the room, and only moves him when his dwell
+    // is up or the room he's in has gone dark.
+    this.ctoPatrol();
     this.staffRoom(key);                 // the live crew heads-down; everyone else off duty
+  }
+
+  // The rooms with work in them right now, in floor order — the CTO's patrol route.
+  // `roomLive` expands the virtual engineering stage, so its three lanes each count.
+  patrolRooms(){ return PATROL_ROOMS.filter(k => ROOMS[k] && this.roomLive(k)); }
+  // One beat of the patrol: stay put while the dwell runs, then walk to the next live
+  // room. Called on a timer AND whenever the live set changes, so he reacts at once when
+  // the first work lands or the room he's overseeing goes quiet.
+  ctoPatrol(){
+    if (!this.cto || this._dead || this.ctoHold) return;         // held during a checkpoint
+    if (this.cto.moveTween && this.cto.moveTween.isPlaying()) return;   // already walking
+    const rooms = this.patrolRooms();
+    if (!rooms.length){ if (this.ctoRoom !== null) this.sendCTO(null); return; }
+    const here = rooms.indexOf(this.ctoRoom);
+    if (here >= 0 && (rooms.length === 1 || Date.now() < (this.ctoDwellUntil||0))) return;
+    this.sendCTO(rooms[(here + 1) % rooms.length]);   // here<0 (office/dark room) -> rooms[0]
   }
 
   // Walk the CTO to the room he's overseeing (null → back to his office) and mark it.
@@ -1224,11 +1250,16 @@ class FloorScene extends Phaser.Scene {
     this.ctoRoom = T ? T.key : null;
     this.paintGlow();
     if (!this.cto || !this.lobby) return;
+    // Fresh dwell for wherever he's headed, so the patrol leaves him alone while he
+    // oversees this room (jittered, so he isn't metronomic).
+    const dwell = ()=>{ this.ctoDwellUntil = Date.now() + CTO_DWELL_MS[0]
+      + Math.random()*(CTO_DWELL_MS[1]-CTO_DWELL_MS[0]); };
     const tx = Math.round(T ? T.cx : this.lobby.cx);
     const ty = Math.round(T ? T.standY : this.lobby.standY);
-    if (Math.abs(this.cto.x-tx) < 4 && Math.abs(this.cto.y-ty) < 4) return;   // already there
+    if (Math.abs(this.cto.x-tx) < 4 && Math.abs(this.cto.y-ty) < 4){ dwell(); return; }
     this.walkTo(this.cto, tx, ty, ()=>{
       if (this._dead) return;
+      dwell();
       // overseeing a team → faces up into the room, watching them work; in his own
       // office he faces the door instead.
       if (T){ if (this.cto.faceBack) this.cto.faceBack(); }
@@ -1396,14 +1427,17 @@ class FloorScene extends Phaser.Scene {
   nodeTelemetry(room, agent, phase){
     if (!room) return;
     if (phase === "finish"){
-      if (agent) this.workingAgents.delete(agent);
+      if (agent){
+        const n = (this.workingAgents.get(agent)||1) - 1;
+        if (n > 0) this.workingAgents.set(agent, n); else this.workingAgents.delete(agent);
+      }
       this.roomInflight[room] = Math.max(0, (this.roomInflight[room]||0) - 1);
       if (this.roomInflight[room] === 0) this.liveRooms.delete(room);  // no work left here
       this.restaff();
       return;
     }
     this.liveRooms.add(room);
-    if (agent) this.workingAgents.add(agent);
+    if (agent) this.workingAgents.set(agent, (this.workingAgents.get(agent)||0) + 1);
     if (phase === "start") this.roomInflight[room] = (this.roomInflight[room]||0) + 1;
     // The primary room (glow + CTO visit) follows the most recent start; re-seat either way.
     if (this.activeRoom !== room) this.setActiveRoom(room); else this.restaff();
@@ -1429,7 +1463,7 @@ class FloorScene extends Phaser.Scene {
   // while the Junior is. (Per-AREA — frontend vs backend — isn't in the telemetry: both
   // nodes run once across every area, so all disciplines light together.)
   restaff(){
-    const namedIn = (rm)=>{ for (const a of this.workingAgents) if (AGENT_ROOM[a]===rm) return true; return false; };
+    const namedIn = (rm)=>{ for (const a of this.workingAgents.keys()) if (AGENT_ROOM[a]===rm) return true; return false; };
     for (const [name,a] of this.agents){
       if (!a.seen) continue;
       const rm = AGENT_ROOM[name];
@@ -1923,6 +1957,9 @@ function routeEvent(floor, ev){
       // so the office shows who is genuinely working RIGHT NOW — not the whole room.
       const phase = ev.phase || "pulse";     // legacy no-phase "active" = a room pre-seat
       if (S) S.nodeTelemetry(ev.room, ev.agent, phase);
+      // `quiet` = floor-only telemetry: a platform build already narrates every node as a
+      // per-service `svc` box, so logging it again here would double every line.
+      if (ev.quiet) break;
       if (phase === "finish"){
         if (ev.agent) agentActivity(F, ev.room, ev.agent, true, ev.summary);   // box → done
         else if (ev.step) logTo(F, "good", "✓ "+ev.step);

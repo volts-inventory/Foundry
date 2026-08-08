@@ -130,4 +130,15 @@ it yourself, immediately, as a one-line bullet under a `## Learned` heading
 at the end of this section. No judgment call here (it already happened),
 so no need to ask first; just don't rely on remembering it next session.
 
+## Dev commands
+
+```
+ruff check .                                              # lint
+ruff check --fix . && ruff format .                       # autofix + format
+mypy foundry webapp                                       # typecheck (strict)
+pytest -n auto -q                                         # full suite, parallel
+pytest -n auto -q -m "not slow"                           # fast inner loop (skips slow e2e)
+ruff check . && mypy foundry webapp && pytest -n auto -q  # the full gate
+```
+
 ## Learned

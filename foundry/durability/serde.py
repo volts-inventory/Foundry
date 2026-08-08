@@ -33,6 +33,14 @@ FOUNDRY_MSGPACK_MODULES: list[tuple[str, str]] = [
     ("foundry.schemas.checkpoint", "CheckpointDecision"),
     ("foundry.schemas.checkpoint", "CheckpointVerdict"),
     ("foundry.schemas.checkpoint", "CheckpointBoundary"),
+    # Phase-2 channel records that ride `risk_tier` / `sign_offs` directly. Both
+    # are read as TYPED objects after a resume — `assurance_gate_set` reads
+    # `tier.tier` and the release boundary filters `s.role` — so a type missing
+    # here degrades the record to a dict and raises AttributeError mid-run.
+    # ChangeRiskTier is the class behind the `RiskTier` alias TierDecision carries.
+    ("foundry.schemas.governance", "TierDecision"),
+    ("foundry.schemas.governance", "ChangeRiskTier"),
+    ("foundry.schemas.governance", "SignOffRecord"),
     # `scope_tier` single-writer channel record — rides the channel directly
     # (like GateTriage), so it must round-trip the checkpoint or a resumed run
     # loses the tier and silently reverts to STANDARD prompts mid-build. NOT a

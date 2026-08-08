@@ -1132,6 +1132,13 @@ class FloorScene extends Phaser.Scene {
     const ci = opt.ci != null ? opt.ci : 0;
     const ch = CHARACTERS[((ci % CHARACTERS.length) + CHARACTERS.length) % CHARACTERS.length];
     const c = this.add.container(x,y).setDepth(10);
+    // ON-THE-CLOCK marker: a green disc BEHIND the whole person while their node is
+    // running, so "who is working right now" reads from across the floor. First child
+    // of the container = backmost, so it never covers the body, the badge or the desk;
+    // it lives on the container rather than `bob` so the walk bob doesn't jitter it.
+    const glow = this.add.circle(0,-8,19,0x2fe07a,0.35).setStrokeStyle(2,0x6cffae,0.95)
+      .setAlpha(0).setVisible(false);
+    c.add(glow);
     c.add(this.add.ellipse(0,3,11,4,PC.shadow,0.32));       // cool shadow under the feet
     const bob = this.add.container(0,0);
     // 0.36 x the caller's 1.4 container = ~0.5 net of the 64px frame => crisp 32px
@@ -1147,12 +1154,24 @@ class FloorScene extends Phaser.Scene {
     const spark = this.add.rectangle(6,-24,2,2,0xfff04a).setOrigin(0,0).setVisible(false);
     bob.add(spark);
     c.add(bob);
-    c.bob=bob; c.sprite=sprite; c.spark=spark; c.eyes=[]; c.char=ch; c._wf=0;
+    c.bob=bob; c.sprite=sprite; c.glow=glow; c.spark=spark; c.eyes=[]; c.char=ch; c._wf=0;
     c.faceFront = ()=>{ sprite.setFrame(ch.front[c._wf % ch.front.length]); };
     c.faceBack  = ()=>{ sprite.setFrame(ch.back); };
     return c;
   }
 
+  // Light (or drop) the working disc. Idempotent: restaff() re-seats the whole floor
+  // on every telemetry event, so re-lighting an already-lit agent must not restart the
+  // pulse (it would flicker in step with the event stream instead of breathing).
+  setGlow(a, on){
+    if (!a || !a.glow || !!a.glowOn === !!on) return;
+    a.glowOn = !!on;
+    if (a.glowTween){ a.glowTween.stop(); a.glowTween = null; }
+    if (!on){ a.glow.setAlpha(0).setVisible(false); return; }
+    a.glow.setVisible(true).setAlpha(1);
+    a.glowTween = this.tweens.add({targets:a.glow, alpha:{from:0.62,to:1},
+      duration:760, yoyo:true, repeat:-1, ease:"Sine.inOut"});
+  }
   // Stepped walk: a snappy 2-frame bob + waddle on the whole body (legs are baked).
   startWalk(a){
     if (!a || !a.bob) return;
@@ -1353,6 +1372,7 @@ class FloorScene extends Phaser.Scene {
   // busy->idle transition, so restaff() churn can't make anyone twitch.
   standDown(a){
     if (!a || !a.seen || !a.home) return;
+    this.setGlow(a, false);                            // off the clock -> no halo
     if (a.idle && !a.working && a.atDesk) return;      // already settled — leave them be
     a.working = false; a.atDesk = true;
     this.clearBubble(a, true);
@@ -1410,6 +1430,7 @@ class FloorScene extends Phaser.Scene {
   deskRest(a, working, busy){
     if (!a || !a.home) return;
     a.working = working; a.atDesk = true; this.clearIdle(a); this.clearBubble(a, true);
+    this.setGlow(a, working);
     if (!a.seen){ a.seen = true; a.setAlpha(1); }
     this.zzzLoop(a);                       // idempotent; the gate shows it only when idle
     const settle = ()=>{
@@ -1738,7 +1759,11 @@ class FloorScene extends Phaser.Scene {
 
   // Seat the engineers in their discipline ROOMS from current org + pool state.
   layoutEngineering(){
-    const kill=(s)=>{ if(!s) return; s._dead=true; if(s.zzzEv){ s.zzzEv.remove(); s.zzzEv=null; }
+    // setGlow first: destroy() does NOT kill tweens targeting the object, so a lit
+    // sprite would leave a repeat:-1 alpha tween writing to a dead target forever —
+    // and this runs on every org event, so it accumulates.
+    const kill=(s)=>{ if(!s) return; this.setGlow(s, false);
+      s._dead=true; if(s.zzzEv){ s.zzzEv.remove(); s.zzzEv=null; }
       if(s.chair){ s.chair.destroy(); s.chair=null; } s.destroy(); };
     if(this.techLeadGroup) this.techLeadGroup.forEach(kill);
     if(this.poolGroup) this.poolGroup.forEach(kill);
@@ -2152,10 +2177,66 @@ function rowNode(cls, headline, lines){
   d.appendChild(ul); li.appendChild(d); return li;
 }
 function artBase(label){ return (String(label||"").replace(/\s*#\d+\s*$/,"").trim()) || "Artifact"; }
+// ---- the log FOLLOWS new activity ------------------------------------------
+// Every mutation of the live log goes through this: it measures whether you were
+// already at the bottom BEFORE the DOM grows, then scrolls to the new bottom if you
+// were. Boxes grow in place as their agent works (a new "· editing x.py" line inside
+// an existing box), so scrolling only on append left the newest lines under the fold —
+// which is what made the log look stuck. If you HAVE scrolled up, we leave the view
+// where you put it and raise the jump-to-latest pill instead.
+const LOG_PIN_SLACK = 48;   // px from the bottom that still counts as "at the bottom"
+// Following = you're parked at the bottom. Measured from the live scroll position on
+// every mutation, so a growing box never silently unpins the view and scrolling up to
+// read something never gets yanked back down. Only kept as state to survive the log
+// being hidden (the PROGRESS tab), where nothing is measurable.
+let logFollow = true;
+function logAtBottom(ul){
+  return ul.scrollHeight - ul.scrollTop - ul.clientHeight <= LOG_PIN_SLACK;
+}
+function showLogJump(on){
+  const b=document.getElementById("log-jump"); if(!b) return;
+  b.classList.toggle("hidden", !on);
+}
+// Run a mutation of the live log and, if we're following, reveal the new bottom.
+// Hidden (the PROGRESS tab is showing) => every measurement is 0, so touching
+// scrollTop would silently rewind the live list to the top: leave it alone and let
+// selectLogTab re-pin when the tab comes back.
+function inLog(mutate){
+  const ul=document.getElementById("log");
+  if(!ul){ mutate(null); return; }
+  // Re-read the position rather than trusting the scroll listener: `scroll` fires on
+  // the NEXT frame, so a mutation landing in the same tick as your scroll would still
+  // see the stale value and yank you back down.
+  if(ul.clientHeight) logFollow=logAtBottom(ul);
+  mutate(ul);
+  if(!ul.clientHeight) return;
+  if(logFollow) ul.scrollTop=ul.scrollHeight;
+  showLogJump(!logFollow);
+}
+function scrollLogToEnd(){
+  const ul=document.getElementById("log");
+  logFollow=true;
+  if(ul && ul.clientHeight) ul.scrollTop=ul.scrollHeight;
+  showLogJump(false);
+}
+{ const ul=document.getElementById("log"), jump=document.getElementById("log-jump");
+  if(ul) ul.addEventListener("scroll", ()=>{
+    if(!ul.clientHeight) return;
+    logFollow=logAtBottom(ul);
+    showLogJump(!logFollow);
+  });
+  if(jump) jump.onclick=scrollLogToEnd; }
 function appendLogDom(cls, text, lines){
-  const ul=document.getElementById("log"); if(!ul) return;
-  ul.appendChild(rowNode(cls, text, lines)); ul.scrollTop=ul.scrollHeight;
-  while(ul.children.length>240) ul.removeChild(ul.firstChild);
+  inLog((ul)=>{
+    if(!ul) return;
+    ul.appendChild(rowNode(cls, text, lines));
+    // Trimming the head removes content ABOVE the viewport, so a reader who isn't
+    // following would watch the text slide up under their eyes on every event once
+    // the log is at cap. Give back exactly the height that was cut.
+    const before=ul.scrollHeight;
+    while(ul.children.length>240) ul.removeChild(ul.firstChild);
+    if(!logFollow) ul.scrollTop=Math.max(0, ul.scrollTop-(before-ul.scrollHeight));
+  });
 }
 function logTo(F, cls, text, lines){
   F.log.push({cls, text, lines:(lines&&lines.length)?lines:null});
@@ -2215,7 +2296,10 @@ function renderAgentBox(g){
   }
   return li;
 }
-function refreshAgentBox(g){ if(g.el){ const n=renderAgentBox(g); g.el.replaceWith(n); g.el=n; } }
+function refreshAgentBox(g){
+  if(!g.el) return;
+  inLog(()=>{ const n=renderAgentBox(g); g.el.replaceWith(n); g.el=n; });
+}
 // Find-or-create the agent's box (keyed by agent for the whole build), appended in the
 // order the agent first became active — so the box header IS the "… working" line and
 // its body fills in beneath as the agent narrates / finishes / its artifacts land.
@@ -2225,8 +2309,7 @@ function agentBox(F, agent){
   if(!g){
     g={box:true, agent, room:"", done:false, cap:"", fallback:"", narrates:[], items:[]};
     F._agrp[agent]=g; F.log.push(g); if(F.log.length>240) F.log.shift();
-    if(F.floor===ACTIVE){ const ul=document.getElementById("log"); g.el=renderAgentBox(g);
-      ul.appendChild(g.el); ul.scrollTop=ul.scrollHeight; }
+    if(F.floor===ACTIVE) inLog((ul)=>{ if(!ul) return; g.el=renderAgentBox(g); ul.appendChild(g.el); });
   }
   return g;
 }
@@ -2322,13 +2405,15 @@ function renderEvBox(g){
   }
   return li;
 }
-function refreshEvBox(g){ if(g.el){ const n=renderEvBox(g); g.el.replaceWith(n); g.el=n; } }
+function refreshEvBox(g){
+  if(!g.el) return;
+  inLog(()=>{ const n=renderEvBox(g); g.el.replaceWith(n); g.el=n; });
+}
 // Append one event box (every event is a fresh box).
 function pushEvBox(F, g){
   g.evbox=true; g.body=g.body||[]; g.assumptions=g.assumptions||[]; g.concerns=g.concerns||[]; g.arts=g.arts||[];
   F.log.push(g); if(F.log.length>240) F.log.shift();
-  if(F.floor===ACTIVE){ const ul=document.getElementById("log"); if(ul){
-    g.el=renderEvBox(g); ul.appendChild(g.el); ul.scrollTop=ul.scrollHeight; } }
+  if(F.floor===ACTIVE) inLog((ul)=>{ if(!ul) return; g.el=renderEvBox(g); ul.appendChild(g.el); });
   return g;
 }
 // Fold an agent's reported specifics (journal summary + assumptions/concerns/artifacts)
@@ -2409,7 +2494,7 @@ function rebuildLog(F){
     else if(e.evbox){ e.el=renderEvBox(e); ul.appendChild(e.el); }
     else ul.appendChild(rowNode(e.cls, e.text, e.lines||null));
   }
-  ul.scrollTop = ul.scrollHeight;
+  scrollLogToEnd();          // a floor switch always lands you on the newest activity
 }
 // The high-level PROGRESS tab: one collapsible row per stage / milestone. The summary
 // carries the short "what was completed" statement; expanding shows the specifics.
@@ -2435,6 +2520,11 @@ function selectLogTab(tab){
   if (live) live.style.display = tab==="progress" ? "none" : "";
   if (prog) prog.style.display = tab==="progress" ? "" : "none";
   if (F && tab==="progress") rebuildProgress(F);
+  // Nothing was measurable while the live list was hidden, so restore the state the
+  // tab was left in: re-pin if following, otherwise put the pill back.
+  if (tab==="progress") showLogJump(false);
+  else if (logFollow) scrollLogToEnd();
+  else showLogJump(true);
 }
 function renderGatesMini(gates){
   const el=document.getElementById("gates-mini"); el.innerHTML="";
@@ -3091,6 +3181,37 @@ function askInterview(){
 const newModal=document.getElementById("new-modal");
 document.getElementById("new-btn").onclick=()=>showNewModal();
 document.getElementById("cancel-btn").onclick=()=>newModal.classList.add("hidden");
+document.getElementById("new-close").onclick=()=>newModal.classList.add("hidden");
+// ---- folded sections report what they're set to ------------------------------
+// ③ How it runs and ④ Scale & limits stay shut on their defaults, so their summary
+// line has to name those defaults — a fold that hides the setting AND its value is
+// just a setting you can't find.
+function _selLabel(id){
+  const s=document.getElementById(id);
+  if(!s || !s.selectedOptions || !s.selectedOptions.length) return "";
+  return (s.selectedOptions[0].textContent||"").split("—")[0].trim();
+}
+function syncFoldSummaries(){
+  const val=(id)=>String((document.getElementById(id)||{}).value||"").trim();
+  const run=document.getElementById("run-sum");
+  if(run) run.textContent=[_selLabel("backend-select"), _selLabel("mode-select"),
+    _selLabel("build-select"), _selLabel("adapter-select"),
+    "stack: "+(_selLabel("profile-select")||"auto")].filter(Boolean).join(" · ");
+  const scale=document.getElementById("scale-sum");
+  if(scale){
+    const ap=parseInt(val("autopilot-input"),10);
+    const parts=[(val("extra-workers")||"auto")+" workers",
+                 (val("fix-input")||"0")+" auto-fix"];
+    if(val("cap-input")) parts.push("$"+val("cap-input")+" cap");
+    parts.push(Number.isFinite(ap)&&ap>0 ? "autopilot "+ap : "autopilot off");
+    if(val("packs-input")) parts.push(val("packs-input"));
+    const sup=document.getElementById("supervised");
+    parts.push(sup && sup.checked ? "supervised" : "unsupervised");
+    scale.textContent=parts.join(" · ");
+  }
+}
+newModal.addEventListener("change", syncFoldSummaries);
+newModal.addEventListener("input", syncFoldSummaries);
 
 // ---- Presets: one-click example builds that fill every spec-side setting -------
 // The PIR entry reuses the modal's HTML defaults (one source of truth); the rest are
@@ -3233,6 +3354,7 @@ function showNewModal(parentId){
     syncStartFrom();
   });
   updateSlotHint();
+  syncFoldSummaries();   // reconciled selects (/api/config) don't fire change events
 }
 // Advisory IC-pool sizing: ask the server (/api/suggest-slots) how many parallel
 // workers the request + packs are likely to need, and fold it into the note. The
@@ -3458,6 +3580,7 @@ fetch("/api/config").then(r=>r.json()).then(c=>{
   MODELS_BY_BACKEND = c.models_by_backend || {};
   updateModelNote();
   syncCostCap();
+  syncFoldSummaries();   // these selects were set programmatically — no change event
 }).catch(()=>{});
 
 // The USD cost cap only binds *metered* API backends (real per-token charges).
@@ -3591,10 +3714,10 @@ async function rehydrate(){
   await bootReady;  // shared textures must exist before a FloorScene builds
   try {
     const {projects} = await fetch("/api/projects").then(r=>r.json());
-    if(!projects || !projects.length){ newModal.classList.remove("hidden"); return; }
+    if(!projects || !projects.length){ showNewModal(); return; }
     for(const row of projects) adoptFloor(row);
     switchToFloor(projects[projects.length-1].floor);
     renderElevator();
-  } catch(_){ newModal.classList.remove("hidden"); }
+  } catch(_){ showNewModal(); }
 }
 rehydrate();

@@ -26,11 +26,13 @@ from typing import TYPE_CHECKING, Any
 
 from foundry.canonical import content_digest
 from foundry.schemas.base import Artifact, FrozenModel
+from foundry.schemas.governance import ScopeTier
 from foundry.schemas.journal import JournalEntry
 from foundry.state.seq import Seq
 
 if TYPE_CHECKING:
     from foundry.durability.artifact_store import ArtifactStore
+    from foundry.state.factory_state import FactoryState
 
 
 def content_schema(model: type[FrozenModel], *, drop: tuple[str, ...] = ("seq",)) -> dict[str, Any]:
@@ -118,6 +120,71 @@ def emit_artifact(
 def as_text(obj: Any) -> str:
     """Canonical, sort-stable JSON serialization (deterministic prompts/digests)."""
     return json.dumps(obj, sort_keys=True, ensure_ascii=False)
+
+
+# --- scope tiering: the deterministic caps a ScopeDecision maps to ----------
+# The scope judge (a model call) supplies only the TIER; these caps are code, so
+# a tier always means the same thing and a model cannot widen its own budget.
+# STANDARD has no caps — its directive is "", which keeps every downstream prompt
+# byte-identical to a pre-tiering run.
+_DEMO_MAX_CRITERIA = 5
+_DEMO_MAX_COMPONENTS = 1
+_DEMO_MAX_OWNERSHIP_UNITS = 3
+
+# What the PM may NOT drop at any tier: these are what the deterministic gates
+# read. `oracle_hint` becomes the `oracle` field the Spec gate requires on EVERY
+# criterion (gates/spec.py `_REQUIRED_FIELDS`), and an applicable security/abuse
+# criterion is separately mandatory there (`require_security_criterion`). A cap
+# that removed either would fail the run at a signed gate instead of shrinking it.
+_DEMO_PM_DIRECTIVE = (
+    "\n\nSCOPE: DEMO. This request asks for a small demonstration, not a "
+    "production system. Author AT MOST "
+    f"{_DEMO_MAX_CRITERIA} acceptance criteria total — the ones that decide "
+    "whether the core thing works. Prefer one criterion covering the happy path "
+    "of the primary feature over broad coverage of secondary features.\n"
+    "This cap does NOT relax the following — they are checked by deterministic "
+    "gates and a build that omits them FAILS:\n"
+    "- EVERY criterion still needs a non-empty, runner-evaluable oracle_hint.\n"
+    "- Still author AT LEAST ONE security/abuse criterion (security_abuse=true). "
+    "Lead with the highest-value case rather than one per category; this is a "
+    "floor, not a quota — author a second if the request genuinely warrants it.\n"
+    "- Still author the pinned-dependency-manifest criterion (SOP step 5).\n"
+    "Spend the remaining criteria on the core feature."
+)
+
+_DEMO_ARCHITECT_DIRECTIVE = (
+    "\n\nSCOPE: DEMO. This request asks for a small demonstration, not a "
+    "production system. Design the smallest thing that works:\n"
+    f"- AT MOST {_DEMO_MAX_COMPONENTS} component. A demo is one module, not a "
+    "service topology.\n"
+    "- NO interface contracts. Return an EMPTY interfaces array — a demo has no "
+    "cross-service boundary to contract. Do not design an API, an HTTP surface, "
+    "or a client/server split unless the request explicitly asks for one.\n"
+    f"- The ownership map must name AT LEAST ONE owner and BETWEEN 1 AND "
+    f"{_DEMO_MAX_OWNERSHIP_UNITS} ownership units. Each unit becomes one "
+    "independently-built task, so extra units are the main cost of a demo. An "
+    "EMPTY ownership map is invalid — it yields zero tasks and an empty repo "
+    "that fails the build gate.\n"
+    "- Keep ADRs to the one or two decisions that actually shaped the design."
+)
+
+
+def scope_directive(state: FactoryState, *, architect: bool = False) -> str:
+    """The scope caps to append to a PM / architect prompt, or ``""``.
+
+    Reads the ``scope_tier`` single-writer channel. Returns ``""`` for STANDARD
+    (and when no decision was written), so a non-DEMO run's prompts are
+    byte-identical to a pre-tiering run — the ONLY behavioural delta this feature
+    introduces is on a run judged DEMO.
+
+    The caps shrink what the agent PROPOSES; each directive restates the floor
+    the deterministic gates still enforce, because a cap that silently dropped a
+    gate-required criterion would trade a large build for a failing one.
+    """
+    decision = state.get("scope_tier")
+    if decision is None or decision.tier is not ScopeTier.DEMO:
+        return ""
+    return _DEMO_ARCHITECT_DIRECTIVE if architect else _DEMO_PM_DIRECTIVE
 
 
 def journal_entry(

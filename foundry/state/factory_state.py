@@ -14,7 +14,7 @@ from foundry.schemas.architecture import PinnedConstraint
 from foundry.schemas.base import Artifact, BudgetLedger, ExternalAction, LogRef
 from foundry.schemas.checkpoint import CheckpointDecision
 from foundry.schemas.gates import GateResult, GateTriage
-from foundry.schemas.governance import SignOffRecord, TierDecision
+from foundry.schemas.governance import ScopeDecision, SignOffRecord, TierDecision
 from foundry.schemas.journal import JournalEntry
 from foundry.state import reducers
 
@@ -34,6 +34,17 @@ class FactoryState(TypedDict, total=False):
     spec: str  # single-writer
     route: str | None  # single-writer (triage)
     phase: str  # single-writer (supervisor)
+    # How much system the request is asking for. Single-writer — unlike
+    # `risk_tier` (written by the parent-level triage node) this one is written
+    # by the `scope_judge` node INSIDE the product subgraph; the supervisor
+    # returns that subgraph's whole final state as its delta, so the write folds
+    # through, and the product phase is entered exactly once per run (both fix
+    # loops re-enter at architecture/implementation), so LastValue never
+    # contends. PROMPT INPUT ONLY: read by the PM + architect to cap what they
+    # PROPOSE. Never read by a gate, router, or admission path — no gate is
+    # skipped and no verdict weakened at DEMO. It DOES thin the criteria those
+    # gates verify against, though; see ScopeDecision for that honest limit.
+    scope_tier: ScopeDecision | None  # single-writer (scope_judge, or --scope pin)
     required_capabilities: Annotated[list[str], reducers.union]
     pinned_constraints: Annotated[list[PinnedConstraint], reducers.merge_constraints]
     artifacts: Annotated[list[Artifact], reducers.merge_by_uri]

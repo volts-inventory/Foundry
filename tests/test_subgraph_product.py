@@ -40,6 +40,12 @@ KEY_ID = "dev-key-subgraph-product"
 
 # ---- per-node payloads, in SOP order (the four product nodes) ----------------
 
+SCOPE_PAYLOAD: dict[str, Any] = {
+    "tier": "standard",
+    "rationale": "a todo app is a real system",
+    "signals": [],
+}
+
 INTENT_PAYLOAD: dict[str, Any] = {
     "intent": "Let users manage a personal todo list.",
     "assumptions": ["single user", "web client"],
@@ -91,6 +97,7 @@ def _transport() -> MockTransport:
     payloads ride ``completions=`` and are returned verbatim as ``text``."""
     return MockTransport(
         completions=[
+            json.dumps(SCOPE_PAYLOAD),
             json.dumps(INTENT_PAYLOAD),
             json.dumps(PRD_PAYLOAD),
             json.dumps(CRITIQUE_PAYLOAD),
@@ -154,9 +161,10 @@ def test_product_subgraph_runs_nodes_in_sop_order() -> None:
     app = build_product_subgraph(_runtime(transport)).compile()
     app.invoke({"request": "build a todo app", "route": "greenfield"}, _config())
 
-    assert len(transport.requests) == 4  # exactly one model call per node
+    assert len(transport.requests) == 5  # exactly one model call per node
     sops = ["".join(block["text"] for block in req["system"]) for req in transport.requests]
     markers = [
+        "You are the Scope Judge",
         "You are the Stakeholder / Client Proxy",
         "You are the Product Manager",
         "You are the Criteria-Completeness Critic",
@@ -236,6 +244,7 @@ def test_product_subgraph_revises_on_blocking_critique() -> None:
     never a stall at a fixable Spec-gate omission."""
     transport = MockTransport(
         completions=[
+            json.dumps(SCOPE_PAYLOAD),
             json.dumps(INTENT_PAYLOAD),
             json.dumps(PRD_MISSING_SECURITY),
             json.dumps(CRITIQUE_BLOCKING),  # flags a security omission -> revise
@@ -247,8 +256,8 @@ def test_product_subgraph_revises_on_blocking_critique() -> None:
     app = build_product_subgraph(_runtime(transport, cas=ArtifactStore())).compile()
     final: FactoryState = app.invoke({"request": "build a todo app"}, _config())
 
-    # intent, pm, critic, pm(revised), critic(clean), sprint == 6 model calls.
-    assert len(transport.requests) == 6
+    # scope, intent, pm, critic, pm(revised), critic(clean), sprint == 7 calls.
+    assert len(transport.requests) == 7
     sops = ["".join(b["text"] for b in req["system"]) for req in transport.requests]
     assert sum(1 for x in sops if "You are the Product Manager" in x) == 2  # PM re-ran once
     # The layer converged: it produced the sprint plan (reached eng_pm) ...
@@ -264,7 +273,7 @@ def test_product_subgraph_revision_loop_is_bounded() -> None:
     revision bound and advances to eng_pm (the signed Spec gate downstream owns
     the verdict — the layer never spins forever)."""
     # Every critic pass flags a blocking omission; enough payloads for the bound.
-    completions = [json.dumps(INTENT_PAYLOAD)]
+    completions = [json.dumps(SCOPE_PAYLOAD), json.dumps(INTENT_PAYLOAD)]
     for _ in range(6):
         completions.append(json.dumps(PRD_MISSING_SECURITY))
         completions.append(json.dumps(CRITIQUE_BLOCKING))

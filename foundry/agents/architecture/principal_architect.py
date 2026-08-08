@@ -36,6 +36,7 @@ from foundry.agents._common import (
     emit_artifact,
     journal_entry,
     persist_prose,
+    scope_directive,
 )
 from foundry.context import SymbolIndex
 from foundry.schemas.architecture import (
@@ -187,11 +188,12 @@ def make_principal_architect_node(
             "required_capabilities": list(state.get("required_capabilities") or ()),
             "retrieved_spans": retrieved,
         }
+        prompt = as_text(user_content) + scope_directive(state, architect=True)
         completion = rt.proxy.complete(
             NODE_ID,
             TIER,
             _SYSTEM_SOP,
-            [{"role": "user", "content": as_text(user_content)}],
+            [{"role": "user", "content": prompt}],
             purpose="ideation",
             schema=_DESIGN_SCHEMA,
         )

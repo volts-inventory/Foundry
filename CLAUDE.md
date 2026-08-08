@@ -132,7 +132,7 @@ so no need to ask first; just don't rely on remembering it next session.
 
 ## Dev commands
 
-Recorded verbatim from README.md §"Develop on it":
+Recorded verbatim from README.md §11 (Develop):
 
 ```bash
 pip install pytest pytest-xdist mypy ruff                # one-time: dev tooling

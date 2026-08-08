@@ -146,3 +146,5 @@ rm -rf .pytest_cache .mypy_cache .ruff_cache ./.run spec.md  # clean caches + ou
 ```
 
 ## Learned
+
+- No system `pytest`/`ruff`/`mypy` in a fresh clone here — prefix the dev commands with `uv run` (the repo ships `uv.lock`).

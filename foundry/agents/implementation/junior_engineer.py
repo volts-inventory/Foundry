@@ -90,6 +90,7 @@ __all__ = [
     "make_junior_engineer_node",
     "pinned_texts",
     "ready_tasks",
+    "tasks_for_lane",
 ]
 
 NODE_ID = "junior_engineer"
@@ -192,6 +193,27 @@ def _area_by_task_id(ownership: OwnershipMap) -> dict[str, str]:
         task_id_for_unit(unit): ownership.area_of(owner)
         for unit, owner in ownership.owners.items()
     }
+
+
+def tasks_for_lane(
+    state: FactoryState, resolve: ArtifactResolver | None, lane: str | None
+) -> tuple[Task, ...]:
+    """The ready tasks a LANE node builds: those whose owning area folds into ``lane``
+    (:func:`lane_of_area`). ``None`` = the whole ready set (the legacy single-node
+    scope). With no ownership wired every task defaults to the backend lane, so exactly
+    one lane node claims it — never zero, never two.
+
+    Shared with the subgraph router so the EDGE and the NODE partition the tasks with
+    one predicate and can never disagree: a lane the router skips is provably a lane
+    with no task to build (see :func:`senior_engineer.leads_for_lane`)."""
+    all_tasks = ready_tasks(state)
+    if lane is None:
+        return all_tasks
+    ownership = _read_ownership(state, resolve) if resolve is not None else None
+    area_by_tid = _area_by_task_id(ownership) if ownership is not None else {}
+    return tuple(
+        t for t in all_tasks if lane_of_area(area_by_tid.get(t.id, "backend")) == lane
+    )
 
 
 def _domain_by_task_id(ownership: OwnershipMap) -> dict[str, str]:
@@ -853,17 +875,8 @@ def make_junior_engineer_node(
         constraints: Sequence[PinnedConstraint] = state.get("pinned_constraints") or ()
         all_tasks = ready_tasks(state)
         # Lane scoping: build only THIS lane's tasks, but keep the full ready set for
-        # budget weighting (below). A task's lane = the lane its owning area folds into;
-        # with no ownership wired (resolver absent) every task defaults to the backend
-        # lane, so exactly one lane node builds it — never duplicated across lane nodes.
-        if lane is not None:
-            ownership = _read_ownership(state, resolve) if resolve is not None else None
-            area_by_tid = _area_by_task_id(ownership) if ownership is not None else {}
-            def _task_lane(tid: str) -> str:
-                return lane_of_area(area_by_tid.get(tid, "backend"))
-            tasks = [t for t in all_tasks if _task_lane(t.id) == lane]
-        else:
-            tasks = all_tasks
+        # budget weighting (below).
+        tasks = list(tasks_for_lane(state, resolve, lane))
         # Advisory journal note: a prose "what this engineer built" line (the feature
         # domains its tasks implement) for the event log / interview affordance.
         jnote = _engineer_note(rt, config, tasks, state, resolve, lane)

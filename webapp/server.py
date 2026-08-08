@@ -2010,6 +2010,16 @@ def _run_platform(p: Project) -> None:
                   desc=role_desc.get(role, role))
         elif t == "svc_node":
             node = str(ev.get("node") or "")
+            # Canvas: the SAME per-node start/finish telemetry a single build streams, so
+            # the floor seats the agent whose node is actually running and clears them when
+            # it ends. Without this a platform build only ever announced a room per service,
+            # so every room stayed lit and the CTO had nothing to walk between. `quiet`
+            # keeps it off the quest log — the `svc` boxes below already narrate each node.
+            live = live_event_for_node(node, str(ev.get("scope") or ""),
+                                       phase=str(ev.get("phase") or "finish"))
+            if live:
+                live["quiet"] = True
+                _emit(p, **live)
             # Canvas: pulse the service's room when its pipeline REGRESSES to an earlier
             # stage (tests failed -> re-implement). The event log below is per-agent, but
             # the floor animation still tracks the coarse stage.

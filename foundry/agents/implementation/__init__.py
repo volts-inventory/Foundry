@@ -27,11 +27,14 @@ from foundry.agents.implementation.junior_engineer import (
     make_junior_engineer_node,
     pinned_texts,
     ready_tasks,
+    tasks_for_lane,
 )
 from foundry.agents.implementation.senior_engineer import (
     DESIGN_KIND,
     OWNERSHIP_KIND,
     ArtifactResolverError,
+    lanes_with_leads,
+    leads_for_lane,
     make_senior_engineer_node,
     stub_conflict_resolution,
 )
@@ -41,9 +44,12 @@ __all__ = [
     "OWNERSHIP_KIND",
     "ArtifactResolverError",
     "idempotency_key",
+    "lanes_with_leads",
+    "leads_for_lane",
     "make_junior_engineer_node",
     "make_senior_engineer_node",
     "pinned_texts",
     "ready_tasks",
     "stub_conflict_resolution",
+    "tasks_for_lane",
 ]

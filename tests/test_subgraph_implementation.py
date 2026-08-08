@@ -25,6 +25,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+import pytest
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -33,6 +34,7 @@ from foundry.agents._common import emit_artifact
 from foundry.agents.implementation.senior_engineer import (
     DESIGN_KIND,
     OWNERSHIP_KIND,
+    ArtifactResolverError,
     task_id_for_unit,
 )
 from foundry.durability.artifact_store import ArtifactStore
@@ -483,3 +485,80 @@ def test_pool_fail_closed_when_over_budget(tmp_path: Any) -> None:
     final: FactoryState = app.invoke(_seed_state(), _config("run-budget"))
 
     assert _feature_diffs(final) == []  # rejected at admit -> nothing built
+
+
+# ---- lane scoping: an empty lane is SKIPPED, not run as a no-op ---------------
+
+
+def _ran(app: Any, state: FactoryState, config: RunnableConfig) -> set[str]:
+    """The node ids that actually EXECUTED — the same edge the live telemetry
+    (and so the quest log / the office floor) is driven off."""
+    return {node for chunk in app.stream(state, config) for node in chunk}
+
+
+def test_empty_lanes_never_run(tmp_path: Any) -> None:
+    """A frontend-only ownership map must enter the frontend lane and NOTHING else.
+    Empty lanes used to execute as no-ops — free in model calls, but they reported
+    themselves as a working agent, which is how a data-only service came to show a
+    "Frontend Lead" decomposing work in the log and seated at a desk on the floor."""
+    (tmp_path / "README.md").write_text("seed\n")
+    ownership = OwnershipMap(owners={"web/app.tsx": "ui", "web/page.tsx": "ui"}, seq=_seq())
+    app = build_implementation_subgraph(
+        _runtime(), source_dir=str(tmp_path), resolve=_resolve
+    ).compile()
+
+    ran = _ran(app, _seed_with_ownership(ownership), _config("run-fe-only"))
+
+    assert ran == {"frontend_lead", "frontend_engineer"}
+
+
+def test_ownership_with_no_owners_runs_nothing(tmp_path: Any) -> None:
+    """The degenerate end of the same rule: an OwnershipMap the architect left empty
+    has no lane with work, so the phase runs NO node and still returns cleanly (it
+    produced nothing before either — it just used to announce six agents doing it)."""
+    (tmp_path / "README.md").write_text("seed\n")
+    app = build_implementation_subgraph(
+        _runtime(), source_dir=str(tmp_path), resolve=_resolve
+    ).compile()
+    state = _seed_with_ownership(OwnershipMap(owners={}, seq=_seq()))
+
+    assert _ran(app, state, _config("run-no-owners")) == set()
+    final: FactoryState = app.invoke(state, _config("run-no-owners-2"))
+    assert final["tasks"] == [] and _feature_diffs(final) == []
+
+
+def test_every_lane_with_work_still_runs_in_order(tmp_path: Any) -> None:
+    """Skipping is scoped to EMPTY lanes: a map spanning all three still runs all
+    six nodes, leads before engineers, in canonical lane order."""
+    (tmp_path / "README.md").write_text("seed\n")
+    ownership = OwnershipMap(
+        owners={"web/app.tsx": "ui", "services/a.py": "svc", "warehouse/etl.py": "data_team"},
+        seq=_seq(),
+    )
+    app = build_implementation_subgraph(
+        _runtime(), source_dir=str(tmp_path), resolve=_resolve
+    ).compile()
+    state, cfg = _seed_with_ownership(ownership), _config("run-all-lanes")
+
+    order = [node for chunk in app.stream(state, cfg) for node in chunk]
+
+    assert order == ["frontend_lead", "backend_lead", "data_lead",
+                     "frontend_engineer", "backend_engineer", "data_engineer"]
+    # and each lane built exactly its own unit — scoping changed WHO ran, not the work
+    final: FactoryState = app.invoke(_seed_with_ownership(ownership), _config("run-all-2"))
+    assert len(_feature_diffs(final)) == 3
+
+
+def test_unreadable_ownership_still_enters_the_lane(tmp_path: Any) -> None:
+    """UNKNOWN is not EMPTY. With no OwnershipMap on the channel the router cannot
+    tell whether a lane has leads, so it must still enter the node and let it raise —
+    a router that read "no lanes" from an unreadable map would silently skip the whole
+    implementation phase and ship nothing."""
+    (tmp_path / "README.md").write_text("seed\n")
+    app = build_implementation_subgraph(
+        _runtime(), source_dir=str(tmp_path), resolve=_resolve
+    ).compile()
+    state: FactoryState = {"request": "x", "artifacts": [], "pinned_constraints": []}
+
+    with pytest.raises(ArtifactResolverError):
+        app.invoke(state, _config("run-no-ownership"))

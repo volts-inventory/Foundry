@@ -1128,18 +1128,26 @@ class FloorScene extends Phaser.Scene {
     // (integer-friendly half-scale; non-integer scales soften pixel art).
     // selective dark OUTLINE: a slightly-larger silhouette behind the body, tinted scene
     // ink and kept frame-synced — gives every character a clean 1px edge so they pop.
-    // ON-THE-CLOCK glow: a third copy of the silhouette, one notch larger again and
-    // additively blended, so a working agent wears a soft halo that reads at a glance
-    // from across the floor. Hidden (and untweened) whenever they stand down.
-    const glow = this.add.sprite(0,4,"chars",ch.front[0]).setOrigin(0.5,1).setScale(0.48)
-      .setTint(0x9fe8ff).setBlendMode(Phaser.BlendModes.ADD).setAlpha(0).setVisible(false);
+    // ON-THE-CLOCK outline: a THICK green edge while this agent's node is running, so
+    // "who is working right now" reads from across the floor. Four copies of the
+    // silhouette offset N/S/E/W — scaling one copy up instead would grow a tall thin
+    // body far more vertically than horizontally and read as a drop shadow, not an
+    // outline. Sits outside the dark ink edge, which stays put underneath.
+    const OUTLINE = 2.4;
+    const glow = this.add.container(0,0).setVisible(false).setAlpha(0);
+    const glowParts = [];
+    for (const [dx,dy] of [[-OUTLINE,0],[OUTLINE,0],[0,-OUTLINE],[0,OUTLINE]]){
+      const g = this.add.sprite(dx,4+dy,"chars",ch.front[0]).setOrigin(0.5,1)
+        .setScale(0.378).setTint(0x3dff87);
+      glow.add(g); glowParts.push(g);
+    }
     bob.add(glow);
     const ol = this.add.sprite(0,4,"chars",ch.front[0]).setOrigin(0.5,1).setScale(0.378).setTint(PC.sceneInk);
     bob.add(ol);
     const sprite = this.add.sprite(0,4,"chars",ch.front[0]).setOrigin(0.5,1).setScale(0.36);
     const _sf = sprite.setFrame.bind(sprite);
-    // outline + glow mirror the body frame, so the halo tracks the walk cycle
-    sprite.setFrame = (f)=>{ _sf(f); ol.setFrame(f); glow.setFrame(f); return sprite; };
+    // outline + working edge mirror the body frame, so both track the walk cycle
+    sprite.setFrame = (f)=>{ _sf(f); ol.setFrame(f); for(const g of glowParts) g.setFrame(f); return sprite; };
     bob.add(sprite);
     const spark = this.add.rectangle(6,-24,2,2,0xfff04a).setOrigin(0,0).setVisible(false);
     bob.add(spark);
@@ -1150,17 +1158,17 @@ class FloorScene extends Phaser.Scene {
     return c;
   }
 
-  // Light (or drop) the working halo. Idempotent: restaff() re-seats the whole floor on
-  // every telemetry event, so re-lighting an already-lit agent must not restart the
+  // Light (or drop) the working outline. Idempotent: restaff() re-seats the whole floor
+  // on every telemetry event, so re-lighting an already-lit agent must not restart the
   // pulse (it would flicker in step with the event stream instead of breathing).
   setGlow(a, on){
     if (!a || !a.glow || !!a.glowOn === !!on) return;
     a.glowOn = !!on;
     if (a.glowTween){ a.glowTween.stop(); a.glowTween = null; }
     if (!on){ a.glow.setAlpha(0).setVisible(false); return; }
-    a.glow.setVisible(true);
-    a.glowTween = this.tweens.add({targets:a.glow, alpha:{from:0.30,to:0.72},
-      duration:820, yoyo:true, repeat:-1, ease:"Sine.inOut"});
+    a.glow.setVisible(true).setAlpha(1);
+    a.glowTween = this.tweens.add({targets:a.glow, alpha:{from:0.62,to:1},
+      duration:760, yoyo:true, repeat:-1, ease:"Sine.inOut"});
   }
   // Stepped walk: a snappy 2-frame bob + waddle on the whole body (legs are baked).
   startWalk(a){

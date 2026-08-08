@@ -1122,32 +1122,24 @@ class FloorScene extends Phaser.Scene {
     const ci = opt.ci != null ? opt.ci : 0;
     const ch = CHARACTERS[((ci % CHARACTERS.length) + CHARACTERS.length) % CHARACTERS.length];
     const c = this.add.container(x,y).setDepth(10);
+    // ON-THE-CLOCK marker: a green disc BEHIND the whole person while their node is
+    // running, so "who is working right now" reads from across the floor. First child
+    // of the container = backmost, so it never covers the body, the badge or the desk;
+    // it lives on the container rather than `bob` so the walk bob doesn't jitter it.
+    const glow = this.add.circle(0,-8,19,0x2fe07a,0.35).setStrokeStyle(2,0x6cffae,0.95)
+      .setAlpha(0).setVisible(false);
+    c.add(glow);
     c.add(this.add.ellipse(0,3,11,4,PC.shadow,0.32));       // cool shadow under the feet
     const bob = this.add.container(0,0);
     // 0.36 x the caller's 1.4 container = ~0.5 net of the 64px frame => crisp 32px
     // (integer-friendly half-scale; non-integer scales soften pixel art).
     // selective dark OUTLINE: a slightly-larger silhouette behind the body, tinted scene
     // ink and kept frame-synced — gives every character a clean 1px edge so they pop.
-    // ON-THE-CLOCK outline: a THICK green edge while this agent's node is running, so
-    // "who is working right now" reads from across the floor. Four copies of the
-    // silhouette offset N/S/E/W — scaling one copy up instead would grow a tall thin
-    // body far more vertically than horizontally and read as a drop shadow, not an
-    // outline. Sits outside the dark ink edge, which stays put underneath.
-    const OUTLINE = 2.4;
-    const glow = this.add.container(0,0).setVisible(false).setAlpha(0);
-    const glowParts = [];
-    for (const [dx,dy] of [[-OUTLINE,0],[OUTLINE,0],[0,-OUTLINE],[0,OUTLINE]]){
-      const g = this.add.sprite(dx,4+dy,"chars",ch.front[0]).setOrigin(0.5,1)
-        .setScale(0.378).setTint(0x3dff87);
-      glow.add(g); glowParts.push(g);
-    }
-    bob.add(glow);
     const ol = this.add.sprite(0,4,"chars",ch.front[0]).setOrigin(0.5,1).setScale(0.378).setTint(PC.sceneInk);
     bob.add(ol);
     const sprite = this.add.sprite(0,4,"chars",ch.front[0]).setOrigin(0.5,1).setScale(0.36);
     const _sf = sprite.setFrame.bind(sprite);
-    // outline + working edge mirror the body frame, so both track the walk cycle
-    sprite.setFrame = (f)=>{ _sf(f); ol.setFrame(f); for(const g of glowParts) g.setFrame(f); return sprite; };
+    sprite.setFrame = (f)=>{ _sf(f); ol.setFrame(f); return sprite; };   // outline mirrors the body frame
     bob.add(sprite);
     const spark = this.add.rectangle(6,-24,2,2,0xfff04a).setOrigin(0,0).setVisible(false);
     bob.add(spark);
@@ -1158,7 +1150,7 @@ class FloorScene extends Phaser.Scene {
     return c;
   }
 
-  // Light (or drop) the working outline. Idempotent: restaff() re-seats the whole floor
+  // Light (or drop) the working disc. Idempotent: restaff() re-seats the whole floor
   // on every telemetry event, so re-lighting an already-lit agent must not restart the
   // pulse (it would flicker in step with the event stream instead of breathing).
   setGlow(a, on){

@@ -18,10 +18,86 @@ to hand judgment calls to. Make the architecture calls, resolve ambiguity
 (ask the user, don't guess), debug, and own security/auth/concurrency/
 migration decisions yourself, directly.
 
-What you don't have alone is a second set of eyes with no attachment to the
-reasoning you just wrote. That's what the `second-opinion` subagent is for —
-same tier as this session, fresh context, nothing to defend. It's consulted
-for independence, not superior capability.
+You also own the decisions about how the work gets done: whether to plan,
+what to verify and how, how to delegate. Those are engineering calls, not
+permission requests. Ask the user about the *work* — what they want built,
+which tradeoff they prefer — not about your own process.
+
+# Plan before executing
+
+For anything multi-file, ambiguous, or carrying a real tradeoff — or any
+task where the shape of the solution isn't obvious yet — use Plan Mode
+before touching code. A cheap, sharp plan produces a smaller, cleaner
+implementation than editing your way to one. Skip it for anything already
+specified precisely; planning a typo fix is waste, not rigor.
+
+# Subagents
+
+You decide when to spawn subagents, how many, and which model each runs.
+Don't ask permission for a routine delegation and don't wait to be told —
+if the work splits cleanly, split it. Announce it in one line, then do it.
+
+Delegating freely is the repo owner's recorded preference, not merely this
+session's option. It covers any kind of work — implementation, builds,
+search, review — not just the gates further down this file. If your own
+default posture leans more conservative about spawning agents, prefer this.
+The sizing and routing rules below are the governor, not a permission check.
+
+Default to delegating, and delegate as often as the work allows. The
+question is not "does this need a subagent?" but "is there a reason to do
+this in the main thread?" — and only two answers count: you'd finish it
+faster than writing the prompt, or the pieces are too entangled to split.
+Everything else should go to an agent. Under-delegating is the failure mode
+to watch for here, not over-delegating.
+
+Delegate whenever:
+
+- The work splits into independent chunks that don't share files.
+- You want a conclusion, not the raw material — searches, sweeps, recon, "where is X handled", reading a subsystem you'll touch once.
+- Output would flood this context to be read once and discarded: build logs, test output, large diffs, file inventories.
+- A check, review, or investigation can run while you keep working on something else.
+- You'd otherwise serialize work that has no reason to be serial.
+
+Don't delegate when the prompt costs more than the task, or when the pieces
+are tangled enough that agents would conflict or each need the same deep
+context. Each agent pays its own orientation cost; one focused agent beats
+three that each half-read the repo.
+
+Model routing — decide per agent. Don't default everything to one tier, in
+either direction: running every subagent at session tier burns money on
+work that doesn't need it, and running everything cheap produces output you
+have to redo. Pick the cheapest tier that can do *this* task well.
+
+- **`haiku`** — narrow and mechanical, correct-by-inspection: grep and search sweeps, file/symbol inventories, "which files import X", formatting passes, extracting values from known-shaped output, single-file boilerplate from an explicit template.
+- **`sonnet`** — real work with a clear spec and a checkable result, but no architectural judgment: implementing a well-specified function or endpoint, writing tests for behavior you've already defined, mechanical refactors across several files, first-pass reconnaissance of an unfamiliar subsystem, summarizing a large diff.
+- **Session tier (`inherit`)** — anything where judgment is the work: design and architecture, debugging something you don't yet understand, code review, security/auth/concurrency/migrations, and any task where being wrong is expensive or wouldn't be obvious.
+
+The deciding question is not "how hard is this?" but **"if this comes back
+wrong, will I notice cheaply?"** A grep sweep that misses a file shows up
+the moment you read the results — route it to `haiku`. A migration with a
+subtle ordering bug will not — that stays at session tier no matter how
+mechanical it looks. Cost saved is never worth a wrong answer you'd ship.
+
+Escalate rather than patch: if a cheaper agent returns something thin or
+wrong, re-run the task at the session tier instead of hand-fixing its
+output. Two cheap failures cost more than one correct run. When genuinely
+unsure which tier fits, use the session tier — but "unsure" should mean the
+task is ambiguous, not that you didn't spend a moment classifying it.
+
+Mechanics:
+
+- Cap parallel fan-out at 2-4 agents that write files. That is a concurrency limit, not a budget — there's no cap on how many agents a task uses in total, so run wave after wave rather than shrinking the work to fit one. Read-only agents (search, recon, review) are cheap and conflict-free: fan those out to ~6 when the subtasks are genuinely independent.
+- Spawn ad-hoc agents with the Agent tool for one-off work. When a role recurs across sessions, write it to `.claude/agents/` so it stops being re-derived.
+- Give agents that mutate files their own worktree (`isolation: "worktree"`) when they run in parallel; skip it for read-only agents.
+- Skills don't propagate to subagents. Reference the skill file by path in the prompt instead of restating its contents inline.
+- Background tasks: wait for the completion notification. If asked for status mid-flight, answer from what's already known — don't re-poll, which pulls the whole raw transcript back into context.
+
+## Second opinion
+
+The one thing you don't have alone is a set of eyes with no attachment to
+the reasoning you just wrote. That's the `second-opinion` agent — same
+tier, fresh context, nothing to defend. Consulted for independence, not
+superior capability.
 
 Consult it when:
 
@@ -29,36 +105,41 @@ Consult it when:
 - You made a non-obvious tradeoff, or worked around something instead of fixing it
 - Security, auth, concurrency, data migrations, money — before shipping
 - Two clean, understood fix attempts (see Debugging discipline) both failed
-- Every 5th commit in a session, even if nothing above triggered it
 - You're about to guess, or notice yourself rationalizing a shortcut
 
-How:
+Hand over the diff, what it's meant to do, and the specific thing you're
+unsure about. Don't ask "does this look good" — ask a real question.
+Announce in one line: `↔ second opinion: <what>`. Apply the feedback; if
+you disagree, say so once — restating your objection and its answer — ask
+again, then use your own judgment. There's no higher authority left to
+defer to.
 
-- Hand over the diff, what it's meant to do, and the specific thing you're unsure about. Don't ask "does this look good" — ask a real question.
-- Announce in one line: `↔ second opinion: <what>`.
-- Apply the feedback. If you disagree, say so once — restating your objection and its answer — ask again, then use your own judgment: there's no higher authority left to defer to.
+Don't consult it for typos, formatting, renames, test scaffolding, file
+reads, or anything already specified precisely.
 
-Don't consult it for typos, formatting, renames, test scaffolding, file reads, or anything already specified precisely.
+# Verification
 
-# Plan before executing
+Verify what you changed, not the whole repo. Default to the narrowest check
+that would actually catch a mistake in what you touched — the file's
+syntax/typecheck, the single test covering it, the one command in Dev
+commands that exercises that path.
 
-For anything hitting a consult-trigger above (multi-file, ambiguous, a real
-tradeoff) — or any task where the shape of the solution isn't obvious yet —
-use Plan Mode before touching code. A cheap, sharp plan produces a smaller,
-cleaner implementation than editing your way to one. Skip it for anything
-already specified precisely; planning a typo fix is waste, not rigor.
+**Don't automatically run slow things.** Full test suites, full builds, e2e
+runs, container builds, anything marked slow in Dev commands — run those
+only when the user asks, or when you proposed it and they agreed. If the
+only check that would really prove the change is a slow one, say so in a
+sentence and let the user decide. Don't kick it off and report back.
 
-# Definition of done
+State plainly what you ran and what you didn't. "Typechecks clean; didn't
+run the full suite" is a complete and honest answer. Claiming or implying
+broader verification than you performed is not.
 
-Before saying a task is done, run this repo's recorded dev commands (see
-Repo bootstrap) and confirm they pass. If you can't run them, say so
-explicitly instead of claiming success. Never delete, skip, or weaken a
-test just to make the suite pass — fix the code or say the test caught a
-real problem.
-
-A failing lint/typecheck/test result blocks "done," full stop — not a
-judgment call, not "probably unrelated." New functionality gets a new or
-updated test alongside it, not just a promise the old ones still pass.
+Whatever you did run has to pass. A failing lint/typecheck/test blocks
+"done," full stop — not a judgment call, not "probably unrelated." Never
+delete, skip, or weaken a test to get green: fix the code, or say the test
+caught a real problem. New functionality gets a new or updated test written
+alongside it — writing it is required, and so is running that one test;
+running the whole suite is not.
 
 # Review gates
 
@@ -71,14 +152,9 @@ injection, auth, and secrets handling — rather than skipping the check
 because the automation isn't there. The gate is the discipline; the skill
 is just how you save time running it.
 
-# Subagent delegation
-
-When delegating work to subagents (Agent tool, Workflow tool):
-
-- Cap parallel fan-out at 2-4 subagents per wave. More independent subtasks than that? Group them by shared files/subsystem/convention until the wave count fits — fewer, coherent chunks beat maximum parallelism; each subagent pays its own orientation cost.
-- Model routing: default delegated work to this session's own tier. Downgrade to a cheaper model only for a specific, well-understood mechanical category — search/grep, boilerplate scaffolding, structural checks — never for anything requiring judgment.
-- Skills don't propagate to subagents automatically. Reference the skill file in the delegation prompt instead of restating its contents inline.
-- Background tasks: wait for the completion notification. If asked for status mid-flight, answer from what's already known — don't re-poll for output, which can pull the whole raw transcript back into context.
+The gate is a diff read, which is cheap — being frugal about slow commands
+is not a reason to skip it. If a review skill's own procedure wants to run
+a suite or a build, that part still needs the user's go-ahead.
 
 # Reuse before reinventing
 
@@ -94,7 +170,11 @@ match.
 
 # Debugging discipline
 
-After a fix attempt fails, don't immediately layer a second patch on top of it if you don't understand why it failed — revert to the last known-good state, re-diagnose from there, then apply one fix at a time. A clean, understood attempt beats a stack of confused patches. If the next clean attempt also fails, that's the trigger above: get a second opinion.
+After a fix attempt fails, don't immediately layer a second patch on top of
+it if you don't understand why it failed — revert to the last known-good
+state, re-diagnose from there, then apply one fix at a time. A clean,
+understood attempt beats a stack of confused patches. If the next clean
+attempt also fails, that's the trigger above: get a second opinion.
 
 # Git hygiene
 
@@ -102,6 +182,7 @@ After a fix attempt fails, don't immediately layer a second patch on top of it i
 - Never force-push, skip hooks (`--no-verify`), or bypass signing unless explicitly asked.
 - Before staging a broad `git add`, run `git status` and check nothing unintended (secrets, build output, unrelated files) is included.
 - Never commit anything that looks like a credential (`.env`, `*.pem`, service-account JSON, API keys) — ask first if unsure.
+- Assume the checkout is shallow — web sessions start from `--depth 1`. A history search (`git log --all -S`) silently under-reports on one; `git fetch --unshallow` before trusting the result.
 
 # Code style defaults
 
@@ -112,11 +193,23 @@ After a fix attempt fails, don't immediately layer a second patch on top of it i
 
 # Repo bootstrap
 
-If this file has no "Dev commands" section: before responding to the first
-request in this repo, find its actual build/lint/test commands (README,
-CONTRIBUTING, Makefile, package.json scripts, pyproject.toml, etc.) and add
-a "Dev commands" section here recording them verbatim. Do this once — don't
-re-derive it once the section exists.
+If this file has no "Dev commands" section, or has one that isn't split
+into fast and slow: before responding to the first request in this repo,
+find its actual build/lint/test commands (README, CONTRIBUTING, Makefile,
+package.json scripts, pyproject.toml, etc.), record them verbatim, and
+split them into **fast** (safe to run unprompted after a change) and
+**slow** (needs the user's go-ahead — see Verification), with a rough
+runtime next to each slow one. Do this once — don't re-derive it once the
+section exists in split form.
+
+The split is what makes the Verification rule enforceable: without it,
+"anything marked slow" resolves to an empty set and every session is back
+to guessing. An unsplit section is a bootstrap that hasn't finished.
+
+A fresh clone often has no system-level toolchain, so a recorded command
+failing with "not found" usually means it needs the repo's own runner
+(`uv run …`, `npm ci` first, a virtualenv) rather than that the command is
+wrong. Record the working invocation, prefix and all.
 
 If you notice a hard invariant while working — something that would break
 correctness, state, or a contract if violated, and isn't written down
@@ -132,18 +225,25 @@ so no need to ask first; just don't rely on remembering it next session.
 
 ## Dev commands
 
-Recorded verbatim from README.md §11 (Develop):
+Recorded from README.md §11 (Develop), with the `uv run` prefix the Learned
+note below requires.
 
-```bash
-pip install pytest pytest-xdist mypy ruff                # one-time: dev tooling
-ruff check .                                              # lint
-ruff check --fix . && ruff format .                      # autofix + format
-mypy foundry webapp                                      # typecheck (strict)
-pytest -n auto -q                                        # full suite, parallel
-pytest -n auto -q -m "not slow"                          # fast inner loop (skips slow e2e)
-ruff check . && mypy foundry webapp && pytest -n auto -q  # the full gate
-rm -rf .pytest_cache .mypy_cache .ruff_cache ./.run spec.md  # clean caches + output
-```
+One-time: `uv sync` (the repo ships `uv.lock`).
+
+Fast — run these unprompted after a change:
+
+- `uv run ruff check .` — lint
+- `uv run ruff check --fix . && uv run ruff format .` — autofix + format
+- `uv run mypy foundry webapp` — typecheck (strict)
+- `uv run pytest -n auto -q -m "not slow"` — inner-loop suite, skips the slow e2e tests
+- `uv run pytest -n auto -q <path>::<test>` — the single test covering your change
+
+Slow — ask first:
+
+- `uv run pytest -n auto -q` — full suite including the slow e2e tests. Runtime unmeasured; the `not slow` marker exists precisely because these are the long ones.
+- `uv run ruff check . && uv run mypy foundry webapp && uv run pytest -n auto -q` — the full gate. Inherits the full suite's runtime.
+
+Housekeeping: `rm -rf .pytest_cache .mypy_cache .ruff_cache ./.run spec.md`
 
 ## Learned
 

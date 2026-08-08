@@ -502,6 +502,16 @@ _ASSURANCE_PASSING_DIFF = (
 # Substring-keyed on each agent's SOP marker (count-independent, so a fix-loop
 # can re-run the implementation+quality phases without exhausting a queue; SUP7).
 
+# The mock backend must script EVERY node that can make a model call: an unscripted
+# node gets `default_text=""`, which fails structured-output parsing and dies as a
+# ProxyUnavailable after the retries. STANDARD keeps the smoke path's scope
+# unchanged; `--scope demo` still exercises the capped path deterministically.
+_SCOPE_PAYLOAD: dict[str, Any] = {
+    "tier": "standard",
+    "rationale": "the smoke request is treated as a full-scope build",
+    "signals": [],
+}
+
 _INTENT_PAYLOAD: dict[str, Any] = {
     "intent": "Run the one-line request through the factory.",
     "assumptions": ["single user"],
@@ -618,6 +628,7 @@ _SUPPLY_CHAIN_PAYLOAD: dict[str, Any] = {
 }
 
 _SCRIPTS: dict[str, str] = {
+    "You are the Scope Judge": json.dumps(_SCOPE_PAYLOAD),
     "Stakeholder / Client Proxy": json.dumps(_INTENT_PAYLOAD),
     "Product Manager": json.dumps(_PRD_PAYLOAD),
     "Criteria-Completeness Critic": json.dumps(_CRITIQUE_PAYLOAD),
@@ -1602,7 +1613,6 @@ def run(
                 seed["scope_tier"] = ScopeDecision(
                     tier=ScopeTier(scope),
                     rationale=f"Pinned by the operator (--scope {scope}).",
-                    source="flag",
                     seq=rt.seq(config, "cli", "scope_tier"),
                 )
             # LIVE artifact CONTENT for per-node telemetry: resolve each finishing

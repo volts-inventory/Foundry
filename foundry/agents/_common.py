@@ -26,11 +26,13 @@ from typing import TYPE_CHECKING, Any
 
 from foundry.canonical import content_digest
 from foundry.schemas.base import Artifact, FrozenModel
+from foundry.schemas.governance import ScopeTier
 from foundry.schemas.journal import JournalEntry
 from foundry.state.seq import Seq
 
 if TYPE_CHECKING:
     from foundry.durability.artifact_store import ArtifactStore
+    from foundry.state.factory_state import FactoryState
 
 
 def content_schema(model: type[FrozenModel], *, drop: tuple[str, ...] = ("seq",)) -> dict[str, Any]:
@@ -143,8 +145,9 @@ _DEMO_PM_DIRECTIVE = (
     "This cap does NOT relax the following — they are checked by deterministic "
     "gates and a build that omits them FAILS:\n"
     "- EVERY criterion still needs a non-empty, runner-evaluable oracle_hint.\n"
-    "- Still author EXACTLY ONE security/abuse criterion (security_abuse=true) — "
-    "the single highest-value case, not one per category.\n"
+    "- Still author AT LEAST ONE security/abuse criterion (security_abuse=true). "
+    "Lead with the highest-value case rather than one per category; this is a "
+    "floor, not a quota — author a second if the request genuinely warrants it.\n"
     "- Still author the pinned-dependency-manifest criterion (SOP step 5).\n"
     "Spend the remaining criteria on the core feature."
 )
@@ -166,11 +169,11 @@ _DEMO_ARCHITECT_DIRECTIVE = (
 )
 
 
-def scope_directive(state: Any, *, architect: bool = False) -> str:
+def scope_directive(state: FactoryState, *, architect: bool = False) -> str:
     """The scope caps to append to a PM / architect prompt, or ``""``.
 
     Reads the ``scope_tier`` single-writer channel. Returns ``""`` for STANDARD
-    (and for an absent/unreadable decision), so a non-DEMO run's prompts are
+    (and when no decision was written), so a non-DEMO run's prompts are
     byte-identical to a pre-tiering run — the ONLY behavioural delta this feature
     introduces is on a run judged DEMO.
 
@@ -178,10 +181,8 @@ def scope_directive(state: Any, *, architect: bool = False) -> str:
     the deterministic gates still enforce, because a cap that silently dropped a
     gate-required criterion would trade a large build for a failing one.
     """
-    from foundry.schemas.governance import ScopeTier
-
     decision = state.get("scope_tier")
-    if decision is None or getattr(decision, "tier", None) != ScopeTier.DEMO:
+    if decision is None or decision.tier is not ScopeTier.DEMO:
         return ""
     return _DEMO_ARCHITECT_DIRECTIVE if architect else _DEMO_PM_DIRECTIVE
 

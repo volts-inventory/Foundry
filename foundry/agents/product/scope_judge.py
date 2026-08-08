@@ -10,30 +10,31 @@ one-line "demo URL shortener" acquires interface contracts, a multi-lane
 ownership map, and a full criteria set — the floor the product/architecture SOPs
 enforce has no ceiling above it.
 
-**Two-stage, cheapest-first.** A deterministic keyword pre-filter runs first: a
-request carrying no smallness word at all cannot be DEMO, so the node returns
-STANDARD *without a model call*. Only a request that DOES carry one reaches the
-model, whose job is the part that actually needs judgment — telling "a simple
-URL shortener" (demo) from "a simple ledger for production payroll" (not). Most
-runs therefore cost zero extra tokens, and the model is spent only on the
-genuinely ambiguous case.
+One deterministic short-circuit only: a run supplied with a design spec is
+STANDARD without a model call, because supplying a spec at all is the signal.
+Everything else goes to the model. An earlier draft also gated the model call
+behind a keyword regex; it was cut because a keyword list is a hard recall
+ceiling ("proof of concept", "throwaway", "hello world" all read as STANDARD and
+the miss is invisible), and because one T3 call is noise beside the dozens of
+T1/T2 calls a run already spends.
 
-Trust posture: this node writes NOTHING a gate reads. ``scope_tier`` is a prompt
-input; ``ScopeDecision.relaxes_integrity()`` is False by construction, and the
-deterministic gates a DEMO build must pass are identical to a STANDARD one
-(agents propose, only signed gates decide, L5). A mis-classification cannot
-weaken a release — it can only make the factory build too little.
+Trust posture: this node writes nothing a gate reads. ``scope_tier`` is a prompt
+input, ``ScopeDecision.relaxes_integrity()`` is False by construction, and the
+gate SET a DEMO build faces is identical to a STANDARD one (agents propose, only
+signed gates decide, L5). That is a claim about the gate set, NOT about assurance
+strength: acceptance criteria are the specification the gates verify against, so
+capping their count genuinely thins what gets checked. DEMO is a weaker build
+that passes the same gates — not an equally-assured one.
 
-Bias: STANDARD unless proven otherwise, in BOTH stages. The product layer runs
-exactly once per run (both fix loops re-enter at architecture / implementation,
-never at product), so a wrong DEMO verdict is NOT self-correcting — the criteria
-stay capped for the whole run. A wrong STANDARD only costs tokens. Every
-tie-break in this module resolves to STANDARD for that reason.
+Bias: STANDARD unless proven otherwise. The product layer runs exactly once per
+run (both fix loops re-enter at architecture / implementation, never at product),
+so a wrong DEMO verdict is NOT self-correcting — the criteria stay capped for the
+whole run. A wrong STANDARD only costs tokens. Every tie-break in this module
+resolves to STANDARD for that reason.
 """
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING, Any
 
 from foundry.agents._common import journal_entry
@@ -49,9 +50,8 @@ _NODE_ID = "scope_judge"
 _TIER = "T3"  # a two-way classification; the cheapest tier is the right one
 
 SOP = (
-    "You are the Scope Judge. The request below contains a word suggesting it "
-    "may be small. Decide whether it is genuinely a demonstration or whether "
-    "that word is incidental to a real system.\n"
+    "You are the Scope Judge. Decide how much system the request below is asking "
+    "for, so the factory builds at the right size.\n"
     "- 'demo': the request is for something to look at or learn from — a demo, "
     "toy, example, sample, prototype, spike, exercise, or a small illustrative "
     "build. Nobody depends on it.\n"
@@ -78,62 +78,22 @@ _SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
-# Stage 1: the words that make DEMO even reachable. A request containing NONE of
-# these is STANDARD deterministically — no model call, no tokens. Matched on word
-# boundaries so "sampler" or "justify" don't trip it. Deliberately a NECESSARY
-# condition only: a hit sends the request to the model, it does not decide it.
-_SMALLNESS_WORDS = (
-    "demo",
-    "demonstration",
-    "toy",
-    "example",
-    "sample",
-    "prototype",
-    "spike",
-    "exercise",
-    "playground",
-    "scratch",
-    "simple",
-    "basic",
-    "minimal",
-    "tiny",
-    "trivial",
-    "quick",
-    "just",
-    "small",
-)
-_SMALLNESS_RE = re.compile(r"\b(" + "|".join(_SMALLNESS_WORDS) + r")\b", re.IGNORECASE)
-
-# A request long enough to describe a real system is not a demo however it is
-# worded — a backstop against one stray "simple" in a long brief. Deterministic,
-# so it cannot itself be talked out of by the request's own text.
-_DEMO_REQUEST_CHAR_CAP = 600
-
-
 def _request_text(state: FactoryState) -> str:
     """What the judge classifies: the raw request. The design spec is
-    deliberately EXCLUDED — supplying a spec at all is a standard-scope signal
-    (see :func:`_forced_standard`), so there is no case where the spec's text
-    would change the verdict, and reading it would blow this node's token cost."""
+    deliberately EXCLUDED — supplying a spec at all already decides the verdict
+    (see :func:`_forced_standard`), so its text could never change the outcome
+    and reading it would only inflate this node's token cost."""
     return str(state.get("request", ""))
 
 
 def _forced_standard(state: FactoryState) -> str | None:
     """The deterministic STANDARD verdict + its reason, or None to ask the model.
 
-    Stage 1 of the two-stage judge. These rules only ever TIGHTEN (demo ->
-    standard), never the reverse, so neither the model nor the request's own
-    wording can talk the factory into building less than they allow."""
-    request = _request_text(state)
+    One rule, and it only ever TIGHTENS (demo -> standard): a run given a design
+    spec is asking for the system that spec describes, whatever the one-line
+    request calls it."""
     if str(state.get("spec", "") or "").strip():
         return "a design spec was supplied, which is a standard-scope request"
-    if len(request) > _DEMO_REQUEST_CHAR_CAP:
-        return (
-            f"the request is longer than {_DEMO_REQUEST_CHAR_CAP} characters, "
-            "so it describes a real system rather than a demo"
-        )
-    if not _SMALLNESS_RE.search(request):
-        return "the request asks for a system without qualifying it as small"
     return None
 
 

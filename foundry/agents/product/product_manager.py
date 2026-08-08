@@ -218,12 +218,12 @@ def make_product_manager_node(rt: AgentRuntime) -> NodeFn:
     def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         prd_seq = rt.seq(config, _NODE_ID, "artifact:prd")
         criteria_seq = rt.seq(config, _NODE_ID, "artifact:acceptance_criteria")
-        # Scope caps come BEFORE the revision block: a revision pass is closing a
-        # gate-blocking omission, so its "add these criteria" instruction must be
-        # the last word if the two ever pull against each other.
-        user_content = (
-            _intent_text(state) + scope_directive(state) + _revision_directive(state, rt)
-        )
+        # A revision pass exists ONLY to close a gate-blocking omission, and its
+        # "reproduce every criterion AND add" instruction flatly contradicts a
+        # criteria cap. Ordering wouldn't resolve that, so the cap is dropped for
+        # the pass: closing the gap wins over staying small.
+        revision = _revision_directive(state, rt)
+        user_content = _intent_text(state) + (revision or scope_directive(state))
         result = rt.proxy.complete(
             _NODE_ID,
             _TIER,

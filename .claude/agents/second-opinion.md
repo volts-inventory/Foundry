@@ -1,6 +1,6 @@
 ---
 name: second-opinion
-description: Fresh-context peer review for this repo — independent, not superior. Invoked per the consult triggers in the "You own the call" section of CLAUDE.md.
+description: Fresh-context peer review for this repo — independent, not superior. Invoked per the consult triggers in the "Second opinion" section of CLAUDE.md.
 tools: Read, Grep, Glob, Bash, WebFetch
 model: inherit
 ---

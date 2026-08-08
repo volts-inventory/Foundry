@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from foundry.agents._common import scope_directive
 from foundry.agents.product._common import emit_artifact, journal_entry, persist_prose
 from foundry.schemas.product import PRD, AcceptanceCriterion, Criticality
 
@@ -217,7 +218,12 @@ def make_product_manager_node(rt: AgentRuntime) -> NodeFn:
     def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         prd_seq = rt.seq(config, _NODE_ID, "artifact:prd")
         criteria_seq = rt.seq(config, _NODE_ID, "artifact:acceptance_criteria")
-        user_content = _intent_text(state) + _revision_directive(state, rt)
+        # Scope caps come BEFORE the revision block: a revision pass is closing a
+        # gate-blocking omission, so its "add these criteria" instruction must be
+        # the last word if the two ever pull against each other.
+        user_content = (
+            _intent_text(state) + scope_directive(state) + _revision_directive(state, rt)
+        )
         result = rt.proxy.complete(
             _NODE_ID,
             _TIER,

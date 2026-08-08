@@ -139,6 +139,51 @@ class TierDecision(FrozenModel):
         return False
 
 
+class ScopeTier(StrEnum):
+    """How much system the request is actually asking for.
+
+    ``STANDARD`` is the historical behaviour — every prompt and cap is exactly
+    what the factory did before scope tiering existed, so a STANDARD run is
+    byte-identical to a pre-tiering run. ``DEMO`` is the only tier that changes
+    anything: it caps how much the product/architecture layers may PROPOSE.
+    """
+
+    DEMO = "demo"
+    STANDARD = "standard"
+
+
+class ScopeDecision(FrozenModel):
+    """Scope-tier decision: the record of how much system a request wants.
+
+    Sibling of :class:`TierDecision` — that one scales assurance DEPTH off the
+    change's risk, this one scales the proposed SYSTEM off the request's stated
+    ambition. Both are triage records, neither is a bypass: this one is read
+    only by agent PROMPTS (the PM's criteria cap, the architect's component /
+    interface / ownership caps). No gate, router, or admission path reads it, so
+    it can lower what agents propose but never what the signed gates require.
+
+    The model supplies ``tier``/``rationale``/``signals`` only; the concrete caps
+    are a deterministic table in ``foundry.agents._common`` (agents propose
+    judgment, code applies policy — the same split as the gate two-zone rule).
+    """
+
+    tier: ScopeTier
+    rationale: str  # why this tier
+    signals: tuple[str, ...] = ()  # the request phrases that triggered DEMO
+    source: str = "judge"  # "judge" (model-classified) | "flag" (operator-pinned)
+    version: int = 1
+    supersedes: str | None = None
+    seq: Seq
+
+    def relaxes_integrity(self) -> bool:
+        """Scope tiering NEVER relaxes admission/integrity — always False.
+
+        Mirrors :meth:`TierDecision.relaxes_integrity` so callers can assert the
+        invariant rather than rely on a comment. A DEMO tier shrinks what the
+        agents propose; the gates it must still pass are unchanged."""
+        return False
+
+
 class SignOffRecord(FrozenModel):
     """Approver-of-record sign-off for a Gated release / HITL decision
     (governance.md §1e/§6, domains.md §1 class-4 human-witnessed).

@@ -1,10 +1,10 @@
 """Product & Planning subgraph (architecture.md §1 / agents.md Layer 1).
 
-Composes the four Layer-1 product node factories into one mountable
+Composes the five Layer-1 product node factories into one mountable
 ``StateGraph(FactoryState)`` in SOP order:
 
-    stakeholder_proxy -> product_manager -> criteria_completeness_critic
-                      -> eng_program_mgr
+    scope_judge -> stakeholder_proxy -> product_manager
+                -> criteria_completeness_critic -> eng_program_mgr
 
 The builder returns an **UNCOMPILED** ``StateGraph`` (LEARNINGS AR3): the
 supervisor / ``factory_graph`` is the only place that compiles — and it owns the
@@ -33,6 +33,7 @@ from foundry.agents.product import (
     make_criteria_completeness_critic_node,
     make_eng_program_mgr_node,
     make_product_manager_node,
+    make_scope_judge_node,
     make_stakeholder_proxy_node,
 )
 from foundry.state.factory_state import FactoryState
@@ -46,6 +47,7 @@ __all__ = ["build_product_subgraph", "make_criteria_revision_router"]
 _Node = Callable[[FactoryState, RunnableConfig], dict[str, Any]]
 
 # Node ids match the agent node_ids (so Seq.node_id == the graph node name).
+_SCOPE_JUDGE = "scope_judge"
 _STAKEHOLDER_PROXY = "stakeholder_proxy"
 _PRODUCT_MANAGER = "product_manager"
 _CRITERIA_CRITIC = "criteria_completeness_critic"
@@ -116,6 +118,7 @@ def build_product_subgraph(rt: AgentRuntime) -> StateGraph[FactoryState]:
     """
     g: StateGraph[FactoryState] = StateGraph(FactoryState)
 
+    scope: _Node = make_scope_judge_node(rt)
     stakeholder: _Node = make_stakeholder_proxy_node(rt)
     pm: _Node = make_product_manager_node(rt)
     critic: _Node = make_criteria_completeness_critic_node(rt)
@@ -130,6 +133,9 @@ def build_product_subgraph(rt: AgentRuntime) -> StateGraph[FactoryState]:
     # ``def``). Re-express each as a thin concrete wrapper to restore structural
     # matching WITHOUT a private import or ``cast`` (mirrors the architecture /
     # implementation / quality subgraphs; full type-checking preserved — SG2/IM5).
+    def _scope(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        return scope(state, config)
+
     def _stakeholder(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         return stakeholder(state, config)
 
@@ -142,11 +148,17 @@ def build_product_subgraph(rt: AgentRuntime) -> StateGraph[FactoryState]:
     def _eng_pm(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         return eng_pm(state, config)
 
+    g.add_node(_SCOPE_JUDGE, _scope)
     g.add_node(_STAKEHOLDER_PROXY, _stakeholder)
     g.add_node(_PRODUCT_MANAGER, _pm)
     g.add_node(_CRITERIA_CRITIC, _critic)
     g.add_node(_ENG_PROGRAM_MGR, _eng_pm)
-    g.add_edge(START, _STAKEHOLDER_PROXY)
+    # The Scope Judge runs FIRST: it writes the `scope_tier` channel the PM (and,
+    # a layer later, the Principal Architect) read to cap what they propose. It
+    # writes no artifact and no gate input — a mis-judgement can only make the
+    # factory build too little, never let a weaker build through.
+    g.add_edge(START, _SCOPE_JUDGE)
+    g.add_edge(_SCOPE_JUDGE, _STAKEHOLDER_PROXY)
     g.add_edge(_STAKEHOLDER_PROXY, _PRODUCT_MANAGER)
     g.add_edge(_PRODUCT_MANAGER, _CRITERIA_CRITIC)
     # Bounded planning self-correction (autonomous mode never stalls at a fixable

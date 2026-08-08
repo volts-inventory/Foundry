@@ -157,6 +157,13 @@ BACKENDS = (_MOCK_BACKEND, "anthropic", "openai", "claude-cli", "codex", "ollama
 ADAPTERS = ("stub", "raw-react", "claude-code", "proxy-agent")
 _DEFAULT_ADAPTER = "stub"
 
+# Scope tier selection: how much system to build. `auto` (the default) lets the
+# Scope Judge node classify the request; `demo`/`standard` PIN the tier and skip
+# the judge's model call. Pinning gives a deterministic tier for an A/B against
+# the judged one. Scope caps what the agents PROPOSE, never what the gates
+# require — both tiers face an identical gate set.
+SCOPES = ("auto", "demo", "standard")
+
 
 # When --adapter is OMITTED the coding substrate is DERIVED from the chosen backend,
 # so picking a real brain writes real code without a second flag (the historical
@@ -1278,6 +1285,7 @@ def run(
     cost_cap_microusd: int | None = None,
     base_dir: str | None = None,
     profile: str | None = "auto",
+    scope: str = "auto",
 ) -> RunResult:
     """Run ``request`` end-to-end through the compiled factory graph (smoke path).
 
@@ -1373,11 +1381,21 @@ def run(
         authorship). When ``checkpoints`` are on but NO responder is supplied, the
         run PAUSES at the first boundary and returns with ``RunResult.paused_at``
         set (the caller resumes out-of-band on the same ``thread_id``).
+    scope:
+        How much system to build. ``"auto"`` (the DEFAULT) lets the Scope Judge
+        node classify the request; ``"demo"`` / ``"standard"`` PIN the tier and
+        skip the judge's model call entirely. Scope caps only what the PM and
+        architect PROPOSE (criteria count, components, interface contracts,
+        ownership units) — every deterministic gate a build must pass is
+        identical at both tiers, so this can never release a weaker build. Pin it
+        for a reproducible A/B against the judged tier.
     """
     if mode not in MODES:
         raise ValueError(f"unknown mode {mode!r}; choose one of {', '.join(MODES)}")
     if backend not in BACKENDS:
         raise ValueError(f"unknown backend {backend!r}; choose one of {', '.join(BACKENDS)}")
+    if scope not in SCOPES:
+        raise ValueError(f"unknown scope {scope!r}; choose one of {', '.join(SCOPES)}")
     # Resolve the checkpoint boundary set up front (fail-closed on a typo'd name).
     ckpt_set = normalize_checkpoints(checkpoints)
     ckpt_names = tuple(sorted(b.value for b in ckpt_set))
@@ -1574,6 +1592,19 @@ def run(
             # / HITL fires off required_capabilities). Default run: never set.
             if pack_capabilities:
                 seed["required_capabilities"] = sorted(pack_capabilities)
+            # An operator-pinned scope seeds the channel the Scope Judge would
+            # otherwise write; the judge sees a decision already present and
+            # returns without a model call. `auto` (the default) seeds nothing,
+            # so the historical seed is unchanged.
+            if scope != "auto":
+                from foundry.schemas.governance import ScopeDecision, ScopeTier
+
+                seed["scope_tier"] = ScopeDecision(
+                    tier=ScopeTier(scope),
+                    rationale=f"Pinned by the operator (--scope {scope}).",
+                    source="flag",
+                    seq=rt.seq(config, "cli", "scope_tier"),
+                )
             # LIVE artifact CONTENT for per-node telemetry: resolve each finishing
             # node's artifacts through the run's store and attach a short content
             # one-liner per handle (the PRD's title, an acceptance criterion's text,
@@ -2176,6 +2207,13 @@ def main(argv: list[str] | None = None) -> int:
         args, _profile = _take_value(args, "--profile", what="a stack name")
         profile = _profile if _profile is not None else "auto"
 
+        # --scope {auto|demo|standard}: how much system to build. OMITTED ⇒ "auto"
+        # (the Scope Judge classifies the request). A pinned tier skips the judge.
+        args, _scope = _take_value(args, "--scope", what="a value")
+        scope = _scope if _scope is not None else "auto"
+        if scope not in SCOPES:
+            raise _CliUsageError(f"unknown --scope {scope!r}; choose one of {', '.join(SCOPES)}")
+
         # --adapter {stub|raw-react|claude-code}: the coding substrate that writes
         # the code. OMITTED ⇒ DERIVED from --backend in run() (mock→stub,
         # claude-cli→claude-code agentic, other real backends→raw-react) so a real
@@ -2241,6 +2279,7 @@ def main(argv: list[str] | None = None) -> int:
                 "[--backend {mock|anthropic|openai|claude-cli|codex|ollama-gemma}] "
                 "[--adapter {stub|raw-react|claude-code}] "
                 "[--checkpoints [all|product,design,release]] "
+                "[--scope {auto|demo|standard}] "
                 "[--docs DIR] [--out DIR] [--spec FILE|DIR ...] "
                 "[--state-dir DIR] [--thread-id NAME] [--max-fix-attempts N] "
                 '["<one-line request>"]   (optional when --spec is given)\n'
@@ -2256,7 +2295,10 @@ def main(argv: list[str] | None = None) -> int:
                 "  packs: regulated | ml_data | frontend | game | crypto | infra "
                 "(a pack may VETO an unsafe mode — fail-closed)\n"
                 "  checkpoints (plan [10]): pause at stage boundaries for human "
-                "verification; an approve can NEVER turn a gate FAIL into a release",
+                "verification; an approve can NEVER turn a gate FAIL into a release\n"
+                "  scope: auto (default — the Scope Judge classifies the request) | "
+                "demo (small: capped criteria, 1 component, no interface contracts) | "
+                "standard. Caps what the agents PROPOSE; the gate set is identical",
                 file=sys.stderr,
             )
             return 2
@@ -2289,6 +2331,7 @@ def main(argv: list[str] | None = None) -> int:
             max_slots=max_slots,
             cost_cap_microusd=cost_cap_microusd,
             profile=(None if profile == "none" else profile),
+            scope=scope,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)

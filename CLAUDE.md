@@ -130,4 +130,19 @@ it yourself, immediately, as a one-line bullet under a `## Learned` heading
 at the end of this section. No judgment call here (it already happened),
 so no need to ask first; just don't rely on remembering it next session.
 
+## Dev commands
+
+Recorded verbatim from README.md §"Develop on it":
+
+```bash
+pip install pytest pytest-xdist mypy ruff                # one-time: dev tooling
+ruff check .                                              # lint
+ruff check --fix . && ruff format .                      # autofix + format
+mypy foundry webapp                                      # typecheck (strict)
+pytest -n auto -q                                        # full suite, parallel
+pytest -n auto -q -m "not slow"                          # fast inner loop (skips slow e2e)
+ruff check . && mypy foundry webapp && pytest -n auto -q  # the full gate
+rm -rf .pytest_cache .mypy_cache .ruff_cache ./.run spec.md  # clean caches + output
+```
+
 ## Learned

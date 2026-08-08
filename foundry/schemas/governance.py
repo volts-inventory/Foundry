@@ -157,10 +157,16 @@ class ScopeDecision(FrozenModel):
 
     Sibling of :class:`TierDecision` — that one scales assurance DEPTH off the
     change's risk, this one scales the proposed SYSTEM off the request's stated
-    ambition. Both are triage records, neither is a bypass: this one is read
-    only by agent PROMPTS (the PM's criteria cap, the architect's component /
-    interface / ownership caps). No gate, router, or admission path reads it, so
-    it can lower what agents propose but never what the signed gates require.
+    ambition. Both are triage records, neither is a bypass: this one is read only
+    by agent PROMPTS (the PM's criteria cap, the architect's component /
+    interface / ownership caps). No gate, router, or admission path reads it.
+
+    Honest limit on that: the gate SET is tier-independent, but acceptance
+    criteria are the specification those gates verify against, so capping their
+    count does thin what gets checked. A DEMO build is a smaller build passing
+    the same gates — not an equally-assured one. What the caps may never do is
+    drop a criterion a gate structurally REQUIRES (see the directives in
+    ``foundry.agents._common``), which would fail the run rather than shrink it.
 
     The model supplies ``tier``/``rationale``/``signals`` only; the concrete caps
     are a deterministic table in ``foundry.agents._common`` (agents propose
@@ -168,9 +174,8 @@ class ScopeDecision(FrozenModel):
     """
 
     tier: ScopeTier
-    rationale: str  # why this tier
+    rationale: str  # why this tier (carries "pinned by the operator" when flagged)
     signals: tuple[str, ...] = ()  # the request phrases that triggered DEMO
-    source: str = "judge"  # "judge" (model-classified) | "flag" (operator-pinned)
     version: int = 1
     supersedes: str | None = None
     seq: Seq
@@ -179,8 +184,9 @@ class ScopeDecision(FrozenModel):
         """Scope tiering NEVER relaxes admission/integrity — always False.
 
         Mirrors :meth:`TierDecision.relaxes_integrity` so callers can assert the
-        invariant rather than rely on a comment. A DEMO tier shrinks what the
-        agents propose; the gates it must still pass are unchanged."""
+        invariant rather than rely on a comment. Scoped to what it says: no gate
+        is skipped and no verdict is weakened at DEMO. It does NOT claim the
+        resulting build is as thoroughly specified — see the class docstring."""
         return False
 
 

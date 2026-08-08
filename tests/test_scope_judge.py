@@ -2,10 +2,11 @@
 
 Asserts the properties the feature's safety rests on:
 
-* the judge is STANDARD-biased in both stages (no smallness word, an oversized
-  request, or a supplied design spec => STANDARD with NO model call);
-* a smallness word only makes DEMO *reachable* — the model still decides, and
-  anything that is not exactly "demo" degrades to STANDARD;
+* a supplied design spec short-circuits to STANDARD with no model call;
+* the model decides everything else, and anything that is not exactly "demo"
+  degrades to STANDARD;
+* every node that can make a model call is scripted for `--backend mock`, or the
+  run dies as a ProxyUnavailable on the documented smoke path;
 * an already-decided ``scope_tier`` (an operator ``--scope`` pin, or a resume
   re-entry) short-circuits the node with no write and no model call;
 * ``scope_directive`` is EMPTY at standard tier, so a non-demo run's prompts are
@@ -67,19 +68,10 @@ def _seq() -> Seq:
 
 
 def _pinned(tier: ScopeTier) -> ScopeDecision:
-    return ScopeDecision(tier=tier, rationale="pinned", source="flag", seq=_seq())
+    return ScopeDecision(tier=tier, rationale="pinned", seq=_seq())
 
 
-# ---- stage 1: the deterministic pre-filter (no model call) -------------------
-
-
-def test_request_without_smallness_word_is_standard_without_a_model_call() -> None:
-    # An EMPTY completion queue: if the node called the model this would raise.
-    rt = runtime_for()
-    writes = make_scope_judge_node(rt)({"request": "build a URL shortener"}, config_for("r"))
-
-    assert writes["scope_tier"].tier is ScopeTier.STANDARD
-    assert "gates" not in writes  # a product node never mints a verdict (L5)
+# ---- the one deterministic short-circuit ------------------------------------
 
 
 def test_supplied_design_spec_forces_standard_without_a_model_call() -> None:
@@ -91,41 +83,33 @@ def test_supplied_design_spec_forces_standard_without_a_model_call() -> None:
 
     assert writes["scope_tier"].tier is ScopeTier.STANDARD
     assert "design spec" in writes["scope_tier"].rationale
+    assert "gates" not in writes  # a product node never mints a verdict (L5)
 
 
-def test_oversized_request_forces_standard_without_a_model_call() -> None:
-    rt = runtime_for()
-    long_request = "build a simple demo service. " + ("more detail. " * 100)
-    writes = make_scope_judge_node(rt)({"request": long_request}, config_for("r"))
-
-    assert writes["scope_tier"].tier is ScopeTier.STANDARD
+# ---- the model decides everything else --------------------------------------
 
 
-def test_smallness_word_matches_on_word_boundaries_only() -> None:
-    # "sampler" / "justify" contain "sample" / "just" as substrings but are not
-    # smallness words — an empty queue proves no model call was made.
-    rt = runtime_for()
-    writes = make_scope_judge_node(rt)(
-        {"request": "build an audio sampler that can justify its latency"}, config_for("r")
-    )
-
-    assert writes["scope_tier"].tier is ScopeTier.STANDARD
-
-
-# ---- stage 2: the model adjudicates a keyword hit ----------------------------
-
-
-def test_smallness_word_reaches_the_model_and_demo_is_honored() -> None:
+def test_every_other_request_reaches_the_model_and_demo_is_honored() -> None:
     rt = runtime_for(DEMO_PAYLOAD)
     writes = make_scope_judge_node(rt)({"request": "a demo URL shortener"}, config_for("r"))
 
     decision = writes["scope_tier"]
     assert decision.tier is ScopeTier.DEMO
     assert decision.signals == ("demo",)
-    assert decision.source == "judge"
 
 
-def test_model_may_overrule_the_keyword_and_return_standard() -> None:
+def test_a_plain_request_with_no_smallness_word_still_reaches_the_model() -> None:
+    # No keyword prefilter: the judge sees every request that has no design spec,
+    # so wordings a keyword list would miss ("proof of concept") stay reachable.
+    rt = runtime_for(DEMO_PAYLOAD)
+    writes = make_scope_judge_node(rt)(
+        {"request": "a proof of concept for a link redirector"}, config_for("r")
+    )
+
+    assert writes["scope_tier"].tier is ScopeTier.DEMO
+
+
+def test_model_may_overrule_the_wording_and_return_standard() -> None:
     rt = runtime_for(STANDARD_PAYLOAD)
     writes = make_scope_judge_node(rt)(
         {"request": "a simple ledger for production payroll"}, config_for("r")
@@ -171,9 +155,12 @@ def test_demo_pm_directive_preserves_the_gate_enforced_floor() -> None:
 
     assert "AT MOST 5 acceptance criteria" in directive
     # gates/spec.py FAILs on any criterion with an empty oracle, and separately
-    # requires a security/abuse criterion — a cap must not drop either.
+    # requires a security/abuse criterion — a cap must not drop either. The
+    # security criterion is a FLOOR, not a quota: capping it AT one would pin
+    # assurance content to the gate minimum, which is a weakening, not a cap.
     assert "oracle_hint" in directive
-    assert "EXACTLY ONE security/abuse criterion" in directive
+    assert "AT LEAST ONE security/abuse criterion" in directive
+    assert "EXACTLY ONE" not in directive
     assert "manifest" in directive
 
 
@@ -195,6 +182,33 @@ def test_demo_architect_directive_caps_fan_out_but_never_to_zero() -> None:
 def test_scope_tiering_never_relaxes_integrity() -> None:
     assert _pinned(ScopeTier.DEMO).relaxes_integrity() is False
     assert _pinned(ScopeTier.STANDARD).relaxes_integrity() is False
+
+
+def test_every_model_calling_node_is_scripted_for_the_mock_backend() -> None:
+    """The mock backend serves `default_text=""` for an unscripted node, which
+    fails structured-output parsing and dies as ProxyUnavailable after retries.
+    The scope judge shipped unscripted and crashed `--backend mock` on any
+    request the (since-removed) keyword prefilter let through — including the
+    README's own example. Assert the SOP marker the script is keyed on."""
+    from foundry.agents.product.scope_judge import SOP
+    from foundry.cli import _SCRIPTS
+
+    matched = [key for key in _SCRIPTS if key in SOP]
+    assert matched, f"the Scope Judge SOP matches no _SCRIPTS key; it would serve '' — {SOP[:60]!r}"
+    assert json.loads(_SCRIPTS[matched[0]])["tier"] in ("demo", "standard")
+
+
+def test_a_revision_pass_drops_the_scope_cap() -> None:
+    """A revision pass exists only to close a gate-BLOCKING criteria omission, so
+    its "reproduce every criterion AND add" instruction must not be handed to the
+    model alongside a "at most 5 criteria" cap. Closing the gap wins."""
+    from foundry.agents.product.product_manager import _revision_directive
+
+    # No critique on the channel => no revision pass => the cap applies.
+    rt = runtime_for()
+    state = {"request": "a demo shortener", "scope_tier": _pinned(ScopeTier.DEMO)}
+    assert _revision_directive(state, rt) == ""
+    assert scope_directive(state) != ""
 
 
 def test_scope_decision_round_trips_the_checkpoint_serde() -> None:

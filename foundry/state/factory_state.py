@@ -41,8 +41,9 @@ class FactoryState(TypedDict, total=False):
     # through, and the product phase is entered exactly once per run (both fix
     # loops re-enter at architecture/implementation), so LastValue never
     # contends. PROMPT INPUT ONLY: read by the PM + architect to cap what they
-    # PROPOSE. Never read by a gate, router, or admission path — it cannot
-    # change what the signed gates require (ScopeDecision.relaxes_integrity()).
+    # PROPOSE. Never read by a gate, router, or admission path — no gate is
+    # skipped and no verdict weakened at DEMO. It DOES thin the criteria those
+    # gates verify against, though; see ScopeDecision for that honest limit.
     scope_tier: ScopeDecision | None  # single-writer (scope_judge, or --scope pin)
     required_capabilities: Annotated[list[str], reducers.union]
     pinned_constraints: Annotated[list[PinnedConstraint], reducers.merge_constraints]

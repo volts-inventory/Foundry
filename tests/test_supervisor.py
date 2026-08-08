@@ -151,6 +151,11 @@ SDET_PAYLOAD: dict[str, Any] = {
 # -> a parse failure). The reviewer's verdict rides the verdict channel
 # (default_verdict="approve", repeatable).
 _SCRIPTS: dict[str, str] = {
+    # Every node that can make a model call needs a script: an unscripted node
+    # serves "" and dies as ProxyUnavailable after the retries.
+    "You are the Scope Judge": json.dumps(
+        {"tier": "standard", "rationale": "a full-scope build", "signals": []}
+    ),
     "Stakeholder / Client Proxy": json.dumps(INTENT_PAYLOAD),
     "Product Manager": json.dumps(PRD_PAYLOAD),
     "Criteria-Completeness Critic": json.dumps(CRITIQUE_PAYLOAD),

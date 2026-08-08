@@ -60,43 +60,49 @@
       </div>
       <ul id="log"></ul>
       <ul id="progress" style="display:none"></ul>
+      <!-- The log follows new activity only while you're already at the bottom; scroll
+           up to read something and this appears instead of yanking you back down. -->
+      <button id="log-jump" class="log-jump hidden" type="button">↓ NEW ACTIVITY</button>
     </aside>
   </div>
 
-  <!-- New-project dialog -->
+  <!-- New-project dialog. Four numbered SECTIONS instead of one 20-field wall: the
+       two that carry sane defaults (③ how it runs, ④ scale) are folded shut behind a
+       summary line of their current values, so the dialog opens at "what do you want
+       built?" and everything else is one tap away. Same structure on every width. -->
   <div id="new-modal" class="overlay hidden">
-    <div class="dialog">
-      <h2>▶ START A BUILD</h2>
-      <div class="row">
-        <label>Preset <span class="hint">— load an example; fills every setting below</span></label>
-        <select id="preset-select"></select>
+    <div class="dialog build">
+      <div class="dialog-head">
+        <h2>▶ START A BUILD</h2>
+        <button id="new-close" class="icon-btn" title="close" aria-label="close">✕</button>
       </div>
-      <p class="hint" id="preset-note"></p>
-      <div class="row">
-        <label>Backend</label>
-        <select id="backend-select">
-          <option value="mock">mock — deterministic, offline (no key)</option>
-          <option value="anthropic">anthropic — Claude API (ANTHROPIC_API_KEY)</option>
-          <option value="openai">openai — OpenAI API (OPENAI_API_KEY)</option>
-          <option value="claude-cli" selected>claude-cli — claude -p (Max subscription)</option>
-          <option value="codex">codex — codex CLI (OPENAI_API_KEY)</option>
-          <option value="ollama-gemma">ollama-gemma — local Ollama endpoint</option>
-        </select>
-      </div>
-      <p class="hint" id="model-note"></p>
-      <label>Start from <span class="hint">— a fresh build, or iterate on a finished one</span></label>
-      <select id="startfrom-select"><option value="">✦ Fresh build</option></select>
-      <label id="req-label">What should the factory build? <span class="hint">— a sentence, or a full brief</span></label>
-      <textarea id="req-input" rows="3"
-        placeholder="e.g. a URL shortener with custom slugs, link expiry, and per-IP abuse rate-limiting">a Private Information Retrieval (PIR) system: fetch record i from a database without any server learning which record you asked for — information-theoretic 2-server PIR plus a single-server homomorphic variant, verified in-process</textarea>
 
-      <label>How do you want to feed the spec? <span class="hint">— the request alone is enough; these add detail</span></label>
-      <div class="intake-modes" id="intake-modes">
-        <label><input type="radio" name="intake" value="idea" /> Idea only</label>
-        <label><input type="radio" name="intake" value="spec" checked /> Paste spec</label>
-        <label><input type="radio" name="intake" value="zip" /> Upload .zip</label>
-        <label><input type="radio" name="intake" value="chat" /> Work it out with the leads</label>
-      </div>
+      <section class="fset">
+        <h3 class="fset-h">① The build</h3>
+        <div class="field">
+          <label for="preset-select">Preset <span class="hint">— load an example; fills every setting below</span></label>
+          <select id="preset-select"></select>
+          <p class="hint" id="preset-note"></p>
+        </div>
+        <div class="field">
+          <label for="startfrom-select">Start from <span class="hint">— a fresh build, or iterate on a finished one</span></label>
+          <select id="startfrom-select"><option value="">✦ Fresh build</option></select>
+        </div>
+        <div class="field">
+          <label id="req-label" for="req-input">What should the factory build? <span class="hint">— a sentence, or a full brief</span></label>
+          <textarea id="req-input" rows="3"
+            placeholder="e.g. a URL shortener with custom slugs, link expiry, and per-IP abuse rate-limiting">a Private Information Retrieval (PIR) system: fetch record i from a database without any server learning which record you asked for — information-theoretic 2-server PIR plus a single-server homomorphic variant, verified in-process</textarea>
+        </div>
+      </section>
+
+      <section class="fset">
+        <h3 class="fset-h">② The spec <span class="hint">— the request alone is enough; these add detail</span></h3>
+        <div class="intake-modes" id="intake-modes">
+          <label class="seg"><input type="radio" name="intake" value="idea" /><span>Idea only</span></label>
+          <label class="seg"><input type="radio" name="intake" value="spec" checked /><span>Paste spec</span></label>
+          <label class="seg"><input type="radio" name="intake" value="zip" /><span>Upload .zip</span></label>
+          <label class="seg"><input type="radio" name="intake" value="chat" /><span>Work it out with the leads</span></label>
+        </div>
       <div class="intake-panel" data-mode="spec">
         <label>Full spec (markdown / text) — grounds the PRD</label>
         <textarea id="spec-text" rows="7"
@@ -135,78 +141,132 @@ matches the true record.</textarea>
         <p class="cp-note">The Program Manager, Architect &amp; Tech-Leads help shape a spec (best on a real backend; mock can't converse). “Break ground” builds from the draft below.</p>
         <details id="chat-spec-wrap"><summary>Draft spec (updates as you talk)</summary><pre id="chat-spec">(nothing yet)</pre></details>
       </div>
+      </section>
 
-      <div class="row">
-        <label>Mode</label>
-        <select id="mode-select">
-          <option value="gated">gated — CTO signs off in the floor screen + evidence pack</option>
-          <option value="autonomous">autonomous — build · admit · deploy</option>
-        </select>
-      </div>
-      <div class="row">
-        <label>Build as</label>
-        <select id="build-select">
-          <option value="milestones" selected>milestone ladder — releasable increments (best for big specs)</option>
-          <option value="single">single build — the whole spec at once</option>
-        </select>
-      </div>
-      <div id="milestones-opts">
-        <label>Max milestones <span class="hint">— ladder length cap; the planner may use fewer</span></label>
-        <input id="max-milestones" type="number" min="1" max="12" value="6" />
-        <label>Explicit ladder <span class="hint">— optional, one milestone per line; blank = the model plans it</span></label>
-        <textarea id="milestones-text" rows="6"
-          placeholder="record store + XOR combiner over a selection vector&#10;2-server query split: random share r and r XOR e_i">record store: fixed-size records + an XOR combiner over a selection vector
+      <!-- Folded by default: every field here has a working default, and the summary
+           line reports what those defaults currently are. -->
+      <details class="fset fold" id="fold-run">
+        <summary><span class="fset-h">③ How it runs</span><span class="fset-sum" id="run-sum"></span></summary>
+        <div class="fset-body">
+          <div class="field">
+            <label for="backend-select">Backend</label>
+            <select id="backend-select">
+              <option value="mock">mock — deterministic, offline (no key)</option>
+              <option value="anthropic">anthropic — Claude API (ANTHROPIC_API_KEY)</option>
+              <option value="openai">openai — OpenAI API (OPENAI_API_KEY)</option>
+              <option value="claude-cli" selected>claude-cli — claude -p (Max subscription)</option>
+              <option value="codex">codex — codex CLI (OPENAI_API_KEY)</option>
+              <option value="ollama-gemma">ollama-gemma — local Ollama endpoint</option>
+            </select>
+            <p class="hint" id="model-note"></p>
+          </div>
+          <div class="field">
+            <label for="mode-select">Mode</label>
+            <select id="mode-select">
+              <option value="gated">gated — CTO signs off in the floor screen + evidence pack</option>
+              <option value="autonomous">autonomous — build · admit · deploy</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="build-select">Build as</label>
+            <select id="build-select">
+              <option value="milestones" selected>milestone ladder — releasable increments (best for big specs)</option>
+              <option value="single">single build — the whole spec at once</option>
+            </select>
+          </div>
+          <div id="milestones-opts">
+            <div class="field">
+              <label for="max-milestones">Max milestones <span class="hint">— ladder length cap; the planner may use fewer</span></label>
+              <input id="max-milestones" type="number" min="1" max="12" value="6" />
+            </div>
+            <div class="field">
+              <label for="milestones-text">Explicit ladder <span class="hint">— optional, one milestone per line; blank = the model plans it</span></label>
+              <textarea id="milestones-text" rows="6"
+                placeholder="record store + XOR combiner over a selection vector&#10;2-server query split: random share r and r XOR e_i">record store: fixed-size records + an XOR combiner over a selection vector
 2-server query split: a uniform random share r and r' = r XOR e_i for index i
 server answer + client reconstruct: each server XORs its selected records; client XORs both → record i
 correctness across indices, variable DB sizes, and multi-block records
 privacy tests: each server's query vector is independent of i (unlinkability)
 single-server additive-homomorphic (Paillier) variant + the demo runner</textarea>
-      </div>
-      <div class="row">
-        <label>Coding substrate</label>
-        <select id="adapter-select">
-          <option value="stub">stub — deterministic no-op (smoke/demo)</option>
-          <option value="raw-react">raw-react — one completion per task via the chosen backend</option>
-          <option value="claude-code">claude-code — AGENTIC: claude edits/builds/tests in the sandbox (Max plan or API)</option>
-          <option value="proxy-agent">proxy-agent — agentic loop through the proxy (any backend, key stays outside)</option>
-        </select>
-      </div>
-      <div class="row">
-        <label>Stack</label>
-        <select id="profile-select">
-          <option value="auto" selected>auto — the Architect picks from the installed toolchains</option>
-        </select>
-      </div>
-      <p class="hint">The stack pins the verification gates (build/test/smoke commands).
-        Non-Python stacks need their toolchain installed on the server — a missing
-        toolchain fails the gate loudly, it never fakes a pass.</p>
-      <label>Worker pool <span class="hint">— max parallel IC workers (blank = automatic)</span></label>
-      <input id="extra-workers" type="number" min="1" max="32" placeholder="auto" value="4" />
-      <p class="hint" id="parallel-note">The ceiling on how many implementation workers run
-        at once — the leads share this pool by demand. Effective parallelism is
-        min(tasks created, this cap); each discipline still gets at least one.</p>
-      <label>Auto-fix attempts <span class="hint">— fix-forward retries until green; each retry is a full agentic pass, so this is the biggest token lever (default 5)</span></label>
-      <input id="fix-input" type="number" min="0" max="20" value="5" />
-      <label>Cost cap (USD) <span class="hint">— max model spend (metered API backends only)</span></label>
-      <input id="cap-input" type="number" min="0" step="0.01" placeholder="no cap" />
-      <label>Autopilot <span class="hint">— self-iterations after a green build (0 = off): a Director proposes, a software/usability panel votes, the winner builds next</span></label>
-      <input id="autopilot-input" type="number" min="0" max="20" value="0" />
-      <label>Domain packs (optional, comma-separated)</label>
-      <input id="packs-input" type="text" placeholder="regulated, ml_data, frontend, game, crypto, infra" />
-      <label class="check"><input type="checkbox" id="supervised" checked /> Supervised (CTO approves each checkpoint)</label>
-      <p class="hint" id="supervised-hint"></p>
-      <p class="hint">A multi-service request (e.g. a site with users + posts) is auto-built as a PLATFORM — split into web / backend / data services (the backend owns the REST API, auth &amp; domain logic), each auto-deepened, then stitched into one monorepo. A single thing builds as one service.</p>
-      <details class="adv-platform">
-        <summary>Advanced — platform build</summary>
-        <label>Max deepening passes per service <span class="hint">— failsafe ceiling; auto stops sooner (default 6)</span></label>
-        <input type="number" id="max-passes" min="1" value="6" />
-        <label class="check"><input type="checkbox" id="critic-on" checked /> Completeness critic <span class="hint">— judges "done" each pass; off = stop on plateau only</span></label>
-        <label>Services built at once <span class="hint">— concurrency across services (default 4)</span></label>
-        <input type="number" id="max-parallel" min="1" value="4" />
-        <label>Tasks per service <span class="hint">— parallelism within each service (default 6)</span></label>
-        <input type="number" id="max-slots-svc" min="1" value="6" />
+            </div>
+          </div>
+          <div class="field">
+            <label for="adapter-select">Coding substrate</label>
+            <select id="adapter-select">
+              <option value="stub">stub — deterministic no-op (smoke/demo)</option>
+              <option value="raw-react">raw-react — one completion per task via the chosen backend</option>
+              <option value="claude-code">claude-code — AGENTIC: claude edits/builds/tests in the sandbox (Max plan or API)</option>
+              <option value="proxy-agent">proxy-agent — agentic loop through the proxy (any backend, key stays outside)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="profile-select">Stack</label>
+            <select id="profile-select">
+              <option value="auto" selected>auto — the Architect picks from the installed toolchains</option>
+            </select>
+            <p class="hint">The stack pins the verification gates (build/test/smoke commands).
+              Non-Python stacks need their toolchain installed on the server — a missing
+              toolchain fails the gate loudly, it never fakes a pass.</p>
+          </div>
+        </div>
       </details>
-      <div class="dialog-actions">
+
+      <details class="fset fold" id="fold-scale">
+        <summary><span class="fset-h">④ Scale &amp; limits</span><span class="fset-sum" id="scale-sum"></span></summary>
+        <div class="fset-body">
+          <!-- short numeric fields pair up two-across once there's room for it -->
+          <div class="field-grid">
+            <div class="field">
+              <label for="extra-workers">Worker pool <span class="hint">— max parallel IC workers (blank = automatic)</span></label>
+              <input id="extra-workers" type="number" min="1" max="32" placeholder="auto" value="4" />
+            </div>
+            <div class="field">
+              <label for="fix-input">Auto-fix attempts <span class="hint">— fix-forward retries until green; the biggest token lever (default 5)</span></label>
+              <input id="fix-input" type="number" min="0" max="20" value="5" />
+            </div>
+            <div class="field">
+              <label for="cap-input">Cost cap (USD) <span class="hint">— max model spend (metered API backends only)</span></label>
+              <input id="cap-input" type="number" min="0" step="0.01" placeholder="no cap" />
+            </div>
+            <div class="field">
+              <label for="autopilot-input">Autopilot <span class="hint">— self-iterations after a green build (0 = off): a Director proposes, a panel votes</span></label>
+              <input id="autopilot-input" type="number" min="0" max="20" value="0" />
+            </div>
+          </div>
+          <p class="hint" id="parallel-note">The ceiling on how many implementation workers run
+            at once — the leads share this pool by demand. Effective parallelism is
+            min(tasks created, this cap); each discipline still gets at least one.</p>
+          <div class="field">
+            <label for="packs-input">Domain packs (optional, comma-separated)</label>
+            <input id="packs-input" type="text" placeholder="regulated, ml_data, frontend, game, crypto, infra" />
+          </div>
+          <label class="check"><input type="checkbox" id="supervised" checked /> Supervised (CTO approves each checkpoint)</label>
+          <p class="hint" id="supervised-hint"></p>
+          <p class="hint">A multi-service request (e.g. a site with users + posts) is auto-built as a PLATFORM — split into web / backend / data services (the backend owns the REST API, auth &amp; domain logic), each auto-deepened, then stitched into one monorepo. A single thing builds as one service.</p>
+          <details class="adv-platform">
+            <summary>Advanced — platform build</summary>
+            <div class="field-grid">
+              <div class="field">
+                <label for="max-passes">Max deepening passes per service <span class="hint">— failsafe ceiling; auto stops sooner (default 6)</span></label>
+                <input type="number" id="max-passes" min="1" value="6" />
+              </div>
+              <div class="field">
+                <label for="max-parallel">Services built at once <span class="hint">— concurrency across services (default 4)</span></label>
+                <input type="number" id="max-parallel" min="1" value="4" />
+              </div>
+              <div class="field">
+                <label for="max-slots-svc">Tasks per service <span class="hint">— parallelism within each service (default 6)</span></label>
+                <input type="number" id="max-slots-svc" min="1" value="6" />
+              </div>
+            </div>
+            <label class="check"><input type="checkbox" id="critic-on" checked /> Completeness critic <span class="hint">— judges "done" each pass; off = stop on plateau only</span></label>
+          </details>
+        </div>
+      </details>
+
+      <!-- Sticky: the form outruns a phone screen, and BREAK GROUND must never be the
+           thing you have to scroll to find. -->
+      <div class="dialog-actions build-actions">
         <button id="start-btn" class="primary">BREAK GROUND</button>
         <button id="cancel-btn">cancel</button>
       </div>

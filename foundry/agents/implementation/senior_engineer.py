@@ -70,6 +70,7 @@ __all__ = [
     "DESIGN_KIND",
     "OWNERSHIP_KIND",
     "ArtifactResolverError",
+    "leads_for_lane",
     "make_senior_engineer_node",
     "stub_conflict_resolution",
     "task_id_for_unit",
@@ -175,6 +176,35 @@ def _read_design_and_ownership(
     return design, ownership
 
 
+def leads_for_lane(ownership: OwnershipMap, lane: str | None) -> tuple[str, ...]:
+    """The Tech-Leads a LANE node decomposes: those whose area folds into ``lane``
+    (:func:`lane_of_area`), in :meth:`OwnershipMap.leads` order. ``None`` = every lead
+    (the legacy single-node scope).
+
+    Shared with the subgraph router so the EDGE and the NODE decide lane membership
+    with one predicate and can never disagree (the architecture subgraph's AC2
+    ``should_enter_<role>`` pattern) — a lane the router skips is provably a lane this
+    node would have found nothing to do in."""
+    return tuple(
+        lead
+        for lead in ownership.leads()
+        if lane is None or lane_of_area(ownership.area_of(lead)) == lane
+    )
+
+
+def lanes_with_leads(state: FactoryState, resolve: ArtifactResolver) -> frozenset[str] | None:
+    """Which lanes have a Tech-Lead to decompose, for the subgraph router.
+
+    ``None`` means UNKNOWN — the OwnershipMap isn't readable yet. The router must then
+    run the node anyway: reading it is the node's job, and its failure is the node's to
+    raise (a router that swallowed it would silently skip the whole lane)."""
+    try:
+        _design, ownership = _read_design_and_ownership(state, resolve)
+    except (ArtifactResolverError, KeyError, LookupError, ValueError):
+        return None
+    return frozenset(lane_of_area(ownership.area_of(lead)) for lead in ownership.leads())
+
+
 def make_senior_engineer_node(
     rt: AgentRuntime,
     *,
@@ -230,9 +260,7 @@ def make_senior_engineer_node(
         # org is stored on the Task (a later wave records lineage where consumed).
         tasks: list[dict[str, Any]] = []
         notes: list[JournalEntry] = []
-        for lead in ownership.leads():
-            if lane is not None and lane_of_area(ownership.area_of(lead)) != lane:
-                continue  # another lane's node decomposes this Tech-Lead
+        for lead in leads_for_lane(ownership, lane):   # another lane owns the rest
             units = ownership.units_of(lead)
             prompt = json.dumps(
                 {

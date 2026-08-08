@@ -7,6 +7,12 @@ LEAD (decompose) + ENGINEER (build) node per discipline lane:
 
     START -> {fe,be,da}_lead (decompose) -> {fe,be,da}_engineer (build) -> END
 
+Each hop is CONDITIONAL on the next lane having work: a lane with no Tech-Lead (and
+so no task) is skipped, not run as a no-op — an empty lane executed for free but
+still reported itself as a working agent. The routers key on the same
+``leads_for_lane`` / ``tasks_for_lane`` predicates the nodes partition with, so the
+edge and the node can never disagree (the architecture subgraph's AC2 pattern).
+
 The Senior Engineer (T1) reads the SystemDesign + OwnershipMap off
 ``state["artifacts"]`` (by ``Artifact.kind``, reconstituted through the injected
 ``resolve``) and decomposes them into a deterministic, ownership-ordered
@@ -40,8 +46,10 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
 from foundry.agents.implementation import (
+    lanes_with_leads,
     make_junior_engineer_node,
     make_senior_engineer_node,
+    tasks_for_lane,
 )
 from foundry.schemas.architecture import ENGINEERING_LANES
 from foundry.state.factory_state import FactoryState
@@ -113,7 +121,7 @@ def build_implementation_subgraph(
     # (and the office) can tell FE-lead / BE-engineer / … apart. Every owner/task folds
     # into exactly one lane (``lane_of_area``: infra+security -> backend), so nothing is
     # decomposed or built twice, and task identity/seq/merge are unchanged (see the two
-    # node factories). Empty lanes (no owner) simply write nothing.
+    # node factories).
     lead_ids: list[str] = []
     eng_ids: list[str] = []
     for _lane in ENGINEERING_LANES:
@@ -135,10 +143,46 @@ def build_implementation_subgraph(
         lead_ids.append(lead_id)
         eng_ids.append(eng_id)
 
-    # START -> (fe/be/da lead) -> (fe/be/da engineer) -> END, in a single deterministic
-    # chain: leads decompose in lane order, then engineers build in lane order.
-    chain = [START, *lead_ids, *eng_ids, END]
-    for _a, _b in zip(chain, chain[1:]):
-        g.add_edge(_a, _b)
+    # START -> (fe/be/da lead) -> (fe/be/da engineer) -> END: leads decompose in lane
+    # order, then engineers build in lane order — but a lane with NO work is skipped
+    # rather than run as a no-op. An empty lane cost no model call either way, yet it
+    # still executed, and so still reported itself as a working agent: a "Frontend Lead"
+    # decomposing on a data-only service, both in the quest log and at a desk on the
+    # floor. The chain is therefore conditional, each hop routing to the NEXT lane with
+    # work (else END).
+    #
+    # The routers key on the SAME helpers the nodes partition with — `leads_for_lane` /
+    # `tasks_for_lane` — so the edge and the node can never disagree and no lane can be
+    # skipped out of work it would have done (the architecture subgraph's AC2 pattern).
+    # An unreadable OwnershipMap is UNKNOWN, not empty: the node runs and raises, exactly
+    # as before. Order and lane membership are unchanged, so task ids, seqs and the
+    # merge order are byte-identical to the unconditional chain.
+    chain = [*lead_ids, *eng_ids]
+    lane_of_node = {f"{ln}_lead": ln for ln in ENGINEERING_LANES}
+    lane_of_node.update({f"{ln}_engineer": ln for ln in ENGINEERING_LANES})
+
+    def _has_work(node_id: str, state: FactoryState) -> bool:
+        lane = lane_of_node[node_id]
+        if node_id.endswith("_lead"):
+            lanes = lanes_with_leads(state, resolve)
+            return lanes is None or lane in lanes
+        return bool(tasks_for_lane(state, resolve, lane))
+
+    def _next_with_work(after: int) -> Callable[[FactoryState], str]:
+        def _route(state: FactoryState) -> str:
+            for node_id in chain[after + 1:]:
+                if _has_work(node_id, state):
+                    return node_id
+            return END
+        return _route
+
+    # The path map's keys are the legal router return values (the reachable node ids +
+    # END); add_conditional_edges drives branch-target validation and the rendered
+    # topology off it.
+    g.add_conditional_edges(START, _next_with_work(-1),
+                            {**{n: n for n in chain}, END: END})
+    for _i, _node_id in enumerate(chain):
+        g.add_conditional_edges(_node_id, _next_with_work(_i),
+                                {**{n: n for n in chain[_i + 1:]}, END: END})
 
     return g

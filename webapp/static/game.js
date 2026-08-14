@@ -10,36 +10,66 @@
  * can influence a build — the signed gates decide and this is only the view.
  */
 
-// Canvas aspect (~1.5:1) is matched to the game panel so the world FILLS the frame
-// (no letterbox). Pokémon-interior vertical split: WALL fills the top, FLOOR the
-// rest. FLOOR_TOP is the wall/floor seam; characters stand on the floor near FLOOR_BOT.
-const W = 1280, H = 840;
-const FLOOR_TOP = 100, FLOOR_BOT = H - 40;   // general playfield bounds (rooms are placed boxes)
+// Canvas aspect is matched to the game panel so the world FILLS the frame (no
+// letterbox). Pokémon-interior vertical split: WALL fills the top, FLOOR the rest.
+// FLOOR_TOP is the wall/floor seam; characters stand on the floor near FLOOR_BOT.
+//
+// TWO floorplans, one per orientation. A room's desk grid sits at fixed offsets
+// (placeOrg puts the first row at R.y+94 with a 50px pitch), so cells cannot shrink —
+// the only thing free to change is the SHAPE of the grid. Four cells across makes a
+// 1280px world, which a 390px phone can only draw at ~30%; three across is 970px and
+// draws at ~40%, and the block is nearly square, so on a phone it fills the screen
+// instead of sitting in it as a letterbox strip.
+const PORTRAIT_MQ = "(max-width: 820px) and (orientation: portrait)";
+let W, H, FLOOR_TOP, FLOOR_BOT;
 
-// ---- floorplan: a tidy 3x3 GRID of section zones with walkway aisles (the "#").
+// ---- floorplan: a GRID of section zones with walkway aisles (the "#").
 // One open level; the elevator switches PROJECTS. Aisles between cells are corridors
 // people walk along; sections are coloured floor rugs in the cells.
-const WALL_TOP = 118, FLOOR_BOTTOM = H - 26;
-// 4×3 grid of (smaller) section-cells. The engineering stage is split into its OWN
-// per-discipline rooms — FRONTEND / BACKEND / DATA — top-level sections like the
-// others, occupying row 1; all of an area's engineers live in its room.
-const CELL_W = 274, CELL_H = 196, AISLE = 34, GX0 = 40, GY0 = 132, GX1 = W - 40;
+let WALL_TOP, FLOOR_BOTTOM;
+// Cell size is FIXED in both plans: the desk grid inside a room is placed at absolute
+// offsets (PX/SY/RP in buildAgents + layoutEngineering), so a shorter or narrower cell
+// would push desks through the walls. Only the grid's shape changes.
+const CELL_W = 274, CELL_H = 196, AISLE = 34, GX0 = 40, GY0 = 132;
+let GX1;
 function cellBox(c,r){ const x = GX0 + c*(CELL_W+AISLE), y = GY0 + r*(CELL_H+AISLE);
   // include derived coords so non-ROOM callers (the lounge cell) get cx/cy/x1/y1 too.
   return {x, y, w:CELL_W, h:CELL_H, x0:x, y0:y, x1:x+CELL_W, y1:y+CELL_H, cx:x+CELL_W/2, cy:y+CELL_H/2}; }
-const GRID = {  // pipeline: product → architecture → engineering(FE/BE/DA) → qa → security → gate → vault
-  product:[0,0], architecture:[1,0], qa:[2,0], security:[3,0],
-  frontend:[0,1], backend:[1,1], data:[2,1], gate:[3,1],
-  vault:[3,2],                       // gate(3,1) sits directly above vault(3,2)
-  office:[0,2],                      // the CTO's own office (row 2, far left)
+// Both plans read pipeline-order left-to-right, top-to-bottom, keep the GATE directly
+// above the VAULT (the vault's only opening is a top gap punched at the gate's centre,
+// and buildGate seals the one-aisle corridor between them), and give the vault two
+// cells so the prize room spans a full row-end.
+const PLANS = {
+  // 4 across × 3 down — the desktop floor, unchanged.
+  landscape: {
+    W:1280, H:840, cols:4, rows:3,
+    grid:{ product:[0,0], architecture:[1,0], qa:[2,0], security:[3,0],
+           frontend:[0,1], backend:[1,1], data:[2,1], gate:[3,1],
+           vault:[3,2],                   // gate(3,1) sits directly above vault(3,2)
+           office:[0,2] },                // the CTO's own office (row 2, far left)
+    vaultSpan:[[2,2],[3,2]],
+    lounge:[1,2],
+  },
+  // 3 across × 4 down — the portrait phone floor. Same cells, taller stack, so a
+  // 390px screen draws it at ~40% instead of ~30% and the block is nearly square.
+  portrait: {
+    W:970, H:1070, cols:3, rows:4,
+    grid:{ product:[0,0], architecture:[1,0], office:[2,0],
+           frontend:[0,1], backend:[1,1], data:[2,1],
+           qa:[0,2], security:[1,2], gate:[2,2],
+           vault:[2,3] },                 // gate(2,2) sits directly above vault(1..2,3)
+    vaultSpan:[[1,3],[2,3]],
+    lounge:[0,3],
+  },
 };
+let PLAN = null;
+let GRID, LOUNGE_CELL, ENTRANCE_CELL;
 // Pipeline ORDER (the build sequence) — drives the order numerals + the flow path.
 const PIPELINE_ORDER = ["product","architecture","frontend","backend","data","qa","security","gate","vault"];
-// (0,2) = the CTO OFFICE (a real room, see GRID.office); (1,2) = the RECEPTION /
-// LOUNGE. No pipeline work happens in either — and nobody is ever SENT to the
+// The CTO OFFICE is a real room (see each plan's grid); the LOUNGE cell is the
+// RECEPTION. No pipeline work happens in either — and nobody is ever SENT to the
 // lounge: every agent lives at their own desk (see "presence" below), so it's the
 // entrance + a furnished break room, not a holding pen for idle staff.
-const LOUNGE_CELL = [1,2], ENTRANCE_CELL = [1,2];
 const ENG_ROOMS = ["frontend","backend","data"];               // engineering discipline rooms
 const ENG_AREA_ROOM = {frontend:"frontend", backend:"backend", data:"data",
                        infra:"backend", security:"backend"};   // org AREA → its discipline room
@@ -56,28 +86,48 @@ const RBASE = {
 const ORDER_NO = {product:1, architecture:2, frontend:3, backend:3, data:3,
                   qa:4, security:5, gate:6, vault:7};
 const ROOMS = {};
-for (const k in RBASE) ROOMS[k] = Object.assign({}, RBASE[k], cellBox(GRID[k][0], GRID[k][1]));
-// Virtual "engineering" region = bbox over the discipline rooms. NOT drawn (virtual),
-// but present so server events keyed to room "engineering" (stage glow / pickups /
-// bursts) still resolve to a sensible position.
-(function(){ const rs = ENG_ROOMS.map(k=>ROOMS[k]);
-  const x0=Math.min(...rs.map(r=>r.x)), y0=Math.min(...rs.map(r=>r.y));
-  const x1=Math.max(...rs.map(r=>r.x+r.w)), y1=Math.max(...rs.map(r=>r.y+r.h));
-  ROOMS.engineering = {label:"ENGINEERING", color:0x5a3a2e, virtual:true, x:x0, y:y0, w:x1-x0, h:y1-y0};
-})();
-// The VAULT is the shipped-artifact destination — give it prominence by spanning the
-// bottom-right two cells (fills the corner with REAL content; it's the prize room, not filler).
-(function(){ const a = cellBox(2,2), b = cellBox(3,2);
-  Object.assign(ROOMS.vault, {x:a.x, y:a.y, w:(b.x + b.w) - a.x, h:a.h}); })();
 const ROOM_ORDER = ["product","architecture","frontend","backend","data","qa","security","gate","vault"];
 const TINT = {security:[0xff6d6d,0.05], gate:[0x6aa0ff,0.05], vault:[0xffd25a,0.06]};
-// the "#": centre-lines of the walkway aisles between columns / rows (generated)
-const AISLE_VX = [0,1,2].map(c => GX0 + (c+1)*CELL_W + c*AISLE + AISLE/2);
-const AISLE_HY = [0,1].map(r => GY0 + (r+1)*CELL_H + r*AISLE + AISLE/2);
-(function layout(){ for (const k in ROOMS){ const R = ROOMS[k];
-  R.key=k; R.x0=R.x; R.x1=R.x+R.w; R.y1=R.y+R.h; R.cx=R.x+R.w/2; R.cy=R.y+R.h/2;
-  R.wallH=0; R.floorY=R.y+18; R.standY=R.y1-14;
-} })();
+// the "#": centre-lines of the walkway aisles between columns / rows (generated).
+// corridorRoute() walks these, so the counts must match the plan's cols/rows.
+const AISLE_VX = [], AISLE_HY = [];
+
+// Lay the world out for the current orientation. ROOMS and the aisle arrays are
+// rebuilt IN PLACE so every module-level reference to them stays live. Returns false
+// when the plan is already the right one, so a resize can call it cheaply.
+function applyFloorplan(force){
+  const want = window.matchMedia(PORTRAIT_MQ).matches ? "portrait" : "landscape";
+  if (!force && PLAN === PLANS[want]) return false;
+  PLAN = PLANS[want];
+  W = PLAN.W; H = PLAN.H;
+  FLOOR_TOP = 100; FLOOR_BOT = H - 40;   // general playfield bounds (rooms are placed boxes)
+  WALL_TOP = 118; FLOOR_BOTTOM = H - 26;
+  GX1 = W - 40;
+  GRID = PLAN.grid;
+  LOUNGE_CELL = PLAN.lounge; ENTRANCE_CELL = PLAN.lounge;
+  for (const k of Object.keys(ROOMS)) delete ROOMS[k];
+  for (const k in RBASE) ROOMS[k] = Object.assign({}, RBASE[k], cellBox(GRID[k][0], GRID[k][1]));
+  // Virtual "engineering" region = bbox over the discipline rooms. NOT drawn (virtual),
+  // but present so server events keyed to room "engineering" (stage glow / pickups /
+  // bursts) still resolve to a sensible position.
+  { const rs = ENG_ROOMS.map(k=>ROOMS[k]);
+    const x0=Math.min(...rs.map(r=>r.x)), y0=Math.min(...rs.map(r=>r.y));
+    const x1=Math.max(...rs.map(r=>r.x+r.w)), y1=Math.max(...rs.map(r=>r.y+r.h));
+    ROOMS.engineering = {label:"ENGINEERING", color:0x5a3a2e, virtual:true, x:x0, y:y0, w:x1-x0, h:y1-y0}; }
+  // The VAULT is the shipped-artifact destination — give it prominence by spanning two
+  // cells (fills the row end with REAL content; it's the prize room, not filler).
+  { const [ca, cb] = PLAN.vaultSpan, a = cellBox(ca[0],ca[1]), b = cellBox(cb[0],cb[1]);
+    Object.assign(ROOMS.vault, {x:a.x, y:a.y, w:(b.x + b.w) - a.x, h:a.h}); }
+  AISLE_VX.length = 0; AISLE_HY.length = 0;
+  for (let c = 0; c < PLAN.cols-1; c++) AISLE_VX.push(GX0 + (c+1)*CELL_W + c*AISLE + AISLE/2);
+  for (let r = 0; r < PLAN.rows-1; r++) AISLE_HY.push(GY0 + (r+1)*CELL_H + r*AISLE + AISLE/2);
+  for (const k in ROOMS){ const R = ROOMS[k];
+    R.key=k; R.x0=R.x; R.x1=R.x+R.w; R.y1=R.y+R.h; R.cx=R.x+R.w/2; R.cy=R.y+R.h/2;
+    R.wallH=0; R.floorY=R.y+18; R.standY=R.y1-14;
+  }
+  return true;
+}
+applyFloorplan(true);
 function roomAt(x,y){ for (const k in ROOMS){ const R=ROOMS[k];
   if (x>=R.x && x<=R.x1 && y>=R.y && y<=R.y1) return k; } return null; }
 
@@ -408,8 +458,14 @@ class FloorScene extends Phaser.Scene {
     this.add.rectangle(0, FLOOR_BOTTOM, W, H-FLOOR_BOTTOM, PC.bg).setOrigin(0,0).setDepth(1);
     // framed wall pictures along the top wall — each a DIFFERENT scene (the sun is on
     // only one, not repeated in every window).
+    // Same count and pitch as ever; only a narrower world re-centres the run, so it
+    // doesn't leave a dead gap against the right wall.
     let pi = 0;
-    for (let wx=86; wx<W-130; wx+=232){
+    const picPitch = 232, picW = 80;
+    const picN = Math.max(3, Math.floor((W - 130 - 86) / picPitch) + 1);
+    const picX0 = PLAN.cols >= 4 ? 86
+      : Math.round((W - (picN-1)*picPitch - picW) / 2);
+    for (let wx=picX0; pi<picN; wx+=picPitch){
       // the SUN belongs to exactly one window (pi 0); the rest cycle the other
       // three scenes (clouds / mountain / birds) so no scene — sun included — repeats back-to-back.
       const ww=80, wh=42, wy=60, v = pi===0 ? 0 : 1 + ((pi-1) % 3);
@@ -434,8 +490,10 @@ class FloorScene extends Phaser.Scene {
       this.add.rectangle(wx+7, wy, 3, wh, 0xffffff, 0.10).setOrigin(0,0).setDepth(2);           // glass glint
       pi++;
     }
-    // soft ceiling-light pools on the floor (kept subtle, bright theme)
-    [240,560,1140].forEach(lx=>{
+    // soft ceiling-light pools on the floor (kept subtle, bright theme). Fractions of
+    // W, not the three coordinates picked for 1280 (1140 falls outside a 970 world);
+    // these reproduce 240/560/1140 exactly at the landscape width.
+    [0.1875, 0.4375, 0.890625].map(f => Math.round(f*W)).forEach(lx=>{
       this.add.ellipse(lx, WALL_TOP+92, 110, 38, 0xffffff, 0.06).setDepth(0);
       this.add.circle(lx, WALL_TOP+18, 5, 0xfff6d8, 0.95).setDepth(2).setStrokeStyle(2, PC.wallShade);
     });
@@ -505,8 +563,10 @@ class FloorScene extends Phaser.Scene {
       const topGap = key==="gate" ? cx : (key==="vault" ? Math.round(ROOMS.gate.cx) : null);
       // The CTO OFFICE opens on its RIGHT wall (onto the corridor), not the bottom —
       // everyone else opens at the bottom centre. Vault is sealed bottom (top-only).
-      const rightGap = key==="office" ? Math.round(R.cy) : null;
-      const botGap = (key==="vault" || key==="office") ? null : cx;
+      // In a plan where the office is the last column there is no corridor to its
+      // right, only the perimeter wall, so it falls back to a bottom door.
+      const rightGap = (key==="office" && R.x1 < GX1) ? Math.round(R.cy) : null;
+      const botGap = (key==="vault" || rightGap != null) ? null : cx;
       seg(R.x, R.y, T, R.h);                                   // left  (solid)
       if (rightGap != null){ seg(R.x1-T, R.y, T, (rightGap-DOOR/2)-R.y); seg(R.x1-T, rightGap+DOOR/2, T, R.y1-(rightGap+DOOR/2)); }
       else seg(R.x1 - T, R.y, T, R.h);                         // right (solid or split)
@@ -552,7 +612,10 @@ class FloorScene extends Phaser.Scene {
     this.add.rectangle(0,44,W,2,PC.wallHi).setOrigin(0,0).setDepth(-1);
     const cloud=(cx,cy,cw,a)=>{ const c=this.add.rectangle(cx,cy,cw,6,0x1a2e30,a).setOrigin(0,0).setDepth(-1);
       this.tweens.add({targets:c, x:cx+60, duration:22000, yoyo:true, repeat:-1, ease:"Sine.inOut"}); };
-    cloud(160,18,90,0.5); cloud(520,30,130,0.4); cloud(900,14,80,0.5);
+    // fractions of W: each cloud drifts +60px, so fixed x's bunch against the right
+    // wall on a narrow world. These are 160/520/900 exactly at the landscape width.
+    cloud(Math.round(W*0.125),18,90,0.5); cloud(Math.round(W*0.40625),30,130,0.4);
+    cloud(Math.round(W*0.703125),14,80,0.5);
   }
 
   drawFlowPath(){   // faint guide line through the build STAGES (engineering as one waypoint)
@@ -1657,11 +1720,17 @@ class FloorScene extends Phaser.Scene {
   }
 
   drawGatePips(){
-    const {ax,atop} = this.gateGeom;
+    const {atop, cx} = this.gateGeom;
+    // Centred on the gate and clamped inside the world. All nine gates make a ~230px
+    // strip, which ran off the right edge whenever the gate sits in the last column —
+    // so the run is re-centred on every call and existing pips are moved with it.
+    const present = GATE_ORDER.filter(n => this.gates[n]);
+    const PITCH = 26, span = (present.length - 1) * PITCH;
+    const x0 = Math.round(Math.min(Math.max(cx - span/2 - 10, 16), W - span - 46));
     let i = 0;
-    for (const n of GATE_ORDER){
-      const g = this.gates[n]; if (!g) continue;
-      const sx = ax+12+i*26, sy = atop-12;
+    for (const n of present){
+      const g = this.gates[n];
+      const sx = x0 + i*PITCH, sy = atop-12;
       if (!this.gatePips[n]){
         const c = this.add.container(sx, sy).setDepth(6);
         c.add(this.add.rectangle(10,4,20,18,PC.sceneInk));
@@ -1670,7 +1739,7 @@ class FloorScene extends Phaser.Scene {
         c.add(this.add.rectangle(17,-3,5,5,0xffcf52).setVisible(false));
         this.gatePips[n] = c;
         c.setScale(0); this.tweens.add({targets:c, scale:1, duration:240, ease:"Back.out"});
-      }
+      } else this.gatePips[n].setPosition(sx, sy);
       const [plate,label,pip] = this.gatePips[n].list;
       const pass = g.status === "pass";
       plate.setFillStyle(pass?0x1f6b3a:0x6b1f28);
@@ -1868,6 +1937,27 @@ const GAME = new Phaser.Game({
   scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH },
   scene: [BootScene],
 });
+
+// Rotating the phone swaps which floorplan fits, so re-lay the world and replay every
+// floor scene onto it. A scene restart is already how a new release redraws a floor,
+// so the floors rebuild from the state the client is holding.
+window.matchMedia(PORTRAIT_MQ).addEventListener("change", ()=>{
+  if (!applyFloorplan()) return;
+  // setGameSize, not resize: resize() leaves displaySize's aspect ratio on the old
+  // world, so FIT keeps letterboxing the new one to the previous shape.
+  GAME.scale.setGameSize(W, H);
+  for (const F of FLOORS.values()){
+    const sc = GAME.scene.getScene(floorKey(F.floor));
+    if (sc) sc.scene.restart({floor:F.floor, id:F.id, request:F.request, mode:F.mode, slots:F.slots});
+  }
+  // resize() keeps the FIT computed for the OLD panel box, and the box changes on this
+  // same media query — so re-fit once the new one has been laid out.
+  requestAnimationFrame(refitGame);
+});
+// A ResizeObserver fires once the moment it is attached, before Phaser has made its
+// canvas, and refresh() dereferences that canvas — hence the guard.
+function refitGame(){ if (GAME.scale && GAME.scale.canvas) GAME.scale.refresh(); }
+new ResizeObserver(refitGame).observe(document.getElementById("game"));
 
 // =========================================================================== //
 //  Floor manager + multi-project networking                                   //

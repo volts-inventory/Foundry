@@ -570,9 +570,11 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
   }
 
   /* The display: exactly the canvas aspect (Phaser Scale.FIT then fills it edge to
-     edge), so the old centred-with-black-bars gap is gone. Capped so a short phone
-     still leaves room for the log. */
-  #game{width:100%;aspect-ratio:1280/840;max-height:46dvh;
+     edge), so the old centred-with-black-bars gap is gone. Portrait reflows the
+     floorplan to 3 cells across instead of 4 (see PLAN_PORTRAIT in game.js), so the
+     world is 970x1070 here and the block is nearly square rather than a letterbox
+     strip. Capped so a short phone still leaves room for the log. */
+  #game{width:100%;aspect-ratio:970/1070;max-height:60dvh;
     border-bottom:3px solid var(--gold)}
 
   /* ---- the control bar: hud rows + floor pills read as ONE band ----

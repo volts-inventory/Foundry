@@ -53,10 +53,13 @@
     <main id="game"><div id="wipe" aria-hidden="true"></div></main>
 
     <aside id="log-panel">
-      <div class="log-title">QUEST LOG <span id="log-live" class="log-live"></span></div>
+      <div class="log-title">QUEST LOG</div>
+      <!-- The live chip rides the tabs row (not the title) so portrait can drop the
+           title row entirely without losing the stream-health indicator. -->
       <div class="log-tabs">
         <button class="log-tab sel" data-tab="live">● Live</button>
         <button class="log-tab" data-tab="progress">≡ Progress</button>
+        <span id="log-live" class="log-live"></span>
       </div>
       <ul id="log"></ul>
       <ul id="progress" style="display:none"></ul>

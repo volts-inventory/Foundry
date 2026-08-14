@@ -161,8 +161,9 @@ button.warn{background:#5a4a18;border-color:var(--gold);color:#fff6da}
 .log-live.on::before{content:"●";margin-right:4px;animation:pulse 1.6s infinite;display:inline-block}
 .log-live.stale{color:var(--gold)}
 /* two views share the list styling: LIVE (blow-by-blow) and PROGRESS (per-stage skim) */
-.log-tabs{display:flex;flex:0 0 auto;border-bottom:2px solid var(--gold);
+.log-tabs{display:flex;align-items:center;flex:0 0 auto;border-bottom:2px solid var(--gold);
   background:rgba(255,207,82,.04)}
+.log-tabs .log-live{padding-right:10px}
 /* square, flush tabs: they inherit from `button`, so the radius + drop shadow have
    to be reset or the 2px underline renders as a rounded stub poking below the bar. */
 .log-tab{flex:1;padding:6px 8px;background:none;border:none;border-radius:0;
@@ -491,9 +492,12 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
 .repo-sha{font-size:11px;color:var(--dim);font-family:monospace}
 .repo-src{font-size:11px;color:var(--dim)}
 .repo-src.ok{color:#7fe7a4}
-.repo-tabs{display:flex;gap:6px;margin-top:10px;border-bottom:2px solid var(--line)}
+/* one scrolling line: four tabs outgrow a phone, and a clipped tab is unreachable */
+.repo-tabs{display:flex;gap:6px;margin-top:10px;border-bottom:2px solid var(--line);
+  overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+.repo-tabs::-webkit-scrollbar{display:none}
 .repo-tab{background:transparent;border:none;border-bottom:3px solid transparent;color:var(--dim);
-  padding:7px 12px;font-size:12px;font-weight:bold;cursor:pointer}
+  padding:7px 12px;font-size:12px;font-weight:bold;cursor:pointer;flex:none;white-space:nowrap}
 .repo-tab:hover{color:var(--ink)}
 .repo-tab.sel{color:var(--gold);border-bottom-color:var(--gold)}
 .tab-count{font-size:10px;color:var(--dim);background:#1f2942;border-radius:8px;padding:1px 6px;margin-left:2px}
@@ -600,10 +604,14 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
   .el-btn{padding:5px 11px;white-space:nowrap}
   .el-btn .fl-no{display:inline;font-size:13px}
 
-  /* the log owns the rest of the screen (no fixed drawer height any more), and its
-     own chrome is trimmed to one thin title line + the tabs */
+  /* the log owns the rest of the screen (no fixed drawer height any more). The
+     title row goes entirely — the LIVE/PROGRESS tabs already name the panel, and
+     the live chip moved into the tabs row, so nothing is lost. The tabs' own bar
+     drops to a quiet line: the elevator's gold rule right above is the band
+     separator, and two gold rules 30px apart is the clutter being fixed. */
   #log-panel{border-left:none;border-top:none}
-  .log-title{padding:4px 10px;font-size:10px}
+  .log-title{display:none}
+  .log-tabs{border-bottom-color:var(--line)}
   .log-tab{padding:8px 8px}                   /* touch target, minus the title bulk */
   #log,#progress{font-size:12px;padding:7px 10px}
 
@@ -616,6 +624,14 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
      font is chunky, so every horizontal pixel counts on a 390px screen */
   .dialog{width:96vw;padding:14px}
   .dialog h2{font-size:15px;margin-bottom:10px}
+  /* action rows wrap instead of shoving no-wrap buttons past the dialog edge */
+  .dialog-actions{flex-wrap:wrap}
+  /* Checkpoint verdicts: three abreast overflows at 390px (REQUEST CHANGES spills
+     onto APPROVE). APPROVE gets its own full-width row; the two "send it back"
+     verbs share the second. Sticky offset retuned to this block's 14px padding. */
+  .cp-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;bottom:-14px}
+  .cp-actions button{white-space:normal}
+  #cp-approve{grid-column:1 / -1}
 
   /* The build form is far too long for a centred card on a phone, so it becomes a
      full-height SHEET: edge to edge, header pinned to the top, BREAK GROUND pinned

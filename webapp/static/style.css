@@ -42,16 +42,26 @@ body{
   box-shadow:inset 0 -6px 0 rgba(0,0,0,.35), 0 2px 0 #0a0f1c;
   text-transform:uppercase;font-size:13px;gap:10px;flex:0 0 auto;flex-wrap:nowrap;
 }
-/* hud-left absorbs the slack and lets the project title ellipsis; hud-right
-   (buttons) never shrinks. Keeps everything on one row from ~820px up. */
-.hud-left{display:flex;align-items:center;gap:12px;min-width:0;flex:1 1 auto}
-.hud-mid{display:flex;align-items:center;min-width:0;flex:0 1 auto;
+/* the request line absorbs the slack and ellipsises; the wordmark/floor block and
+   hud-right (buttons) never shrink. Keeps everything on one row from ~820px up. */
+.hud-left{display:flex;align-items:center;gap:12px;min-width:0;flex:0 0 auto}
+/* the chips absorb the slack: they carry live gate status, so spare width is worth
+   more here than on the request line, which ellipsises either way */
+.hud-mid{display:flex;align-items:center;min-width:0;flex:1 1 auto;
   overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
 .hud-mid::-webkit-scrollbar{display:none}
 .hud-right{display:flex;align-items:center;gap:12px;flex:0 0 auto}
 .logo{font-weight:bold;color:var(--gold);font-size:16px;white-space:nowrap;text-shadow:0 0 8px rgba(255,207,82,.4), 2px 2px 0 #0a0f1c}
 .elevator{color:var(--blue);border:2px solid var(--blue);border-radius:4px;padding:2px 8px;font-weight:bold;white-space:nowrap}
-.proj{color:var(--ink);max-width:46vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* The cap is what actually rations the bar: the line pins to it and the leftover
+   deficit falls on the chips, so 46vw here starved them once .proj became a direct
+   child of the bar rather than a nested one. */
+.proj{color:var(--ink);flex:0 1 auto;min-width:0;max-width:40vw;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* The milestone loop appends " — MILESTONE i/n: <title>" to the request, so the raw
+   string is a prompt, not a label. updateHud() splits it into these two spans. */
+.proj-mile{color:var(--dim)}
+.proj-mile::before{content:" — "}
 .mode{color:var(--dim);white-space:nowrap}
 /* Stage / per-service chips: ONE line that scrolls sideways when a long milestone
    ladder outgrows the bar — never wrapping (a wrapped "0/6 ✓" tally reads broken). */
@@ -161,8 +171,9 @@ button.warn{background:#5a4a18;border-color:var(--gold);color:#fff6da}
 .log-live.on::before{content:"●";margin-right:4px;animation:pulse 1.6s infinite;display:inline-block}
 .log-live.stale{color:var(--gold)}
 /* two views share the list styling: LIVE (blow-by-blow) and PROGRESS (per-stage skim) */
-.log-tabs{display:flex;flex:0 0 auto;border-bottom:2px solid var(--gold);
+.log-tabs{display:flex;align-items:center;flex:0 0 auto;border-bottom:2px solid var(--gold);
   background:rgba(255,207,82,.04)}
+.log-tabs .log-live{padding-right:10px}
 /* square, flush tabs: they inherit from `button`, so the radius + drop shadow have
    to be reset or the 2px underline renders as a rounded stub poking below the bar. */
 .log-tab{flex:1;padding:6px 8px;background:none;border:none;border-radius:0;
@@ -491,9 +502,12 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
 .repo-sha{font-size:11px;color:var(--dim);font-family:monospace}
 .repo-src{font-size:11px;color:var(--dim)}
 .repo-src.ok{color:#7fe7a4}
-.repo-tabs{display:flex;gap:6px;margin-top:10px;border-bottom:2px solid var(--line)}
+/* one scrolling line: four tabs outgrow a phone, and a clipped tab is unreachable */
+.repo-tabs{display:flex;gap:6px;margin-top:10px;border-bottom:2px solid var(--line);
+  overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+.repo-tabs::-webkit-scrollbar{display:none}
 .repo-tab{background:transparent;border:none;border-bottom:3px solid transparent;color:var(--dim);
-  padding:7px 12px;font-size:12px;font-weight:bold;cursor:pointer}
+  padding:7px 12px;font-size:12px;font-weight:bold;cursor:pointer;flex:none;white-space:nowrap}
 .repo-tab:hover{color:var(--ink)}
 .repo-tab.sel{color:var(--gold);border-bottom-color:var(--gold)}
 .tab-count{font-size:10px;color:var(--dim);background:#1f2942;border-radius:8px;padding:1px 6px;margin-left:2px}
@@ -556,31 +570,49 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
   }
 
   /* The display: exactly the canvas aspect (Phaser Scale.FIT then fills it edge to
-     edge), so the old centred-with-black-bars gap is gone. Capped so a short phone
-     still leaves room for the log. */
-  #game{width:100%;aspect-ratio:1280/840;max-height:46dvh;
+     edge), so the old centred-with-black-bars gap is gone. Portrait reflows the
+     floorplan to 3 cells across instead of 4 (see PLAN_PORTRAIT in game.js), so the
+     world is 970x1070 here and the block is nearly square rather than a letterbox
+     strip. Capped so a short phone still leaves room for the log. */
+  #game{width:100%;aspect-ratio:970/1070;max-height:60dvh;
     border-bottom:3px solid var(--gold)}
 
   /* ---- the control bar: hud rows + floor pills read as ONE band ----
      row 1  FOUNDRY · FLOOR 2 · r3            [⌥] [▶ NEW]
-     row 2  the request line, ellipsised      · gated · mock
+     row 2  the request, then the milestone   (full width — see below)
      row 3  stage chips (scrolls sideways)
      row 4  floor pills (scrolls sideways)                                     */
   #hud{
     display:grid;grid-template-columns:minmax(0,1fr) auto;
-    grid-template-areas:"id act" "chips chips";
+    grid-template-areas:"id act" "proj proj" "chips chips";
     align-items:center;gap:5px 10px;padding:7px 10px 6px;font-size:11px;
     border-bottom:none;box-shadow:none;
   }
-  .hud-left{grid-area:id;gap:4px 8px;flex-wrap:wrap}
+  .hud-left{grid-area:id;gap:4px 8px}
   .hud-right{grid-area:act;justify-self:end;gap:7px}
   /* stage / per-service chips: ONE horizontally scrolling line, so a 12-milestone
      ladder can't grow the bar to three rows */
   .hud-mid{grid-area:chips;-webkit-overflow-scrolling:touch}
   .hud-mid:has(.gates-mini:empty){display:none}   /* no chips -> no empty row */
   .logo{font-size:13px}
-  /* the request gets the identity block's whole second line to ellipsise in */
-  .proj{flex:1 1 100%;max-width:none;font-size:11px;color:var(--dim)}
+  /* The request gets a full-width row of its own. Inside .hud-left it was boxed
+     into the column beside the buttons — ~220px of a 390px screen, which turned a
+     long milestone request into three visible words. Request and milestone take one
+     line each so the row height is fixed no matter how long the prompt gets. */
+  .proj{grid-area:proj;flex:none;max-width:none;font-size:11px;color:var(--dim);
+    white-space:normal;overflow:visible;position:relative}
+  .proj-req,.proj-mile{display:block;overflow:hidden;text-overflow:ellipsis;
+    white-space:nowrap;line-height:1.35}
+  .proj-mile::before{content:none}
+  /* tap to read the whole request / milestone; the chevron appears only when a line
+     is actually cut off (game.js sets .clamped), so a short request stays a plain
+     label with nothing to poke at */
+  .proj.clamped{padding-right:18px;cursor:pointer}
+  .proj.clamped::after{content:"⌄";position:absolute;right:0;top:-1px;
+    color:var(--gold);opacity:.75;transition:transform .15s}
+  .proj.open::after{transform:rotate(180deg)}
+  .proj.open .proj-req,.proj.open .proj-mile{white-space:normal;overflow:visible;
+    text-overflow:clip}
   /* `· gated · mock` is static per floor and the least useful thing in the bar —
      dropping it is what keeps this to two lines instead of three. It's still on the
      desktop bar and in the build dialog. */
@@ -600,10 +632,14 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
   .el-btn{padding:5px 11px;white-space:nowrap}
   .el-btn .fl-no{display:inline;font-size:13px}
 
-  /* the log owns the rest of the screen (no fixed drawer height any more), and its
-     own chrome is trimmed to one thin title line + the tabs */
+  /* the log owns the rest of the screen (no fixed drawer height any more). The
+     title row goes entirely — the LIVE/PROGRESS tabs already name the panel, and
+     the live chip moved into the tabs row, so nothing is lost. The tabs' own bar
+     drops to a quiet line: the elevator's gold rule right above is the band
+     separator, and two gold rules 30px apart is the clutter being fixed. */
   #log-panel{border-left:none;border-top:none}
-  .log-title{padding:4px 10px;font-size:10px}
+  .log-title{display:none}
+  .log-tabs{border-bottom-color:var(--line)}
   .log-tab{padding:8px 8px}                   /* touch target, minus the title bulk */
   #log,#progress{font-size:12px;padding:7px 10px}
 
@@ -616,6 +652,14 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
      font is chunky, so every horizontal pixel counts on a 390px screen */
   .dialog{width:96vw;padding:14px}
   .dialog h2{font-size:15px;margin-bottom:10px}
+  /* action rows wrap instead of shoving no-wrap buttons past the dialog edge */
+  .dialog-actions{flex-wrap:wrap}
+  /* Checkpoint verdicts: three abreast overflows at 390px (REQUEST CHANGES spills
+     onto APPROVE). APPROVE gets its own full-width row; the two "send it back"
+     verbs share the second. Sticky offset retuned to this block's 14px padding. */
+  .cp-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;bottom:-14px}
+  .cp-actions button{white-space:normal}
+  #cp-approve{grid-column:1 / -1}
 
   /* The build form is far too long for a centred card on a phone, so it becomes a
      full-height SHEET: edge to edge, header pinned to the top, BREAK GROUND pinned
@@ -650,6 +694,7 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
   #hud{padding:4px 10px;font-size:11px;gap:8px}
   .logo{font-size:13px}
   .mode{display:none}          /* static per floor — the chips need the width more */
+  .proj{max-width:30vw}        /* ~390px of height means the chips need it too */
   .elevator{padding:1px 6px}
   #hud button{padding:4px 8px;font-size:11px}
   .el-btn{padding:5px 3px;font-size:10px}

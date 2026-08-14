@@ -15,7 +15,7 @@
 // FLOOR_TOP is the wall/floor seam; characters stand on the floor near FLOOR_BOT.
 //
 // TWO floorplans, one per orientation. A room's desk grid sits at fixed offsets
-// (placeOrg puts the first row at R.y+94 with a 50px pitch), so cells cannot shrink —
+// (buildAgents puts the first row at R.y+94 with a 50px pitch), so cells cannot shrink —
 // the only thing free to change is the SHAPE of the grid. Four cells across makes a
 // 1280px world, which a 390px phone can only draw at ~30%; three across is 970px and
 // draws at ~40%, and the block is nearly square, so on a phone it fills the screen

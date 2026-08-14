@@ -2553,7 +2553,35 @@ function renderPlatProg(pp){
 function updateHud(F){
   document.getElementById("floor-tag").textContent =
     "FLOOR "+F.floor + (F.release>1 ? " · r"+F.release : "");
-  document.getElementById("proj-tag").textContent = F.request || "—";
+  // A milestone build's request is the model's prompt — the root request with
+  // " — MILESTONE i/n: <title>" appended — so it runs to hundreds of characters.
+  // Split it back into identity + current milestone; portrait gives each its own
+  // line, desktop rejoins them with the em dash from .proj-mile::before.
+  const proj = document.getElementById("proj-tag");
+  const req = F.request || "—";
+  const m = req.match(/^([\s\S]*?) — MILESTONE (\d+\/\d+): ([\s\S]*)$/);
+  proj.textContent = "";
+  proj.title = req;
+  if (m){
+    const root = document.createElement("span");
+    root.className = "proj-req"; root.textContent = m[1];
+    const mile = document.createElement("span");
+    mile.className = "proj-mile"; mile.textContent = "M"+m[2]+" · "+m[3];
+    proj.append(root, mile);
+  } else {
+    const root = document.createElement("span");
+    root.className = "proj-req"; root.textContent = req;
+    proj.append(root);
+  }
+  // Portrait clamps each line, so tapping the row unclamps it. The chevron is only
+  // drawn when something really is cut off — a request short enough to fit gets no
+  // affordance and no hint that there is more to see.
+  proj.onclick = () => proj.classList.toggle("open");
+  requestAnimationFrame(() => {
+    const cut = Array.from(proj.children).some(c => c.scrollWidth > c.clientWidth + 1);
+    if (!cut) proj.classList.remove("open");
+    proj.classList.toggle("clamped", cut);
+  });
   const tail = (F.mode ? "· "+F.mode : "") + (F.backend ? " · "+F.backend : "");
   document.getElementById("mode-tag").textContent = tail.trim();
 }

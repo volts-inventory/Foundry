@@ -28,9 +28,12 @@
       <div class="hud-left">
         <span class="logo">FOUNDRY</span>
         <span class="elevator" id="floor-tag">FLOOR —</span>
-        <span class="proj" id="proj-tag">no project</span>
-        <span class="mode" id="mode-tag"></span>
       </div>
+      <!-- The request line is a DIRECT child of the bar, not of .hud-left: portrait
+           gives it a full-width row of its own, and a nested element cannot be
+           placed in a grid area. -->
+      <span class="proj" id="proj-tag">no project</span>
+      <span class="mode" id="mode-tag"></span>
       <!-- stage / per-service chips: their own group so narrow screens can give
            them a single horizontally-scrolling row instead of wrapping to three -->
       <div class="hud-mid"><span class="gates-mini" id="gates-mini"></span></div>

@@ -115,14 +115,54 @@ conditional chain to concurrent fan-out over lanes-with-work.
 **Rollout:** land §1a (EpochCounter lock) + §1b tests, then D7, then D1. Get a
 second opinion on D1 specifically before merging (concurrency + resume).
 
-## 4. Pacing (mandatory with any fan-out)
+## 4. Pacing — the proxy limiter does NOT cover the coding substrate (corrected)
 
-Fan-out bursts concurrent requests → trips 429s faster on a subscription. Turn on
-the proxy's existing client-side pacing (`_RateLimiter`,
-`model_provider_proxy.py:570-609`): set `FOUNDRY_MAX_CONCURRENT_CALLS` to the
-fan-out width (≈3 for lanes/authors) and `FOUNDRY_MAX_RPM` under the plan ceiling.
-Without this, the wall-clock win becomes a throttle stall. **This is a pairing
-requirement, not optional.**
+Original claim (WRONG, kept as a warning): "turn on the proxy's `_RateLimiter`
+and fan-out is paced." A second-opinion review found the hole:
+
+- The proxy `_RateLimiter` (`model_provider_proxy.py:570-609`) paces ONLY
+  `rt.proxy` egress — i.e. the **agent** calls. It works for **D7** (reviewer/qa/
+  sdet/appsec/audit/supply_chain all call `rt.proxy`), so the D7 fan-out IS paced
+  by `FOUNDRY_MAX_CONCURRENT_CALLS` / `FOUNDRY_MAX_RPM`. D7 is fine.
+- But the `claude-code` coding substrate authenticates INSIDE the sandbox
+  (`CLAUDE_CODE_OAUTH_TOKEN`/`home_passthrough`, `claude_code.py:289-290`) and the
+  packet's `proxy_endpoint` is always None (`junior_engineer.py:368`) — so its
+  model calls go **direct to Anthropic, bypassing the proxy limiter entirely**.
+  The implementation phase's dominant load is exactly those coding sessions.
+- True concurrency under lane fan-out is **`N_lanes × effective_slots`** (each lane
+  spawns its own `ThreadPoolExecutor`, `work_pool.py:384`, sized `min(tasks,
+  max_slots)`), not `N_lanes`.
+
+**So D1 (lane fan-out) is BLOCKED on a new mechanism the proxy pacer cannot
+provide: a global cross-lane admission bound on concurrent in-flight sandboxes /
+coding sessions, sized to `N_lanes × slots`** (the per-lane pools can't see each
+other; the proxy pacer can't see the substrate). Without it, lane fan-out
+multiplies unpaced, direct-to-provider sessions against one subscription → blown
+session limit / throttle stall — the exact failure this section was meant to
+prevent. Also uncapped without it: `N_lanes × slots` concurrent `copytree` of
+`source_dir` (`sandbox.py:232`) = real disk/inode pressure on a large repo.
+
+## 4b. D1 prerequisites (from the second-opinion review) — before any lane merge
+
+1. **Cross-lane sandbox/coding-session admission bound** (§4) — the real blocker.
+2. **Budget ceiling is emergent, not enforced.** Each lane pool gets its OWN
+   `BudgetLedger(cap=global_cap)` (`junior_engineer.py:728-729`), so three lanes
+   each admit up to the FULL cap. It doesn't over-spend today only because
+   per-domain lineage quotas are disjoint (`Σ ≤ cap`) and lineage=domain→one lane —
+   an emergent property. Add an invariant test: Σ spend across concurrent lanes ≤
+   `global_cap` under a binding cap, so a future `lane_of_area` change can't
+   silently permit 3×cap.
+3. **Disjoint-id partition is unguarded.** `tasks` are dicts → `union_by_id` is
+   first-keyed-wins (`reducers.py:132-143`), which commutes ONLY because lane task
+   ids are disjoint. Add the reducer-commutativity test AND assert the partition is
+   disjoint.
+4. **Adapter instance state check** (one-liner): confirm `claude_code.run` holds no
+   per-run mutable instance state (each call gets its own sandbox) — `rt.adapter`
+   is a single shared instance called concurrently.
+5. Kill-then-resume determinism test mid-fan-out.
+
+D1 does not merge until 1-5 land. State/race/determinism are otherwise covered by
+the EpochCounter lock + GIL-atomic CAS (verified).
 
 ## 5. B2 — cross-fix session continuity (coding agent only)
 
@@ -142,11 +182,13 @@ Reuse the coding session on a fix attempt instead of re-priming.
 
 ## 6. Rollout order & gates
 
-1. **§1a EpochCounter lock** — foundation, behavior-preserving, ships alone with a
-   concurrency test. *(Implementable now, low-risk.)*
-2. **§1b reducer-commutativity tests** — assert the folds commute.
-3. **D7 author fan-out** — first real parallelism, lower risk.
-4. **D1 lane fan-out** — highest risk; second opinion before merge.
+1. **§1a EpochCounter lock** — ✅ DONE (locked + contention test).
+2. **§1b reducer-commutativity tests** — pending (fold-order commutes for disjoint writes).
+3. **D7 author fan-out** — ✅ DONE (quality + assurance subgraphs fan out; paced by the
+   proxy limiter since they use `rt.proxy`).
+4. **D1 lane fan-out** — ⛔ BLOCKED. Second opinion found the proxy pacer does NOT
+   reach the coding substrate (§4). Needs the cross-lane sandbox-admission bound +
+   §4b prerequisites 1-5 before merge. NOT a quick edit — a real new mechanism.
 5. **B2** — last, separate; needs its own worktree/session-lifecycle design.
 
 Every fan-out step ships WITH pacing (§4) enabled by default in the parallel

@@ -298,3 +298,39 @@ belongs to the coding substrate (B1/B2) only.
 - No change weakens a gate: verdicts still come only from the attested
   `TwoZoneGateRunner`; the cuts target advisory/redundant model calls, not the
   trust boundaries.
+
+## 8. Appendix — Agent → model map (current vs planned)
+
+Tier legend: **T1 = `claude-opus-4-8`** (Opus), **T2 = `claude-sonnet-4-6`**
+(Sonnet), **T3 = `claude-haiku-4-5`** (Haiku). Tiers are a cost choice, not a
+trust choice; gates decide correctness regardless of tier. Several are
+env-overridable (`FOUNDRY_REVIEW_TIER`, appsec/supply-chain envs).
+
+| Agent | Layer | Current | Planned | Change driver |
+|-------|-------|---------|---------|---------------|
+| scope_judge | Product | T3 Haiku | T3 Haiku | — |
+| stakeholder_proxy | Product | T2 Sonnet | **T3 Haiku / advisory** | D3 (dead output — downgrade, keep desk) |
+| product_manager | Product | T2 Sonnet | T2 Sonnet | absorbs the completeness checklist (D4) |
+| criteria_completeness_critic | Product | T1 Opus | **removed** | D4 (folded into the PM) |
+| eng_program_mgr | Product | T2 Sonnet | **T3 Haiku / advisory** | D3 (dead output — downgrade, keep desk) |
+| principal_architect | Architecture | T1 Opus | T1 Opus | — |
+| domain_specialist *(conditional)* | Architecture | T2 Sonnet | T2 Sonnet | — |
+| ux_design *(conditional)* | Architecture | T2 Sonnet | T2 Sonnet | — |
+| senior_engineer / tech-lead *(per lane)* | Implementation | T1 Opus | T1 Opus | parallelized across lanes (D1) |
+| junior_engineer / IC coder *(per lane)* | Implementation | **proxy-agent, T1 Opus + adaptive thinking** | **`claude-code` adapter: T2 Sonnet default, T1 Opus on the last fix attempt, no thinking** | A1 + B1 (kills the quadratic) |
+| reviewer_critic *(quality boundary)* | Quality | T2 Sonnet | T2 Sonnet **+ now sees the diff** | C1 |
+| qa_engineer | Quality | T1 Opus | T1 Opus | — |
+| sdet | Quality | T2 Sonnet | T2 Sonnet | E2E result shared, not re-run (D5) |
+| appsec_engineer | Assurance | T1 Opus | T1 Opus | — |
+| audit_compliance | Assurance | T2 Sonnet | T2 Sonnet | — |
+| supply_chain_reviewer | Assurance | T1 Opus | T1 Opus | — |
+| reviewer_critic *(assurance boundary)* | Assurance | T2 Sonnet | **cut / scoped to security findings** | D2 (duplicate review) |
+| technical writer (docs) | Docs | T2 Sonnet | **T3 Haiku, async** | D6 |
+| AI release judge *(per domain)* | Release | T2 Sonnet | T2 Sonnet | — |
+
+Non-model (no tier): `triage`, the supervisor/orchestrator routing, every gate
+runner (spec/build/test/assurance), the design/release sign-offs, and the
+`*_fix` nodes — all deterministic code.
+
+Pre-pipeline model users (outside the main build graph): the ideation/brainstorm
+loop and the interview affordance both run **T2 Sonnet**.

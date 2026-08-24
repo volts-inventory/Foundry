@@ -294,7 +294,7 @@ flagged below; everything else is decided.
 | C2 | **Adopt (incremental)** | Generalize `_ai_judge_evidence` into a per-role context contract; roll out node-by-node, non-blocking. |
 | C3 | **Moot under B1** | `proxy-agent` is removed, so there is no observation transcript to prune. |
 | D1 | **Adopt — design-first** | Parallelize the 3 lanes. Prerequisites: thread-safe `EpochCounter`, order-independent reducers, pacing on. Plan Mode + second opinion before coding. |
-| D2 | **Cut, scoped + router change** | Remove the assurance-stage `reviewer_critic`; if a security-focused review is wanted, replace with a pass scoped to security-agent findings, gated on "tree changed since the quality review." **Verified:** the assurance *gate* does not require the review verdict, but `_route_assurance` (the ROUTER) fail-closes on a missing fresh review verdict (`assurance.py:139-158,194`) — so the cut MUST also change `_route_assurance` to stop demanding an assurance-stage review, else the boundary halts. |
+| D2 | **KEEP (verified — removal safe but poor cost/benefit)** | Second opinion CONFIRMED removal is safe and needs no `_route_assurance` change (the router falls back to the quality-stage review verdict, which the shipping tree always carries; removal is even *more* fail-closed and kills a latent same-`node_id` latch-key collision). BUT the cost is bad: it saves only **one Sonnet call/gated run**, requires decoupling the assurance subgraph's self-contained evaluator (its isolation tests seed the verdict via the reviewer → would need signed-verdict rewrites), and loses the ONLY review that runs *after* the security triage. So keep it — the "duplicate" is a deliberate design property (isolated-testable subgraph + a post-triage review), not an oversight. |
 | D3 | **Downgrade, don't delete** | Keep Stakeholder Proxy + Eng PM as desks/narrative but move to **T3 or advisory/no-LLM** — preserves the office (E1), drops the token cost. Full delete only if UI removal is also wanted. |
 | D4 | **Revised → downgrade, not fold** | Verification showed the critic is NOT redundant: its critique drives the revision loop that improves the **acceptance criteria the Spec gate reads** (build-load-bearing), and folding it would delete property tests (bounded revision, advisory-not-verdict) and a security-completeness check. So instead: downgrade its tier **T1→T2** (env `FOUNDRY_CRITERIA_TIER=T1` restores Opus) — keeps the check + loop, cuts the cost. Implemented. |
 | D5 | **Reframed → downgrade sdet** | Verified: `sdet` does NOT execute E2E (it authors a report via one model call); the assurance E2E gate re-runs pytest itself and reads nothing from sdet. So there is **no duplicate execution** to remove. The `E2EReport` is build-dead advisory (docs-only), so the real action is downgrade `sdet` **T2→T3**. Implemented. |
@@ -392,7 +392,7 @@ env-overridable (`FOUNDRY_REVIEW_TIER`, appsec/supply-chain envs).
 | appsec_engineer | Assurance | T1 Opus | **T2 Sonnet** (threat model is build-dead) | A5 |
 | audit_compliance | Assurance | T2 Sonnet | T2 Sonnet | — |
 | supply_chain_reviewer | Assurance | T1 Opus | **T2 Sonnet** | A5 |
-| reviewer_critic *(assurance boundary)* | Assurance | T2 Sonnet | **cut / scoped to security findings** | D2 (duplicate review) |
+| reviewer_critic *(assurance boundary)* | Assurance | T2 Sonnet | **T2 Sonnet (kept)** | D2 (removal safe but poor cost/benefit — kept) |
 | technical writer (docs) | Docs | T2 Sonnet | **T3 Haiku, async** | D6 |
 | AI release judge *(per domain)* | Release | T2 Sonnet | T2 Sonnet | — |
 

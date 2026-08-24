@@ -241,6 +241,7 @@ flagged below; everything else is decided.
 | E4 | **Seat the Writer** | Promote `docs` to a seated agent so the Technical Writer desk is live (rather than dropping it). |
 | E5 | **Remove all cosmetic** | Drop gate guard, pool runners, **and the CTO**. Replace the CTO's checkpoint role with a **non-character checkpoint modal/prompt** (design before E5 lands). |
 | E6 | **Adopt** | Unique appearance per agent via procedural tinting/variation (sprite sheet lacks enough distinct frames for a dynamic IC count). |
+| E7 | **Adopt (UI runs)** | Run the `claude-code` coding adapter with `--output-format stream-json --verbose` + `on_activity` wired, so the live per-agent activity phrases feed the floor. Observability only — does **not** change tokens or the quadratic. Headless/CI runs keep plain `--output-format json`. Distinct from bidirectional *input* stream-json (that's B2, session continuity). |
 
 ## 4. Sequencing
 

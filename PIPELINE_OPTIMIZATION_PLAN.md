@@ -1,12 +1,11 @@
 # Pipeline Token & Latency Optimization Plan
 
 Status: **decided, not yet implemented.** A selected approach is recorded for
-every item in §3 "Decisions." The mediating proxy is being **removed entirely**
-(B1); one open point (**B3**) needs confirmation — whether to keep a minimal
-verdict-signer+meter so the review/judge gates stay un-forgeable, or drop it too
-and let those gates become advisory. Each item lists its own verification and
-blast radius; the high-blast-radius items (proxy removal, D1, D7, B2) are marked
-for Plan Mode + a second-opinion pass before any code lands.
+every item in §3 "Decisions." The proxy is **kept**; only the coding adapter is
+swapped (`proxy-agent` → `claude-code`, B1), which deletes the quadratic and
+keeps the gate trust model intact (B3 dropped). Each item lists its own
+verification and blast radius; the high-blast-radius items (D1, D7, B2) are
+marked for Plan Mode + a second-opinion pass before any code lands.
 
 ## 1. Problem
 
@@ -80,38 +79,31 @@ runs its own internal agentic turns with native caching — the efficient shape.
 The `proxy-agent` adapter re-implements the loop externally (the A2 hog). See §5
 for why a persistent session **per reasoning agent** is explicitly rejected.
 
-**Decision revision (supersedes B1's "coding only"):** remove the mediating
-`ModelProviderProxy` egress **entirely** — every agent (reasoning *and* coding)
-calls Claude Code directly with its own sandbox auth. The proxy adds no tokens
-(it is a stateless pass-through), so this is a **token-neutral** simplification;
-the payoff is operational — fewer moving parts, no single middleman, each agent
-talks to Claude directly. It also deletes the `proxy-agent` adapter and its
-quadratic transcript outright, so **A2 and C3 become moot** (there is no external
-ReAct loop left to bound).
+**Decision (B1): keep the proxy; nix the `proxy-agent` adapter.** The proxy and
+the `proxy-agent` adapter are different things: the proxy is the shared model
+egress used by all ~16 reasoning/judge agents; `proxy-agent` is ONE coding
+adapter that re-implements a ReAct loop on top of it (the quadratic). Keep the
+proxy exactly as-is — it goes on signing verdicts (gates stay un-forgeable),
+metering, lineage/drift, rate-limit handling, and holding the single credential —
+and only swap the coding substrate from `proxy-agent` to **`claude-code`** (one
+`claude -p` invocation per task, internal turns, CLI-managed context + native
+caching). That deletes the quadratic without touching anything else, so **A2 and
+C3 become moot** (there is no external ReAct loop left to bound), and **B3
+disappears** (the signer stays because the proxy stays — no advisory-gate risk).
 
-The catch — the proxy owns four responsibilities that do **not** vanish with it;
-each must be re-homed or explicitly dropped:
+One trade (inherent to `claude-code`): the coding call authenticates in the
+sandbox cage and does NOT ride the proxy egress, so it is absent from the proxy's
+token manifest — but the adapter already observes `total_cost_usd`/usage from the
+CLI envelope, so cost stays visible. Wanting the coding call to *also* ride the
+proxy is the only reason to instead keep `proxy-agent` and bound its context
+(more work, mitigates rather than deletes the quadratic).
 
-1. **Verdict attestation** (the `ZoneBSigner` stamp on `proxy.judge`) — the thing
-   that makes the reviewer / AI-judge `approve` **un-forgeable by the agent**
-   (LEARNINGS L5). Drop it → the review/judge gates become **advisory**: an
-   agent's self-reported verdict is trusted. This is a security-posture change.
-2. **Lineage observation + pinned-ID drift** detection.
-3. **Per-call usage metering** — feeds the budget ledger and the UI cost meter.
-4. **Retry / rate-limit / backoff** (429 + Max-window waits).
-
-Recommended realization of "get rid of the proxy": **collapse the egress, keep a
-minimal signer+meter seam** (a ~small component, not a middleman) so the gates
-stay trustworthy and the UI still shows cost; let the `claude` CLI own retry and
-auth. Fully deleting the signer too is possible but makes the trust gates
-advisory — that specific point is flagged for confirmation (decision **B3**).
-
-**This does NOT touch the shared pool.** The proxy is the *agent→model* egress;
-the shared workspace where agents publish/read each other's work is a separate
-thing — the LangGraph shared state channels (`artifacts`, `gates`, `tasks`, …)
-plus the content-addressed artifact store (CAS). That is the MetaGPT
-message-pool + subscription equivalent and it is **unchanged** by proxy removal.
-proxy = agent→model (removed); shared pool = agent→agent (kept).
+**The shared pool is untouched regardless.** The proxy is the *agent→model*
+egress; the shared workspace where agents publish/read each other's work is a
+separate thing — the LangGraph shared state channels (`artifacts`, `gates`,
+`tasks`, …) plus the content-addressed artifact store (CAS), the MetaGPT
+message-pool + subscription equivalent. proxy = agent→model; shared pool =
+agent→agent. Neither this decision nor any other here changes the shared pool.
 
 | # | Change | Where | Impact | Blast |
 |---|--------|-------|--------|-------|
@@ -230,9 +222,9 @@ flagged below; everything else is decided.
 | A2 | **Moot under B1** | B1 deletes `proxy-agent` entirely, so there is no external transcript to bound. `claude-code` manages its own context. |
 | A3 | **Adopt** | Per-purpose `max_tokens`: gate/judgment/structured-verdict **2k**, decomposition/structured **4k**, free-form ideation **8k** (down from a flat 16k). |
 | A4 | **Adopt** | CLI `max_fix_attempts` default **5→3** (match the graph); wire `cost_cap_microusd` as an early stop. |
-| B1 | **Adopt — proxy removed** | **Remove the mediating proxy egress entirely** — all agents (reasoning + coding) call Claude Code directly. Token-neutral simplification; deletes the `proxy-agent` adapter (⇒ A2/C3 moot). |
+| B1 | **Adopt — keep proxy, nix adapter** | Keep the `ModelProviderProxy` as-is for all reasoning/judge agents; only swap the coding substrate from `proxy-agent` to **`claude-code`**. Deletes the quadratic; ⇒ A2/C3 moot, B3 gone. Trade: the coding call doesn't ride the proxy (auth in cage; cost read from the CLI envelope). |
 | B2 | **Defer** | Write a design doc first (worktree + `session_id` lifecycle vs reset-to-base idempotency). Not in the first implementation wave. |
-| B3 | **NEEDS CONFIRM** | Verdict attestation + metering (the proxy's non-token jobs). **Recommended:** keep a minimal signer+meter seam so review/judge gates stay un-forgeable and cost is still metered; the CLI owns retry/auth. **Alternative (full nuke):** drop the signer too → review/judge gates become **advisory** (agent verdicts trusted directly). Confirm which. |
+| B3 | **Dropped** | N/A — the proxy is retained, so the verdict-signer/meter stays and the review/judge gates remain un-forgeable. No advisory-gate tradeoff to decide. |
 | C1 | **Adopt** | Feed the reviewer the changed hunks (capped) via the `_retrieved_spans` resolve pattern. `security-review` the change. |
 | C2 | **Adopt (incremental)** | Generalize `_ai_judge_evidence` into a per-role context contract; roll out node-by-node, non-blocking. |
 | C3 | **Moot under B1** | `proxy-agent` is removed, so there is no observation transcript to prune. |

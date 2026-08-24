@@ -218,10 +218,11 @@ flagged below; everything else is decided.
 
 | Item | Decision | Selected approach / parameters |
 |------|----------|--------------------------------|
-| A1 | **Adopt** | Default the coding adapter to **T2 (Sonnet)**; escalate to **T1 (Opus)** only on the final fix attempt. Drop `purpose="ideation"` on the coding path (no adaptive thinking). |
+| A1 | **Adopt** | **Coding = plan-in-Opus, do-in-Sonnet.** Per task: a short **Opus** implementation-plan micro-step (reasoning call, small output, high-leverage) → the **Sonnet** `claude-code` adapter executes it (the turns/volume) → escalate the *doing* to **Opus** only on the last fix attempt. Drop `purpose="ideation"` (no adaptive thinking). Adds one short Opus call per task; the volume stays on Sonnet. (Mechanism: one `--model` per `claude-code` run, so this is a separate plan call + the Sonnet coder, not a mid-session switch.) |
 | A2 | **Moot under B1** | B1 deletes `proxy-agent` entirely, so there is no external transcript to bound. `claude-code` manages its own context. |
 | A3 | **Adopt** | Per-purpose `max_tokens`: gate/judgment/structured-verdict **2k**, decomposition/structured **4k**, free-form ideation **8k** (down from a flat 16k). |
 | A4 | **Adopt** | CLI `max_fix_attempts` default **5→3** (match the graph); wire `cost_cap_microusd` as an early stop. |
+| A5 | **Adopt — tier policy + fixes** | **Principle:** plan / design / split = **Opus**; execute / author = **Sonnet**; mechanical / fail-safe = **Haiku**; the judgment that *gates correctness* = **Opus**. **Fixes:** (1) `reviewer_critic` **T2→T1 Opus** — it's the correctness backstop and now has the diff (C1); bound the recurring cost by using T2 for intermediate fix-loop re-reviews and T1 for the decisive/final one. (2) `qa_engineer` **T1→T2 Sonnet** — test authoring is specifiable. (3) `supply_chain_reviewer` **T1→T2 Sonnet** — mechanical SBOM/license check. (4) `principal_architect` + `senior_engineer`/tech-lead **stay T1 Opus** — they are the plan/design/split brains (this supersedes any earlier "tech-lead → T2" note). (5) `scope_judge` **stays T3**; bump to T2 only if runs under-size. |
 | B1 | **Adopt — keep proxy, nix adapter** | Keep the `ModelProviderProxy` as-is for all reasoning/judge agents; only swap the coding substrate from `proxy-agent` to **`claude-code`**. Deletes the quadratic; ⇒ A2/C3 moot, B3 gone. Trade: the coding call doesn't ride the proxy (auth in cage; cost read from the CLI envelope). |
 | B2 | **Defer — design-first, CODING AGENT ONLY** | **Stacks on B1 (requires it): you can only resume a session if coding already runs on `claude-code`. Ship B1 first; B2 is a later add-on, not an alternative.** Within B2 pick ONE mechanism (`--resume`), not both. Cross-fix session continuity: reuse the coding session on a fix attempt instead of re-priming. **Scope: the coding agent (`junior_engineer`) only.** NOT judges/reviewers (session memory breaks verdict independence + temp-0 reproducibility — same reason per-agent threads are rejected, §5); N/A for single-shot agents (nothing to resume) and the orchestrator (it's the deterministic LangGraph supervisor, not a model caller — no session exists). Within a single task, `claude -p` is *already* a continuous session; B2 only adds continuity *across* fix attempts. Two mechanisms: **`--resume <session_id>`** (re-attach a fresh invocation — tolerates the graph's checkpoint pauses + hours-long rate-limit waits) vs **bidirectional stream-json** (one live process fed over stdin — can't survive those pauses/resume). **Prefer `--resume`.** Hard problem either way: the sandbox is destroyed + reset-to-base per task, so the worktree + session id must be kept alive across the fix loop and stored durably for graph resume. Principle: cross-agent/cross-iteration context rides the shared pool (explicit artifacts, auditable, deterministic); session memory holds only the coder's private within-task working history. Design doc + second opinion before building. |
 | B3 | **Dropped** | N/A — the proxy is retained, so the verdict-signer/meter stays and the review/judge gates remain un-forgeable. No advisory-gate tradeoff to decide. |
@@ -316,14 +317,14 @@ env-overridable (`FOUNDRY_REVIEW_TIER`, appsec/supply-chain envs).
 | principal_architect | Architecture | T1 Opus | T1 Opus | — |
 | domain_specialist *(conditional)* | Architecture | T2 Sonnet | T2 Sonnet | — |
 | ux_design *(conditional)* | Architecture | T2 Sonnet | T2 Sonnet | — |
-| senior_engineer / tech-lead *(per lane)* | Implementation | T1 Opus | T1 Opus | parallelized across lanes (D1) |
-| junior_engineer / IC coder *(per lane)* | Implementation | **proxy-agent, T1 Opus + adaptive thinking** | **`claude-code` adapter: T2 Sonnet default, T1 Opus on the last fix attempt, no thinking** | A1 + B1 (kills the quadratic) |
-| reviewer_critic *(quality boundary)* | Quality | T2 Sonnet | T2 Sonnet **+ now sees the diff** | C1 |
-| qa_engineer | Quality | T1 Opus | T1 Opus | — |
+| senior_engineer / tech-lead *(per lane)* | Implementation | T1 Opus | **T1 Opus** (plan/split brain) | A5 + parallelized (D1) |
+| junior_engineer / IC coder *(per lane)* | Implementation | **proxy-agent, T1 Opus + adaptive thinking** | **plan: short Opus micro-step → do: Sonnet `claude-code` (Opus on last fix), no thinking** | A1 + A5 + B1 (kills the quadratic) |
+| reviewer_critic *(quality boundary)* | Quality | T2 Sonnet | **T1 Opus + sees the diff** (T2 for intermediate re-reviews) | C1 + A5 |
+| qa_engineer | Quality | T1 Opus | **T2 Sonnet** | A5 |
 | sdet | Quality | T2 Sonnet | T2 Sonnet | E2E result shared, not re-run (D5) |
 | appsec_engineer | Assurance | T1 Opus | T1 Opus | — |
 | audit_compliance | Assurance | T2 Sonnet | T2 Sonnet | — |
-| supply_chain_reviewer | Assurance | T1 Opus | T1 Opus | — |
+| supply_chain_reviewer | Assurance | T1 Opus | **T2 Sonnet** | A5 |
 | reviewer_critic *(assurance boundary)* | Assurance | T2 Sonnet | **cut / scoped to security findings** | D2 (duplicate review) |
 | technical writer (docs) | Docs | T2 Sonnet | **T3 Haiku, async** | D6 |
 | AI release judge *(per domain)* | Release | T2 Sonnet | T2 Sonnet | — |

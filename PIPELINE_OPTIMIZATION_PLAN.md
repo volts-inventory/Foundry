@@ -104,6 +104,38 @@ miscalibrations point in opposite directions.
 | D5 | **De-dupe E2E.** `sdet` authors an E2EReport for the build/test boundary and the assurance E2E gate re-runs E2E at HIGH tier — run E2E once and share the attested result. | `sdet.py`; `assurance_wiring.py:138-139` | Low–Medium | Medium |
 | D6 | Make `docs` (T2, every PASS) cheaper (T3) or async — it's on the release critical path but not release-gating. | `factory_graph.py:1158-1166` | Low | Low |
 
+### Workstream E — UI: one-to-one agent representation (webapp, low blast, UI-only)
+
+Requirement: the "virtual office" floor shows **exactly the agents that run in a
+given pipeline run — one unique character + desk per live agent instance — and
+nothing else**. No cosmetic filler, no shared/dynamic pools, no invisible agents,
+no permanently-staffed desks for agents that didn't run.
+
+Today the floor is a Phaser 2D office (`webapp/static/game.js`) driven by an
+event stream (`webapp/events.py`). Desks come from a static per-room `ROSTER`
+(`game.js:141-148`); engineering is a shared Tech-Lead + dynamic IC *pool*
+(`layoutEngineering`, `game.js:1844-1901`); several agents are invisible or
+cosmetic (see §2 diagnosis).
+
+| # | Change | Where | Notes |
+|---|--------|-------|-------|
+| E1 | **Dynamic staffing for every room.** Replace the static `ROSTER` with desks spawned from live telemetry — one unique desk+sprite per agent that actually runs, in its room; agents that don't run get no desk. Generalize the per-lane `layoutEngineering` pattern to all rooms so the roster tracks the live node set (and auto-follows any agent cut/added by Workstream D — no manual roster edits). | `game.js` `ROSTER`/`restaff`/`layout*`; `events.py` `live_event_for_node` | Floor size becomes a function of the live run. |
+| E2 | **Give the invisible LLM agents desks.** `scope_judge` (add to `AGENT_BY_NODE`, product room — it currently returns `None` from `live_event_for_node`); `ux_design` + `domain_specialist` (move from `_INFRA_NODE` to `AGENT_BY_NODE`, architecture room, so they seat a sprite when they run instead of only a log line). | `events.py:29-52,170-174` | Conditional agents seat only when they actually run — consistent with "alive only." |
+| E3 | **One desk per live IC.** Each `junior_engineer` IC spawned at runtime gets its own unique desk+sprite, and each lane Tech-Lead (`senior_engineer` per lane) its own — the floor grows/shrinks with the live IC count rather than a shared pool. | `game.js` `layoutEngineering:1844-1901`, `restaff:1549-1577` | Needs per-lane/per-IC identity in telemetry; the legacy `senior_engineer`/`junior_engineer` nodes carry no area and light all three lanes together (`events.py:40-44`) — the per-lane nodes must be the telemetry source, and IC identity must be surfaced per spawned worker. |
+| E4 | **Seat the Technical Writer live** (or drop its desk). The `docs` node is agent-less infra today (`events.py:164`), so the Writer desk never seats even though it owns the doc artifacts. Emit live telemetry for `docs` so the Writer is a real seated agent. | `events.py:164`; docs node | Pick one: promote `docs` to a seated agent, or remove the Writer desk (it wouldn't be "alive"). |
+| E5 | **Remove all cosmetic characters** — gate guard, idle pool runners, and the CTO. | `game.js` gate room `1017-1064`; `sendCTO`/`ctoPatrol` `1326`; checkpoint `1373`, `2162-2177` | **Open UX item:** the CTO is currently the *human-approver avatar* at checkpoints (spotlight + approve/changes/reject). Removing it needs a replacement approval affordance — a checkpoint modal/prompt with no character. Must be designed before E5 lands, or checkpoint approvals lose their UI. |
+| E6 | **Unique appearance per agent.** Assign a distinct sprite/tint per agent role and a distinct variation per IC so no two desks share a look. | `game.js` `ROSTER`/character sheet `206-217` | The route1rodent sheet may lack enough distinct frames for a dynamic IC count — likely needs procedural tinting/variation to keep every worker unique. |
+
+Design principle tying E to D: wire the on-screen roster off the **live node
+set**, not a hardcoded list. Then Workstream D's cuts (drop Stakeholder Proxy /
+Eng PM, remove the second Reviewer) reflect on the floor automatically, and the
+UI never needs a lockstep edit when the pipeline changes. Infra/no-LLM nodes
+(triage, gates, fix passes, sign-offs) stay deskless — they light a room / add a
+log line only, which is consistent with "only agents alive."
+
+Blast radius: UI-only, no pipeline logic touched. The single real design
+decision is E5's CTO-replacement approval affordance.
+
 ## 4. Sequencing
 
 1. **Now (low blast, high return):** A1, A2, A3, C1. Independent, individually
@@ -115,6 +147,11 @@ miscalibrations point in opposite directions.
    parallelism) and B2 (cross-fix session resume). Write a short design doc for
    each — state-reducer/determinism/resume implications for D1; worktree +
    session lifecycle for B2 — before touching code.
+4. **UI (Workstream E), independent of the above:** low blast, UI-only. E1-E4/E6
+   can follow whenever; E5 (remove cosmetic incl. the CTO) is blocked on
+   designing the replacement checkpoint-approval affordance. Land E *after* the
+   Workstream D cut decisions so the live-node-set roster reflects the final
+   agent set in one pass.
 
 ## 5. Explicitly rejected: persistent session per reasoning agent
 

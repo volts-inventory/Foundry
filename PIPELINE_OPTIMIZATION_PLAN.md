@@ -187,6 +187,16 @@ the human/UI:
 Net: de-dupe + downgrade + wire. "Remove all dead" would strip real human-review
 and UI value; only the two duplicates are actually removed.
 
+**Why not just delete the build-dead advisory agents?** Because downgrading already
+recovers ~all the cost (a Haiku/Sonnet call is near-free), so deleting saves only a
+sliver *more* while blanking the human checkpoint review and emptying the UI. Delete
+buys a rounding error and a regression; downgrade buys the savings with no loss.
+**The exception — mode-gate them:** in a **headless autonomous run** (no human
+checkpoints, no UI viewer) nothing reads the advisory outputs at all, so **skip the
+advisory agents entirely in that mode** and run them (cheaply) only when a human or
+the UI is present. That beats a blanket delete: full value when observed, zero cost
+when not.
+
 ### Process-latency track (structural, rate-limit-aware)
 
 This is the ordered answer to "make the *process* faster" (independent of

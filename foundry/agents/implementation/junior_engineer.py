@@ -45,6 +45,9 @@ What this node is careful about (the contract, LEARNINGS L4/L5/L7, arch §2/§2b
 from __future__ import annotations
 
 import json
+import os
+import threading
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
@@ -72,7 +75,7 @@ from foundry.schemas.product import AcceptanceCriterion
 from foundry.state.reducers import live_constraints
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
 
     from langchain_core.runnables import RunnableConfig
 
@@ -97,6 +100,55 @@ NODE_ID = "junior_engineer"
 
 _DEFAULT_TURN_BUDGET = 8
 _DEFAULT_COST_BUDGET_MICROUSD = 1_000_000  # integer micro-USD, never floats
+
+# Cross-lane coding-session admission bound (D1 — LATENCY_PARALLELISM_DESIGN §4/§4b).
+# The claude-code substrate authenticates IN-SANDBOX and calls Anthropic DIRECTLY,
+# bypassing the proxy's rate limiter — so when lanes fan out (D1) nothing else bounds
+# the total concurrent coding sessions against ONE subscription. This process-global
+# semaphore is the single admission point ACROSS lanes + in-lane pool workers: every
+# adapter run acquires it. FOUNDRY_MAX_CODING_SESSIONS=0 (default) is unbounded (the
+# unchanged serial behaviour); lane fan-out is GATED on a positive bound (see the
+# implementation subgraph), so it can never run unpaced against the provider.
+_coding_gate_lock = threading.Lock()
+_coding_gate: threading.Semaphore | None = None
+_coding_gate_built = False
+
+
+def _max_coding_sessions() -> int:
+    try:
+        return max(0, int(os.environ.get("FOUNDRY_MAX_CODING_SESSIONS") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def reset_coding_gate() -> None:
+    """Test seam: drop the process-global coding-session gate so a new env re-reads."""
+    global _coding_gate, _coding_gate_built
+    with _coding_gate_lock:
+        _coding_gate = None
+        _coding_gate_built = False
+
+
+@contextmanager
+def coding_admission() -> Iterator[None]:
+    """Hold one global coding-session slot around a single adapter run — a no-op when
+    ``FOUNDRY_MAX_CODING_SESSIONS`` is 0/unset. Bounds total concurrent coding-substrate
+    sessions across ALL lanes + in-lane pool workers, since those calls bypass the proxy."""
+    global _coding_gate, _coding_gate_built
+    with _coding_gate_lock:
+        if not _coding_gate_built:
+            cap = _max_coding_sessions()
+            _coding_gate = threading.Semaphore(cap) if cap > 0 else None
+            _coding_gate_built = True
+        gate = _coding_gate
+    if gate is None:
+        yield
+        return
+    gate.acquire()
+    try:
+        yield
+    finally:
+        gate.release()
 
 
 def pinned_texts(constraints: Sequence[PinnedConstraint]) -> tuple[str, ...]:
@@ -542,7 +594,8 @@ def _run_one_task(
             persona=persona,
             retrieved_spans=retrieved_spans,
         )
-        result: AdapterResult = rt.adapter.run(packet, sandbox)
+        with coding_admission():  # global cross-lane coding-session bound (D1)
+            result: AdapterResult = rt.adapter.run(packet, sandbox)
         _mirror_diff_blob(rt, sandbox, result)  # while the sandbox is alive
     finally:
         sandbox.destroy()
@@ -624,7 +677,8 @@ class _MirroringAdapter:
         self.supports_turn_snapshots = rt.adapter.supports_turn_snapshots
 
     def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
-        result = self._rt.adapter.run(packet, sandbox)  # type: ignore[union-attr]
+        with coding_admission():  # global cross-lane coding-session bound (D1)
+            result = self._rt.adapter.run(packet, sandbox)  # type: ignore[union-attr]
         _mirror_diff_blob(self._rt, sandbox, result)
         return result
 

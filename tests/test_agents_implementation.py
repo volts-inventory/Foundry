@@ -25,8 +25,11 @@ follow the state-reading convention (AR1-AR4 / IM4): their DATA inputs come from
 from __future__ import annotations
 
 import json
+import threading
+import time
 from typing import Any
 
+import pytest
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
@@ -656,3 +659,44 @@ def test_prior_failures_feeds_failed_gate_findings_back_to_the_engineer() -> Non
     assert _prior_failures({}) == ()                                   # first pass: blind
     passing = failing.model_copy(update={"status": GateStatus.PASS})
     assert _prior_failures({"gates": [passing]}) == ()                 # green: no feedback
+
+
+def test_coding_admission_bounds_global_concurrency(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D1: the cross-lane coding-session gate caps total concurrent adapter runs
+    (they bypass the proxy limiter, so nothing else bounds them). With the bound set
+    to 2, at most 2 admissions are ever in-flight at once, however many threads
+    contend. Unset/0 is unbounded (the serial default) — asserted by the peak == N."""
+    from foundry.agents.implementation.junior_engineer import coding_admission, reset_coding_gate
+
+    def peak_concurrency(n_threads: int) -> int:
+        reset_coding_gate()
+        live = 0
+        peak = 0
+        lock = threading.Lock()
+        start = threading.Barrier(n_threads)
+
+        def worker() -> None:
+            nonlocal live, peak
+            start.wait()
+            with coding_admission():
+                with lock:
+                    live += 1
+                    peak = max(peak, live)
+                time.sleep(0.03)  # hold the slot so contenders pile up
+                with lock:
+                    live -= 1
+
+        threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        return peak
+
+    monkeypatch.setenv("FOUNDRY_MAX_CODING_SESSIONS", "2")
+    try:
+        assert peak_concurrency(6) <= 2  # bound holds across all contenders
+        monkeypatch.setenv("FOUNDRY_MAX_CODING_SESSIONS", "0")
+        assert peak_concurrency(6) == 6  # unset/0 is unbounded (serial-default behaviour)
+    finally:
+        reset_coding_gate()  # don't leak the env-built gate to other tests

@@ -103,6 +103,51 @@ miscalibrations point in opposite directions.
 | D4 | **Fold `criteria_completeness_critic` into the PM prompt.** The producer/critic pair over one artifact costs a T1 call + up to 2 PM revision round-trips; the PM SOP can carry the completeness checklist directly. Keep the critic only if an independent second pass is genuinely required. | `product.py:163,172-176`; `product_manager.py` SOP | Medium | Medium |
 | D5 | **De-dupe E2E.** `sdet` authors an E2EReport for the build/test boundary and the assurance E2E gate re-runs E2E at HIGH tier — run E2E once and share the attested result. | `sdet.py`; `assurance_wiring.py:138-139` | Low–Medium | Medium |
 | D6 | Make `docs` (T2, every PASS) cheaper (T3) or async — it's on the release critical path but not release-gating. | `factory_graph.py:1158-1166` | Low | Low |
+| D7 | **Fan out the independent author chains.** Quality (`reviewer_critic`/`qa_engineer`/`sdet`) and assurance (`appsec`/`audit`/`supply_chain`) run as serial chains but the nodes are independent — they read the same integrated diff and don't consume each other's output. Run each subgraph's authors concurrently in one superstep (as architecture already does for domain_specialist + ux_design), converging at the gate. | `quality.py:112-115`; `assurance.py:486-490` | Medium (latency) | Medium — same reducer/`Seq` concurrency concerns as D1 (see track below), but no cross-file mutation. |
+
+### Process-latency track (structural, rate-limit-aware)
+
+This is the ordered answer to "make the *process* faster" (independent of
+rate-limit stalls). Latency here is the serial waterfall + the coding substrate
+run 3× back-to-back, not waiting on a throttle. Do it in this order:
+
+1. **Shorten the chain (low blast, no concurrency):** C1 (reviewer sees the diff
+   → fewer whole-layer fix re-runs — often the biggest *effective* speedup), then
+   D2 / D3 / D4 / D6 to drop ~4 serial hops. None of these touch concurrency, so
+   they carry no rate-limit interaction.
+2. **Fan out independent authors (D7):** quality + assurance chains → concurrent.
+   Medium blast.
+3. **Parallelize the implementation lanes (D1):** the single biggest wall-clock
+   win, high blast — design-first.
+
+Concurrency mechanics (apply to D1 and D7): LangGraph runs parallel branches of a
+superstep on a thread pool, so before ANY fan-out lands, two shared, non-thread-
+safe seams must be fixed or determinism/resume breaks:
+
+- **`EpochCounter.bump` is an unlocked read-modify-write on a shared dict**
+  (`state/seq.py:46-50`). Concurrent nodes minting a `Seq` can race the
+  `emission_epoch`, which is what makes a re-executed node outrank the stale
+  record it supersedes — a corrupted epoch corrupts resume ordering. Make it
+  lock-guarded (or per-node counters reconciled deterministically) as a
+  prerequisite.
+- **Channel reducers must tolerate concurrent writes.** The keyed unions
+  (`union_by_id`, `merge_by_uri`, `union_journal`, `_merge_gates`) already merge
+  independent writes, but confirm each is order-independent under a parallel
+  superstep (the merge result must not depend on branch arrival order).
+- **The serial "overlay" (shared evolving tree) in the junior path assumes
+  ordered predecessor slices.** Parallel lanes lose cross-lane visibility mid-
+  flight; disjoint ownership makes that moot, but the integration boundary must
+  own the merge (it already does). Verify no lane relies on seeing another lane's
+  in-flight slice.
+
+**Keep rate-limiting in mind (the interaction):** parallel fan-out sends
+concurrent requests, so on a constrained subscription it trips 429s *faster* —
+turning a structural speedup into a throttle stall. So D1/D7 MUST ship with the
+proxy's client-side pacing turned on (`max_rpm` / `max_concurrent_calls`, the
+`_RateLimiter` seam, `model_provider_proxy.py:570-609`, off by default). Size
+`max_concurrent` to the fan-out width (e.g. 3 lanes) and `max_rpm` under the
+plan's ceiling. This is a pairing requirement, not optional: parallelism without
+pacing converts the process win into a rate-limit loss.
 
 ### Workstream E — UI: one-to-one agent representation (webapp, low blast, UI-only)
 

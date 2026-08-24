@@ -133,7 +133,7 @@ miscalibrations point in opposite directions.
 | D5 | **De-dupe E2E.** `sdet` authors an E2EReport for the build/test boundary and the assurance E2E gate re-runs E2E at HIGH tier — run E2E once and share the attested result. | `sdet.py`; `assurance_wiring.py:138-139` | Low–Medium | Medium |
 | D6 | Make `docs` (T2, every PASS) cheaper (T3) or async — it's on the release critical path but not release-gating. | `factory_graph.py:1158-1166` | Low | Low |
 | D7 | **Fan out the independent author chains.** Quality (`reviewer_critic`/`qa_engineer`/`sdet`) and assurance (`appsec`/`audit`/`supply_chain`) run as serial chains but the nodes are independent — they read the same integrated diff and don't consume each other's output. Run each subgraph's authors concurrently in one superstep (as architecture already does for domain_specialist + ux_design), converging at the gate. | `quality.py:112-115`; `assurance.py:486-490` | Medium (latency) | Medium — same reducer/`Seq` concurrency concerns as D1 (see track below), but no cross-file mutation. |
-| D8 | **Wire-or-cut** the design refiners. `domain_specialist` (`domain_addendum`) and `ux_design` (`ux_spec`) emit artifacts that **nothing** consumes — no gate, router, docs, or even the UI (`conditional.py:86,104`; absent from every consumer). Either wire the addendum into implementation (`junior_engineer._retrieved_spans`) if the enrichment is wanted, or cut the two conditional stages. | `conditional.py:86,104` | Low–Medium | Medium — verify design intent |
+| D8 | **Wire (fix) — recommended, not cut.** `domain_specialist` (`domain_addendum`) and `ux_design` (`ux_spec`) emit artifacts that **nothing** consumes (`conditional.py:86,104`) — a wiring gap, not a dead feature. **Rec: wire the addendum into implementation (`junior_engineer._retrieved_spans`)** so the UX/domain guidance reaches the coder — turns a dead stage into a load-bearing one. They're conditional (UI/domain builds only), which is exactly when the enrichment pays. Cut only if you don't want design enrichment at all. | `conditional.py:86,104`; `junior_engineer.py:253` | Medium (adds real value) | Medium |
 
 ### Dead/redundant verification (confirmed — full read-only producer→consumer trace)
 
@@ -170,6 +170,22 @@ changes no build outcome, only the UI / checkpoint / docs narrative.
 at the cheapest tier that still yields readable narrative — its model quality gates
 nothing. Starkest miss: `appsec_engineer` at T1 **Opus** on a threat model no gate
 reads. Downgraded in A5.
+
+**Removal policy (what actually gets DELETED vs kept):** "dead" ≠ "delete". The
+only genuine deletions are the **redundant duplicates** (D2 assurance reviewer +
+D5 double E2E). Everything else that is build-dead is KEPT because it still serves
+the human/UI:
+- Build-dead **advisory** (security agents, `intent_brief`, `sprint_plan`) →
+  **downgrade + keep** — they populate the UI security room and the human
+  checkpoint's release-review context (a reviewer wants the threat model/SBOM in
+  front of them). Deleting them blinds the sign-off and empties the office.
+- `domain_addendum` / `ux_spec` → **wire (fix)**, not delete (D8) — make them
+  load-bearing rather than throwing the analysis away.
+- `oracle_binding` → **leave** — a free byproduct of qa's output; the offline eval
+  harness reads it.
+
+Net: de-dupe + downgrade + wire. "Remove all dead" would strip real human-review
+and UI value; only the two duplicates are actually removed.
 
 ### Process-latency track (structural, rate-limit-aware)
 

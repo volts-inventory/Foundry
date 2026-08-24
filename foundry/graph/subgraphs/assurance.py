@@ -483,9 +483,17 @@ def build_assurance_subgraph(
     g.add_node(_ASSURANCE_FIX, _fix)
 
     # -- wire the SOP chain + the bounded rework loop -------------------------
+    # D7 fan-out: the three security AUTHORS (appsec/audit/supply_chain) are
+    # independent — each reads the integrated tree and writes a disjoint
+    # advisory artifact + gate_triage; none consumes another's output. Run them in
+    # ONE superstep; the reviewer (3 incoming edges) is the barrier that waits for
+    # all three before it runs, then the gate. Concurrency-safe: locked
+    # EpochCounter + GIL-atomic CAS writes (see LATENCY_PARALLELISM_DESIGN).
     g.add_edge(START, _APPSEC)
-    g.add_edge(_APPSEC, _AUDIT)
-    g.add_edge(_AUDIT, _SUPPLY_CHAIN)
+    g.add_edge(START, _AUDIT)
+    g.add_edge(START, _SUPPLY_CHAIN)
+    g.add_edge(_APPSEC, _REVIEWER)
+    g.add_edge(_AUDIT, _REVIEWER)
     g.add_edge(_SUPPLY_CHAIN, _REVIEWER)
     g.add_edge(_REVIEWER, _ASSURANCE_GATE)
 

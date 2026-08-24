@@ -133,6 +133,43 @@ miscalibrations point in opposite directions.
 | D5 | **De-dupe E2E.** `sdet` authors an E2EReport for the build/test boundary and the assurance E2E gate re-runs E2E at HIGH tier — run E2E once and share the attested result. | `sdet.py`; `assurance_wiring.py:138-139` | Low–Medium | Medium |
 | D6 | Make `docs` (T2, every PASS) cheaper (T3) or async — it's on the release critical path but not release-gating. | `factory_graph.py:1158-1166` | Low | Low |
 | D7 | **Fan out the independent author chains.** Quality (`reviewer_critic`/`qa_engineer`/`sdet`) and assurance (`appsec`/`audit`/`supply_chain`) run as serial chains but the nodes are independent — they read the same integrated diff and don't consume each other's output. Run each subgraph's authors concurrently in one superstep (as architecture already does for domain_specialist + ux_design), converging at the gate. | `quality.py:112-115`; `assurance.py:486-490` | Medium (latency) | Medium — same reducer/`Seq` concurrency concerns as D1 (see track below), but no cross-file mutation. |
+| D8 | **Wire-or-cut** the design refiners. `domain_specialist` (`domain_addendum`) and `ux_design` (`ux_spec`) emit artifacts that **nothing** consumes — no gate, router, docs, or even the UI (`conditional.py:86,104`; absent from every consumer). Either wire the addendum into implementation (`junior_engineer._retrieved_spans`) if the enrichment is wanted, or cut the two conditional stages. | `conditional.py:86,104` | Low–Medium | Medium — verify design intent |
+
+### Dead/redundant verification (confirmed — full read-only producer→consumer trace)
+
+Decisive fact: **the deterministic gates re-materialize an integrated tree from
+`acceptance_criterion` + `feature_diff` and re-run everything themselves**
+(`gate_wiring.materialize_workdir`, `assurance_wiring.materialize_assurance_workdir`);
+they read **no** agent analysis artifact — the L5 trust model (agents propose,
+gates re-derive + decide). So a whole class of agent output is **build-dead**: it
+changes no build outcome, only the UI / checkpoint / docs narrative.
+
+**Confirmed DEAD to the build** (consumed only by checkpoint display + webapp UI):
+- `stakeholder_proxy` → `intent_brief` (the PM reads `request`/`spec`, not this) — D3.
+- `eng_program_mgr` → `sprint_plan` + proposed cap (the ledger is seeded at triage) — D3.
+- `appsec_engineer` → `threat_model`, `audit_compliance` → `audit_finding`,
+  `supply_chain_reviewer` → `supply_chain_report` — the assurance gates re-scan the
+  tree / re-ground the SBOM / police the diff and read none of these. **By design
+  (trust model) — DO NOT cut the gates; downgrade the AGENTS for narrative (A5).**
+- `qa_engineer` → `oracle_binding` — read only by the offline eval harness, not the
+  build (negligible cost: a field of qa's existing output, not a separate call).
+
+**Confirmed DEAD and read by nothing at all** (not even the UI): `domain_addendum`,
+`ux_spec` — D8 (wire-or-cut).
+
+**Confirmed REDUNDANT:**
+- `reviewer_critic` at both quality + assurance on the SAME `feature_diff` (D2).
+  **Router nuance:** the assurance verdict is load-bearing via the ROUTER, not the
+  gate — `_route_assurance` fail-closes on a missing fresh review verdict
+  (`assurance.py:139-158,194`). So the cut must ALSO change `_route_assurance`, else
+  the boundary halts.
+- E2E executed twice: `sdet`'s report + the assurance E2E gate re-running the
+  scenarios (`gates/e2e.py`) — D5.
+
+**Tiering implication (feeds A5):** an agent whose output is build-dead should run
+at the cheapest tier that still yields readable narrative — its model quality gates
+nothing. Starkest miss: `appsec_engineer` at T1 **Opus** on a threat model no gate
+reads. Downgraded in A5.
 
 ### Process-latency track (structural, rate-limit-aware)
 
@@ -222,7 +259,7 @@ flagged below; everything else is decided.
 | A2 | **Moot under B1** | B1 deletes `proxy-agent` entirely, so there is no external transcript to bound. `claude-code` manages its own context. |
 | A3 | **Adopt** | Per-purpose `max_tokens`: gate/judgment/structured-verdict **2k**, decomposition/structured **4k**, free-form ideation **8k** (down from a flat 16k). |
 | A4 | **Adopt** | CLI `max_fix_attempts` default **5→3** (match the graph); wire `cost_cap_microusd` as an early stop. |
-| A5 | **Adopt — tier policy + fixes** | **Principle:** plan / design / split = **Opus**; execute / author = **Sonnet**; mechanical / fail-safe = **Haiku**; the judgment that *gates correctness* = **Opus**. **Fixes:** (1) `reviewer_critic` **T2→T1 Opus** — it's the correctness backstop and now has the diff (C1); bound the recurring cost by using T2 for intermediate fix-loop re-reviews and T1 for the decisive/final one. (2) `supply_chain_reviewer` **T1→T2 Sonnet** — mechanical SBOM/license check. (3) `principal_architect` + `senior_engineer`/tech-lead **stay T1 Opus** — they are the plan/design/split brains (this supersedes any earlier "tech-lead → T2" note). (4) `scope_judge` **stays T3**; bump to T2 only if runs under-size. |
+| A5 | **Adopt — tier policy + fixes** | **Principle:** plan / design / split = **Opus**; execute / author = **Sonnet**; mechanical / fail-safe = **Haiku**; the judgment that *gates correctness* = **Opus**. **Fixes:** (1) `reviewer_critic` **T2→T1 Opus** — it's the correctness backstop and now has the diff (C1); bound the recurring cost by using T2 for intermediate fix-loop re-reviews and T1 for the decisive/final one. (2) `supply_chain_reviewer` **T1→T2 Sonnet** — mechanical SBOM/license check. (3) `principal_architect` + `senior_engineer`/tech-lead **stay T1 Opus** — they are the plan/design/split brains (this supersedes any earlier "tech-lead → T2" note). (4) `scope_judge` **stays T3**; bump to T2 only if runs under-size. (5) `appsec_engineer` **T1→T2 Sonnet** — its threat model is **build-dead** (the security gate re-scans the tree; nothing reads the model), so Opus gates nothing; Sonnet keeps the analysis readable for the UI/checkpoint. This **revises the earlier "appsec stays Opus"** — the verification showed its output feeds no gate. (`audit`/`supply_chain` already Sonnet; drop to Haiku if their narrative reads acceptably.) |
 | A5b | **Adopt — plan/do split roster** | The Opus-plan → Sonnet-do split (A1) applies to every agent with BOTH a real planning decision AND a separate high-volume authoring phase: **IC coder** (A1), **`product_manager`** (Opus derives + completeness-checks the acceptance criteria — preserving the Opus judgment folded in from the criteria critic, D4 — then Sonnet writes the PRD prose), **`qa_engineer`** (Opus plans oracles/strategy → Sonnet writes tests), **`sdet`** (Opus plans E2E scenarios → Sonnet writes them). This supersedes A5's flat "qa → Sonnet". Everyone else stays single-tier: all-plan roles (architect, tech-lead, appsec) are already Opus with no bulk do-phase; all-mechanical roles (audit, supply-chain, docs) and single-verdict roles (reviewers, judges, scope_judge) have no two-phase shape to split. |
 | B1 | **Adopt — keep proxy, nix adapter** | Keep the `ModelProviderProxy` as-is for all reasoning/judge agents; only swap the coding substrate from `proxy-agent` to **`claude-code`**. Deletes the quadratic; ⇒ A2/C3 moot, B3 gone. Trade: the coding call doesn't ride the proxy (auth in cage; cost read from the CLI envelope). |
 | B2 | **Defer — design-first, CODING AGENT ONLY** | **Stacks on B1 (requires it): you can only resume a session if coding already runs on `claude-code`. Ship B1 first; B2 is a later add-on, not an alternative.** Within B2 pick ONE mechanism (`--resume`), not both. Cross-fix session continuity: reuse the coding session on a fix attempt instead of re-priming. **Scope: the coding agent (`junior_engineer`) only.** NOT judges/reviewers (session memory breaks verdict independence + temp-0 reproducibility — same reason per-agent threads are rejected, §5); N/A for single-shot agents (nothing to resume) and the orchestrator (it's the deterministic LangGraph supervisor, not a model caller — no session exists). Within a single task, `claude -p` is *already* a continuous session; B2 only adds continuity *across* fix attempts. Two mechanisms: **`--resume <session_id>`** (re-attach a fresh invocation — tolerates the graph's checkpoint pauses + hours-long rate-limit waits) vs **bidirectional stream-json** (one live process fed over stdin — can't survive those pauses/resume). **Prefer `--resume`.** Hard problem either way: the sandbox is destroyed + reset-to-base per task, so the worktree + session id must be kept alive across the fix loop and stored durably for graph resume. Principle: cross-agent/cross-iteration context rides the shared pool (explicit artifacts, auditable, deterministic); session memory holds only the coder's private within-task working history. Design doc + second opinion before building. |
@@ -231,7 +268,7 @@ flagged below; everything else is decided.
 | C2 | **Adopt (incremental)** | Generalize `_ai_judge_evidence` into a per-role context contract; roll out node-by-node, non-blocking. |
 | C3 | **Moot under B1** | `proxy-agent` is removed, so there is no observation transcript to prune. |
 | D1 | **Adopt — design-first** | Parallelize the 3 lanes. Prerequisites: thread-safe `EpochCounter`, order-independent reducers, pacing on. Plan Mode + second opinion before coding. |
-| D2 | **Cut, scoped** | Remove the assurance-stage `reviewer_critic`; if a security-focused review is wanted, replace with a pass scoped to security-agent findings, gated on "tree changed since the quality review." Verify `assurance_gate` doesn't require a fresh `review` verdict first. |
+| D2 | **Cut, scoped + router change** | Remove the assurance-stage `reviewer_critic`; if a security-focused review is wanted, replace with a pass scoped to security-agent findings, gated on "tree changed since the quality review." **Verified:** the assurance *gate* does not require the review verdict, but `_route_assurance` (the ROUTER) fail-closes on a missing fresh review verdict (`assurance.py:139-158,194`) — so the cut MUST also change `_route_assurance` to stop demanding an assurance-stage review, else the boundary halts. |
 | D3 | **Downgrade, don't delete** | Keep Stakeholder Proxy + Eng PM as desks/narrative but move to **T3 or advisory/no-LLM** — preserves the office (E1), drops the token cost. Full delete only if UI removal is also wanted. |
 | D4 | **Adopt** | Fold the completeness checklist into the PM SOP; drop the separate critic node + its revision loop. Keep the security/abuse coverage in the PM prompt. |
 | D5 | **Adopt** | Run E2E once; share the attested result across the build/test and assurance boundaries. |
@@ -278,12 +315,14 @@ belongs to the coding substrate (B1/B2) only.
 
 ## 6. Open questions / verify-before-cut
 
-- **Dead-output confirmation (blocks D3):** grep the `webapp/` and any
-  interview/event-log/office code for consumers of `IntentBrief` and
-  `SprintPlan` before deleting the nodes. If only the narrative UI reads them,
-  downgrade rather than remove.
-- **Assurance reviewer inputs (blocks D2):** confirm `run_assurance_gates`
-  doesn't require a `review` verdict minted at the assurance stage specifically.
+- **Dead-output confirmation (D3) — RESOLVED.** Trace confirmed `intent_brief` and
+  `sprint_plan` are read only by checkpoint display + webapp UI (not the PM, not the
+  ledger, not docs). Downgrade rather than remove, to keep the office/checkpoint
+  narrative. Also newly confirmed build-dead: the three security agents' analysis,
+  `oracle_binding`, and (read by nothing at all) `domain_addendum`/`ux_spec` (D8).
+- **Assurance reviewer inputs (D2) — RESOLVED.** `run_assurance_gates` does NOT
+  require a review verdict, but `_route_assurance` does (fail-closed) — so the D2 cut
+  must also patch the router. Captured in D2.
 - **Lane parallelism invariants (blocks D1):** the serial-overlay "shared
   evolving tree" assumes ordered predecessor slices; confirm disjoint ownership
   makes cross-lane visibility unnecessary, and that keyed-union reducers +
@@ -324,7 +363,7 @@ env-overridable (`FOUNDRY_REVIEW_TIER`, appsec/supply-chain envs).
 | reviewer_critic *(quality boundary)* | Quality | T2 Sonnet | **T1 Opus + sees the diff** (T2 for intermediate re-reviews) | C1 + A5 |
 | qa_engineer | Quality | T1 Opus | **Opus (plan oracles) → Sonnet (write tests)** | A5b |
 | sdet | Quality | T2 Sonnet | **Opus (plan scenarios) → Sonnet (write E2E)** | A5b + E2E shared (D5) |
-| appsec_engineer | Assurance | T1 Opus | T1 Opus | — |
+| appsec_engineer | Assurance | T1 Opus | **T2 Sonnet** (threat model is build-dead) | A5 |
 | audit_compliance | Assurance | T2 Sonnet | T2 Sonnet | — |
 | supply_chain_reviewer | Assurance | T1 Opus | **T2 Sonnet** | A5 |
 | reviewer_critic *(assurance boundary)* | Assurance | T2 Sonnet | **cut / scoped to security findings** | D2 (duplicate review) |

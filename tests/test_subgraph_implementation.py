@@ -168,6 +168,36 @@ def test_subgraph_produces_feature_diffs(tmp_path: Any) -> None:
         assert art.produced_by == "junior_engineer"
 
 
+def test_lane_fanout_matches_serial_output(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """D1: with the coding-session bound set, the lanes fan out (concurrent) instead
+    of the serial chain, and produce the IDENTICAL set of content-addressed
+    feature_diffs — the fan-out changes execution ORDER, not output (determinism)."""
+    from foundry.agents.implementation.junior_engineer import reset_coding_gate
+
+    (tmp_path / "README.md").write_text("seed\n")
+
+    def _diff_uris(run_id: str) -> set[str]:
+        # Topology is chosen at BUILD time from the env, so build inside the run.
+        app = build_implementation_subgraph(
+            _runtime(), source_dir=str(tmp_path), resolve=_resolve
+        ).compile()
+        final: FactoryState = app.invoke(_seed_state(), _config(run_id))
+        return {a.uri for a in _feature_diffs(final)}
+
+    monkeypatch.delenv("FOUNDRY_MAX_CODING_SESSIONS", raising=False)
+    serial = _diff_uris("run-serial")  # serial conditional chain
+
+    monkeypatch.setenv("FOUNDRY_MAX_CODING_SESSIONS", "3")  # gate → fan-out topology
+    reset_coding_gate()
+    try:
+        fanout = _diff_uris("run-fanout")
+    finally:
+        reset_coding_gate()
+
+    assert len(serial) >= 1
+    assert serial == fanout  # identical content-addressed diffs, just parallelized
+
+
 def test_subgraph_preserves_branch_per_task(tmp_path: Any) -> None:
     (tmp_path / "README.md").write_text("seed\n")
     app = build_implementation_subgraph(

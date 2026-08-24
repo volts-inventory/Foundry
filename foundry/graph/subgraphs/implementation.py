@@ -39,6 +39,7 @@ and the architecture/product subgraphs).
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -59,6 +60,20 @@ if TYPE_CHECKING:
     from foundry.agents.implementation.senior_engineer import ArtifactResolver
 
 __all__ = ["build_implementation_subgraph"]
+
+
+def _lane_fanout_enabled() -> bool:
+    """D1: fan out the lanes only when a coding-session bound is configured.
+
+    Lane fan-out multiplies the coding substrate's sessions, which bypass the proxy
+    rate limiter (they auth in-sandbox, direct to Anthropic), so it must never run
+    without ``FOUNDRY_MAX_CODING_SESSIONS`` bounding total concurrent sessions
+    (``junior_engineer.coding_admission``) — see LATENCY_PARALLELISM_DESIGN §4."""
+    try:
+        return int(os.environ.get("FOUNDRY_MAX_CODING_SESSIONS") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
 
 # The concrete LangGraph node signature (same shape as NodeFn).
 _Node = Callable[[FactoryState, RunnableConfig], dict[str, Any]]
@@ -176,9 +191,33 @@ def build_implementation_subgraph(
             return END
         return _route
 
-    # The path map's keys are the legal router return values (the reachable node ids +
-    # END); add_conditional_edges drives branch-target validation and the rendered
-    # topology off it.
+    # D1 lane fan-out — GATED on a coding-session bound. The fan-out runs the three
+    # lanes' lead→engineer pipelines CONCURRENTLY (biggest wall-clock win), but each
+    # lane engineer runs the coding substrate, which bypasses the proxy rate limiter
+    # (auths in-sandbox, direct to Anthropic). So fan-out is enabled ONLY when
+    # FOUNDRY_MAX_CODING_SESSIONS>0 caps the total concurrent coding sessions
+    # (junior_engineer.coding_admission) — else it could blow the subscription's
+    # session limit (LATENCY_PARALLELISM_DESIGN §4). Default (unset) keeps the serial
+    # conditional chain, byte-identical to before.
+    if _lane_fanout_enabled():
+        def _leads_router(state: FactoryState) -> list[str]:
+            live = [lid for lid in lead_ids if _has_work(lid, state)]
+            return live or [END]  # fan out to every lane-with-work in one superstep
+
+        g.add_conditional_edges(START, _leads_router, {**{n: n for n in lead_ids}, END: END})
+        for _ln in ENGINEERING_LANES:
+            _lead_id, _eng_id = f"{_ln}_lead", f"{_ln}_engineer"
+
+            def _eng_router(state: FactoryState, _eng: str = _eng_id) -> str:
+                return _eng if _has_work(_eng, state) else END  # this lane's engineer, or skip
+
+            g.add_conditional_edges(_lead_id, _eng_router, {_eng_id: _eng_id, END: END})
+            g.add_edge(_eng_id, END)
+        return g
+
+    # Serial conditional chain (default): START -> first-with-work; each node -> the
+    # NEXT node-with-work in `chain`. The path map's keys are the legal router return
+    # values (reachable node ids + END).
     g.add_conditional_edges(START, _next_with_work(-1),
                             {**{n: n for n in chain}, END: END})
     for _i, _node_id in enumerate(chain):

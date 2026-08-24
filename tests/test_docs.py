@@ -131,9 +131,11 @@ def test_build_manifest_aggregates_usage_and_indexes() -> None:
         PRD(title="S", prd_uri="cas://p", seq=SEQ), "prd", "product_manager", SEQ, store=store
     )
     proxy_manifest = [
-        {"tier": "T1", "served_model": "claude-opus-4-8", "served_family": ["anthropic-claude"],
+        {"tier": "T1", "node_id": "product_manager",
+         "served_model": "claude-opus-4-8", "served_family": ["anthropic-claude"],
          "usage": {"input_tokens": 100, "output_tokens": 10, "cache_read_input_tokens": 50}},
-        {"tier": "T2", "served_model": "claude-sonnet-4-6", "served_family": ["anthropic-claude"],
+        {"tier": "T2", "node_id": "reviewer_critic",
+         "served_model": "claude-sonnet-4-6", "served_family": ["anthropic-claude"],
          "usage": {"input_tokens": 20, "output_tokens": 5}},
     ]
     m = build_manifest(
@@ -146,9 +148,13 @@ def test_build_manifest_aggregates_usage_and_indexes() -> None:
     assert m.model_usage.total_tokens_in == 120
     assert m.model_usage.calls_by_tier == {"T1": 1, "T2": 1}
     assert m.model_usage.served_models == ("claude-opus-4-8", "claude-sonnet-4-6")
+    # Per-node token breakdown (the "who's the hog" view), highest first.
+    assert m.model_usage.tokens_by_node == {"product_manager": 110, "reviewer_critic": 25}
+    assert next(iter(m.model_usage.tokens_by_node)) == "product_manager"  # sorted desc
     assert any(a.kind == "prd" for a in m.artifacts)
     md = render_manifest_md(m)
     assert "Build Manifest" in md and "claude-opus-4-8" in md
+    assert "Tokens by node" in md and "product_manager" in md
 
 
 def test_manifest_attested_counts_judgment_binding() -> None:

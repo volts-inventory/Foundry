@@ -71,6 +71,9 @@ class ModelUsageSummary(FrozenModel):
     # per-call records; absent kinds simply don't appear.
     drift_by_kind: dict[str, int] = {}  # noqa: RUF012 - pydantic deep-copies defaults
     calls_by_tier: dict[str, int] = {}  # noqa: RUF012 - pydantic deep-copies defaults
+    # Total tokens (in+out) per agent node, highest first — the "who's the hog"
+    # view for cost tuning. Derived from the proxy per-call records.
+    tokens_by_node: dict[str, int] = {}  # noqa: RUF012 - pydantic deep-copies defaults
 
 
 class BuildManifest(FrozenModel):
@@ -129,11 +132,16 @@ def _usage_summary(
     models: set[str] = set()
     by_tier: dict[str, int] = {}
     by_kind: dict[str, int] = {}
+    by_node: dict[str, int] = {}
     for rec in proxy_manifest:
         usage = rec.get("usage") or {}
-        tin += int(usage.get("input_tokens", 0))
-        tout += int(usage.get("output_tokens", 0))
+        in_tok = int(usage.get("input_tokens", 0))
+        out_tok = int(usage.get("output_tokens", 0))
+        tin += in_tok
+        tout += out_tok
         cache += int(usage.get("cache_read_input_tokens", 0))
+        node = str(rec.get("node_id", "?"))
+        by_node[node] = by_node.get(node, 0) + in_tok + out_tok
         for fam in rec.get("served_family") or ():
             families.add(str(fam))
         if rec.get("served_model"):
@@ -155,6 +163,7 @@ def _usage_summary(
         drift_events=drift_events,
         drift_by_kind=dict(sorted(by_kind.items())),
         calls_by_tier=dict(sorted(by_tier.items())),
+        tokens_by_node=dict(sorted(by_node.items(), key=lambda kv: (-kv[1], kv[0]))),
     )
 
 
@@ -237,6 +246,17 @@ def render_manifest_md(m: BuildManifest) -> str:
             if u.drift_by_kind
             else ""
         ),
+        "",
+        "## Tokens by node (highest first)",
+        "",
+        "| Node | Tokens (in+out) |",
+        "|------|-----------------|",
+    ]
+    for node, toks in u.tokens_by_node.items():
+        lines.append(f"| {node} | {toks:,} |")
+    if not u.tokens_by_node:
+        lines.append("| _none_ | — |")
+    lines += [
         "",
         "## Documents",
         "",

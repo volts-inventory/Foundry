@@ -258,6 +258,42 @@ def test_two_reviews_in_one_run_get_distinct_nonces(installed: GlobalRecords) ->
     assert a.verdict_nonce != b.verdict_nonce            # same base "N", distinct nonces
 
 
+def test_reviewer_prompt_includes_the_changed_code(installed: GlobalRecords) -> None:
+    """C1: with the CAS wired, the reviewer is fed the ACTUAL changed code (not just
+    the subject URI), so its verdict is informed. rt.cas unwired falls back to the
+    URI-only prompt (the other reviewer tests, which pass no cas, prove that path)."""
+    import json as _json
+
+    from foundry.durability.artifact_store import ArtifactStore
+    from foundry.schemas.implementation import FeatureDiff
+
+    store = ArtifactStore()
+    blob_uri = store.put_blob(
+        _json.dumps(
+            {
+                "kind": "full-file-snapshot",
+                "files": {"src/app.py": "def add(a, b):\n    return a + b  # C1_SENTINEL"},
+            }
+        )
+    )
+    fd_seq = Seq(run_id="run-C1", emission_epoch=0, superstep_index=0,
+                 node_id="junior_engineer", local=0)
+    fd = FeatureDiff(diff_uri=blob_uri, task_id="t1", branch="task/t1",
+                     base_tree_sha="base-sha", seq=fd_seq)
+    handle = emit_artifact(fd, "feature_diff", "junior_engineer", fd_seq, store=store)
+
+    transport = MockTransport(verdicts=["approve"])
+    proxy = ModelProviderProxy(transport, signer=ZoneBSigner(KEY, KEY_ID))
+    rt = AgentRuntime(proxy=proxy, cas=store)
+    make_reviewer_critic_node(rt)(
+        {"artifacts": [handle]},
+        config_for("run-C1", nonce="N", subject=handle.uri, state_sha="s"),
+    )
+
+    content = transport.requests[-1]["messages"][0]["content"]
+    assert "C1_SENTINEL" in content and "src/app.py" in content
+
+
 def test_commit_step_consumes_nonce_so_replay_is_rejected(installed: GlobalRecords) -> None:
     """H3 (live): the trusted commit step consumes an admitted verdict's nonce, so a
     DIFFERENT verdict reusing that nonce is then rejected — the single-use replay

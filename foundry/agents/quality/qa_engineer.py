@@ -183,7 +183,7 @@ def make_qa_engineer_node(
     *,
     resolve: ArtifactResolver | None = None,
     run_against: str = "task/qa",
-    tier: str = "T1",
+    tier: str = "T2",
 ) -> NodeFn:
     """Build the QA Engineer node (agents.md Layer 4).
 

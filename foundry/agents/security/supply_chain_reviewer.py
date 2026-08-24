@@ -31,8 +31,11 @@ if TYPE_CHECKING:
 import os as _os  # noqa: E402
 
 _NODE_ID = "supply_chain_reviewer"
-# Defaults to Opus (T1); FOUNDRY_SECURITY_TIER=T2 opts into Sonnet (frugal).
-_TIER = _os.environ.get("FOUNDRY_SECURITY_TIER", "T1").strip() or "T1"
+# Default Sonnet (T2): the SupplyChainReport is advisory/build-dead — the
+# SupplyChain gate polices the diff itself and reads no agent analysis — and the
+# check is mechanical (SBOM/license), so Opus buys nothing. FOUNDRY_SECURITY_TIER=T1
+# restores Opus.
+_TIER = _os.environ.get("FOUNDRY_SECURITY_TIER", "T2").strip() or "T2"
 _SUPPLY_CHAIN_GATE = "supply_chain"
 
 SOP = (

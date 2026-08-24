@@ -39,8 +39,11 @@ import os as _os  # noqa: E402
 
 _NODE_ID = "appsec_engineer"
 # Security review defaults to Opus (T1) — don't cheap out on the security floor.
-# FOUNDRY_SECURITY_TIER=T2 opts into Sonnet for a frugal hobby build.
-_TIER = _os.environ.get("FOUNDRY_SECURITY_TIER", "T1").strip() or "T1"
+# Default Sonnet (T2): the ThreatModel is advisory/build-dead — the Security gate
+# re-scans the materialized tree and reads no agent analysis — so Opus buys no gate
+# quality here. FOUNDRY_SECURITY_TIER=T1 restores Opus when a human relies on the
+# threat model at a checkpoint.
+_TIER = _os.environ.get("FOUNDRY_SECURITY_TIER", "T2").strip() or "T2"
 _SECURITY_GATE = "security"
 
 SOP = (

@@ -1285,7 +1285,7 @@ def run(
     resolve_blob: BlobResolver | None = None,
     adapter: str | Any | None = None,
     diff_body: str | None = None,
-    max_fix_attempts: int = 5,
+    max_fix_attempts: int = 3,
     docs_dir: str | None = None,
     output_dir: str | None = None,
     checkpoints: bool | list[str | CheckpointBoundary] | None = None,
@@ -2184,7 +2184,7 @@ def main(argv: list[str] | None = None) -> int:
         args, _tid = _take_value(args, "--thread-id", what="a value")
         thread_id = _tid if _tid is not None else "cli-run"
         args, _mfa = _take_int(args, "--max-fix-attempts", minimum=1)
-        max_fix_attempts = _mfa if _mfa is not None else 5
+        max_fix_attempts = _mfa if _mfa is not None else 3
 
         # Parallelism is SYSTEM-DECIDED: the Tech-Lead decomposes the work and the
         # IC pool sizes itself to that plan (min(tasks, AUTO_SLOTS_CAP)). --max-slots

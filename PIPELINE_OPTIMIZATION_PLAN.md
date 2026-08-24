@@ -296,7 +296,7 @@ flagged below; everything else is decided.
 | D1 | **Adopt — design-first** | Parallelize the 3 lanes. Prerequisites: thread-safe `EpochCounter`, order-independent reducers, pacing on. Plan Mode + second opinion before coding. |
 | D2 | **Cut, scoped + router change** | Remove the assurance-stage `reviewer_critic`; if a security-focused review is wanted, replace with a pass scoped to security-agent findings, gated on "tree changed since the quality review." **Verified:** the assurance *gate* does not require the review verdict, but `_route_assurance` (the ROUTER) fail-closes on a missing fresh review verdict (`assurance.py:139-158,194`) — so the cut MUST also change `_route_assurance` to stop demanding an assurance-stage review, else the boundary halts. |
 | D3 | **Downgrade, don't delete** | Keep Stakeholder Proxy + Eng PM as desks/narrative but move to **T3 or advisory/no-LLM** — preserves the office (E1), drops the token cost. Full delete only if UI removal is also wanted. |
-| D4 | **Adopt** | Fold the completeness checklist into the PM SOP; drop the separate critic node + its revision loop. Keep the security/abuse coverage in the PM prompt. |
+| D4 | **Revised → downgrade, not fold** | Verification showed the critic is NOT redundant: its critique drives the revision loop that improves the **acceptance criteria the Spec gate reads** (build-load-bearing), and folding it would delete property tests (bounded revision, advisory-not-verdict) and a security-completeness check. So instead: downgrade its tier **T1→T2** (env `FOUNDRY_CRITERIA_TIER=T1` restores Opus) — keeps the check + loop, cuts the cost. Implemented. |
 | D5 | **Adopt** | Run E2E once; share the attested result across the build/test and assurance boundaries. |
 | D6 | **Adopt** | Downgrade `docs` to **T3** and make it async / non-blocking on the release path. |
 | D7 | **Adopt — design-first** | Fan out the quality + assurance author chains. Ships with D1's `EpochCounter` fix + pacing. |
@@ -379,7 +379,7 @@ env-overridable (`FOUNDRY_REVIEW_TIER`, appsec/supply-chain envs).
 | scope_judge | Product | T3 Haiku | T3 Haiku | — |
 | stakeholder_proxy | Product | T2 Sonnet | **T3 Haiku / advisory** | D3 (dead output — downgrade, keep desk) |
 | product_manager | Product | T2 Sonnet | **Opus (plan/criteria) → Sonnet (prose)** | A5b + D4 (keeps the critic's Opus judgment) |
-| criteria_completeness_critic | Product | T1 Opus | **removed** | D4 (folded into the PM) |
+| criteria_completeness_critic | Product | T1 Opus | **T2 Sonnet** (env T1) | D4 (downgraded, kept — drives the revision loop) |
 | eng_program_mgr | Product | T2 Sonnet | **T3 Haiku / advisory** | D3 (dead output — downgrade, keep desk) |
 | principal_architect | Architecture | T1 Opus | T1 Opus | — |
 | domain_specialist *(conditional)* | Architecture | T2 Sonnet | T2 Sonnet | — |

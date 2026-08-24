@@ -18,6 +18,7 @@ governance §1e / plan §0.2) so a same-lineage critique is recorded openly.
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any
 
 from foundry.agents.product._common import emit_artifact
@@ -32,7 +33,12 @@ if TYPE_CHECKING:
     from foundry.state.factory_state import FactoryState
 
 _NODE_ID = "criteria_completeness_critic"
-_TIER = "T1"  # most-consequential completeness judgment never auto-downgrades
+# D4 revised: the critic is NOT redundant — its critique drives the revision loop
+# that improves the acceptance criteria the Spec gate reads (build-load-bearing), so
+# it is downgraded (not folded/removed). Default Sonnet (T2): a strong completeness
+# check at a fraction of Opus cost on every run + revision pass. FOUNDRY_CRITERIA_TIER=T1
+# restores Opus for the heaviest reasoning on this security/abuse completeness judgment.
+_TIER = os.environ.get("FOUNDRY_CRITERIA_TIER", "T2").strip() or "T2"
 _SPEC_GATE = "spec"
 
 SOP = (

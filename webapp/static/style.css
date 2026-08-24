@@ -274,6 +274,13 @@ li.agent-box.done .agent-head{color:var(--green);background:rgba(93,220,122,.08)
   border:3px solid var(--line);border-radius:6px;font-family:inherit;font-size:12px;
 }
 .dialog textarea{resize:vertical;min-height:60px;line-height:1.5}
+/* E8 — the free-text is the CANVAS, not form-field ①. On the now-wider build
+   dialog give the primary editors real height + a monospace face so a full
+   spec/request/milestone list isn't cramped into a 3-row box. resize:vertical is
+   inherited, so the writer can still drag them taller. */
+#req-input{min-height:15vh}
+#spec-text,#milestones-text{min-height:38vh;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px}
 .dialog .hint{color:var(--dim);font-weight:normal;text-transform:none;font-size:11px}
 
 /* ---- Build dialog: numbered SECTIONS, not one 20-field wall -----------------
@@ -281,7 +288,7 @@ li.agent-box.done .agent-head{color:var(--green);background:rgba(93,220,122,.08)
    part only you can supply); ③ how it runs and ④ scale fold shut behind a summary
    of their current values, because every field in them already has a default. The
    header and BREAK GROUND stick to the edges of the scroll box.               */
-.dialog.build{width:min(600px,94vw);padding:0 18px}
+.dialog.build{width:min(940px,96vw);padding:0 18px}
 .dialog-head{position:sticky;top:0;z-index:3;display:flex;align-items:center;gap:10px;
   background:var(--panel);padding:16px 0 10px;border-bottom:2px solid var(--line)}
 .dialog-head h2{margin:0;flex:1 1 auto;min-width:0}

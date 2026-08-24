@@ -166,8 +166,8 @@ const ROLE_TAG = {
 // workstation; the only thing that changes is their POSTURE:
 //   working  -> turned to the monitor (back of head), typing, code glyphs
 //   off duty -> turned around, settled into an idle MOOD + the odd chat bubble
-// Which group is actually live is read off the CTO — he goes and stands with
-// them (see sendCTO), so "where the boss is" == "where the work is".
+// Which group is actually live reads straight off the seated crew: only agents with
+// a node in-flight are heads-down, and the primary (most recent) room glows brightest.
 //
 // A mood is stable for the whole idle spell (and per person), so the floor has
 // a recognisable cast: the same one naps, the same one is always on a coffee
@@ -184,14 +184,6 @@ const IDLE_CHATTER = {
   tunes:  ["~ headphones on ~", "new playlist, no notes", "~ ~ ~", "this track though"],
   stretch:["*stretches*", "my back...", "twelve steps today", "standing desk next sprint"],
 };
-// What the CTO says as he arrives to oversee whichever group just went live.
-const CTO_LINES = ["how's it looking?", "keep going, this is good", "what's blocking you?",
-                   "I'll be right here", "show me when it's ready"];
-// The CTO walks a BEAT rather than being leashed to the newest event: he stands with one
-// live team for a spell, then moves on to the next room that has work. Rooms he can stand
-// in, in floor order (the gate/vault/his office aren't teams).
-const PATROL_ROOMS = ["product","architecture","frontend","backend","data","qa","security"];
-const CTO_DWELL_MS = [7000, 13000];   // how long he oversees one room before moving on
 const pick = (arr)=> arr[Math.floor(Math.random()*arr.length)];
 
 // ---- generated character sprites (our own pixel art) -----------------------
@@ -220,7 +212,7 @@ const ROLE_CHAR = {
   "Stakeholder Proxy":4,"Product Manager":7,"Criteria Critic":2,"Program Manager":6,
   "Principal Architect":0,"Senior Engineer":5,"Junior Engineer":9,
   "QA Engineer":8,"SDET":1,"Reviewer":4,"Technical Writer":3,
-  "AppSec Engineer":5,"Audit & Compliance":7,"Supply-chain Reviewer":0,"CTO":3,
+  "AppSec Engineer":5,"Audit & Compliance":7,"Supply-chain Reviewer":0,
 };
 function charFor(name, seed){
   if (ROLE_CHAR[name] != null) return ROLE_CHAR[name];
@@ -414,15 +406,13 @@ class FloorScene extends Phaser.Scene {
     // mid-call twice — one service finishing must not unseat the other.
     this.workingAgents = new Map();
     this.roomInflight = {};          // room -> count of in-flight nodes (ref-count)
-    this.ctoRoom = null;             // the room the CTO is overseeing = the active group
+    this.primaryRoom = null;         // the most-recent live room (glows brightest)
     // per-floor offset into IDLE_MOODS so the napper isn't the same person on every floor
     this._moodSeed = hashStr(this.proj.id || "f") % IDLE_MOODS.length;
     this.buildRooms();
     this.buildGate();
     this.buildChest();
-    this.buildGuardian();
     this.buildAgents();
-    this.buildCTO();
     const F = FLOORS.get(this.proj.floor);
     if (F) F.scene = this;
     if (this.proj.slots) this.setPool(this.proj.slots);  // rehydrate / initial pool
@@ -897,14 +887,12 @@ class FloorScene extends Phaser.Scene {
   startAmbient(){
     this.time.addEvent({delay:2600, loop:true, callback:()=>{
       for (const a of this.agents.values()) if (a.seen) this.blink(a);
-      this.blink(this.cto);
     }});
     this.time.addEvent({delay:360, loop:true, callback:()=>{
       const s = this.screens; if (!s || !s.length) return;
       const sc = s[(this._sf = (this._sf||0)+1) % s.length];
       if (sc) this.tweens.add({targets:sc, alpha:{from:0.6,to:0.95}, duration:150, yoyo:true});
     }});
-    this.time.addEvent({delay:1500, loop:true, callback:()=>this.ctoPatrol()});  // the CTO's rounds
     this.time.addEvent({delay:2600, loop:true, callback:()=>this.deskSweep()});  // stay-at-your-desk sweep
     this.time.addEvent({delay:1600, loop:true, callback:()=>this.chatter()});    // idle chat bubbles
   }
@@ -966,24 +954,24 @@ class FloorScene extends Phaser.Scene {
         this.time.delayedCall(950,()=>this.tweens.add({targets:s,alpha:0,duration:300,onComplete:()=>s.destroy()})); }});
     if (!pass) this.shake(380,0.015);
   }
-  // checkpoint spotlight + bouncing "?" over the CTO
-  spotlightCTO(on){
-    this.ctoHold = !!on;        // he's deciding, not doing his rounds — pause the patrol
+  // Checkpoint hold: no approver character on the floor — the decision is made in the
+  // DOM checkpoint modal. The floor just dims and marks the gate as awaiting a decision.
+  checkpointHold(on){
+    this.cpHold = !!on;
     if (this.spot){ this.spot.destroy(); this.spot=null; }
     if (this.qmark){ this.qmark.destroy(); this.qmark=null; }
-    if (!on || !this.cto) return;
-    const x=this.cto.x;
+    if (!on) return;
+    const G = ROOMS.gate, x = Math.round(G.cx);
     const dim=this.add.rectangle(0,0,W,H,0x05080f,0.5).setOrigin(0,0);
     const beam=this.add.triangle(x,FLOOR_TOP-70,-66,180,66,180,0,0,0xfff1c0,0.10);
     this.spot=this.add.container(0,0).setDepth(34); this.spot.add([dim,beam]);
-    const q=this.add.text(x,this.cto.y-48,"?",{fontFamily:"'PixelFont','Courier New',monospace",
+    const q=this.add.text(x,Math.round(G.cy),"?",{fontFamily:"'PixelFont','Courier New',monospace",
       fontSize:"24px",fontStyle:"bold",color:"#ffd95e"}).setOrigin(0.5).setDepth(2000);
     this.qmark=q;
     this.tweens.add({targets:q, y:q.y-7, duration:480, yoyo:true, repeat:-1, ease:"Sine.inOut"});
   }
   celebrate(){
     for (const a of this.agents.values()) if (a.seen) this.hop(a,3);
-    this.hop(this.cto,3);
     for (const s of (this.poolGroup||[])) if (s && s.bob) this.hop(s,2);
     this.confetti();
   }
@@ -1012,25 +1000,6 @@ class FloorScene extends Phaser.Scene {
     this.tweens.add({targets:b, scale:1, alpha:1, duration:300, ease:"Back.out"});
     this.time.delayedCall(2400,()=>this.tweens.add({targets:b, alpha:0, y:b.y-20, duration:400,
       onComplete:()=>b.destroy()}));
-  }
-
-  // a security guard posted at the checkpoint desk (dark uniform, cap, badge)
-  buildGuardian(){
-    const R = ROOMS.gate, x = Math.round(R.x + R.w*0.30), y = R.y1-30;
-    const c = this.add.container(x,y).setDepth(6);
-    c.add(this.add.ellipse(0,9,18,5,PC.shadow,0.30));           // cool cast shadow
-    c.add(this.add.rectangle(0,0,14,16,0x2b3350));              // torso (navy uniform)
-    c.add(this.add.rectangle(0,2,14,2,0x1a2030));               // belt line
-    c.add(this.add.rectangle(-4,-4,3,3,0xffd95e));              // brass badge
-    c.add(this.add.rectangle(0,-12,12,11,0xe8b487));            // head
-    c.add(this.add.rectangle(0,-18,13,5,0x1a2030));             // cap brim
-    c.add(this.add.rectangle(0,-21,11,4,0x2b3350));             // cap crown
-    c.add(this.add.rectangle(-3,-12,2,2,0x141822));             // eyes
-    c.add(this.add.rectangle(3,-12,2,2,0x141822));
-    this.guardSpark = this.add.rectangle(7,-6,3,3,0x5ddc7a,0.9);// radio LED
-    c.add(this.guardSpark);
-    this.tweens.add({targets:this.guardSpark, alpha:0.2, duration:900, yoyo:true, repeat:-1});
-    this.pinBadge(c, "GUARD", 0xbcd0ff, true, -30);            // label the gate security guard
   }
 
   // The Gate is the RELEASE CHECKPOINT: a CCTV bank + checkpoint desk, plus a sealed
@@ -1169,22 +1138,6 @@ class FloorScene extends Phaser.Scene {
     }
   }
 
-  buildCTO(){
-    const O = ROOMS.office;
-    this.lobby = {cx: Math.round(O.cx), standY: Math.round(O.y1 - 48)};   // behind his desk
-    const c = this.makePerson(this.lobby.cx, this.lobby.standY, kitFor("CTO", hashStr((this.proj.id||'f')+"CTO")));
-    c.setScale(1.5).setDepth(900); c.fixedDepth = 900;   // CTO walks the floor -> always on top
-    this.pinBadge(c, "CTO", 0xffd95e, true, -26);         // gold badge, above the head
-    // A pulsing gold pool of light under his feet. Everyone else is permanently at a
-    // desk, so HE is the active-group indicator — this makes him findable at a glance.
-    const pool = this.add.ellipse(0, 4, 40, 16, 0xffd95e, 0.34);
-    c.addAt(pool, 0);                                    // under the body (and its shadow)
-    this.tweens.add({targets:pool, scaleX:{from:0.80,to:1.16}, scaleY:{from:0.80,to:1.16},
-      alpha:{from:0.42,to:0.18}, duration:1200, yoyo:true, repeat:-1, ease:"Sine.inOut"});
-    this.cto = c;
-    this.tweens.add({targets:c.bob, y:-1, duration:380, yoyo:true, repeat:-1, ease:"Sine.inOut"});
-  }
-
   // Our own generated GBA-style sprite: big head, tiny torso, pointed ears, vertical
   // eyes, colourful clothes. `opt` = a role/pool kit (body/trim/style/cloth/hw/acc).
   // A character from the route1rodent sprite sheet. Preserves the old API
@@ -1296,98 +1249,34 @@ class FloorScene extends Phaser.Scene {
     const ph = (k)=> (ENG_ROOMS.includes(k)||k==="engineering") ? "engineering" : k;
     const oi = SEQ.indexOf(ph(prev)), ni = SEQ.indexOf(ph(key));
     if (oi >= 0 && ni > oi) this.deliverWork(prev, key);
-    // The CTO GOES AND STANDS WITH a group that's live — since everyone else is
-    // permanently at their own desk, he's the thing that tells you at a glance WHERE the
-    // work is. He does NOT jump to every newest event (with several rooms live that just
-    // teleports him around): the patrol picks the room, and only moves him when his dwell
-    // is up or the room he's in has gone dark.
-    this.ctoPatrol();
+    // The PRIMARY room (most recent start) is lit brightest, so the eye lands on where
+    // work just began. No overseer character — the live crew themselves mark the work.
+    const R = key ? ROOMS[key] : null;
+    const T = (R && R.virtual) ? (ENG_ROOMS.find(r=>this.roomLive(r)) || "backend") : key;
+    this.primaryRoom = T || null;
     this.staffRoom(key);                 // the live crew heads-down; everyone else off duty
   }
 
-  // The rooms with work in them right now, in floor order — the CTO's patrol route.
-  // `roomLive` expands the virtual engineering stage, so its three lanes each count.
-  patrolRooms(){ return PATROL_ROOMS.filter(k => ROOMS[k] && this.roomLive(k)); }
-  // One beat of the patrol: stay put while the dwell runs, then walk to the next live
-  // room. Called on a timer AND whenever the live set changes, so he reacts at once when
-  // the first work lands or the room he's overseeing goes quiet.
-  ctoPatrol(){
-    if (!this.cto || this._dead || this.ctoHold) return;         // held during a checkpoint
-    if (this.cto.moveTween && this.cto.moveTween.isPlaying()) return;   // already walking
-    const rooms = this.patrolRooms();
-    if (!rooms.length){ if (this.ctoRoom !== null) this.sendCTO(null); return; }
-    const here = rooms.indexOf(this.ctoRoom);
-    if (here >= 0 && (rooms.length === 1 || Date.now() < (this.ctoDwellUntil||0))) return;
-    this.sendCTO(rooms[(here + 1) % rooms.length]);   // here<0 (office/dark room) -> rooms[0]
-  }
-
-  // Walk the CTO to the room he's overseeing (null → back to his office) and mark it.
-  // `ctoRoom` also drives the brightest room glow, so his room reads as THE active one.
-  sendCTO(key){
-    const R = key ? ROOMS[key] : null;
-    // A VIRTUAL stage (engineering) has no room of its own — stand in a live lane, and
-    // let ctoRoom name that REAL room so the glow marks exactly where he is.
-    const T = (R && R.virtual) ? ROOMS[ENG_ROOMS.find(r=>this.roomLive(r)) || "backend"] : R;
-    const prev = this.ctoRoom;
-    this.ctoRoom = T ? T.key : null;
-    this.paintGlow();
-    if (!this.cto || !this.lobby) return;
-    // Fresh dwell for wherever he's headed, so the patrol leaves him alone while he
-    // oversees this room (jittered, so he isn't metronomic).
-    const dwell = ()=>{ this.ctoDwellUntil = Date.now() + CTO_DWELL_MS[0]
-      + Math.random()*(CTO_DWELL_MS[1]-CTO_DWELL_MS[0]); };
-    const tx = Math.round(T ? T.cx : this.lobby.cx);
-    const ty = Math.round(T ? T.standY : this.lobby.standY);
-    if (Math.abs(this.cto.x-tx) < 4 && Math.abs(this.cto.y-ty) < 4){ dwell(); return; }
-    this.walkTo(this.cto, tx, ty, ()=>{
-      if (this._dead) return;
-      dwell();
-      // overseeing a team → faces up into the room, watching them work; in his own
-      // office he faces the door instead.
-      if (T){ if (this.cto.faceBack) this.cto.faceBack(); }
-      else if (this.cto.faceFront) this.cto.faceFront();
-      if (!T || T.key === prev) return;
-      this.floatText(tx, ty-34, "◆ "+(T.label || T.key), "#ffe6a0", 11);
-      this.showBubble(this.cto, pick(CTO_LINES), 3200, true);
-    });
-  }
-  // Room glow: every LIVE room is lit, and the room the CTO is standing in is lit
-  // brightest — so "where the boss is" is unmistakably "where the work is".
+  // Room glow: every LIVE room is lit, and the PRIMARY (most recent) room brightest, so
+  // "where the work just started" reads at a glance.
   paintGlow(){
     for (const k in this.roomGlow){
       const g = this.roomGlow[k];
-      const on = this.roomLive(k) ? (k === this.ctoRoom ? 0.20 : 0.10)
-                                  : (k === this.ctoRoom ? 0.12 : 0);
+      const on = this.roomLive(k) ? (k === this.primaryRoom ? 0.20 : 0.10)
+                                  : (k === this.primaryRoom ? 0.12 : 0);
       this.tweens.killTweensOf(g);          // one fade at a time (restaff can re-paint often)
       this.tweens.add({targets:g, fillAlpha:on, duration:420});
     }
   }
 
-  // A worker from the just-finished phase carries the "work" package to the next
-  // phase's room, drops it (a pickup pops there), then heads back and leaves.
+  // A forward phase handoff: a work package pops in the destination room (no courier
+  // character — the artifact itself is the signal that work crossed over).
   deliverWork(fromKey, toKey){
     const rk = (k)=> k==="engineering" ? "backend" : k;     // virtual eng → a real room
-    const A = ROOMS[rk(fromKey)], B = ROOMS[rk(toKey)];
-    if (!A || !B || this._dead) return;
-    const ax = Math.round(A.cx), ay = Math.round(A.standY);
-    const runner = this.makePerson(ax, ay, poolKit(4));
-    runner.setScale(1.4).setDepth(945); runner.fixedDepth = 945;   // stays on top while crossing
-    this.pinBadge(runner, "RUNNER", 0xffcf52, true, -17);          // label the delivery courier
-    const pkg = this.add.container(0,-17);                          // the "work" carried in hand
-    pkg.add(this.add.rectangle(0,0,12,9,0xffcf52).setStrokeStyle(1,0x7a5028));
-    pkg.add(this.add.rectangle(0,-1,12,2,0xfff0a8));
-    pkg.add(this.add.rectangle(0,0,2,9,0xc89b2e));
-    runner.add(pkg);
-    this.floatText(ax, ay-26, "→ "+(B.label||"next"), "#ffe6a0", 10);   // sets off with the work
-    this.walkTo(runner, Math.round(B.cx), Math.round(B.standY), ()=>{
-      if (this._dead){ runner.destroy(); return; }
-      this.burst(B.cx, B.standY-10, [0xffcf52,0xffffff], 10);
-      this.floatText(B.cx, B.standY-26, "✦ work delivered", "#ffe6a0", 10);
-      if (pkg) pkg.destroy();
-      // brief beat at the destination, then head back and leave
-      this.time.delayedCall(600, ()=>{ if (this._dead){ runner.destroy(); return; }
-        this.walkTo(runner, ax, ay, ()=>{ runner.destroy(); }); });
-    });
+    const B = ROOMS[rk(toKey)];
+    if (!B || this._dead) return;
+    this.burst(B.cx, B.standY-10, [0xffcf52,0xffffff], 10);
+    this.floatText(B.cx, B.standY-26, "✦ work delivered", "#ffe6a0", 10);
   }
 
   // ---- presence: nobody ever leaves their desk ----------------------------
@@ -2159,21 +2048,21 @@ function routeEvent(floor, ev){
         F.cp = Object.assign({}, F.cp, {boundary: ev.boundary, request: ev.request || ""});
       if (Array.isArray(ev.journal)) F.journal = ev.journal;
       renderElevator();
-      if (S){ S.spotlightCTO(true); S.standDownAll(); }   // whole floor off duty while the CTO decides
+      if (S){ S.checkpointHold(true); S.standDownAll(); }   // whole floor off duty while the decision is pending
       if (isActive) showCheckpoint(F); break;
     case "resolved": {
       F.awaiting = false; renderElevator();
       // three-way verdict: approve (green) · needs_changes (gold) · reject (red)
       const ap = ev.decision === "approve", ch = ev.decision === "needs_changes";
       const txt = ap?"APPROVED":(ch?"CHANGES":"REJECTED");
-      logProgress(F, ap?"good":(ch?"hot":"bad"), "CTO "+txt);
-      if (S){ S.spotlightCTO(false);
+      logProgress(F, ap?"good":(ch?"hot":"bad"), txt);
+      if (S){ S.checkpointHold(false);
         if (S.activeRoomKey) S.staffRoom(S.activeRoomKey);   // back to work
         const col = ap?0x5ddc7a:(ch?0xffcf52:0xff5d6c);
         const hex = ap?"#9dffbf":(ch?"#ffe6a3":"#ffb3ba");
-        S.hop(S.cto, ap?2:1); S.ring(S.cto.x, S.cto.y-10, col);
-        S.burst(S.cto.x, S.cto.y-10, [col,0xffffff], 12);
-        S.floatText(S.cto.x, S.cto.y-30, txt, hex, 13);
+        const G = ROOMS.gate, gx = Math.round(G.cx), gy = Math.round(G.cy);
+        S.ring(gx, gy, col); S.burst(gx, gy, [col,0xffffff], 12);
+        S.floatText(gx, gy-20, txt, hex, 13);
         if (ev.decision === "reject") S.shake(280,0.01); }
       if (isActive) hideCheckpoint(); break;
     }

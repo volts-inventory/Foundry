@@ -300,6 +300,7 @@ class ClaudeCodeAdapter:
         exec_fn: SandboxExec | None = None,
         extra_args: Sequence[str] = (),
         on_activity: Callable[[str], None] | None = None,
+        resume_session_id: str | None = None,
     ) -> None:
         self._bin = claude_bin
         self._run_id = run_id
@@ -308,6 +309,10 @@ class ClaudeCodeAdapter:
         self._timeout_s = timeout_s
         self._exec: SandboxExec = exec_fn or _default_exec
         self._extra_args = tuple(extra_args)
+        # B2: when set, resume the prior coding session (`--resume <id>`) instead of
+        # re-priming. Off by default; wiring it into the fix loop trades reset-to-base
+        # idempotency (LATENCY_PARALLELISM §5) — this only plumbs the flag.
+        self._resume_session_id = resume_session_id
         # Opt-in live progress. Passing it switches the CLI to stream-json so each
         # tool call can be reported while the step runs; without it the argv, the
         # parsing and the result are exactly as before.
@@ -348,6 +353,8 @@ class ClaudeCodeAdapter:
         ]
         if self._model:
             argv += ["--model", self._model]
+        if self._resume_session_id:
+            argv += ["--resume", self._resume_session_id]  # B2: continue the prior session
         argv += list(self._extra_args)
         return argv
 
@@ -408,6 +415,7 @@ class ClaudeCodeAdapter:
         )
 
         num_turns = envelope.get("num_turns")
+        session = envelope.get("session_id")
         return AdapterResult(
             diff_uri=diff_uri,
             test_source_uris=(),
@@ -415,6 +423,7 @@ class ClaudeCodeAdapter:
             adapter_self_reported_model=_observed_model(envelope),
             turns_used=num_turns if isinstance(num_turns, int) and num_turns > 0 else 1,
             snapshot_digest=sandbox.snapshot(),
+            session_id=session if isinstance(session, str) and session else None,
         )
 
     def _triage_notes(

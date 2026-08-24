@@ -107,6 +107,11 @@ class AdapterResult(FrozenModel):
     )
     turns_used: int = 1
     snapshot_digest: str  # content-addressed turn snapshot (Sandbox.snapshot)
+    # B2 foundation: the coding session's id (observed from the substrate envelope),
+    # so a future fix attempt can `--resume` it instead of re-priming. None when the
+    # substrate reports none. Carrying it is inert; wiring resume into the fix loop is
+    # a separate opt-in that trades reset-to-base idempotency (LATENCY_PARALLELISM §5).
+    session_id: str | None = None
 
 
 def assemble_prompt(packet: TaskPacket, *, epilogue: str = "") -> str:

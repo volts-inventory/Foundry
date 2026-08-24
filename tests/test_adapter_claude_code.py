@@ -31,7 +31,6 @@ from foundry.execution.adapters.claude_code import (
 )
 from foundry.execution.sandbox import GRANTABLE_MODEL_AUTH, Sandbox, SandboxResult
 
-
 # ---- helpers -----------------------------------------------------------------
 
 
@@ -103,6 +102,24 @@ def test_run_records_added_and_modified_files_as_snapshot(source_dir: Path) -> N
     # BOTH the addition and the MODIFICATION ride in the slice — the load-bearing
     # difference from the additions-only unified-diff path (ROADMAP ceiling #2).
     assert body["files"] == {"pkg/new.py": "NEW = 2\n", "existing.py": "OLD = 99\n"}
+
+
+def test_resume_id_adds_flag_and_session_id_is_captured(source_dir: Path) -> None:
+    """B2 foundation: a resume_session_id adds `--resume <id>` to argv, and the
+    envelope's session_id is captured on the result (so a future fix attempt could
+    continue the session). Both are inert by default (unset)."""
+    seen: list[Any] = []
+
+    def _exec(sandbox: Sandbox, argv: Any, timeout_s: Any) -> SandboxResult:
+        seen.extend(argv)
+        (sandbox.worktree / "a.py").write_text("A = 1\n")
+        return SandboxResult(0, envelope(session_id="sess-new"), "", False, 1.0)
+
+    adapter = ClaudeCodeAdapter(exec_fn=_exec, resume_session_id="sess-prev")
+    with Sandbox(source_dir) as sb:
+        result = adapter.run(make_packet(sb.worktree), sb)
+    assert "--resume" in seen and "sess-prev" in seen  # continues the prior session
+    assert result.session_id == "sess-new"              # captured for the next attempt
 
 
 def test_snapshot_slice_materializes_via_gate_wiring(source_dir: Path) -> None:
@@ -191,7 +208,7 @@ def test_argv_carries_turn_budget_and_skip_permissions(source_dir: Path) -> None
     argv = seen["argv"]
     assert argv[:2] == ["claude", "-p"]
     assert "CONSTRAINT-A: use stdlib only." in argv[2]  # pinned VERBATIM in prompt
-    assert ["--max-turns", "7"] == argv[argv.index("--max-turns") : argv.index("--max-turns") + 2]
+    assert argv[argv.index("--max-turns") : argv.index("--max-turns") + 2] == ["--max-turns", "7"]
     assert "--dangerously-skip-permissions" in argv  # the SANDBOX is the boundary
 
 

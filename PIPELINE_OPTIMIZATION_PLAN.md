@@ -1,8 +1,10 @@
 # Pipeline Token & Latency Optimization Plan
 
-Status: **proposal** — nothing here is implemented. Each item lists its own
-verification and blast radius; the high-blast-radius items are marked for Plan
-Mode + a second-opinion pass before any code lands.
+Status: **decided, not yet implemented.** A selected approach is recorded for
+every item in §3 "Decisions"; one item (**B1**, the coding adapter) needs an
+explicit product confirmation. Each item lists its own verification and blast
+radius; the high-blast-radius items (D1, D7, B2) are marked for Plan Mode + a
+second-opinion pass before any code lands.
 
 ## 1. Problem
 
@@ -180,6 +182,37 @@ log line only, which is consistent with "only agents alive."
 
 Blast radius: UI-only, no pipeline logic touched. The single real design
 decision is E5's CTO-replacement approval affordance.
+
+### Decisions — selected approach for every item
+
+Authoritative selection per item (supersedes any "either/or" phrasing in the
+tables above). One decision needs an explicit product confirmation — **B1**,
+flagged below; everything else is decided.
+
+| Item | Decision | Selected approach / parameters |
+|------|----------|--------------------------------|
+| A1 | **Adopt** | Default the coding adapter to **T2 (Sonnet)**; escalate to **T1 (Opus)** only on the final fix attempt. Drop `purpose="ideation"` on the coding path (no adaptive thinking). |
+| A2 | **Adopt via B1** | Primary fix is B1 (`claude-code` moots the quadratic). Where `proxy-agent` is still used: bounded sliding window + incremental cache breakpoints + `turn_budget` 8→**5**. |
+| A3 | **Adopt** | Per-purpose `max_tokens`: gate/judgment/structured-verdict **2k**, decomposition/structured **4k**, free-form ideation **8k** (down from a flat 16k). |
+| A4 | **Adopt** | CLI `max_fix_attempts` default **5→3** (match the graph); wire `cost_cap_microusd` as an early stop. |
+| B1 | **Adopt — NEEDS CONFIRM** | Default coding substrate = **`claude-code`**. Decided under the assumption that "every model call rides the proxy" is **not** a hard invariant for the *coding* agent (gates still decide correctness; credential rides the sandbox cage — a documented trade). If that invariant IS hard, fall back to A2's bounded `proxy-agent`. **Confirm this one.** |
+| B2 | **Defer** | Write a design doc first (worktree + `session_id` lifecycle vs reset-to-base idempotency). Not in the first implementation wave. |
+| C1 | **Adopt** | Feed the reviewer the changed hunks (capped) via the `_retrieved_spans` resolve pattern. `security-review` the change. |
+| C2 | **Adopt (incremental)** | Generalize `_ai_judge_evidence` into a per-role context contract; roll out node-by-node, non-blocking. |
+| C3 | **Conditional** | Only if `proxy-agent` is retained anywhere after B1; otherwise N/A. |
+| D1 | **Adopt — design-first** | Parallelize the 3 lanes. Prerequisites: thread-safe `EpochCounter`, order-independent reducers, pacing on. Plan Mode + second opinion before coding. |
+| D2 | **Cut, scoped** | Remove the assurance-stage `reviewer_critic`; if a security-focused review is wanted, replace with a pass scoped to security-agent findings, gated on "tree changed since the quality review." Verify `assurance_gate` doesn't require a fresh `review` verdict first. |
+| D3 | **Downgrade, don't delete** | Keep Stakeholder Proxy + Eng PM as desks/narrative but move to **T3 or advisory/no-LLM** — preserves the office (E1), drops the token cost. Full delete only if UI removal is also wanted. |
+| D4 | **Adopt** | Fold the completeness checklist into the PM SOP; drop the separate critic node + its revision loop. Keep the security/abuse coverage in the PM prompt. |
+| D5 | **Adopt** | Run E2E once; share the attested result across the build/test and assurance boundaries. |
+| D6 | **Adopt** | Downgrade `docs` to **T3** and make it async / non-blocking on the release path. |
+| D7 | **Adopt — design-first** | Fan out the quality + assurance author chains. Ships with D1's `EpochCounter` fix + pacing. |
+| E1 | **Adopt** | Dynamic per-room staffing off the live node set (roster follows D's cuts automatically). |
+| E2 | **Adopt** | Give `scope_judge`, `ux_design`, `domain_specialist` desks (seat only when they run). |
+| E3 | **Adopt** | One unique desk+sprite **per live IC** + per-lane Tech-Lead; floor scales with the run. |
+| E4 | **Seat the Writer** | Promote `docs` to a seated agent so the Technical Writer desk is live (rather than dropping it). |
+| E5 | **Remove all cosmetic** | Drop gate guard, pool runners, **and the CTO**. Replace the CTO's checkpoint role with a **non-character checkpoint modal/prompt** (design before E5 lands). |
+| E6 | **Adopt** | Unique appearance per agent via procedural tinting/variation (sprite sheet lacks enough distinct frames for a dynamic IC count). |
 
 ## 4. Sequencing
 

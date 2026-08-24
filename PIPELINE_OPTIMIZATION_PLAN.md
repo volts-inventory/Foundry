@@ -1,10 +1,12 @@
 # Pipeline Token & Latency Optimization Plan
 
 Status: **decided, not yet implemented.** A selected approach is recorded for
-every item in §3 "Decisions"; one item (**B1**, the coding adapter) needs an
-explicit product confirmation. Each item lists its own verification and blast
-radius; the high-blast-radius items (D1, D7, B2) are marked for Plan Mode + a
-second-opinion pass before any code lands.
+every item in §3 "Decisions." The mediating proxy is being **removed entirely**
+(B1); one open point (**B3**) needs confirmation — whether to keep a minimal
+verdict-signer+meter so the review/judge gates stay un-forgeable, or drop it too
+and let those gates become advisory. Each item lists its own verification and
+blast radius; the high-blast-radius items (proxy removal, D1, D7, B2) are marked
+for Plan Mode + a second-opinion pass before any code lands.
 
 ## 1. Problem
 
@@ -77,6 +79,32 @@ Context: the `claude-code` adapter is already a long-lived per-task process that
 runs its own internal agentic turns with native caching — the efficient shape.
 The `proxy-agent` adapter re-implements the loop externally (the A2 hog). See §5
 for why a persistent session **per reasoning agent** is explicitly rejected.
+
+**Decision revision (supersedes B1's "coding only"):** remove the mediating
+`ModelProviderProxy` egress **entirely** — every agent (reasoning *and* coding)
+calls Claude Code directly with its own sandbox auth. The proxy adds no tokens
+(it is a stateless pass-through), so this is a **token-neutral** simplification;
+the payoff is operational — fewer moving parts, no single middleman, each agent
+talks to Claude directly. It also deletes the `proxy-agent` adapter and its
+quadratic transcript outright, so **A2 and C3 become moot** (there is no external
+ReAct loop left to bound).
+
+The catch — the proxy owns four responsibilities that do **not** vanish with it;
+each must be re-homed or explicitly dropped:
+
+1. **Verdict attestation** (the `ZoneBSigner` stamp on `proxy.judge`) — the thing
+   that makes the reviewer / AI-judge `approve` **un-forgeable by the agent**
+   (LEARNINGS L5). Drop it → the review/judge gates become **advisory**: an
+   agent's self-reported verdict is trusted. This is a security-posture change.
+2. **Lineage observation + pinned-ID drift** detection.
+3. **Per-call usage metering** — feeds the budget ledger and the UI cost meter.
+4. **Retry / rate-limit / backoff** (429 + Max-window waits).
+
+Recommended realization of "get rid of the proxy": **collapse the egress, keep a
+minimal signer+meter seam** (a ~small component, not a middleman) so the gates
+stay trustworthy and the UI still shows cost; let the `claude` CLI own retry and
+auth. Fully deleting the signer too is possible but makes the trust gates
+advisory — that specific point is flagged for confirmation (decision **B3**).
 
 | # | Change | Where | Impact | Blast |
 |---|--------|-------|--------|-------|
@@ -192,14 +220,15 @@ flagged below; everything else is decided.
 | Item | Decision | Selected approach / parameters |
 |------|----------|--------------------------------|
 | A1 | **Adopt** | Default the coding adapter to **T2 (Sonnet)**; escalate to **T1 (Opus)** only on the final fix attempt. Drop `purpose="ideation"` on the coding path (no adaptive thinking). |
-| A2 | **Adopt via B1** | Primary fix is B1 (`claude-code` moots the quadratic). Where `proxy-agent` is still used: bounded sliding window + incremental cache breakpoints + `turn_budget` 8→**5**. |
+| A2 | **Moot under B1** | B1 deletes `proxy-agent` entirely, so there is no external transcript to bound. `claude-code` manages its own context. |
 | A3 | **Adopt** | Per-purpose `max_tokens`: gate/judgment/structured-verdict **2k**, decomposition/structured **4k**, free-form ideation **8k** (down from a flat 16k). |
 | A4 | **Adopt** | CLI `max_fix_attempts` default **5→3** (match the graph); wire `cost_cap_microusd` as an early stop. |
-| B1 | **Adopt — NEEDS CONFIRM** | Default coding substrate = **`claude-code`**. Decided under the assumption that "every model call rides the proxy" is **not** a hard invariant for the *coding* agent (gates still decide correctness; credential rides the sandbox cage — a documented trade). If that invariant IS hard, fall back to A2's bounded `proxy-agent`. **Confirm this one.** |
+| B1 | **Adopt — proxy removed** | **Remove the mediating proxy egress entirely** — all agents (reasoning + coding) call Claude Code directly. Token-neutral simplification; deletes the `proxy-agent` adapter (⇒ A2/C3 moot). |
 | B2 | **Defer** | Write a design doc first (worktree + `session_id` lifecycle vs reset-to-base idempotency). Not in the first implementation wave. |
+| B3 | **NEEDS CONFIRM** | Verdict attestation + metering (the proxy's non-token jobs). **Recommended:** keep a minimal signer+meter seam so review/judge gates stay un-forgeable and cost is still metered; the CLI owns retry/auth. **Alternative (full nuke):** drop the signer too → review/judge gates become **advisory** (agent verdicts trusted directly). Confirm which. |
 | C1 | **Adopt** | Feed the reviewer the changed hunks (capped) via the `_retrieved_spans` resolve pattern. `security-review` the change. |
 | C2 | **Adopt (incremental)** | Generalize `_ai_judge_evidence` into a per-role context contract; roll out node-by-node, non-blocking. |
-| C3 | **Conditional** | Only if `proxy-agent` is retained anywhere after B1; otherwise N/A. |
+| C3 | **Moot under B1** | `proxy-agent` is removed, so there is no observation transcript to prune. |
 | D1 | **Adopt — design-first** | Parallelize the 3 lanes. Prerequisites: thread-safe `EpochCounter`, order-independent reducers, pacing on. Plan Mode + second opinion before coding. |
 | D2 | **Cut, scoped** | Remove the assurance-stage `reviewer_critic`; if a security-focused review is wanted, replace with a pass scoped to security-agent findings, gated on "tree changed since the quality review." Verify `assurance_gate` doesn't require a fresh `review` verdict first. |
 | D3 | **Downgrade, don't delete** | Keep Stakeholder Proxy + Eng PM as desks/narrative but move to **T3 or advisory/no-LLM** — preserves the office (E1), drops the token cost. Full delete only if UI removal is also wanted. |

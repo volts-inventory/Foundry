@@ -106,6 +106,13 @@ stay trustworthy and the UI still shows cost; let the `claude` CLI own retry and
 auth. Fully deleting the signer too is possible but makes the trust gates
 advisory — that specific point is flagged for confirmation (decision **B3**).
 
+**This does NOT touch the shared pool.** The proxy is the *agent→model* egress;
+the shared workspace where agents publish/read each other's work is a separate
+thing — the LangGraph shared state channels (`artifacts`, `gates`, `tasks`, …)
+plus the content-addressed artifact store (CAS). That is the MetaGPT
+message-pool + subscription equivalent and it is **unchanged** by proxy removal.
+proxy = agent→model (removed); shared pool = agent→agent (kept).
+
 | # | Change | Where | Impact | Blast |
 |---|--------|-------|--------|-------|
 | B1 | Default the coding substrate to `claude-code` (per-task process, native caching) over `proxy-agent`. Captures ~all of "long-lived CLI" for coding with no protocol work. Keep `proxy-agent` only where the mediating-proxy credential locus is a hard requirement. | `cli.py` adapter selection | High | Medium (trust: `claude-code` moves the credential into the sandbox cage — already a documented trade) |

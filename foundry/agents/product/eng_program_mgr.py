@@ -29,7 +29,10 @@ if TYPE_CHECKING:
     from foundry.state.factory_state import FactoryState
 
 _NODE_ID = "eng_program_mgr"
-_TIER = "T2"
+# Haiku (T3): the SprintPlan is advisory/build-dead — the budget ledger is seeded at
+# triage and nothing reads the proposed cap; it only feeds the UI + checkpoint
+# display, so a cheap tier is right for the narrative.
+_TIER = "T3"
 
 # Per-route default caps (micro-USD) the PLAN refines from the Triage seed
 # (governance §7). A greenfield build carries the widest cap; a bugfix the

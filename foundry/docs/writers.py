@@ -125,7 +125,7 @@ def _strs(value: Any) -> tuple[str, ...]:
 class TechnicalWriter:
     """Authors the four release docs via the proxy; best-effort, never fatal."""
 
-    def __init__(self, rt: AgentRuntime, *, run_id: str, tier: str = "T2") -> None:
+    def __init__(self, rt: AgentRuntime, *, run_id: str, tier: str = "T3") -> None:
         self._rt = rt
         self._run_id = run_id
         self._tier = tier

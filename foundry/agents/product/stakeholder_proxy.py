@@ -21,7 +21,10 @@ if TYPE_CHECKING:
     from foundry.state.factory_state import FactoryState
 
 _NODE_ID = "stakeholder_proxy"
-_TIER = "T2"
+# Haiku (T3): the IntentBrief is advisory/build-dead — no gate or downstream agent
+# reads it (the PM works from request/spec); it only feeds the UI + checkpoint
+# display, so a cheap tier is right for the narrative.
+_TIER = "T3"
 
 SOP = (
     "You are the Stakeholder / Client Proxy. Stand in for the customer; hold the "

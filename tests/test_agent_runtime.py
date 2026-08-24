@@ -76,6 +76,39 @@ def test_seq_emission_epoch_is_monotonic_per_key() -> None:
     assert epochs == [1, 2, 3]  # bump on every (re-)emission of the key
 
 
+def test_epoch_counter_is_thread_safe_under_concurrent_bump() -> None:
+    """D1/D7 prerequisite: LangGraph runs parallel branches on a thread pool that
+    share one EpochCounter. Concurrent bumps of the SAME key must mint distinct,
+    contiguous epochs (no collision, no skip) — else resume-monotonic ordering
+    corrupts. Without the lock this races; with it, the returned set is exactly
+    {1..N}."""
+    import threading
+
+    from foundry.state.seq import EpochCounter
+
+    counter = EpochCounter()
+    n_threads, per_thread = 8, 200
+    total = n_threads * per_thread
+    results: list[int] = []
+    results_lock = threading.Lock()
+    start = threading.Barrier(n_threads)
+
+    def worker() -> None:
+        start.wait()  # maximize contention
+        local = [counter.bump("run-A", "shared-key") for _ in range(per_thread)]
+        with results_lock:
+            results.extend(local)
+
+    threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(results) == total
+    assert sorted(results) == list(range(1, total + 1))  # distinct + contiguous, no races
+
+
 def test_distinct_keys_have_independent_epoch_streams() -> None:
     rt = make_runtime()
     config = config_for("run-A")

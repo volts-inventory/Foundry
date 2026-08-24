@@ -21,6 +21,7 @@ records are distinct identities in the WORM/predicate stores.
 
 from __future__ import annotations
 
+import threading
 from typing import NamedTuple
 
 
@@ -42,9 +43,20 @@ class EpochCounter:
 
     def __init__(self) -> None:
         self._epochs: dict[tuple[str, str], int] = {}
+        # LangGraph runs parallel branches of a superstep on a thread pool, and a
+        # single AgentRuntime shares ONE EpochCounter across all nodes. The bump is a
+        # read-modify-write on a shared dict, so concurrent lane/author nodes (the
+        # D1/D7 fan-out) could interleave the get/set and collide or skip an
+        # emission_epoch — which would corrupt resume-monotonic ordering. Guard it.
+        # Behavior is identical single-threaded; the lock only serializes the mutation.
+        self._lock = threading.Lock()
 
     def bump(self, run_id: str, key: str) -> int:
-        """Increment and return the new epoch for a (re-)execution of `key`."""
-        nxt = self._epochs.get((run_id, key), 0) + 1
-        self._epochs[(run_id, key)] = nxt
-        return nxt
+        """Increment and return the new epoch for a (re-)execution of `key`.
+
+        Thread-safe: concurrent fan-out branches mint distinct, non-colliding
+        epochs (the lock serializes the read-modify-write on the shared dict)."""
+        with self._lock:
+            nxt = self._epochs.get((run_id, key), 0) + 1
+            self._epochs[(run_id, key)] = nxt
+            return nxt

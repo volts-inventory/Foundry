@@ -8,11 +8,17 @@ criterion coverage end-to-end, not just green scenarios.
 
 Trust model (LEARNINGS L5 / AR4): the SDET NEVER writes a ``GateResult`` — the
 E2E verdict is computed + signed by the trusted runner. This node authors the
-:class:`~foundry.schemas.quality.E2EReport` (the determinism notes +
-scenario→criterion traceability + quarantine the runner consumes) and emits it
-as a content-addressed :class:`Artifact` handle on the ``artifacts`` channel
-(DS9 / L4). Model egress is through ``rt.proxy.complete`` (L6); the node owns
-the causal-order ``Seq`` and the determinism guarantees.
+:class:`~foundry.schemas.quality.E2EReport` (determinism notes + scenario→criterion
+traceability + quarantine) and emits it as a content-addressed :class:`Artifact`
+handle on the ``artifacts`` channel (DS9 / L4). Model egress is through
+``rt.proxy.complete`` (L6); the node owns the causal-order ``Seq``.
+
+Tier note (D5): the E2E GATE (``gates/e2e.py``) re-runs pytest on the integrated
+tree independently and reads NOTHING from this report — so the ``E2EReport`` is
+ADVISORY / build-dead (only the release docs render it). Its model quality gates
+nothing, so it runs Haiku (T3); the gate remains the sole, trusted E2E executor.
+There is no duplicate E2E *execution* to remove (the SDET only authors; it never
+runs the suite).
 """
 
 from __future__ import annotations
@@ -31,7 +37,7 @@ if TYPE_CHECKING:
     from foundry.state.factory_state import FactoryState
 
 _NODE_ID = "sdet"
-_TIER = "T2"
+_TIER = "T3"  # E2EReport is advisory/build-dead (the E2E gate re-runs pytest itself)
 
 # The determinism guarantees the SDET pins so e2e runs are reproducible and the
 # flake policy is meaningful (governance.md §1a). Recorded on the report so the

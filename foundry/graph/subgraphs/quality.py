@@ -109,8 +109,17 @@ def build_quality_subgraph(
     g.add_node(_REVIEWER_CRITIC, _reviewer)
     g.add_node(_QA_ENGINEER, _qa)
     g.add_node(_SDET, _sdet)
+    # D7 fan-out: the three quality authors are INDEPENDENT — each reads the
+    # integrated diff + criteria and writes a disjoint artifact (reviewer → the
+    # `review` verdict on `gates`; qa/sdet → `artifacts`), and none consumes
+    # another's output. So run them in ONE superstep instead of a serial chain;
+    # the downstream build/test gate boundary is the barrier that waits for all.
+    # Concurrency-safe: EpochCounter.bump is locked and the CAS writes are
+    # GIL-atomic on disjoint content-addressed keys (see LATENCY_PARALLELISM_DESIGN).
     g.add_edge(START, _REVIEWER_CRITIC)
-    g.add_edge(_REVIEWER_CRITIC, _QA_ENGINEER)
-    g.add_edge(_QA_ENGINEER, _SDET)
+    g.add_edge(START, _QA_ENGINEER)
+    g.add_edge(START, _SDET)
+    g.add_edge(_REVIEWER_CRITIC, END)
+    g.add_edge(_QA_ENGINEER, END)
     g.add_edge(_SDET, END)
     return g

@@ -265,11 +265,10 @@ def test_quality_subgraph_admits_reviewer_verdict_to_gates() -> None:
         token.var.reset(token)
 
 
-def test_quality_subgraph_runs_nodes_in_sop_order() -> None:
-    """reviewer_critic -> qa_engineer -> sdet, one model call each, in SOP order.
-
-    The reviewer rides the verdict channel; QA + SDET ride free-text completions —
-    order is asserted via the distinct "You are the ..." opening of each SOP."""
+def test_quality_subgraph_runs_all_three_authors() -> None:
+    """reviewer_critic + qa_engineer + sdet each run exactly once. D7: they now
+    fan out into ONE superstep (independent authors), so ORDER is no longer
+    guaranteed — assert all three ran, order-independent, via their SOP markers."""
     transport = _transport()
     _records, token = _installed()
     try:
@@ -279,14 +278,11 @@ def test_quality_subgraph_runs_nodes_in_sop_order() -> None:
         token.var.reset(token)
 
     assert len(transport.requests) == 3  # exactly one model call per node
-    sops = ["".join(block["text"] for block in req["system"]) for req in transport.requests]
-    markers = [
-        "You are the Reviewer/Critic",
-        "You are the QA Engineer",
-        "You are the SDET",
-    ]
-    for sop, marker in zip(sops, markers, strict=True):
-        assert marker in sop
+    sops = "\n".join(
+        "".join(block["text"] for block in req["system"]) for req in transport.requests
+    )
+    for marker in ("You are the Reviewer/Critic", "You are the QA Engineer", "You are the SDET"):
+        assert marker in sops  # all three ran (D7: concurrent, order-independent)
 
 
 def test_quality_subgraph_plan_is_criterion_traceable() -> None:

@@ -37,6 +37,7 @@ from foundry.agents.quality._common import MissingVerdictNonceError, server_issu
 from foundry.agents.quality.qa_engineer import (
     ACCEPTANCE_CRITERION_KIND,
     MissingCriteriaResolverError,
+    author_up_to_date,
 )
 from foundry.canonical import content_digest
 from foundry.gates.attestation import DevGateWriteVerifier, ZoneBSigner
@@ -139,6 +140,42 @@ def resolver(
         return body_by_uri[handle.uri]
 
     return _resolve
+
+
+def _handle(kind: str, epoch: int, local: int = 0) -> Artifact:
+    """A bare artifact handle of ``kind`` at a chosen Seq epoch (the guard reads
+    only .kind/.seq, never the body)."""
+    return Artifact(
+        kind=kind,
+        uri=f"cas://sha256/{kind}-{epoch}-{local}",
+        produced_by="test",
+        seq=Seq(run_id="r", emission_epoch=epoch, superstep_index=0, node_id="n", local=local),
+    )
+
+
+def test_author_up_to_date_is_seq_based() -> None:
+    crits = criterion_handles()  # emission_epoch 0
+    plan = _handle("test_plan", epoch=1)  # authored AFTER the criteria
+    # a plan newer than every criterion => the author already ran against them.
+    assert author_up_to_date({"artifacts": [*crits, plan]}, "test_plan") is True
+    # a criterion newer than the plan (a spec_fix added one) => must re-author.
+    newer_crit = _handle(ACCEPTANCE_CRITERION_KIND, epoch=2, local=9)
+    assert author_up_to_date({"artifacts": [*crits, plan, newer_crit]}, "test_plan") is False
+    # no prior plan / no criteria yet => author.
+    assert author_up_to_date({"artifacts": [*crits]}, "test_plan") is False
+    assert author_up_to_date({"artifacts": [plan]}, "test_plan") is False
+
+
+def test_qa_and_sdet_skip_the_model_call_when_their_plan_is_up_to_date() -> None:
+    """Fix-loop re-entry with unchanged criteria: the existing plan/oracles (QA) and
+    e2e plan (SDET) stand, so each returns {} and bills no model call."""
+    crits = criterion_handles()
+    for make, kind in ((make_qa_engineer_node, "test_plan"), (make_sdet_node, "e2e_report")):
+        state = {"artifacts": [*crits, _handle(kind, epoch=1)]}
+        transport = MockTransport(completions=["{}"])
+        node = make(make_runtime(transport), resolve=resolver())
+        assert node(state, config_for("r")) == {}
+        assert transport.requests == []  # no model call billed
 
 
 @pytest.fixture

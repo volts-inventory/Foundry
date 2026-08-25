@@ -101,6 +101,29 @@ def read_criteria(
                 by_id[body.id] = body
     return tuple(sorted(by_id.values(), key=lambda c: c.id))
 
+
+def author_up_to_date(state: FactoryState, output_kind: str) -> bool:
+    """True when this criteria-derived author already ran against the current
+    criteria set, so a fix-loop re-entry can skip its (T2/T3) model call.
+
+    The test plan / oracles / e2e plan derive from the acceptance CRITERIA, not the
+    code — so a build/test fix (code changed, criteria unchanged) re-authors an
+    equivalent artifact for nothing. Skip when an artifact of ``output_kind`` already
+    exists AND no ``acceptance_criterion`` is newer than the newest such artifact (by
+    Seq): a spec_fix that adds or supersedes a criterion bumps the newest criterion
+    Seq past the artifact, so the author re-runs then. Seq is a NamedTuple (tuple
+    ordering). The Test/E2E gate verdict comes from real execution, not these
+    placeholder reports, so skipping re-authoring changes no verdict."""
+    arts = state.get("artifacts") or ()
+    out_seqs = [a.seq for a in arts if getattr(a, "kind", None) == output_kind]
+    if not out_seqs:
+        return False
+    crit_seqs = [a.seq for a in arts if getattr(a, "kind", None) == "acceptance_criterion"]
+    if not crit_seqs:
+        return False
+    return max(crit_seqs) <= max(out_seqs)
+
+
 _SOP = (
     "You are the QA Engineer (Layer 4). Author the oracle — the most "
     "consequential artifact in the loop. Derive tests from the acceptance "
@@ -213,6 +236,8 @@ def make_qa_engineer_node(
     """
 
     def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        if author_up_to_date(state, "test_plan"):
+            return {}  # fix-loop re-entry, criteria unchanged: the existing plan/oracles stand
         criteria = read_criteria(state, resolve)
         plan_seq = rt.seq(config, _NODE_ID, "artifact:test_plan")
         report_seq = rt.seq(config, _NODE_ID, "artifact:test_report")

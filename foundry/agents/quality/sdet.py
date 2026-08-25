@@ -27,7 +27,11 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from foundry.agents.quality._common import emit_artifact
-from foundry.agents.quality.qa_engineer import ArtifactResolver, read_criteria
+from foundry.agents.quality.qa_engineer import (
+    ArtifactResolver,
+    author_up_to_date,
+    read_criteria,
+)
 from foundry.schemas.quality import E2EReport
 
 if TYPE_CHECKING:
@@ -120,6 +124,8 @@ def make_sdet_node(
     """
 
     def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        if author_up_to_date(state, "e2e_report"):
+            return {}  # fix-loop re-entry, criteria unchanged: the existing e2e plan stands
         seq = rt.seq(config, _NODE_ID, "artifact:e2e_report")
         known = frozenset(c.id for c in read_criteria(state, resolve))
 

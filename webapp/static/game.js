@@ -423,6 +423,7 @@ class FloorScene extends Phaser.Scene {
     this.buildGate();
     this.buildChest();
     this.buildAgents();
+    this.buildOverviewBoard();
     const F = FLOORS.get(this.proj.floor);
     if (F) F.scene = this;
     if (this.proj.slots) this.setPool(this.proj.slots);  // rehydrate / initial pool
@@ -1110,6 +1111,51 @@ class FloorScene extends Phaser.Scene {
     openFilesFor({id:F.id, floor:F.floor, release:F.release, request:F.request, status:"done"});
   }
 
+  // The OFFICE room holds no agent, so it shows the live RUN OVERVIEW instead of sitting
+  // empty: who's working, which rooms are active, the org areas, and the gate board. Built
+  // once (frame + labels), refreshed in place by updateOverviewBoard on every telemetry
+  // change (restaff / setGate / setOrg / workerTelemetry).
+  buildOverviewBoard(){
+    const E = ROOMS.office; if (!E) return;
+    const pad = 12, x0 = E.x + pad, w = E.w - 2*pad, top = E.y + 28, h = 116, depth = E.y + 4;
+    const c = this.add.container(0, 0).setDepth(depth);
+    c.add(this.add.rectangle(x0, top, w, h, 0x10151f, 0.86).setOrigin(0,0).setStrokeStyle(1, PC.sceneInk));
+    c.add(this.add.rectangle(x0, top, w, 15, 0x2a3550, 0.96).setOrigin(0,0));
+    c.add(this.bm(x0+6, top+3, "RUN STATUS", 10, 0xffd95e, 0, 0).setDepth(depth+1));
+    const body = this.bm(x0+8, top+22, "", 9, 0xbcd0ff, 0, 0).setDepth(depth+1);
+    c.add(body);
+    this.ovb = {c, x0, top, w, h, body, depth: depth+1, gatePips: {}, dotY: top + 22 + 4*12 + 2};
+    this.updateOverviewBoard();
+  }
+  // Refresh the overview board in place (cheap; safe to call on every telemetry event).
+  updateOverviewBoard(){
+    const o = this.ovb; if (!o) return;
+    const workers = this.liveWorkers ? this.liveWorkers.size : 0;
+    const agents = this.workingAgents ? this.workingAgents.size : 0;
+    const rooms = this.liveRooms ? this.liveRooms.size : 0;
+    const areas = (this.orgAreas || []).map(a => AREA_TAG[a.area] ||
+      String((a && a.area) || "").slice(0,2).toUpperCase()).filter(Boolean);
+    const present = GATE_ORDER.filter(n => this.gates[n]);
+    const green = present.filter(n => this.gates[n].status === "pass").length;
+    o.body.setText([
+      `WORKING  ${agents} agent${agents===1?"":"s"} · ${workers} coder${workers===1?"":"s"}`,
+      `ROOMS    ${rooms} active`,
+      `AREAS    ${areas.length ? areas.join(" ") : "—"}`,
+      `GATES    ${present.length ? green + "/" + present.length + " green" : "—"}`,
+    ].join("\n"));
+    // one colour-coded square per present gate, in GATE_ORDER, under the GATES line
+    let i = 0;
+    for (const n of present){
+      const pass = this.gates[n].status === "pass";
+      let pip = o.gatePips[n];
+      if (!pip){ pip = this.add.rectangle(0, 0, 9, 9, 0x000000).setOrigin(0,0)
+        .setStrokeStyle(1, PC.sceneInk).setDepth(o.depth); o.c.add(pip); o.gatePips[n] = pip; }
+      pip.setPosition(o.x0 + 8 + i*13, o.dotY);
+      pip.setFillStyle(pass ? 0x2fe07a : 0xff5d6c);
+      i++;
+    }
+  }
+
   // The floor shows exactly the crew that is ALIVE in this run: no named agent gets a
   // desk until its node first reports telemetry (ensureSeated). So buildAgents seats
   // nobody up front — it just records the per-room catalog + the live seating order.
@@ -1501,6 +1547,7 @@ class FloorScene extends Phaser.Scene {
     seat(this.techLeadGroup, leadUp);      // each lane's LEAD works while its lead node runs
     seat(this.poolGroup, engUp);           // each lane's ICs work while its engineer node runs
     this.paintGlow();                      // and re-light the rooms for the new live set
+    this.updateOverviewBoard();            // reflect the new live set on the office board
   }
   // Every person on the floor (named leads + the engineering lanes), one iterator.
   *everyone(){
@@ -1642,6 +1689,7 @@ class FloorScene extends Phaser.Scene {
   setGate(name, info){
     this.gates[name] = info;
     this.drawGatePips();
+    this.updateOverviewBoard();
     if (info.status === "fail") this.flashGate();
   }
 
@@ -1718,6 +1766,7 @@ class FloorScene extends Phaser.Scene {
     this.orgAreas = (areas||[]).filter(a=>a && a.area);
     this.orgDomains = domains||[];
     this.layoutEngineering();
+    this.updateOverviewBoard();
   }
 
   // Per-area engineer counts: the IC pool distributed across the present areas ∝
@@ -1764,9 +1813,10 @@ class FloorScene extends Phaser.Scene {
     if (!this.liveWorkerMode) this._enterLiveWorkerMode();
     const area = String(ev.area || ""), lane = String(ev.lane || "");
     const room = ENG_AREA_ROOM[area] || (ENG_ROOMS.includes(lane) ? lane : ENG_AREA_ROOM[lane]) || "backend";
-    if (phase === "finish"){ this._dropLiveWorker(tid); return; }
-    if (this.liveWorkers.has(tid)) return;            // idempotent re-start
+    if (phase === "finish"){ this._dropLiveWorker(tid); this.updateOverviewBoard(); return; }
+    if (this.liveWorkers.has(tid)){ this.updateOverviewBoard(); return; }   // idempotent re-start
     this._spawnLiveWorker(room, tid, String(ev.title || ""), area || lane || room);
+    this.updateOverviewBoard();
   }
   // First real worker → drop the synthetic IC pool (keep the lane leads) so the two never
   // double up; the live workers become the lane's IC crew from here on.

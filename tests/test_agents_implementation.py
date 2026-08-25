@@ -550,6 +550,44 @@ def test_junior_builds_each_ready_task_on_its_own_branch(tmp_path: Any) -> None:
     assert len(writes["artifacts"]) == 2
 
 
+def test_junior_skips_already_built_tasks_on_a_clean_resume(tmp_path: Any) -> None:
+    """Resume-cheap: on a CLEAN continuation (no failed gate), a task that already
+    produced a feature_diff on the durable artifacts channel is NOT rebuilt — only the
+    un-built tasks run, so a resumed/paused build re-derives nothing it already did."""
+    (tmp_path / "README.md").write_text("seed\n")
+    rt = make_runtime(adapter=StubAdapter())
+    t1, t2 = a_task("t-001"), a_task("t-002")
+    node = make_junior_engineer_node(rt, source_dir=str(tmp_path))
+    prior = Artifact(kind="feature_diff", uri="cas://feature_diff/prev",
+                     produced_by="junior_engineer", task_id="t-001", seq=a_seq("junior_engineer"))
+    writes = node({"tasks": tasks_state(t1, t2), "pinned_constraints": (),
+                   "artifacts": [prior]}, config_for("resume"))
+    assert {a.task_id for a in writes["artifacts"]} == {"t-002"}  # t-001 skipped, t-002 built
+
+
+def test_junior_rebuilds_all_tasks_on_a_fix_loop(tmp_path: Any) -> None:
+    """A fix-loop re-entry (a gate FAILED) rebuilds EVERYTHING — the fix reaches the
+    gate by overwriting the diff at its base-stable uri, so a task that already has a
+    feature_diff must NOT be skipped or the unfixed code would ship."""
+    from foundry.schemas.gates import GateResult, GateStatus, VerdictClass
+    from foundry.state.seq import Seq as _Seq
+
+    (tmp_path / "README.md").write_text("seed\n")
+    rt = make_runtime(adapter=StubAdapter())
+    t1, t2 = a_task("t-001"), a_task("t-002")
+    node = make_junior_engineer_node(rt, source_dir=str(tmp_path))
+    prior = Artifact(kind="feature_diff", uri="cas://feature_diff/prev",
+                     produced_by="junior_engineer", task_id="t-001", seq=a_seq("junior_engineer"))
+    failed = GateResult(name="test", status=GateStatus.FAIL, decision_deterministic=True,
+                        execution_deterministic=True,
+                        verdict_class=VerdictClass.EXECUTION_DETERMINISTIC,
+                        findings=("FAILED something",), run_against="a" * 64,
+                        seq=_Seq("r", 1, 1, "test", 0))
+    writes = node({"tasks": tasks_state(t1, t2), "pinned_constraints": (),
+                   "artifacts": [prior], "gates": [failed]}, config_for("fix"))
+    assert {a.task_id for a in writes["artifacts"]} == {"t-001", "t-002"}  # both rebuilt
+
+
 def test_worker_cb_fires_start_and_finish_per_task(tmp_path: Any) -> None:
     """Advisory per-worker telemetry (E3): each built task emits exactly one start and
     one finish through rt.worker_cb, carrying its task id — so the floor can seat one

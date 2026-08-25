@@ -383,6 +383,38 @@ def _prior_failures(state: FactoryState) -> tuple[str, ...]:
     return tuple(out)
 
 
+def _in_fix_loop(state: FactoryState) -> bool:
+    """True when the coding node is re-entered to FIX a failure (a gate FAILED/ERRORed,
+    or the convergence counter was bumped) — as opposed to a clean continuation (a
+    resumed/paused build, or a restart re-entering the node).
+
+    The distinction is load-bearing for :func:`_built_task_ids` skipping: a fix reaches
+    the gate by OVERWRITING the diff at its base-stable uri (``base_tree_sha`` is
+    identical across a fix re-entry — source_dir is never mutated between attempts), so
+    skipping a task that already has a feature_diff during a fix would ship the UNFIXED
+    code. Only a clean continuation may skip. Broadest safe signal: ANY unresolved
+    FAIL/ERROR gate (with or without findings) OR ``fix_attempts_since_all_green > 0``."""
+    for g in state.get("gates") or ():
+        if g.status in (GateStatus.FAIL, GateStatus.ERROR):
+            return True
+    budget = state.get("budget")
+    return bool(budget is not None and getattr(budget, "fix_attempts_since_all_green", 0) > 0)
+
+
+def _built_task_ids(state: FactoryState) -> set[str]:
+    """task_ids that already have a ``feature_diff`` handle on the durable ``artifacts``
+    channel (``merge_by_uri`` accumulates them; each carries ``task_id``). On a CLEAN
+    continuation these are skipped so a resumed build re-derives nothing it already did;
+    the base is stable across a pause/resume, so the recorded diff stays valid."""
+    out: set[str] = set()
+    for a in state.get("artifacts") or ():
+        if getattr(a, "kind", None) == "feature_diff":
+            tid = getattr(a, "task_id", None)
+            if tid:
+                out.add(str(tid))
+    return out
+
+
 def _build_packet(
     task: Task,
     constraints: Sequence[PinnedConstraint],
@@ -981,6 +1013,16 @@ def make_junior_engineer_node(
         # Fix loop: on a re-entry after a failed gate, feed the SPECIFIC failure back
         # to the engineer (empty on the first pass) so it fixes that instead of re-rolling.
         prior_failures = _prior_failures(state)
+        # RESUME-CHEAP: on a CLEAN continuation (an interrupted/paused build re-entering
+        # this node, or a restart resuming from the durable checkpoint — NOT a fix loop),
+        # skip tasks that already produced a feature_diff so a resume re-derives nothing
+        # it already built. A fix-loop re-entry rebuilds EVERYTHING (see _in_fix_loop) —
+        # the fix reaches the gate by overwriting the diff at its base-stable uri, so
+        # skipping a 'built' task there would ship the unfixed code.
+        if not _in_fix_loop(state):
+            built = _built_task_ids(state)
+            if built:
+                tasks = [t for t in tasks if t.id not in built]
         # SYSTEM-DECIDED parallelism. The Tech-Lead's decomposition IS the decision
         # to parallelize: it splits the work into independently-buildable tasks. We
         # size the IC pool to that decomposition — one worker per ready task —

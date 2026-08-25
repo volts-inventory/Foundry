@@ -121,6 +121,15 @@ _DEFAULT_EFFORT = "high"
 
 _DEFAULT_MAX_TOKENS = 16000
 
+# A3 (plan): cap output tokens by CALL SHAPE instead of a flat 16k on every call.
+# Structured verdicts (gate/judgment) are tiny; structured ideation (decomposition,
+# acceptance criteria — schema-bound) is bounded; only free-form ideation (prose) needs
+# real headroom. Each cap is still clamped to the configured ceiling (``self._max_tokens``)
+# so a lower explicit ceiling always wins, and each is env-overridable for tuning.
+_MAX_TOKENS_VERDICT = int(os.environ.get("FOUNDRY_MAX_TOKENS_VERDICT", "2000"))
+_MAX_TOKENS_STRUCTURED = int(os.environ.get("FOUNDRY_MAX_TOKENS_STRUCTURED", "4000"))
+_MAX_TOKENS_FREEFORM = int(os.environ.get("FOUNDRY_MAX_TOKENS_FREEFORM", "8000"))
+
 Purpose = Literal["ideation", "gate", "judgment"]
 _PURPOSES = ("ideation", "gate", "judgment")
 
@@ -940,6 +949,21 @@ class ModelProviderProxy:
                 return (True, "tier-mismatch")
         return (True, "pinned-id")
 
+    def _max_tokens_for(self, purpose: Purpose, schema: dict[str, Any] | None) -> int:
+        """Per-call output-token cap by shape (A3), clamped to the configured ceiling.
+
+        gate/judgment (structured verdicts) → small; ideation WITH a schema
+        (decomposition, acceptance criteria) → bounded; free-form ideation (prose) →
+        the largest. Truncation risk is why prose keeps the most headroom; a structured
+        call that still overruns is re-rolled by ``_send_with_retry``."""
+        if purpose in ("gate", "judgment"):
+            cap = _MAX_TOKENS_VERDICT
+        elif schema is not None:
+            cap = _MAX_TOKENS_STRUCTURED
+        else:
+            cap = _MAX_TOKENS_FREEFORM
+        return min(cap, self._max_tokens)
+
     def _build_request(
         self,
         requested_model: str,
@@ -956,7 +980,7 @@ class ModelProviderProxy:
         """
         request: dict[str, Any] = {
             "model": requested_model,
-            "max_tokens": self._max_tokens,
+            "max_tokens": self._max_tokens_for(purpose, schema),
             "system": [
                 {
                     "type": "text",

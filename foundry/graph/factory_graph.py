@@ -400,24 +400,72 @@ _AI_JUDGE_SOP = (
 )
 
 
-def _ai_judge_evidence(state: FactoryState) -> str:
-    """A compact, model-readable release-evidence digest for the AI judge."""
-    lines = [f"REQUEST: {str(state.get('request') or '')[:800]}"]
+# ── C2: per-role CONTEXT CONTRACT ──────────────────────────────────────────
+# An EXPLICIT allow-list of the state slices a role may see, so each model call gets
+# exactly the context its job needs — bounded token exposure + focus — instead of ad-hoc
+# per-node digests. Adding a role to CONTEXT_CONTRACTS is the whole opt-in; the release AI
+# judge is the first adopter (it was `_ai_judge_evidence`). Rolled out node-by-node and
+# non-blocking: an unmapped role renders nothing, so nothing regresses by omission.
+#
+# Slice renderers each return a self-contained block ("" when empty); render_context joins
+# the role's allowed slices in contract order. NONE of them emit artifact BODIES — only the
+# request head, recent gate verdicts, and an inventory count — so the contract can never
+# leak more than it names.
+
+
+def _slice_request(state: FactoryState) -> str:
+    return f"REQUEST: {str(state.get('request') or '')[:800]}"
+
+
+def _slice_gates(state: FactoryState) -> str:
     gates = list(state.get("gates") or ())
-    if gates:
-        lines.append("GATES:")
-        for g in gates[-24:]:
-            name = getattr(g, "name", None) or (g.get("name") if isinstance(g, dict) else "?")
-            status = getattr(g, "status", None) or (g.get("status") if isinstance(g, dict) else "?")
-            lines.append(f"- {name}: {status}")
-    arts = list(state.get("artifacts") or ())
-    if arts:
-        kinds: dict[str, int] = {}
-        for a in arts:
-            kind = str(getattr(a, "kind", None) or (a.get("kind") if isinstance(a, dict) else "?"))
-            kinds[kind] = kinds.get(kind, 0) + 1
-        lines.append("ARTIFACTS: " + ", ".join(f"{k}×{n}" for k, n in sorted(kinds.items())))
+    if not gates:
+        return ""
+    lines = ["GATES:"]
+    for g in gates[-24:]:
+        name = getattr(g, "name", None) or (g.get("name") if isinstance(g, dict) else "?")
+        status = getattr(g, "status", None) or (g.get("status") if isinstance(g, dict) else "?")
+        lines.append(f"- {name}: {status}")
     return "\n".join(lines)
+
+
+def _slice_artifact_kinds(state: FactoryState) -> str:
+    arts = list(state.get("artifacts") or ())
+    if not arts:
+        return ""
+    kinds: dict[str, int] = {}
+    for a in arts:
+        kind = str(getattr(a, "kind", None) or (a.get("kind") if isinstance(a, dict) else "?"))
+        kinds[kind] = kinds.get(kind, 0) + 1
+    return "ARTIFACTS: " + ", ".join(f"{k}×{n}" for k, n in sorted(kinds.items()))
+
+
+# slice key -> renderer. The registry of everything a contract can grant.
+_CONTEXT_SLICES: dict[str, Any] = {
+    "request": _slice_request,
+    "gates": _slice_gates,
+    "artifact_kinds": _slice_artifact_kinds,
+}
+
+# role -> ordered slice keys it MAY see. This IS the contract; extend per node.
+CONTEXT_CONTRACTS: dict[str, tuple[str, ...]] = {
+    "release_judge": ("request", "gates", "artifact_kinds"),
+}
+
+
+def render_context(state: FactoryState, role: str) -> str:
+    """The bounded, model-readable context ``role`` is allowed to see (C2 contract).
+
+    Renders only the slices its contract names, in order, skipping empty ones. An
+    unmapped role gets ``""`` — a node opts in by adding itself to CONTEXT_CONTRACTS."""
+    parts = [_CONTEXT_SLICES[key](state) for key in CONTEXT_CONTRACTS.get(role, ())]
+    return "\n".join(p for p in parts if p)
+
+
+def _ai_judge_evidence(state: FactoryState) -> str:
+    """The release AI judge's evidence digest — now the ``release_judge`` context
+    contract (C2). Byte-identical to the former inline digest."""
+    return render_context(state, "release_judge")
 
 
 def make_pack_ai_judge(rt: AgentRuntime) -> Any:
@@ -1165,22 +1213,23 @@ def build_factory_graph(
         authored doc artifacts on the ``artifacts`` channel."""
         return _docs_node(state, config)
 
-    def _route_after_factory(state: FactoryState, config: RunnableConfig) -> str:
-        """Run the docs node only on the PASS path (governance: doc authoring is a
-        post-release deliverable). A halted / failed run skips authoring (no writer
-        spend, no doc artifacts) and goes straight to emit, which itself fail-closes
-        on the terminal-gate guard."""
-        return _DOCS if terminal_gates_pass(state) else _EMIT
+    def _route_after_emit(state: FactoryState, config: RunnableConfig) -> str:
+        """Author docs only on the PASS path, and only AFTER emit (D6: docs is a
+        post-release deliverable that must not block the release). A halted / failed
+        run skips authoring (no writer spend, no doc artifacts) and ends."""
+        return _DOCS if terminal_gates_pass(state) else END
 
     g: StateGraph[FactoryState] = StateGraph(FactoryState)
     g.add_node(_FACTORY, supervisor)
-    g.add_node(_DOCS, docs)
     g.add_node(_EMIT, _emit_node)
+    g.add_node(_DOCS, docs)
     g.add_edge(START, _FACTORY)
-    # PASS -> docs -> emit; non-PASS -> emit (skip authoring). Both paths reach the
-    # emit node, whose own guard decides whether a PR/release is emitted.
-    g.add_conditional_edges(_FACTORY, _route_after_factory, {_DOCS: _DOCS, _EMIT: _EMIT})
-    g.add_edge(_DOCS, _EMIT)
-    g.add_edge(_EMIT, END)
+    # The release emits FIRST and never waits on doc authoring (D6). emit's own guard
+    # decides whether a PR/release is opened; then, on a PASS only, the docs node authors
+    # the runbook/release docs off the release path (its artifacts still land in final
+    # state). A halted/failed run ends straight after emit — no writer spend.
+    g.add_edge(_FACTORY, _EMIT)
+    g.add_conditional_edges(_EMIT, _route_after_emit, {_DOCS: _DOCS, END: END})
+    g.add_edge(_DOCS, END)
 
     return g.compile(checkpointer=checkpointer)

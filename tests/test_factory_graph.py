@@ -34,7 +34,12 @@ from foundry.durability.artifact_store import ArtifactStore
 from foundry.durability.checkpointer import FoundryCheckpointer
 from foundry.execution.adapters.stub import StubAdapter
 from foundry.gates import DevGateWriteVerifier, TwoZoneGateRunner, ZoneBSigner
-from foundry.graph.factory_graph import build_factory_graph, terminal_gates_pass
+from foundry.graph.factory_graph import (
+    CONTEXT_CONTRACTS,
+    build_factory_graph,
+    render_context,
+    terminal_gates_pass,
+)
 from foundry.proxy import ModelProviderProxy
 from foundry.proxy.test_doubles import MockTransport
 from foundry.schemas.architecture import OwnershipMap, SystemDesign
@@ -389,6 +394,53 @@ def _runtime_with_docs() -> AgentRuntime:
     tx = MockTransport.scripted(dict(_DOC_SCRIPTS), default_verdict="approve")
     proxy = ModelProviderProxy(tx, signer=ZoneBSigner(KEY, KEY_ID))
     return AgentRuntime(proxy=proxy, adapter=StubAdapter(), cas=ArtifactStore())
+
+
+def test_context_contract_bounds_what_the_release_judge_sees() -> None:
+    """C2: render_context returns ONLY the slices a role's contract names — request head,
+    recent gate verdicts, artifact-kind inventory — and nothing for an unmapped role."""
+    state: Any = {
+        "request": "x" * 1000,
+        "gates": [{"name": "spec", "status": "pass"}],
+        "artifacts": [{"kind": "prd"}, {"kind": "prd"}],
+    }
+    ctx = render_context(state, "release_judge")
+    mult = "\u00d7"   # the inventory count separator (escaped to avoid an ambiguous glyph)
+    assert "REQUEST:" in ctx and "GATES:" in ctx and "- spec: pass" in ctx
+    assert f"prd{mult}2" in ctx
+    # request is capped at 800 chars (bounded exposure)
+    assert len(ctx.split("REQUEST: ", 1)[1].split("\n", 1)[0]) == 800
+    assert render_context(state, "nonesuch") == ""      # unmapped role sees nothing
+    assert "release_judge" in CONTEXT_CONTRACTS
+
+
+def test_docs_runs_after_emit_off_the_release_path(tmp_path: Any) -> None:
+    """D6: the release emits FIRST — factory→emit — and docs authoring hangs off emit
+    (post-release), never on the path to the release action."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "README.md").write_text("seed\n")
+    records = GlobalRecords()
+    rt = _runtime_with_docs()
+    ckpt = FoundryCheckpointer()
+    token = set_gate_write_verifier(DevGateWriteVerifier(KEY, KEY_ID, records))
+    try:
+        app = build_factory_graph(
+            rt,
+            runner=_runner(records),
+            resolve=_synthetic_resolve,
+            resolve_blob=_resolve_blob_factory(_PASSING_DIFF),
+            source_dir=str(src),
+            checkpointer=ckpt.saver,
+            doc_sink=[],
+        )
+        edges = {(e.source, e.target) for e in app.get_graph().edges}
+    finally:
+        reset_gate_write_verifier(token)
+        ckpt.close()
+    assert ("factory", "emit") in edges       # release path goes straight to emit
+    assert ("factory", "docs") not in edges   # docs is NOT on the release path
+    assert ("emit", "docs") in edges          # docs authors AFTER the release emits
 
 
 def test_doc_node_runs_in_graph_and_emits_doc_artifacts(tmp_path: Any) -> None:

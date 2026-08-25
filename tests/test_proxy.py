@@ -246,6 +246,20 @@ def test_drift_alert_recorded_when_served_model_differs():
     assert result.served_family == frozenset({"anthropic-claude"})
 
 
+def test_max_tokens_capped_by_call_shape() -> None:
+    """A3: output cap tracks call shape — verdicts (gate/judgment) smallest, schema-bound
+    ideation bounded, free-form ideation largest — instead of a flat 16k on every call."""
+    transport = FakeTransport()
+    proxy, _ = make_proxy(transport)
+    msgs = [{"role": "user", "content": "x"}]
+    proxy.complete("g", "T2", "SOP", msgs, purpose="gate")
+    proxy.complete("i_struct", "T1", "SOP", msgs, purpose="ideation", schema={"type": "object"})
+    proxy.complete("i_free", "T1", "SOP", msgs, purpose="ideation")
+    caps = [r["max_tokens"] for r in transport.requests]
+    assert caps == [2000, 4000, 8000]
+    assert all(c < 16000 for c in caps)   # every call is below the old flat default
+
+
 def test_no_drift_for_pinned_id_match():
     proxy, _ = make_proxy()
     result = proxy.complete(

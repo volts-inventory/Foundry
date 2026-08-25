@@ -1202,9 +1202,17 @@ class FloorScene extends Phaser.Scene {
     c.add(this.add.rectangle(x0, top, w, 16, 0x2a3550, 0.96).setOrigin(0,0));
     c.add(this.add.rectangle(x0, top+16, w, 1, 0xffd95e, 0.5).setOrigin(0,0));   // title underline
     c.add(this.bm(x0+8, top+4, "RUN STATUS", 10, 0xffd95e, 0, 0).setDepth(depth+1));
-    const body = this.bm(x0+10, top+26, "", 9, 0xbcd0ff, 0, 0).setDepth(depth+1);
-    c.add(body);
-    this.ovb = {c, x0, top, w, h, body, depth: depth+1, gatePips: {}};
+    // Two aligned columns (the baked font isn't monospace, so space-padding never lined up):
+    // muted labels on the left, bright values on a fixed column — clean to scan.
+    const rows = [["WORKING","working"], ["ROOMS","rooms"], ["AREAS","areas"], ["GATES","gates"]];
+    const labX = x0 + 10, valX = x0 + 74, rowY = (i)=> top + 26 + i*15;
+    const vals = {};
+    rows.forEach(([lab, key], i)=>{
+      c.add(this.bm(labX, rowY(i), lab, 10, 0x8aa0c8, 0, 0).setDepth(depth+1));
+      vals[key] = this.bm(valX, rowY(i), "", 10, 0xeef2ff, 0, 0).setDepth(depth+1);
+      c.add(vals[key]);
+    });
+    this.ovb = {c, x0, top, w, h, vals, dotY: rowY(3)+15, depth: depth+1, gatePips: {}};
     this.updateOverviewBoard();
   }
   // Refresh the overview board in place (cheap; safe to call on every telemetry event).
@@ -1217,15 +1225,13 @@ class FloorScene extends Phaser.Scene {
       String((a && a.area) || "").slice(0,2).toUpperCase()).filter(Boolean);
     const present = GATE_ORDER.filter(n => this.gates[n]);
     const green = present.filter(n => this.gates[n].status === "pass").length;
-    o.body.setText([
-      `WORKING  ${agents} agent${agents===1?"":"s"} · ${workers} coder${workers===1?"":"s"}`,
-      `ROOMS    ${rooms} active`,
-      `AREAS    ${areas.length ? areas.join(" ") : "—"}`,
-      `GATES    ${present.length ? green + "/" + present.length + " green" : "—"}`,
-    ].join("\n"));
-    // one colour-coded square per present gate, in GATE_ORDER, anchored just under the
-    // text block (measured, so it never drifts from the GATES line).
-    const dotY = Math.round(o.body.y + o.body.height + 4);
+    const v = o.vals;
+    v.working.setText(`${agents} agent${agents===1?"":"s"} · ${workers} coder${workers===1?"":"s"}`);
+    v.rooms.setText(`${rooms} active`);
+    v.areas.setText(areas.length ? areas.join(" ") : "—");
+    v.gates.setText(present.length ? `${green}/${present.length} green` : "—");
+    // one colour-coded square per present gate, in GATE_ORDER, on the row below GATES.
+    const dotY = o.dotY;
     let i = 0;
     for (const n of present){
       const pass = this.gates[n].status === "pass";

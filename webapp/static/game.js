@@ -502,12 +502,14 @@ class FloorScene extends Phaser.Scene {
       this.add.rectangle(wx, wy+Math.round(wh*hLo), ww, Math.ceil(wh*(1-hLo)), 0x322a3c).setOrigin(0,0).setDepth(2); // near hill silhouette
       if (v===0){ this.add.circle(wx+ww-19, wy+Math.round(wh*0.5), 11, 0xffb45a, 0.28).setDepth(2);
         this.add.circle(wx+ww-19, wy+Math.round(wh*0.5), 6, 0xffcf7a).setDepth(2); }             // low warm sun + glow
-      else if (v===1){ this.add.ellipse(wx+24, wy+14, 22, 7, 0xcaa6b0,0.7).setDepth(2);
-        this.add.ellipse(wx+54, wy+20, 24, 7, 0xb894a4,0.6).setDepth(2); }                        // dusk-lit clouds
+      else if (v===1){ const c1=this.add.ellipse(wx+24, wy+14, 22, 7, 0xcaa6b0,0.7).setDepth(2);
+        const c2=this.add.ellipse(wx+54, wy+20, 24, 7, 0xb894a4,0.6).setDepth(2);                 // dusk-lit clouds
+        this.tweens.add({targets:[c1,c2], x:"+=7", duration:9000+pi*900, yoyo:true, repeat:-1, ease:"Sine.inOut"}); }
       else if (v===2){ this.add.triangle(0,0, wx+22,wy+28, wx+46,wy+28, wx+34,wy+11, 0x453a56).setDepth(2);
         this.add.triangle(0,0, wx+31,wy+14, wx+37,wy+14, wx+34,wy+11, 0xe0a06a).setDepth(2); }    // peak + amber-lit tip
-      else { this.add.rectangle(wx+18,wy+12,6,1.5,0x2a2436).setOrigin(0,0).setDepth(2);
-        this.add.rectangle(wx+28,wy+15,6,1.5,0x2a2436).setOrigin(0,0).setDepth(2); }              // distant birds
+      else { const b1=this.add.rectangle(wx+18,wy+12,6,1.5,0x2a2436).setOrigin(0,0).setDepth(2);
+        const b2=this.add.rectangle(wx+28,wy+15,6,1.5,0x2a2436).setOrigin(0,0).setDepth(2);        // distant birds
+        this.tweens.add({targets:[b1,b2], x:"+=14", y:"-=3", duration:14000+pi*1500, yoyo:true, repeat:-1, ease:"Sine.inOut"}); }
       this.add.rectangle(wx+7, wy, 3, wh, 0xffffff, 0.08).setOrigin(0,0).setDepth(2);            // glass glint
       pi++;
     }

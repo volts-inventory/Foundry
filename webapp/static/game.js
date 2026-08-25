@@ -421,6 +421,7 @@ class FloorScene extends Phaser.Scene {
     this._moodSeed = hashStr(this.proj.id || "f") % IDLE_MOODS.length;
     this.buildRooms();
     this.buildGate();
+    this.buildMainframe();
     this.buildGateSignal();
     this.buildChest();
     this.buildAgents();
@@ -1014,35 +1015,12 @@ class FloorScene extends Phaser.Scene {
       onComplete:()=>b.destroy()}));
   }
 
-  // The Gate is the RELEASE CHECKPOINT: a CCTV bank + checkpoint desk, plus a sealed
-  // vault door (vertical) in the gap to the VAULT below. The horizontal corridor
-  // between the two cells is walled off — the only link is that short door,
-  // which unlocks only when every release gate passes.
+  // The Gate is the RELEASE CHECKPOINT: a chugging GATE-ENGINE mainframe under a
+  // stoplight (built separately), plus a sealed vault door (vertical) in the gap to the
+  // VAULT below. The only link between the cells is that short door, which unlocks only
+  // when every release gate passes.
   buildGate(){
     const G = ROOMS.gate, V = ROOMS.vault, cx = Math.round(G.cx);
-    // ---- CCTV monitors MOUNTED on the top wall (right of the GATE sign), so they read
-    // as wall-hung camera feeds — not loose blocks on the floor. ----
-    const bx = G.x1-58, by = G.y+52, mon=[0x2bd3ff,0x7dffb0,0xffd95e,0x5db8ff];
-    const bank = this.add.container(bx,by).setDepth(3);
-    bank.add(this.add.rectangle(0,-30,6,18,0x2a3550).setOrigin(0.5,1));        // wall mount bracket
-    bank.add(this.add.rectangle(0,0,54,34,0x10151f).setOrigin(0.5,1).setStrokeStyle(2,0x2a3550));
-    for (let i=0;i<4;i++){ const sx=-12+(i%2)*24, sy=-19+Math.floor(i/2)*16;
-      bank.add(this.add.rectangle(sx,sy,20,12,mon[i],0.85).setOrigin(0.5,1));
-      bank.add(this.add.rectangle(sx,sy,20,12).setOrigin(0.5,1).setStrokeStyle(1,0x05080f)); }
-    const led=this.add.rectangle(bx+22,by-30,4,4,0xff5d6c,0.9).setDepth(3);    // REC light
-    this.tweens.add({targets:led, alpha:0.2, duration:700, yoyo:true, repeat:-1});
-    // ---- checkpoint desk: a clear, legged counter sitting IN FRONT OF the guard, so
-    // the two read together as a manned security checkpoint. ----
-    const dx = Math.round(G.x + G.w*0.30), dy = G.y1-18;
-    const desk = this.add.container(dx,dy).setDepth(7);
-    desk.add(this.add.ellipse(0,2,72,7,PC.shadow,0.28).setOrigin(0.5,1));    // contact shadow
-    desk.add(this.add.rectangle(-28,1,5,9,0x2a3550).setOrigin(0.5,1));       // left leg
-    desk.add(this.add.rectangle(28,1,5,9,0x2a3550).setOrigin(0.5,1));        // right leg
-    desk.add(this.add.rectangle(0,-7,64,12,0x394566).setOrigin(0.5,1).setStrokeStyle(1,PC.sceneInk)); // counter front
-    desk.add(this.add.rectangle(0,-19,68,5,0x4a587a).setOrigin(0.5,1).setStrokeStyle(1,PC.sceneInk)); // counter top
-    desk.add(this.add.rectangle(0,-19,68,1,0x6a7aa0).setOrigin(0.5,1));      // top edge highlight
-    desk.add(this.add.rectangle(-18,-26,16,11,0x10151f).setOrigin(0.5,1).setStrokeStyle(1,0x05080f)); // terminal
-    desk.add(this.add.rectangle(-18,-28,12,7,0x2bd3ff,0.85).setOrigin(0.5,1)); // terminal screen
     // ---- seal the corridor gap between the GATE and the VAULT below ----
     const gapTop = G.y1, gapBot = V.y, dw = 60;          // short vertical door
     const wallC = 0x1a2030, capC = 0x2a3550;
@@ -1699,24 +1677,79 @@ class FloorScene extends Phaser.Scene {
     if (info.status === "fail") this.flashGate();
   }
 
-  // The gate has no agent — it's a deterministic machine — so it wears a stoplight that
-  // reflects the overall gate state: GREEN all gates pass · AMBER running / decision
-  // pending · RED a gate failed. Wall-mounted above the checkpoint desk.
+  // The GATE ENGINE: a big mainframe cabinet that visibly chugs — spinning tape reels, a
+  // blinking status-LED grid, a scrolling activity bar. The gate has no agent (it's a
+  // deterministic machine), so this IS the gate: the room's working centrepiece.
+  buildMainframe(){
+    const G = ROOMS.gate; if (!G) return;
+    const x = Math.round(G.x + G.w*0.40), topY = G.y + 44, botY = G.y1 - 26;
+    const w = 84, hh = botY - topY;
+    const c = this.add.container(x, topY).setDepth(6);
+    c.add(this.add.rectangle(0, hh+3, w+6, 8, PC.shadow, 0.30).setOrigin(0.5,1));   // floor shadow
+    c.add(this.add.rectangle(0, 0, w, hh, 0x1a1f2b).setOrigin(0.5,0).setStrokeStyle(2, PC.sceneInk));
+    c.add(this.add.rectangle(0, 0, w, hh, 0x2a3550, 0).setOrigin(0.5,0));
+    c.add(this.add.rectangle(0, 4, w-10, 9, 0x2a3550).setOrigin(0.5,0).setStrokeStyle(1, 0x05080f)); // vent
+    // two spinning tape reels
+    this.mfReels = [];
+    const reel = (rx, ry) => {
+      const g = this.add.container(rx, ry);
+      g.add(this.add.circle(0,0,10,0x0c1016).setStrokeStyle(2,0x4a587a));
+      g.add(this.add.circle(0,0,3,0x6a7aa0));
+      for (let a=0;a<4;a++){ const rad=a*Math.PI/2;
+        g.add(this.add.rectangle(Math.cos(rad)*6, Math.sin(rad)*6, 2.4, 2.4, 0x2a3550)); }
+      c.add(g); this.mfReels.push(g);
+    };
+    reel(-19, 30); reel(19, 30);
+    // status-LED grid (blinks)
+    this.mfLeds = [];
+    for (let r=0;r<3;r++) for (let col=0;col<6;col++){
+      const l = this.add.rectangle(-25+col*10, 52+r*8, 4, 4, 0x1c4a2e).setOrigin(0.5); c.add(l);
+      this.mfLeds.push(l);
+    }
+    // scrolling activity bar
+    const barW = w-16;
+    c.add(this.add.rectangle(0, hh-24, barW, 8, 0x0c1016).setOrigin(0.5,0).setStrokeStyle(1, 0x2a3550));
+    this.mfBarBase = -barW/2 + 1; this.mfBarSpan = barW - 12;
+    this.mfBar = this.add.rectangle(this.mfBarBase, hh-23, 11, 6, 0x2fe07a).setOrigin(0,0);
+    c.add(this.mfBar);
+    c.add(this.bm(0, hh-11, "GATE ENGINE", 8, 0x8aa0c8, 0.5, 0).setDepth(7));
+    this.mfChug();
+  }
+  mfChug(){
+    for (const g of (this.mfReels||[]))
+      this.tweens.add({targets:g, angle:"+=360", duration:1500, repeat:-1, ease:"Linear"});
+    if (this.mfBar) this.tweens.add({targets:this.mfBar,
+      x:{from:this.mfBarBase, to:this.mfBarBase+this.mfBarSpan}, duration:1100, yoyo:true,
+      repeat:-1, ease:"Sine.inOut"});
+    this.time.addEvent({delay:220, loop:true, callback:()=>{
+      if (this._dead || !this.mfLeds) return;
+      for (const l of this.mfLeds){
+        const r = Math.random();
+        if (r < 0.30) l.setFillStyle(r < 0.16 ? 0x2fe07a : 0x2bd3ff);
+        else if (r < 0.55) l.setFillStyle(0x1c4a2e);
+      }
+    }});
+  }
+
+  // The gate's stoplight — the room's FOCUS. A big standing signal beside the mainframe:
+  // GREEN all gates pass · AMBER running / decision pending · RED a gate failed.
   buildGateSignal(){
     const G = ROOMS.gate; if (!G) return;
-    const x = Math.round(G.x + G.w*0.30), y = Math.round(G.y + 30);
-    const c = this.add.container(x, y).setDepth(9);
-    c.add(this.add.rectangle(0, -6, 4, 14, 0x2a3550).setOrigin(0.5,1));   // bracket up to the wall
-    c.add(this.add.rectangle(0, 0, 18, 44, 0x14181f).setOrigin(0.5,0).setStrokeStyle(1, PC.sceneInk));
+    const x = Math.round(G.x + G.w*0.72), baseY = G.y1 - 24;
+    const c = this.add.container(x, baseY).setDepth(9);
+    c.add(this.add.ellipse(0, 2, 22, 7, PC.shadow, 0.32).setOrigin(0.5,1));   // base shadow
+    c.add(this.add.rectangle(0, 0, 7, 66, 0x2a3550).setOrigin(0.5,1).setStrokeStyle(1, PC.sceneInk)); // pole
+    const hy = -66;
+    c.add(this.add.rectangle(0, hy, 28, 70, 0x14181f).setOrigin(0.5,0).setStrokeStyle(2, PC.sceneInk));
     const mk = (cy, on, off) => {
-      const glow = this.add.circle(0, cy, 8, on, 0); c.add(glow);        // behind (pulses when lit)
-      const lamp = this.add.circle(0, cy, 5, off).setStrokeStyle(1, 0x05080f); c.add(lamp);
+      const glow = this.add.circle(0, hy+cy, 12, on, 0); c.add(glow);       // behind (pulses when lit)
+      const lamp = this.add.circle(0, hy+cy, 8, off).setStrokeStyle(2, 0x05080f); c.add(lamp);
       return {lamp, glow, on, off};
     };
     this.gateSig = {
-      stop: mk(10, 0xff5d6c, 0x4a1c22),
-      wait: mk(22, 0xffcf52, 0x4a3a1c),
-      go:   mk(34, 0x2fe07a, 0x1c4a2e),
+      stop: mk(16, 0xff5d6c, 0x4a1c22),
+      wait: mk(35, 0xffcf52, 0x4a3a1c),
+      go:   mk(54, 0x2fe07a, 0x1c4a2e),
       state: null,
     };
     this.setGateSignal(this.gateSignalState());

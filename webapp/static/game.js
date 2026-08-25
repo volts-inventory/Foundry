@@ -652,9 +652,9 @@ class FloorScene extends Phaser.Scene {
     P("vending", L.x1-TI-12, L.y+74);
     P("plant",   L.x+TI+6, bot(L)); P("plant", L.x1-TI-8, bot(L));
 
-    // OFFICE (walled room, row 2): a desk + corner plants (uncluttered). Opens RIGHT.
+    // OFFICE (walled room, row 2): the live RUN-STATUS board owns this room
+    // (buildOverviewBoard), so no desk — just corner plants flanking the board.
     const E = ROOMS.office;
-    P("counter", E.cx, E.y1-34);                                       // a desk
     P("plant", E.x+TI+8, E.y1-TI); P("plant", E.x1-TI-10, E.y1-TI);    // corner plants (clear of the door)
   }
 
@@ -1117,14 +1117,15 @@ class FloorScene extends Phaser.Scene {
   // change (restaff / setGate / setOrg / workerTelemetry).
   buildOverviewBoard(){
     const E = ROOMS.office; if (!E) return;
-    const pad = 12, x0 = E.x + pad, w = E.w - 2*pad, top = E.y + 28, h = 116, depth = E.y + 4;
+    const pad = 12, x0 = E.x + pad, w = E.w - 2*pad, top = E.y + 30, h = 128, depth = E.y + 4;
     const c = this.add.container(0, 0).setDepth(depth);
-    c.add(this.add.rectangle(x0, top, w, h, 0x10151f, 0.86).setOrigin(0,0).setStrokeStyle(1, PC.sceneInk));
-    c.add(this.add.rectangle(x0, top, w, 15, 0x2a3550, 0.96).setOrigin(0,0));
-    c.add(this.bm(x0+6, top+3, "RUN STATUS", 10, 0xffd95e, 0, 0).setDepth(depth+1));
-    const body = this.bm(x0+8, top+22, "", 9, 0xbcd0ff, 0, 0).setDepth(depth+1);
+    c.add(this.add.rectangle(x0, top, w, h, 0x10151f, 0.9).setOrigin(0,0).setStrokeStyle(1, PC.sceneInk));
+    c.add(this.add.rectangle(x0, top, w, 16, 0x2a3550, 0.96).setOrigin(0,0));
+    c.add(this.add.rectangle(x0, top+16, w, 1, 0xffd95e, 0.5).setOrigin(0,0));   // title underline
+    c.add(this.bm(x0+8, top+4, "RUN STATUS", 10, 0xffd95e, 0, 0).setDepth(depth+1));
+    const body = this.bm(x0+10, top+26, "", 9, 0xbcd0ff, 0, 0).setDepth(depth+1);
     c.add(body);
-    this.ovb = {c, x0, top, w, h, body, depth: depth+1, gatePips: {}, dotY: top + 22 + 4*12 + 2};
+    this.ovb = {c, x0, top, w, h, body, depth: depth+1, gatePips: {}};
     this.updateOverviewBoard();
   }
   // Refresh the overview board in place (cheap; safe to call on every telemetry event).
@@ -1143,14 +1144,16 @@ class FloorScene extends Phaser.Scene {
       `AREAS    ${areas.length ? areas.join(" ") : "—"}`,
       `GATES    ${present.length ? green + "/" + present.length + " green" : "—"}`,
     ].join("\n"));
-    // one colour-coded square per present gate, in GATE_ORDER, under the GATES line
+    // one colour-coded square per present gate, in GATE_ORDER, anchored just under the
+    // text block (measured, so it never drifts from the GATES line).
+    const dotY = Math.round(o.body.y + o.body.height + 4);
     let i = 0;
     for (const n of present){
       const pass = this.gates[n].status === "pass";
       let pip = o.gatePips[n];
       if (!pip){ pip = this.add.rectangle(0, 0, 9, 9, 0x000000).setOrigin(0,0)
         .setStrokeStyle(1, PC.sceneInk).setDepth(o.depth); o.c.add(pip); o.gatePips[n] = pip; }
-      pip.setPosition(o.x0 + 8 + i*13, o.dotY);
+      pip.setPosition(o.x0 + 10 + i*13, dotY);
       pip.setFillStyle(pass ? 0x2fe07a : 0xff5d6c);
       i++;
     }

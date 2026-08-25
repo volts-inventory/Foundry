@@ -113,7 +113,14 @@ def author_up_to_date(state: FactoryState, output_kind: str) -> bool:
     Seq): a spec_fix that adds or supersedes a criterion bumps the newest criterion
     Seq past the artifact, so the author re-runs then. Seq is a NamedTuple (tuple
     ordering). The Test/E2E gate verdict comes from real execution, not these
-    placeholder reports, so skipping re-authoring changes no verdict."""
+    placeholder reports, so skipping re-authoring changes no verdict.
+
+    INVARIANT this rests on: the acceptance-criteria set changes ONLY via a PM
+    re-run, which bumps the durable per-(run,key) epoch and re-emits the full set at
+    a higher Seq — and each criteria-derived author fires exactly once per PM bump
+    (this guard suppresses the extra runs), so a genuine criteria change always
+    outranks the standing plan. That lockstep would drift only if a future change
+    emitted ``output_kind`` from another node or ran an author twice per revision."""
     arts = state.get("artifacts") or ()
     out_seqs = [a.seq for a in arts if getattr(a, "kind", None) == output_kind]
     if not out_seqs:

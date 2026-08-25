@@ -490,20 +490,25 @@ class FloorScene extends Phaser.Scene {
       this.add.rectangle(wx-4, wy-4, ww+8, 2, 0x8a5e36).setOrigin(0,0).setDepth(2);            // frame top light
       this.add.rectangle(wx-4, wy+wh+2, ww+8, 2, 0x4a2f18).setOrigin(0,0).setDepth(2);         // frame bottom shade
       this.add.rectangle(wx-2, wy-2, ww+4, wh+4, PC.sceneInk).setOrigin(0,0).setDepth(2);      // inner liner
-      // LANDSCAPE: banded sky + two layered hills
-      this.add.rectangle(wx, wy, ww, wh, 0xbfe6f2).setOrigin(0,0).setDepth(2);                 // sky
-      this.add.rectangle(wx, wy, ww, Math.round(wh*0.42), 0xa6d6ee).setOrigin(0,0).setDepth(2);// upper sky
-      this.add.rectangle(wx, wy+Math.round(wh*0.55), ww, Math.round(wh*0.2), 0x9ec98a).setOrigin(0,0).setDepth(2); // far hill
-      this.add.rectangle(wx, wy+Math.round(wh*0.66), ww, Math.round(wh*0.34), 0x6fae74).setOrigin(0,0).setDepth(2);// near hill
-      if (v===0){ this.add.circle(wx+ww-18, wy+13, 9, 0xfff0a8, 0.3).setDepth(2);
-        this.add.circle(wx+ww-18, wy+13, 6, 0xfff4be).setDepth(2); }                            // sun + glow
-      else if (v===1){ this.add.ellipse(wx+22, wy+13, 22, 8, 0xffffff,0.9).setDepth(2);
-        this.add.ellipse(wx+54, wy+19, 26, 8, 0xffffff,0.8).setDepth(2); }                       // clouds
-      else if (v===2){ this.add.triangle(0,0, wx+22,wy+28, wx+46,wy+28, wx+34,wy+11, 0x93a4ba).setDepth(2);
-        this.add.triangle(0,0, wx+30,wy+13, wx+38,wy+13, wx+34,wy+11, 0xffffff).setDepth(2); }   // snowy mountain
-      else { this.add.rectangle(wx+18,wy+13,6,1.5,0x33405e).setOrigin(0,0).setDepth(2);
-        this.add.rectangle(wx+28,wy+16,6,1.5,0x33405e).setOrigin(0,0).setDepth(2); }             // distant birds
-      this.add.rectangle(wx+7, wy, 3, wh, 0xffffff, 0.10).setOrigin(0,0).setDepth(2);           // glass glint
+      // DUSK landscape — matches the warm late-afternoon interior (was bright daytime,
+      // which fought the dark night shell). Dusky purple sky over an amber horizon, hills
+      // in silhouette; height + tint vary per window so no two repeat.
+      this.add.rectangle(wx, wy, ww, wh, 0x5a4f74).setOrigin(0,0).setDepth(2);                  // dusk sky
+      this.add.rectangle(wx, wy, ww, Math.round(wh*0.4), 0x463f63).setOrigin(0,0).setDepth(2);  // deeper upper sky
+      this.add.rectangle(wx, wy+Math.round(wh*0.5), ww, Math.round(wh*0.22), 0xd98a5e).setOrigin(0,0).setDepth(2);  // amber horizon glow
+      this.add.rectangle(wx, wy+Math.round(wh*0.62), ww, Math.round(wh*0.1), 0xe6a56a).setOrigin(0,0).setDepth(2);  // bright horizon line
+      const hLo = 0.60 + ((pi*5)%3)*0.06;                                                        // 0.60/0.66/0.72 — varies
+      this.add.rectangle(wx, wy+Math.round(wh*(hLo-0.08)), ww, Math.round(wh*0.2), mix(0x6a5b74,0x463a52,pi%2)).setOrigin(0,0).setDepth(2); // far hill
+      this.add.rectangle(wx, wy+Math.round(wh*hLo), ww, Math.ceil(wh*(1-hLo)), 0x322a3c).setOrigin(0,0).setDepth(2); // near hill silhouette
+      if (v===0){ this.add.circle(wx+ww-19, wy+Math.round(wh*0.5), 11, 0xffb45a, 0.28).setDepth(2);
+        this.add.circle(wx+ww-19, wy+Math.round(wh*0.5), 6, 0xffcf7a).setDepth(2); }             // low warm sun + glow
+      else if (v===1){ this.add.ellipse(wx+24, wy+14, 22, 7, 0xcaa6b0,0.7).setDepth(2);
+        this.add.ellipse(wx+54, wy+20, 24, 7, 0xb894a4,0.6).setDepth(2); }                        // dusk-lit clouds
+      else if (v===2){ this.add.triangle(0,0, wx+22,wy+28, wx+46,wy+28, wx+34,wy+11, 0x453a56).setDepth(2);
+        this.add.triangle(0,0, wx+31,wy+14, wx+37,wy+14, wx+34,wy+11, 0xe0a06a).setDepth(2); }    // peak + amber-lit tip
+      else { this.add.rectangle(wx+18,wy+12,6,1.5,0x2a2436).setOrigin(0,0).setDepth(2);
+        this.add.rectangle(wx+28,wy+15,6,1.5,0x2a2436).setOrigin(0,0).setDepth(2); }              // distant birds
+      this.add.rectangle(wx+7, wy, 3, wh, 0xffffff, 0.08).setOrigin(0,0).setDepth(2);            // glass glint
       pi++;
     }
     // soft ceiling-light pools on the floor (kept subtle, bright theme). Fractions of
@@ -524,8 +529,13 @@ class FloorScene extends Phaser.Scene {
       // The room's OWN floor, laid over the shared base (was built + never drawn) — this is
       // what makes each room read as a distinct material, not one tan slab. Below glow/walls.
       this.add.tileSprite(R.x, R.y, R.w, R.h, "floor_"+key).setOrigin(0,0).setDepth(0.5);
+      // Ambient occlusion: a soft contact shadow on the floor where the top + left walls
+      // meet it (light is top-left), so the walls seat instead of floating.
+      this.add.rectangle(R.x+12, R.y+20, R.w-24, 5, 0x000000, 0.13).setOrigin(0,0).setDepth(0.7);
+      this.add.rectangle(R.x+12, R.y+20, 5, R.h-32, 0x000000, 0.10).setOrigin(0,0).setDepth(0.7);
       // label placard — a navy sign hanging just BELOW the banded top wall (bigger sign)
       const sw = Math.min(R.w-10, R.label.length*9+28);
+      (this.roomLabels = this.roomLabels || {})[key] =
       this.add.rectangle(R.cx, R.y+22, sw, 22, PC.ink, 0.96).setOrigin(0.5,0).setDepth(3).setStrokeStyle(2, accent);
       this.add.rectangle(R.cx, R.y+22, sw, 2, mix(accent,0xffffff,0.4)).setOrigin(0.5,0).setDepth(4);
       this.roomGlyph(key, R.cx-sw/2+7, R.y+27);
@@ -719,7 +729,7 @@ class FloorScene extends Phaser.Scene {
       c.add(this.add.rectangle(rx,ry-1,w,1,shade(col,0.80)).setOrigin(0.5,1));          // bottom shade
       c.add(this.add.rectangle(rx+w/2-1,ry,1,h,shade(col,0.84)).setOrigin(0,1));        // right shade
     };
-    c.add(this.add.ellipse(0,3,18,5,PC.shadow,0.22));                                   // contact shadow on the floor
+    c.add(this.add.ellipse(0,3,18,5,PC.shadow,0.30));                                   // contact shadow on the floor
     if (kind==="plant"){
       // potted plant — terracotta pot (rim + soil) and a fan of SHAPED tapering leaf
       // blades (each a 2-tone triangle), splaying out and up. Drawn back-to-front.
@@ -1366,6 +1376,16 @@ class FloorScene extends Phaser.Scene {
       this.tweens.add({targets:g, fillAlpha:on, duration:420});
     }
   }
+  // A room just went LIVE (rising edge): overshoot its glow (paintGlow then settles it) and
+  // pop its label placard, so "work just started HERE" reads distinct from steady-state.
+  announceRoom(room){
+    const g = this.roomGlow[room];
+    if (g){ this.tweens.killTweensOf(g); g.fillAlpha = 0.34; }   // paintGlow (next) eases it down
+    const lab = this.roomLabels && this.roomLabels[room];
+    if (lab){ this.tweens.killTweensOf(lab);
+      this.tweens.add({targets:lab, scaleX:{from:1,to:1.05}, scaleY:{from:1,to:1.14},
+        duration:230, yoyo:true, ease:"Back.out"}); }
+  }
 
   // A forward phase handoff: a work package pops in the destination room (no courier
   // character — the artifact itself is the signal that work crossed over).
@@ -1549,6 +1569,7 @@ class FloorScene extends Phaser.Scene {
       this.restaff();
       return;
     }
+    if (!this.liveRooms.has(room)) this.announceRoom(room);   // rising edge → pull the eye here
     this.liveRooms.add(room);
     if (agent) this.ensureSeated(agent);   // first run of this node → give it a desk now
     if (agent) this.workingAgents.set(agent, (this.workingAgents.get(agent)||0) + 1);
@@ -1861,6 +1882,7 @@ class FloorScene extends Phaser.Scene {
   }
   setGateSignal(state){
     const s = this.gateSig; if (!s || s.state === state) return;
+    const first = s.state === null;   // no punch on the initial build-time set
     s.state = state;
     for (const k of ["stop", "wait", "go"]){
       const L = s[k];
@@ -1869,8 +1891,17 @@ class FloorScene extends Phaser.Scene {
       L.glow.setAlpha(0);
     }
     const active = s[state];
-    if (active) active.glow.setAlpha(0.45), this.tweens.add({targets: active.glow,
-      alpha: {from: 0.5, to: 0.16}, duration: 900, yoyo: true, repeat: -1, ease: "Sine.inOut"});
+    if (!active) return;
+    active.glow.setAlpha(0.45);
+    this.tweens.add({targets: active.glow, alpha: {from: 0.5, to: 0.16},
+      duration: 900, yoyo: true, repeat: -1, ease: "Sine.inOut"});
+    if (first) return;
+    // Punch the newly-lit lamp so a gate flip is impossible to miss (a stronger pop on a
+    // green/red result than on the amber running state).
+    this.tweens.killTweensOf(active.lamp);
+    active.lamp.setScale(1);
+    const peak = state === "wait" ? 1.22 : 1.4;
+    this.tweens.add({targets: active.lamp, scale: {from: peak, to: 1}, duration: 260, ease: "Back.out"});
   }
 
   drawGatePips(){

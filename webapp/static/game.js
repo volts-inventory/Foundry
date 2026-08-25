@@ -628,8 +628,10 @@ class FloorScene extends Phaser.Scene {
       seg(R.x, R.y, T, R.h, dSide);                            // left  (solid)
       if (rightGap != null){ seg(R.x1-T, R.y, T, (rightGap-DOOR/2)-R.y, dSide); seg(R.x1-T, rightGap+DOOR/2, T, R.y1-(rightGap+DOOR/2), dSide); }
       else seg(R.x1 - T, R.y, T, R.h, dSide);                  // right (solid or split)
-      if (topGap != null){ band(R.x, (topGap-DOOR/2)-R.x, R.y, stripe); band(topGap+DOOR/2, R.x1-(topGap+DOOR/2), R.y, stripe); }
-      else band(R.x, R.w, R.y, stripe);                       // banded back wall (solid or split)
+      // Inset the back-wall band BETWEEN the two side posts (was full width, so it painted
+      // over the posts' caps and cut its base/AO across them — the notched inside corners).
+      if (topGap != null){ band(R.x+T, (topGap-DOOR/2)-(R.x+T), R.y, stripe); band(topGap+DOOR/2, (R.x1-T)-(topGap+DOOR/2), R.y, stripe); }
+      else band(R.x+T, R.w-2*T, R.y, stripe);                 // banded back wall (solid or split), posts own the corners
       // FRONT (south) wall = a LOW lip you look over into the room (3/4), in front of the crew.
       if (botGap != null){ seg(R.x, R.y1-FRONT_H, (botGap-DOOR/2)-R.x, FRONT_H, dFront); seg(botGap+DOOR/2, R.y1-FRONT_H, R.x1-(botGap+DOOR/2), FRONT_H, dFront); }
       else seg(R.x, R.y1 - FRONT_H, R.w, FRONT_H, dFront);     // low front lip (solid or split)
@@ -774,7 +776,7 @@ class FloorScene extends Phaser.Scene {
     };
     for (const key in props){
       const R = ROOMS[key]; if(!R) continue;
-      this.makeProp(props[key], R.x1 - 22, R.y + 34);
+      this.makeProp(props[key], R.x1 - 22, R.y + 44);   // footprint low enough that a tall rack/shelf stands INSIDE the back wall, not through the ceiling
     }
   }
 

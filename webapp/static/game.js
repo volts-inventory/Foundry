@@ -286,8 +286,10 @@ function buildSharedTextures(scene){
   }
   if (!scene.textures.exists("vignette")){      // radial dark-edge overlay for depth
     const cv = document.createElement("canvas"); cv.width = cv.height = 256;
-    const g = cv.getContext("2d"); const rg = g.createRadialGradient(128,128,46,128,128,172);
-    rg.addColorStop(0,"rgba(0,0,0,0)"); rg.addColorStop(1,"rgba(0,0,0,1)");
+    const g = cv.getContext("2d"); const rg = g.createRadialGradient(128,128,56,128,128,176);
+    // warm-dark (not pure black) with an eased mid-stop, so corners seat without crushing
+    // the corner rooms; the tint matches the plaster/wood palette instead of a grey hole.
+    rg.addColorStop(0,"rgba(20,12,6,0)"); rg.addColorStop(0.62,"rgba(20,12,6,0.28)"); rg.addColorStop(1,"rgba(16,9,4,1)");
     g.fillStyle = rg; g.fillRect(0,0,256,256); scene.textures.addCanvas("vignette", cv);
   }
   // Per-room floor — DRAWN per room (was built and never used). Rooms differ by MATERIAL,
@@ -518,13 +520,16 @@ class FloorScene extends Phaser.Scene {
       this.add.rectangle(wx+7, wy, 3, wh, 0xffffff, 0.08).setOrigin(0,0).setDepth(2);            // glass glint
       pi++;
     }
-    // soft ceiling-light pools on the floor (kept subtle, bright theme). Fractions of
-    // W, not the three coordinates picked for 1280 (1140 falls outside a 970 world);
-    // these reproduce 240/560/1140 exactly at the landscape width.
-    [0.1875, 0.4375, 0.890625].map(f => Math.round(f*W)).forEach(lx=>{
-      this.add.ellipse(lx, WALL_TOP+92, 122, 42, 0xfff0c8, 0.14).setDepth(0.6);   // warm pool, now readable
-      this.add.circle(lx, WALL_TOP+18, 5, 0xfff6d8, 0.95).setDepth(2).setStrokeStyle(2, PC.wallShade);
-    });
+    // Soft ceiling-light pools, one CENTRED OVER EACH TOP-ROW ROOM (was three legacy
+    // 1280-coords that drifted off the room grid). The fixture hangs at the ceiling; its
+    // pool spills onto that room's floor so the light reads as belonging to the room.
+    { const tops = Object.values(ROOMS).filter(R=>!R.virtual);
+      const topY = Math.min(...tops.map(R=>R.y));
+      tops.filter(R=>R.y <= topY + 4).forEach(R=>{
+        this.add.ellipse(R.cx, WALL_TOP+92, 122, 42, 0xfff0c8, 0.14).setDepth(0.6);   // warm pool on the floor
+        this.add.circle(R.cx, WALL_TOP+18, 5, 0xfff6d8, 0.95).setDepth(2).setStrokeStyle(2, PC.wallShade);
+      });
+    }
     this.drawFlowPath();
     // The WHOLE floor is one teal tiled surface (the shared floor_base laid down above
     // already covers it). Rooms are defined only by the thick cream walls + a label —
@@ -749,7 +754,7 @@ class FloorScene extends Phaser.Scene {
 
   buildAtmosphere(){
     if (this.textures.exists("vignette"))
-      this.add.image(W/2,H/2,"vignette").setDisplaySize(W+20,H+20).setDepth(60).setAlpha(0.5);
+      this.add.image(W/2,H/2,"vignette").setDisplaySize(W+20,H+20).setDepth(60).setAlpha(0.42);
     for (let i=0;i<24;i++){
       const rx=()=>Math.random()*W, ry=()=>FLOOR_TOP+Math.random()*(H-FLOOR_TOP);
       const m=this.add.rectangle(rx(),ry(),2,2,0xfff0c0,0.16).setDepth(33);

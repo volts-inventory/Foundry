@@ -917,9 +917,6 @@ class FloorScene extends Phaser.Scene {
   // ========================= animation library ============================ //
   // Ambient life: blink + monitor flicker, always running on a floor.
   startAmbient(){
-    this.time.addEvent({delay:2600, loop:true, callback:()=>{
-      for (const a of this.agents.values()) if (a.seen) this.blink(a);
-    }});
     this.time.addEvent({delay:360, loop:true, callback:()=>{
       const s = this.screens; if (!s || !s.length) return;
       const sc = s[(this._sf = (this._sf||0)+1) % s.length];
@@ -927,11 +924,6 @@ class FloorScene extends Phaser.Scene {
     }});
     this.time.addEvent({delay:2600, loop:true, callback:()=>this.deskSweep()});  // stay-at-your-desk sweep
     this.time.addEvent({delay:1600, loop:true, callback:()=>this.chatter()});    // idle chat bubbles
-  }
-  blink(a){
-    if (!a || !a.eyes) return;
-    a.eyes.forEach(e=>{ e.scaleY = 0.15; });
-    this.time.delayedCall(110, ()=>{ if (a.eyes) a.eyes.forEach(e=>{ e.scaleY = 1; }); });
   }
   // generic effects
   floatText(x,y,txt,color,size){
@@ -966,7 +958,28 @@ class FloorScene extends Phaser.Scene {
   }
   deskIdle(a){ if (!a || !a.bob) return; this.stopDeskIdle(a);
     a.breathe = this.tweens.add({targets:a.bob, y:{from:0,to:-1}, duration:1500, yoyo:true, repeat:-1, ease:"Sine.inOut"}); }
-  stopDeskIdle(a){ if (a && a.breathe){ a.breathe.stop(); a.breathe=null; if (a.bob) a.bob.y=0; } }
+  // Fast small "typing" cadence for an agent that's heads-down WORKING (distinct from the
+  // slow idle breathe, so who's-working reads by motion, not just the green halo).
+  startTyping(a){ if (!a || !a.bob) return; this.stopDeskIdle(a);
+    a.breathe = this.tweens.add({targets:a.bob, y:{from:0,to:-1}, duration:180, yoyo:true, repeat:-1, ease:"Sine.inOut"}); }
+  // A small rising puff (steam/note) over a person — one-off, self-destroying.
+  moodPuff(a, txt, color){
+    if (!a || a._dead) return;
+    const t = this.add.text(a.x+7, a.y-18, txt, {fontFamily:"'PixelFont','Courier New'",
+      fontSize:"11px", color:color||"#cfe0ff"}).setOrigin(0,1).setDepth(2000);
+    this.tweens.add({targets:t, y:t.y-14, alpha:{from:0.9,to:0}, duration:1400, ease:"Sine.out",
+      onComplete:()=>t.destroy()});
+  }
+  // A per-mood periodic emitter (sip, stretch, ♪), gated so it only fires while this
+  // person is genuinely idle in THIS mood. Single stored handle, torn down by stopDeskIdle.
+  moodEvery(a, mood, delay, fn){
+    a.moodEv = this.time.addEvent({delay, loop:true,
+      startAt: Math.floor(((a.idleSlot||0)*370) % delay),   // stagger so a room never syncs
+      callback:()=>{ if (!a._dead && this.idleNow(a) && a.idle===mood) fn(); }});
+  }
+  stopDeskIdle(a){ if (!a) return;
+    if (a.breathe){ a.breathe.stop(); a.breathe=null; if (a.bob){ a.bob.y=0; a.bob.x=0; a.bob.scaleY=1; } }
+    if (a.moodEv){ a.moodEv.remove(); a.moodEv=null; } }
   codeGlyph(a){
     if (!a) return;
     const g=["</>","{ }","( )",";","==","fn","[]","#"][Math.abs(Math.round(a.x))%8];
@@ -1420,18 +1433,44 @@ class FloorScene extends Phaser.Scene {
   }
   // Settle IN PLACE at the desk: nappers slump with a slow Zzz, everyone else turns
   // to face the room and breathes. Nobody walks again until their stage calls them.
+  // Settle IN PLACE with a mood-SPECIFIC motion, so the floor reads as a recognisable cast
+  // (the napper slumps, the coffee one sips, the tunes one head-bobs) instead of one shared
+  // breathe. Each mood is a single stored tween (a.breathe) + an optional periodic emitter
+  // (a.moodEv); both torn down by stopDeskIdle. Amplitudes ≤2px, periods ≥400ms, staggered.
   idleSettle(a){
     if (!a || a.working || !a.idle) return;
     this.stopWalk(a);
     if (a.napTween){ a.napTween.stop(); a.napTween = null; }
     if (a.faceFront) a.faceFront();                    // swivelled away from the screen
     this.zzzLoop(a);                                   // gated by restingNow()
-    if (a.idle === "nap"){
-      if (a.bob) a.bob.y = 0;
-      this.stopDeskIdle(a);
-      a.napTween = this.tweens.add({targets:a.bob, y:{from:0,to:-1.5}, duration:2200,
-        yoyo:true, repeat:-1, ease:"Sine.inOut"});
-    } else this.deskIdle(a);
+    this.stopDeskIdle(a);
+    const bob = a.bob; if (!bob) return;
+    const off = ((a.idleSlot||0)*140);                 // per-person phase so a room never syncs
+    switch (a.idle){
+      case "nap":
+        a.napTween = this.tweens.add({targets:bob, y:{from:0,to:-1.5}, duration:2200,
+          yoyo:true, repeat:-1, ease:"Sine.inOut"}); break;
+      case "tunes":                                    // rhythmic head-bob + the odd ♪
+        a.breathe = this.tweens.add({targets:bob, y:{from:0,to:-1.5}, duration:440,
+          yoyo:true, repeat:-1, ease:"Sine.inOut", delay:off%440});
+        this.moodEvery(a, "tunes", 5200, ()=>this.moodPuff(a, "♪", "#bcd6ff")); break;
+      case "coffee":                                   // gentle breathe + periodic sip + steam
+        this.deskIdle(a);
+        this.moodEvery(a, "coffee", 4200, ()=>{
+          this.tweens.add({targets:bob, y:"+=2", duration:150, yoyo:true, ease:"Sine.inOut"});
+          this.moodPuff(a, "°", "#e6ddd0"); }); break;
+      case "stretch":                                  // mostly still, an occasional stretch up
+        this.moodEvery(a, "stretch", 6000, ()=>
+          this.tweens.add({targets:bob, scaleY:{from:1,to:1.09}, duration:300,
+            yoyo:true, ease:"Back.out"})); break;
+      case "bored":                                    // slow side sway
+        a.breathe = this.tweens.add({targets:bob, x:{from:-1,to:1}, duration:2600,
+          yoyo:true, repeat:-1, ease:"Sine.inOut", delay:off%2600}); break;
+      case "happy":                                    // a touch livelier breathe
+        a.breathe = this.tweens.add({targets:bob, y:{from:0,to:-1.5}, duration:1100,
+          yoyo:true, repeat:-1, ease:"Sine.inOut", delay:off%1100}); break;
+      default: this.deskIdle(a);                        // chat + fallback: the calm breathe
+    }
   }
   // Idle RIGHT NOW = parked at their desk, off the clock, not mid-walk.
   idleNow(a){
@@ -1472,8 +1511,9 @@ class FloorScene extends Phaser.Scene {
     this.zzzLoop(a);                       // idempotent; the gate shows it only when idle
     const settle = ()=>{
       if (a.faceBack) a.faceBack();
-      if (working && busy) this.startWalk(a);   // engineers actively building = busy bob
-      else { this.stopWalk(a); this.deskIdle(a); }
+      if (working && busy) this.startWalk(a);        // engineers actively building = busy bob
+      else if (working){ this.stopWalk(a); this.startTyping(a); }  // heads-down = fast typing bob
+      else { this.stopWalk(a); this.deskIdle(a); }   // off duty = calm breathe
     };
     const here = Math.abs(a.x-a.home.x) < 2 && Math.abs(a.y-a.home.y) < 2;
     if (here) settle(); else this.walkTo(a, a.home.x, a.home.y, settle);

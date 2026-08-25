@@ -1160,9 +1160,11 @@ class FloorScene extends Phaser.Scene {
         a._placed = true; a.x = hx; a.y = hy; a.setDepth(hy);
         a.setScale(0); this.tweens.add({targets:a, scale:1.4, duration:400, ease:"Back.out"});
         this.standDown(a);
-      } else {                                  // re-centre: walk (or teleport) to the new slot
+      } else {                                  // re-centre: walk to the new slot
         a.setDepth(hy);
-        if (a.working) this.deskRest(a, true); else this.standDown(a);
+        // standDown() no-ops an already-settled idle agent — clear the mood first so it
+        // actually walks to its shifted home (else the desk moves and the person doesn't).
+        if (a.working) this.deskRest(a, true); else { a.idle = null; this.standDown(a); }
       }
     });
   }

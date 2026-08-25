@@ -41,6 +41,43 @@ def _project(**kw):
     return Project(id="p1", request="r", mode="assistant", supervised=True, floor=1, **kw)
 
 
+# --- pause / resume ---------------------------------------------------------- #
+
+
+def test_pause_gate_returns_immediately_when_not_paused(store) -> None:
+    p = _project()
+    server._pause_gate(p)  # must not block
+    assert not p.parked
+
+
+def test_pause_gate_parks_until_resumed(store) -> None:
+    p = _project()
+    p.paused = True
+    reached, returned = threading.Event(), threading.Event()
+
+    def worker():
+        reached.set()
+        server._pause_gate(p)  # blocks until resumed
+        returned.set()
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    assert reached.wait(1)
+    time.sleep(0.05)
+    assert not returned.is_set()  # parked at the boundary
+    assert p.parked
+    assert any(e.get("type") == "paused" for e in p.log)
+
+    with p.cond:  # the /api/control resume path
+        p.paused = False
+        p.cond.notify_all()
+
+    assert returned.wait(1)  # woke and continued
+    assert not p.parked
+    assert any(e.get("type") == "resumed" for e in p.log)
+    t.join(1)
+
+
 # --- the durable event log --------------------------------------------------- #
 
 def test_store_event_log_roundtrip_and_idempotent(tmp_path):

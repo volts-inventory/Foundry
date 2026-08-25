@@ -375,6 +375,8 @@ class Project:
     status: str = "running"
     passed: bool = False  # final verdict (for elevator/reload rehydration)
     awaiting: bool = False  # at a checkpoint right now (badge survives reload)
+    paused: bool = False    # user paused: hold at the next node boundary (survives reload)
+    parked: bool = False    # run thread actually parked at a boundary (vs pause just requested)
     journal: list[dict[str, Any]] = field(default_factory=list)  # latest agent journal ([11])
     gates: dict[str, Any] = field(default_factory=dict)  # name -> {status,attested,advisory}
     out_base: Path | None = None  # this floor's output dir (code/ + docs/)
@@ -1266,6 +1268,31 @@ def _gated_runner(runner, p: Project, **kwargs: Any) -> None:
         _BUILD_GATE.release()
 
 
+def _pause_gate(p: Project) -> None:
+    """Hold the run thread at a node boundary while the build is paused.
+
+    Called from the per-node progress callback at a node's ``start``, so a pause
+    takes effect BEFORE the next node runs. The graph is a suspended stream
+    generator whose last completed superstep is already durably checkpointed, so a
+    resume (or even a server restart, via the durable-checkpoint re-entry) continues
+    cleanly. A long in-flight node finishes first — pause lands at the next boundary.
+    Reuses ``p.cond`` (the shared stream/decision condition); the ``while p.paused``
+    re-check makes spurious wakeups from stream notifies harmless."""
+    with p.cond:
+        if not p.paused:
+            return
+        p.parked = True
+    # Emit OUTSIDE the lock (``_emit`` takes ``p.cond`` to wake streams).
+    _emit(p, type="paused")
+    _emit(p, type="narrate", text="⏸ Paused — holding at a safe point. Resume when ready.")
+    with p.cond:
+        while p.paused:
+            p.cond.wait()
+        p.parked = False
+    _emit(p, type="resumed")
+    _emit(p, type="narrate", text="▶ Resumed — back to work.")
+
+
 def _run_factory(p: Project, resume: bool = False) -> None:
     """Drive a REAL build; stream its telemetry as paced game events.
 
@@ -1413,6 +1440,11 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     # immediately (unpaced) so the floor reflects the build actually grinding.
     def progress(node: str, scope: str, *, phase: str = "finish",
                  result: object = None) -> None:
+        # Pause button: hold here BEFORE the next node starts (the graph suspends as a
+        # stream generator; its last superstep is durably checkpointed). No-op unless
+        # the user paused. A long in-flight node finishes first, then pause takes hold.
+        if phase == "start":
+            _pause_gate(p)
         ev = live_event_for_node(node, scope, phase, result)
         if ev is None:
             return
@@ -1484,7 +1516,7 @@ def _run_factory(p: Project, resume: bool = False) -> None:
             if len(p.log) != last_len:
                 last_len, quiet_min = len(p.log), 0
                 continue
-            if p.awaiting:            # checkpoint pause: quiet is expected
+            if p.awaiting or p.paused:  # checkpoint OR user pause: quiet is expected
                 continue
             quiet_min += 1
             if quiet_min in (5, 15, 30):
@@ -2561,6 +2593,8 @@ class Handler(BaseHTTPRequestHandler):
             self._ideate()
         elif path.startswith("/api/decision/"):
             self._decision(path.rsplit("/", 1)[-1])
+        elif path.startswith("/api/control/"):
+            self._control(path.rsplit("/", 1)[-1])
         elif path == "/api/suggest-slots":
             self._suggest_slots()
         elif path.startswith("/api/interview/"):
@@ -2587,6 +2621,7 @@ class Handler(BaseHTTPRequestHandler):
              "backend": p.backend, "adapter": p.adapter,
              "supervised": p.supervised, "slots": p.max_slots,
              "status": p.status, "passed": p.passed, "awaiting": p.awaiting,
+             "paused": p.paused,
              "gates": p.gates, "parent_id": p.parent_id,
              "autopilot_budget": p.autopilot_budget, "autopilot_note": p.autopilot_note}
             for p in sorted(by_floor.values(), key=lambda x: x.floor)
@@ -2938,6 +2973,31 @@ class Handler(BaseHTTPRequestHandler):
         with _REPO_CACHE_LOCK:
             _REPO_CACHE.clear()
         self._json(200, {"ok": True})
+
+    def _control(self, pid: str) -> None:
+        """Pause or resume a running build (POST /api/control/<pid> {action}).
+
+        Pause sets a cooperative flag the run thread honours at the NEXT node
+        boundary (a long in-flight node finishes first); the graph suspends with its
+        last superstep durably checkpointed, so resume — or a restart's durable
+        re-entry — continues cleanly. Resume wakes the parked thread. Idempotent."""
+        body = self._read_json()
+        action = str(body.get("action", ""))
+        if action not in ("pause", "resume"):
+            self._json(400, {"error": "action must be 'pause' or 'resume'"})
+            return
+        p = _PROJECTS.get(pid)
+        if p is None:
+            self._json(404, {"error": "no such project"})
+            return
+        if p.status not in ("running", "queued") or p.ended:
+            self._json(409, {"error": "build is not running"})
+            return
+        with p.cond:
+            p.paused = action == "pause"
+            p.cond.notify_all()          # wake the parked run thread (and the streams)
+        _emit(p, type="control", paused=p.paused)   # flip the badge on every device
+        self._json(200, {"ok": True, "paused": p.paused})
 
     def _decision(self, pid: str) -> None:
         body = self._read_json()

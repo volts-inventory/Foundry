@@ -373,7 +373,7 @@ function buildPixelFont(scene){
   if (scene.cache.bitmapFont.exists("px")) return;
   // RetroFont (fixed cell) renders reliably here. Keep the cell TIGHT (≈ the glyph
   // width) and centre each glyph so the mostly-uppercase labels read evenly, not spaced.
-  const CW=11, CH=18, F=14, FONT = F+'px "PixelFont","Courier New",monospace';
+  const CW=9, CH=18, F=14, FONT = F+'px "PixelFont","Courier New",monospace';
   const cv = document.createElement("canvas");
   cv.width = PXFONT_CHARS.length*CW; cv.height = CH;
   const ctx = cv.getContext("2d");

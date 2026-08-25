@@ -572,7 +572,7 @@ class FloorScene extends Phaser.Scene {
   // building's plan, not rugs on open space. Walls sit below the agents (depth 4)
   // so people always render in front; doorways open onto the corridors.
   buildWalls(){
-    const T = 12, DOOR = 48;   // THICK plaster partitions, wide open passage
+    const T = 12, DOOR = 48, FRONT_H = 9;   // side thickness, passage width, low FRONT lip
     // Interior partitions are PLASTER (the brick is the perimeter shell only) — a distinct,
     // lighter material so rooms read as interior architecture, not more of the outer wall.
     const FACE = PC.plaster, CAP = PC.plasterHi, BASE = PC.plasterBase, EDGE = PC.plasterEdge;
@@ -625,8 +625,9 @@ class FloorScene extends Phaser.Scene {
       else seg(R.x1 - T, R.y, T, R.h, dSide);                  // right (solid or split)
       if (topGap != null){ band(R.x, (topGap-DOOR/2)-R.x, R.y, stripe); band(topGap+DOOR/2, R.x1-(topGap+DOOR/2), R.y, stripe); }
       else band(R.x, R.w, R.y, stripe);                       // banded back wall (solid or split)
-      if (botGap != null){ seg(R.x, R.y1-T, (botGap-DOOR/2)-R.x, T, dFront); seg(botGap+DOOR/2, R.y1-T, R.x1-(botGap+DOOR/2), T, dFront); }
-      else seg(R.x, R.y1 - T, R.w, T, dFront);                 // front lip (solid or split)
+      // FRONT (south) wall = a LOW lip you look over into the room (3/4), in front of the crew.
+      if (botGap != null){ seg(R.x, R.y1-FRONT_H, (botGap-DOOR/2)-R.x, FRONT_H, dFront); seg(botGap+DOOR/2, R.y1-FRONT_H, R.x1-(botGap+DOOR/2), FRONT_H, dFront); }
+      else seg(R.x, R.y1 - FRONT_H, R.w, FRONT_H, dFront);     // low front lip (solid or split)
     }
   }
 

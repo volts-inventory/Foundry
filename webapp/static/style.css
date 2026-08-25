@@ -246,6 +246,19 @@ li.agent-box.done .agent-head{color:var(--green);background:rgba(93,220,122,.08)
 /* live activity inside a step (what the agent is doing right now) — quieter than the
    agent's own narration, and marked as in-progress rather than recorded */
 .agent-item.act{color:#7f93b8;border-left-color:#3d4d73;font-style:normal}
+/* collapsible per-stage GROUP: a clickable header (the gold "── STAGE ──" banner while the
+   stage is live, the green ✓ summary once it's finished and folded) over the stage's boxes,
+   which sit in a nested list rail. The active stage stays open; finished stages fold up. */
+#log li.stage-group{padding:0;border-bottom:none;margin:6px 0 2px}
+.stage-head{cursor:pointer;padding:5px 9px;color:var(--gold);font-weight:bold;letter-spacing:1px;
+  display:flex;gap:6px;align-items:baseline;overflow-wrap:anywhere;word-break:break-word}
+.stage-head:hover{background:rgba(255,207,82,.08)}
+.stage-caret{flex:none;color:var(--gold);opacity:.7;transition:transform .15s}
+li.stage-group.collapsed .stage-caret{transform:rotate(-90deg)}
+li.stage-group.collapsed.done .stage-head,
+li.stage-group.collapsed.done .stage-caret{color:var(--green)}
+.stage-body{list-style:none;margin:0;padding:2px 0 3px 8px;border-left:2px solid #2a3550}
+li.stage-group.collapsed .stage-body{display:none}
 @keyframes pop{from{opacity:0;transform:translateX(8px)}to{opacity:1}}
 /* Jump-to-latest: the log only auto-follows while you're already at the bottom, so
    this is how you get back down after scrolling up to read something. */

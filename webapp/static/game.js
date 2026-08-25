@@ -2460,8 +2460,12 @@ function routeEvent(floor, ev){
       break;
     case "stage":
       if (S) S.setActiveRoom(ev.room, true);   // new phase boundary → reset the live crew
+      // Open a collapsible group for the new stage. logStage FIRST finalises the previous
+      // group (its fallback headline reads the outgoing stage's arts) — so reset the
+      // per-stage buckets only AFTER, or the fallback would see an empty stage.
+      logStage(F, ev.label);
       resetStage(F);                            // new stage → fresh artifact/journal buckets
-      logTo(F, "gold", "── "+ev.label+" ──"); break;   // Progress gets the stage's ✓ cap at its checkpoint
+      break;   // Progress gets the stage's ✓ cap at its checkpoint
     case "agent":
       if (S) S.agentWork(ev.agent);
       // Retroactive checkpoint burst: this work already finished, so open-and-close the
@@ -2550,7 +2554,11 @@ function routeEvent(floor, ev){
       if(bd.length) lines.push("Produced: "+bd.join(", "));
       const says=F.stageSays||{};
       for(const ag in says) lines.push(ag+" — "+says[ag]);
-      logProgress(F, "good", head, lines); break;
+      logProgress(F, "good", head, lines);
+      // Reuse the same summary as the collapsed-group headline, so the folded stage in
+      // the Live feed reads identically to its row in the Progress tab.
+      if(F._curStage){ F._curStage.headline=head; F._curStage.lines=lines.length?lines.slice():null; }
+      break;
     }
     case "await_decision":
       F.awaiting = true; F.cpIndex = ev.checkpoint;
@@ -2740,7 +2748,7 @@ function scrollLogToEnd(){
 function appendLogDom(cls, text, lines){
   inLog((ul)=>{
     if(!ul) return;
-    ul.appendChild(rowNode(cls, text, lines));
+    stageBody(ul).appendChild(rowNode(cls, text, lines));
     // Trimming the head removes content ABOVE the viewport, so a reader who isn't
     // following would watch the text slide up under their eyes on every event once
     // the log is at cap. Give back exactly the height that was cut.
@@ -2759,7 +2767,7 @@ function logTo(F, cls, text, lines){
 function logInfraStep(F, step){
   const e={cls:"hot", text:"⋯ "+step, lines:null};
   F.log.push(e); if(F.log.length>240) F.log.shift();
-  if(F.floor===ACTIVE) inLog((ul)=>{ if(!ul) return; e.el=rowNode(e.cls, e.text, null); ul.appendChild(e.el); });
+  if(F.floor===ACTIVE) inLog((ul)=>{ if(!ul) return; e.el=rowNode(e.cls, e.text, null); stageBody(ul).appendChild(e.el); });
   (F._openInfra=F._openInfra||[]).push(e);
 }
 // Resolve a gate verdict onto its open "⋯ running the X gate" row when exactly one
@@ -2856,7 +2864,7 @@ function agentBox(F, agent){
   if(!g){
     g={box:true, agent, room:"", done:false, cap:"", fallback:"", narrates:[], items:[]};
     F._agrp[agent]=g; F.log.push(g); if(F.log.length>240) F.log.shift();
-    if(F.floor===ACTIVE) inLog((ul)=>{ if(!ul) return; g.el=renderAgentBox(g); ul.appendChild(g.el); });
+    if(F.floor===ACTIVE) inLog((ul)=>{ if(!ul) return; g.el=renderAgentBox(g); stageBody(ul).appendChild(g.el); });
   }
   return g;
 }
@@ -2907,6 +2915,56 @@ function logSay(F, ev){
 // New STAGE: reset only the per-stage buckets that feed the PROGRESS summary; the agent
 // boxes are build-global (each agent appears once, filling in as its work lands).
 function resetStage(F){ F.stageArts=[]; F.stageSays={}; }
+// ---- Collapsible per-stage GROUPS in the LIVE feed --------------------------------
+// Each "── STAGE ──" banner opens a group: a clickable header over a nested list holding
+// that stage's boxes. The ACTIVE (last) stage stays expanded; a finished stage folds to a
+// one-line headline that reuses its Progress-tab summary (captured at the checkpoint, or a
+// per-artifact fallback). A box is filed under whichever stage was open when it was FIRST
+// created and never moves — so a box whose agent spans stages stays in its opening stage.
+// Where new content lands: the open stage's body, or the log root before any stage exists.
+function stageBody(ul){
+  const F=FLOORS.get(ACTIVE), g=F&&F._curStage;
+  return (g && g.bodyEl) ? g.bodyEl : ul;
+}
+function stageHeadline(F, g){          // the collapsed line: checkpoint summary, else arts tally
+  if(g.headline) return g.headline;
+  const bd=kindBreakdown(F.stageArts), n=(F.stageArts||[]).length;
+  return "✓ "+g.label+(bd.length ? " — "+bd.join(" · ")
+    : (n ? " — "+n+" artifact"+(n===1?"":"s") : ""));
+}
+function paintStageGroup(g){           // reflect done/collapsed state onto the DOM
+  if(!g.groupEl) return;
+  g.groupEl.className="stage-group"+(g.done?" done":"")+(g.collapsed?" collapsed":"");
+  const car=document.createElement("span"); car.className="stage-caret"; car.textContent="▾";
+  const lab=document.createElement("span"); lab.className="stage-label";
+  lab.textContent=(g.collapsed && g.done) ? deEmoji(g.headline||("✓ "+g.label)) : ("── "+g.label+" ──");
+  g.headEl.replaceChildren(car, lab);
+}
+function buildStageGroup(g){
+  const li=document.createElement("li"); li.className="stage-group";
+  const head=document.createElement("div"); head.className="stage-head";
+  const body=document.createElement("ul"); body.className="stage-body";
+  head.onclick=()=>toggleStageGroup(g);
+  li.appendChild(head); li.appendChild(body);
+  g.groupEl=li; g.headEl=head; g.bodyEl=body;
+  paintStageGroup(g);
+  return li;
+}
+function toggleStageGroup(g){          // user fold/unfold — re-pins if you were at the bottom
+  g.collapsed=!g.collapsed;
+  inLog(()=>paintStageGroup(g));
+}
+// Open a new stage group. Finalise the previous one first: mark it done and fold it, with a
+// headline (a captured checkpoint summary wins over the per-artifact fallback).
+function logStage(F, label){
+  const prev=F._curStage;
+  if(prev){ prev.done=true; prev.headline=stageHeadline(F, prev); prev.collapsed=true;
+    if(F.floor===ACTIVE) inLog(()=>paintStageGroup(prev)); }
+  const g={stagegrp:true, label, done:false, collapsed:false, headline:null, lines:null};
+  F._curStage=g;
+  F.log.push(g); if(F.log.length>240) F.log.shift();
+  if(F.floor===ACTIVE) inLog((ul)=>{ if(!ul) return; ul.appendChild(buildStageGroup(g)); });
+}
 // ---- Platform EVENT boxes: one bordered box PER pipeline event -----------------
 // A platform build streams each service's pipeline as `svc` events. Each event is its
 // OWN box (not one box per service): a stage OPENS a box when it starts (header
@@ -2960,7 +3018,7 @@ function refreshEvBox(g){
 function pushEvBox(F, g){
   g.evbox=true; g.body=g.body||[]; g.assumptions=g.assumptions||[]; g.concerns=g.concerns||[]; g.arts=g.arts||[];
   F.log.push(g); if(F.log.length>240) F.log.shift();
-  if(F.floor===ACTIVE) inLog((ul)=>{ if(!ul) return; g.el=renderEvBox(g); ul.appendChild(g.el); });
+  if(F.floor===ACTIVE) inLog((ul)=>{ if(!ul) return; g.el=renderEvBox(g); stageBody(ul).appendChild(g.el); });
   return g;
 }
 // Fold an agent's reported specifics (journal summary + assumptions/concerns/artifacts)
@@ -3036,10 +3094,12 @@ function logService(F, ev){
 }
 function rebuildLog(F){
   const ul=document.getElementById("log"); ul.innerHTML="";
+  let body=ul; F._curStage=null;   // content before the first stage sits at the log root
   for (const e of F.log){
-    if(e.box){ e.el=renderAgentBox(e); ul.appendChild(e.el); }
-    else if(e.evbox){ e.el=renderEvBox(e); ul.appendChild(e.el); }
-    else ul.appendChild(rowNode(e.cls, e.text, e.lines||null));
+    if(e.stagegrp){ ul.appendChild(buildStageGroup(e)); body=e.bodyEl; F._curStage=e; }
+    else if(e.box){ e.el=renderAgentBox(e); body.appendChild(e.el); }
+    else if(e.evbox){ e.el=renderEvBox(e); body.appendChild(e.el); }
+    else body.appendChild(rowNode(e.cls, e.text, e.lines||null));
   }
   scrollLogToEnd();          // a floor switch always lands you on the newest activity
 }

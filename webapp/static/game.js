@@ -421,6 +421,7 @@ class FloorScene extends Phaser.Scene {
     this._moodSeed = hashStr(this.proj.id || "f") % IDLE_MOODS.length;
     this.buildRooms();
     this.buildGate();
+    this.buildGateSignal();
     this.buildChest();
     this.buildAgents();
     this.buildOverviewBoard();
@@ -968,6 +969,7 @@ class FloorScene extends Phaser.Scene {
   // DOM checkpoint modal. The floor just dims and marks the gate as awaiting a decision.
   checkpointHold(on){
     this.cpHold = !!on;
+    this.setGateSignal(on ? "wait" : this.gateSignalState());   // amber while a decision pends
     if (this.spot){ this.spot.destroy(); this.spot=null; }
     if (this.qmark){ this.qmark.destroy(); this.qmark=null; }
     if (!on) return;
@@ -1693,7 +1695,51 @@ class FloorScene extends Phaser.Scene {
     this.gates[name] = info;
     this.drawGatePips();
     this.updateOverviewBoard();
+    if (!this.cpHold) this.setGateSignal(this.gateSignalState());   // the machine's own read-out
     if (info.status === "fail") this.flashGate();
+  }
+
+  // The gate has no agent — it's a deterministic machine — so it wears a stoplight that
+  // reflects the overall gate state: GREEN all gates pass · AMBER running / decision
+  // pending · RED a gate failed. Wall-mounted above the checkpoint desk.
+  buildGateSignal(){
+    const G = ROOMS.gate; if (!G) return;
+    const x = Math.round(G.x + G.w*0.30), y = Math.round(G.y + 30);
+    const c = this.add.container(x, y).setDepth(9);
+    c.add(this.add.rectangle(0, -6, 4, 14, 0x2a3550).setOrigin(0.5,1));   // bracket up to the wall
+    c.add(this.add.rectangle(0, 0, 18, 44, 0x14181f).setOrigin(0.5,0).setStrokeStyle(1, PC.sceneInk));
+    const mk = (cy, on, off) => {
+      const glow = this.add.circle(0, cy, 8, on, 0); c.add(glow);        // behind (pulses when lit)
+      const lamp = this.add.circle(0, cy, 5, off).setStrokeStyle(1, 0x05080f); c.add(lamp);
+      return {lamp, glow, on, off};
+    };
+    this.gateSig = {
+      stop: mk(10, 0xff5d6c, 0x4a1c22),
+      wait: mk(22, 0xffcf52, 0x4a3a1c),
+      go:   mk(34, 0x2fe07a, 0x1c4a2e),
+      state: null,
+    };
+    this.setGateSignal(this.gateSignalState());
+  }
+  // Overall read: any gate failed → stop; gates present and all pass → go; else wait.
+  gateSignalState(){
+    const present = GATE_ORDER.filter(n => this.gates[n]);
+    if (present.some(n => this.gates[n].status === "fail")) return "stop";
+    if (present.length && present.every(n => this.gates[n].status === "pass")) return "go";
+    return "wait";
+  }
+  setGateSignal(state){
+    const s = this.gateSig; if (!s || s.state === state) return;
+    s.state = state;
+    for (const k of ["stop", "wait", "go"]){
+      const L = s[k];
+      L.lamp.setFillStyle(k === state ? L.on : L.off);
+      this.tweens.killTweensOf(L.glow);
+      L.glow.setAlpha(0);
+    }
+    const active = s[state];
+    if (active) active.glow.setAlpha(0.45), this.tweens.add({targets: active.glow,
+      alpha: {from: 0.5, to: 0.16}, duration: 900, yoyo: true, repeat: -1, ease: "Sine.inOut"});
   }
 
   drawGatePips(){
@@ -2237,11 +2283,11 @@ function routeEvent(floor, ev){
       if (isActive) hideCheckpoint(); break;
     }
     case "release":
-      if (S){ S.openGateAndChest(); S.stampGate(true); S.celebrate(); S.banner("SHIPPED!", 0x5ddc7a); }
+      if (S){ S.setGateSignal("go"); S.openGateAndChest(); S.stampGate(true); S.celebrate(); S.banner("SHIPPED!", 0x5ddc7a); }
       logTo(F, "gold", "RELEASED -> "+(ev.uri||"artifact"));
       logProgress(F, "good", "★ SHIPPED — "+(ev.uri||"artifact")); break;
     case "halt":
-      if (S){ S.flashGate(); S.stampGate(false); }
+      if (S){ S.setGateSignal("stop"); S.flashGate(); S.stampGate(false); }
       logTo(F, "bad", "HELD: "+ev.reason);
       logProgress(F, "bad", "✕ HELD — "+ev.reason); break;
     case "done":

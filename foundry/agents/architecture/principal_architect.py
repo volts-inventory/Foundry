@@ -28,6 +28,7 @@ imports NO Anthropic SDK (LEARNINGS L6: all egress via ``rt.proxy``).
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any
 
 from foundry.agents._common import (
@@ -64,6 +65,13 @@ TIER = "T1"  # most consequential judgment never auto-downgrades (agents.md)
 # recall-oriented; the retriever's call/def neighbours expand the impact set.
 _DEFAULT_QUERY_SYMBOLS: tuple[str, ...] = ()
 _RETRIEVAL_K = 24
+
+# The architect inlines the PM's PRD prose so it designs against the real product
+# spec, not the one-line request. Cap the body so a large PRD can't blow up the
+# T1 prompt — the criteria (below) are always inlined in full; a bounded prose
+# head is sufficient design context. Env-overridable, mirroring the PM
+# `_SPEC_PROMPT_CAP` / criteria-critic `_PRD_BODY_CAP` pattern.
+_PRD_BODY_CAP = int(os.environ.get("FOUNDRY_ARCHITECT_PRD_CAP", "24000") or "24000")
 
 # The structured-output channel the proxy constrains the model to. The model
 # returns the *narratives* (titles, decisions, constraint text); the node mints
@@ -126,7 +134,8 @@ _DESIGN_SCHEMA: dict[str, Any] = {
 }
 
 _SYSTEM_SOP = (
-    "You are the Principal Architect (Layer 2). From the PRD and the retrieved "
+    "You are the Principal Architect (Layer 2). From the PRD, the acceptance "
+    "criteria, and the retrieved "
     "code spans, choose the architecture and component decomposition; write ADRs "
     "WITH rejected alternatives; define interface/API contracts, the data model, "
     "and file/interface ownership (used for deterministic merge order); identify "
@@ -157,6 +166,53 @@ def _retrieve_spans(index: SymbolIndex | None, state: FactoryState) -> tuple[Spa
     return tuple(index.retrieve_or_need_context(symbols, _RETRIEVAL_K))
 
 
+def _prd_uri(state: FactoryState) -> str:
+    """The newest ``prd`` handle on the ``artifacts`` channel (empty if none — a
+    greenfield/one-line-request view). Mirrors criteria_critic ``_prd_uri``."""
+    prds = [a for a in (state.get("artifacts") or ()) if getattr(a, "kind", None) == "prd"]
+    if not prds:
+        return ""
+    return max(prds, key=lambda a: a.seq).uri
+
+
+def _prd_body(state: FactoryState, rt: AgentRuntime) -> str:
+    """The PM's PRD prose body, resolved via the node's CAS resolver so the
+    architect designs against the real spec, not ``state['request']``.
+
+    Fail-soft (mirrors criteria_critic ``_prd_body``): no PRD handle, no resolver,
+    or an unresolvable handle → empty, so the caller falls back to request-only
+    behaviour and the synthetic-resolver tests (no CAS wired) still pass."""
+    uri = _prd_uri(state)
+    if not uri or rt.cas is None:
+        return ""
+    try:
+        body = rt.cas.resolve_blob(uri).decode("utf-8", "replace")
+    except Exception:
+        return ""
+    if len(body) > _PRD_BODY_CAP:
+        return body[:_PRD_BODY_CAP] + "\n…[PRD truncated for length]"
+    return body
+
+
+def _declared_criteria(state: FactoryState, rt: AgentRuntime) -> list[dict[str, str]]:
+    """The PM's acceptance criteria (id + text), resolved from the
+    ``acceptance_criterion`` handles on the channel so the architect designs to
+    the actual testable targets. Fail-soft: no resolver or an unresolvable handle
+    skips that criterion, never raises (mirrors criteria_critic ``_declared_criteria``)."""
+    if rt.cas is None:
+        return []
+    out: list[dict[str, str]] = []
+    for a in state.get("artifacts") or ():
+        if getattr(a, "kind", None) != "acceptance_criterion":
+            continue
+        try:
+            c = rt.cas.resolve(a)
+        except Exception:
+            continue
+        out.append({"id": str(getattr(c, "id", "")), "text": str(getattr(c, "text", ""))})
+    return out
+
+
 def _seqs(rt: AgentRuntime, config: RunnableConfig) -> dict[str, Seq]:
     """One independent epoch stream per emitted artifact key (AR2)."""
     return {
@@ -183,8 +239,15 @@ def make_principal_architect_node(
             {"file": s.file, "lines": [s.line, s.end_line], "symbol": s.symbol}
             for s in spans
         ]
+        # Feed the REAL PRD body + acceptance criteria (the whole product layer's
+        # output) into the design prompt, not just the one-line request. Fail-soft:
+        # with no PRD resolved, "prd" falls back to the request — today's behaviour.
+        request = state.get("request", "")
+        prd_body = _prd_body(state, rt)
         user_content = {
-            "prd": state.get("request", ""),
+            "request": request,
+            "prd": prd_body or request,
+            "acceptance_criteria": _declared_criteria(state, rt),
             "required_capabilities": list(state.get("required_capabilities") or ()),
             "retrieved_spans": retrieved,
         }

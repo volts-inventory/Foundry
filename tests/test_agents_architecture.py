@@ -258,6 +258,71 @@ def test_architect_greenfield_no_index_still_produces_design() -> None:
     assert "system_design" in _kinds(_artifacts_of(writes))
 
 
+# ---- 2b. the real PRD body + acceptance criteria reach the design prompt ------
+
+
+def test_architect_prompt_includes_prd_body_and_criteria_when_present() -> None:
+    """The whole product layer's output — the PM's PRD prose and acceptance
+    criteria — is threaded into the architect's model prompt (resolved via the
+    CAS seams), not discarded in favour of the one-line request."""
+    from foundry.durability.artifact_store import ArtifactStore
+    from foundry.schemas.product import AcceptanceCriterion
+    from foundry.state.seq import Seq
+
+    store = ArtifactStore()
+    prd_body = (
+        "PRD: the todo service supports add/list/complete over a REST API with "
+        "auth. UNIQUE_PRD_MARKER."
+    )
+    prd_handle = Artifact(
+        kind="prd",
+        uri=store.put_blob(prd_body),  # resolve_blob reads the raw blob store
+        produced_by="product_manager",
+        seq=Seq("run-A", 1, 1, "product_manager", 0),
+    )
+    criterion = AcceptanceCriterion(
+        id="AC-9",
+        text="Given a user WHEN they add a todo THEN it persists. UNIQUE_CRIT_MARKER",
+        seq=Seq("run-A", 1, 2, "product_manager", 0),
+    )
+    crit_handle = Artifact(
+        kind="acceptance_criterion",
+        uri=store.put_body(criterion),  # resolve reconstitutes the typed body
+        produced_by="product_manager",
+        seq=Seq("run-A", 1, 3, "product_manager", 0),
+    )
+
+    transport = design_transport()
+    proxy = ModelProviderProxy(transport, signer=ZoneBSigner(KEY, KEY_ID))
+    node = make_principal_architect_node(AgentRuntime(proxy=proxy, cas=store))
+    writes = node(
+        {"request": "build a todo app", "artifacts": [prd_handle, crit_handle]},
+        config_for("run-A"),
+    )
+
+    assert "system_design" in _kinds(_artifacts_of(writes))
+    sent = json.dumps(transport.requests[-1])
+    assert "UNIQUE_PRD_MARKER" in sent  # real PRD prose, not just the request
+    assert "UNIQUE_CRIT_MARKER" in sent  # criterion text
+    assert "AC-9" in sent  # criterion id
+
+
+def test_architect_falls_back_to_request_when_no_prd_present() -> None:
+    """Fail-soft: a resolver is wired but no PRD / criteria handles ride state —
+    the prompt falls back to the one-line request and the node still runs."""
+    from foundry.durability.artifact_store import ArtifactStore
+
+    store = ArtifactStore()
+    transport = design_transport()
+    proxy = ModelProviderProxy(transport, signer=ZoneBSigner(KEY, KEY_ID))
+    node = make_principal_architect_node(AgentRuntime(proxy=proxy, cas=store))
+    writes = node({"request": "UNIQUE_REQUEST_ONLY"}, config_for("run-A"))
+
+    assert "system_design" in _kinds(_artifacts_of(writes))
+    sent = json.dumps(transport.requests[-1])
+    assert "UNIQUE_REQUEST_ONLY" in sent  # request fed under "prd" fallback
+
+
 # ---- 3. conditional entry predicates ----------------------------------------
 
 

@@ -95,14 +95,20 @@ def _transport() -> MockTransport:
     SOP order. Every product node calls ``complete(purpose="ideation", schema=)``
     — schema-constrained IDEATION, not a verdict (AC3 resolved, DT1) — so the
     payloads ride ``completions=`` and are returned verbatim as ``text``."""
-    return MockTransport(
+    # stakeholder_proxy and eng_program_mgr now fan off START in PARALLEL (not in the
+    # sequential SOP chain), so their responses are keyed by SOP substring
+    # (order-independent); the load-bearing chain scope_judge -> product_manager ->
+    # criteria_critic still consumes the FIFO `completions` queue in its order.
+    return MockTransport.scripted(
+        {
+            "You are the Stakeholder / Client Proxy": json.dumps(INTENT_PAYLOAD),
+            "You are the Engineering / Program Manager": json.dumps(SPRINT_PAYLOAD),
+        },
         completions=[
             json.dumps(SCOPE_PAYLOAD),
-            json.dumps(INTENT_PAYLOAD),
             json.dumps(PRD_PAYLOAD),
             json.dumps(CRITIQUE_PAYLOAD),
-            json.dumps(SPRINT_PAYLOAD),
-        ]
+        ],
     )
 
 
@@ -153,25 +159,34 @@ def test_product_subgraph_produces_spec_gate_artifacts() -> None:
 
 
 def test_product_subgraph_runs_nodes_in_sop_order() -> None:
-    """The four nodes fire once each, in SOP order (one model call per node).
+    """Every product node fires exactly once, and the build-load-bearing chain runs
+    in order: scope_judge -> product_manager -> criteria_critic. stakeholder_proxy
+    and eng_program_mgr are UI-only advisories that fan off START in parallel, so
+    they each fire once but their position relative to the chain is unconstrained.
 
-    The transport request carries each node's system SOP (not its node_id), so
-    order is asserted via the distinct "You are the ..." opening of each SOP."""
+    The transport request carries each node's system SOP (not its node_id), so this
+    is asserted via the distinct "You are the ..." opening of each SOP."""
     transport = _transport()
     app = build_product_subgraph(_runtime(transport)).compile()
     app.invoke({"request": "build a todo app", "route": "greenfield"}, _config())
 
     assert len(transport.requests) == 5  # exactly one model call per node
     sops = ["".join(block["text"] for block in req["system"]) for req in transport.requests]
-    markers = [
+    markers = (
         "You are the Scope Judge",
         "You are the Stakeholder / Client Proxy",
         "You are the Product Manager",
         "You are the Criteria-Completeness Critic",
         "You are the Engineering / Program Manager",
-    ]
-    for sop, marker in zip(sops, markers, strict=True):
-        assert marker in sop
+    )
+    for marker in markers:  # each node ran exactly once
+        assert sum(1 for s in sops if marker in s) == 1
+
+    def pos(marker: str) -> int:
+        return next(i for i, s in enumerate(sops) if marker in s)
+
+    # the load-bearing chain keeps its SOP order (the advisories may interleave)
+    assert pos(markers[0]) < pos(markers[2]) < pos(markers[3])
 
 
 def test_product_subgraph_writes_advisory_triage_not_a_verdict() -> None:
@@ -242,21 +257,25 @@ def test_product_subgraph_revises_on_blocking_critique() -> None:
     """A BLOCKING critique loops the PM back once; on the revised (clean) pass the
     layer advances to eng_pm and completes — autonomous planning self-correction,
     never a stall at a fixable Spec-gate omission."""
-    transport = MockTransport(
+    # Parallel advisories keyed by SOP; the sequential scope->PM->critic loop rides
+    # the FIFO queue: scope, PM(missing), critic(blocking), PM(revised), critic(clean).
+    transport = MockTransport.scripted(
+        {
+            "You are the Stakeholder / Client Proxy": json.dumps(INTENT_PAYLOAD),
+            "You are the Engineering / Program Manager": json.dumps(SPRINT_PAYLOAD),
+        },
         completions=[
             json.dumps(SCOPE_PAYLOAD),
-            json.dumps(INTENT_PAYLOAD),
             json.dumps(PRD_MISSING_SECURITY),
             json.dumps(CRITIQUE_BLOCKING),  # flags a security omission -> revise
             json.dumps(PRD_REVISED_WITH_SECURITY),  # PM adds the missing criterion
             json.dumps({"missing": [], "security_abuse_omissions": []}),  # clean
-            json.dumps(SPRINT_PAYLOAD),
-        ]
+        ],
     )
     app = build_product_subgraph(_runtime(transport, cas=ArtifactStore())).compile()
     final: FactoryState = app.invoke({"request": "build a todo app"}, _config())
 
-    # scope, intent, pm, critic, pm(revised), critic(clean), sprint == 7 calls.
+    # scope, stakeholder, eng_pm, pm, critic, pm(revised), critic(clean) == 7 calls.
     assert len(transport.requests) == 7
     sops = ["".join(b["text"] for b in req["system"]) for req in transport.requests]
     assert sum(1 for x in sops if "You are the Product Manager" in x) == 2  # PM re-ran once
@@ -273,12 +292,19 @@ def test_product_subgraph_revision_loop_is_bounded() -> None:
     revision bound and advances to eng_pm (the signed Spec gate downstream owns
     the verdict — the layer never spins forever)."""
     # Every critic pass flags a blocking omission; enough payloads for the bound.
-    completions = [json.dumps(SCOPE_PAYLOAD), json.dumps(INTENT_PAYLOAD)]
+    # scope + the PM/critic loop ride the FIFO queue; the parallel advisories are
+    # keyed by SOP so their firing order (off START) can't consume a loop payload.
+    completions = [json.dumps(SCOPE_PAYLOAD)]
     for _ in range(6):
         completions.append(json.dumps(PRD_MISSING_SECURITY))
         completions.append(json.dumps(CRITIQUE_BLOCKING))
-    completions.append(json.dumps(SPRINT_PAYLOAD))
-    transport = MockTransport(completions=completions)
+    transport = MockTransport.scripted(
+        {
+            "You are the Stakeholder / Client Proxy": json.dumps(INTENT_PAYLOAD),
+            "You are the Engineering / Program Manager": json.dumps(SPRINT_PAYLOAD),
+        },
+        completions=completions,
+    )
     app = build_product_subgraph(_runtime(transport, cas=ArtifactStore())).compile()
     final: FactoryState = app.invoke({"request": "build a todo app"}, _config())
 

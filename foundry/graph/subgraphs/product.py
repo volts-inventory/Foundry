@@ -92,17 +92,20 @@ def _num_critiques(state: FactoryState) -> int:
 def make_criteria_revision_router(rt: AgentRuntime) -> Callable[[FactoryState], str]:
     """Route after the Criteria-Completeness Critic: loop back to the PM to revise
     when the latest critique flags an applicable security/abuse omission AND the
-    revision budget is not spent; otherwise advance to eng_pm. Reads the critique
-    from the ``artifacts`` channel (post-reduction), so it sees the pass the critic
-    just wrote. Fail-open to eng_pm keeps the signed Spec gate as the sole verdict
-    authority (L5) — the router only decides whether to give the PM another try."""
+    revision budget is not spent; otherwise the critic's work is done and the PM
+    chain ENDs. (``eng_program_mgr`` no longer follows the critic — it depends on
+    nothing the product chain produces, so it runs once in parallel off START.)
+    Reads the critique from the ``artifacts`` channel (post-reduction), so it sees
+    the pass the critic just wrote. Fail-open to END keeps the signed Spec gate as
+    the sole verdict authority (L5) — the router only decides whether to give the
+    PM another try."""
 
     def _route(state: FactoryState) -> str:
         critique = _latest_critique(state, rt)
         blocking = bool(critique is not None and critique.spec_gate_blocking())
         if blocking and _num_critiques(state) <= _MAX_PM_REVISIONS:
             return _PRODUCT_MANAGER
-        return _ENG_PROGRAM_MGR
+        return END
 
     return _route
 
@@ -110,11 +113,15 @@ def make_criteria_revision_router(rt: AgentRuntime) -> Callable[[FactoryState], 
 def build_product_subgraph(rt: AgentRuntime) -> StateGraph[FactoryState]:
     """Build the Layer-1 product subgraph (UNCOMPILED) over ``FactoryState``.
 
-    Wires the four product node factories (each built with ``rt``) as a linear
-    SOP chain ``START -> stakeholder_proxy -> product_manager ->
-    criteria_completeness_critic -> eng_program_mgr -> END``. Returns the
-    ``StateGraph`` itself; the caller compiles it (the supervisor with the shared
-    checkpointer, or a test standalone). Do NOT compile with a checkpointer here.
+    Wires the five product node factories (each built with ``rt``). The build-load-
+    bearing chain is ``START -> scope_judge -> product_manager ->
+    criteria_completeness_critic ->{revise->PM | END}``; ``stakeholder_proxy`` and
+    ``eng_program_mgr`` produce UI-only advisories nothing downstream reads and run
+    ONCE in parallel off ``START`` (``START -> stakeholder_proxy -> END`` and
+    ``START -> eng_program_mgr -> END``) so they never serialize or re-run inside the
+    revision loop. Returns the ``StateGraph`` itself; the caller compiles it (the
+    supervisor with the shared checkpointer, or a test standalone). Do NOT compile
+    with a checkpointer here.
     """
     g: StateGraph[FactoryState] = StateGraph(FactoryState)
 
@@ -158,9 +165,19 @@ def build_product_subgraph(rt: AgentRuntime) -> StateGraph[FactoryState]:
     # writes no artifact and no gate input — a mis-judgement can only make the
     # factory build too little, never let a weaker build through.
     g.add_edge(START, _SCOPE_JUDGE)
-    g.add_edge(_SCOPE_JUDGE, _STAKEHOLDER_PROXY)
-    g.add_edge(_STAKEHOLDER_PROXY, _PRODUCT_MANAGER)
+    g.add_edge(_SCOPE_JUDGE, _PRODUCT_MANAGER)   # PM reads scope_tier the judge writes
     g.add_edge(_PRODUCT_MANAGER, _CRITERIA_CRITIC)
+    # stakeholder_proxy (intent_brief) and eng_program_mgr (sprint_plan) produce
+    # UI-only advisories that NO product node and no gate reads, and each reads only
+    # START-available state (stakeholder: request/spec; eng_pm: route/request). Fan
+    # them off START so they run ONCE in parallel with the PM chain instead of
+    # serializing it — and, crucially, OUTSIDE the criteria-revision loop, so a
+    # revision no longer re-bills eng_pm. Their `artifacts` writes merge safely
+    # (merge_by_uri, disjoint kinds). In autonomous mode both early-return {} (#4).
+    g.add_edge(START, _STAKEHOLDER_PROXY)
+    g.add_edge(_STAKEHOLDER_PROXY, END)
+    g.add_edge(START, _ENG_PROGRAM_MGR)
+    g.add_edge(_ENG_PROGRAM_MGR, END)
     # Bounded planning self-correction (autonomous mode never stalls at a fixable
     # Spec-gate omission): when the Criteria-Completeness Critic flags an
     # APPLICABLE security/abuse omission, loop back to the PM (which sees the
@@ -172,7 +189,6 @@ def build_product_subgraph(rt: AgentRuntime) -> StateGraph[FactoryState]:
     g.add_conditional_edges(
         _CRITERIA_CRITIC,
         route_after_critic,
-        {_PRODUCT_MANAGER: _PRODUCT_MANAGER, _ENG_PROGRAM_MGR: _ENG_PROGRAM_MGR},
+        {_PRODUCT_MANAGER: _PRODUCT_MANAGER, END: END},
     )
-    g.add_edge(_ENG_PROGRAM_MGR, END)
     return g

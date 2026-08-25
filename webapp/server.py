@@ -1441,6 +1441,14 @@ def _run_factory(p: Project, resume: bool = False) -> None:
             _emit(p, type="act", room=p.act_room, agent=p.act_agent,
                   text="… (still working; further tool calls not listed)")
 
+    def worker(ev: dict[str, object]) -> None:
+        """One live CODING worker started/finished a task — seats one desk per
+        concurrent worker on the floor (advisory; fired from pool worker threads, so
+        _emit must stay thread-safe, as it already is for `activity`)."""
+        _emit(p, type="worker", phase=str(ev.get("phase") or ""),
+              task_id=str(ev.get("task_id") or ""), title=str(ev.get("title") or ""),
+              area=str(ev.get("area") or ""), lane=str(ev.get("lane") or ""))
+
     # The code lives in the durable CAS — the build needs NO output directory. We
     # only write a disk tree when WORKSHOP_WRITE_DISK opts in (an export cache);
     # otherwise the Repo/OUTPUT browser materializes the tree straight from the store.
@@ -1499,6 +1507,7 @@ def _run_factory(p: Project, resume: bool = False) -> None:
                 run_request,                  # = p.request, or this rung's milestone framing
                 progress_cb=progress,
                 activity_cb=activity,         # what the agent is doing INSIDE a step
+                worker_cb=worker,             # per-concurrent-worker coding desks (E3)
                 mode=p.mode,
                 backend=p.backend,            # real backend per project (not always mock)
                 adapter=p.adapter,            # coding substrate (stub/raw-react)

@@ -412,6 +412,11 @@ class FloorScene extends Phaser.Scene {
     this.workingAgents = new Map();
     this.roomInflight = {};          // room -> count of in-flight nodes (ref-count)
     this.primaryRoom = null;         // the most-recent live room (glows brightest)
+    // Live coding workers: task_id -> {sprite, room}. One desk per CONCURRENT worker,
+    // driven by real per-worker telemetry (E3). Until the first worker event, the eng
+    // rooms show the org-derived synthetic IC pool; the first live worker takes over.
+    this.liveWorkers = new Map();
+    this.liveWorkerMode = false;
     // per-floor offset into IDLE_MOODS so the napper isn't the same person on every floor
     this._moodSeed = hashStr(this.proj.id || "f") % IDLE_MOODS.length;
     this.buildRooms();
@@ -1748,6 +1753,79 @@ class FloorScene extends Phaser.Scene {
   }
 
   // Seat the engineers in their discipline ROOMS from current org + pool state.
+  // ---- live per-worker coding desks (E3) ----------------------------------
+  // Real telemetry: one desk per CONCURRENT coding worker, seated when a worker starts a
+  // task and cleared when it finishes. The org-derived synthetic IC pool is a placeholder
+  // until the first real worker lands; from then on the live crew owns the IC desks.
+  workerTelemetry(ev){
+    const phase = String(ev && ev.phase || "");
+    const tid = String(ev && ev.task_id || "");
+    if (!tid) return;
+    if (!this.liveWorkerMode) this._enterLiveWorkerMode();
+    const area = String(ev.area || ""), lane = String(ev.lane || "");
+    const room = ENG_AREA_ROOM[area] || (ENG_ROOMS.includes(lane) ? lane : ENG_AREA_ROOM[lane]) || "backend";
+    if (phase === "finish"){ this._dropLiveWorker(tid); return; }
+    if (this.liveWorkers.has(tid)) return;            // idempotent re-start
+    this._spawnLiveWorker(room, tid, String(ev.title || ""), area || lane || room);
+  }
+  // First real worker → drop the synthetic IC pool (keep the lane leads) so the two never
+  // double up; the live workers become the lane's IC crew from here on.
+  _enterLiveWorkerMode(){
+    this.liveWorkerMode = true;
+    this.layoutEngineering();                          // re-lay leads only (ICs now live-driven)
+  }
+  _spawnLiveWorker(room, tid, title, tag){
+    const R = ROOMS[room]; if (!R) return;
+    const color = AREA_COLOR[room] || AREA_COLOR[tag] || 0xffc08a;
+    const k = poolKit(this._slotSeq++); k.accent = color;
+    const s = this.makePerson(0, -1000, k); s.setScale(1.3).setAlpha(0.96);
+    s.ws = this.makeWorkstation(0, -1000+16, color);
+    const short = (AREA_TAG[tag] || (tag||room).slice(0,2).toUpperCase());
+    this.pinBadge(s, short, color, false);
+    s.room = room; s.seen = true; s.taskId = tid; s.idleSlot = this._slotSeq;
+    s.setInteractive(new Phaser.Geom.Rectangle(-8,-15,16,22), Phaser.Geom.Rectangle.Contains);
+    s.on("pointerover", ()=>{ this.input.manager.canvas.style.cursor="pointer"; });
+    s.on("pointerout",  ()=>{ this.input.manager.canvas.style.cursor="default"; });
+    this.liveWorkers.set(tid, s);
+    this.zzzLoop(s);
+    this._layoutLaneWorkers(room);
+    if (title) this.showBubble(s, title, 3200, true);   // what this worker is building
+  }
+  _dropLiveWorker(tid){
+    const s = this.liveWorkers.get(tid); if (!s) return;
+    this.liveWorkers.delete(tid);
+    const room = s.room;
+    this.setGlow(s, false);
+    s._dead = true; if (s.zzzEv){ s.zzzEv.remove(); s.zzzEv=null; }
+    if (s.ws){ if (s.ws.chair) s.ws.chair.destroy(); s.ws.destroy(); }
+    this.tweens.add({targets:s, alpha:0, scale:0, duration:260, ease:"Back.in",
+      onComplete:()=>s.destroy()});
+    this._layoutLaneWorkers(room);
+  }
+  // Pack a lane's live workers into the shared centred IC grid (same PX/SY/RP as
+  // layoutEngineering) and seat them heads-down building.
+  _layoutLaneWorkers(room){
+    const R = ROOMS[room]; if (!R) return;
+    const crew = []; for (const s of this.liveWorkers.values()) if (s.room === room && !s._dead) crew.push(s);
+    const n = crew.length, cols = Math.min(Math.max(n,1), 3), PX=84, SY=R.y+94, RP=50;
+    crew.forEach((s,i)=>{
+      const col=i%cols, row=Math.floor(i/cols), bw=(cols-1)*PX;
+      const hx = Math.round(R.cx - bw/2 + col*PX), hy = SY + row*RP;
+      s.home = {x:hx, y:hy};
+      if (s.ws){ s.ws.x=hx; s.ws.y=hy+16; s.ws.setDepth(hy+21);
+        if (s.ws.chair){ s.ws.chair.x=hx; s.ws.chair.y=hy; s.ws.chair.setDepth(hy-4); } }
+      if (!s._placed){ s._placed=true; s.x=hx; s.y=hy; s.setDepth(hy);
+        s.setScale(0); this.tweens.add({targets:s, scale:1.35, duration:360, ease:"Back.out"});
+        this.deskRest(s, true, true);
+      } else { s.setDepth(hy); this.deskRest(s, true, true); }
+    });
+  }
+  // Drop every live worker (build over / floor reset).
+  clearLiveWorkers(){
+    for (const tid of [...this.liveWorkers.keys()]) this._dropLiveWorker(tid);
+    this.liveWorkerMode = false;
+  }
+
   layoutEngineering(){
     // setGlow first: destroy() does NOT kill tweens targeting the object, so a lit
     // sprite would leave a repeat:-1 alpha tween writing to a dead target forever —
@@ -1782,7 +1860,9 @@ class FloorScene extends Phaser.Scene {
     for(const rk in perRoom){
       const R=ROOMS[rk]; if(!R) continue;
       const people=perRoom[rk];
-      const lead=people.find(p=>p.lead), ics=people.filter(p=>!p.lead);
+      // In live-worker mode the real per-worker telemetry owns the IC desks, so the
+      // synthetic pool draws leads ONLY (the ICs are seated by _spawnLiveWorker).
+      const lead=people.find(p=>p.lead), ics=this.liveWorkerMode ? [] : people.filter(p=>!p.lead);
       // create one seated worker (+desk) at (x,y); leads get the star + "<AREA> LEAD" badge.
       const place=(p, x, y, faceUp)=>{
         x=Math.round(x); y=Math.round(y);
@@ -2019,6 +2099,11 @@ function routeEvent(floor, ev){
       logAct(F, ev);
       if (S) S.agentAct(ev.agent, ev.text, ev.room);
       break;
+    case "worker":
+      // LIVE per-worker coding desk (E3): one desk per CONCURRENT worker, seated when a
+      // worker starts a task and cleared when it finishes — the real parallel IC crew.
+      if (S) S.workerTelemetry(ev);
+      break;
     case "say":
       if (S) S.agentSay(ev.agent, ev.text);
       logSay(F, ev);   // fold the journal note onto the agent's artifact group + stage summary
@@ -2110,7 +2195,7 @@ function routeEvent(floor, ev){
       F.status = "done"; F.passed = !!ev.passed; renderElevator();
       // Build's over: nobody is working, so everyone heads to the LOUNGE
       // (staffRoom(null) marks no room active and routes idle folks there).
-      if (S){ S.staffRoom(null); if (!ev.passed){ S.gloom(); S.banner("HELD AT THE GATE", 0xff5d6c); } }
+      if (S){ S.clearLiveWorkers(); S.staffRoom(null); if (!ev.passed){ S.gloom(); S.banner("HELD AT THE GATE", 0xff5d6c); } }
       logTo(F, ev.passed?"good":"bad",
         ev.passed?"Build complete — shipped.":"Build halted — nothing shipped.");
       logProgress(F, ev.passed?"good":"bad",

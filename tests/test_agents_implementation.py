@@ -512,6 +512,45 @@ def test_junior_builds_each_ready_task_on_its_own_branch(tmp_path: Any) -> None:
     assert len(writes["artifacts"]) == 2
 
 
+def test_worker_cb_fires_start_and_finish_per_task(tmp_path: Any) -> None:
+    """Advisory per-worker telemetry (E3): each built task emits exactly one start and
+    one finish through rt.worker_cb, carrying its task id — so the floor can seat one
+    desk per concurrent worker. Runs pooled (max_slots>1)."""
+    (tmp_path / "README.md").write_text("seed\n")
+    events: list[dict[str, Any]] = []
+    proxy = ModelProviderProxy(MockTransport(default_text="{}"), signer=ZoneBSigner(KEY, KEY_ID))
+    rt = AgentRuntime(proxy=proxy, adapter=StubAdapter(), worker_cb=events.append)
+    node = make_junior_engineer_node(rt, source_dir=str(tmp_path), max_slots=3)
+
+    writes = node({"tasks": tasks_state(a_task("t-001"), a_task("t-002")),
+                   "pinned_constraints": ()}, config_for("run-A"))
+
+    assert len(writes["artifacts"]) == 2  # build unaffected by the advisory callback
+    by_task: dict[str, set[str]] = {}
+    for e in events:
+        by_task.setdefault(e["task_id"], set()).add(e["phase"])
+    assert by_task == {"t-001": {"start", "finish"}, "t-002": {"start", "finish"}}
+
+
+def test_worker_cb_failure_never_breaks_the_build(tmp_path: Any) -> None:
+    """A telemetry sink that raises must not fail a coding worker (the callback runs on
+    worker threads; it is strictly advisory) — the build still produces its diffs."""
+    (tmp_path / "README.md").write_text("seed\n")
+
+    def boom(_e: dict[str, Any]) -> None:
+        raise RuntimeError("sink is down")
+
+    proxy = ModelProviderProxy(MockTransport(default_text="{}"), signer=ZoneBSigner(KEY, KEY_ID))
+    rt = AgentRuntime(proxy=proxy, adapter=StubAdapter(), worker_cb=boom)
+    # serial path (single task) AND pooled path (two tasks) both stay guarded.
+    serial = make_junior_engineer_node(rt, source_dir=str(tmp_path))
+    assert len(serial({"tasks": tasks_state(a_task("s-1")), "pinned_constraints": ()},
+                      config_for("run-A"))["artifacts"]) == 1
+    pooled = make_junior_engineer_node(rt, source_dir=str(tmp_path), max_slots=2)
+    assert len(pooled({"tasks": tasks_state(a_task("p-1"), a_task("p-2")),
+                       "pinned_constraints": ()}, config_for("run-B"))["artifacts"]) == 2
+
+
 def test_junior_forwards_triage_never_a_gate_result(tmp_path: Any) -> None:
     (tmp_path / "README.md").write_text("seed\n")
     rt = make_runtime(adapter=StubAdapter(triage_note="needs a test"))

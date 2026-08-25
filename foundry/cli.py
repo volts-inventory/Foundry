@@ -1292,6 +1292,7 @@ def run(
     checkpoint_responder: CheckpointResponder | None = None,
     progress_cb: Callable[..., None] | None = None,
     activity_cb: Callable[[str], None] | None = None,
+    worker_cb: Callable[[dict[str, Any]], None] | None = None,
     max_slots: int = AUTO_SLOTS_CAP,
     cost_cap_microusd: int | None = None,
     base_dir: str | None = None,
@@ -1451,6 +1452,7 @@ def run(
         adapter=_resolve_coding_adapter(adapter, proxy=proxy, thread_id=thread_id,
                                         activity_cb=activity_cb),
         cas=store,
+        worker_cb=worker_cb,
     )
 
     # Seal the zone-A observation channel (fail-closed forged-results hardening):

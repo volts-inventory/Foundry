@@ -91,6 +91,13 @@ class AgentRuntime:
     proxy: ModelProviderProxy
     epochs: EpochCounter = field(default_factory=EpochCounter)
     adapter: WorkerAdapter | None = None
+    # ADVISORY live-worker telemetry (observability only — like the adapter's on_activity
+    # seam). The implementation pool calls this once when a worker STARTS running one
+    # coding task and once when it FINISHES, so the UI can seat one desk per concurrent
+    # worker (≤ max_slots per lane). It is fired from worker threads, so the sink MUST be
+    # thread-safe; it MUST NOT raise (callers guard it) and MUST NOT influence any write —
+    # the build is byte-identical whether or not it is wired. None ⇒ no live-worker events.
+    worker_cb: Callable[[dict[str, Any]], None] | None = None
     # The content-addressed body store written on emit (DECISIONS D6). When set,
     # emit_artifact(..., store=rt.cas) ALSO stores the typed body so a real run's
     # resolve/resolve_blob can reconstitute it; None ⇒ mint-only (backward-

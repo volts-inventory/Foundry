@@ -47,7 +47,7 @@ from __future__ import annotations
 import json
 import os
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
@@ -663,24 +663,65 @@ def _finalize_diff(
     return writes
 
 
+def _emit_worker(
+    rt: AgentRuntime, phase: str, task: Mapping[str, Any], area: str, lane: str | None
+) -> None:
+    """ADVISORY live-worker telemetry: one desk per concurrent coding worker (E3).
+
+    Fired when a worker STARTS running one task and when it FINISHES. Strictly
+    observability — guarded so a bad sink can never break a build (the callback runs
+    from worker threads and its failure must not surface as a task failure), and it
+    writes nothing to state. No-op when no sink is wired."""
+    cb = rt.worker_cb
+    if cb is None:
+        return
+    tid = str(task.get("id") or "")
+    if not tid:
+        return
+    title = str(task.get("title") or task.get("instructions") or tid)
+    # Advisory: a telemetry sink must never fail a coding worker (runs on worker threads).
+    with suppress(Exception):
+        cb({"phase": phase, "task_id": tid, "title": title[:80],
+            "area": area, "lane": lane or area or ""})
+
+
 class _MirroringAdapter:
     """Wraps ``rt.adapter`` to mirror the diff blob into ``rt.cas`` WHILE the
     pool worker's sandbox is still alive (the pool destroys it immediately after
     ``run``). This is the ONLY shared-state write a pool worker makes — and it is
     content-addressed + atomic (``put_blob`` keys by sha256, ``os.replace``), so
     concurrent workers are safe. All ``rt.seq``/``rt.cas`` body writes stay in the
-    node's SEQUENTIAL post-processing (``_finalize_diff``)."""
+    node's SEQUENTIAL post-processing (``_finalize_diff``).
 
-    def __init__(self, rt: AgentRuntime) -> None:
+    Also fires ADVISORY per-worker desk telemetry (``_emit_worker``) at the precise
+    moment this worker begins/ends coding one task — so the floor seats exactly the
+    workers running concurrently (≤ max_slots), each on its real task."""
+
+    def __init__(
+        self,
+        rt: AgentRuntime,
+        *,
+        area_by_task: Mapping[str, str] | None = None,
+        lane: str | None = None,
+    ) -> None:
         assert rt.adapter is not None
         self._rt = rt
+        self._area_by_task = area_by_task or {}
+        self._lane = lane
         self.supports_turn_snapshots = rt.adapter.supports_turn_snapshots
 
     def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
+        area = self._area_by_task.get(str(packet.task.get("id") or ""), "")
         with coding_admission():  # global cross-lane coding-session bound (D1)
-            result = self._rt.adapter.run(packet, sandbox)  # type: ignore[union-attr]
-        _mirror_diff_blob(self._rt, sandbox, result)
-        return result
+            # Seat the desk only once actually coding (admission acquired), and clear it
+            # whatever happens — so a failed task never leaves a ghost worker on the floor.
+            _emit_worker(self._rt, "start", packet.task, area, self._lane)
+            try:
+                result = self._rt.adapter.run(packet, sandbox)  # type: ignore[union-attr]
+                _mirror_diff_blob(self._rt, sandbox, result)
+                return result
+            finally:
+                _emit_worker(self._rt, "finish", packet.task, area, self._lane)
 
 
 def _adapter_name(rt: AgentRuntime) -> str:
@@ -708,6 +749,8 @@ def _run_tasks_pooled(
     persona_by_task: Mapping[str, str] | None = None,
     spans_by_task: Mapping[str, tuple[str, ...]] | None = None,
     weight_tasks: Sequence[Task] | None = None,
+    area_by_task: Mapping[str, str] | None = None,
+    lane: str | None = None,
 ) -> dict[str, Any]:
     """Run the ready tasks' adapter work in PARALLEL through a bounded
     :class:`LocalWorkPool` (``max_slots`` physical slots), then post-process the
@@ -788,7 +831,8 @@ def _run_tasks_pooled(
 
     with LocalWorkPool(
         sandbox_factory=make_sandbox,
-        adapter_factory=lambda _name: _MirroringAdapter(rt),
+        adapter_factory=lambda _name: _MirroringAdapter(
+            rt, area_by_task=area_by_task, lane=lane),
         max_slots=max_slots,
         quota=quota,
     ) as pool:
@@ -954,6 +998,13 @@ def make_junior_engineer_node(
         # Area-expert persona per task (option-2): a frontend task is written by a
         # frontend specialist, etc. Empty map when no ownership/resolver is wired.
         persona_by_task = _persona_by_task(state, resolve)
+        # task_id -> AREA, for advisory per-worker desk telemetry (which room a live
+        # worker sits in). Empty when no ownership/resolver is wired.
+        area_by_task: dict[str, str] = {}
+        if resolve is not None:
+            _own = _read_ownership(state, resolve)
+            if _own is not None:
+                area_by_task = _area_by_task_id(_own)
         # Spec grounding per task (ROADMAP Phase 4): the criteria/design/unit spans
         # this task traces to. Empty when no resolver is wired (unchanged prompt).
         spans_by_task = {t.id: _retrieved_spans(state, resolve, t) for t in tasks}
@@ -988,6 +1039,8 @@ def make_junior_engineer_node(
                 persona_by_task=persona_by_task,
                 spans_by_task=spans_by_task,
                 weight_tasks=all_tasks,  # per-domain quotas span EVERY lane, not just this one
+                area_by_task=area_by_task,  # advisory: which room each live worker sits in
+                lane=lane,
             )
             if jnote is not None:
                 pooled.setdefault("agent_journal", []).append(jnote)
@@ -999,21 +1052,27 @@ def make_junior_engineer_node(
         # (parallel siblings can't see each other mid-flight).
         overlay: dict[str, str | None] = {}
         for task in tasks:
-            writes = _run_one_task(
-                rt,
-                task,
-                constraints,
-                _base_snapshot_of(task, state),
-                config,
-                source_dir=source_dir,
-                snapshot_store=snapshot_store,
-                turn_budget=turn_budget,
-                cost_budget_microusd=cost_budget_microusd,
-                prior_failures=prior_failures,
-                persona=persona_by_task.get(task.id, ""),
-                retrieved_spans=spans_by_task.get(task.id, ()),
-                overlay=overlay,
-            )
+            _t_area = area_by_task.get(task.id, "")
+            _tmeta = {"id": task.id, "title": getattr(task, "title", task.id)}
+            _emit_worker(rt, "start", _tmeta, _t_area, lane)
+            try:
+                writes = _run_one_task(
+                    rt,
+                    task,
+                    constraints,
+                    _base_snapshot_of(task, state),
+                    config,
+                    source_dir=source_dir,
+                    snapshot_store=snapshot_store,
+                    turn_budget=turn_budget,
+                    cost_budget_microusd=cost_budget_microusd,
+                    prior_failures=prior_failures,
+                    persona=persona_by_task.get(task.id, ""),
+                    retrieved_spans=spans_by_task.get(task.id, ()),
+                    overlay=overlay,
+                )
+            finally:
+                _emit_worker(rt, "finish", _tmeta, _t_area, lane)
             overlay.update(_slice_of(rt, writes))
             for channel, records in writes.items():
                 merged.setdefault(channel, []).extend(records)

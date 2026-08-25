@@ -169,7 +169,7 @@ matches the true record.</textarea>
           <div class="field">
             <label for="mode-select">Mode</label>
             <select id="mode-select">
-              <option value="gated">gated — CTO signs off in the floor screen + evidence pack</option>
+              <option value="gated">gated — you sign off in the floor screen + evidence pack</option>
               <option value="autonomous">autonomous — build · admit · deploy</option>
             </select>
           </div>
@@ -246,7 +246,7 @@ single-server additive-homomorphic (Paillier) variant + the demo runner</textare
             <label for="packs-input">Domain packs (optional, comma-separated)</label>
             <input id="packs-input" type="text" placeholder="regulated, ml_data, frontend, game, crypto, infra" />
           </div>
-          <label class="check"><input type="checkbox" id="supervised" checked /> Supervised (CTO approves each checkpoint)</label>
+          <label class="check"><input type="checkbox" id="supervised" checked /> Supervised (you approve each checkpoint)</label>
           <p class="hint" id="supervised-hint"></p>
           <p class="hint">A multi-service request (e.g. a site with users + posts) is auto-built as a PLATFORM — split into web / backend / data services (the backend owns the REST API, auth &amp; domain logic), each auto-deepened, then stitched into one monorepo. A single thing builds as one service.</p>
           <details class="adv-platform">
@@ -366,7 +366,7 @@ single-server additive-homomorphic (Paillier) variant + the demo runner</textare
         <div id="pulls-list" class="pulls-list"></div>
       </div>
       <div class="repo-pane hidden" data-pane="signoffs">
-        <p class="cp-note">Recorded CTO approvals (Design / Release), signed off right
+        <p class="cp-note">Recorded approvals (Design / Release), signed off right
           here in the floor screen — never in Git. Exported with the build as
           <code>.foundry/evidence.json</code> + <code>EVIDENCE.md</code>.</p>
         <ul id="signoffs-list" class="checks-list"></ul>

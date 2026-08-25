@@ -30,8 +30,13 @@ AGENT_BY_NODE: dict[str, tuple[str, str]] = {
     "stakeholder_proxy": ("Stakeholder Proxy", "product"),
     "product_manager": ("Product Manager", "product"),
     "criteria_completeness_critic": ("Criteria Critic", "product"),
+    "scope_judge": ("Scope Judge", "product"),
     "eng_program_mgr": ("Program Manager", "product"),
     "principal_architect": ("Principal Architect", "architecture"),
+    # Conditional design agents: seat a real sprite when they actually run (only then),
+    # instead of the log-only line they used to get from _INFRA_NODE.
+    "ux_design": ("UX Designer", "architecture"),
+    "domain_specialist": ("Domain Specialist", "architecture"),
     # Implementation fans out into a LEAD (decompose) + ENGINEER (build) node per
     # discipline lane, so each lights its own room + role. Legacy single-node ids kept
     # so an OLD build's replayed telemetry still seats someone.
@@ -46,6 +51,9 @@ AGENT_BY_NODE: dict[str, tuple[str, str]] = {
     "qa_engineer": ("QA Engineer", "qa"),
     "sdet": ("SDET", "qa"),
     "reviewer_critic": ("Reviewer", "qa"),
+    # The doc pass owns the runbook/known-issues/upgrade artifacts, so seat the Writer
+    # as a real agent when `docs` runs (was desk-less infra — the Writer never seated).
+    "docs": ("Technical Writer", "qa"),
     "appsec_engineer": ("AppSec Engineer", "security"),
     "audit_compliance": ("Audit & Compliance", "security"),
     "supply_chain_reviewer": ("Supply-chain Reviewer", "security"),
@@ -160,18 +168,10 @@ _INFRA_NODE: dict[str, tuple[str, str, str | None]] = {
                        "rebuild finished"),
     "assurance_fix": ("engineering", "fix-forward — clearing the assurance findings",
                       "assurance fixes finished"),
-    # the doc pass + the evidence packs behind each sign-off
-    "docs": ("qa", "writing the runbook & release docs", "docs written"),
+    # the evidence packs behind each sign-off
     "design_sign_off": ("gate", "assembling the design evidence", None),
     "release_sign_off": ("gate", "assembling the release evidence", None),
 }
-# Conditional-architecture agents that have no sprite on the floor — they still get a
-# step line so the log doesn't skip them. (agent name, room, running, done)
-_INFRA_NODE.update({
-    "domain_specialist": ("architecture", "domain specialist reviewing the design",
-                          "domain review finished"),
-    "ux_design": ("architecture", "UX pass over the interface", "UX pass finished"),
-})
 _BOUNDARY_TITLE: dict[str, str] = {
     "product": "Product & Requirements",
     "design": "Architecture & Design",
@@ -228,8 +228,12 @@ _NODE_SUMMARY: dict[str, str] = {
     "stakeholder_proxy": "clarified the intent brief",
     "product_manager": "wrote the PRD & acceptance criteria",
     "criteria_completeness_critic": "critiqued the acceptance criteria",
+    "scope_judge": "sized the request into a build scope",
     "eng_program_mgr": "drafted the sprint plan",
     "principal_architect": "produced the system design & interface contracts",
+    "ux_design": "did a UX pass over the interface",
+    "domain_specialist": "reviewed the design for domain fit",
+    "docs": "wrote the runbook & release docs",
     "senior_engineer": "decomposed the design into ownership-ordered tasks",
     "junior_engineer": "built the feature diffs (code) across the task set",
     "frontend_lead": "decomposed the frontend work into tasks",

@@ -79,7 +79,7 @@ const RBASE = {
   data:{label:"DATA",color:0x245a42}, qa:{label:"QA · REVIEW",color:0x2e5a4a},
   security:{label:"SECURITY",color:0x5a2e36},
   gate:{label:"GATE",color:0x2c4a55}, vault:{label:"VAULT",color:0x5a4a18},
-  office:{label:"CTO OFFICE",color:0x4a4030},   // the CTO's room (opens on the RIGHT wall)
+  office:{label:"OFFICE",color:0x4a4030},   // a quiet office (opens on the RIGHT wall)
 };
 // Build-order numeral per room (engineering's 3 rooms share stage 3 — they run in
 // parallel; support rooms have none).
@@ -133,14 +133,18 @@ function roomAt(x,y){ for (const k in ROOMS){ const R=ROOMS[k];
 
 const COLORS = {
   "Stakeholder Proxy":0x7fd1ff,"Product Manager":0xffd95e,"Criteria Critic":0xff8fae,
-  "Program Manager":0xb59bff,"Principal Architect":0xc79bff,"Senior Engineer":0xff9b5e,
+  "Scope Judge":0x9be7ff,"Program Manager":0xb59bff,"Principal Architect":0xc79bff,
+  "UX Designer":0xff9be0,"Domain Specialist":0xbdf0a0,"Senior Engineer":0xff9b5e,
   "Junior Engineer":0xffc08a,"QA Engineer":0x7dffb0,"SDET":0x5ddc7a,"Reviewer":0x5db8ff,
   "Technical Writer":0xe8e0a0,"AppSec Engineer":0xff6d6d,
   "Audit & Compliance":0xffb38a,"Supply-chain Reviewer":0x9bb0ff,
 };
+// The CATALOG of named agents per room. Nobody is seated from this up front — an agent
+// gets a desk only when its node first runs (ensureSeated), so the floor is exactly the
+// crew alive in THIS run. Order here is only a fallback; live seating packs in run order.
 const ROSTER = {
-  product:["Stakeholder Proxy","Product Manager","Criteria Critic","Program Manager"],
-  architecture:["Principal Architect"],
+  product:["Stakeholder Proxy","Product Manager","Criteria Critic","Scope Judge","Program Manager"],
+  architecture:["Principal Architect","UX Designer","Domain Specialist"],
   // engineering is NOT a static room: its engineers are placed per-discipline
   // (frontend/backend/data) from the live org telemetry (layoutEngineering).
   qa:["QA Engineer","SDET","Reviewer","Technical Writer"],
@@ -156,7 +160,8 @@ const AREA_TAG = {frontend:"FE", backend:"BE", data:"DA", infra:"IN", security:"
 // short role tags for the named static-room agents (the senior roles), shown on a badge.
 const ROLE_TAG = {
   "Stakeholder Proxy":"STAKEHLDR", "Product Manager":"PROD MGR", "Criteria Critic":"CRITIC",
-  "Program Manager":"PROG MGR", "Principal Architect":"ARCHITECT", "QA Engineer":"QA ENG",
+  "Scope Judge":"SCOPE", "Program Manager":"PROG MGR", "Principal Architect":"ARCHITECT",
+  "UX Designer":"UX", "Domain Specialist":"DOMAIN", "QA Engineer":"QA ENG",
   "SDET":"SDET", "Reviewer":"REVIEWER", "Technical Writer":"WRITER", "AppSec Engineer":"APPSEC",
   "Audit & Compliance":"AUDIT", "Supply-chain Reviewer":"SUPPLY",
 };
@@ -209,8 +214,8 @@ const CHARACTERS = [
 ];
 // Stable, room-distinct character per role (no two leads in a room share a sprite).
 const ROLE_CHAR = {
-  "Stakeholder Proxy":4,"Product Manager":7,"Criteria Critic":2,"Program Manager":6,
-  "Principal Architect":0,"Senior Engineer":5,"Junior Engineer":9,
+  "Stakeholder Proxy":4,"Product Manager":7,"Criteria Critic":2,"Scope Judge":3,"Program Manager":6,
+  "Principal Architect":0,"UX Designer":8,"Domain Specialist":6,"Senior Engineer":5,"Junior Engineer":9,
   "QA Engineer":8,"SDET":1,"Reviewer":4,"Technical Writer":3,
   "AppSec Engineer":5,"Audit & Compliance":7,"Supply-chain Reviewer":0,
 };
@@ -641,10 +646,9 @@ class FloorScene extends Phaser.Scene {
     P("vending", L.x1-TI-12, L.y+74);
     P("plant",   L.x+TI+6, bot(L)); P("plant", L.x1-TI-8, bot(L));
 
-    // CTO OFFICE (walled room, row 2): his executive desk + chair at the bottom and
-    // plants in the corners (no org board — the room stays uncluttered). Opens RIGHT.
+    // OFFICE (walled room, row 2): a desk + corner plants (uncluttered). Opens RIGHT.
     const E = ROOMS.office;
-    P("counter", E.cx, E.y1-34);                                       // executive desk (CTO stands behind)
+    P("counter", E.cx, E.y1-34);                                       // a desk
     P("plant", E.x+TI+8, E.y1-TI); P("plant", E.x1-TI-10, E.y1-TI);    // corner plants (clear of the door)
   }
 
@@ -1101,41 +1105,66 @@ class FloorScene extends Phaser.Scene {
     openFilesFor({id:F.id, floor:F.floor, release:F.release, request:F.request, status:"done"});
   }
 
+  // The floor shows exactly the crew that is ALIVE in this run: no named agent gets a
+  // desk until its node first reports telemetry (ensureSeated). So buildAgents seats
+  // nobody up front — it just records the per-room catalog + the live seating order.
   buildAgents(){
-    let li = 0;                                    // global idle-mood slot index
-    for (const room in ROSTER){
-      const names = ROSTER[room], R = ROOMS[room]; if (!R) continue;
-      const cols = Math.min(names.length, 3);
-      const single = names.length === 1;                         // a one-role room → centre it
-      const PX = 84, SY = R.y + 94, RP = 50;                     // SAME grid as the eng rooms
-      names.forEach((name,i)=>{
-        const col = i%cols, row = Math.floor(i/cols);
-        // centred columns, first row well below the room label (matches every other room)
-        const blockW = (cols-1)*PX, hx = single ? R.cx : R.cx - blockW/2 + col*PX;
-        const hy = single ? Math.round(R.y + R.h*0.52)            // single role → centred desk
-                          : SY + row*RP;                          // else the consistent grid
-        const seed = hashStr((this.proj.id||'f')+name), kit = kitFor(name, seed);
-        this.makeWorkstation(hx, hy+16, kit.accent);              // desk just in front of them
-        const a = this.makePerson(hx, hy, kit);
-        a.setScale(1.5).setDepth(hy);                             // y-sort (desk occludes legs)
-        // role badge over the agent so every senior role is labelled (like the eng leads)
-        const rtag = ROLE_TAG[name] || name.slice(0,9).toUpperCase();
-        const acc = (kit.accent!=null ? kit.accent : 0x9fb4d8);
-        this.pinBadge(a, rtag, acc, true);
-        a.home = {x:hx,y:hy}; a.room = room; a.idleSlot = li++;
-        // Everyone starts AT their own desk, off the clock: stages just turn them
-        // round to the monitor. Nobody is ever staged in the lounge.
-        a.setAlpha(1); a.seen = true; a.bubble = null;
+    this.seatedNames = {};       // room -> [names] spawned so far, in reveal order (packing order)
+    this._slotSeq = 0;           // idle-mood slot counter across every spawned agent
+  }
+
+  // Spawn a named agent's sprite+desk the first time its node runs, then re-pack its
+  // room so the seated crew stays centred with no gaps. Idempotent: a second call for an
+  // already-seated agent just returns it. Returns null for names with no room (the eng
+  // lanes are laid out separately by layoutEngineering).
+  ensureSeated(name){
+    if (this.agents.has(name)) return this.agents.get(name);
+    const room = AGENT_ROOM[name];
+    if (!room || !ROOMS[room]) return null;
+    const seed = hashStr((this.proj.id||'f')+name), kit = kitFor(name, seed);
+    const a = this.makePerson(0, -1000, kit);        // off-screen until layoutRoomAgents places it
+    a.setScale(1.5);
+    const rtag = ROLE_TAG[name] || name.slice(0,9).toUpperCase();
+    const acc = COLORS[name] != null ? COLORS[name] : 0x9fb4d8;   // per-role tint (unique look, E6)
+    this.pinBadge(a, rtag, acc, true);
+    a.room = room; a.idleSlot = this._slotSeq++; a.bubble = null; a.seen = true; a.setAlpha(1);
+    a.ws = this.makeWorkstation(0, -1000+16, acc);
+    a.setInteractive(new Phaser.Geom.Rectangle(-8,-15,16,22), Phaser.Geom.Rectangle.Contains);
+    a.on("pointerdown", ()=> openInterview(name));
+    a.on("pointerover", ()=>{ this.input.manager.canvas.style.cursor = "pointer"; });
+    a.on("pointerout",  ()=>{ this.input.manager.canvas.style.cursor = "default"; });
+    this.agents.set(name, a);
+    (this.seatedNames[room] = this.seatedNames[room] || []).push(name);
+    this.layoutRoomAgents(room);
+    return a;
+  }
+
+  // Pack a room's seated agents into the shared centred grid (same PX/SY/RP as the eng
+  // rooms), re-centring as the crew grows. A newly-spawned sprite scales in at its slot;
+  // an already-seated one walks to its new slot. Desk + stool move with the person.
+  layoutRoomAgents(room){
+    const R = ROOMS[room]; if (!R) return;
+    const names = this.seatedNames[room] || [];
+    const n = names.length, single = n === 1;
+    const cols = Math.min(Math.max(n,1), 3);
+    const PX = 84, SY = R.y + 94, RP = 50;
+    names.forEach((name,i)=>{
+      const a = this.agents.get(name); if (!a) return;
+      const col = i%cols, row = Math.floor(i/cols), blockW = (cols-1)*PX;
+      const hx = single ? Math.round(R.cx) : Math.round(R.cx - blockW/2 + col*PX);
+      const hy = single ? Math.round(R.y + R.h*0.52) : (SY + row*RP);
+      a.home = {x:hx, y:hy};
+      if (a.ws){ a.ws.x = hx; a.ws.y = hy+16; a.ws.setDepth(hy+21);
+        if (a.ws.chair){ a.ws.chair.x = hx; a.ws.chair.y = hy; a.ws.chair.setDepth(hy-4); } }
+      if (!a._placed){                          // first placement → pop in at the slot
+        a._placed = true; a.x = hx; a.y = hy; a.setDepth(hy);
+        a.setScale(0); this.tweens.add({targets:a, scale:1.4, duration:400, ease:"Back.out"});
         this.standDown(a);
-        // Clickable -> interview this lead (their journal + a question), advisory.
-        a.setInteractive(new Phaser.Geom.Rectangle(-8,-15,16,22), Phaser.Geom.Rectangle.Contains);
-        a.on("pointerdown", ()=> openInterview(name));
-        a.on("pointerover", ()=>{ this.input.manager.canvas.style.cursor = "pointer"; });
-        a.on("pointerout", ()=>{ this.input.manager.canvas.style.cursor = "default"; });
-        a.setScale(0); this.tweens.add({targets:a, scale:1.4, duration:400, delay:60*li, ease:"Back.out"});
-        this.agents.set(name, a);
-      });
-    }
+      } else {                                  // re-centre: walk (or teleport) to the new slot
+        a.setDepth(hy);
+        if (a.working) this.deskRest(a, true); else this.standDown(a);
+      }
+    });
   }
 
   // Our own generated GBA-style sprite: big head, tiny torso, pointed ears, vertical
@@ -1232,7 +1261,7 @@ class FloorScene extends Phaser.Scene {
     const L = this.liveRooms;
     return !!room && !!L && (L.has(room) || (L.has("engineering") && ENG_ROOMS.includes(room)));
   }
-  // key = the PRIMARY (most recent) room: drives the glow, the CTO visit and the
+  // key = the PRIMARY (most recent) room: drives the glow and the
   // forward-phase handoff. reset=true (a new phase boundary) clears the live set first,
   // so a fresh phase doesn't inherit the prior phase's crew.
   setActiveRoom(key, reset=false){
@@ -1410,9 +1439,10 @@ class FloorScene extends Phaser.Scene {
       return;
     }
     this.liveRooms.add(room);
+    if (agent) this.ensureSeated(agent);   // first run of this node → give it a desk now
     if (agent) this.workingAgents.set(agent, (this.workingAgents.get(agent)||0) + 1);
     if (phase === "start") this.roomInflight[room] = (this.roomInflight[room]||0) + 1;
-    // The primary room (glow + CTO visit) follows the most recent start; re-seat either way.
+    // The primary room (brightest glow) follows the most recent start; re-seat either way.
     if (this.activeRoom !== room) this.setActiveRoom(room); else this.restaff();
     if (agent) this.agentWork(agent);   // the seated agent visibly types
   }
@@ -1502,7 +1532,7 @@ class FloorScene extends Phaser.Scene {
   }
 
   reveal(name){
-    const a = this.agents.get(name); if (!a) return a;
+    const a = this.agents.get(name) || this.ensureSeated(name); if (!a) return a;
     if (!a.seen){ a.seen = true; this.tweens.add({targets:a, alpha:1, duration:300}); }
     return a;
   }
@@ -1554,7 +1584,7 @@ class FloorScene extends Phaser.Scene {
     return pick(this.poolGroup, room) || pick(this.techLeadGroup, room);
   }
 
-  // Show a speech bubble over anyone (agents, engineers, the CTO). `ambient` marks it
+  // Show a speech bubble over anyone (agents, engineers). `ambient` marks it
   // as idle flavour: ambient chatter never overwrites a real line, and is dropped the
   // moment its owner is called back to work.
   showBubble(a, text, ms, ambient){
@@ -3051,7 +3081,7 @@ function renderSignOffs(sign_offs){
   ul.innerHTML = "";
   cnt.textContent = sign_offs.length ? String(sign_offs.length) : "";
   if(!sign_offs.length){
-    ul.innerHTML = "<li class='muted'>No sign-offs recorded yet — the CTO signs off at the Design &amp; Release checkpoints.</li>";
+    ul.innerHTML = "<li class='muted'>No sign-offs recorded yet — you sign off at the Design &amp; Release checkpoints.</li>";
     return;
   }
   for(const s of sign_offs){
@@ -3628,7 +3658,7 @@ syncCostCap();
 // is the sole release gate (build · admit · deploy, no human sign-off). So when
 // `autonomous` is picked, supervision (per-checkpoint human approval) is forced
 // OFF — keeping it on would pause an unattended build. gated re-enables it so the
-// CTO drives the Design/Release checkpoints in the floor screen.
+// You drive the Design/Release checkpoints in the floor screen.
 function syncMode(){
   const mode = document.getElementById("mode-select").value;
   const sup = document.getElementById("supervised");
@@ -3648,7 +3678,7 @@ function syncMode(){
         + "a human) — the build will refuse to start. Switch to gated, or clear the pack.";
   } else {
     sup.disabled = false;
-    if(hint) hint.textContent = "Gated — the CTO approves the Design & Release checkpoints right here in the floor screen (no Git merge).";
+    if(hint) hint.textContent = "Gated — you approve the Design & Release checkpoints right here in the floor screen (no Git merge).";
   }
 }
 document.getElementById("mode-select").addEventListener("change", syncMode);

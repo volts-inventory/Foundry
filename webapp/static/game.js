@@ -1371,10 +1371,25 @@ class FloorScene extends Phaser.Scene {
   // character — the artifact itself is the signal that work crossed over).
   deliverWork(fromKey, toKey){
     const rk = (k)=> k==="engineering" ? "backend" : k;     // virtual eng → a real room
-    const B = ROOMS[rk(toKey)];
+    const A = ROOMS[rk(fromKey)], B = ROOMS[rk(toKey)];
     if (!B || this._dead) return;
-    this.burst(B.cx, B.standY-10, [0xffcf52,0xffffff], 10);
-    this.floatText(B.cx, B.standY-26, "✦ work delivered", "#ffe6a0", 10);
+    const bx = Math.round(B.cx), by = Math.round(B.standY-10);
+    const land = ()=>{ this.burst(bx, by, [0xffcf52,0xffffff], 10);
+      this.floatText(bx, B.standY-26, "✦ work delivered", "#ffe6a0", 10); };
+    if (!A){ land(); return; }
+    // A glowing work-token physically crosses the pipeline, room → room — the strongest
+    // "this is a factory" signal, fired only on a real forward handoff.
+    const ax = Math.round(A.cx), ay = Math.round(A.standY-10);
+    const pkt = this.add.container(ax, ay).setDepth(2100);
+    const glow = this.add.circle(0,0,9,0xffcf52,0.5); pkt.add(glow);
+    pkt.add(this.add.rectangle(0,0,10,8,0xffcf52).setStrokeStyle(1,0x7a5028));
+    pkt.add(this.add.rectangle(0,-1,10,2,0xfff0a8));
+    this.tweens.add({targets:glow, alpha:{from:0.5,to:0.16}, duration:280, yoyo:true, repeat:-1});
+    for (let i=1;i<=4;i++) this.time.delayedCall(i*100, ()=>{ if (this._dead||!pkt.active) return;
+      const d = this.add.circle(pkt.x, pkt.y, 3, 0xffcf52, 0.5).setDepth(2099);
+      this.tweens.add({targets:d, alpha:0, scale:0.3, duration:420, onComplete:()=>d.destroy()}); });
+    this.tweens.add({targets:pkt, x:bx, y:by, scale:{from:1.3,to:1}, duration:600, ease:"Cubic.inOut",
+      onComplete:()=>{ pkt.destroy(); land(); }});
   }
 
   // ---- presence: nobody ever leaves their desk ----------------------------
@@ -1591,6 +1606,7 @@ class FloorScene extends Phaser.Scene {
     seat(this.poolGroup, engUp);           // each lane's ICs work while its engineer node runs
     this.paintGlow();                      // and re-light the rooms for the new live set
     this.updateOverviewBoard();            // reflect the new live set on the office board
+    this.setGateEngine(this.roomLive("gate"));   // the mainframe chugs only while the gate runs
   }
   // Every person on the floor (named leads + the engineering lanes), one iterator.
   *everyone(){
@@ -1734,6 +1750,7 @@ class FloorScene extends Phaser.Scene {
     this.drawGatePips();
     this.updateOverviewBoard();
     if (!this.cpHold) this.setGateSignal(this.gateSignalState());   // the machine's own read-out
+    this.mfFlash();                                                 // a green LED pulse on each result
     if (info.status === "fail") this.flashGate();
   }
 
@@ -1778,20 +1795,39 @@ class FloorScene extends Phaser.Scene {
     this.mfChug();
   }
   mfChug(){
-    for (const g of (this.mfReels||[]))
-      this.tweens.add({targets:g, angle:"+=360", duration:1500, repeat:-1, ease:"Linear"});
-    if (this.mfBar) this.tweens.add({targets:this.mfBar,
-      x:{from:this.mfBarBase, to:this.mfBarBase+this.mfBarSpan}, duration:1100, yoyo:true,
-      repeat:-1, ease:"Sine.inOut"});
+    // LED strobe runs always; density tracks engine state (busy vs near-dark idle) so a
+    // chugging mainframe MEANS the gate is running, not a permanent false signal.
     this.time.addEvent({delay:220, loop:true, callback:()=>{
       if (this._dead || !this.mfLeds) return;
+      const p = this.mfEngineOn ? 0.34 : 0.05;
       for (const l of this.mfLeds){
         const r = Math.random();
-        if (r < 0.30) l.setFillStyle(r < 0.16 ? 0x2fe07a : 0x2bd3ff);
-        else if (r < 0.55) l.setFillStyle(0x1c4a2e);
+        if (r < p) l.setFillStyle(r < p*0.5 ? 0x2fe07a : 0x2bd3ff);
+        else if (r < p+0.22) l.setFillStyle(0x1c4a2e);
       }
     }});
+    this.setGateEngine(false);   // idle until a gate node actually runs
   }
+  // Reels spin fast + the bar sweeps only while the gate is working; otherwise reels creep
+  // and the bar parks. Store handles + kill before restart so start/stop never leaks tweens.
+  setGateEngine(on){
+    if (!this.mfReels) return;   // mainframe not built yet (restaff can fire before buildMainframe)
+    on = !!on;
+    if (this._mfInit && this.mfEngineOn === on) return;
+    this._mfInit = true; this.mfEngineOn = on;
+    for (const g of (this.mfReels||[])){
+      this.tweens.killTweensOf(g);
+      this.tweens.add({targets:g, angle:"+=360", duration:on?1500:6000, repeat:-1, ease:"Linear"});
+    }
+    if (this.mfBar){
+      this.tweens.killTweensOf(this.mfBar);
+      if (on) this.tweens.add({targets:this.mfBar, x:{from:this.mfBarBase, to:this.mfBarBase+this.mfBarSpan},
+        duration:1100, yoyo:true, repeat:-1, ease:"Sine.inOut"});
+      else this.mfBar.x = this.mfBarBase;
+    }
+  }
+  // A one-shot full-green LED flash on a gate RESULT — the next strobe tick re-randomises.
+  mfFlash(){ if (this.mfLeds) for (const l of this.mfLeds) l.setFillStyle(0x2fe07a); }
 
   // The gate's stoplight — the room's FOCUS. A big standing signal beside the mainframe:
   // GREEN all gates pass · AMBER running / decision pending · RED a gate failed.

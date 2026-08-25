@@ -245,12 +245,14 @@ function mix(a,b,t){
 // walls with a pink stripe, navy ink. Room identity is a soft cream-tint of the
 // area accent so the backend-driven rooms still read distinct.
 const PC = {
-  // WARM scheme: a tan tiled FLOOR with terracotta/BRICK walls and a cream stripe.
-  // (GBA art-direction pass: quieter floor checker, cooler shadows, one scene ink.)
-  floor:0xe8d2a8, floorAlt:0xe2c99e, floorSeam:0xcdb99a,   // tan floor — checker ~6% off, seam whispers
-  room:0xf3ead0, roomAlt:0xe9dcbe, roomSeam:0xcdbd98,       // (room tiles, unused now)
-  wall:0xc2614a, wallHi:0xcf7158, wallShade:0x8a4248,       // brick face — softer cap, rose-cooled shade
-  stripe:0xf2e8cc, stripeHi:0xfffaf0,                       // cream wall trim (the anchor light)
+  // WARM scheme, 3-VALUE MATERIAL HIERARCHY (art pass): a tan tiled FLOOR, PLASTER interior
+  // partitions, and a BRICK perimeter shell — three distinct materials so "inside a room"
+  // reads. Corridors + rooms share the floor; each room re-tints its own copy of it.
+  floor:0xe6cfa2, floorAlt:0xdcc290, floorSeam:0xc0a880,    // tan floor — wider checker, seam reads
+  room:0xf3ead0, roomAlt:0xe9dcbe, roomSeam:0xcdbd98,       // room-floor base (now DRAWN, tinted per room)
+  wall:0xc2614a, wallHi:0xcf7158, wallShade:0x8a4248,       // BRICK — perimeter shell only
+  plaster:0xcdbb92, plasterHi:0xe6d8b2, plasterBase:0x7a684c, plasterEdge:0x3a2e22, // interior partitions
+  stripe:0xf2e8cc, stripeHi:0xfffaf0,                       // cream shell trim (the building's top band)
   ink:0x33405e, line:0x2c4a8c,                              // navy TEXT ink
   sceneInk:0x241d2e, shadow:0x1a1726,                       // one outline ink + one cool cast-shadow
   bg:0x140d0a,                                              // dark warm letterbox around the building
@@ -283,19 +285,30 @@ function buildSharedTextures(scene){
     rg.addColorStop(0,"rgba(0,0,0,0)"); rg.addColorStop(1,"rgba(0,0,0,1)");
     g.fillStyle = rg; g.fillRect(0,0,256,256); scene.textures.addCanvas("vignette", cv);
   }
-  // Per-room floor: cream tile checker, lightly tinted by the room's accent so each
-  // discipline still reads distinct (a pale teal/amber/green wash on the cream).
+  // Per-room floor — DRAWN per room (was built and never used). Rooms differ by MATERIAL,
+  // not just hue: engineering lanes get a cool raised-access data-centre grid (corner bolts);
+  // qa/security a slate wash; everyone else warm ceramic tinted by the room accent (~16-20%).
   for (const key in ROOMS){
     const tkey = "floor_"+key;
     if (scene.textures.exists(tkey)) continue;
     const R = ROOMS[key]; const g = scene.make.graphics({add:false});
-    const base = mix(PC.room, R.color, 0.07), alt = mix(PC.roomAlt, R.color, 0.10);
+    const eng = key==="frontend" || key==="backend" || key==="data";
+    const cool = key==="qa" || key==="security";
+    let base, alt, seam;
+    if (eng){ base = mix(0x313d52, R.color, 0.20); alt = mix(0x2a3446, R.color, 0.15); seam = 0x1b2330; }
+    else if (cool){ base = mix(PC.room, 0x454a5e, 0.17); alt = mix(PC.roomAlt, 0x454a5e, 0.20); seam = 0x8d887f; }
+    else { base = mix(PC.room, R.color, 0.22); alt = mix(PC.roomAlt, R.color, 0.27); seam = 0xbfa682; }
     g.fillStyle(base,1); g.fillRect(0,0,40,40);
     g.fillStyle(alt,1);  g.fillRect(20,0,20,20); g.fillRect(0,20,20,20);            // checker
-    g.fillStyle(PC.roomSeam,1); g.fillRect(0,0,40,1); g.fillRect(0,0,1,40);          // tile seams
-    g.fillStyle(PC.roomSeam,1); g.fillRect(20,0,1,40); g.fillRect(0,20,40,1);
-    g.fillStyle(shade(base,1.05),1); g.fillRect(7,6,2,2); g.fillRect(27,25,2,2);     // light fleck
-    g.fillStyle(PC.roomSeam,1);      g.fillRect(31,9,2,2); g.fillRect(11,31,2,2);     // dark fleck
+    g.fillStyle(seam,1); g.fillRect(0,0,40,1); g.fillRect(0,0,1,40);                 // tile seams
+    g.fillStyle(seam,1); g.fillRect(20,0,1,40); g.fillRect(0,20,40,1);
+    if (eng){                                                                        // raised-access bolts
+      g.fillStyle(0x5c6d88,1);
+      for (const [bx,by] of [[3,3],[23,3],[3,23],[23,23]]) g.fillRect(bx,by,2,2);
+    } else {
+      g.fillStyle(shade(base,1.05),1); g.fillRect(7,6,2,2); g.fillRect(27,25,2,2);   // light fleck
+      g.fillStyle(seam,1);             g.fillRect(31,9,2,2); g.fillRect(11,31,2,2);   // dark fleck
+    }
     g.generateTexture(tkey,40,40); g.destroy();
   }
   // Per-room interior wall tile: cream face with a shaded lower course + bright top.
@@ -497,7 +510,7 @@ class FloorScene extends Phaser.Scene {
     // W, not the three coordinates picked for 1280 (1140 falls outside a 970 world);
     // these reproduce 240/560/1140 exactly at the landscape width.
     [0.1875, 0.4375, 0.890625].map(f => Math.round(f*W)).forEach(lx=>{
-      this.add.ellipse(lx, WALL_TOP+92, 110, 38, 0xffffff, 0.06).setDepth(0);
+      this.add.ellipse(lx, WALL_TOP+92, 122, 42, 0xfff0c8, 0.14).setDepth(0.6);   // warm pool, now readable
       this.add.circle(lx, WALL_TOP+18, 5, 0xfff6d8, 0.95).setDepth(2).setStrokeStyle(2, PC.wallShade);
     });
     this.drawFlowPath();
@@ -508,7 +521,9 @@ class FloorScene extends Phaser.Scene {
       const R = ROOMS[key];
       if (R.virtual) continue;
       const accent = shade(R.color, 1.7);
-      const t = TINT[key]; if (t) this.add.rectangle(R.x, R.y, R.w, R.h, t[0], t[1]).setOrigin(0,0).setDepth(1);
+      // The room's OWN floor, laid over the shared base (was built + never drawn) — this is
+      // what makes each room read as a distinct material, not one tan slab. Below glow/walls.
+      this.add.tileSprite(R.x, R.y, R.w, R.h, "floor_"+key).setOrigin(0,0).setDepth(0.5);
       // label placard — a navy sign hanging just BELOW the banded top wall (bigger sign)
       const sw = Math.min(R.w-10, R.label.length*9+28);
       this.add.rectangle(R.cx, R.y+22, sw, 22, PC.ink, 0.96).setOrigin(0.5,0).setDepth(3).setStrokeStyle(2, accent);
@@ -534,9 +549,11 @@ class FloorScene extends Phaser.Scene {
   // building's plan, not rugs on open space. Walls sit below the agents (depth 4)
   // so people always render in front; doorways open onto the corridors.
   buildWalls(){
-    const T = 12, DOOR = 48, BAND = 20;   // THICK brick walls, wide open passage, tall top band
-    const FACE = PC.wall, CAP = PC.wallHi, BASE = PC.wallShade, EDGE = 0x4a2018;
-    const WHITE = 0x7a3526;   // dark-brick line framing the cream stripe
+    const T = 12, DOOR = 48, BAND = 20;   // THICK plaster partitions, wide open passage, tall top band
+    // Interior partitions are PLASTER (the brick is the perimeter shell only) — a distinct,
+    // lighter material so rooms read as interior architecture, not more of the outer wall.
+    const FACE = PC.plaster, CAP = PC.plasterHi, BASE = PC.plasterBase, EDGE = PC.plasterEdge;
+    const WHITE = 0x9a8a66;   // plaster pinline framing each room's accent stripe
     const R0 = (x,y,w,h,c,a)=> this.add.rectangle(x,y,w,h,c,a==null?1:a).setOrigin(0,0).setDepth(4);
     // Plain THICK teal wall: dark outline, teal face, lit cap, shadowed base.
     const seg = (x, y, w, h) => {
@@ -546,20 +563,23 @@ class FloorScene extends Phaser.Scene {
       if (h > 5) R0(x, y+h-2, w, 2, BASE);
       if (w > 5) R0(x+w-2, y, 2, h, BASE);
     };
-    // Top wall: a TALL banded teal wall with a white-bordered PINK STRIPE + baseboard.
-    const band = (x, w, y) => {
+    // Top wall: a TALL banded plaster wall with a per-room ACCENT STRIPE (the one place each
+    // room's colour reads) framed by plaster pinlines + a baseboard shadow. `accent` per room.
+    const band = (x, w, y, accent) => {
       if (w <= 0) return;
+      const hi = mix(accent, 0xffffff, 0.45);
       R0(x-1, y-1, w+2, BAND+2, EDGE);
-      R0(x, y,    w, 8, FACE);  R0(x, y, w, 1, CAP);                // teal upper + lit cap
-      R0(x, y+8,  w, 1, WHITE);                                     // white pinline
-      R0(x, y+9,  w, 5, PC.stripe); R0(x, y+9, w, 1, PC.stripeHi);  // pink stripe + highlight
-      R0(x, y+14, w, 1, WHITE);                                     // white pinline
-      R0(x, y+15, w, 4, FACE);                                      // teal lower
+      R0(x, y,    w, 8, FACE);  R0(x, y, w, 1, CAP);                // plaster upper + lit cap
+      R0(x, y+8,  w, 1, WHITE);                                     // pinline
+      R0(x, y+9,  w, 5, accent); R0(x, y+9, w, 1, hi);             // room accent stripe + highlight
+      R0(x, y+14, w, 1, WHITE);                                     // pinline
+      R0(x, y+15, w, 4, FACE);                                      // plaster lower
       R0(x, y+19, w, 1, BASE);                                      // baseboard shadow
     };
     for (const key in ROOMS){
       const R = ROOMS[key]; if (R.virtual) continue;
       const cx = Math.round(R.cx);
+      const stripe = mix(R.color, 0xffffff, 0.12);   // this room's accent, once, on its top band
       // Openings (no doors — plain gaps): normal rooms open at the BOTTOM centre. The
       // GATE also has a TOP entrance (from security above) so work flows security →
       // gate → vault. The VAULT is sealed except a single TOP opening under the gate.
@@ -573,8 +593,8 @@ class FloorScene extends Phaser.Scene {
       seg(R.x, R.y, T, R.h);                                   // left  (solid)
       if (rightGap != null){ seg(R.x1-T, R.y, T, (rightGap-DOOR/2)-R.y); seg(R.x1-T, rightGap+DOOR/2, T, R.y1-(rightGap+DOOR/2)); }
       else seg(R.x1 - T, R.y, T, R.h);                         // right (solid or split)
-      if (topGap != null){ band(R.x, (topGap-DOOR/2)-R.x, R.y); band(topGap+DOOR/2, R.x1-(topGap+DOOR/2), R.y); }
-      else band(R.x, R.w, R.y);                                // banded top (solid or split)
+      if (topGap != null){ band(R.x, (topGap-DOOR/2)-R.x, R.y, stripe); band(topGap+DOOR/2, R.x1-(topGap+DOOR/2), R.y, stripe); }
+      else band(R.x, R.w, R.y, stripe);                       // banded top (solid or split)
       if (botGap != null){ seg(R.x, R.y1-T, (botGap-DOOR/2)-R.x, T); seg(botGap+DOOR/2, R.y1-T, R.x1-(botGap+DOOR/2), T); }
       else seg(R.x, R.y1 - T, R.w, T);                         // bottom (solid or split)
     }

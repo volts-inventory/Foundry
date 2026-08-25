@@ -540,17 +540,20 @@ class FloorScene extends Phaser.Scene {
       // draws its own floor AO now that it stands). Starts below the standing back wall.
       this.add.rectangle(R.x+12, R.y+WALL_H, 5, R.h-WALL_H-12, 0x000000, 0.10).setOrigin(0,0).setDepth(0.7);
       this.roomDecal(key, R);                        // a faint department emblem so the room reads even empty
-      // label placard — a sign hanging on the floor just BELOW the standing back wall
-      const ly = R.y + WALL_H + 4;
-      const sw = Math.min(R.w-10, R.label.length*9+28);
+      // Room SIGN mounted on the back wall (GB interior style): a glyph + the name, the
+      // placard SIZED TO THE ACTUAL TEXT (no char-count guess that overflows), centred on
+      // the wall face. Clear of the first agent row's badges below.
+      const sy = R.y + 15, gW = 13;
+      const lt = this.bm(0, 0, R.label, 12, 0xfbf3df, 0, 0);        // build first → measure width
+      const pw = Math.min(R.w - 16, Math.ceil(lt.width) + gW + 14);
       (this.roomLabels = this.roomLabels || {})[key] =
-      this.add.rectangle(R.cx, ly, sw, 22, PC.ink, 0.96).setOrigin(0.5,0).setDepth(5).setStrokeStyle(2, accent);
-      this.add.rectangle(R.cx, ly, sw, 2, mix(accent,0xffffff,0.4)).setOrigin(0.5,0).setDepth(6);
-      this.roomGlyph(key, R.cx-sw/2+7, ly+5);
-      this.bm(R.cx+6, ly+6, R.label, 13, 0xfbf3df, 0.5, 0).setDepth(6);
+      this.add.rectangle(R.cx, sy, pw, 17, PC.ink, 0.97).setOrigin(0.5).setDepth(5).setStrokeStyle(2, accent);
+      this.add.rectangle(R.cx, sy-7, pw-2, 1, mix(accent,0xffffff,0.4)).setOrigin(0.5,0).setDepth(6);
+      this.roomGlyph(key, Math.round(R.cx - pw/2 + 5), Math.round(sy - 5));
+      lt.setPosition(Math.round(R.cx - pw/2 + gW + 4), Math.round(sy - lt.height/2)).setDepth(6);
       const no = ORDER_NO[key];
       if (no != null){
-        const bx = R.x+15, by = ly+12;
+        const bx = R.x+16, by = R.y + WALL_H + 12;              // order pip on the floor below the wall
         this.add.circle(bx, by, 10, PC.stripe, 0.98).setStrokeStyle(2, PC.wallHi).setDepth(6);
         this.bm(bx, by, String(no), 13, 0xfff4e0, 0.5, 0.5).setDepth(7);
       }

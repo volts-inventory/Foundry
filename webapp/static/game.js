@@ -156,6 +156,10 @@ const AGENT_ROOM = {}; for (const rm in ROSTER) for (const nm of ROSTER[rm]) AGE
 // IC pool) so frontend/backend/data/… read the same colour everywhere.
 const AREA_COLOR = {frontend:0x7fd1ff, backend:0xff9b5e, data:0x7dffb0,
                     infra:0xb59bff, security:0xff6d6d};
+// One DEPARTMENT colour per non-eng room (art review #6): a room's agents all wear their
+// department's hue on the badge/desk, differing only by SPRITE — so a glance names the
+// department instead of a seven-hue confetti. (Engineering lanes use AREA_COLOR.)
+const ROOM_FAMILY_COLOR = {product:0xffd95e, architecture:0xb59bff, qa:0x7dffb0, security:0xff6d6d};
 const AREA_TAG = {frontend:"FE", backend:"BE", data:"DA", infra:"IN", security:"SE"};
 // short role tags for the named static-room agents (the senior roles), shown on a badge.
 const ROLE_TAG = {
@@ -535,6 +539,7 @@ class FloorScene extends Phaser.Scene {
       // meet it (light is top-left), so the walls seat instead of floating.
       this.add.rectangle(R.x+12, R.y+20, R.w-24, 5, 0x000000, 0.13).setOrigin(0,0).setDepth(0.7);
       this.add.rectangle(R.x+12, R.y+20, 5, R.h-32, 0x000000, 0.10).setOrigin(0,0).setDepth(0.7);
+      this.roomDecal(key, R);                        // a faint department emblem so the room reads even empty
       // label placard — a navy sign hanging just BELOW the banded top wall (bigger sign)
       const sw = Math.min(R.w-10, R.label.length*9+28);
       (this.roomLabels = this.roomLabels || {})[key] =
@@ -614,6 +619,41 @@ class FloorScene extends Phaser.Scene {
 
   // A ~10px WHITE department glyph on the plaque so rooms are identifiable by SHAPE
   // (colour-blind / grayscale safe), not hue. (x,y)=top-left. High contrast on dark.
+  // A large, faint DEPARTMENT emblem stencilled on the room floor (under agents) so each
+  // room reads as itself even when nobody's seated. Procedural, low-alpha, CSP-safe.
+  roomDecal(key, R){
+    const cx = Math.round(R.cx), cy = Math.round(R.cy + 6), D = 0.6;
+    const eng = key==="frontend" || key==="backend" || key==="data";
+    if (!eng && !["product","architecture","qa","security"].includes(key)) return;
+    const col = eng ? 0x9fb2d6 : shade(R.color, 0.72);   // light on the dark eng floor, deep on warm
+    const A = eng ? 0.17 : 0.13;
+    const box = (x,y,w,h,a)=> this.add.rectangle(x,y,w,h,col,a==null?A:a).setOrigin(0.5).setDepth(D);
+    if (eng){                                             // build-zone corner brackets
+      for (const [ox,oy] of [[-1,-1],[1,-1],[-1,1],[1,1]]){
+        const hx = cx+ox*46, hy = cy+oy*38;
+        this.add.rectangle(hx, hy, 18, 3, col, A).setOrigin(ox<0?0:1, oy<0?0:1).setDepth(D);
+        this.add.rectangle(hx, hy, 3, 18, col, A).setOrigin(ox<0?0:1, oy<0?0:1).setDepth(D);
+      }
+      box(cx, cy, 30, 3, A*0.7); box(cx, cy, 3, 30, A*0.7);   // a small centre cross
+      return;
+    }
+    if (key==="product"){                                // clipboard + check lines
+      this.add.rectangle(cx, cy, 46, 56, col, A*0.35).setStrokeStyle(2, col, A).setOrigin(0.5).setDepth(D);
+      box(cx, cy-25, 16, 6);                              // clip
+      for (let i=0;i<3;i++){ box(cx+4, cy-10+i*13, 24, 3); box(cx-15, cy-10+i*13, 6, 6, A*0.8); }
+    } else if (key==="architecture"){                    // blueprint grid
+      for (let i=-2;i<=2;i++){ box(cx+i*13, cy, 1.5, 62, A*0.8); box(cx, cy+i*13, 62, 1.5, A*0.8); }
+      this.add.rectangle(cx, cy, 62, 62, col, 0).setStrokeStyle(2, col, A).setOrigin(0.5).setDepth(D);
+    } else if (key==="qa"){                               // inspection crosshair
+      this.add.circle(cx, cy, 27, col, 0).setStrokeStyle(3, col, A).setDepth(D);
+      box(cx, cy, 66, 2); box(cx, cy, 2, 66);
+    } else {                                              // security — hazard chevrons
+      for (let i=0;i<3;i++){ const yy = cy-16+i*17;
+        this.add.rectangle(cx-11, yy, 26, 4, col, A).setAngle(-32).setDepth(D);
+        this.add.rectangle(cx+11, yy, 26, 4, col, A).setAngle(32).setDepth(D);
+      }
+    }
+  }
   roomGlyph(key, x, y){
     const W = 0xffffff, D = PC.ink;     // white glyph, navy plaque cut-outs
     const p = (dx,dy,w,h,c)=> this.add.rectangle(x+dx, y+dy, w, h, c).setOrigin(0,0).setDepth(4);
@@ -960,6 +1000,12 @@ class FloorScene extends Phaser.Scene {
       onComplete:()=>r.destroy()});
   }
   shake(ms,amt){ this.cameras.main.shake(ms||300, amt||0.012); }
+  // Gentle per-scene camera zoom for the big beats (checkpoint / release). Kept subtle and
+  // ALWAYS restored to 1 so it never fights the responsive Scale.FIT layout; a mid-zoom
+  // portrait/landscape swap restarts the scene, which resets the camera anyway.
+  cameraZoom(z, ms){ const cam = this.cameras && this.cameras.main; if (!cam) return;
+    cam.zoomTo(z, ms||400, "Sine.easeInOut", true); }
+  cameraPunch(){ this.cameraZoom(1.05, 150); this.time.delayedCall(200, ()=>this.cameraZoom(1, 320)); }
   hop(a, times){
     if (!a) return; const y0=a.y; let i=0; times=times||1;
     const up=()=>{
@@ -1016,6 +1062,7 @@ class FloorScene extends Phaser.Scene {
   checkpointHold(on){
     this.cpHold = !!on;
     this.setGateSignal(on ? "wait" : this.gateSignalState());   // amber while a decision pends
+    this.cameraZoom(on ? 1.045 : 1, 500);                       // lean in while a decision pends
     if (this.spot){ this.spot.destroy(); this.spot=null; }
     if (this.qmark){ this.qmark.destroy(); this.qmark=null; }
     if (!on) return;
@@ -1204,7 +1251,9 @@ class FloorScene extends Phaser.Scene {
     const a = this.makePerson(0, -1000, kit);        // off-screen until layoutRoomAgents places it
     a.setScale(1.5);
     const rtag = ROLE_TAG[name] || name.slice(0,9).toUpperCase();
-    const acc = COLORS[name] != null ? COLORS[name] : 0x9fb4d8;   // per-role tint (unique look, E6)
+    // Department colour, not per-role — the room reads as one hue; agents differ by sprite.
+    const acc = ROOM_FAMILY_COLOR[room] != null ? ROOM_FAMILY_COLOR[room]
+              : (COLORS[name] != null ? COLORS[name] : 0x9fb4d8);
     this.pinBadge(a, rtag, acc, true);
     a.room = room; a.idleSlot = this._slotSeq++; a.bubble = null; a.seen = true; a.setAlpha(1);
     a.ws = this.makeWorkstation(0, -1000+16, acc);
@@ -2447,7 +2496,7 @@ function routeEvent(floor, ev){
       if (isActive) hideCheckpoint(); break;
     }
     case "release":
-      if (S){ S.setGateSignal("go"); S.openGateAndChest(); S.stampGate(true); S.celebrate(); S.banner("SHIPPED!", 0x5ddc7a); }
+      if (S){ S.setGateSignal("go"); S.openGateAndChest(); S.stampGate(true); S.celebrate(); S.cameraPunch(); S.banner("SHIPPED!", 0x5ddc7a); }
       logTo(F, "gold", "RELEASED -> "+(ev.uri||"artifact"));
       logProgress(F, "good", "★ SHIPPED — "+(ev.uri||"artifact")); break;
     case "halt":
@@ -2458,7 +2507,7 @@ function routeEvent(floor, ev){
       F.status = "done"; F.passed = !!ev.passed; renderElevator();
       // Build's over: nobody is working, so everyone heads to the LOUNGE
       // (staffRoom(null) marks no room active and routes idle folks there).
-      if (S){ S.clearLiveWorkers(); S.staffRoom(null); if (!ev.passed){ S.gloom(); S.banner("HELD AT THE GATE", 0xff5d6c); } }
+      if (S){ S.clearLiveWorkers(); S.staffRoom(null); S.cameraZoom(1, 300); if (!ev.passed){ S.gloom(); S.banner("HELD AT THE GATE", 0xff5d6c); } }
       logTo(F, ev.passed?"good":"bad",
         ev.passed?"Build complete — shipped.":"Build halted — nothing shipped.");
       logProgress(F, ev.passed?"good":"bad",

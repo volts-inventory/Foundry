@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from foundry.agents._common import skip_advisory_in_autonomous
 from foundry.agents.security._common import (
     blocking_triage,
     cas_uri,
@@ -72,6 +73,8 @@ def make_audit_compliance_node(rt: AgentRuntime) -> NodeFn:
     ``GateResult`` (L5)."""
 
     def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        if skip_advisory_in_autonomous(state):
+            return {}  # build-dead in a headless run; the Audit gate re-scans the tree
         finding_seq = rt.seq(config, _NODE_ID, "artifact:audit_finding")
         triage_seq = rt.seq(config, _NODE_ID, "gate_triage:audit")
         run_ref = run_against(config)

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from foundry.agents._common import skip_advisory_in_autonomous
 from foundry.agents.product._common import cas_uri, emit_artifact
 from foundry.schemas.product import SprintPlan
 
@@ -83,6 +84,8 @@ def make_eng_program_mgr_node(rt: AgentRuntime) -> NodeFn:
     """Factory for the Eng/Program Manager node (PRD -> SprintPlan + budget hint)."""
 
     def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        if skip_advisory_in_autonomous(state):
+            return {}  # sprint_plan is read only by the UI checkpoint; a headless run has none
         seq = rt.seq(config, _NODE_ID, "artifact:sprint_plan")
         result = rt.proxy.complete(
             _NODE_ID,

@@ -166,6 +166,24 @@ def test_stakeholder_proxy_writes_intent_brief_handle() -> None:
     assert "gates" not in writes
 
 
+def test_advisory_product_authors_skip_the_model_call_in_autonomous_mode() -> None:
+    """stakeholder_proxy / eng_program_mgr feed only the UI checkpoint payload, so a
+    headless autonomous run skips their model call and writes nothing — while an
+    assistant run still authors."""
+    cases = (
+        (make_stakeholder_proxy_node, INTENT_PAYLOAD, {"request": "x"}),
+        (make_eng_program_mgr_node, SPRINT_PAYLOAD, {"request": "x", "route": "greenfield"}),
+    )
+    for make, payload, base_state in cases:
+        t = MockTransport(completions=[json.dumps(payload)])
+        assert make(make_runtime(t))({**base_state, "mode": "autonomous"}, config_for("a")) == {}
+        assert t.requests == []  # no model call billed
+
+        t2 = MockTransport(completions=[json.dumps(payload)])
+        assert make(make_runtime(t2))(base_state, config_for("a")) != {}
+        assert t2.requests  # model called
+
+
 # ---- 2. product manager: PRD + traceable acceptance criteria -----------------
 
 

@@ -104,6 +104,29 @@ def _no_gates_write(writes: dict[str, Any]) -> None:
 # ---- 1. AppSec: ThreatModel + BLOCKING security triage ----------------------
 
 
+def test_advisory_security_authors_skip_the_model_call_in_autonomous_mode() -> None:
+    """A headless autonomous run reads none of these authors' output (the gates
+    re-scan the tree independently), so each skips its model call and writes
+    nothing — while an assistant/gated run still authors normally."""
+    cfg = config_for("run-auto", run_against="sha", base_tree_sha="base")
+    cases = (
+        (make_appsec_engineer_node, _appsec_payload(severity="low")),
+        (make_audit_compliance_node, _audit_payload(severity="low")),
+        (make_supply_chain_reviewer_node, _supply_chain_payload(violations=[])),
+    )
+    for make, payload in cases:
+        transport = MockTransport(completions=[payload])
+        rt, _cas = make_runtime(transport)
+        assert make(rt)({"request": "x", "mode": "autonomous"}, cfg) == {}
+        assert transport.requests == []  # no model call billed
+
+        # control: an assistant run (mode unset / not autonomous) still authors.
+        transport2 = MockTransport(completions=[payload])
+        rt2, _cas2 = make_runtime(transport2)
+        assert make(rt2)({"request": "x"}, cfg) != {}
+        assert transport2.requests  # model called
+
+
 def test_appsec_emits_threat_model_and_blocking_high_severity_triage() -> None:
     transport = MockTransport(completions=[_appsec_payload(severity="high")])
     rt, cas = make_runtime(transport)

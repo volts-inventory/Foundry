@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from foundry.agents._common import skip_advisory_in_autonomous
 from foundry.agents.security._common import (
     blocking_triage,
     cas_uri,
@@ -89,6 +90,8 @@ def make_appsec_engineer_node(rt: AgentRuntime) -> NodeFn:
     high-severity finding as BLOCKING — never a ``GateResult`` (L5)."""
 
     def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        if skip_advisory_in_autonomous(state):
+            return {}  # build-dead in a headless run; the Security gate re-scans the tree
         tm_seq = rt.seq(config, _NODE_ID, "artifact:threat_model")
         triage_seq = rt.seq(config, _NODE_ID, "gate_triage:security")
         run_ref = run_against(config)

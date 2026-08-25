@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from foundry.agents._common import cas_uri, emit_artifact
+from foundry.agents._common import cas_uri, emit_artifact, skip_advisory_in_autonomous
 from foundry.schemas.gates import GateTriage
 from foundry.schemas.security import SupplyChainReport
 
@@ -90,6 +90,8 @@ def make_supply_chain_reviewer_node(rt: AgentRuntime) -> NodeFn:
     ``GateResult`` (L5)."""
 
     def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        if skip_advisory_in_autonomous(state):
+            return {}  # build-dead in a headless run; the Supply-chain gate re-scans the diff
         report_seq = rt.seq(config, _NODE_ID, "artifact:supply_chain_report")
         triage_seq = rt.seq(config, _NODE_ID, "gate_triage:supply_chain")
         base_tree_sha, tree_sha = _tree_refs(config)

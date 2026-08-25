@@ -187,6 +187,30 @@ def scope_directive(state: FactoryState, *, architect: bool = False) -> str:
     return _DEMO_ARCHITECT_DIRECTIVE if architect else _DEMO_PM_DIRECTIVE
 
 
+# --- advisory authors: skip the model call in a headless autonomous run ------
+# A hands-off run (mode=autonomous, no human/UI) reads NONE of the advisory
+# authors' output. The security / audit / supply-chain GATES re-scan the
+# materialized tree independently (they read a workdir observation, never agent
+# analysis); the threat_model / audit_finding / supply_chain_report / intent_brief
+# / sprint_plan artifacts and the gate_triage channel are read only by the UI
+# checkpoint payload and the eval harness — never by a gate, router, admission, or
+# the release judge. So in an autonomous run those authors are pure cost (re-billed
+# on every assurance fix-loop re-entry as well). GATED / ASSISTANT runs keep them
+# (a human at a checkpoint may read them); a regulated request has autonomous
+# VETOED to gated, so it keeps them too — the safe direction.
+_AUTONOMOUS_MODE = "autonomous"  # == MODE_AUTONOMOUS (foundry.graph.supervisor / governance_hooks)
+
+
+def skip_advisory_in_autonomous(state: FactoryState) -> bool:
+    """True when this is a hands-off autonomous run whose advisory model call is
+    build-dead (see the note above) — the node should return ``{}`` and skip it.
+
+    Reads the single-writer ``mode`` channel. Only pure ``autonomous`` matches, so
+    assistant/gated runs (and any run where a regulated pack vetoed autonomous down
+    to gated) keep the advisory authoring."""
+    return state.get("mode") == _AUTONOMOUS_MODE
+
+
 def journal_entry(
     *,
     node_id: str,

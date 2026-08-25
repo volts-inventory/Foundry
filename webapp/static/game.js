@@ -1682,8 +1682,10 @@ class FloorScene extends Phaser.Scene {
   // deterministic machine), so this IS the gate: the room's working centrepiece.
   buildMainframe(){
     const G = ROOMS.gate; if (!G) return;
-    const x = Math.round(G.x + G.w*0.40), topY = G.y + 44, botY = G.y1 - 26;
-    const w = 84, hh = botY - topY;
+    // LEFT third — the room's doorway + vault door are at the bottom CENTRE (cx), so the
+    // centre column stays a clear walk path; the mainframe and the stoplight flank it.
+    const x = Math.round(G.x + G.w*0.26), topY = G.y + 44, botY = G.y1 - 26;
+    const w = 74, hh = botY - topY;
     const c = this.add.container(x, topY).setDepth(6);
     c.add(this.add.rectangle(0, hh+3, w+6, 8, PC.shadow, 0.30).setOrigin(0.5,1));   // floor shadow
     c.add(this.add.rectangle(0, 0, w, hh, 0x1a1f2b).setOrigin(0.5,0).setStrokeStyle(2, PC.sceneInk));
@@ -1735,7 +1737,7 @@ class FloorScene extends Phaser.Scene {
   // GREEN all gates pass · AMBER running / decision pending · RED a gate failed.
   buildGateSignal(){
     const G = ROOMS.gate; if (!G) return;
-    const x = Math.round(G.x + G.w*0.72), baseY = G.y1 - 24;
+    const x = Math.round(G.x + G.w*0.76), baseY = G.y1 - 24;   // RIGHT third (centre path clear)
     const c = this.add.container(x, baseY).setDepth(9);
     c.add(this.add.ellipse(0, 2, 22, 7, PC.shadow, 0.32).setOrigin(0.5,1));   // base shadow
     c.add(this.add.rectangle(0, 0, 7, 66, 0x2a3550).setOrigin(0.5,1).setStrokeStyle(1, PC.sceneInk)); // pole

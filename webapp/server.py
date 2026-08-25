@@ -1428,7 +1428,11 @@ def _run_factory(p: Project, resume: bool = False) -> None:
             p.act_agent = str(ev.get("agent") or "")
             p.act_count, p.act_text = 0, ""
         else:
-            p.inflight.pop(node, None)
+            started = p.inflight.pop(node, None)
+            if started is not None:                     # per-step wall time for the quest log
+                elapsed = time.monotonic() - started[1]
+                if elapsed >= 1:
+                    ev["elapsed_s"] = round(elapsed, 1)
         _emit(p, **ev)
 
     def activity(text: str) -> None:

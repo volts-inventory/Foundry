@@ -368,12 +368,19 @@ def events_for_payload(
             continue
         seen_uris.add(uri)
         kind = str(a.get("kind", ""))
-        agent, aroom = _origin(kind, str(a.get("produced_by", "")))
-        label = ARTIFACT_LABEL.get(kind, kind.replace("_", " ").title())
+        produced_by = str(a.get("produced_by", ""))
+        agent, aroom = _origin(kind, produced_by)
+        base_label = ARTIFACT_LABEL.get(kind, kind.replace("_", " ").title())
+        label = base_label
         if kind_total[kind] > 1:
             kind_seen[kind] += 1
             label = f"{label} #{kind_seen[kind]}"
-        out.append({"type": "agent", "room": aroom, "agent": agent, "action": "work"})
+        # The retroactive burst describes work that ALREADY finished, so close the
+        # agent's log box (done) with a short "what it did" verb — else a finished
+        # build shows a wall of "WORKING" boxes that were opened but never resolved.
+        summary = _NODE_SUMMARY.get(produced_by) or f"produced the {base_label}"
+        out.append({"type": "agent", "room": aroom, "agent": agent,
+                    "action": "work", "done": True, "summary": summary})
         out.append({
             "type": "artifact", "room": aroom, "agent": agent, "kind": kind,
             "label": label, "detail": str(a.get("detail", "")),  # advisory content one-liner

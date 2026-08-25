@@ -550,7 +550,7 @@ class FloorScene extends Phaser.Scene {
       // the wall face. Clear of the first agent row's badges below.
       // The sign is mounted ON the back wall, so it must sort JUST ABOVE that wall's baseY
       // (R.y+WALL_H) or the taller wall would hide it. sd = wall depth; sign at sd+1/+2.
-      const sy = R.y + 15, gW = 13, sd = R.y + WALL_H;
+      const sy = R.y + 11, gW = 13, sd = R.y + WALL_H;
       const lt = this.bm(0, 0, R.label, 12, 0xfbf3df, 0, 0);        // build first → measure width
       const pw = Math.min(R.w - 16, Math.ceil(lt.width) + gW + 14);
       (this.roomLabels = this.roomLabels || {})[key] =
@@ -560,8 +560,8 @@ class FloorScene extends Phaser.Scene {
       lt.setPosition(Math.round(R.cx - pw/2 + gW + 4), Math.round(sy - lt.height/2)).setDepth(sd+2);
       const no = ORDER_NO[key];
       if (no != null){
-        const bx = R.x+16, by = R.y + WALL_H + 12;              // order pip on the floor below the wall
-        this.add.circle(bx, by, 10, PC.stripe, 0.98).setStrokeStyle(2, PC.wallHi).setDepth(sd+2);
+        const bx = R.x+26, by = R.y + WALL_H + 12;              // order pip on the floor below the wall, clear of the post
+        this.add.circle(bx, by, 10, PC.ink, 0.98).setStrokeStyle(2, accent).setDepth(sd+2);
         this.bm(bx, by, String(no), 13, 0xfff4e0, 0.5, 0.5).setDepth(sd+3);
       }
       this.roomGlow[key] = this.add.rectangle(R.x, R.y, R.w, R.h, 0xffe27a, 0).setOrigin(0,0).setDepth(1);
@@ -993,7 +993,7 @@ class FloorScene extends Phaser.Scene {
   startAmbient(){
     this.time.addEvent({delay:360, loop:true, callback:()=>{
       const s = this.screens; if (!s || !s.length) return;
-      const sc = s[(this._sf = (this._sf||0)+1) % s.length];
+      const sc = s[(Math.random()*s.length)|0];   // random pick → organic flicker, not a marching sweep
       if (sc) this.tweens.add({targets:sc, alpha:{from:0.6,to:0.95}, duration:150, yoyo:true});
     }});
     this.time.addEvent({delay:2600, loop:true, callback:()=>this.deskSweep()});  // stay-at-your-desk sweep
@@ -1037,11 +1037,13 @@ class FloorScene extends Phaser.Scene {
     up();
   }
   deskIdle(a){ if (!a || !a.bob) return; this.stopDeskIdle(a);
-    a.breathe = this.tweens.add({targets:a.bob, y:{from:0,to:-1}, duration:1500, yoyo:true, repeat:-1, ease:"Sine.inOut"}); }
+    a.breathe = this.tweens.add({targets:a.bob, y:{from:0,to:-1}, duration:1500, yoyo:true, repeat:-1, ease:"Sine.inOut",
+      delay:((a.idleSlot!=null?a.idleSlot*140:Math.abs(Math.round(a.x||0)))) % 1500}); }   // per-person phase → no room-wide unison
   // Fast small "typing" cadence for an agent that's heads-down WORKING (distinct from the
   // slow idle breathe, so who's-working reads by motion, not just the green halo).
   startTyping(a){ if (!a || !a.bob) return; this.stopDeskIdle(a);
-    a.breathe = this.tweens.add({targets:a.bob, y:{from:0,to:-1}, duration:180, yoyo:true, repeat:-1, ease:"Sine.inOut"}); }
+    a.breathe = this.tweens.add({targets:a.bob, y:{from:0,to:-1}, duration:180, yoyo:true, repeat:-1, ease:"Sine.inOut",
+      delay:((a.idleSlot!=null?a.idleSlot*37:Math.abs(Math.round(a.x||0)))) % 180}); }   // desync the typing cadence too
   // A small rising puff (steam/note) over a person — one-off, self-destroying.
   moodPuff(a, txt, color){
     if (!a || a._dead) return;
@@ -1114,9 +1116,13 @@ class FloorScene extends Phaser.Scene {
   }
   gloom(){
     const o=this.add.rectangle(0,0,W,H,0x0a0f1c,0).setOrigin(0,0).setDepth(33);
+    this.gloomOverlay = o;                       // stashed so a teardown/restart can clear it
     this.tweens.add({targets:o, fillAlpha:0.45, duration:700});
-    for (const a of this.agents.values()) if (a.seen)
+    for (const a of this.agents.values()) if (a.seen){
+      this.stopDeskIdle(a);                       // stop the breathe/nap bob so it doesn't fight the slump
+      if (a.napTween){ a.napTween.stop(); a.napTween=null; }
       this.tweens.add({targets:a.bob, angle:7, y:3, duration:500});
+    }
   }
   banner(txt,color){
     const b=this.add.container(W/2, FLOOR_TOP+40).setDepth(2200);
@@ -1162,11 +1168,16 @@ class FloorScene extends Phaser.Scene {
   buildChest(){
     const R = ROOMS.vault, x = Math.round(R.cx), y = Math.round(R.cy+12);
     this.chestPos = {x,y};
-    // enshrined: concentric floor inlay rings + a pedestal so the Vault reads as
-    // "the prize lives here" even before it's earned.
-    this.add.ellipse(x, y+10, 132, 44).setStrokeStyle(2, shade(R.color,1.5)).setDepth(0).setAlpha(0.5);
-    this.add.ellipse(x, y+10, 92, 30).setStrokeStyle(1, shade(R.color,1.7)).setDepth(0).setAlpha(0.4);
-    this.add.ellipse(x, y+14, 56, 16, shade(R.color,1.3), 0.5).setDepth(0);   // pedestal top
+    // enshrined: a warm spotlight pool, two archive shelves against the back wall, then
+    // concentric floor inlay rings + a pedestal so the Vault reads as "the prize lives
+    // here" even before it's earned.
+    // These floor decals sort ABOVE the room floor tile (depth 0.5) or the tile hides them
+    // (that hidden state is why the vault read empty); still well below props/chest.
+    this.add.ellipse(x, y+6, 150, 50, 0xffe9b0, 0.12).setDepth(0.55);   // spotlight pool
+    this.makeProp("shelf", R.x+66, R.y+48); this.makeProp("shelf", R.x1-66, R.y+48);
+    this.add.ellipse(x, y+10, 180, 60).setStrokeStyle(2, shade(R.color,1.5)).setDepth(0.56).setAlpha(0.5);
+    this.add.ellipse(x, y+10, 128, 42).setStrokeStyle(1, shade(R.color,1.7)).setDepth(0.57).setAlpha(0.4);
+    this.add.ellipse(x, y+14, 56, 16, shade(R.color,1.3), 0.5).setDepth(0.58);   // pedestal top
     this.chestGlow = this.add.rectangle(x,y-20,120,120,0xffd25a,0.10).setDepth(R.y+WALL_H+1);
     this.tweens.add({targets:this.chestGlow, fillAlpha:{from:0.06,to:0.14}, duration:2200, yoyo:true, repeat:-1});
     const c = this.add.container(x,y).setDepth(y).setScale(1.3);   // sort by its base, above the vault wall
@@ -1312,6 +1323,24 @@ class FloorScene extends Phaser.Scene {
     const col = i%cols, row = Math.floor(i/cols), bw = (cols-1)*PX;
     return {x: Math.round(R.cx - bw/2 + col*PX), y: SY + row*RP};
   }
+  // Move a workstation (desk + its chair) to a new slot. Instant on first placement;
+  // tweened on a regrid so desks glide instead of teleporting. killTweensOf first (no
+  // stacked tweens); final depth set in onComplete so occlusion snaps only once, settled.
+  moveWorkstation(ws, hx, hy, tween){
+    if (!ws) return;
+    const chair = ws.chair;
+    if (!tween){
+      ws.x = hx; ws.y = hy+16; ws.setDepth(hy+21);
+      if (chair){ chair.x = hx; chair.y = hy; chair.setDepth(hy-4); }
+      return;
+    }
+    this.tweens.killTweensOf(ws);
+    this.tweens.add({targets:ws, x:hx, y:hy+16, duration:320, ease:"Sine.inOut",
+      onComplete:()=>ws.setDepth(hy+21)});
+    if (chair){ this.tweens.killTweensOf(chair);
+      this.tweens.add({targets:chair, x:hx, y:hy, duration:320, ease:"Sine.inOut",
+        onComplete:()=>chair.setDepth(hy-4)}); }
+  }
   layoutRoomAgents(room){
     const R = ROOMS[room]; if (!R) return;
     const names = this.seatedNames[room] || [];
@@ -1320,13 +1349,13 @@ class FloorScene extends Phaser.Scene {
       const a = this.agents.get(name); if (!a) return;
       const g = this.roomGrid(R, i, n), hx = g.x, hy = g.y;
       a.home = {x:hx, y:hy};
-      if (a.ws){ a.ws.x = hx; a.ws.y = hy+16; a.ws.setDepth(hy+21);
-        if (a.ws.chair){ a.ws.chair.x = hx; a.ws.chair.y = hy; a.ws.chair.setDepth(hy-4); } }
       if (!a._placed){                          // first placement → pop in at the slot
+        this.moveWorkstation(a.ws, hx, hy, false);
         a._placed = true; a.x = hx; a.y = hy; a.setDepth(hy);
         a.setScale(0); this.tweens.add({targets:a, scale:1.4, duration:400, ease:"Back.out"});
         this.standDown(a);
-      } else {                                  // re-centre: walk to the new slot
+      } else {                                  // re-centre: desk glides, person walks to the new slot
+        this.moveWorkstation(a.ws, hx, hy, true);
         a.setDepth(hy);
         // standDown() no-ops an already-settled idle agent — clear the mood first so it
         // actually walks to its shifted home (else the desk moves and the person doesn't).
@@ -1650,6 +1679,8 @@ class FloorScene extends Phaser.Scene {
     if (!room) return;
     if (phase === "finish"){
       if (agent){
+        const fa = this.agents.get(agent);   // step-done ping on the finishing agent only (not restaff)
+        if (fa && fa.seen) this.ring(fa.x, fa.y-8, 0x6cffae);
         const n = (this.workingAgents.get(agent)||1) - 1;
         if (n > 0) this.workingAgents.set(agent, n); else this.workingAgents.delete(agent);
       }
@@ -1764,11 +1795,12 @@ class FloorScene extends Phaser.Scene {
     const a = this.reveal(name); if (!a) return;
     a.spark.setVisible(true);
     if (a.workTween) a.workTween.stop();
+    this.stopDeskIdle(a);            // kill the breathe so it doesn't fight the work bob (double-bob)
     a.bob.y = 0;
     // typing: quick stepped bob + a couple of floating code glyphs rising off the desk
     a.workTween = this.tweens.add({
       targets:a.bob, y:-2, duration:90, yoyo:true, repeat:13, ease:"Sine.inOut",
-      onComplete:()=>{ a.spark.setVisible(false); a.bob.y=0; },
+      onComplete:()=>{ a.spark.setVisible(false); a.bob.y=0; this.startTyping(a); },   // settle into the typing cadence
     });
     this.codeGlyph(a);
     this.time.delayedCall(420, ()=>this.codeGlyph(a));
@@ -2014,11 +2046,23 @@ class FloorScene extends Phaser.Scene {
         this.gatePips[n] = c;
         c.setScale(0); this.tweens.add({targets:c, scale:1, duration:240, ease:"Back.out"});
       } else this.gatePips[n].setPosition(sx, sy);
-      const [plate,label,pip] = this.gatePips[n].list;
+      const c = this.gatePips[n];
+      const [plate,label,pip] = c.list;
       const pass = g.status === "pass";
+      const att = !!g.attested;
       plate.setFillStyle(pass?0x1f6b3a:0x6b1f28);
       label.setText(pass?"P":"F").setColor(pass?"#5ddc7a":"#ff5d6c");
-      pip.setVisible(!!g.attested);
+      pip.setVisible(att);
+      if (c._st !== undefined && c._st !== pass){        // verdict flipped → punch the plate
+        this.tweens.killTweensOf(plate);
+        this.tweens.add({targets:plate, scale:{from:1.35,to:1}, duration:220, ease:"Back.out"});
+      }
+      if (att && !c._att){                               // attested rising edge → gold pip pops + ring
+        this.tweens.killTweensOf(pip);
+        pip.setScale(0); this.tweens.add({targets:pip, scale:{from:0,to:1}, duration:240, ease:"Back.out"});
+        this.ring(sx+17, sy-3, 0xffcf52);
+      }
+      c._st = pass; c._att = att;
       i++;
     }
   }
@@ -2145,9 +2189,12 @@ class FloorScene extends Phaser.Scene {
     const s = this.liveWorkers.get(tid); if (!s) return;
     this.liveWorkers.delete(tid);
     const room = s.room;
+    if (s.seen) this.ring(s.x, s.y-8, 0x6cffae);   // step-done ping as the live worker leaves
     this.setGlow(s, false);
     s._dead = true; if (s.zzzEv){ s.zzzEv.remove(); s.zzzEv=null; }
-    if (s.ws){ if (s.ws.chair) s.ws.chair.destroy(); s.ws.destroy(); }
+    // kill any in-flight regrid glide before destroy — destroy() does NOT stop a tween
+    // still writing x/y to the workstation (would target a dead object otherwise).
+    if (s.ws){ this.tweens.killTweensOf(s.ws); if (s.ws.chair){ this.tweens.killTweensOf(s.ws.chair); s.ws.chair.destroy(); } s.ws.destroy(); }
     this.tweens.add({targets:s, alpha:0, scale:0, duration:260, ease:"Back.in",
       onComplete:()=>s.destroy()});
     this._layoutLaneWorkers(room);
@@ -2161,12 +2208,11 @@ class FloorScene extends Phaser.Scene {
     crew.forEach((s,i)=>{
       const g = this.roomGrid(R, i, n), hx = g.x, hy = g.y;
       s.home = {x:hx, y:hy};
-      if (s.ws){ s.ws.x=hx; s.ws.y=hy+16; s.ws.setDepth(hy+21);
-        if (s.ws.chair){ s.ws.chair.x=hx; s.ws.chair.y=hy; s.ws.chair.setDepth(hy-4); } }
-      if (!s._placed){ s._placed=true; s.x=hx; s.y=hy; s.setDepth(hy);
+      if (!s._placed){ this.moveWorkstation(s.ws, hx, hy, false);
+        s._placed=true; s.x=hx; s.y=hy; s.setDepth(hy);
         s.setScale(0); this.tweens.add({targets:s, scale:1.35, duration:360, ease:"Back.out"});
         this.deskRest(s, true, true);
-      } else { s.setDepth(hy); this.deskRest(s, true, true); }
+      } else { this.moveWorkstation(s.ws, hx, hy, true); s.setDepth(hy); this.deskRest(s, true, true); }
     });
   }
   // Drop every live worker (build over / floor reset).
@@ -2416,7 +2462,12 @@ function routeEvent(floor, ev){
       if (S) S.setActiveRoom(ev.room, true);   // new phase boundary → reset the live crew
       resetStage(F);                            // new stage → fresh artifact/journal buckets
       logTo(F, "gold", "── "+ev.label+" ──"); break;   // Progress gets the stage's ✓ cap at its checkpoint
-    case "agent": if (S) S.agentWork(ev.agent); break;
+    case "agent":
+      if (S) S.agentWork(ev.agent);
+      // Retroactive checkpoint burst: this work already finished, so open-and-close the
+      // agent's box with its accomplishment (was left perpetually "WORKING" otherwise).
+      if (ev.done && ev.agent) agentActivity(F, ev.room, ev.agent, true, ev.summary);
+      break;
     case "active": {
       // LIVE per-node telemetry: a real graph node STARTED (seat its agent for the whole
       // model call) or FINISHED (clear them, with a summary). Only in-flight agents sit,
@@ -2427,9 +2478,10 @@ function routeEvent(floor, ev){
       // per-service `svc` box, so logging it again here would double every line.
       if (ev.quiet) break;
       if (phase === "finish"){
-        if (ev.agent) agentActivity(F, ev.room, ev.agent, true, ev.summary);   // box → done
-        else if (ev.step) logTo(F, "good", "✓ "+ev.step);
-        else if (ev.summary) logTo(F, "good", "✓ "+ev.summary);
+        const dur = ev.elapsed_s ? fmtDur(ev.elapsed_s) : "";
+        if (ev.agent) agentActivity(F, ev.room, ev.agent, true, ev.summary, dur);   // box → done
+        else if (ev.step) logTo(F, "good", "✓ "+ev.step+(dur?" · "+dur:""));
+        else if (ev.summary) logTo(F, "good", "✓ "+ev.summary+(dur?" · "+dur:""));
       } else if (phase !== "pulse" && ev.agent){
         agentActivity(F, ev.room, ev.agent, false);   // START opens the agent's box (its header)
         F.liveRoom = ev.room; F.liveAgent = ev.agent;
@@ -2437,7 +2489,7 @@ function routeEvent(floor, ev){
         // A desk-less STEP (a gate run, a fix-forward pass, the doc pass). These used
         // to move the floor and log nothing, which is what made the log look asleep
         // while the crew visibly re-staffed around it.
-        logTo(F, "hot", "⋯ "+ev.step);
+        logInfraStep(F, ev.step);   // remembered so its gate verdict can resolve it in place
         F.liveRoom = ev.room;
       }
       break;
@@ -2469,8 +2521,7 @@ function routeEvent(floor, ev){
         const g=S.gateGeom; if(g){ const col=ev.status==="pass"?0x5ddc7a:0xff5d6c;
           S.ring(g.cx,(g.atop+g.abot)/2,col); S.burst(g.cx,(g.atop+g.abot)/2,[col,0xffffff],8); } }
       if (isActive) renderGatesMini(F.gates);
-      if (!ev.advisory) logTo(F, ev.status==="pass"?"good":"bad",
-        `GATE ${ev.name.toUpperCase()}: ${ev.status.toUpperCase()}${ev.attested?" (signed)":""}`);
+      if (!ev.advisory) resolveGateLine(F, ev.name, ev.status, ev.attested);
       break;
     case "org":
       if (S){ S.renderOrg(ev); S.setOrg(ev.areas, ev.domains);
@@ -2478,7 +2529,8 @@ function routeEvent(floor, ev){
       logTo(F, "gold", "ORG · "+(ev.areas||[]).map(a=>`${a.area}(${(a.leads||[]).length})`).join("  "));
       break;
     case "files":
-      break;   // file count is read live from the repo view, not cached on F
+      F.fileCount = ev.count;   // remembered for the release capstone (the repo view reads files live)
+      break;
     case "checkpoint": {
       // `phase`/`route`/`state_sha` are the pause's provenance (WHERE in the pipeline,
       // WHICH state); `actions` is the per-button consequence copy from the server.
@@ -2533,10 +2585,19 @@ function routeEvent(floor, ev){
         if (ev.decision === "reject") S.shake(280,0.01); }
       if (isActive) hideCheckpoint(); break;
     }
-    case "release":
+    case "release": {
       if (S){ S.setGateSignal("go"); S.openGateAndChest(); S.stampGate(true); S.celebrate(); S.cameraPunch(); S.banner("SHIPPED!", 0x5ddc7a); }
-      logTo(F, "gold", "RELEASED -> "+(ev.uri||"artifact"));
-      logProgress(F, "good", "★ SHIPPED — "+(ev.uri||"artifact")); break;
+      // Capstone: the repo slug + what shipped inside it (file count, gates green).
+      const slug = ev.uri || "artifact";
+      const gs = Object.values(F.gates || {});
+      const green = gs.filter(g => g.status === "pass").length;
+      const bits = [];
+      if (F.fileCount) bits.push(F.fileCount + " file" + (F.fileCount === 1 ? "" : "s"));
+      if (gs.length) bits.push(green + "/" + gs.length + " gates green");
+      const tail = bits.length ? " · " + bits.join(" · ") : "";
+      logTo(F, "gold", "RELEASED -> " + slug + tail);
+      logProgress(F, "good", "★ SHIPPED — " + slug + tail); break;
+    }
     case "halt":
       if (S){ S.setGateSignal("stop"); S.flashGate(); S.stampGate(false); }
       logTo(F, "bad", "HELD: "+ev.reason);
@@ -2601,12 +2662,16 @@ function updateLiveDot(){
   const el = document.getElementById("log-live"); if (!el) return;
   const F = FLOORS.get(ACTIVE);
   if (!F || F.status !== "running"){ el.className="log-live"; el.textContent=""; return; }
-  const fresh = F.lastBeat && (Date.now() - F.lastBeat) < 40000;
+  // A checkpoint pause is expected-quiet — the build is waiting on a human, not the
+  // stream — so keep the healthy dot and never cry RECONNECTING there.
+  const quiet = !!F.awaiting;
+  const fresh = quiet || (F.lastBeat && (Date.now() - F.lastBeat) < 40000);
   el.className = "log-live " + (fresh ? "on" : "stale");
   // Healthy = just the pulsing dot (the ● LIVE tab right below already says the
   // word, and two "LIVE"s side by side read as one broken label). Trouble is loud.
   el.textContent = fresh ? "" : "RECONNECTING…";
-  el.title = fresh ? "Stream connected — quiet stretches are the model thinking."
+  el.title = quiet ? "Paused for your decision — the stream is idle by design."
+           : fresh ? "Stream connected — quiet stretches are the model thinking."
                    : "No data for 40s — check the connection / server.";
 }
 setInterval(updateLiveDot, 5000);
@@ -2689,6 +2754,29 @@ function logTo(F, cls, text, lines){
   if (F.log.length > 240) F.log.shift();
   if (F.floor === ACTIVE) appendLogDom(cls, text, lines);
 }
+// A desk-less STEP row ("⋯ running the SPEC gate"), remembered so its gate verdict can
+// rewrite it in place instead of leaving it dangling above a separate result line.
+function logInfraStep(F, step){
+  const e={cls:"hot", text:"⋯ "+step, lines:null};
+  F.log.push(e); if(F.log.length>240) F.log.shift();
+  if(F.floor===ACTIVE) inLog((ul)=>{ if(!ul) return; e.el=rowNode(e.cls, e.text, null); ul.appendChild(e.el); });
+  (F._openInfra=F._openInfra||[]).push(e);
+}
+// Resolve a gate verdict onto its open "⋯ running the X gate" row when exactly one
+// matches (rewrite in place); otherwise log a fresh gate line. The one-match guard keeps
+// a fuzzy name/label match from ever rewriting the wrong row.
+function resolveGateLine(F, name, status, attested){
+  const pass=status==="pass", tok=String(name||"").toUpperCase();
+  const open=(F._openInfra||[]).filter(e=> !e._closed && String(e.text||"").toUpperCase().includes(tok+" GATE"));
+  const text=(pass?"✓ ":"✕ ")+tok+" gate — "+String(status).toUpperCase()+(attested?" (signed)":"");
+  const cls=pass?"good":"bad";
+  if(open.length===1){
+    const e=open[0]; e._closed=true; e.text=text; e.cls=cls;
+    if(F.floor===ACTIVE && e.el) inLog(()=>{ const n=rowNode(cls, text, null); e.el.replaceWith(n); e.el=n; });
+  } else {
+    logTo(F, cls, "GATE "+tok+": "+String(status).toUpperCase()+(attested?" (signed)":""));
+  }
+}
 // A narrate line. If an agent is CURRENTLY working (and this isn't a system/status
 // message), it's that agent's output — fold it into their box body. Otherwise it's a
 // standalone system line (collapsible if long).
@@ -2720,13 +2808,26 @@ function kindBreakdown(items){
 // narrate output and each artifact with its content one-liner). One border around the
 // whole thing; the response is shown, not hidden behind a disclosure.
 function agentHeadText(g){
-  return (g.done?"✓ ":"▸ ")+(g.room?g.room.toUpperCase()+" · ":"")+g.agent+(g.done?"":" working");
+  const head=(g.done?"✓ ":"▸ ")+(g.room?g.room.toUpperCase()+" · ":"")+g.agent;
+  if(!g.done) return head+" working";
+  // Accomplishment in the header. The verb comes from the T3 caption or the node's
+  // summary; the live-finish summary is prefixed with the agent name ("PM wrote…"), so
+  // strip that when it duplicates the name already in the header.
+  let v=g.fallback||g.cap||"";
+  if(v && g.agent && v.toLowerCase().startsWith(g.agent.toLowerCase()+" ")) v=v.slice(g.agent.length+1);
+  return v ? head+" — "+v : head;
 }
 function renderAgentBox(g){
   const li=document.createElement("li"); li.className="agent-box"+(g.done?" done":"");
   const head=document.createElement("div"); head.className="agent-head";
-  head.textContent=deEmoji(agentHeadText(g)); li.appendChild(head);
-  const cap=g.cap||g.fallback;
+  head.textContent=deEmoji(agentHeadText(g));
+  if(g.done && g.elapsed){ const d=document.createElement("span"); d.className="agent-dur";
+    d.textContent=" · "+g.elapsed; head.appendChild(d); }   // per-step duration, dim
+  li.appendChild(head);
+  // The header already shows the accomplishment verb when done; only repeat a caption in
+  // the body when it's the richer T3 line (g.cap) and actually differs from the header.
+  const headVerb=g.fallback||g.cap||"";
+  const cap = g.done ? (g.cap && g.cap!==headVerb ? g.cap : "") : (g.cap||g.fallback);
   const acts=(g.done?[]:(g.acts||[]));      // live activity only while the step runs
   const body=(cap?1:0)+g.narrates.length+g.items.length+acts.length;
   if(body){
@@ -2761,11 +2862,11 @@ function agentBox(F, agent){
 }
 // active telemetry: START opens the agent's box (header shows "… working"); FINISH marks
 // it done and seeds a fallback caption (the T3 caption overrides it later, via `say`).
-function agentActivity(F, room, agent, done, summary){
+function agentActivity(F, room, agent, done, summary, elapsed){
   if(!agent) return;
   const g=agentBox(F, agent);
   if(room) g.room=room;
-  if(done){ g.done=true; if(summary && !g.fallback) g.fallback=summary; }
+  if(done){ g.done=true; if(summary && !g.fallback) g.fallback=summary; if(elapsed) g.elapsed=elapsed; }
   else F.curAgent=agent;
   if(F.floor===ACTIVE) refreshAgentBox(g);
 }

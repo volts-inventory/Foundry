@@ -38,6 +38,9 @@
            them a single horizontally-scrolling row instead of wrapping to three -->
       <div class="hud-mid"><span class="gates-mini" id="gates-mini"></span></div>
       <div class="hud-right">
+        <!-- Pause/Resume the current floor's build. Shown only while that floor is
+             running; the `control` SSE event is authoritative for its label. -->
+        <button id="pause-btn" class="hidden" title="Pause this build at the next boundary">⏸ PAUSE</button>
         <!-- `.lbl-long` is dropped on narrow screens so both actions still fit on
              one line beside the floor tag (⌥ REPO · ▶ NEW). -->
         <button id="output-btn">⌥ REPO</button>

@@ -96,6 +96,15 @@ button.primary{background:#1f6b3a;border-color:var(--green);color:#dffce8}
 button.danger{background:#6b1f28;border-color:var(--red);color:#ffe0e3}
 button.warn{background:#5a4a18;border-color:var(--gold);color:#fff6da}
 #new-btn{background:#5a4a18;border-color:var(--gold);color:#fff6da}
+/* Pause/Resume toggle: calm blue while running (pause available), loud pulsing gold
+   once the build is paused so a stopped floor reads at a glance. */
+#pause-btn{background:#1b3a4a;border-color:var(--blue);color:#dff2ff}
+#pause-btn.paused{background:#5a4a18;border-color:var(--gold);color:#fff6da;
+  animation:pausedGlow 1.6s infinite}
+@keyframes pausedGlow{
+  0%,100%{box-shadow:0 3px 0 #0c1322,0 0 0 rgba(255,207,82,0)}
+  50%{box-shadow:0 3px 0 #0c1322,0 0 10px rgba(255,207,82,.65)}
+}
 
 /* ---- Stage ---- */
 /* Zelda-style screen wipe on floor change (chunky stepped sweep). It's a child of
@@ -136,6 +145,8 @@ button.warn{background:#5a4a18;border-color:var(--gold);color:#fff6da}
   animation:pulse 1s infinite;
 }
 @keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.25)}}
+/* paused variant of the awaiting badge: blue rather than the gold "!" alert */
+.el-btn .badge.paused{background:var(--blue);color:#06121f;font-size:9px}
 /* release counter on a project's elevator button (bottom-left, distinct from the ! badge) */
 .el-btn .rel-badge{
   position:absolute;bottom:-5px;left:-5px;background:var(--blue);color:#06121f;

@@ -2393,7 +2393,7 @@ async function newProject(req, mode, supervised, backend, packs, extra){
     if (existing.es){ try{ existing.es.close(); }catch(_){} }
     Object.assign(existing, {
       id:resp.id, release, releases:(existing.releases||1)+1, request:req, mode, backend,
-      log:[], progress:[], gates:{}, org:null, cp:null, awaiting:false, status:"running", passed:false,
+      log:[], progress:[], gates:{}, org:null, cp:null, awaiting:false, paused:false, status:"running", passed:false,
       slots, journal:[], seenUris:new Set(), _agrp:null, _svcOpen:null,
     });
     const sc = GAME.scene.getScene(floorKey(floor));
@@ -2406,7 +2406,7 @@ async function newProject(req, mode, supervised, backend, packs, extra){
   // NEW PROJECT: a fresh floor.
   const F = {
     id: resp.id, floor, release, releases:1, request:req, mode, backend, scene:null,
-    log:[], progress:[], gates:{}, org:null, cp:null, awaiting:false, status:"running", passed:false,
+    log:[], progress:[], gates:{}, org:null, cp:null, awaiting:false, paused:false, status:"running", passed:false,
     slots, journal:[], seenUris:new Set(),
   };
   FLOORS.set(floor, F);
@@ -2610,8 +2610,23 @@ function routeEvent(floor, ev){
       if (S){ S.setGateSignal("stop"); S.flashGate(); S.stampGate(false); }
       logTo(F, "bad", "HELD: "+ev.reason);
       logProgress(F, "bad", "✕ HELD — "+ev.reason); break;
+    case "control":
+      // Authoritative pause-state flip, fired immediately on the POST — reconciles the
+      // optimistic toggle on this device and sets the button on every other one.
+      F.paused = !!ev.paused;
+      if (isActive) updatePauseBtn(F);
+      renderElevator(); break;
+    case "paused":                       // the run actually parked at a boundary
+      F.paused = true;
+      if (isActive) updatePauseBtn(F);
+      renderElevator(); break;
+    case "resumed":                      // …and unparked
+      F.paused = false;
+      if (isActive) updatePauseBtn(F);
+      renderElevator(); break;
     case "done":
-      F.status = "done"; F.passed = !!ev.passed; renderElevator();
+      F.status = "done"; F.passed = !!ev.passed; F.paused = false; renderElevator();
+      if (isActive) updatePauseBtn(F);
       // Build's over: nobody is working, so everyone heads to the LOUNGE
       // (staffRoom(null) marks no room active and routes idle folks there).
       if (S){ S.clearLiveWorkers(); S.staffRoom(null); S.cameraZoom(1, 300); if (!ev.passed){ S.gloom(); S.banner("HELD AT THE GATE", 0xff5d6c); } }
@@ -3191,6 +3206,7 @@ function updateHud(F){
   });
   const tail = (F.mode ? "· "+F.mode : "") + (F.backend ? " · "+F.backend : "");
   document.getElementById("mode-tag").textContent = tail.trim();
+  updatePauseBtn(F);
 }
 function renderElevator(){
   const el=document.getElementById("el-floors"); el.innerHTML="";
@@ -3212,6 +3228,7 @@ function renderElevator(){
     btn.innerHTML=`<span class="fl-no">${f}</span>FL`;
     if (F.releases>1){ const r=document.createElement("span"); r.className="rel-badge"; r.textContent="r"+F.release; btn.appendChild(r); }
     if (F.awaiting){ const b=document.createElement("span"); b.className="badge"; b.textContent="!"; btn.appendChild(b); }
+    else if (F.paused && F.status==="running"){ const p=document.createElement("span"); p.className="badge paused"; p.textContent="⏸"; btn.appendChild(p); }
     btn.onclick=()=>switchToFloor(f);
     el.appendChild(btn);
   }
@@ -3772,6 +3789,33 @@ function sendDecision(decision){
   F.awaiting = false; renderElevator(); hideCheckpoint();
 }
 
+// ---- pause / resume the current floor's build ------------------------------
+// POSTed EXACTLY like sendDecision above — same postHeaders() (JSON content-type +
+// the X-Workshop-Token when set) — so it clears the same mutation guard as the
+// checkpoint decision. The `control` SSE event is authoritative for the button
+// label on every connected device; the optimistic flip here only makes THIS tap
+// feel instant while that event is in flight.
+function togglePause(){
+  const F = FLOORS.get(ACTIVE);
+  if (!F || F.status !== "running") return;      // nothing to pause on a done/idle floor
+  const action = F.paused ? "resume" : "pause";
+  fetch("/api/control/"+F.id, {method:"POST", headers:postHeaders(),
+    body: JSON.stringify({action})});
+  F.paused = !F.paused;                           // optimistic; `control` reconciles it
+  updatePauseBtn(F); renderElevator();
+}
+// The toggle exists only while THIS floor is genuinely running; label + paused
+// styling track F.paused (owned authoritatively by the `control` event).
+function updatePauseBtn(F){
+  const b = document.getElementById("pause-btn"); if (!b) return;
+  const running = !!F && F.status === "running";
+  b.classList.toggle("hidden", !running);
+  if (!running) return;
+  b.classList.toggle("paused", !!F.paused);
+  b.textContent = F.paused ? "▶ RESUME" : "⏸ PAUSE";
+  b.title = F.paused ? "Resume this build" : "Pause this build at the next boundary";
+}
+
 // ---- interview a lead (click an agent) -------------------------------------
 let IV_TARGET = null;
 function openInterview(name){
@@ -3815,6 +3859,7 @@ function askInterview(){
 // ---- UI wiring -------------------------------------------------------------
 const newModal=document.getElementById("new-modal");
 document.getElementById("new-btn").onclick=()=>showNewModal();
+document.getElementById("pause-btn").onclick=()=>togglePause();
 document.getElementById("cancel-btn").onclick=()=>newModal.classList.add("hidden");
 document.getElementById("new-close").onclick=()=>newModal.classList.add("hidden");
 // ---- folded sections report what they're set to ------------------------------
@@ -4292,6 +4337,7 @@ function adoptFloor(row){
     id:row.id, floor:row.floor, release:row.release||1, releases:row.releases||1,
     request:row.request, mode:row.mode, backend:row.backend,
     scene:null, log:[], progress:[], gates:row.gates||{}, org:null, cp:null, awaiting:!!row.awaiting,
+    paused:!!row.paused,
     status:row.status, passed:!!row.passed, slots:row.slots||1, journal:[], seenUris:new Set(),
   };
   FLOORS.set(row.floor, F);
@@ -4333,7 +4379,7 @@ async function adoptNextRelease(F){
     if (F.es){ try{ F.es.close(); }catch(_){} }
     Object.assign(F, {
       id:row.id, release:row.release||F.release+1, releases:(F.releases||1)+1,
-      request:row.request, log:[], gates:{}, org:null, cp:null, awaiting:false,
+      request:row.request, log:[], gates:{}, org:null, cp:null, awaiting:false, paused:false,
       status:"running", passed:false, journal:[], seenUris:new Set(),
       liveRoom:null, liveAgent:null, _agrp:null, _svcOpen:null,
     });

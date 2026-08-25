@@ -31,6 +31,7 @@ let WALL_TOP, FLOOR_BOTTOM;
 // offsets (PX/SY/RP in buildAgents + layoutEngineering), so a shorter or narrower cell
 // would push desks through the walls. Only the grid's shape changes.
 const CELL_W = 274, CELL_H = 196, AISLE = 34, GX0 = 40, GY0 = 132;
+const WALL_H = 30;   // 3/4 interior: the standing FRONT FACE height of a room's back (north) wall
 let GX1;
 function cellBox(c,r){ const x = GX0 + c*(CELL_W+AISLE), y = GY0 + r*(CELL_H+AISLE);
   // include derived coords so non-ROOM callers (the lounge cell) get cx/cy/x1/y1 too.
@@ -535,23 +536,23 @@ class FloorScene extends Phaser.Scene {
       // The room's OWN floor, laid over the shared base (was built + never drawn) — this is
       // what makes each room read as a distinct material, not one tan slab. Below glow/walls.
       this.add.tileSprite(R.x, R.y, R.w, R.h, "floor_"+key).setOrigin(0,0).setDepth(0.5);
-      // Ambient occlusion: a soft contact shadow on the floor where the top + left walls
-      // meet it (light is top-left), so the walls seat instead of floating.
-      this.add.rectangle(R.x+12, R.y+20, R.w-24, 5, 0x000000, 0.13).setOrigin(0,0).setDepth(0.7);
-      this.add.rectangle(R.x+12, R.y+20, 5, R.h-32, 0x000000, 0.10).setOrigin(0,0).setDepth(0.7);
+      // Ambient occlusion: a soft contact shadow along the LEFT wall base (the back wall
+      // draws its own floor AO now that it stands). Starts below the standing back wall.
+      this.add.rectangle(R.x+12, R.y+WALL_H, 5, R.h-WALL_H-12, 0x000000, 0.10).setOrigin(0,0).setDepth(0.7);
       this.roomDecal(key, R);                        // a faint department emblem so the room reads even empty
-      // label placard — a navy sign hanging just BELOW the banded top wall (bigger sign)
+      // label placard — a sign hanging on the floor just BELOW the standing back wall
+      const ly = R.y + WALL_H + 4;
       const sw = Math.min(R.w-10, R.label.length*9+28);
       (this.roomLabels = this.roomLabels || {})[key] =
-      this.add.rectangle(R.cx, R.y+22, sw, 22, PC.ink, 0.96).setOrigin(0.5,0).setDepth(3).setStrokeStyle(2, accent);
-      this.add.rectangle(R.cx, R.y+22, sw, 2, mix(accent,0xffffff,0.4)).setOrigin(0.5,0).setDepth(4);
-      this.roomGlyph(key, R.cx-sw/2+7, R.y+27);
-      this.bm(R.cx+6, R.y+28, R.label, 13, 0xfbf3df, 0.5, 0).setDepth(4);
+      this.add.rectangle(R.cx, ly, sw, 22, PC.ink, 0.96).setOrigin(0.5,0).setDepth(5).setStrokeStyle(2, accent);
+      this.add.rectangle(R.cx, ly, sw, 2, mix(accent,0xffffff,0.4)).setOrigin(0.5,0).setDepth(6);
+      this.roomGlyph(key, R.cx-sw/2+7, ly+5);
+      this.bm(R.cx+6, ly+6, R.label, 13, 0xfbf3df, 0.5, 0).setDepth(6);
       const no = ORDER_NO[key];
       if (no != null){
-        const bx = R.x+15, by = R.y+34;
-        this.add.circle(bx, by, 10, PC.stripe, 0.98).setStrokeStyle(2, PC.wallHi).setDepth(4);
-        this.bm(bx, by, String(no), 13, 0xfff4e0, 0.5, 0.5).setDepth(5);
+        const bx = R.x+15, by = ly+12;
+        this.add.circle(bx, by, 10, PC.stripe, 0.98).setStrokeStyle(2, PC.wallHi).setDepth(6);
+        this.bm(bx, by, String(no), 13, 0xfff4e0, 0.5, 0.5).setDepth(7);
       }
       this.roomGlow[key] = this.add.rectangle(R.x, R.y, R.w, R.h, 0xffe27a, 0).setOrigin(0,0).setDepth(1);
     }
@@ -566,7 +567,7 @@ class FloorScene extends Phaser.Scene {
   // building's plan, not rugs on open space. Walls sit below the agents (depth 4)
   // so people always render in front; doorways open onto the corridors.
   buildWalls(){
-    const T = 12, DOOR = 48, BAND = 20;   // THICK plaster partitions, wide open passage, tall top band
+    const T = 12, DOOR = 48;   // THICK plaster partitions, wide open passage
     // Interior partitions are PLASTER (the brick is the perimeter shell only) — a distinct,
     // lighter material so rooms read as interior architecture, not more of the outer wall.
     const FACE = PC.plaster, CAP = PC.plasterHi, BASE = PC.plasterBase, EDGE = PC.plasterEdge;
@@ -580,18 +581,21 @@ class FloorScene extends Phaser.Scene {
       if (h > 5) R0(x, y+h-2, w, 2, BASE);
       if (w > 5) R0(x+w-2, y, 2, h, BASE);
     };
-    // Top wall: a TALL banded plaster wall with a per-room ACCENT STRIPE (the one place each
-    // room's colour reads) framed by plaster pinlines + a baseboard shadow. `accent` per room.
+    // Back (north) wall: a STANDING 3/4 FRONT FACE (WALL_H tall) — a lit top cap, the plaster
+    // face with the per-room accent course mid-wall, a darker base course, and a floor AO strip
+    // where it meets the tiles. This height (vs a flat strip) is what reads as a GB interior.
     const band = (x, w, y, accent) => {
       if (w <= 0) return;
       const hi = mix(accent, 0xffffff, 0.45);
-      R0(x-1, y-1, w+2, BAND+2, EDGE);
-      R0(x, y,    w, 8, FACE);  R0(x, y, w, 1, CAP);                // plaster upper + lit cap
-      R0(x, y+8,  w, 1, WHITE);                                     // pinline
-      R0(x, y+9,  w, 5, accent); R0(x, y+9, w, 1, hi);             // room accent stripe + highlight
-      R0(x, y+14, w, 1, WHITE);                                     // pinline
-      R0(x, y+15, w, 4, FACE);                                      // plaster lower
-      R0(x, y+19, w, 1, BASE);                                      // baseboard shadow
+      R0(x-1, y-1, w+2, WALL_H+2, EDGE);                           // ink outline around the face
+      R0(x, y, w, WALL_H, FACE);                                   // full standing plaster face
+      R0(x, y, w, 2, CAP);                                         // lit top cap
+      R0(x, y+13, w, 1, WHITE);                                    // pinline above the accent
+      R0(x, y+14, w, 5, accent); R0(x, y+14, w, 1, hi);           // room accent course + highlight
+      R0(x, y+19, w, 1, WHITE);                                    // pinline below
+      R0(x, y+WALL_H-3, w, 2, BASE);                               // darker base course
+      R0(x, y+WALL_H-1, w, 1, EDGE);                               // where the face meets the floor
+      this.add.rectangle(x, y+WALL_H, w, 3, 0x000000, 0.18).setOrigin(0,0).setDepth(0.7); // floor AO
     };
     for (const key in ROOMS){
       const R = ROOMS[key]; if (R.virtual) continue;
@@ -656,7 +660,7 @@ class FloorScene extends Phaser.Scene {
   }
   roomGlyph(key, x, y){
     const W = 0xffffff, D = PC.ink;     // white glyph, navy plaque cut-outs
-    const p = (dx,dy,w,h,c)=> this.add.rectangle(x+dx, y+dy, w, h, c).setOrigin(0,0).setDepth(4);
+    const p = (dx,dy,w,h,c)=> this.add.rectangle(x+dx, y+dy, w, h, c).setOrigin(0,0).setDepth(6);
     const M = (rects)=> rects.forEach(([dx,dy,w,h,k])=> p(dx,dy,w,h, k?W:D));
     switch(key){
       case "engineering":  // gear: body + 4 teeth + hole

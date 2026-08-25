@@ -240,6 +240,44 @@ def test_senior_decomposition_is_deterministic_across_reruns() -> None:
     assert ids1 == ids2
 
 
+def test_senior_skips_redecomposition_when_all_units_already_have_tasks() -> None:
+    """Fix-loop re-entry guard: when every owned unit already carries a task, the
+    Senior makes ZERO model calls and writes nothing. The `tasks` channel is
+    first-keyed-wins, so a re-emission would coalesce to identical state anyway —
+    the (T1 Opus) decomposition on every fix attempt is pure waste."""
+    design, ownership = a_design(), an_ownership_map()
+    scripted = {"src/store.py": ["AC-1"], "src/util.py": ["AC-2"], "src/api.py": ["AC-3"]}
+
+    t1 = scripted_decomposition(scripted)
+    node1 = senior_node(make_runtime(t1), design, ownership)
+    first = node1(senior_state(design, ownership), config_for("r1"))
+    assert len(t1.requests) == len(ownership.leads())  # first run authors the tasks
+
+    t2 = scripted_decomposition(scripted)
+    node2 = senior_node(make_runtime(t2), design, ownership)
+    reentry = {**senior_state(design, ownership), "tasks": first["tasks"]}
+    writes = node2(reentry, config_for("r2"))
+    assert t2.requests == []  # ZERO model calls on re-entry
+    assert writes == {}  # nothing re-emitted (reducer would coalesce it anyway)
+
+
+def test_senior_still_runs_when_a_new_unit_is_uncovered() -> None:
+    """A design change that introduces a NEW ownership unit leaves it uncovered, so
+    the guard does NOT fire — the node runs and emits the missing task."""
+    design, ownership = a_design(), an_ownership_map()
+    scripted = {"src/store.py": ["AC-1"], "src/util.py": ["AC-2"], "src/api.py": ["AC-3"]}
+    node1 = senior_node(make_runtime(scripted_decomposition(scripted)), design, ownership)
+    first = node1(senior_state(design, ownership), config_for("r1"))
+
+    t2 = scripted_decomposition(scripted)
+    node2 = senior_node(make_runtime(t2), design, ownership)
+    # Only ONE of the three units is already on the channel -> not all covered.
+    partial = {**senior_state(design, ownership), "tasks": first["tasks"][:1]}
+    writes = node2(partial, config_for("r2"))
+    assert t2.requests != []  # ran
+    assert writes.get("tasks")  # emitted
+
+
 def test_senior_never_mints_a_gate_result() -> None:
     design, ownership = a_design(), an_ownership_map()
     rt = make_runtime(scripted_decomposition({}))

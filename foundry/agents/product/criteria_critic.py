@@ -40,6 +40,12 @@ _NODE_ID = "criteria_completeness_critic"
 # restores Opus for the heaviest reasoning on this security/abuse completeness judgment.
 _TIER = os.environ.get("FOUNDRY_CRITERIA_TIER", "T2").strip() or "T2"
 _SPEC_GATE = "spec"
+# The critic inlines the PRD prose for context, and it runs on every revision pass
+# (<=2 extra). Every other prompt input here and in the PM caps its span; this was the
+# one hole. Cap the body so a large PRD can't re-bill unbounded tokens each pass — the
+# completeness judgment reads the DECLARED CRITERIA (always inlined in full), not the
+# full prose, so a bounded prose head is sufficient context. Env-overridable.
+_PRD_BODY_CAP = int(os.environ.get("FOUNDRY_CRITERIA_PRD_CAP", "16000") or "16000")
 
 SOP = (
     "You are the Criteria-Completeness Critic (Layer 1), an INDEPENDENT reviewer "
@@ -116,9 +122,12 @@ def _prd_body(state: FactoryState, rt: AgentRuntime) -> str:
     if not uri or rt.cas is None:
         return ""
     try:
-        return rt.cas.resolve_blob(uri).decode("utf-8", "replace")
+        body = rt.cas.resolve_blob(uri).decode("utf-8", "replace")
     except Exception:
         return ""
+    if len(body) > _PRD_BODY_CAP:
+        return body[:_PRD_BODY_CAP] + "\n…[PRD truncated for length]"
+    return body
 
 
 def _provenance(rt: AgentRuntime) -> JudgmentProvenance:

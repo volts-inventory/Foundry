@@ -246,6 +246,21 @@ def make_senior_engineer_node(
         order = ownership.merge_order()
         index_of = {unit: i for i, unit in enumerate(order)}  # GLOBAL, spans all lanes
 
+        # FIX-LOOP RE-ENTRY GUARD (efficiency): the supervisor routes a build/test fix
+        # back through the whole implementation layer, so the Senior re-runs on every
+        # attempt. But its task ids are unit-keyed and the `tasks` channel is
+        # first-keyed-wins (union_by_id), so re-decomposing units that ALREADY have a
+        # task changes no load-bearing state — the original tasks survive, and the node
+        # writes no artifacts/gates (only `tasks` + an advisory journal note). When every
+        # unit this node owns is already covered, skip the (T1 Opus) decomposition call
+        # entirely. A design change that introduces a NEW unit leaves it uncovered, so
+        # the node still runs to emit it.
+        my_units = [u for lead in leads_for_lane(ownership, lane) for u in ownership.units_of(lead)]
+        if my_units:
+            have_ids = {e.get("id") for e in (state.get("tasks") or ()) if isinstance(e, dict)}
+            if all(task_id_for_unit(u) in have_ids for u in my_units):
+                return {}
+
         # ONE Tech-Lead per domain (each OwnershipMap owner; Wave A
         # `OwnershipMap.leads()`): a lead decomposes ONLY its own ownership units,
         # so its decomposition context stays focused on its slice. The task

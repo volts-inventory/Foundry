@@ -1298,17 +1298,25 @@ class FloorScene extends Phaser.Scene {
   // Pack a room's seated agents into the shared centred grid (same PX/SY/RP as the eng
   // rooms), re-centring as the crew grows. A newly-spawned sprite scales in at its slot;
   // an already-seated one walks to its new slot. Desk + stool move with the person.
+  // ONE desk grid shared by every room — static crews (layoutRoomAgents), live coding
+  // workers (_layoutLaneWorkers) AND engineering ICs (layoutEngineering) — so spacing is
+  // identical everywhere and desks/badges never crowd. Max 2 COLUMNS (a 250px room
+  // interior can't fit three 64px desks + ~80px badges without them touching), centred,
+  // with real gaps; a lone occupant centres in the room. Rows start well below the wall
+  // sign and pitch to fit up to three rows (a 5-strong crew = 2+2+1) inside the room.
+  roomGrid(R, i, n){
+    if (n <= 1) return {x: Math.round(R.cx), y: Math.round(R.y + R.h*0.52)};
+    const cols = Math.min(n, 2), PX = 112, SY = R.y + 72, RP = 46;
+    const col = i%cols, row = Math.floor(i/cols), bw = (cols-1)*PX;
+    return {x: Math.round(R.cx - bw/2 + col*PX), y: SY + row*RP};
+  }
   layoutRoomAgents(room){
     const R = ROOMS[room]; if (!R) return;
     const names = this.seatedNames[room] || [];
-    const n = names.length, single = n === 1;
-    const cols = Math.min(Math.max(n,1), 3);
-    const PX = 84, SY = R.y + 94, RP = 50;
+    const n = names.length;
     names.forEach((name,i)=>{
       const a = this.agents.get(name); if (!a) return;
-      const col = i%cols, row = Math.floor(i/cols), blockW = (cols-1)*PX;
-      const hx = single ? Math.round(R.cx) : Math.round(R.cx - blockW/2 + col*PX);
-      const hy = single ? Math.round(R.y + R.h*0.52) : (SY + row*RP);
+      const g = this.roomGrid(R, i, n), hx = g.x, hy = g.y;
       a.home = {x:hx, y:hy};
       if (a.ws){ a.ws.x = hx; a.ws.y = hy+16; a.ws.setDepth(hy+21);
         if (a.ws.chair){ a.ws.chair.x = hx; a.ws.chair.y = hy; a.ws.chair.setDepth(hy-4); } }
@@ -2147,10 +2155,9 @@ class FloorScene extends Phaser.Scene {
   _layoutLaneWorkers(room){
     const R = ROOMS[room]; if (!R) return;
     const crew = []; for (const s of this.liveWorkers.values()) if (s.room === room && !s._dead) crew.push(s);
-    const n = crew.length, cols = Math.min(Math.max(n,1), 3), PX=84, SY=R.y+94, RP=50;
+    const n = crew.length;
     crew.forEach((s,i)=>{
-      const col=i%cols, row=Math.floor(i/cols), bw=(cols-1)*PX;
-      const hx = Math.round(R.cx - bw/2 + col*PX), hy = SY + row*RP;
+      const g = this.roomGrid(R, i, n), hx = g.x, hy = g.y;
       s.home = {x:hx, y:hy};
       if (s.ws){ s.ws.x=hx; s.ws.y=hy+16; s.ws.setDepth(hy+21);
         if (s.ws.chair){ s.ws.chair.x=hx; s.ws.chair.y=hy; s.ws.chair.setDepth(hy-4); } }
@@ -2227,16 +2234,17 @@ class FloorScene extends Phaser.Scene {
         if (this.roomLive(rk)) this.deskRest(s, true, true); else this.standDown(s);
         (p.lead?this.techLeadGroup:this.poolGroup).push(s, ws);
       };
-      // ONE consistent desk grid for every room: centred columns, first row well BELOW
-      // the room label so it's never covered. (PX=column pitch, SY=first-row Y, RP=row pitch.)
-      const PX=84, SY=R.y+94, RP=50;
-      if (!ics.length && lead){
-        place(lead, R.cx, Math.round(R.y + R.h*0.52), true);   // ONLY the lead → centre the desk
+      // Same shared desk grid as every other room (roomGrid). The lead oversees from the
+      // bottom-right corner whenever anyone else is on the floor — in LIVE-worker mode the
+      // real per-worker desks own the grid, so the lead must NOT sit centre (it used to,
+      // and the live workers seated right on top of it).
+      const corner = () => place(lead, R.x1 - 56, R.y1 - 34, true);
+      if (this.liveWorkerMode && lead){ corner(); }
+      else if (!ics.length && lead){
+        const g = this.roomGrid(R, 0, 1); place(lead, g.x, g.y, true);   // ONLY the lead → centre
       } else {
-        const c2=Math.min(3, Math.max(1, ics.length));
-        ics.forEach((p,i)=>{ const c=i%c2, r=Math.floor(i/c2), bw=(c2-1)*PX;
-          place(p, R.cx - bw/2 + c*PX, SY + r*RP, false); });   // centred IC grid (upper room)
-        if (lead) place(lead, R.x1 - 50, R.y1 - 36, true);     // LEAD oversees from the bottom-right
+        ics.forEach((p,i)=>{ const g = this.roomGrid(R, i, ics.length); place(p, g.x, g.y, false); });
+        if (lead) corner();
       }
       this.engLabels.push(this.bm(R.x1-8, R.y+8, "×"+people.length, 11, 0xffc08a, 1, 0).setDepth(28));
     }

@@ -870,6 +870,8 @@ def _run_tasks_pooled(
     ) as pool:
         submitted: dict[str, str | None] = {}
         for task in tasks:
+            if rt.pause_gate is not None:
+                rt.pause_gate()  # worker-drain pause: hold here before submitting the next task
             etask = execution_task_for(
                 task,
                 constraints,
@@ -1007,9 +1009,6 @@ def make_junior_engineer_node(
         # Lane scoping: build only THIS lane's tasks, but keep the full ready set for
         # budget weighting (below).
         tasks = list(tasks_for_lane(state, resolve, lane))
-        # Advisory journal note: a prose "what this engineer built" line (the feature
-        # domains its tasks implement) for the event log / interview affordance.
-        jnote = _engineer_note(rt, config, tasks, state, resolve, lane)
         # Fix loop: on a re-entry after a failed gate, feed the SPECIFIC failure back
         # to the engineer (empty on the first pass) so it fixes that instead of re-rolling.
         prior_failures = _prior_failures(state)
@@ -1023,6 +1022,10 @@ def make_junior_engineer_node(
             built = _built_task_ids(state)
             if built:
                 tasks = [t for t in tasks if t.id not in built]
+        # Advisory journal note: a prose "what this engineer built" line — computed on
+        # the POST-skip task set so a resume that skips already-built tasks doesn't claim
+        # to have implemented them. For the event log / interview affordance.
+        jnote = _engineer_note(rt, config, tasks, state, resolve, lane)
         # SYSTEM-DECIDED parallelism. The Tech-Lead's decomposition IS the decision
         # to parallelize: it splits the work into independently-buildable tasks. We
         # size the IC pool to that decomposition — one worker per ready task —
@@ -1094,6 +1097,8 @@ def make_junior_engineer_node(
         # (parallel siblings can't see each other mid-flight).
         overlay: dict[str, str | None] = {}
         for task in tasks:
+            if rt.pause_gate is not None:
+                rt.pause_gate()  # worker-drain pause: hold before starting the next task
             _t_area = area_by_task.get(task.id, "")
             _tmeta = {"id": task.id, "title": getattr(task, "title", task.id)}
             _emit_worker(rt, "start", _tmeta, _t_area, lane)

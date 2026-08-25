@@ -550,6 +550,20 @@ def test_junior_builds_each_ready_task_on_its_own_branch(tmp_path: Any) -> None:
     assert len(writes["artifacts"]) == 2
 
 
+def test_pool_consults_the_pause_gate_before_each_task(tmp_path: Any) -> None:
+    """Worker-drain wiring: rt.pause_gate is called once before submitting each coding
+    task, so a paused build drains its in-flight workers (they finish) without starting
+    new ones. Default (no gate) is byte-identical — the guard is `is not None`."""
+    (tmp_path / "README.md").write_text("seed\n")
+    calls: list[int] = []
+    rt = make_runtime(adapter=StubAdapter())
+    rt.pause_gate = lambda: calls.append(1)
+    t1, t2 = a_task("t-001"), a_task("t-002")
+    node = make_junior_engineer_node(rt, source_dir=str(tmp_path))
+    node({"tasks": tasks_state(t1, t2), "pinned_constraints": ()}, config_for("run"))
+    assert len(calls) == 2  # consulted once per task before it is dispatched
+
+
 def test_junior_skips_already_built_tasks_on_a_clean_resume(tmp_path: Any) -> None:
     """Resume-cheap: on a CLEAN continuation (no failed gate), a task that already
     produced a feature_diff on the durable artifacts channel is NOT rebuilt — only the

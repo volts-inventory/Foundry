@@ -1293,6 +1293,7 @@ def run(
     progress_cb: Callable[..., None] | None = None,
     activity_cb: Callable[[str], None] | None = None,
     worker_cb: Callable[[dict[str, Any]], None] | None = None,
+    pause_gate: Callable[[], None] | None = None,
     max_slots: int = AUTO_SLOTS_CAP,
     cost_cap_microusd: int | None = None,
     base_dir: str | None = None,
@@ -1453,6 +1454,7 @@ def run(
                                         activity_cb=activity_cb),
         cas=store,
         worker_cb=worker_cb,
+        pause_gate=pause_gate,
     )
 
     # Seal the zone-A observation channel (fail-closed forged-results hardening):

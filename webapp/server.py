@@ -1544,6 +1544,8 @@ def _run_factory(p: Project, resume: bool = False) -> None:
                 progress_cb=progress,
                 activity_cb=activity,         # what the agent is doing INSIDE a step
                 worker_cb=worker,             # per-concurrent-worker coding desks (E3)
+                pause_gate=lambda: _pause_gate(p),  # worker-drain: pause between coding tasks
+
                 mode=p.mode,
                 backend=p.backend,            # real backend per project (not always mock)
                 adapter=p.adapter,            # coding substrate (stub/raw-react)

@@ -311,6 +311,28 @@ def _usage_from_envelope(envelope: dict[str, Any]) -> dict[str, int]:
     return {}
 
 
+# CLI-INFRASTRUCTURAL failure phrases (the claude binary itself couldn't start the
+# agentic session — auth/setup/permission), as opposed to something the MODEL wrote.
+# Matched case-insensitively against the error envelope's `result` AND stderr, and
+# ONLY when the run authored no files — so an is_error run that DID produce a diff
+# (a real code attempt) is still handed to the gates, never misread as unavailability.
+_UNAVAILABLE_MARKERS: tuple[str, ...] = (
+    "not logged in",
+    "please run /login",
+    "invalid api key",
+    "authentication_error",
+    "no credentials",
+    "cannot be used with root",  # --dangerously-skip-permissions refused as root/sudo
+    "setup-token",
+)
+
+
+def _looks_unavailable(*texts: str) -> bool:
+    """True when any text carries a CLI auth/setup/permission failure marker."""
+    blob = " ".join(t for t in texts if t).lower()
+    return any(m in blob for m in _UNAVAILABLE_MARKERS)
+
+
 class ClaudeCodeAdapter:
     """Agentic Claude Code substrate: the CLI edits the worktree; the adapter
     observes the authored tree slice and records it content-addressed."""
@@ -410,6 +432,7 @@ class ClaudeCodeAdapter:
         else:
             result = self._exec(sandbox, self._argv(packet), self._timeout_s)
         after = walk_worktree(sandbox.worktree)
+        authored, deleted, skipped_binary = changed_files(before, after)
 
         envelope = (_stream_envelope(result.stdout) if self._on_activity is not None
                     else _lenient_json_object(result.stdout))
@@ -418,7 +441,19 @@ class ClaudeCodeAdapter:
             # the gates decide whether the partial tree passes.
             summary = "claude hard-killed at the sandbox wall-clock cap"
         elif envelope.get("is_error"):
-            summary = f"claude reported is_error: {str(envelope.get('result'))[:400]}"
+            err = str(envelope.get("result") or "")
+            # An is_error run that AUTHORED NOTHING and carries an auth/setup/permission
+            # marker means the substrate never actually started (e.g. "Not logged in" in
+            # the sandbox, or the root permission refusal). Surface it LOUDLY as
+            # unavailability — the build fails in seconds with the real reason — instead
+            # of handing the gates an empty diff that masquerades as a code failure and
+            # burns the whole fix loop re-reviewing nothing.
+            if not authored and not deleted and _looks_unavailable(err, result.stderr):
+                raise AdapterUnavailableError(
+                    "claude could not run in the sandbox — no code produced: "
+                    f"{(err or result.stderr)[:300] or '(no detail)'}"
+                )
+            summary = f"claude reported is_error: {err[:400]}"
         elif not envelope and result.returncode != 0:
             raise AdapterUnavailableError(
                 f"claude exit {result.returncode} with no parseable envelope: "
@@ -427,8 +462,6 @@ class ClaudeCodeAdapter:
         else:
             raw = envelope.get("result")
             summary = raw if isinstance(raw, str) else ""
-
-        authored, deleted, skipped_binary = changed_files(before, after)
         payload: dict[str, Any] = {"kind": "full-file-snapshot", "files": authored}
         if deleted:
             payload["deleted"] = deleted  # integration unlinks these (Phase 2)

@@ -122,6 +122,29 @@ def test_resume_id_adds_flag_and_session_id_is_captured(source_dir: Path) -> Non
     assert result.session_id == "sess-new"              # captured for the next attempt
 
 
+def test_auth_failure_with_no_files_raises_unavailable(source_dir: Path) -> None:
+    """A "Not logged in" (or root-permission) is_error envelope that authored NOTHING is
+    the substrate failing to START — raise AdapterUnavailableError loudly so the build
+    fails in seconds with the real reason, instead of handing the gates an empty diff
+    that masquerades as a code failure and burns the whole fix loop."""
+    bad = envelope(is_error=True, result="Not logged in · Please run /login")
+    adapter = ClaudeCodeAdapter(exec_fn=fake_exec({}, bad))  # authors nothing
+    with Sandbox(source_dir) as sb, pytest.raises(AdapterUnavailableError, match="could not run"):
+        adapter.run(make_packet(sb.worktree), sb)
+
+
+def test_is_error_that_authored_code_is_not_treated_as_unavailable(source_dir: Path) -> None:
+    """The unavailability guard is gated on AUTHORED-NOTHING: an is_error run that DID
+    write code is a real attempt — even if its text happens to match a marker — so it is
+    handed to the gates, never misread as unavailability."""
+    bad = envelope(is_error=True, result="warning: not logged in to the deploy service")
+    adapter = ClaudeCodeAdapter(exec_fn=fake_exec({"a.py": "A = 1\n"}, bad))
+    with Sandbox(source_dir) as sb:
+        result = adapter.run(make_packet(sb.worktree), sb)  # must NOT raise
+        body = json.loads(sb.get_blob(result.diff_uri))
+    assert body["files"] == {"a.py": "A = 1\n"}
+
+
 def test_snapshot_slice_materializes_via_gate_wiring(source_dir: Path) -> None:
     # End-to-end contract: the blob the adapter emits is the exact body shape the
     # integration boundary consumes.

@@ -106,6 +106,12 @@ class AdapterResult(FrozenModel):
         ),
     )
     turns_used: int = 1
+    # ADVISORY token usage the substrate reported for THIS task (the coding session's
+    # own tokens — which never flow through the proxy, so this is the only way a token
+    # manifest can account for the coder). Keys mirror the provider envelope:
+    # ``input_tokens`` / ``output_tokens`` / ``cache_read_input_tokens``. Empty when the
+    # substrate reports none (stub/tests). Observe-only — never a budget/verdict input.
+    usage: dict[str, int] = Field(default_factory=dict)
     snapshot_digest: str  # content-addressed turn snapshot (Sandbox.snapshot)
     # B2 foundation: the coding session's id (observed from the substrate envelope),
     # so a future fix attempt can `--resume` it instead of re-priming. None when the

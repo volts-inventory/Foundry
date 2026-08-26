@@ -853,6 +853,30 @@ def test_usage_manifest_buckets_by_node_and_tier_and_composes_as_observer():
     assert m.observe not in mpp._usage_observers       # de-registered
 
 
+def test_coder_usage_parses_from_the_envelope_and_flips_the_manifest_rollup():
+    from foundry.execution.adapters.claude_code import _usage_from_envelope
+    from foundry.proxy.usage_manifest import UsageManifest
+
+    # top-level ``usage`` is preferred and mapped straight through
+    assert _usage_from_envelope(
+        {"usage": {"input_tokens": 10, "output_tokens": 3, "cache_read_input_tokens": 1}}
+    ) == {"input_tokens": 10, "output_tokens": 3, "cache_read_input_tokens": 1}
+    # fallback: sum per-model camelCase ``modelUsage`` when no top-level usage
+    assert _usage_from_envelope(
+        {"modelUsage": {"m1": {"inputTokens": 5, "outputTokens": 2},
+                        "m2": {"inputTokens": 5, "outputTokens": 8}}}
+    ) == {"input_tokens": 10, "output_tokens": 10, "cache_read_input_tokens": 0}
+    assert _usage_from_envelope({}) == {}  # nothing reported
+
+    # A coder row (tier 'code') flips the manifest to a full, coder-included rollup.
+    m = UsageManifest()
+    m.observe("principal_architect", "T1", {"input_tokens": 100, "output_tokens": 40})
+    m.observe("junior_engineer", "code", {"input_tokens": 5000, "output_tokens": 960})
+    report = m.render()
+    assert "coder included" in report and "coding substrate:" in report
+    assert "TOTAL (proxy only)" not in report  # no longer proxy-only
+
+
 def test_failed_call_meters_nothing():
     # A call that never reaches a response has no usage to report.
     from foundry.proxy import model_provider_proxy as mpp

@@ -188,6 +188,19 @@ def register_usage_observer(
     return _unregister
 
 
+def emit_usage(node_id: str, tier: str, usage: Mapping[str, int]) -> None:
+    """Fan a usage record into the single ``on_call_usage`` slot AND every composed
+    observer. Used by the proxy for its own calls, and by the coding substrate to
+    report the coder's own tokens (which never flow through the proxy) so a token
+    manifest can account for them. Advisory: every listener failure is swallowed."""
+    if on_call_usage is not None:
+        with suppress(Exception):
+            on_call_usage(node_id, tier, dict(usage))
+    for _obs in tuple(_usage_observers):
+        with suppress(Exception):
+            _obs(node_id, tier, dict(usage))
+
+
 @dataclass(frozen=True, slots=True)
 class SamplingPolicy:
     """Backend/model-aware determinism control selector (arch §8).
@@ -839,14 +852,9 @@ class ModelProviderProxy:
         if self._manifest.maxlen is not None and len(self._manifest) == self._manifest.maxlen:
             self._manifest_dropped += 1     # this append rolls the oldest record off
         self._manifest.append(record)
-        if on_call_usage is not None:
-            # Advisory usage meter (the Workshop shows "what this stage cost" at a
-            # checkpoint). Fail-soft: a broken observer must never fail a real call.
-            with suppress(Exception):
-                on_call_usage(node_id, tier, dict(response.usage))
-        for _obs in tuple(_usage_observers):  # composed per-run observers (token manifest)
-            with suppress(Exception):
-                _obs(node_id, tier, dict(response.usage))
+        # Advisory usage meter + composed observers (Workshop HUD, token manifest).
+        # Fail-soft: a broken observer must never fail a real call (handled inside).
+        emit_usage(node_id, tier, response.usage)
         if drift:
             # Pinned-ID drift (arch §8): invalidates calibration baselines. The
             # event is ALWAYS recorded (advisory or fail-closed); the policy only

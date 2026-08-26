@@ -686,6 +686,15 @@ def _finalize_diff(
     # resolve(feature_diff_handle) == get_body(artifact.uri) reconstitutes it.
     if rt.cas is not None:
         rt.cas.put_body_at(artifact.uri, diff)
+    # Report the CODER's own tokens (the substrate ran OUTSIDE the proxy) into the same
+    # usage stream, so a token manifest can account for the coding substrate. Advisory;
+    # empty when the substrate reports none (stub/tests). Import locally so the base
+    # coding path takes no hard proxy dependency.
+    if getattr(result, "usage", None):
+        from foundry.proxy.model_provider_proxy import emit_usage
+
+        with suppress(Exception):
+            emit_usage(NODE_ID, "code", result.usage)
     writes: dict[str, Any] = {
         "artifacts": [artifact],
         "tasks": [_task_done_marker(task, diff)],

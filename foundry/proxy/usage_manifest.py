@@ -27,6 +27,11 @@ from collections.abc import Mapping
 
 _FIELDS = ("calls", "input", "output", "cache_read")
 
+# The tier the coding substrate reports under (via emit_usage) — its own tokens,
+# which never flow through the proxy. Its presence flips the manifest from
+# "proxy-only" to a full coder-included accounting.
+_CODE_TIER = "code"
+
 
 class UsageManifest:
     """Thread-safe per-``(node_id, tier)`` token accumulator + text report."""
@@ -64,21 +69,32 @@ class UsageManifest:
             return {t: dict(v) for t, v in out.items()}
 
     def render(self) -> str:
-        """A plain-text proxy token manifest: per-node rows + per-tier + totals."""
+        """A plain-text token manifest: per-node rows + per-tier + totals, with a
+        coding-vs-orchestration rollup when the coder reported usage (tier ``code``)."""
         with self._lock:
             rows = sorted(
                 self._rows.items(), key=lambda kv: kv[1]["output"], reverse=True
             )
+            coding_out = sum(
+                r["output"] for (_n, tier), r in self._rows.items() if tier == _CODE_TIER
+            )
+            has_coder = any(tier == _CODE_TIER for (_n, tier) in self._rows)
         totals = self.totals()
         tot_out = totals["output"] or 1  # avoid /0; a run with zero output is degenerate
 
         def pct(n: int) -> str:
             return f"{100 * n / tot_out:5.1f}%"
 
+        if has_coder:
+            head = ["TOKENS-MANIFEST — model spend by node, output-weighted (coder included)."]
+        else:
+            head = [
+                "TOKENS-MANIFEST — PROXY (orchestration) spend by node, output-weighted.",
+                "NOTE: excludes the coding substrate (its tokens are external to the proxy);",
+                "run a real coding backend to include the coder (tier 'code').",
+            ]
         lines = [
-            "TOKENS-MANIFEST — PROXY (orchestration) spend by node, output-weighted.",
-            "NOTE: excludes the coding substrate (Junior Engineer / claude-code CLI),",
-            "whose tokens are external to the proxy — this is the layer AROUND the coder.",
+            *head,
             "",
             f"{'node':28} {'tier':5} {'calls':>6} {'in':>10} {'out':>10} "
             f"{'cache_rd':>10} {'out%':>6}",
@@ -96,9 +112,15 @@ class UsageManifest:
                 f"{'  tier ' + tier:28} {'':5} {tr['calls']:>6} {tr['input']:>10} "
                 f"{tr['output']:>10} {tr['cache_read']:>10} {pct(tr['output']):>6}"
             )
+        total_label = "TOTAL" if has_coder else "TOTAL (proxy only)"
         lines += [
             "-" * 84,
-            f"{'TOTAL (proxy only)':28} {'':5} {totals['calls']:>6} {totals['input']:>10} "
+            f"{total_label:28} {'':5} {totals['calls']:>6} {totals['input']:>10} "
             f"{totals['output']:>10} {totals['cache_read']:>10} {'100.0%':>6}",
         ]
+        if has_coder:
+            lines.append(
+                f"coding substrate: {pct(coding_out)} of output tokens; "
+                f"orchestration (everything else): {pct(tot_out - coding_out)}"
+            )
         return "\n".join(lines)

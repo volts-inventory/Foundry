@@ -277,6 +277,40 @@ def _observed_model(envelope: dict[str, Any]) -> str | None:
     return model if isinstance(model, str) and model else None
 
 
+def _usage_from_envelope(envelope: dict[str, Any]) -> dict[str, int]:
+    """Advisory token counts the CLI reported for this session, normalised to the
+    token-manifest keys (``input_tokens`` / ``output_tokens`` /
+    ``cache_read_input_tokens``). Prefers the top-level ``usage`` aggregate; falls back
+    to summing per-model ``modelUsage`` (camelCase). Empty when none is reported."""
+    def _int(v: Any) -> int:
+        return v if isinstance(v, int) and not isinstance(v, bool) else 0
+
+    keys = ("input_tokens", "output_tokens", "cache_read_input_tokens")
+    top = envelope.get("usage")
+    if isinstance(top, dict):
+        out = {k: _int(top.get(k)) for k in keys}
+        if any(out.values()):
+            return out
+    by_model = envelope.get("modelUsage")
+    if isinstance(by_model, dict):
+        def _pick(per: dict[str, Any], *names: str) -> int:
+            for n in names:
+                got = _int(per.get(n))
+                if got:
+                    return got
+            return 0
+
+        agg = dict.fromkeys(keys, 0)
+        for per in by_model.values():
+            if isinstance(per, dict):
+                agg["input_tokens"] += _pick(per, "inputTokens", "input_tokens")
+                agg["output_tokens"] += _pick(per, "outputTokens", "output_tokens")
+                agg["cache_read_input_tokens"] += _pick(per, "cacheReadInputTokens")
+        if any(agg.values()):
+            return agg
+    return {}
+
+
 class ClaudeCodeAdapter:
     """Agentic Claude Code substrate: the CLI edits the worktree; the adapter
     observes the authored tree slice and records it content-addressed."""
@@ -422,6 +456,7 @@ class ClaudeCodeAdapter:
             triage=triage,
             adapter_self_reported_model=_observed_model(envelope),
             turns_used=num_turns if isinstance(num_turns, int) and num_turns > 0 else 1,
+            usage=_usage_from_envelope(envelope),
             snapshot_digest=sandbox.snapshot(),
             session_id=session if isinstance(session, str) and session else None,
         )

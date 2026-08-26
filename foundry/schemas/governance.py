@@ -144,11 +144,22 @@ class ScopeTier(StrEnum):
 
     ``STANDARD`` is the historical behaviour — every prompt and cap is exactly
     what the factory did before scope tiering existed, so a STANDARD run is
-    byte-identical to a pre-tiering run. ``DEMO`` is the only tier that changes
-    anything: it caps how much the product/architecture layers may PROPOSE.
+    byte-identical to a pre-tiering run. The other tiers narrow what the
+    product/architecture layers may PROPOSE:
+
+    * ``DEMO`` caps BOTH specification and decomposition — fewer acceptance
+      criteria, one component, no interface contracts. A demo is a smaller build
+      passing the same gates, not an equally-assured one.
+    * ``SMALL`` caps ONLY decomposition — a modest ceiling on ownership units and
+      components so a real-but-modest single-purpose app doesn't fan into many
+      tiny coding sessions. It does NOT cap acceptance criteria: the quality bar
+      and gate strictness are unchanged, so the PM prompt is byte-identical to
+      STANDARD and only the architect's fan-out shrinks. The win is fewer coding
+      sessions' fixed orientation overhead, not building less.
     """
 
     DEMO = "demo"
+    SMALL = "small"
     STANDARD = "standard"
 
 

@@ -131,6 +131,15 @@ _DEMO_MAX_CRITERIA = 5
 _DEMO_MAX_COMPONENTS = 1
 _DEMO_MAX_OWNERSHIP_UNITS = 3
 
+# SMALL caps ONLY decomposition — a hair below a typical STANDARD small-app
+# decomposition, so a real-but-modest single-purpose app builds as a handful of
+# cohesive coding sessions instead of fanning into many tiny ones (each ownership
+# unit is one full coding session with its own fixed orientation overhead).
+# Deliberately NO criteria cap: unlike DEMO, SMALL preserves the quality bar and
+# every gate — the token win is fewer sessions' fixed cost, not less spec.
+_SMALL_MAX_COMPONENTS = 3
+_SMALL_MAX_OWNERSHIP_UNITS = 5
+
 # What the PM may NOT drop at any tier: these are what the deterministic gates
 # read. `oracle_hint` becomes the `oracle` field the Spec gate requires on EVERY
 # criterion (gates/spec.py `_REQUIRED_FIELDS`), and an applicable security/abuse
@@ -168,23 +177,56 @@ _DEMO_ARCHITECT_DIRECTIVE = (
     "- Keep ADRs to the one or two decisions that actually shaped the design."
 )
 
+# SMALL touches ONLY the architect: it caps decomposition (units + components)
+# and nothing else. There is DELIBERATELY no SMALL PM directive — criteria are
+# uncapped, so a SMALL run's PM prompt must be byte-identical to STANDARD. The
+# cap restates the ownership-map floor the build gate needs (an empty map yields
+# zero tasks) and states plainly that spec/interface/gate coverage is UNCHANGED,
+# so the model shrinks fan-out without shrinking the app.
+_SMALL_ARCHITECT_DIRECTIVE = (
+    "\n\nSCOPE: SMALL. This request asks for a real but modest, single-purpose "
+    "app — not a demo, but not a multi-service system either. Keep the "
+    "DECOMPOSITION tight; the quality bar is UNCHANGED:\n"
+    f"- AT MOST {_SMALL_MAX_COMPONENTS} components. A modest app is a handful of "
+    "cohesive modules, not a service topology. Do not split it into separate "
+    "services unless the request explicitly asks for one.\n"
+    f"- The ownership map must name AT LEAST ONE owner and BETWEEN 1 AND "
+    f"{_SMALL_MAX_OWNERSHIP_UNITS} ownership units. Each unit becomes one "
+    "independently-built coding session with its own fixed orientation cost, so "
+    "prefer FEWER, more cohesive units over many tiny ones. An EMPTY ownership "
+    "map is invalid — it yields zero tasks and an empty repo that fails the "
+    "build gate.\n"
+    "- This is a DECOMPOSITION cap ONLY. Do NOT reduce acceptance criteria, "
+    "interface contracts, or gate coverage — build the WHOLE app, just as fewer "
+    "units. Design interface contracts wherever a real boundary exists.\n"
+    "- Keep ADRs to the decisions that actually shaped the design."
+)
+
 
 def scope_directive(state: FactoryState, *, architect: bool = False) -> str:
     """The scope caps to append to a PM / architect prompt, or ``""``.
 
     Reads the ``scope_tier`` single-writer channel. Returns ``""`` for STANDARD
-    (and when no decision was written), so a non-DEMO run's prompts are
-    byte-identical to a pre-tiering run — the ONLY behavioural delta this feature
-    introduces is on a run judged DEMO.
+    (and when no decision was written), so a STANDARD run's prompts are
+    byte-identical to a pre-tiering run. The per-tier deltas:
+
+    * DEMO — capped criteria (PM) and capped fan-out with no interfaces (architect).
+    * SMALL — capped fan-out ONLY (architect); the PM prompt is ``""``, so it is
+      byte-identical to STANDARD (criteria are uncapped).
 
     The caps shrink what the agent PROPOSES; each directive restates the floor
     the deterministic gates still enforce, because a cap that silently dropped a
     gate-required criterion would trade a large build for a failing one.
     """
     decision = state.get("scope_tier")
-    if decision is None or decision.tier is not ScopeTier.DEMO:
+    if decision is None:
         return ""
-    return _DEMO_ARCHITECT_DIRECTIVE if architect else _DEMO_PM_DIRECTIVE
+    tier = decision.tier
+    if tier is ScopeTier.DEMO:
+        return _DEMO_ARCHITECT_DIRECTIVE if architect else _DEMO_PM_DIRECTIVE
+    if tier is ScopeTier.SMALL:
+        return _SMALL_ARCHITECT_DIRECTIVE if architect else ""
+    return ""
 
 
 # --- advisory authors: skip the model call in a headless autonomous run ------

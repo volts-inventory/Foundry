@@ -28,9 +28,19 @@ that passes the same gates — not an equally-assured one.
 
 Bias: STANDARD unless proven otherwise. The product layer runs exactly once per
 run (both fix loops re-enter at architecture / implementation, never at product),
-so a wrong DEMO verdict is NOT self-correcting — the criteria stay capped for the
-whole run. A wrong STANDARD only costs tokens. Every tie-break in this module
-resolves to STANDARD for that reason.
+so a wrong down-tier verdict is NOT self-correcting — the caps stay for the whole
+run. A wrong STANDARD only costs tokens. Every tie-break in this module resolves
+to STANDARD for that reason: the deterministic parse caps the build ONLY on an
+exact ``"demo"`` / ``"small"`` string, and anything else degrades to STANDARD.
+
+Three tiers, DEMO < SMALL < STANDARD by ambition. SMALL sits above DEMO: a real
+but modest single-purpose app that someone would actually use, but not a
+multi-service system. It caps only the architect's DECOMPOSITION (fewer ownership
+units / components), never the acceptance criteria, so its build faces the same
+spec and the same gates as STANDARD — only the coding-session fan-out shrinks.
+DEMO detection is unchanged; SMALL is chosen only when the request is clearly one
+small app, and STANDARD remains the conservative default for anything larger or
+uncertain.
 """
 
 from __future__ import annotations
@@ -55,14 +65,21 @@ SOP = (
     "- 'demo': the request is for something to look at or learn from — a demo, "
     "toy, example, sample, prototype, spike, exercise, or a small illustrative "
     "build. Nobody depends on it.\n"
-    "- 'standard': everything else, including a request that merely calls itself "
-    "simple. 'A simple payroll ledger' is a real system.\n"
+    "- 'small': a real but modest, single-purpose app — one cohesive application "
+    "that does one thing that someone would actually use and rely on. Real, but "
+    "NOT a multi-service system, a platform, or one spanning several backends. "
+    "'A simple payroll ledger' or 'a personal expense tracker' is 'small'.\n"
+    "- 'standard': everything larger — a multi-service or multi-tenant system, a "
+    "platform, or anything naming production scale, many users, compliance, or "
+    "several backends/services. Also everything you are unsure about.\n"
     "Rules, in order:\n"
     "1. A short request is not a small request. Judge the SUBJECT, not length.\n"
-    "2. A request naming real users, production, deployment, scale, compliance, "
-    "money, or persistence of real data is 'standard' however it is qualified.\n"
-    "3. When in doubt, return 'standard'. Under-building is not recoverable "
-    "later in the run; over-building only costs time.\n"
+    "2. A request naming multiple services/backends, a platform, production "
+    "scale, many users, or compliance is 'standard' however it is qualified.\n"
+    "3. When in doubt between two tiers, choose the LARGER — 'standard' over "
+    "'small', and 'small' over 'demo'. Under-building is not recoverable later "
+    "in the run; over-building only costs time. Reserve 'small' for a request "
+    "that is CLEARLY one small single-purpose app.\n"
     "4. Quote the exact phrases you relied on under signals.\n"
     "Respond in the constrained JSON schema."
 )
@@ -70,7 +87,7 @@ SOP = (
 _SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "tier": {"type": "string", "enum": ["demo", "standard"]},
+        "tier": {"type": "string", "enum": ["demo", "small", "standard"]},
         "rationale": {"type": "string"},
         "signals": {"type": "array", "items": {"type": "string"}},
     },
@@ -126,9 +143,13 @@ def make_scope_judge_node(rt: AgentRuntime) -> NodeFn:
             )
             payload = result.parsed or {}
             # An unparseable or absent completion must not silently cap the
-            # build: anything that is not exactly "demo" is STANDARD.
+            # build: only the EXACT strings "demo" / "small" cap it; everything
+            # else (including a tie or an unrecognized tier) degrades to STANDARD.
             raw_tier = str(payload.get("tier", "")).strip().lower()
-            tier = ScopeTier.DEMO if raw_tier == ScopeTier.DEMO.value else ScopeTier.STANDARD
+            tier = {
+                ScopeTier.DEMO.value: ScopeTier.DEMO,
+                ScopeTier.SMALL.value: ScopeTier.SMALL,
+            }.get(raw_tier, ScopeTier.STANDARD)
             decision = ScopeDecision(
                 tier=tier,
                 rationale=str(payload.get("rationale", "")),
@@ -143,9 +164,13 @@ def make_scope_judge_node(rt: AgentRuntime) -> NodeFn:
             summary=f"Judged scope {decision.tier.value!r}: {decision.rationale}",
             assumptions=(f"Classified from request: {_request_text(state)[:120]}",),
             concerns=(
-                ("Demo scope caps the build; the product layer does not re-run.",)
+                ("Demo scope caps criteria and fan-out; the product layer does not re-run.",)
                 if decision.tier is ScopeTier.DEMO
-                else ()
+                else (
+                    ("Small scope caps decomposition only; the product layer does not re-run.",)
+                    if decision.tier is ScopeTier.SMALL
+                    else ()
+                )
             ),
         )
         return {"scope_tier": decision, "agent_journal": [note]}

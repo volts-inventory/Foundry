@@ -819,6 +819,40 @@ def test_on_call_usage_observer_never_breaks_a_call():
     assert result.usage == USAGE        # the call completed normally
 
 
+def test_usage_manifest_buckets_by_node_and_tier_and_composes_as_observer():
+    from foundry.proxy import model_provider_proxy as mpp
+    from foundry.proxy.usage_manifest import UsageManifest
+
+    m = UsageManifest()
+    m.observe("product_manager", "T2",
+              {"input_tokens": 100, "output_tokens": 20, "cache_read_input_tokens": 10})
+    m.observe("product_manager", "T2", {"input_tokens": 50, "output_tokens": 5})
+    m.observe("senior_engineer", "T1", {"input_tokens": 200, "output_tokens": 80})
+
+    assert m.totals() == {"calls": 3, "input": 350, "output": 105, "cache_read": 10}
+    assert m.by_tier()["T2"]["output"] == 25 and m.by_tier()["T1"]["output"] == 80
+    report = m.render()
+    assert "senior_engineer" in report and "TOTAL (proxy only)" in report
+    assert "excludes the coding substrate" in report  # honest boundary is stated
+
+    # The observer registry COMPOSES (doesn't clobber the single on_call_usage slot)
+    # and de-registers cleanly.
+    prev = mpp.on_call_usage
+    seen: list[str] = []
+    mpp.on_call_usage = lambda node, _t, _u: seen.append(node)
+    unregister = mpp.register_usage_observer(m.observe)
+    try:
+        proxy, _ = make_proxy()
+        proxy.complete("qa_engineer", "T2", "SOP", [{"role": "user", "content": "x"}],
+                       purpose="gate")
+    finally:
+        mpp.on_call_usage = prev
+        unregister()
+    assert seen == ["qa_engineer"]                    # the single slot still fired
+    assert m.totals()["calls"] == 4                    # AND the composed observer saw it
+    assert m.observe not in mpp._usage_observers       # de-registered
+
+
 def test_failed_call_meters_nothing():
     # A call that never reaches a response has no usage to report.
     from foundry.proxy import model_provider_proxy as mpp

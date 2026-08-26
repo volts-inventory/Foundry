@@ -3,18 +3,20 @@
 Asserts the properties the feature's safety rests on:
 
 * a supplied design spec short-circuits to STANDARD with no model call;
-* the model decides everything else, and anything that is not exactly "demo"
-  degrades to STANDARD;
+* the model decides everything else, and anything that is not exactly "demo" /
+  "small" degrades to STANDARD (the tie-break stays conservative);
 * every node that can make a model call is scripted for `--backend mock`, or the
   run dies as a ProxyUnavailable on the documented smoke path;
 * an already-decided ``scope_tier`` (an operator ``--scope`` pin, or a resume
   re-entry) short-circuits the node with no write and no model call;
-* ``scope_directive`` is EMPTY at standard tier, so a non-demo run's prompts are
-  byte-identical to a pre-tiering run — the feature's only behavioural delta is
-  on a DEMO run;
+* ``scope_directive`` is EMPTY at standard tier, so a STANDARD run's prompts are
+  byte-identical to a pre-tiering run; a SMALL run's PM prompt is EMPTY too
+  (criteria uncapped) and only its architect prompt changes;
 * the demo directives preserve the floor the deterministic gates enforce (the
   per-criterion oracle hint, one security/abuse criterion, the manifest
   criterion, and a non-empty ownership map);
+* the SMALL directive caps DECOMPOSITION only (fewer units / components) and
+  never the criteria, interfaces, or gate coverage;
 * scope tiering never relaxes integrity, and the judge writes no gate channel.
 """
 
@@ -41,6 +43,11 @@ DEMO_PAYLOAD: dict[str, Any] = {
     "tier": "demo",
     "rationale": "asks for a demo of one feature",
     "signals": ["demo"],
+}
+SMALL_PAYLOAD: dict[str, Any] = {
+    "tier": "small",
+    "rationale": "a real but modest single-purpose app",
+    "signals": ["expense tracker"],
 }
 STANDARD_PAYLOAD: dict[str, Any] = {
     "tier": "standard",
@@ -119,9 +126,45 @@ def test_model_may_overrule_the_wording_and_return_standard() -> None:
 
 
 def test_unrecognized_tier_degrades_to_standard() -> None:
-    # Fail-to-full-scope: only the exact string "demo" caps the build.
+    # Fail-to-full-scope: only the exact strings "demo"/"small" cap the build.
     rt = runtime_for({"tier": "DEMO-ish", "rationale": "?"})
     writes = make_scope_judge_node(rt)({"request": "a demo shortener"}, config_for("r"))
+
+    assert writes["scope_tier"].tier is ScopeTier.STANDARD
+
+
+def test_a_clear_small_app_request_is_classified_small() -> None:
+    rt = runtime_for(SMALL_PAYLOAD)
+    writes = make_scope_judge_node(rt)(
+        {"request": "a personal expense tracker for one user"}, config_for("r")
+    )
+
+    decision = writes["scope_tier"]
+    assert decision.tier is ScopeTier.SMALL
+    assert decision.signals == ("expense tracker",)
+
+
+def test_a_toy_request_is_classified_demo() -> None:
+    rt = runtime_for(DEMO_PAYLOAD)
+    writes = make_scope_judge_node(rt)({"request": "a toy URL shortener demo"}, config_for("r"))
+
+    assert writes["scope_tier"].tier is ScopeTier.DEMO
+
+
+def test_a_large_multi_service_request_is_classified_standard() -> None:
+    rt = runtime_for(STANDARD_PAYLOAD)
+    writes = make_scope_judge_node(rt)(
+        {"request": "a multi-tenant billing platform across several services"}, config_for("r")
+    )
+
+    assert writes["scope_tier"].tier is ScopeTier.STANDARD
+
+
+def test_an_ambiguous_tie_degrades_to_standard() -> None:
+    # A blank / undecided verdict is a tie, and every tie resolves conservatively
+    # to STANDARD — a wrong down-tier is not self-correcting within the run.
+    rt = runtime_for({"tier": "", "rationale": "could go either way"})
+    writes = make_scope_judge_node(rt)({"request": "a link app"}, config_for("r"))
 
     assert writes["scope_tier"].tier is ScopeTier.STANDARD
 
@@ -176,11 +219,53 @@ def test_demo_architect_directive_caps_fan_out_but_never_to_zero() -> None:
     assert "EMPTY ownership map is invalid" in directive
 
 
+def test_small_pm_directive_is_byte_identical_to_standard() -> None:
+    # SMALL caps decomposition ONLY — criteria are uncapped, so the PM prompt at
+    # SMALL must be the empty string, exactly as STANDARD.
+    assert scope_directive({"scope_tier": _pinned(ScopeTier.SMALL)}) == ""
+    assert scope_directive({"scope_tier": _pinned(ScopeTier.SMALL)}) == scope_directive(
+        {"scope_tier": _pinned(ScopeTier.STANDARD)}
+    )
+
+
+def test_small_architect_directive_caps_decomposition_only() -> None:
+    directive = scope_directive({"scope_tier": _pinned(ScopeTier.SMALL)}, architect=True)
+
+    # Caps fan-out: fewer components and a modest ownership-unit ceiling, but the
+    # ownership floor of one is still load-bearing (an empty map fails the build gate).
+    assert "AT MOST 3 components" in directive
+    assert "BETWEEN 1 AND 5 ownership units" in directive
+    assert "AT LEAST ONE owner" in directive
+    assert "EMPTY ownership map is invalid" in directive
+    # Decomposition ONLY: it must NOT cap criteria and must NOT forbid interfaces
+    # the way DEMO does — the quality bar and gate coverage are preserved. The
+    # DEMO criteria cap ("AT MOST N acceptance criteria total") and interface ban
+    # ("EMPTY interfaces array") must both be ABSENT.
+    assert "acceptance criteria total" not in directive
+    assert "EMPTY interfaces array" not in directive
+    assert "do not reduce acceptance criteria" in directive.lower()
+
+
+def test_small_leaves_demo_directives_byte_identical() -> None:
+    # Adding SMALL must not perturb DEMO: a DEMO run stays exactly as it was.
+    from foundry.agents._common import (
+        _DEMO_ARCHITECT_DIRECTIVE,
+        _DEMO_PM_DIRECTIVE,
+    )
+
+    assert scope_directive({"scope_tier": _pinned(ScopeTier.DEMO)}) == _DEMO_PM_DIRECTIVE
+    assert (
+        scope_directive({"scope_tier": _pinned(ScopeTier.DEMO)}, architect=True)
+        == _DEMO_ARCHITECT_DIRECTIVE
+    )
+
+
 # ---- trust posture -----------------------------------------------------------
 
 
 def test_scope_tiering_never_relaxes_integrity() -> None:
     assert _pinned(ScopeTier.DEMO).relaxes_integrity() is False
+    assert _pinned(ScopeTier.SMALL).relaxes_integrity() is False
     assert _pinned(ScopeTier.STANDARD).relaxes_integrity() is False
 
 

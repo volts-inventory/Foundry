@@ -158,11 +158,11 @@ ADAPTERS = ("stub", "raw-react", "claude-code", "proxy-agent")
 _DEFAULT_ADAPTER = "stub"
 
 # Scope tier selection: how much system to build. `auto` (the default) lets the
-# Scope Judge node classify the request; `demo`/`standard` PIN the tier and skip
-# the judge's model call. Pinning gives a deterministic tier for an A/B against
-# the judged one. Scope caps what the agents PROPOSE, never what the gates
-# require — both tiers face an identical gate set.
-SCOPES = ("auto", "demo", "standard")
+# Scope Judge node classify the request; `demo`/`small`/`standard` PIN the tier
+# and skip the judge's model call. Pinning gives a deterministic tier for an A/B
+# against the judged one. Scope caps what the agents PROPOSE, never what the
+# gates require — every tier faces an identical gate set.
+SCOPES = ("auto", "demo", "small", "standard")
 
 
 # When --adapter is OMITTED the coding substrate is DERIVED from the chosen backend,
@@ -987,6 +987,10 @@ class RunResult:
     what's still failing — so a held build hands back a usable starting point, never
     empty hands. ``None`` on a PASS (use ``output_root``) or when no draft could be
     materialized."""
+    token_manifest: str | None = None
+    """A plain-text per-node/per-tier token report for THIS run (where the model
+    spend went — coding substrate vs. everything else). Advisory measurement only;
+    also written to ``TOKENS-MANIFEST.md`` when an ``output_dir`` is set."""
     checkpoints: tuple[str, ...] = ()
     """The checkpoint stage boundaries the run was driven with (plan [10]); empty
     when checkpoints were OFF (the default)."""
@@ -1556,6 +1560,14 @@ def run(
             base = Path(base_dir)
             if base.is_dir():
                 shutil.copytree(base, source_dir, dirs_exist_ok=True)
+        # Per-run token manifest (measurement): observe every model call's usage
+        # bucketed by node/tier for THIS build, so we can see where the spend went.
+        # A COMPOSED observer — leaves the Workshop's own usage meter untouched.
+        from foundry.proxy.model_provider_proxy import register_usage_observer
+        from foundry.proxy.usage_manifest import UsageManifest
+
+        _usage_manifest = UsageManifest()
+        _unregister_usage = register_usage_observer(_usage_manifest.observe)
         try:
             # Verification profile (ROADMAP Phase 3): stack-appropriate pinned
             # gate commands. "auto" (default) infers from the request + spec;
@@ -1711,6 +1723,7 @@ def run(
                 resumable=(durable is not None),
             )
         finally:
+            _unregister_usage()
             reset_gate_write_verifier(token)
             # Release the SQLite handles: durable mode closes the checkpointer +
             # the global-records connection together; otherwise just the ckpt.
@@ -1730,6 +1743,16 @@ def run(
         checkpoints=ckpt_names,
         paused_at=paused_at,
     )
+    # Attach the per-run token manifest (measurement) + persist it beside the build
+    # when an output tree is written, so `foundry run --out X` leaves a TOKENS-MANIFEST.md.
+    _token_report = _usage_manifest.render()
+    result = replace(result, token_manifest=_token_report)
+    if output_dir is not None:
+        with contextlib.suppress(OSError):
+            Path(output_dir).mkdir(parents=True, exist_ok=True)
+            (Path(output_dir) / "TOKENS-MANIFEST.md").write_text(
+                _token_report + "\n", encoding="utf-8"
+            )
     if output_dir is not None and result.passed:
         # On a PASSING build, materialize the FINAL accepted integrated tree
         # (reusing the SAME materialize_workdir + resolve/resolve_blob seams the
@@ -2221,7 +2244,7 @@ def main(argv: list[str] | None = None) -> int:
         args, _profile = _take_value(args, "--profile", what="a stack name")
         profile = _profile if _profile is not None else "auto"
 
-        # --scope {auto|demo|standard}: how much system to build. OMITTED ⇒ "auto"
+        # --scope {auto|demo|small|standard}: how much system to build. OMITTED ⇒ "auto"
         # (the Scope Judge classifies the request). A pinned tier skips the judge.
         args, _scope = _take_value(args, "--scope", what="a value")
         scope = _scope if _scope is not None else "auto"
@@ -2293,7 +2316,7 @@ def main(argv: list[str] | None = None) -> int:
                 "[--backend {mock|anthropic|openai|claude-cli|codex|ollama-gemma}] "
                 "[--adapter {stub|raw-react|claude-code}] "
                 "[--checkpoints [all|product,design,release]] "
-                "[--scope {auto|demo|standard}] "
+                "[--scope {auto|demo|small|standard}] "
                 "[--docs DIR] [--out DIR] [--spec FILE|DIR ...] "
                 "[--state-dir DIR] [--thread-id NAME] [--max-fix-attempts N] "
                 '["<one-line request>"]   (optional when --spec is given)\n'
@@ -2311,7 +2334,9 @@ def main(argv: list[str] | None = None) -> int:
                 "  checkpoints (plan [10]): pause at stage boundaries for human "
                 "verification; an approve can NEVER turn a gate FAIL into a release\n"
                 "  scope: auto (default — the Scope Judge classifies the request) | "
-                "demo (small: capped criteria, 1 component, no interface contracts) | "
+                "demo (capped criteria, 1 component, no interface contracts) | "
+                "small (capped decomposition ONLY — <=5 units, <=3 components; "
+                "criteria and gates unchanged) | "
                 "standard. Caps what the agents PROPOSE; the gate set is identical",
                 file=sys.stderr,
             )

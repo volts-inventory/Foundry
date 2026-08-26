@@ -164,6 +164,29 @@ on_rate_limit_wait: Callable[[float, float, bool], None] | None = None
 # only: nothing here can influence a request, a verdict, or a budget decision.
 on_call_usage: Callable[[str, str, Mapping[str, int]], None] | None = None
 
+# Additional per-call usage OBSERVERS (independent of the single ``on_call_usage``
+# above, so the Workshop meter and a per-run token manifest can both listen without
+# clobbering each other). Same contract: observe only — never influence a request,
+# verdict, or budget. Each is called once per successful call; exceptions swallowed.
+_usage_observers: list[Callable[[str, str, Mapping[str, int]], None]] = []
+
+
+def register_usage_observer(
+    cb: Callable[[str, str, Mapping[str, int]], None],
+) -> Callable[[], None]:
+    """Register a per-call usage observer; returns a no-arg de-register function.
+
+    Unlike the single ``on_call_usage`` slot, observers COMPOSE — a run can add its
+    own token-manifest collector for the duration of the build and remove it after,
+    leaving any long-lived meter (the Workshop HUD) untouched."""
+    _usage_observers.append(cb)
+
+    def _unregister() -> None:
+        with suppress(ValueError):
+            _usage_observers.remove(cb)
+
+    return _unregister
+
 
 @dataclass(frozen=True, slots=True)
 class SamplingPolicy:
@@ -821,6 +844,9 @@ class ModelProviderProxy:
             # checkpoint). Fail-soft: a broken observer must never fail a real call.
             with suppress(Exception):
                 on_call_usage(node_id, tier, dict(response.usage))
+        for _obs in tuple(_usage_observers):  # composed per-run observers (token manifest)
+            with suppress(Exception):
+                _obs(node_id, tier, dict(response.usage))
         if drift:
             # Pinned-ID drift (arch §8): invalidates calibration baselines. The
             # event is ALWAYS recorded (advisory or fail-closed); the policy only

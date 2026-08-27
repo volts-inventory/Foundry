@@ -1800,32 +1800,6 @@ def _result(
     )
 
 
-# ---- the evolution route (task [12]) ----------------------------------------
-
-
-def _read_overlay(overlay_dir: str) -> dict[str, str | None]:
-    """Read an OVERLAY directory into a change set (relpath -> new content).
-
-    The overlay's files are the added/modified files of the maintained change;
-    they are laid over the prior tree by :func:`foundry.lifecycle.evolve.evolve`.
-    Read as UTF-8 (errors replaced) — plain input data, never executed. (Deletes
-    are expressed via the programmatic ``evolve(changes={rel: None})`` API; the
-    shell affordance overlays added/modified files, the common evolution shape.)
-    """
-    root = Path(overlay_dir)
-    if not root.is_dir():
-        raise ValueError(f"overlay path is not a directory: {overlay_dir}")
-    changes: dict[str, str | None] = {}
-    for p in sorted(root.rglob("*")):
-        if p.is_file():
-            changes[p.relative_to(root).as_posix()] = p.read_text(
-                encoding="utf-8", errors="replace"
-            )
-    if not changes:
-        raise ValueError(f"overlay directory is empty: {overlay_dir}")
-    return changes
-
-
 def _autopilot_main(args: list[str]) -> int:
     """`foundry autopilot "<target>" --out DIR [...]` — Director + design panel.
 
@@ -1976,82 +1950,6 @@ def _export_git(out_dir: str, released: list[tuple[str, str, str]]) -> None:
               f"{Path(out_dir) / '.stages'}", file=sys.stderr)
 
 
-def _evolve_main(args: list[str]) -> int:
-    """``foundry evolve <prior repo> "<change>" --apply OVERLAY`` (task [12]).
-
-    Re-enters an EXISTING released codebase as a MAINTAINED change: re-verify
-    change-proportionally, re-gate via the SAME runner, re-admit fail-closed, link
-    provenance to the prior version. The maintained change is RELEASED only when
-    it RE-PASSES the gates + RE-ADMITS (a failing re-gate ⇒ NOT released — no PR /
-    deploy). ``--apply OVERLAY`` supplies the changed files (overlaid on the prior
-    tree); ``--guardian-approve`` records the HITL decision for a protected
-    criterion/oracle/gate edit (which otherwise BLOCKS release, deterministic HITL).
-
-    Returns 0 iff the maintained change was RELEASED, 1 if NOT released
-    (fail-closed), 2 on a usage error.
-    """
-    from foundry.lifecycle.evolve import EvolveRefused, evolve
-
-    guardian_approval = False
-    if "--guardian-approve" in args:
-        args = [a for a in args if a != "--guardian-approve"]
-        guardian_approval = True
-    # --strict: a not-released re-gate RAISES (EvolveRefused) instead of returning a
-    # result — for scripts/CI that want a hard failure on any non-release.
-    strict = False
-    if "--strict" in args:
-        args = [a for a in args if a != "--strict"]
-        strict = True
-    overlay_dir: str | None = None
-    if "--apply" in args:
-        i = args.index("--apply")
-        if i + 1 >= len(args):
-            print("error: --apply requires a directory argument", file=sys.stderr)
-            return 2
-        overlay_dir = args[i + 1]
-        args = args[:i] + args[i + 2 :]
-    if len(args) < 2:
-        print(
-            'usage: python -m foundry.cli evolve <prior-repo-dir> "<change>" '
-            "--apply OVERLAY_DIR [--guardian-approve] [--strict]\n"
-            "  re-enter an EXISTING released repo as a maintained change: re-verify\n"
-            "  change-proportionally, re-gate (same runner), re-admit (fail-closed),\n"
-            "  link provenance to the prior version. A failing re-gate => NOT released.\n"
-            "  --apply OVERLAY_DIR: the changed/added files overlaid on the prior tree\n"
-            "  --guardian-approve: record the HITL decision for a protected\n"
-            "    criterion/oracle/gate edit (otherwise it BLOCKS release)\n"
-            "  --strict: a not-released re-gate exits non-zero (raises) instead of reporting",
-            file=sys.stderr,
-        )
-        return 2
-    prior_dir = args[0]
-    change = " ".join(args[1:]).strip()
-    if not change:
-        print("error: change request must be non-empty", file=sys.stderr)
-        return 2
-    if overlay_dir is None:
-        print("error: evolve requires --apply OVERLAY_DIR", file=sys.stderr)
-        return 2
-    if not Path(prior_dir).is_dir():
-        print(f"error: prior repo not found: {prior_dir}", file=sys.stderr)
-        return 2
-    try:
-        changes = _read_overlay(overlay_dir)
-        result = evolve(
-            prior_dir, change, changes=changes,
-            guardian_approval=guardian_approval, strict=strict,
-        )
-    except EvolveRefused as exc:
-        # --strict: the re-gate refused to release; report and exit non-zero.
-        print(f"evolve REFUSED (not released): {exc}", file=sys.stderr)
-        return 1
-    except (FileNotFoundError, ValueError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    print(result.summary())
-    return 0 if result.released else 1
-
-
 # ---- entry point ------------------------------------------------------------
 
 
@@ -2107,13 +2005,6 @@ def main(argv: list[str] | None = None) -> int:
     emitted), 1 on a halted/failed run, 2 on a usage error.
     """
     args = sys.argv[1:] if argv is None else argv
-    # The evolution route (task [12]): `foundry evolve <prior repo> "<change>"`
-    # (see the `evolve` dispatch below; `milestones` follows the same shape.)
-    # re-enters an EXISTING released codebase as a maintained change (re-gate +
-    # re-admit, fail-closed). Dispatched as a leading subcommand so the greenfield
-    # path stays byte-identical (the default — no subcommand — is unchanged).
-    if args and args[0] == "evolve":
-        return _evolve_main(args[1:])
     # The milestone route (ROADMAP Phase 5): `foundry milestones "<big target>"
     # --out DIR` plans an ordered milestone list and runs the FULL factory per
     # milestone, chaining each released tree as the next milestone's base.

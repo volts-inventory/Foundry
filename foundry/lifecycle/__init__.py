@@ -1,25 +1,17 @@
-"""Product-lifecycle modules — maintenance + provenance. (docs/lifecycle.md §1/§5)
+"""Product-lifecycle modules wired into the Workshop-UI workflow.
 
-The pipeline ships a release; the LIFECYCLE owns software over its life. Two
-concerns live here, both fail-closed and both REUSING the existing trust seams
-rather than reinventing them:
+The pipeline ships a release; the LIFECYCLE owns software over its life. The
+UI-wired concerns live here:
 
-* :mod:`foundry.lifecycle.maintenance` — a maintained/evolved change to a
-  previously-released artifact is RE-VERIFIED change-proportionally (reusing
-  :func:`foundry.graph.reverification.reverification_plan`) and must RE-PASS the
-  trust gates + RE-ADMIT before the maintained version is released. Maintenance
-  NEVER bypasses the gates (fail-closed: a maintained change that does not
-  re-pass is not released). Provenance of the maintained version links to the
-  prior version — a maintenance chain.
+* :mod:`foundry.lifecycle.milestones` — plans an ordered milestone list and
+  runs the full factory per milestone, chaining each released tree as the next
+  milestone's base.
+* :mod:`foundry.lifecycle.autopilot` — Director proposes, a design panel votes,
+  the winner becomes the next gated iteration (fail-closed on panel decline).
+* :mod:`foundry.lifecycle.git_export` — exports a released tree's build stages
+  as a git history.
 
-* :mod:`foundry.lifecycle.provenance` — every released artifact TRACES to its
-  run + attested gate verdicts + evidence pack + sign-offs + SLSA provenance,
-  and the trace is TAMPER-EVIDENT (reusing the evidence-pack hash-chain). A
-  released artifact with a broken/incomplete provenance chain is FLAGGED, never
-  trusted as released (fail-closed).
-
-This package is import-cheap (no heavy imports at module import time); the
-feedback loop (T-M6-10) and the exit test consume these modules.
+This package is import-cheap (no heavy imports at module import time).
 """
 
 from __future__ import annotations

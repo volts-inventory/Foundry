@@ -1,45 +1,17 @@
-"""Deterministic monitors — the load-bearing detections. (governance.md §3)
+"""Deterministic monitors — the shared trip primitives. (governance.md §3)
 
-Hard rule (gov §3): every monitor in this package is **deterministic** — no
-LLM call anywhere, so nothing here is prompt-injectable. The sandboxed LLM
-"analyzer" is *advisory-only*: it appears in this layer solely as the
-`AdvisoryAnalyzer` protocol the Guardian consults to ANNOTATE an assessment
-(`foundry.monitors.guardian`); it can never approve work or clear/downgrade a
-deterministic trip.
-
-This module owns the shared primitives (`Severity`, `TripKind`, `Trip`) so the
-individual monitors can share one typed trip record without import cycles;
-the concrete monitors are lazily re-exported below.
+This module owns the shared primitives (`Severity`, `TripKind`, `Trip`) so a
+typed trip record can be shared across the codebase without import cycles;
+governance (`foundry.governance.human_liaison`) imports `Trip` at runtime.
 """
 
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
 
 from foundry.schemas.base import FrozenModel
 
-if TYPE_CHECKING:
-    from foundry.monitors.analyzer import SandboxedAnalyzer
-    from foundry.monitors.constraint_pressure_monitor import ConstraintPressureMonitor
-    from foundry.monitors.cost_monitor import CostMonitor
-    from foundry.monitors.coverage_delta_monitor import CoverageDeltaMonitor
-    from foundry.monitors.guardian import Guardian
-    from foundry.monitors.loop_detector import SemanticLoopDetector
-    from foundry.monitors.oracle_monitor import OracleMonitor
-    from foundry.monitors.pinned_id_drift_monitor import PinnedIdDriftMonitor
-    from foundry.monitors.policy_monitor import PolicyMonitor
-
 __all__ = [
-    "ConstraintPressureMonitor",
-    "CostMonitor",
-    "CoverageDeltaMonitor",
-    "Guardian",
-    "OracleMonitor",
-    "PinnedIdDriftMonitor",
-    "PolicyMonitor",
-    "SandboxedAnalyzer",
-    "SemanticLoopDetector",
     "Severity",
     "Trip",
     "TripKind",
@@ -78,24 +50,3 @@ class Trip(FrozenModel):
     rule: str  # the specific rule that matched
     reason: str  # human-readable, deterministic explanation
     matched: tuple[str, ...] = ()  # matched paths / keys / signature ids
-
-
-_LAZY = {
-    "ConstraintPressureMonitor": "foundry.monitors.constraint_pressure_monitor",
-    "CostMonitor": "foundry.monitors.cost_monitor",
-    "CoverageDeltaMonitor": "foundry.monitors.coverage_delta_monitor",
-    "Guardian": "foundry.monitors.guardian",
-    "OracleMonitor": "foundry.monitors.oracle_monitor",
-    "PinnedIdDriftMonitor": "foundry.monitors.pinned_id_drift_monitor",
-    "PolicyMonitor": "foundry.monitors.policy_monitor",
-    "SandboxedAnalyzer": "foundry.monitors.analyzer",
-    "SemanticLoopDetector": "foundry.monitors.loop_detector",
-}
-
-
-def __getattr__(name: str) -> Any:
-    if name in _LAZY:
-        import importlib
-
-        return getattr(importlib.import_module(_LAZY[name]), name)
-    raise AttributeError(name)

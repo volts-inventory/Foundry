@@ -1,6 +1,6 @@
-"""Execution layer tests: sandbox cage, adapter contract, adapters.
+"""Execution layer tests: sandbox cage, adapter contract.
 
-No network required — the raw-react substrate drives an injected fake proxy seam.
+No network required.
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ from foundry.execution.adapter_contract import (
     AdapterResult,
     TaskPacket,
 )
-from foundry.execution.adapters.raw_react import RawReactAdapter
 from foundry.execution.sandbox import Sandbox
 from foundry.schemas.gates import GateTriage
 from foundry.state.seq import Seq
@@ -191,8 +190,8 @@ def test_adapter_result_frozen():
         name="adapter-report",
         run_against="task/T1",
         explanation="note",
-        produced_by="raw-react",
-        seq=Seq("run", 0, 0, "raw-react", 0),
+        produced_by="claude-code",
+        seq=Seq("run", 0, 0, "claude-code", 0),
     )
     result = AdapterResult(
         diff_uri="cas://sha256/" + "0" * 64, triage=(triage,), snapshot_digest="d"
@@ -214,100 +213,13 @@ def test_constraints_verbatim_round_trip(tmp_path: Path):
     assert rehydrated == packet
 
 
-def test_prompt_surfaces_prior_failures_for_the_fix_loop(tmp_path: Path):
-    # On a re-attempt, the SPECIFIC prior failure rides the packet -> the prompt, so
-    # the engineer fixes that instead of re-rolling blind.
-    failure = "E       assert 'world hello' == 'world  hello'"
-    packet = make_packet(tmp_path, prior_failures=(failure,))
-    prompt = RawReactAdapter(lambda p: "").build_prompt(packet)
-    assert failure in prompt
-    assert "PREVIOUS ATTEMPT FAILED" in prompt
-    assert prompt.index("TASK:") < prompt.index(failure)  # after the task, as feedback
-    # No prior failures (first attempt) -> no feedback section.
-    assert "PREVIOUS ATTEMPT FAILED" not in RawReactAdapter(lambda p: "").build_prompt(
-        make_packet(tmp_path)
-    )
-
-
-def test_prompt_injects_constraints_verbatim_and_first(tmp_path: Path):
-    constraints = ("never use floats for money", "unicode: ⧺ §2b — décorrélation")
-    packet = make_packet(tmp_path, pinned_constraints=constraints)
-    prompt = RawReactAdapter(lambda p: "").build_prompt(packet)
-    for c in constraints:
-        assert c in prompt  # byte-for-byte, never paraphrased
-    assert prompt.index(constraints[0]) < prompt.index(constraints[1])
-    assert prompt.index(constraints[1]) < prompt.index("TASK:")
-    assert prompt.index("TASK:") < prompt.index("span-A")
-
-
-# ---------------------------------------------------------------------------
-# RawReactAdapter (fake proxy seam — no network)
-# ---------------------------------------------------------------------------
-
-FAKE_RESPONSE = """Here you go.
-```diff
---- a/hello.py
-+++ b/hello.py
-@@ -1 +1 @@
--print('hello')
-+print('hello, world')
-```
-```triage
-lint: line too long in pkg/mod.py
-test: missing negative case for empty input
-```
-"""
-
-
-def test_raw_react_adapter_records_outputs(sandbox: Sandbox):
-    prompts: list[str] = []
-
-    def fake_complete(prompt: str) -> str:
-        prompts.append(prompt)
-        return FAKE_RESPONSE
-
-    adapter = RawReactAdapter(fake_complete, self_reported_model="totally-real-model-9000")
-    packet = make_packet(sandbox.worktree)
-    result = adapter.run(packet, sandbox)
-
-    assert len(prompts) == 1
-    assert "never use floats for money" in prompts[0]
-
-    # diff recorded as a content-addressed blob, applied to NOTHING
-    diff = sandbox.get_blob(result.diff_uri).decode()
-    assert "+print('hello, world')" in diff
-    assert (sandbox.worktree / "hello.py").read_text() == "print('hello')\n"
-
-    # triage notes are advisory GateTriage, never a verdict
-    assert len(result.triage) == 2
-    assert all(isinstance(t, GateTriage) for t in result.triage)
-    assert result.triage[0].explanation == "lint: line too long in pkg/mod.py"
-    assert result.triage[0].run_against == "task/T1"
-
-    # snapshot digest is the worktree's content address
-    assert result.snapshot_digest == sandbox.snapshot()
-    assert result.turns_used == 1
-    assert adapter.supports_turn_snapshots
-
-
-def test_self_reported_model_carried_but_flagged_ignored(sandbox: Sandbox):
-    adapter = RawReactAdapter(lambda p: FAKE_RESPONSE, self_reported_model="claude-fake")
-    result = adapter.run(make_packet(sandbox.worktree), sandbox)
-    # carried...
-    assert result.adapter_self_reported_model == "claude-fake"
-    # ...but the contract flags it as ignored: lineage is proxy-observed only
+def test_self_reported_model_contract_flags_it_ignored():
+    # The contract carries an adapter's self-reported model but marks it IGNORED:
+    # lineage is proxy-observed only, never trusted from the coding substrate.
     desc = AdapterResult.model_fields["adapter_self_reported_model"].description
     assert desc is not None
     assert "IGNORED" in desc
     assert "proxy" in desc.lower()
-
-
-def test_raw_react_unparseable_response_still_triaged(sandbox: Sandbox):
-    adapter = RawReactAdapter(lambda p: "no fences at all")
-    result = adapter.run(make_packet(sandbox.worktree), sandbox)
-    assert sandbox.get_blob(result.diff_uri) == b""  # no diff recorded
-    assert len(result.triage) == 1
-    assert "unparseable" in result.triage[0].explanation
 
 
 # ---------------------------------------------------------------------------

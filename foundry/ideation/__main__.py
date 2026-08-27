@@ -6,9 +6,9 @@ human can ideate then redirect the output to a file and feed it to a build:
     python -m foundry.ideation "a CLI todo app" > spec.md
     python -m foundry.cli --spec spec.md "build a CLI todo app"
 
-By default it constructs a :class:`ModelProviderProxy` over the real Anthropic
-transport (the proxy is the single credential holder; this entry point holds no
-key of its own). With ``--mock`` it runs entirely on a deterministic
+By default it constructs a :class:`ModelProviderProxy` over the ``claude -p``
+CLI backend (the CLI holds its own auth; this entry point holds no key of its
+own). With ``--mock`` it runs entirely on a deterministic
 :class:`MockTransport` (no live API key, no network) — useful for a dry run and
 for the tests, which inject the proxy directly via :func:`foundry.ideation.ideate`.
 
@@ -34,7 +34,9 @@ def _build_proxy(*, mock: bool) -> ModelProviderProxy:
         # A deterministic, schema-shaped ideation payload served on the free-text
         # (non-verdict) channel for the dry run.
         return ModelProviderProxy(transport=MockTransport(default_text=_mock_text()))
-    return ModelProviderProxy()
+    from foundry.proxy import claude_cli_backend
+
+    return claude_cli_backend()
 
 
 def _mock_text() -> str:

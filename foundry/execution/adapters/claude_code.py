@@ -3,10 +3,10 @@
 Runs the ``claude`` CLI *agentically inside the task sandbox worktree*: Claude
 Code reads/edits files, runs builds and tests, and iterates — the inner-loop
 sophistication the adapter contract says "lives in the substrate by design"
-(`adapter_contract.py`). This is the load-bearing difference from
-:class:`~foundry.execution.adapters.raw_react.RawReactAdapter` (one completion,
-one diff, applies nothing): here the substrate mutates the worktree and the
-adapter OBSERVES the resulting tree.
+(`adapter_contract.py`). This is the load-bearing difference from the
+deterministic :class:`~foundry.execution.adapters.stub.StubAdapter` (which
+applies nothing): here the substrate mutates the worktree and the adapter
+OBSERVES the resulting tree.
 
 Contract mapping:
 
@@ -418,7 +418,7 @@ class ClaudeCodeAdapter:
         if self._exec is _default_exec and not self.available():
             raise AdapterUnavailableError(
                 f"the {self.name!r} adapter needs the {self._bin!r} binary on PATH "
-                f"(install Claude Code, or pick --adapter raw-react)"
+                f"(install Claude Code, or pick --adapter stub)"
             )
         before = walk_worktree(sandbox.worktree)
         if self._on_activity is not None:

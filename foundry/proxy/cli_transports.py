@@ -1,53 +1,42 @@
-"""Alternative configured backends for the model-provider proxy. (arch §2b)
+"""Claude Code CLI backend for the model-provider proxy. (arch §2b)
 
 The factory runs ONE flow. The only thing a backend swaps is the proxy's
 egress seam (:class:`~foundry.proxy.model_provider_proxy.ProviderTransport`)
 together with the tier→model map and the lineage map it resolves against —
 nothing in the graph, agents, gates, or admission changes. This module adds
-four drop-in transports beside the default Anthropic SDK transport:
+the single shipped transport:
 
-* :class:`OpenAITransport`     — calls the OpenAI SDK ``chat.completions`` directly
-  (the first-party OpenAI API, the direct-API twin of the Anthropic SDK transport);
 * :class:`ClaudeCliTransport`  — shells ``claude -p "<prompt>" --output-format json``;
-* :class:`CodexCliTransport`   — shells ``codex exec --json -m <model> "<prompt>"``;
-* :class:`OllamaTransport`     — POSTs ``/api/chat`` to a local Ollama server
-  (e.g. a ``gemma3`` model), the local/offline backend.
 
-and four presets (:func:`openai_backend`, :func:`claude_cli_backend`,
-:func:`codex_backend`, :func:`ollama_gemma_backend`) plus :func:`build_backend` /
-:func:`backend_from_env` that return a fully-wired :class:`ModelProviderProxy` —
-same proxy class, same contract, different backend.
+and its preset (:func:`claude_cli_backend`) plus :func:`build_backend` that
+returns a fully-wired :class:`ModelProviderProxy` — same proxy class, same
+contract.
 
 TRUST NOTES (honest, per arch §2b / plan §0.3) — what stays and what changes
-when the backend is not the Anthropic SDK:
+when the backend is the ``claude`` CLI rather than a direct SDK:
 
-* *Observed-not-trusted still holds for lineage.* Each transport reports the
-  model the backend SAYS it served (CLI JSON ``modelUsage`` key / Codex session
-  model / Ollama ``model``), which the proxy resolves through the curated
-  :class:`LineageMap` and drift-checks against the pinned tier id. It is the
-  best wire-level observation a CLI/local server exposes; it is never the
-  adapter self-report, and an unknown id still fails closed.
-* *The grammar-constrained verdict channel weakens to fail-closed.* The
-  Anthropic SDK enforces the verdict JSON schema as a decoding grammar. The CLIs
-  do not, so for schema calls these transports INSTRUCT json-only output and the
+* *Observed-not-trusted still holds for lineage.* The transport reports the
+  model the backend SAYS it served (CLI JSON ``modelUsage`` key), which the
+  proxy resolves through the curated :class:`LineageMap` and drift-checks
+  against the pinned tier id. It is the best wire-level observation a CLI
+  exposes; it is never the adapter self-report, and an unknown id still fails
+  closed.
+* *The grammar-constrained verdict channel weakens to fail-closed.* A direct
+  SDK could enforce the verdict JSON schema as a decoding grammar. The CLI does
+  not, so for schema calls this transport INSTRUCTS json-only output and the
   proxy still parses + ``ZoneBSigner``-stamps the result; a non-conforming reply
   raises :class:`VerdictChannelError` (no PR, no signed verdict) rather than
-  being mis-admitted. Ollama honours ``format`` (a real JSON-schema constraint),
-  so it keeps the grammar. The safety property (no forged authentic verdict) is
-  preserved on all three; only availability degrades on the CLIs.
-* *The credential locus moves.* With the SDK the proxy is the sole secret
-  holder. With ``claude``/``codex`` the secret lives in the CLI's own auth
-  (env/keychain) and with Ollama there is no secret. The proxy remains the sole
-  *egress path* (all calls route through it), but it is no longer the sole
-  secret holder — record this when you pick a backend.
+  being mis-admitted. The safety property (no forged authentic verdict) is
+  preserved; only availability degrades.
+* *The credential locus moves.* The secret lives in the ``claude`` CLI's own
+  auth (env/keychain). The proxy remains the sole *egress path* (all calls
+  route through it), but it is no longer the sole secret holder — record this.
 """
 
 from __future__ import annotations
 
 import json
 import re
-import urllib.error
-import urllib.request
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -55,14 +44,11 @@ from typing import Any, Literal
 from foundry.canonical import content_digest
 from foundry.proxy.lineage import (
     DEFAULT_LINEAGE_ENTRIES,
-    GEMMA_LINEAGE_ENTRIES,
-    OPENAI_LINEAGE_ENTRIES,
     LineageMap,
 )
 from foundry.proxy.model_provider_proxy import (
     ModelProviderProxy,
     ProviderResponse,
-    _ClientCache,
 )
 
 __all__ = [
@@ -70,17 +56,9 @@ __all__ = [
     "ClaudeCliTransport",
     "CliResult",
     "CliRunner",
-    "CodexCliTransport",
-    "HttpPost",
-    "OllamaTransport",
-    "OpenAITransport",
     "TransportError",
-    "backend_from_env",
     "build_backend",
     "claude_cli_backend",
-    "codex_backend",
-    "ollama_gemma_backend",
-    "openai_backend",
 ]
 
 
@@ -145,7 +123,7 @@ def _schema_of(request: dict[str, Any]) -> dict[str, Any] | None:
 
 def _flatten_to_prompt(request: dict[str, Any], *, include_system: bool = True) -> str:
     """System + messages → one prompt. Appends a json-only instruction when the
-    proxy attached a schema (the CLIs have no native grammar constraint).
+    proxy attached a schema (the CLI has no native grammar constraint).
 
     ``include_system=False`` omits the system SOP — used when the caller routes it
     through the CLI's ``--append-system-prompt`` (so it can be prompt-cached)."""
@@ -178,6 +156,10 @@ def _as_int(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
 # --------------------------------------------------------------------------- #
 # CLI subprocess seam (injectable for tests — no real binary needed)           #
 # --------------------------------------------------------------------------- #
@@ -200,9 +182,9 @@ CliRunner = Callable[[Sequence[str], float | None], CliResult]
 
 
 # Default wall-clock cap for a CLI backend subprocess. Without it a hung
-# `claude`/`codex` invocation blocks its worker thread forever (the transports
-# accept timeout_s=None, but the shipped backends never set it). 300s matches the
-# Ollama HTTP transport's cap; override via claude_cli_backend/codex_backend.
+# `claude` invocation blocks its worker thread forever (the transport accepts
+# timeout_s=None, but the shipped backend never sets it). Override via
+# claude_cli_backend.
 _DEFAULT_CLI_TIMEOUT_S = 300.0
 
 
@@ -253,7 +235,7 @@ def _lenient_json_object(text: str) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
-# Backend 1 — Claude Code CLI (`claude -p`)                                     #
+# Backend — Claude Code CLI (`claude -p`)                                       #
 # --------------------------------------------------------------------------- #
 
 # Prompt caching (routing the stable SOP through `--append-system-prompt`) is the
@@ -428,354 +410,10 @@ def _observe_claude_model(parsed: dict[str, Any], *, requested: str | None) -> s
 
 
 # --------------------------------------------------------------------------- #
-# Backend 2 — Codex CLI (`codex exec`)                                          #
+# Preset — wire (transport + tier_models + lineage) into the SAME proxy         #
 # --------------------------------------------------------------------------- #
 
-
-class CodexCliTransport:
-    """``codex exec --json [-m <model>] [-c model_reasoning_effort=<e>] "<prompt>"``.
-
-    ALTITUDE CAVEAT: ``codex exec`` is an *agentic loop*, not a single-shot
-    completion — it may take tool/command turns before emitting a final
-    ``agent_message``. We observe only the LAST agent message as the turn text
-    and the model/usage off the stream; the proxy treats this transport as a
-    single completion at its own altitude (the intermediate agent steps are
-    Codex-internal and not surfaced to the graph).
-
-    Codex emits JSONL events; the model id, the final agent message, and token
-    usage are observed from that stream (lenient — the exact event shapes are
-    Codex-version-dependent and centralised in :func:`_extract_codex`)."""
-
-    def __init__(
-        self,
-        *,
-        codex_bin: str = "codex",
-        runner: CliRunner | None = None,
-        timeout_s: float | None = None,
-        extra_args: Sequence[str] = (),
-    ) -> None:
-        self._bin = codex_bin
-        self._run: CliRunner = runner or _default_cli_runner
-        self._timeout_s = timeout_s
-        self._extra_args = tuple(extra_args)
-
-    def send(self, request: dict[str, Any]) -> ProviderResponse:
-        prompt = _flatten_to_prompt(request)
-        argv = [self._bin, "exec", "--json", "--skip-git-repo-check"]
-        model = request.get("model")
-        if isinstance(model, str) and model:
-            argv += ["-m", model]
-        effort = request.get("output_config", {})
-        effort = effort.get("effort") if isinstance(effort, dict) else None
-        if isinstance(effort, str) and effort:
-            argv += ["-c", f"model_reasoning_effort={effort}"]
-        argv += list(self._extra_args)
-        argv.append(prompt)
-
-        result = self._run(argv, self._timeout_s)
-        if result.timed_out:
-            raise TransportError("codex CLI hard-killed at wall-clock cap")
-        served, text, usage = _extract_codex(result.stdout)
-        if not text and result.returncode != 0:
-            raise TransportError(
-                f"codex CLI exit {result.returncode}: {result.stderr[:400] or '(no stderr)'}"
-            )
-        if not text:
-            # Zero-exit but no agent_message recovered from the JSONL stream:
-            # a parser/shape mismatch must NOT masquerade as a silent empty
-            # completion (the proxy would admit an empty turn). Fail closed.
-            raise TransportError(
-                "codex CLI exit 0 but no agent_message text found in JSONL stream "
-                f"(stdout {len(result.stdout)} bytes; event shape unrecognised)"
-            )
-        return ProviderResponse(
-            served_model=served,
-            request_id=f"codex-cli:{content_digest(request)[:16]}",
-            text=text,
-            usage=usage,
-            stop_reason="end_turn",
-        )
-
-
-def _extract_codex(stdout: str) -> tuple[str, str, dict[str, int]]:
-    """Walk Codex JSONL → (served_model, final_text, usage). Tolerant of the
-    event-shape variants across Codex versions; the last agent message wins."""
-    served = ""
-    text = ""
-    usage = _usage()
-    for line in stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if not isinstance(event, dict):
-            continue
-        served = _find_model(event) or served
-        msg = _find_agent_message(event)
-        if msg:
-            text = msg
-        u = _find_usage(event)
-        if u is not None:
-            usage = u
-    return served, text, usage
-
-
-def _find_model(event: dict[str, Any]) -> str:
-    for key in ("model", "model_id"):
-        v = event.get(key)
-        if isinstance(v, str) and v:
-            return v
-    for sub in ("msg", "session", "config", "item"):
-        v = event.get(sub)
-        if isinstance(v, dict):
-            found = _find_model(v)
-            if found:
-                return found
-    return ""
-
-
-def _as_dict(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
-def _is_agent_message_type(etype: str) -> bool:
-    return "agent_message" in etype or etype in ("message", "assistant")
-
-
-def _agent_message_text(carrier: dict[str, Any]) -> str:
-    for key in ("message", "text", "content"):
-        v = carrier.get(key)
-        if isinstance(v, str) and v:
-            return v
-    return ""
-
-
-def _find_agent_message(event: dict[str, Any]) -> str:
-    """Final-agent-message text across Codex event shapes:
-
-    * current ``codex exec --json``: the message is nested as
-      ``{"type": "item.completed", "item": {"type": "agent_message", "text": ...}}``
-      — the OUTER ``type`` is the lifecycle phase, the agent_message tag lives on
-      the ``item``;
-    * older streams: ``{"msg": {"type": "agent_message", "message": ...}}`` or a
-      flat ``{"type": "message"|"assistant"|"agent_message", ...}``.
-
-    We inspect the nested item tag first (so ``item.completed`` no longer misses),
-    then fall back to the inner/outer envelope tag — keeping tolerance for the
-    older shapes."""
-    inner = _as_dict(event.get("msg")) or event
-    item = _as_dict(inner.get("item"))
-    # 1) current shape: the agent_message tag rides on the nested item.
-    if item and _is_agent_message_type(str(item.get("type") or "")):
-        text = _agent_message_text(item)
-        if text:
-            return text
-    # 2) older/flat shapes: the tag rides on the inner (msg) or outer envelope.
-    etype = str(inner.get("type") or event.get("type") or "")
-    if _is_agent_message_type(etype):
-        text = _agent_message_text(item) or _agent_message_text(inner)
-        if text:
-            return text
-    return ""
-
-
-def _find_usage(event: dict[str, Any]) -> dict[str, int] | None:
-    # Usage rides at the top level (older shapes), on the ``msg`` envelope, or on
-    # the nested ``item`` of a current ``turn.completed`` event.
-    src: Any = event.get("usage")
-    if not isinstance(src, dict):
-        src = _as_dict(event.get("msg")).get("usage")
-    if not isinstance(src, dict):
-        src = _as_dict(event.get("item")).get("usage")
-    if not isinstance(src, dict):
-        return None
-    return _usage(
-        input_tokens=_as_int(src.get("input_tokens") or src.get("prompt_tokens")),
-        output_tokens=_as_int(src.get("output_tokens") or src.get("completion_tokens")),
-        cache_read=_as_int(src.get("cached_input_tokens") or src.get("cache_read_input_tokens")),
-    )
-
-
-# --------------------------------------------------------------------------- #
-# Backend 3 — OpenAI (direct SDK, `chat.completions`)                           #
-# --------------------------------------------------------------------------- #
-
-
-class OpenAITransport:
-    """Default transport over the real OpenAI SDK (``chat.completions``).
-
-    The first-party OpenAI egress — the direct-API twin of
-    :class:`~foundry.proxy.model_provider_proxy.AnthropicTransport`. (The ``codex``
-    backend also reaches OpenAI, but through the agentic ``codex exec`` CLI; this
-    one calls the API directly, a single-shot completion.) The client and the
-    credential it resolves are built lazily on first use, so importing this module
-    never needs a key or network — tests inject a fake ``client``.
-
-    OpenAI honours ``response_format=json_schema`` (a real decoding grammar), so the
-    grammar-constrained verdict channel is PRESERVED here (like Ollama, unlike the
-    CLIs). The system block + messages are sent as real chat roles; the proxy-pinned
-    ``temperature`` (deterministic gate/judge calls) and reasoning ``effort`` ride
-    through unchanged.
-    """
-
-    def __init__(self, client: Any | None = None) -> None:
-        def _build() -> Any:
-            try:
-                import openai
-            except ImportError as exc:  # pragma: no cover - import guard
-                raise TransportError(
-                    "the 'openai' backend requires the openai SDK; install it "
-                    "(e.g. `uv add openai` / `pip install openai`)"
-                ) from exc
-            return openai.OpenAI()
-        self._cache = _ClientCache(_build, injected=client)
-
-    def _ensure_client(self) -> Any:
-        return self._cache.get()
-
-    def send(self, request: dict[str, Any]) -> ProviderResponse:
-        model = request.get("model")
-        if not isinstance(model, str) or not model:
-            raise TransportError("openai transport requires a pinned model id on the request")
-
-        messages: list[dict[str, str]] = []
-        sys_text = _system_text(request)
-        if sys_text:
-            messages.append({"role": "system", "content": sys_text})
-        for role, text in _message_pairs(request):
-            messages.append({"role": role, "content": text})
-
-        params: dict[str, Any] = {"model": model, "messages": messages}
-        max_tokens = request.get("max_tokens")
-        if isinstance(max_tokens, int) and max_tokens > 0:
-            params["max_completion_tokens"] = max_tokens  # reasoning-model-safe form
-        if "temperature" in request:
-            params["temperature"] = request["temperature"]
-        effort = _as_dict(request.get("output_config", {})).get("effort")
-        if isinstance(effort, str) and effort:
-            params["reasoning_effort"] = effort
-        schema = _schema_of(request)
-        if schema is not None:
-            params["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {"name": "verdict", "schema": schema, "strict": True},
-            }
-
-        response = self._cache.run(lambda c: c.chat.completions.create(**params))
-        choice = response.choices[0] if getattr(response, "choices", None) else None
-        text = (getattr(choice.message, "content", "") or "") if choice is not None else ""
-        usage = getattr(response, "usage", None)
-        details = getattr(usage, "prompt_tokens_details", None) if usage else None
-        return ProviderResponse(
-            served_model=str(getattr(response, "model", "") or ""),
-            request_id=str(getattr(response, "id", "") or ""),
-            text=text if isinstance(text, str) else str(text),
-            usage=_usage(
-                input_tokens=_as_int(getattr(usage, "prompt_tokens", 0)) if usage else 0,
-                output_tokens=_as_int(getattr(usage, "completion_tokens", 0)) if usage else 0,
-                cache_read=_as_int(getattr(details, "cached_tokens", 0)) if details else 0,
-            ),
-            stop_reason=str(getattr(choice, "finish_reason", "") or "stop") if choice else "stop",
-        )
-
-
-# --------------------------------------------------------------------------- #
-# Backend 4 — Ollama (local Gemma)                                             #
-# --------------------------------------------------------------------------- #
-
-# Injectable HTTP seam (url, json-payload) -> json-response; tests fake it.
-HttpPost = Callable[[str, dict[str, Any]], dict[str, Any]]
-
-
-def _default_http_post(url: str, payload: dict[str, Any]) -> dict[str, Any]:
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=data, headers={"Content-Type": "application/json"}, method="POST"
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            body = resp.read().decode("utf-8")
-    except (urllib.error.URLError, OSError) as exc:
-        raise TransportError(f"ollama request failed: {exc}") from exc
-    parsed = json.loads(body)
-    if not isinstance(parsed, dict):
-        raise TransportError("ollama returned a non-object response")
-    return parsed
-
-
-class OllamaTransport:
-    """POST ``/api/chat`` to a local Ollama server (e.g. ``gemma3``).
-
-    Unlike the CLIs, Ollama supports ``format`` (a JSON-schema constraint), so
-    the grammar-constrained verdict channel is PRESERVED here. The system block
-    and messages are sent as real chat roles (no flattening). ``temperature``
-    pinned by the proxy (0 on deterministic gate/judge calls) rides in
-    ``options``."""
-
-    def __init__(
-        self,
-        *,
-        base_url: str = "http://localhost:11434",
-        http_post: HttpPost | None = None,
-    ) -> None:
-        self._url = base_url.rstrip("/") + "/api/chat"
-        self._post: HttpPost = http_post or _default_http_post
-
-    def send(self, request: dict[str, Any]) -> ProviderResponse:
-        model = request.get("model")
-        if not isinstance(model, str) or not model:
-            raise TransportError("ollama transport requires a pinned model id on the request")
-
-        messages: list[dict[str, str]] = []
-        sys_text = _system_text(request)
-        if sys_text:
-            messages.append({"role": "system", "content": sys_text})
-        for role, text in _message_pairs(request):
-            messages.append({"role": role, "content": text})
-
-        options: dict[str, Any] = {}
-        if "temperature" in request:
-            options["temperature"] = request["temperature"]
-        payload: dict[str, Any] = {"model": model, "messages": messages, "stream": False}
-        if options:
-            payload["options"] = options
-        schema = _schema_of(request)
-        if schema is not None:
-            payload["format"] = schema  # native JSON-schema constraint
-
-        resp = self._post(self._url, payload)
-        message = resp.get("message")
-        text = message.get("content", "") if isinstance(message, dict) else ""
-        if not isinstance(text, str):
-            text = str(text)
-        served = resp.get("model")
-        done_reason = resp.get("done_reason")
-        return ProviderResponse(
-            served_model=served if isinstance(served, str) else "",
-            request_id=f"ollama:{content_digest(request)[:16]}",
-            text=text,
-            usage=_usage(
-                input_tokens=_as_int(resp.get("prompt_eval_count")),
-                output_tokens=_as_int(resp.get("eval_count")),
-            ),
-            stop_reason=str(done_reason) if done_reason else "end_turn",
-        )
-
-
-# --------------------------------------------------------------------------- #
-# Presets — wire (transport + tier_models + lineage) into the SAME proxy        #
-# --------------------------------------------------------------------------- #
-
-BackendName = Literal["anthropic", "openai", "claude-cli", "codex", "ollama-gemma"]
-
-# Sensible default tier→model maps per backend. Override via build_backend(...,
-# tier_models=...) to pin the exact ids you run.
-OPENAI_TIER_MODELS: dict[str, str] = {"T1": "gpt-5", "T2": "gpt-5", "T3": "gpt-5-mini"}
-CODEX_TIER_MODELS: dict[str, str] = {"T1": "gpt-5-codex", "T2": "gpt-5", "T3": "gpt-5-mini"}
-GEMMA_TIER_MODELS: dict[str, str] = {"T1": "gemma3:27b", "T2": "gemma3:12b", "T3": "gemma3:4b"}
+BackendName = Literal["claude-cli"]
 
 
 def claude_cli_backend(
@@ -785,9 +423,10 @@ def claude_cli_backend(
     timeout_s: float | None = _DEFAULT_CLI_TIMEOUT_S,
     **proxy_kwargs: Any,
 ) -> ModelProviderProxy:
-    """Proxy backed by ``claude -p``. Same Anthropic tier ids + lineage as the
-    SDK transport, so calibration baselines carry over. ``timeout_s`` hard-caps each
-    subprocess (default 300s) so a hung CLI can't wedge the worker forever."""
+    """Proxy backed by ``claude -p``. Same Anthropic tier ids + lineage as a
+    direct SDK transport, so calibration baselines carry over. ``timeout_s``
+    hard-caps each subprocess (default 300s) so a hung CLI can't wedge the
+    worker forever."""
     return ModelProviderProxy(
         transport=ClaudeCliTransport(runner=runner, timeout_s=timeout_s),
         lineage_map=LineageMap(DEFAULT_LINEAGE_ENTRIES),
@@ -796,99 +435,12 @@ def claude_cli_backend(
     )
 
 
-def openai_backend(
-    *,
-    tier_models: dict[str, str] | None = None,
-    client: Any | None = None,
-    **proxy_kwargs: Any,
-) -> ModelProviderProxy:
-    """Proxy backed by the OpenAI SDK (``chat.completions``). OpenAI lineage — a
-    genuinely different ``served_family`` from Anthropic, so the ``decorrelated``
-    profile becomes meaningful. The direct-API twin of the default Anthropic SDK
-    backend; ``client`` is injectable for tests (else built lazily from the env)."""
-    return ModelProviderProxy(
-        transport=OpenAITransport(client=client),
-        lineage_map=LineageMap((*OPENAI_LINEAGE_ENTRIES, *DEFAULT_LINEAGE_ENTRIES)),
-        tier_models=tier_models or OPENAI_TIER_MODELS,
-        **proxy_kwargs,
-    )
-
-
-def codex_backend(
-    *,
-    tier_models: dict[str, str] | None = None,
-    runner: CliRunner | None = None,
-    timeout_s: float | None = _DEFAULT_CLI_TIMEOUT_S,
-    **proxy_kwargs: Any,
-) -> ModelProviderProxy:
-    """Proxy backed by ``codex exec``. OpenAI lineage — a genuinely different
-    served_family, so the ``decorrelated`` profile becomes meaningful. ``timeout_s``
-    hard-caps each subprocess (default 300s) so a hung CLI can't wedge the worker."""
-    return ModelProviderProxy(
-        transport=CodexCliTransport(runner=runner, timeout_s=timeout_s),
-        lineage_map=LineageMap((*OPENAI_LINEAGE_ENTRIES, *DEFAULT_LINEAGE_ENTRIES)),
-        tier_models=tier_models or CODEX_TIER_MODELS,
-        **proxy_kwargs,
-    )
-
-
-def ollama_gemma_backend(
-    *,
-    tier_models: dict[str, str] | None = None,
-    base_url: str = "http://localhost:11434",
-    http_post: HttpPost | None = None,
-    **proxy_kwargs: Any,
-) -> ModelProviderProxy:
-    """Proxy backed by a local Ollama Gemma server (offline-capable, keeps the
-    JSON-schema verdict grammar via Ollama ``format``)."""
-    return ModelProviderProxy(
-        transport=OllamaTransport(base_url=base_url, http_post=http_post),
-        lineage_map=LineageMap((*GEMMA_LINEAGE_ENTRIES, *DEFAULT_LINEAGE_ENTRIES)),
-        tier_models=tier_models or GEMMA_TIER_MODELS,
-        **proxy_kwargs,
-    )
-
-
 def build_backend(name: BackendName, **kwargs: Any) -> ModelProviderProxy:
     """Config entry point: name → fully-wired proxy (the only thing that
     changes between backends; the rest of the factory flow is identical).
 
-    ``"anthropic"`` returns the default SDK-backed proxy.
+    ``"claude-cli"`` is the sole real backend — ``claude -p``.
     """
-    if name == "anthropic":
-        return ModelProviderProxy(**kwargs)
-    if name == "openai":
-        return openai_backend(**kwargs)
     if name == "claude-cli":
         return claude_cli_backend(**kwargs)
-    if name == "codex":
-        return codex_backend(**kwargs)
-    if name == "ollama-gemma":
-        return ollama_gemma_backend(**kwargs)
-    raise ValueError(
-        f"unknown backend {name!r} "
-        "(expected anthropic | openai | claude-cli | codex | ollama-gemma)"
-    )
-
-
-def backend_from_env(env: dict[str, str] | None = None, **kwargs: Any) -> ModelProviderProxy:
-    """Read ``FOUNDRY_MODEL_BACKEND`` (default ``anthropic``) and build it.
-
-    Lets an operator config-swap the backend without touching call sites:
-    ``FOUNDRY_MODEL_BACKEND=ollama-gemma`` runs the exact same flow on Gemma.
-
-    For the ``ollama-gemma`` backend, the server endpoint is read from
-    ``FOUNDRY_OLLAMA_URL`` (default in-process: ``http://localhost:11434``) so a
-    deployment points every worker at ONE shared Ollama service over the network
-    (the GPU is a host/infra concern, not a per-container one) instead of the
-    hardcoded localhost. An explicit ``base_url=`` kwarg still wins.
-    """
-    import os
-
-    source = env if env is not None else dict(os.environ)
-    name = source.get("FOUNDRY_MODEL_BACKEND", "anthropic").strip() or "anthropic"
-    if name == "ollama-gemma" and "base_url" not in kwargs:
-        url = source.get("FOUNDRY_OLLAMA_URL", "").strip()
-        if url:
-            kwargs["base_url"] = url
-    return build_backend(name, **kwargs)  # type: ignore[arg-type]
+    raise ValueError(f"unknown backend {name!r} (expected claude-cli)")

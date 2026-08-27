@@ -161,11 +161,7 @@ matches the true record.</textarea>
             <label for="backend-select">Backend</label>
             <select id="backend-select">
               <option value="mock">mock — deterministic, offline (no key)</option>
-              <option value="anthropic">anthropic — Claude API (ANTHROPIC_API_KEY)</option>
-              <option value="openai">openai — OpenAI API (OPENAI_API_KEY)</option>
               <option value="claude-cli" selected>claude-cli — claude -p (Max subscription)</option>
-              <option value="codex">codex — codex CLI (OPENAI_API_KEY)</option>
-              <option value="ollama-gemma">ollama-gemma — local Ollama endpoint</option>
             </select>
             <p class="hint" id="model-note"></p>
           </div>
@@ -203,9 +199,7 @@ single-server additive-homomorphic (Paillier) variant + the demo runner</textare
             <label for="adapter-select">Coding substrate</label>
             <select id="adapter-select">
               <option value="stub">stub — deterministic no-op (smoke/demo)</option>
-              <option value="raw-react">raw-react — one completion per task via the chosen backend</option>
               <option value="claude-code">claude-code — AGENTIC: claude edits/builds/tests in the sandbox (Max plan or API)</option>
-              <option value="proxy-agent">proxy-agent — agentic loop through the proxy (any backend, key stays outside)</option>
             </select>
           </div>
           <div class="field">

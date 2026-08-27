@@ -5,26 +5,18 @@ lineage observation, trusted verdict extraction, judgment-binding stamping.
 
 from foundry.proxy.cli_transports import (
     ClaudeCliTransport,
-    CodexCliTransport,
-    OllamaTransport,
     TransportError,
-    backend_from_env,
     build_backend,
     claude_cli_backend,
-    codex_backend,
-    ollama_gemma_backend,
 )
 from foundry.proxy.lineage import (
     DEFAULT_LINEAGE_ENTRIES,
-    GEMMA_LINEAGE_ENTRIES,
-    OPENAI_LINEAGE_ENTRIES,
     LineageMap,
     UnknownModelLineageError,
 )
 from foundry.proxy.model_provider_proxy import (
     TIER_MODELS,
     VERDICT_SCHEMA,
-    AnthropicTransport,
     CompletionResult,
     DriftMode,
     DriftPolicy,
@@ -43,13 +35,9 @@ from foundry.proxy.model_provider_proxy import (
 
 __all__ = [
     "DEFAULT_LINEAGE_ENTRIES",
-    "GEMMA_LINEAGE_ENTRIES",
-    "OPENAI_LINEAGE_ENTRIES",
     "TIER_MODELS",
     "VERDICT_SCHEMA",
-    "AnthropicTransport",
     "ClaudeCliTransport",
-    "CodexCliTransport",
     "CompletionResult",
     "DriftMode",
     "DriftPolicy",
@@ -57,7 +45,6 @@ __all__ = [
     "JudgmentResult",
     "LineageMap",
     "ModelProviderProxy",
-    "OllamaTransport",
     "PinnedIdDriftError",
     "ProviderResponse",
     "ProviderTransport",
@@ -66,11 +53,8 @@ __all__ = [
     "TransportError",
     "UnknownModelLineageError",
     "VerdictChannelError",
-    "backend_from_env",
     "build_backend",
     "claude_cli_backend",
-    "codex_backend",
     "default_drift_policy",
     "default_sampling_policy",
-    "ollama_gemma_backend",
 ]

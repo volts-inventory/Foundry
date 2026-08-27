@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS builds (
   request          TEXT,
   mode             TEXT,
   backend          TEXT,
-  adapter          TEXT,   -- coding substrate (stub/raw-react)
+  adapter          TEXT,   -- coding substrate (stub/claude-code)
   supervised       INTEGER,
   slots            INTEGER,
   max_fix_attempts INTEGER,

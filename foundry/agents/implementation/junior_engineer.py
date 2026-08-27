@@ -565,7 +565,7 @@ def _sandbox_for(rt: AgentRuntime, source_dir: str, snapshot_store: str | None) 
     ``home_passthrough`` on the adapter; the Sandbox validates the grant
     fail-closed against ``GRANTABLE_MODEL_AUTH`` (ROADMAP Phase 1b — model-auth
     only, target-system credentials can never be granted). Adapters that declare
-    nothing (stub, raw-react) get the fully-scrubbed cage, byte-identical to
+    nothing (stub) get the fully-scrubbed cage, byte-identical to
     before."""
     return Sandbox(
         source_dir,

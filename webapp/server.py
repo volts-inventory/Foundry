@@ -1548,7 +1548,7 @@ def _run_factory(p: Project, resume: bool = False) -> None:
 
                 mode=p.mode,
                 backend=p.backend,            # real backend per project (not always mock)
-                adapter=p.adapter,            # coding substrate (stub/raw-react)
+                adapter=p.adapter,            # coding substrate (stub/claude-code)
                 packs=p.packs or None,        # optional domain packs (regulated/ml_data/frontend)
                 spec=run_spec,                # pasted spec text OR uploaded docs dir (additive)
                 max_slots=p.max_slots,        # IC-pool parallelism (Wave C) + budget tree (Wave D)
@@ -2807,7 +2807,7 @@ class Handler(BaseHTTPRequestHandler):
         if backend not in BACKENDS:
             backend = "mock"
         # The adapter is DERIVED from the backend when not explicitly provided (CLI
-        # parity: mock→stub, any real backend→raw-react), so a real backend writes
+        # parity: mock→stub, claude-cli→claude-code), so a real backend writes
         # real code without a second field. An explicit valid adapter still wins.
         adapter = str(body.get("adapter", "")).strip()
         if adapter not in ADAPTERS:

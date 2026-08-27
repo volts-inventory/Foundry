@@ -128,7 +128,7 @@ class FeatureDiffBodyError(MaterializationError):
     The materialization contract: ``resolve(feature_diff_artifact)`` returns the
     typed :class:`FeatureDiff`; its ``diff_uri`` body — fetched through the
     SEPARATE :data:`BlobResolver` seam (``sandbox.get_blob``) — is a UNIFIED-DIFF
-    string (what the StubAdapter / raw_react adapters emit via
+    string (what the StubAdapter emits via
     ``sandbox.put_blob``). It is parsed into a relative-POSIX-path -> file-content
     mapping by the Phase-1 additions-only applier. A body present but of a hunk
     shape we don't support yet (modifications / deletions) is fail-closed here
@@ -259,8 +259,8 @@ _GIT_PREAMBLE_PREFIXES = ("diff --git ", "index ", "new file mode ")
 def _parse_addition_diff(diff_uri: str, body: str) -> dict[str, str]:
     """Parse a UNIFIED-DIFF body into a relative-path -> file-content mapping.
 
-    Phase-1 scope: diffs are pure FILE ADDITIONS (the StubAdapter / raw_react
-    adapters emit ``--- /dev/null`` / ``+++ b/<path>`` hunks). A
+    Phase-1 scope: diffs are pure FILE ADDITIONS (the StubAdapter emits
+    ``--- /dev/null`` / ``+++ b/<path>`` hunks). A
     minimal applier handling additions is sufficient here; FULL patch application
     (context-line matching, modifications, deletions, renames) is a LATER PHASE.
     We therefore FAIL-CLOSED (raise :class:`FeatureDiffBodyError`) on any hunk

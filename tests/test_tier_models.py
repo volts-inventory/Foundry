@@ -13,17 +13,10 @@ import pytest
 from foundry.cli import _default_tier_models, _tier_models
 
 
-def test_anthropic_and_claude_cli_share_the_anthropic_map() -> None:
-    a = _default_tier_models("anthropic")
+def test_claude_cli_uses_the_anthropic_map() -> None:
     c = _default_tier_models("claude-cli")
-    assert a == c
-    assert set(a) == {"T1", "T2", "T3"}
-    assert a["T1"].startswith("claude-")
-
-
-def test_codex_and_gemma_have_their_own_defaults() -> None:
-    assert _default_tier_models("codex")["T1"] == "gpt-5-codex"
-    assert _default_tier_models("ollama-gemma")["T1"].startswith("gemma")
+    assert set(c) == {"T1", "T2", "T3"}
+    assert c["T1"].startswith("claude-")
 
 
 def test_env_override_overlays_a_single_tier(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -45,8 +38,7 @@ def test_env_override_can_pin_all_tiers(monkeypatch: pytest.MonkeyPatch) -> None
 def test_no_env_is_byte_identical_to_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     for var in ("FOUNDRY_MODEL_T1", "FOUNDRY_MODEL_T2", "FOUNDRY_MODEL_T3"):
         monkeypatch.delenv(var, raising=False)
-    for backend in ("anthropic", "claude-cli", "codex", "ollama-gemma"):
-        assert _tier_models(backend) == _default_tier_models(backend)
+    assert _tier_models("claude-cli") == _default_tier_models("claude-cli")
 
 
 def test_build_proxy_threads_pinned_models(monkeypatch: pytest.MonkeyPatch) -> None:

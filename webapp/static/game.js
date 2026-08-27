@@ -4254,7 +4254,7 @@ fetch("/api/config").then(r=>r.json()).then(c=>{
         ps.appendChild(o);
       } } }
   // The coding substrate is DERIVED from the backend (parity with the CLI:
-  // mock→stub, any real backend→raw-react), so a real backend writes real code
+  // mock→stub, claude-cli→claude-code), so a real backend writes real code
   // without a second pick. syncAdapter() applies it unless the user overrode it.
   syncAdapter();
   MODELS_BY_BACKEND = c.models_by_backend || {};
@@ -4264,9 +4264,10 @@ fetch("/api/config").then(r=>r.json()).then(c=>{
 }).catch(()=>{});
 
 // The USD cost cap only binds *metered* API backends (real per-token charges).
-// mock is offline, ollama is local, and claude-cli bills a flat subscription —
-// so for those a per-build USD cap is meaningless: disable + annotate the field.
-const METERED_BACKENDS = ["anthropic","openai","codex"];
+// Neither remaining backend is metered: mock is offline and claude-cli bills a
+// flat subscription — so a per-build USD cap is always meaningless here: disable
+// + annotate the field.
+const METERED_BACKENDS = [];
 function syncCostCap(){
   const backend = document.getElementById("backend-select").value;
   const cap = document.getElementById("cap-input");
@@ -4277,13 +4278,12 @@ function syncCostCap(){
   if(!metered) cap.value = "";
 }
 // Coding substrate derived from the backend (CLI parity): mock→stub no-op,
-// claude-cli→claude-code (AGENTIC: claude edits/builds/tests inside the task
-// sandbox), other real backends→raw-react (one completion → one diff). A user who
-// manually picks an adapter pins it (adapterTouched), so derivation never
-// clobbers an explicit choice.
+// any real backend→claude-code (AGENTIC: claude edits/builds/tests inside the
+// task sandbox). A user who manually picks an adapter pins it (adapterTouched),
+// so derivation never clobbers an explicit choice.
 function defaultAdapterFor(backend){
   if(backend==="mock") return "stub";
-  return backend==="claude-cli" ? "claude-code" : "raw-react";
+  return "claude-code";
 }
 let adapterTouched = false;
 function syncAdapter(){

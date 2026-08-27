@@ -1,8 +1,9 @@
 """CLI ``--backend`` flag (model-backend selection) — no network.
 
 Proves the flag selects the proxy backend: the default is the deterministic
-keyless mock; the four real names map to the right transport (constructed, never
-called); an unknown name fails closed; and the default run is unchanged.
+keyless mock; the real ``claude-cli`` name maps to the right transport
+(constructed, never called); an unknown name fails closed; and the default run
+is unchanged.
 """
 
 from __future__ import annotations
@@ -11,12 +12,7 @@ import pytest
 
 from foundry.cli import BACKENDS, _build_proxy, main, run
 from foundry.proxy import ModelProviderProxy
-from foundry.proxy.cli_transports import (
-    ClaudeCliTransport,
-    CodexCliTransport,
-    OllamaTransport,
-)
-from foundry.proxy.model_provider_proxy import AnthropicTransport
+from foundry.proxy.cli_transports import ClaudeCliTransport
 from foundry.proxy.test_doubles import MockTransport
 
 
@@ -32,26 +28,17 @@ def test_build_proxy_mock_uses_mocktransport() -> None:
     assert isinstance(proxy._transport, MockTransport)
 
 
-@pytest.mark.parametrize(
-    ("backend", "transport_cls"),
-    [
-        ("anthropic", AnthropicTransport),
-        ("claude-cli", ClaudeCliTransport),
-        ("codex", CodexCliTransport),
-        ("ollama-gemma", OllamaTransport),
-    ],
-)
-def test_build_proxy_maps_real_backends_to_transports(backend: str, transport_cls: type) -> None:
+def test_build_proxy_maps_claude_cli_to_transport() -> None:
     # Construction only — no model is called, so no key/binary/server is needed.
-    proxy = _build_proxy(backend)
+    proxy = _build_proxy("claude-cli")
     assert isinstance(proxy, ModelProviderProxy)
-    assert isinstance(proxy._transport, transport_cls)
+    assert isinstance(proxy._transport, ClaudeCliTransport)
 
 
 def test_real_backend_carries_the_dev_signer() -> None:
     # The zone-B signer must be injected for every backend so the judgment path
     # can stamp verdicts regardless of which model egress is configured.
-    assert _build_proxy("ollama-gemma")._signer is not None
+    assert _build_proxy("claude-cli")._signer is not None
     assert _build_proxy("mock")._signer is not None
 
 

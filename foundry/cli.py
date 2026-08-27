@@ -135,26 +135,24 @@ MODES = (MODE_ASSISTANT, MODE_GATED, MODE_AUTONOMOUS)
 
 # The model backends selectable via ``--backend`` / run(backend=). "mock" (DEFAULT)
 # is the deterministic scripted MockTransport — keyless, no network, the historical
-# smoke behavior. The others route the factory's model egress through a REAL backend
-# via the single-egress proxy (foundry/proxy/cli_transports.build_backend): "anthropic"
-# (SDK; needs ANTHROPIC_API_KEY), "openai" (SDK chat.completions; needs OPENAI_API_KEY),
-# "claude-cli" (`claude -p`), "codex" (`codex exec`), "ollama-gemma" (local Ollama).
-# Picking a real backend makes real, metered model calls; the coding substrate +
-# materialization in THIS smoke CLI stay dev-grade (StubAdapter + synthetic resolver),
-# so --backend exercises the proxy/lineage/determinism/manifest path, not a real
-# code-writing adapter (that is a separate seam).
+# smoke behavior. "claude-cli" routes the factory's model egress through a REAL
+# backend via the single-egress proxy (foundry/proxy/cli_transports.build_backend):
+# `claude -p` (the CLI holds its own auth). Picking the real backend makes real model
+# calls; the coding substrate + materialization in THIS smoke CLI stay dev-grade
+# (StubAdapter + synthetic resolver), so --backend exercises the
+# proxy/lineage/determinism/manifest path, not a real code-writing adapter (that is a
+# separate seam).
 _MOCK_BACKEND = "mock"
-BACKENDS = (_MOCK_BACKEND, "anthropic", "openai", "claude-cli", "codex", "ollama-gemma")
+BACKENDS = (_MOCK_BACKEND, "claude-cli")
 
 
 # Coding substrates (WorkerAdapter): the thing that actually writes the code for
-# each task. `stub` is the deterministic no-op (the smoke default); `raw-react` is a
-# provider-agnostic single-loop substrate over the model backend (one completion ->
-# one diff, any backend); `claude-code` is the AGENTIC substrate (ROADMAP Phase 1a) —
-# it runs the `claude` CLI multi-turn INSIDE the task sandbox, where it edits files
-# and runs builds/tests itself, and authenticates via the sandbox's typed model-auth
-# grant (Max login/token = no API billing, or ANTHROPIC_API_KEY = metered).
-ADAPTERS = ("stub", "raw-react", "claude-code", "proxy-agent")
+# each task. `stub` is the deterministic no-op (the smoke default); `claude-code`
+# is the AGENTIC substrate (ROADMAP Phase 1a) — it runs the `claude` CLI multi-turn
+# INSIDE the task sandbox, where it edits files and runs builds/tests itself, and
+# authenticates via the sandbox's typed model-auth grant (Max login/token = no API
+# billing, or ANTHROPIC_API_KEY = metered).
+ADAPTERS = ("stub", "claude-code")
 _DEFAULT_ADAPTER = "stub"
 
 # Scope tier selection: how much system to build. `auto` (the default) lets the
@@ -171,22 +169,20 @@ SCOPES = ("auto", "demo", "small", "standard")
 # has no real model, so it keeps the deterministic no-op `stub` (the default run stays
 # hermetic + byte-identical). `claude-cli` — the backend whose substrate binary IS
 # Claude Code — defaults to the agentic `claude-code` adapter (the roadmap's biggest
-# quality lever; same binary, same auth). Every other real backend defaults to
-# `raw-react`, the provider-agnostic completion substrate. FOUNDRY_CODING_ADAPTER
-# (the same env var the Workshop UI reads) overrides the derivation env-side; an
-# explicit --adapter always wins.
+# quality lever; same binary, same auth). FOUNDRY_CODING_ADAPTER (the same env var the
+# Workshop UI reads) overrides the derivation env-side; an explicit --adapter always
+# wins.
 def _default_adapter_for(backend: str) -> str:
     """The coding substrate to use when ``--adapter`` is omitted, derived from
-    ``backend``: ``mock`` ⇒ ``stub`` (no real model), ``claude-cli`` ⇒
-    ``claude-code`` (agentic, same binary + auth), any other real backend ⇒
-    ``raw-react`` (the universal completion substrate). ``FOUNDRY_CODING_ADAPTER``
+    ``backend``: ``mock`` ⇒ ``stub`` (no real model); the real ``claude-cli``
+    backend ⇒ ``claude-code`` (agentic, same binary + auth). ``FOUNDRY_CODING_ADAPTER``
     (when set to a known adapter) overrides the derivation."""
     env = os.environ.get("FOUNDRY_CODING_ADAPTER", "").strip().lower()
     if env in ADAPTERS:
         return env
     if backend == _MOCK_BACKEND:
         return _DEFAULT_ADAPTER
-    return "claude-code" if backend == "claude-cli" else "raw-react"
+    return "claude-code"
 
 # System-decided parallelism (no user knob): the Tech-Lead decomposes the work
 # into independently-buildable tasks, and the IC pool sizes ITSELF to that plan —
@@ -199,12 +195,6 @@ def _default_adapter_for(backend: str) -> str:
 # via FOUNDRY_SLOTS_CAP (default 8) so a complex, many-task build can fan out wider
 # without per-call flags.
 AUTO_SLOTS_CAP = max(1, int(os.environ.get("FOUNDRY_SLOTS_CAP") or 8))
-# Minimal system prompt for the raw-react substrate (the full task prompt — pinned
-# constraints, task, spans, "emit a unified diff" — is built by the adapter itself).
-_RAW_REACT_SOP = (
-    "You are a senior software engineer. Implement the requested change exactly, "
-    "returning your work as a single fenced ```diff block. Touch nothing outside it."
-)
 
 
 def make_coding_adapter(
@@ -215,28 +205,12 @@ def make_coding_adapter(
     activity_cb: Callable[[str], None] | None = None,
 ) -> Any:
     """Construct the selected coding substrate (``ADAPTERS``). ``None`` ⇒ the
-    deterministic ``stub`` (back-compat). ``raw-react`` drives the chosen model
-    backend through the single-egress proxy (real code over any backend — `claude -p`
-    completions under ``claude-cli``, the Anthropic API under ``anthropic``)."""
+    deterministic ``stub`` (back-compat). ``claude-code`` is the agentic substrate:
+    it runs the ``claude`` CLI multi-turn inside the task sandbox (real code under
+    the ``claude-cli`` backend)."""
     name = (name or _DEFAULT_ADAPTER).strip().lower()
     if name == "stub":
         return StubAdapter()
-    if name == "raw-react":
-        from foundry.execution.adapters.raw_react import RawReactAdapter
-
-        def _complete(prompt: str) -> str:
-            return (
-                proxy.complete(
-                    "junior_engineer",
-                    "T1",
-                    _RAW_REACT_SOP,
-                    [{"role": "user", "content": prompt}],
-                    purpose="ideation",
-                ).text
-                or ""
-            )
-
-        return RawReactAdapter(complete_fn=_complete, run_id=thread_id)
     if name == "claude-code":
         from foundry.execution.adapters.claude_code import ClaudeCodeAdapter
 
@@ -248,23 +222,6 @@ def make_coding_adapter(
         # a step is a single blocking CLI call, so without it a multi-minute agentic
         # pass reports nothing until it returns.
         return ClaudeCodeAdapter(run_id=thread_id, on_activity=activity_cb)
-    if name == "proxy-agent":
-        from foundry.execution.adapters.proxy_agent import ProxyAgentAdapter
-
-        # The trust-preserving agentic loop (ROADMAP 1c): multi-turn, but every
-        # call rides the mediating proxy — sole credential holder, any backend.
-        def _agent_complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
-            result = proxy.complete(
-                "junior_engineer",
-                "T1",
-                _RAW_REACT_SOP,
-                list(messages),
-                purpose="ideation",
-                schema=schema,
-            )
-            return result.text or "", result.parsed
-
-        return ProxyAgentAdapter(complete_fn=_agent_complete, run_id=thread_id)
     raise ValueError(f"unknown adapter {name!r}; choose one of {', '.join(ADAPTERS)}")
 
 
@@ -320,21 +277,12 @@ _TIER_ENV: dict[str, str] = {
 
 def _default_tier_models(backend: str) -> dict[str, str]:
     """The curated default tier→model map the backend ships with (so an env
-    override can overlay a partial set without dropping the other tiers)."""
-    from foundry.proxy.cli_transports import (
-        CODEX_TIER_MODELS,
-        GEMMA_TIER_MODELS,
-        OPENAI_TIER_MODELS,
-    )
+    override can overlay a partial set without dropping the other tiers).
+
+    ``claude-cli`` uses the Anthropic-lineage ``TIER_MODELS``."""
     from foundry.proxy.model_provider_proxy import TIER_MODELS
 
-    if backend == "openai":
-        return dict(OPENAI_TIER_MODELS)
-    if backend == "codex":
-        return dict(CODEX_TIER_MODELS)
-    if backend == "ollama-gemma":
-        return dict(GEMMA_TIER_MODELS)
-    return dict(TIER_MODELS)  # anthropic / claude-cli share the Anthropic lineage
+    return dict(TIER_MODELS)
 
 
 def _tier_models(backend: str) -> dict[str, str]:
@@ -963,8 +911,7 @@ class RunResult:
     mode: str = MODE_ASSISTANT
     """The release mode the run was driven in (assistant | gated | autonomous)."""
     backend: str = _MOCK_BACKEND
-    """The model backend the proxy used (mock | anthropic | openai | claude-cli | codex |
-    ollama-gemma)."""
+    """The model backend the proxy used (mock | claude-cli)."""
     packs: tuple[str, ...] = ()
     """The domain packs engaged (by name) — empty when no ``--packs`` were given."""
     artifact_uri: str | None = None
@@ -1448,7 +1395,7 @@ def run(
         ckpt = FoundryCheckpointer()
     proxy = _build_proxy(backend)
     # --adapter omitted (None) ⇒ DERIVE the substrate from the backend so a real brain
-    # writes real code (mock→stub, any real backend→raw-react). An explicit adapter —
+    # writes real code (mock→stub, claude-cli→claude-code). An explicit adapter —
     # a name OR an injected WorkerAdapter instance (tests) — is never None and wins.
     if adapter is None:
         adapter = _default_adapter_for(backend)
@@ -1645,10 +1592,10 @@ def run(
                 def _feature_diff_stat(body: object) -> str | None:
                     # An engineer's "what I built": the FeatureDiff handle has no content
                     # fields, so resolve its diff BLOB and summarise it — changed files +
-                    # size. claude-code / proxy adapters store a JSON full-file snapshot
-                    # ({"files": {path: content}, "deleted": [...]}); raw-react stores a
-                    # unified diff. Handle both; return None (→ bare "feature diff") on
-                    # anything unrecognised.
+                    # size. The claude-code adapter stores a JSON full-file snapshot
+                    # ({"files": {path: content}, "deleted": [...]}); a completion-style
+                    # adapter stores a unified diff. Handle both; return None (→ bare
+                    # "feature diff") on anything unrecognised.
                     uri = getattr(body, "diff_uri", None)
                     if not uri:
                         return None
@@ -2251,10 +2198,9 @@ def main(argv: list[str] | None = None) -> int:
         if scope not in SCOPES:
             raise _CliUsageError(f"unknown --scope {scope!r}; choose one of {', '.join(SCOPES)}")
 
-        # --adapter {stub|raw-react|claude-code}: the coding substrate that writes
-        # the code. OMITTED ⇒ DERIVED from --backend in run() (mock→stub,
-        # claude-cli→claude-code agentic, other real backends→raw-react) so a real
-        # backend writes real code without a second flag.
+        # --adapter {stub|claude-code}: the coding substrate that writes the code.
+        # OMITTED ⇒ DERIVED from --backend in run() (mock→stub, claude-cli→claude-code
+        # agentic) so a real backend writes real code without a second flag.
         args, _adapter = _take_value(args, "--adapter", what="a value")
         if _adapter is not None and _adapter not in ADAPTERS:
             raise _CliUsageError(
@@ -2313,8 +2259,8 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 "usage: python -m foundry.cli "
                 "[--mode {assistant|gated|autonomous}] [--packs name1,name2] "
-                "[--backend {mock|anthropic|openai|claude-cli|codex|ollama-gemma}] "
-                "[--adapter {stub|raw-react|claude-code}] "
+                "[--backend {mock|claude-cli}] "
+                "[--adapter {stub|claude-code}] "
                 "[--checkpoints [all|product,design,release]] "
                 "[--scope {auto|demo|small|standard}] "
                 "[--docs DIR] [--out DIR] [--spec FILE|DIR ...] "
@@ -2324,11 +2270,11 @@ def main(argv: list[str] | None = None) -> int:
                 f"    assistant  {_TRUST_POSTURE[MODE_ASSISTANT]}\n"
                 f"    gated      {_TRUST_POSTURE[MODE_GATED]}\n"
                 f"    autonomous {_TRUST_POSTURE[MODE_AUTONOMOUS]}\n"
-                "  backend: mock (default — keyless, deterministic) | anthropic | openai | "
-                "claude-cli | codex | ollama-gemma (real model egress)\n"
+                "  backend: mock (default — keyless, deterministic) | "
+                "claude-cli (real model egress via `claude -p`)\n"
                 "  adapter (coding substrate): omitted => DERIVED from --backend "
-                "(mock=>stub no-op, claude-cli=>claude-code AGENTIC, other real "
-                "backends=>raw-react); override with stub | raw-react | claude-code\n"
+                "(mock=>stub no-op, claude-cli=>claude-code AGENTIC); "
+                "override with stub | claude-code\n"
                 "  packs: regulated | ml_data | frontend | game | crypto | infra "
                 "(a pack may VETO an unsafe mode — fail-closed)\n"
                 "  checkpoints (plan [10]): pause at stage boundaries for human "

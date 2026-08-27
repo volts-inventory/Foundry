@@ -364,43 +364,6 @@ class ProviderTransport(Protocol):
     def send(self, request: dict[str, Any]) -> ProviderResponse: ...
 
 
-class AnthropicTransport:
-    """Default transport over the real Anthropic SDK.
-
-    The client (and the credential it resolves) is constructed lazily on
-    first use — importing/instantiating this module never requires network
-    or an API key, so tests run entirely on a fake transport.
-    """
-
-    def __init__(self, client: Any | None = None) -> None:
-        def _build() -> Any:
-            import anthropic
-            return anthropic.Anthropic()
-        self._cache = _ClientCache(_build, injected=client)
-
-    def _ensure_client(self) -> Any:
-        return self._cache.get()
-
-    def send(self, request: dict[str, Any]) -> ProviderResponse:
-        response = self._cache.run(lambda c: c.messages.create(**request))
-        text = next(
-            (block.text for block in response.content if block.type == "text"), ""
-        )
-        usage = response.usage
-        return ProviderResponse(
-            served_model=response.model,
-            request_id=response._request_id or "",
-            text=text,
-            usage={
-                "input_tokens": usage.input_tokens,
-                "output_tokens": usage.output_tokens,
-                "cache_read_input_tokens": usage.cache_read_input_tokens or 0,
-                "cache_creation_input_tokens": usage.cache_creation_input_tokens or 0,
-            },
-            stop_reason=response.stop_reason or "",
-        )
-
-
 @dataclass(frozen=True, slots=True)
 class CompletionResult:
     """What a proxy call hands back: text/JSON + the trusted observations."""
@@ -680,7 +643,17 @@ class ModelProviderProxy:
     ) -> None:
         if profile not in ("self_judge", "decorrelated"):
             raise ValueError(f"unknown profile: {profile!r}")
-        self._transport = transport or AnthropicTransport()
+        # No implicit real backend: production wires a concrete transport
+        # (claude_cli_backend → ClaudeCliTransport) and tests wire MockTransport.
+        # A bare proxy with no transport must NOT silently reach a live provider —
+        # fail closed with a clear error instead of guessing one.
+        if transport is None:
+            raise ValueError(
+                "ModelProviderProxy requires an explicit transport "
+                "(claude_cli_backend()/build_backend('claude-cli') in production, "
+                "MockTransport in tests) — there is no default real backend"
+            )
+        self._transport = transport
         self._lineage = lineage_map or LineageMap()
         self._signer = signer
         self._profile = profile

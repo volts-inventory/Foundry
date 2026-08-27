@@ -1,7 +1,7 @@
 """Adapter (coding-substrate) selection, CLI flag + webapp API option.
 
-Phase 1 wiring: all three `WorkerAdapter`s are constructible, selectable with a
-`--adapter` CLI flag, and selectable per build via the `adapter` field on
+Phase 1 wiring: both shipped `WorkerAdapter`s are constructible, selectable with
+a `--adapter` CLI flag, and selectable per build via the `adapter` field on
 POST /api/projects. `stub` stays the default everywhere (the deterministic smoke
 path is unchanged).
 """
@@ -38,9 +38,7 @@ def test_every_adapter_constructs(proxy: Any) -> None:
     }
     assert by_name == {
         "stub": "StubAdapter",
-        "raw-react": "RawReactAdapter",
         "claude-code": "ClaudeCodeAdapter",
-        "proxy-agent": "ProxyAgentAdapter",
     }
 
 
@@ -60,31 +58,25 @@ def test_unknown_adapter_name_raises(proxy: Any) -> None:
 def test_default_adapter_is_derived_from_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     # mock has no real model ⇒ the deterministic stub. claude-cli — whose substrate
     # binary IS Claude Code — derives the AGENTIC claude-code adapter (ROADMAP 1a/1d:
-    # same binary, same auth, multi-turn inner loop). Every other real backend ⇒
-    # raw-react (the universal completion substrate).
+    # same binary, same auth, multi-turn inner loop).
     monkeypatch.delenv("FOUNDRY_CODING_ADAPTER", raising=False)
     assert _default_adapter_for("mock") == "stub"
-    assert _default_adapter_for("anthropic") == "raw-react"
-    assert _default_adapter_for("openai") == "raw-react"
     assert _default_adapter_for("claude-cli") == "claude-code"
-    assert _default_adapter_for("codex") == "raw-react"
-    assert _default_adapter_for("ollama-gemma") == "raw-react"
 
 
 def test_foundry_adapter_env_overrides_derivation(monkeypatch: pytest.MonkeyPatch) -> None:
     # FOUNDRY_CODING_ADAPTER (a known adapter name) overrides the backend derivation —
     # config-side opt-out of the agentic default without a per-call flag.
-    monkeypatch.setenv("FOUNDRY_CODING_ADAPTER", "raw-react")
-    assert _default_adapter_for("claude-cli") == "raw-react"
+    monkeypatch.setenv("FOUNDRY_CODING_ADAPTER", "stub")
+    assert _default_adapter_for("claude-cli") == "stub"
     monkeypatch.setenv("FOUNDRY_CODING_ADAPTER", "bogus")  # unknown ⇒ ignored, derivation wins
     assert _default_adapter_for("claude-cli") == "claude-code"
 
 
 def test_offered_adapters() -> None:
-    # Four substrates: the deterministic stub, the provider-agnostic raw-react
-    # completion adapter, the agentic claude-code substrate (ROADMAP 1a), and the
-    # proxy-mediated agentic loop (ROADMAP 1c — trust story intact, any backend).
-    assert set(ADAPTERS) == {"stub", "raw-react", "claude-code", "proxy-agent"}
+    # Two substrates: the deterministic stub and the agentic claude-code substrate
+    # (ROADMAP 1a — it runs the `claude` CLI multi-turn inside the task sandbox).
+    assert set(ADAPTERS) == {"stub", "claude-code"}
 
 
 def test_run_with_mock_backend_and_no_adapter_stays_stub() -> None:
@@ -121,7 +113,7 @@ def test_api_validates_adapter_against_set() -> None:
     # The set the API validates against is the single source of truth in cli.py.
     from foundry.cli import ADAPTERS as cli_adapters
 
-    assert "stub" in cli_adapters and "raw-react" in cli_adapters
+    assert "stub" in cli_adapters and "claude-code" in cli_adapters
 
 
 def test_project_carries_adapter_field() -> None:
@@ -129,9 +121,9 @@ def test_project_carries_adapter_field() -> None:
 
     p = Project(
         id="x", request="r", mode="assistant", supervised=False, floor=1,
-        adapter="raw-react",
+        adapter="claude-code",
     )
-    assert p.adapter == "raw-react"
+    assert p.adapter == "claude-code"
 
 
 def test_project_defaults_to_stub_adapter() -> None:
@@ -146,10 +138,10 @@ def test_store_roundtrips_adapter(tmp_path: Any) -> None:
 
     s = BuildStore(tmp_path / "cat.sqlite")
     s.upsert(
-        {"id": "b1", "floor": 1, "backend": "mock", "adapter": "raw-react", "gates": {}}
+        {"id": "b1", "floor": 1, "backend": "mock", "adapter": "claude-code", "gates": {}}
     )
     row = dict(s._conn.execute("SELECT adapter FROM builds WHERE id='b1'").fetchone())
-    assert row["adapter"] == "raw-react"
+    assert row["adapter"] == "claude-code"
 
 
 def test_activity_callback_reaches_the_agentic_adapter(proxy: Any) -> None:

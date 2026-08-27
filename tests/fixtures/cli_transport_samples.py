@@ -1,13 +1,9 @@
-"""Captured-style real-shape CLI output samples for the configured backends.
+"""Captured-style real-shape CLI output samples for the claude -p backend.
 
-These mirror what current binaries actually emit so the extraction in
+These mirror what the current binary actually emits so the extraction in
 ``foundry.proxy.cli_transports`` is exercised against the wire shapes, not just
 synthetic ones:
 
-* ``CODEX_EXEC_JSON_STREAM`` — current ``codex exec --json`` JSONL, where the
-  final assistant turn is wrapped as
-  ``{"type": "item.completed", "item": {"type": "agent_message", "text": ...}}``
-  and the model rides on the early session/thread events.
 * ``CLAUDE_P_JSON_RESULT`` — current ``claude -p --output-format json`` single
   result envelope (carries ``total_cost_usd`` + ``usage`` + ``modelUsage``).
 * ``CLAUDE_P_JSON_NO_MODELUSAGE`` — an older/degraded envelope that omits
@@ -18,27 +14,6 @@ bearing part being asserted.
 """
 
 from __future__ import annotations
-
-# --- codex exec --json --------------------------------------------------- #
-# One newline-delimited JSON event per line, current-version shapes.
-CODEX_EXEC_JSON_STREAM = "\n".join(
-    [
-        '{"type":"thread.started","thread_id":"thr_01HZX","model":"gpt-5-codex"}',
-        '{"type":"turn.started"}',
-        (
-            '{"type":"item.completed","item":{"id":"item_0","type":"reasoning",'
-            '"text":"Considering the request."}}'
-        ),
-        (
-            '{"type":"item.completed","item":{"id":"item_1","type":"agent_message",'
-            '"text":"Here is the final answer from codex."}}'
-        ),
-        (
-            '{"type":"turn.completed","item":{"usage":{"input_tokens":128,'
-            '"output_tokens":41,"cached_input_tokens":16}}}'
-        ),
-    ]
-)
 
 # --- claude -p --output-format json -------------------------------------- #
 # Single JSON object on stdout (current shape).

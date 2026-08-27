@@ -269,3 +269,23 @@ def test_write_bundle_is_idempotent(tmp_path: Path) -> None:
     write_bundle(bundle, tmp_path)
     write_bundle(bundle, tmp_path)  # second write overwrites, no error
     assert (tmp_path / "README.md").read_text() == bundle.docs[0].body
+
+
+def test_docs_full_scope_gates_and_env_override(monkeypatch) -> None:
+    """DEMO/SMALL ship a README only (no narrative-doc model calls); STANDARD/unset get
+    the full set. FOUNDRY_DOCS=readme|full overrides. Docs are off the release path, so
+    this only changes the doc deliverable's depth."""
+    from types import SimpleNamespace
+
+    from foundry.docs.assemble import _docs_full
+    from foundry.schemas.governance import ScopeTier
+
+    monkeypatch.delenv("FOUNDRY_DOCS", raising=False)
+    assert _docs_full({}) is True  # no scope decided -> full
+    assert _docs_full({"scope_tier": SimpleNamespace(tier=ScopeTier.SMALL)}) is False
+    assert _docs_full({"scope_tier": SimpleNamespace(tier=ScopeTier.DEMO)}) is False
+    assert _docs_full({"scope_tier": SimpleNamespace(tier=ScopeTier.STANDARD)}) is True
+    monkeypatch.setenv("FOUNDRY_DOCS", "readme")
+    assert _docs_full({"scope_tier": SimpleNamespace(tier=ScopeTier.STANDARD)}) is False
+    monkeypatch.setenv("FOUNDRY_DOCS", "full")
+    assert _docs_full({"scope_tier": SimpleNamespace(tier=ScopeTier.SMALL)}) is True

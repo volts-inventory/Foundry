@@ -22,6 +22,7 @@ JSON serialization used to build deterministic prompts / body digests.
 from __future__ import annotations
 
 import json
+import os
 from typing import TYPE_CHECKING, Any
 
 from foundry.canonical import content_digest
@@ -251,6 +252,24 @@ def skip_advisory_in_autonomous(state: FactoryState) -> bool:
     assistant/gated runs (and any run where a regulated pack vetoed autonomous down
     to gated) keep the advisory authoring."""
     return state.get("mode") == _AUTONOMOUS_MODE
+
+
+_OFF_VALUES = frozenset({"off", "0", "false", "no", "none"})
+
+
+def skip_ui_only_author(state: FactoryState) -> bool:
+    """True when a UI-ONLY advisory author (stakeholder_proxy / eng_program_mgr) should
+    skip its model call.
+
+    These emit ``intent_brief`` / ``sprint_plan``, which are read ONLY by the UI
+    (checkpoint inspection + the Workshop floor/quest-log) — never by a gate, router,
+    admission, the release judge, or the shipped code. So skipping them changes no build
+    outcome, only what the UI can display. Skip when the run is hands-off autonomous
+    (nobody reads them) OR when ``FOUNDRY_UI_AUTHORS`` is set off (the operator has
+    opted out of the UI blobs to save tokens). Default keeps them (UI unchanged)."""
+    if skip_advisory_in_autonomous(state):
+        return True
+    return os.environ.get("FOUNDRY_UI_AUTHORS", "on").strip().lower() in _OFF_VALUES
 
 
 def journal_entry(

@@ -21,6 +21,7 @@ writer's model calls go through the same proxy seam.
 from __future__ import annotations
 
 import hashlib
+import os
 import sys
 from collections.abc import Callable, MutableSequence, Sequence
 from dataclasses import dataclass
@@ -36,6 +37,7 @@ from foundry.docs.writers import TechnicalWriter
 from foundry.schemas.architecture import ADR, InterfaceContract, OwnershipMap, SystemDesign
 from foundry.schemas.base import Artifact
 from foundry.schemas.docs import ProseBody
+from foundry.schemas.governance import ScopeTier
 from foundry.schemas.product import PRD, AcceptanceCriterion
 from foundry.schemas.quality import E2EReport, TestPlan, TestReport
 
@@ -65,6 +67,21 @@ class DocumentationBundle:
 
 def _sha(body: str) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _docs_full(state: Any) -> bool:
+    """Author the full narrative doc set (four model calls) vs. a README-only build.
+
+    ``FOUNDRY_DOCS=readme|full`` overrides; otherwise DEMO/SMALL scope -> README-only,
+    STANDARD (or unset) -> full. Docs are off the release path, so this only changes
+    the doc deliverable's depth, never the build or any gate verdict."""
+    env = os.environ.get("FOUNDRY_DOCS", "").strip().lower()
+    if env == "readme":
+        return False
+    if env == "full":
+        return True
+    tier = getattr(state.get("scope_tier"), "tier", None)
+    return tier not in (ScopeTier.DEMO, ScopeTier.SMALL)
 
 
 def _resolve_bodies(
@@ -196,29 +213,35 @@ def assemble_documentation(
         "phase": phase,
         "passed": passed,
     }
-    usage = _proxy_usage(rt)
-    runbook = writer.runbook(title, context)
-    known_issues = writer.known_issues(title, context)
-    upgrade = writer.upgrade_guide(title, context)
-    perf_cost = writer.perf_cost(
-        title, context, usage={**usage, "estimated_cost_microusd": _budget_spend(state)}
-    )
-    rendered += [
-        render.render_runbook(runbook),
-        render.render_known_issues(known_issues),
-        render.render_upgrade(upgrade),
-        render.render_perf_cost(perf_cost),
-    ]
-
-    doc_artifacts = tuple(
-        emit_artifact(body, kind, "tech_writer", body.seq, store=rt.cas)
-        for body, kind in (
-            (runbook, "runbook"),
-            (known_issues, "known_issues"),
-            (upgrade, "upgrade_guide"),
-            (perf_cost, "perf_cost_report"),
+    # Author the four narrative doc SECTIONS (4 model calls) only when the scope
+    # warrants the full set; a DEMO/SMALL build ships just the deterministic README
+    # below (zero model calls), which is all a small project needs. Docs are off the
+    # release path either way — this changes the doc deliverable's depth, never the
+    # build or any gate. Override: FOUNDRY_DOCS=readme|full.
+    doc_artifacts: tuple[Artifact, ...] = ()
+    if _docs_full(state):
+        usage = _proxy_usage(rt)
+        runbook = writer.runbook(title, context)
+        known_issues = writer.known_issues(title, context)
+        upgrade = writer.upgrade_guide(title, context)
+        perf_cost = writer.perf_cost(
+            title, context, usage={**usage, "estimated_cost_microusd": _budget_spend(state)}
         )
-    )
+        rendered += [
+            render.render_runbook(runbook),
+            render.render_known_issues(known_issues),
+            render.render_upgrade(upgrade),
+            render.render_perf_cost(perf_cost),
+        ]
+        doc_artifacts = tuple(
+            emit_artifact(body, kind, "tech_writer", body.seq, store=rt.cas)
+            for body, kind in (
+                (runbook, "runbook"),
+                (known_issues, "known_issues"),
+                (upgrade, "upgrade_guide"),
+                (perf_cost, "perf_cost_report"),
+            )
+        )
 
     # ---- real project README (repo root) ----
     readme = _render_readme(

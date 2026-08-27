@@ -386,3 +386,18 @@ def test_product_layer_runs_inside_a_state_graph() -> None:
     assert not final.get("gates")
     # required_capabilities propagated from the PM.
     assert final["required_capabilities"] == ["ui"]
+
+
+def test_skip_ui_only_author_honours_env_and_mode(monkeypatch) -> None:
+    """stakeholder_proxy / eng_program_mgr are UI-only (intent_brief/sprint_plan read
+    only by the UI). Skip on hands-off autonomous OR when FOUNDRY_UI_AUTHORS is off;
+    default keeps them so the Workshop UI is unchanged."""
+    from foundry.agents._common import skip_ui_only_author
+
+    monkeypatch.delenv("FOUNDRY_UI_AUTHORS", raising=False)
+    assert skip_ui_only_author({}) is False                    # assistant default: keep
+    assert skip_ui_only_author({"mode": "autonomous"}) is True  # hands-off: skip
+    monkeypatch.setenv("FOUNDRY_UI_AUTHORS", "off")
+    assert skip_ui_only_author({}) is True                      # operator opted out: skip
+    monkeypatch.setenv("FOUNDRY_UI_AUTHORS", "on")
+    assert skip_ui_only_author({}) is False

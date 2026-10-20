@@ -39,7 +39,10 @@ if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
 
     from foundry.agents._runtime import AgentRuntime, NodeFn
+    from foundry.proxy.model_provider_proxy import JudgmentResult
     from foundry.schemas.base import Artifact
+    from foundry.schemas.journal import JournalEntry
+    from foundry.schemas.product import AcceptanceCriterion
     from foundry.state.factory_state import FactoryState
 
 _NODE_ID = "reviewer_critic"
@@ -102,103 +105,104 @@ _SOP = (
 )
 
 
-def make_reviewer_critic_node(rt: AgentRuntime) -> NodeFn:
-    """Factory for the reviewer judgment node (LEARNINGS AR3).
+def review(
+    rt: AgentRuntime,
+    state: FactoryState,
+    config: RunnableConfig,
+    *,
+    node_id: str,
+    role: str,
+    criteria: Sequence[AcceptanceCriterion] = (),
+) -> tuple[JudgmentResult, JournalEntry]:
+    """Issue ONE proxy-stamped review verdict for ``node_id`` and its journal note.
 
-    Issues a verdict via ``rt.proxy.judge`` with a server-issued nonce and a
-    ``Seq`` whose ``node_id == _NODE_ID`` (the binding signs ``seq.node_id``;
-    ``judge`` rejects a mismatch). Writes the proxy-stamped ``GateResult`` to
-    the ``gates`` channel and carries ``judgment_provenance`` forward.
+    Shared by the assurance ``reviewer_critic`` node and the quality ``reviewer``
+    node. ``node_id`` is signed into the binding (via ``seq.node_id``) AND into the
+    per-request nonce, so two reviewers in one run must use distinct ids (H3).
+    ``criteria`` (when given) are put in front of the judge so it reviews against
+    them. Returns the :class:`JudgmentResult` and the advisory journal entry.
+    """
+    # Seq.node_id MUST equal the node_id passed to judge() — the binding
+    # signs seq.node_id, so judge() rejects a mismatched record (proxy L5).
+    seq = rt.seq(config, node_id, "verdict:review")
+
+    # Fail closed on a missing server-issued nonce BEFORE anything else (the most
+    # fundamental trust input of a verdict); the per-request nonce is derived
+    # below, once the subject + state it binds to are known.
+    require_verdict_nonce(config)
+
+    # Primary source is the config-pinned subject (the runner sets it); the
+    # state fallback selects the feature_diff by KIND, newest-by-seq (C-R1-03)
+    # — never insertion-order ``artifacts[-1]``.
+    state_subject = _newest_feature_diff_uri(state.get("artifacts") or [])
+    subject_uri = subject_artifact_uri(config, state_subject)
+    # DT2 / fail-closed: a verdict needs a concrete subject to bind to; an empty
+    # subject yields a coherent-but-empty binding the gate runner can't latch.
+    if not subject_uri:
+        raise ValueError(
+            f"{node_id} has no subject to judge: neither "
+            "config['configurable']['subject_artifact_uri'] nor a state "
+            "artifact is present. The supervisor/gate-wiring wave (T-M1-13) "
+            "must pin subject_artifact_uri on the run config for judgment nodes."
+        )
+    # Config-pinned `state_sha` wins (the `mock` smoke pins it); otherwise
+    # (real backends) prefer the REAL integrated tree_sha the gates ran
+    # against, falling back to a stable per-run label only before any gate
+    # verdict carries one.
+    run_against = state_sha(config, fallback=_attested_tree_sha(state) or seq.run_id)
+
+    # Server-issued, single-use; the agent consumes but never mints it. Derived
+    # per-request (bound to node/subject/state) so each verdict in a run has its
+    # OWN nonce — fail-closed when the run config has no base nonce.
+    nonce = server_issued_nonce(
+        config, node_id=node_id, subject_uri=subject_uri, state_sha=run_against
+    )
+
+    content = (
+        f"Review the artifact under {subject_uri} against the interfaces and "
+        "acceptance criteria. Emit your verdict."
+    )
+    if criteria:
+        content += "\n\nAcceptance criteria:\n" + "\n".join(
+            f"- {c.id} [{c.criticality}]: {c.text}" for c in criteria
+        )
+    result = rt.proxy.judge(
+        node_id,
+        subject_uri,
+        run_against,
+        nonce,
+        _SOP,
+        [{"role": "user", "content": content}],
+        seq=seq,
+        tier=_REVIEW_TIER,
+        gate_name=_GATE_NAME,
+    )
+
+    # ADVISORY journal entry (plan [11]): it only ECHOES the proxy-stamped verdict
+    # onto the SEPARATE `agent_journal` channel, which no gate/router reads. The
+    # TRUST path is the signed `gates` write; `_merge_gates` reads ONLY that.
+    note = journal_entry(
+        node_id=node_id,
+        role=role,
+        seq=rt.seq(config, node_id, "journal"),
+        summary=f"Reviewed {subject_uri} -> verdict {result.gate_result.status.value}.",
+        assumptions=(f"Judged against state {run_against}.",),
+        concerns=tuple(result.gate_result.findings),
+    )
+    return result, note
+
+
+def make_reviewer_critic_node(rt: AgentRuntime) -> NodeFn:
+    """Factory for the assurance reviewer judgment node (LEARNINGS AR3).
+
+    Issues a verdict via ``rt.proxy.judge`` (see :func:`review`) and writes the
+    proxy-stamped ``GateResult`` to ``gates``. ``_merge_gates`` admits it on a
+    valid binding + fresh nonce + no latch; it is dropped fail-closed otherwise
+    (L5) — the agent never signed it.
     """
 
     def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
-        # Seq.node_id MUST equal the node_id passed to judge() — the binding
-        # signs seq.node_id, so judge() rejects a mismatched record (proxy L5).
-        seq = rt.seq(config, _NODE_ID, "verdict:review")
-
-        # Fail closed on a missing server-issued nonce BEFORE anything else (the most
-        # fundamental trust input of a verdict); the per-request nonce is derived
-        # below, once the subject + state it binds to are known.
-        require_verdict_nonce(config)
-
-        # Primary source is the config-pinned subject (the runner sets it); the
-        # state fallback selects the feature_diff by KIND, newest-by-seq (C-R1-03)
-        # — never insertion-order ``artifacts[-1]``.
-        state_subject = _newest_feature_diff_uri(state.get("artifacts") or [])
-        subject_uri = subject_artifact_uri(config, state_subject)
-        # DT2 / fail-closed: a verdict needs a concrete subject to bind to.
-        # `subject_artifact_uri` falls back to "" when neither the config seam
-        # nor state names one — that yields a coherent-but-empty binding the gate
-        # runner can't meaningfully latch. The supervisor / gate-wiring wave
-        # (T-M1-13) MUST pin `config['configurable']['subject_artifact_uri']` for
-        # every judgment node (exactly like `verdict_nonce`/`state_sha`); until
-        # then we fail closed rather than emit a verdict over an empty subject.
-        if not subject_uri:
-            raise ValueError(
-                "reviewer_critic has no subject to judge: neither "
-                "config['configurable']['subject_artifact_uri'] nor a state "
-                "artifact is present. The supervisor/gate-wiring wave (T-M1-13) "
-                "must pin subject_artifact_uri on the run config for judgment nodes."
-            )
-        # Config-pinned `state_sha` wins (the `mock` smoke pins it); otherwise
-        # (real backends) prefer the REAL integrated tree_sha the gates ran
-        # against, falling back to a stable per-run label only before any gate
-        # verdict carries one.
-        run_against = state_sha(
-            config, fallback=_attested_tree_sha(state) or seq.run_id
-        )
-
-        # Server-issued, single-use; the agent consumes but never mints it. Derived
-        # per-request (bound to node/subject/state) so each verdict in a run has its
-        # OWN nonce — fail-closed when the run config has no base nonce.
-        nonce = server_issued_nonce(
-            config, node_id=_NODE_ID, subject_uri=subject_uri, state_sha=run_against
-        )
-
-        result = rt.proxy.judge(
-            _NODE_ID,
-            subject_uri,
-            run_against,
-            nonce,
-            _SOP,
-            [
-                {
-                    "role": "user",
-                    "content": (
-                        "Review the artifact under "
-                        f"{subject_uri or '(unspecified subject)'} against the "
-                        "interfaces and acceptance criteria. Emit your verdict."
-                    ),
-                }
-            ],
-            seq=seq,
-            tier=_REVIEW_TIER,
-            gate_name=_GATE_NAME,
-        )
-
-        # ADVISORY journal entry (plan [11]). It merely ECHOES the verdict the
-        # proxy already stamped — derived from `result.gate_result` (zero extra
-        # cost, no new model call) — onto the SEPARATE `agent_journal` channel.
-        # CRITICAL: this is observability only. The TRUST path is the signed
-        # `gates` write below; `_merge_gates` reads ONLY that. The journal is
-        # read by no gate/router, so even if its text disagreed with the verdict
-        # it could not change the outcome (rollout to other nodes is mechanical).
-        journal_seq = rt.seq(config, _NODE_ID, "journal")
-        note = journal_entry(
-            node_id=_NODE_ID,
-            role="Reviewer / Critic",
-            seq=journal_seq,
-            summary=(
-                f"Reviewed {subject_uri} -> verdict "
-                f"{result.gate_result.status.value}."
-            ),
-            assumptions=(f"Judged against state {run_against}.",),
-            concerns=tuple(result.gate_result.findings),
-        )
-
-        # The verdict the proxy stamped (binding + provenance) — the agent never
-        # signed it. _merge_gates admits it on a valid binding + fresh nonce +
-        # no latch; it is dropped fail-closed otherwise (L5).
+        result, note = review(rt, state, config, node_id=_NODE_ID, role="Reviewer / Critic")
         return {"gates": [result.gate_result], "agent_journal": [note]}
 
     return _node

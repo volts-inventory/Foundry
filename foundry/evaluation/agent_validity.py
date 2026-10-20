@@ -53,8 +53,8 @@ from typing import TYPE_CHECKING, Any
 
 from foundry.agents import AgentRuntime
 from foundry.agents.planner import make_planner_node
-from foundry.agents.quality import make_qa_engineer_node, make_reviewer_critic_node
-from foundry.agents.quality.qa_engineer import ACCEPTANCE_CRITERION_KIND
+from foundry.agents.quality import make_reviewer_critic_node, make_reviewer_node
+from foundry.agents.quality._common import ACCEPTANCE_CRITERION_KIND
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.evaluation.hypothesis import Provenance
 from foundry.gates.attestation import ZoneBSigner
@@ -350,14 +350,19 @@ def qa_engineer_validity(*, catches: bool = True) -> RoleValidity:
     handle = _criterion_handle(criterion, store=cas)
     state: FactoryState = {"artifacts": [handle]}
 
-    # Trace a test to the criterion (the model's enrichment); the negative-oracle
-    # binding is the node's own invariant on high-risk criteria, not the model's.
-    payload = {"tests": [{"test_id": "t-401", "criterion_ids": [_HIGH_RISK_CID]}]}
-    transport = MockTransport.scripted({}, default_text=_json(payload))
-    rt = _runtime(transport, cas=cas)
-    node = make_qa_engineer_node(rt, resolve=cas.resolve, run_against="task/validity")
+    # The oracle authoring now lives in the quality ``reviewer`` node (its
+    # negative-oracle binding is a node invariant on high-risk criteria, not a
+    # model output); its one judge call needs the verdict-channel run inputs.
+    rt = _runtime(MockTransport(verdicts=["approve"]), cas=cas)
+    node = make_reviewer_node(rt, resolve=cas.resolve)
 
-    writes = node(state, _config("validity-qa"))
+    writes = node(
+        state,
+        _config(
+            "validity-qa", nonce="N-validity", subject="cas://diff/validity",
+            state_sha="task/validity",
+        ),
+    )
     artifacts = writes.get("artifacts") or []
     # The QA's contribution: a NEGATIVE oracle traceable to the high-risk criterion.
     # Resolve each oracle_binding body and check it BINDS _HIGH_RISK_CID as NEGATIVE

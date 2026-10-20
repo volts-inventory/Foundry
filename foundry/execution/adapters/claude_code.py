@@ -67,6 +67,8 @@ from foundry.state.seq import Seq
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    from foundry.proxy.token_meter import TokenMeter
+
     # The injectable exec seam: (sandbox, argv, timeout_s) -> SandboxResult.
     # Default runs through Sandbox.run (the cage); tests inject a fake that
     # writes files into sandbox.worktree and returns a canned envelope.
@@ -315,6 +317,8 @@ class ClaudeCodeAdapter:
         # Per-session token usage, read into the BUILD-MANIFEST: coding sessions are
         # most of a run's spend and never pass through the proxy's per-call records.
         self.usage: list[dict[str, int]] = []
+        # Per-run token cap shared with the proxy; None = uncapped.
+        self.token_meter: TokenMeter | None = None
 
     def _pump_activity(self, line: str) -> None:
         """One stdout line -> zero or more activity phrases -> the listener. Advisory:
@@ -360,6 +364,8 @@ class ClaudeCodeAdapter:
                 f"the {self.name!r} adapter needs the {self._bin!r} binary on PATH "
                 f"(install Claude Code, or pick --adapter raw-react)"
             )
+        if self.token_meter is not None:
+            self.token_meter.check()
         before = walk_worktree(sandbox.worktree)
         if self._on_activity is not None:
             # STREAMING: each stdout line is an event; report the tool calls as they
@@ -397,6 +403,8 @@ class ClaudeCodeAdapter:
                 for k in ("input_tokens", "output_tokens", "cache_read_input_tokens",
                           "cache_creation_input_tokens")
             })
+            if self.token_meter is not None:
+                self.token_meter.charge(self.usage[-1])
         authored, deleted, skipped_binary = changed_files(before, after)
         payload: dict[str, Any] = {"kind": "full-file-snapshot", "files": authored}
         if deleted:

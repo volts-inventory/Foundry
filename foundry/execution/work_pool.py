@@ -86,6 +86,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from foundry.canonical import content_digest
+from foundry.proxy.token_meter import TokenCapExceeded
 from foundry.schemas.base import BudgetLedger
 
 if TYPE_CHECKING:
@@ -441,6 +442,13 @@ class LocalWorkPool:
         try:
             adapter = self._adapter_factory(task.adapter)
             result = adapter.run(task.packet, sandbox)
+        except TokenCapExceeded as exc:
+            # A spent run budget is not a task failure: re-raise so ``result()``'s
+            # ``fut.result()`` hands it to the caller as-is and the run stops cleanly.
+            with self._lock:
+                self._records[task_id].status = TaskStatus.FAILED
+                self._records[task_id].error = repr(exc)
+            raise
         except Exception as exc:  # record the failure; never silently lose work
             with self._lock:
                 self._records[task_id].status = TaskStatus.FAILED

@@ -3321,6 +3321,7 @@ function syncFoldSummaries(){
     const parts=[(val("extra-workers")||"auto")+" workers",
                  (val("fix-input")||"0")+" auto-fix"];
     if(val("cap-input")) parts.push("$"+val("cap-input")+" cap");
+    if(val("token-cap-input")) parts.push(val("token-cap-input")+" token cap");
     parts.push(Number.isFinite(ap)&&ap>0 ? "autopilot "+ap : "autopilot off");
     if(val("packs-input")) parts.push(val("packs-input"));
     const sup=document.getElementById("supervised");
@@ -3572,6 +3573,8 @@ document.getElementById("start-btn").onclick=async ()=>{
   if(Number.isFinite(fix) && fix>=0) extra.max_fix_attempts=fix;
   const cap=parseFloat(document.getElementById("cap-input").value);
   if(Number.isFinite(cap) && cap>0) extra.cost_cap_usd=cap;
+  const tokCap=parseInt(document.getElementById("token-cap-input").value,10);
+  if(Number.isFinite(tokCap) && tokCap>0) extra.token_cap=tokCap;
   if(startFromSel.value) extra.parent_id=startFromSel.value;   // iterate on a finished build
   // platform vs single is INFERRED server-side from the request (multi-service => platform).
   // These advanced knobs only take effect when the request builds as a platform.

@@ -103,6 +103,8 @@ python -m foundry.cli [OPTIONS] "<one-line request>"   # build a GitHub-ready re
   --max-fix-attempts <N>     # auto-fix retries per FAILING gate (N ≥ 1)                        (default: 2)
   --max-slots <N>            # parallelism CEILING; pool usually auto-sizes (N ≥ 1)             (default: auto)
   --cost-cap-microusd <N>    # global spend envelope in micro-USD, for metered backends         (default: none)
+  --token-cap <N>            # stop cleanly after N tokens (cache reads count 1/10); any backend;
+                             #   with --state-dir, rerun the same command to resume   (default: none)
   --checkpoints [all|product,design,release]  # pause at stage boundaries (CLI auto-approves)   (default: off)
 
 # ── Subcommand: evolve an already-released repo (re-gate a change) ─────────────
@@ -720,6 +722,7 @@ rm -rf .pytest_cache .mypy_cache .ruff_cache ./.run spec.md  # clean caches + ou
 | `--max-fix-attempts N` | gate fix-loop bound (N ≥ 1) | `2` |
 | `--max-slots N` | parallelism ceiling (N ≥ 1) | auto |
 | `--cost-cap-microusd N` | spend envelope | — |
+| `--token-cap N` / `FOUNDRY_TOKEN_CAP` | stop cleanly after N tokens (exit 3) | — |
 | `--out DIR` | output repo | — |
 | `--state-dir DIR` / `--thread-id NAME` | durable resume | in-memory / `cli-run` |
 

@@ -78,6 +78,7 @@ from typing import Any, Literal, Protocol
 
 from foundry.gates.attestation import ZoneBSigner
 from foundry.proxy.lineage import LineageMap
+from foundry.proxy.token_meter import TokenMeter
 from foundry.schemas.gates import GateResult, GateStatus, JudgmentProvenance, VerdictClass
 from foundry.state.seq import Seq
 
@@ -658,6 +659,8 @@ class ModelProviderProxy:
         if not self._tier_models:
             raise ValueError("tier_models must define at least one tier")
         self._retry = _RetryPolicy(max_retries, backoff_base_s, sleeper)
+        # Per-run token cap (set by the host that owns the run); None = uncapped.
+        self.token_meter: TokenMeter | None = None
         # Rate-limit (429/529) handling: a separate, more generous retry budget that
         # honors Retry-After, so a long run rides out provider throttling instead of
         # failing closed on it. Defaults come from the environment (off-by-default for
@@ -1014,12 +1017,17 @@ class ModelProviderProxy:
         judgment nodes pause-and-escalate instead of degrading silently
         (arch §2b/§8).
         """
+        meter = self.token_meter
+        if meter is not None:
+            meter.check()
         attempt = 0          # real transport failures (bounded, fail-closed)
         rl_attempt = 0       # provider throttling (separate, more generous budget)
         while True:
             try:
                 with self._limiter.slot():
                     response = self._transport.send(request)
+                if meter is not None:
+                    meter.charge(response.usage)
                 parsed = (
                     _extract_json_object(response.text) if schema is not None else None
                 )

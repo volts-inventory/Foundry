@@ -82,6 +82,7 @@ from foundry.graph.supervisor import (
 from foundry.proxy import ModelProviderProxy, build_backend
 from foundry.proxy.model_provider_proxy import DriftMode, DriftPolicy
 from foundry.proxy.test_doubles import MockTransport
+from foundry.proxy.token_meter import TokenCapExceeded, TokenMeter
 from foundry.schemas.architecture import OwnershipMap, SystemDesign
 from foundry.schemas.base import FrozenModel
 from foundry.schemas.checkpoint import CHECKPOINT_BOUNDARIES
@@ -1289,6 +1290,7 @@ def run(
     activity_cb: Callable[[str], None] | None = None,
     max_slots: int = AUTO_SLOTS_CAP,
     cost_cap_microusd: int | None = None,
+    token_cap: int | None = None,
     base_dir: str | None = None,
     profile: str | None = "auto",
     scope: str = "auto",
@@ -1447,6 +1449,11 @@ def run(
                                         activity_cb=activity_cb),
         cas=store,
     )
+    if token_cap is not None:
+        meter = TokenMeter(token_cap)
+        proxy.token_meter = meter
+        if hasattr(rt.adapter, "token_meter"):  # the claude-code substrate bypasses the proxy
+            setattr(rt.adapter, "token_meter", meter)  # noqa: B010
 
     # Seal the zone-A observation channel (fail-closed forged-results hardening):
     # the gate-wiring builds each gate with `runner.seal_key`, so the observation a
@@ -2125,7 +2132,8 @@ def main(argv: list[str] | None = None) -> int:
     """``python -m foundry.cli "build a ..."`` — run the smoke path, print a report.
 
     Returns process exit code 0 on a clean Spec/Build/Test PASS (a PR action was
-    emitted), 1 on a halted/failed run, 2 on a usage error.
+    emitted), 1 on a halted/failed run, 2 on a usage error, 3 when --token-cap
+    stopped the run.
     """
     args = sys.argv[1:] if argv is None else argv
     # The evolution route (task [12]): `foundry evolve <prior repo> "<change>"`
@@ -2198,6 +2206,13 @@ def main(argv: list[str] | None = None) -> int:
         args, _cost = _take_int(args, "--cost-cap-microusd")
         if _cost is not None:
             cost_cap_microusd = _cost
+        # --token-cap N / FOUNDRY_TOKEN_CAP: stop the run cleanly once it has used N
+        # tokens (cache reads count at a tenth). Works on subscription backends too.
+        _tok_env = os.environ.get("FOUNDRY_TOKEN_CAP", "").strip()
+        token_cap: int | None = int(_tok_env) if _tok_env.isdigit() else None
+        args, _tok = _take_int(args, "--token-cap", minimum=1)
+        if _tok is not None:
+            token_cap = _tok
 
         # --packs name1,name2 (task [9]): domain packs to engage. A pack may VETO the
         # requested mode (enforced fail-closed in run()).
@@ -2335,12 +2350,22 @@ def main(argv: list[str] | None = None) -> int:
             checkpoint_responder=responder,
             max_slots=max_slots,
             cost_cap_microusd=cost_cap_microusd,
+            token_cap=token_cap,
             profile=(None if profile == "none" else profile),
             scope=scope,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    except TokenCapExceeded as exc:
+        hint = (
+            "Progress is saved: rerun the same command (same --thread-id and "
+            "--state-dir) with a higher --token-cap to continue."
+            if state_dir
+            else "Add --state-dir DIR to make a capped run resumable."
+        )
+        print(f"stopped: {exc}. {hint}", file=sys.stderr)
+        return 3
     print(result.summary())
     return 0 if result.passed else 1
 

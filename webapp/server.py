@@ -311,6 +311,7 @@ class Project:
     max_slots: int = 4  # IC-pool CEILING (= cli.AUTO_SLOTS_CAP); the system sizes
     # actual parallelism to the lead's decomposition (min(tasks, this)).
     cost_cap_microusd: int | None = None  # global spend envelope (Wave D)
+    token_cap: int | None = None  # stop the build cleanly after this many tokens
     max_fix_attempts: int = 2  # auto-fix retry budget per failing gate (run() default)
     release_seq: int = 1  # 1,2,3… within the floor; each iterate adds a release
     parent_id: str | None = None  # lineage: the release this one iterates on
@@ -1506,6 +1507,7 @@ def _run_factory(p: Project, resume: bool = False) -> None:
                 spec=run_spec,                # pasted spec text OR uploaded docs dir (additive)
                 max_slots=p.max_slots,        # IC-pool parallelism (Wave C) + budget tree (Wave D)
                 cost_cap_microusd=p.cost_cap_microusd,
+                token_cap=p.token_cap,
                 max_fix_attempts=p.max_fix_attempts,
                 base_dir=base_dir,            # iterate: prior code seeded as the base tree
                 thread_id=p.id,               # UNIQUE per project — no cross-floor collision
@@ -1546,6 +1548,14 @@ def _run_factory(p: Project, resume: bool = False) -> None:
             if not alive:
                 return
             return _run_factory(p, resume=True)  # re-enter from the durable checkpoint
+        if type(exc).__name__ == "TokenCapExceeded":
+            _emit(p, type="narrate", text=f"⏹ Stopped: {exc}. Raise the token cap to go further.")
+            _emit(p, type="halt", phase="token_cap", reason=str(exc))
+            _emit(p, type="done", passed=False, phase="token_cap")
+            p.status = "done"
+            _persist(p)
+            _close(p)
+            return
         _emit(p, type="narrate", text=f"💥 Build error: {exc}")
         _emit(p, type="halt", phase="error", reason=str(exc))
         _emit(p, type="done", passed=False, phase="error")
@@ -1728,6 +1738,7 @@ def _spawn_iteration(
         spec=parent.spec_text or None, spec_text=parent.spec_text,
         out_base=_OUTPUT_ROOT / f"floor-{parent.floor}" / f"r{release_seq}",
         max_slots=parent.max_slots, cost_cap_microusd=parent.cost_cap_microusd,
+        token_cap=parent.token_cap,
         max_fix_attempts=parent.max_fix_attempts, parent_id=parent.id,
         autopilot_budget=max(0, budget),
     )
@@ -1798,6 +1809,7 @@ def _spawn_milestone_next(parent: Project) -> Project:
         spec=parent.spec_text or None, spec_text=parent.spec_text,
         out_base=_OUTPUT_ROOT / f"floor-{parent.floor}" / f"r{release_seq}",
         max_slots=parent.max_slots, cost_cap_microusd=parent.cost_cap_microusd,
+        token_cap=parent.token_cap,
         max_fix_attempts=parent.max_fix_attempts, parent_id=parent.id,
         autopilot_budget=parent.autopilot_budget,
     )
@@ -2798,6 +2810,14 @@ class Handler(BaseHTTPRequestHandler):
                 cost_cap_microusd = int(round(usd * 1_000_000))
         except (TypeError, ValueError):
             pass
+        tok_env = os.environ.get("FOUNDRY_TOKEN_CAP", "").strip()
+        token_cap = int(tok_env) if tok_env.isdigit() else None
+        try:
+            tok = int(body.get("token_cap") or 0)
+            if tok > 0:
+                token_cap = tok
+        except (TypeError, ValueError):
+            pass
         # A floor is one PROJECT. A fresh build is a NEW project (new floor, release
         # 1). Iterating (parent_id) adds the NEXT RELEASE to the parent's floor — same
         # project, release_seq + 1 — never a new floor.
@@ -2853,6 +2873,7 @@ class Handler(BaseHTTPRequestHandler):
             release_seq=release_seq, backend=backend, adapter=adapter, packs=packs, spec=spec,
             spec_text=effective_spec_text,
             out_base=out_base, max_slots=max_slots, cost_cap_microusd=cost_cap_microusd,
+            token_cap=token_cap,
             max_fix_attempts=max_fix_attempts, parent_id=parent_id, base_dir=base_dir,
             autopilot_budget=autopilot_budget,
         )

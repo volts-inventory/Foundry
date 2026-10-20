@@ -165,16 +165,21 @@ class MissingCriteriaResolverError(RuntimeError):
 def read_criteria(
     state: FactoryState, resolve: ArtifactResolver | None
 ) -> tuple[AcceptanceCriterion, ...]:
-    """The acceptance criteria on ``state['artifacts']``, resolved, deduped and
-    ordered by ``id`` (fold-order-independent across a resume re-fold).
+    """The current acceptance criteria on ``state['artifacts']``: the newest-by-
+    ``Seq`` record per ``id`` (a re-plan re-emits under the same id; the Spec gate
+    re-validates that newest set, so it is the correct supersession), ordered by
+    ``id`` (fold-order-independent across a resume re-fold).
 
     Raises :class:`MissingCriteriaResolverError` when handles are present but no
     ``resolve`` is wired (C-R1-01); with no handles at all the result is ``()``."""
-    handles = [
-        h
-        for h in (state.get("artifacts") or ())
-        if getattr(h, "kind", None) == ACCEPTANCE_CRITERION_KIND
-    ]
+    handles = sorted(
+        (
+            h
+            for h in (state.get("artifacts") or ())
+            if getattr(h, "kind", None) == ACCEPTANCE_CRITERION_KIND
+        ),
+        key=lambda h: h.seq,
+    )
     if handles and resolve is None:
         raise MissingCriteriaResolverError(
             f"{len(handles)} {ACCEPTANCE_CRITERION_KIND!r} handle(s) on "

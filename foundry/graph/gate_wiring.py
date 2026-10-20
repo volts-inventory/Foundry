@@ -177,11 +177,15 @@ def _criteria_list(
     ``text``, ``oracle`` (mapped from :attr:`AcceptanceCriterion.oracle_hint`),
     and ``security_abuse``. Ordered by criterion ``id`` so the materialized file
     — and thus the integrated ``tree_sha`` — is byte-stable across folds/resume.
+
+    A re-plan re-emits criteria under the same ids; the newest-by-``Seq`` record
+    per id is the current one. Taking it cannot weaken the gate: this gate
+    re-validates exactly that newest set.
     """
-    criteria: list[AcceptanceCriterion] = [
-        _resolve_typed(a, resolve, AcceptanceCriterion, CRITERION_KIND)
-        for a in _of_kind(state, CRITERION_KIND)
-    ]
+    current: dict[str, AcceptanceCriterion] = {}
+    for a in sorted(_of_kind(state, CRITERION_KIND), key=lambda a: a.seq):
+        c = _resolve_typed(a, resolve, AcceptanceCriterion, CRITERION_KIND)
+        current[c.id] = c
     return [
         {
             "id": c.id,
@@ -189,7 +193,7 @@ def _criteria_list(
             "oracle": c.oracle_hint,
             "security_abuse": c.security_abuse,
         }
-        for c in sorted(criteria, key=lambda c: c.id)
+        for c in sorted(current.values(), key=lambda c: c.id)
     ]
 
 

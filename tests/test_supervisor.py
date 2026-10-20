@@ -39,6 +39,7 @@ from typing import Any
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph
+from langgraph.types import Command
 
 from foundry.agents import AgentRuntime
 from foundry.durability.artifact_store import ArtifactStore
@@ -405,9 +406,9 @@ def test_forced_test_error_routes_to_fix_and_terminates_bounded(tmp_path: Any) -
 # ---- spec_fix re-enters the planner with the Spec gate's findings -----------
 
 
-def test_spec_fail_replans_with_the_gate_findings_then_advances(tmp_path: Any) -> None:
-    """A Spec FAIL routes spec_fix -> planner; the re-entry prompt carries the
-    signed gate's findings, and the revised plan passes the gate."""
+def _respec_app(tmp_path: Any, records: GlobalRecords, **kwargs: Any) -> tuple[Any, MockTransport]:
+    """A supervisor whose first plan FAILs the Spec gate (no security/abuse
+    criterion) and whose REVISION PASS plan passes it."""
     src = tmp_path / "src"
     src.mkdir()
     (src / "README.md").write_text("seed\n")
@@ -444,16 +445,24 @@ def test_spec_fail_replans_with_the_gate_findings_then_advances(tmp_path: Any) -
             return body
         return _synthetic_resolve(handle)
 
+    app = build_supervisor_graph(
+        rt,
+        runner=_runner(records),
+        resolve=_resolve,
+        resolve_blob=_resolve_blob_factory(_PASSING_DIFF),
+        source_dir=str(src),
+        **kwargs,
+    ).compile(checkpointer=MemorySaver())
+    return app, tx
+
+
+def test_spec_fail_replans_with_the_gate_findings_then_advances(tmp_path: Any) -> None:
+    """A Spec FAIL routes spec_fix -> planner; the re-entry prompt carries the
+    signed gate's findings, and the revised plan passes the gate."""
     records = GlobalRecords()
+    app, tx = _respec_app(tmp_path, records)
     token = set_gate_write_verifier(DevGateWriteVerifier(KEY, KEY_ID, records))
     try:
-        app = build_supervisor_graph(
-            rt,
-            runner=_runner(records),
-            resolve=_resolve,
-            resolve_blob=_resolve_blob_factory(_PASSING_DIFF),
-            source_dir=str(src),
-        ).compile(checkpointer=MemorySaver())
         final: FactoryState = app.invoke({"request": "build a todo app"}, _config("run-respec"))
     finally:
         reset_gate_write_verifier(token)
@@ -468,3 +477,26 @@ def test_spec_fail_replans_with_the_gate_findings_then_advances(tmp_path: Any) -
     assert {g.status for g in spec} == {GateStatus.FAIL, GateStatus.PASS}
     assert max(spec, key=lambda g: g.seq).status is GateStatus.PASS
     assert _gates_by_name(final).get("test") is GateStatus.PASS
+
+
+def test_plan_checkpoints_fire_once_across_a_spec_fix_replan(tmp_path: Any) -> None:
+    """The spec_fix -> planner re-entry does not re-prompt the operator at the
+    product/design boundaries already approved on the first pass."""
+    records = GlobalRecords()
+    app, tx = _respec_app(tmp_path, records, checkpoints=True)
+    cfg = _config("run-respec-ckpt")
+    paused_at: list[str] = []
+    token = set_gate_write_verifier(DevGateWriteVerifier(KEY, KEY_ID, records))
+    try:
+        result = app.invoke({"request": "build a todo app"}, cfg)
+        while result.get("__interrupt__"):
+            paused_at.append(str(result["__interrupt__"][0].value["boundary"]))
+            result = app.invoke(Command(resume="approve"), cfg)
+    finally:
+        reset_gate_write_verifier(token)
+
+    planner_prompts = [r for r in tx.requests if PLANNER_SOP_KEY in json.dumps(r)]
+    assert len(planner_prompts) == 2  # the re-plan really happened
+    assert paused_at == ["product", "design", "release"]
+    spec = [g for g in result["gates"] if g.name == "spec"]
+    assert max(spec, key=lambda g: g.seq).status is GateStatus.PASS

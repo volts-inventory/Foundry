@@ -123,7 +123,7 @@ def as_text(obj: Any) -> str:
 
 
 # --- scope tiering: the deterministic caps a ScopeDecision maps to ----------
-# The scope judge (a model call) supplies only the TIER; these caps are code, so
+# The planner (a model call) supplies only the TIER; these caps are code, so
 # a tier always means the same thing and a model cannot widen its own budget.
 # STANDARD has no caps — its directive is "", which keeps every downstream prompt
 # byte-identical to a pre-tiering run.

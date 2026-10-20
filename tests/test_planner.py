@@ -26,7 +26,9 @@ from foundry.agents.planner import (
     SOP,
     _build_adrs,
     _build_constraints,
+    _build_criteria,
     _build_interfaces,
+    _build_ownership,
     make_planner_node,
 )
 from foundry.context import SymbolIndex
@@ -36,8 +38,14 @@ from foundry.proxy import ModelProviderProxy
 from foundry.proxy.test_doubles import MockTransport
 from foundry.schemas.architecture import ConstraintScope, OwnershipMap
 from foundry.schemas.gates import GateResult, GateStatus, JudgmentProvenance, VerdictClass
-from foundry.schemas.product import AcceptanceCriterion, CriteriaCritique, SprintPlan
+from foundry.schemas.product import (
+    AcceptanceCriterion,
+    CriteriaCritique,
+    Criticality,
+    SprintPlan,
+)
 from foundry.state.factory_state import FactoryState
+from foundry.state.reducers import live_constraints, merge_constraints
 from foundry.state.seq import Seq
 
 KEY = b"dev-zone-b-planner-key"
@@ -270,7 +278,8 @@ def test_garbled_reply_still_yields_a_well_formed_plan() -> None:
 def test_self_review_omission_is_flagged_blocking_and_stamped_self() -> None:
     cas = ArtifactStore()
     review = {"missing": [], "security_abuse_omissions": ["no rate limit on add"]}
-    rt, _ = runtime_for(_plan(criteria_review=review), cas=cas)
+    flagged = _plan(criteria_review=review)
+    rt, _ = runtime_for(flagged, flagged, cas=cas)
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
 
     [triage] = writes["gate_triage"]
@@ -372,3 +381,122 @@ def test_the_mock_backend_scripts_the_planner() -> None:
     matched = [key for key in _SCRIPTS if key in SOP]
     assert matched == ["You are the Planner"]
     assert set(json.loads(_SCRIPTS[matched[0]])) >= {"intent", "prd", "ownership"}
+
+
+# ---- tolerant parsing at the CLI-backend boundary --------------------------------
+
+
+def test_off_schema_fields_degrade_to_defaults_instead_of_raising() -> None:
+    seq = Seq("r", 1, 1, NODE_ID, 0)
+    criteria = _build_criteria(
+        [
+            {"id": "AC-1", "text": "t", "criticality": "HIGH_RISK", "oracle_hint": "o"},
+            {"id": "AC-2", "text": "t", "criticality": "High Risk", "oracle_hint": "o"},
+            {"id": None, "text": None, "criticality": "critical!!", "oracle_hint": None,
+             "security_abuse": "false"},
+            {"id": "AC-4", "criticality": None, "security_abuse": "true"},
+        ],
+        seq,
+    )
+    assert [c.criticality for c in criteria] == [
+        Criticality.HIGH_RISK, Criticality.HIGH_RISK, Criticality.NORMAL, Criticality.NORMAL
+    ]
+    assert criteria[2].id == "AC-002" and criteria[2].text == "" and not criteria[2].security_abuse
+    assert criteria[3].security_abuse is True
+
+    constraints = _build_constraints(
+        [{"id": "PC-1", "text": "t", "scope": "LOCAL"}, {"id": "PC-2", "text": "t", "scope": 7}],
+        seq,
+    )
+    # Unknown scope fails safe to global injection.
+    assert [c.scope for c in constraints] == [ConstraintScope.LOCAL, ConstraintScope.GLOBAL]
+
+
+def test_numeric_strings_and_floats_are_accepted_for_the_cap() -> None:
+    for raw, expected in (("3000000", 3_000_000), (3e6, 3_000_000), ("lots", 5_000_000),
+                          (float("nan"), 5_000_000)):
+        cas = ArtifactStore()
+        sprint = {**PLAN["sprint_plan"], "usd_cap_microusd": raw}
+        rt, _ = runtime_for(_plan(sprint_plan=sprint), cas=cas)
+        writes = make_planner_node(rt)({"request": "x", "route": "bugfix"}, config_for("r"))
+        [handle] = [a for a in writes["artifacts"] if a.kind == "sprint_plan"]
+        assert cas.resolve(handle).usd_cap_microusd == expected
+
+
+def test_one_bad_field_does_not_kill_the_plan() -> None:
+    bad = [{**PLAN["acceptance_criteria"][0], "criticality": "urgent"}]
+    rt, _ = runtime_for(_plan(acceptance_criteria=bad, sprint_plan={"usd_cap_microusd": None}))
+    writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
+    assert sum(a.kind == "acceptance_criterion" for a in writes["artifacts"]) == 1
+
+
+# ---- ownership: later entry wins wholesale, unknown criterion ids dropped ------
+
+
+def test_duplicate_ownership_unit_later_entry_wins_wholesale() -> None:
+    ownership = _build_ownership(
+        [
+            {"unit": "a.py", "owner": "first", "criterion_ids": ["AC-001"]},
+            {"unit": "b.py", "owner": "b", "criterion_ids": ["AC-001", "AC-999"]},
+            {"unit": "a.py", "owner": "second", "criterion_ids": []},
+        ],
+        Seq("r", 1, 1, NODE_ID, 0),
+        {"AC-001", "AC-002"},
+    )
+    assert ownership.owners == {"a.py": "second", "b.py": "b"}
+    assert ownership.unit_criteria == {"b.py": ("AC-001",)}
+
+
+# ---- self-review: at most one in-node revision ----------------------------------
+
+
+def test_clean_self_review_makes_one_call() -> None:
+    rt, tx = runtime_for(PLAN)
+    make_planner_node(rt)({"request": "x"}, config_for("r"))
+    assert len(tx.requests) == 1
+
+
+def test_flagged_self_review_revises_once_in_node() -> None:
+    flagged = _plan(criteria_review={"missing": [], "security_abuse_omissions": ["no rate limit"]})
+    # Even if the revision still flags a gap, there is no third call.
+    rt, tx = runtime_for(flagged, flagged, PLAN)
+    writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
+
+    assert len(tx.requests) == 2
+    assert "SELF-REVIEW REVISION" not in json.dumps(tx.requests[0])
+    assert "SELF-REVIEW REVISION" in _prompt(tx) and "no rate limit" in _prompt(tx)
+    assert "Self-revised once" in writes["agent_journal"][0].summary
+
+
+def test_revision_output_is_what_gets_emitted() -> None:
+    flagged = _plan(criteria_review={"missing": ["no delete criterion"],
+                                     "security_abuse_omissions": []})
+    rt, tx = runtime_for(flagged, PLAN)
+    writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
+    assert len(tx.requests) == 2
+    assert writes["gate_triage"][0].explanation == "No criteria-completeness omissions found."
+
+
+# ---- re-plan retracts its own dropped constraints ----------------------------------
+
+
+def test_replan_retires_constraints_it_no_longer_emits() -> None:
+    only_pc1 = _plan(pinned_constraints=[PLAN["pinned_constraints"][0]])
+    rt, _ = runtime_for(PLAN, only_pc1)
+    node = make_planner_node(rt)
+    first = node({"request": "x"}, config_for("r"))
+    channel = merge_constraints(None, first["pinned_constraints"])
+    operator_pin = first["pinned_constraints"][0].model_copy(
+        update={"id": "OP-1", "seq": Seq("r", 1, 1, "operator", 0)}
+    )
+    channel = merge_constraints(channel, [operator_pin])
+
+    state: FactoryState = {
+        "request": "x",
+        "pinned_constraints": channel,
+        "gates": [_spec_verdict(GateStatus.FAIL, ("finding",), epoch=1)],
+    }
+    second = node(state, config_for("r", step=5))
+    channel = merge_constraints(channel, second["pinned_constraints"])
+
+    assert {c.id for c in live_constraints(channel)} == {"PC-001", "OP-1"}

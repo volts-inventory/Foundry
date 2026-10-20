@@ -367,7 +367,7 @@ def events_for_payload(
     # New artifacts -> the producing desk lights up + a quest-log pickup. A stage
     # often emits MANY artifacts of one kind (e.g. 9 acceptance criteria); numbering
     # same-kind pickups (#1..#9) keeps the quest log readable instead of a wall of
-    # identical "Acceptance Criterion · Product Manager" lines. Lone kinds (one PRD)
+    # identical "Acceptance Criterion · Planner" lines. Lone kinds (one PRD)
     # are left unnumbered. Counts are over the NEW artifacts in THIS payload only.
     new_uris = [
         u for u in (str(a.get("uri", "")) for a in payload.get("artifacts", []))

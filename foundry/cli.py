@@ -7,7 +7,7 @@ request it assembles the FULL dev wiring with the test doubles (NO live API key,
 NO ``claude -p`` binary, NO network), compiles the factory graph, and runs the
 SPEC core path::
 
-    intake -> product -> architecture -> [spec gate] -> implementation
+    triage -> planner -> [spec gate] -> implementation
            -> quality -> [build+test gates] -> emit (PR-equivalent action)
 
 end to end, returning the emitted reviewed-artifact handle, the single ``open_pr``
@@ -559,16 +559,6 @@ _PLAN_PAYLOAD: dict[str, Any] = {
     "pinned_constraints": [],
 }
 
-_QA_PAYLOAD: dict[str, Any] = {
-    "tests": [{"test_id": "t-1", "criterion_ids": ["AC-001", "AC-002"]}],
-    "quarantined": [],
-}
-
-_SDET_PAYLOAD: dict[str, Any] = {
-    "scenarios": [{"scenario_id": "e2e-1", "criterion_ids": ["AC-001"]}],
-    "quarantined": [],
-}
-
 _RUNBOOK_PAYLOAD: dict[str, Any] = {
     "overview": "Operational guide for deploying and running the service.",
     "prerequisites": ["provisioned runtime", "configured secrets"],
@@ -622,8 +612,6 @@ _SUPPLY_CHAIN_PAYLOAD: dict[str, Any] = {
 
 _SCRIPTS: dict[str, str] = {
     "You are the Planner": json.dumps(_PLAN_PAYLOAD),
-    "QA Engineer": json.dumps(_QA_PAYLOAD),
-    "SDET": json.dumps(_SDET_PAYLOAD),
     # Assurance phase (Gated / Autonomous spine).
     "You are the Security / AppSec Engineer": json.dumps(_APPSEC_PAYLOAD),
     "You are the Audit / Compliance agent": json.dumps(_AUDIT_PAYLOAD),
@@ -1064,7 +1052,7 @@ def _invoke_streaming(app: Any, seed: FactoryState, config: RunnableConfig) -> F
     import time
 
     t0 = time.monotonic()
-    # subgraphs=True surfaces the INNER stage nodes (product/architecture/…), not
+    # subgraphs=True surfaces the INNER stage nodes (planner/implementation/…), not
     # just the top-level supernode; each item is (namespace_tuple, {node: update}).
     for item in app.stream(seed, config, stream_mode="updates", subgraphs=True):
         ns, chunk = item if isinstance(item, tuple) else ((), item)
@@ -1380,9 +1368,9 @@ def run(
         set (the caller resumes out-of-band on the same ``thread_id``).
     scope:
         How much system to build. ``"auto"`` (the DEFAULT) lets the planner
-        node classify the request; ``"demo"`` / ``"standard"`` PIN the tier and
-        skip the judge's model call entirely. Scope caps only what the PM and
-        architect PROPOSE (criteria count, components, interface contracts,
+        node classify the request; ``"demo"`` / ``"standard"`` PIN the tier so
+        the planner echoes it instead of judging it. Scope caps only what the
+        planner PROPOSES (criteria count, components, interface contracts,
         ownership units) — every deterministic gate a build must pass is
         identical at both tiers, so this can never release a weaker build. Pin it
         for a reproducible A/B against the judged tier.
@@ -1453,8 +1441,8 @@ def run(
 
     # -- materialization seam (Phase-1 2b) ------------------------------------
     # The `mock` smoke backend uses the synthetic SUP7 doubles: with the
-    # StubAdapter no faithful test body is ever authored and the architecture
-    # agents mint epoch-keyed handles, so the doubles synthesize faithful bodies
+    # StubAdapter no faithful test body is ever authored and the planner
+    # mints epoch-keyed handles, so the doubles synthesize faithful bodies
     # that guarantee the deterministic Spec/Build/Test PASS. A REAL backend means
     # the agents author real designs / criteria / ownership AND (with a real
     # coding adapter) a real FeatureDiff is written into the CAS, so we resolve

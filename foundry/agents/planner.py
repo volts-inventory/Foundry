@@ -29,7 +29,8 @@ model only via ``rt.proxy`` (L6), and its self-review of the criteria is stamped
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from enum import StrEnum
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from foundry.agents._common import (
     as_text,
@@ -58,6 +59,7 @@ from foundry.schemas.product import (
     IntentBrief,
     SprintPlan,
 )
+from foundry.state.reducers import live_constraints
 
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
@@ -346,14 +348,23 @@ def latest_spec_failure(state: FactoryState) -> tuple[str, ...] | None:
 def _declared_criteria_text(state: FactoryState, rt: AgentRuntime) -> str:
     if rt.cas is None:
         return ""
-    lines: list[str] = []
-    for a in state.get("artifacts") or ():
-        if getattr(a, "kind", None) != "acceptance_criterion":
-            continue
+    handles = sorted(
+        (
+            a
+            for a in state.get("artifacts") or ()
+            if getattr(a, "kind", None) == "acceptance_criterion"
+        ),
+        key=lambda a: a.seq,
+    )
+    current: dict[str, Any] = {}
+    for a in handles:
         try:
             c = rt.cas.resolve(a)
         except Exception:
             continue
+        current[str(getattr(c, "id", "?"))] = c
+    lines: list[str] = []
+    for c in current.values():
         lines.append(
             f"- id={getattr(c, 'id', '?')} | {getattr(c, 'text', '')} "
             f"(criticality={getattr(c, 'criticality', 'normal')}; "
@@ -366,9 +377,8 @@ def _declared_criteria_text(state: FactoryState, rt: AgentRuntime) -> str:
 def _revision_text(state: FactoryState, rt: AgentRuntime) -> str:
     """The re-entry block (spec_fix -> planner), or "" on the first pass.
 
-    Previously declared criteria stay on the artifacts channel (records are
-    superseded, never edited) and the Spec gate reads all of them, so the
-    revision must keep their ids and ADD criteria that close each finding."""
+    The Spec gate reads the newest record per criterion id, so the revision fixes
+    a criterion a finding names by re-emitting it under the same id."""
     findings = latest_spec_failure(state)
     if findings is None:
         return ""
@@ -376,9 +386,27 @@ def _revision_text(state: FactoryState, rt: AgentRuntime) -> str:
     return (
         "\n\nREVISION PASS — the signed Spec gate FAILED your previous plan. Return "
         "the FULL plan again: reproduce every previously declared criterion (same "
-        "id, never weakened) AND add criteria that close every finding below.\n"
+        "id, never weakened; fix in place any criterion a finding names) AND add "
+        "criteria that close every finding below.\n"
         "Spec gate findings:\n- " + "\n- ".join(findings) + "\n\n"
         f"Previously declared criteria:\n{prior or '(none resolved)'}"
+    )
+
+
+def _self_review_gaps(payload: dict[str, Any]) -> tuple[str, ...]:
+    review = _section(payload, "criteria_review")
+    return (
+        *_strs(review.get("security_abuse_omissions")),
+        *_strs(review.get("missing")),
+    )
+
+
+def _self_revision_text(gaps: tuple[str, ...]) -> str:
+    return (
+        "\n\nSELF-REVIEW REVISION — your own criteria_review flagged these gaps. "
+        "Return the FULL plan again with criteria that close each one (same ids for "
+        "criteria you keep); list under criteria_review only gaps that genuinely "
+        "remain.\nFlagged gaps:\n- " + "\n- ".join(gaps)
     )
 
 
@@ -398,8 +426,47 @@ def _user_content(
 # ---- record builders -----------------------------------------------------------
 
 
+# CLI backends don't grammar-enforce the schema, so one off-schema field must
+# degrade to a default rather than raise and lose the whole plan.
+
+_E = TypeVar("_E", bound=StrEnum)
+
+
+def _str(raw: Any, default: str = "") -> str:
+    return default if raw is None else str(raw)
+
+
 def _strs(raw: Any) -> tuple[str, ...]:
-    return tuple(str(x) for x in raw or ())
+    if isinstance(raw, str):
+        return (raw,) if raw else ()
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(str(x) for x in raw if x is not None)
+
+
+def _enum(cls: type[_E], raw: Any, default: _E) -> _E:
+    key = str(raw or "").strip().lower().replace("_", "-").replace(" ", "-")
+    for member in cls:
+        if key in (member.value.lower(), member.name.lower().replace("_", "-")):
+            return member
+    return default
+
+
+def _int(raw: Any) -> int:
+    if isinstance(raw, bool):
+        return 0
+    if isinstance(raw, int):
+        return raw
+    try:
+        return int(float(str(raw).strip().replace(",", "").replace("_", "")))
+    except (ValueError, OverflowError):  # also NaN / inf
+        return 0
+
+
+def _bool(raw: Any) -> bool:
+    if isinstance(raw, str):
+        return raw.strip().lower() in {"true", "yes", "1"}
+    return bool(raw)
 
 
 def _objs(raw: Any) -> list[dict[str, Any]]:
@@ -417,11 +484,11 @@ def _build_criteria(raw: Any, seq: Seq) -> list[AcceptanceCriterion]:
     for i, item in enumerate(_objs(raw)):
         out.append(
             AcceptanceCriterion(
-                id=str(item.get("id", f"AC-{i:03d}")),
-                text=str(item.get("text", "")),
-                criticality=Criticality(str(item.get("criticality", "normal"))),
-                oracle_hint=str(item.get("oracle_hint", "")),
-                security_abuse=bool(item.get("security_abuse", False)),
+                id=_str(item.get("id"), f"AC-{i:03d}"),
+                text=_str(item.get("text")),
+                criticality=_enum(Criticality, item.get("criticality"), Criticality.NORMAL),
+                oracle_hint=_str(item.get("oracle_hint")),
+                security_abuse=_bool(item.get("security_abuse")),
                 seq=seq._replace(local=i),
             )
         )
@@ -431,10 +498,10 @@ def _build_criteria(raw: Any, seq: Seq) -> list[AcceptanceCriterion]:
 def _build_adrs(raw: Any, seq: Seq, *, store: ArtifactStore | None) -> list[ADR]:
     return [
         ADR(
-            id=str(item.get("id", f"ADR-{i:03d}")),
-            title=str(item.get("title", "")),
-            decision=str(item.get("decision", "")),
-            body_uri=persist_prose(str(item.get("body", "")), store=store),
+            id=_str(item.get("id"), f"ADR-{i:03d}"),
+            title=_str(item.get("title")),
+            decision=_str(item.get("decision")),
+            body_uri=persist_prose(_str(item.get("body")), store=store),
             rejected_alternatives=_strs(item.get("rejected_alternatives")),
             seq=seq._replace(local=i),
         )
@@ -445,8 +512,8 @@ def _build_adrs(raw: Any, seq: Seq, *, store: ArtifactStore | None) -> list[ADR]
 def _build_interfaces(raw: Any, seq: Seq) -> list[InterfaceContract]:
     return [
         InterfaceContract(
-            name=str(item.get("name", f"iface-{i}")),
-            spec_uri=cas_uri(str(item.get("spec", ""))),
+            name=_str(item.get("name"), f"iface-{i}"),
+            spec_uri=cas_uri(_str(item.get("spec"))),
             consumers=_strs(item.get("consumers")),
             seq=seq._replace(local=i),
         )
@@ -457,28 +524,57 @@ def _build_interfaces(raw: Any, seq: Seq) -> list[InterfaceContract]:
 def _build_constraints(raw: Any, seq: Seq) -> list[PinnedConstraint]:
     return [
         PinnedConstraint(
-            id=str(item.get("id", f"PC-{i:03d}")),
-            text=str(item.get("text", "")),
-            scope=ConstraintScope(str(item.get("scope", "local"))),
-            source=str(item.get("source", NODE_ID)),
+            id=_str(item.get("id"), f"PC-{i:03d}"),
+            text=_str(item.get("text")),
+            # Unknown scope is injected as global: the fail-safe direction.
+            scope=_enum(ConstraintScope, item.get("scope"), ConstraintScope.GLOBAL),
+            source=_str(item.get("source"), NODE_ID),
             seq=seq._replace(local=i),
         )
         for i, item in enumerate(_objs(raw))
     ]
 
 
-def _build_ownership(raw: Any, seq: Seq) -> OwnershipMap:
+def _build_ownership(raw: Any, seq: Seq, criterion_ids: set[str]) -> OwnershipMap:
+    """A later entry for the same unit replaces the earlier one wholesale; ids
+    naming no declared criterion are dropped."""
     owners: dict[str, str] = {}
     unit_criteria: dict[str, tuple[str, ...]] = {}
     for item in _objs(raw):
-        unit = str(item.get("unit", "")).strip()
+        unit = _str(item.get("unit")).strip()
         if not unit:
             continue
-        owners[unit] = str(item.get("owner", "")) or "owner"
-        cids = _strs(item.get("criterion_ids"))
+        owners[unit] = _str(item.get("owner")) or "owner"
+        cids = tuple(c for c in _strs(item.get("criterion_ids")) if c in criterion_ids)
         if cids:
             unit_criteria[unit] = cids
+        else:
+            unit_criteria.pop(unit, None)
     return OwnershipMap(owners=owners, unit_criteria=unit_criteria, seq=seq)
+
+
+def _retired_constraints(
+    state: FactoryState, emitted: list[PinnedConstraint], seq: Seq
+) -> list[PinnedConstraint]:
+    """Tombstones for this node's prior live constraints a re-plan dropped.
+
+    A record whose ``supersedes`` names its own id retires that id in
+    ``live_constraints``; the newer Seq makes it the id's latest record."""
+    kept = {c.id for c in emitted}
+    stale = sorted(
+        (
+            c
+            for c in live_constraints(list(state.get("pinned_constraints") or ()))
+            if c.seq.node_id == NODE_ID and c.id not in kept
+        ),
+        key=lambda c: c.id,
+    )
+    return [
+        c.model_copy(
+            update={"supersedes": c.id, "seq": seq._replace(local=len(emitted) + i)}
+        )
+        for i, c in enumerate(stale)
+    ]
 
 
 def _route_cap(state: FactoryState) -> int:
@@ -497,11 +593,11 @@ def _scope_decision(
     scope = _section(payload, "scope")
     # Anything that is not exactly "demo" is STANDARD: an absent or garbled
     # answer must never silently cap the build.
-    raw_tier = str(scope.get("tier", "")).strip().lower()
+    raw_tier = _str(scope.get("tier")).strip().lower()
     tier = ScopeTier.DEMO if raw_tier == ScopeTier.DEMO.value else ScopeTier.STANDARD
     return ScopeDecision(
         tier=tier,
-        rationale=str(scope.get("rationale", "")),
+        rationale=_str(scope.get("rationale")),
         signals=_strs(scope.get("signals")),
         seq=seq,
     )
@@ -533,22 +629,32 @@ def _triage(critique: CriteriaCritique, prd_uri: str, seq: Seq) -> GateTriage:
 
 
 def make_planner_node(rt: AgentRuntime, index: SymbolIndex | None = None) -> NodeFn:
-    """Build the Planner node (T1, one structured model call per pass).
+    """Build the Planner node (T1, one structured model call per pass, plus at
+    most one revision call when its own criteria review flags gaps).
 
     ``index`` is the context retriever probed for existing code spans (``None``
     is greenfield — empty retrieval)."""
 
-    def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
-        spans = _retrieve_spans(index, state)
+    def _plan(content: str) -> dict[str, Any]:
         completion = rt.proxy.complete(
             NODE_ID,
             TIER,
             SOP,
-            [{"role": "user", "content": _user_content(state, rt, spans)}],
+            [{"role": "user", "content": content}],
             purpose="ideation",
             schema=PLAN_SCHEMA,
         )
-        payload: dict[str, Any] = completion.parsed or {}
+        return completion.parsed or {}
+
+    def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        spans = _retrieve_spans(index, state)
+        content = _user_content(state, rt, spans)
+        payload = _plan(content)
+        # One free in-node revision when the self-review flags gaps, so they don't
+        # spend the shared Spec-gate fix budget; never more than one.
+        gaps = _self_review_gaps(payload)
+        if gaps:
+            payload = _plan(content + _self_revision_text(gaps))
         store = rt.cas
 
         def seq(key: str) -> Seq:
@@ -557,7 +663,7 @@ def make_planner_node(rt: AgentRuntime, index: SymbolIndex | None = None) -> Nod
         intent = _section(payload, "intent")
         brief_seq = seq("artifact:intent_brief")
         brief = IntentBrief(
-            intent=str(intent.get("intent", "")),
+            intent=_str(intent.get("intent")),
             assumptions=_strs(intent.get("assumptions")),
             unknowns=_strs(intent.get("unknowns")),
             success_criteria=_strs(intent.get("success_criteria")),
@@ -572,8 +678,8 @@ def make_planner_node(rt: AgentRuntime, index: SymbolIndex | None = None) -> Nod
             payload.get("acceptance_criteria"), seq("artifact:acceptance_criteria")
         )
         prd = PRD(
-            title=str(prd_section.get("title", "")),
-            prd_uri=persist_prose(str(prd_section.get("body", "")), store=store),
+            title=_str(prd_section.get("title")),
+            prd_uri=persist_prose(_str(prd_section.get("body")), store=store),
             required_capabilities=_strs(prd_section.get("required_capabilities")),
             criterion_ids=tuple(c.id for c in criteria),
             seq=prd_seq,
@@ -592,33 +698,35 @@ def make_planner_node(rt: AgentRuntime, index: SymbolIndex | None = None) -> Nod
 
         sprint = _section(payload, "sprint_plan")
         sprint_seq = seq("artifact:sprint_plan")
-        proposed = int(sprint.get("usd_cap_microusd", 0) or 0)
+        proposed = _int(sprint.get("usd_cap_microusd"))
         cap = min(proposed, _route_cap(state)) if proposed > 0 else _route_cap(state)
         plan = SprintPlan(
             milestones=_strs(sprint.get("milestones")),
             usd_cap_microusd=cap,
-            risk_register_uri=cas_uri(str(sprint.get("risk_register", ""))),
-            done_definition=str(sprint.get("done_definition", "")),
+            risk_register_uri=cas_uri(_str(sprint.get("risk_register"))),
+            done_definition=_str(sprint.get("done_definition")),
             seq=sprint_seq,
         )
 
         adrs = _build_adrs(payload.get("adrs"), seq("artifact:adrs"), store=store)
         interfaces = _build_interfaces(payload.get("interfaces"), seq("artifact:interfaces"))
         ownership_seq = seq("artifact:ownership_map")
-        ownership = _build_ownership(payload.get("ownership"), ownership_seq)
+        ownership = _build_ownership(
+            payload.get("ownership"), ownership_seq, {c.id for c in criteria}
+        )
         design_section = _section(payload, "design")
         design_seq = seq("artifact:system_design")
         design = SystemDesign(
-            title=str(design_section.get("title", "")),
-            design_uri=persist_prose(str(design_section.get("body", "")), store=store),
+            title=_str(design_section.get("title")),
+            design_uri=persist_prose(_str(design_section.get("body")), store=store),
             components=_strs(design_section.get("components")),
             adr_ids=tuple(a.id for a in adrs),
             interface_ids=tuple(i.name for i in interfaces),
             seq=design_seq,
         )
-        constraints = _build_constraints(
-            payload.get("pinned_constraints"), seq("pinned_constraints")
-        )
+        constraints_seq = seq("pinned_constraints")
+        constraints = _build_constraints(payload.get("pinned_constraints"), constraints_seq)
+        retired = _retired_constraints(state, constraints, constraints_seq)
 
         artifacts = [
             emit_artifact(brief, "intent_brief", NODE_ID, brief_seq, store=store),
@@ -640,7 +748,7 @@ def make_planner_node(rt: AgentRuntime, index: SymbolIndex | None = None) -> Nod
 
         out: dict[str, Any] = {
             "artifacts": artifacts,
-            "pinned_constraints": constraints,
+            "pinned_constraints": [*constraints, *retired],
             "required_capabilities": list(prd.required_capabilities),
             "gate_triage": [_triage(critique, prd.prd_uri, seq("gate_triage:spec"))],
         }
@@ -673,6 +781,7 @@ def make_planner_node(rt: AgentRuntime, index: SymbolIndex | None = None) -> Nod
                     f"{len(ownership.owners)} ownership units, {len(constraints)} "
                     "pinned constraints."
                     + (" Revised after a Spec-gate failure." if revision else "")
+                    + (" Self-revised once after its own criteria review." if gaps else "")
                 ),
                 assumptions=(
                     *brief.assumptions,

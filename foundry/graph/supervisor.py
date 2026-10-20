@@ -194,6 +194,8 @@ _CHECKPOINT_NODE: dict[CheckpointBoundary, str] = {
     CheckpointBoundary.DESIGN: "checkpoint_design",
     CheckpointBoundary.RELEASE: "checkpoint_release",
 }
+# Boundaries after the planner: prompted only on its first pass, not on re-plans.
+_PLAN_BOUNDARIES = frozenset({CheckpointBoundary.PRODUCT, CheckpointBoundary.DESIGN})
 # The conditional-edge labels a checkpoint router returns.
 _CKPT_PROCEED = "proceed"  # human approve -> continue to the gate boundary
 _CKPT_HALT = "halt"  # human reject/needs-changes -> END (no PR / no release)
@@ -819,6 +821,13 @@ def build_supervisor_graph(
     # ``ckpt_set`` no pause node is built and the topology is byte-identical.)
     def _make_checkpoint(boundary: CheckpointBoundary):
         def _checkpoint(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+            # A spec_fix re-plan re-enters the planner; the operator already
+            # approved this plan boundary on the first pass, so don't re-prompt.
+            # The router reads that standing approval and proceeds.
+            if boundary in _PLAN_BOUNDARIES:
+                prior = _newest_decision(state, boundary)
+                if prior is not None and prior.proceeds():
+                    return {}
             sha = state_sha(config)
             subject_uri = newest_artifact_uri(state, DESIGN_KIND)
             # PAUSE: surface the read-only inspection payload + block for a human

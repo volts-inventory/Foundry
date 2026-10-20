@@ -789,3 +789,28 @@ def test_halted_run_writes_a_usable_draft_with_failing_findings(tmp_path, verifi
     assert "held at the gate" in status.lower()             # clearly marked not shipped
     assert "E   assert f() == 2" in status                  # what's still failing
     assert "❌" in status and "✅" in status                 # per-gate verdicts
+
+
+def test_spec_gate_reads_the_newest_criterion_per_id(tmp_path, rt, runner, verifier):
+    """A re-plan re-emits a criterion under the same id; the gate validates the
+    newest-by-Seq record, not a stale one still on the channel (list order is
+    irrelevant)."""
+    fixed = _criterion("c1").model_copy(update={"seq": _seq("planner", "c", epoch=2)})
+    stale = _criterion("c1").model_copy(
+        update={"oracle_hint": "", "seq": _seq("planner", "c", epoch=1)}
+    )
+    state, resolve, resolve_blob = _seed((fixed, stale, _criterion("c2", security=True)))
+
+    out = run_spec_gate(
+        state, _config(), rt=rt, runner=runner, resolve=resolve,
+        resolve_blob=resolve_blob, workdir=tmp_path / "spec",
+    )
+    assert out["gates"][0].status is GateStatus.PASS
+
+    stale_newer = stale.model_copy(update={"seq": _seq("planner", "c", epoch=3)})
+    state, resolve, resolve_blob = _seed((fixed, stale_newer, _criterion("c2", security=True)))
+    out = run_spec_gate(
+        state, _config(2), rt=rt, runner=runner, resolve=resolve,
+        resolve_blob=resolve_blob, workdir=tmp_path / "spec2",
+    )
+    assert out["gates"][0].status is GateStatus.FAIL

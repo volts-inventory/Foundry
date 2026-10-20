@@ -248,3 +248,20 @@ def test_reviewer_seq_node_id_matches_judge_node_id() -> None:
     node = make_reviewer_critic_node(rt)
     [verdict] = node({}, config_for("run-E", nonce="N", subject="s", state_sha="sha"))["gates"]
     assert verdict.seq.node_id == "reviewer_critic"
+
+
+def test_read_criteria_takes_the_newest_seq_per_id_not_list_order() -> None:
+    from foundry.agents._common import emit_artifact
+    from foundry.agents.quality._common import ACCEPTANCE_CRITERION_KIND, read_criteria
+    from foundry.schemas.product import AcceptanceCriterion
+    from foundry.state.seq import Seq
+
+    def _c(text: str, epoch: int) -> AcceptanceCriterion:
+        return AcceptanceCriterion(id="AC-1", text=text, seq=Seq("r", epoch, 1, "planner", 0))
+
+    new, old = _c("revised", 2), _c("stale", 1)
+    handles = [emit_artifact(c, ACCEPTANCE_CRITERION_KIND, "planner", c.seq) for c in (new, old)]
+    bodies = {h.uri: c for h, c in zip(handles, (new, old), strict=True)}
+
+    [current] = read_criteria({"artifacts": handles}, lambda h: bodies[h.uri])
+    assert current.text == "revised"

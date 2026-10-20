@@ -753,7 +753,7 @@ def build_factory_graph(
         a non-checkpointed graph (callers normally pass a
         :class:`FoundryCheckpointer.saver` or a dev ``MemorySaver``).
     index:
-        Context retriever for the Principal Architect (``None`` = greenfield).
+        Context retriever for the planner (``None`` = greenfield).
     max_fix_attempts:
         Convergence bound forwarded to the supervisor's gate routing.
     mode:

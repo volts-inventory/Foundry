@@ -1,24 +1,13 @@
-"""Architecture-layer agent nodes (T-M1-05) — principal_architect + conditionals.
+"""Conditional Layer-2 nodes (domain_specialist / ux_design).
 
-Drives the REAL Layer-2 node factories over a REAL :class:`ModelProviderProxy`
-backed by :class:`MockTransport` (no live API key, LEARNINGS D1). Asserts:
-
-* ``make_principal_architect_node`` writes a SystemDesign / ADR[] /
-  InterfaceContract[] / OwnershipMap onto the ``artifacts`` channel and the
-  PinnedConstraint records onto the ``pinned_constraints`` channel (the verbatim
-  downstream path, architecture.md §8);
-* ADRs carry ``rejected_alternatives`` and an OwnershipMap artifact is present;
-* the architect retrieves through the context retriever (SymbolIndex) rather
-  than reading files ad hoc;
-* the conditional ``domain_specialist`` / ``ux_design`` nodes enter only when
-  ``required_capabilities`` match (predicate + node guard agree) and are a
-  no-op otherwise (``{}``);
-* a factory-built node drops straight into a ``StateGraph(FactoryState)``.
+The design itself is authored by the planner (tests/test_planner.py). These
+deterministic addenda nodes enter only when ``required_capabilities`` match
+(predicate + node guard agree) and are a no-op otherwise (``{}``); a
+factory-built node drops straight into a ``StateGraph(FactoryState)``.
 """
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
@@ -27,7 +16,6 @@ from langgraph.graph import END, START, StateGraph
 from foundry.agents import AgentRuntime
 from foundry.agents.architecture import (
     make_domain_specialist_node,
-    make_principal_architect_node,
     make_ux_design_node,
     should_enter_domain_specialist,
     should_enter_ux_design,
@@ -36,82 +24,18 @@ from foundry.agents.architecture.conditional import (
     DOMAIN_SPECIALIST_NODE_ID,
     UX_DESIGN_NODE_ID,
 )
-from foundry.agents.architecture.principal_architect import NODE_ID as ARCHITECT_NODE_ID
-from foundry.context import SymbolIndex
 from foundry.gates.attestation import ZoneBSigner
 from foundry.proxy import ModelProviderProxy
 from foundry.proxy.test_doubles import MockTransport
-from foundry.schemas.architecture import ConstraintScope, PinnedConstraint
 from foundry.schemas.base import Artifact
 from foundry.state.factory_state import FactoryState
 
 KEY = b"dev-zone-b-architecture-key"
 KEY_ID = "dev-key-architecture"
 
-# A representative architect payload on the constrained design channel: a
-# SystemDesign, ADRs (with rejected alternatives), interface contracts, an
-# ownership map, and pinned constraints (one global cross-cutting invariant).
-DESIGN_PAYLOAD: dict[str, Any] = {
-    "title": "Todo service",
-    "design_body": "layered: api -> store; sqlite persistence",
-    "components": ["api", "store"],
-    "adrs": [
-        {
-            "id": "ADR-001",
-            "title": "Use SQLite",
-            "decision": "Persist todos in SQLite",
-            "body": "single-node, embedded; no ops overhead",
-            "rejected_alternatives": ["Postgres", "in-memory dict"],
-        },
-        {
-            "id": "ADR-002",
-            "title": "Synchronous API",
-            "decision": "Expose a synchronous REST API",
-            "body": "simplicity over throughput at this scale",
-            "rejected_alternatives": ["async/event-driven"],
-        },
-    ],
-    "interfaces": [
-        {"name": "TodoStore.add", "spec": "add(todo) -> id", "consumers": ["api"]},
-        {"name": "TodoStore.list", "spec": "list() -> [todo]", "consumers": ["api"]},
-    ],
-    "ownership": {"todo/api.py": "task-api", "todo/store.py": "task-store"},
-    "pinned_constraints": [
-        {
-            "id": "PC-001",
-            "text": "All access tokens must be redacted from logs.",
-            "scope": "global",
-            "source": "ADR-001",
-        },
-        {
-            "id": "PC-002",
-            "text": "Todo titles are limited to 200 characters.",
-            "scope": "local",
-            "source": "ADR-002",
-        },
-    ],
-}
 
-
-def design_transport(n: int = 8) -> MockTransport:
-    """A transport that serves the architect's design payload.
-
-    The architect calls ``complete(..., schema=_DESIGN_SCHEMA, purpose="ideation")``.
-    That is a schema-constrained IDEATION call, NOT a verdict (AC3 is resolved —
-    MockTransport now routes to the verdict queue only when the schema IS the
-    verdict schema, DT1). So the structured design payload rides the natural
-    free-text completion path: the ``completions=`` FIFO queue returns each item
-    verbatim as ``text``, which the proxy ``json.loads`` under the design schema.
-    The queue is sized for the number of architect calls a test makes.
-    """
-    return MockTransport(completions=[json.dumps(DESIGN_PAYLOAD)] * n)
-
-
-def make_runtime(transport: MockTransport | None = None) -> AgentRuntime:
-    proxy = ModelProviderProxy(
-        transport or design_transport(),
-        signer=ZoneBSigner(KEY, KEY_ID),
-    )
+def make_runtime() -> AgentRuntime:
+    proxy = ModelProviderProxy(MockTransport(), signer=ZoneBSigner(KEY, KEY_ID))
     return AgentRuntime(proxy=proxy)
 
 
@@ -130,135 +54,7 @@ def _kinds(artifacts: list[Artifact]) -> set[str]:
     return {a.kind for a in artifacts}
 
 
-# ---- 1. principal_architect produces the full artifact set -------------------
-
-
-def test_architect_writes_design_adrs_interfaces_ownership_and_constraints() -> None:
-    rt = make_runtime()
-    node = make_principal_architect_node(rt)
-    writes = node({"request": "build a todo app"}, config_for("run-A"))
-
-    artifacts = _artifacts_of(writes)
-    kinds = _kinds(artifacts)
-    assert "system_design" in kinds
-    assert "ownership_map" in kinds  # OwnershipMap present
-    assert sum(1 for a in artifacts if a.kind == "adr") == 2
-    assert sum(1 for a in artifacts if a.kind == "interface_contract") == 2
-    # Every artifact is a content-addressed handle (bodies out-of-band, L4).
-    assert all(a.uri.startswith("cas://") for a in artifacts)
-    assert all(a.produced_by == ARCHITECT_NODE_ID for a in artifacts)
-    # CR4: the two ADRs have different id/title, so their handles — minted off
-    # the record's content_identity(), not the body digest — are DISTINCT and
-    # neither is dropped under merge_by_uri.
-    adr_uris = [a.uri for a in artifacts if a.kind == "adr"]
-    assert len(set(adr_uris)) == 2
-
-
-def test_pinned_constraints_flow_to_their_own_channel() -> None:
-    rt = make_runtime()
-    node = make_principal_architect_node(rt)
-    writes = node({"request": "build a todo app"}, config_for("run-A"))
-
-    constraints = writes["pinned_constraints"]
-    assert all(isinstance(c, PinnedConstraint) for c in constraints)
-    ids = {c.id for c in constraints}
-    assert ids == {"PC-001", "PC-002"}
-    by_id = {c.id: c for c in constraints}
-    # Verbatim text + scope are preserved for the downstream injector.
-    assert by_id["PC-001"].scope is ConstraintScope.GLOBAL
-    assert "redacted from logs" in by_id["PC-001"].text
-    assert by_id["PC-002"].scope is ConstraintScope.LOCAL
-    # Constraints ride pinned_constraints, NOT artifacts.
-    assert "pinned_constraints" not in _kinds(_artifacts_of(writes))
-
-
-def test_adrs_carry_rejected_alternatives() -> None:
-    rt = make_runtime()
-    # ADRs are emitted as artifact handles; assert the modeled ADR list by
-    # exercising the same payload through the node and checking the design's
-    # adr coverage, then verify rejected_alternatives via the builder result.
-    node = make_principal_architect_node(rt)
-    writes = node({"request": "x"}, config_for("run-A"))
-    adr_artifacts = [a for a in _artifacts_of(writes) if a.kind == "adr"]
-    assert len(adr_artifacts) == 2
-    # rejected_alternatives are part of the ADR record (kept in state, not the
-    # body handle): rebuild from the payload to confirm they are not dropped.
-    from foundry.agents.architecture.principal_architect import _build_adrs
-
-    seq = rt.seq(config_for("run-A"), ARCHITECT_NODE_ID, "artifact:adrs")
-    adrs = _build_adrs(DESIGN_PAYLOAD["adrs"], seq)
-    assert adrs[0].rejected_alternatives == ("Postgres", "in-memory dict")
-    assert adrs[1].rejected_alternatives == ("async/event-driven",)
-    assert all(a.status == "accepted" for a in adrs)
-
-
-def test_architect_builders_skip_non_dict_items() -> None:
-    # CLI backends (the default claude-cli) instruct JSON-only output but do NOT
-    # grammar-enforce the nested schema, so a reply can carry array items that are
-    # bare strings instead of objects. The builders must skip those, not crash with
-    # AttributeError mid-graph (mirrors the isinstance guard in the quality nodes).
-    from foundry.agents.architecture.principal_architect import (
-        _build_adrs,
-        _build_constraints,
-        _build_interfaces,
-    )
-
-    rt = make_runtime()
-    seq = rt.seq(config_for("run-A"), ARCHITECT_NODE_ID, "artifact:adrs")
-    # A mix of a valid object and junk (string, None) the model might emit.
-    adrs = _build_adrs([{"id": "ADR-1", "title": "ok"}, "stray text", None], seq)
-    assert [a.id for a in adrs] == ["ADR-1"]
-    ifaces = _build_interfaces([{"name": "api"}, "not-an-object"], seq)
-    assert [i.name for i in ifaces] == ["api"]
-    cons = _build_constraints([{"id": "PC-1", "text": "t"}, 42], seq)
-    assert [c.id for c in cons] == ["PC-1"]
-
-
-def test_constraint_seqs_are_distinct_per_record() -> None:
-    rt = make_runtime()
-    node = make_principal_architect_node(rt)
-    writes = node({"request": "x"}, config_for("run-A"))
-    seqs = [c.seq for c in writes["pinned_constraints"]]
-    assert len(set(seqs)) == len(seqs)  # local index disambiguates within key
-
-
-# ---- 2. retrieval goes through the context retriever -------------------------
-
-
-def test_architect_retrieves_through_symbol_index(tmp_path: Any) -> None:
-    """When state carries capability symbols and an index is provided, the
-    architect retrieves spans through the SymbolIndex (impact analysis), not by
-    reading files ad hoc — the retrieved spans ride into the model prompt."""
-    src = tmp_path / "mod.py"
-    src.write_text(
-        "def TodoStore():\n    return persist()\n\n\ndef persist():\n    return 1\n",
-        encoding="utf-8",
-    )
-    index = SymbolIndex.build(tmp_path)
-    transport = design_transport()
-    rt = ModelProviderProxy(transport, signer=ZoneBSigner(KEY, KEY_ID))
-    node = make_principal_architect_node(AgentRuntime(proxy=rt), index)
-
-    writes = node(
-        {"request": "extend todos", "required_capabilities": ["TodoStore"]},
-        config_for("run-A"),
-    )
-    # The node still produced its artifacts...
-    assert "system_design" in _kinds(_artifacts_of(writes))
-    # ...and the retrieved spans were threaded into the outgoing model prompt.
-    sent = json.dumps(transport.requests[-1])
-    assert "retrieved_spans" in sent
-    assert "TodoStore" in sent
-
-
-def test_architect_greenfield_no_index_still_produces_design() -> None:
-    rt = make_runtime()
-    node = make_principal_architect_node(rt)  # index=None (greenfield)
-    writes = node({"request": "fresh project"}, config_for("run-A"))
-    assert "system_design" in _kinds(_artifacts_of(writes))
-
-
-# ---- 3. conditional entry predicates ----------------------------------------
+# ---- conditional entry predicates ----------------------------------------
 
 
 def test_domain_specialist_predicate_matches_only_domain_caps() -> None:
@@ -306,25 +102,7 @@ def test_ux_node_contributes_on_match() -> None:
     assert artifacts[0].produced_by == UX_DESIGN_NODE_ID
 
 
-# ---- 4. graph-compatibility --------------------------------------------------
-
-
-def test_architect_node_runs_inside_a_state_graph() -> None:
-    rt = make_runtime()
-    g = StateGraph(FactoryState)
-    g.add_node("architect", make_principal_architect_node(rt))
-    g.add_edge(START, "architect")
-    g.add_edge("architect", END)
-    app = g.compile()
-
-    final: FactoryState = app.invoke(
-        {"request": "build a todo app"}, config_for("run-A")
-    )
-    kinds = {a.kind for a in final["artifacts"]}
-    assert "system_design" in kinds
-    assert "ownership_map" in kinds
-    constraint_ids = {c.id for c in final["pinned_constraints"]}
-    assert constraint_ids == {"PC-001", "PC-002"}
+# ---- graph-compatibility --------------------------------------------------
 
 
 def test_conditional_nodes_run_inside_a_state_graph() -> None:

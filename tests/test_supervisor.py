@@ -23,7 +23,7 @@ The two materialization seams (GW1a/D-R1-02) are in-memory doubles:
 
 Asserts:
 
-* the FULL phase order executes (triage -> product -> architecture -> spec gate
+* the FULL phase order executes (triage -> planner -> spec gate
   -> implementation -> quality -> build+test gate);
 * advancement happens ONLY on an attested gate PASS at each boundary;
 * a forced gate FAIL routes back to the responsible layer and the run TERMINATES
@@ -41,6 +41,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph
 
 from foundry.agents import AgentRuntime
+from foundry.durability.artifact_store import ArtifactStore
 from foundry.execution.adapters.stub import StubAdapter
 from foundry.gates import DevGateWriteVerifier, TwoZoneGateRunner, ZoneBSigner
 from foundry.graph.supervisor import (
@@ -62,6 +63,7 @@ from foundry.schemas.product import (
 from foundry.state.factory_state import FactoryState
 from foundry.state.global_records import GlobalRecords
 from foundry.state.reducers import reset_gate_write_verifier, set_gate_write_verifier
+from tests.planner_payload import PLANNER_SOP_KEY, plan_payload
 
 KEY = b"dev-zone-b-supervisor-key-0123456789"
 KEY_ID = "dev-key-supervisor"
@@ -86,8 +88,8 @@ INTENT_PAYLOAD: dict[str, Any] = {
     "nice_to_haves": [],
 }
 
-# No required_capabilities -> architecture skips the conditional Layer-2 nodes
-# (one architect call), keeping the model-call script simple. One criterion is
+# No required_capabilities -> the planner skips the conditional Layer-2 nodes
+# (one planner call), keeping the model-call script simple. One criterion is
 # security_abuse=True so the Spec gate's mandatory security coverage is met.
 PRD_PAYLOAD: dict[str, Any] = {
     "title": "Todo service",
@@ -153,15 +155,16 @@ SDET_PAYLOAD: dict[str, Any] = {
 _SCRIPTS: dict[str, str] = {
     # Every node that can make a model call needs a script: an unscripted node
     # serves "" and dies as ProxyUnavailable after the retries.
-    "You are the Scope Judge": json.dumps(
-        {"tier": "standard", "rationale": "a full-scope build", "signals": []}
+    PLANNER_SOP_KEY: json.dumps(
+        plan_payload(
+            intent=INTENT_PAYLOAD,
+            prd=PRD_PAYLOAD,
+            critique=CRITIQUE_PAYLOAD,
+            sprint=SPRINT_PAYLOAD,
+            design=DESIGN_PAYLOAD,
+            decomposition=DECOMPOSITION_PAYLOAD,
+        )
     ),
-    "Stakeholder / Client Proxy": json.dumps(INTENT_PAYLOAD),
-    "Product Manager": json.dumps(PRD_PAYLOAD),
-    "Criteria-Completeness Critic": json.dumps(CRITIQUE_PAYLOAD),
-    "Engineering / Program Manager": json.dumps(SPRINT_PAYLOAD),
-    "Principal Architect": json.dumps(DESIGN_PAYLOAD),
-    "Senior Engineer": json.dumps(DECOMPOSITION_PAYLOAD),
     "QA Engineer": json.dumps(QA_PAYLOAD),
     "SDET": json.dumps(SDET_PAYLOAD),
 }
@@ -397,3 +400,71 @@ def test_forced_test_error_routes_to_fix_and_terminates_bounded(tmp_path: Any) -
     assert final["budget"].fix_attempts_since_all_green >= max_fix
     test_verdict = next(g for g in final["gates"] if g.name == "test")
     assert not records.stable_fail_latched(test_verdict.run_against, "test")
+
+
+# ---- spec_fix re-enters the planner with the Spec gate's findings -----------
+
+
+def test_spec_fail_replans_with_the_gate_findings_then_advances(tmp_path: Any) -> None:
+    """A Spec FAIL routes spec_fix -> planner; the re-entry prompt carries the
+    signed gate's findings, and the revised plan passes the gate."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "README.md").write_text("seed\n")
+
+    no_abuse = {**PRD_PAYLOAD, "acceptance_criteria": [PRD_PAYLOAD["acceptance_criteria"][0]]}
+
+    def _plan(prd: dict[str, Any]) -> str:
+        return json.dumps(
+            plan_payload(
+                intent=INTENT_PAYLOAD,
+                prd=prd,
+                critique=CRITIQUE_PAYLOAD,
+                sprint=SPRINT_PAYLOAD,
+                design=DESIGN_PAYLOAD,
+                decomposition=DECOMPOSITION_PAYLOAD,
+            )
+        )
+
+    # First match wins: the revision prompt gets the fixed plan, the first pass
+    # a plan with no security/abuse criterion (a Spec FAIL).
+    scripts = {"REVISION PASS": _plan(PRD_PAYLOAD), **_SCRIPTS, PLANNER_SOP_KEY: _plan(no_abuse)}
+    tx = MockTransport.scripted(scripts, default_verdict="approve")
+    cas = ArtifactStore()
+    rt = AgentRuntime(
+        proxy=ModelProviderProxy(tx, signer=ZoneBSigner(KEY, KEY_ID)),
+        adapter=StubAdapter(),
+        cas=cas,
+    )
+
+    def _resolve(handle: Artifact) -> FrozenModel:
+        # Real criteria from the CAS, so the gate sees what the planner wrote.
+        if handle.kind in ("acceptance_criterion", "criteria_findings"):
+            body: FrozenModel = cas.resolve(handle)
+            return body
+        return _synthetic_resolve(handle)
+
+    records = GlobalRecords()
+    token = set_gate_write_verifier(DevGateWriteVerifier(KEY, KEY_ID, records))
+    try:
+        app = build_supervisor_graph(
+            rt,
+            runner=_runner(records),
+            resolve=_resolve,
+            resolve_blob=_resolve_blob_factory(_PASSING_DIFF),
+            source_dir=str(src),
+        ).compile(checkpointer=MemorySaver())
+        final: FactoryState = app.invoke({"request": "build a todo app"}, _config("run-respec"))
+    finally:
+        reset_gate_write_verifier(token)
+
+    planner_prompts = [json.dumps(r) for r in tx.requests if PLANNER_SOP_KEY in json.dumps(r)]
+    assert len(planner_prompts) == 2
+    assert "REVISION PASS" not in planner_prompts[0]
+    assert "REVISION PASS" in planner_prompts[1]
+    assert "no criterion flags security_abuse=true" in planner_prompts[1]
+
+    spec = [g for g in final["gates"] if g.name == "spec"]
+    assert {g.status for g in spec} == {GateStatus.FAIL, GateStatus.PASS}
+    assert max(spec, key=lambda g: g.seq).status is GateStatus.PASS
+    assert _gates_by_name(final).get("test") is GateStatus.PASS

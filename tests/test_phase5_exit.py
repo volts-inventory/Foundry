@@ -115,6 +115,7 @@ from foundry.state.global_records import GlobalRecords
 from foundry.state.reducers import reset_gate_write_verifier, set_gate_write_verifier
 from foundry.state.seq import Seq
 from foundry.trust_root import AdmissionController, Deployer, TrustedBuilder
+from tests.planner_payload import PLANNER_SOP_KEY, plan_payload
 
 KEY = b"dev-zone-b-phase5-exit-key-0123456789abcdef"
 KEY_ID = "dev-key-phase5-exit"
@@ -201,15 +202,16 @@ SUPPLY_CHAIN_PAYLOAD: dict[str, Any] = {
 _SCRIPTS: dict[str, str] = {
     # Every node that can make a model call needs a script: an unscripted node
     # serves "" and dies as ProxyUnavailable after the retries.
-    "You are the Scope Judge": json.dumps(
-        {"tier": "standard", "rationale": "a full-scope build", "signals": []}
+    PLANNER_SOP_KEY: json.dumps(
+        plan_payload(
+            intent=INTENT_PAYLOAD,
+            prd=PRD_PAYLOAD,
+            critique=CRITIQUE_PAYLOAD,
+            sprint=SPRINT_PAYLOAD,
+            design=DESIGN_PAYLOAD,
+            decomposition=DECOMPOSITION_PAYLOAD,
+        )
     ),
-    "Stakeholder / Client Proxy": json.dumps(INTENT_PAYLOAD),
-    "Product Manager": json.dumps(PRD_PAYLOAD),
-    "Criteria-Completeness Critic": json.dumps(CRITIQUE_PAYLOAD),
-    "Engineering / Program Manager": json.dumps(SPRINT_PAYLOAD),
-    "Principal Architect": json.dumps(DESIGN_PAYLOAD),
-    "Senior Engineer": json.dumps(DECOMPOSITION_PAYLOAD),
     "QA Engineer": json.dumps(QA_PAYLOAD),
     "SDET": json.dumps(SDET_PAYLOAD),
     "You are the Security / AppSec Engineer": json.dumps(APPSEC_PAYLOAD),

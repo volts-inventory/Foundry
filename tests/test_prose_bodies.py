@@ -1,6 +1,6 @@
 """Upstream prose bodies persist into the CAS and inline into the doc set (task [2]).
 
-The PM/architect author narrative prose (PRD body, system-design body, ADR
+The planner authors narrative prose (PRD body, system-design body, ADR
 rationale) but historically kept only the ``cas_uri(text)`` handle and DISCARDED
 the text — so ``docs/render.py`` rendered a dead handle. These tests prove the
 prose now round-trips through the :class:`ArtifactStore` (as an allowlisted
@@ -17,8 +17,7 @@ from langchain_core.runnables import RunnableConfig
 
 from foundry.agents import AgentRuntime
 from foundry.agents._common import cas_uri, persist_prose
-from foundry.agents.architecture import make_principal_architect_node
-from foundry.agents.product import make_product_manager_node
+from foundry.agents.planner import make_planner_node
 from foundry.docs import assemble_documentation
 from foundry.docs.render import render_adrs, render_design, render_prd
 from foundry.durability.artifact_store import ArtifactStore, UnknownArtifactError
@@ -28,6 +27,7 @@ from foundry.schemas.architecture import ADR, SystemDesign
 from foundry.schemas.docs import ProseBody
 from foundry.schemas.product import PRD
 from foundry.state.seq import Seq
+from tests.planner_payload import plan_payload
 
 SEQ = Seq("r", 1, 1, "n", 0)
 
@@ -61,6 +61,14 @@ DESIGN_PAYLOAD: dict[str, Any] = {
     "ownership": {"foundry/api": "api-team"},
 }
 
+PLAN_PAYLOAD: dict[str, Any] = plan_payload(
+    intent={"intent": "todo"},
+    prd=PRD_PAYLOAD,
+    critique={"missing": [], "security_abuse_omissions": []},
+    sprint={"milestones": [], "usd_cap_microusd": 0, "done_definition": "done"},
+    design=DESIGN_PAYLOAD,
+)
+
 
 def _config(run_id: str = "run-prose") -> RunnableConfig:
     return {"configurable": {"thread_id": run_id}, "metadata": {"langgraph_step": 1}}
@@ -74,9 +82,9 @@ def _runtime(payload: dict[str, Any], *, cas: ArtifactStore | None) -> AgentRunt
 # ---- producer side: prose round-trips through the store ----------------------
 
 
-def test_pm_persists_prd_prose_under_its_handle() -> None:
+def test_planner_persists_prd_prose_under_its_handle() -> None:
     store = ArtifactStore()
-    node = make_product_manager_node(_runtime(PRD_PAYLOAD, cas=store))
+    node = make_planner_node(_runtime(PLAN_PAYLOAD, cas=store))
     writes = node({"request": "build a todo app"}, _config())
 
     bodies = [store.get_body(a.uri) for a in writes["artifacts"]]
@@ -88,9 +96,9 @@ def test_pm_persists_prd_prose_under_its_handle() -> None:
     assert isinstance(body, ProseBody) and body.text == PRD_BODY
 
 
-def test_architect_persists_design_and_adr_prose() -> None:
+def test_planner_persists_design_and_adr_prose() -> None:
     store = ArtifactStore()
-    node = make_principal_architect_node(_runtime(DESIGN_PAYLOAD, cas=store))
+    node = make_planner_node(_runtime(PLAN_PAYLOAD, cas=store))
     writes = node({"request": "build a todo app"}, _config())
     bodies = [store.get_body(a.uri) for a in writes["artifacts"]]
 
@@ -116,8 +124,8 @@ def test_persist_prose_store_none_is_mint_only() -> None:
         raise AssertionError("store=None must not persist a body")
 
 
-def test_pm_store_none_keeps_handle_without_storing() -> None:
-    node = make_product_manager_node(_runtime(PRD_PAYLOAD, cas=None))
+def test_planner_store_none_keeps_handle_without_storing() -> None:
+    node = make_planner_node(_runtime(PLAN_PAYLOAD, cas=None))
     writes = node({"request": "x"}, _config())
     # The node still emits a PRD handle whose prd_uri is the prose digest, but no
     # body is stored anywhere (the synthetic-resolver tests are untouched).
@@ -164,12 +172,9 @@ def test_assemble_inlines_upstream_prose_end_to_end() -> None:
     store = ArtifactStore()
     rt = AgentRuntime(proxy=ModelProviderProxy(MockTransport(default_text="{}")), cas=store)
 
-    # Drive the real PM + architect so the prose lands in the store under its handle.
-    pm_rt = _runtime(PRD_PAYLOAD, cas=store)
-    arch_rt = _runtime(DESIGN_PAYLOAD, cas=store)
-    pm_writes = make_product_manager_node(pm_rt)({"request": "todo"}, _config())
-    arch_writes = make_principal_architect_node(arch_rt)({"request": "todo"}, _config())
-    artifacts = [*pm_writes["artifacts"], *arch_writes["artifacts"]]
+    # Drive the real planner so the prose lands in the store under its handle.
+    writes = make_planner_node(_runtime(PLAN_PAYLOAD, cas=store))({"request": "todo"}, _config())
+    artifacts = writes["artifacts"]
 
     bundle = assemble_documentation(
         request="todo",

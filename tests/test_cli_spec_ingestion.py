@@ -4,10 +4,9 @@
 
 A build may start from a real design-spec document (a ``.md``/``.txt`` FILE, a
 DIRECTORY of them, or literal text) in ADDITION to the one-line ``request``. The
-spec text is seeded onto the ``spec`` state channel, where the Stakeholder/Client
-Proxy and Product Manager GROUND the IntentBrief/PRD in it (so the product —
-and, through its outputs, the architecture — layer builds from the provided spec
-rather than synthesizing from a one-liner). The spec is plain INPUT DATA: it
+spec text is seeded onto the ``spec`` state channel, where the planner GROUNDS
+the IntentBrief/PRD/design in it (so the plan is built from the provided spec
+rather than synthesized from a one-liner). The spec is plain INPUT DATA: it
 INFORMS the criteria but never bypasses the acceptance-criteria derivation or any
 signed gate, and request-only runs are unchanged.
 """
@@ -20,13 +19,12 @@ from typing import Any
 
 import pytest
 
-from foundry.agents.product.product_manager import _intent_text
-from foundry.agents.product.stakeholder_proxy import _intake_text
+from foundry.agents.planner import _intake_text
 from foundry.cli import _load_spec, main, run
 from foundry.proxy.test_doubles import MockTransport
 
 # A multi-paragraph design spec carrying a distinctive marker the test can look
-# for in the prompts the product nodes send through the proxy.
+# for in the prompts the planner sends through the proxy.
 _SPEC_TEXT = (
     "# Link Shortener — Design Spec\n\n"
     "## Goal\nProvide a SPEC_MARKER_7F3 short-link service with analytics.\n\n"
@@ -34,11 +32,11 @@ _SPEC_TEXT = (
 )
 
 
-# ---- the product layer reads the spec off the channel (the seam) ------------
+# ---- the planner reads the spec off the channel (the seam) -----------------
 
 
 def test_intake_text_grounds_in_spec_when_present() -> None:
-    """The Stakeholder/Client Proxy intake includes the spec when one is seeded."""
+    """The planner intake includes the spec when one is seeded."""
     state = {"request": "build a link shortener", "spec": _SPEC_TEXT}
     text = _intake_text(state)  # type: ignore[arg-type]
     assert "build a link shortener" in text  # request still summarizes intent
@@ -46,18 +44,10 @@ def test_intake_text_grounds_in_spec_when_present() -> None:
     assert "DESIGN SPEC" in text
 
 
-def test_pm_intent_text_grounds_in_spec_when_present() -> None:
-    state = {"request": "build a link shortener", "spec": _SPEC_TEXT}
-    text = _intent_text(state)  # type: ignore[arg-type]
-    assert "SPEC_MARKER_7F3" in text
-    assert "DESIGN SPEC" in text
-
-
 def test_intake_text_request_only_unchanged() -> None:
     """No spec channel -> the intake is EXACTLY the raw request (unchanged)."""
     state = {"request": "build a link shortener"}
     assert _intake_text(state) == "build a link shortener"  # type: ignore[arg-type]
-    assert _intent_text(state) == "build a link shortener"  # type: ignore[arg-type]
 
 
 # ---- _load_spec resolves file / dir / literal text / list -------------------
@@ -164,7 +154,7 @@ def test_run_with_spec_completes_and_product_sees_spec(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A passing build seeded with a --spec file completes AND the spec text is
-    seen by the product-layer model calls (Stakeholder + Product Manager)."""
+    seen by the planner's model call."""
     captured = _install_request_capture(monkeypatch)
     spec_file = tmp_path / "design.md"
     spec_file.write_text(_SPEC_TEXT, encoding="utf-8")
@@ -178,7 +168,7 @@ def test_run_with_spec_completes_and_product_sees_spec(
     spec_status = result.gate_statuses.get("spec")
     assert spec_status is not None and spec_status.value == "pass"
 
-    # The spec text reached the product layer's prompts (the grounding seam).
+    # The spec text reached the planner's prompt (the grounding seam).
     spec_grounded = [r for r in _seen_prompts(captured) if "SPEC_MARKER_7F3" in r]
     assert spec_grounded, "spec text never reached any model call"
 
@@ -188,8 +178,8 @@ def test_run_request_only_does_not_inject_spec(monkeypatch: pytest.MonkeyPatch) 
     captured = _install_request_capture(monkeypatch)
     result = run("build a link shortener", thread_id="cli-spec-none")
     assert result.passed is True
-    # No spec content leaks, and the product nodes do NOT prepend the
-    # request/spec body framing they only add when a spec is seeded.
+    # No spec content leaks, and the planner does NOT prepend the
+    # request/spec body framing it only adds when a spec is seeded.
     seen = _seen_prompts(captured)
     assert not any("SPEC_MARKER_7F3" in r for r in seen)
     assert not any("REQUEST (intent summary)" in r for r in seen)

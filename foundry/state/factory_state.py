@@ -23,28 +23,24 @@ class FactoryState(TypedDict, total=False):
     request: str  # single-writer
     # OPTIONAL full design-spec document text (task [8]). Additive input: a short
     # `request` still summarizes intent; when present, `spec` carries the detailed
-    # design-spec doc(s) text that GROUNDS the product layer — the Stakeholder /
-    # Client Proxy and Product Manager derive the IntentBrief/PRD/criteria FROM it
-    # (read by `stakeholder_proxy._intake_text` / `product_manager._intent_text`).
-    # The architecture layer inherits the grounding indirectly, through the
-    # spec-grounded PRD/criteria the product layer emits. Single-writer (seeded at
-    # graph entry). It is plain INPUT DATA — it INFORMS the PRD/criteria but never
-    # bypasses the acceptance-criteria derivation or any signed gate (same trust
-    # posture as `request`: agents propose, only gates decide, L5).
+    # design-spec doc(s) text that GROUNDS the plan — the planner derives the
+    # IntentBrief/PRD/criteria/design FROM it (read by `planner._intake_text`).
+    # Single-writer (seeded at graph entry). It is plain INPUT DATA — it INFORMS
+    # the PRD/criteria but never bypasses the acceptance-criteria derivation or
+    # any signed gate (same trust posture as `request`: agents propose, only
+    # gates decide, L5).
     spec: str  # single-writer
     route: str | None  # single-writer (triage)
     phase: str  # single-writer (supervisor)
     # How much system the request is asking for. Single-writer — unlike
     # `risk_tier` (written by the parent-level triage node) this one is written
-    # by the `scope_judge` node INSIDE the product subgraph; the supervisor
-    # returns that subgraph's whole final state as its delta, so the write folds
-    # through, and the product phase is entered exactly once per run (both fix
-    # loops re-enter at architecture/implementation), so LastValue never
-    # contends. PROMPT INPUT ONLY: read by the PM + architect to cap what they
-    # PROPOSE. Never read by a gate, router, or admission path — no gate is
+    # by the `planner` node INSIDE the planner subgraph, only when absent (an
+    # operator pin or an earlier pass wins), so a spec_fix re-entry never changes
+    # it. PROMPT INPUT ONLY: read by the planner to cap what it
+    # proposes. Never read by a gate, router, or admission path — no gate is
     # skipped and no verdict weakened at DEMO. It DOES thin the criteria those
     # gates verify against, though; see ScopeDecision for that honest limit.
-    scope_tier: ScopeDecision | None  # single-writer (scope_judge, or --scope pin)
+    scope_tier: ScopeDecision | None  # single-writer (planner, or --scope pin)
     required_capabilities: Annotated[list[str], reducers.union]
     pinned_constraints: Annotated[list[PinnedConstraint], reducers.merge_constraints]
     artifacts: Annotated[list[Artifact], reducers.merge_by_uri]

@@ -9,8 +9,8 @@ swappable backend and credential, and adds no egress of its own.
 The deliverable is a markdown SPEC DOCUMENT shaped so task [8]'s ``--spec``
 ingest (``foundry.cli.run(spec=...)``) can consume it: a human-readable design
 spec with a Capabilities section and a numbered Acceptance Criteria section
-(Given/When/Then with oracle hints) that the Product Manager node can GROUND its
-PRD + criteria in. It never replaces the criteria the PM derives.
+(Given/When/Then with oracle hints) that the planner node can GROUND its
+PRD + criteria in. It never replaces the criteria the planner derives.
 """
 
 from __future__ import annotations

@@ -160,8 +160,8 @@ ADAPTERS = ("stub", "raw-react", "claude-code", "proxy-agent")
 _DEFAULT_ADAPTER = "stub"
 
 # Scope tier selection: how much system to build. `auto` (the default) lets the
-# Scope Judge node classify the request; `demo`/`standard` PIN the tier and skip
-# the judge's model call. Pinning gives a deterministic tier for an A/B against
+# planner classify the request; `demo`/`standard` PIN the tier (the planner
+# keeps it and applies its caps). Pinning gives a deterministic tier for an A/B against
 # the judged one. Scope caps what the agents PROPOSE, never what the gates
 # require — both tiers face an identical gate set.
 SCOPES = ("auto", "demo", "standard")
@@ -508,25 +508,26 @@ _ASSURANCE_PASSING_DIFF = (
 # node gets `default_text=""`, which fails structured-output parsing and dies as a
 # ProxyUnavailable after the retries. STANDARD keeps the smoke path's scope
 # unchanged; `--scope demo` still exercises the capped path deterministically.
-_SCOPE_PAYLOAD: dict[str, Any] = {
-    "tier": "standard",
-    "rationale": "the smoke request is treated as a full-scope build",
-    "signals": [],
-}
-
-_INTENT_PAYLOAD: dict[str, Any] = {
-    "intent": "Run the one-line request through the factory.",
-    "assumptions": ["single user"],
-    "unknowns": [],
-    "success_criteria": ["the requested behavior works"],
-    "must_haves": ["core feature"],
-    "nice_to_haves": [],
-}
-
-_PRD_PAYLOAD: dict[str, Any] = {
-    "title": "Requested service",
-    "prd_body": "Deliver the requested behavior.",
-    "required_capabilities": [],
+# The planner's ONE call authors the whole product + architecture plan.
+_PLAN_PAYLOAD: dict[str, Any] = {
+    "scope": {
+        "tier": "standard",
+        "rationale": "the smoke request is treated as a full-scope build",
+        "signals": [],
+    },
+    "intent": {
+        "intent": "Run the one-line request through the factory.",
+        "assumptions": ["single user"],
+        "unknowns": [],
+        "success_criteria": ["the requested behavior works"],
+        "must_haves": ["core feature"],
+        "nice_to_haves": [],
+    },
+    "prd": {
+        "title": "Requested service",
+        "body": "Deliver the requested behavior.",
+        "required_capabilities": [],
+    },
     "acceptance_criteria": [
         {
             "id": "AC-001",
@@ -543,29 +544,19 @@ _PRD_PAYLOAD: dict[str, Any] = {
             "security_abuse": True,
         },
     ],
-}
-
-_CRITIQUE_PAYLOAD: dict[str, Any] = {"missing": [], "security_abuse_omissions": []}
-
-_SPRINT_PAYLOAD: dict[str, Any] = {
-    "milestones": ["M1"],
-    "usd_cap_microusd": 30_000_000,
-    "risk_register_body": "none",
-    "done_definition": "all criteria green",
-}
-
-_DESIGN_PAYLOAD: dict[str, Any] = {
-    "title": "Requested service",
-    "design_body": "api -> store",
-    "components": ["api"],
+    "criteria_review": {"missing": [], "security_abuse_omissions": []},
+    "sprint_plan": {
+        "milestones": ["M1"],
+        "usd_cap_microusd": 30_000_000,
+        "risk_register": "none",
+        "done_definition": "all criteria green",
+    },
+    "design": {"title": "Requested service", "body": "api -> store", "components": ["api"]},
     "adrs": [],
     "interfaces": [],
-    "ownership": {"app.py": "owner-a"},  # one unit -> one task -> one diff
+    # one unit -> one task -> one diff
+    "ownership": [{"unit": "app.py", "owner": "owner-a", "criterion_ids": ["AC-001"]}],
     "pinned_constraints": [],
-}
-
-_DECOMPOSITION_PAYLOAD: dict[str, Any] = {
-    "tasks": [{"unit": "app.py", "title": "build app", "criterion_ids": ["AC-001"]}]
 }
 
 _QA_PAYLOAD: dict[str, Any] = {
@@ -630,13 +621,7 @@ _SUPPLY_CHAIN_PAYLOAD: dict[str, Any] = {
 }
 
 _SCRIPTS: dict[str, str] = {
-    "You are the Scope Judge": json.dumps(_SCOPE_PAYLOAD),
-    "Stakeholder / Client Proxy": json.dumps(_INTENT_PAYLOAD),
-    "Product Manager": json.dumps(_PRD_PAYLOAD),
-    "Criteria-Completeness Critic": json.dumps(_CRITIQUE_PAYLOAD),
-    "Engineering / Program Manager": json.dumps(_SPRINT_PAYLOAD),
-    "Principal Architect": json.dumps(_DESIGN_PAYLOAD),
-    "Senior Engineer": json.dumps(_DECOMPOSITION_PAYLOAD),
+    "You are the Planner": json.dumps(_PLAN_PAYLOAD),
     "QA Engineer": json.dumps(_QA_PAYLOAD),
     "SDET": json.dumps(_SDET_PAYLOAD),
     # Assurance phase (Gated / Autonomous spine).
@@ -657,7 +642,7 @@ _SCRIPTS: dict[str, str] = {
 def _synthetic_resolve(store: ArtifactStore) -> ArtifactResolver:
     """A KIND-dispatching typed resolver that falls through to the real store.
 
-    The architecture/product agents mint content-addressed HANDLES mid-run whose
+    The planner mints content-addressed HANDLES mid-run whose
     uri encodes an epoch-dependent ``content_identity()`` (so it can't be
     pre-keyed) and, with the StubAdapter, no faithful passing-test body is ever
     authored. So for the handle kinds the SPEC core path consumes we synthesize a
@@ -675,7 +660,11 @@ def _synthetic_resolve(store: ArtifactStore) -> ArtifactResolver:
                 seq=handle.seq,
             )
         if handle.kind == "ownership_map":
-            return OwnershipMap(owners={"app.py": "owner-a"}, seq=handle.seq)
+            return OwnershipMap(
+                owners={"app.py": "owner-a"},
+                unit_criteria={"app.py": ("AC-001",)},
+                seq=handle.seq,
+            )
         if handle.kind == "acceptance_criterion":
             cid = f"AC-{handle.seq.local:03d}-{handle.seq.emission_epoch}"
             return AcceptanceCriterion(
@@ -1336,9 +1325,9 @@ def run(
         a path to a ``.md``/``.txt`` FILE, a path to a DIRECTORY of such files
         (read recursively, sorted), a list of paths, or literal spec text. The
         resolved text is seeded onto the ``spec`` state channel, where the
-        Stakeholder/Client Proxy and Product Manager GROUND the IntentBrief/PRD in
-        it. It is plain input data — it INFORMS the criteria but never bypasses the
-        acceptance-criteria derivation or any signed gate.
+        planner GROUNDS the IntentBrief/PRD/design in it. It is plain input data
+        — it INFORMS the criteria but never bypasses the acceptance-criteria
+        derivation or any signed gate.
     thread_id:
         The run identity (LangGraph ``thread_id`` / ``Seq.run_id``); also seeds
         the deterministic idempotency keys (verdict nonce, PR key).
@@ -1390,7 +1379,7 @@ def run(
         run PAUSES at the first boundary and returns with ``RunResult.paused_at``
         set (the caller resumes out-of-band on the same ``thread_id``).
     scope:
-        How much system to build. ``"auto"`` (the DEFAULT) lets the Scope Judge
+        How much system to build. ``"auto"`` (the DEFAULT) lets the planner
         node classify the request; ``"demo"`` / ``"standard"`` PIN the tier and
         skip the judge's model call entirely. Scope caps only what the PM and
         architect PROPOSE (criteria count, components, interface contracts,
@@ -1605,9 +1594,9 @@ def run(
             # / HITL fires off required_capabilities). Default run: never set.
             if pack_capabilities:
                 seed["required_capabilities"] = sorted(pack_capabilities)
-            # An operator-pinned scope seeds the channel the Scope Judge would
-            # otherwise write; the judge sees a decision already present and
-            # returns without a model call. `auto` (the default) seeds nothing,
+            # An operator-pinned scope seeds the channel the planner would
+            # otherwise write; the planner sees a decision already present and
+            # keeps it. `auto` (the default) seeds nothing,
             # so the historical seed is unchanged.
             if scope != "auto":
                 from foundry.schemas.governance import ScopeDecision, ScopeTier
@@ -2228,7 +2217,7 @@ def main(argv: list[str] | None = None) -> int:
         profile = _profile if _profile is not None else "auto"
 
         # --scope {auto|demo|standard}: how much system to build. OMITTED ⇒ "auto"
-        # (the Scope Judge classifies the request). A pinned tier skips the judge.
+        # (the planner classifies the request). A pinned tier is kept as-is.
         args, _scope = _take_value(args, "--scope", what="a value")
         scope = _scope if _scope is not None else "auto"
         if scope not in SCOPES:
@@ -2316,7 +2305,7 @@ def main(argv: list[str] | None = None) -> int:
                 "(a pack may VETO an unsafe mode — fail-closed)\n"
                 "  checkpoints (plan [10]): pause at stage boundaries for human "
                 "verification; an approve can NEVER turn a gate FAIL into a release\n"
-                "  scope: auto (default — the Scope Judge classifies the request) | "
+                "  scope: auto (default — the planner classifies the request) | "
                 "demo (small: capped criteria, 1 component, no interface contracts) | "
                 "standard. Caps what the agents PROPOSE; the gate set is identical",
                 file=sys.stderr,

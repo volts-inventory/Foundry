@@ -8,9 +8,9 @@ follow the state-reading convention (AR1-AR4 / IM4): their DATA inputs come from
 
 * the Senior reads the ``SystemDesign`` + ``OwnershipMap`` off ``state["artifacts"]``
   (by ``Artifact.kind``, reconstituted via the injected ``resolve``) and
-  decomposes them into a deterministic, ownership-ordered ``Task[]``
-  (``OwnershipMap.merge_order``), each on its own ``task/<id>`` branch with
-  ``criterion_ids`` traceability;
+  decomposes them — with NO model call — into a deterministic, ownership-ordered
+  ``Task[]`` (``OwnershipMap.merge_order``), each on its own ``task/<id>`` branch
+  with the planner's per-unit ``criterion_ids`` traceability;
 * the Junior reads the ready ``Task(s)`` off ``state["tasks"]`` + the pinned
   constraints off ``state["pinned_constraints"]``, assembles a ``TaskPacket``
   with the constraints injected FIRST and VERBATIM, runs the adapter inside a
@@ -95,11 +95,11 @@ def a_design() -> SystemDesign:
         design_uri="cas://design/abc",
         components=("store", "api"),
         interface_ids=("TodoStore.add",),
-        seq=a_seq("principal_architect"),
+        seq=a_seq("planner"),
     )
 
 
-def an_ownership_map() -> OwnershipMap:
+def an_ownership_map(criteria: dict[str, tuple[str, ...]] | None = None) -> OwnershipMap:
     # Insertion order deliberately NOT the merge order, to prove merge_order()
     # (sorted by (owner, unit)) drives the emitted sequence, not dict order.
     return OwnershipMap(
@@ -108,7 +108,8 @@ def an_ownership_map() -> OwnershipMap:
             "src/store.py": "owner-a",
             "src/util.py": "owner-a",
         },
-        seq=a_seq("principal_architect"),
+        unit_criteria=criteria or {},
+        seq=a_seq("planner"),
     )
 
 
@@ -118,7 +119,7 @@ def a_constraint(cid: str, text: str) -> PinnedConstraint:
         text=text,
         scope=ConstraintScope.GLOBAL,
         source="ADR-1",
-        seq=a_seq("principal_architect"),
+        seq=a_seq("planner"),
     )
 
 
@@ -130,10 +131,10 @@ def seed_artifacts(
     The architecture layer emits content-addressed Artifact HANDLES; the bodies
     live out-of-band. Mirror that here: emit handles and a uri->body map the
     Senior's injected ``resolve`` reconstitutes from (CAS in prod)."""
-    pa_seq = a_seq("principal_architect")
+    pa_seq = a_seq("planner")
     handles = [
-        emit_artifact(design, DESIGN_KIND, "principal_architect", pa_seq),
-        emit_artifact(ownership, OWNERSHIP_KIND, "principal_architect", pa_seq),
+        emit_artifact(design, DESIGN_KIND, "planner", pa_seq),
+        emit_artifact(ownership, OWNERSHIP_KIND, "planner", pa_seq),
     ]
     bodies: dict[str, FrozenModel] = {handles[0].uri: design, handles[1].uri: ownership}
     return handles, bodies
@@ -156,41 +157,19 @@ def senior_state(design: SystemDesign, ownership: OwnershipMap) -> FactoryState:
     return {"artifacts": handles}
 
 
-def scripted_decomposition(criteria_by_unit: dict[str, list[str]]) -> MockTransport:
-    """A transport that answers the schema-constrained decomposition call.
-
-    The Senior's ``complete(..., schema=_DECOMPOSITION_SCHEMA, purpose="ideation")``
-    is a schema-constrained IDEATION call, NOT a verdict. AC3 is resolved (DT1):
-    MockTransport routes to the verdict queue only when the schema IS the verdict
-    schema, so the decomposition payload rides the natural ``completions=`` path
-    and is returned verbatim as ``text`` (the proxy ``json.loads`` it under the
-    decomposition schema).
-    """
-    payload = {
-        "tasks": [
-            {"unit": unit, "title": f"build {unit}", "criterion_ids": cids}
-            for unit, cids in criteria_by_unit.items()
-        ]
-    }
-    # One decomposition call PER Tech-Lead (per OwnershipMap owner) now, not one
-    # global call — so serve the full scripted payload on EVERY call (each lead
-    # extracts the criteria for its own units). default_text carries it for the
-    # 2nd..Nth lead once the explicit completion is popped.
-    body = json.dumps(payload)
-    return MockTransport(completions=[body], default_text=body)
-
-
 # ---- senior_engineer ---------------------------------------------------------
 
 
 def test_senior_emits_one_task_per_unit_in_merge_order() -> None:
     design, ownership = a_design(), an_ownership_map()
-    rt = make_runtime(scripted_decomposition({}))
+    transport = MockTransport()
+    rt = make_runtime(transport)
     node = senior_node(rt, design, ownership)
 
     writes = node(senior_state(design, ownership), config_for("run-A"))
     tasks = writes["tasks"]
 
+    assert transport.requests == []  # deterministic: no model call
     # One task per ownership unit, sequenced by merge_order (owner, unit).
     assert len(tasks) == len(ownership.owners)
     order = ownership.merge_order()
@@ -200,16 +179,9 @@ def test_senior_emits_one_task_per_unit_in_merge_order() -> None:
 
 
 def test_senior_tasks_are_branch_per_task_with_criteria() -> None:
-    design, ownership = a_design(), an_ownership_map()
-    rt = make_runtime(
-        scripted_decomposition(
-            {
-                "src/store.py": ["AC-1", "AC-2"],
-                "src/util.py": ["AC-3"],
-                "src/api.py": [],
-            }
-        )
-    )
+    design = a_design()
+    ownership = an_ownership_map({"src/store.py": ("AC-1", "AC-2"), "src/util.py": ("AC-3",)})
+    rt = make_runtime()
     node = senior_node(rt, design, ownership)
 
     tasks = node(senior_state(design, ownership), config_for("run-A"))["tasks"]
@@ -226,8 +198,8 @@ def test_senior_tasks_are_branch_per_task_with_criteria() -> None:
 
 def test_senior_decomposition_is_deterministic_across_reruns() -> None:
     design, ownership = a_design(), an_ownership_map()
-    rt1 = make_runtime(scripted_decomposition({"src/store.py": ["AC-1"]}))
-    rt2 = make_runtime(scripted_decomposition({"src/store.py": ["AC-1"]}))
+    rt1 = make_runtime()
+    rt2 = make_runtime()
 
     node1 = senior_node(rt1, design, ownership)
     node2 = senior_node(rt2, design, ownership)
@@ -239,7 +211,7 @@ def test_senior_decomposition_is_deterministic_across_reruns() -> None:
 
 def test_senior_never_mints_a_gate_result() -> None:
     design, ownership = a_design(), an_ownership_map()
-    rt = make_runtime(scripted_decomposition({}))
+    rt = make_runtime()
     node = senior_node(rt, design, ownership)
     writes = node(senior_state(design, ownership), config_for("run-A"))
     assert "gates" not in writes  # verdicts are computed + signed by the runner
@@ -249,25 +221,25 @@ def test_senior_never_mints_a_gate_result() -> None:
 
 
 def _single_owner_map() -> OwnershipMap:
-    """All units owned by ONE lead — the byte-identity regression case."""
+    """All units owned by ONE lead — the task-identity regression case."""
     return OwnershipMap(
         owners={"src/api.py": "solo", "src/store.py": "solo", "src/util.py": "solo"},
-        seq=a_seq("principal_architect"),
+        unit_criteria={"src/store.py": ("AC-1",), "src/util.py": ("AC-2",)},
+        seq=a_seq("planner"),
     )
 
 
-def test_single_owner_makes_one_call_byte_identical_to_pre_fanout() -> None:
-    """One owner -> exactly ONE decomposition call over all units, and the task
-    records are exactly what the pre-fan-out Senior produced (same ids, branches,
-    spec_uris, seq order, criteria). The fan-out is a no-op when there's 1 lead."""
+def test_single_owner_task_records_keep_their_identity_formula() -> None:
+    """One owner -> one task per unit with the historical ids, branches,
+    spec_uris and seq order; criteria come from the planner's unit_criteria."""
     design, ownership = a_design(), _single_owner_map()
-    transport = scripted_decomposition({"src/store.py": ["AC-1"], "src/util.py": ["AC-2"]})
+    transport = MockTransport()
     rt = make_runtime(transport)
     node = senior_node(rt, design, ownership)
 
     tasks = node(senior_state(design, ownership), config_for("run-A"))["tasks"]
 
-    assert len(transport.requests) == 1  # ONE lead -> ONE focused decomposition call
+    assert transport.requests == []  # deterministic: no model call
     order = ownership.merge_order()
     assert [t["id"] for t in tasks] == [f"t-{content_digest({'unit': u})[:12]}" for u in order]
     assert [t["seq"][4] for t in tasks] == [0, 1, 2]  # merge-order index preserved
@@ -276,32 +248,33 @@ def test_single_owner_makes_one_call_byte_identical_to_pre_fanout() -> None:
         # spec_uri is byte-identical to the pre-fan-out formula (full-record parity)
         spec_digest = content_digest({"unit": unit, "design": design.design_uri})
         assert t["spec_uri"] == f"cas://task/{spec_digest}"
-    # criteria flowed from the single call
+    # criteria flowed from the planner's ownership map
     assert any(t["criterion_ids"] == ["AC-1"] for t in tasks)
     assert any(t["criterion_ids"] == ["AC-2"] for t in tasks)
 
 
-def test_multi_owner_fans_out_one_call_per_lead() -> None:
-    """N owners -> N decomposition calls (one per Tech-Lead), but the same task
-    ids and the same merge order as a single decomposition would yield."""
-    design, ownership = a_design(), an_ownership_map()  # owner-a (2 units), owner-b (1)
-    transport = scripted_decomposition(
-        {"src/store.py": ["AC-1"], "src/util.py": ["AC-2"], "src/api.py": ["AC-3"]}
+def test_multi_owner_leads_partition_planner_criteria_without_a_model_call() -> None:
+    """N owners -> N leads, zero model calls, and the same task ids and merge
+    order as a single decomposition would yield."""
+    design = a_design()
+    ownership = an_ownership_map(  # owner-a (2 units), owner-b (1)
+        {"src/store.py": ("AC-1",), "src/util.py": ("AC-2",), "src/api.py": ("AC-3",)}
     )
+    transport = MockTransport()
     rt = make_runtime(transport)
     node = senior_node(rt, design, ownership)
 
     writes = node(senior_state(design, ownership), config_for("run-A"))
     tasks = writes["tasks"]
 
-    assert len(transport.requests) == len(ownership.leads()) == 2  # one call per lead
+    assert transport.requests == []
+    assert len(writes["agent_journal"]) == len(ownership.leads()) == 2
     # Same task ids AND same global merge order as a single decomposition would
     # yield — the fan-out changes WHO proposes a task, never its identity/order.
     order = ownership.merge_order()
     assert [t["id"] for t in tasks] == [f"t-{content_digest({'unit': u})[:12]}" for u in order]
     assert [t["seq"][4] for t in tasks] == list(range(len(order)))
-    # Per-lead criteria are partitioned to the right unit (owner-a owns store+util,
-    # owner-b owns api) — each lead enriched only its own units.
+    # Criteria land on the right unit (owner-a owns store+util, owner-b owns api).
     by_id = {t["id"]: t for t in tasks}
 
     def crit(unit: str) -> list[str]:
@@ -313,7 +286,7 @@ def test_multi_owner_fans_out_one_call_per_lead() -> None:
 
 def test_fanout_emits_one_advisory_journal_entry_per_lead() -> None:
     design, ownership = a_design(), an_ownership_map()
-    rt = make_runtime(scripted_decomposition({}))
+    rt = make_runtime()
     node = senior_node(rt, design, ownership)
 
     writes = node(senior_state(design, ownership), config_for("run-A"))
@@ -326,11 +299,11 @@ def test_fanout_emits_one_advisory_journal_entry_per_lead() -> None:
     assert "gates" not in writes and "gate_triage" not in writes
 
 
-def test_empty_ownership_map_makes_no_calls() -> None:
-    """No owners -> no leads -> no decomposition calls, empty tasks + journal."""
+def test_empty_ownership_map_makes_no_tasks() -> None:
+    """No owners -> no leads -> empty tasks + journal."""
     design = a_design()
-    ownership = OwnershipMap(owners={}, seq=a_seq("principal_architect"))
-    transport = scripted_decomposition({})
+    ownership = OwnershipMap(owners={}, seq=a_seq("planner"))
+    transport = MockTransport()
     rt = make_runtime(transport)
     node = senior_node(rt, design, ownership)
 
@@ -338,7 +311,7 @@ def test_empty_ownership_map_makes_no_calls() -> None:
 
     assert writes["tasks"] == []
     assert writes["agent_journal"] == []
-    assert len(transport.requests) == 0  # nothing to decompose -> no egress
+    assert len(transport.requests) == 0
 
 
 def test_stub_conflict_resolution_is_typed_and_deterministic() -> None:
@@ -603,7 +576,7 @@ def test_junior_requires_an_adapter(tmp_path: Any) -> None:
 
 def test_senior_node_runs_inside_a_state_graph() -> None:
     design, ownership = a_design(), an_ownership_map()
-    rt = make_runtime(scripted_decomposition({"src/store.py": ["AC-1"]}))
+    rt = make_runtime()
     g = StateGraph(FactoryState)
     g.add_node("senior", senior_node(rt, design, ownership))
     g.add_edge(START, "senior")

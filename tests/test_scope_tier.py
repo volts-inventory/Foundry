@@ -1,21 +1,19 @@
-"""Scope tiering — the Scope Judge node and the caps it drives.
+"""Scope tiering — the planner's scope decision and the caps it drives.
 
 Asserts the properties the feature's safety rests on:
 
-* a supplied design spec short-circuits to STANDARD with no model call;
+* a supplied design spec forces STANDARD whatever the model answers;
 * the model decides everything else, and anything that is not exactly "demo"
   degrades to STANDARD;
-* every node that can make a model call is scripted for `--backend mock`, or the
-  run dies as a ProxyUnavailable on the documented smoke path;
-* an already-decided ``scope_tier`` (an operator ``--scope`` pin, or a resume
-  re-entry) short-circuits the node with no write and no model call;
-* ``scope_directive`` is EMPTY at standard tier, so a non-demo run's prompts are
-  byte-identical to a pre-tiering run — the feature's only behavioural delta is
-  on a DEMO run;
+* an already-decided ``scope_tier`` (an operator ``--scope`` pin, or a spec_fix
+  re-entry) is never rewritten, and its caps reach the prompt — except on a
+  revision pass, where closing the gate gap wins over the cap;
+* ``scope_directive`` is EMPTY at standard tier, so a non-demo run's prompts
+  carry no caps — the feature's only behavioural delta is on a DEMO run;
 * the demo directives preserve the floor the deterministic gates enforce (the
   per-criterion oracle hint, one security/abuse criterion, the manifest
   criterion, and a non-empty ownership map);
-* scope tiering never relaxes integrity, and the judge writes no gate channel.
+* scope tiering never relaxes integrity, and the planner writes no gate channel.
 """
 
 from __future__ import annotations
@@ -27,36 +25,35 @@ from langchain_core.runnables import RunnableConfig
 
 from foundry.agents import AgentRuntime
 from foundry.agents._common import scope_directive
-from foundry.agents.product import make_scope_judge_node
+from foundry.agents.planner import make_planner_node
 from foundry.gates.attestation import ZoneBSigner
 from foundry.proxy import ModelProviderProxy
 from foundry.proxy.test_doubles import MockTransport
+from foundry.schemas.gates import GateResult, GateStatus, VerdictClass
 from foundry.schemas.governance import ScopeDecision, ScopeTier
 from foundry.state.seq import Seq
+from tests.test_planner import PLAN
 
 KEY = b"dev-zone-b-scope-key"
 KEY_ID = "dev-key-scope"
 
-DEMO_PAYLOAD: dict[str, Any] = {
+DEMO_SCOPE: dict[str, Any] = {
     "tier": "demo",
     "rationale": "asks for a demo of one feature",
     "signals": ["demo"],
 }
-STANDARD_PAYLOAD: dict[str, Any] = {
+STANDARD_SCOPE: dict[str, Any] = {
     "tier": "standard",
     "rationale": "a real system despite the word 'simple'",
     "signals": [],
 }
 
 
-def runtime_for(*payloads: dict[str, Any]) -> AgentRuntime:
-    """A runtime whose free-text completion queue yields ``payloads`` in order."""
-    return AgentRuntime(
-        proxy=ModelProviderProxy(
-            MockTransport(completions=[json.dumps(p) for p in payloads]),
-            signer=ZoneBSigner(KEY, KEY_ID),
-        )
-    )
+def runtime_for(*scopes: dict[str, Any]) -> tuple[AgentRuntime, MockTransport]:
+    """A runtime whose planner replies carry ``scopes`` in order."""
+    tx = MockTransport(completions=[json.dumps({**PLAN, "scope": s}) for s in scopes])
+    proxy = ModelProviderProxy(tx, signer=ZoneBSigner(KEY, KEY_ID))
+    return AgentRuntime(proxy=proxy), tx
 
 
 def config_for(run_id: str, step: int = 1) -> RunnableConfig:
@@ -71,47 +68,45 @@ def _pinned(tier: ScopeTier) -> ScopeDecision:
     return ScopeDecision(tier=tier, rationale="pinned", seq=_seq())
 
 
-# ---- the one deterministic short-circuit ------------------------------------
+def _prompt(tx: MockTransport) -> str:
+    return json.dumps(tx.requests[-1], ensure_ascii=False)
 
 
-def test_supplied_design_spec_forces_standard_without_a_model_call() -> None:
-    rt = runtime_for()
-    writes = make_scope_judge_node(rt)(
+# ---- the one deterministic override ------------------------------------------
+
+
+def test_supplied_design_spec_forces_standard_whatever_the_model_says() -> None:
+    rt, tx = runtime_for(DEMO_SCOPE)
+    writes = make_planner_node(rt)(
         {"request": "a simple demo shortener", "spec": "# Design\nDetailed doc."},
         config_for("r"),
     )
 
     assert writes["scope_tier"].tier is ScopeTier.STANDARD
     assert "design spec" in writes["scope_tier"].rationale
-    assert "gates" not in writes  # a product node never mints a verdict (L5)
+    assert "SCOPE IS FIXED: standard" in _prompt(tx)
+    assert "gates" not in writes  # the planner never mints a verdict (L5)
 
 
 # ---- the model decides everything else --------------------------------------
 
 
-def test_every_other_request_reaches_the_model_and_demo_is_honored() -> None:
-    rt = runtime_for(DEMO_PAYLOAD)
-    writes = make_scope_judge_node(rt)({"request": "a demo URL shortener"}, config_for("r"))
+def test_demo_is_honored_and_the_conditional_caps_are_offered() -> None:
+    rt, tx = runtime_for(DEMO_SCOPE)
+    writes = make_planner_node(rt)({"request": "a demo URL shortener"}, config_for("r"))
 
     decision = writes["scope_tier"]
     assert decision.tier is ScopeTier.DEMO
     assert decision.signals == ("demo",)
-
-
-def test_a_plain_request_with_no_smallness_word_still_reaches_the_model() -> None:
-    # No keyword prefilter: the judge sees every request that has no design spec,
-    # so wordings a keyword list would miss ("proof of concept") stay reachable.
-    rt = runtime_for(DEMO_PAYLOAD)
-    writes = make_scope_judge_node(rt)(
-        {"request": "a proof of concept for a link redirector"}, config_for("r")
-    )
-
-    assert writes["scope_tier"].tier is ScopeTier.DEMO
+    prompt = _prompt(tx)
+    assert "IF you judge scope.tier = 'demo'" in prompt
+    assert "AT MOST 5 acceptance criteria" in prompt
+    assert "AT MOST 1 component" in prompt
 
 
 def test_model_may_overrule_the_wording_and_return_standard() -> None:
-    rt = runtime_for(STANDARD_PAYLOAD)
-    writes = make_scope_judge_node(rt)(
+    rt, _ = runtime_for(STANDARD_SCOPE)
+    writes = make_planner_node(rt)(
         {"request": "a simple ledger for production payroll"}, config_for("r")
     )
 
@@ -120,23 +115,55 @@ def test_model_may_overrule_the_wording_and_return_standard() -> None:
 
 def test_unrecognized_tier_degrades_to_standard() -> None:
     # Fail-to-full-scope: only the exact string "demo" caps the build.
-    rt = runtime_for({"tier": "DEMO-ish", "rationale": "?"})
-    writes = make_scope_judge_node(rt)({"request": "a demo shortener"}, config_for("r"))
+    rt, _ = runtime_for({"tier": "DEMO-ish", "rationale": "?"})
+    writes = make_planner_node(rt)({"request": "a demo shortener"}, config_for("r"))
 
     assert writes["scope_tier"].tier is ScopeTier.STANDARD
 
 
-# ---- idempotence: an existing decision short-circuits the node ---------------
+# ---- an existing decision is kept --------------------------------------------
 
 
-def test_existing_decision_short_circuits_with_no_write_and_no_model_call() -> None:
-    rt = runtime_for()  # empty queue: a model call would raise
-    writes = make_scope_judge_node(rt)(
+def test_existing_decision_is_never_rewritten_and_its_caps_reach_the_prompt() -> None:
+    rt, tx = runtime_for(STANDARD_SCOPE)  # the model's answer must not win
+    writes = make_planner_node(rt)(
         {"request": "a demo shortener", "scope_tier": _pinned(ScopeTier.DEMO)},
         config_for("r"),
     )
 
-    assert writes == {}
+    assert "scope_tier" not in writes
+    prompt = _prompt(tx)
+    assert "SCOPE IS FIXED: demo" in prompt
+    assert "AT MOST 5 acceptance criteria" in prompt
+
+
+def test_a_revision_pass_drops_the_scope_cap() -> None:
+    """A revision pass exists only to close a gate-BLOCKING gap, so its "reproduce
+    every criterion AND add" instruction must not be handed to the model alongside
+    an "at most 5 criteria" cap. Closing the gap wins."""
+    rt, tx = runtime_for(DEMO_SCOPE)
+    failed = GateResult(
+        name="spec",
+        status=GateStatus.FAIL,
+        decision_deterministic=True,
+        execution_deterministic=False,
+        verdict_class=VerdictClass.CONFIG_EVALUABLE,
+        findings=("criteria set is empty",),
+        run_against="sha",
+        seq=_seq(),
+    )
+    make_planner_node(rt)(
+        {
+            "request": "a demo shortener",
+            "scope_tier": _pinned(ScopeTier.DEMO),
+            "gates": [failed],
+        },
+        config_for("r"),
+    )
+
+    prompt = _prompt(tx)
+    assert "REVISION PASS" in prompt
+    assert "AT MOST 5 acceptance criteria" not in prompt
 
 
 # ---- the caps the decision drives -------------------------------------------
@@ -182,33 +209,6 @@ def test_demo_architect_directive_caps_fan_out_but_never_to_zero() -> None:
 def test_scope_tiering_never_relaxes_integrity() -> None:
     assert _pinned(ScopeTier.DEMO).relaxes_integrity() is False
     assert _pinned(ScopeTier.STANDARD).relaxes_integrity() is False
-
-
-def test_every_model_calling_node_is_scripted_for_the_mock_backend() -> None:
-    """The mock backend serves `default_text=""` for an unscripted node, which
-    fails structured-output parsing and dies as ProxyUnavailable after retries.
-    The scope judge shipped unscripted and crashed `--backend mock` on any
-    request the (since-removed) keyword prefilter let through — including the
-    README's own example. Assert the SOP marker the script is keyed on."""
-    from foundry.agents.product.scope_judge import SOP
-    from foundry.cli import _SCRIPTS
-
-    matched = [key for key in _SCRIPTS if key in SOP]
-    assert matched, f"the Scope Judge SOP matches no _SCRIPTS key; it would serve '' — {SOP[:60]!r}"
-    assert json.loads(_SCRIPTS[matched[0]])["tier"] in ("demo", "standard")
-
-
-def test_a_revision_pass_drops_the_scope_cap() -> None:
-    """A revision pass exists only to close a gate-BLOCKING criteria omission, so
-    its "reproduce every criterion AND add" instruction must not be handed to the
-    model alongside a "at most 5 criteria" cap. Closing the gap wins."""
-    from foundry.agents.product.product_manager import _revision_directive
-
-    # No critique on the channel => no revision pass => the cap applies.
-    rt = runtime_for()
-    state = {"request": "a demo shortener", "scope_tier": _pinned(ScopeTier.DEMO)}
-    assert _revision_directive(state, rt) == ""
-    assert scope_directive(state) != ""
 
 
 def test_scope_decision_round_trips_the_checkpoint_serde() -> None:

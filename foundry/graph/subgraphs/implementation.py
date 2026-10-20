@@ -13,7 +13,7 @@ still reported itself as a working agent. The routers key on the same
 ``leads_for_lane`` / ``tasks_for_lane`` predicates the nodes partition with, so the
 edge and the node can never disagree (the architecture subgraph's AC2 pattern).
 
-The Senior Engineer (T1) reads the SystemDesign + OwnershipMap off
+The Senior Engineer (no model call) reads the SystemDesign + OwnershipMap off
 ``state["artifacts"]`` (by ``Artifact.kind``, reconstituted through the injected
 ``resolve``) and decomposes them into a deterministic, ownership-ordered
 ``Task[]`` on the ``tasks`` channel (one ``task/<id>`` branch each). The Junior
@@ -70,7 +70,6 @@ def build_implementation_subgraph(
     source_dir: str,
     resolve: ArtifactResolver,
     snapshot_store: str | None = None,
-    tier: str = "T1",
     turn_budget: int = 8,
     cost_budget_microusd: int = 1_000_000,
     max_slots: int = 1,
@@ -93,8 +92,6 @@ def build_implementation_subgraph(
     snapshot_store:
         DURABLE snapshot/blob store path so a retry's base snapshot survives the
         sandbox destroy/rebuild (LEARNINGS IM1).
-    tier:
-        Model tier for the Senior's decomposition call (T1 default).
     turn_budget / cost_budget_microusd:
         Per-task adapter budgets the Junior carries into each ``TaskPacket``.
 
@@ -125,7 +122,7 @@ def build_implementation_subgraph(
     lead_ids: list[str] = []
     eng_ids: list[str] = []
     for _lane in ENGINEERING_LANES:
-        lead = make_senior_engineer_node(rt, resolve=resolve, tier=tier, lane=_lane)
+        lead = make_senior_engineer_node(rt, resolve=resolve, lane=_lane)
         eng = make_junior_engineer_node(
             rt,
             source_dir=source_dir,

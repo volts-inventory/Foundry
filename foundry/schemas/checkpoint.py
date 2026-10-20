@@ -49,7 +49,7 @@ if TYPE_CHECKING:
     # Reconstitutes a typed body from its content-addressed handle (CAS in prod).
     ArtifactResolver = Callable[[Artifact], Any]
 
-# The Artifact.kind the Principal Architect stamps on the OwnershipMap handle.
+# The Artifact.kind the planner stamps on the OwnershipMap handle.
 # Held as a literal here (not imported from the agents layer) to keep schemas
 # free of an agents dependency.
 _OWNERSHIP_KIND = "ownership_map"

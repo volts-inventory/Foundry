@@ -11,6 +11,8 @@ import re
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
+from pydantic import Field
+
 from foundry.schemas.base import FrozenModel
 from foundry.state.seq import Seq
 
@@ -105,6 +107,9 @@ class OwnershipMap(FrozenModel):
     state), so a LangGraph resume re-derives the identical order."""
 
     owners: dict[str, str]  # path / interface name -> owner (task or agent id)
+    # unit -> the acceptance-criterion ids it implements (the planner authors it,
+    # so lead decomposition is deterministic — no model call).
+    unit_criteria: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     version: int = 1
     supersedes: str | None = None
     seq: Seq

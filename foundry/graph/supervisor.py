@@ -11,11 +11,10 @@ Topology (the SOP phase order — agents.md, governance §1 gate boundaries)::
 
     START
       -> triage              # classify -> route + seed per-route budget
-      -> product             # Layer 1 subgraph (PRD + AcceptanceCriterion[])
-      -> architecture        # Layer 2 subgraph (SystemDesign + constraints)
-      -> spec_gate           # [SPEC gate] criteria(product) x design(arch)
+      -> planner             # ONE model call: PRD + criteria + design + ownership
+      -> spec_gate           # [SPEC gate] criteria x design
          --(advance)--> implementation
-         --(fix)-----> spec_fix -> architecture        (bounded re-verification)
+         --(fix)-----> spec_fix -> planner             (bounded re-verification)
          --(halt)----> END
       -> implementation      # Layer 3 subgraph (Task[] -> FeatureDiff[])
       -> quality             # Layer 4 subgraph (TestPlan/Report/E2E + review)
@@ -54,8 +53,7 @@ boundaries to the Phase-1 spine, never relaxing its convergence bound or
 attested-only advancement::
 
     triage (classify_tier -> risk_tier + mode)
-      -> product
-      -> architecture
+      -> planner
       -> design_sign_off     # [Design gate] record a SignOffRecord (always)
       -> spec_gate           # (unchanged integrity boundary)
       -> implementation
@@ -118,10 +116,9 @@ from foundry.graph.gate_wiring import (
     run_build_test_gates,
     run_spec_gate,
 )
-from foundry.graph.subgraphs.architecture import build_architecture_subgraph
 from foundry.graph.subgraphs.assurance import build_assurance_subgraph
 from foundry.graph.subgraphs.implementation import build_implementation_subgraph
-from foundry.graph.subgraphs.product import build_product_subgraph
+from foundry.graph.subgraphs.planner import build_planner_subgraph
 from foundry.graph.subgraphs.quality import build_quality_subgraph
 from foundry.schemas.base import BudgetLedger
 from foundry.schemas.checkpoint import (
@@ -174,8 +171,8 @@ MODE_AUTONOMOUS = "autonomous"
 # ---- supervisor node ids ----------------------------------------------------
 
 _TRIAGE = "triage"
-_PRODUCT = "product"
-_ARCHITECTURE = "architecture"
+# The planner subgraph (product + architecture in one model call).
+_PLANNER = "planner"
 _SPEC_GATE = "spec_gate"
 _IMPLEMENTATION = "implementation"
 _QUALITY = "quality"
@@ -426,7 +423,7 @@ def build_supervisor_graph(
         Base tree cloned into each per-task sandbox (the implementation layer's
         Junior; INFRA).
     index:
-        Context retriever for the Principal Architect (``None`` = greenfield,
+        Context retriever for the planner (``None`` = greenfield,
         empty retrieval; AC1).
     max_fix_attempts:
         Convergence bound: a gate boundary may route ``fix`` (re-verification)
@@ -437,7 +434,7 @@ def build_supervisor_graph(
         ``"assistant"`` (DEFAULT) builds the Phase-1 topology unchanged
         (back-compat). ``"gated"`` builds the Phase-2 flow: triage tiering
         (``classify_tier`` → ``risk_tier``), a Design sign-off boundary after
-        architecture, the assurance subgraph after build+test, and a Release
+        the planner, the assurance subgraph after build+test, and a Release
         sign-off boundary (``release_allowed``-gated, fail-closed) before emit.
         ``"autonomous"`` (Phase-4, T-M4-10) builds the SAME assurance spine as
         Gated (tiering + the Design sign-off boundary + the assurance subgraph
@@ -565,22 +562,16 @@ def build_supervisor_graph(
     # Each builder returns an UNCOMPILED StateGraph (SG4); we ``.compile()`` each
     # so it can be added as a single node of the supervisor (its internal
     # channel writes fold through FactoryState's reducers on the parent run).
-    product = build_product_subgraph(rt).compile()
-    architecture = build_architecture_subgraph(rt, index).compile()
+    planner = build_planner_subgraph(rt, index).compile()
     implementation = build_implementation_subgraph(
         rt, source_dir=source_dir, resolve=resolve,
         max_slots=max_slots, cost_cap_microusd=cost_cap_microusd,
     ).compile()
     quality = build_quality_subgraph(rt, resolve=resolve).compile()
 
-    def product_node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
-        out: dict[str, Any] = dict(product.invoke(state, config))
-        out["phase"] = _PRODUCT
-        return out
-
-    def architecture_node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
-        out: dict[str, Any] = dict(architecture.invoke(state, config))
-        out["phase"] = _ARCHITECTURE
+    def planner_node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        out: dict[str, Any] = dict(planner.invoke(state, config))
+        out["phase"] = _PLANNER
         return out
 
     def implementation_node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
@@ -872,8 +863,7 @@ def build_supervisor_graph(
 
     # -- register nodes (concrete defs; SG2/IM5 mypy seam) --------------------
     g.add_node(_TRIAGE, triage)
-    g.add_node(_PRODUCT, product_node)
-    g.add_node(_ARCHITECTURE, architecture_node)
+    g.add_node(_PLANNER, planner_node)
     g.add_node(_SPEC_GATE, spec_gate)
     g.add_node(_IMPLEMENTATION, implementation_node)
     g.add_node(_QUALITY, quality_node)
@@ -908,32 +898,39 @@ def build_supervisor_graph(
 
     # -- wire the phase sequence ----------------------------------------------
     g.add_edge(START, _TRIAGE)
-    g.add_edge(_TRIAGE, _PRODUCT)
-    # PRODUCT stage boundary checkpoint: after product/spec, before architecture.
-    _ckpt_edge(_PRODUCT, CheckpointBoundary.PRODUCT, _ARCHITECTURE)
+    g.add_edge(_TRIAGE, _PLANNER)
+    # The planner emits product AND design in one pass, so the PRODUCT and DESIGN
+    # checkpoints both sit after it, in that order (each only when enabled).
+    design_entry = _DESIGN_SIGN_OFF if gated else (
+        _CHECKPOINT_NODE[CheckpointBoundary.DESIGN]
+        if CheckpointBoundary.DESIGN in ckpt_set else _SPEC_GATE
+    )
+    _ckpt_edge(_PLANNER, CheckpointBoundary.PRODUCT, design_entry)
 
     if gated:
-        # Design sign-off boundary AFTER architecture, BEFORE the spec gate
+        # Design sign-off boundary AFTER the plan, BEFORE the spec gate
         # (the integrity boundary is unchanged — the sign-off is an ADDED
         # boundary, never a relaxation). The DESIGN checkpoint sits AFTER the
         # Design sign-off (it does not bypass it) and BEFORE the spec gate.
         g.add_node(_DESIGN_SIGN_OFF, design_sign_off)
         g.add_node(_ASSURANCE, assurance_node)
         g.add_node(_RELEASE_SIGN_OFF, release_sign_off)
-        g.add_edge(_ARCHITECTURE, _DESIGN_SIGN_OFF)
         _ckpt_edge(_DESIGN_SIGN_OFF, CheckpointBoundary.DESIGN, _SPEC_GATE)
-    else:
-        # DESIGN stage boundary checkpoint: after architecture, before the spec gate.
-        _ckpt_edge(_ARCHITECTURE, CheckpointBoundary.DESIGN, _SPEC_GATE)
+    elif CheckpointBoundary.DESIGN in ckpt_set:
+        g.add_conditional_edges(
+            _CHECKPOINT_NODE[CheckpointBoundary.DESIGN],
+            _route_checkpoint(CheckpointBoundary.DESIGN),
+            {_CKPT_PROCEED: _SPEC_GATE, _CKPT_HALT: END},
+        )
 
-    # SPEC boundary: advance -> implementation; fix -> back to architecture;
-    # halt -> END. The path map lists every legal router return value.
+    # SPEC boundary: advance -> implementation; fix -> back to the planner (which
+    # reads the failing findings off the gates channel); halt -> END.
     g.add_conditional_edges(
         _SPEC_GATE,
         _route_spec,
         {"advance": _IMPLEMENTATION, "fix": _SPEC_FIX, "halt": END},
     )
-    g.add_edge(_SPEC_FIX, _ARCHITECTURE)  # re-verify the responsible layer
+    g.add_edge(_SPEC_FIX, _PLANNER)  # re-plan with the Spec gate's findings
 
     g.add_edge(_IMPLEMENTATION, _QUALITY)
     g.add_edge(_QUALITY, _BUILD_TEST_GATE)

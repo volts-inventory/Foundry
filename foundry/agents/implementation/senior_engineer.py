@@ -6,32 +6,30 @@ well-specified :class:`~foundry.schemas.implementation.Task` units, one per
 branch (``task/<id>``), each tracing back to the acceptance criteria it
 implements (``criterion_ids``).
 
-Org fan-out (org_fanout_design.md, Wave B): the decomposition runs ONE focused
-proxy call PER Tech-Lead — one per OwnershipMap owner (``OwnershipMap.leads()``)
-— each decomposing only its own ``units_of(owner)``. Because the task id/seq/
-branch are keyed off the unit and its GLOBAL merge-order index, this changes only
-WHO proposes a task, never its identity or order: a single-owner map is one call,
-byte-identical to the pre-fan-out Senior; a multi-owner map keeps the same ids and
-the same merge order, differing only in per-domain ``criterion_ids`` enrichment.
-The branch/merge ORDER is a deterministic function of the architect's
+The decomposition is DETERMINISTIC — no model call. The planner already
+authored, per ownership unit, the criterion ids it implements
+(``OwnershipMap.unit_criteria``); each Tech-Lead (one per OwnershipMap owner,
+``OwnershipMap.leads()``) turns its own ``units_of(owner)`` into one task each.
+The task id/seq/branch are keyed off the unit and its GLOBAL merge-order index,
+so which lead emits a task never changes its identity or order.
+The branch/merge ORDER is a deterministic function of the planner's
 :class:`~foundry.schemas.architecture.OwnershipMap` —
 ``OwnershipMap.merge_order()`` — so a LangGraph resume re-derives the identical
 ordering (no reliance on dict insertion or process state; LEARNINGS L8).
 
 State-reading convention (LEARNINGS AR1-AR4, IM4): the node's DATA inputs — the
-SystemDesign and OwnershipMap the architecture layer produced — are read from
+SystemDesign and OwnershipMap the planner produced — are read from
 ``state["artifacts"]`` INSIDE the closure (found by ``Artifact.kind``), NEVER
 captured as build-time factory kwargs. The artifacts channel carries only the
 content-addressed HANDLES (DS9), so the typed bodies are reconstituted through
 an injected ``resolve`` callable (an INFRA dependency, like ``rt.adapter``):
 the orchestrator wires it to the CAS; tests wire it to an in-memory map. This
 keeps the factory composable — one ``rt`` + infra, the per-run data flows in on
-the state channels exactly as the architecture subgraph emitted it.
+the state channels exactly as the planner emitted it.
 
 Convention (LEARNINGS AR1-AR4): a ``make_senior_engineer_node(rt, ...) ->
 NodeFn`` factory returns a closure ``(state, config) -> channel-writes`` that
-mints a deterministic :class:`~foundry.state.seq.Seq` via ``rt.seq`` and reaches
-the single model egress through ``rt.proxy.complete`` (L6). It writes the
+mints a deterministic :class:`~foundry.state.seq.Seq` via ``rt.seq``. It writes the
 decomposed tasks to the ``tasks`` channel (``list[dict]`` keyed by ``id``);
 nothing here mints a ``GateResult`` — the Senior's review verdict is produced on
 the trusted ``rt.proxy.judge`` path, never minted by the agent (L5).
@@ -44,7 +42,6 @@ and the graph wiring can depend on the shape before the integration loop lands.
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING, Any
 
 from foundry.agents._common import journal_entry
@@ -78,41 +75,11 @@ __all__ = [
 
 NODE_ID = "senior_engineer"
 
-# The Artifact.kind tags the Principal Architect stamps on its handles
-# (foundry/agents/architecture/principal_architect.py) — the seam the Senior
-# reads its DATA inputs back off the artifacts channel by.
+# The Artifact.kind tags the planner stamps on its handles
+# (foundry/agents/planner.py) — the seam the Senior reads its DATA inputs back
+# off the artifacts channel by.
 DESIGN_KIND = "system_design"
 OWNERSHIP_KIND = "ownership_map"
-
-_SOP = (
-    "You are the Senior Engineer. Decompose the system design into a set of "
-    "well-specified, independently-buildable tasks. Each task implements one or "
-    "more acceptance criteria and is scoped to a single ownership unit so it can "
-    "be built on its own branch. Reply with JSON only."
-)
-
-# Grammar-constrained decomposition channel: the proxy json.loads this off the
-# structured-output channel, so the adapter cannot smuggle free text past it.
-_DECOMPOSITION_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "tasks": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "unit": {"type": "string"},
-                    "title": {"type": "string"},
-                    "criterion_ids": {"type": "array", "items": {"type": "string"}},
-                },
-                "required": ["unit", "title", "criterion_ids"],
-                "additionalProperties": False,
-            },
-        }
-    },
-    "required": ["tasks"],
-    "additionalProperties": False,
-}
 
 
 class ArtifactResolverError(LookupError):
@@ -209,7 +176,6 @@ def make_senior_engineer_node(
     rt: AgentRuntime,
     *,
     resolve: ArtifactResolver,
-    tier: str = "T1",
     lane: str | None = None,
 ) -> NodeFn:
     """Build the Senior Engineer node.
@@ -222,9 +188,6 @@ def make_senior_engineer_node(
         orchestrator wires it to the CAS; tests wire it to an in-memory map. The
         DATA (WHICH design/ownership) is read from ``state["artifacts"]`` inside
         the closure — never a build-time kwarg (LEARNINGS IM4 / AR1-AR4).
-    tier:
-        Model tier for the decomposition call (T1 default — defects are born in
-        implementation, agents.md Layer 3).
     lane:
         Discipline LANE (``frontend``/``backend``/``data``) this node owns. When set,
         the node decomposes ONLY the Tech-Leads whose area folds into this lane
@@ -246,42 +209,13 @@ def make_senior_engineer_node(
         order = ownership.merge_order()
         index_of = {unit: i for i, unit in enumerate(order)}  # GLOBAL, spans all lanes
 
-        # ONE Tech-Lead per domain (each OwnershipMap owner; Wave A
-        # `OwnershipMap.leads()`): a lead decomposes ONLY its own ownership units,
-        # so its decomposition context stays focused on its slice. The task
-        # id/seq/branch are GLOBAL — keyed off the unit and its merge-order index —
-        # so the org fan-out changes WHO proposes a task, never its identity:
-        #   * a single-owner map makes exactly one decomposition call over all
-        #     units, byte-identical to the pre-fan-out Senior (regression guard);
-        #   * a multi-owner map preserves the same task ids AND the same merge
-        #     order (leads + units iterate in (owner, unit) order == merge_order);
-        #     only the per-domain `criterion_ids` enrichment differs — the point.
-        # Areas/leads are DERIVED from the OwnershipMap (Wave A); nothing about the
-        # org is stored on the Task (a later wave records lineage where consumed).
+        # The task id/seq/branch are GLOBAL — keyed off the unit and its
+        # merge-order index — so lane scoping changes WHO emits a task, never its
+        # identity (leads + units iterate in (owner, unit) order == merge_order).
         tasks: list[dict[str, Any]] = []
         notes: list[JournalEntry] = []
         for lead in leads_for_lane(ownership, lane):   # another lane owns the rest
             units = ownership.units_of(lead)
-            prompt = json.dumps(
-                {
-                    "design_title": design.title,
-                    "design_uri": design.design_uri,
-                    "components": list(design.components),
-                    "interfaces": list(design.interface_ids),
-                    "ownership_units_in_merge_order": list(units),
-                },
-                sort_keys=True,
-                ensure_ascii=False,
-            )
-            result = rt.proxy.complete(
-                NODE_ID,
-                tier,
-                _SOP,
-                [{"role": "user", "content": prompt}],
-                purpose="ideation",
-                schema=_DECOMPOSITION_SCHEMA,
-            )
-            criteria_by_unit = _criteria_by_unit((result.parsed or {}).get("tasks", []))
             for unit in units:
                 tid = task_id_for_unit(unit)
                 seq = rt.seq(config, NODE_ID, f"task:{tid}", local=index_of[unit])
@@ -289,13 +223,12 @@ def make_senior_engineer_node(
                 task = Task(
                     id=tid,
                     spec_uri=f"cas://task/{spec_digest}",
-                    criterion_ids=criteria_by_unit.get(unit, ()),
+                    criterion_ids=ownership.unit_criteria.get(unit, ()),
                     branch=f"task/{tid}",
                     seq=seq,
                 )
                 tasks.append(task.model_dump(mode="json"))
-            # ADVISORY per-lead journal note (plan [11]; zero extra model call —
-            # derived from data this lead already produced). Distinct seq key per
+            # ADVISORY per-lead journal note (plan [11]). Distinct seq key per
             # lead so `union_journal` keeps one entry per domain. Never a trust
             # input; no gate reads it.
             area = ownership.area_of(lead)
@@ -314,24 +247,6 @@ def make_senior_engineer_node(
         return {"tasks": tasks, "agent_journal": notes}
 
     return _node
-
-
-def _criteria_by_unit(proposed: list[Any]) -> dict[str, tuple[str, ...]]:
-    """Index the model's proposed criterion_ids by ownership unit.
-
-    Defensive: ignores malformed entries (the merge order, not the model, is
-    the source of truth for WHICH tasks exist — the model only enriches each
-    task with its criteria traceability)."""
-    out: dict[str, tuple[str, ...]] = {}
-    for entry in proposed:
-        if not isinstance(entry, dict):
-            continue
-        unit = entry.get("unit")
-        if not isinstance(unit, str):
-            continue
-        cids = entry.get("criterion_ids", [])
-        out[unit] = tuple(str(c) for c in cids) if isinstance(cids, list) else ()
-    return out
 
 
 def stub_conflict_resolution(

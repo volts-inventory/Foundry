@@ -148,7 +148,7 @@ def test_progress_cb_streams_live_nodes_without_breaking_checkpoints() -> None:
     assert res.passed is True
     # Live telemetry actually fired with real agent node ids streamed per-node.
     assert nodes, "progress_cb must receive streamed node names"
-    assert "product_manager" in nodes and "principal_architect" in nodes
+    assert "planner" in nodes and "backend_lead" in nodes
     # Both edges stream now: a node is seated on START and cleared on FINISH.
     assert "start" in phases and "finish" in phases
 

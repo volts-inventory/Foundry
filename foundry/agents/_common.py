@@ -187,6 +187,12 @@ def scope_directive(state: FactoryState, *, architect: bool = False) -> str:
     return _DEMO_ARCHITECT_DIRECTIVE if architect else _DEMO_PM_DIRECTIVE
 
 
+def demo_directives() -> str:
+    """Both DEMO caps (criteria + architecture), for a prompt that decides the
+    scope tier in the same call that applies it."""
+    return _DEMO_PM_DIRECTIVE + _DEMO_ARCHITECT_DIRECTIVE
+
+
 def journal_entry(
     *,
     node_id: str,

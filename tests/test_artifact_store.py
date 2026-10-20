@@ -25,10 +25,7 @@ from langchain_core.runnables import RunnableConfig
 
 from foundry.agents import AgentRuntime
 from foundry.agents._common import emit_artifact
-from foundry.agents.product import (
-    make_product_manager_node,
-    make_stakeholder_proxy_node,
-)
+from foundry.agents.planner import make_planner_node
 from foundry.durability.artifact_store import ArtifactStore, UnknownArtifactError
 from foundry.gates.attestation import ZoneBSigner
 from foundry.proxy import ModelProviderProxy
@@ -37,6 +34,7 @@ from foundry.schemas.architecture import SystemDesign
 from foundry.schemas.implementation import FeatureDiff
 from foundry.schemas.product import AcceptanceCriterion, Criticality
 from foundry.state.seq import Seq
+from tests.planner_payload import plan_payload
 
 KEY = b"dev-zone-b-artifact-store-key"
 KEY_ID = "dev-key-artifact-store"
@@ -214,14 +212,19 @@ def _cas_runtime(*payloads: dict[str, Any]) -> tuple[AgentRuntime, ArtifactStore
 
 
 def test_agent_nodes_emit_handles_that_resolve_back_via_store() -> None:
-    """Drive the stakeholder + product-manager nodes with a cas-backed runtime;
-    every emitted handle resolves back to an EQUAL typed body via store.resolve."""
-    rt, cas = _cas_runtime(INTENT_PAYLOAD, PRD_PAYLOAD)
+    """Drive the planner with a cas-backed runtime; every emitted handle resolves
+    back to an EQUAL typed body via store.resolve."""
+    rt, cas = _cas_runtime(
+        plan_payload(
+            intent=INTENT_PAYLOAD,
+            prd=PRD_PAYLOAD,
+            critique={"missing": [], "security_abuse_omissions": []},
+            sprint={"milestones": [], "usd_cap_microusd": 0, "done_definition": "done"},
+            design={"title": "Todo", "ownership": {"app.py": "owner-a"}},
+        )
+    )
 
-    intent_writes = make_stakeholder_proxy_node(rt)({"request": "todo app"}, _config("run-E"))
-    prd_writes = make_product_manager_node(rt)({"request": "todo app"}, _config("run-E", 2))
-
-    handles = [*intent_writes["artifacts"], *prd_writes["artifacts"]]
+    handles = make_planner_node(rt)({"request": "todo app"}, _config("run-E"))["artifacts"]
     # Every handle is content-addressed and resolves to a body of a matching kind.
     assert handles
     for handle in handles:

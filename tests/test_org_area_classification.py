@@ -28,11 +28,11 @@ def _map(owners: dict[str, str]) -> OwnershipMap:
 
 
 def test_ownership_map_serialization_has_no_area_field() -> None:
-    """Areas are DERIVED, never stored — model_dump must not gain a key (the
-    ownership_map digest/state_sha stay identical to pre-Wave-A)."""
+    """Areas are DERIVED, never stored — model_dump must not gain an area key.
+    (``unit_criteria`` is the planner's stored per-unit criterion mapping.)"""
     om = _map({"api/store.py": "store", "web/app.tsx": "ui"})
     dumped = om.model_dump(mode="json")
-    assert set(dumped) == {"owners", "version", "supersedes", "seq"}
+    assert set(dumped) == {"owners", "unit_criteria", "version", "supersedes", "seq"}
     # content_identity is over the dump, so it cannot have shifted.
     assert "area" not in repr(dumped)
 

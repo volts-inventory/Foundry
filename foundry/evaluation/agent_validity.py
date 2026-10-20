@@ -52,7 +52,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from foundry.agents import AgentRuntime
-from foundry.agents.product import make_criteria_completeness_critic_node
+from foundry.agents.planner import make_planner_node
 from foundry.agents.quality import make_qa_engineer_node, make_reviewer_critic_node
 from foundry.agents.quality.qa_engineer import ACCEPTANCE_CRITERION_KIND
 from foundry.durability.artifact_store import ArtifactStore
@@ -221,10 +221,24 @@ def criteria_critic_validity(*, catches: bool = True) -> RoleValidity:
     verdict.
     """
     omissions = [_PLANTED_OMISSION] if catches else []
-    payload = {"missing": [], "security_abuse_omissions": omissions}
+    payload = {
+        "intent": {"intent": "add todos"},
+        "prd": {"title": "Todo API", "body": "Add a todo via a public REST endpoint."},
+        "acceptance_criteria": [
+            {"id": "AC-1", "text": "Given a todo, When POSTed, Then 201.", "oracle_hint": "201"}
+        ],
+        "criteria_review": {"missing": [], "security_abuse_omissions": omissions},
+        "sprint_plan": {"milestones": [], "usd_cap_microusd": 0, "done_definition": "done"},
+        "design": {"title": "Todo API", "body": "api"},
+        "adrs": [],
+        "interfaces": [],
+        "ownership": [],
+    }
     transport = MockTransport.scripted({}, default_text=_json(payload))
     rt = _runtime(transport)
-    node = make_criteria_completeness_critic_node(rt)
+    # The critic is the planner's criteria_review: one call authors the plan and
+    # reviews its own criteria.
+    node = make_planner_node(rt)
 
     state: FactoryState = {"request": "Add a todo via a public REST endpoint."}
     writes = node(state, _config("validity-critic"))

@@ -43,9 +43,9 @@ const PLANS = {
   // 4 across × 3 down — the desktop floor, unchanged.
   landscape: {
     W:1280, H:840, cols:4, rows:3,
-    grid:{ product:[0,0], architecture:[1,0], qa:[2,0], security:[3,0],
-           frontend:[0,1], backend:[1,1], data:[2,1], gate:[3,1],
-           vault:[3,2],                   // gate(3,1) sits directly above vault(3,2)
+    grid:{ plan:[0,0], frontend:[1,0], backend:[2,0], data:[3,0],
+           review:[0,1], security:[1,1], gate:[2,1],
+           vault:[2,2],                   // gate(2,1) sits directly above vault(2..3,2)
            office:[0,2] },                // the CTO's own office (row 2, far left)
     vaultSpan:[[2,2],[3,2]],
     lounge:[1,2],
@@ -54,9 +54,9 @@ const PLANS = {
   // 390px screen draws it at ~40% instead of ~30% and the block is nearly square.
   portrait: {
     W:970, H:1070, cols:3, rows:4,
-    grid:{ product:[0,0], architecture:[1,0], office:[2,0],
+    grid:{ plan:[0,0], office:[2,0],
            frontend:[0,1], backend:[1,1], data:[2,1],
-           qa:[0,2], security:[1,2], gate:[2,2],
+           review:[0,2], security:[1,2], gate:[2,2],
            vault:[2,3] },                 // gate(2,2) sits directly above vault(1..2,3)
     vaultSpan:[[1,3],[2,3]],
     lounge:[0,3],
@@ -65,7 +65,7 @@ const PLANS = {
 let PLAN = null;
 let GRID, LOUNGE_CELL, ENTRANCE_CELL;
 // Pipeline ORDER (the build sequence) — drives the order numerals + the flow path.
-const PIPELINE_ORDER = ["product","architecture","frontend","backend","data","qa","security","gate","vault"];
+const PIPELINE_ORDER = ["plan","frontend","backend","data","review","security","gate","vault"];
 // The CTO OFFICE is a real room (see each plan's grid); the LOUNGE cell is the
 // RECEPTION. No pipeline work happens in either — and nobody is ever SENT to the
 // lounge: every agent lives at their own desk (see "presence" below), so it's the
@@ -74,19 +74,19 @@ const ENG_ROOMS = ["frontend","backend","data"];               // engineering di
 const ENG_AREA_ROOM = {frontend:"frontend", backend:"backend", data:"data",
                        infra:"backend", security:"backend"};   // org AREA → its discipline room
 const RBASE = {
-  product:{label:"PRODUCT",color:0x2e3b5a}, architecture:{label:"ARCHITECTURE",color:0x3a2e5a},
+  plan:{label:"PLAN",color:0x2e3b5a},
   frontend:{label:"FRONTEND",color:0x243f5a}, backend:{label:"BACKEND",color:0x5a4524},
-  data:{label:"DATA",color:0x245a42}, qa:{label:"QA · REVIEW",color:0x2e5a4a},
+  data:{label:"DATA",color:0x245a42}, review:{label:"REVIEW",color:0x2e5a4a},
   security:{label:"SECURITY",color:0x5a2e36},
   gate:{label:"GATE",color:0x2c4a55}, vault:{label:"VAULT",color:0x5a4a18},
   office:{label:"CTO OFFICE",color:0x4a4030},   // the CTO's room (opens on the RIGHT wall)
 };
 // Build-order numeral per room (engineering's 3 rooms share stage 3 — they run in
 // parallel; support rooms have none).
-const ORDER_NO = {product:1, architecture:2, frontend:3, backend:3, data:3,
-                  qa:4, security:5, gate:6, vault:7};
+const ORDER_NO = {plan:1, frontend:2, backend:2, data:2,
+                  review:3, security:4, gate:5, vault:6};
 const ROOMS = {};
-const ROOM_ORDER = ["product","architecture","frontend","backend","data","qa","security","gate","vault"];
+const ROOM_ORDER = ["plan","frontend","backend","data","review","security","gate","vault"];
 const TINT = {security:[0xff6d6d,0.05], gate:[0x6aa0ff,0.05], vault:[0xffd25a,0.06]};
 // the "#": centre-lines of the walkway aisles between columns / rows (generated).
 // corridorRoute() walks these, so the counts must match the plan's cols/rows.
@@ -132,18 +132,15 @@ function roomAt(x,y){ for (const k in ROOMS){ const R=ROOMS[k];
   if (x>=R.x && x<=R.x1 && y>=R.y && y<=R.y1) return k; } return null; }
 
 const COLORS = {
-  "Stakeholder Proxy":0x7fd1ff,"Product Manager":0xffd95e,"Criteria Critic":0xff8fae,
-  "Program Manager":0xb59bff,"Principal Architect":0xc79bff,"Senior Engineer":0xff9b5e,
-  "Junior Engineer":0xffc08a,"QA Engineer":0x7dffb0,"SDET":0x5ddc7a,"Reviewer":0x5db8ff,
-  "Technical Writer":0xe8e0a0,"AppSec Engineer":0xff6d6d,
+  "Planner":0xffd95e,"Senior Engineer":0xff9b5e,
+  "Junior Engineer":0xffc08a,"Reviewer":0x5db8ff,"AppSec Engineer":0xff6d6d,
   "Audit & Compliance":0xffb38a,"Supply-chain Reviewer":0x9bb0ff,
 };
 const ROSTER = {
-  product:["Stakeholder Proxy","Product Manager","Criteria Critic","Program Manager"],
-  architecture:["Principal Architect"],
+  plan:["Planner"],
   // engineering is NOT a static room: its engineers are placed per-discipline
   // (frontend/backend/data) from the live org telemetry (layoutEngineering).
-  qa:["QA Engineer","SDET","Reviewer","Technical Writer"],
+  review:["Reviewer"],
   security:["AppSec Engineer","Audit & Compliance","Supply-chain Reviewer"],
 };
 const GATE_ORDER = ["spec","build","test","smoke","review","security","audit","supply_chain","e2e"];
@@ -155,9 +152,7 @@ const AREA_COLOR = {frontend:0x7fd1ff, backend:0xff9b5e, data:0x7dffb0,
 const AREA_TAG = {frontend:"FE", backend:"BE", data:"DA", infra:"IN", security:"SE"};
 // short role tags for the named static-room agents (the senior roles), shown on a badge.
 const ROLE_TAG = {
-  "Stakeholder Proxy":"STAKEHLDR", "Product Manager":"PROD MGR", "Criteria Critic":"CRITIC",
-  "Program Manager":"PROG MGR", "Principal Architect":"ARCHITECT", "QA Engineer":"QA ENG",
-  "SDET":"SDET", "Reviewer":"REVIEWER", "Technical Writer":"WRITER", "AppSec Engineer":"APPSEC",
+  "Planner":"PLANNER", "Reviewer":"REVIEWER", "AppSec Engineer":"APPSEC",
   "Audit & Compliance":"AUDIT", "Supply-chain Reviewer":"SUPPLY",
 };
 
@@ -190,7 +185,7 @@ const CTO_LINES = ["how's it looking?", "keep going, this is good", "what's bloc
 // The CTO walks a BEAT rather than being leashed to the newest event: he stands with one
 // live team for a spell, then moves on to the next room that has work. Rooms he can stand
 // in, in floor order (the gate/vault/his office aren't teams).
-const PATROL_ROOMS = ["product","architecture","frontend","backend","data","qa","security"];
+const PATROL_ROOMS = ["plan","frontend","backend","data","review","security"];
 const CTO_DWELL_MS = [7000, 13000];   // how long he oversees one room before moving on
 const pick = (arr)=> arr[Math.floor(Math.random()*arr.length)];
 
@@ -217,9 +212,8 @@ const CHARACTERS = [
 ];
 // Stable, room-distinct character per role (no two leads in a room share a sprite).
 const ROLE_CHAR = {
-  "Stakeholder Proxy":4,"Product Manager":7,"Criteria Critic":2,"Program Manager":6,
-  "Principal Architect":0,"Senior Engineer":5,"Junior Engineer":9,
-  "QA Engineer":8,"SDET":1,"Reviewer":4,"Technical Writer":3,
+  "Planner":7,"Senior Engineer":5,"Junior Engineer":9,
+  "Reviewer":4,
   "AppSec Engineer":5,"Audit & Compliance":7,"Supply-chain Reviewer":0,"CTO":3,
 };
 function charFor(name, seed){
@@ -586,16 +580,14 @@ class FloorScene extends Phaser.Scene {
     switch(key){
       case "engineering":  // gear: body + 4 teeth + hole
         M([[2,2,6,6,1],[4,0,2,2,1],[4,8,2,2,1],[0,4,2,2,1],[8,4,2,2,1],[4,4,2,2,0]]); break;
-      case "qa":           // magnifier: square lens ring + diagonal handle
+      case "review":       // magnifier: square lens ring + diagonal handle
         M([[1,0,6,1,1],[1,5,6,1,1],[0,1,1,4,1],[6,1,1,4,1],[6,6,2,2,1],[8,8,2,2,1]]); break;
       case "gate":         // shield: flat top, tapered point
         M([[2,0,6,2,1],[1,2,8,3,1],[2,5,6,1,1],[3,6,4,1,1],[4,7,2,2,1]]); break;
       case "security":     // padlock: shackle + body + keyhole
         M([[3,0,4,1,1],[2,1,1,3,1],[7,1,1,3,1],[1,4,8,6,1],[4,6,2,3,0]]); break;
-      case "product":      // clipboard: board + clip + two text lines
+      case "plan":         // clipboard: board + clip + two text lines
         M([[3,0,4,1,1],[1,1,8,9,1],[3,3,4,1,0],[3,5,4,1,0],[3,7,3,1,0]]); break;
-      case "architecture": // solid triangle (set-square)
-        M([[4,0,2,1,1],[3,1,4,1,1],[3,2,4,1,1],[2,3,6,1,1],[2,4,6,1,1],[1,5,8,1,1],[1,6,8,1,1],[0,7,10,1,1],[0,8,10,1,1]]); break;
       case "vault":        // key: round bow (hole) + clean straight stem + 2 teeth
         M([[1,1,4,4,1],[2,2,2,2,0],[5,2,5,1,1],[7,3,1,2,1],[9,3,1,2,1]]); break;
       case "reception":    // door: frame + dark panel + knob
@@ -619,7 +611,7 @@ class FloorScene extends Phaser.Scene {
   }
 
   drawFlowPath(){   // faint guide line through the build STAGES (engineering as one waypoint)
-    const stages = ["product","architecture","engineering","qa","security","gate","vault"];
+    const stages = ["plan","engineering","review","security","gate","vault"];
     const pts = stages.map(k=>ROOMS[k]).filter(Boolean).map(R=>({x:R.cx, y:R.cy}));
     const g = this.add.graphics().setDepth(0); g.lineStyle(2, 0xffcf52, 0.18);
     g.beginPath(); g.moveTo(pts[0].x, pts[0].y);
@@ -675,8 +667,8 @@ class FloorScene extends Phaser.Scene {
     // ONE themed prop per room, tucked into the same top-right corner against the wall
     // (consistent, never random). The working desks are placed per-lead by the floor.
     const props = {
-      product:"board", architecture:"shelf", frontend:"rack", backend:"rack",
-      data:"shelf", qa:"shelf", security:"rack",
+      plan:"board", frontend:"rack", backend:"rack",
+      data:"shelf", review:"shelf", security:"rack",
     };
     for (const key in props){
       const R = ROOMS[key]; if(!R) continue;
@@ -1136,6 +1128,7 @@ class FloorScene extends Phaser.Scene {
     let li = 0;                                    // global idle-mood slot index
     for (const room in ROSTER){
       const names = ROSTER[room], R = ROOMS[room]; if (!R) continue;
+      if (room === "security" && this.proj.mode === "assistant") continue;   // gated-mode crew only
       const cols = Math.min(names.length, 3);
       const single = names.length === 1;                         // a one-role room → centre it
       const PX = 84, SY = R.y + 94, RP = 50;                     // SAME grid as the eng rooms
@@ -1292,7 +1285,7 @@ class FloorScene extends Phaser.Scene {
     if (key) this.liveRooms.add(key);      // this room is now producing work
     // When the build advances to the NEXT phase, a worker from the finished room carries
     // the "work" over to the new room (the handoff). Only on a forward phase boundary.
-    const SEQ = ["product","architecture","engineering","qa","security","gate","vault"];
+    const SEQ = ["plan","engineering","review","security","gate","vault"];
     const ph = (k)=> (ENG_ROOMS.includes(k)||k==="engineering") ? "engineering" : k;
     const oi = SEQ.indexOf(ph(prev)), ni = SEQ.indexOf(ph(key));
     if (oi >= 0 && ni > oi) this.deliverWork(prev, key);
@@ -1563,7 +1556,8 @@ class FloorScene extends Phaser.Scene {
     const wa = this.workingAgents, CAP = {frontend:"Frontend", backend:"Backend", data:"Data"};
     const anyEngNamed = wa.has("Senior Engineer") || wa.has("Junior Engineer")
       || ENG_ROOMS.some(r => wa.has(CAP[r]+" Lead") || wa.has(CAP[r]+" Engineer"));
-    const leadUp = (room)=> wa.has((CAP[room]||"")+" Lead") || wa.has("Senior Engineer") || !anyEngNamed;
+    const leadUp = (room)=> wa.has((CAP[room]||"")+" Lead") || wa.has((CAP[room]||"")+" Engineer")
+      || wa.has("Senior Engineer") || !anyEngNamed;   // leads fold into their lane's Engineer
     const engUp  = (room)=> wa.has((CAP[room]||"")+" Engineer") || wa.has("Junior Engineer") || !anyEngNamed;
     const seat = (group, wants)=>{
       for (const s of (group||[])){
@@ -1703,7 +1697,7 @@ class FloorScene extends Phaser.Scene {
   }
 
   spawnPickup(room, label){
-    const R = ROOMS[room] || ROOMS.product;
+    const R = ROOMS[room] || ROOMS.plan;
     const w = Math.max(64, label.length*7+18);
     const c = this.add.container(R.cx, R.floorY+24).setDepth(2000);
     c.add(this.add.rectangle(0,0,w,18,0xfffdf3).setStrokeStyle(2,PC.ink));
@@ -1862,7 +1856,7 @@ class FloorScene extends Phaser.Scene {
       const R=ROOMS[rk]; if(!R) continue;
       const people=perRoom[rk];
       const lead=people.find(p=>p.lead), ics=people.filter(p=>!p.lead);
-      // create one seated worker (+desk) at (x,y); leads get the star + "<AREA> LEAD" badge.
+      // create one seated worker (+desk) at (x,y); leads get the star + "<AREA> ENG" badge.
       const place=(p, x, y, faceUp)=>{
         x=Math.round(x); y=Math.round(y);
         const col6=p.color.toString(16).padStart(6,"0");
@@ -1874,7 +1868,7 @@ class FloorScene extends Phaser.Scene {
         if (p.lead){
           s.add(this.add.text(0,-39,"★",{fontFamily:"'PixelFont','Courier New'",fontSize:"10px",
             color:"#ffd95e"}).setOrigin(0.5).setResolution(3));
-          this.pinBadge(s, tag+" LEAD", p.color, true);        // filled accent badge
+          this.pinBadge(s, tag+" ENG", p.color, true);        // filled accent badge
           if (faceUp && s.faceBack) s.faceBack();              // overseeing — faces up into the room
         } else {
           this.pinBadge(s, tag, p.color, false);               // every IC labelled too
@@ -2039,8 +2033,24 @@ function switchToFloor(floor){
 }
 
 // ---- per-floor event routing ----------------------------------------------
+// Rooms and cast labels from OLD builds' stored/replayed telemetry -> the current floor
+// (product/architecture -> plan, qa -> review; the per-role agents -> Planner/Reviewer,
+// each lane's lead -> that lane's Engineer).
+const LEGACY_ROOM = {product:"plan", architecture:"plan", qa:"review"};
+const LEGACY_AGENT = {
+  "Stakeholder Proxy":"Planner","Product Manager":"Planner","Criteria Critic":"Planner",
+  "Program Manager":"Planner","Principal Architect":"Planner",
+  "QA Engineer":"Reviewer","SDET":"Reviewer","Technical Writer":"Reviewer",
+  "Frontend Lead":"Frontend Engineer","Backend Lead":"Backend Engineer","Data Lead":"Data Engineer",
+};
+function modernEvent(ev){
+  const room = LEGACY_ROOM[ev.room], agent = LEGACY_AGENT[ev.agent];
+  if (!room && !agent) return ev;
+  return Object.assign({}, ev, room ? {room} : {}, agent ? {agent} : {});
+}
 function routeEvent(floor, ev){
   const F = FLOORS.get(floor); if (!F) return;
+  ev = modernEvent(ev);
   const S = F.scene, isActive = floor === ACTIVE;
   switch(ev.type){
     case "project":
@@ -2359,7 +2369,7 @@ function kindBreakdown(items){
   return order.map(b=> b+(c[b]>1?" ×"+c[b]:""));
 }
 // EVENT LOG = one bordered BOX per agent. The box HEADER is the activity line
-// ("▸ PRODUCT · Product Manager working" → "✓ …" when done); the BODY holds that agent's
+// ("▸ PLAN · Planner working" → "✓ …" when done); the BODY holds that agent's
 // response — a descriptive caption (their T3/journal note) plus what they produced (their
 // narrate output and each artifact with its content one-liner). One border around the
 // whole thing; the response is shown, not hidden behind a disclosure.
@@ -3260,7 +3270,7 @@ let IV_TARGET = null;
 function openInterview(name){
   const F = FLOORS.get(ACTIVE); if(!F) return;
   const journal = F.journal || [];
-  const mine = journal.filter(e=>e.role===name);
+  const mine = journal.filter(e=>e.role===name || e.agent===name);
   const entries = mine.length ? mine : journal;
   document.getElementById("iv-role").textContent = name;
   const jc = document.getElementById("iv-journal"); jc.innerHTML = "";

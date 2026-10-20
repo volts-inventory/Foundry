@@ -33,6 +33,7 @@ from typing import Any
 
 from foundry.schemas.architecture import CANONICAL_AREAS
 from webapp.events import (
+    AGENT_BY_NODE,
     checkpoint_actions,
     events_for_payload,
     events_for_result,
@@ -311,8 +312,7 @@ class Project:
     max_slots: int = 4  # IC-pool CEILING (= cli.AUTO_SLOTS_CAP); the system sizes
     # actual parallelism to the lead's decomposition (min(tasks, this)).
     cost_cap_microusd: int | None = None  # global spend envelope (Wave D)
-    token_cap: int | None = None  # stop the build cleanly after this many tokens
-    max_fix_attempts: int = 2  # auto-fix retry budget per failing gate (run() default)
+    max_fix_attempts: int = 5  # auto-fix retry budget per failing gate (run() default)
     release_seq: int = 1  # 1,2,3… within the floor; each iterate adds a release
     parent_id: str | None = None  # lineage: the release this one iterates on
     base_dir: str | None = None  # prior code seeded as the base tree (iterate)
@@ -497,7 +497,7 @@ def _load_persisted() -> None:
                     backend=str(row.get("backend", "mock")),
                     adapter=str(row.get("adapter", "stub")),
                     max_slots=int(row.get("slots", 1) or 1),
-                    max_fix_attempts=int(row.get("max_fix_attempts", 2) or 2),
+                    max_fix_attempts=int(row.get("max_fix_attempts", 5) or 5),
                     parent_id=row.get("parent_id"),
                     out_base=Path(ob) if ob else None,
                     created_at=str(row.get("created_at") or ""),
@@ -1304,20 +1304,20 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     # The build ALWAYS opens with product/intake work, but live node telemetry only
     # fires as nodes COMPLETE — seat the product team NOW so the floor shows the
     # work already grinding instead of an all-lounge office.
-    _emit(p, type="active", room="product", agent="", live=True)
+    _emit(p, type="active", room="plan", agent="", live=True)
     time.sleep(_PACE)
 
-    # Stack = auto on a real backend: the Principal Architect picks the stack from
+    # Stack = auto on a real backend: the Planner picks the stack from
     # the toolchains actually installed on this host; the chosen profile pins the
     # gates for THIS build and every child (iterate / autopilot / ladder rung).
     if (p.profile or "auto") == "auto":
         chosen = _choose_stack(p)
         if chosen:
             p.profile = chosen[0]
-            _emit(p, type="active", room="architecture", agent="Principal Architect",
+            _emit(p, type="active", room="plan", agent="Planner",
                   live=True)
             _emit(p, type="narrate",
-                  text=f"🏗 Principal Architect chose the stack: {chosen[0]}"
+                  text=f"🏗 Planner chose the stack: {chosen[0]}"
                        + (f" — {chosen[1]}" if chosen[1] else ""))
 
     # ---- milestone ladder: plan once (rung 1), then run THIS rung ------------- #
@@ -1374,7 +1374,12 @@ def _run_factory(p: Project, resume: bool = False) -> None:
         # Stash the agents' journal so a lead can be "interviewed" ([11], advisory).
         jrnl = payload.get("agent_journal")
         if isinstance(jrnl, list):
-            p.journal = jrnl
+            # `agent` = the floor sprite that owns the node, so the interview picker can
+            # match a Planner/Reviewer click to journal entries written under old role ids.
+            p.journal = [
+                {**e, "agent": AGENT_BY_NODE.get(str(e.get("node_id", "")), ("",))[0]}
+                if isinstance(e, dict) else e for e in jrnl
+            ]
         boundary = str(payload.get("boundary", "stage"))
         if p.supervised:
             # GATED gets the same AI experts autonomous does — but ADVISORY: they
@@ -1507,7 +1512,6 @@ def _run_factory(p: Project, resume: bool = False) -> None:
                 spec=run_spec,                # pasted spec text OR uploaded docs dir (additive)
                 max_slots=p.max_slots,        # IC-pool parallelism (Wave C) + budget tree (Wave D)
                 cost_cap_microusd=p.cost_cap_microusd,
-                token_cap=p.token_cap,
                 max_fix_attempts=p.max_fix_attempts,
                 base_dir=base_dir,            # iterate: prior code seeded as the base tree
                 thread_id=p.id,               # UNIQUE per project — no cross-floor collision
@@ -1548,14 +1552,6 @@ def _run_factory(p: Project, resume: bool = False) -> None:
             if not alive:
                 return
             return _run_factory(p, resume=True)  # re-enter from the durable checkpoint
-        if type(exc).__name__ == "TokenCapExceeded":
-            _emit(p, type="narrate", text=f"⏹ Stopped: {exc}. Raise the token cap to go further.")
-            _emit(p, type="halt", phase="token_cap", reason=str(exc))
-            _emit(p, type="done", passed=False, phase="token_cap")
-            p.status = "done"
-            _persist(p)
-            _close(p)
-            return
         _emit(p, type="narrate", text=f"💥 Build error: {exc}")
         _emit(p, type="halt", phase="error", reason=str(exc))
         _emit(p, type="done", passed=False, phase="error")
@@ -1738,7 +1734,6 @@ def _spawn_iteration(
         spec=parent.spec_text or None, spec_text=parent.spec_text,
         out_base=_OUTPUT_ROOT / f"floor-{parent.floor}" / f"r{release_seq}",
         max_slots=parent.max_slots, cost_cap_microusd=parent.cost_cap_microusd,
-        token_cap=parent.token_cap,
         max_fix_attempts=parent.max_fix_attempts, parent_id=parent.id,
         autopilot_budget=max(0, budget),
     )
@@ -1809,7 +1804,6 @@ def _spawn_milestone_next(parent: Project) -> Project:
         spec=parent.spec_text or None, spec_text=parent.spec_text,
         out_base=_OUTPUT_ROOT / f"floor-{parent.floor}" / f"r{release_seq}",
         max_slots=parent.max_slots, cost_cap_microusd=parent.cost_cap_microusd,
-        token_cap=parent.token_cap,
         max_fix_attempts=parent.max_fix_attempts, parent_id=parent.id,
         autopilot_budget=parent.autopilot_budget,
     )
@@ -1868,18 +1862,17 @@ def _proposal_approved(p: Project, proposal: dict[str, Any]) -> bool:
     return True
 
 
-_STAGE_ORDER = ["defining requirements", "designing the system", "implementing",
-                "testing & review", "security review", "verifying at the gate"]
+_STAGE_ORDER = ["planning", "implementing", "testing & review", "security review",
+                "verifying at the gate"]
 
 
 def _node_stage(node: str) -> str | None:
     """Map a live graph node id to a readable pipeline STAGE for the platform log
     (None for infra/non-stage nodes we don't surface)."""
     n = (node or "").lower()
-    if any(k in n for k in ("stakeholder", "product", "criteria", "program")):
-        return "defining requirements"
-    if "architect" in n:
-        return "designing the system"
+    if any(k in n for k in ("planner", "stakeholder", "product", "criteria", "program",
+                            "architect")):
+        return "planning"
     if ("engineer" in n and "appsec" not in n) or n == "fixer":
         return "implementing"
     if any(k in n for k in ("qa", "sdet", "reviewer", "writer", "tester")):
@@ -2664,7 +2657,8 @@ class Handler(BaseHTTPRequestHandler):
         question = str(body.get("question", "")).strip() or "How is it going?"
         if p.backend == "mock":
             # The mock transport can't deliberate; answer from the real journal we have.
-            mine = [e for e in p.journal if str(e.get("role", "")) == role] or p.journal
+            mine = [e for e in p.journal
+                    if role in (str(e.get("role", "")), str(e.get("agent", "")))] or p.journal
             bits = "; ".join(
                 str(e.get("summary", "")) for e in mine[:3] if str(e.get("summary", ""))
             )
@@ -2797,9 +2791,9 @@ class Handler(BaseHTTPRequestHandler):
         max_slots = max(1, max_slots)
         # auto-fix retry budget (run() default = 3); optional UI override.
         try:
-            max_fix_attempts = int(body.get("max_fix_attempts", 2))
+            max_fix_attempts = int(body.get("max_fix_attempts", 5))
         except (TypeError, ValueError):
-            max_fix_attempts = 2
+            max_fix_attempts = 5
         max_fix_attempts = max(0, max_fix_attempts)
         # spend cap: UI sends dollars (cost_cap_usd); fall back to the env micro-USD.
         cost_env = os.environ.get("FOUNDRY_COST_CAP_MICROUSD", "").strip()
@@ -2808,14 +2802,6 @@ class Handler(BaseHTTPRequestHandler):
             usd = float(body.get("cost_cap_usd") or 0)
             if usd > 0:
                 cost_cap_microusd = int(round(usd * 1_000_000))
-        except (TypeError, ValueError):
-            pass
-        tok_env = os.environ.get("FOUNDRY_TOKEN_CAP", "").strip()
-        token_cap = int(tok_env) if tok_env.isdigit() else None
-        try:
-            tok = int(body.get("token_cap") or 0)
-            if tok > 0:
-                token_cap = tok
         except (TypeError, ValueError):
             pass
         # A floor is one PROJECT. A fresh build is a NEW project (new floor, release
@@ -2873,7 +2859,6 @@ class Handler(BaseHTTPRequestHandler):
             release_seq=release_seq, backend=backend, adapter=adapter, packs=packs, spec=spec,
             spec_text=effective_spec_text,
             out_base=out_base, max_slots=max_slots, cost_cap_microusd=cost_cap_microusd,
-            token_cap=token_cap,
             max_fix_attempts=max_fix_attempts, parent_id=parent_id, base_dir=base_dir,
             autopilot_budget=autopilot_budget,
         )

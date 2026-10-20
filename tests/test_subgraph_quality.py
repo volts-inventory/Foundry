@@ -1,38 +1,23 @@
-"""Quality subgraph (T-M1-11) — the Layer-4 builder composed end-to-end.
+"""Quality subgraph — the single Layer-4 ``reviewer`` node, composed end-to-end.
 
 Drives :func:`build_quality_subgraph` over a REAL :class:`ModelProviderProxy`
 backed by :class:`MockTransport` + a dev :class:`ZoneBSigner` (no live API key,
-LEARNINGS D1/D4). Compiles the subgraph STANDALONE (no checkpointer — the
-supervisor owns that) and invokes it with state seeded as the upstream layers
-would leave it:
+LEARNINGS D1/D4), compiled STANDALONE (the supervisor owns the checkpointer), with
+state seeded as the upstream layers leave it: ``acceptance_criterion`` HANDLES
+(resolved through a real in-process CAS), a ``FeatureDiff`` handle, and the
+server-issued ``verdict_nonce`` / ``subject_artifact_uri`` / ``state_sha`` run
+inputs on the config (Q1).
 
-* the acceptance criteria as resolvable ``acceptance_criterion`` HANDLES on
-  ``artifacts`` (raw bodies carry no ``.uri`` and would crash ``merge_by_uri``;
-  the QA / SDET nodes reconstitute bodies via the injected ``resolve`` — the
-  Senior Engineer's seam) — this is "as product would" leave them;
-* a ``FeatureDiff`` handle (the diff the Reviewer judges); and
-* a server-issued ``verdict_nonce`` on the run config (Q1 — a RUN INPUT the
-  runner threads, never agent-minted), alongside ``subject_artifact_uri`` /
-  ``state_sha``.
-
-The transport scripts ``verdicts=["approve"]`` for the reviewer's constrained
-verdict channel and ``completions=`` (free-text, schema-constrained IDEATION; AC3
-resolved, DT1) for QA + SDET.
-
-Asserts:
-
-* the criterion-traceable ``TestPlan`` + a NEGATIVE ``OracleBinding`` per
-  high-risk criterion + the ``TestReport`` quarantine + the ``E2EReport`` land on
-  ``artifacts``;
-* the Reviewer's proxy-stamped ``GateResult`` is ADMITTED to ``gates`` via the
-  REAL ``merge_gates`` path (valid binding + fresh nonce + no latch);
-* the builder returns an UNCOMPILED ``StateGraph`` (the caller compiles).
+Asserts the one node makes exactly ONE model call (the trusted judge), its
+proxy-stamped verdict is admitted by the REAL ``merge_gates`` and latched by the
+supervisor's ledger commit, and it still emits every artifact kind the docs /
+checkpoint / webapp consumers read (``test_plan``, a NEGATIVE ``oracle_binding``
+per high-risk criterion, ``test_report``, ``e2e_report``).
 """
 
 from __future__ import annotations
 
-import json
-from collections.abc import Callable
+import inspect
 from typing import Any
 
 import pytest
@@ -41,27 +26,31 @@ from langgraph.graph import StateGraph
 
 from foundry.agents import AgentRuntime
 from foundry.agents._common import emit_artifact
-from foundry.agents.quality.qa_engineer import ACCEPTANCE_CRITERION_KIND
+from foundry.agents.quality import make_reviewer_critic_node, make_reviewer_node
+from foundry.agents.quality._common import (
+    ACCEPTANCE_CRITERION_KIND,
+    MissingCriteriaResolverError,
+    server_issued_nonce,
+)
+from foundry.durability.artifact_store import ArtifactStore
 from foundry.gates.attestation import DevGateWriteVerifier, ZoneBSigner
 from foundry.graph.subgraphs.quality import build_quality_subgraph
 from foundry.proxy import ModelProviderProxy
-from foundry.proxy.test_doubles import MockTransport
-from foundry.schemas.base import Artifact, FrozenModel
+from foundry.proxy.test_doubles import MockTransport, verdict_json
 from foundry.schemas.gates import GateResult, GateStatus, JudgmentProvenance
 from foundry.schemas.implementation import FeatureDiff
+from foundry.schemas.journal import JournalEntry
 from foundry.schemas.product import AcceptanceCriterion, Criticality
+from foundry.schemas.quality import E2EReport, OracleBinding, OracleKind, TestPlan, TestReport
 from foundry.state.factory_state import FactoryState
 from foundry.state.global_records import GlobalRecords
-from foundry.state.reducers import merge_gates, set_gate_write_verifier
+from foundry.state.reducers import merge_by_uri, merge_gates, set_gate_write_verifier
 from foundry.state.seq import Seq
 
 KEY = b"dev-zone-b-subgraph-quality-key"
 KEY_ID = "dev-key-subgraph-quality"
 
 DIFF_URI = "cas://diff/feature-1"
-
-
-# ---- the criteria the product layer leaves (high-risk drives negative oracles) -
 
 
 def _crit(cid: str, crit: Criticality = Criticality.NORMAL) -> AcceptanceCriterion:
@@ -80,59 +69,20 @@ CRITERIA = (
 )
 
 
-# ---- per-node scripted payloads (SOP order: reviewer -> qa -> sdet) -----------
-
-QA_PAYLOAD = json.dumps(
-    {
-        "tests": [
-            {"test_id": "t-fidelity-1", "criterion_ids": ["AC-001"]},
-            {"test_id": "t-cov-2", "criterion_ids": ["AC-002"]},
-            {"test_id": "t-fidelity-3", "criterion_ids": ["AC-003"]},
-        ],
-        "quarantined": ["t-flaky-net"],
-    }
-)
-
-SDET_PAYLOAD = json.dumps(
-    {
-        "scenarios": [
-            {"scenario_id": "e2e-checkout", "criterion_ids": ["AC-001", "AC-002"]},
-            {"scenario_id": "e2e-login", "criterion_ids": ["AC-003"]},
-        ],
-        "quarantined": ["e2e-flaky-timing"],
-    }
-)
+def _runtime(
+    transport: MockTransport | None = None, cas: ArtifactStore | None = None
+) -> AgentRuntime:
+    proxy = ModelProviderProxy(
+        transport or MockTransport(verdicts=["approve"]), signer=ZoneBSigner(KEY, KEY_ID)
+    )
+    return AgentRuntime(proxy=proxy, cas=cas)
 
 
-def _transport() -> MockTransport:
-    # verdicts= for the reviewer's constrained verdict channel; completions= for
-    # the QA + SDET schema-constrained IDEATION calls (AC3 resolved, DT1).
-    return MockTransport(verdicts=["approve"], completions=[QA_PAYLOAD, SDET_PAYLOAD])
-
-
-def _runtime(transport: MockTransport | None = None) -> AgentRuntime:
-    proxy = ModelProviderProxy(transport or _transport(), signer=ZoneBSigner(KEY, KEY_ID))
-    return AgentRuntime(proxy=proxy)
-
-
-def _resolver(
-    criteria: tuple[AcceptanceCriterion, ...] = CRITERIA,
-) -> Callable[[Artifact], FrozenModel]:
-    body_by_uri = {
-        emit_artifact(c, ACCEPTANCE_CRITERION_KIND, "product_manager", c.seq).uri: c
-        for c in criteria
-    }
-
-    def _resolve(handle: Artifact) -> FrozenModel:
-        return body_by_uri[handle.uri]
-
-    return _resolve
-
-
-def _seed_state() -> FactoryState:
+def _seed(cas: ArtifactStore) -> FactoryState:
     """State as the product + implementation layers would leave it."""
     criteria_handles = [
-        emit_artifact(c, ACCEPTANCE_CRITERION_KIND, "product_manager", c.seq) for c in CRITERIA
+        emit_artifact(c, ACCEPTANCE_CRITERION_KIND, "product_manager", c.seq, store=cas)
+        for c in CRITERIA
     ]
     diff = FeatureDiff(
         diff_uri=DIFF_URI,
@@ -148,8 +98,6 @@ def _seed_state() -> FactoryState:
 
 
 def _config(run_id: str = "run-quality-subgraph", step: int = 1) -> RunnableConfig:
-    # verdict_nonce / subject_artifact_uri / state_sha are RUN INPUTS the runner
-    # threads onto the config (Q1), exactly like thread_id (AR2).
     return {
         "configurable": {
             "thread_id": run_id,
@@ -161,172 +109,165 @@ def _config(run_id: str = "run-quality-subgraph", step: int = 1) -> RunnableConf
     }
 
 
-def _installed() -> tuple[GlobalRecords, Any]:
+@pytest.fixture
+def records() -> Any:
     records = GlobalRecords()
     token = set_gate_write_verifier(DevGateWriteVerifier(KEY, KEY_ID, records))
-    return records, token
+    try:
+        yield records
+    finally:
+        token.var.reset(token)
 
 
-def _artifacts(state: FactoryState) -> list[Artifact]:
-    return list(state.get("artifacts") or ())
+def _run(transport: MockTransport | None = None) -> tuple[FactoryState, ArtifactStore]:
+    cas = ArtifactStore()
+    seed = _seed(cas)
+    app = build_quality_subgraph(_runtime(transport, cas), resolve=cas.resolve).compile()
+    return app.invoke(seed, _config()), cas
 
 
-# ---- tests -------------------------------------------------------------------
+def _bodies(final: FactoryState, cas: ArtifactStore, kind: str) -> list[Any]:
+    return [cas.get_body(a.uri) for a in final.get("artifacts") or () if a.kind == kind]
 
 
-def test_build_quality_subgraph_returns_uncompiled_state_graph() -> None:
-    g = build_quality_subgraph(_runtime(), resolve=_resolver())
+# ---- topology ----------------------------------------------------------------
+
+
+def test_build_quality_subgraph_returns_uncompiled_single_reviewer_node() -> None:
+    cas = ArtifactStore()
+    g = build_quality_subgraph(_runtime(cas=cas), resolve=cas.resolve)
     assert isinstance(g, StateGraph)
     assert not hasattr(g, "invoke")  # compilation is the caller's job
+    assert set(g.nodes) == {"reviewer"}
 
 
 def test_build_quality_subgraph_requires_resolve() -> None:
-    """C-R1-01: ``resolve`` is a REQUIRED arg (mirrors build_implementation_
-    subgraph). A defaulted ``resolve=None`` was the vacuous-pass trap — in the
-    chained graph criteria arrive ONLY as handles, so a None resolver would read
-    zero criteria → an empty TestPlan → a vacuous Test gate pass."""
-    import inspect
-
-    sig = inspect.signature(build_quality_subgraph)
-    resolve = sig.parameters["resolve"]
-    assert resolve.default is inspect.Parameter.empty  # no default -> required
+    """C-R1-01: a defaulted ``resolve=None`` was the vacuous-pass trap."""
+    resolve = inspect.signature(build_quality_subgraph).parameters["resolve"]
+    assert resolve.default is inspect.Parameter.empty
 
 
-def test_quality_subgraph_fail_closed_when_handles_present_but_no_resolver() -> None:
-    """End-to-end: if a (hypothetical) None resolver were wired while criterion
-    HANDLES are on state, the QA node fails closed rather than vacuous-passing."""
-    from foundry.agents.quality.qa_engineer import (
-        MissingCriteriaResolverError,
-        make_qa_engineer_node,
+def test_reviewer_fails_closed_without_resolver_before_any_model_call(records: Any) -> None:
+    transport = MockTransport(verdicts=["approve"])
+    node = make_reviewer_node(_runtime(transport), resolve=None)
+    with pytest.raises(MissingCriteriaResolverError):
+        node(_seed(ArtifactStore()), _config())
+    assert transport.requests == []
+
+
+# ---- call count --------------------------------------------------------------
+
+
+def test_one_model_call_per_quality_pass_on_the_judge_channel(records: Any) -> None:
+    transport = MockTransport(verdicts=["approve"])
+    _run(transport)
+
+    [request] = transport.requests
+    # The ONE call is the constrained verdict channel (judge), not a completion.
+    schema = request["output_config"]["format"]["schema"]
+    assert schema["properties"]["status"]["enum"] == ["approve", "request-changes"]
+    # The criteria the old QA/SDET personas planned against are in front of the judge.
+    prompt = request["messages"][0]["content"]
+    assert all(c.id in prompt for c in CRITERIA)
+
+
+# ---- the bound verdict -------------------------------------------------------
+
+
+def test_reviewer_verdict_is_proxy_bound_and_admitted(records: Any) -> None:
+    final, _cas = _run()
+
+    [verdict] = final["gates"]
+    assert isinstance(verdict, GateResult)
+    assert verdict.name == "review"
+    assert verdict.status is GateStatus.PASS
+    assert verdict.seq.node_id == "reviewer"
+    assert verdict.judgment_binding is not None
+    assert verdict.judgment_provenance is JudgmentProvenance.SELF
+    assert verdict.subject_artifact_uri == DIFF_URI
+    assert verdict.run_against == "integrated-sha"
+    assert verdict.verdict_nonce == server_issued_nonce(
+        _config(), node_id="reviewer", subject_uri=DIFF_URI, state_sha="integrated-sha"
     )
-
-    _records, token = _installed()
-    try:
-        # Build the QA node WITHOUT a resolver and run it directly over the seeded
-        # handle state — the production wiring path that C-R1-01 made impossible to
-        # reach via the builder (resolve is required) is still defended at the node.
-        node = make_qa_engineer_node(_runtime())
-        with pytest.raises(MissingCriteriaResolverError):
-            node(_seed_state(), _config())
-    finally:
-        token.var.reset(token)
+    assert merge_gates([verdict], None) == [verdict]
 
 
-def test_quality_subgraph_produces_test_and_e2e_artifacts() -> None:
-    """A standalone-compiled run yields the criterion-traceable TestPlan + a
-    NEGATIVE oracle per high-risk criterion + the quarantining TestReport +
-    E2EReport on ``artifacts`` (the inputs the Test / E2E gates consume)."""
-    _records, token = _installed()
-    try:
-        app = build_quality_subgraph(_runtime(), resolve=_resolver()).compile()
-        final: FactoryState = app.invoke(_seed_state(), _config())
-    finally:
-        token.var.reset(token)
+def test_request_changes_is_latched_by_the_supervisor_ledger_commit(records: Any) -> None:
+    """The quality boundary's trusted ledger write still latches a request-changes
+    from the new node, so a later approve on the same key cannot override it."""
+    from foundry.graph.supervisor import _commit_judgment_ledger
 
-    kinds = sorted(a.kind for a in _artifacts(final))
-    # The two high-risk criteria each get a NEGATIVE oracle binding (fidelity).
-    assert kinds.count("oracle_binding") == 2
-    assert {"test_plan", "test_report", "e2e_report"} <= set(kinds)
-    # The seeded criterion + diff handles are still on the channel (folded by uri).
-    assert kinds.count(ACCEPTANCE_CRITERION_KIND) == len(CRITERIA)
-    assert "feature_diff" in kinds
-    # All bodies ride out-of-band as content-addressed handles (L4).
-    assert all(a.uri.startswith("cas://") for a in _artifacts(final))
+    final, _cas = _run(MockTransport(verdicts=[verdict_json("request-changes", ["x"])]))
+    [rc] = final["gates"]
+    assert rc.status is GateStatus.FAIL
+    assert rc.findings == ("x",)
+
+    _commit_judgment_ledger([], [rc], records)
+    assert records.negative_verdict_latched(rc.latch_key()) is True
+
+    later, _ = _run(MockTransport(verdicts=["approve"]))
+    assert merge_gates(later["gates"], None) == []
 
 
-def test_quality_subgraph_admits_reviewer_verdict_to_gates() -> None:
-    """The Reviewer's proxy-stamped GateResult lands on ``gates`` and is admitted
-    by the REAL merge_gates path (valid binding + fresh server-issued nonce)."""
-    _records, token = _installed()
-    try:
-        app = build_quality_subgraph(_runtime(), resolve=_resolver()).compile()
-        final: FactoryState = app.invoke(_seed_state(), _config())
-
-        [verdict] = final["gates"]
-        assert isinstance(verdict, GateResult)
-        assert verdict.name == "review"
-        assert verdict.status is GateStatus.PASS
-        # The PROXY stamped the binding + provenance — the agent never signed it.
-        assert verdict.judgment_binding is not None
-        assert verdict.judgment_provenance is JudgmentProvenance.SELF
-        # H3: the nonce is the per-request derivation of the verdict's own identity
-        # (the base "N-server-issued" bound to node/subject/state), not the raw base.
-        from foundry.agents.quality._common import server_issued_nonce
-
-        assert verdict.verdict_nonce == server_issued_nonce(
-            _config(), node_id=verdict.seq.node_id,
-            subject_uri=verdict.subject_artifact_uri or "", state_sha=verdict.run_against,
-        )
-        assert verdict.verdict_nonce != "N-server-issued"
-        # ADMITTED by the real reducer + verifier (it already merged into `gates`,
-        # and a re-fold of the committed verdict is idempotent).
-        assert merge_gates([verdict], None) == [verdict]
-    finally:
-        token.var.reset(token)
+def test_quality_and_assurance_reviews_get_distinct_nonces(records: Any) -> None:
+    """H3: the quality ``reviewer`` and the assurance ``reviewer_critic`` judge the
+    same subject/state in one run; their per-request nonces must not collide."""
+    cas = ArtifactStore()
+    seed = _seed(cas)
+    q = make_reviewer_node(_runtime(cas=cas), resolve=cas.resolve)(seed, _config())["gates"][0]
+    a = make_reviewer_critic_node(_runtime())(seed, _config())["gates"][0]
+    assert q.verdict_nonce != a.verdict_nonce
+    assert merge_gates([q], None) == [q] and merge_gates([a], None) == [a]
 
 
-def test_quality_subgraph_runs_nodes_in_sop_order() -> None:
-    """reviewer_critic -> qa_engineer -> sdet, one model call each, in SOP order.
-
-    The reviewer rides the verdict channel; QA + SDET ride free-text completions —
-    order is asserted via the distinct "You are the ..." opening of each SOP."""
-    transport = _transport()
-    _records, token = _installed()
-    try:
-        app = build_quality_subgraph(_runtime(transport), resolve=_resolver()).compile()
-        app.invoke(_seed_state(), _config())
-    finally:
-        token.var.reset(token)
-
-    assert len(transport.requests) == 3  # exactly one model call per node
-    sops = ["".join(block["text"] for block in req["system"]) for req in transport.requests]
-    markers = [
-        "You are the Reviewer/Critic",
-        "You are the QA Engineer",
-        "You are the SDET",
-    ]
-    for sop, marker in zip(sops, markers, strict=True):
-        assert marker in sop
+# ---- artifacts ---------------------------------------------------------------
 
 
-def test_quality_subgraph_plan_is_criterion_traceable() -> None:
-    """Every acceptance criterion is exercised by at least one planned test, and
-    a negative oracle is bound for each high-risk criterion (criterion fidelity)."""
-    from foundry.schemas.quality import OracleBinding, OracleKind, TestPlan
+def test_reviewer_emits_every_quality_artifact_kind(records: Any) -> None:
+    final, _cas = _run()
+    arts = [a for a in final["artifacts"] if a.produced_by == "reviewer"]
+    kinds = sorted(a.kind for a in arts)
+    assert kinds == ["e2e_report", "oracle_binding", "oracle_binding", "test_plan", "test_report"]
+    assert all(a.uri.startswith("cas://") for a in final["artifacts"])
+    # The seeded criterion + diff handles are still on the channel.
+    assert sum(a.kind == ACCEPTANCE_CRITERION_KIND for a in final["artifacts"]) == len(CRITERIA)
 
-    _records, token = _installed()
-    try:
-        app = build_quality_subgraph(_runtime(), resolve=_resolver()).compile()
-        final: FactoryState = app.invoke(_seed_state(), _config())
-    finally:
-        token.var.reset(token)
 
-    arts = _artifacts(final)
-    plan_handle = next(a for a in arts if a.kind == "test_plan")
-    plan = TestPlan(
-        plan_uri=plan_handle.uri,
-        test_criteria={
-            "t-fidelity-1": ("AC-001",),
-            "t-cov-2": ("AC-002",),
-            "t-fidelity-3": ("AC-003",),
-        },
-        seq=plan_handle.seq,
-    )
-    assert plan.covered_criteria() == {"AC-001", "AC-002", "AC-003"}
+def test_plan_and_e2e_trace_every_criterion(records: Any) -> None:
+    final, cas = _run()
+    [plan] = _bodies(final, cas, "test_plan")
+    [report] = _bodies(final, cas, "test_report")
+    [e2e] = _bodies(final, cas, "e2e_report")
+    ids = {c.id for c in CRITERIA}
 
-    high_risk = sorted(c.id for c in CRITERIA if c.criticality is Criticality.HIGH_RISK)
-    oracle_handles = sorted(
-        (a for a in arts if a.kind == "oracle_binding"), key=lambda a: a.seq
-    )
-    rebound = [
-        OracleBinding(
-            criterion_id=cid,
-            oracle_uri=f"cas://oracle/negative/{cid}",
-            oracle_kind=OracleKind.NEGATIVE,
-            seq=h.seq,
-        )
-        for cid, h in zip(high_risk, oracle_handles, strict=True)
-    ]
-    for ob, h in zip(rebound, oracle_handles, strict=True):
-        assert ob.oracle_kind is OracleKind.NEGATIVE
-        assert h.uri == f"cas://sha256/{ob.content_identity()}"
+    assert isinstance(plan, TestPlan) and plan.covered_criteria() == ids
+    assert isinstance(report, TestReport)
+    assert (report.passed, report.failed, report.run_against) == (3, 0, "integrated-sha")
+    assert isinstance(e2e, E2EReport)
+    assert {c for cids in e2e.scenario_criteria.values() for c in cids} == ids
+    assert "pinned seeds" in e2e.pinned_seeds_note and e2e.flake_retry_budget == 2
+
+
+def test_negative_oracle_per_high_risk_criterion(records: Any) -> None:
+    final, cas = _run()
+    oracles = _bodies(final, cas, "oracle_binding")
+    assert all(isinstance(o, OracleBinding) for o in oracles)
+    assert sorted(o.criterion_id for o in oracles) == ["AC-001", "AC-003"]
+    assert all(o.oracle_kind is OracleKind.NEGATIVE for o in oracles)
+
+
+def test_artifact_handles_dedupe_under_merge_by_uri(records: Any) -> None:
+    cas = ArtifactStore()
+    node = make_reviewer_node(_runtime(cas=cas), resolve=cas.resolve)
+    a = node(_seed(cas), _config())["artifacts"]
+    assert len(merge_by_uri(a, a)) == len(a)
+
+
+# ---- journal -----------------------------------------------------------------
+
+
+def test_one_journal_entry_as_reviewer(records: Any) -> None:
+    final, _cas = _run()
+    [entry] = final["agent_journal"]
+    assert isinstance(entry, JournalEntry)
+    assert (entry.node_id, entry.role) == ("reviewer", "Reviewer")

@@ -562,3 +562,92 @@ def test_unreadable_ownership_still_enters_the_lane(tmp_path: Any) -> None:
 
     with pytest.raises(ArtifactResolverError):
         app.invoke(state, _config("run-no-ownership"))
+
+
+class _RecordingAdapter(StubAdapter):
+    """StubAdapter that records each packet and the files the worktree held."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[tuple[TaskPacket, set[str]]] = []
+
+    def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
+        root = Path(sandbox.worktree)
+        seen = {p.relative_to(root).as_posix() for p in root.rglob("*")
+                if p.is_file() and ".git" not in p.parts}
+        self.calls.append((packet, seen))
+        return super().run(packet, sandbox)
+
+
+def test_fix_iteration_runs_one_fixer_session_on_the_integrated_tree(tmp_path: Any) -> None:
+    """A re-entry from the build/test fix loop must NOT re-decompose and rebuild every
+    task (one fresh agent session each). It runs a single fixer session seeded with the
+    integrated tree, whose diff is minted last so it lands on top at integration."""
+    (tmp_path / "README.md").write_text("seed\n")
+    cas = ArtifactStore()
+    adapter = _RecordingAdapter()
+    body = _decomposition_payload()
+    proxy = ModelProviderProxy(
+        MockTransport(completions=[body], default_text=body), signer=ZoneBSigner(KEY, KEY_ID)
+    )
+    rt = AgentRuntime(proxy=proxy, adapter=adapter, cas=cas)
+
+    def resolve(handle: Artifact) -> FrozenModel:
+        return _BODIES[handle.uri] if handle.uri in _BODIES else cas.resolve(handle)
+
+    app = build_implementation_subgraph(rt, source_dir=str(tmp_path), resolve=resolve).compile()
+    built: FactoryState = app.invoke(_seed_state(), _config("run-fix"))
+    first_pass = len(adapter.calls)
+    assert first_pass == 2
+
+    fix_state: FactoryState = {**built, "phase": "build_test_fix"}
+    assert _ran(app, fix_state, _config("run-fix", step=2)) == {"fixer"}
+    assert len(adapter.calls) == first_pass + 1
+
+    packet, seen = adapter.calls[-1]
+    assert packet.task["id"] == "fix-0"
+    assert "README.md" in seen and "STUB_CHANGE.txt" in seen  # integrated tree, not scaffold
+    assert "criteria.json" not in seen  # the gate oracle never reaches the agent
+    fixed: FactoryState = app.invoke(fix_state, _config("run-fix", step=3))
+    diffs = sorted(_feature_diffs(fixed), key=lambda a: a.seq)
+    assert diffs[-1].task_id == "fix-0"
+
+
+def test_first_pass_ignores_the_fixer(tmp_path: Any) -> None:
+    """Outside the build/test fix loop (e.g. after a SPEC fix) the normal lanes run."""
+    (tmp_path / "README.md").write_text("seed\n")
+    cas = ArtifactStore()
+    body = _decomposition_payload()
+    proxy = ModelProviderProxy(
+        MockTransport(completions=[body], default_text=body), signer=ZoneBSigner(KEY, KEY_ID)
+    )
+    rt = AgentRuntime(proxy=proxy, adapter=StubAdapter(), cas=cas)
+    app = build_implementation_subgraph(rt, source_dir=str(tmp_path), resolve=_resolve).compile()
+
+    state: FactoryState = {**_seed_state(), "phase": "build_test_fix"}  # no diffs yet
+    assert "fixer" not in _ran(app, state, _config("run-nofix"))
+
+
+def test_fix_iteration_rebuilds_a_task_that_never_produced_a_diff(tmp_path: Any) -> None:
+    """The fixer repairs what was built; a task with no diff (killed, errored) still
+    needs its own build, so the fix loop takes the normal lanes for it."""
+    (tmp_path / "README.md").write_text("seed\n")
+    cas = ArtifactStore()
+    body = _decomposition_payload()
+    proxy = ModelProviderProxy(
+        MockTransport(completions=[body], default_text=body), signer=ZoneBSigner(KEY, KEY_ID)
+    )
+    rt = AgentRuntime(proxy=proxy, adapter=StubAdapter(), cas=cas)
+
+    def resolve(handle: Artifact) -> FrozenModel:
+        return _BODIES[handle.uri] if handle.uri in _BODIES else cas.resolve(handle)
+
+    app = build_implementation_subgraph(rt, source_dir=str(tmp_path), resolve=resolve).compile()
+    built: FactoryState = app.invoke(_seed_state(), _config("run-partial"))
+    diffs = _feature_diffs(built)
+    partial: FactoryState = {
+        **built,
+        "phase": "build_test_fix",
+        "artifacts": [a for a in built["artifacts"] if a not in diffs[1:]],
+    }
+    assert "fixer" not in _ran(app, partial, _config("run-partial", step=2))

@@ -100,7 +100,7 @@ python -m foundry.cli [OPTIONS] "<one-line request>"   # build a GitHub-ready re
   --thread-id <NAME>         # run identity; seeds idempotency keys + resume                   (default: cli-run)
 
 # ── Budgets & flow control ────────────────────────────────────────────────────
-  --max-fix-attempts <N>     # auto-fix retries per FAILING gate (N ≥ 1)                        (default: 5)
+  --max-fix-attempts <N>     # auto-fix retries per FAILING gate (N ≥ 1)                        (default: 2)
   --max-slots <N>            # parallelism CEILING; pool usually auto-sizes (N ≥ 1)             (default: auto)
   --cost-cap-microusd <N>    # global spend envelope in micro-USD, for metered backends         (default: none)
   --checkpoints [all|product,design,release]  # pause at stage boundaries (CLI auto-approves)   (default: off)
@@ -717,7 +717,7 @@ rm -rf .pytest_cache .mypy_cache .ruff_cache ./.run spec.md  # clean caches + ou
 | `--packs a,b` | domain packs (`regulated` · `ml_data` · `frontend`) | — |
 | `--docs DIR` | generated doc-set output | — |
 | `--checkpoints` | `all` · `product,design,release` | off |
-| `--max-fix-attempts N` | gate fix-loop bound (N ≥ 1) | `5` |
+| `--max-fix-attempts N` | gate fix-loop bound (N ≥ 1) | `2` |
 | `--max-slots N` | parallelism ceiling (N ≥ 1) | auto |
 | `--cost-cap-microusd N` | spend envelope | — |
 | `--out DIR` | output repo | — |

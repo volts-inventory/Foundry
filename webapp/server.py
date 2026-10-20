@@ -311,7 +311,7 @@ class Project:
     max_slots: int = 4  # IC-pool CEILING (= cli.AUTO_SLOTS_CAP); the system sizes
     # actual parallelism to the lead's decomposition (min(tasks, this)).
     cost_cap_microusd: int | None = None  # global spend envelope (Wave D)
-    max_fix_attempts: int = 5  # auto-fix retry budget per failing gate (run() default)
+    max_fix_attempts: int = 2  # auto-fix retry budget per failing gate (run() default)
     release_seq: int = 1  # 1,2,3… within the floor; each iterate adds a release
     parent_id: str | None = None  # lineage: the release this one iterates on
     base_dir: str | None = None  # prior code seeded as the base tree (iterate)
@@ -496,7 +496,7 @@ def _load_persisted() -> None:
                     backend=str(row.get("backend", "mock")),
                     adapter=str(row.get("adapter", "stub")),
                     max_slots=int(row.get("slots", 1) or 1),
-                    max_fix_attempts=int(row.get("max_fix_attempts", 5) or 5),
+                    max_fix_attempts=int(row.get("max_fix_attempts", 2) or 2),
                     parent_id=row.get("parent_id"),
                     out_base=Path(ob) if ob else None,
                     created_at=str(row.get("created_at") or ""),
@@ -1868,7 +1868,7 @@ def _node_stage(node: str) -> str | None:
         return "defining requirements"
     if "architect" in n:
         return "designing the system"
-    if "engineer" in n and ("appsec" not in n):
+    if ("engineer" in n and "appsec" not in n) or n == "fixer":
         return "implementing"
     if any(k in n for k in ("qa", "sdet", "reviewer", "writer", "tester")):
         return "testing & review"
@@ -2785,9 +2785,9 @@ class Handler(BaseHTTPRequestHandler):
         max_slots = max(1, max_slots)
         # auto-fix retry budget (run() default = 3); optional UI override.
         try:
-            max_fix_attempts = int(body.get("max_fix_attempts", 5))
+            max_fix_attempts = int(body.get("max_fix_attempts", 2))
         except (TypeError, ValueError):
-            max_fix_attempts = 5
+            max_fix_attempts = 2
         max_fix_attempts = max(0, max_fix_attempts)
         # spend cap: UI sends dollars (cost_cap_usd); fall back to the env micro-USD.
         cost_env = os.environ.get("FOUNDRY_COST_CAP_MICROUSD", "").strip()

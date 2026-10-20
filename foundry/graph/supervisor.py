@@ -568,7 +568,7 @@ def build_supervisor_graph(
     product = build_product_subgraph(rt).compile()
     architecture = build_architecture_subgraph(rt, index).compile()
     implementation = build_implementation_subgraph(
-        rt, source_dir=source_dir, resolve=resolve,
+        rt, source_dir=source_dir, resolve=resolve, resolve_blob=resolve_blob,
         max_slots=max_slots, cost_cap_microusd=cost_cap_microusd,
     ).compile()
     quality = build_quality_subgraph(rt, resolve=resolve).compile()

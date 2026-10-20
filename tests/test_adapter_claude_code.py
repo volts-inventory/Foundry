@@ -158,6 +158,15 @@ def test_turns_model_and_triage_are_observed(source_dir: Path) -> None:
     assert any("total_cost_usd=0.0" in n for n in notes)
 
 
+def test_session_token_usage_is_recorded_for_the_manifest(source_dir: Path) -> None:
+    usage = {"input_tokens": 7, "output_tokens": 3, "cache_read_input_tokens": 900,
+             "cache_creation_input_tokens": 40}
+    adapter = ClaudeCodeAdapter(exec_fn=fake_exec({"a.py": "A = 1\n"}, envelope(usage=usage)))
+    with Sandbox(source_dir) as sb:
+        adapter.run(make_packet(sb.worktree), sb)
+    assert adapter.usage == [usage]
+
+
 def test_hard_kill_records_budget_breach_triage(source_dir: Path) -> None:
     # A wall-clock kill is a budget breach, never a verdict (sandbox contract):
     # the partially-authored tree is still recorded; the gates decide.

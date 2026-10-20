@@ -47,16 +47,20 @@ from langgraph.graph import END, START, StateGraph
 
 from foundry.agents.implementation import (
     lanes_with_leads,
+    make_fixer_node,
     make_junior_engineer_node,
     make_senior_engineer_node,
+    ready_tasks,
     tasks_for_lane,
 )
+from foundry.graph.gate_wiring import FEATURE_DIFF_KIND, _of_kind
 from foundry.schemas.architecture import ENGINEERING_LANES
 from foundry.state.factory_state import FactoryState
 
 if TYPE_CHECKING:
     from foundry.agents._runtime import AgentRuntime
     from foundry.agents.implementation.senior_engineer import ArtifactResolver
+    from foundry.graph.gate_wiring import BlobResolver
 
 __all__ = ["build_implementation_subgraph"]
 
@@ -69,6 +73,7 @@ def build_implementation_subgraph(
     *,
     source_dir: str,
     resolve: ArtifactResolver,
+    resolve_blob: BlobResolver | None = None,
     snapshot_store: str | None = None,
     tier: str = "T1",
     turn_budget: int = 8,
@@ -90,6 +95,9 @@ def build_implementation_subgraph(
         bodies from their content-addressed ``Artifact`` handles with (CAS in
         prod, an in-memory map in tests). The DATA (WHICH design/ownership) is
         read from ``state["artifacts"]`` inside the node (LEARNINGS IM4).
+    resolve_blob:
+        The SAME diff-body seam the gates materialize with; the fixer rebuilds the
+        integrated tree through it. Defaults to ``rt.cas.resolve_blob``.
     snapshot_store:
         DURABLE snapshot/blob store path so a retry's base snapshot survives the
         sandbox destroy/rebuild (LEARNINGS IM1).
@@ -179,8 +187,37 @@ def build_implementation_subgraph(
     # The path map's keys are the legal router return values (the reachable node ids +
     # END); add_conditional_edges drives branch-target validation and the rendered
     # topology off it.
-    g.add_conditional_edges(START, _next_with_work(-1),
-                            {**{n: n for n in chain}, END: END})
+    # A re-entry from the build/test fix loop repairs the integrated tree in ONE
+    # session instead of re-decomposing and rebuilding every task.
+    fixer_id = "fixer"
+    blobs = resolve_blob or (rt.cas.resolve_blob if rt.cas is not None else None)
+    can_fix = rt.cas is not None and blobs is not None
+    if can_fix:
+        assert blobs is not None
+        fixer = make_fixer_node(
+            rt, source_dir=source_dir, resolve=resolve, resolve_blob=blobs,
+            snapshot_store=snapshot_store,
+            turn_budget=turn_budget, cost_budget_microusd=cost_budget_microusd,
+        )
+
+        def _fixer(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+            return fixer(state, config)
+
+        g.add_node(fixer_id, _fixer)
+        g.add_edge(fixer_id, END)
+    first_lane = _next_with_work(-1)
+
+    def _start(state: FactoryState) -> str:
+        if can_fix and state.get("phase") == "build_test_fix":
+            built = {a.task_id for a in _of_kind(state, FEATURE_DIFF_KIND)}
+            # A task with no diff yet still needs its own build, not a repair pass.
+            if built and all(t.id in built for t in ready_tasks(state)):
+                return fixer_id
+        return first_lane(state)
+
+    g.add_conditional_edges(START, _start,
+                            {**{n: n for n in chain},
+                             **({fixer_id: fixer_id} if can_fix else {}), END: END})
     for _i, _node_id in enumerate(chain):
         g.add_conditional_edges(_node_id, _next_with_work(_i),
                                 {**{n: n for n in chain[_i + 1:]}, END: END})

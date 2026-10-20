@@ -72,6 +72,7 @@ from foundry.execution.adapters.stub import StubAdapter
 from foundry.gates import DevGateWriteVerifier, TwoZoneGateRunner, ZoneBSigner
 from foundry.gates.signing import signing_schemes_from_env
 from foundry.graph.factory_graph import build_factory_graph, terminal_gates_pass
+from foundry.graph.gate_wiring import GATE_INPUT_FILES
 from foundry.graph.supervisor import (
     MODE_ASSISTANT,
     MODE_AUTONOMOUS,
@@ -745,12 +746,6 @@ def _judgment_anchors(real_artifacts: bool) -> dict[str, str]:
 
 # ---- final source-tree materialization (on a passing build) -----------------
 
-# The gate-input file the integrated tree carries for the Spec gate; it is NOT a
-# source file the user asked the factory to produce, so it is excluded from the
-# emitted output tree.
-_GATE_INPUT_FILES = frozenset({"criteria.json"})
-
-
 def _write_output_tree(
     final_state: FactoryState,
     output_dir: str,
@@ -787,7 +782,7 @@ def _write_output_tree(
             if not src.is_file():
                 continue
             rel = src.relative_to(stage_root)
-            if rel.name in _GATE_INPUT_FILES and len(rel.parts) == 1:
+            if rel.name in GATE_INPUT_FILES and len(rel.parts) == 1:
                 continue
             # Defense-in-depth (mirrors docs/assemble.write_bundle): reject an
             # absolute or '..' relative path before writing under out_root.
@@ -1285,7 +1280,7 @@ def run(
     resolve_blob: BlobResolver | None = None,
     adapter: str | Any | None = None,
     diff_body: str | None = None,
-    max_fix_attempts: int = 5,
+    max_fix_attempts: int = 2,
     docs_dir: str | None = None,
     output_dir: str | None = None,
     checkpoints: bool | list[str | CheckpointBoundary] | None = None,
@@ -1357,7 +1352,7 @@ def run(
         assurance Audit gate reads a lockfile inventory). Pass an explicit
         error/failing body to exercise the halted-run path.
     max_fix_attempts:
-        Convergence bound for the gate fix-loop (default 5). On a gate FAIL/ERROR the
+        Convergence bound for the gate fix-loop (default 2). On a gate FAIL/ERROR the
         run fixes FORWARD — back to the responsible layer WITH the specific failures —
         up to this many times before HALTing (escalate). The failed tree's digest stays
         permanently disqualified each round (anti-gaming); only a genuinely-passing NEW
@@ -2184,7 +2179,7 @@ def main(argv: list[str] | None = None) -> int:
         args, _tid = _take_value(args, "--thread-id", what="a value")
         thread_id = _tid if _tid is not None else "cli-run"
         args, _mfa = _take_int(args, "--max-fix-attempts", minimum=1)
-        max_fix_attempts = _mfa if _mfa is not None else 5
+        max_fix_attempts = _mfa if _mfa is not None else 2
 
         # Parallelism is SYSTEM-DECIDED: the Tech-Lead decomposes the work and the
         # IC pool sizes itself to that plan (min(tasks, AUTO_SLOTS_CAP)). --max-slots

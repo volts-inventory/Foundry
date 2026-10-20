@@ -199,10 +199,10 @@ def _claude_request(sop: str, user: str, model: str = "claude-opus-4-8") -> dict
     }
 
 
-def test_claude_cli_always_routes_sop_through_append_flag_for_caching() -> None:
-    """Prompt caching is ALWAYS ON (not a setting): the stable SOP rides on
-    --append-system-prompt (so Claude Code prompt-caches it) and is kept OUT of the
-    -p user string, on a new-enough binary. The version probe runs once per binary."""
+def test_claude_cli_runs_persona_calls_one_shot() -> None:
+    """The SOP REPLACES Claude Code's default system prompt and the agent
+    scaffolding (tools, settings, MCP, skills) is switched off, so a persona call
+    pays only for its own prompt. The version probe runs once per binary."""
     payload = {"type": "result", "subtype": "success", "result": "ok",
                "modelUsage": {"claude-opus-4-8": {"inputTokens": 1, "outputTokens": 1}}}
     runner = _versioned_claude_runner("2.5.1", payload)
@@ -214,18 +214,23 @@ def test_claude_cli_always_routes_sop_through_append_flag_for_caching() -> None:
     version_calls = [c for c in runner.calls if "--version" in c]
     assert len(version_calls) == 1  # probed once, cached thereafter
     call = next(c for c in runner.calls if "-p" in c)
-    assert "--append-system-prompt" in call
-    assert call[call.index("--append-system-prompt") + 1] == "STABLE-SOP"
+    assert "--append-system-prompt" not in call
+    assert call[call.index("--system-prompt") + 1] == "STABLE-SOP"
+    assert call[call.index("--tools") + 1] == ""
+    assert call[call.index("--setting-sources") + 1] == ""
+    one_shot = {"--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence"}
+    assert one_shot <= set(call)
     prompt = call[call.index("-p") + 1]
     assert "STABLE-SOP" not in prompt and "volatile" in prompt
 
 
-def test_claude_cli_rejects_a_binary_too_old_for_append_system_prompt() -> None:
+def test_claude_cli_rejects_a_binary_too_old_for_one_shot_flags() -> None:
     """A `claude` below the floor fails closed with an upgrade instruction rather
-    than silently dropping caching — the minimum version is a hard REQUIREMENT."""
+    than silently running the expensive default agent — the minimum version is a
+    hard REQUIREMENT."""
     payload = {"type": "result", "subtype": "success", "result": "ok",
                "modelUsage": {"claude-opus-4-8": {"inputTokens": 1, "outputTokens": 1}}}
-    runner = _versioned_claude_runner("0.2.9", payload)
+    runner = _versioned_claude_runner("1.9.9", payload)
     tx = ClaudeCliTransport(claude_bin="claude-ancient", runner=runner)
 
     with pytest.raises(TransportError) as exc:

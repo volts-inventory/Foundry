@@ -62,6 +62,13 @@ class ModelUsageSummary(FrozenModel):
     total_tokens_in: int = 0
     total_tokens_out: int = 0
     total_cache_read_tokens: int = 0
+    total_cache_creation_tokens: int = 0
+    # Agentic coding sessions (claude-code adapter), which bypass the proxy records.
+    agent_sessions: int = 0
+    agent_tokens_in: int = 0
+    agent_tokens_out: int = 0
+    agent_cache_read_tokens: int = 0
+    agent_cache_creation_tokens: int = 0
     served_families: tuple[str, ...] = ()
     served_models: tuple[str, ...] = ()
     drift_events: int = 0
@@ -122,9 +129,11 @@ def _gate_refs(gates: Sequence[GateResult]) -> tuple[GateRef, ...]:
 
 
 def _usage_summary(
-    proxy_manifest: Sequence[Mapping[str, Any]], drift_events: int
+    proxy_manifest: Sequence[Mapping[str, Any]],
+    drift_events: int,
+    agent_usage: Sequence[Mapping[str, int]] = (),
 ) -> ModelUsageSummary:
-    tin = tout = cache = 0
+    tin = tout = cache = cache_new = 0
     families: set[str] = set()
     models: set[str] = set()
     by_tier: dict[str, int] = {}
@@ -134,6 +143,7 @@ def _usage_summary(
         tin += int(usage.get("input_tokens", 0))
         tout += int(usage.get("output_tokens", 0))
         cache += int(usage.get("cache_read_input_tokens", 0))
+        cache_new += int(usage.get("cache_creation_input_tokens", 0))
         for fam in rec.get("served_family") or ():
             families.add(str(fam))
         if rec.get("served_model"):
@@ -150,6 +160,14 @@ def _usage_summary(
         total_tokens_in=tin,
         total_tokens_out=tout,
         total_cache_read_tokens=cache,
+        total_cache_creation_tokens=cache_new,
+        agent_sessions=len(agent_usage),
+        agent_tokens_in=sum(a.get("input_tokens", 0) for a in agent_usage),
+        agent_tokens_out=sum(a.get("output_tokens", 0) for a in agent_usage),
+        agent_cache_read_tokens=sum(a.get("cache_read_input_tokens", 0) for a in agent_usage),
+        agent_cache_creation_tokens=sum(
+            a.get("cache_creation_input_tokens", 0) for a in agent_usage
+        ),
         served_families=tuple(sorted(families)),
         served_models=tuple(sorted(models)),
         drift_events=drift_events,
@@ -170,6 +188,7 @@ def build_manifest(
     docs: Sequence[DocRef],
     proxy_manifest: Sequence[Mapping[str, Any]] = (),
     drift_events: int = 0,
+    agent_usage: Sequence[Mapping[str, int]] = (),
     tree_sha: str = "",
     estimated_cost_microusd: int = 0,
 ) -> BuildManifest:
@@ -184,7 +203,7 @@ def build_manifest(
         artifacts=_artifact_refs(artifacts),
         gates=_gate_refs(gates),
         docs=tuple(docs),
-        model_usage=_usage_summary(proxy_manifest, drift_events),
+        model_usage=_usage_summary(proxy_manifest, drift_events, agent_usage),
         estimated_cost_microusd=estimated_cost_microusd,
     )
 
@@ -228,7 +247,11 @@ def render_manifest_md(m: BuildManifest) -> str:
         "",
         f"- **Calls:** {u.model_calls} ({by_tier})",
         f"- **Tokens in / out:** {u.total_tokens_in:,} / {u.total_tokens_out:,}",
-        f"- **Cache-read tokens:** {u.total_cache_read_tokens:,}",
+        f"- **Cache-read / cache-write tokens:** {u.total_cache_read_tokens:,} / "
+        f"{u.total_cache_creation_tokens:,}",
+        f"- **Coding sessions:** {u.agent_sessions} — tokens in / out "
+        f"{u.agent_tokens_in:,} / {u.agent_tokens_out:,}, cache read / write "
+        f"{u.agent_cache_read_tokens:,} / {u.agent_cache_creation_tokens:,}",
         f"- **Served families:** {', '.join(u.served_families) or 'n/a'}",
         f"- **Served models:** {', '.join(u.served_models) or 'n/a'}",
         f"- **Pinned-ID drift events:** {u.drift_events}"

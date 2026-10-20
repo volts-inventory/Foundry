@@ -312,6 +312,9 @@ class ClaudeCodeAdapter:
         # tool call can be reported while the step runs; without it the argv, the
         # parsing and the result are exactly as before.
         self._on_activity = on_activity
+        # Per-session token usage, read into the BUILD-MANIFEST: coding sessions are
+        # most of a run's spend and never pass through the proxy's per-call records.
+        self.usage: list[dict[str, int]] = []
 
     def _pump_activity(self, line: str) -> None:
         """One stdout line -> zero or more activity phrases -> the listener. Advisory:
@@ -387,6 +390,13 @@ class ClaudeCodeAdapter:
             raw = envelope.get("result")
             summary = raw if isinstance(raw, str) else ""
 
+        u = envelope.get("usage")
+        if isinstance(u, dict):
+            self.usage.append({
+                k: int(u.get(k) or 0)
+                for k in ("input_tokens", "output_tokens", "cache_read_input_tokens",
+                          "cache_creation_input_tokens")
+            })
         authored, deleted, skipped_binary = changed_files(before, after)
         payload: dict[str, Any] = {"kind": "full-file-snapshot", "files": authored}
         if deleted:

@@ -141,8 +141,18 @@ def test_build_manifest_aggregates_usage_and_indexes() -> None:
         passed=True, phase="done", artifacts=[art], gates=[],
         docs=[DocRef(path="README.md", title="R", sha256="a" * 64)],
         proxy_manifest=proxy_manifest, drift_events=0,
+        agent_usage=[
+            {"input_tokens": 5, "output_tokens": 7, "cache_read_input_tokens": 1000,
+             "cache_creation_input_tokens": 200},
+            {"input_tokens": 1, "output_tokens": 2, "cache_read_input_tokens": 0,
+             "cache_creation_input_tokens": 0},
+        ],
     )
     assert m.model_usage.model_calls == 2
+    assert m.model_usage.agent_sessions == 2
+    assert m.model_usage.agent_tokens_out == 9
+    assert m.model_usage.agent_cache_read_tokens == 1000
+    assert m.model_usage.agent_cache_creation_tokens == 200
     assert m.model_usage.total_tokens_in == 120
     assert m.model_usage.calls_by_tier == {"T1": 1, "T2": 1}
     assert m.model_usage.served_models == ("claude-opus-4-8", "claude-sonnet-4-6")

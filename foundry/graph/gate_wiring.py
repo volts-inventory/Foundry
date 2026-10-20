@@ -791,6 +791,10 @@ def _scaffold_manifest(dest: Path) -> None:
     (dest / "requirements.txt").write_text(header + body, encoding="utf-8")
 
 
+# Files materialize_workdir writes for the gates themselves, not product code.
+GATE_INPUT_FILES = frozenset({"criteria.json"})
+
+
 def materialize_workdir(
     state: FactoryState, dest: Path, *, resolve: ArtifactResolver, resolve_blob: BlobResolver
 ) -> str:

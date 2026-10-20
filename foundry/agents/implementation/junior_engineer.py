@@ -66,10 +66,10 @@ from foundry.schemas.architecture import (
     lane_of_area,
 )
 from foundry.schemas.base import Artifact, BudgetLedger
-from foundry.schemas.gates import GateStatus
+from foundry.schemas.gates import GateResult, GateStatus
 from foundry.schemas.implementation import FeatureDiff, Task, TaskStatus
 from foundry.schemas.product import AcceptanceCriterion
-from foundry.state.reducers import live_constraints
+from foundry.state.reducers import DETERMINISTIC_GATES, live_constraints
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -77,6 +77,7 @@ if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
 
     from foundry.execution.work_pool import ExecutionTask
+    from foundry.graph.gate_wiring import BlobResolver
     from foundry.schemas.journal import JournalEntry
     from foundry.state.factory_state import FactoryState
 
@@ -87,6 +88,7 @@ if TYPE_CHECKING:
 __all__ = [
     "execution_task_for",
     "idempotency_key",
+    "make_fixer_node",
     "make_junior_engineer_node",
     "pinned_texts",
     "ready_tasks",
@@ -94,6 +96,13 @@ __all__ = [
 ]
 
 NODE_ID = "junior_engineer"
+FIXER_NODE_ID = "fixer"
+
+_FIXER_PERSONA = (
+    "You are fixing an integrated build that failed verification. The worktree holds "
+    "the whole project as built so far. Make the smallest changes that make the failing "
+    "gates below pass; do not rewrite working code or add features."
+)
 
 _DEFAULT_TURN_BUDGET = 8
 _DEFAULT_COST_BUDGET_MICROUSD = 1_000_000  # integer micro-USD, never floats
@@ -320,11 +329,25 @@ def _retrieved_spans(
 
 
 def _prior_failures(state: FactoryState) -> tuple[str, ...]:
-    """Findings from any gate that FAILED/ERRORed on the previous pass — fed back to
-    the engineer (via the TaskPacket) so a fix attempt targets the SPECIFIC failure
-    instead of re-rolling blind. Empty on the first pass (no gates yet)."""
+    """Findings from the latest pass's FAILED/ERRORed gates — fed back to the
+    engineer (via the TaskPacket) so a fix attempt targets the SPECIFIC failure
+    instead of re-rolling blind. Empty on the first pass (no gates yet).
+
+    The ``gates`` channel keeps one record per (gate, tree), so superseded trees'
+    failures stay in state. Only the latest verdict per gate counts, and a
+    deterministic gate counts only if it ran against the newest tree: a gate skipped
+    on this pass (tests after a build failure) must not resurface last pass's FAIL."""
+    gates = list(state.get("gates") or ())
+    latest: dict[str, GateResult] = {}
+    for g in gates:
+        if g.name not in latest or g.seq > latest[g.name].seq:
+            latest[g.name] = g
+    tree_gates = [g for g in gates if g.name in DETERMINISTIC_GATES]
+    current_tree = max(tree_gates, key=lambda g: g.seq).run_against if tree_gates else None
     out: list[str] = []
-    for g in state.get("gates") or ():
+    for g in sorted(latest.values(), key=lambda g: g.seq):
+        if g.name in DETERMINISTIC_GATES and g.run_against != current_tree:
+            continue
         if g.status in (GateStatus.FAIL, GateStatus.ERROR) and g.findings:
             out.append(f"[{g.name} gate FAILED]")
             out.extend(g.findings)
@@ -985,3 +1008,96 @@ def _task_done_marker(task: Task, diff: FeatureDiff) -> dict[str, Any]:
     d["diff_uri"] = diff.diff_uri
     d["base_tree_sha"] = diff.base_tree_sha
     return d
+
+
+def make_fixer_node(
+    rt: AgentRuntime,
+    *,
+    source_dir: str,
+    resolve: ArtifactResolver,
+    resolve_blob: BlobResolver,
+    snapshot_store: str | None = None,
+    turn_budget: int = _DEFAULT_TURN_BUDGET,
+    cost_budget_microusd: int = _DEFAULT_COST_BUDGET_MICROUSD,
+) -> NodeFn:
+    """One coding session that repairs the INTEGRATED tree after a failed gate.
+
+    Re-running every task from scratch on each fix iteration rebuilt the whole
+    project (one fresh agent session per task) to repair what is usually a local
+    failure. The fixer instead seeds a single sandbox with the integrated tree, hands
+    the adapter only the latest failures, and emits one FeatureDiff whose seq is
+    lifted past every existing diff, so integration applies it on top
+    (later-by-Seq wins)."""
+    if rt.adapter is None or rt.cas is None:
+        raise ValueError("fixer requires rt.adapter and rt.cas (it rebuilds the integrated tree)")
+
+    def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        import tempfile
+
+        from foundry.graph.gate_wiring import (
+            FEATURE_DIFF_KIND,
+            GATE_INPUT_FILES,
+            MaterializationError,
+            _fix_attempts,
+            _of_kind,
+            materialize_workdir,
+        )
+
+        attempt = _fix_attempts(state, config)
+        try:
+            with tempfile.TemporaryDirectory(prefix="foundry-fix-") as tmp:
+                materialize_workdir(state, Path(tmp), resolve=resolve, resolve_blob=resolve_blob)
+                # Gate inputs (criteria.json) stay out of the agent's worktree: an agent
+                # told to "make the gates pass" must not be handed the oracle to edit.
+                overlay: dict[str, str | None] = {
+                    f.relative_to(tmp).as_posix(): f.read_text(encoding="utf-8")
+                    for f in sorted(Path(tmp).rglob("*"))
+                    if f.is_file() and f.relative_to(tmp).as_posix() not in GATE_INPUT_FILES
+                }
+        except MaterializationError as exc:
+            # The gate already recorded this tree as ERROR; returning no diff lets the
+            # bounded fix loop halt in order instead of crashing the run.
+            return {"agent_journal": [journal_entry(
+                node_id=FIXER_NODE_ID, role="Backend Engineer",
+                seq=rt.seq(config, FIXER_NODE_ID, f"journal:fix-{attempt}"),
+                summary="Could not rebuild the integrated tree to fix it",
+                concerns=(str(exc)[:400],),
+            )]}
+        task_id = f"fix-{attempt}"
+        task = Task(
+            id=task_id,
+            spec_uri=f"fix://{attempt}",
+            criterion_ids=(),
+            branch=f"task/{task_id}",
+            seq=rt.seq(config, FIXER_NODE_ID, f"task:{task_id}"),
+        )
+        writes = _run_one_task(
+            rt,
+            task,
+            state.get("pinned_constraints") or (),
+            None,
+            config,
+            source_dir=source_dir,
+            snapshot_store=snapshot_store,
+            turn_budget=turn_budget,
+            cost_budget_microusd=cost_budget_microusd,
+            prior_failures=_prior_failures(state),
+            persona=_FIXER_PERSONA,
+            overlay=overlay,
+        )
+        # Integration orders diffs by Seq. A fresh diff key starts at epoch 1, tying
+        # with (and possibly sorting under) the diffs it repairs, so lift its epoch
+        # past every existing diff.
+        top = max(a.seq.emission_epoch for a in _of_kind(state, FEATURE_DIFF_KIND))
+        writes["artifacts"] = [
+            a.model_copy(update={"seq": a.seq._replace(emission_epoch=top + 1)})
+            for a in writes["artifacts"]
+        ]
+        writes.setdefault("agent_journal", []).append(journal_entry(
+            node_id=FIXER_NODE_ID, role="Backend Engineer",
+            seq=rt.seq(config, FIXER_NODE_ID, f"journal:{task_id}"),
+            summary=f"Fixed the failing gates (attempt {attempt})",
+        ))
+        return writes
+
+    return _node

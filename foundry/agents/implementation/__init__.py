@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from foundry.agents.implementation.junior_engineer import (
     idempotency_key,
+    make_fixer_node,
     make_junior_engineer_node,
     pinned_texts,
     ready_tasks,
@@ -46,6 +47,7 @@ __all__ = [
     "idempotency_key",
     "lanes_with_leads",
     "leads_for_lane",
+    "make_fixer_node",
     "make_junior_engineer_node",
     "make_senior_engineer_node",
     "pinned_texts",

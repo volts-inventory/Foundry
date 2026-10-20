@@ -656,3 +656,37 @@ def test_prior_failures_feeds_failed_gate_findings_back_to_the_engineer() -> Non
     assert _prior_failures({}) == ()                                   # first pass: blind
     passing = failing.model_copy(update={"status": GateStatus.PASS})
     assert _prior_failures({"gates": [passing]}) == ()                 # green: no feedback
+
+
+def test_prior_failures_reports_only_the_latest_verdict_per_gate() -> None:
+    """The gates channel keeps one record per (gate, tree). Superseded trees' failures
+    must not pile up in every later fix prompt; a gate that has since passed adds none."""
+    from foundry.agents.implementation.junior_engineer import _prior_failures
+    from foundry.schemas.gates import GateResult, GateStatus, VerdictClass
+    from foundry.state.seq import Seq
+
+    def gate(name: str, epoch: int, status: GateStatus, finding: str) -> GateResult:
+        return GateResult(
+            name=name, status=status, decision_deterministic=True,
+            execution_deterministic=True,
+            verdict_class=VerdictClass.EXECUTION_DETERMINISTIC,
+            findings=(finding,), run_against=str(epoch) * 64,
+            seq=Seq("r", epoch, 1, name, 0),
+        )
+
+    fed = _prior_failures({"gates": [
+        gate("test", 1, GateStatus.FAIL, "OLD test failure"),
+        gate("test", 2, GateStatus.FAIL, "NEW test failure"),
+        gate("build", 1, GateStatus.FAIL, "OLD build failure"),
+        gate("build", 2, GateStatus.PASS, "build ok"),
+    ]})
+    assert "NEW test failure" in fed
+    assert "OLD test failure" not in fed and "OLD build failure" not in fed
+
+    # Build failed on the newest tree, so tests never re-ran there: the older tree's
+    # test FAIL is stale and must not be fed back as a current failure.
+    fed = _prior_failures({"gates": [
+        gate("test", 1, GateStatus.FAIL, "STALE test failure"),
+        gate("build", 2, GateStatus.FAIL, "CURRENT build failure"),
+    ]})
+    assert "CURRENT build failure" in fed and "STALE test failure" not in fed

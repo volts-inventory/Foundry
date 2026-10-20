@@ -244,6 +244,7 @@ def assemble_documentation(
         docs=doc_refs,
         proxy_manifest=rt.proxy.manifest,
         drift_events=len(rt.proxy.drift_events),
+        agent_usage=getattr(rt.adapter, "usage", ()),
         estimated_cost_microusd=_budget_spend(state),
     )
     manifest_md = RenderedDoc("BUILD-MANIFEST.md", "Build Manifest", render_manifest_md(manifest))

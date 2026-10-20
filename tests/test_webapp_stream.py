@@ -372,7 +372,7 @@ def test_platform_svc_nodes_stream_floor_telemetry_quietly(store, tmp_path, monk
     active = [e for e in p.log if e["type"] == "active" and e.get("agent")]
     assert [(e["room"], e["phase"]) for e in active] == [("frontend", "start"),
                                                          ("frontend", "finish")]
-    assert all(e["agent"] == "Frontend Lead" and e["quiet"] for e in active)
+    assert all(e["agent"] == "Frontend Engineer" and e["quiet"] for e in active)
     # and the quest log still gets exactly one box per node, from the `svc` stream
     svc_phases = [e["phase"] for e in p.log if e["type"] == "svc"]
     assert svc_phases == ["start", "agent_start", "agent_done"]

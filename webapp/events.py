@@ -15,37 +15,50 @@ from collections import Counter
 from typing import Any
 
 # Workshop rooms, left -> right (the agent walks the floor as the build advances).
+# Engineering is virtual here: its three lanes (frontend/backend/data) are rooms of
+# their own on the floor. The cast is Planner / Engineers / Reviewer (+ the gated-mode
+# security trio); the gate and vault are infrastructure.
 ROOMS: tuple[str, ...] = (
-    "product",
-    "architecture",
+    "plan",
     "engineering",
-    "qa",
+    "review",
     "security",
     "gate",
     "vault",
 )
 
-# Which room + sprite a journal node_id belongs to.
+# Room ids from OLD builds' replayed telemetry -> the current room.
+LEGACY_ROOM: dict[str, str] = {
+    "product": "plan",
+    "architecture": "plan",
+    "qa": "review",
+}
+
+# Which room + sprite a journal node_id belongs to. Labels are the floor's sprite keys.
+# The planner / reviewer are single nodes; the old per-role ids stay mapped so replayed
+# telemetry still seats someone (product + architecture -> Planner, qa -> Reviewer, each
+# lane's lead -> that lane's Engineer).
 AGENT_BY_NODE: dict[str, tuple[str, str]] = {
-    "stakeholder_proxy": ("Stakeholder Proxy", "product"),
-    "product_manager": ("Product Manager", "product"),
-    "criteria_completeness_critic": ("Criteria Critic", "product"),
-    "eng_program_mgr": ("Program Manager", "product"),
-    "principal_architect": ("Principal Architect", "architecture"),
-    # Implementation fans out into a LEAD (decompose) + ENGINEER (build) node per
-    # discipline lane, so each lights its own room + role. Legacy single-node ids kept
-    # so an OLD build's replayed telemetry still seats someone.
+    "planner": ("Planner", "plan"),
+    "stakeholder_proxy": ("Planner", "plan"),
+    "product_manager": ("Planner", "plan"),
+    "criteria_completeness_critic": ("Planner", "plan"),
+    "eng_program_mgr": ("Planner", "plan"),
+    "principal_architect": ("Planner", "plan"),
+    # Legacy single-node ids kept so an OLD build's replayed telemetry still seats someone.
     "senior_engineer": ("Senior Engineer", "engineering"),
     "junior_engineer": ("Junior Engineer", "engineering"),
-    "frontend_lead": ("Frontend Lead", "frontend"),
+    "frontend_lead": ("Frontend Engineer", "frontend"),
     "frontend_engineer": ("Frontend Engineer", "frontend"),
-    "backend_lead": ("Backend Lead", "backend"),
+    "backend_lead": ("Backend Engineer", "backend"),
     "backend_engineer": ("Backend Engineer", "backend"),
-    "data_lead": ("Data Lead", "data"),
+    "data_lead": ("Data Engineer", "data"),
     "data_engineer": ("Data Engineer", "data"),
-    "qa_engineer": ("QA Engineer", "qa"),
-    "sdet": ("SDET", "qa"),
-    "reviewer_critic": ("Reviewer", "qa"),
+    "fixer": ("Engineer", "engineering"),
+    "reviewer": ("Reviewer", "review"),
+    "qa_engineer": ("Reviewer", "review"),
+    "sdet": ("Reviewer", "review"),
+    "reviewer_critic": ("Reviewer", "review"),
     "appsec_engineer": ("AppSec Engineer", "security"),
     "audit_compliance": ("Audit & Compliance", "security"),
     "supply_chain_reviewer": ("Supply-chain Reviewer", "security"),
@@ -53,27 +66,28 @@ AGENT_BY_NODE: dict[str, tuple[str, str]] = {
 
 # Which agent/room PRODUCED each artifact kind (so a new artifact lights up a desk).
 ARTIFACT_ORIGIN: dict[str, tuple[str, str]] = {
-    "intent_brief": ("Stakeholder Proxy", "product"),
-    "prd": ("Product Manager", "product"),
-    "acceptance_criterion": ("Product Manager", "product"),
-    "criteria_findings": ("Criteria Critic", "product"),
-    "sprint_plan": ("Program Manager", "product"),
-    "system_design": ("Principal Architect", "architecture"),
-    "adr": ("Principal Architect", "architecture"),
-    "interface_contract": ("Principal Architect", "architecture"),
-    "ownership_map": ("Principal Architect", "architecture"),
+    "intent_brief": ("Planner", "plan"),
+    "prd": ("Planner", "plan"),
+    "acceptance_criterion": ("Planner", "plan"),
+    "criteria_findings": ("Planner", "plan"),
+    "sprint_plan": ("Planner", "plan"),
+    "system_design": ("Planner", "plan"),
+    "adr": ("Planner", "plan"),
+    "interface_contract": ("Planner", "plan"),
+    "ownership_map": ("Planner", "plan"),
+    "scope_tier": ("Planner", "plan"),
     "feature_diff": ("Junior Engineer", "engineering"),
-    "test_plan": ("QA Engineer", "qa"),
-    "oracle_binding": ("QA Engineer", "qa"),
-    "test_report": ("QA Engineer", "qa"),
-    "e2e_report": ("SDET", "qa"),
+    "test_plan": ("Reviewer", "review"),
+    "oracle_binding": ("Reviewer", "review"),
+    "test_report": ("Reviewer", "review"),
+    "e2e_report": ("Reviewer", "review"),
     "threat_model": ("AppSec Engineer", "security"),
     "audit_finding": ("Audit & Compliance", "security"),
     "supply_chain_report": ("Supply-chain Reviewer", "security"),
-    "runbook": ("Technical Writer", "qa"),
-    "known_issues": ("Technical Writer", "qa"),
-    "upgrade_guide": ("Technical Writer", "qa"),
-    "perf_cost_report": ("Technical Writer", "qa"),
+    "runbook": ("Reviewer", "review"),
+    "known_issues": ("Reviewer", "review"),
+    "upgrade_guide": ("Reviewer", "review"),
+    "perf_cost_report": ("Reviewer", "review"),
 }
 
 # A friendly label per artifact kind (shown as a little pickup icon + quest line).
@@ -102,18 +116,19 @@ ARTIFACT_LABEL: dict[str, str] = {
 }
 
 _BOUNDARY_ROOM: dict[str, str] = {
-    "product": "product",
-    "design": "architecture",
-    "release": "qa",
+    "product": "plan",
+    "design": "plan",
+    "release": "review",
 }
 # Subgraph SCOPE -> room, for a node inside a stage that isn't a named agent. Without
 # the implementation/quality/assurance entries those steps resolved to no room at all
 # and vanished from the floor AND the log.
 _SCOPE_ROOM: dict[str, str] = {
     **_BOUNDARY_ROOM,
-    "architecture": "architecture",
+    "architecture": "plan",
+    "planning": "plan",
     "implementation": "engineering",
-    "quality": "qa",
+    "quality": "review",
     "assurance": "security",
 }
 
@@ -126,7 +141,7 @@ def _room_for_scope(scope: str) -> str:
     has to be matched per segment (innermost stage first), never as a whole string.
     """
     for seg in reversed(scope.split(":")):
-        room = _SCOPE_ROOM.get(seg) or (seg if seg in ROOMS else "")
+        room = _SCOPE_ROOM.get(seg) or LEGACY_ROOM.get(seg) or (seg if seg in ROOMS else "")
         if room:
             return room
     return ""
@@ -140,7 +155,7 @@ def _room_for_scope(scope: str) -> str:
 # ANOTHER event already reports the outcome — the gate runners emit their own
 # pass/fail verdict, so announcing the finish twice would just be noise.
 _INFRA_NODE: dict[str, tuple[str, str, str | None]] = {
-    "triage": ("product", "sorting the request into a build plan", "build plan ready"),
+    "triage": ("plan", "sorting the request into a build plan", "build plan ready"),
     # gate runners (top-level + inside the assurance/quality subgraphs)
     "spec_gate": ("gate", "running the SPEC gate", None),
     "build_gate": ("gate", "running the BUILD gate", None),
@@ -154,23 +169,23 @@ _INFRA_NODE: dict[str, tuple[str, str, str | None]] = {
     "supply_chain_gate": ("gate", "running the SUPPLY-CHAIN gate", None),
     # fix-forward retries: the longest silences in a real build — each is a full
     # agentic pass over the failing tree
-    "spec_fix": ("product", "fix-forward — reworking the spec after a gate failure",
+    "spec_fix": ("plan", "fix-forward — reworking the spec after a gate failure",
                  "spec rework finished"),
     "build_test_fix": ("engineering", "fix-forward — rebuilding after a gate failure",
                        "rebuild finished"),
     "assurance_fix": ("engineering", "fix-forward — clearing the assurance findings",
                       "assurance fixes finished"),
     # the doc pass + the evidence packs behind each sign-off
-    "docs": ("qa", "writing the runbook & release docs", "docs written"),
+    "docs": ("review", "writing the runbook & release docs", "docs written"),
     "design_sign_off": ("gate", "assembling the design evidence", None),
     "release_sign_off": ("gate", "assembling the release evidence", None),
 }
 # Conditional-architecture agents that have no sprite on the floor — they still get a
 # step line so the log doesn't skip them. (agent name, room, running, done)
 _INFRA_NODE.update({
-    "domain_specialist": ("architecture", "domain specialist reviewing the design",
+    "domain_specialist": ("plan", "domain specialist reviewing the design",
                           "domain review finished"),
-    "ux_design": ("architecture", "UX pass over the interface", "UX pass finished"),
+    "ux_design": ("plan", "UX pass over the interface", "UX pass finished"),
 })
 _BOUNDARY_TITLE: dict[str, str] = {
     "product": "Product & Requirements",
@@ -225,6 +240,7 @@ def _origin(kind: str, produced_by: str) -> tuple[str, str]:
 # A short, human "what this node just did" line for the quest log (task completion).
 # Keyed by node id; falls back to the agent name when a node isn't listed here.
 _NODE_SUMMARY: dict[str, str] = {
+    "planner": "wrote the PRD, acceptance criteria, design & sprint plan",
     "stakeholder_proxy": "clarified the intent brief",
     "product_manager": "wrote the PRD & acceptance criteria",
     "criteria_completeness_critic": "critiqued the acceptance criteria",
@@ -232,12 +248,14 @@ _NODE_SUMMARY: dict[str, str] = {
     "principal_architect": "produced the system design & interface contracts",
     "senior_engineer": "decomposed the design into ownership-ordered tasks",
     "junior_engineer": "built the feature diffs (code) across the task set",
-    "frontend_lead": "decomposed the frontend work into tasks",
+    "frontend_lead": "lined up the frontend work",
     "frontend_engineer": "built the frontend feature diffs (code)",
-    "backend_lead": "decomposed the backend work into tasks",
+    "backend_lead": "lined up the backend work",
     "backend_engineer": "built the backend feature diffs (code)",
-    "data_lead": "decomposed the data-layer work into tasks",
+    "data_lead": "lined up the data-layer work",
     "data_engineer": "built the data-layer feature diffs (code)",
+    "fixer": "repaired the failing gates",
+    "reviewer": "reviewed the change and ran the test plan",
     "qa_engineer": "ran the test plan",
     "sdet": "ran the end-to-end checks",
     "reviewer_critic": "reviewed the change",
@@ -308,7 +326,7 @@ def events_for_payload(
     journal text on the speech bubbles / log block headers."""
     agent_caps: dict[str, str] = dict((summaries or {}).get("agents") or {})
     boundary = str(payload.get("boundary", ""))
-    room = _BOUNDARY_ROOM.get(boundary, "product")
+    room = _BOUNDARY_ROOM.get(boundary, "plan")
     out: list[dict[str, Any]] = [
         {"type": "stage", "room": room, "boundary": boundary,
          "label": _BOUNDARY_TITLE.get(boundary, boundary.title())},

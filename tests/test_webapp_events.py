@@ -6,14 +6,14 @@ from webapp.events import events_for_payload, events_for_result, live_event_for_
 
 def test_live_event_for_node_seats_the_agent_at_its_desk() -> None:
     # START: a named agent node seats that agent in its room for the whole model call.
-    ev = live_event_for_node("principal_architect", "architecture", "start")
-    assert ev == {"type": "active", "room": "architecture", "agent": "Principal Architect",
+    ev = live_event_for_node("planner", "planning", "start")
+    assert ev == {"type": "active", "room": "plan", "agent": "Planner",
                   "live": True, "phase": "start"}
     # FINISH: clears the agent and carries a human summary of what the step produced.
-    fin = live_event_for_node("principal_architect", "architecture", "finish")
+    fin = live_event_for_node("planner", "planning", "finish")
     assert fin["phase"] == "finish"
-    assert fin["room"] == "architecture" and fin["agent"] == "Principal Architect"
-    assert "Principal Architect" in fin["summary"] and fin["summary"] != "Principal Architect"
+    assert fin["room"] == "plan" and fin["agent"] == "Planner"
+    assert "Planner" in fin["summary"] and fin["summary"] != "Planner"
     # An unnamed node falls back to the subgraph scope -> room (room still lights).
     ev2 = live_event_for_node("some_infra_node", "engineering", "start")
     assert ev2 == {"type": "active", "room": "engineering", "agent": "", "live": True,
@@ -43,7 +43,7 @@ def test_infra_steps_are_reported_even_with_no_agent_and_no_scope() -> None:
 
     # Named agents are unchanged — they still open an agent box, never a step line.
     named = live_event_for_node("sdet", "quality", "finish")
-    assert named is not None and "step" not in named and "SDET" in named["summary"]
+    assert named is not None and "step" not in named and "Reviewer" in named["summary"]
 
 
 def test_subgraph_scopes_all_resolve_to_a_room() -> None:
@@ -52,10 +52,10 @@ def test_subgraph_scopes_all_resolve_to_a_room() -> None:
     # observed from a run. Matching the whole string resolved nothing, so every
     # unnamed step inside a stage was dropped.
     for scope, room in (("factory:implementation", "engineering"),
-                        ("factory:quality", "qa"),
+                        ("factory:quality", "review"),
                         ("factory:assurance", "security"),
-                        ("factory:architecture", "architecture"),
-                        ("factory:product", "product"),
+                        ("factory:architecture", "plan"),
+                        ("factory:product", "plan"),
                         ("implementation", "engineering")):    # bare form still works
         ev = live_event_for_node("some_unnamed_node", scope, "start")
         assert ev is not None and ev["room"] == room, scope
@@ -213,3 +213,37 @@ def test_gate_events_carry_the_tree_they_ran_against() -> None:
             "gates": [{"name": "test", "status": "pass"}]}
     bare_gate = next(e for e in events_for_payload(bare, set()) if e["type"] == "gate")
     assert bare_gate["run_against"] == ""
+
+
+def test_reviewer_persona_does_not_collide_with_the_review_gate() -> None:
+    # `review` is the REVIEW gate (infra, no sprite); `reviewer` is the Reviewer persona.
+    gate = live_event_for_node("review", "", "start")
+    assert gate is not None and gate["room"] == "gate" and gate["agent"] == ""
+    who = live_event_for_node("reviewer", "", "start")
+    assert who is not None and who["room"] == "review" and who["agent"] == "Reviewer"
+
+
+def test_cast_is_planner_engineers_reviewer_and_old_ids_still_seat_someone() -> None:
+    expect = {
+        "planner": ("Planner", "plan"),
+        "frontend_lead": ("Frontend Engineer", "frontend"),
+        "backend_engineer": ("Backend Engineer", "backend"),
+        "data_lead": ("Data Engineer", "data"),
+        "reviewer": ("Reviewer", "review"),
+        # replayed telemetry from old builds
+        "stakeholder_proxy": ("Planner", "plan"),
+        "principal_architect": ("Planner", "plan"),
+        "eng_program_mgr": ("Planner", "plan"),
+        "qa_engineer": ("Reviewer", "review"),
+        "sdet": ("Reviewer", "review"),
+        "reviewer_critic": ("Reviewer", "review"),
+    }
+    for node, (agent, room) in expect.items():
+        ev = live_event_for_node(node, "", "start")
+        assert ev is not None and (ev["agent"], ev["room"]) == (agent, room), node
+    out = events_for_payload(
+        {"boundary": "design", "artifacts": [
+            {"uri": "u1", "kind": "prd", "produced_by": "planner"},
+            {"uri": "u2", "kind": "test_report", "produced_by": "reviewer"}]}, set())
+    arts = {e["kind"]: (e["agent"], e["room"]) for e in out if e["type"] == "artifact"}
+    assert arts == {"prd": ("Planner", "plan"), "test_report": ("Reviewer", "review")}

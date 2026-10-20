@@ -33,6 +33,7 @@ from typing import Any
 
 from foundry.schemas.architecture import CANONICAL_AREAS
 from webapp.events import (
+    AGENT_BY_NODE,
     checkpoint_actions,
     events_for_payload,
     events_for_result,
@@ -1303,20 +1304,20 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     # The build ALWAYS opens with product/intake work, but live node telemetry only
     # fires as nodes COMPLETE — seat the product team NOW so the floor shows the
     # work already grinding instead of an all-lounge office.
-    _emit(p, type="active", room="product", agent="", live=True)
+    _emit(p, type="active", room="plan", agent="", live=True)
     time.sleep(_PACE)
 
-    # Stack = auto on a real backend: the Principal Architect picks the stack from
+    # Stack = auto on a real backend: the Planner picks the stack from
     # the toolchains actually installed on this host; the chosen profile pins the
     # gates for THIS build and every child (iterate / autopilot / ladder rung).
     if (p.profile or "auto") == "auto":
         chosen = _choose_stack(p)
         if chosen:
             p.profile = chosen[0]
-            _emit(p, type="active", room="architecture", agent="Principal Architect",
+            _emit(p, type="active", room="plan", agent="Planner",
                   live=True)
             _emit(p, type="narrate",
-                  text=f"🏗 Principal Architect chose the stack: {chosen[0]}"
+                  text=f"🏗 Planner chose the stack: {chosen[0]}"
                        + (f" — {chosen[1]}" if chosen[1] else ""))
 
     # ---- milestone ladder: plan once (rung 1), then run THIS rung ------------- #
@@ -1373,7 +1374,12 @@ def _run_factory(p: Project, resume: bool = False) -> None:
         # Stash the agents' journal so a lead can be "interviewed" ([11], advisory).
         jrnl = payload.get("agent_journal")
         if isinstance(jrnl, list):
-            p.journal = jrnl
+            # `agent` = the floor sprite that owns the node, so the interview picker can
+            # match a Planner/Reviewer click to journal entries written under old role ids.
+            p.journal = [
+                {**e, "agent": AGENT_BY_NODE.get(str(e.get("node_id", "")), ("",))[0]}
+                if isinstance(e, dict) else e for e in jrnl
+            ]
         boundary = str(payload.get("boundary", "stage"))
         if p.supervised:
             # GATED gets the same AI experts autonomous does — but ADVISORY: they
@@ -1856,19 +1862,18 @@ def _proposal_approved(p: Project, proposal: dict[str, Any]) -> bool:
     return True
 
 
-_STAGE_ORDER = ["defining requirements", "designing the system", "implementing",
-                "testing & review", "security review", "verifying at the gate"]
+_STAGE_ORDER = ["planning", "implementing", "testing & review", "security review",
+                "verifying at the gate"]
 
 
 def _node_stage(node: str) -> str | None:
     """Map a live graph node id to a readable pipeline STAGE for the platform log
     (None for infra/non-stage nodes we don't surface)."""
     n = (node or "").lower()
-    if any(k in n for k in ("stakeholder", "product", "criteria", "program")):
-        return "defining requirements"
-    if "architect" in n:
-        return "designing the system"
-    if "engineer" in n and ("appsec" not in n):
+    if any(k in n for k in ("planner", "stakeholder", "product", "criteria", "program",
+                            "architect")):
+        return "planning"
+    if ("engineer" in n and "appsec" not in n) or n == "fixer":
         return "implementing"
     if any(k in n for k in ("qa", "sdet", "reviewer", "writer", "tester")):
         return "testing & review"
@@ -2652,7 +2657,8 @@ class Handler(BaseHTTPRequestHandler):
         question = str(body.get("question", "")).strip() or "How is it going?"
         if p.backend == "mock":
             # The mock transport can't deliberate; answer from the real journal we have.
-            mine = [e for e in p.journal if str(e.get("role", "")) == role] or p.journal
+            mine = [e for e in p.journal
+                    if role in (str(e.get("role", "")), str(e.get("agent", "")))] or p.journal
             bits = "; ".join(
                 str(e.get("summary", "")) for e in mine[:3] if str(e.get("summary", ""))
             )

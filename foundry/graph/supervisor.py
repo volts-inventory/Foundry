@@ -36,8 +36,8 @@ bound is read off ``budget.fix_attempts_since_all_green`` (BudgetLedger,
 single-writer); a dedicated ``*_fix`` node BUMPS it on each fix iteration so the
 loop is bounded — no infinite cycle. (LEARNINGS SUP1.)
 
-This builder returns the UNCOMPILED ``StateGraph`` (mirrors ``skeleton.py`` and
-the four subgraph builders, SG4): ``factory_graph`` (T-M1-14) compiles it, adds
+This builder returns the UNCOMPILED ``StateGraph`` (mirrors the subgraph
+builders, SG4): ``factory_graph`` (T-M1-14) compiles it, adds
 the shared checkpointer, and appends the assistant-mode emit node. The supervisor
 defines NONE of that here.
 
@@ -45,38 +45,6 @@ The ``add_node`` mypy seam (LEARNINGS SG2/IM5): a factory closure typed as the
 ``NodeFn`` ``Callable`` alias trips ``add_node``'s overload resolution, so every
 node is wrapped in a thin concrete ``def`` (no ``cast``, no private import).
 
-Phase-2 (Gated mode) extension (T-M2-09)
-----------------------------------------
-``mode="gated"`` selects the Phase-2 flow; ``mode="assistant"`` (the DEFAULT)
-keeps the Phase-1 topology byte-for-byte (back-compat). The Gated path ADDS three
-boundaries to the Phase-1 spine, never relaxing its convergence bound or
-attested-only advancement::
-
-    triage (classify_tier -> risk_tier + mode)
-      -> planner
-      -> design_sign_off     # [Design gate] record a SignOffRecord (always)
-      -> spec_gate           # (unchanged integrity boundary)
-      -> implementation
-      -> quality
-      -> build_test_gate     # (unchanged integrity boundary)
-      -> assurance           # build_assurance_subgraph (sec/audit/supply + reviewer)
-         --(advance)--> release_sign_off  # [Release gate] record + release_allowed
-         --(halt)----> END                # vulnerable change caught -> NO release
-      -> release_sign_off
-         --(release_allowed)--> END        # fail-closed: no record => no emit
-         --(blocked)---------> END
-
-* TIERING (gov §1e): triage calls :func:`classify_tier`, writing the
-  ``risk_tier`` (``TierDecision``) single-writer channel + ``mode``. The tier
-  scales the assurance subgraph's DEPTH (passed through), NEVER integrity.
-* DESIGN / RELEASE SIGN-OFF (gov §1/§6): each boundary ALWAYS records a
-  ``SignOffRecord`` (self-judge stamp, bound to the artifact + ``state_sha`` +
-  a process-stable nonce) — the always-recorded invariant. Advancement past the
-  Release boundary to emit is gated by :func:`release_allowed` (fail-closed: no
-  recorded approved sign-off ⇒ no release).
-* ASSURANCE (AS1/AW1): the assurance subgraph routes ``advance``/``halt`` like
-  the other gate boundaries; a known-vulnerable change is caught there (attested
-  FAIL → latch → ``halt``), so there is NO release-sign-off path to emit.
 """
 
 from __future__ import annotations
@@ -90,24 +58,8 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from foundry.agents.implementation.senior_engineer import DESIGN_KIND
-from foundry.domains.governance_hooks import resolve_effective_mode_tier
 from foundry.governance.budget_controller import BudgetCaps, BudgetController
-from foundry.governance.release_anchors import (
-    evidence_hash,
-    newest_artifact_uri,
-    newest_release_sign_off,
-    sign_off_nonce,
-    state_sha,
-)
-from foundry.governance.sign_off import (
-    record_design_sign_off,
-    record_release_sign_off,
-    release_allowed,
-)
-from foundry.governance.tiering import classify_tier, classify_tier_at_floor
-from foundry.graph.assurance_wiring import ADVANCE as ASSURANCE_ADVANCE
-from foundry.graph.assurance_wiring import HALT as ASSURANCE_HALT
-from foundry.graph.assurance_wiring import route_after_assurance
+from foundry.governance.release_anchors import newest_artifact_uri, state_sha
 from foundry.graph.gate_wiring import (
     BUILD_TEST_BOUNDARY,
     SPEC_BOUNDARY,
@@ -116,7 +68,6 @@ from foundry.graph.gate_wiring import (
     run_build_test_gates,
     run_spec_gate,
 )
-from foundry.graph.subgraphs.assurance import build_assurance_subgraph
 from foundry.graph.subgraphs.implementation import build_implementation_subgraph
 from foundry.graph.subgraphs.planner import build_planner_subgraph
 from foundry.graph.subgraphs.quality import build_quality_subgraph
@@ -137,7 +88,6 @@ if TYPE_CHECKING:
     from foundry.agents._runtime import AgentRuntime
     from foundry.agents.implementation.senior_engineer import ArtifactResolver
     from foundry.context import SymbolIndex
-    from foundry.domains.registry import PackRegistry
     from foundry.gates.discriminator import DiscriminatorFactory
     from foundry.gates.profiles import VerificationProfile
     from foundry.gates.runner import TwoZoneGateRunner
@@ -146,8 +96,6 @@ if TYPE_CHECKING:
 __all__ = [
     "DEFAULT_ROUTE_CAPS_MICROUSD",
     "MODE_ASSISTANT",
-    "MODE_AUTONOMOUS",
-    "MODE_GATED",
     "ROUTES",
     "build_supervisor_graph",
     "classify_request",
@@ -156,17 +104,7 @@ __all__ = [
 
 # ---- supervisor mode --------------------------------------------------------
 
-MODE_ASSISTANT = "assistant"  # Phase-1 flow (default; back-compat)
-MODE_GATED = "gated"  # Phase-2 flow: tiering + design/release sign-off + assurance
-# Phase-4 (Autonomous mode, T-M4-10): the SAME trusted Gated assurance spine
-# (tiering + assurance gates + the hardened runner + discriminator), but the
-# RELEASE boundary is NOT a human/recorded sign-off — it is the TRUST ROOT
-# (build → admit → deploy, hands-off). The deterministic gates + the assurance
-# family + the convergence bound are inherited UNCHANGED from Gated mode; the
-# only difference is the terminal release gate: deploy-time ADMISSION, not a
-# sign-off. So the supervisor phase spine is byte-identical to Gated; the
-# difference lives entirely in the factory_graph emit node.
-MODE_AUTONOMOUS = "autonomous"
+MODE_ASSISTANT = "assistant"  # the only release mode
 
 # ---- supervisor node ids ----------------------------------------------------
 
@@ -181,10 +119,6 @@ _BUILD_TEST_GATE = "build_test_gate"
 # back to the responsible layer (the layer that must regenerate the tree).
 _SPEC_FIX = "spec_fix"
 _BUILD_TEST_FIX = "build_test_fix"
-# ---- Phase-2 (Gated mode) boundary node ids ---------------------------------
-_DESIGN_SIGN_OFF = "design_sign_off"
-_ASSURANCE = "assurance"
-_RELEASE_SIGN_OFF = "release_sign_off"
 # ---- checkpoint/HITL pause node ids (plan [10]) -----------------------------
 # A pause node per stage boundary; built+wired ONLY when that boundary is in the
 # selected ``checkpoints`` set. The id encodes the boundary so the rendered
@@ -372,15 +306,6 @@ def _seed_budget(route: str) -> BudgetLedger:
     return BudgetLedger(cap_microusd=controller.caps.total_microusd)
 
 
-# ---- Phase-2 sign-off anchors (always-recorded; gov §1/§6) ------------------
-# The four what-you-sign anchor derivations + the newest-release-sign-off lookup
-# now live in the shared PUBLIC module ``foundry.governance.release_anchors`` —
-# a single source of truth imported by BOTH this supervisor and the gated emit's
-# release re-check (factory_graph), so the two can never drift (M2-R1-01). They
-# are imported above as ``newest_artifact_uri`` / ``state_sha`` / ``sign_off_nonce``
-# / ``evidence_hash`` / ``newest_release_sign_off``.
-
-
 # ---- builder ----------------------------------------------------------------
 
 
@@ -393,10 +318,8 @@ def build_supervisor_graph(
     source_dir: str,
     index: SymbolIndex | None = None,
     max_fix_attempts: int = 3,
-    mode: str = MODE_ASSISTANT,
     discriminator_factory: DiscriminatorFactory | None = None,
     profile: VerificationProfile | None = None,
-    pack_registry: PackRegistry | None = None,
     checkpoints: bool | Sequence[str | CheckpointBoundary] | None = None,
     max_slots: int = 1,
     cost_cap_microusd: int | None = None,
@@ -432,45 +355,14 @@ def build_supervisor_graph(
         at most this many times before ``route_after_gates`` returns ``halt``.
         Tracked on ``budget.fix_attempts_since_all_green`` (bumped by the
         ``*_fix`` node), so the rework loop can never spin forever.
-    mode:
-        ``"assistant"`` (DEFAULT) builds the Phase-1 topology unchanged
-        (back-compat). ``"gated"`` builds the Phase-2 flow: triage tiering
-        (``classify_tier`` → ``risk_tier``), a Design sign-off boundary after
-        the planner, the assurance subgraph after build+test, and a Release
-        sign-off boundary (``release_allowed``-gated, fail-closed) before emit.
-        ``"autonomous"`` (Phase-4, T-M4-10) builds the SAME assurance spine as
-        Gated (tiering + the Design sign-off boundary + the assurance subgraph
-        + the convergence bound — integrity is never relaxed), so the phase
-        topology is byte-identical to Gated; the difference is the RELEASE
-        boundary, which is the TRUST ROOT (build → admit → deploy, hands-off)
-        rather than a human/recorded sign-off — and that lives entirely in the
-        factory_graph autonomous emit node, NOT here. The Gated/Autonomous paths
-        only ADD boundaries — the convergence bound + the attested-only
-        advancement are inherited unchanged (gov §1e).
     discriminator_factory:
         OPTIONAL malicious-test defense (A-M4-01). When provided, the
         ``build_test_gate`` node threads it into :func:`run_build_test_gates`, so
         the COMPILED Test gate consults the held-out-mutant + behavioral-invariance
         :class:`~foundry.gates.discriminator.TestSuiteDiscriminator` the factory
         produces — a gamed-green suite that clears the adequacy floor but does not
-        kill a held-out mutant FAILs the gate in the SHIPPING graph (not only in
-        ``tests/test_phase4_exit.py``). ``None`` (the default) keeps the Phase-1/2
-        behavior byte-for-byte (adequacy floor only; Assistant/Gated/Autonomous
-        back-compat).
-    pack_registry:
-        OPTIONAL domain-pack registry (T-M5-08; the open/closed seam). ``None``
-        (the DEFAULT) engages NO packs → exact prior behavior (back-compat). When
-        provided, the TRIAGE node routes the request's ``required_capabilities``
-        through :meth:`PackRegistry.compose` → a strictest-wins ``ComposedPolicy``,
-        applies its ``mode_tier`` veto via :func:`resolve_effective_mode_tier` (a
-        regulated request CANNOT run Autonomous — the effective mode degrades to
-        Gated and the tier is raised tighten-only), and stamps the EFFECTIVE
-        mode/risk_tier on state. The composed policy is a PURE function of the
-        request capabilities + the registry, so the release boundaries
-        (factory_graph emit) RE-DERIVE it generically (verdict-class assignments /
-        approver-of-record / perceptual-HITL) — pack-by-pack wiring is never
-        needed, so adding a 4th pack is ``registry.register(pack)`` with NO edit
-        here.
+        kill a held-out mutant FAILs the gate in the SHIPPING graph. ``None`` (the
+        default) keeps the adequacy floor only.
     checkpoints:
         OPTIONAL checkpoint/HITL mode (plan [10]). ``None``/``False`` (the
         DEFAULT) inserts NO pause nodes — the topology is byte-identical to today
@@ -486,79 +378,24 @@ def build_supervisor_graph(
         boundary, where the runner-attested verdict still decides; a *reject* halts
         to END. A checkpoint approve can NEVER turn a gate FAIL into a pass: the
         pause node writes only the steering channel, never ``gates``, and the emit
-        guard re-checks the gates regardless (factory_graph). The Design/Release
-        sign-off is NOT bypassed — the checkpoint sits BESIDE it (the product
-        checkpoint before the spec gate, the design checkpoint after the Design
-        sign-off, the release checkpoint after the Build+Test gate has run).
+        guard re-checks the gates regardless (factory_graph). The release
+        checkpoint sits after the Build+Test gate has run.
 
     Returns the ``StateGraph`` UNCOMPILED — ``factory_graph`` (T-M1-14) compiles
     it, attaches the shared checkpointer, and appends the emit node.
     """
-    # Autonomous mode reuses the trusted Gated assurance spine verbatim (the
-    # phase order, the tiering, the assurance subgraph, the convergence bound).
-    # The ONLY difference is the terminal release gate (admission, not sign-off),
-    # which is the factory_graph emit node's concern — so the supervisor builds
-    # the same graph for both. (T-M4-10.)
-    gated = mode in (MODE_GATED, MODE_AUTONOMOUS)
     ckpt_set = normalize_checkpoints(checkpoints)
     g: StateGraph[FactoryState] = StateGraph(FactoryState)
 
-    # -- triage: classify + seed route/budget; gated also tiers (gov §1e) -----
+    # -- triage: classify + seed route/budget ---------------------------------
     def triage(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         route = classify_request(state.get("request", ""))
-        base_mode = mode if gated else MODE_ASSISTANT
-        out: dict[str, Any] = {
+        return {
             "phase": _TRIAGE,
             "route": route,
             "budget": _seed_budget(route),
-            # Record the EXACT mode on the single-writer channel (autonomous is
-            # distinct from gated even though it reuses the gated spine).
-            "mode": base_mode,
+            "mode": MODE_ASSISTANT,
         }
-        if gated:
-            tier_seq = rt.seq(config, _TRIAGE, "tier")
-            caps = state.get("required_capabilities")
-            run_against = state_sha(config)
-            if pack_registry is not None:
-                # T-M5-08: engage the domain packs at TRIAGE. Route the request's
-                # capabilities through the registry → a strictest-wins composed
-                # policy, then APPLY the mode/tier veto: a vetoed mode (Autonomous
-                # for a regulated request) is UNREACHABLE, so the effective mode
-                # DEGRADES to the strictest still-allowed (Gated) and the tier is
-                # RAISED tighten-only (never relaxed). The composed policy is a pure
-                # function of the capabilities, so the release boundaries re-derive
-                # it generically — no pack-by-pack wiring (the registry is the seam).
-                policy = pack_registry.compose(state)
-                eff = resolve_effective_mode_tier(
-                    policy.mode_tier,
-                    requested_mode=mode,
-                    request=state,
-                    capabilities=caps,
-                    seq=tier_seq,
-                    run_against=run_against,
-                )
-                # The effective release mode is capped by the veto (Autonomous is
-                # unreachable for a regulated request → Gated). Stamp it on the
-                # single-writer channel so the emit boundary sees the degraded mode.
-                out["mode"] = eff.effective_mode
-                # The risk_tier is the deterministic classifier verdict TIGHTENED to
-                # the policy floor (a regulated pack force-escalates to HIGH); the
-                # two-person-Release flag rides through. Never relaxes integrity.
-                out["risk_tier"] = classify_tier_at_floor(
-                    state,
-                    floor=eff.effective_tier,
-                    capabilities=caps,
-                    two_person_release=eff.two_person_release,
-                    seq=tier_seq,
-                    run_against=run_against,
-                )
-            else:
-                # No registry → exact prior behavior (back-compat): the
-                # deterministic change-risk tier only, no pack policy.
-                out["risk_tier"] = classify_tier(
-                    state, capabilities=caps, seq=tier_seq, run_against=run_against
-                )
-        return out
 
     # -- the four layer subgraphs, compiled + mounted as nodes ----------------
     # Each builder returns an UNCOMPILED StateGraph (SG4); we ``.compile()`` each
@@ -698,110 +535,6 @@ def build_supervisor_graph(
             max_fix_attempts=max_fix_attempts,
         )
 
-    # -- Phase-2 (Gated mode) boundary nodes ----------------------------------
-    # Built unconditionally (cheap) but wired ONLY when gated; the assistant
-    # topology stays byte-identical to Phase-1 (back-compat).
-
-    # The assurance subgraph (sec/audit/supply-chain + reviewer evaluator-
-    # optimizer loop, AS1). The tier scales its DEPTH at run time off
-    # state['risk_tier'] (set by triage tiering); reuses the SAME runner +
-    # materialization seams as the M1 gate nodes (verdicts ONLY from the runner).
-    assurance = build_assurance_subgraph(
-        rt,
-        runner=runner,
-        resolve=resolve,
-        resolve_blob=resolve_blob,
-        source_dir=source_dir,
-        max_fix_attempts=max_fix_attempts,
-    ).compile()
-
-    def assurance_node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
-        out: dict[str, Any] = dict(assurance.invoke(state, config))
-        # H3: commit the assurance review verdict's nonce/negative-latch (same
-        # trusted post-admission write as the quality boundary).
-        _commit_judgment_ledger(state.get("gates"), out.get("gates"), runner.records)
-        out["phase"] = _ASSURANCE
-        return out
-
-    def _route_assurance(state: FactoryState, config: RunnableConfig) -> str:
-        # The subgraph already converged (advance) or latched/spent-bound (halt)
-        # internally; the supervisor reads its outcome off the post-fold gates +
-        # the cross-fork latch, exactly like the M1 boundaries (AS3/AW4). A
-        # halt (a known-vulnerable change caught, or the bound spent) routes to
-        # END — there is NO release-sign-off path to emit from a halted run.
-        decision = route_after_assurance(
-            state,
-            config,
-            records=runner.records,
-            tier=state.get("risk_tier"),
-            max_fix_attempts=max_fix_attempts,
-        )
-        return ASSURANCE_ADVANCE if decision == ASSURANCE_ADVANCE else ASSURANCE_HALT
-
-    # The Design sign-off boundary (gov §1 Design row): ALWAYS record a Design
-    # SignOffRecord (self-judge stamp, bound to the design artifact + state_sha +
-    # a process-stable nonce). In the self-judge profile this is the recorded-
-    # but-no-op HITL; the RECORD is always made (the testable invariant).
-    def design_sign_off(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
-        subject_uri = newest_artifact_uri(state, DESIGN_KIND)
-        sha = state_sha(config)
-        nonce = sign_off_nonce(config, _DESIGN_SIGN_OFF, subject_uri, sha)
-        ev_hash = evidence_hash(subject_uri, sha, list(state.get("gates") or ()))
-        seq = rt.seq(config, _DESIGN_SIGN_OFF, "sign_off:design")
-        record = record_design_sign_off(
-            subject_artifact_uri=subject_uri,
-            state_sha=sha,
-            presented_evidence_hash=ev_hash,
-            server_nonce=nonce,
-            approver="self-judge",
-            role="design-approver",
-            profile=rt.proxy.profile,
-            seq=seq,
-        )
-        return {"phase": _DESIGN_SIGN_OFF, "sign_offs": [record]}
-
-    # The Release sign-off boundary (gov §1 Release row, §6): ALWAYS record a
-    # Release SignOffRecord, then gate advancement to emit with release_allowed
-    # — fail-closed (no recorded approved sign-off binding THIS release ⇒ no
-    # release). The record is made regardless; only ADVANCEMENT is gated.
-    def release_sign_off(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
-        subject_uri = newest_artifact_uri(state, DESIGN_KIND)
-        sha = state_sha(config)
-        nonce = sign_off_nonce(config, _RELEASE_SIGN_OFF, subject_uri, sha)
-        ev_hash = evidence_hash(subject_uri, sha, list(state.get("gates") or ()))
-        seq = rt.seq(config, _RELEASE_SIGN_OFF, "sign_off:release")
-        record = record_release_sign_off(
-            subject_artifact_uri=subject_uri,
-            state_sha=sha,
-            presented_evidence_hash=ev_hash,
-            server_nonce=nonce,
-            approver="self-judge",
-            role="release-approver",
-            profile=rt.proxy.profile,
-            seq=seq,
-        )
-        return {"phase": _RELEASE_SIGN_OFF, "sign_offs": [record]}
-
-    def _route_release(state: FactoryState, config: RunnableConfig) -> str:
-        # Fail-closed release admission (gov §1/§5): advance to emit ONLY if a
-        # recorded, approved sign-off binds THIS exact release (subject +
-        # state_sha + evidence + nonce). The record is re-derived against the
-        # SAME anchors the node bound, so a missing/!approved/mismatched sign-off
-        # blocks emit. (No record ⇒ not released.)
-        subject_uri = newest_artifact_uri(state, DESIGN_KIND)
-        sha = state_sha(config)
-        nonce = sign_off_nonce(config, _RELEASE_SIGN_OFF, subject_uri, sha)
-        ev_hash = evidence_hash(subject_uri, sha, list(state.get("gates") or ()))
-        record = newest_release_sign_off(state)
-        ok = release_allowed(
-            record,
-            subject_artifact_uri=subject_uri,
-            state_sha=sha,
-            presented_evidence_hash=ev_hash,
-            server_nonce=nonce,
-        )
-        return ASSURANCE_ADVANCE if ok else ASSURANCE_HALT
-
     # -- checkpoint/HITL pause nodes (plan [10]) ------------------------------
     # A pause node per ENABLED stage boundary. It PAUSES the run via LangGraph's
     # dynamic ``interrupt()`` (the run is resumable on the EXISTING checkpointer),
@@ -815,9 +548,8 @@ def build_supervisor_graph(
     # boundary, where the runner-attested verdict still decides; a *reject* routes
     # to END (no PR / no release). A checkpoint approve can NEVER turn a gate FAIL
     # into a pass: the gate boundaries are untouched and the emit guard re-checks
-    # the gates regardless (factory_graph). The Design/Release sign-off is NOT
-    # bypassed — the design checkpoint sits AFTER the Design sign-off, the release
-    # checkpoint AFTER the Build+Test gate. (Default OFF: when a boundary is not in
+    # the gates regardless (factory_graph). The release checkpoint sits AFTER the
+    # Build+Test gate. (Default OFF: when a boundary is not in
     # ``ckpt_set`` no pause node is built and the topology is byte-identical.)
     def _make_checkpoint(boundary: CheckpointBoundary):
         def _checkpoint(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
@@ -910,22 +642,12 @@ def build_supervisor_graph(
     g.add_edge(_TRIAGE, _PLANNER)
     # The planner emits product AND design in one pass, so the PRODUCT and DESIGN
     # checkpoints both sit after it, in that order (each only when enabled).
-    design_entry = _DESIGN_SIGN_OFF if gated else (
+    design_entry = (
         _CHECKPOINT_NODE[CheckpointBoundary.DESIGN]
         if CheckpointBoundary.DESIGN in ckpt_set else _SPEC_GATE
     )
     _ckpt_edge(_PLANNER, CheckpointBoundary.PRODUCT, design_entry)
-
-    if gated:
-        # Design sign-off boundary AFTER the plan, BEFORE the spec gate
-        # (the integrity boundary is unchanged — the sign-off is an ADDED
-        # boundary, never a relaxation). The DESIGN checkpoint sits AFTER the
-        # Design sign-off (it does not bypass it) and BEFORE the spec gate.
-        g.add_node(_DESIGN_SIGN_OFF, design_sign_off)
-        g.add_node(_ASSURANCE, assurance_node)
-        g.add_node(_RELEASE_SIGN_OFF, release_sign_off)
-        _ckpt_edge(_DESIGN_SIGN_OFF, CheckpointBoundary.DESIGN, _SPEC_GATE)
-    elif CheckpointBoundary.DESIGN in ckpt_set:
+    if CheckpointBoundary.DESIGN in ckpt_set:
         g.add_conditional_edges(
             _CHECKPOINT_NODE[CheckpointBoundary.DESIGN],
             _route_checkpoint(CheckpointBoundary.DESIGN),
@@ -946,58 +668,25 @@ def build_supervisor_graph(
 
     # The RELEASE checkpoint sits AFTER the Build+Test gate has run (the human
     # inspects the attested verdicts) and BEFORE the release path. On a build_test
-    # ADVANCE we route into the checkpoint; proceed continues to the release path
-    # (assurance/END), halt ends the run. CRUCIAL: the gate already ran — an
+    # ADVANCE we route into the checkpoint; proceed continues to END (emit), halt
+    # ends the run. CRUCIAL: the gate already ran — an
     # approve here cannot make a FAILing build pass (a non-advance never reaches
     # the checkpoint, and the emit guard re-checks the gates regardless).
     release_enabled = CheckpointBoundary.RELEASE in ckpt_set
-    if gated:
-        # BUILD+TEST boundary: advance -> [release ckpt ->] assurance; fix -> back
-        # to implementation; halt -> END.
-        advance_target = (
-            _CHECKPOINT_NODE[CheckpointBoundary.RELEASE] if release_enabled else _ASSURANCE
-        )
+    # BUILD+TEST boundary: advance -> [release ckpt ->] END; fix -> back to
+    # implementation; halt -> END.
+    advance_target = _CHECKPOINT_NODE[CheckpointBoundary.RELEASE] if release_enabled else END
+    g.add_conditional_edges(
+        _BUILD_TEST_GATE,
+        _route_build_test,
+        {"advance": advance_target, "fix": _BUILD_TEST_FIX, "halt": END},
+    )
+    if release_enabled:
         g.add_conditional_edges(
-            _BUILD_TEST_GATE,
-            _route_build_test,
-            {"advance": advance_target, "fix": _BUILD_TEST_FIX, "halt": END},
+            _CHECKPOINT_NODE[CheckpointBoundary.RELEASE],
+            _route_checkpoint(CheckpointBoundary.RELEASE),
+            {_CKPT_PROCEED: END, _CKPT_HALT: END},
         )
-        if release_enabled:
-            g.add_conditional_edges(
-                _CHECKPOINT_NODE[CheckpointBoundary.RELEASE],
-                _route_checkpoint(CheckpointBoundary.RELEASE),
-                {_CKPT_PROCEED: _ASSURANCE, _CKPT_HALT: END},
-            )
-        g.add_conditional_edges(
-            _ASSURANCE,
-            _route_assurance,
-            {ASSURANCE_ADVANCE: _RELEASE_SIGN_OFF, ASSURANCE_HALT: END},
-        )
-        # Release boundary: release_allowed -> END (emit); blocked -> END
-        # (fail-closed). Both terminate the supervisor; factory_graph appends the
-        # emit node AFTER END only on a release-admitted run.
-        g.add_conditional_edges(
-            _RELEASE_SIGN_OFF,
-            _route_release,
-            {ASSURANCE_ADVANCE: END, ASSURANCE_HALT: END},
-        )
-    else:
-        # BUILD+TEST boundary: advance -> [release ckpt ->] END; fix -> back to
-        # implementation; halt -> END.
-        advance_target = (
-            _CHECKPOINT_NODE[CheckpointBoundary.RELEASE] if release_enabled else END
-        )
-        g.add_conditional_edges(
-            _BUILD_TEST_GATE,
-            _route_build_test,
-            {"advance": advance_target, "fix": _BUILD_TEST_FIX, "halt": END},
-        )
-        if release_enabled:
-            g.add_conditional_edges(
-                _CHECKPOINT_NODE[CheckpointBoundary.RELEASE],
-                _route_checkpoint(CheckpointBoundary.RELEASE),
-                {_CKPT_PROCEED: END, _CKPT_HALT: END},
-            )
     g.add_edge(_BUILD_TEST_FIX, _IMPLEMENTATION)  # re-verify the responsible layer
 
     return g

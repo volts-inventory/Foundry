@@ -26,7 +26,7 @@ from langgraph.graph import StateGraph
 
 from foundry.agents import AgentRuntime
 from foundry.agents._common import emit_artifact
-from foundry.agents.quality import make_reviewer_critic_node, make_reviewer_node
+from foundry.agents.quality import make_reviewer_node
 from foundry.agents.quality._common import (
     ACCEPTANCE_CRITERION_KIND,
     MissingCriteriaResolverError,
@@ -207,17 +207,6 @@ def test_request_changes_is_latched_by_the_supervisor_ledger_commit(records: Any
 
     later, _ = _run(MockTransport(verdicts=["approve"]))
     assert merge_gates(later["gates"], None) == []
-
-
-def test_quality_and_assurance_reviews_get_distinct_nonces(records: Any) -> None:
-    """H3: the quality ``reviewer`` and the assurance ``reviewer_critic`` judge the
-    same subject/state in one run; their per-request nonces must not collide."""
-    cas = ArtifactStore()
-    seed = _seed(cas)
-    q = make_reviewer_node(_runtime(cas=cas), resolve=cas.resolve)(seed, _config())["gates"][0]
-    a = make_reviewer_critic_node(_runtime())(seed, _config())["gates"][0]
-    assert q.verdict_nonce != a.verdict_nonce
-    assert merge_gates([q], None) == [q] and merge_gates([a], None) == [a]
 
 
 # ---- artifacts ---------------------------------------------------------------

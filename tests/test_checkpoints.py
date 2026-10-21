@@ -212,23 +212,6 @@ def test_checkpoint_approve_cannot_release_a_failing_gate() -> None:
     assert res.open_pr_idempotency_key is None
 
 
-def test_gated_checkpoint_approve_cannot_release_a_failing_gate() -> None:
-    """Same trust invariant in GATED mode: a Test-gate FAIL is not released even
-    with approve-all checkpoints (the Release sign-off + the gates still gate)."""
-    res = run(
-        "build a todo app",
-        mode="gated",
-        checkpoints=True,
-        checkpoint_responder=lambda _p: "approve",
-        diff_body=_ERROR_DIFF,
-        max_fix_attempts=1,
-        thread_id="ck-gated-fail-approve",
-    )
-    assert res.gate_statuses.get("test") is not GateStatus.PASS
-    assert res.passed is False
-    assert res.open_pr_idempotency_key is None
-
-
 # ---- default OFF: a non-checkpoint run is unchanged -------------------------
 
 

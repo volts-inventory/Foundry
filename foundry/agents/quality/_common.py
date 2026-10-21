@@ -106,12 +106,11 @@ def server_issued_nonce(
 
     The base is BOUND to this request's identity — ``(node_id, subject_uri,
     state_sha)`` — so every judgment verdict in a run gets its OWN single-use nonce
-    (H3). Without this, the two reviews a gated/autonomous run emits (quality +
-    assurance) would share one nonce, and consuming the first would make
-    ``merge_gates`` reject the second. The derivation is still server-grounded (the
-    base) and not agent-mintable (node/subject/state are run identity, all signed
-    into the judgment binding), and it is deterministic so a resume re-derives the
-    SAME nonce (idempotent consumption).
+    (H3). Without this, two reviews in one run would share one nonce, and consuming
+    the first would make ``merge_gates`` reject the second. The derivation is still
+    server-grounded (the base) and not agent-mintable (node/subject/state are run
+    identity, all signed into the judgment binding), and it is deterministic so a
+    resume re-derives the SAME nonce (idempotent consumption).
     """
     base = require_verdict_nonce(config)
     return "N-" + content_digest(

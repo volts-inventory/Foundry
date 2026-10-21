@@ -1,6 +1,6 @@
-"""Assurance reviewer node factory: ``reviewer_critic`` (the verdict-only judge).
+"""The shared review verdict (:func:`reviewer_critic.review`) as a verdict-only node.
 
-Drives the REAL node over a REAL :class:`ModelProviderProxy` backed by
+Drives the REAL ``review()`` call over a REAL :class:`ModelProviderProxy` backed by
 :class:`MockTransport` + a dev :class:`ZoneBSigner` (no live API key, LEARNINGS
 D1/D4). Asserts its ``judge()`` ``GateResult`` carries a valid binding +
 ``judgment_provenance`` and is ADMITTED by the real ``merge_gates`` /
@@ -18,8 +18,8 @@ import pytest
 from langchain_core.runnables import RunnableConfig
 
 from foundry.agents import AgentRuntime
-from foundry.agents.quality import make_reviewer_critic_node
 from foundry.agents.quality._common import MissingVerdictNonceError, server_issued_nonce
+from foundry.agents.quality.reviewer_critic import review
 from foundry.gates.attestation import DevGateWriteVerifier, ZoneBSigner
 from foundry.proxy import ModelProviderProxy
 from foundry.proxy.test_doubles import MockTransport, verdict_json
@@ -33,6 +33,17 @@ KEY_ID = "dev-key-quality"
 
 
 # ---- harness ----------------------------------------------------------------
+
+
+def make_reviewer_critic_node(rt: AgentRuntime) -> Any:
+    """A verdict-only node over the shared ``review()`` call (the quality reviewer
+    wraps the same call with its test bookkeeping)."""
+
+    def _node(state: Any, config: RunnableConfig) -> dict[str, Any]:
+        result, note = review(rt, state, config, node_id="reviewer_critic", role="Reviewer")
+        return {"gates": [result.gate_result], "agent_journal": [note]}
+
+    return _node
 
 
 def make_runtime(transport: MockTransport) -> AgentRuntime:
@@ -214,31 +225,6 @@ def test_commit_step_latches_request_changes_blocking_override(installed: Global
     )["gates"][0]
     assert later.latch_key() == rc.latch_key()
     assert merge_gates([later], None) == []             # override blocked
-
-
-def test_latched_review_routes_as_request_changes(installed: GlobalRecords) -> None:
-    """H3-1 guard (adversarial review): the negative latch's no-override property
-    works by the latched verdict VANISHING from the channel, so the assurance router
-    MUST fail-closed on the now-absent review. This pins that load-bearing coupling
-    end-to-end: latch -> merge_gates drops it -> _review_requests_changes -> True."""
-    from foundry.graph.subgraphs.assurance import _review_requests_changes
-    from foundry.graph.supervisor import _commit_judgment_ledger
-
-    records = installed
-    rc = make_reviewer_critic_node(make_runtime(MockTransport(verdicts=["request-changes"])))(
-        {}, config_for("run-L", nonce="N", subject="cas://diff/l", state_sha="sl")
-    )["gates"][0]
-    _commit_judgment_ledger([], [rc], records)          # latches it
-
-    dropped = merge_gates([rc], None)                    # the latch drops it
-    assert dropped == []
-    assert _review_requests_changes({"gates": dropped}) is True   # router fail-closes
-
-    # A later approve at the same key is dropped too, so the router still says "no".
-    ap = make_reviewer_critic_node(make_runtime(MockTransport(verdicts=["approve"])))(
-        {}, config_for("run-L", step=9, nonce="N", subject="cas://diff/l", state_sha="sl")
-    )["gates"][0]
-    assert _review_requests_changes({"gates": merge_gates([ap], None)}) is True
 
 
 def test_reviewer_seq_node_id_matches_judge_node_id() -> None:

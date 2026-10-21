@@ -46,7 +46,7 @@ PASS without ever earning it:
 
 - **Zone-B config re-derivation.** Zone B does not trust a ``scanner_config_rev``
   handed to it (an agent could supply a weakened scanner config). When a
-  run-immutable :class:`~foundry.policy.scanner_config.PinnedScannerConfig` is
+  run-immutable :class:`PinnedScannerConfig` is
   injected, zone B RE-DERIVES the pinned revision from it (``verify()`` —
   fail-closed tamper detection) and binds THAT into the attestation. If zone A
   reports the config it actually ran under and it does not match the re-derived
@@ -71,7 +71,7 @@ import hmac
 import re
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Protocol
 
 from pydantic import Field
 
@@ -82,9 +82,6 @@ from foundry.schemas.gates import GateResult, GateStatus, VerdictClass
 from foundry.state.global_records import GlobalRecords
 from foundry.state.seq import Seq
 from foundry.state.tree_sha import execution_reuse_key
-
-if TYPE_CHECKING:
-    from foundry.policy.scanner_config import PinnedScannerConfig
 
 __all__ = [
     "GateImpl",
@@ -146,6 +143,13 @@ class ZoneAObservation(FrozenModel):
     structured: dict[str, Any] = Field(default_factory=dict)
     results_digest: str
     seal: str = ""
+
+
+class PinnedScannerConfig(Protocol):
+    """A run-immutable scanner config: ``verify()`` re-derives its pinned revision
+    and raises on tamper."""
+
+    def verify(self) -> str: ...
 
 
 class _ConfigTamperError(RuntimeError):

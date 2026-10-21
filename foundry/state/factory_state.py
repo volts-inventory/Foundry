@@ -57,7 +57,7 @@ class FactoryState(TypedDict, total=False):
     actions: Annotated[list[ExternalAction], reducers.union_actions]
     history_ref: LogRef  # handle; raw events live out-of-band
     # --- Phase-2 (Gated mode) channels (governance.md §1e/§2) -----------------
-    mode: str  # single-writer: "assistant" | "gated" (supervisor/factory_graph)
+    mode: str  # single-writer: always "assistant" (supervisor triage)
     risk_tier: TierDecision | None  # single-writer (triage tiering, gov §1e)
     sign_offs: Annotated[list[SignOffRecord], reducers.union_sign_offs]
     # HUMAN-STEERING ONLY (plan [10]). A SEPARATE channel from gates/sign_offs:

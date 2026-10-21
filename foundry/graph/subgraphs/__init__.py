@@ -1,4 +1,4 @@
-"""Per-layer LangGraph subgraphs (planner / implementation / quality / assurance).
+"""Per-layer LangGraph subgraphs (planner / implementation / quality).
 
 Each module exposes a ``build_<layer>_subgraph(rt: AgentRuntime, ...)`` builder that
 composes that layer's ``make_<agent>_node(rt)`` factories into a ``StateGraph(FactoryState)``

@@ -1,4 +1,4 @@
-"""Reviewer / Critic — the optimizer's evaluator (agents.md Layer 4, T1).
+"""Review verdict — the shared ``rt.proxy.judge`` call the quality reviewer makes (T1).
 
 SOP: review the diff for correctness, design adherence, readability, and the
 *test* diffs (guard against weakened assertions) → emit a verdict
@@ -38,14 +38,13 @@ if TYPE_CHECKING:
 
     from langchain_core.runnables import RunnableConfig
 
-    from foundry.agents._runtime import AgentRuntime, NodeFn
+    from foundry.agents._runtime import AgentRuntime
     from foundry.proxy.model_provider_proxy import JudgmentResult
     from foundry.schemas.base import Artifact
     from foundry.schemas.journal import JournalEntry
     from foundry.schemas.product import AcceptanceCriterion
     from foundry.state.factory_state import FactoryState
 
-_NODE_ID = "reviewer_critic"
 _GATE_NAME = "review"  # a JUDGMENT_VERDICTS gate (reducers.py)
 
 # The code-review JUDGE runs every release AND every fix-loop iteration, so its
@@ -116,7 +115,7 @@ def review(
 ) -> tuple[JudgmentResult, JournalEntry]:
     """Issue ONE proxy-stamped review verdict for ``node_id`` and its journal note.
 
-    Shared by the assurance ``reviewer_critic`` node and the quality ``reviewer``
+    Called by the quality ``reviewer``
     node. ``node_id`` is signed into the binding (via ``seq.node_id``) AND into the
     per-request nonce, so two reviewers in one run must use distinct ids (H3).
     ``criteria`` (when given) are put in front of the judge so it reviews against
@@ -190,19 +189,3 @@ def review(
         concerns=tuple(result.gate_result.findings),
     )
     return result, note
-
-
-def make_reviewer_critic_node(rt: AgentRuntime) -> NodeFn:
-    """Factory for the assurance reviewer judgment node (LEARNINGS AR3).
-
-    Issues a verdict via ``rt.proxy.judge`` (see :func:`review`) and writes the
-    proxy-stamped ``GateResult`` to ``gates``. ``_merge_gates`` admits it on a
-    valid binding + fresh nonce + no latch; it is dropped fail-closed otherwise
-    (L5) — the agent never signed it.
-    """
-
-    def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
-        result, note = review(rt, state, config, node_id=_NODE_ID, role="Reviewer / Critic")
-        return {"gates": [result.gate_result], "agent_journal": [note]}
-
-    return _node

@@ -1,41 +1,22 @@
 """FoundryCheckpointer — one connection, one transaction per superstep. (DS3)
 
-architecture.md §5: ONE transaction commits, per superstep, the LangGraph
-checkpoint, the budget-ledger update, the outbox rows for every external
-effect + audit event, and the adapter turn-snapshot handle. The checkpoint
-and the ledgers can never diverge.
-
-Dev backend (this module): a single ``sqlite3`` connection (WAL,
-``check_same_thread=False``) shared between
-``langgraph.checkpoint.sqlite.SqliteSaver`` and the outbox tables, so a
-checkpoint ``put()`` and an outbox ``enqueue()`` inside
-:meth:`FoundryCheckpointer.superstep_txn` commit (or roll back) atomically.
+A single ``sqlite3`` connection (WAL, ``check_same_thread=False``) backs
+``langgraph.checkpoint.sqlite.SqliteSaver``; :meth:`FoundryCheckpointer.superstep_txn`
+commits everything written on ``.conn`` in one transaction, or none of it.
 
 SqliteSaver API friction (langgraph-checkpoint-sqlite 3.1.0) and how it is
 resolved here:
 
 * ``SqliteSaver.put()`` ends with ``self.conn.commit()`` (via its internal
-  ``cursor()`` context manager). Under a naive outer ``BEGIN IMMEDIATE`` that
-  would prematurely commit the superstep transaction — checkpoint durable,
-  outbox rows not yet written: exactly the dual-write divergence DS3 forbids.
-  Resolution: the shared connection is a :class:`_SuperstepConnection`
-  (``sqlite3.Connection`` subclass) whose ``commit()`` is a no-op while a
-  superstep transaction is open; the one real COMMIT is issued by
-  ``superstep_txn()`` on successful exit. Outside a superstep, ``commit()``
-  behaves normally, so direct saver use (e.g. by LangGraph itself between
-  supersteps) still works.
-* ``SqliteSaver.setup()`` uses ``executescript``, which implicitly COMMITs
-  any pending transaction. Resolution: ``setup()`` (and the outbox DDL) run
-  eagerly in the factory, never inside a superstep transaction.
-* The connection is opened with ``isolation_level=None`` (explicit
-  transaction control): no implicit ``BEGIN`` ever races our
-  ``BEGIN IMMEDIATE``, and ``superstep_txn()`` owns the transaction
-  boundaries outright.
-
-Atomicity achieved: every statement executed on ``.conn`` between entering
-``superstep_txn()`` and its exit — saver ``put``/``put_writes``, outbox
-``enqueue`` + WORM audit appends, ledger updates, the turn-snapshot handle —
-commits in ONE SQLite transaction, or none of it does.
+  ``cursor()`` context manager), which would prematurely commit an outer
+  ``BEGIN IMMEDIATE``. The shared connection is a :class:`_SuperstepConnection`
+  whose ``commit()`` is a no-op while a superstep transaction is open; the one
+  real COMMIT is issued by ``superstep_txn()`` on successful exit.
+* ``SqliteSaver.setup()`` uses ``executescript``, which implicitly COMMITs any
+  pending transaction, so it runs eagerly in the factory, never inside a
+  superstep transaction.
+* The connection is opened with ``isolation_level=None`` (explicit transaction
+  control): no implicit ``BEGIN`` ever races our ``BEGIN IMMEDIATE``.
 """
 
 from __future__ import annotations
@@ -47,8 +28,6 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from langgraph.checkpoint.sqlite import SqliteSaver
-
-from foundry.durability.outbox import ensure_outbox_schema
 
 __all__ = ["FoundryCheckpointer", "make_checkpointer"]
 
@@ -70,11 +49,10 @@ class _SuperstepConnection(sqlite3.Connection):
 
 
 class FoundryCheckpointer:
-    """Factory owning the ONE shared connection for checkpoint + outbox.
+    """Factory owning the ONE shared connection for the checkpoint.
 
     Exposes ``.saver`` (the ``SqliteSaver``), ``.conn`` (the shared
-    connection — pass it to ``enqueue()``/``append_audit()``), and
-    :meth:`superstep_txn`.
+    connection), and :meth:`superstep_txn`.
     """
 
     def __init__(self, db_path: str | Path = ":memory:") -> None:
@@ -89,14 +67,13 @@ class FoundryCheckpointer:
         self.saver = SqliteSaver(self.conn)
         # DDL (executescript ⇒ implicit COMMIT) must run OUTSIDE supersteps:
         self.saver.setup()
-        ensure_outbox_schema(self.conn)
 
     @contextmanager
     def superstep_txn(self) -> Iterator[sqlite3.Connection]:
         """BEGIN IMMEDIATE … COMMIT; ROLLBACK on exception. Not reentrant.
 
         Everything written on ``.conn`` inside this block — checkpoint,
-        ledgers, outbox rows, audit events, turn-snapshot handle — commits
+        ledgers, turn-snapshot handle — commits
         atomically or not at all (DS3).
         """
         if self.conn._in_superstep or self.conn.in_transaction:

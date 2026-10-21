@@ -8,8 +8,6 @@ property and the byte-identical default:
 * a stable-FAIL latch + a LangGraph checkpoint + an artifact body written via
   file-backed instances are STILL there after those instances are DROPPED and
   NEW ones are re-opened on the SAME state dir (simulating a process restart);
-* the outbox + WORM audit ride the checkpointer's shared file conn (so they
-  persist with it);
 * ``FOUNDRY_STATE_DIR`` UNSET ⇒ :memory: + in-memory dicts (no file written),
   byte-identical to today.
 """
@@ -24,14 +22,12 @@ from langgraph.checkpoint.base import empty_checkpoint
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.durability.checkpointer import FoundryCheckpointer
 from foundry.durability.fs_artifact_store import FilesystemArtifactStore
-from foundry.durability.outbox import enqueue, verify_audit_chain
 from foundry.durability.persistence import (
     DurableBackends,
     durable_backends,
     state_dir_from_env,
 )
 from foundry.schemas.architecture import SystemDesign
-from foundry.schemas.base import ExternalAction, IdempotencyPath
 from foundry.state.global_records import AdmissionState, GlobalRecords
 from foundry.state.seq import Seq
 
@@ -61,23 +57,12 @@ def _system_design() -> SystemDesign:
     )
 
 
-def _action() -> ExternalAction:
-    return ExternalAction(
-        kind="open_pr",
-        idempotency_key="pr-durable-1",
-        path=IdempotencyPath.CLIENT_KEY,
-        payload_uri="cas://sha256/payload",
-        seq=_seq(),
-    )
-
-
 def test_state_survives_process_restart(tmp_path: Path) -> None:
     """Write via file-backed instances, DROP them, re-open on the same dir.
 
-    (a) a stable-FAIL latch + a checkpoint + an outbox row/audit + an artifact
-    body, (b) drop the instances, (c) open NEW ones on the SAME dir and assert
-    the latch is still latched, the checkpoint thread resumes, the outbox row +
-    audit survive, and the artifact body resolves.
+    (a) a stable-FAIL latch + a checkpoint + an artifact body, (b) drop the
+    instances, (c) open NEW ones on the SAME dir and assert the latch is still
+    latched, the checkpoint thread resumes, and the artifact body resolves.
     """
     state_dir = tmp_path / "state"
 
@@ -88,9 +73,8 @@ def test_state_survives_process_restart(tmp_path: Path) -> None:
         assert first.global_records.stable_fail_latched(_DIGEST, _GATE) is True
 
         checkpoint = empty_checkpoint()
-        with first.checkpointer.superstep_txn() as conn:
+        with first.checkpointer.superstep_txn():
             first.checkpointer.saver.put(_CONFIG, checkpoint, _METADATA, {})
-            enqueue(conn, _action(), {"effect": "open pr"})
 
         body_uri = first.cas.put_body(_system_design())
         blob_uri = first.cas.put_blob(b"unified-diff-body")
@@ -115,15 +99,6 @@ def test_state_survives_process_restart(tmp_path: Path) -> None:
         saved = second.checkpointer.saver.get_tuple(_CONFIG)
         assert saved is not None
         assert saved.checkpoint["id"] == checkpoint["id"]
-
-        # The outbox row + the WORM audit chain rode the checkpointer's shared
-        # file conn, so they persisted with it.
-        (outbox_count,) = second.checkpointer.conn.execute(
-            "SELECT COUNT(*) FROM outbox WHERE idempotency_key = ?",
-            ("pr-durable-1",),
-        ).fetchone()
-        assert outbox_count == 1
-        assert verify_audit_chain(second.checkpointer.conn) is True
 
         # The artifact body + raw blob resolve end to end.
         resolved = second.cas.get_body(body_uri)

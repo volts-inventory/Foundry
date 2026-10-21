@@ -10,7 +10,6 @@ fallback runs, fail-closed (missing grounding ⇒ ERROR, never PASS).
 from foundry.gates.attestation import DevGateWriteVerifier, ZoneBSigner
 from foundry.gates.audit import AuditGate
 from foundry.gates.build import BuildGate
-from foundry.gates.e2e import E2EGate
 from foundry.gates.runner import (
     GateImpl,
     GroundingUnavailable,
@@ -18,21 +17,16 @@ from foundry.gates.runner import (
     ZoneAObservation,
     observe,
 )
-from foundry.gates.security import SecurityGate
 from foundry.gates.spec import SpecGate
-from foundry.gates.supply_chain import SupplyChainGate
 from foundry.gates.test import TestGate
 
 __all__ = [
     "AuditGate",
     "BuildGate",
     "DevGateWriteVerifier",
-    "E2EGate",
     "GateImpl",
     "GroundingUnavailable",
-    "SecurityGate",
     "SpecGate",
-    "SupplyChainGate",
     "TestGate",
     "TwoZoneGateRunner",
     "ZoneAObservation",

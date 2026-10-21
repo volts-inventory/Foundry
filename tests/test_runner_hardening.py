@@ -17,6 +17,7 @@ REAL ``merge_gates`` (an agent could not have forged it).
 
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -32,11 +33,6 @@ from foundry.gates import (
 from foundry.gates.runner import (
     RAN_CONFIG_REV_KEY,
     seal_observation,
-)
-from foundry.policy.scanner_config import (
-    PinnedScannerConfig,
-    ScannerConfigRecord,
-    ScannerRule,
 )
 from foundry.schemas.gates import GateStatus, VerdictClass
 from foundry.state.global_records import GlobalRecords
@@ -56,12 +52,25 @@ LINEAGE_REV = "lineage-rev-1"
 # ---- pinned scanner config --------------------------------------------------
 
 
-def _pinned(version: str = "1") -> PinnedScannerConfig:
-    record = ScannerConfigRecord(
-        rules=(ScannerRule(id="secret.aws", family="secret", version=version),),
-        severity_floors=(("sast", "high"),),
-    )
-    return PinnedScannerConfig.pin(record)
+@dataclass(frozen=True)
+class _Pinned:
+    """Minimal run-immutable pinned config: ``verify()`` re-derives the revision
+    and raises when the record no longer matches the pin."""
+
+    pinned_revision: str
+    record_version: str
+
+    def verify(self) -> str:
+        if not self.is_intact():
+            raise ValueError("pinned scanner config does not match its revision")
+        return self.pinned_revision
+
+    def is_intact(self) -> bool:
+        return self.pinned_revision == f"scanner-config-v{self.record_version}"
+
+
+def _pinned(version: str = "1") -> _Pinned:
+    return _Pinned(pinned_revision=f"scanner-config-v{version}", record_version=version)
 
 
 # ---- fixtures ---------------------------------------------------------------
@@ -186,13 +195,7 @@ def test_tampered_pinned_config_is_error(tmp_path, records, verifier):
     """A pinned config that fails to verify → ERROR (tamper, not a judgment)."""
     pinned = _pinned()
     # Tamper: keep the old pinned_revision but mutate the record so verify() fails.
-    tampered = pinned.model_copy(
-        update={
-            "record": ScannerConfigRecord(
-                rules=(ScannerRule(id="secret.aws", family="secret", version="999"),),
-            )
-        }
-    )
+    tampered = replace(pinned, record_version="999")
     assert not tampered.is_intact()
     runner = TwoZoneGateRunner(
         ZoneBSigner(KEY, KEY_ID), records, "scanner-rev-1", LINEAGE_REV,

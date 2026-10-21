@@ -40,8 +40,7 @@ proven assembly in ``tests/test_factory_graph.py`` / ``tests/test_supervisor.py`
 
 ALL model egress stays behind the proxy (L6) — this module never imports
 ``anthropic`` and never touches GitHub / the network: the PR is expressed ONLY
-as an :class:`ExternalAction` on the ``actions`` channel (FG2); the outbox relay
-is the sole component that ever touches the outside world.
+as an :class:`ExternalAction` on the ``actions`` channel (FG2).
 """
 
 from __future__ import annotations
@@ -75,8 +74,6 @@ from foundry.graph.factory_graph import build_factory_graph, terminal_gates_pass
 from foundry.graph.gate_wiring import GATE_INPUT_FILES
 from foundry.graph.supervisor import (
     MODE_ASSISTANT,
-    MODE_AUTONOMOUS,
-    MODE_GATED,
     normalize_checkpoints,
 )
 from foundry.proxy import ModelProviderProxy, build_backend
@@ -97,8 +94,6 @@ if TYPE_CHECKING:
 
     from foundry.agents.implementation.senior_engineer import ArtifactResolver
     from foundry.docs import DocumentationBundle
-    from foundry.domains.contract import DomainPackContract
-    from foundry.domains.registry import PackRegistry
     from foundry.graph.gate_wiring import BlobResolver
     from foundry.proxy.cli_transports import BackendName
     from foundry.schemas.base import Artifact, ExternalAction
@@ -124,16 +119,9 @@ _LINEAGE_REV = "lineage-rev-cli-1"
 # returns the passing unified-diff body keyed on it (SUP7).
 _DIFF_BODY_URI = "cas://cli/diff-body"
 
-# The dev-grade trusted-builder identity + deploy target the AUTONOMOUS trust-root
-# chain (build → admit → deploy) wires hands-off. They stand in for the production
-# KMS/OIDC builder + deploy target (plan §0.3); the builder shares the run's zone-B
-# key so admission re-verifies the build signature under the SAME root.
-_BUILDER_ID = "dev-trusted-builder-cli"
-_DEPLOY_TARGET = "prod"
-
-# The release modes the CLI exposes (the supervisor mode constants; assistant is the
-# DEFAULT — byte-identical to the historical request-only run).
-MODES = (MODE_ASSISTANT, MODE_GATED, MODE_AUTONOMOUS)
+# The release modes the CLI accepts. Only assistant remains; the flag is kept so
+# existing `--mode assistant` invocations still work.
+MODES = (MODE_ASSISTANT,)
 
 # The model backends selectable via ``--backend`` / run(backend=). "mock" (DEFAULT)
 # is the deterministic scripted MockTransport — keyless, no network, the historical
@@ -377,99 +365,6 @@ def _build_proxy(backend: str) -> ModelProviderProxy:
         tier_models=_tier_models(backend),
     )
 
-# The first-party domain packs selectable via ``--packs`` (T-M5-08). Mapped by the
-# stable pack NAME (``pack.name``); a NEW pack is added here AND via register() — but
-# the graph wiring stays open/closed (it reads the COMPOSED policy generically).
-_PACK_FACTORIES: dict[str, Callable[[], DomainPackContract]] = {}
-
-
-def _pack_factories() -> dict[str, Callable[[], DomainPackContract]]:
-    """The lazily-built ``name -> pack-factory`` map for ``--packs`` selection.
-
-    Imported lazily (the pack modules pull in the domain contract) so a plain
-    ``--mode assistant`` run never imports the domain layer (back-compat: no new
-    import cost / no new surface on the default path).
-    """
-    if not _PACK_FACTORIES:
-        from foundry.domains.packs.crypto import CryptoPack
-        from foundry.domains.packs.frontend import FrontendPack
-        from foundry.domains.packs.game import GamePack
-        from foundry.domains.packs.infra import InfraPack
-        from foundry.domains.packs.ml_data import MLDataPack
-        from foundry.domains.packs.regulated import RegulatedPack
-
-        for cls in (RegulatedPack, MLDataPack, FrontendPack, GamePack, CryptoPack, InfraPack):
-            _PACK_FACTORIES[cls().name] = cls
-    return _PACK_FACTORIES
-
-
-def _build_pack_registry(packs: list[str]) -> tuple[PackRegistry, frozenset[str]]:
-    """Build a :class:`PackRegistry` from selected pack NAMES + their capabilities.
-
-    Returns the registry (with each named pack registered) and the UNION of the
-    selected packs' declared capabilities. The capabilities are seeded onto the
-    request's ``required_capabilities`` channel so the COMPOSED policy actually
-    engages (a pack's veto / approver-of-record / HITL fires off the request
-    capabilities, not merely off registration — mirrors the supervisor-pack
-    tests). Raises :class:`ValueError` for an unknown pack name (fail-closed; a
-    typo never silently engages nothing)."""
-    from foundry.domains.registry import PackRegistry
-
-    factories = _pack_factories()
-    registry = PackRegistry()
-    capabilities: set[str] = set()
-    for name in packs:
-        factory = factories.get(name)
-        if factory is None:
-            raise ValueError(
-                f"unknown pack {name!r}; available: {', '.join(sorted(factories))}"
-            )
-        pack = factory()
-        registry.register(pack)
-        capabilities.update(pack.capabilities)
-    return registry, frozenset(capabilities)
-
-
-def _enforce_mode_veto(
-    rt: AgentRuntime,
-    config: RunnableConfig,
-    registry: PackRegistry,
-    capabilities: frozenset[str],
-    *,
-    requested_mode: str,
-) -> None:
-    """Fail-closed: refuse to run a mode an engaged domain pack VETOES (T-M5-08).
-
-    The composed ``mode_tier`` policy is a PURE function of the request's
-    capabilities; :func:`resolve_effective_mode_tier` resolves the EFFECTIVE mode
-    after the veto. If the requested mode is no longer reachable (e.g. a regulated
-    pack vetoes hands-off Autonomous, degrading it to Gated), we RAISE rather than
-    silently run the (now-vetoed) mode — the operator must re-issue with the
-    allowed mode. This mirrors the supervisor's at-triage degrade, surfaced as an
-    explicit CLI error so the trust posture the operator believes they ran is the
-    posture that actually ran."""
-    from foundry.domains.governance_hooks import resolve_effective_mode_tier
-
-    # The view carries the requested mode so mode-aware packs (game/infra/crypto
-    # relax their human-only requirements for a declared-autonomous run) compose
-    # the same policy here as at the release boundary.
-    request_view = {"required_capabilities": sorted(capabilities), "mode": requested_mode}
-    policy = registry.compose(request_view)
-    eff = resolve_effective_mode_tier(
-        policy.mode_tier,
-        requested_mode=requested_mode,
-        request=request_view,
-        capabilities=sorted(capabilities),
-        seq=rt.seq(config, "cli", "pack:mode_veto"),
-    )
-    if requested_mode not in eff.reachable_modes:
-        raise ValueError(
-            f"mode {requested_mode!r} is VETOED by the engaged pack(s) "
-            f"{', '.join(p.name for p in registry.packs())}; the strictest "
-            f"reachable mode is {eff.effective_mode!r} "
-            f"(re-run with --mode {eff.effective_mode})"
-        )
-
 # Spec ingestion (task [8]). A whole-run cap on the design-spec text seeded into
 # state: bounds checkpoint size + token cost on a large doc / directory; the
 # product nodes truncate again for their prompts. Read as UTF-8, errors replaced
@@ -486,19 +381,6 @@ _PASSING_DIFF = (
     "--- /dev/null\n+++ b/test_app.py\n@@ -0,0 +1,2 @@\n"
     "+def test_ok():\n    assert 1 + 1 == 2\n"
 )
-
-# The Gated/Autonomous spine ADDS the assurance phase (Security/Audit/supply-chain
-# on the integrated tree). The Audit gate reads a lockfile inventory (AW2), so the
-# assurance-mode default diff carries a ``uv.lock`` alongside the passing test (no
-# hardcoded secret → Security PASS). Used as the run() default ONLY for
-# gated/autonomous (assistant stays byte-identical to the Phase-1 _PASSING_DIFF).
-_ASSURANCE_PASSING_DIFF = (
-    "--- /dev/null\n+++ b/app.py\n@@ -0,0 +1,1 @@\n+VALUE = 42\n"
-    "--- /dev/null\n+++ b/test_app.py\n@@ -0,0 +1,2 @@\n"
-    "+def test_ok():\n    assert 1 + 1 == 2\n"
-    '--- /dev/null\n+++ b/uv.lock\n@@ -0,0 +1,2 @@\n+name = "pkg"\n    license = "MIT"\n'
-)
-
 
 # ---- scripted per-node payloads (free-text completions, SOP order) ----------
 # Substring-keyed on each agent's SOP marker (count-independent, so a fix-loop
@@ -592,30 +474,8 @@ _PERF_COST_PAYLOAD: dict[str, Any] = {
     "recommendations": ["enable prompt caching on the stable SOP prefixes"],
 }
 
-# The assurance-phase agents (Gated/Autonomous spine only). Mirrors the gated /
-# autonomous end-to-end test fixtures: a clean STRIDE model, a clean SBOM, and a
-# clean supply-chain review → Security/Audit/supply_chain PASS on the integrated
-# tree. Unused on the Assistant path (the assurance subgraph is never mounted).
-_APPSEC_PAYLOAD: dict[str, Any] = {
-    "threat_model_body": "STRIDE model",
-    "oracle_bindings": {"S1": "test_auth"},
-    "residual_item_ids": [],
-    "severity": "low",
-    "findings": [],
-}
-_AUDIT_PAYLOAD: dict[str, Any] = {"sbom_body": "sbom", "severity": "low", "findings": []}
-_SUPPLY_CHAIN_PAYLOAD: dict[str, Any] = {
-    "report_body": "supply-chain review",
-    "policy_violations": [],
-    "trust_root_touched": False,
-}
-
 _SCRIPTS: dict[str, str] = {
     "You are the Planner": json.dumps(_PLAN_PAYLOAD),
-    # Assurance phase (Gated / Autonomous spine).
-    "You are the Security / AppSec Engineer": json.dumps(_APPSEC_PAYLOAD),
-    "You are the Audit / Compliance agent": json.dumps(_AUDIT_PAYLOAD),
-    "You are the Supply-Chain Reviewer": json.dumps(_SUPPLY_CHAIN_PAYLOAD),
     # Technical Writer (foundry/docs) authored docs.
     "OPERATIONAL RUNBOOK": json.dumps(_RUNBOOK_PAYLOAD),
     "KNOWN-ISSUES": json.dumps(_KNOWN_ISSUES_PAYLOAD),
@@ -714,9 +574,8 @@ def _judgment_anchors(real_artifacts: bool) -> dict[str, str]:
     produces (the reviewer's advisory verdict binds them; byte-identical smoke).
     Real backend ⇒ pin NOTHING: the reviewer then binds the REAL newest
     FeatureDiff uri (state fallback) + the REAL integrated tree_sha (read off the
-    attested gate verdicts), and the gated sign-off anchors derive consistently
-    on both read sites. Admission/provenance/evidence already bind the real
-    verdict-carried ``run_against``, never these labels, so unpinning is safe."""
+    attested gate verdicts). The gates bind the real verdict-carried
+    ``run_against``, never these labels, so unpinning is safe."""
     if real_artifacts:
         return {}
     return {"subject_artifact_uri": _DIFF_BODY_URI, "state_sha": "integrated-sha"}
@@ -786,7 +645,7 @@ def _write_draft_on_halt(
     plus a ``DRAFT-STATUS.md`` naming what's still failing — so a held build hands back
     a usable starting point, never empty hands. Best-effort: a tree that can't even be
     materialized (e.g. an unparseable diff) is skipped (returns ``None``), never crashes
-    the run. Clearly marked NOT shipped — admission still rejected the tree."""
+    the run. Clearly marked NOT shipped — the gates rejected the tree."""
     try:
         draft_root = _write_output_tree(
             final_state, output_dir, resolve=resolve, resolve_blob=resolve_blob
@@ -906,15 +765,6 @@ _TRUST_POSTURE: dict[str, str] = {
         "advisory review, no trust root — produces a bare open_pr a human reviews "
         "+ merges via normal CI (the reviewer's verdict is ADVISORY)"
     ),
-    MODE_GATED: (
-        "full gate set + human sign-off — a release candidate behind Spec/Build/Test "
-        "+ the tier-scaled assurance family, carrying a WORM evidence pack, gated on "
-        "a recorded Design + Release sign-off"
-    ),
-    MODE_AUTONOMOUS: (
-        "full trust root — hands-off build -> admit -> deploy; deploy-time admission "
-        "is the SOLE release gate (no human sign-off)"
-    ),
 }
 
 
@@ -934,12 +784,10 @@ class RunResult:
     passed: bool
     phase: str
     mode: str = MODE_ASSISTANT
-    """The release mode the run was driven in (assistant | gated | autonomous)."""
+    """The release mode the run was driven in (always assistant)."""
     backend: str = _MOCK_BACKEND
     """The model backend the proxy used (mock | anthropic | openai | claude-cli | codex |
     ollama-gemma)."""
-    packs: tuple[str, ...] = ()
-    """The domain packs engaged (by name) — empty when no ``--packs`` were given."""
     artifact_uri: str | None = None
     """The reviewed FeatureDiff handle uri the PR opens against (the PR subject)."""
     open_pr_idempotency_key: str | None = None
@@ -979,8 +827,6 @@ class RunResult:
             + ("(deterministic mock — no model call)"
                if self.backend == _MOCK_BACKEND else "(real model egress)"),
         ]
-        if self.packs:
-            lines.append(f"packs:     {', '.join(self.packs)}")
         if self.checkpoints:
             lines.append(f"checkpoints: {', '.join(self.checkpoints)}")
         if self.paused_at is not None:
@@ -1249,7 +1095,6 @@ def run(
     request: str,
     *,
     mode: str = MODE_ASSISTANT,
-    packs: list[str] | None = None,
     spec: str | list[str] | None = None,
     backend: str = _MOCK_BACKEND,
     thread_id: str = "cli-run",
@@ -1285,28 +1130,7 @@ def run(
     request:
         The one-line natural-language request (e.g. ``"build a URL shortener"``).
     mode:
-        The deployment-trust mode (lifecycle.md §4; default ``"assistant"`` — the
-        run is byte-identical to the historical request-only run). ``"gated"``
-        threads the Phase-2 supervisor (tiering + Design/Release sign-off +
-        assurance) and the evidence-pack-carrying, release-gated emit; the
-        reviewer's verdict is advisory in Assistant — the deterministic gates own
-        the release bit. ``"autonomous"`` (Phase-4) threads the SAME assurance
-        spine and additionally constructs the dev-grade TRUST ROOT (a hermetic
-        :class:`TrustedBuilder` + the fail-closed :class:`AdmissionController` +
-        the least-privileged :class:`Deployer` + a :class:`DevGateWriteVerifier`,
-        all sharing this run's zone-B key + cross-fork records), so the emit is
-        the hands-off build → admit → deploy chain (admission is the SOLE release
-        gate). Unknown modes are rejected fail-closed.
-    packs:
-        OPTIONAL domain packs to engage (by NAME — ``regulated`` / ``ml_data`` /
-        ``frontend``; T-M5-08). The selected packs are registered in a
-        :class:`PackRegistry` (passed to the graph) AND their declared
-        capabilities are seeded onto ``required_capabilities`` so the composed
-        policy actually engages at triage + the release boundary. A pack can only
-        TIGHTEN the release; crucially it may VETO an unsafe mode (a regulated pack
-        makes hands-off Autonomous UNREACHABLE / forces a human approver-of-record).
-        The veto is enforced FAIL-CLOSED up front: if the requested mode is vetoed
-        the run raises a clear error rather than silently running the vetoed mode.
+        Accepted for compatibility; only ``"assistant"`` is valid.
     spec:
         OPTIONAL full design-spec document (task [8]). ADDITIVE to ``request``: a
         short request summarizes intent while the spec provides the detail. May be
@@ -1325,10 +1149,7 @@ def run(
         SPEC core path reaches a clean Spec/Build/Test PASS with the StubAdapter.
     diff_body:
         The unified-diff body the synthetic ``resolve_blob`` returns for the
-        FeatureDiff. ``None`` (the default) selects a passing addition: the
-        Phase-1 ``_PASSING_DIFF`` for Assistant (byte-identical to today) or the
-        lockfile-bearing ``_ASSURANCE_PASSING_DIFF`` for Gated/Autonomous (the
-        assurance Audit gate reads a lockfile inventory). Pass an explicit
+        FeatureDiff. ``None`` (the default) selects the passing ``_PASSING_DIFF``. Pass an explicit
         error/failing body to exercise the halted-run path.
     max_fix_attempts:
         Convergence bound for the gate fix-loop (default 2). On a gate FAIL/ERROR the
@@ -1384,15 +1205,11 @@ def run(
     # Resolve the checkpoint boundary set up front (fail-closed on a typo'd name).
     ckpt_set = normalize_checkpoints(checkpoints)
     ckpt_names = tuple(sorted(b.value for b in ckpt_set))
-    # The default passing diff is mode-specific: Assistant uses the Phase-1
-    # _PASSING_DIFF (byte-identical to today); Gated/Autonomous use the
-    # lockfile-bearing variant the assurance Audit gate needs. An explicit
-    # diff_body (e.g. a failing body) always wins.
     if diff_body is None:
-        diff_body = _PASSING_DIFF if mode == MODE_ASSISTANT else _ASSURANCE_PASSING_DIFF
+        diff_body = _PASSING_DIFF
     spec_text = _load_spec(spec)
     # Single-host durability seam (durability/persistence.py): when
-    # FOUNDRY_STATE_DIR is SET, the checkpointer (+ its outbox/WORM audit),
+    # FOUNDRY_STATE_DIR is SET, the checkpointer,
     # the GlobalRecords trust ledgers and the CAS are all file-backed under that
     # dir so the run survives a process restart. UNSET (the DEFAULT) ⇒ in-memory
     # everywhere — byte-identical to the historical request-only run.
@@ -1459,18 +1276,14 @@ def run(
 
     # -- judgment-binding anchors (Phase-1 2c) --------------------------------
     # `subject_artifact_uri` / `state_sha` are pre-build RUN-INPUT LABELS the
-    # reviewer's advisory verdict + the gated sign-off bind to. For the `mock`
+    # reviewer's advisory verdict + checkpoint decisions bind to. For the `mock`
     # smoke they are PINNED to the synthetic subject/label the synthetic resolver
     # produces (byte-identical to before). For a REAL backend we DON'T pin them:
     # the reviewer then binds the REAL newest FeatureDiff uri (state fallback) +
     # the REAL integrated tree_sha (read off the attested gate verdicts), so the
-    # verdict honestly cites the artifact that was actually built, and the gated
-    # sign-off anchors derive consistently on both read sites. The LOAD-BEARING
-    # trust binds — admission's expected per-gate trees, the BuildOutput
-    # provenance, the evidence pack, the stable-FAIL latch — already use the real
-    # verdict-carried `run_against`, NEVER this label (factory_graph
-    # `_attested_run_against` / `_autonomous_admission_inputs`), so unpinning is
-    # safe: admission re-verifies each gate against its own real tree.
+    # verdict honestly cites the artifact that was actually built. The gates and
+    # the stable-FAIL latch use the real verdict-carried `run_against`, never
+    # this label, so unpinning is safe.
     configurable: dict[str, Any] = {
         "thread_id": thread_id,
         "verdict_nonce": f"N-{thread_id}",
@@ -1481,33 +1294,6 @@ def run(
         "metadata": {"langgraph_step": 1},
         "recursion_limit": 200,
     }
-
-    # -- domain packs (T-M5-08) -----------------------------------------------
-    # Build the registry from the selected pack NAMES + collect their capabilities
-    # (seeded onto required_capabilities so the composed policy engages). Then
-    # ENFORCE the mode veto fail-closed BEFORE running: a regulated pack vetoes
-    # hands-off Autonomous (and auto-approve Assistant) — we refuse rather than
-    # silently downgrade, so the operator never believes a vetoed mode ran.
-    pack_names = tuple(packs or ())
-    pack_registry: PackRegistry | None = None
-    pack_capabilities: frozenset[str] = frozenset()
-    if pack_names:
-        pack_registry, pack_capabilities = _build_pack_registry(list(pack_names))
-        _enforce_mode_veto(rt, config, pack_registry, pack_capabilities, requested_mode=mode)
-
-    # -- trust-root chain for AUTONOMOUS (lifecycle.md §4) --------------------
-    # Construct the SAME dev-grade trust-root components the autonomous tests wire,
-    # all sharing THIS run's zone-B key + cross-fork records (so admission
-    # re-verifies the runner-attested gate-state + reads the disqualification
-    # latch). For gated/assistant these stay None (ignored by build_factory_graph).
-    builder = admission = deployer = gate_verifier = None
-    if mode == MODE_AUTONOMOUS:
-        from foundry.trust_root import AdmissionController, Deployer, TrustedBuilder
-
-        builder = TrustedBuilder(_zone_b_signer(), builder_id=_BUILDER_ID)
-        admission = AdmissionController(builder_id=_BUILDER_ID)
-        deployer = Deployer(target=_DEPLOY_TARGET)
-        gate_verifier = _gate_verifier(records)
 
     # The terminal ``docs`` graph node assembles the company-shaped documentation
     # set + BUILD-MANIFEST IN-GRAPH (task [3]): the Technical Writer's model spend
@@ -1557,13 +1343,7 @@ def run(
                 source_dir=source_dir,
                 checkpointer=ckpt.saver,
                 max_fix_attempts=max_fix_attempts,
-                mode=mode,
-                builder=builder,
-                admission=admission,
-                deployer=deployer,
-                gate_verifier=gate_verifier,
                 profile=run_profile,
-                pack_registry=pack_registry,
                 # Author the doc set when EITHER a separate --docs dir OR an --out
                 # tree is requested (the docs land inside the --out repo, below).
                 doc_sink=doc_sink if (docs_dir is not None or output_dir is not None) else None,
@@ -1577,11 +1357,6 @@ def run(
             seed: FactoryState = {"request": request}
             if spec_text:
                 seed["spec"] = spec_text
-            # Seed the selected packs' capabilities so the composed policy engages
-            # at triage + the release boundary (a pack's veto / approver-of-record
-            # / HITL fires off required_capabilities). Default run: never set.
-            if pack_capabilities:
-                seed["required_capabilities"] = sorted(pack_capabilities)
             # An operator-pinned scope seeds the channel the planner would
             # otherwise write; the planner sees a decision already present and
             # keeps it. `auto` (the default) seeds nothing,
@@ -1701,7 +1476,6 @@ def run(
         final_state,
         mode=mode,
         backend=backend,
-        packs=pack_names,
         checkpoints=ckpt_names,
         paused_at=paused_at,
     )
@@ -1750,17 +1524,10 @@ def _result(
     *,
     mode: str = MODE_ASSISTANT,
     backend: str = _MOCK_BACKEND,
-    packs: tuple[str, ...] = (),
     checkpoints: tuple[str, ...] = (),
     paused_at: str | None = None,
 ) -> RunResult:
-    """Distill the terminal state into a :class:`RunResult` (no bodies, L4).
-
-    The release action is mode-specific: Assistant/Gated emit an ``open_pr``
-    (Gated's payload is the evidence-pack handle), Autonomous emits a ``deploy``
-    (payload is the admitting decision handle). We surface whichever was emitted
-    on the same ``open_pr_*`` fields so the summary reports the release uniformly.
-    """
+    """Distill the terminal state into a :class:`RunResult` (no bodies, L4)."""
     statuses: dict[str, GateStatus] = {}
     findings: dict[str, tuple[str, ...]] = {}
     # newest-by-Seq per gate (the verdict that gates the release; mirrors emit guard)
@@ -1774,10 +1541,9 @@ def _result(
         if getattr(g, "findings", None):
             findings[name] = tuple(g.findings)
 
-    # The mode-specific release action: open_pr (assistant/gated) or deploy
-    # (autonomous). At most one is emitted on a released run (fail-closed otherwise).
+    # The release action: at most one open_pr on a released run.
     release: ExternalAction | None = next(
-        (a for a in (final.get("actions") or ()) if a.kind in ("open_pr", "deploy")),
+        (a for a in (final.get("actions") or ()) if a.kind == "open_pr"),
         None,
     )
     # A run "passed" only if a release action was actually emitted (gates PASS AND
@@ -1792,7 +1558,6 @@ def _result(
         thread_id=thread_id,
         mode=mode,
         backend=backend,
-        packs=packs,
         passed=passed,
         phase=str(final.get("phase") or "unknown"),
         artifact_uri=release.payload_uri if release is not None else None,
@@ -1805,38 +1570,12 @@ def _result(
     )
 
 
-# ---- the evolution route (task [12]) ----------------------------------------
-
-
-def _read_overlay(overlay_dir: str) -> dict[str, str | None]:
-    """Read an OVERLAY directory into a change set (relpath -> new content).
-
-    The overlay's files are the added/modified files of the maintained change;
-    they are laid over the prior tree by :func:`foundry.lifecycle.evolve.evolve`.
-    Read as UTF-8 (errors replaced) — plain input data, never executed. (Deletes
-    are expressed via the programmatic ``evolve(changes={rel: None})`` API; the
-    shell affordance overlays added/modified files, the common evolution shape.)
-    """
-    root = Path(overlay_dir)
-    if not root.is_dir():
-        raise ValueError(f"overlay path is not a directory: {overlay_dir}")
-    changes: dict[str, str | None] = {}
-    for p in sorted(root.rglob("*")):
-        if p.is_file():
-            changes[p.relative_to(root).as_posix()] = p.read_text(
-                encoding="utf-8", errors="replace"
-            )
-    if not changes:
-        raise ValueError(f"overlay directory is empty: {overlay_dir}")
-    return changes
-
-
 def _autopilot_main(args: list[str]) -> int:
     """`foundry autopilot "<target>" --out DIR [...]` — Director + design panel.
 
     Builds the target, then loops: the Director proposes candidate next actions,
     a software/usability panel scores + vetoes them (deterministic tally), and
-    the winner becomes the next gated iteration. Exit 0 iff every iteration
+    the winner becomes the next iteration. Exit 0 iff every iteration
     released; 1 when the loop stopped (gate refusal / panel decline / budget).
     """
     try:
@@ -1981,82 +1720,6 @@ def _export_git(out_dir: str, released: list[tuple[str, str, str]]) -> None:
               f"{Path(out_dir) / '.stages'}", file=sys.stderr)
 
 
-def _evolve_main(args: list[str]) -> int:
-    """``foundry evolve <prior repo> "<change>" --apply OVERLAY`` (task [12]).
-
-    Re-enters an EXISTING released codebase as a MAINTAINED change: re-verify
-    change-proportionally, re-gate via the SAME runner, re-admit fail-closed, link
-    provenance to the prior version. The maintained change is RELEASED only when
-    it RE-PASSES the gates + RE-ADMITS (a failing re-gate ⇒ NOT released — no PR /
-    deploy). ``--apply OVERLAY`` supplies the changed files (overlaid on the prior
-    tree); ``--guardian-approve`` records the HITL decision for a protected
-    criterion/oracle/gate edit (which otherwise BLOCKS release, deterministic HITL).
-
-    Returns 0 iff the maintained change was RELEASED, 1 if NOT released
-    (fail-closed), 2 on a usage error.
-    """
-    from foundry.lifecycle.evolve import EvolveRefused, evolve
-
-    guardian_approval = False
-    if "--guardian-approve" in args:
-        args = [a for a in args if a != "--guardian-approve"]
-        guardian_approval = True
-    # --strict: a not-released re-gate RAISES (EvolveRefused) instead of returning a
-    # result — for scripts/CI that want a hard failure on any non-release.
-    strict = False
-    if "--strict" in args:
-        args = [a for a in args if a != "--strict"]
-        strict = True
-    overlay_dir: str | None = None
-    if "--apply" in args:
-        i = args.index("--apply")
-        if i + 1 >= len(args):
-            print("error: --apply requires a directory argument", file=sys.stderr)
-            return 2
-        overlay_dir = args[i + 1]
-        args = args[:i] + args[i + 2 :]
-    if len(args) < 2:
-        print(
-            'usage: python -m foundry.cli evolve <prior-repo-dir> "<change>" '
-            "--apply OVERLAY_DIR [--guardian-approve] [--strict]\n"
-            "  re-enter an EXISTING released repo as a maintained change: re-verify\n"
-            "  change-proportionally, re-gate (same runner), re-admit (fail-closed),\n"
-            "  link provenance to the prior version. A failing re-gate => NOT released.\n"
-            "  --apply OVERLAY_DIR: the changed/added files overlaid on the prior tree\n"
-            "  --guardian-approve: record the HITL decision for a protected\n"
-            "    criterion/oracle/gate edit (otherwise it BLOCKS release)\n"
-            "  --strict: a not-released re-gate exits non-zero (raises) instead of reporting",
-            file=sys.stderr,
-        )
-        return 2
-    prior_dir = args[0]
-    change = " ".join(args[1:]).strip()
-    if not change:
-        print("error: change request must be non-empty", file=sys.stderr)
-        return 2
-    if overlay_dir is None:
-        print("error: evolve requires --apply OVERLAY_DIR", file=sys.stderr)
-        return 2
-    if not Path(prior_dir).is_dir():
-        print(f"error: prior repo not found: {prior_dir}", file=sys.stderr)
-        return 2
-    try:
-        changes = _read_overlay(overlay_dir)
-        result = evolve(
-            prior_dir, change, changes=changes,
-            guardian_approval=guardian_approval, strict=strict,
-        )
-    except EvolveRefused as exc:
-        # --strict: the re-gate refused to release; report and exit non-zero.
-        print(f"evolve REFUSED (not released): {exc}", file=sys.stderr)
-        return 1
-    except (FileNotFoundError, ValueError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    print(result.summary())
-    return 0 if result.released else 1
-
-
 # ---- entry point ------------------------------------------------------------
 
 
@@ -2113,20 +1776,13 @@ def main(argv: list[str] | None = None) -> int:
     stopped the run.
     """
     args = sys.argv[1:] if argv is None else argv
-    # The evolution route (task [12]): `foundry evolve <prior repo> "<change>"`
-    # (see the `evolve` dispatch below; `milestones` follows the same shape.)
-    # re-enters an EXISTING released codebase as a maintained change (re-gate +
-    # re-admit, fail-closed). Dispatched as a leading subcommand so the greenfield
-    # path stays byte-identical (the default — no subcommand — is unchanged).
-    if args and args[0] == "evolve":
-        return _evolve_main(args[1:])
     # The milestone route (ROADMAP Phase 5): `foundry milestones "<big target>"
     # --out DIR` plans an ordered milestone list and runs the FULL factory per
     # milestone, chaining each released tree as the next milestone's base.
     if args and args[0] == "milestones":
         return _milestones_main(args[1:])
     # The autopilot route: Director proposes, a software/usability panel votes,
-    # the winner becomes the next gated iteration (fail-closed on panel decline).
+    # the winner becomes the next iteration (fail-closed on panel decline).
     if args and args[0] == "autopilot":
         return _autopilot_main(args[1:])
     # Simple value flags parse through `_take_value`/`_take_int` (H5: one helper
@@ -2136,8 +1792,7 @@ def main(argv: list[str] | None = None) -> int:
         args, docs_dir = _take_value(args, "--docs", what="a directory argument")
         args, output_dir = _take_value(args, "--out", what="a directory argument")
 
-        # --mode {assistant|gated|autonomous} (default assistant; task [9]); the
-        # default keeps the run byte-identical to the historical request-only path.
+        # --mode assistant: the only mode; the flag is accepted for compatibility.
         args, _mode = _take_value(args, "--mode", what="a value")
         mode = _mode if _mode is not None else MODE_ASSISTANT
         if mode not in MODES:
@@ -2190,11 +1845,6 @@ def main(argv: list[str] | None = None) -> int:
         args, _tok = _take_int(args, "--token-cap", minimum=1)
         if _tok is not None:
             token_cap = _tok
-
-        # --packs name1,name2 (task [9]): domain packs to engage. A pack may VETO the
-        # requested mode (enforced fail-closed in run()).
-        args, _packs = _take_value(args, "--packs", what="a comma-separated list")
-        packs: list[str] = [p.strip() for p in _packs.split(",") if p.strip()] if _packs else []
 
         # --profile NAME: the verification stack (pinned build/test/smoke commands).
         # OMITTED ⇒ "auto" (infer the stack from the request/spec keywords). A NAME
@@ -2272,7 +1922,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(
                 "usage: python -m foundry.cli "
-                "[--mode {assistant|gated|autonomous}] [--packs name1,name2] "
+                "[--mode assistant] "
                 "[--backend {mock|anthropic|openai|claude-cli|codex|ollama-gemma}] "
                 "[--adapter {stub|raw-react|claude-code}] "
                 "[--checkpoints [all|product,design,release]] "
@@ -2280,17 +1930,12 @@ def main(argv: list[str] | None = None) -> int:
                 "[--docs DIR] [--out DIR] [--spec FILE|DIR ...] "
                 "[--state-dir DIR] [--thread-id NAME] [--max-fix-attempts N] "
                 '["<one-line request>"]   (optional when --spec is given)\n'
-                "  modes (lifecycle.md §4 deployment-trust):\n"
-                f"    assistant  {_TRUST_POSTURE[MODE_ASSISTANT]}\n"
-                f"    gated      {_TRUST_POSTURE[MODE_GATED]}\n"
-                f"    autonomous {_TRUST_POSTURE[MODE_AUTONOMOUS]}\n"
+                f"  mode: assistant — {_TRUST_POSTURE[MODE_ASSISTANT]}\n"
                 "  backend: mock (default — keyless, deterministic) | anthropic | openai | "
                 "claude-cli | codex | ollama-gemma (real model egress)\n"
                 "  adapter (coding substrate): omitted => DERIVED from --backend "
                 "(mock=>stub no-op, claude-cli=>claude-code AGENTIC, other real "
                 "backends=>raw-react); override with stub | raw-react | claude-code\n"
-                "  packs: regulated | ml_data | frontend | game | crypto | infra "
-                "(a pack may VETO an unsafe mode — fail-closed)\n"
                 "  checkpoints (plan [10]): pause at stage boundaries for human "
                 "verification; an approve can NEVER turn a gate FAIL into a release\n"
                 "  scope: auto (default — the planner classifies the request) | "
@@ -2308,13 +1953,10 @@ def main(argv: list[str] | None = None) -> int:
         (lambda _payload: "approve") if checkpoints else None
     )
 
-    # An unknown pack name OR a pack VETO of the requested mode is a fail-closed
-    # usage error (exit 2) — we never silently run a vetoed/empty configuration.
     try:
         result = run(
             request,
             mode=mode,
-            packs=packs or None,
             spec=spec_text,
             backend=backend,
             adapter=adapter,

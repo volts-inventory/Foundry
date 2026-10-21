@@ -25,8 +25,8 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--backend", default="mock",
                    help="model egress: mock (keyless skeletons) | claude-cli | anthropic | "
                         "openai | codex  (default: mock — use claude-cli for real code)")
-    p.add_argument("--mode", default="assistant",
-                   help="per-service trust mode: assistant | gated | autonomous (def assistant)")
+    p.add_argument("--mode", default="assistant", choices=["assistant"],
+                   help="per-service release mode (only assistant)")
     p.add_argument("--name", help="platform / monorepo name (default: slug of request)")
     p.add_argument("--services", help="comma-separated subset of roles to build "
                                       "(web,api,backend,data,worker); default: inferred")

@@ -143,7 +143,7 @@ def run_milestones(
     ``milestones`` explicit ⇒ used verbatim (gated posture / tests); otherwise
     planned via ``proxy`` (required then). ``run_fn`` defaults to
     :func:`foundry.cli.run`; injectable for tests. Extra ``run_kwargs``
-    (backend, adapter, mode, packs, state_dir, ...) pass through to every
+    (backend, adapter, mode, state_dir, ...) pass through to every
     milestone's run. Stops at the first milestone whose gates refuse — the
     report's ``released_dir`` is the furthest RELEASED increment either way.
     """

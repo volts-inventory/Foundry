@@ -4,8 +4,7 @@ The checkpoint/HITL mode pauses a build IN STAGES at the stage boundaries (after
 product/spec, after architecture/design, after implementation+quality / before
 release) so a human can INSPECT that stage's outputs and steer the run —
 *approve* (continue), *reject* (halt), or *needs-changes* (route the stage back
-for rework). This is the in-build counterpart to the binary Design/Release
-sign-off (``foundry.governance.sign_off``).
+for rework).
 
 HARD TRUST CONSTRAINT (the whole point of [10]): a checkpoint decision is HUMAN
 STEERING LAYERED ON TOP of the deterministic gates — it can HALT a run or send a

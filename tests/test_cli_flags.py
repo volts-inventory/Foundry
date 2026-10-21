@@ -1,4 +1,4 @@
-"""CLI parity flags: --state-dir, --thread-id, --max-fix-attempts, evolve --strict.
+"""CLI parity flags: --state-dir, --thread-id, --max-fix-attempts.
 
 Each closes a programmatic/env-only setting that previously had no CLI flag.
 """
@@ -21,7 +21,7 @@ def test_thread_id_param_is_reflected() -> None:
 
 def test_state_dir_param_writes_durable_files(tmp_path: Path) -> None:
     run("build a thing", state_dir=str(tmp_path))
-    assert (tmp_path / "checkpoints.db").is_file()      # checkpointer (+ outbox/audit)
+    assert (tmp_path / "checkpoints.db").is_file()      # checkpointer
     assert (tmp_path / "global_records.db").is_file()   # trust ledgers
     assert (tmp_path / "cas").is_dir()                  # content-addressed store
 
@@ -91,19 +91,3 @@ def test_max_slots_and_cost_cap_validate() -> None:
     assert main(["--max-slots", "0", "build a thing"]) == 2
     assert main(["--cost-cap-microusd", "nope", "build a thing"]) == 2
     assert main(["--max-slots", "2", "build a thing"]) == 0
-
-
-# ---- evolve --strict --------------------------------------------------------
-
-
-def test_evolve_strict_refused_returns_1(tmp_path: Path) -> None:
-    prior = tmp_path / "v1"
-    run("build a URL shortener", output_dir=str(prior))
-    assert (prior / "test_app.py").is_file()
-    overlay = tmp_path / "changes"
-    overlay.mkdir()
-    # Break the prior oracle -> failing re-gate -> --strict makes it exit non-zero.
-    _broken = "def test_ok():\n    assert 1 + 1 == 3\n"
-    (overlay / "test_app.py").write_text(_broken, encoding="utf-8")
-    rc = main(["evolve", str(prior), "break it", "--apply", str(overlay), "--strict"])
-    assert rc == 1

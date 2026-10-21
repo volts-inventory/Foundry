@@ -30,12 +30,6 @@ from foundry.schemas.implementation import (
     Task,
     TaskStatus,
 )
-from foundry.schemas.operations import (
-    DeployPlan,
-    IaCProposal,
-    Pipeline,
-    Release,
-)
 from foundry.schemas.product import (
     PRD,
     AcceptanceCriterion,
@@ -260,42 +254,6 @@ CASES: list[tuple[type[FrozenModel], dict, str, object]] = [
         "cas://sbom/2",
     ),
     (
-        Pipeline,
-        {"pipeline_uri": "cas://pipeline/1", "seq": SEQ},
-        "pipeline_uri",
-        "cas://pipeline/2",
-    ),
-    (
-        IaCProposal,
-        {"plan_uri": "cas://iac/1", "seq": SEQ},
-        "plan_uri",
-        "cas://iac/2",
-    ),
-    (
-        DeployPlan,
-        {
-            "plan_uri": "cas://deploy/1",
-            "rollback_plan_uri": "cas://rollback/1",
-            "health_checks": ("/healthz",),
-            "seq": SEQ,
-        },
-        "plan_uri",
-        "cas://deploy/2",
-    ),
-    (
-        Release,
-        {
-            "semver": "1.2.0",
-            "artifact_digest": "sha256:" + "e" * 64,
-            "changelog_uri": "cas://changelog/1",
-            "evidence_pack_uri": "cas://evidence/1",
-            "server_nonce": "sn-release-1",
-            "seq": SEQ,
-        },
-        "semver",
-        "1.2.1",
-    ),
-    (
         TriageDecision,
         {
             "route": RequestRoute.EVOLUTION,
@@ -388,12 +346,6 @@ def test_set_valued_field_digest_is_order_independent():
 # ---------------------------------------------------------------------------
 # Spot checks on key invariants
 # ---------------------------------------------------------------------------
-
-
-def test_iac_proposal_plan_only_defaults_true():
-    """Agents PROPOSE IaC, never apply it (agents.md Layer 6, gov §2/§5)."""
-    p = IaCProposal(plan_uri="cas://iac/1", seq=SEQ)
-    assert p.plan_only is True
 
 
 def test_triage_tier_is_the_governance_1e_enum():

@@ -104,7 +104,7 @@ def build_implementation_subgraph(
         Per-task adapter budgets the Junior carries into each ``TaskPacket``.
 
     Returns the ``StateGraph`` UNCOMPILED so the caller owns compilation
-    (checkpointer, etc.), mirroring ``skeleton.build_skeleton_graph``'s split.
+    (checkpointer, etc.).
     """
     g: StateGraph[FactoryState] = StateGraph(FactoryState)
 

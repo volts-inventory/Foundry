@@ -231,7 +231,7 @@ def _safe_unzip_spec(b64: str, dest: Path) -> int:
 
 
 # --- interactive spec chat with the leads (intake option 4) ----------------- #
-# Advisory authoring aid (same posture as foundry.ideation): it produces ONLY
+# Advisory authoring aid: it produces ONLY
 # text — a transcript + a running draft spec — and writes NO FactoryState / gate /
 # verdict. "Lock spec & build" just feeds the draft back as run(spec=<text>); the
 # spec gate + criteria machinery are unchanged (agents propose, gates decide).

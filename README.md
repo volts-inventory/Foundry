@@ -3,7 +3,7 @@
 A graph-based, multi-agent software factory. Give it a one-line request — "a
 stardew-style farming game about colonizing the moon", "a file-encryption
 vault", "a terraform stack for a three-tier app" — and it runs a full
-product → architecture → engineering → QA → security → gates pipeline and
+plan → engineering → review → gates pipeline and
 writes a GitHub-ready repo (code + docs). Use it two ways:
 
 - **CLI** — `python -m foundry.cli "<request>"` → a repo on disk.
@@ -26,11 +26,8 @@ writes a GitHub-ready repo (code + docs). Use it two ways:
   `autopilot` loop goes further — a Director proposes candidate next actions,
   a software/usability panel votes, and the winner becomes the next release.
   Both stop fail-closed (gate refusal, panel decline) and resume after a kill.
-- **Governance that scales with risk.** Domain packs (regulated, ml_data,
-  frontend, game, crypto, infra) tighten the floor per domain: a game release
-  requires a human playability sign-off; crypto releases are gated-only with a
-  human approver; infra never hands-off deploys. Only model-auth credentials
-  can ever enter the build sandbox — cloud/deploy keys structurally cannot.
+- **A sandbox that holds no secrets.** Only model-auth credentials can ever
+  enter the build sandbox — cloud/deploy keys structurally cannot.
 
 Pick a model backend — Claude Code (`claude -p`, a Max plan) or the Anthropic /
 OpenAI APIs — and it writes real code. Examples below use `claude-cli`.
@@ -65,10 +62,10 @@ session cached on disk that the CLI auto-refreshes), or **generate a token** (`c
 setup-token`) and store it in `.env` as `CLAUDE_CODE_OAUTH_TOKEN` (handy for a headless
 host or CI, where there's no interactive login to lean on). If you're already logged in,
 you need neither — `claude -p` reuses that session. Prefer the metered API instead? Set
-`FOUNDRY_MODEL_BACKEND=anthropic` and an `ANTHROPIC_API_KEY` in `.env` (see §4).
+`FOUNDRY_MODEL_BACKEND=anthropic` and an `ANTHROPIC_API_KEY` in `.env` (see §3).
 
 Leave the Terminal window open while it runs. To keep it running after closing the
-window, see [§10](#10-run-it-as-a-long-lived-server).
+window, see [§8](#8-run-it-as-a-long-lived-server).
 
 ---
 
@@ -81,7 +78,7 @@ Every flag, with what it does, inline. Defaults are shown in each comment. Set a
 python -m foundry.cli [OPTIONS] "<one-line request>"   # build a GitHub-ready repo from one sentence
 
 # ── Release posture ───────────────────────────────────────────────────────────
-  --mode <assistant|gated|autonomous>  # trust posture: advisory PR · full gates+sign-off · hands-off deploy   (default: assistant)
+  --mode assistant           # the only mode: gates decide, the reviewer advises, a PR is emitted   (default)
 
 # ── Model egress & code generation (orthogonal seams) ─────────────────────────
   --backend <claude-cli|anthropic|openai|codex|ollama-gemma>  # WHERE model calls go (the "brain")   (set one; e.g. claude-cli)
@@ -91,7 +88,6 @@ python -m foundry.cli [OPTIONS] "<one-line request>"   # build a GitHub-ready re
 
 # ── Inputs ────────────────────────────────────────────────────────────────────
   --spec <FILE|DIR>          # ground the build with a spec (or run from a spec ALONE, no one-liner); REPEATABLE   (default: none)
-  --packs <name1,name2>      # domain packs: regulated|ml_data|frontend|game|crypto|infra; a pack may VETO a mode   (default: none)
   --docs <DIR>               # write the generated doc set (PRD / design / ops) here           (default: none)
 
 # ── Output & durable state ────────────────────────────────────────────────────
@@ -107,12 +103,6 @@ python -m foundry.cli [OPTIONS] "<one-line request>"   # build a GitHub-ready re
                              #   with --state-dir, rerun the same command to resume   (default: none)
   --checkpoints [all|product,design,release]  # pause at stage boundaries (CLI auto-approves)   (default: off)
 
-# ── Subcommand: evolve an already-released repo (re-gate a change) ─────────────
-python -m foundry.cli evolve <prior-repo> "<change>" [OPTIONS]
-  --apply <DIR>              # overlay these changed files onto the prior tree
-  --guardian-approve         # authorize a protected criterion / oracle / gate edit (else blocked)
-  --strict                   # exit non-zero if the re-gate REFUSES to release (for CI)
-
 # ── Subcommand: build a BIG target milestone-by-milestone ──────────────────────
 python -m foundry.cli milestones "<big target>" --out DIR [OPTIONS]
   --milestones "a; b; c"     # explicit ordered plan (omit ⇒ the model plans the ladder)
@@ -121,7 +111,7 @@ python -m foundry.cli milestones "<big target>" --out DIR [OPTIONS]
                              # milestone; increments stage under <out>/.stages). --no-git
                              # restores plain sibling mNN folders (no git needed). The
                              # content-addressed store stays the source of truth either way.
-  # each milestone runs the FULL gated factory; its RELEASED tree seeds the next;
+  # each milestone runs the FULL factory; its RELEASED tree seeds the next;
   # stops fail-closed at the first gate refusal; resumable per milestone
 
 # ── Subcommand: autopilot — Director proposes, a design panel votes ────────────
@@ -144,17 +134,15 @@ python -m foundry.cli autopilot "<target>" --out DIR [OPTIONS]
 1. [Requirements](#requirements)
 2. [Setup](#1-setup)
 3. [Quickstart (CLI)](#2-quickstart-cli)
-4. [Picking a mode](#3-picking-a-mode)
-5. [Setting the backend (real models)](#4-setting-the-backend-real-models)
-6. [Choosing a coding substrate (`--adapter`)](#5-choosing-a-coding-substrate---adapter)
-7. [Feeding a spec](#6-feeding-a-spec)
-8. [Common flags](#7-common-flags)
-9. [Evolve an existing repo](#8-evolve-an-existing-repo)
-10. [Worked example — the moon-colony game](#worked-example--the-moon-colony-game)
-11. [Full autonomy: milestones & autopilot](#full-autonomy-milestones--autopilot)
-11. [Workshop UI](#9-workshop-ui)
-11. [Run it as a long-lived server](#10-run-it-as-a-long-lived-server)
-12. [Develop](#11-develop)
+4. [Setting the backend (real models)](#3-setting-the-backend-real-models)
+5. [Choosing a coding substrate (`--adapter`)](#4-choosing-a-coding-substrate---adapter)
+6. [Feeding a spec](#5-feeding-a-spec)
+7. [Common flags](#6-common-flags)
+8. [Worked example — the moon-colony game](#worked-example--the-moon-colony-game)
+9. [Full autonomy: milestones & autopilot](#full-autonomy-milestones--autopilot)
+10. [Workshop UI](#7-workshop-ui)
+11. [Run it as a long-lived server](#8-run-it-as-a-long-lived-server)
+12. [Develop](#9-develop)
 13. [Configuration reference](#configuration-reference)
 
 ---
@@ -165,12 +153,12 @@ python -m foundry.cli autopilot "<target>" --out DIR [OPTIONS]
 "<one-line request>"
         │
         ▼
-  product ──▶ architecture ──▶ engineering ──▶ QA ──▶ security ──▶ gates
-        │            │              │            │         │          │
-        └──────── one graph; agents share state, parallelize, and re-loop ───────┘
-                                                                       │
-                                                                       ▼
-                                                          ./out  (code + docs + report)
+  planner ──▶ engineering ──▶ review ──▶ gates (spec · build · test · smoke)
+        │             │             │          │
+        └── one graph; agents share state, parallelize, and re-loop ──┘
+                                                │
+                                                ▼
+                                   ./out  (code + docs + report)
 ```
 
 Two seams are deliberately independent, and worth internalizing before you start:
@@ -209,7 +197,7 @@ pip install -e .
 ```
 
 > Keep the venv activated (`source .venv/bin/activate`) so the `python …` commands
-> below run with the project's dependencies. (Contributors: see [Develop](#11-develop)
+> below run with the project's dependencies. (Contributors: see [Develop](#9-develop)
 > for the lint/typecheck/test tooling.)
 
 ---
@@ -219,13 +207,13 @@ pip install -e .
 Each command writes a complete repo to `--out` and prints a pass/fail report.
 
 ```bash
-# 1. Simplest possible run (assistant mode) → repo in ./out
+# 1. Simplest possible run → repo in ./out
 python -m foundry.cli "build a tiny URL-shortener service" --backend claude-cli --out ./out
 
 # 2. A richer, multi-feature ask — one detailed sentence is fine
 python -m foundry.cli "a multi-tenant URL shortener with custom slugs, link expiry, \
 per-account API keys, click analytics with daily rollups, and per-IP abuse \
-rate-limiting" --backend claude-cli --mode gated --out ./out
+rate-limiting" --backend claude-cli --out ./out
 
 # 3. …or build straight from a design spec — no one-liner needed
 python -m foundry.cli --spec ./spec.md --backend claude-cli --out ./out
@@ -241,24 +229,7 @@ echo $?                  # 0 = passed (PR-ready) · 1 = halted · 2 = usage erro
 
 ---
 
-## 3. Picking a mode
-
-`--mode` sets the deployment-trust posture (default `assistant`).
-
-```bash
-# 1. assistant — advisory review; emits a PR for a human to merge (default)
-python -m foundry.cli "build a markdown linter" --mode assistant --out ./out
-
-# 2. gated — full gate set + recorded human sign-off + WORM evidence pack
-python -m foundry.cli "build a payments webhook handler" --mode gated --out ./out
-
-# 3. autonomous — hands-off build → admit → deploy; admission is the only gate
-python -m foundry.cli "build a status-page service" --mode autonomous --out ./out
-```
-
----
-
-## 4. Setting the backend (real models)
+## 3. Setting the backend (real models)
 
 A backend is the model egress. Set it three ways — last one wins:
 
@@ -334,13 +305,13 @@ python -m foundry.cli "build a todo API" --backend ollama-gemma --out ./out
 
 Any backend writes real code automatically — the adapter is derived from the
 backend (`claude-cli` → the agentic `claude-code`; other real backends → `raw-react`),
-so you don't need a second flag (override only when you want something else; see §5).
+so you don't need a second flag (override only when you want something else; see §4).
 In the Workshop UI, the backend is a dropdown; `FOUNDRY_MODEL_BACKEND` only sets
-which option is preselected (§9).
+which option is preselected (§7).
 
 ---
 
-## 5. Choosing a coding substrate (`--adapter`)
+## 4. Choosing a coding substrate (`--adapter`)
 
 The adapter is what actually writes the code. **You normally omit it** — it's
 derived from `--backend` (`claude-cli` → `claude-code` agentic; other real backends →
@@ -374,73 +345,45 @@ python -m foundry.cli "build a dice roller" \
 
 ---
 
-## 6. Feeding a spec
+## 5. Feeding a spec
 
 Ground the build with detail beyond the one-liner. `--spec` accepts a file or
 directory and may repeat.
 
 ```bash
-# 1. Co-generate a spec from your request, then edit it
-python -m foundry.ideation "build a feature-flag service" > spec.md
-$EDITOR spec.md
-
-# 2. Build from that spec (the one-liner is optional — `--spec spec.md` alone works)
+# 1. Build from a spec (the one-liner is optional — `--spec spec.md` alone works)
 python -m foundry.cli "build a feature-flag service" --spec spec.md --out ./out
 
-# 3. Ingest multiple spec files / a docs folder
+# 2. Ingest multiple spec files / a docs folder
 python -m foundry.cli "port the billing module" \
   --spec requirements.md --spec ./design-docs --out ./out
 ```
 
 ---
 
-## 7. Common flags
+## 6. Common flags
 
 ```bash
-# 1. Domain packs — engage extra guidance/governance (a pack can veto a mode)
-python -m foundry.cli "build a clinical intake form" \
-  --packs regulated,ml_data --out ./out
-
-# 2. Auto-fix budget — retries per failing gate (default 5)
+# 1. Auto-fix budget — retries per failing gate (default 5)
 python -m foundry.cli "build a parser" --max-fix-attempts 5 --out ./out
 
-# 3. Cost ceiling — global spend envelope in micro-USD (metered backends)
+# 2. Cost ceiling — global spend envelope in micro-USD (metered backends)
 python -m foundry.cli "build a parser" \
   --backend anthropic --cost-cap-microusd 500000 --out ./out      # $0.50
 
-# 4. Parallelism ceiling — usually auto; lower it on a constrained box
+# 3. Parallelism ceiling — usually auto; lower it on a constrained box
 python -m foundry.cli "build a parser" --max-slots 2 --out ./out
 
-# 5. Checkpoints — pause at stage boundaries (CLI auto-approves all)
+# 4. Checkpoints — pause at stage boundaries (CLI auto-approves all)
 python -m foundry.cli "build a parser" --checkpoints all --out ./out
 python -m foundry.cli "build a parser" --checkpoints product,release --out ./out
 
-# 6. Durable state — survive restarts / resume by thread id
+# 5. Durable state — survive restarts / resume by thread id
 python -m foundry.cli "build a parser" \
   --state-dir ./.state --thread-id parser-v1 --out ./out
 
-# 7. See every flag
+# 6. See every flag
 python -m foundry.cli        # prints full usage
-```
-
----
-
-## 8. Evolve an existing repo
-
-Re-enter a released codebase as a maintained change: re-verify, re-gate, re-admit
-(fail-closed). The change ships only if it re-passes.
-
-```bash
-# 1. Apply a change overlaid on the prior tree
-python -m foundry.cli evolve ./out "add per-IP rate limiting" --apply ./changes
-
-# 2. Approve a protected criterion/oracle/gate edit (otherwise blocked)
-python -m foundry.cli evolve ./out "loosen the auth gate" \
-  --apply ./changes --guardian-approve
-
-# 3. Hard-fail in CI when the re-gate refuses to release
-python -m foundry.cli evolve ./out "add caching" --apply ./changes --strict
-echo $?                              # non-zero if NOT released
 ```
 
 ---
@@ -461,10 +404,10 @@ build — and the same flow applies.
 ### CLI
 
 ```bash
-# 1. One gated increment (the walking skeleton), on your Max plan:
+# 1. One increment (the walking skeleton), on your Max plan:
 python -m foundry.cli "a stardew-style farming game about colonizing the moon" \
-  --backend claude-cli --mode gated --out ~/moon-colony --profile pygame \
-  --state-dir ~/foundry/state --packs game
+  --backend claude-cli --out ~/moon-colony --profile pygame \
+  --state-dir ~/foundry/state
 #    --profile pygame pins the gates: build = compileall, test = pytest, smoke =
 #    `python smoke.py` (the game must boot headless and survive 120 frames or the
 #    boundary routes back to fix). Drop --profile (or --profile auto) to let the
@@ -474,7 +417,7 @@ python -m foundry.cli "a stardew-style farming game about colonizing the moon" \
 #    economy → save/load — the model plans the ladder), fully unattended:
 python -m foundry.cli milestones \
   "a stardew-style farming game about colonizing the moon" \
-  --out ~/moon-colony --backend claude-cli --mode autonomous \
+  --out ~/moon-colony --backend claude-cli \
   --profile pygame --state-dir ~/foundry/state
 #    each milestone releases into ~/moon-colony/mNN and seeds the next; a kill
 #    resumes at the milestone it died in; the first red gate stops the ladder
@@ -495,16 +438,14 @@ cd ~/moon-colony/m05 && pip install pygame && python main.py
 2. Request: *a stardew-style farming game about colonizing the moon*. **Stack:
    auto** (the Architect picks the engine from your installed toolchains — or
    choose `pygame`/another explicitly). Backend **claude-cli** (the substrate
-   auto-flips to **claude-code**, the agentic coder on your Max plan). Packs:
-   **game** — in gated mode playability requires YOUR recorded sign-off; in
-   autonomous an AI playability expert judges the release instead. Mode
-   **gated**, Supervised on. **Autopilot: 5**.
+   auto-flips to **claude-code**, the agentic coder on your Max plan).
+   Supervised on. **Autopilot: 5**.
 3. Watch the floor: requirements → design checkpoints ask for your approve;
    the engineers build in sandboxes (each task sees the spec, the criteria,
    and its predecessors' code); the gate row shows **build / test / smoke**
    pills — smoke red means the game didn't survive its 120 headless frames,
    and the failure feeds the next fix attempt automatically.
-4. On green you sign off; then the panel's pick surfaces as an **AUTOPILOT
+4. On green, the panel's pick surfaces as an **AUTOPILOT
    PROPOSAL checkpoint** on the next release: *"save slots — retention (panel:
    staff_engineer=8, usability_designer=9, product_designer=7, qa_lead=8)"*,
    with the next-iteration request in an editable box. **Approve** builds it
@@ -516,9 +457,8 @@ cd ~/moon-colony/m05 && pip install pygame && python main.py
 5. Open **REPO** to browse or export the tree — or grab the zip and
    `python main.py`.
 
-Same flow with **mode autonomous + Supervised off**: no checkpoints, no
-sign-offs, the trust-root chain releases, and you come back to five stacked
-releases with the panel's reasoning recorded on each.
+Same flow with **Supervised off**: no checkpoints, and you come back to five
+stacked releases with the panel's reasoning recorded on each.
 
 ---
 
@@ -533,7 +473,7 @@ as any run), both stop fail-closed, and both resume after a kill via
 
 ```bash
 python -m foundry.cli milestones "stardew-style moon colony game" \
-  --out ~/game --backend claude-cli --mode autonomous --profile pygame \
+  --out ~/game --backend claude-cli --profile pygame \
   --state-dir ~/foundry/state
 ```
 
@@ -557,13 +497,12 @@ iteration's request, and amendments ride along as steering notes. If the panel
 declines everything, the loop STOPS and hands steering back to you — it never
 builds what the panel refused.
 
-**Who's in charge, per mode:** in `autonomous` mode both loops run with zero
-human contact (the trust-root chain releases; the panel's winner builds
-directly). In `gated`/supervised mode the AI still does all the work and
-drives the loop — the panel's pick first surfaces as a **proposal checkpoint**
-(approve / edit-the-request-then-approve / reject, with the same auto-approve
-timeout as every checkpoint so an absent human never stalls it), then the
-build's stage checkpoints and sign-offs surface as usual. Every iteration
+**Who's in charge:** from the CLI both loops run with zero human contact (the
+panel's winner builds directly). On a supervised Workshop floor the AI still
+does all the work and drives the loop — the panel's pick first surfaces as a
+**proposal checkpoint** (approve / edit-the-request-then-approve / reject, with
+the same auto-approve timeout as every checkpoint so an absent human never
+stalls it), then the build's stage checkpoints surface as usual. Every iteration
 lands as a release on the same Workshop floor with the panel's ballot
 recorded, so you can audit WHY each change was chosen. Human steering
 directives become pinned constraints on all future iterations (tighten-only).
@@ -574,7 +513,7 @@ release on the same floor automatically.
 
 ---
 
-## 9. Workshop UI
+## 7. Workshop UI
 
 A localhost web app that runs the real factory and visualizes it. Floors are
 projects; iterate to add releases; browse output and release history; approve,
@@ -615,7 +554,7 @@ export FOUNDRY_GATE_SANDBOX=inprocess
 
 ---
 
-## 10. Run it as a long-lived server
+## 8. Run it as a long-lived server
 
 The Workshop is built to run unattended for long, complex builds — including
 **multi-day runs** — and to **survive restarts**: with a durable state dir it
@@ -658,7 +597,7 @@ Pi's tmpfs/backup notes).
 
 ---
 
-## 11. Develop
+## 9. Develop
 
 ```bash
 pip install pytest pytest-xdist mypy ruff                # one-time: dev tooling
@@ -712,11 +651,10 @@ rm -rf .pytest_cache .mypy_cache .ruff_cache ./.run spec.md  # clean caches + ou
 
 | Flag | Values | Default |
 |---|---|---|
-| `--mode` | `assistant` · `gated` · `autonomous` | `assistant` |
+| `--mode` | `assistant` | `assistant` |
 | `--backend` | `claude-cli` · `anthropic` · `openai` · `codex` · `ollama-gemma` | set one (e.g. `claude-cli`) |
 | `--adapter` | `stub` · `raw-react` · `claude-code` | derived from `--backend` (`claude-cli` → `claude-code`; other real backends → `raw-react`) |
 | `--spec FILE\|DIR` | spec input (repeatable) | — |
-| `--packs a,b` | domain packs (`regulated` · `ml_data` · `frontend`) | — |
 | `--docs DIR` | generated doc-set output | — |
 | `--checkpoints` | `all` · `product,design,release` | off |
 | `--max-fix-attempts N` | gate fix-loop bound (N ≥ 1) | `2` |
@@ -725,7 +663,5 @@ rm -rf .pytest_cache .mypy_cache .ruff_cache ./.run spec.md  # clean caches + ou
 | `--token-cap N` / `FOUNDRY_TOKEN_CAP` | stop cleanly after N tokens (exit 3) | — |
 | `--out DIR` | output repo | — |
 | `--state-dir DIR` / `--thread-id NAME` | durable resume | in-memory / `cli-run` |
-
-**`evolve` subcommand:** `--apply DIR` · `--guardian-approve` · `--strict`
 
 Exit codes: `0` passed · `1` halted/failed · `2` usage error.

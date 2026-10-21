@@ -38,9 +38,6 @@ def test_read_repo_materializes_tree_from_the_store(tmp_path: Path) -> None:
     assert "build" in checks and "test" in checks
     # The FeatureDiff is surfaced as a 'pull request' with its unified-diff body.
     assert repo.diffs and all(d.text for d in repo.diffs)
-    # Sign-offs are surfaced too — a mock assistant build records none, so the
-    # channel is present but empty (gated/autonomous builds populate it).
-    assert repo.sign_offs == ()
     # file_bytes returns the exact materialized content.
     first = next(iter(paths))
     assert repo.file_bytes(first) is not None

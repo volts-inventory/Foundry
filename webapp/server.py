@@ -100,9 +100,6 @@ _AUTO_APPROVE_DELAY = 1.4  # auto-run: dwell on each checkpoint before approving
 _ACT_MIN_GAP = 2.0          # seconds between reported activities
 _ACT_MAX_PER_STEP = 40      # then one "still working" line and silence for that step
 
-_MODES = ("assistant", "gated", "autonomous")
-
-
 def _int_env(name: str, default: int) -> int:
     """A small non-negative int from the environment (blank/garbage -> default)."""
     try:
@@ -301,12 +298,11 @@ def _ideate_turn(backend: str, history: list[dict[str, str]]) -> dict[str, Any]:
 class Project:
     id: str
     request: str
-    mode: str
+    mode: str  # always "assistant" (the only release mode); kept for the catalog
     supervised: bool
     floor: int
     backend: str = "mock"
     adapter: str = "stub"  # coding substrate (see foundry.cli.ADAPTERS)
-    packs: list[str] = field(default_factory=list)
     spec: str | None = None  # literal spec text OR a dir of uploaded docs (run(spec=))
     spec_text: str = ""  # the literal spec (converse/paste), cataloged so an iterate inherits + extends it
     max_slots: int = 4  # IC-pool CEILING (= cli.AUTO_SLOTS_CAP); the system sizes
@@ -320,9 +316,8 @@ class Project:
     # Autopilot (lifecycle.autopilot): remaining self-iterations AFTER this build.
     # >0 and gates green ⇒ the Director proposes, the software/usability panel
     # votes (deterministic tally), and the winner is spawned as the next release
-    # with budget-1. The AI drives in EVERY mode: autonomous children run with no
-    # human contact; gated/supervised children keep their checkpoints + sign-offs
-    # surfacing to the human (auto-approve timeout keeps the loop moving). A panel
+    # with budget-1. Supervised children keep their checkpoints surfacing to the
+    # human (auto-approve timeout keeps the loop moving). A panel
     # DECLINE stops the loop fail-closed (human steering wanted).
     autopilot_budget: int = 0
     created_at: str = field(
@@ -409,21 +404,16 @@ _AREA_KEYWORDS: dict[str, tuple[str, ...]] = {
     "security": ("security", "encrypt", "compliance", "pii", "regulated", "audit",
                  "secret", "gdpr", "hipaa", "auth", "oauth"),
 }
-_PACK_AREA: dict[str, str] = {"frontend": "frontend", "regulated": "security", "ml_data": "data"}
 
 
-def _suggest_slots(request: str, packs: list[Any]) -> tuple[int, list[str]]:
-    """N = the distinct CANONICAL_AREAS the request + packs likely touch (>=1).
+def _suggest_slots(request: str) -> tuple[int, list[str]]:
+    """N = the distinct CANONICAL_AREAS the request likely touches (>=1).
     'backend' is the baseline area for any service build."""
     text = request.lower()
     hit = {"backend"}
     for area, kws in _AREA_KEYWORDS.items():
         if any(k in text for k in kws):
             hit.add(area)
-    for pk in packs:
-        pack_area = _PACK_AREA.get(str(pk).strip().lower())
-        if pack_area:
-            hit.add(pack_area)
     ordered = [a for a in CANONICAL_AREAS if a in hit]
     return max(1, min(len(ordered), len(CANONICAL_AREAS))), ordered
 _LOCK = threading.Lock()
@@ -490,7 +480,7 @@ def _load_persisted() -> None:
                 ob = row.get("out_base")
                 p = Project(
                     id=str(row["id"]), request=str(row.get("request", "")),
-                    mode=str(row.get("mode", "assistant")),
+                    mode="assistant",  # gated/autonomous rows from old builds resume as assistant
                     supervised=bool(row.get("supervised", True)),
                     floor=int(row.get("floor", 0)),
                     release_seq=int(row.get("release_seq", 1) or 1),
@@ -634,22 +624,12 @@ def _build_summary(pid: str) -> str:
     return "## What the last build actually produced\n\n" + "\n".join(f"- {ln}" for ln in lines)
 
 
-def _sign_offs_payload(repo: "Repo | None") -> list[dict[str, Any]]:
-    """The repo's recorded sign-offs as JSON rows (empty for an assistant build)."""
-    return [
-        {"point": s.point, "approver": s.approver, "role": s.role,
-         "approved": s.approved, "provenance": s.provenance,
-         "state_sha": s.state_sha, "evidence_hash": s.evidence_hash, "note": s.note}
-        for s in (repo.sign_offs if repo else ())
-    ]
-
-
 def _evidence_files(pid: str) -> dict[str, bytes]:
-    """The evidence sidecar for a build's export: gate verdicts + recorded
-    sign-offs, as a machine-readable ``.foundry/evidence.json`` and a readable
-    ``EVIDENCE.md``. Returns ``{}`` when there is nothing to attest yet.
+    """The evidence sidecar for a build's export: the gate verdicts, as a
+    machine-readable ``.foundry/evidence.json`` and a readable ``EVIDENCE.md``.
+    Returns ``{}`` when there is nothing to attest yet.
 
-    This is an EXPORT-time sidecar — built from the attested gate/sign-off records
+    This is an EXPORT-time sidecar — built from the attested gate records
     as-is and added ALONGSIDE the materialized tree, never mixed into it, so the
     bytes the gates ran against are unchanged."""
     repo = _read_repo_cached(pid)
@@ -663,8 +643,7 @@ def _evidence_files(pid: str) -> dict[str, bytes]:
           "advisory": bool(g.get("advisory")), "findings": []}
          for n, g in (p.gates.items() if p else [])]
     )
-    sign_offs = _sign_offs_payload(repo)
-    if not checks and not sign_offs:
+    if not checks:
         return {}
     doc = {
         "build_id": pid,
@@ -674,7 +653,6 @@ def _evidence_files(pid: str) -> dict[str, bytes]:
         "passed": bool(p.passed) if p else None,
         "tree_sha": repo.tree_sha if repo else None,
         "gates": checks,
-        "sign_offs": sign_offs,
     }
     md = _evidence_markdown(doc)
     return {
@@ -686,7 +664,7 @@ def _evidence_files(pid: str) -> dict[str, bytes]:
 def _evidence_markdown(doc: dict[str, Any]) -> str:
     """A human-readable rendering of the evidence doc for ``EVIDENCE.md``."""
     lines = [
-        "# Evidence pack",
+        "# Evidence",
         "",
         f"- **Build**: `{doc['build_id']}`",
         f"- **Request**: {doc.get('request') or '(none)'}",
@@ -707,18 +685,6 @@ def _evidence_markdown(doc: dict[str, Any]) -> str:
                 lines.append(f"    - {f}")
     else:
         lines.append("- _(no gate verdicts recorded)_")
-    lines += ["", "## Sign-offs", ""]
-    if doc["sign_offs"]:
-        for s in doc["sign_offs"]:
-            mark = "✓" if s["approved"] else "✗"
-            who = " · ".join(x for x in (s.get("approver"), s.get("role")) if x) or "(unnamed)"
-            lines.append(f"- {mark} **{s['point']}** — {who} _(provenance: {s.get('provenance') or 'n/a'})_")
-            if s.get("evidence_hash"):
-                lines.append(f"    - evidence hash: `{s['evidence_hash']}`")
-            if s.get("note"):
-                lines.append(f"    - note: {s['note']}")
-    else:
-        lines.append("- _(no human sign-offs — assistant mode, or none recorded)_")
     lines.append("")
     return "\n".join(lines)
 
@@ -1038,87 +1004,6 @@ def _summarize_stage(p: "Project", payload: dict[str, Any]) -> dict[str, Any] | 
     return {"stage": stage, "agents": agents} if (stage or agents) else None
 
 
-_ADVISOR_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "verdict": {"type": "string", "enum": ["approve", "request-changes"]},
-        "findings": {"type": "array", "items": {"type": "string"}, "maxItems": 4},
-    },
-    "required": ["verdict"],
-    "additionalProperties": False,
-}
-
-_ADVISOR_SOP = (
-    "You are a domain-expert reviewer advising a human release approver. You are "
-    "given a DOMAIN RUBRIC and the release evidence. Review STRICTLY against the "
-    "rubric and reply with JSON only: verdict 'approve' or 'request-changes', "
-    "plus up to 4 short findings the human should look at."
-)
-
-
-def _advisory_judgments(p: Project, payload: dict[str, Any], boundary: str) -> list[dict[str, Any]]:
-    """The gated-mode counterpart of the autonomous AI judge (ADVISORY, fail-soft).
-
-    At the RELEASE checkpoint, run each engaged pack's judgment rubric through
-    the backend and return [{domain, verdict, findings}] for the approval dialog
-    — the same expert panel that would decide an autonomous release, informing
-    (never replacing) the human's sign-off. Advisory only: any failure returns
-    what it has; the checkpoint proceeds regardless."""
-    if boundary != "release" or p.backend == "mock" or not p.packs:
-        return []
-    try:
-        from foundry.cli import _build_pack_registry, _build_proxy
-
-        registry, caps = _build_pack_registry(list(p.packs))
-        # Rubrics are declared on the AUTONOMOUS view (that's where the AI fills
-        # the judgment slot); compose that view to EXTRACT them for advisory use.
-        view = {"required_capabilities": sorted(caps), "mode": "autonomous"}
-        rubrics = dict(registry.compose(view).ai_judge.rubrics)
-        if not rubrics:
-            return []
-        _emit(p, type="narrate",
-              text="🧑‍⚖️ AI experts reviewing the release before your sign-off…")
-        proxy = _build_proxy(p.backend)
-        gates = payload.get("gates") or ()
-        gate_lines = "\n".join(
-            f"- {g.get('name', '?')}: {g.get('status', '?')}" for g in gates
-            if isinstance(g, dict)
-        ) or "(none recorded on this payload)"
-        arts = payload.get("artifacts") or ()
-        kinds: dict[str, int] = {}
-        for a in arts:
-            if isinstance(a, dict):
-                kinds[str(a.get("kind", "?"))] = kinds.get(str(a.get("kind", "?")), 0) + 1
-        evidence = (
-            f"REQUEST: {p.request[:800]}\nGATES:\n{gate_lines}\n"
-            f"ARTIFACTS: {', '.join(f'{k}×{n}' for k, n in sorted(kinds.items())) or '(none)'}"
-        )
-        out: list[dict[str, Any]] = []
-        for domain in sorted(rubrics):
-            try:
-                result = proxy.complete(
-                    "release_advisor", "T2", _ADVISOR_SOP,
-                    [{"role": "user",
-                      "content": (f"DOMAIN: {domain}\nRUBRIC:\n{rubrics[domain]}\n\n"
-                                  f"RELEASE EVIDENCE:\n{evidence}\n\nAdvise the approver.")}],
-                    purpose="ideation", schema=_ADVISOR_SCHEMA,
-                )
-                parsed = result.parsed if isinstance(result.parsed, dict) else {}
-                verdict = str(parsed.get("verdict") or "request-changes")
-                findings = [str(f)[:200] for f in (parsed.get("findings") or [])][:4]
-            except Exception as exc:
-                verdict, findings = "unavailable", [f"advisor error: {exc}"][:1]
-            out.append({"domain": domain, "verdict": verdict, "findings": findings})
-            icon = "✅" if verdict == "approve" else ("⚠️" if verdict == "request-changes" else "❔")
-            _emit(p, type="narrate",
-                  text=f"🧑‍⚖️ {domain}: {icon} {verdict.upper()}"
-                       + (f" — {findings[0]}" if findings else ""))
-        return out
-    except Exception as exc:
-        print(f"[advisors] floor {p.floor}: advisory panel failed: {exc}")
-        return []
-
-
 _RL_HOOKED = [False]
 
 
@@ -1224,24 +1109,6 @@ def _checkpoint_spend(p: Project) -> dict[str, Any]:
     if p.cost_cap_microusd:
         spend["cap_usd"] = round(p.cost_cap_microusd / 1_000_000, 2)
     return spend
-
-
-def _advisor_note(p: Project, boundary: str, advisors: list[dict[str, Any]]) -> str:
-    """Why the expert panel is absent, when it is.
-
-    An empty panel used to render as nothing at all, which reads exactly like "every
-    advisor approved". Naming the reason keeps silence from looking like consent."""
-    if advisors:
-        return ""
-    if boundary != "release":
-        return ("No expert panel at this checkpoint — the panel reviews release "
-                "evidence only.")
-    if p.backend == "mock":
-        return "No expert panel — the mock backend can't convene advisors."
-    if not p.packs:
-        return "No expert panel — no domain packs are engaged for this build."
-    return ("The expert panel returned no verdict (advisory only — the gates still "
-            "decide).")
 
 
 def _gated_runner(runner, p: Project, **kwargs: Any) -> None:
@@ -1382,10 +1249,6 @@ def _run_factory(p: Project, resume: bool = False) -> None:
             ]
         boundary = str(payload.get("boundary", "stage"))
         if p.supervised:
-            # GATED gets the same AI experts autonomous does — but ADVISORY: they
-            # review the release evidence BEFORE the human's checkpoint and their
-            # verdicts ride into the approval dialog. The human stays the judge.
-            advisors = _advisory_judgments(p, payload, boundary)
             with p.cond:
                 p.checkpoint_seq += 1
                 cidx = p.checkpoint_seq
@@ -1394,9 +1257,7 @@ def _run_factory(p: Project, resume: bool = False) -> None:
             # `checkpoint` lets any device's decision name WHICH pause it answers,
             # so a stale/duplicate click can't leak into the next checkpoint.
             _emit(p, type="await_decision", boundary=boundary, checkpoint=cidx,
-                  journal=p.journal, advisors=advisors,
-                  advisors_note=_advisor_note(p, boundary, advisors),
-                  spend=_checkpoint_spend(p))
+                  journal=p.journal, spend=_checkpoint_spend(p))
             decision = _await_decision(p, cidx)
             # The next pause measures from THIS one (the stage the human just judged
             # is closed), whichever way they decided.
@@ -1508,7 +1369,6 @@ def _run_factory(p: Project, resume: bool = False) -> None:
                 mode=p.mode,
                 backend=p.backend,            # real backend per project (not always mock)
                 adapter=p.adapter,            # coding substrate (stub/raw-react)
-                packs=p.packs or None,        # optional domain packs (regulated/ml_data/frontend)
                 spec=run_spec,                # pasted spec text OR uploaded docs dir (additive)
                 max_slots=p.max_slots,        # IC-pool parallelism (Wave C) + budget tree (Wave D)
                 cost_cap_microusd=p.cost_cap_microusd,
@@ -1635,8 +1495,7 @@ def _maybe_autopilot_next(p: Project) -> None:
 
     Runs in its own thread (the build thread is done); a panel DECLINE or any
     ideation failure stops the loop fail-closed — nothing is built that the
-    panel did not choose. The child inherits mode/supervision: autonomous keeps
-    zero human contact; gated keeps its checkpoints + sign-offs."""
+    panel did not choose. The child inherits supervision (its checkpoints)."""
     if not (p.passed and p.autopilot_budget > 0):
         return
 
@@ -1670,7 +1529,7 @@ def _maybe_autopilot_next(p: Project) -> None:
         )
         proposal = None
         if p.supervised:
-            # Gated/supervised: the IDEA itself is a checkpoint (approve /
+            # Supervised: the IDEA itself is a checkpoint (approve /
             # edit-then-approve / reject) BEFORE any model spend on the build.
             proposal = {
                 "title": w.title, "rationale": w.rationale, "scope": w.scope,
@@ -1715,8 +1574,8 @@ def _spawn_iteration(
 ) -> Project:
     """Create + start the next release on the parent's floor (the same shape the
     POST /api/projects iterate path builds): spec inherited, base tree overlaid
-    from the parent's CAS lineage inside _run_factory, mode/supervision inherited
-    so autonomous stays hands-off and gated keeps its human checkpoints.
+    from the parent's CAS lineage inside _run_factory, supervision inherited so
+    the human checkpoints carry over.
 
     ``proposal`` (supervised floors): the build FIRST pauses on a PROPOSAL
     checkpoint — the panel's chosen idea surfaces as approve / edit-then-approve
@@ -1730,7 +1589,7 @@ def _spawn_iteration(
     p = Project(
         id=pid, request=request, mode=parent.mode, supervised=parent.supervised,
         floor=parent.floor, release_seq=release_seq, backend=parent.backend,
-        adapter=parent.adapter, packs=list(parent.packs),
+        adapter=parent.adapter,
         spec=parent.spec_text or None, spec_text=parent.spec_text,
         out_base=_OUTPUT_ROOT / f"floor-{parent.floor}" / f"r{release_seq}",
         max_slots=parent.max_slots, cost_cap_microusd=parent.cost_cap_microusd,
@@ -1800,7 +1659,7 @@ def _spawn_milestone_next(parent: Project) -> Project:
         request=f"{parent.milestone_root} — MILESTONE {i}/{len(plan)}: {plan[i - 1]}",
         mode=parent.mode, supervised=parent.supervised,
         floor=parent.floor, release_seq=release_seq, backend=parent.backend,
-        adapter=parent.adapter, packs=list(parent.packs),
+        adapter=parent.adapter,
         spec=parent.spec_text or None, spec_text=parent.spec_text,
         out_base=_OUTPUT_ROOT / f"floor-{parent.floor}" / f"r{release_seq}",
         max_slots=parent.max_slots, cost_cap_microusd=parent.cost_cap_microusd,
@@ -1862,8 +1721,7 @@ def _proposal_approved(p: Project, proposal: dict[str, Any]) -> bool:
     return True
 
 
-_STAGE_ORDER = ["planning", "implementing", "testing & review", "security review",
-                "verifying at the gate"]
+_STAGE_ORDER = ["planning", "implementing", "testing & review", "verifying at the gate"]
 
 
 def _node_stage(node: str) -> str | None:
@@ -1873,12 +1731,10 @@ def _node_stage(node: str) -> str | None:
     if any(k in n for k in ("planner", "stakeholder", "product", "criteria", "program",
                             "architect")):
         return "planning"
-    if ("engineer" in n and "appsec" not in n) or n == "fixer":
+    if "engineer" in n or n == "fixer":
         return "implementing"
     if any(k in n for k in ("qa", "sdet", "reviewer", "writer", "tester")):
         return "testing & review"
-    if any(k in n for k in ("appsec", "audit", "supply", "security")):
-        return "security review"
     if "gate" in n:
         return "verifying at the gate"
     return None
@@ -2376,7 +2232,7 @@ class Handler(BaseHTTPRequestHandler):
                 for n, g in (p.gates.items() if p else [])
             ]
             self._json(200, {"source": "disk", "tree_sha": None, "files": files,
-                             "checks": checks, "diffs": [], "sign_offs": []})
+                             "checks": checks, "diffs": []})
             return
         files = [{"path": p, "size": len(b)} for p, b in sorted((tree or {}).items())]
         checks = [
@@ -2390,8 +2246,7 @@ class Handler(BaseHTTPRequestHandler):
         ]
         self._json(200, {"source": "store",
                          "tree_sha": repo.tree_sha if repo else None,
-                         "files": files, "checks": checks, "diffs": diffs,
-                         "sign_offs": _sign_offs_payload(repo)})
+                         "files": files, "checks": checks, "diffs": diffs})
 
     def _resolve_within(self, base: Path, rel: str) -> Path | None:
         """Resolve ``rel`` under ``base``, fail-closed on traversal/symlink escape."""
@@ -2450,7 +2305,7 @@ class Handler(BaseHTTPRequestHandler):
                 for f in sorted(base.rglob("*")) if f.is_file()
             }
             name = base.name
-        # Export-time sidecar: ship the attested gate verdicts + recorded sign-offs
+        # Export-time sidecar: ship the attested gate verdicts
         # alongside the tree (a sibling .foundry/evidence.json + EVIDENCE.md), never
         # mixed INTO the materialized tree the gates ran against.
         tree = {**tree, **_evidence_files(pid)}
@@ -2636,13 +2491,12 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, {"floor": floor, "releases": rels})
 
     def _suggest_slots(self) -> None:
-        """Suggest an IC-pool size N from the request + packs — count the distinct
+        """Suggest an IC-pool size N from the request — count the distinct
         CANONICAL_AREAS the work is likely to touch (one IC per area). Advisory: the
         real area split is derived during the build (Wave A); this just seeds the UI."""
         body = self._read_json()
         request = str(body.get("request", ""))
-        packs = body.get("packs") or []
-        n, areas = _suggest_slots(request, packs if isinstance(packs, list) else [])
+        n, areas = _suggest_slots(request)
         self._json(200, {"slots": n, "areas": areas})
 
     def _interview(self, pid: str) -> None:
@@ -2752,13 +2606,6 @@ class Handler(BaseHTTPRequestHandler):
 
         body = self._read_json()
         request = str(body.get("request", "")).strip() or "build a tiny URL-shortener service"
-        # The Workshop offers only gated / autonomous (both approve in the floor
-        # screen — no external Git merge). `assistant` stays a valid ENGINE/CLI mode
-        # for back-compat, but a UI build defaults to gated and never silently runs
-        # the advisory-PR posture.
-        mode = str(body.get("mode", "gated"))
-        if mode not in _MODES:
-            mode = "gated"
         backend = str(body.get("backend", "mock"))
         if backend not in BACKENDS:
             backend = "mock"
@@ -2768,10 +2615,6 @@ class Handler(BaseHTTPRequestHandler):
         adapter = str(body.get("adapter", "")).strip()
         if adapter not in ADAPTERS:
             adapter = _default_adapter_for(backend)
-        raw_packs = body.get("packs", [])
-        if isinstance(raw_packs, str):
-            raw_packs = raw_packs.replace(",", " ").split()
-        packs = [str(p).strip() for p in raw_packs if str(p).strip()]
         supervised = bool(body.get("supervised", True))
         spec_text = str(body.get("spec_text", "")).strip()
         spec_zip_b64 = body.get("spec_zip_b64")
@@ -2849,14 +2692,13 @@ class Handler(BaseHTTPRequestHandler):
             if pcode.is_dir():
                 base_dir = str(pcode)        # seed the base tree with the prior code
         # Autopilot budget: how many SELF-ITERATIONS follow this build (0 = off).
-        # The AI drives in every mode; gated keeps its human checkpoints.
         try:
             autopilot_budget = max(0, min(20, int(body.get("autopilot", 0) or 0)))
         except (TypeError, ValueError):
             autopilot_budget = 0
         p = Project(
-            id=pid, request=request, mode=mode, supervised=supervised, floor=floor,
-            release_seq=release_seq, backend=backend, adapter=adapter, packs=packs, spec=spec,
+            id=pid, request=request, mode="assistant", supervised=supervised, floor=floor,
+            release_seq=release_seq, backend=backend, adapter=adapter, spec=spec,
             spec_text=effective_spec_text,
             out_base=out_base, max_slots=max_slots, cost_cap_microusd=cost_cap_microusd,
             max_fix_attempts=max_fix_attempts, parent_id=parent_id, base_dir=base_dir,

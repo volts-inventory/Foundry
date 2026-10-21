@@ -2,8 +2,8 @@
 
 An approval dialog that shows only a title and one sentence asks for a decision
 without the facts behind it. These cover the context the server assembles for that
-dialog: why an expert panel is ABSENT (silence must not read as consent), and the
-advisory cost/elapsed meter for the work the human is being asked to judge.
+dialog: the advisory cost/elapsed meter for the work the human is being asked to
+judge.
 
 All of it is display-only — nothing here is read back into a build, and a broken
 meter degrades to zeroes rather than blocking a pause.
@@ -16,7 +16,7 @@ import time
 import pytest
 
 from webapp import server
-from webapp.server import Project, _advisor_note, _checkpoint_spend
+from webapp.server import Project, _checkpoint_spend
 
 
 @pytest.fixture(autouse=True)
@@ -29,31 +29,11 @@ def clean_meter(monkeypatch):
 
 
 def _project(**kw):
-    return Project(id="p1", request="r", mode="gated", supervised=True, floor=1, **kw)
+    return Project(id="p1", request="r", mode="assistant", supervised=True, floor=1, **kw)
 
 
 def _meter(calls=0, tokens=0):
     server._USAGE.update({"calls": calls, "input": tokens, "output": 0, "cache_read": 0})
-
-
-# --- why the expert panel is missing ----------------------------------------- #
-
-def test_absent_panel_always_says_why() -> None:
-    # An empty advisor list rendered as nothing at all, which reads exactly like
-    # "every advisor approved". Each reason is named instead.
-    p = _project(backend="claude-cli", packs=["game"])
-    assert "release evidence only" in _advisor_note(p, "design", [])
-    assert "mock backend" in _advisor_note(_project(backend="mock", packs=["game"]),
-                                           "release", [])
-    assert "no domain packs" in _advisor_note(_project(backend="claude-cli"),
-                                              "release", [])
-    # Panel ran and returned nothing -> that is its own (different) reason.
-    assert "no verdict" in _advisor_note(p, "release", [])
-
-
-def test_a_panel_that_ran_needs_no_note() -> None:
-    p = _project(backend="claude-cli", packs=["game"])
-    assert _advisor_note(p, "release", [{"domain": "game", "verdict": "approve"}]) == ""
 
 
 # --- the advisory cost / elapsed meter ---------------------------------------- #

@@ -167,13 +167,6 @@ matches the true record.</textarea>
             <p class="hint" id="model-note"></p>
           </div>
           <div class="field">
-            <label for="mode-select">Mode</label>
-            <select id="mode-select">
-              <option value="gated">gated — CTO signs off in the floor screen + evidence pack</option>
-              <option value="autonomous">autonomous — build · admit · deploy</option>
-            </select>
-          </div>
-          <div class="field">
             <label for="build-select">Build as</label>
             <select id="build-select">
               <option value="milestones" selected>milestone ladder — releasable increments (best for big specs)</option>
@@ -246,10 +239,6 @@ single-server additive-homomorphic (Paillier) variant + the demo runner</textare
           <p class="hint" id="parallel-note">The ceiling on how many implementation workers run
             at once — the leads share this pool by demand. Effective parallelism is
             min(tasks created, this cap); each discipline still gets at least one.</p>
-          <div class="field">
-            <label for="packs-input">Domain packs (optional, comma-separated)</label>
-            <input id="packs-input" type="text" placeholder="regulated, ml_data, frontend, game, crypto, infra" />
-          </div>
           <label class="check"><input type="checkbox" id="supervised" checked /> Supervised (CTO approves each checkpoint)</label>
           <p class="hint" id="supervised-hint"></p>
           <p class="hint">A multi-service request (e.g. a site with users + posts) is auto-built as a PLATFORM — split into web / backend / data services (the backend owns the REST API, auth &amp; domain logic), each auto-deepened, then stitched into one monorepo. A single thing builds as one service.</p>
@@ -289,7 +278,7 @@ single-server additive-homomorphic (Paillier) variant + the demo runner</textare
       <h2 id="cp-title">CHECKPOINT</h2>
       <p id="cp-summary"></p>
       <!-- Evidence for the decision, most decisive first: what the gates say, what
-           the agents flagged, what actually landed, what the advisors think. -->
+           the agents flagged, what actually landed. -->
       <div id="cp-meta" class="cp-meta"></div>
       <div id="cp-gates" class="cp-gates hidden"></div>
       <div id="cp-flags" class="cp-flags hidden"></div>
@@ -297,8 +286,6 @@ single-server additive-homomorphic (Paillier) variant + the demo runner</textare
         <summary>What landed this stage <span id="cp-arts-count" class="hint"></span></summary>
         <div id="cp-arts" class="cp-arts"></div>
       </details>
-      <div id="cp-advisors" class="cp-advisors hidden"></div>
-      <p id="cp-adv-note" class="cp-note hidden"></p>
       <p class="cp-note">An approve only lets the build reach the gates — it can never ship a failing build. Request changes to send the work back for another pass.</p>
       <div id="cp-edit-wrap" class="hidden">
         <label>Next-iteration request <span class="hint">— edit before approving; REQUEST CHANGES builds YOUR text instead of the panel's</span></label>
@@ -354,7 +341,6 @@ single-server additive-homomorphic (Paillier) variant + the demo runner</textare
         <button class="repo-tab sel" data-tab="code">⊞ Code</button>
         <button class="repo-tab" data-tab="checks">✓ Checks <span id="checks-count" class="tab-count"></span></button>
         <button class="repo-tab" data-tab="pulls">⇄ Pull requests <span id="pulls-count" class="tab-count"></span></button>
-        <button class="repo-tab" data-tab="signoffs">✍ Sign-offs <span id="signoffs-count" class="tab-count"></span></button>
       </div>
       <div class="repo-pane" data-pane="code">
         <nav id="files-crumb" class="files-crumb"></nav>
@@ -368,12 +354,6 @@ single-server additive-homomorphic (Paillier) variant + the demo runner</textare
       </div>
       <div class="repo-pane hidden" data-pane="pulls">
         <div id="pulls-list" class="pulls-list"></div>
-      </div>
-      <div class="repo-pane hidden" data-pane="signoffs">
-        <p class="cp-note">Recorded CTO approvals (Design / Release), signed off right
-          here in the floor screen — never in Git. Exported with the build as
-          <code>.foundry/evidence.json</code> + <code>EVIDENCE.md</code>.</p>
-        <ul id="signoffs-list" class="checks-list"></ul>
       </div>
       <div class="dialog-actions">
         <a id="files-zip" class="btn-link" href="#" download>⭳ Export .zip</a>

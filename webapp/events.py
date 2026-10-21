@@ -16,13 +16,12 @@ from typing import Any
 
 # Workshop rooms, left -> right (the agent walks the floor as the build advances).
 # Engineering is virtual here: its three lanes (frontend/backend/data) are rooms of
-# their own on the floor. The cast is Planner / Engineers / Reviewer (+ the gated-mode
-# security trio); the gate and vault are infrastructure.
+# their own on the floor. The cast is Planner / Engineers / Reviewer; the gate and
+# vault are infrastructure.
 ROOMS: tuple[str, ...] = (
     "plan",
     "engineering",
     "review",
-    "security",
     "gate",
     "vault",
 )
@@ -32,6 +31,7 @@ LEGACY_ROOM: dict[str, str] = {
     "product": "plan",
     "architecture": "plan",
     "qa": "review",
+    "security": "review",
 }
 
 # Which room + sprite a journal node_id belongs to. Labels are the floor's sprite keys.
@@ -58,10 +58,11 @@ AGENT_BY_NODE: dict[str, tuple[str, str]] = {
     "reviewer": ("Reviewer", "review"),
     "qa_engineer": ("Reviewer", "review"),
     "sdet": ("Reviewer", "review"),
+    # The removed assurance crew: old ids seat the Reviewer on replay.
     "reviewer_critic": ("Reviewer", "review"),
-    "appsec_engineer": ("AppSec Engineer", "security"),
-    "audit_compliance": ("Audit & Compliance", "security"),
-    "supply_chain_reviewer": ("Supply-chain Reviewer", "security"),
+    "appsec_engineer": ("Reviewer", "review"),
+    "audit_compliance": ("Reviewer", "review"),
+    "supply_chain_reviewer": ("Reviewer", "review"),
 }
 
 # Which agent/room PRODUCED each artifact kind (so a new artifact lights up a desk).
@@ -81,9 +82,10 @@ ARTIFACT_ORIGIN: dict[str, tuple[str, str]] = {
     "oracle_binding": ("Reviewer", "review"),
     "test_report": ("Reviewer", "review"),
     "e2e_report": ("Reviewer", "review"),
-    "threat_model": ("AppSec Engineer", "security"),
-    "audit_finding": ("Audit & Compliance", "security"),
-    "supply_chain_report": ("Supply-chain Reviewer", "security"),
+    # Assurance artifacts from old builds' replayed telemetry.
+    "threat_model": ("Reviewer", "review"),
+    "audit_finding": ("Reviewer", "review"),
+    "supply_chain_report": ("Reviewer", "review"),
     "runbook": ("Reviewer", "review"),
     "known_issues": ("Reviewer", "review"),
     "upgrade_guide": ("Reviewer", "review"),
@@ -121,7 +123,7 @@ _BOUNDARY_ROOM: dict[str, str] = {
     "release": "review",
 }
 # Subgraph SCOPE -> room, for a node inside a stage that isn't a named agent. Without
-# the implementation/quality/assurance entries those steps resolved to no room at all
+# the implementation/quality entries those steps resolved to no room at all
 # and vanished from the floor AND the log.
 _SCOPE_ROOM: dict[str, str] = {
     **_BOUNDARY_ROOM,
@@ -129,7 +131,7 @@ _SCOPE_ROOM: dict[str, str] = {
     "planning": "plan",
     "implementation": "engineering",
     "quality": "review",
-    "assurance": "security",
+    "assurance": "review",  # old builds' replayed telemetry
 }
 
 
@@ -156,29 +158,21 @@ def _room_for_scope(scope: str) -> str:
 # pass/fail verdict, so announcing the finish twice would just be noise.
 _INFRA_NODE: dict[str, tuple[str, str, str | None]] = {
     "triage": ("plan", "sorting the request into a build plan", "build plan ready"),
-    # gate runners (top-level + inside the assurance/quality subgraphs)
+    # gate runners
     "spec_gate": ("gate", "running the SPEC gate", None),
     "build_gate": ("gate", "running the BUILD gate", None),
     "test_gate": ("gate", "running the TEST gate", None),
     "smoke_gate": ("gate", "running the SMOKE gate", None),
     "build_test_gate": ("gate", "running the BUILD / TEST gates", None),
-    "assurance_gate": ("gate", "running the ASSURANCE gates", None),
     "review": ("gate", "running the REVIEW gate", None),
-    "security_gate": ("gate", "running the SECURITY gate", None),
-    "audit_gate": ("gate", "running the AUDIT gate", None),
-    "supply_chain_gate": ("gate", "running the SUPPLY-CHAIN gate", None),
     # fix-forward retries: the longest silences in a real build — each is a full
     # agentic pass over the failing tree
     "spec_fix": ("plan", "fix-forward — reworking the spec after a gate failure",
                  "spec rework finished"),
     "build_test_fix": ("engineering", "fix-forward — rebuilding after a gate failure",
                        "rebuild finished"),
-    "assurance_fix": ("engineering", "fix-forward — clearing the assurance findings",
-                      "assurance fixes finished"),
-    # the doc pass + the evidence packs behind each sign-off
+    # the doc pass
     "docs": ("review", "writing the runbook & release docs", "docs written"),
-    "design_sign_off": ("gate", "assembling the design evidence", None),
-    "release_sign_off": ("gate", "assembling the release evidence", None),
 }
 # Conditional-architecture agents that have no sprite on the floor — they still get a
 # step line so the log doesn't skip them. (agent name, room, running, done)
@@ -259,9 +253,6 @@ _NODE_SUMMARY: dict[str, str] = {
     "qa_engineer": "ran the test plan",
     "sdet": "ran the end-to-end checks",
     "reviewer_critic": "reviewed the change",
-    "appsec_engineer": "built the threat model",
-    "audit_compliance": "checked audit & compliance",
-    "supply_chain_reviewer": "reviewed the supply chain",
 }
 
 

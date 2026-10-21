@@ -37,17 +37,17 @@ function cellBox(c,r){ const x = GX0 + c*(CELL_W+AISLE), y = GY0 + r*(CELL_H+AIS
   return {x, y, w:CELL_W, h:CELL_H, x0:x, y0:y, x1:x+CELL_W, y1:y+CELL_H, cx:x+CELL_W/2, cy:y+CELL_H/2}; }
 // Both plans read pipeline-order left-to-right, top-to-bottom, keep the GATE directly
 // above the VAULT (the vault's only opening is a top gap punched at the gate's centre,
-// and buildGate seals the one-aisle corridor between them), and give the vault two
-// cells so the prize room spans a full row-end.
+// and buildGate seals the one-aisle corridor between them), and give the vault and
+// the review room two cells each.
 const PLANS = {
   // 4 across × 3 down — the desktop floor, unchanged.
   landscape: {
     W:1280, H:840, cols:4, rows:3,
     grid:{ plan:[0,0], frontend:[1,0], backend:[2,0], data:[3,0],
-           review:[0,1], security:[1,1], gate:[2,1],
+           review:[0,1], gate:[2,1],      // review spans (0..1,1)
            vault:[2,2],                   // gate(2,1) sits directly above vault(2..3,2)
            office:[0,2] },                // the CTO's own office (row 2, far left)
-    vaultSpan:[[2,2],[3,2]],
+    spans:{ vault:[[2,2],[3,2]], review:[[0,1],[1,1]] },
     lounge:[1,2],
   },
   // 3 across × 4 down — the portrait phone floor. Same cells, taller stack, so a
@@ -56,16 +56,16 @@ const PLANS = {
     W:970, H:1070, cols:3, rows:4,
     grid:{ plan:[0,0], office:[2,0],
            frontend:[0,1], backend:[1,1], data:[2,1],
-           review:[0,2], security:[1,2], gate:[2,2],
+           review:[0,2], gate:[2,2],      // review spans (0..1,2)
            vault:[2,3] },                 // gate(2,2) sits directly above vault(1..2,3)
-    vaultSpan:[[1,3],[2,3]],
+    spans:{ vault:[[1,3],[2,3]], review:[[0,2],[1,2]] },
     lounge:[0,3],
   },
 };
 let PLAN = null;
 let GRID, LOUNGE_CELL, ENTRANCE_CELL;
 // Pipeline ORDER (the build sequence) — drives the order numerals + the flow path.
-const PIPELINE_ORDER = ["plan","frontend","backend","data","review","security","gate","vault"];
+const PIPELINE_ORDER = ["plan","frontend","backend","data","review","gate","vault"];
 // The CTO OFFICE is a real room (see each plan's grid); the LOUNGE cell is the
 // RECEPTION. No pipeline work happens in either — and nobody is ever SENT to the
 // lounge: every agent lives at their own desk (see "presence" below), so it's the
@@ -77,17 +77,16 @@ const RBASE = {
   plan:{label:"PLAN",color:0x2e3b5a},
   frontend:{label:"FRONTEND",color:0x243f5a}, backend:{label:"BACKEND",color:0x5a4524},
   data:{label:"DATA",color:0x245a42}, review:{label:"REVIEW",color:0x2e5a4a},
-  security:{label:"SECURITY",color:0x5a2e36},
   gate:{label:"GATE",color:0x2c4a55}, vault:{label:"VAULT",color:0x5a4a18},
   office:{label:"CTO OFFICE",color:0x4a4030},   // the CTO's room (opens on the RIGHT wall)
 };
 // Build-order numeral per room (engineering's 3 rooms share stage 3 — they run in
 // parallel; support rooms have none).
 const ORDER_NO = {plan:1, frontend:2, backend:2, data:2,
-                  review:3, security:4, gate:5, vault:6};
+                  review:3, gate:4, vault:5};
 const ROOMS = {};
-const ROOM_ORDER = ["plan","frontend","backend","data","review","security","gate","vault"];
-const TINT = {security:[0xff6d6d,0.05], gate:[0x6aa0ff,0.05], vault:[0xffd25a,0.06]};
+const ROOM_ORDER = ["plan","frontend","backend","data","review","gate","vault"];
+const TINT = {gate:[0x6aa0ff,0.05], vault:[0xffd25a,0.06]};
 // the "#": centre-lines of the walkway aisles between columns / rows (generated).
 // corridorRoute() walks these, so the counts must match the plan's cols/rows.
 const AISLE_VX = [], AISLE_HY = [];
@@ -114,10 +113,11 @@ function applyFloorplan(force){
     const x0=Math.min(...rs.map(r=>r.x)), y0=Math.min(...rs.map(r=>r.y));
     const x1=Math.max(...rs.map(r=>r.x+r.w)), y1=Math.max(...rs.map(r=>r.y+r.h));
     ROOMS.engineering = {label:"ENGINEERING", color:0x5a3a2e, virtual:true, x:x0, y:y0, w:x1-x0, h:y1-y0}; }
-  // The VAULT is the shipped-artifact destination — give it prominence by spanning two
-  // cells (fills the row end with REAL content; it's the prize room, not filler).
-  { const [ca, cb] = PLAN.vaultSpan, a = cellBox(ca[0],ca[1]), b = cellBox(cb[0],cb[1]);
-    Object.assign(ROOMS.vault, {x:a.x, y:a.y, w:(b.x + b.w) - a.x, h:a.h}); }
+  // Two-cell rooms: the VAULT (the shipped-artifact destination) fills a row end, and
+  // REVIEW takes the cell beside it.
+  for (const [key, [ca, cb]] of Object.entries(PLAN.spans)){
+    const a = cellBox(ca[0],ca[1]), b = cellBox(cb[0],cb[1]);
+    Object.assign(ROOMS[key], {x:a.x, y:a.y, w:(b.x + b.w) - a.x, h:a.h}); }
   AISLE_VX.length = 0; AISLE_HY.length = 0;
   for (let c = 0; c < PLAN.cols-1; c++) AISLE_VX.push(GX0 + (c+1)*CELL_W + c*AISLE + AISLE/2);
   for (let r = 0; r < PLAN.rows-1; r++) AISLE_HY.push(GY0 + (r+1)*CELL_H + r*AISLE + AISLE/2);
@@ -133,17 +133,15 @@ function roomAt(x,y){ for (const k in ROOMS){ const R=ROOMS[k];
 
 const COLORS = {
   "Planner":0xffd95e,"Senior Engineer":0xff9b5e,
-  "Junior Engineer":0xffc08a,"Reviewer":0x5db8ff,"AppSec Engineer":0xff6d6d,
-  "Audit & Compliance":0xffb38a,"Supply-chain Reviewer":0x9bb0ff,
+  "Junior Engineer":0xffc08a,"Reviewer":0x5db8ff,
 };
 const ROSTER = {
   plan:["Planner"],
   // engineering is NOT a static room: its engineers are placed per-discipline
   // (frontend/backend/data) from the live org telemetry (layoutEngineering).
   review:["Reviewer"],
-  security:["AppSec Engineer","Audit & Compliance","Supply-chain Reviewer"],
 };
-const GATE_ORDER = ["spec","build","test","smoke","review","security","audit","supply_chain","e2e"];
+const GATE_ORDER = ["spec","build","test","smoke","review"];
 const AGENT_ROOM = {}; for (const rm in ROSTER) for (const nm of ROSTER[rm]) AGENT_ROOM[nm] = rm;
 // Per-area accent (shared by the org board, the Tech-Leads, and the area-expert
 // IC pool) so frontend/backend/data/… read the same colour everywhere.
@@ -152,8 +150,7 @@ const AREA_COLOR = {frontend:0x7fd1ff, backend:0xff9b5e, data:0x7dffb0,
 const AREA_TAG = {frontend:"FE", backend:"BE", data:"DA", infra:"IN", security:"SE"};
 // short role tags for the named static-room agents (the senior roles), shown on a badge.
 const ROLE_TAG = {
-  "Planner":"PLANNER", "Reviewer":"REVIEWER", "AppSec Engineer":"APPSEC",
-  "Audit & Compliance":"AUDIT", "Supply-chain Reviewer":"SUPPLY",
+  "Planner":"PLANNER", "Reviewer":"REVIEWER",
 };
 
 // ---- presence: everybody lives at their own desk ---------------------------
@@ -185,7 +182,7 @@ const CTO_LINES = ["how's it looking?", "keep going, this is good", "what's bloc
 // The CTO walks a BEAT rather than being leashed to the newest event: he stands with one
 // live team for a spell, then moves on to the next room that has work. Rooms he can stand
 // in, in floor order (the gate/vault/his office aren't teams).
-const PATROL_ROOMS = ["plan","frontend","backend","data","review","security"];
+const PATROL_ROOMS = ["plan","frontend","backend","data","review"];
 const CTO_DWELL_MS = [7000, 13000];   // how long he oversees one room before moving on
 const pick = (arr)=> arr[Math.floor(Math.random()*arr.length)];
 
@@ -213,8 +210,7 @@ const CHARACTERS = [
 // Stable, room-distinct character per role (no two leads in a room share a sprite).
 const ROLE_CHAR = {
   "Planner":7,"Senior Engineer":5,"Junior Engineer":9,
-  "Reviewer":4,
-  "AppSec Engineer":5,"Audit & Compliance":7,"Supply-chain Reviewer":0,"CTO":3,
+  "Reviewer":4,"CTO":3,
 };
 function charFor(name, seed){
   if (ROLE_CHAR[name] != null) return ROLE_CHAR[name];
@@ -552,8 +548,7 @@ class FloorScene extends Phaser.Scene {
       const R = ROOMS[key]; if (R.virtual) continue;
       const cx = Math.round(R.cx);
       // Openings (no doors — plain gaps): normal rooms open at the BOTTOM centre. The
-      // GATE also has a TOP entrance (from security above) so work flows security →
-      // gate → vault. The VAULT is sealed except a single TOP opening under the gate.
+      // GATE also has a TOP entrance so work flows review → gate → vault. The VAULT is sealed except a single TOP opening under the gate.
       const topGap = key==="gate" ? cx : (key==="vault" ? Math.round(ROOMS.gate.cx) : null);
       // The CTO OFFICE opens on its RIGHT wall (onto the corridor), not the bottom —
       // everyone else opens at the bottom centre. Vault is sealed bottom (top-only).
@@ -584,8 +579,6 @@ class FloorScene extends Phaser.Scene {
         M([[1,0,6,1,1],[1,5,6,1,1],[0,1,1,4,1],[6,1,1,4,1],[6,6,2,2,1],[8,8,2,2,1]]); break;
       case "gate":         // shield: flat top, tapered point
         M([[2,0,6,2,1],[1,2,8,3,1],[2,5,6,1,1],[3,6,4,1,1],[4,7,2,2,1]]); break;
-      case "security":     // padlock: shackle + body + keyhole
-        M([[3,0,4,1,1],[2,1,1,3,1],[7,1,1,3,1],[1,4,8,6,1],[4,6,2,3,0]]); break;
       case "plan":         // clipboard: board + clip + two text lines
         M([[3,0,4,1,1],[1,1,8,9,1],[3,3,4,1,0],[3,5,4,1,0],[3,7,3,1,0]]); break;
       case "vault":        // key: round bow (hole) + clean straight stem + 2 teeth
@@ -611,7 +604,7 @@ class FloorScene extends Phaser.Scene {
   }
 
   drawFlowPath(){   // faint guide line through the build STAGES (engineering as one waypoint)
-    const stages = ["plan","engineering","review","security","gate","vault"];
+    const stages = ["plan","engineering","review","gate","vault"];
     const pts = stages.map(k=>ROOMS[k]).filter(Boolean).map(R=>({x:R.cx, y:R.cy}));
     const g = this.add.graphics().setDepth(0); g.lineStyle(2, 0xffcf52, 0.18);
     g.beginPath(); g.moveTo(pts[0].x, pts[0].y);
@@ -668,7 +661,7 @@ class FloorScene extends Phaser.Scene {
     // (consistent, never random). The working desks are placed per-lead by the floor.
     const props = {
       plan:"board", frontend:"rack", backend:"rack",
-      data:"shelf", review:"shelf", security:"rack",
+      data:"shelf", review:"shelf",
     };
     for (const key in props){
       const R = ROOMS[key]; if(!R) continue;
@@ -1128,7 +1121,6 @@ class FloorScene extends Phaser.Scene {
     let li = 0;                                    // global idle-mood slot index
     for (const room in ROSTER){
       const names = ROSTER[room], R = ROOMS[room]; if (!R) continue;
-      if (room === "security" && this.proj.mode === "assistant") continue;   // gated-mode crew only
       const cols = Math.min(names.length, 3);
       const single = names.length === 1;                         // a one-role room → centre it
       const PX = 84, SY = R.y + 94, RP = 50;                     // SAME grid as the eng rooms
@@ -1285,7 +1277,7 @@ class FloorScene extends Phaser.Scene {
     if (key) this.liveRooms.add(key);      // this room is now producing work
     // When the build advances to the NEXT phase, a worker from the finished room carries
     // the "work" over to the new room (the handoff). Only on a forward phase boundary.
-    const SEQ = ["plan","engineering","review","security","gate","vault"];
+    const SEQ = ["plan","engineering","review","gate","vault"];
     const ph = (k)=> (ENG_ROOMS.includes(k)||k==="engineering") ? "engineering" : k;
     const oi = SEQ.indexOf(ph(prev)), ni = SEQ.indexOf(ph(key));
     if (oi >= 0 && ni > oi) this.deliverWork(prev, key);
@@ -1970,13 +1962,14 @@ let ACTIVE = null;          // the floor currently shown
 
 function floorKey(f){ return "floor-"+f; }
 
-async function newProject(req, mode, supervised, backend, packs, extra){
+async function newProject(req, supervised, backend, extra){
+  const mode = "assistant";
   await bootReady;  // shared textures must exist before a FloorScene builds
   let resp;
   try {
     resp = await fetch("/api/projects", {
       method:"POST", headers:postHeaders(),
-      body: JSON.stringify({request:req, mode, supervised, backend, packs, ...(extra||{})}),
+      body: JSON.stringify({request:req, supervised, backend, ...(extra||{})}),
     }).then(r=>r.json());
   } catch(err){ appendLogDom("bad","ERR "+err); return; }
 
@@ -2156,12 +2149,8 @@ function routeEvent(floor, ev){
     }
     case "await_decision":
       F.awaiting = true; F.cpIndex = ev.checkpoint;
-      // AI expert advisors (gated release checkpoint): ride into the modal. The
-      // NOTE says why the panel is absent when it is — an empty panel must not read
-      // as "everyone approved". `spend` is the advisory cost/elapsed context.
-      F.cp = Object.assign({}, F.cp, {advisors: ev.advisors || [],
-                                      advisorsNote: ev.advisors_note || "",
-                                      spend: ev.spend || null,
+      // `spend` is the advisory cost/elapsed context.
+      F.cp = Object.assign({}, F.cp, {spend: ev.spend || null,
                                       // the stage's artifacts are frozen at the pause
                                       arts: (F.stageArts || []).slice()});
       // Autopilot PROPOSAL: carry the panel's request so the modal offers an edit box.
@@ -2902,34 +2891,6 @@ function showCheckpoint(F){
   renderCpArts(F, cp);
   renderCpProvenance(cp);
   renderCpActions(F, cp);
-  // AI expert advisors (the same panel that judges autonomous releases, here
-  // ADVISORY): show each domain's verdict + findings above the buttons.
-  const adv = document.getElementById("cp-advisors");
-  if (adv){
-    const list = cp.advisors || [];
-    adv.classList.toggle("hidden", !list.length);
-    adv.innerHTML = "";
-    for (const a of list){
-      const row = document.createElement("div");
-      row.className = "cp-advisor " + (a.verdict==="approve" ? "ok" : (a.verdict==="request-changes" ? "warn" : "na"));
-      const head = document.createElement("div"); head.className = "adv-head";
-      head.textContent = (a.verdict==="approve" ? "✅ " : (a.verdict==="request-changes" ? "⚠ " : "❔ "))
-        + a.domain.toUpperCase() + " · " + (a.verdict||"?").toUpperCase();
-      row.appendChild(head);
-      for (const f of (a.findings||[])){
-        const li = document.createElement("div"); li.className = "adv-finding"; li.textContent = "· " + f;
-        row.appendChild(li);
-      }
-      adv.appendChild(row);
-    }
-  }
-  // No panel is NOT a clean bill of health — say which it is.
-  const advNote = document.getElementById("cp-adv-note");
-  if (advNote){
-    const note = (cp.advisors && cp.advisors.length) ? "" : (cp.advisorsNote || "");
-    advNote.textContent = note;
-    advNote.classList.toggle("hidden", !note);
-  }
   // Autopilot proposal: surface the panel's request as an EDITABLE next-iteration
   // request (approve = as-is; request-changes = build the edited text; reject = stop).
   const wrap = document.getElementById("cp-edit-wrap");
@@ -3046,7 +3007,7 @@ function loadRepo(id){
   document.getElementById("repo-sha").textContent = "";
   document.getElementById("repo-src").textContent = "";
   fetch("/api/repo/"+id)
-    .then(r => r.ok ? r.json() : {files:[],checks:[],diffs:[],sign_offs:[]})
+    .then(r => r.ok ? r.json() : {files:[],checks:[],diffs:[]})
     .then(repo => { renderRepo(id, repo); })
     .catch(() => { list.innerHTML = "<li class='muted'>(could not load repo)</li>"; view.textContent = ""; });
 }
@@ -3059,7 +3020,6 @@ function renderRepo(id, repo){
   renderTree(id, repo.files || []);
   renderChecks(repo.checks || []);
   renderPulls(repo.diffs || []);
-  renderSignOffs(repo.sign_offs || []);
 }
 function renderTree(id, files){
   FILES_TREE = files || [];
@@ -3161,32 +3121,6 @@ function renderChecks(checks){
     if(c.findings && c.findings.length){
       html += `<div class="ck-findings">`+ c.findings.map(escapeHtml).join("<br>") +`</div>`;
     }
-    li.innerHTML = html;
-    ul.appendChild(li);
-  }
-}
-function renderSignOffs(sign_offs){
-  const ul = document.getElementById("signoffs-list");
-  const cnt = document.getElementById("signoffs-count");
-  if(!ul) return;
-  ul.innerHTML = "";
-  cnt.textContent = sign_offs.length ? String(sign_offs.length) : "";
-  if(!sign_offs.length){
-    ul.innerHTML = "<li class='muted'>No sign-offs recorded yet — the CTO signs off at the Design &amp; Release checkpoints.</li>";
-    return;
-  }
-  for(const s of sign_offs){
-    const li = document.createElement("li");
-    li.className = "check " + (s.approved ? "ok" : "bad");
-    const icon = s.approved ? "✓" : "✕";
-    const who = [s.approver, s.role].filter(Boolean).map(escapeHtml).join(" · ") || "(unnamed)";
-    const prov = s.provenance ? ` <span class='adv'>${escapeHtml(s.provenance)}</span>` : "";
-    let html = `<span class="ck-icon">${icon}</span><span class="ck-name">${escapeHtml(s.point||"sign-off")}</span>`+
-               `<span class="ck-status">${who}</span>${prov}`;
-    const detail = [];
-    if(s.evidence_hash) detail.push("evidence "+escapeHtml(String(s.evidence_hash).slice(0,16)));
-    if(s.note) detail.push(escapeHtml(s.note));
-    if(detail.length) html += `<div class="ck-findings">`+ detail.join("<br>") +`</div>`;
     li.innerHTML = html;
     ul.appendChild(li);
   }
@@ -3322,7 +3256,7 @@ function _selLabel(id){
 function syncFoldSummaries(){
   const val=(id)=>String((document.getElementById(id)||{}).value||"").trim();
   const run=document.getElementById("run-sum");
-  if(run) run.textContent=[_selLabel("backend-select"), _selLabel("mode-select"),
+  if(run) run.textContent=[_selLabel("backend-select"),
     _selLabel("build-select"), _selLabel("adapter-select"),
     "stack: "+(_selLabel("profile-select")||"auto")].filter(Boolean).join(" · ");
   const scale=document.getElementById("scale-sum");
@@ -3333,7 +3267,6 @@ function syncFoldSummaries(){
     if(val("cap-input")) parts.push("$"+val("cap-input")+" cap");
     if(val("token-cap-input")) parts.push(val("token-cap-input")+" token cap");
     parts.push(Number.isFinite(ap)&&ap>0 ? "autopilot "+ap : "autopilot off");
-    if(val("packs-input")) parts.push(val("packs-input"));
     const sup=document.getElementById("supervised");
     parts.push(sup && sup.checked ? "supervised" : "unsupervised");
     scale.textContent=parts.join(" · ");
@@ -3344,8 +3277,8 @@ newModal.addEventListener("input", syncFoldSummaries);
 
 // ---- Presets: one-click example builds that fill every spec-side setting -------
 // The PIR entry reuses the modal's HTML defaults (one source of truth); the rest are
-// defined inline. A preset sets the SPEC side (request/spec/mode/build/ladder/stack/
-// packs/workers/fix/autopilot) but NOT backend/adapter — those are host-dependent and
+// defined inline. A preset sets the SPEC side (request/spec/build/ladder/stack/
+// workers/fix/autopilot) but NOT backend/adapter — those are host-dependent and
 // the server already reconciles them from /api/config.
 const _pirReq = (document.getElementById("req-input")||{}).value || "";
 const _pirSpec = (document.getElementById("spec-text")||{}).value || "";
@@ -3363,43 +3296,43 @@ graphics (shapes/procedural tiles) are fine — no external assets.`;
 const PRESETS = [
   { id:"custom", label:"— Custom (blank) —",
     note:"A blank slate — describe your own build.",
-    request:"", intake:"idea", spec:"", mode:"autonomous", build:"single",
-    maxMilestones:6, milestones:"", profile:"auto", packs:"", workers:4, fix:5, autopilot:0 },
+    request:"", intake:"idea", spec:"", build:"single",
+    maxMilestones:6, milestones:"", profile:"auto", workers:4, fix:5, autopilot:0 },
   { id:"pir", label:"PIR system · cryptography (complex)",
     note:"Information-theoretic 2-server + homomorphic single-server PIR, verified in-process.",
-    request:_pirReq, intake:"spec", spec:_pirSpec, mode:"gated", build:"milestones",
-    maxMilestones:6, milestones:_pirLadder, profile:"auto", packs:"crypto",
+    request:_pirReq, intake:"spec", spec:_pirSpec, build:"milestones",
+    maxMilestones:6, milestones:_pirLadder, profile:"auto",
     workers:4, fix:5, autopilot:0 },
   { id:"moon", label:"Moon Colony farming game · pygame (very complex)",
     note:"The BUILD-A-FULL-GAME recipe: a complete Stardew-style sim as a milestone ladder.",
     request:"a complete stardew-style farming game about colonizing the moon",
-    intake:"spec", spec:MOON_SPEC, mode:"gated", build:"milestones", maxMilestones:10,
-    milestones:"", profile:"pygame", packs:"game", workers:4, fix:8, autopilot:5 },
+    intake:"spec", spec:MOON_SPEC, build:"milestones", maxMilestones:10,
+    milestones:"", profile:"pygame", workers:4, fix:8, autopilot:5 },
   { id:"urlshort", label:"URL shortener · web service (simple)",
     note:"A small single service — quick end-to-end build.",
     request:"a URL shortener service with custom slugs, link expiry, click analytics, and per-IP abuse rate-limiting",
-    intake:"idea", spec:"", mode:"autonomous", build:"single", maxMilestones:6,
-    milestones:"", profile:"auto", packs:"", workers:4, fix:5, autopilot:0 },
+    intake:"idea", spec:"", build:"single", maxMilestones:6,
+    milestones:"", profile:"auto", workers:4, fix:5, autopilot:0 },
   { id:"chip8", label:"CHIP-8 emulator · systems (simple)",
     note:"Cheap pipeline validation — objectively scoreable against public test ROMs.",
     request:"a CHIP-8 emulator in Python with pytest tests against public test ROMs",
-    intake:"idea", spec:"", mode:"autonomous", build:"single", maxMilestones:6,
-    milestones:"", profile:"auto", packs:"", workers:4, fix:6, autopilot:0 },
+    intake:"idea", spec:"", build:"single", maxMilestones:6,
+    milestones:"", profile:"auto", workers:4, fix:6, autopilot:0 },
   { id:"taskmgr", label:"Team task manager · web+API+DB platform (complex)",
     note:"Multi-service — auto-built as a platform (web / backend / data), stitched into one repo.",
     request:"a team task manager: users sign up and log in, create projects, add tasks with assignees, due dates and labels, comment on tasks, and switch between a board and a list view — a REST API, a web UI, and a database",
-    intake:"idea", spec:"", mode:"gated", build:"single", maxMilestones:6,
-    milestones:"", profile:"auto", packs:"frontend", workers:6, fix:6, autopilot:0 },
+    intake:"idea", spec:"", build:"single", maxMilestones:6,
+    milestones:"", profile:"auto", workers:6, fix:6, autopilot:0 },
   { id:"ssg", label:"Static-site generator · CLI tool (simple)",
     note:"A command-line tool + library — a different shape of software.",
     request:"a command-line static-site generator: turn a folder of Markdown with front-matter into a linked HTML site with a table of contents, page templates, and a live-reload dev server",
-    intake:"idea", spec:"", mode:"autonomous", build:"single", maxMilestones:6,
-    milestones:"", profile:"auto", packs:"", workers:4, fix:5, autopilot:0 },
+    intake:"idea", spec:"", build:"single", maxMilestones:6,
+    milestones:"", profile:"auto", workers:4, fix:5, autopilot:0 },
   { id:"chat", label:"Real-time chat · WebSocket platform (complex)",
     note:"Rooms, presence and typing over WebSockets — web client + realtime backend + DB.",
     request:"a real-time group chat app: named rooms, user presence, typing indicators, persistent message history and search, and auth — a WebSocket backend, a web client, and a database",
-    intake:"idea", spec:"", mode:"gated", build:"single", maxMilestones:6,
-    milestones:"", profile:"auto", packs:"frontend", workers:6, fix:6, autopilot:0 },
+    intake:"idea", spec:"", build:"single", maxMilestones:6,
+    milestones:"", profile:"auto", workers:6, fix:6, autopilot:0 },
 ];
 function _setSelIfPresent(id, val){
   const s=document.getElementById(id); if(!s) return;
@@ -3413,18 +3346,15 @@ function applyPreset(id){
   set("spec-text", p.spec||"");
   set("milestones-text", p.milestones||"");
   set("max-milestones", p.maxMilestones!=null?p.maxMilestones:6);
-  set("packs-input", p.packs||"");
   set("extra-workers", p.workers!=null?p.workers:"");
   set("fix-input", p.fix!=null?p.fix:5);
   set("autopilot-input", p.autopilot!=null?p.autopilot:0);
-  _setSelIfPresent("mode-select", p.mode||"autonomous");
   _setSelIfPresent("build-select", p.build||"single");   // change event toggles the ladder opts
   _setSelIfPresent("profile-select", p.profile||"auto");
   // intake radio: reveal the matching panel (idea hides the spec box, spec shows it).
   const rb=document.querySelector(`input[name="intake"][value="${p.intake||"idea"}"]`);
   if(rb){ rb.checked=true; rb.dispatchEvent(new Event("change")); }
   if(typeof updateSlotHint==="function") updateSlotHint();
-  if(typeof syncMode==="function") syncMode();
 }
 { const ps=document.getElementById("preset-select");
   if(ps){
@@ -3486,7 +3416,7 @@ function showNewModal(parentId){
   syncFoldSummaries();   // reconciled selects (/api/config) don't fire change events
 }
 // Advisory IC-pool sizing: ask the server (/api/suggest-slots) how many parallel
-// workers the request + packs are likely to need, and fold it into the note. The
+// workers the request is likely to need, and fold it into the note. The
 // real split is decided during the build — this just previews the scale.
 const PARALLEL_BASE = "Automatic — the tech-lead decomposes the work and the system runs the independent tasks in parallel.";
 let slotHintTimer = null;
@@ -3495,11 +3425,9 @@ function updateSlotHint(){
   slotHintTimer = setTimeout(()=>{
     const note = document.getElementById("parallel-note");
     const request = (document.getElementById("req-input").value || "").trim();
-    const packs = (document.getElementById("packs-input").value || "")
-      .split(",").map(s=>s.trim()).filter(Boolean);
     if(!note || !request){ if(note) note.textContent = PARALLEL_BASE; return; }
     fetch("/api/suggest-slots",{method:"POST",headers:postHeaders(),
-      body:JSON.stringify({request, packs})})
+      body:JSON.stringify({request})})
      .then(r=>r.ok?r.json():null)
      .then(d=>{
        if(!d || !d.slots){ note.textContent = PARALLEL_BASE; return; }
@@ -3567,9 +3495,7 @@ function fileToB64(file){
 }
 document.getElementById("start-btn").onclick=async ()=>{
   const req=document.getElementById("req-input").value;
-  const mode=document.getElementById("mode-select").value;
   const backend=document.getElementById("backend-select").value;
-  const packs=document.getElementById("packs-input").value;
   const sup=document.getElementById("supervised").checked;
   const extra={};
   extra.adapter=document.getElementById("adapter-select").value;
@@ -3624,14 +3550,13 @@ document.getElementById("start-btn").onclick=async ()=>{
     extra.spec_text=chatDraft;
   }
   newModal.classList.add("hidden");
-  newProject(req, mode, sup, backend, packs, extra);
+  newProject(req, sup, backend, extra);
   // reset the chat for the next project
   chatSession=null; chatDraft=""; iterBuilt="";
   document.getElementById("chat-log").innerHTML="";
   document.getElementById("chat-spec").textContent="(nothing yet)";
 };
 document.getElementById("req-input").addEventListener("input", updateSlotHint);
-document.getElementById("packs-input").addEventListener("input", updateSlotHint);
 // Build-as select: the milestone options only make sense for the ladder.
 { const bs=document.getElementById("build-select"), mo=document.getElementById("milestones-opts");
   if(bs && mo) bs.addEventListener("change", ()=>mo.classList.toggle("hidden", bs.value!=="milestones")); }
@@ -3747,37 +3672,6 @@ function syncAdapter(){
   if(asel) asel.addEventListener("change", ()=>{ adapterTouched = true; }); }
 document.getElementById("backend-select").addEventListener("change", ()=>{ syncCostCap(); syncAdapter(); updateModelNote(); });
 syncCostCap();
-
-// Autonomous mode is HANDS-OFF by definition: the trust-root admission controller
-// is the sole release gate (build · admit · deploy, no human sign-off). So when
-// `autonomous` is picked, supervision (per-checkpoint human approval) is forced
-// OFF — keeping it on would pause an unattended build. gated re-enables it so the
-// CTO drives the Design/Release checkpoints in the floor screen.
-function syncMode(){
-  const mode = document.getElementById("mode-select").value;
-  const sup = document.getElementById("supervised");
-  const hint = document.getElementById("supervised-hint");
-  if(!sup) return;
-  if(mode === "autonomous"){
-    sup.checked = false;
-    sup.disabled = true;
-    if(hint) hint.textContent = "Autonomous is hands-off — admission is the sole release gate; no checkpoint approvals.";
-    // Only the REGULATED pack vetoes hands-off release (compliance sign-off needs
-    // a human). Warn HERE instead of letting the server refuse the build with a
-    // cryptic mode-veto error. Other packs (game/infra/crypto) allow autonomous —
-    // their human sign-offs simply don't bind when no human is in the loop.
-    const packs=(document.getElementById("packs-input").value||"").toLowerCase();
-    if(hint && packs.includes("regulated"))
-      hint.textContent = "⚠ The regulated pack VETOES autonomous (compliance sign-off needs "
-        + "a human) — the build will refuse to start. Switch to gated, or clear the pack.";
-  } else {
-    sup.disabled = false;
-    if(hint) hint.textContent = "Gated — the CTO approves the Design & Release checkpoints right here in the floor screen (no Git merge).";
-  }
-}
-document.getElementById("mode-select").addEventListener("change", syncMode);
-document.getElementById("packs-input").addEventListener("input", syncMode);
-syncMode();
 
 // Rehydrate on (re)load: floors run server-side independently of this tab, so a
 // refresh / reconnect from another device rebuilds every floor + reconnects the

@@ -53,7 +53,7 @@ def test_subgraph_scopes_all_resolve_to_a_room() -> None:
     # unnamed step inside a stage was dropped.
     for scope, room in (("factory:implementation", "engineering"),
                         ("factory:quality", "review"),
-                        ("factory:assurance", "security"),
+                        ("factory:assurance", "review"),   # old builds' replays
                         ("factory:architecture", "plan"),
                         ("factory:product", "plan"),
                         ("implementation", "engineering")):    # bare form still works
@@ -237,6 +237,9 @@ def test_cast_is_planner_engineers_reviewer_and_old_ids_still_seat_someone() -> 
         "qa_engineer": ("Reviewer", "review"),
         "sdet": ("Reviewer", "review"),
         "reviewer_critic": ("Reviewer", "review"),
+        "appsec_engineer": ("Reviewer", "review"),
+        "audit_compliance": ("Reviewer", "review"),
+        "supply_chain_reviewer": ("Reviewer", "review"),
     }
     for node, (agent, room) in expect.items():
         ev = live_event_for_node(node, "", "start")

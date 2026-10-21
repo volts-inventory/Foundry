@@ -70,25 +70,6 @@ class PullDiff:
 
 
 @dataclass(frozen=True)
-class SignOff:
-    """A recorded human sign-off — the Gated/Autonomous Design/Release approval.
-
-    Surfaced as the 'approvals' a gated build carries (assistant builds have
-    none). The security-bearing ``server_nonce`` is deliberately NOT exposed; the
-    evidence-pack ``evidence_hash`` IS — it is a hash, and the what-you-signed
-    anchor that makes the approval auditable."""
-
-    point: str  # what the signature attests (e.g. "design sign-off" / "release sign-off")
-    approver: str  # named accountable identity
-    role: str  # the distinct required role (segregation of duties)
-    approved: bool
-    provenance: str  # self | independent (self-judge profile stamp)
-    state_sha: str  # the integrated state the sign-off binds to
-    evidence_hash: str  # hash of the exact evidence pack shown to the signer
-    note: str = ""
-
-
-@dataclass(frozen=True)
 class Repo:
     """A finished build's repository read from the durable store."""
 
@@ -97,7 +78,6 @@ class Repo:
     files: tuple[RepoFile, ...]
     checks: tuple[GateCheck, ...]
     diffs: tuple[PullDiff, ...]
-    sign_offs: tuple[SignOff, ...] = ()
     _blobs: dict[str, bytes] = field(default_factory=dict, repr=False)
 
     def file_bytes(self, path: str) -> bytes | None:
@@ -172,32 +152,6 @@ def _gate_checks(state: FactoryState) -> tuple[GateCheck, ...]:
     return tuple(checks)
 
 
-def _sign_offs(state: FactoryState) -> tuple[SignOff, ...]:
-    """The recorded Design/Release sign-offs, order-stable by ``seq``.
-
-    Reads the ``sign_offs`` channel of the terminal state (Gated/Autonomous
-    record these; an assistant build has none). The server nonce is never
-    surfaced; the evidence-pack hash is (see :class:`SignOff`)."""
-    records = state.get("sign_offs") or ()
-    out: list[SignOff] = []
-    for s in sorted(records, key=lambda r: getattr(r, "seq", ())):
-        prov = getattr(s, "judgment_provenance", "")
-        prov = str(getattr(prov, "value", prov)).split(".")[-1].lower()
-        out.append(
-            SignOff(
-                point=str(getattr(s, "meaning_of_signing", "") or "sign-off"),
-                approver=str(getattr(s, "approver", "") or ""),
-                role=str(getattr(s, "role", "") or ""),
-                approved=bool(getattr(s, "approved", False)),
-                provenance=prov,
-                state_sha=str(getattr(s, "state_sha", "") or ""),
-                evidence_hash=str(getattr(s, "presented_evidence_hash", "") or ""),
-                note=str(getattr(s, "note", "") or ""),
-            )
-        )
-    return tuple(out)
-
-
 def _pull_diffs(state: FactoryState, backends: Any) -> tuple[PullDiff, ...]:
     """Each FeatureDiff's raw unified-diff body — the build's 'pull requests'."""
     from foundry.graph.gate_wiring import FEATURE_DIFF_KIND, _of_kind, _resolve_typed
@@ -237,7 +191,6 @@ def read_repo(thread_id: str, state_dir: str | Path) -> Repo:
         state = _load_final_state(thread_id, backends)
         checks = _gate_checks(state)
         diffs = _pull_diffs(state, backends)
-        sign_offs = _sign_offs(state)
         blobs: dict[str, bytes] = {}
         with tempfile.TemporaryDirectory(prefix="foundry-repo-") as staging:
             root = Path(staging)
@@ -264,7 +217,6 @@ def read_repo(thread_id: str, state_dir: str | Path) -> Repo:
             files=files,
             checks=checks,
             diffs=diffs,
-            sign_offs=sign_offs,
             _blobs=blobs,
         )
     finally:

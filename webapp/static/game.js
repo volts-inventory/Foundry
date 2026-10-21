@@ -1383,7 +1383,10 @@ class FloorScene extends Phaser.Scene {
   // then step into the destination. (Within-room moves stay direct — handled in walkTo.)
   corridorRoute(sx,sy,tx,ty){
     const near=(arr,v)=>arr.reduce((b,n)=>Math.abs(n-v)<Math.abs(b-v)?n:b, arr[0]);
-    const exitY=near(AISLE_HY,sy), entryY=near(AISLE_HY,ty), vx=near(AISLE_VX,(sx+tx)/2);
+    const exitY=near(AISLE_HY,sy), entryY=near(AISLE_HY,ty), 
+      lo=Math.min(exitY,entryY), hi=Math.max(exitY,entryY),
+      open=AISLE_VX.filter(v=>!Object.values(ROOMS).some(R=>!R.virtual && v>R.x && v<R.x1 && R.y<hi && R.y1>lo)),
+      vx=near(open.length?open:AISLE_VX,(sx+tx)/2);   // never switch rows through a two-cell room's walls
     const pts=[[sx,exitY]];                              // step out to the nearest horizontal aisle
     if (exitY!==entryY){ pts.push([vx,exitY],[vx,entryY],[tx,entryY]); }  // switch rows via a vertical aisle
     else { pts.push([tx,exitY]); }                       // same aisle -> straight along it
@@ -2027,12 +2030,13 @@ function switchToFloor(floor){
 
 // ---- per-floor event routing ----------------------------------------------
 // Rooms and cast labels from OLD builds' stored/replayed telemetry -> the current floor
-// (product/architecture -> plan, qa -> review; the per-role agents -> Planner/Reviewer,
+// (product/architecture -> plan, qa/security -> review; the per-role agents -> Planner/Reviewer,
 // each lane's lead -> that lane's Engineer).
-const LEGACY_ROOM = {product:"plan", architecture:"plan", qa:"review"};
+const LEGACY_ROOM = {product:"plan", architecture:"plan", qa:"review", security:"review"};
 const LEGACY_AGENT = {
   "Stakeholder Proxy":"Planner","Product Manager":"Planner","Criteria Critic":"Planner",
   "Program Manager":"Planner","Principal Architect":"Planner",
+  "AppSec Engineer":"Reviewer","Audit & Compliance":"Reviewer","Supply-chain Reviewer":"Reviewer",
   "QA Engineer":"Reviewer","SDET":"Reviewer","Technical Writer":"Reviewer",
   "Frontend Lead":"Frontend Engineer","Backend Lead":"Backend Engineer","Data Lead":"Data Engineer",
 };
@@ -3293,42 +3297,44 @@ buy seeds/upgrades at a store); base-building (place/upgrade modules); save/load
 with 3 slots; a title screen, pause menu, and controls screen; sound hooks
 (procedural or silent-safe); keyboard controls documented in-game. Code-drawn
 graphics (shapes/procedural tiles) are fine — no external assets.`;
+// supervised: the old autonomous presets are hands-off (no checkpoint approvals); the
+// old gated ones keep the CTO approving each checkpoint.
 const PRESETS = [
-  { id:"custom", label:"— Custom (blank) —",
+  { id:"custom", supervised:false, label:"— Custom (blank) —",
     note:"A blank slate — describe your own build.",
     request:"", intake:"idea", spec:"", build:"single",
-    maxMilestones:6, milestones:"", profile:"auto", workers:4, fix:5, autopilot:0 },
-  { id:"pir", label:"PIR system · cryptography (complex)",
+    maxMilestones:6, milestones:"", profile:"auto", workers:4, fix:2, autopilot:0 },
+  { id:"pir", supervised:true, label:"PIR system · cryptography (complex)",
     note:"Information-theoretic 2-server + homomorphic single-server PIR, verified in-process.",
     request:_pirReq, intake:"spec", spec:_pirSpec, build:"milestones",
     maxMilestones:6, milestones:_pirLadder, profile:"auto",
-    workers:4, fix:5, autopilot:0 },
-  { id:"moon", label:"Moon Colony farming game · pygame (very complex)",
+    workers:4, fix:2, autopilot:0 },
+  { id:"moon", supervised:true, label:"Moon Colony farming game · pygame (very complex)",
     note:"The BUILD-A-FULL-GAME recipe: a complete Stardew-style sim as a milestone ladder.",
     request:"a complete stardew-style farming game about colonizing the moon",
     intake:"spec", spec:MOON_SPEC, build:"milestones", maxMilestones:10,
     milestones:"", profile:"pygame", workers:4, fix:8, autopilot:5 },
-  { id:"urlshort", label:"URL shortener · web service (simple)",
+  { id:"urlshort", supervised:false, label:"URL shortener · web service (simple)",
     note:"A small single service — quick end-to-end build.",
     request:"a URL shortener service with custom slugs, link expiry, click analytics, and per-IP abuse rate-limiting",
     intake:"idea", spec:"", build:"single", maxMilestones:6,
-    milestones:"", profile:"auto", workers:4, fix:5, autopilot:0 },
-  { id:"chip8", label:"CHIP-8 emulator · systems (simple)",
+    milestones:"", profile:"auto", workers:4, fix:2, autopilot:0 },
+  { id:"chip8", supervised:false, label:"CHIP-8 emulator · systems (simple)",
     note:"Cheap pipeline validation — objectively scoreable against public test ROMs.",
     request:"a CHIP-8 emulator in Python with pytest tests against public test ROMs",
     intake:"idea", spec:"", build:"single", maxMilestones:6,
     milestones:"", profile:"auto", workers:4, fix:6, autopilot:0 },
-  { id:"taskmgr", label:"Team task manager · web+API+DB platform (complex)",
+  { id:"taskmgr", supervised:true, label:"Team task manager · web+API+DB platform (complex)",
     note:"Multi-service — auto-built as a platform (web / backend / data), stitched into one repo.",
     request:"a team task manager: users sign up and log in, create projects, add tasks with assignees, due dates and labels, comment on tasks, and switch between a board and a list view — a REST API, a web UI, and a database",
     intake:"idea", spec:"", build:"single", maxMilestones:6,
     milestones:"", profile:"auto", workers:6, fix:6, autopilot:0 },
-  { id:"ssg", label:"Static-site generator · CLI tool (simple)",
+  { id:"ssg", supervised:false, label:"Static-site generator · CLI tool (simple)",
     note:"A command-line tool + library — a different shape of software.",
     request:"a command-line static-site generator: turn a folder of Markdown with front-matter into a linked HTML site with a table of contents, page templates, and a live-reload dev server",
     intake:"idea", spec:"", build:"single", maxMilestones:6,
-    milestones:"", profile:"auto", workers:4, fix:5, autopilot:0 },
-  { id:"chat", label:"Real-time chat · WebSocket platform (complex)",
+    milestones:"", profile:"auto", workers:4, fix:2, autopilot:0 },
+  { id:"chat", supervised:true, label:"Real-time chat · WebSocket platform (complex)",
     note:"Rooms, presence and typing over WebSockets — web client + realtime backend + DB.",
     request:"a real-time group chat app: named rooms, user presence, typing indicators, persistent message history and search, and auth — a WebSocket backend, a web client, and a database",
     intake:"idea", spec:"", build:"single", maxMilestones:6,
@@ -3347,13 +3353,14 @@ function applyPreset(id){
   set("milestones-text", p.milestones||"");
   set("max-milestones", p.maxMilestones!=null?p.maxMilestones:6);
   set("extra-workers", p.workers!=null?p.workers:"");
-  set("fix-input", p.fix!=null?p.fix:5);
+  set("fix-input", p.fix!=null?p.fix:2);
   set("autopilot-input", p.autopilot!=null?p.autopilot:0);
   _setSelIfPresent("build-select", p.build||"single");   // change event toggles the ladder opts
   _setSelIfPresent("profile-select", p.profile||"auto");
   // intake radio: reveal the matching panel (idea hides the spec box, spec shows it).
   const rb=document.querySelector(`input[name="intake"][value="${p.intake||"idea"}"]`);
   if(rb){ rb.checked=true; rb.dispatchEvent(new Event("change")); }
+  const sup=document.getElementById("supervised"); if(sup) sup.checked=!!p.supervised;
   if(typeof updateSlotHint==="function") updateSlotHint();
 }
 { const ps=document.getElementById("preset-select");

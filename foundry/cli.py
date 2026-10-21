@@ -1597,7 +1597,7 @@ def _autopilot_main(args: list[str]) -> int:
         args, _profile = _take_value(args, "--profile", what="a stack name")
         no_git = "--no-git" in args
         args = [a for a in args if a not in ("--git", "--no-git")]  # --git = default
-        request = " ".join(args).strip()
+        request = _request_text(args)
         if not request or not out_dir:
             raise _CliUsageError(
                 'usage: python -m foundry.cli autopilot "<target>" --out DIR '
@@ -1660,7 +1660,7 @@ def _milestones_main(args: list[str]) -> int:
         args, _profile = _take_value(args, "--profile", what="a stack name")
         no_git = "--no-git" in args
         args = [a for a in args if a not in ("--git", "--no-git")]  # --git = default
-        request = " ".join(args).strip()
+        request = _request_text(args)
         if not request or not out_dir:
             raise _CliUsageError(
                 'usage: python -m foundry.cli milestones "<big target>" --out DIR '
@@ -1721,6 +1721,20 @@ def _export_git(out_dir: str, released: list[tuple[str, str, str]]) -> None:
 
 
 # ---- entry point ------------------------------------------------------------
+
+
+# Flags whose features were removed: reject them rather than letting the leftover
+# tokens silently become part of the build request.
+_REMOVED_FLAGS = frozenset({"--packs", "--apply", "--guardian-approve", "--strict"})
+
+
+def _request_text(args: list[str]) -> str:
+    removed = [a.split("=", 1)[0] for a in args if a.split("=", 1)[0] in _REMOVED_FLAGS]
+    if args and args[0] == "evolve":
+        removed.insert(0, "the evolve subcommand")
+    if removed:
+        raise _CliUsageError(f"{removed[0]} is no longer supported")
+    return " ".join(args).strip()
 
 
 class _CliUsageError(Exception):
@@ -1915,7 +1929,11 @@ def main(argv: list[str] | None = None) -> int:
 
     # The one-line request is OPTIONAL when a --spec is given: with no request we
     # derive one from the spec; with NEITHER a request nor a spec, print usage.
-    request = " ".join(args).strip()
+    try:
+        request = _request_text(args)
+    except _CliUsageError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     if not request:
         if spec_text:
             request = _request_from_spec(spec_text)

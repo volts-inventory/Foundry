@@ -91,3 +91,15 @@ def test_max_slots_and_cost_cap_validate() -> None:
     assert main(["--max-slots", "0", "build a thing"]) == 2
     assert main(["--cost-cap-microusd", "nope", "build a thing"]) == 2
     assert main(["--max-slots", "2", "build a thing"]) == 0
+
+
+def test_removed_flags_are_rejected_not_folded_into_the_request() -> None:
+    assert main(["--packs", "regulated", "build a thing"]) == 2
+
+
+def test_removed_flag_in_equals_form_is_rejected() -> None:
+    assert main(["--packs=regulated", "build a thing"]) == 2
+
+
+def test_removed_evolve_subcommand_is_rejected_not_built() -> None:
+    assert main(["evolve", "./released", "fix login"]) == 2

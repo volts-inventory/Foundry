@@ -303,7 +303,7 @@ _TICKET_DIFFICULTIES = ("trivial", "standard", "complex")
 
 
 def parse_workers(raw: Any = None) -> dict[str, int]:
-    """Per-specialty worker limits from a request body: ints >= 0 (clamped to
+    """Per-specialty worker limits from a request body: ints >= 1 (clamped to
     MAX_WORKERS), default 2 each; unknown keys and non-integers fall back."""
     src = raw if isinstance(raw, Mapping) else {}
     out: dict[str, int] = {}
@@ -312,7 +312,8 @@ def parse_workers(raw: Any = None) -> dict[str, int]:
             n = int(src.get(spec, DEFAULT_WORKERS))
         except (TypeError, ValueError):
             n = DEFAULT_WORKERS
-        out[spec] = max(0, min(MAX_WORKERS, n))
+        # The pool needs >= 1 permit per specialty; 0 would strand that specialty's tickets.
+        out[spec] = max(1, min(MAX_WORKERS, n))
     return out
 
 
@@ -1271,7 +1272,7 @@ def _run_factory(p: Project, resume: bool = False) -> None:
             summaries = _summarize_stage(p, payload)
         except Exception as exc:
             print(f"[summary] floor {p.floor} caption pass failed: {exc}")
-        _emit_paced(p, events_for_payload(payload, p.seen_uris, summaries))
+        _emit_paced(p, events_for_payload(payload, p.seen_uris, summaries, p.ticket_tiers))
         try:                          # persist the dedup set so a resume won't replay
             _STORE.add_seen(p.id, p.seen_uris)
         except Exception:

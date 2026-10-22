@@ -237,10 +237,10 @@ single-server additive-homomorphic (Paillier) variant + the demo runner</textare
           <div class="field worker-limits">
             <label>Workers per specialty <span class="hint">— max tickets in flight at once for each specialist (0 = pause that lane)</span></label>
             <div class="worker-grid">
-              <label class="wl" for="workers-frontend">Frontend <input id="workers-frontend" type="number" min="0" max="16" value="2" /></label>
-              <label class="wl" for="workers-backend">Backend <input id="workers-backend" type="number" min="0" max="16" value="2" /></label>
-              <label class="wl" for="workers-data">Data <input id="workers-data" type="number" min="0" max="16" value="2" /></label>
-              <label class="wl" for="workers-test">Test <input id="workers-test" type="number" min="0" max="16" value="2" /></label>
+              <label class="wl" for="workers-frontend">Frontend <input id="workers-frontend" type="number" min="1" max="16" value="2" /></label>
+              <label class="wl" for="workers-backend">Backend <input id="workers-backend" type="number" min="1" max="16" value="2" /></label>
+              <label class="wl" for="workers-data">Data <input id="workers-data" type="number" min="1" max="16" value="2" /></label>
+              <label class="wl" for="workers-test">Test <input id="workers-test" type="number" min="1" max="16" value="2" /></label>
             </div>
           </div>
           <p class="hint" id="parallel-note">Tickets run in dependency order; each specialty

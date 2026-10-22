@@ -2235,8 +2235,9 @@ function routeEvent(floor, ev){
     }
     case "ticket": {               // a planned ticket (Planner artifact) for the Tickets tab
       const row = ticketRow(taskState(F), ev.id);
+      // A tier already observed from a task event is what the ticket really ran on.
       Object.assign(row, {title:ev.title, specialty:ev.specialty, difficulty:ev.difficulty,
-        tier:ev.tier || DIFF_TIER[ev.difficulty] || "", depends_on:ev.depends_on || []});
+        tier:row.tier || ev.tier || DIFF_TIER[ev.difficulty] || "", depends_on:ev.depends_on || []});
       if (isActive) refreshTickets(F);
       break;
     }

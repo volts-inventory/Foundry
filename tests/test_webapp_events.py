@@ -300,3 +300,14 @@ def test_ticket_artifact_detail_feeds_the_tickets_tab() -> None:
     assert row["id"] == "T-001" and row["specialty"] == "data"
     assert row["tier"] == "T1" and row["depends_on"] == ["T-000"]
     assert row["title"] == long_title.strip()
+
+
+def test_ticket_event_uses_the_run_tier_overrides() -> None:
+    import json as _json
+
+    from webapp.events import ticket_event
+
+    detail = _json.dumps({"id": "T-1", "title": "x", "specialty": "data",
+                          "difficulty": "trivial", "depends_on": []})
+    assert ticket_event(detail)["tier"] == "T3"  # type: ignore[index]
+    assert ticket_event(detail, {"trivial": "T1"})["tier"] == "T1"  # type: ignore[index]

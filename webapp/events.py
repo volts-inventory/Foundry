@@ -324,7 +324,9 @@ def event_for_task(ev: Mapping[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def ticket_event(detail: str) -> dict[str, Any] | None:
+def ticket_event(
+    detail: str, ticket_tiers: Mapping[str, str] | None = None
+) -> dict[str, Any] | None:
     """The Tickets-tab row for a ``ticket`` artifact. Its ``detail`` one-liner is a JSON
     object (id, title, specialty, difficulty, depends_on); anything else yields None and
     the artifact still shows as an ordinary quest-log pickup."""
@@ -340,7 +342,8 @@ def ticket_event(detail: str) -> dict[str, Any] | None:
         "type": "ticket", "id": str(d["id"]), "title": str(d.get("title", "")),
         "specialty": specialty if specialty in _SPECIALTIES else "backend",
         "difficulty": difficulty,
-        "tier": _TIER_FOR_DIFFICULTY.get(difficulty, "T2"),
+        "tier": (ticket_tiers or {}).get(difficulty)
+        or _TIER_FOR_DIFFICULTY.get(difficulty, "T2"),
         "depends_on": [str(x) for x in (d.get("depends_on") or [])],
     }
 
@@ -349,6 +352,7 @@ def events_for_payload(
     payload: dict[str, Any],
     seen_uris: set[str],
     summaries: dict[str, Any] | None = None,
+    ticket_tiers: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Game events for ONE checkpoint pause (the REAL inspection payload).
 
@@ -426,7 +430,7 @@ def events_for_payload(
             label = f"{label} #{kind_seen[kind]}"
         out.append({"type": "agent", "room": aroom, "agent": agent, "action": "work"})
         detail = str(a.get("detail", ""))   # advisory content one-liner
-        tk = ticket_event(detail) if kind == "ticket" else None
+        tk = ticket_event(detail, ticket_tiers) if kind == "ticket" else None
         if tk is not None:
             detail = f"{tk['id']} — {tk['title']}"
         out.append({

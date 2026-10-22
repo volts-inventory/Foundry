@@ -56,7 +56,7 @@ from foundry.gates.spec import SpecGate
 from foundry.gates.test import TestGate
 from foundry.schemas.base import BudgetLedger
 from foundry.schemas.gates import GateResult, GateStatus, GateTriage
-from foundry.schemas.implementation import FEATURE_DIR, FeatureDiff, feature_path
+from foundry.schemas.implementation import FEATURE_DIR, FeatureDiff, Ticket, feature_path
 from foundry.schemas.product import AcceptanceCriterion, CriteriaCritique
 from foundry.state.reducers import merge_gates
 from foundry.state.tree_sha import tree_sha
@@ -111,6 +111,7 @@ __all__ = [
 # Artifact.kind tags the upstream layers stamp on their handles — the seam we
 # read the boundary's DATA inputs back off the artifacts channel by.
 CRITERION_KIND = "acceptance_criterion"  # product layer (LEARNINGS QS3)
+TICKET_KIND = "ticket"
 CRITERIA_CRITIQUE_KIND = "criteria_findings"  # Criteria-Completeness Critic output
 FEATURE_DIFF_KIND = "feature_diff"  # implementation layer (junior_engineer)
 
@@ -176,6 +177,26 @@ def _resolve_typed(
 # ---- criteria.json (the exact shape SpecGate parses) ------------------------
 
 
+def _current_criteria(
+    state: FactoryState, resolve: ArtifactResolver
+) -> dict[str, AcceptanceCriterion]:
+    """Newest record per criterion id, minus the scenarios of tickets a re-plan
+    dropped (a ticket whose newest record supersedes its own id): nothing builds
+    those tickets, so their scenarios must not be specified or executed."""
+    current: dict[str, AcceptanceCriterion] = {}
+    for a in sorted(_of_kind(state, CRITERION_KIND), key=lambda a: a.seq):
+        c = _resolve_typed(a, resolve, AcceptanceCriterion, CRITERION_KIND)
+        current[c.id] = c
+    if not any(c.ticket_id for c in current.values()):
+        return current
+    newest: dict[str, Ticket] = {}
+    for a in sorted(_of_kind(state, TICKET_KIND), key=lambda a: a.seq):
+        t = _resolve_typed(a, resolve, Ticket, TICKET_KIND)
+        newest[t.id] = t
+    retired = {tid for tid, t in newest.items() if t.supersedes == tid}
+    return {cid: c for cid, c in current.items() if c.ticket_id not in retired}
+
+
 def _criteria_list(
     state: FactoryState, resolve: ArtifactResolver
 ) -> list[dict[str, Any]]:
@@ -192,10 +213,7 @@ def _criteria_list(
     per id is the current one. Taking it cannot weaken the gate: this gate
     re-validates exactly that newest set.
     """
-    current: dict[str, AcceptanceCriterion] = {}
-    for a in sorted(_of_kind(state, CRITERION_KIND), key=lambda a: a.seq):
-        c = _resolve_typed(a, resolve, AcceptanceCriterion, CRITERION_KIND)
-        current[c.id] = c
+    current = _current_criteria(state, resolve)
     out: list[dict[str, Any]] = []
     for c in sorted(current.values(), key=lambda c: c.id):
         entry: dict[str, Any] = {
@@ -734,10 +752,7 @@ def render_feature(ticket_id: str, criteria: list[AcceptanceCriterion]) -> str:
 def _features(state: FactoryState, resolve: ArtifactResolver) -> dict[str, str]:
     """``features/<ticket>.feature`` path -> rendered body, for the newest record
     per criterion id that carries a ``ticket_id`` (criteria without one are skipped)."""
-    current: dict[str, AcceptanceCriterion] = {}
-    for a in sorted(_of_kind(state, CRITERION_KIND), key=lambda a: a.seq):
-        c = _resolve_typed(a, resolve, AcceptanceCriterion, CRITERION_KIND)
-        current[c.id] = c
+    current = _current_criteria(state, resolve)
     by_ticket: dict[str, list[AcceptanceCriterion]] = {}
     for c in current.values():
         if c.ticket_id:

@@ -270,7 +270,7 @@ def test_ticket_artifact_surfaces_as_a_planner_pickup_and_a_ticket_event() -> No
     tickets = [e for e in evs if e["type"] == "ticket"]
     assert tickets == [{"type": "ticket", "id": "T-001", "title": "Add login",
                         "specialty": "frontend", "difficulty": "complex", "tier": "T1",
-                        "depends_on": ["T-000"]}]          # the unparseable one stays a pickup only
+                        "depends_on": ["T-000"], "retired": False}]  # unparseable: pickup only
     assert ticket_event("not json") is None
 
     # pool TaskEvent -> floor `task` event; malformed events are dropped
@@ -311,3 +311,16 @@ def test_ticket_event_uses_the_run_tier_overrides() -> None:
                           "difficulty": "trivial", "depends_on": []})
     assert ticket_event(detail)["tier"] == "T3"  # type: ignore[index]
     assert ticket_event(detail, {"trivial": "T1"})["tier"] == "T1"  # type: ignore[index]
+
+
+def test_a_retired_ticket_is_flagged_for_removal_from_the_board() -> None:
+    from foundry.schemas.checkpoint import _artifact_detail
+    from foundry.schemas.implementation import Specialty, Ticket
+    from foundry.state.seq import Seq
+    from webapp.events import ticket_event
+
+    seq = Seq("r", 1, 1, "planner", 0)
+    live = Ticket(id="T-1", title="x", specialty=Specialty.DATA, seq=seq)
+    tomb = Ticket(id="T-1", title="x", specialty=Specialty.DATA, supersedes="T-1", seq=seq)
+    assert ticket_event(_artifact_detail("ticket", live) or "")["retired"] is False  # type: ignore[index]
+    assert ticket_event(_artifact_detail("ticket", tomb) or "")["retired"] is True  # type: ignore[index]

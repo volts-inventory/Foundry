@@ -2234,6 +2234,11 @@ function routeEvent(floor, ev){
       break;
     }
     case "ticket": {               // a planned ticket (Planner artifact) for the Tickets tab
+      if (ev.retired){               // a re-plan dropped it: off the board
+        taskState(F).tickets.delete(ev.id);
+        if (isActive) refreshTickets(F);
+        break;
+      }
       const row = ticketRow(taskState(F), ev.id);
       // A tier already observed from a task event is what the ticket really ran on.
       Object.assign(row, {title:ev.title, specialty:ev.specialty, difficulty:ev.difficulty,

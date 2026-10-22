@@ -202,6 +202,8 @@ def _artifact_detail(kind: str, body: object, *, max_len: int = 200) -> str | No
             "specialty": str(getattr(body, "specialty", "") or ""),
             "difficulty": str(getattr(body, "difficulty", "") or ""),
             "depends_on": list(getattr(body, "depends_on", ()) or ()),
+            # A re-plan's tombstone (supersedes its own id): the ticket was dropped.
+            "retired": getattr(body, "supersedes", None) == s("id"),
         }, separators=(",", ":"))
     out: str | None = None
     if kind == "acceptance_criterion":

@@ -345,6 +345,7 @@ def ticket_event(
         "tier": (ticket_tiers or {}).get(difficulty)
         or _TIER_FOR_DIFFICULTY.get(difficulty, "T2"),
         "depends_on": [str(x) for x in (d.get("depends_on") or [])],
+        "retired": bool(d.get("retired")),
     }
 
 

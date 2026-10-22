@@ -433,3 +433,27 @@ def test_build_excerpt_is_sanitized_and_capped(tmp_path: Path) -> None:
     assert "line 499" in body and "line 0 " not in body
     assert "\x1b" not in body and "\x07" not in body
     assert len(obs.findings) <= 42 and len(body) <= 4500
+
+
+def test_a_dropped_tickets_scenarios_are_neither_specified_nor_executed(tmp_path: Path) -> None:
+    from foundry.graph.gate_wiring import _criteria_list
+    from foundry.schemas.implementation import Specialty, Ticket
+
+    state, resolve, blob = _state((_ac("AC-1"), _ac("AC-2", ticket="T2")), {"app.py": "X = 1\n"})
+    by_uri: dict[str, Any] = {}
+    for t in (
+        Ticket(id="T2", title="old", specialty=Specialty.BACKEND, seq=_seq("planner", 1)),
+        # The re-plan's tombstone: a newer T2 record superseding its own id.
+        Ticket(id="T2", title="old", specialty=Specialty.BACKEND, supersedes="T2", version=2,
+               seq=_seq("planner", 2)),
+    ):
+        h = emit_artifact(t, "ticket", "planner", t.seq)
+        state["artifacts"].append(h)
+        by_uri[h.uri] = t
+
+    def resolve2(a: Artifact) -> Any:
+        return by_uri[a.uri] if a.uri in by_uri else resolve(a)
+
+    assert [c["id"] for c in _criteria_list(state, resolve2)] == ["AC-1"]
+    materialize_workdir(state, tmp_path, resolve=resolve2, resolve_blob=blob)
+    assert sorted(p.name for p in (tmp_path / "features").iterdir()) == ["T1.feature"]

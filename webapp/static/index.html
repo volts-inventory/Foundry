@@ -218,7 +218,6 @@ matches the true record.</textarea>
           </div>
           <p class="hint" id="parallel-note">Tickets run in dependency order; each specialty
             works at most this many at once, the rest queue.</p>
-          <label class="check"><input type="checkbox" id="supervised" checked /> Supervised (CTO approves each checkpoint)</label>
         </div>
       </details>
 
@@ -227,37 +226,6 @@ matches the true record.</textarea>
       <div class="dialog-actions build-actions">
         <button id="start-btn" class="primary">BREAK GROUND</button>
         <button id="cancel-btn">cancel</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Checkpoint dialog (NES-style) -->
-  <div id="cp-modal" class="overlay hidden">
-    <div class="dialog cp">
-      <h2 id="cp-title">CHECKPOINT</h2>
-      <p id="cp-summary"></p>
-      <!-- Evidence for the decision, most decisive first: what the gates say, what
-           the agents flagged, what actually landed. -->
-      <div id="cp-meta" class="cp-meta"></div>
-      <div id="cp-gates" class="cp-gates hidden"></div>
-      <div id="cp-flags" class="cp-flags hidden"></div>
-      <details id="cp-arts-wrap" class="cp-details hidden">
-        <summary>What landed this stage <span id="cp-arts-count" class="hint"></span></summary>
-        <div id="cp-arts" class="cp-arts"></div>
-      </details>
-      <p class="cp-note">An approve only lets the build reach the gates — it can never ship a failing build. Request changes to send the work back for another pass.</p>
-      <div id="cp-prov" class="cp-prov"></div>
-      <!-- Reading the diff is evidence-gathering, so it sits with the evidence —
-           above the decision, not competing with it. -->
-      <div class="dialog-actions cp-review">
-        <button id="cp-code">⌥ REVIEW THE CODE</button>
-      </div>
-      <!-- Sticky: the evidence above can outgrow a phone screen, and the decision
-           must never be the thing you have to scroll to find. -->
-      <div class="dialog-actions cp-actions">
-        <button id="cp-approve" class="primary">APPROVE<span class="btn-sub" id="cp-approve-sub"></span></button>
-        <button id="cp-changes" class="warn">REQUEST CHANGES<span class="btn-sub" id="cp-changes-sub"></span></button>
-        <button id="cp-reject" class="danger">REJECT<span class="btn-sub" id="cp-reject-sub"></span></button>
       </div>
     </div>
   </div>

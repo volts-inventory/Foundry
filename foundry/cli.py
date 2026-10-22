@@ -56,8 +56,6 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from langgraph.types import Command
-
 from foundry.agents import AgentRuntime
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.durability.checkpointer import FoundryCheckpointer
@@ -72,10 +70,7 @@ from foundry.gates import DevGateWriteVerifier, TwoZoneGateRunner, ZoneBSigner
 from foundry.gates.signing import signing_schemes_from_env
 from foundry.graph.factory_graph import build_factory_graph, terminal_gates_pass
 from foundry.graph.gate_wiring import GATE_INPUT_FILES
-from foundry.graph.supervisor import (
-    MODE_ASSISTANT,
-    normalize_checkpoints,
-)
+from foundry.graph.supervisor import MODE_ASSISTANT
 from foundry.manifest import write_manifest
 from foundry.proxy import ModelProviderProxy, build_backend
 from foundry.proxy.model_provider_proxy import DriftMode, DriftPolicy
@@ -83,7 +78,6 @@ from foundry.proxy.test_doubles import MockTransport
 from foundry.proxy.token_meter import TokenCapExceeded, TokenMeter
 from foundry.schemas.architecture import OwnershipMap, SystemDesign
 from foundry.schemas.base import FrozenModel
-from foundry.schemas.checkpoint import CHECKPOINT_BOUNDARIES
 from foundry.schemas.gates import GateStatus
 from foundry.schemas.implementation import (
     DEFAULT_TICKET_TIERS,
@@ -103,16 +97,9 @@ if TYPE_CHECKING:
     from foundry.graph.gate_wiring import BlobResolver
     from foundry.proxy.cli_transports import BackendName
     from foundry.schemas.base import Artifact, ExternalAction
-    from foundry.schemas.checkpoint import CheckpointBoundary
     from foundry.state.factory_state import FactoryState
 
-# A programmatic checkpoint responder (plan [10]): given the READ-ONLY inspection
-# payload surfaced at a pause, return the human decision (a verdict string, or a
-# mapping with ``verdict`` + optional ``steered_by``/``note``). Programmatic by
-# design — NO interactive stdin — so the checkpoint flow is fully testable.
-CheckpointResponder = Callable[[dict[str, Any]], "str | dict[str, Any]"]
-
-__all__ = ["MODES", "CheckpointResponder", "RunResult", "main", "run"]
+__all__ = ["MODES", "RunResult", "main", "run"]
 
 # Zone-B trust-root key material: a locally-held HMAC secret (the operator is the
 # trust boundary on a single-user LAN; see foundry.gates.signing).
@@ -845,14 +832,6 @@ class RunResult:
     what's still failing — so a held build hands back a usable starting point, never
     empty hands. ``None`` on a PASS (use ``output_root``) or when no draft could be
     materialized."""
-    checkpoints: tuple[str, ...] = ()
-    """The checkpoint stage boundaries the run was driven with (plan [10]); empty
-    when checkpoints were OFF (the default)."""
-    paused_at: str | None = None
-    """The stage boundary the run is PAUSED at awaiting a human decision (plan
-    [10]) — set only when checkpoints are on and no responder drove past the pause.
-    ``None`` means the run completed (or was never checkpointed)."""
-
     def summary(self) -> str:
         """A concise human-readable report of the run (printed by ``main``)."""
         lines = [
@@ -864,13 +843,6 @@ class RunResult:
             + ("(deterministic mock — no model call)"
                if self.backend == _MOCK_BACKEND else "(real model egress)"),
         ]
-        if self.checkpoints:
-            lines.append(f"checkpoints: {', '.join(self.checkpoints)}")
-        if self.paused_at is not None:
-            lines.append(
-                f"PAUSED at the {self.paused_at!r} checkpoint awaiting a human "
-                "decision (resume with a CheckpointDecision)."
-            )
         lines += [
             f"phase:     {self.phase}",
             f"result:    {'PASS' if self.passed else 'HALTED (no PR)'}",
@@ -901,20 +873,7 @@ class RunResult:
         return "\n".join(lines)
 
 
-# ---- checkpoint pause/resume driver (plan [10]) -----------------------------
-
-
-def _pending_interrupt(result: Any) -> Any:
-    """The pending LangGraph ``Interrupt`` on a paused invoke result, or ``None``.
-
-    A checkpointed run that hits a pause returns a dict carrying ``__interrupt__``
-    (the active interrupts); we read the first one's ``value`` (our read-only
-    inspection payload) to drive the responder. ``None`` means the run completed."""
-    if isinstance(result, dict):
-        interrupts = result.get("__interrupt__")
-        if interrupts:
-            return interrupts[0]
-    return None
+# ---- graph drivers ----------------------------------------------------------
 
 
 def _progress_enabled() -> bool:
@@ -968,31 +927,19 @@ def _stream_segment(
     x: Any,
     config: RunnableConfig,
     progress_cb: Callable[..., None],
-) -> dict[str, Any]:
-    """Drive ONE graph segment with ``stream``, forwarding each node's START and
-    FINISH to ``progress_cb(node, scope, phase=..., result=...)`` for LIVE telemetry
-    (so the floor seats an agent the moment its node begins — through the whole model
-    call — and clears it, with a summary, when the node completes; not a single burst
-    at the pause).
+) -> None:
+    """Drive the graph with ``stream``, forwarding each node's START and FINISH to
+    ``progress_cb(node, scope, phase=..., result=...)`` for LIVE telemetry (so the
+    floor seats an agent the moment its node begins and clears it, with a summary,
+    when the node completes).
 
-    ``stream_mode=["updates", "tasks"]`` gives both edges: the ``tasks`` mode emits a
-    task event on start (no ``result``) and on finish (carries ``result``), while the
-    ``updates`` mode still surfaces ``__interrupt__`` for the pause. ``subgraphs=True``
-    surfaces the inner stage nodes; the namespace's leading scope names the stage/room.
-    Returns a dict carrying ``__interrupt__`` if the segment paused, so the caller's
-    interrupt detection (:func:`_pending_interrupt`) is byte-identical to ``invoke``.
-    (Requires langgraph's ``tasks`` stream mode — present since the pinned 1.x line.)"""
-    pending: Any = None
-    for item in app.stream(x, config, stream_mode=["updates", "tasks"], subgraphs=True):
-        ns, mode, payload = _unpack_stream_item(item)
+    The ``tasks`` stream mode emits a task event on start (no ``result``) and on
+    finish (carries ``result``). ``subgraphs=True`` surfaces the inner stage nodes;
+    the namespace's leading scope names the stage/room."""
+    for item in app.stream(x, config, stream_mode="tasks", subgraphs=True):
+        ns, _mode, payload = _unpack_stream_item(item)
         scope = ":".join(str(n).split(":")[0] for n in ns) if ns else ""
-        if mode == "updates":
-            # 'updates' is used ONLY for the pause signal now (start/finish come from
-            # 'tasks'); a segment paused iff its update carries an interrupt.
-            if isinstance(payload, dict) and "__interrupt__" in payload:
-                pending = payload["__interrupt__"]
-            continue
-        if mode == "tasks" and isinstance(payload, dict) and payload.get("name"):
+        if isinstance(payload, dict) and payload.get("name"):
             node = str(payload["name"])
             finished = ("result" in payload) or ("error" in payload)
             phase = "finish" if finished else "start"
@@ -1000,62 +947,23 @@ def _stream_segment(
             # telemetry is advisory — never let a UI callback break the build
             with contextlib.suppress(Exception):
                 progress_cb(node, scope, phase=phase, result=result)
-    return {"__interrupt__": pending} if pending else {}
 
 
-def _invoke_with_checkpoints(
+def _invoke(
     app: Any,
     seed: FactoryState,
     config: RunnableConfig,
     *,
-    checkpointed: bool,
-    responder: CheckpointResponder | None,
     progress_cb: Callable[..., None] | None = None,
-) -> tuple[FactoryState, str | None]:
-    """Drive the compiled graph, pausing/resuming at the checkpoint boundaries.
-
-    Non-checkpointed runs (the default) invoke ONCE — byte-identical to today.
-    A checkpointed run invokes, and while the result carries a pending
-    ``__interrupt__`` it asks the ``responder`` for a decision and RESUMES via
-    ``Command(resume=...)`` (the run is durable on the checkpointer). With NO
-    responder, it stops at the first pause and returns ``(state, boundary)`` so the
-    caller can resume out-of-band. The bound on the resume loop is the number of
-    checkpoint boundaries (a responder that always rejects halts immediately).
-
-    When ``progress_cb`` is given each segment is STREAMED (per-node liveness) via
-    :func:`_stream_segment` instead of a silent ``invoke`` — same control flow,
-    same interrupt handling, plus live telemetry."""
-    def _drive(x: Any) -> Any:
-        if progress_cb is not None:
-            return _stream_segment(app, x, config, progress_cb)
-        return app.invoke(x, config)
-
-    if not checkpointed:
-        # Byte-identical to the historical single-invoke path: the invoke return
-        # IS the terminal channel state (no interrupts on a non-checkpointed run).
-        # With progress on, stream per-node so a long real build shows liveness.
-        if progress_cb is not None:
-            _stream_segment(app, seed, config, progress_cb)
-            return cast("FactoryState", app.get_state(config).values), None
-        if _progress_enabled():
-            return _invoke_streaming(app, seed, config), None
-        return cast("FactoryState", app.invoke(seed, config)), None
-    result = _drive(seed)
-
-    # Bound the loop: at most one pause per stage boundary (3) + slack.
-    for _ in range(len(CHECKPOINT_BOUNDARIES) + 1):
-        interrupt = _pending_interrupt(result)
-        if interrupt is None:
-            break
-        payload = dict(interrupt.value) if isinstance(interrupt.value, dict) else {}
-        if responder is None:
-            # No responder: surface the pause and stop (caller resumes out-of-band).
-            boundary = str(payload.get("boundary") or "")
-            return cast("FactoryState", app.get_state(config).values), boundary or None
-        decision = responder(payload)
-        result = _drive(Command(resume=decision))
-    # The authoritative terminal state is the checkpointed channel view.
-    return cast("FactoryState", app.get_state(config).values), None
+) -> FactoryState:
+    """Drive the compiled graph to completion; stream per-node telemetry when a
+    ``progress_cb`` is given (or ``FOUNDRY_PROGRESS`` is set)."""
+    if progress_cb is not None:
+        _stream_segment(app, seed, config, progress_cb)
+        return cast("FactoryState", app.get_state(config).values)
+    if _progress_enabled():
+        return _invoke_streaming(app, seed, config)
+    return cast("FactoryState", app.invoke(seed, config))
 
 
 def _is_transient_proxy_failure(exc: BaseException) -> bool:
@@ -1070,12 +978,10 @@ def _invoke_with_autoresume(
     seed: FactoryState,
     config: RunnableConfig,
     *,
-    checkpointed: bool,
-    responder: CheckpointResponder | None,
     progress_cb: Callable[..., None] | None,
     resumable: bool,
-) -> tuple[FactoryState, str | None]:
-    """Wrap :func:`_invoke_with_checkpoints` so a TRANSIENT provider failure does
+) -> FactoryState:
+    """Wrap :func:`_invoke` so a TRANSIENT provider failure does
     not kill a DURABLE run. A spent Max usage/session window (or a provider blip)
     surfaces as ProxyUnavailable; the durable checkpoint is intact, so back off
     and RE-INVOKE — langgraph continues the graph from its last superstep.
@@ -1098,14 +1004,7 @@ def _invoke_with_autoresume(
     used = 0
     while True:
         try:
-            return _invoke_with_checkpoints(
-                app,
-                seed,
-                config,
-                checkpointed=checkpointed,
-                responder=responder,
-                progress_cb=progress_cb,
-            )
+            return _invoke(app, seed, config, progress_cb=progress_cb)
         except Exception as exc:  # noqa: BLE001 — re-raised unless transient+budget
             if used >= budget or not _is_transient_proxy_failure(exc):
                 raise
@@ -1140,8 +1039,6 @@ def run(
     diff_body: str | None = None,
     max_fix_attempts: int = 2,
     output_dir: str | None = None,
-    checkpoints: bool | list[str | CheckpointBoundary] | None = None,
-    checkpoint_responder: CheckpointResponder | None = None,
     progress_cb: Callable[..., None] | None = None,
     activity_cb: Callable[[str], None] | None = None,
     task_cb: Callable[[TaskEvent], None] | None = None,
@@ -1202,24 +1099,6 @@ def run(
         best-effort DRAFT (the latest attempt's tree + a ``DRAFT-STATUS.md`` naming
         what's failing) is written instead, surfaced on ``RunResult.draft_root`` — so
         a held build hands back a usable starting point, never empty hands.
-    checkpoints:
-        OPTIONAL checkpoint/HITL mode (plan [10]). ``None``/``False`` (the
-        DEFAULT) runs straight through with NO pauses (byte-identical to today).
-        ``True`` pauses at all three stage boundaries (after product/spec, after
-        architecture/design, after implementation+quality / before release); a
-        list of boundary names pauses at exactly those. The run is resumable on
-        the durable checkpointer. **Trust:** a checkpoint approve only lets the run
-        proceed to the (unchanged) gate boundary — it can NEVER turn a gate FAIL
-        into a release; a release reject HALTS even on a gate PASS.
-    checkpoint_responder:
-        OPTIONAL programmatic responder driving the pauses (plan [10]; NO
-        interactive stdin, so the flow is fully testable). Called with the
-        READ-ONLY inspection payload at each pause; returns the human decision (a
-        verdict string ``"approve"``/``"reject"``/``"needs_changes"``, or a mapping
-        with ``verdict`` + optional ``steered_by``/``note`` recording steering
-        authorship). When ``checkpoints`` are on but NO responder is supplied, the
-        run PAUSES at the first boundary and returns with ``RunResult.paused_at``
-        set (the caller resumes out-of-band on the same ``thread_id``).
     task_cb / workers / ticket_tiers:
         Ticket path (the planner emitted tickets). ``task_cb`` receives each
         ticket's :class:`TaskEvent` (``{phase, ticket_id, title, specialty, tier}``,
@@ -1242,9 +1121,6 @@ def run(
         raise ValueError(f"unknown backend {backend!r}; choose one of {', '.join(BACKENDS)}")
     if scope not in SCOPES:
         raise ValueError(f"unknown scope {scope!r}; choose one of {', '.join(SCOPES)}")
-    # Resolve the checkpoint boundary set up front (fail-closed on a typo'd name).
-    ckpt_set = normalize_checkpoints(checkpoints)
-    ckpt_names = tuple(sorted(b.value for b in ckpt_set))
     if diff_body is None:
         diff_body = _PASSING_DIFF
     spec_text = _load_spec(spec)
@@ -1317,7 +1193,7 @@ def run(
 
     # -- judgment-binding anchors (Phase-1 2c) --------------------------------
     # `subject_artifact_uri` / `state_sha` are pre-build RUN-INPUT LABELS the
-    # reviewer's advisory verdict + checkpoint decisions bind to. For the `mock`
+    # reviewer's advisory verdict binds to. For the `mock`
     # smoke they are PINNED to the synthetic subject/label the synthetic resolver
     # produces (byte-identical to before). For a REAL backend we DON'T pin them:
     # the reviewer then binds the REAL newest FeatureDiff uri (state fallback) +
@@ -1375,7 +1251,6 @@ def run(
                 checkpointer=ckpt.saver,
                 max_fix_attempts=max_fix_attempts,
                 profile=run_profile,
-                checkpoints=sorted(ckpt_set) if ckpt_set else None,
                 max_slots=max_slots,
                 cost_cap_microusd=cost_cap_microusd,
                 workers=workers,
@@ -1409,7 +1284,7 @@ def run(
             # detail). Only wired when a progress_cb is attached.
             drive_pc = progress_cb
             if progress_cb is not None:
-                from foundry.schemas.checkpoint import _artifact_detail
+                from foundry.schemas.checkpoint import _artifact_detail, _org_section
 
                 def _feature_diff_stat(body: object) -> str | None:
                     # An engineer's "what I built": the FeatureDiff handle has no content
@@ -1468,8 +1343,11 @@ def run(
                     result: object = None, _pc: Any = progress_cb, _rv: Any = resolve,
                 ) -> None:
                     if phase == "finish" and isinstance(result, dict) and result.get("artifacts"):
+                        arts = list(result["artifacts"])
                         details: list[dict[str, str]] = []
-                        for a in list(result["artifacts"])[:24]:
+                        # Every ticket must reach the Workshop's Tickets tab, so the
+                        # cap is generous (it only bounds a pathological plan).
+                        for a in arts[:200]:
                             kind = str(getattr(a, "kind", ""))
                             try:
                                 body = _rv(a)
@@ -1477,17 +1355,22 @@ def run(
                                      else _artifact_detail(kind, body, max_len=600))
                             except Exception:
                                 d = None
-                            details.append({"kind": kind, "detail": str(d or "")})
+                            details.append({
+                                "kind": kind, "detail": str(d or ""),
+                                "uri": str(getattr(a, "uri", "")),
+                                "produced_by": str(getattr(a, "produced_by", "")),
+                            })
                         if details:
                             result = {**result, "_art_details": details}
+                        org = _org_section({"artifacts": arts}, _rv)
+                        if org is not None:
+                            result = {**result, "_org": org}
                     _pc(node, scope, phase=phase, result=result)
 
-            final, paused_at = _invoke_with_autoresume(
+            final = _invoke_with_autoresume(
                 app,
                 seed,
                 config,
-                checkpointed=bool(ckpt_set),
-                responder=checkpoint_responder,
                 progress_cb=drive_pc,
                 resumable=(durable is not None),
             )
@@ -1507,8 +1390,6 @@ def run(
         final_state,
         mode=mode,
         backend=backend,
-        checkpoints=ckpt_names,
-        paused_at=paused_at,
     )
     if output_dir is not None and result.passed:
         # On a PASSING build, materialize the FINAL accepted integrated tree
@@ -1541,8 +1422,6 @@ def _result(
     *,
     mode: str = MODE_ASSISTANT,
     backend: str = _MOCK_BACKEND,
-    checkpoints: tuple[str, ...] = (),
-    paused_at: str | None = None,
 ) -> RunResult:
     """Distill the terminal state into a :class:`RunResult` (no bodies, L4)."""
     statuses: dict[str, GateStatus] = {}
@@ -1563,12 +1442,7 @@ def _result(
         (a for a in (final.get("actions") or ()) if a.kind == "open_pr"),
         None,
     )
-    # A run "passed" only if a release action was actually emitted (gates PASS AND
-    # not halted by a checkpoint reject / pause). On a non-checkpoint PASS a
-    # release is always emitted, so this is byte-identical to the prior
-    # ``terminal_gates_pass`` semantics; a checkpoint reject (gates PASS but no
-    # PR) or a paused run reports ``passed=False`` — the gates remain the trust
-    # authority, the checkpoint only subtracts the release.
+    # A run "passed" only if the gates PASS AND a release action was emitted.
     passed = terminal_gates_pass(final) and release is not None
     return RunResult(
         request=request,
@@ -1582,8 +1456,6 @@ def _result(
         open_pr_payload_uri=release.payload_uri if release is not None else None,
         gate_statuses=statuses,
         gate_findings=findings,
-        checkpoints=checkpoints,
-        paused_at=paused_at,
     )
 
 
@@ -1592,7 +1464,8 @@ def _result(
 
 # Flags whose features were removed: reject them rather than letting the leftover
 # tokens silently become part of the build request.
-_REMOVED_FLAGS = frozenset({"--packs", "--apply", "--guardian-approve", "--strict", "--docs"})
+_REMOVED_FLAGS = frozenset({"--packs", "--apply", "--guardian-approve", "--strict", "--docs",
+                            "--checkpoints"})
 
 
 def _request_text(args: list[str]) -> str:
@@ -1815,27 +1688,6 @@ def main(argv: list[str] | None = None) -> int:
     except _CliUsageError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    # --checkpoints [all|name1,name2] (plan [10]): pause at the stage boundaries
-    # for human verification. ``--checkpoints`` alone (or ``all``) enables all
-    # three; a comma list selects specific boundaries. From the shell the CLI uses
-    # an APPROVE-ALL responder (a human partner would inspect + decide via the
-    # ``run(checkpoint_responder=...)`` API — programmatic, no interactive stdin);
-    # an approve still cannot turn a gate FAIL into a release (the gates decide).
-    checkpoints: bool | list[str] | None = None
-    if "--checkpoints" in args:
-        i = args.index("--checkpoints")
-        # An optional value follows ONLY if the next token isn't the request /
-        # another flag (heuristic: contains no spaces and isn't the last arg or a
-        # known sub-token). We accept "all" or a comma list; otherwise enable all.
-        nxt = args[i + 1] if i + 1 < len(args) else None
-        if nxt is not None and (nxt == "all" or ("," in nxt) or nxt in {
-            b.value for b in CHECKPOINT_BOUNDARIES
-        }):
-            checkpoints = True if nxt == "all" else [s.strip() for s in nxt.split(",") if s.strip()]
-            args = args[:i] + args[i + 2 :]
-        else:
-            checkpoints = True
-            args = args[:i] + args[i + 1 :]
     # Resolve --spec paths to text FIRST: a spec can STAND IN for the one-line
     # request (run from just `--spec FILE`), so we resolve it before deciding whether
     # a positional request is required. A missing/empty path is a clean usage error
@@ -1863,7 +1715,6 @@ def main(argv: list[str] | None = None) -> int:
                 "[--mode assistant] "
                 "[--backend {mock|anthropic|openai|claude-cli|codex|ollama-gemma}] "
                 "[--adapter {stub|raw-react|claude-code}] "
-                "[--checkpoints [all|product,design,release]] "
                 "[--scope {auto|demo|standard}] "
                 "[--out DIR] [--spec FILE|DIR ...] "
                 "[--state-dir DIR] [--thread-id NAME] [--max-fix-attempts N] "
@@ -1876,22 +1727,12 @@ def main(argv: list[str] | None = None) -> int:
                 "  adapter (coding substrate): omitted => DERIVED from --backend "
                 "(mock=>stub no-op, claude-cli=>claude-code AGENTIC, other real "
                 "backends=>raw-react); override with stub | raw-react | claude-code\n"
-                "  checkpoints (plan [10]): pause at stage boundaries for human "
-                "verification; an approve can NEVER turn a gate FAIL into a release\n"
                 "  scope: auto (default — the planner classifies the request) | "
                 "demo (small: capped criteria, 1 component, no interface contracts) | "
                 "standard. Caps what the agents PROPOSE; the gate set is identical",
                 file=sys.stderr,
             )
             return 2
-
-    # A shell --checkpoints run uses an APPROVE-ALL responder so it completes
-    # without interactive stdin (a human partner inspects + decides via the
-    # run(checkpoint_responder=...) API). The approve only proceeds to the gates;
-    # it can never make a FAILing gate release.
-    responder: CheckpointResponder | None = (
-        (lambda _payload: "approve") if checkpoints else None
-    )
 
     try:
         result = run(
@@ -1904,8 +1745,6 @@ def main(argv: list[str] | None = None) -> int:
             state_dir=state_dir,
             max_fix_attempts=max_fix_attempts,
             output_dir=output_dir,
-            checkpoints=checkpoints,
-            checkpoint_responder=responder,
             max_slots=max_slots,
             cost_cap_microusd=cost_cap_microusd,
             workers=workers,

@@ -960,21 +960,6 @@ class FloorScene extends Phaser.Scene {
         this.time.delayedCall(950,()=>this.tweens.add({targets:s,alpha:0,duration:300,onComplete:()=>s.destroy()})); }});
     if (!pass) this.shake(380,0.015);
   }
-  // checkpoint spotlight + bouncing "?" over the CTO
-  spotlightCTO(on){
-    this.ctoHold = !!on;        // he's deciding, not doing his rounds — pause the patrol
-    if (this.spot){ this.spot.destroy(); this.spot=null; }
-    if (this.qmark){ this.qmark.destroy(); this.qmark=null; }
-    if (!on || !this.cto) return;
-    const x=this.cto.x;
-    const dim=this.add.rectangle(0,0,W,H,0x05080f,0.5).setOrigin(0,0);
-    const beam=this.add.triangle(x,FLOOR_TOP-70,-66,180,66,180,0,0,0xfff1c0,0.10);
-    this.spot=this.add.container(0,0).setDepth(34); this.spot.add([dim,beam]);
-    const q=this.add.text(x,this.cto.y-48,"?",{fontFamily:"'PixelFont','Courier New',monospace",
-      fontSize:"24px",fontStyle:"bold",color:"#ffd95e"}).setOrigin(0.5).setDepth(2000);
-    this.qmark=q;
-    this.tweens.add({targets:q, y:q.y-7, duration:480, yoyo:true, repeat:-1, ease:"Sine.inOut"});
-  }
   celebrate(){
     for (const a of this.agents.values()) if (a.seen) this.hop(a,3);
     this.hop(this.cto,3);
@@ -1293,7 +1278,7 @@ class FloorScene extends Phaser.Scene {
   // room. Called on a timer AND whenever the live set changes, so he reacts at once when
   // the first work lands or the room he's overseeing goes quiet.
   ctoPatrol(){
-    if (!this.cto || this._dead || this.ctoHold) return;         // held during a checkpoint
+    if (!this.cto || this._dead) return;
     if (this.cto.moveTween && this.cto.moveTween.isPlaying()) return;   // already walking
     const rooms = this.patrolRooms();
     if (!rooms.length){ if (this.ctoRoom !== null) this.sendCTO(null); return; }
@@ -1568,9 +1553,6 @@ class FloorScene extends Phaser.Scene {
     for (const [,a] of this.agents) if (a && a.seen) yield a;
     for (const s of [...(this.poolGroup||[]), ...(this.techLeadGroup||[]), ...(this.taskGroup||[])])
       if (s && s.bob && s.seen) yield s;    // the group arrays also hold workstations
-  }
-  standDownAll(){   // whole floor off the clock (checkpoints / done) — still at their desks
-    for (const a of this.everyone()) this.standDown(a);
   }
   deskSweep(){   // NOBODY roams: the sweep just walks anyone off-duty back to their own
     // desk if some animation left them adrift, and re-settles anyone with no mood.
@@ -2028,14 +2010,14 @@ let ACTIVE = null;          // the floor currently shown
 
 function floorKey(f){ return "floor-"+f; }
 
-async function newProject(req, supervised, backend, extra){
+async function newProject(req, backend, extra){
   const mode = "assistant";
   await bootReady;  // shared textures must exist before a FloorScene builds
   let resp;
   try {
     resp = await fetch("/api/projects", {
       method:"POST", headers:postHeaders(),
-      body: JSON.stringify({request:req, supervised, backend, ...(extra||{})}),
+      body: JSON.stringify({request:req, backend, ...(extra||{})}),
     }).then(r=>r.json());
   } catch(err){ appendLogDom("bad","ERR "+err); return; }
 
@@ -2049,7 +2031,7 @@ async function newProject(req, supervised, backend, extra){
     if (existing.es){ try{ existing.es.close(); }catch(_){} }
     Object.assign(existing, {
       id:resp.id, release, releases:(existing.releases||1)+1, request:req, mode, backend,
-      log:[], progress:[], gates:{}, org:null, cp:null, awaiting:false, status:"running", passed:false,
+      log:[], progress:[], gates:{}, org:null, status:"running", passed:false,
       slots, journal:[], seenUris:new Set(), _agrp:null, tasks:null,
     });
     setTaskLimits(existing, extra && extra.workers);
@@ -2063,7 +2045,7 @@ async function newProject(req, supervised, backend, extra){
   // NEW PROJECT: a fresh floor.
   const F = {
     id: resp.id, floor, release, releases:1, request:req, mode, backend, scene:null,
-    log:[], progress:[], gates:{}, org:null, cp:null, awaiting:false, status:"running", passed:false,
+    log:[], progress:[], gates:{}, org:null, status:"running", passed:false,
     slots, journal:[], seenUris:new Set(),
   };
   setTaskLimits(F, extra && extra.workers);
@@ -2089,7 +2071,6 @@ function switchToFloor(floor){
   refreshTickets(F);
   renderGatesMini(F.gates);
   updateHud(F);
-  if (F.awaiting) showCheckpoint(F); else hideCheckpoint();
   renderElevator();
 }
 
@@ -2236,8 +2217,11 @@ function routeEvent(floor, ev){
       break;
     case "stage":
       if (S) S.setActiveRoom(ev.room, true);   // new phase boundary → reset the live crew
-      resetStage(F);                            // new stage → fresh artifact/journal buckets
-      logTo(F, "gold", "── "+ev.label+" ──"); break;   // Progress gets the stage's ✓ cap at its checkpoint
+      closeStage(F);                            // the previous stage's ✓ row on Progress
+      F.stageLabel = ev.label;
+      logTo(F, "gold", "── "+ev.label+" ──"); break;
+    case "journal":                // one agent's journal entry, for the interview dialog
+      (F.journal = F.journal || []).push(ev.entry || {}); break;
     case "agent": if (S) S.agentWork(ev.agent); break;
     case "active": {
       // LIVE per-node telemetry: a real graph node STARTED (seat its agent for the whole
@@ -2293,53 +2277,6 @@ function routeEvent(floor, ev){
       break;
     case "files":
       break;   // file count is read live from the repo view, not cached on F
-    case "checkpoint": {
-      // `phase`/`route`/`state_sha` are the pause's provenance (WHERE in the pipeline,
-      // WHICH state); `actions` is the per-button consequence copy from the server.
-      F.cp = {title:ev.title, summary:ev.summary, boundary:ev.boundary,
-              phase:ev.phase||"", route:ev.route||"", state_sha:ev.state_sha||"",
-              actions:ev.actions||null};
-      // Stage outcome -> the Progress tab as a COLLAPSIBLE row: the summary states what
-      // was completed (the artifact breakdown), and expanding lists it + the agents'
-      // journal notes (what specifically each lead produced) + the raw count.
-      const bd = kindBreakdown(F.stageArts);
-      const desc = (ev.summary||"").trim();   // T3 descriptive caption of the stage
-      const head = "✓ "+(ev.title||ev.boundary||"stage")+" finished"
-        + (desc ? " — "+desc : (bd.length ? " — "+bd.join(" · ") : ""));
-      // Body: the itemised breakdown + each agent's descriptive caption (not a repeat of
-      // the header — the header is the T3 prose, the body is the specifics).
-      const lines=[];
-      if(bd.length) lines.push("Produced: "+bd.join(", "));
-      const says=F.stageSays||{};
-      for(const ag in says) lines.push(ag+" — "+says[ag]);
-      logProgress(F, "good", head, lines); break;
-    }
-    case "await_decision":
-      F.awaiting = true; F.cpIndex = ev.checkpoint;
-      // `spend` is the advisory cost/elapsed context.
-      F.cp = Object.assign({}, F.cp, {spend: ev.spend || null,
-                                      // the stage's artifacts are frozen at the pause
-                                      arts: (F.stageArts || []).slice()});
-      if (Array.isArray(ev.journal)) F.journal = ev.journal;
-      renderElevator();
-      if (S){ S.spotlightCTO(true); S.standDownAll(); }   // whole floor off duty while the CTO decides
-      if (isActive) showCheckpoint(F); break;
-    case "resolved": {
-      F.awaiting = false; renderElevator();
-      // three-way verdict: approve (green) · needs_changes (gold) · reject (red)
-      const ap = ev.decision === "approve", ch = ev.decision === "needs_changes";
-      const txt = ap?"APPROVED":(ch?"CHANGES":"REJECTED");
-      logProgress(F, ap?"good":(ch?"hot":"bad"), "CTO "+txt);
-      if (S){ S.spotlightCTO(false);
-        if (S.activeRoomKey) S.staffRoom(S.activeRoomKey);   // back to work
-        const col = ap?0x5ddc7a:(ch?0xffcf52:0xff5d6c);
-        const hex = ap?"#9dffbf":(ch?"#ffe6a3":"#ffb3ba");
-        S.hop(S.cto, ap?2:1); S.ring(S.cto.x, S.cto.y-10, col);
-        S.burst(S.cto.x, S.cto.y-10, [col,0xffffff], 12);
-        S.floatText(S.cto.x, S.cto.y-30, txt, hex, 13);
-        if (ev.decision === "reject") S.shake(280,0.01); }
-      if (isActive) hideCheckpoint(); break;
-    }
     case "release":
       if (S){ S.openGateAndChest(); S.stampGate(true); S.celebrate(); S.banner("SHIPPED!", 0x5ddc7a); }
       logTo(F, "gold", "RELEASED -> "+(ev.uri||"artifact"));
@@ -2349,6 +2286,7 @@ function routeEvent(floor, ev){
       logTo(F, "bad", "HELD: "+ev.reason);
       logProgress(F, "bad", "✕ HELD — "+ev.reason); break;
     case "done":
+      closeStage(F);
       F.status = "done"; F.passed = !!ev.passed; renderElevator();
       taskClear(F); if (S) S.clearWorkers();
       // Build's over: nobody is working, so everyone heads to the LOUNGE
@@ -2362,7 +2300,7 @@ function routeEvent(floor, ev){
 }
 
 // =========================================================================== //
-//  DOM: quest log, gates-mini, HUD, elevator, checkpoint modal                //
+//  DOM: quest log, gates-mini, HUD, elevator                                  //
 // =========================================================================== //
 function logClass(t){   // classify BEFORE stripping, so server emoji still tint the row
   if(/✅|💰|green|shipped|released|complete/i.test(t)) return "good";
@@ -2599,7 +2537,6 @@ function logAct(F, ev){
 function logArtifact(F, ev){
   const base=artBase(ev.label), agent=ev.agent||"(system)", detail=ev.detail||"";
   (F.stageArts=F.stageArts||[]).push({kind:ev.kind||base, base, label:ev.label, agent, detail});
-  if((ev.kind||"")==="feature_diff") F.hasCode=true;   // code exists -> the checkpoint can offer to show it
   const g=agentBox(F, agent);
   g.items.push({base, label:ev.label, detail});
   if(F.floor===ACTIVE) refreshAgentBox(g);
@@ -2611,9 +2548,19 @@ function logSay(F, ev){
   const g=(F._agrp||{})[ev.agent];
   if(g && ev.text && g.cap!==ev.text){ g.cap=ev.text; if(F.floor===ACTIVE) refreshAgentBox(g); }
 }
-// New STAGE: reset only the per-stage buckets that feed the PROGRESS summary; the agent
-// boxes are build-global (each agent appears once, filling in as its work lands).
-function resetStage(F){ F.stageArts=[]; F.stageSays={}; }
+// A stage's outcome -> the Progress tab as a COLLAPSIBLE row: what it produced, and
+// each agent's note. Called when the next stage opens and when the build ends; the
+// agent boxes are build-global (each agent appears once, filling in as work lands).
+function closeStage(F){
+  if (F.stageLabel){
+    const bd = kindBreakdown(F.stageArts), lines = [];
+    if (bd.length) lines.push("Produced: "+bd.join(", "));
+    const says = F.stageSays || {};
+    for (const ag in says) lines.push(ag+" — "+says[ag]);
+    logProgress(F, "good", "✓ "+F.stageLabel+" finished"+(bd.length ? " — "+bd.join(" · ") : ""), lines);
+  }
+  F.stageLabel = null; F.stageArts = []; F.stageSays = {};
+}
 function rebuildLog(F){
   const ul=document.getElementById("log"); ul.innerHTML="";
   for (const e of F.log){
@@ -2700,207 +2647,10 @@ function renderElevator(){
     btn.className=cls;
     btn.innerHTML=`<span class="fl-no">${f}</span>FL`;
     if (F.releases>1){ const r=document.createElement("span"); r.className="rel-badge"; r.textContent="r"+F.release; btn.appendChild(r); }
-    if (F.awaiting){ const b=document.createElement("span"); b.className="badge"; b.textContent="!"; btn.appendChild(b); }
     btn.onclick=()=>switchToFloor(f);
     el.appendChild(btn);
   }
 }
-
-// ---- checkpoint modal (per active floor) -----------------------------------
-// The dialog's job is not to announce a pause — it is to hand over enough evidence
-// to answer "continue or not?" without leaving it. Everything below is already in
-// hand when the pause fires (gate verdicts, the agents' own concerns, each
-// artifact's content one-liner); the dialog used to drop all of it and show one
-// sentence. Order is by decisiveness: gates, then flags, then what landed.
-
-// "4m 12s" / "1h 06m" — an elapsed count a human reads at a glance.
-function fmtDur(s){
-  s = Math.max(0, Math.round(Number(s)||0));
-  if (s < 60) return s+"s";
-  const m = Math.floor(s/60), r = s%60;
-  if (m < 60) return m+"m "+String(r).padStart(2,"0")+"s";
-  return Math.floor(m/60)+"h "+String(m%60).padStart(2,"0")+"m";
-}
-// "12.4k" — token counts, short.
-function fmtNum(n){
-  n = Number(n)||0;
-  return n >= 1000 ? (n/1000).toFixed(n >= 10000 ? 0 : 1)+"k" : String(n);
-}
-// Does an artifact's content one-liner describe a NON-ZERO problem? The details are
-// generated strings ("3 failed", "severity high — 2 finding(s)", "0 policy
-// violation(s)"), so a zero count must not be flagged as trouble.
-function artIsRisk(detail){
-  const d = String(detail||"").toLowerCase();
-  if (/\b0 (failed|finding|policy violation|residual)/.test(d)) return false;
-  if (/\b([1-9]\d*) (failed|finding|policy violation)/.test(d)) return true;
-  return /severity (high|critical)/.test(d);
-}
-function chip(parent, text, cls){
-  const s = document.createElement("span");
-  s.className = "cp-chip" + (cls ? " "+cls : "");
-  s.textContent = text;
-  parent.appendChild(s);
-  return s;
-}
-// Cost + elapsed for the work behind THIS pause (advisory; the server meters it).
-// `shared` means other builds ran concurrently against the one global egress, so the
-// token figure is an upper bound — say so rather than quietly overstating.
-function renderCpMeta(F, cp){
-  const el = document.getElementById("cp-meta"); if(!el) return;
-  el.innerHTML = "";
-  const sp = cp.spend;
-  if (!sp){ el.classList.add("hidden"); return; }
-  el.classList.remove("hidden");
-  chip(el, "this stage " + fmtDur(sp.stage_s));
-  chip(el, "build " + fmtDur(sp.build_s));
-  if (sp.stage_calls) chip(el, sp.stage_calls + " model call" + (sp.stage_calls===1?"":"s"));
-  if (sp.stage_tokens) chip(el, fmtNum(sp.stage_tokens) + " tokens" + (sp.shared ? "*" : ""));
-  if (sp.cap_usd) chip(el, "cap $" + sp.cap_usd);
-  if (sp.shared) chip(el, "*shared with " + sp.builds + " running builds", "dim");
-}
-
-// The gate verdicts SO FAR — the single most decision-relevant thing at a pause, and
-// the one the dialog never showed. Failing gates are named in full underneath; a
-// green strip alone can hide WHICH gate is red behind a colour.
-function renderCpGates(F){
-  const el = document.getElementById("cp-gates"); if(!el) return;
-  el.innerHTML = "";
-  const gates = (F && F.gates) || {};
-  const names = GATE_ORDER.filter(n => gates[n]);
-  if (!names.length){ el.classList.add("hidden"); return; }
-  el.classList.remove("hidden");
-  const strip = document.createElement("div"); strip.className = "cp-gate-strip";
-  const bad = [];
-  for (const n of names){
-    const g = gates[n];
-    const s = document.createElement("span");
-    s.className = "g " + (g.status || "");
-    s.textContent = n;
-    if (g.run_against) s.title = "run against " + String(g.run_against).slice(0,12);
-    strip.appendChild(s);
-    if (g.status === "fail" || g.status === "error") bad.push(n);
-  }
-  el.appendChild(strip);
-  const line = document.createElement("div");
-  line.className = "cp-gate-line " + (bad.length ? "bad" : "ok");
-  line.textContent = bad.length
-    ? "✕ not green: " + bad.join(", ").toUpperCase()
-      + " — approving cannot pass these; they must go green before anything ships"
-    : "✓ " + names.length + " gate" + (names.length===1?"":"s") + " green so far";
-  el.appendChild(line);
-}
-
-// What the agents themselves flagged: `concerns` from the advisory journal, plus
-// anyone reporting low confidence. Zero extra model calls — the payload already
-// carries it, and it was previously reachable only by clicking each lead.
-function renderCpFlags(F){
-  const el = document.getElementById("cp-flags"); if(!el) return;
-  el.innerHTML = "";
-  const rows = [];
-  for (const e of ((F && F.journal) || [])){
-    const role = e.role || e.node_id || "agent";
-    for (const c of (e.concerns || [])) if (String(c).trim()) rows.push({role, text:String(c), kind:"concern"});
-    if (typeof e.confidence === "number" && e.confidence < 0.6)
-      rows.push({role, text:"low confidence ("+e.confidence.toFixed(2)+") in this step", kind:"conf"});
-  }
-  if (!rows.length){ el.classList.add("hidden"); return; }
-  el.classList.remove("hidden");
-  const head = document.createElement("div");
-  head.className = "cp-flags-head";
-  head.textContent = "⚠ " + rows.length + " thing" + (rows.length===1?"":"s") + " the crew flagged";
-  el.appendChild(head);
-  for (const r of rows.slice(0, 8)){
-    const d = document.createElement("div"); d.className = "cp-flag "+r.kind;
-    d.textContent = "· " + r.role + " — " + r.text;
-    el.appendChild(d);
-  }
-  if (rows.length > 8){
-    const more = document.createElement("div"); more.className = "cp-flag dim";
-    more.textContent = "· +" + (rows.length-8) + " more (click a lead to interview them)";
-    el.appendChild(more);
-  }
-}
-
-// What actually landed this stage, with each artifact's CONTENT one-liner ("12
-// passed / 3 failed", "severity high — 2 finding(s)") rather than a bare count.
-// Anything describing a non-zero failure sorts to the top and is coloured.
-function renderCpArts(F, cp){
-  const wrap = document.getElementById("cp-arts-wrap");
-  const el = document.getElementById("cp-arts");
-  const count = document.getElementById("cp-arts-count");
-  if (!wrap || !el) return;
-  el.innerHTML = "";
-  const arts = (cp.arts && cp.arts.length) ? cp.arts : ((F && F.stageArts) || []);
-  if (!arts.length){ wrap.classList.add("hidden"); return; }
-  wrap.classList.remove("hidden");
-  const risky = arts.filter(a => artIsRisk(a.detail));
-  if (count) count.textContent = "— " + arts.length + " artifact" + (arts.length===1?"":"s")
-    + (risky.length ? " · " + risky.length + " needing a look" : "");
-  // Risky first, original order preserved within each group.
-  wrap.open = risky.length > 0;      // auto-expand only when there is something to see
-  for (const a of risky.concat(arts.filter(x => !artIsRisk(x.detail)))){
-    const row = document.createElement("div");
-    row.className = "cp-art" + (artIsRisk(a.detail) ? " risk" : "");
-    const lab = document.createElement("span"); lab.className = "cp-art-label";
-    lab.textContent = a.label || a.base || a.kind || "artifact";
-    row.appendChild(lab);
-    if (a.detail){
-      const det = document.createElement("span"); det.className = "cp-art-detail";
-      det.textContent = " — " + a.detail;
-      row.appendChild(det);
-    }
-    el.appendChild(row);
-  }
-}
-
-// WHERE this pause is and WHICH state it decides on — provenance the payload always
-// carried and the dialog dropped.
-function renderCpProvenance(cp){
-  const el = document.getElementById("cp-prov"); if(!el) return;
-  const bits = [];
-  if (cp.phase) bits.push("phase " + cp.phase);
-  if (cp.route) bits.push("route " + cp.route);
-  if (cp.state_sha) bits.push("state " + String(cp.state_sha).slice(0, 12));
-  el.textContent = bits.join("  ·  ");
-  el.classList.toggle("hidden", !bits.length);
-}
-
-// Per-button consequence copy + the "go read the code" escape hatch.
-function renderCpActions(F, cp){
-  const acts = cp.actions || null;
-  const set = (id, text) => {
-    const el = document.getElementById(id); if(!el) return;
-    el.textContent = text || "";
-    el.classList.toggle("hidden", !text);
-  };
-  set("cp-approve-sub", acts && acts.approve);
-  set("cp-changes-sub", acts && acts.changes);
-  set("cp-reject-sub",  acts && acts.reject);
-  // Reviewing the actual diff is the strongest evidence there is — but only offer it
-  // once code exists (nothing is written at the product/design pauses).
-  const code = document.getElementById("cp-code");
-  if (code){
-    // A reloaded floor has no per-stage artifact history, so the release boundary
-    // (where code always exists by definition) counts too.
-    const has = !!(F && (F.hasCode || cp.boundary === "release"));
-    code.classList.toggle("hidden", !has);
-    code.onclick = () => { if (F) openFilesFor(F); };   // same shape openFiles() passes
-  }
-}
-
-function showCheckpoint(F){
-  const cp = (F && F.cp) || {title:"CHECKPOINT", summary:""};
-  document.getElementById("cp-title").textContent="CHECKPOINT · "+(cp.title||"");
-  document.getElementById("cp-summary").textContent=cp.summary||"";
-  renderCpMeta(F, cp);
-  renderCpGates(F);
-  renderCpFlags(F);
-  renderCpArts(F, cp);
-  renderCpProvenance(cp);
-  renderCpActions(F, cp);
-  document.getElementById("cp-modal").classList.remove("hidden");
-}
-function hideCheckpoint(){ document.getElementById("cp-modal").classList.add("hidden"); }
 
 // ---- repo browser (self-hosted GitHub over the store) ----------------------
 let FILES_ID = null;   // which release's repo the browser is currently showing
@@ -3184,15 +2934,6 @@ function viewFile(id, path, li){
     .catch(() => { view.textContent = "(could not load file)"; });
 }
 function hideFiles(){ document.getElementById("files-modal").classList.add("hidden"); }
-function sendDecision(decision){
-  const F = FLOORS.get(ACTIVE);
-  if (!F){ hideCheckpoint(); return; }
-  const body = {decision, checkpoint: F.cpIndex};
-  fetch("/api/decision/"+F.id, {method:"POST", headers:postHeaders(),
-    body: JSON.stringify(body)});
-  F.awaiting = false; renderElevator(); hideCheckpoint();
-}
-
 // ---- interview a lead (click an agent) -------------------------------------
 let IV_TARGET = null;
 function openInterview(name){
@@ -3203,7 +2944,7 @@ function openInterview(name){
   document.getElementById("iv-role").textContent = name;
   const jc = document.getElementById("iv-journal"); jc.innerHTML = "";
   if(!entries.length){
-    jc.innerHTML = "<div class='cp-note'>No journal yet — reach a checkpoint first (or run supervised).</div>";
+    jc.innerHTML = "<div class='cp-note'>No journal yet — it fills in as the agents finish their steps.</div>";
   }
   for(const e of entries.slice(0,6)){
     const d = document.createElement("div"); d.className = "iv-entry";
@@ -3269,8 +3010,6 @@ function syncFoldSummaries(){
                  (val("fix-input")||"0")+" auto-fix"];
     if(val("cap-input")) parts.push("$"+val("cap-input")+" cap");
     if(val("token-cap-input")) parts.push(val("token-cap-input")+" token cap");
-    const sup=document.getElementById("supervised");
-    parts.push(sup && sup.checked ? "supervised" : "unsupervised");
     scale.textContent=parts.join(" · ");
   }
 }
@@ -3294,37 +3033,35 @@ buy seeds/upgrades at a store); base-building (place/upgrade modules); save/load
 with 3 slots; a title screen, pause menu, and controls screen; sound hooks
 (procedural or silent-safe); keyboard controls documented in-game. Code-drawn
 graphics (shapes/procedural tiles) are fine — no external assets.`;
-// supervised: the old autonomous presets are hands-off (no checkpoint approvals); the
-// old gated ones keep the CTO approving each checkpoint.
 const PRESETS = [
-  { id:"custom", supervised:false, label:"— Custom (blank) —",
+  { id:"custom", label:"— Custom (blank) —",
     note:"A blank slate — describe your own build.",
     request:"", intake:"idea", spec:"", profile:"auto", workers:2, fix:2 },
-  { id:"pir", supervised:true, label:"PIR system · cryptography (complex)",
+  { id:"pir", label:"PIR system · cryptography (complex)",
     note:"Information-theoretic 2-server + homomorphic single-server PIR, verified in-process.",
     request:_pirReq, intake:"spec", spec:_pirSpec, profile:"auto",
     workers:2, fix:2 },
-  { id:"moon", supervised:true, label:"Moon Colony farming game · pygame (very complex)",
+  { id:"moon", label:"Moon Colony farming game · pygame (very complex)",
     note:"A complete Stardew-style sim from a big spec.",
     request:"a complete stardew-style farming game about colonizing the moon",
     intake:"spec", spec:MOON_SPEC, profile:"pygame", workers:2, fix:8 },
-  { id:"urlshort", supervised:false, label:"URL shortener · web service (simple)",
+  { id:"urlshort", label:"URL shortener · web service (simple)",
     note:"A small single service — quick end-to-end build.",
     request:"a URL shortener service with custom slugs, link expiry, click analytics, and per-IP abuse rate-limiting",
     intake:"idea", spec:"", profile:"auto", workers:2, fix:2 },
-  { id:"chip8", supervised:false, label:"CHIP-8 emulator · systems (simple)",
+  { id:"chip8", label:"CHIP-8 emulator · systems (simple)",
     note:"Cheap pipeline validation — objectively scoreable against public test ROMs.",
     request:"a CHIP-8 emulator in Python with pytest tests against public test ROMs",
     intake:"idea", spec:"", profile:"auto", workers:2, fix:6 },
-  { id:"taskmgr", supervised:true, label:"Team task manager · web+API+DB (complex)",
+  { id:"taskmgr", label:"Team task manager · web+API+DB (complex)",
     note:"Web UI + REST API + database in one repo.",
     request:"a team task manager: users sign up and log in, create projects, add tasks with assignees, due dates and labels, comment on tasks, and switch between a board and a list view — a REST API, a web UI, and a database",
     intake:"idea", spec:"", profile:"auto", workers:3, fix:6 },
-  { id:"ssg", supervised:false, label:"Static-site generator · CLI tool (simple)",
+  { id:"ssg", label:"Static-site generator · CLI tool (simple)",
     note:"A command-line tool + library — a different shape of software.",
     request:"a command-line static-site generator: turn a folder of Markdown with front-matter into a linked HTML site with a table of contents, page templates, and a live-reload dev server",
     intake:"idea", spec:"", profile:"auto", workers:2, fix:2 },
-  { id:"chat", supervised:true, label:"Real-time chat · WebSocket app (complex)",
+  { id:"chat", label:"Real-time chat · WebSocket app (complex)",
     note:"Rooms, presence and typing over WebSockets — web client + realtime backend + DB.",
     request:"a real-time group chat app: named rooms, user presence, typing indicators, persistent message history and search, and auth — a WebSocket backend, a web client, and a database",
     intake:"idea", spec:"", profile:"auto", workers:3, fix:6 },
@@ -3345,7 +3082,6 @@ function applyPreset(id){
   // intake radio: reveal the matching panel (idea hides the spec box, spec shows it).
   const rb=document.querySelector(`input[name="intake"][value="${p.intake||"idea"}"]`);
   if(rb){ rb.checked=true; rb.dispatchEvent(new Event("change")); }
-  const sup=document.getElementById("supervised"); if(sup) sup.checked=!!p.supervised;
   if(typeof updateSlotHint==="function") updateSlotHint();
 }
 { const ps=document.getElementById("preset-select");
@@ -3488,7 +3224,6 @@ function fileToB64(file){
 document.getElementById("start-btn").onclick=async ()=>{
   const req=document.getElementById("req-input").value;
   const backend=document.getElementById("backend-select").value;
-  const sup=document.getElementById("supervised").checked;
   const extra={};
   extra.adapter=document.getElementById("adapter-select").value;
   extra.workers=readWorkers();   // per-specialty ticket workers in flight at once
@@ -3515,7 +3250,7 @@ document.getElementById("start-btn").onclick=async ()=>{
     extra.spec_text=chatDraft;
   }
   newModal.classList.add("hidden");
-  newProject(req, sup, backend, extra);
+  newProject(req, backend, extra);
   // reset the chat for the next project
   chatSession=null; chatDraft=""; iterBuilt="";
   document.getElementById("chat-log").innerHTML="";
@@ -3524,9 +3259,6 @@ document.getElementById("start-btn").onclick=async ()=>{
 document.getElementById("req-input").addEventListener("input", updateSlotHint);
 document.getElementById("chat-send").onclick=sendChat;
 document.getElementById("chat-msg").addEventListener("keydown",(e)=>{ if(e.key==="Enter"){ e.preventDefault(); sendChat(); }});
-document.getElementById("cp-approve").onclick=()=>sendDecision("approve");
-document.getElementById("cp-changes").onclick=()=>sendDecision("needs_changes");
-document.getElementById("cp-reject").onclick=()=>sendDecision("reject");
 document.getElementById("output-btn").onclick=openFiles;
 for (const t of document.querySelectorAll(".log-tab")) t.onclick = () => selectLogTab(t.dataset.tab);
 document.getElementById("files-close").onclick=hideFiles;
@@ -3643,7 +3375,7 @@ function adoptFloor(row){
   const F = {
     id:row.id, floor:row.floor, release:row.release||1, releases:row.releases||1,
     request:row.request, mode:row.mode, backend:row.backend,
-    scene:null, log:[], progress:[], gates:row.gates||{}, org:null, cp:null, awaiting:!!row.awaiting,
+    scene:null, log:[], progress:[], gates:row.gates||{}, org:null,
     status:row.status, passed:!!row.passed, slots:row.slots||1, journal:[], seenUris:new Set(),
   };
   FLOORS.set(row.floor, F);

@@ -1,9 +1,9 @@
 """Pure mapping: real factory telemetry -> game events for the workshop frontend.
 
-These functions turn the REAL checkpoint inspection payload (artifacts, attested
-gate verdicts, the advisory agent journal) and the final ``RunResult`` into a
-stream of small JSON game events the canvas renders. No I/O, no sleeps, no model
-calls — deterministic and unit-testable. The server (server.py) paces them.
+These functions turn the REAL per-node telemetry (each finished node's artifacts,
+org chart and agent journal) and the final ``RunResult`` into a stream of small
+JSON game events the canvas renders. No I/O, no sleeps, no model calls —
+deterministic and unit-testable.
 
 The factory is the source of truth; this module is a costume. Nothing here can
 influence a build — it only describes what already happened.
@@ -113,16 +113,10 @@ ARTIFACT_LABEL: dict[str, str] = {
     "supply_chain_report": "Supply-chain Report",
 }
 
-_BOUNDARY_ROOM: dict[str, str] = {
-    "product": "plan",
-    "design": "plan",
-    "release": "review",
-}
 # Subgraph SCOPE -> room, for a node inside a stage that isn't a named agent. Without
 # the implementation/quality entries those steps resolved to no room at all
 # and vanished from the floor AND the log.
 _SCOPE_ROOM: dict[str, str] = {
-    **_BOUNDARY_ROOM,
     "architecture": "plan",
     "planning": "plan",
     "implementation": "engineering",
@@ -175,35 +169,12 @@ _INFRA_NODE.update({
                           "domain review finished"),
     "ux_design": ("plan", "UX pass over the interface", "UX pass finished"),
 })
-_BOUNDARY_TITLE: dict[str, str] = {
-    "product": "Product & Requirements",
-    "design": "Architecture & Design",
-    "release": "Build, Test & Review",
+# A supervisor phase node STARTING opens a new stage on the floor: (room, banner).
+STAGE_FOR_NODE: dict[str, tuple[str, str]] = {
+    "planner": ("plan", "Product & Design"),
+    "implementation": ("engineering", "Engineering"),
+    "quality": ("review", "Test & Review"),
 }
-
-# What each button at a checkpoint actually DOES, per boundary — the modal prints
-# these under the buttons so the choice is not guessed from a verb. APPROVE names
-# the work it unblocks (never "ships it": approve can only let the build REACH the
-# gates); REQUEST CHANGES names the rework pass it costs; REJECT is terminal
-# everywhere. An unknown boundary falls back to generic-but-true copy.
-_BOUNDARY_NEXT: dict[str, str] = {
-    "product": "architecture & design starts",
-    "design": "engineering starts building",
-    "release": "the signed release gates run",
-}
-_BOUNDARY_REWORK: dict[str, str] = {
-    "product": "another spec pass",
-    "design": "another design pass",
-    "release": "a fix-forward rebuild",
-}
-
-def checkpoint_actions(boundary: str) -> dict[str, str]:
-    """Per-button consequence copy for the checkpoint dialog (pure, display-only)."""
-    return {
-        "approve": _BOUNDARY_NEXT.get(boundary, "the build continues"),
-        "changes": _BOUNDARY_REWORK.get(boundary, "another pass") + " — costs a full rerun",
-        "reject": "stops the build — nothing ships",
-    }
 
 
 def _origin(kind: str, produced_by: str) -> tuple[str, str]:
@@ -329,36 +300,39 @@ def ticket_event(
     }
 
 
-def events_for_payload(
-    payload: dict[str, Any],
+def journal_dicts(entries: Any) -> list[dict[str, Any]]:
+    """A node's ``agent_journal`` writes (JournalEntry records) as plain dicts."""
+    out: list[dict[str, Any]] = []
+    for e in entries or ():
+        if isinstance(e, Mapping):
+            out.append(dict(e))
+            continue
+        out.append({
+            "node_id": str(getattr(e, "node_id", "")),
+            "role": str(getattr(e, "role", "")),
+            "summary": str(getattr(e, "summary", "")),
+            "assumptions": list(getattr(e, "assumptions", ()) or ()),
+            "concerns": list(getattr(e, "concerns", ()) or ()),
+            "confidence": getattr(e, "confidence", None),
+        })
+    return out
+
+
+def events_for_node_output(
+    result: Mapping[str, Any],
     seen_uris: set[str],
-    summaries: dict[str, Any] | None = None,
     ticket_tiers: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Game events for ONE checkpoint pause (the REAL inspection payload).
+    """Game events for ONE finished node's output (its channel writes plus the CLI's
+    ``_art_details`` / ``_org`` telemetry annotations).
 
-    Emits: a stage banner, an ``artifact`` (desk lights up) + ``say`` (speech
-    bubble from the agent journal) for each NEW artifact since the last pause, the
-    advisory gate badges so far, and the ``checkpoint`` dialog itself. ``seen_uris``
-    is mutated so a re-emitted handle never double-fires (idempotent, like the
-    channel folds the data came from).
-
-    ``summaries`` (optional, from the T3 caption pass) supplies a descriptive
-    ``stage`` line for the checkpoint and per-``agent`` captions that override the raw
-    journal text on the speech bubbles / log block headers."""
-    agent_caps: dict[str, str] = dict((summaries or {}).get("agents") or {})
-    boundary = str(payload.get("boundary", ""))
-    room = _BOUNDARY_ROOM.get(boundary, "plan")
-    out: list[dict[str, Any]] = [
-        {"type": "stage", "room": room, "boundary": boundary,
-         "label": _BOUNDARY_TITLE.get(boundary, boundary.title())},
-    ]
-
-    # Org chart (Wave E): the REAL hierarchy from the inspection payload — present
-    # areas, their Tech-Lead domains, and each domain's units. Emitted ONCE (the
-    # OwnershipMap is stable across boundaries); the canvas renders the org tree.
-    org = payload.get("org")
-    if isinstance(org, dict) and "__org__" not in seen_uris:
+    Emits the org chart (once), and for each NEW artifact a desk pulse + quest-log
+    pickup (+ a Tickets-tab row for a ticket, + the agent's journal note as a speech
+    bubble). ``seen_uris`` is mutated so a handle re-reported by an enclosing node
+    never double-fires."""
+    out: list[dict[str, Any]] = []
+    org = result.get("_org")
+    if isinstance(org, Mapping) and "__org__" not in seen_uris:
         seen_uris.add("__org__")
         out.append({
             "type": "org",
@@ -373,34 +347,27 @@ def events_for_payload(
             ],
         })
 
-    # Journal: the agents' own words -> speech bubbles (advisory, observability).
-    say_by_room: dict[str, list[dict[str, str]]] = {}
-    for e in payload.get("agent_journal", []):
+    say_by_agent: dict[str, dict[str, str]] = {}
+    for e in journal_dicts(result.get("agent_journal")):
         agent, jroom = AGENT_BY_NODE.get(str(e.get("node_id", "")),
-                                         (str(e.get("role", "agent")).title(), room))
-        # Prefer the T3 caption (descriptive, concise) over the raw journal text.
-        bubble = agent_caps.get(agent) or str(e.get("summary", "")).strip()
+                                         (str(e.get("role", "agent")).title(), "plan"))
         concerns = [str(c) for c in (e.get("concerns") or []) if str(c).strip()]
-        say_by_room.setdefault(jroom, []).append(
-            {"agent": agent, "room": jroom, "text": bubble or "Working…",
-             "concern": concerns[0] if concerns else ""}
-        )
+        say_by_agent.setdefault(agent, {
+            "agent": agent, "room": jroom,
+            "text": str(e.get("summary", "")).strip() or "Working…",
+            "concern": concerns[0] if concerns else "",
+        })
 
-    # New artifacts -> the producing desk lights up + a quest-log pickup. A stage
-    # often emits MANY artifacts of one kind (e.g. 9 acceptance criteria); numbering
-    # same-kind pickups (#1..#9) keeps the quest log readable instead of a wall of
-    # identical "Acceptance Criterion · Planner" lines. Lone kinds (one PRD)
-    # are left unnumbered. Counts are over the NEW artifacts in THIS payload only.
-    new_uris = [
-        u for u in (str(a.get("uri", "")) for a in payload.get("artifacts", []))
-        if u and u not in seen_uris
-    ]
-    kind_of = {str(a.get("uri", "")): str(a.get("kind", "")) for a in payload.get("artifacts", [])}
-    kind_total: Counter[str] = Counter(kind_of[u] for u in new_uris)
+    # A node often emits MANY artifacts of one kind (e.g. 9 acceptance criteria);
+    # numbering same-kind pickups (#1..#9) keeps the quest log readable.
+    arts = [a for a in (result.get("_art_details") or []) if isinstance(a, Mapping)]
+    new = [a for a in arts if str(a.get("uri", "")) and str(a["uri"]) not in seen_uris]
+    kind_total: Counter[str] = Counter(str(a.get("kind", "")) for a in new)
     kind_seen: Counter[str] = Counter()
-    for a in payload.get("artifacts", []):
-        uri = str(a.get("uri", ""))
-        if not uri or uri in seen_uris:
+    said: set[str] = set()
+    for a in new:
+        uri = str(a["uri"])
+        if uri in seen_uris:
             continue
         seen_uris.add(uri)
         kind = str(a.get("kind", ""))
@@ -420,32 +387,10 @@ def events_for_payload(
         })
         if tk is not None:
             out.append(tk)
-        # Attach a speech bubble for this agent if the journal had one.
-        for s in say_by_room.get(aroom, []):
-            if s["agent"] == agent:
-                out.append({"type": "say", **s})
-                break
-
-    # Advisory gate context so far (status only — the gates still decide).
-    # `run_against` names the TREE the verdict was produced over, so a human reading
-    # a red gate at the checkpoint can tell a stale verdict from a current one.
-    for g in payload.get("gates", []):
-        out.append({"type": "gate", "name": str(g.get("name", "")),
-                    "status": _norm_status(g.get("status")), "attested": True,
-                    "advisory": True, "run_against": str(g.get("run_against", ""))})
-
-    stage_caption = str((summaries or {}).get("stage") or "").strip()
-    out.append({
-        "type": "checkpoint", "boundary": boundary, "room": room,
-        "title": _BOUNDARY_TITLE.get(boundary, boundary.title()),
-        "summary": stage_caption or _checkpoint_summary(payload),  # T3 caption, else counts
-        # Provenance the payload already carries and the dialog used to drop: WHERE
-        # in the pipeline this pause is, and WHICH state the decision is about.
-        "phase": str(payload.get("phase") or ""),
-        "route": str(payload.get("route") or ""),
-        "state_sha": str(payload.get("state_sha") or ""),
-        "actions": checkpoint_actions(boundary),
-    })
+        say = say_by_agent.get(agent)
+        if say is not None and agent not in said:
+            said.add(agent)
+            out.append({"type": "say", **say})
     return out
 
 
@@ -474,17 +419,3 @@ def _norm_status(status: Any) -> str:
     if "fail" in s:
         return "fail"
     return "error" if "error" in s else s
-
-
-def _checkpoint_summary(payload: dict[str, Any]) -> str:
-    n_art = len(payload.get("artifacts", []))
-    gates = payload.get("gates", [])
-    n_pass = sum(1 for g in gates if _norm_status(g.get("status")) == "pass")
-    n_fail = sum(1 for g in gates if _norm_status(g.get("status")) == "fail")
-    parts = [f"{n_art} artifacts produced"]
-    if gates:
-        seg = f"{n_pass}/{len(gates)} gates green"
-        if n_fail:
-            seg += f" · {n_fail} failing"
-        parts.append(seg)
-    return " · ".join(parts)

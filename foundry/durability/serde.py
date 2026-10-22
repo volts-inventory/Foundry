@@ -27,9 +27,8 @@ FOUNDRY_MSGPACK_MODULES: list[tuple[str, str]] = [
     # Advisory `agent_journal` channel record (plan [11]) — small, rides the
     # channel directly (like GateTriage), so it must round-trip the checkpoint.
     ("foundry.schemas.journal", "JournalEntry"),
-    # Human-steering `checkpoint_decisions` channel records (plan [10]) — small,
-    # ride the channel directly, so they must round-trip the checkpoint. NOT a
-    # trust input: a checkpoint approve can never turn a gate FAIL into a pass.
+    # Retired `checkpoint_decisions` channel records: no longer written, kept so a
+    # checkpoint saved before supervision was removed still deserializes.
     ("foundry.schemas.checkpoint", "CheckpointDecision"),
     ("foundry.schemas.checkpoint", "CheckpointVerdict"),
     ("foundry.schemas.checkpoint", "CheckpointBoundary"),

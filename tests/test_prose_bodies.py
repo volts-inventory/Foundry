@@ -126,4 +126,3 @@ def test_planner_store_none_keeps_handle_without_storing() -> None:
     # The node still emits a PRD handle whose prd_uri is the prose digest, but no
     # body is stored anywhere (the synthetic-resolver tests are untouched).
     assert any(a.kind == "prd" for a in writes["artifacts"])
-

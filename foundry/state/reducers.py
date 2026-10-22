@@ -33,7 +33,6 @@ from typing import Protocol, TypeVar
 
 from foundry.schemas.architecture import PinnedConstraint
 from foundry.schemas.base import ExternalAction
-from foundry.schemas.checkpoint import CheckpointDecision
 from foundry.schemas.gates import GateResult, GateTriage
 from foundry.schemas.governance import SignOffRecord
 from foundry.schemas.journal import JournalEntry
@@ -181,14 +180,6 @@ union_sign_offs = make_union_by_key(_sign_off_key)
 # (`union_key` keys on content identity, so a resume re-fold of a byte-identical
 # entry coalesces; genuinely distinct notes coexist.)
 union_journal = make_union_by_key(JournalEntry.union_key)
-
-# Human-steering `checkpoint_decisions` channel (plan [10]). Same additive,
-# order-independent, re-fold-idempotent keyed union — a SEPARATE channel from
-# gates/sign_offs, read by NO gate, by `merge_gates`, by `route_after_gates`, by
-# `release_allowed`, or by `admission`. A checkpoint decision can HALT or re-route
-# a run, but it can NEVER mint or weaken a gate verdict — the gates remain the
-# sole trust authority (the whole point of [10]; same posture as the journal).
-union_checkpoint_decisions = make_union_by_key(CheckpointDecision.union_key)
 
 
 # ---- artifacts: set-union by content address --------------------------------

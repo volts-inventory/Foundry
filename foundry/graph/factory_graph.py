@@ -48,12 +48,11 @@ from foundry.canonical import content_digest
 from foundry.graph.gate_wiring import FEATURE_DIFF_KIND
 from foundry.graph.supervisor import build_supervisor_graph
 from foundry.schemas.base import ExternalAction, IdempotencyPath
-from foundry.schemas.checkpoint import CheckpointBoundary
 from foundry.schemas.gates import GateStatus
 from foundry.state.factory_state import FactoryState
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Mapping
 
     from langgraph.checkpoint.base import BaseCheckpointSaver
     from langgraph.graph.state import CompiledStateGraph
@@ -71,7 +70,6 @@ if TYPE_CHECKING:
 __all__ = [
     "TERMINAL_PASS_GATES",
     "build_factory_graph",
-    "checkpoint_blocks_release",
     "terminal_gates_pass",
 ]
 
@@ -128,32 +126,6 @@ def terminal_gates_pass(state: FactoryState) -> bool:
     return _gates_all_pass(_latest_by_name(state), TERMINAL_PASS_GATES)
 
 
-def checkpoint_blocks_release(state: FactoryState) -> bool:
-    """True iff a RELEASE-boundary checkpoint decision HALTS the release (plan [10]).
-
-    The checkpoint/HITL mode lets a human REJECT (or send back for changes) at the
-    release stage boundary. That decision must HALT the emit even though the gates
-    already PASSED — so this guard is ANDed into every emit guard (a *not blocked*
-    is required to release). It reads only the steering-only ``checkpoint_decisions``
-    channel.
-
-    HARD TRUST DIRECTION (the whole point of [10]): this guard can only SUBTRACT a
-    release (a human reject halts a gate-PASS run) — it can NEVER ADD one. A human
-    *approve* makes ``proceeds()`` True so this returns False (does NOT block), but
-    the release still requires :func:`terminal_gates_pass` /
-    the gates to hold independently. So a checkpoint approve
-    can never turn a gate FAIL into a pass: the gates remain the sole trust
-    authority. Fail-closed: a recorded RELEASE decision that does not ``proceeds()``
-    blocks; no decision (checkpoints off, or the boundary not reached) does not."""
-    best: Any = None
-    for d in state.get("checkpoint_decisions") or ():
-        if d.boundary != CheckpointBoundary.RELEASE:
-            continue
-        if best is None or d.seq > best.seq:
-            best = d
-    return best is not None and not best.proceeds()
-
-
 def _pr_subject(state: FactoryState) -> Artifact | None:
     """The integrated FeatureDiff handle the PR opens against (newest-by-``Seq``).
 
@@ -183,7 +155,6 @@ def build_factory_graph(
     max_fix_attempts: int = 3,
     discriminator_factory: DiscriminatorFactory | None = None,
     profile: VerificationProfile | None = None,
-    checkpoints: bool | Sequence[str | CheckpointBoundary] | None = None,
     max_slots: int = 1,
     cost_cap_microusd: int | None = None,
     workers: Mapping[str, int] | None = None,
@@ -233,21 +204,6 @@ def build_factory_graph(
         The held-out mutant SET is a dev-grade CURATED set (a real mutation engine
         is heavier; plan §0.3). ``None`` (the default) keeps the adequacy-floor-only
         behavior byte-for-byte (back-compat for every existing caller).
-    checkpoints:
-        OPTIONAL checkpoint/HITL mode (plan [10]), threaded straight to
-        :func:`build_supervisor_graph`. ``None``/``False`` (the DEFAULT) inserts NO
-        pause nodes — a non-checkpoint run is byte-identical to today (back-compat).
-        ``True`` pauses at all three stage boundaries; a sequence of boundary names
-        pauses at exactly those. At each pause the supervisor surfaces a READ-ONLY
-        inspection payload via LangGraph's ``interrupt()`` (resumable on the
-        ``checkpointer`` above) and awaits a human :class:`CheckpointDecision` fed
-        back via ``Command(resume=...)``. **Trust:** a checkpoint *approve* only
-        lets the run PROCEED to the (unchanged) gate boundary — the emit guards
-        below still require :func:`terminal_gates_pass`, so a checkpoint approve can NEVER turn a
-        gate FAIL into a release. A RELEASE-boundary *reject* additionally HALTS the
-        emit via :func:`checkpoint_blocks_release` (it can only subtract a release,
-        never add one).
-
     Returns the COMPILED top-level graph.
     """
     supervisor = build_supervisor_graph(
@@ -260,7 +216,6 @@ def build_factory_graph(
         max_fix_attempts=max_fix_attempts,
         discriminator_factory=discriminator_factory,
         profile=profile,
-        checkpoints=checkpoints,
         max_slots=max_slots,
         cost_cap_microusd=cost_cap_microusd,
         workers=workers,
@@ -283,12 +238,6 @@ def build_factory_graph(
         """
         if not terminal_gates_pass(state):
             # Halted / failed run: do NOT open a PR. Mark the phase only.
-            return {"phase": "halted"}
-        if checkpoint_blocks_release(state):
-            # A human REJECTED at the release checkpoint (plan [10]) — HALT even
-            # though the gates passed. This can only SUBTRACT a release; it can
-            # never make a FAILing gate pass (the terminal-gate guard above is
-            # independent and unchanged).
             return {"phase": "halted"}
         subject = _pr_subject(state)
         if subject is None:

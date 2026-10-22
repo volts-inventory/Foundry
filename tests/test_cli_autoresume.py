@@ -33,13 +33,11 @@ def _no_sleep(monkeypatch: Any) -> list[float]:
     return waited
 
 
-def _call(seed: Any = None, **kw: Any) -> tuple[Any, Any]:
+def _call(seed: Any = None, **kw: Any) -> Any:
     return cli._invoke_with_autoresume(
-        object(),  # app is never touched — _invoke_with_checkpoints is patched
+        object(),  # app is never touched — _invoke is patched
         seed or {"request": "x"},
         {"configurable": {"thread_id": "t"}},
-        checkpointed=False,
-        responder=None,
         progress_cb=None,
         **kw,
     )
@@ -50,14 +48,14 @@ def test_transient_failure_is_retried_from_checkpoint(monkeypatch: Any) -> None:
     waited = _no_sleep(monkeypatch)
     calls = {"n": 0}
 
-    def _fake(*_a: Any, **_k: Any) -> tuple[dict[str, str], None]:
+    def _fake(*_a: Any, **_k: Any) -> dict[str, str]:
         calls["n"] += 1
         if calls["n"] < 3:  # fail twice, succeed on the third invoke
             raise ProxyUnavailable("provider ...; judgment nodes must pause-and-escalate")
-        return {"done": "yes"}, None
+        return {"done": "yes"}
 
-    monkeypatch.setattr(cli, "_invoke_with_checkpoints", _fake)
-    final, paused = _call(resumable=True)
+    monkeypatch.setattr(cli, "_invoke", _fake)
+    final = _call(resumable=True)
 
     assert final == {"done": "yes"}
     assert calls["n"] == 3  # two retries + the success
@@ -69,11 +67,11 @@ def test_non_durable_run_does_not_retry(monkeypatch: Any) -> None:
     _no_sleep(monkeypatch)
     calls = {"n": 0}
 
-    def _fake(*_a: Any, **_k: Any) -> tuple[dict[str, str], None]:
+    def _fake(*_a: Any, **_k: Any) -> Any:
         calls["n"] += 1
         raise ProxyUnavailable("pause-and-escalate")
 
-    monkeypatch.setattr(cli, "_invoke_with_checkpoints", _fake)
+    monkeypatch.setattr(cli, "_invoke", _fake)
     try:
         _call(resumable=False)
         raise AssertionError("expected the transient failure to propagate")
@@ -86,10 +84,10 @@ def test_non_transient_error_always_reraises(monkeypatch: Any) -> None:
     """A real error (not a proxy pause) is never swallowed, even on a durable run."""
     _no_sleep(monkeypatch)
 
-    def _fake(*_a: Any, **_k: Any) -> tuple[Any, Any]:
+    def _fake(*_a: Any, **_k: Any) -> Any:
         raise ValueError("a genuine bug")
 
-    monkeypatch.setattr(cli, "_invoke_with_checkpoints", _fake)
+    monkeypatch.setattr(cli, "_invoke", _fake)
     try:
         _call(resumable=True)
         raise AssertionError("expected the real error to propagate")
@@ -104,11 +102,11 @@ def test_budget_is_bounded(monkeypatch: Any) -> None:
     monkeypatch.setenv("FOUNDRY_CLI_AUTORESUME", "3")
     calls = {"n": 0}
 
-    def _fake(*_a: Any, **_k: Any) -> tuple[Any, Any]:
+    def _fake(*_a: Any, **_k: Any) -> Any:
         calls["n"] += 1
         raise ProxyUnavailable("pause-and-escalate")
 
-    monkeypatch.setattr(cli, "_invoke_with_checkpoints", _fake)
+    monkeypatch.setattr(cli, "_invoke", _fake)
     try:
         _call(resumable=True)
         raise AssertionError("expected exhaustion to re-raise")

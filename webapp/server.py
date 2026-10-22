@@ -4,10 +4,9 @@ Run:  uv run python -m webapp.server   then open  http://localhost:8765
 
 A tiny stdlib HTTP + Server-Sent-Events server (no extra deps, never touches the
 trust core). ``POST /api/projects`` starts a REAL ``foundry.cli.run`` in a thread;
-the build pauses at its real stage boundaries and this server streams the real
-artifacts / agent-journal / gate verdicts to the browser as paced game events.
-The CTO (you) approves or rejects each checkpoint — driving the real run — and an
-approve can NEVER release a failing build (the gates decide; this is just the view).
+this server streams the real per-node telemetry (artifacts, agent journal, gate
+verdicts) to the browser as game events. Builds run hands-off; the gates decide
+what ships — this is just the view.
 """
 
 from __future__ import annotations
@@ -35,9 +34,11 @@ from typing import Any
 from foundry.schemas.architecture import CANONICAL_AREAS
 from webapp.events import (
     AGENT_BY_NODE,
+    STAGE_FOR_NODE,
     event_for_task,
-    events_for_payload,
+    events_for_node_output,
     events_for_result,
+    journal_dicts,
     live_event_for_node,
 )
 from webapp.repo import Repo, RepoUnavailable, read_repo
@@ -92,9 +93,7 @@ def _load_env_file() -> bool:
 _ENV_FILE_FOUND = _load_env_file()   # before the config constants below read os.environ
 
 _STATIC = Path(__file__).parent / "static"
-_PACE = 0.5          # seconds between paced game events
-_STAGE_PAUSE = 0.9   # extra beat when a new stage opens
-_AUTO_APPROVE_DELAY = 1.4  # auto-run: dwell on each checkpoint before approving
+_PACE = 0.5          # seconds between paced closing events
 # Live activity from inside an agentic step (each edit / command the substrate runs).
 # Bounded on BOTH axes: a floor is readable at ~1 line every 2s, and one step can't
 # flood the log (or every connected device's stream) with hundreds of tool calls.
@@ -154,7 +153,7 @@ _STATE_DIR = (
 _WRITE_DISK = (os.environ.get("WORKSHOP_WRITE_DISK", "").strip().lower()
                in ("1", "true", "yes", "on"))
 
-# State-changing routes (start a build → real model spend, drive a checkpoint) are
+# State-changing routes (start a build → real model spend) are
 # guarded. A shared token (FOUNDRY_WORKSHOP_TOKEN) gates them when the server is
 # exposed beyond localhost; an Origin/Host same-origin check blocks a malicious web
 # page from POSTing to a localhost workshop (CSRF) even with no token set.
@@ -331,7 +330,6 @@ class Project:
     id: str
     request: str
     mode: str  # always "assistant" (the only release mode); kept for the catalog
-    supervised: bool
     floor: int
     backend: str = "mock"
     adapter: str = "stub"  # coding substrate (see foundry.cli.ADAPTERS)
@@ -354,7 +352,7 @@ class Project:
     # A single shared queue would let two streams STEAL each other's events; a log
     # lets many devices each tail it at their own cursor, and a late/reconnecting
     # device replays from the start (or from its Last-Event-ID). `cond` guards
-    # `log`, `ended`, and the checkpoint-decision fields below.
+    # `log` and `ended`.
     log: list[dict[str, Any]] = field(default_factory=list)
     cond: threading.Condition = field(default_factory=threading.Condition)
     ended: bool = False
@@ -365,20 +363,7 @@ class Project:
     # from its durable checkpoint instead of dying, so an overnight run survives a
     # usage-window exhaustion / provider outage. Decrements per outer retry.
     autoresume_left: int = 6
-    # Checkpoint decisions: first decision for a checkpoint wins (idempotent);
-    # every device still watches the resolution play (it's just another log event).
-    checkpoint_seq: int = 0          # monotonic id of the LATEST checkpoint reached
-    pending_checkpoint: int | None = None  # the checkpoint awaiting a decision, if any
-    decision_for: dict[int, str] = field(default_factory=dict)  # checkpoint id -> decision
     seen_uris: set[str] = field(default_factory=set)
-    # Checkpoint COST context (advisory): what the work behind this pause consumed, so
-    # "continue or not?" is answered against real spend, not a guess. Monotonic clocks
-    # (never wall time — a clock step must not produce a negative duration) and a
-    # snapshot of the global usage meter taken at build start and at each pause.
-    start_mono: float = field(default_factory=time.monotonic)
-    cp_mono: float | None = None            # monotonic time of the LAST checkpoint
-    usage_mark: dict[str, int] = field(default_factory=dict)   # meter at build start
-    usage_cp: dict[str, int] = field(default_factory=dict)     # meter at the last pause
     # Steps running RIGHT NOW: "who/what" -> monotonic start. Fed by the live per-node
     # telemetry so the quiet-watchdog can name what a long silence is waiting ON,
     # instead of just reporting that nothing has landed. Runtime-only (not persisted).
@@ -394,8 +379,7 @@ class Project:
     act_text: str = ""               # last phrase (collapses immediate repeats)
     status: str = "running"
     passed: bool = False  # final verdict (for elevator/reload rehydration)
-    awaiting: bool = False  # at a checkpoint right now (badge survives reload)
-    journal: list[dict[str, Any]] = field(default_factory=list)  # latest agent journal ([11])
+    journal: list[dict[str, Any]] = field(default_factory=list)  # agent journal so far ([11])
     gates: dict[str, Any] = field(default_factory=dict)  # name -> {status,attested,advisory}
     out_base: Path | None = None  # this floor's output dir (code/)
     profile: str = "auto"  # verification profile / stack ("auto" = infer from request)
@@ -441,8 +425,7 @@ _FLOOR = [0]
 # A build in flight is an in-memory thread — it can't resume; on reload it's
 # marked finished so the floor and its output stay browsable.
 _STORE = BuildStore(_OUTPUT_ROOT / "foundry.db")
-_PERSIST_ON = {"project", "gate", "files", "halt", "release", "done",
-               "await_decision", "resolved"}
+_PERSIST_ON = {"project", "gate", "files", "halt", "release", "done"}
 
 
 def _build_record(p: "Project") -> dict[str, Any]:
@@ -451,7 +434,7 @@ def _build_record(p: "Project") -> dict[str, Any]:
         "id": p.id, "floor": p.floor, "release_seq": p.release_seq,
         "parent_id": p.parent_id, "request": p.request, "mode": p.mode,
         "backend": p.backend, "adapter": p.adapter,
-        "supervised": p.supervised, "slots": p.max_slots,
+        "slots": p.max_slots,
         "max_fix_attempts": p.max_fix_attempts, "status": p.status,
         "passed": p.passed, "gates": p.gates,
         "out_base": str(p.out_base) if p.out_base else None,
@@ -494,7 +477,6 @@ def _load_persisted() -> None:
                 p = Project(
                     id=str(row["id"]), request=str(row.get("request", "")),
                     mode="assistant",  # gated/autonomous rows from old builds resume as assistant
-                    supervised=bool(row.get("supervised", True)),
                     floor=int(row.get("floor", 0)),
                     release_seq=int(row.get("release_seq", 1) or 1),
                     backend=str(row.get("backend", "mock")),
@@ -514,11 +496,13 @@ def _load_persisted() -> None:
                     e.get("type") == "_end" for e in p.log
                 )
                 p.passed = bool(row.get("passed", False))
-                p.awaiting = False
                 p.gates = dict(row.get("gates") or {})
                 _PROJECTS[p.id] = p
                 # A checkpoint written by the removed gated/autonomous graph names nodes
                 # that no longer exist, so it can't be resumed on the assistant graph.
+                # (A floor paused at a removed supervision checkpoint is still
+                # "running": it resumes hands-off — run() re-enters from START over
+                # the durable state, so the retired pause node is never needed.)
                 legacy_mode = str(row.get("mode") or "assistant") != "assistant"
                 if was_running and not legacy_mode and _has_durable_checkpoint(p.id):
                     # Durable state survived the restart → RESUME the build from its
@@ -848,28 +832,6 @@ def _log_sweeper() -> None:
             pass
 
 
-def _record_decision(
-    p: Project, decision: str, checkpoint: int | None
-) -> tuple[bool, bool]:
-    """Record a checkpoint decision, FIRST-wins. Returns ``(applied, stale)``.
-
-    ``stale`` is True when the decision names no current pause (already resolved,
-    or a different checkpoint than the one awaiting) — a no-op. ``applied`` is True
-    only for the FIRST decision on the awaiting checkpoint; later/duplicate clicks
-    from any device return ``(False, False)`` and simply watch the resolution play."""
-    with p.cond:
-        cidx = p.pending_checkpoint
-        if checkpoint is not None and checkpoint != cidx:
-            return (False, True)          # a stale click for an already-passed pause
-        if cidx is None:
-            return (False, True)          # nothing is awaiting a decision
-        if cidx in p.decision_for:
-            return (False, False)         # someone already decided this one
-        p.decision_for[cidx] = decision
-        p.cond.notify_all()
-        return (True, False)
-
-
 def _resume_cursor(last_event_id: str | None) -> int:
     """The log index a stream should resume at given an SSE ``Last-Event-ID``.
 
@@ -878,26 +840,6 @@ def _resume_cursor(last_event_id: str | None) -> int:
     if last_event_id and last_event_id.isdigit():
         return int(last_event_id) + 1
     return 0
-
-
-def _await_decision(p: Project, cidx: int, timeout: float = 600.0) -> str:
-    """Block the build until SOME device decides checkpoint ``cidx`` (first wins),
-    or until ``timeout`` elapses (then auto-approve). Many devices can post; only
-    the first is recorded — the rest watch the `resolved` event play, live."""
-    deadline = time.monotonic() + timeout
-    with p.cond:
-        while cidx not in p.decision_for:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return "approve"
-            p.cond.wait(remaining)
-        return p.decision_for[cidx]
-
-
-def _emit_paced(p: Project, events: list[dict[str, Any]]) -> None:
-    for ev in events:
-        _emit(p, **ev)
-        time.sleep(_STAGE_PAUSE if ev.get("type") == "stage" else _PACE)
 
 
 _STACK_SOP = (
@@ -953,69 +895,6 @@ def _choose_stack(p: Project) -> tuple[str, str] | None:
     return None
 
 
-# One cheap T3 pass per checkpoint turns the raw artifact list into human captions: a
-# descriptive one-liner for the STAGE and for EACH agent's output. Fed into the quest-log
-# blocks (the log's per-agent headers) and the Progress tab (the stage header) so they
-# read as "what actually got done", not a repeat of the artifact-kind names.
-_SUMMARY_SOP = (
-    "You write terse, factual build-log captions for an autonomous software factory. "
-    "Given the artifacts produced at ONE stage, write ONE concise, SPECIFIC sentence for "
-    "the stage overall and ONE for each agent's output. Say WHAT was decided or built "
-    "(capabilities, key decisions, coverage) — never merely restate artifact-type names. "
-    "No preamble, no markdown, no trailing period needed; each <= 20 words."
-)
-_SUMMARY_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "stage": {"type": "string"},
-        "agents": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {"agent": {"type": "string"}, "summary": {"type": "string"}},
-                "required": ["agent", "summary"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    "required": ["stage", "agents"],
-    "additionalProperties": False,
-}
-
-
-def _summarize_stage(p: "Project", payload: dict[str, Any]) -> dict[str, Any] | None:
-    """A cheap T3 caption pass over a checkpoint's artifacts. Returns
-    ``{"stage": str, "agents": {agent_name: str}}`` or None (advisory — any failure
-    just falls back to the mechanical breakdown)."""
-    from foundry.cli import _build_proxy
-    from webapp.events import _origin
-
-    arts = payload.get("artifacts") or []
-    if not arts:
-        return None
-    by_agent: dict[str, list[str]] = {}
-    for a in arts:
-        kind = str(a.get("kind", ""))
-        agent, _room = _origin(kind, str(a.get("produced_by", "")))
-        detail = str(a.get("detail", "")).strip()
-        by_agent.setdefault(agent, []).append(f"{kind}: {detail}" if detail else kind)
-    lines = [f"{agent}: " + "; ".join(items[:10])[:1200] for agent, items in by_agent.items()]
-    prompt = (f"STAGE: {payload.get('boundary', '')}\n\nARTIFACTS BY AGENT:\n"
-              + "\n".join(lines))[:6000]
-    result = _build_proxy(p.backend).complete(
-        "stage_summarizer", "T3", _SUMMARY_SOP,
-        [{"role": "user", "content": prompt}], purpose="ideation", schema=_SUMMARY_SCHEMA,
-    )
-    parsed = result.parsed if isinstance(result.parsed, dict) else json.loads(result.text or "{}")
-    agents: dict[str, str] = {}
-    for e in (parsed.get("agents") or []):
-        nm, sm = str(e.get("agent", "")).strip(), str(e.get("summary", "")).strip()
-        if nm and sm:
-            agents[nm] = sm
-    stage = str(parsed.get("stage", "")).strip()
-    return {"stage": stage, "agents": agents} if (stage or agents) else None
-
-
 _RL_HOOKED = [False]
 
 
@@ -1046,81 +925,6 @@ def _hook_rate_limit_waits() -> None:
                        f"out and resumes ~{hhmm}. Nothing is lost.")
 
     _mpp.on_rate_limit_wait = _on_wait
-
-
-# ---- advisory usage meter (what a stage cost) --------------------------------- #
-# The proxy's usage observer is GLOBAL (one egress serves every floor), so the meter
-# it feeds is global too. A project reads it as a DELTA between two snapshots — its
-# own start, and its last checkpoint — which is exact while one build runs (the
-# localhost norm) and an upper bound when several do. `_running_builds()` tells the
-# dialog which case it is, so the number is never presented as more precise than it
-# is. Advisory only: nothing reads this back into a build.
-_USAGE: dict[str, int] = {"calls": 0, "input": 0, "output": 0, "cache_read": 0}
-_USAGE_LOCK = threading.Lock()
-_USAGE_HOOKED = [False]
-
-
-def _hook_usage_meter() -> None:
-    """Register the proxy's per-call usage observer (once, lazily). Fail-soft: if the
-    proxy can't be imported the meter simply stays at zero and the dialog omits it."""
-    if _USAGE_HOOKED[0]:
-        return
-    _USAGE_HOOKED[0] = True
-    try:
-        from foundry.proxy import model_provider_proxy as _mpp
-    except Exception:
-        return
-
-    def _on_usage(_node_id: str, _tier: str, usage: Mapping[str, int]) -> None:
-        with _USAGE_LOCK:
-            _USAGE["calls"] += 1
-            _USAGE["input"] += int(usage.get("input_tokens", 0) or 0)
-            _USAGE["output"] += int(usage.get("output_tokens", 0) or 0)
-            _USAGE["cache_read"] += int(usage.get("cache_read_input_tokens", 0) or 0)
-
-    _mpp.on_call_usage = _on_usage
-
-
-def _usage_snapshot() -> dict[str, int]:
-    with _USAGE_LOCK:
-        return dict(_USAGE)
-
-
-def _usage_since(mark: Mapping[str, int]) -> dict[str, int]:
-    """Meter delta since ``mark`` (an earlier snapshot). Clamped at zero so a meter
-    reset (a server restart between snapshots) reads as 0, never as a negative."""
-    now = _usage_snapshot()
-    return {k: max(0, now.get(k, 0) - int(mark.get(k, 0))) for k in now}
-
-
-def _running_builds() -> int:
-    with _LOCK:
-        return sum(1 for q in _PROJECTS.values() if q.status == "running")
-
-
-def _checkpoint_spend(p: Project) -> dict[str, Any]:
-    """The advisory cost/elapsed block that rides into the approval dialog.
-
-    ``stage`` covers the work since the previous pause (what the human is being asked
-    to judge); ``build`` covers this run since it started. ``shared`` marks the case
-    where other builds ran concurrently, so the token figures are an upper bound."""
-    now = time.monotonic()
-    stage_usage = _usage_since(p.usage_cp or p.usage_mark)
-    build_usage = _usage_since(p.usage_mark)
-    n_running = _running_builds()
-    spend: dict[str, Any] = {
-        "stage_s": int(max(0.0, now - (p.cp_mono or p.start_mono))),
-        "build_s": int(max(0.0, now - p.start_mono)),
-        "stage_calls": stage_usage.get("calls", 0),
-        "build_calls": build_usage.get("calls", 0),
-        "stage_tokens": stage_usage.get("input", 0) + stage_usage.get("output", 0),
-        "build_tokens": build_usage.get("input", 0) + build_usage.get("output", 0),
-        "shared": n_running > 1,
-        "builds": n_running,
-    }
-    if p.cost_cap_microusd:
-        spend["cap_usd"] = round(p.cost_cap_microusd / 1_000_000, 2)
-    return spend
 
 
 def _gated_runner(runner, p: Project, **kwargs: Any) -> None:
@@ -1157,14 +961,6 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     from foundry.cli import run
 
     _hook_rate_limit_waits()
-    _hook_usage_meter()
-    # Baseline the cost/elapsed context for THIS session's checkpoints. A resume
-    # re-baselines (the meter is in-memory and a restart zeroed it), so the dialog
-    # reports "since the build resumed" rather than an invented total.
-    p.start_mono = time.monotonic()
-    p.cp_mono = None
-    p.usage_mark = _usage_snapshot()
-    p.usage_cp = {}
 
     if resume:
         _emit(p, type="narrate",
@@ -1199,62 +995,17 @@ def _run_factory(p: Project, resume: bool = False) -> None:
                   text=f"🏗 Planner chose the stack: {chosen[0]}"
                        + (f" — {chosen[1]}" if chosen[1] else ""))
 
-    def responder(payload: dict[str, Any]) -> str:
-        # The REAL stage payload -> paced game events, then the CTO's call. A cheap T3
-        # caption pass first, so the log/progress blocks describe what was DONE (advisory
-        # — any failure falls back to the mechanical artifact breakdown).
-        summaries = None
-        try:
-            summaries = _summarize_stage(p, payload)
-        except Exception as exc:
-            print(f"[summary] floor {p.floor} caption pass failed: {exc}")
-        _emit_paced(p, events_for_payload(payload, p.seen_uris, summaries, p.ticket_tiers))
-        try:                          # persist the dedup set so a resume won't replay
-            _STORE.add_seen(p.id, p.seen_uris)
-        except Exception:
-            pass
-        # Stash the agents' journal so a lead can be "interviewed" ([11], advisory).
-        jrnl = payload.get("agent_journal")
-        if isinstance(jrnl, list):
-            # `agent` = the floor sprite that owns the node, so the interview picker can
-            # match a Planner/Reviewer click to journal entries written under old role ids.
-            p.journal = [
-                {**e, "agent": AGENT_BY_NODE.get(str(e.get("node_id", "")), ("",))[0]}
-                if isinstance(e, dict) else e for e in jrnl
-            ]
-        boundary = str(payload.get("boundary", "stage"))
-        if p.supervised:
-            with p.cond:
-                p.checkpoint_seq += 1
-                cidx = p.checkpoint_seq
-                p.pending_checkpoint = cidx
-            p.awaiting = True
-            # `checkpoint` lets any device's decision name WHICH pause it answers,
-            # so a stale/duplicate click can't leak into the next checkpoint.
-            _emit(p, type="await_decision", boundary=boundary, checkpoint=cidx,
-                  journal=p.journal, spend=_checkpoint_spend(p))
-            decision = _await_decision(p, cidx)
-            # The next pause measures from THIS one (the stage the human just judged
-            # is closed), whichever way they decided.
-            p.cp_mono = time.monotonic()
-            p.usage_cp = _usage_snapshot()
-        else:
-            time.sleep(_AUTO_APPROVE_DELAY)
-            decision = "approve"
-        p.awaiting = False
-        with p.cond:
-            p.pending_checkpoint = None
-        _emit(p, type="resolved", boundary=boundary, decision=decision)
-        verb = {"approve": "approved", "needs_changes": "requested changes on",
-                "reject": "REJECTED"}.get(decision, "REJECTED")
-        _emit(p, type="narrate", text=f"🧑‍💼 CTO {verb} the {boundary} checkpoint.")
-        return decision
-
     # LIVE per-node telemetry: as each real graph node executes, seat its agent at
-    # the desk in real time (not the retroactive burst at the checkpoint). Emitted
-    # immediately (unpaced) so the floor reflects the build actually grinding.
+    # the desk in real time; as it finishes, surface what it produced (artifacts,
+    # tickets, org chart, journal). Emitted immediately so the floor reflects the
+    # build actually grinding.
     def progress(node: str, scope: str, *, phase: str = "finish",
                  result: object = None) -> None:
+        if phase == "start" and scope == "factory" and node in STAGE_FOR_NODE:
+            room, label = STAGE_FOR_NODE[node]
+            _emit(p, type="stage", room=room, label=label)
+        if phase == "finish" and isinstance(result, dict):
+            _emit_node_output(result)
         ev = live_event_for_node(node, scope, phase, result)
         if ev is None:
             return
@@ -1272,6 +1023,22 @@ def _run_factory(p: Project, resume: bool = False) -> None:
         else:
             p.inflight.pop(node, None)
         _emit(p, **ev)
+
+    def _emit_node_output(result: Mapping[str, Any]) -> None:
+        for out in events_for_node_output(result, p.seen_uris, p.ticket_tiers):
+            _emit(p, **out)
+        with contextlib.suppress(Exception):   # persist the dedup set so a resume won't replay
+            _STORE.add_seen(p.id, p.seen_uris)
+        # The agents' journal, so a lead can be "interviewed" ([11], advisory). `agent`
+        # = the floor sprite that owns the node, so the interview picker can match a
+        # Planner/Reviewer click to entries written under old role ids.
+        known = {(e.get("node_id"), e.get("summary")) for e in p.journal}
+        for e in journal_dicts(result.get("agent_journal")):
+            if (e.get("node_id"), e.get("summary")) not in known:
+                known.add((e.get("node_id"), e.get("summary")))
+                entry = {**e, "agent": AGENT_BY_NODE.get(str(e.get("node_id", "")), ("",))[0]}
+                p.journal.append(entry)
+                _emit(p, type="journal", entry=entry)
 
     def task_cb(ev: Mapping[str, Any]) -> None:
         """One ticket's worker started / finished / failed (the floor's per-ticket sprites)."""
@@ -1303,8 +1070,8 @@ def _run_factory(p: Project, resume: bool = False) -> None:
             tempfile.TemporaryDirectory(prefix="foundry-base-")))
         if _materialize_base_dir(p.parent_id, scratch):
             base_dir = str(scratch)
-    # Quiet-watchdog: on a REAL backend, if no event lands for a long stretch (and
-    # we're not paused at a checkpoint), report WHO the build is waiting on. A single
+    # Quiet-watchdog: on a REAL backend, if no event lands for a long stretch,
+    # report WHO the build is waiting on. A single
     # agentic step is legitimately minutes long, so the first tick is a status line,
     # not an alarm — the "something may be wrong" advice waits until it really drags.
     # (Without this, a hung CLI — auth prompt, wall-clock cap + silent retries — looks
@@ -1319,8 +1086,6 @@ def _run_factory(p: Project, resume: bool = False) -> None:
                 return
             if len(p.log) != last_len:
                 last_len, quiet_min = len(p.log), 0
-                continue
-            if p.awaiting:            # checkpoint pause: quiet is expected
                 continue
             quiet_min += 1
             if quiet_min in (5, 15, 30):
@@ -1364,8 +1129,6 @@ def _run_factory(p: Project, resume: bool = False) -> None:
                 base_dir=base_dir,            # iterate: prior code seeded as the base tree
                 thread_id=p.id,               # UNIQUE per project — no cross-floor collision
                 state_dir=_STATE_DIR,         # durable: build survives + resumes past a restart
-                checkpoints=True,
-                checkpoint_responder=responder,
                 output_dir=str(code_dir) if code_dir else None,
                 profile=p.profile or "auto",  # stack picked in the UI ("auto" = infer)
             )
@@ -1437,7 +1200,9 @@ def _run_factory(p: Project, resume: bool = False) -> None:
         "artifact_uri": result.artifact_uri,
         "gate_statuses": {k: str(v) for k, v in result.gate_statuses.items()},
     }
-    _emit_paced(p, events_for_result(result_dict))
+    for ev in events_for_result(result_dict):
+        _emit(p, **ev)
+        time.sleep(_PACE)
     if result.passed:
         _emit(p, type="narrate", text="💰 Gates all green — the vault opens. Shipped!")
     else:
@@ -1895,8 +1660,6 @@ class Handler(BaseHTTPRequestHandler):
             self._reset()
         elif path == "/api/ideate":
             self._ideate()
-        elif path.startswith("/api/decision/"):
-            self._decision(path.rsplit("/", 1)[-1])
         elif path == "/api/suggest-slots":
             self._suggest_slots()
         elif path.startswith("/api/interview/"):
@@ -1921,8 +1684,8 @@ class Handler(BaseHTTPRequestHandler):
             {"id": p.id, "floor": p.floor, "release": p.release_seq,
              "releases": counts[p.floor], "request": p.request, "mode": p.mode,
              "backend": p.backend, "adapter": p.adapter,
-             "supervised": p.supervised, "slots": p.max_slots,
-             "status": p.status, "passed": p.passed, "awaiting": p.awaiting,
+             "slots": p.max_slots,
+             "status": p.status, "passed": p.passed,
              "gates": p.gates, "parent_id": p.parent_id}
             for p in sorted(by_floor.values(), key=lambda x: x.floor)
         ]
@@ -2109,7 +1872,6 @@ class Handler(BaseHTTPRequestHandler):
         adapter = str(body.get("adapter", "")).strip()
         if adapter not in ADAPTERS:
             adapter = _default_adapter_for(backend)
-        supervised = bool(body.get("supervised", True))
         spec_text = str(body.get("spec_text", "")).strip()
         spec_zip_b64 = body.get("spec_zip_b64")
         # Parallelism is system-decided (the Tech-Lead's decomposition sizes the IC
@@ -2194,7 +1956,7 @@ class Handler(BaseHTTPRequestHandler):
             if pcode.is_dir():
                 base_dir = str(pcode)        # seed the base tree with the prior code
         p = Project(
-            id=pid, request=request, mode="assistant", supervised=supervised, floor=floor,
+            id=pid, request=request, mode="assistant", floor=floor,
             release_seq=release_seq, backend=backend, adapter=adapter, spec=spec,
             spec_text=effective_spec_text,
             out_base=out_base, max_slots=max_slots, cost_cap_microusd=cost_cap_microusd,
@@ -2247,26 +2009,6 @@ class Handler(BaseHTTPRequestHandler):
         with _REPO_CACHE_LOCK:
             _REPO_CACHE.clear()
         self._json(200, {"ok": True})
-
-    def _decision(self, pid: str) -> None:
-        body = self._read_json()
-        decision = str(body.get("decision", "approve"))
-        if decision not in ("approve", "reject", "needs_changes"):
-            decision = "approve"
-        p = _PROJECTS.get(pid)
-        if p is None:
-            self._json(404, {"error": "no such project"})
-            return
-        # First decision for the awaiting checkpoint wins; later/duplicate clicks
-        # (from this or another device) are no-ops — but every device still sees
-        # the `resolved` event play, because it rides the shared log.
-        cp = body.get("checkpoint")
-        try:
-            checkpoint = int(cp) if cp is not None else None
-        except (TypeError, ValueError):
-            checkpoint = None
-        applied, stale = _record_decision(p, decision, checkpoint)
-        self._json(200, {"ok": not stale, "applied": applied, "stale": stale})
 
     def _stream(self, pid: str) -> None:
         p = _PROJECTS.get(pid)

@@ -61,13 +61,11 @@ body{
 .mode{color:var(--dim);white-space:nowrap}
 /* Stage chips: ONE line that scrolls sideways when they outgrow the bar — never wrapping. */
 .gates-mini{display:flex;gap:5px;flex-wrap:nowrap}
-/* The checkpoint dialog reuses these pills (same verdicts, same colours) — it just
-   wraps them instead of scrolling, since the dialog has the width to show them all. */
-.gates-mini .g,.cp-gate-strip .g{padding:1px 6px;border-radius:3px;border:2px solid var(--line);
+.gates-mini .g{padding:1px 6px;border-radius:3px;border:2px solid var(--line);
   font-size:11px;white-space:nowrap}
-.gates-mini .g.pass,.cp-gate-strip .g.pass{border-color:var(--green);color:var(--green)}
-.gates-mini .g.fail,.cp-gate-strip .g.fail{border-color:var(--red);color:var(--red)}
-.gates-mini .g.error,.cp-gate-strip .g.error{border-color:#d9a23a;color:#ffcf7a}
+.gates-mini .g.pass{border-color:var(--green);color:var(--green)}
+.gates-mini .g.fail{border-color:var(--red);color:var(--red)}
+.gates-mini .g.error{border-color:#d9a23a;color:#ffcf7a}
 button{
   font-family:inherit;text-transform:uppercase;cursor:pointer;white-space:nowrap;
   background:#24304f;color:var(--ink);border:3px solid var(--line);
@@ -77,7 +75,6 @@ button{
 button:active{transform:translateY(2px);box-shadow:0 1px 0 #0c1322}
 button.primary{background:#1f6b3a;border-color:var(--green);color:#dffce8}
 button.danger{background:#6b1f28;border-color:var(--red);color:#ffe0e3}
-button.warn{background:#5a4a18;border-color:var(--gold);color:#fff6da}
 #new-btn{background:#5a4a18;border-color:var(--gold);color:#fff6da}
 
 /* ---- Stage ---- */
@@ -113,13 +110,8 @@ button.warn{background:#5a4a18;border-color:var(--gold);color:#fff6da}
 .el-btn.done{color:var(--green);border-color:#2c5a3a}
 .el-btn.failed{color:var(--red);border-color:#5a2c30}
 .el-btn .fl-no{font-size:15px;display:block}
-.el-btn .badge{
-  position:absolute;top:-6px;right:-6px;background:var(--gold);color:#000;
-  border-radius:50%;width:16px;height:16px;font-size:11px;line-height:16px;
-  animation:pulse 1s infinite;
-}
 @keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.25)}}
-/* release counter on a project's elevator button (bottom-left, distinct from the ! badge) */
+/* release counter on a project's elevator button (bottom-left) */
 .el-btn .rel-badge{
   position:absolute;bottom:-5px;left:-5px;background:var(--blue);color:#06121f;
   border-radius:6px;padding:0 4px;font-size:9px;line-height:13px;font-weight:bold;
@@ -250,7 +242,6 @@ li.agent-box.done .agent-head{color:var(--green);background:rgba(93,220,122,.08)
   padding:20px 22px;width:min(520px,92vw);box-shadow:0 8px 0 #05080f;
   max-height:90vh;max-height:90dvh;overflow-y:auto;  /* never overflow the viewport (clipped buttons) */
 }
-.dialog.cp{border-color:var(--gold)}
 .dialog h2{margin:0 0 14px;color:var(--gold);text-transform:uppercase;font-size:18px}
 .dialog label{display:block;margin:10px 0 4px;color:var(--dim);font-size:12px;text-transform:uppercase}
 .dialog input[type=text],.dialog input[type=number],.dialog select,.dialog textarea{
@@ -350,52 +341,6 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
 .dialog label.check input{width:auto}
 .dialog-actions{display:flex;gap:10px;margin-top:18px;align-items:center}
 .cp-note{color:var(--dim);font-size:11px;margin:6px 0 0}   /* roman: Silkscreen oblique is rough */
-#cp-summary{color:var(--ink);font-size:14px;margin:4px 0}
-
-/* ---- checkpoint evidence: cost, gates, flags, artifacts, provenance ---- */
-/* Cost/elapsed chips */
-.cp-meta{display:flex;flex-wrap:wrap;gap:5px;margin:8px 0 2px}
-.cp-meta:empty{display:none}
-.cp-chip{border:2px solid var(--line);border-radius:5px;padding:2px 7px;
-  font-size:10px;color:var(--dim);background:#0e1626;text-transform:uppercase}
-.cp-chip.dim{border-color:transparent;background:transparent;text-transform:none}
-/* Gate verdicts so far: the strip, then the failures named in words */
-.cp-gates{margin:9px 0 2px}
-.cp-gate-strip{display:flex;flex-wrap:wrap;gap:4px}
-.cp-gate-line{font-size:11px;margin-top:5px;line-height:1.4}
-.cp-gate-line.ok{color:#9dffbf}
-.cp-gate-line.bad{color:#ff9b9b}
-/* What the crew flagged (journal concerns + low confidence) */
-.cp-flags{border:2px solid #6b5a1f;border-radius:6px;padding:6px 9px;margin:9px 0 2px;
-  background:#191506;max-height:22vh;overflow-y:auto}
-.cp-flags-head{font-size:11px;font-weight:bold;color:#ffe6a3;text-transform:uppercase}
-.cp-flag{font-size:11px;color:var(--dim);margin-top:3px;line-height:1.4}
-.cp-flag.concern{color:#ffd9a3}
-.cp-flag.dim{color:var(--dim)}
-/* What landed this stage (collapsible; auto-open when something needs a look) */
-.cp-details{margin:9px 0 2px}
-.cp-details>summary{cursor:pointer;color:var(--gold);font-size:12px;text-transform:uppercase}
-.cp-arts{max-height:26vh;overflow-y:auto;margin-top:6px;
-  border:2px solid var(--line);border-radius:6px;background:#0e1626;padding:6px 9px}
-.cp-art{font-size:11px;color:var(--dim);margin:2px 0;line-height:1.4}
-.cp-art-label{color:var(--ink)}
-.cp-art.risk .cp-art-label,.cp-art.risk .cp-art-detail{color:#ff9b9b}
-/* Provenance of the pause (phase · route · state sha) */
-.cp-prov{color:var(--dim);font-size:10px;margin-top:10px;opacity:.8;
-  word-break:break-all;text-transform:uppercase}
-.cp-prov:empty{display:none}
-/* Buttons carry what they DO, under the verb. The row is STICKY: the evidence
-   above can outgrow a phone screen, and the decision must never be the thing you
-   have to scroll to find. */
-.cp-actions{position:sticky;bottom:-20px;background:var(--panel);z-index:2;
-  padding:14px 0 6px;margin-top:8px;box-shadow:0 -10px 12px -4px var(--panel);
-  align-items:stretch}   /* equal heights: a taller button must not poke out of the band */
-.cp-actions button{display:flex;flex-direction:column;align-items:center;
-  justify-content:center;gap:2px;flex:1;min-width:0;text-align:center}
-.cp-actions .btn-sub{font-size:9px;font-weight:normal;opacity:.85;
-  text-transform:none;line-height:1.25;white-space:normal}
-.cp-review{margin-top:8px}
-#cp-code{background:#1b3a4a;border-color:var(--blue);color:#dff2ff;font-size:11px}
 
 /* ---- suggest-N row ---- */
 .slots-row{display:flex;align-items:center;gap:8px}
@@ -627,12 +572,6 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
   .dialog h2{font-size:15px;margin-bottom:10px}
   /* action rows wrap instead of shoving no-wrap buttons past the dialog edge */
   .dialog-actions{flex-wrap:wrap}
-  /* Checkpoint verdicts: three abreast overflows at 390px (REQUEST CHANGES spills
-     onto APPROVE). APPROVE gets its own full-width row; the two "send it back"
-     verbs share the second. Sticky offset retuned to this block's 14px padding. */
-  .cp-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;bottom:-14px}
-  .cp-actions button{white-space:normal}
-  #cp-approve{grid-column:1 / -1}
 
   /* The build form is far too long for a centred card on a phone, so it becomes a
      full-height SHEET: edge to edge, header pinned to the top, BREAK GROUND pinned

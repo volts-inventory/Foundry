@@ -1,7 +1,7 @@
 """webapp.events — pure telemetry->game-event mapping (no server, no factory)."""
 from __future__ import annotations
 
-from webapp.events import events_for_payload, events_for_result, live_event_for_node
+from webapp.events import events_for_node_output, events_for_result, live_event_for_node
 
 
 def test_live_event_for_node_seats_the_agent_at_its_desk() -> None:
@@ -63,37 +63,32 @@ def test_subgraph_scopes_all_resolve_to_a_room() -> None:
     assert live_event_for_node("some_unnamed_node", "factory", "start") is None
 
 
-def test_payload_maps_artifacts_journal_and_checkpoint() -> None:
-    payload = {
-        "boundary": "product",
-        "artifacts": [{"kind": "prd", "uri": "cas://a", "produced_by": "product_manager"}],
-        "gates": [{"name": "spec", "status": "GateStatus.PASS"}],
-        "agent_journal": [{"node_id": "product_manager", "role": "pm",
+def test_node_output_maps_artifacts_and_journal() -> None:
+    result = {
+        "_art_details": [{"kind": "prd", "uri": "cas://a", "produced_by": "planner"}],
+        "agent_journal": [{"node_id": "planner", "role": "pm",
                            "summary": "Authored the PRD", "concerns": ["thin criteria"]}],
     }
     seen: set[str] = set()
-    evs = events_for_payload(payload, seen)
-    types = [e["type"] for e in evs]
-    assert types[0] == "stage" and types[-1] == "checkpoint"
+    evs = events_for_node_output(result, seen)
     assert any(e["type"] == "artifact" and e["label"] == "PRD" for e in evs)
     assert any(e["type"] == "say" and "PRD" in e["text"] for e in evs)
-    assert any(e["type"] == "gate" and e["name"] == "spec" and e["status"] == "pass" for e in evs)
     assert "cas://a" in seen  # idempotent: re-emit won't double-fire
+    assert events_for_node_output(result, seen) == []
 
 
 def test_same_kind_artifacts_are_numbered_not_vague_dups() -> None:
     # A stage that emits many artifacts of ONE kind (e.g. 9 acceptance criteria)
     # must number the quest-log pickups (#1..#N) instead of N identical lines.
     payload = {
-        "boundary": "product",
-        "artifacts": [
+        "_art_details": [
             {"kind": "prd", "uri": "cas://prd", "produced_by": "product_manager"},
             {"kind": "acceptance_criterion", "uri": "cas://c1", "produced_by": "product_manager"},
             {"kind": "acceptance_criterion", "uri": "cas://c2", "produced_by": "product_manager"},
             {"kind": "acceptance_criterion", "uri": "cas://c3", "produced_by": "product_manager"},
         ],
     }
-    labels = [e["label"] for e in events_for_payload(payload, set()) if e["type"] == "artifact"]
+    labels = [e["label"] for e in events_for_node_output(payload, set()) if e["type"] == "artifact"]
     # Lone kind stays unnumbered; the repeated kind is numbered in order.
     assert "PRD" in labels
     assert "Acceptance Criterion #1" in labels
@@ -103,13 +98,12 @@ def test_same_kind_artifacts_are_numbered_not_vague_dups() -> None:
     assert "Acceptance Criterion" not in labels
 
 
-def test_org_chart_emitted_once_from_payload() -> None:
+def test_org_chart_emitted_once() -> None:
     payload = {
-        "boundary": "design",
-        "artifacts": [],
+        "_art_details": [],
         "gates": [],
         "agent_journal": [],
-        "org": {
+        "_org": {
             "areas": [
                 {"area": "frontend", "leads": ["ui_team"]},
                 {"area": "backend", "leads": ["svc"]},
@@ -121,21 +115,19 @@ def test_org_chart_emitted_once_from_payload() -> None:
         },
     }
     seen: set[str] = set()
-    evs = events_for_payload(payload, seen)
+    evs = events_for_node_output(payload, seen)
     org = [e for e in evs if e["type"] == "org"]
     assert len(org) == 1
     assert {a["area"] for a in org[0]["areas"]} == {"frontend", "backend"}
     assert any(d["owner"] == "svc" for d in org[0]["domains"])
     # re-emitting the same payload does NOT fire a second org event (idempotent)
-    assert not any(e["type"] == "org" for e in events_for_payload(payload, seen))
+    assert not any(e["type"] == "org" for e in events_for_node_output(payload, seen))
 
 
 def test_seen_uris_dedup() -> None:
-    payload = {"boundary": "product",
-               "artifacts": [{"kind": "prd", "uri": "cas://a", "produced_by": "pm"}],
-               "gates": [], "agent_journal": []}
+    payload = {"_art_details": [{"kind": "prd", "uri": "cas://a", "produced_by": "pm"}]}
     seen = {"cas://a"}
-    evs = events_for_payload(payload, seen)
+    evs = events_for_node_output(payload, seen)
     assert not any(e["type"] == "artifact" for e in evs)  # already seen
 
 
@@ -152,62 +144,6 @@ def test_result_halt_on_fail() -> None:
                              "artifact_uri": None, "gate_statuses": {"test": "GateStatus.FAIL"}})
     assert any(e["type"] == "halt" for e in evs)
     assert not any(e["type"] == "release" for e in evs)
-
-
-def test_checkpoint_carries_provenance_and_button_consequences() -> None:
-    # The approval dialog used to get a title and one sentence. The payload always
-    # carried WHERE the pause is and WHICH state it decides on — carry it through.
-    payload = {
-        "boundary": "design",
-        "phase": "architecture",
-        "route": "gated",
-        "state_sha": "abc123def456789",
-        "artifacts": [],
-        "gates": [],
-    }
-    cp = next(e for e in events_for_payload(payload, set()) if e["type"] == "checkpoint")
-    assert cp["phase"] == "architecture"
-    assert cp["route"] == "gated"
-    assert cp["state_sha"] == "abc123def456789"
-    # Each button says what it DOES, per boundary — "approve" never claims to ship.
-    assert "engineering" in cp["actions"]["approve"]
-    assert "ship" not in cp["actions"]["approve"]
-    assert "nothing ships" in cp["actions"]["reject"]
-
-
-def test_missing_provenance_degrades_to_empty_not_none() -> None:
-    # An older/leaner payload must not put "None" strings in front of a human.
-    cp = next(e for e in events_for_payload({"boundary": "product"}, set())
-              if e["type"] == "checkpoint")
-    assert cp["phase"] == "" and cp["route"] == "" and cp["state_sha"] == ""
-    assert cp["actions"]["approve"]      # copy is always present
-
-
-def test_checkpoint_actions_differ_per_boundary() -> None:
-    from webapp.events import checkpoint_actions
-
-    assert checkpoint_actions("product")["approve"] != checkpoint_actions("design")["approve"]
-    assert "gates" in checkpoint_actions("release")["approve"]
-    # An unknown boundary still yields true, generic copy (never a KeyError).
-    unknown = checkpoint_actions("something_new")
-    assert unknown["approve"] and unknown["changes"] and unknown["reject"]
-
-
-def test_gate_events_carry_the_tree_they_ran_against() -> None:
-    # A red gate at a checkpoint is only readable if you can tell a stale verdict
-    # from a current one — `run_against` names the tree it was produced over.
-    payload = {
-        "boundary": "release",
-        "artifacts": [],
-        "gates": [{"name": "test", "status": "GateStatus.FAIL", "run_against": "sha-777"}],
-    }
-    gate = next(e for e in events_for_payload(payload, set()) if e["type"] == "gate")
-    assert gate["status"] == "fail" and gate["run_against"] == "sha-777"
-    # A payload without it degrades to "" (the dialog just omits the tooltip).
-    bare = {"boundary": "release", "artifacts": [],
-            "gates": [{"name": "test", "status": "pass"}]}
-    bare_gate = next(e for e in events_for_payload(bare, set()) if e["type"] == "gate")
-    assert bare_gate["run_against"] == ""
 
 
 def test_reviewer_persona_does_not_collide_with_the_review_gate() -> None:
@@ -239,8 +175,8 @@ def test_cast_is_planner_engineers_reviewer_and_old_ids_still_seat_someone() -> 
     for node, (agent, room) in expect.items():
         ev = live_event_for_node(node, "", "start")
         assert ev is not None and (ev["agent"], ev["room"]) == (agent, room), node
-    out = events_for_payload(
-        {"boundary": "design", "artifacts": [
+    out = events_for_node_output(
+        {"_art_details": [
             {"uri": "u1", "kind": "prd", "produced_by": "planner"},
             {"uri": "u2", "kind": "test_report", "produced_by": "reviewer"}]}, set())
     arts = {e["kind"]: (e["agent"], e["room"]) for e in out if e["type"] == "artifact"}
@@ -254,11 +190,11 @@ def test_ticket_artifact_surfaces_as_a_planner_pickup_and_a_ticket_event() -> No
 
     detail = json.dumps({"id": "T-001", "title": "Add login", "specialty": "frontend",
                          "difficulty": "complex", "depends_on": ["T-000"]})
-    payload = {"boundary": "design", "artifacts": [
+    payload = {"_art_details": [
         {"kind": "ticket", "uri": "cas://t1", "produced_by": "planner", "detail": detail},
         {"kind": "ticket", "uri": "cas://t2", "produced_by": "planner", "detail": "plain text"},
     ]}
-    evs = events_for_payload(payload, set())
+    evs = events_for_node_output(payload, set())
     arts = [e for e in evs if e["type"] == "artifact"]
     assert [(a["room"], a["agent"], a["kind"]) for a in arts] == [("plan", "Planner", "ticket")] * 2
     assert arts[0]["label"] == "Ticket #1" and arts[0]["detail"] == "T-001 — Add login"

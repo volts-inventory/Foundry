@@ -64,17 +64,9 @@ def test_max_fix_attempts_valid_runs() -> None:
     assert main(["--max-fix-attempts", "5", "build a thing"]) == 0
 
 
-# ---- --checkpoints heuristic (H5: must not greedily eat the request) ---------
-
-
-def test_checkpoints_bare_enables_all_and_does_not_eat_request() -> None:
-    # `--checkpoints` directly before the request must NOT consume it as a value.
-    assert main(["--checkpoints", "build a thing"]) == 0
-
-
-def test_checkpoints_all_and_boundary_list_parse() -> None:
-    assert main(["--checkpoints", "all", "build a thing"]) == 0
-    assert main(["--checkpoints", "product,design", "build a thing"]) == 0
+def test_removed_supervision_flag_is_rejected() -> None:
+    # Supervision is gone: the old flag must fail loudly, not join the request text.
+    assert main(["--checkpoints", "build a thing"]) == 2
 
 
 # ---- the de-duplicated value-flag helpers (H5) ------------------------------

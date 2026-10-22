@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from foundry.cli import main, run
 from foundry.schemas.gates import GateStatus
 
@@ -100,3 +102,29 @@ def test_main_out_flag_writes_tree(tmp_path: Path) -> None:
 
 def test_main_out_flag_requires_argument() -> None:
     assert main(["--out"]) == 2
+
+
+def test_a_manifest_write_failure_never_changes_the_build_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(*_: object, **__: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr("foundry.cli.write_manifest", boom)
+    out = tmp_path / "generated"
+    result = run("build a tiny URL-shortener service", thread_id="cli-out-manifest-fail",
+                 output_dir=str(out))
+    assert result.passed is True and (out / "app.py").is_file()
+    assert not (out / "BUILD-MANIFEST.json").exists()
+
+
+def test_telemetry_details_every_ticket_past_the_bulk_cap() -> None:
+    from types import SimpleNamespace
+
+    from foundry.cli import _detailed_artifacts
+
+    arts = [SimpleNamespace(kind="acceptance_criterion", n=i) for i in range(250)]
+    arts += [SimpleNamespace(kind="ticket", n=i) for i in range(5)]
+    picked = _detailed_artifacts(arts)
+    assert sum(a.kind == "ticket" for a in picked) == 5
+    assert sum(a.kind == "acceptance_criterion" for a in picked) == 200

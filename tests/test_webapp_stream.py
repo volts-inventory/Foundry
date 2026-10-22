@@ -229,6 +229,28 @@ def test_load_persisted_closes_interrupted_build(store, monkeypatch):
     assert len(server._STORE.events_of("run1")) == before
 
 
+def test_floor_paused_at_a_retired_checkpoint_is_closed_not_rerun(store, monkeypatch):
+    # Paused at a supervision checkpoint before supervision was removed: resuming
+    # would re-plan from START, so it is closed out even with a durable checkpoint.
+    log = [{"type": "stage"}, {"type": "await_decision", "checkpoint": 1}]
+    for i, ev in enumerate(log):
+        store.append_event("pz1", i, ev)
+    store.upsert({"id": "pz1", "floor": 3, "release_seq": 1, "request": "r",
+                  "mode": "assistant", "status": "running", "passed": False})
+    monkeypatch.setattr(server, "_PROJECTS", {})
+    monkeypatch.setattr(server, "_has_durable_checkpoint", lambda _tid: True)
+
+    def no_resume(*_a, **_k):
+        raise AssertionError("a retired pause must not be resumed")
+
+    monkeypatch.setattr(server, "_gated_runner", no_resume)
+    server._load_persisted()
+    p = server._PROJECTS["pz1"]
+    types = [e["type"] for e in p.log]
+    assert types[:2] == ["stage", "await_decision"] and "halt" in types
+    assert p.ended and p.status == "done"
+
+
 # --- what a long silence is waiting on --------------------------------------- #
 
 def test_waiting_on_names_the_longest_running_steps_first():

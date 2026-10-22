@@ -51,12 +51,13 @@ import os
 import shutil
 import sys
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from foundry.agents import AgentRuntime
+from foundry.agents.planner import TICKET_KIND
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.durability.checkpointer import FoundryCheckpointer
 from foundry.durability.persistence import (
@@ -996,6 +997,23 @@ def _invoke_with_autoresume(
             time.sleep(wait)
 
 
+_DETAIL_CAP = 200
+
+
+def _detailed_artifacts(arts: Sequence[Any], cap: int = _DETAIL_CAP) -> list[Any]:
+    """The artifacts a node's telemetry details, in order: every ticket (each must
+    reach the Workshop's Tickets tab) plus the first ``cap`` of the bulk kinds."""
+    out: list[Any] = []
+    bulk = 0
+    for a in arts:
+        if getattr(a, "kind", None) == TICKET_KIND:
+            out.append(a)
+        elif bulk < cap:
+            bulk += 1
+            out.append(a)
+    return out
+
+
 # ---- the smoke run ----------------------------------------------------------
 
 
@@ -1319,9 +1337,7 @@ def run(
                     if phase == "finish" and isinstance(result, dict) and result.get("artifacts"):
                         arts = list(result["artifacts"])
                         details: list[dict[str, str]] = []
-                        # Every ticket must reach the Workshop's Tickets tab, so the
-                        # cap is generous (it only bounds a pathological plan).
-                        for a in arts[:200]:
+                        for a in _detailed_artifacts(arts):
                             kind = str(getattr(a, "kind", ""))
                             try:
                                 body = _rv(a)
@@ -1384,8 +1400,13 @@ def run(
         if draft_root is not None:
             result = replace(result, draft_root=draft_root)
     if result.output_root or result.draft_root:
-        write_manifest(output_dir or "", request=request, thread_id=thread_id,
-                       state=final_state, rt=rt, passed=result.passed)
+        # The manifest is a report on a finished build: failing to write it must
+        # never turn a gated result into an exception.
+        try:
+            write_manifest(output_dir or "", request=request, thread_id=thread_id,
+                           state=final_state, rt=rt, passed=result.passed)
+        except Exception as exc:
+            print(f"warning: BUILD-MANIFEST not written: {exc}", file=sys.stderr)
     return result
 
 

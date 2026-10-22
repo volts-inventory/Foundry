@@ -67,6 +67,7 @@ FOUNDRY_MSGPACK_MODULES: list[tuple[str, str]] = [
     ("foundry.schemas.implementation", "ConflictResolution"),
     ("foundry.schemas.implementation", "TaskStatus"),
     ("foundry.schemas.implementation", "Ticket"),
+    ("foundry.schemas.implementation", "Epic"),
     ("foundry.schemas.implementation", "Specialty"),
     ("foundry.schemas.implementation", "Difficulty"),
     ("foundry.schemas.quality", "TestPlan"),

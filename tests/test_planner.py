@@ -40,6 +40,7 @@ from foundry.agents.planner import (
     _build_tickets,
     _epic_items,
     _ownership_from_tickets,
+    _prior_plan,
     make_planner_node,
 )
 from foundry.context import SymbolIndex
@@ -810,7 +811,7 @@ def _epic_runtime(
 
 def _epic_of(request: dict[str, Any]) -> str | None:
     blob = json.dumps(request, ensure_ascii=False)
-    return next((e for e in ("E1", "E2", "E3") if f"YOUR EPIC: {e}" in blob), None)
+    return next((e for e in ("E1", "E2", "E3", "E4") if f"YOUR EPIC: {e}" in blob), None)
 
 
 def _bodies(cas: ArtifactStore, writes: dict[str, Any], kind: str) -> list[Any]:
@@ -837,7 +838,8 @@ def test_multi_epic_plan_makes_one_ticket_call_per_epic_with_namespaced_ids() ->
     epic_prompt = json.dumps(next(r for r in tx.requests if _epic_of(r) == "E2"))
     assert EPIC_PLANNER_SOP_KEY in epic_prompt and PLANNER_SOP_KEY not in epic_prompt
     assert "Store.load: load(id) -> note" in epic_prompt  # the shared contracts
-    assert {a.kind for a in writes["artifacts"]} == EXPECTED_KINDS - {"adr"}  # none planned
+    # No ADRs planned; the epics ride as their own records.
+    assert {a.kind for a in writes["artifacts"]} == (EXPECTED_KINDS - {"adr"}) | {"epic"}
 
     tickets = {t.id: t for t in _bodies(cas, writes, "ticket")}
     assert list(tickets) == [
@@ -1036,3 +1038,88 @@ def test_epic_items_are_namespaced_and_capped() -> None:
     assert items[0]["depends_on"] == ["E1-T02"]
     assert [s["id"] for s in items[0]["scenarios"]] == ["E1-AC01", "E1-AC9"]
     assert any(f"per-epic cap of {MAX_EPIC_TICKETS}" in c for c in concerns)
+
+
+def _run_epics(
+    plan: dict[str, Any], replies: dict[str, dict[str, Any]], cas: ArtifactStore
+) -> tuple[AgentRuntime, dict[str, Any]]:
+    rt, _ = _epic_runtime(*_epic_scripts(plan, replies), cas=cas)
+    return rt, make_planner_node(rt)({"request": "x"}, config_for("r"))
+
+
+def test_an_empty_upstream_epic_is_looked_through_to_its_own_upstream() -> None:
+    plan, replies = multi_epic_plan()
+    replies["E2"]["tickets"] = []
+    cas = ArtifactStore()
+    _, writes = _run_epics(plan, replies, cas)
+    deps = {t.id: t.depends_on for t in _bodies(cas, writes, "ticket")}
+    # E3 -> E2 (no tickets) -> E1: E3's root still waits for E1's sink.
+    assert deps["E3-web-page"] == ("E1-T03",)
+
+
+def test_cross_epic_links_never_count_as_test_coverage() -> None:
+    plan, replies = multi_epic_plan()
+    replies["E1"]["tickets"] = replies["E1"]["tickets"][:2]  # E1 loses its test ticket
+    replies["E2"]["tickets"] = [_ticket("T01", specialty="test")]
+    cas = ArtifactStore()
+    _, writes = _run_epics(plan, replies, cas)
+    tickets = {t.id: t for t in _bodies(cas, writes, "ticket")}
+    assert tickets["E2-T01"].depends_on == ("E1-T02",)  # ordered after E1 ...
+    assert tickets["E2-T01"].scenario_ids == ()  # ... but covers none of its scenarios
+    assert "Ticket E1-T02 has scenarios but no test ticket depends on it." in (
+        writes["agent_journal"][0].concerns
+    )
+
+
+def test_epics_are_recorded_and_read_back_whole_for_a_targeted_replan() -> None:
+    plan, replies = multi_epic_plan()
+    replies["E2"]["tickets"] = []
+    cas = ArtifactStore()
+    rt, writes = _run_epics(plan, replies, cas)
+    prior = _prior_plan(_failed(writes, "criterion E1-AC01: vague"), rt)
+    assert prior is not None
+    assert [(e.id, e.title, e.provides, e.consumes) for e in prior.epics] == [
+        ("E1", "Storage", ("Store.save", "Store.load"), ()),
+        ("E2", "API", ("Api.http",), ("Store.load",)),  # no tickets, still an epic
+        ("E3", "Web", (), ()),
+    ]
+
+
+def test_a_scenario_dropped_by_a_replan_stays_dropped() -> None:
+    _, replies = multi_epic_plan()
+    e2 = replies["E2"]["tickets"]
+    revised = {**replies["E2"], "tickets": [{**e2[0], "scenarios": [_scn("AC05")]}, e2[1]]}
+    cas = ArtifactStore()
+    node, tx, first = _first_pass(
+        cas, ResponseScript(json.dumps(revised), match=_match("YOUR EPIC: E2", "REVISION PASS"))
+    )
+    state = _failed(first, "criterion E2-AC01: scenario has no then step")
+    second = node(state, config_for("r", step=5))
+    after: FactoryState = {**state, "artifacts": [*first["artifacts"], *second["artifacts"]]}
+    rt = AgentRuntime(proxy=ModelProviderProxy(tx, signer=ZoneBSigner(KEY, KEY_ID)), cas=cas)
+    prior = _prior_plan(after, rt)
+    assert prior is not None
+    assert {c for c in prior.criteria if c.startswith("E2-")} == {"E2-AC05"}
+
+
+def test_a_full_replan_pairs_epics_by_title_not_position() -> None:
+    plan, replies = multi_epic_plan()
+    storage, api, web = plan["epics"]
+    search = {"id": "E2", "title": "Search", "summary": "find notes", "depends_on": ["E1"],
+              "provides": [], "consumes": []}
+    replan = {**plan, "epics": [
+        storage, search, {**api, "id": "E3"}, {**web, "id": "E4", "depends_on": ["E3"]},
+    ]}
+    cas = ArtifactStore()
+    node, tx, first = _first_pass(
+        cas,
+        ResponseScript(json.dumps(replan), match=_match(PLANNER_SOP_KEY, "REVISION PASS")),
+        ResponseScript(json.dumps(replies["E3"]), match=_match("YOUR EPIC: E4")),
+    )
+    node(_failed(first, "no criterion flags security_abuse=true"), config_for("r", step=5))
+    prompts = {_epic_of(r): json.dumps(r, ensure_ascii=False) for r in tx.requests[4:]}
+    # The API epic moved E2 -> E3: it reproduces its own tickets, re-prefixed.
+    assert "E3-T01 [backend] backend T01" in prompts["E3"] and "E3-AC01:" in prompts["E3"]
+    # The new E2 continues nothing: the old plan is reference, not ids to reproduce.
+    assert "reference only" in prompts["E2"]
+    assert "This epic's previous tickets" not in prompts["E2"]

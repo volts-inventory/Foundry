@@ -172,6 +172,81 @@ def _pull_diffs(state: FactoryState, backends: Any) -> tuple[PullDiff, ...]:
     return tuple(diffs)
 
 
+PLAN_CONTEXT_CAP = 12_000
+
+
+def plan_context(state: Any, cas: Any, cap: int = PLAN_CONTEXT_CAP) -> str:
+    """The plan a finished build shipped — PRD, system design, its interface
+    contracts and live pinned constraints — as spec text for a release that
+    iterates on it, at most ``cap`` characters; "" when there is none."""
+    from foundry.state.reducers import live_constraints
+
+    def newest(kind: str) -> Any:
+        handles = sorted(
+            (a for a in state.get("artifacts") or () if getattr(a, "kind", None) == kind),
+            key=lambda a: a.seq,
+        )
+        for a in reversed(handles):
+            with contextlib.suppress(Exception):
+                return cas.resolve(a)
+        return None
+
+    def body(uri: str) -> str:
+        try:
+            return str(getattr(cas.get_body(uri), "text", "") or "")
+        except Exception:
+            return ""
+
+    parts: list[str] = []
+    prd = newest("prd")
+    if prd is not None:
+        parts.append(f"PRD: {prd.title}\n{body(prd.prd_uri)}")
+    design = newest("system_design")
+    if design is not None:
+        parts.append(
+            f"System design: {design.title}\n{body(design.design_uri)}\n"
+            f"Components: {', '.join(design.components) or '(none)'}"
+        )
+        contracts: dict[str, str] = {}
+        for a in sorted((a for a in state.get("artifacts") or ()
+                         if getattr(a, "kind", None) == "interface_contract"),
+                        key=lambda a: a.seq):
+            with contextlib.suppress(Exception):
+                c = cas.resolve(a)
+                if c.name in design.interface_ids:
+                    contracts[c.name] = body(c.spec_uri)
+        if contracts:
+            parts.append("Interface contracts:\n" + "\n".join(
+                f"- {name}: {spec}" for name, spec in contracts.items()))
+    constraints = live_constraints(list(state.get("pinned_constraints") or ()))
+    if constraints:
+        parts.append("Pinned constraints:\n" + "\n".join(f"- {c.text}" for c in constraints))
+    if not parts:
+        return ""
+    return ("PREVIOUS RELEASE'S PLAN (the build this release iterates on):\n\n"
+            + "\n\n".join(parts))[:cap]
+
+
+def read_plan_context(thread_id: str, state_dir: str | Path) -> str:
+    """:func:`plan_context` of ``thread_id``'s latest durable checkpoint; "" when
+    the build has none (best-effort — a missing plan never blocks an iterate)."""
+    from foundry.durability.persistence import durable_backends
+
+    try:
+        backends = durable_backends(state_dir)
+    except Exception:
+        return ""
+    try:
+        tup = backends.checkpointer.saver.get_tuple({"configurable": {"thread_id": thread_id}})
+        values = tup.checkpoint.get("channel_values") if tup is not None else None
+        return plan_context(values, backends.cas) if isinstance(values, dict) else ""
+    except Exception:
+        return ""
+    finally:
+        with contextlib.suppress(Exception):
+            backends.close()
+
+
 def read_repo(thread_id: str, state_dir: str | Path) -> Repo:
     """Read a finished build's repository from the durable store (no output dir).
 

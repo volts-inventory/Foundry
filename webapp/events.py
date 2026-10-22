@@ -79,6 +79,7 @@ ARTIFACT_ORIGIN: dict[str, tuple[str, str]] = {
     "interface_contract": ("Planner", "plan"),
     "ownership_map": ("Planner", "plan"),
     "ticket": ("Planner", "plan"),
+    "epic": ("Planner", "plan"),
     "scope_tier": ("Planner", "plan"),
     "feature_diff": ("Junior Engineer", "engineering"),
     "test_plan": ("Reviewer", "review"),
@@ -103,6 +104,7 @@ ARTIFACT_LABEL: dict[str, str] = {
     "interface_contract": "Interface Contract",
     "ownership_map": "Ownership Map",
     "ticket": "Ticket",
+    "epic": "Epic",
     "feature_diff": "Feature Diff (code!)",
     "test_plan": "Test Plan",
     "oracle_binding": "Oracle",
@@ -391,6 +393,21 @@ def events_for_node_output(
         if say is not None and agent not in said:
             said.add(agent)
             out.append({"type": "say", **say})
+
+    # Gate verdicts as they land, so the HUD shows a mid-run FAIL -> fix -> PASS.
+    # Advisory: the closing events carry the verdicts that decide the release.
+    for g in result.get("gates") or ():
+        def field(key: str, g: Any = g) -> Any:
+            return g.get(key) if isinstance(g, Mapping) else getattr(g, key, None)
+
+        name = str(field("name") or "")
+        key = f"gate:{name}:{field('seq')}"
+        if not name or key in seen_uris:
+            continue
+        seen_uris.add(key)
+        out.append({"type": "gate", "name": name, "status": _norm_status(field("status")),
+                    "attested": True, "advisory": True,
+                    "run_against": str(field("run_against") or "")})
     return out
 
 

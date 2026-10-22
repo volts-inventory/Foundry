@@ -79,6 +79,21 @@ class Ticket(FrozenModel):
     seq: Seq
 
 
+class Epic(FrozenModel):
+    """One epic of an epic-mode plan as the Planner's call 1 split it, kept so a
+    targeted Spec-gate re-plan re-runs it with its own title, summary and
+    declared contracts. Every epic of one pass shares a Seq but for ``local``."""
+
+    id: str  # positional: "E1".."En"
+    title: str = ""
+    summary: str = ""
+    specialty_mix: tuple[str, ...] = ()
+    depends_on: tuple[str, ...] = ()  # epic ids; a DAG
+    provides: tuple[str, ...] = ()  # InterfaceContract names
+    consumes: tuple[str, ...] = ()
+    seq: Seq
+
+
 class TaskEvent(TypedDict):
     """Live per-ticket telemetry (pool -> run(task_cb=...) -> Workshop)."""
 

@@ -41,7 +41,7 @@ from webapp.events import (
     journal_dicts,
     live_event_for_node,
 )
-from webapp.repo import Repo, RepoUnavailable, read_repo
+from webapp.repo import Repo, RepoUnavailable, read_plan_context, read_repo
 from webapp.store import BuildStore
 
 
@@ -500,11 +500,12 @@ def _load_persisted() -> None:
                 _PROJECTS[p.id] = p
                 # A checkpoint written by the removed gated/autonomous graph names nodes
                 # that no longer exist, so it can't be resumed on the assistant graph.
-                # (A floor paused at a removed supervision checkpoint is still
-                # "running": it resumes hands-off — run() re-enters from START over
-                # the durable state, so the retired pause node is never needed.)
+                # Neither can a floor paused at a removed supervision checkpoint: run()
+                # would re-enter from START, re-plan without retiring the first plan's
+                # tickets and build both — so it is closed out like a legacy floor.
                 legacy_mode = str(row.get("mode") or "assistant") != "assistant"
-                if was_running and not legacy_mode and _has_durable_checkpoint(p.id):
+                if (was_running and not legacy_mode and not _paused_at_retired_checkpoint(p.log)
+                        and _has_durable_checkpoint(p.id)):
                     # Durable state survived the restart → RESUME the build from its
                     # last checkpoint. Seed the dedup set so the resumed run doesn't
                     # re-emit the history already in the log.
@@ -533,6 +534,18 @@ def _load_persisted() -> None:
             except Exception:
                 continue
         _FLOOR[0] = max(_FLOOR[0], _STORE.max_floor())
+
+
+def _paused_at_retired_checkpoint(log: list[dict[str, Any]]) -> bool:
+    """True iff the floor's log ends paused at a supervision checkpoint (an
+    ``await_decision`` no ``resolved`` followed) — a pause the graph no longer has."""
+    paused = False
+    for e in log:
+        if e.get("type") == "await_decision":
+            paused = True
+        elif e.get("type") == "resolved":
+            paused = False
+    return paused
 
 
 def _has_durable_checkpoint(thread_id: str) -> bool:
@@ -737,6 +750,19 @@ def _materialize_base_dir(parent_id: str, dest: Path) -> bool:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
     return True
+
+
+def _child_spec(p: Project) -> str | None:
+    """The spec a release runs with: its own (text or uploaded docs dir) plus, when
+    it iterates on a parent, the parent's shipped plan (PRD, design, interface
+    contracts, pinned constraints) so the planner extends that plan."""
+    parent_plan = read_plan_context(p.parent_id, _STATE_DIR) if p.parent_id else ""
+    if not parent_plan:
+        return p.spec
+    from foundry.cli import _load_spec
+
+    own = _load_spec(p.spec)
+    return f"{own}\n\n{parent_plan}" if own.strip() else parent_plan
 
 
 def take_activity(p: Project, text: str, now: float | None = None) -> str | None:
@@ -1121,7 +1147,7 @@ def _run_factory(p: Project, resume: bool = False) -> None:
                 mode=p.mode,
                 backend=p.backend,            # real backend per project (not always mock)
                 adapter=p.adapter,            # coding substrate (stub/raw-react)
-                spec=p.spec,                  # pasted spec text OR uploaded docs dir (additive)
+                spec=_child_spec(p),          # spec text OR docs dir, + the parent's plan
                 max_slots=p.max_slots,        # IC-pool parallelism (Wave C) + budget tree (Wave D)
                 cost_cap_microusd=p.cost_cap_microusd,
                 token_cap=p.token_cap,

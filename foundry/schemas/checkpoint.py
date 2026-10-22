@@ -154,6 +154,8 @@ def _artifact_detail(kind: str, body: object, *, max_len: int = 200) -> str | No
         out = (s("title") or "System Design") + (f" — {comps} components" if comps else "")
     elif kind == "adr":
         out = s("title") or s("decision")
+    elif kind == "epic":
+        out = " — ".join(x for x in (s("id"), s("title")) if x) or None
     elif kind == "interface_contract":
         out = s("name")
         cons = count("consumers")

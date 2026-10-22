@@ -255,3 +255,29 @@ def test_a_retired_ticket_is_flagged_for_removal_from_the_board() -> None:
     tomb = Ticket(id="T-1", title="x", specialty=Specialty.DATA, supersedes="T-1", seq=seq)
     assert ticket_event(_artifact_detail("ticket", live) or "")["retired"] is False  # type: ignore[index]
     assert ticket_event(_artifact_detail("ticket", tomb) or "")["retired"] is True  # type: ignore[index]
+
+
+def test_gate_verdicts_surface_from_node_output_as_they_land() -> None:
+    from foundry.schemas.gates import GateResult, GateStatus, VerdictClass
+    from foundry.state.seq import Seq
+
+    fail = GateResult(name="spec", status=GateStatus.FAIL, decision_deterministic=True,
+                      execution_deterministic=False,
+                      verdict_class=VerdictClass.CONFIG_EVALUABLE, run_against="sha-1",
+                      seq=Seq("r", 1, 1, "spec_gate", 0))
+    seen: set[str] = set()
+    evs = events_for_node_output({"gates": [fail]}, seen)
+    assert [e for e in evs if e["type"] == "gate"] == [{
+        "type": "gate", "name": "spec", "status": "fail", "attested": True,
+        "advisory": True, "run_against": "sha-1",
+    }]
+    # An enclosing node re-reporting the same verdict does not fire it again.
+    assert events_for_node_output({"gates": [fail]}, seen) == []
+
+
+def test_epic_artifact_is_a_labelled_planner_pickup() -> None:
+    evs = events_for_node_output({"_art_details": [
+        {"kind": "epic", "uri": "cas://e1", "produced_by": "planner", "detail": "E1 — Storage"},
+    ]}, set())
+    [art] = [e for e in evs if e["type"] == "artifact"]
+    assert (art["agent"], art["room"], art["label"]) == ("Planner", "plan", "Epic")

@@ -239,3 +239,4 @@ Housekeeping: `rm -rf .pytest_cache .mypy_cache .ruff_cache ./.run spec.md`
 - The Workshop requires sign-in by default: set `FOUNDRY_AUTH=0` for a local curl smoke test, and stop it by PID — `pkill -f webapp.server` also matches (and kills) the calling shell.
 - `isolation: "worktree"` agents branch from the default branch, not your current branch — their merge back can conflict with (and `--theirs` can silently drop) your unmerged work; diff against your branch before resolving.
 - Killing a `uv run` PID can leave its Python child running (e.g. the Workshop server): stop the child by its own PID (find it via the listening port).
+- LangGraph starts a NEW run whenever `invoke`/`stream` gets non-None input, even on a thread with pending nodes — resume an interrupted thread with `None` (see `cli._has_pending_run`).

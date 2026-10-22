@@ -479,46 +479,8 @@ _PLAN_PAYLOAD: dict[str, Any] = {
     "pinned_constraints": [],
 }
 
-_RUNBOOK_PAYLOAD: dict[str, Any] = {
-    "overview": "Operational guide for deploying and running the service.",
-    "prerequisites": ["provisioned runtime", "configured secrets"],
-    "deploy_steps": ["build artifact", "run gates", "promote to prod"],
-    "rollback_steps": ["re-point to previous artifact digest", "verify health"],
-    "health_checks": ["GET /healthz returns 200"],
-    "monitoring": ["error rate", "p99 latency"],
-    "oncall_escalation": ["page primary on-call after 5m of failing health checks"],
-}
-_KNOWN_ISSUES_PAYLOAD: dict[str, Any] = {
-    "issues": [
-        {
-            "summary": "Dev-grade in-memory persistence",
-            "impact": "State is lost on restart",
-            "workaround": "Wire a durable store before production",
-            "severity": "medium",
-        }
-    ],
-    "limitations": ["single-region deployment assumed"],
-}
-_UPGRADE_PAYLOAD: dict[str, Any] = {
-    "from_version": "0.0.0",
-    "to_version": "0.1.0",
-    "breaking_changes": [],
-    "migration_steps": ["no migration required for the initial release"],
-    "rollback_notes": "Re-deploy the previous artifact digest.",
-}
-_PERF_COST_PAYLOAD: dict[str, Any] = {
-    "summary": "Build completed within the configured budget.",
-    "observations": ["most tokens were spent in the architecture and quality stages"],
-    "recommendations": ["enable prompt caching on the stable SOP prefixes"],
-}
-
 _SCRIPTS: dict[str, str] = {
     "You are the Planner": json.dumps(_PLAN_PAYLOAD),
-    # Technical Writer (foundry/docs) authored docs.
-    "OPERATIONAL RUNBOOK": json.dumps(_RUNBOOK_PAYLOAD),
-    "KNOWN-ISSUES": json.dumps(_KNOWN_ISSUES_PAYLOAD),
-    "UPGRADE / MIGRATION GUIDE": json.dumps(_UPGRADE_PAYLOAD),
-    "PERFORMANCE & COST": json.dumps(_PERF_COST_PAYLOAD),
 }
 
 

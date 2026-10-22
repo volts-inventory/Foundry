@@ -75,3 +75,18 @@ def test_cli_exits_3_with_a_resume_hint(tmp_path: Path, capsys: pytest.CaptureFi
     assert "token cap reached" in err and "rerun the same command" in err
     # The hint holds: the same command without the cap continues to a finished run.
     assert main(["--state-dir", str(tmp_path), "build a thing"]) == 0
+
+
+def test_rerun_resumes_the_capped_thread_instead_of_replanning(tmp_path: Path) -> None:
+    """LangGraph starts a NEW run whenever it is given input; a rerun of a stopped
+    thread must continue it, not re-plan and build a second set of tickets."""
+    from foundry.cli import run
+
+    with pytest.raises(TokenCapExceeded):
+        run("build a thing", state_dir=str(tmp_path), token_cap=1)
+    nodes: list[str] = []
+    result = run("build a thing", state_dir=str(tmp_path),
+                 progress_cb=lambda node, scope, **_k: nodes.append(node))
+    assert result.passed
+    assert nodes, "the resumed run should still stream its remaining nodes"
+    assert "planner" not in nodes and "triage" not in nodes

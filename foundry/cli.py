@@ -861,7 +861,9 @@ def _progress_enabled() -> bool:
     return os.environ.get("FOUNDRY_PROGRESS", "").strip().lower() not in ("", "0", "false", "no")
 
 
-def _invoke_streaming(app: Any, seed: FactoryState, config: RunnableConfig) -> FactoryState:
+def _invoke_streaming(
+    app: Any, seed: FactoryState | None, config: RunnableConfig
+) -> FactoryState:
     """Drive the graph with ``stream`` (updates mode), printing each completed
     node + elapsed time to stderr, then return the terminal channel state."""
     import time
@@ -926,7 +928,7 @@ def _stream_segment(
 
 def _invoke(
     app: Any,
-    seed: FactoryState,
+    seed: FactoryState | None,
     config: RunnableConfig,
     *,
     progress_cb: Callable[..., None] | None = None,
@@ -946,6 +948,14 @@ def _is_transient_proxy_failure(exc: BaseException) -> bool:
     its bounded retry + rate-limit budget and is telling judgment nodes to pause,
     NOT a real build failure. Same predicate the Workshop server uses."""
     return "ProxyUnavailable" in type(exc).__name__ or "pause-and-escalate" in str(exc)
+
+
+def _has_pending_run(app: Any, config: RunnableConfig) -> bool:
+    """True when this thread has a checkpoint with nodes still to run."""
+    try:
+        return bool(app.get_state(config).next)
+    except Exception:  # no checkpointer/thread: a fresh run
+        return False
 
 
 def _invoke_with_autoresume(
@@ -979,7 +989,11 @@ def _invoke_with_autoresume(
     used = 0
     while True:
         try:
-            return _invoke(app, seed, config, progress_cb=progress_cb)
+            # LangGraph starts a NEW run whenever it gets input, so resuming an
+            # interrupted thread (a retry here, or a rerun after a crash or token-cap
+            # stop) must pass None; otherwise it re-plans and builds a second plan.
+            inp = None if _has_pending_run(app, config) else seed
+            return _invoke(app, inp, config, progress_cb=progress_cb)
         except Exception as exc:  # noqa: BLE001 — re-raised unless transient+budget
             if used >= budget or not _is_transient_proxy_failure(exc):
                 raise

@@ -1123,3 +1123,34 @@ def test_a_full_replan_pairs_epics_by_title_not_position() -> None:
     # The new E2 continues nothing: the old plan is reference, not ids to reproduce.
     assert "reference only" in prompts["E2"]
     assert "This epic's previous tickets" not in prompts["E2"]
+
+
+def test_replan_prompt_lists_only_the_current_prds_criteria() -> None:
+    """A scenario a later pass dropped must not be offered back to the model."""
+    from foundry.agents import AgentRuntime
+    from foundry.agents._common import emit_artifact
+    from foundry.agents.planner import NODE_ID, _declared_criteria_text
+    from foundry.durability.artifact_store import ArtifactStore
+    from foundry.proxy import ModelProviderProxy
+    from foundry.proxy.test_doubles import MockTransport
+    from foundry.schemas.product import PRD, AcceptanceCriterion
+    from foundry.state.seq import Seq
+
+    store = ArtifactStore()
+    rt = AgentRuntime(proxy=ModelProviderProxy(MockTransport(default_text="{}")), cas=store)
+
+    def seq(epoch: int, local: int) -> Seq:
+        return Seq("r", epoch, 1, NODE_ID, local)
+
+    arts = [
+        emit_artifact(AcceptanceCriterion(id="AC-1", text="kept", seq=seq(1, 0)),
+                      "acceptance_criterion", NODE_ID, seq(1, 0), store=store),
+        emit_artifact(AcceptanceCriterion(id="AC-2", text="dropped later", seq=seq(1, 1)),
+                      "acceptance_criterion", NODE_ID, seq(1, 1), store=store),
+        emit_artifact(PRD(title="v1", prd_uri="cas://p1", criterion_ids=("AC-1", "AC-2"),
+                          seq=seq(1, 2)), "prd", NODE_ID, seq(1, 2), store=store),
+        emit_artifact(PRD(title="v1", prd_uri="cas://p2", criterion_ids=("AC-1",),
+                          seq=seq(2, 0)), "prd", NODE_ID, seq(2, 0), store=store),
+    ]
+    text = _declared_criteria_text({"artifacts": arts}, rt)
+    assert "AC-1" in text and "AC-2" not in text

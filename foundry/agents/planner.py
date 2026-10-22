@@ -478,6 +478,12 @@ def _declared_criteria_text(state: FactoryState, rt: AgentRuntime) -> str:
         except Exception:
             continue
         current[str(getattr(c, "id", "?"))] = c
+    # Criteria are never tombstoned: only the newest PRD's ids are still declared.
+    prds = list(_newest_by_id(state, rt, "prd", PRD).values())
+    if prds:
+        live = set(max(prds, key=lambda p: p.seq).criterion_ids)
+        if live:
+            current = {cid: c for cid, c in current.items() if cid in live}
     lines: list[str] = []
     for c in current.values():
         ticket = getattr(c, "ticket_id", None)

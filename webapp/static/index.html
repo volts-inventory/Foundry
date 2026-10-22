@@ -62,10 +62,12 @@
       <div class="log-tabs">
         <button class="log-tab sel" data-tab="live">● Live</button>
         <button class="log-tab" data-tab="progress">≡ Progress</button>
+        <button class="log-tab" data-tab="tickets">☰ Tickets</button>
         <span id="log-live" class="log-live"></span>
       </div>
       <ul id="log"></ul>
       <ul id="progress" style="display:none"></ul>
+      <ul id="tickets" style="display:none"></ul>
       <!-- The log follows new activity only while you're already at the bottom; scroll
            up to read something and this appears instead of yanking you back down. -->
       <button id="log-jump" class="log-jump hidden" type="button">↓ NEW ACTIVITY</button>
@@ -216,10 +218,6 @@ single-server additive-homomorphic (Paillier) variant + the demo runner</textare
           <!-- short numeric fields pair up two-across once there's room for it -->
           <div class="field-grid">
             <div class="field">
-              <label for="extra-workers">Worker pool <span class="hint">— max parallel IC workers (blank = automatic)</span></label>
-              <input id="extra-workers" type="number" min="1" max="32" placeholder="auto" value="4" />
-            </div>
-            <div class="field">
               <label for="fix-input">Auto-fix attempts <span class="hint">— fix-forward retries until green; the biggest token lever (default 2)</span></label>
               <input id="fix-input" type="number" min="0" max="20" value="2" />
             </div>
@@ -236,9 +234,17 @@ single-server additive-homomorphic (Paillier) variant + the demo runner</textare
               <input id="autopilot-input" type="number" min="0" max="20" value="0" />
             </div>
           </div>
-          <p class="hint" id="parallel-note">The ceiling on how many implementation workers run
-            at once — the leads share this pool by demand. Effective parallelism is
-            min(tasks created, this cap); each discipline still gets at least one.</p>
+          <div class="field worker-limits">
+            <label>Workers per specialty <span class="hint">— max tickets in flight at once for each specialist (0 = pause that lane)</span></label>
+            <div class="worker-grid">
+              <label class="wl" for="workers-frontend">Frontend <input id="workers-frontend" type="number" min="0" max="16" value="2" /></label>
+              <label class="wl" for="workers-backend">Backend <input id="workers-backend" type="number" min="0" max="16" value="2" /></label>
+              <label class="wl" for="workers-data">Data <input id="workers-data" type="number" min="0" max="16" value="2" /></label>
+              <label class="wl" for="workers-test">Test <input id="workers-test" type="number" min="0" max="16" value="2" /></label>
+            </div>
+          </div>
+          <p class="hint" id="parallel-note">Tickets run in dependency order; each specialty
+            works at most this many at once, the rest queue.</p>
           <label class="check"><input type="checkbox" id="supervised" checked /> Supervised (CTO approves each checkpoint)</label>
           <p class="hint">A multi-service request (e.g. a site with users + posts) is auto-built as a PLATFORM — split into web / backend / data services (the backend owns the REST API, auth &amp; domain logic), each auto-deepened, then stitched into one monorepo. A single thing builds as one service.</p>
           <details class="adv-platform">

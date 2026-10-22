@@ -250,3 +250,34 @@ def test_cast_is_planner_engineers_reviewer_and_old_ids_still_seat_someone() -> 
             {"uri": "u2", "kind": "test_report", "produced_by": "reviewer"}]}, set())
     arts = {e["kind"]: (e["agent"], e["room"]) for e in out if e["type"] == "artifact"}
     assert arts == {"prd": ("Planner", "plan"), "test_report": ("Reviewer", "review")}
+
+
+def test_ticket_artifact_surfaces_as_a_planner_pickup_and_a_ticket_event() -> None:
+    import json
+
+    from webapp.events import event_for_task, ticket_event
+
+    detail = json.dumps({"id": "T-001", "title": "Add login", "specialty": "frontend",
+                         "difficulty": "complex", "depends_on": ["T-000"]})
+    payload = {"boundary": "design", "artifacts": [
+        {"kind": "ticket", "uri": "cas://t1", "produced_by": "planner", "detail": detail},
+        {"kind": "ticket", "uri": "cas://t2", "produced_by": "planner", "detail": "plain text"},
+    ]}
+    evs = events_for_payload(payload, set())
+    arts = [e for e in evs if e["type"] == "artifact"]
+    assert [(a["room"], a["agent"], a["kind"]) for a in arts] == [("plan", "Planner", "ticket")] * 2
+    assert arts[0]["label"] == "Ticket #1" and arts[0]["detail"] == "T-001 — Add login"
+    tickets = [e for e in evs if e["type"] == "ticket"]
+    assert tickets == [{"type": "ticket", "id": "T-001", "title": "Add login",
+                        "specialty": "frontend", "difficulty": "complex", "tier": "T1",
+                        "depends_on": ["T-000"]}]          # the unparseable one stays a pickup only
+    assert ticket_event("not json") is None
+
+    # pool TaskEvent -> floor `task` event; malformed events are dropped
+    ev = {"phase": "start", "ticket_id": "T-001", "title": "Add login",
+          "specialty": "test", "tier": "T3"}
+    assert event_for_task(ev) == {"type": "task", **ev}
+    odd = event_for_task({**ev, "specialty": "weird"})
+    assert odd is not None and odd["specialty"] == "backend"
+    assert event_for_task({**ev, "phase": "bogus"}) is None
+    assert event_for_task({**ev, "ticket_id": ""}) is None

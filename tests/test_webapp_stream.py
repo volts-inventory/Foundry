@@ -376,3 +376,50 @@ def test_platform_svc_nodes_stream_floor_telemetry_quietly(store, tmp_path, monk
     # and the quest log still gets exactly one box per node, from the `svc` stream
     svc_phases = [e["phase"] for e in p.log if e["type"] == "svc"]
     assert svc_phases == ["start", "agent_start", "agent_done"]
+
+
+def test_parse_workers_defaults_clamps_and_ignores_junk():
+    assert server.parse_workers(None) == {"frontend": 2, "backend": 2, "data": 2, "test": 2}
+    got = server.parse_workers({"frontend": "5", "backend": -3, "data": "x", "test": 99,
+                                "bogus": 7})
+    assert got == {"frontend": 5, "backend": 0, "data": 2, "test": 16}
+    assert server.parse_ticket_tiers({"trivial": "t3", "standard": "T9", "x": "T1"}) == {
+        "trivial": "T3"}
+
+
+def test_run_gets_ticket_kwargs_and_task_events_stream(store, monkeypatch, tmp_path):
+    import foundry.cli
+
+    seen: dict = {}
+
+    def run(request, *, task_cb, workers, ticket_tiers, progress_cb=None, **kw):
+        seen.update(workers=workers, ticket_tiers=ticket_tiers)
+        task_cb({"phase": "start", "ticket_id": "T-001", "title": "x",
+                 "specialty": "data", "tier": "T2"})
+        raise RuntimeError("stop here")       # ends the build through the error path
+
+    monkeypatch.setattr(foundry.cli, "run", run)
+    monkeypatch.setattr(server, "_OUTPUT_ROOT", tmp_path / "out")
+    p = _project(workers=server.parse_workers({"data": 5}), ticket_tiers={"trivial": "T3"})
+    server._run_factory(p)
+    assert seen["workers"]["data"] == 5 and seen["ticket_tiers"] == {"trivial": "T3"}
+    assert [e for e in p.log if e["type"] == "task"] == [
+        {"type": "task", "phase": "start", "ticket_id": "T-001", "title": "x",
+         "specialty": "data", "tier": "T2"}]
+    proj = next(e for e in p.log if e["type"] == "project")
+    assert proj["workers"]["data"] == 5
+
+
+def test_run_without_ticket_support_gets_no_ticket_kwargs(store, monkeypatch, tmp_path):
+    import foundry.cli
+
+    seen: dict = {}
+
+    def run(request, *, progress_cb=None, **kw):
+        seen.update(kw)
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(foundry.cli, "run", run)
+    monkeypatch.setattr(server, "_OUTPUT_ROOT", tmp_path / "out")
+    server._run_factory(_project())
+    assert "workers" not in seen and "task_cb" not in seen and "ticket_tiers" not in seen

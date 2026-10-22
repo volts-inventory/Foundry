@@ -71,6 +71,15 @@ const PIPELINE_ORDER = ["plan","frontend","backend","data","review","gate","vaul
 // lounge: every agent lives at their own desk (see "presence" below), so it's the
 // entrance + a furnished break room, not a holding pen for idle staff.
 const ENG_ROOMS = ["frontend","backend","data"];               // engineering discipline rooms
+// Ticket-driven crew: each specialty's tickets seat a worker sprite in its room (test →
+// the review room). Per-specialty LIMITS cap the sprites; tickets over the cap queue.
+const SPECIALTIES = ["frontend","backend","data","test"];
+const TASK_ROOM = {frontend:"frontend", backend:"backend", data:"data", test:"review"};
+const TIER_LETTER = {T3:"H", T2:"S", T1:"O"};                  // Haiku / Sonnet / Opus
+const TIER_NAME = {T3:"Haiku", T2:"Sonnet", T1:"Opus"};
+const TIER_COLOR = {T3:0x7dffb0, T2:0xffd95e, T1:0xff9b5e};
+const DIFF_TIER = {trivial:"T3", standard:"T2", complex:"T1"};
+const DEFAULT_LIMIT = 2, MAX_LIMIT = 16;
 const ENG_AREA_ROOM = {frontend:"frontend", backend:"backend", data:"data",
                        infra:"backend", security:"backend"};   // org AREA → its discipline room
 const RBASE = {
@@ -146,7 +155,7 @@ const AGENT_ROOM = {}; for (const rm in ROSTER) for (const nm of ROSTER[rm]) AGE
 // Per-area accent (shared by the org board, the Tech-Leads, and the area-expert
 // IC pool) so frontend/backend/data/… read the same colour everywhere.
 const AREA_COLOR = {frontend:0x7fd1ff, backend:0xff9b5e, data:0x7dffb0,
-                    infra:0xb59bff, security:0xff6d6d};
+                    infra:0xb59bff, security:0xff6d6d, test:0xd9a8ff};
 const AREA_TAG = {frontend:"FE", backend:"BE", data:"DA", infra:"IN", security:"SE"};
 // short role tags for the named static-room agents (the senior roles), shown on a badge.
 const ROLE_TAG = {
@@ -390,7 +399,7 @@ class BootScene extends Phaser.Scene {
 //  Floor scene — one workshop per project                                     //
 // =========================================================================== //
 class FloorScene extends Phaser.Scene {
-  init(data){ this.proj = data || {}; }
+  init(data){ this.proj = data || {}; this.taskGroup = []; this.taskSprites = new Map(); this.taskLabels = []; }
 
   create(){
     this.cameras.main.setBackgroundColor(PC.bg);
@@ -1563,12 +1572,14 @@ class FloorScene extends Phaser.Scene {
     };
     seat(this.techLeadGroup, leadUp);      // each lane's LEAD works while its lead node runs
     seat(this.poolGroup, engUp);           // each lane's ICs work while its engineer node runs
+    for (const w of (this.taskGroup||[]))  // a ticket worker exists only while in flight
+      if (w && w.bob && !w.working) this.deskRest(w, true, true);
     this.paintGlow();                      // and re-light the rooms for the new live set
   }
   // Every person on the floor (named leads + the engineering lanes), one iterator.
   *everyone(){
     for (const [,a] of this.agents) if (a && a.seen) yield a;
-    for (const s of [...(this.poolGroup||[]), ...(this.techLeadGroup||[])])
+    for (const s of [...(this.poolGroup||[]), ...(this.techLeadGroup||[]), ...(this.taskGroup||[])])
       if (s && s.bob && s.seen) yield s;    // the group arrays also hold workstations
   }
   standDownAll(){   // whole floor off the clock (checkpoints / done) — still at their desks
@@ -1783,37 +1794,18 @@ class FloorScene extends Phaser.Scene {
     this.layoutEngineering();
   }
 
-  // Per-area engineer counts: the IC pool distributed across the present areas ∝
-  // each area's unit weight (largest-remainder, ≥1 where the pool allows). null when
-  // there's no org telemetry yet.
+  // Per-area engineer counts. Without ticket telemetry every room keeps ONE baseline
+  // worker; once task events flow (taskMode) the ticket workers ARE the crew, so the
+  // baseline drops to 0. null when there's no org telemetry yet.
   engineeringLanes(){
     const list = (this.orgAreas||[]).map(a=>a&&a.area).filter(Boolean);
     if(!list.length) return null;
-    // Real per-area workload from the ownership map (units owned) = the IC demand.
-    const units={}; list.forEach(a=>units[a]=0);
-    for(const d of (this.orgDomains||[]))
-      if(d && (d.area in units)) units[d.area] += (d.units&&d.units.length)?d.units.length:0;
-    // Each role gets ONE required worker (its lead persona) — the always-on baseline.
-    // On TOP of that sits the EXTRA pool (poolN): the additional workers we can afford,
-    // which management hands out across roles by demand, deploying only as many as the
-    // work needs. So total crew = (1 per role) + min(demand, extra budget): the baseline
-    // grows on its own as the architect adds teams, and the extra number is what you set.
-    const icSlots=Math.max(0, this.poolN||0);              // extra worker budget (on top of 1/role)
-    const dem=list.map(a=>Math.max(0, units[a]));
-    const totalDem=dem.reduce((s,n)=>s+n,0);
-    const ics={}; list.forEach(a=>ics[a]=0);
-    if(icSlots>0 && totalDem>0){
-      if(totalDem<=icSlots){
-        list.forEach((a,i)=>{ ics[a]=dem[i]; });           // room to spare: one IC per owned unit
-      } else {                                              // oversubscribed: split slots by demand
-        const rem=[]; let used=0;
-        list.forEach((a,i)=>{ const raw=icSlots*dem[i]/totalDem; ics[a]=Math.floor(raw); used+=ics[a]; rem.push([a,raw-ics[a]]); });
-        rem.sort((p,q)=>q[1]-p[1]);
-        for(let k=0; used<icSlots && rem.length; k++,used++) ics[rem[k%rem.length][0]]++;
-      }
-    }
-    return list.map(a=>({area:a, ics:ics[a]||0, color:AREA_COLOR[a]||0xffc08a}));
+    const base = this.taskMode() ? 0 : 1;
+    return list.map(a=>({area:a, ics:base, color:AREA_COLOR[a]||0xffc08a}));
   }
+  taskMode(){ const F = FLOORS.get(this.proj.floor); return !!(F && F.tasks && F.tasks.seen); }
+  taskCap(spec){ const F = FLOORS.get(this.proj.floor);
+    return F ? taskState(F).limits[spec] : DEFAULT_LIMIT; }
 
   // Seat the engineers in their discipline ROOMS from current org + pool state.
   layoutEngineering(){
@@ -1844,41 +1836,19 @@ class FloorScene extends Phaser.Scene {
     for(const rk of ENG_ROOMS){
       if(perRoom[rk] && perRoom[rk].length) continue;
       const col=AREA_COLOR[rk]||0xffc08a;
-      perRoom[rk]=[{area:rk, color:col, lead:true}, {area:rk, color:col, lead:false}];
+      perRoom[rk]=[{area:rk, color:col, lead:true}, ...(this.taskMode()?[]:[{area:rk, color:col, lead:false}])];
     }
     let slot=12;
     for(const rk in perRoom){
       const R=ROOMS[rk]; if(!R) continue;
       const people=perRoom[rk];
       const lead=people.find(p=>p.lead), ics=people.filter(p=>!p.lead);
-      // create one seated worker (+desk) at (x,y); leads get the star + "<AREA> ENG" badge.
-      const place=(p, x, y, faceUp)=>{
-        x=Math.round(x); y=Math.round(y);
-        const col6=p.color.toString(16).padStart(6,"0");
-        const tag=AREA_TAG[p.area]||p.area.slice(0,2).toUpperCase();
-        const k = p.lead ? kitFor("Tech-Lead "+p.area, hashStr((this.proj.id||'f')+"TL"+p.area)) : poolKit(slot);
-        k.accent=p.color;
-        const ws=this.makeWorkstation(x, y+16, p.color);
-        const s=this.makePerson(x, y, k); s.setScale(p.lead?1.45:1.3).setDepth(y).setAlpha(p.lead?1:0.94);
-        if (p.lead){
-          s.add(this.add.text(0,-39,"★",{fontFamily:"'PixelFont','Courier New'",fontSize:"10px",
-            color:"#ffd95e"}).setOrigin(0.5).setResolution(3));
-          this.pinBadge(s, tag+" ENG", p.color, true);        // filled accent badge
-          if (faceUp && s.faceBack) s.faceBack();              // overseeing — faces up into the room
-        } else {
-          this.pinBadge(s, tag, p.color, false);               // every IC labelled too
-        }
-        s.home={x,y}; s.room=rk; s.idleSlot=slot++; s.seen=true; s.atDesk=true;
-        this.zzzLoop(s);
-        // Spawn AT the desk either way — heads-down if this lane is live, otherwise
-        // turned round with an idle mood.
-        if (this.roomLive(rk)) this.deskRest(s, true, true); else this.standDown(s);
-        (p.lead?this.techLeadGroup:this.poolGroup).push(s, ws);
-      };
+      const place=(p, x, y, faceUp)=>
+        this.seatWorker(rk, p, x, y, faceUp, slot++, p.lead?this.techLeadGroup:this.poolGroup);
       // ONE consistent desk grid for every room: centred columns, first row well BELOW
       // the room label so it's never covered. (PX=column pitch, SY=first-row Y, RP=row pitch.)
       const PX=84, SY=R.y+94, RP=50;
-      if (!ics.length && lead){
+      if (!ics.length && lead && !this.taskMode()){
         place(lead, R.cx, Math.round(R.y + R.h*0.52), true);   // ONLY the lead → centre the desk
       } else {
         const c2=Math.min(3, Math.max(1, ics.length));
@@ -1886,7 +1856,113 @@ class FloorScene extends Phaser.Scene {
           place(p, R.cx - bw/2 + c*PX, SY + r*RP, false); });   // centred IC grid (upper room)
         if (lead) place(lead, R.x1 - 50, R.y1 - 36, true);     // LEAD oversees from the bottom-right
       }
-      this.engLabels.push(this.bm(R.x1-8, R.y+8, "×"+people.length, 11, 0xffc08a, 1, 0).setDepth(28));
+      if (!this.taskMode())
+        this.engLabels.push(this.bm(R.x1-8, R.y+8, "×"+people.length, 11, 0xffc08a, 1, 0).setDepth(28));
+    }
+    this.rebuildTaskSprites();
+  }
+
+  // One seated worker (+desk) at (x,y): leads get the star + "<AREA> ENG" badge, ICs a
+  // tag badge, ticket workers (o.ticket) their ticket id + a model-tier pill. Returns
+  // {s, ws}; both are pushed onto `group`.
+  seatWorker(rk, p, x, y, faceUp, idleSlot, group, o){
+    o = o || {};
+    x=Math.round(x); y=Math.round(y);
+    const tag=AREA_TAG[p.area]||p.area.slice(0,2).toUpperCase();
+    const k = o.kit || (p.lead ? kitFor("Tech-Lead "+p.area, hashStr((this.proj.id||'f')+"TL"+p.area)) : poolKit(idleSlot));
+    k.accent=p.color;
+    const ws = o.desk===false ? null : this.makeWorkstation(x, y+16, p.color);
+    const s=this.makePerson(x, y, k);
+    s.setScale(o.scale || (p.lead?1.45:1.3)).setDepth(y).setAlpha(p.lead?1:0.94);
+    if (o.ticket){
+      this.pinBadge(s, o.ticket, p.color, false);                     // ticket id
+      const L = TIER_LETTER[o.tier];
+      if (L) this.pinBadge(s, L, TIER_COLOR[o.tier], true, -38);      // model: H / S / O
+    } else if (p.lead){
+      s.add(this.add.text(0,-39,"★",{fontFamily:"'PixelFont','Courier New'",fontSize:"10px",
+        color:"#ffd95e"}).setOrigin(0.5).setResolution(3));
+      this.pinBadge(s, tag+" ENG", p.color, true);        // filled accent badge
+      if (faceUp && s.faceBack) s.faceBack();              // overseeing — faces up into the room
+    } else {
+      this.pinBadge(s, tag, p.color, false);               // every IC labelled too
+    }
+    s.home={x,y}; s.room=rk; s.idleSlot=idleSlot; s.seen=true; s.atDesk=true;
+    this.zzzLoop(s);
+    // Spawn AT the desk either way — heads-down if this lane is live, otherwise
+    // turned round with an idle mood. A ticket worker exists only while in flight.
+    if (o.working || this.roomLive(rk)) this.deskRest(s, true, true); else this.standDown(s);
+    group.push(...(ws ? [s, ws] : [s]));
+    return {s, ws};
+  }
+
+  // Desk grid for a room's ticket workers, sized to the room's LIMIT so slots never move
+  // as workers come and go. Review is a double-width room whose Reviewer sits mid-room,
+  // so its workers use the right half.
+  taskGeom(room, cap){
+    const R = ROOMS[room];
+    const cx = room === "review" ? Math.round((R.cx + R.x1)/2) + 10 : R.cx;
+    let cols, px, rp, top, scale, desk = true;
+    if (cap <= 6){ cols = Math.min(3, Math.max(1, cap)); px = 84; rp = 50; top = R.y + 94; scale = 1.3; }
+    else if (cap <= 12){ cols = 4; px = 62; rp = 42; top = R.y + 70; scale = 1.05; }
+    else { cols = 5; px = 50; rp = 34; top = R.y + 56; scale = 0.85; desk = false; }
+    const at = (i)=>({ x: cx - (cols-1)*px/2 + (i%cols)*px, y: top + Math.floor(i/cols)*rp });
+    return {at, scale, desk};
+  }
+  addWorker(room, ticketId, tier, spec){
+    const R = ROOMS[room]; if (!R) return;
+    if (!this.taskSprites) this.taskSprites = new Map();
+    if (this.taskSprites.has(ticketId)) return;
+    const used = new Set([...this.taskSprites.values()].filter(w=>w.room===room).map(w=>w.slot));
+    let slot = 0; while (used.has(slot)) slot++;
+    const g = this.taskGeom(room, Math.max(this.taskCap(spec), slot+1)), pos = g.at(slot);
+    const color = AREA_COLOR[spec] || 0xffc08a;
+    const kit = poolKit(hashStr(ticketId) % 997);
+    const {s, ws} = this.seatWorker(room, {area:spec, color, lead:false}, pos.x, pos.y, false,
+      20 + slot, this.taskGroup, {scale:g.scale, desk:g.desk, working:true, kit, ticket:ticketId, tier});
+    s.setAlpha(0); this.tweens.add({targets:s, alpha:0.96, duration:240});
+    this.taskSprites.set(ticketId, {s, ws, room, slot, tier, spec});
+    this.updateTaskLabels();
+  }
+  killSprite(o){
+    if (!o) return;
+    if (o.bob) this.stopWalk(o);
+    this.setGlow(o, false); o._dead = true;
+    if (o.zzzEv){ o.zzzEv.remove(); o.zzzEv = null; }
+    if (o.chair){ o.chair.destroy(); o.chair = null; }
+    o.destroy();
+  }
+  removeWorker(ticketId){
+    const w = this.taskSprites && this.taskSprites.get(ticketId); if (!w) return;
+    this.taskSprites.delete(ticketId);
+    const done = ()=>{ this.killSprite(w.s); this.killSprite(w.ws);
+      this.taskGroup = this.taskGroup.filter(o=>o!==w.s && o!==w.ws); };
+    this.setGlow(w.s, false);
+    this.tweens.add({targets:[w.s, w.ws].filter(Boolean), alpha:0, duration:200, onComplete:done});
+    this.updateTaskLabels();
+  }
+  clearWorkers(){
+    for (const id of [...(this.taskSprites||new Map()).keys()]) this.removeWorker(id);
+  }
+  // Rebuild every ticket worker from the floor's task state (layout / rotate / restart).
+  rebuildTaskSprites(){
+    for (const w of (this.taskGroup||[])) this.killSprite(w);
+    this.taskGroup = []; this.taskSprites = new Map();
+    const F = FLOORS.get(this.proj.floor); if (!F || !F.tasks) { this.updateTaskLabels(); return; }
+    for (const sp of SPECIALTIES)
+      for (const w of F.tasks.active[sp]) this.addWorker(w.room, w.id, w.tier, sp);
+    this.updateTaskLabels();
+  }
+  // "active/limit  +N queued" in each ticket room's top-right corner.
+  updateTaskLabels(){
+    for (const o of (this.taskLabels||[])) o.destroy();
+    this.taskLabels = [];
+    const F = FLOORS.get(this.proj.floor); if (!F || !F.tasks || !F.tasks.seen) return;
+    const T = F.tasks;
+    for (const sp of SPECIALTIES){
+      const R = ROOMS[TASK_ROOM[sp]]; if (!R) continue;
+      const q = T.queue[sp].length;
+      const txt = `${T.active[sp].length}/${T.limits[sp]}` + (q ? `  +${q} queued` : "");
+      this.taskLabels.push(this.bm(R.x1-8, R.y+8, txt, 11, q ? 0xff9b5e : 0xffc08a, 1, 0).setDepth(28));
     }
   }
 
@@ -1978,7 +2054,7 @@ async function newProject(req, supervised, backend, extra){
 
   const floor = resp.floor;
   const release = resp.release || 1;
-  const slots = (extra && extra.max_slots) || 1;
+  const slots = 1;
   const openStream = (F) => openFloorStream(F);
   const existing = FLOORS.get(floor);
   if (existing){
@@ -1987,8 +2063,9 @@ async function newProject(req, supervised, backend, extra){
     Object.assign(existing, {
       id:resp.id, release, releases:(existing.releases||1)+1, request:req, mode, backend,
       log:[], progress:[], gates:{}, org:null, cp:null, awaiting:false, status:"running", passed:false,
-      slots, journal:[], seenUris:new Set(), _agrp:null, _svcOpen:null,
+      slots, journal:[], seenUris:new Set(), _agrp:null, _svcOpen:null, tasks:null,
     });
+    setTaskLimits(existing, extra && extra.workers);
     const sc = GAME.scene.getScene(floorKey(floor));
     if (sc) sc.scene.restart({floor, id:resp.id, request:req, mode, slots});
     else GAME.scene.add(floorKey(floor), FloorScene, true, {floor, id:resp.id, request:req, mode, slots});
@@ -2002,6 +2079,7 @@ async function newProject(req, supervised, backend, extra){
     log:[], progress:[], gates:{}, org:null, cp:null, awaiting:false, status:"running", passed:false,
     slots, journal:[], seenUris:new Set(),
   };
+  setTaskLimits(F, extra && extra.workers);
   FLOORS.set(floor, F);
   GAME.scene.add(floorKey(floor), FloorScene, true, {floor, id:resp.id, request:req, mode, slots});
   switchToFloor(floor);
@@ -2021,6 +2099,7 @@ function switchToFloor(floor){
   const F = FLOORS.get(floor);
   rebuildLog(F);
   rebuildProgress(F);
+  refreshTickets(F);
   renderGatesMini(F.gates);
   if (F.platprog) renderPlatProg(F.platprog);   // platform floors show service chips
   updateHud(F);
@@ -2040,6 +2119,87 @@ const LEGACY_AGENT = {
   "QA Engineer":"Reviewer","SDET":"Reviewer","Technical Writer":"Reviewer",
   "Frontend Lead":"Frontend Engineer","Backend Lead":"Backend Engineer","Data Lead":"Data Engineer",
 };
+// ---- ticket crew state (per floor; pure, so replay and live events share it) ----------
+function taskState(F){
+  if (!F.tasks){
+    const per = (mk)=>Object.fromEntries(SPECIALTIES.map(sp=>[sp, mk()]));
+    F.tasks = {limits:per(()=>DEFAULT_LIMIT), active:per(()=>[]), queue:per(()=>[]),
+               tickets:new Map(), seen:false};
+  }
+  return F.tasks;
+}
+function setTaskLimits(F, w){
+  const T = taskState(F);
+  for (const sp of SPECIALTIES){
+    const n = Number(w && w[sp]);
+    if (Number.isFinite(n) && n >= 0) T.limits[sp] = Math.min(MAX_LIMIT, Math.floor(n));
+  }
+}
+function ticketRow(T, id){
+  let r = T.tickets.get(id);
+  if (!r){ r = {id, title:"", specialty:"", difficulty:"", tier:"", depends_on:[], status:"todo"}; T.tickets.set(id, r); }
+  return r;
+}
+function taskClear(F){
+  if (!F.tasks) return;
+  for (const sp of SPECIALTIES){ F.tasks.active[sp] = []; F.tasks.queue[sp] = []; }
+}
+// Apply one `task` event -> {added, removed, layout}: the workers to seat / retire. A
+// start over the specialty's limit queues (no sprite) until a finished worker frees a seat.
+function taskApply(F, ev){
+  const T = taskState(F), id = ev.ticket_id, out = {added:[], removed:[], layout:false};
+  if (!id) return out;
+  const sp = SPECIALTIES.includes(ev.specialty) ? ev.specialty : "backend";
+  const row = ticketRow(T, id);
+  if (ev.title) row.title = ev.title;
+  row.specialty = sp; if (ev.tier) row.tier = ev.tier;
+  const drop = (arr)=>{ const i = arr.findIndex(w=>w.id===id); if (i < 0) return false; arr.splice(i, 1); return true; };
+  if (ev.phase === "start"){
+    row.status = "in-progress";
+    if (!T.seen){ T.seen = true; out.layout = true; }
+    if (!T.active[sp].some(w=>w.id===id) && !T.queue[sp].some(w=>w.id===id)){
+      const w = {id, tier:ev.tier || row.tier, spec:sp, room:TASK_ROOM[sp]};
+      if (T.active[sp].length < T.limits[sp]){ T.active[sp].push(w); out.added.push(w); }
+      else T.queue[sp].push(w);
+    }
+  } else {
+    row.status = ev.phase === "failed" ? "failed" : "done";
+    if (drop(T.active[sp])){
+      out.removed.push(id);
+      const nxt = T.queue[sp].shift();
+      if (nxt){ T.active[sp].push(nxt); out.added.push(nxt); }
+    } else drop(T.queue[sp]);
+  }
+  return out;
+}
+// TICKETS tab: id, title, specialty, difficulty→model letter, deps, status. Text is set
+// with textContent — ticket titles are model output.
+function renderTickets(F){
+  const ul = document.getElementById("tickets"); if (!ul) return;
+  ul.innerHTML = "";
+  const rows = F && F.tasks ? [...F.tasks.tickets.values()] : [];
+  if (!rows.length){
+    const li = document.createElement("li"); li.className = "tk-empty";
+    li.textContent = "No tickets yet — the Planner writes them."; ul.appendChild(li); return;
+  }
+  rows.sort((a, b)=>a.id.localeCompare(b.id, undefined, {numeric:true}));
+  for (const r of rows){
+    const li = document.createElement("li"); li.className = "st-" + r.status; li.dataset.id = r.id;
+    const mk = (cls, txt)=>{ const e = document.createElement("span"); e.className = cls; e.textContent = txt; li.appendChild(e); };
+    mk("tk-id", r.id); mk("tk-title", r.title || "(untitled)"); mk("tk-st", r.status);
+    const tier = r.tier || DIFF_TIER[r.difficulty] || "";
+    const bits = [r.specialty || "?"];
+    if (r.difficulty || tier) bits.push(`${r.difficulty || "?"} → ${TIER_LETTER[tier] || "?"}`);
+    bits.push(r.depends_on && r.depends_on.length ? "deps: " + r.depends_on.join(", ") : "no deps");
+    mk("tk-meta", bits.join(" · "));
+    ul.appendChild(li);
+  }
+}
+function refreshTickets(F){
+  const sel = document.querySelector(".log-tab.sel");
+  if (sel && sel.dataset.tab === "tickets") renderTickets(F);
+}
+
 function modernEvent(ev){
   const room = LEGACY_ROOM[ev.room], agent = LEGACY_AGENT[ev.agent];
   if (!room && !agent) return ev;
@@ -2053,11 +2213,33 @@ function routeEvent(floor, ev){
     case "project":
       F.request = ev.request; F.mode = ev.mode; F.backend = ev.backend || F.backend;
       F.slots = ev.slots || 1;
+      if (ev.workers){ setTaskLimits(F, ev.workers); if (S) S.rebuildTaskSprites(); }
       if (S) S.setPool(F.slots);
       if (isActive) updateHud(F);
       break;
     case "narrate": logNarrate(F, ev.text); break;
     case "svc": logService(F, ev); break;   // platform: one box per service, updated in place
+    case "task": {                 // one ticket's worker started / finished / failed
+      const r = taskApply(F, ev);
+      if (S){
+        if (r.layout) S.layoutEngineering();            // first ticket: baseline workers give way
+        for (const id of r.removed) S.removeWorker(id);
+        for (const w of r.added) S.addWorker(w.room, w.id, w.tier, w.spec);
+        S.updateTaskLabels();
+      }
+      const lbl = `${ev.ticket_id}${ev.title ? " "+ev.title : ""}`;
+      if (ev.phase === "start") logTo(F, "hot", `▸ ${lbl} (${ev.specialty}${TIER_LETTER[ev.tier] ? ", "+TIER_NAME[ev.tier] : ""})`);
+      else logTo(F, ev.phase === "failed" ? "bad" : "good", `${ev.phase === "failed" ? "✕" : "✓"} ${lbl}`);
+      if (isActive) refreshTickets(F);
+      break;
+    }
+    case "ticket": {               // a planned ticket (Planner artifact) for the Tickets tab
+      const row = ticketRow(taskState(F), ev.id);
+      Object.assign(row, {title:ev.title, specialty:ev.specialty, difficulty:ev.difficulty,
+        tier:ev.tier || DIFF_TIER[ev.difficulty] || "", depends_on:ev.depends_on || []});
+      if (isActive) refreshTickets(F);
+      break;
+    }
     case "limitwait":              // provider usage limit: global pause banner
       showLimitToast(ev.until);
       break;
@@ -2190,6 +2372,7 @@ function routeEvent(floor, ev){
       logProgress(F, "bad", "✕ HELD — "+ev.reason); break;
     case "done":
       F.status = "done"; F.passed = !!ev.passed; renderElevator();
+      taskClear(F); if (S) S.clearWorkers();
       // Build's over: nobody is working, so everyone heads to the LOUNGE
       // (staffRoom(null) marks no room active and routes idle folks there).
       if (S){ S.staffRoom(null); if (!ev.passed){ S.gloom(); S.banner("HELD AT THE GATE", 0xff5d6c); } }
@@ -2609,13 +2792,14 @@ function rebuildProgress(F){
 function selectLogTab(tab){
   const F = FLOORS.get(ACTIVE);
   document.querySelectorAll(".log-tab").forEach(b=>b.classList.toggle("sel", b.dataset.tab===tab));
-  const live=document.getElementById("log"), prog=document.getElementById("progress");
-  if (live) live.style.display = tab==="progress" ? "none" : "";
-  if (prog) prog.style.display = tab==="progress" ? "" : "none";
+  for (const [t, id] of [["live","log"], ["progress","progress"], ["tickets","tickets"]]){
+    const el = document.getElementById(id); if (el) el.style.display = t===tab ? "" : "none";
+  }
   if (F && tab==="progress") rebuildProgress(F);
+  if (F && tab==="tickets") renderTickets(F);
   // Nothing was measurable while the live list was hidden, so restore the state the
   // tab was left in: re-pin if following, otherwise put the pill back.
-  if (tab==="progress") showLogJump(false);
+  if (tab!=="live") showLogJump(false);
   else if (logFollow) scrollLogToEnd();
   else showLogJump(true);
 }
@@ -3257,6 +3441,15 @@ function _selLabel(id){
   if(!s || !s.selectedOptions || !s.selectedOptions.length) return "";
   return (s.selectedOptions[0].textContent||"").split("—")[0].trim();
 }
+// Per-specialty worker limits (Scale & limits fold): ints 0..16, default 2.
+function readWorkers(){
+  const w = {};
+  for (const sp of SPECIALTIES){
+    const n = parseInt((document.getElementById("workers-"+sp)||{}).value, 10);
+    w[sp] = Number.isFinite(n) && n >= 0 ? Math.min(MAX_LIMIT, n) : DEFAULT_LIMIT;
+  }
+  return w;
+}
 function syncFoldSummaries(){
   const val=(id)=>String((document.getElementById(id)||{}).value||"").trim();
   const run=document.getElementById("run-sum");
@@ -3266,7 +3459,8 @@ function syncFoldSummaries(){
   const scale=document.getElementById("scale-sum");
   if(scale){
     const ap=parseInt(val("autopilot-input"),10);
-    const parts=[(val("extra-workers")||"auto")+" workers",
+    const w=readWorkers();
+    const parts=[`workers FE${w.frontend} BE${w.backend} DA${w.data} TE${w.test}`,
                  (val("fix-input")||"0")+" auto-fix"];
     if(val("cap-input")) parts.push("$"+val("cap-input")+" cap");
     if(val("token-cap-input")) parts.push(val("token-cap-input")+" token cap");
@@ -3303,42 +3497,42 @@ const PRESETS = [
   { id:"custom", supervised:false, label:"— Custom (blank) —",
     note:"A blank slate — describe your own build.",
     request:"", intake:"idea", spec:"", build:"single",
-    maxMilestones:6, milestones:"", profile:"auto", workers:4, fix:2, autopilot:0 },
+    maxMilestones:6, milestones:"", profile:"auto", workers:2, fix:2, autopilot:0 },
   { id:"pir", supervised:true, label:"PIR system · cryptography (complex)",
     note:"Information-theoretic 2-server + homomorphic single-server PIR, verified in-process.",
     request:_pirReq, intake:"spec", spec:_pirSpec, build:"milestones",
     maxMilestones:6, milestones:_pirLadder, profile:"auto",
-    workers:4, fix:2, autopilot:0 },
+    workers:2, fix:2, autopilot:0 },
   { id:"moon", supervised:true, label:"Moon Colony farming game · pygame (very complex)",
     note:"The BUILD-A-FULL-GAME recipe: a complete Stardew-style sim as a milestone ladder.",
     request:"a complete stardew-style farming game about colonizing the moon",
     intake:"spec", spec:MOON_SPEC, build:"milestones", maxMilestones:10,
-    milestones:"", profile:"pygame", workers:4, fix:8, autopilot:5 },
+    milestones:"", profile:"pygame", workers:2, fix:8, autopilot:5 },
   { id:"urlshort", supervised:false, label:"URL shortener · web service (simple)",
     note:"A small single service — quick end-to-end build.",
     request:"a URL shortener service with custom slugs, link expiry, click analytics, and per-IP abuse rate-limiting",
     intake:"idea", spec:"", build:"single", maxMilestones:6,
-    milestones:"", profile:"auto", workers:4, fix:2, autopilot:0 },
+    milestones:"", profile:"auto", workers:2, fix:2, autopilot:0 },
   { id:"chip8", supervised:false, label:"CHIP-8 emulator · systems (simple)",
     note:"Cheap pipeline validation — objectively scoreable against public test ROMs.",
     request:"a CHIP-8 emulator in Python with pytest tests against public test ROMs",
     intake:"idea", spec:"", build:"single", maxMilestones:6,
-    milestones:"", profile:"auto", workers:4, fix:6, autopilot:0 },
+    milestones:"", profile:"auto", workers:2, fix:6, autopilot:0 },
   { id:"taskmgr", supervised:true, label:"Team task manager · web+API+DB platform (complex)",
     note:"Multi-service — auto-built as a platform (web / backend / data), stitched into one repo.",
     request:"a team task manager: users sign up and log in, create projects, add tasks with assignees, due dates and labels, comment on tasks, and switch between a board and a list view — a REST API, a web UI, and a database",
     intake:"idea", spec:"", build:"single", maxMilestones:6,
-    milestones:"", profile:"auto", workers:6, fix:6, autopilot:0 },
+    milestones:"", profile:"auto", workers:3, fix:6, autopilot:0 },
   { id:"ssg", supervised:false, label:"Static-site generator · CLI tool (simple)",
     note:"A command-line tool + library — a different shape of software.",
     request:"a command-line static-site generator: turn a folder of Markdown with front-matter into a linked HTML site with a table of contents, page templates, and a live-reload dev server",
     intake:"idea", spec:"", build:"single", maxMilestones:6,
-    milestones:"", profile:"auto", workers:4, fix:2, autopilot:0 },
+    milestones:"", profile:"auto", workers:2, fix:2, autopilot:0 },
   { id:"chat", supervised:true, label:"Real-time chat · WebSocket platform (complex)",
     note:"Rooms, presence and typing over WebSockets — web client + realtime backend + DB.",
     request:"a real-time group chat app: named rooms, user presence, typing indicators, persistent message history and search, and auth — a WebSocket backend, a web client, and a database",
     intake:"idea", spec:"", build:"single", maxMilestones:6,
-    milestones:"", profile:"auto", workers:6, fix:6, autopilot:0 },
+    milestones:"", profile:"auto", workers:3, fix:6, autopilot:0 },
 ];
 function _setSelIfPresent(id, val){
   const s=document.getElementById(id); if(!s) return;
@@ -3352,7 +3546,7 @@ function applyPreset(id){
   set("spec-text", p.spec||"");
   set("milestones-text", p.milestones||"");
   set("max-milestones", p.maxMilestones!=null?p.maxMilestones:6);
-  set("extra-workers", p.workers!=null?p.workers:"");
+  for (const sp of SPECIALTIES) set("workers-"+sp, p.workers!=null?p.workers:DEFAULT_LIMIT);
   set("fix-input", p.fix!=null?p.fix:2);
   set("autopilot-input", p.autopilot!=null?p.autopilot:0);
   _setSelIfPresent("build-select", p.build||"single");   // change event toggles the ladder opts
@@ -3425,7 +3619,7 @@ function showNewModal(parentId){
 // Advisory IC-pool sizing: ask the server (/api/suggest-slots) how many parallel
 // workers the request is likely to need, and fold it into the note. The
 // real split is decided during the build — this just previews the scale.
-const PARALLEL_BASE = "Automatic — the tech-lead decomposes the work and the system runs the independent tasks in parallel.";
+const PARALLEL_BASE = "Tickets run in dependency order; each specialty works at most this many at once, the rest queue.";
 let slotHintTimer = null;
 function updateSlotHint(){
   if(slotHintTimer) clearTimeout(slotHintTimer);
@@ -3508,10 +3702,7 @@ document.getElementById("start-btn").onclick=async ()=>{
   extra.adapter=document.getElementById("adapter-select").value;
   { const ap=document.getElementById("autopilot-input");
     const n=ap?parseInt(ap.value,10):0; if(Number.isFinite(n)&&n>0) extra.autopilot=n; }
-  // Extra workers: the pool ON TOP of one-per-team. Blank ⇒ the server's automatic
-  // cap. Each role always gets its baseline worker; these scale the busy teams.
-  const xw=parseInt((document.getElementById("extra-workers")||{}).value,10);
-  if(Number.isFinite(xw) && xw>=0) extra.max_slots=xw;
+  extra.workers=readWorkers();   // per-specialty ticket workers in flight at once
   const fix=parseInt(document.getElementById("fix-input").value,10);
   if(Number.isFinite(fix) && fix>=0) extra.max_fix_attempts=fix;
   const cap=parseFloat(document.getElementById("cap-input").value);

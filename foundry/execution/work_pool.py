@@ -78,12 +78,13 @@ only verb is ``submit``; making slots is infra's job.
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 from foundry.canonical import content_digest
 from foundry.proxy.token_meter import TokenCapExceeded
@@ -92,6 +93,7 @@ from foundry.schemas.base import BudgetLedger
 if TYPE_CHECKING:
     from foundry.execution.adapter_contract import AdapterResult, TaskPacket, WorkerAdapter
     from foundry.execution.sandbox import Sandbox
+    from foundry.schemas.implementation import TaskEvent
 
 __all__ = [
     "AdapterFactory",
@@ -100,6 +102,7 @@ __all__ = [
     "LocalWorkPool",
     "QuotaPolicy",
     "SandboxFactory",
+    "TaskEventHook",
     "TaskRejectedError",
     "TaskState",
     "TaskStatus",
@@ -180,6 +183,8 @@ def allocate_budget_tree(
 # identical whether the worker is a thread (LocalWorkPool) or a container.
 SandboxFactory = Callable[["ExecutionTask"], "Sandbox"]
 AdapterFactory = Callable[[str], "WorkerAdapter"]
+# Live per-task telemetry (start/done/failed). Advisory: a hook that raises is ignored.
+TaskEventHook = Callable[["TaskEvent"], None]
 
 
 class TaskRejectedError(RuntimeError):
@@ -373,10 +378,22 @@ class LocalWorkPool:
         adapter_factory: AdapterFactory,
         max_slots: int = 1,
         quota: QuotaPolicy | None = None,
+        limits: Mapping[str, int] | None = None,
+        on_task: TaskEventHook | None = None,
     ) -> None:
+        """``limits`` caps how many tasks of one ``lineage`` run at once, under the
+        global ``max_slots`` (a lineage with no entry is bounded by ``max_slots``
+        only). ``on_task`` receives a :class:`TaskEvent` when a task starts running,
+        finishes, or fails."""
         if max_slots < 1:
             raise ValueError("max_slots must be >= 1")
+        if any(n < 1 for n in (limits or {}).values()):
+            raise ValueError("every per-lineage limit must be >= 1")
         self.max_slots = max_slots
+        self._lineage_slots = {
+            lineage: threading.BoundedSemaphore(n) for lineage, n in (limits or {}).items()
+        }
+        self._on_task = on_task
         self._sandbox_factory = sandbox_factory
         self._adapter_factory = adapter_factory
         self._quota = quota or QuotaPolicy()
@@ -435,11 +452,17 @@ class LocalWorkPool:
         task = self._claim(task_id)
         if task is None:
             return  # already claimed/ran — idempotent, no double-run
+        gate = self._lineage_slots.get(task.lineage)
+        with gate if gate is not None else contextlib.nullcontext():
+            self._run_claimed(task_id, task)
+
+    def _run_claimed(self, task_id: str, task: ExecutionTask) -> None:
         with self._lock:
             self._records[task_id].status = TaskStatus.RUNNING
-
-        sandbox = self._sandbox_factory(task)
+        self._emit(task, "start")
+        sandbox: Sandbox | None = None
         try:
+            sandbox = self._sandbox_factory(task)
             adapter = self._adapter_factory(task.adapter)
             result = adapter.run(task.packet, sandbox)
         except TokenCapExceeded as exc:
@@ -448,18 +471,36 @@ class LocalWorkPool:
             with self._lock:
                 self._records[task_id].status = TaskStatus.FAILED
                 self._records[task_id].error = repr(exc)
+            self._emit(task, "failed")
             raise
         except Exception as exc:  # record the failure; never silently lose work
             with self._lock:
                 self._records[task_id].status = TaskStatus.FAILED
                 self._records[task_id].error = repr(exc)
+            self._emit(task, "failed")
             return
         finally:
-            sandbox.destroy()  # arch §2(d): no reuse
+            if sandbox is not None:
+                sandbox.destroy()  # arch §2(d): no reuse
         with self._lock:
             rec = self._records[task_id]
             rec.result = result
             rec.status = TaskStatus.DONE
+        self._emit(task, "done")
+
+    def _emit(self, task: ExecutionTask, phase: Literal["start", "done", "failed"]) -> None:
+        if self._on_task is None:
+            return
+        body = task.packet.task
+        event: TaskEvent = {
+            "phase": phase,
+            "ticket_id": str(body.get("ticket_id") or body.get("id") or ""),
+            "title": str(body.get("title") or ""),
+            "specialty": str(body.get("specialty") or task.lineage),
+            "tier": str(body.get("tier") or ""),
+        }
+        with contextlib.suppress(Exception):
+            self._on_task(event)
 
     # -- read-back -----------------------------------------------------------
 

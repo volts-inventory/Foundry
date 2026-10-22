@@ -65,7 +65,7 @@ from foundry.schemas.gates import GateStatus
 from foundry.state.factory_state import FactoryState
 
 if TYPE_CHECKING:
-    from collections.abc import MutableSequence, Sequence
+    from collections.abc import Mapping, MutableSequence, Sequence
 
     from langgraph.checkpoint.base import BaseCheckpointSaver
     from langgraph.graph.state import CompiledStateGraph
@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     from foundry.agents.implementation.senior_engineer import ArtifactResolver
     from foundry.context import SymbolIndex
     from foundry.docs.assemble import DocumentationBundle
+    from foundry.execution.work_pool import TaskEventHook
     from foundry.gates.discriminator import DiscriminatorFactory
     from foundry.gates.profiles import VerificationProfile
     from foundry.gates.runner import TwoZoneGateRunner
@@ -204,6 +205,9 @@ def build_factory_graph(
     checkpoints: bool | Sequence[str | CheckpointBoundary] | None = None,
     max_slots: int = 1,
     cost_cap_microusd: int | None = None,
+    workers: Mapping[str, int] | None = None,
+    ticket_tiers: Mapping[Any, str] | None = None,
+    on_task: TaskEventHook | None = None,
 ) -> CompiledStateGraph[FactoryState]:
     """Compile the full factory graph.
 
@@ -287,6 +291,9 @@ def build_factory_graph(
         checkpoints=checkpoints,
         max_slots=max_slots,
         cost_cap_microusd=cost_cap_microusd,
+        workers=workers,
+        ticket_tiers=ticket_tiers,
+        on_task=on_task,
     ).compile()
 
     def emit(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:

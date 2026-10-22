@@ -62,9 +62,9 @@ from foundry.governance.budget_controller import BudgetCaps, BudgetController
 from foundry.governance.release_anchors import newest_artifact_uri, state_sha
 from foundry.graph.gate_wiring import (
     BUILD_TEST_BOUNDARY,
+    BUILD_TEST_SMOKE_BOUNDARY,
     SPEC_BOUNDARY,
     route_after_gates,
-    BUILD_TEST_SMOKE_BOUNDARY,
     run_build_test_gates,
     run_spec_gate,
 )
@@ -83,11 +83,12 @@ from foundry.state.factory_state import FactoryState
 from foundry.state.reducers import JUDGMENT_VERDICTS, merge_gates
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from foundry.agents._runtime import AgentRuntime
     from foundry.agents.implementation.senior_engineer import ArtifactResolver
     from foundry.context import SymbolIndex
+    from foundry.execution.work_pool import TaskEventHook
     from foundry.gates.discriminator import DiscriminatorFactory
     from foundry.gates.profiles import VerificationProfile
     from foundry.gates.runner import TwoZoneGateRunner
@@ -323,6 +324,9 @@ def build_supervisor_graph(
     checkpoints: bool | Sequence[str | CheckpointBoundary] | None = None,
     max_slots: int = 1,
     cost_cap_microusd: int | None = None,
+    workers: Mapping[str, int] | None = None,
+    ticket_tiers: Mapping[Any, str] | None = None,
+    on_task: TaskEventHook | None = None,
 ) -> StateGraph[FactoryState]:
     """Build the UNCOMPILED supervisor graph over :class:`FactoryState`.
 
@@ -405,6 +409,7 @@ def build_supervisor_graph(
     implementation = build_implementation_subgraph(
         rt, source_dir=source_dir, resolve=resolve, resolve_blob=resolve_blob,
         max_slots=max_slots, cost_cap_microusd=cost_cap_microusd,
+        workers=workers, ticket_tiers=ticket_tiers, on_task=on_task,
     ).compile()
     quality = build_quality_subgraph(rt, resolve=resolve).compile()
 

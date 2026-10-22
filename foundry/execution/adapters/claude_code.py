@@ -65,7 +65,7 @@ from foundry.schemas.gates import GateTriage
 from foundry.state.seq import Seq
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from foundry.proxy.token_meter import TokenMeter
 
@@ -302,11 +302,15 @@ class ClaudeCodeAdapter:
         exec_fn: SandboxExec | None = None,
         extra_args: Sequence[str] = (),
         on_activity: Callable[[str], None] | None = None,
+        tier_models: Mapping[str, str] | None = None,
     ) -> None:
         self._bin = claude_bin
         self._run_id = run_id
         self._node_id = node_id
         self._model = model
+        # tier ("T1".."T3") -> model id, the same map the proxy pins; a packet's
+        # tier picks its model, falling back to ``model``.
+        self._tier_models = dict(tier_models or {})
         self._timeout_s = timeout_s
         self._exec: SandboxExec = exec_fn or _default_exec
         self._extra_args = tuple(extra_args)
@@ -353,8 +357,11 @@ class ClaudeCodeAdapter:
             # permission prompts — headless agentic runs inside the cage.
             "--dangerously-skip-permissions",
         ]
-        if self._model:
-            argv += ["--model", self._model]
+        tier = packet.task.get("tier")
+        model = self._tier_models.get(str(tier)) if tier else None
+        model = model or self._model
+        if model:
+            argv += ["--model", model]
         argv += list(self._extra_args)
         return argv
 

@@ -26,6 +26,7 @@ from foundry.execution.adapter_contract import (
     AdapterResult,
     TaskPacket,
     assemble_prompt,
+    packet_tier_scope,
 )
 from foundry.execution.sandbox import Sandbox
 from foundry.schemas.gates import GateTriage
@@ -70,7 +71,8 @@ class RawReactAdapter:
         return assemble_prompt(packet, epilogue=_EPILOGUE)
 
     def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
-        response = self._complete(self.build_prompt(packet))
+        with packet_tier_scope(packet):  # the completion closure picks the packet's model tier
+            response = self._complete(self.build_prompt(packet))
 
         diff_match = _DIFF_RE.search(response)
         diff_text = diff_match.group(1) if diff_match else ""

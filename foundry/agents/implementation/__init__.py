@@ -9,6 +9,8 @@ the shared seam (LEARNINGS AR1-AR4):
   the ``tasks`` channel via ``rt.proxy.complete`` (single egress, L6). The
   integration conflict-resolution path is typed but stubbed
   (:func:`stub_conflict_resolution`).
+* :func:`make_engineering_node` — the ticket path: tickets -> tasks, built wave
+  by wave through a per-specialty-limited pool (``tickets.py``).
 * :func:`make_junior_engineer_node` — take ONE ``Task``, build a ``TaskPacket``
   with the pinned constraints injected VERBATIM + FIRST (arch §2), run the
   swappable substrate (``rt.adapter``) inside a ``Sandbox``, and emit a
@@ -39,19 +41,35 @@ from foundry.agents.implementation.senior_engineer import (
     make_senior_engineer_node,
     stub_conflict_resolution,
 )
+from foundry.agents.implementation.tickets import (
+    DEFAULT_WORKERS,
+    TICKET_KIND,
+    has_tickets,
+    make_engineering_node,
+    next_wave,
+    read_tickets,
+    task_from_ticket,
+)
 
 __all__ = [
+    "DEFAULT_WORKERS",
     "DESIGN_KIND",
     "OWNERSHIP_KIND",
+    "TICKET_KIND",
     "ArtifactResolverError",
+    "has_tickets",
     "idempotency_key",
     "lanes_with_leads",
     "leads_for_lane",
+    "make_engineering_node",
     "make_fixer_node",
     "make_junior_engineer_node",
     "make_senior_engineer_node",
+    "next_wave",
     "pinned_texts",
+    "read_tickets",
     "ready_tasks",
     "stub_conflict_resolution",
+    "task_from_ticket",
     "tasks_for_lane",
 ]

@@ -32,6 +32,7 @@ from foundry.execution.adapter_contract import (
     AdapterResult,
     TaskPacket,
     assemble_prompt,
+    packet_tier_scope,
 )
 from foundry.execution.adapters.claude_code import changed_files, walk_worktree
 from foundry.execution.sandbox import Sandbox
@@ -122,6 +123,10 @@ class ProxyAgentAdapter:
         return True  # nothing but the injected proxy seam is required
 
     def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
+        with packet_tier_scope(packet):  # the completion closure picks the packet's model tier
+            return self._run(packet, sandbox)
+
+    def _run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
         worktree = Path(sandbox.worktree)
         before = walk_worktree(worktree)
         messages: list[dict[str, Any]] = [

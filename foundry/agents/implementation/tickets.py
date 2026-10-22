@@ -20,6 +20,12 @@ node:
 
 The node returns after each wave, so the graph checkpoints per wave and a resume
 (token cap, crash) skips every ticket that already has a FeatureDiff.
+
+A ticket that fails never costs its wave-mates their work: every successful
+sibling's diff is still returned. An ordinary failure is noted and retried next
+pass, up to :data:`MAX_TICKET_ATTEMPTS`, then skipped so the loop ends and the gates
+decide. A spent token cap is noted too (:func:`cap_stopped`); the subgraph then
+exits and the supervisor raises it, after this wave's writes are committed.
 """
 
 from __future__ import annotations
@@ -54,6 +60,7 @@ from foundry.execution.work_pool import (
     TaskEventHook,
     allocate_lineage_quotas,
 )
+from foundry.proxy.token_meter import TokenCapExceeded
 from foundry.schemas.architecture import InterfaceContract
 from foundry.schemas.base import Artifact, BudgetLedger
 from foundry.schemas.gates import GateTriage
@@ -86,6 +93,7 @@ __all__ = [
     "DEFAULT_WORKERS",
     "NODE_ID",
     "TICKET_KIND",
+    "cap_stopped",
     "has_tickets",
     "in_write_scope",
     "make_engineering_node",
@@ -107,6 +115,12 @@ _FEATURE_DIFF_KIND = "feature_diff"
 # Triage names this module writes; SKIP doubles as the "never built" marker.
 SKIP_TRIAGE = "ticket-skipped"
 SCOPE_TRIAGE = "write-scope"
+# One note per failed attempt (the triage union keys on name, so the attempt is in it).
+FAIL_TRIAGE = "ticket-failed"
+CAP_TRIAGE = "token-cap"
+# Attempts a ticket gets before it is skipped; bounds the loop on a ticket that
+# keeps erroring.
+MAX_TICKET_ATTEMPTS = 2
 
 # Per-specialty concurrent ticket limit when none is configured.
 DEFAULT_WORKERS: dict[str, int] = {s.value: 2 for s in Specialty}
@@ -186,6 +200,25 @@ def _skipped_task_ids(state: FactoryState) -> set[str]:
         for t in (state.get("gate_triage") or ())
         if t.name == SKIP_TRIAGE and t.produced_by == NODE_ID
     }
+
+
+def _ticket_notes(state: FactoryState, prefix: str) -> dict[str, list[GateTriage]]:
+    out: dict[str, list[GateTriage]] = {}
+    for t in state.get("gate_triage") or ():
+        if t.produced_by == NODE_ID and t.name.startswith(prefix):
+            out.setdefault(t.run_against.removeprefix("task/"), []).append(t)
+    return out
+
+
+def cap_stopped(state: FactoryState) -> tuple[GateTriage, ...]:
+    """The token-cap notes of tickets still unbuilt and unskipped: non-empty means the
+    last pass stopped on a spent cap and the run must stop. A resumed pass that builds
+    those tickets clears it."""
+    settled = _built_task_ids(state) | _skipped_task_ids(state)
+    return tuple(
+        note for tid, notes in sorted(_ticket_notes(state, CAP_TRIAGE).items())
+        if tid not in settled for note in notes
+    )
 
 
 def next_wave(
@@ -460,6 +493,46 @@ def _ticket_packet(
     )
 
 
+def _failure_notes(
+    rt: AgentRuntime, config: RunnableConfig, tid: str, attempt: int, exc: Exception
+) -> list[GateTriage]:
+    """The triage for a ticket's ``attempt``-th failure, plus the skip marker once
+    :data:`MAX_TICKET_ATTEMPTS` is spent (so the wave loop terminates)."""
+    notes = [GateTriage(
+        name=f"{FAIL_TRIAGE}:{attempt}", run_against=f"task/{tid}",
+        explanation=f"attempt {attempt} failed: {exc}"[:2000], produced_by=NODE_ID,
+        seq=rt.seq(config, NODE_ID, f"fail:{tid}"),
+    )]
+    if attempt >= MAX_TICKET_ATTEMPTS:
+        notes.append(GateTriage(
+            name=SKIP_TRIAGE, run_against=f"task/{tid}",
+            explanation=f"not built: failed {attempt} attempt(s); last error: {exc}"[:2000],
+            produced_by=NODE_ID, seq=rt.seq(config, NODE_ID, f"skip:{tid}"),
+        ))
+    return notes
+
+
+def _order_after_integrated(state: FactoryState, merged: dict[str, list[Any]]) -> None:
+    """Sort this wave's diffs after every diff already integrated.
+
+    Integration applies diffs in Seq order, but a ticket diff's own Seq does not
+    follow build order: the fixer lifts its epoch past every diff it repairs (a
+    per-wave fix lands BEFORE the next wave), and a resumed pass restarts the
+    superstep index. A later wave builds on the integrated tree and may rewrite a
+    file an earlier diff wrote, so its diff must apply last or its edit is lost."""
+    top = max(
+        (a.seq.emission_epoch for a in (state.get("artifacts") or ())
+         if a.kind == _FEATURE_DIFF_KIND),
+        default=0,
+    )
+    if top and merged.get("artifacts"):
+        merged["artifacts"] = [
+            a.model_copy(update={"seq": a.seq._replace(emission_epoch=top + 1)})
+            if a.kind == _FEATURE_DIFF_KIND and a.seq.emission_epoch <= top else a
+            for a in merged["artifacts"]
+        ]
+
+
 def _round_robin(wave: Sequence[Ticket]) -> list[Ticket]:
     """Interleave specialties so a busy specialty's queued tickets don't hold every
     pool thread while another specialty has free slots."""
@@ -593,19 +666,34 @@ def make_engineering_node(
                         seq=rt.seq(config, NODE_ID, f"skip:{tid}"),
                     ))
             # Finalize in Seq order, single-threaded: rt.seq and rt.cas body writes
-            # never race. A failed ticket (or a spent token cap) propagates.
+            # never race. A failed ticket never takes its siblings' diffs with it.
+            failures = _ticket_notes(state, FAIL_TRIAGE)
+            built: list[Ticket] = []
             for ticket in wave:
                 tid = task_id_for_ticket(ticket.id)
                 if tid not in submitted:
                     continue
-                result = pool.result(submitted[tid])
-                out = _finalize_diff(rt, tasks[tid], constraints, bases[tid], result, config)
+                try:
+                    result = pool.result(submitted[tid])
+                    out = _finalize_diff(rt, tasks[tid], constraints, bases[tid], result, config)
+                except TokenCapExceeded as exc:
+                    merged.setdefault("gate_triage", []).append(GateTriage(
+                        name=CAP_TRIAGE, run_against=f"task/{tid}", explanation=str(exc),
+                        produced_by=NODE_ID, seq=rt.seq(config, NODE_ID, f"cap:{tid}"),
+                    ))
+                    continue
+                except Exception as exc:
+                    merged.setdefault("gate_triage", []).extend(
+                        _failure_notes(rt, config, tid, len(failures.get(tid, ())) + 1, exc)
+                    )
+                    continue
+                built.append(ticket)
                 for channel, records in out.items():
                     merged.setdefault(channel, []).extend(records)
 
+        _order_after_integrated(state, merged)
         for channel, records in merged.items():
             writes.setdefault(channel, []).extend(records)
-        built = [t for t in wave if task_id_for_ticket(t.id) in submitted]
         writes.setdefault("agent_journal", []).append(journal_entry(
             node_id=NODE_ID, role="Engineering",
             seq=rt.seq(config, NODE_ID, f"journal:wave:{wave[0].id}"),

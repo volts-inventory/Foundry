@@ -23,7 +23,9 @@ from foundry import cli
 from foundry.agents import AgentRuntime
 from foundry.agents._common import emit_artifact, persist_prose
 from foundry.agents.implementation.tickets import (
+    cap_stopped,
     next_wave,
+    pending_wave,
     task_from_ticket,
     tier_for,
 )
@@ -32,12 +34,16 @@ from foundry.execution.adapter_contract import AdapterResult, TaskPacket
 from foundry.execution.adapters.claude_code import ClaudeCodeAdapter
 from foundry.execution.sandbox import Sandbox
 from foundry.execution.work_pool import ExecutionTask, LocalWorkPool
+from foundry.gates import DevGateWriteVerifier, TwoZoneGateRunner
 from foundry.gates.attestation import ZoneBSigner
+from foundry.graph.gate_wiring import WaveBuildCheck, materialize_workdir
 from foundry.graph.subgraphs.implementation import build_implementation_subgraph
+from foundry.graph.supervisor import build_supervisor_graph
 from foundry.proxy import ModelProviderProxy
 from foundry.proxy.test_doubles import MockTransport
-from foundry.proxy.token_meter import TokenCapExceeded
+from foundry.proxy.token_meter import TokenCapExceeded, TokenMeter
 from foundry.schemas.architecture import ConstraintScope, InterfaceContract, PinnedConstraint
+from foundry.schemas.gates import GateStatus
 from foundry.schemas.implementation import (
     Difficulty,
     FeatureDiff,
@@ -47,6 +53,8 @@ from foundry.schemas.implementation import (
 )
 from foundry.schemas.product import AcceptanceCriterion
 from foundry.state.factory_state import FactoryState
+from foundry.state.global_records import GlobalRecords
+from foundry.state.reducers import reset_gate_write_verifier, set_gate_write_verifier
 from foundry.state.seq import Seq
 
 CONSTRAINT = "MUST store money as integer cents, never floats."
@@ -80,19 +88,37 @@ class _Recorder:
     supports_turn_snapshots = True
     name = "recorder"
 
-    def __init__(self, cap_on: str | None = None, delay: float = 0.0) -> None:
+    def __init__(
+        self,
+        cap_on: str | None = None,
+        delay: float = 0.0,
+        *,
+        fail_on: dict[str, int] | None = None,
+        writes: dict[str, dict[str, str]] | None = None,
+        meter: TokenMeter | None = None,
+    ) -> None:
         self.lock = threading.Lock()
         self.calls: list[str] = []
         self.packets: dict[str, TaskPacket] = {}
         self.seen: dict[str, dict[str, str]] = {}
         self.cap_on = cap_on
         self.delay = delay
+        self.fail_on = dict(fail_on or {})  # tid -> times to raise an ordinary error
+        self.writes = writes or {}  # tid -> extra/overriding file contents
+        self.meter = meter
 
     def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
         tid = str(packet.task["id"])
         if tid == self.cap_on:
             self.cap_on = None
+            if self.meter is not None:
+                self.meter.used = self.meter.cap  # this session spent the rest
             raise TokenCapExceeded("token cap spent")
+        with self.lock:
+            if self.fail_on.get(tid, 0) > 0:
+                self.fail_on[tid] -= 1
+                self.calls.append(f"{tid}!")
+                raise RuntimeError(f"adapter crashed on {tid}")
         time.sleep(self.delay)
         root = Path(sandbox.worktree)
         seen = {
@@ -104,6 +130,7 @@ class _Recorder:
             self.packets[tid] = packet
             self.seen[tid] = seen
         files = {f: f"# written by {tid}\n" for f in packet.task.get("files", ())}
+        files.update(self.writes.get(tid, {}))
         files["rogue.txt"] = "out of scope\n"
         files["features/T-001.feature"] = "Feature: edited\n"
         blob = json.dumps({"kind": "full-file-snapshot", "files": files}, sort_keys=True)
@@ -277,21 +304,85 @@ def test_writes_outside_the_ticket_files_are_dropped_and_noted(tmp_path: Path) -
     assert "features/T-001.feature" in notes[0].explanation
 
 
-def test_resume_after_token_cap_skips_built_tickets(tmp_path: Path) -> None:
+def _wave_of_three() -> list[Ticket]:
+    return [_ticket(f"T-00{i}", i, files=(f"m{i}.py",)) for i in (1, 2, 3)]
+
+
+def test_a_failing_ticket_keeps_its_siblings_and_is_retried_then_skipped(
+    tmp_path: Path,
+) -> None:
+    store = ArtifactStore()
+    rec = _Recorder(fail_on={"T-002": 5})  # fails every attempt
+    out = _graph(_runtime(rec, store), store, tmp_path).compile().invoke(
+        _state(store, _wave_of_three()), _config())
+    assert set(_diffs(out)) == {"T-001", "T-003"}  # the siblings' diffs landed
+    assert sorted(rec.calls) == ["T-001", "T-002!", "T-002!", "T-003"]  # retried once
+    notes = {t.name for t in out["gate_triage"] if t.run_against == "task/T-002"}
+    assert notes == {"ticket-failed:1", "ticket-failed:2", "ticket-skipped"}
+
+
+def test_a_ticket_that_fails_once_is_built_on_the_retry(tmp_path: Path) -> None:
+    store = ArtifactStore()
+    rec = _Recorder(fail_on={"T-002": 1})
+    out = _graph(_runtime(rec, store), store, tmp_path).compile().invoke(
+        _state(store, _wave_of_three()), _config())
+    assert set(_diffs(out)) == {"T-001", "T-002", "T-003"}
+    assert rec.calls.count("T-001") == 1 and rec.calls[-1] == "T-002"
+
+
+def test_a_token_cap_commits_the_siblings_and_resume_skips_them(tmp_path: Path) -> None:
     store = ArtifactStore()
     rec = _Recorder(cap_on="T-002")
-    tickets = [
-        _ticket("T-001", 0, files=("a.py",)),
-        _ticket("T-002", 1, files=("b.py",), deps=("T-001",)),
-    ]
-    app = _graph(_runtime(rec, store), store, tmp_path).compile(checkpointer=MemorySaver())
-    cfg = _config("resume-run")
-    with pytest.raises(TokenCapExceeded):
-        app.invoke(_state(store, tickets), cfg)
-    assert rec.calls == ["T-001"]
-    out = app.invoke(None, cfg)
-    assert rec.calls == ["T-001", "T-002"]  # wave 1 was not rebuilt
-    assert set(_diffs(out)) == {"T-001", "T-002"}
+    app = _graph(_runtime(rec, store), store, tmp_path).compile()
+    out = app.invoke(_state(store, _wave_of_three()), _config())
+    # The subgraph exits cleanly with the siblings' writes and the stop marker; the
+    # supervisor raises the cap a superstep later, once these writes are committed.
+    assert set(_diffs(out)) == {"T-001", "T-003"}
+    assert [n.run_against for n in cap_stopped(out)] == ["task/T-002"]
+    rec.calls.clear()
+    resumed = app.invoke(out, _config())
+    assert rec.calls == ["T-002"]  # the completed siblings were not rebuilt
+    assert set(_diffs(resumed)) == {"T-001", "T-002", "T-003"}
+    assert not cap_stopped(resumed)
+
+
+def test_supervisor_raises_the_cap_after_committing_and_resumes(tmp_path: Path) -> None:
+    from tests.test_supervisor import _SCRIPTS, KEY, KEY_ID, _runner
+    from tests.test_supervisor import _config as _sup_config
+
+    store = ArtifactStore()
+    meter = TokenMeter(10**9)
+    rec = _Recorder(cap_on="T-002", meter=meter)
+    proxy = ModelProviderProxy(MockTransport.scripted(dict(_SCRIPTS), default_verdict="approve"),
+                               signer=ZoneBSigner(KEY, KEY_ID))
+    proxy.token_meter = meter
+    rt = AgentRuntime(proxy=proxy, adapter=rec, cas=store)
+    src = tmp_path / "src"
+    src.mkdir()
+    records = GlobalRecords()
+    app = build_supervisor_graph(
+        rt, runner=_runner(records), resolve=store.resolve, resolve_blob=store.resolve_blob,
+        source_dir=str(src), max_fix_attempts=1,
+    ).compile(checkpointer=MemorySaver())
+    cfg = _sup_config("cap-run")
+    seed = _state(store, _wave_of_three())
+    token = set_gate_write_verifier(DevGateWriteVerifier(KEY, KEY_ID, records))
+    try:
+        with pytest.raises(TokenCapExceeded):
+            app.invoke(seed, cfg)
+        committed = app.get_state(cfg)
+        assert committed.next == ("token_cap",)
+        assert set(_diffs(committed.values)) == {"T-001", "T-003"}
+        rec.calls.clear()
+        with pytest.raises(TokenCapExceeded):  # still spent: stays stopped
+            app.invoke(None, cfg)
+        meter.cap = 2 * 10**9  # the operator raises the cap and resumes
+        final = app.invoke(None, cfg)
+    finally:
+        reset_gate_write_verifier(token)
+    assert rec.calls.count("T-002") == 1
+    assert "T-001" not in rec.calls and "T-003" not in rec.calls
+    assert {"T-001", "T-002", "T-003"} <= set(_diffs(final))
 
 
 def test_a_ticket_with_a_diff_is_not_rebuilt(tmp_path: Path) -> None:
@@ -335,6 +426,81 @@ def test_fix_reentry_runs_the_fixer_not_the_tickets(tmp_path: Path) -> None:
         ran.extend(step)
     assert ran == ["fixer"]
     assert rec.calls[-1] == "fix-0" and rec.seen["fix-0"]["a.py"] == "# written by T-001\n"
+
+
+# ---- per-wave integration check (§2b) ------------------------------------------
+
+_WAVE_KEY = b"dev-zone-b-wave-key-0123456789abcdef"
+
+
+def _wave_run(
+    tmp_path: Path, rec: _Recorder, *, max_fix_attempts: int = 3
+) -> tuple[FactoryState, list[str], ArtifactStore]:
+    """Two waves (T-002 depends on T-001) with the REAL runner's build gate between."""
+    store = ArtifactStore()
+    rt = _runtime(rec, store)
+    records = GlobalRecords()
+    runner = TwoZoneGateRunner(ZoneBSigner(_WAVE_KEY, "wave-kid"), records, "s1", "l1")
+    check = WaveBuildCheck(rt, runner, store.resolve, store.resolve_blob,
+                           max_fix_attempts=max_fix_attempts)
+    tickets = [
+        _ticket("T-001", 0, files=("app.py",)),
+        _ticket("T-002", 1, files=("app.py",), deps=("T-001",)),
+    ]
+    ran: list[str] = []
+    token = set_gate_write_verifier(DevGateWriteVerifier(_WAVE_KEY, "wave-kid", records))
+    try:
+        app = _graph(rt, store, tmp_path, wave_check=check).compile(checkpointer=MemorySaver())
+        cfg = _config("wave-run")
+        for step in app.stream(_state(store, tickets), cfg, stream_mode="updates"):
+            ran.extend(step)
+        out: FactoryState = app.get_state(cfg).values
+    finally:
+        reset_gate_write_verifier(token)
+    return out, ran, store
+
+
+def _builds(out: FactoryState) -> list[GateStatus]:
+    return [g.status for g in sorted(out.get("gates") or (), key=lambda g: g.seq)
+            if g.name == "build"]
+
+
+def test_a_passing_intermediate_build_proceeds_to_the_next_wave(tmp_path: Path) -> None:
+    out, ran, _ = _wave_run(tmp_path, _Recorder())
+    # Checked once, between the waves; never after the last (the final gate's job).
+    assert ran == ["engineering", "wave_gate", "engineering"]
+    assert _builds(out) == [GateStatus.PASS]
+    assert set(_diffs(out)) == {"T-001", "T-002"}
+
+
+def test_a_failing_intermediate_build_runs_the_fixer_before_the_next_wave(
+    tmp_path: Path,
+) -> None:
+    rec = _Recorder(writes={
+        "T-001": {"app.py": "def broken(:\n"},
+        "fix-1": {"app.py": "def fixed():\n    return 1\n"},
+        "T-002": {"app.py": "def fixed():\n    return 2\n"},
+    })
+    out, ran, store = _wave_run(tmp_path, rec)
+    assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "engineering"]
+    assert rec.calls == ["T-001", "fix-1", "T-002"]
+    assert _builds(out) == [GateStatus.FAIL, GateStatus.PASS]
+    assert rec.seen["T-002"]["app.py"] == "def fixed():\n    return 1\n"  # built on the fix
+    assert out["budget"].fix_attempts_since_all_green == 1
+    # Integration applies wave 2 AFTER the fix, so its edit to the same file wins.
+    tree = tmp_path / "tree"
+    materialize_workdir(out, tree, resolve=store.resolve, resolve_blob=store.resolve_blob)
+    assert (tree / "app.py").read_text() == "def fixed():\n    return 2\n"
+
+
+def test_a_spent_fix_budget_halts_the_waves_in_order(tmp_path: Path) -> None:
+    rec = _Recorder(writes={"T-001": {"app.py": "def broken(:\n"}})  # the fixer can't fix
+    out, ran, store = _wave_run(tmp_path, rec, max_fix_attempts=3)
+    assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "fixer", "wave_gate"]
+    assert rec.calls == ["T-001", "fix-1", "fix-2"]  # wave 2 never started
+    assert set(_builds(out)) == {GateStatus.FAIL}
+    assert out["budget"].fix_attempts_since_all_green == 3  # the bound, as the final gate counts it
+    assert [t.id for t in pending_wave(out, store.resolve)] == ["T-002"]  # supervisor halts
 
 
 def test_without_tickets_the_ownership_lane_path_runs(tmp_path: Path) -> None:

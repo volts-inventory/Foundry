@@ -58,12 +58,15 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from foundry.agents.implementation.senior_engineer import DESIGN_KIND
+from foundry.agents.implementation.tickets import cap_stopped, pending_wave
 from foundry.governance.budget_controller import BudgetCaps, BudgetController
 from foundry.governance.release_anchors import newest_artifact_uri, state_sha
 from foundry.graph.gate_wiring import (
     BUILD_TEST_BOUNDARY,
     BUILD_TEST_SMOKE_BOUNDARY,
     SPEC_BOUNDARY,
+    WaveBuildCheck,
+    bump_fix_attempts,
     route_after_gates,
     run_build_test_gates,
     run_spec_gate,
@@ -71,6 +74,7 @@ from foundry.graph.gate_wiring import (
 from foundry.graph.subgraphs.implementation import build_implementation_subgraph
 from foundry.graph.subgraphs.planner import build_planner_subgraph
 from foundry.graph.subgraphs.quality import build_quality_subgraph
+from foundry.proxy.token_meter import TokenCapExceeded
 from foundry.schemas.base import BudgetLedger
 from foundry.schemas.checkpoint import (
     CheckpointBoundary,
@@ -120,6 +124,8 @@ _BUILD_TEST_GATE = "build_test_gate"
 # back to the responsible layer (the layer that must regenerate the tree).
 _SPEC_FIX = "spec_fix"
 _BUILD_TEST_FIX = "build_test_fix"
+# Raises a token cap the implementation layer hit, AFTER its writes are committed.
+_TOKEN_CAP = "token_cap"
 # ---- checkpoint/HITL pause node ids (plan [10]) -----------------------------
 # A pause node per stage boundary; built+wired ONLY when that boundary is in the
 # selected ``checkpoints`` set. The id encodes the boundary so the rendered
@@ -410,6 +416,10 @@ def build_supervisor_graph(
         rt, source_dir=source_dir, resolve=resolve, resolve_blob=resolve_blob,
         max_slots=max_slots, cost_cap_microusd=cost_cap_microusd,
         workers=workers, ticket_tiers=ticket_tiers, on_task=on_task,
+        wave_check=WaveBuildCheck(
+            rt, runner, resolve, resolve_blob,
+            max_fix_attempts=max_fix_attempts, profile=profile,
+        ),
     ).compile()
     quality = build_quality_subgraph(rt, resolve=resolve).compile()
 
@@ -440,32 +450,8 @@ def build_supervisor_graph(
     def _bump_on_non_advance(
         state: FactoryState, config: RunnableConfig, out: dict[str, Any], *, boundary: str
     ) -> None:
-        # The in-node bump decision MUST be derived from the SAME post-fold
-        # ``gates`` view the conditional edge routes on. The edge reads the full
-        # ``gates`` channel AFTER LangGraph folds the node's ``out["gates"]``
-        # delta through ``merge_gates`` (latest-by-Seq per (name, run_against),
-        # trust-filtered). So fold the prior channel (``state["gates"]``) with
-        # the node's freshly attested delta through the REAL reducer here —
-        # never a hand-assembled subset — so the in-node bump can never diverge
-        # from the edge's post-fold read by an unenforced invariant (E-R1-01).
-        post: FactoryState = {
-            "gates": merge_gates(state.get("gates"), out.get("gates")),
-            "budget": state.get("budget") or BudgetLedger(),
-        }
-        decision = route_after_gates(
-            post,
-            config,
-            boundary=boundary,
-            records=runner.records,
-            max_fix_attempts=max_fix_attempts,
-        )
-        if decision == "fix":
-            ledger = state.get("budget") or BudgetLedger()
-            out["budget"] = ledger.model_copy(
-                update={
-                    "fix_attempts_since_all_green": ledger.fix_attempts_since_all_green + 1
-                }
-            )
+        bump_fix_attempts(state, config, out, boundary=boundary,
+                          records=runner.records, max_fix_attempts=max_fix_attempts)
 
     def _gate_workdir(name: str) -> Path:
         # A fresh materialization tree per gate run (materialize_workdir writes
@@ -520,6 +506,27 @@ def build_supervisor_graph(
 
     def build_test_fix(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         return {"phase": _BUILD_TEST_FIX}
+
+    # -- token cap: stop only once the implementation writes are committed -----
+    # A ticket that hit the cap ends the implementation subgraph cleanly (its
+    # wave-mates' diffs ride out with it); this node, a superstep later, raises.
+    # Raising inside the subgraph would discard every write of the pass. On a
+    # resume it raises again while the run's meter is still spent; with headroom
+    # (a higher cap) it returns and the unbuilt tickets are built.
+    def token_cap(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        meter = getattr(rt.proxy, "token_meter", None)
+        if meter is None:
+            raise TokenCapExceeded(cap_stopped(state)[0].explanation)
+        meter.check()
+        return {}
+
+    def _route_implementation(state: FactoryState) -> str:
+        if cap_stopped(state):
+            return _TOKEN_CAP
+        # Waves left unbuilt: the per-wave check spent the fix budget (halt in order).
+        if pending_wave(state, resolve):
+            return "halt"
+        return _QUALITY
 
     # -- conditional routers (advance / fix / halt) ---------------------------
     def _route_spec(state: FactoryState, config: RunnableConfig) -> str:
@@ -616,6 +623,7 @@ def build_supervisor_graph(
     g.add_node(_BUILD_TEST_GATE, build_test_gate)
     g.add_node(_SPEC_FIX, spec_fix)
     g.add_node(_BUILD_TEST_FIX, build_test_fix)
+    g.add_node(_TOKEN_CAP, token_cap)
 
     # Register the ENABLED checkpoint pause nodes (default OFF → none built, so the
     # topology is byte-identical). Each gets a conditional router (proceed/halt).
@@ -668,7 +676,12 @@ def build_supervisor_graph(
     )
     g.add_edge(_SPEC_FIX, _PLANNER)  # re-plan with the Spec gate's findings
 
-    g.add_edge(_IMPLEMENTATION, _QUALITY)
+    g.add_conditional_edges(
+        _IMPLEMENTATION,
+        _route_implementation,
+        {_QUALITY: _QUALITY, _TOKEN_CAP: _TOKEN_CAP, "halt": END},
+    )
+    g.add_edge(_TOKEN_CAP, _IMPLEMENTATION)
     g.add_edge(_QUALITY, _BUILD_TEST_GATE)
 
     # The RELEASE checkpoint sits AFTER the Build+Test gate has run (the human

@@ -54,12 +54,13 @@ from foundry.agents.implementation import (
     tasks_for_lane,
 )
 from foundry.agents.implementation.tickets import (
+    cap_stopped,
     has_tickets,
     make_engineering_node,
     pending_wave,
     tickets_settled,
 )
-from foundry.graph.gate_wiring import FEATURE_DIFF_KIND, _of_kind
+from foundry.graph.gate_wiring import ADVANCE, FEATURE_DIFF_KIND, FIX, HALT, _of_kind
 from foundry.schemas.architecture import ENGINEERING_LANES
 from foundry.state.factory_state import FactoryState
 
@@ -67,7 +68,7 @@ if TYPE_CHECKING:
     from foundry.agents._runtime import AgentRuntime
     from foundry.agents.implementation.senior_engineer import ArtifactResolver
     from foundry.execution.work_pool import TaskEventHook
-    from foundry.graph.gate_wiring import BlobResolver
+    from foundry.graph.gate_wiring import BlobResolver, WaveBuildCheck
 
 __all__ = ["build_implementation_subgraph"]
 
@@ -89,6 +90,7 @@ def build_implementation_subgraph(
     workers: Mapping[str, int] | None = None,
     ticket_tiers: Mapping[Any, str] | None = None,
     on_task: TaskEventHook | None = None,
+    wave_check: WaveBuildCheck | None = None,
 ) -> StateGraph[FactoryState]:
     """Build the UNCOMPILED implementation (Layer 3) role subgraph.
 
@@ -116,6 +118,13 @@ def build_implementation_subgraph(
         Ticket path only: per-specialty concurrent ticket limits (under
         ``max_slots``), the difficulty -> model-tier table, and the per-ticket
         start/done/failed telemetry hook.
+    wave_check:
+        Ticket path only: the per-wave integration check (§2b). Between waves (never
+        after the last — the supervisor's build/test gate covers that) it runs the
+        attested Build gate on the integrated tree; a FAIL routes to the fixer and
+        back to the check, bounded by the shared fix-attempt budget, and a spent
+        budget exits with waves unbuilt (the supervisor halts). Needs the fixer
+        (``rt.cas``); ``None`` builds every wave back to back.
 
     When the planner emitted ``ticket`` artifacts, START routes to the looping
     ``engineering`` node instead of the lane chain: each pass builds one wave of
@@ -208,6 +217,9 @@ def build_implementation_subgraph(
     fixer_id = "fixer"
     blobs = resolve_blob or (rt.cas.resolve_blob if rt.cas is not None else None)
     can_fix = rt.cas is not None and blobs is not None
+    # Per-wave integration check (§2b): only with a fixer to route a FAIL to.
+    gate_id = "wave_gate"
+    check = wave_check if can_fix else None
     if can_fix:
         assert blobs is not None
         fixer = make_fixer_node(
@@ -220,7 +232,15 @@ def build_implementation_subgraph(
             return fixer(state, config)
 
         g.add_node(fixer_id, _fixer)
-        g.add_edge(fixer_id, END)
+        if check is None:
+            g.add_edge(fixer_id, END)
+        else:
+            # A mid-wave repair is re-checked before the next wave; the final
+            # build/test fix loop has no wave left and exits as before.
+            def _after_fix(state: FactoryState) -> str:
+                return gate_id if pending_wave(state, resolve) else END
+
+            g.add_conditional_edges(fixer_id, _after_fix, {gate_id: gate_id, END: END})
     first_lane = _next_with_work(-1)
 
     # Ticket path: one looping node, one wave per pass (a checkpoint per wave).
@@ -238,10 +258,28 @@ def build_implementation_subgraph(
 
     g.add_node(eng_id, _engineering)
 
-    def _after_wave(state: FactoryState) -> str:
-        return eng_id if pending_wave(state, resolve) else END
+    if check is not None:
+        def _wave_gate(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+            assert check is not None
+            return check.run(state, config)
 
-    g.add_conditional_edges(eng_id, _after_wave, {eng_id: eng_id, END: END})
+        def _after_check(state: FactoryState, config: RunnableConfig) -> str:
+            assert check is not None
+            return {ADVANCE: eng_id, FIX: fixer_id, HALT: END}[check.route(state, config)]
+
+        g.add_node(gate_id, _wave_gate)
+        g.add_conditional_edges(gate_id, _after_check,
+                                {eng_id: eng_id, fixer_id: fixer_id, END: END})
+
+    def _after_wave(state: FactoryState) -> str:
+        # A spent token cap exits so the supervisor commits this wave, then stops.
+        if cap_stopped(state) or not pending_wave(state, resolve):
+            return END
+        return gate_id if check is not None else eng_id
+
+    g.add_conditional_edges(eng_id, _after_wave,
+                            {eng_id: eng_id, END: END,
+                             **({gate_id: gate_id} if check is not None else {})})
 
     def _start(state: FactoryState) -> str:
         if has_tickets(state):

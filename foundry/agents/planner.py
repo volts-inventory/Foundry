@@ -32,6 +32,7 @@ model only via ``rt.proxy`` (L6), and its self-review of the criteria is stamped
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -93,6 +94,7 @@ ROLE = "Planner"
 TIER = "T1"  # everything downstream inherits this plan; never auto-downgrade
 _SPEC_GATE = "spec"
 TICKET_KIND = "ticket"
+_SAFE_TICKET_ID = re.compile(r"[A-Za-z0-9._-]+")
 
 # Deterministic, bounds token cost on a large design doc; the full spec stays on
 # the `spec` channel.
@@ -578,6 +580,25 @@ def _break_cycles(deps: dict[str, list[str]]) -> list[str]:
     return concerns
 
 
+def _safe_ticket_ids(ids: list[str]) -> dict[str, str]:
+    """Raw id -> an id safe as a file name (``features/<id>.feature``, ``task/<id>``):
+    other characters become ``-``; a collision gets the first free ``-<n>`` suffix,
+    in plan order, so the mapping is deterministic."""
+    out: dict[str, str] = {}
+    taken = {tid for tid in ids if _SAFE_TICKET_ID.fullmatch(tid) and tid not in (".", "..")}
+    for tid in ids:
+        if tid in taken:
+            out[tid] = tid
+            continue
+        base = re.sub(r"[^A-Za-z0-9._-]", "-", tid).strip(".") or "T"
+        new, n = base, 2
+        while new in taken:
+            new, n = f"{base}-{n}", n + 1
+        taken.add(new)
+        out[tid] = new
+    return out
+
+
 def _build_tickets(
     raw: Any, ticket_seq: Seq, criteria_seq: Seq, interface_names: set[str]
 ) -> tuple[list[Ticket], list[AcceptanceCriterion], list[str]]:
@@ -588,22 +609,28 @@ def _build_tickets(
     a cycle loses its closing edge. A ``test`` ticket covers its own scenarios
     plus those of the feature tickets it depends on."""
     concerns: list[str] = []
-    items: dict[str, dict[str, Any]] = {}
+    raw_items: dict[str, dict[str, Any]] = {}
     for i, item in enumerate(_objs(raw)):
         tid = _str(item.get("id")).strip() or f"T-{i + 1:03d}"
-        if tid in items:
+        if tid in raw_items:
             concerns.append(f"Duplicate ticket id {tid}: the later entry wins.")
-        items[tid] = item
-    if len(items) > MAX_TICKETS:
+        raw_items[tid] = item
+    if len(raw_items) > MAX_TICKETS:
         concerns.append(
-            f"{len(items)} tickets exceed the cap of {MAX_TICKETS}; "
+            f"{len(raw_items)} tickets exceed the cap of {MAX_TICKETS}; "
             f"kept the first {MAX_TICKETS}."
         )
-        items = dict(list(items.items())[:MAX_TICKETS])
+        raw_items = dict(list(raw_items.items())[:MAX_TICKETS])
+    alias = _safe_ticket_ids(list(raw_items))
+    concerns += [
+        f"Ticket id {old!r} renamed to {new!r} (ids name files)."
+        for old, new in alias.items() if old != new
+    ]
+    items = {alias[tid]: item for tid, item in raw_items.items()}
 
     deps: dict[str, list[str]] = {}
     for tid, item in items.items():
-        wanted = _uniq(_strs(item.get("depends_on")))
+        wanted = _uniq(alias.get(d, d) for d in _strs(item.get("depends_on")))
         unknown = [d for d in wanted if d not in items]
         if unknown:
             concerns.append(f"Ticket {tid}: dropped unknown dependencies {', '.join(unknown)}.")
@@ -758,6 +785,38 @@ def _retired_constraints(
     ]
 
 
+def _retired_tickets(
+    state: FactoryState, rt: AgentRuntime, emitted: list[Ticket], seq: Seq
+) -> list[Ticket]:
+    """Tombstones for this node's prior live tickets a re-plan dropped, the same
+    pattern as :func:`_retired_constraints`: ``supersedes`` names the ticket's own id
+    and the newer Seq makes it the id's latest record, so ``read_tickets`` drops it."""
+    if rt.cas is None:
+        return []
+    newest: dict[str, Ticket] = {}
+    for a in state.get("artifacts") or ():
+        if a.kind != TICKET_KIND or a.seq.node_id != NODE_ID:
+            continue
+        try:
+            body = rt.cas.resolve(a)
+        except Exception:
+            continue
+        if isinstance(body, Ticket) and (body.id not in newest or body.seq > newest[body.id].seq):
+            newest[body.id] = body
+    kept = {t.id for t in emitted}
+    stale = sorted(
+        (t for t in newest.values() if t.supersedes != t.id and t.id not in kept),
+        key=lambda t: t.id,
+    )
+    return [
+        t.model_copy(update={
+            "supersedes": t.id, "version": t.version + 1,
+            "seq": seq._replace(local=len(emitted) + i),
+        })
+        for i, t in enumerate(stale)
+    ]
+
+
 def _route_cap(state: FactoryState) -> int:
     return _ROUTE_CAP_MICROUSD.get(str(state.get("route")), _DEFAULT_CAP_MICROUSD)
 
@@ -856,11 +915,17 @@ def make_planner_node(rt: AgentRuntime, index: SymbolIndex | None = None) -> Nod
         prd_section = _section(payload, "prd")
         prd_seq = seq("artifact:prd")
         interfaces = _build_interfaces(payload.get("interfaces"), seq("artifact:interfaces"))
+        tickets_seq = seq("artifact:tickets")
         tickets, criteria, ticket_concerns = _build_tickets(
             payload.get("tickets"),
-            seq("artifact:tickets"),
+            tickets_seq,
             seq("artifact:acceptance_criteria"),
             {i.name for i in interfaces},
+        )
+        # Only a Spec-gate re-plan replaces an earlier plan of this run.
+        dropped = (
+            _retired_tickets(state, rt, tickets, tickets_seq)
+            if latest_spec_failure(state) else []
         )
         prd = PRD(
             title=_str(prd_section.get("title")),
@@ -925,7 +990,10 @@ def make_planner_node(rt: AgentRuntime, index: SymbolIndex | None = None) -> Nod
                 emit_artifact(i, "interface_contract", NODE_ID, i.seq, store=store)
                 for i in interfaces
             ),
-            *(emit_artifact(t, TICKET_KIND, NODE_ID, t.seq, store=store) for t in tickets),
+            *(
+                emit_artifact(t, TICKET_KIND, NODE_ID, t.seq, store=store)
+                for t in (*tickets, *dropped)
+            ),
             emit_artifact(ownership, "ownership_map", NODE_ID, ownership_seq, store=store),
         ]
 
@@ -943,6 +1011,8 @@ def make_planner_node(rt: AgentRuntime, index: SymbolIndex | None = None) -> Nod
 
         high_risk = sum(1 for c in criteria if c.criticality is Criticality.HIGH_RISK)
         concerns: list[str] = list(ticket_concerns)
+        if dropped:
+            concerns.append("Re-plan retired ticket(s) " + ", ".join(t.id for t in dropped) + ".")
         if not criteria:
             concerns.append("No acceptance criteria derived from the intent.")
         if not ownership.owners:

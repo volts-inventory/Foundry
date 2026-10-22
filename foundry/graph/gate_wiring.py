@@ -1314,7 +1314,10 @@ def bump_fix_attempts(
 class WaveBuildCheck:
     """The per-wave integration check (plan §2b) the implementation subgraph runs
     between ticket waves: the attested Build gate on the integrated tree, through
-    the SAME runner as the supervisor's gates, sharing its fix-attempt budget.
+    the SAME runner as the supervisor's gates, sharing its fix-attempt budget. A
+    passing check is a green state for that boundary and resets the counter, so wave
+    repairs never eat the final build/test gate's budget; each wave still gets at
+    most ``max_fix_attempts`` fixes and the waves are finite, so the run stays bounded.
 
     ``run`` is the node (verdict + budget bump); ``route`` returns
     :data:`ADVANCE` / :data:`FIX` / :data:`HALT` for the :data:`BUILD_BOUNDARY`."""
@@ -1334,6 +1337,15 @@ class WaveBuildCheck:
             )
         bump_fix_attempts(state, config, out, boundary=BUILD_BOUNDARY,
                           records=self.runner.records, max_fix_attempts=self.max_fix_attempts)
+        ledger = state.get("budget") or BudgetLedger()
+        if "budget" not in out and ledger.fix_attempts_since_all_green:
+            # Not FIX: either green (reset, so the final gate keeps its whole budget)
+            # or the bound is spent (HALT reads the unchanged ledger; keep it).
+            post: FactoryState = {
+                "gates": merge_gates(state.get("gates"), out.get("gates")), "budget": ledger,
+            }
+            if self.route(post, config) == ADVANCE:
+                out["budget"] = ledger.model_copy(update={"fix_attempts_since_all_green": 0})
         return out
 
     def route(self, state: FactoryState, config: RunnableConfig) -> str:

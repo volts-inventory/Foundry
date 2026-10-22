@@ -390,19 +390,22 @@ class LocalWorkPool:
         if any(n < 1 for n in (limits or {}).values()):
             raise ValueError("every per-lineage limit must be >= 1")
         self.max_slots = max_slots
-        self._lineage_slots = {
-            lineage: threading.BoundedSemaphore(n) for lineage, n in (limits or {}).items()
-        }
+        self._limits = dict(limits or {})
         self._on_task = on_task
         self._sandbox_factory = sandbox_factory
         self._adapter_factory = adapter_factory
         self._quota = quota or QuotaPolicy()
         # Bounded PHYSICAL slots: a thread pool of exactly max_slots workers. Excess
-        # submissions queue inside the executor — the app never makes more slots.
+        # submissions wait in ``_pending`` — the app never makes more slots. A task
+        # reaches the executor only once its lineage has a free slot, so a task
+        # waiting on its lineage never holds a thread another lineage could use.
         self._executor = ThreadPoolExecutor(max_workers=max_slots)
         self._lock = threading.Lock()
         self._records: dict[str, TaskState] = {}
         self._futures: dict[str, Future[None]] = {}
+        self._pending: list[str] = []
+        self._running = 0
+        self._running_by_lineage: dict[str, int] = {}
 
     # -- admission (logical) -------------------------------------------------
 
@@ -427,8 +430,39 @@ class LocalWorkPool:
 
             self._quota.commit(task)
             self._records[tid] = TaskState(task, TaskStatus.QUEUED)
-            self._futures[tid] = self._executor.submit(self._run, tid)
+            self._futures[tid] = Future()
+            self._pending.append(tid)
+            self._dispatch()
         return tid
+
+    def _dispatch(self) -> None:
+        """Start every pending task (in submit order) whose lineage and the pool both
+        have a free slot. Call under the lock."""
+        for tid in list(self._pending):
+            if self._running >= self.max_slots:
+                return
+            lineage = self._records[tid].task.lineage
+            limit = self._limits.get(lineage)
+            if limit is not None and self._running_by_lineage.get(lineage, 0) >= limit:
+                continue
+            self._pending.remove(tid)
+            self._running += 1
+            self._running_by_lineage[lineage] = self._running_by_lineage.get(lineage, 0) + 1
+            self._executor.submit(self._worker, tid, lineage)
+
+    def _worker(self, task_id: str, lineage: str) -> None:
+        fut = self._futures[task_id]
+        try:
+            self._run(task_id)
+        except BaseException as exc:
+            fut.set_exception(exc)
+        else:
+            fut.set_result(None)
+        finally:
+            with self._lock:
+                self._running -= 1
+                self._running_by_lineage[lineage] -= 1
+                self._dispatch()
 
     # -- worker (physical slot) ----------------------------------------------
 
@@ -452,9 +486,7 @@ class LocalWorkPool:
         task = self._claim(task_id)
         if task is None:
             return  # already claimed/ran — idempotent, no double-run
-        gate = self._lineage_slots.get(task.lineage)
-        with gate if gate is not None else contextlib.nullcontext():
-            self._run_claimed(task_id, task)
+        self._run_claimed(task_id, task)
 
     def _run_claimed(self, task_id: str, task: ExecutionTask) -> None:
         with self._lock:
@@ -531,6 +563,10 @@ class LocalWorkPool:
 
     def shutdown(self) -> None:
         """Drain and tear down the worker threads (idempotent-friendly)."""
+        with self._lock:
+            futures = list(self._futures.values())
+        for fut in futures:
+            fut.exception()  # wait; a still-pending task is dispatched by a finishing one
         self._executor.shutdown(wait=True)
 
     def __enter__(self) -> LocalWorkPool:

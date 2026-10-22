@@ -1100,7 +1100,7 @@ class FloorScene extends Phaser.Scene {
     c.on("pointerdown", ()=> this.onChestClick());
   }
   // Actionable only when this floor's build has finished (a repo exists). Locked
-  // while running/iterating, so agents-at-work never opens a half-baked tree.
+  // while running, so agents-at-work never opens a half-baked tree.
   chestActionable(){
     const F = FLOORS.get(this.proj.floor);
     return !!(F && F.status === "done");
@@ -1108,7 +1108,7 @@ class FloorScene extends Phaser.Scene {
   onChestClick(){
     const F = FLOORS.get(this.proj.floor);
     if(!F || F.status !== "done") return;   // locked / no repo yet -> do nothing
-    openFilesFor({id:F.id, floor:F.floor, release:F.release, request:F.request, status:"done"});
+    openFilesFor(F);
   }
 
   buildAgents(){
@@ -1137,11 +1137,6 @@ class FloorScene extends Phaser.Scene {
         // round to the monitor. Nobody is ever staged in the lounge.
         a.setAlpha(1); a.seen = true; a.bubble = null;
         this.standDown(a);
-        // Clickable -> interview this lead (their journal + a question), advisory.
-        a.setInteractive(new Phaser.Geom.Rectangle(-8,-15,16,22), Phaser.Geom.Rectangle.Contains);
-        a.on("pointerdown", ()=> openInterview(name));
-        a.on("pointerover", ()=>{ this.input.manager.canvas.style.cursor = "pointer"; });
-        a.on("pointerout", ()=>{ this.input.manager.canvas.style.cursor = "default"; });
         a.setScale(0); this.tweens.add({targets:a, scale:1.4, duration:400, delay:60*li, ease:"Back.out"});
         this.agents.set(name, a);
       });
@@ -1973,8 +1968,7 @@ const GAME = new Phaser.Game({
 });
 
 // Rotating the phone swaps which floorplan fits, so re-lay the world and replay every
-// floor scene onto it. A scene restart is already how a new release redraws a floor,
-// so the floors rebuild from the state the client is holding.
+// floor scene onto it. The floors rebuild from the state the client is holding.
 window.matchMedia(PORTRAIT_MQ).addEventListener("change", ()=>{
   if (!applyFloorplan()) return;
   // setGameSize, not resize: resize() leaves displaySize's aspect ratio on the old
@@ -2010,49 +2004,30 @@ let ACTIVE = null;          // the floor currently shown
 
 function floorKey(f){ return "floor-"+f; }
 
-async function newProject(req, backend, extra){
+async function newProject(req, extra){
   const mode = "assistant";
   await bootReady;  // shared textures must exist before a FloorScene builds
   let resp;
   try {
     resp = await fetch("/api/projects", {
       method:"POST", headers:postHeaders(),
-      body: JSON.stringify({request:req, backend, ...(extra||{})}),
+      body: JSON.stringify({request:req, ...(extra||{})}),
     }).then(r=>r.json());
   } catch(err){ appendLogDom("bad","ERR "+err); return; }
+  if (!resp || !resp.id){ appendLogDom("bad","ERR "+((resp && resp.error)||"build did not start")); return; }
 
   const floor = resp.floor;
-  const release = resp.release || 1;
   const slots = 1;
-  const openStream = (F) => openFloorStream(F);
-  const existing = FLOORS.get(floor);
-  if (existing){
-    // NEW RELEASE on an existing project: reset per-release state + replay the scene.
-    if (existing.es){ try{ existing.es.close(); }catch(_){} }
-    Object.assign(existing, {
-      id:resp.id, release, releases:(existing.releases||1)+1, request:req, mode, backend,
-      log:[], progress:[], gates:{}, org:null, status:"running", passed:false,
-      slots, journal:[], seenUris:new Set(), _agrp:null, tasks:null,
-    });
-    setTaskLimits(existing, extra && extra.workers);
-    const sc = GAME.scene.getScene(floorKey(floor));
-    if (sc) sc.scene.restart({floor, id:resp.id, request:req, mode, slots});
-    else GAME.scene.add(floorKey(floor), FloorScene, true, {floor, id:resp.id, request:req, mode, slots});
-    switchToFloor(floor);
-    openStream(existing);
-    return;
-  }
-  // NEW PROJECT: a fresh floor.
   const F = {
-    id: resp.id, floor, release, releases:1, request:req, mode, backend, scene:null,
+    id: resp.id, floor, request:req, mode, backend:"", scene:null,
     log:[], progress:[], gates:{}, org:null, status:"running", passed:false,
-    slots, journal:[], seenUris:new Set(),
+    slots, seenUris:new Set(),
   };
   setTaskLimits(F, extra && extra.workers);
   FLOORS.set(floor, F);
   GAME.scene.add(floorKey(floor), FloorScene, true, {floor, id:resp.id, request:req, mode, slots});
   switchToFloor(floor);
-  openStream(F);
+  openFloorStream(F);
 }
 
 function switchToFloor(floor){
@@ -2220,8 +2195,6 @@ function routeEvent(floor, ev){
       closeStage(F);                            // the previous stage's ✓ row on Progress
       F.stageLabel = ev.label;
       logTo(F, "gold", "── "+ev.label+" ──"); break;
-    case "journal":                // one agent's journal entry, for the interview dialog
-      (F.journal = F.journal || []).push(ev.entry || {}); break;
     case "agent": if (S) S.agentWork(ev.agent); break;
     case "active": {
       // LIVE per-node telemetry: a real graph node STARTED (seat its agent for the whole
@@ -2608,7 +2581,7 @@ function renderGatesMini(gates){
 }
 function updateHud(F){
   document.getElementById("floor-tag").textContent =
-    "FLOOR "+F.floor + (F.release>1 ? " · r"+F.release : "");
+    "FLOOR "+F.floor;
   const proj = document.getElementById("proj-tag");
   const req = F.request || "—";
   proj.textContent = "";
@@ -2646,47 +2619,28 @@ function renderElevator(){
     if (F.status==="done") cls += F.passed ? " done" : " failed";
     btn.className=cls;
     btn.innerHTML=`<span class="fl-no">${f}</span>FL`;
-    if (F.releases>1){ const r=document.createElement("span"); r.className="rel-badge"; r.textContent="r"+F.release; btn.appendChild(r); }
     btn.onclick=()=>switchToFloor(f);
     el.appendChild(btn);
   }
 }
 
-// ---- repo browser (self-hosted GitHub over the store) ----------------------
-let FILES_ID = null;   // which release's repo the browser is currently showing
-let FILES_TREE = [];   // the open repo's flat file list ({path,size}); folded into folders below
-let FILES_CWD = "";    // the folder the Code tab is currently showing (""=repo root)
-function selectTab(name){
-  for(const t of document.querySelectorAll(".repo-tab"))
-    t.classList.toggle("sel", t.dataset.tab === name);
-  for(const p of document.querySelectorAll(".repo-pane"))
-    p.classList.toggle("hidden", p.dataset.pane !== name);
-}
+// ---- file viewer (browse a build's generated code from the store) ----------
+let FILES_ID = null;   // which build the viewer is currently showing
+let FILES_TREE = [];   // the open build's flat file list ({path,size}); folded into folders below
+let FILES_CWD = "";    // the folder currently shown (""=root)
 function openFiles(){
   const F = FLOORS.get(ACTIVE);
   if(!F){ openRepoHub(); return; }   // no active build — go to the Floor 0 repo hub
   openFilesFor(F);
 }
-// Open the repo browser for any build (`meta` = {id, floor, release, request,
-// status}) — used by the active floor AND by the Floor 0 repo hub.
+// Open the file viewer for any build (`meta` = {id, floor}) — used by the active
+// floor AND by the Floor 0 repo hub.
 function openFilesFor(meta){
-  const modal = document.getElementById("files-modal");
-  const list = document.getElementById("files-list");
-  const view = document.getElementById("files-view");
-  const rels = document.getElementById("files-releases");
-  list.innerHTML = ""; view.textContent = ""; rels.innerHTML = "";
+  document.getElementById("files-list").innerHTML = "";
+  document.getElementById("files-view").textContent = "";
   document.getElementById("files-floor").textContent = "Floor "+meta.floor;
-  for(const t of document.querySelectorAll(".repo-tab")) t.onclick = () => selectTab(t.dataset.tab);
-  selectTab("code");
-  // ITERATE: start a new floor from this finished build (enabled once it's done).
-  const itBtn = document.getElementById("files-iterate");
-  itBtn.style.display = (meta.status === "done") ? "" : "none";
-  itBtn.onclick = () => { hideFiles(); showNewModal(meta.id); };
-  const gz = document.getElementById("files-gitzip");
-  if (gz) gz.href = "/api/gitzip/" + meta.id;   // whole-floor lineage as ONE git repo
-  renderReleases(meta);              // release history for this floor (newest first)
-  loadRepo(meta.id);                 // start on the latest release's repo
-  modal.classList.remove("hidden");
+  loadRepo(meta.id);
+  document.getElementById("files-modal").classList.remove("hidden");
 }
 // ---- Floor 0: the repo hub (a self-hosted GitHub home) ---------------------
 let REPOS_OPEN = false;
@@ -2728,7 +2682,6 @@ function repoRow(b){
     `<div class="repo-row1">`+
       `<span class="repo-name">${escapeHtml(repoSlug(b.request))}</span>`+
       `<span class="repo-vis">store</span>`+
-      (b.release>1 ? `<span class="repo-rel" title="${b.release} releases — this project has been iterated">↻ r${b.release}</span>` : ``)+
       `<span class="repo-pill ${ok}">${pill}</span>`+
     `</div>`+
     `<div class="repo-desc">${escapeHtml(b.request||"")}</div>`+
@@ -2737,38 +2690,24 @@ function repoRow(b){
       (when ? `<span>updated ${when}</span>` : ``)+
     `</div>`;
   li.onclick = () => { closeRepoHub();
-    openFilesFor({id:b.id, floor:b.floor, release:b.release, request:b.request, status:"done"}); };
+    openFilesFor(b); };
   return li;
 }
 function closeRepoHub(){
   document.getElementById("repos-modal").classList.add("hidden");
   REPOS_OPEN = false; renderElevator();
 }
-// Load the whole repo (tree + checks + pull-request diffs) for one release id.
+// Load one build's file list.
 function loadRepo(id){
   FILES_ID = id;
   const list = document.getElementById("files-list");
   const view = document.getElementById("files-view");
   document.getElementById("files-zip").href = "/api/zip/"+id;
-  { const gz = document.getElementById("files-gitzip");
-    if (gz) gz.href = "/api/gitzip/"+id; }   // lineage repo up to THIS release
   list.innerHTML = ""; view.textContent = "Loading…";
-  document.getElementById("repo-sha").textContent = "";
-  document.getElementById("repo-src").textContent = "";
-  fetch("/api/repo/"+id)
-    .then(r => r.ok ? r.json() : {files:[],checks:[],diffs:[]})
-    .then(repo => { renderRepo(id, repo); })
-    .catch(() => { list.innerHTML = "<li class='muted'>(could not load repo)</li>"; view.textContent = ""; });
-}
-function renderRepo(id, repo){
-  const sha = document.getElementById("repo-sha");
-  if(repo.tree_sha){ sha.textContent = "sha "+repo.tree_sha.slice(0,10); }
-  const src = document.getElementById("repo-src");
-  src.textContent = repo.source === "store" ? "● from store" : "○ from disk";
-  src.className = "repo-src " + (repo.source === "store" ? "ok" : "");
-  renderTree(id, repo.files || []);
-  renderChecks(repo.checks || []);
-  renderPulls(repo.diffs || []);
+  fetch("/api/files/"+id)
+    .then(r => r.ok ? r.json() : {files:[]})
+    .then(d => { renderTree(id, d.files || []); })
+    .catch(() => { list.innerHTML = "<li class='muted'>(could not load files)</li>"; view.textContent = ""; });
 }
 function renderTree(id, files){
   FILES_TREE = files || [];
@@ -2853,76 +2792,7 @@ function renderDir(dir){
     list.appendChild(li);
   }
 }
-function renderChecks(checks){
-  const ul = document.getElementById("checks-list");
-  const cnt = document.getElementById("checks-count");
-  ul.innerHTML = "";
-  const passed = checks.filter(c => c.ok).length;
-  cnt.textContent = checks.length ? `${passed}/${checks.length}` : "";
-  if(!checks.length){ ul.innerHTML = "<li class='muted'>No gate verdicts yet.</li>"; return; }
-  for(const c of checks){
-    const li = document.createElement("li");
-    li.className = "check " + (c.ok ? "ok" : "bad");
-    const icon = c.ok ? "✓" : (c.status === "error" ? "!" : "✕");
-    const adv = c.advisory ? " <span class='adv'>advisory</span>" : "";
-    let html = `<span class="ck-icon">${icon}</span><span class="ck-name">${c.name}</span>`+
-               `<span class="ck-status">${c.status}</span>${adv}`;
-    if(c.findings && c.findings.length){
-      html += `<div class="ck-findings">`+ c.findings.map(escapeHtml).join("<br>") +`</div>`;
-    }
-    li.innerHTML = html;
-    ul.appendChild(li);
-  }
-}
-function renderPulls(diffs){
-  const box = document.getElementById("pulls-list");
-  const cnt = document.getElementById("pulls-count");
-  box.innerHTML = "";
-  cnt.textContent = diffs.length ? String(diffs.length) : "";
-  if(!diffs.length){ box.innerHTML = "<div class='muted'>No pull requests (no FeatureDiff in this build).</div>"; return; }
-  diffs.forEach((d, i) => {
-    const card = document.createElement("div"); card.className = "pull";
-    const head = document.createElement("div"); head.className = "pull-head";
-    head.innerHTML = `<span class="pull-no">#${i+1}</span> <span class="pull-sum">${escapeHtml(d.summary||"feature diff")}</span> <span class="pull-merged">merged</span>`;
-    const pre = document.createElement("pre"); pre.className = "pull-diff";
-    pre.innerHTML = colorizeDiff(d.text || "");
-    head.onclick = () => pre.classList.toggle("open");
-    card.appendChild(head); card.appendChild(pre);
-    box.appendChild(card);
-  });
-}
 function escapeHtml(s){ return String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
-function colorizeDiff(text){
-  return text.split("\n").map(line => {
-    const e = escapeHtml(line);
-    if(line.startsWith("+") && !line.startsWith("+++")) return `<span class="d-add">${e}</span>`;
-    if(line.startsWith("-") && !line.startsWith("---")) return `<span class="d-del">${e}</span>`;
-    if(line.startsWith("@@")) return `<span class="d-hunk">${e}</span>`;
-    if(line.startsWith("diff ") || line.startsWith("+++") || line.startsWith("---")) return `<span class="d-file">${e}</span>`;
-    return e;
-  }).join("\n");
-}
-// Release history of the open floor — one row per release; click to browse it.
-function renderReleases(F){
-  const rels = document.getElementById("files-releases");
-  fetch("/api/releases/"+F.floor)
-    .then(r => r.ok ? r.json() : {releases:[]})
-    .then(({releases}) => {
-      rels.innerHTML = "";
-      if(!releases || releases.length <= 1) return;   // nothing to switch between
-      for(const rel of releases){
-        const b = document.createElement("button");
-        b.type = "button"; b.className = "rel-chip";
-        const ok = rel.passed ? "✓" : (rel.status === "done" ? "✗" : "…");
-        b.textContent = `r${rel.release} ${ok}`;
-        b.title = (rel.request || "") + (rel.created_at ? `  ·  ${rel.created_at}` : "");
-        b.onclick = () => { for(const c of rels.children) c.classList.remove("sel");
-                            b.classList.add("sel"); loadRepo(rel.id); };
-        rels.appendChild(b);
-      }
-    })
-    .catch(() => { rels.innerHTML = ""; });
-}
 function viewFile(id, path, li){
   for(const c of document.getElementById("files-list").children) c.classList.remove("sel");
   if(li) li.classList.add("sel");
@@ -2934,331 +2804,41 @@ function viewFile(id, path, li){
     .catch(() => { view.textContent = "(could not load file)"; });
 }
 function hideFiles(){ document.getElementById("files-modal").classList.add("hidden"); }
-// ---- interview a lead (click an agent) -------------------------------------
-let IV_TARGET = null;
-function openInterview(name){
-  const F = FLOORS.get(ACTIVE); if(!F) return;
-  const journal = F.journal || [];
-  const mine = journal.filter(e=>e.role===name || e.agent===name);
-  const entries = mine.length ? mine : journal;
-  document.getElementById("iv-role").textContent = name;
-  const jc = document.getElementById("iv-journal"); jc.innerHTML = "";
-  if(!entries.length){
-    jc.innerHTML = "<div class='cp-note'>No journal yet — it fills in as the agents finish their steps.</div>";
-  }
-  for(const e of entries.slice(0,6)){
-    const d = document.createElement("div"); d.className = "iv-entry";
-    const conf = (e.confidence!=null) ? ` · conf ${Math.round(e.confidence*100)}%` : "";
-    d.innerHTML = `<div class="role"></div><div class="sum"></div><div class="meta"></div>`;
-    d.querySelector(".role").textContent = (e.role||"agent")+conf;
-    d.querySelector(".sum").textContent = e.summary||"";
-    const meta = d.querySelector(".meta");
-    const assumptions = e.assumptions||[], concerns = e.concerns||[];
-    if(assumptions.length){ const a=document.createElement("div"); a.textContent="assumes: "+assumptions.join("; "); meta.appendChild(a); }
-    if(concerns.length){ const c=document.createElement("div"); c.className="concern"; c.textContent="concern: "+concerns.join("; "); meta.appendChild(c); }
-    jc.appendChild(d);
-  }
-  const ans=document.getElementById("iv-answer"); ans.classList.add("hidden"); ans.textContent="";
-  document.getElementById("iv-question").value = "";
-  IV_TARGET = {id:F.id, role:name};
-  document.getElementById("iv-modal").classList.remove("hidden");
-}
-function askInterview(){
-  if(!IV_TARGET) return;
-  const q = document.getElementById("iv-question").value.trim();
-  const ans = document.getElementById("iv-answer");
-  ans.classList.remove("hidden"); ans.textContent = "…asking "+IV_TARGET.role+"…";
-  fetch("/api/interview/"+IV_TARGET.id,{method:"POST",headers:postHeaders(),
-    body:JSON.stringify({role:IV_TARGET.role, question:q})})
-   .then(r=>r.json()).then(d=>{ ans.textContent = d.answer || "(no answer)"; })
-   .catch(()=>{ ans.textContent = "(interview request failed)"; });
-}
-
 // ---- UI wiring -------------------------------------------------------------
 const newModal=document.getElementById("new-modal");
+function showNewModal(){
+  newModal.classList.remove("hidden");
+  syncSettingsSummary();
+}
 document.getElementById("new-btn").onclick=()=>showNewModal();
 document.getElementById("cancel-btn").onclick=()=>newModal.classList.add("hidden");
 document.getElementById("new-close").onclick=()=>newModal.classList.add("hidden");
-// ---- folded sections report what they're set to ------------------------------
-// ③ How it runs and ④ Scale & limits stay shut on their defaults, so their summary
-// line has to name those defaults — a fold that hides the setting AND its value is
-// just a setting you can't find.
-function _selLabel(id){
-  const s=document.getElementById(id);
-  if(!s || !s.selectedOptions || !s.selectedOptions.length) return "";
-  return (s.selectedOptions[0].textContent||"").split("—")[0].trim();
-}
-// Per-specialty worker limits (Scale & limits fold): ints 0..16, default 2.
+// Per-specialty worker limits: ints 1..16, default 2.
 function readWorkers(){
   const w = {};
   for (const sp of SPECIALTIES){
     const n = parseInt((document.getElementById("workers-"+sp)||{}).value, 10);
-    w[sp] = Number.isFinite(n) && n >= 0 ? Math.min(MAX_LIMIT, n) : DEFAULT_LIMIT;
+    w[sp] = Number.isFinite(n) && n >= 1 ? Math.min(MAX_LIMIT, n) : DEFAULT_LIMIT;
   }
   return w;
 }
-function syncFoldSummaries(){
-  const val=(id)=>String((document.getElementById(id)||{}).value||"").trim();
-  const run=document.getElementById("run-sum");
-  if(run) run.textContent=[_selLabel("backend-select"),
-    _selLabel("adapter-select"),
-    "stack: "+(_selLabel("profile-select")||"auto")].filter(Boolean).join(" · ");
-  const scale=document.getElementById("scale-sum");
-  if(scale){
-    const w=readWorkers();
-    const parts=[`workers FE${w.frontend} BE${w.backend} DA${w.data} TE${w.test}`,
-                 (val("fix-input")||"0")+" auto-fix"];
-    if(val("cap-input")) parts.push("$"+val("cap-input")+" cap");
-    if(val("token-cap-input")) parts.push(val("token-cap-input")+" token cap");
-    scale.textContent=parts.join(" · ");
-  }
+// The settings fold stays shut; its summary line names what it is set to.
+function syncSettingsSummary(){
+  const w=readWorkers();
+  const tok=String((document.getElementById("token-cap-input")||{}).value||"").trim();
+  document.getElementById("scale-sum").textContent =
+    `workers FE${w.frontend} BE${w.backend} DA${w.data} TE${w.test} · `+(tok ? tok+" token cap" : "no token cap");
 }
-newModal.addEventListener("change", syncFoldSummaries);
-newModal.addEventListener("input", syncFoldSummaries);
-
-// ---- Presets: one-click example builds that fill every spec-side setting -------
-// The PIR entry reuses the modal's HTML defaults (one source of truth); the rest are
-// defined inline. A preset sets the SPEC side (request/spec/stack/
-// workers/fix) but NOT backend/adapter — those are host-dependent and
-// the server already reconciles them from /api/config.
-const _pirReq = (document.getElementById("req-input")||{}).value || "";
-const _pirSpec = (document.getElementById("spec-text")||{}).value || "";
-const MOON_SPEC =
-`A complete stardew-valley-style 2D farming/life sim, set on the moon.
-Must include: tile-based moon surface with a scrolling camera; day/night + sol
-cycle; player movement and tool use; tilling, planting, watering, and harvesting
-at least 6 crop types with growth stages; oxygen/energy management; a colony hub
-with at least 4 NPCs with daily schedules and dialog; an economy (sell crops,
-buy seeds/upgrades at a store); base-building (place/upgrade modules); save/load
-with 3 slots; a title screen, pause menu, and controls screen; sound hooks
-(procedural or silent-safe); keyboard controls documented in-game. Code-drawn
-graphics (shapes/procedural tiles) are fine — no external assets.`;
-const PRESETS = [
-  { id:"custom", label:"— Custom (blank) —",
-    note:"A blank slate — describe your own build.",
-    request:"", intake:"idea", spec:"", profile:"auto", workers:2, fix:2 },
-  { id:"pir", label:"PIR system · cryptography (complex)",
-    note:"Information-theoretic 2-server + homomorphic single-server PIR, verified in-process.",
-    request:_pirReq, intake:"spec", spec:_pirSpec, profile:"auto",
-    workers:2, fix:2 },
-  { id:"moon", label:"Moon Colony farming game · pygame (very complex)",
-    note:"A complete Stardew-style sim from a big spec.",
-    request:"a complete stardew-style farming game about colonizing the moon",
-    intake:"spec", spec:MOON_SPEC, profile:"pygame", workers:2, fix:8 },
-  { id:"urlshort", label:"URL shortener · web service (simple)",
-    note:"A small single service — quick end-to-end build.",
-    request:"a URL shortener service with custom slugs, link expiry, click analytics, and per-IP abuse rate-limiting",
-    intake:"idea", spec:"", profile:"auto", workers:2, fix:2 },
-  { id:"chip8", label:"CHIP-8 emulator · systems (simple)",
-    note:"Cheap pipeline validation — objectively scoreable against public test ROMs.",
-    request:"a CHIP-8 emulator in Python with pytest tests against public test ROMs",
-    intake:"idea", spec:"", profile:"auto", workers:2, fix:6 },
-  { id:"taskmgr", label:"Team task manager · web+API+DB (complex)",
-    note:"Web UI + REST API + database in one repo.",
-    request:"a team task manager: users sign up and log in, create projects, add tasks with assignees, due dates and labels, comment on tasks, and switch between a board and a list view — a REST API, a web UI, and a database",
-    intake:"idea", spec:"", profile:"auto", workers:3, fix:6 },
-  { id:"ssg", label:"Static-site generator · CLI tool (simple)",
-    note:"A command-line tool + library — a different shape of software.",
-    request:"a command-line static-site generator: turn a folder of Markdown with front-matter into a linked HTML site with a table of contents, page templates, and a live-reload dev server",
-    intake:"idea", spec:"", profile:"auto", workers:2, fix:2 },
-  { id:"chat", label:"Real-time chat · WebSocket app (complex)",
-    note:"Rooms, presence and typing over WebSockets — web client + realtime backend + DB.",
-    request:"a real-time group chat app: named rooms, user presence, typing indicators, persistent message history and search, and auth — a WebSocket backend, a web client, and a database",
-    intake:"idea", spec:"", profile:"auto", workers:3, fix:6 },
-];
-function _setSelIfPresent(id, val){
-  const s=document.getElementById(id); if(!s) return;
-  if([...s.options].some(o=>o.value===val)){ s.value=val; s.dispatchEvent(new Event("change")); }
-}
-function applyPreset(id){
-  const p=PRESETS.find(x=>x.id===id); if(!p) return;
-  const note=document.getElementById("preset-note"); if(note) note.textContent=p.note||"";
-  const set=(elId,val)=>{ const e=document.getElementById(elId); if(e) e.value=val; };
-  set("req-input", p.request||"");
-  set("spec-text", p.spec||"");
-  for (const sp of SPECIALTIES) set("workers-"+sp, p.workers!=null?p.workers:DEFAULT_LIMIT);
-  set("fix-input", p.fix!=null?p.fix:2);
-  _setSelIfPresent("profile-select", p.profile||"auto");
-  // intake radio: reveal the matching panel (idea hides the spec box, spec shows it).
-  const rb=document.querySelector(`input[name="intake"][value="${p.intake||"idea"}"]`);
-  if(rb){ rb.checked=true; rb.dispatchEvent(new Event("change")); }
-  if(typeof updateSlotHint==="function") updateSlotHint();
-}
-{ const ps=document.getElementById("preset-select");
-  if(ps){
-    for(const p of PRESETS){ const o=document.createElement("option"); o.value=p.id; o.textContent=p.label; ps.appendChild(o); }
-    ps.value="pir";   // the modal's HTML defaults already show the PIR demo
-    const pn=document.getElementById("preset-note");
-    if(pn){ const cur=PRESETS.find(x=>x.id==="pir"); if(cur) pn.textContent=cur.note; }
-    ps.addEventListener("change", ()=>applyPreset(ps.value));
-  } }
-
-// ---- "Start from": fresh build, or iterate on a finished build -------------
-const startFromSel=document.getElementById("startfrom-select");
-const REQ_FRESH='What should the factory build? <span class="hint">— a sentence, or a full brief</span>';
-const REQ_ITER='What to change or add? <span class="hint">— the agents build on the selected floor</span>';
-const SEED_REQ='build a tiny URL-shortener service';
-async function loadStartFrom(){
-  let builds=[];
-  try{ const r=await fetch("/api/builds"); builds=((await r.json())||{}).builds||[]; }catch(_){}
-  startFromSel.innerHTML='<option value="">✦ Fresh build</option>';
-  for(const b of builds){
-    if(b.has_repo===false) continue;
-    const o=document.createElement("option");
-    o.value=b.id;
-    o.textContent=`⎘ Floor ${b.floor} ${b.passed?"✓":"✗"} · ${(b.request||"").slice(0,40)}`;
-    startFromSel.appendChild(o);
-  }
-}
-function syncStartFrom(){
-  const iterating=!!startFromSel.value;
-  document.getElementById("req-label").innerHTML=iterating?REQ_ITER:REQ_FRESH;
-  const req=document.getElementById("req-input");
-  if(iterating && (req.value.trim()===""||req.value.trim()===SEED_REQ)){
-    req.value=""; req.placeholder="e.g. add link expiry + custom slugs, and rate-limit by IP";
-  }
-  // Iterate → pre-fill the converse draft with the PARENT's saved spec, so a new
-  // conversation with the leads EXTENDS it (and the release saves it cumulatively).
-  // Guarded by !chatDraft so it never clobbers an in-progress draft.
-  if(iterating){
-    fetch("/api/spec/"+startFromSel.value).then(r=>r.ok?r.json():{spec:"",built:""})
-      .then(d=>{
-        if(typeof d.spec==="string" && d.spec.trim() && !chatDraft.trim()){
-          chatDraft=d.spec;
-          const el=document.getElementById("chat-spec"); if(el) el.textContent=chatDraft;
-        }
-        iterBuilt = (typeof d.built==="string") ? d.built : "";   // seeds the leads on iterate
-      }).catch(()=>{});
-  } else {
-    iterBuilt = "";
-  }
-}
-startFromSel.addEventListener("change", syncStartFrom);
-function showNewModal(parentId){
-  newModal.classList.remove("hidden");
-  loadStartFrom().then(()=>{
-    startFromSel.value=(parentId && [...startFromSel.options].some(o=>o.value===parentId))?parentId:"";
-    syncStartFrom();
-  });
-  updateSlotHint();
-  syncFoldSummaries();   // reconciled selects (/api/config) don't fire change events
-}
-// Advisory IC-pool sizing: ask the server (/api/suggest-slots) how many parallel
-// workers the request is likely to need, and fold it into the note. The
-// real split is decided during the build — this just previews the scale.
-const PARALLEL_BASE = "Tickets run in dependency order; each specialty works at most this many at once, the rest queue.";
-let slotHintTimer = null;
-function updateSlotHint(){
-  if(slotHintTimer) clearTimeout(slotHintTimer);
-  slotHintTimer = setTimeout(()=>{
-    const note = document.getElementById("parallel-note");
-    const request = (document.getElementById("req-input").value || "").trim();
-    if(!note || !request){ if(note) note.textContent = PARALLEL_BASE; return; }
-    fetch("/api/suggest-slots",{method:"POST",headers:postHeaders(),
-      body:JSON.stringify({request})})
-     .then(r=>r.ok?r.json():null)
-     .then(d=>{
-       if(!d || !d.slots){ note.textContent = PARALLEL_BASE; return; }
-       const areas = (d.areas||[]).length ? ` across ${d.areas.join(", ")}` : "";
-       note.textContent = `${PARALLEL_BASE} For this request, expect ≈ ${d.slots} parallel worker${d.slots===1?"":"s"}${areas}.`;
-     })
-     .catch(()=>{ note.textContent = PARALLEL_BASE; });
-  }, 350);
-}
-// intake mode radios -> reveal the matching panel
-function intakeMode(){ return (document.querySelector('input[name="intake"]:checked')||{}).value||"idea"; }
-for(const r of document.querySelectorAll('input[name="intake"]')){
-  r.addEventListener("change", ()=>{
-    const v = intakeMode();
-    for(const p of document.querySelectorAll(".intake-panel"))
-      p.classList.toggle("hidden", p.dataset.mode !== v);
-  });
-}
-// ---- spec chat with the leads (intake mode "chat") -------------------------
-let chatSession = null, chatDraft = "", iterBuilt = "";
-function appendChatTurn(role, text){
-  const log = document.getElementById("chat-log");
-  const cls = role === "user" ? "user" : (role === "system" ? "system" : "lead");
-  const div = document.createElement("div");
-  div.className = "chat-turn "+cls;
-  div.innerHTML = `<span class="who"></span> <span class="txt"></span>`;
-  div.querySelector(".who").textContent = role === "user" ? "you" : role;
-  div.querySelector(".txt").textContent = text;
-  log.appendChild(div); log.scrollTop = log.scrollHeight;
-}
-function sendChat(){
-  const input = document.getElementById("chat-msg");
-  const msg = input.value.trim();
-  if(!msg) return;
-  input.value = "";
-  appendChatTurn("user", msg);
-  appendChatTurn("system", "…leads are thinking…");
-  const backend = document.getElementById("backend-select").value;
-  // On the FIRST turn of an iterate, seed the session with the inherited spec
-  // (what it SHOULD be) and what the last build actually produced (what's DONE),
-  // so the leads EXTEND the spec and focus the new work on the gaps.
-  const seedSpec  = (!chatSession && chatDraft.trim()) ? chatDraft : undefined;
-  const seedBuilt = (!chatSession && iterBuilt.trim()) ? iterBuilt : undefined;
-  fetch("/api/ideate", {method:"POST", headers:postHeaders(),
-    body: JSON.stringify({session:chatSession, message:msg, backend,
-                          base_spec:seedSpec, base_built:seedBuilt})})
-   .then(r=>r.json())
-   .then(d=>{
-     // drop the "thinking…" placeholder
-     const log=document.getElementById("chat-log"); if(log.lastChild) log.removeChild(log.lastChild);
-     chatSession = d.session;
-     for(const m of (d.messages||[])) appendChatTurn(m.role||"lead", m.text||"");
-     if(typeof d.spec === "string"){ chatDraft = d.spec; document.getElementById("chat-spec").textContent = chatDraft || "(nothing yet)"; }
-   })
-   .catch(()=>{ const log=document.getElementById("chat-log"); if(log.lastChild) log.removeChild(log.lastChild); appendChatTurn("system","(chat request failed)"); });
-}
-
-function fileToB64(file){
-  return new Promise((res,rej)=>{
-    const r=new FileReader();
-    r.onload=()=>res(String(r.result).split(",",2)[1]||"");  // drop the data: prefix
-    r.onerror=()=>rej(r.error);
-    r.readAsDataURL(file);
-  });
-}
-document.getElementById("start-btn").onclick=async ()=>{
-  const req=document.getElementById("req-input").value;
-  const backend=document.getElementById("backend-select").value;
-  const extra={};
-  extra.adapter=document.getElementById("adapter-select").value;
-  extra.workers=readWorkers();   // per-specialty ticket workers in flight at once
-  const fix=parseInt(document.getElementById("fix-input").value,10);
-  if(Number.isFinite(fix) && fix>=0) extra.max_fix_attempts=fix;
-  const cap=parseFloat(document.getElementById("cap-input").value);
-  if(Number.isFinite(cap) && cap>0) extra.cost_cap_usd=cap;
+newModal.addEventListener("input", syncSettingsSummary);
+document.getElementById("start-btn").onclick=()=>{
+  const req=document.getElementById("req-input").value.trim();
+  if(!req){ alert("Describe what to build."); return; }
+  const extra={workers:readWorkers()};
   const tokCap=parseInt(document.getElementById("token-cap-input").value,10);
   if(Number.isFinite(tokCap) && tokCap>0) extra.token_cap=tokCap;
-  if(startFromSel.value) extra.parent_id=startFromSel.value;   // iterate on a finished build
-  { const ps=document.getElementById("profile-select");
-    if (ps && ps.value && ps.value!=="auto") extra.profile=ps.value; }
-  const intake=intakeMode();
-  if(startFromSel.value && !req.trim()){ alert("Describe what to change or add."); return; }
-  if(intake==="spec"){
-    extra.spec_text=document.getElementById("spec-text").value;
-  } else if(intake==="zip"){
-    const f=document.getElementById("zip-file").files[0];
-    if(!f){ alert("Choose a .zip of docs first."); return; }
-    try { extra.spec_zip_b64=await fileToB64(f); }
-    catch(_){ alert("Could not read that file."); return; }
-  } else if(intake==="chat"){
-    if(!chatDraft.trim()){ alert("Chat with the leads first to draft a spec (or pick another mode)."); return; }
-    extra.spec_text=chatDraft;
-  }
   newModal.classList.add("hidden");
-  newProject(req, backend, extra);
-  // reset the chat for the next project
-  chatSession=null; chatDraft=""; iterBuilt="";
-  document.getElementById("chat-log").innerHTML="";
-  document.getElementById("chat-spec").textContent="(nothing yet)";
+  newProject(req, extra);
 };
-document.getElementById("req-input").addEventListener("input", updateSlotHint);
-document.getElementById("chat-send").onclick=sendChat;
-document.getElementById("chat-msg").addEventListener("keydown",(e)=>{ if(e.key==="Enter"){ e.preventDefault(); sendChat(); }});
 document.getElementById("output-btn").onclick=openFiles;
 for (const t of document.querySelectorAll(".log-tab")) t.onclick = () => selectLogTab(t.dataset.tab);
 document.getElementById("files-close").onclick=hideFiles;
@@ -3276,96 +2856,6 @@ document.getElementById("repos-clear").onclick=async ()=>{
     location.reload();   // floors/repos are gone server-side — rebuild the empty UI
   }catch(_){ alert("Clear failed — could not reach the server."); }
 };
-// interview modal
-document.getElementById("iv-ask").onclick=askInterview;
-document.getElementById("iv-close").onclick=()=>document.getElementById("iv-modal").classList.add("hidden");
-document.getElementById("iv-question").addEventListener("keydown",(e)=>{ if(e.key==="Enter"){ e.preventDefault(); askInterview(); }});
-
-// Pull runtime config from the server: preselect the configured default backend +
-// adapter (FOUNDRY_MODEL_BACKEND/_CODING_ADAPTER; mock/stub if unset), drop any
-// option the server doesn't actually support (keeps the picker 1-1 with BACKENDS /
-// ADAPTERS), and surface the per-tier model ids each backend would serve.
-let MODELS_BY_BACKEND = {};
-function reconcileSelect(sel, supported, fallback){
-  if(!sel || !Array.isArray(supported) || !supported.length) return;
-  // drop options the server no longer supports…
-  for(const o of [...sel.options]) if(!supported.includes(o.value)) o.remove();
-  // …and add any the server supports but the static markup didn't list (the rich
-  // descriptions stay on the known ones; new ones get a plain label).
-  const have = new Set([...sel.options].map(o=>o.value));
-  for(const v of supported) if(!have.has(v)){
-    const o=document.createElement("option"); o.value=v; o.textContent=v; sel.appendChild(o);
-  }
-  if(![...sel.options].some(o=>o.value===sel.value))
-    sel.value = (fallback && supported.includes(fallback)) ? fallback : supported[0];
-}
-function updateModelNote(){
-  const note=document.getElementById("model-note");
-  if(!note) return;
-  const backend=document.getElementById("backend-select").value;
-  const m=MODELS_BY_BACKEND[backend];
-  if(!m || !Object.keys(m).length){ note.textContent = backend==="mock"
-    ? "mock runs no real model — deterministic, offline." : ""; return; }
-  note.textContent = "Models · " + Object.entries(m).map(([t,id])=>`${t}: ${id}`).join("  ·  ");
-}
-fetch("/api/config").then(r=>r.json()).then(c=>{
-  if(!c) return;
-  const sel=document.getElementById("backend-select");
-  reconcileSelect(sel, c.backends, c.default_backend);
-  if(c.default_backend && [...sel.options].some(o=>o.value===c.default_backend))
-    sel.value=c.default_backend;
-  const asel=document.getElementById("adapter-select");
-  reconcileSelect(asel, c.adapters, c.default_adapter);
-  // Stack picker: "auto" + every verification profile the server ships.
-  { const ps=document.getElementById("profile-select");
-    if (ps && Array.isArray(c.profiles)){
-      for (const name of c.profiles){
-        const o=document.createElement("option"); o.value=name; o.textContent=name;
-        ps.appendChild(o);
-      } } }
-  // The coding substrate is DERIVED from the backend (parity with the CLI:
-  // mock→stub, any real backend→raw-react), so a real backend writes real code
-  // without a second pick. syncAdapter() applies it unless the user overrode it.
-  syncAdapter();
-  MODELS_BY_BACKEND = c.models_by_backend || {};
-  updateModelNote();
-  syncCostCap();
-  syncFoldSummaries();   // these selects were set programmatically — no change event
-}).catch(()=>{});
-
-// The USD cost cap only binds *metered* API backends (real per-token charges).
-// mock is offline, ollama is local, and claude-cli bills a flat subscription —
-// so for those a per-build USD cap is meaningless: disable + annotate the field.
-const METERED_BACKENDS = ["anthropic","openai","codex"];
-function syncCostCap(){
-  const backend = document.getElementById("backend-select").value;
-  const cap = document.getElementById("cap-input");
-  if(!cap) return;
-  const metered = METERED_BACKENDS.includes(backend);
-  cap.disabled = !metered;
-  cap.placeholder = metered ? "no cap" : `${backend} isn't metered — no USD cost`;
-  if(!metered) cap.value = "";
-}
-// Coding substrate derived from the backend (CLI parity): mock→stub no-op,
-// claude-cli→claude-code (AGENTIC: claude edits/builds/tests inside the task
-// sandbox), other real backends→raw-react (one completion → one diff). A user who
-// manually picks an adapter pins it (adapterTouched), so derivation never
-// clobbers an explicit choice.
-function defaultAdapterFor(backend){
-  if(backend==="mock") return "stub";
-  return backend==="claude-cli" ? "claude-code" : "raw-react";
-}
-let adapterTouched = false;
-function syncAdapter(){
-  const asel = document.getElementById("adapter-select");
-  if(!asel || adapterTouched) return;
-  const want = defaultAdapterFor(document.getElementById("backend-select").value);
-  if([...asel.options].some(o=>o.value===want)) asel.value = want;
-}
-{ const asel = document.getElementById("adapter-select");
-  if(asel) asel.addEventListener("change", ()=>{ adapterTouched = true; }); }
-document.getElementById("backend-select").addEventListener("change", ()=>{ syncCostCap(); syncAdapter(); updateModelNote(); });
-syncCostCap();
 
 // Rehydrate on (re)load: floors run server-side independently of this tab, so a
 // refresh / reconnect from another device rebuilds every floor + reconnects the
@@ -3373,19 +2863,17 @@ syncCostCap();
 function adoptFloor(row){
   if (FLOORS.has(row.floor)) return;
   const F = {
-    id:row.id, floor:row.floor, release:row.release||1, releases:row.releases||1,
+    id:row.id, floor:row.floor,
     request:row.request, mode:row.mode, backend:row.backend,
     scene:null, log:[], progress:[], gates:row.gates||{}, org:null,
-    status:row.status, passed:!!row.passed, slots:row.slots||1, journal:[], seenUris:new Set(),
+    status:row.status, passed:!!row.passed, slots:row.slots||1, seenUris:new Set(),
   };
   FLOORS.set(row.floor, F);
   GAME.scene.add(floorKey(row.floor), FloorScene, true,
     {floor:row.floor, id:row.id, request:row.request, mode:row.mode, slots:F.slots});
-  if (row.status !== "done"){          // running build: reconnect its live stream
-    openFloorStream(F);
-  }
+  openFloorStream(F);   // a running build reconnects live; a finished one replays its log and ends
 }
-// ONE live stream per floor, shared by every path (new build / rehydrate / iterate).
+// ONE live stream per floor, shared by every path (new build / rehydrate).
 function openFloorStream(F){
   const es = new EventSource("/api/stream/"+F.id);
   F.lastBeat = Date.now();

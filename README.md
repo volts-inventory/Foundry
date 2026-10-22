@@ -146,12 +146,13 @@ degrade it to fail-closed JSON parsing. Pin exact model ids per tier with
 
 ## Workshop UI
 
-A localhost web app that runs the real factory and visualizes it. Floors are
-projects; **iterate** on a finished build to add the next release on the same
-floor (built on top of the prior code). The Tickets tab shows the planner's
-ticket DAG and each worker as it runs; REPO browses any release and exports it
-as a **.zip** or the whole floor lineage as **one git repository** (a tagged
-commit per release).
+A localhost web app that runs the real factory and visualizes it: type a
+request, watch the animated floor build it (Planner, per-ticket workers, Reviewer,
+Gate, Vault) with the live log and Tickets tab, then download the repo as a
+**.zip**. Each build is a floor; the elevator reopens earlier builds and their
+logs, and REPO browses a build's files. The backend comes from
+`FOUNDRY_MODEL_BACKEND` (as in the CLI); the New-build dialog's collapsed
+Settings hold the per-specialty worker limits and a token cap.
 
 ```bash
 python -m webapp.server                                  # http://localhost:8765
@@ -172,7 +173,7 @@ to the sys.path-fenced in-process harness with `FOUNDRY_GATE_SANDBOX=inprocess`
 With a durable state dir the server resumes an in-flight build after a restart,
 and the event log replays in full on reconnect. Keep it running with tmux or
 nohup (`nohup python -m webapp.server > ~/foundry.log 2>&1 &`; kill the PID to
-stop). For long runs set a cost or token cap, size `WORKSHOP_MAX_CONCURRENT_BUILDS`
+stop). For long runs set a token cap, size `WORKSHOP_MAX_CONCURRENT_BUILDS`
 to the host (Pi `1`, M-series Mac `3–4`), and `FOUNDRY_MAX_RPM` if your plan needs
 a throttle. The host presets (`foundry.mac.env.example`,
 `foundry.linux.env.example`) are annotated with per-host tuning.

@@ -18,8 +18,6 @@ import json
 import os
 import re
 import sys
-import shutil
-import tempfile
 import threading
 import time
 import traceback
@@ -31,17 +29,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from foundry.schemas.architecture import CANONICAL_AREAS
 from webapp.events import (
-    AGENT_BY_NODE,
     STAGE_FOR_NODE,
     event_for_task,
     events_for_node_output,
     events_for_result,
-    journal_dicts,
     live_event_for_node,
 )
-from webapp.repo import Repo, RepoUnavailable, read_plan_context, read_repo
+from webapp.repo import Repo, RepoUnavailable, read_repo
 from webapp.store import BuildStore
 
 
@@ -187,111 +182,6 @@ def _authorize_mutation(headers: Any, token: str | None) -> str | None:
             return "missing or invalid workshop token"
     return None
 _MAX_VIEW_BYTES = 1_000_000  # cap a single file served to the in-page viewer
-# Uploaded-spec-zip limits (defence-in-depth for an untrusted upload).
-_MAX_ZIP_BYTES = 5_000_000
-_MAX_ZIP_MEMBER_BYTES = 1_000_000
-_MAX_ZIP_MEMBERS = 200
-_SPEC_SUFFIXES = (".md", ".markdown", ".txt", ".rst")
-
-
-def _safe_unzip_spec(b64: str, dest: Path) -> int:
-    """Decode + extract a base64 docs-zip into ``dest``, returning the file count.
-
-    Defence-in-depth for an untrusted upload: caps total/member size + member
-    count, keeps only text-doc suffixes, and fail-closes on zip-slip (a member
-    that resolves outside ``dest`` is skipped, never written)."""
-    import base64
-    import io
-    import zipfile
-
-    raw = base64.b64decode(b64, validate=False)
-    if len(raw) > _MAX_ZIP_BYTES:
-        raise ValueError("uploaded zip exceeds size cap")
-    dest.mkdir(parents=True, exist_ok=True)
-    root = str(dest.resolve())
-    written = 0
-    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-        for info in zf.infolist():
-            if info.is_dir() or info.file_size > _MAX_ZIP_MEMBER_BYTES:
-                continue
-            if Path(info.filename).suffix.lower() not in _SPEC_SUFFIXES:
-                continue
-            target = (dest / info.filename).resolve()
-            if not str(target).startswith(root + os.sep):  # zip-slip guard
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(zf.read(info))
-            written += 1
-            if written >= _MAX_ZIP_MEMBERS:
-                break
-    return written
-
-
-# --- interactive spec chat with the leads (intake option 4) ----------------- #
-# Advisory authoring aid: it produces ONLY
-# text — a transcript + a running draft spec — and writes NO FactoryState / gate /
-# verdict. "Lock spec & build" just feeds the draft back as run(spec=<text>); the
-# spec gate + criteria machinery are unchanged (agents propose, gates decide).
-_CHATS: dict[str, dict[str, Any]] = {}  # session id -> {"history":[...], "spec":str}
-
-_LEADS_SOP = (
-    "You are a product leadership round-table — the Program Manager, the Principal "
-    "Architect, and 1-2 domain Tech-Leads — helping a CTO turn an idea into a "
-    "buildable spec. Each turn, reply as 2-4 of these voices (set role to the "
-    "title), each one or two concise, substantive sentences: ask the single most "
-    "important clarifying question, surface a risk, or propose a concrete "
-    "capability / acceptance criterion. Then output spec_markdown: the CURRENT best "
-    "full draft spec (goals, constraints, interfaces, acceptance criteria) "
-    "reflecting the whole conversation so far. If a prior spec and a summary of "
-    "what a previous build already produced are given, treat the spec as the "
-    "target and focus the new round on the GAPS and the requested changes — do "
-    "not re-propose what is already built. Reply with JSON only."
-)
-_CHAT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "messages": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {"role": {"type": "string"}, "text": {"type": "string"}},
-                "required": ["role", "text"],
-                "additionalProperties": False,
-            },
-        },
-        "spec_markdown": {"type": "string"},
-    },
-    "required": ["messages", "spec_markdown"],
-    "additionalProperties": False,
-}
-
-
-def _chat_proxy(backend: str) -> Any:
-    """A ModelProviderProxy for the spec chat — mock returns canned/empty, the real
-    backends actually converse. Uses the observation path (complete), no signer."""
-    from foundry.proxy.cli_transports import build_backend
-    from foundry.proxy.model_provider_proxy import ModelProviderProxy
-    from foundry.proxy.test_doubles import MockTransport
-
-    if backend == "mock":
-        return ModelProviderProxy(MockTransport(default_text="{}"))
-    return build_backend(backend)  # type: ignore[arg-type]
-
-
-def _ideate_turn(backend: str, history: list[dict[str, str]]) -> dict[str, Any]:
-    """One round-table turn over the chosen backend; returns {messages, spec_markdown}."""
-    proxy = _chat_proxy(backend)
-    messages = [
-        {
-            "role": "user" if h["role"] == "user" else "assistant",
-            "content": h["text"] if h["role"] == "user" else f"[{h['role']}] {h['text']}",
-        }
-        for h in history
-    ]
-    result = proxy.complete(
-        "ideation_chat", "T1", _LEADS_SOP, messages, purpose="ideation", schema=_CHAT_SCHEMA
-    )
-    return result.parsed or {}
 
 
 WORKER_SPECIALTIES = ("frontend", "backend", "data", "test")
@@ -332,19 +222,12 @@ class Project:
     mode: str  # always "assistant" (the only release mode); kept for the catalog
     floor: int
     backend: str = "mock"
-    adapter: str = "stub"  # coding substrate (see foundry.cli.ADAPTERS)
-    spec: str | None = None  # literal spec text OR a dir of uploaded docs (run(spec=))
-    spec_text: str = ""  # the literal spec (converse/paste), cataloged so an iterate inherits + extends it
+    adapter: str = "stub"  # coding substrate, derived from the backend
     max_slots: int = 4  # IC-pool CEILING (= cli.AUTO_SLOTS_CAP); the system sizes
     # actual parallelism to the lead's decomposition (min(tasks, this)).
-    cost_cap_microusd: int | None = None  # global spend envelope (Wave D)
     token_cap: int | None = None  # stop the build cleanly after this many tokens
     workers: dict[str, int] = field(default_factory=parse_workers)  # per-specialty limits
     ticket_tiers: dict[str, str] = field(default_factory=dict)  # difficulty -> tier overrides
-    max_fix_attempts: int = 2  # auto-fix retry budget per failing gate (run() default)
-    release_seq: int = 1  # 1,2,3… within the floor; each iterate adds a release
-    parent_id: str | None = None  # lineage: the release this one iterates on
-    base_dir: str | None = None  # prior code seeded as the base tree (iterate)
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -379,7 +262,6 @@ class Project:
     act_text: str = ""               # last phrase (collapses immediate repeats)
     status: str = "running"
     passed: bool = False  # final verdict (for elevator/reload rehydration)
-    journal: list[dict[str, Any]] = field(default_factory=list)  # agent journal so far ([11])
     gates: dict[str, Any] = field(default_factory=dict)  # name -> {status,attested,advisory}
     out_base: Path | None = None  # this floor's output dir (code/)
     profile: str = "auto"  # verification profile / stack ("auto" = infer from request)
@@ -387,32 +269,7 @@ class Project:
 
 _PROJECTS: dict[str, Project] = {}
 
-# Keyword -> area map for the "suggest N" hint (one IC per area the work touches).
-# Advisory only: the REAL area split is derived during the build (Wave A).
-_AREA_KEYWORDS: dict[str, tuple[str, ...]] = {
-    "frontend": ("ui", "page", "frontend", "react", "css", "button", "screen",
-                 "dashboard", "web", "form", "style", "client"),
-    "backend": ("api", "service", "server", "endpoint", "backend", "route",
-                "handler", "queue", "worker", "webhook", "microservice"),
-    "data": ("db", "database", "data", "sql", "schema", "store", "analytics",
-             "ml", "model", "pipeline", "etl", "report", "warehouse"),
-    "infra": ("deploy", "docker", "k8s", "kubernetes", "infra", "terraform",
-              "cloud", "scale", "ops", "ci/cd", "observability"),
-    "security": ("security", "encrypt", "compliance", "pii", "regulated", "audit",
-                 "secret", "gdpr", "hipaa", "auth", "oauth"),
-}
 
-
-def _suggest_slots(request: str) -> tuple[int, list[str]]:
-    """N = the distinct CANONICAL_AREAS the request likely touches (>=1).
-    'backend' is the baseline area for any service build."""
-    text = request.lower()
-    hit = {"backend"}
-    for area, kws in _AREA_KEYWORDS.items():
-        if any(k in text for k in kws):
-            hit.add(area)
-    ordered = [a for a in CANONICAL_AREAS if a in hit]
-    return max(1, min(len(ordered), len(CANONICAL_AREAS))), ordered
 _LOCK = threading.Lock()
 _FLOOR = [0]
 
@@ -431,15 +288,12 @@ _PERSIST_ON = {"project", "gate", "files", "halt", "release", "done"}
 def _build_record(p: "Project") -> dict[str, Any]:
     """The catalog (DB) shape of a build."""
     return {
-        "id": p.id, "floor": p.floor, "release_seq": p.release_seq,
-        "parent_id": p.parent_id, "request": p.request, "mode": p.mode,
+        "id": p.id, "floor": p.floor, "request": p.request, "mode": p.mode,
         "backend": p.backend, "adapter": p.adapter,
-        "slots": p.max_slots,
-        "max_fix_attempts": p.max_fix_attempts, "status": p.status,
+        "slots": p.max_slots, "status": p.status,
         "passed": p.passed, "gates": p.gates,
         "out_base": str(p.out_base) if p.out_base else None,
         "created_at": p.created_at,
-        "spec_text": p.spec_text,
     }
 
 
@@ -478,15 +332,11 @@ def _load_persisted() -> None:
                     id=str(row["id"]), request=str(row.get("request", "")),
                     mode="assistant",  # gated/autonomous rows from old builds resume as assistant
                     floor=int(row.get("floor", 0)),
-                    release_seq=int(row.get("release_seq", 1) or 1),
                     backend=str(row.get("backend", "mock")),
                     adapter=str(row.get("adapter", "stub")),
                     max_slots=int(row.get("slots", 1) or 1),
-                    max_fix_attempts=int(row.get("max_fix_attempts", 2) or 2),
-                    parent_id=row.get("parent_id"),
                     out_base=Path(ob) if ob else None,
                     created_at=str(row.get("created_at") or ""),
-                    spec_text=str(row.get("spec_text") or ""),
                 )
                 try:
                     p.log = _STORE.events_of(p.id)   # the durable replay log
@@ -608,35 +458,6 @@ def _invalidate_repo(pid: str) -> None:
         _REPO_CACHE.pop(pid, None)
 
 
-def _build_summary(pid: str) -> str:
-    """A concise 'what the last build actually produced' digest — gate outcomes,
-    implemented features, and the file manifest — so an iterate knows what is
-    already DONE (vs. what the accumulated spec still calls for). Empty string when
-    there's nothing readable yet."""
-    rec = _STORE.get(pid) or {}
-    repo = _read_repo_cached(pid)
-    lines: list[str] = []
-    passed = rec.get("passed")
-    if passed is not None:
-        verdict = "passed the gates" if passed else "did NOT pass the gates"
-        lines.append(f"Release r{rec.get('release_seq', '?')} {verdict}.")
-    if repo is not None:
-        if repo.checks:
-            checks = ", ".join(f"{c.name} {'PASS' if c.ok else c.status.upper()}" for c in repo.checks)
-            lines.append(f"Gate checks: {checks}.")
-        feats = [d.summary for d in repo.diffs if d.summary and d.summary != "(feature diff)"]
-        if feats:
-            shown = "; ".join(feats[:12])
-            lines.append("Implemented: " + shown + ("…" if len(feats) > 12 else "") + ".")
-        if repo.files:
-            paths = [f.path for f in repo.files]
-            top = sorted({p.split("/")[0] for p in paths})
-            lines.append(f"{len(paths)} file(s) across: {', '.join(top[:20])}.")
-    if not lines:
-        return ""
-    return "## What the last build actually produced\n\n" + "\n".join(f"- {ln}" for ln in lines)
-
-
 def _evidence_files(pid: str) -> dict[str, bytes]:
     """The evidence sidecar for a build's export: the gate verdicts, as a
     machine-readable ``.foundry/evidence.json`` and a readable ``EVIDENCE.md``.
@@ -702,67 +523,17 @@ def _evidence_markdown(doc: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _lineage_ids(pid: str) -> list[str]:
-    """The build's ancestry oldest→newest (root … pid) via ``parent_id`` in the
-    catalog — so a release's full tree is the parent's tree + this release's diffs."""
-    chain: list[str] = []
-    seen: set[str] = set()
-    cur: str | None = pid
-    while cur and cur not in seen:
-        seen.add(cur)
-        chain.append(cur)
-        try:
-            rec = _STORE.get(cur)
-        except Exception:
-            rec = None
-        cur = (rec or {}).get("parent_id")
-    chain.reverse()
-    return chain
-
-
-def _overlay_tree(pid: str) -> dict[str, bytes] | None:
-    """The FULL release tree for ``pid`` from the CAS: each ancestor's materialized
-    files overlaid oldest→newest (this release's diffs win) — mirroring the on-disk
-    'fill the unchanged files from the parent' merge. ``None`` if nothing readable."""
+def _tree(pid: str) -> dict[str, bytes] | None:
+    """The build's files from the CAS (path -> bytes); ``None`` if nothing is readable."""
+    repo = _read_repo_cached(pid)
+    if repo is None:
+        return None
     blobs: dict[str, bytes] = {}
-    found = False
-    for anc in _lineage_ids(pid):
-        repo = _read_repo_cached(anc)
-        if repo is None:
-            continue
-        found = True
-        for f in repo.files:
-            b = repo.file_bytes(f.path)
-            if b is not None:
-                blobs[f.path] = b
-    return blobs if found else None
-
-
-def _materialize_base_dir(parent_id: str, dest: Path) -> bool:
-    """Write the parent build's full CAS tree into ``dest`` (the base a release
-    iterates on). Returns True if any file was written. Used in place of an on-disk
-    parent ``code`` dir so iterate works with no output directory."""
-    tree = _overlay_tree(parent_id)
-    if not tree:
-        return False
-    for rel, data in tree.items():
-        target = (dest / rel)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
-    return True
-
-
-def _child_spec(p: Project) -> str | None:
-    """The spec a release runs with: its own (text or uploaded docs dir) plus, when
-    it iterates on a parent, the parent's shipped plan (PRD, design, interface
-    contracts, pinned constraints) so the planner extends that plan."""
-    parent_plan = read_plan_context(p.parent_id, _STATE_DIR) if p.parent_id else ""
-    if not parent_plan:
-        return p.spec
-    from foundry.cli import _load_spec
-
-    own = _load_spec(p.spec)
-    return f"{own}\n\n{parent_plan}" if own.strip() else parent_plan
+    for f in repo.files:
+        b = repo.file_bytes(f.path)
+        if b is not None:
+            blobs[f.path] = b
+    return blobs
 
 
 def take_activity(p: Project, text: str, now: float | None = None) -> str | None:
@@ -906,7 +677,7 @@ def _choose_stack(p: Project) -> tuple[str, str] | None:
         result = _build_proxy(p.backend).complete(
             "principal_architect", "T2", _STACK_SOP,  # one structural pick; Sonnet is ample
             [{"role": "user",
-              "content": (f"REQUEST:\n{p.request}\n\nSPEC:\n{(p.spec_text or '')[:2000]}"
+              "content": (f"REQUEST:\n{p.request}"
                           f"\n\nINSTALLED STACKS (pick one):\n{menu}")}],
             purpose="ideation", schema=schema,
         )
@@ -1010,7 +781,7 @@ def _run_factory(p: Project, resume: bool = False) -> None:
 
     # Stack = auto on a real backend: the Planner picks the stack from
     # the toolchains actually installed on this host; the chosen profile pins the
-    # gates for THIS build and every iterate child.
+    # gates for THIS build.
     if (p.profile or "auto") == "auto":
         chosen = _choose_stack(p)
         if chosen:
@@ -1055,16 +826,6 @@ def _run_factory(p: Project, resume: bool = False) -> None:
             _emit(p, **out)
         with contextlib.suppress(Exception):   # persist the dedup set so a resume won't replay
             _STORE.add_seen(p.id, p.seen_uris)
-        # The agents' journal, so a lead can be "interviewed" ([11], advisory). `agent`
-        # = the floor sprite that owns the node, so the interview picker can match a
-        # Planner/Reviewer click to entries written under old role ids.
-        known = {(e.get("node_id"), e.get("summary")) for e in p.journal}
-        for e in journal_dicts(result.get("agent_journal")):
-            if (e.get("node_id"), e.get("summary")) not in known:
-                known.add((e.get("node_id"), e.get("summary")))
-                entry = {**e, "agent": AGENT_BY_NODE.get(str(e.get("node_id", "")), ("",))[0]}
-                p.journal.append(entry)
-                _emit(p, type="journal", entry=entry)
 
     def task_cb(ev: Mapping[str, Any]) -> None:
         """One ticket's worker started / finished / failed (the floor's per-ticket sprites)."""
@@ -1086,16 +847,6 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     # only write a disk tree when WORKSHOP_WRITE_DISK opts in (an export cache);
     # otherwise the Repo/OUTPUT browser materializes the tree straight from the store.
     code_dir = (p.out_base / "code") if (p.out_base and _WRITE_DISK) else None
-    # Iterate base: prefer an on-disk parent code dir (set when disk export is on);
-    # else materialize the parent's full tree from the CAS into a scratch dir, so a
-    # release still builds ON TOP of the prior code with no output directory.
-    base_stack = contextlib.ExitStack()
-    base_dir = p.base_dir
-    if not base_dir and p.parent_id:
-        scratch = Path(base_stack.enter_context(
-            tempfile.TemporaryDirectory(prefix="foundry-base-")))
-        if _materialize_base_dir(p.parent_id, scratch):
-            base_dir = str(scratch)
     # Quiet-watchdog: on a REAL backend, if no event lands for a long stretch,
     # report WHO the build is waiting on. A single
     # agentic step is legitimately minutes long, so the first tick is a status line,
@@ -1147,12 +898,8 @@ def _run_factory(p: Project, resume: bool = False) -> None:
                 mode=p.mode,
                 backend=p.backend,            # real backend per project (not always mock)
                 adapter=p.adapter,            # coding substrate (stub/raw-react)
-                spec=_child_spec(p),          # spec text OR docs dir, + the parent's plan
                 max_slots=p.max_slots,        # IC-pool parallelism (Wave C) + budget tree (Wave D)
-                cost_cap_microusd=p.cost_cap_microusd,
                 token_cap=p.token_cap,
-                max_fix_attempts=p.max_fix_attempts,
-                base_dir=base_dir,            # iterate: prior code seeded as the base tree
                 thread_id=p.id,               # UNIQUE per project — no cross-floor collision
                 state_dir=_STATE_DIR,         # durable: build survives + resumes past a restart
                 output_dir=str(code_dir) if code_dir else None,
@@ -1160,11 +907,10 @@ def _run_factory(p: Project, resume: bool = False) -> None:
             )
         finally:
             wd_stop.set()
-            base_stack.close()  # run() copies base_dir into its sandbox synchronously
     except Exception as exc:
         # Print the full traceback to the SERVER terminal too — the quest-log line
         # is a one-line summary, and "no error in the terminal" must never mislead.
-        print(f"[build] floor {p.floor} r{p.release_seq} failed: {exc}")
+        print(f"[build] floor {p.floor} failed: {exc}")
         traceback.print_exc()
         # A TRANSIENT provider failure (ProxyUnavailable — the proxy already rode
         # its bounded retry/rate-limit budget and is telling judgment nodes to
@@ -1204,20 +950,6 @@ def _run_factory(p: Project, resume: bool = False) -> None:
         _persist(p)
         _close(p)
         return
-
-    # Disk-export mode only: the build wrote ONLY its changed/added files to
-    # code_dir; fill in every unchanged file from the parent so the on-disk tree is
-    # the prior code + the change. (The CAS Repo view does this overlay at read time.)
-    if base_dir and code_dir:
-        base = Path(base_dir)
-        if base.is_dir():
-            code_dir.mkdir(parents=True, exist_ok=True)
-            for src in base.rglob("*"):
-                if src.is_file():
-                    dst = code_dir / src.relative_to(base)
-                    if not dst.exists():
-                        dst.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(src, dst)
 
     result_dict = {
         "passed": result.passed,
@@ -1394,23 +1126,11 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/static/"):
             self._serve_static(path[len("/static/"):])
             return
-        if path == "/api/config":
-            self._config()
-            return
         if path == "/api/projects":
             self._list_projects()
             return
         if path == "/api/builds":
             self._list_builds()
-            return
-        if path.startswith("/api/releases/"):
-            self._list_releases(path.rsplit("/", 1)[-1])
-            return
-        if path.startswith("/api/repo/"):
-            self._repo_meta(path.rsplit("/", 1)[-1])
-            return
-        if path.startswith("/api/spec/"):
-            self._get_spec(path.rsplit("/", 1)[-1])
             return
         if path.startswith("/api/files/"):
             self._list_files(path.rsplit("/", 1)[-1])
@@ -1421,48 +1141,10 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/zip/"):
             self._zip_output(path.rsplit("/", 1)[-1])
             return
-        if path.startswith("/api/gitzip/"):
-            self._gitzip(path.rsplit("/", 1)[-1])
-            return
         if not path.startswith("/api"):
             self._serve_static(path)  # e.g. /favicon.ico
             return
         self._json(404, {"error": "not found"})
-
-    def _config(self) -> None:
-        """UI config: the default backend (FOUNDRY_MODEL_BACKEND, else mock) so the
-        modal preselects it — a deployment sets the env to default to claude-cli."""
-        from foundry.cli import ADAPTERS, BACKENDS, _tier_models
-
-        default = os.environ.get("FOUNDRY_MODEL_BACKEND", "mock")
-        if default not in BACKENDS:
-            default = "mock"
-        default_adapter = os.environ.get("FOUNDRY_CODING_ADAPTER", "stub")
-        if default_adapter not in ADAPTERS:
-            default_adapter = "stub"
-        # The effective per-tier model ids each real backend would serve (curated
-        # default + FOUNDRY_MODEL_T{1,2,3} overrides) so the UI can SHOW what runs
-        # for whichever backend the user picks. Mock has no real models.
-        models = {} if default == "mock" else _tier_models(default)
-        models_by_backend = {
-            b: _tier_models(b) for b in BACKENDS if b != "mock"
-        }
-        try:
-            default_slots = max(1, int(os.environ.get("FOUNDRY_MAX_SLOTS", "1") or "1"))
-        except ValueError:
-            default_slots = 1
-        try:
-            from foundry.gates.profiles import PROFILES
-            profiles = sorted(PROFILES)
-        except Exception:
-            profiles = []
-        self._json(200, {
-            "default_backend": default, "backends": list(BACKENDS),
-            "default_adapter": default_adapter, "adapters": list(ADAPTERS),
-            "profiles": profiles,
-            "default_max_slots": default_slots, "models": models,
-            "models_by_backend": models_by_backend,
-        })
 
     # -- output browsing (the build's written code) ---------------------------------
     def _out_base(self, pid: str) -> Path | None:
@@ -1474,7 +1156,7 @@ class Handler(BaseHTTPRequestHandler):
     def _list_files(self, pid: str) -> None:
         # The code lives in the store: list the materialized CAS tree first. Fall
         # back to a disk export only for an older build with no durable checkpoint.
-        tree = _overlay_tree(pid)
+        tree = _tree(pid)
         if tree is not None:
             files = [{"path": p, "size": len(b)} for p, b in sorted(tree.items())]
             self._json(200, {"files": files, "source": "store"})
@@ -1488,45 +1170,6 @@ class Handler(BaseHTTPRequestHandler):
             for f in sorted(base.rglob("*")) if f.is_file()
         ]
         self._json(200, {"files": files, "source": "disk"})
-
-    def _repo_meta(self, pid: str) -> None:
-        """The self-hosted-GitHub view of a build: tree + gate 'checks' + the
-        FeatureDiff 'pull requests', all read from the durable store."""
-        repo = _read_repo_cached(pid)
-        tree = _overlay_tree(pid)
-        if repo is None and tree is None:
-            # No durable checkpoint — degrade to a disk listing + the cached HUD gates.
-            base = self._out_base(pid)
-            p = _PROJECTS.get(pid)
-            if base is None:
-                self._json(404, {"error": "no repo yet"})
-                return
-            files = [
-                {"path": str(f.relative_to(base)), "size": f.stat().st_size}
-                for f in sorted(base.rglob("*")) if f.is_file()
-            ]
-            checks = [
-                {"name": n, "status": str(g.get("status", "")).split(".")[-1].lower(),
-                 "ok": str(g.get("status", "")).split(".")[-1].lower() == "pass",
-                 "advisory": bool(g.get("advisory")), "findings": []}
-                for n, g in (p.gates.items() if p else [])
-            ]
-            self._json(200, {"source": "disk", "tree_sha": None, "files": files,
-                             "checks": checks, "diffs": []})
-            return
-        files = [{"path": p, "size": len(b)} for p, b in sorted((tree or {}).items())]
-        checks = [
-            {"name": c.name, "status": c.status, "ok": c.ok,
-             "advisory": c.advisory, "findings": list(c.findings)}
-            for c in (repo.checks if repo else ())
-        ]
-        diffs = [
-            {"uri": d.uri, "summary": d.summary, "text": d.text}
-            for d in (repo.diffs if repo else ())
-        ]
-        self._json(200, {"source": "store",
-                         "tree_sha": repo.tree_sha if repo else None,
-                         "files": files, "checks": checks, "diffs": diffs})
 
     def _resolve_within(self, base: Path, rel: str) -> Path | None:
         """Resolve ``rel`` under ``base``, fail-closed on traversal/symlink escape."""
@@ -1542,7 +1185,7 @@ class Handler(BaseHTTPRequestHandler):
         rel = (parse_qs(urlparse(self.path).query).get("path") or [""])[0]
         # Store first: the materialized tree's keys are already containment-checked
         # by materialize_workdir (D-R1-03), so an exact-key lookup needs no re-guard.
-        tree = _overlay_tree(pid)
+        tree = _tree(pid)
         if tree is not None:
             data = tree.get(rel)
             if data is None:
@@ -1573,7 +1216,7 @@ class Handler(BaseHTTPRequestHandler):
         import io
         import zipfile
 
-        tree = _overlay_tree(pid)
+        tree = _tree(pid)
         name = pid
         if tree is None:
             base = self._out_base(pid)
@@ -1597,56 +1240,6 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/zip")
         self.send_header("Content-Disposition", f'attachment; filename="{name}.zip"')
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-
-    def _gitzip(self, pid: str) -> None:
-        """Export the FLOOR LINEAGE as one git repository, zipped: each ancestor
-        release becomes a tagged commit (r01..rNN) via the same deterministic
-        export_lineage — the store stays the source of truth."""
-        import io
-        import tempfile
-        import zipfile
-
-        from foundry.lifecycle.git_export import (
-            GitExportError, ReleaseExport, export_lineage,
-        )
-
-        chain = _lineage_ids(pid)
-        if not chain:
-            self._json(404, {"error": "no lineage"})
-            return
-        try:
-            with tempfile.TemporaryDirectory(prefix="foundry-gitzip-") as td:
-                releases = []
-                for i, anc in enumerate(chain, start=1):
-                    tree = _overlay_tree(anc)  # full repo AT that release
-                    if not tree:
-                        continue
-                    tdir = Path(td) / f"r{i:02d}"
-                    for rel, data in tree.items():
-                        target = tdir / rel
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        target.write_bytes(data)
-                    rec = _STORE.get(anc) or {}
-                    releases.append(ReleaseExport(
-                        tag=f"r{i:02d}", tree_dir=tdir,
-                        message=str(rec.get("request") or anc)[:200]))
-                repo = Path(td) / "repo"
-                export_lineage(repo, releases)
-                buf = io.BytesIO()
-                with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                    for f in sorted(repo.rglob("*")):
-                        if f.is_file():
-                            zf.write(f, f.relative_to(repo))
-                payload = buf.getvalue()
-        except GitExportError as exc:
-            self._json(503, {"error": f"git export unavailable: {exc}"})
-            return
-        self.send_response(200)
-        self.send_header("Content-Type", "application/zip")
-        self.send_header("Content-Disposition", f'attachment; filename="{pid}-git.zip"')
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
@@ -1684,12 +1277,6 @@ class Handler(BaseHTTPRequestHandler):
             self._new_project()
         elif path == "/api/reset":
             self._reset()
-        elif path == "/api/ideate":
-            self._ideate()
-        elif path == "/api/suggest-slots":
-            self._suggest_slots()
-        elif path.startswith("/api/interview/"):
-            self._interview(path.rsplit("/", 1)[-1])
         else:
             self._json(404, {"error": "not found"})
 
@@ -1697,240 +1284,46 @@ class Handler(BaseHTTPRequestHandler):
         """Every floor's live state — the browser rehydrates the elevator on reload
         (and reconnects each running floor's stream) so a refresh loses nothing."""
         with _LOCK:
-            projs = list(_PROJECTS.values())
-        # One row per FLOOR (project) = its latest release, plus the release count.
-        by_floor: dict[int, "Project"] = {}
-        counts: dict[int, int] = {}
-        for p in projs:
-            counts[p.floor] = counts.get(p.floor, 0) + 1
-            cur = by_floor.get(p.floor)
-            if cur is None or p.release_seq > cur.release_seq:
-                by_floor[p.floor] = p
+            projs = sorted(_PROJECTS.values(), key=lambda x: x.floor)
         rows = [
-            {"id": p.id, "floor": p.floor, "release": p.release_seq,
-             "releases": counts[p.floor], "request": p.request, "mode": p.mode,
-             "backend": p.backend, "adapter": p.adapter,
-             "slots": p.max_slots,
-             "status": p.status, "passed": p.passed,
-             "gates": p.gates, "parent_id": p.parent_id}
-            for p in sorted(by_floor.values(), key=lambda x: x.floor)
+            {"id": p.id, "floor": p.floor, "request": p.request, "mode": p.mode,
+             "backend": p.backend, "slots": p.max_slots, "status": p.status,
+             "passed": p.passed, "gates": p.gates}
+            for p in projs
         ]
         self._json(200, {"projects": rows})
 
     def _list_builds(self) -> None:
-        """Finished builds from the catalog — the 'iterate on…' picker reads this
-        to let a new floor start from an existing build (lineage via parent_id)."""
+        """Finished builds from the catalog — the Floor 0 repository list."""
         try:
             rows = _STORE.finished()
         except Exception:
             rows = []
         builds = [
-            {"id": r["id"], "floor": r.get("floor"), "release": r.get("release_seq"),
-             "request": r.get("request"), "passed": r.get("passed"),
-             "parent_id": r.get("parent_id"), "created_at": r.get("created_at"),
-             # The repo lives in the store: a finished build has one (a disk export
-             # may also exist). Either makes it a valid base to iterate on.
-             "has_repo": bool(r.get("status") == "done" or (
-                 r.get("out_base") and (Path(r["out_base"]) / "code").is_dir()))}
+            {"id": r["id"], "floor": r.get("floor"), "request": r.get("request"),
+             "passed": r.get("passed"), "created_at": r.get("created_at")}
             for r in rows
         ]
         self._json(200, {"builds": builds})
 
-    def _get_spec(self, pid: str) -> None:
-        """The saved spec + a 'what was built' digest for a build. On iterate the UI
-        pre-fills the converse draft with the parent's ``spec`` (what it SHOULD be)
-        and seeds the round-table with ``built`` (what was actually COMPLETED), so
-        the leads reason about the remaining gap."""
-        p = _PROJECTS.get(pid)
-        spec = p.spec_text if p is not None else ""
-        if not spec:
-            rec = _STORE.get(pid)
-            spec = str((rec or {}).get("spec_text") or "")
-        self._json(200, {"id": pid, "spec": spec, "built": _build_summary(pid)})
-
-    def _list_releases(self, floor_s: str) -> None:
-        """Every release of one floor (project), newest first — release history."""
-        try:
-            floor = int(floor_s)
-        except ValueError:
-            self._json(400, {"error": "bad floor"})
-            return
-        try:
-            rows = _STORE.releases_of(floor)
-        except Exception:
-            rows = []
-        rels = [
-            {"id": r["id"], "release": r.get("release_seq"), "request": r.get("request"),
-             "status": r.get("status"), "passed": r.get("passed"),
-             "created_at": r.get("created_at")}
-            for r in rows
-        ]
-        self._json(200, {"floor": floor, "releases": rels})
-
-    def _suggest_slots(self) -> None:
-        """Suggest an IC-pool size N from the request — count the distinct
-        CANONICAL_AREAS the work is likely to touch (one IC per area). Advisory: the
-        real area split is derived during the build (Wave A); this just seeds the UI."""
-        body = self._read_json()
-        request = str(body.get("request", ""))
-        n, areas = _suggest_slots(request)
-        self._json(200, {"slots": n, "areas": areas})
-
-    def _interview(self, pid: str) -> None:
-        """Ask a lead a question given its journal ([11]) — advisory, writes nothing.
-        Best-effort: a backend/proxy error degrades to a short string, never 500s."""
-        p = _PROJECTS.get(pid)
-        if p is None:
-            self._json(404, {"error": "unknown project"})
-            return
-        body = self._read_json()
-        role = str(body.get("role", "")).strip() or "agent"
-        question = str(body.get("question", "")).strip() or "How is it going?"
-        if p.backend == "mock":
-            # The mock transport can't deliberate; answer from the real journal we have.
-            mine = [e for e in p.journal
-                    if role in (str(e.get("role", "")), str(e.get("agent", "")))] or p.journal
-            bits = "; ".join(
-                str(e.get("summary", "")) for e in mine[:3] if str(e.get("summary", ""))
-            )
-            concerns = [c for e in mine for c in (e.get("concerns") or [])]
-            note = f" Concerns: {concerns[0]}." if concerns else ""
-            self._json(200, {"role": role, "answer": (
-                f"(mock — from {role}'s journal) {bits or 'Working as planned.'}{note} "
-                "Pick a real backend to actually interview the leads.")})
-            return
-        try:
-            from foundry.agents.interview import interview
-            from foundry.cli import _build_proxy
-            from foundry.schemas.journal import JournalEntry
-            from foundry.state.seq import Seq
-
-            entries = []
-            for i, e in enumerate(p.journal):
-                conf = e.get("confidence")
-                node_id = str(e.get("node_id", "")) or f"agent-{i}"
-                entries.append(JournalEntry(
-                    node_id=node_id,
-                    role=str(e.get("role", role)),
-                    summary=str(e.get("summary", "")),
-                    assumptions=tuple(str(a) for a in (e.get("assumptions") or [])),
-                    concerns=tuple(str(c) for c in (e.get("concerns") or [])),
-                    confidence=float(conf) if isinstance(conf, (int, float)) else None,
-                    # interview() never reads seq; mint a valid synthetic one.
-                    seq=Seq(run_id=p.id, emission_epoch=0, superstep_index=0,
-                            node_id=node_id, local=i),
-                ))
-            answer = interview(
-                _build_proxy(p.backend), role=role, question=question, entries=entries,
-            )
-        except Exception as exc:  # advisory — never let an interview wedge the UI
-            answer = f"(interview unavailable: {type(exc).__name__})"
-        self._json(200, {"role": role, "answer": answer})
-
-    def _ideate(self) -> None:
-        from foundry.cli import BACKENDS
-
-        body = self._read_json()
-        session = str(body.get("session", "")).strip() or uuid.uuid4().hex[:12]
-        message = str(body.get("message", "")).strip()
-        backend = str(body.get("backend", "mock"))
-        if backend not in BACKENDS:
-            backend = "mock"
-        chat = _CHATS.setdefault(session, {"history": [], "spec": ""})
-        # Iterate seed: on a NEW session, an inherited base spec (the parent's saved
-        # spec) primes the round-table so it EXTENDS that spec instead of drafting
-        # from scratch. Recorded as prior context + the current draft.
-        base_spec = str(body.get("base_spec", "")).strip()
-        base_built = str(body.get("base_built", "")).strip()
-        if (base_spec or base_built) and not chat["history"] and not chat["spec"]:
-            if base_spec:
-                chat["spec"] = base_spec
-                chat["history"].append(
-                    {"role": "lead", "text": f"[Prior spec to extend]\n{base_spec}"}
-                )
-            if base_built:
-                chat["history"].append(
-                    {"role": "lead", "text": f"[What was already built — focus the "
-                                             f"new work on the gaps]\n{base_built}"}
-                )
-        if message:
-            chat["history"].append({"role": "user", "text": message})
-        try:
-            reply = _ideate_turn(backend, chat["history"])
-        except Exception as exc:  # advisory aid — never 500 the chat
-            self._json(200, {"session": session, "messages":
-                             [{"role": "system", "text": f"(ideation error: {exc})"}],
-                             "spec": chat["spec"]})
-            return
-        msgs = [
-            {"role": str(m.get("role", "lead")), "text": str(m.get("text", ""))}
-            for m in (reply.get("messages") or []) if str(m.get("text", "")).strip()
-        ]
-        if not msgs:
-            msgs = [{"role": "system", "text":
-                     "(no reply — on the mock backend the leads can't really converse; "
-                     "pick a real backend for an interactive spec session.)"}]
-        spec = str(reply.get("spec_markdown") or chat["spec"])
-        for m in msgs:
-            chat["history"].append(m)
-        chat["spec"] = spec
-        chat["history"] = chat["history"][-40:]  # bound the session
-        self._json(200, {"session": session, "messages": msgs, "spec": spec})
-
     def _new_project(self) -> None:
-        # validate against the real backend + adapter sets
-        from foundry.cli import ADAPTERS, BACKENDS, _default_adapter_for
+        from foundry.cli import AUTO_SLOTS_CAP, BACKENDS, _default_adapter_for
 
         body = self._read_json()
-        # Gated/autonomous modes and domain packs were removed. Refuse them instead of
-        # quietly building with a weaker trust posture than the caller asked for.
-        if str(body.get("mode") or "assistant") != "assistant" or body.get("packs"):
-            self._json(400, {"error": "only assistant mode is supported; domain packs "
-                                      "were removed"})
+        request = str(body.get("request", "")).strip()
+        if not request:
+            self._json(400, {"error": "describe what to build"})
             return
-        request = str(body.get("request", "")).strip() or "build a tiny URL-shortener service"
-        backend = str(body.get("backend", "mock"))
+        # The backend comes from the environment (FOUNDRY_MODEL_BACKEND / .env), as
+        # the CLI does; the adapter derives from it (mock→stub, real→raw-react).
+        backend = os.environ.get("FOUNDRY_MODEL_BACKEND", "mock").strip() or "mock"
         if backend not in BACKENDS:
             backend = "mock"
-        # The adapter is DERIVED from the backend when not explicitly provided (CLI
-        # parity: mock→stub, any real backend→raw-react), so a real backend writes
-        # real code without a second field. An explicit valid adapter still wins.
-        adapter = str(body.get("adapter", "")).strip()
-        if adapter not in ADAPTERS:
-            adapter = _default_adapter_for(backend)
-        spec_text = str(body.get("spec_text", "")).strip()
-        spec_zip_b64 = body.get("spec_zip_b64")
-        # Parallelism is system-decided (the Tech-Lead's decomposition sizes the IC
-        # pool, capped by AUTO_SLOTS_CAP). The env/body value only OVERRIDES the
-        # ceiling; absent ⇒ the automatic cap. The UI no longer asks for a count.
-        from foundry.cli import AUTO_SLOTS_CAP
-
+        adapter = _default_adapter_for(backend)
         try:
-            default_slots = int(os.environ.get("FOUNDRY_MAX_SLOTS", "") or AUTO_SLOTS_CAP)
+            max_slots = max(1, int(os.environ.get("FOUNDRY_MAX_SLOTS", "") or AUTO_SLOTS_CAP))
         except ValueError:
-            default_slots = AUTO_SLOTS_CAP
-        try:
-            max_slots = int(body.get("max_slots", default_slots))
-        except (TypeError, ValueError):
-            max_slots = default_slots
-        max_slots = max(1, max_slots)
-        # auto-fix retry budget (run() default = 3); optional UI override.
-        try:
-            max_fix_attempts = int(body.get("max_fix_attempts", 2))
-        except (TypeError, ValueError):
-            max_fix_attempts = 2
-        max_fix_attempts = max(0, max_fix_attempts)
-        # spend cap: UI sends dollars (cost_cap_usd); fall back to the env micro-USD.
-        cost_env = os.environ.get("FOUNDRY_COST_CAP_MICROUSD", "").strip()
-        cost_cap_microusd = int(cost_env) if cost_env.isdigit() else None
-        try:
-            usd = float(body.get("cost_cap_usd") or 0)
-            if usd > 0:
-                cost_cap_microusd = int(round(usd * 1_000_000))
-        except (TypeError, ValueError):
-            pass
-        workers = parse_workers(body.get("workers"))
-        ticket_tiers = parse_ticket_tiers(body.get("ticket_tiers"))
+            max_slots = AUTO_SLOTS_CAP
         tok_env = os.environ.get("FOUNDRY_TOKEN_CAP", "").strip()
         token_cap = int(tok_env) if tok_env.isdigit() else None
         try:
@@ -1939,69 +1332,25 @@ class Handler(BaseHTTPRequestHandler):
                 token_cap = tok
         except (TypeError, ValueError):
             pass
-        # A floor is one PROJECT. A fresh build is a NEW project (new floor, release
-        # 1). Iterating (parent_id) adds the NEXT RELEASE to the parent's floor — same
-        # project, release_seq + 1 — never a new floor.
-        parent_id = str(body.get("parent_id") or "").strip() or None
-        parent = _STORE.get(parent_id) if parent_id else None
-        if parent is None:
-            parent_id = None
-        if parent is not None:
-            floor = int(parent.get("floor", 0))
-            with _LOCK:
-                release_seq = _STORE.max_release(floor) + 1
-        else:
-            with _LOCK:
-                _FLOOR[0] += 1
-                floor = _FLOOR[0]
-            release_seq = 1
+        with _LOCK:
+            _FLOOR[0] += 1
+            floor = _FLOOR[0]
         pid = uuid.uuid4().hex[:12]
-        out_base = _OUTPUT_ROOT / f"floor-{floor}" / f"r{release_seq}"
-        # Spec text is SAVED per build and INHERITED on iterate: a new release with
-        # no fresh spec reuses the parent's saved spec; with a fresh spec (the
-        # converse draft is pre-filled from the parent, so it already carries the
-        # prior spec PLUS this round's additions) that extended draft supersedes it.
-        # Either way the release's spec_text is the cumulative spec, saved for the
-        # NEXT iterate to build on.
-        parent_spec_text = str(parent.get("spec_text") or "") if parent else ""
-        effective_spec_text = spec_text or parent_spec_text
-        # Spec input: the effective spec TEXT (literal), else an uploaded docs-zip (a
-        # dir), else None (request alone).
-        spec: str | None = effective_spec_text or None
-        if spec is None and isinstance(spec_zip_b64, str) and spec_zip_b64.strip():
-            try:
-                spec_dir = out_base / "spec-in"
-                if _safe_unzip_spec(spec_zip_b64, spec_dir) > 0:
-                    spec = str(spec_dir)
-            except Exception:
-                spec = None
-        base_dir: str | None = None
-        if parent and parent.get("out_base"):
-            pbase = Path(parent["out_base"])
-            pcode = pbase / "code"
-            if pcode.is_dir():
-                base_dir = str(pcode)        # seed the base tree with the prior code
         p = Project(
             id=pid, request=request, mode="assistant", floor=floor,
-            release_seq=release_seq, backend=backend, adapter=adapter, spec=spec,
-            spec_text=effective_spec_text,
-            out_base=out_base, max_slots=max_slots, cost_cap_microusd=cost_cap_microusd,
-            token_cap=token_cap, workers=workers, ticket_tiers=ticket_tiers,
-            max_fix_attempts=max_fix_attempts, parent_id=parent_id, base_dir=base_dir,
+            backend=backend, adapter=adapter,
+            out_base=_OUTPUT_ROOT / f"floor-{floor}",
+            max_slots=max_slots, token_cap=token_cap,
+            workers=parse_workers(body.get("workers")),
+            ticket_tiers=parse_ticket_tiers(body.get("ticket_tiers")),
         )
-        # Verification profile / stack: "auto" (default) infers from the request;
-        # a named profile pins the gate commands (validated by run(), which
-        # rejects unknown names fail-closed before any model spend).
-        prof = str(body.get("profile") or "auto").strip().lower()
-        p.profile = prof or "auto"
         with _LOCK:
             _PROJECTS[pid] = p
         # NOTE: do NOT catalog the build here. A floor is persisted only once the
         # build ACTUALLY starts — the runner's first `project` event (in _PERSIST_ON)
-        # upserts it. So a created-but-never-run project leaves no floor to restore
-        # on restart (the response below carries the floor/release in-memory anyway).
+        # upserts it, so a created-but-never-run project leaves no floor to restore.
         threading.Thread(target=_gated_runner, args=(_run_factory, p), daemon=True).start()
-        self._json(200, {"id": pid, "floor": floor, "release": release_seq})
+        self._json(200, {"id": pid, "floor": floor})
 
     def _reset(self) -> None:
         """Clear ALL floors & repos: drop the in-memory floors, reset the floor

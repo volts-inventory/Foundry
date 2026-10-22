@@ -15,8 +15,7 @@ This module reads that source of truth back out for the Workshop's self-hosted
   :func:`materialize_workdir` + ``resolve`` / ``resolve_blob`` seams the gates ran
   against — so the bytes read back are EXACTLY what shipped, never a re-render.
 
-It also surfaces the GitHub-style metadata the tab shows: the gate verdicts as
-"checks", and each FeatureDiff's unified-diff body as the "pull request" diff.
+It also surfaces the gate verdicts as "checks" (used for the export's evidence file).
 
 Everything here is READ-ONLY: it opens the durable backends, reads, and closes
 them. It never drives a build, writes a gate, or mutates the store.
@@ -61,15 +60,6 @@ class GateCheck:
 
 
 @dataclass(frozen=True)
-class PullDiff:
-    """One FeatureDiff's unified-diff body — the 'pull request' the build merged."""
-
-    uri: str
-    summary: str
-    text: str
-
-
-@dataclass(frozen=True)
 class Repo:
     """A finished build's repository read from the durable store."""
 
@@ -77,7 +67,6 @@ class Repo:
     tree_sha: str
     files: tuple[RepoFile, ...]
     checks: tuple[GateCheck, ...]
-    diffs: tuple[PullDiff, ...]
     _blobs: dict[str, bytes] = field(default_factory=dict, repr=False)
 
     def file_bytes(self, path: str) -> bytes | None:
@@ -152,107 +141,12 @@ def _gate_checks(state: FactoryState) -> tuple[GateCheck, ...]:
     return tuple(checks)
 
 
-def _pull_diffs(state: FactoryState, backends: Any) -> tuple[PullDiff, ...]:
-    """Each FeatureDiff's raw unified-diff body — the build's 'pull requests'."""
-    from foundry.graph.gate_wiring import FEATURE_DIFF_KIND, _of_kind, _resolve_typed
-    from foundry.schemas.implementation import FeatureDiff
-
-    diffs: list[PullDiff] = []
-    for artifact in sorted(_of_kind(state, FEATURE_DIFF_KIND), key=lambda a: a.seq):
-        try:
-            diff = _resolve_typed(artifact, backends.cas.resolve, FeatureDiff, FEATURE_DIFF_KIND)
-            body = backends.cas.resolve_blob(diff.diff_uri)
-            text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else str(body)
-        except Exception:
-            continue
-        task = str(getattr(diff, "task_id", "") or "")
-        branch = str(getattr(diff, "branch", "") or "")
-        summary = " · ".join(p for p in (task, branch) if p) or "(feature diff)"
-        diffs.append(PullDiff(uri=artifact.uri, summary=summary, text=text))
-    return tuple(diffs)
-
-
-PLAN_CONTEXT_CAP = 12_000
-
-
-def plan_context(state: Any, cas: Any, cap: int = PLAN_CONTEXT_CAP) -> str:
-    """The plan a finished build shipped — PRD, system design, its interface
-    contracts and live pinned constraints — as spec text for a release that
-    iterates on it, at most ``cap`` characters; "" when there is none."""
-    from foundry.state.reducers import live_constraints
-
-    def newest(kind: str) -> Any:
-        handles = sorted(
-            (a for a in state.get("artifacts") or () if getattr(a, "kind", None) == kind),
-            key=lambda a: a.seq,
-        )
-        for a in reversed(handles):
-            with contextlib.suppress(Exception):
-                return cas.resolve(a)
-        return None
-
-    def body(uri: str) -> str:
-        try:
-            return str(getattr(cas.get_body(uri), "text", "") or "")
-        except Exception:
-            return ""
-
-    parts: list[str] = []
-    prd = newest("prd")
-    if prd is not None:
-        parts.append(f"PRD: {prd.title}\n{body(prd.prd_uri)}")
-    design = newest("system_design")
-    if design is not None:
-        parts.append(
-            f"System design: {design.title}\n{body(design.design_uri)}\n"
-            f"Components: {', '.join(design.components) or '(none)'}"
-        )
-        contracts: dict[str, str] = {}
-        for a in sorted((a for a in state.get("artifacts") or ()
-                         if getattr(a, "kind", None) == "interface_contract"),
-                        key=lambda a: a.seq):
-            with contextlib.suppress(Exception):
-                c = cas.resolve(a)
-                if c.name in design.interface_ids:
-                    contracts[c.name] = body(c.spec_uri)
-        if contracts:
-            parts.append("Interface contracts:\n" + "\n".join(
-                f"- {name}: {spec}" for name, spec in contracts.items()))
-    constraints = live_constraints(list(state.get("pinned_constraints") or ()))
-    if constraints:
-        parts.append("Pinned constraints:\n" + "\n".join(f"- {c.text}" for c in constraints))
-    if not parts:
-        return ""
-    return ("PREVIOUS RELEASE'S PLAN (the build this release iterates on):\n\n"
-            + "\n\n".join(parts))[:cap]
-
-
-def read_plan_context(thread_id: str, state_dir: str | Path) -> str:
-    """:func:`plan_context` of ``thread_id``'s latest durable checkpoint; "" when
-    the build has none (best-effort — a missing plan never blocks an iterate)."""
-    from foundry.durability.persistence import durable_backends
-
-    try:
-        backends = durable_backends(state_dir)
-    except Exception:
-        return ""
-    try:
-        tup = backends.checkpointer.saver.get_tuple({"configurable": {"thread_id": thread_id}})
-        values = tup.checkpoint.get("channel_values") if tup is not None else None
-        return plan_context(values, backends.cas) if isinstance(values, dict) else ""
-    except Exception:
-        return ""
-    finally:
-        with contextlib.suppress(Exception):
-            backends.close()
-
-
 def read_repo(thread_id: str, state_dir: str | Path) -> Repo:
     """Read a finished build's repository from the durable store (no output dir).
 
     Opens the durable backends rooted at ``state_dir``, loads the build's terminal
     state from the checkpointer, materializes the integrated tree from the durable
-    CAS, and reads back the gate checks + FeatureDiff 'pull requests'. The backends
+    CAS, and reads back the gate checks. The backends
     are always closed before returning.
 
     Raises :class:`RepoUnavailable` if the build has no durable checkpoint (e.g. an
@@ -265,7 +159,6 @@ def read_repo(thread_id: str, state_dir: str | Path) -> Repo:
     try:
         state = _load_final_state(thread_id, backends)
         checks = _gate_checks(state)
-        diffs = _pull_diffs(state, backends)
         blobs: dict[str, bytes] = {}
         with tempfile.TemporaryDirectory(prefix="foundry-repo-") as staging:
             root = Path(staging)
@@ -291,7 +184,6 @@ def read_repo(thread_id: str, state_dir: str | Path) -> Repo:
             tree_sha=tree_sha,
             files=files,
             checks=checks,
-            diffs=diffs,
             _blobs=blobs,
         )
     finally:

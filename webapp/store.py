@@ -26,22 +26,17 @@ from typing import Any
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS builds (
   id               TEXT PRIMARY KEY,
-  floor            INTEGER,   -- the PROJECT (stable across releases)
-  release_seq      INTEGER,   -- 1,2,3… within the floor (each iterate = +1)
-  parent_id        TEXT,
+  floor            INTEGER,   -- one floor per build
   request          TEXT,
   mode             TEXT,
   backend          TEXT,
   adapter          TEXT,   -- coding substrate (stub/raw-react)
-  supervised       INTEGER,
   slots            INTEGER,
-  max_fix_attempts INTEGER,
   status           TEXT,
   passed           INTEGER,
   gates            TEXT,   -- json: {name: {status, attested, advisory}}
   out_base         TEXT,
-  created_at       TEXT,
-  spec_text        TEXT    -- literal spec (converse/paste); inherited + extended on iterate
+  created_at       TEXT
 );
 -- The append-only game-event log per build (the SSE stream's durable backing).
 -- Persisting it lets ANY device replay a build's whole story after a reconnect or
@@ -63,11 +58,9 @@ CREATE TABLE IF NOT EXISTS seen_uris (
 """
 
 _COLS = (
-    "id", "floor", "release_seq", "parent_id", "request", "mode", "backend",
-    "adapter", "supervised", "slots", "max_fix_attempts", "status", "passed",
-    "gates", "out_base", "created_at", "spec_text",
+    "id", "floor", "request", "mode", "backend", "adapter", "slots", "status",
+    "passed", "gates", "out_base", "created_at",
 )
-
 
 class BuildStore:
     """A single SQLite file cataloguing builds. Thread-safe (one lock, WAL)."""
@@ -88,7 +81,7 @@ class BuildStore:
         """Add columns introduced after a DB was first created (CREATE TABLE IF NOT
         EXISTS never alters an existing table). Idempotent; runs under the lock."""
         have = {r["name"] for r in self._conn.execute("PRAGMA table_info(builds)")}
-        for col in ("adapter", "spec_text"):
+        for col in ("adapter",):
             if col not in have:
                 # suppress: another connection may add it first (shared-file race) — idempotent
                 with contextlib.suppress(sqlite3.OperationalError):
@@ -99,7 +92,6 @@ class BuildStore:
         row = {k: rec.get(k) for k in _COLS}
         row["gates"] = json.dumps(rec.get("gates") or {})
         row["passed"] = 1 if rec.get("passed") else 0
-        row["supervised"] = 1 if rec.get("supervised") else 0
         with self._lock:
             self._conn.execute(
                 f"INSERT OR REPLACE INTO builds ({','.join(_COLS)}) "
@@ -115,35 +107,24 @@ class BuildStore:
         except (TypeError, ValueError):
             d["gates"] = {}
         d["passed"] = bool(d.get("passed"))
-        d["supervised"] = bool(d.get("supervised"))
         return d
 
     def latest_per_floor(self) -> list[dict[str, Any]]:
-        """The newest release of every floor (one row per project) — for rehydrate."""
+        """The newest row of every floor — for rehydrate. (Rows written before
+        builds stopped iterating can share a floor; the newest write wins.)"""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM builds b WHERE release_seq = "
-                "(SELECT MAX(release_seq) FROM builds WHERE floor = b.floor) "
+                "SELECT * FROM builds b WHERE rowid = "
+                "(SELECT MAX(rowid) FROM builds WHERE floor = b.floor) "
                 "ORDER BY floor ASC"
             ).fetchall()
         return [self._decode(r) for r in rows]
 
     def finished(self) -> list[dict[str, Any]]:
-        """The newest FINISHED release of every floor (for the 'iterate on…' picker)
-        — you iterate on a PROJECT, taking its latest passed release as the base."""
+        """Every finished build, newest floor first (the Floor 0 repository list)."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM builds b WHERE status = 'done' AND release_seq = "
-                "(SELECT MAX(release_seq) FROM builds WHERE floor = b.floor AND status = 'done') "
-                "ORDER BY floor DESC"
-            ).fetchall()
-        return [self._decode(r) for r in rows]
-
-    def releases_of(self, floor: int) -> list[dict[str, Any]]:
-        """All releases of one floor, newest first (for the release history view)."""
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM builds WHERE floor = ? ORDER BY release_seq DESC", (floor,)
+                "SELECT * FROM builds WHERE status = 'done' ORDER BY floor DESC, rowid DESC"
             ).fetchall()
         return [self._decode(r) for r in rows]
 
@@ -157,13 +138,6 @@ class BuildStore:
     def max_floor(self) -> int:
         with self._lock:
             r = self._conn.execute("SELECT MAX(floor) AS m FROM builds").fetchone()
-        return int(r["m"]) if r and r["m"] is not None else 0
-
-    def max_release(self, floor: int) -> int:
-        with self._lock:
-            r = self._conn.execute(
-                "SELECT MAX(release_seq) AS m FROM builds WHERE floor = ?", (floor,)
-            ).fetchone()
         return int(r["m"]) if r and r["m"] is not None else 0
 
     # ---- per-build event log (the durable SSE backing) ----------------------

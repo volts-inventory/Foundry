@@ -48,7 +48,6 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import shutil
 import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
@@ -1053,7 +1052,6 @@ def run(
     max_slots: int = AUTO_SLOTS_CAP,
     cost_cap_microusd: int | None = None,
     token_cap: int | None = None,
-    base_dir: str | None = None,
     profile: str | None = "auto",
     scope: str = "auto",
 ) -> RunResult:
@@ -1222,15 +1220,6 @@ def run(
     # runner-attested verdicts (D4); reset its token in finally so it never leaks.
     token = set_gate_write_verifier(_gate_verifier(records))
     with tempfile.TemporaryDirectory(prefix="foundry-cli-src-") as source_dir:
-        # Seed the base tree with an existing codebase (the evolution / iterate
-        # path): the implementation agents clone ``source_dir`` into each sandbox
-        # worktree and produce a diff AGAINST it, so a seeded base makes the change
-        # build ON TOP of the prior code instead of greenfield. Plain input bytes —
-        # copied, never executed (the gates still decide what ships).
-        if base_dir:
-            base = Path(base_dir)
-            if base.is_dir():
-                shutil.copytree(base, source_dir, dirs_exist_ok=True)
         try:
             # Verification profile (ROADMAP Phase 3): stack-appropriate pinned
             # gate commands. "auto" (default) infers from the request + spec;

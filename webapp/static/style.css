@@ -112,10 +112,6 @@ button.danger{background:#6b1f28;border-color:var(--red);color:#ffe0e3}
 .el-btn .fl-no{font-size:15px;display:block}
 @keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.25)}}
 /* release counter on a project's elevator button (bottom-left) */
-.el-btn .rel-badge{
-  position:absolute;bottom:-5px;left:-5px;background:var(--blue);color:#06121f;
-  border-radius:6px;padding:0 4px;font-size:9px;line-height:13px;font-weight:bold;
-}
 /* Floor 0 — the repo hub: visually set apart from the project floors */
 .el-btn.hub{color:#cfe0ff;border-color:#2f3e63;background:#141d33}
 .el-btn.hub:hover{color:#fff;border-color:var(--blue)}
@@ -234,8 +230,7 @@ li.agent-box.done .agent-head{color:var(--green);background:rgba(93,220,122,.08)
 .overlay{position:fixed;inset:0;background:rgba(6,10,20,.78);
   display:flex;align-items:center;justify-content:center;z-index:50}
 .overlay.hidden{display:none}
-/* generic hide utility — JS toggles `hidden` on intake panels, the interview
-   answer box, etc. (not just overlays), so it must hide non-overlay elements too. */
+/* generic hide utility — JS toggles `hidden` on non-overlay elements too. */
 .hidden{display:none}
 .dialog{
   background:var(--panel);border:4px solid var(--ink);border-radius:8px;
@@ -289,10 +284,6 @@ details.fset.fold[open]>summary{border-bottom:2px solid var(--line)}
 .field:first-child{margin-top:0}
 .dialog .field>label{margin:0 0 6px;line-height:1.45}
 .dialog .field>.hint{display:block;margin:6px 0 0;line-height:1.45}
-/* short numeric fields pair up as soon as there's room; single column when there isn't */
-.field-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
-  gap:13px 14px}
-.field-grid .field{margin-top:0}
 /* BREAK GROUND is pinned: the form outruns a phone screen and the verb must not be
    the thing you have to scroll to find. */
 .build-actions{position:sticky;bottom:0;z-index:3;background:var(--panel);margin-top:6px;
@@ -300,73 +291,18 @@ details.fset.fold[open]>summary{border-bottom:2px solid var(--line)}
   box-shadow:0 -10px 12px -6px var(--panel)}
 .build-actions #start-btn{flex:1 1 auto}
 
-/* ---- intake modes (idea / paste spec / upload zip / converse) ---- */
-/* segmented cards, not bare radios — a 13px radio dot is not a phone-sized target */
-.intake-modes{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 4px}
-.intake-modes label.seg{display:flex;align-items:center;gap:7px;margin:0;flex:1 1 auto;
-  border:2px solid var(--line);border-radius:8px;padding:9px 12px;background:#0e1424;
-  text-transform:none;color:var(--dim);font-size:12px;cursor:pointer;min-height:40px}
-.intake-modes label.seg:hover{border-color:#3d4d73;color:var(--ink)}
-.intake-modes label.seg:has(input:checked){border-color:var(--gold);color:var(--ink);
-  background:#221c0c}
-.intake-modes input{width:auto;flex:none;accent-color:var(--gold)}
-.intake-panel{margin-top:10px}
-.intake-panel code{background:#0e1424;border:1px solid var(--line);border-radius:3px;padding:0 4px}
-input[type=file]{color:var(--dim);font-family:inherit;font-size:11px}
-/* style the OS chrome so it doesn't poke through the pixel skin */
-input[type=file]::file-selector-button{
-  background:var(--panel);color:var(--ink);border:2px solid var(--line);border-radius:6px;
-  padding:5px 10px;margin-right:8px;font-family:inherit;font-weight:bold;font-size:10px;
-  text-transform:uppercase;cursor:pointer;box-shadow:0 2px 0 #0c1322}
-input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff2ff}
-/* kill the native number spinner — value is typed or set via SUGGEST */
+/* kill the native number spinner — value is typed */
 .dialog input[type=number]{ -moz-appearance:textfield; appearance:textfield }
 .dialog input[type=number]::-webkit-inner-spin-button,
 .dialog input[type=number]::-webkit-outer-spin-button{ -webkit-appearance:none; margin:0 }
 
-/* ---- spec chat with the leads ---- */
-#chat-log{border:2px solid var(--line);border-radius:6px;background:#0e1424;
-  height:min(34vh,260px);overflow:auto;padding:8px;font-size:12px}
-.chat-turn{margin:0 0 9px;line-height:1.4}
-.chat-turn .who{color:var(--gold);font-weight:bold;font-size:11px;text-transform:uppercase}
-.chat-turn.user .who{color:var(--blue)}
-.chat-turn.system .who{color:var(--dim)}
-.chat-turn .txt{color:var(--ink);white-space:pre-wrap}
-.chat-row{display:flex;gap:8px;margin-top:8px}
-.chat-row input{flex:1}
-#chat-spec-wrap summary{cursor:pointer;color:var(--gold);font-size:12px;margin-top:8px}
-#chat-spec{max-height:24vh;overflow:auto;white-space:pre-wrap;background:#0e1424;
-  border:2px solid var(--line);border-radius:6px;padding:8px;font-size:11px;color:var(--dim);margin:6px 0 0}
-.dialog label.check{display:flex;align-items:center;gap:8px;text-transform:none;color:var(--ink);margin-top:14px}
-.dialog label.check input{width:auto}
 .dialog-actions{display:flex;gap:10px;margin-top:18px;align-items:center}
 .cp-note{color:var(--dim);font-size:11px;margin:6px 0 0}   /* roman: Silkscreen oblique is rough */
 
-/* ---- suggest-N row ---- */
-.slots-row{display:flex;align-items:center;gap:8px}
-.slots-row #slots-input{width:64px}
-#suggest-btn{background:#22314a;border-color:var(--blue);color:#dff2ff;
-  font-size:11px;padding:4px 8px;cursor:pointer}
-#slots-hint{flex:1;font-size:11px}
-
-/* ---- Interview a lead ---- */
-.iv-journal{max-height:34vh;overflow:auto;margin:8px 0;display:flex;flex-direction:column;gap:8px}
-.iv-entry{border:2px solid var(--line);border-radius:6px;padding:7px 9px;background:#0e1626}
-.iv-entry .role{color:var(--gold);font-weight:bold;font-size:12px}
-.iv-entry .sum{color:var(--ink);font-size:13px;margin:3px 0}
-.iv-entry .meta{color:var(--dim);font-size:11px}
-.iv-entry .concern{color:#ff9b9b}
-.iv-answer{border:2px solid var(--blue);border-radius:6px;padding:8px 10px;margin:6px 0;
-  background:#0c1c2a;color:#dff2ff;font-size:13px;white-space:pre-wrap}
-#iv-question{width:100%}
 
 /* ---- Output (files) browser ---- */
 #output-btn{background:#1b3a4a;border-color:var(--blue);color:#dff2ff}
 .dialog.files{width:min(860px,95vw)}
-.files-releases{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
-.files-releases:empty{display:none}
-.rel-chip{padding:4px 9px;font-size:11px}
-.rel-chip.sel{background:#24304f;border-color:var(--gold);color:var(--gold)}
 .files-body{display:flex;gap:10px;height:min(56vh,440px);margin-top:8px}
 #files-list{list-style:none;margin:0;padding:0;overflow:auto;flex:0 0 40%;
   border:2px solid var(--line);border-radius:6px}
@@ -403,7 +339,6 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
 .repo-name{color:#9ab8ff;font-weight:bold;font-size:14px}
 .repo-item:hover .repo-name{color:#cfe0ff;text-decoration:underline}
 .repo-vis{font-size:10px;color:var(--dim);border:1px solid var(--line);border-radius:9px;padding:1px 8px}
-.repo-rel{font-size:10px;color:#cdbcf0;background:#2c2052;border-radius:9px;padding:1px 8px}
 .repo-pill{font-size:10px;border-radius:9px;padding:1px 8px}
 .repo-pill.ok{color:#7fe7a4;background:#1d3a26}
 .repo-pill.bad{color:#ff9a9a;background:#3a1d1d}
@@ -419,48 +354,8 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
 /* ---- Repo (self-hosted GitHub) tabs ---- */
 .repo-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .repo-head h2{margin:0}
-.repo-sha{font-size:11px;color:var(--dim);font-family:monospace}
-.repo-src{font-size:11px;color:var(--dim)}
-.repo-src.ok{color:#7fe7a4}
 /* one scrolling line: four tabs outgrow a phone, and a clipped tab is unreachable */
-.repo-tabs{display:flex;gap:6px;margin-top:10px;border-bottom:2px solid var(--line);
-  overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;scrollbar-width:none}
-.repo-tabs::-webkit-scrollbar{display:none}
-.repo-tab{background:transparent;border:none;border-bottom:3px solid transparent;color:var(--dim);
-  padding:7px 12px;font-size:12px;font-weight:bold;cursor:pointer;flex:none;white-space:nowrap}
-.repo-tab:hover{color:var(--ink)}
-.repo-tab.sel{color:var(--gold);border-bottom-color:var(--gold)}
-.tab-count{font-size:10px;color:var(--dim);background:#1f2942;border-radius:8px;padding:1px 6px;margin-left:2px}
-.repo-pane{margin-top:8px}
-.checks-list{list-style:none;margin:0;padding:0;max-height:min(56vh,440px);overflow:auto}
-.checks-list li.check{display:flex;align-items:center;gap:9px;flex-wrap:wrap;
-  padding:9px 11px;border:2px solid var(--line);border-radius:6px;margin-bottom:7px;font-size:13px}
-.check.ok{border-color:#2c5a3c}
-.check.bad{border-color:#6b2a2a}
-.ck-icon{width:20px;height:20px;display:inline-flex;align-items:center;justify-content:center;
-  border-radius:50%;font-weight:bold;font-size:12px}
-.check.ok .ck-icon{background:#1d3a26;color:#7fe7a4}
-.check.bad .ck-icon{background:#3a1d1d;color:#ff9a9a}
-.ck-name{font-weight:bold;color:var(--ink)}
-.ck-status{color:var(--dim);font-size:11px;text-transform:uppercase}
 .adv{font-size:10px;color:#d9c27a;background:#2e2814;border-radius:4px;padding:1px 5px}
-.ck-findings{flex-basis:100%;margin-top:5px;font-family:monospace;font-size:11px;color:#ffb4b4;
-  white-space:pre-wrap;word-break:break-word}
-.checks-list li.muted{color:var(--dim);list-style:none}
-.pulls-list{max-height:min(56vh,440px);overflow:auto}
-.pull{border:2px solid var(--line);border-radius:6px;margin-bottom:8px;overflow:hidden}
-.pull-head{display:flex;align-items:center;gap:8px;padding:9px 11px;cursor:pointer;background:#161d30}
-.pull-head:hover{background:#1c2540}
-.pull-no{color:var(--gold);font-weight:bold;font-size:12px}
-.pull-sum{flex:1 1 auto;font-size:12px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pull-merged{font-size:10px;color:#cdbcf0;background:#2c2052;border-radius:8px;padding:2px 8px}
-.pull-diff{display:none;margin:0;padding:10px;background:#0e1424;border-top:2px solid var(--line);
-  font-size:11px;overflow:auto;max-height:40vh;white-space:pre;color:var(--ink)}
-.pull-diff.open{display:block}
-.d-add{color:#7fe7a4}
-.d-del{color:#ff9a9a}
-.d-hunk{color:#9ab8ff}
-.d-file{color:#d9c27a}
 .muted{color:var(--dim)}
 
 /* ---- provider-limit pause banner ------------------------------------------ */
@@ -585,10 +480,6 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
   details.fset.fold>summary{padding:14px 32px 14px 12px}
   details.fset.fold>summary::after{top:14px;right:11px}
   .fset-body{padding:10px 12px 12px}
-  /* one column: two 190px cells side by side on a 390px screen is the cramping */
-  .field-grid{grid-template-columns:1fr}
-  /* two intake cards per row, each a full-width touch target */
-  .intake-modes label.seg{flex:1 1 44%;min-height:44px}
   .build-actions{padding:11px 0 calc(14px + env(safe-area-inset-bottom))}
 }
 
@@ -630,5 +521,4 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
   /* iOS Safari auto-zooms the whole page when a focused input's font is under
      16px — keep form fields at 16px on touch so the layout stays put. */
   .dialog input[type=text],.dialog input[type=number],.dialog select,.dialog textarea,
-  #chat-msg,#iv-question{font-size:16px}
 }

@@ -74,10 +74,8 @@
     </aside>
   </div>
 
-  <!-- New-project dialog. Four numbered SECTIONS instead of one 20-field wall: the
-       two that carry sane defaults (③ how it runs, ④ scale) are folded shut behind a
-       summary line of their current values, so the dialog opens at "what do you want
-       built?" and everything else is one tap away. Same structure on every width. -->
+  <!-- New-build dialog: the request, plus a collapsed settings fold that reports
+       what it is set to. The backend comes from the server's environment. -->
   <div id="new-modal" class="overlay hidden">
     <div class="dialog build">
       <div class="dialog-head">
@@ -86,129 +84,18 @@
       </div>
 
       <section class="fset">
-        <h3 class="fset-h">① The build</h3>
         <div class="field">
-          <label for="preset-select">Preset <span class="hint">— load an example; fills every setting below</span></label>
-          <select id="preset-select"></select>
-          <p class="hint" id="preset-note"></p>
-        </div>
-        <div class="field">
-          <label for="startfrom-select">Start from <span class="hint">— a fresh build, or iterate on a finished one</span></label>
-          <select id="startfrom-select"><option value="">✦ Fresh build</option></select>
-        </div>
-        <div class="field">
-          <label id="req-label" for="req-input">What should the factory build? <span class="hint">— a sentence, or a full brief</span></label>
-          <textarea id="req-input" rows="3"
-            placeholder="e.g. a URL shortener with custom slugs, link expiry, and per-IP abuse rate-limiting">a Private Information Retrieval (PIR) system: fetch record i from a database without any server learning which record you asked for — information-theoretic 2-server PIR plus a single-server homomorphic variant, verified in-process</textarea>
+          <label for="req-input">What should the factory build? <span class="hint">— a sentence, or a full brief</span></label>
+          <textarea id="req-input" rows="4"
+            placeholder="e.g. a URL shortener with custom slugs, link expiry, and per-IP abuse rate-limiting"></textarea>
         </div>
       </section>
-
-      <section class="fset">
-        <h3 class="fset-h">② The spec <span class="hint">— the request alone is enough; these add detail</span></h3>
-        <div class="intake-modes" id="intake-modes">
-          <label class="seg"><input type="radio" name="intake" value="idea" /><span>Idea only</span></label>
-          <label class="seg"><input type="radio" name="intake" value="spec" checked /><span>Paste spec</span></label>
-          <label class="seg"><input type="radio" name="intake" value="zip" /><span>Upload .zip</span></label>
-          <label class="seg"><input type="radio" name="intake" value="chat" /><span>Work it out with the leads</span></label>
-        </div>
-      <div class="intake-panel" data-mode="spec">
-        <label>Full spec (markdown / text) — grounds the PRD</label>
-        <textarea id="spec-text" rows="7"
-          placeholder="# Spec&#10;&#10;Goals, constraints, interfaces, acceptance criteria…">A Private Information Retrieval (PIR) system: a client fetches record i from a
-database WITHOUT any server learning which record was requested. Built and
-verified entirely IN-PROCESS (in-memory servers — no sockets), so it is fully
-deterministic and testable.
-Core — information-theoretic 2-server PIR: the database is replicated on two
-non-colluding servers. To fetch index i from an n-record DB, the client draws a
-uniformly random bit-vector r of length n, forms r' = r XOR e_i (e_i selects i),
-and sends r to server 1 and r' to server 2. Each server XORs the records whose
-bit is set in its vector and returns that block; the client XORs the two answers
-to recover record i. Each server sees only a uniformly random vector, so neither
-learns i.
-Single-server variant: an additive-homomorphic scheme (e.g. Paillier) — the
-client sends an encrypted selection vector, the server computes the homomorphic
-dot product with the records, the client decrypts record i. Use vetted crypto
-primitives; never hand-roll a cipher.
-Tests MUST assert: correctness (recovered == DB[i]) across indices and DB sizes;
-PRIVACY — each server's received query is independent of i (the 2-server share
-is uniform; the single-server ciphertext leaks nothing about i); multi-block
-records. The smoke entry privately fetches a record and exits 0 only if it
-matches the true record.</textarea>
-      </div>
-      <div class="intake-panel hidden" data-mode="zip">
-        <label>Zip of <code>.md</code> / <code>.txt</code> docs — read as the spec</label>
-        <input id="zip-file" type="file" accept=".zip,application/zip" />
-        <p class="cp-note">Docs are read as plain spec input; they inform the PRD, never bypass a gate.</p>
-      </div>
-      <div class="intake-panel hidden" data-mode="chat">
-        <div id="chat-log"></div>
-        <div class="chat-row">
-          <input id="chat-msg" type="text" placeholder="Tell the leads what you're thinking…" />
-          <button id="chat-send" type="button">send</button>
-        </div>
-        <p class="cp-note">The Planner &amp; Engineers help shape a spec (best on a real backend; mock can't converse). “Break ground” builds from the draft below.</p>
-        <details id="chat-spec-wrap"><summary>Draft spec (updates as you talk)</summary><pre id="chat-spec">(nothing yet)</pre></details>
-      </div>
-      </section>
-
-      <!-- Folded by default: every field here has a working default, and the summary
-           line reports what those defaults currently are. -->
-      <details class="fset fold" id="fold-run">
-        <summary><span class="fset-h">③ How it runs</span><span class="fset-sum" id="run-sum"></span></summary>
-        <div class="fset-body">
-          <div class="field">
-            <label for="backend-select">Backend</label>
-            <select id="backend-select">
-              <option value="mock">mock — deterministic, offline (no key)</option>
-              <option value="anthropic">anthropic — Claude API (ANTHROPIC_API_KEY)</option>
-              <option value="openai">openai — OpenAI API (OPENAI_API_KEY)</option>
-              <option value="claude-cli" selected>claude-cli — claude -p (Max subscription)</option>
-              <option value="codex">codex — codex CLI (OPENAI_API_KEY)</option>
-              <option value="ollama-gemma">ollama-gemma — local Ollama endpoint</option>
-            </select>
-            <p class="hint" id="model-note"></p>
-          </div>
-          <div class="field">
-            <label for="adapter-select">Coding substrate</label>
-            <select id="adapter-select">
-              <option value="stub">stub — deterministic no-op (smoke/demo)</option>
-              <option value="raw-react">raw-react — one completion per task via the chosen backend</option>
-              <option value="claude-code">claude-code — AGENTIC: claude edits/builds/tests in the sandbox (Max plan or API)</option>
-              <option value="proxy-agent">proxy-agent — agentic loop through the proxy (any backend, key stays outside)</option>
-            </select>
-          </div>
-          <div class="field">
-            <label for="profile-select">Stack</label>
-            <select id="profile-select">
-              <option value="auto" selected>auto — the Planner picks from the installed toolchains</option>
-            </select>
-            <p class="hint">The stack pins the verification gates (build/test/smoke commands).
-              Non-Python stacks need their toolchain installed on the server — a missing
-              toolchain fails the gate loudly, it never fakes a pass.</p>
-          </div>
-        </div>
-      </details>
 
       <details class="fset fold" id="fold-scale">
-        <summary><span class="fset-h">④ Scale &amp; limits</span><span class="fset-sum" id="scale-sum"></span></summary>
+        <summary><span class="fset-h">Settings</span><span class="fset-sum" id="scale-sum"></span></summary>
         <div class="fset-body">
-          <!-- short numeric fields pair up two-across once there's room for it -->
-          <div class="field-grid">
-            <div class="field">
-              <label for="fix-input">Auto-fix attempts <span class="hint">— fix-forward retries until green; the biggest token lever (default 2)</span></label>
-              <input id="fix-input" type="number" min="0" max="20" value="2" />
-            </div>
-            <div class="field">
-              <label for="cap-input">Cost cap (USD) <span class="hint">— max model spend (metered API backends only)</span></label>
-              <input id="cap-input" type="number" min="0" step="0.01" placeholder="no cap" />
-            </div>
-            <div class="field">
-              <label for="token-cap-input">Token cap <span class="hint">— stop the build after this many tokens (any backend; cache reads count 1/10)</span></label>
-              <input id="token-cap-input" type="number" min="0" step="10000" placeholder="no cap" />
-            </div>
-          </div>
           <div class="field worker-limits">
-            <label>Workers per specialty <span class="hint">— max tickets in flight at once for each specialist (0 = pause that lane)</span></label>
+            <label>Workers per specialty <span class="hint">— max tickets in flight at once for each specialist</span></label>
             <div class="worker-grid">
               <label class="wl" for="workers-frontend">Frontend <input id="workers-frontend" type="number" min="1" max="16" value="2" /></label>
               <label class="wl" for="workers-backend">Backend <input id="workers-backend" type="number" min="1" max="16" value="2" /></label>
@@ -216,13 +103,13 @@ matches the true record.</textarea>
               <label class="wl" for="workers-test">Test <input id="workers-test" type="number" min="1" max="16" value="2" /></label>
             </div>
           </div>
-          <p class="hint" id="parallel-note">Tickets run in dependency order; each specialty
-            works at most this many at once, the rest queue.</p>
+          <div class="field">
+            <label for="token-cap-input">Token cap <span class="hint">— stop the build after this many tokens (cache reads count 1/10)</span></label>
+            <input id="token-cap-input" type="number" min="0" step="10000" placeholder="no cap" />
+          </div>
         </div>
       </details>
 
-      <!-- Sticky: the form outruns a phone screen, and BREAK GROUND must never be the
-           thing you have to scroll to find. -->
       <div class="dialog-actions build-actions">
         <button id="start-btn" class="primary">BREAK GROUND</button>
         <button id="cancel-btn">cancel</button>
@@ -238,8 +125,7 @@ matches the true record.</textarea>
         <span class="repo-src ok" id="repos-count"></span>
       </div>
       <p class="cp-note">Every build that produced code — read straight from the
-        content-addressed store. Pick a repository to browse its files, checks and
-        pull requests.</p>
+        content-addressed store. Pick a repository to browse its files.</p>
       <ul id="repos-list" class="repos-list"></ul>
       <div class="dialog-actions">
         <button id="repos-new" class="primary">＋ NEW PROJECT</button>
@@ -249,56 +135,20 @@ matches the true record.</textarea>
     </div>
   </div>
 
-  <!-- Repo browser: a self-hosted "GitHub" over the build's store (read-only) -->
+  <!-- File viewer: browse a build's generated code (read-only, from the store) -->
   <div id="files-modal" class="overlay hidden">
     <div class="dialog files">
       <div class="repo-head">
         <h2>⌥ REPO · <span id="files-floor"></span></h2>
-        <span class="repo-sha" id="repo-sha" title="integrated tree sha"></span>
-        <span class="repo-src" id="repo-src"></span>
       </div>
-      <p class="cp-note">A self-hosted view of this build's repository — read straight
-        from the content-addressed store (the database), not a working directory.</p>
-      <div id="files-releases" class="files-releases"></div>
-      <div class="repo-tabs">
-        <button class="repo-tab sel" data-tab="code">⊞ Code</button>
-        <button class="repo-tab" data-tab="checks">✓ Checks <span id="checks-count" class="tab-count"></span></button>
-        <button class="repo-tab" data-tab="pulls">⇄ Pull requests <span id="pulls-count" class="tab-count"></span></button>
-      </div>
-      <div class="repo-pane" data-pane="code">
-        <nav id="files-crumb" class="files-crumb"></nav>
-        <div class="files-body">
-          <ul id="files-list"></ul>
-          <pre id="files-view">Select a file…</pre>
-        </div>
-      </div>
-      <div class="repo-pane hidden" data-pane="checks">
-        <ul id="checks-list" class="checks-list"></ul>
-      </div>
-      <div class="repo-pane hidden" data-pane="pulls">
-        <div id="pulls-list" class="pulls-list"></div>
+      <nav id="files-crumb" class="files-crumb"></nav>
+      <div class="files-body">
+        <ul id="files-list"></ul>
+        <pre id="files-view">Select a file…</pre>
       </div>
       <div class="dialog-actions">
-        <a id="files-zip" class="btn-link" href="#" download>⭳ Export .zip</a>
-        <a id="files-gitzip" class="btn-link" href="#" title="One git repo of the whole floor: each release a tagged commit (r01..rNN)">⎇ Git repo</a>
-        <button id="files-iterate" class="primary">⎘ ITERATE</button>
+        <a id="files-zip" class="btn-link" href="#" download>⭳ Download .zip</a>
         <button id="files-close">close</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Interview a lead: their journal (advisory) + ask a question ([11]) -->
-  <div id="iv-modal" class="overlay hidden">
-    <div class="dialog">
-      <h2>INTERVIEW · <span id="iv-role"></span></h2>
-      <p class="cp-note">The agent's own work journal — advisory only, writes nothing to the build.</p>
-      <div id="iv-journal" class="iv-journal"></div>
-      <label>Ask this lead</label>
-      <input id="iv-question" type="text" placeholder="What worried you? What did you assume?" />
-      <div id="iv-answer" class="iv-answer hidden"></div>
-      <div class="dialog-actions">
-        <button id="iv-ask" class="primary">ask</button>
-        <button id="iv-close">close</button>
       </div>
     </div>
   </div>

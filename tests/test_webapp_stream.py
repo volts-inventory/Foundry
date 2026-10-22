@@ -363,3 +363,45 @@ def test_run_without_ticket_support_gets_no_ticket_kwargs(store, monkeypatch, tm
     monkeypatch.setattr(server, "_OUTPUT_ROOT", tmp_path / "out")
     server._run_factory(_project())
     assert "workers" not in seen and "task_cb" not in seen and "ticket_tiers" not in seen
+
+
+def test_new_build_takes_backend_from_env_and_ignores_removed_fields(store, monkeypatch):
+    import json
+    import threading
+    import urllib.error
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    monkeypatch.setenv("FOUNDRY_AUTH", "0")
+    monkeypatch.setenv("FOUNDRY_MODEL_BACKEND", "mock")
+    started: list[server.Project] = []
+    monkeypatch.setattr(server, "_run_factory", lambda p, resume=False: started.append(p))
+    monkeypatch.setattr(server, "_PROJECTS", {})
+    monkeypatch.setattr(server, "_FLOOR", [0])
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+    def send(body):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{srv.server_port}/api/projects",
+            data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    try:
+        assert send({"request": "  "})[0] == 400
+        code, got = send({"request": "a todo cli", "backend": "claude-cli", "spec_text": "x",
+                          "parent_id": "p0", "max_fix_attempts": 9,
+                          "workers": {"data": 5}, "token_cap": 1234})
+        assert code == 200 and got["floor"] == 1
+        deadline = time.time() + 5
+        while not started and time.time() < deadline:
+            time.sleep(0.02)
+        p = started[0]
+        assert (p.backend, p.adapter, p.token_cap) == ("mock", "stub", 1234)
+        assert p.workers["data"] == 5
+    finally:
+        srv.shutdown()

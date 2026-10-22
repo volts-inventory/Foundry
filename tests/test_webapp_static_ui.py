@@ -29,16 +29,16 @@ def test_every_id_the_script_reads_exists_in_the_page() -> None:
     assert not (used - ids - RUNTIME_IDS)
 
 
-def test_build_dialog_keeps_its_sections_and_their_summaries() -> None:
-    # The two folded sections carry every defaulted setting; each needs the summary
-    # span that reports its current values while shut.
-    for fold, summary in (("fold-run", "run-sum"), ("fold-scale", "scale-sum")):
-        assert f'id="{fold}"' in HTML
-        assert f'id="{summary}"' in HTML
-    # …and the summaries have to be recomputed when the dialog opens, because the
-    # selects reconciled from /api/config never fire a change event.
+def test_build_dialog_is_request_plus_collapsed_settings() -> None:
+    # The settings fold holds only the worker limits + token cap, shut by default,
+    # with a summary line that is recomputed whenever the dialog opens.
+    assert re.search(r'<details[^>]*id="fold-scale"(?![^>]*\bopen\b)', HTML)
+    assert 'id="scale-sum"' in HTML
+    for gone in ("backend-select", "adapter-select", "profile-select", "fix-input",
+                 "cap-input", "preset-select", "spec-text", "startfrom-select"):
+        assert f'id="{gone}"' not in HTML
     show = JS.split("function showNewModal(")[1].split("\n}")[0]
-    assert "syncFoldSummaries()" in show
+    assert "syncSettingsSummary()" in show
 
 
 def test_live_log_mutations_all_go_through_the_follow_helper() -> None:

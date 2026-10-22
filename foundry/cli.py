@@ -51,7 +51,7 @@ import os
 import shutil
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -67,6 +67,7 @@ from foundry.durability.persistence import (
     durable_backends,
     state_dir_from_env,
 )
+from foundry.execution.adapter_contract import current_packet_tier
 from foundry.execution.adapters.stub import StubAdapter
 from foundry.gates import DevGateWriteVerifier, TwoZoneGateRunner, ZoneBSigner
 from foundry.gates.signing import signing_schemes_from_env
@@ -84,7 +85,13 @@ from foundry.schemas.architecture import OwnershipMap, SystemDesign
 from foundry.schemas.base import FrozenModel
 from foundry.schemas.checkpoint import CHECKPOINT_BOUNDARIES
 from foundry.schemas.gates import GateStatus
-from foundry.schemas.implementation import FeatureDiff
+from foundry.schemas.implementation import (
+    DEFAULT_TICKET_TIERS,
+    Difficulty,
+    FeatureDiff,
+    Specialty,
+    TaskEvent,
+)
 from foundry.schemas.product import AcceptanceCriterion, Criticality
 from foundry.state.global_records import GlobalRecords
 from foundry.state.reducers import reset_gate_write_verifier, set_gate_write_verifier
@@ -203,11 +210,17 @@ def make_coding_adapter(
     proxy: ModelProviderProxy,
     thread_id: str = "cli-run",
     activity_cb: Callable[[str], None] | None = None,
+    tier_models: Mapping[str, str] | None = None,
 ) -> Any:
     """Construct the selected coding substrate (``ADAPTERS``). ``None`` ⇒ the
     deterministic ``stub`` (back-compat). ``raw-react`` drives the chosen model
     backend through the single-egress proxy (real code over any backend — `claude -p`
-    completions under ``claude-cli``, the Anthropic API under ``anthropic``)."""
+    completions under ``claude-cli``, the Anthropic API under ``anthropic``).
+
+    Each packet's ``task["tier"]`` (a ticket's difficulty, mapped) picks the model:
+    the proxy closures pass it as the call's tier, and ``claude-code`` resolves it
+    through ``tier_models`` (the proxy's tier -> model map) into ``--model``. A
+    packet with no tier runs on T1 / the CLI's default model."""
     name = (name or _DEFAULT_ADAPTER).strip().lower()
     if name == "stub":
         return StubAdapter()
@@ -218,7 +231,7 @@ def make_coding_adapter(
             return (
                 proxy.complete(
                     "junior_engineer",
-                    "T1",
+                    current_packet_tier() or "T1",
                     _RAW_REACT_SOP,
                     [{"role": "user", "content": prompt}],
                     purpose="ideation",
@@ -237,7 +250,8 @@ def make_coding_adapter(
         # `activity_cb` (optional) streams what the agent is DOING inside one step —
         # a step is a single blocking CLI call, so without it a multi-minute agentic
         # pass reports nothing until it returns.
-        return ClaudeCodeAdapter(run_id=thread_id, on_activity=activity_cb)
+        return ClaudeCodeAdapter(run_id=thread_id, on_activity=activity_cb,
+                                 tier_models=tier_models)
     if name == "proxy-agent":
         from foundry.execution.adapters.proxy_agent import ProxyAgentAdapter
 
@@ -246,7 +260,7 @@ def make_coding_adapter(
         def _agent_complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
             result = proxy.complete(
                 "junior_engineer",
-                "T1",
+                current_packet_tier() or "T1",
                 _RAW_REACT_SOP,
                 list(messages),
                 purpose="ideation",
@@ -264,12 +278,13 @@ def _resolve_coding_adapter(
     proxy: ModelProviderProxy,
     thread_id: str,
     activity_cb: Callable[[str], None] | None = None,
+    tier_models: Mapping[str, str] | None = None,
 ) -> Any:
     """A WorkerAdapter instance passes through (tests inject one); a name (or None)
     is constructed via :func:`make_coding_adapter`."""
     if adapter is None or isinstance(adapter, str):
         return make_coding_adapter(adapter, proxy=proxy, thread_id=thread_id,
-                                   activity_cb=activity_cb)
+                                   activity_cb=activity_cb, tier_models=tier_models)
     return adapter
 
 
@@ -1110,6 +1125,9 @@ def run(
     checkpoint_responder: CheckpointResponder | None = None,
     progress_cb: Callable[..., None] | None = None,
     activity_cb: Callable[[str], None] | None = None,
+    task_cb: Callable[[TaskEvent], None] | None = None,
+    workers: Mapping[str, int] | None = None,
+    ticket_tiers: Mapping[Any, str] | None = None,
     max_slots: int = AUTO_SLOTS_CAP,
     cost_cap_microusd: int | None = None,
     token_cap: int | None = None,
@@ -1187,6 +1205,13 @@ def run(
         authorship). When ``checkpoints`` are on but NO responder is supplied, the
         run PAUSES at the first boundary and returns with ``RunResult.paused_at``
         set (the caller resumes out-of-band on the same ``thread_id``).
+    task_cb / workers / ticket_tiers:
+        Ticket path (the planner emitted tickets). ``task_cb`` receives each
+        ticket's :class:`TaskEvent` (``{phase, ticket_id, title, specialty, tier}``,
+        phase start/done/failed) as the worker pool runs it; ``workers`` caps
+        concurrent tickets per specialty (default 2 each) under ``max_slots``;
+        ``ticket_tiers`` maps difficulty -> model tier (default
+        trivial=T3, standard=T2, complex=T1).
     scope:
         How much system to build. ``"auto"`` (the DEFAULT) lets the planner
         node classify the request; ``"demo"`` / ``"standard"`` PIN the tier so
@@ -1240,7 +1265,8 @@ def run(
     rt = AgentRuntime(
         proxy=proxy,
         adapter=_resolve_coding_adapter(adapter, proxy=proxy, thread_id=thread_id,
-                                        activity_cb=activity_cb),
+                                        activity_cb=activity_cb,
+                                        tier_models=_tier_models(backend)),
         cas=store,
     )
     if token_cap is not None:
@@ -1350,6 +1376,9 @@ def run(
                 checkpoints=sorted(ckpt_set) if ckpt_set else None,
                 max_slots=max_slots,
                 cost_cap_microusd=cost_cap_microusd,
+                workers=workers,
+                ticket_tiers=ticket_tiers,
+                on_task=task_cb,
             )
             # `spec` is additive and seeded ONLY when provided (request-only runs
             # keep the historical {"request": ...} seed exactly). The product
@@ -1754,6 +1783,53 @@ def _take_value(args: list[str], flag: str, *, what: str) -> tuple[list[str], st
     return args[:i] + args[i + 2 :], args[i + 1]
 
 
+def _kv_pairs(text: str, what: str) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    for item in (p.strip() for p in text.split(",")):
+        if not item:
+            continue
+        key, sep, value = item.partition("=")
+        if not sep or not key.strip() or not value.strip():
+            raise ValueError(f"{what}: expected key=value, got {item!r}")
+        pairs.append((key.strip().lower(), value.strip()))
+    return pairs
+
+
+def parse_workers(text: str) -> dict[str, int]:
+    """``frontend=2,backend=3,data=1,test=2`` -> per-specialty ticket limits, over
+    the default of 2 each. Unknown specialty or a value below 1 is a ValueError."""
+    known = sorted(s.value for s in Specialty)
+    out = dict.fromkeys(known, 2)
+    for key, value in _kv_pairs(text, "workers"):
+        if key not in out:
+            raise ValueError(f"workers: unknown specialty {key!r}; choose from "
+                             f"{', '.join(known)}")
+        if not value.isdigit() or int(value) < 1:
+            raise ValueError(f"workers: {key} needs a whole number >= 1, got {value!r}")
+        out[key] = int(value)
+    return out
+
+
+def parse_ticket_tiers(text: str) -> dict[Difficulty, str]:
+    """``trivial=T3,standard=T2,complex=T1`` -> difficulty -> model tier, over the
+    defaults. Unknown difficulty or tier is a ValueError."""
+    out = dict(DEFAULT_TICKET_TIERS)
+    for key, value in _kv_pairs(text, "ticket tiers"):
+        try:
+            difficulty = Difficulty(key)
+        except ValueError:
+            raise ValueError(
+                f"ticket tiers: unknown difficulty {key!r}; choose from "
+                f"{', '.join(d.value for d in Difficulty)}"
+            ) from None
+        tier = value.upper()
+        if tier not in _TIER_ENV:
+            raise ValueError(f"ticket tiers: unknown tier {value!r}; choose from "
+                             f"{', '.join(_TIER_ENV)}")
+        out[difficulty] = tier
+    return out
+
+
 def _take_int(
     args: list[str], flag: str, *, minimum: int | None = None
 ) -> tuple[list[str], int | None]:
@@ -1860,6 +1936,22 @@ def main(argv: list[str] | None = None) -> int:
         if _tok is not None:
             token_cap = _tok
 
+        # --workers frontend=2,backend=3,data=1,test=2 (or FOUNDRY_WORKERS): tickets
+        # building at once per specialty, under the --max-slots ceiling. Default 2
+        # each. --ticket-tiers trivial=T3,standard=T2,complex=T1 (or
+        # FOUNDRY_TICKET_TIERS): the model tier each ticket difficulty runs on.
+        args, _workers = _take_value(args, "--workers", what="specialty=N pairs")
+        args, _tiers = _take_value(args, "--ticket-tiers", what="difficulty=TIER pairs")
+        try:
+            workers = parse_workers(
+                _workers if _workers is not None else os.environ.get("FOUNDRY_WORKERS", "")
+            )
+            ticket_tiers = parse_ticket_tiers(
+                _tiers if _tiers is not None else os.environ.get("FOUNDRY_TICKET_TIERS", "")
+            )
+        except ValueError as exc:
+            raise _CliUsageError(str(exc)) from None
+
         # --profile NAME: the verification stack (pinned build/test/smoke commands).
         # OMITTED ⇒ "auto" (infer the stack from the request/spec keywords). A NAME
         # pins it (run() rejects an unknown name fail-closed). "none" keeps the bare
@@ -1947,6 +2039,8 @@ def main(argv: list[str] | None = None) -> int:
                 "[--scope {auto|demo|standard}] "
                 "[--docs DIR] [--out DIR] [--spec FILE|DIR ...] "
                 "[--state-dir DIR] [--thread-id NAME] [--max-fix-attempts N] "
+                "[--max-slots N] [--workers frontend=2,backend=2,data=2,test=2] "
+                "[--ticket-tiers trivial=T3,standard=T2,complex=T1] "
                 '["<one-line request>"]   (optional when --spec is given)\n'
                 f"  mode: assistant — {_TRUST_POSTURE[MODE_ASSISTANT]}\n"
                 "  backend: mock (default — keyless, deterministic) | anthropic | openai | "
@@ -1987,6 +2081,8 @@ def main(argv: list[str] | None = None) -> int:
             checkpoint_responder=responder,
             max_slots=max_slots,
             cost_cap_microusd=cost_cap_microusd,
+            workers=workers,
+            ticket_tiers=ticket_tiers,
             token_cap=token_cap,
             profile=(None if profile == "none" else profile),
             scope=scope,

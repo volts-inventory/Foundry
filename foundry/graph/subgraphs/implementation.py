@@ -39,7 +39,7 @@ and the architecture/product subgraphs).
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.runnables import RunnableConfig
@@ -53,6 +53,12 @@ from foundry.agents.implementation import (
     ready_tasks,
     tasks_for_lane,
 )
+from foundry.agents.implementation.tickets import (
+    has_tickets,
+    make_engineering_node,
+    pending_wave,
+    tickets_settled,
+)
 from foundry.graph.gate_wiring import FEATURE_DIFF_KIND, _of_kind
 from foundry.schemas.architecture import ENGINEERING_LANES
 from foundry.state.factory_state import FactoryState
@@ -60,6 +66,7 @@ from foundry.state.factory_state import FactoryState
 if TYPE_CHECKING:
     from foundry.agents._runtime import AgentRuntime
     from foundry.agents.implementation.senior_engineer import ArtifactResolver
+    from foundry.execution.work_pool import TaskEventHook
     from foundry.graph.gate_wiring import BlobResolver
 
 __all__ = ["build_implementation_subgraph"]
@@ -79,6 +86,9 @@ def build_implementation_subgraph(
     cost_budget_microusd: int = 1_000_000,
     max_slots: int = 1,
     cost_cap_microusd: int | None = None,
+    workers: Mapping[str, int] | None = None,
+    ticket_tiers: Mapping[Any, str] | None = None,
+    on_task: TaskEventHook | None = None,
 ) -> StateGraph[FactoryState]:
     """Build the UNCOMPILED implementation (Layer 3) role subgraph.
 
@@ -102,6 +112,15 @@ def build_implementation_subgraph(
         sandbox destroy/rebuild (LEARNINGS IM1).
     turn_budget / cost_budget_microusd:
         Per-task adapter budgets the Junior carries into each ``TaskPacket``.
+    workers / ticket_tiers / on_task:
+        Ticket path only: per-specialty concurrent ticket limits (under
+        ``max_slots``), the difficulty -> model-tier table, and the per-ticket
+        start/done/failed telemetry hook.
+
+    When the planner emitted ``ticket`` artifacts, START routes to the looping
+    ``engineering`` node instead of the lane chain: each pass builds one wave of
+    tickets and loops back while a wave remains, then exits to the supervisor's
+    build/test gate. With no tickets the lane chain below runs unchanged.
 
     Returns the ``StateGraph`` UNCOMPILED so the caller owns compilation
     (checkpointer, etc.).
@@ -204,7 +223,33 @@ def build_implementation_subgraph(
         g.add_edge(fixer_id, END)
     first_lane = _next_with_work(-1)
 
+    # Ticket path: one looping node, one wave per pass (a checkpoint per wave).
+    eng_id = "engineering"
+    engineering = make_engineering_node(
+        rt, source_dir=source_dir, resolve=resolve, resolve_blob=blobs,
+        snapshot_store=snapshot_store, turn_budget=turn_budget,
+        cost_budget_microusd=cost_budget_microusd, max_slots=max_slots,
+        cost_cap_microusd=cost_cap_microusd, workers=workers,
+        ticket_tiers=ticket_tiers, on_task=on_task,
+    )
+
+    def _engineering(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        return engineering(state, config)
+
+    g.add_node(eng_id, _engineering)
+
+    def _after_wave(state: FactoryState) -> str:
+        return eng_id if pending_wave(state, resolve) else END
+
+    g.add_conditional_edges(eng_id, _after_wave, {eng_id: eng_id, END: END})
+
     def _start(state: FactoryState) -> str:
+        if has_tickets(state):
+            if (can_fix and state.get("phase") == "build_test_fix"
+                    and tickets_settled(state, resolve)):
+                return fixer_id
+            # The node also emits the ticket tasks, so it runs even with no wave.
+            return eng_id if pending_wave(state, resolve) or not ready_tasks(state) else END
         if can_fix and state.get("phase") == "build_test_fix":
             built = {a.task_id for a in _of_kind(state, FEATURE_DIFF_KIND)}
             # A task with no diff yet still needs its own build, not a repair pass.
@@ -213,7 +258,7 @@ def build_implementation_subgraph(
         return first_lane(state)
 
     g.add_conditional_edges(START, _start,
-                            {**{n: n for n in chain},
+                            {**{n: n for n in chain}, eng_id: eng_id,
                              **({fixer_id: fixer_id} if can_fix else {}), END: END})
     for _i, _node_id in enumerate(chain):
         g.add_conditional_edges(_node_id, _next_with_work(_i),

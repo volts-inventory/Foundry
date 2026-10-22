@@ -206,19 +206,9 @@ _BOUNDARY_REWORK: dict[str, str] = {
     "design": "another design pass",
     "release": "a fix-forward rebuild",
 }
-# The autopilot PROPOSAL pause is not a stage boundary — it decides whether a whole
-# NEXT release gets built, so all three buttons mean something different there.
-_PROPOSAL_ACTIONS: dict[str, str] = {
-    "approve": "builds the proposal as the next release",
-    "changes": "builds YOUR edited request instead",
-    "reject": "stops autopilot — the floor stays where it is",
-}
-
 
 def checkpoint_actions(boundary: str) -> dict[str, str]:
     """Per-button consequence copy for the checkpoint dialog (pure, display-only)."""
-    if boundary == "autopilot_proposal":
-        return dict(_PROPOSAL_ACTIONS)
     return {
         "approve": _BOUNDARY_NEXT.get(boundary, "the build continues"),
         "changes": _BOUNDARY_REWORK.get(boundary, "another pass") + " — costs a full rerun",

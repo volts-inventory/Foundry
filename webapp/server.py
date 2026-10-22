@@ -35,7 +35,6 @@ from typing import Any
 from foundry.schemas.architecture import CANONICAL_AREAS
 from webapp.events import (
     AGENT_BY_NODE,
-    checkpoint_actions,
     event_for_task,
     events_for_payload,
     events_for_result,
@@ -348,14 +347,6 @@ class Project:
     release_seq: int = 1  # 1,2,3… within the floor; each iterate adds a release
     parent_id: str | None = None  # lineage: the release this one iterates on
     base_dir: str | None = None  # prior code seeded as the base tree (iterate)
-    autopilot_note: str = ""  # why the autopilot loop stopped (surfaced via the API)
-    # Autopilot (lifecycle.autopilot): remaining self-iterations AFTER this build.
-    # >0 and gates green ⇒ the Director proposes, the software/usability panel
-    # votes (deterministic tally), and the winner is spawned as the next release
-    # with budget-1. Supervised children keep their checkpoints surfacing to the
-    # human (auto-approve timeout keeps the loop moving). A panel
-    # DECLINE stops the loop fail-closed (human steering wanted).
-    autopilot_budget: int = 0
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -379,9 +370,6 @@ class Project:
     checkpoint_seq: int = 0          # monotonic id of the LATEST checkpoint reached
     pending_checkpoint: int | None = None  # the checkpoint awaiting a decision, if any
     decision_for: dict[int, str] = field(default_factory=dict)  # checkpoint id -> decision
-    decision_edit: dict[int, str] = field(default_factory=dict)  # checkpoint id -> edited text
-    # (the autopilot PROPOSAL checkpoint uses id -1 so it never collides with the
-    #  in-build stage checkpoints, which index from 0)
     seen_uris: set[str] = field(default_factory=set)
     # Checkpoint COST context (advisory): what the work behind this pause consumed, so
     # "continue or not?" is answered against real spend, not a guess. Monotonic clocks
@@ -409,19 +397,8 @@ class Project:
     awaiting: bool = False  # at a checkpoint right now (badge survives reload)
     journal: list[dict[str, Any]] = field(default_factory=list)  # latest agent journal ([11])
     gates: dict[str, Any] = field(default_factory=dict)  # name -> {status,attested,advisory}
-    out_base: Path | None = None  # this floor's output dir (code/ + docs/)
-    platform_opts: dict[str, Any] = field(default_factory=dict)  # platform build knobs (advanced)
+    out_base: Path | None = None  # this floor's output dir (code/)
     profile: str = "auto"  # verification profile / stack ("auto" = infer from request)
-    # Milestone ladder (BUILD-A-FULL-GAME.md §2, in the Workshop): each rung runs as
-    # a RELEASE on this floor, chained on the prior rung's released tree. Continuation
-    # state is in-memory (same posture as autopilot_budget) — a restart mid-ladder
-    # keeps every released rung browsable but doesn't auto-spawn the next one.
-    milestones_on: bool = False
-    milestone_max: int = 10
-    milestone_explicit: list[str] = field(default_factory=list)  # human-authored plan
-    milestone_plan: list[str] | None = None   # the full ordered ladder (set at rung 1)
-    milestone_index: int = 0                  # 1-based rung THIS release implements
-    milestone_root: str = ""                  # the original target request
 
 
 _PROJECTS: dict[str, Project] = {}
@@ -872,16 +849,14 @@ def _log_sweeper() -> None:
 
 
 def _record_decision(
-    p: Project, decision: str, checkpoint: int | None, *, edit: str = ""
+    p: Project, decision: str, checkpoint: int | None
 ) -> tuple[bool, bool]:
     """Record a checkpoint decision, FIRST-wins. Returns ``(applied, stale)``.
 
     ``stale`` is True when the decision names no current pause (already resolved,
     or a different checkpoint than the one awaiting) — a no-op. ``applied`` is True
     only for the FIRST decision on the awaiting checkpoint; later/duplicate clicks
-    from any device return ``(False, False)`` and simply watch the resolution play.
-    ``edit`` carries the human's amended text for an autopilot PROPOSAL checkpoint
-    (recorded only with the winning decision — a stale edit never applies)."""
+    from any device return ``(False, False)`` and simply watch the resolution play."""
     with p.cond:
         cidx = p.pending_checkpoint
         if checkpoint is not None and checkpoint != cidx:
@@ -891,8 +866,6 @@ def _record_decision(
         if cidx in p.decision_for:
             return (False, False)         # someone already decided this one
         p.decision_for[cidx] = decision
-        if edit.strip():
-            p.decision_edit[cidx] = edit.strip()
         p.cond.notify_all()
         return (True, False)
 
@@ -1215,7 +1188,7 @@ def _run_factory(p: Project, resume: bool = False) -> None:
 
     # Stack = auto on a real backend: the Planner picks the stack from
     # the toolchains actually installed on this host; the chosen profile pins the
-    # gates for THIS build and every child (iterate / autopilot / ladder rung).
+    # gates for THIS build and every iterate child.
     if (p.profile or "auto") == "auto":
         chosen = _choose_stack(p)
         if chosen:
@@ -1225,43 +1198,6 @@ def _run_factory(p: Project, resume: bool = False) -> None:
             _emit(p, type="narrate",
                   text=f"🏗 Planner chose the stack: {chosen[0]}"
                        + (f" — {chosen[1]}" if chosen[1] else ""))
-
-    # ---- milestone ladder: plan once (rung 1), then run THIS rung ------------- #
-    run_request, run_spec = p.request, p.spec
-    if p.milestones_on:
-        if not p.milestone_plan:                      # rung 1 plans the ladder
-            p.milestone_root = p.milestone_root or p.request
-            plan = [m for m in p.milestone_explicit if m][: p.milestone_max]
-            if not plan and p.backend == "mock":      # mock has no planner model
-                plan = ["walking skeleton — the core loop end to end",
-                        "core features on the skeleton",
-                        "polish, docs and hardening"][: p.milestone_max]
-            if not plan:
-                _emit(p, type="narrate", text="🪜 Planning the milestone ladder…")
-                try:
-                    from foundry.cli import _build_proxy
-                    from foundry.lifecycle.milestones import plan_milestones
-                    plan = plan_milestones(p.request, _build_proxy(p.backend),
-                                           max_milestones=p.milestone_max)
-                except Exception as exc:
-                    print(f"[milestones] floor {p.floor} planning failed: {exc}")
-                    traceback.print_exc()
-                    _emit(p, type="narrate", text=f"💥 Milestone planning failed: {exc}")
-                    _emit(p, type="done", passed=False, phase="plan")
-                    p.status = "done"
-                    _persist(p)
-                    _close(p)
-                    return
-            p.milestone_plan = plan
-            p.milestone_index = 1
-            _emit(p, type="narrate",
-                  text=f"🪜 Milestone ladder ({len(plan)}):  "
-                       + "  ·  ".join(f"{k + 1}. {t}" for k, t in enumerate(plan)))
-        _emit_ladder_prog(p)
-        _emit(p, type="narrate",
-              text=f"🪜 MILESTONE {p.milestone_index}/{len(p.milestone_plan)}: "
-                   f"{p.milestone_plan[p.milestone_index - 1]}")
-        run_request, run_spec = _milestone_run_args(p)
 
     def responder(payload: dict[str, Any]) -> str:
         # The REAL stage payload -> paced game events, then the CTO's call. A cheap T3
@@ -1413,14 +1349,14 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     try:
         try:
             result = run(
-                run_request,
-                **sched,                  # = p.request, or this rung's milestone framing
+                p.request,
+                **sched,
                 progress_cb=progress,
                 activity_cb=activity,         # what the agent is doing INSIDE a step
                 mode=p.mode,
                 backend=p.backend,            # real backend per project (not always mock)
                 adapter=p.adapter,            # coding substrate (stub/raw-react)
-                spec=run_spec,                # pasted spec text OR uploaded docs dir (additive)
+                spec=p.spec,                  # pasted spec text OR uploaded docs dir (additive)
                 max_slots=p.max_slots,        # IC-pool parallelism (Wave C) + budget tree (Wave D)
                 cost_cap_microusd=p.cost_cap_microusd,
                 token_cap=p.token_cap,
@@ -1519,518 +1455,7 @@ def _run_factory(p: Project, resume: bool = False) -> None:
               text=f"📂 {n_files} file(s) in the repo — open REPO to browse the store.")
     p.passed = bool(result.passed)
     p.status = "done"
-    # Milestone ladder: update the rung chips, then either chain the next rung as a
-    # new release (fail-closed: only on a PASS) or close the ladder out.
-    ladder_more = False
-    if p.milestones_on and p.milestone_plan:
-        i, n = p.milestone_index, len(p.milestone_plan)
-        _emit_ladder_prog(p, current="done" if p.passed else "failed")
-        if p.passed and i < n:
-            ladder_more = True
-            _emit(p, type="narrate",
-                  text=f"🪜 Milestone {i}/{n} released — starting {i + 1}/{n}: "
-                       f"{p.milestone_plan[i]}…")
-        elif p.passed:
-            _emit(p, type="narrate",
-                  text=f"🪜 All {n} milestones released — the ladder is complete.")
-        else:
-            _emit(p, type="narrate",
-                  text=f"🪜 Ladder stopped fail-closed at milestone {i}/{n} — every "
-                       "released rung below it is still playable/browsable.")
-    if p.passed and not ladder_more and p.autopilot_budget > 0:
-        _emit(p, type="narrate",
-              text=f"🧭 Autopilot: {p.autopilot_budget} iteration(s) left — the Director "
-                   "and panel are choosing the next action…")
     _persist(p)              # catalog the FINAL status/passed (after they're set)
-    _close(p)
-    if ladder_more:
-        _spawn_milestone_next(p)     # the next rung streams as the floor's next release
-        return
-    _maybe_autopilot_next(p)
-
-
-def _maybe_autopilot_next(p: Project) -> None:
-    """Autopilot step (lifecycle.autopilot): after a GREEN build with budget left,
-    Director → panel → deterministic tally → spawn the winner as the next release.
-
-    Runs in its own thread (the build thread is done); a panel DECLINE or any
-    ideation failure stops the loop fail-closed — nothing is built that the
-    panel did not choose. The child inherits supervision (its checkpoints)."""
-    if not (p.passed and p.autopilot_budget > 0):
-        return
-
-    def _step() -> None:
-        from foundry.cli import _build_proxy
-        from foundry.lifecycle.autopilot import propose_candidates, run_panel, tally
-
-        target = _root_request(p)
-        evidence = "\n".join(
-            f"release {i + 1}: {req}" for i, req in enumerate(_lineage_requests(p.id))
-        )
-        try:
-            proxy = _build_proxy(p.backend)
-            candidates = propose_candidates(proxy, target, evidence)
-            votes = run_panel(proxy, target, evidence, candidates)
-            decision = tally(candidates, votes)
-        except Exception as exc:  # ideation is advisory: fail-closed, never a crash-loop
-            _autopilot_stop_note(p, f"autopilot stopped: ideation failed ({exc})")
-            return
-        if decision.declined or decision.winner is None:
-            _autopilot_stop_note(
-                p, "autopilot stopped: the panel declined every candidate — "
-                   "human steering wanted (iterate manually to continue)")
-            return
-        w = decision.winner
-        request = f"{target} — NEXT ITERATION: {w.title}. {w.scope}"
-        if decision.amendments:
-            request += " PANEL AMENDMENTS (honor these): " + " | ".join(decision.amendments)
-        ballots = ", ".join(
-            f"{v.panelist}={v.scores[decision.winner_index]}" for v in decision.votes
-        )
-        proposal = None
-        if p.supervised:
-            # Supervised: the IDEA itself is a checkpoint (approve /
-            # edit-then-approve / reject) BEFORE any model spend on the build.
-            proposal = {
-                "title": w.title, "rationale": w.rationale, "scope": w.scope,
-                "ballots": ballots, "request": request,
-            }
-        child = _spawn_iteration(p, request, p.autopilot_budget - 1, proposal=proposal)
-        _emit(child, type="narrate",
-              text=f"🧭 Autopilot chose “{w.title}” ({w.rationale}) — panel scores: "
-                   f"{ballots}."
-                   + (" Awaiting your proposal decision…" if proposal
-                      else f" Building release {child.release_seq}…"))
-
-    threading.Thread(target=_step, daemon=True).start()
-
-
-def _root_request(p: Project) -> str:
-    """The floor's ORIGINAL target (the root of the lineage), so every autopilot
-    iteration steers toward the same goal instead of drifting off the last title."""
-    chain = _lineage_ids(p.id)
-    root = _STORE.get(chain[0]) if chain else None
-    return str((root or {}).get("request") or p.request)
-
-
-def _lineage_requests(pid: str) -> list[str]:
-    out: list[str] = []
-    for anc in _lineage_ids(pid):
-        rec = _STORE.get(anc)
-        if rec and rec.get("request"):
-            out.append(str(rec["request"]))
-    return out
-
-
-def _autopilot_stop_note(p: Project, note: str) -> None:
-    """The build stream is already closed — record WHY the loop stopped where the
-    projects API can show it (and the server log can grep it)."""
-    print(f"[autopilot] floor {p.floor} r{p.release_seq}: {note}")
-    p.autopilot_note = note
-
-
-def _spawn_iteration(
-    parent: Project, request: str, budget: int, *, proposal: dict[str, Any] | None = None
-) -> Project:
-    """Create + start the next release on the parent's floor (the same shape the
-    POST /api/projects iterate path builds): spec inherited, base tree overlaid
-    from the parent's CAS lineage inside _run_factory, supervision inherited so
-    the human checkpoints carry over.
-
-    ``proposal`` (supervised floors): the build FIRST pauses on a PROPOSAL
-    checkpoint — the panel's chosen idea surfaces as approve / edit-then-approve
-    (the human's text becomes the request, both versions logged) / reject (the
-    loop stops, nothing is built). Uses the same first-decision-wins seam as the
-    stage checkpoints, id ``-1``, with the same auto-approve timeout so an absent
-    human never stalls the loop."""
-    with _LOCK:
-        release_seq = _STORE.max_release(parent.floor) + 1
-    pid = uuid.uuid4().hex[:12]
-    p = Project(
-        id=pid, request=request, mode=parent.mode, supervised=parent.supervised,
-        floor=parent.floor, release_seq=release_seq, backend=parent.backend,
-        adapter=parent.adapter,
-        spec=parent.spec_text or None, spec_text=parent.spec_text,
-        out_base=_OUTPUT_ROOT / f"floor-{parent.floor}" / f"r{release_seq}",
-        max_slots=parent.max_slots, cost_cap_microusd=parent.cost_cap_microusd,
-        token_cap=parent.token_cap, workers=dict(parent.workers),
-        ticket_tiers=dict(parent.ticket_tiers),
-        max_fix_attempts=parent.max_fix_attempts, parent_id=parent.id,
-        autopilot_budget=max(0, budget),
-    )
-    p.profile = parent.profile
-    with _LOCK:
-        _PROJECTS[pid] = p
-
-    def _runner() -> None:
-        if proposal is not None and not _proposal_approved(p, proposal):
-            return  # rejected: nothing built, the floor waits for manual steering
-        _gated_runner(_run_factory, p)
-
-    threading.Thread(target=_runner, daemon=True).start()
-    return p
-
-
-# ---- milestone ladder (Workshop): each rung = one release on the floor ------- #
-
-def _milestone_run_args(p: Project) -> tuple[str, str]:
-    """(request, spec) for THIS rung — mirrors ``foundry.lifecycle.milestones``'s
-    composition so a Workshop ladder builds the same way the CLI one does. The
-    user's own spec text (if any) rides on top of the plan framing."""
-    plan = p.milestone_plan or []
-    i, n = p.milestone_index, len(plan)
-    title = plan[i - 1]
-    plan_text = "\n".join(f"{k + 1}. {t}" for k, t in enumerate(plan))
-    req = f"{p.milestone_root} — MILESTONE {i}/{n}: {title}"
-    spec = (
-        f"OVERALL TARGET:\n{p.milestone_root}\n\nMILESTONE PLAN:\n{plan_text}\n\n"
-        f"THIS BUILD implements ONLY milestone {i}: {title}. Build on the "
-        "existing base tree; do not regress released behavior (the prior "
-        "criteria ride as the regression floor)."
-    )
-    if p.spec_text:
-        spec = f"{p.spec_text}\n\n{spec}"
-    return req, spec
-
-
-def _emit_ladder_prog(p: Project, *, current: str = "building") -> None:
-    """Ladder progress as the HUD's per-unit chips (reuses the platform chip row):
-    m01..mNN coloured done / building / failed / queued. ``current`` is THIS
-    rung's state (building while running; done/failed at its finish)."""
-    plan = p.milestone_plan or []
-    i = p.milestone_index
-    state = {
-        f"m{k:02d}": ("done" if k < i else (current if k == i else "queued"))
-        for k in range(1, len(plan) + 1)
-    }
-    _emit(p, type="platprog", services=state, total=len(state))
-
-
-def _spawn_milestone_next(parent: Project) -> Project:
-    """Start the NEXT rung as a new release on the parent's floor (the same shape
-    as _spawn_iteration): the parent's released tree is the base via the CAS
-    lineage, mode/supervision/autopilot budget carry over, and the rung's
-    request/spec are composed in _run_factory from the inherited plan."""
-    plan = list(parent.milestone_plan or [])
-    i = parent.milestone_index + 1
-    with _LOCK:
-        release_seq = _STORE.max_release(parent.floor) + 1
-    pid = uuid.uuid4().hex[:12]
-    p = Project(
-        id=pid,
-        request=f"{parent.milestone_root} — MILESTONE {i}/{len(plan)}: {plan[i - 1]}",
-        mode=parent.mode, supervised=parent.supervised,
-        floor=parent.floor, release_seq=release_seq, backend=parent.backend,
-        adapter=parent.adapter,
-        spec=parent.spec_text or None, spec_text=parent.spec_text,
-        out_base=_OUTPUT_ROOT / f"floor-{parent.floor}" / f"r{release_seq}",
-        max_slots=parent.max_slots, cost_cap_microusd=parent.cost_cap_microusd,
-        token_cap=parent.token_cap, workers=dict(parent.workers),
-        ticket_tiers=dict(parent.ticket_tiers),
-        max_fix_attempts=parent.max_fix_attempts, parent_id=parent.id,
-        autopilot_budget=parent.autopilot_budget,
-    )
-    p.milestones_on = True
-    p.milestone_plan = plan
-    p.milestone_index = i
-    p.milestone_root = parent.milestone_root
-    p.profile = parent.profile
-    with _LOCK:
-        _PROJECTS[pid] = p
-    threading.Thread(target=_gated_runner, args=(_run_factory, p), daemon=True).start()
-    return p
-
-
-_PROPOSAL_CHECKPOINT = -1  # never collides with the in-build stage checkpoints (0..)
-
-
-def _proposal_approved(p: Project, proposal: dict[str, Any]) -> bool:
-    """Surface the autopilot proposal as a decision; apply the human's verdict.
-
-    approve ⇒ build as proposed; needs_changes + edited text ⇒ the edit BECOMES
-    the request (both versions narrated — the audit trail keeps who chose what);
-    reject ⇒ stop (persisted halt, autopilot note). Timeout auto-approves, same
-    as every other checkpoint, so the AI keeps driving an unattended floor."""
-    with p.cond:
-        p.pending_checkpoint = _PROPOSAL_CHECKPOINT
-    _emit(p, type="checkpoint", boundary="autopilot_proposal",
-          title="AUTOPILOT PROPOSAL",
-          summary=f"{proposal['title']} — {proposal['rationale']} "
-                  f"(panel: {proposal['ballots']})",
-          actions=checkpoint_actions("autopilot_proposal"))
-    _emit(p, type="await_decision", boundary="autopilot_proposal",
-          checkpoint=_PROPOSAL_CHECKPOINT, request=proposal["request"],
-          title=proposal["title"], scope=proposal["scope"], ballots=proposal["ballots"],
-          spend=_checkpoint_spend(p))
-    decision = _await_decision(p, _PROPOSAL_CHECKPOINT)
-    edit = p.decision_edit.get(_PROPOSAL_CHECKPOINT, "").strip()
-    with p.cond:
-        p.pending_checkpoint = None
-    _emit(p, type="resolved", boundary="autopilot_proposal", decision=decision)
-    if decision == "reject":
-        _emit(p, type="narrate", text="🛑 Proposal rejected — autopilot stopped. "
-                                      "Iterate manually to continue this floor.")
-        _emit(p, type="done", passed=False, phase="proposal_rejected")
-        p.status = "done"
-        p.autopilot_note = "autopilot stopped: proposal rejected by the human"
-        _persist(p)
-        _close(p)
-        return False
-    if decision == "needs_changes" and edit:
-        _emit(p, type="narrate",
-              text=f"✏️ Human amended the proposal. Panel proposed: “{p.request}” — "
-                   f"building instead: “{edit}”")
-        p.request = edit
-    _emit(p, type="narrate", text=f"✅ Proposal approved — building release {p.release_seq}…")
-    return True
-
-
-_STAGE_ORDER = ["planning", "implementing", "testing & review", "verifying at the gate"]
-
-
-def _node_stage(node: str) -> str | None:
-    """Map a live graph node id to a readable pipeline STAGE for the platform log
-    (None for infra/non-stage nodes we don't surface)."""
-    n = (node or "").lower()
-    if any(k in n for k in ("planner", "stakeholder", "product", "criteria", "program",
-                            "architect")):
-        return "planning"
-    if "engineer" in n or n == "fixer":
-        return "implementing"
-    if any(k in n for k in ("qa", "sdet", "reviewer", "writer", "tester")):
-        return "testing & review"
-    if "gate" in n:
-        return "verifying at the gate"
-    return None
-
-
-def _agent_for_node(node: str) -> str | None:
-    """The human agent ROLE for a graph node id (exact id, else substring for a
-    namespaced/lane-suffixed name), or None for infra/router nodes that aren't an agent
-    action worth its own log box."""
-    from webapp.events import AGENT_BY_NODE
-
-    n = node or ""
-    who = AGENT_BY_NODE.get(n)
-    if who:
-        return who[0]
-    for key, (agent, _room) in AGENT_BY_NODE.items():
-        if key in n:
-            return agent
-    return None
-
-
-def _node_verb(node: str) -> str:
-    """A short 'what this agent did' verb for a node id (exact, else substring) — the
-    generic fallback when a node recorded no specific journal summary."""
-    from webapp.events import _NODE_SUMMARY
-
-    n = node or ""
-    verb = _NODE_SUMMARY.get(n)
-    if verb:
-        return verb
-    for key, v in _NODE_SUMMARY.items():
-        if key in n:
-            return v
-    return "did its step"
-
-
-def _platform_opts(body: dict[str, Any]) -> dict[str, Any]:
-    """Advanced platform knobs from the request body (all optional; sane defaults)."""
-    def _int(key: str, default: int) -> int:
-        try:
-            return max(1, int(body.get(key, default)))
-        except (TypeError, ValueError):
-            return default
-    return {
-        "max_passes": _int("max_passes", 6),
-        "critic": not bool(body.get("no_critic")),
-        "max_parallel": _int("max_parallel", 4),
-        "max_slots_per_service": _int("max_slots_per_service", 6),
-    }
-
-
-def _infers_platform(request: str) -> bool:
-    """True when the request decomposes into MORE THAN ONE service — i.e. it reads as
-    a multi-service app/platform (web + backend + data …) rather than a single
-    component (a game, a tool, one service). Drives the auto platform/single choice."""
-    try:
-        from foundry.platform import plan_platform
-
-        return len(plan_platform(request).services) >= 2
-    except Exception:
-        return False
-
-
-def _run_platform(p: Project) -> None:
-    """A PLATFORM build on one floor: compose many services into one monorepo via
-    ``foundry.platform.build_platform`` and stream its progress to the quest log.
-    The stitched monorepo is written to ``p.out_base`` so the repo browser / Floor-0
-    hub serve it from disk (no CAS build of its own)."""
-    from foundry.platform import build_platform
-    from foundry.platform.planner import plan_platform
-
-    _hook_rate_limit_waits()
-
-    # Map a service role to a discipline ROOM the floor can light up (the platform
-    # floor has no engine stage stream of its own, so we drive it ourselves).
-    role_room = {"web": "frontend", "backend": "backend",
-                 "data": "data", "worker": "backend", "game": "frontend"}
-    plan = plan_platform(p.request)
-    # Synthetic org so the discipline rooms staff up (engineers per area); whoever
-    # isn't working the active stage waits in the lounge until their room lights up.
-    area_units: dict[str, list[str]] = {}
-    order: list[str] = []
-    for s in plan.services:
-        a = role_room.get(s.role, "backend")
-        if a not in area_units:
-            area_units[a] = []
-            order.append(a)
-        area_units[a].append(s.name)
-    areas = [{"area": a, "leads": [f"{a} lead"]} for a in order]
-    domains = [{"owner": a, "area": a, "units": area_units[a]} for a in order]
-    first_room = role_room.get(plan.services[0].role, "backend") if plan.services else "backend"
-
-    # The floor's "extra workers" pool = the user's setting (p.max_slots), so the same
-    # knob drives platform and single builds. Each discipline room still gets its one
-    # baseline worker; these extras are shared out across the rooms by demand.
-    _emit(p, type="project", request=p.request, mode=p.mode, backend=p.backend,
-          slots=p.max_slots, workers=p.workers)
-    _emit(p, type="org", areas=areas, domains=domains)
-    _emit(p, type="active", room=first_room)   # seat everyone; first discipline works
-    _emit(p, type="narrate", text=f"🏗  Platform build — {p.request}")
-
-    role_desc = {"web": "the web frontend (SPA)",
-                 "backend": "the back-end (REST API + auth + domain)",
-                 "data": "the data layer (schema + DB)",
-                 "worker": "the background worker", "game": "the game"}
-    svc_role = {s.name: s.role for s in plan.services}
-    state: dict[str, str] = {s.name: "queued" for s in plan.services}
-    svc_stage: dict[str, str] = {}   # last pipeline stage per service (show every CHANGE)
-
-    def push_prog() -> None:
-        _emit(p, type="platprog", services=dict(state), total=len(state))
-
-    push_prog()
-
-    def set_state(svc: str, st: str) -> None:
-        state[svc] = st
-        push_prog()
-
-    def cb(ev: dict[str, Any]) -> None:
-        t = ev.get("type")
-        svc = ev.get("service", "")
-        pn = ev.get("pass", 1)
-        # Each service is ONE box in the quest log: `svc` events open it (empty) at
-        # svc_start, update it in place as its pipeline advances / regresses / rebuilds,
-        # and populate its body when it finishes — instead of a growing flat list of
-        # per-stage narrate lines (which read as one event spilling across many rows).
-        if t == "plan":
-            _emit(p, type="narrate", text="📋 Services: " + ", ".join(ev.get("services") or []))
-        elif t == "svc_start":
-            role = str(ev.get("role") or "")
-            _emit(p, type="active", room=role_room.get(role, "backend"))
-            set_state(svc, "building")
-            _emit(p, type="svc", service=svc, phase="start", role=role,
-                  desc=role_desc.get(role, role))
-        elif t == "svc_node":
-            node = str(ev.get("node") or "")
-            # Canvas: the SAME per-node start/finish telemetry a single build streams, so
-            # the floor seats the agent whose node is actually running and clears them when
-            # it ends. Without this a platform build only ever announced a room per service,
-            # so every room stayed lit and the CTO had nothing to walk between. `quiet`
-            # keeps it off the quest log — the `svc` boxes below already narrate each node.
-            live = live_event_for_node(node, str(ev.get("scope") or ""),
-                                       phase=str(ev.get("phase") or "finish"))
-            if live:
-                live["quiet"] = True
-                _emit(p, **live)
-            # Canvas: pulse the service's room when its pipeline REGRESSES to an earlier
-            # stage (tests failed -> re-implement). The event log below is per-agent, but
-            # the floor animation still tracks the coarse stage.
-            stage = _node_stage(node)
-            last = svc_stage.get(svc)
-            if stage and stage != last:
-                back = (last in _STAGE_ORDER and stage in _STAGE_ORDER
-                        and _STAGE_ORDER.index(stage) < _STAGE_ORDER.index(last))
-                svc_stage[svc] = stage
-                if back:
-                    _emit(p, type="rebuild", room=role_room.get(svc_role.get(svc, ""), "backend"))
-            # Log: ONE box per AGENT action. The node opens its box on START ("▸ working")
-            # and fills it on FINISH — the agent's journal summary (else a role verb) as the
-            # box line, with its assumptions/concerns/artifacts behind the box caret. Infra
-            # / router nodes (no agent) don't get a box.
-            agent = _agent_for_node(node)
-            if agent:
-                if ev.get("phase") == "start":
-                    _emit(p, type="svc", service=svc, phase="agent_start",
-                          agent=agent, node=node)
-                else:
-                    det_raw = ev.get("detail")
-                    det = det_raw if isinstance(det_raw, dict) else {}
-                    _emit(p, type="svc", service=svc, phase="agent_done",
-                          agent=agent, node=node,
-                          summary=str(det.get("summary") or ""), did=_node_verb(node),
-                          assumptions=det.get("assumptions") or [],
-                          concerns=det.get("concerns") or [],
-                          artifacts=det.get("artifacts") or [])
-        elif t == "pass" and pn > 1:
-            svc_stage.pop(svc, None)   # a new pass re-runs the pipeline; let stages re-announce
-            set_state(svc, "rebuilding")
-            _emit(p, type="rebuild", room=role_room.get(svc_role.get(svc, ""), "backend"))
-            _emit(p, type="svc", service=svc, phase="rebuild", passno=pn)
-        elif t == "pass_result":
-            passed = bool(ev.get("passed"))
-            set_state(svc, "built" if passed else "held")
-            _emit(p, type="svc", service=svc, phase="pass_result", passed=passed, passno=pn)
-        elif t == "critic":
-            if ev.get("complete"):
-                set_state(svc, "approved")
-                _emit(p, type="svc", service=svc, phase="critic", complete=True)
-            else:
-                gaps = ev.get("gaps") or []
-                detail = "; ".join(gaps[:3]) if gaps else "more to do"
-                _emit(p, type="svc", service=svc, phase="critic", complete=False, detail=detail)
-        elif t == "svc_done":
-            passed = bool(ev.get("passed"))
-            set_state(svc, "done" if passed else "failed")
-            _emit(p, type="svc", service=svc, phase="done", passed=passed,
-                  passes=int(ev.get("passes", 1)),
-                  files=[str(f) for f in (ev.get("files") or [])[:8]])
-
-    opts = p.platform_opts or {}
-    staging = str(p.out_base.parent / f".staging-{p.id}") if p.out_base else None
-    try:
-        result = build_platform(
-            p.request, out_dir=str(p.out_base), backend=p.backend, mode=p.mode,
-            cost_cap_microusd=p.cost_cap_microusd, progress_cb=cb, work_dir=staging,
-            max_passes=int(opts.get("max_passes", 6)),
-            critic=bool(opts.get("critic", True)),
-            max_parallel=int(opts.get("max_parallel", 4)),
-            max_slots_per_service=int(opts.get("max_slots_per_service", 6)),
-        )
-    except Exception as exc:
-        _emit(p, type="narrate", text=f"💥 Platform error: {exc}")
-        _emit(p, type="done", passed=False, phase="error")
-        p.status = "done"
-        _persist(p)
-        _close(p)
-        return
-
-    # One "check" per service for the repo Checks tab (disk-fallback reads p.gates).
-    p.gates = {s.name: {"status": "PASS" if s.passed else "FAIL", "advisory": False}
-               for s in result.services}
-    n_files = sum(1 for f in p.out_base.rglob("*") if f.is_file()) if p.out_base else 0
-    _emit(p, type="narrate",
-          text=f"📦 Stitched monorepo — {len(result.services)} services, {n_files} files")
-    if n_files:
-        _emit(p, type="files", count=n_files)
-    if result.passed:   # shipped — open the vault chest + celebrate, like a single build
-        _emit(p, type="release", uri=f"monorepo · {len(result.services)} services")
-    _emit(p, type="done", passed=result.passed, phase="done")
-    p.passed = bool(result.passed)
-    p.status = "done"
-    _persist(p)
     _close(p)
 
 
@@ -2248,7 +1673,7 @@ class Handler(BaseHTTPRequestHandler):
             "models_by_backend": models_by_backend,
         })
 
-    # -- output browsing (the build's written code + docs) ----------------------
+    # -- output browsing (the build's written code) ---------------------------------
     def _out_base(self, pid: str) -> Path | None:
         p = _PROJECTS.get(pid)
         if p is None or p.out_base is None or not p.out_base.is_dir():
@@ -2388,7 +1813,7 @@ class Handler(BaseHTTPRequestHandler):
     def _gitzip(self, pid: str) -> None:
         """Export the FLOOR LINEAGE as one git repository, zipped: each ancestor
         release becomes a tagged commit (r01..rNN) via the same deterministic
-        export_lineage the CLI uses — the store stays the source of truth."""
+        export_lineage — the store stays the source of truth."""
         import io
         import tempfile
         import zipfile
@@ -2498,8 +1923,7 @@ class Handler(BaseHTTPRequestHandler):
              "backend": p.backend, "adapter": p.adapter,
              "supervised": p.supervised, "slots": p.max_slots,
              "status": p.status, "passed": p.passed, "awaiting": p.awaiting,
-             "gates": p.gates, "parent_id": p.parent_id,
-             "autopilot_budget": p.autopilot_budget, "autopilot_note": p.autopilot_note}
+             "gates": p.gates, "parent_id": p.parent_id}
             for p in sorted(by_floor.values(), key=lambda x: x.floor)
         ]
         self._json(200, {"projects": rows})
@@ -2754,7 +2178,7 @@ class Handler(BaseHTTPRequestHandler):
         parent_spec_text = str(parent.get("spec_text") or "") if parent else ""
         effective_spec_text = spec_text or parent_spec_text
         # Spec input: the effective spec TEXT (literal), else an uploaded docs-zip (a
-        # dir), else the PARENT's design docs (iterate), else None (request alone).
+        # dir), else None (request alone).
         spec: str | None = effective_spec_text or None
         if spec is None and isinstance(spec_zip_b64, str) and spec_zip_b64.strip():
             try:
@@ -2766,16 +2190,9 @@ class Handler(BaseHTTPRequestHandler):
         base_dir: str | None = None
         if parent and parent.get("out_base"):
             pbase = Path(parent["out_base"])
-            pdocs, pcode = pbase / "docs", pbase / "code"
-            if spec is None and pdocs.is_dir():
-                spec = str(pdocs)            # ground the release in the prior design
+            pcode = pbase / "code"
             if pcode.is_dir():
                 base_dir = str(pcode)        # seed the base tree with the prior code
-        # Autopilot budget: how many SELF-ITERATIONS follow this build (0 = off).
-        try:
-            autopilot_budget = max(0, min(20, int(body.get("autopilot", 0) or 0)))
-        except (TypeError, ValueError):
-            autopilot_budget = 0
         p = Project(
             id=pid, request=request, mode="assistant", supervised=supervised, floor=floor,
             release_seq=release_seq, backend=backend, adapter=adapter, spec=spec,
@@ -2783,43 +2200,19 @@ class Handler(BaseHTTPRequestHandler):
             out_base=out_base, max_slots=max_slots, cost_cap_microusd=cost_cap_microusd,
             token_cap=token_cap, workers=workers, ticket_tiers=ticket_tiers,
             max_fix_attempts=max_fix_attempts, parent_id=parent_id, base_dir=base_dir,
-            autopilot_budget=autopilot_budget,
         )
         # Verification profile / stack: "auto" (default) infers from the request;
         # a named profile pins the gate commands (validated by run(), which
         # rejects unknown names fail-closed before any model spend).
         prof = str(body.get("profile") or "auto").strip().lower()
         p.profile = prof or "auto"
-        # Milestone ladder (build="milestones"): plan-and-chain releasable rungs.
-        # An explicit list (one per line in the UI) skips the planner entirely.
-        if str(body.get("build") or "").strip().lower() == "milestones":
-            p.milestones_on = True
-            p.milestone_root = request
-            try:
-                p.milestone_max = max(1, min(12, int(body.get("max_milestones", 10) or 10)))
-            except (TypeError, ValueError):
-                p.milestone_max = 10
-            raw_plan = body.get("milestones")
-            if isinstance(raw_plan, list):
-                p.milestone_explicit = [str(m).strip()[:300] for m in raw_plan
-                                        if str(m).strip()][:12]
         with _LOCK:
             _PROJECTS[pid] = p
         # NOTE: do NOT catalog the build here. A floor is persisted only once the
         # build ACTUALLY starts — the runner's first `project` event (in _PERSIST_ON)
         # upserts it. So a created-but-never-run project leaves no floor to restore
         # on restart (the response below carries the floor/release in-memory anyway).
-        # A PLATFORM build composes many services into one monorepo on this floor; a
-        # normal build is one service through the factory. INFERRED from the request
-        # (multi-service => platform), unless the caller pins it with `platform`.
-        want = body.get("platform")
-        is_platform = want if isinstance(want, bool) else _infers_platform(request)
-        if p.milestones_on:
-            is_platform = False   # a ladder chains single-service releases
-        if is_platform:
-            p.platform_opts = _platform_opts(body)
-        runner = _run_platform if is_platform else _run_factory
-        threading.Thread(target=_gated_runner, args=(runner, p), daemon=True).start()
+        threading.Thread(target=_gated_runner, args=(_run_factory, p), daemon=True).start()
         self._json(200, {"id": pid, "floor": floor, "release": release_seq})
 
     def _reset(self) -> None:
@@ -2872,10 +2265,7 @@ class Handler(BaseHTTPRequestHandler):
             checkpoint = int(cp) if cp is not None else None
         except (TypeError, ValueError):
             checkpoint = None
-        # `request_edit` carries the human's amended next-iteration request for an
-        # autopilot PROPOSAL checkpoint (ignored by the stage checkpoints).
-        edit = str(body.get("request_edit", "") or "")[:4000]
-        applied, stale = _record_decision(p, decision, checkpoint, edit=edit)
+        applied, stale = _record_decision(p, decision, checkpoint)
         self._json(200, {"ok": not stale, "applied": applied, "stale": stale})
 
     def _stream(self, pid: str) -> None:

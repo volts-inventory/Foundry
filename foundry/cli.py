@@ -1086,8 +1086,8 @@ def _invoke_with_autoresume(
     and RE-INVOKE — langgraph continues the graph from its last superstep.
 
     This mirrors the Workshop server's in-process auto-resume
-    (``webapp/server.py``) so an unattended ``foundry run``/``milestones
-    --state-dir …`` survives a window reset instead of dying and needing a manual
+    (``webapp/server.py``) so an unattended ``foundry run --state-dir …``
+    survives a window reset instead of dying and needing a manual
     restart. Bounded with a growing backoff (5,10,20,40,60,60 min). A NON-durable
     run has no checkpoint to resume from, so the budget is 0 and behaviour is
     byte-identical to a bare invoke. Tunable via ``FOUNDRY_CLI_AUTORESUME``
@@ -1371,9 +1371,8 @@ def run(
         try:
             # Verification profile (ROADMAP Phase 3): stack-appropriate pinned
             # gate commands. "auto" (default) infers from the request + spec;
-            # None keeps the historical python defaults (the platform
-            # orchestrator opts out — its deepening loop owns per-service
-            # verification); a profile NAME pins that profile explicitly.
+            # None keeps the historical python defaults; a profile NAME pins
+            # that profile explicitly.
             from foundry.gates.profiles import PROFILES, profile_for_request
 
             if profile == "auto":
@@ -1624,156 +1623,6 @@ def _result(
     )
 
 
-def _autopilot_main(args: list[str]) -> int:
-    """`foundry autopilot "<target>" --out DIR [...]` — Director + design panel.
-
-    Builds the target, then loops: the Director proposes candidate next actions,
-    a software/usability panel scores + vetoes them (deterministic tally), and
-    the winner becomes the next iteration. Exit 0 iff every iteration
-    released; 1 when the loop stopped (gate refusal / panel decline / budget).
-    """
-    try:
-        args, out_dir = _take_value(args, "--out", what="a directory argument")
-        args, _mode = _take_value(args, "--mode", what="a value")
-        mode = _mode if _mode is not None else MODE_ASSISTANT
-        if mode not in MODES:
-            raise _CliUsageError(f"unknown --mode {_mode!r}")
-        args, _backend = _take_value(args, "--backend", what="a value")
-        backend = _backend if _backend is not None else _MOCK_BACKEND
-        if backend not in BACKENDS:
-            raise _CliUsageError(f"unknown --backend {_backend!r}")
-        args, _adapter = _take_value(args, "--adapter", what="a value")
-        if _adapter is not None and _adapter not in ADAPTERS:
-            raise _CliUsageError(f"unknown --adapter {_adapter!r}")
-        args, state_dir = _take_value(args, "--state-dir", what="a directory argument")
-        args, _thread = _take_value(args, "--thread-id", what="a value")
-        args, _iters = _take_value(args, "--iterations", what="an integer")
-        args, _profile = _take_value(args, "--profile", what="a stack name")
-        no_git = "--no-git" in args
-        args = [a for a in args if a not in ("--git", "--no-git")]  # --git = default
-        request = _request_text(args)
-        if not request or not out_dir:
-            raise _CliUsageError(
-                'usage: python -m foundry.cli autopilot "<target>" --out DIR '
-                "[--iterations N] [--backend B] [--adapter A] [--mode M] "
-                "[--state-dir DIR] [--thread-id NAME] [--no-git]"
-            )
-        iterations = int(_iters) if _iters else 3
-    except (_CliUsageError, ValueError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-
-    from foundry.lifecycle.autopilot import autopilot
-
-    stage_dir = out_dir if no_git else str(Path(out_dir) / ".stages")
-    report = autopilot(
-        request,
-        out_dir=stage_dir,
-        iterations=iterations,
-        proxy=_build_proxy(backend),
-        thread_id=_thread or "autopilot",
-        mode=mode,
-        backend=backend,
-        adapter=_adapter,
-        state_dir=state_dir,
-        profile=(_profile if _profile is not None else "auto"),
-    )
-    print(report.summary())
-    if report.released_dir:
-        print(f"released:  {report.released_dir}")
-    if not no_git and report.released_dir:
-        _export_git(out_dir, [(f"i{r.index:02d}", r.out_dir, r.request[:72])
-                              for r in report.iterations if r.passed])
-    return 0 if all(r.passed for r in report.iterations) else 1
-
-
-def _milestones_main(args: list[str]) -> int:
-    """`foundry milestones "<big target>" --out DIR [...]` — the Phase-5 loop.
-
-    Plans (or takes ``--milestones "a; b; c"`` verbatim) and runs the full
-    factory per milestone, chaining released trees. Exit 0 iff EVERY milestone
-    released; 1 when the loop stopped at a gate refusal; 2 on usage error.
-    """
-    try:
-        args, out_dir = _take_value(args, "--out", what="a directory argument")
-        args, _mode = _take_value(args, "--mode", what="a value")
-        mode = _mode if _mode is not None else MODE_ASSISTANT
-        if mode not in MODES:
-            raise _CliUsageError(f"unknown --mode {_mode!r}")
-        args, _backend = _take_value(args, "--backend", what="a value")
-        backend = _backend if _backend is not None else _MOCK_BACKEND
-        if backend not in BACKENDS:
-            raise _CliUsageError(f"unknown --backend {_backend!r}")
-        args, _adapter = _take_value(args, "--adapter", what="a value")
-        if _adapter is not None and _adapter not in ADAPTERS:
-            raise _CliUsageError(f"unknown --adapter {_adapter!r}")
-        args, plan_arg = _take_value(args, "--milestones", what="a '; '-separated list")
-        args, state_dir = _take_value(args, "--state-dir", what="a directory argument")
-        args, _thread = _take_value(args, "--thread-id", what="a value")
-        args, _max = _take_value(args, "--max-milestones", what="an integer")
-        args, _profile = _take_value(args, "--profile", what="a stack name")
-        no_git = "--no-git" in args
-        args = [a for a in args if a not in ("--git", "--no-git")]  # --git = default
-        request = _request_text(args)
-        if not request or not out_dir:
-            raise _CliUsageError(
-                'usage: python -m foundry.cli milestones "<big target>" --out DIR '
-                "[--milestones 'a; b; c'] [--backend B] [--adapter A] [--mode M] "
-                "[--state-dir DIR] [--thread-id NAME] [--max-milestones N] [--no-git]"
-            )
-        max_milestones = int(_max) if _max else 8
-    except (_CliUsageError, ValueError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-
-    from foundry.lifecycle.milestones import run_milestones
-
-    explicit = [m.strip() for m in (plan_arg or "").split(";") if m.strip()] or None
-    proxy = None if explicit else _build_proxy(backend)
-    stage_dir = out_dir if no_git else str(Path(out_dir) / ".stages")
-    report = run_milestones(
-        request,
-        out_dir=stage_dir,
-        milestones=explicit,
-        proxy=proxy,
-        thread_id=_thread or "milestones",
-        max_milestones=max_milestones,
-        mode=mode,
-        backend=backend,
-        adapter=_adapter,
-        state_dir=state_dir,
-        profile=(_profile if _profile is not None else "auto"),
-    )
-    print(report.summary())
-    if report.released_dir:
-        print(f"released:  {report.released_dir}")
-    if not no_git and report.released_dir:
-        _export_git(out_dir, [(f"m{r.index:02d}", r.out_dir, r.title)
-                              for r in report.results if r.passed])
-    return 0 if report.passed else 1
-
-
-def _export_git(out_dir: str, released: list[tuple[str, str, str]]) -> None:
-    """Project the released increments into ONE git repo at <out>/repo (a VIEW —
-    the CAS/verdicts are untouched). Failure is reported, never fatal: the
-    released trees stand either way."""
-    from pathlib import Path
-
-    from foundry.lifecycle.git_export import GitExportError, ReleaseExport, export_lineage
-
-    try:
-        head = export_lineage(
-            out_dir,  # <out> IS the repo; increments stage under <out>/.stages
-            [ReleaseExport(tag=tag, tree_dir=Path(d), message=title)
-             for tag, d, title in released],
-        )
-        print(f"git repo:  {out_dir}  (HEAD {head[:12]}, "
-              f"{len(released)} tagged commit(s); increments in .stages/)")
-    except GitExportError as exc:
-        print(f"git export skipped ({exc}) — increments stand in "
-              f"{Path(out_dir) / '.stages'}", file=sys.stderr)
-
-
 # ---- entry point ------------------------------------------------------------
 
 
@@ -1784,8 +1633,8 @@ _REMOVED_FLAGS = frozenset({"--packs", "--apply", "--guardian-approve", "--stric
 
 def _request_text(args: list[str]) -> str:
     removed = [a.split("=", 1)[0] for a in args if a.split("=", 1)[0] in _REMOVED_FLAGS]
-    if args and args[0] == "evolve":
-        removed.insert(0, "the evolve subcommand")
+    if args and args[0] in ("evolve", "milestones", "autopilot"):
+        removed.insert(0, f"the {args[0]} subcommand")
     if removed:
         raise _CliUsageError(f"{removed[0]} is no longer supported")
     return " ".join(args).strip()
@@ -1891,15 +1740,6 @@ def main(argv: list[str] | None = None) -> int:
     stopped the run.
     """
     args = sys.argv[1:] if argv is None else argv
-    # The milestone route (ROADMAP Phase 5): `foundry milestones "<big target>"
-    # --out DIR` plans an ordered milestone list and runs the FULL factory per
-    # milestone, chaining each released tree as the next milestone's base.
-    if args and args[0] == "milestones":
-        return _milestones_main(args[1:])
-    # The autopilot route: Director proposes, a software/usability panel votes,
-    # the winner becomes the next iteration (fail-closed on panel decline).
-    if args and args[0] == "autopilot":
-        return _autopilot_main(args[1:])
     # Simple value flags parse through `_take_value`/`_take_int` (H5: one helper
     # instead of 13 copy-pasted index/slice blocks); a usage error raises and is
     # rendered identically below. Comments mark the non-obvious semantics.

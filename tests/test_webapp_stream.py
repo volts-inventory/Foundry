@@ -342,42 +342,6 @@ def test_activity_is_throttled_deduped_and_capped_per_step():
     assert server.take_activity(p2, "editing again.py", now=9000.0) is not None
 
 
-# --- platform builds feed the FLOOR, not just the log ------------------------- #
-
-def test_platform_svc_nodes_stream_floor_telemetry_quietly(store, tmp_path, monkeypatch):
-    """A platform build streams the same per-node start/finish `active` telemetry a
-    single build does, so the office seats the agent actually mid-call and clears the
-    room when it ends. It used to announce ONE room per service and never a finish —
-    every room stayed lit forever and the CTO had nowhere to walk. The events are
-    `quiet`: the per-service `svc` boxes already narrate each node to the quest log."""
-    import foundry.platform as platform_mod
-    from foundry.platform.planner import plan_platform
-    from foundry.platform.schema import PlatformResult
-
-    def fake_build_platform(request, *, out_dir, progress_cb=None, **_kw):
-        cb = progress_cb or (lambda _e: None)
-        cb({"type": "svc_start", "service": "data", "role": "data"})
-        cb({"type": "svc_node", "service": "data", "node": "frontend_lead",
-            "scope": "factory:implementation", "phase": "start"})
-        cb({"type": "svc_node", "service": "data", "node": "frontend_lead",
-            "scope": "factory:implementation", "phase": "finish", "detail": {}})
-        return PlatformResult(plan=plan_platform(request), services=(),
-                              out_dir=out_dir, passed=True)
-
-    monkeypatch.setattr(platform_mod, "build_platform", fake_build_platform)
-    p = _project(out_base=tmp_path / "out")
-    (tmp_path / "out").mkdir()
-    server._run_platform(p)
-
-    active = [e for e in p.log if e["type"] == "active" and e.get("agent")]
-    assert [(e["room"], e["phase"]) for e in active] == [("frontend", "start"),
-                                                         ("frontend", "finish")]
-    assert all(e["agent"] == "Frontend Engineer" and e["quiet"] for e in active)
-    # and the quest log still gets exactly one box per node, from the `svc` stream
-    svc_phases = [e["phase"] for e in p.log if e["type"] == "svc"]
-    assert svc_phases == ["start", "agent_start", "agent_done"]
-
-
 def test_parse_workers_defaults_clamps_and_ignores_junk():
     assert server.parse_workers(None) == {"frontend": 2, "backend": 2, "data": 2, "test": 2}
     got = server.parse_workers({"frontend": "5", "backend": -3, "data": "x", "test": 99,

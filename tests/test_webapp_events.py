@@ -188,11 +188,6 @@ def test_checkpoint_actions_differ_per_boundary() -> None:
 
     assert checkpoint_actions("product")["approve"] != checkpoint_actions("design")["approve"]
     assert "gates" in checkpoint_actions("release")["approve"]
-    # The autopilot proposal decides a whole NEXT release — all three differ there.
-    prop = checkpoint_actions("autopilot_proposal")
-    assert "next release" in prop["approve"]
-    assert "edited" in prop["changes"]
-    assert "autopilot" in prop["reject"]
     # An unknown boundary still yields true, generic copy (never a KeyError).
     unknown = checkpoint_actions("something_new")
     assert unknown["approve"] and unknown["changes"] and unknown["reject"]

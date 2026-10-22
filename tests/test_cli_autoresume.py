@@ -1,6 +1,6 @@
 """CLI in-process auto-resume (parity with the Workshop server).
 
-A DURABLE ``foundry run``/``milestones --state-dir …`` must survive a TRANSIENT
+A DURABLE ``foundry run --state-dir …`` must survive a TRANSIENT
 provider failure (a spent Max usage/session window surfaces as
 ``ProxyUnavailable``): back off and RE-INVOKE from the durable checkpoint instead
 of dying and needing a manual restart. A NON-durable run has no checkpoint, so

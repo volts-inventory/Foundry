@@ -2,7 +2,7 @@
 
 The CAS stays the source of truth (verdicts bind to normalized tree digests;
 records are append-only); git is the HUMAN interface: one repository where
-each released increment is a tagged commit — `git diff m01..m02`, checkout any
+each released increment is a tagged commit — `git diff r01..r02`, checkout any
 increment, push to a remote. This module is a pure projection: it never feeds
 back into trust, and re-exporting the same lineage reproduces IDENTICAL commit
 SHAs (pinned author/committer identity + deterministic timestamps derived from

@@ -169,29 +169,6 @@ matches the true record.</textarea>
             <p class="hint" id="model-note"></p>
           </div>
           <div class="field">
-            <label for="build-select">Build as</label>
-            <select id="build-select">
-              <option value="milestones" selected>milestone ladder — releasable increments (best for big specs)</option>
-              <option value="single">single build — the whole spec at once</option>
-            </select>
-          </div>
-          <div id="milestones-opts">
-            <div class="field">
-              <label for="max-milestones">Max milestones <span class="hint">— ladder length cap; the planner may use fewer</span></label>
-              <input id="max-milestones" type="number" min="1" max="12" value="6" />
-            </div>
-            <div class="field">
-              <label for="milestones-text">Explicit ladder <span class="hint">— optional, one milestone per line; blank = the model plans it</span></label>
-              <textarea id="milestones-text" rows="6"
-                placeholder="record store + XOR combiner over a selection vector&#10;2-server query split: random share r and r XOR e_i">record store: fixed-size records + an XOR combiner over a selection vector
-2-server query split: a uniform random share r and r' = r XOR e_i for index i
-server answer + client reconstruct: each server XORs its selected records; client XORs both → record i
-correctness across indices, variable DB sizes, and multi-block records
-privacy tests: each server's query vector is independent of i (unlinkability)
-single-server additive-homomorphic (Paillier) variant + the demo runner</textarea>
-            </div>
-          </div>
-          <div class="field">
             <label for="adapter-select">Coding substrate</label>
             <select id="adapter-select">
               <option value="stub">stub — deterministic no-op (smoke/demo)</option>
@@ -229,10 +206,6 @@ single-server additive-homomorphic (Paillier) variant + the demo runner</textare
               <label for="token-cap-input">Token cap <span class="hint">— stop the build after this many tokens (any backend; cache reads count 1/10)</span></label>
               <input id="token-cap-input" type="number" min="0" step="10000" placeholder="no cap" />
             </div>
-            <div class="field">
-              <label for="autopilot-input">Autopilot <span class="hint">— self-iterations after a green build (0 = off): a Director proposes, a panel votes</span></label>
-              <input id="autopilot-input" type="number" min="0" max="20" value="0" />
-            </div>
           </div>
           <div class="field worker-limits">
             <label>Workers per specialty <span class="hint">— max tickets in flight at once for each specialist (0 = pause that lane)</span></label>
@@ -246,25 +219,6 @@ single-server additive-homomorphic (Paillier) variant + the demo runner</textare
           <p class="hint" id="parallel-note">Tickets run in dependency order; each specialty
             works at most this many at once, the rest queue.</p>
           <label class="check"><input type="checkbox" id="supervised" checked /> Supervised (CTO approves each checkpoint)</label>
-          <p class="hint">A multi-service request (e.g. a site with users + posts) is auto-built as a PLATFORM — split into web / backend / data services (the backend owns the REST API, auth &amp; domain logic), each auto-deepened, then stitched into one monorepo. A single thing builds as one service.</p>
-          <details class="adv-platform">
-            <summary>Advanced — platform build</summary>
-            <div class="field-grid">
-              <div class="field">
-                <label for="max-passes">Max deepening passes per service <span class="hint">— failsafe ceiling; auto stops sooner (default 6)</span></label>
-                <input type="number" id="max-passes" min="1" value="6" />
-              </div>
-              <div class="field">
-                <label for="max-parallel">Services built at once <span class="hint">— concurrency across services (default 4)</span></label>
-                <input type="number" id="max-parallel" min="1" value="4" />
-              </div>
-              <div class="field">
-                <label for="max-slots-svc">Tasks per service <span class="hint">— parallelism within each service (default 6)</span></label>
-                <input type="number" id="max-slots-svc" min="1" value="6" />
-              </div>
-            </div>
-            <label class="check"><input type="checkbox" id="critic-on" checked /> Completeness critic <span class="hint">— judges "done" each pass; off = stop on plateau only</span></label>
-          </details>
         </div>
       </details>
 
@@ -292,10 +246,6 @@ single-server additive-homomorphic (Paillier) variant + the demo runner</textare
         <div id="cp-arts" class="cp-arts"></div>
       </details>
       <p class="cp-note">An approve only lets the build reach the gates — it can never ship a failing build. Request changes to send the work back for another pass.</p>
-      <div id="cp-edit-wrap" class="hidden">
-        <label>Next-iteration request <span class="hint">— edit before approving; REQUEST CHANGES builds YOUR text instead of the panel's</span></label>
-        <textarea id="cp-edit" rows="3"></textarea>
-      </div>
       <div id="cp-prov" class="cp-prov"></div>
       <!-- Reading the diff is evidence-gathering, so it sits with the evidence —
            above the decision, not competing with it. -->

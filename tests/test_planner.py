@@ -731,3 +731,36 @@ def test_replan_retires_constraints_it_no_longer_emits() -> None:
     channel = merge_constraints(channel, second["pinned_constraints"])
 
     assert {c.id for c in live_constraints(channel)} == {"PC-001", "OP-1"}
+
+
+def test_replan_retires_tickets_it_no_longer_emits() -> None:
+    from foundry.agents.implementation.tickets import read_tickets
+
+    cas = ArtifactStore()
+    revised = _plan(tickets=[t for t in PLAN["tickets"] if t["id"] != "T-003"])
+    rt, _ = runtime_for(PLAN, revised, cas=cas)
+    node = make_planner_node(rt)
+    first = node({"request": "x"}, config_for("r"))
+    state: FactoryState = {
+        "request": "x",
+        "artifacts": first["artifacts"],
+        "scope_tier": first["scope_tier"],
+        "gates": [_spec_verdict(GateStatus.FAIL, ("finding",), epoch=1)],
+    }
+    second = node(state, config_for("r", step=5))
+    after: FactoryState = {**state, "artifacts": [*first["artifacts"], *second["artifacts"]]}
+    assert [t.id for t in read_tickets(after, cas.resolve)] == ["T-001", "T-002"]
+    assert "retired ticket(s) T-003" in " ".join(second["agent_journal"][0].concerns)
+
+
+def test_ticket_ids_are_made_file_safe_and_references_follow() -> None:
+    tickets, criteria, concerns = _build_tickets(
+        [_ticket("a/b"), _ticket("a-b"), _ticket("x y", "a/b", scenarios=[_scn("AC-1")])],
+        _TSEQ, _CSEQ, set(),
+    )
+    assert [t.id for t in tickets] == ["a-b-2", "a-b", "x-y"]
+    assert tickets[2].depends_on == ("a-b-2",)
+    assert [(c.ticket_id, c.oracle_hint) for c in criteria] == [
+        ("x-y", "features/x-y.feature::AC-1")
+    ]
+    assert any("'a/b' renamed to 'a-b-2'" in c for c in concerns)

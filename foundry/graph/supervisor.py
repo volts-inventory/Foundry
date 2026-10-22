@@ -74,7 +74,6 @@ from foundry.graph.gate_wiring import (
 from foundry.graph.subgraphs.implementation import build_implementation_subgraph
 from foundry.graph.subgraphs.planner import build_planner_subgraph
 from foundry.graph.subgraphs.quality import build_quality_subgraph
-from foundry.proxy.token_meter import TokenCapExceeded
 from foundry.schemas.base import BudgetLedger
 from foundry.schemas.checkpoint import (
     CheckpointBoundary,
@@ -512,12 +511,12 @@ def build_supervisor_graph(
     # wave-mates' diffs ride out with it); this node, a superstep later, raises.
     # Raising inside the subgraph would discard every write of the pass. On a
     # resume it raises again while the run's meter is still spent; with headroom
-    # (a higher cap) it returns and the unbuilt tickets are built.
+    # (a higher cap) — or no meter at all (the cap was removed) — it returns and the
+    # unbuilt tickets are built, which clears the stop.
     def token_cap(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         meter = getattr(rt.proxy, "token_meter", None)
-        if meter is None:
-            raise TokenCapExceeded(cap_stopped(state)[0].explanation)
-        meter.check()
+        if meter is not None:
+            meter.check()
         return {}
 
     def _route_implementation(state: FactoryState) -> str:

@@ -210,6 +210,47 @@ def test_waves_respect_dependencies_and_never_share_a_file() -> None:
     assert [t.id for t in next_wave(tickets, {"A", "B", "C", "D"})] == []
 
 
+def test_unrestricted_and_directory_scopes_collide() -> None:
+    src = _ticket("SRC", 0, files=("src/",))
+    app = _ticket("APP", 1, files=("src/app.py",))  # under SRC's directory
+    other = _ticket("OTHER", 2, files=("docs/readme.md",))
+    anything = _ticket("ANY", 3)  # empty files: may write anywhere
+    tickets = [src, app, other, anything]
+    assert [t.id for t in next_wave(tickets, set())] == ["SRC", "OTHER"]
+    assert [t.id for t in next_wave(tickets, {"SRC", "OTHER"})] == ["APP"]
+    assert [t.id for t in next_wave(tickets, {"SRC", "OTHER", "APP"})] == ["ANY"]
+    first = _ticket("ANY0", 0)
+    assert [t.id for t in next_wave([first, other], set())] == ["ANY0"]  # runs alone
+
+
+def test_a_replanned_ticket_uses_its_newest_version(tmp_path: Path) -> None:
+    store = ArtifactStore()
+    rec = _Recorder()
+    v1 = _ticket("T-001", 0, files=("a.py",), difficulty=Difficulty.TRIVIAL)
+    v2 = _ticket("T-001", 5, files=("a.py",), difficulty=Difficulty.COMPLEX, version=2)
+    gone = _ticket("T-002", 1, files=("b.py",))
+    tomb = gone.model_copy(update={"supersedes": "T-002", "version": 2, "seq": _seq(6)})
+    first_task = task_from_ticket(v1, _seq(0, "senior_engineer"))
+    state = _state(store, [v1, gone, v2, tomb], tasks=[first_task.model_dump(mode="json")])
+    out = _graph(_runtime(rec, store), store, tmp_path).compile().invoke(state, _config())
+    assert rec.calls == ["T-001"]  # the retired ticket is never built
+    assert rec.packets["T-001"].task["tier"] == "T1"  # complex, not v1's trivial T3
+    assert set(_diffs(out)) == {"T-001"}
+
+
+def test_an_unmaterializable_tree_is_noted_not_silently_dropped(tmp_path: Path) -> None:
+    store = ArtifactStore()
+    rec = _Recorder()
+    bad = AcceptanceCriterion(id="AC-9", text="x", ticket_id="../escape", seq=_seq(9))
+    state = _state(store, [_ticket("T-001", 0, files=("a.py",))], artifacts=[
+        emit_artifact(bad, "acceptance_criterion", "planner", bad.seq, store=store),
+    ])
+    out = _graph(_runtime(rec, store), store, tmp_path).compile().invoke(state, _config())
+    [note] = [t for t in out["gate_triage"] if t.name == "wave-overlay"]
+    assert "bare base" in note.explanation and "escape" in note.explanation
+    assert any("bare base" in c for j in out["agent_journal"] for c in j.concerns)
+
+
 # ---- the engineering loop -----------------------------------------------------
 
 
@@ -387,6 +428,38 @@ def test_supervisor_raises_the_cap_after_committing_and_resumes(tmp_path: Path) 
     assert {"T-001", "T-002", "T-003"} <= set(_diffs(final))
 
 
+def test_a_cap_stopped_run_resumed_without_a_cap_continues(tmp_path: Path) -> None:
+    from tests.test_supervisor import _SCRIPTS, KEY, KEY_ID, _runner
+    from tests.test_supervisor import _config as _sup_config
+
+    store = ArtifactStore()
+    meter = TokenMeter(10**9)
+    rec = _Recorder(cap_on="T-002", meter=meter)
+    proxy = ModelProviderProxy(MockTransport.scripted(dict(_SCRIPTS), default_verdict="approve"),
+                               signer=ZoneBSigner(KEY, KEY_ID))
+    proxy.token_meter = meter
+    rt = AgentRuntime(proxy=proxy, adapter=rec, cas=store)
+    src = tmp_path / "src"
+    src.mkdir()
+    records = GlobalRecords()
+    app = build_supervisor_graph(
+        rt, runner=_runner(records), resolve=store.resolve, resolve_blob=store.resolve_blob,
+        source_dir=str(src), max_fix_attempts=1,
+    ).compile(checkpointer=MemorySaver())
+    cfg = _sup_config("uncapped-run")
+    token = set_gate_write_verifier(DevGateWriteVerifier(KEY, KEY_ID, records))
+    try:
+        with pytest.raises(TokenCapExceeded):
+            app.invoke(_state(store, _wave_of_three()), cfg)
+        proxy.token_meter = None  # the operator resumes with the cap removed
+        final = app.invoke(None, cfg)
+    finally:
+        reset_gate_write_verifier(token)
+    assert rec.calls.count("T-002") == 1
+    assert {"T-001", "T-002", "T-003"} <= set(_diffs(final))
+    assert not cap_stopped(final)
+
+
 def test_a_ticket_with_a_diff_is_not_rebuilt(tmp_path: Path) -> None:
     store = ArtifactStore()
     rec = _Recorder()
@@ -488,7 +561,8 @@ def test_a_failing_intermediate_build_runs_the_fixer_before_the_next_wave(
     assert rec.calls == ["T-001", "fix-1", "T-002"]
     assert _builds(out) == [GateStatus.FAIL, GateStatus.PASS]
     assert rec.seen["T-002"]["app.py"] == "def fixed():\n    return 1\n"  # built on the fix
-    assert out["budget"].fix_attempts_since_all_green == 1
+    # The passing re-check is green: the final gate keeps its whole fix budget.
+    assert out["budget"].fix_attempts_since_all_green == 0
     # Integration applies wave 2 AFTER the fix, so its edit to the same file wins.
     tree = tmp_path / "tree"
     materialize_workdir(out, tree, resolve=store.resolve, resolve_blob=store.resolve_blob)
@@ -586,6 +660,48 @@ def test_per_specialty_limit_is_never_exceeded(tmp_path: Path) -> None:
     assert adapter.high["frontend"] <= 2
     assert adapter.total_high <= 4
     assert adapter.total_high >= 2  # and it did run concurrently
+
+
+def test_a_task_waiting_on_its_specialty_never_holds_a_pool_thread(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    started: list[str] = []
+    cond = threading.Condition()
+    release = threading.Event()
+
+    class _Gated(_LiveByLineage):
+        def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
+            with cond:
+                started.append(str(packet.task["id"]))
+                cond.notify_all()
+            release.wait(5)
+            return super().run(packet, sandbox)
+
+    adapter = _Gated()
+    pool = LocalWorkPool(
+        sandbox_factory=lambda _t: Sandbox(str(src)),
+        adapter_factory=lambda _n: adapter,
+        max_slots=3,
+        limits={"backend": 1, "frontend": 2},
+    )
+    try:
+        ids = [pool.submit(_etask(tid, sp)) for tid, sp in (
+            ("B1", "backend"), ("B2", "backend"), ("B3", "backend"),
+            ("F1", "frontend"), ("F2", "frontend"), ("F3", "frontend"),
+        )]
+        with cond:
+            cond.wait_for(lambda: len(started) >= 3, timeout=2)
+            first = sorted(started)
+        release.set()
+        for tid in ids:
+            pool.result(tid)
+    finally:
+        release.set()
+        pool.shutdown()
+    assert first == ["B1", "F1", "F2"]  # B2/B3 wait without taking a thread
+    assert adapter.high == {"backend": 1, "frontend": 2}
+    assert adapter.total_high <= 3
+    assert sorted(started) == ["B1", "B2", "B3", "F1", "F2", "F3"]
 
 
 def test_on_task_reports_start_done_failed_and_is_fail_soft(tmp_path: Path) -> None:

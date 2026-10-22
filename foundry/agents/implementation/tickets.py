@@ -7,8 +7,9 @@ them wave by wave from the implementation subgraph's looping ``engineering``
 node:
 
 * A **wave** is every ticket whose dependencies all have a FeatureDiff, minus
-  same-file collisions: two tickets that share a ``files`` entry never run in one
-  wave — the later one (by Seq) waits for the next wave and builds on the first.
+  write-scope collisions: two tickets whose ``files`` overlap (the same path, a
+  ``dir/`` entry and a path under it, or an empty — unrestricted — scope) never run
+  in one wave — the later one (by Seq) waits for the next wave and builds on the first.
 * Each wave runs through :class:`LocalWorkPool` with ``lineage = specialty`` and a
   per-specialty slot limit under the global ``max_slots``.
 * Each ticket's sandbox is seeded with the FULL integrated tree as it stands after
@@ -118,6 +119,7 @@ SCOPE_TRIAGE = "write-scope"
 # One note per failed attempt (the triage union keys on name, so the attempt is in it).
 FAIL_TRIAGE = "ticket-failed"
 CAP_TRIAGE = "token-cap"
+OVERLAY_TRIAGE = "wave-overlay"
 # Attempts a ticket gets before it is skipped; bounds the loop on a ticket that
 # keeps erroring.
 MAX_TICKET_ATTEMPTS = 2
@@ -138,7 +140,9 @@ def has_tickets(state: FactoryState) -> bool:
 
 
 def read_tickets(state: FactoryState, resolve: ArtifactResolver) -> tuple[Ticket, ...]:
-    """The live tickets (newest by Seq per id), in Seq order — the scheduling order."""
+    """The live tickets (newest by Seq per id), in Seq order — the scheduling order.
+    A newest record whose ``supersedes`` names its own id is a tombstone: a re-plan
+    dropped that ticket."""
     newest: dict[str, Ticket] = {}
     for handle in (a for a in (state.get("artifacts") or ()) if a.kind == TICKET_KIND):
         body = resolve(handle)
@@ -147,7 +151,8 @@ def read_tickets(state: FactoryState, resolve: ArtifactResolver) -> tuple[Ticket
         prior = newest.get(body.id)
         if prior is None or body.seq > prior.seq:
             newest[body.id] = body
-    return tuple(sorted(newest.values(), key=lambda t: (t.seq, t.id)))
+    live = (t for t in newest.values() if t.supersedes != t.id)
+    return tuple(sorted(live, key=lambda t: (t.seq, t.id)))
 
 
 def task_id_for_ticket(ticket_id: str) -> str:
@@ -225,22 +230,30 @@ def next_wave(
     tickets: Sequence[Ticket], done: Iterable[str], skipped: Iterable[str] = ()
 ) -> tuple[Ticket, ...]:
     """The tickets to build next: not done/skipped, every known dependency done, and
-    no ``files`` entry shared with an earlier (by order) ticket of the same wave."""
+    no write-scope overlap with an earlier (by order) ticket of the same wave. An
+    empty ``files`` (unrestricted scope) overlaps everything, so it runs alone."""
     known = {t.id for t in tickets}
     done, skipped = set(done), set(skipped)
     wave: list[Ticket] = []
-    claimed: set[str] = set()
     for t in tickets:
         tid = task_id_for_ticket(t.id)
         if tid in done or tid in skipped:
             continue
         if any(task_id_for_ticket(d) not in done for d in t.depends_on if d in known):
             continue
-        if claimed.intersection(t.files):
+        if any(_scopes_overlap(w.files, t.files) for w in wave):
             continue
-        claimed.update(t.files)
         wave.append(t)
     return tuple(wave)
+
+
+def _scopes_overlap(a: Sequence[str], b: Sequence[str]) -> bool:
+    if not a or not b:
+        return True
+    return any(
+        x == y or (x.endswith("/") and y.startswith(x)) or (y.endswith("/") and x.startswith(y))
+        for x in a for y in b
+    )
 
 
 def pending_wave(state: FactoryState, resolve: ArtifactResolver) -> tuple[Ticket, ...]:
@@ -350,9 +363,10 @@ class _ScopedAdapter:
 
 def _integrated_overlay(
     state: FactoryState, resolve: ArtifactResolver, resolve_blob: BlobResolver
-) -> dict[str, str | None]:
+) -> tuple[dict[str, str | None], str | None]:
     """The integrated tree after the previous waves (feature files included, other
-    gate inputs excluded), as an overlay for each ticket's fresh sandbox."""
+    gate inputs excluded), as an overlay for each ticket's fresh sandbox — plus the
+    materialization error when the tree could not be built (overlay then empty)."""
     from foundry.graph.gate_wiring import (
         GATE_INPUT_FILES,
         MaterializationError,
@@ -363,8 +377,8 @@ def _integrated_overlay(
         root = Path(tmp)
         try:
             materialize_workdir(state, root, resolve=resolve, resolve_blob=resolve_blob)
-        except MaterializationError:
-            return {}  # the build gate records this tree as ERROR; build on the base
+        except MaterializationError as exc:
+            return {}, str(exc)
         out: dict[str, str | None] = {}
         for f in sorted(root.rglob("*")):
             rel = f.relative_to(root).as_posix()
@@ -374,7 +388,7 @@ def _integrated_overlay(
                 out[rel] = f.read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 continue
-        return out
+        return out, None
 
 
 def _newest_by(
@@ -584,15 +598,14 @@ def make_engineering_node(
         new_tasks: list[dict[str, Any]] = []
         for i, ticket in enumerate(tickets):
             tid = task_id_for_ticket(ticket.id)
-            if tid in on_channel:
-                tasks[tid] = on_channel[tid]
-                continue
-            task = task_from_ticket(
-                ticket, rt.seq(config, SENIOR_NODE_ID, f"task:{tid}", local=i),
-                ticket_tiers=ticket_tiers, known=known,
-            )
-            tasks[tid] = task
-            new_tasks.append(task.model_dump(mode="json"))
+            # The tasks channel keeps a task's FIRST record; a re-planned ticket's
+            # tier and dependencies come from its newest version, re-derived here.
+            existing = on_channel.get(tid)
+            seq = (existing.seq if existing
+                   else rt.seq(config, SENIOR_NODE_ID, f"task:{tid}", local=i))
+            tasks[tid] = task_from_ticket(ticket, seq, ticket_tiers=ticket_tiers, known=known)
+            if existing is None:
+                new_tasks.append(tasks[tid].model_dump(mode="json"))
         writes: dict[str, Any] = {"tasks": new_tasks} if new_tasks else {}
 
         done = _built_task_ids(state)
@@ -602,7 +615,10 @@ def make_engineering_node(
 
         constraints: Sequence[PinnedConstraint] = state.get("pinned_constraints") or ()
         blobs = resolve_blob or (rt.cas.resolve_blob if rt.cas is not None else None)
-        overlay = _integrated_overlay(state, resolve, blobs) if blobs is not None else {}
+        overlay: dict[str, str | None] = {}
+        overlay_error: str | None = None
+        if blobs is not None:
+            overlay, overlay_error = _integrated_overlay(state, resolve, blobs)
         criteria = _newest_by(state, resolve, _CRITERION_KIND, AcceptanceCriterion, "id")
         contracts = _newest_by(state, resolve, CONTRACT_KIND, InterfaceContract, "name")
         prior = _prior_failures(state)
@@ -637,6 +653,14 @@ def make_engineering_node(
         adapter_name = _adapter_name(rt)
         submitted: dict[str, str] = {}
         merged: dict[str, list[Any]] = {}
+        if overlay_error is not None:
+            # This wave builds on the bare base, not on the earlier waves: say so.
+            merged["gate_triage"] = [GateTriage(
+                name=OVERLAY_TRIAGE, run_against=f"wave/{wave[0].id}",
+                explanation="the integrated tree could not be materialized, so this wave "
+                f"builds on the bare base without the earlier waves' work: {overlay_error}"[:2000],
+                produced_by=NODE_ID, seq=rt.seq(config, NODE_ID, f"overlay:{wave[0].id}"),
+            )]
         with LocalWorkPool(
             sandbox_factory=make_sandbox,
             adapter_factory=lambda _name: scoped,
@@ -701,6 +725,8 @@ def make_engineering_node(
                 f"{t.id} ({t.specialty.value}, {tasks[task_id_for_ticket(t.id)].tier})"
                 for t in built
             ),
+            concerns=(f"Integrated tree unavailable, built on the bare base: {overlay_error}",)
+            if overlay_error else (),
         ))
         return writes
 

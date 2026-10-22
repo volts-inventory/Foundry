@@ -179,28 +179,26 @@ _PASSING_DIFF = (
     "--- /dev/null\n+++ b/test_app.py\n@@ -0,0 +1,2 @@\n"
     "+def test_ok():\n    assert 1 + 1 == 2\n"
 )
-# The passing tree plus catch-all pytest-bdd steps binding every planned feature, for
-# runs whose planner emits ticketed (executable) scenarios.
+# The passing tree plus specific pytest-bdd steps for the scenarios the planner payload
+# emits (legacy text criteria render as one ``Then <text>`` step each). Catch-all
+# steps would not do: the Test gate rejects scenarios bound only by them.
 _BDD_PASSING_DIFF = _PASSING_DIFF + (
-    "--- /dev/null\n+++ b/test_steps.py\n@@ -0,0 +1,18 @@\n"
-    "+from pytest_bdd import given, parsers, scenarios, then, when\n"
+    "--- /dev/null\n+++ b/test_steps.py\n@@ -0,0 +1,15 @@\n"
+    "+from pytest_bdd import scenarios, then\n"
+    "+\n"
+    "+import app\n"
     "+\n"
     "+scenarios('features')\n"
     "+\n"
     "+\n"
-    "+@given(parsers.re('.*'))\n"
-    "+def _given():\n"
-    "+    pass\n"
+    "+@then('Given a user, When they add a todo, Then it appears.')\n"
+    "+def _todo_appears():\n"
+    "+    assert app.VALUE == 42\n"
     "+\n"
     "+\n"
-    "+@when(parsers.re('.*'))\n"
-    "+def _when():\n"
-    "+    pass\n"
-    "+\n"
-    "+\n"
-    "+@then(parsers.re('.*'))\n"
-    "+def _then():\n"
-    "+    pass\n"
+    "+@then('Given an unauthenticated request, When it hits /todos, Then 401.')\n"
+    "+def _unauthenticated_rejected():\n"
+    "+    assert app.VALUE != 401\n"
 )
 # A compiling module + a test whose COLLECTION fails (imports a missing module):
 # compileall PASSes (syntactically valid), but pytest exits 2 -> a signed Test

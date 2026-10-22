@@ -11,7 +11,9 @@ influence a build — it only describes what already happened.
 
 from __future__ import annotations
 
+import json
 from collections import Counter
+from collections.abc import Mapping
 from typing import Any
 
 # Workshop rooms, left -> right (the agent walks the floor as the build advances).
@@ -76,6 +78,7 @@ ARTIFACT_ORIGIN: dict[str, tuple[str, str]] = {
     "adr": ("Planner", "plan"),
     "interface_contract": ("Planner", "plan"),
     "ownership_map": ("Planner", "plan"),
+    "ticket": ("Planner", "plan"),
     "scope_tier": ("Planner", "plan"),
     "feature_diff": ("Junior Engineer", "engineering"),
     "test_plan": ("Reviewer", "review"),
@@ -103,6 +106,7 @@ ARTIFACT_LABEL: dict[str, str] = {
     "adr": "ADR",
     "interface_contract": "Interface Contract",
     "ownership_map": "Ownership Map",
+    "ticket": "Ticket",
     "feature_diff": "Feature Diff (code!)",
     "test_plan": "Test Plan",
     "oracle_binding": "Oracle",
@@ -299,6 +303,48 @@ def live_event_for_node(
     return ev
 
 
+TASK_PHASES = ("start", "done", "failed")
+_SPECIALTIES = ("frontend", "backend", "data", "test")
+_TIER_FOR_DIFFICULTY = {"trivial": "T3", "standard": "T2", "complex": "T1"}
+
+
+def event_for_task(ev: Mapping[str, Any]) -> dict[str, Any] | None:
+    """A work-pool TaskEvent -> the floor's ``task`` event (a worker sprite appears on
+    ``start`` and leaves on ``done``/``failed``). None for a malformed event."""
+    phase = str(ev.get("phase", ""))
+    ticket_id = str(ev.get("ticket_id", ""))
+    if phase not in TASK_PHASES or not ticket_id:
+        return None
+    specialty = str(ev.get("specialty", ""))
+    return {
+        "type": "task", "phase": phase, "ticket_id": ticket_id,
+        "title": str(ev.get("title", "")),
+        "specialty": specialty if specialty in _SPECIALTIES else "backend",
+        "tier": str(ev.get("tier", "")),
+    }
+
+
+def ticket_event(detail: str) -> dict[str, Any] | None:
+    """The Tickets-tab row for a ``ticket`` artifact. Its ``detail`` one-liner is a JSON
+    object (id, title, specialty, difficulty, depends_on); anything else yields None and
+    the artifact still shows as an ordinary quest-log pickup."""
+    try:
+        d = json.loads(detail)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(d, dict) or not str(d.get("id", "")).strip():
+        return None
+    difficulty = str(d.get("difficulty") or "standard")
+    specialty = str(d.get("specialty") or "backend")
+    return {
+        "type": "ticket", "id": str(d["id"]), "title": str(d.get("title", "")),
+        "specialty": specialty if specialty in _SPECIALTIES else "backend",
+        "difficulty": difficulty,
+        "tier": _TIER_FOR_DIFFICULTY.get(difficulty, "T2"),
+        "depends_on": [str(x) for x in (d.get("depends_on") or [])],
+    }
+
+
 def events_for_payload(
     payload: dict[str, Any],
     seen_uris: set[str],
@@ -379,10 +425,16 @@ def events_for_payload(
             kind_seen[kind] += 1
             label = f"{label} #{kind_seen[kind]}"
         out.append({"type": "agent", "room": aroom, "agent": agent, "action": "work"})
+        detail = str(a.get("detail", ""))   # advisory content one-liner
+        tk = ticket_event(detail) if kind == "ticket" else None
+        if tk is not None:
+            detail = f"{tk['id']} — {tk['title']}"
         out.append({
             "type": "artifact", "room": aroom, "agent": agent, "kind": kind,
-            "label": label, "detail": str(a.get("detail", "")),  # advisory content one-liner
+            "label": label, "detail": detail,
         })
+        if tk is not None:
+            out.append(tk)
         # Attach a speech bubble for this agent if the journal had one.
         for s in say_by_room.get(aroom, []):
             if s["agent"] == agent:

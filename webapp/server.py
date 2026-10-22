@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import hmac
+import inspect
 import json
 import os
 import re
@@ -35,6 +36,7 @@ from foundry.schemas.architecture import CANONICAL_AREAS
 from webapp.events import (
     AGENT_BY_NODE,
     checkpoint_actions,
+    event_for_task,
     events_for_payload,
     events_for_result,
     live_event_for_node,
@@ -294,6 +296,36 @@ def _ideate_turn(backend: str, history: list[dict[str, str]]) -> dict[str, Any]:
     return result.parsed or {}
 
 
+WORKER_SPECIALTIES = ("frontend", "backend", "data", "test")
+DEFAULT_WORKERS = 2
+MAX_WORKERS = 16
+_TICKET_DIFFICULTIES = ("trivial", "standard", "complex")
+
+
+def parse_workers(raw: Any = None) -> dict[str, int]:
+    """Per-specialty worker limits from a request body: ints >= 0 (clamped to
+    MAX_WORKERS), default 2 each; unknown keys and non-integers fall back."""
+    src = raw if isinstance(raw, Mapping) else {}
+    out: dict[str, int] = {}
+    for spec in WORKER_SPECIALTIES:
+        try:
+            n = int(src.get(spec, DEFAULT_WORKERS))
+        except (TypeError, ValueError):
+            n = DEFAULT_WORKERS
+        out[spec] = max(0, min(MAX_WORKERS, n))
+    return out
+
+
+def parse_ticket_tiers(raw: Any) -> dict[str, str]:
+    """difficulty -> tier overrides; entries outside trivial|standard|complex -> T1|T2|T3 drop."""
+    if not isinstance(raw, Mapping):
+        return {}
+    return {
+        str(k): str(v).upper() for k, v in raw.items()
+        if str(k) in _TICKET_DIFFICULTIES and str(v).upper() in ("T1", "T2", "T3")
+    }
+
+
 @dataclass
 class Project:
     id: str
@@ -309,6 +341,8 @@ class Project:
     # actual parallelism to the lead's decomposition (min(tasks, this)).
     cost_cap_microusd: int | None = None  # global spend envelope (Wave D)
     token_cap: int | None = None  # stop the build cleanly after this many tokens
+    workers: dict[str, int] = field(default_factory=parse_workers)  # per-specialty limits
+    ticket_tiers: dict[str, str] = field(default_factory=dict)  # difficulty -> tier overrides
     max_fix_attempts: int = 2  # auto-fix retry budget per failing gate (run() default)
     release_seq: int = 1  # 1,2,3… within the floor; each iterate adds a release
     parent_id: str | None = None  # lineage: the release this one iterates on
@@ -1163,7 +1197,7 @@ def _run_factory(p: Project, resume: bool = False) -> None:
               text="↻ Resuming after a restart — picking up from the last checkpoint…")
     else:
         _emit(p, type="project", id=p.id, request=p.request, mode=p.mode, floor=p.floor,
-              backend=p.backend, slots=p.max_slots)
+              backend=p.backend, slots=p.max_slots, workers=p.workers)
         _emit(p, type="narrate", text=f"📋 New project on Floor {p.floor}: {p.request!r}")
         _emit(p, type="narrate", text=f"🏭 Mode: {p.mode}. The crew reports for duty…")
         if p.backend != "mock":
@@ -1302,6 +1336,12 @@ def _run_factory(p: Project, resume: bool = False) -> None:
             p.inflight.pop(node, None)
         _emit(p, **ev)
 
+    def task_cb(ev: Mapping[str, Any]) -> None:
+        """One ticket's worker started / finished / failed (the floor's per-ticket sprites)."""
+        out = event_for_task(ev)
+        if out is not None:
+            _emit(p, **out)
+
     def activity(text: str) -> None:
         """One line of "what the agent is doing right now", from inside a step."""
         line = take_activity(p, text)
@@ -1364,10 +1404,16 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     if p.backend != "mock":
         threading.Thread(target=_quiet_watchdog, daemon=True,
                          name=f"quiet-watchdog-{p.id}").start()
+    # Pass the ticket-scheduler kwargs only when this foundry.cli.run knows them.
+    accepted = inspect.signature(run).parameters
+    sched: dict[str, Any] = {k: v for k, v in (("task_cb", task_cb), ("workers", p.workers),
+                               ("ticket_tiers", p.ticket_tiers or None))
+             if k in accepted and v is not None}
     try:
         try:
             result = run(
-                run_request,                  # = p.request, or this rung's milestone framing
+                run_request,
+                **sched,                  # = p.request, or this rung's milestone framing
                 progress_cb=progress,
                 activity_cb=activity,         # what the agent is doing INSIDE a step
                 mode=p.mode,
@@ -1606,7 +1652,8 @@ def _spawn_iteration(
         spec=parent.spec_text or None, spec_text=parent.spec_text,
         out_base=_OUTPUT_ROOT / f"floor-{parent.floor}" / f"r{release_seq}",
         max_slots=parent.max_slots, cost_cap_microusd=parent.cost_cap_microusd,
-        token_cap=parent.token_cap,
+        token_cap=parent.token_cap, workers=dict(parent.workers),
+        ticket_tiers=dict(parent.ticket_tiers),
         max_fix_attempts=parent.max_fix_attempts, parent_id=parent.id,
         autopilot_budget=max(0, budget),
     )
@@ -1677,7 +1724,8 @@ def _spawn_milestone_next(parent: Project) -> Project:
         spec=parent.spec_text or None, spec_text=parent.spec_text,
         out_base=_OUTPUT_ROOT / f"floor-{parent.floor}" / f"r{release_seq}",
         max_slots=parent.max_slots, cost_cap_microusd=parent.cost_cap_microusd,
-        token_cap=parent.token_cap,
+        token_cap=parent.token_cap, workers=dict(parent.workers),
+        ticket_tiers=dict(parent.ticket_tiers),
         max_fix_attempts=parent.max_fix_attempts, parent_id=parent.id,
         autopilot_budget=parent.autopilot_budget,
     )
@@ -1846,7 +1894,7 @@ def _run_platform(p: Project) -> None:
     # knob drives platform and single builds. Each discipline room still gets its one
     # baseline worker; these extras are shared out across the rooms by demand.
     _emit(p, type="project", request=p.request, mode=p.mode, backend=p.backend,
-          slots=p.max_slots)
+          slots=p.max_slots, workers=p.workers)
     _emit(p, type="org", areas=areas, domains=domains)
     _emit(p, type="active", room=first_room)   # seat everyone; first discipline works
     _emit(p, type="narrate", text=f"🏗  Platform build — {p.request}")
@@ -2668,6 +2716,8 @@ class Handler(BaseHTTPRequestHandler):
                 cost_cap_microusd = int(round(usd * 1_000_000))
         except (TypeError, ValueError):
             pass
+        workers = parse_workers(body.get("workers"))
+        ticket_tiers = parse_ticket_tiers(body.get("ticket_tiers"))
         tok_env = os.environ.get("FOUNDRY_TOKEN_CAP", "").strip()
         token_cap = int(tok_env) if tok_env.isdigit() else None
         try:
@@ -2730,7 +2780,7 @@ class Handler(BaseHTTPRequestHandler):
             release_seq=release_seq, backend=backend, adapter=adapter, spec=spec,
             spec_text=effective_spec_text,
             out_base=out_base, max_slots=max_slots, cost_cap_microusd=cost_cap_microusd,
-            token_cap=token_cap,
+            token_cap=token_cap, workers=workers, ticket_tiers=ticket_tiers,
             max_fix_attempts=max_fix_attempts, parent_id=parent_id, base_dir=base_dir,
             autopilot_budget=autopilot_budget,
         )

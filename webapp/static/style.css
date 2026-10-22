@@ -183,7 +183,7 @@ button.warn{background:#5a4a18;border-color:var(--gold);color:#fff6da}
 .log-tab:active{transform:none;box-shadow:none}
 .log-tab:hover{color:var(--ink)}
 .log-tab.sel{color:var(--gold);border-bottom-color:var(--gold)}
-#log,#progress{list-style:none;margin:0;padding:8px 10px;overflow-y:auto;flex:1 1 auto;
+#log,#progress,#tickets{list-style:none;margin:0;padding:8px 10px;overflow-y:auto;flex:1 1 auto;
   font-size:12px;line-height:1.5}
 #log li,#progress li{padding:3px 0;border-bottom:1px dashed #1f2942;color:var(--dim);
   animation:pop .25s;overflow-wrap:anywhere;word-break:break-word}
@@ -191,6 +191,22 @@ button.warn{background:#5a4a18;border-color:var(--gold);color:#fff6da}
 #log li.good,#progress li.good{color:var(--green)}
 #log li.bad,#progress li.bad{color:var(--red)}
 #log li.gold,#progress li.gold{color:var(--gold)}
+/* TICKETS tab: one row per planned ticket, status from the live task events */
+#tickets li{padding:5px 0;border-bottom:1px dashed #1f2942;color:var(--dim);
+  overflow-wrap:anywhere;display:grid;grid-template-columns:auto 1fr auto;gap:2px 8px;align-items:baseline}
+#tickets .tk-id{color:var(--ink);font-weight:bold}
+#tickets .tk-title{color:var(--ink)}
+#tickets .tk-meta{grid-column:2/4;font-size:10px;color:var(--dim)}
+#tickets .tk-st{font-size:10px;letter-spacing:1px;text-transform:uppercase;border:1px solid var(--line);
+  border-radius:3px;padding:0 5px}
+#tickets .st-in-progress .tk-st{color:var(--gold);border-color:var(--gold)}
+#tickets .st-done .tk-st{color:var(--green);border-color:var(--green)}
+#tickets .st-failed .tk-st{color:var(--red);border-color:var(--red)}
+#tickets .tk-empty{display:block;color:var(--dim)}
+/* per-specialty worker limits in the build dialog: four short inputs in a row */
+.worker-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.worker-grid .wl{display:flex;flex-direction:column;gap:4px;margin:0}
+@media (max-width:520px){ .worker-grid{grid-template-columns:repeat(2,1fr)} }
 /* collapsible entries render as BLOCKS (cards) that expand DOWN: a clickable header
    (the short "what was completed" statement, always visible) over an indented body. */
 #log li:has(details),#progress li:has(details){border-bottom:none;padding:0}

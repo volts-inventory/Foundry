@@ -172,7 +172,17 @@ def render_acceptance(criteria: tuple[AcceptanceCriterion, ...]) -> RenderedDoc:
         parts.append("_No acceptance criteria recorded._")
     for c in sorted(criteria, key=lambda c: c.id):
         parts.append(f"## {c.id} ({c.criticality})\n")
-        parts.append(f"{c.text}\n")
+        if c.given or c.when or c.then:
+            steps = [
+                f"{'And' if i else word} {step}"
+                for word, group in (("Given", c.given), ("When", c.when), ("Then", c.then))
+                for i, step in enumerate(group)
+            ]
+            parts.append("```gherkin\n" + "\n".join(steps) + "\n```\n")
+            if c.ticket_id:
+                parts.append(f"**Ticket:** {c.ticket_id}\n")
+        else:
+            parts.append(f"{c.text}\n")
         if c.oracle_hint:
             parts.append(f"**Oracle hint:** {c.oracle_hint}\n")
         if c.security_abuse:

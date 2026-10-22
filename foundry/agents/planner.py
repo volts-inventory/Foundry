@@ -10,13 +10,16 @@ channels:
 
 * ``artifacts``: ``intent_brief``, ``prd``, ``acceptance_criterion`` (each),
   ``criteria_findings``, ``sprint_plan``, ``system_design``, ``adr`` (each),
-  ``interface_contract`` (each), ``ownership_map`` — content-addressed handles.
+  ``interface_contract`` (each), ``ticket`` (each), ``ownership_map`` —
+  content-addressed handles.
 * ``pinned_constraints``, ``required_capabilities``, ``scope_tier`` (only when
   not already decided — it is single-writer), an advisory ``gate_triage`` on the
   ``spec`` gate, and ONE ``agent_journal`` entry.
 
-The ownership map also carries ``unit_criteria`` (criterion ids per ownership
-unit), so the per-lane leads decompose deterministically with no model call.
+The plan is a DAG of atomic tickets, each carrying its Given/When/Then scenarios
+(one ``AcceptanceCriterion`` per scenario, ``ticket_id`` set). The ownership map
+is DERIVED from the tickets' files (with ``unit_criteria`` per file) so the
+ownership-driven scheduler keeps working unchanged.
 
 Re-entry: ``spec_fix`` routes back here. The newest FAILing Spec-gate verdict's
 findings, and the criteria already declared, go into the prompt so the revision
@@ -29,6 +32,7 @@ model only via ``rt.proxy`` (L6), and its self-review of the criteria is stamped
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -51,6 +55,7 @@ from foundry.schemas.architecture import (
 )
 from foundry.schemas.gates import GateStatus, GateTriage, JudgmentProvenance
 from foundry.schemas.governance import ScopeDecision, ScopeTier
+from foundry.schemas.implementation import Difficulty, Specialty, Ticket, scenario_ref
 from foundry.schemas.product import (
     PRD,
     AcceptanceCriterion,
@@ -58,6 +63,7 @@ from foundry.schemas.product import (
     Criticality,
     IntentBrief,
     SprintPlan,
+    render_scenario,
 )
 from foundry.state.reducers import live_constraints
 
@@ -71,17 +77,30 @@ if TYPE_CHECKING:
     from foundry.state.factory_state import FactoryState
     from foundry.state.seq import Seq
 
-__all__ = ["NODE_ID", "PLAN_SCHEMA", "SOP", "TIER", "make_planner_node"]
+__all__ = [
+    "MAX_TICKETS",
+    "NODE_ID",
+    "PLAN_SCHEMA",
+    "SOP",
+    "TICKET_KIND",
+    "TIER",
+    "make_planner_node",
+    "ticket_owner",
+]
 
 NODE_ID = "planner"
 ROLE = "Planner"
 TIER = "T1"  # everything downstream inherits this plan; never auto-downgrade
 _SPEC_GATE = "spec"
+TICKET_KIND = "ticket"
 
 # Deterministic, bounds token cost on a large design doc; the full spec stays on
 # the `spec` channel.
 _SPEC_PROMPT_CAP = 24_000
 _RETRIEVAL_K = 24
+
+# Hard ceiling on tickets per plan: each ticket is a coding session.
+MAX_TICKETS = 40
 
 # Per-route budget envelopes (micro-USD) the sprint plan's cap is clamped into
 # (governance §7): the plan may refine the Triage-seeded cap down, never widen it.
@@ -106,27 +125,38 @@ SOP = (
     "unknowns; define success in user terms; flag must-haves vs nice-to-haves.\n"
     "PRD: the problem, user stories and prioritization; declare "
     "required_capabilities (e.g. 'ui', 'ml') — they drive specialist routing.\n"
-    "ACCEPTANCE CRITERIA: each a testable Given/When/Then with a stable id and a "
-    "non-empty oracle_hint saying how a runner-evaluable test decides it. Mark "
-    "high-risk criteria 'high-risk', the rest 'normal'. Identify how the component "
+    "TICKETS: decompose the work into ATOMIC, Jira-style tickets (at most "
+    f"{MAX_TICKETS}). Each ticket is ONE behaviour touching roughly 1-2 files, "
+    "lists in files[] every path it may write, has a specialty (frontend | backend "
+    "| data | test) and a difficulty (trivial | standard | complex — it picks the "
+    "model), and depends_on the ticket ids that must land first; depends_on MUST "
+    "form a DAG. Name the interface contracts each ticket implements[] and "
+    "consumes[] by their interfaces[].name, so tickets built in parallel code "
+    "against the same signatures. Every feature ticket gets a paired "
+    "specialty='test' ticket that depends_on it and writes the step definitions for "
+    "that feature's scenarios; the test ticket carries no scenarios of its own. "
+    "Where a scope cap speaks of ownership units, it means the files across your "
+    "tickets.\n"
+    "SCENARIOS (the acceptance criteria): each feature ticket carries its executable "
+    "BDD scenarios, each with a stable id unique across the plan and at least one "
+    "given, one when and one then step (plain phrases, without the keyword). Mark "
+    "high-risk scenarios 'high-risk', the rest 'normal'. Identify how the component "
     "can be MISUSED or ABUSED (malformed/wrong-type input, invalid operations on an "
     "empty or boundary state, resource exhaustion, authn/authz for anything exposed) "
-    "and author at least one criterion covering the applicable case with "
-    "security_abuse=true. ALWAYS author one criterion requiring a pinned dependency "
+    "and author at least one scenario covering the applicable case with "
+    "security_abuse=true. ALWAYS author one scenario requiring a pinned dependency "
     "manifest for the stack at the repo root (requirements.txt / uv.lock / "
     "package-lock.json / go.sum / Cargo.lock; pin dev/test deps if there are no "
-    "runtime deps), with an oracle_hint that a recognized manifest is present.\n"
-    "CRITERIA REVIEW: then review your own criteria against the request. Under "
+    "runtime deps), on the ticket that writes that manifest.\n"
+    "CRITERIA REVIEW: then review your own scenarios against the request. Under "
     "criteria_review list only REAL, in-scope gaps you could not close: missing / "
-    "under-specified criteria, and applicable security/abuse cases no criterion "
-    "covers. Prefer closing a gap by adding a criterion; a listed security/abuse "
+    "under-specified scenarios, and applicable security/abuse cases no scenario "
+    "covers. Prefer closing a gap by adding a scenario; a listed security/abuse "
     "omission FAILS the Spec gate. Return empty arrays when coverage is complete.\n"
     "SPRINT PLAN: ordered milestones; usd_cap_microusd as an integer number of "
     "micro-USD (never a float); a short risk register; done-for-this-iteration.\n"
     "ARCHITECTURE: choose the component decomposition; write ADRs WITH rejected "
-    "alternatives; define interface/API contracts; assign every file/interface "
-    "ownership unit an owner (units become independently built tasks, merged in "
-    "owner order) and list, per unit, the acceptance-criterion ids it implements; "
+    "alternatives; define interface/API contracts FIRST (tickets reference them); "
     "emit cross-cutting concerns as pinned constraints, which are injected verbatim "
     "into every build task.\n"
     "When a DESIGN SPEC is provided, it is the detailed source of truth: derive the "
@@ -134,6 +164,21 @@ SOP = (
 )
 
 _STR_ARRAY: dict[str, Any] = {"type": "array", "items": {"type": "string"}}
+
+_SCENARIO_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "id": {"type": "string"},
+        "title": {"type": "string"},
+        "given": _STR_ARRAY,
+        "when": _STR_ARRAY,
+        "then": _STR_ARRAY,
+        "criticality": {"type": "string", "enum": ["normal", "high-risk"]},
+        "security_abuse": {"type": "boolean"},
+    },
+    "required": ["id", "given", "when", "then", "security_abuse"],
+    "additionalProperties": False,
+}
 
 PLAN_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -170,21 +215,6 @@ PLAN_SCHEMA: dict[str, Any] = {
             },
             "required": ["title", "body"],
             "additionalProperties": False,
-        },
-        "acceptance_criteria": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "id": {"type": "string"},
-                    "text": {"type": "string"},
-                    "criticality": {"type": "string", "enum": ["normal", "high-risk"]},
-                    "oracle_hint": {"type": "string"},
-                    "security_abuse": {"type": "boolean"},
-                },
-                "required": ["id", "text", "oracle_hint"],
-                "additionalProperties": False,
-            },
         },
         "criteria_review": {
             "type": "object",
@@ -244,16 +274,26 @@ PLAN_SCHEMA: dict[str, Any] = {
                 "additionalProperties": False,
             },
         },
-        "ownership": {
+        "tickets": {
             "type": "array",
             "items": {
                 "type": "object",
                 "properties": {
-                    "unit": {"type": "string"},
-                    "owner": {"type": "string"},
-                    "criterion_ids": _STR_ARRAY,
+                    "id": {"type": "string"},
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "specialty": {"type": "string", "enum": [m.value for m in Specialty]},
+                    "difficulty": {"type": "string", "enum": [m.value for m in Difficulty]},
+                    "depends_on": _STR_ARRAY,
+                    "files": _STR_ARRAY,
+                    "implements": _STR_ARRAY,
+                    "consumes": _STR_ARRAY,
+                    "scenarios": {"type": "array", "items": _SCENARIO_SCHEMA},
                 },
-                "required": ["unit", "owner", "criterion_ids"],
+                "required": [
+                    "id", "title", "specialty", "difficulty", "depends_on", "files",
+                    "scenarios",
+                ],
                 "additionalProperties": False,
             },
         },
@@ -275,13 +315,12 @@ PLAN_SCHEMA: dict[str, Any] = {
     "required": [
         "intent",
         "prd",
-        "acceptance_criteria",
         "criteria_review",
         "sprint_plan",
         "design",
         "adrs",
         "interfaces",
-        "ownership",
+        "tickets",
     ],
     "additionalProperties": False,
 }
@@ -365,8 +404,11 @@ def _declared_criteria_text(state: FactoryState, rt: AgentRuntime) -> str:
         current[str(getattr(c, "id", "?"))] = c
     lines: list[str] = []
     for c in current.values():
+        ticket = getattr(c, "ticket_id", None)
         lines.append(
-            f"- id={getattr(c, 'id', '?')} | {getattr(c, 'text', '')} "
+            f"- id={getattr(c, 'id', '?')}"
+            + (f" (ticket={ticket})" if ticket else "")
+            + f" | {getattr(c, 'text', '')} "
             f"(criticality={getattr(c, 'criticality', 'normal')}; "
             f"oracle_hint={getattr(c, 'oracle_hint', '')!r}; "
             f"security_abuse={getattr(c, 'security_abuse', False)})"
@@ -385,9 +427,10 @@ def _revision_text(state: FactoryState, rt: AgentRuntime) -> str:
     prior = _declared_criteria_text(state, rt)
     return (
         "\n\nREVISION PASS — the signed Spec gate FAILED your previous plan. Return "
-        "the FULL plan again: reproduce every previously declared criterion (same "
-        "id, never weakened; fix in place any criterion a finding names) AND add "
-        "criteria that close every finding below.\n"
+        "the FULL plan again: reproduce every ticket (same ids) and every previously "
+        "declared scenario (same id, on the same ticket, never weakened; fix in place "
+        "any scenario a finding names) AND add scenarios that close every finding "
+        "below.\n"
         "Spec gate findings:\n- " + "\n- ".join(findings) + "\n\n"
         f"Previously declared criteria:\n{prior or '(none resolved)'}"
     )
@@ -404,8 +447,8 @@ def _self_review_gaps(payload: dict[str, Any]) -> tuple[str, ...]:
 def _self_revision_text(gaps: tuple[str, ...]) -> str:
     return (
         "\n\nSELF-REVIEW REVISION — your own criteria_review flagged these gaps. "
-        "Return the FULL plan again with criteria that close each one (same ids for "
-        "criteria you keep); list under criteria_review only gaps that genuinely "
+        "Return the FULL plan again with scenarios that close each one (same ids for "
+        "tickets and scenarios you keep); list under criteria_review only gaps that genuinely "
         "remain.\nFlagged gaps:\n- " + "\n- ".join(gaps)
     )
 
@@ -479,20 +522,155 @@ def _section(payload: dict[str, Any], key: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _build_criteria(raw: Any, seq: Seq) -> list[AcceptanceCriterion]:
-    out: list[AcceptanceCriterion] = []
+def _steps(raw: Any) -> tuple[str, ...]:
+    return tuple(x.strip() for x in _strs(raw) if x.strip())
+
+
+def _uniq(items: Iterable[str]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(x.strip() for x in items if x.strip()))
+
+
+def _build_criterion(
+    item: dict[str, Any], *, ticket_id: str, default_id: str, seq: Seq
+) -> AcceptanceCriterion:
+    """One scenario -> one criterion. Its oracle is the scenario itself; ``text``
+    falls back to a free-text ``text`` only when no step was given."""
+    cid = _str(item.get("id")).strip() or default_id
+    given, when, then = (_steps(item.get(k)) for k in ("given", "when", "then"))
+    return AcceptanceCriterion(
+        id=cid,
+        text=render_scenario(given, when, then) or _str(item.get("text")),
+        criticality=_enum(Criticality, item.get("criticality"), Criticality.NORMAL),
+        oracle_hint=scenario_ref(ticket_id, cid),
+        security_abuse=_bool(item.get("security_abuse")),
+        given=given,
+        when=when,
+        then=then,
+        ticket_id=ticket_id,
+        seq=seq,
+    )
+
+
+def _break_cycles(deps: dict[str, list[str]]) -> list[str]:
+    """Depth-first in ticket order; an edge back into the current path closes a
+    cycle and is dropped. Mutates ``deps``; returns one concern per dropped edge."""
+    concerns: list[str] = []
+    on_path: set[str] = set()
+    done: set[str] = set()
+
+    def visit(tid: str) -> None:
+        on_path.add(tid)
+        kept: list[str] = []
+        for dep in deps[tid]:
+            if dep in on_path:
+                concerns.append(f"Dropped dependency {tid} -> {dep}: it closed a cycle.")
+                continue
+            if dep not in done:
+                visit(dep)
+            kept.append(dep)
+        deps[tid] = kept
+        on_path.discard(tid)
+        done.add(tid)
+
+    for tid in deps:
+        if tid not in done:
+            visit(tid)
+    return concerns
+
+
+def _build_tickets(
+    raw: Any, ticket_seq: Seq, criteria_seq: Seq, interface_names: set[str]
+) -> tuple[list[Ticket], list[AcceptanceCriterion], list[str]]:
+    """Tickets + their scenarios as criteria, made a valid DAG deterministically.
+
+    Duplicate ticket / scenario ids: the later entry wins. Over ``MAX_TICKETS``
+    the tail is dropped. Unknown dependencies and contract names are dropped and
+    a cycle loses its closing edge. A ``test`` ticket covers its own scenarios
+    plus those of the feature tickets it depends on."""
+    concerns: list[str] = []
+    items: dict[str, dict[str, Any]] = {}
     for i, item in enumerate(_objs(raw)):
-        out.append(
-            AcceptanceCriterion(
-                id=_str(item.get("id"), f"AC-{i:03d}"),
-                text=_str(item.get("text")),
-                criticality=_enum(Criticality, item.get("criticality"), Criticality.NORMAL),
-                oracle_hint=_str(item.get("oracle_hint")),
-                security_abuse=_bool(item.get("security_abuse")),
-                seq=seq._replace(local=i),
+        tid = _str(item.get("id")).strip() or f"T-{i + 1:03d}"
+        if tid in items:
+            concerns.append(f"Duplicate ticket id {tid}: the later entry wins.")
+        items[tid] = item
+    if len(items) > MAX_TICKETS:
+        concerns.append(
+            f"{len(items)} tickets exceed the cap of {MAX_TICKETS}; "
+            f"kept the first {MAX_TICKETS}."
+        )
+        items = dict(list(items.items())[:MAX_TICKETS])
+
+    deps: dict[str, list[str]] = {}
+    for tid, item in items.items():
+        wanted = _uniq(_strs(item.get("depends_on")))
+        unknown = [d for d in wanted if d not in items]
+        if unknown:
+            concerns.append(f"Ticket {tid}: dropped unknown dependencies {', '.join(unknown)}.")
+        deps[tid] = [d for d in wanted if d in items]
+    concerns += _break_cycles(deps)
+
+    criteria: dict[str, AcceptanceCriterion] = {}
+    n = 0
+    for tid, item in items.items():
+        for scenario in _objs(item.get("scenarios")):
+            n += 1
+            c = _build_criterion(
+                scenario, ticket_id=tid, default_id=f"AC-{n:03d}", seq=criteria_seq
+            )
+            if c.id in criteria:
+                concerns.append(f"Duplicate scenario id {c.id}: the later entry wins.")
+            criteria[c.id] = c
+    ordered = [
+        c.model_copy(update={"seq": criteria_seq._replace(local=i)})
+        for i, c in enumerate(criteria.values())
+    ]
+
+    specialty = {
+        tid: _enum(Specialty, item.get("specialty"), Specialty.BACKEND)
+        for tid, item in items.items()
+    }
+    own = {tid: tuple(c.id for c in ordered if c.ticket_id == tid) for tid in items}
+    tickets: list[Ticket] = []
+    for i, (tid, item) in enumerate(items.items()):
+        scenario_ids = own[tid]
+        if specialty[tid] is Specialty.TEST:
+            scenario_ids = _uniq(
+                (*scenario_ids, *(c for d in deps[tid] if specialty[d] is not Specialty.TEST
+                                  for c in own[d]))
+            )
+        contracts: dict[str, tuple[str, ...]] = {}
+        for key in ("implements", "consumes"):
+            named = _uniq(_strs(item.get(key)))
+            unknown = [x for x in named if x not in interface_names]
+            if unknown:
+                concerns.append(
+                    f"Ticket {tid}: dropped unknown {key} contracts {', '.join(unknown)}."
+                )
+            contracts[key] = tuple(x for x in named if x in interface_names)
+        tickets.append(
+            Ticket(
+                id=tid,
+                title=_str(item.get("title")),
+                description=_str(item.get("description")),
+                specialty=specialty[tid],
+                difficulty=_enum(Difficulty, item.get("difficulty"), Difficulty.STANDARD),
+                depends_on=tuple(deps[tid]),
+                files=_uniq(_strs(item.get("files"))),
+                scenario_ids=scenario_ids,
+                implements=contracts["implements"],
+                consumes=contracts["consumes"],
+                seq=ticket_seq._replace(local=i),
             )
         )
-    return out
+
+    tested = {d for t in tickets if t.specialty is Specialty.TEST for d in t.depends_on}
+    concerns += [
+        f"Ticket {t.id} has scenarios but no test ticket depends on it."
+        for t in tickets
+        if t.specialty is not Specialty.TEST and own[t.id] and t.id not in tested
+    ]
+    return tickets, ordered, concerns
 
 
 def _build_adrs(raw: Any, seq: Seq, *, store: ArtifactStore | None) -> list[ADR]:
@@ -535,21 +713,24 @@ def _build_constraints(raw: Any, seq: Seq) -> list[PinnedConstraint]:
     ]
 
 
-def _build_ownership(raw: Any, seq: Seq, criterion_ids: set[str]) -> OwnershipMap:
-    """A later entry for the same unit replaces the earlier one wholesale; ids
-    naming no declared criterion are dropped."""
+def ticket_owner(ticket: Ticket) -> str:
+    """Owner name for a ticket's files: the specialty leads it, so area
+    classification (whole-token) lands frontend/data tickets in their lane."""
+    return f"{ticket.specialty.value}-{ticket.id}"
+
+
+def _ownership_from_tickets(tickets: list[Ticket], seq: Seq) -> OwnershipMap:
+    """Compatibility view for the ownership-driven scheduler: every ticket file
+    is a unit. A file shared by tickets goes to the later ticket and carries the
+    union of their scenario ids."""
     owners: dict[str, str] = {}
     unit_criteria: dict[str, tuple[str, ...]] = {}
-    for item in _objs(raw):
-        unit = _str(item.get("unit")).strip()
-        if not unit:
-            continue
-        owners[unit] = _str(item.get("owner")) or "owner"
-        cids = tuple(c for c in _strs(item.get("criterion_ids")) if c in criterion_ids)
-        if cids:
-            unit_criteria[unit] = cids
-        else:
-            unit_criteria.pop(unit, None)
+    for t in tickets:
+        for path in t.files:
+            owners[path] = ticket_owner(t)
+            merged = _uniq((*unit_criteria.get(path, ()), *t.scenario_ids))
+            if merged:
+                unit_criteria[path] = merged
     return OwnershipMap(owners=owners, unit_criteria=unit_criteria, seq=seq)
 
 
@@ -674,8 +855,12 @@ def make_planner_node(rt: AgentRuntime, index: SymbolIndex | None = None) -> Nod
 
         prd_section = _section(payload, "prd")
         prd_seq = seq("artifact:prd")
-        criteria = _build_criteria(
-            payload.get("acceptance_criteria"), seq("artifact:acceptance_criteria")
+        interfaces = _build_interfaces(payload.get("interfaces"), seq("artifact:interfaces"))
+        tickets, criteria, ticket_concerns = _build_tickets(
+            payload.get("tickets"),
+            seq("artifact:tickets"),
+            seq("artifact:acceptance_criteria"),
+            {i.name for i in interfaces},
         )
         prd = PRD(
             title=_str(prd_section.get("title")),
@@ -709,11 +894,8 @@ def make_planner_node(rt: AgentRuntime, index: SymbolIndex | None = None) -> Nod
         )
 
         adrs = _build_adrs(payload.get("adrs"), seq("artifact:adrs"), store=store)
-        interfaces = _build_interfaces(payload.get("interfaces"), seq("artifact:interfaces"))
         ownership_seq = seq("artifact:ownership_map")
-        ownership = _build_ownership(
-            payload.get("ownership"), ownership_seq, {c.id for c in criteria}
-        )
+        ownership = _ownership_from_tickets(tickets, ownership_seq)
         design_section = _section(payload, "design")
         design_seq = seq("artifact:system_design")
         design = SystemDesign(
@@ -743,6 +925,7 @@ def make_planner_node(rt: AgentRuntime, index: SymbolIndex | None = None) -> Nod
                 emit_artifact(i, "interface_contract", NODE_ID, i.seq, store=store)
                 for i in interfaces
             ),
+            *(emit_artifact(t, TICKET_KIND, NODE_ID, t.seq, store=store) for t in tickets),
             emit_artifact(ownership, "ownership_map", NODE_ID, ownership_seq, store=store),
         ]
 
@@ -759,7 +942,7 @@ def make_planner_node(rt: AgentRuntime, index: SymbolIndex | None = None) -> Nod
             out["scope_tier"] = scope
 
         high_risk = sum(1 for c in criteria if c.criticality is Criticality.HIGH_RISK)
-        concerns: list[str] = []
+        concerns: list[str] = list(ticket_concerns)
         if not criteria:
             concerns.append("No acceptance criteria derived from the intent.")
         if not ownership.owners:
@@ -778,6 +961,7 @@ def make_planner_node(rt: AgentRuntime, index: SymbolIndex | None = None) -> Nod
                     f"Planned {prd.title!r} ({scope.tier.value} scope): "
                     f"{len(criteria)} acceptance criteria ({high_risk} high-risk), "
                     f"{len(adrs)} ADRs, {len(interfaces)} interface contracts, "
+                    f"{len(tickets)} tickets, "
                     f"{len(ownership.owners)} ownership units, {len(constraints)} "
                     "pinned constraints."
                     + (" Revised after a Spec-gate failure." if revision else "")

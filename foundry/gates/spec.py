@@ -1,7 +1,9 @@
 """Spec gate — class 1 (config-evaluable). (governance §1, plan §5.1)
 
 Evaluates the acceptance-criteria document deterministically: every criterion
-must carry an id, testable text, and an oracle hint, and **security/abuse
+must carry an id, testable text, and an oracle hint; a criterion written as a
+structured BDD scenario (any of ``given``/``when``/``then`` present) must have at
+least one step of each; and **security/abuse
 criteria coverage is mandatory where applicable — omission fails the gate**
 (governance §1b: "100% criterion-coverage" cannot be satisfied by
 under-specifying).
@@ -43,12 +45,29 @@ from .runner import ZoneAObservation, observe
 __all__ = ["SpecGate"]
 
 _REQUIRED_FIELDS = ("id", "text", "oracle")
+_SCENARIO_STEPS = ("given", "when", "then")
 
 # The critique block the materializer writes onto the criteria document from the
 # Criteria-Completeness Critic's findings. Zone A surfaces the RAW omission list;
 # zone B alone turns a non-empty list into a FAIL (the critic mints no verdict).
 _CRITIQUE_KEY = "critique"
 _OMISSIONS_KEY = "security_abuse_omissions"
+
+
+def _incomplete_steps(criterion: dict[str, Any]) -> list[str]:
+    """Step kinds a structured scenario lacks; ``[]`` for a text-only criterion.
+
+    A criterion is structured once any step key carries a value; then each kind
+    needs at least one non-empty string step (a wrong type fails closed)."""
+    if not any(criterion.get(k) for k in _SCENARIO_STEPS):
+        return []
+    return [
+        k for k in _SCENARIO_STEPS
+        if not (
+            isinstance(v := criterion.get(k), list)
+            and any(isinstance(step, str) and step.strip() for step in v)
+        )
+    ]
 
 
 class SpecGate:
@@ -117,6 +136,8 @@ class SpecGate:
                 v = c.get(field)
                 if not isinstance(v, str) or not v.strip():
                     return GateStatus.FAIL
+            if _incomplete_steps(c):
+                return GateStatus.FAIL
         if self._require_security_criterion and not any(
             c.get("security_abuse") is True for c in criteria
         ):
@@ -153,6 +174,8 @@ class SpecGate:
             ]
             if missing:
                 out.append(f"criterion {cid}: missing/empty {', '.join(missing)}")
+            if steps := _incomplete_steps(c):
+                out.append(f"criterion {cid}: scenario has no {'/'.join(steps)} step")
         if self._require_security_criterion and not any(
             isinstance(c, dict) and c.get("security_abuse") is True for c in criteria
         ):

@@ -18,20 +18,27 @@ Drives the REAL planner over a REAL :class:`ModelProviderProxy` backed by
 from __future__ import annotations
 
 import json
+import time
+from collections.abc import Callable
 from typing import Any
 
+import pytest
 from langchain_core.runnables import RunnableConfig
 
-from foundry.agents import AgentRuntime
+from foundry.agents import AgentRuntime, planner
 from foundry.agents.planner import (
+    MAX_EPIC_TICKETS,
+    MAX_EPICS,
     MAX_TICKETS,
     NODE_ID,
     SOP,
     _build_adrs,
     _build_constraints,
     _build_criterion,
+    _build_epics,
     _build_interfaces,
     _build_tickets,
+    _epic_items,
     _ownership_from_tickets,
     make_planner_node,
 )
@@ -39,7 +46,8 @@ from foundry.context import SymbolIndex
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.gates.attestation import ZoneBSigner
 from foundry.proxy import ModelProviderProxy
-from foundry.proxy.test_doubles import MockTransport
+from foundry.proxy.test_doubles import MockTransport, ResponseScript
+from foundry.proxy.token_meter import TokenCapExceeded, TokenMeter
 from foundry.schemas.architecture import ConstraintScope, OwnershipMap, lane_of_area
 from foundry.schemas.gates import GateResult, GateStatus, JudgmentProvenance, VerdictClass
 from foundry.schemas.implementation import Difficulty, Specialty, Ticket
@@ -52,6 +60,12 @@ from foundry.schemas.product import (
 from foundry.state.factory_state import FactoryState
 from foundry.state.reducers import live_constraints, merge_constraints
 from foundry.state.seq import Seq
+from tests.planner_payload import (
+    EPIC_PLANNER_SOP_KEY,
+    PLANNER_SOP_KEY,
+    _review,
+    multi_epic_plan,
+)
 
 KEY = b"dev-zone-b-planner-key"
 KEY_ID = "dev-key-planner"
@@ -764,3 +778,261 @@ def test_ticket_ids_are_made_file_safe_and_references_follow() -> None:
         ("x-y", "features/x-y.feature::AC-1")
     ]
     assert any("'a/b' renamed to 'a-b-2'" in c for c in concerns)
+
+
+# ---- epics -> tickets ---------------------------------------------------------------
+
+
+def _match(*needles: str) -> Callable[[dict[str, Any]], bool]:
+    return lambda request: all(n in json.dumps(request, ensure_ascii=False) for n in needles)
+
+
+def _epic_scripts(
+    plan: dict[str, Any], replies: dict[str, dict[str, Any]],
+    *extra: ResponseScript,
+) -> list[ResponseScript]:
+    return [
+        *extra,
+        ResponseScript(json.dumps(plan), match=_match(PLANNER_SOP_KEY)),
+        *(ResponseScript(json.dumps(r), match=_match(f"YOUR EPIC: {eid}"))
+          for eid, r in replies.items()),
+    ]
+
+
+def _epic_runtime(
+    *scripts: ResponseScript, cas: ArtifactStore | None = None,
+    transport: type[MockTransport] = MockTransport,
+) -> tuple[AgentRuntime, MockTransport]:
+    tx = transport(scripts)
+    proxy = ModelProviderProxy(tx, signer=ZoneBSigner(KEY, KEY_ID))
+    return AgentRuntime(proxy=proxy, cas=cas), tx
+
+
+def _epic_of(request: dict[str, Any]) -> str | None:
+    blob = json.dumps(request, ensure_ascii=False)
+    return next((e for e in ("E1", "E2", "E3") if f"YOUR EPIC: {e}" in blob), None)
+
+
+def _bodies(cas: ArtifactStore, writes: dict[str, Any], kind: str) -> list[Any]:
+    return [cas.resolve(a) for a in writes["artifacts"] if a.kind == kind]
+
+
+def test_single_epic_with_inline_tickets_is_one_call() -> None:
+    epic = {"id": "E1", "title": "Todo", "summary": "all of it", "depends_on": [],
+            "provides": [], "consumes": []}
+    rt, tx = runtime_for(_plan(epics=[epic]))
+    writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
+    assert len(tx.requests) == 1
+    assert sum(a.kind == "ticket" for a in writes["artifacts"]) == 3
+
+
+def test_multi_epic_plan_makes_one_ticket_call_per_epic_with_namespaced_ids() -> None:
+    plan, replies = multi_epic_plan()
+    cas = ArtifactStore()
+    rt, tx = _epic_runtime(*_epic_scripts(plan, replies), cas=cas)
+    writes = make_planner_node(rt)({"request": "notes app"}, config_for("r"))
+
+    assert len(tx.requests) == 1 + 3
+    assert sorted(filter(None, map(_epic_of, tx.requests))) == ["E1", "E2", "E3"]
+    epic_prompt = json.dumps(next(r for r in tx.requests if _epic_of(r) == "E2"))
+    assert EPIC_PLANNER_SOP_KEY in epic_prompt and PLANNER_SOP_KEY not in epic_prompt
+    assert "Store.load: load(id) -> note" in epic_prompt  # the shared contracts
+    assert {a.kind for a in writes["artifacts"]} == EXPECTED_KINDS - {"adr"}  # none planned
+
+    tickets = {t.id: t for t in _bodies(cas, writes, "ticket")}
+    assert list(tickets) == [
+        "E1-T01", "E1-T02", "E1-T03", "E2-T01", "E2-T02", "E3-web-page", "E3-T02",
+    ]
+    assert tickets["E3-T02"].depends_on == ("E3-web-page",)  # sanitized refs follow
+    criteria = {c.id: c for c in _bodies(cas, writes, "acceptance_criterion")}
+    assert set(criteria) == {"E1-AC01", "E1-AC02", "E2-AC01", "E3-AC01"}
+    assert criteria["E3-AC01"].oracle_hint == "features/E3-web-page.feature::E3-AC01"
+    [note] = writes["agent_journal"]
+    assert "7 tickets" in note.summary and "3 parallel call(s) (E1, E2, E3)" in note.summary
+    assert any("'E3-web page' renamed to 'E3-web-page'" in c for c in note.concerns)
+
+
+def test_cross_epic_order_follows_interfaces_then_sinks() -> None:
+    plan, replies = multi_epic_plan()
+    cas = ArtifactStore()
+    rt, _ = _epic_runtime(*_epic_scripts(plan, replies), cas=cas)
+    writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
+    deps = {t.id: t.depends_on for t in _bodies(cas, writes, "ticket")}
+
+    assert deps["E1-T01"] == ()  # E1 depends on no epic
+    # E2 consumes Store.load: its root waits for E1's implementer of it only.
+    assert deps["E2-T01"] == ("E1-T02",)
+    assert deps["E2-T02"] == ("E2-T01",)  # non-roots inherit the order transitively
+    # E3 consumes nothing E2 implements: its root waits for E2's sink ticket.
+    assert deps["E3-web-page"] == ("E2-T02",)
+
+
+def test_a_dependency_on_another_epics_ticket_is_dropped() -> None:
+    plan, replies = multi_epic_plan()
+    replies["E2"]["tickets"][0]["depends_on"] = ["E1-T01"]
+    cas = ArtifactStore()
+    rt, _ = _epic_runtime(*_epic_scripts(plan, replies), cas=cas)
+    writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
+    deps = {t.id: t.depends_on for t in _bodies(cas, writes, "ticket")}
+    assert deps["E2-T01"] == ("E1-T02",)
+    assert any("E2-T01: dropped unknown dependencies E2-E1-T01" in c
+               for c in writes["agent_journal"][0].concerns)
+
+
+def test_epic_calls_overlap_in_time() -> None:
+    spans: dict[str, tuple[float, float]] = {}
+
+    class Slow(MockTransport):
+        def send(self, request: dict[str, Any]) -> Any:
+            epic = _epic_of(request)
+            start = time.monotonic()
+            if epic:
+                time.sleep(0.3)
+                spans[epic] = (start, time.monotonic())
+            return super().send(request)
+
+    plan, replies = multi_epic_plan()
+    rt, _ = _epic_runtime(*_epic_scripts(plan, replies), transport=Slow)
+    make_planner_node(rt)({"request": "x"}, config_for("r"))
+    assert set(spans) == {"E1", "E2", "E3"}
+    assert max(s for s, _ in spans.values()) < min(e for _, e in spans.values())
+
+
+def test_token_cap_from_a_parallel_epic_call_propagates() -> None:
+    plan, replies = multi_epic_plan()
+    rt, tx = _epic_runtime(*_epic_scripts(plan, replies))
+    # Call 1 fits; it spends the cap, so every epic call stops before sending.
+    rt.proxy.token_meter = TokenMeter(1)
+    with pytest.raises(TokenCapExceeded):
+        make_planner_node(rt)({"request": "x"}, config_for("r"))
+    assert len(tx.requests) == 1
+
+
+def test_global_and_per_epic_ticket_caps(monkeypatch: pytest.MonkeyPatch) -> None:
+    plan, replies = multi_epic_plan()
+    replies["E1"]["tickets"] = [
+        {**replies["E1"]["tickets"][0], "id": f"T{i:02d}", "files": [f"f{i}.py"]}
+        for i in range(MAX_EPIC_TICKETS + 3)
+    ]
+    monkeypatch.setattr(planner, "MAX_PLAN_TICKETS", MAX_EPIC_TICKETS + 2)
+    cas = ArtifactStore()
+    rt, _ = _epic_runtime(*_epic_scripts(plan, replies), cas=cas)
+    writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
+    ids = [t.id for t in _bodies(cas, writes, "ticket")]
+    # Merge order is epic then ticket order, so the global cap drops the tail: E3.
+    assert len(ids) == MAX_EPIC_TICKETS + 2
+    assert ids[-2:] == ["E2-T01", "E2-T02"]
+    concerns = " ".join(writes["agent_journal"][0].concerns)
+    assert f"per-epic cap of {MAX_EPIC_TICKETS}" in concerns
+    assert f"exceed the cap of {MAX_EPIC_TICKETS + 2}" in concerns
+
+
+def test_only_flagged_epics_self_revise_and_their_gaps_are_tagged() -> None:
+    plan, replies = multi_epic_plan()
+    flagged = {**replies["E2"], "criteria_review": _review("no paging scenario")}
+    still = {**replies["E2"], "criteria_review": _review("no sort scenario")}
+    cas = ArtifactStore()
+    rt, tx = _epic_runtime(
+        *_epic_scripts(
+            plan, {**replies, "E2": flagged},
+            ResponseScript(json.dumps(still), match=_match("YOUR EPIC: E2", "SELF-REVIEW")),
+        ),
+        cas=cas,
+    )
+    writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
+
+    assert len(tx.requests) == 1 + 3 + 1
+    revisions = [_epic_of(r) for r in tx.requests if "SELF-REVIEW" in json.dumps(r)]
+    assert revisions == ["E2"]
+    [critique] = _bodies(cas, writes, "criteria_findings")
+    assert critique.missing == ("[E2] no sort scenario",)
+    assert "Self-revised epic(s) E2 once" in writes["agent_journal"][0].summary
+
+
+def _first_pass(cas: ArtifactStore, *extra: ResponseScript) -> tuple[
+    Any, MockTransport, dict[str, Any]
+]:
+    plan, replies = multi_epic_plan()
+    rt, tx = _epic_runtime(*_epic_scripts(plan, replies, *extra), cas=cas)
+    node = make_planner_node(rt)
+    return node, tx, node({"request": "x"}, config_for("r"))
+
+
+def _failed(first: dict[str, Any], finding: str) -> FactoryState:
+    return {
+        "request": "x",
+        "artifacts": first["artifacts"],
+        "scope_tier": first["scope_tier"],
+        "gates": [_spec_verdict(GateStatus.FAIL, (finding,), epoch=1)],
+    }
+
+
+def test_spec_fix_naming_a_criterion_reruns_only_its_epic() -> None:
+    from foundry.agents.implementation.tickets import read_tickets
+
+    _, replies = multi_epic_plan()
+    revised = {**replies["E2"], "tickets": [
+        replies["E2"]["tickets"][0], {**replies["E2"]["tickets"][1], "id": "T03"},
+    ]}
+    cas = ArtifactStore()
+    node, tx, first = _first_pass(
+        cas, ResponseScript(json.dumps(revised), match=_match("YOUR EPIC: E2", "REVISION PASS"))
+    )
+    state = _failed(first, "criterion E2-AC01: scenario has no then step")
+    second = node(state, config_for("r", step=5))
+
+    new = tx.requests[4:]
+    assert [_epic_of(r) for r in new] == ["E2"]
+    prompt = json.dumps(new[0], ensure_ascii=False)
+    assert "E2-AC01: scenario has no then step" in prompt and "E2-T02" in prompt
+    assert {a.kind for a in second["artifacts"]} == {
+        "prd", "acceptance_criterion", "criteria_findings", "ticket", "ownership_map"
+    }
+    after: FactoryState = {**state, "artifacts": [*first["artifacts"], *second["artifacts"]]}
+    live = {t.id: t for t in read_tickets(after, cas.resolve)}
+    assert "E2-T02" not in live and "E2-T03" in live  # tombstoned, replaced
+    assert live["E3-web-page"].depends_on == ("E2-T03",)  # re-linked to E2's new sink
+    assert live["E1-T02"].scenario_ids == ("E1-AC02",)  # untouched epics kept
+    assert "Re-planned epic(s) E2" in second["agent_journal"][0].summary
+
+
+def test_spec_fix_with_a_plan_level_finding_reruns_everything() -> None:
+    cas = ArtifactStore()
+    node, tx, first = _first_pass(cas)
+    state = _failed(first, "no criterion flags security_abuse=true")
+    node(state, config_for("r", step=5))
+    new = tx.requests[4:]
+    assert len(new) == 4
+    assert PLANNER_SOP_KEY in json.dumps(new[0]) and "REVISION PASS" in json.dumps(new[0])
+    assert sorted(filter(None, map(_epic_of, new))) == ["E1", "E2", "E3"]
+
+
+def test_epics_are_positional_capped_and_validated() -> None:
+    raw = [
+        {"id": "store", "depends_on": ["api"], "provides": ["X", "nope"]},
+        {"id": "api", "depends_on": ["store", "ghost"]},
+        *({"id": f"e{i}"} for i in range(MAX_EPICS)),
+    ]
+    epics, concerns = _build_epics(raw, {"X"})
+    assert len(epics) == MAX_EPICS
+    assert [e.id for e in epics[:2]] == ["E1", "E2"]
+    assert epics[0].provides == ("X",)
+    assert (epics[0].depends_on, epics[1].depends_on) == (("E2",), ())
+    assert any("exceed the cap of 12" in c for c in concerns)
+    assert "Epic E2: dropped unknown dependencies ghost." in concerns
+    assert "Dropped epic dependency E2 -> E1: it closed a cycle." in concerns
+
+
+def test_epic_items_are_namespaced_and_capped() -> None:
+    epic = _build_epics([{"id": "E1"}], set())[0][0]
+    items, concerns = _epic_items(epic, [
+        {"id": "T01", "depends_on": ["E1-T02"], "scenarios": [{"id": ""}, {"id": "AC9"}]},
+        {"id": "E1-T02"},
+        {},
+        *({"id": f"X{i}"} for i in range(MAX_EPIC_TICKETS)),
+    ])
+    assert len(items) == MAX_EPIC_TICKETS
+    assert [i["id"] for i in items[:3]] == ["E1-T01", "E1-T02", "E1-T03"]
+    assert items[0]["depends_on"] == ["E1-T02"]
+    assert [s["id"] for s in items[0]["scenarios"]] == ["E1-AC01", "E1-AC9"]
+    assert any(f"per-epic cap of {MAX_EPIC_TICKETS}" in c for c in concerns)

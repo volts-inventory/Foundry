@@ -86,6 +86,95 @@ def plan_payload(
         },
         "adrs": design.get("adrs", []),
         "interfaces": design.get("interfaces", []),
+        # A single epic with its tickets inline: the planner makes one call.
+        "epics": [{
+            "id": "E1", "title": prd["title"], "summary": prd.get("prd_body", ""),
+            "depends_on": [], "provides": [], "consumes": [],
+        }],
         "tickets": tickets,
         "pinned_constraints": design.get("pinned_constraints", []),
     }
+
+
+# ---- a large plan: three epics joined by interface contracts -------------------
+
+EPIC_PLANNER_SOP_KEY = "You are the Epic Planner"
+
+
+def _ticket(tid: str, specialty: str, *deps: str, **extra: Any) -> dict[str, Any]:
+    return {"id": tid, "title": f"{specialty} {tid}", "specialty": specialty,
+            "difficulty": "standard", "depends_on": list(deps), "files": [f"{tid}.py"],
+            "scenarios": [], **extra}
+
+
+def _scn(cid: str, *, abuse: bool = False) -> dict[str, Any]:
+    return {"id": cid, "given": ["g"], "when": ["w"], "then": ["t"], "security_abuse": abuse}
+
+
+def _review(*missing: str) -> dict[str, Any]:
+    return {"missing": list(missing), "security_abuse_omissions": []}
+
+
+def multi_epic_plan() -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    """Call 1's reply (three epics, no inline tickets) and each epic call's reply.
+
+    E1 (storage) provides ``Store.save`` / ``Store.load``; E2 (api) depends on E1
+    and consumes ``Store.load``, so its root ticket waits for E1's ``Store.load``
+    implementer; E3 (web) depends on E2 but consumes none of E2's contracts, so its
+    root waits for E2's sink ticket. E3's ``web page`` id is not file-safe."""
+    plan = {
+        "scope": {"tier": "standard", "rationale": "a real product", "signals": []},
+        "intent": {"intent": "A notes product with storage, an API and a web UI."},
+        "prd": {"title": "Notes", "body": "Users keep notes.", "required_capabilities": []},
+        "criteria_review": _review(),
+        "sprint_plan": {"milestones": ["M1"], "usd_cap_microusd": 1_000_000,
+                        "done_definition": "green"},
+        "design": {"title": "Notes", "body": "web -> api -> store",
+                   "components": ["store", "api", "web"]},
+        "adrs": [],
+        "interfaces": [
+            {"name": "Store.save", "spec": "save(note) -> id"},
+            {"name": "Store.load", "spec": "load(id) -> note"},
+            {"name": "Api.http", "spec": "GET /notes/{id}"},
+        ],
+        "epics": [
+            {"id": "E1", "title": "Storage", "summary": "persist notes",
+             "specialty_mix": ["data", "test"], "depends_on": [],
+             "provides": ["Store.save", "Store.load"], "consumes": []},
+            {"id": "E2", "title": "API", "summary": "serve notes",
+             "specialty_mix": ["backend", "test"], "depends_on": ["E1"],
+             "provides": ["Api.http"], "consumes": ["Store.load"]},
+            {"id": "E3", "title": "Web", "summary": "show notes",
+             "specialty_mix": ["frontend", "test"], "depends_on": ["E2"],
+             "provides": [], "consumes": []},
+        ],
+        "tickets": [],
+        "pinned_constraints": [],
+    }
+    replies = {
+        "E1": {
+            "tickets": [
+                _ticket("T01", "data", implements=["Store.save"], scenarios=[_scn("AC01")]),
+                _ticket("T02", "data", "T01", implements=["Store.load"],
+                        scenarios=[_scn("AC02", abuse=True)]),
+                _ticket("T03", "test", "T01", "T02"),
+            ],
+            "criteria_review": _review(),
+        },
+        "E2": {
+            "tickets": [
+                _ticket("T01", "backend", implements=["Api.http"], consumes=["Store.load"],
+                        scenarios=[_scn("AC01")]),
+                _ticket("T02", "test", "T01"),
+            ],
+            "criteria_review": _review(),
+        },
+        "E3": {
+            "tickets": [
+                _ticket("web page", "frontend", scenarios=[_scn("AC01")]),
+                _ticket("T02", "test", "web page"),
+            ],
+            "criteria_review": _review(),
+        },
+    }
+    return plan, replies

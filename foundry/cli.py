@@ -435,6 +435,18 @@ _PLAN_PAYLOAD: dict[str, Any] = {
     "design": {"title": "Requested service", "body": "api -> store", "components": ["api"]},
     "adrs": [],
     "interfaces": [],
+    # A small build: one epic, its tickets inline (no per-epic calls).
+    "epics": [
+        {
+            "id": "E1",
+            "title": "Requested service",
+            "summary": "The whole requested behavior.",
+            "specialty_mix": ["backend", "test"],
+            "depends_on": [],
+            "provides": [],
+            "consumes": [],
+        },
+    ],
     # One feature ticket and its paired test ticket.
     "tickets": [
         {

@@ -18,14 +18,23 @@ a rotation boundary when rotation arrives.
 Exit-code semantics (pytest): 0 green, 1 test failures, 2/3/4 harness/usage
 errors (→ ERROR: infra, not a verdict), 5 no tests collected (→ adequacy FAIL
 when a floor is set).
+
+Executable-BDD residual limit: the reporter runs in the same interpreter as the
+agent's test code, so it raises the bar (no hook, stdout, shadowing, or rewritten-
+feature forgery; no catch-all-only binding) but cannot stop code that deliberately
+introspects and patches the reporter in-process, nor judge whether a specific step
+definition actually asserts anything.
 """
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import re
+import secrets
 import sys
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -42,7 +51,7 @@ __all__ = ["TestGate", "parse_pytest_summary"]
 # Structured-observation key carrying the discriminator's report (zone A → B).
 DISCRIMINATOR_KEY = "discriminator"
 # Structured-observation key carrying {scenario_ref: outcome} for every expected
-# BDD scenario (outcome ∈ passed / failed / skipped / missing).
+# BDD scenario (outcome ∈ passed / failed / skipped / missing / unmatched / catch-all).
 BDD_KEY = "bdd"
 
 _SUMMARY_RE = re.compile(r"(\d+) (passed|failed|errors?|skipped)")
@@ -55,19 +64,21 @@ _NO_TESTS_COLLECTED = 5
 _DENY_PATHS_ENV = "FOUNDRY_GATE_DENY_PATHS"
 
 # The pinned pytest invocation, run as a bootstrap that ISOLATES generated code from
-# ours: it cd's to the workdir, removes the host source checkout (``_DENY_PATHS_ENV``)
-# from ``sys.path`` and puts the workdir first BEFORE importing pytest — so a model-
-# named module that collides with a host package (e.g. ``foundry.x``) resolves to the
-# WORKDIR and can never reach or be shadowed by our code — then caps cpu/file/proc
-# resources. Run on its own (in-process fence) OR inside the namespace sandbox.
+# ours: it cd's to the workdir and strips the workdir ('' / cwd) and the host source
+# checkout (``_DENY_PATHS_ENV``) from ``sys.path``, imports EVERY trusted module it
+# relies on, and only THEN puts the workdir first — so a workdir ``json.py`` /
+# ``resource.py`` / ``pytest_bdd/`` can never shadow the harness, and a model-named
+# module that collides with a host package (e.g. ``foundry.x``) resolves to the
+# WORKDIR, never to our code. It also caps cpu/file/proc resources. Run on its own
+# (in-process fence) OR inside the namespace sandbox.
 _BOOTSTRAP_PREAMBLE = """\
-import os, sys, resource
+import os, sys
 wd = os.environ.get("FOUNDRY_GATE_WORKDIR") or os.getcwd()
 os.chdir(wd)
 _raw = os.environ.get("FOUNDRY_GATE_DENY_PATHS", "").split(os.pathsep)
-deny = {os.path.realpath(p) for p in _raw if p}
-sys.path[:] = [p for p in sys.path if os.path.realpath(p) not in deny]
-sys.path.insert(0, wd)
+deny = {os.path.realpath(p) for p in _raw if p} | {os.path.realpath(wd)}
+sys.path[:] = [p for p in sys.path if p and os.path.realpath(p) not in deny]
+import resource
 for _res, _lim in ((resource.RLIMIT_CPU, (300, 300)),
                    (resource.RLIMIT_FSIZE, (256 << 20, 256 << 20)),
                    (resource.RLIMIT_NPROC, (1024, 1024))):
@@ -78,71 +89,174 @@ for _res, _lim in ((resource.RLIMIT_CPU, (300, 300)),
 """
 _ISOLATED_PYTEST_BOOTSTRAP = _BOOTSTRAP_PREAMBLE + """\
 from pytest import console_main
+sys.path.insert(0, wd)
 sys.exit(console_main())
 """
 
-# Executed scenarios are reported on one stdout line, keyed by the feature file's
-# workdir-relative path + scenario name — i.e. by scenario_ref(ticket, criterion).
-BDD_REPORT_MARKER = "FOUNDRY-BDD-REPORT "
+# Env keys handing the BDD bootstrap its gate-owned channel; it pops them before any
+# workdir code runs. The report path is in a fresh temp dir OUTSIDE the workdir and is
+# opened O_EXCL at startup; the per-run nonce is echoed into the report and checked.
+_BDD_REPORT_ENV = "FOUNDRY_BDD_REPORT"
+_BDD_NONCE_ENV = "FOUNDRY_BDD_NONCE"
+_BDD_EXPECTED_ENV = "FOUNDRY_BDD_EXPECTED"
 
-# Same isolation, plus pytest-bdd loaded explicitly (plugin autoload stays off) and a
-# trusted in-bootstrap reporter that records each executed scenario's outcome.
+# Same isolation, plus pytest-bdd registered by MODULE OBJECT (autoload stays off; no
+# name lookup once the workdir is on sys.path) and a trusted reporter that wraps
+# pytest-bdd's step executor. A scenario passes only if its pytest item passed AND
+# every step of the TRUSTED scenario (type + text, parsed by the gate before the run)
+# executed through pytest-bdd and returned; hook calls (which test code can fire by
+# hand) never mark anything executed. The report is written after pytest returns, then
+# the process ``_exit``s so no agent atexit code runs after it; stdout is not consulted.
 _ISOLATED_PYTEST_BDD_BOOTSTRAP = _BOOTSTRAP_PREAMBLE + f"""\
-import json, pytest
+import importlib, json, pytest
+import pytest_bdd.plugin
+_bdd_scenario = importlib.import_module("pytest_bdd.scenario")
+
+_report_path = os.environ.pop("{_BDD_REPORT_ENV}")
+_nonce = os.environ.pop("{_BDD_NONCE_ENV}")
+with open(os.environ.pop("{_BDD_EXPECTED_ENV}"), encoding="utf-8") as _f:
+    _expected = {{k: [tuple(s) for s in v] for k, v in json.load(_f).items()}}
+_fd = os.open(_report_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+_probes = (os.urandom(12).hex() + " Zq-9 !", "wV? " + os.urandom(12).hex() + " 7")
+_dumps = json.dumps
+_execute_step = _bdd_scenario._execute_step_function
+sys.path.insert(0, wd)
 
 
 class _BddReport:
     def __init__(self):
-        self.ref, self.out = {{}}, {{}}
+        self.claims = set()  # (nodeid, ref)
+        self.steps = {{}}      # (nodeid, ref) -> [[type, text, ok, catch_all], ...]
+        self.failed, self.passed, self.skipped = set(), set(), set()
+
+    @staticmethod
+    def _ref(scenario):
+        rel = os.path.relpath(scenario.feature.filename, wd).replace(os.sep, "/")
+        return rel + "::" + scenario.name
 
     @pytest.hookimpl(optionalhook=True)
     def pytest_bdd_before_scenario(self, request, feature, scenario):
-        rel = os.path.relpath(feature.filename, wd).replace(os.sep, "/")
-        self.ref[request.node.nodeid] = rel + "::" + scenario.name
+        # A claim only (an unbound first step then reads "failed"); never a pass.
+        self.claims.add((request.node.nodeid, self._ref(scenario)))
+
+    def execute_step(self, request, scenario, step, context):
+        key = (request.node.nodeid, self._ref(scenario))
+        self.claims.add(key)
+        catch_all = all(context.parser.is_matching(p) for p in _probes)
+        rec = [step.type, step.name, False, catch_all]
+        self.steps.setdefault(key, []).append(rec)
+        out = _execute_step(request, scenario, step, context)
+        rec[2] = True
+        return out
 
     def pytest_runtest_logreport(self, report):
-        ref = self.ref.get(report.nodeid)
-        if ref is None or self.out.get(ref) == "failed":
-            return
         if report.failed:
-            self.out[ref] = "failed"
+            self.failed.add(report.nodeid)
         elif report.when == "call":
-            self.out[ref] = "passed" if report.passed else "skipped"
+            (self.passed if report.passed else self.skipped).add(report.nodeid)
 
-    def pytest_unconfigure(self, config):
-        sys.stdout.write("\\n{BDD_REPORT_MARKER}" + json.dumps(self.out, sort_keys=True) + "\\n")
-        sys.stdout.flush()
+    def _outcome(self, nodeid, ref):
+        steps = self.steps.get((nodeid, ref), [])
+        if nodeid in self.failed or not all(s[2] for s in steps):
+            return "failed"
+        if nodeid not in self.passed:
+            return "skipped" if nodeid in self.skipped else "missing"
+        if not steps:
+            return "missing"
+        if [(s[0], s[1]) for s in steps] != _expected.get(ref):
+            return "unmatched"
+        return "catch-all" if all(s[3] for s in steps) else "passed"
+
+    def outcomes(self):
+        rank = ("failed", "passed", "catch-all", "skipped", "unmatched", "missing")
+        out = {{}}
+        for nodeid, ref in sorted(self.claims):
+            o = self._outcome(nodeid, ref)
+            if ref not in out or rank.index(o) < rank.index(out[ref]):
+                out[ref] = o
+        return out
 
 
-sys.exit(pytest.main(sys.argv[1:], plugins=[_BddReport()]))
+_rep = _BddReport()
+_bdd_scenario._execute_step_function = _rep.execute_step
+_rc = pytest.main(sys.argv[1:], plugins=[pytest_bdd.plugin, _rep])
+_data = _dumps({{"nonce": _nonce, "scenarios": _rep.outcomes()}}, sort_keys=True).encode()
+while _data:
+    _data = _data[os.write(_fd, _data):]
+os.close(_fd)
+sys.stdout.flush()
+sys.stderr.flush()
+os._exit(int(_rc))
 """
 
-_BDD_PLUGIN_ARGS = ("-p", "pytest_bdd.plugin")
+_STEP_KEYWORDS = {"Given": "given", "When": "when", "Then": "then"}
+
+
+def trusted_scenarios(workdir: Path) -> dict[str, list[tuple[str, str]]]:
+    """``features/<ticket>.feature::<criterion id>`` -> its ``(type, text)`` steps,
+    parsed from the trusted materialized feature files BEFORE any workdir code runs
+    (one ``Scenario:`` per criterion; ``And``/``But`` inherit the previous type)."""
+    out: dict[str, list[tuple[str, str]]] = {}
+    for path in sorted((Path(workdir) / FEATURE_DIR).glob("*.feature")):
+        rel = f"{FEATURE_DIR}/{path.name}"
+        steps: list[tuple[str, str]] | None = None
+        kind = ""
+        for line in path.read_text(encoding="utf-8").splitlines():
+            st = line.strip()
+            head, sep, name = st.partition(":")
+            if sep and head == "Scenario":
+                steps = out.setdefault(f"{rel}::{name.strip()}", [])
+                kind = ""
+                continue
+            word, _, text = st.partition(" ")
+            if steps is None or not text.strip():
+                continue
+            if word in _STEP_KEYWORDS:
+                kind = _STEP_KEYWORDS[word]
+            elif word not in ("And", "But") or not kind:
+                continue
+            steps.append((kind, text.strip()))
+    return out
 
 
 def expected_scenarios(workdir: Path) -> tuple[str, ...]:
     """Every ``features/<ticket>.feature::<criterion id>`` the materialized feature
     files declare (the trusted side writes them; one ``Scenario:`` per criterion)."""
-    refs: list[str] = []
-    for path in sorted((Path(workdir) / FEATURE_DIR).glob("*.feature")):
-        rel = f"{FEATURE_DIR}/{path.name}"
-        for line in path.read_text(encoding="utf-8").splitlines():
-            head, sep, name = line.strip().partition(":")
-            if sep and head == "Scenario":
-                refs.append(f"{rel}::{name.strip()}")
-    return tuple(refs)
+    return tuple(trusted_scenarios(workdir))
 
 
-def parse_bdd_report(stdout: str) -> dict[str, str]:
-    """The reporter's scenario-ref -> outcome map (last marker line wins; none ⇒ {})."""
-    for line in reversed(stdout.splitlines()):
-        if line.startswith(BDD_REPORT_MARKER):
-            try:
-                data = json.loads(line[len(BDD_REPORT_MARKER):])
-            except json.JSONDecodeError:
-                return {}
-            return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
-    return {}
+def read_bdd_report(path: Path, nonce: str) -> dict[str, str] | None:
+    """The reporter's scenario-ref -> outcome map from the gate-owned report file, or
+    ``None`` when it is absent, malformed, or does not carry this run's nonce."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not hmac.compare_digest(str(data.get("nonce")), nonce):
+        return None
+    scenarios = data.get("scenarios")
+    if not isinstance(scenarios, dict):
+        return None
+    return {str(k): str(v) for k, v in scenarios.items()}
+
+
+_BDD_WHY = {
+    "missing": (
+        "was not executed — bind the feature with pytest-bdd `scenarios(...)` "
+        "and implement every Given/When/Then step"
+    ),
+    "unmatched": (
+        "ran steps that do not match the trusted feature file's scenario — do not "
+        "edit or regenerate features/*.feature; bind it as written"
+    ),
+    "catch-all": (
+        "passed only through catch-all step definitions (a matcher that accepts any "
+        "text) — write a specific step definition per Given/When/Then that exercises "
+        "the behavior and asserts its outcome. (The gate can only reject matchers "
+        "that accept arbitrary text; it cannot verify that a specific step asserts "
+        "anything, so a no-op step still defeats it — that is on review.)"
+    ),
+}
 
 
 def bdd_findings(scenarios: dict[str, str]) -> tuple[str, ...]:
@@ -152,14 +266,7 @@ def bdd_findings(scenarios: dict[str, str]) -> tuple[str, ...]:
         if status == "passed":
             continue
         criterion = ref.rsplit("::", 1)[-1]
-        if status == "missing":
-            why = (
-                "was not executed — bind the feature with pytest-bdd `scenarios(...)` "
-                "and implement every Given/When/Then step"
-            )
-        else:
-            why = status
-        out.append(f"BDD criterion {criterion}: scenario {ref} {why}")
+        out.append(f"BDD criterion {criterion}: scenario {ref} {_BDD_WHY.get(status, status)}")
     return tuple(out)
 
 
@@ -260,38 +367,58 @@ class TestGate:
         self._timeout_s = timeout_s
         self._seal_key = seal_key  # zone-A observation seal (None ⇒ unsealed channel)
 
-    def _env(self, workdir: Path) -> dict[str, str]:
+    def _env(self, workdir: Path, extra: dict[str, str] | None = None) -> dict[str, str]:
         # Tell the isolating bootstrap where to run (the workdir) and which host paths
         # to fence off (the source checkout root); absent deny ⇒ nothing stripped.
-        extra: dict[str, str] = {"FOUNDRY_GATE_WORKDIR": str(Path(workdir).resolve())}
+        env: dict[str, str] = {"FOUNDRY_GATE_WORKDIR": str(Path(workdir).resolve())}
         root = _host_source_root()
         if root:
-            extra[_DENY_PATHS_ENV] = root
-        return pinned_test_env(extra)
+            env[_DENY_PATHS_ENV] = root
+        return pinned_test_env({**env, **(extra or {})})
 
     # ---- zone A: pinned harness execution, raw rc + summary ---------------
 
-    def _ground(self, workdir: Path, cmd: tuple[str, ...]) -> tuple[int, str, str]:
+    def _ground(
+        self, workdir: Path, cmd: tuple[str, ...], extra_env: dict[str, str] | None = None
+    ) -> tuple[int, str, str]:
         """Run the pinned harness over ``workdir``. By default the isolated pytest runs
         inside the namespace sandbox (no network, isolated mount/pid/ipc/uts — see
         ``sandbox.py``); ``FOUNDRY_GATE_SANDBOX=inprocess`` runs it in-process with only
         the sys.path fence. Either way generated code can't import or shadow ours."""
         from .sandbox import run_in_sandbox, sandbox_enabled
 
-        env = self._env(workdir)
+        env = self._env(workdir, extra_env)
         if sandbox_enabled():
             return run_in_sandbox(cmd, workdir, env=env, timeout_s=self._timeout_s)
         return run_grounding_command(cmd, workdir, env=env, timeout_s=self._timeout_s)
 
+    def _ground_bdd(
+        self, workdir: Path, cmd: tuple[str, ...], trusted: dict[str, list[tuple[str, str]]]
+    ) -> tuple[int, str, str, dict[str, str] | None]:
+        """Run the BDD harness with a gate-owned report channel outside the workdir;
+        returns the authenticated report (``None`` if absent/forged)."""
+        with tempfile.TemporaryDirectory(prefix="foundry-bdd-") as tmp:
+            nonce = secrets.token_hex(16)
+            report = Path(tmp) / f"report-{secrets.token_hex(16)}.json"
+            expected = Path(tmp) / "expected.json"
+            expected.write_text(json.dumps(trusted), encoding="utf-8")
+            extra = {
+                _BDD_REPORT_ENV: str(report),
+                _BDD_NONCE_ENV: nonce,
+                _BDD_EXPECTED_ENV: str(expected),
+            }
+            rc, out, err = self._ground(workdir, cmd, extra)
+            return rc, out, err, read_bdd_report(report, nonce)
+
     def execute(self, workdir: Path) -> ZoneAObservation:
-        expected = expected_scenarios(workdir) if self._runs_bdd else ()
+        trusted = trusted_scenarios(workdir) if self._runs_bdd else {}
         cmd = self.cmd
-        if expected:
-            cmd = (
-                sys.executable, "-c", _ISOLATED_PYTEST_BDD_BOOTSTRAP, *self.cmd[3:],
-                *_BDD_PLUGIN_ARGS,
-            )
-        rc, out, err = self._ground(workdir, cmd)
+        executed: dict[str, str] | None = None
+        if trusted:
+            cmd = (sys.executable, "-c", _ISOLATED_PYTEST_BDD_BOOTSTRAP, *self.cmd[3:])
+            rc, out, err, executed = self._ground_bdd(workdir, cmd, trusted)
+        else:
+            rc, out, err = self._ground(workdir, cmd)
         structured: dict[str, object] = {
             "cmd": list(cmd),
             "summary": parse_pytest_summary(out),
@@ -310,13 +437,19 @@ class TestGate:
             report = self._discriminator.evaluate(workdir)
             structured[DISCRIMINATOR_KEY] = report.model_dump(mode="json")
             findings = report.findings
-        if expected:
+        if trusted:
             # Each criterion's scenario outcome, keyed by scenario_ref; a scenario the
             # run never executed (unbound feature, collection miss) is "missing".
-            executed = parse_bdd_report(out)
-            scenarios = {ref: executed.get(ref, "missing") for ref in sorted(expected)}
+            got = executed or {}
+            scenarios = {ref: got.get(ref, "missing") for ref in sorted(trusted)}
             structured[BDD_KEY] = scenarios
             findings = bdd_findings(scenarios) + findings
+            if executed is None:
+                findings = (
+                    "BDD report absent or not authentic — the harness did not finish "
+                    "normally (a test exited the process or tampered with the run)",
+                    *findings,
+                )
         return observe(
             self.name,
             exit_codes=(rc,),

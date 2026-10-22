@@ -3,6 +3,7 @@ accounting, run against a real pytest-bdd project in ``tmp_path``."""
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -247,3 +248,188 @@ def test_foreign_harness_ignores_features(tmp_path: Path) -> None:
     obs = gate.execute(tmp_path)
     assert BDD_KEY not in obs.structured
     assert gate.decide(obs) is GateStatus.PASS
+
+
+# ---- adversarial: the gate must not be passable without running the scenarios --
+
+_BOTH_PASSED = (
+    '{"features/T1.feature::AC-1": "passed", "features/T1.feature::AC-2": "passed"}'
+)
+
+
+def _attack(tmp_path: Path, files: dict[str, str]) -> tuple[TestGate, Any]:
+    criteria = (_ac("AC-1"), _ac("AC-2"))
+    files = {"test_plain.py": "def test_plain():\n    assert True\n", **files}
+    state, resolve, blob = _state(criteria, files)
+    materialize_workdir(state, tmp_path, resolve=resolve, resolve_blob=blob)
+    gate = TestGate()
+    return gate, gate.execute(tmp_path)
+
+
+def test_forged_before_scenario_hook_does_not_count_as_execution(tmp_path: Path) -> None:
+    forge = '''\
+import os
+
+from pytest_bdd.feature import get_feature
+
+
+def _forge(request, name):
+    hook = request.config.hook
+    feature = get_feature(os.path.abspath("features"), "T1.feature")
+    scenario = feature.scenarios[name].render({})
+    hook.pytest_bdd_before_scenario(request=request, feature=feature, scenario=scenario)
+    for step in scenario.steps:
+        kw = dict(request=request, feature=feature, scenario=scenario, step=step,
+                  step_func=lambda: None, step_func_args={})
+        hook.pytest_bdd_before_step(**kw)
+        hook.pytest_bdd_after_step(**kw)
+    hook.pytest_bdd_after_scenario(request=request, feature=feature, scenario=scenario)
+
+
+def test_ac1(request):
+    _forge(request, "AC-1")
+
+
+def test_ac2(request):
+    _forge(request, "AC-2")
+'''
+    gate, obs = _attack(tmp_path, {"tests/test_forge.py": forge})
+    assert obs.exit_codes == (0,)
+    assert gate.decide(obs) is GateStatus.FAIL
+    assert set(obs.structured[BDD_KEY].values()) == {"missing"}
+
+
+def test_forged_stdout_report_line_is_ignored(tmp_path: Path) -> None:
+    conftest = f'''\
+import atexit
+import sys
+
+
+def _forge():
+    sys.stdout.write("\\nFOUNDRY-BDD-REPORT " + {_BOTH_PASSED!r} + "\\n")
+    sys.stdout.flush()
+
+
+atexit.register(_forge)
+
+
+def pytest_unconfigure(config):
+    _forge()
+'''
+    gate, obs = _attack(tmp_path, {"conftest.py": conftest})
+    assert gate.decide(obs) is GateStatus.FAIL
+    assert set(obs.structured[BDD_KEY].values()) == {"missing"}
+
+
+def test_workdir_cannot_shadow_trusted_harness_modules(tmp_path: Path) -> None:
+    sentinel = tmp_path / "shadowed.txt"
+    plant = f"open({str(sentinel)!r}, 'a').write(__name__ + '\\n')\n"
+    files = {
+        "json.py": plant + f"def dumps(*a, **k):\n    return {_BOTH_PASSED!r}\n",
+        "resource.py": plant,
+        "pytest_bdd/__init__.py": plant,
+        "pytest_bdd/plugin.py": plant,
+        "tests/test_t1.py": _STEPS.replace("{expected}", "n"),
+    }
+    gate, obs = _attack(tmp_path, files)
+    assert not sentinel.exists(), sentinel.read_text()
+    assert gate.decide(obs) is GateStatus.PASS, obs.stdout + obs.stderr
+
+
+def test_plain_harness_cannot_be_shadowed_either(tmp_path: Path) -> None:
+    sentinel = tmp_path / "shadowed.txt"
+    (tmp_path / "resource.py").write_text(f"open({str(sentinel)!r}, 'a').write('x')\n")
+    (tmp_path / "test_a.py").write_text("def test_a():\n    assert True\n")
+    gate = TestGate()
+    obs = gate.execute(tmp_path)
+    assert not sentinel.exists()
+    assert gate.decide(obs) is GateStatus.PASS
+
+
+_CATCH_ALL = '''\
+from pytest_bdd import given, parsers, scenarios, then, when
+
+scenarios("../features/T1.feature")
+
+
+@given(parsers.re({pattern!r}))
+def _given():
+    pass
+
+
+@when(parsers.re({pattern!r}))
+def _when():
+    pass
+
+
+@then(parsers.re({pattern!r}))
+def _then():
+    pass
+'''
+
+
+def test_scenarios_bound_only_by_catch_all_steps_fail(tmp_path: Path) -> None:
+    gate, obs = _attack(tmp_path, {"tests/test_t1.py": _CATCH_ALL.format(pattern=".*")})
+    assert obs.exit_codes == (0,)
+    assert gate.decide(obs) is GateStatus.FAIL
+    assert set(obs.structured[BDD_KEY].values()) == {"catch-all"}
+    assert any("catch-all" in f and "AC-1" in f for f in obs.findings)
+
+
+def test_nonempty_catch_all_steps_also_fail(tmp_path: Path) -> None:
+    gate, obs = _attack(tmp_path, {"tests/test_t1.py": _CATCH_ALL.format(pattern=".+")})
+    assert gate.decide(obs) is GateStatus.FAIL
+    assert set(obs.structured[BDD_KEY].values()) == {"catch-all"}
+
+
+def test_feature_rewritten_at_run_time_does_not_count(tmp_path: Path) -> None:
+    conftest = '''\
+import pathlib
+
+pathlib.Path("features/T1.feature").write_text(
+    "Feature: T1\\n\\n  Scenario: AC-1\\n    Then ok\\n\\n  Scenario: AC-2\\n    Then ok\\n"
+)
+'''
+    steps = (
+        'from pytest_bdd import scenarios, then\n\n'
+        'scenarios("../features/T1.feature")\n\n\n'
+        '@then("ok")\ndef _ok():\n    pass\n'
+    )
+    gate, obs = _attack(tmp_path, {"conftest.py": conftest, "tests/test_t1.py": steps})
+    assert obs.exit_codes == (0,)
+    assert gate.decide(obs) is GateStatus.FAIL
+    assert set(obs.structured[BDD_KEY].values()) == {"unmatched"}
+
+
+# ---- build gate: the fixer gets the failing build output ----------------------
+
+
+def test_build_failure_carries_a_bounded_output_excerpt(tmp_path: Path) -> None:
+    from foundry.gates.build import BuildGate
+
+    (tmp_path / "bad.py").write_text("def f(:\n    pass\n")
+    gate = BuildGate()
+    obs = gate.execute(tmp_path)
+    assert gate.decide(obs) is GateStatus.FAIL
+    assert obs.findings and any("bad.py" in f for f in obs.findings), obs.findings
+    assert any("SyntaxError" in f for f in obs.findings)
+    assert gate.execute(tmp_path).results_digest == obs.results_digest
+
+
+def test_build_excerpt_is_sanitized_and_capped(tmp_path: Path) -> None:
+    from foundry.gates.build import BuildGate
+
+    script = (
+        "import sys\n"
+        "for i in range(500):\n"
+        "    print(f'\\x1b[31mline {i} ' + 'x' * 400 + '\\x07')\n"
+        "sys.exit(2)\n"
+    )
+    (tmp_path / "noisy.py").write_text(script)
+    gate = BuildGate(cmd=(sys.executable, "noisy.py"))
+    obs = gate.execute(tmp_path)
+    assert gate.decide(obs) is GateStatus.FAIL
+    body = "\n".join(obs.findings)
+    assert "line 499" in body and "line 0 " not in body
+    assert "\x1b" not in body and "\x07" not in body
+    assert len(obs.findings) <= 42 and len(body) <= 4500

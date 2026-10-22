@@ -13,6 +13,7 @@ which the runner signs as ERROR — never PASS.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -20,7 +21,34 @@ from foundry.schemas.gates import GateStatus, VerdictClass
 
 from .runner import ZoneAObservation, observe, run_grounding_command
 
-__all__ = ["BuildGate"]
+__all__ = ["BuildGate", "build_findings"]
+
+_EXCERPT_LINES = 40
+_LINE_CHARS = 200
+_EXCERPT_CHARS = 4000
+# ANSI escape sequences, then any remaining control char except tab.
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-_]")
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def build_findings(rc: int, stdout: str, stderr: str, workdir: Path) -> tuple[str, ...]:
+    """The fixer's view of a failed build: the exit code + the tail of the build output
+    (stdout then stderr), sanitized and bounded. A pure function of the observed
+    output with the workdir path normalized to ``.``, so it adds nothing to
+    ``results_digest`` that the raw stdout/stderr didn't already bind."""
+    text = "\n".join(t for t in (stdout, stderr) if t.strip())
+    root = str(Path(workdir).resolve())
+    text = text.replace(root + "/", "./").replace(root, ".")
+    text = _CONTROL_RE.sub("", _ANSI_RE.sub("", text))
+    lines = [ln.rstrip()[:_LINE_CHARS] for ln in text.splitlines() if ln.strip()]
+    tail: list[str] = []
+    used = 0
+    for ln in reversed(lines[-_EXCERPT_LINES:]):
+        if used + len(ln) > _EXCERPT_CHARS:
+            break
+        tail.append(ln)
+        used += len(ln)
+    return (f"build command exited {rc}; last {len(tail)} output line(s):", *reversed(tail))
 
 
 class BuildGate:
@@ -55,6 +83,7 @@ class BuildGate:
             exit_codes=(rc,),
             stdout=out,
             stderr=err,
+            findings=build_findings(rc, out, err, workdir) if rc != 0 else (),
             structured={"cmd": list(self.cmd)},
             seal_key=self._seal_key,
         )

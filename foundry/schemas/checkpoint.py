@@ -32,6 +32,7 @@ identity so a LangGraph resume re-fold coalesces the re-emission (idempotent, L7
 
 from __future__ import annotations
 
+import json
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
@@ -194,6 +195,14 @@ def _artifact_detail(kind: str, body: object, *, max_len: int = 200) -> str | No
         except Exception:
             return 0
 
+    if kind == "ticket":
+        # Machine-readable for the Workshop's Tickets tab, so never length-trimmed.
+        return json.dumps({
+            "id": s("id"), "title": s("title"),
+            "specialty": str(getattr(body, "specialty", "") or ""),
+            "difficulty": str(getattr(body, "difficulty", "") or ""),
+            "depends_on": list(getattr(body, "depends_on", ()) or ()),
+        }, separators=(",", ":"))
     out: str | None = None
     if kind == "acceptance_criterion":
         out = s("text")

@@ -55,7 +55,7 @@ from foundry.proxy.test_doubles import MockTransport
 from foundry.schemas.architecture import OwnershipMap, SystemDesign
 from foundry.schemas.base import Artifact, FrozenModel
 from foundry.schemas.gates import GateStatus, JudgmentProvenance
-from foundry.schemas.implementation import FeatureDiff
+from foundry.schemas.implementation import FeatureDiff, Specialty, Ticket
 from foundry.schemas.product import (
     AcceptanceCriterion,
     CriteriaCritique,
@@ -179,6 +179,29 @@ _PASSING_DIFF = (
     "--- /dev/null\n+++ b/test_app.py\n@@ -0,0 +1,2 @@\n"
     "+def test_ok():\n    assert 1 + 1 == 2\n"
 )
+# The passing tree plus catch-all pytest-bdd steps binding every planned feature, for
+# runs whose planner emits ticketed (executable) scenarios.
+_BDD_PASSING_DIFF = _PASSING_DIFF + (
+    "--- /dev/null\n+++ b/test_steps.py\n@@ -0,0 +1,18 @@\n"
+    "+from pytest_bdd import given, parsers, scenarios, then, when\n"
+    "+\n"
+    "+scenarios('features')\n"
+    "+\n"
+    "+\n"
+    "+@given(parsers.re('.*'))\n"
+    "+def _given():\n"
+    "+    pass\n"
+    "+\n"
+    "+\n"
+    "+@when(parsers.re('.*'))\n"
+    "+def _when():\n"
+    "+    pass\n"
+    "+\n"
+    "+\n"
+    "+@then(parsers.re('.*'))\n"
+    "+def _then():\n"
+    "+    pass\n"
+)
 # A compiling module + a test whose COLLECTION fails (imports a missing module):
 # compileall PASSes (syntactically valid), but pytest exits 2 -> a signed Test
 # ERROR (infra, not a verdict, DS7). An ERROR routes to bounded retry (`fix`) and
@@ -230,6 +253,11 @@ def _synthetic_resolve(handle: Artifact) -> FrozenModel:
             judgment_provenance=JudgmentProvenance.SELF,
             seq=handle.seq,
         )
+    if handle.kind == "ticket":
+        tid = f"T-{handle.seq.local:03d}"
+        # No `files`: unrestricted write scope, so the canned diff lands whole.
+        return Ticket(id=tid, title=f"Ticket {tid}", specialty=Specialty.BACKEND,
+                      seq=handle.seq)
     if handle.kind == "feature_diff":
         return FeatureDiff(
             diff_uri=_DIFF_BODY_URI,
@@ -449,7 +477,7 @@ def _respec_app(tmp_path: Any, records: GlobalRecords, **kwargs: Any) -> tuple[A
         rt,
         runner=_runner(records),
         resolve=_resolve,
-        resolve_blob=_resolve_blob_factory(_PASSING_DIFF),
+        resolve_blob=_resolve_blob_factory(_BDD_PASSING_DIFF),
         source_dir=str(src),
         **kwargs,
     ).compile(checkpointer=MemorySaver())

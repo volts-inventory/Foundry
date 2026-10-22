@@ -281,3 +281,22 @@ def test_ticket_artifact_surfaces_as_a_planner_pickup_and_a_ticket_event() -> No
     assert odd is not None and odd["specialty"] == "backend"
     assert event_for_task({**ev, "phase": "bogus"}) is None
     assert event_for_task({**ev, "ticket_id": ""}) is None
+
+
+def test_ticket_artifact_detail_feeds_the_tickets_tab() -> None:
+    from foundry.schemas.checkpoint import _artifact_detail
+    from foundry.schemas.implementation import Difficulty, Specialty, Ticket
+    from foundry.state.seq import Seq
+    from webapp.events import ticket_event
+
+    long_title = "Add an item to the list " * 20
+    ticket = Ticket(id="T-001", title=long_title, specialty=Specialty.DATA,
+                    difficulty=Difficulty.COMPLEX, depends_on=("T-000",),
+                    seq=Seq("r", 1, 1, "planner", 0))
+    detail = _artifact_detail("ticket", ticket)
+    assert detail is not None
+    row = ticket_event(detail)
+    assert row is not None
+    assert row["id"] == "T-001" and row["specialty"] == "data"
+    assert row["tier"] == "T1" and row["depends_on"] == ["T-000"]
+    assert row["title"] == long_title.strip()

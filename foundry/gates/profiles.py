@@ -46,12 +46,20 @@ def _sh(script: str) -> tuple[str, ...]:
     return ("/bin/sh", "-c", script)
 
 
+# The pytest harness also executes the tickets' acceptance scenarios.
+_BDD_CONTRACT = (
+    " BDD: every Scenario in features/<ticket>.feature (named by its criterion id) "
+    "MUST be bound with pytest-bdd `scenarios(...)` and pass; the feature files "
+    "are read-only."
+)
+
+
 PROFILES: dict[str, VerificationProfile] = {
     "python": VerificationProfile(
         name="python",
         contract_text=(
             "GATES: build = `python -m compileall -q .`; test = pytest (>=1 test "
-            "must pass)."
+            "must pass)." + _BDD_CONTRACT
         ),
     ),
     "python-app": VerificationProfile(
@@ -61,7 +69,7 @@ PROFILES: dict[str, VerificationProfile] = {
             "GATES: build = compileall; test = pytest; smoke = `python smoke.py` — "
             "the repo MUST ship smoke.py that exercises the REAL app headless "
             "(start the service and hit one real endpoint in-process, or run the "
-            "CLI end-to-end on sample input) and exits 0 only on success."
+            "CLI end-to-end on sample input) and exits 0 only on success." + _BDD_CONTRACT
         ),
     ),
     "node-web": VerificationProfile(
@@ -97,7 +105,7 @@ PROFILES: dict[str, VerificationProfile] = {
             "GATES: build = compileall; test = pytest; smoke = `python smoke.py` — "
             "the repo MUST ship smoke.py that sets SDL_VIDEODRIVER=dummy, boots the "
             "game, advances >=120 frames with scripted input, and exits 0 only if "
-            "no exception was raised."
+            "no exception was raised." + _BDD_CONTRACT
         ),
     ),
     "love2d": VerificationProfile(
@@ -118,7 +126,7 @@ PROFILES: dict[str, VerificationProfile] = {
             "round-trip property (encrypt->decrypt identity), and a tamper test "
             "(modified ciphertext MUST fail authentication). Use vetted primitives "
             "(the `cryptography` package / libsodium); NEVER hand-roll ciphers, "
-            "modes, or KDFs; no ECB; no static IVs/nonces."
+            "modes, or KDFs; no ECB; no static IVs/nonces." + _BDD_CONTRACT
         ),
     ),
     "go": VerificationProfile(

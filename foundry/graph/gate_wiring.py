@@ -53,8 +53,8 @@ from foundry.agents._runtime import AgentRuntime
 from foundry.gates.build import BuildGate
 from foundry.gates.spec import SpecGate
 from foundry.gates.test import TestGate
-from foundry.schemas.gates import GateResult, GateStatus
-from foundry.schemas.implementation import FeatureDiff
+from foundry.schemas.gates import GateResult, GateStatus, GateTriage
+from foundry.schemas.implementation import FEATURE_DIR, FeatureDiff, feature_path
 from foundry.schemas.product import AcceptanceCriterion, CriteriaCritique
 from foundry.state.tree_sha import tree_sha
 
@@ -95,6 +95,7 @@ __all__ = [
     "PathContainmentError",
     "flake_quarantined",
     "materialize_workdir",
+    "render_feature",
     "route_after_gates",
     "run_build_test_gates",
     "run_spec_gate",
@@ -692,6 +693,72 @@ def _write_sources(
             target.write_text(patched, encoding="utf-8")
 
 
+# ---- executable BDD: features/<ticket>.feature from the criteria -------------
+
+
+def _one_line(text: str) -> str:
+    return " ".join(text.split())
+
+
+def render_feature(ticket_id: str, criteria: list[AcceptanceCriterion]) -> str:
+    """One ticket's Gherkin feature: a ``Scenario`` per criterion, NAMED by the
+    criterion id so an executed scenario maps 1:1 back to its criterion. Ordered
+    by id so the file (and the integrated ``tree_sha``) is byte-stable."""
+    lines = [f"Feature: {_one_line(ticket_id)}", ""]
+    for c in sorted(criteria, key=lambda c: c.id):
+        lines.append(f"  Scenario: {_one_line(c.id)}")
+        steps = [("Given", c.given), ("When", c.when), ("Then", c.then)]
+        if not (c.given or c.when or c.then):
+            # An unstructured criterion still needs a step to bind — an empty
+            # scenario would pass vacuously.
+            steps = [("Then", (c.text,))]
+        for keyword, texts in steps:
+            for i, text in enumerate(texts):
+                lines.append(f"    {keyword if i == 0 else 'And'} {_one_line(text)}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _features(state: FactoryState, resolve: ArtifactResolver) -> dict[str, str]:
+    """``features/<ticket>.feature`` path -> rendered body, for the newest record
+    per criterion id that carries a ``ticket_id`` (criteria without one are skipped)."""
+    current: dict[str, AcceptanceCriterion] = {}
+    for a in sorted(_of_kind(state, CRITERION_KIND), key=lambda a: a.seq):
+        c = _resolve_typed(a, resolve, AcceptanceCriterion, CRITERION_KIND)
+        current[c.id] = c
+    by_ticket: dict[str, list[AcceptanceCriterion]] = {}
+    for c in current.values():
+        if c.ticket_id:
+            by_ticket.setdefault(c.ticket_id, []).append(c)
+    out: dict[str, str] = {}
+    for ticket_id in sorted(by_ticket):
+        rel = feature_path(ticket_id)
+        # ticket_id is planner (model) output: keep the file directly under features/.
+        if PurePosixPath(rel).parent != PurePosixPath(FEATURE_DIR):
+            raise PathContainmentError(
+                f"ticket id {ticket_id!r} does not name a file directly under "
+                f"{FEATURE_DIR}/ — rejected fail-closed"
+            )
+        out[rel] = render_feature(ticket_id, by_ticket[ticket_id])
+    return out
+
+
+def _write_features(dest: Path, features: dict[str, str], *, prune: bool = False) -> None:
+    """Write the trusted feature files. With ``prune``, also drop any other
+    ``features/*.feature`` an agent diff introduced: the directory is gate-owned,
+    and the trusted copies overwrite any agent edit (agents see them, can't change them)."""
+    if not features:
+        return
+    for rel, body in features.items():
+        target = _contained_target(dest, rel)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
+    if prune:
+        for stray in (dest / FEATURE_DIR).glob("*.feature"):
+            if f"{FEATURE_DIR}/{stray.name}" not in features:
+                stray.unlink()
+
+
 # ---- dependency-manifest scaffold (audit-gate grounding) --------------------
 #
 # The dependency/license AUDIT gate grounds its SBOM in a recognized manifest at
@@ -768,6 +835,8 @@ def _python_third_party_requirements(dest: Path) -> list[str] | None:
             reqs.add(name)  # unresolved import: list the bare name, still auditable
     if _has_tests(dest):
         reqs.add(_pin("pytest"))
+    if any((dest / FEATURE_DIR).glob("*.feature")):
+        reqs.update((_pin("pytest"), _pin("pytest-bdd")))
     return sorted(reqs)
 
 
@@ -832,8 +901,13 @@ def materialize_workdir(
     (dest / "criteria.json").write_text(
         as_text(_criteria_payload(state, resolve)), encoding="utf-8"
     )
+    # Executable BDD: written before the sources so an agent patch against a
+    # feature applies, then again after so the trusted copy is what the gates see.
+    features = _features(state, resolve)
+    _write_features(dest, features)
     # Build / Test gate inputs: the integrated code + test sources.
     _write_sources(dest, state, resolve, resolve_blob)
+    _write_features(dest, features, prune=True)
     # Guarantee an auditable dependency manifest so the AUDIT gate can ground its
     # SBOM (no-op when the engineers already shipped one, or the tree is non-Python).
     _scaffold_manifest(dest)
@@ -977,6 +1051,22 @@ def run_build_test_gates(
         node_id=_TEST_NODE,
     )
     gates = [build, test]
+    out: dict[str, Any] = {"gates": gates}
+    if profile is not None and test_cmd is not None and any(
+        (workdir / FEATURE_DIR).glob("*.feature")
+    ):
+        # Only the pytest harness executes scenarios; say so rather than pass silently.
+        out["gate_triage"] = [GateTriage(
+            name=test.name,
+            run_against=run_against,
+            explanation=(
+                "ADVISORY: features/*.feature hold the tickets' acceptance scenarios, "
+                f"but the {profile.name} test harness does not execute them — they "
+                "are not enforced as executable for this stack."
+            ),
+            produced_by=_TEST_NODE,
+            seq=rt.seq(config, _TEST_NODE, "triage:bdd"),
+        )]
     if profile is not None and profile.smoke_cmd is not None:
         from foundry.gates.smoke import SmokeGate
 
@@ -991,7 +1081,7 @@ def run_build_test_gates(
                 node_id=_SMOKE_NODE,
             )
         )
-    return {"gates": gates}
+    return out
 
 
 # ---- routing predicate (fail-closed, convergence-bounded) -------------------

@@ -22,6 +22,7 @@ when a floor is set).
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -29,6 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from foundry.schemas.gates import GateStatus, VerdictClass
+from foundry.schemas.implementation import FEATURE_DIR
 
 from .runner import ZoneAObservation, observe, run_grounding_command
 
@@ -39,6 +41,9 @@ __all__ = ["TestGate", "parse_pytest_summary"]
 
 # Structured-observation key carrying the discriminator's report (zone A → B).
 DISCRIMINATOR_KEY = "discriminator"
+# Structured-observation key carrying {scenario_ref: outcome} for every expected
+# BDD scenario (outcome ∈ passed / failed / skipped / missing).
+BDD_KEY = "bdd"
 
 _SUMMARY_RE = re.compile(r"(\d+) (passed|failed|errors?|skipped)")
 
@@ -55,7 +60,7 @@ _DENY_PATHS_ENV = "FOUNDRY_GATE_DENY_PATHS"
 # named module that collides with a host package (e.g. ``foundry.x``) resolves to the
 # WORKDIR and can never reach or be shadowed by our code — then caps cpu/file/proc
 # resources. Run on its own (in-process fence) OR inside the namespace sandbox.
-_ISOLATED_PYTEST_BOOTSTRAP = """\
+_BOOTSTRAP_PREAMBLE = """\
 import os, sys, resource
 wd = os.environ.get("FOUNDRY_GATE_WORKDIR") or os.getcwd()
 os.chdir(wd)
@@ -70,9 +75,92 @@ for _res, _lim in ((resource.RLIMIT_CPU, (300, 300)),
         resource.setrlimit(_res, _lim)
     except Exception:
         pass
+"""
+_ISOLATED_PYTEST_BOOTSTRAP = _BOOTSTRAP_PREAMBLE + """\
 from pytest import console_main
 sys.exit(console_main())
 """
+
+# Executed scenarios are reported on one stdout line, keyed by the feature file's
+# workdir-relative path + scenario name — i.e. by scenario_ref(ticket, criterion).
+BDD_REPORT_MARKER = "FOUNDRY-BDD-REPORT "
+
+# Same isolation, plus pytest-bdd loaded explicitly (plugin autoload stays off) and a
+# trusted in-bootstrap reporter that records each executed scenario's outcome.
+_ISOLATED_PYTEST_BDD_BOOTSTRAP = _BOOTSTRAP_PREAMBLE + f"""\
+import json, pytest
+
+
+class _BddReport:
+    def __init__(self):
+        self.ref, self.out = {{}}, {{}}
+
+    @pytest.hookimpl(optionalhook=True)
+    def pytest_bdd_before_scenario(self, request, feature, scenario):
+        rel = os.path.relpath(feature.filename, wd).replace(os.sep, "/")
+        self.ref[request.node.nodeid] = rel + "::" + scenario.name
+
+    def pytest_runtest_logreport(self, report):
+        ref = self.ref.get(report.nodeid)
+        if ref is None or self.out.get(ref) == "failed":
+            return
+        if report.failed:
+            self.out[ref] = "failed"
+        elif report.when == "call":
+            self.out[ref] = "passed" if report.passed else "skipped"
+
+    def pytest_unconfigure(self, config):
+        sys.stdout.write("\\n{BDD_REPORT_MARKER}" + json.dumps(self.out, sort_keys=True) + "\\n")
+        sys.stdout.flush()
+
+
+sys.exit(pytest.main(sys.argv[1:], plugins=[_BddReport()]))
+"""
+
+_BDD_PLUGIN_ARGS = ("-p", "pytest_bdd.plugin")
+
+
+def expected_scenarios(workdir: Path) -> tuple[str, ...]:
+    """Every ``features/<ticket>.feature::<criterion id>`` the materialized feature
+    files declare (the trusted side writes them; one ``Scenario:`` per criterion)."""
+    refs: list[str] = []
+    for path in sorted((Path(workdir) / FEATURE_DIR).glob("*.feature")):
+        rel = f"{FEATURE_DIR}/{path.name}"
+        for line in path.read_text(encoding="utf-8").splitlines():
+            head, sep, name = line.strip().partition(":")
+            if sep and head == "Scenario":
+                refs.append(f"{rel}::{name.strip()}")
+    return tuple(refs)
+
+
+def parse_bdd_report(stdout: str) -> dict[str, str]:
+    """The reporter's scenario-ref -> outcome map (last marker line wins; none ⇒ {})."""
+    for line in reversed(stdout.splitlines()):
+        if line.startswith(BDD_REPORT_MARKER):
+            try:
+                data = json.loads(line[len(BDD_REPORT_MARKER):])
+            except json.JSONDecodeError:
+                return {}
+            return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+    return {}
+
+
+def bdd_findings(scenarios: dict[str, str]) -> tuple[str, ...]:
+    """One finding per criterion whose scenario did not pass."""
+    out: list[str] = []
+    for ref, status in sorted(scenarios.items()):
+        if status == "passed":
+            continue
+        criterion = ref.rsplit("::", 1)[-1]
+        if status == "missing":
+            why = (
+                "was not executed — bind the feature with pytest-bdd `scenarios(...)` "
+                "and implement every Given/When/Then step"
+            )
+        else:
+            why = status
+        out.append(f"BDD criterion {criterion}: scenario {ref} {why}")
+    return tuple(out)
 
 
 def _host_source_root() -> str | None:
@@ -149,7 +237,9 @@ class TestGate:
     ) -> None:
         # Default: the ISOLATED pinned harness (fences the host source off sys.path
         # so generated modules can't collide with / reach ours). An explicit cmd is
-        # honored verbatim (tests inject one).
+        # honored verbatim (tests inject one). Only the default harness executes BDD
+        # scenarios (a profile-pinned foreign harness can't run pytest-bdd).
+        self._runs_bdd = cmd is None
         self.cmd = cmd or (
             sys.executable, "-c", _ISOLATED_PYTEST_BOOTSTRAP, "-q", "--tb=short"
         )
@@ -181,7 +271,7 @@ class TestGate:
 
     # ---- zone A: pinned harness execution, raw rc + summary ---------------
 
-    def _ground(self, workdir: Path) -> tuple[int, str, str]:
+    def _ground(self, workdir: Path, cmd: tuple[str, ...]) -> tuple[int, str, str]:
         """Run the pinned harness over ``workdir``. By default the isolated pytest runs
         inside the namespace sandbox (no network, isolated mount/pid/ipc/uts — see
         ``sandbox.py``); ``FOUNDRY_GATE_SANDBOX=inprocess`` runs it in-process with only
@@ -190,13 +280,20 @@ class TestGate:
 
         env = self._env(workdir)
         if sandbox_enabled():
-            return run_in_sandbox(self.cmd, workdir, env=env, timeout_s=self._timeout_s)
-        return run_grounding_command(self.cmd, workdir, env=env, timeout_s=self._timeout_s)
+            return run_in_sandbox(cmd, workdir, env=env, timeout_s=self._timeout_s)
+        return run_grounding_command(cmd, workdir, env=env, timeout_s=self._timeout_s)
 
     def execute(self, workdir: Path) -> ZoneAObservation:
-        rc, out, err = self._ground(workdir)
+        expected = expected_scenarios(workdir) if self._runs_bdd else ()
+        cmd = self.cmd
+        if expected:
+            cmd = (
+                sys.executable, "-c", _ISOLATED_PYTEST_BDD_BOOTSTRAP, *self.cmd[3:],
+                *_BDD_PLUGIN_ARGS,
+            )
+        rc, out, err = self._ground(workdir, cmd)
         structured: dict[str, object] = {
-            "cmd": list(self.cmd),
+            "cmd": list(cmd),
             "summary": parse_pytest_summary(out),
         }
         findings: tuple[str, ...] = ()
@@ -213,6 +310,13 @@ class TestGate:
             report = self._discriminator.evaluate(workdir)
             structured[DISCRIMINATOR_KEY] = report.model_dump(mode="json")
             findings = report.findings
+        if expected:
+            # Each criterion's scenario outcome, keyed by scenario_ref; a scenario the
+            # run never executed (unbound feature, collection miss) is "missing".
+            executed = parse_bdd_report(out)
+            scenarios = {ref: executed.get(ref, "missing") for ref in sorted(expected)}
+            structured[BDD_KEY] = scenarios
+            findings = bdd_findings(scenarios) + findings
         return observe(
             self.name,
             exit_codes=(rc,),
@@ -232,8 +336,11 @@ class TestGate:
         if rc in _INFRA_EXIT_CODES:
             return GateStatus.ERROR  # harness failure is not a verdict (DS7)
         if rc == _NO_TESTS_COLLECTED:
-            # Adequacy floor: an empty suite cannot clear the gate.
-            return GateStatus.FAIL if self.min_passed > 0 else GateStatus.PASS
+            # Adequacy floor: an empty suite cannot clear the gate — nor can one
+            # that leaves acceptance scenarios unexecuted.
+            if self.min_passed > 0 or obs.structured.get(BDD_KEY):
+                return GateStatus.FAIL
+            return GateStatus.PASS
         if rc != 0:
             return GateStatus.FAIL
         passed = obs.structured.get("summary", {}).get("passed", 0)
@@ -245,5 +352,9 @@ class TestGate:
         # nothing real; the discriminator report rode the sealed observation.
         report = obs.structured.get(DISCRIMINATOR_KEY)
         if report is not None and not report.get("passed", False):
+            return GateStatus.FAIL
+        # Executable acceptance: every criterion's scenario must have run and passed.
+        scenarios = obs.structured.get(BDD_KEY)
+        if scenarios is not None and any(v != "passed" for v in scenarios.values()):
             return GateStatus.FAIL
         return GateStatus.PASS

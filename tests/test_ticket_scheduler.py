@@ -372,7 +372,9 @@ def test_supervisor_raises_the_cap_after_committing_and_resumes(tmp_path: Path) 
             app.invoke(seed, cfg)
         committed = app.get_state(cfg)
         assert committed.next == ("token_cap",)
-        assert set(_diffs(committed.values)) == {"T-001", "T-003"}
+        # The scripted planner adds its own ticket (T-SPEC) beside the seeded wave.
+        built = set(_diffs(committed.values))
+        assert {"T-001", "T-003"} <= built and "T-002" not in built
         rec.calls.clear()
         with pytest.raises(TokenCapExceeded):  # still spent: stays stopped
             app.invoke(None, cfg)

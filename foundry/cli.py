@@ -410,22 +410,6 @@ _PLAN_PAYLOAD: dict[str, Any] = {
         "body": "Deliver the requested behavior.",
         "required_capabilities": [],
     },
-    "acceptance_criteria": [
-        {
-            "id": "AC-001",
-            "text": "Given the service, When invoked, Then it responds.",
-            "criticality": "normal",
-            "oracle_hint": "call it; observe the response",
-            "security_abuse": False,
-        },
-        {
-            "id": "AC-002",
-            "text": "Given an unauthenticated request, When it hits the API, Then 401.",
-            "criticality": "high-risk",
-            "oracle_hint": "no token -> 401; negative oracle",
-            "security_abuse": True,
-        },
-    ],
     "criteria_review": {"missing": [], "security_abuse_omissions": []},
     "sprint_plan": {
         "milestones": ["M1"],
@@ -436,8 +420,49 @@ _PLAN_PAYLOAD: dict[str, Any] = {
     "design": {"title": "Requested service", "body": "api -> store", "components": ["api"]},
     "adrs": [],
     "interfaces": [],
-    # one unit -> one task -> one diff
-    "ownership": [{"unit": "app.py", "owner": "owner-a", "criterion_ids": ["AC-001"]}],
+    # One feature ticket and its paired test ticket.
+    "tickets": [
+        {
+            "id": "T-001",
+            "title": "Serve the requested behavior",
+            "description": "The service answers callers and rejects anonymous ones.",
+            "specialty": "backend",
+            "difficulty": "standard",
+            "depends_on": [],
+            "files": ["app.py"],
+            "implements": [],
+            "consumes": [],
+            "scenarios": [
+                {
+                    "id": "AC-001",
+                    "given": ["the service is running"],
+                    "when": ["it is invoked"],
+                    "then": ["it responds"],
+                    "criticality": "normal",
+                    "security_abuse": False,
+                },
+                {
+                    "id": "AC-002",
+                    "given": ["an unauthenticated request"],
+                    "when": ["it hits the API"],
+                    "then": ["the response is 401"],
+                    "criticality": "high-risk",
+                    "security_abuse": True,
+                },
+            ],
+        },
+        {
+            "id": "T-002",
+            "title": "Step definitions for T-001",
+            "specialty": "test",
+            "difficulty": "trivial",
+            "depends_on": ["T-001"],
+            "files": ["tests/step_defs/test_t_001.py"],
+            "implements": [],
+            "consumes": [],
+            "scenarios": [],
+        },
+    ],
     "pinned_constraints": [],
 }
 

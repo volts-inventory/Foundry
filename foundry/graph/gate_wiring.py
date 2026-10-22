@@ -175,7 +175,9 @@ def _criteria_list(
 
     Each entry carries the fields SpecGate's zone-A read expects: ``id``,
     ``text``, ``oracle`` (mapped from :attr:`AcceptanceCriterion.oracle_hint`),
-    and ``security_abuse``. Ordered by criterion ``id`` so the materialized file
+    and ``security_abuse``, plus ``given``/``when``/``then`` for a structured
+    scenario (omitted for a text-only criterion, whose entry is unchanged).
+    Ordered by criterion ``id`` so the materialized file
     — and thus the integrated ``tree_sha`` — is byte-stable across folds/resume.
 
     A re-plan re-emits criteria under the same ids; the newest-by-``Seq`` record
@@ -186,15 +188,18 @@ def _criteria_list(
     for a in sorted(_of_kind(state, CRITERION_KIND), key=lambda a: a.seq):
         c = _resolve_typed(a, resolve, AcceptanceCriterion, CRITERION_KIND)
         current[c.id] = c
-    return [
-        {
+    out: list[dict[str, Any]] = []
+    for c in sorted(current.values(), key=lambda c: c.id):
+        entry: dict[str, Any] = {
             "id": c.id,
             "text": c.text,
             "oracle": c.oracle_hint,
             "security_abuse": c.security_abuse,
         }
-        for c in sorted(current.values(), key=lambda c: c.id)
-    ]
+        if c.given or c.when or c.then:
+            entry.update(given=list(c.given), when=list(c.when), then=list(c.then))
+        out.append(entry)
+    return out
 
 
 def _latest_critique(

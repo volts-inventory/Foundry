@@ -43,6 +43,7 @@ import ast
 import json
 import re
 import sys
+import tempfile
 from dataclasses import dataclass
 from importlib import metadata as _im
 from pathlib import Path, PurePosixPath
@@ -53,9 +54,11 @@ from foundry.agents._runtime import AgentRuntime
 from foundry.gates.build import BuildGate
 from foundry.gates.spec import SpecGate
 from foundry.gates.test import TestGate
+from foundry.schemas.base import BudgetLedger
 from foundry.schemas.gates import GateResult, GateStatus, GateTriage
 from foundry.schemas.implementation import FEATURE_DIR, FeatureDiff, feature_path
 from foundry.schemas.product import AcceptanceCriterion, CriteriaCritique
+from foundry.state.reducers import merge_gates
 from foundry.state.tree_sha import tree_sha
 
 if TYPE_CHECKING:
@@ -86,6 +89,7 @@ if TYPE_CHECKING:
     BlobResolver = Callable[[str], "bytes | str"]
 
 __all__ = [
+    "BUILD_BOUNDARY",
     "BUILD_TEST_SMOKE_BOUNDARY",
     "CRITERIA_CRITIQUE_KIND",
     "CRITERION_KIND",
@@ -93,10 +97,13 @@ __all__ = [
     "FeatureDiffBodyError",
     "MaterializationError",
     "PathContainmentError",
+    "WaveBuildCheck",
+    "bump_fix_attempts",
     "flake_quarantined",
     "materialize_workdir",
     "render_feature",
     "route_after_gates",
+    "run_build_gate",
     "run_build_test_gates",
     "run_spec_gate",
 ]
@@ -1089,11 +1096,43 @@ def run_build_test_gates(
     return out
 
 
+def run_build_gate(
+    state: FactoryState,
+    config: RunnableConfig,
+    *,
+    rt: AgentRuntime,
+    runner: TwoZoneGateRunner,
+    resolve: ArtifactResolver,
+    resolve_blob: BlobResolver,
+    workdir: Path,
+    profile: VerificationProfile | None = None,
+) -> dict[str, Any]:
+    """Run ONLY the Build gate on the integrated tree (the per-wave check, §2b).
+
+    The Test gate is left out on purpose: scenarios of tickets not yet built would
+    fail it. Keyed under the same node as the final Build gate, so the final
+    verdict (a later epoch) supersedes every intermediate one."""
+    run_against = materialize_workdir(state, workdir, resolve=resolve, resolve_blob=resolve_blob)
+    build = _run_gate(
+        BuildGate(cmd=profile.build_cmd if profile is not None else None,
+                  seal_key=runner.seal_key),
+        rt=rt,
+        runner=runner,
+        config=config,
+        run_against=run_against,
+        workdir=workdir,
+        node_id=_BUILD_NODE,
+    )
+    return {"gates": [build]}
+
+
 # ---- routing predicate (fail-closed, convergence-bounded) -------------------
 
 # Which gate verdicts each phase boundary is responsible for.
 SPEC_BOUNDARY = "spec"
 BUILD_TEST_BOUNDARY = "build_test"
+# The per-wave integration check (§2b): the build verdict alone.
+BUILD_BOUNDARY = "build"
 # Profile boundary variant (ROADMAP Phase 3): when the run's verification
 # profile pins a smoke (runtime boot) command, the boundary is also responsible
 # for the "smoke" verdict — a missing/FAILed smoke can never advance.
@@ -1101,6 +1140,7 @@ BUILD_TEST_SMOKE_BOUNDARY = "build_test_smoke"
 
 _BOUNDARY_GATES: dict[str, frozenset[str]] = {
     SPEC_BOUNDARY: frozenset({"spec"}),
+    BUILD_BOUNDARY: frozenset({"build"}),
     BUILD_TEST_BOUNDARY: frozenset({"build", "test"}),
     BUILD_TEST_SMOKE_BOUNDARY: frozenset({"build", "test", "smoke"}),
 }
@@ -1237,3 +1277,66 @@ def route_after_gates(
 
     # All relevant gates PASS on a non-disqualified digest.
     return ADVANCE
+
+
+def bump_fix_attempts(
+    state: FactoryState,
+    config: RunnableConfig,
+    out: dict[str, Any],
+    *,
+    boundary: str,
+    records: Any,
+    max_fix_attempts: int,
+) -> None:
+    """Bump ``budget.fix_attempts_since_all_green`` on ``out`` when ``boundary``
+    will route ``fix`` after ``out`` folds in.
+
+    The gate node writing ``out`` is the sole ``budget`` writer of its superstep, and
+    the conditional edge that fires in that same superstep reads the post-fold state.
+    So the decision folds the prior ``gates`` with the node's delta through the REAL
+    reducer — never a hand-assembled subset — so it can never diverge from the edge's
+    read (E-R1-01)."""
+    ledger = state.get("budget") or BudgetLedger()
+    post: FactoryState = {
+        "gates": merge_gates(state.get("gates"), out.get("gates")),
+        "budget": ledger,
+    }
+    decision = route_after_gates(
+        post, config, boundary=boundary, records=records, max_fix_attempts=max_fix_attempts
+    )
+    if decision == FIX:
+        out["budget"] = ledger.model_copy(
+            update={"fix_attempts_since_all_green": ledger.fix_attempts_since_all_green + 1}
+        )
+
+
+@dataclass(frozen=True)
+class WaveBuildCheck:
+    """The per-wave integration check (plan §2b) the implementation subgraph runs
+    between ticket waves: the attested Build gate on the integrated tree, through
+    the SAME runner as the supervisor's gates, sharing its fix-attempt budget.
+
+    ``run`` is the node (verdict + budget bump); ``route`` returns
+    :data:`ADVANCE` / :data:`FIX` / :data:`HALT` for the :data:`BUILD_BOUNDARY`."""
+
+    rt: AgentRuntime
+    runner: TwoZoneGateRunner
+    resolve: ArtifactResolver
+    resolve_blob: BlobResolver
+    max_fix_attempts: int = 3
+    profile: VerificationProfile | None = None
+
+    def run(self, state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        with tempfile.TemporaryDirectory(prefix="foundry_wave_gate_") as tmp:
+            out = run_build_gate(
+                state, config, rt=self.rt, runner=self.runner, resolve=self.resolve,
+                resolve_blob=self.resolve_blob, workdir=Path(tmp), profile=self.profile,
+            )
+        bump_fix_attempts(state, config, out, boundary=BUILD_BOUNDARY,
+                          records=self.runner.records, max_fix_attempts=self.max_fix_attempts)
+        return out
+
+    def route(self, state: FactoryState, config: RunnableConfig) -> str:
+        return route_after_gates(state, config, boundary=BUILD_BOUNDARY,
+                                 records=self.runner.records,
+                                 max_fix_attempts=self.max_fix_attempts)

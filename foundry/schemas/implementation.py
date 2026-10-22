@@ -10,6 +10,7 @@ content-addressed handles, never inline (DS9).
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal, TypedDict
 
 from foundry.schemas.base import FrozenModel
 from foundry.state.seq import Seq
@@ -22,6 +23,72 @@ class TaskStatus(StrEnum):
     DONE = "done"
 
 
+class Specialty(StrEnum):
+    """Which specialist agent builds a ticket."""
+
+    FRONTEND = "frontend"
+    BACKEND = "backend"
+    DATA = "data"
+    TEST = "test"
+
+
+class Difficulty(StrEnum):
+    """Planner's rating of a ticket; mapped to a model tier, never to a model id."""
+
+    TRIVIAL = "trivial"
+    STANDARD = "standard"
+    COMPLEX = "complex"
+
+
+# Default difficulty -> proxy tier (T1 strongest). Overridable per run.
+DEFAULT_TICKET_TIERS: dict[Difficulty, str] = {
+    Difficulty.TRIVIAL: "T3",
+    Difficulty.STANDARD: "T2",
+    Difficulty.COMPLEX: "T1",
+}
+
+FEATURE_DIR = "features"
+
+
+def feature_path(ticket_id: str) -> str:
+    """Repo-relative path of a ticket's executable BDD feature file."""
+    return f"{FEATURE_DIR}/{ticket_id}.feature"
+
+
+def scenario_ref(ticket_id: str, criterion_id: str) -> str:
+    """A criterion's oracle: its scenario, which is named after the criterion id."""
+    return f"{feature_path(ticket_id)}::{criterion_id}"
+
+
+class Ticket(FrozenModel):
+    """An atomic, Jira-style unit of work the Planner emits. Its acceptance
+    scenarios are the AcceptanceCriterion records listed in ``scenario_ids``."""
+
+    id: str  # "T-001"
+    title: str
+    description: str = ""
+    specialty: Specialty
+    difficulty: Difficulty = Difficulty.STANDARD
+    depends_on: tuple[str, ...] = ()  # ticket ids; must form a DAG
+    files: tuple[str, ...] = ()  # the only paths this ticket may write
+    scenario_ids: tuple[str, ...] = ()  # AcceptanceCriterion ids
+    implements: tuple[str, ...] = ()  # InterfaceContract ids it provides
+    consumes: tuple[str, ...] = ()  # InterfaceContract ids it calls
+    version: int = 1
+    supersedes: str | None = None
+    seq: Seq
+
+
+class TaskEvent(TypedDict):
+    """Live per-ticket telemetry (pool -> run(task_cb=...) -> Workshop)."""
+
+    phase: Literal["start", "done", "failed"]
+    ticket_id: str
+    title: str
+    specialty: str
+    tier: str
+
+
 class Task(FrozenModel):
     """A well-specified unit of work (agents.md Layer 3 — Senior Engineer SOP):
     each task gets its own branch (`task/<id>`) and traces to the acceptance
@@ -32,6 +99,11 @@ class Task(FrozenModel):
     criterion_ids: tuple[str, ...]  # traceability to AcceptanceCriterion.id
     branch: str  # "task/<id>" — the junior's git scope is this branch only
     status: TaskStatus = TaskStatus.PENDING
+    # Ticket-driven fields; None/() on tasks derived from a plain ownership unit.
+    ticket_id: str | None = None
+    specialty: Specialty | None = None
+    tier: str | None = None  # proxy tier ("T1".."T3"); carried to the adapter
+    depends_on: tuple[str, ...] = ()  # task ids that must finish first
     version: int = 1
     supersedes: str | None = None
     seq: Seq

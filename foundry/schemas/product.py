@@ -65,9 +65,24 @@ class AcceptanceCriterion(FrozenModel):
     criticality: Criticality = Criticality.NORMAL
     oracle_hint: str = ""  # testable-oracle hint: how a runner-evaluable test decides it
     security_abuse: bool = False  # security/abuse criterion (Spec-gate relevant)
+    # Structured scenario; ``text`` stays the rendered "Given … When … Then …" so
+    # every plain-text consumer keeps working.
+    given: tuple[str, ...] = ()
+    when: tuple[str, ...] = ()
+    then: tuple[str, ...] = ()
+    ticket_id: str | None = None
     version: int = 1
     supersedes: str | None = None
     seq: Seq
+
+
+def render_scenario(given: tuple[str, ...], when: tuple[str, ...], then: tuple[str, ...]) -> str:
+    """The one-line ``text`` form of a scenario."""
+    parts = []
+    for word, steps in (("Given", given), ("When", when), ("Then", then)):
+        if steps:
+            parts.append(f"{word} " + " and ".join(steps))
+    return " ".join(parts)
 
 
 class CriteriaCritique(FrozenModel):

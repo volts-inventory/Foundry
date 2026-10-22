@@ -70,4 +70,3 @@ def test_refuses_dirty_dest_and_empty_lineage(tmp_path: Path) -> None:
         export_lineage(dirty, make_lineage(tmp_path))
     with pytest.raises(GitExportError, match="nothing to export"):
         export_lineage(tmp_path / "empty-out", [])
-

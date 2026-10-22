@@ -12,6 +12,7 @@ written path is surfaced on ``RunResult.output_root`` and in ``summary()``.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from foundry.cli import main, run
@@ -35,7 +36,7 @@ def test_passing_run_writes_source_files(tmp_path: Path) -> None:
     )
 
     assert result.passed is True
-    # The written path is surfaced on the result (like doc_root).
+    # The written path is surfaced on the result.
     assert result.output_root is not None
     assert Path(result.output_root) == out.resolve()
 
@@ -51,6 +52,12 @@ def test_passing_run_writes_source_files(tmp_path: Path) -> None:
 
     # The written path is reported in the human-readable summary.
     assert str(out.resolve()) in result.summary()
+
+    # The BUILD-MANIFEST (json + md) rides in the same tree with token accounting.
+    manifest = json.loads((out / "BUILD-MANIFEST.json").read_text(encoding="utf-8"))
+    assert manifest["passed"] is True
+    assert manifest["model_usage"]["model_calls"] > 0
+    assert "## Model usage (observed)" in (out / "BUILD-MANIFEST.md").read_text()
 
 
 def test_halted_run_writes_a_usable_draft(tmp_path: Path) -> None:

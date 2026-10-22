@@ -2,7 +2,7 @@
 
 A real company's release ships a manifest: what was built, which gates passed
 (with their attestation), the dependency/provenance digests, the cost of the
-build, and the documents produced. Foundry already records all of this, but
+build. Foundry already records all of this, but
 scattered — across ``state['artifacts']``, ``state['gates']``, the proxy's
 per-call manifest, and the evidence pack. :class:`BuildManifest` consolidates it
 into one content-addressed record that renders to both JSON (machine) and
@@ -17,22 +17,26 @@ from the budget ledger when present — never invented.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from foundry.schemas.base import FrozenModel
 
 if TYPE_CHECKING:
+    from foundry.agents._runtime import AgentRuntime
     from foundry.schemas.base import Artifact
     from foundry.schemas.gates import GateResult
+    from foundry.state.factory_state import FactoryState
 
 __all__ = [
     "ArtifactRef",
     "BuildManifest",
-    "DocRef",
     "GateRef",
     "ModelUsageSummary",
     "build_manifest",
     "render_manifest_md",
+    "write_manifest",
 ]
 
 
@@ -49,12 +53,6 @@ class GateRef(FrozenModel):
     status: str
     run_against: str = ""
     attested: bool = False
-
-
-class DocRef(FrozenModel):
-    path: str
-    title: str
-    sha256: str
 
 
 class ModelUsageSummary(FrozenModel):
@@ -90,7 +88,6 @@ class BuildManifest(FrozenModel):
     tree_sha: str = ""
     artifacts: tuple[ArtifactRef, ...] = ()
     gates: tuple[GateRef, ...] = ()
-    docs: tuple[DocRef, ...] = ()
     model_usage: ModelUsageSummary = ModelUsageSummary()
     estimated_cost_microusd: int = 0
 
@@ -185,7 +182,6 @@ def build_manifest(
     phase: str,
     artifacts: Sequence[Artifact],
     gates: Sequence[GateResult],
-    docs: Sequence[DocRef],
     proxy_manifest: Sequence[Mapping[str, Any]] = (),
     drift_events: int = 0,
     agent_usage: Sequence[Mapping[str, int]] = (),
@@ -202,7 +198,6 @@ def build_manifest(
         tree_sha=tree_sha,
         artifacts=_artifact_refs(artifacts),
         gates=_gate_refs(gates),
-        docs=tuple(docs),
         model_usage=_usage_summary(proxy_manifest, drift_events, agent_usage),
         estimated_cost_microusd=estimated_cost_microusd,
     )
@@ -260,14 +255,42 @@ def render_manifest_md(m: BuildManifest) -> str:
             if u.drift_by_kind
             else ""
         ),
-        "",
-        "## Documents",
-        "",
-        "| Document | Path | sha256 |",
-        "|----------|------|--------|",
     ]
-    for d in m.docs:
-        lines.append(f"| {d.title} | `{d.path}` | `{d.sha256[:12]}…` |")
-    if not m.docs:
-        lines.append("| _none_ | — | — |")
     return "\n".join(lines) + "\n"
+
+
+def _budget_spend(state: FactoryState) -> int:
+    spend = getattr(state.get("budget"), "spend_microusd", 0)
+    return spend if isinstance(spend, int) and not isinstance(spend, bool) else 0
+
+
+def write_manifest(
+    out_dir: str | Path,
+    *,
+    request: str,
+    thread_id: str,
+    state: FactoryState,
+    rt: AgentRuntime,
+    passed: bool,
+) -> BuildManifest:
+    """Build the manifest for a finished run and write BUILD-MANIFEST.{json,md}."""
+    manifest = build_manifest(
+        request=request,
+        thread_id=thread_id,
+        generated_at=datetime.now(UTC).isoformat(timespec="seconds"),
+        passed=passed,
+        phase=str(state.get("phase") or "unknown"),
+        artifacts=tuple(state.get("artifacts") or ()),
+        gates=tuple(state.get("gates") or ()),
+        proxy_manifest=rt.proxy.manifest,
+        drift_events=len(rt.proxy.drift_events),
+        agent_usage=getattr(rt.adapter, "usage", ()),
+        estimated_cost_microusd=_budget_spend(state),
+    )
+    root = Path(out_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "BUILD-MANIFEST.json").write_text(
+        manifest.model_dump_json(indent=2) + "\n", encoding="utf-8"
+    )
+    (root / "BUILD-MANIFEST.md").write_text(render_manifest_md(manifest), encoding="utf-8")
+    return manifest

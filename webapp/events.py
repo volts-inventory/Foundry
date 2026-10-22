@@ -89,10 +89,6 @@ ARTIFACT_ORIGIN: dict[str, tuple[str, str]] = {
     "threat_model": ("Reviewer", "review"),
     "audit_finding": ("Reviewer", "review"),
     "supply_chain_report": ("Reviewer", "review"),
-    "runbook": ("Reviewer", "review"),
-    "known_issues": ("Reviewer", "review"),
-    "upgrade_guide": ("Reviewer", "review"),
-    "perf_cost_report": ("Reviewer", "review"),
 }
 
 # A friendly label per artifact kind (shown as a little pickup icon + quest line).
@@ -115,10 +111,6 @@ ARTIFACT_LABEL: dict[str, str] = {
     "threat_model": "Threat Model",
     "audit_finding": "Audit Finding",
     "supply_chain_report": "Supply-chain Report",
-    "runbook": "Runbook",
-    "known_issues": "Known Issues",
-    "upgrade_guide": "Upgrade Guide",
-    "perf_cost_report": "Perf/Cost Report",
 }
 
 _BOUNDARY_ROOM: dict[str, str] = {
@@ -175,8 +167,6 @@ _INFRA_NODE: dict[str, tuple[str, str, str | None]] = {
                  "spec rework finished"),
     "build_test_fix": ("engineering", "fix-forward — rebuilding after a gate failure",
                        "rebuild finished"),
-    # the doc pass
-    "docs": ("review", "writing the runbook & release docs", "docs written"),
 }
 # Conditional-architecture agents that have no sprite on the floor — they still get a
 # step line so the log doesn't skip them. (agent name, room, running, done)

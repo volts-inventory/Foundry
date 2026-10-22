@@ -2102,7 +2102,7 @@ const LEGACY_AGENT = {
   "Stakeholder Proxy":"Planner","Product Manager":"Planner","Criteria Critic":"Planner",
   "Program Manager":"Planner","Principal Architect":"Planner",
   "AppSec Engineer":"Reviewer","Audit & Compliance":"Reviewer","Supply-chain Reviewer":"Reviewer",
-  "QA Engineer":"Reviewer","SDET":"Reviewer","Technical Writer":"Reviewer",
+  "QA Engineer":"Reviewer","SDET":"Reviewer",
   "Frontend Lead":"Frontend Engineer","Backend Lead":"Backend Engineer","Data Lead":"Data Engineer",
 };
 // ---- ticket crew state (per floor; pure, so replay and live events share it) ----------

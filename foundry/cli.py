@@ -59,7 +59,6 @@ from typing import TYPE_CHECKING, Any, cast
 from langgraph.types import Command
 
 from foundry.agents import AgentRuntime
-from foundry.docs import write_bundle
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.durability.checkpointer import FoundryCheckpointer
 from foundry.durability.persistence import (
@@ -77,6 +76,7 @@ from foundry.graph.supervisor import (
     MODE_ASSISTANT,
     normalize_checkpoints,
 )
+from foundry.manifest import write_manifest
 from foundry.proxy import ModelProviderProxy, build_backend
 from foundry.proxy.model_provider_proxy import DriftMode, DriftPolicy
 from foundry.proxy.test_doubles import MockTransport
@@ -100,7 +100,6 @@ if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
 
     from foundry.agents.implementation.senior_engineer import ArtifactResolver
-    from foundry.docs import DocumentationBundle
     from foundry.graph.gate_wiring import BlobResolver
     from foundry.proxy.cli_transports import BackendName
     from foundry.schemas.base import Artifact, ExternalAction
@@ -644,7 +643,7 @@ def _write_output_tree(
     from agent-influenced diff bodies; ``materialize_workdir`` already rejects an
     absolute/``..`` diff path fail-closed (D-R1-03), and we re-check each copied
     relative path against the destination root (mirrors
-    :func:`docs.assemble.write_bundle`) so a write can never escape ``output_dir``.
+    ``materialize_workdir``) so a write can never escape ``output_dir``.
     """
     from foundry.graph.gate_wiring import materialize_workdir
 
@@ -661,7 +660,7 @@ def _write_output_tree(
             rel = src.relative_to(stage_root)
             if rel.name in GATE_INPUT_FILES and len(rel.parts) == 1:
                 continue
-            # Defense-in-depth (mirrors docs/assemble.write_bundle): reject an
+            # Defense-in-depth: reject an
             # absolute or '..' relative path before writing under out_root.
             if rel.is_absolute() or ".." in rel.parts:
                 raise ValueError(f"unsafe source path {str(rel)!r}")
@@ -837,8 +836,6 @@ class RunResult:
     gate_findings: dict[str, tuple[str, ...]] = field(default_factory=dict)
     """Findings (the human-readable WHY) for the newest verdict per gate — surfaced
     in the summary for FAILING gates so a halted real build is diagnosable."""
-    doc_root: str | None = None
-    """Where the per-build documentation set was written (when ``docs_dir`` set)."""
     output_root: str | None = None
     """Where the final accepted source tree was written (when ``output_dir`` is
     set AND the build passed); ``None`` on a halted run (no PASS, no write)."""
@@ -901,8 +898,6 @@ class RunResult:
                 f"DRAFT written to: {self.draft_root}  (held — see DRAFT-STATUS.md "
                 "for what's failing; not shipped)"
             )
-        if self.doc_root:
-            lines.append(f"documentation set written to: {self.doc_root}")
         return "\n".join(lines)
 
 
@@ -1144,7 +1139,6 @@ def run(
     adapter: str | Any | None = None,
     diff_body: str | None = None,
     max_fix_attempts: int = 2,
-    docs_dir: str | None = None,
     output_dir: str | None = None,
     checkpoints: bool | list[str | CheckpointBoundary] | None = None,
     checkpoint_responder: CheckpointResponder | None = None,
@@ -1203,15 +1197,11 @@ def run(
     output_dir:
         When set AND the build PASSES (terminal gates pass), write a single
         **GitHub-ready repository** here: the accepted integrated source tree at
-        the root + a real ``README.md`` + the doc set under ``docs/`` + the
-        ``BUILD-MANIFEST``. Surfaced on ``RunResult.output_root``. On a HALTED run a
+        the root + the ``BUILD-MANIFEST`` (json + md, with model/token usage).
+        Surfaced on ``RunResult.output_root``. On a HALTED run a
         best-effort DRAFT (the latest attempt's tree + a ``DRAFT-STATUS.md`` naming
         what's failing) is written instead, surfaced on ``RunResult.draft_root`` — so
         a held build hands back a usable starting point, never empty hands.
-    docs_dir:
-        OPTIONAL. When set, ALSO write the documentation set to this SEPARATE
-        directory (back-compat / docs elsewhere). When only ``output_dir`` is
-        given, the docs already live inside that repo under ``docs/``.
     checkpoints:
         OPTIONAL checkpoint/HITL mode (plan [10]). ``None``/``False`` (the
         DEFAULT) runs straight through with NO pauses (byte-identical to today).
@@ -1346,15 +1336,6 @@ def run(
         "recursion_limit": 200,
     }
 
-    # The terminal ``docs`` graph node assembles the company-shaped documentation
-    # set + BUILD-MANIFEST IN-GRAPH (task [3]): the Technical Writer's model spend
-    # is budget-metered through the SAME proxy and the authored doc artifacts land
-    # on the checkpointed ``artifacts`` channel. The node appends the assembled
-    # bundle to this in-process sink so the CLI can WRITE the already-assembled
-    # tree to disk without re-authoring (no second round of model spend). The sink
-    # is only wired when ``--docs DIR`` was requested.
-    doc_sink: list[DocumentationBundle] = []
-
     # Install the dev gate-write verifier so the REAL merge_gates admits the
     # runner-attested verdicts (D4); reset its token in finally so it never leaks.
     token = set_gate_write_verifier(_gate_verifier(records))
@@ -1394,9 +1375,6 @@ def run(
                 checkpointer=ckpt.saver,
                 max_fix_attempts=max_fix_attempts,
                 profile=run_profile,
-                # Author the doc set when EITHER a separate --docs dir OR an --out
-                # tree is requested (the docs land inside the --out repo, below).
-                doc_sink=doc_sink if (docs_dir is not None or output_dir is not None) else None,
                 checkpoints=sorted(ckpt_set) if ckpt_set else None,
                 max_slots=max_slots,
                 cost_cap_microusd=cost_cap_microusd,
@@ -1541,14 +1519,6 @@ def run(
             final_state, output_dir, resolve=resolve, resolve_blob=resolve_blob
         )
         result = replace(result, output_root=output_root)
-        # GitHub-ready repo: write the doc set INTO the same tree (a real README
-        # at the root + the design/ops docs under docs/ + the BUILD-MANIFEST), so
-        # `--out` produces a single push-ready repository, not code-then-docs in
-        # two places. The bundle's RenderedDoc paths (README.md / docs/… /
-        # BUILD-MANIFEST.*) compose with the source files already at the root.
-        if doc_sink:
-            write_bundle(doc_sink[-1], output_dir)
-            result = replace(result, doc_root=output_dir)
     elif output_dir is not None and not result.passed:
         # HALTED with an output dir: still hand back a usable DRAFT (the best attempt
         # + a DRAFT-STATUS.md saying what's failing), so the run is never empty-handed.
@@ -1558,15 +1528,9 @@ def run(
         )
         if draft_root is not None:
             result = replace(result, draft_root=draft_root)
-            if doc_sink:  # docs help orient a human finishing the draft
-                write_bundle(doc_sink[-1], output_dir)
-                result = replace(result, doc_root=output_dir)
-    if docs_dir is not None and doc_sink:
-        # An EXPLICIT --docs DIR still writes the bundle to that separate location
-        # (back-compat / docs elsewhere). AUTHORING + the manifest already happened
-        # IN-GRAPH (budget-metered, checkpointed); the CLI only writes to disk.
-        write_bundle(doc_sink[-1], docs_dir)
-        result = replace(result, doc_root=docs_dir)
+    if result.output_root or result.draft_root:
+        write_manifest(output_dir or "", request=request, thread_id=thread_id,
+                       state=final_state, rt=rt, passed=result.passed)
     return result
 
 
@@ -1628,7 +1592,7 @@ def _result(
 
 # Flags whose features were removed: reject them rather than letting the leftover
 # tokens silently become part of the build request.
-_REMOVED_FLAGS = frozenset({"--packs", "--apply", "--guardian-approve", "--strict"})
+_REMOVED_FLAGS = frozenset({"--packs", "--apply", "--guardian-approve", "--strict", "--docs"})
 
 
 def _request_text(args: list[str]) -> str:
@@ -1744,7 +1708,6 @@ def main(argv: list[str] | None = None) -> int:
     # instead of 13 copy-pasted index/slice blocks); a usage error raises and is
     # rendered identically below. Comments mark the non-obvious semantics.
     try:
-        args, docs_dir = _take_value(args, "--docs", what="a directory argument")
         args, output_dir = _take_value(args, "--out", what="a directory argument")
 
         # --mode assistant: the only mode; the flag is accepted for compatibility.
@@ -1902,7 +1865,7 @@ def main(argv: list[str] | None = None) -> int:
                 "[--adapter {stub|raw-react|claude-code}] "
                 "[--checkpoints [all|product,design,release]] "
                 "[--scope {auto|demo|standard}] "
-                "[--docs DIR] [--out DIR] [--spec FILE|DIR ...] "
+                "[--out DIR] [--spec FILE|DIR ...] "
                 "[--state-dir DIR] [--thread-id NAME] [--max-fix-attempts N] "
                 "[--max-slots N] [--workers frontend=2,backend=2,data=2,test=2] "
                 "[--ticket-tiers trivial=T3,standard=T2,complex=T1] "
@@ -1940,7 +1903,6 @@ def main(argv: list[str] | None = None) -> int:
             thread_id=thread_id,
             state_dir=state_dir,
             max_fix_attempts=max_fix_attempts,
-            docs_dir=docs_dir,
             output_dir=output_dir,
             checkpoints=checkpoints,
             checkpoint_responder=responder,

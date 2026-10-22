@@ -84,13 +84,3 @@ def test_criteria_payload_carries_steps_only_for_structured_scenarios() -> None:
          "given": ["a list"], "when": ["I add x"], "then": ["x is listed"]},
         {"id": "AC-2", "text": "plain", "oracle": "o", "security_abuse": False},
     ]
-
-
-def test_requirements_doc_renders_scenarios_as_gherkin() -> None:
-    from foundry.docs.render import render_acceptance
-
-    c = _criterion("AC-1", 0, text="Given a When b Then c and d", oracle_hint="o",
-                   given=("a",), when=("b",), then=("c", "d"), ticket_id="T-1")
-    body = render_acceptance((c, _criterion("AC-2", 1, text="plain"))).body
-    assert "```gherkin\nGiven a\nWhen b\nThen c\nAnd d\n```" in body
-    assert "**Ticket:** T-1" in body and "plain" in body

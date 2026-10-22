@@ -2,15 +2,12 @@
 
 These cover the W1 fix — replacing the single per-project queue (which let two
 streams steal each other's events) with an append-only log that many viewers tail
-independently, that survives reconnect/restart via the durable store, and whose
-checkpoint decisions are first-wins + idempotent so multiple devices can drive one
-build without a stale click leaking into the next pause.
+independently, and that survives reconnect/restart via the durable store.
 """
 
 from __future__ import annotations
 
 import os
-import threading
 import time
 
 import pytest
@@ -18,10 +15,8 @@ import pytest
 from webapp import server
 from webapp.server import (
     Project,
-    _await_decision,
     _close,
     _emit,
-    _record_decision,
     _resume_cursor,
 )
 from webapp.store import BuildStore
@@ -38,7 +33,7 @@ def store(tmp_path, monkeypatch):
 
 
 def _project(**kw):
-    return Project(id="p1", request="r", mode="assistant", supervised=True, floor=1, **kw)
+    return Project(id="p1", request="r", mode="assistant", floor=1, **kw)
 
 
 # --- the durable event log --------------------------------------------------- #
@@ -94,45 +89,6 @@ def test_resume_cursor_from_last_event_id():
     assert _resume_cursor("not-a-number") == 0           # malformed → safe replay
 
 
-# --- checkpoint decisions: first-wins, idempotent, multi-device -------------- #
-
-def test_first_decision_wins_later_clicks_are_noops(store):
-    p = _project(pending_checkpoint=1)
-    assert _record_decision(p, "approve", 1) == (True, False)    # first wins
-    assert _record_decision(p, "reject", 1) == (False, False)    # 2nd device: no-op
-    assert p.decision_for[1] == "approve"
-
-
-def test_stale_checkpoint_click_is_ignored(store):
-    p = _project(pending_checkpoint=2)
-    # A click for the PREVIOUS pause (1) must not resolve the current one (2).
-    assert _record_decision(p, "approve", 1) == (False, True)
-    assert 2 not in p.decision_for
-    # No pause awaiting at all → also stale.
-    p.pending_checkpoint = None
-    assert _record_decision(p, "approve", None) == (False, True)
-
-
-def test_await_decision_blocks_then_returns_first(store):
-    p = _project(pending_checkpoint=1)
-    out: dict[str, str] = {}
-
-    def waiter():
-        out["decision"] = _await_decision(p, 1, timeout=5)
-
-    t = threading.Thread(target=waiter)
-    t.start()
-    _record_decision(p, "reject", 1)                      # any device decides
-    t.join(timeout=5)
-    assert out["decision"] == "reject"
-
-
-def test_await_decision_times_out_to_approve(store):
-    p = _project(pending_checkpoint=1)
-    # No decision arrives within the (tiny) timeout → fail-safe auto-approve.
-    assert _await_decision(p, 1, timeout=0.05) == "approve"
-
-
 # --- survive restart: replay history + honestly close interrupted builds ----- #
 
 def test_load_persisted_replays_finished_build(store, monkeypatch):
@@ -154,7 +110,7 @@ def test_finished_log_trimmed_but_store_keeps_full_history(store, monkeypatch):
     monkeypatch.setattr(server, "_LOG_TAIL", 2)
     monkeypatch.setattr(server, "_LOG_GRACE_S", 0)     # eligible as soon as it ends
     running = _project()
-    done = Project(id="p2", request="r", mode="assistant", supervised=True, floor=2)
+    done = Project(id="p2", request="r", mode="assistant", floor=2)
     monkeypatch.setattr(server, "_PROJECTS", {"p1": running, "p2": done})
     for i in range(6):
         _emit(running, type="narrate", text=f"e{i}")     # still running
@@ -228,17 +184,14 @@ def test_interrupted_build_resumes_to_completion(store, monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_OUTPUT_ROOT", tmp_path / "out")
     tid = "rz1"
 
-    # Simulate a crash mid-build: a checkpointed run with NO responder pauses at the
-    # first boundary and leaves a durable checkpoint behind.
-    run("build a tiny url shortener", thread_id=tid, state_dir=state_dir,
-        checkpoints=True, mode="assistant")
+    # Simulate a crash mid-build: a durable run leaves its checkpoint behind.
+    run("build a tiny url shortener", thread_id=tid, state_dir=state_dir, mode="assistant")
     assert server._has_durable_checkpoint(tid) is True       # the probe sees it
 
-    # Catalog it as it would have been mid-flight: status 'running', a little history,
-    # unsupervised so the resumed run auto-approves to the end without a human.
+    # Catalog it as it would have been mid-flight: status 'running', a little history.
     store.append_event(tid, 0, {"type": "stage", "room": "product"})
     store.upsert({"id": tid, "floor": 1, "release_seq": 1, "request": "r",
-                  "mode": "assistant", "supervised": False, "status": "running",
+                  "mode": "assistant", "status": "running",
                   "passed": False})
 
     monkeypatch.setattr(server, "_PROJECTS", {})
@@ -340,42 +293,6 @@ def test_activity_is_throttled_deduped_and_capped_per_step():
     assert accepted == server._ACT_MAX_PER_STEP
     p2.act_count, p2.act_text, p2.act_last = 0, "", 0.0        # what a step start does
     assert server.take_activity(p2, "editing again.py", now=9000.0) is not None
-
-
-# --- platform builds feed the FLOOR, not just the log ------------------------- #
-
-def test_platform_svc_nodes_stream_floor_telemetry_quietly(store, tmp_path, monkeypatch):
-    """A platform build streams the same per-node start/finish `active` telemetry a
-    single build does, so the office seats the agent actually mid-call and clears the
-    room when it ends. It used to announce ONE room per service and never a finish —
-    every room stayed lit forever and the CTO had nowhere to walk. The events are
-    `quiet`: the per-service `svc` boxes already narrate each node to the quest log."""
-    import foundry.platform as platform_mod
-    from foundry.platform.planner import plan_platform
-    from foundry.platform.schema import PlatformResult
-
-    def fake_build_platform(request, *, out_dir, progress_cb=None, **_kw):
-        cb = progress_cb or (lambda _e: None)
-        cb({"type": "svc_start", "service": "data", "role": "data"})
-        cb({"type": "svc_node", "service": "data", "node": "frontend_lead",
-            "scope": "factory:implementation", "phase": "start"})
-        cb({"type": "svc_node", "service": "data", "node": "frontend_lead",
-            "scope": "factory:implementation", "phase": "finish", "detail": {}})
-        return PlatformResult(plan=plan_platform(request), services=(),
-                              out_dir=out_dir, passed=True)
-
-    monkeypatch.setattr(platform_mod, "build_platform", fake_build_platform)
-    p = _project(out_base=tmp_path / "out")
-    (tmp_path / "out").mkdir()
-    server._run_platform(p)
-
-    active = [e for e in p.log if e["type"] == "active" and e.get("agent")]
-    assert [(e["room"], e["phase"]) for e in active] == [("frontend", "start"),
-                                                         ("frontend", "finish")]
-    assert all(e["agent"] == "Frontend Engineer" and e["quiet"] for e in active)
-    # and the quest log still gets exactly one box per node, from the `svc` stream
-    svc_phases = [e["phase"] for e in p.log if e["type"] == "svc"]
-    assert svc_phases == ["start", "agent_start", "agent_done"]
 
 
 def test_parse_workers_defaults_clamps_and_ignores_junk():

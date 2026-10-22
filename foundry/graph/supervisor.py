@@ -55,12 +55,9 @@ from typing import TYPE_CHECKING, Any
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import interrupt
 
-from foundry.agents.implementation.senior_engineer import DESIGN_KIND
 from foundry.agents.implementation.tickets import cap_stopped, pending_wave
 from foundry.governance.budget_controller import BudgetCaps, BudgetController
-from foundry.governance.release_anchors import newest_artifact_uri, state_sha
 from foundry.graph.gate_wiring import (
     BUILD_TEST_BOUNDARY,
     BUILD_TEST_SMOKE_BOUNDARY,
@@ -75,18 +72,12 @@ from foundry.graph.subgraphs.implementation import build_implementation_subgraph
 from foundry.graph.subgraphs.planner import build_planner_subgraph
 from foundry.graph.subgraphs.quality import build_quality_subgraph
 from foundry.schemas.base import BudgetLedger
-from foundry.schemas.checkpoint import (
-    CheckpointBoundary,
-    CheckpointDecision,
-    CheckpointVerdict,
-    inspection_payload,
-)
 from foundry.schemas.gates import GateResult, GateStatus
 from foundry.state.factory_state import FactoryState
 from foundry.state.reducers import JUDGMENT_VERDICTS, merge_gates
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Mapping
 
     from foundry.agents._runtime import AgentRuntime
     from foundry.agents.implementation.senior_engineer import ArtifactResolver
@@ -103,7 +94,6 @@ __all__ = [
     "ROUTES",
     "build_supervisor_graph",
     "classify_request",
-    "normalize_checkpoints",
 ]
 
 # ---- supervisor mode --------------------------------------------------------
@@ -125,22 +115,6 @@ _SPEC_FIX = "spec_fix"
 _BUILD_TEST_FIX = "build_test_fix"
 # Raises a token cap the implementation layer hit, AFTER its writes are committed.
 _TOKEN_CAP = "token_cap"
-# ---- checkpoint/HITL pause node ids (plan [10]) -----------------------------
-# A pause node per stage boundary; built+wired ONLY when that boundary is in the
-# selected ``checkpoints`` set. The id encodes the boundary so the rendered
-# topology shows which stage each pause guards.
-_CHECKPOINT_NODE: dict[CheckpointBoundary, str] = {
-    CheckpointBoundary.PRODUCT: "checkpoint_product",
-    CheckpointBoundary.DESIGN: "checkpoint_design",
-    CheckpointBoundary.RELEASE: "checkpoint_release",
-}
-# Boundaries after the planner: prompted only on its first pass, not on re-plans.
-_PLAN_BOUNDARIES = frozenset({CheckpointBoundary.PRODUCT, CheckpointBoundary.DESIGN})
-# The conditional-edge labels a checkpoint router returns.
-_CKPT_PROCEED = "proceed"  # human approve -> continue to the gate boundary
-_CKPT_HALT = "halt"  # human reject/needs-changes -> END (no PR / no release)
-
-
 def _commit_judgment_ledger(
     prior: list[GateResult] | None,
     delta: list[GateResult] | None,
@@ -164,101 +138,6 @@ def _commit_judgment_ledger(
             if g.status is GateStatus.FAIL:
                 records.latch_negative_verdict(g.latch_key())
 
-
-def normalize_checkpoints(
-    checkpoints: bool | Sequence[str | CheckpointBoundary] | None,
-) -> frozenset[CheckpointBoundary]:
-    """Resolve the ``checkpoints`` argument to the SET of boundaries to pause at.
-
-    The selectable affordance (plan [10]): ``None``/``False`` → no checkpoints
-    (the DEFAULT — a non-checkpoint run is byte-identical to today); ``True`` →
-    ALL three stage boundaries (:data:`CHECKPOINT_BOUNDARIES`); an explicit
-    sequence of boundary names/enums → exactly those. Unknown names raise
-    ``ValueError`` (fail-closed — a typo never silently disables a checkpoint)."""
-    if not checkpoints:
-        return frozenset()
-    if checkpoints is True:
-        return frozenset(CheckpointBoundary)
-    out: set[CheckpointBoundary] = set()
-    for item in checkpoints:
-        if isinstance(item, CheckpointBoundary):
-            out.add(item)
-        else:
-            try:
-                out.add(CheckpointBoundary(item))
-            except ValueError as exc:
-                allowed = ", ".join(b.value for b in CheckpointBoundary)
-                raise ValueError(
-                    f"unknown checkpoint boundary {item!r}; choose from {allowed}"
-                ) from exc
-    return frozenset(out)
-
-
-def _coerce_decision(
-    raw: Any,
-    *,
-    boundary: CheckpointBoundary,
-    state_sha: str,
-    subject_artifact_uri: str,
-    seq: Any,
-) -> CheckpointDecision:
-    """Coerce the value fed back via ``Command(resume=...)`` into a recorded
-    :class:`CheckpointDecision`, binding it to THIS boundary + the integrated
-    ``state_sha`` (so the recorded decision is provenance-keyed, never replayable
-    across boundaries).
-
-    Accepts a ready :class:`CheckpointDecision` (re-keyed to this boundary/state),
-    a bare verdict string/enum (``"approve"``/``"reject"``/``"needs_changes"``), or
-    a mapping carrying ``verdict`` plus optional ``steered_by``/``note`` (steering
-    AUTHORSHIP, lifecycle §2). Fail-closed: an unrecognized/empty value is treated
-    as REJECT — an absent/garbled human decision NEVER auto-approves a release."""
-    verdict: CheckpointVerdict = CheckpointVerdict.REJECT
-    steered_by = ""
-    note = ""
-    if isinstance(raw, CheckpointDecision):
-        verdict, steered_by, note = raw.verdict, raw.steered_by, raw.note
-    elif isinstance(raw, CheckpointVerdict):
-        verdict = raw
-    elif isinstance(raw, str):
-        verdict = _verdict_from_str(raw)
-    elif isinstance(raw, dict):
-        verdict = _verdict_from_str(str(raw.get("verdict", "")))
-        steered_by = str(raw.get("steered_by", "") or "")
-        note = str(raw.get("note", "") or "")
-    return CheckpointDecision(
-        boundary=boundary,
-        verdict=verdict,
-        state_sha=state_sha,
-        subject_artifact_uri=subject_artifact_uri,
-        steered_by=steered_by,
-        note=note,
-        seq=seq,
-    )
-
-
-def _verdict_from_str(value: str) -> CheckpointVerdict:
-    """Map a verdict string to :class:`CheckpointVerdict`; fail-closed to REJECT.
-
-    An unrecognized token is REJECT (never auto-approve) — a checkpoint can only
-    HALT or proceed-to-the-gates, so a garbled human decision halts the run."""
-    try:
-        return CheckpointVerdict(value.strip().lower())
-    except ValueError:
-        return CheckpointVerdict.REJECT
-
-
-def _newest_decision(
-    state: FactoryState, boundary: CheckpointBoundary
-) -> CheckpointDecision | None:
-    """The newest-by-``Seq`` checkpoint decision recorded at ``boundary`` (or
-    ``None`` if none yet) — what the router and emit guard read."""
-    best: CheckpointDecision | None = None
-    for d in state.get("checkpoint_decisions") or ():
-        if d.boundary != boundary:
-            continue
-        if best is None or d.seq > best.seq:
-            best = d
-    return best
 
 # ---- triage classification (Phase-1 deterministic classifier) ---------------
 
@@ -326,7 +205,6 @@ def build_supervisor_graph(
     max_fix_attempts: int = 3,
     discriminator_factory: DiscriminatorFactory | None = None,
     profile: VerificationProfile | None = None,
-    checkpoints: bool | Sequence[str | CheckpointBoundary] | None = None,
     max_slots: int = 1,
     cost_cap_microusd: int | None = None,
     workers: Mapping[str, int] | None = None,
@@ -372,28 +250,9 @@ def build_supervisor_graph(
         produces — a gamed-green suite that clears the adequacy floor but does not
         kill a held-out mutant FAILs the gate in the SHIPPING graph. ``None`` (the
         default) keeps the adequacy floor only.
-    checkpoints:
-        OPTIONAL checkpoint/HITL mode (plan [10]). ``None``/``False`` (the
-        DEFAULT) inserts NO pause nodes — the topology is byte-identical to today
-        (back-compat). ``True`` pauses at ALL three stage boundaries; a sequence
-        of boundary names/enums (``"product"``/``"design"``/``"release"``) pauses
-        at exactly those. At each enabled boundary a pause node calls LangGraph's
-        ``interrupt()`` with a READ-ONLY :func:`inspection_payload` (the stage's
-        artifacts + the attested gate verdicts SO FAR + the advisory
-        ``agent_journal`` from [11]) and waits for a human :class:`CheckpointDecision`
-        fed back via ``Command(resume=...)``. The run is resumable on the EXISTING
-        checkpointer. **Trust:** the checkpoint is HUMAN STEERING LAYERED ON TOP of
-        the gates — an *approve* only lets the run PROCEED to the (unchanged) gate
-        boundary, where the runner-attested verdict still decides; a *reject* halts
-        to END. A checkpoint approve can NEVER turn a gate FAIL into a pass: the
-        pause node writes only the steering channel, never ``gates``, and the emit
-        guard re-checks the gates regardless (factory_graph). The release
-        checkpoint sits after the Build+Test gate has run.
-
     Returns the ``StateGraph`` UNCOMPILED — ``factory_graph`` (T-M1-14) compiles
     it, attaches the shared checkpointer, and appends the emit node.
     """
-    ckpt_set = normalize_checkpoints(checkpoints)
     g: StateGraph[FactoryState] = StateGraph(FactoryState)
 
     # -- triage: classify + seed route/budget ---------------------------------
@@ -546,73 +405,6 @@ def build_supervisor_graph(
             max_fix_attempts=max_fix_attempts,
         )
 
-    # -- checkpoint/HITL pause nodes (plan [10]) ------------------------------
-    # A pause node per ENABLED stage boundary. It PAUSES the run via LangGraph's
-    # dynamic ``interrupt()`` (the run is resumable on the EXISTING checkpointer),
-    # surfacing a READ-ONLY inspection payload to the caller, then RECORDS the
-    # human decision fed back via ``Command(resume=...)`` onto the steering-only
-    # ``checkpoint_decisions`` channel and routes proceed/halt.
-    #
-    # TRUST (the whole point of [10]): the pause node writes ONLY the steering
-    # channel — never ``gates``, never via the runner — so it can never mint or
-    # weaken a verdict. An *approve* routes the run onward to the (unchanged) gate
-    # boundary, where the runner-attested verdict still decides; a *reject* routes
-    # to END (no PR / no release). A checkpoint approve can NEVER turn a gate FAIL
-    # into a pass: the gate boundaries are untouched and the emit guard re-checks
-    # the gates regardless (factory_graph). The release checkpoint sits AFTER the
-    # Build+Test gate. (Default OFF: when a boundary is not in
-    # ``ckpt_set`` no pause node is built and the topology is byte-identical.)
-    def _make_checkpoint(boundary: CheckpointBoundary):
-        def _checkpoint(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
-            # A spec_fix re-plan re-enters the planner; the operator already
-            # approved this plan boundary on the first pass, so don't re-prompt.
-            # The router reads that standing approval and proceeds.
-            if boundary in _PLAN_BOUNDARIES:
-                prior = _newest_decision(state, boundary)
-                if prior is not None and prior.proceeds():
-                    return {}
-            sha = state_sha(config)
-            subject_uri = newest_artifact_uri(state, DESIGN_KIND)
-            # PAUSE: surface the read-only inspection payload + block for a human
-            # decision. On the FIRST run ``interrupt()`` raises to suspend the
-            # graph (resumable via the checkpointer); on the resume invoke
-            # (``Command(resume=...)``) it RETURNS the supplied value here.
-            raw = interrupt(
-                inspection_payload(
-                    state,
-                    boundary=boundary,
-                    state_sha=sha,
-                    # Advisory org chart (Wave E): reconstitute the OwnershipMap
-                    # via the CAS when available; None falls back to no org.
-                    resolve=rt.cas.resolve if rt.cas is not None else None,
-                )
-            )
-            decision = _coerce_decision(
-                raw,
-                boundary=boundary,
-                state_sha=sha,
-                subject_artifact_uri=subject_uri,
-                seq=rt.seq(config, _CHECKPOINT_NODE[boundary], "checkpoint"),
-            )
-            # Record the steering decision (authorship via steered_by/note,
-            # lifecycle §2) on the steering-only channel. NOT a gate write.
-            return {"phase": _CHECKPOINT_NODE[boundary], "checkpoint_decisions": [decision]}
-
-        return _checkpoint
-
-    def _route_checkpoint(boundary: CheckpointBoundary):
-        def _route(state: FactoryState, config: RunnableConfig) -> str:
-            # Route on the NEWEST decision recorded at THIS boundary. proceed only
-            # on a human APPROVE; reject/needs-changes halt to END. This is purely
-            # human steering — proceeding merely reaches the gate boundary (the
-            # gates still decide); it can never make a FAILing gate pass.
-            decision = _newest_decision(state, boundary)
-            if decision is not None and decision.proceeds():
-                return _CKPT_PROCEED
-            return _CKPT_HALT
-
-        return _route
-
     # -- register nodes (concrete defs; SG2/IM5 mypy seam) --------------------
     g.add_node(_TRIAGE, triage)
     g.add_node(_PLANNER, planner_node)
@@ -624,47 +416,10 @@ def build_supervisor_graph(
     g.add_node(_BUILD_TEST_FIX, build_test_fix)
     g.add_node(_TOKEN_CAP, token_cap)
 
-    # Register the ENABLED checkpoint pause nodes (default OFF → none built, so the
-    # topology is byte-identical). Each gets a conditional router (proceed/halt).
-    for boundary in ckpt_set:
-        node_id = _CHECKPOINT_NODE[boundary]
-        g.add_node(node_id, _make_checkpoint(boundary))
-
-    def _ckpt_edge(predecessor: str, boundary: CheckpointBoundary, succeed: str) -> None:
-        """Insert the checkpoint pause node between ``predecessor`` and ``succeed``
-        when ``boundary`` is enabled; otherwise wire the plain edge unchanged.
-
-        Enabled: ``predecessor -> checkpoint_<boundary>``; the checkpoint routes
-        ``proceed -> succeed`` (continue to the gate boundary) / ``halt -> END``
-        (a human reject ends the run; no PR / no release). The pause writes ONLY
-        the steering channel, so it can never affect a gate verdict."""
-        if boundary in ckpt_set:
-            node_id = _CHECKPOINT_NODE[boundary]
-            g.add_edge(predecessor, node_id)
-            g.add_conditional_edges(
-                node_id,
-                _route_checkpoint(boundary),
-                {_CKPT_PROCEED: succeed, _CKPT_HALT: END},
-            )
-        else:
-            g.add_edge(predecessor, succeed)
-
     # -- wire the phase sequence ----------------------------------------------
     g.add_edge(START, _TRIAGE)
     g.add_edge(_TRIAGE, _PLANNER)
-    # The planner emits product AND design in one pass, so the PRODUCT and DESIGN
-    # checkpoints both sit after it, in that order (each only when enabled).
-    design_entry = (
-        _CHECKPOINT_NODE[CheckpointBoundary.DESIGN]
-        if CheckpointBoundary.DESIGN in ckpt_set else _SPEC_GATE
-    )
-    _ckpt_edge(_PLANNER, CheckpointBoundary.PRODUCT, design_entry)
-    if CheckpointBoundary.DESIGN in ckpt_set:
-        g.add_conditional_edges(
-            _CHECKPOINT_NODE[CheckpointBoundary.DESIGN],
-            _route_checkpoint(CheckpointBoundary.DESIGN),
-            {_CKPT_PROCEED: _SPEC_GATE, _CKPT_HALT: END},
-        )
+    g.add_edge(_PLANNER, _SPEC_GATE)
 
     # SPEC boundary: advance -> implementation; fix -> back to the planner (which
     # reads the failing findings off the gates channel); halt -> END.
@@ -683,27 +438,12 @@ def build_supervisor_graph(
     g.add_edge(_TOKEN_CAP, _IMPLEMENTATION)
     g.add_edge(_QUALITY, _BUILD_TEST_GATE)
 
-    # The RELEASE checkpoint sits AFTER the Build+Test gate has run (the human
-    # inspects the attested verdicts) and BEFORE the release path. On a build_test
-    # ADVANCE we route into the checkpoint; proceed continues to END (emit), halt
-    # ends the run. CRUCIAL: the gate already ran — an
-    # approve here cannot make a FAILing build pass (a non-advance never reaches
-    # the checkpoint, and the emit guard re-checks the gates regardless).
-    release_enabled = CheckpointBoundary.RELEASE in ckpt_set
-    # BUILD+TEST boundary: advance -> [release ckpt ->] END; fix -> back to
-    # implementation; halt -> END.
-    advance_target = _CHECKPOINT_NODE[CheckpointBoundary.RELEASE] if release_enabled else END
+    # BUILD+TEST boundary: advance -> END; fix -> back to implementation; halt -> END.
     g.add_conditional_edges(
         _BUILD_TEST_GATE,
         _route_build_test,
-        {"advance": advance_target, "fix": _BUILD_TEST_FIX, "halt": END},
+        {"advance": END, "fix": _BUILD_TEST_FIX, "halt": END},
     )
-    if release_enabled:
-        g.add_conditional_edges(
-            _CHECKPOINT_NODE[CheckpointBoundary.RELEASE],
-            _route_checkpoint(CheckpointBoundary.RELEASE),
-            {_CKPT_PROCEED: END, _CKPT_HALT: END},
-        )
     g.add_edge(_BUILD_TEST_FIX, _IMPLEMENTATION)  # re-verify the responsible layer
 
     return g

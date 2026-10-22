@@ -44,7 +44,7 @@ def test_build_dialog_keeps_its_sections_and_their_summaries() -> None:
 def test_live_log_mutations_all_go_through_the_follow_helper() -> None:
     # Anything appending to (or replacing a node inside) #log must be wrapped in
     # inLog, which is what re-pins the view to the bottom.
-    for fn in ("appendLogDom", "agentBox", "refreshAgentBox", "pushEvBox", "refreshEvBox"):
+    for fn in ("appendLogDom", "agentBox", "refreshAgentBox"):
         body = JS.split(f"function {fn}(")[1].split("\n}")[0]
         assert "inLog(" in body, fn
     assert 'id="log-jump"' in HTML          # the affordance for when you HAVE scrolled up

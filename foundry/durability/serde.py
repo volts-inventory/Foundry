@@ -27,9 +27,8 @@ FOUNDRY_MSGPACK_MODULES: list[tuple[str, str]] = [
     # Advisory `agent_journal` channel record (plan [11]) — small, rides the
     # channel directly (like GateTriage), so it must round-trip the checkpoint.
     ("foundry.schemas.journal", "JournalEntry"),
-    # Human-steering `checkpoint_decisions` channel records (plan [10]) — small,
-    # ride the channel directly, so they must round-trip the checkpoint. NOT a
-    # trust input: a checkpoint approve can never turn a gate FAIL into a pass.
+    # Retired `checkpoint_decisions` channel records: no longer written, kept so a
+    # checkpoint saved before supervision was removed still deserializes.
     ("foundry.schemas.checkpoint", "CheckpointDecision"),
     ("foundry.schemas.checkpoint", "CheckpointVerdict"),
     ("foundry.schemas.checkpoint", "CheckpointBoundary"),
@@ -81,16 +80,10 @@ FOUNDRY_MSGPACK_MODULES: list[tuple[str, str]] = [
     ("foundry.schemas.security", "SBOMRef"),
     ("foundry.schemas.security", "AuditFinding"),
     ("foundry.schemas.security", "Severity"),
-    # Upstream narrative body (PM/architect prose) persisted via put_body_at so
-    # the doc set can inline it instead of rendering a dead handle (task [2]).
+    # Upstream narrative body (PM/architect prose) persisted via put_body_at.
+    # (The removed release-doc bodies — Runbook etc. — were CAS-only and are never
+    # read back, so dropping them here cannot break loading an old checkpoint.)
     ("foundry.schemas.docs", "ProseBody"),
-    # Agent-authored release-doc bodies (foundry/docs/writers.py), emitted as
-    # content-addressed artifacts like every other stage's output.
-    ("foundry.schemas.docs", "Runbook"),
-    ("foundry.schemas.docs", "KnownIssue"),
-    ("foundry.schemas.docs", "KnownIssues"),
-    ("foundry.schemas.docs", "UpgradeGuide"),
-    ("foundry.schemas.docs", "PerfCostReport"),
 ]
 
 

@@ -10,9 +10,9 @@ This is an OBSERVABILITY affordance, nothing more. It calls
 writes NO channel — no ``GateResult``, no ``GateTriage``, no ``JournalEntry`` —
 so it can never enter a verdict/trust path (LEARNINGS L5: agents propose, only
 signed gates decide). It is purely a read of the advisory journal turned into
-prose; the checkpoint/HITL integration that surfaces it to an operator lands
-later in [10]. Best-effort: a proxy failure yields a short fallback string, not
-a raised exception, because an interview must never be able to wedge a run.
+prose (the Workshop's "interview a lead" dialog). Best-effort: a proxy failure
+yields a short fallback string, not a raised exception, because an interview
+must never be able to wedge a run.
 """
 
 from __future__ import annotations

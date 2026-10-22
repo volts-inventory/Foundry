@@ -1,4 +1,4 @@
-"""Long-horizon build loops: milestones, autopilot, and git export of released trees."""
+"""Git export of a floor's released trees."""
 
 from __future__ import annotations
 

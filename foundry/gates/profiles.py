@@ -199,9 +199,7 @@ PROFILES: dict[str, VerificationProfile] = {
 }
 
 
-# Keyword tables mirror the platform planner's stack inference
-# (`platform/planner.py` `_GAME_HINTS` / `_engine_hint`) so the CLI's single-repo
-# path and the platform path infer the same stack from the same words.
+# Keyword tables for inferring a stack from the request words.
 _GAME_WORDS = (
     "game", "nes", "snes", "arcade", "tetris", "pong", "pixel", "platformer",
     "roguelike", "sprite", "tilemap", "stardew", "metroidvania", "shoot-em-up",

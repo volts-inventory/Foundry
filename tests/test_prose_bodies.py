@@ -1,10 +1,8 @@
-"""Upstream prose bodies persist into the CAS and inline into the doc set (task [2]).
+"""Upstream prose bodies persist into the CAS under their handles.
 
 The planner authors narrative prose (PRD body, system-design body, ADR
-rationale) but historically kept only the ``cas_uri(text)`` handle and DISCARDED
-the text — so ``docs/render.py`` rendered a dead handle. These tests prove the
-prose now round-trips through the :class:`ArtifactStore` (as an allowlisted
-:class:`ProseBody`) and that the assembler resolves + inlines it, while the
+rationale). These tests prove the prose round-trips through the
+:class:`ArtifactStore` (as an allowlisted :class:`ProseBody`), while the
 ``store=None`` mint-only path stays byte-identical to the historical behaviour.
 """
 
@@ -18,8 +16,6 @@ from langchain_core.runnables import RunnableConfig
 from foundry.agents import AgentRuntime
 from foundry.agents._common import cas_uri, persist_prose
 from foundry.agents.planner import make_planner_node
-from foundry.docs import assemble_documentation
-from foundry.docs.render import render_adrs, render_design, render_prd
 from foundry.durability.artifact_store import ArtifactStore, UnknownArtifactError
 from foundry.proxy import ModelProviderProxy
 from foundry.proxy.test_doubles import MockTransport
@@ -130,62 +126,3 @@ def test_planner_store_none_keeps_handle_without_storing() -> None:
     # The node still emits a PRD handle whose prd_uri is the prose digest, but no
     # body is stored anywhere (the synthetic-resolver tests are untouched).
     assert any(a.kind == "prd" for a in writes["artifacts"])
-
-
-# ---- renderer side: inline when present, fall back to handle when absent ------
-
-
-def test_render_prd_inlines_resolved_prose() -> None:
-    prd = PRD(title="Todo", prd_uri="cas://sha256/abc", seq=SEQ)
-    body = render_prd(prd, (), prose=PRD_BODY).body
-    assert PRD_BODY in body
-    assert "cas://sha256/abc" not in body  # the dead handle is gone
-
-
-def test_render_prd_falls_back_to_handle_without_prose() -> None:
-    prd = PRD(title="Todo", prd_uri="cas://sha256/abc", seq=SEQ)
-    body = render_prd(prd, ()).body
-    assert "cas://sha256/abc" in body
-    assert "Narrative body" in body
-
-
-def test_render_design_inlines_resolved_prose() -> None:
-    design = SystemDesign(title="Todo", design_uri="cas://sha256/d", seq=SEQ)
-    body = render_design(design, prose=DESIGN_BODY).body
-    assert DESIGN_BODY in body and "cas://sha256/d" not in body
-
-
-def test_render_adrs_inlines_per_adr_prose() -> None:
-    adr = ADR(id="ADR-001", title="Storage", decision="SQLite", body_uri="cas://sha256/a", seq=SEQ)
-    body = render_adrs((adr,), prose={"ADR-001": ADR_BODY}).body
-    assert ADR_BODY in body and "cas://sha256/a" not in body
-    # an ADR without resolved prose still renders its handle note
-    other = ADR(id="ADR-002", title="X", decision="y", body_uri="cas://sha256/b", seq=SEQ)
-    body2 = render_adrs((adr, other), prose={"ADR-001": ADR_BODY}).body
-    assert "cas://sha256/b" in body2
-
-
-# ---- end-to-end: assembler resolves + inlines the prose ----------------------
-
-
-def test_assemble_inlines_upstream_prose_end_to_end() -> None:
-    store = ArtifactStore()
-    rt = AgentRuntime(proxy=ModelProviderProxy(MockTransport(default_text="{}")), cas=store)
-
-    # Drive the real planner so the prose lands in the store under its handle.
-    writes = make_planner_node(_runtime(PLAN_PAYLOAD, cas=store))({"request": "todo"}, _config())
-    artifacts = writes["artifacts"]
-
-    bundle = assemble_documentation(
-        request="todo",
-        thread_id="r",
-        state={"artifacts": artifacts, "gates": []},
-        rt=rt,
-        passed=True,
-        phase="done",
-        clock=lambda: "2026-01-01T00:00:00+00:00",
-    )
-    docs = {d.path: d.body for d in bundle.docs}
-    assert PRD_BODY in docs["docs/PRD.md"]
-    assert DESIGN_BODY in docs["docs/architecture/DESIGN.md"]
-    assert ADR_BODY in docs["docs/architecture/ADRS.md"]

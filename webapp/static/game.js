@@ -408,9 +408,9 @@ class FloorScene extends Phaser.Scene {
     this.gatePips = {};
     this.activeRoom = "lobby";
     this.liveRooms = new Set();      // rooms with a node in-flight (concurrent stages)
-    // agent name -> how many of its nodes are in flight. A COUNT, not a set: a platform
-    // build runs several services at once, so the same role ("Frontend Lead") can be
-    // mid-call twice — one service finishing must not unseat the other.
+    // agent name -> how many of its nodes are in flight. A COUNT, not a set: a
+    // build runs several tickets at once, so the same role ("Frontend Lead") can be
+    // mid-call twice — one ticket finishing must not unseat the other.
     this.workingAgents = new Map();
     this.roomInflight = {};          // room -> count of in-flight nodes (ref-count)
     this.ctoRoom = null;             // the room the CTO is overseeing = the active group
@@ -960,21 +960,6 @@ class FloorScene extends Phaser.Scene {
         this.time.delayedCall(950,()=>this.tweens.add({targets:s,alpha:0,duration:300,onComplete:()=>s.destroy()})); }});
     if (!pass) this.shake(380,0.015);
   }
-  // checkpoint spotlight + bouncing "?" over the CTO
-  spotlightCTO(on){
-    this.ctoHold = !!on;        // he's deciding, not doing his rounds — pause the patrol
-    if (this.spot){ this.spot.destroy(); this.spot=null; }
-    if (this.qmark){ this.qmark.destroy(); this.qmark=null; }
-    if (!on || !this.cto) return;
-    const x=this.cto.x;
-    const dim=this.add.rectangle(0,0,W,H,0x05080f,0.5).setOrigin(0,0);
-    const beam=this.add.triangle(x,FLOOR_TOP-70,-66,180,66,180,0,0,0xfff1c0,0.10);
-    this.spot=this.add.container(0,0).setDepth(34); this.spot.add([dim,beam]);
-    const q=this.add.text(x,this.cto.y-48,"?",{fontFamily:"'PixelFont','Courier New',monospace",
-      fontSize:"24px",fontStyle:"bold",color:"#ffd95e"}).setOrigin(0.5).setDepth(2000);
-    this.qmark=q;
-    this.tweens.add({targets:q, y:q.y-7, duration:480, yoyo:true, repeat:-1, ease:"Sine.inOut"});
-  }
   celebrate(){
     for (const a of this.agents.values()) if (a.seen) this.hop(a,3);
     this.hop(this.cto,3);
@@ -1251,19 +1236,6 @@ class FloorScene extends Phaser.Scene {
     if (a.sprite && a.char){ a._wf = 0; a.sprite.setFrame(a.char.front[0]); }
   }
 
-  // A discipline room is REBUILDING (a service deepening): pulse its glow + a
-  // floating "↻ rebuilding" tag so it reads at a glance, not just in the log.
-  pulseRoom(key){
-    const R = ROOMS[key]; if(!R || R.virtual) return;
-    const g = this.roomGlow[key];
-    if(g) this.tweens.add({targets:g, fillAlpha:{from:0.0,to:0.22}, duration:260,
-                           yoyo:true, repeat:2, ease:"Sine.inOut"});
-    const t = this.add.text(R.cx, R.y+20, "↻ rebuilding",
-      {fontFamily:"'PixelFont','Courier New'",fontSize:"9px",fontStyle:"bold",color:"#ffb05a"})
-      .setOrigin(0.5,0).setDepth(2000);
-    this.tweens.add({targets:t, y:t.y-14, alpha:{from:1,to:0}, duration:1400,
-                     ease:"Sine.out", onComplete:()=>t.destroy()});
-  }
   // A room "seats its crew" when it's in the LIVE set — the rooms currently producing
   // node telemetry. The real build runs stages concurrently (engineering can still be
   // heads-down while QA reviews), so this is a SET, not one active room: a room joins
@@ -1306,7 +1278,7 @@ class FloorScene extends Phaser.Scene {
   // room. Called on a timer AND whenever the live set changes, so he reacts at once when
   // the first work lands or the room he's overseeing goes quiet.
   ctoPatrol(){
-    if (!this.cto || this._dead || this.ctoHold) return;         // held during a checkpoint
+    if (!this.cto || this._dead) return;
     if (this.cto.moveTween && this.cto.moveTween.isPlaying()) return;   // already walking
     const rooms = this.patrolRooms();
     if (!rooms.length){ if (this.ctoRoom !== null) this.sendCTO(null); return; }
@@ -1581,9 +1553,6 @@ class FloorScene extends Phaser.Scene {
     for (const [,a] of this.agents) if (a && a.seen) yield a;
     for (const s of [...(this.poolGroup||[]), ...(this.techLeadGroup||[]), ...(this.taskGroup||[])])
       if (s && s.bob && s.seen) yield s;    // the group arrays also hold workstations
-  }
-  standDownAll(){   // whole floor off the clock (checkpoints / done) — still at their desks
-    for (const a of this.everyone()) this.standDown(a);
   }
   deskSweep(){   // NOBODY roams: the sweep just walks anyone off-duty back to their own
     // desk if some animation left them adrift, and re-settles anyone with no mood.
@@ -2041,14 +2010,14 @@ let ACTIVE = null;          // the floor currently shown
 
 function floorKey(f){ return "floor-"+f; }
 
-async function newProject(req, supervised, backend, extra){
+async function newProject(req, backend, extra){
   const mode = "assistant";
   await bootReady;  // shared textures must exist before a FloorScene builds
   let resp;
   try {
     resp = await fetch("/api/projects", {
       method:"POST", headers:postHeaders(),
-      body: JSON.stringify({request:req, supervised, backend, ...(extra||{})}),
+      body: JSON.stringify({request:req, backend, ...(extra||{})}),
     }).then(r=>r.json());
   } catch(err){ appendLogDom("bad","ERR "+err); return; }
 
@@ -2062,8 +2031,8 @@ async function newProject(req, supervised, backend, extra){
     if (existing.es){ try{ existing.es.close(); }catch(_){} }
     Object.assign(existing, {
       id:resp.id, release, releases:(existing.releases||1)+1, request:req, mode, backend,
-      log:[], progress:[], gates:{}, org:null, cp:null, awaiting:false, status:"running", passed:false,
-      slots, journal:[], seenUris:new Set(), _agrp:null, _svcOpen:null, tasks:null,
+      log:[], progress:[], gates:{}, org:null, status:"running", passed:false,
+      slots, journal:[], seenUris:new Set(), _agrp:null, tasks:null,
     });
     setTaskLimits(existing, extra && extra.workers);
     const sc = GAME.scene.getScene(floorKey(floor));
@@ -2076,7 +2045,7 @@ async function newProject(req, supervised, backend, extra){
   // NEW PROJECT: a fresh floor.
   const F = {
     id: resp.id, floor, release, releases:1, request:req, mode, backend, scene:null,
-    log:[], progress:[], gates:{}, org:null, cp:null, awaiting:false, status:"running", passed:false,
+    log:[], progress:[], gates:{}, org:null, status:"running", passed:false,
     slots, journal:[], seenUris:new Set(),
   };
   setTaskLimits(F, extra && extra.workers);
@@ -2101,9 +2070,7 @@ function switchToFloor(floor){
   rebuildProgress(F);
   refreshTickets(F);
   renderGatesMini(F.gates);
-  if (F.platprog) renderPlatProg(F.platprog);   // platform floors show service chips
   updateHud(F);
-  if (F.awaiting) showCheckpoint(F); else hideCheckpoint();
   renderElevator();
 }
 
@@ -2116,7 +2083,7 @@ const LEGACY_AGENT = {
   "Stakeholder Proxy":"Planner","Product Manager":"Planner","Criteria Critic":"Planner",
   "Program Manager":"Planner","Principal Architect":"Planner",
   "AppSec Engineer":"Reviewer","Audit & Compliance":"Reviewer","Supply-chain Reviewer":"Reviewer",
-  "QA Engineer":"Reviewer","SDET":"Reviewer","Technical Writer":"Reviewer",
+  "QA Engineer":"Reviewer","SDET":"Reviewer",
   "Frontend Lead":"Frontend Engineer","Backend Lead":"Backend Engineer","Data Lead":"Data Engineer",
 };
 // ---- ticket crew state (per floor; pure, so replay and live events share it) ----------
@@ -2218,7 +2185,6 @@ function routeEvent(floor, ev){
       if (isActive) updateHud(F);
       break;
     case "narrate": logNarrate(F, ev.text); break;
-    case "svc": logService(F, ev); break;   // platform: one box per service, updated in place
     case "task": {                 // one ticket's worker started / finished / failed
       const r = taskApply(F, ev);
       if (S){
@@ -2249,17 +2215,13 @@ function routeEvent(floor, ev){
     case "limitwait":              // provider usage limit: global pause banner
       showLimitToast(ev.until);
       break;
-    case "platprog":               // platform: per-service progress for the HUD
-      F.platprog = ev;
-      if (isActive) renderPlatProg(ev);
-      break;
-    case "rebuild":                // a service is deepening — pulse its room
-      if (S && ev.room) S.pulseRoom(ev.room);
-      break;
     case "stage":
       if (S) S.setActiveRoom(ev.room, true);   // new phase boundary → reset the live crew
-      resetStage(F);                            // new stage → fresh artifact/journal buckets
-      logTo(F, "gold", "── "+ev.label+" ──"); break;   // Progress gets the stage's ✓ cap at its checkpoint
+      closeStage(F);                            // the previous stage's ✓ row on Progress
+      F.stageLabel = ev.label;
+      logTo(F, "gold", "── "+ev.label+" ──"); break;
+    case "journal":                // one agent's journal entry, for the interview dialog
+      (F.journal = F.journal || []).push(ev.entry || {}); break;
     case "agent": if (S) S.agentWork(ev.agent); break;
     case "active": {
       // LIVE per-node telemetry: a real graph node STARTED (seat its agent for the whole
@@ -2267,9 +2229,6 @@ function routeEvent(floor, ev){
       // so the office shows who is genuinely working RIGHT NOW — not the whole room.
       const phase = ev.phase || "pulse";     // legacy no-phase "active" = a room pre-seat
       if (S) S.nodeTelemetry(ev.room, ev.agent, phase);
-      // `quiet` = floor-only telemetry: a platform build already narrates every node as a
-      // per-service `svc` box, so logging it again here would double every line.
-      if (ev.quiet) break;
       if (phase === "finish"){
         if (ev.agent) agentActivity(F, ev.room, ev.agent, true, ev.summary);   // box → done
         else if (ev.step) logTo(F, "good", "✓ "+ev.step);
@@ -2318,56 +2277,6 @@ function routeEvent(floor, ev){
       break;
     case "files":
       break;   // file count is read live from the repo view, not cached on F
-    case "checkpoint": {
-      // `phase`/`route`/`state_sha` are the pause's provenance (WHERE in the pipeline,
-      // WHICH state); `actions` is the per-button consequence copy from the server.
-      F.cp = {title:ev.title, summary:ev.summary, boundary:ev.boundary,
-              phase:ev.phase||"", route:ev.route||"", state_sha:ev.state_sha||"",
-              actions:ev.actions||null};
-      // Stage outcome -> the Progress tab as a COLLAPSIBLE row: the summary states what
-      // was completed (the artifact breakdown), and expanding lists it + the agents'
-      // journal notes (what specifically each lead produced) + the raw count.
-      const bd = kindBreakdown(F.stageArts);
-      const desc = (ev.summary||"").trim();   // T3 descriptive caption of the stage
-      const head = "✓ "+(ev.title||ev.boundary||"stage")+" finished"
-        + (desc ? " — "+desc : (bd.length ? " — "+bd.join(" · ") : ""));
-      // Body: the itemised breakdown + each agent's descriptive caption (not a repeat of
-      // the header — the header is the T3 prose, the body is the specifics).
-      const lines=[];
-      if(bd.length) lines.push("Produced: "+bd.join(", "));
-      const says=F.stageSays||{};
-      for(const ag in says) lines.push(ag+" — "+says[ag]);
-      logProgress(F, "good", head, lines); break;
-    }
-    case "await_decision":
-      F.awaiting = true; F.cpIndex = ev.checkpoint;
-      // `spend` is the advisory cost/elapsed context.
-      F.cp = Object.assign({}, F.cp, {spend: ev.spend || null,
-                                      // the stage's artifacts are frozen at the pause
-                                      arts: (F.stageArts || []).slice()});
-      // Autopilot PROPOSAL: carry the panel's request so the modal offers an edit box.
-      if (ev.boundary === "autopilot_proposal")
-        F.cp = Object.assign({}, F.cp, {boundary: ev.boundary, request: ev.request || ""});
-      if (Array.isArray(ev.journal)) F.journal = ev.journal;
-      renderElevator();
-      if (S){ S.spotlightCTO(true); S.standDownAll(); }   // whole floor off duty while the CTO decides
-      if (isActive) showCheckpoint(F); break;
-    case "resolved": {
-      F.awaiting = false; renderElevator();
-      // three-way verdict: approve (green) · needs_changes (gold) · reject (red)
-      const ap = ev.decision === "approve", ch = ev.decision === "needs_changes";
-      const txt = ap?"APPROVED":(ch?"CHANGES":"REJECTED");
-      logProgress(F, ap?"good":(ch?"hot":"bad"), "CTO "+txt);
-      if (S){ S.spotlightCTO(false);
-        if (S.activeRoomKey) S.staffRoom(S.activeRoomKey);   // back to work
-        const col = ap?0x5ddc7a:(ch?0xffcf52:0xff5d6c);
-        const hex = ap?"#9dffbf":(ch?"#ffe6a3":"#ffb3ba");
-        S.hop(S.cto, ap?2:1); S.ring(S.cto.x, S.cto.y-10, col);
-        S.burst(S.cto.x, S.cto.y-10, [col,0xffffff], 12);
-        S.floatText(S.cto.x, S.cto.y-30, txt, hex, 13);
-        if (ev.decision === "reject") S.shake(280,0.01); }
-      if (isActive) hideCheckpoint(); break;
-    }
     case "release":
       if (S){ S.openGateAndChest(); S.stampGate(true); S.celebrate(); S.banner("SHIPPED!", 0x5ddc7a); }
       logTo(F, "gold", "RELEASED -> "+(ev.uri||"artifact"));
@@ -2377,6 +2286,7 @@ function routeEvent(floor, ev){
       logTo(F, "bad", "HELD: "+ev.reason);
       logProgress(F, "bad", "✕ HELD — "+ev.reason); break;
     case "done":
+      closeStage(F);
       F.status = "done"; F.passed = !!ev.passed; renderElevator();
       taskClear(F); if (S) S.clearWorkers();
       // Build's over: nobody is working, so everyone heads to the LOUNGE
@@ -2390,7 +2300,7 @@ function routeEvent(floor, ev){
 }
 
 // =========================================================================== //
-//  DOM: quest log, gates-mini, HUD, elevator, checkpoint modal                //
+//  DOM: quest log, gates-mini, HUD, elevator                                  //
 // =========================================================================== //
 function logClass(t){   // classify BEFORE stripping, so server emoji still tint the row
   if(/✅|💰|green|shipped|released|complete/i.test(t)) return "good";
@@ -2627,7 +2537,6 @@ function logAct(F, ev){
 function logArtifact(F, ev){
   const base=artBase(ev.label), agent=ev.agent||"(system)", detail=ev.detail||"";
   (F.stageArts=F.stageArts||[]).push({kind:ev.kind||base, base, label:ev.label, agent, detail});
-  if((ev.kind||"")==="feature_diff") F.hasCode=true;   // code exists -> the checkpoint can offer to show it
   const g=agentBox(F, agent);
   g.items.push({base, label:ev.label, detail});
   if(F.floor===ACTIVE) refreshAgentBox(g);
@@ -2639,146 +2548,28 @@ function logSay(F, ev){
   const g=(F._agrp||{})[ev.agent];
   if(g && ev.text && g.cap!==ev.text){ g.cap=ev.text; if(F.floor===ACTIVE) refreshAgentBox(g); }
 }
-// New STAGE: reset only the per-stage buckets that feed the PROGRESS summary; the agent
-// boxes are build-global (each agent appears once, filling in as its work lands).
-function resetStage(F){ F.stageArts=[]; F.stageSays={}; }
-// ---- Platform EVENT boxes: one bordered box PER pipeline event -----------------
-// A platform build streams each service's pipeline as `svc` events. Each event is its
-// OWN box (not one box per service): a stage OPENS a box when it starts (header
-// "▸ WEB · designing the system", empty body) and the box is FINALISED with what it
-// did (green "✓ …" header + a one-line body) when that stage ends. Service kickoff,
-// each pass result, rebuilds, critiques and the service's completion each land as
-// their own box too — so the log reads as a running list of started/finished events.
-// The "more details" that live behind a box's caret — the specifics the agent recorded.
-function _evExtras(g){
-  const x=[];
-  for(const a of (g.arts||[])){                 // WHAT the agent produced, content first
-    const label=String(a.kind||"").replace(/_/g," ");
-    if(a.detail) x.push("⊞ "+label+": "+a.detail);
-    else x.push("⊞ "+label+(a.n>1?" ×"+a.n:""));
+// A stage's outcome -> the Progress tab as a COLLAPSIBLE row: what it produced, and
+// each agent's note. Called when the next stage opens and when the build ends; the
+// agent boxes are build-global (each agent appears once, filling in as work lands).
+function closeStage(F){
+  if (F.stageLabel){
+    const bd = kindBreakdown(F.stageArts), lines = [];
+    if (bd.length) lines.push("Produced: "+bd.join(", "));
+    const says = F.stageSays || {};
+    for (const ag in says) lines.push(ag+" — "+says[ag]);
+    logProgress(F, "good", "✓ "+F.stageLabel+" finished"+(bd.length ? " — "+bd.join(" · ") : ""), lines);
   }
-  for(const c of (g.concerns||[])) x.push("⚠ "+c);
-  for(const a of (g.assumptions||[])) x.push("• "+a);
-  for(const b of (g.body||[])) x.push(b);
-  return x;
-}
-function renderEvBox(g){
-  const li=document.createElement("li");
-  li.className="agent-box ev-box"+(g.tone==="good"?" done":g.tone==="bad"?" held":"");
-  const live = (g.kind==="agent"||g.kind==="stage");   // ▸ while working, ✓ once done
-  const headText = live ? ((g.done?"✓ ":"▸ ")+g.title) : g.title;
-  const main = g.summary || g.did || "";     // the SPECIFIC, always-visible context line
-  const extras = _evExtras(g);               // the MORE details, revealed by the caret
-  if(extras.length){                          // collapsible: a chevron opens the specifics
-    const d=document.createElement("details"); d.className="ev-det";
-    const s=document.createElement("summary"); s.className="ev-head";
-    s.textContent=deEmoji(headText+(main?" — "+main:""));
-    d.appendChild(s);
-    const bd=document.createElement("div"); bd.className="agent-body";
-    for(const ln of extras){ const e=document.createElement("div"); e.className="agent-item";
-      e.textContent=deEmoji(ln); bd.appendChild(e); }
-    d.appendChild(bd); li.appendChild(d);
-  } else {                                     // no extra specifics → header (+ the main line)
-    const head=document.createElement("div"); head.className="agent-head";
-    head.textContent=deEmoji(headText); li.appendChild(head);
-    if(main){ const bd=document.createElement("div"); bd.className="agent-body";
-      const e=document.createElement("div"); e.className="agent-item"; e.textContent=deEmoji(main);
-      bd.appendChild(e); li.appendChild(bd); }
-  }
-  return li;
-}
-function refreshEvBox(g){
-  if(!g.el) return;
-  inLog(()=>{ const n=renderEvBox(g); g.el.replaceWith(n); g.el=n; });
-}
-// Append one event box (every event is a fresh box).
-function pushEvBox(F, g){
-  g.evbox=true; g.body=g.body||[]; g.assumptions=g.assumptions||[]; g.concerns=g.concerns||[]; g.arts=g.arts||[];
-  F.log.push(g); if(F.log.length>240) F.log.shift();
-  if(F.floor===ACTIVE) inLog((ul)=>{ if(!ul) return; g.el=renderEvBox(g); ul.appendChild(g.el); });
-  return g;
-}
-// Fold an agent's reported specifics (journal summary + assumptions/concerns/artifacts)
-// into its box.
-function _mergeNote(g, ev){
-  if(ev.summary) g.summary=ev.summary;
-  for(const c of (ev.concerns||[])) if(g.concerns.indexOf(c)<0) g.concerns.push(c);
-  for(const a of (ev.assumptions||[])) if(g.assumptions.indexOf(a)<0) g.assumptions.push(a);
-  // Each agent box gets ONE note carrying its produced artifacts (kind + content
-  // one-liner) — set them directly (the last note wins if a node re-runs).
-  if(ev.artifacts && ev.artifacts.length) g.arts=ev.artifacts.slice(0, 12);
-}
-// Finalise any of a service's still-open agent boxes (e.g. when a pass or the build ends).
-function closeOpenAgents(F, svc){
-  const o=F._svcOpen||{}, pfx=svc+"|";
-  for(const k in o){ const g=o[k];
-    if(k.indexOf(pfx)===0 && g && !g.done){ g.done=true; g.tone="good"; if(F.floor===ACTIVE) refreshEvBox(g); o[k]=null; } }
-}
-// Apply one `svc` event → a box. EACH AGENT ACTION is its own box: it opens ("▸ working")
-// when the agent's node starts and fills ("✓ …") with what it did when the node finishes —
-// its journal summary (else a role verb), with assumptions/concerns/artifacts behind the
-// caret. Service kickoff, passes, rebuilds, the critic and completion are their own boxes.
-function logService(F, ev){
-  const svc=ev.service||"service", SVC=svc.toUpperCase();
-  F._svcOpen=F._svcOpen||{};
-  switch(ev.phase){
-    case "start":
-      pushEvBox(F, {kind:"marker", tone:"", done:true,
-        title:"▶ "+SVC+" — building"+(ev.desc?" "+ev.desc:"")});
-      break;
-    case "agent_start": {                 // an agent BEGAN its step → open its box
-      const key=svc+"|"+(ev.node||ev.agent);
-      F._svcOpen[key]=pushEvBox(F, {kind:"agent", tone:"", done:false,
-        title:SVC+" · "+(ev.agent||"agent")});
-      break;
-    }
-    case "agent_done": {                  // the agent FINISHED → fill its box with what it did
-      const key=svc+"|"+(ev.node||ev.agent);
-      let g=(F._svcOpen||{})[key];
-      if(!g) g=pushEvBox(F, {kind:"agent", tone:"", done:false, title:SVC+" · "+(ev.agent||"agent")});
-      _mergeNote(g, ev);
-      if(!g.summary && ev.did) g.summary=ev.did;   // fall back to the role verb
-      g.done=true; g.tone="good";
-      if(F._svcOpen) F._svcOpen[key]=null;
-      if(F.floor===ACTIVE) refreshEvBox(g);
-      break;
-    }
-    case "rebuild":
-      closeOpenAgents(F, svc);
-      pushEvBox(F, {kind:"marker", tone:"", done:true,
-        title:"↻ "+SVC+" — rebuilding · pass "+(ev.passno||"?")});
-      break;
-    case "pass_result":
-      closeOpenAgents(F, svc);
-      pushEvBox(F, {kind:"marker", tone:ev.passed?"good":"bad", done:true,
-        title:(ev.passed?"✓ ":"✗ ")+SVC+" — pass "+(ev.passno||"?")
-          +(ev.passed?" · gates green":" · held at the gate")});
-      break;
-    case "critic":
-      pushEvBox(F, {kind:"marker", tone:ev.complete?"good":"", done:true,
-        title:ev.complete? "✦ "+SVC+" — approved: technically complete"
-          : "• "+SVC+" — needs more work",
-        did: ev.complete? "" : (ev.detail||"")});
-      break;
-    case "done":
-      closeOpenAgents(F, svc);
-      pushEvBox(F, {kind:"marker", tone:ev.passed?"good":"bad", done:true,
-        title:(ev.passed?"✓ ":"✗ ")+SVC+" — "+(ev.passed?"built":"held at the gate")
-          +" · "+(ev.passes||1)+" pass"+((ev.passes||1)>1?"es":""),
-        body:(ev.files||[]).map(f=>"⊞ "+svc+"/"+f)});
-      break;
-  }
+  F.stageLabel = null; F.stageArts = []; F.stageSays = {};
 }
 function rebuildLog(F){
   const ul=document.getElementById("log"); ul.innerHTML="";
   for (const e of F.log){
     if(e.box){ e.el=renderAgentBox(e); ul.appendChild(e.el); }
-    else if(e.evbox){ e.el=renderEvBox(e); ul.appendChild(e.el); }
     else ul.appendChild(rowNode(e.cls, e.text, e.lines||null));
   }
   scrollLogToEnd();          // a floor switch always lands you on the newest activity
 }
-// The high-level PROGRESS tab: one collapsible row per stage / milestone. The summary
+// The high-level PROGRESS tab: one collapsible row per stage. The summary
 // carries the short "what was completed" statement; expanding shows the specifics.
 function logProgress(F, cls, text, lines){
   (F.progress = F.progress || []).push({cls,text,lines:(lines&&lines.length)?lines:null});
@@ -2815,47 +2606,16 @@ function renderGatesMini(gates){
     const s=document.createElement("span"); s.className="g "+(g.status); s.textContent=n;
     el.appendChild(s);}
 }
-// Platform builds: one chip per service in the HUD, coloured by lifecycle state,
-// with a "done/total" tally. Overrides the (empty) gate chips for a platform floor.
-function renderPlatProg(pp){
-  const el=document.getElementById("gates-mini"); if(!el) return;
-  if(!pp || !pp.services){ return; }
-  el.innerHTML="";
-  const names=Object.keys(pp.services); let done=0;
-  for(const name of names){
-    const st=pp.services[name];
-    if(st==="done"||st==="approved") done++;
-    const s=document.createElement("span");
-    s.className="g plat "+st; s.textContent=name; s.title=name+" — "+st;
-    el.appendChild(s);
-  }
-  const tot=document.createElement("span");
-  tot.className="g plat-count"; tot.textContent=done+"/"+names.length+" ✓";
-  el.appendChild(tot);
-}
 function updateHud(F){
   document.getElementById("floor-tag").textContent =
     "FLOOR "+F.floor + (F.release>1 ? " · r"+F.release : "");
-  // A milestone build's request is the model's prompt — the root request with
-  // " — MILESTONE i/n: <title>" appended — so it runs to hundreds of characters.
-  // Split it back into identity + current milestone; portrait gives each its own
-  // line, desktop rejoins them with the em dash from .proj-mile::before.
   const proj = document.getElementById("proj-tag");
   const req = F.request || "—";
-  const m = req.match(/^([\s\S]*?) — MILESTONE (\d+\/\d+): ([\s\S]*)$/);
   proj.textContent = "";
   proj.title = req;
-  if (m){
-    const root = document.createElement("span");
-    root.className = "proj-req"; root.textContent = m[1];
-    const mile = document.createElement("span");
-    mile.className = "proj-mile"; mile.textContent = "M"+m[2]+" · "+m[3];
-    proj.append(root, mile);
-  } else {
-    const root = document.createElement("span");
-    root.className = "proj-req"; root.textContent = req;
-    proj.append(root);
-  }
+  const root = document.createElement("span");
+  root.className = "proj-req"; root.textContent = req;
+  proj.append(root);
   // Portrait clamps each line, so tapping the row unclamps it. The chevron is only
   // drawn when something really is cut off — a request short enough to fit gets no
   // affordance and no hint that there is more to see.
@@ -2887,215 +2647,10 @@ function renderElevator(){
     btn.className=cls;
     btn.innerHTML=`<span class="fl-no">${f}</span>FL`;
     if (F.releases>1){ const r=document.createElement("span"); r.className="rel-badge"; r.textContent="r"+F.release; btn.appendChild(r); }
-    if (F.awaiting){ const b=document.createElement("span"); b.className="badge"; b.textContent="!"; btn.appendChild(b); }
     btn.onclick=()=>switchToFloor(f);
     el.appendChild(btn);
   }
 }
-
-// ---- checkpoint modal (per active floor) -----------------------------------
-// The dialog's job is not to announce a pause — it is to hand over enough evidence
-// to answer "continue or not?" without leaving it. Everything below is already in
-// hand when the pause fires (gate verdicts, the agents' own concerns, each
-// artifact's content one-liner); the dialog used to drop all of it and show one
-// sentence. Order is by decisiveness: gates, then flags, then what landed.
-
-// "4m 12s" / "1h 06m" — an elapsed count a human reads at a glance.
-function fmtDur(s){
-  s = Math.max(0, Math.round(Number(s)||0));
-  if (s < 60) return s+"s";
-  const m = Math.floor(s/60), r = s%60;
-  if (m < 60) return m+"m "+String(r).padStart(2,"0")+"s";
-  return Math.floor(m/60)+"h "+String(m%60).padStart(2,"0")+"m";
-}
-// "12.4k" — token counts, short.
-function fmtNum(n){
-  n = Number(n)||0;
-  return n >= 1000 ? (n/1000).toFixed(n >= 10000 ? 0 : 1)+"k" : String(n);
-}
-// Does an artifact's content one-liner describe a NON-ZERO problem? The details are
-// generated strings ("3 failed", "severity high — 2 finding(s)", "0 policy
-// violation(s)"), so a zero count must not be flagged as trouble.
-function artIsRisk(detail){
-  const d = String(detail||"").toLowerCase();
-  if (/\b0 (failed|finding|policy violation|residual)/.test(d)) return false;
-  if (/\b([1-9]\d*) (failed|finding|policy violation)/.test(d)) return true;
-  return /severity (high|critical)/.test(d);
-}
-function chip(parent, text, cls){
-  const s = document.createElement("span");
-  s.className = "cp-chip" + (cls ? " "+cls : "");
-  s.textContent = text;
-  parent.appendChild(s);
-  return s;
-}
-// Cost + elapsed for the work behind THIS pause (advisory; the server meters it).
-// `shared` means other builds ran concurrently against the one global egress, so the
-// token figure is an upper bound — say so rather than quietly overstating.
-function renderCpMeta(F, cp){
-  const el = document.getElementById("cp-meta"); if(!el) return;
-  el.innerHTML = "";
-  const sp = cp.spend;
-  if (!sp){ el.classList.add("hidden"); return; }
-  el.classList.remove("hidden");
-  chip(el, "this stage " + fmtDur(sp.stage_s));
-  chip(el, "build " + fmtDur(sp.build_s));
-  if (sp.stage_calls) chip(el, sp.stage_calls + " model call" + (sp.stage_calls===1?"":"s"));
-  if (sp.stage_tokens) chip(el, fmtNum(sp.stage_tokens) + " tokens" + (sp.shared ? "*" : ""));
-  if (sp.cap_usd) chip(el, "cap $" + sp.cap_usd);
-  if (sp.shared) chip(el, "*shared with " + sp.builds + " running builds", "dim");
-}
-
-// The gate verdicts SO FAR — the single most decision-relevant thing at a pause, and
-// the one the dialog never showed. Failing gates are named in full underneath; a
-// green strip alone can hide WHICH gate is red behind a colour.
-function renderCpGates(F){
-  const el = document.getElementById("cp-gates"); if(!el) return;
-  el.innerHTML = "";
-  const gates = (F && F.gates) || {};
-  const names = GATE_ORDER.filter(n => gates[n]);
-  if (!names.length){ el.classList.add("hidden"); return; }
-  el.classList.remove("hidden");
-  const strip = document.createElement("div"); strip.className = "cp-gate-strip";
-  const bad = [];
-  for (const n of names){
-    const g = gates[n];
-    const s = document.createElement("span");
-    s.className = "g " + (g.status || "");
-    s.textContent = n;
-    if (g.run_against) s.title = "run against " + String(g.run_against).slice(0,12);
-    strip.appendChild(s);
-    if (g.status === "fail" || g.status === "error") bad.push(n);
-  }
-  el.appendChild(strip);
-  const line = document.createElement("div");
-  line.className = "cp-gate-line " + (bad.length ? "bad" : "ok");
-  line.textContent = bad.length
-    ? "✕ not green: " + bad.join(", ").toUpperCase()
-      + " — approving cannot pass these; they must go green before anything ships"
-    : "✓ " + names.length + " gate" + (names.length===1?"":"s") + " green so far";
-  el.appendChild(line);
-}
-
-// What the agents themselves flagged: `concerns` from the advisory journal, plus
-// anyone reporting low confidence. Zero extra model calls — the payload already
-// carries it, and it was previously reachable only by clicking each lead.
-function renderCpFlags(F){
-  const el = document.getElementById("cp-flags"); if(!el) return;
-  el.innerHTML = "";
-  const rows = [];
-  for (const e of ((F && F.journal) || [])){
-    const role = e.role || e.node_id || "agent";
-    for (const c of (e.concerns || [])) if (String(c).trim()) rows.push({role, text:String(c), kind:"concern"});
-    if (typeof e.confidence === "number" && e.confidence < 0.6)
-      rows.push({role, text:"low confidence ("+e.confidence.toFixed(2)+") in this step", kind:"conf"});
-  }
-  if (!rows.length){ el.classList.add("hidden"); return; }
-  el.classList.remove("hidden");
-  const head = document.createElement("div");
-  head.className = "cp-flags-head";
-  head.textContent = "⚠ " + rows.length + " thing" + (rows.length===1?"":"s") + " the crew flagged";
-  el.appendChild(head);
-  for (const r of rows.slice(0, 8)){
-    const d = document.createElement("div"); d.className = "cp-flag "+r.kind;
-    d.textContent = "· " + r.role + " — " + r.text;
-    el.appendChild(d);
-  }
-  if (rows.length > 8){
-    const more = document.createElement("div"); more.className = "cp-flag dim";
-    more.textContent = "· +" + (rows.length-8) + " more (click a lead to interview them)";
-    el.appendChild(more);
-  }
-}
-
-// What actually landed this stage, with each artifact's CONTENT one-liner ("12
-// passed / 3 failed", "severity high — 2 finding(s)") rather than a bare count.
-// Anything describing a non-zero failure sorts to the top and is coloured.
-function renderCpArts(F, cp){
-  const wrap = document.getElementById("cp-arts-wrap");
-  const el = document.getElementById("cp-arts");
-  const count = document.getElementById("cp-arts-count");
-  if (!wrap || !el) return;
-  el.innerHTML = "";
-  const arts = (cp.arts && cp.arts.length) ? cp.arts : ((F && F.stageArts) || []);
-  if (!arts.length){ wrap.classList.add("hidden"); return; }
-  wrap.classList.remove("hidden");
-  const risky = arts.filter(a => artIsRisk(a.detail));
-  if (count) count.textContent = "— " + arts.length + " artifact" + (arts.length===1?"":"s")
-    + (risky.length ? " · " + risky.length + " needing a look" : "");
-  // Risky first, original order preserved within each group.
-  wrap.open = risky.length > 0;      // auto-expand only when there is something to see
-  for (const a of risky.concat(arts.filter(x => !artIsRisk(x.detail)))){
-    const row = document.createElement("div");
-    row.className = "cp-art" + (artIsRisk(a.detail) ? " risk" : "");
-    const lab = document.createElement("span"); lab.className = "cp-art-label";
-    lab.textContent = a.label || a.base || a.kind || "artifact";
-    row.appendChild(lab);
-    if (a.detail){
-      const det = document.createElement("span"); det.className = "cp-art-detail";
-      det.textContent = " — " + a.detail;
-      row.appendChild(det);
-    }
-    el.appendChild(row);
-  }
-}
-
-// WHERE this pause is and WHICH state it decides on — provenance the payload always
-// carried and the dialog dropped.
-function renderCpProvenance(cp){
-  const el = document.getElementById("cp-prov"); if(!el) return;
-  const bits = [];
-  if (cp.phase) bits.push("phase " + cp.phase);
-  if (cp.route) bits.push("route " + cp.route);
-  if (cp.state_sha) bits.push("state " + String(cp.state_sha).slice(0, 12));
-  el.textContent = bits.join("  ·  ");
-  el.classList.toggle("hidden", !bits.length);
-}
-
-// Per-button consequence copy + the "go read the code" escape hatch.
-function renderCpActions(F, cp){
-  const acts = cp.actions || null;
-  const set = (id, text) => {
-    const el = document.getElementById(id); if(!el) return;
-    el.textContent = text || "";
-    el.classList.toggle("hidden", !text);
-  };
-  set("cp-approve-sub", acts && acts.approve);
-  set("cp-changes-sub", acts && acts.changes);
-  set("cp-reject-sub",  acts && acts.reject);
-  // Reviewing the actual diff is the strongest evidence there is — but only offer it
-  // once code exists (nothing is written at the product/design pauses).
-  const code = document.getElementById("cp-code");
-  if (code){
-    // A reloaded floor has no per-stage artifact history, so the release boundary
-    // (where code always exists by definition) counts too.
-    const has = !!(F && (F.hasCode || cp.boundary === "release"));
-    code.classList.toggle("hidden", !has);
-    code.onclick = () => { if (F) openFilesFor(F); };   // same shape openFiles() passes
-  }
-}
-
-function showCheckpoint(F){
-  const cp = (F && F.cp) || {title:"CHECKPOINT", summary:""};
-  document.getElementById("cp-title").textContent="CHECKPOINT · "+(cp.title||"");
-  document.getElementById("cp-summary").textContent=cp.summary||"";
-  renderCpMeta(F, cp);
-  renderCpGates(F);
-  renderCpFlags(F);
-  renderCpArts(F, cp);
-  renderCpProvenance(cp);
-  renderCpActions(F, cp);
-  // Autopilot proposal: surface the panel's request as an EDITABLE next-iteration
-  // request (approve = as-is; request-changes = build the edited text; reject = stop).
-  const wrap = document.getElementById("cp-edit-wrap");
-  if (wrap){
-    const isProposal = cp.boundary === "autopilot_proposal";
-    wrap.classList.toggle("hidden", !isProposal);
-    if (isProposal) document.getElementById("cp-edit").value = cp.request || "";
-  }
-  document.getElementById("cp-modal").classList.remove("hidden");
-}
-function hideCheckpoint(){ document.getElementById("cp-modal").classList.add("hidden"); }
 
 // ---- repo browser (self-hosted GitHub over the store) ----------------------
 let FILES_ID = null;   // which release's repo the browser is currently showing
@@ -3379,20 +2934,6 @@ function viewFile(id, path, li){
     .catch(() => { view.textContent = "(could not load file)"; });
 }
 function hideFiles(){ document.getElementById("files-modal").classList.add("hidden"); }
-function sendDecision(decision){
-  const F = FLOORS.get(ACTIVE);
-  if (!F){ hideCheckpoint(); return; }
-  const body = {decision, checkpoint: F.cpIndex};
-  const wrap = document.getElementById("cp-edit-wrap");
-  if (wrap && !wrap.classList.contains("hidden")){
-    const edit = (document.getElementById("cp-edit").value || "").trim();
-    if (edit) body.request_edit = edit;   // the human's amended next-iteration request
-  }
-  fetch("/api/decision/"+F.id, {method:"POST", headers:postHeaders(),
-    body: JSON.stringify(body)});
-  F.awaiting = false; renderElevator(); hideCheckpoint();
-}
-
 // ---- interview a lead (click an agent) -------------------------------------
 let IV_TARGET = null;
 function openInterview(name){
@@ -3403,7 +2944,7 @@ function openInterview(name){
   document.getElementById("iv-role").textContent = name;
   const jc = document.getElementById("iv-journal"); jc.innerHTML = "";
   if(!entries.length){
-    jc.innerHTML = "<div class='cp-note'>No journal yet — reach a checkpoint first (or run supervised).</div>";
+    jc.innerHTML = "<div class='cp-note'>No journal yet — it fills in as the agents finish their steps.</div>";
   }
   for(const e of entries.slice(0,6)){
     const d = document.createElement("div"); d.className = "iv-entry";
@@ -3460,19 +3001,15 @@ function syncFoldSummaries(){
   const val=(id)=>String((document.getElementById(id)||{}).value||"").trim();
   const run=document.getElementById("run-sum");
   if(run) run.textContent=[_selLabel("backend-select"),
-    _selLabel("build-select"), _selLabel("adapter-select"),
+    _selLabel("adapter-select"),
     "stack: "+(_selLabel("profile-select")||"auto")].filter(Boolean).join(" · ");
   const scale=document.getElementById("scale-sum");
   if(scale){
-    const ap=parseInt(val("autopilot-input"),10);
     const w=readWorkers();
     const parts=[`workers FE${w.frontend} BE${w.backend} DA${w.data} TE${w.test}`,
                  (val("fix-input")||"0")+" auto-fix"];
     if(val("cap-input")) parts.push("$"+val("cap-input")+" cap");
     if(val("token-cap-input")) parts.push(val("token-cap-input")+" token cap");
-    parts.push(Number.isFinite(ap)&&ap>0 ? "autopilot "+ap : "autopilot off");
-    const sup=document.getElementById("supervised");
-    parts.push(sup && sup.checked ? "supervised" : "unsupervised");
     scale.textContent=parts.join(" · ");
   }
 }
@@ -3481,12 +3018,11 @@ newModal.addEventListener("input", syncFoldSummaries);
 
 // ---- Presets: one-click example builds that fill every spec-side setting -------
 // The PIR entry reuses the modal's HTML defaults (one source of truth); the rest are
-// defined inline. A preset sets the SPEC side (request/spec/build/ladder/stack/
-// workers/fix/autopilot) but NOT backend/adapter — those are host-dependent and
+// defined inline. A preset sets the SPEC side (request/spec/stack/
+// workers/fix) but NOT backend/adapter — those are host-dependent and
 // the server already reconciles them from /api/config.
 const _pirReq = (document.getElementById("req-input")||{}).value || "";
 const _pirSpec = (document.getElementById("spec-text")||{}).value || "";
-const _pirLadder = (document.getElementById("milestones-text")||{}).value || "";
 const MOON_SPEC =
 `A complete stardew-valley-style 2D farming/life sim, set on the moon.
 Must include: tile-based moon surface with a scrolling camera; day/night + sol
@@ -3497,48 +3033,38 @@ buy seeds/upgrades at a store); base-building (place/upgrade modules); save/load
 with 3 slots; a title screen, pause menu, and controls screen; sound hooks
 (procedural or silent-safe); keyboard controls documented in-game. Code-drawn
 graphics (shapes/procedural tiles) are fine — no external assets.`;
-// supervised: the old autonomous presets are hands-off (no checkpoint approvals); the
-// old gated ones keep the CTO approving each checkpoint.
 const PRESETS = [
-  { id:"custom", supervised:false, label:"— Custom (blank) —",
+  { id:"custom", label:"— Custom (blank) —",
     note:"A blank slate — describe your own build.",
-    request:"", intake:"idea", spec:"", build:"single",
-    maxMilestones:6, milestones:"", profile:"auto", workers:2, fix:2, autopilot:0 },
-  { id:"pir", supervised:true, label:"PIR system · cryptography (complex)",
+    request:"", intake:"idea", spec:"", profile:"auto", workers:2, fix:2 },
+  { id:"pir", label:"PIR system · cryptography (complex)",
     note:"Information-theoretic 2-server + homomorphic single-server PIR, verified in-process.",
-    request:_pirReq, intake:"spec", spec:_pirSpec, build:"milestones",
-    maxMilestones:6, milestones:_pirLadder, profile:"auto",
-    workers:2, fix:2, autopilot:0 },
-  { id:"moon", supervised:true, label:"Moon Colony farming game · pygame (very complex)",
-    note:"The BUILD-A-FULL-GAME recipe: a complete Stardew-style sim as a milestone ladder.",
+    request:_pirReq, intake:"spec", spec:_pirSpec, profile:"auto",
+    workers:2, fix:2 },
+  { id:"moon", label:"Moon Colony farming game · pygame (very complex)",
+    note:"A complete Stardew-style sim from a big spec.",
     request:"a complete stardew-style farming game about colonizing the moon",
-    intake:"spec", spec:MOON_SPEC, build:"milestones", maxMilestones:10,
-    milestones:"", profile:"pygame", workers:2, fix:8, autopilot:5 },
-  { id:"urlshort", supervised:false, label:"URL shortener · web service (simple)",
+    intake:"spec", spec:MOON_SPEC, profile:"pygame", workers:2, fix:8 },
+  { id:"urlshort", label:"URL shortener · web service (simple)",
     note:"A small single service — quick end-to-end build.",
     request:"a URL shortener service with custom slugs, link expiry, click analytics, and per-IP abuse rate-limiting",
-    intake:"idea", spec:"", build:"single", maxMilestones:6,
-    milestones:"", profile:"auto", workers:2, fix:2, autopilot:0 },
-  { id:"chip8", supervised:false, label:"CHIP-8 emulator · systems (simple)",
+    intake:"idea", spec:"", profile:"auto", workers:2, fix:2 },
+  { id:"chip8", label:"CHIP-8 emulator · systems (simple)",
     note:"Cheap pipeline validation — objectively scoreable against public test ROMs.",
     request:"a CHIP-8 emulator in Python with pytest tests against public test ROMs",
-    intake:"idea", spec:"", build:"single", maxMilestones:6,
-    milestones:"", profile:"auto", workers:2, fix:6, autopilot:0 },
-  { id:"taskmgr", supervised:true, label:"Team task manager · web+API+DB platform (complex)",
-    note:"Multi-service — auto-built as a platform (web / backend / data), stitched into one repo.",
+    intake:"idea", spec:"", profile:"auto", workers:2, fix:6 },
+  { id:"taskmgr", label:"Team task manager · web+API+DB (complex)",
+    note:"Web UI + REST API + database in one repo.",
     request:"a team task manager: users sign up and log in, create projects, add tasks with assignees, due dates and labels, comment on tasks, and switch between a board and a list view — a REST API, a web UI, and a database",
-    intake:"idea", spec:"", build:"single", maxMilestones:6,
-    milestones:"", profile:"auto", workers:3, fix:6, autopilot:0 },
-  { id:"ssg", supervised:false, label:"Static-site generator · CLI tool (simple)",
+    intake:"idea", spec:"", profile:"auto", workers:3, fix:6 },
+  { id:"ssg", label:"Static-site generator · CLI tool (simple)",
     note:"A command-line tool + library — a different shape of software.",
     request:"a command-line static-site generator: turn a folder of Markdown with front-matter into a linked HTML site with a table of contents, page templates, and a live-reload dev server",
-    intake:"idea", spec:"", build:"single", maxMilestones:6,
-    milestones:"", profile:"auto", workers:2, fix:2, autopilot:0 },
-  { id:"chat", supervised:true, label:"Real-time chat · WebSocket platform (complex)",
+    intake:"idea", spec:"", profile:"auto", workers:2, fix:2 },
+  { id:"chat", label:"Real-time chat · WebSocket app (complex)",
     note:"Rooms, presence and typing over WebSockets — web client + realtime backend + DB.",
     request:"a real-time group chat app: named rooms, user presence, typing indicators, persistent message history and search, and auth — a WebSocket backend, a web client, and a database",
-    intake:"idea", spec:"", build:"single", maxMilestones:6,
-    milestones:"", profile:"auto", workers:3, fix:6, autopilot:0 },
+    intake:"idea", spec:"", profile:"auto", workers:3, fix:6 },
 ];
 function _setSelIfPresent(id, val){
   const s=document.getElementById(id); if(!s) return;
@@ -3550,17 +3076,12 @@ function applyPreset(id){
   const set=(elId,val)=>{ const e=document.getElementById(elId); if(e) e.value=val; };
   set("req-input", p.request||"");
   set("spec-text", p.spec||"");
-  set("milestones-text", p.milestones||"");
-  set("max-milestones", p.maxMilestones!=null?p.maxMilestones:6);
   for (const sp of SPECIALTIES) set("workers-"+sp, p.workers!=null?p.workers:DEFAULT_LIMIT);
   set("fix-input", p.fix!=null?p.fix:2);
-  set("autopilot-input", p.autopilot!=null?p.autopilot:0);
-  _setSelIfPresent("build-select", p.build||"single");   // change event toggles the ladder opts
   _setSelIfPresent("profile-select", p.profile||"auto");
   // intake radio: reveal the matching panel (idea hides the spec box, spec shows it).
   const rb=document.querySelector(`input[name="intake"][value="${p.intake||"idea"}"]`);
   if(rb){ rb.checked=true; rb.dispatchEvent(new Event("change")); }
-  const sup=document.getElementById("supervised"); if(sup) sup.checked=!!p.supervised;
   if(typeof updateSlotHint==="function") updateSlotHint();
 }
 { const ps=document.getElementById("preset-select");
@@ -3703,11 +3224,8 @@ function fileToB64(file){
 document.getElementById("start-btn").onclick=async ()=>{
   const req=document.getElementById("req-input").value;
   const backend=document.getElementById("backend-select").value;
-  const sup=document.getElementById("supervised").checked;
   const extra={};
   extra.adapter=document.getElementById("adapter-select").value;
-  { const ap=document.getElementById("autopilot-input");
-    const n=ap?parseInt(ap.value,10):0; if(Number.isFinite(n)&&n>0) extra.autopilot=n; }
   extra.workers=readWorkers();   // per-specialty ticket workers in flight at once
   const fix=parseInt(document.getElementById("fix-input").value,10);
   if(Number.isFinite(fix) && fix>=0) extra.max_fix_attempts=fix;
@@ -3716,28 +3234,6 @@ document.getElementById("start-btn").onclick=async ()=>{
   const tokCap=parseInt(document.getElementById("token-cap-input").value,10);
   if(Number.isFinite(tokCap) && tokCap>0) extra.token_cap=tokCap;
   if(startFromSel.value) extra.parent_id=startFromSel.value;   // iterate on a finished build
-  // platform vs single is INFERRED server-side from the request (multi-service => platform).
-  // These advanced knobs only take effect when the request builds as a platform.
-  const mp=parseInt((document.getElementById("max-passes")||{}).value,10);
-  if(Number.isFinite(mp) && mp>=1) extra.max_passes=mp;
-  const criticEl=document.getElementById("critic-on");
-  if(criticEl && !criticEl.checked) extra.no_critic=true;
-  const mpar=parseInt((document.getElementById("max-parallel")||{}).value,10);
-  if(Number.isFinite(mpar) && mpar>=1) extra.max_parallel=mpar;
-  const mss=parseInt((document.getElementById("max-slots-svc")||{}).value,10);
-  if(Number.isFinite(mss) && mss>=1) extra.max_slots_per_service=mss;
-  // Milestone ladder: plan-and-chain releasable increments (one release per rung).
-  // Iterating on a finished build stays a single release, so the ladder select
-  // only applies to fresh builds.
-  { const bs=document.getElementById("build-select");
-    if(bs && bs.value==="milestones" && !startFromSel.value){
-      extra.build="milestones";
-      const mm=parseInt((document.getElementById("max-milestones")||{}).value,10);
-      extra.max_milestones=(Number.isFinite(mm)&&mm>=1)?Math.min(mm,12):10;
-      const lines=(document.getElementById("milestones-text").value||"")
-        .split("\n").map(s=>s.trim()).filter(Boolean);
-      if(lines.length) extra.milestones=lines;
-    } }
   { const ps=document.getElementById("profile-select");
     if (ps && ps.value && ps.value!=="auto") extra.profile=ps.value; }
   const intake=intakeMode();
@@ -3754,21 +3250,15 @@ document.getElementById("start-btn").onclick=async ()=>{
     extra.spec_text=chatDraft;
   }
   newModal.classList.add("hidden");
-  newProject(req, sup, backend, extra);
+  newProject(req, backend, extra);
   // reset the chat for the next project
   chatSession=null; chatDraft=""; iterBuilt="";
   document.getElementById("chat-log").innerHTML="";
   document.getElementById("chat-spec").textContent="(nothing yet)";
 };
 document.getElementById("req-input").addEventListener("input", updateSlotHint);
-// Build-as select: the milestone options only make sense for the ladder.
-{ const bs=document.getElementById("build-select"), mo=document.getElementById("milestones-opts");
-  if(bs && mo) bs.addEventListener("change", ()=>mo.classList.toggle("hidden", bs.value!=="milestones")); }
 document.getElementById("chat-send").onclick=sendChat;
 document.getElementById("chat-msg").addEventListener("keydown",(e)=>{ if(e.key==="Enter"){ e.preventDefault(); sendChat(); }});
-document.getElementById("cp-approve").onclick=()=>sendDecision("approve");
-document.getElementById("cp-changes").onclick=()=>sendDecision("needs_changes");
-document.getElementById("cp-reject").onclick=()=>sendDecision("reject");
 document.getElementById("output-btn").onclick=openFiles;
 for (const t of document.querySelectorAll(".log-tab")) t.onclick = () => selectLogTab(t.dataset.tab);
 document.getElementById("files-close").onclick=hideFiles;
@@ -3885,7 +3375,7 @@ function adoptFloor(row){
   const F = {
     id:row.id, floor:row.floor, release:row.release||1, releases:row.releases||1,
     request:row.request, mode:row.mode, backend:row.backend,
-    scene:null, log:[], progress:[], gates:row.gates||{}, org:null, cp:null, awaiting:!!row.awaiting,
+    scene:null, log:[], progress:[], gates:row.gates||{}, org:null,
     status:row.status, passed:!!row.passed, slots:row.slots||1, journal:[], seenUris:new Set(),
   };
   FLOORS.set(row.floor, F);
@@ -3895,49 +3385,15 @@ function adoptFloor(row){
     openFloorStream(F);
   }
 }
-// ONE live stream per floor, shared by every path (new build / rehydrate / next
-// release). When the stream ENDS, the server may immediately spawn the floor's
-// NEXT release (a milestone-ladder rung or an autopilot iteration) — follow along
-// by briefly polling for a newer release and adopting it in place, so an open tab
-// streams a whole overnight ladder without a refresh.
+// ONE live stream per floor, shared by every path (new build / rehydrate / iterate).
 function openFloorStream(F){
   const es = new EventSource("/api/stream/"+F.id);
   F.lastBeat = Date.now();
   es.onmessage = e => { F.lastBeat = Date.now();
     try { routeEvent(F.floor, JSON.parse(e.data)); } catch(_){} };
   es.addEventListener("ka", ()=>{ F.lastBeat = Date.now(); updateLiveDot(); });
-  es.addEventListener("end", ()=>{ es.close(); adoptNextRelease(F); });
+  es.addEventListener("end", ()=>{ es.close(); });
   F.es = es;
-}
-async function adoptNextRelease(F){
-  // Poll for ~5 minutes (autopilot's Director/panel deliberation can take a while
-  // on a real backend; a ladder rung spawns in seconds), then give up quietly.
-  for (let tries = 0; tries < 60; tries++){
-    await new Promise(r=>setTimeout(r, 5000));
-    let rows;
-    try { rows = (await fetch("/api/projects").then(r=>r.json())).projects; }
-    catch(_){ continue; }
-    const row = (rows||[]).find(r=>r.floor===F.floor);
-    if (!row || row.id === F.id){
-      if (row && row.status === "done") return;   // floor truly finished
-      continue;
-    }
-    // A fresh release took over the floor: reset per-release state and reconnect
-    // (the same shape newProject's iterate path uses).
-    if (F.es){ try{ F.es.close(); }catch(_){} }
-    Object.assign(F, {
-      id:row.id, release:row.release||F.release+1, releases:(F.releases||1)+1,
-      request:row.request, log:[], gates:{}, org:null, cp:null, awaiting:false,
-      status:"running", passed:false, journal:[], seenUris:new Set(),
-      liveRoom:null, liveAgent:null, _agrp:null, _svcOpen:null,
-    });
-    const sc = GAME.scene.getScene(floorKey(F.floor));
-    if (sc) sc.scene.restart({floor:F.floor, id:row.id, request:row.request, mode:row.mode, slots:F.slots});
-    renderElevator();
-    if (F.floor === ACTIVE) updateHud(F);
-    openFloorStream(F);
-    return;
-  }
 }
 async function rehydrate(){
   await bootReady;  // shared textures must exist before a FloorScene builds

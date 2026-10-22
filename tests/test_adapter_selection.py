@@ -128,7 +128,7 @@ def test_project_carries_adapter_field() -> None:
     from webapp.server import Project
 
     p = Project(
-        id="x", request="r", mode="assistant", supervised=False, floor=1,
+        id="x", request="r", mode="assistant", floor=1,
         adapter="raw-react",
     )
     assert p.adapter == "raw-react"
@@ -137,7 +137,7 @@ def test_project_carries_adapter_field() -> None:
 def test_project_defaults_to_stub_adapter() -> None:
     from webapp.server import Project
 
-    p = Project(id="x", request="r", mode="assistant", supervised=False, floor=1)
+    p = Project(id="x", request="r", mode="assistant", floor=1)
     assert p.adapter == "stub"
 
 

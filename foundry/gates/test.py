@@ -39,8 +39,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from foundry.schemas.gates import GateStatus, VerdictClass
-from foundry.schemas.implementation import FEATURE_DIR
+from foundry.schemas.implementation import BDD_REPORT_ENV, FEATURE_DIR
 
+from . import cucumber
 from .runner import ZoneAObservation, observe, run_grounding_command
 
 if TYPE_CHECKING:
@@ -53,6 +54,8 @@ DISCRIMINATOR_KEY = "discriminator"
 # Structured-observation key carrying {scenario_ref: outcome} for every expected
 # BDD scenario (outcome ∈ passed / failed / skipped / missing / unmatched / catch-all).
 BDD_KEY = "bdd"
+# Exit code of the planned Cucumber ``bdd`` command (absent on the pytest-bdd path).
+BDD_EXIT_KEY = "bdd_exit_code"
 
 _SUMMARY_RE = re.compile(r"(\d+) (passed|failed|errors?|skipped)")
 
@@ -96,7 +99,7 @@ sys.exit(console_main())
 # Env keys handing the BDD bootstrap its gate-owned channel; it pops them before any
 # workdir code runs. The report path is in a fresh temp dir OUTSIDE the workdir and is
 # opened O_EXCL at startup; the per-run nonce is echoed into the report and checked.
-_BDD_REPORT_ENV = "FOUNDRY_BDD_REPORT"
+_BDD_REPORT_ENV = BDD_REPORT_ENV
 _BDD_NONCE_ENV = "FOUNDRY_BDD_NONCE"
 _BDD_EXPECTED_ENV = "FOUNDRY_BDD_EXPECTED"
 
@@ -259,14 +262,33 @@ _BDD_WHY = {
 }
 
 
-def bdd_findings(scenarios: dict[str, str]) -> tuple[str, ...]:
+# The Cucumber path's wording where the pytest-bdd advice would mislead.
+_CUCUMBER_WHY = {
+    **_BDD_WHY,
+    "missing": (
+        "was not executed or has undefined steps — the bdd command must run the "
+        "stack's Cucumber runner over features/ from the repo root, writing Cucumber "
+        "Messages to $FOUNDRY_BDD_REPORT, with a step definition for every "
+        "Given/When/Then"
+    ),
+    "unmatched": (
+        "ran steps that do not match the trusted feature file's scenario — do not "
+        "edit or regenerate features/*.feature; run it as written"
+    ),
+}
+
+
+def bdd_findings(
+    scenarios: dict[str, str], why: dict[str, str] | None = None
+) -> tuple[str, ...]:
     """One finding per criterion whose scenario did not pass."""
+    why = why or _BDD_WHY
     out: list[str] = []
     for ref, status in sorted(scenarios.items()):
         if status == "passed":
             continue
         criterion = ref.rsplit("::", 1)[-1]
-        out.append(f"BDD criterion {criterion}: scenario {ref} {_BDD_WHY.get(status, status)}")
+        out.append(f"BDD criterion {criterion}: scenario {ref} {why.get(status, status)}")
     return tuple(out)
 
 
@@ -341,12 +363,15 @@ class TestGate:
         discriminator: TestSuiteDiscriminator | None = None,
         timeout_s: float = 600.0,
         seal_key: bytes | None = None,
+        bdd_cmd: str | None = None,
     ) -> None:
         # Default: the ISOLATED pinned harness (fences the host source off sys.path
         # so generated modules can't collide with / reach ours). An explicit cmd is
-        # honored verbatim (tests inject one). Only the default harness executes BDD
-        # scenarios (a profile-pinned foreign harness can't run pytest-bdd).
-        self._runs_bdd = cmd is None
+        # honored verbatim (tests inject one). With a planned Cucumber ``bdd_cmd``
+        # the scenarios run through it; otherwise only the default harness executes
+        # them (a profile-pinned foreign harness can't run pytest-bdd).
+        self.bdd_cmd = bdd_cmd or None
+        self._runs_bdd = cmd is None and self.bdd_cmd is None
         self.cmd = cmd or (
             sys.executable, "-c", _ISOLATED_PYTEST_BOOTSTRAP, "-q", "--tb=short"
         )
@@ -410,11 +435,49 @@ class TestGate:
             rc, out, err = self._ground(workdir, cmd, extra)
             return rc, out, err, read_bdd_report(report, nonce)
 
+    @staticmethod
+    def _cucumber_scenarios(
+        report: Path,
+        digest: cucumber.ReportDigest | None,
+        trusted: dict[str, list[tuple[str, str]]],
+        workdir: Path,
+    ) -> tuple[dict[str, str], tuple[str, ...]]:
+        """Outcomes from the pinned Cucumber Messages report; an absent, tampered or
+        unparseable one marks every trusted scenario "missing"."""
+        try:
+            envelopes = cucumber.read_verified_report(report, digest)
+        except cucumber.ReportError as exc:
+            note = (
+                f"BDD report rejected: {exc} — every scenario is marked missing. The "
+                "bdd command must run the stack's Cucumber runner writing Cucumber "
+                "Messages NDJSON to $FOUNDRY_BDD_REPORT (e.g. cucumber-js "
+                '--format "message:$FOUNDRY_BDD_REPORT")'
+            )
+            return {ref: "missing" for ref in sorted(trusted)}, (note,)
+        return cucumber.scenario_outcomes(envelopes, trusted, workdir)
+
     def execute(self, workdir: Path) -> ZoneAObservation:
-        trusted = trusted_scenarios(workdir) if self._runs_bdd else {}
+        trusted = trusted_scenarios(workdir) if self._runs_bdd or self.bdd_cmd else {}
+        if trusted and self.bdd_cmd:
+            with tempfile.TemporaryDirectory(prefix="foundry-bdd-") as tmp:
+                return self._execute(workdir, trusted, Path(tmp))
+        return self._execute(workdir, trusted, None)
+
+    def _execute(
+        self, workdir: Path, trusted: dict[str, list[tuple[str, str]]], bdd_dir: Path | None
+    ) -> ZoneAObservation:
         cmd = self.cmd
         executed: dict[str, str] | None = None
-        if trusted:
+        if bdd_dir is not None and self.bdd_cmd:
+            # The Cucumber run goes first and its report is pinned (size + sha256)
+            # the moment it exits, before any other agent code in this gate runs.
+            report_path = cucumber.create_report_file(bdd_dir)
+            bdd_rc, bdd_out, bdd_err = self._ground(
+                workdir, ("/bin/sh", "-c", self.bdd_cmd), {_BDD_REPORT_ENV: str(report_path)}
+            )
+            digest = cucumber.record_report(report_path)
+            rc, out, err = self._ground(workdir, cmd)
+        elif trusted:
             cmd = (sys.executable, "-c", _ISOLATED_PYTEST_BDD_BOOTSTRAP, *self.cmd[3:])
             rc, out, err, executed = self._ground_bdd(workdir, cmd, trusted)
         else:
@@ -437,7 +500,22 @@ class TestGate:
             report = self._discriminator.evaluate(workdir)
             structured[DISCRIMINATOR_KEY] = report.model_dump(mode="json")
             findings = report.findings
-        if trusted:
+        if bdd_dir is not None and self.bdd_cmd:
+            scenarios, notes = self._cucumber_scenarios(report_path, digest, trusted, workdir)
+            structured[BDD_KEY] = scenarios
+            structured[BDD_EXIT_KEY] = bdd_rc
+            structured["bdd_cmd"] = self.bdd_cmd
+            bdd_failures = failure_findings(bdd_out, limit=20) if bdd_rc != 0 else ()
+            findings = (
+                *notes,
+                *bdd_findings(scenarios, _CUCUMBER_WHY),
+                *bdd_failures,
+                *findings,
+                cucumber.CUCUMBER_RESIDUAL,
+            )
+            out = f"{out}\n--- bdd: {self.bdd_cmd} (exit {bdd_rc}) ---\n{bdd_out}"
+            err = f"{err}\n--- bdd ---\n{bdd_err}"
+        elif trusted:
             # Each criterion's scenario outcome, keyed by scenario_ref; a scenario the
             # run never executed (unbound feature, collection miss) is "missing".
             got = executed or {}
@@ -486,7 +564,10 @@ class TestGate:
         report = obs.structured.get(DISCRIMINATOR_KEY)
         if report is not None and not report.get("passed", False):
             return GateStatus.FAIL
-        # Executable acceptance: every criterion's scenario must have run and passed.
+        # Executable acceptance: every criterion's scenario must have run and passed,
+        # and a planned Cucumber run must itself have been green.
+        if obs.structured.get(BDD_EXIT_KEY, 0) != 0:
+            return GateStatus.FAIL
         scenarios = obs.structured.get(BDD_KEY)
         if scenarios is not None and any(v != "passed" for v in scenarios.values()):
             return GateStatus.FAIL

@@ -35,6 +35,9 @@ class VerificationProfile:
     """A named, pinned gate-command bundle. ``None`` = that gate's default."""
 
     name: str
+    # Dependency install (shell line), run by BuildGate FIRST and the only gate step
+    # with network; build/test/smoke then run offline. None = nothing to install.
+    install_cmd: str | None = None
     build_cmd: tuple[str, ...] | None = None
     test_cmd: tuple[str, ...] | None = None
     smoke_cmd: tuple[str, ...] | None = None  # runtime boot gate; None = no smoke gate
@@ -74,11 +77,13 @@ PROFILES: dict[str, VerificationProfile] = {
     ),
     "node-web": VerificationProfile(
         name="node-web",
-        build_cmd=_sh("npm ci --no-audit --no-fund && npm run build --if-present"),
+        install_cmd="npm ci --no-audit --no-fund",
+        build_cmd=_sh("npm run build --if-present"),
         test_cmd=_sh("npm test --silent"),
         smoke_cmd=("node", "smoke.mjs"),
         contract_text=(
-            "GATES: build = `npm ci && npm run build`; test = `npm test`; smoke = "
+            "GATES: install = `npm ci` (the ONLY step with network); build = `npm "
+            "run build`; test = `npm test`; smoke = "
             "`node smoke.mjs` (the package.json MUST define working build/test "
             "scripts, and the repo MUST ship smoke.mjs that boots the REAL app "
             "headless — start the server and hit one real route in-process, or "
@@ -87,11 +92,13 @@ PROFILES: dict[str, VerificationProfile] = {
     ),
     "phaser-web": VerificationProfile(
         name="phaser-web",
-        build_cmd=_sh("npm ci --no-audit --no-fund && npm run build --if-present"),
+        install_cmd="npm ci --no-audit --no-fund",
+        build_cmd=_sh("npm run build --if-present"),
         test_cmd=_sh("npm test --silent"),
         smoke_cmd=("node", "smoke.mjs"),
         contract_text=(
-            "GATES: build = `npm ci && npm run build`; test = `npm test`; smoke = "
+            "GATES: install = `npm ci` (the ONLY step with network); build = `npm "
+            "run build`; test = `npm test`; smoke = "
             "`node smoke.mjs` — the repo MUST ship a headless smoke.mjs that boots "
             "the game loop, advances >=100 simulated ticks with scripted input, and "
             "exits 0 only if no exception was thrown."

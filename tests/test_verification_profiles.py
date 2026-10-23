@@ -47,6 +47,13 @@ def test_every_profile_has_a_contract() -> None:
         assert p.contract_text.startswith("GATES:"), p.name
 
 
+def test_node_profiles_split_install_from_offline_build() -> None:
+    for name in ("node-web", "phaser-web"):
+        p = PROFILES[name]
+        assert p.install_cmd is not None and p.install_cmd.startswith("npm ci")
+        assert p.build_cmd is not None and "npm ci" not in " ".join(p.build_cmd)
+
+
 # ---- smoke gate ------------------------------------------------------------------
 
 

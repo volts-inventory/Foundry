@@ -49,6 +49,36 @@ DEFAULT_TICKET_TIERS: dict[Difficulty, str] = {
 
 FEATURE_DIR = "features"
 
+# Env var the gate sets to a path it owns; the planned BDD command must write its
+# Cucumber Messages (NDJSON) report there.
+BDD_REPORT_ENV = "FOUNDRY_BDD_REPORT"
+
+
+class Toolchain(FrozenModel):
+    """A language toolchain detected on this machine (offered to the planner)."""
+
+    language: str  # "python", "typescript", "go", ...
+    binaries: tuple[str, ...]  # the executables found, e.g. ("node", "npm")
+    version: str = ""
+
+
+class StackDecision(FrozenModel):
+    """The planner's choice of stack and the commands the gates run for it.
+    Commands are shell strings run by the gates in the sandbox; only ``install``
+    gets network."""
+
+    language: str
+    framework: str = ""
+    package_manager: str = ""
+    install: str = ""
+    build: str = ""
+    typecheck: str = ""
+    test: str = ""
+    bdd: str = ""  # must write Cucumber Messages to $FOUNDRY_BDD_REPORT
+    run: str = ""  # optional smoke command
+    profile: str = ""  # a pinned/legacy gate profile name, when one was used
+    notes: str = ""
+
 
 def feature_path(ticket_id: str) -> str:
     """Repo-relative path of a ticket's executable BDD feature file."""
@@ -70,7 +100,8 @@ class Ticket(FrozenModel):
     specialty: Specialty
     difficulty: Difficulty = Difficulty.STANDARD
     depends_on: tuple[str, ...] = ()  # ticket ids; must form a DAG
-    files: tuple[str, ...] = ()  # the only paths this ticket may write
+    files: tuple[str, ...] = ()  # the only paths this ticket may write (outputs)
+    reads: tuple[str, ...] = ()  # files it reads (inputs)
     scenario_ids: tuple[str, ...] = ()  # AcceptanceCriterion ids
     implements: tuple[str, ...] = ()  # InterfaceContract ids it provides
     consumes: tuple[str, ...] = ()  # InterfaceContract ids it calls

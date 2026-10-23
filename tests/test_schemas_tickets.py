@@ -62,3 +62,26 @@ def test_new_records_round_trip_the_checkpoint_serde() -> None:
                 ticket_id="T-1", specialty=Specialty.TEST, tier="T3", seq=SEQ)
     for obj in (ticket, ac, task):
         assert serde.loads_typed(serde.dumps_typed(obj)) == obj
+
+
+def test_stack_contract_and_toolchain_round_trip_the_checkpoint_serde() -> None:
+    from foundry.schemas.architecture import InterfaceContract
+    from foundry.schemas.implementation import BDD_REPORT_ENV, StackDecision, Toolchain
+
+    serde = foundry_serde()
+    stack = StackDecision(language="typescript", package_manager="npm", install="npm ci",
+                          typecheck="npx tsc --noEmit",
+                          bdd=f"npx cucumber-js --format message:${BDD_REPORT_ENV}")
+    tool = Toolchain(language="go", binaries=("go",), version="1.24")
+    contract = InterfaceContract(name="TodoStore.add", spec_uri="cas://c", kind="function",
+                                 signature="add(text: string): Todo", seq=SEQ)
+    ticket = Ticket(id="T-1", title="x", specialty=Specialty.BACKEND, reads=("src/a.ts",),
+                    seq=SEQ)
+    for obj in (stack, tool, contract, ticket):
+        assert serde.loads_typed(serde.dumps_typed(obj)) == obj
+
+
+def test_factory_state_carries_the_stack_channel() -> None:
+    from foundry.state.factory_state import FactoryState
+
+    assert "stack" in FactoryState.__annotations__

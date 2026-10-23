@@ -92,6 +92,8 @@ class InterfaceContract(FrozenModel):
 
     name: str  # the seam's stable identity (e.g. "TodoStore.add")
     spec_uri: str  # CAS handle to the full signature / contract body (DS9)
+    kind: str = ""  # function|class|type|http|cli|event
+    signature: str = ""  # written in the chosen language; compiled into wave-0 stubs
     consumers: tuple[str, ...] = ()  # component/interface ids that depend on this seam
     version: int = 1
     supersedes: str | None = None

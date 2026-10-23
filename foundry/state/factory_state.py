@@ -14,6 +14,7 @@ from foundry.schemas.architecture import PinnedConstraint
 from foundry.schemas.base import Artifact, BudgetLedger, ExternalAction, LogRef
 from foundry.schemas.gates import GateResult, GateTriage
 from foundry.schemas.governance import ScopeDecision, SignOffRecord, TierDecision
+from foundry.schemas.implementation import StackDecision
 from foundry.schemas.journal import JournalEntry
 from foundry.state import reducers
 
@@ -40,6 +41,7 @@ class FactoryState(TypedDict, total=False):
     # skipped and no verdict weakened at DEMO. It DOES thin the criteria those
     # gates verify against, though; see ScopeDecision for that honest limit.
     scope_tier: ScopeDecision | None  # single-writer (planner, or --scope pin)
+    stack: StackDecision | None  # single-writer (planner, or --profile pin)
     required_capabilities: Annotated[list[str], reducers.union]
     pinned_constraints: Annotated[list[PinnedConstraint], reducers.merge_constraints]
     artifacts: Annotated[list[Artifact], reducers.merge_by_uri]

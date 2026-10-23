@@ -1156,7 +1156,11 @@ def run_build_test_gates(
     build_cmd = profile.build_cmd if profile is not None else None
     test_cmd = profile.test_cmd if profile is not None else None
     build = _run_gate(
-        BuildGate(cmd=build_cmd, seal_key=runner.seal_key),
+        BuildGate(
+            cmd=build_cmd,
+            install_cmd=profile.install_cmd if profile is not None else None,
+            seal_key=runner.seal_key,
+        ),
         rt=rt,
         runner=runner,
         config=config,
@@ -1180,6 +1184,7 @@ def run_build_test_gates(
             min_passed=effective_min,
             discriminator=discriminator,
             seal_key=runner.seal_key,
+            bdd_cmd=profile.bdd_cmd if profile is not None else None,
         ),
         rt=rt,
         runner=runner,
@@ -1247,8 +1252,11 @@ def run_build_gate(
     run_against = materialize_workdir(state, workdir, resolve=resolve, resolve_blob=resolve_blob)
     profile = gate_profile(state, profile)
     build = _run_gate(
-        BuildGate(cmd=profile.build_cmd if profile is not None else None,
-                  seal_key=runner.seal_key),
+        BuildGate(
+            cmd=profile.build_cmd if profile is not None else None,
+            install_cmd=profile.install_cmd if profile is not None else None,
+            seal_key=runner.seal_key,
+        ),
         rt=rt,
         runner=runner,
         config=config,

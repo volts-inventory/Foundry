@@ -1265,7 +1265,7 @@ def run(
             if spec_text:
                 seed["spec"] = spec_text
             # A named profile pins the stack the planner would otherwise choose.
-            if profile not in (None, "auto"):
+            if profile is not None and profile != "auto":
                 from foundry.gates.profiles import pinned_stack
 
                 seed["stack"] = pinned_stack(profile)

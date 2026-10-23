@@ -228,7 +228,8 @@ def test_fit_violations_become_blocking_spec_findings() -> None:
         in findings
     assert "Ticket T-002 consumes contract TodoStore.add but does not depend on T-001, " \
         "which implements it." in findings
-    assert any(f.startswith("Contract Unused (implemented by T-003) has no consumer") for f in findings)
+    unused = "Contract Unused (implemented by T-003) has no consumer"
+    assert any(f.startswith(unused) for f in findings)
     critique = _critique(writes, cas)
     assert critique.spec_gate_blocking()
     assert writes["gate_triage"][0].explanation.startswith(
@@ -269,9 +270,12 @@ def test_gate_profile_reads_the_stack(monkeypatch: pytest.MonkeyPatch) -> None:
                                    typecheck="npx tsc --noEmit", test="npm test",
                                    bdd="npx cucumber-js")}, fallback)
     assert p is not None
-    assert p.build_cmd == ("/bin/sh", "-c", "npm ci && npm run build && npx tsc --noEmit")
+    assert p.install_cmd == "npm ci"  # its own networked step, not folded into build
+    assert p.build_cmd == ("/bin/sh", "-c", "npm run build && npx tsc --noEmit")
     assert p.test_cmd == ("/bin/sh", "-c", "npm test") and p.smoke_cmd is None
-    assert p.bdd_cmd == ("/bin/sh", "-c", "npx cucumber-js")
+    assert p.bdd_cmd == "npx cucumber-js"
+    bdd_only = gate_profile({"stack": _js(bdd="npx cucumber-js")}, fallback)
+    assert bdd_only is not None and bdd_only.test_cmd == ("/bin/sh", "-c", "true")
     undetected = {"request": "a react dashboard", "stack": StackDecision(language="rust")}
     assert gate_profile(undetected, fallback) is PROFILES["node-web"]
 
@@ -317,6 +321,77 @@ def test_build_test_gates_run_the_stack_commands(
     assert by_name == {"build": GateStatus.PASS, "test": GateStatus.PASS,
                        "smoke": GateStatus.FAIL}
     assert (tmp_path / "typed.txt").read_text().strip() == "typed"  # typecheck ran in BUILD
+
+
+def _constructed_gates(
+    state: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    profile: Any = None,
+) -> dict[str, Any]:
+    """The Build/Test gates run_build_test_gates constructs (they still run)."""
+    import foundry.graph.gate_wiring as gw
+
+    made: dict[str, Any] = {}
+
+    class _Build(gw.BuildGate):
+        def __init__(self, *a: Any, **kw: Any) -> None:
+            super().__init__(*a, **kw)
+            made["build"] = self
+
+    class _Test(gw.TestGate):
+        def __init__(self, *a: Any, **kw: Any) -> None:
+            super().__init__(*a, **kw)
+            made["test"] = self
+
+    monkeypatch.setattr(gw, "BuildGate", _Build)
+    monkeypatch.setattr(gw, "TestGate", _Test)
+    runner, rt, config = _runner_rt()
+    run_build_test_gates(
+        {"artifacts": [], **state}, config, rt=rt, runner=runner, resolve=lambda h: None,
+        resolve_blob=lambda u: b"", workdir=tmp_path, profile=profile,
+    )
+    return made
+
+
+def test_stack_on_state_drives_install_and_bdd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import foundry.toolchains as tc
+
+    monkeypatch.setattr(tc, "available_languages", lambda: frozenset({"javascript"}))
+    stack = _js(install="true", build="true", typecheck="true", test="true",
+                bdd="npx cucumber-js --format message:$FOUNDRY_BDD_REPORT")
+    made = _constructed_gates({"stack": stack}, tmp_path, monkeypatch)
+    assert made["build"].install_cmd == "true"
+    assert made["build"].cmd == ("/bin/sh", "-c", "true && true")
+    test = made["test"]
+    assert test.cmd == ("/bin/sh", "-c", "true") and test.min_passed == 0
+    assert test.bdd_cmd == stack.bdd
+
+
+def test_python_stack_without_bdd_keeps_the_default_test_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import foundry.toolchains as tc
+
+    monkeypatch.setattr(tc, "available_languages", lambda: frozenset({"python"}))
+    made = _constructed_gates(
+        {"stack": StackDecision(language="python", test="pytest")}, tmp_path, monkeypatch
+    )
+    assert made["build"].install_cmd is None
+    test = made["test"]
+    assert test.bdd_cmd is None and test.min_passed == 1 and test._runs_bdd
+
+
+def test_no_stack_falls_back_to_the_graph_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dataclasses import replace
+
+    fallback = replace(PROFILES["node-web"], install_cmd="true", build_cmd=("true",),
+                       test_cmd=("true",), smoke_cmd=None)
+    made = _constructed_gates({}, tmp_path, monkeypatch, profile=fallback)
+    assert made["build"].install_cmd == "true" and made["build"].cmd == ("true",)
+    assert made["test"].bdd_cmd is None and made["test"].cmd == ("true",)
 
 
 def test_wave_build_check_reads_the_stack(monkeypatch: pytest.MonkeyPatch) -> None:

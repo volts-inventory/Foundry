@@ -54,10 +54,8 @@ class VerificationProfile:
     smoke_cmd: tuple[str, ...] | None = None  # runtime boot gate; None = no smoke gate
     contract_text: str = ""  # advisory: what the gates will run (prompt-side)
     notes: tuple[str, ...] = field(default=())
-    # A planner-chosen stack's dependency install (already folded into build_cmd)
-    # and its Cucumber runner command.
-    install_cmd: tuple[str, ...] | None = None
-    bdd_cmd: tuple[str, ...] | None = None
+    # A planner-chosen stack's Cucumber runner (shell line, writes $FOUNDRY_BDD_REPORT).
+    bdd_cmd: str | None = None
 
 
 def _sh(script: str) -> tuple[str, ...]:
@@ -342,6 +340,7 @@ def pinned_stack(name: str) -> StackDecision:
     p = PROFILES[name]
     return StackDecision(
         language=_PROFILE_LANGUAGE.get(name, name),
+        install=p.install_cmd or "",
         build=_script(p.build_cmd),
         test=_script(p.test_cmd),
         run=_script(p.smoke_cmd),
@@ -353,32 +352,40 @@ def pinned_stack(name: str) -> StackDecision:
 def stack_profile(stack: StackDecision) -> VerificationProfile:
     """The gate commands for a planner-chosen stack.
 
-    BUILD runs install, build and typecheck as one command, so a ticket that breaks
-    an agreed contract fails the build with the type checker's own message. Python
-    keeps the trusted pinned pytest(-bdd) harness for TEST and never installs into
-    the host interpreter the gates run on; an empty Python build is compileall."""
+    BUILD runs the stack's install (the only step with network) and then build and
+    typecheck as one offline command, so a ticket that breaks an agreed contract
+    fails the build with the type checker's own message. With a ``bdd`` command TEST
+    runs ``test`` and the Cucumber runner; Python without one keeps the trusted
+    pinned pytest(-bdd) harness. Python never gets an install step: the gates run
+    its tests on the host interpreter, which the sandboxed install cannot write to."""
     python = stack.language == "python"
     build = stack.build or (
         f"{shlex.quote(sys.executable)} -m compileall -q ." if python and stack.typecheck else ""
     )
-    steps = [s for s in ("" if python else stack.install, build, stack.typecheck) if s]
+    steps = [s for s in (build, stack.typecheck) if s]
     build_cmd = _sh(" && ".join(steps)) if steps else None
-    test_cmd = None if python or not stack.test else _sh(stack.test)
+    install = stack.install if stack.install and not python else None
+    if stack.bdd:
+        # Scenarios are judged from the Cucumber report; `true` when only bdd is set.
+        test_cmd: tuple[str, ...] | None = _sh(stack.test or "true")
+    else:
+        test_cmd = None if python or not stack.test else _sh(stack.test)
     gates = [
-        f"build = `{_script(build_cmd) or 'python -m compileall -q .'}`",
+        *([f"install = `{install}` (the ONLY step with network)"] if install else []),
+        f"build = `{_script(build_cmd) or 'python -m compileall -q .'}` (offline)",
         f"test = `{_script(test_cmd) or 'pytest'}`",
         *([f"bdd = `{stack.bdd}`"] if stack.bdd else []),
         f"smoke = `{stack.run}`" if stack.run else "smoke = not pinned",
     ]
     return VerificationProfile(
         name=f"stack:{stack.language}",
+        install_cmd=install,
         build_cmd=build_cmd,
         test_cmd=test_cmd,
         smoke_cmd=_sh(stack.run) if stack.run else None,
         contract_text="GATES: " + "; ".join(gates) + "."
         + (_BDD_CONTRACT if python and not stack.bdd else ""),
-        install_cmd=_sh(stack.install) if stack.install and not python else None,
-        bdd_cmd=_sh(stack.bdd) if stack.bdd else None,
+        bdd_cmd=stack.bdd or None,
     )
 
 

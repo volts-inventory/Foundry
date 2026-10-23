@@ -485,7 +485,7 @@ def test_adequacy_floor_zero_tests_is_fail(tmp_path, rt, runner, records, verifi
         workdir=tmp_path / "bt",
         min_passed=1,
     )
-    build, test, smoke = bt_out["gates"]
+    build, test, _smoke = bt_out["gates"]
     assert build.status is GateStatus.PASS  # it compiles
     assert test.status is GateStatus.FAIL  # vacuous suite cannot clear the floor
     assert merge_gates(bt_out["gates"], None)  # both attested + admitted

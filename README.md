@@ -162,11 +162,15 @@ FOUNDRY_WORKSHOP_TOKEN=secret python -m webapp.server    # token for mutating ac
 
 Sign-in is on by default (`FOUNDRY_AUTH=0` disables it for a local smoke test).
 
-**Sandboxed test gate.** Generated tests run inside an unprivileged Linux
-namespace sandbox (`unshare`: no network, isolated mounts/processes, resource
-caps). If the host can't create user namespaces the gate fails closed; opt out
-to the sys.path-fenced in-process harness with `FOUNDRY_GATE_SANDBOX=inprocess`
-(required on macOS).
+**Sandboxed gates.** Generated tests, BDD scenarios, builds and smoke runs execute
+inside an unprivileged Linux namespace sandbox (`unshare`: own netns with loopback
+only, read-only filesystem except the workdir, private `/tmp`, host sockets and
+credential stores masked, env allowlist). The dependency-install step gets egress
+only through a gate-owned HTTPS `CONNECT` relay that refuses loopback, metadata and
+private destinations. If the host can't create user namespaces the gates fail
+closed; opt out to the sys.path-fenced in-process harness with
+`FOUNDRY_GATE_SANDBOX=inprocess` (required on macOS), which still refuses the
+install step unless `FOUNDRY_ALLOW_UNSANDBOXED_INSTALL=1`.
 
 ### Long-lived server
 
@@ -206,6 +210,7 @@ uv run pytest -n auto -q                                  # full suite (slow e2e
 | `FOUNDRY_COST_CAP_MICROUSD` / `FOUNDRY_TOKEN_CAP` | Spend / token envelope | — |
 | `FOUNDRY_STATE_DIR` | Durable state dir | in-memory |
 | `FOUNDRY_GATE_SANDBOX` | `inprocess` opts out of the namespace sandbox | sandbox |
+| `FOUNDRY_ALLOW_UNSANDBOXED_INSTALL` | `1` lets the networked install step run under the `inprocess` opt-out (refused otherwise) | off |
 | `WORKSHOP_HOST` / `WORKSHOP_PORT` | UI bind address / port | `127.0.0.1` / `8765` |
 | `WORKSHOP_OUTPUT_DIR` | UI output root | `.run/web` |
 | `WORKSHOP_STATE_DIR` | UI durable state dir (resume) | `WORKSHOP_OUTPUT_DIR/state` |

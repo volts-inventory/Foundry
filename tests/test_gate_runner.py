@@ -282,6 +282,15 @@ def test_build_missing_tool_is_error(tmp_path, runner, verifier):
     assert r.status is GateStatus.ERROR  # GroundingUnavailable -> fail-closed ERROR
 
 
+def test_build_without_sandbox_is_error_not_unsandboxed(tmp_path, runner, verifier, monkeypatch):
+    from foundry.gates import sandbox
+
+    monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)
+    monkeypatch.setattr(sandbox, "unshare_available", lambda: False)
+    r = runner.run(BuildGate(), "task/1", _seq("build", "task/1"), tmp_path)
+    assert r.status is GateStatus.ERROR
+
+
 def test_generated_module_named_like_host_pkg_is_isolated(tmp_path, runner, records, verifier):
     """The real failure reproduced: a generated impl under ``foundry/`` (a namespace
     package, no ``__init__``) + a test importing it. In a shared interpreter the host

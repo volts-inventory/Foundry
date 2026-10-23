@@ -56,6 +56,12 @@ class VerificationProfile:
     notes: tuple[str, ...] = field(default=())
     # A planner-chosen stack's Cucumber runner (shell line, writes $FOUNDRY_BDD_REPORT).
     bdd_cmd: str | None = None
+    # Why this profile cannot gate on this host (e.g. its toolchain is absent): every
+    # gate is an attested infra ERROR naming it. Empty = the profile can run.
+    unavailable: str = ""
+    # Why the TEST gate cannot run (a non-Python stack with no test and no bdd
+    # command): that gate alone is an ERROR, never the pytest harness.
+    test_unavailable: str = ""
 
 
 def _sh(script: str) -> tuple[str, ...]:
@@ -365,11 +371,17 @@ def stack_profile(stack: StackDecision) -> VerificationProfile:
     steps = [s for s in (build, stack.typecheck) if s]
     build_cmd = _sh(" && ".join(steps)) if steps else None
     install = stack.install if stack.install and not python else None
+    test_unavailable = ""
     if stack.bdd:
         # Scenarios are judged from the Cucumber report; `true` when only bdd is set.
         test_cmd: tuple[str, ...] | None = _sh(stack.test or "true")
     else:
         test_cmd = None if python or not stack.test else _sh(stack.test)
+        if not python and not stack.test:
+            test_unavailable = (
+                f"the {stack.language} stack declares neither a test nor a bdd command; "
+                "the pytest harness cannot test it — re-plan the stack with at least one"
+            )
     gates = [
         *([f"install = `{install}` (the ONLY step with network)"] if install else []),
         f"build = `{_script(build_cmd) or 'python -m compileall -q .'}` (offline)",
@@ -386,6 +398,7 @@ def stack_profile(stack: StackDecision) -> VerificationProfile:
         contract_text="GATES: " + "; ".join(gates) + "."
         + (_BDD_CONTRACT if python and not stack.bdd else ""),
         bdd_cmd=stack.bdd or None,
+        test_unavailable=test_unavailable,
     )
 
 

@@ -17,7 +17,9 @@ a rotation boundary when rotation arrives.
 
 Exit-code semantics (pytest): 0 green, 1 test failures, 2/3/4 harness/usage
 errors (→ ERROR: infra, not a verdict), 5 no tests collected (→ adequacy FAIL
-when a floor is set).
+when a floor is set). A stack-provided command (``stack_harness``: npm test, go
+test, the Cucumber ``bdd`` command) is not pytest: 0 passes, 126/127 (the shell
+could not find or run a binary — missing toolchain) is ERROR, anything else FAIL.
 
 Executable-BDD residual limit: the reporter runs in the same interpreter as the
 agent's test code, so it raises the bar (no hook, stdout, shadowing, or rewritten-
@@ -42,6 +44,7 @@ from foundry.schemas.gates import GateStatus, VerdictClass
 from foundry.schemas.implementation import BDD_REPORT_ENV, FEATURE_DIR
 
 from . import cucumber
+from .build import MISSING_BINARY_EXIT_CODES, commands_digest
 from .runner import ZoneAObservation, observe, run_grounding_command
 
 if TYPE_CHECKING:
@@ -120,7 +123,17 @@ _nonce = os.environ.pop("{_BDD_NONCE_ENV}")
 with open(os.environ.pop("{_BDD_EXPECTED_ENV}"), encoding="utf-8") as _f:
     _expected = {{k: [tuple(s) for s in v] for k, v in json.load(_f).items()}}
 _fd = os.open(_report_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-_probes = (os.urandom(12).hex() + " Zq-9 !", "wV? " + os.urandom(12).hex() + " 7")
+import secrets as _secrets
+_alpha = {cucumber._PROBE_ALPHABET!r}
+
+
+
+def _probes(words):
+    # Three random texts with the step's word count: nothing fixed to dodge.
+    return [" ".join("".join(_secrets.choice(_alpha) for _ in range(1 + _secrets.randbelow(10)))
+                     for _ in range(max(words, 1))) for _ in range(3)]
+
+
 _dumps = json.dumps
 _execute_step = _bdd_scenario._execute_step_function
 sys.path.insert(0, wd)
@@ -145,7 +158,9 @@ class _BddReport:
     def execute_step(self, request, scenario, step, context):
         key = (request.node.nodeid, self._ref(scenario))
         self.claims.add(key)
-        catch_all = all(context.parser.is_matching(p) for p in _probes)
+        catch_all = all(
+            context.parser.is_matching(p) for p in _probes(len(step.name.split()))
+        )
         rec = [step.type, step.name, False, catch_all]
         self.steps.setdefault(key, []).append(rec)
         out = _execute_step(request, scenario, step, context)
@@ -168,7 +183,9 @@ class _BddReport:
             return "missing"
         if [(s[0], s[1]) for s in steps] != _expected.get(ref):
             return "unmatched"
-        return "catch-all" if all(s[3] for s in steps) else "passed"
+        if all(s[3] for s in steps) or any(s[3] and s[0] == "then" for s in steps):
+            return "catch-all"
+        return "passed"
 
     def outcomes(self):
         rank = ("failed", "passed", "catch-all", "skipped", "unmatched", "missing")
@@ -364,6 +381,8 @@ class TestGate:
         timeout_s: float = 600.0,
         seal_key: bytes | None = None,
         bdd_cmd: str | None = None,
+        stack_harness: bool = False,
+        profile_name: str = "",
     ) -> None:
         # Default: the ISOLATED pinned harness (fences the host source off sys.path
         # so generated modules can't collide with / reach ours). An explicit cmd is
@@ -388,7 +407,13 @@ class TestGate:
         self.mutant_rotation_id = (
             discriminator.mutant_rotation_id if discriminator is not None else mutant_rotation_id
         )
-        self.scanner_rule_version = "pytest-harness-v1"
+        # A stack command is judged by its exit code alone, never pytest's codes.
+        self.stack_harness = stack_harness
+        # The command digest: a cached verdict never outlives a change of commands.
+        self.scanner_rule_version = "test-harness-v2:" + commands_digest(
+            cmd=list(self.cmd), bdd_cmd=self.bdd_cmd, stack_harness=stack_harness,
+            profile=profile_name,
+        )
         self._timeout_s = timeout_s
         self._seal_key = seal_key  # zone-A observation seal (None ⇒ unsealed channel)
 
@@ -492,6 +517,12 @@ class TestGate:
         # failure back to the engineer (zone B still decides the verdict on rc alone).
         if rc != 0:
             findings = failure_findings(out)
+        if self.stack_harness and rc in MISSING_BINARY_EXIT_CODES:
+            findings = (
+                f"test command exited {rc}: command not found or not executable "
+                "(missing toolchain) — infra ERROR, not a verdict",
+                *findings,
+            )
         # The discriminator runs in zone A (no signing key in scope) ONLY when
         # the agent suite is actually green — a red/no-tests run is already a
         # FAIL/ERROR by exit code, so there is nothing to re-verify. The report
@@ -506,6 +537,12 @@ class TestGate:
             structured[BDD_EXIT_KEY] = bdd_rc
             structured["bdd_cmd"] = self.bdd_cmd
             bdd_failures = failure_findings(bdd_out, limit=20) if bdd_rc != 0 else ()
+            if bdd_rc in MISSING_BINARY_EXIT_CODES:
+                bdd_failures = (
+                    f"bdd command exited {bdd_rc}: command not found or not executable "
+                    "(missing toolchain) — infra ERROR, not a verdict",
+                    *bdd_failures,
+                )
             findings = (
                 *notes,
                 *bdd_findings(scenarios, _CUCUMBER_WHY),
@@ -544,7 +581,14 @@ class TestGate:
         if len(obs.exit_codes) != 1:
             return GateStatus.ERROR
         rc = obs.exit_codes[0]
-        if rc in _INFRA_EXIT_CODES:
+        if obs.structured.get(BDD_EXIT_KEY) in MISSING_BINARY_EXIT_CODES:
+            return GateStatus.ERROR  # the Cucumber runner's binary is missing
+        if self.stack_harness:
+            if rc in MISSING_BINARY_EXIT_CODES:
+                return GateStatus.ERROR  # missing toolchain: infra, never latched
+            if rc != 0:
+                return GateStatus.FAIL
+        elif rc in _INFRA_EXIT_CODES:
             return GateStatus.ERROR  # harness failure is not a verdict (DS7)
         if rc == _NO_TESTS_COLLECTED:
             # Adequacy floor: an empty suite cannot clear the gate — nor can one

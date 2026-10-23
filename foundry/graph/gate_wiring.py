@@ -51,6 +51,7 @@ from typing import TYPE_CHECKING, Any
 
 from foundry.agents._common import as_text
 from foundry.agents._runtime import AgentRuntime
+from foundry.canonical import content_digest
 from foundry.gates.build import BuildGate
 from foundry.gates.spec import SpecGate
 from foundry.gates.test import TestGate
@@ -998,8 +999,14 @@ def materialize_workdir(
     stack = state.get("stack")
     if stack is None or stack.language == "python":
         _scaffold_manifest(dest)
+    # The stack's commands are part of what a verdict judges, so they join the
+    # toolchain digest: the stable-FAIL latch keys on run_against, and a re-planned
+    # stack must be able to re-gate the same source. No stack keeps the old digest.
+    toolchain = _TOOLCHAIN_DIGEST
+    if stack is not None:
+        toolchain = f"{_TOOLCHAIN_DIGEST}+stack:" + content_digest(stack.model_dump(mode="json"))
     # prefer_git=False: dest is a fresh materialized tree, not a git worktree.
-    return tree_sha(dest, toolchain_digest=_TOOLCHAIN_DIGEST, prefer_git=False)
+    return tree_sha(dest, toolchain_digest=toolchain, prefer_git=False)
 
 
 # ---- gate-run helpers (verdicts ONLY from the runner) -----------------------
@@ -1038,10 +1045,11 @@ def gate_profile(
     """The gate commands for this run, read at gate time from the ``stack`` channel.
 
     A ``--profile`` pin runs that profile unchanged; a planner stack in a language
-    this host has runs its own commands; a stack in an undetected language falls
-    back to the request-inferred profile; no stack keeps ``fallback`` (the
-    profile the graph was built with)."""
-    from foundry.gates.profiles import PROFILES, profile_for_request, stack_profile
+    this host has runs its own commands; a stack in an undetected language is an
+    ``unavailable`` profile (every gate an infra ERROR naming the missing toolchain —
+    never a silent switch to another stack's commands); no stack keeps ``fallback``
+    (the profile the graph was built with)."""
+    from foundry.gates.profiles import PROFILES, VerificationProfile, stack_profile
     from foundry.toolchains import available_languages
 
     stack = state.get("stack")
@@ -1049,9 +1057,40 @@ def gate_profile(
         return fallback
     if stack.profile:
         return PROFILES.get(stack.profile, fallback)
-    if stack.language not in available_languages():
-        return profile_for_request(f"{state.get('request', '')}\n{state.get('spec') or ''}")
+    available = available_languages()
+    if stack.language not in available:
+        return VerificationProfile(
+            name=f"stack:{stack.language}",
+            unavailable=(
+                f"missing toolchain: the planned stack's language {stack.language!r} "
+                f"is not installed on the gate host (detected: "
+                f"{', '.join(sorted(available)) or 'none'})"
+            ),
+        )
     return stack_profile(stack)
+
+
+class UnavailableGate:
+    """A gate that cannot run on this host: zone A raises ``GroundingUnavailable`` so
+    the runner signs an infra ERROR (bounded retry, never latched) naming ``reason``."""
+
+    verdict_class = VerdictClass.EXECUTION_DETERMINISTIC
+    decision_deterministic = True
+    execution_deterministic = True
+    mutant_rotation_id = 0
+    scanner_rule_version = "unavailable-v1"
+
+    def __init__(self, name: str, reason: str) -> None:
+        self.name = name
+        self._reason = reason
+
+    def execute(self, workdir: Path) -> ZoneAObservation:
+        from foundry.gates.runner import GroundingUnavailable
+
+        raise GroundingUnavailable(self._reason)
+
+    def decide(self, obs: ZoneAObservation) -> GateStatus:
+        return GateStatus.ERROR
 
 
 class UnpinnedSmokeGate:
@@ -1079,6 +1118,19 @@ class UnpinnedSmokeGate:
 
     def decide(self, obs: ZoneAObservation) -> GateStatus:
         return GateStatus.PASS if obs.structured.get("pinned") is False else GateStatus.ERROR
+
+
+def _build_gate(profile: VerificationProfile | None, runner: TwoZoneGateRunner) -> GateImpl:
+    if profile is None:
+        return BuildGate(seal_key=runner.seal_key)
+    if profile.unavailable:
+        return UnavailableGate("build", profile.unavailable)
+    return BuildGate(
+        cmd=profile.build_cmd,
+        install_cmd=profile.install_cmd,
+        seal_key=runner.seal_key,
+        profile_name=profile.name,
+    )
 
 
 def run_spec_gate(
@@ -1153,14 +1205,9 @@ def run_build_test_gates(
     # swaps WHAT the gates execute, never the two-zone trust seam. None keeps
     # each gate's historical default — byte-identical to the pre-profile factory.
     profile = gate_profile(state, profile)
-    build_cmd = profile.build_cmd if profile is not None else None
     test_cmd = profile.test_cmd if profile is not None else None
     build = _run_gate(
-        BuildGate(
-            cmd=build_cmd,
-            install_cmd=profile.install_cmd if profile is not None else None,
-            seal_key=runner.seal_key,
-        ),
+        _build_gate(profile, runner),
         rt=rt,
         runner=runner,
         config=config,
@@ -1178,14 +1225,23 @@ def run_build_test_gates(
     # pytest summary to count, so the adequacy floor drops to exit-code-only there
     # (min_passed=0; the floor is pytest-specific). The python default keeps it.
     effective_min = 0 if test_cmd is not None else min_passed
-    test = _run_gate(
-        TestGate(
+    test_gate: GateImpl
+    if profile is not None and (profile.unavailable or profile.test_unavailable):
+        test_gate = UnavailableGate("test", profile.unavailable or profile.test_unavailable)
+    else:
+        test_gate = TestGate(
             cmd=test_cmd,
             min_passed=effective_min,
             discriminator=discriminator,
             seal_key=runner.seal_key,
             bdd_cmd=profile.bdd_cmd if profile is not None else None,
-        ),
+            # Profile commands (npm test, go test, ...) are judged by exit code, not
+            # pytest's codes; None keeps the pinned pytest harness and its semantics.
+            stack_harness=test_cmd is not None,
+            profile_name=profile.name if profile is not None else "",
+        )
+    test = _run_gate(
+        test_gate,
         rt=rt,
         runner=runner,
         config=config,
@@ -1214,11 +1270,13 @@ def run_build_test_gates(
     # attested "not pinned" PASS (the boundary is always build/test/smoke).
     from foundry.gates.smoke import SmokeGate
 
-    smoke: GateImpl = (
-        SmokeGate(profile.smoke_cmd, seal_key=runner.seal_key)
-        if profile is not None and profile.smoke_cmd is not None
-        else UnpinnedSmokeGate(seal_key=runner.seal_key)
-    )
+    smoke: GateImpl
+    if profile is not None and profile.unavailable:
+        smoke = UnavailableGate("smoke", profile.unavailable)
+    elif profile is not None and profile.smoke_cmd is not None:
+        smoke = SmokeGate(profile.smoke_cmd, seal_key=runner.seal_key)
+    else:
+        smoke = UnpinnedSmokeGate(seal_key=runner.seal_key)
     gates.append(
         _run_gate(
             smoke,
@@ -1252,11 +1310,7 @@ def run_build_gate(
     run_against = materialize_workdir(state, workdir, resolve=resolve, resolve_blob=resolve_blob)
     profile = gate_profile(state, profile)
     build = _run_gate(
-        BuildGate(
-            cmd=profile.build_cmd if profile is not None else None,
-            install_cmd=profile.install_cmd if profile is not None else None,
-            seal_key=runner.seal_key,
-        ),
+        _build_gate(profile, runner),
         rt=rt,
         runner=runner,
         config=config,

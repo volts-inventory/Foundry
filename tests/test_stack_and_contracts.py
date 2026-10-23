@@ -138,6 +138,14 @@ def test_undetected_language_writes_no_stack_and_says_so() -> None:
     assert any("'rust' is not available" in c for c in writes["agent_journal"][0].concerns)
 
 
+def test_a_non_python_stack_without_test_or_bdd_is_dropped() -> None:
+    bare = {**TS_STACK, "test": "", "bdd": ""}
+    writes, _, _ = _plan_once({**PLAN, "stack": bare})
+    assert "stack" not in writes
+    assert any("neither a test nor a bdd command" in c
+               for c in writes["agent_journal"][0].concerns)
+
+
 def test_a_pinned_stack_is_kept_and_shown_as_fixed() -> None:
     pinned = pinned_stack("go")
     writes, _, prompt = _plan_once({**PLAN, "stack": TS_STACK}, {"stack": pinned})
@@ -277,7 +285,81 @@ def test_gate_profile_reads_the_stack(monkeypatch: pytest.MonkeyPatch) -> None:
     bdd_only = gate_profile({"stack": _js(bdd="npx cucumber-js")}, fallback)
     assert bdd_only is not None and bdd_only.test_cmd == ("/bin/sh", "-c", "true")
     undetected = {"request": "a react dashboard", "stack": StackDecision(language="rust")}
-    assert gate_profile(undetected, fallback) is PROFILES["node-web"]
+    missing = gate_profile(undetected, fallback)
+    assert missing is not None and missing.build_cmd is None and missing.test_cmd is None
+    assert "missing toolchain" in missing.unavailable and "'rust'" in missing.unavailable
+
+
+def test_undetected_stack_language_is_an_error_not_another_stack(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import foundry.toolchains as tc
+    from foundry.graph.gate_wiring import WaveBuildCheck
+
+    monkeypatch.setattr(tc, "available_languages", lambda: frozenset({"python"}))
+    runner, rt, config = _runner_rt()
+    state: dict[str, Any] = {"artifacts": [], "request": "a react dashboard",
+                             "stack": StackDecision(language="rust", test="cargo test")}
+    out = run_build_test_gates(
+        state, config, rt=rt, runner=runner, resolve=lambda h: None,
+        resolve_blob=lambda u: b"", workdir=tmp_path,
+    )
+    assert [(g.name, g.status) for g in out["gates"]] == [
+        ("build", GateStatus.ERROR), ("test", GateStatus.ERROR), ("smoke", GateStatus.ERROR)]
+    for g in out["gates"]:
+        assert any("missing toolchain" in f and "'rust'" in f for f in g.findings)
+        assert not runner.records.stable_fail_latched(g.run_against, g.name)
+    check = WaveBuildCheck(rt, runner, lambda h: None, lambda u: b"")
+    [build] = check.run(state, config)["gates"]
+    assert build.status is GateStatus.ERROR
+
+
+def test_stack_without_test_or_bdd_never_falls_back_to_pytest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import foundry.toolchains as tc
+
+    monkeypatch.setattr(tc, "available_languages", lambda: frozenset({"javascript"}))
+    assert "neither a test nor a bdd" in stack_profile(_js(build="true")).test_unavailable
+    assert stack_profile(_js(test="npm test")).test_unavailable == ""
+    runner, rt, config = _runner_rt()
+    out = run_build_test_gates(
+        {"artifacts": [], "stack": _js(build="true")}, config, rt=rt, runner=runner,
+        resolve=lambda h: None, resolve_blob=lambda u: b"", workdir=tmp_path,
+    )
+    by_name = {g.name: g for g in out["gates"]}
+    assert by_name["build"].status is GateStatus.PASS
+    assert by_name["test"].status is GateStatus.ERROR
+    assert any("neither a test nor a bdd" in f for f in by_name["test"].findings)
+
+
+def test_a_stack_command_exit_5_is_a_fail_not_no_tests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import foundry.toolchains as tc
+
+    monkeypatch.setattr(tc, "available_languages", lambda: frozenset({"javascript"}))
+    runner, rt, config = _runner_rt()
+    out = run_build_test_gates(
+        {"artifacts": [], "stack": _js(build="true", test="exit 5")}, config, rt=rt,
+        runner=runner, resolve=lambda h: None, resolve_blob=lambda u: b"", workdir=tmp_path,
+    )
+    assert {g.name: g.status for g in out["gates"]}["test"] is GateStatus.FAIL
+
+
+def test_the_stack_commands_are_part_of_the_latched_digest(tmp_path: Path) -> None:
+    def sha(stack: StackDecision | None) -> str:
+        state: dict[str, Any] = {"artifacts": []}
+        if stack is not None:
+            state["stack"] = stack
+        return materialize_workdir(state, tmp_path / str(len(list(tmp_path.iterdir()))),
+                                   resolve=lambda h: None, resolve_blob=lambda u: b"")
+
+    plain = sha(None)
+    assert plain == sha(None)
+    first, replanned = sha(_js(test="npm test")), sha(_js(test="npx vitest run"))
+    assert len({plain, first, replanned}) == 3
+    assert first == sha(_js(test="npm test"))
 
 
 def test_python_stack_keeps_the_trusted_harness() -> None:

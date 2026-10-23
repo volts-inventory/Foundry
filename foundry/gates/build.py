@@ -11,8 +11,13 @@ Isolation: every command runs in the confined namespace sandbox
 (``sandbox.ground_untrusted`` — no network, writes fenced to the workdir). An
 optional ``install_cmd`` (the stack's dependency install, e.g. ``npm ci``) runs
 FIRST in its own confined invocation, the only one that keeps network access; the
-build then runs offline over what the install wrote into the workdir. An install
-failure is a build FAIL carrying the install output as findings.
+build then runs offline over what the install wrote into the workdir.
+
+Infra vs. verdict: an install that exits non-zero (registry 5xx, network flake) and
+any command exiting 126/127 (the shell could not find or run a binary — a missing
+toolchain) are ERROR, never FAIL: the runner latches a FAIL on the tree digest
+forever, while an ERROR routes to bounded retry and never latches. Only the build
+itself exiting non-zero (other than 126/127) is a judgment about the tree.
 
 Fail-closed: a missing build tool — or an unavailable sandbox — raises
 ``GroundingUnavailable`` in zone A, which the runner signs as ERROR — never PASS.
@@ -24,12 +29,21 @@ import re
 import sys
 from pathlib import Path
 
+from foundry.canonical import content_digest
 from foundry.schemas.gates import GateStatus, VerdictClass
 
 from .runner import ZoneAObservation, observe
 from .sandbox import ground_untrusted
 
-__all__ = ["BuildGate", "build_findings"]
+__all__ = ["MISSING_BINARY_EXIT_CODES", "BuildGate", "build_findings", "commands_digest"]
+
+# POSIX shell: 126 = found but not executable, 127 = command not found.
+MISSING_BINARY_EXIT_CODES = frozenset({126, 127})
+
+
+def commands_digest(**commands: object) -> str:
+    """Short digest of a gate's effective commands, for its reuse-key version."""
+    return content_digest({k: v for k, v in sorted(commands.items())})[:16]
 
 _EXCERPT_LINES = 40
 _LINE_CHARS = 200
@@ -53,12 +67,17 @@ def build_findings(
     lines = [ln.rstrip()[:_LINE_CHARS] for ln in text.splitlines() if ln.strip()]
     tail: list[str] = []
     used = 0
+    head = f"{step} command exited {rc}"
+    if rc in MISSING_BINARY_EXIT_CODES:
+        head += " (command not found or not executable: missing toolchain — infra ERROR)"
+    elif step == "install":
+        head += " (dependency install failed — infra ERROR, retried)"
     for ln in reversed(lines[-_EXCERPT_LINES:]):
         if used + len(ln) > _EXCERPT_CHARS:
             break
         tail.append(ln)
         used += len(ln)
-    return (f"{step} command exited {rc}; last {len(tail)} output line(s):", *reversed(tail))
+    return (f"{head}; last {len(tail)} output line(s):", *reversed(tail))
 
 
 class BuildGate:
@@ -76,6 +95,7 @@ class BuildGate:
         install_cmd: str | None = None,
         timeout_s: float = 600.0,
         seal_key: bytes | None = None,
+        profile_name: str = "",
     ) -> None:
         self.cmd = cmd or (sys.executable, "-m", "compileall", "-q", ".")
         self.install_cmd = install_cmd or None  # shell line, e.g. the stack's `npm ci`
@@ -85,7 +105,10 @@ class BuildGate:
         # machinery; the ids are still bound so the key shape is uniform.
         self.mutant_rotation_id = 0
         # v2 = commands run in the confined sandbox: never reuse a pre-sandbox verdict.
-        self.scanner_rule_version = "build-cmd-v2"
+        # The command digest: a cached verdict never outlives a change of commands.
+        self.scanner_rule_version = "build-cmd-v3:" + commands_digest(
+            cmd=list(self.cmd), install_cmd=self.install_cmd, profile=profile_name
+        )
 
     # ---- zone A: [install, then] build; observe the exit code(s) ------------
 
@@ -130,6 +153,10 @@ class BuildGate:
         codes = obs.exit_codes
         if not codes or len(codes) > expected:
             return GateStatus.ERROR  # no / malformed observation -> not a verdict
+        if any(c in MISSING_BINARY_EXIT_CODES for c in codes):
+            return GateStatus.ERROR  # missing toolchain: infra, never latched
+        if self.install_cmd is not None and codes[0] != 0:
+            return GateStatus.ERROR  # failed install (network/registry): retriable
         if any(c != 0 for c in codes):
-            return GateStatus.FAIL  # a failed install short-circuits the build
+            return GateStatus.FAIL
         return GateStatus.PASS if len(codes) == expected else GateStatus.ERROR

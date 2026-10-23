@@ -177,11 +177,12 @@ def test_build_and_smoke_opt_out_mirrors_testgate(tmp_path: Path, monkeypatch: A
     assert all(argv[0] != "unshare" for argv in calls) and len(calls) == 3
 
 
-def test_install_failure_is_build_fail_with_findings(tmp_path: Path, monkeypatch: Any) -> None:
+def test_install_failure_is_build_error_with_findings(tmp_path: Path, monkeypatch: Any) -> None:
+    # A failed install (registry 5xx, network flake) is infra: ERROR, never a latched FAIL.
     monkeypatch.setenv("FOUNDRY_GATE_SANDBOX", "inprocess")
     gate = BuildGate(cmd=("/bin/sh", "-c", "touch built"), install_cmd="echo nope >&2; exit 4")
     obs = gate.execute(tmp_path)
-    assert gate.decide(obs) is GateStatus.FAIL
+    assert gate.decide(obs) is GateStatus.ERROR
     assert obs.exit_codes == (4,)
     assert obs.findings[0].startswith("install command exited 4") and "nope" in obs.findings
     assert not (tmp_path / "built").exists()          # build never ran
@@ -244,7 +245,7 @@ def test_real_writes_are_fenced_to_the_workdir(tmp_path: Path, monkeypatch: Any)
         ):
             obs = gate.execute(wd)
             if blocked:
-                assert gate.decide(obs) is GateStatus.FAIL and "Read-only" in obs.stderr
+                assert gate.decide(obs) is not GateStatus.PASS and "Read-only" in obs.stderr
         assert not target.exists()
     # ...while the workdir itself, /tmp and installed deps persist across steps.
     gate = BuildGate(

@@ -382,6 +382,19 @@ def test_nonempty_catch_all_steps_also_fail(tmp_path: Path) -> None:
     assert set(obs.structured[BDD_KEY].values()) == {"catch-all"}
 
 
+def test_a_catch_all_then_alone_fails_and_probes_have_no_fixed_literal(tmp_path: Path) -> None:
+    # Specific Given/When; the Then accepts anything but the old fixed probe literals.
+    then = (
+        '@then(parsers.re(r"^(?!.*Zq-9 !)(?!wV\\\\? ).*$"))\n'
+        "def _count():\n    pass\n"
+    )
+    steps = _STEPS.split('@then(parsers.parse("the list has')[0] + then
+    gate = TestGate()
+    obs = gate.execute(_project(tmp_path, steps))
+    assert set(obs.structured[BDD_KEY].values()) == {"catch-all"}, obs.stdout
+    assert gate.decide(obs) is GateStatus.FAIL
+
+
 def test_feature_rewritten_at_run_time_does_not_count(tmp_path: Path) -> None:
     conftest = '''\
 import pathlib

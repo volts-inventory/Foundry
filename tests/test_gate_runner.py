@@ -291,6 +291,66 @@ def test_build_without_sandbox_is_error_not_unsandboxed(tmp_path, runner, verifi
     assert r.status is GateStatus.ERROR
 
 
+@pytest.mark.parametrize(
+    ("cmd", "install", "status"),
+    [
+        (("/bin/sh", "-c", "true"), "echo registry 503 >&2; exit 1", GateStatus.ERROR),
+        (("/bin/sh", "-c", "no-such-toolchain-xyz build"), None, GateStatus.ERROR),  # 127
+        (("/bin/sh", "-c", "true"), "no-such-installer-xyz ci", GateStatus.ERROR),  # 127
+        (("/bin/sh", "-c", "exit 1"), "true", GateStatus.FAIL),
+    ],
+)
+def test_build_infra_failures_are_unlatched_errors(
+    tmp_path, runner, records, verifier, cmd, install, status
+):
+    digest = "c" * 64
+    r = runner.run(BuildGate(cmd=cmd, install_cmd=install), digest, _seq("build", digest),
+                   tmp_path)
+    assert r.status is status, r.findings
+    assert records.stable_fail_latched(digest, "build") is (status is GateStatus.FAIL)
+
+
+def test_reuse_key_binds_the_gate_commands(runner):
+    def key(g: GateImpl) -> str:
+        return runner.reuse_key(g, "sha-x")
+
+    sh = ("/bin/sh", "-c", "npm test")
+    assert key(BuildGate()) == key(BuildGate())
+    assert len({
+        key(BuildGate()), key(BuildGate(cmd=("make",))),
+        key(BuildGate(install_cmd="npm ci")), key(BuildGate(profile_name="stack:go")),
+    }) == 4
+    assert len({
+        key(TestGate()), key(TestGate(cmd=sh, stack_harness=True)),
+        key(TestGate(cmd=sh, stack_harness=True, bdd_cmd="npx cucumber-js")),
+        key(TestGate(cmd=sh, stack_harness=True, bdd_cmd="npx cucumber-js --x")),
+        key(TestGate(cmd=sh, stack_harness=True, profile_name="stack:typescript")),
+    }) == 5
+
+
+@pytest.mark.parametrize(
+    ("stack", "rc", "bdd_rc", "status"),
+    [
+        (True, 0, None, GateStatus.PASS),
+        (True, 5, None, GateStatus.FAIL),  # not pytest: 5 is not "no tests collected"
+        (True, 2, None, GateStatus.FAIL),
+        (True, 127, None, GateStatus.ERROR),
+        (True, 126, None, GateStatus.ERROR),
+        (True, 0, 127, GateStatus.ERROR),
+        (True, 0, 1, GateStatus.FAIL),
+        (False, 5, None, GateStatus.PASS),  # the pinned pytest harness keeps its codes
+        (False, 2, None, GateStatus.ERROR),
+    ],
+)
+def test_test_gate_exit_semantics(stack, rc, bdd_rc, status):
+    from foundry.gates.runner import observe
+    from foundry.gates.test import BDD_EXIT_KEY
+
+    gate = TestGate(cmd=("x",), min_passed=0, stack_harness=stack)
+    structured = {} if bdd_rc is None else {BDD_EXIT_KEY: bdd_rc}
+    assert gate.decide(observe("test", exit_codes=(rc,), structured=structured)) is status
+
+
 def test_generated_module_named_like_host_pkg_is_isolated(tmp_path, runner, records, verifier):
     """The real failure reproduced: a generated impl under ``foundry/`` (a namespace
     package, no ``__init__``) + a test importing it. In a shared interpreter the host

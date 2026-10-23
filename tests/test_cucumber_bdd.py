@@ -133,8 +133,52 @@ def test_expression_translation() -> None:
 )
 def test_catch_all_detection(ptype: str, source: str, params: dict, flagged: bool) -> None:
     defs = {"d": {"id": "d", "pattern": {"type": ptype, "source": source}}}
-    got, _ = cucumber._catch_all_ids(defs, params, cucumber.make_probes())
+    probes = cucumber.make_probes(len(source.split()) or None)  # the step's shape
+    got, _ = cucumber._catch_all_ids(defs, params, probes)
     assert ("d" in got) is flagged
+
+
+def test_probes_are_random_with_no_fixed_literal_to_dodge() -> None:
+    runs = [cucumber.make_probes() for _ in range(20)]
+    assert all(len(r) == 3 for r in runs) and len({p for r in runs for p in r}) == 60
+    assert len({len(p) for r in runs for p in r}) > 5
+    assert all(len(p.split(" ")) == 4 for p in cucumber.make_probes(4))
+    # A matcher that accepts everything except the old fixed probe literals.
+    dodge = {"d": {"pattern": {"type": "REGULAR_EXPRESSION",
+                               "source": r"^(?!.*Zq-9 !)(?!wV\? ).*$"}}}
+    got, _ = cucumber._catch_all_ids(dodge, {}, cucumber.make_probes())
+    assert got == {"d"}
+
+
+def _rebind(envs: list[dict[str, Any]], scenario: str, step_type: str, def_id: str) -> None:
+    """Bind ``scenario``'s ``step_type`` step(s) to step definition ``def_id``."""
+    pickle = next(e["pickle"] for e in envs if e.get("pickle", {}).get("name") == scenario)
+    ids = {s["id"] for s in pickle["steps"] if s["type"] == step_type}
+    case = next(e["testCase"] for e in envs
+                if e.get("testCase", {}).get("pickleId") == pickle["id"])
+    for ts in case["testSteps"]:
+        if ts.get("pickleStepId") in ids:
+            ts["stepDefinitionIds"] = [def_id]
+
+
+def test_a_catch_all_then_step_alone_grades_the_scenario_catch_all(tmp_path: Path) -> None:
+    wd = _workdir(tmp_path)
+    envs = _envelopes("mixed")
+    envs.insert(0, {"stepDefinition": {
+        "id": "any", "pattern": {"type": "CUCUMBER_EXPRESSION", "source": "{}"}}})
+    _rebind(envs, "AC-1", "Outcome", "any")  # Given/When stay specific
+    _rebind(envs, "AC-4", "Context", "any")  # a catch-all Given alone is not enough
+    out, _ = scenario_outcomes(envs, trusted_scenarios(wd), wd)
+    assert out[REF + "AC-1"] == "catch-all"
+    assert out[REF + "AC-4"] == "passed"
+
+
+def test_an_undeclared_step_definition_counts_as_catch_all(tmp_path: Path) -> None:
+    wd = _workdir(tmp_path)
+    envs = _envelopes("mixed")
+    _rebind(envs, "AC-1", "Context", "never-declared")
+    out, _ = scenario_outcomes(envs, trusted_scenarios(wd), wd)
+    assert out[REF + "AC-1"] == "catch-all"
 
 
 def test_backtracking_pattern_cannot_hang_the_gate(monkeypatch: Any) -> None:

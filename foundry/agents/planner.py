@@ -1226,6 +1226,13 @@ def _stack_decision(
             "bdd", "run", "notes",
         )},
     )
+    if language != "python" and not stack.test and not stack.bdd:
+        # The pytest harness cannot test another language: without a command of its
+        # own the stack has no test gate at all.
+        return None, [
+            f"The {language} stack declares neither a test nor a bdd command; it was "
+            "dropped and the gates infer a profile from the request."
+        ]
     concerns: list[str] = []
     if language != "python" and not stack.bdd:
         concerns.append(

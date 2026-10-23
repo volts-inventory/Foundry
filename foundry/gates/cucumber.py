@@ -219,13 +219,34 @@ def expression_to_regex(expr: str, params: dict[str, list[str]]) -> str:
     return "^" + "".join(out) + "$"
 
 
-def make_probes() -> tuple[str, str]:
-    """Two per-run random step texts no specific step definition should accept."""
-    return (secrets.token_hex(12) + " Zq-9 !", "wV? " + secrets.token_hex(12) + " 7")
+# Letters, digits and punctuation: a probe can contain anything a step text can, so
+# a pattern cannot dodge the probes by excluding a fixed literal.
+_PROBE_ALPHABET = (
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    ".,;:!?-_'\"()[]{}<>/\\@#$%^&*+=~|`"
+)
+
+
+def _random_probe(words: int | None) -> str:
+    n = words if words is not None else 1 + secrets.randbelow(6)
+    return " ".join(
+        "".join(secrets.choice(_PROBE_ALPHABET) for _ in range(1 + secrets.randbelow(10)))
+        for _ in range(max(n, 1))
+    )
+
+
+def make_probes(words: int | None = None) -> tuple[str, str, str]:
+    """Three per-run random step texts — random characters (punctuation included)
+    and token lengths, nothing fixed — that no specific step definition should
+    accept. ``words`` fixes their space-separated word count, so a matcher that
+    accepts any text of a step's shape (``{word} {word} {word}``) is caught on it;
+    ``None`` draws a random count per probe."""
+    return (_random_probe(words), _random_probe(words), _random_probe(words))
 
 
 # Evaluated in a child process so a catastrophic-backtracking pattern from the
 # report cannot hang the gate; a pattern with no answer counts as a catch-all.
+# One output token per pattern: "E", or one 1/0 per probe set.
 _MATCH_CHILD = """\
 import json, re, sys
 d = json.load(sys.stdin)
@@ -236,7 +257,7 @@ for kind, pat in d["patterns"]:
         print("E", flush=True)
         continue
     f = r.fullmatch if kind == "full" else r.search
-    print("1" if all(f(p) for p in d["probes"]) else "0", flush=True)
+    print("".join("1" if all(f(p) for p in s) else "0" for s in d["sets"]), flush=True)
 """
 
 
@@ -245,6 +266,16 @@ def _catch_all_ids(
     params: dict[str, list[str]],
     probes: tuple[str, ...],
 ) -> tuple[set[str], tuple[str, ...]]:
+    [flagged], notes = _catch_all_sets(step_defs, params, [probes])
+    return flagged, notes
+
+
+def _catch_all_sets(
+    step_defs: dict[str, dict[str, Any]],
+    params: dict[str, list[str]],
+    probe_sets: list[tuple[str, ...]],
+) -> tuple[list[set[str]], tuple[str, ...]]:
+    """For each probe set, the definition ids that accept every probe in it."""
     ids = sorted(step_defs)
     patterns: list[tuple[str, str] | None] = []
     for sid in ids:
@@ -261,7 +292,7 @@ def _catch_all_ids(
     notes: tuple[str, ...] = ()
     answers: list[str] = []
     if jobs:
-        payload = json.dumps({"patterns": jobs, "probes": list(probes)})
+        payload = json.dumps({"patterns": jobs, "sets": [list(s) for s in probe_sets]})
         try:
             proc = subprocess.run(
                 [sys.executable, "-I", "-S", "-c", _MATCH_CHILD],
@@ -276,12 +307,13 @@ def _catch_all_ids(
                 "BDD step-definition patterns took too long to evaluate; the "
                 "unevaluated ones are treated as catch-all matchers",
             )
-    flagged: set[str] = set()
+    flagged: list[set[str]] = [set() for _ in probe_sets]
     it = iter(answers)
     for sid, pat in zip(ids, patterns, strict=True):
         answer = next(it, None) if pat is not None else None
-        if answer != "0":
-            flagged.add(sid)
+        for i, out in enumerate(flagged):
+            if answer is None or len(answer) != len(probe_sets) or answer[i] != "0":
+                out.add(sid)
     return flagged, notes
 
 
@@ -307,10 +339,14 @@ def scenario_outcomes(
     trusted: dict[str, list[tuple[str, str]]],
     workdir: Path,
     *,
-    probes: tuple[str, str] | None = None,
+    probes: tuple[str, ...] | None = None,
 ) -> tuple[dict[str, str], tuple[str, ...]]:
     """``{scenario_ref: outcome}`` for every trusted scenario (unreported ones are
-    "missing"), plus any notes for the findings."""
+    "missing"), plus any notes for the findings.
+
+    A passing scenario is "catch-all" when ANY Then step, or every step, is bound
+    to a catch-all definition, or when any step is bound to no definition or to one
+    the report never declared (fail-closed)."""
     pickles: dict[str, tuple[str, dict[str, tuple[str, str]]]] = {}
     step_defs: dict[str, dict[str, Any]] = {}
     params: dict[str, list[str]] = {}
@@ -340,12 +376,25 @@ def scenario_outcomes(
             key = (str(f.get("testCaseStartedId")), str(f.get("testStepId")))
             results.setdefault(key, []).append(status)
 
-    flagged, notes = _catch_all_ids(step_defs, params, probes or make_probes())
+    # Probe each definition with random texts of every step shape it may bind (the
+    # word count), so "any N-word text" is caught on an N-word step.
+    if probes is not None:
+        shapes: list[int | None] = [None]
+        probe_sets = [probes]
+    else:
+        words = {len(text.split()) for _, steps in pickles.values() for _, text in steps.values()}
+        shapes = [*sorted(words)]
+        probe_sets = [make_probes(k) for k in sorted(words)]
+    sets, notes = _catch_all_sets(step_defs, params, probe_sets)
+    flagged_by_shape = dict(zip(shapes, sets, strict=True))
 
     def attempt(tcs_id: str, case: dict[str, Any], ref: str, steps: dict) -> str:
         executed: list[tuple[str, str]] = []
         step_status: list[str] = []
         catch_all: list[bool] = []
+        # Fail-closed: a step bound to no definition, or to one the report never
+        # declared, cannot be checked, so it voids the scenario's pass on its own.
+        unchecked = then_catch_all = False
         for ts in case.get("testSteps") or []:
             if not isinstance(ts, dict):
                 continue
@@ -362,7 +411,13 @@ def scenario_outcomes(
             executed.append(steps[str(psid)])
             step_status.append(status)
             defs = [str(x) for x in ts.get("stepDefinitionIds") or []]
-            catch_all.append(bool(defs) and all(x in flagged for x in defs))
+            shape = None if probes is not None else len(steps[str(psid)][1].split())
+            flagged = flagged_by_shape.get(shape, set(step_defs))
+            unknown = not defs or any(x not in step_defs for x in defs)
+            unchecked |= unknown
+            bound_catch_all = unknown or any(x in flagged for x in defs)
+            catch_all.append(bound_catch_all)
+            then_catch_all |= bound_catch_all and steps[str(psid)][0] == "then"
         if "UNDEFINED" in step_status:
             return "missing"
         if executed != trusted[ref]:
@@ -371,7 +426,9 @@ def scenario_outcomes(
             return "skipped"
         if any(s != "PASSED" for s in step_status):
             return "missing"
-        return "catch-all" if catch_all and all(catch_all) else "passed"
+        if unchecked or then_catch_all or (catch_all and all(catch_all)):
+            return "catch-all"
+        return "passed"
 
     outcomes: dict[str, list[str]] = {}
     for pickle_ref, _ in pickles.values():

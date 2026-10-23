@@ -301,8 +301,10 @@ def test_build_without_sandbox_is_error_not_unsandboxed(tmp_path, runner, verifi
     ],
 )
 def test_build_infra_failures_are_unlatched_errors(
-    tmp_path, runner, records, verifier, cmd, install, status
+    tmp_path, runner, records, verifier, cmd, install, status, monkeypatch
 ):
+    # These run in-process; the networked install step must be explicitly allowed there.
+    monkeypatch.setenv("FOUNDRY_ALLOW_UNSANDBOXED_INSTALL", "1")
     digest = "c" * 64
     r = runner.run(BuildGate(cmd=cmd, install_cmd=install), digest, _seq("build", digest),
                    tmp_path)

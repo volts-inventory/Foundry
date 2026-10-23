@@ -236,7 +236,9 @@ def test_real_build_and_install_cannot_reach_host_loopback(
         for gate in (BuildGate(cmd=_py(code)),
                      BuildGate(cmd=("true",), install_cmd=shlex.join(_py(code)))):
             obs = gate.execute(tmp_path)
-            assert gate.decide(obs) is GateStatus.FAIL and "blocked" in obs.stderr
+            # A failed install is infra (ERROR, retried); a failed build is FAIL.
+            want = GateStatus.ERROR if gate.install_cmd else GateStatus.FAIL
+            assert gate.decide(obs) is want and "blocked" in obs.stderr
         inet = BuildGate(cmd=_py("socket = __import__('socket'); socket.create_connection("
                                  "('1.1.1.1', 53), timeout=3)"))
         assert inet.decide(inet.execute(tmp_path)) is GateStatus.FAIL

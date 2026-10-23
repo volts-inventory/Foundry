@@ -391,7 +391,13 @@ def test_cucumber_js_passing_run_in_namespace_sandbox(
     if not unshare_available():
         pytest.skip("no unprivileged user namespaces")
     monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)
-    gate, obs = _run_js(_js_project(tmp_path, cucumber_js))
+    wd = _js_project(tmp_path, cucumber_js)
+    # The sandbox shadows host /tmp, so the shared install must live in the workdir —
+    # as a real install step puts it.
+    (wd / "node_modules").unlink()
+    shutil.copytree(cucumber_js, wd / "node_modules", symlinks=True)
+    gate, obs = _run_js(wd)
+    assert obs.structured[BDD_KEY] == {REF + "AC-1": "passed", REF + "AC-2": "passed"}, obs.stdout
     assert gate.decide(obs) is GateStatus.PASS, obs.stdout + obs.stderr
 
 

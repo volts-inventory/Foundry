@@ -45,7 +45,7 @@ from foundry.schemas.implementation import BDD_REPORT_ENV, FEATURE_DIR
 
 from . import cucumber
 from .build import MISSING_BINARY_EXIT_CODES, commands_digest
-from .runner import ZoneAObservation, observe, run_grounding_command
+from .runner import ZoneAObservation, observe
 
 if TYPE_CHECKING:
     from .discriminator import TestSuiteDiscriminator
@@ -418,29 +418,39 @@ class TestGate:
         self._seal_key = seal_key  # zone-A observation seal (None ⇒ unsealed channel)
 
     def _env(self, workdir: Path, extra: dict[str, str] | None = None) -> dict[str, str]:
-        # Tell the isolating bootstrap where to run (the workdir) and which host paths
-        # to fence off (the source checkout root); absent deny ⇒ nothing stripped.
-        env: dict[str, str] = {"FOUNDRY_GATE_WORKDIR": str(Path(workdir).resolve())}
+        # The gate-owned env, added on top of the sandbox's host-env allowlist: tell
+        # the isolating bootstrap where to run (the workdir) and which host paths to
+        # fence off (the source checkout root); absent deny ⇒ nothing stripped.
+        env: dict[str, str] = {
+            "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",  # no agent-supplied plugins (gov §1c)
+            "FOUNDRY_GATE_WORKDIR": str(Path(workdir).resolve()),
+        }
         root = _host_source_root()
         if root:
             env[_DENY_PATHS_ENV] = root
-        return pinned_test_env({**env, **(extra or {})})
+        return {**env, **(extra or {})}
 
     # ---- zone A: pinned harness execution, raw rc + summary ---------------
 
     def _ground(
-        self, workdir: Path, cmd: tuple[str, ...], extra_env: dict[str, str] | None = None
+        self,
+        workdir: Path,
+        cmd: tuple[str, ...],
+        extra_env: dict[str, str] | None = None,
+        binds: tuple[tuple[Path, bool], ...] = (),
     ) -> tuple[int, str, str]:
-        """Run the pinned harness over ``workdir``. By default the isolated pytest runs
-        inside the namespace sandbox (no network, isolated mount/pid/ipc/uts — see
-        ``sandbox.py``); ``FOUNDRY_GATE_SANDBOX=inprocess`` runs it in-process with only
-        the sys.path fence. Either way generated code can't import or shadow ours."""
-        from .sandbox import run_in_sandbox, sandbox_enabled
+        """Run the pinned harness over ``workdir`` in the same confined sandbox build and
+        smoke use (``sandbox.ground_untrusted``: offline with loopback up, read-only
+        fence except the workdir and the gate-owned report ``binds``, allowlisted env);
+        ``FOUNDRY_GATE_SANDBOX=inprocess`` runs it on the host with only the sys.path
+        fence and the env allowlist. Either way generated code can't import or shadow
+        ours."""
+        from .sandbox import ground_untrusted
 
-        env = self._env(workdir, extra_env)
-        if sandbox_enabled():
-            return run_in_sandbox(cmd, workdir, env=env, timeout_s=self._timeout_s)
-        return run_grounding_command(cmd, workdir, env=env, timeout_s=self._timeout_s)
+        return ground_untrusted(
+            cmd, workdir, extra_env=self._env(workdir, extra_env), binds=binds,
+            timeout_s=self._timeout_s,
+        )
 
     def _ground_bdd(
         self, workdir: Path, cmd: tuple[str, ...], trusted: dict[str, list[tuple[str, str]]]
@@ -457,7 +467,9 @@ class TestGate:
                 _BDD_NONCE_ENV: nonce,
                 _BDD_EXPECTED_ENV: str(expected),
             }
-            rc, out, err = self._ground(workdir, cmd, extra)
+            # The reporter creates the report (O_EXCL), so its private dir is writable.
+            binds = ((Path(tmp), True), (expected, False))
+            rc, out, err = self._ground(workdir, cmd, extra, binds)
             return rc, out, err, read_bdd_report(report, nonce)
 
     @staticmethod
@@ -498,7 +510,10 @@ class TestGate:
             # the moment it exits, before any other agent code in this gate runs.
             report_path = cucumber.create_report_file(bdd_dir)
             bdd_rc, bdd_out, bdd_err = self._ground(
-                workdir, ("/bin/sh", "-c", self.bdd_cmd), {_BDD_REPORT_ENV: str(report_path)}
+                workdir,
+                ("/bin/sh", "-c", self.bdd_cmd),
+                {_BDD_REPORT_ENV: str(report_path)},
+                ((report_path, True),),
             )
             digest = cucumber.record_report(report_path)
             rc, out, err = self._ground(workdir, cmd)

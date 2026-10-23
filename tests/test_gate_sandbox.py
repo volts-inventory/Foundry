@@ -624,3 +624,28 @@ def test_inprocess_refuses_networked_install_unless_explicitly_allowed(
     BuildGate(cmd=("true",), install_cmd="npm ci").execute(tmp_path)
     assert len(calls) == 3
     assert all("GH_TOKEN" not in env and "PATH" in env for env in calls)  # ...allowlisted
+
+
+@_REAL
+def test_real_discriminator_suite_runs_confined(tmp_path: Path, monkeypatch: Any) -> None:
+    """The discriminator re-runs the agent's own suite (and mutants of it): it is
+    untrusted code and must get the same confinement as the Test gate."""
+    from foundry.gates.discriminator import TestSuiteDiscriminator
+
+    monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)
+    monkeypatch.setenv("GH_TOKEN", "ghp-secret")
+    outside = _host_dir("disc")
+    probe = (
+        "import os, pathlib, sys\n"
+        "ok = 'GH_TOKEN' not in os.environ\n"
+        f"try:\n    pathlib.Path({str(outside)!r}).write_text('x')\n    ok = False\n"
+        "except OSError:\n    pass\n"
+        "sys.exit(0 if ok else 3)\n"
+    )
+    disc = TestSuiteDiscriminator(cmd=_py(probe))
+    try:
+        assert disc._run_suite(tmp_path) == 0
+        assert not outside.exists()
+    finally:
+        if outside.exists():
+            outside.unlink()

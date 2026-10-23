@@ -56,8 +56,7 @@ from pathlib import Path
 from foundry.schemas.base import FrozenModel
 from foundry.schemas.gates import VerdictClass
 
-from .runner import run_grounding_command
-from .test import pinned_test_env
+from .sandbox import ground_untrusted
 
 __all__ = [
     "BehavioralInvariant",
@@ -167,8 +166,10 @@ class TestSuiteDiscriminator:
 
     def _run_suite(self, workdir: Path) -> int:
         """Run the agent suite under the pinned harness; return the pytest rc."""
-        rc, _out, _err = run_grounding_command(
-            self.cmd, workdir, env=pinned_test_env(), timeout_s=self.timeout_s
+        # The agent's suite is untrusted code: same confinement as the Test gate.
+        rc, _out, _err = ground_untrusted(
+            self.cmd, workdir, extra_env={"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"},
+            timeout_s=self.timeout_s,
         )
         return rc
 
@@ -294,10 +295,10 @@ def _check_invariant(
         "got = fn(*P['args'])\n"
         "sys.exit(0 if got == P['expected'] else 1)\n"
     )
-    rc, _out, err = run_grounding_command(
+    rc, _out, err = ground_untrusted(
         (sys.executable, "-c", script),
         workdir,
-        env=pinned_test_env({"PYTHONPATH": str(workdir)}),
+        extra_env={"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "PYTHONPATH": str(workdir)},
         timeout_s=timeout_s,
     )
     if rc == 0:

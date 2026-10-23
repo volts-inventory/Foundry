@@ -11,6 +11,13 @@ from typing import Any
 
 PLANNER_SOP_KEY = "You are the Planner"
 
+# Python without a bdd command: the gates keep the pinned pytest-bdd harness.
+PYTHON_STACK: dict[str, Any] = {
+    "language": "python", "framework": "", "package_manager": "pip", "install": "",
+    "build": "", "typecheck": "", "test": "pytest", "bdd": "", "run": "", "notes": "",
+    "contracts_file": "", "harness_files": [],
+}
+
 
 def _scenario(criterion: dict[str, Any]) -> dict[str, Any]:
     """A legacy text criterion as a scenario: its text stays the rendered form."""
@@ -85,6 +92,7 @@ def plan_payload(
             "components": design.get("components", []),
         },
         "adrs": design.get("adrs", []),
+        "stack": PYTHON_STACK,
         "interfaces": design.get("interfaces", []),
         # A single epic with its tickets inline: the planner makes one call.
         "epics": [{
@@ -132,6 +140,7 @@ def multi_epic_plan() -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
         "design": {"title": "Notes", "body": "web -> api -> store",
                    "components": ["store", "api", "web"]},
         "adrs": [],
+        "stack": PYTHON_STACK,
         "interfaces": [
             {"name": "Store.save", "spec": "save(note) -> id"},
             {"name": "Store.load", "spec": "load(id) -> note"},

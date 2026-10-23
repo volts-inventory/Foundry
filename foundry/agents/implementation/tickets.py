@@ -71,6 +71,7 @@ from foundry.schemas.implementation import (
     Difficulty,
     FeatureDiff,
     Specialty,
+    StackDecision,
     Task,
     Ticket,
     feature_path,
@@ -470,6 +471,7 @@ def _ticket_packet(
     prior_failures: tuple[str, ...],
     turn_budget: int,
     cost_budget_microusd: int,
+    stack: StackDecision | None = None,
 ) -> TaskPacket:
     rules = [
         "You can read the whole project in the working directory: it holds everything "
@@ -493,10 +495,11 @@ def _ticket_packet(
             "criterion_ids": list(task.criterion_ids),
             "depends_on": list(task.depends_on),
             "files": list(ticket.files),
+            "reads": list(ticket.reads),
             "feature_files": list(feature_files),
             "rules": rules,
         },
-        persona=persona_for(ticket.specialty.value),
+        persona=persona_for(ticket.specialty.value, stack),
         pinned_constraints=pinned_texts(constraints),  # VERBATIM + FIRST (arch §2)
         retrieved_spans=spans,
         prior_failures=prior_failures,
@@ -675,7 +678,7 @@ def make_engineering_node(
                 packet = _ticket_packet(
                     tasks[tid], ticket, constraints, spans=spans, feature_files=features,
                     prior_failures=prior, turn_budget=turn_budget,
-                    cost_budget_microusd=cost_budget_microusd,
+                    cost_budget_microusd=cost_budget_microusd, stack=state.get("stack"),
                 )
                 etask = ExecutionTask(
                     packet=packet, adapter=adapter_name, lineage=ticket.specialty.value,

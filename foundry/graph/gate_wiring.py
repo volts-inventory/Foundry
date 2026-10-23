@@ -55,8 +55,14 @@ from foundry.gates.build import BuildGate
 from foundry.gates.spec import SpecGate
 from foundry.gates.test import TestGate
 from foundry.schemas.base import BudgetLedger
-from foundry.schemas.gates import GateResult, GateStatus, GateTriage
-from foundry.schemas.implementation import FEATURE_DIR, FeatureDiff, Ticket, feature_path
+from foundry.schemas.gates import GateResult, GateStatus, GateTriage, VerdictClass
+from foundry.schemas.implementation import (
+    CONTRACTS_TICKET_ID,
+    FEATURE_DIR,
+    FeatureDiff,
+    Ticket,
+    feature_path,
+)
 from foundry.schemas.product import AcceptanceCriterion, CriteriaCritique
 from foundry.state.reducers import merge_gates
 from foundry.state.tree_sha import tree_sha
@@ -68,7 +74,7 @@ if TYPE_CHECKING:
 
     from foundry.gates.discriminator import DiscriminatorFactory
     from foundry.gates.profiles import VerificationProfile
-    from foundry.gates.runner import GateImpl, TwoZoneGateRunner
+    from foundry.gates.runner import GateImpl, TwoZoneGateRunner, ZoneAObservation
     from foundry.schemas.base import Artifact
     from foundry.state.factory_state import FactoryState
 
@@ -97,9 +103,12 @@ __all__ = [
     "FeatureDiffBodyError",
     "MaterializationError",
     "PathContainmentError",
+    "UnpinnedSmokeGate",
     "WaveBuildCheck",
     "bump_fix_attempts",
+    "contract_paths",
     "flake_quarantined",
+    "gate_profile",
     "materialize_workdir",
     "render_feature",
     "route_after_gates",
@@ -269,13 +278,13 @@ def _criteria_payload(
     critique = _latest_critique(state, resolve)
     if critique is None or not critique.spec_gate_blocking():
         return criteria
-    return {
-        "criteria": criteria,
-        "critique": {
-            # RAW findings only — sorted for byte-stable tree_sha across folds.
-            "security_abuse_omissions": sorted(critique.security_abuse_omissions),
-        },
+    block: dict[str, list[str]] = {
+        # RAW findings only — sorted for byte-stable tree_sha across folds.
+        "security_abuse_omissions": sorted(critique.security_abuse_omissions),
     }
+    if critique.contract_findings:
+        block["contract_findings"] = sorted(critique.contract_findings)
+    return {"criteria": criteria, "critique": block}
 
 
 # ---- code + test sources from FeatureDiff diff bodies -----------------------
@@ -697,8 +706,13 @@ def _write_sources(
     * PATCH: the target must already exist in ``dest`` (written by a prior diff
       in Seq order) and every hunk must apply EXACTLY — else fail-closed.
     """
-    diff_artifacts = sorted(_of_kind(state, FEATURE_DIFF_KIND), key=lambda a: a.seq)
-    for artifact in diff_artifacts:
+    _apply_diffs(dest, _of_kind(state, FEATURE_DIFF_KIND), resolve, resolve_blob)
+
+
+def _apply_diffs(
+    dest: Path, artifacts: list[Artifact], resolve: ArtifactResolver, resolve_blob: BlobResolver
+) -> None:
+    for artifact in sorted(artifacts, key=lambda a: a.seq):
         diff = _resolve_typed(artifact, resolve, FeatureDiff, FEATURE_DIFF_KIND)
         ops = _diff_ops(diff, resolve_blob)
         for rel, content in ops.writes.items():
@@ -891,6 +905,49 @@ def _scaffold_manifest(dest: Path) -> None:
     (dest / "requirements.txt").write_text(header + body, encoding="utf-8")
 
 
+# ---- gate-owned contract files (the wave-0 contracts ticket) -----------------
+
+
+def contract_paths(state: FactoryState, resolve: ArtifactResolver) -> tuple[str, ...]:
+    """The files of the live contracts ticket: gate-owned once it is built."""
+    newest: Ticket | None = None
+    for a in sorted(_of_kind(state, TICKET_KIND), key=lambda a: a.seq):
+        t = _resolve_typed(a, resolve, Ticket, TICKET_KIND)
+        if t.id == CONTRACTS_TICKET_ID:
+            newest = t
+    if newest is None or newest.supersedes == newest.id:
+        return ()
+    return newest.files
+
+
+def _write_contracts(
+    dest: Path, state: FactoryState, resolve: ArtifactResolver, resolve_blob: BlobResolver
+) -> None:
+    """Rewrite the contract files from the contracts ticket's own diffs alone, so
+    another ticket's or the fixer's edit to an agreed signature never reaches the
+    gates (the planner also keeps those paths out of every other ticket's files)."""
+    paths = contract_paths(state, resolve)
+    if not paths:
+        return
+    owned = [
+        a for a in _of_kind(state, FEATURE_DIFF_KIND)
+        if _resolve_typed(a, resolve, FeatureDiff, FEATURE_DIFF_KIND).task_id
+        == CONTRACTS_TICKET_ID
+    ]
+    if not owned:
+        return  # not built yet: nothing agreed to restore
+    with tempfile.TemporaryDirectory(prefix="foundry_contracts_") as tmp:
+        _apply_diffs(Path(tmp), owned, resolve, resolve_blob)
+        for rel in paths:
+            source = _contained_target(Path(tmp), rel)
+            target = _contained_target(dest, rel)
+            if source.is_file():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(source.read_bytes())
+            elif target.is_file():
+                target.unlink()
+
+
 # Files materialize_workdir writes for the gates themselves, not product code.
 GATE_INPUT_FILES = frozenset({"criteria.json"})
 
@@ -935,9 +992,12 @@ def materialize_workdir(
     # Build / Test gate inputs: the integrated code + test sources.
     _write_sources(dest, state, resolve, resolve_blob)
     _write_features(dest, features, prune=True)
+    _write_contracts(dest, state, resolve, resolve_blob)
     # Guarantee an auditable dependency manifest so the AUDIT gate can ground its
     # SBOM (no-op when the engineers already shipped one, or the tree is non-Python).
-    _scaffold_manifest(dest)
+    stack = state.get("stack")
+    if stack is None or stack.language == "python":
+        _scaffold_manifest(dest)
     # prefer_git=False: dest is a fresh materialized tree, not a git worktree.
     return tree_sha(dest, toolchain_digest=_TOOLCHAIN_DIGEST, prefer_git=False)
 
@@ -970,6 +1030,55 @@ def _run_gate(
     """
     seq = rt.seq(config, node_id, f"verdict:{gate.name}")
     return runner.run(gate, run_against, seq, workdir)
+
+
+def gate_profile(
+    state: FactoryState, fallback: VerificationProfile | None
+) -> VerificationProfile | None:
+    """The gate commands for this run, read at gate time from the ``stack`` channel.
+
+    A ``--profile`` pin runs that profile unchanged; a planner stack in a language
+    this host has runs its own commands; a stack in an undetected language falls
+    back to the request-inferred profile; no stack keeps ``fallback`` (the
+    profile the graph was built with)."""
+    from foundry.gates.profiles import PROFILES, profile_for_request, stack_profile
+    from foundry.toolchains import available_languages
+
+    stack = state.get("stack")
+    if stack is None:
+        return fallback
+    if stack.profile:
+        return PROFILES.get(stack.profile, fallback)
+    if stack.language not in available_languages():
+        return profile_for_request(f"{state.get('request', '')}\n{state.get('spec') or ''}")
+    return stack_profile(stack)
+
+
+class UnpinnedSmokeGate:
+    """The smoke verdict for a stack with no run command: a deterministic PASS that
+    says so. Nothing executes; the verdict still comes from the runner, attested,
+    so the boundary's smoke slot is never filled by an unsigned record."""
+
+    name = "smoke"
+    verdict_class = VerdictClass.CONFIG_EVALUABLE
+    decision_deterministic = True
+    execution_deterministic = False
+
+    def __init__(self, *, seal_key: bytes | None = None) -> None:
+        self._seal_key = seal_key
+
+    def execute(self, workdir: Path) -> ZoneAObservation:
+        from foundry.gates.runner import observe
+
+        return observe(
+            self.name,
+            structured={"pinned": False},
+            findings=("smoke not pinned: the stack declares no run command",),
+            seal_key=self._seal_key,
+        )
+
+    def decide(self, obs: ZoneAObservation) -> GateStatus:
+        return GateStatus.PASS if obs.structured.get("pinned") is False else GateStatus.ERROR
 
 
 def run_spec_gate(
@@ -1016,7 +1125,7 @@ def run_build_test_gates(
     discriminator_factory: DiscriminatorFactory | None = None,
     profile: VerificationProfile | None = None,
 ) -> dict[str, Any]:
-    """Run the Build + Test (+ profile Smoke) gates at an implementation /
+    """Run the Build + Test + Smoke gates at an implementation /
     quality exit boundary.
 
     Materializes the integrated tree (code + test sources + criteria.json) into
@@ -1024,7 +1133,8 @@ def run_build_test_gates(
     its ``tree_sha`` (the same integrated digest, so both verdicts latch/bind to
     one state). ``min_passed`` is the Test gate's adequacy floor — a vacuous
     (0-test) suite is FAIL, never PASS (governance §1c). Returns
-    ``{"gates": [<attested build>, <attested test>]}``.
+    ``{"gates": [<attested build>, <attested test>, <attested smoke>]}``; the
+    commands come from :func:`gate_profile` (the stack on state, else ``profile``).
 
     ``discriminator_factory`` is the OPTIONAL malicious-test defense seam (the
     A-M4-01 fix). When provided, it produces a
@@ -1042,6 +1152,7 @@ def run_build_test_gates(
     # Profile-pinned commands (ROADMAP Phase 3): a stack-appropriate profile
     # swaps WHAT the gates execute, never the two-zone trust seam. None keeps
     # each gate's historical default — byte-identical to the pre-profile factory.
+    profile = gate_profile(state, profile)
     build_cmd = profile.build_cmd if profile is not None else None
     test_cmd = profile.test_cmd if profile is not None else None
     build = _run_gate(
@@ -1079,7 +1190,7 @@ def run_build_test_gates(
     )
     gates = [build, test]
     out: dict[str, Any] = {"gates": gates}
-    if profile is not None and test_cmd is not None and any(
+    if profile is not None and test_cmd is not None and profile.bdd_cmd is None and any(
         (workdir / FEATURE_DIR).glob("*.feature")
     ):
         # Only the pytest harness executes scenarios; say so rather than pass silently.
@@ -1094,20 +1205,26 @@ def run_build_test_gates(
             produced_by=_TEST_NODE,
             seq=rt.seq(config, _TEST_NODE, "triage:bdd"),
         )]
-    if profile is not None and profile.smoke_cmd is not None:
-        from foundry.gates.smoke import SmokeGate
+    # Every run carries a smoke verdict: the stack's own run command, else an
+    # attested "not pinned" PASS (the boundary is always build/test/smoke).
+    from foundry.gates.smoke import SmokeGate
 
-        gates.append(
-            _run_gate(
-                SmokeGate(profile.smoke_cmd, seal_key=runner.seal_key),
-                rt=rt,
-                runner=runner,
-                config=config,
-                run_against=run_against,
-                workdir=workdir,
-                node_id=_SMOKE_NODE,
-            )
+    smoke: GateImpl = (
+        SmokeGate(profile.smoke_cmd, seal_key=runner.seal_key)
+        if profile is not None and profile.smoke_cmd is not None
+        else UnpinnedSmokeGate(seal_key=runner.seal_key)
+    )
+    gates.append(
+        _run_gate(
+            smoke,
+            rt=rt,
+            runner=runner,
+            config=config,
+            run_against=run_against,
+            workdir=workdir,
+            node_id=_SMOKE_NODE,
         )
+    )
     return out
 
 
@@ -1128,6 +1245,7 @@ def run_build_gate(
     fail it. Keyed under the same node as the final Build gate, so the final
     verdict (a later epoch) supersedes every intermediate one."""
     run_against = materialize_workdir(state, workdir, resolve=resolve, resolve_blob=resolve_blob)
+    profile = gate_profile(state, profile)
     build = _run_gate(
         BuildGate(cmd=profile.build_cmd if profile is not None else None,
                   seal_key=runner.seal_key),
@@ -1148,9 +1266,8 @@ SPEC_BOUNDARY = "spec"
 BUILD_TEST_BOUNDARY = "build_test"
 # The per-wave integration check (§2b): the build verdict alone.
 BUILD_BOUNDARY = "build"
-# Profile boundary variant (ROADMAP Phase 3): when the run's verification
-# profile pins a smoke (runtime boot) command, the boundary is also responsible
-# for the "smoke" verdict — a missing/FAILed smoke can never advance.
+# The final boundary: build, test and smoke (a stack without a run command gets
+# an attested "not pinned" smoke PASS), so a missing/FAILed smoke never advances.
 BUILD_TEST_SMOKE_BOUNDARY = "build_test_smoke"
 
 _BOUNDARY_GATES: dict[str, frozenset[str]] = {

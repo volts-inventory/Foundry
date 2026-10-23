@@ -242,7 +242,8 @@ def _persona_by_task(state: FactoryState, resolve: ArtifactResolver | None) -> d
     ownership = _read_ownership(state, resolve)
     if ownership is None:
         return {}
-    return {tid: persona_for(area) for tid, area in _area_by_task_id(ownership).items()}
+    stack = state.get("stack")
+    return {tid: persona_for(area, stack) for tid, area in _area_by_task_id(ownership).items()}
 
 
 # Kind literal for AcceptanceCriterion handles (matches gate_wiring.CRITERION_KIND;

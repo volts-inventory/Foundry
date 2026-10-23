@@ -420,6 +420,12 @@ _PLAN_PAYLOAD: dict[str, Any] = {
     },
     "design": {"title": "Requested service", "body": "api -> store", "components": ["api"]},
     "adrs": [],
+    # Python without a bdd command: the gates keep the pinned pytest-bdd harness.
+    "stack": {
+        "language": "python", "framework": "", "package_manager": "pip", "install": "",
+        "build": "", "typecheck": "", "test": "pytest", "bdd": "", "run": "", "notes": "",
+        "contracts_file": "", "harness_files": [],
+    },
     "interfaces": [],
     # A small build: one epic, its tickets inline (no per-epic calls).
     "epics": [
@@ -1258,6 +1264,11 @@ def run(
             seed: FactoryState = {"request": request}
             if spec_text:
                 seed["spec"] = spec_text
+            # A named profile pins the stack the planner would otherwise choose.
+            if profile not in (None, "auto"):
+                from foundry.gates.profiles import pinned_stack
+
+                seed["stack"] = pinned_stack(profile)
             # An operator-pinned scope seeds the channel the planner would
             # otherwise write; the planner sees a decision already present and
             # keeps it. `auto` (the default) seeds nothing,

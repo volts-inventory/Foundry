@@ -17,6 +17,11 @@ or a gate (those stay verbatim + first). An unknown/empty area yields no persona
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from foundry.schemas.implementation import StackDecision
+
 # area -> expert engineer persona (role preamble). Kept concise and concrete:
 # each names the discipline and the things that area's code must get right.
 AREA_PERSONAS: dict[str, str] = {
@@ -64,6 +69,31 @@ AREA_PERSONAS: dict[str, str] = {
 }
 
 
-def persona_for(area: str | None) -> str:
-    """The expert persona for ``area`` (case-insensitive), or ``""`` if none."""
-    return AREA_PERSONAS.get((area or "").strip().lower(), "")
+def _stack_test_persona(stack: StackDecision) -> str:
+    return (
+        "You are a SENIOR TEST / QA ENGINEER. Expertise: behaviour-driven testing "
+        f"with the official Cucumber runner for {stack.language}. Write the step "
+        "definitions that make this ticket's scenarios executable under the "
+        f"project's BDD command `{stack.bdd}`: implement every Given/When/Then step "
+        "of the feature file named in the task, matching each step's text exactly, "
+        "sharing state through the runner's world/context. Drive the real code "
+        "through its public interface; assert observable behaviour, never internals; "
+        "never write a catch-all step that matches any text. NEVER edit .feature "
+        "files — they are the spec; if a step cannot pass, report it as TRIAGE "
+        "instead of weakening the assertion."
+    )
+
+
+def persona_for(area: str | None, stack: StackDecision | None = None) -> str:
+    """The expert persona for ``area`` (case-insensitive), or ``""`` if none.
+
+    With the run's ``stack``, the persona names its language, and the test persona
+    its Cucumber runner (Python without a ``bdd`` command keeps pytest-bdd)."""
+    key = (area or "").strip().lower()
+    base = AREA_PERSONAS.get(key, "")
+    if not base or stack is None:
+        return base
+    if key == "test" and stack.bdd:
+        base = _stack_test_persona(stack)
+    framework = f" with {stack.framework}" if stack.framework else ""
+    return f"{base} The project is written in {stack.language}{framework}."

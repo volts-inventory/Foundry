@@ -251,14 +251,15 @@ def test_signed_pass_path_advances(tmp_path, rt, runner, records, verifier):
     )
 
     spec = spec_out["gates"][0]
-    build, test = bt_out["gates"]
+    build, test, smoke = bt_out["gates"]
     assert spec.name == "spec" and spec.status is GateStatus.PASS
     assert build.name == "build" and build.status is GateStatus.PASS
     assert test.name == "test" and test.status is GateStatus.PASS
+    assert smoke.name == "smoke" and smoke.status is GateStatus.PASS  # not pinned
 
-    # Every verdict is runner-attested -> the REAL merge_gates admits all three.
+    # Every verdict is runner-attested -> the REAL merge_gates admits all four.
     folded = merge_gates(spec_out["gates"] + bt_out["gates"], None)
-    assert set(folded) == {spec, build, test}
+    assert set(folded) == {spec, build, test, smoke}
 
     # Fold onto state and route: all relevant gates PASS, nothing latched.
     state_with = {**state, "gates": folded}
@@ -484,7 +485,7 @@ def test_adequacy_floor_zero_tests_is_fail(tmp_path, rt, runner, records, verifi
         workdir=tmp_path / "bt",
         min_passed=1,
     )
-    build, test = bt_out["gates"]
+    build, test, smoke = bt_out["gates"]
     assert build.status is GateStatus.PASS  # it compiles
     assert test.status is GateStatus.FAIL  # vacuous suite cannot clear the floor
     assert merge_gates(bt_out["gates"], None)  # both attested + admitted

@@ -49,6 +49,12 @@ DEFAULT_TICKET_TIERS: dict[Difficulty, str] = {
 
 FEATURE_DIR = "features"
 
+# Tickets the planner emits itself, ahead of the model's tickets: the wave-0 one
+# that writes every typed contract as code (its files are gate-owned once built),
+# and the one that wires the stack's Cucumber runner.
+CONTRACTS_TICKET_ID = "contracts"
+HARNESS_TICKET_ID = "bdd-harness"
+
 # Env var the gate sets to a path it owns; the planned BDD command must write its
 # Cucumber Messages (NDJSON) report there.
 BDD_REPORT_ENV = "FOUNDRY_BDD_REPORT"

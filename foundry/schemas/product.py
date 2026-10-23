@@ -99,16 +99,21 @@ class CriteriaCritique(FrozenModel):
     security_abuse_omissions: tuple[str, ...] = ()  # omitted security/abuse cases
     judgment_provenance: JudgmentProvenance
     seq: Seq
+    # The planner's deterministic contract fit check (a consumed contract with no
+    # or several producers, a consumer not ordered after its producer, an output
+    # nothing uses): computed, not judged, and blocking like an omission.
+    contract_findings: tuple[str, ...] = ()
 
     def spec_gate_blocking(self) -> bool:
         """Omission of applicable security/abuse criteria FAILS the Spec gate
-        (agents.md Layer 1 — Criteria-Completeness Critic SOP).
+        (agents.md Layer 1 — Criteria-Completeness Critic SOP), as does a
+        contract fit finding.
 
         Blank/whitespace-only entries are ignored so this predicate matches the
         Spec gate's own re-derivation byte-for-byte (``SpecGate._critique_blocks``
         requires ``o.strip()`` truthy) — the materialize decision and the gate
         decision apply the SAME rule to a degenerate omission list."""
-        return any(o.strip() for o in self.security_abuse_omissions)
+        return any(o.strip() for o in (*self.security_abuse_omissions, *self.contract_findings))
 
 
 class SprintPlan(FrozenModel):

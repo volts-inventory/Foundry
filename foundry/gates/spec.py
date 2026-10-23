@@ -52,6 +52,8 @@ _SCENARIO_STEPS = ("given", "when", "then")
 # zone B alone turns a non-empty list into a FAIL (the critic mints no verdict).
 _CRITIQUE_KEY = "critique"
 _OMISSIONS_KEY = "security_abuse_omissions"
+# The planner's contract fit findings ride the same block and block the same way.
+_CONTRACT_KEY = "contract_findings"
 
 
 def _incomplete_steps(criterion: dict[str, Any]) -> list[str]:
@@ -184,7 +186,11 @@ class SpecGate:
                 "is mandatory (gov §1b)"
             )
         if self._critique_blocks(doc):
-            out.append("criteria-completeness critic flagged a security/abuse omission")
+            contract = self._contract_findings(doc)
+            if not contract or self._critique_blocks(doc, (_OMISSIONS_KEY,)):
+                out.append("criteria-completeness critic flagged a security/abuse omission")
+            # Verbatim: the planner's revision pass is handed these findings.
+            out += [f"contract fit: {f}" for f in contract]
         return tuple(out) if out else (f"{len(criteria)} criteria, all structurally complete",)
 
     @staticmethod
@@ -196,11 +202,23 @@ class SpecGate:
         return None
 
     @staticmethod
-    def _critique_blocks(doc: Any) -> bool:
-        """True iff the materialized critique block flags a security/abuse omission.
+    def _contract_findings(doc: Any) -> list[str]:
+        critique = doc.get(_CRITIQUE_KEY) if isinstance(doc, dict) else None
+        found = critique.get(_CONTRACT_KEY) if isinstance(critique, dict) else None
+        if not isinstance(found, list):
+            return []
+        return [f for f in found if isinstance(f, str) and f.strip()]
+
+    @staticmethod
+    def _critique_blocks(
+        doc: Any, keys: tuple[str, ...] = (_OMISSIONS_KEY, _CONTRACT_KEY)
+    ) -> bool:
+        """True iff the materialized critique block flags a security/abuse omission
+        or a contract fit finding.
 
         Mirrors ``CriteriaCritique.spec_gate_blocking()`` over the RAW findings the
-        materializer wrote: a non-empty ``security_abuse_omissions`` list blocks.
+        materializer wrote: a non-empty ``security_abuse_omissions`` or
+        ``contract_findings`` list blocks.
         The block is OPTIONAL — its absence is "no flagged omission", never a PASS
         bit an agent can assert. A malformed block (wrong types) is treated as a
         present-but-uninterpretable finding and fails closed.
@@ -212,9 +230,12 @@ class SpecGate:
             return False
         if not isinstance(critique, dict):
             return True  # present but unparseable → fail closed
-        omissions = critique.get(_OMISSIONS_KEY)
-        if omissions is None:
-            return False
-        if not isinstance(omissions, list):
-            return True  # present but unparseable → fail closed
-        return any(isinstance(o, str) and o.strip() for o in omissions)
+        for key in keys:
+            found = critique.get(key)
+            if found is None:
+                continue
+            if not isinstance(found, list):
+                return True  # present but unparseable → fail closed
+            if any(isinstance(o, str) and o.strip() for o in found):
+                return True
+        return False

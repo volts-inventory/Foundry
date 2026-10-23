@@ -64,6 +64,7 @@ from foundry.state.seq import Seq
 from tests.planner_payload import (
     EPIC_PLANNER_SOP_KEY,
     PLANNER_SOP_KEY,
+    PYTHON_STACK,
     _review,
     multi_epic_plan,
 )
@@ -110,6 +111,7 @@ PLAN: dict[str, Any] = {
             "rejected_alternatives": ["async"],
         },
     ],
+    "stack": PYTHON_STACK,
     "interfaces": [
         {"name": "TodoStore.add", "spec": "add(todo) -> id", "consumers": ["api"]},
         {"name": "TodoStore.list", "spec": "list() -> [todo]", "consumers": ["api"]},

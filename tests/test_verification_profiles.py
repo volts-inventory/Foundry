@@ -139,7 +139,7 @@ def test_profile_commands_reach_the_gates(tmp_path: Path, monkeypatch) -> None:
     assert by_name["smoke"] is GateStatus.FAIL  # pinned boot command failed
 
 
-def test_no_profile_runs_no_smoke_gate(tmp_path: Path) -> None:
+def test_no_profile_records_an_attested_unpinned_smoke_pass(tmp_path: Path) -> None:
     from foundry.gates import TwoZoneGateRunner, ZoneBSigner
     from foundry.agents._runtime import AgentRuntime
     from foundry.graph.gate_wiring import run_build_test_gates
@@ -162,4 +162,6 @@ def test_no_profile_runs_no_smoke_gate(tmp_path: Path) -> None:
         resolve_blob=lambda u: b"",
         workdir=tmp_path,
     )
-    assert {g.name for g in out["gates"]} == {"build", "test"}
+    smoke = {g.name: g for g in out["gates"]}["smoke"]
+    assert smoke.status is GateStatus.PASS and smoke.runner_attestation
+    assert any("not pinned" in f for f in smoke.findings)

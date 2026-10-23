@@ -66,7 +66,19 @@ from foundry.schemas.architecture import (
 )
 from foundry.schemas.gates import GateStatus, GateTriage, JudgmentProvenance
 from foundry.schemas.governance import ScopeDecision, ScopeTier
-from foundry.schemas.implementation import Difficulty, Epic, Specialty, Ticket, scenario_ref
+from foundry.schemas.implementation import (
+    BDD_REPORT_ENV,
+    CONTRACTS_TICKET_ID,
+    FEATURE_DIR,
+    HARNESS_TICKET_ID,
+    Difficulty,
+    Epic,
+    Specialty,
+    StackDecision,
+    Ticket,
+    Toolchain,
+    scenario_ref,
+)
 from foundry.schemas.product import (
     PRD,
     AcceptanceCriterion,
@@ -144,7 +156,11 @@ _TICKET_RULES = (
     "model), and depends_on the ticket ids that must land first; depends_on MUST "
     "form a DAG. Name the interface contracts each ticket implements[] and "
     "consumes[] by their interfaces[].name, so tickets built in parallel code "
-    "against the same signatures. Every feature ticket gets a paired "
+    "against the same signatures, and list in reads[] the files it reads. CONTRACT "
+    "FIT (checked; a violation FAILS the Spec gate): every contract a ticket "
+    "consumes is implemented by exactly ONE ticket, which the consumer depends_on "
+    "(directly or through other tickets); every implemented contract has a consumer "
+    "or a scenario on its implementing ticket. Every feature ticket gets a paired "
     "specialty='test' ticket that depends_on it and writes the step definitions for "
     "that feature's scenarios; the test ticket carries no scenarios of its own. "
     "Where a scope cap speaks of ownership units, it means the files across your "
@@ -194,9 +210,28 @@ SOP = (
     "SPRINT PLAN: ordered milestones; usd_cap_microusd as an integer number of "
     "micro-USD (never a float); a short risk register; done-for-this-iteration.\n"
     "ARCHITECTURE: choose the component decomposition; write ADRs WITH rejected "
-    "alternatives; define interface/API contracts FIRST (tickets reference them); "
-    "emit cross-cutting concerns as pinned constraints, which are injected verbatim "
+    "alternatives; define interface/API contracts FIRST (tickets reference them): "
+    "every seam between tickets is a contract with a name, a kind (function | class "
+    "| type for code seams; http | cli | event for the rest), its signature written "
+    "in the chosen language, its inputs, outputs and errors, and a description. "
+    "Emit cross-cutting concerns as pinned constraints, which are injected verbatim "
     "into every build task.\n"
+    "STACK: choose the stack yourself from the request: stack.language MUST be one "
+    "of the LANGUAGES AVAILABLE HERE; pick the framework and package manager. Give "
+    "the shell commands the gates run from the repo root: install (fetches "
+    "dependencies; the only step with network), build, typecheck (the language's "
+    "own type checker over the whole project, e.g. `npx tsc --noEmit`, `go vet "
+    "./...`, `python3 -m mypy .`; it proves every ticket matches the contracts), "
+    "test, bdd (runs every features/*.feature scenario with the language's OFFICIAL "
+    "Cucumber runner and writes Cucumber Messages NDJSON to the file named by $"
+    + BDD_REPORT_ENV + "; Python may leave bdd empty to use the built-in pytest-bdd "
+    "harness) and run (optional: boots the real app headless, exits 0 on success). "
+    "contracts_file is the source file the code-kind contracts are written to (e.g. "
+    "src/contracts.ts, contracts.py); harness_files are the package manifest and "
+    "build/runner config (e.g. package.json, tsconfig.json, cucumber.json). Two "
+    f"tickets are added for you: '{CONTRACTS_TICKET_ID}' writes contracts_file first "
+    f"and '{HARNESS_TICKET_ID}' wires the Cucumber runner into harness_files; every "
+    "ticket you write depends on them, and none may list contracts_file in files.\n"
     "When a DESIGN SPEC is provided, it is the detailed source of truth: derive the "
     "plan FROM it rather than from the one-line request alone."
 )
@@ -213,6 +248,30 @@ EPIC_SOP = (
 )
 
 _STR_ARRAY: dict[str, Any] = {"type": "array", "items": {"type": "string"}}
+
+# Contract kinds; the code kinds are written as real code by the contracts ticket.
+CODE_CONTRACT_KINDS = ("function", "class", "type")
+CONTRACT_KINDS = (*CODE_CONTRACT_KINDS, "http", "cli", "event")
+_GENERATED_TICKETS = frozenset({CONTRACTS_TICKET_ID, HARNESS_TICKET_ID})
+
+# Where the contracts ticket writes, and what the harness ticket writes, when the
+# plan leaves it out.
+_DEFAULT_CONTRACTS_FILE: dict[str, str] = {
+    "python": "contracts.py",
+    "typescript": "src/contracts.ts",
+    "javascript": "src/contracts.js",
+    "go": "contracts/contracts.go",
+    "rust": "src/contracts.rs",
+    "java": "src/main/java/contracts/Contracts.java",
+}
+_DEFAULT_HARNESS_FILES: dict[str, tuple[str, ...]] = {
+    "python": ("pyproject.toml",),
+    "typescript": ("package.json", "tsconfig.json", "cucumber.json"),
+    "javascript": ("package.json", "cucumber.json"),
+    "go": ("go.mod",),
+    "rust": ("Cargo.toml",),
+    "java": ("pom.xml",),
+}
 
 _SCENARIO_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -239,12 +298,52 @@ _TICKET_SCHEMA: dict[str, Any] = {
         "difficulty": {"type": "string", "enum": [m.value for m in Difficulty]},
         "depends_on": _STR_ARRAY,
         "files": _STR_ARRAY,
+        "reads": _STR_ARRAY,
         "implements": _STR_ARRAY,
         "consumes": _STR_ARRAY,
         "scenarios": {"type": "array", "items": _SCENARIO_SCHEMA},
     },
     "required": [
         "id", "title", "specialty", "difficulty", "depends_on", "files", "scenarios",
+    ],
+    "additionalProperties": False,
+}
+
+_INTERFACE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string"},
+        "kind": {"type": "string", "enum": list(CONTRACT_KINDS)},
+        "signature": {"type": "string"},
+        "inputs": _STR_ARRAY,
+        "outputs": _STR_ARRAY,
+        "errors": _STR_ARRAY,
+        "description": {"type": "string"},
+        "consumers": _STR_ARRAY,
+    },
+    "required": ["name", "kind", "signature", "inputs", "outputs", "errors", "description"],
+    "additionalProperties": False,
+}
+
+_STACK_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "language": {"type": "string"},
+        "framework": {"type": "string"},
+        "package_manager": {"type": "string"},
+        "install": {"type": "string"},
+        "build": {"type": "string"},
+        "typecheck": {"type": "string"},
+        "test": {"type": "string"},
+        "bdd": {"type": "string"},
+        "run": {"type": "string"},
+        "notes": {"type": "string"},
+        "contracts_file": {"type": "string"},
+        "harness_files": _STR_ARRAY,
+    },
+    "required": [
+        "language", "framework", "package_manager", "install", "build", "typecheck",
+        "test", "bdd", "run", "contracts_file", "harness_files",
     ],
     "additionalProperties": False,
 }
@@ -347,19 +446,8 @@ PLAN_SCHEMA: dict[str, Any] = {
                 "additionalProperties": False,
             },
         },
-        "interfaces": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                    "spec": {"type": "string"},
-                    "consumers": _STR_ARRAY,
-                },
-                "required": ["name", "spec"],
-                "additionalProperties": False,
-            },
-        },
+        "stack": _STACK_SCHEMA,
+        "interfaces": {"type": "array", "items": _INTERFACE_SCHEMA},
         "tickets": {"type": "array", "items": _TICKET_SCHEMA},
         "epics": {"type": "array", "items": _EPIC_ITEM_SCHEMA},
         "pinned_constraints": {
@@ -384,12 +472,20 @@ PLAN_SCHEMA: dict[str, Any] = {
         "sprint_plan",
         "design",
         "adrs",
+        "stack",
         "interfaces",
         "tickets",
         "epics",
     ],
     "additionalProperties": False,
 }
+
+
+def _plan_schema(languages: Iterable[str]) -> dict[str, Any]:
+    """:data:`PLAN_SCHEMA` with ``stack.language`` limited to ``languages``."""
+    language = {"type": "string", "enum": sorted(set(languages))}
+    stack = {**_STACK_SCHEMA, "properties": {**_STACK_SCHEMA["properties"], "language": language}}
+    return {**PLAN_SCHEMA, "properties": {**PLAN_SCHEMA["properties"], "stack": stack}}
 
 EPIC_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -535,8 +631,32 @@ def _self_revision_text(gaps: tuple[str, ...], what: str = "plan") -> str:
     )
 
 
+def _stack_text(state: FactoryState, toolchains: Sequence[Toolchain]) -> str:
+    pinned = state.get("stack")
+    if pinned is not None:
+        fixed = {k: v for k, v in pinned.model_dump(mode="json").items() if v and k != "notes"}
+        return (
+            "\n\nSTACK IS FIXED (pinned by the operator): " + as_text(fixed)
+            + f"\nEcho language={pinned.language!r} in stack.language."
+            + (f"\nGates: {pinned.notes}" if pinned.notes else "")
+        )
+    from foundry.gates.profiles import profile_examples
+
+    langs = "\n".join(
+        f"- {t.language} ({', '.join(t.binaries)}" + (f"; {t.version}" if t.version else "") + ")"
+        for t in toolchains
+    )
+    return (
+        "\n\nLANGUAGES AVAILABLE HERE (stack.language must be one of these):\n"
+        f"{langs or '- python'}\n\n"
+        "EXAMPLE GATE COMMANDS (hand-written profiles, for reference only; choose "
+        f"your own commands):\n{profile_examples()}"
+    )
+
+
 def _user_content(
-    state: FactoryState, rt: AgentRuntime, spans: tuple[Span, ...]
+    state: FactoryState, rt: AgentRuntime, spans: tuple[Span, ...],
+    toolchains: Sequence[Toolchain] = (),
 ) -> str:
     retrieved = [
         {"file": s.file, "lines": [s.line, s.end_line], "symbol": s.symbol} for s in spans
@@ -545,7 +665,10 @@ def _user_content(
     if retrieved:
         body += "\n\nRETRIEVED CODE SPANS (existing code):\n" + as_text(retrieved)
     revision = _revision_text(state, rt)
-    return body + _scope_text(state, revising=bool(revision)) + revision
+    return (
+        body + _stack_text(state, toolchains) + _scope_text(state, revising=bool(revision))
+        + revision
+    )
 
 
 # ---- record builders -----------------------------------------------------------
@@ -665,9 +788,13 @@ def _safe_ticket_ids(ids: list[str]) -> dict[str, str]:
     other characters become ``-``; a collision gets the first free ``-<n>`` suffix,
     in plan order, so the mapping is deterministic."""
     out: dict[str, str] = {}
-    taken = {tid for tid in ids if _SAFE_TICKET_ID.fullmatch(tid) and tid not in (".", "..")}
+    safe = {
+        tid for tid in ids
+        if _SAFE_TICKET_ID.fullmatch(tid) and tid not in (".", "..", *_GENERATED_TICKETS)
+    }
+    taken = safe | _GENERATED_TICKETS
     for tid in ids:
-        if tid in taken:
+        if tid in safe:
             out[tid] = tid
             continue
         base = re.sub(r"[^A-Za-z0-9._-]", "-", tid).strip(".") or "T"
@@ -839,8 +966,14 @@ def _plan_brief(payload: dict[str, Any]) -> str:
     """What every epic call needs of call 1's plan besides the epics and contracts."""
     prd, design = _section(payload, "prd"), _section(payload, "design")
     constraints = [f"- {_str(c.get('text'))}" for c in _objs(payload.get("pinned_constraints"))]
+    stack = _section(payload, "stack")
     return (
         "PLAN (from the lead planner):\n"
+        f"Stack: {_str(stack.get('language')) or '(unset)'}"
+        + (f" / {_str(stack.get('framework'))}" if stack.get("framework") else "")
+        + (f"; contracts file (written for you, never list it in files): "
+           f"{_str(stack.get('contracts_file'))}" if stack.get("contracts_file") else "")
+        + "\n"
         f"Product: {_str(prd.get('title'))}\n{_str(prd.get('body'))[:_BRIEF_CAP]}\n"
         f"Architecture: {_str(design.get('title'))}\n"
         f"{_str(design.get('body'))[:_BRIEF_CAP]}\n"
@@ -998,6 +1131,7 @@ def _build_tickets(
                 difficulty=_enum(Difficulty, item.get("difficulty"), Difficulty.STANDARD),
                 depends_on=tuple(deps[tid]),
                 files=_uniq(_strs(item.get("files"))),
+                reads=_uniq(_strs(item.get("reads"))),
                 scenario_ids=scenario_ids,
                 implements=contracts["implements"],
                 consumes=contracts["consumes"],
@@ -1028,20 +1162,239 @@ def _build_adrs(raw: Any, seq: Seq, *, store: ArtifactStore | None) -> list[ADR]
     ]
 
 
+def _contract_kind(item: dict[str, Any]) -> str:
+    kind = _str(item.get("kind")).strip().lower()
+    return kind if kind in CONTRACT_KINDS else ""
+
+
+def _contract_text(item: dict[str, Any]) -> str:
+    """A contract's body: kind + signature, description, inputs/outputs/errors.
+    A contract given only as free-text ``spec`` keeps that text unchanged."""
+    signature = _str(item.get("signature")).strip()
+    kind = _contract_kind(item)
+    lines = [f"[{kind}] {signature}" if kind else signature] if signature else []
+    description = _str(item.get("description")).strip() or _str(item.get("spec"))
+    if description:
+        lines.append(description)
+    for key in ("inputs", "outputs", "errors"):
+        if values := _steps(item.get(key)):
+            lines.append(f"{key}: " + "; ".join(values))
+    return "\n".join(lines)
+
+
 def _build_interfaces(
     raw: Any, seq: Seq, *, store: ArtifactStore | None = None
 ) -> list[InterfaceContract]:
     return [
         InterfaceContract(
             name=_str(item.get("name"), f"iface-{i}"),
-            # Same handle as cas_uri(spec); persisted so a targeted re-plan can
+            # Same handle as cas_uri(body); persisted so a targeted re-plan can
             # hand the contract text to the epics it re-runs.
-            spec_uri=persist_prose(_str(item.get("spec")), store=store),
+            spec_uri=persist_prose(_contract_text(item), store=store),
+            kind=_contract_kind(item),
+            signature=_str(item.get("signature")).strip(),
             consumers=_strs(item.get("consumers")),
             seq=seq._replace(local=i),
         )
         for i, item in enumerate(_objs(raw))
     ]
+
+
+# ---- stack, generated tickets, contract fit ----------------------------------
+
+
+def _stack_decision(
+    payload: dict[str, Any], languages: Iterable[str]
+) -> tuple[StackDecision | None, list[str]]:
+    """The plan's stack, or None (the gates then infer a profile from the request)
+    when it names no language or one this host lacks."""
+    raw = _section(payload, "stack")
+    language = _str(raw.get("language")).strip().lower()
+    available = sorted(set(languages))
+    if language not in available:
+        return None, [
+            f"Stack language {language or '(none)'!r} is not available here "
+            f"({', '.join(available)}); the gates infer a profile from the request."
+        ]
+    stack = StackDecision(
+        language=language,
+        **{k: _str(raw.get(k)).strip() for k in (
+            "framework", "package_manager", "install", "build", "typecheck", "test",
+            "bdd", "run", "notes",
+        )},
+    )
+    concerns: list[str] = []
+    if language != "python" and not stack.bdd:
+        concerns.append(
+            f"The {language} stack has no bdd command: its scenarios are not executed."
+        )
+    if language != "python" and not stack.test:
+        concerns.append(f"The {language} stack has no test command.")
+    return stack, concerns
+
+
+def _plan_paths(raw: Any, what: str, concerns: list[str]) -> tuple[str, ...]:
+    """Repo-relative file paths from the plan; gate inputs, directories, absolute
+    paths and ``..`` are dropped with a concern."""
+    kept: list[str] = []
+    for path in _uniq(_strs(raw)):
+        parts = path.split("/")
+        if (path.startswith("/") or path.endswith("/") or ".." in parts
+                or path == "criteria.json" or parts[0] == FEATURE_DIR):
+            concerns.append(f"Dropped {what} path {path!r}: not a project file.")
+        else:
+            kept.append(path)
+    return tuple(kept)
+
+
+def _generated_tickets(
+    interfaces: Sequence[InterfaceContract],
+    raw_stack: dict[str, Any],
+    stack: StackDecision | None,
+    seq: Seq,
+) -> tuple[list[Ticket], list[str]]:
+    """The planner's own tickets: ``contracts`` writes every code-kind contract as
+    real code when there are any; ``bdd-harness`` wires the stack's Cucumber runner
+    when it has a ``bdd`` command. Both have no dependencies (wave 0), so the first
+    BUILD check already has the manifest, the config and the contracts to compile."""
+    concerns: list[str] = []
+    language = stack.language if stack else _str(raw_stack.get("language")).strip().lower()
+    out: list[Ticket] = []
+    code = [i for i in interfaces if i.kind in CODE_CONTRACT_KINDS]
+    owned: tuple[str, ...] = ()
+    if code:
+        owned = _plan_paths(raw_stack.get("contracts_file"), "contracts", concerns)
+        if not owned and language in _DEFAULT_CONTRACTS_FILE:
+            owned = (_DEFAULT_CONTRACTS_FILE[language],)
+        if not owned:
+            concerns.append(
+                f"{len(code)} code contract(s) but no contracts file for language "
+                f"{language or '(none)'!r}: they are not written as code."
+            )
+        else:
+            out.append(Ticket(
+                id=CONTRACTS_TICKET_ID,
+                title="Define contracts",
+                description=(
+                    f"Write every interface contract this ticket implements as real "
+                    f"{language or 'project-language'} code in {', '.join(owned)}: the "
+                    "exact signatures, types, classes and interfaces (TypeScript "
+                    "interfaces/types, Python Protocols and dataclasses, Go interfaces, "
+                    "...) with no behaviour beyond what the language needs to compile. "
+                    "Every other ticket imports these definitions and none may change "
+                    "them, so match each contract exactly."
+                ),
+                specialty=Specialty.BACKEND,
+                difficulty=Difficulty.TRIVIAL,
+                files=owned,
+                implements=tuple(i.name for i in code),
+                seq=seq,
+            ))
+    if stack is not None and stack.bdd:
+        files = _plan_paths(raw_stack.get("harness_files"), "harness", concerns) or (
+            _DEFAULT_HARNESS_FILES.get(language, ())
+        )
+        commands = "; ".join(
+            f"{k} `{v}`" for k, v in (
+                ("install", stack.install), ("build", stack.build),
+                ("typecheck", stack.typecheck), ("test", stack.test),
+            ) if v
+        )
+        out.append(Ticket(
+            id=HARNESS_TICKET_ID,
+            title="Wire the BDD runner",
+            description=(
+                f"Add the official Cucumber runner for {language} as a dev dependency "
+                "in the package manifest and write its config so the BDD command "
+                f"`{stack.bdd}` runs every {FEATURE_DIR}/*.feature file and writes "
+                f"Cucumber Messages (NDJSON) to the file named by ${BDD_REPORT_ENV}. "
+                "Set up the project skeleton so these commands work"
+                + (f": {commands}." if commands else ".")
+                + " Write no step definitions: the test tickets do."
+            ),
+            specialty=Specialty.TEST,
+            difficulty=Difficulty.STANDARD,
+            files=tuple(f for f in files if f not in owned),
+            seq=seq,
+        ))
+    return out, concerns
+
+
+def _attach_generated(
+    tickets: Sequence[Ticket], generated: Sequence[Ticket], seq: Seq
+) -> tuple[list[Ticket], list[str]]:
+    """Put the generated tickets first, make every other ticket depend on them, and
+    take the contract files out of every other ticket's write scope (they are
+    gate-owned once the contracts ticket is built)."""
+    concerns: list[str] = []
+    gen_ids = tuple(t.id for t in generated)
+    owned = {f for t in generated if t.id == CONTRACTS_TICKET_ID for f in t.files}
+    ordered = list(generated)
+    for t in tickets:
+        files = tuple(f for f in t.files if f not in owned)
+        if files != t.files:
+            concerns.append(
+                f"Ticket {t.id}: dropped the gate-owned contract file(s) "
+                f"{', '.join(sorted(set(t.files) - set(files)))} from its files."
+            )
+        ordered.append(t.model_copy(update={
+            "files": files, "depends_on": _uniq((*gen_ids, *t.depends_on)),
+        }))
+    return [
+        t.model_copy(update={"seq": seq._replace(local=i)}) for i, t in enumerate(ordered)
+    ], concerns
+
+
+def _contract_findings(
+    tickets: Sequence[Ticket], criteria: Sequence[AcceptanceCriterion]
+) -> tuple[str, ...]:
+    """The plan-time contract fit check over the model's tickets: every consumed
+    contract has exactly one implementing ticket and the consumer depends on it;
+    every implemented contract has a consumer or a scenario on its implementer."""
+    work = [t for t in tickets if t.id not in _GENERATED_TICKETS]
+    deps = {t.id: t.depends_on for t in tickets}
+    producers: dict[str, list[str]] = {}
+    for t in work:
+        for name in t.implements:
+            producers.setdefault(name, []).append(t.id)
+
+    def ancestors(tid: str) -> set[str]:
+        seen: set[str] = set()
+        todo = list(deps.get(tid, ()))
+        while todo:
+            d = todo.pop()
+            if d not in seen:
+                seen.add(d)
+                todo.extend(deps.get(d, ()))
+        return seen
+
+    out = [
+        f"Contract {name} is implemented by {len(ids)} tickets ({', '.join(ids)}); "
+        "exactly one ticket may implement it."
+        for name, ids in producers.items() if len(ids) > 1
+    ]
+    consumed: set[str] = set()
+    for t in work:
+        for name in t.consumes:
+            if name in t.implements:
+                continue
+            consumed.add(name)
+            ids = producers.get(name, [])
+            if not ids:
+                out.append(f"Ticket {t.id} consumes contract {name}, but no ticket implements it.")
+            elif len(ids) == 1 and ids[0] not in ancestors(t.id):
+                out.append(
+                    f"Ticket {t.id} consumes contract {name} but does not depend on "
+                    f"{ids[0]}, which implements it."
+                )
+    with_scenarios = {c.ticket_id for c in criteria}
+    out += [
+        f"Contract {name} (implemented by {', '.join(ids)}) has no consumer and no "
+        "scenario on its implementing ticket."
+        for name, ids in producers.items()
+        if name not in consumed and not with_scenarios.intersection(ids)
+    ]
+    return tuple(out)
 
 
 def _build_constraints(raw: Any, seq: Seq) -> list[PinnedConstraint]:
@@ -1142,7 +1495,8 @@ class _PriorPlan:
 
     epics: tuple[_Epic, ...]
     epic_of: dict[str, str]  # live ticket id -> epic id
-    tickets: tuple[Ticket, ...]  # live, Seq order
+    tickets: tuple[Ticket, ...]  # live, Seq order (the planner's own tickets aside)
+    generated: tuple[Ticket, ...]  # the planner's own tickets, carried as they were
     criteria: dict[str, AcceptanceCriterion]  # newest per id, live tickets only
     prd: PRD
     critique: CriteriaCritique | None
@@ -1203,11 +1557,12 @@ def _epics_from_tickets(live: Sequence[Ticket], epic_of: dict[str, str]) -> list
 def _prior_plan(state: FactoryState, rt: AgentRuntime) -> _PriorPlan | None:
     """None unless every live planner ticket carries the prefix of a known epic
     (an inline plan has no epics to target) and the PRD resolves."""
-    live = sorted(
+    every = sorted(
         (t for t in _newest_by_id(state, rt, TICKET_KIND, Ticket).values()
          if t.supersedes != t.id),
         key=lambda t: t.seq,
     )
+    live = [t for t in every if t.id not in _GENERATED_TICKETS]
     prds = list(_newest_by_id(state, rt, "prd", PRD).values())
     if not live or not prds:
         return None
@@ -1243,7 +1598,8 @@ def _prior_plan(state: FactoryState, rt: AgentRuntime) -> _PriorPlan | None:
            f"Components: {', '.join(design.components) or '(none)'}" if design else "")
     )
     return _PriorPlan(
-        epics=tuple(epics), epic_of=epic_of, tickets=tuple(live), criteria=criteria,
+        epics=tuple(epics), epic_of=epic_of, tickets=tuple(live),
+        generated=tuple(t for t in every if t.id in _GENERATED_TICKETS), criteria=criteria,
         prd=prd, critique=max(critiques, key=lambda c: c.seq) if critiques else None,
         interfaces=interfaces, brief=brief,
     )
@@ -1277,8 +1633,8 @@ def _prior_items(prior: _PriorPlan, epic_id: str) -> list[dict[str, Any]]:
             "id": t.id, "title": t.title, "description": t.description,
             "specialty": t.specialty.value, "difficulty": t.difficulty.value,
             "depends_on": [d for d in t.depends_on if prior.epic_of.get(d) == epic_id],
-            "files": list(t.files), "implements": list(t.implements),
-            "consumes": list(t.consumes),
+            "files": list(t.files), "reads": list(t.reads),
+            "implements": list(t.implements), "consumes": list(t.consumes),
             "scenarios": [
                 {"id": c.id, "text": c.text, "given": list(c.given), "when": list(c.when),
                  "then": list(c.then), "criticality": c.criticality.value,
@@ -1410,7 +1766,15 @@ def _scope_decision(
 def _triage(critique: CriteriaCritique, prd_uri: str, seq: Seq) -> GateTriage:
     """The advisory the Spec gate's operators read; the gate re-derives the FAIL
     from the materialized omissions itself (L5)."""
-    if critique.spec_gate_blocking():
+    if critique.contract_findings:
+        explanation = (
+            "BLOCKING: the contract fit check failed — "
+            f"{'; '.join(critique.contract_findings)}"
+            + (f" Security/abuse omissions: {'; '.join(critique.security_abuse_omissions)}."
+               if critique.security_abuse_omissions else "")
+            + " Either fails the Spec gate."
+        )
+    elif critique.spec_gate_blocking():
         explanation = (
             "BLOCKING: applicable security/abuse acceptance criteria are omitted — "
             f"{'; '.join(critique.security_abuse_omissions)}. "
@@ -1432,14 +1796,19 @@ def _triage(critique: CriteriaCritique, prd_uri: str, seq: Seq) -> GateTriage:
 # ---- the node ------------------------------------------------------------------
 
 
-def make_planner_node(rt: AgentRuntime, index: SymbolIndex | None = None) -> NodeFn:
+def make_planner_node(
+    rt: AgentRuntime,
+    index: SymbolIndex | None = None,
+    toolchains: Sequence[Toolchain] | None = None,
+) -> NodeFn:
     """Build the Planner node (T1). Call 1 writes the plan and its epics; a small
     plan carries its tickets inline (one call), a larger one gets one ticket call
     per epic, run in parallel. Each call self-revises at most once when its own
     criteria review flags gaps.
 
     ``index`` is the context retriever probed for existing code spans (``None``
-    is greenfield — empty retrieval)."""
+    is greenfield — empty retrieval). ``toolchains`` are the languages offered
+    for the stack (``None`` probes this host once)."""
 
     def _call(sop: str, schema: dict[str, Any], content: str) -> dict[str, Any]:
         completion = rt.proxy.complete(
@@ -1489,13 +1858,22 @@ def make_planner_node(rt: AgentRuntime, index: SymbolIndex | None = None) -> Nod
         if findings and prior and targets:
             return _replan_epics(state, config, prior, targets, findings)
         spans = _retrieve_spans(index, state)
-        content = _user_content(state, rt, spans)
-        payload = _call(SOP, PLAN_SCHEMA, content)
+        if toolchains is None:
+            from foundry.toolchains import available_toolchains
+
+            tools: tuple[Toolchain, ...] = available_toolchains()
+        else:
+            tools = tuple(toolchains)
+        languages = {t.language for t in tools}
+        pinned = state.get("stack")
+        schema = _plan_schema(languages | ({pinned.language} if pinned else set()))
+        content = _user_content(state, rt, spans, tools)
+        payload = _call(SOP, schema, content)
         # One free in-node revision when the self-review flags gaps, so they don't
         # spend the shared Spec-gate fix budget; never more than one.
         gaps = _self_review_gaps(payload)
         if gaps:
-            payload = _call(SOP, PLAN_SCHEMA, content + _self_revision_text(gaps))
+            payload = _call(SOP, schema, content + _self_revision_text(gaps))
         store = rt.cas
 
         def seq(key: str) -> Seq:
@@ -1536,7 +1914,7 @@ def make_planner_node(rt: AgentRuntime, index: SymbolIndex | None = None) -> Nod
             intake = _intake_text(state)
             plan_brief = _plan_brief(payload)
             iface_text = _interfaces_text(
-                (_str(i.get("name")), _str(i.get("spec")))
+                (_str(i.get("name")), _contract_text(i))
                 for i in _objs(payload.get("interfaces"))
             )
             continues = _match_prior_epics(epics, prior) if prior else {}
@@ -1559,6 +1937,16 @@ def make_planner_node(rt: AgentRuntime, index: SymbolIndex | None = None) -> Nod
             tickets, criteria, ticket_concerns = _build_tickets(
                 payload.get("tickets"), tickets_seq, criteria_seq, names
             )
+        # stack is single-writer: an operator pin or an earlier pass wins.
+        decided, stack_concerns = (
+            _stack_decision(payload, languages) if pinned is None else (None, [])
+        )
+        generated, more_concerns = _generated_tickets(
+            interfaces, _section(payload, "stack"), pinned or decided, tickets_seq
+        )
+        tickets, attach_concerns = _attach_generated(tickets, generated, tickets_seq)
+        ticket_concerns += [*stack_concerns, *more_concerns, *attach_concerns]
+        contract_findings = _contract_findings(tickets, criteria)
         # Only a Spec-gate re-plan replaces an earlier plan of this run.
         dropped = (
             _retired_tickets(state, rt, tickets, tickets_seq)
@@ -1583,6 +1971,7 @@ def make_planner_node(rt: AgentRuntime, index: SymbolIndex | None = None) -> Nod
             # The plan reviews its own criteria: same call, same lineage — say so.
             judgment_provenance=JudgmentProvenance.SELF,
             seq=critique_seq,
+            contract_findings=contract_findings,
         )
 
         sprint = _section(payload, "sprint_plan")
@@ -1652,6 +2041,8 @@ def make_planner_node(rt: AgentRuntime, index: SymbolIndex | None = None) -> Nod
             "required_capabilities": list(prd.required_capabilities),
             "gate_triage": [_triage(critique, prd.prd_uri, seq("gate_triage:spec"))],
         }
+        if decided is not None:
+            out["stack"] = decided
         # scope_tier is single-writer: an operator pin or an earlier pass wins.
         scope = state.get("scope_tier")
         if scope is None:
@@ -1668,8 +2059,11 @@ def make_planner_node(rt: AgentRuntime, index: SymbolIndex | None = None) -> Nod
             concerns.append("Empty ownership map — no build tasks will be created.")
         if scope.tier is ScopeTier.DEMO:
             concerns.append("Demo scope caps the build.")
-        if critique.spec_gate_blocking():
+        if any(o.strip() for o in critique.security_abuse_omissions):
             concerns.append("Self-review left security/abuse omissions open.")
+        if contract_findings:
+            concerns.append(f"Contract fit check: {len(contract_findings)} finding(s).")
+        stack = pinned or decided
         epic_note = (
             f" Tickets planned per epic in {len(epics)} parallel call(s)"
             f" ({', '.join(e.id for e in epics)})."
@@ -1688,6 +2082,9 @@ def make_planner_node(rt: AgentRuntime, index: SymbolIndex | None = None) -> Nod
                     f"{len(tickets)} tickets, "
                     f"{len(ownership.owners)} ownership units, {len(constraints)} "
                     "pinned constraints."
+                    + (f" Stack: {stack.language}"
+                       + (f" ({stack.profile} profile)." if stack.profile else ".")
+                       if stack else "")
                     + epic_note
                     + (" Revised after a Spec-gate failure." if findings else "")
                     + (" Self-revised once after its own criteria review." if gaps else "")
@@ -1745,6 +2142,8 @@ def make_planner_node(rt: AgentRuntime, index: SymbolIndex | None = None) -> Nod
             raw, tickets_seq, seq("artifact:acceptance_criteria"),
             {name for name, _ in prior.interfaces}, cap=MAX_PLAN_TICKETS, epics=prior.epics,
         )
+        tickets, attach_concerns = _attach_generated(tickets, prior.generated, tickets_seq)
+        ticket_concerns += attach_concerns
         dropped = _retired_tickets(state, rt, tickets, tickets_seq)
         prd_seq = seq("artifact:prd")
         prd = prior.prd.model_copy(
@@ -1764,6 +2163,7 @@ def make_planner_node(rt: AgentRuntime, index: SymbolIndex | None = None) -> Nod
             ),
             judgment_provenance=JudgmentProvenance.SELF,
             seq=critique_seq,
+            contract_findings=_contract_findings(tickets, criteria),
         )
         ownership_seq = seq("artifact:ownership_map")
         ownership = _ownership_from_tickets(tickets, ownership_seq)

@@ -24,10 +24,21 @@ production swaps the command set (Playwright + pinned Chromium), not the seam.
 
 from __future__ import annotations
 
+import shlex
 import sys
 from dataclasses import dataclass, field
 
-__all__ = ["PROFILES", "VerificationProfile", "installed_profiles", "profile_for_request"]
+from foundry.schemas.implementation import StackDecision
+
+__all__ = [
+    "PROFILES",
+    "VerificationProfile",
+    "installed_profiles",
+    "pinned_stack",
+    "profile_examples",
+    "profile_for_request",
+    "stack_profile",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +51,10 @@ class VerificationProfile:
     smoke_cmd: tuple[str, ...] | None = None  # runtime boot gate; None = no smoke gate
     contract_text: str = ""  # advisory: what the gates will run (prompt-side)
     notes: tuple[str, ...] = field(default=())
+    # A planner-chosen stack's dependency install (already folded into build_cmd)
+    # and its Cucumber runner command.
+    install_cmd: tuple[str, ...] | None = None
+    bdd_cmd: tuple[str, ...] | None = None
 
 
 def _sh(script: str) -> tuple[str, ...]:
@@ -296,3 +311,70 @@ def profile_for_request(request: str) -> VerificationProfile:
     if any(w in low for w in _NODE_WORDS):
         return PROFILES["node-web"]
     return PROFILES["python"]
+
+
+# The language each hand-written profile builds, for a --profile pin.
+_PROFILE_LANGUAGE: dict[str, str] = {
+    "python": "python", "python-app": "python", "pygame": "python", "crypto": "python",
+    "node-web": "javascript", "phaser-web": "javascript", "love2d": "lua", "go": "go",
+    "rust": "rust", "dotnet": "csharp", "java-maven": "java", "iac-terraform": "terraform",
+}
+
+
+def _script(cmd: tuple[str, ...] | None) -> str:
+    if cmd is None:
+        return ""
+    if len(cmd) == 3 and cmd[:2] == ("/bin/sh", "-c"):
+        return cmd[2]
+    return shlex.join(cmd)
+
+
+def pinned_stack(name: str) -> StackDecision:
+    """The stack an operator pins with ``--profile NAME``: the gates run that
+    profile unchanged (``profile`` names it); the commands are for the prompts."""
+    p = PROFILES[name]
+    return StackDecision(
+        language=_PROFILE_LANGUAGE.get(name, name),
+        build=_script(p.build_cmd),
+        test=_script(p.test_cmd),
+        run=_script(p.smoke_cmd),
+        profile=name,
+        notes=p.contract_text,
+    )
+
+
+def stack_profile(stack: StackDecision) -> VerificationProfile:
+    """The gate commands for a planner-chosen stack.
+
+    BUILD runs install, build and typecheck as one command, so a ticket that breaks
+    an agreed contract fails the build with the type checker's own message. Python
+    keeps the trusted pinned pytest(-bdd) harness for TEST and never installs into
+    the host interpreter the gates run on; an empty Python build is compileall."""
+    python = stack.language == "python"
+    build = stack.build or (
+        f"{shlex.quote(sys.executable)} -m compileall -q ." if python and stack.typecheck else ""
+    )
+    steps = [s for s in ("" if python else stack.install, build, stack.typecheck) if s]
+    build_cmd = _sh(" && ".join(steps)) if steps else None
+    test_cmd = None if python or not stack.test else _sh(stack.test)
+    gates = [
+        f"build = `{_script(build_cmd) or 'python -m compileall -q .'}`",
+        f"test = `{_script(test_cmd) or 'pytest'}`",
+        *([f"bdd = `{stack.bdd}`"] if stack.bdd else []),
+        f"smoke = `{stack.run}`" if stack.run else "smoke = not pinned",
+    ]
+    return VerificationProfile(
+        name=f"stack:{stack.language}",
+        build_cmd=build_cmd,
+        test_cmd=test_cmd,
+        smoke_cmd=_sh(stack.run) if stack.run else None,
+        contract_text="GATES: " + "; ".join(gates) + "."
+        + (_BDD_CONTRACT if python and not stack.bdd else ""),
+        install_cmd=_sh(stack.install) if stack.install and not python else None,
+        bdd_cmd=_sh(stack.bdd) if stack.bdd else None,
+    )
+
+
+def profile_examples() -> str:
+    """The hand-written profiles as EXAMPLES of gate commands (planner prompt)."""
+    return "\n".join(f"- {name}: {p.contract_text}" for name, p in PROFILES.items())

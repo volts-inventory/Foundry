@@ -39,11 +39,6 @@ class ThreatModel(FrozenModel):
     supersedes: str | None = None
     seq: Seq
 
-    def has_residual(self) -> bool:
-        """True when judgment items exist that the runner-signed Security
-        verdict must NOT absorb (governance.md §1d)."""
-        return bool(self.residual_item_ids)
-
 
 class SecurityTriage(FrozenModel):
     """AppSec manual-review triage (agents.md Layer 5): which items to add,

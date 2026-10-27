@@ -43,7 +43,7 @@ FOUNDRY_MSGPACK_MODULES: list[tuple[str, str]] = [
     # `scope_tier` single-writer channel record — rides the channel directly
     # (like GateTriage), so it must round-trip the checkpoint or a resumed run
     # loses the tier and silently reverts to STANDARD prompts mid-build. NOT a
-    # trust input: no gate reads it (ScopeDecision.relaxes_integrity()).
+    # trust input: no gate reads it.
     ("foundry.schemas.governance", "ScopeDecision"),
     ("foundry.schemas.governance", "ScopeTier"),
     ("foundry.schemas.architecture", "PinnedConstraint"),

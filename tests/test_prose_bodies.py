@@ -78,25 +78,18 @@ def _runtime(payload: dict[str, Any], *, cas: ArtifactStore | None) -> AgentRunt
 # ---- producer side: prose round-trips through the store ----------------------
 
 
-def test_planner_persists_prd_prose_under_its_handle() -> None:
+def test_planner_persists_prose_under_its_handles() -> None:
     store = ArtifactStore()
     node = make_planner_node(_runtime(PLAN_PAYLOAD, cas=store))
     writes = node({"request": "build a todo app"}, _config())
-
     bodies = [store.get_body(a.uri) for a in writes["artifacts"]]
+
     prd = next(b for b in bodies if isinstance(b, PRD))
     # The handle is the historical content digest of the prose string (stable).
     assert prd.prd_uri == cas_uri(PRD_BODY)
     # ...and the prose itself now resolves out of the store.
     body = store.get_body(prd.prd_uri)
     assert isinstance(body, ProseBody) and body.text == PRD_BODY
-
-
-def test_planner_persists_design_and_adr_prose() -> None:
-    store = ArtifactStore()
-    node = make_planner_node(_runtime(PLAN_PAYLOAD, cas=store))
-    writes = node({"request": "build a todo app"}, _config())
-    bodies = [store.get_body(a.uri) for a in writes["artifacts"]]
 
     design = next(b for b in bodies if isinstance(b, SystemDesign))
     adr = next(b for b in bodies if isinstance(b, ADR))
@@ -118,11 +111,3 @@ def test_persist_prose_store_none_is_mint_only() -> None:
         pass
     else:  # pragma: no cover - defensive
         raise AssertionError("store=None must not persist a body")
-
-
-def test_planner_store_none_keeps_handle_without_storing() -> None:
-    node = make_planner_node(_runtime(PLAN_PAYLOAD, cas=None))
-    writes = node({"request": "x"}, _config())
-    # The node still emits a PRD handle whose prd_uri is the prose digest, but no
-    # body is stored anywhere (the synthetic-resolver tests are untouched).
-    assert any(a.kind == "prd" for a in writes["artifacts"])

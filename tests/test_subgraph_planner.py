@@ -17,8 +17,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
 from langchain_core.runnables import RunnableConfig
-from langgraph.graph import StateGraph
 
 from foundry.agents import AgentRuntime
 from foundry.gates.attestation import ZoneBSigner
@@ -58,42 +58,24 @@ def _kinds(state: FactoryState) -> set[str]:
     return {a.kind for a in state.get("artifacts", [])}
 
 
-def test_builder_returns_an_uncompiled_state_graph() -> None:
-    rt, _ = _runtime([])
-    assert isinstance(build_planner_subgraph(rt), StateGraph)
-
-
-def test_no_capabilities_skips_conditionals() -> None:
-    final, tx = _run([])
-
-    kinds = _kinds(final)
-    assert {"system_design", "ownership_map", "adr", "interface_contract", "prd"} <= kinds
-    assert {c.id for c in final["pinned_constraints"]} == {"PC-001", "PC-002"}
-    assert "domain_addendum" not in kinds
-    assert "ux_spec" not in kinds
-    assert len(tx.requests) == 1
-
-
-def test_domain_capability_enters_domain_specialist() -> None:
-    final, tx = _run(["regulated"])
+@pytest.mark.parametrize(
+    ("caps", "present", "absent"),
+    [
+        ([], {"system_design", "ownership_map", "adr", "interface_contract", "prd"},
+         {"domain_addendum", "ux_spec"}),
+        (["regulated"], {"system_design", "domain_addendum"}, {"ux_spec"}),
+        (["frontend"], {"ux_spec"}, {"domain_addendum"}),
+        (["regulated", "ui"], {"system_design", "domain_addendum", "ux_spec"}, set()),
+    ],
+)
+def test_capabilities_route_the_conditionals(
+    caps: list[str], present: set[str], absent: set[str]
+) -> None:
+    final, tx = _run(caps)
 
     kinds = _kinds(final)
-    assert "system_design" in kinds
-    assert "domain_addendum" in kinds
-    assert "ux_spec" not in kinds
+    assert present <= kinds
+    assert not absent & kinds
     assert len(tx.requests) == 1
-
-
-def test_ui_capability_enters_ux_design() -> None:
-    final, _ = _run(["frontend"])
-
-    kinds = _kinds(final)
-    assert "ux_spec" in kinds
-    assert "domain_addendum" not in kinds
-
-
-def test_both_capabilities_enter_both_conditionals() -> None:
-    final, tx = _run(["regulated", "ui"])
-
-    assert {"system_design", "domain_addendum", "ux_spec"} <= _kinds(final)
-    assert len(tx.requests) == 1
+    if not caps:
+        assert {c.id for c in final["pinned_constraints"]} == {"PC-001", "PC-002"}

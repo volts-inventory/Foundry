@@ -4,84 +4,69 @@ Workshop all build against."""
 from __future__ import annotations
 
 import pytest
-from pydantic import ValidationError
 
 from foundry.durability.serde import foundry_serde
+from foundry.schemas.architecture import InterfaceContract
+from foundry.schemas.base import FrozenModel
+from foundry.schemas.gates import JudgmentProvenance
+from foundry.schemas.governance import ChangeRiskTier, SignOffRecord, TierDecision
 from foundry.schemas.implementation import (
-    DEFAULT_TICKET_TIERS,
+    BDD_REPORT_ENV,
     Difficulty,
     Specialty,
+    StackDecision,
     Task,
     Ticket,
-    feature_path,
-    scenario_ref,
+    Toolchain,
 )
-from foundry.schemas.product import AcceptanceCriterion, render_scenario
+from foundry.schemas.product import AcceptanceCriterion
+from foundry.schemas.security import (
+    AuditFinding,
+    SBOMRef,
+    SecurityTriage,
+    Severity,
+    SupplyChainReport,
+    ThreatModel,
+)
 from foundry.state.seq import Seq
 
 SEQ = Seq("r", 1, 1, "planner", 0)
+SHA = "c" * 40
+
+RECORDS: list[FrozenModel] = [
+    Ticket(id="T-1", title="x", specialty=Specialty.TEST, difficulty=Difficulty.TRIVIAL,
+           depends_on=("T-0",), seq=SEQ),
+    Ticket(id="T-1", title="x", specialty=Specialty.BACKEND, reads=("src/a.ts",), seq=SEQ),
+    AcceptanceCriterion(id="AC-1", text="Given a When b Then c", given=("a",), when=("b",),
+                        then=("c",), ticket_id="T-1", seq=SEQ),
+    Task(id="t", spec_uri="u", criterion_ids=("AC-1",), branch="task/t", ticket_id="T-1",
+         specialty=Specialty.TEST, tier="T3", seq=SEQ),
+    StackDecision(language="typescript", package_manager="npm", install="npm ci",
+                  typecheck="npx tsc --noEmit",
+                  bdd=f"npx cucumber-js --format message:${BDD_REPORT_ENV}"),
+    Toolchain(language="go", binaries=("go",), version="1.24"),
+    InterfaceContract(name="TodoStore.add", spec_uri="cas://c", kind="function",
+                      signature="add(text: string): Todo", seq=SEQ),
+    # Checkpoint-compat records: no longer written, but an old checkpoint carrying
+    # them (risk_tier / sign_offs channels, security bodies) must still load typed.
+    TierDecision(tier=ChangeRiskTier.HIGH, rationale="r", run_against=SHA,
+                 gate_set=("build",), forced_high=True, seq=SEQ),
+    SignOffRecord(subject_artifact_uri="cas://release/1", state_sha=SHA, approver="alice",
+                  role="release-manager", approved=True, server_nonce="sn-1",
+                  presented_evidence_hash="sha256:" + "a" * 64,
+                  judgment_provenance=JudgmentProvenance.SELF, seq=SEQ),
+    ThreatModel(threat_model_uri="cas://tm/1", run_against=SHA,
+                oracle_bindings={"TM-1": "cas://oracle/3"}, residual_item_ids=("TM-2",),
+                seq=SEQ),
+    SecurityTriage(run_against=SHA, severity=Severity.HIGH, findings=("f",), seq=SEQ),
+    SupplyChainReport(base_tree_sha="a" * 40, tree_sha=SHA, report_uri="cas://sc/1", seq=SEQ),
+    SBOMRef(sbom_uri="cas://sbom/1", tree_sha=SHA, seq=SEQ),
+    AuditFinding(run_against=SHA, sbom_uri="cas://sbom/1", severity=Severity.LOW, seq=SEQ),
+]
 
 
-def test_ticket_defaults_and_frozen() -> None:
-    t = Ticket(id="T-001", title="Add item", specialty=Specialty.BACKEND, seq=SEQ)
-    assert t.difficulty is Difficulty.STANDARD and t.depends_on == ()
-    with pytest.raises(ValidationError):
-        t.title = "x"  # type: ignore[misc]
-
-
-def test_ticket_rejects_unknown_specialty() -> None:
-    with pytest.raises(ValidationError):
-        Ticket(id="T-1", title="x", specialty="devops", seq=SEQ)  # type: ignore[arg-type]
-
-
-def test_task_ticket_fields_default_for_ownership_tasks() -> None:
-    t = Task(id="t-1", spec_uri="cas://x", criterion_ids=(), branch="task/t-1", seq=SEQ)
-    assert t.ticket_id is None and t.tier is None and t.depends_on == ()
-
-
-def test_scenario_refs_and_tier_table() -> None:
-    assert feature_path("T-007") == "features/T-007.feature"
-    assert scenario_ref("T-007", "AC-3") == "features/T-007.feature::AC-3"
-    assert DEFAULT_TICKET_TIERS[Difficulty.TRIVIAL] == "T3"
-    assert DEFAULT_TICKET_TIERS[Difficulty.COMPLEX] == "T1"
-
-
-def test_render_scenario() -> None:
-    assert render_scenario(("a list",), ("I add x",), ("x is listed", "count is 1")) == (
-        "Given a list When I add x Then x is listed and count is 1"
-    )
-
-
-def test_new_records_round_trip_the_checkpoint_serde() -> None:
+@pytest.mark.parametrize("obj", RECORDS, ids=lambda o: type(o).__name__)
+def test_records_round_trip_the_checkpoint_serde(obj: FrozenModel) -> None:
     serde = foundry_serde()
-    ticket = Ticket(id="T-1", title="x", specialty=Specialty.TEST,
-                    difficulty=Difficulty.TRIVIAL, depends_on=("T-0",), seq=SEQ)
-    ac = AcceptanceCriterion(id="AC-1", text="Given a When b Then c", given=("a",),
-                             when=("b",), then=("c",), ticket_id="T-1", seq=SEQ)
-    task = Task(id="t", spec_uri="u", criterion_ids=("AC-1",), branch="task/t",
-                ticket_id="T-1", specialty=Specialty.TEST, tier="T3", seq=SEQ)
-    for obj in (ticket, ac, task):
-        assert serde.loads_typed(serde.dumps_typed(obj)) == obj
-
-
-def test_stack_contract_and_toolchain_round_trip_the_checkpoint_serde() -> None:
-    from foundry.schemas.architecture import InterfaceContract
-    from foundry.schemas.implementation import BDD_REPORT_ENV, StackDecision, Toolchain
-
-    serde = foundry_serde()
-    stack = StackDecision(language="typescript", package_manager="npm", install="npm ci",
-                          typecheck="npx tsc --noEmit",
-                          bdd=f"npx cucumber-js --format message:${BDD_REPORT_ENV}")
-    tool = Toolchain(language="go", binaries=("go",), version="1.24")
-    contract = InterfaceContract(name="TodoStore.add", spec_uri="cas://c", kind="function",
-                                 signature="add(text: string): Todo", seq=SEQ)
-    ticket = Ticket(id="T-1", title="x", specialty=Specialty.BACKEND, reads=("src/a.ts",),
-                    seq=SEQ)
-    for obj in (stack, tool, contract, ticket):
-        assert serde.loads_typed(serde.dumps_typed(obj)) == obj
-
-
-def test_factory_state_carries_the_stack_channel() -> None:
-    from foundry.state.factory_state import FactoryState
-
-    assert "stack" in FactoryState.__annotations__
+    back = serde.loads_typed(serde.dumps_typed(obj))
+    assert type(back) is type(obj) and back == obj

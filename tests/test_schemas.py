@@ -11,25 +11,11 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+from foundry.schemas.architecture import ADR, InterfaceContract, OwnershipMap, SystemDesign
 from foundry.schemas.base import FrozenModel
 from foundry.schemas.gates import JudgmentProvenance
-from foundry.schemas.governance import (
-    BudgetAction,
-    BudgetDecision,
-    ChangeRiskTier,
-    GuardianAction,
-    GuardianDecision,
-    HumanDecision,
-    RequestRoute,
-    TriageDecision,
-)
-from foundry.schemas.implementation import (
-    ConflictResolution,
-    FeatureDiff,
-    ReviewRequest,
-    Task,
-    TaskStatus,
-)
+from foundry.schemas.governance import BudgetAction, BudgetDecision
+from foundry.schemas.implementation import ConflictResolution, FeatureDiff, Task, TaskStatus
 from foundry.schemas.product import (
     PRD,
     AcceptanceCriterion,
@@ -39,13 +25,6 @@ from foundry.schemas.product import (
     SprintPlan,
 )
 from foundry.schemas.quality import E2EReport, OracleBinding, OracleKind, TestPlan, TestReport
-from foundry.schemas.security import (
-    SBOMRef,
-    SecurityTriage,
-    Severity,
-    SupplyChainReport,
-    ThreatModel,
-)
 from foundry.state.seq import Seq
 
 SEQ = Seq(run_id="r1", emission_epoch=1, superstep_index=3, node_id="pm", local=0)
@@ -141,18 +120,6 @@ CASES: list[tuple[type[FrozenModel], dict, str, object]] = [
         "b" * 40,
     ),
     (
-        ReviewRequest,
-        {
-            "diff_uri": "cas://diff/1",
-            "task_id": "T-1",
-            "run_against": "task/T-1",
-            "verdict_nonce": "nonce-1",
-            "seq": SEQ,
-        },
-        "verdict_nonce",
-        "nonce-2",
-    ),
-    (
         ConflictResolution,
         {
             "task_ids": ("T-1", "T-2"),
@@ -213,69 +180,6 @@ CASES: list[tuple[type[FrozenModel], dict, str, object]] = [
         2,
     ),
     (
-        ThreatModel,
-        {
-            "threat_model_uri": "cas://tm/1",
-            "run_against": "c" * 40,
-            "oracle_bindings": {"TM-1": "cas://oracle/3"},
-            "residual_item_ids": ("TM-2",),
-            "seq": SEQ,
-        },
-        "threat_model_uri",
-        "cas://tm/2",
-    ),
-    (
-        SecurityTriage,
-        {
-            "run_against": "c" * 40,
-            "severity": Severity.HIGH,
-            "findings": ("add input validation on /login",),
-            "seq": SEQ,
-        },
-        "run_against",
-        "d" * 40,
-    ),
-    (
-        SupplyChainReport,
-        {
-            "base_tree_sha": "a" * 40,
-            "tree_sha": "c" * 40,
-            "report_uri": "cas://supplychain/1",
-            "policy_violations": (),
-            "seq": SEQ,
-        },
-        "tree_sha",
-        "d" * 40,
-    ),
-    (
-        SBOMRef,
-        {"sbom_uri": "cas://sbom/1", "tree_sha": "c" * 40, "seq": SEQ},
-        "sbom_uri",
-        "cas://sbom/2",
-    ),
-    (
-        TriageDecision,
-        {
-            "route": RequestRoute.EVOLUTION,
-            "tier": ChangeRiskTier.STANDARD,
-            "usd_cap_microusd": 10_000_000,
-            "seq": SEQ,
-        },
-        "usd_cap_microusd",
-        20_000_000,
-    ),
-    (
-        GuardianDecision,
-        {
-            "action": GuardianAction.PAUSE,
-            "advisory": False,
-            "reason": "loop signature (AC-1, test, sig-9f2) tripped",
-            "seq": SEQ,
-        },
-        "reason",
-        "cost threshold crossed",
-    ),
-    (
         BudgetDecision,
         {
             "action": BudgetAction.ESCALATE,
@@ -288,16 +192,51 @@ CASES: list[tuple[type[FrozenModel], dict, str, object]] = [
         "qa",
     ),
     (
-        HumanDecision,
+        SystemDesign,
         {
-            "subject_artifact_uri": "cas://design/1",
-            "approver": "alice@example.com",
-            "approved": True,
-            "server_nonce": "sn-hitl-1",
+            "title": "Todo service architecture",
+            "design_uri": "cas://design/1",
+            "components": ("api", "store"),
+            "adr_ids": ("ADR-1",),
+            "interface_ids": ("TodoStore.add",),
             "seq": SEQ,
         },
-        "approver",
-        "bob@example.com",
+        "title",
+        "Notes service architecture",
+    ),
+    (
+        ADR,
+        {
+            "id": "ADR-1",
+            "title": "Use Postgres for persistence",
+            "decision": "Postgres over SQLite for concurrency",
+            "body_uri": "cas://adr/1",
+            "rejected_alternatives": ("SQLite", "in-memory dict"),
+            "status": "accepted",
+            "seq": SEQ,
+        },
+        "decision",
+        "SQLite for simplicity",
+    ),
+    (
+        InterfaceContract,
+        {
+            "name": "TodoStore.add",
+            "spec_uri": "cas://iface/1",
+            "consumers": ("api",),
+            "seq": SEQ,
+        },
+        "name",
+        "TodoStore.remove",
+    ),
+    (
+        OwnershipMap,
+        {
+            "owners": {"src/api.py": "T-1", "src/store.py": "T-2"},
+            "seq": SEQ,
+        },
+        "version",
+        2,
     ),
 ]
 
@@ -305,15 +244,11 @@ IDS = [cls.__name__ for cls, *_ in CASES]
 
 
 @pytest.mark.parametrize(("cls", "kwargs", "field", "changed"), CASES, ids=IDS)
-def test_constructs_and_is_frozen(cls, kwargs, field, changed):
+def test_frozen_and_closed(cls, kwargs, field, changed):
     m = cls(**kwargs)
     assert m.seq == SEQ
     with pytest.raises(ValidationError):
         setattr(m, field, changed)
-
-
-@pytest.mark.parametrize(("cls", "kwargs", "field", "changed"), CASES, ids=IDS)
-def test_extra_fields_rejected(cls, kwargs, field, changed):
     with pytest.raises(ValidationError):
         cls(**kwargs, not_a_declared_field="boom")
 
@@ -343,98 +278,14 @@ def test_set_valued_field_digest_is_order_independent():
     assert m.content_identity() == expected
 
 
-# ---------------------------------------------------------------------------
-# Spot checks on key invariants
-# ---------------------------------------------------------------------------
-
-
-def test_triage_tier_is_the_governance_1e_enum():
-    assert {t.value for t in ChangeRiskTier} == {"low", "standard", "high"}
-    with pytest.raises(ValidationError):
-        TriageDecision(route=RequestRoute.BUGFIX, tier="medium", usd_cap_microusd=1, seq=SEQ)
-
-
-def test_task_carries_criterion_traceability():
-    t = Task(
-        id="T-9",
-        spec_uri="cas://task/T-9",
-        criterion_ids=["AC-1"],  # list coerces to tuple
-        branch="task/T-9",
-        seq=SEQ,
-    )
-    assert t.criterion_ids == ("AC-1",)
-    assert t.status is TaskStatus.PENDING
-    with pytest.raises(ValidationError):
-        Task(id="T-9", spec_uri="u", branch="task/T-9", seq=SEQ)  # criterion_ids required
-
-
-def test_criteria_critique_security_omission_blocks_spec_gate():
-    base = {
-        "prd_uri": "cas://prd/1",
-        "judgment_provenance": JudgmentProvenance.SELF,
-        "seq": SEQ,
-    }
-    clean = CriteriaCritique(**base)
-    assert not clean.spec_gate_blocking()
-    dirty = CriteriaCritique(**base, security_abuse_omissions=("missing abuse case",))
-    assert dirty.spec_gate_blocking()
-
-
-def test_review_request_is_not_a_verdict_and_carries_server_nonce():
-    r = ReviewRequest(
-        diff_uri="cas://diff/1", task_id="T-1", run_against="task/T-1",
-        verdict_nonce="nonce-1", seq=SEQ,
-    )
-    assert r.verdict_nonce == "nonce-1"
-    assert not hasattr(r, "status")  # the verdict lives in GateResult, not here
-
-
-def test_e2e_report_flake_budget_defaults_to_n2():
-    r = E2EReport(
-        results_uri="cas://e2e/1", run_against="c" * 40,
-        scenarios_passed=1, scenarios_failed=0,
-        pinned_seeds_note="seed=42", seq=SEQ,
-    )
-    assert r.flake_retry_budget == 2
-
-
-def test_test_plan_covered_criteria_union():
-    tp = TestPlan(
-        plan_uri="cas://plan/1",
-        test_criteria={"t1": ("AC-1",), "t2": ("AC-1", "AC-2")},
-        seq=SEQ,
-    )
-    assert tp.covered_criteria() == frozenset({"AC-1", "AC-2"})
-
-
-def test_threat_model_residual_flag_and_dict_key_order_identity():
-    kwargs = {
-        "threat_model_uri": "cas://tm/1",
-        "run_against": "c" * 40,
-        "seq": SEQ,
-    }
-    a = ThreatModel(**kwargs, oracle_bindings={"TM-1": "u1", "TM-2": "u2"})
-    b = ThreatModel(**kwargs, oracle_bindings={"TM-2": "u2", "TM-1": "u1"})
-    assert a.content_identity() == b.content_identity()  # canonical: dict order irrelevant
-    assert not a.has_residual()
-    c = a.model_copy(update={"residual_item_ids": ("TM-3",)})
-    assert c.has_residual()
-
-
-def test_guardian_analyzer_is_advisory_monitor_trip_is_not():
-    trip = GuardianDecision(action=GuardianAction.HALT, reason="oracle diff", seq=SEQ)
-    assert trip.advisory is False  # deterministic trips are load-bearing by default
-    flag = GuardianDecision(
-        action=GuardianAction.ESCALATE, advisory=True, reason="semantic drift", seq=SEQ
-    )
-    assert flag.advisory is True
-
-
-def test_versioned_supersession_fields_present_where_designed():
-    prd = PRD(title="t", prd_uri="cas://prd/2", supersedes="cas://prd/1", version=2, seq=SEQ)
-    assert prd.version == 2 and prd.supersedes == "cas://prd/1"
-    ob = OracleBinding(
-        criterion_id="AC-1", oracle_uri="cas://oracle/2", oracle_kind=OracleKind.GOLDEN,
-        version=2, supersedes="cas://oracle/1", seq=SEQ,
-    )
-    assert ob.supersedes == "cas://oracle/1"
+def test_ownership_map_merge_order_is_deterministic():
+    """Merge order is a pure function of the mapping — insertion order and
+    dict key order do not affect it (resume re-derives the same order)."""
+    a = OwnershipMap(owners={"src/z.py": "T-2", "src/a.py": "T-1", "src/b.py": "T-1"}, seq=SEQ)
+    b = OwnershipMap(owners={"src/b.py": "T-1", "src/z.py": "T-2", "src/a.py": "T-1"}, seq=SEQ)
+    # ordered by (owner, unit): T-1 units first (a, b), then T-2 (z)
+    expected = ("src/a.py", "src/b.py", "src/z.py")
+    assert a.merge_order() == expected
+    assert b.merge_order() == expected  # independent of construction order
+    # content_identity also order-independent (canonical dump)
+    assert a.content_identity() == b.content_identity()

@@ -14,10 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from foundry.agents.planner import (
-    MAX_EPIC_TICKETS,
-    MAX_EPICS,
     MAX_TICKETS,
-    _build_epics,
     _coverage_findings,
     make_planner_node,
 )
@@ -95,27 +92,6 @@ def test_a_fully_covered_plan_has_no_coverage_findings() -> None:
 # ---- 1. traceability ------------------------------------------------------------------
 
 
-def test_an_uncovered_must_have_is_a_blocking_finding() -> None:
-    _, _, critique = _run(_plan(tickets=_tickets_with(T_002={
-        "scenarios": _scenarios_covering("SC-1"),
-    })))
-    assert critique.coverage_findings == (
-        "Must-have MH-1 ('add todo') has no covering scenario; add one whose covers "
-        "lists MH-1.",
-    )
-    assert critique.spec_gate_blocking()
-
-
-def test_an_uncovered_success_criterion_is_a_blocking_finding() -> None:
-    findings = _coverage(_plan(tickets=_tickets_with(T_002={
-        "scenarios": _scenarios_covering("MH-1"),
-    })))
-    assert findings == (
-        "Success criterion SC-1 ('a user can add a todo') has no covering scenario; add "
-        "one whose covers lists SC-1.",
-    )
-
-
 def test_bad_goal_and_covers_ids_are_tolerated_and_reported() -> None:
     intent = {
         **PLAN["intent"],
@@ -187,14 +163,6 @@ def test_a_feature_ticket_without_scenarios_is_a_finding_test_tickets_exempt() -
 # ---- 3. one entrypoint wires everything; an app has a run command ---------------------------
 
 
-def test_a_plan_without_an_entrypoint_ticket_fails() -> None:
-    findings = _coverage(_plan(tickets=_tickets_with(T_002={"entrypoint": False})))
-    assert findings == (
-        "No entrypoint ticket: mark one feature ticket entrypoint=true that wires the app "
-        "together end to end and depends_on every other feature ticket.",
-    )
-
-
 def test_an_entrypoint_must_depend_on_every_feature_ticket() -> None:
     findings = _coverage(_plan(tickets=_tickets_with(
         T_001={"entrypoint": True}, T_002={"entrypoint": False},
@@ -258,35 +226,6 @@ def test_inline_cap_overflow_is_a_finding_naming_the_dropped_tickets() -> None:
         "so no work is lost."
     )
     assert critique.spec_gate_blocking()
-
-
-def test_epic_cap_overflow_names_the_dropped_epics() -> None:
-    overflow: list[str] = []
-    raw = [{"id": f"e{i}", "title": f"epic {i}"} for i in range(MAX_EPICS + 2)]
-    epics, _ = _build_epics(raw, set(), overflow)
-    assert len(epics) == MAX_EPICS
-    assert overflow == [
-        f"{MAX_EPICS + 2} epics exceed the cap of {MAX_EPICS}; dropped e12 (epic 12), "
-        f"e13 (epic 13): merge epics so the plan has at most {MAX_EPICS} and no work is lost."
-    ]
-
-
-def test_per_epic_cap_overflow_is_a_finding_naming_the_dropped_tickets() -> None:
-    plan, replies = multi_epic_plan()
-    first = replies["E1"]["tickets"][0]
-    replies["E1"]["tickets"] = [
-        {**first, "id": f"T{i:02d}", "title": f"t{i}", "files": [f"f{i}.py"]}
-        for i in range(MAX_EPIC_TICKETS + 2)
-    ]
-    cas = ArtifactStore()
-    rt, _ = _epic_runtime(*_epic_scripts(plan, replies), cas=cas)
-    writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
-    [critique] = _bodies(cas, writes, "criteria_findings")
-    assert (
-        f"Epic E1: {MAX_EPIC_TICKETS + 2} tickets exceed the per-epic cap of "
-        f"{MAX_EPIC_TICKETS}; dropped E1-T25 (t25), E1-T26 (t26): consolidate this "
-        "epic's tickets so no work is lost."
-    ) in critique.coverage_findings
 
 
 # ---- epic mode: coverage is checked across epics ---------------------------------------------

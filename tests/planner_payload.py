@@ -42,7 +42,6 @@ def plan_payload(
     sprint: dict[str, Any],
     design: dict[str, Any],
     decomposition: dict[str, Any] | None = None,
-    tier: str = "standard",
 ) -> dict[str, Any]:
     """``design["ownership"]`` is ``{unit: owner}``; ``decomposition["tasks"]``
     (``[{"unit", "criterion_ids"}]``) supplies the criterion ids per unit.
@@ -91,7 +90,7 @@ def plan_payload(
         tickets[-1]["entrypoint"] = True
         tickets[-1]["depends_on"] = [t["id"] for t in tickets[:-1]]
     return {
-        "scope": {"tier": tier, "rationale": "test scope", "signals": []},
+        "scope": {"tier": "standard", "rationale": "test scope", "signals": []},
         "intent": {"deliverable": "library", **intent},
         "prd": {
             "title": prd["title"],

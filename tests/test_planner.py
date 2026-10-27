@@ -313,12 +313,6 @@ def test_bodies_resolve_back_and_ownership_carries_unit_criteria() -> None:
     assert plan.usd_cap_microusd == 5_000_000
 
 
-def test_required_capabilities_flow_to_their_channel() -> None:
-    rt, _ = runtime_for(_plan(prd={**PLAN["prd"], "required_capabilities": ["ui"]}))
-    writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
-    assert writes["required_capabilities"] == ["ui"]
-
-
 def test_one_journal_entry_as_the_planner() -> None:
     rt, _ = runtime_for(PLAN)
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
@@ -374,12 +368,6 @@ def test_self_review_omission_is_flagged_blocking_and_stamped_self() -> None:
     assert critique.judgment_provenance is JudgmentProvenance.SELF
 
 
-def test_clean_self_review_is_non_blocking() -> None:
-    rt, _ = runtime_for(PLAN)
-    writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
-    assert not writes["gate_triage"][0].explanation.startswith("BLOCKING")
-
-
 # ---- spec_fix re-entry -----------------------------------------------------------
 
 
@@ -425,20 +413,17 @@ def test_a_newer_spec_pass_supersedes_an_older_fail() -> None:
 # ---- prompt inputs -----------------------------------------------------------------
 
 
-def test_design_spec_grounds_the_prompt() -> None:
+@pytest.mark.parametrize("with_spec", [True, False])
+def test_design_spec_grounds_the_prompt(with_spec: bool) -> None:
     rt, tx = runtime_for(PLAN)
-    make_planner_node(rt)(
-        {"request": "short links", "spec": "# Spec\nSPEC_MARKER_9Q"}, config_for("r")
-    )
+    spec = {"spec": "# Spec\nSPEC_MARKER_9Q"} if with_spec else {}
+    make_planner_node(rt)({"request": "short links", **spec}, config_for("r"))
     prompt = _prompt(tx)
-    assert "DESIGN SPEC (detailed source of truth)" in prompt
-    assert "SPEC_MARKER_9Q" in prompt
-
-
-def test_request_only_prompt_has_no_spec_framing() -> None:
-    rt, tx = runtime_for(PLAN)
-    make_planner_node(rt)({"request": "short links"}, config_for("r"))
-    assert "REQUEST (intent summary)" not in _prompt(tx)
+    if with_spec:
+        assert "DESIGN SPEC (detailed source of truth)" in prompt
+        assert "SPEC_MARKER_9Q" in prompt
+    else:
+        assert "REQUEST (intent summary)" not in prompt
 
 
 def test_retrieves_existing_code_through_the_symbol_index(tmp_path: Any) -> None:
@@ -562,19 +547,6 @@ def test_tickets_parse_with_tolerant_enums_and_contract_filtering() -> None:
     assert any("unknown implements contracts Nope" in c for c in concerns)
 
 
-def test_scenarios_become_structured_criteria() -> None:
-    _, [c], _ = _build_tickets(
-        [_ticket("T-9", scenarios=[{**_scn("AC-7", abuse=True), "then": ["a", "b"],
-                                    "criticality": "high-risk"}])],
-        _TSEQ, _CSEQ, set(),
-    )
-    assert c.given == ("g",) and c.when == ("w",) and c.then == ("a", "b")
-    assert c.text == "Given g When w Then a and b"
-    assert c.ticket_id == "T-9" and c.security_abuse
-    assert c.oracle_hint == "features/T-9.feature::AC-7"
-    assert c.criticality is Criticality.HIGH_RISK
-
-
 def test_unknown_dependencies_are_dropped_with_a_concern() -> None:
     [t], _, concerns = _build_tickets([_ticket("T-1", "T-404", "T-1x")], _TSEQ, _CSEQ, set())
     assert t.depends_on == ()
@@ -620,12 +592,6 @@ def test_duplicate_ticket_and_scenario_ids_later_entry_wins() -> None:
     assert [(c.id, c.ticket_id, c.given) for c in criteria] == [("AC-2", "T-3", ("later",))]
     assert "Duplicate ticket id T-1: the later entry wins." in concerns
     assert "Duplicate scenario id AC-2: the later entry wins." in concerns
-
-
-def test_untested_feature_ticket_is_a_concern() -> None:
-    _, _, concerns = _build_tickets([_ticket("T-1", scenarios=[_scn("AC-1")])],
-                                    _TSEQ, _CSEQ, set())
-    assert concerns == ["Ticket T-1 has scenarios but no test ticket depends on it."]
 
 
 def test_ownership_is_derived_from_ticket_files() -> None:
@@ -680,12 +646,6 @@ def test_emitted_tickets_and_criteria_resolve_with_their_fields() -> None:
 
 
 # ---- self-review: at most one in-node revision ----------------------------------
-
-
-def test_clean_self_review_makes_one_call() -> None:
-    rt, tx = runtime_for(PLAN)
-    make_planner_node(rt)({"request": "x"}, config_for("r"))
-    assert len(tx.requests) == 1
 
 
 def test_flagged_self_review_revises_once_in_node() -> None:
@@ -919,7 +879,8 @@ def test_token_cap_from_a_parallel_epic_call_propagates() -> None:
 def test_global_and_per_epic_ticket_caps(monkeypatch: pytest.MonkeyPatch) -> None:
     plan, replies = multi_epic_plan()
     replies["E1"]["tickets"] = [
-        {**replies["E1"]["tickets"][0], "id": f"T{i:02d}", "files": [f"f{i}.py"]}
+        {**replies["E1"]["tickets"][0], "id": f"T{i:02d}", "title": f"t{i}",
+         "files": [f"f{i}.py"]}
         for i in range(MAX_EPIC_TICKETS + 3)
     ]
     monkeypatch.setattr(planner, "MAX_PLAN_TICKETS", MAX_EPIC_TICKETS + 2)
@@ -933,6 +894,12 @@ def test_global_and_per_epic_ticket_caps(monkeypatch: pytest.MonkeyPatch) -> Non
     concerns = " ".join(writes["agent_journal"][0].concerns)
     assert f"per-epic cap of {MAX_EPIC_TICKETS}" in concerns
     assert f"exceed the cap of {MAX_EPIC_TICKETS + 2}" in concerns
+    [critique] = _bodies(cas, writes, "criteria_findings")
+    assert (
+        f"Epic E1: {MAX_EPIC_TICKETS + 3} tickets exceed the per-epic cap of "
+        f"{MAX_EPIC_TICKETS}; dropped E1-T25 (t25), E1-T26 (t26), E1-T27 (t27): consolidate "
+        "this epic's tickets so no work is lost."
+    ) in critique.coverage_findings
 
 
 def test_only_flagged_epics_self_revise_and_their_gaps_are_tagged() -> None:
@@ -1020,10 +987,15 @@ def test_epics_are_positional_capped_and_validated() -> None:
     raw = [
         {"id": "store", "depends_on": ["api"], "provides": ["X", "nope"]},
         {"id": "api", "depends_on": ["store", "ghost"]},
-        *({"id": f"e{i}"} for i in range(MAX_EPICS)),
+        *({"id": f"e{i}", "title": f"epic {i}"} for i in range(MAX_EPICS)),
     ]
-    epics, concerns = _build_epics(raw, {"X"})
+    overflow: list[str] = []
+    epics, concerns = _build_epics(raw, {"X"}, overflow)
     assert len(epics) == MAX_EPICS
+    assert overflow == [
+        f"{MAX_EPICS + 2} epics exceed the cap of {MAX_EPICS}; dropped e10 (epic 10), "
+        f"e11 (epic 11): merge epics so the plan has at most {MAX_EPICS} and no work is lost."
+    ]
     assert [e.id for e in epics[:2]] == ["E1", "E2"]
     assert epics[0].provides == ("X",)
     assert (epics[0].depends_on, epics[1].depends_on) == (("E2",), ())

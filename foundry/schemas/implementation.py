@@ -177,22 +177,6 @@ class FeatureDiff(FrozenModel):
     seq: Seq
 
 
-class ReviewRequest(FrozenModel):
-    """The review REQUEST packet — NOT the verdict (agents.md Layer 4 —
-    Reviewer/Critic; verdicts are `GateResult`s).
-
-    Carries the server/orchestrator-issued single-use `verdict_nonce` that the
-    eventual judgment verdict's binding must consume — the anti-replay,
-    anti-status-FLIP challenge of architecture.md §3 / governance.md §1c.
-    """
-
-    diff_uri: str  # subject_artifact_uri of the eventual judgment verdict
-    task_id: str
-    run_against: str  # per-branch "task/<id>" | integrated state_sha (arch §4)
-    verdict_nonce: str  # server-issued, single-use; never agent-minted
-    seq: Seq
-
-
 class ConflictResolution(FrozenModel):
     """Senior Engineer integration output (agents.md Layer 3): merge conflicts
     resolved using the `ownership_map` and the conflicting hunks."""

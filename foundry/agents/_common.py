@@ -207,7 +207,7 @@ def journal_entry(
 
     Reusable across every agent node: a node returns ``{"agent_journal": [entry]}``
     on its OWN channel — never on ``gates``/``gate_triage`` — to record how its turn
-    went for the "interview the agent" affordance (:mod:`foundry.agents.interview`).
+    went, for the run's event log.
 
     HARD CONSTRAINT (plan [11]): the journal is STRICTLY ADVISORY observability —
     NEVER a trust input. No gate, ``merge_gates``, ``route_after_gates``, or

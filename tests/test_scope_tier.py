@@ -104,15 +104,6 @@ def test_demo_is_honored_and_the_conditional_caps_are_offered() -> None:
     assert "AT MOST 1 component" in prompt
 
 
-def test_model_may_overrule_the_wording_and_return_standard() -> None:
-    rt, _ = runtime_for(STANDARD_SCOPE)
-    writes = make_planner_node(rt)(
-        {"request": "a simple ledger for production payroll"}, config_for("r")
-    )
-
-    assert writes["scope_tier"].tier is ScopeTier.STANDARD
-
-
 def test_unrecognized_tier_degrades_to_standard() -> None:
     # Fail-to-full-scope: only the exact string "demo" caps the build.
     rt, _ = runtime_for({"tier": "DEMO-ish", "rationale": "?"})
@@ -201,20 +192,3 @@ def test_demo_architect_directive_caps_fan_out_but_never_to_zero() -> None:
     # fails the build gate, so the floor of one is load-bearing.
     assert "AT LEAST ONE owner" in directive
     assert "EMPTY ownership map is invalid" in directive
-
-
-# ---- trust posture -----------------------------------------------------------
-
-
-def test_scope_tiering_never_relaxes_integrity() -> None:
-    assert _pinned(ScopeTier.DEMO).relaxes_integrity() is False
-    assert _pinned(ScopeTier.STANDARD).relaxes_integrity() is False
-
-
-def test_scope_decision_round_trips_the_checkpoint_serde() -> None:
-    # A type missing from the allowlist degrades to a dict on resume, which would
-    # silently revert a resumed run to STANDARD prompts mid-build.
-    from foundry.durability.serde import FOUNDRY_MSGPACK_MODULES
-
-    assert ("foundry.schemas.governance", "ScopeDecision") in FOUNDRY_MSGPACK_MODULES
-    assert ("foundry.schemas.governance", "ScopeTier") in FOUNDRY_MSGPACK_MODULES

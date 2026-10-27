@@ -54,6 +54,7 @@ _CRITIQUE_KEY = "critique"
 _OMISSIONS_KEY = "security_abuse_omissions"
 # The planner's contract fit findings ride the same block and block the same way.
 _CONTRACT_KEY = "contract_findings"
+_COVERAGE_KEY = "coverage_findings"
 
 
 def _incomplete_steps(criterion: dict[str, Any]) -> list[str]:
@@ -186,11 +187,13 @@ class SpecGate:
                 "is mandatory (gov §1b)"
             )
         if self._critique_blocks(doc):
-            contract = self._contract_findings(doc)
-            if not contract or self._critique_blocks(doc, (_OMISSIONS_KEY,)):
+            contract = self._findings(doc, _CONTRACT_KEY)
+            coverage = self._findings(doc, _COVERAGE_KEY)
+            if not (contract or coverage) or self._critique_blocks(doc, (_OMISSIONS_KEY,)):
                 out.append("criteria-completeness critic flagged a security/abuse omission")
             # Verbatim: the planner's revision pass is handed these findings.
             out += [f"contract fit: {f}" for f in contract]
+            out += [f"coverage: {f}" for f in coverage]
         return tuple(out) if out else (f"{len(criteria)} criteria, all structurally complete",)
 
     @staticmethod
@@ -202,23 +205,23 @@ class SpecGate:
         return None
 
     @staticmethod
-    def _contract_findings(doc: Any) -> list[str]:
+    def _findings(doc: Any, key: str) -> list[str]:
         critique = doc.get(_CRITIQUE_KEY) if isinstance(doc, dict) else None
-        found = critique.get(_CONTRACT_KEY) if isinstance(critique, dict) else None
+        found = critique.get(key) if isinstance(critique, dict) else None
         if not isinstance(found, list):
             return []
         return [f for f in found if isinstance(f, str) and f.strip()]
 
     @staticmethod
     def _critique_blocks(
-        doc: Any, keys: tuple[str, ...] = (_OMISSIONS_KEY, _CONTRACT_KEY)
+        doc: Any, keys: tuple[str, ...] = (_OMISSIONS_KEY, _CONTRACT_KEY, _COVERAGE_KEY)
     ) -> bool:
-        """True iff the materialized critique block flags a security/abuse omission
-        or a contract fit finding.
+        """True iff the materialized critique block flags a security/abuse omission,
+        a contract fit finding or a coverage finding.
 
         Mirrors ``CriteriaCritique.spec_gate_blocking()`` over the RAW findings the
         materializer wrote: a non-empty ``security_abuse_omissions`` or
-        ``contract_findings`` list blocks.
+        ``contract_findings`` / ``coverage_findings`` list blocks.
         The block is OPTIONAL — its absence is "no flagged omission", never a PASS
         bit an agent can assert. A malformed block (wrong types) is treated as a
         present-but-uninterpretable finding and fails closed.

@@ -402,9 +402,10 @@ _PLAN_PAYLOAD: dict[str, Any] = {
         "intent": "Run the one-line request through the factory.",
         "assumptions": ["single user"],
         "unknowns": [],
-        "success_criteria": ["the requested behavior works"],
-        "must_haves": ["core feature"],
+        "success_criteria": [{"id": "SC-1", "text": "the requested behavior works"}],
+        "must_haves": [{"id": "MH-1", "text": "core feature"}],
         "nice_to_haves": [],
+        "deliverable": "cli",
     },
     "prd": {
         "title": "Requested service",
@@ -423,8 +424,8 @@ _PLAN_PAYLOAD: dict[str, Any] = {
     # Python without a bdd command: the gates keep the pinned pytest-bdd harness.
     "stack": {
         "language": "python", "framework": "", "package_manager": "pip", "install": "",
-        "build": "", "typecheck": "", "test": "pytest", "bdd": "", "run": "", "notes": "",
-        "contracts_file": "", "harness_files": [],
+        "build": "", "typecheck": "", "test": "pytest", "bdd": "",
+        "run": "python3 -c 'import app'", "notes": "", "contracts_file": "", "harness_files": [],
     },
     "interfaces": [],
     # A small build: one epic, its tickets inline (no per-epic calls).
@@ -439,7 +440,7 @@ _PLAN_PAYLOAD: dict[str, Any] = {
             "consumes": [],
         },
     ],
-    # One feature ticket and its paired test ticket.
+    # One feature ticket (also the entrypoint) and its paired test ticket.
     "tickets": [
         {
             "id": "T-001",
@@ -451,6 +452,7 @@ _PLAN_PAYLOAD: dict[str, Any] = {
             "files": ["app.py"],
             "implements": [],
             "consumes": [],
+            "entrypoint": True,
             "scenarios": [
                 {
                     "id": "AC-001",
@@ -459,6 +461,7 @@ _PLAN_PAYLOAD: dict[str, Any] = {
                     "then": ["it responds"],
                     "criticality": "normal",
                     "security_abuse": False,
+                    "covers": ["MH-1", "SC-1"],
                 },
                 {
                     "id": "AC-002",
@@ -467,6 +470,7 @@ _PLAN_PAYLOAD: dict[str, Any] = {
                     "then": ["the response is 401"],
                     "criticality": "high-risk",
                     "security_abuse": True,
+                    "covers": [],
                 },
             ],
         },
@@ -479,6 +483,7 @@ _PLAN_PAYLOAD: dict[str, Any] = {
             "files": ["tests/step_defs/test_t_001.py"],
             "implements": [],
             "consumes": [],
+            "entrypoint": False,
             "scenarios": [],
         },
     ],

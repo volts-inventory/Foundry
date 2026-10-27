@@ -34,6 +34,12 @@ class IntentBrief(FrozenModel):
     success_criteria: tuple[str, ...] = ()  # success in user terms
     must_haves: tuple[str, ...] = ()
     nice_to_haves: tuple[str, ...] = ()
+    # Stable ids the plan's scenarios cite in ``covers`` (aligned by index with
+    # ``must_haves`` / ``success_criteria``), and what the build delivers
+    # (app | library | cli | service; "" when undeclared).
+    must_have_ids: tuple[str, ...] = ()
+    success_criterion_ids: tuple[str, ...] = ()
+    deliverable: str = ""
     version: int = 1
     supersedes: str | None = None
     seq: Seq
@@ -71,6 +77,7 @@ class AcceptanceCriterion(FrozenModel):
     when: tuple[str, ...] = ()
     then: tuple[str, ...] = ()
     ticket_id: str | None = None
+    covers: tuple[str, ...] = ()  # the must-have / success-criterion ids it proves
     version: int = 1
     supersedes: str | None = None
     seq: Seq
@@ -103,17 +110,26 @@ class CriteriaCritique(FrozenModel):
     # or several producers, a consumer not ordered after its producer, an output
     # nothing uses): computed, not judged, and blocking like an omission.
     contract_findings: tuple[str, ...] = ()
+    # The planner's deterministic coverage check (an uncovered must-have or success
+    # criterion, a feature ticket without scenarios, no end-to-end entrypoint, no
+    # run command, work dropped at a cap): computed, and blocking the same way.
+    coverage_findings: tuple[str, ...] = ()
 
     def spec_gate_blocking(self) -> bool:
         """Omission of applicable security/abuse criteria FAILS the Spec gate
         (agents.md Layer 1 — Criteria-Completeness Critic SOP), as does a
-        contract fit finding.
+        contract fit or coverage finding.
 
         Blank/whitespace-only entries are ignored so this predicate matches the
         Spec gate's own re-derivation byte-for-byte (``SpecGate._critique_blocks``
         requires ``o.strip()`` truthy) — the materialize decision and the gate
         decision apply the SAME rule to a degenerate omission list."""
-        return any(o.strip() for o in (*self.security_abuse_omissions, *self.contract_findings))
+        return any(
+            o.strip() for o in (
+                *self.security_abuse_omissions, *self.contract_findings,
+                *self.coverage_findings,
+            )
+        )
 
 
 class SprintPlan(FrozenModel):

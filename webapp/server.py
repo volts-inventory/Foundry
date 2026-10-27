@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import contextlib
 import hmac
-import inspect
 import json
 import os
 import re
@@ -883,16 +882,13 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     if p.backend != "mock":
         threading.Thread(target=_quiet_watchdog, daemon=True,
                          name=f"quiet-watchdog-{p.id}").start()
-    # Pass the ticket-scheduler kwargs only when this foundry.cli.run knows them.
-    accepted = inspect.signature(run).parameters
-    sched: dict[str, Any] = {k: v for k, v in (("task_cb", task_cb), ("workers", p.workers),
-                               ("ticket_tiers", p.ticket_tiers or None))
-             if k in accepted and v is not None}
     try:
         try:
             result = run(
                 p.request,
-                **sched,
+                task_cb=task_cb,
+                workers=p.workers,
+                ticket_tiers=p.ticket_tiers or None,
                 progress_cb=progress,
                 activity_cb=activity,         # what the agent is doing INSIDE a step
                 mode=p.mode,

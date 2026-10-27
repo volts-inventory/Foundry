@@ -18,6 +18,7 @@ from __future__ import annotations
 import importlib
 
 from foundry.cli import RunResult, run
+from foundry.graph.supervisor import MODE_ASSISTANT
 from foundry.schemas.gates import GateStatus
 
 # A compiling module whose test COLLECTION fails (imports a missing module):
@@ -38,6 +39,7 @@ def test_run_completes_spec_core_path_and_opens_one_pr() -> None:
     result = run("build a tiny URL-shortener service", thread_id="cli-smoke-pass")
 
     assert isinstance(result, RunResult)
+    assert result.mode == MODE_ASSISTANT
     # Attested Spec / Build / Test PASS.
     assert result.gate_statuses.get("spec") is GateStatus.PASS
     assert result.gate_statuses.get("build") is GateStatus.PASS
@@ -45,9 +47,9 @@ def test_run_completes_spec_core_path_and_opens_one_pr() -> None:
     assert result.passed is True
     assert result.phase == "done"
 
-    # A content-addressed reviewed artifact is the PR subject.
+    # The PR opens against the content-addressed reviewed FeatureDiff handle.
     assert result.artifact_uri is not None
-    assert result.artifact_uri.startswith("cas://")
+    assert result.artifact_uri.startswith("cas://feature_diff/")
 
     # EXACTLY ONE emitted open_pr action — its key + payload uri are reported.
     assert result.open_pr_idempotency_key is not None
@@ -58,6 +60,9 @@ def test_run_completes_spec_core_path_and_opens_one_pr() -> None:
     summary = result.summary()
     assert "open_pr" in summary
     assert result.artifact_uri in summary
+
+    # No output_dir => no source tree is written.
+    assert result.output_root is None
 
 
 def test_idempotency_key_is_deterministic_across_runs() -> None:

@@ -5,9 +5,8 @@ body, so every downstream resolve/resolve_blob consumer only worked against a
 SYNTHETIC resolver in tests; a real run resolved nothing. These tests pin the
 store that closes the gap:
 
-* put_body / get_body round-trip several schema types; the uri ==
-  cas://sha256/<content_identity>; unknown-uri get_body/get_blob raise (fail-
-  closed); put_blob / get_blob round-trip raw bytes.
+* the put/get store contract is pinned for BOTH backends in
+  test_fs_artifact_store.py.
 * emit_artifact WITH a store stores the body and the handle uri matches the
   stored uri; WITH store=None it mints only (no store write) — backward-compat.
 * end-to-end-ish: drive a couple of REAL agent nodes with
@@ -30,8 +29,6 @@ from foundry.durability.artifact_store import ArtifactStore, UnknownArtifactErro
 from foundry.gates.attestation import ZoneBSigner
 from foundry.proxy import ModelProviderProxy
 from foundry.proxy.test_doubles import MockTransport
-from foundry.schemas.architecture import SystemDesign
-from foundry.schemas.implementation import FeatureDiff
 from foundry.schemas.product import AcceptanceCriterion, Criticality
 from foundry.state.seq import Seq
 from tests.planner_payload import plan_payload
@@ -61,75 +58,6 @@ def _criterion() -> AcceptanceCriterion:
     )
 
 
-def _system_design() -> SystemDesign:
-    return SystemDesign(
-        title="Todo service",
-        design_uri="cas://sha256/deadbeef",
-        components=("api", "store"),
-        adr_ids=("ADR-1",),
-        seq=_seq("principal_architect"),
-    )
-
-
-def _feature_diff() -> FeatureDiff:
-    return FeatureDiff(
-        diff_uri="cas://sha256/cafef00d",
-        task_id="T1",
-        branch="task/T1",
-        base_tree_sha="base-sha",
-        seq=_seq("junior_engineer"),
-    )
-
-
-# ---- put_body / get_body round-trip (several schema types) -------------------
-
-
-@pytest.mark.parametrize("body", [_criterion(), _system_design(), _feature_diff()])
-def test_put_body_get_body_round_trips_typed_bodies(body: Any) -> None:
-    store = ArtifactStore()
-    uri = store.put_body(body)
-    # uri is the body's content identity (== what emit_artifact mints).
-    assert uri == f"cas://sha256/{body.content_identity()}"
-    back = store.get_body(uri)
-    assert back == body
-    assert type(back) is type(body)
-
-
-def test_get_body_unknown_uri_raises_fail_closed() -> None:
-    store = ArtifactStore()
-    with pytest.raises(UnknownArtifactError):
-        store.get_body("cas://sha256/does-not-exist")
-
-
-def test_get_blob_unknown_uri_raises_fail_closed() -> None:
-    store = ArtifactStore()
-    with pytest.raises(UnknownArtifactError):
-        store.get_blob("cas://sha256/does-not-exist")
-
-
-# ---- put_blob / get_blob (raw bytes, sandbox-compatible digest) --------------
-
-
-def test_put_blob_get_blob_round_trips_bytes_and_str() -> None:
-    store = ArtifactStore()
-    uri = store.put_blob(b"--- /dev/null\n+++ b/x.py\n@@\n+print(1)\n")
-    assert uri.startswith("cas://sha256/")
-    assert store.get_blob(uri) == b"--- /dev/null\n+++ b/x.py\n@@\n+print(1)\n"
-    # str is encoded utf-8 and keyed by the SAME raw sha256 as the bytes.
-    assert store.put_blob("hello") == store.put_blob(b"hello")
-
-
-def test_put_blob_matches_sandbox_raw_sha256() -> None:
-    """The store keys blobs by the RAW sha256 of the bytes — EXACTLY
-    Sandbox.put_blob — so a diff blob mirrored sandbox->store keeps its uri."""
-    import hashlib
-
-    store = ArtifactStore()
-    data = b"some diff body"
-    uri = store.put_blob(data)
-    assert uri == f"cas://sha256/{hashlib.sha256(data).hexdigest()}"
-
-
 # ---- emit_artifact: store-backed vs mint-only (backward-compat) --------------
 
 
@@ -153,17 +81,6 @@ def test_emit_artifact_store_none_mints_only_no_store_write() -> None:
     # Nothing was written to the store: resolve fails closed.
     with pytest.raises(UnknownArtifactError):
         store.get_body(handle.uri)
-
-
-def test_put_body_at_explicit_uri_for_junior_feature_diff() -> None:
-    """The junior's FeatureDiff handle uri carries the idempotency KEY, not the
-    body content identity; put_body_at stores it under that exact uri so
-    resolve(feature_diff_handle) reconstitutes it."""
-    store = ArtifactStore()
-    diff = _feature_diff()
-    handle_uri = "cas://feature_diff/some-idempotency-key"
-    assert store.put_body_at(handle_uri, diff) == handle_uri
-    assert store.get_body(handle_uri) == diff
 
 
 # ---- end-to-end-ish: drive REAL agent nodes with a cas-backed runtime --------

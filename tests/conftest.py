@@ -13,12 +13,6 @@ import pytest
 _SLOW_FILES = frozenset(
     {
         "test_factory_graph.py",
-        "test_factory_graph_autonomous.py",
-        "test_factory_graph_gated.py",
-        "test_phase2_exit.py",
-        "test_phase4_exit.py",
-        "test_phase5_exit.py",
-        "test_supervisor_packs.py",
     }
 )
 

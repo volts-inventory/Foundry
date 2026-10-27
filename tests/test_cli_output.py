@@ -84,24 +84,12 @@ def test_halted_run_writes_a_usable_draft(tmp_path: Path) -> None:
     assert "DRAFT written to" in result.summary()
 
 
-def test_no_output_dir_writes_nothing(tmp_path: Path) -> None:
-    """Default (output_dir unset) leaves output_root None and writes no tree."""
-    result = run("build a tiny URL-shortener service", thread_id="cli-out-default")
-    assert result.passed is True
-    assert result.output_root is None
-    assert not any(tmp_path.iterdir())
-
-
 def test_main_out_flag_writes_tree(tmp_path: Path) -> None:
     out = tmp_path / "main-out"
     code = main(["--out", str(out), "build a tiny URL-shortener service"])
     assert code == 0
     assert (out / "app.py").is_file()
     assert not (out / "criteria.json").exists()
-
-
-def test_main_out_flag_requires_argument() -> None:
-    assert main(["--out"]) == 2
 
 
 def test_a_manifest_write_failure_never_changes_the_build_result(

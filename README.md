@@ -89,7 +89,7 @@ Two seams are deliberately independent:
 ```bash
 python -m foundry.cli [OPTIONS] "<one-line request>"
 
-  --backend <claude-cli|anthropic|openai|codex|ollama-gemma>  # WHERE model calls go (default: mock)
+  --backend <claude-cli|anthropic|openai|codex>  # WHERE model calls go (default: mock)
   --adapter <stub|raw-react|claude-code|proxy-agent>          # WHAT writes the code (default: derived)
   --profile <auto|pygame|node-web|…|none>  # stack → pinned gate commands (default: auto)
   --scope <auto|demo|standard>             # caps what the agents propose     (default: auto)
@@ -132,7 +132,6 @@ pick a stack from the installed toolchains.
 | `anthropic` | Claude API (SDK) | `ANTHROPIC_API_KEY` |
 | `openai` | OpenAI API (SDK `chat.completions`) | `OPENAI_API_KEY` |
 | `codex` | codex CLI (`codex exec`) | `OPENAI_API_KEY` |
-| `ollama-gemma` | Local Ollama endpoint | `FOUNDRY_OLLAMA_URL` |
 
 Set it per command (`--backend`), per shell (`FOUNDRY_MODEL_BACKEND`), or in `.env`.
 The direct-SDK backends keep the grammar-constrained verdict channel; the CLIs
@@ -204,7 +203,6 @@ uv run pytest -n auto -q                                  # full suite (slow e2e
 | `FOUNDRY_CODING_ADAPTER` | Default adapter | derived from backend |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | API keys | — |
 | `CLAUDE_CODE_OAUTH_TOKEN` | `claude-cli` token (via `claude setup-token`) | — |
-| `FOUNDRY_OLLAMA_URL` | `ollama-gemma` endpoint | — |
 | `FOUNDRY_MODEL_T1/T2/T3` | Pin exact model id per tier | curated map |
 | `FOUNDRY_MAX_SLOTS` | Parallelism ceiling | auto |
 | `FOUNDRY_COST_CAP_MICROUSD` / `FOUNDRY_TOKEN_CAP` | Spend / token envelope | — |

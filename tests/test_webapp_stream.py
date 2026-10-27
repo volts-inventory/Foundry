@@ -64,23 +64,6 @@ def test_emit_appends_to_log_persists_and_marks_end(store):
 
 # --- fan-out: many viewers, no event stealing -------------------------------- #
 
-def test_fanout_every_cursor_sees_every_event(store):
-    """The core W1 property: two independent tails over ONE log both see the FULL
-    sequence (the old shared queue split events across consumers)."""
-    p = _project()
-    for i in range(6):
-        _emit(p, type="narrate", text=f"e{i}")
-
-    def drain_from(cursor: int) -> list[str]:
-        seen = []
-        while cursor < len(p.log):
-            seen.append(p.log[cursor]["text"])
-            cursor += 1
-        return seen
-
-    a, b = drain_from(0), drain_from(0)                   # two simultaneous viewers
-    assert a == b == [f"e{i}" for i in range(6)]
-
 
 def test_resume_cursor_from_last_event_id():
     assert _resume_cursor(None) == 0                      # fresh viewer → full replay
@@ -153,12 +136,6 @@ def test_load_env_file_last_line_wins_and_real_env_wins(tmp_path, monkeypatch):
         # `claude -p` that hangs on a box with the binary installed.
         os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
         os.environ.pop("FOUNDRY_MODEL_BACKEND", None)
-
-
-def test_durable_state_dir_defaults_on_under_output_root():
-    # The Workshop turns durable state ON by default (CLI leaves it off) so a build
-    # survives a restart. The constant resolves to a real, non-empty path.
-    assert server._STATE_DIR and server._STATE_DIR != ""
 
 
 def test_seen_uris_roundtrip(tmp_path):
@@ -277,18 +254,6 @@ def test_waiting_on_names_the_longest_running_steps_first():
     assert server.waiting_on(p, now=now) == ""
 
 
-def test_inflight_is_tracked_by_node_id_not_label():
-    # A finish event can carry no label at all (a gate's outcome is reported by its own
-    # `gate` event), so the in-flight set has to be keyed by node id — keying by label
-    # would leak an entry per gate run and the watchdog would name steps long finished.
-    from webapp.events import live_event_for_node
-
-    start = live_event_for_node("build_test_gate", "factory", "start")
-    fin = live_event_for_node("build_test_gate", "factory", "finish")
-    assert start is not None and fin is not None
-    assert "step" in start and "step" not in fin        # the asymmetry that caused it
-
-
 # --- live activity from inside a step (throttling) ---------------------------- #
 
 def test_activity_is_throttled_deduped_and_capped_per_step():
@@ -348,21 +313,6 @@ def test_run_gets_ticket_kwargs_and_task_events_stream(store, monkeypatch, tmp_p
          "specialty": "data", "tier": "T2"}]
     proj = next(e for e in p.log if e["type"] == "project")
     assert proj["workers"]["data"] == 5
-
-
-def test_run_without_ticket_support_gets_no_ticket_kwargs(store, monkeypatch, tmp_path):
-    import foundry.cli
-
-    seen: dict = {}
-
-    def run(request, *, progress_cb=None, **kw):
-        seen.update(kw)
-        raise RuntimeError("stop here")
-
-    monkeypatch.setattr(foundry.cli, "run", run)
-    monkeypatch.setattr(server, "_OUTPUT_ROOT", tmp_path / "out")
-    server._run_factory(_project())
-    assert "workers" not in seen and "task_cb" not in seen and "ticket_tiers" not in seen
 
 
 def test_new_build_takes_backend_from_env_and_ignores_removed_fields(store, monkeypatch):

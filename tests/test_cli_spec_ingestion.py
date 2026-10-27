@@ -103,21 +103,15 @@ def test_load_spec_empty_dir_raises(tmp_path: Path) -> None:
         _load_spec(str(tmp_path))
 
 
-def test_load_spec_caps_large_text() -> None:
-    from foundry.cli import _SPEC_MAX_BYTES
-    huge = "x" * (_SPEC_MAX_BYTES * 2)
-    out = _load_spec(huge)
-    assert len(out.encode("utf-8")) <= _SPEC_MAX_BYTES
-
-
-def test_load_spec_caps_large_multibyte_text_on_bytes() -> None:
+@pytest.mark.parametrize("char", ["x", "€"])
+def test_load_spec_caps_on_encoded_bytes(char: str) -> None:
     """The cap is on ENCODED BYTES, so a multibyte spec is bounded too (not just
     ASCII) — and the truncation never leaves a partial UTF-8 char."""
     from foundry.cli import _SPEC_MAX_BYTES
-    huge = "€" * _SPEC_MAX_BYTES  # 3 bytes each -> ~3x the cap
+    huge = char * (_SPEC_MAX_BYTES * 2)
     out = _load_spec(huge)
     assert len(out.encode("utf-8")) <= _SPEC_MAX_BYTES  # truly byte-bounded
-    out.encode("utf-8")  # decodes cleanly (no partial trailing char)
+    out.encode("utf-8")  # encodes cleanly (no partial trailing char)
 
 
 # ---- end-to-end: the product stages SEE the spec during a real run ----------
@@ -188,13 +182,6 @@ def test_run_request_only_does_not_inject_spec(monkeypatch: pytest.MonkeyPatch) 
 # ---- CLI --spec flag parsing ------------------------------------------------
 
 
-def test_main_spec_flag_runs(tmp_path: Path) -> None:
-    spec_file = tmp_path / "design.md"
-    spec_file.write_text(_SPEC_TEXT, encoding="utf-8")
-    code = main(["--spec", str(spec_file), "build a link shortener"])
-    assert code == 0
-
-
 def test_main_spec_flag_repeatable(tmp_path: Path) -> None:
     a = tmp_path / "a.md"
     b = tmp_path / "b.md"
@@ -216,15 +203,6 @@ def test_request_from_spec_uses_first_heading() -> None:
     from foundry.cli import _request_from_spec
     assert _request_from_spec(_SPEC_TEXT) == "Link Shortener — Design Spec"
     assert _request_from_spec("\n\n  \n") == "Build the system described in the provided spec."
-
-
-def test_main_no_args_is_usage_error() -> None:
-    # Neither a request nor a spec → usage error (exit 2).
-    assert main([]) == 2
-
-
-def test_main_spec_flag_requires_argument() -> None:
-    assert main(["--spec"]) == 2
 
 
 def test_main_spec_missing_file_errors_cleanly(

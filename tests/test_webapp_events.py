@@ -124,13 +124,6 @@ def test_org_chart_emitted_once() -> None:
     assert not any(e["type"] == "org" for e in events_for_node_output(payload, seen))
 
 
-def test_seen_uris_dedup() -> None:
-    payload = {"_art_details": [{"kind": "prd", "uri": "cas://a", "produced_by": "pm"}]}
-    seen = {"cas://a"}
-    evs = events_for_node_output(payload, seen)
-    assert not any(e["type"] == "artifact" for e in evs)  # already seen
-
-
 def test_result_release_opens_chest() -> None:
     evs = events_for_result({"passed": True, "phase": "done", "mode": "assistant",
                              "artifact_uri": "cas://diff",

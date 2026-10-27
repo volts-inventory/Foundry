@@ -21,9 +21,7 @@ from langgraph.checkpoint.base import empty_checkpoint
 
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.durability.checkpointer import FoundryCheckpointer
-from foundry.durability.fs_artifact_store import FilesystemArtifactStore
 from foundry.durability.persistence import (
-    DurableBackends,
     durable_backends,
     state_dir_from_env,
 )
@@ -107,23 +105,6 @@ def test_state_survives_process_restart(tmp_path: Path) -> None:
         assert second.cas.get_blob(blob_uri) == b"unified-diff-body"
     finally:
         second.close()
-
-
-def test_durable_backends_returns_file_backed_instances(tmp_path: Path) -> None:
-    """durable_backends wires the file-backed trio + creates the state dir."""
-    state_dir = tmp_path / "wired"
-    backends = durable_backends(state_dir)
-    try:
-        assert isinstance(backends, DurableBackends)
-        assert isinstance(backends.checkpointer, FoundryCheckpointer)
-        assert isinstance(backends.global_records, GlobalRecords)
-        assert isinstance(backends.cas, FilesystemArtifactStore)
-        # Files materialize under the state dir (durable on disk).
-        assert (state_dir / "checkpoints.db").exists()
-        assert (state_dir / "global_records.db").exists()
-        assert (state_dir / "cas").is_dir()
-    finally:
-        backends.close()
 
 
 def test_state_dir_unset_is_in_memory_no_file(

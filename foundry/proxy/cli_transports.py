@@ -4,18 +4,16 @@ The factory runs ONE flow. The only thing a backend swaps is the proxy's
 egress seam (:class:`~foundry.proxy.model_provider_proxy.ProviderTransport`)
 together with the tier→model map and the lineage map it resolves against —
 nothing in the graph, agents, gates, or admission changes. This module adds
-four drop-in transports beside the default Anthropic SDK transport:
+three drop-in transports beside the default Anthropic SDK transport:
 
 * :class:`OpenAITransport`     — calls the OpenAI SDK ``chat.completions`` directly
   (the first-party OpenAI API, the direct-API twin of the Anthropic SDK transport);
 * :class:`ClaudeCliTransport`  — shells ``claude -p "<prompt>" --output-format json``;
-* :class:`CodexCliTransport`   — shells ``codex exec --json -m <model> "<prompt>"``;
-* :class:`OllamaTransport`     — POSTs ``/api/chat`` to a local Ollama server
-  (e.g. a ``gemma3`` model), the local/offline backend.
+* :class:`CodexCliTransport`   — shells ``codex exec --json -m <model> "<prompt>"``.
 
-and four presets (:func:`openai_backend`, :func:`claude_cli_backend`,
-:func:`codex_backend`, :func:`ollama_gemma_backend`) plus :func:`build_backend` /
-:func:`backend_from_env` that return a fully-wired :class:`ModelProviderProxy` —
+and three presets (:func:`openai_backend`, :func:`claude_cli_backend`,
+:func:`codex_backend`) plus :func:`build_backend` that return a fully-wired
+:class:`ModelProviderProxy` —
 same proxy class, same contract, different backend.
 
 TRUST NOTES (honest, per arch §2b / plan §0.3) — what stays and what changes
@@ -23,21 +21,21 @@ when the backend is not the Anthropic SDK:
 
 * *Observed-not-trusted still holds for lineage.* Each transport reports the
   model the backend SAYS it served (CLI JSON ``modelUsage`` key / Codex session
-  model / Ollama ``model``), which the proxy resolves through the curated
+  model / OpenAI response ``model``), which the proxy resolves through the curated
   :class:`LineageMap` and drift-checks against the pinned tier id. It is the
-  best wire-level observation a CLI/local server exposes; it is never the
+  best wire-level observation a CLI exposes; it is never the
   adapter self-report, and an unknown id still fails closed.
 * *The grammar-constrained verdict channel weakens to fail-closed.* The
   Anthropic SDK enforces the verdict JSON schema as a decoding grammar. The CLIs
   do not, so for schema calls these transports INSTRUCT json-only output and the
   proxy still parses + ``ZoneBSigner``-stamps the result; a non-conforming reply
   raises :class:`VerdictChannelError` (no PR, no signed verdict) rather than
-  being mis-admitted. Ollama honours ``format`` (a real JSON-schema constraint),
-  so it keeps the grammar. The safety property (no forged authentic verdict) is
-  preserved on all three; only availability degrades on the CLIs.
+  being mis-admitted. OpenAI honours ``response_format=json_schema``, so it keeps
+  the grammar. The safety property (no forged authentic verdict) is preserved on
+  all three; only availability degrades on the CLIs.
 * *The credential locus moves.* With the SDK the proxy is the sole secret
   holder. With ``claude``/``codex`` the secret lives in the CLI's own auth
-  (env/keychain) and with Ollama there is no secret. The proxy remains the sole
+  (env/keychain). The proxy remains the sole
   *egress path* (all calls route through it), but it is no longer the sole
   secret holder — record this when you pick a backend.
 """
@@ -46,8 +44,6 @@ from __future__ import annotations
 
 import json
 import re
-import urllib.error
-import urllib.request
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -55,7 +51,6 @@ from typing import Any, Literal
 from foundry.canonical import content_digest
 from foundry.proxy.lineage import (
     DEFAULT_LINEAGE_ENTRIES,
-    GEMMA_LINEAGE_ENTRIES,
     OPENAI_LINEAGE_ENTRIES,
     LineageMap,
 )
@@ -71,15 +66,11 @@ __all__ = [
     "CliResult",
     "CliRunner",
     "CodexCliTransport",
-    "HttpPost",
-    "OllamaTransport",
     "OpenAITransport",
     "TransportError",
-    "backend_from_env",
     "build_backend",
     "claude_cli_backend",
     "codex_backend",
-    "ollama_gemma_backend",
     "openai_backend",
 ]
 
@@ -201,8 +192,8 @@ CliRunner = Callable[[Sequence[str], float | None], CliResult]
 
 # Default wall-clock cap for a CLI backend subprocess. Without it a hung
 # `claude`/`codex` invocation blocks its worker thread forever (the transports
-# accept timeout_s=None, but the shipped backends never set it). 300s matches the
-# Ollama HTTP transport's cap; override via claude_cli_backend/codex_backend.
+# accept timeout_s=None, but the shipped backends never set it). Override via
+# claude_cli_backend/codex_backend.
 _DEFAULT_CLI_TIMEOUT_S = 300.0
 
 
@@ -606,8 +597,8 @@ class OpenAITransport:
     never needs a key or network — tests inject a fake ``client``.
 
     OpenAI honours ``response_format=json_schema`` (a real decoding grammar), so the
-    grammar-constrained verdict channel is PRESERVED here (like Ollama, unlike the
-    CLIs). The system block + messages are sent as real chat roles; the proxy-pinned
+    grammar-constrained verdict channel is PRESERVED here (unlike the CLIs). The
+    system block + messages are sent as real chat roles; the proxy-pinned
     ``temperature`` (deterministic gate/judge calls) and reasoning ``effort`` ride
     through unchanged.
     """
@@ -674,99 +665,15 @@ class OpenAITransport:
 
 
 # --------------------------------------------------------------------------- #
-# Backend 4 — Ollama (local Gemma)                                             #
-# --------------------------------------------------------------------------- #
-
-# Injectable HTTP seam (url, json-payload) -> json-response; tests fake it.
-HttpPost = Callable[[str, dict[str, Any]], dict[str, Any]]
-
-
-def _default_http_post(url: str, payload: dict[str, Any]) -> dict[str, Any]:
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=data, headers={"Content-Type": "application/json"}, method="POST"
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            body = resp.read().decode("utf-8")
-    except (urllib.error.URLError, OSError) as exc:
-        raise TransportError(f"ollama request failed: {exc}") from exc
-    parsed = json.loads(body)
-    if not isinstance(parsed, dict):
-        raise TransportError("ollama returned a non-object response")
-    return parsed
-
-
-class OllamaTransport:
-    """POST ``/api/chat`` to a local Ollama server (e.g. ``gemma3``).
-
-    Unlike the CLIs, Ollama supports ``format`` (a JSON-schema constraint), so
-    the grammar-constrained verdict channel is PRESERVED here. The system block
-    and messages are sent as real chat roles (no flattening). ``temperature``
-    pinned by the proxy (0 on deterministic gate/judge calls) rides in
-    ``options``."""
-
-    def __init__(
-        self,
-        *,
-        base_url: str = "http://localhost:11434",
-        http_post: HttpPost | None = None,
-    ) -> None:
-        self._url = base_url.rstrip("/") + "/api/chat"
-        self._post: HttpPost = http_post or _default_http_post
-
-    def send(self, request: dict[str, Any]) -> ProviderResponse:
-        model = request.get("model")
-        if not isinstance(model, str) or not model:
-            raise TransportError("ollama transport requires a pinned model id on the request")
-
-        messages: list[dict[str, str]] = []
-        sys_text = _system_text(request)
-        if sys_text:
-            messages.append({"role": "system", "content": sys_text})
-        for role, text in _message_pairs(request):
-            messages.append({"role": role, "content": text})
-
-        options: dict[str, Any] = {}
-        if "temperature" in request:
-            options["temperature"] = request["temperature"]
-        payload: dict[str, Any] = {"model": model, "messages": messages, "stream": False}
-        if options:
-            payload["options"] = options
-        schema = _schema_of(request)
-        if schema is not None:
-            payload["format"] = schema  # native JSON-schema constraint
-
-        resp = self._post(self._url, payload)
-        message = resp.get("message")
-        text = message.get("content", "") if isinstance(message, dict) else ""
-        if not isinstance(text, str):
-            text = str(text)
-        served = resp.get("model")
-        done_reason = resp.get("done_reason")
-        return ProviderResponse(
-            served_model=served if isinstance(served, str) else "",
-            request_id=f"ollama:{content_digest(request)[:16]}",
-            text=text,
-            usage=_usage(
-                input_tokens=_as_int(resp.get("prompt_eval_count")),
-                output_tokens=_as_int(resp.get("eval_count")),
-            ),
-            stop_reason=str(done_reason) if done_reason else "end_turn",
-        )
-
-
-# --------------------------------------------------------------------------- #
 # Presets — wire (transport + tier_models + lineage) into the SAME proxy        #
 # --------------------------------------------------------------------------- #
 
-BackendName = Literal["anthropic", "openai", "claude-cli", "codex", "ollama-gemma"]
+BackendName = Literal["anthropic", "openai", "claude-cli", "codex"]
 
 # Sensible default tier→model maps per backend. Override via build_backend(...,
 # tier_models=...) to pin the exact ids you run.
 OPENAI_TIER_MODELS: dict[str, str] = {"T1": "gpt-5", "T2": "gpt-5", "T3": "gpt-5-mini"}
 CODEX_TIER_MODELS: dict[str, str] = {"T1": "gpt-5-codex", "T2": "gpt-5", "T3": "gpt-5-mini"}
-GEMMA_TIER_MODELS: dict[str, str] = {"T1": "gemma3:27b", "T2": "gemma3:12b", "T3": "gemma3:4b"}
 
 
 def claude_cli_backend(
@@ -794,9 +701,9 @@ def openai_backend(
     **proxy_kwargs: Any,
 ) -> ModelProviderProxy:
     """Proxy backed by the OpenAI SDK (``chat.completions``). OpenAI lineage — a
-    genuinely different ``served_family`` from Anthropic, so the ``decorrelated``
-    profile becomes meaningful. The direct-API twin of the default Anthropic SDK
-    backend; ``client`` is injectable for tests (else built lazily from the env)."""
+    genuinely different ``served_family`` from Anthropic. The direct-API twin of
+    the default Anthropic SDK backend; ``client`` is injectable for tests (else
+    built lazily from the env)."""
     return ModelProviderProxy(
         transport=OpenAITransport(client=client),
         lineage_map=LineageMap((*OPENAI_LINEAGE_ENTRIES, *DEFAULT_LINEAGE_ENTRIES)),
@@ -813,29 +720,12 @@ def codex_backend(
     **proxy_kwargs: Any,
 ) -> ModelProviderProxy:
     """Proxy backed by ``codex exec``. OpenAI lineage — a genuinely different
-    served_family, so the ``decorrelated`` profile becomes meaningful. ``timeout_s``
-    hard-caps each subprocess (default 300s) so a hung CLI can't wedge the worker."""
+    served_family. ``timeout_s`` hard-caps each subprocess (default 300s) so a
+    hung CLI can't wedge the worker."""
     return ModelProviderProxy(
         transport=CodexCliTransport(runner=runner, timeout_s=timeout_s),
         lineage_map=LineageMap((*OPENAI_LINEAGE_ENTRIES, *DEFAULT_LINEAGE_ENTRIES)),
         tier_models=tier_models or CODEX_TIER_MODELS,
-        **proxy_kwargs,
-    )
-
-
-def ollama_gemma_backend(
-    *,
-    tier_models: dict[str, str] | None = None,
-    base_url: str = "http://localhost:11434",
-    http_post: HttpPost | None = None,
-    **proxy_kwargs: Any,
-) -> ModelProviderProxy:
-    """Proxy backed by a local Ollama Gemma server (offline-capable, keeps the
-    JSON-schema verdict grammar via Ollama ``format``)."""
-    return ModelProviderProxy(
-        transport=OllamaTransport(base_url=base_url, http_post=http_post),
-        lineage_map=LineageMap((*GEMMA_LINEAGE_ENTRIES, *DEFAULT_LINEAGE_ENTRIES)),
-        tier_models=tier_models or GEMMA_TIER_MODELS,
         **proxy_kwargs,
     )
 
@@ -854,32 +744,8 @@ def build_backend(name: BackendName, **kwargs: Any) -> ModelProviderProxy:
         return claude_cli_backend(**kwargs)
     if name == "codex":
         return codex_backend(**kwargs)
-    if name == "ollama-gemma":
-        return ollama_gemma_backend(**kwargs)
     raise ValueError(
         f"unknown backend {name!r} "
-        "(expected anthropic | openai | claude-cli | codex | ollama-gemma)"
+        "(expected anthropic | openai | claude-cli | codex)"
     )
 
-
-def backend_from_env(env: dict[str, str] | None = None, **kwargs: Any) -> ModelProviderProxy:
-    """Read ``FOUNDRY_MODEL_BACKEND`` (default ``anthropic``) and build it.
-
-    Lets an operator config-swap the backend without touching call sites:
-    ``FOUNDRY_MODEL_BACKEND=ollama-gemma`` runs the exact same flow on Gemma.
-
-    For the ``ollama-gemma`` backend, the server endpoint is read from
-    ``FOUNDRY_OLLAMA_URL`` (default in-process: ``http://localhost:11434``) so a
-    deployment points every worker at ONE shared Ollama service over the network
-    (the GPU is a host/infra concern, not a per-container one) instead of the
-    hardcoded localhost. An explicit ``base_url=`` kwarg still wins.
-    """
-    import os
-
-    source = env if env is not None else dict(os.environ)
-    name = source.get("FOUNDRY_MODEL_BACKEND", "anthropic").strip() or "anthropic"
-    if name == "ollama-gemma" and "base_url" not in kwargs:
-        url = source.get("FOUNDRY_OLLAMA_URL", "").strip()
-        if url:
-            kwargs["base_url"] = url
-    return build_backend(name, **kwargs)  # type: ignore[arg-type]

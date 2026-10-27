@@ -78,9 +78,10 @@ PLAN: dict[str, Any] = {
         "intent": "Let users manage a personal todo list.",
         "assumptions": ["single user"],
         "unknowns": [],
-        "success_criteria": ["a user can add a todo"],
-        "must_haves": ["add todo"],
+        "success_criteria": [{"id": "SC-1", "text": "a user can add a todo"}],
+        "must_haves": [{"id": "MH-1", "text": "add todo"}],
         "nice_to_haves": [],
+        "deliverable": "library",
     },
     "prd": {
         "title": "Todo service",
@@ -148,6 +149,7 @@ PLAN: dict[str, Any] = {
             "files": ["todo/api.py"],
             "implements": [],
             "consumes": ["TodoStore.add"],
+            "entrypoint": True,
             "scenarios": [
                 {
                     "id": "AC-001",
@@ -156,6 +158,7 @@ PLAN: dict[str, Any] = {
                     "then": ["it appears", "the count is 1"],
                     "criticality": "normal",
                     "security_abuse": False,
+                    "covers": ["MH-1", "SC-1"],
                 },
                 {
                     "id": "AC-002",
@@ -867,8 +870,9 @@ def test_cross_epic_order_follows_interfaces_then_sinks() -> None:
     # E2 consumes Store.load: its root waits for E1's implementer of it only.
     assert deps["E2-T01"] == ("E1-T02",)
     assert deps["E2-T02"] == ("E2-T01",)  # non-roots inherit the order transitively
-    # E3 consumes nothing E2 implements: its root waits for E2's sink ticket.
-    assert deps["E3-web-page"] == ("E2-T02",)
+    # E3 consumes nothing E2 implements: its root waits for E2's sink ticket; as
+    # the entrypoint it also waits for every upstream feature ticket.
+    assert deps["E3-web-page"] == ("E2-T02", "E1-T01", "E1-T02", "E2-T01")
 
 
 def test_a_dependency_on_another_epics_ticket_is_dropped() -> None:
@@ -995,7 +999,8 @@ def test_spec_fix_naming_a_criterion_reruns_only_its_epic() -> None:
     after: FactoryState = {**state, "artifacts": [*first["artifacts"], *second["artifacts"]]}
     live = {t.id: t for t in read_tickets(after, cas.resolve)}
     assert "E2-T02" not in live and "E2-T03" in live  # tombstoned, replaced
-    assert live["E3-web-page"].depends_on == ("E2-T03",)  # re-linked to E2's new sink
+    # Re-linked to E2's new sink (then the entrypoint's upstream feature tickets).
+    assert live["E3-web-page"].depends_on == ("E2-T03", "E1-T01", "E1-T02", "E2-T01")
     assert live["E1-T02"].scenario_ids == ("E1-AC02",)  # untouched epics kept
     assert "Re-planned epic(s) E2" in second["agent_journal"][0].summary
 
@@ -1056,7 +1061,7 @@ def test_an_empty_upstream_epic_is_looked_through_to_its_own_upstream() -> None:
     _, writes = _run_epics(plan, replies, cas)
     deps = {t.id: t.depends_on for t in _bodies(cas, writes, "ticket")}
     # E3 -> E2 (no tickets) -> E1: E3's root still waits for E1's sink.
-    assert deps["E3-web-page"] == ("E1-T03",)
+    assert deps["E3-web-page"] == ("E1-T03", "E1-T01", "E1-T02")
 
 
 def test_cross_epic_links_never_count_as_test_coverage() -> None:

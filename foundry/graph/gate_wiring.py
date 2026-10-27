@@ -285,6 +285,8 @@ def _criteria_payload(
     }
     if critique.contract_findings:
         block["contract_findings"] = sorted(critique.contract_findings)
+    if critique.coverage_findings:
+        block["coverage_findings"] = sorted(critique.coverage_findings)
     return {"criteria": criteria, "critique": block}
 
 

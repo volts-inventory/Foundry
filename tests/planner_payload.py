@@ -25,6 +25,15 @@ def _scenario(criterion: dict[str, Any]) -> dict[str, Any]:
     return {**out, "text": criterion.get("text", ""), "given": [], "when": [], "then": []}
 
 
+def _goal_ids(intent: dict[str, Any]) -> list[str]:
+    """The ids the planner gives the intent's must-haves / success criteria when
+    they are bare strings: positional ``MH-<n>`` / ``SC-<n>``."""
+    return [
+        *(f"MH-{i}" for i, _ in enumerate(intent.get("must_haves", ()), start=1)),
+        *(f"SC-{i}" for i, _ in enumerate(intent.get("success_criteria", ()), start=1)),
+    ]
+
+
 def plan_payload(
     *,
     intent: dict[str, Any],
@@ -40,7 +49,11 @@ def plan_payload(
 
     Each unit becomes one backend ticket owning that file and the scenarios for
     its criteria (a criterion goes to the first unit naming it); criteria no unit
-    names ride a file-less ticket so they still reach the Spec gate."""
+    names ride a file-less ticket so they still reach the Spec gate.
+
+    Full coverage by construction: the first scenario covers every must-have and
+    success criterion, the last ticket is the entrypoint (depending on every
+    other) and the deliverable defaults to a library (no run command needed)."""
     criteria_of = {
         t["unit"]: list(t.get("criterion_ids", ()))
         for t in (decomposition or {}).get("tasks", ())
@@ -71,9 +84,15 @@ def plan_payload(
             "files": [],
             "scenarios": [_scenario(c) for c in orphans],
         })
+    scenarios = [s for t in tickets for s in t["scenarios"]]
+    if scenarios:
+        scenarios[0]["covers"] = _goal_ids(intent)
+    if tickets:
+        tickets[-1]["entrypoint"] = True
+        tickets[-1]["depends_on"] = [t["id"] for t in tickets[:-1]]
     return {
         "scope": {"tier": tier, "rationale": "test scope", "signals": []},
-        "intent": intent,
+        "intent": {"deliverable": "library", **intent},
         "prd": {
             "title": prd["title"],
             "body": prd.get("prd_body", ""),
@@ -115,8 +134,9 @@ def _ticket(tid: str, specialty: str, *deps: str, **extra: Any) -> dict[str, Any
             "scenarios": [], **extra}
 
 
-def _scn(cid: str, *, abuse: bool = False) -> dict[str, Any]:
-    return {"id": cid, "given": ["g"], "when": ["w"], "then": ["t"], "security_abuse": abuse}
+def _scn(cid: str, *covers: str, abuse: bool = False) -> dict[str, Any]:
+    return {"id": cid, "given": ["g"], "when": ["w"], "then": ["t"], "security_abuse": abuse,
+            "covers": list(covers)}
 
 
 def _review(*missing: str) -> dict[str, Any]:
@@ -129,10 +149,18 @@ def multi_epic_plan() -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     E1 (storage) provides ``Store.save`` / ``Store.load``; E2 (api) depends on E1
     and consumes ``Store.load``, so its root ticket waits for E1's ``Store.load``
     implementer; E3 (web) depends on E2 but consumes none of E2's contracts, so its
-    root waits for E2's sink ticket. E3's ``web page`` id is not file-safe."""
+    root waits for E2's sink ticket. E3's ``web page`` id is not file-safe; it is
+    the entrypoint (E3 is downstream of every epic). Coverage is complete: each
+    must-have / success criterion is covered by a scenario in some epic."""
     plan = {
         "scope": {"tier": "standard", "rationale": "a real product", "signals": []},
-        "intent": {"intent": "A notes product with storage, an API and a web UI."},
+        "intent": {
+            "intent": "A notes product with storage, an API and a web UI.",
+            "must_haves": [{"id": "MH-1", "text": "notes persist"},
+                           {"id": "MH-2", "text": "notes are served over HTTP"}],
+            "success_criteria": [{"id": "SC-1", "text": "a user sees a note in the browser"}],
+            "deliverable": "app",
+        },
         "prd": {"title": "Notes", "body": "Users keep notes.", "required_capabilities": []},
         "criteria_review": _review(),
         "sprint_plan": {"milestones": ["M1"], "usd_cap_microusd": 1_000_000,
@@ -140,7 +168,7 @@ def multi_epic_plan() -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
         "design": {"title": "Notes", "body": "web -> api -> store",
                    "components": ["store", "api", "web"]},
         "adrs": [],
-        "stack": PYTHON_STACK,
+        "stack": {**PYTHON_STACK, "run": "python -m notes --check"},
         "interfaces": [
             {"name": "Store.save", "spec": "save(note) -> id"},
             {"name": "Store.load", "spec": "load(id) -> note"},
@@ -163,7 +191,7 @@ def multi_epic_plan() -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     replies = {
         "E1": {
             "tickets": [
-                _ticket("T01", "data", implements=["Store.save"], scenarios=[_scn("AC01")]),
+                _ticket("T01", "data", implements=["Store.save"], scenarios=[_scn("AC01", "MH-1")]),
                 _ticket("T02", "data", "T01", implements=["Store.load"],
                         scenarios=[_scn("AC02", abuse=True)]),
                 _ticket("T03", "test", "T01", "T02"),
@@ -173,14 +201,15 @@ def multi_epic_plan() -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
         "E2": {
             "tickets": [
                 _ticket("T01", "backend", implements=["Api.http"], consumes=["Store.load"],
-                        scenarios=[_scn("AC01")]),
+                        scenarios=[_scn("AC01", "MH-2")]),
                 _ticket("T02", "test", "T01"),
             ],
             "criteria_review": _review(),
         },
         "E3": {
             "tickets": [
-                _ticket("web page", "frontend", scenarios=[_scn("AC01")]),
+                _ticket("web page", "frontend", scenarios=[_scn("AC01", "SC-1")],
+                        entrypoint=True),
                 _ticket("T02", "test", "web page"),
             ],
             "criteria_review": _review(),

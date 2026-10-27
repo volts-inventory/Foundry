@@ -111,6 +111,8 @@ class Ticket(FrozenModel):
     scenario_ids: tuple[str, ...] = ()  # AcceptanceCriterion ids
     implements: tuple[str, ...] = ()  # InterfaceContract ids it provides
     consumes: tuple[str, ...] = ()  # InterfaceContract ids it calls
+    # Wires the whole app together end to end; depends on every feature ticket.
+    entrypoint: bool = False
     version: int = 1
     supersedes: str | None = None
     seq: Seq

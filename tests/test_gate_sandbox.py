@@ -649,3 +649,25 @@ def test_real_discriminator_suite_runs_confined(tmp_path: Path, monkeypatch: Any
     finally:
         if outside.exists():
             outside.unlink()
+
+
+def test_proxy_credentials_never_enter_the_sandbox_env(monkeypatch: Any) -> None:
+    """The egress relay adds Proxy-Authorization host-side; confined code (which may
+    reach any public host during install) must never see the operator's proxy password."""
+    from foundry.gates.sandbox import _confined_env
+
+    secret = "http://alice:S3cret@proxy.corp:3128"
+    for k in ("HTTP_PROXY", "https_proxy", "ALL_PROXY", "npm_config_proxy"):
+        monkeypatch.setenv(k, secret)
+    monkeypatch.setenv("JAVA_TOOL_OPTIONS",
+                       "-Dhttps.proxyHost=proxy.corp -Dhttps.proxyPassword=S3cret -Xmx1g")
+    env = _confined_env(None)
+    assert "S3cret" not in repr(env) and "alice" not in repr(env)
+    assert env["HTTP_PROXY"] == "http://proxy.corp:3128"
+    assert "-Dhttps.proxyHost=proxy.corp" in env["JAVA_TOOL_OPTIONS"]
+
+
+def test_install_forwarder_overrides_the_plain_http_proxy_too() -> None:
+    from foundry.gates import sandbox
+
+    assert '"HTTP_PROXY", "http_proxy"' in sandbox._FORWARDER

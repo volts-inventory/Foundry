@@ -55,7 +55,7 @@ import threading
 from base64 import b64encode
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 from .runner import GroundingUnavailable, run_grounding_command
 
@@ -177,11 +177,38 @@ _ENV_ALLOW = frozenset({
 })
 
 
+_PROXY_VARS = frozenset({
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy",
+    "npm_config_proxy", "npm_config_https_proxy", "YARN_HTTPS_PROXY",
+})
+_JAVA_PROXY_SECRET = re.compile(r"-D(?:http|https)\.proxy(?:User|Password)=\S*")
+
+
+def _without_userinfo(url: str) -> str:
+    """``http://user:pass@host:3128`` -> ``http://host:3128``: proxy credentials stay
+    host-side (the egress relay adds ``Proxy-Authorization`` itself)."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return ""
+    if parts.username is None and parts.password is None:
+        return url
+    host = parts.hostname or ""
+    netloc = f"[{host}]" if ":" in host else host
+    if parts.port is not None:
+        netloc += f":{parts.port}"
+    return urlunsplit(parts._replace(netloc=netloc))
+
+
 def _confined_env(
     env: dict[str, str] | None, extra_env: dict[str, str] | None = None
 ) -> dict[str, str]:
     base = os.environ if env is None else env
     kept = {k: v for k, v in base.items() if k in _ENV_ALLOW or k.startswith("LC_")}
+    for k in _PROXY_VARS & kept.keys():
+        kept[k] = _without_userinfo(kept[k])
+    if "JAVA_TOOL_OPTIONS" in kept:
+        kept["JAVA_TOOL_OPTIONS"] = _JAVA_PROXY_SECRET.sub("", kept["JAVA_TOOL_OPTIONS"])
     return {**kept, **(extra_env or {})}
 
 
@@ -360,8 +387,8 @@ if os.fork() == 0:
         os._exit(0)
 url = "http://127.0.0.1:%d" % ls.getsockname()[1]
 ls.close()
-for k in ("HTTPS_PROXY", "https_proxy", "npm_config_https_proxy", "npm_config_proxy",
-          "YARN_HTTPS_PROXY"):
+for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
+          "npm_config_https_proxy", "npm_config_proxy", "YARN_HTTPS_PROXY"):
     os.environ[k] = url
 for k in ("NO_PROXY", "no_proxy", "npm_config_noproxy"):
     os.environ[k] = "localhost,127.0.0.1,::1"   # nothing else is reachable directly

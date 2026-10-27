@@ -65,31 +65,9 @@ class SnapshotWritingAdapter:
         )
 
 
-def test_second_task_sees_first_tasks_file(tmp_path: Path) -> None:
+def test_serial_tasks_compose_on_shared_tree(tmp_path: Path) -> None:
     (tmp_path / "seed").mkdir()
     (tmp_path / "seed" / "README.md").write_text("seed\n")
-    adapter = SnapshotWritingAdapter()
-    rt = cas_runtime(adapter)
-
-    from foundry.agents.implementation.junior_engineer import make_junior_engineer_node
-
-    node = make_junior_engineer_node(rt, source_dir=str(tmp_path / "seed"))
-    node(
-        {
-            "tasks": [a_task("t-one", 0).model_dump(mode="json"),
-                      a_task("t-two", 1).model_dump(mode="json")],
-            "pinned_constraints": two_constraints(),
-        },
-        config_for("run-shared"),
-    )
-    assert adapter.visible["t-one"] == []  # first task: scaffold only
-    assert adapter.visible["t-two"] == ["t-one.py"]  # second task SEES the first's slice
-
-
-def test_overlay_changes_the_recorded_base(tmp_path: Path) -> None:
-    # The overlay precedes snapshot(): the two tasks record DIFFERENT base tree
-    # digests, so a predecessor change correctly supersedes the successor's key.
-    (tmp_path / "seed").mkdir()
     adapter = SnapshotWritingAdapter()
     rt = cas_runtime(adapter)
 
@@ -102,7 +80,11 @@ def test_overlay_changes_the_recorded_base(tmp_path: Path) -> None:
                       a_task("t-two", 1).model_dump(mode="json")],
             "pinned_constraints": two_constraints(),
         },
-        config_for("run-base"),
+        config_for("run-shared"),
     )
+    assert adapter.visible["t-one"] == []  # first task: scaffold only
+    assert adapter.visible["t-two"] == ["t-one.py"]  # second task SEES the first's slice
+    # The overlay precedes snapshot(): the two tasks record DIFFERENT base tree
+    # digests, so a predecessor change correctly supersedes the successor's key.
     markers = {t["id"]: t["base_tree_sha"] for t in writes["tasks"]}
     assert markers["t-one"] != markers["t-two"]

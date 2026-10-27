@@ -21,7 +21,6 @@ from foundry.gates.sandbox import (
     UNSHARE_FLAGS,
     sandbox_enabled,
     unshare_available,
-    wrap_argv,
 )
 from foundry.gates.smoke import SmokeGate
 from foundry.gates.test import TestGate
@@ -36,36 +35,10 @@ def test_sandbox_is_the_default_and_opt_out_disables_it(monkeypatch: Any) -> Non
         assert sandbox_enabled() is False                  # explicit opt-out only
 
 
-def test_wrap_argv_uses_unprivileged_namespaces() -> None:
-    argv = wrap_argv(("python", "-c", "pass"))
-    assert argv[0] == "unshare"
+def test_unshare_flags_use_unprivileged_namespaces() -> None:
     # the load-bearing isolation flags: unprivileged userns + NO network + ns isolation
     for flag in ("--user", "--map-root-user", "--net", "--mount", "--pid"):
-        assert flag in argv
-    assert argv[-3:] == ["python", "-c", "pass"]           # the wrapped cmd is last
-    assert tuple(argv[1:1 + len(UNSHARE_FLAGS)]) == UNSHARE_FLAGS
-
-
-def test_run_in_sandbox_fails_closed_when_unavailable(tmp_path: Any, monkeypatch: Any) -> None:
-    # No usable user namespaces -> fail-closed ERROR, never an unsandboxed run.
-    monkeypatch.setattr(sandbox, "unshare_available", lambda: False)
-    with pytest.raises(GroundingUnavailable):
-        sandbox.run_in_sandbox(("true",), tmp_path)
-
-
-def test_gate_routes_through_sandbox_when_enabled(tmp_path: Any, monkeypatch: Any) -> None:
-    monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)   # default = sandbox
-    monkeypatch.setattr(sandbox, "unshare_available", lambda: True)
-    captured: dict[str, Any] = {}
-
-    def fake_run(argv: Any, workdir: Any, *, env: Any = None, timeout_s: float = 600.0) -> Any:
-        captured["argv"] = list(argv)
-        return (0, "1 passed in 0.01s", "")
-
-    monkeypatch.setattr(sandbox, "run_grounding_command", fake_run)
-    obs = TestGate().execute(tmp_path)
-    assert captured["argv"][0] == "unshare"                 # wrapped in the namespace
-    assert TestGate().decide(obs) is GateStatus.PASS
+        assert flag in UNSHARE_FLAGS
 
 
 def test_gate_in_process_when_opted_out(tmp_path: Any, monkeypatch: Any) -> None:

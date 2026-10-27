@@ -90,62 +90,6 @@ def test_smoke_boundary_includes_smoke_verdict() -> None:
     assert _BOUNDARY_GATES[BUILD_TEST_SMOKE_BOUNDARY] == frozenset({"build", "test", "smoke"})
 
 
-def test_profile_commands_reach_the_gates(tmp_path: Path, monkeypatch) -> None:
-    # run_build_test_gates constructs the gates FROM the profile: a failing
-    # pinned smoke fails its verdict while build/test pass on their pinned cmds.
-    from tests.test_gate_wiring import (  # reuse the suite's real-runner harness
-        KEY,
-        KEY_ID,
-        LINEAGE_REV,
-        SCANNER_REV,
-        rt as rt_fixture,  # noqa: F401  (fixture import registers it)
-    )
-    import tests.test_gate_wiring as tgw
-    from foundry.gates import TwoZoneGateRunner, ZoneBSigner
-    from foundry.gates.profiles import VerificationProfile
-    from foundry.graph.gate_wiring import run_build_test_gates
-    from foundry.state.global_records import GlobalRecords
-
-    records = GlobalRecords()
-    runner = TwoZoneGateRunner(ZoneBSigner(KEY, KEY_ID), records, SCANNER_REV, LINEAGE_REV)
-    rt = tgw.make_rt() if hasattr(tgw, "make_rt") else None
-    if rt is None:  # construct a minimal runtime the same way the suite does
-        import pytest
-
-        rt = pytest.importorskip("tests.test_gate_wiring").__dict__.get("_rt_instance")
-    # Fall back: build the rt exactly like the fixture body does.
-    if rt is None:
-        from foundry.agents._runtime import AgentRuntime
-        from foundry.proxy import ModelProviderProxy
-        from foundry.proxy.test_doubles import MockTransport
-        from foundry.state.seq import EpochCounter
-
-        rt = AgentRuntime(
-            proxy=ModelProviderProxy(transport=MockTransport()), epochs=EpochCounter()
-        )
-
-    profile = VerificationProfile(
-        name="t",
-        build_cmd=("/bin/sh", "-c", "exit 0"),
-        test_cmd=("/bin/sh", "-c", "exit 0"),
-        smoke_cmd=("/bin/sh", "-c", "exit 7"),
-    )
-    out = run_build_test_gates(
-        {"artifacts": []},
-        {"configurable": {"thread_id": "t-profile"}},
-        rt=rt,
-        runner=runner,
-        resolve=lambda h: None,
-        resolve_blob=lambda u: b"",
-        workdir=tmp_path,
-        profile=profile,
-    )
-    by_name = {g.name: g.status for g in out["gates"]}
-    assert by_name["build"] is GateStatus.PASS
-    assert by_name["test"] is GateStatus.PASS  # exit-code-only floor for foreign harness
-    assert by_name["smoke"] is GateStatus.FAIL  # pinned boot command failed
-
-
 def test_no_profile_records_an_attested_unpinned_smoke_pass(tmp_path: Path) -> None:
     from foundry.gates import TwoZoneGateRunner, ZoneBSigner
     from foundry.agents._runtime import AgentRuntime

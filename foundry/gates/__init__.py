@@ -8,7 +8,6 @@ fallback runs, fail-closed (missing grounding ⇒ ERROR, never PASS).
 """
 
 from foundry.gates.attestation import DevGateWriteVerifier, ZoneBSigner
-from foundry.gates.audit import AuditGate
 from foundry.gates.build import BuildGate
 from foundry.gates.runner import (
     GateImpl,
@@ -21,7 +20,6 @@ from foundry.gates.spec import SpecGate
 from foundry.gates.test import TestGate
 
 __all__ = [
-    "AuditGate",
     "BuildGate",
     "DevGateWriteVerifier",
     "GateImpl",

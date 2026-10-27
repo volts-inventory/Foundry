@@ -102,8 +102,7 @@ class AuditFinding(FrozenModel):
 #
 # These records are the input-bound, content-addressed evidence the supply-chain
 # trust root produces and the deploy-time admission controller re-verifies:
-# the SLSA/in-toto provenance PREDICATE (what an attestation binds), and the
-# authoritative re-derivable SBOM (fuller than the agent-side `SBOMRef` handle).
+# the authoritative re-derivable SBOM (fuller than the agent-side `SBOMRef` handle).
 # They follow the same conventions as the records above: FrozenModel (frozen +
 # extra="forbid"), `seq: Seq` on every persisted/channel record, bodies as
 # content-addressed `*_uri` handles (DS9/L4), `default_factory` for mutable
@@ -117,80 +116,6 @@ class AuditFinding(FrozenModel):
 # task), NOT a production root of trust. The discipline is real; only the root is
 # dev-grade.
 # ===========================================================================
-
-
-class Material(FrozenModel):
-    """One pinned, hash-addressed build input (a SLSA `material` / in-toto link
-    materials entry — governance.md §4).
-
-    `uri` names the input (e.g. a git remote, a vendored dependency, the pinned
-    base image) and `digest` is its content address (`sha256:<hex>`). A material
-    is the atomic unit of the provenance's INPUT-BINDING: the predicate's
-    `materials` set is part of its identity, so changing ANY material's digest
-    changes the provenance the signature attests over (governance.md §4 — the
-    boundary is enforced on the build INPUTS, not just the environment)."""
-
-    uri: str  # what the input is (git remote / dep / base image)
-    digest: str  # its content address — "sha256:<hex>" (the pinned input hash)
-
-
-class SLSAProvenance(FrozenModel):
-    """SLSA / in-toto provenance PREDICATE — the input-bound provenance an
-    attestation binds (governance.md §4, "Provenance predicate binds gate-state").
-
-    Records WHAT was built (`subject_*` — the produced artifact's name + digest),
-    by WHOM (`builder_id` — the trusted hermetic builder's identity), HOW
-    (`build_type` + the `invocation_uri` config handle), and FROM WHAT
-    (`materials` — the pinned, hash-addressed inputs; `source_uri`/`source_digest`
-    the source commit). It also binds the trust-root grounding the predicate is
-    keyed to: `scanner_config_rev` (the pinned external scanner-config revision
-    hash, gov §2/§4), `trust_store_rev` (the class-4 verification trust store
-    revision, gov §2), and `gate_result_uris` (the WORM-anchored, hash-chained,
-    trusted-runner-attested gate results keyed to this `tree_sha`, gov §1c/§4) —
-    so the signature attests BOTH provenance AND "passed all required Foundry
-    gates, as computed by trusted infra." Target SLSA Build L3.
-
-    INPUT-BINDING (the load-bearing property): every field that names an input
-    (the materials' digests, `source_digest`, `tree_sha`, `scanner_config_rev`,
-    `gate_result_uris`) is part of `content_identity()`, so a valid attestation
-    over this predicate cannot be replayed onto a different tree / config / input
-    set — admission re-checks them per record (gov §5). Changing ANY material
-    digest yields a different predicate identity.
-
-    DEV-GRADE ROOT (plan §0.3): `builder_id` is a dev-grade builder identity and
-    `hermetic` asserts the LOGICAL hermeticity posture; the real air-gapped /
-    OIDC-federated build root is an ops task. The predicate shape + binding are
-    real.
-    """
-
-    build_type: str  # the build recipe identity (SLSA buildType)
-    builder_id: str  # the trusted builder's identity (dev-grade root, §0.3)
-    invocation_uri: str  # CAS handle to the build config/invocation (DS9)
-    source_uri: str  # the source repo/remote the build ran against
-    source_digest: str  # the source commit/tree the build ran against
-    tree_sha: str  # the integrated tree_sha the predicate + gate-state key to
-    subject_name: str  # the produced artifact's name/identifier
-    subject_digest: str  # the produced artifact's content address (what admission re-verifies)
-    materials: tuple[Material, ...] = ()  # pinned hash-addressed build inputs (§4)
-    gate_result_uris: tuple[str, ...] = ()  # WORM-anchored attested gate results (§1c/§4)
-    scanner_config_rev: str | None = None  # pinned external scanner-config rev (gov §2/§4)
-    trust_store_rev: str | None = None  # class-4 verification trust-store rev (gov §2)
-    hermetic: bool = True  # logical hermeticity posture (dev-grade isolation, §0.3)
-    predicate_type: str = "https://slsa.dev/provenance/v1"  # in-toto predicateType
-    version: int = 1
-    supersedes: str | None = None
-    seq: Seq
-
-    def material_digests(self) -> tuple[str, ...]:
-        """The pinned input digests, in declared order — the input set the
-        provenance binds (governance.md §4)."""
-        return tuple(m.digest for m in self.materials)
-
-    def binds_subject(self, subject_digest: str) -> bool:
-        """True iff this predicate's produced subject is exactly `subject_digest`
-        — the exact digest admission re-verifies for `this commit/builder`
-        (governance.md §5)."""
-        return self.subject_digest == subject_digest
 
 
 class SBOMComponent(FrozenModel):
@@ -219,8 +144,7 @@ class SBOM(FrozenModel):
     (no disallowed-license / critical-CVE deps; full resolution, no unpinned
     components — gov §4) has a content-addressed, re-checkable input. `tree_sha`
     is the tree the SBOM was generated for; `sbom_uri` keeps the out-of-band body
-    handle for the large canonical document (DS9). It is REUSED by the SLSA
-    predicate chain and the evidence pack as the resolved-inventory ground truth.
+    handle for the large canonical document (DS9).
 
     DEV-GRADE ROOT (plan §0.3): the inventory + binding are real; the trusted
     builder that AUTHORITATIVELY re-derives it in a hermetic environment is an ops

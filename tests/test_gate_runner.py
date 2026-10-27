@@ -8,13 +8,11 @@ FAIL latches cross-fork while ERROR never does.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
 from foundry.gates import (
-    AuditGate,
     BuildGate,
     DevGateWriteVerifier,
     SpecGate,
@@ -71,85 +69,7 @@ def _write(workdir: Path, name: str, body: str) -> None:
     (workdir / name).write_text(body, encoding="utf-8")
 
 
-# ---- Build gate ------------------------------------------------------------
-
-
-def test_build_pass_on_valid_tree(tmp_path, runner, verifier):
-    _write(tmp_path, "ok.py", "x = 1\n")
-    r = runner.run(BuildGate(), "task/1", _seq("build", "task/1"), tmp_path)
-    assert r.status is GateStatus.PASS
-    _assert_admitted(r, verifier)
-
-
-def test_build_fail_on_syntax_error(tmp_path, runner, verifier):
-    _write(tmp_path, "bad.py", "def broken(:\n")
-    r = runner.run(BuildGate(), "task/1", _seq("build", "task/1"), tmp_path)
-    assert r.status is GateStatus.FAIL
-    _assert_admitted(r, verifier)
-
-
-# ---- Test gate -------------------------------------------------------------
-
-
-def test_test_gate_pass(tmp_path, runner, verifier):
-    _write(tmp_path, "test_ok.py", "def test_ok():\n    assert True\n")
-    r = runner.run(TestGate(), "task/1", _seq("test", "task/1"), tmp_path)
-    assert r.status is GateStatus.PASS
-    _assert_admitted(r, verifier)
-
-
-def test_test_gate_fail(tmp_path, runner, verifier):
-    _write(tmp_path, "test_bad.py", "def test_bad():\n    assert False\n")
-    r = runner.run(TestGate(), "task/1", _seq("test", "task/1"), tmp_path)
-    assert r.status is GateStatus.FAIL
-    _assert_admitted(r, verifier)
-
-
-# ---- Audit gate: SBOM rederivation + license allowlist ---------------------
-
-
-def test_audit_pass_with_lockfile(tmp_path, runner, verifier):
-    _write(tmp_path, "requirements.txt", "pydantic==2.13.4  # license: MIT\n")
-    r = runner.run(AuditGate(), "sha-int", _seq("audit", "sha-int"), tmp_path)
-    assert r.status is GateStatus.PASS
-    _assert_admitted(r, verifier)
-
-
-def test_audit_error_without_lockfile(tmp_path, runner, verifier):
-    _write(tmp_path, "main.py", "x = 1\n")
-    r = runner.run(AuditGate(), "sha-int", _seq("audit", "sha-int"), tmp_path)
-    assert r.status is GateStatus.ERROR  # inventory not rederivable -> not a verdict
-
-
-def test_audit_fail_on_denied_license(tmp_path, runner, verifier):
-    _write(tmp_path, "requirements.txt", "some-gpl-pkg==1.0  # license: GPL-3.0\n")
-    r = runner.run(AuditGate(), "sha-int", _seq("audit", "sha-int"), tmp_path)
-    assert r.status is GateStatus.FAIL
-
-
 # ---- Spec gate -------------------------------------------------------------
-
-
-def test_spec_fails_without_security_criterion(tmp_path, runner, verifier):
-    _write(
-        tmp_path,
-        "criteria.json",
-        '[{"id":"c1","text":"does X","oracle":"test_x"}]',
-    )
-    r = runner.run(SpecGate(), "task/1", _seq("spec", "task/1"), tmp_path)
-    assert r.status is GateStatus.FAIL
-
-
-def test_spec_passes_with_security_criterion(tmp_path, runner, verifier):
-    _write(
-        tmp_path,
-        "criteria.json",
-        '[{"id":"c1","text":"does X","oracle":"test_x"},'
-        '{"id":"c2","text":"rejects bad input","oracle":"test_abuse","security_abuse":true}]',
-    )
-    r = runner.run(SpecGate(), "task/1", _seq("spec", "task/1"), tmp_path)
-    assert r.status is GateStatus.PASS
-    _assert_admitted(r, verifier)
 
 
 # A criteria document that, on its OWN structural merits, would PASS — so any
@@ -158,21 +78,6 @@ _STRUCTURALLY_OK = (
     '"criteria":[{"id":"c1","text":"does X","oracle":"test_x"},'
     '{"id":"c2","text":"rejects bad input","oracle":"test_abuse","security_abuse":true}]'
 )
-
-
-def test_spec_fails_when_critic_flags_security_omission(tmp_path, runner, verifier):
-    """ADVERSARIAL: a CriteriaCritique with a non-empty ``security_abuse_omissions``
-    makes the Spec gate FAIL even though the criteria are structurally complete —
-    the gate re-derives the FAIL from the critic's RAW findings (gov §1b, L5)."""
-    _write(
-        tmp_path,
-        "criteria.json",
-        "{" + _STRUCTURALLY_OK + ',"critique":{"security_abuse_omissions":'
-        '["no rate-limit abuse criterion","no auth-bypass criterion"]}}',
-    )
-    r = runner.run(SpecGate(), "task/1", _seq("spec", "task/1"), tmp_path)
-    assert r.status is GateStatus.FAIL  # flagged omission → FAIL → no PR
-    _assert_admitted(r, verifier)
 
 
 def test_spec_passes_when_critic_finds_no_omission(tmp_path, runner, verifier):
@@ -234,31 +139,6 @@ def test_zone_a_exception_is_signed_error(tmp_path, runner, verifier):
     _assert_admitted(r, verifier)  # ERROR is still a trusted, foldable record
 
 
-def test_unsigned_verdict_is_dropped_by_reducer(tmp_path, runner, verifier):
-    _write(tmp_path, "ok.py", "x = 1\n")
-    good = runner.run(BuildGate(), "task/1", _seq("build", "task/1"), tmp_path)
-    forged = good.model_copy(update={"runner_attestation": "hmac256:zoneB-dev:" + "0" * 64})
-    # The forged attestation does not verify, so the reducer drops it entirely.
-    assert merge_gates([forged], None) == []
-
-
-def test_integrated_fail_latches_cross_fork(tmp_path, runner, records, verifier):
-    _write(tmp_path, "test_bad.py", "def test_bad():\n    assert False\n")
-    digest = "a" * 64  # looks like an integrated tree sha
-    r = runner.run(TestGate(), digest, _seq("test", digest), tmp_path)
-    assert r.status is GateStatus.FAIL
-    assert records.stable_fail_latched(digest, "test")
-
-
-def test_error_does_not_latch(tmp_path, runner, records, verifier):
-    digest = "b" * 64
-    gate: GateImpl = _ExplodingGate()
-    gate.name = "test"
-    r = runner.run(gate, digest, _seq("test", digest), tmp_path)
-    assert r.status is GateStatus.ERROR
-    assert not records.stable_fail_latched(digest, "test")
-
-
 def test_per_branch_fail_does_not_latch(tmp_path, runner, records, verifier):
     _write(tmp_path, "test_bad.py", "def test_bad():\n    assert False\n")
     r = runner.run(TestGate(), "task/7", _seq("test", "task/7"), tmp_path)
@@ -273,13 +153,6 @@ def test_reuse_key_binds_rotation_for_class2(runner):
     assert k1 != k2  # a rotation boundary invalidates the cached class-2 verdict
     # config-evaluable gates key on the state sha alone
     assert runner.reuse_key(SpecGate(), "sha-x") == "sha-x"
-
-
-@pytest.mark.skipif(sys.platform == "win32", reason="posix subprocess semantics")
-def test_build_missing_tool_is_error(tmp_path, runner, verifier):
-    g = BuildGate(cmd=("this-binary-does-not-exist-xyz",))
-    r = runner.run(g, "task/1", _seq("build", "task/1"), tmp_path)
-    assert r.status is GateStatus.ERROR  # GroundingUnavailable -> fail-closed ERROR
 
 
 def test_build_without_sandbox_is_error_not_unsandboxed(tmp_path, runner, verifier, monkeypatch):

@@ -11,14 +11,11 @@ This is the **dev-grade tree-sitter/LSP substitute** built on stdlib `ast`:
   design**: edges are keyed on bare names (`Name.id` / `Attribute.attr`), so
   aliasing, dynamic dispatch, and same-name symbols in different modules are
   conflated. That is acceptable for a recall-oriented dev index (extra
-  neighbors cost tokens, not correctness) and is exactly why the retriever is
-  gated by `recall_eval` (evaluation.md §5) rather than trusted.
+  neighbors cost tokens, not correctness).
 - `retrieve(query_symbols, k)` returns direct symbol-index hits plus one-hop
   call/def-graph neighbors (callers AND callees — impact analysis), deduped,
   in deterministic order.
-- `recall_eval(labeled)` is the measured recall-floor hook (evaluation.md §5):
-  fraction of labeled known-relevant spans actually recalled.
-- `need_context` integration: an empty result means the caller should raise
+- `NeedContext` integration: an empty result means the caller should raise
   `NeedContext` rather than proceed over a partial view —
   `retrieve_or_need_context` does exactly that.
 """
@@ -145,25 +142,3 @@ class SymbolIndex:
         if not spans:
             raise NeedContext(query=", ".join(query_symbols))
         return spans
-
-    def recall_eval(
-        self,
-        labeled: list[tuple[list[str] | tuple[str, ...], list[Span]]],
-        k: int = 10,
-    ) -> float:
-        """Measured recall-floor hook (evaluation.md §5).
-
-        `labeled` pairs a query with its known-relevant spans; the result is
-        the fraction of expected spans recalled (micro-averaged). This number
-        GATES the retriever — a scorer/index change that drops it below the
-        floor does not ship.
-        """
-        total = 0
-        hit = 0
-        for query, expected in labeled:
-            retrieved = set(self.retrieve(query, k))
-            total += len(expected)
-            hit += sum(1 for span in expected if span in retrieved)
-        if total == 0:
-            raise ValueError("recall_eval requires at least one expected span")
-        return hit / total

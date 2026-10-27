@@ -148,15 +148,6 @@ class OwnershipMap(FrozenModel):
         """Canonical area an owner's domain belongs to (``backend`` default)."""
         return classify_area(owner, self.units_of(owner))
 
-    def areas_present(self) -> tuple[str, ...]:
-        """Distinct areas that actually have ≥1 domain, in canonical order.
-
-        Areas materialize from the work: an area appears here only when some
-        owner classifies into it (so a headless service has no ``frontend``,
-        a static site no ``data`` — no idle departments)."""
-        present = {self.area_of(owner) for owner in self.leads()}
-        return tuple(area for area in CANONICAL_AREAS if area in present)
-
     def leads_by_area(self) -> dict[str, tuple[str, ...]]:
         """area -> the owners (Tech-Leads) in it, in canonical area order.
 

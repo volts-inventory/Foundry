@@ -33,12 +33,13 @@ from foundry.durability.checkpointer import FoundryCheckpointer
 from foundry.execution.adapters.stub import StubAdapter
 from foundry.gates import DevGateWriteVerifier, TwoZoneGateRunner, ZoneBSigner
 from foundry.graph.factory_graph import build_factory_graph, terminal_gates_pass
+from foundry.graph.supervisor import DEFAULT_ROUTE_CAPS_MICROUSD
 from foundry.proxy import ModelProviderProxy
 from foundry.proxy.test_doubles import MockTransport
 from foundry.schemas.architecture import OwnershipMap, SystemDesign
 from foundry.schemas.base import Artifact, FrozenModel
 from foundry.schemas.gates import GateStatus, JudgmentProvenance
-from foundry.schemas.implementation import FeatureDiff
+from foundry.schemas.implementation import FeatureDiff, Specialty, Ticket
 from foundry.schemas.product import (
     AcceptanceCriterion,
     CriteriaCritique,
@@ -191,6 +192,11 @@ def _synthetic_resolve(handle: Artifact) -> FrozenModel:
             judgment_provenance=JudgmentProvenance.SELF,
             seq=handle.seq,
         )
+    if handle.kind == "ticket":
+        tid = f"T-{handle.seq.local:03d}"
+        # No `files`: unrestricted write scope, so the canned diff lands whole.
+        return Ticket(id=tid, title=f"Ticket {tid}", specialty=Specialty.BACKEND,
+                      seq=handle.seq)
     if handle.kind == "feature_diff":
         return FeatureDiff(
             diff_uri=_DIFF_BODY_URI,
@@ -282,17 +288,25 @@ def test_factory_graph_passes_end_to_end_and_opens_one_pr(tmp_path: Any) -> None
         reset_gate_write_verifier(token)
         ckpt.close()
 
+    # Triage seeded route + budget.
+    assert final["route"] == "greenfield"
+    assert final["budget"].cap_microusd == DEFAULT_ROUTE_CAPS_MICROUSD["greenfield"]
+
     # The full phase order ran: every layer's artifacts landed.
     kinds = {a.kind for a in final.get("artifacts") or ()}
     assert {"prd", "acceptance_criterion", "system_design", "feature_diff"} <= kinds
     assert {"test_plan", "e2e_report"} <= kinds
 
-    # Terminal gates are runner-ATTESTED and all PASS.
+    # Terminal gates are runner-ATTESTED and all PASS; advancement only on PASS.
     statuses = _gates_by_name(final)
     assert statuses.get("spec") is GateStatus.PASS
     assert statuses.get("build") is GateStatus.PASS
     assert statuses.get("test") is GateStatus.PASS
+    # The reviewer's judgment verdict also rode `gates` (admitted by merge_gates).
+    assert statuses.get("review") is GateStatus.PASS
     assert terminal_gates_pass(final) is True
+    # No fix iterations were needed (the convergence counter stayed at 0).
+    assert final["budget"].fix_attempts_since_all_green == 0
 
     # EXACTLY ONE open_pr ExternalAction, opened against the integrated FeatureDiff.
     prs = _open_pr_actions(final)
@@ -343,7 +357,10 @@ def test_kill_then_resume_does_not_duplicate_pr(tmp_path: Any) -> None:
 
 def test_halted_run_emits_no_pr(tmp_path: Any) -> None:
     """A Test ERROR routes to bounded fix and never advances to an attested PASS;
-    the emit guard therefore opens NO PR (governance §1/§5)."""
+    the emit guard therefore opens NO PR (governance §1/§5).
+
+    An ERROR (not a hard FAIL) exercises the route-back path: it never latches
+    (infra, DS7), so the bounded ``fix`` counter must converge the loop."""
     src = tmp_path / "src"
     src.mkdir()
     (src / "README.md").write_text("seed\n")
@@ -359,7 +376,16 @@ def test_halted_run_emits_no_pr(tmp_path: Any) -> None:
         reset_gate_write_verifier(token)
         ckpt.close()
 
+    # Spec advanced (PASS); the build compiles; the Test gate is a signed ERROR
+    # (collection import failure) — never an advance.
     statuses = _gates_by_name(final)
+    assert statuses.get("spec") is GateStatus.PASS
+    assert statuses.get("build") is GateStatus.PASS
     assert statuses.get("test") is GateStatus.ERROR
     assert terminal_gates_pass(final) is False
+    # Bounded: the convergence counter reached the bound and routing halted rather
+    # than spinning. An ERROR never latches (infra, not a verdict).
+    assert final["budget"].fix_attempts_since_all_green >= 2
+    test_verdict = next(g for g in final["gates"] if g.name == "test")
+    assert not records.stable_fail_latched(test_verdict.run_against, "test")
     assert _open_pr_actions(final) == []  # no PR for a failed run

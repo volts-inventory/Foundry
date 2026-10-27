@@ -9,6 +9,7 @@ trimming and resume are all observable.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
@@ -387,7 +388,8 @@ def test_a_token_cap_commits_the_siblings_and_resume_skips_them(tmp_path: Path) 
     assert not cap_stopped(resumed)
 
 
-def test_supervisor_raises_the_cap_after_committing_and_resumes(tmp_path: Path) -> None:
+@pytest.mark.parametrize("resume", ["raise cap", "remove meter"])
+def test_a_cap_stopped_supervisor_run_resumes(tmp_path: Path, resume: str) -> None:
     from tests.test_supervisor import _SCRIPTS, KEY, KEY_ID, _runner
     from tests.test_supervisor import _config as _sup_config
 
@@ -417,45 +419,17 @@ def test_supervisor_raises_the_cap_after_committing_and_resumes(tmp_path: Path) 
         built = set(_diffs(committed.values))
         assert {"T-001", "T-003"} <= built and "T-002" not in built
         rec.calls.clear()
-        with pytest.raises(TokenCapExceeded):  # still spent: stays stopped
-            app.invoke(None, cfg)
-        meter.cap = 2 * 10**9  # the operator raises the cap and resumes
+        if resume == "raise cap":
+            with pytest.raises(TokenCapExceeded):  # still spent: stays stopped
+                app.invoke(None, cfg)
+            meter.cap = 2 * 10**9  # the operator raises the cap and resumes
+        else:
+            proxy.token_meter = None  # the operator resumes with the cap removed
         final = app.invoke(None, cfg)
     finally:
         reset_gate_write_verifier(token)
     assert rec.calls.count("T-002") == 1
     assert "T-001" not in rec.calls and "T-003" not in rec.calls
-    assert {"T-001", "T-002", "T-003"} <= set(_diffs(final))
-
-
-def test_a_cap_stopped_run_resumed_without_a_cap_continues(tmp_path: Path) -> None:
-    from tests.test_supervisor import _SCRIPTS, KEY, KEY_ID, _runner
-    from tests.test_supervisor import _config as _sup_config
-
-    store = ArtifactStore()
-    meter = TokenMeter(10**9)
-    rec = _Recorder(cap_on="T-002", meter=meter)
-    proxy = ModelProviderProxy(MockTransport.scripted(dict(_SCRIPTS), default_verdict="approve"),
-                               signer=ZoneBSigner(KEY, KEY_ID))
-    proxy.token_meter = meter
-    rt = AgentRuntime(proxy=proxy, adapter=rec, cas=store)
-    src = tmp_path / "src"
-    src.mkdir()
-    records = GlobalRecords()
-    app = build_supervisor_graph(
-        rt, runner=_runner(records), resolve=store.resolve, resolve_blob=store.resolve_blob,
-        source_dir=str(src), max_fix_attempts=1,
-    ).compile(checkpointer=MemorySaver())
-    cfg = _sup_config("uncapped-run")
-    token = set_gate_write_verifier(DevGateWriteVerifier(KEY, KEY_ID, records))
-    try:
-        with pytest.raises(TokenCapExceeded):
-            app.invoke(_state(store, _wave_of_three()), cfg)
-        proxy.token_meter = None  # the operator resumes with the cap removed
-        final = app.invoke(None, cfg)
-    finally:
-        reset_gate_write_verifier(token)
-    assert rec.calls.count("T-002") == 1
     assert {"T-001", "T-002", "T-003"} <= set(_diffs(final))
     assert not cap_stopped(final)
 
@@ -501,6 +475,7 @@ def test_fix_reentry_runs_the_fixer_not_the_tickets(tmp_path: Path) -> None:
         ran.extend(step)
     assert ran == ["fixer"]
     assert rec.calls[-1] == "fix-0" and rec.seen["fix-0"]["a.py"] == "# written by T-001\n"
+    assert "criteria.json" not in rec.seen["fix-0"]  # the oracle stays out of the worktree
 
 
 # ---- per-wave integration check (§2b) ------------------------------------------
@@ -579,23 +554,61 @@ def test_a_spent_fix_budget_halts_the_waves_in_order(tmp_path: Path) -> None:
     assert [t.id for t in pending_wave(out, store.resolve)] == ["T-002"]  # supervisor halts
 
 
-def test_without_tickets_the_ownership_lane_path_runs(tmp_path: Path) -> None:
-    from foundry.agents.implementation.senior_engineer import DESIGN_KIND, OWNERSHIP_KIND
-    from foundry.schemas.architecture import OwnershipMap, SystemDesign
-
+@pytest.mark.parametrize("phase", [None, "build_test_fix"])
+def test_without_tickets_the_subgraph_builds_nothing(tmp_path: Path, phase: str | None) -> None:
+    # The planner always emits tickets; with none there is no work and no fix target,
+    # so START goes straight to END and the gates fail on the empty tree.
     store = ArtifactStore()
     rec = _Recorder()
-    own = OwnershipMap(owners={"api.py": "owner-a"}, seq=_seq(0))
-    design = SystemDesign(title="t", design_uri="cas://d", components=("api",), seq=_seq(1))
-    state = _state(store, [], artifacts=[
-        emit_artifact(own, OWNERSHIP_KIND, "p", own.seq, store=store),
-        emit_artifact(design, DESIGN_KIND, "p", design.seq, store=store),
-    ])
+    state = _state(store, [], **({"phase": phase} if phase else {}))
     ran: list[str] = []
     app = _graph(_runtime(rec, store), store, tmp_path).compile()
     for step in app.stream(state, _config(), stream_mode="updates"):
         ran.extend(step)
-    assert "engineering" not in ran and "backend_engineer" in ran
+    assert ran == [] and rec.calls == []
+
+
+def test_adapter_triage_is_forwarded_never_a_gate_result(tmp_path: Path) -> None:
+    from foundry.execution.adapters.stub import StubAdapter
+    from foundry.schemas.gates import GateResult, GateTriage
+
+    store = ArtifactStore()
+    rt = _runtime(StubAdapter(triage_note="needs a test"), store)
+    out = _graph(rt, store, tmp_path).compile().invoke(
+        _state(store, [_ticket("T-001", 0)]), _config())
+    assert set(_diffs(out)) == {"T-001"}
+    assert not out.get("gates")  # L5: agents never mint a GateResult
+    triage = out["gate_triage"]
+    assert any(t.explanation == "needs a test" for t in triage)
+    assert all(isinstance(t, GateTriage) and not isinstance(t, GateResult) for t in triage)
+
+
+class _ConstantDiffAdapter:
+    """Every ticket writes IDENTICAL worktree content + diff bytes -> identical
+    snapshot AND blob digests, so concurrent workers collide on the shared
+    content-addressed store."""
+
+    supports_turn_snapshots = True
+    name = "constant-diff"
+
+    def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
+        (Path(sandbox.worktree) / "same.txt").write_text("constant")
+        return AdapterResult(diff_uri=sandbox.put_blob(b"identical-diff"),
+                             snapshot_digest=sandbox.snapshot())
+
+
+def test_concurrent_identical_writes_to_a_shared_store_are_safe(tmp_path: Path) -> None:
+    """Race regression: a durable snapshot_store + rt.cas shared by pool workers must
+    survive concurrent identical-digest writes. Pre-fix this raised FileExistsError /
+    'Directory not empty' (a PID-only temp name shared across threads)."""
+    store = ArtifactStore()
+    tickets = [_ticket("T-001", 0, files=("a.py",)), _ticket("T-002", 1, files=("b.py",))]
+    app = _graph(_runtime(_ConstantDiffAdapter(), store), store, tmp_path,
+                 snapshot_store=str(tmp_path / "store")).compile()
+    out = app.invoke(_state(store, tickets), _config())
+    assert set(_diffs(out)) == {"T-001", "T-002"}  # one wave, no race crash
+    digest = hashlib.sha256(b"identical-diff").hexdigest()
+    assert store.resolve_blob(f"cas://sha256/{digest}") == b"identical-diff"
 
 
 # ---- pool: per-specialty limits + events --------------------------------------

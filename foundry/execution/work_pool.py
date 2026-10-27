@@ -107,21 +107,15 @@ __all__ = [
     "TaskState",
     "TaskStatus",
     "WorkPool",
-    "allocate_budget_tree",
     "allocate_lineage_quotas",
 ]
 
-# Lineage bucket for work with no resolved domain/area (fallback; also the global
-# axis label). Kept in sync with ExecutionTask.lineage's default.
-_DEFAULT_LINEAGE = "default"
-
-
 def allocate_lineage_quotas(weights: Mapping[str, int], global_cap_microusd: int) -> dict[str, int]:
     """Split a global micro-USD envelope across lineages proportional to ``weights``
-    — the budget tree the org fan-out spends down (org_fanout_design.md, Wave D).
+    (the ticket path's lineage is the ticket's specialty).
 
-    The Program Manager owns one global cap; it sub-allocates a per-lineage (per-
-    AREA) quota so one area's fan-out cannot starve the others (the noisy-neighbor
+    One global cap is sub-allocated as a per-lineage quota so one lineage's fan-out
+    cannot starve the others (the noisy-neighbor
     guard, ops §6 / arch §4). FLOOR division guarantees **Σ(allocations) ≤
     global_cap** — a fail-closed invariant: the sum of the children's quotas can
     never let total committed spend exceed the parent envelope (any rounding
@@ -140,42 +134,6 @@ def allocate_lineage_quotas(weights: Mapping[str, int], global_cap_microusd: int
         if weight > 0
     }
 
-
-def allocate_budget_tree(
-    domain_area: Mapping[str, str],
-    domain_weight: Mapping[str, int],
-    global_cap_microusd: int,
-) -> dict[str, int]:
-    """The two-level org budget tree: global envelope -> per-AREA -> per-DOMAIN
-    (org_fanout_design.md, Wave D). The Program Manager splits the global cap
-    across present areas (by area task-weight), then each Area Manager splits ITS
-    area cap across the domains it owns (by domain task-weight) — both levels by
-    the floor-division :func:`allocate_lineage_quotas`.
-
-    Returns a flat ``{domain -> quota}`` (the per-domain lineage quotas the pool
-    meters against), so a domain that exhausts its share is rejected even when its
-    SIBLING domains in the same area are idle (true per-domain isolation) and even
-    when the global ledger has room. Both levels are floor-allocated, so
-    **Σ(domain quotas) ≤ Σ(area quotas) ≤ global_cap** — fail-closed at every tier.
-    ``global_cap <= 0`` (unlimited) => ``{}`` (no per-domain limit). Pure +
-    deterministic: a resume re-derives the identical tree."""
-    if global_cap_microusd <= 0:
-        return {}
-    area_weight: dict[str, int] = {}
-    for domain, weight in domain_weight.items():
-        if weight > 0:
-            area = domain_area.get(domain, _DEFAULT_LINEAGE)
-            area_weight[area] = area_weight.get(area, 0) + weight
-    area_caps = allocate_lineage_quotas(area_weight, global_cap_microusd)
-    out: dict[str, int] = {}
-    for area, area_cap in area_caps.items():
-        in_area = {
-            domain: weight
-            for domain, weight in domain_weight.items()
-            if weight > 0 and domain_area.get(domain, _DEFAULT_LINEAGE) == area
-        }
-        out.update(allocate_lineage_quotas(in_area, area_cap))
-    return out
 
 # A worker, having claimed a task, builds its OWN sandbox + adapter from the task.
 # The pool is handed FACTORIES (not live instances) precisely because a real

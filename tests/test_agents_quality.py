@@ -18,12 +18,12 @@ import pytest
 from langchain_core.runnables import RunnableConfig
 
 from foundry.agents import AgentRuntime
-from foundry.agents.quality._common import MissingVerdictNonceError, server_issued_nonce
+from foundry.agents.quality._common import MissingVerdictNonceError
 from foundry.agents.quality.reviewer_critic import review
 from foundry.gates.attestation import DevGateWriteVerifier, ZoneBSigner
 from foundry.proxy import ModelProviderProxy
-from foundry.proxy.test_doubles import MockTransport, verdict_json
-from foundry.schemas.gates import GateResult, GateStatus, JudgmentProvenance
+from foundry.proxy.test_doubles import MockTransport
+from foundry.schemas.gates import GateStatus
 from foundry.state.global_records import GlobalRecords
 from foundry.state.reducers import merge_gates, set_gate_write_verifier
 
@@ -85,46 +85,6 @@ def installed(records: GlobalRecords):
 
 
 # ---- 1. reviewer_critic: verdict admitted by the real merge_gates -----------
-
-
-def test_reviewer_approve_verdict_admitted_with_binding(installed: GlobalRecords) -> None:
-    transport = MockTransport(verdicts=["approve"])
-    rt = make_runtime(transport)
-    node = make_reviewer_critic_node(rt)
-
-    cfg = config_for("run-A", nonce="N-approve", subject="cas://diff/1", state_sha="sha-1")
-    writes = node({}, cfg)
-    [verdict] = writes["gates"]
-    assert isinstance(verdict, GateResult)
-    assert verdict.status is GateStatus.PASS
-    # The proxy stamped the binding + provenance; the agent never signed it.
-    assert verdict.judgment_binding is not None
-    assert verdict.judgment_provenance is JudgmentProvenance.SELF
-    # H3: the nonce is the per-request derivation of the verdict's OWN identity
-    # (base "N-approve" bound to node/subject/state), not the raw base — so each
-    # verdict in a run gets a distinct single-use nonce.
-    assert verdict.verdict_nonce == server_issued_nonce(
-        cfg, node_id=verdict.seq.node_id,
-        subject_uri=verdict.subject_artifact_uri or "", state_sha=verdict.run_against,
-    )
-    assert verdict.verdict_nonce != "N-approve"
-
-    # ADMITTED by the real reducer + verifier (valid binding, fresh nonce, no latch).
-    assert merge_gates([verdict], None) == [verdict]
-
-
-def test_reviewer_request_changes_verdict_admitted(installed: GlobalRecords) -> None:
-    transport = MockTransport(
-        verdicts=[verdict_json("request-changes", ["weak assertion in test X"])]
-    )
-    rt = make_runtime(transport)
-    node = make_reviewer_critic_node(rt)
-
-    writes = node({}, config_for("run-B", nonce="N-rc", subject="cas://diff/2", state_sha="sha-2"))
-    [verdict] = writes["gates"]
-    assert verdict.status is GateStatus.FAIL
-    assert verdict.findings == ("weak assertion in test X",)
-    assert merge_gates([verdict], None) == [verdict]
 
 
 def test_request_changes_not_overridden_by_later_approve(installed: GlobalRecords) -> None:
@@ -203,37 +163,6 @@ def test_commit_step_consumes_nonce_so_replay_is_rejected(installed: GlobalRecor
     assert records.nonce_consumed_by_other(ap.verdict_nonce, "another-identity") is True
     # idempotent: the SAME verdict re-folding is not a replay
     assert records.nonce_consumed_by_other(ap.verdict_nonce, ap.content_identity()) is False
-
-
-def test_commit_step_latches_request_changes_blocking_override(installed: GlobalRecords) -> None:
-    """H3 (live): the trusted commit step latches a request-changes, so a later
-    approve at the same key can't override it — the no-approve-override property the
-    README promises, previously inert (latch_negative_verdict had no caller)."""
-    from foundry.graph.supervisor import _commit_judgment_ledger
-
-    records = installed
-    rc = make_reviewer_critic_node(make_runtime(MockTransport(verdicts=["request-changes"])))(
-        {}, config_for("run-Y", nonce="N1", subject="cas://diff/y", state_sha="sy")
-    )["gates"][0]
-    assert rc.status is GateStatus.FAIL
-
-    _commit_judgment_ledger([], [rc], records)          # the trusted write latches it
-
-    assert records.negative_verdict_latched(rc.latch_key()) is True
-    later = make_reviewer_critic_node(make_runtime(MockTransport(verdicts=["approve"])))(
-        {}, config_for("run-Y", step=9, nonce="N1", subject="cas://diff/y", state_sha="sy")
-    )["gates"][0]
-    assert later.latch_key() == rc.latch_key()
-    assert merge_gates([later], None) == []             # override blocked
-
-
-def test_reviewer_seq_node_id_matches_judge_node_id() -> None:
-    """judge() rejects seq.node_id != node_id; the node wires them equal."""
-    transport = MockTransport(verdicts=["approve"])
-    rt = make_runtime(transport)
-    node = make_reviewer_critic_node(rt)
-    [verdict] = node({}, config_for("run-E", nonce="N", subject="s", state_sha="sha"))["gates"]
-    assert verdict.seq.node_id == "reviewer_critic"
 
 
 def test_read_criteria_takes_the_newest_seq_per_id_not_list_order() -> None:

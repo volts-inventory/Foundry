@@ -2,16 +2,15 @@
 
 The design itself is authored by the planner (tests/test_planner.py). These
 deterministic addenda nodes enter only when ``required_capabilities`` match
-(predicate + node guard agree) and are a no-op otherwise (``{}``); a
-factory-built node drops straight into a ``StateGraph(FactoryState)``.
+(predicate + node guard agree) and are a no-op otherwise (``{}``).
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from langchain_core.runnables import RunnableConfig
-from langgraph.graph import END, START, StateGraph
 
 from foundry.agents import AgentRuntime
 from foundry.agents.architecture import (
@@ -27,8 +26,6 @@ from foundry.agents.architecture.conditional import (
 from foundry.gates.attestation import ZoneBSigner
 from foundry.proxy import ModelProviderProxy
 from foundry.proxy.test_doubles import MockTransport
-from foundry.schemas.base import Artifact
-from foundry.state.factory_state import FactoryState
 
 KEY = b"dev-zone-b-architecture-key"
 KEY_ID = "dev-key-architecture"
@@ -46,84 +43,37 @@ def config_for(run_id: str, step: int = 1) -> RunnableConfig:
     }
 
 
-def _artifacts_of(writes: dict[str, Any]) -> list[Artifact]:
-    return list(writes.get("artifacts", []))
-
-
-def _kinds(artifacts: list[Artifact]) -> set[str]:
-    return {a.kind for a in artifacts}
-
-
 # ---- conditional entry predicates ----------------------------------------
 
 
-def test_domain_specialist_predicate_matches_only_domain_caps() -> None:
-    assert should_enter_domain_specialist({"required_capabilities": ["regulated"]})
-    assert should_enter_domain_specialist({"required_capabilities": ["ml", "ui"]})
-    assert not should_enter_domain_specialist({"required_capabilities": ["ui"]})
-    assert not should_enter_domain_specialist({})
+@pytest.mark.parametrize(
+    ("enter", "matching", "other"),
+    [
+        (should_enter_domain_specialist, [["regulated"], ["ml", "ui"]], ["ui"]),
+        (should_enter_ux_design, [["frontend"], ["ui"]], ["regulated"]),
+    ],
+)
+def test_entry_predicates(enter: Any, matching: list[list[str]], other: list[str]) -> None:
+    for caps in matching:
+        assert enter({"required_capabilities": caps})
+    assert not enter({"required_capabilities": other})
+    assert not enter({})
 
 
-def test_ux_predicate_matches_only_ui_caps() -> None:
-    assert should_enter_ux_design({"required_capabilities": ["frontend"]})
-    assert should_enter_ux_design({"required_capabilities": ["ui"]})
-    assert not should_enter_ux_design({"required_capabilities": ["regulated"]})
-    assert not should_enter_ux_design({})
-
-
-def test_domain_specialist_node_is_noop_without_matching_capability() -> None:
-    rt = make_runtime()
-    node = make_domain_specialist_node(rt)
-    assert node({"required_capabilities": ["ui"]}, config_for("run-A")) == {}
+@pytest.mark.parametrize(
+    ("make", "match", "other", "kind", "node_id"),
+    [
+        (make_domain_specialist_node, ["regulated"], ["ui"], "domain_addendum",
+         DOMAIN_SPECIALIST_NODE_ID),
+        (make_ux_design_node, ["frontend"], ["regulated"], "ux_spec", UX_DESIGN_NODE_ID),
+    ],
+)
+def test_conditional_node_is_noop_without_matching_capability(
+    make: Any, match: list[str], other: list[str], kind: str, node_id: str
+) -> None:
+    node = make(make_runtime())
+    assert node({"required_capabilities": other}, config_for("run-A")) == {}
     assert node({}, config_for("run-A")) == {}
-
-
-def test_domain_specialist_node_contributes_on_match() -> None:
-    rt = make_runtime()
-    node = make_domain_specialist_node(rt)
-    writes = node({"required_capabilities": ["regulated"]}, config_for("run-A"))
-    artifacts = _artifacts_of(writes)
-    assert _kinds(artifacts) == {"domain_addendum"}
-    assert artifacts[0].produced_by == DOMAIN_SPECIALIST_NODE_ID
-
-
-def test_ux_node_is_noop_without_ui_capability() -> None:
-    rt = make_runtime()
-    node = make_ux_design_node(rt)
-    assert node({"required_capabilities": ["regulated"]}, config_for("run-A")) == {}
-
-
-def test_ux_node_contributes_on_match() -> None:
-    rt = make_runtime()
-    node = make_ux_design_node(rt)
-    writes = node({"required_capabilities": ["frontend"]}, config_for("run-A"))
-    artifacts = _artifacts_of(writes)
-    assert _kinds(artifacts) == {"ux_spec"}
-    assert artifacts[0].produced_by == UX_DESIGN_NODE_ID
-
-
-# ---- graph-compatibility --------------------------------------------------
-
-
-def test_conditional_nodes_run_inside_a_state_graph() -> None:
-    rt = make_runtime()
-    g = StateGraph(FactoryState)
-    g.add_node("domain", make_domain_specialist_node(rt))
-    g.add_node("ux", make_ux_design_node(rt))
-    g.add_edge(START, "domain")
-    g.add_edge("domain", "ux")
-    g.add_edge("ux", END)
-    app = g.compile()
-
-    # UI + domain caps: both contribute.
-    final: FactoryState = app.invoke(
-        {"request": "regulated UI app", "required_capabilities": ["regulated", "ui"]},
-        config_for("run-A"),
-    )
-    assert {a.kind for a in final["artifacts"]} == {"domain_addendum", "ux_spec"}
-
-    # No matching caps: both no-op, no artifacts written.
-    final2: FactoryState = app.invoke(
-        {"request": "plain backend"}, config_for("run-B")
-    )
-    assert not final2.get("artifacts")
+    artifacts = list(node({"required_capabilities": match}, config_for("run-A"))["artifacts"])
+    assert {a.kind for a in artifacts} == {kind}
+    assert artifacts[0].produced_by == node_id

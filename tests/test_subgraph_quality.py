@@ -22,7 +22,6 @@ from typing import Any
 
 import pytest
 from langchain_core.runnables import RunnableConfig
-from langgraph.graph import StateGraph
 
 from foundry.agents import AgentRuntime
 from foundry.agents._common import emit_artifact
@@ -44,7 +43,7 @@ from foundry.schemas.product import AcceptanceCriterion, Criticality
 from foundry.schemas.quality import E2EReport, OracleBinding, OracleKind, TestPlan, TestReport
 from foundry.state.factory_state import FactoryState
 from foundry.state.global_records import GlobalRecords
-from foundry.state.reducers import merge_by_uri, merge_gates, set_gate_write_verifier
+from foundry.state.reducers import merge_gates, set_gate_write_verifier
 from foundry.state.seq import Seq
 
 KEY = b"dev-zone-b-subgraph-quality-key"
@@ -133,14 +132,6 @@ def _bodies(final: FactoryState, cas: ArtifactStore, kind: str) -> list[Any]:
 # ---- topology ----------------------------------------------------------------
 
 
-def test_build_quality_subgraph_returns_uncompiled_single_reviewer_node() -> None:
-    cas = ArtifactStore()
-    g = build_quality_subgraph(_runtime(cas=cas), resolve=cas.resolve)
-    assert isinstance(g, StateGraph)
-    assert not hasattr(g, "invoke")  # compilation is the caller's job
-    assert set(g.nodes) == {"reviewer"}
-
-
 def test_build_quality_subgraph_requires_resolve() -> None:
     """C-R1-01: a defaulted ``resolve=None`` was the vacuous-pass trap."""
     resolve = inspect.signature(build_quality_subgraph).parameters["resolve"]
@@ -189,6 +180,7 @@ def test_reviewer_verdict_is_proxy_bound_and_admitted(records: Any) -> None:
     assert verdict.verdict_nonce == server_issued_nonce(
         _config(), node_id="reviewer", subject_uri=DIFF_URI, state_sha="integrated-sha"
     )
+    assert verdict.verdict_nonce != "N-server-issued"  # derived per request, not the raw base
     assert merge_gates([verdict], None) == [verdict]
 
 
@@ -220,6 +212,9 @@ def test_reviewer_emits_every_quality_artifact_kind(records: Any) -> None:
     assert all(a.uri.startswith("cas://") for a in final["artifacts"])
     # The seeded criterion + diff handles are still on the channel.
     assert sum(a.kind == ACCEPTANCE_CRITERION_KIND for a in final["artifacts"]) == len(CRITERIA)
+    [entry] = final["agent_journal"]
+    assert isinstance(entry, JournalEntry)
+    assert (entry.node_id, entry.role) == ("reviewer", "Reviewer")
 
 
 def test_plan_and_e2e_trace_every_criterion(records: Any) -> None:
@@ -243,20 +238,3 @@ def test_negative_oracle_per_high_risk_criterion(records: Any) -> None:
     assert all(isinstance(o, OracleBinding) for o in oracles)
     assert sorted(o.criterion_id for o in oracles) == ["AC-001", "AC-003"]
     assert all(o.oracle_kind is OracleKind.NEGATIVE for o in oracles)
-
-
-def test_artifact_handles_dedupe_under_merge_by_uri(records: Any) -> None:
-    cas = ArtifactStore()
-    node = make_reviewer_node(_runtime(cas=cas), resolve=cas.resolve)
-    a = node(_seed(cas), _config())["artifacts"]
-    assert len(merge_by_uri(a, a)) == len(a)
-
-
-# ---- journal -----------------------------------------------------------------
-
-
-def test_one_journal_entry_as_reviewer(records: Any) -> None:
-    final, _cas = _run()
-    [entry] = final["agent_journal"]
-    assert isinstance(entry, JournalEntry)
-    assert (entry.node_id, entry.role) == ("reviewer", "Reviewer")

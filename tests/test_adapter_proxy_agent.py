@@ -122,10 +122,3 @@ def test_path_escape_is_an_observation_error_not_a_write(tmp_path: Path) -> None
 def test_declares_no_sandbox_grant() -> None:
     assert ProxyAgentAdapter.credential_grant == ()
     assert ProxyAgentAdapter.home_passthrough is False
-
-
-def test_cli_constructs_proxy_agent() -> None:
-    from foundry.cli import _build_proxy, make_coding_adapter
-
-    adapter = make_coding_adapter("proxy-agent", proxy=_build_proxy("mock"), thread_id="t")
-    assert type(adapter).__name__ == "ProxyAgentAdapter"

@@ -6,7 +6,7 @@ verifiable via DevGateWriteVerifier AND admitted by merge_gates); the
 self-judge provenance stamp; verdict-flip-after-stamp rejection; pinned-ID
 drift alerts; the T1 sampling substitution vs T2 temperature 0; bounded
 retry then ProxyUnavailable (fail-closed, no family fallback); manifest
-usage/cache metering; and the decorrelated-profile disjointness check.
+usage/cache metering.
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ from foundry.proxy import (
     TIER_MODELS,
     DriftMode,
     DriftPolicy,
-    FamilyOverlapError,
     LineageMap,
     ModelProviderProxy,
     PinnedIdDriftError,
@@ -86,7 +85,6 @@ def make_seq(node_id: str = "review_node", *, step: int = 1) -> Seq:
 def make_proxy(
     transport: FakeTransport | None = None,
     *,
-    profile: str = "self_judge",
     sleeper=None,
     max_retries: int = 2,
 ) -> tuple[ModelProviderProxy, FakeTransport]:
@@ -95,7 +93,6 @@ def make_proxy(
         transport,
         LineageMap(),
         ZoneBSigner(KEY, KEY_ID),
-        profile=profile,  # type: ignore[arg-type]
         max_retries=max_retries,
         sleeper=sleeper or (lambda _s: None),
     )
@@ -189,17 +186,11 @@ def test_judgment_binding_stamped_verifiable_and_admitted(verifier, installed):
 
 
 def test_self_judge_profile_stamps_provenance_self():
-    proxy, _ = make_proxy(profile="self_judge")
+    proxy, _ = make_proxy()
     assert judge_once(proxy).gate_result.judgment_provenance == JudgmentProvenance.SELF
 
-    decorrelated, _ = make_proxy(profile="decorrelated")
-    assert (
-        judge_once(decorrelated).gate_result.judgment_provenance
-        == JudgmentProvenance.INDEPENDENT
-    )
 
-
-def test_request_changes_verdict_maps_to_fail_with_findings():
+def test_request_changes_verdict_maps_to_fail_with_findings(verifier, installed):
     transport = FakeTransport(
         text=json.dumps({"status": "request-changes", "findings": ["missing tests"]})
     )
@@ -207,6 +198,7 @@ def test_request_changes_verdict_maps_to_fail_with_findings():
     g = judge_once(proxy).gate_result
     assert g.status == GateStatus.FAIL
     assert g.findings == ("missing tests",)
+    assert verifier.verify_judgment_binding(g)  # a FAIL verdict is stamped too
 
 
 def test_verdict_flip_after_stamping_fails_verification(verifier, installed):
@@ -224,8 +216,11 @@ def test_verdict_flip_after_stamping_fails_verification(verifier, installed):
 
 
 def test_drift_alert_recorded_when_served_model_differs():
+    # DEFAULT policy is ADVISORY: a gate drift is recorded + surfaced, never raised.
+    assert default_drift_policy().mode is DriftMode.ADVISORY
     transport = FakeTransport(served_model="claude-sonnet-9-experimental")
     proxy, _ = make_proxy(transport)
+    assert proxy.drift_policy.mode is DriftMode.ADVISORY
     result = proxy.complete(
         "gate_node", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate"
     )
@@ -268,21 +263,7 @@ def test_versioned_suffix_of_pinned_id_is_not_drift():
     assert proxy.drift_events == ()
 
 
-# ---- 3a. drift policy: advisory (default) vs fail-closed -----------------------
-
-
-def test_advisory_is_the_default_and_records_without_raising():
-    # DEFAULT policy is ADVISORY: a gate/judgment drift is recorded + surfaced
-    # but never raises — the prior behaviour is preserved.
-    assert default_drift_policy().mode is DriftMode.ADVISORY
-    transport = FakeTransport(served_model="claude-sonnet-9-experimental")
-    proxy, _ = make_proxy(transport)
-    assert proxy.drift_policy.mode is DriftMode.ADVISORY
-    result = proxy.complete(
-        "gate_node", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate"
-    )
-    assert result.manifest_record["drift"] is True
-    assert len(proxy.drift_events) == 1
+# ---- 3a. drift policy: fail-closed --------------------------------------------
 
 
 def _fail_closed_proxy(transport: FakeTransport) -> ModelProviderProxy:
@@ -338,37 +319,32 @@ def test_fail_closed_stays_advisory_for_ideation():
 # ---- 3b. tier-mismatch: same family, wrong tier id -----------------------------
 
 
-def _gemma_proxy(transport: FakeTransport, **kw: Any) -> ModelProviderProxy:
-    # An Ollama/Gemma backend with two pinned tiers in ONE lineage family.
+def _same_family_proxy(transport: FakeTransport, **kw: Any) -> ModelProviderProxy:
+    # The default Anthropic tiers all resolve to ONE lineage family.
     return ModelProviderProxy(
-        transport,
-        LineageMap([("gemma*", {"google-gemma"})]),
-        ZoneBSigner(KEY, KEY_ID),
-        tier_models={"T1": "gemma3:27b", "T2": "gemma3:12b"},
-        sleeper=lambda _s: None,
-        **kw,
+        transport, LineageMap(), ZoneBSigner(KEY, KEY_ID), sleeper=lambda _s: None, **kw
     )
 
 
 def test_tier_mismatch_same_family_is_surfaced_as_drift():
-    # A smaller tag (gemma3:12b) served against the larger T1 pin (gemma3:27b)
+    # A smaller tier (claude-sonnet-4-6) served against the T1 pin (claude-opus-4-8)
     # resolves to the SAME family — but the served capability silently degraded,
     # so it is flagged drift with kind tier-mismatch (not family-resolved away).
-    transport = FakeTransport(served_model="gemma3:12b")
-    proxy = _gemma_proxy(transport)
+    transport = FakeTransport(served_model="claude-sonnet-4-6")
+    proxy = _same_family_proxy(transport)
     result = proxy.complete(
         "gate_node", "T1", "SOP", [{"role": "user", "content": "x"}], purpose="gate"
     )
-    assert result.served_family == frozenset({"google-gemma"})  # same family
+    assert result.served_family == frozenset({"anthropic-claude"})  # same family
     assert result.manifest_record["drift"] is True
     assert result.manifest_record["drift_kind"] == "tier-mismatch"
     assert proxy.drift_events[0]["kind"] == "tier-mismatch"
-    assert proxy.drift_events[0]["served_model"] == "gemma3:12b"
+    assert proxy.drift_events[0]["served_model"] == "claude-sonnet-4-6"
 
 
 def test_tier_mismatch_fails_closed_under_fail_closed_policy():
-    transport = FakeTransport(served_model="gemma3:12b")
-    proxy = _gemma_proxy(transport, drift_policy=DriftPolicy(mode=DriftMode.FAIL_CLOSED))
+    transport = FakeTransport(served_model="claude-sonnet-4-6")
+    proxy = _same_family_proxy(transport, drift_policy=DriftPolicy(mode=DriftMode.FAIL_CLOSED))
     with pytest.raises(PinnedIdDriftError) as exc:
         proxy.complete(
             "gate_node", "T1", "SOP", [{"role": "user", "content": "x"}], purpose="gate"
@@ -396,6 +372,7 @@ def test_t1_gate_has_no_temperature_t2_gate_has_temperature_zero():
 
     assert t2_req["model"] == "claude-sonnet-4-6"
     assert t2_req["temperature"] == 0
+    assert "output_config" not in t2_req
     assert t2_rec["sampling"] == {"temperature": 0}
     assert "sampling_note" not in t2_rec
 
@@ -425,21 +402,8 @@ def test_sampling_policy_routes_effort_vs_temperature_by_model_id():
     for effort_id in ("claude-opus-4-8", "gpt-5", "gpt-5-codex", "o3-mini", "codex-mini"):
         assert policy.takes_effort(effort_id), effort_id
     # Models that honour options.temperature => temperature 0.
-    for temp_id in ("claude-sonnet-4-6", "claude-haiku-4-5", "gemma3:27b", "gemma3:4b"):
+    for temp_id in ("claude-sonnet-4-6", "claude-haiku-4-5"):
         assert not policy.takes_effort(temp_id), temp_id
-
-
-def test_anthropic_opus_gate_uses_effort_sonnet_pins_temperature_zero():
-    # The DEFAULT Anthropic backend stays backward-compatible: opus (T1, a
-    # reasoning model) gets effort; sonnet (T2) pins temperature 0.
-    proxy, transport = make_proxy()
-    proxy.complete("n1", "T1", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
-    proxy.complete("n2", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
-    t1_req, t2_req = transport.requests
-    assert t1_req["output_config"] == {"effort": "high"}
-    assert "temperature" not in t1_req
-    assert t2_req["temperature"] == 0
-    assert "output_config" not in t2_req
 
 
 def test_codex_tier_model_gate_pins_effort_not_temperature_via_policy():
@@ -552,7 +516,7 @@ class _RateLimitTransport:
 def _rl_proxy(transport: Any, *, sleeper: Any, rl_retries: int = 6,
               rl_base: float = 2.0) -> ModelProviderProxy:
     return ModelProviderProxy(
-        transport, LineageMap(), ZoneBSigner(KEY, KEY_ID), profile="self_judge",
+        transport, LineageMap(), ZoneBSigner(KEY, KEY_ID),
         sleeper=sleeper, rate_limit_max_retries=rl_retries,
         rate_limit_backoff_base_s=rl_base,
     )
@@ -696,7 +660,7 @@ def test_client_cache_rebuilds_after_auth_error():
 def test_manifest_is_bounded_and_counts_dropped():
     transport = FakeTransport()
     proxy = ModelProviderProxy(
-        transport, LineageMap(), ZoneBSigner(KEY, KEY_ID), profile="self_judge",
+        transport, LineageMap(), ZoneBSigner(KEY, KEY_ID),
         sleeper=lambda _s: None, manifest_max=3,
     )
     for _ in range(5):
@@ -744,79 +708,3 @@ def test_manifest_is_append_only_across_calls():
     for i in range(3):
         proxy.complete(f"n{i}", "T3", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
     assert [r["node_id"] for r in proxy.manifest] == ["n0", "n1", "n2"]
-
-
-# ---- 7. decorrelation seam ------------------------------------------------------
-
-
-def test_assert_disjoint_raises_on_overlap_in_decorrelated_profile():
-    proxy, _ = make_proxy(profile="decorrelated")
-    with pytest.raises(FamilyOverlapError):
-        proxy.assert_disjoint(
-            frozenset({"anthropic-claude"}), frozenset({"anthropic-claude", "x"})
-        )
-    # Genuinely disjoint sets pass.
-    proxy.assert_disjoint(frozenset({"anthropic-claude"}), frozenset({"google-gemma"}))
-
-
-def test_self_judge_profile_replaces_disjointness_with_stamp():
-    proxy, _ = make_proxy(profile="self_judge")
-    # No exception: the check is replaced by the recorded SELF stamp (plan §0.2).
-    proxy.assert_disjoint(frozenset({"anthropic-claude"}), frozenset({"anthropic-claude"}))
-    assert judge_once(proxy).gate_result.judgment_provenance == JudgmentProvenance.SELF
-
-
-# ---- 8. advisory usage observer -------------------------------------------------
-
-
-def test_on_call_usage_observer_meters_every_successful_call():
-    # The Workshop meters what a stage cost so a human pausing at a checkpoint can
-    # judge "continue or not?" against real spend. Advisory: observe only.
-    from foundry.proxy import model_provider_proxy as mpp
-
-    seen: list[tuple[str, str, dict[str, int]]] = []
-    proxy, _ = make_proxy()
-    prev = mpp.on_call_usage
-    mpp.on_call_usage = lambda node, tier, usage: seen.append((node, tier, dict(usage)))
-    try:
-        proxy.complete("n0", "T3", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
-        proxy.complete("n1", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
-    finally:
-        mpp.on_call_usage = prev
-    assert [(n, t) for n, t, _ in seen] == [("n0", "T3"), ("n1", "T2")]
-    assert seen[0][2] == USAGE          # the real per-call usage, not a summary
-
-
-def test_on_call_usage_observer_never_breaks_a_call():
-    # Telemetry is not load-bearing: a raising observer must not fail the call.
-    from foundry.proxy import model_provider_proxy as mpp
-
-    def boom(_node, _tier, _usage):
-        raise RuntimeError("observer is broken")
-
-    proxy, _ = make_proxy()
-    prev = mpp.on_call_usage
-    mpp.on_call_usage = boom
-    try:
-        result = proxy.complete("n0", "T3", "SOP", [{"role": "user", "content": "x"}],
-                                purpose="gate")
-    finally:
-        mpp.on_call_usage = prev
-    assert result.usage == USAGE        # the call completed normally
-
-
-def test_failed_call_meters_nothing():
-    # A call that never reaches a response has no usage to report.
-    from foundry.proxy import model_provider_proxy as mpp
-
-    seen: list[str] = []
-    proxy, _ = make_proxy(FakeTransport(fail_times=99), max_retries=1)
-    prev = mpp.on_call_usage
-    mpp.on_call_usage = lambda node, _tier, _usage: seen.append(node)
-    try:
-        with pytest.raises(ProxyUnavailable):
-            proxy.complete("n0", "T3", "SOP", [{"role": "user", "content": "x"}],
-                           purpose="gate")
-    finally:
-        mpp.on_call_usage = prev
-    assert seen == []

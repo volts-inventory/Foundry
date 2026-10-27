@@ -121,13 +121,13 @@ MODES = (MODE_ASSISTANT,)
 # smoke behavior. The others route the factory's model egress through a REAL backend
 # via the single-egress proxy (foundry/proxy/cli_transports.build_backend): "anthropic"
 # (SDK; needs ANTHROPIC_API_KEY), "openai" (SDK chat.completions; needs OPENAI_API_KEY),
-# "claude-cli" (`claude -p`), "codex" (`codex exec`), "ollama-gemma" (local Ollama).
+# "claude-cli" (`claude -p`), "codex" (`codex exec`).
 # Picking a real backend makes real, metered model calls; the coding substrate +
 # materialization in THIS smoke CLI stay dev-grade (StubAdapter + synthetic resolver),
 # so --backend exercises the proxy/lineage/determinism/manifest path, not a real
 # code-writing adapter (that is a separate seam).
 _MOCK_BACKEND = "mock"
-BACKENDS = (_MOCK_BACKEND, "anthropic", "openai", "claude-cli", "codex", "ollama-gemma")
+BACKENDS = (_MOCK_BACKEND, "anthropic", "openai", "claude-cli", "codex")
 
 
 # Coding substrates (WorkerAdapter): the thing that actually writes the code for
@@ -314,7 +314,6 @@ def _default_tier_models(backend: str) -> dict[str, str]:
     override can overlay a partial set without dropping the other tiers)."""
     from foundry.proxy.cli_transports import (
         CODEX_TIER_MODELS,
-        GEMMA_TIER_MODELS,
         OPENAI_TIER_MODELS,
     )
     from foundry.proxy.model_provider_proxy import TIER_MODELS
@@ -323,8 +322,6 @@ def _default_tier_models(backend: str) -> dict[str, str]:
         return dict(OPENAI_TIER_MODELS)
     if backend == "codex":
         return dict(CODEX_TIER_MODELS)
-    if backend == "ollama-gemma":
-        return dict(GEMMA_TIER_MODELS)
     return dict(TIER_MODELS)  # anthropic / claude-cli share the Anthropic lineage
 
 
@@ -797,8 +794,7 @@ class RunResult:
     mode: str = MODE_ASSISTANT
     """The release mode the run was driven in (always assistant)."""
     backend: str = _MOCK_BACKEND
-    """The model backend the proxy used (mock | anthropic | openai | claude-cli | codex |
-    ollama-gemma)."""
+    """The model backend the proxy used (mock | anthropic | openai | claude-cli | codex)."""
     artifact_uri: str | None = None
     """The reviewed FeatureDiff handle uri the PR opens against (the PR subject)."""
     open_pr_idempotency_key: str | None = None
@@ -1727,7 +1723,7 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 "usage: python -m foundry.cli "
                 "[--mode assistant] "
-                "[--backend {mock|anthropic|openai|claude-cli|codex|ollama-gemma}] "
+                "[--backend {mock|anthropic|openai|claude-cli|codex}] "
                 "[--adapter {stub|raw-react|claude-code}] "
                 "[--scope {auto|demo|standard}] "
                 "[--out DIR] [--spec FILE|DIR ...] "
@@ -1737,7 +1733,7 @@ def main(argv: list[str] | None = None) -> int:
                 '["<one-line request>"]   (optional when --spec is given)\n'
                 f"  mode: assistant — {_TRUST_POSTURE[MODE_ASSISTANT]}\n"
                 "  backend: mock (default — keyless, deterministic) | anthropic | openai | "
-                "claude-cli | codex | ollama-gemma (real model egress)\n"
+                "claude-cli | codex (real model egress)\n"
                 "  adapter (coding substrate): omitted => DERIVED from --backend "
                 "(mock=>stub no-op, claude-cli=>claude-code AGENTIC, other real "
                 "backends=>raw-react); override with stub | raw-react | claude-code\n"

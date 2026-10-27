@@ -6,7 +6,7 @@ adapter provides a multi-turn agentic inner loop with the ORIGINAL trust story
 intact: every model call routes through the §2b mediating
 :class:`~foundry.proxy.model_provider_proxy.ModelProviderProxy` — the proxy
 stays the sole credential holder and the lineage observer — and works over ANY
-configured backend (Anthropic API, OpenAI, Ollama, the CLIs-as-completion).
+configured backend (Anthropic API, OpenAI, the CLIs-as-completion).
 
 The loop is a schema-constrained ReAct cycle: each turn the model returns ONE
 action as JSON — ``write_file`` / ``delete_file`` / ``read_file`` / ``run`` /

@@ -28,8 +28,8 @@ T1 reasoning tier; any OpenAI/Codex id) REMOVE sampling params — sending a
 temperature is a 400 (and a CLI transport that silently drops it would leave
 the call with no determinism control at all) — so the proxy pins
 ``output_config={"effort": "high"}`` instead and records the substitution in
-the manifest. Models that honour sampling (Anthropic Sonnet/Haiku, Ollama/
-Gemma) get ``temperature 0``. Thinking is enabled (adaptive) only for
+the manifest. Models that honour sampling (Anthropic Sonnet/Haiku) get
+``temperature 0``. Thinking is enabled (adaptive) only for
 ideation-class reasoning-model calls and OMITTED for deterministic gate/judge
 calls.
 
@@ -55,7 +55,7 @@ DIFFERS by policy is whether a drift on a high-risk call ALSO fails closed:
 
 Tier-mismatch is drift even WITHIN a lineage family: when the served model
 resolves to the same family as the pin but is not the pinned tier id (e.g. a
-smaller Ollama tag ``gemma3:12b`` served against a ``gemma3:27b`` pin) the
+``claude-haiku-*`` served against a ``claude-sonnet-*`` pin) the
 served capability silently degraded. That is flagged as drift (kind
 ``tier-mismatch``) even though family resolution would otherwise pass it.
 """
@@ -70,7 +70,7 @@ import time
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import StrEnum
 from fnmatch import fnmatchcase
@@ -105,7 +105,7 @@ TIER_MODELS: dict[str, str] = {
 #     temperature; the Codex CLI forwards `model_reasoning_effort` instead;
 #   - the Anthropic T1 reasoning model (claude-opus-*) — sampling params are
 #     removed (existing behaviour, kept).
-# Everything else (Anthropic Sonnet/Haiku, Ollama/Gemma) honours `temperature`,
+# Everything else (Anthropic Sonnet/Haiku) honours `temperature`,
 # so a deterministic call pins temperature 0 there.
 _DEFAULT_EFFORT_MODEL_GLOBS: tuple[str, ...] = (
     "claude-opus-*",
@@ -148,14 +148,6 @@ _STATUS_BY_VERDICT = {
 # retrying thread; exceptions are swallowed — telemetry never breaks a build.
 on_rate_limit_wait: Callable[[float, float, bool], None] | None = None
 
-# Optional observer for per-call token usage (advisory, fail-soft): a host app (the
-# Workshop) sets this to meter what a run has consumed so far, so a human pausing at
-# a checkpoint can see the cost of the work behind them. Called as
-# on_call_usage(node_id, tier, usage) once per SUCCESSFUL call, from the calling
-# thread; exceptions are swallowed — telemetry never breaks a build. It observes
-# only: nothing here can influence a request, a verdict, or a budget decision.
-on_call_usage: Callable[[str, str, Mapping[str, int]], None] | None = None
-
 
 @dataclass(frozen=True, slots=True)
 class SamplingPolicy:
@@ -168,7 +160,7 @@ class SamplingPolicy:
 
     Injectable so an operator can pin the exact policy for the backend they run;
     the default (:func:`default_sampling_policy`) covers the curated backends
-    (Anthropic / OpenAI-Codex / Ollama-Gemma).
+    (Anthropic / OpenAI-Codex).
     """
 
     effort_model_globs: tuple[str, ...] = _DEFAULT_EFFORT_MODEL_GLOBS
@@ -182,7 +174,7 @@ class SamplingPolicy:
 
 def default_sampling_policy() -> SamplingPolicy:
     """The curated default policy (Anthropic opus + OpenAI/Codex => effort;
-    Anthropic sonnet/haiku + Ollama/Gemma => temperature 0)."""
+    Anthropic sonnet/haiku => temperature 0)."""
     return SamplingPolicy()
 
 
@@ -255,10 +247,6 @@ class PinnedIdDriftError(RuntimeError):
             "calibration baselines are invalidated (arch §8) — pause-and-escalate, "
             "do not trust the drifted model (fail-closed drift policy)"
         )
-
-
-class FamilyOverlapError(RuntimeError):
-    """reviewer ∩ implementer served_family is non-empty (decorrelated profile)."""
 
 
 class VerdictChannelError(RuntimeError):
@@ -619,7 +607,6 @@ class ModelProviderProxy:
         lineage_map: LineageMap | None = None,
         signer: ZoneBSigner | None = None,
         *,
-        profile: Literal["self_judge", "decorrelated"] = "self_judge",
         tier_models: Mapping[str, str] | None = None,
         sampling_policy: SamplingPolicy | None = None,
         drift_policy: DriftPolicy | None = None,
@@ -634,12 +621,9 @@ class ModelProviderProxy:
         rate_limit_backoff_cap_s: float = 60.0,
         manifest_max: int | None = None,
     ) -> None:
-        if profile not in ("self_judge", "decorrelated"):
-            raise ValueError(f"unknown profile: {profile!r}")
         self._transport = transport or AnthropicTransport()
         self._lineage = lineage_map or LineageMap()
         self._signer = signer
-        self._profile = profile
         # Backend/model-aware determinism control (arch §8): which knob a
         # deterministic gate/judge call pins (effort vs temperature 0) is a
         # property of the configured backend's model ids, not a hardcoded id.
@@ -649,8 +633,8 @@ class ModelProviderProxy:
         # makes gate/judgment drift raise PinnedIdDriftError (pause-and-escalate).
         self._drift_policy = drift_policy or default_drift_policy()
         # Tier -> pinned-model-id map. Defaults to the Anthropic lineage
-        # (TIER_MODELS) but is injectable so an alternative backend (Codex/
-        # Ollama-Gemma) can pin ITS real model ids — the flow is identical, the
+        # (TIER_MODELS) but is injectable so an alternative backend (OpenAI/
+        # Codex) can pin ITS real model ids — the flow is identical, the
         # ids the proxy pins/observes/drift-checks against just change with the
         # configured backend. Empty/unknown tiers still fail closed in complete().
         self._tier_models: dict[str, str] = (
@@ -698,10 +682,6 @@ class ModelProviderProxy:
     # ---- read-only views ----------------------------------------------------
 
     @property
-    def profile(self) -> str:
-        return self._profile
-
-    @property
     def lineage_map_revision(self) -> str:
         return self._lineage.revision
 
@@ -734,28 +714,6 @@ class ModelProviderProxy:
     def drift_events(self) -> tuple[dict[str, Any], ...]:
         """Pinned-ID-drift alerts (arch §8): served model != pinned request."""
         return tuple(self._drift_events)
-
-    # ---- decorrelation seam ---------------------------------------------------
-
-    def assert_disjoint(
-        self,
-        reviewer_family: frozenset[str] | set[str],
-        implementer_family: frozenset[str] | set[str],
-    ) -> None:
-        """Decorrelated profile: reviewer/implementer family sets must not
-        intersect (arch §2/§8). In the self-judge profile this check is
-        REPLACED by the recorded ``judgment_provenance="self"`` stamp
-        (plan §0.2) — same lineage is the declared operating condition, so
-        the call is a no-op there rather than a false guarantee.
-        """
-        if self._profile == "self_judge":
-            return
-        overlap = frozenset(reviewer_family) & frozenset(implementer_family)
-        if overlap:
-            raise FamilyOverlapError(
-                f"reviewer/implementer served_family overlap {sorted(overlap)} — "
-                "judgment node must not proceed in a correlated configuration"
-            )
 
     # ---- the single egress ------------------------------------------------------
 
@@ -810,11 +768,6 @@ class ModelProviderProxy:
         if self._manifest.maxlen is not None and len(self._manifest) == self._manifest.maxlen:
             self._manifest_dropped += 1     # this append rolls the oldest record off
         self._manifest.append(record)
-        if on_call_usage is not None:
-            # Advisory usage meter (the Workshop shows "what this stage cost" at a
-            # checkpoint). Fail-soft: a broken observer must never fail a real call.
-            with suppress(Exception):
-                on_call_usage(node_id, tier, dict(response.usage))
         if drift:
             # Pinned-ID drift (arch §8): invalidates calibration baselines. The
             # event is ALWAYS recorded (advisory or fail-closed); the policy only
@@ -888,11 +841,6 @@ class ModelProviderProxy:
             raise VerdictChannelError(
                 f"constrained verdict channel returned out-of-grammar payload: {verdict!r}"
             )
-        provenance = (
-            JudgmentProvenance.SELF
-            if self._profile == "self_judge"
-            else JudgmentProvenance.INDEPENDENT
-        )
         unstamped = GateResult(
             name=gate_name,
             status=_STATUS_BY_VERDICT[verdict["status"]],
@@ -905,7 +853,7 @@ class ModelProviderProxy:
             lineage_map_revision=self._lineage.revision,
             run_against=state_sha,
             findings=tuple(str(f) for f in verdict.get("findings", ())),
-            judgment_provenance=provenance,
+            judgment_provenance=JudgmentProvenance.SELF,
             seq=seq,
         )
         stamped = self._signer.with_judgment_binding(unstamped)
@@ -924,14 +872,14 @@ class ModelProviderProxy:
           form of it (``claude-sonnet-4-6-20250101`` against ``claude-sonnet-4-6``):
           same pinned tier, no drift.
         - ``(True, "tier-mismatch")`` — the served id is a DIFFERENT configured
-          tier's id (e.g. a smaller Ollama tag served against a larger pin). It may
+          tier's id (e.g. a haiku id served against a sonnet pin). It may
           resolve to the same lineage family, so the family check would pass it; we
           surface it as drift anyway because the served CAPABILITY silently changed.
         - ``(True, "pinned-id")`` — any other departure from the pinned id.
         """
         # Exact pin, or a version-suffixed form of it, is the trusted case. The
-        # suffix must start at a version-style boundary so e.g. a `gemma3:27b` pin
-        # is NOT matched by a `gemma3:27b-it` distinct tag silently — but a bare
+        # suffix must start at a `-` boundary so e.g. a `claude-sonnet-4-6` pin is
+        # NOT matched by a distinct `claude-sonnet-4-60` id silently — but a bare
         # date/version suffix on the same id is (the prior startswith contract).
         if served_model == requested_model or served_model.startswith(requested_model + "-"):
             return (False, None)

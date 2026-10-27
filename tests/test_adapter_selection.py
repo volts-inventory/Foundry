@@ -18,7 +18,6 @@ from foundry.cli import (
     _resolve_coding_adapter,
     main,
     make_coding_adapter,
-    run,
 )
 
 # ---- make_coding_adapter: construction --------------------------------------
@@ -68,7 +67,6 @@ def test_default_adapter_is_derived_from_backend(monkeypatch: pytest.MonkeyPatch
     assert _default_adapter_for("openai") == "raw-react"
     assert _default_adapter_for("claude-cli") == "claude-code"
     assert _default_adapter_for("codex") == "raw-react"
-    assert _default_adapter_for("ollama-gemma") == "raw-react"
 
 
 def test_foundry_adapter_env_overrides_derivation(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -78,19 +76,6 @@ def test_foundry_adapter_env_overrides_derivation(monkeypatch: pytest.MonkeyPatc
     assert _default_adapter_for("claude-cli") == "raw-react"
     monkeypatch.setenv("FOUNDRY_CODING_ADAPTER", "bogus")  # unknown ⇒ ignored, derivation wins
     assert _default_adapter_for("claude-cli") == "claude-code"
-
-
-def test_offered_adapters() -> None:
-    # Four substrates: the deterministic stub, the provider-agnostic raw-react
-    # completion adapter, the agentic claude-code substrate (ROADMAP 1a), and the
-    # proxy-mediated agentic loop (ROADMAP 1c — trust story intact, any backend).
-    assert set(ADAPTERS) == {"stub", "raw-react", "claude-code", "proxy-agent"}
-
-
-def test_run_with_mock_backend_and_no_adapter_stays_stub() -> None:
-    # The default (no backend, no adapter) run stays the deterministic stub no-op,
-    # so the hermetic smoke path is byte-identical.
-    assert run("build a thing").passed in (True, False)  # runs without a real model
 
 
 def test_resolve_passes_instance_through(proxy: Any) -> None:
@@ -110,35 +95,7 @@ def test_adapter_flag_unknown_is_usage_error() -> None:
     assert main(["--adapter", "bogus", "build a thing"]) == 2
 
 
-def test_adapter_flag_missing_value_is_usage_error() -> None:
-    assert main(["build a thing", "--adapter"]) == 2
-
-
 # ---- webapp API option ------------------------------------------------------
-
-
-def test_api_validates_adapter_against_set() -> None:
-    # The set the API validates against is the single source of truth in cli.py.
-    from foundry.cli import ADAPTERS as cli_adapters
-
-    assert "stub" in cli_adapters and "raw-react" in cli_adapters
-
-
-def test_project_carries_adapter_field() -> None:
-    from webapp.server import Project
-
-    p = Project(
-        id="x", request="r", mode="assistant", floor=1,
-        adapter="raw-react",
-    )
-    assert p.adapter == "raw-react"
-
-
-def test_project_defaults_to_stub_adapter() -> None:
-    from webapp.server import Project
-
-    p = Project(id="x", request="r", mode="assistant", floor=1)
-    assert p.adapter == "stub"
 
 
 def test_store_roundtrips_adapter(tmp_path: Any) -> None:

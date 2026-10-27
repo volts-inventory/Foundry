@@ -435,9 +435,7 @@ class Sandbox:
         transaction as the resumable marker.
         """
         self._check_alive()
-        # prefer_git=False: adapter writes are typically untracked; the
-        # snapshot must cover what is on disk, not what git happens to track.
-        digest = normalized_source_tree(self.worktree, prefer_git=False)
+        digest = normalized_source_tree(self.worktree)
         dest = self._snapshots_dir / digest
         if not dest.exists():
             tmp = self._snapshots_dir / _tmp_name(digest)
@@ -466,7 +464,7 @@ class Sandbox:
             src, digest = candidate, str(snapshot)
         elif Path(snapshot).is_dir():
             src = Path(snapshot)
-            digest = normalized_source_tree(src, prefer_git=False)
+            digest = normalized_source_tree(src)
         else:
             raise FileNotFoundError(f"no recorded snapshot: {snapshot!r}")
         shutil.rmtree(self.worktree)

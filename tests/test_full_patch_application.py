@@ -18,6 +18,7 @@ from foundry.graph.gate_wiring import (
     FeatureDiffBodyError,
     _apply_hunks,
     _diff_ops,
+    _maybe_snapshot_files,
     _parse_patch_diff,
     _write_sources,
 )
@@ -83,18 +84,17 @@ def test_addition_section_parses_to_write_op() -> None:
     assert ops.writes == {"new.py": "N = 1\n"}
 
 
-def test_rename_fails_closed() -> None:
-    with pytest.raises(FeatureDiffBodyError, match="rename"):
-        _parse_patch_diff("cas://x", RENAME_DIFF)
-
-
-def test_implicit_rename_via_mismatched_paths_fails_closed() -> None:
-    body = "--- a/old.py\n+++ b/new.py\n@@ -1,1 +1,1 @@\n-A\n+B\n"
+@pytest.mark.parametrize(
+    "body",
+    [
+        RENAME_DIFF,
+        "--- a/old.py\n+++ b/new.py\n@@ -1,1 +1,1 @@\n-A\n+B\n",  # mismatched paths
+    ],
+    ids=["explicit", "implicit"],
+)
+def test_renames_fail_closed(body: str) -> None:
     with pytest.raises(FeatureDiffBodyError, match="rename"):
         _parse_patch_diff("cas://x", body)
-
-
-# ---- hunk application ----------------------------------------------------------
 
 
 def test_apply_hunks_exact() -> None:
@@ -211,3 +211,8 @@ def test_delete_path_is_containment_checked(tmp_path: Path) -> None:
     body = '{"kind": "full-file-snapshot", "files": {}, "deleted": ["../escape.py"]}'
     with pytest.raises(PathContainmentError):
         write_sources(tmp_path, {"cas://one": body})
+
+
+def test_malformed_snapshot_fails_closed() -> None:
+    with pytest.raises(FeatureDiffBodyError):
+        _maybe_snapshot_files("cas://x", '{"kind": "full-file-snapshot", "files": "oops"}')

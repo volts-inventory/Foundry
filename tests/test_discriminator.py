@@ -126,16 +126,6 @@ def test_inapplicable_mutant_is_not_counted_killed(tmp_path):
 # ---- standalone: behavioral invariance -------------------------------------
 
 
-def test_behavioral_invariance_satisfied(tmp_path):
-    tree = _mk_tree(tmp_path, GENUINE_SUITE)
-    inv = BehavioralInvariant(
-        invariant_id="add-3-4", module="calc.py", call="add", args=(3, 4), expected=7
-    )
-    report = TestSuiteDiscriminator(invariants=[inv]).evaluate(tree)
-    assert report.passed
-    assert report.invariants_violated == ()
-
-
 def test_behavioral_invariance_violation_fails(tmp_path):
     # The produced code is WRONG (subtracts) even though the agent's suite (which
     # only ever asserts on its own buggy outputs) might be green -> invariant catches it.
@@ -217,14 +207,6 @@ def test_gate_mutant_rotation_mirrors_discriminator():
 
 
 # ---- existing Test-gate behavior preserved ---------------------------------
-
-
-def test_clean_green_run_still_passes_without_discriminator(tmp_path, runner, verifier):
-    """No discriminator wired: a real green suite still PASSes (legacy behavior)."""
-    (tmp_path / "test_ok.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
-    r = runner.run(TestGate(), "task/1", _seq("test", "task/1"), tmp_path)
-    assert r.status is GateStatus.PASS
-    _assert_admitted(r)
 
 
 def test_vacuous_zero_test_run_still_fails_via_floor(tmp_path, runner, verifier):

@@ -1,15 +1,8 @@
 """Forged-results hardening of the two-zone gate runner (T-M4-03, gov §1c/§4).
 
-Two seams defend a Phase-4 adversarial exit where an agent-influenced path tries
-to fabricate a PASS it never earned:
-
-* **Zone-B config re-derivation.** Zone B re-derives the bound ``scanner_config_rev``
-  from the run-immutable ``PinnedScannerConfig`` (never trusts an agent-supplied
-  config). A swapped/weakened config zone A ran under → attested FAIL, never PASS;
-  a pinned config that itself fails to verify → ERROR (tamper, not a judgment).
-* **Sealed observation channel.** Zone A seals the observation; zone B re-derives
-  the tag. A tampered observation (FAIL swapped for PASS between zone A and zone B)
-  → ERROR, never PASS. The genuine sealed observation → the correct verdict.
+**Sealed observation channel.** Zone A seals the observation; zone B re-derives
+the tag. A tampered observation (FAIL swapped for PASS between zone A and zone B)
+→ ERROR, never PASS. The genuine sealed observation → the correct verdict.
 
 Every emitted verdict still verifies under the zone-B key and is admitted by the
 REAL ``merge_gates`` (an agent could not have forged it).
@@ -17,7 +10,6 @@ REAL ``merge_gates`` (an agent could not have forged it).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -30,10 +22,7 @@ from foundry.gates import (
     ZoneBSigner,
     observe,
 )
-from foundry.gates.runner import (
-    RAN_CONFIG_REV_KEY,
-    seal_observation,
-)
+from foundry.gates.runner import seal_observation
 from foundry.schemas.gates import GateStatus, VerdictClass
 from foundry.state.global_records import GlobalRecords
 from foundry.state.reducers import (
@@ -47,30 +36,6 @@ KEY = b"zone-b-dev-key-0123456789abcdef"
 KEY_ID = "zoneB-dev"
 SEAL_KEY = b"zone-a-seal-key-fedcba9876543210"
 LINEAGE_REV = "lineage-rev-1"
-
-
-# ---- pinned scanner config --------------------------------------------------
-
-
-@dataclass(frozen=True)
-class _Pinned:
-    """Minimal run-immutable pinned config: ``verify()`` re-derives the revision
-    and raises when the record no longer matches the pin."""
-
-    pinned_revision: str
-    record_version: str
-
-    def verify(self) -> str:
-        if not self.is_intact():
-            raise ValueError("pinned scanner config does not match its revision")
-        return self.pinned_revision
-
-    def is_intact(self) -> bool:
-        return self.pinned_revision == f"scanner-config-v{self.record_version}"
-
-
-def _pinned(version: str = "1") -> _Pinned:
-    return _Pinned(pinned_revision=f"scanner-config-v{version}", record_version=version)
 
 
 # ---- fixtures ---------------------------------------------------------------
@@ -102,124 +67,25 @@ def _admitted(result) -> bool:
 # ---- a configurable test gate ----------------------------------------------
 
 
-class _ConfigPinnedGate:
-    """A class-2 gate whose zone-A observation reports the config it ran under.
-
-    ``ran_rev`` is what zone A claims to have executed under; ``seal_key`` (when
-    set) seals the observation. ``decide`` PASSes a clean observation — so any
+class _CleanGate:
+    """A class-2 gate whose ``decide`` PASSes a clean observation — so any
     downgrade in these tests is the runner's hardening, not the gate.
+    ``seal_key`` (when set) seals the observation.
     """
 
-    name = "security"
+    name = "test"
     verdict_class = VerdictClass.EXECUTION_DETERMINISTIC
     decision_deterministic = True
     execution_deterministic = True
 
-    def __init__(self, *, ran_rev: str | None, seal_key: bytes | None = None) -> None:
-        self._ran_rev = ran_rev
+    def __init__(self, *, seal_key: bytes | None = None) -> None:
         self._seal_key = seal_key
 
     def execute(self, workdir: Path) -> ZoneAObservation:
-        structured: dict[str, object] = {}
-        if self._ran_rev is not None:
-            structured[RAN_CONFIG_REV_KEY] = self._ran_rev
-        return observe(
-            self.name,
-            exit_codes=(0,),
-            findings=(),
-            structured=structured,
-            seal_key=self._seal_key,
-        )
+        return observe(self.name, exit_codes=(0,), findings=(), seal_key=self._seal_key)
 
     def decide(self, obs: ZoneAObservation) -> GateStatus:
         return GateStatus.PASS
-
-
-# =====================================================================
-# Zone-B config re-derivation
-# =====================================================================
-
-
-def test_clean_run_passes_with_rederived_config(tmp_path, records, verifier):
-    """A run whose zone-A config matches the re-derived pin PASSes, attested."""
-    pinned = _pinned()
-    runner = TwoZoneGateRunner(
-        ZoneBSigner(KEY, KEY_ID), records, "ignored-string-rev", LINEAGE_REV,
-        pinned_config=pinned,
-    )
-    gate: GateImpl = _ConfigPinnedGate(ran_rev=pinned.pinned_revision)
-    r = runner.run(gate, "task/1", _seq("security", "task/1"), tmp_path)
-    assert r.status is GateStatus.PASS
-    # Zone B bound the RE-DERIVED rev, not the plain string handed to the ctor.
-    assert r.scanner_config_rev == pinned.pinned_revision
-    assert r.scanner_config_rev != "ignored-string-rev"
-    assert _admitted(r)
-
-
-def test_forged_config_caught_not_pass(tmp_path, records, verifier):
-    """Zone A ran under a config that does not match the pin → FAIL, never PASS.
-
-    A forged/weakened scanner config cannot produce a passing attested verdict.
-    """
-    pinned = _pinned()
-    runner = TwoZoneGateRunner(
-        ZoneBSigner(KEY, KEY_ID), records, "scanner-rev-1", LINEAGE_REV,
-        pinned_config=pinned,
-    )
-    # The agent path supplies a DIFFERENT (weakened) config rev than the pin.
-    gate: GateImpl = _ConfigPinnedGate(ran_rev="weakened-attacker-config")
-    r = runner.run(gate, "task/1", _seq("security", "task/1"), tmp_path)
-    assert r.status is GateStatus.FAIL
-    assert r.status is not GateStatus.PASS
-    assert any("scanner-config mismatch" in f for f in r.findings)
-    # Still attested — the FAIL is a real, foldable zone-B verdict.
-    assert r.scanner_config_rev == pinned.pinned_revision
-    assert _admitted(r)
-
-
-def test_forged_config_on_integrated_digest_latches(tmp_path, records, verifier):
-    """A config-mismatch FAIL on an integrated digest latches stable-FAIL."""
-    pinned = _pinned()
-    runner = TwoZoneGateRunner(
-        ZoneBSigner(KEY, KEY_ID), records, "scanner-rev-1", LINEAGE_REV,
-        pinned_config=pinned,
-    )
-    digest = "c" * 64
-    gate: GateImpl = _ConfigPinnedGate(ran_rev="weakened-attacker-config")
-    r = runner.run(gate, digest, _seq("security", digest), tmp_path)
-    assert r.status is GateStatus.FAIL
-    assert records.stable_fail_latched(digest, "security")
-
-
-def test_tampered_pinned_config_is_error(tmp_path, records, verifier):
-    """A pinned config that fails to verify → ERROR (tamper, not a judgment)."""
-    pinned = _pinned()
-    # Tamper: keep the old pinned_revision but mutate the record so verify() fails.
-    tampered = replace(pinned, record_version="999")
-    assert not tampered.is_intact()
-    runner = TwoZoneGateRunner(
-        ZoneBSigner(KEY, KEY_ID), records, "scanner-rev-1", LINEAGE_REV,
-        pinned_config=tampered,
-    )
-    gate: GateImpl = _ConfigPinnedGate(ran_rev=None)
-    r = runner.run(gate, "task/1", _seq("security", "task/1"), tmp_path)
-    assert r.status is GateStatus.ERROR  # not FAIL (not a tree judgment), not PASS
-    assert any("scanner-config tamper" in f for f in r.findings)
-    assert _admitted(r)
-
-
-def test_no_pinned_config_preserves_legacy_behavior(tmp_path, records, verifier):
-    """No pinned config → the plain string rev binds, exactly as before."""
-    runner = TwoZoneGateRunner(
-        ZoneBSigner(KEY, KEY_ID), records, "scanner-rev-1", LINEAGE_REV,
-    )
-    # A reported ran-rev is ignored when there is no pinned config to re-derive
-    # against — the mismatch check is meaningful only against a re-derived pin.
-    gate: GateImpl = _ConfigPinnedGate(ran_rev="whatever")
-    r = runner.run(gate, "task/1", _seq("security", "task/1"), tmp_path)
-    assert r.status is GateStatus.PASS
-    assert r.scanner_config_rev == "scanner-rev-1"
-    assert _admitted(r)
 
 
 # =====================================================================
@@ -233,8 +99,8 @@ def test_sealed_genuine_observation_passes(tmp_path, records, verifier):
         ZoneBSigner(KEY, KEY_ID), records, "scanner-rev-1", LINEAGE_REV,
         seal_key=SEAL_KEY,
     )
-    gate: GateImpl = _ConfigPinnedGate(ran_rev=None, seal_key=SEAL_KEY)
-    r = runner.run(gate, "task/1", _seq("security", "task/1"), tmp_path)
+    gate: GateImpl = _CleanGate(seal_key=SEAL_KEY)
+    r = runner.run(gate, "task/1", _seq("test", "task/1"), tmp_path)
     assert r.status is GateStatus.PASS
     assert _admitted(r)
 
@@ -299,25 +165,24 @@ def test_unsealed_observation_on_sealed_channel_is_error(tmp_path, records, veri
         seal_key=SEAL_KEY,
     )
     # The gate produces an UNSEALED observation (seal_key=None) on a sealed channel.
-    gate: GateImpl = _ConfigPinnedGate(ran_rev=None, seal_key=None)
-    r = runner.run(gate, "task/1", _seq("security", "task/1"), tmp_path)
+    gate: GateImpl = _CleanGate()
+    r = runner.run(gate, "task/1", _seq("test", "task/1"), tmp_path)
     assert r.status is GateStatus.ERROR
     assert any("sealed-channel violation" in f for f in r.findings)
 
 
-def test_body_rewrite_breaks_seal(tmp_path, records):
-    """Rewriting any observation body field breaks the seal (covers whole obs)."""
-    sealed = observe("test", exit_codes=(1,), findings=("boom",), seal_key=SEAL_KEY)
-    # Flip the verdict-bearing fields to look like a PASS but keep the old seal.
-    forged = sealed.model_copy(update={"exit_codes": (0,), "findings": ()})
-    # Re-deriving the seal over the forged body does NOT match the kept tag.
-    rederived = seal_observation(forged.model_copy(update={"seal": ""}), SEAL_KEY)
-    assert rederived.seal != forged.seal
-
-
-def test_seal_also_covers_results_digest(tmp_path, records):
-    """A swapped results_digest (cache-laundering) breaks the seal."""
-    sealed = observe("test", exit_codes=(0,), seal_key=SEAL_KEY)
-    forged = sealed.model_copy(update={"results_digest": "0" * 64})
+@pytest.mark.parametrize(
+    ("observed", "forged_fields"),
+    [
+        # Flip the verdict-bearing body fields to look like a PASS.
+        ({"exit_codes": (1,), "findings": ("boom",)}, {"exit_codes": (0,), "findings": ()}),
+        # Swap the results_digest (cache-laundering).
+        ({"exit_codes": (0,)}, {"results_digest": "0" * 64}),
+    ],
+)
+def test_seal_covers_observation_fields(observed, forged_fields):
+    """Rewriting any observation field while keeping the old seal breaks it."""
+    sealed = observe("test", **observed, seal_key=SEAL_KEY)
+    forged = sealed.model_copy(update=forged_fields)
     rederived = seal_observation(forged.model_copy(update={"seal": ""}), SEAL_KEY)
     assert rederived.seal != forged.seal

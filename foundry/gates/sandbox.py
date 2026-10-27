@@ -64,10 +64,8 @@ __all__ = [
     "egress_allowed",
     "ground_untrusted",
     "run_confined",
-    "run_in_sandbox",
     "sandbox_enabled",
     "unshare_available",
-    "wrap_argv",
 ]
 
 # Explicit opt-OUT values: run WITHOUT the namespace sandbox (in-process only).
@@ -114,29 +112,6 @@ def unshare_available() -> bool:
         except GroundingUnavailable:
             _UNSHARE_OK = False  # no `unshare` binary at all
     return _UNSHARE_OK
-
-
-def wrap_argv(cmd: tuple[str, ...] | list[str]) -> list[str]:
-    """Prefix ``cmd`` with the unprivileged-namespace ``unshare`` invocation."""
-    return [_UNSHARE_BIN, *UNSHARE_FLAGS, *cmd]
-
-
-def run_in_sandbox(
-    cmd: tuple[str, ...] | list[str],
-    workdir: Path | str,
-    *,
-    env: dict[str, str] | None = None,
-    timeout_s: float = 600.0,
-) -> tuple[int, str, str]:
-    """Run ``cmd`` in bare namespaces (no filesystem fence, env as given). Gates use
-    :func:`ground_untrusted`; this is the low-level primitive. Fails CLOSED."""
-    if not unshare_available():
-        raise GroundingUnavailable(
-            "namespace sandbox unavailable (no `unshare` / unprivileged user "
-            "namespaces are kernel-disabled); set FOUNDRY_GATE_SANDBOX=inprocess to "
-            "accept in-process-only isolation"
-        )
-    return run_grounding_command(wrap_argv(cmd), Path(workdir), env=env, timeout_s=timeout_s)
 
 
 # Exit code + stderr marker the fence uses for its OWN setup failures, so they surface
@@ -601,8 +576,8 @@ def run_confined(
     only ``workdir``, private tmpfs and the gate-owned ``binds`` marked writable;
     ``/run``, host sockets and credential stores masked; ``env`` allowlisted, then
     ``extra_env`` added verbatim). ``network=True`` — the dependency-install step —
-    adds egress through the vetted CONNECT relay only. Fails CLOSED like
-    :func:`run_in_sandbox`."""
+    adds egress through the vetted CONNECT relay only. Fails CLOSED when the
+    sandbox is unavailable."""
     if not cmd:
         raise GroundingUnavailable("empty grounding command")
     wd = Path(workdir).resolve()

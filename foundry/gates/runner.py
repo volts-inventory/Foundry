@@ -41,20 +41,7 @@ FS/network namespace with a sealed result channel. That is key/namespace
 custody, not a change to this code's interfaces.
 
 Forged-results hardening (T-M4-03, gov §1c/§4 — defends a Phase-4 adversarial
-exit). Two seams close the gap where an agent-influenced path could fabricate a
-PASS without ever earning it:
-
-- **Zone-B config re-derivation.** Zone B does not trust a ``scanner_config_rev``
-  handed to it (an agent could supply a weakened scanner config). When a
-  run-immutable :class:`PinnedScannerConfig` is
-  injected, zone B RE-DERIVES the pinned revision from it (``verify()`` —
-  fail-closed tamper detection) and binds THAT into the attestation. If zone A
-  reports the config it actually ran under and it does not match the re-derived
-  pin, the verdict can never be PASS: a swapped/weakened config is downgraded to
-  FAIL (it is a judgment that the tree was scanned under the wrong rules); a
-  pinned config that itself fails to verify is ERROR (infra/tamper, not a
-  judgment, DS7).
-- **Sealed observation channel.** Zone A's :class:`ZoneAObservation` reaches
+exit): a **sealed observation channel.** Zone A's :class:`ZoneAObservation` reaches
   zone B SEALED: zone A stamps an integrity tag (:func:`seal_observation`) with a
   sealing secret held in zone A's custody, and zone B re-derives the tag and
   rejects any mismatch. The seal covers the WHOLE observation (every raw field
@@ -93,10 +80,6 @@ __all__ = [
     "run_grounding_command",
     "seal_observation",
 ]
-
-# Zone A may report the scanner-config revision it actually executed under on
-# this structured key; zone B re-derives the pinned rev and rejects a mismatch.
-RAN_CONFIG_REV_KEY = "ran_scanner_config_rev"
 
 # An integrated run_against is a content digest (sha1/sha256 hex); anything
 # else ("task/<id>" per-branch refs) is per-branch and never latches.
@@ -143,21 +126,6 @@ class ZoneAObservation(FrozenModel):
     structured: dict[str, Any] = Field(default_factory=dict)
     results_digest: str
     seal: str = ""
-
-
-class PinnedScannerConfig(Protocol):
-    """A run-immutable scanner config: ``verify()`` re-derives its pinned revision
-    and raises on tamper."""
-
-    def verify(self) -> str: ...
-
-
-class _ConfigTamperError(RuntimeError):
-    """Internal: the pinned scanner config failed to verify (→ ERROR)."""
-
-
-class _ConfigMismatchError(RuntimeError):
-    """Internal: zone A ran under a config != the re-derived pin (→ FAIL)."""
 
 
 def _observation_core(obs: ZoneAObservation) -> dict[str, Any]:
@@ -306,17 +274,12 @@ class TwoZoneGateRunner:
         scanner_config_rev: str,
         lineage_map_revision: str,
         *,
-        pinned_config: PinnedScannerConfig | None = None,
         seal_key: bytes | None = None,
     ) -> None:
         self._signer = signer
         self._records = records
         self._scanner_config_rev = scanner_config_rev
         self._lineage_map_revision = lineage_map_revision
-        # Run-immutable pinned scanner config: when present, zone B RE-DERIVES
-        # the bound revision from it (never trusts the plain ``scanner_config_rev``
-        # string nor any agent-supplied config). Absent → legacy behavior.
-        self._pinned_config = pinned_config
         # Zone-A sealing key (verification side held by zone B). When present
         # the observation channel is SEALED — zone B rejects an unsealed or
         # mismatched observation. Absent → unsealed channel (back-compat).
@@ -345,37 +308,17 @@ class TwoZoneGateRunner:
         """
         return self._records
 
-    def _verify_observation(
-        self, obs: ZoneAObservation, config_rev: str, config_tamper_error: str | None
-    ) -> None:
+    def _verify_observation(self, obs: ZoneAObservation) -> None:
         """Zone-B integrity gate, run BEFORE ``decide``. Fail-closed.
 
-        1. **Sealed channel.** If a sealing key is held, the observation must
-           carry a seal that re-derives — a tampered/forged swap raises
-           :class:`ObservationSealError` (→ ERROR).
-        2. **Config tamper.** A pinned config that failed to verify raises
-           :class:`_ConfigTamperError` (→ ERROR).
-        3. **Config re-derivation.** If zone A reported the config rev it ran
-           under and it differs from the re-derived pin, raise
-           :class:`_ConfigMismatchError` (→ FAIL): a forged/weakened config can
-           never produce a PASS.
+        If a sealing key is held, the observation must carry a seal that
+        re-derives — a tampered/forged swap raises :class:`ObservationSealError`
+        (→ ERROR).
         """
         if self._seal_key is not None and not _seal_intact(obs, self._seal_key):
             raise ObservationSealError(
                 "observation seal absent or does not verify — the decided "
                 "observation is not the one zone A produced"
-            )
-        if config_tamper_error is not None:
-            raise _ConfigTamperError(config_tamper_error)
-        # The mismatch check is meaningful only against a RE-DERIVED pin — with
-        # no pinned config there is nothing trustworthy to compare against, so a
-        # zone-A config claim is ignored (legacy back-compat).
-        if self._pinned_config is None:
-            return
-        ran_rev = obs.structured.get(RAN_CONFIG_REV_KEY)
-        if ran_rev is not None and ran_rev != config_rev:
-            raise _ConfigMismatchError(
-                f"zone A ran under {ran_rev!r}, re-derived pin is {config_rev!r}"
             )
 
     def run(self, gate: GateImpl, run_against: str, seq: Seq, workdir: Path | str) -> GateResult:
@@ -387,18 +330,6 @@ class TwoZoneGateRunner:
         per-branch without an unsigned write ever entering the channel.
         """
         findings: tuple[str, ...]
-        # Zone B RE-DERIVES the scanner-config revision from the run-immutable
-        # pinned source (fail-closed tamper detection) — it never trusts the
-        # plain string nor an agent-supplied config. A pinned config that fails
-        # to verify is infra/tamper (ERROR, DS7), not a judgment about the tree.
-        config_rev = self._scanner_config_rev
-        config_tamper_error: str | None = None
-        if self._pinned_config is not None:
-            try:
-                config_rev = self._pinned_config.verify()
-            except Exception as exc:
-                config_tamper_error = f"{type(exc).__name__}: {exc}"
-
         try:  # ---- zone A: untrusted execution, no signing key in scope ----
             obs = gate.execute(Path(workdir))
         except Exception as exc:
@@ -410,23 +341,13 @@ class TwoZoneGateRunner:
             findings = (f"zone-a infra failure: {type(exc).__name__}: {exc}",)
         else:  # ---- zone B: verify the seam, then decide over the observation --
             try:
-                self._verify_observation(obs, config_rev, config_tamper_error)
+                self._verify_observation(obs)
                 status = gate.decide(obs)
                 findings = obs.findings
             except ObservationSealError as exc:
                 # Tampered/forged observation: not a judgment about the tree.
                 status = GateStatus.ERROR
                 findings = (*obs.findings, f"sealed-channel violation: {exc}")
-            except _ConfigTamperError as exc:
-                # Pinned config did not verify: infra/tamper, never PASS.
-                status = GateStatus.ERROR
-                findings = (*obs.findings, f"scanner-config tamper: {exc}")
-            except _ConfigMismatchError as exc:
-                # Zone A ran under a config that is NOT the re-derived pin: a
-                # judgment that the tree was scanned under the wrong rules. A
-                # forged/weakened config can never yield a PASS — latch FAIL.
-                status = GateStatus.FAIL
-                findings = (*obs.findings, f"scanner-config mismatch: {exc}")
             except Exception as exc:
                 status = GateStatus.ERROR
                 findings = (*obs.findings, f"zone-b decision failure: {type(exc).__name__}: {exc}")
@@ -437,7 +358,7 @@ class TwoZoneGateRunner:
             decision_deterministic=gate.decision_deterministic,
             execution_deterministic=gate.execution_deterministic,
             verdict_class=gate.verdict_class,
-            scanner_config_rev=config_rev,
+            scanner_config_rev=self._scanner_config_rev,
             lineage_map_revision=self._lineage_map_revision,
             results_digest=obs.results_digest,
             findings=findings,

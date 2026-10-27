@@ -14,6 +14,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from foundry.cli import (
     _DIFF_BODY_URI,
     _judgment_anchors,
@@ -43,8 +45,6 @@ def test_real_backend_resolves_off_the_store() -> None:
     assert resolve_blob.__func__ is ArtifactStore.resolve_blob  # type: ignore[attr-defined]
     # And it does NOT special-case the synthetic diff uri — the real seam has no
     # canned body, so an unknown uri raises rather than returning a fake diff.
-    import pytest
-
     with pytest.raises((KeyError, Exception)):
         resolve_blob(_DIFF_BODY_URI)
 
@@ -52,55 +52,40 @@ def test_real_backend_resolves_off_the_store() -> None:
 # ---- 2c: judgment-binding anchors -------------------------------------------
 
 
-def test_mock_pins_synthetic_anchors() -> None:
-    anchors = _judgment_anchors(False)
-    assert anchors == {
-        "subject_artifact_uri": _DIFF_BODY_URI,
-        "state_sha": "integrated-sha",
-    }
-
-
-def test_real_backend_pins_no_anchors() -> None:
-    # Nothing pinned ⇒ the reviewer falls back to the REAL subject + tree (state).
-    assert _judgment_anchors(True) == {}
+@pytest.mark.parametrize(
+    ("real", "anchors"),
+    [
+        (False, {"subject_artifact_uri": _DIFF_BODY_URI, "state_sha": "integrated-sha"}),
+        # Nothing pinned => the reviewer falls back to the REAL subject + tree (state).
+        (True, {}),
+    ],
+    ids=["mock", "real"],
+)
+def test_judgment_anchors(real: bool, anchors: dict[str, str]) -> None:
+    assert _judgment_anchors(real) == anchors
 
 
 # ---- 2c: reviewer's real tree-sha fallback ----------------------------------
 
 
-def _gate(name: str, run_against: str, seq_local: int) -> Any:
-    return SimpleNamespace(
-        name=name,
-        run_against=run_against,
-        seq=SimpleNamespace(local=seq_local),
-    )
+def _gate(name: str, run_against: str, seq: int) -> Any:
+    return SimpleNamespace(name=name, run_against=run_against, seq=seq)
 
 
-def test_attested_tree_sha_picks_newest_real_run_against() -> None:
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        # Newest-by-seq wins regardless of channel order.
+        ({"gates": (_gate("test", "tree-B", 2), _gate("build", "tree-A", 1))}, "tree-B"),
+        ({"gates": (_gate("build", "tree-A", 1), _gate("test", "tree-B", 2))}, "tree-B"),
+        # A newer verdict with an empty run_against is ignored.
+        ({"gates": (_gate("build", "tree-A", 1), _gate("review", "", 5))}, "tree-A"),
+        ({"gates": (_gate("review", "", 5),)}, None),
+        ({"gates": ()}, None),
+        ({}, None),
+    ],
+)
+def test_attested_tree_sha(state: dict[str, Any], expected: str | None) -> None:
     from foundry.agents.quality.reviewer_critic import _attested_tree_sha
 
-    # SimpleNamespace.seq needs a real ordering; use ints via a tiny shim.
-    class _Seq(int):
-        pass
-
-    g1 = SimpleNamespace(name="build", run_against="tree-A", seq=_Seq(1))
-    g2 = SimpleNamespace(name="test", run_against="tree-A", seq=_Seq(2))
-    state = {"gates": (g1, g2)}
-    assert _attested_tree_sha(state) == "tree-A"
-
-
-def test_attested_tree_sha_none_before_any_gate() -> None:
-    from foundry.agents.quality.reviewer_critic import _attested_tree_sha
-
-    assert _attested_tree_sha({"gates": ()}) is None
-    assert _attested_tree_sha({}) is None
-
-
-def test_attested_tree_sha_ignores_empty_run_against() -> None:
-    from foundry.agents.quality.reviewer_critic import _attested_tree_sha
-
-    class _Seq(int):
-        pass
-
-    g = SimpleNamespace(name="review", run_against="", seq=_Seq(5))
-    assert _attested_tree_sha({"gates": (g,)}) is None
+    assert _attested_tree_sha(state) == expected

@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from foundry.agents._common import emit_artifact
 from foundry.gates.test import BDD_KEY, TestGate
 from foundry.graph.gate_wiring import (
@@ -368,18 +370,13 @@ def _then():
 '''
 
 
-def test_scenarios_bound_only_by_catch_all_steps_fail(tmp_path: Path) -> None:
-    gate, obs = _attack(tmp_path, {"tests/test_t1.py": _CATCH_ALL.format(pattern=".*")})
+@pytest.mark.parametrize("pattern", [".*", ".+"])
+def test_catch_all_steps_fail(tmp_path: Path, pattern: str) -> None:
+    gate, obs = _attack(tmp_path, {"tests/test_t1.py": _CATCH_ALL.format(pattern=pattern)})
     assert obs.exit_codes == (0,)
     assert gate.decide(obs) is GateStatus.FAIL
     assert set(obs.structured[BDD_KEY].values()) == {"catch-all"}
     assert any("catch-all" in f and "AC-1" in f for f in obs.findings)
-
-
-def test_nonempty_catch_all_steps_also_fail(tmp_path: Path) -> None:
-    gate, obs = _attack(tmp_path, {"tests/test_t1.py": _CATCH_ALL.format(pattern=".+")})
-    assert gate.decide(obs) is GateStatus.FAIL
-    assert set(obs.structured[BDD_KEY].values()) == {"catch-all"}
 
 
 def test_a_catch_all_then_alone_fails_and_probes_have_no_fixed_literal(tmp_path: Path) -> None:

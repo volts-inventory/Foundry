@@ -38,6 +38,9 @@ from foundry.schemas.governance import SignOffRecord
 from foundry.schemas.journal import JournalEntry
 
 # Gate names whose verdicts MUST carry a valid zone-B runner attestation.
+# security/audit/supply_chain/e2e are no longer run but stay listed: older builds
+# persisted signed verdicts under them, and dropping a name here would let an
+# unsigned write under it into the channel (and the release manifest).
 DETERMINISTIC_GATES = frozenset(
     {"spec", "design", "build", "test", "security", "audit", "supply_chain", "e2e"}
 )

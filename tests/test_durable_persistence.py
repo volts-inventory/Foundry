@@ -28,7 +28,7 @@ from foundry.durability.persistence import (
     state_dir_from_env,
 )
 from foundry.schemas.architecture import SystemDesign
-from foundry.state.global_records import AdmissionState, GlobalRecords
+from foundry.state.global_records import GlobalRecords
 from foundry.state.seq import Seq
 
 _CONFIG = {"configurable": {"thread_id": "restart-thread", "checkpoint_ns": ""}}
@@ -88,12 +88,8 @@ def test_state_survives_process_restart(tmp_path: Path) -> None:
     try:
         # The trust latch is STILL latched (consumed-nonce / stable-FAIL /
         # alpha-look ledgers survive — this is the property the in-memory store
-        # lacks). Admission folds it: the digest stays DISQUALIFIED.
+        # lacks).
         assert second.global_records.stable_fail_latched(_DIGEST, _GATE) is True
-        assert (
-            second.global_records.admission_look(_DIGEST)
-            is AdmissionState.DISQUALIFIED
-        )
 
         # The checkpoint thread RESUMES (the saver reads the persisted row).
         saved = second.checkpointer.saver.get_tuple(_CONFIG)

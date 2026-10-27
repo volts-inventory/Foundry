@@ -885,12 +885,10 @@ def _python_third_party_requirements(dest: Path) -> list[str] | None:
 
 
 def _scaffold_manifest(dest: Path) -> None:
-    """Ensure ``dest`` ships a recognized dependency manifest for the AUDIT gate.
+    """Ensure a Python ``dest`` ships a recognized dependency manifest.
 
-    No-op when the engineers already shipped one (audit theirs, untouched) or the
-    tree is not Python. Otherwise writes a ``requirements.txt`` derived from the
-    tree's real imports so the audit can ground its SBOM instead of fail-closing
-    to ERROR for want of a manifest.
+    No-op when the engineers already shipped one or the tree is not Python.
+    Otherwise writes a ``requirements.txt`` derived from the tree's real imports.
     """
     from foundry.gates.audit import recognized_manifests
 
@@ -1007,8 +1005,7 @@ def materialize_workdir(
     toolchain = _TOOLCHAIN_DIGEST
     if stack is not None:
         toolchain = f"{_TOOLCHAIN_DIGEST}+stack:" + content_digest(stack.model_dump(mode="json"))
-    # prefer_git=False: dest is a fresh materialized tree, not a git worktree.
-    return tree_sha(dest, toolchain_digest=toolchain, prefer_git=False)
+    return tree_sha(dest, toolchain_digest=toolchain)
 
 
 # ---- gate-run helpers (verdicts ONLY from the runner) -----------------------

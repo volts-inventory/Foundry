@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 import threading
 import time
 from pathlib import Path
@@ -37,7 +38,12 @@ from foundry.execution.sandbox import Sandbox
 from foundry.execution.work_pool import ExecutionTask, LocalWorkPool
 from foundry.gates import DevGateWriteVerifier, TwoZoneGateRunner
 from foundry.gates.attestation import ZoneBSigner
-from foundry.graph.gate_wiring import WaveBuildCheck, materialize_workdir
+from foundry.graph.gate_wiring import (
+    WaveBuildCheck,
+    materialize_workdir,
+    planned_paths,
+    wave_typecheck,
+)
 from foundry.graph.subgraphs.implementation import build_implementation_subgraph
 from foundry.graph.supervisor import build_supervisor_graph
 from foundry.proxy import ModelProviderProxy
@@ -49,6 +55,7 @@ from foundry.schemas.implementation import (
     Difficulty,
     FeatureDiff,
     Specialty,
+    StackDecision,
     TaskEvent,
     Ticket,
 )
@@ -97,7 +104,9 @@ class _Recorder:
         fail_on: dict[str, int] | None = None,
         writes: dict[str, dict[str, str]] | None = None,
         meter: TokenMeter | None = None,
+        silent: frozenset[str] = frozenset(),
     ) -> None:
+        self.silent = silent  # tids whose session writes none of the ticket's files
         self.lock = threading.Lock()
         self.calls: list[str] = []
         self.packets: dict[str, TaskPacket] = {}
@@ -130,7 +139,8 @@ class _Recorder:
             self.calls.append(tid)
             self.packets[tid] = packet
             self.seen[tid] = seen
-        files = {f: f"# written by {tid}\n" for f in packet.task.get("files", ())}
+        files = {f: f"# written by {tid}\n" for f in packet.task.get("files", ())
+                 if tid not in self.silent}
         files.update(self.writes.get(tid, {}))
         files["rogue.txt"] = "out of scope\n"
         files["features/T-001.feature"] = "Feature: edited\n"
@@ -434,6 +444,25 @@ def test_a_cap_stopped_supervisor_run_resumes(tmp_path: Path, resume: str) -> No
     assert not cap_stopped(final)
 
 
+def test_a_ticket_that_writes_none_of_its_files_is_retried_then_skipped(
+    tmp_path: Path,
+) -> None:
+    # A session that ends without writing its scope (e.g. its turns ran out) is a
+    # failed attempt, not a built ticket: an empty diff must not unblock dependents.
+    store = ArtifactStore()
+    rec = _Recorder(silent=frozenset({"T-001"}))
+    tickets = [_ticket("T-001", 0, files=("contracts.py",)),
+               _ticket("T-002", 1, files=("app.py",), deps=("T-001",))]
+    out = _graph(_runtime(rec, store), store, tmp_path).compile().invoke(
+        _state(store, tickets), _config())
+    assert _diffs(out) == {}
+    assert rec.calls == ["T-001", "T-001"]  # T-002 never builds on the empty contract
+    notes = {t.name: t.explanation for t in out["gate_triage"]
+             if t.run_against == "task/T-001" and t.produced_by == "engineering"}
+    assert set(notes) == {"ticket-failed:1", "ticket-failed:2", "ticket-skipped"}
+    assert "contracts.py" in notes["ticket-failed:1"]
+
+
 def test_a_ticket_with_a_diff_is_not_rebuilt(tmp_path: Path) -> None:
     store = ArtifactStore()
     rec = _Recorder()
@@ -484,7 +513,8 @@ _WAVE_KEY = b"dev-zone-b-wave-key-0123456789abcdef"
 
 
 def _wave_run(
-    tmp_path: Path, rec: _Recorder, *, max_fix_attempts: int = 3
+    tmp_path: Path, rec: _Recorder, *, max_fix_attempts: int = 3,
+    tickets: list[Ticket] | None = None, **extra: Any,
 ) -> tuple[FactoryState, list[str], ArtifactStore]:
     """Two waves (T-002 depends on T-001) with the REAL runner's build gate between."""
     store = ArtifactStore()
@@ -493,7 +523,7 @@ def _wave_run(
     runner = TwoZoneGateRunner(ZoneBSigner(_WAVE_KEY, "wave-kid"), records, "s1", "l1")
     check = WaveBuildCheck(rt, runner, store.resolve, store.resolve_blob,
                            max_fix_attempts=max_fix_attempts)
-    tickets = [
+    tickets = tickets or [
         _ticket("T-001", 0, files=("app.py",)),
         _ticket("T-002", 1, files=("app.py",), deps=("T-001",)),
     ]
@@ -502,7 +532,7 @@ def _wave_run(
     try:
         app = _graph(rt, store, tmp_path, wave_check=check).compile(checkpointer=MemorySaver())
         cfg = _config("wave-run")
-        for step in app.stream(_state(store, tickets), cfg, stream_mode="updates"):
+        for step in app.stream(_state(store, tickets, **extra), cfg, stream_mode="updates"):
             ran.extend(step)
         out: FactoryState = app.get_state(cfg).values
     finally:
@@ -552,6 +582,106 @@ def test_a_spent_fix_budget_halts_the_waves_in_order(tmp_path: Path) -> None:
     assert set(_builds(out)) == {GateStatus.FAIL}
     assert out["budget"].fix_attempts_since_all_green == 3  # the bound, as the final gate counts it
     assert [t.id for t in pending_wave(out, store.resolve)] == ["T-002"]  # supervisor halts
+
+
+_EXISTS = "import os, sys; sys.exit(0 if all(map(os.path.exists, sys.argv[1:])) else 1)"
+
+
+def _exists_check(tmp_path: Path) -> str:
+    """A stand-in type checker that fails on a missing target, like `mypy app`."""
+    script = tmp_path / "check.py"
+    script.write_text(_EXISTS)
+    return f"{sys.executable} {script}"
+
+
+def test_the_wave_check_typechecks_only_targets_built_so_far(tmp_path: Path) -> None:
+    # Wave 0 is the contracts ticket; the planned `app` package arrives in wave 1.
+    # The stack's typecheck names both, so the wave-0 check must not demand `app`.
+    stack = StackDecision(language="python", build="true",
+                          typecheck=f"{_exists_check(tmp_path)} app contracts.py")
+    tickets = [
+        _ticket("contracts", 0, files=("contracts.py",)),
+        _ticket("T-001", 1, files=("app/__init__.py",), deps=("contracts",)),
+    ]
+    out, ran, _ = _wave_run(tmp_path, _Recorder(), tickets=tickets, stack=stack)
+    assert ran == ["engineering", "wave_gate", "engineering"]
+    assert _builds(out) == [GateStatus.PASS]
+    assert set(_diffs(out)) == {"contracts", "T-001"}
+    scope = [t for t in out["gate_triage"] if t.name == "wave-typecheck-scope"]
+    assert len(scope) == 1 and "app" in scope[0].explanation
+
+
+def test_the_wave_check_still_fails_a_missing_built_target(tmp_path: Path) -> None:
+    # Scoping only drops planned-but-unbuilt targets: a path no ticket plans (a
+    # typo'd target) still fails the check — the gate is not weakened.
+    stack = StackDecision(language="python", build="true",
+                          typecheck=f"{_exists_check(tmp_path)} contracts.py contract.py")
+    tickets = [
+        _ticket("contracts", 0, files=("contracts.py",)),
+        _ticket("T-001", 1, files=("app/__init__.py",), deps=("contracts",)),
+    ]
+    out, ran, _ = _wave_run(tmp_path, _Recorder(), tickets=tickets, stack=stack,
+                            max_fix_attempts=1)
+    assert ran == ["engineering", "wave_gate"]
+    assert _builds(out) == [GateStatus.FAIL]
+
+
+def test_contracts_that_fail_the_wave_zero_typecheck_are_fixable(tmp_path: Path) -> None:
+    # The contracts are gate-owned, but not before wave 0 passes: the fixer's repair
+    # of a stub the type checker rejects reaches the re-check, and wave 1 builds on it.
+    script = tmp_path / "typecheck.py"
+    script.write_text("import sys; sys.exit(any('BROKEN' in open(p).read() "
+                      "for p in sys.argv[1:]))")
+    stack = StackDecision(language="python", build="true",
+                          typecheck=f"{sys.executable} {script} contracts.py")
+    tickets = [
+        _ticket("contracts", 0, files=("contracts.py",)),
+        _ticket("T-001", 1, files=("app.py",), deps=("contracts",)),
+    ]
+    rec = _Recorder(writes={"contracts": {"contracts.py": "BROKEN\n"},
+                            "fix-1": {"contracts.py": "class Store: ...\n"}})
+    out, ran, store = _wave_run(tmp_path, rec, tickets=tickets, stack=stack,
+                                max_fix_attempts=2)
+    assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "engineering"]
+    assert _builds(out) == [GateStatus.FAIL, GateStatus.PASS]
+    assert rec.seen["T-001"]["contracts.py"] == "class Store: ...\n"
+    tree = tmp_path / "tree"
+    materialize_workdir(out, tree, resolve=store.resolve, resolve_blob=store.resolve_blob)
+    assert (tree / "contracts.py").read_text() == "class Store: ...\n"
+
+
+def test_a_mid_wave_fix_writes_only_the_files_built_so_far(tmp_path: Path) -> None:
+    # The wave-0 fixer must repair what is built, not pre-build a later ticket's
+    # module (it then collides with the module that ticket plans).
+    rec = _Recorder(writes={
+        "T-001": {"app.py": "def broken(:\n"},
+        "fix-1": {"app.py": "def fixed():\n    return 1\n", "later.py": "x = 1\n"},
+    })
+    tickets = [_ticket("T-001", 0, files=("app.py",)),
+               _ticket("T-002", 1, files=("later.py",), deps=("T-001",))]
+    out, ran, _ = _wave_run(tmp_path, rec, tickets=tickets)
+    assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "engineering"]
+    assert "later.py" not in rec.seen["T-002"]
+    assert "write ONLY these paths" in rec.packets["fix-1"].persona
+    notes = [t for t in out["gate_triage"] if t.name == "write-scope"
+             and t.run_against == "task/fix-1"]
+    assert notes and "later.py" in notes[0].explanation
+
+
+@pytest.mark.parametrize(("cmd", "want"), [
+    ("mypy app contracts.py smoke.py", "mypy contracts.py"),
+    ("mypy app/ smoke.py", ""),
+    ("mypy ./app contracts.py && pyright contracts.py",
+     "mypy contracts.py && pyright contracts.py"),
+    ("mypy .", "mypy ."),
+    ("mypy contracts.py lib", "mypy contracts.py lib"),  # `lib` is not planned
+])
+def test_wave_typecheck_drops_only_planned_unbuilt_targets(
+    tmp_path: Path, cmd: str, want: str,
+) -> None:
+    (tmp_path / "contracts.py").write_text("")
+    planned = planned_paths(["contracts.py", "app/db.py", "app/__init__.py", "smoke.py"])
+    assert wave_typecheck(cmd, planned, tmp_path) == want
 
 
 @pytest.mark.parametrize("phase", [None, "build_test_fix"])

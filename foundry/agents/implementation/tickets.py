@@ -280,15 +280,37 @@ def _is_gate_input(path: str) -> bool:
     )
 
 
+# A manifest's lockfiles: written by the package manager whenever the manifest's
+# owner installs, so they belong to that ticket's scope (dropping one leaves a
+# lockfile-strict install like `npm ci` nothing to install from).
+_LOCKFILES: dict[str, tuple[str, ...]] = {
+    "package.json": ("package-lock.json", "npm-shrinkwrap.json", "yarn.lock",
+                     "pnpm-lock.yaml"),
+    "Cargo.toml": ("Cargo.lock",),
+    "go.mod": ("go.sum",),
+    "pyproject.toml": ("uv.lock", "poetry.lock"),
+}
+
+
 def in_write_scope(path: str, files: Sequence[str]) -> bool:
     """May a ticket with write scope ``files`` write ``path``? Gate inputs (criteria,
-    feature files) never; an entry ending in ``/`` admits its subtree; an empty
-    scope admits everything else (the ticket declared none)."""
+    feature files) never; an entry ending in ``/`` admits its subtree, a package
+    manifest its lockfiles; an empty scope admits everything else (the ticket
+    declared none)."""
     if _is_gate_input(path):
         return False
     if not files:
         return True
-    return any(path == f or (f.endswith("/") and path.startswith(f)) for f in files)
+    return any(
+        path == f or (f.endswith("/") and path.startswith(f)) or _is_lockfile_of(path, f)
+        for f in files
+    )
+
+
+def _is_lockfile_of(path: str, manifest: str) -> bool:
+    m_dir, _, m_name = manifest.rpartition("/")
+    p_dir, _, p_name = path.rpartition("/")
+    return m_dir == p_dir and p_name in _LOCKFILES.get(m_name, ())
 
 
 def trim_to_write_scope(
@@ -354,9 +376,45 @@ class _ScopedAdapter:
     def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
         tid = str(packet.task.get("id"))
         result = self._rt.adapter.run(packet, sandbox)  # type: ignore[union-attr]
-        result = trim_to_write_scope(result, sandbox, self._scopes.get(tid, ()), tid)
+        files = self._scopes.get(tid, ())
+        result = trim_to_write_scope(result, sandbox, files, tid)
+        _require_scope_written(result, sandbox, files, tid)
         _mirror_diff_blob(self._rt, sandbox, result)
         return result
+
+
+class EmptyTicketError(RuntimeError):
+    """A ticket's session ended without any of its ``files`` in the tree."""
+
+
+def _require_scope_written(
+    result: AdapterResult, sandbox: Sandbox, files: Sequence[str], task_id: str
+) -> None:
+    """Fail a ticket whose diff touches none of its ``files`` while none of them
+    exists yet: recording that empty diff as built would unblock its dependents on
+    a tree without the work (a session that ran out of turns before writing). It
+    becomes an ordinary failed attempt — retried, then skipped. An unrestricted
+    scope or an unparseable body is left to integration."""
+    from foundry.graph.gate_wiring import MaterializationError, _diff_ops
+
+    if not files:
+        return
+    probe = FeatureDiff(
+        diff_uri=result.diff_uri, task_id=task_id, branch=f"task/{task_id}",
+        base_tree_sha="", seq=Seq("scope", 0, 0, NODE_ID, 0),
+    )
+    try:
+        ops = _diff_ops(probe, sandbox.get_blob)
+    except MaterializationError:
+        return
+    if set(ops.writes) | set(ops.deletes) | set(ops.patches):
+        return
+    worktree = Path(sandbox.worktree)
+    if any((worktree / f.rstrip("/")).exists() for f in files):
+        return
+    raise EmptyTicketError(
+        f"the session wrote none of the ticket's files ({', '.join(files)})"
+    )
 
 
 # ---- context ------------------------------------------------------------------

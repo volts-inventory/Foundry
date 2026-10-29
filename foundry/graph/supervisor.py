@@ -66,6 +66,7 @@ from foundry.graph.gate_wiring import (
     route_after_gates,
     run_build_test_gates,
     run_spec_gate,
+    settle_fix_attempts,
 )
 from foundry.graph.subgraphs.implementation import build_implementation_subgraph
 from foundry.graph.subgraphs.planner import build_planner_subgraph
@@ -327,7 +328,10 @@ def build_supervisor_graph(
             workdir=_gate_workdir("spec_gate"),
         )
         out["phase"] = _SPEC_GATE
-        _bump_on_non_advance(state, config, out, boundary=SPEC_BOUNDARY)
+        # A Spec PASS resets the counter: the re-plans it took must not shrink the
+        # build/test boundary's fix budget.
+        settle_fix_attempts(state, config, out, boundary=SPEC_BOUNDARY,
+                            records=runner.records, max_fix_attempts=max_fix_attempts)
         return out
 
     # The gates read the stack off state at gate time, so the boundary cannot

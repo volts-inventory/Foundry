@@ -42,6 +42,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import shlex
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -61,6 +62,7 @@ from foundry.schemas.implementation import (
     CONTRACTS_TICKET_ID,
     FEATURE_DIR,
     FeatureDiff,
+    StackDecision,
     Ticket,
     feature_path,
 )
@@ -69,7 +71,7 @@ from foundry.state.reducers import merge_gates
 from foundry.state.tree_sha import tree_sha
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
     from langchain_core.runnables import RunnableConfig
 
@@ -111,11 +113,14 @@ __all__ = [
     "flake_quarantined",
     "gate_profile",
     "materialize_workdir",
+    "planned_paths",
     "render_feature",
     "route_after_gates",
     "run_build_gate",
     "run_build_test_gates",
     "run_spec_gate",
+    "settle_fix_attempts",
+    "wave_typecheck",
 ]
 
 # Artifact.kind tags the upstream layers stamp on their handles — the seam we
@@ -921,22 +926,49 @@ def contract_paths(state: FactoryState, resolve: ArtifactResolver) -> tuple[str,
     return newest.files
 
 
+def _wave0_ticket_ids(
+    state: FactoryState, resolve: ArtifactResolver
+) -> tuple[set[str], set[str]]:
+    """(ids of the tickets with no dependency on another ticket, every ticket id)."""
+    newest: dict[str, Ticket] = {}
+    for a in _of_kind(state, TICKET_KIND):
+        t = _resolve_typed(a, resolve, Ticket, TICKET_KIND)
+        if t.id not in newest or t.seq > newest[t.id].seq:
+            newest[t.id] = t
+    known = set(newest)
+    wave0 = {t.id for t in newest.values() if not any(d in known for d in t.depends_on)}
+    return wave0, known
+
+
+def _is_fix(task_id: str) -> bool:
+    return task_id.startswith("fix-")  # the fixer's FeatureDiffs (make_fixer_node)
+
+
 def _write_contracts(
     dest: Path, state: FactoryState, resolve: ArtifactResolver, resolve_blob: BlobResolver
 ) -> None:
-    """Rewrite the contract files from the contracts ticket's own diffs alone, so
-    another ticket's or the fixer's edit to an agreed signature never reaches the
-    gates (the planner also keeps those paths out of every other ticket's files)."""
+    """Rewrite the contract files as they stood at the end of wave 0, so a later
+    ticket's or fixer's edit to an agreed signature never reaches the gates (the
+    planner also keeps those paths out of every other ticket's files).
+
+    Wave 0 — the tickets with no dependencies, plus the fixes the per-wave check
+    ran on them — is every diff integrated before the first later-wave diff. Its
+    fixes may still repair the contracts (a stub that fails the type checker); they
+    freeze once the check passes and wave 1 starts building against them."""
     paths = contract_paths(state, resolve)
     if not paths:
         return
-    owned = [
-        a for a in _of_kind(state, FEATURE_DIFF_KIND)
-        if _resolve_typed(a, resolve, FeatureDiff, FEATURE_DIFF_KIND).task_id
-        == CONTRACTS_TICKET_ID
-    ]
-    if not owned:
+    diffs = [(a, _resolve_typed(a, resolve, FeatureDiff, FEATURE_DIFF_KIND))
+             for a in _of_kind(state, FEATURE_DIFF_KIND)]
+    if not any(d.task_id == CONTRACTS_TICKET_ID for _, d in diffs):
         return  # not built yet: nothing agreed to restore
+    wave0, known = _wave0_ticket_ids(state, resolve)
+    frozen_at = min(
+        (a.seq for a, d in diffs
+         if d.task_id not in wave0 and (d.task_id in known or not _is_fix(d.task_id))),
+        default=None,
+    )
+    owned = [a for a, _ in diffs if frozen_at is None or a.seq < frozen_at]
     with tempfile.TemporaryDirectory(prefix="foundry_contracts_") as tmp:
         _apply_diffs(Path(tmp), owned, resolve, resolve_blob)
         for rel in paths:
@@ -1002,10 +1034,13 @@ def materialize_workdir(
     # The stack's commands are part of what a verdict judges, so they join the
     # toolchain digest: the stable-FAIL latch keys on run_against, and a re-planned
     # stack must be able to re-gate the same source. No stack keeps the old digest.
-    toolchain = _TOOLCHAIN_DIGEST
-    if stack is not None:
-        toolchain = f"{_TOOLCHAIN_DIGEST}+stack:" + content_digest(stack.model_dump(mode="json"))
-    return tree_sha(dest, toolchain_digest=toolchain)
+    return tree_sha(dest, toolchain_digest=_toolchain_digest(stack))
+
+
+def _toolchain_digest(stack: StackDecision | None) -> str:
+    if stack is None:
+        return _TOOLCHAIN_DIGEST
+    return f"{_TOOLCHAIN_DIGEST}+stack:" + content_digest(stack.model_dump(mode="json"))
 
 
 # ---- gate-run helpers (verdicts ONLY from the runner) -----------------------
@@ -1307,6 +1342,28 @@ def run_build_gate(
     fail it. Keyed under the same node as the final Build gate, so the final
     verdict (a later epoch) supersedes every intermediate one."""
     run_against = materialize_workdir(state, workdir, resolve=resolve, resolve_blob=resolve_blob)
+    out: dict[str, Any] = {}
+    stack = state.get("stack")
+    if stack is not None and stack.typecheck and not stack.profile:
+        planned = planned_paths(
+            f for a in _of_kind(state, TICKET_KIND)
+            for f in _resolve_typed(a, resolve, Ticket, TICKET_KIND).files
+        )
+        full = stack.typecheck
+        scoped = wave_typecheck(full, planned, workdir)
+        if scoped != full:
+            # The scoped command is what this verdict judges, so it keys the digest.
+            stack = stack.model_copy(update={"typecheck": scoped})
+            state = {**state, "stack": stack}
+            run_against = tree_sha(workdir, toolchain_digest=_toolchain_digest(stack))
+            out["gate_triage"] = [GateTriage(
+                name=WAVE_TYPECHECK_TRIAGE, run_against=run_against,
+                explanation="this wave's typecheck skips planned targets no ticket has "
+                f"built yet: `{scoped or '(skipped: none built yet)'}` instead of "
+                f"`{full}`"[:2000],
+                produced_by=_BUILD_NODE,
+                seq=rt.seq(config, _BUILD_NODE, f"wave-scope:{run_against}"),
+            )]
     profile = gate_profile(state, profile)
     build = _run_gate(
         _build_gate(profile, runner),
@@ -1317,7 +1374,56 @@ def run_build_gate(
         workdir=workdir,
         node_id=_BUILD_NODE,
     )
-    return {"gates": [build]}
+    out["gates"] = [build]
+    return out
+
+
+WAVE_TYPECHECK_TRIAGE = "wave-typecheck-scope"
+_SHELL_OPERATORS = frozenset({"&&", "||", ";", "|", "&"})
+
+
+def planned_paths(files: Iterable[str]) -> frozenset[str]:
+    """Every path the plan will create: each ticket file and its parent dirs
+    (``app/db.py`` plans ``app`` too), normalized with no ``./`` or trailing ``/``."""
+    out: set[str] = set()
+    for f in files:
+        p = PurePosixPath(_norm_target(f))
+        if str(p) in ("", "."):
+            continue
+        out.add(str(p))
+        out.update(str(d) for d in p.parents if str(d) != ".")
+    return frozenset(out)
+
+
+def _norm_target(token: str) -> str:
+    return token.removeprefix("./").rstrip("/")
+
+
+def wave_typecheck(typecheck: str, planned: frozenset[str], workdir: Path) -> str:
+    """The stack's typecheck for an intermediate wave: arguments naming a planned
+    path that no ticket has built yet are dropped (``mypy app`` before the wave
+    that writes ``app/`` would fail on the missing target, not on the code). If
+    that leaves none of the command's planned targets, the step is skipped (``""``).
+    Anything else — a target outside the plan, a path already built — is kept, so
+    a real type error or a bad target still fails the check; the final Build gate
+    always runs the full command."""
+    try:
+        tokens = shlex.split(typecheck)
+    except ValueError:
+        return typecheck
+
+    def targeted(tok: str) -> bool:
+        return _norm_target(tok) in planned
+
+    def unbuilt(tok: str) -> bool:
+        return targeted(tok) and not (workdir / _norm_target(tok)).exists()
+
+    if not any(unbuilt(t) for t in tokens):
+        return typecheck
+    kept = [t for t in tokens if not unbuilt(t)]
+    if not any(targeted(t) for t in kept):
+        return ""
+    return " ".join(t if t in _SHELL_OPERATORS else shlex.quote(t) for t in kept)
 
 
 # ---- routing predicate (fail-closed, convergence-bounded) -------------------
@@ -1503,6 +1609,32 @@ def bump_fix_attempts(
         )
 
 
+def settle_fix_attempts(
+    state: FactoryState,
+    config: RunnableConfig,
+    out: dict[str, Any],
+    *,
+    boundary: str,
+    records: Any,
+    max_fix_attempts: int,
+) -> None:
+    """:func:`bump_fix_attempts`, plus a reset to 0 when ``boundary`` ADVANCEs: a
+    green boundary hands the next one the whole budget, so the attempts one
+    boundary spent (a Spec re-plan, an earlier wave's repair) never leave a later
+    failure with fewer fixes. A spent bound (HALT) keeps the ledger unchanged."""
+    bump_fix_attempts(state, config, out, boundary=boundary, records=records,
+                      max_fix_attempts=max_fix_attempts)
+    ledger = state.get("budget") or BudgetLedger()
+    if "budget" in out or not ledger.fix_attempts_since_all_green:
+        return
+    post: FactoryState = {
+        "gates": merge_gates(state.get("gates"), out.get("gates")), "budget": ledger,
+    }
+    if route_after_gates(post, config, boundary=boundary, records=records,
+                         max_fix_attempts=max_fix_attempts) == ADVANCE:
+        out["budget"] = ledger.model_copy(update={"fix_attempts_since_all_green": 0})
+
+
 @dataclass(frozen=True)
 class WaveBuildCheck:
     """The per-wave integration check (plan §2b) the implementation subgraph runs
@@ -1528,17 +1660,8 @@ class WaveBuildCheck:
                 state, config, rt=self.rt, runner=self.runner, resolve=self.resolve,
                 resolve_blob=self.resolve_blob, workdir=Path(tmp), profile=self.profile,
             )
-        bump_fix_attempts(state, config, out, boundary=BUILD_BOUNDARY,
-                          records=self.runner.records, max_fix_attempts=self.max_fix_attempts)
-        ledger = state.get("budget") or BudgetLedger()
-        if "budget" not in out and ledger.fix_attempts_since_all_green:
-            # Not FIX: either green (reset, so the final gate keeps its whole budget)
-            # or the bound is spent (HALT reads the unchanged ledger; keep it).
-            post: FactoryState = {
-                "gates": merge_gates(state.get("gates"), out.get("gates")), "budget": ledger,
-            }
-            if self.route(post, config) == ADVANCE:
-                out["budget"] = ledger.model_copy(update={"fix_attempts_since_all_green": 0})
+        settle_fix_attempts(state, config, out, boundary=BUILD_BOUNDARY,
+                            records=self.runner.records, max_fix_attempts=self.max_fix_attempts)
         return out
 
     def route(self, state: FactoryState, config: RunnableConfig) -> str:

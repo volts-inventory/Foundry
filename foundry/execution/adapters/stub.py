@@ -9,7 +9,8 @@ determinism property tests.
 Contract honored (``foundry.execution.adapter_contract``):
 
 * ``supports_turn_snapshots = True`` — eligibility flag for the substrate.
-* :meth:`run` writes a tiny DETERMINISTIC diff into the sandbox worktree (so the
+* :meth:`run` writes a tiny DETERMINISTIC diff into the sandbox worktree (and a
+  comment line into each of the ticket's ``files``, when it has any; so the
   ``snapshot_digest`` reflects real on-disk state), records the diff as a
   content-addressed ``cas://`` blob, returns advisory ``GateTriage`` ONLY (never
   a ``GateResult`` — LEARNINGS L5; agents do not sign verdicts), the
@@ -74,12 +75,20 @@ class StubAdapter:
         # reflects real on-disk state. cwd is pinned to the worktree by the
         # sandbox; resolve against it explicitly so we never touch the source.
         body = self._payload(packet)
-        target = Path(sandbox.worktree) / self._output_path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(body, encoding="utf-8")
-
-        # Record the change as a content-addressed blob (DS9: bodies out-of-band).
-        diff_text = f"--- /dev/null\n+++ b/{self._output_path}\n@@\n+{body}"
+        # A ticket must write its own files (a session that writes none of them is a
+        # failed attempt), so they get the same change, as a comment line.
+        note = "".join(f"# {line}\n" for line in body.splitlines())
+        changes = {self._output_path: body}
+        for f in packet.task.get("files") or ():
+            if not str(f).endswith("/"):
+                changes.setdefault(str(f), note)
+        diff_text = ""
+        for rel, text in changes.items():
+            target = Path(sandbox.worktree) / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+            # Record the change as a content-addressed blob (DS9: bodies out-of-band).
+            diff_text += f"--- /dev/null\n+++ b/{rel}\n@@\n+{text}"
         diff_uri = sandbox.put_blob(diff_text.encode("utf-8"))
 
         triage = (

@@ -71,7 +71,11 @@ def build_findings(
     if rc in MISSING_BINARY_EXIT_CODES:
         head += " (command not found or not executable: missing toolchain — infra ERROR)"
     elif step == "install":
-        head += " (dependency install failed — infra ERROR, retried)"
+        head += (
+            " (dependency install failed — an ERROR, never latched: if the output "
+            "names a project problem such as a missing lockfile, a bad manifest or an "
+            "unknown package, fix the manifest; otherwise the registry/network failed)"
+        )
     for ln in reversed(lines[-_EXCERPT_LINES:]):
         if used + len(ln) > _EXCERPT_CHARS:
             break

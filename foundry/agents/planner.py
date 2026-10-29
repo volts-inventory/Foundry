@@ -235,8 +235,10 @@ SOP = (
     "of the LANGUAGES AVAILABLE HERE; pick the framework and package manager. Give "
     "the shell commands the gates run from the repo root, in a sandbox that can "
     "write only inside the repo: install (the ONLY step with network: it must fetch "
-    "or vendor every dependency into the repo, e.g. `npm ci`, `go mod vendor`, "
-    "`cargo vendor`; Python leaves it empty), then build, typecheck (the language's "
+    "or vendor every dependency into the repo, e.g. `npm install --no-audit "
+    "--no-fund`, `go mod vendor`, `cargo vendor`; it must work with no lockfile in "
+    "the repo, since none may have been generated yet; Python leaves it empty), then "
+    "build, typecheck (the language's "
     "own type checker over the whole project, e.g. `npx tsc --noEmit`, `go vet "
     "./...`, `python3 -m mypy .`; it proves every ticket matches the contracts), "
     "test, bdd and run, all OFFLINE; run is REQUIRED unless the deliverable is a "
@@ -1391,6 +1393,25 @@ def _plan_paths(raw: Any, what: str, concerns: list[str]) -> tuple[str, ...]:
     return tuple(kept)
 
 
+# How to write contract stubs a strict type checker accepts with no implementation.
+_CONTRACT_STUB_RULES: dict[str, str] = {
+    "python": (
+        "declare services as typing.Protocol classes (mypy accepts a `...` body "
+        "there, but reports a plain class or function with a `...` body as a "
+        "missing return) or as ABCs with @abstractmethod, and data as dataclasses; "
+        "never name a method after a builtin used in annotations (`list`, `type`, "
+        "`id`, `dict`, ...) — inside the class body it shadows the builtin, so "
+        "`-> list[X]` breaks — or annotate with `builtins.list`."
+    ),
+    "typescript": (
+        "use only `interface` and `type` declarations (plus `enum`/`const` values "
+        "the contracts name), never a function or class body."
+    ),
+    "": "declarations only — interfaces, types and signatures with no bodies the "
+        "compiler would reject.",
+}
+
+
 def _generated_tickets(
     interfaces: Sequence[InterfaceContract],
     raw_stack: dict[str, Any],
@@ -1426,7 +1447,9 @@ def _generated_tickets(
                     "interfaces/types, Python Protocols and dataclasses, Go interfaces, "
                     "...) with no behaviour beyond what the language needs to compile. "
                     "Every other ticket imports these definitions and none may change "
-                    "them, so match each contract exactly."
+                    "them, so match each contract exactly. The file must pass the "
+                    "stack's build and typecheck on its own: "
+                    + _CONTRACT_STUB_RULES.get(language, _CONTRACT_STUB_RULES[""])
                 ),
                 specialty=Specialty.BACKEND,
                 difficulty=Difficulty.TRIVIAL,

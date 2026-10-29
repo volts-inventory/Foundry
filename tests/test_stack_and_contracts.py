@@ -23,7 +23,12 @@ from foundry.agents._common import emit_artifact
 from foundry.agents.implementation.personas import persona_for
 from foundry.agents.planner import _plan_schema, make_planner_node
 from foundry.durability.artifact_store import ArtifactStore
-from foundry.gates.profiles import PROFILES, pinned_stack, stack_profile
+from foundry.gates.profiles import (
+    PROFILES,
+    lockfile_tolerant_install,
+    pinned_stack,
+    stack_profile,
+)
 from foundry.gates.spec import SpecGate
 from foundry.graph.gate_wiring import (
     FEATURE_DIFF_KIND,
@@ -170,6 +175,7 @@ def test_code_contracts_and_bdd_stack_generate_wave_zero_tickets() -> None:
     assert contracts.files == ("src/contracts.ts",)
     assert contracts.implements == ("TodoStore.add", "TodoStore.list")  # not the http one
     assert contracts.specialty is Specialty.BACKEND and contracts.difficulty.value == "trivial"
+    assert "only `interface` and `type` declarations" in contracts.description
     assert harness.id == HARNESS_TICKET_ID and harness.specialty is Specialty.TEST
     assert harness.files == ("package.json", "tsconfig.json", "cucumber.json")
     assert harness.depends_on == () and "$FOUNDRY_BDD_REPORT" in harness.description
@@ -278,7 +284,8 @@ def test_gate_profile_reads_the_stack(monkeypatch: pytest.MonkeyPatch) -> None:
                                    typecheck="npx tsc --noEmit", test="npm test",
                                    bdd="npx cucumber-js")}, fallback)
     assert p is not None
-    assert p.install_cmd == "npm ci"  # its own networked step, not folded into build
+    # Its own networked step, not folded into build; tolerant of a missing lockfile.
+    assert p.install_cmd == lockfile_tolerant_install("npm ci")
     assert p.build_cmd == ("/bin/sh", "-c", "npm run build && npx tsc --noEmit")
     assert p.test_cmd == ("/bin/sh", "-c", "npm test") and p.smoke_cmd is None
     assert p.bdd_cmd == "npx cucumber-js"
@@ -488,6 +495,52 @@ def test_wave_build_check_reads_the_stack(monkeypatch: pytest.MonkeyPatch) -> No
     assert build.name == "build" and build.status is GateStatus.FAIL
 
 
+@pytest.mark.parametrize(("install", "lockfile", "ran"), [
+    ("npm ci", None, "npm install"),
+    ("npm ci", "package-lock.json", "npm ci"),
+    ("npm ci --no-audit --no-fund", None, "npm install --no-audit --no-fund"),
+    ("yarn install --frozen-lockfile", None, "yarn install"),
+    ("pnpm install --frozen-lockfile", "pnpm-lock.yaml", "pnpm install --frozen-lockfile"),
+])
+def test_a_lockfile_strict_install_works_without_a_lockfile(
+    tmp_path: Path, install: str, lockfile: str | None, ran: str,
+) -> None:
+    # Agents write package.json, rarely the lockfile: a bare `npm ci` then fails
+    # identically on every retry (EUSAGE) and the run halts on an "infra" ERROR.
+    import os
+    import subprocess
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for tool in ("npm", "yarn", "pnpm"):
+        stub = bin_dir / tool
+        stub.write_text(f'#!/bin/sh\necho "{tool} $*" >> "$PWD/ran.log"\n')
+        stub.chmod(0o755)
+    if lockfile:
+        (tmp_path / lockfile).write_text("{}")
+    profile = stack_profile(_js(install=install))
+    assert profile.install_cmd == lockfile_tolerant_install(install)
+    assert profile.install_cmd is not None
+    subprocess.run(["/bin/sh", "-c", profile.install_cmd], cwd=tmp_path, check=True,
+                   env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"})
+    assert (tmp_path / "ran.log").read_text().strip() == ran
+
+
+def test_other_installs_are_left_alone() -> None:
+    for cmd in ("npm install", "go mod vendor", "npm ci && npm run gen"):
+        assert lockfile_tolerant_install(cmd) == cmd
+
+
+def test_a_manifest_owner_may_write_its_lockfile() -> None:
+    from foundry.agents.implementation.tickets import in_write_scope
+
+    files = ("package.json", "web/Cargo.toml")
+    assert in_write_scope("package-lock.json", files)
+    assert in_write_scope("web/Cargo.lock", files)
+    assert not in_write_scope("web/package-lock.json", files)
+    assert not in_write_scope("package-lock.json", ("tsconfig.json",))
+
+
 # ---- materialization: gate-owned contracts, no Python manifest for other stacks ------
 
 
@@ -529,6 +582,22 @@ def test_contract_files_are_rewritten_from_the_contracts_ticket(tmp_path: Path) 
     materialize_workdir(state, tmp_path, resolve=resolve, resolve_blob=blob)
     assert (tmp_path / "src/contracts.ts").read_text() == "export type Id = string;\n"
     assert (tmp_path / "src/app.ts").read_text() == "x\n"
+
+
+def test_a_wave_zero_fix_repairs_the_contracts_until_a_later_wave_builds(
+    tmp_path: Path,
+) -> None:
+    # The wave-0 check may FAIL on the contracts themselves (a stub the type checker
+    # rejects): the fixer's repair must reach the gates, or the run can never pass.
+    # Once a later-wave ticket builds against them, they freeze.
+    state, resolve, blob = _diff_state([
+        (CONTRACTS_TICKET_ID, {"src/contracts.ts": "export type Id = ;\n"}),
+        ("fix-1", {"src/contracts.ts": "export type Id = string;\n"}),
+        ("T-001", {"src/contracts.ts": "export type Id = number;\n", "src/app.ts": "x\n"}),
+        ("fix-2", {"src/contracts.ts": "// gone\n"}),
+    ])
+    materialize_workdir(state, tmp_path, resolve=resolve, resolve_blob=blob)
+    assert (tmp_path / "src/contracts.ts").read_text() == "export type Id = string;\n"
 
 
 def test_a_retried_contracts_ticket_still_owns_its_files(tmp_path: Path) -> None:

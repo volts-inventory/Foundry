@@ -230,8 +230,10 @@ def _run_one_task(
     persona: str = "",
     retrieved_spans: tuple[str, ...] = (),
     overlay: Mapping[str, str | None] | None = None,
+    scope: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Run the adapter for ONE task in a fresh sandbox; return its channel writes.
+    A non-empty ``scope`` cuts the diff back to those paths (a noted trim).
 
     A FRESH ``Sandbox`` per task (arch §2(d): no reuse), then the diff keyed by
     ``content_digest`` (L7) so a re-run re-derives the same key and the
@@ -257,6 +259,10 @@ def _run_one_task(
             retrieved_spans=retrieved_spans,
         )
         result: AdapterResult = rt.adapter.run(packet, sandbox)
+        if scope:
+            from foundry.agents.implementation.tickets import trim_to_write_scope
+
+            result = trim_to_write_scope(result, sandbox, scope, task.id)
         _mirror_diff_blob(rt, sandbox, result)  # while the sandbox is alive
     finally:
         sandbox.destroy()
@@ -345,6 +351,31 @@ def _task_done_marker(task: Task, diff: FeatureDiff) -> dict[str, Any]:
     return d
 
 
+def _mid_wave_fix_scope(state: FactoryState, resolve: ArtifactResolver) -> tuple[str, ...]:
+    """Between waves the fixer repairs what is built — the built tickets' files —
+    and must not pre-build a later ticket's files (that ticket would then collide
+    with an unplanned module). Empty = unrestricted: after the last wave, or when a
+    built ticket declared no scope."""
+    from foundry.agents.implementation.tickets import (
+        _built_task_ids,
+        pending_wave,
+        read_tickets,
+        task_id_for_ticket,
+    )
+
+    if not pending_wave(state, resolve):
+        return ()
+    built = _built_task_ids(state)
+    files: list[str] = []
+    for t in read_tickets(state, resolve):
+        if task_id_for_ticket(t.id) not in built:
+            continue
+        if not t.files:
+            return ()
+        files.extend(f for f in t.files if f not in files)
+    return tuple(files)
+
+
 def make_fixer_node(
     rt: AgentRuntime,
     *,
@@ -398,6 +429,12 @@ def make_fixer_node(
                 summary="Could not rebuild the integrated tree to fix it",
                 concerns=(str(exc)[:400],),
             )]}
+        scope = _mid_wave_fix_scope(state, resolve)
+        persona = _FIXER_PERSONA
+        if scope:
+            persona += (" Later waves have not been built yet: fix only the files built so "
+                        "far, and write ONLY these paths (changes anywhere else are "
+                        "discarded): " + ", ".join(scope) + ".")
         task_id = f"fix-{attempt}"
         task = Task(
             id=task_id,
@@ -416,8 +453,9 @@ def make_fixer_node(
             turn_budget=turn_budget,
             cost_budget_microusd=cost_budget_microusd,
             prior_failures=_prior_failures(state),
-            persona=_FIXER_PERSONA,
+            persona=persona,
             overlay=overlay,
+            scope=scope,
         )
         # Integration orders diffs by Seq. A fresh diff key starts at epoch 1, tying
         # with (and possibly sorting under) the diffs it repairs, so lift its epoch

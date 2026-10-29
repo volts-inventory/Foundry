@@ -24,6 +24,7 @@ production swaps the command set (Playwright + pinned Chromium), not the seam.
 
 from __future__ import annotations
 
+import re
 import shlex
 import sys
 from dataclasses import dataclass, field
@@ -34,6 +35,7 @@ __all__ = [
     "PROFILES",
     "VerificationProfile",
     "installed_profiles",
+    "lockfile_tolerant_install",
     "pinned_stack",
     "profile_examples",
     "profile_for_request",
@@ -68,6 +70,37 @@ def _sh(script: str) -> tuple[str, ...]:
     return ("/bin/sh", "-c", script)
 
 
+# A lockfile-strict install and its fallback: (command pattern, lockfiles, the
+# replacement for the strict part when no lockfile exists).
+_STRICT_INSTALLS: tuple[tuple[re.Pattern[str], tuple[str, ...], str], ...] = (
+    (re.compile(r"npm\s+ci\b"), ("package-lock.json", "npm-shrinkwrap.json"), "npm install"),
+    (re.compile(r"yarn(\s+install)?\s+--(frozen-lockfile|immutable)\b"), ("yarn.lock",),
+     "yarn install"),
+    (re.compile(r"pnpm\s+(install|i)\s+--frozen-lockfile\b"), ("pnpm-lock.yaml",),
+     "pnpm install"),
+)
+_SHELL_META = re.compile(r"[;&|<>`$()]")
+
+
+def lockfile_tolerant_install(install: str) -> str:
+    """``install`` made to work on a tree without a lockfile: a bare lockfile-strict
+    install (``npm ci``, ``yarn --frozen-lockfile``, ``pnpm i --frozen-lockfile``) runs
+    as is when its lockfile exists and as the plain install otherwise. Agents write
+    the manifest, rarely the lockfile, and ``npm ci`` without one fails the same way
+    on every retry. A compound or unrecognized command is returned unchanged."""
+    cmd = install.strip()
+    if _SHELL_META.search(cmd):
+        return install
+    for strict, lockfiles, loose in _STRICT_INSTALLS:
+        m = strict.match(cmd)
+        if m is None:
+            continue
+        rest = cmd[m.end():]
+        test = " || ".join(f"[ -f {f} ]" for f in lockfiles)
+        return f"if {test}; then {cmd}; else {loose}{rest}; fi"
+    return install
+
+
 # The pytest harness also executes the tickets' acceptance scenarios.
 _BDD_CONTRACT = (
     " BDD: every Scenario in features/<ticket>.feature (named by its criterion id) "
@@ -96,7 +129,7 @@ PROFILES: dict[str, VerificationProfile] = {
     ),
     "node-web": VerificationProfile(
         name="node-web",
-        install_cmd="npm ci --no-audit --no-fund",
+        install_cmd=lockfile_tolerant_install("npm ci --no-audit --no-fund"),
         build_cmd=_sh("npm run build --if-present"),
         test_cmd=_sh("npm test --silent"),
         smoke_cmd=("node", "smoke.mjs"),
@@ -111,7 +144,7 @@ PROFILES: dict[str, VerificationProfile] = {
     ),
     "phaser-web": VerificationProfile(
         name="phaser-web",
-        install_cmd="npm ci --no-audit --no-fund",
+        install_cmd=lockfile_tolerant_install("npm ci --no-audit --no-fund"),
         build_cmd=_sh("npm run build --if-present"),
         test_cmd=_sh("npm test --silent"),
         smoke_cmd=("node", "smoke.mjs"),
@@ -370,7 +403,7 @@ def stack_profile(stack: StackDecision) -> VerificationProfile:
     )
     steps = [s for s in (build, stack.typecheck) if s]
     build_cmd = _sh(" && ".join(steps)) if steps else None
-    install = stack.install if stack.install and not python else None
+    install = lockfile_tolerant_install(stack.install) if stack.install and not python else None
     test_unavailable = ""
     if stack.bdd:
         # Scenarios are judged from the Cucumber report; `true` when only bdd is set.

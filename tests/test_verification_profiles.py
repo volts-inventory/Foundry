@@ -50,7 +50,9 @@ def test_every_profile_has_a_contract() -> None:
 def test_node_profiles_split_install_from_offline_build() -> None:
     for name in ("node-web", "phaser-web"):
         p = PROFILES[name]
-        assert p.install_cmd is not None and p.install_cmd.startswith("npm ci")
+        # `npm ci` when the tree has a lockfile, `npm install` when it has none.
+        assert p.install_cmd is not None and "then npm ci " in p.install_cmd
+        assert "else npm install " in p.install_cmd
         assert p.build_cmd is not None and "npm ci" not in " ".join(p.build_cmd)
 
 

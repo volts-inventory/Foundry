@@ -372,3 +372,25 @@ def test_spec_fail_replans_with_the_gate_findings_then_advances(tmp_path: Any) -
     assert {g.status for g in spec} == {GateStatus.FAIL, GateStatus.PASS}
     assert max(spec, key=lambda g: g.seq).status is GateStatus.PASS
     assert _gates_by_name(final).get("test") is GateStatus.PASS
+
+
+def test_a_spec_advance_resets_the_fix_budget_for_the_build_boundary(tmp_path: Any) -> None:
+    """The re-plan a Spec FAIL cost must not eat the build/test fix budget: with
+    max_fix_attempts=2 a carried-over attempt left the first wave failure no fixer
+    pass at all (a straight halt)."""
+    records = GlobalRecords()
+    app, _ = _respec_app(tmp_path, records, max_fix_attempts=2)
+    token = set_gate_write_verifier(DevGateWriteVerifier(KEY, KEY_ID, records))
+    budgets: list[tuple[GateStatus, int]] = []
+    try:
+        for step in app.stream({"request": "build a todo app"}, _config("run-respec-budget"),
+                               stream_mode="updates"):
+            out = step.get("spec_gate")
+            if out:
+                (verdict,) = out["gates"]
+                ledger = out.get("budget")
+                budgets.append((verdict.status, ledger.fix_attempts_since_all_green
+                                if ledger is not None else -1))
+    finally:
+        reset_gate_write_verifier(token)
+    assert budgets == [(GateStatus.FAIL, 1), (GateStatus.PASS, 0)]

@@ -64,7 +64,8 @@ _FIXER_PERSONA = (
     "gates below pass; do not rewrite working code or add features."
 )
 
-_DEFAULT_TURN_BUDGET = 8
+# Claude Code needs several turns to read, write and verify; 8 left contract stubs empty.
+_DEFAULT_TURN_BUDGET = 25
 _DEFAULT_COST_BUDGET_MICROUSD = 1_000_000  # integer micro-USD, never floats
 
 

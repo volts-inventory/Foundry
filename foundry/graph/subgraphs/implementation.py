@@ -52,7 +52,7 @@ def build_implementation_subgraph(
     resolve: ArtifactResolver,
     resolve_blob: BlobResolver | None = None,
     snapshot_store: str | None = None,
-    turn_budget: int = 8,
+    turn_budget: int = 25,
     cost_budget_microusd: int = 1_000_000,
     max_slots: int = 1,
     cost_cap_microusd: int | None = None,

@@ -128,7 +128,8 @@ MAX_TICKET_ATTEMPTS = 2
 # Per-specialty concurrent ticket limit when none is configured.
 DEFAULT_WORKERS: dict[str, int] = {s.value: 2 for s in Specialty}
 
-_DEFAULT_TURN_BUDGET = 8
+# Claude Code needs several turns to read, write and verify; 8 left contract stubs empty.
+_DEFAULT_TURN_BUDGET = 25
 _DEFAULT_COST_BUDGET_MICROUSD = 1_000_000
 
 

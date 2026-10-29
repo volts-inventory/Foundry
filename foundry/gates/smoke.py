@@ -20,6 +20,7 @@ from pathlib import Path
 
 from foundry.schemas.gates import GateStatus, VerdictClass
 
+from .build import build_findings
 from .runner import ZoneAObservation, observe
 from .sandbox import ground_untrusted
 
@@ -46,7 +47,7 @@ class SmokeGate:
         self._seal_key = seal_key  # zone-A observation seal (None ⇒ unsealed channel)
         # Class-2 reuse-key bindings (§1f) — uniform key shape with Build/Test.
         self.mutant_rotation_id = 0
-        self.scanner_rule_version = "smoke-cmd-v2"  # v2 = confined sandbox
+        self.scanner_rule_version = "smoke-cmd-v3"  # v2 = confined sandbox; v3 = findings
 
     def execute(self, workdir: Path) -> ZoneAObservation:
         rc, out, err = ground_untrusted(self.cmd, workdir, timeout_s=self._timeout_s)
@@ -56,6 +57,8 @@ class SmokeGate:
             stdout=out,
             stderr=err,
             structured={"cmd": list(self.cmd)},
+            # A red boot carries its WHY (exit code + output tail) for the fixer.
+            findings=build_findings(rc, out, err, workdir, step="smoke") if rc != 0 else (),
             seal_key=self._seal_key,
         )
 

@@ -66,14 +66,15 @@ AREA_PERSONAS: dict[str, str] = {
     "test": (
         "You are a SENIOR TEST / QA ENGINEER. Expertise: behaviour-driven testing "
         "with pytest-bdd. Write the step definitions that make this ticket's "
-        "scenarios executable: one module under tests/steps/ that binds each "
-        "scenario from the feature file named in the task via scenarios(...) (path "
-        "relative to the module unless the project sets bdd_features_base_dir) and "
-        "implements every Given/When/Then step with "
+        "scenarios executable: one module under tests/steps/ that binds the exact "
+        "gate-owned features/<ticket>.feature file named in the task via "
+        "scenarios(...) (path relative to the module unless the project sets "
+        "bdd_features_base_dir) and implements every Given/When/Then step with "
         "@given/@when/@then and parsers, sharing state through fixtures. Drive the "
         "real code through its public interface; assert observable behaviour, never "
-        "internals. NEVER edit .feature files — they are the spec; if a step cannot "
-        "pass, report it as TRIAGE instead of weakening the assertion."
+        "internals. NEVER write, copy or edit a .feature file: the gate runs only "
+        "features/<ticket>.feature and discards any other; if a step cannot pass, "
+        "report it as TRIAGE instead of weakening the assertion."
     ),
 }
 
@@ -87,9 +88,10 @@ def _stack_test_persona(stack: StackDecision) -> str:
         "of the feature file named in the task, matching each step's text exactly, "
         "sharing state through the runner's world/context. Drive the real code "
         "through its public interface; assert observable behaviour, never internals; "
-        "never write a catch-all step that matches any text. NEVER edit .feature "
-        "files — they are the spec; if a step cannot pass, report it as TRIAGE "
-        "instead of weakening the assertion."
+        "never write a catch-all step that matches any text. NEVER write, copy or "
+        "edit a .feature file: the gate runs only features/<ticket>.feature and "
+        "discards any other; if a step cannot pass, report it as TRIAGE instead of "
+        "weakening the assertion."
     )
 
 

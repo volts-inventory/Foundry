@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import builtins
 import re
+import shlex
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -163,7 +164,11 @@ _TICKET_RULES = (
     "(directly or through other tickets); every implemented contract has a consumer "
     "or a scenario on its implementing ticket. Every feature ticket gets a paired "
     "specialty='test' ticket that depends_on it and writes the step definitions for "
-    "that feature's scenarios; the test ticket carries no scenarios of its own. "
+    "that feature's scenarios, binding the gate-written features/<feature ticket "
+    "id>.feature (the gate renders one per ticket from its scenarios); the test "
+    "ticket carries no scenarios of its own. Never list a .feature file in files[]: "
+    "feature files are gate-owned. Every repo file a stack command names (e.g. "
+    "smoke.py in `python3 smoke.py`) must be in some ticket's files[]. "
     "Where a scope cap speaks of ownership units, it means the files across your "
     "tickets.\n"
     "SCENARIOS (the acceptance criteria): each feature ticket carries its executable "
@@ -1251,6 +1256,16 @@ def _build_tickets(
         for tid, item in items.items()
     }
     own = {tid: tuple(c.id for c in ordered if c.ticket_id == tid) for tid in items}
+    files: dict[str, tuple[str, ...]] = {}
+    for tid, item in items.items():
+        planned = _uniq(_strs(item.get("files")))
+        files[tid] = tuple(f for f in planned if not f.endswith(".feature"))
+        if files[tid] != planned:
+            concerns.append(
+                f"Ticket {tid}: dropped feature file(s) "
+                f"{', '.join(f for f in planned if f.endswith('.feature'))} from its files: "
+                f"the gate writes {FEATURE_DIR}/<ticket>.feature from the scenarios."
+            )
     tickets: list[Ticket] = []
     for i, (tid, item) in enumerate(items.items()):
         scenario_ids = own[tid]
@@ -1276,7 +1291,7 @@ def _build_tickets(
                 specialty=specialty[tid],
                 difficulty=_enum(Difficulty, item.get("difficulty"), Difficulty.STANDARD),
                 depends_on=tuple(deps[tid]),
-                files=_uniq(_strs(item.get("files"))),
+                files=files[tid],
                 reads=_uniq(_strs(item.get("reads"))),
                 scenario_ids=scenario_ids,
                 implements=contracts["implements"],
@@ -1519,6 +1534,64 @@ def _attach_generated(
     return [
         t.model_copy(update={"seq": seq._replace(local=i)}) for i, t in enumerate(ordered)
     ], concerns
+
+
+# Script files a stack command can name as its own repo file (`python3 smoke.py`).
+_SCRIPT_SUFFIXES = (".py", ".js", ".mjs", ".cjs", ".ts", ".mts", ".sh", ".rb", ".lua",
+                    ".pl", ".php")
+
+
+def stack_files(stack: StackDecision) -> tuple[str, ...]:
+    """Repo-relative script files the stack's run / test / bdd commands execute."""
+    out: list[str] = []
+    for cmd in (stack.run, stack.test, stack.bdd):
+        try:
+            tokens = shlex.split(cmd)
+        except ValueError:
+            continue
+        for tok in tokens:
+            path = tok.removeprefix("./")
+            if (path.endswith(_SCRIPT_SUFFIXES) and not path.startswith(("-", "/"))
+                    and not any(ch in path for ch in "$=*:")
+                    and ".." not in path.split("/") and path not in out):
+                out.append(path)
+    return tuple(out)
+
+
+def _own_stack_files(
+    tickets: Sequence[Ticket], stack: StackDecision | None
+) -> tuple[list[Ticket], list[str], tuple[str, ...]]:
+    """Give every script a stack command runs (``smoke.py`` for ``python3 smoke.py``)
+    an owner: one no ticket writes is added to the entrypoint ticket, which wires the
+    app end to end — else the run command fails on a file nothing builds. With no
+    entrypoint ticket it is a coverage finding (a re-plan). Returns (tickets,
+    concerns, findings)."""
+    if stack is None:
+        return list(tickets), [], ()
+
+    def owned(path: str) -> bool:
+        return any(f == path or (f.endswith("/") and path.startswith(f))
+                   for t in tickets for f in t.files)
+
+    orphans = [f for f in stack_files(stack) if not owned(f)]
+    if not orphans:
+        return list(tickets), [], ()
+    entry = next((t for t in tickets if t.entrypoint and t.id not in _GENERATED_TICKETS), None)
+    if entry is None:
+        return list(tickets), [], tuple(
+            f"Stack command file {f} is written by no ticket: put it in the files[] of "
+            "the ticket that wires the app (the entrypoint ticket)." for f in orphans
+        )
+    note = (" Also write " + ", ".join(orphans) + ": the stack's commands run "
+            + ("it" if len(orphans) == 1 else "them")
+            + (f" (run: `{stack.run}`), which must boot the real app headless and exit 0"
+               if stack.run else "") + ".")
+    updated = entry.model_copy(update={
+        "files": (*entry.files, *orphans), "description": entry.description + note,
+    })
+    return ([updated if t.id == entry.id else t for t in tickets],
+            [f"Ticket {entry.id}: added stack command file(s) {', '.join(orphans)} that no "
+             "ticket wrote."], ())
 
 
 def _contract_findings(
@@ -2350,7 +2423,9 @@ def make_planner_node(
             # gain its run command, so a missing-run finding is fixable by re-plan.
             stack_update = pinned.model_copy(update={"run": raw_run})
         current_stack = stack_update or pinned
-        coverage_findings = (*overflow, *_coverage_findings(
+        tickets, own_concerns, stack_findings = _own_stack_files(tickets, current_stack)
+        ticket_concerns += own_concerns
+        coverage_findings = (*overflow, *stack_findings, *_coverage_findings(
             tickets, criteria, brief,
             run=None if current_stack is not None and current_stack.profile
             else (current_stack.run if current_stack is not None else raw_run),
@@ -2557,7 +2632,8 @@ def make_planner_node(
             overflow=overflow,
         )
         tickets, attach_concerns = _attach_generated(tickets, prior.generated, tickets_seq)
-        ticket_concerns += attach_concerns
+        tickets, own_concerns, stack_findings = _own_stack_files(tickets, stack)
+        ticket_concerns += [*attach_concerns, *own_concerns]
         dropped = _retired_tickets(state, rt, tickets, tickets_seq)
         prd_seq = seq("artifact:prd")
         prd = prior.prd.model_copy(
@@ -2578,7 +2654,7 @@ def make_planner_node(
             judgment_provenance=JudgmentProvenance.SELF,
             seq=critique_seq,
             contract_findings=_contract_findings(tickets, criteria),
-            coverage_findings=(*overflow, *_coverage_findings(
+            coverage_findings=(*overflow, *stack_findings, *_coverage_findings(
                 tickets, criteria, prior.intent,
                 run=None if stack is None or stack.profile else stack.run,
             )),

@@ -514,10 +514,10 @@ _WAVE_KEY = b"dev-zone-b-wave-key-0123456789abcdef"
 
 def _wave_run(
     tmp_path: Path, rec: _Recorder, *, max_fix_attempts: int = 3,
-    tickets: list[Ticket] | None = None, **extra: Any,
+    tickets: list[Ticket] | None = None, store: ArtifactStore | None = None, **extra: Any,
 ) -> tuple[FactoryState, list[str], ArtifactStore]:
     """Two waves (T-002 depends on T-001) with the REAL runner's build gate between."""
-    store = ArtifactStore()
+    store = store or ArtifactStore()
     rt = _runtime(rec, store)
     records = GlobalRecords()
     runner = TwoZoneGateRunner(ZoneBSigner(_WAVE_KEY, "wave-kid"), records, "s1", "l1")
@@ -964,3 +964,103 @@ def test_main_passes_flags_and_env_through_to_run(monkeypatch: pytest.MonkeyPatc
     assert seen["ticket_tiers"][Difficulty.TRIVIAL] == "T1"
     assert seen["ticket_tiers"][Difficulty.COMPLEX] == "T1"  # flag replaces the env
     assert cli.main(["--workers", "ops=1", "build x"]) == 2
+
+
+# ---- per-wave scenario check: unbound scenarios are caught in their wave -----
+
+_STEPS = '''from pytest_bdd import given, scenarios, then, when
+
+scenarios("{path}")
+
+
+@given("an empty store")
+def _empty():
+    pass
+
+
+@when("I add 'milk'")
+def _add():
+    pass
+
+
+@then("it has id 1")
+def _id():
+    from app import add
+    assert add("milk") == 1
+'''
+
+
+def _bdd_wave_tickets(store: ArtifactStore) -> tuple[list[Ticket], list[Any]]:
+    crit = AcceptanceCriterion(
+        id="AC-1", text="add returns 1", given=("an empty store",),
+        when=("I add 'milk'",), then=("it has id 1",), ticket_id="T-001", seq=_seq(21),
+    )
+    tickets = [
+        _ticket("T-001", 0, files=("app.py",), scenario_ids=("AC-1",)),
+        _ticket("T-002", 1, specialty=Specialty.TEST, files=("tests/steps/test_app.py",),
+                deps=("T-001",), scenario_ids=("AC-1",)),
+        _ticket("T-003", 2, files=("later.py",), deps=("T-002",)),
+    ]
+    return tickets, [emit_artifact(crit, "acceptance_criterion", "planner", crit.seq,
+                                   store=store)]
+
+
+def test_the_wave_check_catches_an_unbound_scenario_and_the_fixer_binds_it(
+    tmp_path: Path,
+) -> None:
+    # The trial failure: a test ticket binds its OWN copy of the scenarios, so the
+    # suite is green but the gate-owned feature never runs. Caught after the wave
+    # that built both carriers, not all at once at the final gate.
+    rec = _Recorder(writes={
+        "T-001": {"app.py": "def add(title):\n    return 1\n"},
+        "T-002": {"tests/features/app.feature": "Feature: copy\n",
+                  "tests/steps/test_app.py": _STEPS.format(path="../features/app.feature")},
+        "fix-1": {"tests/steps/test_app.py":
+                  _STEPS.format(path="../../features/T-001.feature")},
+    })
+    store = ArtifactStore()
+    tickets, extra = _bdd_wave_tickets(store)
+    out, ran, store = _wave_run(tmp_path, rec, tickets=tickets, artifacts=extra, store=store)
+
+    # T-001 alone leaves AC-1 waiting on its test ticket: build only, no scenario run.
+    assert ran == ["engineering", "wave_gate", "engineering", "wave_gate", "fixer",
+                   "wave_gate", "engineering"]
+    tests = [g for g in sorted(out["gates"], key=lambda g: g.seq) if g.name == "test"]
+    assert [g.status for g in tests] == [GateStatus.FAIL, GateStatus.PASS]
+    assert any("features/T-001.feature::AC-1 was not executed" in f
+               for f in tests[0].findings)
+    # The fixer sees the failure grouped by feature file with the owning tickets.
+    grouped = "\n".join(rec.packets["fix-1"].prior_failures)
+    assert "[features/T-001.feature] scenarios AC-1" in grouped
+    assert "T-002 (tests/steps/test_app.py)" in grouped
+    assert "never write, copy or regenerate a .feature" in " ".join(
+        rec.packets["fix-1"].task["rules"])
+    # The agent's own feature file never reaches the tree.
+    tree = tmp_path / "tree"
+    materialize_workdir(out, tree, resolve=store.resolve, resolve_blob=store.resolve_blob)
+    assert not (tree / "tests/features/app.feature").exists()
+
+
+def test_a_test_ticket_packet_names_its_feature_binding_and_verify_command(
+    tmp_path: Path,
+) -> None:
+    store = ArtifactStore()
+    tickets, extra = _bdd_wave_tickets(store)
+    rec = _Recorder()
+    stack = StackDecision(language="python", test="python3 -m pytest -q")
+    _graph(_runtime(rec, store), store, tmp_path).compile().invoke(
+        _state(store, tickets, artifacts=extra, stack=stack), _config())
+
+    rules = " ".join(rec.packets["T-002"].task["rules"])
+    assert "features/T-001.feature (Scenario: AC-1)" in rules
+    assert 'in tests/steps/test_app.py: scenarios("../../features/T-001.feature")' in rules
+    assert "Never write, copy or regenerate a .feature file" in rules
+    assert rec.packets["T-002"].task["verify"]["scenarios"] == (
+        "grep -q features/T-001.feature tests/steps/test_app.py && "
+        "python3 -m pytest -q -rA tests/steps/test_app.py"
+    )
+    # The feature ticket names the file too, but leaves the binding to its test ticket.
+    impl = " ".join(rec.packets["T-001"].task["rules"])
+    assert "features/T-001.feature (Scenario: AC-1)" in impl
+    assert "A paired test ticket binds these scenarios" in impl
+    assert "scenarios" not in rec.packets["T-001"].task["verify"]

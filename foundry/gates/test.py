@@ -37,7 +37,7 @@ import re
 import secrets
 import sys
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 from foundry.schemas.gates import GateStatus, VerdictClass
@@ -262,8 +262,10 @@ def read_bdd_report(path: Path, nonce: str) -> dict[str, str] | None:
 
 _BDD_WHY = {
     "missing": (
-        "was not executed — bind the feature with pytest-bdd `scenarios(...)` "
-        "and implement every Given/When/Then step"
+        "was not executed — bind that exact gate-owned file with pytest-bdd "
+        "`scenarios(\"<relative path from the step module to it>\")` (a copy of it or a "
+        ".feature file of your own is ignored by the gate) and implement every "
+        "Given/When/Then step"
     ),
     "unmatched": (
         "ran steps that do not match the trusted feature file's scenario — do not "
@@ -306,6 +308,25 @@ def bdd_findings(
             continue
         criterion = ref.rsplit("::", 1)[-1]
         out.append(f"BDD criterion {criterion}: scenario {ref} {why.get(status, status)}")
+    return tuple(out)
+
+
+def binding_modules(workdir: Path, features: set[str]) -> tuple[str, ...]:
+    """The ``.py`` files under ``workdir`` (outside ``features/``) whose text names
+    one of ``features`` by file name — the step modules that bind them."""
+    names = {PurePosixPath(f).name for f in features}
+    root = Path(workdir)
+    out: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root).as_posix()
+        if rel.startswith((f"{FEATURE_DIR}/", ".")) or "/." in rel:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if any(n in text for n in names):
+            out.append(rel)
     return tuple(out)
 
 
@@ -383,6 +404,7 @@ class TestGate:
         bdd_cmd: str | None = None,
         stack_harness: bool = False,
         profile_name: str = "",
+        scope: frozenset[str] | None = None,
     ) -> None:
         # Default: the ISOLATED pinned harness (fences the host source off sys.path
         # so generated modules can't collide with / reach ours). An explicit cmd is
@@ -409,10 +431,13 @@ class TestGate:
         )
         # A stack command is judged by its exit code alone, never pytest's codes.
         self.stack_harness = stack_harness
+        # Scenario refs a per-wave check judges (``None`` = the full gate): only
+        # these scenarios run and decide the verdict; other tests are not judged.
+        self.scope = scope
         # The command digest: a cached verdict never outlives a change of commands.
         self.scanner_rule_version = "test-harness-v2:" + commands_digest(
             cmd=list(self.cmd), bdd_cmd=self.bdd_cmd, stack_harness=stack_harness,
-            profile=profile_name,
+            profile=profile_name, scope=sorted(scope) if scope is not None else None,
         )
         self._timeout_s = timeout_s
         self._seal_key = seal_key  # zone-A observation seal (None ⇒ unsealed channel)
@@ -495,6 +520,8 @@ class TestGate:
 
     def execute(self, workdir: Path) -> ZoneAObservation:
         trusted = trusted_scenarios(workdir) if self._runs_bdd or self.bdd_cmd else {}
+        if self.scope is not None:
+            trusted = {k: v for k, v in trusted.items() if k in self.scope}
         if trusted and self.bdd_cmd:
             with tempfile.TemporaryDirectory(prefix="foundry-bdd-") as tmp:
                 return self._execute(workdir, trusted, Path(tmp))
@@ -505,7 +532,11 @@ class TestGate:
     ) -> ZoneAObservation:
         cmd = self.cmd
         executed: dict[str, str] | None = None
-        if bdd_dir is not None and self.bdd_cmd:
+        if self.scope is not None and not trusted:
+            # No trusted feature holds a scoped scenario: nothing runs, all missing.
+            rc, out, err, executed = 0, "", "", {}
+            trusted = dict.fromkeys(self.scope, [])
+        elif bdd_dir is not None and self.bdd_cmd:
             # The Cucumber run goes first and its report is pinned (size + sha256)
             # the moment it exits, before any other agent code in this gate runs.
             report_path = cucumber.create_report_file(bdd_dir)
@@ -516,7 +547,18 @@ class TestGate:
                 ((report_path, True),),
             )
             digest = cucumber.record_report(report_path)
-            rc, out, err = self._ground(workdir, cmd)
+            # A scoped check judges the scenarios alone: skip the stack's test run.
+            rc, out, err = (0, "", "") if self.scope is not None else self._ground(workdir, cmd)
+        elif trusted and self.scope is not None:
+            # Only the step modules that bind a scoped feature file run, and one
+            # module that fails to import does not hide the others' scenarios.
+            targets = binding_modules(workdir, {r.split("::", 1)[0] for r in trusted})
+            cmd = (sys.executable, "-c", _ISOLATED_PYTEST_BDD_BOOTSTRAP, "-q", "--tb=short",
+                   "--continue-on-collection-errors", *targets)
+            if targets:
+                rc, out, err, executed = self._ground_bdd(workdir, cmd, trusted)
+            else:
+                rc, out, err, executed = 0, "", "", {}
         elif trusted:
             cmd = (sys.executable, "-c", _ISOLATED_PYTEST_BDD_BOOTSTRAP, *self.cmd[3:])
             rc, out, err, executed = self._ground_bdd(workdir, cmd, trusted)
@@ -598,6 +640,12 @@ class TestGate:
         rc = obs.exit_codes[0]
         if obs.structured.get(BDD_EXIT_KEY) in MISSING_BINARY_EXIT_CODES:
             return GateStatus.ERROR  # the Cucumber runner's binary is missing
+        if self.scope is not None:
+            # A per-wave check: the scoped scenarios alone decide (the rest of the
+            # suite may need tickets not built yet; the final gate runs it all).
+            scoped = obs.structured.get(BDD_KEY) or {}
+            return (GateStatus.PASS if scoped and all(v == "passed" for v in scoped.values())
+                    else GateStatus.FAIL)
         if self.stack_harness:
             if rc in MISSING_BINARY_EXIT_CODES:
                 return GateStatus.ERROR  # missing toolchain: infra, never latched

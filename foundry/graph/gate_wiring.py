@@ -65,6 +65,7 @@ from foundry.schemas.implementation import (
     StackDecision,
     Ticket,
     feature_path,
+    scenario_ref,
 )
 from foundry.schemas.product import AcceptanceCriterion, CriteriaCritique
 from foundry.state.reducers import merge_gates
@@ -1327,6 +1328,45 @@ def run_build_test_gates(
     return out
 
 
+def wave_scenarios(state: FactoryState, resolve: ArtifactResolver) -> frozenset[str]:
+    """The scenario refs a per-wave check can judge: those of criteria whose every
+    carrier (the owning ticket and each ticket listing it in ``scenario_ids``, i.e.
+    its paired test ticket) is built. Anything still waiting on a ticket is left to
+    a later wave or the final gate."""
+    from foundry.agents.implementation.tickets import _built_task_ids, read_tickets
+
+    built = _built_task_ids(state)
+    carriers: dict[str, set[str]] = {}
+    for t in read_tickets(state, resolve):
+        for cid in t.scenario_ids:
+            carriers.setdefault(cid, set()).add(t.id)
+    return frozenset(
+        scenario_ref(c.ticket_id, c.id)
+        for c in _current_criteria(state, resolve).values()
+        if c.ticket_id and {c.ticket_id, *carriers.get(c.id, ())} <= built
+    )
+
+
+def _wave_test_gate(
+    profile: VerificationProfile | None, runner: TwoZoneGateRunner, scope: frozenset[str]
+) -> TestGate | None:
+    """The scoped Test gate for a wave check, or ``None`` when this stack's harness
+    does not execute scenarios (a foreign test command with no ``bdd``)."""
+    if profile is not None and (
+        profile.unavailable or profile.test_unavailable
+        or (profile.test_cmd is not None and profile.bdd_cmd is None)
+    ):
+        return None
+    return TestGate(
+        cmd=profile.test_cmd if profile is not None else None,
+        seal_key=runner.seal_key,
+        bdd_cmd=profile.bdd_cmd if profile is not None else None,
+        stack_harness=profile is not None and profile.test_cmd is not None,
+        profile_name=profile.name if profile is not None else "",
+        scope=scope,
+    )
+
+
 def run_build_gate(
     state: FactoryState,
     config: RunnableConfig,
@@ -1337,12 +1377,15 @@ def run_build_gate(
     resolve_blob: BlobResolver,
     workdir: Path,
     profile: VerificationProfile | None = None,
+    scenarios: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
-    """Run ONLY the Build gate on the integrated tree (the per-wave check, §2b).
+    """Run the Build gate on the integrated tree (the per-wave check, §2b), plus,
+    when ``scenarios`` is non-empty, the Test gate scoped to those scenarios, so an
+    unbound or failing scenario is caught in the wave that built it.
 
-    The Test gate is left out on purpose: scenarios of tickets not yet built would
-    fail it. Keyed under the same node as the final Build gate, so the final
-    verdict (a later epoch) supersedes every intermediate one."""
+    The full Test gate is left out on purpose: scenarios of tickets not yet built
+    would fail it. Keyed under the same nodes as the final gates, so the final
+    verdicts (a later epoch) supersede every intermediate one."""
     run_against = materialize_workdir(state, workdir, resolve=resolve, resolve_blob=resolve_blob)
     out: dict[str, Any] = {}
     stack = state.get("stack")
@@ -1391,6 +1434,15 @@ def run_build_gate(
         node_id=_BUILD_NODE,
     )
     out["gates"] = [build]
+    test = _wave_test_gate(profile, runner, scenarios) if scenarios else None
+    if test is not None:
+        # Same tree digest as the build, so the fixer reads both verdicts as this
+        # pass's. A scoped FAIL latching the tree is safe: the final Test gate only
+        # ever runs on a later tree (a failing wave check is fixed or halts).
+        out["gates"].append(_run_gate(
+            test, rt=rt, runner=runner, config=config, run_against=run_against,
+            workdir=workdir, node_id=_TEST_NODE,
+        ))
     return out
 
 
@@ -1695,8 +1747,13 @@ class WaveBuildCheck:
     gets ``max_fix_attempts - 1`` fixer passes (the default 3 gives 2), and every
     build-side fix also counts toward :func:`fix_cap`, the run-wide bound.
 
+    With ``check_scenarios`` the check also runs the Test gate scoped to the
+    scenarios whose tickets are all built (:func:`wave_scenarios`), so an unbound or
+    failing scenario reaches the wave's fixer instead of piling up for the final gate.
+
     ``run`` is the node (verdict + budget bump); ``route`` returns
-    :data:`ADVANCE` / :data:`FIX` / :data:`HALT` for the :data:`BUILD_BOUNDARY`."""
+    :data:`ADVANCE` / :data:`FIX` / :data:`HALT` for the :data:`BUILD_BOUNDARY`, or
+    :data:`BUILD_TEST_BOUNDARY` when the check judged scenarios."""
 
     rt: AgentRuntime
     runner: TwoZoneGateRunner
@@ -1704,20 +1761,34 @@ class WaveBuildCheck:
     resolve_blob: BlobResolver
     max_fix_attempts: int = 3
     profile: VerificationProfile | None = None
+    check_scenarios: bool = True
+
+    def _scenarios(self, state: FactoryState) -> frozenset[str]:
+        if not self.check_scenarios:
+            return frozenset()
+        scope = wave_scenarios(state, self.resolve)
+        if not scope or _wave_test_gate(gate_profile(state, self.profile), self.runner,
+                                        scope) is None:
+            return frozenset()
+        return scope
+
+    def _boundary(self, state: FactoryState) -> str:
+        return BUILD_TEST_BOUNDARY if self._scenarios(state) else BUILD_BOUNDARY
 
     def run(self, state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         with tempfile.TemporaryDirectory(prefix="foundry_wave_gate_") as tmp:
             out = run_build_gate(
                 state, config, rt=self.rt, runner=self.runner, resolve=self.resolve,
                 resolve_blob=self.resolve_blob, workdir=Path(tmp), profile=self.profile,
+                scenarios=self._scenarios(state),
             )
-        settle_fix_attempts(state, config, out, boundary=BUILD_BOUNDARY,
+        settle_fix_attempts(state, config, out, boundary=self._boundary(state),
                             records=self.runner.records, max_fix_attempts=self.max_fix_attempts,
                             total_cap=fix_cap(state, self.resolve, self.max_fix_attempts))
         return out
 
     def route(self, state: FactoryState, config: RunnableConfig) -> str:
-        return route_after_gates(state, config, boundary=BUILD_BOUNDARY,
+        return route_after_gates(state, config, boundary=self._boundary(state),
                                  records=self.runner.records,
                                  max_fix_attempts=self.max_fix_attempts,
                                  total_cap=fix_cap(state, self.resolve, self.max_fix_attempts))

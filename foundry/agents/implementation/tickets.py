@@ -32,10 +32,12 @@ exits and the supervisor raises it, after this wave's writes are committed.
 from __future__ import annotations
 
 import json
+import posixpath
 import re
+import shlex
 import tempfile
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from foundry.agents._common import journal_entry
@@ -293,11 +295,12 @@ def plan_wave_count(tickets: Sequence[Ticket]) -> int:
 
 
 def _is_gate_input(path: str) -> bool:
+    """Criteria and every ``.feature`` file: the gate writes features/<ticket>.feature
+    and executes only those, so an agent's own feature file anywhere (a copy under
+    tests/features/) would only be a scenario binding the gate never runs."""
     from foundry.graph.gate_wiring import GATE_INPUT_FILES
 
-    return path in GATE_INPUT_FILES or (
-        path.startswith(f"{FEATURE_DIR}/") and path.endswith(".feature")
-    )
+    return path in GATE_INPUT_FILES or path.endswith(".feature")
 
 
 # A manifest's lockfiles: written by the package manager whenever the manifest's
@@ -536,6 +539,87 @@ def _flag_contract_duplicates(
 _VERIFY_STEPS = ("install", "build", "typecheck", "test", "bdd")
 
 
+def _python_test_files(files: Sequence[str]) -> tuple[str, ...]:
+    return tuple(
+        f for f in files
+        if f.endswith(".py") and (PurePosixPath(f).name.startswith("test_")
+                                  or f.endswith("_test.py"))
+    )
+
+
+def _pytest_bdd(stack: StackDecision | None) -> bool:
+    """The trusted pytest-bdd harness runs the scenarios (Python with no ``bdd``)."""
+    return stack is None or (stack.language == "python" and not stack.bdd)
+
+
+def scenario_rules(
+    files: Sequence[str],
+    scenarios: Mapping[str, Sequence[str]],
+    stack: StackDecision | None,
+) -> list[str]:
+    """The packet rules that tie a ticket to its gate-owned scenarios: the exact
+    feature file(s) and scenario names, how to bind them on this stack, and never
+    to author a feature file. ``scenarios`` maps feature path -> scenario names."""
+    if not scenarios:
+        return []
+    listing = "; ".join(f"{path} (Scenario: {', '.join(ids)})" for path, ids in scenarios.items())
+    rules = [
+        f"ACCEPTANCE SCENARIOS: this ticket's scenarios are in the gate-owned file(s) "
+        f"{listing}. Never write, copy or regenerate a .feature file anywhere: the "
+        f"gate writes {FEATURE_DIR}/<ticket>.feature, executes only those, and "
+        "discards any other .feature file."
+    ]
+    paths = list(scenarios)
+    if stack is not None and stack.bdd:
+        rules.append(
+            f"BIND THEM: the bdd command `{stack.bdd}` runs every {FEATURE_DIR}/*.feature "
+            f"from the repo root; every Given/When/Then of {', '.join(paths)} needs a "
+            "step definition the runner loads (an undefined or skipped step fails the "
+            "gate). Run the bdd command and confirm each of these scenarios passed."
+        )
+    elif _pytest_bdd(stack):
+        tests = _python_test_files(files)
+        if tests:
+            calls = "; ".join(
+                f"in {t}: " + " ".join(
+                    f'scenarios("{posixpath.relpath(p, posixpath.dirname(t) or ".")}")'
+                    for p in paths)
+                for t in tests
+            )
+            rules.append(
+                "BIND THEM with pytest-bdd, the path relative to your step module: "
+                f"{calls}. Binding any other file leaves these scenarios unexecuted, "
+                "which fails the gate. The `scenarios` command in `verify` checks the "
+                "binding and runs them: every scenario above must pass."
+            )
+        elif files:
+            rules.append(
+                "A paired test ticket binds these scenarios with pytest-bdd; the code "
+                "you write must make them pass."
+            )
+        else:
+            rules.append(
+                "BIND THEM with pytest-bdd from a step module, the path relative to it "
+                f'(from tests/test_x.py: scenarios("../{paths[0]}")), and implement '
+                "every Given/When/Then step."
+            )
+    return rules
+
+
+def scenario_verify(
+    files: Sequence[str], scenarios: Mapping[str, Sequence[str]], stack: StackDecision | None
+) -> dict[str, str]:
+    """The ``verify`` entry that runs a pytest-bdd ticket's own scenarios: check its
+    step modules name its feature file(s), then run them."""
+    tests = _python_test_files(files)
+    if not scenarios or not tests or not _pytest_bdd(stack):
+        return {}
+    test = stack.test if stack is not None and "pytest" in stack.test else "python -m pytest -q"
+    targets = " ".join(shlex.quote(t) for t in tests)
+    checks = [f"grep -q {shlex.quote(p)} {targets}" for p in scenarios]
+    return {"scenarios": " && ".join([*checks, f"{test} -rA {targets}"])}
+
+
 def verify_commands(stack: StackDecision | None) -> dict[str, str]:
     """The stack's planned commands an agent runs on its own work (the gates run
     the same ones on the integrated tree)."""
@@ -601,6 +685,46 @@ def verify_rules(
             "type."
         )
     return rules
+
+
+_BDD_FINDING = re.compile(r"^BDD criterion (\S+): scenario (\S+?)::\S+ (.*)$")
+
+
+def group_failures_by_ticket(
+    failures: Sequence[str], tickets: Sequence[Ticket]
+) -> tuple[str, ...]:
+    """``failures`` with the per-scenario BDD findings folded into one line per
+    (tickets, feature file, reason): the tickets that carry those scenarios and the
+    files they own, so a fixer facing dozens of unbound scenarios sees which step
+    module to fix for which feature instead of one line per scenario. Other lines
+    keep their order; the grouped block takes the first BDD line's place."""
+    carriers: dict[str, list[Ticket]] = {}
+    for t in tickets:
+        for cid in t.scenario_ids:
+            carriers.setdefault(cid, []).append(t)
+    groups: dict[tuple[str, str, str], list[str]] = {}
+    out: list[str] = []
+    anchor = -1
+    for line in failures:
+        m = _BDD_FINDING.match(line)
+        if m is None:
+            out.append(line)
+            continue
+        cid, feature, why = m.groups()
+        owners = ", ".join(
+            f"{t.id} ({', '.join(t.files) or 'any file'})" for t in carriers.get(cid, ())
+        ) or "no ticket"
+        groups.setdefault((owners, feature, why), []).append(cid)
+        if anchor < 0:
+            anchor = len(out)
+    if anchor < 0:
+        return tuple(failures)
+    block = [
+        f"[{feature}] scenarios {', '.join(ids)} {why} — ticket(s): {owners}"
+        for (owners, feature, why), ids in sorted(groups.items(), key=lambda kv: kv[0][1])
+    ]
+    return (*out[:anchor], f"[BDD failures by feature file: {len(block)} group(s)]",
+            *block, *out[anchor:])
 
 
 # ---- context ------------------------------------------------------------------
@@ -678,6 +802,18 @@ def _scenario_text(c: AcceptanceCriterion, owner: str) -> str:
     return "\n".join(lines)
 
 
+def _ticket_scenarios(
+    ticket: Ticket, criteria: Mapping[str, AcceptanceCriterion]
+) -> dict[str, list[str]]:
+    """feature path -> the scenario names (criterion ids) of ``ticket`` in it."""
+    out: dict[str, list[str]] = {}
+    for cid in ticket.scenario_ids:
+        c = criteria.get(cid)
+        if c is not None:
+            out.setdefault(feature_path(c.ticket_id or ticket.id), []).append(cid)
+    return dict(sorted(out.items()))
+
+
 def _ticket_context(
     rt: AgentRuntime,
     ticket: Ticket,
@@ -717,11 +853,14 @@ def _ticket_packet(
     cost_budget_microusd: int,
     stack: StackDecision | None = None,
     contract_files: Sequence[str] = (),
+    scenarios: Mapping[str, Sequence[str]] | None = None,
 ) -> TaskPacket:
+    scenarios = scenarios or {}
     rules = [
         "You can read the whole project in the working directory: it holds everything "
         "the earlier tickets built.",
         f"Never edit {FEATURE_DIR}/*.feature files: they are the executable spec.",
+        *scenario_rules(ticket.files, scenarios, stack),
         *verify_rules(stack, ticket_id=task.id, contract_files=contract_files),
     ]
     if ticket.files:
@@ -744,7 +883,8 @@ def _ticket_packet(
             "reads": list(ticket.reads),
             "feature_files": list(feature_files),
             "rules": rules,
-            "verify": verify_commands(stack),
+            "verify": {**verify_commands(stack),
+                       **scenario_verify(ticket.files, scenarios, stack)},
         },
         persona=persona_for(ticket.specialty.value, stack),
         pinned_constraints=pinned_texts(constraints),  # VERBATIM + FIRST (arch §2)
@@ -932,6 +1072,7 @@ def make_engineering_node(
                     prior_failures=prior, turn_budget=turn_budget,
                     cost_budget_microusd=cost_budget_microusd, stack=state.get("stack"),
                     contract_files=contract_files,
+                    scenarios=_ticket_scenarios(ticket, criteria),
                 )
                 etask = ExecutionTask(
                     packet=packet, adapter=adapter_name, lineage=ticket.specialty.value,

@@ -70,6 +70,11 @@ _FIXER_RULES = (
     "manifest exists; then build and typecheck; then the tests) and keep going until "
     "they all pass or you run out of turns. If one cannot run here (missing tool, no "
     "network), say so in a TRIAGE line.",
+    "Acceptance scenarios live only in the gate-owned features/<ticket>.feature files: "
+    "never write, copy or regenerate a .feature file (any you write is discarded). A "
+    "scenario that \"was not executed\" has no step module bound to that exact file: "
+    "point the step module's binding at it (pytest-bdd: scenarios(\"<path relative to "
+    "the module>\")) and implement its steps. Fix one feature file group at a time.",
 )
 
 # Claude Code needs several turns to read, write and verify; 8 left contract stubs empty.
@@ -280,10 +285,10 @@ def _run_one_task(
             verify=verify,
         )
         result: AdapterResult = rt.adapter.run(packet, sandbox)
-        if scope:
-            from foundry.agents.implementation.tickets import trim_to_write_scope
+        from foundry.agents.implementation.tickets import trim_to_write_scope
 
-            result = trim_to_write_scope(result, sandbox, scope, task.id)
+        # An empty scope still drops gate inputs (feature files, criteria).
+        result = trim_to_write_scope(result, sandbox, scope, task.id)
         _mirror_diff_blob(rt, sandbox, result)  # while the sandbox is alive
     finally:
         sandbox.destroy()
@@ -460,7 +465,9 @@ def make_fixer_node(
         # Contract-type copies type-check alone and then misfit their callers; hand
         # any still in the integrated tree to the fixer with the gate failures.
         duplicates = contract_duplicates(overlay, contract_paths(state, resolve))
-        failures = _prior_failures(state)
+        from foundry.agents.implementation.tickets import group_failures_by_ticket, read_tickets
+
+        failures = group_failures_by_ticket(_prior_failures(state), read_tickets(state, resolve))
         if duplicates:
             failures = (*failures, f"[{CONTRACT_DUP_TRIAGE}]", *duplicates)
         scope = _mid_wave_fix_scope(state, resolve)

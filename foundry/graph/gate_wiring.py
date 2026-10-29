@@ -110,6 +110,7 @@ __all__ = [
     "WaveBuildCheck",
     "bump_fix_attempts",
     "contract_paths",
+    "fix_cap",
     "flake_quarantined",
     "gate_profile",
     "materialize_workdir",
@@ -120,6 +121,7 @@ __all__ = [
     "run_build_test_gates",
     "run_spec_gate",
     "settle_fix_attempts",
+    "unbuilt_manifests",
     "wave_typecheck",
 ]
 
@@ -1344,26 +1346,40 @@ def run_build_gate(
     run_against = materialize_workdir(state, workdir, resolve=resolve, resolve_blob=resolve_blob)
     out: dict[str, Any] = {}
     stack = state.get("stack")
-    if stack is not None and stack.typecheck and not stack.profile:
-        planned = planned_paths(
-            f for a in _of_kind(state, TICKET_KIND)
-            for f in _resolve_typed(a, resolve, Ticket, TICKET_KIND).files
-        )
-        full = stack.typecheck
-        scoped = wave_typecheck(full, planned, workdir)
-        if scoped != full:
-            # The scoped command is what this verdict judges, so it keys the digest.
-            stack = stack.model_copy(update={"typecheck": scoped})
+    if stack is not None and not stack.profile:
+        files = [f for a in _of_kind(state, TICKET_KIND)
+                 for f in _resolve_typed(a, resolve, Ticket, TICKET_KIND).files]
+        notes: list[tuple[str, str]] = []
+        # Python's gates never install and its build/typecheck need no manifest.
+        missing = () if stack.language == "python" else unbuilt_manifests(files, workdir)
+        if missing:
+            # No manifest, nothing to install from; the build and the type checker
+            # need the dependencies the install would have fetched.
+            skip = ("install", "build", "typecheck")
+            dropped = [f"{k} `{getattr(stack, k)}`" for k in skip if getattr(stack, k)]
+            if dropped:
+                stack = stack.model_copy(update=dict.fromkeys(skip, ""))
+                notes.append((WAVE_MANIFEST_TRIAGE, (
+                    f"this wave's check skips {', '.join(dropped)}: the planned "
+                    f"manifest {', '.join(missing)} is not built yet; the final gate "
+                    "runs every step")))
+        if stack.typecheck:
+            full = stack.typecheck
+            scoped = wave_typecheck(full, planned_paths(files), workdir)
+            if scoped != full:
+                stack = stack.model_copy(update={"typecheck": scoped})
+                notes.append((WAVE_TYPECHECK_TRIAGE, (
+                    "this wave's typecheck skips planned targets no ticket has built "
+                    f"yet: `{scoped or '(skipped: none built yet)'}` instead of `{full}`")))
+        if notes:
+            # The scoped commands are what this verdict judges, so they key the digest.
             state = {**state, "stack": stack}
             run_against = tree_sha(workdir, toolchain_digest=_toolchain_digest(stack))
             out["gate_triage"] = [GateTriage(
-                name=WAVE_TYPECHECK_TRIAGE, run_against=run_against,
-                explanation="this wave's typecheck skips planned targets no ticket has "
-                f"built yet: `{scoped or '(skipped: none built yet)'}` instead of "
-                f"`{full}`"[:2000],
+                name=name, run_against=run_against, explanation=text[:2000],
                 produced_by=_BUILD_NODE,
-                seq=rt.seq(config, _BUILD_NODE, f"wave-scope:{run_against}"),
-            )]
+                seq=rt.seq(config, _BUILD_NODE, f"{name}:{run_against}"),
+            ) for name, text in notes]
     profile = gate_profile(state, profile)
     build = _run_gate(
         _build_gate(profile, runner),
@@ -1379,7 +1395,18 @@ def run_build_gate(
 
 
 WAVE_TYPECHECK_TRIAGE = "wave-typecheck-scope"
+WAVE_MANIFEST_TRIAGE = "wave-manifest-scope"
 _SHELL_OPERATORS = frozenset({"&&", "||", ";", "|", "&"})
+# The package manifests a non-Python stack's install, build and typecheck need.
+_MANIFESTS = frozenset({"package.json", "pyproject.toml", "Cargo.toml", "go.mod"})
+
+
+def unbuilt_manifests(files: Iterable[str], workdir: Path) -> tuple[str, ...]:
+    """The planned package manifests no ticket has written into ``workdir`` yet."""
+    return tuple(sorted({
+        p for p in (_norm_target(f) for f in files)
+        if PurePosixPath(p).name in _MANIFESTS and not (workdir / p).exists()
+    }))
 
 
 def planned_paths(files: Iterable[str]) -> frozenset[str]:
@@ -1513,6 +1540,19 @@ def _fix_attempts(state: FactoryState, config: RunnableConfig) -> int:
     return int(configurable.get("fix_attempts", 0))
 
 
+def _fix_total(state: FactoryState) -> int:
+    budget = state.get("budget")
+    return int(budget.fix_attempts_total) if budget is not None else 0
+
+
+def fix_cap(state: FactoryState, resolve: ArtifactResolver, max_fix_attempts: int) -> int:
+    """The run's overall fix bound: ``max_fix_attempts`` per wave check plus the
+    final gate's, so per-boundary resets can never add up to an unbounded loop."""
+    from foundry.agents.implementation.tickets import plan_wave_count, read_tickets
+
+    return max_fix_attempts * (plan_wave_count(read_tickets(state, resolve)) + 1)
+
+
 def route_after_gates(
     state: FactoryState,
     config: RunnableConfig,
@@ -1520,6 +1560,7 @@ def route_after_gates(
     boundary: str,
     records: Any,
     max_fix_attempts: int = 3,
+    total_cap: int | None = None,
 ) -> str:
     """Route a phase boundary on its relevant gate verdicts. Fail-closed.
 
@@ -1531,7 +1572,9 @@ def route_after_gates(
       stable-FAIL-latched digest, WITHIN the convergence bound; route back to the
       responsible layer to fix FORWARD into a new tree.
     * :data:`HALT` — the ``max_fix_attempts`` convergence bound is exhausted (escalate
-      with the best draft); a non-fixable terminal condition.
+      with the best draft); a non-fixable terminal condition. ``total_cap`` bounds the
+      build-side fixes of the whole run (``budget.fix_attempts_total``), which the
+      per-boundary resets never clear.
 
     The stable-FAIL latch (committed cross-fork; ``records``) permanently DISQUALIFIES
     the failing digest — a later PASS on that SAME tree never clears it (governance §5,
@@ -1546,7 +1589,9 @@ def route_after_gates(
 
     latest = _relevant_latest(state, gate_names)
 
-    bound_spent = _fix_attempts(state, config) >= max_fix_attempts
+    bound_spent = _fix_attempts(state, config) >= max_fix_attempts or (
+        total_cap is not None and _fix_total(state) >= total_cap
+    )
 
     # A relevant gate needs a fix when it FAILs, ERRORs, is MISSING (never advance on
     # an absent verdict), OR its digest carries a stable-FAIL latch. A latched digest
@@ -1586,9 +1631,11 @@ def bump_fix_attempts(
     boundary: str,
     records: Any,
     max_fix_attempts: int,
+    total_cap: int | None = None,
 ) -> None:
     """Bump ``budget.fix_attempts_since_all_green`` on ``out`` when ``boundary``
-    will route ``fix`` after ``out`` folds in.
+    will route ``fix`` after ``out`` folds in — and, outside the Spec boundary, the
+    run-wide ``fix_attempts_total`` that ``total_cap`` bounds.
 
     The gate node writing ``out`` is the sole ``budget`` writer of its superstep, and
     the conditional edge that fires in that same superstep reads the post-fold state.
@@ -1601,12 +1648,14 @@ def bump_fix_attempts(
         "budget": ledger,
     }
     decision = route_after_gates(
-        post, config, boundary=boundary, records=records, max_fix_attempts=max_fix_attempts
+        post, config, boundary=boundary, records=records, max_fix_attempts=max_fix_attempts,
+        total_cap=total_cap,
     )
     if decision == FIX:
-        out["budget"] = ledger.model_copy(
-            update={"fix_attempts_since_all_green": ledger.fix_attempts_since_all_green + 1}
-        )
+        out["budget"] = ledger.model_copy(update={
+            "fix_attempts_since_all_green": ledger.fix_attempts_since_all_green + 1,
+            "fix_attempts_total": ledger.fix_attempts_total + (boundary != SPEC_BOUNDARY),
+        })
 
 
 def settle_fix_attempts(
@@ -1617,13 +1666,14 @@ def settle_fix_attempts(
     boundary: str,
     records: Any,
     max_fix_attempts: int,
+    total_cap: int | None = None,
 ) -> None:
     """:func:`bump_fix_attempts`, plus a reset to 0 when ``boundary`` ADVANCEs: a
     green boundary hands the next one the whole budget, so the attempts one
     boundary spent (a Spec re-plan, an earlier wave's repair) never leave a later
     failure with fewer fixes. A spent bound (HALT) keeps the ledger unchanged."""
     bump_fix_attempts(state, config, out, boundary=boundary, records=records,
-                      max_fix_attempts=max_fix_attempts)
+                      max_fix_attempts=max_fix_attempts, total_cap=total_cap)
     ledger = state.get("budget") or BudgetLedger()
     if "budget" in out or not ledger.fix_attempts_since_all_green:
         return
@@ -1631,7 +1681,7 @@ def settle_fix_attempts(
         "gates": merge_gates(state.get("gates"), out.get("gates")), "budget": ledger,
     }
     if route_after_gates(post, config, boundary=boundary, records=records,
-                         max_fix_attempts=max_fix_attempts) == ADVANCE:
+                         max_fix_attempts=max_fix_attempts, total_cap=total_cap) == ADVANCE:
         out["budget"] = ledger.model_copy(update={"fix_attempts_since_all_green": 0})
 
 
@@ -1639,10 +1689,11 @@ def settle_fix_attempts(
 class WaveBuildCheck:
     """The per-wave integration check (plan §2b) the implementation subgraph runs
     between ticket waves: the attested Build gate on the integrated tree, through
-    the SAME runner as the supervisor's gates, sharing its fix-attempt budget. A
+    the SAME runner as the supervisor's gates. Each wave has its own fix budget: a
     passing check is a green state for that boundary and resets the counter, so wave
-    repairs never eat the final build/test gate's budget; each wave still gets at
-    most ``max_fix_attempts`` fixes and the waves are finite, so the run stays bounded.
+    repairs never eat the next wave's or the final build/test gate's budget. A wave
+    gets ``max_fix_attempts - 1`` fixer passes (the default 3 gives 2), and every
+    build-side fix also counts toward :func:`fix_cap`, the run-wide bound.
 
     ``run`` is the node (verdict + budget bump); ``route`` returns
     :data:`ADVANCE` / :data:`FIX` / :data:`HALT` for the :data:`BUILD_BOUNDARY`."""
@@ -1661,10 +1712,12 @@ class WaveBuildCheck:
                 resolve_blob=self.resolve_blob, workdir=Path(tmp), profile=self.profile,
             )
         settle_fix_attempts(state, config, out, boundary=BUILD_BOUNDARY,
-                            records=self.runner.records, max_fix_attempts=self.max_fix_attempts)
+                            records=self.runner.records, max_fix_attempts=self.max_fix_attempts,
+                            total_cap=fix_cap(state, self.resolve, self.max_fix_attempts))
         return out
 
     def route(self, state: FactoryState, config: RunnableConfig) -> str:
         return route_after_gates(state, config, boundary=BUILD_BOUNDARY,
                                  records=self.runner.records,
-                                 max_fix_attempts=self.max_fix_attempts)
+                                 max_fix_attempts=self.max_fix_attempts,
+                                 total_cap=fix_cap(state, self.resolve, self.max_fix_attempts))

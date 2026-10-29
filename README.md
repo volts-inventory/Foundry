@@ -97,7 +97,7 @@ python -m foundry.cli [OPTIONS] "<one-line request>"
   --out <DIR>                # write the repo + BUILD-MANIFEST here (a held build writes a DRAFT)
   --state-dir <DIR>          # durable, restart-survivable state (FOUNDRY_STATE_DIR)
   --thread-id <NAME>         # run identity; seeds idempotency keys + resume (default: cli-run)
-  --max-fix-attempts <N>     # fix-forward retries per failing gate        (default: 2)
+  --max-fix-attempts <N>     # fix-forward retries per failing gate        (default: 3)
   --max-slots <N>            # parallelism ceiling                         (default: auto)
   --workers frontend=2,backend=2,data=2,test=2   # tickets in flight per specialty
   --ticket-tiers trivial=T3,standard=T2,complex=T1

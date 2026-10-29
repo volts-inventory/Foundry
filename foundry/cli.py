@@ -1049,7 +1049,7 @@ def run(
     resolve_blob: BlobResolver | None = None,
     adapter: str | Any | None = None,
     diff_body: str | None = None,
-    max_fix_attempts: int = 2,
+    max_fix_attempts: int = 3,
     output_dir: str | None = None,
     progress_cb: Callable[..., None] | None = None,
     activity_cb: Callable[[str], None] | None = None,
@@ -1097,7 +1097,8 @@ def run(
         FeatureDiff. ``None`` (the default) selects the passing ``_PASSING_DIFF``. Pass an explicit
         error/failing body to exercise the halted-run path.
     max_fix_attempts:
-        Convergence bound for the gate fix-loop (default 2). On a gate FAIL/ERROR the
+        Convergence bound for the gate fix-loop (default 3: two fixer passes per
+        failing boundary — each per-wave check and the final gate). On a gate FAIL/ERROR the
         run fixes FORWARD — back to the responsible layer WITH the specific failures —
         up to this many times before HALTing (escalate). The failed tree's digest stays
         permanently disqualified each round (anti-gaming); only a genuinely-passing NEW
@@ -1620,7 +1621,7 @@ def main(argv: list[str] | None = None) -> int:
         args, _tid = _take_value(args, "--thread-id", what="a value")
         thread_id = _tid if _tid is not None else "cli-run"
         args, _mfa = _take_int(args, "--max-fix-attempts", minimum=1)
-        max_fix_attempts = _mfa if _mfa is not None else 2
+        max_fix_attempts = _mfa if _mfa is not None else 3
 
         # Parallelism is SYSTEM-DECIDED: the Tech-Lead decomposes the work and the
         # IC pool sizes itself to that plan (min(tasks, AUTO_SLOTS_CAP)). --max-slots

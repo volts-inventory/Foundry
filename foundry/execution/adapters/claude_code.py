@@ -82,8 +82,9 @@ _EPILOGUE = (
     "You are working in a disposable sandbox worktree (your current working "
     "directory). IMPLEMENT the task by creating and editing files directly in "
     "this directory — write real, complete code (no placeholders, no TODOs), "
-    "plus tests where the task implies them. Run any build/test commands you "
-    "need and fix what fails. Do NOT run git commands, do NOT touch anything "
+    "plus tests where the task implies them. Run the verification commands the "
+    "task lists and fix what fails before you finish. Do NOT run git commands, "
+    "do NOT touch anything "
     "outside the current directory. When done, reply with a short summary of "
     "what you built; prefix any known risk, gap, or follow-up with 'TRIAGE: ' "
     "(one per line)."
@@ -92,6 +93,12 @@ _EPILOGUE = (
 # Worktree walk exclusions: VCS internals and the substrate's own scratch dirs
 # are never part of the authored tree slice.
 _EXCLUDED_TOP_DIRS = frozenset({".git", ".claude", "node_modules", "__pycache__"})
+# Toolchain output the agent's own install/typecheck/test runs leave anywhere in the
+# tree: environments and caches, never authored source.
+_EXCLUDED_DIRS = frozenset({
+    "__pycache__", "node_modules", ".venv", "venv", ".mypy_cache", ".pytest_cache",
+    ".ruff_cache", ".tox",
+})
 
 
 def walk_worktree(root: Path) -> dict[str, bytes]:
@@ -105,7 +112,7 @@ def walk_worktree(root: Path) -> dict[str, bytes]:
         rel = path.relative_to(root)
         if rel.parts and rel.parts[0] in _EXCLUDED_TOP_DIRS:
             continue
-        if any(part == "__pycache__" for part in rel.parts):
+        if any(part in _EXCLUDED_DIRS for part in rel.parts[:-1]):
             continue
         files[rel.as_posix()] = path.read_bytes()
     return files
@@ -290,6 +297,8 @@ class ClaudeCodeAdapter:
     # adapter DECLARES its grant; the Sandbox validates + applies it).
     credential_grant: tuple[str, ...] = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY")
     home_passthrough: bool = True
+    # The agent runs the stack's install/build/typecheck itself (self-verify).
+    toolchain_env: bool = True
 
     def __init__(
         self,

@@ -65,6 +65,7 @@ __all__ = [
     "ground_untrusted",
     "run_confined",
     "sandbox_enabled",
+    "toolchain_env",
     "unshare_available",
 ]
 
@@ -185,6 +186,14 @@ def _confined_env(
     if "JAVA_TOOL_OPTIONS" in kept:
         kept["JAVA_TOOL_OPTIONS"] = _JAVA_PROXY_SECRET.sub("", kept["JAVA_TOOL_OPTIONS"])
     return {**kept, **(extra_env or {})}
+
+
+def toolchain_env() -> dict[str, str]:
+    """The host's toolchain, proxy and CA settings (proxy userinfo stripped), minus
+    the locations a caller sets itself (``PATH``, ``HOME``) and the host's active
+    virtualenv (an install must not target it)."""
+    return {k: v for k, v in _confined_env(None).items()
+            if k not in ("PATH", "HOME", "VIRTUAL_ENV")}
 
 
 def _host_unix_sockets(limit: int = 4096) -> list[str]:

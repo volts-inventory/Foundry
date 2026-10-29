@@ -32,6 +32,7 @@ exits and the supervisor raises it, after this wave's writes are committed.
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
@@ -66,6 +67,7 @@ from foundry.schemas.architecture import InterfaceContract
 from foundry.schemas.base import Artifact, BudgetLedger
 from foundry.schemas.gates import GateTriage
 from foundry.schemas.implementation import (
+    CONTRACTS_TICKET_ID,
     DEFAULT_TICKET_TIERS,
     FEATURE_DIR,
     Difficulty,
@@ -91,22 +93,27 @@ if TYPE_CHECKING:
     ArtifactResolver = Callable[[Artifact], Any]
 
 __all__ = [
+    "CONTRACT_DUP_TRIAGE",
     "CONTRACT_KIND",
     "DEFAULT_WORKERS",
     "NODE_ID",
     "TICKET_KIND",
     "cap_stopped",
+    "contract_duplicates",
     "has_tickets",
     "in_write_scope",
     "make_engineering_node",
     "next_wave",
     "pending_wave",
+    "plan_wave_count",
     "read_tickets",
     "task_from_ticket",
     "task_id_for_ticket",
     "tickets_settled",
     "tier_for",
     "trim_to_write_scope",
+    "verify_commands",
+    "verify_rules",
 ]
 
 NODE_ID = "engineering"
@@ -121,6 +128,8 @@ SCOPE_TRIAGE = "write-scope"
 FAIL_TRIAGE = "ticket-failed"
 CAP_TRIAGE = "token-cap"
 OVERLAY_TRIAGE = "wave-overlay"
+# A ticket declared a type the contracts file already defines (a parallel copy).
+CONTRACT_DUP_TRIAGE = "contract-duplicate"
 # Attempts a ticket gets before it is skipped; bounds the loop on a ticket that
 # keeps erroring.
 MAX_TICKET_ATTEMPTS = 2
@@ -270,6 +279,16 @@ def tickets_settled(state: FactoryState, resolve: ArtifactResolver) -> bool:
     return bool(_built_task_ids(state)) and not pending_wave(state, resolve)
 
 
+def plan_wave_count(tickets: Sequence[Ticket]) -> int:
+    """How many waves the plan takes when every ticket builds."""
+    done: set[str] = set()
+    waves = 0
+    while wave := next_wave(tickets, done):
+        done.update(task_id_for_ticket(t.id) for t in wave)
+        waves += 1
+    return waves
+
+
 # ---- write scope --------------------------------------------------------------
 
 
@@ -368,10 +387,16 @@ class _ScopedAdapter:
     """``rt.adapter`` + in-worker write-scope trim + diff-blob mirror into ``rt.cas``
     (both need the sandbox, which the pool destroys right after ``run``)."""
 
-    def __init__(self, rt: AgentRuntime, scopes: Mapping[str, tuple[str, ...]]) -> None:
+    def __init__(
+        self,
+        rt: AgentRuntime,
+        scopes: Mapping[str, tuple[str, ...]],
+        contracts: Mapping[str, str] | None = None,
+    ) -> None:
         assert rt.adapter is not None
         self._rt = rt
         self._scopes = scopes
+        self._contracts = dict(contracts or {})
         self.supports_turn_snapshots = rt.adapter.supports_turn_snapshots
 
     def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
@@ -380,6 +405,7 @@ class _ScopedAdapter:
         files = self._scopes.get(tid, ())
         result = trim_to_write_scope(result, sandbox, files, tid)
         _require_scope_written(result, sandbox, files, tid)
+        result = _flag_contract_duplicates(result, sandbox, self._contracts, tid)
         _mirror_diff_blob(self._rt, sandbox, result)
         return result
 
@@ -416,6 +442,165 @@ def _require_scope_written(
     raise EmptyTicketError(
         f"the session wrote none of the ticket's files ({', '.join(files)})"
     )
+
+
+# A top-level (column-0) type declaration in the common languages: Python/TS/JS
+# classes, TS interfaces and type aliases, Go types, Rust structs/enums/traits,
+# Java/Kotlin classes, interfaces and records.
+_TYPE_DECL = re.compile(
+    r"^(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:pub(?:\([^)]*\))?\s+)?"
+    r"(?:public\s+)?(?:(?:abstract|final|sealed|data)\s+)*"
+    r"(?:class|interface|type|struct|enum|trait|record)\s+([A-Za-z_]\w*)",
+    re.MULTILINE,
+)
+_SOURCE_SUFFIXES = (".py", ".pyi", ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs",
+                    ".cjs", ".go", ".rs", ".java", ".kt", ".cs", ".swift")
+
+
+def _declared_types(text: str) -> set[str]:
+    return set(_TYPE_DECL.findall(text))
+
+
+def contract_duplicates(
+    files: Mapping[str, str | None], contract_files: Sequence[str]
+) -> tuple[str, ...]:
+    """One finding per source file outside ``contract_files`` that declares a
+    top-level type with the name of a type the contract files declare: a parallel
+    copy (``models.Category`` beside ``contracts.Category``) type-checks on its own
+    and then fails to fit every caller that uses the contract's type."""
+    names: set[str] = set()
+    for f in contract_files:
+        names |= _declared_types(files.get(f) or "")
+    if not names:
+        return ()
+    out: list[str] = []
+    for path, text in sorted(files.items()):
+        if path in contract_files or not text or not path.endswith(_SOURCE_SUFFIXES):
+            continue
+        dup = sorted(_declared_types(text) & names)
+        if dup:
+            out.append(
+                f"{path} redeclares contract type(s) {', '.join(dup)} already defined in "
+                f"{', '.join(contract_files)}: delete the copy and import the contract's "
+                "type instead"
+            )
+    return tuple(out)
+
+
+def _written_sources(
+    result: AdapterResult, sandbox: Sandbox, task_id: str
+) -> dict[str, str | None]:
+    """The final text of every file the session's diff writes (a patched file is
+    read off the still-live worktree); empty when the body cannot be parsed."""
+    from foundry.graph.gate_wiring import MaterializationError, _diff_ops
+
+    probe = FeatureDiff(
+        diff_uri=result.diff_uri, task_id=task_id, branch=f"task/{task_id}",
+        base_tree_sha="", seq=Seq("scope", 0, 0, NODE_ID, 0),
+    )
+    try:
+        ops = _diff_ops(probe, sandbox.get_blob)
+    except MaterializationError:
+        return {}
+    out: dict[str, str | None] = dict(ops.writes)
+    for rel in sorted(set(ops.patches) - set(ops.writes)):
+        path = Path(sandbox.worktree) / rel
+        try:
+            out[rel] = path.read_text(encoding="utf-8") if path.is_file() else None
+        except UnicodeDecodeError:
+            out[rel] = None
+    return out
+
+
+def _flag_contract_duplicates(
+    result: AdapterResult, sandbox: Sandbox, contracts: Mapping[str, str], task_id: str
+) -> AdapterResult:
+    if not contracts or task_id == task_id_for_ticket(CONTRACTS_TICKET_ID):
+        return result
+    written = _written_sources(result, sandbox, task_id)
+    findings = contract_duplicates({**written, **contracts}, tuple(contracts))
+    if not findings:
+        return result
+    note = GateTriage(
+        name=CONTRACT_DUP_TRIAGE,
+        run_against=f"task/{task_id}",
+        explanation="; ".join(findings)[:2000],
+        produced_by=NODE_ID,
+        seq=Seq("scope", 0, 0, NODE_ID, len(result.triage)),
+    )
+    return result.model_copy(update={"triage": (*result.triage, note)})
+
+
+# ---- self-verification ------------------------------------------------------
+
+_VERIFY_STEPS = ("install", "build", "typecheck", "test", "bdd")
+
+
+def verify_commands(stack: StackDecision | None) -> dict[str, str]:
+    """The stack's planned commands an agent runs on its own work (the gates run
+    the same ones on the integrated tree)."""
+    if stack is None:
+        return {}
+    return {k: v for k in _VERIFY_STEPS if (v := getattr(stack, k))}
+
+
+# Type-check ONE file in isolation, for the contracts ticket (its siblings in wave
+# 0 may not have written the project config yet).
+_SINGLE_FILE_TYPECHECK: dict[str, str] = {
+    "python": "python -m mypy {file}",
+    "typescript": "npx tsc --noEmit --strict --skipLibCheck {file}",
+}
+
+
+def verify_rules(
+    stack: StackDecision | None,
+    *,
+    ticket_id: str = "",
+    contract_files: Sequence[str] = (),
+) -> list[str]:
+    """The packet rules that make an agent check its own work before it finishes:
+    run the stack's commands (``verify``) and fix what fails in its own files; the
+    contracts ticket writes declarations only and type-checks its file alone; every
+    other ticket uses the contract types instead of re-declaring them."""
+    cmds = verify_commands(stack)
+    rules = [
+        "VERIFY BEFORE YOU FINISH: from this directory run "
+        + ("the commands in `verify` (install only once its package manifest exists; "
+           "then build and typecheck; then the tests that cover your files)"
+           if cmds else "the project's build, type checker and the tests that cover "
+           "your files")
+        + ". Fix every failure in the files you may write and re-run until they pass. "
+        "Failures in other files, or caused by files later tickets have not written "
+        "yet, are expected: leave them and name them in a TRIAGE line. If a command "
+        "cannot run here (missing tool, no network), say so in a TRIAGE line."
+    ]
+    if "bdd" in cmds and "FOUNDRY_BDD_REPORT" in cmds["bdd"]:
+        rules.append("The bdd command writes its report to $FOUNDRY_BDD_REPORT: set it "
+                     "to a scratch file outside this directory when you run it.")
+    if ticket_id == task_id_for_ticket(CONTRACTS_TICKET_ID):
+        files = ", ".join(contract_files) or "the contracts file"
+        language = stack.language if stack else ""
+        single = _SINGLE_FILE_TYPECHECK.get(language, "")
+        check = (single.format(file=" ".join(contract_files)) if single and contract_files
+                 else cmds.get("typecheck", "the language's type checker"))
+        rules.append(
+            f"DECLARATIONS ONLY in {files}: types, interfaces and signatures with no "
+            "logic — Python: Protocol, dataclass, TypedDict and Enum classes whose "
+            "methods have `...` bodies; TypeScript: interface and type declarations "
+            "(plus the enum/const values the contracts name). No implementations, "
+            "helpers, I/O or validation. Type-check this file on its own before you "
+            f"finish (`{check}`) and fix every error it reports."
+        )
+    elif contract_files:
+        rules.append(
+            "CONTRACT TYPES ARE THE ONLY TYPES: the data types, interfaces and errors "
+            f"in {', '.join(contract_files)} are the single definition of each. Import "
+            "them from there; never declare a class, interface or type with the same "
+            "name in another file (no parallel models.X copy of a contract type) — a "
+            "copy type-checks alone and breaks every caller that uses the contract's "
+            "type."
+        )
+    return rules
 
 
 # ---- context ------------------------------------------------------------------
@@ -531,11 +716,13 @@ def _ticket_packet(
     turn_budget: int,
     cost_budget_microusd: int,
     stack: StackDecision | None = None,
+    contract_files: Sequence[str] = (),
 ) -> TaskPacket:
     rules = [
         "You can read the whole project in the working directory: it holds everything "
         "the earlier tickets built.",
         f"Never edit {FEATURE_DIR}/*.feature files: they are the executable spec.",
+        *verify_rules(stack, ticket_id=task.id, contract_files=contract_files),
     ]
     if ticket.files:
         rules.insert(1, "Write ONLY these paths; changes anywhere else are discarded: "
@@ -557,6 +744,7 @@ def _ticket_packet(
             "reads": list(ticket.reads),
             "feature_files": list(feature_files),
             "rules": rules,
+            "verify": verify_commands(stack),
         },
         persona=persona_for(ticket.specialty.value, stack),
         pinned_constraints=pinned_texts(constraints),  # VERBATIM + FIRST (arch §2)
@@ -684,6 +872,10 @@ def make_engineering_node(
         criteria = _newest_by(state, resolve, _CRITERION_KIND, AcceptanceCriterion, "id")
         contracts = _newest_by(state, resolve, CONTRACT_KIND, InterfaceContract, "name")
         prior = _prior_failures(state)
+        from foundry.graph.gate_wiring import contract_paths
+
+        contract_files = contract_paths(state, resolve)
+        built_contracts = {f: c for f in contract_files if isinstance(c := overlay.get(f), str)}
 
         # The run's envelope, split across specialties by ticket count; spend of
         # tickets built in earlier waves stays committed so the cap spans the run.
@@ -711,7 +903,8 @@ def make_engineering_node(
             bases[str(etask.packet.task["id"])] = sandbox.snapshot()
             return sandbox
 
-        scoped = _ScopedAdapter(rt, {task_id_for_ticket(t.id): t.files for t in wave})
+        scoped = _ScopedAdapter(rt, {task_id_for_ticket(t.id): t.files for t in wave},
+                                built_contracts)
         adapter_name = _adapter_name(rt)
         submitted: dict[str, str] = {}
         merged: dict[str, list[Any]] = {}
@@ -738,6 +931,7 @@ def make_engineering_node(
                     tasks[tid], ticket, constraints, spans=spans, feature_files=features,
                     prior_failures=prior, turn_budget=turn_budget,
                     cost_budget_microusd=cost_budget_microusd, stack=state.get("stack"),
+                    contract_files=contract_files,
                 )
                 etask = ExecutionTask(
                     packet=packet, adapter=adapter_name, lineage=ticket.specialty.value,

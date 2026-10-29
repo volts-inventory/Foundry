@@ -63,6 +63,7 @@ from foundry.graph.gate_wiring import (
     SPEC_BOUNDARY,
     WaveBuildCheck,
     bump_fix_attempts,
+    fix_cap,
     route_after_gates,
     run_build_test_gates,
     run_spec_gate,
@@ -309,7 +310,8 @@ def build_supervisor_graph(
         state: FactoryState, config: RunnableConfig, out: dict[str, Any], *, boundary: str
     ) -> None:
         bump_fix_attempts(state, config, out, boundary=boundary,
-                          records=runner.records, max_fix_attempts=max_fix_attempts)
+                          records=runner.records, max_fix_attempts=max_fix_attempts,
+                          total_cap=fix_cap(state, resolve, max_fix_attempts))
 
     def _gate_workdir(name: str) -> Path:
         # A fresh materialization tree per gate run (materialize_workdir writes
@@ -403,6 +405,7 @@ def build_supervisor_graph(
             boundary=bt_boundary,
             records=runner.records,
             max_fix_attempts=max_fix_attempts,
+            total_cap=fix_cap(state, resolve, max_fix_attempts),
         )
 
     # -- register nodes (concrete defs; SG2/IM5 mypy seam) --------------------

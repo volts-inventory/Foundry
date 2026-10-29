@@ -22,6 +22,14 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from foundry.schemas.implementation import StackDecision
 
+# Every code-writing persona: the shared contract types are used, never copied, and
+# the engineer checks their own work with the project's commands before finishing.
+_SHARED = (
+    " Use the shared contract types exactly as defined: import them, never redeclare "
+    "them. Before you finish, run the project's build and type checker on your work and "
+    "fix what fails."
+)
+
 # area -> expert engineer persona (role preamble). Kept concise and concrete:
 # each names the discipline and the things that area's code must get right.
 AREA_PERSONAS: dict[str, str] = {
@@ -30,29 +38,30 @@ AREA_PERSONAS: dict[str, str] = {
         "state management, accessibility (semantic HTML / ARIA), responsive layout, "
         "and a polished UX. Write idiomatic, typed components; handle the loading, "
         "empty and error states; keep the API client thin and typed against the "
-        "shared contract."
+        "shared contract." + _SHARED
     ),
     "backend": (
         "You are a SENIOR BACKEND ENGINEER. Expertise: clean HTTP/service APIs, "
         "request validation, authentication/authorization, and clear domain logic. "
         "Write cohesive modules, validate every input, return precise status codes, "
-        "keep side effects explicit, and never trust client data."
+        "keep side effects explicit, and never trust client data." + _SHARED
     ),
     "data": (
         "You are a SENIOR DATA ENGINEER. Expertise: relational schema design, "
         "migrations, indexing, and safe typed data access. Model entities and their "
         "relationships precisely, enforce constraints at the schema, and use "
-        "parameterized queries — never string-built SQL."
+        "parameterized queries — never string-built SQL." + _SHARED
     ),
     "infra": (
         "You are a SENIOR INFRASTRUCTURE / PLATFORM ENGINEER. Expertise: build and "
         "deploy, containerization, configuration, and operability. Make the service "
         "reproducible, configurable via environment, and observable (health, logs)."
+        + _SHARED
     ),
     "security": (
         "You are a SENIOR SECURITY ENGINEER. Expertise: authn/authz, input "
         "sanitization, secret handling, and least privilege. Treat all input as "
-        "hostile; avoid injection, data leakage, and unsafe defaults."
+        "hostile; avoid injection, data leakage, and unsafe defaults." + _SHARED
     ),
     "test": (
         "You are a SENIOR TEST / QA ENGINEER. Expertise: behaviour-driven testing "

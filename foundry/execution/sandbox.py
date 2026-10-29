@@ -194,6 +194,11 @@ class Sandbox:
         sandbox-local HOME so a cached ``claude /login`` session authenticates
         inside the cage. A COPY, never a bind: untrusted task code can corrupt
         at most a throwaway copy of the session, not the real login state.
+    toolchain_env:
+        Pass the host's toolchain, proxy and CA settings through (the gate
+        sandbox's non-secret allowlist, proxy userinfo stripped) so an agent can
+        run the project's install/build/typecheck behind a TLS-intercepting
+        proxy. Off by default.
     """
 
     def __init__(
@@ -207,6 +212,7 @@ class Sandbox:
         snapshot_store: Path | str | None = None,
         credential_grant: Sequence[str] = (),
         home_passthrough: bool = False,
+        toolchain_env: bool = False,
     ) -> None:
         self.proxy_endpoint = proxy_endpoint
         self._wall_clock_timeout_s = wall_clock_timeout_s
@@ -224,6 +230,7 @@ class Sandbox:
             )
         self._credential_grant = tuple(dict.fromkeys(credential_grant))
         self._home_passthrough = bool(home_passthrough)
+        self._toolchain_env = bool(toolchain_env)
 
         self._root = Path(tempfile.mkdtemp(prefix="foundry-sandbox-"))
         self.worktree = self._root / "worktree"
@@ -256,6 +263,10 @@ class Sandbox:
         for name in self._env_allowlist:
             if name in os.environ and not _denied(name):
                 env[name] = os.environ[name]
+        if self._toolchain_env:
+            from foundry.gates.sandbox import toolchain_env
+
+            env.update({k: v for k, v in toolchain_env().items() if not _denied(k)})
         env.setdefault("PATH", os.defpath)
         env["HOME"] = str(self._home)
         if self.proxy_endpoint is not None:

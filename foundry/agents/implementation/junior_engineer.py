@@ -63,6 +63,14 @@ _FIXER_PERSONA = (
     "the whole project as built so far. Make the smallest changes that make the failing "
     "gates below pass; do not rewrite working code or add features."
 )
+_FIXER_RULES = (
+    "The failures below are the tail of each gate's output: re-run the failing "
+    "command yourself (see `verify`) to read the whole output before you edit.",
+    "After each fix re-run the commands in `verify` (install only once its package "
+    "manifest exists; then build and typecheck; then the tests) and keep going until "
+    "they all pass or you run out of turns. If one cannot run here (missing tool, no "
+    "network), say so in a TRIAGE line.",
+)
 
 # Claude Code needs several turns to read, write and verify; 8 left contract stubs empty.
 _DEFAULT_TURN_BUDGET = 25
@@ -152,6 +160,8 @@ def _build_packet(
     prior_failures: tuple[str, ...] = (),
     persona: str = "",
     retrieved_spans: tuple[str, ...] = (),
+    rules: tuple[str, ...] = (),
+    verify: Mapping[str, str] | None = None,
 ) -> TaskPacket:
     """Assemble the immutable packet: pinned constraints VERBATIM + FIRST.
 
@@ -161,14 +171,19 @@ def _build_packet(
     task traces to (ROADMAP Phase 4). The proxy endpoint is intentionally NOT
     handed to the adapter here (egress stays None) — the StubAdapter holds no
     egress and the dev sandbox's network denial is "nothing to talk to"."""
+    body: dict[str, Any] = {
+        "id": task.id,
+        "title": task.id,
+        "spec_uri": task.spec_uri,
+        "branch": task.branch,
+        "criterion_ids": list(task.criterion_ids),
+    }
+    if rules:
+        body["rules"] = list(rules)
+    if verify:
+        body["verify"] = dict(verify)
     return TaskPacket(
-        task={
-            "id": task.id,
-            "title": task.id,
-            "spec_uri": task.spec_uri,
-            "branch": task.branch,
-            "criterion_ids": list(task.criterion_ids),
-        },
+        task=body,
         persona=persona,  # area-expert role preamble (empty == unchanged prompt)
         pinned_constraints=pinned_texts(constraints),  # VERBATIM + FIRST (arch §2)
         retrieved_spans=retrieved_spans,  # spec grounding (empty == unchanged prompt)
@@ -214,6 +229,7 @@ def _sandbox_for(rt: AgentRuntime, source_dir: str, snapshot_store: str | None) 
         snapshot_store=snapshot_store,
         credential_grant=tuple(getattr(rt.adapter, "credential_grant", ()) or ()),
         home_passthrough=bool(getattr(rt.adapter, "home_passthrough", False)),
+        toolchain_env=bool(getattr(rt.adapter, "toolchain_env", False)),
     )
 
 
@@ -232,6 +248,8 @@ def _run_one_task(
     retrieved_spans: tuple[str, ...] = (),
     overlay: Mapping[str, str | None] | None = None,
     scope: tuple[str, ...] = (),
+    rules: tuple[str, ...] = (),
+    verify: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run the adapter for ONE task in a fresh sandbox; return its channel writes.
     A non-empty ``scope`` cuts the diff back to those paths (a noted trim).
@@ -258,6 +276,8 @@ def _run_one_task(
             prior_failures=prior_failures,
             persona=persona,
             retrieved_spans=retrieved_spans,
+            rules=rules,
+            verify=verify,
         )
         result: AdapterResult = rt.adapter.run(packet, sandbox)
         if scope:
@@ -430,6 +450,19 @@ def make_fixer_node(
                 summary="Could not rebuild the integrated tree to fix it",
                 concerns=(str(exc)[:400],),
             )]}
+        from foundry.agents.implementation.tickets import (
+            CONTRACT_DUP_TRIAGE,
+            contract_duplicates,
+            verify_commands,
+        )
+        from foundry.graph.gate_wiring import contract_paths
+
+        # Contract-type copies type-check alone and then misfit their callers; hand
+        # any still in the integrated tree to the fixer with the gate failures.
+        duplicates = contract_duplicates(overlay, contract_paths(state, resolve))
+        failures = _prior_failures(state)
+        if duplicates:
+            failures = (*failures, f"[{CONTRACT_DUP_TRIAGE}]", *duplicates)
         scope = _mid_wave_fix_scope(state, resolve)
         persona = _FIXER_PERSONA
         if scope:
@@ -453,10 +486,12 @@ def make_fixer_node(
             snapshot_store=snapshot_store,
             turn_budget=turn_budget,
             cost_budget_microusd=cost_budget_microusd,
-            prior_failures=_prior_failures(state),
+            prior_failures=failures,
             persona=persona,
             overlay=overlay,
             scope=scope,
+            rules=_FIXER_RULES,
+            verify=verify_commands(state.get("stack")),
         )
         # Integration orders diffs by Seq. A fresh diff key starts at epoch 1, tying
         # with (and possibly sorting under) the diffs it repairs, so lift its epoch

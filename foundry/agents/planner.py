@@ -39,6 +39,7 @@ model only via ``rt.proxy`` (L6), and its self-review of the criteria is stamped
 
 from __future__ import annotations
 
+import builtins
 import re
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
@@ -229,8 +230,15 @@ SOP = (
     "every seam between tickets is a contract with a name, a kind (function | class "
     "| type for code seams; http | cli | event for the rest), its signature written "
     "in the chosen language, its inputs, outputs and errors, and a description. "
-    "Emit cross-cutting concerns as pinned constraints, which are injected verbatim "
-    "into every build task.\n"
+    "Every data type, interface and error that crosses a ticket boundary is a contract "
+    "(kind type or class): the contracts file is its ONLY definition, every ticket "
+    "imports it from there, and no ticket redeclares it (never plan a models module "
+    "that copies contract types). Never name a method after a builtin (list, dict, "
+    "set, type, id, filter, map, ...): inside the class it shadows the builtin used "
+    "in annotations (`def list(self) -> list[Book]` fails the type checker); prefer "
+    "list_books, get_by_id, find_all (checked for Python; a violation FAILS the Spec "
+    "gate). Emit cross-cutting concerns as pinned constraints, which are injected "
+    "verbatim into every build task.\n"
     "STACK: choose the stack yourself from the request: stack.language MUST be one "
     "of the LANGUAGES AVAILABLE HERE; pick the framework and package manager. Give "
     "the shell commands the gates run from the repo root, in a sandbox that can "
@@ -1445,10 +1453,11 @@ def _generated_tickets(
                     f"{language or 'project-language'} code in {', '.join(owned)}: the "
                     "exact signatures, types, classes and interfaces (TypeScript "
                     "interfaces/types, Python Protocols and dataclasses, Go interfaces, "
-                    "...) with no behaviour beyond what the language needs to compile. "
-                    "Every other ticket imports these definitions and none may change "
-                    "them, so match each contract exactly. The file must pass the "
-                    "stack's build and typecheck on its own: "
+                    "...) with no behaviour beyond what the language needs to compile: "
+                    "declarations only, no logic, helpers, I/O or validation. Every "
+                    "other ticket imports these definitions and none may change or "
+                    "redeclare them, so match each contract exactly. The file must pass "
+                    "the stack's build and typecheck on its own: "
                     + _CONTRACT_STUB_RULES.get(language, _CONTRACT_STUB_RULES[""])
                 ),
                 specialty=Specialty.BACKEND,
@@ -1561,6 +1570,40 @@ def _contract_findings(
         for name, ids in producers.items()
         if name not in consumed and not with_scenarios.intersection(ids)
     ]
+    return tuple(out)
+
+
+# Builtin types a method name can shadow inside its class body, breaking every
+# annotation there that uses the builtin (`def list(self) -> list[Book]`).
+_BUILTIN_TYPES = frozenset(
+    n for n in dir(builtins) if isinstance(getattr(builtins, n), type) and n.islower()
+)
+_PY_METHOD = re.compile(r"\bdef\s+([A-Za-z_]\w*)\s*\(")
+
+
+def _builtin_method_findings(
+    interfaces: Sequence[InterfaceContract], language: str
+) -> tuple[str, ...]:
+    """Python contract signatures that name a method after a builtin type the same
+    signature also uses in an annotation: mypy then resolves the annotation to the
+    method and rejects it. Re-planning renames the method (list_books, get_by_id)."""
+    if language != "python":
+        return ()
+    out: list[str] = []
+    for i in interfaces:
+        if i.kind not in CODE_CONTRACT_KINDS:
+            continue
+        clashes = sorted({
+            name for name in _PY_METHOD.findall(i.signature)
+            if name in _BUILTIN_TYPES
+            and re.search(rf"(?:->|:)\s*(?:[\w.]+\[)*{name}\b", i.signature)
+        })
+        if clashes:
+            out.append(
+                f"Contract {i.name} names method(s) {', '.join(clashes)} after a builtin "
+                "its own annotations use, which the type checker rejects; rename them "
+                "(e.g. list_books, get_by_id)."
+            )
     return tuple(out)
 
 
@@ -2289,8 +2332,16 @@ def make_planner_node(
         )
         tickets, attach_concerns = _attach_generated(tickets, generated, tickets_seq)
         ticket_concerns += [*stack_concerns, *more_concerns, *attach_concerns]
-        contract_findings = _contract_findings(tickets, criteria)
         raw_stack = _section(payload, "stack")
+        chosen_stack = pinned or decided
+        contract_findings = (
+            *_contract_findings(tickets, criteria),
+            *_builtin_method_findings(
+                interfaces,
+                chosen_stack.language if chosen_stack is not None
+                else _str(raw_stack.get("language")).strip().lower(),
+            ),
+        )
         raw_run = _str(raw_stack.get("run")).strip()
         stack_update = decided
         if (pinned is not None and not pinned.profile and not pinned.run and raw_run

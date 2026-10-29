@@ -1595,11 +1595,14 @@ def _own_stack_files(
 
 
 def _contract_findings(
-    tickets: Sequence[Ticket], criteria: Sequence[AcceptanceCriterion]
+    tickets: Sequence[Ticket], criteria: Sequence[AcceptanceCriterion],
+    declared: frozenset[str] = frozenset(),
 ) -> tuple[str, ...]:
     """The plan-time contract fit check over the model's tickets: every consumed
     contract has exactly one implementing ticket and the consumer depends on it;
-    every implemented contract has a consumer or a scenario on its implementer."""
+    every implemented contract has a consumer or a scenario on its implementer.
+    ``declared`` names type contracts the generated contracts ticket writes in full
+    (data types, error classes): consuming one needs no implementing ticket."""
     work = [t for t in tickets if t.id not in _GENERATED_TICKETS]
     deps = {t.id: t.depends_on for t in tickets}
     producers: dict[str, list[str]] = {}
@@ -1629,6 +1632,8 @@ def _contract_findings(
                 continue
             consumed.add(name)
             ids = producers.get(name, [])
+            if not ids and name in declared:
+                continue
             if not ids:
                 out.append(f"Ticket {t.id} consumes contract {name}, but no ticket implements it.")
             elif len(ids) == 1 and ids[0] not in ancestors(t.id):
@@ -1936,6 +1941,7 @@ class _PriorPlan:
     prd: PRD
     critique: CriteriaCritique | None
     interfaces: tuple[tuple[str, str], ...]  # (name, spec)
+    declared: frozenset[str]  # type-kind contracts the contracts ticket writes in full
     brief: str
     intent: IntentBrief | None
 
@@ -2028,10 +2034,9 @@ def _prior_plan(state: FactoryState, rt: AgentRuntime) -> _PriorPlan | None:
     critiques = list(_newest_by_id(state, rt, "criteria_findings", CriteriaCritique).values())
     designs = list(_newest_by_id(state, rt, "system_design", SystemDesign).values())
     design = max(designs, key=lambda d: d.seq) if designs else None
-    interfaces = tuple(
-        (name, _prose(rt, i.spec_uri))
-        for name, i in _newest_by_id(state, rt, "interface_contract", InterfaceContract).items()
-    )
+    contracts = _newest_by_id(state, rt, "interface_contract", InterfaceContract)
+    interfaces = tuple((name, _prose(rt, i.spec_uri)) for name, i in contracts.items())
+    declared = frozenset(name for name, i in contracts.items() if i.kind == "type")
     intent = _newest_intent(state, rt)
     brief = (
         "PLAN (from the previous pass):\n"
@@ -2044,7 +2049,7 @@ def _prior_plan(state: FactoryState, rt: AgentRuntime) -> _PriorPlan | None:
         epics=tuple(epics), epic_of=epic_of, tickets=tuple(live),
         generated=tuple(t for t in every if t.id in _GENERATED_TICKETS), criteria=criteria,
         prd=prd, critique=max(critiques, key=lambda c: c.seq) if critiques else None,
-        interfaces=interfaces, brief=brief, intent=intent,
+        interfaces=interfaces, declared=declared, brief=brief, intent=intent,
     )
 
 
@@ -2408,7 +2413,10 @@ def make_planner_node(
         raw_stack = _section(payload, "stack")
         chosen_stack = pinned or decided
         contract_findings = (
-            *_contract_findings(tickets, criteria),
+            *_contract_findings(
+                tickets, criteria,
+                frozenset(i.name for i in interfaces if i.kind == "type"),
+            ),
             *_builtin_method_findings(
                 interfaces,
                 chosen_stack.language if chosen_stack is not None
@@ -2653,7 +2661,7 @@ def make_planner_node(
             ),
             judgment_provenance=JudgmentProvenance.SELF,
             seq=critique_seq,
-            contract_findings=_contract_findings(tickets, criteria),
+            contract_findings=_contract_findings(tickets, criteria, prior.declared),
             coverage_findings=(*overflow, *stack_findings, *_coverage_findings(
                 tickets, criteria, prior.intent,
                 run=None if stack is None or stack.profile else stack.run,

@@ -535,7 +535,7 @@ class TestGate:
         if self.scope is not None and not trusted:
             # No trusted feature holds a scoped scenario: nothing runs, all missing.
             rc, out, err, executed = 0, "", "", {}
-            trusted = dict.fromkeys(self.scope, [])
+            trusted = {name: [] for name in self.scope}
         elif bdd_dir is not None and self.bdd_cmd:
             # The Cucumber run goes first and its report is pinned (size + sha256)
             # the moment it exits, before any other agent code in this gate runs.

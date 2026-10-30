@@ -62,6 +62,8 @@ served capability silently degraded. That is flagged as drift (kind
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 import json
 import os
 import re
@@ -74,6 +76,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from fnmatch import fnmatchcase
+from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from foundry import progress
@@ -646,6 +649,10 @@ class ModelProviderProxy:
         self._retry = _RetryPolicy(max_retries, backoff_base_s, sleeper)
         # Per-run token cap (set by the host that owns the run); None = uncapped.
         self.token_meter: TokenMeter | None = None
+        # Durable per-run directory of finished calls (set by the host): a node that
+        # re-runs after a crash or provider outage replays the calls it already made
+        # instead of paying for them again. None = no cache.
+        self.call_cache: Path | None = None
         # Rate-limit (429/529) handling: a separate, more generous retry budget that
         # honors Retry-After, so a long run rides out provider throttling instead of
         # failing closed on it. Defaults come from the environment (off-by-default for
@@ -742,10 +749,16 @@ class ModelProviderProxy:
         )
 
         label = f"model call: {node_id} ({tier}, {purpose})"
-        progress.log(f"start {label}")
-        started = time.monotonic()
-        response, parsed = self._send_with_retry(request, schema=schema)
-        progress.finished(label, started, response.usage, self.token_meter)
+        cached = self._cached(request, schema)
+        if cached is not None:
+            response, parsed = cached
+            progress.log(f"reuse {label} (finished before a restart)")
+        else:
+            progress.log(f"start {label}")
+            started = time.monotonic()
+            response, parsed = self._send_with_retry(request, schema=schema)
+            progress.finished(label, started, response.usage, self.token_meter)
+            self._cache_put(request, schema, response)
 
         # Lineage is resolved from the proxy-OBSERVED served model id; an
         # unknown id fails closed inside the LineageMap (never guessed).
@@ -955,6 +968,37 @@ class ModelProviderProxy:
         if output_config:
             request["output_config"] = output_config
         return request, sampling, note
+
+    def _cache_path(self, request: dict[str, Any], schema: dict[str, Any] | None) -> Path:
+        assert self.call_cache is not None
+        key = hashlib.sha256(
+            json.dumps([request, schema], sort_keys=True, default=str).encode()
+        ).hexdigest()
+        return self.call_cache / f"{key}.json"
+
+    def _cached(
+        self, request: dict[str, Any], schema: dict[str, Any] | None
+    ) -> tuple[ProviderResponse, dict[str, Any] | None] | None:
+        if self.call_cache is None:
+            return None
+        try:
+            raw = json.loads(self._cache_path(request, schema).read_text(encoding="utf-8"))
+            response = ProviderResponse(**raw)
+        except (OSError, ValueError, TypeError):
+            return None
+        parsed = _extract_json_object(response.text) if schema is not None else None
+        return response, parsed
+
+    def _cache_put(
+        self, request: dict[str, Any], schema: dict[str, Any] | None, response: ProviderResponse
+    ) -> None:
+        if self.call_cache is None:
+            return
+        path = self._cache_path(request, schema)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(dataclasses.asdict(response)), encoding="utf-8")
+        tmp.replace(path)
 
     def _send_with_retry(
         self, request: dict[str, Any], *, schema: dict[str, Any] | None = None

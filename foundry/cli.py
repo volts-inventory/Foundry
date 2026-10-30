@@ -46,6 +46,7 @@ as an :class:`ExternalAction` on the ``actions`` channel (FG2).
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import sys
@@ -1219,6 +1220,9 @@ def run(
                                         tier_models=_tier_models(backend)),
         cas=store,
     )
+    if resolved_state_dir is not None:
+        run_key = hashlib.sha256(thread_id.encode()).hexdigest()[:16]
+        proxy.call_cache = Path(resolved_state_dir) / "calls" / run_key
     if token_cap is not None:
         meter = TokenMeter(token_cap)
         proxy.token_meter = meter

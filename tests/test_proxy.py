@@ -723,3 +723,24 @@ def test_progress_logs_each_model_call_start_and_end(monkeypatch, capsys):
     assert "start model call: planner (T1, gate)" in lines[0]
     assert "done  model call: planner (T1, gate) in " in lines[1]
     assert "of 7.0M)" in lines[1]
+
+
+def test_a_finished_call_is_replayed_from_the_call_cache(tmp_path):
+    from foundry.proxy.token_meter import TokenMeter
+
+    proxy, transport = make_proxy()
+    proxy.call_cache = tmp_path / "calls"
+    proxy.token_meter = TokenMeter(7_000_000)
+    msgs = [{"role": "user", "content": "x"}]
+    first = proxy.complete("planner", "T1", "SOP", msgs, purpose="gate")
+    used = proxy.token_meter.used
+    again, _ = make_proxy(transport)  # a restarted process: same cache dir
+    again.call_cache = tmp_path / "calls"
+    again.token_meter = TokenMeter(7_000_000)
+    sent = len(transport.requests)
+    replay = again.complete("planner", "T1", "SOP", msgs, purpose="gate")
+    assert replay.text == first.text and len(transport.requests) == sent
+    assert again.token_meter.used == 0 and used > 0
+    other = again.complete("planner", "T1", "SOP", [{"role": "user", "content": "y"}],
+                           purpose="gate")
+    assert len(transport.requests) == sent + 1 and other is not None

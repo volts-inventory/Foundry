@@ -57,6 +57,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from foundry.agents import AgentRuntime
+from foundry.agents.implementation import DEFAULT_WORKERS
 from foundry.agents.planner import TICKET_KIND
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.durability.checkpointer import FoundryCheckpointer
@@ -1579,9 +1580,9 @@ def _kv_pairs(text: str, what: str) -> list[tuple[str, str]]:
 
 def parse_workers(text: str) -> dict[str, int]:
     """``frontend=2,backend=3,data=1,test=2`` -> per-specialty ticket limits, over
-    the default of 2 each. Unknown specialty or a value below 1 is a ValueError."""
+    :data:`DEFAULT_WORKERS`. Unknown specialty or a value below 1 is a ValueError."""
     known = sorted(s.value for s in Specialty)
-    out = dict.fromkeys(known, 2)
+    out = dict(DEFAULT_WORKERS)
     for key, value in _kv_pairs(text, "workers"):
         if key not in out:
             raise ValueError(f"workers: unknown specialty {key!r}; choose from "
@@ -1709,7 +1710,7 @@ def main(argv: list[str] | None = None) -> int:
             token_cap = _tok
 
         # --workers frontend=2,backend=3,data=1,test=2 (or FOUNDRY_WORKERS): tickets
-        # building at once per specialty, under the --max-slots ceiling. Default 2
+        # building at once per specialty, under the --max-slots ceiling. Default 4
         # each. --ticket-tiers trivial=T3,standard=T2,complex=T1 (or
         # FOUNDRY_TICKET_TIERS): the model tier each ticket difficulty runs on.
         args, _workers = _take_value(args, "--workers", what="specialty=N pairs")

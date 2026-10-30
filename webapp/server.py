@@ -184,14 +184,14 @@ _MAX_VIEW_BYTES = 1_000_000  # cap a single file served to the in-page viewer
 
 
 WORKER_SPECIALTIES = ("frontend", "backend", "data", "test")
-DEFAULT_WORKERS = 2
+DEFAULT_WORKERS = 4
 MAX_WORKERS = 16
 _TICKET_DIFFICULTIES = ("trivial", "standard", "complex")
 
 
 def parse_workers(raw: Any = None) -> dict[str, int]:
     """Per-specialty worker limits from a request body: ints >= 1 (clamped to
-    MAX_WORKERS), default 2 each; unknown keys and non-integers fall back."""
+    MAX_WORKERS), default 4 each; unknown keys and non-integers fall back."""
     src = raw if isinstance(raw, Mapping) else {}
     out: dict[str, int] = {}
     for spec in WORKER_SPECIALTIES:

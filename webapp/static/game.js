@@ -79,7 +79,7 @@ const TIER_LETTER = {T3:"H", T2:"S", T1:"O"};                  // Haiku / Sonnet
 const TIER_NAME = {T3:"Haiku", T2:"Sonnet", T1:"Opus"};
 const TIER_COLOR = {T3:0x7dffb0, T2:0xffd95e, T1:0xff9b5e};
 const DIFF_TIER = {trivial:"T3", standard:"T2", complex:"T1"};
-const DEFAULT_LIMIT = 2, MAX_LIMIT = 16;
+const DEFAULT_LIMIT = 4, MAX_LIMIT = 16;
 const ENG_AREA_ROOM = {frontend:"frontend", backend:"backend", data:"data",
                        infra:"backend", security:"backend"};   // org AREA → its discipline room
 const RBASE = {
@@ -2813,7 +2813,7 @@ function showNewModal(){
 document.getElementById("new-btn").onclick=()=>showNewModal();
 document.getElementById("cancel-btn").onclick=()=>newModal.classList.add("hidden");
 document.getElementById("new-close").onclick=()=>newModal.classList.add("hidden");
-// Per-specialty worker limits: ints 1..16, default 2.
+// Per-specialty worker limits: ints 1..16, default 4.
 function readWorkers(){
   const w = {};
   for (const sp of SPECIALTIES){

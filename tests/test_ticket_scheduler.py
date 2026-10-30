@@ -986,7 +986,7 @@ def test_cli_wires_tier_models_and_proxy_closures_use_the_packet_tier(
 
 
 def test_parse_workers_and_ticket_tiers() -> None:
-    assert cli.parse_workers("") == {"backend": 2, "data": 2, "frontend": 2, "test": 2}
+    assert cli.parse_workers("") == {"backend": 4, "data": 4, "frontend": 4, "test": 4}
     assert cli.parse_workers("frontend=2, backend=3,data=1,test=2") == {
         "backend": 3, "data": 1, "frontend": 2, "test": 2}
     for bad in ("ops=2", "backend=0", "backend=x", "backend"):
@@ -1012,7 +1012,7 @@ def test_main_passes_flags_and_env_through_to_run(monkeypatch: pytest.MonkeyPatc
     assert cli.main(["build x"]) == 0
     assert seen["workers"]["data"] == 5 and seen["ticket_tiers"][Difficulty.COMPLEX] == "T2"
     assert cli.main(["--workers", "test=3", "--ticket-tiers", "trivial=T1", "build x"]) == 0
-    assert seen["workers"] == {"backend": 2, "data": 2, "frontend": 2, "test": 3}
+    assert seen["workers"] == {"backend": 4, "data": 4, "frontend": 4, "test": 3}
     assert seen["ticket_tiers"][Difficulty.TRIVIAL] == "T1"
     assert seen["ticket_tiers"][Difficulty.COMPLEX] == "T1"  # flag replaces the env
     assert cli.main(["--workers", "ops=1", "build x"]) == 2

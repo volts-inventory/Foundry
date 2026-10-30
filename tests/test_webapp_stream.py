@@ -283,10 +283,10 @@ def test_activity_is_throttled_deduped_and_capped_per_step():
 
 
 def test_parse_workers_defaults_clamps_and_ignores_junk():
-    assert server.parse_workers(None) == {"frontend": 2, "backend": 2, "data": 2, "test": 2}
+    assert server.parse_workers(None) == {"frontend": 4, "backend": 4, "data": 4, "test": 4}
     got = server.parse_workers({"frontend": "5", "backend": -3, "data": "x", "test": 99,
                                 "bogus": 7})
-    assert got == {"frontend": 5, "backend": 1, "data": 2, "test": 16}
+    assert got == {"frontend": 5, "backend": 1, "data": 4, "test": 16}
     assert server.parse_workers({"frontend": 0})["frontend"] == 1  # 0 would strand tickets
     assert server.parse_ticket_tiers({"trivial": "t3", "standard": "T9", "x": "T1"}) == {
         "trivial": "T3"}

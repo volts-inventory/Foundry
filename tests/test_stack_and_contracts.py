@@ -43,6 +43,7 @@ from foundry.schemas.gates import GateStatus
 from foundry.schemas.implementation import (
     CONTRACTS_TICKET_ID,
     HARNESS_TICKET_ID,
+    Difficulty,
     FeatureDiff,
     Specialty,
     StackDecision,
@@ -260,8 +261,10 @@ def test_fit_violations_become_blocking_spec_findings() -> None:
         "one ticket may implement it." in findings
     assert "Ticket T-002 consumes contract TodoStore.missing, but no ticket implements it." \
         in findings
-    assert "Ticket T-002 consumes contract TodoStore.add but does not depend on T-001, " \
-        "which implements it." in findings
+    # A forgotten edge to the one implementer is added, not sent back for a re-plan.
+    assert not any("does not depend on" in f for f in findings)
+    t2 = next(t for t in _tickets(writes, cas) if t.id == "T-002")
+    assert "T-001" in t2.depends_on
     unused = "Contract Unused (implemented by T-003) has no consumer"
     assert any(f.startswith(unused) for f in findings)
     critique = _critique(writes, cas)
@@ -683,3 +686,18 @@ def test_targeted_replan_carries_the_contracts_ticket() -> None:
     assert live[CONTRACTS_TICKET_ID].files == ("notes/contracts.py", "notes/__init__.py")
     assert all(CONTRACTS_TICKET_ID in t.depends_on for tid, t in live.items()
                if tid != CONTRACTS_TICKET_ID)
+
+
+def test_a_missing_contract_edge_that_would_close_a_cycle_stays_a_finding() -> None:
+    from foundry.agents.planner import _add_contract_deps, _contract_findings
+
+    def t(tid: str, deps: tuple[str, ...], impl: tuple[str, ...], uses: tuple[str, ...]) -> Ticket:
+        return Ticket(id=tid, title=tid, description="", specialty=Specialty.BACKEND,
+                      difficulty=Difficulty.STANDARD, depends_on=deps, implements=impl,
+                      consumes=uses, seq=Seq(run_id="r", emission_epoch=1,
+                                             superstep_index=1, node_id="planner", local=0))
+
+    tickets = [t("A", (), ("X",), ("Y",)), t("B", ("A",), ("Y",), ())]
+    out, concerns = _add_contract_deps(tickets)
+    assert out == tickets and concerns == []
+    assert any("does not depend on B" in f for f in _contract_findings(out, []))

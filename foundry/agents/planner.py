@@ -1637,6 +1637,44 @@ def _own_package_inits(
                  "ticket wrote." for tid, inits in added.items()]
 
 
+def _add_contract_deps(tickets: Sequence[Ticket]) -> tuple[list[Ticket], list[str]]:
+    """Order each consumer after the one ticket implementing a contract it consumes
+    when the plan forgot the edge: the fix is mechanical, and leaving it to a
+    re-plan cost a full planner pass per missing edge. An edge that would close a
+    cycle is left for the fit check to report."""
+    out = {t.id: t for t in tickets}
+    producers: dict[str, list[str]] = {}
+    for t in tickets:
+        if t.id not in _GENERATED_TICKETS:
+            for name in t.implements:
+                producers.setdefault(name, []).append(t.id)
+
+    def ancestors(tid: str) -> set[str]:
+        seen: set[str] = set()
+        todo = list(out[tid].depends_on) if tid in out else []
+        while todo:
+            d = todo.pop()
+            if d not in seen:
+                seen.add(d)
+                todo.extend(out[d].depends_on if d in out else ())
+        return seen
+
+    concerns: list[str] = []
+    for t in tickets:
+        for name in t.consumes:
+            ids = producers.get(name, [])
+            if len(ids) != 1 or ids[0] == t.id:
+                continue
+            dep = ids[0]
+            if dep in ancestors(t.id) or t.id in ancestors(dep):
+                continue
+            cur = out[t.id]
+            out[t.id] = cur.model_copy(update={"depends_on": (*cur.depends_on, dep)})
+            concerns.append(f"Ticket {t.id}: added a dependency on {dep}, which "
+                            f"implements the contract {name} it consumes.")
+    return [out[t.id] for t in tickets], concerns
+
+
 # An indented member that takes arguments (`    def add(`, `  add(x: T): R;`); a
 # constructor alone (an error class taking a message) is still a declaration.
 _MEMBER_CALL = re.compile(
@@ -2471,6 +2509,8 @@ def make_planner_node(
         )
         tickets, attach_concerns = _attach_generated(tickets, generated, tickets_seq)
         ticket_concerns += [*stack_concerns, *more_concerns, *attach_concerns]
+        tickets, dep_concerns = _add_contract_deps(tickets)
+        ticket_concerns += dep_concerns
         raw_stack = _section(payload, "stack")
         chosen_stack = pinned or decided
         contract_findings = (
@@ -2702,7 +2742,8 @@ def make_planner_node(
         )
         tickets, attach_concerns = _attach_generated(tickets, prior.generated, tickets_seq)
         tickets, own_concerns, stack_findings = _own_stack_files(tickets, stack)
-        ticket_concerns += [*attach_concerns, *own_concerns]
+        tickets, dep_concerns = _add_contract_deps(tickets)
+        ticket_concerns += [*attach_concerns, *own_concerns, *dep_concerns]
         dropped = _retired_tickets(state, rt, tickets, tickets_seq)
         prd_seq = seq("artifact:prd")
         prd = prior.prd.model_copy(

@@ -261,13 +261,16 @@ def test_python_assembly_and_type_errors(monkeypatch: pytest.MonkeyPatch) -> Non
         ("Prose", "this is prose"),
     ], "python")
     assert result.ran
-    assert result.findings == (
-        'Contract Repo does not compile (mypy): Name "Thing" is not defined [name-defined]',
-    )
+    # An undefined name is an import the fragment can't carry: a concern, not a blocker.
+    assert result.findings == ()
     assert result.concerns == (
         "Contract Prose: its signature is not valid Python, so it was not compiled at "
         "plan time.",
+        'Contract Repo: Name "Thing" is not defined [name-defined] (the contracts ticket '
+        "resolves imports)",
     )
+    typed = check_contracts([("parse", "def parse(text: str) -> int: return text")], "python")
+    assert typed.findings and "Incompatible return value" in typed.findings[0]
 
 
 def test_typescript_contracts_compile_with_tsc(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -281,10 +284,8 @@ def test_typescript_contracts_compile_with_tsc(monkeypatch: pytest.MonkeyPatch) 
     ], "typescript")
     if not result.ran:
         pytest.skip("tsc is not installed here")
-    assert result.findings == (
-        "Contract TodoStore.list does not compile (tsc): Cannot find name 'Todoo'. Did you "
-        "mean 'Todo'? [TS2552]",
-    )
+    assert result.findings == ()
+    assert any("Cannot find name 'Todoo'" in c for c in result.concerns)
     assert any(c.startswith("Contract broken: tsc could not parse") for c in result.concerns)
 
 

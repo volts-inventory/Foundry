@@ -55,6 +55,10 @@ from uuid import UUID
 # mypy codes that are artefacts of checking bare declarations, not contract errors:
 # a stub body has no return; two contracts may each restate a shared type.
 _PY_IGNORED_CODES = ("empty-body", "no-redef")
+# An undefined name is usually an import a signature fragment can't carry
+# (`BaseHTTPRequestHandler`, `TextIO`): the contracts ticket adds it and type-checks
+# the real file, so it is a concern here, never a plan blocker.
+_SOFT = re.compile(r"\[(?:name-defined|TS2304|TS2552)\]$")
 _PY_ERROR = re.compile(r"^contracts\.py:(\d+): error: (.*?)(?:\s+\[([\w-]+)\])?$")
 # tsc: syntax errors (TS1xxx) mean the fragment is not assemblable code; duplicate
 # identifiers, a missing implementation and unresolved modules are assembly artefacts.
@@ -279,7 +283,12 @@ def check_contracts(
             *concerns, f"Contracts not compiled at plan time: {tool} exited {rc}"
             + (f" ({detail[-1][:200]})" if detail else "") + ".",
         ))
-    findings = [f"Contract {name} does not compile ({tool}): {msg}" for name, msg in errors]
+    concerns += [f"Contract {name}: {msg} (the contracts ticket resolves imports)"
+                 for name, msg in errors if _SOFT.search(msg)]
+    findings = [f"Contract {name} does not compile ({tool}): {msg}"
+                for name, msg in errors if not _SOFT.search(msg)]
+    if not findings:
+        return CompileResult(concerns=tuple(concerns), ran=True)
     if len(findings) > _MAX_FINDINGS:
         findings = [*findings[:_MAX_FINDINGS],
                     f"... and {len(findings) - _MAX_FINDINGS} more {tool} error(s)."]

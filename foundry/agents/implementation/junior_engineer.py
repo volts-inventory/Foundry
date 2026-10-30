@@ -255,9 +255,11 @@ def _run_one_task(
     scope: tuple[str, ...] = (),
     rules: tuple[str, ...] = (),
     verify: Mapping[str, str] | None = None,
+    review: Callable[[AdapterResult, Sandbox], AdapterResult] | None = None,
 ) -> dict[str, Any]:
     """Run the adapter for ONE task in a fresh sandbox; return its channel writes.
-    A non-empty ``scope`` cuts the diff back to those paths (a noted trim).
+    A non-empty ``scope`` cuts the diff back to those paths (a noted trim);
+    ``review`` then annotates the kept diff while the sandbox is alive.
 
     A FRESH ``Sandbox`` per task (arch §2(d): no reuse), then the diff keyed by
     ``content_digest`` (L7) so a re-run re-derives the same key and the
@@ -289,6 +291,8 @@ def _run_one_task(
 
         # An empty scope still drops gate inputs (feature files, criteria).
         result = trim_to_write_scope(result, sandbox, scope, task.id)
+        if review is not None:
+            result = review(result, sandbox)
         _mirror_diff_blob(rt, sandbox, result)  # while the sandbox is alive
     finally:
         sandbox.destroy()
@@ -377,20 +381,15 @@ def _task_done_marker(task: Task, diff: FeatureDiff) -> dict[str, Any]:
     return d
 
 
-def _mid_wave_fix_scope(state: FactoryState, resolve: ArtifactResolver) -> tuple[str, ...]:
-    """Between waves the fixer repairs what is built — the built tickets' files —
-    and must not pre-build a later ticket's files (that ticket would then collide
-    with an unplanned module). Empty = unrestricted: after the last wave, or when a
-    built ticket declared no scope."""
+def _fix_focus(state: FactoryState, resolve: ArtifactResolver) -> tuple[str, ...]:
+    """The built tickets' files: what the fixer is repairing. Its writes elsewhere
+    are kept but noted. Empty = no focus (a built ticket declared no scope)."""
     from foundry.agents.implementation.tickets import (
         _built_task_ids,
-        pending_wave,
         read_tickets,
         task_id_for_ticket,
     )
 
-    if not pending_wave(state, resolve):
-        return ()
     built = _built_task_ids(state)
     files: list[str] = []
     for t in read_tickets(state, resolve):
@@ -470,13 +469,24 @@ def make_fixer_node(
         failures = group_failures_by_ticket(_prior_failures(state), read_tickets(state, resolve))
         if duplicates:
             failures = (*failures, f"[{CONTRACT_DUP_TRIAGE}]", *duplicates)
-        scope = _mid_wave_fix_scope(state, resolve)
+        from foundry.agents.implementation.tickets import note_fix_writes, pending_wave
+
+        focus = _fix_focus(state, resolve)
+        contracts = contract_paths(state, resolve)
         persona = _FIXER_PERSONA
-        if scope:
-            persona += (" Later waves have not been built yet: fix only the files built so "
-                        "far, and write ONLY these paths (changes anywhere else are "
-                        "discarded): " + ", ".join(scope) + ".")
-        task_id = f"fix-{attempt}"
+        if focus and pending_wave(state, resolve):
+            persona += (" Later waves have not been built yet: fix the files built so far ("
+                        + ", ".join(focus) + "), and never build a later ticket's files. "
+                        "A change anywhere else is kept but flagged for review.")
+        if contracts:
+            persona += (" Every ticket builds against the contract files ("
+                        + ", ".join(contracts) + "): change them only when the failure is "
+                        "in the contract itself; each change is recorded for review.")
+        # Numbered by the fixes so far, not the attempt counter: that resets per wave
+        # and on a resume, and a reused id would collide with the earlier fix's notes.
+        fixes = {a.task_id for a in _of_kind(state, FEATURE_DIFF_KIND)
+                 if a.task_id and a.task_id.startswith("fix-")}
+        task_id = f"fix-{len(fixes) + 1}"
         task = Task(
             id=task_id,
             spec_uri=f"fix://{attempt}",
@@ -496,9 +506,10 @@ def make_fixer_node(
             prior_failures=failures,
             persona=persona,
             overlay=overlay,
-            scope=scope,
             rules=_FIXER_RULES,
             verify=verify_commands(state.get("stack")),
+            review=lambda result, sandbox: note_fix_writes(
+                result, sandbox, task_id, focus=focus, contracts=contracts),
         )
         # Integration orders diffs by Seq. A fresh diff key starts at epoch 1, tying
         # with (and possibly sorting under) the diffs it repairs, so lift its epoch

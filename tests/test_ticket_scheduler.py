@@ -503,8 +503,8 @@ def test_fix_reentry_runs_the_fixer_not_the_tickets(tmp_path: Path) -> None:
                            stream_mode="updates"):
         ran.extend(step)
     assert ran == ["fixer"]
-    assert rec.calls[-1] == "fix-0" and rec.seen["fix-0"]["a.py"] == "# written by T-001\n"
-    assert "criteria.json" not in rec.seen["fix-0"]  # the oracle stays out of the worktree
+    assert rec.calls[-1] == "fix-1" and rec.seen["fix-1"]["a.py"] == "# written by T-001\n"
+    assert "criteria.json" not in rec.seen["fix-1"]  # the oracle stays out of the worktree
 
 
 # ---- per-wave integration check (§2b) ------------------------------------------
@@ -666,22 +666,58 @@ def test_contracts_that_fail_the_wave_zero_typecheck_are_fixable(tmp_path: Path)
     assert (tree / "contracts.py").read_text() == "class Store: ...\n"
 
 
-def test_a_mid_wave_fix_writes_only_the_files_built_so_far(tmp_path: Path) -> None:
-    # The wave-0 fixer must repair what is built, not pre-build a later ticket's
-    # module (it then collides with the module that ticket plans).
+def test_a_later_contract_fix_carries_forward_and_a_ticket_edit_does_not(
+    tmp_path: Path,
+) -> None:
+    # After wave 0 the contracts stay fixable by the fixer (recorded in triage),
+    # while a ticket's edit to them is still discarded at integration.
+    tickets = [
+        _ticket("contracts", 0, files=("contracts.py",)),
+        _ticket("T-001", 1, files=("app.py",), deps=("contracts",)),
+        _ticket("T-002", 2, files=("more.py", "contracts.py"), deps=("T-001",)),
+    ]
+    rec = _Recorder(writes={
+        "T-001": {"app.py": "def broken(:\n"},
+        "fix-1": {"app.py": "VALUE = 1\n", "contracts.py": "class Store: ...  # fixed\n"},
+        "T-002": {"contracts.py": "class Store: ...  # ticket edit\n"},
+    })
+    out, ran, store = _wave_run(tmp_path, rec, tickets=tickets)
+    assert ran == ["engineering", "wave_gate", "engineering", "wave_gate", "fixer",
+                   "wave_gate", "engineering"]
+    assert rec.seen["T-002"]["contracts.py"] == "class Store: ...  # fixed\n"
+    notes = {t.name: t.explanation for t in out["gate_triage"]
+             if t.run_against == "task/fix-1"}
+    assert "contracts.py" in notes["contract-change:contracts.py"]
+    tree = tmp_path / "tree"
+    materialize_workdir(out, tree, resolve=store.resolve, resolve_blob=store.resolve_blob)
+    assert (tree / "contracts.py").read_text() == "class Store: ...  # fixed\n"
+
+
+def test_a_mid_wave_fix_keeps_writes_outside_the_built_files_and_notes_them(
+    tmp_path: Path,
+) -> None:
+    # A repair often needs a file no built ticket owns (a missing __init__.py, a
+    # manifest): the fixer's write is kept and flagged, never silently dropped.
+    # Gate inputs stay out of reach: its feature-file edit is still discarded.
     rec = _Recorder(writes={
         "T-001": {"app.py": "def broken(:\n"},
         "fix-1": {"app.py": "def fixed():\n    return 1\n", "later.py": "x = 1\n"},
     })
     tickets = [_ticket("T-001", 0, files=("app.py",)),
                _ticket("T-002", 1, files=("later.py",), deps=("T-001",))]
-    out, ran, _ = _wave_run(tmp_path, rec, tickets=tickets)
+    out, ran, store = _wave_run(tmp_path, rec, tickets=tickets)
     assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "engineering"]
-    assert "later.py" not in rec.seen["T-002"]
-    assert "write ONLY these paths" in rec.packets["fix-1"].persona
-    notes = [t for t in out["gate_triage"] if t.name == "write-scope"
-             and t.run_against == "task/fix-1"]
-    assert notes and "later.py" in notes[0].explanation
+    assert rec.seen["T-002"]["later.py"] == "x = 1\n"  # the fix reached the next wave
+    assert "never build a later ticket's files" in rec.packets["fix-1"].persona
+    notes = {t.name: t.explanation for t in out["gate_triage"]
+             if t.run_against == "task/fix-1"}
+    assert "later.py" in notes["fix-scope"] and "rogue.txt" in notes["fix-scope"]
+    assert "app.py" not in notes["fix-scope"]
+    assert notes["write-scope"].endswith("features/T-001.feature")  # dropped, not kept
+    tree = tmp_path / "tree"
+    materialize_workdir(out, tree, resolve=store.resolve, resolve_blob=store.resolve_blob)
+    assert (tree / "rogue.txt").is_file()
+    assert (tree / "later.py").read_text() == "# written by T-002\n"  # its owner wins
 
 
 @pytest.mark.parametrize(("cmd", "want"), [

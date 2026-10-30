@@ -178,10 +178,16 @@ def build_implementation_subgraph(
         if (can_fix and state.get("phase") == "build_test_fix"
                 and tickets_settled(state, resolve)):
             return fixer_id
+        # Resuming a run the per-wave check halted: re-run that check (fresh budget)
+        # on the waves already built before building the next one.
+        if (check is not None and state.get("phase") == "resume"
+                and pending_wave(state, resolve) and ready_tasks(state)):
+            return gate_id
         # The node also emits the ticket tasks, so it runs even with no wave.
         return eng_id if pending_wave(state, resolve) or not ready_tasks(state) else END
 
     g.add_conditional_edges(START, _start,
                             {eng_id: eng_id,
-                             **({fixer_id: fixer_id} if can_fix else {}), END: END})
+                             **({fixer_id: fixer_id} if can_fix else {}),
+                             **({gate_id: gate_id} if check is not None else {}), END: END})
     return g

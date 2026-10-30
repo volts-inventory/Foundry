@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Any
 from foundry.agents._common import journal_entry
 from foundry.agents._runtime import AgentRuntime, NodeFn
 from foundry.agents.implementation.junior_engineer import (
+    FIXER_NODE_ID,
     _adapter_name,
     _apply_overlay,
     _finalize_diff,
@@ -88,7 +89,7 @@ if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
 
     from foundry.execution.sandbox import Sandbox
-    from foundry.graph.gate_wiring import BlobResolver
+    from foundry.graph.gate_wiring import BlobResolver, _DiffOps
     from foundry.schemas.architecture import PinnedConstraint
     from foundry.state.factory_state import FactoryState
 
@@ -106,6 +107,7 @@ __all__ = [
     "in_write_scope",
     "make_engineering_node",
     "next_wave",
+    "note_fix_writes",
     "pending_wave",
     "plan_wave_count",
     "read_tickets",
@@ -126,6 +128,10 @@ _FEATURE_DIFF_KIND = "feature_diff"
 # Triage names this module writes; SKIP doubles as the "never built" marker.
 SKIP_TRIAGE = "ticket-skipped"
 SCOPE_TRIAGE = "write-scope"
+# The fixer's kept writes outside the built tickets' files, and each contract file
+# it changed (the agreed signatures drift from the plan only through these).
+FIX_SCOPE_TRIAGE = "fix-scope"
+CONTRACT_CHANGE_TRIAGE = "contract-change"
 # One note per failed attempt (the triage union keys on name, so the attempt is in it).
 FAIL_TRIAGE = "ticket-failed"
 CAP_TRIAGE = "token-cap"
@@ -336,6 +342,59 @@ def _is_lockfile_of(path: str, manifest: str) -> bool:
     return m_dir == p_dir and p_name in _LOCKFILES.get(m_name, ())
 
 
+def _result_ops(result: AdapterResult, sandbox: Sandbox, task_id: str) -> _DiffOps | None:
+    """The adapter diff's ops, or None for an unparseable body (integration fails it)."""
+    from foundry.graph.gate_wiring import MaterializationError, _diff_ops
+
+    probe = FeatureDiff(
+        diff_uri=result.diff_uri, task_id=task_id, branch=f"task/{task_id}",
+        base_tree_sha="", seq=Seq("scope", 0, 0, NODE_ID, 0),
+    )
+    try:
+        return _diff_ops(probe, sandbox.get_blob)
+    except MaterializationError:
+        return None
+
+
+def note_fix_writes(
+    result: AdapterResult,
+    sandbox: Sandbox,
+    task_id: str,
+    *,
+    focus: Sequence[str],
+    contracts: Sequence[str],
+) -> AdapterResult:
+    """Triage the fixer's kept writes: one note for the paths outside ``focus`` (the
+    built tickets' files; empty = no focus, nothing is outside it) and one per
+    contract file it changed. Notes only — the writes stay in the diff."""
+    ops = _result_ops(result, sandbox, task_id)
+    if ops is None:
+        return result
+    touched = set(ops.writes) | set(ops.deletes) | set(ops.patches)
+    outside = sorted(p for p in touched if focus and not in_write_scope(p, focus))
+    notes: list[GateTriage] = []
+    if outside:
+        notes.append(GateTriage(
+            name=FIX_SCOPE_TRIAGE, run_against=f"task/{task_id}",
+            explanation="the fixer wrote outside the built tickets' files (kept): "
+                        + ", ".join(outside),
+            produced_by=FIXER_NODE_ID,
+            seq=Seq("scope", 0, 0, FIXER_NODE_ID, len(result.triage)),
+        ))
+    for path in sorted(touched & set(contracts)):
+        how = "deleted" if path in ops.deletes else "changed"
+        notes.append(GateTriage(
+            name=f"{CONTRACT_CHANGE_TRIAGE}:{path}", run_against=f"task/{task_id}",
+            explanation=f"the fixer {how} the contract file {path}; this version is now "
+                        "the agreed one every later ticket builds against",
+            produced_by=FIXER_NODE_ID,
+            seq=Seq("scope", 0, 0, FIXER_NODE_ID, len(result.triage) + len(notes)),
+        ))
+    if not notes:
+        return result
+    return result.model_copy(update={"triage": (*result.triage, *notes)})
+
+
 def trim_to_write_scope(
     result: AdapterResult, sandbox: Sandbox, files: Sequence[str], task_id: str
 ) -> AdapterResult:
@@ -344,15 +403,10 @@ def trim_to_write_scope(
     Called in-worker while the sandbox is alive. An unparseable body is returned
     as-is (integration fails it closed). Modification hunks are applied against the
     sandbox's base file so the trimmed body is a self-contained full-file snapshot."""
-    from foundry.graph.gate_wiring import MaterializationError, _apply_hunks, _diff_ops
+    from foundry.graph.gate_wiring import MaterializationError, _apply_hunks
 
-    probe = FeatureDiff(
-        diff_uri=result.diff_uri, task_id=task_id, branch=f"task/{task_id}",
-        base_tree_sha="", seq=Seq("scope", 0, 0, NODE_ID, 0),
-    )
-    try:
-        ops = _diff_ops(probe, sandbox.get_blob)
-    except MaterializationError:
+    ops = _result_ops(result, sandbox, task_id)
+    if ops is None:
         return result
     touched = set(ops.writes) | set(ops.deletes) | set(ops.patches)
     dropped = sorted(p for p in touched if not in_write_scope(p, files))

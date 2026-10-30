@@ -70,7 +70,7 @@ from foundry.gates import DevGateWriteVerifier, TwoZoneGateRunner, ZoneBSigner
 from foundry.gates.signing import signing_schemes_from_env
 from foundry.graph.factory_graph import build_factory_graph, terminal_gates_pass
 from foundry.graph.gate_wiring import GATE_INPUT_FILES
-from foundry.graph.supervisor import MODE_ASSISTANT
+from foundry.graph.supervisor import MODE_ASSISTANT, RESUME_PHASE, resume_boundary
 from foundry.manifest import write_manifest
 from foundry.proxy import ModelProviderProxy, build_backend
 from foundry.proxy.model_provider_proxy import DriftMode, DriftPolicy
@@ -89,6 +89,7 @@ from foundry.schemas.implementation import (
 from foundry.schemas.product import AcceptanceCriterion, Criticality
 from foundry.state.global_records import GlobalRecords
 from foundry.state.reducers import reset_gate_write_verifier, set_gate_write_verifier
+from foundry.state.seq import Seq
 
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
@@ -813,6 +814,11 @@ class RunResult:
     what's still failing — so a held build hands back a usable starting point, never
     empty hands. ``None`` on a PASS (use ``output_root``) or when no draft could be
     materialized."""
+    resume_from: str | None = None
+    """The boundary a HALTED run stopped at, where a rerun picks up (``None`` on a PASS)."""
+    resumable: bool = False
+    """Whether the run's state is durable (``--state-dir``), so a rerun can resume it."""
+
     def summary(self) -> str:
         """A concise human-readable report of the run (printed by ``main``)."""
         lines = [
@@ -844,6 +850,14 @@ class RunResult:
             lines.append(f"  payload_uri:     {self.open_pr_payload_uri}")
         else:
             lines.append("no open_pr action emitted (gates did not all PASS).")
+        if self.resume_from:
+            lines.append(
+                f"halted at {self.resume_from}: rerun the same command to resume from "
+                f"{self.resume_from} (raise --max-fix-attempts or --token-cap for more room)"
+                if self.resumable
+                else f"halted at {self.resume_from}: add --state-dir DIR to make a halted "
+                     "run resumable"
+            )
         if self.output_root:
             lines.append(f"source tree written to: {self.output_root}")
         if self.draft_root:
@@ -962,6 +976,38 @@ def _has_pending_run(app: Any, config: RunnableConfig) -> bool:
         return bool(app.get_state(config).next)
     except Exception:  # no checkpointer/thread: a fresh run
         return False
+
+
+def _prior_values(app: Any, config: RunnableConfig) -> dict[str, Any]:
+    """This thread's checkpointed channel values ({} for a fresh thread)."""
+    try:
+        return dict(app.get_state(config).values or {})
+    except Exception:  # no checkpointer/thread: a fresh run
+        return {}
+
+
+def _max_epoch(values: Mapping[str, Any], run_id: str) -> int:
+    """The highest ``emission_epoch`` among this run's records on ``values``."""
+    top = 0
+    for value in values.values():
+        for item in value if isinstance(value, list) else (value,):
+            seq = getattr(item, "seq", None)
+            if isinstance(seq, Seq) and seq.run_id == run_id:
+                top = max(top, seq.emission_epoch)
+    return top
+
+
+def _resume_seed(app: Any, config: RunnableConfig, seed: FactoryState) -> FactoryState:
+    """A rerun of a HALTED thread with the same request resumes it at the boundary
+    that halted (the supervisor's triage honours ``RESUME_PHASE``) instead of
+    planning from scratch. A thread with nodes pending is continued with ``None``
+    by :func:`_invoke_with_autoresume`; a new thread or request plans fresh."""
+    if _has_pending_run(app, config):
+        return seed
+    prior = _prior_values(app, config)
+    if prior.get("phase") == "halted" and prior.get("request") == seed.get("request"):
+        return {"request": seed["request"], "phase": RESUME_PHASE}
+    return seed
 
 
 def _invoke_with_autoresume(
@@ -1260,6 +1306,12 @@ def run(
                 ticket_tiers=ticket_tiers,
                 on_task=task_cb,
             )
+            # The epoch counter is in-memory: a process continuing this thread's
+            # checkpoint must mint Seqs above the run's records, or a re-run gate's
+            # verdict would rank below the stale one it supersedes.
+            prior = _prior_values(app, config)
+            if prior:
+                rt.epochs.raise_floor(thread_id, _max_epoch(prior, thread_id))
             # `spec` is additive and seeded ONLY when provided (request-only runs
             # keep the historical {"request": ...} seed exactly). The product
             # nodes read it off the `spec` channel to ground the IntentBrief/PRD.
@@ -1375,7 +1427,7 @@ def run(
 
             final = _invoke_with_autoresume(
                 app,
-                seed,
+                _resume_seed(app, config, seed),
                 config,
                 progress_cb=drive_pc,
                 resumable=(durable is not None),
@@ -1397,6 +1449,9 @@ def run(
         mode=mode,
         backend=backend,
     )
+    if final_state.get("phase") == "halted":
+        result = replace(result, resume_from=resume_boundary(final_state, resolve),
+                         resumable=durable is not None)
     if output_dir is not None and result.passed:
         # On a PASSING build, materialize the FINAL accepted integrated tree
         # (reusing the SAME materialize_workdir + resolve/resolve_blob seams the

@@ -721,20 +721,32 @@ def _write_sources(
 
 
 def _apply_diffs(
-    dest: Path, artifacts: list[Artifact], resolve: ArtifactResolver, resolve_blob: BlobResolver
+    dest: Path,
+    artifacts: list[Artifact],
+    resolve: ArtifactResolver,
+    resolve_blob: BlobResolver,
+    *,
+    only: frozenset[str] | None = None,
 ) -> None:
+    """Apply ``artifacts`` in Seq order; ``only`` limits it to those paths."""
     for artifact in sorted(artifacts, key=lambda a: a.seq):
         diff = _resolve_typed(artifact, resolve, FeatureDiff, FEATURE_DIFF_KIND)
         ops = _diff_ops(diff, resolve_blob)
         for rel, content in ops.writes.items():
+            if only is not None and rel not in only:
+                continue
             target = _contained_target(dest, rel)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
         for rel in ops.deletes:
+            if only is not None and rel not in only:
+                continue
             target = _contained_target(dest, rel)
             if target.is_file():
                 target.unlink()
         for rel, hunks in ops.patches.items():
+            if only is not None and rel not in only:
+                continue
             target = _contained_target(dest, rel)
             if not target.is_file():
                 raise FeatureDiffBodyError(
@@ -950,14 +962,15 @@ def _is_fix(task_id: str) -> bool:
 def _write_contracts(
     dest: Path, state: FactoryState, resolve: ArtifactResolver, resolve_blob: BlobResolver
 ) -> None:
-    """Rewrite the contract files as they stood at the end of wave 0, so a later
-    ticket's or fixer's edit to an agreed signature never reaches the gates (the
-    planner also keeps those paths out of every other ticket's files).
+    """Rewrite the contract files as they stood at the end of wave 0 plus every
+    later FIXER edit to them, so a later ticket's edit to an agreed signature never
+    reaches the gates (the planner also keeps those paths out of every other
+    ticket's files) while a repair to the contract itself still can.
 
     Wave 0 — the tickets with no dependencies, plus the fixes the per-wave check
-    ran on them — is every diff integrated before the first later-wave diff. Its
-    fixes may still repair the contracts (a stub that fails the type checker); they
-    freeze once the check passes and wave 1 starts building against them."""
+    ran on them — is every diff integrated before the first later-wave diff. After
+    it only fix diffs (``fix-*``, never a planned ticket's id) touch the contracts;
+    the fixer records each such change in triage (``note_fix_writes``)."""
     paths = contract_paths(state, resolve)
     if not paths:
         return
@@ -972,8 +985,11 @@ def _write_contracts(
         default=None,
     )
     owned = [a for a, _ in diffs if frozen_at is None or a.seq < frozen_at]
+    fixes = [a for a, d in diffs if frozen_at is not None and a.seq >= frozen_at
+             and _is_fix(d.task_id) and d.task_id not in known]
     with tempfile.TemporaryDirectory(prefix="foundry_contracts_") as tmp:
         _apply_diffs(Path(tmp), owned, resolve, resolve_blob)
+        _apply_diffs(Path(tmp), fixes, resolve, resolve_blob, only=frozenset(paths))
         for rel in paths:
             source = _contained_target(Path(tmp), rel)
             target = _contained_target(dest, rel)

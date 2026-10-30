@@ -11,6 +11,7 @@ Topology (the SOP phase order — agents.md, governance §1 gate boundaries)::
 
     START
       -> triage              # classify -> route + seed per-route budget
+         --(resume)--> spec_fix | implementation | build_test_gate   (see below)
       -> planner             # ONE model call: PRD + criteria + design + ownership
       -> spec_gate           # [SPEC gate] criteria x design
          --(advance)--> implementation
@@ -22,6 +23,15 @@ Topology (the SOP phase order — agents.md, governance §1 gate boundaries)::
          --(advance)--> END
          --(fix)-----> build_test_fix -> implementation   (bounded re-verification)
          --(halt)----> END
+
+Resume after a HALT: a halted run ends (``emit`` marks it ``halted``) with no
+pending node, so a rerun must start a new LangGraph run. A seed carrying
+``phase=RESUME_PHASE`` asks triage to re-enter at the boundary that halted
+(:func:`resume_boundary`) with a fresh fix budget instead of planning again: a
+failed Spec gate re-plans through ``spec_fix``; a failed per-wave check re-runs
+that check (the implementation subgraph routes a resume to its ``wave_gate``); a
+failed final gate re-runs the build/test gates. Built tickets and the plan stay
+on state, so nothing upstream of the boundary runs again.
 
 Gate nodes (``spec_gate`` / ``build_test_gate``) call the gate-wiring helpers
 (:func:`run_spec_gate` / :func:`run_build_test_gates`) — the verdict comes ONLY
@@ -92,9 +102,14 @@ if TYPE_CHECKING:
 __all__ = [
     "DEFAULT_ROUTE_CAPS_MICROUSD",
     "MODE_ASSISTANT",
+    "RESUME_FINAL",
+    "RESUME_PHASE",
+    "RESUME_SPEC",
+    "RESUME_WAVE",
     "ROUTES",
     "build_supervisor_graph",
     "classify_request",
+    "resume_boundary",
 ]
 
 # ---- supervisor mode --------------------------------------------------------
@@ -116,6 +131,27 @@ _SPEC_FIX = "spec_fix"
 _BUILD_TEST_FIX = "build_test_fix"
 # Raises a token cap the implementation layer hit, AFTER its writes are committed.
 _TOKEN_CAP = "token_cap"
+
+# The seed phase that asks triage to resume a halted run (see the module doc), and
+# the boundaries it can resume from.
+RESUME_PHASE = "resume"
+RESUME_SPEC = "the Spec gate"
+RESUME_WAVE = "the per-wave check"
+RESUME_FINAL = "the final gates"
+
+
+def resume_boundary(state: FactoryState, resolve: ArtifactResolver) -> str:
+    """The boundary a halted run stopped at, read off its state: a Spec gate that
+    has not passed, else a wave left unbuilt (the per-wave check spent its budget),
+    else the final build/test gates."""
+    spec = max((g for g in state.get("gates") or () if g.name == "spec"),
+               key=lambda g: g.seq, default=None)
+    if spec is None or spec.status is not GateStatus.PASS:
+        return RESUME_SPEC
+    if pending_wave(state, resolve):
+        return RESUME_WAVE
+    return RESUME_FINAL
+
 def _commit_judgment_ledger(
     prior: list[GateResult] | None,
     delta: list[GateResult] | None,
@@ -259,12 +295,24 @@ def build_supervisor_graph(
     # -- triage: classify + seed route/budget ---------------------------------
     def triage(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         route = classify_request(state.get("request", ""))
+        resuming = state.get("phase") == RESUME_PHASE
         return {
-            "phase": _TRIAGE,
+            # A resume keeps the marker for the entry router (and the implementation
+            # subgraph); either way the fix budget starts fresh.
+            "phase": RESUME_PHASE if resuming else _TRIAGE,
             "route": route,
             "budget": _seed_budget(route),
             "mode": MODE_ASSISTANT,
         }
+
+    def _route_entry(state: FactoryState) -> str:
+        if state.get("phase") != RESUME_PHASE:
+            return _PLANNER
+        return {
+            RESUME_SPEC: _SPEC_FIX,
+            RESUME_WAVE: _IMPLEMENTATION,
+            RESUME_FINAL: _BUILD_TEST_GATE,
+        }[resume_boundary(state, resolve)]
 
     # -- the four layer subgraphs, compiled + mounted as nodes ----------------
     # Each builder returns an UNCOMPILED StateGraph (SG4); we ``.compile()`` each
@@ -421,7 +469,11 @@ def build_supervisor_graph(
 
     # -- wire the phase sequence ----------------------------------------------
     g.add_edge(START, _TRIAGE)
-    g.add_edge(_TRIAGE, _PLANNER)
+    g.add_conditional_edges(
+        _TRIAGE,
+        _route_entry,
+        {n: n for n in (_PLANNER, _SPEC_FIX, _IMPLEMENTATION, _BUILD_TEST_GATE)},
+    )
     g.add_edge(_PLANNER, _SPEC_GATE)
 
     # SPEC boundary: advance -> implementation; fix -> back to the planner (which

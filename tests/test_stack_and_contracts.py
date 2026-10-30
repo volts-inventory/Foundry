@@ -600,27 +600,30 @@ def test_contract_files_are_rewritten_from_the_contracts_ticket(tmp_path: Path) 
     state, resolve, blob = _diff_state([
         (CONTRACTS_TICKET_ID, {"src/contracts.ts": "export type Id = string;\n"}),
         ("T-001", {"src/contracts.ts": "export type Id = number;\n", "src/app.ts": "x\n"}),
-        ("fix-1", {"src/contracts.ts": "// gone\n"}),
     ])
     materialize_workdir(state, tmp_path, resolve=resolve, resolve_blob=blob)
     assert (tmp_path / "src/contracts.ts").read_text() == "export type Id = string;\n"
     assert (tmp_path / "src/app.ts").read_text() == "x\n"
 
 
-def test_a_wave_zero_fix_repairs_the_contracts_until_a_later_wave_builds(
+def test_fixes_repair_the_contracts_and_later_tickets_cannot_change_them(
     tmp_path: Path,
 ) -> None:
     # The wave-0 check may FAIL on the contracts themselves (a stub the type checker
-    # rejects): the fixer's repair must reach the gates, or the run can never pass.
-    # Once a later-wave ticket builds against them, they freeze.
+    # rejects), and a later gate may too: the fixer's repair must reach the gates, or
+    # the run can never pass. A later ticket's edit to an agreed signature never does,
+    # before or after a fix.
     state, resolve, blob = _diff_state([
         (CONTRACTS_TICKET_ID, {"src/contracts.ts": "export type Id = ;\n"}),
         ("fix-1", {"src/contracts.ts": "export type Id = string;\n"}),
         ("T-001", {"src/contracts.ts": "export type Id = number;\n", "src/app.ts": "x\n"}),
-        ("fix-2", {"src/contracts.ts": "// gone\n"}),
+        ("fix-2", {"src/contracts.ts": "export type Id = string | number;\n",
+                   "src/app.ts": "y\n"}),
+        ("T-002", {"src/contracts.ts": "// gone\n"}),
     ])
     materialize_workdir(state, tmp_path, resolve=resolve, resolve_blob=blob)
-    assert (tmp_path / "src/contracts.ts").read_text() == "export type Id = string;\n"
+    assert (tmp_path / "src/contracts.ts").read_text() == "export type Id = string | number;\n"
+    assert (tmp_path / "src/app.ts").read_text() == "y\n"
 
 
 def test_a_retried_contracts_ticket_still_owns_its_files(tmp_path: Path) -> None:

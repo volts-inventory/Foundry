@@ -101,7 +101,7 @@ def test_bad_goal_and_covers_ids_are_tolerated_and_reported() -> None:
         "success_criteria": "a user can add a todo",
         "deliverable": "spaceship",
     }
-    scenarios = _scenarios_covering("mh-1", " MH-02 ", "sc1", "bogus", 7, None)
+    scenarios = _scenarios_covering("mh-1", " MH-02 ", "sc1", "bogus", 7, None, " Odd ")
     writes, cas, critique = _run(_plan(intent=intent, tickets=_tickets_with(
         T_002={"scenarios": scenarios},
     )))
@@ -111,12 +111,16 @@ def test_bad_goal_and_covers_ids_are_tolerated_and_reported() -> None:
     assert brief.success_criterion_ids == ("SC-1",)
     assert brief.deliverable == ""  # unknown -> undeclared, treated as an app
     findings = critique.coverage_findings
-    known = "(MH-1, MH-2, MH-3, MH-4, MH-5, MH-6, SC-1)"
-    assert f"Scenario AC-001 covers unknown id 'bogus'; cite must-have / success-criterion " \
-        f"ids {known}." in findings
-    assert any("covers unknown id '7'" in f for f in findings)
+    # Unknown covers entries are dropped with a note; a goal's exact text maps to its id.
+    assert not any("covers unknown id" in f for f in findings)
+    assert (
+        "Scenario AC-001: dropped unknown covers id(s) 'bogus', '7' (declared ids: MH-1, "
+        "MH-2, MH-3, MH-4, MH-5, MH-6, SC-1)."
+    ) in writes["agent_journal"][0].concerns
+    criteria = {c.id: c for c in _bodies(cas, writes, "acceptance_criterion")}
+    assert criteria["AC-001"].covers == ("MH-1", "MH-2", "SC-1", "MH-5")
     uncovered = [f.split()[1] for f in findings if "has no covering scenario" in f]
-    assert uncovered == ["MH-3", "MH-4", "MH-5", "MH-6"]
+    assert uncovered == ["MH-3", "MH-4", "MH-6"]
     assert any(f.startswith("stack.run is empty but the deliverable is an app") for f in findings)
 
 
@@ -210,7 +214,7 @@ def test_a_replan_may_add_the_run_command_to_the_planner_chosen_stack() -> None:
 # ---- 4. caps never drop work silently -------------------------------------------------------
 
 
-def test_inline_cap_overflow_is_a_finding_naming_the_dropped_tickets() -> None:
+def test_inline_cap_overflow_is_a_concern_naming_the_dropped_tickets() -> None:
     entry = _copy(PLAN["tickets"][1])
     filler = [
         {**_copy(PLAN["tickets"][0]), "id": f"T-{i:03d}", "title": f"part {i}",
@@ -218,14 +222,22 @@ def test_inline_cap_overflow_is_a_finding_naming_the_dropped_tickets() -> None:
          "scenarios": [{**PLAN["tickets"][0]["scenarios"][0], "id": f"AC-{i:03d}"}]}
         for i in range(100, 100 + MAX_TICKETS + 1)
     ]
-    _, _, critique = _run(_plan(tickets=[entry, *filler]))
-    [overflow] = [f for f in critique.coverage_findings if "exceed the cap" in f]
-    assert overflow == (
+    filler[-1]["files"] = ["todo/p100.py"]  # T-140 shares a file with kept T-100
+    writes, cas, critique = _run(_plan(tickets=[entry, *filler]))
+    assert not any("exceed the cap" in f for f in critique.coverage_findings)
+    concerns = writes["agent_journal"][0].concerns
+    assert (
         f"{MAX_TICKETS + 2} tickets exceed the cap of {MAX_TICKETS}; dropped T-139 (part "
         "139), T-140 (part 140): consolidate tickets (or split a larger build into epics) "
         "so no work is lost."
-    )
-    assert critique.spec_gate_blocking()
+    ) in concerns
+    # A dropped ticket's scenarios move to the kept ticket owning its files, else drop.
+    assert "Moved scenario(s) AC-140 of dropped ticket T-140 to T-100, which owns its " \
+        "files." in concerns
+    assert "Dropped scenario(s) AC-139 with ticket T-139: no kept ticket owns its " \
+        "files." in concerns
+    owner = {c.id: c.ticket_id for c in _bodies(cas, writes, "acceptance_criterion")}
+    assert owner["AC-140"] == "T-100" and "AC-139" not in owner
 
 
 # ---- epic mode: coverage is checked across epics ---------------------------------------------
@@ -264,9 +276,12 @@ def test_epic_mode_coverage_spans_every_epic() -> None:
 def test_coverage_findings_fail_the_spec_gate_and_reach_the_revision(tmp_path: Path) -> None:
     uncovered = _plan(tickets=_tickets_with(T_002={"scenarios": _scenarios_covering("SC-1")}))
     cas = ArtifactStore()
-    rt, tx = runtime_for(uncovered, PLAN, cas=cas)
+    # The in-node revision returns the same plan, so the finding reaches the gate.
+    rt, tx = runtime_for(uncovered, uncovered, PLAN, cas=cas)
     node = make_planner_node(rt)
     first = node({"request": "x"}, config_for("r"))
+    assert len(tx.requests) == 2
+    assert "Plan check findings:\\n- Must-have MH-1" in json.dumps(tx.requests[1])
 
     doc = _criteria_payload({"artifacts": first["artifacts"]}, cas.resolve)
     assert isinstance(doc, dict)

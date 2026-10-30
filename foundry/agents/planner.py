@@ -45,7 +45,7 @@ import shlex
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -58,6 +58,7 @@ from foundry.agents._common import (
     persist_prose,
     scope_directive,
 )
+from foundry.agents.plan_contracts import CompileResult, check_contracts
 from foundry.schemas.architecture import (
     ADR,
     ConstraintScope,
@@ -151,6 +152,15 @@ _ROUTE_CAP_MICROUSD: dict[str, int] = {
 }
 _DEFAULT_CAP_MICROUSD = 25_000_000
 
+# Where the contracts ticket writes when the plan leaves it out.
+_DEFAULT_CONTRACTS_FILE: dict[str, str] = {
+    "python": "contracts.py",
+    "typescript": "src/contracts.ts",
+    "javascript": "src/contracts.js",
+    "go": "contracts/contracts.go",
+    "rust": "src/contracts.rs",
+    "java": "src/main/java/contracts/Contracts.java",
+}
 _TICKET_RULES = (
     "Each ticket is ONE behaviour touching roughly 1-2 files, "
     "lists in files[] every path it may write, has a specialty (frontend | backend "
@@ -161,8 +171,8 @@ _TICKET_RULES = (
     "against the same signatures, and list in reads[] the files it reads. CONTRACT "
     "FIT (checked; a violation FAILS the Spec gate): every contract a ticket "
     "consumes is implemented by exactly ONE ticket, which the consumer depends_on "
-    "(directly or through other tickets); every implemented contract has a consumer "
-    "or a scenario on its implementing ticket. Every feature ticket gets a paired "
+    "(directly or through other tickets). Every implemented contract should have a "
+    "consumer or a scenario on its implementing ticket. Every feature ticket gets a paired "
     "specialty='test' ticket that depends_on it and writes the step definitions for "
     "that feature's scenarios, binding the gate-written features/<feature ticket "
     "id>.feature (the gate renders one per ticket from its scenarios); the test "
@@ -223,8 +233,8 @@ SOP = (
     "interface contract defined here — give each epic the interfaces[].name it "
     "provides[] and consumes[], the epic ids it depends_on (a DAG), and a "
     "specialty_mix hint. The LAST epic depends (directly or through other epics) on "
-    "every other epic and holds the entrypoint ticket. Over the caps, work is not "
-    "silently lost: the overflow FAILS the Spec gate, so consolidate instead.\n"
+    "every other epic and holds the entrypoint ticket. Work over the caps is dropped "
+    "(and reported), so consolidate instead.\n"
     "TICKETS: decompose the work into ATOMIC, Jira-style tickets. " + _TICKET_RULES
     + "When you return epics without inline tickets, criteria_review covers only "
     "plan-level gaps: each epic reviews its own scenarios.\n"
@@ -265,7 +275,18 @@ SOP = (
     "build/runner config (e.g. package.json, tsconfig.json, cucumber.json). Two "
     f"tickets are added for you: '{CONTRACTS_TICKET_ID}' writes contracts_file first "
     f"and '{HARNESS_TICKET_ID}' wires the Cucumber runner into harness_files; every "
-    "ticket you write depends on them, and none may list contracts_file in files.\n"
+    "ticket you write depends on them, and none may list contracts_file in files. "
+    "Default contracts_file per language: "
+    + ", ".join(f"{lang} {path}" for lang, path in _DEFAULT_CONTRACTS_FILE.items())
+    + ". The code-kind contract signatures are compiled together as that file at plan "
+    "time (Python with mypy, TypeScript with tsc), so write each as complete, valid "
+    "declarations of the chosen language that reference only each other and the "
+    "standard library.\n"
+    "PACKAGE MARKERS: every Python package directory (one holding imported .py "
+    "files, e.g. finance/ for finance/store.py) needs an __init__.py that exactly one "
+    "ticket lists in files[] — the ticket that first writes into that directory, or "
+    f"'{CONTRACTS_TICKET_ID}' when contracts_file lives there; any you leave out is "
+    "given to the contracts ticket. Test directories need none.\n"
     "When a DESIGN SPEC is provided, it is the detailed source of truth: derive the "
     "plan FROM it rather than from the one-line request alone."
 )
@@ -292,16 +313,7 @@ CODE_CONTRACT_KINDS = ("function", "class", "type")
 CONTRACT_KINDS = (*CODE_CONTRACT_KINDS, "http", "cli", "event")
 _GENERATED_TICKETS = frozenset({CONTRACTS_TICKET_ID, HARNESS_TICKET_ID})
 
-# Where the contracts ticket writes, and what the harness ticket writes, when the
-# plan leaves it out.
-_DEFAULT_CONTRACTS_FILE: dict[str, str] = {
-    "python": "contracts.py",
-    "typescript": "src/contracts.ts",
-    "javascript": "src/contracts.js",
-    "go": "contracts/contracts.go",
-    "rust": "src/contracts.rs",
-    "java": "src/main/java/contracts/Contracts.java",
-}
+# What the harness ticket writes when the plan leaves it out.
 _DEFAULT_HARNESS_FILES: dict[str, tuple[str, ...]] = {
     "python": ("pyproject.toml",),
     "typescript": ("package.json", "tsconfig.json", "cucumber.json"),
@@ -633,8 +645,12 @@ def _declared_criteria_text(state: FactoryState, rt: AgentRuntime) -> str:
         live = set(max(prds, key=lambda p: p.seq).criterion_ids)
         if live:
             current = {cid: c for cid, c in current.items() if cid in live}
+    return _criteria_text(current.values())
+
+
+def _criteria_text(criteria: Iterable[Any]) -> str:
     lines: list[str] = []
-    for c in current.values():
+    for c in criteria:
         ticket = getattr(c, "ticket_id", None)
         lines.append(
             f"- id={getattr(c, 'id', '?')}"
@@ -647,25 +663,39 @@ def _declared_criteria_text(state: FactoryState, rt: AgentRuntime) -> str:
     return "\n".join(lines)
 
 
-def _revision_text(state: FactoryState, rt: AgentRuntime) -> str:
-    """The re-entry block (spec_fix -> planner), or "" on the first pass.
+# Who failed the plan a revision block answers: (subject, findings label).
+_GATE = ("the signed Spec gate", "Spec gate findings")
+_CHECK = (
+    "the planner's own plan check (the checks the signed Spec gate runs)",
+    "Plan check findings",
+)
 
-    The Spec gate reads the newest record per criterion id, so the revision fixes
-    a criterion a finding names by re-emitting it under the same id."""
-    findings = latest_spec_failure(state)
-    if findings is None:
-        return ""
-    prior = _declared_criteria_text(state, rt)
-    goals = _goals_text(_newest_intent(state, rt))
+
+def _revision_block(
+    findings: Iterable[str], criteria: str, goals: str, source: tuple[str, str] = _GATE,
+) -> str:
+    """A full-plan revision block. The Spec gate reads the newest record per
+    criterion id, so the revision fixes a criterion a finding names by re-emitting
+    it under the same id."""
     return (
-        "\n\nREVISION PASS — the signed Spec gate FAILED your previous plan. Return "
+        f"\n\nREVISION PASS — {source[0]} FAILED your previous plan. Return "
         "the FULL plan again: reproduce every epic and every ticket (same ids) and "
         "every previously declared scenario (same id, on the same ticket, never "
         "weakened; fix in place any scenario a finding names) AND add scenarios that "
         "close every finding below.\n"
-        "Spec gate findings:\n- " + "\n- ".join(findings) + "\n\n"
-        f"Previously declared criteria:\n{prior or '(none resolved)'}"
+        f"{source[1]}:\n- " + "\n- ".join(findings) + "\n\n"
+        f"Previously declared criteria:\n{criteria or '(none resolved)'}"
         + (f"\n\nPreviously declared intent (keep these ids):{goals}" if goals else "")
+    )
+
+
+def _revision_text(state: FactoryState, rt: AgentRuntime) -> str:
+    """The re-entry block (spec_fix -> planner), or "" on the first pass."""
+    findings = latest_spec_failure(state)
+    if findings is None:
+        return ""
+    return _revision_block(
+        findings, _declared_criteria_text(state, rt), _goals_text(_newest_intent(state, rt))
     )
 
 
@@ -866,6 +896,8 @@ def _safe_ticket_ids(ids: list[str]) -> dict[str, str]:
 
 # Tags an epic call's ticket item with its epic for _link_epics; never emitted.
 _EPIC_KEY = "__epic__"
+# Tags an item dropped at the per-epic cap; never emitted.
+_DROPPED_KEY = "__dropped__"
 _BRIEF_CAP = 6_000
 
 
@@ -955,7 +987,8 @@ def _epic_items(
     epic: _Epic, raw: Any, overflow: list[str] | None = None
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """One epic call's tickets, capped at ``MAX_EPIC_TICKETS`` (the dropped tail
-    named in ``overflow``), with ticket, dependency and scenario ids namespaced
+    named in ``overflow`` and kept marked dropped, so :func:`_build_tickets` can
+    rehome its scenarios), with ticket, dependency and scenario ids namespaced
     ``<epic>-<id>`` (missing ids become ``<epic>-T<nn>`` / ``<epic>-AC<nn>``) and
     each item tagged with its epic. A dependency on another epic's ticket cannot
     resolve and is dropped later: cross-epic order comes from :func:`_link_epics`."""
@@ -977,7 +1010,6 @@ def _epic_items(
                 )
                 + ": consolidate this epic's tickets so no work is lost."
             )
-        items = items[:MAX_EPIC_TICKETS]
     out: list[dict[str, Any]] = []
     n = 0
     for i, item in enumerate(items):
@@ -992,6 +1024,7 @@ def _epic_items(
             "depends_on": [_ns(epic.id, d) for d in _steps(item.get("depends_on"))],
             "scenarios": scenarios,
             _EPIC_KEY: epic.id,
+            **({_DROPPED_KEY: True} if i >= MAX_EPIC_TICKETS else {}),
         })
     return out, concerns
 
@@ -1171,6 +1204,35 @@ def _run_parallel(fn: Callable[[str], _R], args: Sequence[str]) -> list[_R]:
         return [f.result() for f in futures]
 
 
+def _rehome_scenarios(
+    kept: dict[str, dict[str, Any]], dropped: Sequence[tuple[str, dict[str, Any]]]
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """The scenarios of tickets dropped at a cap move to the kept feature ticket that
+    owns one of the dropped ticket's files; with none, they are dropped with a note."""
+    out = dict(kept)
+    concerns: list[str] = []
+    for tid, item in dropped:
+        scenarios = _objs(item.get("scenarios"))
+        if not scenarios:
+            continue
+        ids = ", ".join(_str(s.get("id")).strip() or "?" for s in scenarios)
+        files = set(_strs(item.get("files")))
+        home = next((
+            k for k, it in out.items()
+            if not _is_test(it) and files.intersection(_strs(it.get("files")))
+        ), None)
+        if home is None:
+            concerns.append(
+                f"Dropped scenario(s) {ids} with ticket {tid}: no kept ticket owns its files."
+            )
+            continue
+        out[home] = {**out[home], "scenarios": [*_objs(out[home].get("scenarios")), *scenarios]}
+        concerns.append(
+            f"Moved scenario(s) {ids} of dropped ticket {tid} to {home}, which owns its files."
+        )
+    return out, concerns
+
+
 def _build_tickets(
     raw: Any,
     ticket_seq: Seq,
@@ -1193,8 +1255,12 @@ def _build_tickets(
     are named in ``overflow``."""
     concerns: list[str] = []
     raw_items: dict[str, dict[str, Any]] = {}
+    dropped: list[tuple[str, dict[str, Any]]] = []
     for i, item in enumerate(_objs(raw)):
         tid = _str(item.get("id")).strip() or f"T-{i + 1:03d}"
+        if item.get(_DROPPED_KEY):
+            dropped.append((tid, item))
+            continue
         if tid in raw_items:
             concerns.append(f"Duplicate ticket id {tid}: the later entry wins.")
         raw_items[tid] = item
@@ -1210,7 +1276,10 @@ def _build_tickets(
                 + ("" if epics else " (or split a larger build into epics)")
                 + " so no work is lost."
             )
+        dropped += list(raw_items.items())[cap:]
         raw_items = dict(list(raw_items.items())[:cap])
+    raw_items, rehome_concerns = _rehome_scenarios(raw_items, dropped)
+    concerns += rehome_concerns
     alias = _safe_ticket_ids(list(raw_items))
     concerns += [
         f"Ticket id {old!r} renamed to {new!r} (ids name files)."
@@ -1675,6 +1744,116 @@ def _add_contract_deps(tickets: Sequence[Ticket]) -> tuple[list[Ticket], list[st
     return [out[t.id] for t in tickets], concerns
 
 
+def _ancestors(deps: dict[str, tuple[str, ...]], tid: str) -> set[str]:
+    seen: set[str] = set()
+    todo = list(deps.get(tid, ()))
+    while todo:
+        d = todo.pop()
+        if d not in seen:
+            seen.add(d)
+            todo.extend(deps.get(d, ()))
+    return seen
+
+
+def _drop_self_consumes(tickets: Sequence[Ticket]) -> tuple[list[Ticket], list[str]]:
+    """A ticket consuming a contract it implements itself consumes nothing: drop the
+    entry so the fit check and the dependency repair never see a self-edge."""
+    out: list[Ticket] = []
+    concerns: list[str] = []
+    for t in tickets:
+        own = [n for n in t.consumes if n in t.implements]
+        if own:
+            t = t.model_copy(update={"consumes": tuple(n for n in t.consumes if n not in own)})
+            concerns.append(f"Ticket {t.id}: dropped consumes {', '.join(own)}, which it "
+                            "implements itself.")
+        out.append(t)
+    return out, concerns
+
+
+def _features(tickets: Sequence[Ticket]) -> list[Ticket]:
+    return [
+        t for t in tickets
+        if t.id not in _GENERATED_TICKETS and t.specialty is not Specialty.TEST
+    ]
+
+
+def _wire_entrypoint(tickets: Sequence[Ticket]) -> tuple[list[Ticket], list[str]]:
+    """Make the entrypoint ticket depend on every feature ticket it does not already
+    reach: wiring every feature in is its job, and a forgotten edge cost a re-plan.
+    With several entrypoints the one missing the fewest is wired (the coverage
+    check then passes on it); an edge that would close a cycle is left for the
+    coverage check to report."""
+    features = _features(tickets)
+    entries = [t for t in features if t.entrypoint]
+    if not entries:
+        return list(tickets), []
+    deps = {t.id: t.depends_on for t in tickets}
+
+    def missing(entry: Ticket) -> list[str]:
+        seen = _ancestors(deps, entry.id)
+        return [f.id for f in features if f.id != entry.id and f.id not in seen]
+
+    entry = min(reversed(entries), key=lambda e: len(missing(e)))
+    reached = _ancestors(deps, entry.id)
+    added: list[str] = []
+    for fid in missing(entry):
+        if fid in reached or entry.id in _ancestors(deps, fid):
+            continue
+        added.append(fid)
+        reached |= {fid, *_ancestors(deps, fid)}
+    if not added:
+        return list(tickets), []
+    wired = entry.model_copy(update={"depends_on": (*entry.depends_on, *added)})
+    return [wired if t.id == entry.id else t for t in tickets], [
+        f"Ticket {entry.id}: added dependencies on feature ticket(s) {', '.join(added)} "
+        "so the entrypoint wires every feature in."
+    ]
+
+
+def _drop_orphan_scenarios(
+    tickets: Sequence[Ticket], criteria: Sequence[AcceptanceCriterion]
+) -> tuple[list[AcceptanceCriterion], list[str]]:
+    """A scenario whose ticket is not in the plan has nowhere to run: drop it with a
+    note (scenarios of tickets dropped at a cap were already rehomed by file)."""
+    live = {t.id for t in tickets}
+    orphans = [c for c in criteria if c.ticket_id not in live]
+    return [c for c in criteria if c.ticket_id in live], [
+        f"Dropped scenario {c.id}: its ticket {c.ticket_id or '(none)'} is not in the plan."
+        for c in orphans
+    ]
+
+
+def _fix_covers(
+    criteria: Sequence[AcceptanceCriterion], brief: IntentBrief | None
+) -> tuple[list[AcceptanceCriterion], list[str]]:
+    """Normalise every scenario's ``covers`` to the declared goal ids: an entry naming
+    a goal by id (``mh1``) or by its exact text maps to that id; anything else is
+    dropped with a note. Coverage of every goal is still checked after."""
+    goals = _goal_rows(brief)
+    known = {g.lower(): g for _, g, _ in goals}
+    by_text = {" ".join(text.lower().split()): g for _, g, text in goals}
+    hint = ", ".join(g for _, g, _ in goals) or "none declared"
+    out: list[AcceptanceCriterion] = []
+    concerns: list[str] = []
+    for c in criteria:
+        kept: list[str] = []
+        bad: list[str] = []
+        for raw in c.covers:
+            gid = _goal_of(raw, known) or by_text.get(" ".join(raw.lower().split()))
+            if gid is None:
+                bad.append(raw)
+            else:
+                kept.append(gid)
+        if bad:
+            concerns.append(
+                f"Scenario {c.id}: dropped unknown covers id(s) "
+                f"{', '.join(repr(b) for b in bad)} (declared ids: {hint})."
+            )
+        covers = _uniq(kept)
+        out.append(c if covers == c.covers else c.model_copy(update={"covers": covers}))
+    return out, concerns
+
+
 # An indented member that takes arguments (`    def add(`, `  add(x: T): R;`); a
 # constructor alone (an error class taking a message) is still a declaration.
 _MEMBER_CALL = re.compile(
@@ -1698,8 +1877,7 @@ def _contract_findings(
     declared: frozenset[str] = frozenset(),
 ) -> tuple[str, ...]:
     """The plan-time contract fit check over the model's tickets: every consumed
-    contract has exactly one implementing ticket and the consumer depends on it;
-    every implemented contract has a consumer or a scenario on its implementer.
+    contract has exactly one implementing ticket and the consumer depends on it.
     ``declared`` names contracts the generated contracts ticket writes in full
     (``_declaration_only``): consuming one needs no implementing ticket."""
     work = [t for t in tickets if t.id not in _GENERATED_TICKETS]
@@ -1724,12 +1902,10 @@ def _contract_findings(
         "exactly one ticket may implement it."
         for name, ids in producers.items() if len(ids) > 1
     ]
-    consumed: set[str] = set()
     for t in work:
         for name in t.consumes:
             if name in t.implements:
                 continue
-            consumed.add(name)
             ids = producers.get(name, [])
             if not ids and name in declared:
                 continue
@@ -1740,14 +1916,29 @@ def _contract_findings(
                     f"Ticket {t.id} consumes contract {name} but does not depend on "
                     f"{ids[0]}, which implements it."
                 )
+    return tuple(out)
+
+
+def _unused_contracts(
+    tickets: Sequence[Ticket], criteria: Sequence[AcceptanceCriterion]
+) -> list[str]:
+    """Concerns, not findings: an implemented contract nothing consumes and no
+    scenario on its implementer exercises is dead weight, not a gap."""
+    producers: dict[str, list[str]] = {}
+    consumed: set[str] = set()
+    for t in tickets:
+        if t.id in _GENERATED_TICKETS:
+            continue
+        for name in t.implements:
+            producers.setdefault(name, []).append(t.id)
+        consumed.update(n for n in t.consumes if n not in t.implements)
     with_scenarios = {c.ticket_id for c in criteria}
-    out += [
+    return [
         f"Contract {name} (implemented by {', '.join(ids)}) has no consumer and no "
         "scenario on its implementing ticket."
         for name, ids in producers.items()
         if name not in consumed and not with_scenarios.intersection(ids)
     ]
-    return tuple(out)
 
 
 # Builtin types a method name can shadow inside its class body, breaking every
@@ -1934,6 +2125,93 @@ def _coverage_findings(
             "real app headless and exits 0, or declare deliverable 'library' if nothing runs."
         )
     return tuple(out)
+
+
+# ---- repair, then check: what the Spec gate would reject, fixed in the node ------
+
+
+@dataclass(frozen=True)
+class _Frame:
+    """Everything turning raw ticket items into the checked plan needs besides
+    the items themselves; fixed for one call-1 plan."""
+
+    names: set[str]  # contract names
+    epics: Sequence[_Epic]  # empty for an inline plan
+    cap: int
+    generated: Sequence[Ticket]
+    stack: StackDecision | None
+    brief: IntentBrief | None
+    run: str | None  # None: the run check is skipped
+    declared: frozenset[str]  # contracts the contracts ticket writes in full
+    interfaces: Sequence[InterfaceContract]
+    language: str  # "" skips the signature checks (unchanged contracts)
+    compiled: CompileResult
+    tickets_seq: Seq
+    criteria_seq: Seq
+
+
+@dataclass(frozen=True)
+class _Fit:
+    """The plan's tickets after every mechanical repair, and what the checks left."""
+
+    tickets: list[Ticket]
+    criteria: list[AcceptanceCriterion]
+    concerns: list[str]
+    contract_findings: tuple[str, ...]
+    coverage_findings: tuple[str, ...]
+    overflow: tuple[str, ...]  # work dropped at a cap: a concern, fed to a revision
+
+    @property
+    def blocking(self) -> tuple[str, ...]:
+        return (*self.contract_findings, *self.coverage_findings)
+
+
+def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
+    """Raw ticket items -> the repaired, checked plan. Repairs run first (each one
+    mechanical, leaving what it cannot fix to the checks); only the checks' leftovers
+    are findings. ``overflow`` names work already dropped at the epic caps."""
+    over = list(overflow)
+    tickets, criteria, concerns = _build_tickets(
+        raw, frame.tickets_seq, frame.criteria_seq, frame.names, cap=frame.cap,
+        epics=frame.epics, overflow=over,
+    )
+    tickets, more = _attach_generated(tickets, frame.generated, frame.tickets_seq)
+    concerns += more
+    for repair in (_drop_self_consumes, _add_contract_deps):
+        tickets, more = repair(tickets)
+        concerns += more
+    tickets, more, stack_findings = _own_stack_files(tickets, frame.stack)
+    concerns += more
+    tickets, more = _wire_entrypoint(tickets)
+    concerns += more
+    criteria, more = _drop_orphan_scenarios(tickets, criteria)
+    concerns += more
+    criteria, more = _fix_covers(criteria, frame.brief)
+    concerns += more
+    contract = (
+        *_contract_findings(tickets, criteria, frame.declared),
+        *frame.compiled.findings,
+        # mypy, when it ran, is the authority on signatures; else the heuristic.
+        *(() if frame.compiled.ran else _builtin_method_findings(frame.interfaces, frame.language)),
+    )
+    concerns += [*_unused_contracts(tickets, criteria), *frame.compiled.concerns, *over]
+    coverage = (*stack_findings, *_coverage_findings(tickets, criteria, frame.brief, run=frame.run))
+    return _Fit(tickets, criteria, concerns, contract, coverage, tuple(over))
+
+
+def _compile(
+    interfaces: Sequence[InterfaceContract], language: str, stack: StackDecision | None
+) -> CompileResult:
+    code = [(i.name, i.signature) for i in interfaces if i.kind in CODE_CONTRACT_KINDS]
+    strict = stack is not None and "--strict" in stack.typecheck
+    return check_contracts(code, language, strict=strict)
+
+
+def _ticket_epics(tickets: Sequence[Ticket]) -> dict[str, str]:
+    return {
+        t.id: m.group(1) for t in tickets
+        if t.id not in _GENERATED_TICKETS and (m := _EPIC_OF_TICKET.match(t.id))
+    }
 
 
 def _build_constraints(raw: Any, seq: Seq) -> list[PinnedConstraint]:
@@ -2222,16 +2500,16 @@ def _match_prior_epics(epics: Sequence[_Epic], prior: _PriorPlan) -> dict[str, s
 
 def _epic_revision_text(
     findings: tuple[str, ...], prior: _PriorPlan | None, epic_id: str,
-    continues: str | None,
+    continues: str | None, source: tuple[str, str] = _GATE,
 ) -> str:
     """The revision block of one epic call. ``continues`` is the previous pass's
     epic this one carries on: its tickets are reproduced under this epic's id.
     Without one, the previous plan's tickets are listed for reference only."""
     head = (
-        "\n\nREVISION PASS — the signed Spec gate FAILED the previous plan. Return this "
+        f"\n\nREVISION PASS — {source[0]} FAILED the previous plan. Return this "
         "epic's FULL ticket list again"
     )
-    tail = "Spec gate findings:\n- " + "\n- ".join(findings) + "\n\n"
+    tail = f"{source[1]}:\n- " + "\n- ".join(findings) + "\n\n"
     if prior is None or continues is None:
         refs = "\n".join(
             f"- {t.id} [{t.specialty.value}] {t.title}" for t in prior.tickets
@@ -2350,6 +2628,81 @@ def _triage(critique: CriteriaCritique, prd_uri: str, seq: Seq) -> GateTriage:
 # ---- the node ------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class _Draft:
+    """One call-1 plan turned into checked tickets, before anything is emitted."""
+
+    payload: dict[str, Any]
+    brief: IntentBrief
+    interfaces: list[InterfaceContract]
+    epics: list[_Epic]
+    per_epic: bool
+    raw: list[dict[str, Any]]  # the ticket items (epic-tagged when per epic)
+    epic_overflow: tuple[str, ...]  # work dropped at the epic caps, before assembly
+    epic_inputs: tuple[str, str, str]  # intake, plan brief, contracts text
+    missing: tuple[str, ...]
+    omissions: tuple[str, ...]
+    revised_epics: tuple[str, ...]
+    concerns: tuple[str, ...]  # plan-level: epics, stack, generated tickets
+    decided: StackDecision | None
+    stack_update: StackDecision | None
+    frame: _Frame
+    fit: _Fit
+
+
+def _with_fit(prior: _PriorPlan, fit: _Fit) -> _PriorPlan:
+    """``prior`` describing ``fit``'s tickets and scenarios, so the epic targeting
+    and revision text of a Spec-gate re-plan serve an in-node revision too."""
+    epic_of = _ticket_epics(fit.tickets)
+    return replace(
+        prior,
+        epic_of=epic_of,
+        tickets=tuple(t for t in fit.tickets if t.id in epic_of),
+        criteria={c.id: c for c in fit.criteria if c.ticket_id in epic_of},
+    )
+
+
+def _draft_prior(draft: _Draft, prd_seq: Seq) -> _PriorPlan:
+    payload = draft.payload
+    prd = _section(payload, "prd")
+    base = _PriorPlan(
+        epics=tuple(draft.epics), epic_of={}, tickets=(),
+        generated=tuple(t for t in draft.fit.tickets if t.id in _GENERATED_TICKETS),
+        criteria={},
+        prd=PRD(title=_str(prd.get("title")), prd_uri="", seq=prd_seq),
+        critique=None,
+        interfaces=tuple(
+            (_str(i.get("name")), _contract_text(i)) for i in _objs(payload.get("interfaces"))
+        ),
+        declared=draft.frame.declared, brief=draft.epic_inputs[1], intent=draft.brief,
+    )
+    return _with_fit(base, draft.fit)
+
+
+def _named_epics(findings: Iterable[str], prior: _PriorPlan) -> tuple[str, ...]:
+    """Every epic some finding names (a finding naming none is skipped)."""
+    hit = {e for f in findings for e in (_target_epics((f,), prior) or ())}
+    return tuple(e.id for e in prior.epics if e.id in hit)
+
+
+def _untagged(gaps: Iterable[str], epic_ids: Iterable[str]) -> tuple[str, ...]:
+    tags = tuple(f"[{e}] " for e in epic_ids)
+    return tuple(g for g in gaps if not g.startswith(tags))
+
+
+def _not_of(overflow: Iterable[str], epic_ids: Iterable[str]) -> list[str]:
+    heads = tuple(f"Epic {e}:" for e in epic_ids)
+    return [o for o in overflow if not o.startswith(heads)]
+
+
+def _revision_note(what: str, before: int, after: int, kept: bool) -> str:
+    if kept:
+        return (f" Revised {what} once in-node after its own plan check but kept the "
+                f"original ({before} finding(s); the revision had {after}).")
+    return (f" Revised {what} once in-node after its own plan check: {before} -> "
+            f"{after} finding(s).")
+
+
 def make_planner_node(
     rt: AgentRuntime,
     index: SymbolIndex | None = None,
@@ -2359,6 +2712,12 @@ def make_planner_node(
     plan carries its tickets inline (one call), a larger one gets one ticket call
     per epic, run in parallel. Each call self-revises at most once when its own
     criteria review flags gaps.
+
+    Before emitting, the node repairs what is mechanical (:func:`_assemble`) and
+    runs the Spec gate's deterministic checks itself, plus a plan-time compile of
+    the code contracts. Findings left get ONE in-node revision — only the epics
+    they name, else the whole plan — and the better of the two plans is emitted;
+    only what is still left reaches the Spec gate.
 
     ``index`` is the context retriever probed for existing code spans (``None``
     is greenfield — empty retrieval). ``toolchains`` are the languages offered
@@ -2375,21 +2734,22 @@ def make_planner_node(
         )
         return completion.parsed or {}
 
-    def _plan_epic(content: str) -> tuple[dict[str, Any], bool]:
+    def _plan_epic(content: str, self_review: bool) -> tuple[dict[str, Any], bool]:
         payload = _call(EPIC_SOP, EPIC_SCHEMA, content)
-        gaps = _self_review_gaps(payload)
+        gaps = _self_review_gaps(payload) if self_review else ()
         if gaps:
             revision = _self_revision_text(gaps, "ticket list for your epic")
             payload = _call(EPIC_SOP, EPIC_SCHEMA, content + revision)
         return payload, bool(gaps)
 
     def _plan_epics(
-        epics: Sequence[_Epic], contents: Sequence[str], overflow: list[str]
+        epics: Sequence[_Epic], contents: Sequence[str], overflow: list[str],
+        *, self_review: bool = True,
     ) -> tuple[list[dict[str, Any]], tuple[str, ...], tuple[str, ...], list[str], list[str]]:
         """Run the epic calls; returns their raw items, tagged review gaps
         (missing, omissions), the self-revised epic ids and concerns. Tickets an
         epic loses at its cap are named in ``overflow``."""
-        results = _run_parallel(_plan_epic, contents)
+        results = _run_parallel(lambda c: _plan_epic(c, self_review), contents)
         raw: list[dict[str, Any]] = []
         missing: list[str] = []
         omissions: list[str] = []
@@ -2405,6 +2765,184 @@ def make_planner_node(
             if self_revised:
                 revised.append(epic.id)
         return raw, tuple(missing), tuple(omissions), revised, concerns
+
+    def _rerun_epics(
+        epics: Sequence[_Epic], raw: Sequence[dict[str, Any]], targets: tuple[str, ...],
+        findings: tuple[str, ...], mem: _PriorPlan, inputs: tuple[str, str, str],
+        overflow: list[str],
+    ) -> tuple[list[dict[str, Any]], tuple[str, ...], tuple[str, ...], list[str]]:
+        """The in-node revision of only the epics ``targets`` names, each handed the
+        findings naming it; every other epic's items stand. Returns the merged
+        items, the re-run epics' review gaps and concerns."""
+        intake, brief, iface_text = inputs
+        chosen = [e for e in epics if e.id in targets]
+        contents = [
+            _epic_content(intake, brief, epics, e, iface_text, _epic_revision_text(
+                tuple(f for f in findings if e.id in (_target_epics((f,), mem) or ())),
+                mem, e.id, e.id, _CHECK,
+            ))
+            for e in chosen
+        ]
+        fresh, missing, omissions, _, concerns = _plan_epics(
+            chosen, contents, overflow, self_review=False
+        )
+        merged = [
+            item for e in epics for item in (
+                [i for i in fresh if i.get(_EPIC_KEY) == e.id] if e.id in targets
+                else [i for i in raw if i.get(_EPIC_KEY) == e.id]
+            )
+        ]
+        return merged, missing, omissions, concerns
+
+    def _draft(
+        state: FactoryState, payload: dict[str, Any], seqs: dict[str, Seq],
+        languages: set[str], findings: tuple[str, ...] | None, prior: _PriorPlan | None,
+        source: tuple[str, str] = _GATE, *, self_review: bool = True,
+    ) -> _Draft:
+        """Call 1's reply -> the epic calls (when it has epics) -> repaired, checked
+        tickets. ``findings``/``prior`` make the epic calls revisions."""
+        pinned = state.get("stack")
+        intent = _section(payload, "intent")
+        must_have_ids, must_haves = _goals(intent.get("must_haves"), "MH")
+        success_ids, success = _goals(intent.get("success_criteria"), "SC")
+        deliverable = _str(intent.get("deliverable")).strip().lower()
+        brief = IntentBrief(
+            intent=_str(intent.get("intent")),
+            assumptions=_strs(intent.get("assumptions")),
+            unknowns=_strs(intent.get("unknowns")),
+            success_criteria=success,
+            must_haves=must_haves,
+            nice_to_haves=_strs(intent.get("nice_to_haves")),
+            must_have_ids=must_have_ids,
+            success_criterion_ids=success_ids,
+            deliverable=deliverable if deliverable in DELIVERABLES else "",
+            seq=seqs["brief"],
+        )
+        interfaces = _build_interfaces(payload.get("interfaces"), seqs["interfaces"], store=rt.cas)
+        names = {i.name for i in interfaces}
+        overflow: list[str] = []
+        epics, concerns = _build_epics(payload.get("epics"), names, overflow)
+        inline = _objs(payload.get("tickets"))
+        review = _section(payload, "criteria_review")
+        missing = _strs(review.get("missing"))
+        omissions = _strs(review.get("security_abuse_omissions"))
+        revised: list[str] = []
+        inputs = ("", "", "")
+        raw: list[dict[str, Any]] = inline
+        per_epic = bool(epics) and (len(epics) > 1 or not inline)
+        if per_epic:
+            if inline:
+                concerns.append(
+                    f"Ignored {len(inline)} inline ticket(s): the plan has "
+                    f"{len(epics)} epics, each planned in its own call."
+                )
+            inputs = (
+                _intake_text(state), _plan_brief(payload, brief),
+                _interfaces_text(
+                    (_str(i.get("name")), _contract_text(i))
+                    for i in _objs(payload.get("interfaces"))
+                ),
+            )
+            continues = _match_prior_epics(epics, prior) if prior else {}
+            contents = [
+                _epic_content(
+                    inputs[0], inputs[1], epics, e, inputs[2],
+                    _epic_revision_text(findings, prior, e.id, continues.get(e.id), source)
+                    if findings else "",
+                )
+                for e in epics
+            ]
+            raw, epic_missing, epic_omissions, revised, more = _plan_epics(
+                epics, contents, overflow, self_review=self_review
+            )
+            missing += epic_missing
+            omissions += epic_omissions
+            concerns += more
+        # stack is single-writer: an operator pin or an earlier pass wins.
+        decided, stack_concerns = (
+            _stack_decision(payload, languages) if pinned is None else (None, [])
+        )
+        raw_stack = _section(payload, "stack")
+        generated, gen_concerns = _generated_tickets(
+            interfaces, raw_stack, pinned or decided, seqs["tickets"]
+        )
+        concerns += [*stack_concerns, *gen_concerns]
+        raw_run = _str(raw_stack.get("run")).strip()
+        stack_update = decided
+        if (pinned is not None and not pinned.profile and not pinned.run and raw_run
+                and _str(raw_stack.get("language")).strip().lower() == pinned.language):
+            # A planner-chosen stack (no operator profile) from an earlier pass may
+            # gain its run command, so a missing-run finding is fixable by re-plan.
+            stack_update = pinned.model_copy(update={"run": raw_run})
+        current = stack_update or pinned
+        chosen = pinned or decided
+        language = (
+            chosen.language if chosen is not None
+            else _str(raw_stack.get("language")).strip().lower()
+        )
+        frame = _Frame(
+            names=names,
+            epics=epics if per_epic else (),
+            cap=MAX_PLAN_TICKETS if per_epic else MAX_TICKETS,
+            generated=generated,
+            stack=current,
+            brief=brief,
+            run=None if current is not None and current.profile
+            else (current.run if current is not None else raw_run),
+            declared=frozenset(i.name for i in interfaces if _declaration_only(i)),
+            interfaces=interfaces,
+            language=language,
+            compiled=_compile(interfaces, language, current),
+            tickets_seq=seqs["tickets"],
+            criteria_seq=seqs["criteria"],
+        )
+        return _Draft(
+            payload=payload, brief=brief, interfaces=interfaces, epics=epics,
+            per_epic=per_epic, raw=raw, epic_overflow=tuple(overflow), epic_inputs=inputs,
+            missing=missing, omissions=omissions, revised_epics=tuple(revised),
+            concerns=tuple(concerns), decided=decided, stack_update=stack_update,
+            frame=frame, fit=_assemble(raw, frame, overflow),
+        )
+
+    def _self_check(
+        state: FactoryState, draft: _Draft, content: str, schema: dict[str, Any],
+        seqs: dict[str, Seq], languages: set[str],
+    ) -> tuple[_Draft, str]:
+        """The one in-node revision of a plan the checks still fault: an epic plan
+        re-runs only the epics the findings name; a finding naming none (or an
+        inline plan) re-plans call 1 with every finding. The revision is kept
+        unless it leaves more findings. Returns the draft and a journal note."""
+        blocking = draft.fit.blocking
+        if not blocking:
+            return draft, ""
+        notes = (*blocking, *draft.fit.overflow)
+        mem = _draft_prior(draft, seqs["prd"]) if draft.per_epic else None
+        targets = _target_epics(blocking, mem) if mem is not None else None
+        if mem is not None and targets:
+            over = _not_of(draft.epic_overflow, targets)
+            raw, missing, omissions, concerns = _rerun_epics(
+                draft.epics, draft.raw, targets, notes, mem, draft.epic_inputs, over
+            )
+            revised = replace(
+                draft, raw=raw, epic_overflow=tuple(over),
+                missing=(*_untagged(draft.missing, targets), *missing),
+                omissions=(*_untagged(draft.omissions, targets), *omissions),
+                concerns=(*draft.concerns, *concerns), fit=_assemble(raw, draft.frame, over),
+            )
+            what = f"epic(s) {', '.join(targets)}"
+        else:
+            text = _revision_block(
+                notes, _criteria_text(draft.fit.criteria), _goals_text(draft.brief), _CHECK
+            )
+            revised = _draft(
+                state, _call(SOP, schema, content + text), seqs, languages, notes, mem,
+                _CHECK, self_review=False,
+            )
+            what = "the plan"
+        before, after = len(blocking), len(revised.fit.blocking)
+        if after > before:
+            return draft, _revision_note(what, before, after, kept=True)
+        return revised, _revision_note(what, before, after, kept=False)
 
     def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         findings = latest_spec_failure(state)
@@ -2434,116 +2972,27 @@ def make_planner_node(
         def seq(key: str) -> Seq:
             return rt.seq(config, NODE_ID, key)
 
-        intent = _section(payload, "intent")
-        brief_seq = seq("artifact:intent_brief")
-        must_have_ids, must_haves = _goals(intent.get("must_haves"), "MH")
-        success_ids, success = _goals(intent.get("success_criteria"), "SC")
-        deliverable = _str(intent.get("deliverable")).strip().lower()
-        brief = IntentBrief(
-            intent=_str(intent.get("intent")),
-            assumptions=_strs(intent.get("assumptions")),
-            unknowns=_strs(intent.get("unknowns")),
-            success_criteria=success,
-            must_haves=must_haves,
-            nice_to_haves=_strs(intent.get("nice_to_haves")),
-            must_have_ids=must_have_ids,
-            success_criterion_ids=success_ids,
-            deliverable=deliverable if deliverable in DELIVERABLES else "",
-            seq=brief_seq,
+        seqs = {
+            "brief": seq("artifact:intent_brief"),
+            "prd": seq("artifact:prd"),
+            "interfaces": seq("artifact:interfaces"),
+            "tickets": seq("artifact:tickets"),
+            "criteria": seq("artifact:acceptance_criteria"),
+        }
+        draft = _draft(state, payload, seqs, languages, findings, prior)
+        draft, check_note = _self_check(state, draft, content, schema, seqs, languages)
+        payload, brief, interfaces, epics = (
+            draft.payload, draft.brief, draft.interfaces, draft.epics
         )
-
-        prd_section = _section(payload, "prd")
-        prd_seq = seq("artifact:prd")
-        interfaces = _build_interfaces(
-            payload.get("interfaces"), seq("artifact:interfaces"), store=store
-        )
-        names = {i.name for i in interfaces}
-        overflow: list[str] = []
-        epics, epic_concerns = _build_epics(payload.get("epics"), names, overflow)
-        inline = _objs(payload.get("tickets"))
-        epic_missing: tuple[str, ...] = ()
-        epic_omissions: tuple[str, ...] = ()
-        revised_epics: list[str] = []
-        tickets_seq = seq("artifact:tickets")
-        criteria_seq = seq("artifact:acceptance_criteria")
-        per_epic = bool(epics) and (len(epics) > 1 or not inline)
-        if per_epic:
-            if inline:
-                epic_concerns.append(
-                    f"Ignored {len(inline)} inline ticket(s): the plan has "
-                    f"{len(epics)} epics, each planned in its own call."
-                )
-            intake = _intake_text(state)
-            plan_brief = _plan_brief(payload, brief)
-            iface_text = _interfaces_text(
-                (_str(i.get("name")), _contract_text(i))
-                for i in _objs(payload.get("interfaces"))
-            )
-            continues = _match_prior_epics(epics, prior) if prior else {}
-            contents = [
-                _epic_content(
-                    intake, plan_brief, epics, e, iface_text,
-                    _epic_revision_text(findings, prior, e.id, continues.get(e.id))
-                    if findings else "",
-                )
-                for e in epics
-            ]
-            raw, epic_missing, epic_omissions, revised_epics, more = _plan_epics(
-                epics, contents, overflow
-            )
-            epic_concerns += more
-            tickets, criteria, ticket_concerns = _build_tickets(
-                raw, tickets_seq, criteria_seq, names, cap=MAX_PLAN_TICKETS, epics=epics,
-                overflow=overflow,
-            )
-        else:
-            tickets, criteria, ticket_concerns = _build_tickets(
-                payload.get("tickets"), tickets_seq, criteria_seq, names, overflow=overflow
-            )
-        # stack is single-writer: an operator pin or an earlier pass wins.
-        decided, stack_concerns = (
-            _stack_decision(payload, languages) if pinned is None else (None, [])
-        )
-        generated, more_concerns = _generated_tickets(
-            interfaces, _section(payload, "stack"), pinned or decided, tickets_seq
-        )
-        tickets, attach_concerns = _attach_generated(tickets, generated, tickets_seq)
-        ticket_concerns += [*stack_concerns, *more_concerns, *attach_concerns]
-        tickets, dep_concerns = _add_contract_deps(tickets)
-        ticket_concerns += dep_concerns
-        raw_stack = _section(payload, "stack")
-        chosen_stack = pinned or decided
-        contract_findings = (
-            *_contract_findings(
-                tickets, criteria,
-                frozenset(i.name for i in interfaces if _declaration_only(i)),
-            ),
-            *_builtin_method_findings(
-                interfaces,
-                chosen_stack.language if chosen_stack is not None
-                else _str(raw_stack.get("language")).strip().lower(),
-            ),
-        )
-        raw_run = _str(raw_stack.get("run")).strip()
-        stack_update = decided
-        if (pinned is not None and not pinned.profile and not pinned.run and raw_run
-                and _str(raw_stack.get("language")).strip().lower() == pinned.language):
-            # A planner-chosen stack (no operator profile) from an earlier pass may
-            # gain its run command, so a missing-run finding is fixable by re-plan.
-            stack_update = pinned.model_copy(update={"run": raw_run})
-        current_stack = stack_update or pinned
-        tickets, own_concerns, stack_findings = _own_stack_files(tickets, current_stack)
-        ticket_concerns += own_concerns
-        coverage_findings = (*overflow, *stack_findings, *_coverage_findings(
-            tickets, criteria, brief,
-            run=None if current_stack is not None and current_stack.profile
-            else (current_stack.run if current_stack is not None else raw_run),
-        ))
+        per_epic, fit, tickets_seq = draft.per_epic, draft.fit, seqs["tickets"]
+        tickets, criteria = fit.tickets, fit.criteria
         # Only a Spec-gate re-plan replaces an earlier plan of this run.
         dropped = (
             _retired_tickets(state, rt, tickets, tickets_seq)
             if latest_spec_failure(state) else []
         )
+        prd_section = _section(payload, "prd")
+        prd_seq = seqs["prd"]
         prd = PRD(
             title=_str(prd_section.get("title")),
             prd_uri=persist_prose(_str(prd_section.get("body")), store=store),
@@ -2552,19 +3001,16 @@ def make_planner_node(
             seq=prd_seq,
         )
 
-        review = _section(payload, "criteria_review")
         critique_seq = seq("artifact:criteria_findings")
         critique = CriteriaCritique(
             prd_uri=prd.prd_uri,
-            missing=(*_strs(review.get("missing")), *epic_missing),
-            security_abuse_omissions=(
-                *_strs(review.get("security_abuse_omissions")), *epic_omissions
-            ),
+            missing=draft.missing,
+            security_abuse_omissions=draft.omissions,
             # The plan reviews its own criteria: same call, same lineage — say so.
             judgment_provenance=JudgmentProvenance.SELF,
             seq=critique_seq,
-            contract_findings=contract_findings,
-            coverage_findings=coverage_findings,
+            contract_findings=fit.contract_findings,
+            coverage_findings=fit.coverage_findings,
         )
 
         sprint = _section(payload, "sprint_plan")
@@ -2606,7 +3052,7 @@ def make_planner_node(
             for i, e in enumerate(epics if per_epic else ())
         ]
         artifacts = [
-            emit_artifact(brief, "intent_brief", NODE_ID, brief_seq, store=store),
+            emit_artifact(brief, "intent_brief", NODE_ID, seqs["brief"], store=store),
             *(emit_artifact(e, EPIC_KIND, NODE_ID, e.seq, store=store) for e in epic_records),
             emit_artifact(prd, "prd", NODE_ID, prd_seq, store=store),
             *(
@@ -2634,8 +3080,8 @@ def make_planner_node(
             "required_capabilities": list(prd.required_capabilities),
             "gate_triage": [_triage(critique, prd.prd_uri, seq("gate_triage:spec"))],
         }
-        if stack_update is not None:
-            out["stack"] = stack_update
+        if draft.stack_update is not None:
+            out["stack"] = draft.stack_update
         # scope_tier is single-writer: an operator pin or an earlier pass wins.
         scope = state.get("scope_tier")
         if scope is None:
@@ -2643,7 +3089,7 @@ def make_planner_node(
             out["scope_tier"] = scope
 
         high_risk = sum(1 for c in criteria if c.criticality is Criticality.HIGH_RISK)
-        concerns: list[str] = [*epic_concerns, *ticket_concerns]
+        concerns: list[str] = [*draft.concerns, *fit.concerns]
         if dropped:
             concerns.append("Re-plan retired ticket(s) " + ", ".join(t.id for t in dropped) + ".")
         if not criteria:
@@ -2654,15 +3100,16 @@ def make_planner_node(
             concerns.append("Demo scope caps the build.")
         if any(o.strip() for o in critique.security_abuse_omissions):
             concerns.append("Self-review left security/abuse omissions open.")
-        if contract_findings:
-            concerns.append(f"Contract fit check: {len(contract_findings)} finding(s).")
-        if coverage_findings:
-            concerns.append(f"Coverage check: {len(coverage_findings)} finding(s).")
-        stack = current_stack
+        if fit.contract_findings:
+            concerns.append(f"Contract fit check: {len(fit.contract_findings)} finding(s).")
+        if fit.coverage_findings:
+            concerns.append(f"Coverage check: {len(fit.coverage_findings)} finding(s).")
+        stack = draft.frame.stack
         epic_note = (
             f" Tickets planned per epic in {len(epics)} parallel call(s)"
             f" ({', '.join(e.id for e in epics)})."
-            + (f" Self-revised epic(s) {', '.join(revised_epics)} once." if revised_epics else "")
+            + (f" Self-revised epic(s) {', '.join(draft.revised_epics)} once."
+               if draft.revised_epics else "")
             if per_epic else ""
         )
         out["agent_journal"] = [
@@ -2683,6 +3130,7 @@ def make_planner_node(
                     + epic_note
                     + (" Revised after a Spec-gate failure." if findings else "")
                     + (" Self-revised once after its own criteria review." if gaps else "")
+                    + check_note
                 ),
                 assumptions=(
                     *brief.assumptions,
@@ -2704,7 +3152,8 @@ def make_planner_node(
         other epics stand; every dependency is re-derived over the merged set.
         Re-emits what the re-planned tickets change (tickets + tombstones,
         criteria, PRD criterion ids, critique, ownership); the plan-level
-        records of the earlier pass stay current."""
+        records of the earlier pass stay current. Findings the merged plan still
+        has get one in-node re-run of the epics they name."""
         store = rt.cas
 
         def seq(key: str) -> Seq:
@@ -2712,11 +3161,10 @@ def make_planner_node(
 
         stack = state.get("stack")
         chosen = [e for e in prior.epics if e.id in targets]
-        intake = _intake_text(state)
-        iface_text = _interfaces_text(prior.interfaces)
+        inputs = (_intake_text(state), prior.brief, _interfaces_text(prior.interfaces))
         contents = [
             _epic_content(
-                intake, prior.brief, prior.epics, e, iface_text,
+                inputs[0], inputs[1], prior.epics, e, inputs[2],
                 _epic_revision_text(
                     tuple(f for f in findings if e.id in (_target_epics((f,), prior) or ())),
                     prior, e.id, e.id,
@@ -2735,39 +3183,63 @@ def make_planner_node(
             )
         ]
         tickets_seq = seq("artifact:tickets")
-        tickets, criteria, ticket_concerns = _build_tickets(
-            raw, tickets_seq, seq("artifact:acceptance_criteria"),
-            {name for name, _ in prior.interfaces}, cap=MAX_PLAN_TICKETS, epics=prior.epics,
-            overflow=overflow,
+        frame = _Frame(
+            names={name for name, _ in prior.interfaces},
+            epics=prior.epics,
+            cap=MAX_PLAN_TICKETS,
+            generated=prior.generated,
+            stack=stack,
+            brief=prior.intent,
+            run=None if stack is None or stack.profile else stack.run,
+            declared=prior.declared,
+            # The contracts are the earlier pass's, already checked there.
+            interfaces=(),
+            language="",
+            compiled=CompileResult(),
+            tickets_seq=tickets_seq,
+            criteria_seq=seq("artifact:acceptance_criteria"),
         )
-        tickets, attach_concerns = _attach_generated(tickets, prior.generated, tickets_seq)
-        tickets, own_concerns, stack_findings = _own_stack_files(tickets, stack)
-        tickets, dep_concerns = _add_contract_deps(tickets)
-        ticket_concerns += [*attach_concerns, *own_concerns, *dep_concerns]
+        fit = _assemble(raw, frame, overflow)
+        rerun: tuple[str, ...] = ()
+        check_note = ""
+        if fit.blocking:
+            mem = _with_fit(prior, fit)
+            rerun = _named_epics(fit.blocking, mem)
+            if rerun:
+                over = _not_of(overflow, rerun)
+                raw2, missing2, omissions2, concerns2 = _rerun_epics(
+                    prior.epics, raw, rerun, (*fit.blocking, *fit.overflow), mem, inputs, over
+                )
+                fit2 = _assemble(raw2, frame, over)
+                before, after = len(fit.blocking), len(fit2.blocking)
+                kept = after > before
+                check_note = _revision_note(f"epic(s) {', '.join(rerun)}", before, after, kept)
+                if not kept:
+                    fit = fit2
+                    missing = (*_untagged(missing, rerun), *missing2)
+                    omissions = (*_untagged(omissions, rerun), *omissions2)
+                    concerns += concerns2
+                else:
+                    rerun = ()
+        tickets, criteria = fit.tickets, fit.criteria
         dropped = _retired_tickets(state, rt, tickets, tickets_seq)
         prd_seq = seq("artifact:prd")
         prd = prior.prd.model_copy(
             update={"criterion_ids": tuple(c.id for c in criteria), "seq": prd_seq}
         )
-
-        def kept(gaps: tuple[str, ...]) -> tuple[str, ...]:
-            return tuple(g for g in gaps if not any(g.startswith(f"[{t}] ") for t in targets))
-
+        replanned = (*targets, *rerun)
         old = prior.critique
         critique_seq = seq("artifact:criteria_findings")
         critique = CriteriaCritique(
             prd_uri=prd.prd_uri,
-            missing=(*kept(old.missing if old else ()), *missing),
+            missing=(*_untagged(old.missing if old else (), replanned), *missing),
             security_abuse_omissions=(
-                *kept(old.security_abuse_omissions if old else ()), *omissions
+                *_untagged(old.security_abuse_omissions if old else (), replanned), *omissions
             ),
             judgment_provenance=JudgmentProvenance.SELF,
             seq=critique_seq,
-            contract_findings=_contract_findings(tickets, criteria, prior.declared),
-            coverage_findings=(*overflow, *stack_findings, *_coverage_findings(
-                tickets, criteria, prior.intent,
-                run=None if stack is None or stack.profile else stack.run,
-            )),
+            contract_findings=fit.contract_findings,
+            coverage_findings=fit.coverage_findings,
         )
         ownership_seq = seq("artifact:ownership_map")
         ownership = _ownership_from_tickets(tickets, ownership_seq)
@@ -2784,7 +3256,7 @@ def make_planner_node(
             ),
             emit_artifact(ownership, "ownership_map", NODE_ID, ownership_seq, store=store),
         ]
-        concerns += ticket_concerns
+        concerns += fit.concerns
         if dropped:
             concerns.append("Re-plan retired ticket(s) " + ", ".join(t.id for t in dropped) + ".")
         if critique.spec_gate_blocking():
@@ -2805,6 +3277,7 @@ def make_planner_node(
                         f"{len(ownership.owners)} ownership units. "
                         "Revised after a Spec-gate failure."
                         + (f" Self-revised epic(s) {', '.join(revised)} once." if revised else "")
+                        + check_note
                     ),
                     concerns=tuple(concerns),
                 )

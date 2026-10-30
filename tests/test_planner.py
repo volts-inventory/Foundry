@@ -219,7 +219,12 @@ def _plan(**overrides: Any) -> dict[str, Any]:
 def runtime_for(
     *payloads: dict[str, Any], cas: ArtifactStore | None = None
 ) -> tuple[AgentRuntime, MockTransport]:
-    tx = MockTransport(completions=[json.dumps(p) for p in payloads])
+    # Calls past the scripted payloads (the in-node plan-check revision) get the
+    # last one again: an unchanged plan.
+    tx = MockTransport(
+        completions=[json.dumps(p) for p in payloads],
+        default_text=json.dumps(payloads[-1]) if payloads else "",
+    )
     proxy = ModelProviderProxy(tx, signer=ZoneBSigner(KEY, KEY_ID))
     return AgentRuntime(proxy=proxy, cas=cas), tx
 
@@ -896,12 +901,15 @@ def test_global_and_per_epic_ticket_caps(monkeypatch: pytest.MonkeyPatch) -> Non
     concerns = " ".join(writes["agent_journal"][0].concerns)
     assert f"per-epic cap of {MAX_EPIC_TICKETS}" in concerns
     assert f"exceed the cap of {MAX_EPIC_TICKETS + 2}" in concerns
+    # Overflow is recorded as a concern, not a Spec finding.
     [critique] = _bodies(cas, writes, "criteria_findings")
-    assert (
+    dropped = (
         f"Epic E1: {MAX_EPIC_TICKETS + 3} tickets exceed the per-epic cap of "
         f"{MAX_EPIC_TICKETS}; dropped E1-T25 (t25), E1-T26 (t26), E1-T27 (t27): consolidate "
         "this epic's tickets so no work is lost."
-    ) in critique.coverage_findings
+    )
+    assert dropped in writes["agent_journal"][0].concerns
+    assert not any("exceed" in f for f in critique.coverage_findings)
 
 
 def test_only_flagged_epics_self_revise_and_their_gaps_are_tagged() -> None:
@@ -1014,7 +1022,10 @@ def test_epic_items_are_namespaced_and_capped() -> None:
         {},
         *({"id": f"X{i}"} for i in range(MAX_EPIC_TICKETS)),
     ])
-    assert len(items) == MAX_EPIC_TICKETS
+    # The tail past the cap is kept marked dropped, so its scenarios can be rehomed.
+    assert [bool(i.get(planner._DROPPED_KEY)) for i in items] == (
+        [False] * MAX_EPIC_TICKETS + [True] * 3
+    )
     assert [i["id"] for i in items[:3]] == ["E1-T01", "E1-T02", "E1-T03"]
     assert items[0]["depends_on"] == ["E1-T02"]
     assert [s["id"] for s in items[0]["scenarios"]] == ["E1-AC01", "E1-AC9"]

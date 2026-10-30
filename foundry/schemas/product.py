@@ -107,12 +107,13 @@ class CriteriaCritique(FrozenModel):
     judgment_provenance: JudgmentProvenance
     seq: Seq
     # The planner's deterministic contract fit check (a consumed contract with no
-    # or several producers, a consumer not ordered after its producer, an output
-    # nothing uses): computed, not judged, and blocking like an omission.
+    # or several producers, a consumer not ordered after its producer, a contract
+    # signature that does not compile): computed, not judged, and blocking like an
+    # omission.
     contract_findings: tuple[str, ...] = ()
     # The planner's deterministic coverage check (an uncovered must-have or success
     # criterion, a feature ticket without scenarios, no end-to-end entrypoint, no
-    # run command, work dropped at a cap): computed, and blocking the same way.
+    # run command): computed, and blocking the same way.
     coverage_findings: tuple[str, ...] = ()
 
     def spec_gate_blocking(self) -> bool:

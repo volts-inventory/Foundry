@@ -676,6 +676,6 @@ def test_targeted_replan_carries_the_contracts_ticket() -> None:
     assert [_epic_of(r) for r in tx.requests[4:]] == ["E2"]
     state: Any = {"artifacts": [*first["artifacts"], *second["artifacts"]]}
     live = {t.id: t for t in read_tickets(state, cas.resolve)}
-    assert live[CONTRACTS_TICKET_ID].files == ("notes/contracts.py",)
+    assert live[CONTRACTS_TICKET_ID].files == ("notes/contracts.py", "notes/__init__.py")
     assert all(CONTRACTS_TICKET_ID in t.depends_on for tid, t in live.items()
                if tid != CONTRACTS_TICKET_ID)

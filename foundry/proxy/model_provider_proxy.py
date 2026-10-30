@@ -69,13 +69,14 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from fnmatch import fnmatchcase
 from typing import Any, Literal, Protocol
 
+from foundry import progress
 from foundry.gates.attestation import ZoneBSigner
 from foundry.proxy.lineage import LineageMap
 from foundry.proxy.token_meter import TokenMeter
@@ -740,7 +741,11 @@ class ModelProviderProxy:
             requested_model, system_sop, messages, purpose, schema
         )
 
+        label = f"model call: {node_id} ({tier}, {purpose})"
+        progress.log(f"start {label}")
+        started = time.monotonic()
         response, parsed = self._send_with_retry(request, schema=schema)
+        progress.finished(label, started, response.usage, self.token_meter)
 
         # Lineage is resolved from the proxy-OBSERVED served model id; an
         # unknown id fails closed inside the LineageMap (never guessed).

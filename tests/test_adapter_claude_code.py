@@ -159,6 +159,18 @@ def test_session_token_usage_is_recorded_for_the_manifest(source_dir: Path) -> N
     assert adapter.usage == [usage]
 
 
+def test_progress_logs_each_agent_session(
+    source_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("FOUNDRY_PROGRESS", "1")
+    usage = {"input_tokens": 1000, "output_tokens": 2000}
+    adapter = ClaudeCodeAdapter(exec_fn=fake_exec({"a.py": "A = 1\n"}, envelope(usage=usage)))
+    with Sandbox(source_dir) as sb:
+        adapter.run(make_packet(sb.worktree), sb)
+    err = capsys.readouterr().err
+    assert "start agent session: " in err and ", 3k tokens" in err
+
+
 def test_hard_kill_records_budget_breach_triage(source_dir: Path) -> None:
     # A wall-clock kill is a budget breach, never a verdict (sandbox contract):
     # the partially-authored tree is still recorded; the gates decide.

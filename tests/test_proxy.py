@@ -708,3 +708,18 @@ def test_manifest_is_append_only_across_calls():
     for i in range(3):
         proxy.complete(f"n{i}", "T3", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
     assert [r["node_id"] for r in proxy.manifest] == ["n0", "n1", "n2"]
+
+
+def test_progress_logs_each_model_call_start_and_end(monkeypatch, capsys):
+    from foundry.proxy.token_meter import TokenMeter
+
+    proxy, _ = make_proxy()
+    proxy.token_meter = TokenMeter(7_000_000)
+    proxy.complete("planner", "T1", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
+    assert capsys.readouterr().err == ""  # off by default
+    monkeypatch.setenv("FOUNDRY_PROGRESS", "1")
+    proxy.complete("planner", "T1", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
+    lines = capsys.readouterr().err.splitlines()
+    assert "start model call: planner (T1, gate)" in lines[0]
+    assert "done  model call: planner (T1, gate) in " in lines[1]
+    assert "of 7.0M)" in lines[1]

@@ -51,9 +51,11 @@ from __future__ import annotations
 import contextlib
 import json
 import shutil
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from foundry import progress
 from foundry.execution.adapter_contract import (
     AdapterResult,
     AdapterUnavailableError,
@@ -383,6 +385,11 @@ class ClaudeCodeAdapter:
         if self.token_meter is not None:
             self.token_meter.check()
         before = walk_worktree(sandbox.worktree)
+        tier = packet.task.get("tier")
+        label = (f"agent session: {packet.task.get('id', 'unknown')}"
+                 f" ({self._tier_models.get(str(tier)) or self._model or 'default model'})")
+        progress.log(f"start {label}")
+        started = time.monotonic()
         if self._on_activity is not None:
             # STREAMING: each stdout line is an event; report the tool calls as they
             # happen. `on_stdout_line` is only passed in this branch, so a custom
@@ -421,6 +428,8 @@ class ClaudeCodeAdapter:
             })
             if self.token_meter is not None:
                 self.token_meter.charge(self.usage[-1])
+        progress.finished(label, started, self.usage[-1] if isinstance(u, dict) else None,
+                          self.token_meter)
         authored, deleted, skipped_binary = changed_files(before, after)
         payload: dict[str, Any] = {"kind": "full-file-snapshot", "files": authored}
         if deleted:

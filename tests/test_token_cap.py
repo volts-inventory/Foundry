@@ -90,3 +90,38 @@ def test_rerun_resumes_the_capped_thread_instead_of_replanning(tmp_path: Path) -
     assert result.passed
     assert nodes, "the resumed run should still stream its remaining nodes"
     assert "planner" not in nodes and "triage" not in nodes
+
+
+def test_a_resumed_run_is_held_to_the_cap_across_restarts(tmp_path: Path) -> None:
+    import json
+
+    from foundry.cli import run
+
+    with pytest.raises(TokenCapExceeded):
+        run("build a thing", state_dir=str(tmp_path), token_cap=1)
+    ledger = next((tmp_path / "calls").glob("*/tokens.json"))
+    spent = json.loads(ledger.read_text())["used"]
+    assert spent >= 1
+    # The resumed process starts at the spend so far, not at zero.
+    with pytest.raises(TokenCapExceeded):
+        run("build a thing", state_dir=str(tmp_path), token_cap=spent)
+    assert run("build a thing", state_dir=str(tmp_path), token_cap=10**9).passed
+    assert json.loads(ledger.read_text())["used"] > spent
+
+
+def test_a_fresh_run_on_the_thread_starts_its_spend_at_zero(tmp_path: Path) -> None:
+    import json
+
+    from foundry.cli import run
+
+    def spend(state: Path) -> int:
+        return int(json.loads(next((state / "calls").glob("*/tokens.json")).read_text())["used"])
+
+    used = tmp_path / "used"
+    with pytest.raises(TokenCapExceeded):
+        run("build a thing", state_dir=str(used), token_cap=1)
+    assert run("build a thing", state_dir=str(used)).passed
+    assert run("build a notes cli", state_dir=str(used), token_cap=10**9).passed
+    clean = tmp_path / "clean"
+    assert run("build a notes cli", state_dir=str(clean), token_cap=10**9).passed
+    assert spend(used) == spend(clean)

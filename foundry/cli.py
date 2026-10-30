@@ -1221,11 +1221,14 @@ def run(
                                         tier_models=_tier_models(backend)),
         cas=store,
     )
+    run_dir: Path | None = None
     if resolved_state_dir is not None:
         run_key = hashlib.sha256(thread_id.encode()).hexdigest()[:16]
-        proxy.call_cache = Path(resolved_state_dir) / "calls" / run_key
+        run_dir = Path(resolved_state_dir) / "calls" / run_key
+        proxy.call_cache = run_dir
+    meter: TokenMeter | None = None
     if token_cap is not None:
-        meter = TokenMeter(token_cap)
+        meter = TokenMeter(token_cap, run_dir / "tokens.json" if run_dir else None)
         proxy.token_meter = meter
         if hasattr(rt.adapter, "token_meter"):  # the claude-code substrate bypasses the proxy
             setattr(rt.adapter, "token_meter", meter)  # noqa: B010
@@ -1431,9 +1434,12 @@ def run(
                             result = {**result, "_org": org}
                     _pc(node, scope, phase=phase, result=result)
 
+            start = _resume_seed(app, config, seed)
+            if meter is not None and start is seed and not _has_pending_run(app, config):
+                meter.reset()  # a fresh run, not a resumed one: its spend starts at zero
             final = _invoke_with_autoresume(
                 app,
-                _resume_seed(app, config, seed),
+                start,
                 config,
                 progress_cb=drive_pc,
                 resumable=(durable is not None),

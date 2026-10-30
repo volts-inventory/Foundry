@@ -7,8 +7,11 @@ With durable state the stopped run resumes from its last checkpoint.
 
 from __future__ import annotations
 
+import json
+import os
 import threading
 from collections.abc import Mapping
+from pathlib import Path
 
 __all__ = ["TokenCapExceeded", "TokenMeter", "weighted_tokens"]
 
@@ -30,14 +33,33 @@ def weighted_tokens(usage: Mapping[str, int]) -> int:
 
 
 class TokenMeter:
-    """Thread-safe running total (the IC pool runs coding sessions in parallel)."""
+    """Thread-safe running total (the IC pool runs coding sessions in parallel).
 
-    def __init__(self, cap: int) -> None:
+    With a ``ledger`` file the total survives a restart, so a resumed run is held
+    to the cap across every process it took; :meth:`reset` starts a fresh run."""
+
+    def __init__(self, cap: int, ledger: Path | None = None) -> None:
         if cap < 1:
             raise ValueError("token cap must be >= 1")
         self.cap = cap
+        self.ledger = ledger
         self.used = 0
+        if ledger is not None and ledger.exists():
+            self.used = int(json.loads(ledger.read_text()).get("used", 0))
         self._lock = threading.Lock()
+
+    def reset(self) -> None:
+        with self._lock:
+            self.used = 0
+            self._save()
+
+    def _save(self) -> None:
+        if self.ledger is None:
+            return
+        self.ledger.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.ledger.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"used": self.used}))
+        os.replace(tmp, self.ledger)
 
     def check(self) -> None:
         with self._lock:
@@ -49,3 +71,4 @@ class TokenMeter:
     def charge(self, usage: Mapping[str, int]) -> None:
         with self._lock:
             self.used += weighted_tokens(usage)
+            self._save()

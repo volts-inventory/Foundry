@@ -157,6 +157,16 @@ def test_a_new_thread_or_request_still_plans(tmp_path: Path) -> None:
         assert "planner" in nodes, (thread, request)
 
 
+def test_a_changed_spec_plans_fresh_instead_of_resuming(tmp_path: Path) -> None:
+    run("build a todo cli", thread_id="t-spec", state_dir=str(tmp_path),
+        diff_body=_ERROR_DIFF, max_fix_attempts=1)
+    nodes: list[str] = []
+    run("build a todo cli", thread_id="t-spec", state_dir=str(tmp_path),
+        spec="Todos also carry a due date.",
+        progress_cb=lambda node, scope, **_k: nodes.append(node))
+    assert "planner" in nodes
+
+
 def test_the_cli_halt_message_says_how_to_resume(
     tmp_path: Path, capsys: Any, monkeypatch: Any,
 ) -> None:

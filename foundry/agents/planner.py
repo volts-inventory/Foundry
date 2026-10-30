@@ -877,6 +877,8 @@ def _safe_ticket_ids(ids: list[str]) -> dict[str, str]:
     safe = {
         tid for tid in ids
         if _SAFE_TICKET_ID.fullmatch(tid) and tid not in (".", "..", *_GENERATED_TICKETS)
+        # `fix-<n>` is the fixer's diff namespace: a ticket there would read as built.
+        and not tid.startswith("fix-")
     }
     taken = safe | _GENERATED_TICKETS
     for tid in ids:
@@ -884,6 +886,8 @@ def _safe_ticket_ids(ids: list[str]) -> dict[str, str]:
             out[tid] = tid
             continue
         base = re.sub(r"[^A-Za-z0-9._-]", "-", tid).strip(".") or "T"
+        if base.startswith("fix-"):
+            base = f"T-{base}"
         new, n = base, 2
         while new in taken:
             new, n = f"{base}-{n}", n + 1

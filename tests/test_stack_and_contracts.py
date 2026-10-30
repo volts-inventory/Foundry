@@ -207,6 +207,13 @@ def test_python_stack_without_bdd_or_code_contracts_generates_nothing() -> None:
     assert [t.id for t in _tickets(writes, cas)] == ["T-001", "T-002", "T-003"]
 
 
+def test_a_model_ticket_cannot_take_a_fixer_id() -> None:
+    # A planned `fix-2` would read as built once the fixer mints its second diff.
+    from foundry.agents.planner import _safe_ticket_ids
+
+    assert _safe_ticket_ids(["fix-2", "T-1"])["fix-2"] != "fix-2"
+
+
 def test_a_model_ticket_cannot_take_a_generated_id() -> None:
     tickets = json.loads(json.dumps(PLAN["tickets"]))
     tickets[0]["id"] = "contracts"

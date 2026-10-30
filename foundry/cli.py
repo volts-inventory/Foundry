@@ -853,7 +853,7 @@ class RunResult:
         if self.resume_from:
             lines.append(
                 f"halted at {self.resume_from}: rerun the same command to resume from "
-                f"{self.resume_from} (raise --max-fix-attempts or --token-cap for more room)"
+                f"{self.resume_from} (each rerun gets a fresh fix budget)"
                 if self.resumable
                 else f"halted at {self.resume_from}: add --state-dir DIR to make a halted "
                      "run resumable"
@@ -1001,11 +1001,12 @@ def _resume_seed(app: Any, config: RunnableConfig, seed: FactoryState) -> Factor
     """A rerun of a HALTED thread with the same request resumes it at the boundary
     that halted (the supervisor's triage honours ``RESUME_PHASE``) instead of
     planning from scratch. A thread with nodes pending is continued with ``None``
-    by :func:`_invoke_with_autoresume`; a new thread or request plans fresh."""
+    by :func:`_invoke_with_autoresume`; a new thread, request or spec plans fresh."""
     if _has_pending_run(app, config):
         return seed
     prior = _prior_values(app, config)
-    if prior.get("phase") == "halted" and prior.get("request") == seed.get("request"):
+    if (prior.get("phase") == "halted" and prior.get("request") == seed.get("request")
+            and prior.get("spec") == seed.get("spec")):
         return {"request": seed["request"], "phase": RESUME_PHASE}
     return seed
 

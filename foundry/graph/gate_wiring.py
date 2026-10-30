@@ -1406,13 +1406,15 @@ def run_build_gate(
                     f"this wave's check skips {', '.join(dropped)}: the planned "
                     f"manifest {', '.join(missing)} is not built yet; the final gate "
                     "runs every step")))
-        if stack.typecheck:
-            full = stack.typecheck
+        for step in ("build", "typecheck"):
+            full = getattr(stack, step)
+            if not full:
+                continue
             scoped = wave_typecheck(full, planned_paths(files), workdir)
             if scoped != full:
-                stack = stack.model_copy(update={"typecheck": scoped})
+                stack = stack.model_copy(update={step: scoped})
                 notes.append((WAVE_TYPECHECK_TRIAGE, (
-                    "this wave's typecheck skips planned targets no ticket has built "
+                    f"this wave's {step} skips planned targets no ticket has built "
                     f"yet: `{scoped or '(skipped: none built yet)'}` instead of `{full}`")))
         if notes:
             # The scoped commands are what this verdict judges, so they key the digest.

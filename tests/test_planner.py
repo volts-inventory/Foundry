@@ -124,7 +124,7 @@ PLAN: dict[str, Any] = {
             "specialty": "data",
             "difficulty": "standard",
             "depends_on": [],
-            "files": ["todo/store.py"],
+            "files": ["todo/__init__.py", "todo/store.py"],
             "implements": ["TodoStore.add", "TodoStore.list"],
             "consumes": [],
             "scenarios": [
@@ -289,11 +289,13 @@ def test_bodies_resolve_back_and_ownership_carries_unit_criteria() -> None:
     ownership = cas.resolve(by_kind["ownership_map"])
     assert isinstance(ownership, OwnershipMap)
     assert ownership.owners == {
+        "todo/__init__.py": "data-T-001",
         "todo/store.py": "data-T-001",
         "todo/api.py": "backend-T-002",
         "tests/step_defs/test_todo.py": "test-T-003",
     }
     assert ownership.unit_criteria == {
+        "todo/__init__.py": ("AC-003",),
         "todo/store.py": ("AC-003",),
         "todo/api.py": ("AC-001", "AC-002"),
         "tests/step_defs/test_todo.py": ("AC-003", "AC-001", "AC-002"),

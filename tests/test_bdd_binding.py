@@ -146,13 +146,13 @@ def test_stack_files_are_the_scripts_the_commands_run() -> None:
 
 def test_an_unowned_run_script_goes_to_the_entrypoint_ticket() -> None:
     stack = StackDecision(language="python", run="python3 smoke.py")
-    tickets = [_ticket("T1", ("app/core.py",)),
+    tickets = [_ticket("T1", ("app/__init__.py", "app/core.py")),
                _ticket("T2", ("app/main.py",), entrypoint=True)]
     out, concerns, findings = _own_stack_files(tickets, stack)
     assert out[1].files == ("app/main.py", "smoke.py") and "smoke.py" in out[1].description
     assert out[0] == tickets[0] and concerns and findings == ()
     # Already owned (here through a directory scope): nothing changes.
-    owned = [_ticket("T1", ("scripts/",)), tickets[1]]
+    owned = [_ticket("T1", ("scripts/",)), _ticket("T2", ("main.py",), entrypoint=True)]
     stack = StackDecision(language="python", run="sh scripts/smoke.sh")
     assert _own_stack_files(owned, stack) == (owned, [], ())
 
@@ -161,6 +161,26 @@ def test_an_unowned_run_script_without_an_entrypoint_is_a_coverage_finding() -> 
     stack = StackDecision(language="python", run="python3 smoke.py")
     _, _, findings = _own_stack_files([_ticket("T1", ("app.py",))], stack)
     assert findings and "smoke.py" in findings[0]
+
+
+def test_unowned_python_package_markers_get_an_owner() -> None:
+    # The finance-tracker trial: no ticket wrote finance/__init__.py, so mypy saw
+    # finance/contracts.py as both `contracts` and `finance.contracts`.
+    stack = StackDecision(language="python")
+    tickets = [_ticket("contracts", ("finance/contracts.py",)),
+               _ticket("T1", ("finance/store/db.py", "tests/steps/test_db.py"))]
+    out, concerns, _ = _own_stack_files(tickets, stack)
+    assert out[0].files == ("finance/contracts.py", "finance/__init__.py",
+                            "finance/store/__init__.py")
+    assert out[1] == tickets[1] and concerns
+    # Without a contracts ticket the first ticket writing there owns it; owned
+    # markers and non-Python stacks are left alone.
+    out, _, _ = _own_stack_files([tickets[1]], stack)
+    assert out[0].files[-2:] == ("finance/__init__.py", "finance/store/__init__.py")
+    done = [_ticket("T1", ("pkg/__init__.py", "pkg/a.py"))]
+    assert _own_stack_files(done, stack)[0] == done
+    ts = [_ticket("T1", ("src/a.ts",))]
+    assert _own_stack_files(ts, StackDecision(language="typescript"))[0] == ts
 
 
 # ---- a failed smoke run carries its reason ----------------------------------------

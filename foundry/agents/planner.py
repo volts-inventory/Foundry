@@ -1568,6 +1568,7 @@ def _own_stack_files(
     concerns, findings)."""
     if stack is None:
         return list(tickets), [], ()
+    tickets, init_concerns = _own_package_inits(tickets, stack)
 
     def owned(path: str) -> bool:
         return any(f == path or (f.endswith("/") and path.startswith(f))
@@ -1575,10 +1576,10 @@ def _own_stack_files(
 
     orphans = [f for f in stack_files(stack) if not owned(f)]
     if not orphans:
-        return list(tickets), [], ()
+        return list(tickets), init_concerns, ()
     entry = next((t for t in tickets if t.entrypoint and t.id not in _GENERATED_TICKETS), None)
     if entry is None:
-        return list(tickets), [], tuple(
+        return list(tickets), init_concerns, tuple(
             f"Stack command file {f} is written by no ticket: put it in the files[] of "
             "the ticket that wires the app (the entrypoint ticket)." for f in orphans
         )
@@ -1590,8 +1591,50 @@ def _own_stack_files(
         "files": (*entry.files, *orphans), "description": entry.description + note,
     })
     return ([updated if t.id == entry.id else t for t in tickets],
-            [f"Ticket {entry.id}: added stack command file(s) {', '.join(orphans)} that no "
+            [*init_concerns,
+             f"Ticket {entry.id}: added stack command file(s) {', '.join(orphans)} that no "
              "ticket wrote."], ())
+
+
+def _own_package_inits(
+    tickets: Sequence[Ticket], stack: StackDecision
+) -> tuple[list[Ticket], list[str]]:
+    """Give every Python source directory's ``__init__.py`` an owner. Without one
+    mypy maps ``finance/contracts.py`` to both ``contracts`` and ``finance.contracts``
+    and fails, and no ticket may write it outside its files. The contracts ticket
+    (wave 0) takes them, else the first ticket writing into that directory. Test
+    directories are left to pytest's own rootdir handling."""
+    if stack.language != "python":
+        return list(tickets), []
+    owned = {f for t in tickets for f in t.files}
+    dirs: dict[str, str] = {}  # missing __init__.py -> first ticket writing below it
+    for t in tickets:
+        for f in t.files:
+            if not f.endswith(".py"):
+                continue
+            parts = f.split("/")[:-1]
+            for i in range(1, len(parts) + 1):
+                if any(p.startswith("test") for p in parts[:i]):
+                    break
+                init = "/".join((*parts[:i], "__init__.py"))
+                if init not in owned:
+                    dirs.setdefault(init, t.id)
+    if not dirs:
+        return list(tickets), []
+    holder = CONTRACTS_TICKET_ID if any(t.id == CONTRACTS_TICKET_ID for t in tickets) else None
+    added: dict[str, list[str]] = {}
+    for init, first in dirs.items():
+        added.setdefault(holder or first, []).append(init)
+    out = [
+        t.model_copy(update={
+            "files": (*t.files, *added[t.id]),
+            "description": t.description + " Also create the package marker(s) "
+            + ", ".join(added[t.id]) + " (empty unless this ticket needs exports there).",
+        }) if t.id in added else t
+        for t in tickets
+    ]
+    return out, [f"Ticket {tid}: added package marker(s) {', '.join(inits)} that no "
+                 "ticket wrote." for tid, inits in added.items()]
 
 
 def _contract_findings(

@@ -611,6 +611,22 @@ def test_the_wave_check_typechecks_only_targets_built_so_far(tmp_path: Path) -> 
     assert len(scope) == 1 and "app" in scope[0].explanation
 
 
+def test_the_wave_check_builds_only_targets_built_so_far(tmp_path: Path) -> None:
+    # The finance-tracker trial: `compileall -q finance smoke.py` failed wave 0
+    # because smoke.py belongs to a later ticket.
+    stack = StackDecision(language="python",
+                          build=f"{_exists_check(tmp_path)} contracts.py smoke.py")
+    tickets = [
+        _ticket("contracts", 0, files=("contracts.py",)),
+        _ticket("T-001", 1, files=("smoke.py",), deps=("contracts",)),
+    ]
+    out, ran, _ = _wave_run(tmp_path, _Recorder(), tickets=tickets, stack=stack)
+    assert ran == ["engineering", "wave_gate", "engineering"]
+    assert _builds(out) == [GateStatus.PASS]
+    scope = [t for t in out["gate_triage"] if t.name == "wave-typecheck-scope"]
+    assert len(scope) == 1 and "build" in scope[0].explanation
+
+
 def test_the_wave_check_still_fails_a_missing_built_target(tmp_path: Path) -> None:
     # Scoping only drops planned-but-unbuilt targets: a path no ticket plans (a
     # typo'd target) still fails the check — the gate is not weakened.

@@ -143,7 +143,7 @@ CONTRACT_DUP_TRIAGE = "contract-duplicate"
 MAX_TICKET_ATTEMPTS = 2
 
 # Per-specialty concurrent ticket limit when none is configured.
-DEFAULT_WORKERS: dict[str, int] = {s.value: 2 for s in Specialty}
+DEFAULT_WORKERS: dict[str, int] = {s.value: 4 for s in Specialty}
 
 # Claude Code needs several turns to read, write and verify; 8 left contract stubs empty.
 _DEFAULT_TURN_BUDGET = 25

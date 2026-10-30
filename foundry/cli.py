@@ -1163,7 +1163,7 @@ def run(
         Ticket path (the planner emitted tickets). ``task_cb`` receives each
         ticket's :class:`TaskEvent` (``{phase, ticket_id, title, specialty, tier}``,
         phase start/done/failed) as the worker pool runs it; ``workers`` caps
-        concurrent tickets per specialty (default 2 each) under ``max_slots``;
+        concurrent tickets per specialty (default 4 each) under ``max_slots``;
         ``ticket_tiers`` maps difficulty -> model tier (default
         trivial=T3, standard=T2, complex=T1).
     scope:

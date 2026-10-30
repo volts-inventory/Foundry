@@ -227,15 +227,19 @@ def test_consuming_a_type_contract_needs_no_implementing_ticket() -> None:
     # The finance-tracker trial: data types and error classes are written in full by
     # the generated contracts ticket, so a consumer needs no other implementer.
     tickets = json.loads(json.dumps(PLAN["tickets"]))
-    tickets[1]["consumes"] = [*tickets[1].get("consumes", []), "Errors", "Missing"]
+    tickets[1]["consumes"] = [*tickets[1].get("consumes", []), "Errors", "NotFound", "Missing"]
     interfaces = [*TS_INTERFACES,
                   {"name": "Errors", "kind": "type", "signature": "type E = Error",
                    "inputs": [], "outputs": [], "errors": [], "description": ""},
-                  {"name": "Missing", "kind": "class", "signature": "class M {}",
+                  {"name": "NotFound", "kind": "class",
+                   "signature": "class NotFound extends Error {\n  constructor(m: string);\n}",
+                   "inputs": [], "outputs": [], "errors": [], "description": ""},
+                  {"name": "Missing", "kind": "class",
+                   "signature": "class M {\n  run(x: number): void;\n}",
                    "inputs": [], "outputs": [], "errors": [], "description": ""}]
     writes, cas, _ = _plan_once({**_ts_plan(), "tickets": tickets, "interfaces": interfaces})
     findings = _critique(writes, cas).contract_findings
-    assert not any("contract Errors" in f for f in findings)
+    assert not any("contract Errors" in f or "contract NotFound" in f for f in findings)
     assert "Ticket T-002 consumes contract Missing, but no ticket implements it." in findings
 
 

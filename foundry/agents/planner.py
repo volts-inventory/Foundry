@@ -1637,6 +1637,24 @@ def _own_package_inits(
                  "ticket wrote." for tid, inits in added.items()]
 
 
+# An indented member that takes arguments (`    def add(`, `  add(x: T): R;`); a
+# constructor alone (an error class taking a message) is still a declaration.
+_MEMBER_CALL = re.compile(
+    r"^\s+(?:def\s+)?(?![\w<>\[\], ]*\b(?:__init__|constructor)\s*\()"
+    r"[\w<>\[\], ]*\w\s*\(",
+    re.MULTILINE,
+)
+
+
+def _declaration_only(contract: InterfaceContract) -> bool:
+    """A contract the generated contracts ticket writes in full: a type, or a class
+    with no methods (an error hierarchy, a plain record). One with methods still
+    needs a ticket to implement its behaviour."""
+    if contract.kind == "type":
+        return True
+    return contract.kind == "class" and not _MEMBER_CALL.search(contract.signature)
+
+
 def _contract_findings(
     tickets: Sequence[Ticket], criteria: Sequence[AcceptanceCriterion],
     declared: frozenset[str] = frozenset(),
@@ -1644,8 +1662,8 @@ def _contract_findings(
     """The plan-time contract fit check over the model's tickets: every consumed
     contract has exactly one implementing ticket and the consumer depends on it;
     every implemented contract has a consumer or a scenario on its implementer.
-    ``declared`` names type contracts the generated contracts ticket writes in full
-    (data types, error classes): consuming one needs no implementing ticket."""
+    ``declared`` names contracts the generated contracts ticket writes in full
+    (``_declaration_only``): consuming one needs no implementing ticket."""
     work = [t for t in tickets if t.id not in _GENERATED_TICKETS]
     deps = {t.id: t.depends_on for t in tickets}
     producers: dict[str, list[str]] = {}
@@ -2079,7 +2097,7 @@ def _prior_plan(state: FactoryState, rt: AgentRuntime) -> _PriorPlan | None:
     design = max(designs, key=lambda d: d.seq) if designs else None
     contracts = _newest_by_id(state, rt, "interface_contract", InterfaceContract)
     interfaces = tuple((name, _prose(rt, i.spec_uri)) for name, i in contracts.items())
-    declared = frozenset(name for name, i in contracts.items() if i.kind == "type")
+    declared = frozenset(name for name, i in contracts.items() if _declaration_only(i))
     intent = _newest_intent(state, rt)
     brief = (
         "PLAN (from the previous pass):\n"
@@ -2458,7 +2476,7 @@ def make_planner_node(
         contract_findings = (
             *_contract_findings(
                 tickets, criteria,
-                frozenset(i.name for i in interfaces if i.kind == "type"),
+                frozenset(i.name for i in interfaces if _declaration_only(i)),
             ),
             *_builtin_method_findings(
                 interfaces,

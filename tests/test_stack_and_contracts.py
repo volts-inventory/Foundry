@@ -265,8 +265,10 @@ def test_fit_violations_become_blocking_spec_findings() -> None:
     assert not any("does not depend on" in f for f in findings)
     t2 = next(t for t in _tickets(writes, cas) if t.id == "T-002")
     assert "T-001" in t2.depends_on
+    # An implemented contract nothing uses is a concern, not a blocking finding.
     unused = "Contract Unused (implemented by T-003) has no consumer"
-    assert any(f.startswith(unused) for f in findings)
+    assert not any(f.startswith(unused) for f in findings)
+    assert any(c.startswith(unused) for c in writes["agent_journal"][0].concerns)
     critique = _critique(writes, cas)
     assert critique.spec_gate_blocking()
     assert writes["gate_triage"][0].explanation.startswith(
@@ -672,7 +674,8 @@ def test_targeted_replan_carries_the_contracts_ticket() -> None:
     plan["interfaces"] = [
         {**i, "kind": "function", "signature": i["spec"]} for i in plan["interfaces"]
     ]
-    plan["stack"] = {**PYTHON_STACK, "contracts_file": "notes/contracts.py"}
+    plan["stack"] = {**PYTHON_STACK, "contracts_file": "notes/contracts.py",
+                     "run": "python3 -m notes"}
     cas = ArtifactStore()
     revised = ResponseScript(json.dumps(replies["E2"]), match=_match("YOUR EPIC: E2", "REVISION"))
     rt, tx = _epic_runtime(*_epic_scripts(plan, replies, revised), cas=cas)

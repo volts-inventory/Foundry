@@ -71,7 +71,7 @@ def _config(run_id: str = "run-prose") -> RunnableConfig:
 
 
 def _runtime(payload: dict[str, Any], *, cas: ArtifactStore | None) -> AgentRuntime:
-    tx = MockTransport(completions=[json.dumps(payload)])
+    tx = MockTransport(completions=[json.dumps(payload)], default_text=json.dumps(payload))
     return AgentRuntime(proxy=ModelProviderProxy(tx), cas=cas)
 
 

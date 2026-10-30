@@ -121,7 +121,8 @@ def _config(run_id: str, step: int = 1) -> RunnableConfig:
 
 def _cas_runtime(*payloads: dict[str, Any]) -> tuple[AgentRuntime, ArtifactStore]:
     proxy = ModelProviderProxy(
-        MockTransport(completions=[json.dumps(p) for p in payloads]),
+        MockTransport(completions=[json.dumps(p) for p in payloads],
+                      default_text=json.dumps(payloads[-1])),
         signer=ZoneBSigner(KEY, KEY_ID),
     )
     cas = ArtifactStore()

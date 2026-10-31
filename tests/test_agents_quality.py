@@ -180,3 +180,74 @@ def test_read_criteria_takes_the_newest_seq_per_id_not_list_order() -> None:
 
     [current] = read_criteria({"artifacts": handles}, lambda h: bodies[h.uri])
     assert current.text == "revised"
+
+
+def _diff_state(store: Any, diffs: dict[str, str]) -> dict[str, Any]:
+    from foundry.schemas.base import Artifact
+    from foundry.schemas.implementation import FeatureDiff
+    from foundry.state.seq import Seq
+
+    artifacts = []
+    for i, (task_id, text) in enumerate(diffs.items()):
+        seq = Seq("run-R", 1, 1, "engineering", i)
+        uri = f"cas://feature_diff/key-{task_id}"
+        store.put_body_at(
+            uri,
+            FeatureDiff(
+                diff_uri=store.put_blob(text), task_id=task_id,
+                branch=f"task/{task_id}", base_tree_sha="base", seq=seq,
+            ),
+        )
+        artifacts.append(Artifact(kind="feature_diff", uri=uri, produced_by="engineering",
+                                  task_id=task_id, seq=seq))
+    return {"artifacts": artifacts}
+
+
+def _review_request_text(transport: MockTransport) -> str:
+    [request] = transport.requests
+    return str(request)
+
+
+def test_review_request_carries_the_diff_text() -> None:
+    """The judge cannot dereference cas:// — the request must inline the diffs."""
+    from foundry.durability.artifact_store import ArtifactStore
+
+    transport = MockTransport(verdicts=["approve"])
+    rt = make_runtime(transport)
+    rt.cas = ArtifactStore()
+    state = _diff_state(rt.cas, {
+        "T-A": "+++ b/app.py\n+def tip(total): return total * 0.15\n",
+        "T-B": "+++ b/test_app.py\n+assert tip(100) == 15\n",
+    })
+    review(rt, state, config_for("run-R", nonce="N"), node_id="reviewer", role="Reviewer")
+    text = _review_request_text(transport)
+    assert "def tip(total): return total * 0.15" in text
+    assert "assert tip(100) == 15" in text
+    assert text.index("task T-A") < text.index("task T-B")
+
+
+def test_review_request_truncates_and_names_unresolvable_diffs() -> None:
+    from foundry.agents.quality import reviewer_critic
+    from foundry.durability.artifact_store import ArtifactStore
+    from foundry.schemas.base import Artifact
+    from foundry.state.seq import Seq
+
+    transport = MockTransport(verdicts=["approve"])
+    rt = make_runtime(transport)
+    rt.cas = ArtifactStore()
+    state = _diff_state(rt.cas, {"T-BIG": "+x\n" * reviewer_critic._DIFF_CHAR_CAP})
+    state["artifacts"].append(Artifact(kind="feature_diff", uri="cas://feature_diff/gone",
+                                       produced_by="engineering", task_id="T-GONE",
+                                       seq=Seq("run-R", 1, 2, "engineering", 0)))
+    review(rt, state, config_for("run-R", nonce="N"), node_id="reviewer", role="Reviewer")
+    text = _review_request_text(transport)
+    assert "TRUNCATED" in text
+    assert "cas://feature_diff/gone" in text
+
+
+def test_review_request_says_when_no_diff_is_resolvable() -> None:
+    transport = MockTransport(verdicts=["approve"])
+    rt = make_runtime(transport)
+    review(rt, {}, config_for("run-R", nonce="N", subject="cas://diff/x"),
+           node_id="reviewer", role="Reviewer")
+    assert "no diff text to review" in _review_request_text(transport)

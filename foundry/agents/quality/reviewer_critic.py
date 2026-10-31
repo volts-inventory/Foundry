@@ -32,6 +32,8 @@ from foundry.agents.quality._common import (
     state_sha,
     subject_artifact_uri,
 )
+from foundry.durability.artifact_store import UnknownArtifactError
+from foundry.schemas.implementation import FeatureDiff
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -94,6 +96,49 @@ def _attested_tree_sha(state: FactoryState) -> str | None:
         if getattr(g, "run_against", "") and (best is None or g.seq > best.seq):
             best = g
     return str(best.run_against) if best is not None else None
+
+# Keeps the review request inside a sane context/cost budget on large builds.
+_DIFF_CHAR_CAP = 60_000
+
+
+def _diff_text(rt: AgentRuntime, state: FactoryState) -> str:
+    """The change under review as unified-diff text: every ``feature_diff`` body in
+    ``Seq`` order (the order ``materialize_workdir`` applies them), capped at
+    :data:`_DIFF_CHAR_CAP`. The judge cannot dereference a ``cas://`` uri, so
+    without this it sees only a handle and can never approve."""
+    handles = sorted(
+        (a for a in (state.get("artifacts") or ()) if a.kind == _FEATURE_DIFF_KIND),
+        key=lambda a: a.seq,
+    )
+    if not handles:
+        return "(No feature_diff artifacts on state: there is no diff text to review.)"
+    if rt.cas is None:
+        return "(No artifact store is wired: the diff text could not be resolved.)"
+    parts: list[str] = []
+    missing: list[str] = []
+    for handle in handles:
+        try:
+            body = rt.cas.resolve(handle)
+            if not isinstance(body, FeatureDiff):
+                missing.append(handle.uri)
+                continue
+            text = rt.cas.resolve_blob(body.diff_uri).decode("utf-8", errors="replace")
+        except UnknownArtifactError:
+            missing.append(handle.uri)
+            continue
+        parts.append(f"--- task {handle.task_id or body.task_id} ({handle.uri}) ---\n{text}")
+    if not parts:
+        return "(None of the feature_diff bodies could be resolved: no diff text to review.)"
+    out = "\n\n".join(parts)
+    if len(out) > _DIFF_CHAR_CAP:
+        out = (
+            out[:_DIFF_CHAR_CAP]
+            + f"\n\n[TRUNCATED: showing the first {_DIFF_CHAR_CAP} of {len(out)} chars.]"
+        )
+    if missing:
+        out += "\n\n[Unresolvable diffs, not shown: " + ", ".join(missing) + "]"
+    return out
+
 
 _SOP = (
     "You are the Reviewer/Critic, the evaluator side of the evaluator-optimizer "
@@ -165,6 +210,7 @@ def review(
         content += "\n\nAcceptance criteria:\n" + "\n".join(
             f"- {c.id} [{c.criticality}]: {c.text}" for c in criteria
         )
+    content += "\n\nThe change (unified diffs, applied in order):\n" + _diff_text(rt, state)
     result = rt.proxy.judge(
         node_id,
         subject_uri,

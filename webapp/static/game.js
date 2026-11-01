@@ -200,6 +200,9 @@ const pick = (arr)=> arr[Math.floor(Math.random()*arr.length)];
 // a small face, a narrow slate body with one accent colour, and two split leg stubs.
 // Character sprites come from the route1rodent sheet (see CHARACTERS / makePerson
 // below) — the old procedural pixel body + per-role hair/skin/accent kit is gone.
+// Reduced motion: the confetti, glows, shakes and decorative hops are skipped; the
+// moves that carry meaning (someone walking to a room, a door opening) still play.
+const calm = () => !!(window.A11y && A11y.reducedMotion());
 function hashStr(s){ let h=2166136261; for(let i=0;i<s.length;i++){ h^=s.charCodeAt(i); h=Math.imul(h,16777619); } return h>>>0; }
 // route1rodent CC BY-SA 4.0 sheet -> 13x6 grid of 64px frames (assets/sprites/CREDITS.md).
 // frame index = row*13 + col. 10 characters; `front` = walk frames (cycle), `back` =
@@ -915,6 +918,7 @@ class FloorScene extends Phaser.Scene {
       onComplete:()=>t.destroy()});
   }
   burst(x,y,colors,n){
+    if (calm()) return;
     n = n||12;
     for (let i=0;i<n;i++){
       const ang=(Math.PI*2*i)/n + (x%6)/6, sp=44+(i%4)*22;
@@ -925,20 +929,21 @@ class FloorScene extends Phaser.Scene {
     }
   }
   ring(x,y,color){
+    if (calm()) return;
     const r=this.add.circle(x,y,8,color,0).setStrokeStyle(3,color).setDepth(41);
     this.tweens.add({targets:r, scale:{from:0.4,to:4}, alpha:{from:0.9,to:0}, duration:520,
       onComplete:()=>r.destroy()});
   }
-  shake(ms,amt){ this.cameras.main.shake(ms||300, amt||0.012); }
+  shake(ms,amt){ if (!calm()) this.cameras.main.shake(ms||300, amt||0.012); }
   hop(a, times){
-    if (!a) return; const y0=a.y; let i=0; times=times||1;
+    if (!a || calm()) return; const y0=a.y; let i=0; times=times||1;
     const up=()=>{
       if (a.bob) this.tweens.add({targets:a.bob, scaleY:0.86, duration:60, yoyo:true, ease:"Quad.out"}); // anticipation squash
       this.tweens.add({targets:a, y:y0-15, duration:130, delay:55, ease:"Quad.out", yoyo:true,
         onComplete:()=>{ a.y=y0; if (++i<times) up(); }}); };
     up();
   }
-  deskIdle(a){ if (!a || !a.bob) return; this.stopDeskIdle(a);
+  deskIdle(a){ if (!a || !a.bob || calm()) return; this.stopDeskIdle(a);
     a.breathe = this.tweens.add({targets:a.bob, y:{from:0,to:-1}, duration:1500, yoyo:true, repeat:-1, ease:"Sine.inOut"}); }
   stopDeskIdle(a){ if (a && a.breathe){ a.breathe.stop(); a.breathe=null; if (a.bob) a.bob.y=0; } }
   codeGlyph(a){
@@ -967,6 +972,7 @@ class FloorScene extends Phaser.Scene {
     this.confetti();
   }
   confetti(){
+    if (calm()) return;
     const cols=[0xff5d6c,0x5ddc7a,0x5db8ff,0xffcf52,0xff8fae,0xb59bff];
     for (let i=0;i<72;i++){
       const x=20+Math.abs((i*97)%(W-40)), c=cols[i%cols.length];
@@ -1083,7 +1089,7 @@ class FloorScene extends Phaser.Scene {
     this.add.ellipse(x, y+10, 92, 30).setStrokeStyle(1, shade(R.color,1.7)).setDepth(0).setAlpha(0.4);
     this.add.ellipse(x, y+14, 56, 16, shade(R.color,1.3), 0.5).setDepth(0);   // pedestal top
     this.chestGlow = this.add.rectangle(x,y-20,120,120,0xffd25a,0.10).setDepth(4);
-    this.tweens.add({targets:this.chestGlow, fillAlpha:{from:0.06,to:0.14}, duration:2200, yoyo:true, repeat:-1});
+    if (!calm()) this.tweens.add({targets:this.chestGlow, fillAlpha:{from:0.06,to:0.14}, duration:2200, yoyo:true, repeat:-1});
     const c = this.add.container(x,y).setDepth(5).setScale(1.3);
     c.add(this.add.ellipse(0,15,40,8,PC.shadow,0.32));
     c.add(this.add.rectangle(0,3,36,18,0x7a3b1a));
@@ -1215,6 +1221,7 @@ class FloorScene extends Phaser.Scene {
     if (a.glowTween){ a.glowTween.stop(); a.glowTween = null; }
     if (!on){ a.glow.setAlpha(0).setVisible(false); return; }
     a.glow.setVisible(true).setAlpha(1);
+    if (calm()) return;                  // a steady halo still says "working"
     a.glowTween = this.tweens.add({targets:a.glow, alpha:{from:0.62,to:1},
       duration:760, yoyo:true, repeat:-1, ease:"Sine.inOut"});
   }
@@ -1725,7 +1732,7 @@ class FloorScene extends Phaser.Scene {
   flashGate(){
     this.tweens.add({targets:this.gateDoor, fillColor:{from:0x5a1820,to:0x0c1322},
       duration:520, onUpdate:(_t,o)=>this.gateDoor.setFillStyle(o.fillColor)});
-    this.cameras.main.shake(160, 0.004);
+    this.shake(160, 0.004);
   }
 
   openGateAndChest(){
@@ -1740,6 +1747,7 @@ class FloorScene extends Phaser.Scene {
       this.chestClosed.setVisible(false);
       this.chestOpen.setVisible(true).setScale(1,0);
       this.tweens.add({targets:this.chestOpen, scaleY:1, duration:300, ease:"Back.out"});
+      if (calm()){ this.chestGlow.fillAlpha = 0.3; return; }
       this.tweens.add({targets:this.chestGlow, fillAlpha:0.34, duration:400, yoyo:true,
         repeat:-1, ease:"Sine.inOut"});
       this.ring(this.chestPos.x, this.chestPos.y-12, 0xffd95e);
@@ -2028,7 +2036,7 @@ async function newProject(req, extra){
   const floor = resp.floor;
   const slots = 1;
   const F = {
-    id: resp.id, floor, request:req, mode, backend:"", scene:null,
+    id: resp.id, floor, request:req, title:resp.title || req, mode, backend:"", scene:null,
     log:[], progress:[], gates:{}, org:null, status:"running", passed:false,
     slots, seenUris:new Set(), phase:"", stopping:"",
     tokenCap:(extra && extra.token_cap) || null, maxFix:3, cursor:0,
@@ -2135,7 +2143,7 @@ function renderTickets(F){
   const rows = F && F.tasks ? [...F.tasks.tickets.values()] : [];
   if (!rows.length){
     const li = document.createElement("li"); li.className = "tk-empty";
-    li.textContent = "No tickets yet — the Planner writes them."; ul.appendChild(li); return;
+    li.textContent = "No tickets yet. The Planner splits the request into tickets; each one shows its owner, difficulty and status here."; ul.appendChild(li); return;
   }
   rows.sort((a, b)=>a.id.localeCompare(b.id, undefined, {numeric:true}));
   for (const r of rows){
@@ -2307,6 +2315,7 @@ function routeEvent(floor, ev){
         logProgress(F, "gold", "■ Build "+ev.phase+" — resumable.");
         break;
       }
+      if (window.Notify) Notify.buildEnded(F, ev);
       logTo(F, ev.passed?"good":"bad",
         ev.passed?"Build complete — shipped.":"Build halted — nothing shipped.");
       logProgress(F, ev.passed?"good":"bad",
@@ -2337,9 +2346,10 @@ function showLimitToast(until){
   if (!until || until <= now) return;
   let t = document.getElementById("limit-toast");
   if (!t){
-    t = document.createElement("div"); t.id = "limit-toast";
+    t = document.createElement("div"); t.id = "limit-toast"; t.setAttribute("role", "status");
     const msg = document.createElement("span"); msg.id = "limit-toast-msg";
     const x = document.createElement("button"); x.textContent = "✕";
+    x.type = "button"; x.title = "Dismiss"; x.setAttribute("aria-label", "Dismiss the usage-limit notice");
     x.onclick = ()=>{ if (t._iv) clearInterval(t._iv); t.remove(); };
     t.appendChild(msg); t.appendChild(x);
     document.body.appendChild(t);
@@ -2605,7 +2615,10 @@ function rebuildProgress(F){
 // Switch the quest-log panel between the LIVE feed and the PROGRESS skim.
 function selectLogTab(tab){
   const F = FLOORS.get(ACTIVE);
-  document.querySelectorAll(".log-tab").forEach(b=>b.classList.toggle("sel", b.dataset.tab===tab));
+  document.querySelectorAll(".log-tab").forEach(b=>{
+    b.classList.toggle("sel", b.dataset.tab===tab);
+    b.setAttribute("aria-pressed", String(b.dataset.tab===tab));
+  });
   for (const [t, id] of [["live","log"], ["progress","progress"], ["tickets","tickets"]]){
     const el = document.getElementById(id); if (el) el.style.display = t===tab ? "" : "none";
   }
@@ -2617,10 +2630,16 @@ function selectLogTab(tab){
   else if (logFollow) scrollLogToEnd();
   else showLogJump(true);
 }
+const GATE_MARK = {pass:"✓", fail:"✗", error:"!"};
+const GATE_WORD = {pass:"passed", fail:"failed", error:"error"};
 function renderGatesMini(gates){
   const el=document.getElementById("gates-mini"); el.innerHTML="";
   for(const n of GATE_ORDER){ const g=gates[n]; if(!g) continue;
-    const s=document.createElement("span"); s.className="g "+(g.status); s.textContent=n;
+    const s=document.createElement("span"); s.className="g "+(g.status);
+    const mark = GATE_MARK[g.status] || "…";
+    s.textContent = mark+" "+n;
+    s.title = n+": "+(GATE_WORD[g.status] || g.status || "pending");
+    s.setAttribute("aria-label", s.title);
     el.appendChild(s);}
 }
 function updateHud(F){
@@ -2647,24 +2666,38 @@ function updateHud(F){
   const tail = (meta ? "· "+meta : F.mode ? "· "+F.mode : "") + (F.backend ? " · "+F.backend : "");
   document.getElementById("mode-tag").textContent = tail.trim();
 }
+// A floor's state in words and a mark, so it never rests on colour alone.
+function floorState(F){
+  if (F.status !== "done") return F.status === "queued" ? {mark:"…", word:"queued"} : {mark:"●", word:"running"};
+  if (F.passed) return {mark:"✓", word:"shipped"};
+  if (OPERATOR_STOP.has(F.phase)) return {mark:"❚❚", word:F.phase};
+  if (F.phase === "token_cap" || F.phase === "time_cap") return {mark:"■", word:F.phase.replace("_", " ")};
+  return {mark:"✗", word:"halted"};
+}
 function renderElevator(){
   const el=document.getElementById("el-floors"); el.innerHTML="";
   // Floor 0 — the GitHub home: a hub of every build's repo. Always present, even
   // before any project exists, so the repositories are always one click away.
-  const hub=document.createElement("button");
+  const hub=document.createElement("button"); hub.id="el-floor-0";
   hub.className="el-btn hub"+(REPOS_OPEN?" active":"");
   hub.title="Floor 0 — repositories (every build's code)";
-  hub.innerHTML=`<span class="fl-no">0</span>⌥`;
+  hub.setAttribute("aria-label", hub.title);
+  if (REPOS_OPEN) hub.setAttribute("aria-current", "true");
+  hub.innerHTML=`<span class="fl-no">0</span><span aria-hidden="true">⌥</span>`;
   hub.onclick=()=>openRepoHub();
   el.appendChild(hub);
   for (const f of [...FLOORS.keys()].sort((a,b)=>a-b)){
     const F=FLOORS.get(f);
-    const btn=document.createElement("button");
+    const btn=document.createElement("button"); btn.id="el-floor-"+f;
     let cls="el-btn";
     if (f===ACTIVE) cls+=" active";
     if (F.status==="done") cls += F.passed ? " done" : OPERATOR_STOP.has(F.phase) ? " paused" : " failed";
     btn.className=cls;
-    btn.innerHTML=`<span class="fl-no">${f}</span>FL`;
+    const st = floorState(F);
+    btn.innerHTML=`<span class="fl-no">${f}</span><span class="fl-st" aria-hidden="true">${st.mark}</span>`;
+    const name = "Floor "+f+": "+(F.title || F.request || "untitled")+" ("+st.word+")";
+    btn.title = name; btn.setAttribute("aria-label", name);
+    if (f===ACTIVE) btn.setAttribute("aria-current", "true");
     btn.onclick=()=>switchToFloor(f);
     el.appendChild(btn);
   }
@@ -2682,6 +2715,7 @@ function openFiles(){
 // Open the file viewer for any build (`meta` = {id, floor}) — used by the active
 // floor AND by the Floor 0 repo hub.
 function openFilesFor(meta){
+  document.getElementById("files-q").value = "";
   document.getElementById("files-list").innerHTML = "";
   document.getElementById("files-view").textContent = "";
   document.getElementById("files-floor").textContent = "Floor "+meta.floor;
@@ -2695,48 +2729,87 @@ function repoSlug(req){
   const s = String(req||"project").toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"");
   return s.split("-").filter(Boolean).slice(0,5).join("-") || "project";
 }
-// Open the hub: list every build that produced code (newest first). The catalog
-// grows as more floors finish, so each open reflects the latest set of repos.
+// Open the hub: every floor, searched and filtered on the server (/api/builds).
+const REPO_STATUS = {
+  shipped:{mark:"✔", word:"shipped", cls:"ok"}, halted:{mark:"✗", word:"halted", cls:"bad"},
+  stopped:{mark:"❚❚", word:"stopped", cls:"warn"}, running:{mark:"●", word:"running", cls:"live"},
+};
+let REPO_FETCH = 0;
+let REPO_TIMER = null;
 function openRepoHub(){
-  const modal = document.getElementById("repos-modal");
+  document.getElementById("repos-modal").classList.remove("hidden");
+  REPOS_OPEN = true; renderElevator();
+  loadRepoList();
+}
+function repoQuery(){
+  const p = new URLSearchParams();
+  const q = document.getElementById("repo-q").value.trim();
+  const st = document.getElementById("repo-status").value;
+  const sort = document.getElementById("repo-sort").value;
+  if (q) p.set("q", q);
+  if (st !== "all") p.set("status", st);
+  if (sort !== "newest") p.set("sort", sort);
+  return p.toString();
+}
+function loadRepoList(){
   const list = document.getElementById("repos-list");
   const cnt = document.getElementById("repos-count");
-  list.innerHTML = "<li class='muted'>Loading…</li>"; cnt.textContent = "";
-  modal.classList.remove("hidden");
-  REPOS_OPEN = true; renderElevator();
-  fetch("/api/builds")
-    .then(r => r.ok ? r.json() : {builds:[]})
-    .then(({builds}) => {
-      const repos = (builds||[]).filter(b => b.has_repo)
-        .sort((a,b) => String(b.created_at||"").localeCompare(String(a.created_at||"")));
-      cnt.textContent = repos.length ? `${repos.length} ${repos.length===1?"repository":"repositories"}` : "";
+  const ticket = ++REPO_FETCH;           // a slow answer to an older query is dropped
+  if (!list.children.length) list.innerHTML = "<li class='muted'>Loading…</li>";
+  const qs = repoQuery();
+  fetch("/api/builds"+(qs ? "?"+qs : ""))
+    .then(r => r.json().then(d => { if (!r.ok) throw new Error(d.error || "HTTP "+r.status); return d; }))
+    .then(d => {
+      if (ticket !== REPO_FETCH) return;
+      const builds = d.builds || [];
+      const filtered = !!qs && qs !== "sort=oldest";
+      cnt.textContent = filtered ? `${builds.length} of ${d.total}`
+        : builds.length ? `${builds.length} ${builds.length===1?"repository":"repositories"}` : "";
       list.innerHTML = "";
-      if(!repos.length){
-        list.innerHTML = "<li class='muted'>No repositories yet — finish a build and its code lands here.</li>";
+      if (!builds.length){
+        const li = document.createElement("li"); li.className = "muted empty";
+        li.textContent = d.total
+          ? "No build matches. Try fewer words or another status."
+          : "No repositories yet. Start a build: when it finishes, its code shows up here, "+
+            "ready to browse or download as a .zip.";
+        list.appendChild(li);
         return;
       }
-      for(const b of repos) list.appendChild(repoRow(b));
+      for (const b of builds) list.appendChild(repoRow(b));
     })
-    .catch(() => { list.innerHTML = "<li class='muted'>(could not load repositories)</li>"; });
+    .catch(err => {
+      if (ticket !== REPO_FETCH) return;
+      list.innerHTML = "";
+      const li = document.createElement("li"); li.className = "muted";
+      li.textContent = "Could not load repositories ("+err.message+").";
+      list.appendChild(li);
+    });
 }
 function repoRow(b){
-  const li = document.createElement("li"); li.className = "repo-item";
-  const ok = b.passed ? "ok" : "bad";
-  const pill = b.passed ? "✓ passing" : "✗ failing";
+  const st = REPO_STATUS[b.status] || REPO_STATUS.halted;
   const when = b.created_at ? String(b.created_at).slice(0,10) : "";
-  li.innerHTML =
-    `<div class="repo-row1">`+
-      `<span class="repo-name">${escapeHtml(repoSlug(b.request))}</span>`+
-      `<span class="repo-vis">store</span>`+
-      `<span class="repo-pill ${ok}">${pill}</span>`+
-    `</div>`+
-    `<div class="repo-desc">${escapeHtml(b.request||"")}</div>`+
-    `<div class="repo-meta">`+
+  const live = b.status === "running";
+  return listRow("repo-item",
+    `<span class="repo-row1">`+
+      `<span class="repo-name">${escapeHtml(b.title || repoSlug(b.request))}</span>`+
+      `<span class="repo-pill ${st.cls}">${st.mark} ${st.word}</span>`+
+    `</span>`+
+    `<span class="repo-desc">${escapeHtml(b.request||"")}</span>`+
+    `<span class="repo-meta">`+
       `<span>⌥ floor ${b.floor}</span>`+
-      (when ? `<span>updated ${when}</span>` : ``)+
-    `</div>`;
-  li.onclick = () => { closeRepoHub();
-    openFilesFor(b); };
+      (when ? `<span>started ${when}</span>` : ``)+
+    `</span>`,
+    () => { closeRepoHub();
+      if (live && FLOORS.has(b.floor)) switchToFloor(b.floor); else openFilesFor(b); });
+}
+// A list row whose whole body is one real <button> (keyboard and screen readers
+// get a button; the list keeps its list semantics).
+function listRow(cls, html, onclick, title){
+  const li = document.createElement("li"); li.className = cls;
+  const b = document.createElement("button"); b.type = "button"; b.className = "row-btn";
+  b.innerHTML = html; b.onclick = onclick;
+  if (title) b.title = title;
+  li.appendChild(b);
   return li;
 }
 function closeRepoHub(){
@@ -2761,12 +2834,37 @@ function renderTree(id, files){
   const view = document.getElementById("files-view");
   const list = document.getElementById("files-list");
   const crumb = document.getElementById("files-crumb");
+  const q = document.getElementById("files-q");
+  q.disabled = !FILES_TREE.length;
   if(!FILES_TREE.length){
-    list.innerHTML = "<li class='muted'>No files yet — finish a build (its code lands in the store).</li>";
+    list.innerHTML = "<li class='muted'>No files yet. A build writes its code here as its tickets land; "+
+      "a build stopped before any ticket finished has nothing to show.</li>";
     crumb.innerHTML = ""; view.textContent = ""; return;
   }
   view.textContent = "Select a file…";
-  renderDir("");                     // start at the repo root, GitHub-style
+  if (q.value.trim()) renderMatches(q.value); else renderDir("");   // the repo root, GitHub-style
+}
+function fileRow(f, label){
+  const li = listRow("file",
+    `<span class='ico' aria-hidden='true'>≡</span><span class='nm'>${escapeHtml(label)}</span>`+
+    `<span class='meta'>${f.size}b</span>`, () => viewFile(FILES_ID, f.path, li), f.path);
+  return li;
+}
+// The filter box: every file whose path contains the text, shown flat by full path.
+function renderMatches(text){
+  const list = document.getElementById("files-list");
+  const crumb = document.getElementById("files-crumb");
+  const words = text.toLowerCase().split(/\s+/).filter(Boolean);
+  const hits = FILES_TREE.filter(f => words.every(w => f.path.toLowerCase().includes(w)));
+  list.innerHTML = ""; crumb.innerHTML = "";
+  const note = document.createElement("span"); note.className = "crumb here"; note.setAttribute("role", "status");
+  note.textContent = hits.length+" of "+FILES_TREE.length+" files match";
+  crumb.appendChild(note);
+  if (!hits.length){
+    list.innerHTML = "<li class='muted'>No file name matches that. Clear the filter to browse the folders.</li>";
+    return;
+  }
+  for (const f of hits.sort((a,b) => a.path.localeCompare(b.path))) list.appendChild(fileRow(f, f.path));
 }
 // Immediate children of `dir` folded out of the flat path list: subfolders
 // (with a descendant count) first, then files — each sorted alphabetically.
@@ -2796,10 +2894,11 @@ function renderDir(dir){
   list.innerHTML = ""; crumb.innerHTML = "";
   // breadcrumb: ⌂ root / a / b — every ancestor is a jump-up link.
   const crumbLink = (label, target) => {
-    const s = document.createElement("span");
+    const s = document.createElement(target === dir ? "span" : "button");
     s.className = "crumb" + (target === dir ? " here" : "");
     s.textContent = label;
-    if(target !== dir) s.onclick = () => renderDir(target);
+    if(target !== dir){ s.type = "button"; s.onclick = () => renderDir(target); }
+    else s.setAttribute("aria-current", "location");
     return s;
   };
   crumb.appendChild(crumbLink("⌂ root", ""));
@@ -2813,35 +2912,24 @@ function renderDir(dir){
   const {folders, files} = dirChildren(dir);
   // ".." row to step back up one level (absent at the root).
   if(dir){
-    const up = document.createElement("li"); up.className = "dir up";
-    up.innerHTML = "<span class='ico'>⮬</span><span class='nm'>..</span>";
     const parent = dir.includes("/") ? dir.slice(0, dir.lastIndexOf("/")) : "";
-    up.onclick = () => renderDir(parent);
-    list.appendChild(up);
+    list.appendChild(listRow("dir up",
+      "<span class='ico' aria-hidden='true'>⮬</span><span class='nm'>..</span><span class='sr-only'> up one folder</span>",
+      () => renderDir(parent), "Up one folder"));
   }
   for(const fld of folders){
-    const li = document.createElement("li"); li.className = "dir";
-    li.innerHTML = `<span class='ico'>▸</span><span class='nm'>${escapeHtml(fld.name)}/</span>`+
-                   `<span class='meta'>${fld.count}</span>`;
-    li.title = fld.name;
     const target = dir ? dir + "/" + fld.name : fld.name;
-    li.onclick = () => renderDir(target);
-    list.appendChild(li);
+    list.appendChild(listRow("dir",
+      `<span class='ico' aria-hidden='true'>▸</span><span class='nm'>${escapeHtml(fld.name)}/</span>`+
+      `<span class='meta'>${fld.count}<span class='sr-only'> files</span></span>`,
+      () => renderDir(target), fld.name));
   }
-  for(const f of files){
-    const li = document.createElement("li"); li.className = "file";
-    const name = f.path.slice(f.path.lastIndexOf("/") + 1);
-    li.innerHTML = `<span class='ico'>≡</span><span class='nm'>${escapeHtml(name)}</span>`+
-                   `<span class='meta'>${f.size}b</span>`;
-    li.title = f.path;
-    li.onclick = () => viewFile(FILES_ID, f.path, li);
-    list.appendChild(li);
-  }
+  for(const f of files) list.appendChild(fileRow(f, f.path.slice(f.path.lastIndexOf("/") + 1)));
 }
 function escapeHtml(s){ return String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
 function viewFile(id, path, li){
-  for(const c of document.getElementById("files-list").children) c.classList.remove("sel");
-  if(li) li.classList.add("sel");
+  for(const c of document.getElementById("files-list").children){ c.classList.remove("sel"); c.removeAttribute("aria-current"); }
+  if(li){ li.classList.add("sel"); li.setAttribute("aria-current", "true"); }
   const view = document.getElementById("files-view");
   view.textContent = "Loading…";
   let cut = null;   // the file's full size when the server cut it at the view cap
@@ -2859,6 +2947,7 @@ const OPERATOR_STOP = new Set(["stopped", "paused"]);
 // checkpoint to resume from.
 const RESUMABLE = new Set(["stopped", "paused", "halted", "token_cap", "time_cap", "error"]);
 const MAX_FIX = 20;
+const MAX_TIME_MIN = 7 * 24 * 60;
 let CTL_TIMER = null;
 
 function ctlButton(icon, label, title, onclick, cls){
@@ -2889,7 +2978,7 @@ function renderControls(){
   if (!F.passed && RESUMABLE.has(F.phase)){
     el.append(
       ctlButton("▶", "RESUME", "Resume from the last checkpoint", () => resumeFloor(F, {}), "primary"),
-      ctlButton("↻", "RETRY WITH…", "Resume with a new token cap or more fix attempts", () => showRetryForm(F)));
+      ctlButton("↻", "RETRY WITH…", "Resume with a new token cap, time cap or more fix attempts", () => showRetryForm(F)));
   }
   if (F.passed) el.append(ctlButton("✎", "CHANGE", "Change this build — plan and build only the delta on a new floor", () => showNewModal(F)));
   el.append(ctlButton("✕", "DELETE", "Delete this floor and its output", () => showDeleteConfirm(F), "danger"));
@@ -2907,7 +2996,8 @@ function ctlMessage(text, bad){
   const p = ctlPanel(bad ? "bad" : "ok");
   const m = document.createElement("span"); m.textContent = text;
   const x = document.createElement("button"); x.type = "button"; x.className = "ctl-x";
-  x.textContent = "✕"; x.title = "dismiss"; x.setAttribute("aria-label", "dismiss"); x.onclick = hideCtlPanel;
+  x.textContent = "✕"; x.title = "Dismiss"; x.setAttribute("aria-label", "Dismiss"); x.onclick = hideCtlPanel;
+  x.dataset.dismiss = "";
   p.append(m, x);
   CTL_TIMER = setTimeout(hideCtlPanel, bad ? 9000 : 4000);
 }
@@ -2956,9 +3046,13 @@ function showRetryForm(F){
     placeholder: F.tokenCap ? String(F.tokenCap) : "no cap"});
   const fix = field("Fix attempts", {min:"0", max:String(MAX_FIX), inputmode:"numeric",
     placeholder: String(F.maxFix ?? 3)});
+  const curMin = F.build && F.build.time_cap_minutes;
+  const mins = field("Time cap (min)", {min:"0", step:"any", inputmode:"decimal",
+    placeholder: curMin ? String(curMin) : "no cap"});
   const go = document.createElement("button"); go.type = "submit"; go.className = "primary"; go.textContent = "▶ Resume";
   const no = document.createElement("button"); no.type = "button"; no.textContent = "cancel"; no.onclick = hideCtlPanel;
-  const err = document.createElement("span"); err.className = "ctl-err";
+  no.dataset.dismiss = "";
+  const err = document.createElement("span"); err.className = "ctl-err"; err.setAttribute("role", "alert");
   form.append(go, no, err);
   form.oninput = () => { err.textContent = ""; };
   form.onsubmit = e => {
@@ -2975,6 +3069,12 @@ function showRetryForm(F){
       if (!Number.isInteger(n) || n < 0 || n > MAX_FIX){ err.textContent = "Fix attempts: 0 to "+MAX_FIX+"."; return; }
       body.max_fix_attempts = n;
     }
+    const m = mins.value.trim();
+    if (m !== ""){
+      const n = Number(m);
+      if (!Number.isFinite(n) || n < 0 || n > MAX_TIME_MIN){ err.textContent = "Time cap: minutes, 0 to "+MAX_TIME_MIN+" (0 = no cap)."; return; }
+      body.time_cap_minutes = n;
+    }
     resumeFloor(F, body);
   };
   p.appendChild(form);
@@ -2986,6 +3086,7 @@ function showDeleteConfirm(F){
   m.textContent = "Delete floor "+F.floor+" and its output? This can't be undone.";
   const yes = document.createElement("button"); yes.type = "button"; yes.className = "danger"; yes.textContent = "✕ Delete";
   const no = document.createElement("button"); no.type = "button"; no.textContent = "cancel"; no.onclick = hideCtlPanel;
+  no.dataset.dismiss = "";
   yes.onclick = async () => {
     const d = await ctlRequest("DELETE", "/api/projects/"+F.id);
     if (!d) return;
@@ -3014,8 +3115,18 @@ function removeFloor(F){
 const newModal=document.getElementById("new-modal");
 function showNewModal(change){
   if (window.FoundrySettings) FoundrySettings.prepareForm(change || null);
+  document.getElementById("first-run").classList.toggle("hidden", FLOORS.size > 0 || !!change);
+  document.getElementById("req-err").textContent = "";
   newModal.classList.remove("hidden");
   syncSettingsSummary();
+}
+for (const ex of document.querySelectorAll("#examples .example")){
+  ex.onclick = () => {
+    const req = document.getElementById("req-input");
+    req.value = ex.textContent.trim();
+    req.dispatchEvent(new Event("input", {bubbles:true}));
+    req.focus();
+  };
 }
 document.getElementById("new-btn").onclick=()=>showNewModal();
 document.getElementById("cancel-btn").onclick=()=>newModal.classList.add("hidden");
@@ -3039,7 +3150,10 @@ function syncSettingsSummary(){
 newModal.addEventListener("input", syncSettingsSummary);
 document.getElementById("start-btn").onclick=()=>{
   const req=document.getElementById("req-input").value.trim();
-  if(!req){ alert("Describe what to build."); return; }
+  const reqErr = document.getElementById("req-err");
+  if(!req){ reqErr.textContent = "Describe what to build first."; document.getElementById("req-input").focus(); return; }
+  reqErr.textContent = "";
+  if (window.Notify) Notify.askOnce();
   const adv = window.FoundrySettings ? FoundrySettings.formExtra() : {};
   if (adv === null) return;
   const extra={workers:readWorkers(), ...adv};
@@ -3054,6 +3168,16 @@ for (const t of document.querySelectorAll(".log-tab")) t.onclick = () => selectL
 document.getElementById("files-close").onclick=hideFiles;
 document.getElementById("repos-close").onclick=closeRepoHub;
 document.getElementById("repos-new").onclick=()=>{ closeRepoHub(); showNewModal(); };
+document.getElementById("repo-q").addEventListener("input", () => {
+  clearTimeout(REPO_TIMER); REPO_TIMER = setTimeout(loadRepoList, 200);
+});
+document.getElementById("repo-status").onchange = loadRepoList;
+document.getElementById("repo-sort").onchange = loadRepoList;
+document.getElementById("files-q").addEventListener("input", e => {
+  if (!FILES_TREE.length) return;
+  if (e.target.value.trim()) renderMatches(e.target.value); else renderDir(FILES_CWD);
+});
+window.Workshop = {showFloor: f => { if (FLOORS.has(f)) switchToFloor(f); }};
 document.getElementById("repos-clear").onclick=async ()=>{
   if(!confirm("Clear ALL floors and repositories? This wipes every build from the catalog and cannot be undone.")) return;
   try{
@@ -3079,6 +3203,7 @@ function adoptFloor(row){
     status:row.status, passed:!!row.passed, slots:row.slots||1, seenUris:new Set(),
     phase:row.phase||"", stopping:row.stopping||"", tokenCap:row.token_cap ?? null,
     maxFix:row.max_fix_attempts ?? 3, cursor:0, build:row.build || null,
+    title:row.title || row.request,
   };
   FLOORS.set(row.floor, F);
   GAME.scene.add(floorKey(row.floor), FloorScene, true,
@@ -3114,7 +3239,7 @@ async function rehydrate(){
     return;
   }
   if (window.Insight) Insight.rehydrated();
-  if(!projects.length){ showNewModal(); return; }
+  if(!projects.length){ renderElevator(); showNewModal(); return; }
   for(const row of projects) adoptFloor(row);
   switchToFloor(projects[projects.length-1].floor);
   renderElevator();

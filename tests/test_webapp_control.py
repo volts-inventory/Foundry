@@ -243,6 +243,61 @@ def test_retry_a_halted_build_with_more_fix_attempts(env, monkeypatch):
     assert _call(env, "POST", f"/api/projects/{p.id}/resume")[0] == 409   # shipped
 
 
+def test_resume_a_time_capped_build_with_a_new_time_cap(env, monkeypatch):
+    import foundry.cli
+    from foundry.proxy.token_meter import TimeCapExceeded
+    from webapp import insight
+
+    calls: list[dict[str, Any]] = []
+
+    def fake_run(request, **kw):
+        calls.append(kw)
+        if len(calls) == 1:
+            ledger = insight.ledger_path(server._STATE_DIR, kw["thread_id"])
+            ledger.parent.mkdir(parents=True, exist_ok=True)
+            ledger.write_text(json.dumps({"used": 10, "elapsed_s": 30 * 60}))
+            raise TimeCapExceeded("time cap reached: 30.0 of 30.0 minutes used")
+        return SimpleNamespace(passed=True, phase="emitted", mode="assistant",
+                               artifact_uri=None, gate_statuses={})
+
+    monkeypatch.setattr(foundry.cli, "run", fake_run)
+    monkeypatch.setattr(server, "_has_durable_checkpoint", lambda _tid: True)
+    p = _new(env, time_cap_minutes=30)
+    _wait_ended(p)
+    assert p.phase == "time_cap" and calls[0]["time_cap_minutes"] == 30
+
+    resume = f"/api/projects/{p.id}/resume"
+    for junk in ({"time_cap_minutes": "soon"}, {"time_cap_minutes": True},
+                 {"time_cap_minutes": -5}, {"time_cap_minutes": 10**7},
+                 {"time_cap_minutes": float("inf")}):
+        assert _call(env, "POST", resume, junk)[0] == 400, junk
+    code, got = _call(env, "POST", resume, {"time_cap_minutes": 25})
+    assert code == 400 and "30.0 minutes already spent" in got["error"]
+    assert p.build["time_cap_minutes"] == 30 and p.phase == "time_cap"   # untouched
+
+    assert _call(env, "POST", resume, {"time_cap_minutes": 90})[0] == 200
+    _wait_ended(p)
+    assert calls[1]["time_cap_minutes"] == 90 and p.passed
+    resumed = [e for e in p.log if e["type"] == "resumed"][-1]
+    assert resumed["time_cap_minutes"] == 90
+    assert "90-minute time cap" in [e for e in p.log if e["type"] == "narrate"
+                                    and e["text"].startswith("▶")][-1]["text"]
+
+    # A restart re-reads the cap the latest resume set, so the next Resume keeps it.
+    server._PROJECTS.clear()
+    server._load_persisted()
+    assert server._PROJECTS[p.id].build["time_cap_minutes"] == 90
+
+
+def test_resume_with_time_cap_zero_lifts_the_cap(env, monkeypatch):
+    p = Project(id="t0", request="r", mode="assistant", floor=1, status="done",
+                ended=True, phase="stopped", build={"time_cap_minutes": 5})
+    server._PROJECTS["t0"] = p
+    monkeypatch.setattr(server, "_gated_runner", lambda *a, **k: None)
+    assert _call(env, "POST", "/api/projects/t0/resume", {"time_cap_minutes": 0})[0] == 200
+    assert p.build["time_cap_minutes"] is None
+
+
 def test_resume_and_stop_refuse_the_wrong_state(env):
     running = Project(id="r1", request="r", mode="assistant", floor=1)
     server._PROJECTS["r1"] = running
@@ -326,3 +381,74 @@ def test_new_routes_enforce_csrf_token_and_sign_in(env, monkeypatch, method, pat
     monkeypatch.setenv("FOUNDRY_AUTH", "1")
     assert _call(env, method, path)[0] == 401                     # not signed in
     assert server._PROJECTS["x1"].status == "running"             # nothing happened
+
+
+# --- the build list: search, filter, sort -------------------------------------- #
+
+def _floor(pid: str, floor: int, request: str, created: str, **kw: Any) -> Project:
+    p = Project(id=pid, request=request, mode="assistant", floor=floor,
+                created_at=created, **kw)
+    server._PROJECTS[pid] = p
+    return p
+
+
+@pytest.fixture
+def floors(env):
+    done = {"status": "done", "ended": True}
+    _floor("s1", 1, "Build me a URL shortener with custom slugs.", "2026-01-01T00:00:00",
+           passed=True, phase="passed", **done)
+    _floor("h1", 2, "a todo app\nwith tags", "2026-01-03T00:00:00", phase="halted", **done)
+    _floor("p1", 3, "Pomodoro timer", "2026-01-02T00:00:00", phase="paused", **done)
+    _floor("t1", 4, "Shortener analytics", "2026-01-04T00:00:00", phase="token_cap", **done)
+    _floor("r1", 5, "Weather dashboard", "2026-01-05T00:00:00")
+    return env
+
+
+def _ids(env: Any, query: str = "") -> list[str]:
+    code, got = _call(env, "GET", "/api/builds" + query)
+    assert code == 200, got
+    return [b["id"] for b in got["builds"]]
+
+
+def test_builds_list_every_floor_newest_first_with_a_status_and_title(floors):
+    code, got = _call(floors, "GET", "/api/builds")
+    assert code == 200 and got["total"] == 5
+    assert [b["id"] for b in got["builds"]] == ["r1", "t1", "h1", "p1", "s1"]
+    by = {b["id"]: b for b in got["builds"]}
+    assert {k: by[k]["status"] for k in by} == {
+        "s1": "shipped", "h1": "halted", "p1": "stopped", "t1": "halted", "r1": "running"}
+    assert by["s1"]["title"] == "URL shortener with custom slugs"
+    assert by["h1"]["title"] == "Todo app"
+    assert _ids(floors, "?sort=oldest") == ["s1", "p1", "h1", "t1", "r1"]
+
+
+def test_builds_filter_by_text_and_status(floors):
+    assert _ids(floors, "?q=shortener") == ["t1", "s1"]
+    assert _ids(floors, "?q=SHORTENER%20custom") == ["s1"]           # every word, any case
+    assert _ids(floors, "?q=tags") == ["h1"]                           # the whole request
+    assert _ids(floors, "?status=halted") == ["t1", "h1"]
+    assert _ids(floors, "?status=stopped") == ["p1"]
+    assert _ids(floors, "?status=running") == ["r1"]
+    assert _ids(floors, "?status=shipped&q=shortener") == ["s1"]
+    assert _ids(floors, "?status=all&q=&sort=") == ["r1", "t1", "h1", "p1", "s1"]
+    assert _ids(floors, "?q=nothing-like-this") == []
+
+
+@pytest.mark.parametrize("query,why", [
+    ("?status=done", "status must be"),
+    ("?sort=popular", "sort must be"),
+    ("?q=" + "x" * 201, "longer than"),
+    ("?page=2", "unknown query parameter"),
+    ("?status=halted&status=shipped", "more than once"),
+])
+def test_builds_refuse_bad_query_params(floors, query, why):
+    code, got = _call(floors, "GET", "/api/builds" + query)
+    assert code == 400 and why in got["error"]
+
+
+def test_request_title_names_a_floor_from_its_request():
+    t = server.request_title
+    assert t("please create an inventory tracker. It should…") == "Inventory tracker"
+    assert t("  ") == "Untitled build"
+    long = t("a " + "very " * 30 + "long request")
+    assert long.endswith("…") and len(long) <= 49 and "  " not in long

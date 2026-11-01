@@ -36,21 +36,11 @@ from foundry.proxy.local_transport import (
 DIFFICULTIES = ("trivial", "standard", "complex")
 DEFAULT_TICKET_TIERS = {"trivial": "T3", "standard": "T2", "complex": "T1"}
 SPEC_MAX_BYTES = 200 * 1024
-# A JSON body carrying a full-size spec, with room for escaping; anything bigger
-# is refused before it is read.
-MAX_BODY_BYTES = 1_000_000
 MAX_FIX_ATTEMPTS = 20
 MAX_TIME_CAP_MIN = 7 * 24 * 60
 MAX_COST_USD = 100_000
 _URL_MAX = 500
 SETTINGS_KEYS = ("model_mode", "levels", "ticket_tiers", "local_url", "local_model")
-
-
-def too_large(content_length: str | None) -> bool:
-    try:
-        return int(content_length or 0) > MAX_BODY_BYTES
-    except ValueError:
-        return True
 
 
 def _cloud_models(backend: str) -> dict[str, str]:
@@ -168,7 +158,7 @@ def client_view(settings: Mapping[str, Any], backend: str) -> dict[str, Any]:
     }
 
 
-def _optional_number(raw: Any, name: str) -> float | None:
+def optional_number(raw: Any, name: str) -> float | None:
     if raw is None or raw == "":
         return None
     if isinstance(raw, bool):
@@ -208,11 +198,11 @@ def parse_build_options(
         if max_fix > MAX_FIX_ATTEMPTS:
             raise ValueError(f"max_fix_attempts must be 0 to {MAX_FIX_ATTEMPTS}")
 
-    time_cap = _optional_number(body.get("time_cap_minutes"), "time_cap_minutes")
+    time_cap = optional_number(body.get("time_cap_minutes"), "time_cap_minutes")
     if time_cap is not None and not 0 < time_cap <= MAX_TIME_CAP_MIN:
         raise ValueError(f"time_cap_minutes must be more than 0 and at most {MAX_TIME_CAP_MIN}")
 
-    cost = _optional_number(body.get("cost_cap_usd"), "cost_cap_usd")
+    cost = optional_number(body.get("cost_cap_usd"), "cost_cap_usd")
     if cost is not None and not 0 < cost <= MAX_COST_USD:
         raise ValueError(f"cost_cap_usd must be more than 0 and at most {MAX_COST_USD}")
     cost_micro = round(cost * 1_000_000) if cost is not None else None

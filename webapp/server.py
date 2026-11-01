@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 import traceback
+import urllib.parse
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -222,13 +223,17 @@ def _whole(raw: Any, name: str) -> int:
     raise ValueError(f"{name} must be a whole number, 0 or more")
 
 
-def _resume_overrides(body: Mapping[str, Any]) -> tuple[int | None, int | None]:
-    """(token_cap, max_fix_attempts) from a resume body; ``None`` keeps the floor's
-    current value. A token cap of 0 (or null) lifts the cap. Raises ValueError."""
+def _resume_overrides(
+    body: Mapping[str, Any],
+) -> tuple[int | None, int | None, float | None]:
+    """(token_cap, max_fix_attempts, time_cap_minutes) from a resume body; ``None``
+    keeps the floor's current value. A token or time cap of 0 (or null) lifts that
+    cap. Raises ValueError."""
     if not isinstance(body, Mapping):
         raise ValueError("expected a JSON object")
     token_cap: int | None = None
     max_fix: int | None = None
+    time_cap: float | None = None
     if "token_cap" in body:
         raw = body["token_cap"]
         token_cap = 0 if raw in (None, "") else _whole(raw, "token_cap")
@@ -236,7 +241,64 @@ def _resume_overrides(body: Mapping[str, Any]) -> tuple[int | None, int | None]:
         max_fix = _whole(body["max_fix_attempts"], "max_fix_attempts")
         if max_fix > MAX_FIX_ATTEMPTS:
             raise ValueError(f"max_fix_attempts must be 0 to {MAX_FIX_ATTEMPTS}")
-    return token_cap, max_fix
+    if "time_cap_minutes" in body:
+        n = _settings.optional_number(body["time_cap_minutes"], "time_cap_minutes")
+        time_cap = 0.0 if n is None else n
+        if not 0 <= time_cap <= _settings.MAX_TIME_CAP_MIN:
+            raise ValueError(
+                f"time_cap_minutes must be 0 (no cap) to {_settings.MAX_TIME_CAP_MIN}")
+    return token_cap, max_fix, time_cap
+
+
+BUILD_STATUSES = ("shipped", "halted", "stopped", "running")
+BUILD_SORTS = ("newest", "oldest")
+QUERY_MAX = 200
+
+
+def build_status(p: Project) -> str:
+    """The floor's state as the build list filters it."""
+    if not p.ended or p.status != "done":
+        return "running"
+    if p.passed:
+        return "shipped"
+    return "stopped" if p.phase in ("stopped", "paused") else "halted"
+
+
+_TITLE_LEAD = re.compile(
+    r"^(please\s+)?((build|make|create|write|implement)(\s+me)?\s+)?(an?\s+|the\s+)?", re.I)
+
+
+def request_title(request: str, limit: int = 48) -> str:
+    """A short name for a floor: the request's first line or sentence, without a
+    leading "build me a…", cut at a word boundary."""
+    text = " ".join(str(request or "").split("\n", 1)[0].split())
+    text = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0].rstrip(".!? ")
+    text = _TITLE_LEAD.sub("", text) or text
+    if len(text) > limit:
+        head = text[:limit]
+        text = (head.rsplit(" ", 1)[0] if " " in head else head).rstrip(",;:- ") + "…"
+    return text[:1].upper() + text[1:] if text else "Untitled build"
+
+
+def parse_build_query(raw: str) -> dict[str, str]:
+    """``q``, ``status`` and ``sort`` from /api/builds' query string. Raises ValueError."""
+    params = urllib.parse.parse_qs(raw, keep_blank_values=True)
+    unknown = sorted(set(params) - {"q", "status", "sort"})
+    if unknown:
+        raise ValueError(f"unknown query parameter: {', '.join(unknown)}")
+    for k, v in params.items():
+        if len(v) > 1:
+            raise ValueError(f"{k} is given more than once")
+    q = params.get("q", [""])[0].strip()
+    if len(q) > QUERY_MAX:
+        raise ValueError(f"q is longer than {QUERY_MAX} characters")
+    status = params.get("status", [""])[0] or "all"
+    if status != "all" and status not in BUILD_STATUSES:
+        raise ValueError(f"status must be all or one of {', '.join(BUILD_STATUSES)}")
+    sort = params.get("sort", [""])[0] or "newest"
+    if sort not in BUILD_SORTS:
+        raise ValueError(f"sort must be one of {', '.join(BUILD_SORTS)}")
+    return {"q": q, "status": status, "sort": sort}
 
 
 def parse_ticket_tiers(raw: Any) -> dict[str, str]:
@@ -456,6 +518,8 @@ def _restore_controls(p: Project) -> None:
                 p.token_cap = e["token_cap"]
             if "max_fix_attempts" in e:
                 p.max_fix_attempts = int(e["max_fix_attempts"])
+            if t == "resumed" and "time_cap_minutes" in e:
+                p.build = {**p.build, "time_cap_minutes": e["time_cap_minutes"]}
             p.phase = ""
         elif t == "done":
             p.phase = "passed" if e.get("passed") else str(e.get("phase") or "halted")
@@ -636,6 +700,7 @@ def _floor_insight(p: Project) -> dict[str, Any]:
     out["halt"] = insight.halt_report(
         phase=p.phase or str(halt.get("phase") or "halted"),
         reason=str(halt.get("reason") or ""), token_cap=p.token_cap,
+        time_cap_s=_time_cap_s(p),
         max_fix_attempts=p.max_fix_attempts, resumable=_resumable(p, log), state=state,
         gates=p.gates, meter=meter, draft_files=len(repo.files) if repo else 0)
     return out
@@ -693,7 +758,7 @@ def waiting_on(p: Project, now: float | None = None, cap: int = 3) -> str:
 def _emit(p: Project, **event: Any) -> None:
     if event.get("type") == "done" and "meter" not in event:
         # Stops the floor's meter watcher first, so no reading lands after `done`.
-        event["meter"] = insight.finish_meter(p.id, _STATE_DIR, p.token_cap)
+        event["meter"] = insight.finish_meter(p.id, _STATE_DIR, p.token_cap, _time_cap_s(p))
     # Capture gate verdicts as they stream so /api/projects can rehydrate the HUD
     # pills after a reload (a finished build keeps showing its signed gate row).
     if event.get("type") == "gate":
@@ -896,14 +961,20 @@ def _announce_queue() -> None:
             _emit(q, type="queue", position=pos, slots=_MAX_CONCURRENT_BUILDS)
 
 
+def _time_cap_s(p: Project) -> float | None:
+    minutes = p.build.get("time_cap_minutes")
+    return float(minutes) * 60 if minutes else None
+
+
 def _run_metered(runner, p: Project, kwargs: Mapping[str, Any]) -> None:
     """Run the build with its live token/time meter streaming to the floor."""
     insight.start_meter(p.id, insight.MeterWatch(
-        _STATE_DIR, p.id, lambda ev: _emit(p, **ev), caps=lambda: (p.token_cap, None)))
+        _STATE_DIR, p.id, lambda ev: _emit(p, **ev),
+        caps=lambda: (p.token_cap, _time_cap_s(p))))
     try:
         runner(p, **kwargs)
     finally:
-        insight.finish_meter(p.id, _STATE_DIR, p.token_cap)   # no-op once `done` took it
+        insight.finish_meter(p.id, _STATE_DIR, p.token_cap, _time_cap_s(p))
 
 
 def _finish_stopped(p: Project) -> None:
@@ -1378,7 +1449,7 @@ class Handler(BaseHTTPRequestHandler):
             self._insight(m.group(1))
             return
         if path == "/api/builds":
-            self._list_builds()
+            self._list_builds(self.path.split("?", 1)[1] if "?" in self.path else "")
             return
         if path == "/api/settings":
             backend = _server_backend()
@@ -1539,11 +1610,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(403, {"error": denied})
             return
         m = _CONTROL_ROUTE.fullmatch(path)
-        if path in ("/api/projects", "/api/settings", "/api/settings/local-check") \
-                and _settings.too_large(self.headers.get("Content-Length")):
-            self.close_connection = True
-            self._json(413, {"error": "request too large"})
-        elif path == "/api/projects":
+        if path == "/api/projects":
             self._new_project()
         elif path == "/api/reset":
             self._reset()
@@ -1610,11 +1677,12 @@ class Handler(BaseHTTPRequestHandler):
         halted it (``cli._resume_seed``) with a fresh fix budget."""
         body = self._read_json()
         try:
-            token_cap, max_fix = _resume_overrides(body)
+            token_cap, max_fix, time_cap = _resume_overrides(body)
         except ValueError as exc:
             self._json(400, {"error": str(exc)})
             return
         from_checkpoint = _has_durable_checkpoint(pid)   # a DB probe: not under _LOCK
+        spent = insight.read_ledger(_STATE_DIR, pid)[1]   # the time cap counts all of it
         with _LOCK:
             p = _PROJECTS.get(pid)
             if p is None:
@@ -1633,6 +1701,13 @@ class Handler(BaseHTTPRequestHandler):
             if not from_checkpoint and p.phase not in ("stopped", "paused"):
                 self._json(409, {"error": "no checkpoint to resume from"})
                 return
+            if time_cap and time_cap * 60 <= spent:
+                # A cap at or under the time already spent would stop it again at once.
+                self._json(400, {"error": f"time_cap_minutes must be more than the "
+                                          f"{spent / 60:.1f} minutes already spent"})
+                return
+            if time_cap is not None:
+                p.build = {**p.build, "time_cap_minutes": time_cap or None}
             if token_cap is not None:
                 p.token_cap = token_cap or None      # 0 lifts the cap
             if max_fix is not None:
@@ -1652,10 +1727,13 @@ class Handler(BaseHTTPRequestHandler):
                 p.ended_at = None
         with contextlib.suppress(Exception):
             p.seen_uris |= _STORE.seen_of(p.id)  # don't re-emit what the floor already showed
-        _emit(p, type="resumed", token_cap=p.token_cap, max_fix_attempts=p.max_fix_attempts)
+        minutes = p.build.get("time_cap_minutes")
+        _emit(p, type="resumed", token_cap=p.token_cap, max_fix_attempts=p.max_fix_attempts,
+              time_cap_minutes=minutes)
         cap = f"a {p.token_cap:,}-token cap" if p.token_cap else "no token cap"
+        clock = f", a {minutes:g}-minute time cap" if minutes else ""
         _emit(p, type="narrate",
-              text=f"▶ Resumed with {cap} and {p.max_fix_attempts} fix attempt(s).")
+              text=f"▶ Resumed with {cap}{clock} and {p.max_fix_attempts} fix attempt(s).")
         _persist(p)
         threading.Thread(target=_gated_runner, args=(_run_factory, p),
                          kwargs={"resume": from_checkpoint}, daemon=True).start()
@@ -1689,7 +1767,8 @@ class Handler(BaseHTTPRequestHandler):
         with _LOCK:
             projs = sorted(_PROJECTS.values(), key=lambda x: x.floor)
         rows = [
-            {"id": p.id, "floor": p.floor, "request": p.request, "mode": p.mode,
+            {"id": p.id, "floor": p.floor, "request": p.request,
+             "title": request_title(p.request), "mode": p.mode,
              "backend": p.backend, "slots": p.max_slots, "status": p.status,
              "passed": p.passed, "gates": p.gates, "phase": p.phase,
              "stopping": p.stop_kind if p.cancel.is_set() and not p.ended else "",
@@ -1707,23 +1786,41 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json(200, _floor_insight(p))
 
-    def _list_builds(self) -> None:
-        """Finished builds from the catalog — the Floor 0 repository list."""
+    def _list_builds(self, query: str) -> None:
+        """Every floor for the Floor 0 hub: searched over the request (``q``),
+        filtered by ``status`` (shipped / halted / stopped / running) and sorted by
+        date (``sort=newest|oldest``). Bad parameters are a 400, not ignored."""
         try:
-            rows = _STORE.finished()
-        except Exception:
-            rows = []
-        builds = [
-            {"id": r["id"], "floor": r.get("floor"), "request": r.get("request"),
-             "passed": r.get("passed"), "created_at": r.get("created_at")}
-            for r in rows
-        ]
-        self._json(200, {"builds": builds})
+            want = parse_build_query(query)
+        except ValueError as exc:
+            self._json(400, {"error": str(exc)})
+            return
+        with _LOCK:
+            projs = list(_PROJECTS.values())
+        words = want["q"].casefold().split()
+        builds = []
+        for p in projs:
+            status = build_status(p)
+            if want["status"] != "all" and status != want["status"]:
+                continue
+            title = request_title(p.request)
+            hay = f"{p.request} {title}".casefold()
+            if not all(w in hay for w in words):
+                continue
+            builds.append({
+                "id": p.id, "floor": p.floor, "request": p.request, "title": title,
+                "status": status, "phase": p.phase, "passed": p.passed,
+                "created_at": p.created_at,
+            })
+        builds.sort(key=lambda b: (b["created_at"], b["floor"]),
+                    reverse=want["sort"] == "newest")
+        self._json(200, {"builds": builds, "total": len(projs), **want})
 
     def _save_settings(self) -> None:
         backend = _server_backend()
+        body = self._read_json()
         try:
-            saved = _settings.validate(self._read_json(), backend)
+            saved = _settings.validate(body, backend)
         except ValueError as exc:
             self._json(400, {"error": str(exc)})
             return
@@ -1811,7 +1908,7 @@ class Handler(BaseHTTPRequestHandler):
         # build ACTUALLY starts — the runner's first `project` event (in _PERSIST_ON)
         # upserts it, so a created-but-never-run project leaves no floor to restore.
         threading.Thread(target=_gated_runner, args=(_run_factory, p), daemon=True).start()
-        self._json(200, {"id": pid, "floor": floor})
+        self._json(200, {"id": pid, "floor": floor, "title": request_title(request)})
 
     def _reset(self) -> None:
         """Clear ALL floors & repos: drop the in-memory floors, reset the floor

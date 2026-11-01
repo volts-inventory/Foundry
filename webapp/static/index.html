@@ -28,7 +28,7 @@
   <div id="app">
     <header id="hud">
       <div class="hud-left">
-        <span class="logo">FOUNDRY</span>
+        <h1 class="logo">FOUNDRY</h1>
         <span class="elevator" id="floor-tag">FLOOR —</span>
         <!-- tokens used / cap · elapsed (or the queue position); insight.js -->
         <span class="meter" id="meter-tag" hidden></span>
@@ -40,7 +40,7 @@
       <span class="mode" id="mode-tag"></span>
       <!-- stage / per-service chips: their own group so narrow screens can give
            them a single horizontally-scrolling row instead of wrapping to three -->
-      <div class="hud-mid"><span class="gates-mini" id="gates-mini"></span></div>
+      <div class="hud-mid" tabindex="0" aria-label="Gate status"><span class="gates-mini" id="gates-mini"></span></div>
       <!-- Build control for the floor on screen: game.js draws only the actions valid
            for its state (Stop · Pause while it runs; Resume · Retry with… · Delete
            once it has stopped). The panel under the bar holds their forms and
@@ -57,8 +57,8 @@
     </header>
 
     <!-- Elevator: one button per floor (project). Click to ride to that floor. -->
-    <nav id="elevator" aria-label="floors">
-      <div class="el-head">▲<br>EL<br>▼</div>
+    <nav id="elevator" aria-label="Floors">
+      <div class="el-head" aria-hidden="true">▲<br>EL<br>▼</div>
       <div id="el-floors"></div>
     </nav>
 
@@ -67,20 +67,25 @@
     <main id="game"><div id="wipe" aria-hidden="true"></div></main>
 
     <aside id="log-panel">
-      <div class="log-title">QUEST LOG</div>
+      <div class="log-title" id="log-title">QUEST LOG</div>
       <!-- The live chip rides the tabs row (not the title) so portrait can drop the
            title row entirely without losing the stream-health indicator. -->
-      <div class="log-tabs">
-        <button class="log-tab sel" data-tab="live">● Live</button>
-        <button class="log-tab" data-tab="progress">≡ Progress</button>
-        <button class="log-tab" data-tab="tickets">☰ Tickets</button>
+      <div class="log-tabs" role="group" aria-label="Quest log view">
+        <button class="log-tab sel" data-tab="live" aria-pressed="true">● Live</button>
+        <button class="log-tab" data-tab="progress" aria-pressed="false">≡ Progress</button>
+        <button class="log-tab" data-tab="tickets" aria-pressed="false">☰ Tickets</button>
         <span id="log-live" class="log-live"></span>
       </div>
       <!-- why a finished floor stopped, or how to run what it shipped (insight.js) -->
       <div id="insight-card" class="insight-card hidden" aria-live="polite"></div>
-      <ul id="log"></ul>
-      <ul id="progress" style="display:none"></ul>
-      <ul id="tickets" style="display:none"></ul>
+      <!-- The live feed is announced politely; an empty list shows its own help
+           (style.css, :empty). -->
+      <ul id="log" aria-live="polite" aria-relevant="additions" aria-labelledby="log-title" tabindex="0"
+          data-empty="Nothing here yet. Start a build and the crew narrates every step in this log."></ul>
+      <ul id="progress" style="display:none" aria-label="Progress" tabindex="0"
+          data-empty="No stage has finished yet. Each stage (plan, build, the gates) adds a one-line summary here when it completes."></ul>
+      <ul id="tickets" style="display:none" aria-label="Tickets" tabindex="0"
+          data-empty="No tickets yet. Once a build starts, the Planner splits the request into tickets and each one shows its owner, difficulty and status here."></ul>
       <!-- The log follows new activity only while you're already at the bottom; scroll
            up to read something and this appears instead of yanking you back down. -->
       <button id="log-jump" class="log-jump hidden" type="button">↓ NEW ACTIVITY</button>
@@ -89,17 +94,33 @@
 
   <!-- New-build dialog: the request, plus a collapsed settings fold that reports
        what it is set to. The backend comes from the server's environment. -->
-  <div id="new-modal" class="overlay hidden">
+  <div id="new-modal" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="new-title">
     <div class="dialog build">
       <div class="dialog-head">
-        <h2>▶ START A BUILD</h2>
-        <button id="new-close" class="icon-btn" title="close" aria-label="close">✕</button>
+        <h2 id="new-title">▶ START A BUILD</h2>
+        <button id="new-close" class="icon-btn" title="Close" aria-label="Close" data-dismiss>✕</button>
       </div>
+
+      <!-- First run only (game.js shows it while there are no floors). -->
+      <section class="fset first-run hidden" id="first-run" aria-labelledby="first-run-h">
+        <span class="fset-h" id="first-run-h">Welcome to the Workshop</span>
+        <p class="cp-note">Each build gets its own floor of a pixel office. A Planner
+          splits your request into tickets, engineers in the Frontend, Backend and Data
+          rooms write the code, and every change has to pass the gates (spec, build,
+          test, smoke, review) before the Vault opens and it ships. Watch it happen
+          live, follow the quest log on the right, and browse the code on Floor 0.</p>
+        <p class="cp-note">Try one of these:</p>
+        <div class="examples" id="examples">
+          <button type="button" class="example">a URL shortener with custom slugs and click counts</button>
+          <button type="button" class="example">a todo list API with tags, due dates and a SQLite store</button>
+          <button type="button" class="example">a markdown notes app with search and a live preview</button>
+        </div>
+      </section>
 
       <section class="fset">
         <div class="field">
           <label for="req-input">What should the factory build? <span class="hint">— a sentence, or a full brief</span></label>
-          <textarea id="req-input" rows="4"
+          <textarea id="req-input" rows="4" data-autofocus aria-describedby="req-err"
             placeholder="e.g. a URL shortener with custom slugs, link expiry, and per-IP abuse rate-limiting"></textarea>
         </div>
       </section>
@@ -126,47 +147,71 @@
       <div class="dialog-actions build-actions">
         <button id="start-btn" class="primary">BREAK GROUND</button>
         <button id="cancel-btn">cancel</button>
+        <span id="req-err" class="ctl-err" role="alert"></span>
       </div>
     </div>
   </div>
 
   <!-- Floor 0 — the repo hub: a self-hosted "GitHub" home listing every build's repo -->
-  <div id="repos-modal" class="overlay hidden">
+  <div id="repos-modal" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="repos-title">
     <div class="dialog repos">
       <div class="repo-head">
-        <h2>⌥ FLOOR 0 · REPOSITORIES</h2>
-        <span class="repo-src ok" id="repos-count"></span>
+        <h2 id="repos-title">⌥ FLOOR 0 · REPOSITORIES</h2>
+        <span class="repo-src ok" id="repos-count" role="status"></span>
       </div>
-      <p class="cp-note">Every build that produced code — read straight from the
+      <p class="cp-note">Every build, with the code it wrote — read straight from the
         content-addressed store. Pick a repository to browse its files.</p>
-      <ul id="repos-list" class="repos-list"></ul>
+      <form class="repo-find" id="repo-find" role="search" onsubmit="return false">
+        <label class="sr-only" for="repo-q">Search builds</label>
+        <input id="repo-q" type="search" placeholder="Search requests…" autocomplete="off" maxlength="200" />
+        <label class="sr-only" for="repo-status">Status</label>
+        <select id="repo-status">
+          <option value="all">All</option>
+          <option value="shipped">✔ Shipped</option>
+          <option value="halted">✗ Halted</option>
+          <option value="stopped">❚❚ Stopped</option>
+          <option value="running">● Running</option>
+        </select>
+        <label class="sr-only" for="repo-sort">Sort</label>
+        <select id="repo-sort">
+          <option value="newest">Newest first</option>
+          <option value="oldest">Oldest first</option>
+        </select>
+      </form>
+      <ul id="repos-list" class="repos-list" aria-labelledby="repos-title"></ul>
       <div class="dialog-actions">
         <button id="repos-new" class="primary">＋ NEW PROJECT</button>
         <button id="repos-clear" class="danger" title="Wipe every floor and repository">⌦ Clear all</button>
-        <button id="repos-close">close</button>
+        <button id="repos-close" data-dismiss>close</button>
       </div>
     </div>
   </div>
 
   <!-- File viewer: browse a build's generated code (read-only, from the store) -->
-  <div id="files-modal" class="overlay hidden">
+  <div id="files-modal" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="files-title">
     <div class="dialog files">
       <div class="repo-head">
-        <h2>⌥ REPO · <span id="files-floor"></span></h2>
+        <h2 id="files-title">⌥ REPO · <span id="files-floor"></span></h2>
       </div>
-      <nav id="files-crumb" class="files-crumb"></nav>
+      <div class="files-find">
+        <label class="sr-only" for="files-q">Filter files by name</label>
+        <input id="files-q" type="search" placeholder="Filter files by name…" autocomplete="off" />
+      </div>
+      <nav id="files-crumb" class="files-crumb" aria-label="Folder"></nav>
       <div class="files-body">
-        <ul id="files-list"></ul>
-        <pre id="files-view">Select a file…</pre>
+        <ul id="files-list" aria-label="Files"></ul>
+        <pre id="files-view" tabindex="0" aria-label="File contents">Select a file…</pre>
       </div>
       <div class="dialog-actions">
         <a id="files-zip" class="btn-link" href="#" download>⭳ Download .zip</a>
-        <button id="files-close">close</button>
+        <button id="files-close" data-dismiss>close</button>
       </div>
     </div>
   </div>
 
   <script src="/static/vendor/phaser.min.js"></script>
+  <script src="/static/a11y.js"></script>
+  <script src="/static/notify.js"></script>
   <script src="/static/insight.js"></script>
   <script src="/static/game.js"></script>
   <script src="/static/settings.js"></script>

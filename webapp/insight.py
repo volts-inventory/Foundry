@@ -36,8 +36,9 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
-# Big enough for a pasted or uploaded design spec (the CLI caps specs at 2 MiB).
-MAX_BODY_BYTES = _int_env("WORKSHOP_MAX_BODY_BYTES", 4 * 1024 * 1024)
+# The one cap on every POST body, refused on its Content-Length before it is read.
+# A full-size spec (settings.SPEC_MAX_BYTES, 200 KB) fits with room for JSON escaping.
+MAX_BODY_BYTES = _int_env("WORKSHOP_MAX_BODY_BYTES", 1024 * 1024)
 
 
 class BodyError(ValueError):
@@ -335,6 +336,10 @@ def _nice_cap(n: int) -> int:
     return -(-n // step) * step
 
 
+def _nice_minutes(m: float) -> int:
+    return max(15, -(-int(m + 0.999) // 15) * 15)
+
+
 def _plural(n: int, word: str) -> str:
     return f"{n} {word}{'' if n == 1 else 's'}"
 
@@ -355,7 +360,7 @@ def _first_line(reason: str) -> str:
 def halt_report(*, phase: str, reason: str, token_cap: int | None, max_fix_attempts: int,
                 resumable: bool, state: Mapping[str, Any] | None,
                 gates: Mapping[str, Mapping[str, Any]], meter: Mapping[str, Any] | None,
-                draft_files: int) -> dict[str, Any]:
+                draft_files: int, time_cap_s: float | None = None) -> dict[str, Any]:
     """Why a floor ended without shipping, in plain words, and what to do next.
 
     ``actions`` are what the panel's buttons do: ``resume`` posts ``body`` to the
@@ -395,8 +400,13 @@ def halt_report(*, phase: str, reason: str, token_cap: int | None, max_fix_attem
         cause = (f"It ran for {_minutes(elapsed)} and reached its time cap, so it stopped "
                  "at a clean checkpoint." if elapsed else
                  "It reached its time cap and stopped at a clean checkpoint.")
-        nxt = "The time spent carries over, so resume once the cap has room to spare."
+        nxt = "The time spent carries over, so raise the cap past it and resume."
         detail = str(reason or "")
+        cap_min = (time_cap_s or elapsed) / 60
+        new_min = _nice_minutes(max(cap_min * 2, elapsed / 60 + max(cap_min, 15)))
+        resume(f"Raise the time cap to {new_min} minutes and resume",
+               {"time_cap_minutes": new_min})
+        resume("Resume with no time cap", {"time_cap_minutes": 0}, primary=False)
     elif phase == "error":
         title = "Build error"
         cause = f"The build stopped on an error: {_first_line(reason)}"
@@ -434,10 +444,8 @@ def halt_report(*, phase: str, reason: str, token_cap: int | None, max_fix_attem
         actions = []
         if phase not in ("interrupted",):
             nxt = "This build can't be resumed (it predates resume or has no checkpoint)."
-    elif phase not in ("time_cap",):
-        actions.append({"kind": "retry", "label": "Retry with…", "primary": False})
     else:
-        actions.append({"kind": "retry", "label": "Retry with…", "primary": True})
+        actions.append({"kind": "retry", "label": "Retry with…", "primary": False})
     if draft_files:
         actions.append({"kind": "files", "primary": False,
                         "label": f"Open the draft ({_plural(draft_files, 'file')})"})

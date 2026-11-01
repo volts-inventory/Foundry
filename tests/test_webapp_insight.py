@@ -247,7 +247,13 @@ def test_halt_report_says_what_to_do_for_each_phase() -> None:
     assert lost["actions"] == [] and "new build" in lost["next"]
 
     timed = _report(phase="time_cap", meter={"used": 1, "cap": None, "elapsed_s": 3600})
-    assert "1h 00m" in timed["cause"] and _kinds(timed) == ["retry"]
+    assert "1h 00m" in timed["cause"] and _kinds(timed) == ["resume", "resume", "retry"]
+    assert timed["actions"][0]["body"] == {"time_cap_minutes": 120}   # past the 60 spent
+    assert "120 minutes" in timed["actions"][0]["label"]
+    assert timed["actions"][1]["body"] == {"time_cap_minutes": 0}
+    capped = _report(phase="time_cap", time_cap_s=1800,
+                     meter={"used": 1, "cap": None, "elapsed_s": 1800})
+    assert capped["actions"][0]["body"] == {"time_cap_minutes": 60}
 
     stuck = _report(max_fix_attempts=20, draft_files=3)
     assert "maximum" in stuck["next"] and _kinds(stuck)[-1] == "files"

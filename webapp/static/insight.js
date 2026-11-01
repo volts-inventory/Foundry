@@ -203,13 +203,12 @@
     const head = el("div", "repo-head");
     const h = el("h2", "", ""); h.id = "insight-h";
     const x = el("button", "icon-btn", "✕"); x.type = "button";
-    x.title = "close"; x.setAttribute("aria-label", "close"); x.onclick = closeReport;
+    x.title = "Close"; x.setAttribute("aria-label", "Close"); x.dataset.dismiss = ""; x.onclick = closeReport;
     head.append(h, x);
     const body = el("div", "insight-body"); body.id = "insight-body";
     dlg.append(head, body);
     ov.append(dlg);
     ov.addEventListener("click", e => { if (e.target === ov) closeReport(); });
-    document.addEventListener("keydown", e => { if (e.key === "Escape" && !ov.classList.contains("hidden")) closeReport(); });
     document.body.append(ov);
     return ov;
   }

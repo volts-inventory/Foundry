@@ -102,8 +102,8 @@ function buildPanel(){
     h("div", {class:"dialog build settings"},
       h("div", {class:"dialog-head"},
         h("h2", {id:"settings-title", text:"⚙ Settings"}),
-        h("button", {type:"button", class:"icon-btn", title:"close", "aria-label":"close",
-          text:"✕", onclick: hidePanel})),
+        h("button", {type:"button", class:"icon-btn", title:"Close", "aria-label":"Close",
+          "data-dismiss":"", text:"✕", onclick: hidePanel})),
       h("p", {class:"cp-note", text:"Defaults for every new build. A running or finished floor keeps the settings it started with."}),
       h("section", {class:"fset"},
         h("span", {class:"fset-h", text:"Model mode"}),
@@ -138,7 +138,6 @@ function buildPanel(){
           onclick: saveSettings}),
         h("button", {type:"button", text:"cancel", onclick: hidePanel}),
         h("span", {id:"settings-err", class:"ctl-err", role:"alert"}))));
-  panel.addEventListener("keydown", e => { if (e.key === "Escape") hidePanel(); });
   panel.addEventListener("click", e => { if (e.target === panel) hidePanel(); });
   document.body.appendChild(panel);
 }

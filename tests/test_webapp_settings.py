@@ -18,7 +18,7 @@ import pytest
 import foundry.cli
 import foundry.proxy.local_transport as local_transport
 from foundry.proxy.local_transport import LocalServerStatus
-from webapp import server
+from webapp import insight, server
 from webapp import settings as ws
 from webapp.server import Project
 from webapp.store import BuildStore
@@ -222,10 +222,10 @@ def test_an_oversized_body_is_refused_unread(env, runs):
     # Only the declared length is oversized: the server refuses on the header without
     # reading, so a real oversized upload would race the client into a broken pipe.
     raw = json.dumps({"request": "x"}).encode()
-    oversized = {"Content-Length": str(ws.MAX_BODY_BYTES + 1)}
-    for path in ("/api/projects", "/api/settings"):
-        code, _ = _call(env, "POST", path, raw=raw, headers=oversized)
-        assert code == 413
+    oversized = {"Content-Length": str(insight.MAX_BODY_BYTES + 1)}
+    for path in ("/api/projects", "/api/settings", "/api/settings/local-check"):
+        code, got = _call(env, "POST", path, raw=raw, headers=oversized)
+        assert code == 413, (path, got)
     assert runs == [] and not (env.tmp / "out" / "settings.json").exists()
 
 

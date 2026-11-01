@@ -31,7 +31,9 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ArtifactRef",
+    "BaseRef",
     "BuildManifest",
+    "ContractRef",
     "GateRef",
     "ModelUsageSummary",
     "build_manifest",
@@ -78,6 +80,21 @@ class ModelUsageSummary(FrozenModel):
     calls_by_tier: dict[str, int] = {}  # noqa: RUF012 - pydantic deep-copies defaults
 
 
+class ContractRef(FrozenModel):
+    name: str
+    kind: str = ""
+    signature: str = ""
+
+
+class BaseRef(FrozenModel):
+    """The shipped build a change build extended."""
+
+    thread_id: str = ""
+    request: str = ""
+    digest: str = ""  # content digest of the base tree's files
+    files: int = 0
+
+
 class BuildManifest(FrozenModel):
     schema_version: str = "1"
     request: str
@@ -90,6 +107,12 @@ class BuildManifest(FrozenModel):
     gates: tuple[GateRef, ...] = ()
     model_usage: ModelUsageSummary = ModelUsageSummary()
     estimated_cost_microusd: int = 0
+    # What a later change build on this one needs: the stack it must keep and
+    # the contracts it extends rather than redefines.
+    stack: dict[str, str] = {}  # noqa: RUF012 - pydantic deep-copies defaults
+    contracts: tuple[ContractRef, ...] = ()
+    contracts_files: tuple[str, ...] = ()
+    base: BaseRef | None = None  # set when this build is a change on a base
 
 
 def _artifact_refs(artifacts: Sequence[Artifact]) -> tuple[ArtifactRef, ...]:
@@ -215,6 +238,9 @@ def render_manifest_md(m: BuildManifest) -> str:
         f"- **Result:** {'PASS' if m.passed else 'HALTED'} (phase: {m.phase})",
         f"- **Tree:** `{m.tree_sha or 'n/a'}`",
         f"- **Estimated cost:** ${m.estimated_cost_microusd / 1_000_000:.4f}",
+        *([f"- **Change on base:** run `{m.base.thread_id or 'unknown'}` "
+           f"({m.base.request!r}), {m.base.files} files, digest `{m.base.digest}`"]
+          if m.base is not None else []),
         "",
         "## Gates",
         "",
@@ -264,6 +290,45 @@ def _budget_spend(state: FactoryState) -> int:
     return spend if isinstance(spend, int) and not isinstance(spend, bool) else 0
 
 
+def _with_plan(manifest: BuildManifest, state: FactoryState, rt: AgentRuntime) -> BuildManifest:
+    """Record the stack, the contracts and, for a change build, its base."""
+    from foundry.base_tree import base_digest, read_base
+
+    update: dict[str, Any] = {}
+    stack = state.get("stack")
+    if stack is not None:
+        update["stack"] = {k: str(v) for k, v in stack.model_dump(mode="json").items() if v}
+    base_dir = state.get("base_dir")
+    prior = read_base(base_dir) if base_dir else None
+    cas = rt.cas
+    if cas is not None:
+        from foundry.graph.gate_wiring import contract_paths
+        from foundry.schemas.architecture import InterfaceContract
+
+        newest: dict[str, InterfaceContract] = {}
+        for a in sorted(state.get("artifacts") or (), key=lambda a: a.seq):
+            if a.kind == "interface_contract":
+                body = cas.resolve(a)
+                if isinstance(body, InterfaceContract):
+                    newest[body.name] = body
+        contracts = [ContractRef(name=c.name, kind=c.kind, signature=c.signature)
+                     for c in newest.values()]
+        files = contract_paths(state, cas.resolve)
+        if prior is not None:
+            # A change keeps the base's contracts in force beside its own.
+            contracts = [ContractRef(**c) for c in prior.contracts
+                         if c["name"] not in newest] + contracts
+            files = tuple(dict.fromkeys((*prior.contracts_files, *files)))
+        update["contracts"] = tuple(contracts)
+        update["contracts_files"] = tuple(files)
+    if prior is not None and base_dir:
+        update["base"] = BaseRef(
+            thread_id=prior.thread_id, request=prior.request,
+            digest=base_digest(base_dir), files=len(prior.files),
+        )
+    return manifest.model_copy(update=update)
+
+
 def write_manifest(
     out_dir: str | Path,
     *,
@@ -274,7 +339,7 @@ def write_manifest(
     passed: bool,
 ) -> BuildManifest:
     """Build the manifest for a finished run and write BUILD-MANIFEST.{json,md}."""
-    manifest = build_manifest(
+    manifest = _with_plan(build_manifest(
         request=request,
         thread_id=thread_id,
         generated_at=datetime.now(UTC).isoformat(timespec="seconds"),
@@ -286,7 +351,7 @@ def write_manifest(
         drift_events=len(rt.proxy.drift_events),
         agent_usage=getattr(rt.adapter, "usage", ()),
         estimated_cost_microusd=_budget_spend(state),
-    )
+    ), state, rt)
     root = Path(out_dir)
     root.mkdir(parents=True, exist_ok=True)
     (root / "BUILD-MANIFEST.json").write_text(

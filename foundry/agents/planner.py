@@ -59,6 +59,7 @@ from foundry.agents._common import (
     scope_directive,
 )
 from foundry.agents.plan_contracts import CompileResult, check_contracts
+from foundry.base_tree import BaseView, read_base, render_base_view
 from foundry.schemas.architecture import (
     ADR,
     ConstraintScope,
@@ -567,14 +568,45 @@ EPIC_SCHEMA: dict[str, Any] = {
 
 
 def _intake_text(state: FactoryState) -> str:
-    """The raw request plus, when provided, the (capped) design-spec text."""
+    """The raw request plus, when provided, the (capped) design-spec text and, for
+    a change build, the base tree view with the change-mode rules."""
     request = str(state.get("request", ""))
     spec = str(state.get("spec", "") or "")
-    if not spec.strip():
-        return request
-    return (
+    text = request if not spec.strip() else (
         f"REQUEST (intent summary):\n{request}\n\n"
         f"DESIGN SPEC (detailed source of truth):\n{spec[:_SPEC_PROMPT_CAP]}"
+    )
+    base = _base(state)
+    return text if base is None else f"{text}\n\n{_change_text(base)}"
+
+
+def _base(state: FactoryState) -> BaseView | None:
+    """The base tree of a change build, or None for a new project."""
+    base_dir = state.get("base_dir")
+    return read_base(base_dir) if base_dir else None
+
+
+def _change_text(base: BaseView) -> str:
+    taken = ", ".join(sorted(base.feature_names)) or "(none)"
+    return (
+        render_base_view(base) + "\n\n"
+        "CHANGE MODE — the REQUEST is a change to the EXISTING PROJECT above. These "
+        "rules override any conflicting rule:\n"
+        "- Keep the existing stack (language, framework, package manager and every "
+        "command) exactly as it is and echo it in stack.\n"
+        "- Plan tickets ONLY for files you add or change. List an existing file in a "
+        "ticket's files[] only when that ticket must modify it; untouched files stay "
+        "as they are and need no ticket.\n"
+        "- interfaces[] holds only NEW contracts. The existing contracts are already "
+        "implemented: consume them by name with no implementing ticket, and never "
+        "redeclare one (checked). New code contracts extend the existing contracts "
+        "file.\n"
+        "- Scenarios and must-haves cover only the NEW behaviour. The existing feature "
+        "files stay in force and must keep passing, so never break the behaviour they "
+        f"describe. Existing feature names (do not reuse as ticket ids): {taken}.\n"
+        "- An entrypoint ticket is needed only when the change must re-wire the app; it "
+        "then modifies the existing entry file. A dependency-manifest scenario is "
+        "needed only when the change adds a dependency."
     )
 
 
@@ -869,18 +901,19 @@ def _break_cycles(deps: dict[str, list[str]]) -> list[str]:
     return concerns
 
 
-def _safe_ticket_ids(ids: list[str]) -> dict[str, str]:
+def _safe_ticket_ids(ids: list[str], reserved: frozenset[str] = frozenset()) -> dict[str, str]:
     """Raw id -> an id safe as a file name (``features/<id>.feature``, ``task/<id>``):
     other characters become ``-``; a collision gets the first free ``-<n>`` suffix,
-    in plan order, so the mapping is deterministic."""
+    in plan order, so the mapping is deterministic. ``reserved`` ids (a base tree's
+    feature names) are renamed the same way."""
     out: dict[str, str] = {}
     safe = {
         tid for tid in ids
         if _SAFE_TICKET_ID.fullmatch(tid) and tid not in (".", "..", *_GENERATED_TICKETS)
         # `fix-<n>` is the fixer's diff namespace: a ticket there would read as built.
-        and not tid.startswith("fix-")
+        and not tid.startswith("fix-") and tid not in reserved
     }
-    taken = safe | _GENERATED_TICKETS
+    taken = safe | _GENERATED_TICKETS | reserved
     for tid in ids:
         if tid in safe:
             out[tid] = tid
@@ -1246,6 +1279,7 @@ def _build_tickets(
     cap: int = MAX_TICKETS,
     epics: Sequence[_Epic] = (),
     overflow: list[str] | None = None,
+    reserved: frozenset[str] = frozenset(),
 ) -> tuple[list[Ticket], list[AcceptanceCriterion], list[str]]:
     """Tickets + their scenarios as criteria, made a valid DAG deterministically.
 
@@ -1256,7 +1290,8 @@ def _build_tickets(
     :func:`_epic_items`), each epic's tickets are then ordered after the epics
     it depends on (:func:`_link_epics`), and each epic's entrypoint ticket after
     every feature ticket of the epics upstream of it. Tickets dropped at ``cap``
-    are named in ``overflow``."""
+    are named in ``overflow``. ``reserved`` ids (a base tree's feature names) are
+    renamed so a change never replaces an existing feature file."""
     concerns: list[str] = []
     raw_items: dict[str, dict[str, Any]] = {}
     dropped: list[tuple[str, dict[str, Any]]] = []
@@ -1284,7 +1319,7 @@ def _build_tickets(
         raw_items = dict(list(raw_items.items())[:cap])
     raw_items, rehome_concerns = _rehome_scenarios(raw_items, dropped)
     concerns += rehome_concerns
-    alias = _safe_ticket_ids(list(raw_items))
+    alias = _safe_ticket_ids(list(raw_items), reserved)
     concerns += [
         f"Ticket id {old!r} renamed to {new!r} (ids name files)."
         for old, new in alias.items() if old != new
@@ -1513,11 +1548,14 @@ def _generated_tickets(
     raw_stack: dict[str, Any],
     stack: StackDecision | None,
     seq: Seq,
+    base: BaseView | None = None,
 ) -> tuple[list[Ticket], list[str]]:
     """The planner's own tickets: ``contracts`` writes every code-kind contract as
     real code when there are any; ``bdd-harness`` wires the stack's Cucumber runner
     when it has a ``bdd`` command. Both have no dependencies (wave 0), so the first
-    BUILD check already has the manifest, the config and the contracts to compile."""
+    BUILD check already has the manifest, the config and the contracts to compile.
+    A change build (``base``) extends the base's contracts file and keeps its
+    already-wired runner."""
     concerns: list[str] = []
     language = stack.language if stack else _str(raw_stack.get("language")).strip().lower()
     out: list[Ticket] = []
@@ -1525,6 +1563,8 @@ def _generated_tickets(
     owned: tuple[str, ...] = ()
     if code:
         owned = _plan_paths(raw_stack.get("contracts_file"), "contracts", concerns)
+        if not owned and base is not None and base.contracts_files:
+            owned = (next(iter(base.contracts_files)),)
         if not owned and language in _DEFAULT_CONTRACTS_FILE:
             owned = (_DEFAULT_CONTRACTS_FILE[language],)
         if not owned:
@@ -1547,6 +1587,10 @@ def _generated_tickets(
                     "redeclare them, so match each contract exactly. The file must pass "
                     "the stack's build and typecheck on its own: "
                     + _CONTRACT_STUB_RULES.get(language, _CONTRACT_STUB_RULES[""])
+                    + (" " + ", ".join(f for f in owned if f in base.files)
+                       + " already exists: keep every declaration in it exactly as it "
+                       "is and add the new ones."
+                       if base is not None and any(f in base.files for f in owned) else "")
                 ),
                 specialty=Specialty.BACKEND,
                 difficulty=Difficulty.TRIVIAL,
@@ -1554,7 +1598,9 @@ def _generated_tickets(
                 implements=tuple(i.name for i in code),
                 seq=seq,
             ))
-    if stack is not None and stack.bdd:
+    if stack is not None and stack.bdd and base is not None:
+        concerns.append("Change build: the base tree's BDD runner is kept as wired.")
+    elif stack is not None and stack.bdd:
         files = _plan_paths(raw_stack.get("harness_files"), "harness", concerns) or (
             _DEFAULT_HARNESS_FILES.get(language, ())
         )
@@ -1632,20 +1678,21 @@ def stack_files(stack: StackDecision) -> tuple[str, ...]:
 
 
 def _own_stack_files(
-    tickets: Sequence[Ticket], stack: StackDecision | None
+    tickets: Sequence[Ticket], stack: StackDecision | None,
+    existing: frozenset[str] = frozenset(),
 ) -> tuple[list[Ticket], list[str], tuple[str, ...]]:
     """Give every script a stack command runs (``smoke.py`` for ``python3 smoke.py``)
     an owner: one no ticket writes is added to the entrypoint ticket, which wires the
     app end to end — else the run command fails on a file nothing builds. With no
     entrypoint ticket it is a coverage finding (a re-plan). Returns (tickets,
-    concerns, findings)."""
+    concerns, findings). ``existing`` files (a change build's base tree) need no owner."""
     if stack is None:
         return list(tickets), [], ()
-    tickets, init_concerns = _own_package_inits(tickets, stack)
+    tickets, init_concerns = _own_package_inits(tickets, stack, existing)
 
     def owned(path: str) -> bool:
-        return any(f == path or (f.endswith("/") and path.startswith(f))
-                   for t in tickets for f in t.files)
+        return path in existing or any(f == path or (f.endswith("/") and path.startswith(f))
+                                       for t in tickets for f in t.files)
 
     orphans = [f for f in stack_files(stack) if not owned(f)]
     if not orphans:
@@ -1670,7 +1717,7 @@ def _own_stack_files(
 
 
 def _own_package_inits(
-    tickets: Sequence[Ticket], stack: StackDecision
+    tickets: Sequence[Ticket], stack: StackDecision, existing: frozenset[str] = frozenset(),
 ) -> tuple[list[Ticket], list[str]]:
     """Give every Python source directory's ``__init__.py`` an owner. Without one
     mypy maps ``finance/contracts.py`` to both ``contracts`` and ``finance.contracts``
@@ -1679,7 +1726,7 @@ def _own_package_inits(
     directories are left to pytest's own rootdir handling."""
     if stack.language != "python":
         return list(tickets), []
-    owned = {f for t in tickets for f in t.files}
+    owned = {f for t in tickets for f in t.files} | existing
     dirs: dict[str, str] = {}  # missing __init__.py -> first ticket writing below it
     for t in tickets:
         for f in t.files:
@@ -2053,12 +2100,14 @@ def _coverage_findings(
     brief: IntentBrief | None,
     *,
     run: str | None,
+    change: bool = False,
 ) -> tuple[str, ...]:
     """The plan-time coverage check: every must-have and success criterion is
     covered by a scenario on a live ticket; every feature ticket has scenarios; a
     feature ticket marked ``entrypoint`` depends (transitively) on every other
     feature ticket; and an app-like deliverable has a ``run`` command (``run``
-    None: not checked, e.g. an operator-pinned profile)."""
+    None: not checked, e.g. an operator-pinned profile). A ``change`` build needs
+    no entrypoint ticket: the base tree already wires the app."""
     goals = _goal_rows(brief)
     known = {g.lower(): g for _, g, _ in goals}
     live = {t.id for t in tickets}
@@ -2099,7 +2148,7 @@ def _coverage_findings(
         for t in features if t.id not in owned
     ]
     entries = [t for t in features if t.entrypoint]
-    if features and not entries:
+    if features and not entries and not change:
         out.append(
             "No entrypoint ticket: mark one feature ticket entrypoint=true that wires the "
             "app together end to end and depends_on every other feature ticket."
@@ -2152,6 +2201,7 @@ class _Frame:
     compiled: CompileResult
     tickets_seq: Seq
     criteria_seq: Seq
+    base: BaseView | None = None  # a change build's base tree
 
 
 @dataclass(frozen=True)
@@ -2175,16 +2225,20 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
     mechanical, leaving what it cannot fix to the checks); only the checks' leftovers
     are findings. ``overflow`` names work already dropped at the epic caps."""
     over = list(overflow)
+    base = frame.base
     tickets, criteria, concerns = _build_tickets(
         raw, frame.tickets_seq, frame.criteria_seq, frame.names, cap=frame.cap,
         epics=frame.epics, overflow=over,
+        reserved=base.feature_names if base is not None else frozenset(),
     )
     tickets, more = _attach_generated(tickets, frame.generated, frame.tickets_seq)
     concerns += more
     for repair in (_drop_self_consumes, _add_contract_deps):
         tickets, more = repair(tickets)
         concerns += more
-    tickets, more, stack_findings = _own_stack_files(tickets, frame.stack)
+    tickets, more, stack_findings = _own_stack_files(
+        tickets, frame.stack, frozenset(base.files) if base is not None else frozenset()
+    )
     concerns += more
     tickets, more = _wire_entrypoint(tickets)
     concerns += more
@@ -2194,19 +2248,42 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
     concerns += more
     contract = (
         *_contract_findings(tickets, criteria, frame.declared),
+        *(_redeclared_findings(frame.interfaces, base) if base is not None else ()),
         *frame.compiled.findings,
         # mypy, when it ran, is the authority on signatures; else the heuristic.
         *(() if frame.compiled.ran else _builtin_method_findings(frame.interfaces, frame.language)),
     )
     concerns += [*_unused_contracts(tickets, criteria), *frame.compiled.concerns, *over]
-    coverage = (*stack_findings, *_coverage_findings(tickets, criteria, frame.brief, run=frame.run))
+    coverage = (*stack_findings, *_coverage_findings(
+        tickets, criteria, frame.brief, run=frame.run, change=base is not None
+    ))
     return _Fit(tickets, criteria, concerns, contract, coverage, tuple(over))
 
 
+def _redeclared_findings(
+    interfaces: Sequence[InterfaceContract], base: BaseView
+) -> tuple[str, ...]:
+    """A change consumes the base tree's contracts; redeclaring one forks it."""
+    existing = base.contract_names
+    return tuple(
+        f"Contract {i.name} already exists in the base tree: drop it from interfaces "
+        "and consume it by name instead of redeclaring it."
+        for i in interfaces if i.name in existing
+    )
+
+
 def _compile(
-    interfaces: Sequence[InterfaceContract], language: str, stack: StackDecision | None
+    interfaces: Sequence[InterfaceContract], language: str, stack: StackDecision | None,
+    base: BaseView | None = None,
 ) -> CompileResult:
     code = [(i.name, i.signature) for i in interfaces if i.kind in CODE_CONTRACT_KINDS]
+    if base is not None:
+        # New contracts may reference the base's: compile them together.
+        new = {name for name, _ in code}
+        code = [
+            (c["name"], c["signature"]) for c in base.contracts
+            if c.get("kind") in CODE_CONTRACT_KINDS and c["name"] not in new
+        ] + code
     strict = stack is not None and "--strict" in stack.typecheck
     return check_contracts(code, language, strict=strict)
 
@@ -2823,7 +2900,9 @@ def make_planner_node(
             seq=seqs["brief"],
         )
         interfaces = _build_interfaces(payload.get("interfaces"), seqs["interfaces"], store=rt.cas)
-        names = {i.name for i in interfaces}
+        base = _base(state)
+        existing = base.contract_names if base is not None else frozenset()
+        names = {i.name for i in interfaces} | existing
         overflow: list[str] = []
         epics, concerns = _build_epics(payload.get("epics"), names, overflow)
         inline = _objs(payload.get("tickets"))
@@ -2868,7 +2947,7 @@ def make_planner_node(
         )
         raw_stack = _section(payload, "stack")
         generated, gen_concerns = _generated_tickets(
-            interfaces, raw_stack, pinned or decided, seqs["tickets"]
+            interfaces, raw_stack, pinned or decided, seqs["tickets"], base
         )
         concerns += [*stack_concerns, *gen_concerns]
         raw_run = _str(raw_stack.get("run")).strip()
@@ -2893,12 +2972,13 @@ def make_planner_node(
             brief=brief,
             run=None if current is not None and current.profile
             else (current.run if current is not None else raw_run),
-            declared=frozenset(i.name for i in interfaces if _declaration_only(i)),
+            declared=frozenset(i.name for i in interfaces if _declaration_only(i)) | existing,
             interfaces=interfaces,
             language=language,
-            compiled=_compile(interfaces, language, current),
+            compiled=_compile(interfaces, language, current, base),
             tickets_seq=seqs["tickets"],
             criteria_seq=seqs["criteria"],
+            base=base,
         )
         return _Draft(
             payload=payload, brief=brief, interfaces=interfaces, epics=epics,
@@ -3187,21 +3267,24 @@ def make_planner_node(
             )
         ]
         tickets_seq = seq("artifact:tickets")
+        base = _base(state)
+        existing = base.contract_names if base is not None else frozenset()
         frame = _Frame(
-            names={name for name, _ in prior.interfaces},
+            names={name for name, _ in prior.interfaces} | existing,
             epics=prior.epics,
             cap=MAX_PLAN_TICKETS,
             generated=prior.generated,
             stack=stack,
             brief=prior.intent,
             run=None if stack is None or stack.profile else stack.run,
-            declared=prior.declared,
+            declared=prior.declared | existing,
             # The contracts are the earlier pass's, already checked there.
             interfaces=(),
             language="",
             compiled=CompileResult(),
             tickets_seq=tickets_seq,
             criteria_seq=seq("artifact:acceptance_criteria"),
+            base=base,
         )
         fit = _assemble(raw, frame, overflow)
         rerun: tuple[str, ...] = ()

@@ -30,6 +30,10 @@ class FactoryState(TypedDict, total=False):
     # any signed gate (same trust posture as `request`: agents propose, only
     # gates decide, L5).
     spec: str  # single-writer
+    # OPTIONAL absolute path of a shipped build this run CHANGES (``--base``). Every
+    # gate materialization and ticket sandbox starts from that tree, and the
+    # planner plans only the delta (see foundry.base_tree). Seeded at graph entry.
+    base_dir: str  # single-writer
     route: str | None  # single-writer (triage)
     phase: str  # single-writer (supervisor)
     # How much system the request is asking for. Single-writer — unlike

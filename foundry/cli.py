@@ -1086,6 +1086,40 @@ def _detailed_artifacts(arts: Sequence[Any], cap: int = _DETAIL_CAP) -> list[Any
 # ---- the smoke run ----------------------------------------------------------
 
 
+def _change_base(
+    base_dir: str | None, request: str, thread_id: str
+) -> tuple[str | None, str]:
+    """(absolute base tree, run id) for a change build; (None, thread_id) otherwise."""
+    if base_dir is None:
+        return None, thread_id
+    from foundry.base_tree import change_thread_id, read_base
+
+    root = Path(base_dir).resolve()
+    if not root.is_dir():
+        raise ValueError(f"base {base_dir!r} is not a directory")
+    if thread_id == "cli-run":
+        thread_id = change_thread_id(root, request)
+    if thread_id == read_base(root).thread_id:
+        raise ValueError(
+            f"thread {thread_id!r} is the base build's own run; a change needs a new one"
+        )
+    return str(root), thread_id
+
+
+def _change_seed(base_root: str, *, has_stack: bool) -> FactoryState:
+    """The base tree for the planner and gates, plus the base's recorded stack
+    (a change keeps it) unless the operator pinned one."""
+    from foundry.base_tree import read_base
+
+    seed: FactoryState = {"base_dir": base_root}
+    recorded = read_base(base_root).stack
+    if not has_stack and recorded.get("language"):
+        from foundry.schemas.implementation import StackDecision
+
+        seed["stack"] = StackDecision.model_validate(recorded)
+    return seed
+
+
 def run(
     request: str,
     *,
@@ -1110,6 +1144,7 @@ def run(
     token_cap: int | None = None,
     profile: str | None = "auto",
     scope: str = "auto",
+    base_dir: str | None = None,
 ) -> RunResult:
     """Run ``request`` end-to-end through the compiled factory graph (smoke path).
 
@@ -1175,6 +1210,13 @@ def run(
         ownership units) — every deterministic gate a build must pass is
         identical at both tiers, so this can never release a weaker build. Pin it
         for a reproducible A/B against the judged tier.
+    base_dir:
+        A shipped build's tree to CHANGE (``--base``): ``request`` is the change.
+        Every ticket sandbox and gate starts from that tree, the planner plans only
+        the delta, every gate (the base's own scenarios included) runs on base +
+        delta, and ``output_dir`` receives the full updated tree. The base's
+        recorded stack is kept. The default ``thread_id`` becomes a per-change id;
+        reusing the base build's own thread is refused.
     """
     if mode not in MODES:
         raise ValueError(f"unknown mode {mode!r}; choose one of {', '.join(MODES)}")
@@ -1185,6 +1227,7 @@ def run(
     if diff_body is None:
         diff_body = _PASSING_DIFF
     spec_text = _load_spec(spec)
+    base_root, thread_id = _change_base(base_dir, request, thread_id)
     # Single-host durability seam (durability/persistence.py): when
     # FOUNDRY_STATE_DIR is SET, the checkpointer,
     # the GlobalRecords trust ledgers and the CAS are all file-backed under that
@@ -1284,6 +1327,10 @@ def run(
     token = set_gate_write_verifier(_gate_verifier(records))
     with tempfile.TemporaryDirectory(prefix="foundry-cli-src-") as source_dir:
         try:
+            if base_root is not None:
+                from foundry.base_tree import copy_base_tree
+
+                copy_base_tree(base_root, source_dir)
             # Verification profile (ROADMAP Phase 3): stack-appropriate pinned
             # gate commands. "auto" (default) infers from the request + spec;
             # None keeps the historical python defaults; a profile NAME pins
@@ -1332,6 +1379,8 @@ def run(
                 from foundry.gates.profiles import pinned_stack
 
                 seed["stack"] = pinned_stack(profile)
+            if base_root is not None:
+                seed.update(_change_seed(base_root, has_stack="stack" in seed))
             # An operator-pinned scope seeds the channel the planner would
             # otherwise write; the planner sees a decision already present and
             # keeps it. `auto` (the default) seeds nothing,
@@ -1660,6 +1709,8 @@ def main(argv: list[str] | None = None) -> int:
     # rendered identically below. Comments mark the non-obvious semantics.
     try:
         args, output_dir = _take_value(args, "--out", what="a directory argument")
+        # --base DIR: change that shipped build; the request is the change.
+        args, base_dir = _take_value(args, "--base", what="a directory argument")
 
         # --mode assistant: the only mode; the flag is accepted for compatibility.
         args, _mode = _take_value(args, "--mode", what="a value")
@@ -1794,7 +1845,7 @@ def main(argv: list[str] | None = None) -> int:
                 "[--backend {mock|anthropic|openai|claude-cli|codex}] "
                 "[--adapter {stub|raw-react|claude-code}] "
                 "[--scope {auto|demo|standard}] "
-                "[--out DIR] [--spec FILE|DIR ...] "
+                "[--out DIR] [--base DIR] [--spec FILE|DIR ...] "
                 "[--state-dir DIR] [--thread-id NAME] [--max-fix-attempts N] "
                 "[--max-slots N] [--workers frontend=2,backend=2,data=2,test=2] "
                 "[--ticket-tiers trivial=T3,standard=T2,complex=T1] "
@@ -1830,6 +1881,7 @@ def main(argv: list[str] | None = None) -> int:
             token_cap=token_cap,
             profile=(None if profile == "none" else profile),
             scope=scope,
+            base_dir=base_dir,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)

@@ -440,11 +440,16 @@ def make_fixer_node(
                 materialize_workdir(state, Path(tmp), resolve=resolve, resolve_blob=resolve_blob)
                 # Gate inputs (criteria.json) stay out of the agent's worktree: an agent
                 # told to "make the gates pass" must not be handed the oracle to edit.
-                overlay: dict[str, str | None] = {
-                    f.relative_to(tmp).as_posix(): f.read_text(encoding="utf-8")
-                    for f in sorted(Path(tmp).rglob("*"))
-                    if f.is_file() and f.relative_to(tmp).as_posix() not in GATE_INPUT_FILES
-                }
+                overlay: dict[str, str | None] = {}
+                for f in sorted(Path(tmp).rglob("*")):
+                    rel = f.relative_to(tmp).as_posix()
+                    if not f.is_file() or rel in GATE_INPUT_FILES:
+                        continue
+                    try:
+                        overlay[rel] = f.read_text(encoding="utf-8")
+                    except UnicodeDecodeError:
+                        continue  # a base tree's binary asset: the sandbox clone has it
+
         except MaterializationError as exc:
             # The gate already recorded this tree as ERROR; returning no diff lets the
             # bounded fix loop halt in order instead of crashing the run.

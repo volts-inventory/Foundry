@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING, Any
 
 from foundry.agents._common import as_text
 from foundry.agents._runtime import AgentRuntime
+from foundry.base_tree import base_features, copy_base_tree
 from foundry.canonical import content_digest
 from foundry.gates.build import BuildGate
 from foundry.gates.spec import SpecGate
@@ -988,6 +989,15 @@ def _write_contracts(
     fixes = [a for a, d in diffs if frozen_at is not None and a.seq >= frozen_at
              and _is_fix(d.task_id) and d.task_id not in known]
     with tempfile.TemporaryDirectory(prefix="foundry_contracts_") as tmp:
+        base = state.get("base_dir")
+        if base:
+            # A change extends the base's contract files: its diffs patch them.
+            for rel in paths:
+                source = _contained_target(Path(base), rel)
+                if source.is_file():
+                    target = _contained_target(Path(tmp), rel)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(source.read_bytes())
         _apply_diffs(Path(tmp), owned, resolve, resolve_blob)
         _apply_diffs(Path(tmp), fixes, resolve, resolve_blob, only=frozenset(paths))
         for rel in paths:
@@ -998,6 +1008,19 @@ def _write_contracts(
                 target.write_bytes(source.read_bytes())
             elif target.is_file():
                 target.unlink()
+
+
+def _with_base_features(planned: dict[str, str], base: dict[str, str]) -> dict[str, str]:
+    """The base build's scenarios stay in force beside the change's. A planned
+    ticket reusing a base feature file's name would silently replace those
+    scenarios, so it is refused fail-closed (the planner checks for it too)."""
+    clash = sorted(set(planned) & set(base))
+    if clash:
+        raise MaterializationError(
+            f"planned feature file(s) {', '.join(clash)} would replace the base "
+            "build's scenarios — a change must use new ticket ids"
+        )
+    return {**base, **planned}
 
 
 # Files materialize_workdir writes for the gates themselves, not product code.
@@ -1033,6 +1056,10 @@ def materialize_workdir(
     ``run_against`` (the digest the FAIL latch keys on).
     """
     dest.mkdir(parents=True, exist_ok=True)
+    # A change build starts from the shipped base tree; the diffs are its delta.
+    base = state.get("base_dir")
+    if base:
+        copy_base_tree(base, dest)
     # Spec gate input: the criteria document, byte-stable across folds.
     (dest / "criteria.json").write_text(
         as_text(_criteria_payload(state, resolve)), encoding="utf-8"
@@ -1040,6 +1067,8 @@ def materialize_workdir(
     # Executable BDD: written before the sources so an agent patch against a
     # feature applies, then again after so the trusted copy is what the gates see.
     features = _features(state, resolve)
+    if base:
+        features = _with_base_features(features, base_features(base))
     _write_features(dest, features)
     # Build / Test gate inputs: the integrated code + test sources.
     _write_sources(dest, state, resolve, resolve_blob)

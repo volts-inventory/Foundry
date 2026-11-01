@@ -179,6 +179,14 @@ class BuildStore:
             self._conn.execute("DELETE FROM seen_uris")
             self._conn.commit()
 
+    def delete(self, project_id: str) -> None:
+        """Remove one build's row, event log and seen-uri set (other builds untouched)."""
+        with self._lock:
+            self._conn.execute("DELETE FROM builds WHERE id = ?", (project_id,))
+            self._conn.execute("DELETE FROM events WHERE project_id = ?", (project_id,))
+            self._conn.execute("DELETE FROM seen_uris WHERE project_id = ?", (project_id,))
+            self._conn.commit()
+
     def add_seen(self, project_id: str, uris: set[str]) -> None:
         """Record the artifact handles a build has surfaced (idempotent)."""
         if not uris:

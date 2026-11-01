@@ -977,10 +977,19 @@ class FloorScene extends Phaser.Scene {
     }
   }
   gloom(){
+    if (this.gloomRect) return;
     const o=this.add.rectangle(0,0,W,H,0x0a0f1c,0).setOrigin(0,0).setDepth(33);
+    this.gloomRect = o;
     this.tweens.add({targets:o, fillAlpha:0.45, duration:700});
     for (const a of this.agents.values()) if (a.seen)
       this.tweens.add({targets:a.bob, angle:7, y:3, duration:500});
+  }
+  ungloom(){                       // a resumed floor gets back to work
+    const o=this.gloomRect; if (!o) return;
+    this.gloomRect = null;
+    this.tweens.add({targets:o, fillAlpha:0, duration:400, onComplete:()=>o.destroy()});
+    for (const a of this.agents.values()) if (a.seen)
+      this.tweens.add({targets:a.bob, angle:0, y:0, duration:300});
   }
   banner(txt,color){
     const b=this.add.container(W/2, FLOOR_TOP+40).setDepth(2200);
@@ -2021,7 +2030,8 @@ async function newProject(req, extra){
   const F = {
     id: resp.id, floor, request:req, mode, backend:"", scene:null,
     log:[], progress:[], gates:{}, org:null, status:"running", passed:false,
-    slots, seenUris:new Set(),
+    slots, seenUris:new Set(), phase:"", stopping:"",
+    tokenCap:(extra && extra.token_cap) || null, maxFix:3, cursor:0,
   };
   setTaskLimits(F, extra && extra.workers);
   FLOORS.set(floor, F);
@@ -2047,6 +2057,8 @@ function switchToFloor(floor){
   renderGatesMini(F.gates);
   updateHud(F);
   renderElevator();
+  hideCtlPanel();
+  renderControls();
 }
 
 // ---- per-floor event routing ----------------------------------------------
@@ -2157,7 +2169,18 @@ function routeEvent(floor, ev){
       F.slots = ev.slots || 1;
       if (ev.workers){ setTaskLimits(F, ev.workers); if (S) S.rebuildTaskSprites(); }
       if (S) S.setPool(F.slots);
+      if ("token_cap" in ev) F.tokenCap = ev.token_cap;
+      if ("max_fix_attempts" in ev) F.maxFix = ev.max_fix_attempts;
       if (isActive) updateHud(F);
+      break;
+    case "stopping":               // Stop / Pause requested; the build halts at its next checkpoint
+      if (F.status !== "done"){ F.stopping = ev.kind || "stopped"; if (isActive) renderControls(); }
+      break;
+    case "resumed":                // Resume / Retry with…: the floor is back at work
+      if ("token_cap" in ev) F.tokenCap = ev.token_cap;
+      if ("max_fix_attempts" in ev) F.maxFix = ev.max_fix_attempts;
+      markResumed(F);
+      logTo(F, "gold", "── RESUMED ──");
       break;
     case "narrate": logNarrate(F, ev.text); break;
     case "task": {                 // one ticket's worker started / finished / failed
@@ -2255,20 +2278,38 @@ function routeEvent(floor, ev){
       logTo(F, "gold", "RELEASED -> "+(ev.uri||"artifact"));
       logProgress(F, "good", "★ SHIPPED — "+(ev.uri||"artifact")); break;
     case "halt":
+      if (OPERATOR_STOP.has(ev.phase)){
+        logTo(F, "gold", (ev.phase === "paused" ? "PAUSED" : "STOPPED")+" at a checkpoint");
+        logProgress(F, "gold", "❚❚ "+(ev.phase === "paused" ? "PAUSED" : "STOPPED")+" — resumable");
+        break;
+      }
       if (S){ S.flashGate(); S.stampGate(false); }
       logTo(F, "bad", "HELD: "+ev.reason);
       logProgress(F, "bad", "✕ HELD — "+ev.reason); break;
-    case "done":
+    case "done": {
       closeStage(F);
-      F.status = "done"; F.passed = !!ev.passed; renderElevator();
+      F.status = "done"; F.passed = !!ev.passed; F.stopping = "";
+      F.phase = ev.passed ? "passed" : (ev.phase || "halted");
+      renderElevator();
+      if (isActive) renderControls();
       taskClear(F); if (S) S.clearWorkers();
+      const opStop = OPERATOR_STOP.has(ev.phase);
       // Build's over: nobody is working, so everyone heads to the LOUNGE
       // (staffRoom(null) marks no room active and routes idle folks there).
-      if (S){ S.staffRoom(null); if (!ev.passed){ S.gloom(); S.banner("HELD AT THE GATE", 0xff5d6c); } }
+      if (S){ S.staffRoom(null);
+        if (opStop) S.banner(ev.phase === "paused" ? "PAUSED" : "STOPPED", 0xffcf52);
+        else if (!ev.passed){ S.gloom(); S.banner("HELD AT THE GATE", 0xff5d6c); } }
+      if (opStop){
+        if (isActive) hideCtlPanel();     // the "pausing…" note is answered
+        logTo(F, "gold", "Build "+ev.phase+" — Resume picks up where it left off.");
+        logProgress(F, "gold", "■ Build "+ev.phase+" — resumable.");
+        break;
+      }
       logTo(F, ev.passed?"good":"bad",
         ev.passed?"Build complete — shipped.":"Build halted — nothing shipped.");
       logProgress(F, ev.passed?"good":"bad",
         ev.passed?"■ Build complete — shipped.":"■ Build halted — nothing shipped."); break;
+    }
   }
 }
 
@@ -2616,7 +2657,7 @@ function renderElevator(){
     const btn=document.createElement("button");
     let cls="el-btn";
     if (f===ACTIVE) cls+=" active";
-    if (F.status==="done") cls += F.passed ? " done" : " failed";
+    if (F.status==="done") cls += F.passed ? " done" : OPERATOR_STOP.has(F.phase) ? " paused" : " failed";
     btn.className=cls;
     btn.innerHTML=`<span class="fl-no">${f}</span>FL`;
     btn.onclick=()=>switchToFloor(f);
@@ -2804,6 +2845,162 @@ function viewFile(id, path, li){
     .catch(() => { view.textContent = "(could not load file)"; });
 }
 function hideFiles(){ document.getElementById("files-modal").classList.add("hidden"); }
+// ---- build control: Stop · Pause · Resume · Retry with… · Delete ------------
+// Drawn for the floor on screen from its state; only the actions valid for that
+// state appear. Forms, confirmations and errors go in the panel under the bar.
+const OPERATOR_STOP = new Set(["stopped", "paused"]);
+// "interrupted" is left out: the server closes a floor that way only when it has no
+// checkpoint to resume from.
+const RESUMABLE = new Set(["stopped", "paused", "halted", "token_cap", "error"]);
+const MAX_FIX = 20;
+let CTL_TIMER = null;
+
+function ctlButton(icon, label, title, onclick, cls){
+  const b = document.createElement("button");
+  b.type = "button"; b.className = "ctl-btn" + (cls ? " "+cls : "");
+  b.title = title; b.setAttribute("aria-label", title);
+  b.append(icon+" ");
+  const t = document.createElement("span"); t.className = "ctl-lbl"; t.textContent = label;
+  b.append(t); b.onclick = onclick;
+  return b;
+}
+function renderControls(){
+  const el = document.getElementById("floor-ctl"); el.innerHTML = "";
+  const F = FLOORS.get(ACTIVE); if (!F) return;
+  const chip = (cls, text) => { const s = document.createElement("span");
+    s.className = "ctl-state "+cls; s.textContent = text; el.appendChild(s); };
+  if (F.status === "running" || F.status === "queued"){
+    if (F.stopping){ chip("busy", F.stopping === "paused" ? "PAUSING…" : "STOPPING…"); return; }
+    el.append(
+      ctlButton("■", "STOP", "Stop this build at its next checkpoint", () => stopFloor(F, "stop")),
+      ctlButton("❚❚", "PAUSE", "Pause this build at its next checkpoint", () => stopFloor(F, "pause")));
+    return;
+  }
+  if (F.phase === "paused") chip("", "PAUSED");
+  else if (F.phase === "stopped") chip("stopped", "STOPPED");
+  else if (F.phase === "token_cap") chip("stopped", "TOKEN CAP");
+  if (!F.passed && RESUMABLE.has(F.phase)){
+    el.append(
+      ctlButton("▶", "RESUME", "Resume from the last checkpoint", () => resumeFloor(F, {}), "primary"),
+      ctlButton("↻", "RETRY WITH…", "Resume with a new token cap or more fix attempts", () => showRetryForm(F)));
+  }
+  el.append(ctlButton("✕", "DELETE", "Delete this floor and its output", () => showDeleteConfirm(F), "danger"));
+}
+function ctlPanel(kind){
+  const p = document.getElementById("ctl-panel");
+  clearTimeout(CTL_TIMER); p.innerHTML = ""; p.className = "ctl-panel "+kind;
+  return p;
+}
+function hideCtlPanel(){
+  const p = document.getElementById("ctl-panel");
+  clearTimeout(CTL_TIMER); p.className = "ctl-panel hidden"; p.innerHTML = "";
+}
+function ctlMessage(text, bad){
+  const p = ctlPanel(bad ? "bad" : "ok");
+  const m = document.createElement("span"); m.textContent = text;
+  const x = document.createElement("button"); x.type = "button"; x.className = "ctl-x";
+  x.textContent = "✕"; x.title = "dismiss"; x.setAttribute("aria-label", "dismiss"); x.onclick = hideCtlPanel;
+  p.append(m, x);
+  CTL_TIMER = setTimeout(hideCtlPanel, bad ? 9000 : 4000);
+}
+async function ctlRequest(method, path, body){
+  try {
+    const r = await fetch(path, {method, headers:postHeaders(),
+      body: body === undefined ? undefined : JSON.stringify(body)});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok){ ctlMessage(d.error || ("Request failed ("+r.status+")."), true); return null; }
+    return d;
+  } catch(_){ ctlMessage("Could not reach the server.", true); return null; }
+}
+async function stopFloor(F, how){
+  const d = await ctlRequest("POST", "/api/projects/"+F.id+"/"+how);
+  if (!d) return;
+  if (F.status === "done") return;     // it already halted (a queued build stops at once)
+  F.stopping = d.kind;
+  if (F.floor === ACTIVE) renderControls();
+  ctlMessage(how === "pause" ? "Pausing at the next checkpoint…" : "Stopping at the next checkpoint…");
+}
+function markResumed(F){
+  F.status = "running"; F.phase = ""; F.stopping = ""; F.passed = false;
+  if (F.scene) F.scene.ungloom();
+  renderElevator();
+  if (F.floor === ACTIVE) renderControls();
+}
+async function resumeFloor(F, body){
+  const d = await ctlRequest("POST", "/api/projects/"+F.id+"/resume", body);
+  if (!d) return;
+  markResumed(F);
+  // The floor's stream ended with the last run; reattach where it left off.
+  if (!F.es || F.es.readyState === EventSource.CLOSED) openFloorStream(F, F.cursor);
+  ctlMessage(d.from_checkpoint ? "Resumed from the last checkpoint." : "Restarted — it never reached a checkpoint.");
+}
+function showRetryForm(F){
+  const p = ctlPanel("form");
+  const form = document.createElement("form"); form.className = "ctl-form";
+  form.noValidate = true;            // our inline message, not the browser bubble
+  const field = (label, attrs) => {
+    const l = document.createElement("label"); l.textContent = label;
+    const i = document.createElement("input"); i.type = "number";
+    for (const k in attrs) i.setAttribute(k, attrs[k]);
+    l.appendChild(i); form.appendChild(l); return i;
+  };
+  const cap = field("Token cap", {min:"0", step:"10000", inputmode:"numeric",
+    placeholder: F.tokenCap ? String(F.tokenCap) : "no cap"});
+  const fix = field("Fix attempts", {min:"0", max:String(MAX_FIX), inputmode:"numeric",
+    placeholder: String(F.maxFix ?? 3)});
+  const go = document.createElement("button"); go.type = "submit"; go.className = "primary"; go.textContent = "▶ Resume";
+  const no = document.createElement("button"); no.type = "button"; no.textContent = "cancel"; no.onclick = hideCtlPanel;
+  const err = document.createElement("span"); err.className = "ctl-err";
+  form.append(go, no, err);
+  form.oninput = () => { err.textContent = ""; };
+  form.onsubmit = e => {
+    e.preventDefault();
+    const body = {};
+    const c = cap.value.trim(), f = fix.value.trim();
+    if (c !== ""){
+      const n = Number(c);
+      if (!Number.isInteger(n) || n < 0){ err.textContent = "Token cap: a whole number (0 = no cap)."; return; }
+      body.token_cap = n;
+    }
+    if (f !== ""){
+      const n = Number(f);
+      if (!Number.isInteger(n) || n < 0 || n > MAX_FIX){ err.textContent = "Fix attempts: 0 to "+MAX_FIX+"."; return; }
+      body.max_fix_attempts = n;
+    }
+    resumeFloor(F, body);
+  };
+  p.appendChild(form);
+  cap.focus();
+}
+function showDeleteConfirm(F){
+  const p = ctlPanel("bad");
+  const m = document.createElement("span");
+  m.textContent = "Delete floor "+F.floor+" and its output? This can't be undone.";
+  const yes = document.createElement("button"); yes.type = "button"; yes.className = "danger"; yes.textContent = "✕ Delete";
+  const no = document.createElement("button"); no.type = "button"; no.textContent = "cancel"; no.onclick = hideCtlPanel;
+  yes.onclick = async () => {
+    const d = await ctlRequest("DELETE", "/api/projects/"+F.id);
+    if (!d) return;
+    removeFloor(F);
+    ctlMessage("Floor "+F.floor+" deleted.");
+  };
+  p.append(m, yes, no);
+  yes.focus();
+}
+function removeFloor(F){
+  if (F.es) F.es.close();
+  GAME.scene.remove(floorKey(F.floor));
+  FLOORS.delete(F.floor);
+  const rest = [...FLOORS.keys()].sort((a,b) => a-b);
+  if (rest.length){ switchToFloor(rest[rest.length-1]); return; }
+  ACTIVE = null;
+  document.getElementById("floor-tag").textContent = "FLOOR —";
+  document.getElementById("proj-tag").textContent = "no project";
+  document.getElementById("mode-tag").textContent = "";
+  for (const id of ["log", "progress", "tickets", "gates-mini"]) document.getElementById(id).innerHTML = "";
+  renderElevator(); renderControls();
+}
+
 // ---- UI wiring -------------------------------------------------------------
 const newModal=document.getElementById("new-modal");
 function showNewModal(){
@@ -2867,6 +3064,8 @@ function adoptFloor(row){
     request:row.request, mode:row.mode, backend:row.backend,
     scene:null, log:[], progress:[], gates:row.gates||{}, org:null,
     status:row.status, passed:!!row.passed, slots:row.slots||1, seenUris:new Set(),
+    phase:row.phase||"", stopping:row.stopping||"", tokenCap:row.token_cap ?? null,
+    maxFix:row.max_fix_attempts ?? 3, cursor:0,
   };
   FLOORS.set(row.floor, F);
   GAME.scene.add(floorKey(row.floor), FloorScene, true,
@@ -2874,10 +3073,12 @@ function adoptFloor(row){
   openFloorStream(F);   // a running build reconnects live; a finished one replays its log and ends
 }
 // ONE live stream per floor, shared by every path (new build / rehydrate).
-function openFloorStream(F){
-  const es = new EventSource("/api/stream/"+F.id);
+// `from` reattaches a resumed floor where its stream left off (no full replay).
+function openFloorStream(F, from){
+  const es = new EventSource("/api/stream/"+F.id+(from ? "?from="+from : ""));
   F.lastBeat = Date.now();
   es.onmessage = e => { F.lastBeat = Date.now();
+    if (e.lastEventId) F.cursor = parseInt(e.lastEventId, 10) + 1;
     try { routeEvent(F.floor, JSON.parse(e.data)); } catch(_){} };
   es.addEventListener("ka", ()=>{ F.lastBeat = Date.now(); updateLiveDot(); });
   es.addEventListener("end", ()=>{ es.close(); });
@@ -2894,3 +3095,16 @@ async function rehydrate(){
   } catch(_){ showNewModal(); }
 }
 rehydrate();
+// A floor resumed from another tab or device: this viewer's stream ended with the
+// last run, so look again whenever the page comes back into view.
+async function resyncFloors(){
+  let rows;
+  try { rows = (await fetch("/api/projects").then(r=>r.json())).projects || []; } catch(_){ return; }
+  for (const row of rows){
+    const F = FLOORS.get(row.floor);
+    if (!F || F.id !== row.id || F.status !== "done" || row.status === "done") continue;
+    if (!F.es || F.es.readyState === EventSource.CLOSED) openFloorStream(F, F.cursor);  // replays "resumed"
+  }
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) resyncFloors(); });
+window.addEventListener("focus", resyncFloors);

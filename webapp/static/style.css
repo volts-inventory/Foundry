@@ -77,6 +77,36 @@ button.primary{background:#1f6b3a;border-color:var(--green);color:#dffce8}
 button.danger{background:#6b1f28;border-color:var(--red);color:#ffe0e3}
 #new-btn{background:#5a4a18;border-color:var(--gold);color:#fff6da}
 
+/* ---- build control (floor HUD) ---- */
+#hud{position:relative}
+.floor-ctl{display:flex;align-items:center;gap:8px;flex:0 0 auto}
+.floor-ctl:empty{display:none}
+.floor-ctl button{padding:5px 9px;font-size:11px}
+.ctl-state{padding:2px 7px;border-radius:3px;border:2px solid var(--gold);color:var(--gold);
+  font-size:11px;font-weight:bold;white-space:nowrap}
+.ctl-state.busy{border-color:var(--blue);color:var(--blue)}
+.ctl-state.stopped{border-color:var(--red);color:var(--red)}
+/* forms + messages hang under the bar's right edge, over the stage */
+.ctl-panel{position:absolute;top:calc(100% + 6px);right:12px;z-index:60;
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;max-width:min(560px,calc(100vw - 24px));
+  background:var(--panel);border:3px solid var(--gold);border-radius:8px;padding:9px 12px;
+  box-shadow:0 4px 0 #0c1322;font-size:12px;text-transform:none}
+.ctl-panel.hidden{display:none}
+.ctl-panel.ok{border-color:var(--green);color:#dffce8}
+.ctl-panel.bad{border-color:var(--red);color:#ffe0e3}
+.ctl-panel label{display:flex;align-items:center;gap:6px;color:var(--dim);text-transform:uppercase;font-size:11px}
+.ctl-panel input{width:130px;font-family:inherit;font-size:12px;background:#0e1424;color:var(--ink);
+  border:2px solid var(--line);border-radius:4px;padding:5px 7px}
+.ctl-panel input:focus{outline:none;border-color:var(--gold)}
+.ctl-panel button{padding:5px 10px;font-size:11px}
+.ctl-panel .ctl-err{flex-basis:100%;color:var(--red)}
+.ctl-panel .ctl-x{padding:1px 7px;min-height:0;box-shadow:none}
+.ctl-form{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.el-btn.paused{color:var(--gold);border-color:#5a4a20}
+/* a mid-width bar keeps one row: the control buttons drop to their icons (each
+   keeps its title + aria-label); portrait, with a row of its own, shows the words */
+@media (max-width:1180px){ .floor-ctl .ctl-lbl{display:none} }
+
 /* ---- Stage ---- */
 /* Zelda-style screen wipe on floor change (chunky stepped sweep). It's a child of
    the display box, so it covers exactly the floor — never the log or the chrome. */
@@ -399,12 +429,15 @@ details.fset.fold[open]>summary{border-bottom:2px solid var(--line)}
      row 4  floor pills (scrolls sideways)                                     */
   #hud{
     display:grid;grid-template-columns:minmax(0,1fr) auto;
-    grid-template-areas:"id act" "proj proj" "chips chips";
+    grid-template-areas:"id act" "proj proj" "ctl ctl" "chips chips";
     align-items:center;gap:5px 10px;padding:7px 10px 6px;font-size:11px;
     border-bottom:none;box-shadow:none;
   }
   .hud-left{grid-area:id;gap:4px 8px}
   .hud-right{grid-area:act;justify-self:end;gap:7px}
+  .floor-ctl{grid-area:ctl;flex-wrap:wrap;gap:6px}
+  .floor-ctl .ctl-lbl{display:inline}
+  .ctl-panel{right:8px;left:8px;max-width:none}
   /* stage chips: ONE horizontally scrolling line, so they can't grow the bar */
   .hud-mid{grid-area:chips;-webkit-overflow-scrolling:touch}
   .hud-mid:has(.gates-mini:empty){display:none}   /* no chips -> no empty row */

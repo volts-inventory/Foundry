@@ -37,6 +37,12 @@
       <!-- stage / per-service chips: their own group so narrow screens can give
            them a single horizontally-scrolling row instead of wrapping to three -->
       <div class="hud-mid"><span class="gates-mini" id="gates-mini"></span></div>
+      <!-- Build control for the floor on screen: game.js draws only the actions valid
+           for its state (Stop · Pause while it runs; Resume · Retry with… · Delete
+           once it has stopped). The panel under the bar holds their forms and
+           messages, so nothing here needs alert()/confirm(). -->
+      <div class="floor-ctl" id="floor-ctl"></div>
+      <div class="ctl-panel hidden" id="ctl-panel" role="status" aria-live="polite"></div>
       <div class="hud-right">
         <!-- `.lbl-long` is dropped on narrow screens so both actions still fit on
              one line beside the floor tag (⌥ REPO · ▶ NEW). -->

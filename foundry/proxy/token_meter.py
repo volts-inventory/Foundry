@@ -13,11 +13,16 @@ import threading
 from collections.abc import Mapping
 from pathlib import Path
 
-__all__ = ["TokenCapExceeded", "TokenMeter", "weighted_tokens"]
+__all__ = ["BuildStopped", "TokenCapExceeded", "TokenMeter", "weighted_tokens"]
 
 
 class TokenCapExceeded(RuntimeError):
     """The run's token cap is spent. Not a provider failure: never auto-retried."""
+
+
+class BuildStopped(TokenCapExceeded):
+    """The operator stopped the run. A subclass so it takes the cap's clean-stop path
+    (implementation writes kept, the run resumable from its checkpoint)."""
 
 
 def weighted_tokens(usage: Mapping[str, int]) -> int:
@@ -36,12 +41,19 @@ class TokenMeter:
     """Thread-safe running total (the IC pool runs coding sessions in parallel).
 
     With a ``ledger`` file the total survives a restart, so a resumed run is held
-    to the cap across every process it took; :meth:`reset` starts a fresh run."""
+    to the cap across every process it took; :meth:`reset` starts a fresh run.
 
-    def __init__(self, cap: int, ledger: Path | None = None) -> None:
-        if cap < 1:
+    ``cap=None`` meters without a cap; a set ``cancel`` event makes :meth:`check`
+    raise :class:`BuildStopped`, at the same seams the cap is checked."""
+
+    def __init__(
+        self, cap: int | None, ledger: Path | None = None,
+        cancel: threading.Event | None = None,
+    ) -> None:
+        if cap is not None and cap < 1:
             raise ValueError("token cap must be >= 1")
         self.cap = cap
+        self.cancel = cancel
         self.ledger = ledger
         self.used = 0
         if ledger is not None and ledger.exists():
@@ -61,9 +73,14 @@ class TokenMeter:
         tmp.write_text(json.dumps({"used": self.used}))
         os.replace(tmp, self.ledger)
 
+    def check_cancel(self) -> None:
+        if self.cancel is not None and self.cancel.is_set():
+            raise BuildStopped("stopped by the operator")
+
     def check(self) -> None:
+        self.check_cancel()
         with self._lock:
-            if self.used >= self.cap:
+            if self.cap is not None and self.used >= self.cap:
                 raise TokenCapExceeded(
                     f"token cap reached: {self.used:,} of {self.cap:,} tokens used"
                 )

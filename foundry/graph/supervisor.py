@@ -367,7 +367,15 @@ def build_supervisor_graph(
         # a pure function of those handles, so a per-run temp dir is fine).
         return Path(tempfile.mkdtemp(prefix=f"foundry_{name}_"))
 
+    # A gate run makes no model call, so the meter's own seams never see a stop
+    # requested while the gates run; check it here, between supervisor nodes.
+    def _stop_if_cancelled() -> None:
+        meter = getattr(rt.proxy, "token_meter", None)
+        if meter is not None:
+            meter.check_cancel()
+
     def spec_gate(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        _stop_if_cancelled()
         out = run_spec_gate(
             state,
             config,
@@ -390,6 +398,7 @@ def build_supervisor_graph(
     bt_boundary = BUILD_TEST_SMOKE_BOUNDARY
 
     def build_test_gate(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        _stop_if_cancelled()
         out = run_build_test_gates(
             state,
             config,

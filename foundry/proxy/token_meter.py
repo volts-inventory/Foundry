@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 __all__ = [
+    "BuildStopped",
     "RunCapExceeded",
     "TimeCapExceeded",
     "TokenCapExceeded",
@@ -42,6 +43,11 @@ def _now() -> float:
     return time.monotonic()
 
 
+class BuildStopped(TokenCapExceeded):
+    """The operator stopped the run. A subclass so it takes the cap's clean-stop path
+    (implementation writes kept, the run resumable from its checkpoint)."""
+
+
 def weighted_tokens(usage: Mapping[str, int]) -> int:
     """Tokens a call cost against the cap. Cache reads count at a tenth, matching
     their price; counted in full they would trip the cap on every long agent
@@ -60,10 +66,12 @@ class TokenMeter:
     ``cap=None`` counts tokens without capping them; ``time_cap_s`` caps the run's
     wall-clock time. With a ``ledger`` file both totals survive a restart, so a
     resumed run is held to its caps across every process it took; :meth:`reset`
-    starts a fresh run."""
+    starts a fresh run. A set ``cancel`` event makes :meth:`check` raise
+    :class:`BuildStopped`, at the same seams the caps are checked."""
 
     def __init__(
-        self, cap: int | None, ledger: Path | None = None, *, time_cap_s: float | None = None
+        self, cap: int | None, ledger: Path | None = None,
+        cancel: threading.Event | None = None, *, time_cap_s: float | None = None,
     ) -> None:
         if cap is not None and cap < 1:
             raise ValueError("token cap must be >= 1")
@@ -71,6 +79,7 @@ class TokenMeter:
             raise ValueError("time cap must be > 0 seconds")
         self.cap = cap
         self.time_cap_s = time_cap_s
+        self.cancel = cancel
         self.ledger = ledger
         self.used = 0
         self._elapsed_base = 0.0
@@ -102,7 +111,12 @@ class TokenMeter:
         tmp.write_text(json.dumps({"used": self.used, "elapsed_s": spent}))
         os.replace(tmp, self.ledger)
 
+    def check_cancel(self) -> None:
+        if self.cancel is not None and self.cancel.is_set():
+            raise BuildStopped("stopped by the operator")
+
     def check(self) -> None:
+        self.check_cancel()
         with self._lock:
             if self.cap is not None and self.used >= self.cap:
                 raise TokenCapExceeded(

@@ -33,6 +33,6 @@ def finished(label: str, started: float, usage: Mapping[str, Any] | None, meter:
     tokens = f", {weighted_tokens(usage) / 1000:.0f}k tokens" if usage else ""
     total = ""
     if meter is not None:
-        total = (f" (run {meter.used / 1e6:.2f}M of {meter.cap / 1e6:.1f}M)"
-                 if meter.cap is not None else f" (run {meter.used / 1e6:.2f}M)")
+        of = f" of {meter.cap / 1e6:.1f}M" if meter.cap is not None else ""
+        total = f" (run {meter.used / 1e6:.2f}M{of})"
     log(f"done  {label} in {took}{tokens}{total}")

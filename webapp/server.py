@@ -16,6 +16,7 @@ import hmac
 import json
 import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -204,6 +205,37 @@ def parse_workers(raw: Any = None) -> dict[str, int]:
     return out
 
 
+_PROJECT_ROUTE = re.compile(r"/api/projects/([^/]+)")
+_CONTROL_ROUTE = re.compile(r"/api/projects/([^/]+)/(stop|pause|resume)")
+MAX_FIX_ATTEMPTS = 20
+
+
+def _whole(raw: Any, name: str) -> int:
+    """A non-negative whole number from JSON (an int, or a string of digits)."""
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+        return raw
+    if isinstance(raw, str) and raw.strip().isdigit():
+        return int(raw)
+    raise ValueError(f"{name} must be a whole number, 0 or more")
+
+
+def _resume_overrides(body: Mapping[str, Any]) -> tuple[int | None, int | None]:
+    """(token_cap, max_fix_attempts) from a resume body; ``None`` keeps the floor's
+    current value. A token cap of 0 (or null) lifts the cap. Raises ValueError."""
+    if not isinstance(body, Mapping):
+        raise ValueError("expected a JSON object")
+    token_cap: int | None = None
+    max_fix: int | None = None
+    if "token_cap" in body:
+        raw = body["token_cap"]
+        token_cap = 0 if raw in (None, "") else _whole(raw, "token_cap")
+    if "max_fix_attempts" in body and body["max_fix_attempts"] not in (None, ""):
+        max_fix = _whole(body["max_fix_attempts"], "max_fix_attempts")
+        if max_fix > MAX_FIX_ATTEMPTS:
+            raise ValueError(f"max_fix_attempts must be 0 to {MAX_FIX_ATTEMPTS}")
+    return token_cap, max_fix
+
+
 def parse_ticket_tiers(raw: Any) -> dict[str, str]:
     """difficulty -> tier overrides; entries outside trivial|standard|complex -> T1|T2|T3 drop."""
     if not isinstance(raw, Mapping):
@@ -264,6 +296,15 @@ class Project:
     gates: dict[str, Any] = field(default_factory=dict)  # name -> {status,attested,advisory}
     out_base: Path | None = None  # this floor's output dir (code/)
     profile: str = "auto"  # verification profile / stack ("auto" = infer from request)
+    max_fix_attempts: int = 3
+    # Build control: setting `cancel` stops the run at its next checkpoint (the token
+    # meter's seams); `stop_kind` labels it "stopped" or "paused". A resume swaps in a
+    # fresh Event. `phase` is how the last run ended (passed / halted / token_cap /
+    # error / stopped / paused / interrupted), restored from the log on restart.
+    cancel: threading.Event = field(default_factory=threading.Event)
+    stop_kind: str = ""
+    closing: bool = False  # the run returned; only its closing events are left to emit
+    phase: str = ""
 
 
 _PROJECTS: dict[str, Project] = {}
@@ -341,11 +382,14 @@ def _load_persisted() -> None:
                     p.log = _STORE.events_of(p.id)   # the durable replay log
                 except Exception:
                     p.log = []
-                was_running = str(row.get("status", "")) == "running" and not any(
-                    e.get("type") == "_end" for e in p.log
+                # A resumed build's log keeps its earlier run's _end mid-log, so
+                # only a log that ENDS in _end is closed.
+                was_running = str(row.get("status", "")) == "running" and not (
+                    p.log and p.log[-1].get("type") == "_end"
                 )
                 p.passed = bool(row.get("passed", False))
                 p.gates = dict(row.get("gates") or {})
+                _restore_controls(p)
                 _PROJECTS[p.id] = p
                 # A checkpoint written by the removed gated/autonomous graph names nodes
                 # that no longer exist, so it can't be resumed on the assistant graph.
@@ -376,6 +420,7 @@ def _load_persisted() -> None:
                     _emit(p, type="halt", phase="interrupted",
                           reason="server restarted mid-build")
                     _emit(p, type="done", passed=False, phase="interrupted")
+                    p.phase = "interrupted"
                     _close(p)
                 else:
                     p.status = "done"
@@ -383,6 +428,27 @@ def _load_persisted() -> None:
             except Exception:
                 continue
         _FLOOR[0] = max(_FLOOR[0], _STORE.max_floor())
+
+
+def _restore_controls(p: Project) -> None:
+    """Re-derive what a restart lost from the floor's own log: the settings its
+    latest run used (so a Resume runs it the same way) and how that run ended."""
+    for e in p.log:
+        t = e.get("type")
+        if t == "project":
+            if isinstance(e.get("workers"), Mapping):
+                p.workers = parse_workers(e["workers"])
+            p.ticket_tiers = parse_ticket_tiers(e.get("ticket_tiers"))
+        if t == "profile" and e.get("profile"):
+            p.profile = str(e["profile"])
+        if t in ("project", "resumed"):
+            if "token_cap" in e:
+                p.token_cap = e["token_cap"]
+            if "max_fix_attempts" in e:
+                p.max_fix_attempts = int(e["max_fix_attempts"])
+            p.phase = ""
+        elif t == "done":
+            p.phase = "passed" if e.get("passed") else str(e.get("phase") or "halted")
 
 
 def _paused_at_retired_checkpoint(log: list[dict[str, Any]]) -> bool:
@@ -614,6 +680,8 @@ def _trim_finished_logs() -> None:
                 or now - p.ended_at < _LOG_GRACE_S):
             continue
         with p.cond:
+            if not p.ended:        # resumed since the check above
+                continue
             if len(p.log) > _LOG_TAIL:
                 p.log = p.log[-_LOG_TAIL:]
             p.log_trimmed = True   # stream now replays this build's history from the store
@@ -739,11 +807,28 @@ def _gated_runner(runner, p: Project, **kwargs: Any) -> None:
         _persist(p)
         _emit(p, type="narrate",
               text="⏳ All build slots are busy — queued. Starting as soon as one frees…")
-        _BUILD_GATE.acquire()
+        while not _BUILD_GATE.acquire(timeout=1):
+            if p.cancel.is_set():          # stopped while queued: never takes a slot
+                _finish_stopped(p)
+                return
     try:
         runner(p, **kwargs)
     finally:
         _BUILD_GATE.release()
+
+
+def _finish_stopped(p: Project) -> None:
+    """Close out a build the operator stopped or paused; its checkpoint stays resumable."""
+    kind = p.stop_kind or "stopped"
+    verb = "Paused" if kind == "paused" else "Stopped"
+    _emit(p, type="narrate",
+          text=f"⏸ {verb} at a checkpoint — Resume picks up where it left off.")
+    _emit(p, type="halt", phase=kind, reason=f"{kind} by the operator")
+    _emit(p, type="done", passed=False, phase=kind)
+    p.phase = kind
+    p.status = "done"
+    _persist(p)
+    _close(p)
 
 
 def _run_factory(p: Project, resume: bool = False) -> None:
@@ -760,10 +845,12 @@ def _run_factory(p: Project, resume: bool = False) -> None:
 
     if resume:
         _emit(p, type="narrate",
-              text="↻ Resuming after a restart — picking up from the last checkpoint…")
+              text="↻ Resuming — picking up from the last checkpoint…")
     else:
         _emit(p, type="project", id=p.id, request=p.request, mode=p.mode, floor=p.floor,
-              backend=p.backend, slots=p.max_slots, workers=p.workers)
+              backend=p.backend, slots=p.max_slots, workers=p.workers,
+              ticket_tiers=p.ticket_tiers, token_cap=p.token_cap,
+              max_fix_attempts=p.max_fix_attempts)
         _emit(p, type="narrate", text=f"📋 New project on Floor {p.floor}: {p.request!r}")
         _emit(p, type="narrate", text=f"🏭 Mode: {p.mode}. The crew reports for duty…")
         if p.backend != "mock":
@@ -785,6 +872,7 @@ def _run_factory(p: Project, resume: bool = False) -> None:
         chosen = _choose_stack(p)
         if chosen:
             p.profile = chosen[0]
+            _emit(p, type="profile", profile=p.profile)   # a resume after a restart keeps it
             _emit(p, type="active", room="plan", agent="Planner",
                   live=True)
             _emit(p, type="narrate",
@@ -896,6 +984,8 @@ def _run_factory(p: Project, resume: bool = False) -> None:
                 adapter=p.adapter,            # coding substrate (stub/raw-react)
                 max_slots=p.max_slots,        # IC-pool parallelism (Wave C) + budget tree (Wave D)
                 token_cap=p.token_cap,
+                max_fix_attempts=p.max_fix_attempts,
+                cancel=p.cancel,              # Stop / Pause: halts at the next checkpoint
                 thread_id=p.id,               # UNIQUE per project — no cross-floor collision
                 state_dir=_STATE_DIR,         # durable: build survives + resumes past a restart
                 output_dir=str(code_dir) if code_dir else None,
@@ -906,6 +996,11 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     except Exception as exc:
         # Print the full traceback to the SERVER terminal too — the quest-log line
         # is a one-line summary, and "no error in the terminal" must never mislead.
+        from foundry.proxy.token_meter import BuildStopped
+
+        if isinstance(exc, BuildStopped):
+            _finish_stopped(p)
+            return
         print(f"[build] floor {p.floor} failed: {exc}")
         traceback.print_exc()
         # A TRANSIENT provider failure (ProxyUnavailable — the proxy already rode
@@ -925,16 +1020,22 @@ def _run_factory(p: Project, resume: bool = False) -> None:
                        f"checkpoint ~{resume_at} — nothing is lost.")
             _emit(p, type="limitwait", seconds=int(wait), until=int(time.time() + wait))
             _persist(p)                          # status stays "running": a restart resumes too
-            time.sleep(wait)
+            if p.cancel.wait(wait):              # Stop / Pause during the back-off
+                _finish_stopped(p)
+                return
             with _LOCK:
                 alive = _PROJECTS.get(p.id) is p  # a Clear-all during the wait removes it
             if not alive:
                 return
             return _run_factory(p, resume=True)  # re-enter from the durable checkpoint
-        if type(exc).__name__ == "TokenCapExceeded":
-            _emit(p, type="narrate", text=f"⏹ Stopped: {exc}. Raise the token cap to go further.")
-            _emit(p, type="halt", phase="token_cap", reason=str(exc))
-            _emit(p, type="done", passed=False, phase="token_cap")
+        if type(exc).__name__ in ("TokenCapExceeded", "TimeCapExceeded"):
+            timed = type(exc).__name__ == "TimeCapExceeded"
+            phase = "time_cap" if timed else "token_cap"
+            what = "time cap" if timed else "token cap"
+            _emit(p, type="narrate", text=f"⏹ Stopped: {exc}. Raise the {what} to go further.")
+            _emit(p, type="halt", phase=phase, reason=str(exc))
+            _emit(p, type="done", passed=False, phase=phase)
+            p.phase = phase
             p.status = "done"
             _persist(p)
             _close(p)
@@ -942,11 +1043,13 @@ def _run_factory(p: Project, resume: bool = False) -> None:
         _emit(p, type="narrate", text=f"💥 Build error: {exc}")
         _emit(p, type="halt", phase="error", reason=str(exc))
         _emit(p, type="done", passed=False, phase="error")
+        p.phase = "error"
         p.status = "done"
         _persist(p)
         _close(p)
         return
 
+    p.closing = True
     result_dict = {
         "passed": result.passed,
         "phase": result.phase,
@@ -973,6 +1076,7 @@ def _run_factory(p: Project, resume: bool = False) -> None:
         _emit(p, type="narrate",
               text=f"📂 {n_files} file(s) in the repo — open REPO to browse the store.")
     p.passed = bool(result.passed)
+    p.phase = "passed" if result.passed else (result.phase or "halted")
     p.status = "done"
     _persist(p)              # catalog the FINAL status/passed (after they're set)
     _close(p)
@@ -1269,12 +1373,141 @@ class Handler(BaseHTTPRequestHandler):
         if denied is not None:
             self._json(403, {"error": denied})
             return
+        m = _CONTROL_ROUTE.fullmatch(path)
         if path == "/api/projects":
             self._new_project()
         elif path == "/api/reset":
             self._reset()
+        elif m and m.group(2) in ("stop", "pause"):
+            self._stop(m.group(1), "paused" if m.group(2) == "pause" else "stopped")
+        elif m and m.group(2) == "resume":
+            self._resume(m.group(1))
         else:
             self._json(404, {"error": "not found"})
+
+    def do_DELETE(self) -> None:
+        path = self.path.split("?", 1)[0]
+        if not self._signed_in():
+            self._json(401, {"error": "sign in"})
+            return
+        if _auth.enabled() and _auth.must_change():
+            self._json(403, {"error": "change the default password first"})
+            return
+        denied = _authorize_mutation(self.headers, _AUTH_TOKEN)
+        if denied is not None:
+            self._json(403, {"error": denied})
+            return
+        m = _PROJECT_ROUTE.fullmatch(path)
+        if m:
+            self._delete_project(m.group(1))
+        else:
+            self._json(404, {"error": "not found"})
+
+    # -- build control ------------------------------------------------------------
+    def _stop(self, pid: str, kind: str) -> None:
+        """Stop or pause a running build at its next checkpoint (a model call, a
+        coding session or a gate run); the run then closes out as ``kind``."""
+        with _LOCK:
+            p = _PROJECTS.get(pid)
+            if p is None:
+                self._json(404, {"error": "no such project"})
+                return
+            if p.status not in ("running", "queued") or p.ended:
+                self._json(409, {"error": "this build is not running"})
+                return
+            if p.closing:
+                self._json(409, {"error": "this build is already finishing"})
+                return
+            if p.cancel.is_set():
+                self._json(409, {"error": f"already {p.stop_kind or 'stopping'}"})
+                return
+            p.stop_kind = kind
+            p.cancel.set()
+        verb = "Pause" if kind == "paused" else "Stop"
+        _emit(p, type="stopping", kind=kind)
+        _emit(p, type="narrate",
+              text=f"⏸ {verb} requested — halting at the next checkpoint…")
+        self._json(200, {"ok": True, "kind": kind})
+
+    def _resume(self, pid: str) -> None:
+        """Resume a stopped, paused, halted, token-capped, errored or interrupted
+        build from its durable checkpoint, optionally with a new token cap and fix
+        budget. Pending nodes continue; a halted run re-enters at the boundary that
+        halted it (``cli._resume_seed``) with a fresh fix budget."""
+        body = self._read_json()
+        try:
+            token_cap, max_fix = _resume_overrides(body)
+        except ValueError as exc:
+            self._json(400, {"error": str(exc)})
+            return
+        from_checkpoint = _has_durable_checkpoint(pid)   # a DB probe: not under _LOCK
+        with _LOCK:
+            p = _PROJECTS.get(pid)
+            if p is None:
+                self._json(404, {"error": "no such project"})
+                return
+            if p.status != "done" or not p.ended:
+                self._json(409, {"error": "this build is still running"})
+                return
+            if p.passed:
+                self._json(409, {"error": "this build already shipped"})
+                return
+            if p.mode != "assistant" or _paused_at_retired_checkpoint(p.log):
+                self._json(409, {"error": "this build predates resume and can't be resumed"})
+                return
+            # Stopped while still queued: there is no checkpoint yet, so it starts afresh.
+            if not from_checkpoint and p.phase not in ("stopped", "paused"):
+                self._json(409, {"error": "no checkpoint to resume from"})
+                return
+            if token_cap is not None:
+                p.token_cap = token_cap or None      # 0 lifts the cap
+            if max_fix is not None:
+                p.max_fix_attempts = max_fix
+            p.cancel = threading.Event()
+            p.stop_kind = ""
+            p.closing = False
+            p.phase = ""
+            p.passed = False
+            p.autoresume_left = 6
+            p.status = "running"
+            with p.cond:
+                if p.log_trimmed:                    # seq numbering needs the full log back
+                    p.log = _STORE.events_of(p.id)
+                    p.log_trimmed = False
+                p.ended = False
+                p.ended_at = None
+        with contextlib.suppress(Exception):
+            p.seen_uris |= _STORE.seen_of(p.id)  # don't re-emit what the floor already showed
+        _emit(p, type="resumed", token_cap=p.token_cap, max_fix_attempts=p.max_fix_attempts)
+        cap = f"a {p.token_cap:,}-token cap" if p.token_cap else "no token cap"
+        _emit(p, type="narrate",
+              text=f"▶ Resumed with {cap} and {p.max_fix_attempts} fix attempt(s).")
+        _persist(p)
+        threading.Thread(target=_gated_runner, args=(_run_factory, p),
+                         kwargs={"resume": from_checkpoint}, daemon=True).start()
+        self._json(200, {"ok": True, "from_checkpoint": from_checkpoint})
+
+    def _delete_project(self, pid: str) -> None:
+        """Delete one floor: its catalog rows, event log and output dir. Refused
+        while it runs — the build thread would keep writing it back."""
+        with _LOCK:
+            p = _PROJECTS.get(pid)
+            if p is None:
+                self._json(404, {"error": "no such project"})
+                return
+            if not p.ended:          # running, queued, or still closing out
+                self._json(409, {"error": "this build is still running — stop it first"})
+                return
+            del _PROJECTS[pid]
+        with contextlib.suppress(Exception):
+            _STORE.delete(pid)
+        _invalidate_repo(pid)
+        if p.out_base is not None:
+            base = p.out_base.resolve()
+            if base.is_dir() and base.is_relative_to(_OUTPUT_ROOT.resolve()) \
+                    and base != _OUTPUT_ROOT.resolve():
+                shutil.rmtree(base, ignore_errors=True)
+        self._json(200, {"ok": True})
 
     def _list_projects(self) -> None:
         """Every floor's live state — the browser rehydrates the elevator on reload
@@ -1284,7 +1517,9 @@ class Handler(BaseHTTPRequestHandler):
         rows = [
             {"id": p.id, "floor": p.floor, "request": p.request, "mode": p.mode,
              "backend": p.backend, "slots": p.max_slots, "status": p.status,
-             "passed": p.passed, "gates": p.gates}
+             "passed": p.passed, "gates": p.gates, "phase": p.phase,
+             "stopping": p.stop_kind if p.cancel.is_set() and not p.ended else "",
+             "token_cap": p.token_cap, "max_fix_attempts": p.max_fix_attempts}
             for p in projs
         ]
         self._json(200, {"projects": rows})
@@ -1390,6 +1625,11 @@ class Handler(BaseHTTPRequestHandler):
         # transient reconnect (so it tails from where it left off, no re-replay);
         # a brand-new viewer sends none and replays the whole log from 0.
         cursor = _resume_cursor(self.headers.get("Last-Event-ID"))
+        from urllib.parse import parse_qs, urlparse
+
+        start = (parse_qs(urlparse(self.path).query).get("from") or [""])[0]
+        if not self.headers.get("Last-Event-ID") and start.isdigit():
+            cursor = int(start)   # a client reattaching after a Resume tails from here
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -1403,6 +1643,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 for idx in range(cursor, len(history)):
                     ev = history[idx]
+                    if ev.get("type") == "_end" and idx + 1 < len(history):
+                        continue                 # an earlier run's end; the build resumed
                     if ev.get("type") == "_end":
                         self.wfile.write(f"id: {idx}\nevent: end\ndata: {{}}\n\n".encode())
                         self.wfile.flush()
@@ -1420,6 +1662,7 @@ class Handler(BaseHTTPRequestHandler):
                         if not p.cond.wait(timeout=15):
                             break          # idle → fall through to a keep-alive
                     batch = p.log[cursor:]
+                    total = len(p.log)
                     ended = p.ended
                 if not batch:
                     if ended:              # caught up AND the build is over
@@ -1433,6 +1676,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.flush()
                     continue
                 for idx, ev in enumerate(batch, start=cursor):
+                    if ev.get("type") == "_end" and (idx + 1 < total or not ended):
+                        continue                 # an earlier run's end; the build resumed
                     if ev.get("type") == "_end":
                         self.wfile.write(f"id: {idx}\nevent: end\ndata: {{}}\n\n".encode())
                         self.wfile.flush()

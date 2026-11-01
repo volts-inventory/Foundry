@@ -10,9 +10,13 @@ re-raises. The backoff sleep is monkeypatched so the test is instant.
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
+import pytest
+
 import foundry.cli as cli
+from foundry.proxy.token_meter import BuildStopped
 
 
 class _Boom(Exception):
@@ -114,3 +118,20 @@ def test_budget_is_bounded(monkeypatch: Any) -> None:
         pass
     assert calls["n"] == 4  # initial + 3 retries
     assert waited == [300.0, 600.0, 1200.0]  # 5, 10, 20 min
+
+
+def test_a_stop_during_the_backoff_ends_the_wait_at_once(monkeypatch: Any) -> None:
+    """The Workshop's Stop / Pause must not sit out a back-off of up to an hour."""
+    waited = _no_sleep(monkeypatch)
+    calls = {"n": 0}
+
+    def _fake(*_a: Any, **_k: Any) -> Any:
+        calls["n"] += 1
+        raise ProxyUnavailable("pause-and-escalate")
+
+    monkeypatch.setattr(cli, "_invoke", _fake)
+    stop = threading.Event()
+    stop.set()
+    with pytest.raises(BuildStopped):
+        _call(resumable=True, cancel=stop)
+    assert calls["n"] == 1 and waited == []

@@ -51,6 +51,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -91,7 +92,12 @@ from foundry.proxy.local_transport import (
 )
 from foundry.proxy.model_provider_proxy import DriftMode, DriftPolicy, ProviderTransport
 from foundry.proxy.test_doubles import MockTransport
-from foundry.proxy.token_meter import RunCapExceeded, TimeCapExceeded, TokenMeter
+from foundry.proxy.token_meter import (
+    BuildStopped,
+    RunCapExceeded,
+    TimeCapExceeded,
+    TokenMeter,
+)
 from foundry.schemas.architecture import OwnershipMap, SystemDesign
 from foundry.schemas.base import FrozenModel
 from foundry.schemas.gates import GateStatus
@@ -1096,6 +1102,7 @@ def _invoke_with_autoresume(
     *,
     progress_cb: Callable[..., None] | None,
     resumable: bool,
+    cancel: threading.Event | None = None,
 ) -> FactoryState:
     """Wrap :func:`_invoke` so a TRANSIENT provider failure does
     not kill a DURABLE run. A spent Max usage/session window (or a provider blip)
@@ -1139,7 +1146,10 @@ def _invoke_with_autoresume(
                 file=sys.stderr,
                 flush=True,
             )
-            time.sleep(wait)
+            if cancel is None:
+                time.sleep(wait)
+            elif cancel.wait(wait):  # Stop / Pause during the back-off
+                raise BuildStopped("stopped by the operator") from exc
 
 
 _DETAIL_CAP = 200
@@ -1226,6 +1236,7 @@ def run(
     local_url: str | None = None,
     local_model: str | None = None,
     time_cap_minutes: float | None = None,
+    cancel: threading.Event | None = None,
 ) -> RunResult:
     """Run ``request`` end-to-end through the compiled factory graph (smoke path).
 
@@ -1313,6 +1324,10 @@ def run(
     time_cap_minutes:
         Stop cleanly (resumable, like ``token_cap``) once the run has used this
         much wall-clock time, across restarts.
+    cancel:
+        Setting this event stops the run cleanly with ``BuildStopped`` before the
+        next model call, coding session or gate run (the token meter's seams). The
+        checkpoint stays resumable, as after a token-cap stop.
     """
     if mode not in MODES:
         raise ValueError(f"unknown mode {mode!r}; choose one of {', '.join(MODES)}")
@@ -1380,8 +1395,9 @@ def run(
         run_dir = Path(resolved_state_dir) / "calls" / run_key
         proxy.call_cache = run_dir
     meter: TokenMeter | None = None
-    if token_cap is not None or time_cap_minutes is not None:
+    if token_cap is not None or time_cap_minutes is not None or cancel is not None:
         meter = TokenMeter(token_cap, run_dir / "tokens.json" if run_dir else None,
+                           cancel=cancel,
                            time_cap_s=time_cap_minutes * 60 if time_cap_minutes else None)
         proxy.token_meter = meter
         if hasattr(rt.adapter, "token_meter"):  # the claude-code substrate bypasses the proxy
@@ -1603,6 +1619,7 @@ def run(
                 config,
                 progress_cb=drive_pc,
                 resumable=(durable is not None),
+                cancel=cancel,
             )
         finally:
             reset_gate_write_verifier(token)

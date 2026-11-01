@@ -29,6 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from webapp import settings as _settings
 from webapp.events import (
     STAGE_FOR_NODE,
     event_for_task,
@@ -305,6 +306,9 @@ class Project:
     stop_kind: str = ""
     closing: bool = False  # the run returned; only its closing events are left to emit
     phase: str = ""
+    # Model mode, level table and advanced form options (webapp/settings.py); a
+    # change build also names its base floor here.
+    build: dict[str, Any] = field(default_factory=dict)
 
 
 _PROJECTS: dict[str, Project] = {}
@@ -439,6 +443,10 @@ def _restore_controls(p: Project) -> None:
             if isinstance(e.get("workers"), Mapping):
                 p.workers = parse_workers(e["workers"])
             p.ticket_tiers = parse_ticket_tiers(e.get("ticket_tiers"))
+            if isinstance(e.get("build"), Mapping):
+                p.build = dict(e["build"])
+            if e.get("profile"):
+                p.profile = str(e["profile"])
         if t == "profile" and e.get("profile"):
             p.profile = str(e["profile"])
         if t in ("project", "resumed"):
@@ -831,6 +839,45 @@ def _finish_stopped(p: Project) -> None:
     _close(p)
 
 
+def _inputs_dir(p: Project) -> Path | None:
+    return p.out_base / ".inputs" if p.out_base else None
+
+
+def _build_kwargs(p: Project) -> dict[str, Any]:
+    """The floor's model routing + advanced options for ``run``; the spec and the
+    base tree are server-owned files under the floor's own output dir."""
+    kw = _settings.run_kwargs(p.build)
+    inputs = _inputs_dir(p)
+    if inputs is not None and p.build.get("spec"):
+        kw["spec"] = str(inputs / "spec.md")
+    if inputs is not None and p.build.get("base_id"):
+        kw["base_dir"] = str(inputs / "base")
+    return kw
+
+
+def _settings_path() -> Path:
+    return _OUTPUT_ROOT / "settings.json"
+
+
+def _server_backend() -> str:
+    from foundry.cli import BACKENDS
+
+    backend = os.environ.get("FOUNDRY_MODEL_BACKEND", "mock").strip() or "mock"
+    return backend if backend in BACKENDS else "mock"
+
+
+def _base_tree(base: Project) -> dict[str, bytes] | None:
+    """A shipped floor's tree: from the store, else its disk export."""
+    tree = _tree(base.id)
+    if tree:
+        return tree
+    code = base.out_base / "code" if base.out_base else None
+    if code is None or not code.is_dir():
+        return None
+    return {str(f.relative_to(code)): f.read_bytes()
+            for f in sorted(code.rglob("*")) if f.is_file() and not f.is_symlink()}
+
+
 def _run_factory(p: Project, resume: bool = False) -> None:
     """Drive a REAL build; stream its telemetry as paced game events.
 
@@ -850,8 +897,12 @@ def _run_factory(p: Project, resume: bool = False) -> None:
         _emit(p, type="project", id=p.id, request=p.request, mode=p.mode, floor=p.floor,
               backend=p.backend, slots=p.max_slots, workers=p.workers,
               ticket_tiers=p.ticket_tiers, token_cap=p.token_cap,
-              max_fix_attempts=p.max_fix_attempts)
-        _emit(p, type="narrate", text=f"📋 New project on Floor {p.floor}: {p.request!r}")
+              max_fix_attempts=p.max_fix_attempts, build=p.build, profile=p.profile)
+        if p.build.get("base_floor"):
+            _emit(p, type="narrate", text=f"✎ Change of floor {p.build['base_floor']} "
+                                          f"on Floor {p.floor}: {p.request!r}")
+        else:
+            _emit(p, type="narrate", text=f"📋 New project on Floor {p.floor}: {p.request!r}")
         _emit(p, type="narrate", text=f"🏭 Mode: {p.mode}. The crew reports for duty…")
         if p.backend != "mock":
             # Real backends: the first graph node is one long model call, and node
@@ -990,6 +1041,7 @@ def _run_factory(p: Project, resume: bool = False) -> None:
                 state_dir=_STATE_DIR,         # durable: build survives + resumes past a restart
                 output_dir=str(code_dir) if code_dir else None,
                 profile=p.profile or "auto",  # stack picked in the UI ("auto" = infer)
+                **_build_kwargs(p),
             )
         finally:
             wd_stop.set()
@@ -1232,6 +1284,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/builds":
             self._list_builds()
             return
+        if path == "/api/settings":
+            backend = _server_backend()
+            self._json(200, _settings.client_view(_settings.load(_settings_path(), backend),
+                                                  backend))
+            return
         if path.startswith("/api/files/"):
             self._list_files(path.rsplit("/", 1)[-1])
             return
@@ -1374,10 +1431,19 @@ class Handler(BaseHTTPRequestHandler):
             self._json(403, {"error": denied})
             return
         m = _CONTROL_ROUTE.fullmatch(path)
-        if path == "/api/projects":
+        if path in ("/api/projects", "/api/settings", "/api/settings/local-check") \
+                and _settings.too_large(self.headers.get("Content-Length")):
+            self.close_connection = True
+            self._json(413, {"error": "request too large"})
+        elif path == "/api/projects":
             self._new_project()
         elif path == "/api/reset":
             self._reset()
+        elif path == "/api/settings":
+            self._save_settings()
+        elif path == "/api/settings/local-check":
+            code, out = _settings.check_local(self._read_json())
+            self._json(code, out)
         elif m and m.group(2) in ("stop", "pause"):
             self._stop(m.group(1), "paused" if m.group(2) == "pause" else "stopped")
         elif m and m.group(2) == "resume":
@@ -1519,7 +1585,8 @@ class Handler(BaseHTTPRequestHandler):
              "backend": p.backend, "slots": p.max_slots, "status": p.status,
              "passed": p.passed, "gates": p.gates, "phase": p.phase,
              "stopping": p.stop_kind if p.cancel.is_set() and not p.ended else "",
-             "token_cap": p.token_cap, "max_fix_attempts": p.max_fix_attempts}
+             "token_cap": p.token_cap, "max_fix_attempts": p.max_fix_attempts,
+             "build": p.build}
             for p in projs
         ]
         self._json(200, {"projects": rows})
@@ -1537,8 +1604,18 @@ class Handler(BaseHTTPRequestHandler):
         ]
         self._json(200, {"builds": builds})
 
+    def _save_settings(self) -> None:
+        backend = _server_backend()
+        try:
+            saved = _settings.validate(self._read_json(), backend)
+        except ValueError as exc:
+            self._json(400, {"error": str(exc)})
+            return
+        _settings.save(_settings_path(), saved)
+        self._json(200, _settings.client_view(saved, backend))
+
     def _new_project(self) -> None:
-        from foundry.cli import AUTO_SLOTS_CAP, BACKENDS, _default_adapter_for
+        from foundry.cli import AUTO_SLOTS_CAP, _default_adapter_for
 
         body = self._read_json()
         request = str(body.get("request", "")).strip()
@@ -1547,9 +1624,30 @@ class Handler(BaseHTTPRequestHandler):
             return
         # The backend comes from the environment (FOUNDRY_MODEL_BACKEND / .env), as
         # the CLI does; the adapter derives from it (mock→stub, real→raw-react).
-        backend = os.environ.get("FOUNDRY_MODEL_BACKEND", "mock").strip() or "mock"
-        if backend not in BACKENDS:
-            backend = "mock"
+        backend = _server_backend()
+        try:
+            opts = _settings.parse_build_options(
+                body, _settings.load(_settings_path(), backend), backend)
+        except ValueError as exc:
+            self._json(400, {"error": str(exc)})
+            return
+        # A change builds on a shipped floor's tree, looked up here by floor id: the
+        # browser never names a path.
+        base: Project | None = None
+        base_tree: dict[str, bytes] = {}
+        if body.get("base_id") is not None:
+            with _LOCK:
+                base = _PROJECTS.get(str(body["base_id"]))
+            if base is None:
+                self._json(404, {"error": "no such floor to change"})
+                return
+            if not (base.passed and base.ended):
+                self._json(409, {"error": "only a shipped floor can be changed"})
+                return
+            base_tree = _base_tree(base) or {}
+            if not base_tree:
+                self._json(409, {"error": "that floor's code can't be read back"})
+                return
         adapter = _default_adapter_for(backend)
         try:
             max_slots = max(1, int(os.environ.get("FOUNDRY_MAX_SLOTS", "") or AUTO_SLOTS_CAP))
@@ -1567,14 +1665,30 @@ class Handler(BaseHTTPRequestHandler):
             _FLOOR[0] += 1
             floor = _FLOOR[0]
         pid = uuid.uuid4().hex[:12]
+        build = dict(opts["view"])
+        if base is not None:
+            build.update(base_id=base.id, base_floor=base.floor)
         p = Project(
             id=pid, request=request, mode="assistant", floor=floor,
             backend=backend, adapter=adapter,
             out_base=_OUTPUT_ROOT / f"floor-{floor}",
             max_slots=max_slots, token_cap=token_cap,
             workers=parse_workers(body.get("workers")),
-            ticket_tiers=parse_ticket_tiers(body.get("ticket_tiers")),
+            ticket_tiers=(parse_ticket_tiers(body["ticket_tiers"]) if "ticket_tiers" in body
+                          else opts["ticket_tiers"]),
+            max_fix_attempts=opts["max_fix_attempts"], profile=opts["profile"],
+            build=build,
         )
+        inputs = _OUTPUT_ROOT / f"floor-{floor}" / ".inputs"
+        try:
+            if opts["spec"] is not None:
+                _settings.write_spec(inputs, opts["spec"])
+            if base is not None:
+                _settings.write_tree(inputs / "base", base_tree)
+        except (OSError, ValueError) as exc:
+            shutil.rmtree(inputs, ignore_errors=True)
+            self._json(500, {"error": f"could not stage the build inputs: {exc}"})
+            return
         with _LOCK:
             _PROJECTS[pid] = p
         # NOTE: do NOT catalog the build here. A floor is persisted only once the

@@ -2171,6 +2171,7 @@ function routeEvent(floor, ev){
       if (S) S.setPool(F.slots);
       if ("token_cap" in ev) F.tokenCap = ev.token_cap;
       if ("max_fix_attempts" in ev) F.maxFix = ev.max_fix_attempts;
+      if (ev.build) F.build = ev.build;
       if (isActive) updateHud(F);
       break;
     case "stopping":               // Stop / Pause requested; the build halts at its next checkpoint
@@ -2630,6 +2631,7 @@ function updateHud(F){
   const root = document.createElement("span");
   root.className = "proj-req"; root.textContent = req;
   proj.append(root);
+  if (window.FoundrySettings) FoundrySettings.decorateProj(F, proj);
   // Portrait clamps each line, so tapping the row unclamps it. The chevron is only
   // drawn when something really is cut off — a request short enough to fit gets no
   // affordance and no hint that there is more to see.
@@ -2639,7 +2641,8 @@ function updateHud(F){
     if (!cut) proj.classList.remove("open");
     proj.classList.toggle("clamped", cut);
   });
-  const tail = (F.mode ? "· "+F.mode : "") + (F.backend ? " · "+F.backend : "");
+  const meta = window.FoundrySettings ? FoundrySettings.hudMeta(F) : "";
+  const tail = (meta ? "· "+meta : F.mode ? "· "+F.mode : "") + (F.backend ? " · "+F.backend : "");
   document.getElementById("mode-tag").textContent = tail.trim();
 }
 function renderElevator(){
@@ -2885,6 +2888,7 @@ function renderControls(){
       ctlButton("▶", "RESUME", "Resume from the last checkpoint", () => resumeFloor(F, {}), "primary"),
       ctlButton("↻", "RETRY WITH…", "Resume with a new token cap or more fix attempts", () => showRetryForm(F)));
   }
+  if (F.passed) el.append(ctlButton("✎", "CHANGE", "Change this build — plan and build only the delta on a new floor", () => showNewModal(F)));
   el.append(ctlButton("✕", "DELETE", "Delete this floor and its output", () => showDeleteConfirm(F), "danger"));
 }
 function ctlPanel(kind){
@@ -3004,7 +3008,8 @@ function removeFloor(F){
 
 // ---- UI wiring -------------------------------------------------------------
 const newModal=document.getElementById("new-modal");
-function showNewModal(){
+function showNewModal(change){
+  if (window.FoundrySettings) FoundrySettings.prepareForm(change || null);
   newModal.classList.remove("hidden");
   syncSettingsSummary();
 }
@@ -3031,10 +3036,13 @@ newModal.addEventListener("input", syncSettingsSummary);
 document.getElementById("start-btn").onclick=()=>{
   const req=document.getElementById("req-input").value.trim();
   if(!req){ alert("Describe what to build."); return; }
-  const extra={workers:readWorkers()};
+  const adv = window.FoundrySettings ? FoundrySettings.formExtra() : {};
+  if (adv === null) return;
+  const extra={workers:readWorkers(), ...adv};
   const tokCap=parseInt(document.getElementById("token-cap-input").value,10);
   if(Number.isFinite(tokCap) && tokCap>0) extra.token_cap=tokCap;
   newModal.classList.add("hidden");
+  if (window.FoundrySettings) FoundrySettings.formStarted();
   newProject(req, extra);
 };
 document.getElementById("output-btn").onclick=openFiles;
@@ -3066,7 +3074,7 @@ function adoptFloor(row){
     scene:null, log:[], progress:[], gates:row.gates||{}, org:null,
     status:row.status, passed:!!row.passed, slots:row.slots||1, seenUris:new Set(),
     phase:row.phase||"", stopping:row.stopping||"", tokenCap:row.token_cap ?? null,
-    maxFix:row.max_fix_attempts ?? 3, cursor:0,
+    maxFix:row.max_fix_attempts ?? 3, cursor:0, build:row.build || null,
   };
   FLOORS.set(row.floor, F);
   GAME.scene.add(floorKey(row.floor), FloorScene, true,

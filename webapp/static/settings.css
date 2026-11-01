@@ -1,0 +1,73 @@
+/* Build settings (settings.js): the ⚙ panel, the form's Advanced fold and mode
+   line, the change banner, and the HUD's mode/models line. */
+#settings-btn{padding-left:10px;padding-right:10px;color:var(--ink);font-size:14px}
+/* the mode/models line can outgrow the bar: it yields to the request line */
+#mode-tag{flex:0 1 auto;min-width:0;max-width:30vw;overflow:hidden;text-overflow:ellipsis}
+
+.mode-pick{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.mode-opt{display:flex;flex-direction:column;align-items:flex-start;gap:4px;
+  white-space:normal;text-align:left;padding:9px 10px;background:#0e1424;
+  border-color:var(--line);color:var(--ink)}
+.mode-opt b{color:var(--ink);font-size:13px}
+.mode-opt span{color:var(--dim);font-size:10px;text-transform:none;line-height:1.35}
+.mode-opt[aria-pressed=true]{border-color:var(--gold);background:#2a2614}
+.mode-opt[aria-pressed=true] b{color:var(--gold)}
+
+.lvl-table{display:flex;flex-direction:column;gap:8px;margin-top:8px}
+.lvl-row{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,.9fr) minmax(0,1.6fr);
+  gap:8px;align-items:center}
+.lvl-tier{display:flex;flex-direction:column;min-width:0}
+.lvl-tier b{color:var(--gold)}
+.lvl-tier .hint{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lvl-reset{margin-top:10px;padding:5px 10px;font-size:11px}
+.diff-grid{grid-template-columns:repeat(3,1fr)}
+
+.local-check{display:flex;align-items:center;gap:10px;margin-top:12px;flex-wrap:wrap}
+.local-status{font-size:11px;color:var(--dim);text-transform:none;overflow-wrap:anywhere;min-width:0}
+.local-status.ok{color:var(--green)}
+.local-status.bad{color:var(--red)}
+.local-models{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.local-models .chip{padding:3px 8px;font-size:10px;text-transform:none}
+
+.mode-line{display:flex;align-items:center;gap:6px;margin-top:10px;flex-wrap:wrap;font-size:11px}
+.mode-line b{color:var(--blue);overflow-wrap:anywhere}
+.mode-line .icon-btn{margin-left:auto;font-size:11px}
+
+.change-banner{display:flex;align-items:flex-start;gap:8px;margin:0 0 12px;padding:9px 10px;
+  border:2px solid var(--gold);border-radius:6px;background:#2a2614;color:var(--ink);
+  font-size:11px;line-height:1.45;text-transform:none}
+.change-banner span{flex:1 1 auto;overflow-wrap:anywhere}
+.change-banner.hidden{display:none}
+
+.adv-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 12px}
+.adv-grid .field:nth-child(2){margin-top:0}
+.spec-row{display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap}
+.btn-file{position:relative;display:inline-block;margin:0 !important;padding:6px 10px;
+  border:2px solid var(--line);border-radius:6px;cursor:pointer;font-size:11px;color:var(--ink) !important}
+.btn-file input{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%}
+.btn-file:focus-within{outline:2px solid var(--blue)}
+#spec-info.bad{color:var(--red)}
+#fold-adv .ctl-err{display:block;margin-top:8px;color:var(--red);font-size:11px;text-transform:none}
+#settings-err{color:var(--red);font-size:11px;text-transform:none}
+
+/* HUD: the change link sits before the request on wide screens; the portrait bar
+   hides .mode, so the mode/models line rides under the request there instead. */
+.proj-base,.proj-base-sub{background:none;border:none;box-shadow:none;padding:0 6px 0 0;
+  color:var(--gold);font-size:inherit;min-height:0}
+.proj-base-sub{padding:0;text-decoration:underline}
+.proj-base:active,.proj-base-sub:active{transform:none}
+.proj-sub{display:none}
+
+@media (max-width:520px){
+  .mode-pick{grid-template-columns:1fr}
+  .lvl-row{grid-template-columns:minmax(0,1fr) minmax(0,1.6fr)}
+  .lvl-tier{grid-column:1 / -1;flex-direction:row;gap:8px;align-items:baseline}
+  .adv-grid{grid-template-columns:1fr}
+  .adv-grid .field:nth-child(2){margin-top:13px}
+}
+@media (max-width: 820px) and (orientation: portrait){
+  .proj-base{display:none}
+  .proj-sub{display:block;color:var(--dim);font-size:10px;white-space:nowrap;
+    overflow:hidden;text-overflow:ellipsis}
+  #settings-btn{padding-left:8px;padding-right:8px}
+}

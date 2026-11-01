@@ -17,6 +17,7 @@
 <meta name="apple-mobile-web-app-title" content="Foundry" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <link rel="stylesheet" href="/static/style.css" />
+<link rel="stylesheet" href="/static/settings.css" />
 </head>
 <body>
   <!-- ONE grid, two arrangements (see style.css):
@@ -46,6 +47,7 @@
       <div class="hud-right">
         <!-- `.lbl-long` is dropped on narrow screens so both actions still fit on
              one line beside the floor tag (⌥ REPO · ▶ NEW). -->
+        <button id="settings-btn" title="Settings" aria-label="Settings">⚙</button>
         <button id="output-btn">⌥ REPO</button>
         <button id="new-btn">▶ NEW<span class="lbl-long"> PROJECT</span></button>
       </div>
@@ -161,5 +163,6 @@
 
   <script src="/static/vendor/phaser.min.js"></script>
   <script src="/static/game.js"></script>
+  <script src="/static/settings.js"></script>
 </body>
 </html>

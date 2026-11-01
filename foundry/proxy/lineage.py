@@ -53,6 +53,20 @@ OPENAI_LINEAGE_ENTRIES: tuple[tuple[str, frozenset[str]], ...] = (
 )
 
 
+# Curated lineage for models served by a local OpenAI-compatible server (model
+# modes). Local ids carry an org/quant prefix or suffix ("mlx-community/Qwen3.6-
+# 27B-6bit", "qwen/qwen3.6-27b"), hence the surrounding wildcards.
+LOCAL_LINEAGE_ENTRIES: tuple[tuple[str, frozenset[str]], ...] = (
+    ("*[Qq]wen*", frozenset({"alibaba-qwen"})),
+    ("*[Dd]evstral*", frozenset({"mistral"})),
+    ("*[Mm]istral*", frozenset({"mistral"})),
+    ("*gpt-oss*", frozenset({"openai-gpt-oss"})),
+    ("*[Ll]lama*", frozenset({"meta-llama"})),
+    ("*[Gg]emma*", frozenset({"google-gemma"})),
+    ("*[Dd]eep[Ss]eek*", frozenset({"deepseek"})),
+)
+
+
 class LineageMap:
     """Immutable ordered (pattern → family-set) map with a content revision."""
 

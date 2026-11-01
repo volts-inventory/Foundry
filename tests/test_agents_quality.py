@@ -224,6 +224,7 @@ def test_review_request_carries_the_diff_text() -> None:
     assert "def tip(total): return total * 0.15" in text
     assert "assert tip(100) == 15" in text
     assert text.index("task T-A") < text.index("task T-B")
+    assert "features/*.feature" in text and "Do not flag them as missing" in text
 
 
 def test_review_request_truncates_and_names_unresolvable_diffs() -> None:

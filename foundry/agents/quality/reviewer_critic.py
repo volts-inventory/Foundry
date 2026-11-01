@@ -33,7 +33,7 @@ from foundry.agents.quality._common import (
     subject_artifact_uri,
 )
 from foundry.durability.artifact_store import UnknownArtifactError
-from foundry.schemas.implementation import FeatureDiff
+from foundry.schemas.implementation import FEATURE_DIR, FeatureDiff
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -211,6 +211,13 @@ def review(
             f"- {c.id} [{c.criticality}]: {c.text}" for c in criteria
         )
     content += "\n\nThe change (unified diffs, applied in order):\n" + _diff_text(rt, state)
+    # Without this the judge flags every build: the .feature files and criteria.json
+    # never appear in the tickets' diffs because the gates write them.
+    content += (
+        f"\n\nNot in the diffs by design: the factory writes {FEATURE_DIR}/*.feature (one "
+        "per ticket, rendered from the acceptance criteria above) and criteria.json "
+        "into the tree before the Test gate runs. Do not flag them as missing."
+    )
     result = rt.proxy.judge(
         node_id,
         subject_uri,

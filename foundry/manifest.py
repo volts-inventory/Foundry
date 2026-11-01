@@ -25,6 +25,7 @@ from foundry.schemas.base import FrozenModel
 
 if TYPE_CHECKING:
     from foundry.agents._runtime import AgentRuntime
+    from foundry.graph.gate_wiring import ArtifactResolver
     from foundry.schemas.base import Artifact
     from foundry.schemas.gates import GateResult
     from foundry.state.factory_state import FactoryState
@@ -37,6 +38,7 @@ __all__ = [
     "GateRef",
     "ModelUsageSummary",
     "build_manifest",
+    "plan_fields",
     "render_manifest_md",
     "write_manifest",
 ]
@@ -290,37 +292,48 @@ def _budget_spend(state: FactoryState) -> int:
     return spend if isinstance(spend, int) and not isinstance(spend, bool) else 0
 
 
-def _with_plan(manifest: BuildManifest, state: FactoryState, rt: AgentRuntime) -> BuildManifest:
-    """Record the stack, the contracts and, for a change build, its base."""
-    from foundry.base_tree import base_digest, read_base
+def plan_fields(state: FactoryState, resolve: ArtifactResolver | None) -> dict[str, Any]:
+    """The manifest fields a later change on this build reads back (``read_base``):
+    the stack and, given a resolver, the contracts and the files implementing them."""
+    from foundry.base_tree import read_base
 
     update: dict[str, Any] = {}
     stack = state.get("stack")
     if stack is not None:
         update["stack"] = {k: str(v) for k, v in stack.model_dump(mode="json").items() if v}
+    if resolve is None:
+        return update
+    from foundry.graph.gate_wiring import contract_paths
+    from foundry.schemas.architecture import InterfaceContract
+
     base_dir = state.get("base_dir")
     prior = read_base(base_dir) if base_dir else None
-    cas = rt.cas
-    if cas is not None:
-        from foundry.graph.gate_wiring import contract_paths
-        from foundry.schemas.architecture import InterfaceContract
+    newest: dict[str, InterfaceContract] = {}
+    for a in sorted(state.get("artifacts") or (), key=lambda a: a.seq):
+        if a.kind == "interface_contract":
+            body = resolve(a)
+            if isinstance(body, InterfaceContract):
+                newest[body.name] = body
+    contracts = [ContractRef(name=c.name, kind=c.kind, signature=c.signature)
+                 for c in newest.values()]
+    files = contract_paths(state, resolve)
+    if prior is not None:
+        # A change keeps the base's contracts in force beside its own.
+        contracts = [ContractRef(**c) for c in prior.contracts
+                     if c["name"] not in newest] + contracts
+        files = tuple(dict.fromkeys((*prior.contracts_files, *files)))
+    update["contracts"] = tuple(contracts)
+    update["contracts_files"] = tuple(files)
+    return update
 
-        newest: dict[str, InterfaceContract] = {}
-        for a in sorted(state.get("artifacts") or (), key=lambda a: a.seq):
-            if a.kind == "interface_contract":
-                body = cas.resolve(a)
-                if isinstance(body, InterfaceContract):
-                    newest[body.name] = body
-        contracts = [ContractRef(name=c.name, kind=c.kind, signature=c.signature)
-                     for c in newest.values()]
-        files = contract_paths(state, cas.resolve)
-        if prior is not None:
-            # A change keeps the base's contracts in force beside its own.
-            contracts = [ContractRef(**c) for c in prior.contracts
-                         if c["name"] not in newest] + contracts
-            files = tuple(dict.fromkeys((*prior.contracts_files, *files)))
-        update["contracts"] = tuple(contracts)
-        update["contracts_files"] = tuple(files)
+
+def _with_plan(manifest: BuildManifest, state: FactoryState, rt: AgentRuntime) -> BuildManifest:
+    """Record the stack, the contracts and, for a change build, its base."""
+    from foundry.base_tree import base_digest, read_base
+
+    update = plan_fields(state, rt.cas.resolve if rt.cas is not None else None)
+    base_dir = state.get("base_dir")
+    prior = read_base(base_dir) if base_dir else None
     if prior is not None and base_dir:
         update["base"] = BaseRef(
             thread_id=prior.thread_id, request=prior.request,

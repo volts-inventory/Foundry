@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
+    from foundry.durability.artifact_store import ArtifactStore
     from foundry.state.factory_state import FactoryState
 
 # The Spec gate's criteria document is a gate INPUT, not a source file — excluded
@@ -68,6 +69,8 @@ class Repo:
     files: tuple[RepoFile, ...]
     checks: tuple[GateCheck, ...]
     _blobs: dict[str, bytes] = field(default_factory=dict, repr=False)
+    # What the CLI records in BUILD-MANIFEST.json for a later change on this build.
+    manifest: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def file_bytes(self, path: str) -> bytes | None:
         """The bytes of ``path`` in the materialized tree, or ``None`` if absent."""
@@ -141,7 +144,7 @@ def _gate_checks(state: FactoryState) -> tuple[GateCheck, ...]:
     return tuple(checks)
 
 
-def read_repo(thread_id: str, state_dir: str | Path) -> Repo:
+def read_repo(thread_id: str, state_dir: str | Path, *, backend: str | None = None) -> Repo:
     """Read a finished build's repository from the durable store (no output dir).
 
     Opens the durable backends rooted at ``state_dir``, loads the build's terminal
@@ -149,23 +152,33 @@ def read_repo(thread_id: str, state_dir: str | Path) -> Repo:
     CAS, and reads back the gate checks. The backends
     are always closed before returning.
 
+    ``backend`` is the backend the build ran on: a mock build's gates ran against
+    the CLI's synthetic materialization seam, not the raw CAS, so its tree is read
+    back through that same seam — otherwise the repo shows (and a change build
+    would extend) stub files and scenarios no gate ever judged.
+
     Raises :class:`RepoUnavailable` if the build has no durable checkpoint (e.g. an
     older build that predates ``FOUNDRY_STATE_DIR`` durability).
     """
+    from foundry.cli import _MOCK_BACKEND, _PASSING_DIFF, _materialization_seam
     from foundry.durability.persistence import durable_backends
     from foundry.graph.gate_wiring import materialize_workdir
+    from foundry.manifest import plan_fields
 
     backends = durable_backends(state_dir)
     try:
         state = _load_final_state(thread_id, backends)
         checks = _gate_checks(state)
+        resolve, resolve_blob = _materialization_seam(
+            backend != _MOCK_BACKEND, store=cast("ArtifactStore", backends.cas),
+            diff_body=_PASSING_DIFF,
+        )
         blobs: dict[str, bytes] = {}
         with tempfile.TemporaryDirectory(prefix="foundry-repo-") as staging:
             root = Path(staging)
             try:
                 tree_sha = materialize_workdir(
-                    state, root,
-                    resolve=backends.cas.resolve, resolve_blob=backends.cas.resolve_blob,
+                    state, root, resolve=resolve, resolve_blob=resolve_blob
                 )
             except Exception as exc:  # an unresolvable handle / unparseable diff
                 raise RepoUnavailable(
@@ -179,12 +192,21 @@ def read_repo(thread_id: str, state_dir: str | Path) -> Repo:
                     continue
                 blobs[str(rel)] = src.read_bytes()
         files = tuple(RepoFile(path=p, size=len(b)) for p, b in sorted(blobs.items()))
+        plan = plan_fields(state, backends.cas.resolve)
+        manifest = {
+            "request": str(state.get("request") or ""),
+            "thread_id": thread_id,
+            **plan,
+            "contracts": [c.model_dump() for c in plan.get("contracts", ())],
+            "contracts_files": list(plan.get("contracts_files", ())),
+        }
         return Repo(
             thread_id=thread_id,
             tree_sha=tree_sha,
             files=files,
             checks=checks,
             _blobs=blobs,
+            manifest=manifest,
         )
     finally:
         with contextlib.suppress(Exception):

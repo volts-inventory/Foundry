@@ -78,6 +78,7 @@ class ModelUsageSummary(FrozenModel):
     # per-call records; absent kinds simply don't appear.
     drift_by_kind: dict[str, int] = {}  # noqa: RUF012 - pydantic deep-copies defaults
     calls_by_tier: dict[str, int] = {}  # noqa: RUF012 - pydantic deep-copies defaults
+    models_by_tier: dict[str, tuple[str, ...]] = {}  # noqa: RUF012 - pydantic deep-copies defaults
 
 
 class ContractRef(FrozenModel):
@@ -157,6 +158,7 @@ def _usage_summary(
     families: set[str] = set()
     models: set[str] = set()
     by_tier: dict[str, int] = {}
+    tier_models: dict[str, set[str]] = {}
     by_kind: dict[str, int] = {}
     for rec in proxy_manifest:
         usage = rec.get("usage") or {}
@@ -170,6 +172,8 @@ def _usage_summary(
             models.add(str(rec["served_model"]))
         tier = str(rec.get("tier", "?"))
         by_tier[tier] = by_tier.get(tier, 0) + 1
+        if rec.get("served_model"):
+            tier_models.setdefault(tier, set()).add(str(rec["served_model"]))
         # Drift breakdown by kind (tier-mismatch vs pinned-id) — the record only
         # carries ``drift_kind`` when it drifted, so absent kinds never count.
         if rec.get("drift"):
@@ -193,6 +197,7 @@ def _usage_summary(
         drift_events=drift_events,
         drift_by_kind=dict(sorted(by_kind.items())),
         calls_by_tier=dict(sorted(by_tier.items())),
+        models_by_tier={t: tuple(sorted(m)) for t, m in sorted(tier_models.items())},
     )
 
 

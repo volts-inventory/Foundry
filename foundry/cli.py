@@ -1237,6 +1237,7 @@ def run(
     local_model: str | None = None,
     time_cap_minutes: float | None = None,
     cancel: threading.Event | None = None,
+    manifest_dir: str | None = None,
 ) -> RunResult:
     """Run ``request`` end-to-end through the compiled factory graph (smoke path).
 
@@ -1288,6 +1289,9 @@ def run(
         best-effort DRAFT (the latest attempt's tree + a ``DRAFT-STATUS.md`` naming
         what's failing) is written instead, surfaced on ``RunResult.draft_root`` — so
         a held build hands back a usable starting point, never empty hands.
+    manifest_dir:
+        Where to write the ``BUILD-MANIFEST`` when no tree is written to
+        ``output_dir`` (the Workshop keeps code in the store but still reports it).
     task_cb / workers / ticket_tiers:
         Ticket path (the planner emitted tickets). ``task_cb`` receives each
         ticket's :class:`TaskEvent` (``{phase, ticket_id, title, specialty, tier}``,
@@ -1662,11 +1666,12 @@ def run(
         )
         if draft_root is not None:
             result = replace(result, draft_root=draft_root)
-    if result.output_root or result.draft_root:
+    manifest_root = output_dir if (result.output_root or result.draft_root) else manifest_dir
+    if manifest_root:
         # The manifest is a report on a finished build: failing to write it must
         # never turn a gated result into an exception.
         try:
-            write_manifest(output_dir or "", request=request, thread_id=thread_id,
+            write_manifest(manifest_root, request=request, thread_id=thread_id,
                            state=final_state, rt=rt, passed=result.passed)
         except Exception as exc:
             print(f"warning: BUILD-MANIFEST not written: {exc}", file=sys.stderr)

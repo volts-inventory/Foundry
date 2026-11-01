@@ -2059,6 +2059,7 @@ function switchToFloor(floor){
   renderElevator();
   hideCtlPanel();
   renderControls();
+  if (window.Insight) Insight.onFloor(F);
 }
 
 // ---- per-floor event routing ----------------------------------------------
@@ -2311,6 +2312,7 @@ function routeEvent(floor, ev){
         ev.passed?"■ Build complete — shipped.":"■ Build halted — nothing shipped."); break;
     }
   }
+  if (window.Insight) Insight.onEvent(F, ev, isActive);   // meter · queue · halt panel / run card
 }
 
 // =========================================================================== //
@@ -2747,7 +2749,7 @@ function loadRepo(id){
   list.innerHTML = ""; view.textContent = "Loading…";
   fetch("/api/files/"+id)
     .then(r => r.ok ? r.json() : {files:[]})
-    .then(d => { renderTree(id, d.files || []); })
+    .then(d => { renderTree(id, d.files || []); if (window.Insight) Insight.filesLoaded(d); })
     .catch(() => { list.innerHTML = "<li class='muted'>(could not load files)</li>"; view.textContent = ""; });
 }
 function renderTree(id, files){
@@ -2839,9 +2841,10 @@ function viewFile(id, path, li){
   if(li) li.classList.add("sel");
   const view = document.getElementById("files-view");
   view.textContent = "Loading…";
+  let cut = null;   // the file's full size when the server cut it at the view cap
   fetch("/api/file/"+id+"?path="+encodeURIComponent(path))
-    .then(r => r.text())
-    .then(t => { view.textContent = t || "(empty file)"; })
+    .then(r => { cut = r.headers.get("X-Foundry-Truncated"); return r.text(); })
+    .then(t => { view.textContent = t || "(empty file)"; if (window.Insight) Insight.fileShown(view, cut); })
     .catch(() => { view.textContent = "(could not load file)"; });
 }
 function hideFiles(){ document.getElementById("files-modal").classList.add("hidden"); }
@@ -3000,6 +3003,7 @@ function removeFloor(F){
   document.getElementById("mode-tag").textContent = "";
   for (const id of ["log", "progress", "tickets", "gates-mini"]) document.getElementById(id).innerHTML = "";
   renderElevator(); renderControls();
+  if (window.Insight) Insight.onFloor(null);
 }
 
 // ---- UI wiring -------------------------------------------------------------
@@ -3079,21 +3083,33 @@ function openFloorStream(F, from){
   const es = new EventSource("/api/stream/"+F.id+(from ? "?from="+from : ""));
   F.lastBeat = Date.now();
   es.onmessage = e => { F.lastBeat = Date.now();
+    if (window.Insight) Insight.streamOk(F);
     if (e.lastEventId) F.cursor = parseInt(e.lastEventId, 10) + 1;
     try { routeEvent(F.floor, JSON.parse(e.data)); } catch(_){} };
+  es.onopen = () => { if (window.Insight) Insight.streamOk(F); };
+  es.onerror = () => { if (window.Insight) Insight.streamError(F, es); };
   es.addEventListener("ka", ()=>{ F.lastBeat = Date.now(); updateLiveDot(); });
   es.addEventListener("end", ()=>{ es.close(); });
   F.es = es;
 }
 async function rehydrate(){
   await bootReady;  // shared textures must exist before a FloorScene builds
+  let projects;
   try {
-    const {projects} = await fetch("/api/projects").then(r=>r.json());
-    if(!projects || !projects.length){ showNewModal(); return; }
-    for(const row of projects) adoptFloor(row);
-    switchToFloor(projects[projects.length-1].floor);
-    renderElevator();
-  } catch(_){ showNewModal(); }
+    const r = await fetch("/api/projects");
+    if (!r.ok) throw Object.assign(new Error("HTTP "+r.status), {status:r.status});
+    projects = (await r.json()).projects;
+    if (!Array.isArray(projects)) throw new Error("unexpected reply");
+  } catch(err){
+    // Not "no floors": an error state with retry, never the New Project modal.
+    if (window.Insight) Insight.rehydrateFailed(err, rehydrate); else showNewModal();
+    return;
+  }
+  if (window.Insight) Insight.rehydrated();
+  if(!projects.length){ showNewModal(); return; }
+  for(const row of projects) adoptFloor(row);
+  switchToFloor(projects[projects.length-1].floor);
+  renderElevator();
 }
 rehydrate();
 // A floor resumed from another tab or device: this viewer's stream ended with the

@@ -29,6 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from webapp import insight
 from webapp.events import (
     STAGE_FOR_NODE,
     event_for_task,
@@ -206,6 +207,7 @@ def parse_workers(raw: Any = None) -> dict[str, int]:
 
 
 _PROJECT_ROUTE = re.compile(r"/api/projects/([^/]+)")
+_INSIGHT_ROUTE = re.compile(r"/api/projects/([^/]+)/insight")
 _CONTROL_ROUTE = re.compile(r"/api/projects/([^/]+)/(stop|pause|resume)")
 MAX_FIX_ATTEMPTS = 20
 
@@ -588,6 +590,49 @@ def _evidence_markdown(doc: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _draft_label(pid: str) -> dict[str, Any]:
+    """A finished floor that did not ship holds its latest attempt: a draft."""
+    p = _PROJECTS.get(pid)
+    draft = bool(p and p.status == "done" and p.ended and not p.passed)
+    return {"draft": draft, "phase": p.phase if p else ""}
+
+
+def _resumable(p: Project, log: list[dict[str, Any]]) -> bool:
+    """Whether the floor's Resume would be accepted (mirrors Handler._resume)."""
+    if p.status != "done" or not p.ended or p.passed or p.mode != "assistant":
+        return False
+    if _paused_at_retired_checkpoint(log):
+        return False
+    return p.phase in ("stopped", "paused") or _has_durable_checkpoint(p.id)
+
+
+def _floor_insight(p: Project) -> dict[str, Any]:
+    """The halt report (a floor that ended without shipping) or the run card (a
+    shipped floor), plus its meter — for the insight panel."""
+    log = _STORE.events_of(p.id) if p.log_trimmed else list(p.log)
+    meter = insight.last_meter(log)
+    out: dict[str, Any] = {"id": p.id, "status": p.status, "phase": p.phase,
+                           "passed": p.passed, "meter": meter, "halt": None, "card": None}
+    if p.status != "done" or not p.ended:
+        return out
+    state = insight.durable_state(_STATE_DIR, p.id)
+    if p.passed:
+        manifest = insight.find_manifest(
+            [p.out_base, p.out_base / "code" if p.out_base else None], p.id)
+        out["card"] = insight.run_card(
+            manifest=manifest, stack=(state or {}).get("stack"),
+            tickets=insight.tickets_from_log(log), meter=meter)
+        return out
+    halt = next((e for e in reversed(log) if e.get("type") == "halt"), {})
+    repo = _read_repo_cached(p.id)
+    out["halt"] = insight.halt_report(
+        phase=p.phase or str(halt.get("phase") or "halted"),
+        reason=str(halt.get("reason") or ""), token_cap=p.token_cap,
+        max_fix_attempts=p.max_fix_attempts, resumable=_resumable(p, log), state=state,
+        gates=p.gates, meter=meter, draft_files=len(repo.files) if repo else 0)
+    return out
+
+
 def _tree(pid: str) -> dict[str, bytes] | None:
     """The build's files from the CAS (path -> bytes); ``None`` if nothing is readable."""
     repo = _read_repo_cached(pid)
@@ -638,6 +683,9 @@ def waiting_on(p: Project, now: float | None = None, cap: int = 3) -> str:
 
 
 def _emit(p: Project, **event: Any) -> None:
+    if event.get("type") == "done" and "meter" not in event:
+        # Stops the floor's meter watcher first, so no reading lands after `done`.
+        event["meter"] = insight.finish_meter(p.id, _STATE_DIR, p.token_cap)
     # Capture gate verdicts as they stream so /api/projects can rehydrate the HUD
     # pills after a reload (a finished build keeps showing its signed gate row).
     if event.get("type") == "gate":
@@ -795,26 +843,59 @@ def _gated_runner(runner, p: Project, **kwargs: Any) -> None:
     """Run a build under the global concurrency gate.
 
     When all build slots are busy, the project is marked ``queued`` and this worker
-    thread blocks until a slot frees — so a small host never runs more heavy builds
-    at once than ``WORKSHOP_MAX_CONCURRENT_BUILDS``. The slot is always released, even
-    if the build raises, so a crash can't leak a permanently-held slot."""
+    thread waits its turn (first come, first served; each waiting floor is told its
+    position) — so a small host never runs more heavy builds at once than
+    ``WORKSHOP_MAX_CONCURRENT_BUILDS``. The slot is always released, even if the
+    build raises, so a crash can't leak a permanently-held slot."""
     if _BUILD_GATE is None:
-        runner(p, **kwargs)
+        _run_metered(runner, p, kwargs)
         return
-    if not _BUILD_GATE.acquire(blocking=False):
-        # Every slot busy → tell the user it's queued, then wait for one to free.
+    if insight.QUEUE.head() is not None or not _BUILD_GATE.acquire(blocking=False):
+        # Every slot busy (or others already waiting) → queue, then wait our turn.
         p.status = "queued"
         _persist(p)
+        insight.QUEUE.join(p.id)
         _emit(p, type="narrate",
               text="⏳ All build slots are busy — queued. Starting as soon as one frees…")
-        while not _BUILD_GATE.acquire(timeout=1):
-            if p.cancel.is_set():          # stopped while queued: never takes a slot
-                _finish_stopped(p)
-                return
+        _announce_queue()
+        try:
+            while True:
+                if p.cancel.is_set():          # stopped while queued: never takes a slot
+                    insight.QUEUE.leave(p.id)
+                    _finish_stopped(p)
+                    return
+                if insight.QUEUE.head() == p.id:
+                    if _BUILD_GATE.acquire(timeout=1):
+                        break
+                else:
+                    p.cancel.wait(1)
+        finally:
+            insight.QUEUE.leave(p.id)
+            _announce_queue()
+        p.status = "running"
+        _emit(p, type="queue", position=0)
+    try:
+        _run_metered(runner, p, kwargs)
+    finally:
+        _BUILD_GATE.release()
+
+
+def _announce_queue() -> None:
+    """Tell each waiting floor its place in line when it moves."""
+    for pid, pos in insight.QUEUE.changed():
+        q = _PROJECTS.get(pid)
+        if q is not None:
+            _emit(q, type="queue", position=pos, slots=_MAX_CONCURRENT_BUILDS)
+
+
+def _run_metered(runner, p: Project, kwargs: Mapping[str, Any]) -> None:
+    """Run the build with its live token/time meter streaming to the floor."""
+    insight.start_meter(p.id, insight.MeterWatch(
+        _STATE_DIR, p.id, lambda ev: _emit(p, **ev), caps=lambda: (p.token_cap, None)))
     try:
         runner(p, **kwargs)
     finally:
-        _BUILD_GATE.release()
+        insight.finish_meter(p.id, _STATE_DIR, p.token_cap)   # no-op once `done` took it
 
 
 def _finish_stopped(p: Project) -> None:
@@ -989,6 +1070,9 @@ def _run_factory(p: Project, resume: bool = False) -> None:
                 thread_id=p.id,               # UNIQUE per project — no cross-floor collision
                 state_dir=_STATE_DIR,         # durable: build survives + resumes past a restart
                 output_dir=str(code_dir) if code_dir else None,
+                # The code stays in the store, but the BUILD-MANIFEST (run/test
+                # commands, models, tokens) is the floor's run card.
+                manifest_dir=str(p.out_base) if p.out_base else None,
                 profile=p.profile or "auto",  # stack picked in the UI ("auto" = infer)
             )
         finally:
@@ -1103,13 +1187,13 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _read_json(self) -> dict[str, Any]:
-        n = int(self.headers.get("Content-Length", 0) or 0)
-        if not n:
-            return {}
+        """The JSON object body; raises insight.BodyError (answered by do_POST)."""
         try:
-            return json.loads(self.rfile.read(n).decode("utf-8")) or {}
-        except (ValueError, UnicodeDecodeError):
-            return {}
+            return insight.read_json_body(self.headers, self.rfile)
+        except insight.BodyError as exc:
+            if exc.status == 413:
+                self.close_connection = True   # the unread body would desync keep-alive
+            raise
 
     # -- sign-in ---------------------------------------------------------------
 
@@ -1229,6 +1313,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/projects":
             self._list_projects()
             return
+        m = _INSIGHT_ROUTE.fullmatch(path)
+        if m:
+            self._insight(m.group(1))
+            return
         if path == "/api/builds":
             self._list_builds()
             return
@@ -1259,7 +1347,7 @@ class Handler(BaseHTTPRequestHandler):
         tree = _tree(pid)
         if tree is not None:
             files = [{"path": p, "size": len(b)} for p, b in sorted(tree.items())]
-            self._json(200, {"files": files, "source": "store"})
+            self._json(200, {"files": files, "source": "store", **_draft_label(pid)})
             return
         base = self._out_base(pid)
         if base is None:
@@ -1269,7 +1357,7 @@ class Handler(BaseHTTPRequestHandler):
             {"path": str(f.relative_to(base)), "size": f.stat().st_size}
             for f in sorted(base.rglob("*")) if f.is_file()
         ]
-        self._json(200, {"files": files, "source": "disk"})
+        self._json(200, {"files": files, "source": "disk", **_draft_label(pid)})
 
     def _resolve_within(self, base: Path, rel: str) -> Path | None:
         """Resolve ``rel`` under ``base``, fail-closed on traversal/symlink escape."""
@@ -1291,7 +1379,7 @@ class Handler(BaseHTTPRequestHandler):
             if data is None:
                 self._json(404, {"error": "not found"})
                 return
-            self._send_text(data[:_MAX_VIEW_BYTES])
+            self._send_text(data)
             return
         base = self._out_base(pid)
         if base is None:
@@ -1301,11 +1389,17 @@ class Handler(BaseHTTPRequestHandler):
         if target is None or not target.is_file():
             self._json(404, {"error": "not found"})
             return
-        self._send_text(target.read_bytes()[:_MAX_VIEW_BYTES])
+        self._send_text(target.read_bytes())
 
     def _send_text(self, data: bytes) -> None:
+        """A file for the in-page viewer, cut at the view cap; a cut file says so in
+        ``X-Foundry-Truncated`` (its full size) so the viewer can show a notice."""
+        total = len(data)
+        data = data[:_MAX_VIEW_BYTES]
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
+        if total > len(data):
+            self.send_header("X-Foundry-Truncated", str(total))
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -1346,6 +1440,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         _p = self.path.split("?", 1)[0]
+        try:
+            self._route_post(_p)
+        except insight.BodyError as exc:
+            self._json(exc.status, {"error": exc.message})
+
+    def _route_post(self, _p: str) -> None:
         if _p == "/api/login":
             self._login()
             return
@@ -1519,10 +1619,18 @@ class Handler(BaseHTTPRequestHandler):
              "backend": p.backend, "slots": p.max_slots, "status": p.status,
              "passed": p.passed, "gates": p.gates, "phase": p.phase,
              "stopping": p.stop_kind if p.cancel.is_set() and not p.ended else "",
-             "token_cap": p.token_cap, "max_fix_attempts": p.max_fix_attempts}
+             "token_cap": p.token_cap, "max_fix_attempts": p.max_fix_attempts,
+             "queue": insight.QUEUE.position(p.id), "meter": insight.last_meter(p.log)}
             for p in projs
         ]
         self._json(200, {"projects": rows})
+
+    def _insight(self, pid: str) -> None:
+        p = _PROJECTS.get(pid)
+        if p is None:
+            self._json(404, {"error": "no such project"})
+            return
+        self._json(200, _floor_insight(p))
 
     def _list_builds(self) -> None:
         """Finished builds from the catalog — the Floor 0 repository list."""

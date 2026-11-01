@@ -17,6 +17,7 @@
 <meta name="apple-mobile-web-app-title" content="Foundry" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <link rel="stylesheet" href="/static/style.css" />
+<link rel="stylesheet" href="/static/insight.css" />
 </head>
 <body>
   <!-- ONE grid, two arrangements (see style.css):
@@ -28,6 +29,8 @@
       <div class="hud-left">
         <span class="logo">FOUNDRY</span>
         <span class="elevator" id="floor-tag">FLOOR —</span>
+        <!-- tokens used / cap · elapsed (or the queue position); insight.js -->
+        <span class="meter" id="meter-tag" hidden></span>
       </div>
       <!-- The request line is a DIRECT child of the bar, not of .hud-left: portrait
            gives it a full-width row of its own, and a nested element cannot be
@@ -71,6 +74,8 @@
         <button class="log-tab" data-tab="tickets">☰ Tickets</button>
         <span id="log-live" class="log-live"></span>
       </div>
+      <!-- why a finished floor stopped, or how to run what it shipped (insight.js) -->
+      <div id="insight-card" class="insight-card hidden" aria-live="polite"></div>
       <ul id="log"></ul>
       <ul id="progress" style="display:none"></ul>
       <ul id="tickets" style="display:none"></ul>
@@ -160,6 +165,7 @@
   </div>
 
   <script src="/static/vendor/phaser.min.js"></script>
+  <script src="/static/insight.js"></script>
   <script src="/static/game.js"></script>
 </body>
 </html>

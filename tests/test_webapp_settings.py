@@ -319,6 +319,34 @@ def test_change_a_build_resolves_the_base_tree_server_side(env, runs):
     assert next(r for r in rows if r["id"] == p.id)["build"]["base_floor"] == 1
 
 
+def test_change_a_shipped_mock_floor_ships_through_the_workshop(env):
+    def build(**body: Any) -> Project:
+        code, got = _call(env, "POST", "/api/projects", body)
+        assert code == 200, got
+        p = server._PROJECTS[got["id"]]
+        _wait_ended(p, timeout=120)
+        return p
+
+    base = build(request="build a todo app")
+    assert base.passed, [e for e in base.log if e["type"] == "halt"]
+    change = build(request="add a dark mode", base_id=base.id)
+    staged = env.tmp / "out" / f"floor-{change.floor}" / ".inputs" / "base"
+    # The base is the tree the base floor's gates judged, with its manifest — not
+    # scenarios the mock gates never ran.
+    assert not (staged / "features").exists()
+    manifest = json.loads((staged / "BUILD-MANIFEST.json").read_text())
+    assert manifest["thread_id"] == base.id and manifest["stack"]["language"] == "python"
+    assert change.passed, [e for e in change.log if e["type"] == "halt"]
+
+
+def test_change_prefers_the_floors_own_export_with_its_manifest(env, runs):
+    base = _shipped(env, "base1", 1)
+    assert base.out_base is not None
+    (base.out_base / "code" / "BUILD-MANIFEST.json").write_text('{"thread_id": "base1"}')
+    _, kw = _build(env, runs, request="add a dark mode", base_id="base1")
+    assert kw["_base_files"] == ["BUILD-MANIFEST.json", "README.md", "src/app.py"]
+
+
 def test_change_refuses_unknown_and_unshipped_floors(env, runs):
     _shipped(env, "held", 1, passed=False)
     running = Project(id="live", request="r", mode="assistant", floor=2, passed=True)

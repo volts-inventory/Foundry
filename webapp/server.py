@@ -514,13 +514,13 @@ def _read_repo_cached(pid: str) -> Repo | None:
         hit = _REPO_CACHE.get(pid)
     if hit is not None:
         return hit
+    proj = _PROJECTS.get(pid)
     try:
-        repo = read_repo(pid, _STATE_DIR)
+        repo = read_repo(pid, _STATE_DIR, backend=proj.backend if proj else None)
     except RepoUnavailable:
         return None
     except Exception:
         return None
-    proj = _PROJECTS.get(pid)
     finished = proj is None or proj.status == "done"
     if finished:
         with _REPO_CACHE_LOCK:
@@ -948,13 +948,21 @@ def _server_backend() -> str:
 
 
 def _base_tree(base: Project) -> dict[str, bytes] | None:
-    """A shipped floor's tree: from the store, else its disk export."""
-    tree = _tree(base.id)
-    if tree:
-        return tree
+    """A shipped floor's tree with its BUILD-MANIFEST (the stack and contracts a
+    change inherits): the run's own disk export when it wrote one, else the store
+    read-back with the manifest rebuilt from the same final state."""
     code = base.out_base / "code" if base.out_base else None
-    if code is None or not code.is_dir():
-        return None
+    if code is not None and (code / "BUILD-MANIFEST.json").is_file():
+        return _disk_tree(code)
+    repo = _read_repo_cached(base.id)
+    if repo is not None and repo.files:
+        tree = {f.path: b for f in repo.files if (b := repo.file_bytes(f.path)) is not None}
+        tree["BUILD-MANIFEST.json"] = json.dumps(repo.manifest, indent=2).encode()
+        return tree
+    return _disk_tree(code) if code is not None and code.is_dir() else None
+
+
+def _disk_tree(code: Path) -> dict[str, bytes]:
     return {str(f.relative_to(code)): f.read_bytes()
             for f in sorted(code.rglob("*")) if f.is_file() and not f.is_symlink()}
 

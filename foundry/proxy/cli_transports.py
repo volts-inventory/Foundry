@@ -55,8 +55,10 @@ from foundry.proxy.lineage import (
     LineageMap,
 )
 from foundry.proxy.model_provider_proxy import (
+    AnthropicTransport,
     ModelProviderProxy,
     ProviderResponse,
+    ProviderTransport,
     _ClientCache,
 )
 
@@ -72,6 +74,7 @@ __all__ = [
     "claude_cli_backend",
     "codex_backend",
     "openai_backend",
+    "transport_for",
 ]
 
 
@@ -728,6 +731,20 @@ def codex_backend(
         tier_models=tier_models or CODEX_TIER_MODELS,
         **proxy_kwargs,
     )
+
+
+def transport_for(name: BackendName) -> ProviderTransport:
+    """The bare egress transport of a cloud backend, for a proxy that routes tiers
+    to different backends (model modes); same defaults as the presets above."""
+    if name == "anthropic":
+        return AnthropicTransport()
+    if name == "openai":
+        return OpenAITransport()
+    if name == "claude-cli":
+        return ClaudeCliTransport(timeout_s=_DEFAULT_CLI_TIMEOUT_S)
+    if name == "codex":
+        return CodexCliTransport(timeout_s=_DEFAULT_CLI_TIMEOUT_S)
+    raise ValueError(f"unknown backend {name!r} (expected anthropic | openai | claude-cli | codex)")
 
 
 def build_backend(name: BackendName, **kwargs: Any) -> ModelProviderProxy:

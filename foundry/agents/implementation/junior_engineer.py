@@ -220,7 +220,9 @@ def _apply_overlay(worktree: Path, overlay: Mapping[str, str | None]) -> None:
         target.write_text(content, encoding="utf-8")
 
 
-def _sandbox_for(rt: AgentRuntime, source_dir: str, snapshot_store: str | None) -> Sandbox:
+def _sandbox_for(
+    rt: AgentRuntime, source_dir: str, snapshot_store: str | None, tier: str | None = None
+) -> Sandbox:
     """Build the per-task Sandbox honoring the adapter's DECLARED model-auth needs.
 
     An agentic CLI substrate (claude-code) declares ``credential_grant`` /
@@ -228,13 +230,18 @@ def _sandbox_for(rt: AgentRuntime, source_dir: str, snapshot_store: str | None) 
     fail-closed against ``GRANTABLE_MODEL_AUTH`` (ROADMAP Phase 1b — model-auth
     only, target-system credentials can never be granted). Adapters that declare
     nothing (stub, raw-react) get the fully-scrubbed cage, byte-identical to
-    before."""
+    before. A per-tier adapter (model modes) answers for the substrate that will
+    run ``tier``, so a local session's cage never gets the cloud credential."""
+    adapter: Any = rt.adapter
+    for_tier = getattr(adapter, "for_tier", None)
+    if callable(for_tier):
+        adapter = for_tier(tier)
     return Sandbox(
         source_dir,
         snapshot_store=snapshot_store,
-        credential_grant=tuple(getattr(rt.adapter, "credential_grant", ()) or ()),
-        home_passthrough=bool(getattr(rt.adapter, "home_passthrough", False)),
-        toolchain_env=bool(getattr(rt.adapter, "toolchain_env", False)),
+        credential_grant=tuple(getattr(adapter, "credential_grant", ()) or ()),
+        home_passthrough=bool(getattr(adapter, "home_passthrough", False)),
+        toolchain_env=bool(getattr(adapter, "toolchain_env", False)),
     )
 
 

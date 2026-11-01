@@ -70,8 +70,8 @@ import re
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
@@ -624,8 +624,21 @@ class ModelProviderProxy:
         rate_limit_backoff_base_s: float = 2.0,
         rate_limit_backoff_cap_s: float = 60.0,
         manifest_max: int | None = None,
+        tier_transports: Mapping[str, ProviderTransport] | None = None,
+        local_tiers: Iterable[str] = (),
+        local_lock: threading.RLock | None = None,
     ) -> None:
         self._transport = transport or AnthropicTransport()
+        # Per-level routing (model modes): a tier named here sends through ITS
+        # transport (e.g. a local OpenAI-compatible server) instead of the default
+        # one. Unnamed tiers — and every tier when this is empty — use `transport`.
+        self._tier_transports: dict[str, ProviderTransport] = dict(tier_transports or {})
+        # Tiers served by a local model: their tokens are free (never charged to the
+        # token meter) and one local model is loaded, so at most one thread drives it
+        # at a time. Reentrant so a coding session that holds it for its whole run
+        # (``local_slot``) can still make its own calls through here.
+        self._local_tiers: frozenset[str] = frozenset(local_tiers)
+        self._local_lock: threading.RLock = local_lock or threading.RLock()
         self._lineage = lineage_map or LineageMap()
         self._signer = signer
         # Backend/model-aware determinism control (arch §8): which knob a
@@ -699,6 +712,16 @@ class ModelProviderProxy:
         return dict(self._tier_models)
 
     @property
+    def local_tiers(self) -> frozenset[str]:
+        """Tiers served by a local model (unmetered, one call/session at a time)."""
+        return self._local_tiers
+
+    def local_slot(self) -> threading.RLock:
+        """The run's single local-model slot: hold it (``with proxy.local_slot():``)
+        for a whole local coding session so sessions queue one at a time."""
+        return self._local_lock
+
+    @property
     def sampling_policy(self) -> SamplingPolicy:
         """The configured determinism-control policy (effort vs temperature)."""
         return self._sampling_policy
@@ -756,7 +779,7 @@ class ModelProviderProxy:
         else:
             progress.log(f"start {label}")
             started = time.monotonic()
-            response, parsed = self._send_with_retry(request, schema=schema)
+            response, parsed = self._send_with_retry(request, schema=schema, tier=tier)
             progress.finished(label, started, response.usage, self.token_meter)
             self._cache_put(request, schema, response)
 
@@ -779,6 +802,8 @@ class ModelProviderProxy:
             "sampling": sampling,
             "drift": drift,
         }
+        if tier in self._local_tiers:
+            record["local"] = True
         if drift_kind is not None:
             record["drift_kind"] = drift_kind
         if sampling_note:
@@ -1001,7 +1026,11 @@ class ModelProviderProxy:
         tmp.replace(path)
 
     def _send_with_retry(
-        self, request: dict[str, Any], *, schema: dict[str, Any] | None = None
+        self,
+        request: dict[str, Any],
+        *,
+        schema: dict[str, Any] | None = None,
+        tier: str | None = None,
     ) -> tuple[ProviderResponse, dict[str, Any] | None]:
         """Bounded retry/backoff, then fail closed; returns (response, parsed).
 
@@ -1017,13 +1046,15 @@ class ModelProviderProxy:
         meter = self.token_meter
         if meter is not None:
             meter.check()
+        transport = self._tier_transports.get(tier or "", self._transport)
+        local = tier in self._local_tiers
         attempt = 0          # real transport failures (bounded, fail-closed)
         rl_attempt = 0       # provider throttling (separate, more generous budget)
         while True:
             try:
-                with self._limiter.slot():
-                    response = self._transport.send(request)
-                if meter is not None:
+                with self._local_lock if local else nullcontext(), self._limiter.slot():
+                    response = transport.send(request)
+                if meter is not None and not local:
                     meter.charge(response.usage)
                 parsed = (
                     _extract_json_object(response.text) if schema is not None else None

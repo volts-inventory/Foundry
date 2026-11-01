@@ -65,7 +65,7 @@ from foundry.execution.work_pool import (
     TaskEventHook,
     allocate_lineage_quotas,
 )
-from foundry.proxy.token_meter import TokenCapExceeded
+from foundry.proxy.token_meter import RunCapExceeded
 from foundry.schemas.architecture import InterfaceContract
 from foundry.schemas.base import Artifact, BudgetLedger
 from foundry.schemas.gates import GateTriage
@@ -1091,7 +1091,8 @@ def make_engineering_node(
         bases: dict[str, str] = {}
 
         def make_sandbox(etask: ExecutionTask) -> Sandbox:
-            sandbox = _sandbox_for(rt, source_dir, snapshot_store)
+            tier = etask.packet.task.get("tier")
+            sandbox = _sandbox_for(rt, source_dir, snapshot_store, str(tier) if tier else None)
             if overlay:
                 _apply_overlay(sandbox.worktree, overlay)
             bases[str(etask.packet.task["id"])] = sandbox.snapshot()
@@ -1151,7 +1152,7 @@ def make_engineering_node(
                 try:
                     result = pool.result(submitted[tid])
                     out = _finalize_diff(rt, tasks[tid], constraints, bases[tid], result, config)
-                except TokenCapExceeded as exc:
+                except RunCapExceeded as exc:
                     merged.setdefault("gate_triage", []).append(GateTriage(
                         name=CAP_TRIAGE, run_against=f"task/{tid}", explanation=str(exc),
                         produced_by=NODE_ID, seq=rt.seq(config, NODE_ID, f"cap:{tid}"),

@@ -74,10 +74,24 @@ from foundry.graph.factory_graph import build_factory_graph, terminal_gates_pass
 from foundry.graph.gate_wiring import GATE_INPUT_FILES
 from foundry.graph.supervisor import MODE_ASSISTANT, RESUME_PHASE, resume_boundary
 from foundry.manifest import write_manifest
+from foundry.modes import (
+    DEFAULT_FIX_ATTEMPTS,
+    MODEL_MODES,
+    Level,
+    build_level_proxy,
+    local_tiers,
+    resolve_levels,
+)
 from foundry.proxy import ModelProviderProxy, build_backend
-from foundry.proxy.model_provider_proxy import DriftMode, DriftPolicy
+from foundry.proxy.local_transport import (
+    DEFAULT_LOCAL_MODEL,
+    DEFAULT_LOCAL_URL,
+    LocalOpenAITransport,
+    check_local_server,
+)
+from foundry.proxy.model_provider_proxy import DriftMode, DriftPolicy, ProviderTransport
 from foundry.proxy.test_doubles import MockTransport
-from foundry.proxy.token_meter import TokenCapExceeded, TokenMeter
+from foundry.proxy.token_meter import RunCapExceeded, TimeCapExceeded, TokenMeter
 from foundry.schemas.architecture import OwnershipMap, SystemDesign
 from foundry.schemas.base import FrozenModel
 from foundry.schemas.gates import GateStatus
@@ -365,6 +379,59 @@ def _build_proxy(backend: str) -> ModelProviderProxy:
         drift_policy=drift,
         tier_models=_tier_models(backend),
     )
+
+def _cloud_transport(backend: str) -> ProviderTransport:
+    """The egress of one cloud level ("mock" is the scripted keyless double)."""
+    if backend == _MOCK_BACKEND:
+        return MockTransport.scripted(dict(_SCRIPTS), default_verdict="approve")
+    from foundry.proxy.cli_transports import transport_for
+
+    return transport_for(cast("BackendName", backend))
+
+
+def _local_transport(base_url: str) -> ProviderTransport:
+    """The egress of the local levels: an OpenAI-compatible server, no credential."""
+    return LocalOpenAITransport(base_url)
+
+
+def _build_level_proxy(levels: Mapping[str, Level]) -> ModelProviderProxy:
+    """One proxy routing each tier to its level's transport (model modes)."""
+    return build_level_proxy(
+        levels,
+        cloud_transport=_cloud_transport,
+        local_transport=_local_transport,
+        signer=_zone_b_signer(),
+        drift_policy=_drift_policy(),
+    )
+
+
+def _level_adapter(
+    adapter: str | Any | None,
+    *,
+    backend: str,
+    levels: Mapping[str, Level],
+    proxy: ModelProviderProxy,
+    thread_id: str,
+    activity_cb: Callable[[str], None] | None,
+) -> Any:
+    """The coding substrate under a level table: a ticket on a cloud level runs the
+    run's cloud adapter (claude-code under claude-cli) with the cloud levels'
+    models; a ticket on a local level runs proxy-agent through the local server,
+    one session at a time."""
+    from foundry.execution.adapters.tiered import TieredAdapter
+
+    local = make_coding_adapter("proxy-agent", proxy=proxy, thread_id=thread_id)
+    cloud_models = {t: lvl.model for t, lvl in levels.items() if not lvl.local}
+    cloud = local
+    if cloud_models:
+        cloud = _resolve_coding_adapter(
+            adapter if adapter is not None else _default_adapter_for(backend),
+            proxy=proxy, thread_id=thread_id, activity_cb=activity_cb,
+            tier_models=cloud_models,
+        )
+    return TieredAdapter(cloud=cloud, local=local, local_tiers=local_tiers(levels),
+                         local_slot=proxy.local_slot)
+
 
 # Spec ingestion (task [8]). A whole-run cap on the design-spec text seeded into
 # state: bounds checkpoint size + token cost on a large doc / directory; the
@@ -820,6 +887,11 @@ class RunResult:
     """The boundary a HALTED run stopped at, where a rerun picks up (``None`` on a PASS)."""
     resumable: bool = False
     """Whether the run's state is durable (``--state-dir``), so a rerun can resume it."""
+    model_mode: str | None = None
+    """The model mode (cloud | hybrid | local, or "custom" for an explicit level
+    table); None when the run used the single-backend routing."""
+    levels: dict[str, dict[str, Any]] | None = None
+    """The level table the run routed by (tier -> backend/model[/base_url])."""
 
     def summary(self) -> str:
         """A concise human-readable report of the run (printed by ``main``)."""
@@ -832,6 +904,10 @@ class RunResult:
             + ("(deterministic mock — no model call)"
                if self.backend == _MOCK_BACKEND else "(real model egress)"),
         ]
+        if self.levels:
+            lines.append(f"models:    {self.model_mode or 'custom'}")
+            lines += [f"  {tier}: {lvl['backend']} {lvl['model']}"
+                      for tier, lvl in sorted(self.levels.items())]
         lines += [
             f"phase:     {self.phase}",
             f"result:    {'PASS' if self.passed else 'HALTED (no PR)'}",
@@ -1132,7 +1208,7 @@ def run(
     resolve_blob: BlobResolver | None = None,
     adapter: str | Any | None = None,
     diff_body: str | None = None,
-    max_fix_attempts: int = 3,
+    max_fix_attempts: int | None = None,
     output_dir: str | None = None,
     progress_cb: Callable[..., None] | None = None,
     activity_cb: Callable[[str], None] | None = None,
@@ -1145,6 +1221,11 @@ def run(
     profile: str | None = "auto",
     scope: str = "auto",
     base_dir: str | None = None,
+    model_mode: str | None = None,
+    levels: Mapping[str, Any] | None = None,
+    local_url: str | None = None,
+    local_model: str | None = None,
+    time_cap_minutes: float | None = None,
 ) -> RunResult:
     """Run ``request`` end-to-end through the compiled factory graph (smoke path).
 
@@ -1181,7 +1262,8 @@ def run(
         FeatureDiff. ``None`` (the default) selects the passing ``_PASSING_DIFF``. Pass an explicit
         error/failing body to exercise the halted-run path.
     max_fix_attempts:
-        Convergence bound for the gate fix-loop (default 3: two fixer passes per
+        Convergence bound for the gate fix-loop (default 3 — 4 in the hybrid and 5
+        in the local model mode: two fixer passes per
         failing boundary — each per-wave check and the final gate). On a gate FAIL/ERROR the
         run fixes FORWARD — back to the responsible layer WITH the specific failures —
         up to this many times before HALTing (escalate). The failed tree's digest stays
@@ -1217,6 +1299,20 @@ def run(
         delta, and ``output_dir`` receives the full updated tree. The base's
         recorded stack is kept. The default ``thread_id`` becomes a per-change id;
         reusing the base build's own thread is refused.
+    model_mode / levels / local_url / local_model:
+        Where each model level runs (Phase 4b). ``model_mode`` is a preset —
+        ``"cloud"`` (today's routing, the same as None), ``"hybrid"`` (T1 on
+        ``backend``, T2/T3 local) or ``"local"`` (every tier local). ``levels`` is
+        an explicit table ``{"T1": {"backend", "model"[, "base_url"]}, ...}`` that
+        overrides the preset (omitted tiers run on ``backend``). A local level is an
+        OpenAI-compatible server at ``local_url`` (default LM Studio's
+        ``http://localhost:1234/v1``) serving ``local_model``. Local calls are
+        unmetered and serialized (one local call/session at a time); tickets on a
+        local level run the proxy-agent loop, tickets on a cloud level the run's
+        cloud adapter.
+    time_cap_minutes:
+        Stop cleanly (resumable, like ``token_cap``) once the run has used this
+        much wall-clock time, across restarts.
     """
     if mode not in MODES:
         raise ValueError(f"unknown mode {mode!r}; choose one of {', '.join(MODES)}")
@@ -1226,6 +1322,15 @@ def run(
         raise ValueError(f"unknown scope {scope!r}; choose one of {', '.join(SCOPES)}")
     if diff_body is None:
         diff_body = _PASSING_DIFF
+    level_table = resolve_levels(
+        model_mode=model_mode, levels=levels, backend=backend,
+        cloud_models=_tier_models(backend), cloud_backends=BACKENDS,
+        local_url=local_url, local_model=local_model,
+    )
+    if max_fix_attempts is None:
+        max_fix_attempts = DEFAULT_FIX_ATTEMPTS[model_mode or "cloud"]
+    if time_cap_minutes is not None and time_cap_minutes <= 0:
+        raise ValueError("time_cap_minutes must be > 0")
     spec_text = _load_spec(spec)
     base_root, thread_id = _change_base(base_dir, request, thread_id)
     # Single-host durability seam (durability/persistence.py): when
@@ -1251,27 +1356,33 @@ def run(
         store = ArtifactStore()
         records = GlobalRecords()
         ckpt = FoundryCheckpointer()
-    proxy = _build_proxy(backend)
-    # --adapter omitted (None) ⇒ DERIVE the substrate from the backend so a real brain
-    # writes real code (mock→stub, any real backend→raw-react). An explicit adapter —
-    # a name OR an injected WorkerAdapter instance (tests) — is never None and wins.
-    if adapter is None:
-        adapter = _default_adapter_for(backend)
-    rt = AgentRuntime(
-        proxy=proxy,
-        adapter=_resolve_coding_adapter(adapter, proxy=proxy, thread_id=thread_id,
-                                        activity_cb=activity_cb,
-                                        tier_models=_tier_models(backend)),
-        cas=store,
-    )
+    if level_table is None:
+        proxy = _build_proxy(backend)
+        # --adapter omitted (None) ⇒ DERIVE the substrate from the backend so a real
+        # brain writes real code (mock→stub, any real backend→raw-react). An explicit
+        # adapter — a name OR an injected WorkerAdapter instance (tests) — wins.
+        if adapter is None:
+            adapter = _default_adapter_for(backend)
+        coding_adapter = _resolve_coding_adapter(adapter, proxy=proxy, thread_id=thread_id,
+                                                 activity_cb=activity_cb,
+                                                 tier_models=_tier_models(backend))
+    else:
+        proxy = _build_level_proxy(level_table)
+        coding_adapter = _level_adapter(adapter, backend=backend, levels=level_table,
+                                        proxy=proxy, thread_id=thread_id,
+                                        activity_cb=activity_cb)
+        if local_tiers(level_table) == frozenset(level_table):
+            max_slots = 1  # one local model: more ticket slots would only queue
+    rt = AgentRuntime(proxy=proxy, adapter=coding_adapter, cas=store)
     run_dir: Path | None = None
     if resolved_state_dir is not None:
         run_key = hashlib.sha256(thread_id.encode()).hexdigest()[:16]
         run_dir = Path(resolved_state_dir) / "calls" / run_key
         proxy.call_cache = run_dir
     meter: TokenMeter | None = None
-    if token_cap is not None:
-        meter = TokenMeter(token_cap, run_dir / "tokens.json" if run_dir else None)
+    if token_cap is not None or time_cap_minutes is not None:
+        meter = TokenMeter(token_cap, run_dir / "tokens.json" if run_dir else None,
+                           time_cap_s=time_cap_minutes * 60 if time_cap_minutes else None)
         proxy.token_meter = meter
         if hasattr(rt.adapter, "token_meter"):  # the claude-code substrate bypasses the proxy
             setattr(rt.adapter, "token_meter", meter)  # noqa: B010
@@ -1510,6 +1621,9 @@ def run(
         mode=mode,
         backend=backend,
     )
+    if level_table is not None:
+        result = replace(result, model_mode="custom" if levels else model_mode,
+                         levels={t: lvl.as_dict() for t, lvl in level_table.items()})
     if final_state.get("phase") == "halted":
         result = replace(result, resume_from=resume_boundary(final_state, resolve),
                          resumable=durable is not None)
@@ -1700,8 +1814,9 @@ def main(argv: list[str] | None = None) -> int:
     """``python -m foundry.cli "build a ..."`` — run the smoke path, print a report.
 
     Returns process exit code 0 on a clean Spec/Build/Test PASS (a PR action was
-    emitted), 1 on a halted/failed run, 2 on a usage error, 3 when --token-cap
-    stopped the run.
+    emitted), 1 on a halted/failed run, 2 on a usage error, 3 when --token-cap or
+    --time-cap stopped the run. ``--local-check`` reports the local model server
+    and exits 0 when it is reachable (and serves --local-model), else 1.
     """
     args = sys.argv[1:] if argv is None else argv
     # Simple value flags parse through `_take_value`/`_take_int` (H5: one helper
@@ -1738,8 +1853,27 @@ def main(argv: list[str] | None = None) -> int:
         args, state_dir = _take_value(args, "--state-dir", what="a directory argument")
         args, _tid = _take_value(args, "--thread-id", what="a value")
         thread_id = _tid if _tid is not None else "cli-run"
-        args, _mfa = _take_int(args, "--max-fix-attempts", minimum=1)
-        max_fix_attempts = _mfa if _mfa is not None else 3
+        args, max_fix_attempts = _take_int(args, "--max-fix-attempts", minimum=1)
+
+        # --model-mode {cloud|hybrid|local}: where the model levels run (cloud =
+        # today's routing; hybrid = T1 on --backend, T2/T3 on the local server;
+        # local = every level local). --local-url / --local-model name the local
+        # OpenAI-compatible server (LM Studio by default) and the model it serves.
+        # --time-cap MINUTES stops the run cleanly once it has run that long.
+        args, model_mode = _take_value(args, "--model-mode", what="a value")
+        if model_mode is not None and model_mode not in MODEL_MODES:
+            raise _CliUsageError(
+                f"unknown --model-mode {model_mode!r}; choose one of {', '.join(MODEL_MODES)}"
+            )
+        args, _local_url = _take_value(args, "--local-url", what="a URL")
+        local_url = _local_url or os.environ.get("FOUNDRY_LOCAL_URL", "").strip() \
+            or DEFAULT_LOCAL_URL
+        args, _local_model = _take_value(args, "--local-model", what="a model id")
+        local_model = _local_model or os.environ.get("FOUNDRY_LOCAL_MODEL", "").strip() \
+            or DEFAULT_LOCAL_MODEL
+        args, time_cap = _take_int(args, "--time-cap", minimum=1)
+        local_check = "--local-check" in args
+        args = [a for a in args if a != "--local-check"]
 
         # Parallelism is SYSTEM-DECIDED: the Tech-Lead decomposes the work and the
         # IC pool sizes itself to that plan (min(tasks, AUTO_SLOTS_CAP)). --max-slots
@@ -1817,6 +1951,10 @@ def main(argv: list[str] | None = None) -> int:
     except _CliUsageError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    if local_check:
+        status = check_local_server(local_url, model=local_model)
+        print(json.dumps(status.as_dict(), indent=2))
+        return 0 if status.reachable and status.model_served is not False else 1
     # Resolve --spec paths to text FIRST: a spec can STAND IN for the one-line
     # request (run from just `--spec FILE`), so we resolve it before deciding whether
     # a positional request is required. A missing/empty path is a clean usage error
@@ -1849,6 +1987,8 @@ def main(argv: list[str] | None = None) -> int:
                 "[--state-dir DIR] [--thread-id NAME] [--max-fix-attempts N] "
                 "[--max-slots N] [--workers frontend=2,backend=2,data=2,test=2] "
                 "[--ticket-tiers trivial=T3,standard=T2,complex=T1] "
+                "[--model-mode {cloud|hybrid|local}] [--local-url URL] "
+                "[--local-model ID] [--time-cap MINUTES] [--token-cap N] [--local-check] "
                 '["<one-line request>"]   (optional when --spec is given)\n'
                 f"  mode: assistant — {_TRUST_POSTURE[MODE_ASSISTANT]}\n"
                 "  backend: mock (default — keyless, deterministic) | anthropic | openai | "
@@ -1882,14 +2022,19 @@ def main(argv: list[str] | None = None) -> int:
             profile=(None if profile == "none" else profile),
             scope=scope,
             base_dir=base_dir,
+            model_mode=model_mode,
+            local_url=local_url,
+            local_model=local_model,
+            time_cap_minutes=time_cap,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    except TokenCapExceeded as exc:
+    except RunCapExceeded as exc:
+        flag = "--time-cap" if isinstance(exc, TimeCapExceeded) else "--token-cap"
         hint = (
             "Progress is saved: rerun the same command (same --thread-id and "
-            "--state-dir) with a higher --token-cap to continue."
+            f"--state-dir) with a higher {flag} to continue."
             if state_dir
             else "Add --state-dir DIR to make a capped run resumable."
         )

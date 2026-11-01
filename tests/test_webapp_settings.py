@@ -219,9 +219,12 @@ def test_spec_size_is_limited(env, runs):
 
 
 def test_an_oversized_body_is_refused_unread(env, runs):
-    raw = json.dumps({"request": "x", "pad": "a" * ws.MAX_BODY_BYTES}).encode()
+    # Only the declared length is oversized: the server refuses on the header without
+    # reading, so a real oversized upload would race the client into a broken pipe.
+    raw = json.dumps({"request": "x"}).encode()
+    oversized = {"Content-Length": str(ws.MAX_BODY_BYTES + 1)}
     for path in ("/api/projects", "/api/settings"):
-        code, _ = _call(env, "POST", path, raw=raw)
+        code, _ = _call(env, "POST", path, raw=raw, headers=oversized)
         assert code == 413
     assert runs == [] and not (env.tmp / "out" / "settings.json").exists()
 

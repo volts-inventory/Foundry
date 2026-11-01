@@ -422,8 +422,12 @@ def events_for_result(result: dict[str, Any]) -> list[dict[str, Any]]:
         out.append({"type": "release", "uri": result.get("artifact_uri") or "",
                     "mode": result.get("mode", "assistant")})
     else:
+        failing = [name.upper() for name, status in sorted(
+            (result.get("gate_statuses") or {}).items()) if _norm_status(status) != "pass"]
+        what = (f"the {', '.join(failing)} gate{'s' if len(failing) > 1 else ''} did not PASS"
+                if failing else "a gate did not PASS")
         out.append({"type": "halt", "phase": result.get("phase", "unknown"),
-                    "reason": "a gate did not PASS — the build is held (fail-closed)"})
+                    "reason": f"{what} — the build is held (fail-closed)"})
     out.append({"type": "done", "passed": bool(result.get("passed")),
                 "phase": result.get("phase", "unknown")})
     return out

@@ -161,11 +161,14 @@ _DEMO_ARCHITECT_DIRECTIVE = (
     "cross-service boundary to contract. Do not design an API, an HTTP surface, "
     "or a client/server split unless the request explicitly asks for one.\n"
     f"- The ownership map must name AT LEAST ONE owner and BETWEEN 1 AND "
-    f"{_DEMO_MAX_OWNERSHIP_UNITS} ownership units. Each unit becomes one "
-    "independently-built task, so extra units are the main cost of a demo. An "
-    "EMPTY ownership map is invalid — it yields zero tasks and an empty repo "
-    "that fails the build gate.\n"
-    "- Keep ADRs to the one or two decisions that actually shaped the design."
+    f"{_DEMO_MAX_OWNERSHIP_UNITS} ownership units. Each unit is a file, so extra "
+    "units are the main cost of a demo. An EMPTY ownership map is invalid — it "
+    "yields zero tasks and an empty repo that fails the build gate.\n"
+    "- Keep ADRs to the one or two decisions that actually shaped the design.\n"
+    "- On a Python stack without a bdd command, NO paired test tickets: each feature "
+    "ticket lists its own tests/test_<name>.py in files[] and writes the step "
+    "definitions for its own scenarios. Fold the dependency manifest into the main "
+    "feature ticket rather than giving it a ticket of its own."
 )
 
 

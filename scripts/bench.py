@@ -1,0 +1,152 @@
+"""Benchmark a Foundry build: run fixed cases, then summarize calls, tokens, stages, outcome."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from collections import Counter
+from pathlib import Path
+from typing import Any
+
+CASES = {
+    "dice": "a Python command-line tool that rolls dice given notation like 2d6+3",
+    "todo": "a small Python REST API for a todo list with create, list, complete and delete",
+    "csv": (
+        "a Python command-line tool that prints summary statistics "
+        "for each numeric column of a CSV file"
+    ),
+}
+
+START = re.compile(r"start model call: (\S+) \((\w+), ([^)]*)\)")
+REUSE = re.compile(r"reuse model call: ")
+DONE = re.compile(r"done\s+model call: (\S+) \([^)]*\) in ([\d.]+)([sm])\b")
+STAGE = re.compile(r"·\s+\S+\s+▸\s+(\w+)")
+VERDICTS = {0: "pass", 1: "fail", 3: "stopped", 2: "usage-error"}
+
+
+def run_case(mode: str, backend: str, case: str, cap: int, out_dir: Path) -> None:
+    root = out_dir / mode / case
+    root.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        sys.executable, "-m", "foundry.cli", CASES[case],
+        "--backend", backend, "--model-mode", mode, "--scope", "demo",
+        "--time-cap", str(cap), "--out", str(root / "out"), "--state-dir", str(root / "state"),
+    ]  # fmt: skip
+    env = {**os.environ, "FOUNDRY_PROGRESS": "1", "FOUNDRY_GATE_SANDBOX": "inprocess"}
+    start = time.monotonic()
+    with (root / "run.log").open("w") as log:
+        code = subprocess.run(cmd, env=env, stdout=log, stderr=subprocess.STDOUT).returncode
+    (root / "run.json").write_text(
+        json.dumps({"wall_s": round(time.monotonic() - start, 1), "exit_code": code})
+    )
+
+
+def sum_tokens(state: Path) -> dict[str, int]:
+    tin = tout = 0
+    for path in (state / "calls").glob("*/*.json"):
+        try:
+            usage = json.loads(path.read_text()).get("usage")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(usage, dict):
+            tin += int(usage.get("input_tokens") or 0)
+            tout += int(usage.get("output_tokens") or 0)
+    return {"input": tin, "output": tout}
+
+
+def summarize_case(root: Path) -> dict[str, Any]:
+    meta: dict[str, Any] = {}
+    if (root / "run.json").exists():
+        meta = json.loads((root / "run.json").read_text())
+    log = (root / "run.log").read_text(errors="replace") if (root / "run.log").exists() else ""
+    by_node: Counter[str] = Counter()
+    by_tier: Counter[str] = Counter()
+    secs_by_node: dict[str, float] = {}
+    stages: Counter[str] = Counter()
+    reused = 0
+    for line in log.splitlines():
+        if m := START.search(line):
+            by_node[m[1]] += 1
+            by_tier[m[2]] += 1
+        elif REUSE.search(line):
+            reused += 1
+        elif m := DONE.search(line):
+            secs_by_node[m[1]] = secs_by_node.get(m[1], 0.0) + float(m[2]) * (
+                60 if m[3] == "m" else 1
+            )
+        elif m := STAGE.search(line):
+            stages[m[1]] += 1
+    out = root / "out"
+    files = (
+        [p for p in out.rglob("*") if p.is_file() and ".git" not in p.relative_to(out).parts]
+        if out.is_dir()
+        else []
+    )
+    code = meta.get("exit_code")
+    return {
+        "wall_s": meta.get("wall_s"),
+        "exit_code": code,
+        "stopped_by_time_cap": "time cap reached" in log,
+        "model_calls": sum(by_node.values()),
+        "calls_by_node": dict(by_node),
+        "calls_by_tier": dict(by_tier),
+        "reused_calls": reused,
+        "call_seconds_by_node": {k: round(v, 1) for k, v in secs_by_node.items()},
+        "tokens": sum_tokens(root / "state"),
+        "fix_passes": stages["fixer"],
+        "wave_gates": stages["wave_gate"],
+        "out_files": len(files),
+        "verdict": VERDICTS.get(code) if code is not None else None,
+        "released": bool(files) and code == 0,
+    }
+
+
+def render(summary: dict[str, dict[str, Any]]) -> str:
+    head = (
+        f"{'case':<6} {'wall_m':>7} {'exit':>4} {'calls':>5} {'reuse':>5} {'tok_in':>9} "
+        f"{'tok_out':>8} {'fix':>3} {'wg':>3} {'files':>5} {'verdict':<8} rel"
+    )
+    rows = [head]
+    for case, s in summary.items():
+        wall = f"{s['wall_s'] / 60:.1f}" if s["wall_s"] is not None else "-"
+        rows.append(
+            f"{case:<6} {wall:>7} {s['exit_code'] if s['exit_code'] is not None else '-':>4} "
+            f"{s['model_calls']:>5} {s['reused_calls']:>5} {s['tokens']['input']:>9} "
+            f"{s['tokens']['output']:>8} {s['fix_passes']:>3} {s['wave_gates']:>3} "
+            f"{s['out_files']:>5} {s['verdict'] or '-':<8} {'Y' if s['released'] else 'N'}"
+            f"{' (time cap)' if s['stopped_by_time_cap'] else ''}"
+        )
+    return "\n".join(rows)
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--mode", choices=["local", "hybrid", "cloud"], required=True)
+    ap.add_argument("--backend", default="claude-cli")
+    ap.add_argument("--out-dir", type=Path, required=True)
+    ap.add_argument("--cases", default=",".join(CASES))
+    ap.add_argument("--time-cap", type=int, default=120, help="minutes per case")
+    ap.add_argument("--summarize-only", action="store_true")
+    args = ap.parse_args(argv)
+    cases = [c for c in args.cases.split(",") if c]
+    unknown = [c for c in cases if c not in CASES]
+    if unknown:
+        ap.error(f"unknown cases: {', '.join(unknown)}")
+    if not args.summarize_only:
+        for case in cases:
+            run_case(args.mode, args.backend, case, args.time_cap, args.out_dir)
+    mode_dir = args.out_dir / args.mode
+    summary = {c: summarize_case(mode_dir / c) for c in cases if (mode_dir / c).is_dir()}
+    mode_dir.mkdir(parents=True, exist_ok=True)
+    (mode_dir / "summary.json").write_text(json.dumps(summary, indent=2))
+    print(render(summary))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

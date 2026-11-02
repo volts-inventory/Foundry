@@ -84,9 +84,9 @@ def test_presets_put_the_levels_where_the_plan_says() -> None:
     assert hybrid["T1"] == Level("claude-cli", TIER_MODELS["T1"])
     assert hybrid["T2"].local and hybrid["T3"].local
     assert hybrid["T2"].model == DEFAULT_LOCAL_MODEL
-    assert hybrid["T2"].base_url == "http://localhost:1234/v1"
+    assert hybrid["T2"].base_url == "http://localhost:11434/v1"
     assert all(lvl.local for lvl in preset_levels("local", **kw).values())
-    assert DEFAULT_FIX_ATTEMPTS == {"cloud": 3, "hybrid": 4, "local": 5}
+    assert DEFAULT_FIX_ATTEMPTS == {"cloud": 3, "hybrid": 3, "local": 3}
 
 
 def test_no_mode_and_cloud_mode_keep_todays_routing() -> None:
@@ -317,7 +317,7 @@ def test_a_hybrid_run_routes_tickets_and_calls_by_level(
     assert result.passed
     assert result.model_mode == "hybrid"
     assert result.levels is not None and result.levels["T2"]["backend"] == "local"
-    assert seen["max_fix_attempts"] == 4
+    assert seen["max_fix_attempts"] == 3
     assert server.urls == ["http://box:1234/v1"]
     assert {r["model"] for r in server.requests} == {"qwen/qwen3.6-27b"}
     # The trivial ticket (T3, local) ran the proxy-agent loop on the local server;
@@ -363,7 +363,7 @@ def test_a_run_without_a_mode_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> N
     assert "models:" not in result.summary()
 
 
-def test_local_mode_defaults_to_five_fix_attempts_and_one_slot(
+def test_local_mode_defaults_to_three_fix_attempts_and_one_slot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     server = FakeLocalServer()
@@ -380,7 +380,7 @@ def test_local_mode_defaults_to_five_fix_attempts_and_one_slot(
     # there; what matters is that every call went to the local server.
     result = cli.run("build a thing", model_mode="local")
     assert result.phase == "halted" and result.model_mode == "local"
-    assert seen["max_fix_attempts"] == 5
+    assert seen["max_fix_attempts"] == 3
     assert seen["max_slots"] == 1
     assert any("You are the Planner" in json.dumps(r) for r in server.requests)
 
@@ -426,7 +426,33 @@ def test_local_server_gets_a_json_schema_request_when_it_supports_one() -> None:
     sent = client.chat.completions.calls
     assert len(sent) == 1
     assert sent[0]["response_format"]["json_schema"]["schema"] == SCHEMA
+    assert sent[0]["reasoning_effort"] == "none"
     assert transport.schema_supported is True
+
+
+def test_a_server_rejecting_reasoning_effort_is_retried_without_it() -> None:
+    client = _local_client(False, '{"answer": "42"}')
+    completions = client.chat.completions
+    real_create = completions.create
+
+    def create(**params: Any) -> Any:
+        if "reasoning_effort" in params:
+            completions.calls.append(params)
+            raise RuntimeError("Error code: 400 - reasoning_effort must be low, medium or high")
+        return real_create(**params)
+
+    completions.create = create
+    transport = LocalOpenAITransport(client=client)
+    proxy = build_level_proxy(
+        preset_levels("local", cloud_backend="mock", cloud_models=TIER_MODELS),
+        cloud_transport=lambda _b: RecordingTransport(), local_transport=lambda _u: transport,
+        signer=SIGNER)
+    first = proxy.complete(CALL[0], "T2", *CALL[1:], purpose="ideation", schema=SCHEMA)
+    second = proxy.complete(CALL[0], "T3", *CALL[1:], purpose="ideation", schema=SCHEMA)
+    assert first.parsed == second.parsed == {"answer": "42"}
+    assert ["reasoning_effort" in c for c in completions.calls] == [True, False, False]
+    assert transport.reasoning_supported is False
+    assert transport.schema_supported is True  # not mistaken for a schema rejection
 
 
 def test_local_schema_rejection_falls_back_to_prompt_and_parse() -> None:

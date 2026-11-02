@@ -16,6 +16,7 @@ from typing import Any
 from foundry.agents.planner import (
     MAX_TICKETS,
     _coverage_findings,
+    _own_scenario_bindings,
     make_planner_node,
 )
 from foundry.durability.artifact_store import ArtifactStore
@@ -311,3 +312,27 @@ def test_coverage_findings_fail_the_spec_gate_and_reach_the_revision(tmp_path: P
     assert "MH-1 (must-have): add todo" in prompt  # the ids to keep
     [critique] = [cas.resolve(a) for a in second["artifacts"] if a.kind == "criteria_findings"]
     assert critique.coverage_findings == ()  # the revision covered it
+
+
+def test_an_unpaired_feature_ticket_gets_a_step_module_to_bind_its_scenarios() -> None:
+    def ticket(tid: str, specialty: Specialty, scenarios: tuple[str, ...],
+               files: tuple[str, ...] = ("app.py",), deps: tuple[str, ...] = ()) -> Ticket:
+        return Ticket(id=tid, title=tid, specialty=specialty, scenario_ids=scenarios,
+                      files=files, depends_on=deps, seq=_SEQ)
+
+    tickets = [
+        ticket("E1-T01", Specialty.BACKEND, ("AC-1",)),                      # unpaired
+        ticket("E1-T02", Specialty.BACKEND, ("AC-2",)),                      # paired below
+        ticket("E1-T03", Specialty.TEST, ("AC-2",), ("tests/test_t02.py",), ("E1-T02",)),
+        ticket("E1-T04", Specialty.BACKEND, ("AC-4",), ("app.py", "tests/test_own.py")),
+        ticket("E1-T05", Specialty.BACKEND, ()),                             # no scenarios
+    ]
+    python = StackDecision(language="python", test="pytest")
+    out, concerns = _own_scenario_bindings(tickets, python)
+    files = {t.id: t.files for t in out}
+    assert files["E1-T01"] == ("app.py", "tests/test_e1_t01.py")
+    assert files["E1-T02"] == files["E1-T05"] == ("app.py",)
+    assert files["E1-T04"] == ("app.py", "tests/test_own.py")
+    assert len(concerns) == 1
+    cucumber = python.model_copy(update={"bdd": "behave"})
+    assert _own_scenario_bindings(tickets, cucumber) == (tickets, [])

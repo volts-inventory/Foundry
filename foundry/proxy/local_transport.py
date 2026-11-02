@@ -47,11 +47,11 @@ __all__ = [
     "validate_local_url",
 ]
 
-DEFAULT_LOCAL_URL = "http://localhost:1234/v1"  # LM Studio's default server
-# Qwen 3.6-27B (dense) at 6-bit, MLX — the plan's default local model. The exact id
-# depends on how the model was downloaded; `--local-check` lists what the server
+DEFAULT_LOCAL_URL = "http://localhost:11434/v1"  # Ollama's OpenAI-compatible endpoint
+# Qwen 3.6-27B (dense), Ollama's 8-bit MLX coding tag — the plan's default local model. The exact
+# id depends on how the model was pulled; `--local-check` lists what the server
 # actually serves, and --local-model / FOUNDRY_LOCAL_MODEL override this.
-DEFAULT_LOCAL_MODEL = "mlx-community/Qwen3.6-27B-6bit"
+DEFAULT_LOCAL_MODEL = "qwen3.6:27b-coding-mxfp8"
 # A dense 27B on a laptop can take many minutes for one long completion.
 DEFAULT_LOCAL_TIMEOUT_S = 1800.0
 
@@ -98,6 +98,9 @@ class LocalOpenAITransport:
         # None = untested, True = the server honours response_format, False = it
         # rejected it (prompt-and-parse from then on).
         self.schema_supported: bool | None = None
+        # Same for `reasoning_effort` ("none" turns thinking off on Ollama; some
+        # servers, e.g. vLLM, accept only low/medium/high and reject the request).
+        self.reasoning_supported: bool | None = None
 
         def _build() -> Any:
             try:
@@ -119,7 +122,10 @@ class LocalOpenAITransport:
         for role, text in _message_pairs(request):
             messages.append({"role": role, "content": text})
 
-        params: dict[str, Any] = {"model": model, "messages": messages}
+        # Thinking models (Qwen3.x) reason by default, multiplying output tokens
+        # ~5x on short agent turns; Ollama's /v1 ignores `think` and honours this.
+        params: dict[str, Any] = {"model": model, "messages": messages,
+                                  "reasoning_effort": "none"}
         max_tokens = request.get("max_tokens")
         if isinstance(max_tokens, int) and max_tokens > 0:
             params["max_tokens"] = max_tokens
@@ -149,7 +155,18 @@ class LocalOpenAITransport:
         return self._call({**params, "messages": fallback})
 
     def _call(self, params: dict[str, Any]) -> ProviderResponse:
-        response = self._cache.run(lambda c: c.chat.completions.create(**params))
+        if self.reasoning_supported is False:
+            params = {k: v for k, v in params.items() if k != "reasoning_effort"}
+        try:
+            response = self._cache.run(lambda c: c.chat.completions.create(**params))
+        except Exception as exc:
+            if "reasoning_effort" not in params or "reasoning" not in str(exc).lower():
+                raise
+            self.reasoning_supported = False
+            progress.log(f"local server rejected reasoning_effort ({exc}); sending without it")
+            return self._call(params)
+        if "reasoning_effort" in params:
+            self.reasoning_supported = True
         choice = response.choices[0] if getattr(response, "choices", None) else None
         text = (getattr(choice.message, "content", "") or "") if choice is not None else ""
         usage = getattr(response, "usage", None)

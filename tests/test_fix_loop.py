@@ -1,0 +1,170 @@
+"""The wave fix loop: each fixer pass gets a structured summary of the failure and
+of the previous pass, and a pass that leaves the same checks failing halts the
+wave instead of spending the remaining attempts."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from langchain_core.runnables import RunnableConfig
+
+from foundry.agents.implementation.junior_engineer import _fix_summary
+from foundry.agents.implementation.tickets import pending_wave
+from foundry.gates.test import failure_findings
+from foundry.graph.gate_wiring import (
+    BUILD_BOUNDARY,
+    BUILD_TEST_BOUNDARY,
+    NO_FIX_PROGRESS_TRIAGE,
+    _unchanged_tree_recheck,
+    failing_ids,
+    no_fix_progress,
+)
+from foundry.schemas.base import BudgetLedger
+from foundry.schemas.gates import GateResult, GateStatus, VerdictClass
+from foundry.state.factory_state import FactoryState
+from foundry.state.seq import Seq
+from tests.test_ticket_scheduler import _Recorder, _ticket, _wave_run
+
+_CFG: RunnableConfig = {"configurable": {}}
+
+
+def _gate(name: str, tree: str, local: int, status: GateStatus,
+          *findings: str) -> GateResult:
+    return GateResult(
+        name=name, status=status, decision_deterministic=True,
+        execution_deterministic=True, verdict_class=VerdictClass.EXECUTION_DETERMINISTIC,
+        findings=findings, run_against=tree, seq=Seq("run", 1, local, "gate", 0),
+    )
+
+
+def _state(*gates: GateResult, attempts: int = 2) -> FactoryState:
+    return {"gates": list(gates),
+            "budget": BudgetLedger(fix_attempts_since_all_green=attempts)}
+
+
+_FAIL_A = "FAILED tests/test_app.py::test_add - assert 1 == 2"
+_FAIL_B = "FAILED tests/test_app.py::test_list - assert [] == [1]"
+_BDD = "BDD criterion AC-1: scenario features/T-001.feature::AC-1 was not executed"
+_OK = GateStatus.PASS
+_RED = GateStatus.FAIL
+
+
+def test_failing_ids_names_pytest_nodes_and_bdd_scenarios() -> None:
+    assert failing_ids([_FAIL_A, "E   assert 1 == 2", _BDD, _FAIL_A]) == (
+        "tests/test_app.py::test_add", "features/T-001.feature::AC-1")
+
+
+def test_the_same_failing_tests_after_a_fix_is_no_progress() -> None:
+    # The output around the failure may differ; the failing set is what counts.
+    state = _state(_gate("build", "t1", 1, _OK), _gate("test", "t1", 2, _RED, _FAIL_A, "x"),
+                   _gate("build", "t2", 3, _OK), _gate("test", "t2", 4, _RED, _FAIL_A, "y"))
+    assert no_fix_progress(state, _CFG, boundary=BUILD_TEST_BOUNDARY)
+
+
+def test_a_changed_failing_set_is_progress() -> None:
+    state = _state(_gate("build", "t1", 1, _OK), _gate("test", "t1", 2, _RED, _FAIL_A, _FAIL_B),
+                   _gate("build", "t2", 3, _OK), _gate("test", "t2", 4, _RED, _FAIL_A))
+    assert not no_fix_progress(state, _CFG, boundary=BUILD_TEST_BOUNDARY)
+
+
+def test_an_error_or_a_fresh_budget_is_never_no_progress() -> None:
+    same = (_gate("build", "t1", 1, _OK), _gate("test", "t1", 2, _RED, _FAIL_A),
+            _gate("build", "t2", 3, _OK))
+    errored = _gate("test", "t2", 4, GateStatus.ERROR, _FAIL_A)
+    assert not no_fix_progress(_state(*same, errored), _CFG, boundary=BUILD_TEST_BOUNDARY)
+    # A resumed run's first re-check (budget reseeded) has had no fix pass yet.
+    failed = _gate("test", "t2", 4, _RED, _FAIL_A)
+    assert not no_fix_progress(_state(*same, failed, attempts=1), _CFG,
+                               boundary=BUILD_TEST_BOUNDARY)
+
+
+def test_the_summary_names_the_failing_gates_and_tests() -> None:
+    state = _state(_gate("build", "t1", 1, _OK), _gate("test", "t1", 2, _RED, _FAIL_A, _BDD))
+    summary = _fix_summary(state, lambda a: None, lambda u: b"", attempt=1)
+    assert summary == (
+        "[fix summary]",
+        "failed gates: test",
+        "failing tests/scenarios: tests/test_app.py::test_add, features/T-001.feature::AC-1",
+        "gate output (tail):",
+    )
+
+
+def test_each_fix_pass_gets_the_failure_and_the_previous_pass_summarized(
+    tmp_path: Path,
+) -> None:
+    rec = _Recorder(writes={
+        "T-001": {"app.py": "def broken(:\n"},
+        "fix-1": {"app.py": "def broken_1(:\n"},
+        "fix-2": {"app.py": "def fixed():\n    return 1\n"},
+    })
+    _out, ran, _ = _wave_run(tmp_path, rec)
+    assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "fixer", "wave_gate",
+                   "engineering"]
+    first = rec.packets["fix-1"].prior_failures
+    assert first[:2] == ("[fix summary]", "failed gates: build")
+    assert first[2].startswith("failing tests/scenarios: none named")
+    assert not any(line.startswith("previous fix pass") for line in first)
+    second = list(rec.packets["fix-2"].prior_failures)
+    assert ("previous fix pass (fix-1) touched app.py, rogue.txt and left the gates above "
+            "failing: try a different approach") in second
+    assert any(line.startswith("previous fix pass reported: the fixer wrote outside")
+               and "rogue.txt" in line for line in second)
+    tail = second.index("gate output (tail):")
+    assert second[tail + 1] == "[build gate FAILED]"
+    assert any("broken_1" in line for line in second[tail:])  # this pass's output
+
+
+def test_a_fix_pass_with_no_progress_halts_the_wave(tmp_path: Path) -> None:
+    rec = _Recorder(writes={"T-001": {"app.py": "def broken(:\n"}})  # the fixer can't fix
+    out, ran, store = _wave_run(tmp_path, rec, max_fix_attempts=4)
+    # Two attempts left, none spent: the same failure ends the wave.
+    assert ran == ["engineering", "wave_gate", "fixer", "wave_gate"]
+    assert rec.calls == ["T-001", "fix-1"]
+    assert {g.status for g in out["gates"]} == {GateStatus.FAIL}
+    assert [t.id for t in pending_wave(out, store.resolve)] == ["T-002"]  # supervisor halts
+    assert any(t.name == NO_FIX_PROGRESS_TRIAGE for t in out["gate_triage"])
+
+
+def test_a_fix_that_changes_nothing_is_no_progress() -> None:
+    # The re-check on the same tree replaces the earlier verdict in state, so only
+    # the check itself (old state + new verdicts) can see the unchanged tree.
+    before = _state(_gate("build", "t1", 1, _OK), _gate("test", "t1", 2, _RED, _FAIL_A),
+                    attempts=1)
+    recheck = {"gates": [_gate("build", "t1", 3, _OK), _gate("test", "t1", 4, _RED, _FAIL_A)]}
+    assert _unchanged_tree_recheck(before, recheck, _CFG, boundary=BUILD_TEST_BOUNDARY)
+    errored = {"gates": [_gate("build", "t1", 3, _OK),
+                         _gate("test", "t1", 4, GateStatus.ERROR, _FAIL_A)]}
+    assert not _unchanged_tree_recheck(before, errored, _CFG, boundary=BUILD_TEST_BOUNDARY)
+    fresh = _state(*before["gates"], attempts=0)  # resumed run: no fix pass yet
+    assert not _unchanged_tree_recheck(fresh, recheck, _CFG, boundary=BUILD_TEST_BOUNDARY)
+    moved = {"gates": [_gate("build", "t2", 3, _OK), _gate("test", "t2", 4, _RED, _FAIL_A)]}
+    assert not _unchanged_tree_recheck(before, moved, _CFG, boundary=BUILD_TEST_BOUNDARY)
+
+
+def test_an_empty_fix_diff_halts_the_wave(tmp_path: Path) -> None:
+    broken = {"app.py": "def broken(:\n"}
+    rec = _Recorder(writes={"T-001": broken, "fix-1": broken})  # fixer changes nothing
+    # T-001 owns rogue.txt too, so the recorder's out-of-scope write is no change.
+    tickets = [_ticket("T-001", 0, files=("app.py", "rogue.txt")),
+               _ticket("T-002", 1, files=("app.py",), deps=("T-001",))]
+    out, ran, _ = _wave_run(tmp_path, rec, max_fix_attempts=4, tickets=tickets)
+    assert ran == ["engineering", "wave_gate", "fixer", "wave_gate"]
+    assert len({g.run_against for g in out["gates"]}) == 1
+    assert {g.status for g in out["gates"]} == {GateStatus.FAIL}
+    assert any(t.name == NO_FIX_PROGRESS_TRIAGE for t in out["gate_triage"])
+
+
+def test_raw_findings_compare_without_addresses_or_timings() -> None:
+    first = _state(_gate("build", "t1", 1, _RED, "<Obj at 0x7f3a1c> broke in 1.23s"),
+                   attempts=2)
+    second = _gate("build", "t2", 2, _RED, "<Obj at 0x7f9e00> broke in 0.98s")
+    assert no_fix_progress(_state(*first["gates"], second), _CFG, boundary=BUILD_BOUNDARY)
+
+
+def test_the_failing_test_summary_survives_the_findings_cap() -> None:
+    detail = "\n".join(f"E   assert {i} == {i + 1}" for i in range(200))
+    tail = "\n".join(f"FAILED tests/test_app.py::test_{i} - assert" for i in range(5))
+    findings = failure_findings(f"{detail}\n=== short test summary info ===\n{tail}\n")
+    assert len(findings) == 50
+    assert findings[0] == "E   assert 0 == 1"
+    assert failing_ids(findings) == tuple(f"tests/test_app.py::test_{i}" for i in range(5))

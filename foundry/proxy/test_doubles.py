@@ -61,7 +61,7 @@ status literal as JSON.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -101,13 +101,19 @@ DEFAULT_USAGE: dict[str, int] = {
 Verdict = Literal["approve", "request-changes"]
 
 
-def verdict_json(status: Verdict = "approve", findings: Sequence[str] = ()) -> str:
+def verdict_json(
+    status: Verdict = "approve", findings: Sequence[str | Mapping[str, str]] = ()
+) -> str:
     """Serialize a grammar-conforming verdict payload (the constrained channel).
 
     The shape matches ``VERDICT_SCHEMA``: a ``status`` in the verdict grammar
     plus a ``findings`` array. The proxy ``json.loads`` this off the verdict
-    channel, so it MUST be valid JSON.
+    channel, so it MUST be valid JSON. A bare ``request-changes`` gets one
+    test-backed finding, so a scripted rejection still blocks.
     """
+    if status == "request-changes" and not findings:
+        findings = ({"finding": "scripted rejection", "failing_check": "scripted",
+                     "command": "", "expected": "", "actual": ""},)
     return json.dumps({"status": status, "findings": list(findings)})
 
 

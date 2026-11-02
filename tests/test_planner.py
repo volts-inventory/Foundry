@@ -1058,10 +1058,19 @@ def test_cross_epic_links_never_count_as_test_coverage() -> None:
     tickets = {t.id: t for t in _bodies(cas, writes, "ticket")}
     assert tickets["E2-T01"].depends_on == ("E1-T02",)  # ordered after E1 ...
     assert tickets["E2-T01"].scenario_ids == ()  # ... but covers none of its scenarios
-    assert "Ticket E1-T02 has scenarios but no test ticket depends on it." in (
+    assert "Ticket E1-T02 has scenarios but neither a test ticket nor a test file of its own." in (
         writes["agent_journal"][0].concerns
     )
 
+
+
+def test_a_feature_ticket_with_its_own_test_file_needs_no_test_ticket() -> None:
+    plan, replies = multi_epic_plan()
+    replies["E1"]["tickets"] = replies["E1"]["tickets"][:2]  # no test ticket ...
+    replies["E1"]["tickets"][1]["files"].append("tests/test_t02.py")  # ... but its own test file
+    cas = ArtifactStore()
+    _, writes = _run_epics(plan, replies, cas)
+    assert not any("E1-T02 has scenarios" in c for c in writes["agent_journal"][0].concerns)
 
 def test_epics_are_recorded_and_read_back_whole_for_a_targeted_replan() -> None:
     plan, replies = multi_epic_plan()

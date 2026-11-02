@@ -347,23 +347,28 @@ def _host_source_root() -> str | None:
 def failure_findings(stdout: str, *, limit: int = 50) -> tuple[str, ...]:
     """Human-readable failure lines from pytest output — the failing tests + the
     assertion (expected vs got) — so the fix loop can target the SPECIFIC failure
-    instead of re-rolling blind. Bounded; lines are truncated. (Zone A: pure parse.)"""
+    instead of re-rolling blind. Bounded; lines are truncated. (Zone A: pure parse.)
+
+    The ``FAILED``/``ERROR`` summary lines come last but name every failing test, so
+    they keep their room under ``limit``; the detail lines fill what is left."""
     keep: list[str] = []
+    summary: list[str] = []
     for raw in stdout.splitlines():
         s = raw.rstrip()
         st = s.strip()
         if not st:
             continue
-        if (
+        if st.startswith(("FAILED ", "ERROR ")):
+            summary.append(s[:300])
+        elif (
             st.startswith(("E ", "E\t", ">", "FAILED", "ERROR", "_____"))
             or "assert" in st
             or "Error" in st
             or st.startswith("def test")
         ):
             keep.append(s[:300])
-        if len(keep) >= limit:
-            break
-    return tuple(keep)
+    summary = summary[:limit]
+    return (*keep[: limit - len(summary)], *summary)
 
 
 def parse_pytest_summary(stdout: str) -> dict[str, int]:

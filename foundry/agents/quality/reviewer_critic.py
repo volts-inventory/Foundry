@@ -145,7 +145,10 @@ _SOP = (
     "loop. Review the diff for correctness, design adherence, readability, and "
     "scrutinize the TEST diffs for weakened assertions. Return a verdict: "
     "approve only if the change is correct and the tests still bind the "
-    "criteria; otherwise request-changes with specific, actionable findings."
+    "criteria; otherwise request-changes with specific, actionable findings. "
+    "A finding blocks only if it cites evidence — a failing gate or test id in "
+    "failing_check, or a reproducible command with its expected and actual "
+    "result; any other finding is recorded as advisory and does not block."
 )
 
 

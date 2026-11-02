@@ -52,3 +52,7 @@ def _in_process_test_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     # The planner's plan-time contract compile shells out to mypy / tsc (seconds per
     # plan); a test exercising it opts back in with FOUNDRY_PLAN_COMPILE=1.
     monkeypatch.setenv("FOUNDRY_PLAN_COMPILE", "0")
+    # Same .env leak: FOUNDRY_STATE_DIR roots run() in the developer's real state
+    # dir, where every test's thread-id "cli-run" shares one model-call replay cache
+    # — so a later test replays an earlier test's responses instead of calling.
+    monkeypatch.delenv("FOUNDRY_STATE_DIR", raising=False)

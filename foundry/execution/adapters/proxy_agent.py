@@ -24,7 +24,12 @@ tests), mirroring raw_react's ``complete_fn`` discipline.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import re
+import sys
+import warnings
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
@@ -54,7 +59,9 @@ _EPILOGUE = (
     "You are an agentic engineer working in a disposable sandbox worktree. Each "
     "turn, reply with EXACTLY ONE action as JSON conforming to the given schema:\n"
     '  {"action": "write_file", "path": "<rel>", "content": "<full file>"}\n'
-    '  {"action": "read_file", "path": "<rel>"}\n'
+    '  {"action": "read_file", "path": "<rel>", "start_line": 1, "end_line": 200}'
+    "   # line range optional (1-based, inclusive)\n"
+    '  {"action": "search", "pattern": "<regex>", "path": "<optional rel dir>"}\n'
     '  {"action": "delete_file", "path": "<rel>"}\n'
     '  {"action": "run", "cmd": "<shell command>"}   # build/test inside the sandbox\n'
     '  {"action": "done", "summary": "<what you built>", "triage": ["<risk>", ...]}\n'
@@ -67,9 +74,12 @@ ACTION_SCHEMA: dict[str, Any] = {
     "properties": {
         "action": {
             "type": "string",
-            "enum": ["write_file", "read_file", "delete_file", "run", "done"],
+            "enum": ["write_file", "read_file", "delete_file", "run", "search", "done"],
         },
         "path": {"type": "string"},
+        "start_line": {"type": "integer", "minimum": 1},
+        "end_line": {"type": "integer", "minimum": 1},
+        "pattern": {"type": "string"},
         "content": {"type": "string"},
         "cmd": {"type": "string"},
         "summary": {"type": "string"},
@@ -80,6 +90,23 @@ ACTION_SCHEMA: dict[str, Any] = {
 }
 
 _OBS_CAP = 4_000  # chars of run/read output fed back per turn (context discipline)
+_OBS_KEEP = 3  # observations kept verbatim after an elision pass (arXiv 2508.21433)
+_OBS_MAX = 6  # verbatim observations allowed to pile up before the next pass
+_REPEAT_WARN = 3
+_REPEAT_STOP = 5
+_SEARCH_MAX_HITS = 50
+_SEARCH_MAX_FILE = 1_000_000
+# Lines this long are skipped: the model's regex runs in-process, and catastrophic
+# backtracking cost grows with line length.
+_SEARCH_MAX_LINE = 2_000
+_SEARCH_SKIP_DIRS = frozenset(
+    {".git", ".venv", "venv", "node_modules", "__pycache__", "dist", "build"}
+)
+# Dirs whose churn is a by-product of re-running the same command (test/lint
+# caches, bytecode) — a change there must not reset the repeat detector.
+_TREE_SKIP_DIRS = frozenset(
+    {".git", "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox"}
+)
 
 
 def _contained(worktree: Path, rel: str) -> Path:
@@ -90,7 +117,7 @@ def _contained(worktree: Path, rel: str) -> Path:
     if not rel or pure.is_absolute() or ".." in pure.parts:
         raise ValueError(f"path {rel!r} escapes the worktree")
     target = (root / pure).resolve()
-    if not str(target).startswith(str(root)):
+    if not target.is_relative_to(root):  # not a string prefix: /wt2 is not under /wt
         raise ValueError(f"path {rel!r} escapes the worktree")
     return target
 
@@ -135,6 +162,11 @@ class ProxyAgentAdapter:
         summary = ""
         triage_lines: list[str] = []
         turns = 0
+        # (message index, action summary) of each still-verbatim observation.
+        verbatim: list[tuple[int, str]] = []
+        # action fingerprint -> (consecutive-unchanged count, tree state after it ran)
+        repeats: dict[tuple[str, ...], tuple[int, str]] = {}
+        tree = _tree_state(worktree)
         for _ in range(max(1, packet.turn_budget)):
             turns += 1
             text, parsed = self._complete(messages, ACTION_SCHEMA)
@@ -150,11 +182,43 @@ class ProxyAgentAdapter:
                 summary = str(act.get("summary", ""))
                 triage_lines = [str(t) for t in act.get("triage", []) if str(t).strip()]
                 break
+            fp = _fingerprint(act)
+            count, tree_then = repeats.get(fp, (0, tree))
+            # Any tree change since the last identical action (a write, sed -i, a
+            # formatter, pip install) makes re-running it legitimate again.
+            count = count + 1 if tree_then == tree else 1
+            if count >= _REPEAT_STOP:
+                triage_lines.append(
+                    f"stopped early: identical action repeated {_REPEAT_STOP} times "
+                    f"({_summarize(act)}) — partial work recorded"
+                )
+                break
             try:
                 observation = self._execute(act, sandbox, worktree)
             except (ValueError, OSError) as exc:
                 observation = f"ERROR: {exc}"
+            tree = _tree_state(worktree)
+            repeats[fp] = (count, tree)
+            if count >= _REPEAT_WARN:
+                observation = (
+                    f"WARNING: you have issued this exact action {count} times in a row "
+                    "with no change to the worktree in between. Try something different "
+                    "or declare done.\n" + observation
+                )
             messages.append({"role": "user", "content": f"OBSERVATION:\n{observation}"})
+            verbatim.append((len(messages) - 1, _summarize(act)))
+            if len(verbatim) > _OBS_MAX:
+                # Elide in batches, not one per turn: every rewrite invalidates the
+                # prompt-prefix cache from that message on, so batching moves the
+                # prefix once every 4 turns (3 kept + 4 new).
+                # A placeholder is never rewritten again.
+                for idx, what in verbatim[:-_OBS_KEEP]:
+                    messages[idx] = {
+                        "role": "user",
+                        "content": f"OBSERVATION: [output of {what} elided — re-run or "
+                        "re-read if needed]",
+                    }
+                verbatim = verbatim[-_OBS_KEEP:]
         else:
             triage_lines.append("turn budget exhausted before 'done' — partial work recorded")
 
@@ -168,7 +232,9 @@ class ProxyAgentAdapter:
         )
 
         notes = triage_lines or [summary.strip()[:500] or "run completed with no summary"]
-        notes += [f"non-UTF-8 (binary) file skipped from snapshot slice: {p}" for p in skipped_binary]
+        notes += [
+            f"non-UTF-8 (binary) file skipped from snapshot slice: {p}" for p in skipped_binary
+        ]
         run_against = f"task/{packet.task.get('id', 'unknown')}"
         triage = tuple(
             GateTriage(
@@ -193,8 +259,12 @@ class ProxyAgentAdapter:
         if action == "write_file":
             target = _contained(worktree, str(act.get("path", "")))
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(str(act.get("content", "")), encoding="utf-8")
-            return f"wrote {act.get('path')} ({len(str(act.get('content', '')))} chars)"
+            content = str(act.get("content", ""))
+            target.write_text(content, encoding="utf-8")
+            obs = f"wrote {act.get('path')} ({len(content)} chars)"
+            if target.suffix == ".py":
+                obs += _lint_python(content, str(act.get("path")))
+            return obs
         if action == "delete_file":
             target = _contained(worktree, str(act.get("path", "")))
             if target.is_file():
@@ -205,16 +275,146 @@ class ProxyAgentAdapter:
             target = _contained(worktree, str(act.get("path", "")))
             if not target.is_file():
                 return f"{act.get('path')} does not exist"
-            return target.read_text(encoding="utf-8", errors="replace")[:_OBS_CAP]
+            return _read_range(
+                str(act.get("path")),
+                target.read_text(encoding="utf-8", errors="replace"),
+                act.get("start_line"),
+                act.get("end_line"),
+            )
+        if action == "search":
+            return _search(worktree, str(act.get("pattern", "")), str(act.get("path") or ""))
         if action == "run":
             cmd = str(act.get("cmd", "")).strip()
             if not cmd:
                 return "ERROR: empty cmd"
             result = sandbox.run(cmd, timeout_s=self._run_timeout_s)
-            tail = (result.stdout + "\n" + result.stderr)[-_OBS_CAP:]
-            status = "TIMED OUT (hard-killed)" if result.timed_out else f"exit {result.returncode}"
+            out = result.stdout + "\n" + result.stderr
+            tail = out[-_OBS_CAP:]
+            if result.timed_out:
+                status = "TIMED OUT (hard-killed)"
+            elif result.returncode != 0:
+                status = f"FAILED: exit {result.returncode}"
+            else:
+                status = "exit 0"
+            if len(out) > _OBS_CAP:
+                status += f" (output truncated; last {_OBS_CAP} chars shown)"
             return f"{status}\n{tail}"
         return f"ERROR: unknown action {action!r}"
+
+
+def _summarize(act: dict[str, Any]) -> str:
+    action = str(act.get("action"))
+    if action == "run":
+        return f"run {str(act.get('cmd', ''))[:80]!r}"
+    if action == "search":
+        return f"search {str(act.get('pattern', ''))[:80]!r} in {act.get('path') or '.'}"
+    if action == "read_file" and (act.get("start_line") or act.get("end_line")):
+        lo, hi = act.get("start_line") or 1, act.get("end_line") or "end"
+        return f"read_file {act.get('path')} lines {lo}-{hi}"
+    return f"{action} {act.get('path')}"
+
+
+def _fingerprint(act: dict[str, Any]) -> tuple[str, ...]:
+    content = hashlib.sha256(str(act.get("content", "")).encode("utf-8")).hexdigest()
+    keys = ("action", "path", "cmd", "pattern", "start_line", "end_line")
+    return (*(str(act.get(k)) for k in keys), content)
+
+
+def _tree_state(worktree: Path) -> str:
+    """Cheap worktree fingerprint: (path, size, mtime) of every file, no reads."""
+    h = hashlib.sha256()
+    for dirpath, dirnames, filenames in os.walk(worktree):
+        dirnames[:] = sorted(d for d in dirnames if d not in _TREE_SKIP_DIRS)
+        for name in sorted(filenames):
+            path = os.path.join(dirpath, name)
+            try:
+                st = os.lstat(path)
+            except OSError:
+                continue
+            h.update(f"{path}\0{st.st_size}\0{st.st_mtime_ns}\n".encode())
+    return h.hexdigest()
+
+
+def _lint_python(content: str, rel: str) -> str:
+    """Best-effort compile check; never raises (the host Python may not match the
+    target interpreter, so it is reported as a likely error for the model to judge)."""
+    host = f"{sys.version_info.major}.{sys.version_info.minor}"
+    note = f"(host Python {host} compile check; the project's Python may differ)"
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            compile(content, rel, "exec")
+    except SyntaxError as exc:
+        return f"\nLIKELY SYNTAX ERROR line {exc.lineno}: {exc.msg} {note}"
+    except Exception as exc:
+        return f"\nLIKELY SYNTAX ERROR: compile failed with {type(exc).__name__}: {exc} {note}"
+    return ""
+
+
+def _read_range(rel: str, text: str, start_line: Any, end_line: Any) -> str:
+    lines = text.splitlines(keepends=True)
+    total = len(lines)
+    start = max(1, int(start_line or 1))
+    end = min(total, int(end_line or total))
+    if start > total:
+        return f"{rel} has only {total} lines"
+    out: list[str] = []
+    size = 0
+    last = start - 1
+    for n in range(start, end + 1):
+        line = lines[n - 1]
+        if size + len(line) > _OBS_CAP:
+            if not out:  # a single over-long line: show what fits
+                out.append(line[:_OBS_CAP])
+                last = n
+            break
+        out.append(line)
+        size += len(line)
+        last = n
+    header = f"{rel} (lines {start}-{last} of {total})"
+    if last < end:
+        header += f" — truncated at line {last} of {total}; read_file with start_line={last + 1}"
+    return header + "\n" + "".join(out)
+
+
+def _search(worktree: Path, pattern: str, rel: str) -> str:
+    """Pure-Python grep over the worktree (no shell); skips VCS/env/build dirs,
+    binaries, files over 1 MB, and over-long lines."""
+    if not pattern:
+        return "ERROR: empty pattern"
+    try:
+        rx = re.compile(pattern)
+    except re.error as exc:
+        return f"ERROR: bad regex: {exc}"
+    root = worktree.resolve()
+    base = _contained(worktree, rel) if rel else root
+    if not base.is_dir():
+        return f"{rel} is not a directory"
+    hits: list[str] = []
+    size = 0
+    for dirpath, dirnames, filenames in os.walk(base):
+        dirnames[:] = sorted(d for d in dirnames if d not in _SEARCH_SKIP_DIRS)
+        for name in sorted(filenames):
+            path = Path(dirpath, name)
+            try:
+                if not path.resolve().is_relative_to(root):
+                    continue  # symlink pointing out of the cage
+                if path.stat().st_size > _SEARCH_MAX_FILE:
+                    continue
+                data = path.read_bytes()
+            except OSError:
+                continue
+            if b"\0" in data[:8192]:
+                continue
+            shown = path.relative_to(root).as_posix()
+            for n, line in enumerate(data.decode("utf-8", errors="replace").splitlines(), 1):
+                if len(line) <= _SEARCH_MAX_LINE and rx.search(line):
+                    hit = f"{shown}:{n}: {line.strip()[:200]}"
+                    size += len(hit) + 1
+                    if len(hits) >= _SEARCH_MAX_HITS or size > _OBS_CAP:
+                        return "\n".join(hits) + f"\n[results capped at {len(hits)} matches]"
+                    hits.append(hit)
+    return "\n".join(hits) if hits else f"no matches for {pattern!r}"
 
 
 def _lenient_action(text: str) -> dict[str, Any] | None:

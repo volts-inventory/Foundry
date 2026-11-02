@@ -575,7 +575,10 @@ def test_a_failing_intermediate_build_runs_the_fixer_before_the_next_wave(
 
 
 def test_a_spent_fix_budget_halts_the_waves_in_order(tmp_path: Path) -> None:
-    rec = _Recorder(writes={"T-001": {"app.py": "def broken(:\n"}})  # the fixer can't fix
+    # Each fix changes the failure (progress) without clearing it.
+    rec = _Recorder(writes={"T-001": {"app.py": "def broken(:\n"},
+                            "fix-1": {"app.py": "def broken_1(:\n"},
+                            "fix-2": {"app.py": "def broken_2(:\n"}})
     out, ran, store = _wave_run(tmp_path, rec, max_fix_attempts=3)
     assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "fixer", "wave_gate"]
     assert rec.calls == ["T-001", "fix-1", "fix-2"]  # wave 2 never started
@@ -959,10 +962,12 @@ def test_cli_wires_tier_models_and_proxy_closures_use_the_packet_tier(
     tmp_path: Path,
 ) -> None:
     tiers: list[str] = []
+    systems: list[str] = []
 
     class _Proxy:
-        def complete(self, _node: str, tier: str, *_a: Any, **_k: Any) -> Any:
+        def complete(self, _node: str, tier: str, system: str, *_a: Any, **_k: Any) -> Any:
             tiers.append(tier)
+            systems.append(system)
             return type("R", (), {"text": "```diff\n```\n```triage\nok\n```",
                                   "parsed": {"action": "finish", "summary": "ok"}})()
 
@@ -980,6 +985,8 @@ def test_cli_wires_tier_models_and_proxy_closures_use_the_packet_tier(
     finally:
         sandbox.destroy()
     assert tiers == ["T3", "T1", "T2"]
+    assert "diff" in systems[0] and "diff" not in systems[2]
+    assert "JSON action" in systems[2]
 
 
 # ---- flags --------------------------------------------------------------------

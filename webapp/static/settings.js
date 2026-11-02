@@ -122,7 +122,7 @@ function buildPanel(){
         h("p", {class:"cp-note", id:"local-hint"}),
         h("div", {class:"field"},
           h("label", {for:"local-url", text:"Server URL "},
-            h("span", {class:"hint", text:"— OpenAI-compatible, e.g. LM Studio"})),
+            h("span", {class:"hint", text:"— OpenAI-compatible, e.g. Ollama"})),
           h("input", {id:"local-url", type:"text", spellcheck:"false", autocomplete:"off",
             inputmode:"url", oninput: onLocalEdit})),
         h("div", {class:"field"},

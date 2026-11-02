@@ -1,9 +1,9 @@
 """Pure mapping: real factory telemetry -> game events for the workshop frontend.
 
-These functions turn the REAL checkpoint inspection payload (artifacts, attested
-gate verdicts, the advisory agent journal) and the final ``RunResult`` into a
-stream of small JSON game events the canvas renders. No I/O, no sleeps, no model
-calls — deterministic and unit-testable. The server (server.py) paces them.
+These functions turn the REAL per-node telemetry (each finished node's artifacts,
+org chart and agent journal) and the final ``RunResult`` into a stream of small
+JSON game events the canvas renders. No I/O, no sleeps, no model calls —
+deterministic and unit-testable.
 
 The factory is the source of truth; this module is a costume. Nothing here can
 influence a build — it only describes what already happened.
@@ -11,69 +11,85 @@ influence a build — it only describes what already happened.
 
 from __future__ import annotations
 
+import json
 from collections import Counter
+from collections.abc import Mapping
 from typing import Any
 
 # Workshop rooms, left -> right (the agent walks the floor as the build advances).
+# Engineering is virtual here: its three lanes (frontend/backend/data) are rooms of
+# their own on the floor. The cast is Planner / Engineers / Reviewer; the gate and
+# vault are infrastructure.
 ROOMS: tuple[str, ...] = (
-    "product",
-    "architecture",
+    "plan",
     "engineering",
-    "qa",
-    "security",
+    "review",
     "gate",
     "vault",
 )
 
-# Which room + sprite a journal node_id belongs to.
+# Room ids from OLD builds' replayed telemetry -> the current room.
+LEGACY_ROOM: dict[str, str] = {
+    "product": "plan",
+    "architecture": "plan",
+    "qa": "review",
+    "security": "review",
+}
+
+# Which room + sprite a journal node_id belongs to. Labels are the floor's sprite keys.
+# The planner / reviewer are single nodes; the old per-role ids stay mapped so replayed
+# telemetry still seats someone (product + architecture -> Planner, qa -> Reviewer, each
+# lane's lead -> that lane's Engineer).
 AGENT_BY_NODE: dict[str, tuple[str, str]] = {
-    "stakeholder_proxy": ("Stakeholder Proxy", "product"),
-    "product_manager": ("Product Manager", "product"),
-    "criteria_completeness_critic": ("Criteria Critic", "product"),
-    "eng_program_mgr": ("Program Manager", "product"),
-    "principal_architect": ("Principal Architect", "architecture"),
-    # Implementation fans out into a LEAD (decompose) + ENGINEER (build) node per
-    # discipline lane, so each lights its own room + role. Legacy single-node ids kept
-    # so an OLD build's replayed telemetry still seats someone.
+    "planner": ("Planner", "plan"),
+    "stakeholder_proxy": ("Planner", "plan"),
+    "product_manager": ("Planner", "plan"),
+    "criteria_completeness_critic": ("Planner", "plan"),
+    "eng_program_mgr": ("Planner", "plan"),
+    "principal_architect": ("Planner", "plan"),
+    # Legacy single-node ids kept so an OLD build's replayed telemetry still seats someone.
     "senior_engineer": ("Senior Engineer", "engineering"),
     "junior_engineer": ("Junior Engineer", "engineering"),
-    "frontend_lead": ("Frontend Lead", "frontend"),
+    "frontend_lead": ("Frontend Engineer", "frontend"),
     "frontend_engineer": ("Frontend Engineer", "frontend"),
-    "backend_lead": ("Backend Lead", "backend"),
+    "backend_lead": ("Backend Engineer", "backend"),
     "backend_engineer": ("Backend Engineer", "backend"),
-    "data_lead": ("Data Lead", "data"),
+    "data_lead": ("Data Engineer", "data"),
     "data_engineer": ("Data Engineer", "data"),
-    "qa_engineer": ("QA Engineer", "qa"),
-    "sdet": ("SDET", "qa"),
-    "reviewer_critic": ("Reviewer", "qa"),
-    "appsec_engineer": ("AppSec Engineer", "security"),
-    "audit_compliance": ("Audit & Compliance", "security"),
-    "supply_chain_reviewer": ("Supply-chain Reviewer", "security"),
+    "fixer": ("Engineer", "engineering"),
+    "reviewer": ("Reviewer", "review"),
+    "qa_engineer": ("Reviewer", "review"),
+    "sdet": ("Reviewer", "review"),
+    # The removed assurance crew: old ids seat the Reviewer on replay.
+    "reviewer_critic": ("Reviewer", "review"),
+    "appsec_engineer": ("Reviewer", "review"),
+    "audit_compliance": ("Reviewer", "review"),
+    "supply_chain_reviewer": ("Reviewer", "review"),
 }
 
 # Which agent/room PRODUCED each artifact kind (so a new artifact lights up a desk).
 ARTIFACT_ORIGIN: dict[str, tuple[str, str]] = {
-    "intent_brief": ("Stakeholder Proxy", "product"),
-    "prd": ("Product Manager", "product"),
-    "acceptance_criterion": ("Product Manager", "product"),
-    "criteria_findings": ("Criteria Critic", "product"),
-    "sprint_plan": ("Program Manager", "product"),
-    "system_design": ("Principal Architect", "architecture"),
-    "adr": ("Principal Architect", "architecture"),
-    "interface_contract": ("Principal Architect", "architecture"),
-    "ownership_map": ("Principal Architect", "architecture"),
+    "intent_brief": ("Planner", "plan"),
+    "prd": ("Planner", "plan"),
+    "acceptance_criterion": ("Planner", "plan"),
+    "criteria_findings": ("Planner", "plan"),
+    "sprint_plan": ("Planner", "plan"),
+    "system_design": ("Planner", "plan"),
+    "adr": ("Planner", "plan"),
+    "interface_contract": ("Planner", "plan"),
+    "ownership_map": ("Planner", "plan"),
+    "ticket": ("Planner", "plan"),
+    "epic": ("Planner", "plan"),
+    "scope_tier": ("Planner", "plan"),
     "feature_diff": ("Junior Engineer", "engineering"),
-    "test_plan": ("QA Engineer", "qa"),
-    "oracle_binding": ("QA Engineer", "qa"),
-    "test_report": ("QA Engineer", "qa"),
-    "e2e_report": ("SDET", "qa"),
-    "threat_model": ("AppSec Engineer", "security"),
-    "audit_finding": ("Audit & Compliance", "security"),
-    "supply_chain_report": ("Supply-chain Reviewer", "security"),
-    "runbook": ("Technical Writer", "qa"),
-    "known_issues": ("Technical Writer", "qa"),
-    "upgrade_guide": ("Technical Writer", "qa"),
-    "perf_cost_report": ("Technical Writer", "qa"),
+    "test_plan": ("Reviewer", "review"),
+    "oracle_binding": ("Reviewer", "review"),
+    "test_report": ("Reviewer", "review"),
+    "e2e_report": ("Reviewer", "review"),
+    # Assurance artifacts from old builds' replayed telemetry.
+    "threat_model": ("Reviewer", "review"),
+    "audit_finding": ("Reviewer", "review"),
+    "supply_chain_report": ("Reviewer", "review"),
 }
 
 # A friendly label per artifact kind (shown as a little pickup icon + quest line).
@@ -87,6 +103,8 @@ ARTIFACT_LABEL: dict[str, str] = {
     "adr": "ADR",
     "interface_contract": "Interface Contract",
     "ownership_map": "Ownership Map",
+    "ticket": "Ticket",
+    "epic": "Epic",
     "feature_diff": "Feature Diff (code!)",
     "test_plan": "Test Plan",
     "oracle_binding": "Oracle",
@@ -95,26 +113,17 @@ ARTIFACT_LABEL: dict[str, str] = {
     "threat_model": "Threat Model",
     "audit_finding": "Audit Finding",
     "supply_chain_report": "Supply-chain Report",
-    "runbook": "Runbook",
-    "known_issues": "Known Issues",
-    "upgrade_guide": "Upgrade Guide",
-    "perf_cost_report": "Perf/Cost Report",
 }
 
-_BOUNDARY_ROOM: dict[str, str] = {
-    "product": "product",
-    "design": "architecture",
-    "release": "qa",
-}
 # Subgraph SCOPE -> room, for a node inside a stage that isn't a named agent. Without
-# the implementation/quality/assurance entries those steps resolved to no room at all
+# the implementation/quality entries those steps resolved to no room at all
 # and vanished from the floor AND the log.
 _SCOPE_ROOM: dict[str, str] = {
-    **_BOUNDARY_ROOM,
-    "architecture": "architecture",
+    "architecture": "plan",
+    "planning": "plan",
     "implementation": "engineering",
-    "quality": "qa",
-    "assurance": "security",
+    "quality": "review",
+    "assurance": "review",  # old builds' replayed telemetry
 }
 
 
@@ -126,7 +135,7 @@ def _room_for_scope(scope: str) -> str:
     has to be matched per segment (innermost stage first), never as a whole string.
     """
     for seg in reversed(scope.split(":")):
-        room = _SCOPE_ROOM.get(seg) or (seg if seg in ROOMS else "")
+        room = _SCOPE_ROOM.get(seg) or LEGACY_ROOM.get(seg) or (seg if seg in ROOMS else "")
         if room:
             return room
     return ""
@@ -140,77 +149,34 @@ def _room_for_scope(scope: str) -> str:
 # ANOTHER event already reports the outcome — the gate runners emit their own
 # pass/fail verdict, so announcing the finish twice would just be noise.
 _INFRA_NODE: dict[str, tuple[str, str, str | None]] = {
-    "triage": ("product", "sorting the request into a build plan", "build plan ready"),
-    # gate runners (top-level + inside the assurance/quality subgraphs)
+    "triage": ("plan", "sorting the request into a build plan", "build plan ready"),
+    # gate runners
     "spec_gate": ("gate", "running the SPEC gate", None),
     "build_gate": ("gate", "running the BUILD gate", None),
     "test_gate": ("gate", "running the TEST gate", None),
     "smoke_gate": ("gate", "running the SMOKE gate", None),
     "build_test_gate": ("gate", "running the BUILD / TEST gates", None),
-    "assurance_gate": ("gate", "running the ASSURANCE gates", None),
     "review": ("gate", "running the REVIEW gate", None),
-    "security_gate": ("gate", "running the SECURITY gate", None),
-    "audit_gate": ("gate", "running the AUDIT gate", None),
-    "supply_chain_gate": ("gate", "running the SUPPLY-CHAIN gate", None),
     # fix-forward retries: the longest silences in a real build — each is a full
     # agentic pass over the failing tree
-    "spec_fix": ("product", "fix-forward — reworking the spec after a gate failure",
+    "spec_fix": ("plan", "fix-forward — reworking the spec after a gate failure",
                  "spec rework finished"),
     "build_test_fix": ("engineering", "fix-forward — rebuilding after a gate failure",
                        "rebuild finished"),
-    "assurance_fix": ("engineering", "fix-forward — clearing the assurance findings",
-                      "assurance fixes finished"),
-    # the doc pass + the evidence packs behind each sign-off
-    "docs": ("qa", "writing the runbook & release docs", "docs written"),
-    "design_sign_off": ("gate", "assembling the design evidence", None),
-    "release_sign_off": ("gate", "assembling the release evidence", None),
 }
 # Conditional-architecture agents that have no sprite on the floor — they still get a
 # step line so the log doesn't skip them. (agent name, room, running, done)
 _INFRA_NODE.update({
-    "domain_specialist": ("architecture", "domain specialist reviewing the design",
+    "domain_specialist": ("plan", "domain specialist reviewing the design",
                           "domain review finished"),
-    "ux_design": ("architecture", "UX pass over the interface", "UX pass finished"),
+    "ux_design": ("plan", "UX pass over the interface", "UX pass finished"),
 })
-_BOUNDARY_TITLE: dict[str, str] = {
-    "product": "Product & Requirements",
-    "design": "Architecture & Design",
-    "release": "Build, Test & Review",
+# A supervisor phase node STARTING opens a new stage on the floor: (room, banner).
+STAGE_FOR_NODE: dict[str, tuple[str, str]] = {
+    "planner": ("plan", "Product & Design"),
+    "implementation": ("engineering", "Engineering"),
+    "quality": ("review", "Test & Review"),
 }
-
-# What each button at a checkpoint actually DOES, per boundary — the modal prints
-# these under the buttons so the choice is not guessed from a verb. APPROVE names
-# the work it unblocks (never "ships it": approve can only let the build REACH the
-# gates); REQUEST CHANGES names the rework pass it costs; REJECT is terminal
-# everywhere. An unknown boundary falls back to generic-but-true copy.
-_BOUNDARY_NEXT: dict[str, str] = {
-    "product": "architecture & design starts",
-    "design": "engineering starts building",
-    "release": "the signed release gates run",
-}
-_BOUNDARY_REWORK: dict[str, str] = {
-    "product": "another spec pass",
-    "design": "another design pass",
-    "release": "a fix-forward rebuild",
-}
-# The autopilot PROPOSAL pause is not a stage boundary — it decides whether a whole
-# NEXT release gets built, so all three buttons mean something different there.
-_PROPOSAL_ACTIONS: dict[str, str] = {
-    "approve": "builds the proposal as the next release",
-    "changes": "builds YOUR edited request instead",
-    "reject": "stops autopilot — the floor stays where it is",
-}
-
-
-def checkpoint_actions(boundary: str) -> dict[str, str]:
-    """Per-button consequence copy for the checkpoint dialog (pure, display-only)."""
-    if boundary == "autopilot_proposal":
-        return dict(_PROPOSAL_ACTIONS)
-    return {
-        "approve": _BOUNDARY_NEXT.get(boundary, "the build continues"),
-        "changes": _BOUNDARY_REWORK.get(boundary, "another pass") + " — costs a full rerun",
-        "reject": "stops the build — nothing ships",
-    }
 
 
 def _origin(kind: str, produced_by: str) -> tuple[str, str]:
@@ -225,6 +191,7 @@ def _origin(kind: str, produced_by: str) -> tuple[str, str]:
 # A short, human "what this node just did" line for the quest log (task completion).
 # Keyed by node id; falls back to the agent name when a node isn't listed here.
 _NODE_SUMMARY: dict[str, str] = {
+    "planner": "wrote the PRD, acceptance criteria, design & sprint plan",
     "stakeholder_proxy": "clarified the intent brief",
     "product_manager": "wrote the PRD & acceptance criteria",
     "criteria_completeness_critic": "critiqued the acceptance criteria",
@@ -232,18 +199,17 @@ _NODE_SUMMARY: dict[str, str] = {
     "principal_architect": "produced the system design & interface contracts",
     "senior_engineer": "decomposed the design into ownership-ordered tasks",
     "junior_engineer": "built the feature diffs (code) across the task set",
-    "frontend_lead": "decomposed the frontend work into tasks",
+    "frontend_lead": "lined up the frontend work",
     "frontend_engineer": "built the frontend feature diffs (code)",
-    "backend_lead": "decomposed the backend work into tasks",
+    "backend_lead": "lined up the backend work",
     "backend_engineer": "built the backend feature diffs (code)",
-    "data_lead": "decomposed the data-layer work into tasks",
+    "data_lead": "lined up the data-layer work",
     "data_engineer": "built the data-layer feature diffs (code)",
+    "fixer": "repaired the failing gates",
+    "reviewer": "reviewed the change and ran the test plan",
     "qa_engineer": "ran the test plan",
     "sdet": "ran the end-to-end checks",
     "reviewer_critic": "reviewed the change",
-    "appsec_engineer": "built the threat model",
-    "audit_compliance": "checked audit & compliance",
-    "supply_chain_reviewer": "reviewed the supply chain",
 }
 
 
@@ -290,35 +256,85 @@ def live_event_for_node(
     return ev
 
 
-def events_for_payload(
-    payload: dict[str, Any],
+TASK_PHASES = ("start", "done", "failed")
+_SPECIALTIES = ("frontend", "backend", "data", "test")
+_TIER_FOR_DIFFICULTY = {"trivial": "T3", "standard": "T2", "complex": "T1"}
+
+
+def event_for_task(ev: Mapping[str, Any]) -> dict[str, Any] | None:
+    """A work-pool TaskEvent -> the floor's ``task`` event (a worker sprite appears on
+    ``start`` and leaves on ``done``/``failed``). None for a malformed event."""
+    phase = str(ev.get("phase", ""))
+    ticket_id = str(ev.get("ticket_id", ""))
+    if phase not in TASK_PHASES or not ticket_id:
+        return None
+    specialty = str(ev.get("specialty", ""))
+    return {
+        "type": "task", "phase": phase, "ticket_id": ticket_id,
+        "title": str(ev.get("title", "")),
+        "specialty": specialty if specialty in _SPECIALTIES else "backend",
+        "tier": str(ev.get("tier", "")),
+    }
+
+
+def ticket_event(
+    detail: str, ticket_tiers: Mapping[str, str] | None = None
+) -> dict[str, Any] | None:
+    """The Tickets-tab row for a ``ticket`` artifact. Its ``detail`` one-liner is a JSON
+    object (id, title, specialty, difficulty, depends_on); anything else yields None and
+    the artifact still shows as an ordinary quest-log pickup."""
+    try:
+        d = json.loads(detail)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(d, dict) or not str(d.get("id", "")).strip():
+        return None
+    difficulty = str(d.get("difficulty") or "standard")
+    specialty = str(d.get("specialty") or "backend")
+    return {
+        "type": "ticket", "id": str(d["id"]), "title": str(d.get("title", "")),
+        "specialty": specialty if specialty in _SPECIALTIES else "backend",
+        "difficulty": difficulty,
+        "tier": (ticket_tiers or {}).get(difficulty)
+        or _TIER_FOR_DIFFICULTY.get(difficulty, "T2"),
+        "depends_on": [str(x) for x in (d.get("depends_on") or [])],
+        "retired": bool(d.get("retired")),
+    }
+
+
+def journal_dicts(entries: Any) -> list[dict[str, Any]]:
+    """A node's ``agent_journal`` writes (JournalEntry records) as plain dicts."""
+    out: list[dict[str, Any]] = []
+    for e in entries or ():
+        if isinstance(e, Mapping):
+            out.append(dict(e))
+            continue
+        out.append({
+            "node_id": str(getattr(e, "node_id", "")),
+            "role": str(getattr(e, "role", "")),
+            "summary": str(getattr(e, "summary", "")),
+            "assumptions": list(getattr(e, "assumptions", ()) or ()),
+            "concerns": list(getattr(e, "concerns", ()) or ()),
+            "confidence": getattr(e, "confidence", None),
+        })
+    return out
+
+
+def events_for_node_output(
+    result: Mapping[str, Any],
     seen_uris: set[str],
-    summaries: dict[str, Any] | None = None,
+    ticket_tiers: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Game events for ONE checkpoint pause (the REAL inspection payload).
+    """Game events for ONE finished node's output (its channel writes plus the CLI's
+    ``_art_details`` / ``_org`` telemetry annotations).
 
-    Emits: a stage banner, an ``artifact`` (desk lights up) + ``say`` (speech
-    bubble from the agent journal) for each NEW artifact since the last pause, the
-    advisory gate badges so far, and the ``checkpoint`` dialog itself. ``seen_uris``
-    is mutated so a re-emitted handle never double-fires (idempotent, like the
-    channel folds the data came from).
-
-    ``summaries`` (optional, from the T3 caption pass) supplies a descriptive
-    ``stage`` line for the checkpoint and per-``agent`` captions that override the raw
-    journal text on the speech bubbles / log block headers."""
-    agent_caps: dict[str, str] = dict((summaries or {}).get("agents") or {})
-    boundary = str(payload.get("boundary", ""))
-    room = _BOUNDARY_ROOM.get(boundary, "product")
-    out: list[dict[str, Any]] = [
-        {"type": "stage", "room": room, "boundary": boundary,
-         "label": _BOUNDARY_TITLE.get(boundary, boundary.title())},
-    ]
-
-    # Org chart (Wave E): the REAL hierarchy from the inspection payload — present
-    # areas, their Tech-Lead domains, and each domain's units. Emitted ONCE (the
-    # OwnershipMap is stable across boundaries); the canvas renders the org tree.
-    org = payload.get("org")
-    if isinstance(org, dict) and "__org__" not in seen_uris:
+    Emits the org chart (once), and for each NEW artifact a desk pulse + quest-log
+    pickup (+ a Tickets-tab row for a ticket, + the agent's journal note as a speech
+    bubble). ``seen_uris`` is mutated so a handle re-reported by an enclosing node
+    never double-fires."""
+    out: list[dict[str, Any]] = []
+    org = result.get("_org")
+    if isinstance(org, Mapping) and "__org__" not in seen_uris:
         seen_uris.add("__org__")
         out.append({
             "type": "org",
@@ -333,34 +349,27 @@ def events_for_payload(
             ],
         })
 
-    # Journal: the agents' own words -> speech bubbles (advisory, observability).
-    say_by_room: dict[str, list[dict[str, str]]] = {}
-    for e in payload.get("agent_journal", []):
+    say_by_agent: dict[str, dict[str, str]] = {}
+    for e in journal_dicts(result.get("agent_journal")):
         agent, jroom = AGENT_BY_NODE.get(str(e.get("node_id", "")),
-                                         (str(e.get("role", "agent")).title(), room))
-        # Prefer the T3 caption (descriptive, concise) over the raw journal text.
-        bubble = agent_caps.get(agent) or str(e.get("summary", "")).strip()
+                                         (str(e.get("role", "agent")).title(), "plan"))
         concerns = [str(c) for c in (e.get("concerns") or []) if str(c).strip()]
-        say_by_room.setdefault(jroom, []).append(
-            {"agent": agent, "room": jroom, "text": bubble or "Working…",
-             "concern": concerns[0] if concerns else ""}
-        )
+        say_by_agent.setdefault(agent, {
+            "agent": agent, "room": jroom,
+            "text": str(e.get("summary", "")).strip() or "Working…",
+            "concern": concerns[0] if concerns else "",
+        })
 
-    # New artifacts -> the producing desk lights up + a quest-log pickup. A stage
-    # often emits MANY artifacts of one kind (e.g. 9 acceptance criteria); numbering
-    # same-kind pickups (#1..#9) keeps the quest log readable instead of a wall of
-    # identical "Acceptance Criterion · Product Manager" lines. Lone kinds (one PRD)
-    # are left unnumbered. Counts are over the NEW artifacts in THIS payload only.
-    new_uris = [
-        u for u in (str(a.get("uri", "")) for a in payload.get("artifacts", []))
-        if u and u not in seen_uris
-    ]
-    kind_of = {str(a.get("uri", "")): str(a.get("kind", "")) for a in payload.get("artifacts", [])}
-    kind_total: Counter[str] = Counter(kind_of[u] for u in new_uris)
+    # A node often emits MANY artifacts of one kind (e.g. 9 acceptance criteria);
+    # numbering same-kind pickups (#1..#9) keeps the quest log readable.
+    arts = [a for a in (result.get("_art_details") or []) if isinstance(a, Mapping)]
+    new = [a for a in arts if str(a.get("uri", "")) and str(a["uri"]) not in seen_uris]
+    kind_total: Counter[str] = Counter(str(a.get("kind", "")) for a in new)
     kind_seen: Counter[str] = Counter()
-    for a in payload.get("artifacts", []):
-        uri = str(a.get("uri", ""))
-        if not uri or uri in seen_uris:
+    said: set[str] = set()
+    for a in new:
+        uri = str(a["uri"])
+        if uri in seen_uris:
             continue
         seen_uris.add(uri)
         kind = str(a.get("kind", ""))
@@ -370,36 +379,35 @@ def events_for_payload(
             kind_seen[kind] += 1
             label = f"{label} #{kind_seen[kind]}"
         out.append({"type": "agent", "room": aroom, "agent": agent, "action": "work"})
+        detail = str(a.get("detail", ""))   # advisory content one-liner
+        tk = ticket_event(detail, ticket_tiers) if kind == "ticket" else None
+        if tk is not None:
+            detail = f"{tk['id']} — {tk['title']}"
         out.append({
             "type": "artifact", "room": aroom, "agent": agent, "kind": kind,
-            "label": label, "detail": str(a.get("detail", "")),  # advisory content one-liner
+            "label": label, "detail": detail,
         })
-        # Attach a speech bubble for this agent if the journal had one.
-        for s in say_by_room.get(aroom, []):
-            if s["agent"] == agent:
-                out.append({"type": "say", **s})
-                break
+        if tk is not None:
+            out.append(tk)
+        say = say_by_agent.get(agent)
+        if say is not None and agent not in said:
+            said.add(agent)
+            out.append({"type": "say", **say})
 
-    # Advisory gate context so far (status only — the gates still decide).
-    # `run_against` names the TREE the verdict was produced over, so a human reading
-    # a red gate at the checkpoint can tell a stale verdict from a current one.
-    for g in payload.get("gates", []):
-        out.append({"type": "gate", "name": str(g.get("name", "")),
-                    "status": _norm_status(g.get("status")), "attested": True,
-                    "advisory": True, "run_against": str(g.get("run_against", ""))})
+    # Gate verdicts as they land, so the HUD shows a mid-run FAIL -> fix -> PASS.
+    # Advisory: the closing events carry the verdicts that decide the release.
+    for g in result.get("gates") or ():
+        def field(key: str, g: Any = g) -> Any:
+            return g.get(key) if isinstance(g, Mapping) else getattr(g, key, None)
 
-    stage_caption = str((summaries or {}).get("stage") or "").strip()
-    out.append({
-        "type": "checkpoint", "boundary": boundary, "room": room,
-        "title": _BOUNDARY_TITLE.get(boundary, boundary.title()),
-        "summary": stage_caption or _checkpoint_summary(payload),  # T3 caption, else counts
-        # Provenance the payload already carries and the dialog used to drop: WHERE
-        # in the pipeline this pause is, and WHICH state the decision is about.
-        "phase": str(payload.get("phase") or ""),
-        "route": str(payload.get("route") or ""),
-        "state_sha": str(payload.get("state_sha") or ""),
-        "actions": checkpoint_actions(boundary),
-    })
+        name = str(field("name") or "")
+        key = f"gate:{name}:{field('seq')}"
+        if not name or key in seen_uris:
+            continue
+        seen_uris.add(key)
+        out.append({"type": "gate", "name": name, "status": _norm_status(field("status")),
+                    "attested": True, "advisory": True,
+                    "run_against": str(field("run_against") or "")})
     return out
 
 
@@ -414,8 +422,12 @@ def events_for_result(result: dict[str, Any]) -> list[dict[str, Any]]:
         out.append({"type": "release", "uri": result.get("artifact_uri") or "",
                     "mode": result.get("mode", "assistant")})
     else:
+        failing = [name.upper() for name, status in sorted(
+            (result.get("gate_statuses") or {}).items()) if _norm_status(status) != "pass"]
+        what = (f"the {', '.join(failing)} gate{'s' if len(failing) > 1 else ''} did not PASS"
+                if failing else "a gate did not PASS")
         out.append({"type": "halt", "phase": result.get("phase", "unknown"),
-                    "reason": "a gate did not PASS — the build is held (fail-closed)"})
+                    "reason": f"{what} — the build is held (fail-closed)"})
     out.append({"type": "done", "passed": bool(result.get("passed")),
                 "phase": result.get("phase", "unknown")})
     return out
@@ -428,17 +440,3 @@ def _norm_status(status: Any) -> str:
     if "fail" in s:
         return "fail"
     return "error" if "error" in s else s
-
-
-def _checkpoint_summary(payload: dict[str, Any]) -> str:
-    n_art = len(payload.get("artifacts", []))
-    gates = payload.get("gates", [])
-    n_pass = sum(1 for g in gates if _norm_status(g.get("status")) == "pass")
-    n_fail = sum(1 for g in gates if _norm_status(g.get("status")) == "fail")
-    parts = [f"{n_art} artifacts produced"]
-    if gates:
-        seg = f"{n_pass}/{len(gates)} gates green"
-        if n_fail:
-            seg += f" · {n_fail} failing"
-        parts.append(seg)
-    return " · ".join(parts)

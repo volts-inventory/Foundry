@@ -42,9 +42,16 @@ class EpochCounter:
 
     def __init__(self) -> None:
         self._epochs: dict[tuple[str, str], int] = {}
+        self._floors: dict[str, int] = {}
 
     def bump(self, run_id: str, key: str) -> int:
         """Increment and return the new epoch for a (re-)execution of `key`."""
-        nxt = self._epochs.get((run_id, key), 0) + 1
+        nxt = max(self._epochs.get((run_id, key), 0), self._floors.get(run_id, 0)) + 1
         self._epochs[(run_id, key)] = nxt
         return nxt
+
+    def raise_floor(self, run_id: str, epoch: int) -> None:
+        """Make every later epoch of `run_id` exceed `epoch`: a fresh process
+        resuming a checkpointed run seeds this from the run's records, so what it
+        emits outranks them (this in-memory counter starts empty)."""
+        self._floors[run_id] = max(self._floors.get(run_id, 0), epoch)

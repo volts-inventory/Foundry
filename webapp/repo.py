@@ -15,8 +15,7 @@ This module reads that source of truth back out for the Workshop's self-hosted
   :func:`materialize_workdir` + ``resolve`` / ``resolve_blob`` seams the gates ran
   against — so the bytes read back are EXACTLY what shipped, never a re-render.
 
-It also surfaces the GitHub-style metadata the tab shows: the gate verdicts as
-"checks", and each FeatureDiff's unified-diff body as the "pull request" diff.
+It also surfaces the gate verdicts as "checks" (used for the export's evidence file).
 
 Everything here is READ-ONLY: it opens the durable backends, reads, and closes
 them. It never drives a build, writes a gate, or mutates the store.
@@ -31,6 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
+    from foundry.durability.artifact_store import ArtifactStore
     from foundry.state.factory_state import FactoryState
 
 # The Spec gate's criteria document is a gate INPUT, not a source file — excluded
@@ -61,34 +61,6 @@ class GateCheck:
 
 
 @dataclass(frozen=True)
-class PullDiff:
-    """One FeatureDiff's unified-diff body — the 'pull request' the build merged."""
-
-    uri: str
-    summary: str
-    text: str
-
-
-@dataclass(frozen=True)
-class SignOff:
-    """A recorded human sign-off — the Gated/Autonomous Design/Release approval.
-
-    Surfaced as the 'approvals' a gated build carries (assistant builds have
-    none). The security-bearing ``server_nonce`` is deliberately NOT exposed; the
-    evidence-pack ``evidence_hash`` IS — it is a hash, and the what-you-signed
-    anchor that makes the approval auditable."""
-
-    point: str  # what the signature attests (e.g. "design sign-off" / "release sign-off")
-    approver: str  # named accountable identity
-    role: str  # the distinct required role (segregation of duties)
-    approved: bool
-    provenance: str  # self | independent (self-judge profile stamp)
-    state_sha: str  # the integrated state the sign-off binds to
-    evidence_hash: str  # hash of the exact evidence pack shown to the signer
-    note: str = ""
-
-
-@dataclass(frozen=True)
 class Repo:
     """A finished build's repository read from the durable store."""
 
@@ -96,9 +68,9 @@ class Repo:
     tree_sha: str
     files: tuple[RepoFile, ...]
     checks: tuple[GateCheck, ...]
-    diffs: tuple[PullDiff, ...]
-    sign_offs: tuple[SignOff, ...] = ()
     _blobs: dict[str, bytes] = field(default_factory=dict, repr=False)
+    # What the CLI records in BUILD-MANIFEST.json for a later change on this build.
+    manifest: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def file_bytes(self, path: str) -> bytes | None:
         """The bytes of ``path`` in the materialized tree, or ``None`` if absent."""
@@ -172,79 +144,41 @@ def _gate_checks(state: FactoryState) -> tuple[GateCheck, ...]:
     return tuple(checks)
 
 
-def _sign_offs(state: FactoryState) -> tuple[SignOff, ...]:
-    """The recorded Design/Release sign-offs, order-stable by ``seq``.
-
-    Reads the ``sign_offs`` channel of the terminal state (Gated/Autonomous
-    record these; an assistant build has none). The server nonce is never
-    surfaced; the evidence-pack hash is (see :class:`SignOff`)."""
-    records = state.get("sign_offs") or ()
-    out: list[SignOff] = []
-    for s in sorted(records, key=lambda r: getattr(r, "seq", ())):
-        prov = getattr(s, "judgment_provenance", "")
-        prov = str(getattr(prov, "value", prov)).split(".")[-1].lower()
-        out.append(
-            SignOff(
-                point=str(getattr(s, "meaning_of_signing", "") or "sign-off"),
-                approver=str(getattr(s, "approver", "") or ""),
-                role=str(getattr(s, "role", "") or ""),
-                approved=bool(getattr(s, "approved", False)),
-                provenance=prov,
-                state_sha=str(getattr(s, "state_sha", "") or ""),
-                evidence_hash=str(getattr(s, "presented_evidence_hash", "") or ""),
-                note=str(getattr(s, "note", "") or ""),
-            )
-        )
-    return tuple(out)
-
-
-def _pull_diffs(state: FactoryState, backends: Any) -> tuple[PullDiff, ...]:
-    """Each FeatureDiff's raw unified-diff body — the build's 'pull requests'."""
-    from foundry.graph.gate_wiring import FEATURE_DIFF_KIND, _of_kind, _resolve_typed
-    from foundry.schemas.implementation import FeatureDiff
-
-    diffs: list[PullDiff] = []
-    for artifact in sorted(_of_kind(state, FEATURE_DIFF_KIND), key=lambda a: a.seq):
-        try:
-            diff = _resolve_typed(artifact, backends.cas.resolve, FeatureDiff, FEATURE_DIFF_KIND)
-            body = backends.cas.resolve_blob(diff.diff_uri)
-            text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else str(body)
-        except Exception:
-            continue
-        task = str(getattr(diff, "task_id", "") or "")
-        branch = str(getattr(diff, "branch", "") or "")
-        summary = " · ".join(p for p in (task, branch) if p) or "(feature diff)"
-        diffs.append(PullDiff(uri=artifact.uri, summary=summary, text=text))
-    return tuple(diffs)
-
-
-def read_repo(thread_id: str, state_dir: str | Path) -> Repo:
+def read_repo(thread_id: str, state_dir: str | Path, *, backend: str | None = None) -> Repo:
     """Read a finished build's repository from the durable store (no output dir).
 
     Opens the durable backends rooted at ``state_dir``, loads the build's terminal
     state from the checkpointer, materializes the integrated tree from the durable
-    CAS, and reads back the gate checks + FeatureDiff 'pull requests'. The backends
+    CAS, and reads back the gate checks. The backends
     are always closed before returning.
+
+    ``backend`` is the backend the build ran on: a mock build's gates ran against
+    the CLI's synthetic materialization seam, not the raw CAS, so its tree is read
+    back through that same seam — otherwise the repo shows (and a change build
+    would extend) stub files and scenarios no gate ever judged.
 
     Raises :class:`RepoUnavailable` if the build has no durable checkpoint (e.g. an
     older build that predates ``FOUNDRY_STATE_DIR`` durability).
     """
+    from foundry.cli import _MOCK_BACKEND, _PASSING_DIFF, _materialization_seam
     from foundry.durability.persistence import durable_backends
     from foundry.graph.gate_wiring import materialize_workdir
+    from foundry.manifest import plan_fields
 
     backends = durable_backends(state_dir)
     try:
         state = _load_final_state(thread_id, backends)
         checks = _gate_checks(state)
-        diffs = _pull_diffs(state, backends)
-        sign_offs = _sign_offs(state)
+        resolve, resolve_blob = _materialization_seam(
+            backend != _MOCK_BACKEND, store=cast("ArtifactStore", backends.cas),
+            diff_body=_PASSING_DIFF,
+        )
         blobs: dict[str, bytes] = {}
         with tempfile.TemporaryDirectory(prefix="foundry-repo-") as staging:
             root = Path(staging)
             try:
                 tree_sha = materialize_workdir(
-                    state, root,
-                    resolve=backends.cas.resolve, resolve_blob=backends.cas.resolve_blob,
+                    state, root, resolve=resolve, resolve_blob=resolve_blob
                 )
             except Exception as exc:  # an unresolvable handle / unparseable diff
                 raise RepoUnavailable(
@@ -258,14 +192,21 @@ def read_repo(thread_id: str, state_dir: str | Path) -> Repo:
                     continue
                 blobs[str(rel)] = src.read_bytes()
         files = tuple(RepoFile(path=p, size=len(b)) for p, b in sorted(blobs.items()))
+        plan = plan_fields(state, backends.cas.resolve)
+        manifest = {
+            "request": str(state.get("request") or ""),
+            "thread_id": thread_id,
+            **plan,
+            "contracts": [c.model_dump() for c in plan.get("contracts", ())],
+            "contracts_files": list(plan.get("contracts_files", ())),
+        }
         return Repo(
             thread_id=thread_id,
             tree_sha=tree_sha,
             files=files,
             checks=checks,
-            diffs=diffs,
-            sign_offs=sign_offs,
             _blobs=blobs,
+            manifest=manifest,
         )
     finally:
         with contextlib.suppress(Exception):

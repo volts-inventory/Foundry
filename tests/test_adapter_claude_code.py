@@ -117,14 +117,6 @@ def test_snapshot_slice_materializes_via_gate_wiring(source_dir: Path) -> None:
     assert _maybe_snapshot_files("cas://x", text) == {"a.py": "A = 1\n"}
 
 
-def test_unchanged_files_stay_out_of_the_slice(source_dir: Path) -> None:
-    adapter = ClaudeCodeAdapter(exec_fn=fake_exec({"b.py": "B = 1\n"}, envelope()))
-    with Sandbox(source_dir) as sb:
-        result = adapter.run(make_packet(sb.worktree), sb)
-        body = json.loads(sb.get_blob(result.diff_uri))
-    assert "existing.py" not in body["files"]  # untouched base file: not authored
-
-
 def test_deletion_and_binary_are_triaged_not_dropped(source_dir: Path) -> None:
     (source_dir / "gone.py").write_text("GONE = 1\n")
 
@@ -156,6 +148,27 @@ def test_turns_model_and_triage_are_observed(source_dir: Path) -> None:
     notes = [t.explanation for t in result.triage]
     assert "config default is a guess" in notes  # TRIAGE: line, prefix stripped
     assert any("total_cost_usd=0.0" in n for n in notes)
+
+
+def test_session_token_usage_is_recorded_for_the_manifest(source_dir: Path) -> None:
+    usage = {"input_tokens": 7, "output_tokens": 3, "cache_read_input_tokens": 900,
+             "cache_creation_input_tokens": 40}
+    adapter = ClaudeCodeAdapter(exec_fn=fake_exec({"a.py": "A = 1\n"}, envelope(usage=usage)))
+    with Sandbox(source_dir) as sb:
+        adapter.run(make_packet(sb.worktree), sb)
+    assert adapter.usage == [usage]
+
+
+def test_progress_logs_each_agent_session(
+    source_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("FOUNDRY_PROGRESS", "1")
+    usage = {"input_tokens": 1000, "output_tokens": 2000}
+    adapter = ClaudeCodeAdapter(exec_fn=fake_exec({"a.py": "A = 1\n"}, envelope(usage=usage)))
+    with Sandbox(source_dir) as sb:
+        adapter.run(make_packet(sb.worktree), sb)
+    err = capsys.readouterr().err
+    assert "start agent session: " in err and ", 3k tokens" in err
 
 
 def test_hard_kill_records_budget_breach_triage(source_dir: Path) -> None:

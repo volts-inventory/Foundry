@@ -1,6 +1,6 @@
 """Alternative configured backends (proxy/cli_transports) — fakes only.
 
-Proves the SAME proxy flow runs on claude -p / codex / ollama-gemma with the
+Proves the SAME proxy flow runs on claude -p / codex / openai with the
 backend config swapped: lineage is proxy-observed (not self-reported), the
 verdict path still parses + stamps a verifiable binding, an unobservable model
 fails closed, and a backend failure surfaces as the proxy's fail-closed
@@ -27,9 +27,7 @@ from foundry.proxy.cli_transports import (
     ClaudeCliTransport,
     CliResult,
     CodexCliTransport,
-    OllamaTransport,
     OpenAITransport,
-    backend_from_env,
     reset_claude_cap_cache,
 )
 from foundry.schemas.gates import GateStatus, JudgmentProvenance
@@ -77,15 +75,6 @@ def _codex_runner(lines: list[dict[str, Any]], *, returncode: int = 0) -> Any:
 
     run.calls = []  # type: ignore[attr-defined]
     return run
-
-
-def _ollama_post(response: dict[str, Any]) -> Any:
-    def post(url: str, payload: dict[str, Any]) -> dict[str, Any]:
-        post.calls.append((url, payload))  # type: ignore[attr-defined]
-        return response
-
-    post.calls = []  # type: ignore[attr-defined]
-    return post
 
 
 def _openai_client(
@@ -199,10 +188,10 @@ def _claude_request(sop: str, user: str, model: str = "claude-opus-4-8") -> dict
     }
 
 
-def test_claude_cli_always_routes_sop_through_append_flag_for_caching() -> None:
-    """Prompt caching is ALWAYS ON (not a setting): the stable SOP rides on
-    --append-system-prompt (so Claude Code prompt-caches it) and is kept OUT of the
-    -p user string, on a new-enough binary. The version probe runs once per binary."""
+def test_claude_cli_runs_persona_calls_one_shot() -> None:
+    """The SOP REPLACES Claude Code's default system prompt and the agent
+    scaffolding (tools, settings, MCP, skills) is switched off, so a persona call
+    pays only for its own prompt. The version probe runs once per binary."""
     payload = {"type": "result", "subtype": "success", "result": "ok",
                "modelUsage": {"claude-opus-4-8": {"inputTokens": 1, "outputTokens": 1}}}
     runner = _versioned_claude_runner("2.5.1", payload)
@@ -214,18 +203,23 @@ def test_claude_cli_always_routes_sop_through_append_flag_for_caching() -> None:
     version_calls = [c for c in runner.calls if "--version" in c]
     assert len(version_calls) == 1  # probed once, cached thereafter
     call = next(c for c in runner.calls if "-p" in c)
-    assert "--append-system-prompt" in call
-    assert call[call.index("--append-system-prompt") + 1] == "STABLE-SOP"
+    assert "--append-system-prompt" not in call
+    assert call[call.index("--system-prompt") + 1] == "STABLE-SOP"
+    assert call[call.index("--tools") + 1] == ""
+    assert call[call.index("--setting-sources") + 1] == ""
+    one_shot = {"--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence"}
+    assert one_shot <= set(call)
     prompt = call[call.index("-p") + 1]
     assert "STABLE-SOP" not in prompt and "volatile" in prompt
 
 
-def test_claude_cli_rejects_a_binary_too_old_for_append_system_prompt() -> None:
+def test_claude_cli_rejects_a_binary_too_old_for_one_shot_flags() -> None:
     """A `claude` below the floor fails closed with an upgrade instruction rather
-    than silently dropping caching — the minimum version is a hard REQUIREMENT."""
+    than silently running the expensive default agent — the minimum version is a
+    hard REQUIREMENT."""
     payload = {"type": "result", "subtype": "success", "result": "ok",
                "modelUsage": {"claude-opus-4-8": {"inputTokens": 1, "outputTokens": 1}}}
-    runner = _versioned_claude_runner("0.2.9", payload)
+    runner = _versioned_claude_runner("1.9.9", payload)
     tx = ClaudeCliTransport(claude_bin="claude-ancient", runner=runner)
 
     with pytest.raises(TransportError) as exc:
@@ -312,12 +306,8 @@ def test_codex_completion_observes_openai_lineage() -> None:
     assert argv[:2] == ["codex", "exec"] and "-m" in argv and "gpt-5-codex" in argv
 
 
-def test_codex_default_tier_models_are_openai() -> None:
-    proxy = build_backend("codex", runner=_codex_runner([]))
-    assert proxy.tier_models["T1"] == "gpt-5-codex"
-
-
-def test_codex_gate_call_pins_effort_and_never_a_temperature() -> None:
+@pytest.mark.parametrize(("tier", "model"), [("T1", "gpt-5-codex"), ("T2", "gpt-5")])
+def test_codex_gate_call_pins_effort_and_never_a_temperature(tier: str, model: str) -> None:
     # BLOCKER fix (arch §8): a gate/judge call on the Codex backend must pin a
     # determinism control the backend actually honours. gpt-* / codex-* are
     # reasoning models — they REJECT temperature; the Codex CLI forwards
@@ -325,13 +315,13 @@ def test_codex_gate_call_pins_effort_and_never_a_temperature() -> None:
     # temperature that the transport would silently drop (= no determinism).
     runner = _codex_runner(
         [
-            {"type": "session_configured", "model": "gpt-5-codex"},
+            {"type": "session_configured", "model": model},
             {"msg": {"type": "agent_message", "message": "ok"}},
         ]
     )
     proxy = build_backend("codex", runner=runner)
     result = proxy.complete(
-        "gate_node", "T1", "SOP", [{"role": "user", "content": "review"}], purpose="gate"
+        "gate_node", tier, "SOP", [{"role": "user", "content": "review"}], purpose="gate"
     )
     # Manifest records effort (the substitution), never a temperature.
     assert result.manifest_record["sampling"] == {"effort": "high"}
@@ -340,100 +330,6 @@ def test_codex_gate_call_pins_effort_and_never_a_temperature() -> None:
     argv = runner.calls[0]
     assert "-c" in argv and "model_reasoning_effort=high" in argv
     assert not any("temperature" in str(a) for a in argv)
-
-
-def test_codex_t2_gate_call_also_pins_determinism() -> None:
-    # gpt-5 (T2) is still a reasoning model => effort, not a dropped temperature.
-    runner = _codex_runner(
-        [
-            {"type": "session_configured", "model": "gpt-5"},
-            {"msg": {"type": "agent_message", "message": "ok"}},
-        ]
-    )
-    proxy = build_backend("codex", runner=runner)
-    result = proxy.complete(
-        "gate_node", "T2", "SOP", [{"role": "user", "content": "review"}], purpose="gate"
-    )
-    assert result.manifest_record["sampling"] == {"effort": "high"}
-    assert "model_reasoning_effort=high" in runner.calls[0]
-
-
-# --------------------------------------------------------------------------- #
-# ollama gemma                                                                 #
-# --------------------------------------------------------------------------- #
-
-
-def test_ollama_gemma_completion_observes_gemma_lineage() -> None:
-    post = _ollama_post(
-        {
-            "model": "gemma3:27b",
-            "message": {"role": "assistant", "content": "gemma output"},
-            "done_reason": "stop",
-            "prompt_eval_count": 12,
-            "eval_count": 4,
-        }
-    )
-    proxy = build_backend("ollama-gemma", http_post=post)
-    result = proxy.complete(
-        "n1", "T1", "SYS", [{"role": "user", "content": "hi"}], purpose="ideation"
-    )
-    assert result.text == "gemma output"
-    assert result.served_model == "gemma3:27b"
-    assert result.served_family == frozenset({"google-gemma"})
-    assert result.usage["output_tokens"] == 4
-    # System block + user message went as real chat roles (no flattening).
-    _url, payload = post.calls[0]
-    roles = [m["role"] for m in payload["messages"]]
-    assert roles == ["system", "user"]
-    assert payload["model"] == "gemma3:27b"
-
-
-def test_ollama_verdict_channel_sends_native_json_schema_format() -> None:
-    post = _ollama_post(
-        {
-            "model": "gemma3:27b",
-            "message": {"content": json.dumps({"status": "approve", "findings": []})},
-        }
-    )
-    proxy = build_backend("ollama-gemma", http_post=post, signer=_signer())
-    seq = Seq("r", 1, 1, "review", 0)
-    jr = proxy.judge(
-        "review",
-        "cas://sha256/abc",
-        "sha",
-        "nonce",
-        "SOP",
-        [{"role": "user", "content": "x"}],
-        seq=seq,
-    )
-    assert jr.gate_result.status is GateStatus.PASS
-    # Ollama keeps the grammar: the proxy's verdict schema rode in `format`.
-    _url, payload = post.calls[0]
-    assert payload["format"]["properties"]["status"]["enum"] == ["approve", "request-changes"]
-    # Deterministic judge call pinned temperature 0 (gemma is a sampling model).
-    assert payload["options"]["temperature"] == 0
-
-
-def test_ollama_gate_call_pins_temperature_zero_not_effort() -> None:
-    # Gemma honours options.temperature, so a deterministic gate call pins
-    # temperature 0 (NOT an effort control it would ignore).
-    post = _ollama_post(
-        {"model": "gemma3:27b", "message": {"content": "ok"}}
-    )
-    proxy = build_backend("ollama-gemma", http_post=post)
-    result = proxy.complete(
-        "gate_node", "T1", "SYS", [{"role": "user", "content": "x"}], purpose="gate"
-    )
-    assert result.manifest_record["sampling"] == {"temperature": 0}
-    assert "sampling_note" not in result.manifest_record
-    _url, payload = post.calls[0]
-    assert payload["options"]["temperature"] == 0
-    assert "format" not in payload  # no schema on a plain gate complete()
-
-
-def test_ollama_transport_requires_pinned_model() -> None:
-    with pytest.raises(TransportError):
-        OllamaTransport(http_post=_ollama_post({})).send({"messages": []})
 
 
 # --------------------------------------------------------------------------- #
@@ -500,54 +396,9 @@ def test_openai_transport_requires_pinned_model() -> None:
         OpenAITransport(client=_openai_client()).send({"messages": []})
 
 
-def test_openai_default_tier_models_are_gpt5() -> None:
-    proxy = build_backend("openai", client=_openai_client())
-    assert proxy.tier_models["T1"] == "gpt-5"
-    assert proxy.tier_models["T3"] == "gpt-5-mini"
-
-
 # --------------------------------------------------------------------------- #
-# config-driven selection                                                      #
+# backend selection                                                            #
 # --------------------------------------------------------------------------- #
-
-
-def test_backend_from_env_defaults_to_anthropic() -> None:
-    proxy = backend_from_env({})
-    assert proxy.tier_models["T1"] == "claude-opus-4-8"
-
-
-def test_backend_from_env_selects_named_backend() -> None:
-    proxy = backend_from_env({"FOUNDRY_MODEL_BACKEND": "ollama-gemma"}, http_post=_ollama_post({}))
-    assert proxy.tier_models["T1"] == "gemma3:27b"
-
-
-def test_backend_from_env_selects_openai() -> None:
-    proxy = backend_from_env({"FOUNDRY_MODEL_BACKEND": "openai"}, client=_openai_client())
-    assert proxy.tier_models["T1"] == "gpt-5"
-
-
-def test_backend_from_env_points_ollama_at_shared_endpoint() -> None:
-    # A deployment sets FOUNDRY_OLLAMA_URL so every worker uses ONE shared Ollama
-    # service over the network, not the hardcoded localhost (the GPU is infra's).
-    proxy = backend_from_env(
-        {"FOUNDRY_MODEL_BACKEND": "ollama-gemma", "FOUNDRY_OLLAMA_URL": "http://ollama:11434"},
-        http_post=_ollama_post({}),
-    )
-    assert proxy._transport._url == "http://ollama:11434/api/chat"
-
-
-def test_backend_from_env_ollama_defaults_to_localhost() -> None:
-    proxy = backend_from_env({"FOUNDRY_MODEL_BACKEND": "ollama-gemma"}, http_post=_ollama_post({}))
-    assert proxy._transport._url == "http://localhost:11434/api/chat"
-
-
-def test_backend_from_env_explicit_base_url_wins_over_env() -> None:
-    proxy = backend_from_env(
-        {"FOUNDRY_MODEL_BACKEND": "ollama-gemma", "FOUNDRY_OLLAMA_URL": "http://env:11434"},
-        base_url="http://explicit:11434",
-        http_post=_ollama_post({}),
-    )
-    assert proxy._transport._url == "http://explicit:11434/api/chat"
 
 
 def test_build_backend_rejects_unknown_name() -> None:

@@ -6,6 +6,8 @@ carrying a valid tag, and the wire format is dispatched on the scheme name.
 
 from __future__ import annotations
 
+import pytest
+
 from foundry.gates.attestation import DevGateWriteVerifier, ZoneBSigner
 from foundry.gates.signing import (
     HmacScheme,
@@ -68,3 +70,29 @@ def test_signing_schemes_from_env_shared_hmac() -> None:
     signer, verifier = signing_schemes_from_env(dev_key=b"dev", dev_key_id="dev")
     assert signer.name == "hmac256" and verifier.name == "hmac256"
     assert signer is verifier  # symmetric: same object both sides
+
+
+# --- attestation input binding ------------------------------------------------- #
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        {"run_against": "b" * 40},  # cross-tree replay
+        {"scanner_config_rev": "configY"},  # cross-config replay
+        {"status": GateStatus.FAIL},  # flipped verdict bit
+        {"lineage_map_revision": "lineage-2"},
+        {"results_digest": "tampered"},
+    ],
+)
+def test_attestation_binds_every_input(tamper: dict[str, object]) -> None:
+    gate = _det_gate().model_copy(
+        update={
+            "scanner_config_rev": "configX",
+            "lineage_map_revision": "lineage-1",
+            "results_digest": "resdigest-1",
+        }
+    )
+    signed = ZoneBSigner(b"k", "kid").with_attestation(gate)
+    verifier = DevGateWriteVerifier(b"k", "kid", GlobalRecords())
+    assert verifier.verify_attestation(signed) is True
+    assert verifier.verify_attestation(signed.model_copy(update=tamper)) is False

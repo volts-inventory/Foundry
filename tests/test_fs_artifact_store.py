@@ -1,19 +1,18 @@
-"""FilesystemArtifactStore (TASK [14]) — durable, content-addressed drop-in.
+"""ArtifactStore + FilesystemArtifactStore (TASK [14]) — one content-addressed contract.
 
 The in-memory ArtifactStore is dev-grade; the filesystem store is its production
 drop-in for the docker-compose / EKS profile (state behind the SAME interface so
-AgentRuntime.cas swaps unchanged). These tests pin:
+AgentRuntime.cas swaps unchanged). The contract tests run against BOTH stores
+(the drop-in guarantee). These tests pin:
 
 * put_body / get_body round-trip several schema types; the uri ==
   cas://sha256/<content_identity> (IDENTICAL to what emit_artifact mints and to
   the in-memory store); put_body_at stores under an explicit handle uri.
 * put_blob / get_blob round-trip raw bytes/str, keyed by the RAW sha256 (the
   sandbox-compatible digest) so a mirrored diff keeps its uri.
-* content-address STABILITY: the same body/blob yields the same uri across
-  store instances and survives a fresh store re-opened on the same root (the
-  durability property the in-memory store lacks).
+* durability: a fresh filesystem store re-opened on the same root reads back
+  what an earlier one wrote (the property the in-memory store lacks).
 * fail-closed: unknown uri get_body/get_blob raise UnknownArtifactError.
-* interface parity with the in-memory ArtifactStore (drop-in guarantee).
 """
 
 from __future__ import annotations
@@ -73,25 +72,31 @@ def _feature_diff() -> FeatureDiff:
     )
 
 
+@pytest.fixture(params=["memory", "filesystem"])
+def store(request: pytest.FixtureRequest, tmp_path: Path) -> Any:
+    if request.param == "memory":
+        return ArtifactStore()
+    return FilesystemArtifactStore(tmp_path)
+
+
 # ---- put_body / get_body round-trip (several schema types) -------------------
 
 
 @pytest.mark.parametrize("body", [_criterion(), _system_design(), _feature_diff()])
-def test_put_body_get_body_round_trips_typed_bodies(tmp_path: Path, body: Any) -> None:
-    store = FilesystemArtifactStore(tmp_path)
+def test_put_body_get_body_round_trips_typed_bodies(store: Any, body: Any) -> None:
     uri = store.put_body(body)
-    # uri is the body's content identity (== what emit_artifact / the in-mem store mint).
+    # uri is the body's content identity (== what emit_artifact mints), so both
+    # backends land a body at the SAME uri.
     assert uri == f"cas://sha256/{body.content_identity()}"
     back = store.get_body(uri)
     assert back == body
     assert type(back) is type(body)
 
 
-def test_put_body_at_explicit_uri_for_junior_feature_diff(tmp_path: Path) -> None:
+def test_put_body_at_explicit_uri_for_junior_feature_diff(store: Any) -> None:
     """The junior's FeatureDiff handle uri carries the idempotency KEY, not the
     body content identity; put_body_at stores it under that exact uri (whose
     slashes must NOT become path separators on disk)."""
-    store = FilesystemArtifactStore(tmp_path)
     diff = _feature_diff()
     handle_uri = "cas://feature_diff/some-idempotency-key"
     assert store.put_body_at(handle_uri, diff) == handle_uri
@@ -112,23 +117,16 @@ def test_resolve_view_reconstitutes_handle_body(tmp_path: Path) -> None:
     assert store.resolve_blob(store.put_blob(b"raw")) == b"raw"
 
 
-def test_get_body_unknown_uri_raises_fail_closed(tmp_path: Path) -> None:
-    store = FilesystemArtifactStore(tmp_path)
+@pytest.mark.parametrize("getter", ["get_body", "get_blob"])
+def test_unknown_uri_raises_fail_closed(store: Any, getter: str) -> None:
     with pytest.raises(UnknownArtifactError):
-        store.get_body("cas://sha256/does-not-exist")
-
-
-def test_get_blob_unknown_uri_raises_fail_closed(tmp_path: Path) -> None:
-    store = FilesystemArtifactStore(tmp_path)
-    with pytest.raises(UnknownArtifactError):
-        store.get_blob("cas://sha256/does-not-exist")
+        getattr(store, getter)("cas://sha256/does-not-exist")
 
 
 # ---- put_blob / get_blob (raw bytes, sandbox-compatible digest) --------------
 
 
-def test_put_blob_get_blob_round_trips_bytes_and_str(tmp_path: Path) -> None:
-    store = FilesystemArtifactStore(tmp_path)
+def test_put_blob_get_blob_round_trips_bytes_and_str(store: Any) -> None:
     body = b"--- /dev/null\n+++ b/x.py\n@@\n+print(1)\n"
     uri = store.put_blob(body)
     assert uri.startswith("cas://sha256/")
@@ -138,27 +136,15 @@ def test_put_blob_get_blob_round_trips_bytes_and_str(tmp_path: Path) -> None:
     assert store.get_blob(store.put_blob("hello")) == b"hello"
 
 
-def test_put_blob_matches_sandbox_raw_sha256(tmp_path: Path) -> None:
+def test_put_blob_matches_sandbox_raw_sha256(store: Any) -> None:
     """The store keys blobs by the RAW sha256 of the bytes — EXACTLY
-    Sandbox.put_blob / the in-memory store — so a diff blob mirrored
-    sandbox->store keeps its uri."""
-    store = FilesystemArtifactStore(tmp_path)
+    Sandbox.put_blob — so a diff blob mirrored sandbox->store keeps its uri."""
     data = b"some diff body"
     uri = store.put_blob(data)
     assert uri == f"cas://sha256/{hashlib.sha256(data).hexdigest()}"
 
 
-# ---- content-address STABILITY + DURABILITY (the property the in-mem lacks) --
-
-
-def test_content_address_stable_across_instances(tmp_path: Path) -> None:
-    """The uri is a pure function of content — two independent stores (even on
-    different roots) mint the SAME uri for the same body/blob."""
-    a = FilesystemArtifactStore(tmp_path / "a")
-    b = FilesystemArtifactStore(tmp_path / "b")
-    crit = _criterion()
-    assert a.put_body(crit) == b.put_body(crit)
-    assert a.put_blob(b"x") == b.put_blob(b"x")
+# ---- DURABILITY (the property the in-mem store lacks) ------------------------
 
 
 def test_body_and_blob_survive_store_reopen_on_same_root(tmp_path: Path) -> None:
@@ -173,40 +159,3 @@ def test_body_and_blob_survive_store_reopen_on_same_root(tmp_path: Path) -> None
     reader = FilesystemArtifactStore(tmp_path)
     assert reader.get_body(body_uri) == crit
     assert reader.get_blob(blob_uri) == b"unified diff bytes"
-
-
-def test_put_body_is_idempotent(tmp_path: Path) -> None:
-    store = FilesystemArtifactStore(tmp_path)
-    crit = _criterion()
-    assert store.put_body(crit) == store.put_body(crit)
-    assert store.get_body(store.put_body(crit)) == crit
-
-
-# ---- drop-in interface parity with the in-memory ArtifactStore ---------------
-
-
-def test_interface_parity_with_in_memory_store() -> None:
-    """Every public seam AgentRuntime.cas uses must exist with the same name on
-    the filesystem store — the drop-in guarantee."""
-    seams = [
-        "put_body",
-        "put_body_at",
-        "get_body",
-        "put_blob",
-        "get_blob",
-        "resolve",
-        "resolve_blob",
-    ]
-    for name in seams:
-        assert hasattr(FilesystemArtifactStore, name), name
-        assert hasattr(ArtifactStore, name), name
-
-
-def test_filesystem_and_in_memory_mint_identical_uris(tmp_path: Path) -> None:
-    """A body/blob put through either backend lands at the SAME cas uri — so a
-    handle minted under one resolves under the other."""
-    mem = ArtifactStore()
-    fs = FilesystemArtifactStore(tmp_path)
-    crit = _criterion()
-    assert mem.put_body(crit) == fs.put_body(crit)
-    assert mem.put_blob(b"diff") == fs.put_blob(b"diff")

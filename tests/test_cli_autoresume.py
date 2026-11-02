@@ -1,6 +1,6 @@
 """CLI in-process auto-resume (parity with the Workshop server).
 
-A DURABLE ``foundry run``/``milestones --state-dir …`` must survive a TRANSIENT
+A DURABLE ``foundry run --state-dir …`` must survive a TRANSIENT
 provider failure (a spent Max usage/session window surfaces as
 ``ProxyUnavailable``): back off and RE-INVOKE from the durable checkpoint instead
 of dying and needing a manual restart. A NON-durable run has no checkpoint, so
@@ -10,9 +10,13 @@ re-raises. The backoff sleep is monkeypatched so the test is instant.
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
+import pytest
+
 import foundry.cli as cli
+from foundry.proxy.token_meter import BuildStopped
 
 
 class _Boom(Exception):
@@ -33,13 +37,11 @@ def _no_sleep(monkeypatch: Any) -> list[float]:
     return waited
 
 
-def _call(seed: Any = None, **kw: Any) -> tuple[Any, Any]:
+def _call(seed: Any = None, **kw: Any) -> Any:
     return cli._invoke_with_autoresume(
-        object(),  # app is never touched — _invoke_with_checkpoints is patched
+        object(),  # app is never touched — _invoke is patched
         seed or {"request": "x"},
         {"configurable": {"thread_id": "t"}},
-        checkpointed=False,
-        responder=None,
         progress_cb=None,
         **kw,
     )
@@ -50,14 +52,14 @@ def test_transient_failure_is_retried_from_checkpoint(monkeypatch: Any) -> None:
     waited = _no_sleep(monkeypatch)
     calls = {"n": 0}
 
-    def _fake(*_a: Any, **_k: Any) -> tuple[dict[str, str], None]:
+    def _fake(*_a: Any, **_k: Any) -> dict[str, str]:
         calls["n"] += 1
         if calls["n"] < 3:  # fail twice, succeed on the third invoke
             raise ProxyUnavailable("provider ...; judgment nodes must pause-and-escalate")
-        return {"done": "yes"}, None
+        return {"done": "yes"}
 
-    monkeypatch.setattr(cli, "_invoke_with_checkpoints", _fake)
-    final, paused = _call(resumable=True)
+    monkeypatch.setattr(cli, "_invoke", _fake)
+    final = _call(resumable=True)
 
     assert final == {"done": "yes"}
     assert calls["n"] == 3  # two retries + the success
@@ -69,11 +71,11 @@ def test_non_durable_run_does_not_retry(monkeypatch: Any) -> None:
     _no_sleep(monkeypatch)
     calls = {"n": 0}
 
-    def _fake(*_a: Any, **_k: Any) -> tuple[dict[str, str], None]:
+    def _fake(*_a: Any, **_k: Any) -> Any:
         calls["n"] += 1
         raise ProxyUnavailable("pause-and-escalate")
 
-    monkeypatch.setattr(cli, "_invoke_with_checkpoints", _fake)
+    monkeypatch.setattr(cli, "_invoke", _fake)
     try:
         _call(resumable=False)
         raise AssertionError("expected the transient failure to propagate")
@@ -86,10 +88,10 @@ def test_non_transient_error_always_reraises(monkeypatch: Any) -> None:
     """A real error (not a proxy pause) is never swallowed, even on a durable run."""
     _no_sleep(monkeypatch)
 
-    def _fake(*_a: Any, **_k: Any) -> tuple[Any, Any]:
+    def _fake(*_a: Any, **_k: Any) -> Any:
         raise ValueError("a genuine bug")
 
-    monkeypatch.setattr(cli, "_invoke_with_checkpoints", _fake)
+    monkeypatch.setattr(cli, "_invoke", _fake)
     try:
         _call(resumable=True)
         raise AssertionError("expected the real error to propagate")
@@ -104,11 +106,11 @@ def test_budget_is_bounded(monkeypatch: Any) -> None:
     monkeypatch.setenv("FOUNDRY_CLI_AUTORESUME", "3")
     calls = {"n": 0}
 
-    def _fake(*_a: Any, **_k: Any) -> tuple[Any, Any]:
+    def _fake(*_a: Any, **_k: Any) -> Any:
         calls["n"] += 1
         raise ProxyUnavailable("pause-and-escalate")
 
-    monkeypatch.setattr(cli, "_invoke_with_checkpoints", _fake)
+    monkeypatch.setattr(cli, "_invoke", _fake)
     try:
         _call(resumable=True)
         raise AssertionError("expected exhaustion to re-raise")
@@ -116,3 +118,20 @@ def test_budget_is_bounded(monkeypatch: Any) -> None:
         pass
     assert calls["n"] == 4  # initial + 3 retries
     assert waited == [300.0, 600.0, 1200.0]  # 5, 10, 20 min
+
+
+def test_a_stop_during_the_backoff_ends_the_wait_at_once(monkeypatch: Any) -> None:
+    """The Workshop's Stop / Pause must not sit out a back-off of up to an hour."""
+    waited = _no_sleep(monkeypatch)
+    calls = {"n": 0}
+
+    def _fake(*_a: Any, **_k: Any) -> Any:
+        calls["n"] += 1
+        raise ProxyUnavailable("pause-and-escalate")
+
+    monkeypatch.setattr(cli, "_invoke", _fake)
+    stop = threading.Event()
+    stop.set()
+    with pytest.raises(BuildStopped):
+        _call(resumable=True, cancel=stop)
+    assert calls["n"] == 1 and waited == []

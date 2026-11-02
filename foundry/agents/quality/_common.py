@@ -1,7 +1,7 @@
 """Shared helpers for the Quality-layer node factories (agents.md Layer 4).
 
-Three concerns recur across reviewer_critic / qa_engineer / sdet and live here
-so each factory stays a faithful SOP + a thin model-call body:
+Concerns shared by the ``reviewer`` and ``reviewer_critic`` factories (plus the
+acceptance-criteria read, :func:`read_criteria`):
 
 * **Out-of-band bodies (DS9 / LEARNINGS L4).** A quality node's real output is a
   rich typed model (``TestPlan`` / ``TestReport`` / ``E2EReport`` /
@@ -31,6 +31,7 @@ so each factory stays a faithful SOP + a thin model-call body:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 # CR5: ``emit_artifact`` is an agents-level shared primitive (one definition in
@@ -38,15 +39,23 @@ from typing import TYPE_CHECKING, Any
 # path stays stable and there is no byte-duplicate to drift.
 from foundry.agents._common import emit_artifact, journal_entry
 from foundry.canonical import content_digest
+from foundry.schemas.base import Artifact, FrozenModel
+from foundry.schemas.product import AcceptanceCriterion
 
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
 
+    from foundry.state.factory_state import FactoryState
+
 
 __all__ = [
+    "ACCEPTANCE_CRITERION_KIND",
+    "ArtifactResolver",
+    "MissingCriteriaResolverError",
     "MissingVerdictNonceError",
     "emit_artifact",
     "journal_entry",
+    "read_criteria",
     "require_verdict_nonce",
     "server_issued_nonce",
     "state_sha",
@@ -79,7 +88,7 @@ def require_verdict_nonce(config: RunnableConfig) -> str:
     base = _configurable(config).get("verdict_nonce")
     if not isinstance(base, str) or not base:
         raise MissingVerdictNonceError(
-            "reviewer_critic requires a server-issued verdict_nonce on "
+            "a judgment node requires a server-issued verdict_nonce on "
             "config['configurable']['verdict_nonce']; agents never mint one"
         )
     return base
@@ -97,12 +106,11 @@ def server_issued_nonce(
 
     The base is BOUND to this request's identity — ``(node_id, subject_uri,
     state_sha)`` — so every judgment verdict in a run gets its OWN single-use nonce
-    (H3). Without this, the two reviews a gated/autonomous run emits (quality +
-    assurance) would share one nonce, and consuming the first would make
-    ``merge_gates`` reject the second. The derivation is still server-grounded (the
-    base) and not agent-mintable (node/subject/state are run identity, all signed
-    into the judgment binding), and it is deterministic so a resume re-derives the
-    SAME nonce (idempotent consumption).
+    (H3). Without this, two reviews in one run would share one nonce, and consuming
+    the first would make ``merge_gates`` reject the second. The derivation is still
+    server-grounded (the base) and not agent-mintable (node/subject/state are run
+    identity, all signed into the judgment binding), and it is deterministic so a
+    resume re-derives the SAME nonce (idempotent consumption).
     """
     base = require_verdict_nonce(config)
     return "N-" + content_digest(
@@ -133,3 +141,55 @@ def state_sha(config: RunnableConfig, fallback: str) -> str:
     if isinstance(sha, str) and sha:
         return sha
     return fallback
+
+
+# The product layer emits each AcceptanceCriterion as a content-addressed
+# Artifact HANDLE of this kind (raw typed bodies carry no ``.uri`` and cannot ride
+# the ``merge_by_uri``-folded ``artifacts`` channel).
+ACCEPTANCE_CRITERION_KIND = "acceptance_criterion"
+
+# INFRA dependency: reconstitutes a typed body from its Artifact handle (CAS in
+# prod, an in-memory map in tests) — the Senior Engineer's seam.
+ArtifactResolver = Callable[[Artifact], FrozenModel]
+
+
+class MissingCriteriaResolverError(RuntimeError):
+    """``acceptance_criterion`` handles are on state but no ``resolve`` is wired.
+
+    Fail-closed (C-R1-01): without a resolver the reviewer would read ZERO
+    criteria and author an empty ``TestPlan`` with no oracles — a VACUOUS Test
+    gate pass."""
+
+
+def read_criteria(
+    state: FactoryState, resolve: ArtifactResolver | None
+) -> tuple[AcceptanceCriterion, ...]:
+    """The current acceptance criteria on ``state['artifacts']``: the newest-by-
+    ``Seq`` record per ``id`` (a re-plan re-emits under the same id; the Spec gate
+    re-validates that newest set, so it is the correct supersession), ordered by
+    ``id`` (fold-order-independent across a resume re-fold).
+
+    Raises :class:`MissingCriteriaResolverError` when handles are present but no
+    ``resolve`` is wired (C-R1-01); with no handles at all the result is ``()``."""
+    handles = sorted(
+        (
+            h
+            for h in (state.get("artifacts") or ())
+            if getattr(h, "kind", None) == ACCEPTANCE_CRITERION_KIND
+        ),
+        key=lambda h: h.seq,
+    )
+    if handles and resolve is None:
+        raise MissingCriteriaResolverError(
+            f"{len(handles)} {ACCEPTANCE_CRITERION_KIND!r} handle(s) on "
+            "state['artifacts'] but no resolve= was wired; without it the reviewer "
+            "would read zero criteria and emit an empty TestPlan — a vacuous "
+            "Test-gate pass. Thread the CAS resolver into build_quality_subgraph."
+        )
+    by_id: dict[str, AcceptanceCriterion] = {}
+    if resolve is not None:
+        for handle in handles:
+            body = resolve(handle)
+            if isinstance(body, AcceptanceCriterion):
+                by_id[body.id] = body
+    return tuple(sorted(by_id.values(), key=lambda c: c.id))

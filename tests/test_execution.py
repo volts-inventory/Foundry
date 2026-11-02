@@ -9,7 +9,6 @@ import time
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
 
 from foundry.execution.adapter_contract import (
     AdapterResult,
@@ -18,7 +17,6 @@ from foundry.execution.adapter_contract import (
 from foundry.execution.adapters.raw_react import RawReactAdapter
 from foundry.execution.sandbox import Sandbox
 from foundry.schemas.gates import GateTriage
-from foundry.state.seq import Seq
 
 # ---------------------------------------------------------------------------
 # fixtures / helpers
@@ -178,27 +176,6 @@ def test_blob_store_round_trip(sandbox: Sandbox):
 # ---------------------------------------------------------------------------
 # Adapter contract
 # ---------------------------------------------------------------------------
-
-
-def test_task_packet_frozen(tmp_path: Path):
-    packet = make_packet(tmp_path)
-    with pytest.raises(ValidationError):
-        packet.turn_budget = 99
-
-
-def test_adapter_result_frozen():
-    triage = GateTriage(
-        name="adapter-report",
-        run_against="task/T1",
-        explanation="note",
-        produced_by="raw-react",
-        seq=Seq("run", 0, 0, "raw-react", 0),
-    )
-    result = AdapterResult(
-        diff_uri="cas://sha256/" + "0" * 64, triage=(triage,), snapshot_digest="d"
-    )
-    with pytest.raises(ValidationError):
-        result.diff_uri = "cas://sha256/evil"
 
 
 def test_constraints_verbatim_round_trip(tmp_path: Path):

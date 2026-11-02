@@ -1,101 +1,84 @@
-"""Junior Engineer node factory (agents.md Layer 3 — Implementation).
+"""Shared per-task build helpers for the implementation layer (agents.md Layer 3).
 
-The Junior Engineer is the *production* half of the implementation layer: it
-takes the ready :class:`~foundry.schemas.implementation.Task`(s) the Senior
-decomposed, runs the swappable coding substrate (``rt.adapter``, a
-:class:`~foundry.execution.adapter_contract.WorkerAdapter`) inside a scoped
-:class:`~foundry.execution.sandbox.Sandbox` per task, and emits the resulting
-:class:`~foundry.schemas.implementation.FeatureDiff`(s) (content-addressed diff
-handles on each ``task/<id>`` branch) to the ``artifacts`` channel.
+The ticket scheduler (``tickets.py``) and the build/test :func:`make_fixer_node`
+run the swappable coding substrate (``rt.adapter``) inside a scoped
+:class:`~foundry.execution.sandbox.Sandbox` and emit a content-addressed
+:class:`~foundry.schemas.implementation.FeatureDiff` through the helpers here.
 
-State-reading convention (LEARNINGS AR1-AR4, IM4): the node's DATA inputs — the
-Task(s) to build and the pinned constraints to inject — are read from
-``state["tasks"]`` and ``state["pinned_constraints"]`` INSIDE the closure, NEVER
-captured as build-time factory kwargs. Only the INFRA inputs (``source_dir``,
-``snapshot_store``, the budgets) stay as factory args, exactly like ``rt.adapter``
-— so the factory is composable: one ``rt`` + infra, the per-run work flows in on
-the state channels exactly as the Senior emitted it. For Phase 1 the whole ready
-task set is processed in one node invocation (branch-per-task is preserved by the
-per-task ``task/<id>`` branch + per-task ``FeatureDiff``).
-
-What this node is careful about (the contract, LEARNINGS L4/L5/L7, arch §2/§2b):
+What these helpers are careful about (LEARNINGS L4/L5/L7, arch §2/§2b):
 
 * **Pinned constraints VERBATIM + FIRST.** The architecture-pinned constraint
-  texts are pulled from the ``pinned_constraints`` channel (the live read-time
-  view), injected into the :class:`TaskPacket` byte-for-byte and ahead of the
-  task body — never paraphrased, summarized, or reordered. ``assemble_prompt``
-  then emits them first; the packet field documents the same invariant.
-* **Idempotent retry = supersession, not edit (L4).** A re-run RESETS the
-  worktree to the base tree first (``Sandbox.restore`` of the base snapshot),
-  so the adapter always starts from the same base — a retried diff supersedes
-  its predecessor rather than stacking on it. A task dict that already carries a
-  recorded ``base_tree_sha`` (from a prior run's done-marker) is the reset point
-  for the retry; a durable ``snapshot_store`` (IM1) is what makes that base
-  survive the destroy/rebuild between runs. The diff/idempotency key is derived
-  with ``content_digest`` (L7), never builtin ``hash()``, so the SAME inputs
-  produce the SAME key across a kill-then-resume in a fresh process.
+  texts are pulled from the live (non-superseded) view and injected into the
+  :class:`TaskPacket` byte-for-byte, ahead of the task body.
+* **Content-addressed keys (L7).** The diff/idempotency key is derived with
+  ``content_digest``, never builtin ``hash()``, so the SAME inputs produce the
+  SAME key across a kill-then-resume in a fresh process.
 * **Lineage is proxy-observed, never self-reported (arch §2b).** The adapter's
-  ``adapter_self_reported_model`` is IGNORED for lineage; nothing here reads it
-  as provenance.
+  ``adapter_self_reported_model`` is IGNORED for lineage.
 * **Agents never mint verdicts (L5).** The adapter returns advisory
-  ``GateTriage`` only; this node forwards it to ``gate_triage`` and NEVER writes
-  a ``GateResult`` to ``gates``.
+  ``GateTriage`` only; it is forwarded to ``gate_triage`` and NEVER written as a
+  ``GateResult`` to ``gates``.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from foundry.agents._common import journal_entry
 from foundry.agents._runtime import AgentRuntime, NodeFn
-from foundry.agents.implementation.personas import persona_for
-from foundry.agents.implementation.senior_engineer import (
-    DESIGN_KIND,
-    OWNERSHIP_KIND,
-    task_id_for_unit,
-)
 from foundry.canonical import content_digest
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
 from foundry.execution.sandbox import Sandbox
-from foundry.schemas.architecture import (
-    OwnershipMap,
-    PinnedConstraint,
-    SystemDesign,
-    lane_of_area,
-)
-from foundry.schemas.base import Artifact, BudgetLedger
-from foundry.schemas.gates import GateStatus
+from foundry.schemas.architecture import PinnedConstraint
+from foundry.schemas.base import Artifact
+from foundry.schemas.gates import GateResult, GateStatus
 from foundry.schemas.implementation import FeatureDiff, Task, TaskStatus
-from foundry.schemas.product import AcceptanceCriterion
-from foundry.state.reducers import live_constraints
+from foundry.state.reducers import DETERMINISTIC_GATES, live_constraints
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
     from langchain_core.runnables import RunnableConfig
 
-    from foundry.execution.work_pool import ExecutionTask
-    from foundry.schemas.journal import JournalEntry
+    from foundry.graph.gate_wiring import BlobResolver
     from foundry.state.factory_state import FactoryState
 
     # Reconstitutes a typed body from its content-addressed handle (the same INFRA
-    # seam the Senior takes; CAS in prod, an in-memory map in tests).
+    # seam the gates take; CAS in prod, an in-memory map in tests).
     ArtifactResolver = Callable[[Artifact], Any]
 
 __all__ = [
-    "execution_task_for",
     "idempotency_key",
-    "make_junior_engineer_node",
+    "make_fixer_node",
     "pinned_texts",
     "ready_tasks",
-    "tasks_for_lane",
 ]
 
 NODE_ID = "junior_engineer"
+FIXER_NODE_ID = "fixer"
 
-_DEFAULT_TURN_BUDGET = 8
+_FIXER_PERSONA = (
+    "You are fixing an integrated build that failed verification. The worktree holds "
+    "the whole project as built so far. Make the smallest changes that make the failing "
+    "gates below pass; do not rewrite working code or add features."
+)
+_FIXER_RULES = (
+    "The failures below are the tail of each gate's output: re-run the failing "
+    "command yourself (see `verify`) to read the whole output before you edit.",
+    "After each fix re-run the commands in `verify` (install only once its package "
+    "manifest exists; then build and typecheck; then the tests) and keep going until "
+    "they all pass or you run out of turns. If one cannot run here (missing tool, no "
+    "network), say so in a TRIAGE line.",
+    "Acceptance scenarios live only in the gate-owned features/<ticket>.feature files: "
+    "never write, copy or regenerate a .feature file (any you write is discarded). A "
+    "scenario that \"was not executed\" has no step module bound to that exact file: "
+    "point the step module's binding at it (pytest-bdd: scenarios(\"<path relative to "
+    "the module>\")) and implement its steps. Fix one feature file group at a time.",
+)
+
+# Claude Code needs several turns to read, write and verify; 8 left contract stubs empty.
+_DEFAULT_TURN_BUDGET = 25
 _DEFAULT_COST_BUDGET_MICROUSD = 1_000_000  # integer micro-USD, never floats
 
 
@@ -129,15 +112,11 @@ def idempotency_key(task: Task, constraints: Sequence[PinnedConstraint], base_tr
 
 
 def ready_tasks(state: FactoryState) -> tuple[Task, ...]:
-    """The Task(s) the Junior should build, read off ``state['tasks']`` (AR1).
+    """The Task(s) on ``state['tasks']`` (AR1), typed and ordered by ``Seq``.
 
     The ``tasks`` channel carries plain ``dict``s (keyed by id, ``union_by_id``);
     reconstitute the typed :class:`Task` from each and order by ``Seq`` so the
-    build order is the Senior's deterministic merge order (recoverable from the
-    records alone). A task re-presented carrying a recorded ``base_tree_sha`` is
-    a RETRY: it is reset to that base first so its diff supersedes rather than
-    stacks (idempotent retry, L4) — the build is otherwise idempotent (same
-    inputs re-derive the same content-addressed diff key, L7)."""
+    order is deterministic and recoverable from the records alone."""
     raw = state.get("tasks") or ()
     fields = set(Task.model_fields)
     out: list[Task] = []
@@ -150,181 +129,26 @@ def ready_tasks(state: FactoryState) -> tuple[Task, ...]:
     return tuple(sorted(out, key=lambda t: t.seq))
 
 
-def _base_snapshot_of(task: Task, state: FactoryState) -> str | None:
-    """The base tree to RESET to for a retry of ``task`` (L4), or None.
-
-    A prior run's done-marker for this task carries the ``base_tree_sha`` it was
-    built against; a retry restores the worktree to it first so the diff
-    supersedes rather than stacks. Absent (first run), the freshly-cloned
-    worktree IS the base.
-
-    KNOWN LIMITATION (LEARNINGS IM3 / T-M1-10): in the WIRED subgraph the `tasks`
-    reducer (`union_by_id`) is FIRST-keyed-wins for dicts, so the Senior's plain
-    Task survives and the Junior's done-marker is dropped — this read therefore
-    returns None there and the reset-to-base never fires. The retry still re-derives
-    deterministically (content-addressed `idempotency_key`); true supersession would
-    require minting a fresh task id/version, NOT relying on the reducer's later-wins.
-    The reset path is exercised when a done-marker is presented directly (the durable
-    `snapshot_store` retry test), not via the reduced channel."""
-    for entry in state.get("tasks") or ():
-        if isinstance(entry, dict) and entry.get("id") == task.id:
-            base = entry.get("base_tree_sha")
-            return str(base) if base else None
-    return None
-
-
-def _read_ownership(state: FactoryState, resolve: ArtifactResolver) -> OwnershipMap | None:
-    """Reconstitute the OwnershipMap off ``state['artifacts']`` (newest by Seq), or
-    None if absent / wrong type. READ-ONLY — the Junior derives the per-area budget
-    lineage from it (Wave D); it never mutates ownership."""
-    handles = [a for a in (state.get("artifacts") or ()) if a.kind == OWNERSHIP_KIND]
-    if not handles:
-        return None
-    body = resolve(max(handles, key=lambda a: a.seq))
-    return body if isinstance(body, OwnershipMap) else None
-
-
-def _area_by_task_id(ownership: OwnershipMap) -> dict[str, str]:
-    """task_id -> canonical AREA. A pure function of the OwnershipMap (Wave A
-    ``area_of``): it recomputes each unit's task id (``task_id_for_unit``) so it
-    joins to the Tasks the Senior emitted WITHOUT storing area on the Task
-    (preserves the Task's content identity). Used for org telemetry (Wave E)."""
-    return {
-        task_id_for_unit(unit): ownership.area_of(owner)
-        for unit, owner in ownership.owners.items()
-    }
-
-
-def tasks_for_lane(
-    state: FactoryState, resolve: ArtifactResolver | None, lane: str | None
-) -> tuple[Task, ...]:
-    """The ready tasks a LANE node builds: those whose owning area folds into ``lane``
-    (:func:`lane_of_area`). ``None`` = the whole ready set (the legacy single-node
-    scope). With no ownership wired every task defaults to the backend lane, so exactly
-    one lane node claims it — never zero, never two.
-
-    Shared with the subgraph router so the EDGE and the NODE partition the tasks with
-    one predicate and can never disagree: a lane the router skips is provably a lane
-    with no task to build (see :func:`senior_engineer.leads_for_lane`)."""
-    all_tasks = ready_tasks(state)
-    if lane is None:
-        return all_tasks
-    ownership = _read_ownership(state, resolve) if resolve is not None else None
-    area_by_tid = _area_by_task_id(ownership) if ownership is not None else {}
-    return tuple(
-        t for t in all_tasks if lane_of_area(area_by_tid.get(t.id, "backend")) == lane
-    )
-
-
-def _domain_by_task_id(ownership: OwnershipMap) -> dict[str, str]:
-    """task_id -> DOMAIN (owner) — the per-domain budget lineage (Wave D). Same
-    content-identity-preserving join as :func:`_area_by_task_id`, keyed to the
-    owner (the Tech-Lead's domain) so each domain meters against its own quota."""
-    return {task_id_for_unit(unit): owner for unit, owner in ownership.owners.items()}
-
-
-def _persona_by_task(state: FactoryState, resolve: ArtifactResolver | None) -> dict[str, str]:
-    """task_id -> area-expert persona text. Derived from the OwnershipMap's per-task
-    AREA (the same join the org telemetry uses), so a frontend task is written by a
-    frontend specialist, etc. Empty when no resolver/ownership is wired — leaving the
-    prompt byte-identical to the pre-persona path."""
-    if resolve is None:
-        return {}
-    ownership = _read_ownership(state, resolve)
-    if ownership is None:
-        return {}
-    return {tid: persona_for(area) for tid, area in _area_by_task_id(ownership).items()}
-
-
-# Kind literal for AcceptanceCriterion handles (matches gate_wiring.CRITERION_KIND;
-# duplicated here so the implementation layer never imports the graph layer).
-_CRITERION_KIND = "acceptance_criterion"
-
-# Per-span character cap: context enrichment must never blow the prompt up (the
-# product layer already truncates specs at 24k chars); a criterion/design summary
-# that exceeds this is cut with an explicit marker rather than silently.
-_SPAN_CHAR_CAP = 4_000
-
-
-def _capped(text: str) -> str:
-    return text if len(text) <= _SPAN_CHAR_CAP else text[: _SPAN_CHAR_CAP] + " …[truncated]"
-
-
-def _retrieved_spans(
-    state: FactoryState, resolve: ArtifactResolver | None, task: Task
-) -> tuple[str, ...]:
-    """Ground THIS task's codegen call in the spec context it traces to.
-    (context-grounding: the coder must see the spec, not a handle.)
-
-    Until now the packet's ``retrieved_spans`` was always empty and ``spec_uri``
-    is a synthetic content-address (no stored body), so the coding substrate saw
-    only the pinned constraints + a task id. This resolves, through the SAME typed
-    ``resolve`` seam the ownership read uses:
-
-    * the OWNERSHIP UNIT the task implements (recovered content-identity-
-      preservingly via ``task_id_for_unit``, exactly like the budget lineage);
-    * the ACCEPTANCE CRITERIA bodies for ``task.criterion_ids`` (sorted by id,
-      newest-by-Seq per id, so the packet is byte-stable across folds/resume);
-    * the SYSTEM DESIGN summary (newest by Seq): title, components, interfaces.
-
-    Deterministic order + per-span cap keep the packet content-stable (the pool's
-    content-addressed task id derives from it). ``resolve`` unwired ⇒ empty, the
-    packet stays byte-identical to the pre-enrichment path.
-    """
-    if resolve is None:
-        return ()
-    spans: list[str] = []
-    ownership_handles = [a for a in (state.get("artifacts") or ()) if a.kind == OWNERSHIP_KIND]
-    if ownership_handles:
-        body = resolve(max(ownership_handles, key=lambda a: a.seq))
-        if isinstance(body, OwnershipMap):
-            for unit, owner in sorted(body.owners.items()):
-                if task_id_for_unit(unit) == task.id:
-                    spans.append(
-                        f"OWNERSHIP UNIT: this task implements {unit!r} "
-                        f"(owner: {owner}, area: {body.area_of(owner)})"
-                    )
-                    break
-    wanted = set(task.criterion_ids)
-    if wanted:
-        newest: dict[str, tuple[Any, AcceptanceCriterion]] = {}
-        for handle in (a for a in (state.get("artifacts") or ()) if a.kind == _CRITERION_KIND):
-            body = resolve(handle)
-            if isinstance(body, AcceptanceCriterion) and body.id in wanted:
-                prior = newest.get(body.id)
-                if prior is None or handle.seq > prior[0]:
-                    newest[body.id] = (handle.seq, body)
-        for cid in sorted(newest):
-            c = newest[cid][1]
-            oracle = f" [oracle: {c.oracle_hint}]" if c.oracle_hint else ""
-            spans.append(_capped(f"ACCEPTANCE CRITERION {c.id}: {c.text}{oracle}"))
-    design_handles = [a for a in (state.get("artifacts") or ()) if a.kind == DESIGN_KIND]
-    if design_handles:
-        body = resolve(max(design_handles, key=lambda a: a.seq))
-        if isinstance(body, SystemDesign):
-            spans.append(
-                _capped(
-                    "SYSTEM DESIGN: "
-                    + json.dumps(
-                        {
-                            "title": body.title,
-                            "components": list(body.components),
-                            "interfaces": list(body.interface_ids),
-                        },
-                        sort_keys=True,
-                        ensure_ascii=False,
-                    )
-                )
-            )
-    return tuple(spans)
-
-
 def _prior_failures(state: FactoryState) -> tuple[str, ...]:
-    """Findings from any gate that FAILED/ERRORed on the previous pass — fed back to
-    the engineer (via the TaskPacket) so a fix attempt targets the SPECIFIC failure
-    instead of re-rolling blind. Empty on the first pass (no gates yet)."""
+    """Findings from the latest pass's FAILED/ERRORed gates — fed back to the
+    engineer (via the TaskPacket) so a fix attempt targets the SPECIFIC failure
+    instead of re-rolling blind. Empty on the first pass (no gates yet).
+
+    The ``gates`` channel keeps one record per (gate, tree), so superseded trees'
+    failures stay in state. Only the latest verdict per gate counts, and a
+    deterministic gate counts only if it ran against the newest tree: a gate skipped
+    on this pass (tests after a build failure) must not resurface last pass's FAIL."""
+    gates = list(state.get("gates") or ())
+    latest: dict[str, GateResult] = {}
+    for g in gates:
+        if g.name not in latest or g.seq > latest[g.name].seq:
+            latest[g.name] = g
+    tree_gates = [g for g in gates if g.name in DETERMINISTIC_GATES]
+    current_tree = max(tree_gates, key=lambda g: g.seq).run_against if tree_gates else None
     out: list[str] = []
-    for g in state.get("gates") or ():
+    for g in sorted(latest.values(), key=lambda g: g.seq):
+        if g.name in DETERMINISTIC_GATES and g.run_against != current_tree:
+            continue
         if g.status in (GateStatus.FAIL, GateStatus.ERROR) and g.findings:
             out.append(f"[{g.name} gate FAILED]")
             out.extend(g.findings)
@@ -341,6 +165,8 @@ def _build_packet(
     prior_failures: tuple[str, ...] = (),
     persona: str = "",
     retrieved_spans: tuple[str, ...] = (),
+    rules: tuple[str, ...] = (),
+    verify: Mapping[str, str] | None = None,
 ) -> TaskPacket:
     """Assemble the immutable packet: pinned constraints VERBATIM + FIRST.
 
@@ -350,14 +176,19 @@ def _build_packet(
     task traces to (ROADMAP Phase 4). The proxy endpoint is intentionally NOT
     handed to the adapter here (egress stays None) — the StubAdapter holds no
     egress and the dev sandbox's network denial is "nothing to talk to"."""
+    body: dict[str, Any] = {
+        "id": task.id,
+        "title": task.id,
+        "spec_uri": task.spec_uri,
+        "branch": task.branch,
+        "criterion_ids": list(task.criterion_ids),
+    }
+    if rules:
+        body["rules"] = list(rules)
+    if verify:
+        body["verify"] = dict(verify)
     return TaskPacket(
-        task={
-            "id": task.id,
-            "title": task.id,
-            "spec_uri": task.spec_uri,
-            "branch": task.branch,
-            "criterion_ids": list(task.criterion_ids),
-        },
+        task=body,
         persona=persona,  # area-expert role preamble (empty == unchanged prompt)
         pinned_constraints=pinned_texts(constraints),  # VERBATIM + FIRST (arch §2)
         retrieved_spans=retrieved_spans,  # spec grounding (empty == unchanged prompt)
@@ -366,62 +197,6 @@ def _build_packet(
         turn_budget=turn_budget,
         cost_budget_microusd=cost_budget_microusd,
         proxy_endpoint=None,
-    )
-
-
-def execution_task_for(
-    task: Task,
-    constraints: Sequence[PinnedConstraint],
-    *,
-    adapter: str,
-    worktree_path: str,
-    lineage: str = "default",
-    turn_budget: int = _DEFAULT_TURN_BUDGET,
-    cost_budget_microusd: int = _DEFAULT_COST_BUDGET_MICROUSD,
-    prior_failures: tuple[str, ...] = (),
-    persona: str = "",
-    retrieved_spans: tuple[str, ...] = (),
-) -> ExecutionTask:
-    """OPT-IN seam (additive — NOT on the default path): build the durable
-    :class:`~foundry.execution.work_pool.ExecutionTask` that would dispatch THIS
-    task's adapter run through a :class:`~foundry.execution.work_pool.WorkPool`
-    instead of running it in-process here.
-
-    The default :func:`make_junior_engineer_node` path is unchanged — it still runs
-    the adapter directly in a per-task :class:`Sandbox`. This helper exists only so
-    a future implementation subgraph can opt into pooled dispatch (logical fan-out
-    in the orchestrator; physical slots in infra; plan §4 [15]) WITHOUT the app ever
-    spawning a container: it emits a content-addressed task record (a generic worker
-    builds its own sandbox + adapter from it) and meters spend by ``lineage`` /
-    ``cost_budget_microusd`` against the pool's :class:`QuotaPolicy`.
-
-    The packet is byte-identical to the in-process path (pinned constraints VERBATIM
-    + FIRST), so the pool's content-addressed ``task_id`` is stable across a resume.
-    """
-    from foundry.execution.work_pool import ExecutionTask
-
-    packet = TaskPacket(
-        task={
-            "id": task.id,
-            "title": task.id,
-            "spec_uri": task.spec_uri,
-            "branch": task.branch,
-            "criterion_ids": list(task.criterion_ids),
-        },
-        persona=persona,  # area-expert role preamble (empty == unchanged prompt)
-        pinned_constraints=pinned_texts(constraints),  # VERBATIM + FIRST (arch §2)
-        retrieved_spans=retrieved_spans,  # spec grounding (empty == unchanged prompt)
-        prior_failures=prior_failures,
-        worktree_path=worktree_path,
-        turn_budget=turn_budget,
-        cost_budget_microusd=cost_budget_microusd,
-        proxy_endpoint=None,
-    )
-    return ExecutionTask(
-        packet=packet,
-        adapter=adapter,
-        lineage=lineage,
-        est_cost_microusd=cost_budget_microusd,
     )
 
 
@@ -445,36 +220,9 @@ def _apply_overlay(worktree: Path, overlay: Mapping[str, str | None]) -> None:
         target.write_text(content, encoding="utf-8")
 
 
-def _slice_of(rt: AgentRuntime, writes: dict[str, Any]) -> dict[str, str | None]:
-    """The tree slice ONE finished task contributes, for the next task's overlay.
-
-    Reconstitutes the just-minted FeatureDiff body from ``rt.cas`` and parses it
-    with the SAME op parser the integration boundary uses (``_diff_ops``), so
-    sibling visibility and final integration agree. Modification-hunk patches are
-    NOT projected into the overlay (they need the integrated file; the boundary
-    still applies them — only sibling VISIBILITY of a patch lags). Empty when no
-    CAS is wired (synthetic-resolver tests: overlay off, path unchanged)."""
-    if rt.cas is None:
-        return {}
-    from foundry.graph.gate_wiring import FeatureDiffBodyError, _diff_ops
-
-    artifacts = writes.get("artifacts") or []
-    if not artifacts:
-        return {}
-    diff = rt.cas.resolve(artifacts[0])
-    try:
-        ops = _diff_ops(diff, rt.cas.resolve_blob)
-    except FeatureDiffBodyError:
-        # Overlay is best-effort VISIBILITY; the integration boundary stays the
-        # authoritative (fail-closed) applier of this body.
-        return {}
-    out: dict[str, str | None] = dict(ops.writes)
-    for rel in ops.deletes:
-        out[rel] = None
-    return out
-
-
-def _sandbox_for(rt: AgentRuntime, source_dir: str, snapshot_store: str | None) -> Sandbox:
+def _sandbox_for(
+    rt: AgentRuntime, source_dir: str, snapshot_store: str | None, tier: str | None = None
+) -> Sandbox:
     """Build the per-task Sandbox honoring the adapter's DECLARED model-auth needs.
 
     An agentic CLI substrate (claude-code) declares ``credential_grant`` /
@@ -482,12 +230,18 @@ def _sandbox_for(rt: AgentRuntime, source_dir: str, snapshot_store: str | None) 
     fail-closed against ``GRANTABLE_MODEL_AUTH`` (ROADMAP Phase 1b — model-auth
     only, target-system credentials can never be granted). Adapters that declare
     nothing (stub, raw-react) get the fully-scrubbed cage, byte-identical to
-    before."""
+    before. A per-tier adapter (model modes) answers for the substrate that will
+    run ``tier``, so a local session's cage never gets the cloud credential."""
+    adapter: Any = rt.adapter
+    for_tier = getattr(adapter, "for_tier", None)
+    if callable(for_tier):
+        adapter = for_tier(tier)
     return Sandbox(
         source_dir,
         snapshot_store=snapshot_store,
-        credential_grant=tuple(getattr(rt.adapter, "credential_grant", ()) or ()),
-        home_passthrough=bool(getattr(rt.adapter, "home_passthrough", False)),
+        credential_grant=tuple(getattr(adapter, "credential_grant", ()) or ()),
+        home_passthrough=bool(getattr(adapter, "home_passthrough", False)),
+        toolchain_env=bool(getattr(adapter, "toolchain_env", False)),
     )
 
 
@@ -495,7 +249,6 @@ def _run_one_task(
     rt: AgentRuntime,
     task: Task,
     constraints: Sequence[PinnedConstraint],
-    base_snapshot: str | None,
     config: RunnableConfig,
     *,
     source_dir: str,
@@ -506,32 +259,28 @@ def _run_one_task(
     persona: str = "",
     retrieved_spans: tuple[str, ...] = (),
     overlay: Mapping[str, str | None] | None = None,
+    scope: tuple[str, ...] = (),
+    rules: tuple[str, ...] = (),
+    verify: Mapping[str, str] | None = None,
+    review: Callable[[AdapterResult, Sandbox], AdapterResult] | None = None,
 ) -> dict[str, Any]:
     """Run the adapter for ONE task in a fresh sandbox; return its channel writes.
+    A non-empty ``scope`` cuts the diff back to those paths (a noted trim);
+    ``review`` then annotates the kept diff while the sandbox is alive.
 
-    A FRESH ``Sandbox`` per task (arch §2(d): no reuse). Establishes / resets to
-    the base tree FIRST (idempotent retry = supersession, L4), runs the adapter,
-    then keys the diff by ``content_digest`` (L7) so a re-run re-derives the same
-    key and the keyed-union channels coalesce the supersession.
+    A FRESH ``Sandbox`` per task (arch §2(d): no reuse), then the diff keyed by
+    ``content_digest`` (L7) so a re-run re-derives the same key and the
+    keyed-union channels coalesce the supersession.
 
-    ``overlay`` (ROADMAP Phase 2b — the shared evolving tree): the accumulated
-    slices of EARLIER tasks in this node invocation (merge order), written onto
-    the fresh clone BEFORE the base snapshot is taken, so this task builds ON the
-    code its predecessors authored instead of blind against the scaffold. Because
-    it precedes ``snapshot()``, the recorded base (and thus the idempotency key)
-    reflects what the task actually saw — a retry resets to the SAME overlaid
-    base, and a change in a predecessor's output supersedes correctly. A retry
-    presenting a recorded ``base_snapshot`` skips the overlay (that base is
-    already authoritative)."""
+    ``overlay`` (the integrated tree, for the fixer) is written onto the fresh
+    clone BEFORE the base snapshot, so the recorded base — and the idempotency
+    key — reflect what the task actually built against."""
     assert rt.adapter is not None  # guaranteed by the factory's guard
     sandbox = _sandbox_for(rt, source_dir, snapshot_store)
     try:
-        if base_snapshot is None:
-            if overlay:
-                _apply_overlay(sandbox.worktree, overlay)
-            base = sandbox.snapshot()
-        else:
-            base = sandbox.restore(base_snapshot)
+        if overlay:
+            _apply_overlay(sandbox.worktree, overlay)
+        base = sandbox.snapshot()
         packet = _build_packet(
             task,
             constraints,
@@ -541,8 +290,16 @@ def _run_one_task(
             prior_failures=prior_failures,
             persona=persona,
             retrieved_spans=retrieved_spans,
+            rules=rules,
+            verify=verify,
         )
         result: AdapterResult = rt.adapter.run(packet, sandbox)
+        from foundry.agents.implementation.tickets import trim_to_write_scope
+
+        # An empty scope still drops gate inputs (feature files, criteria).
+        result = trim_to_write_scope(result, sandbox, scope, task.id)
+        if review is not None:
+            result = review(result, sandbox)
         _mirror_diff_blob(rt, sandbox, result)  # while the sandbox is alive
     finally:
         sandbox.destroy()
@@ -578,8 +335,8 @@ def _finalize_diff(
 ) -> dict[str, Any]:
     """The SEQUENTIAL post-processing for one task's adapter result: key the diff
     (``content_digest``, L7), mint the FeatureDiff + Artifact (``rt.seq``), persist
-    the typed body, and emit the done-marker + advisory triage. Shared by the serial
-    loop and the parallel pool path — ALWAYS called single-threaded from the node so
+    the typed body, and emit the done-marker + advisory triage. Shared by the fixer
+    and the ticket pool path — ALWAYS called single-threaded from the node so
     ``rt.seq`` (a non-thread-safe epoch counter) and ``rt.cas`` writes never race."""
     key = idempotency_key(task, constraints, base)
     diff = FeatureDiff(
@@ -610,378 +367,175 @@ def _finalize_diff(
     return writes
 
 
-class _MirroringAdapter:
-    """Wraps ``rt.adapter`` to mirror the diff blob into ``rt.cas`` WHILE the
-    pool worker's sandbox is still alive (the pool destroys it immediately after
-    ``run``). This is the ONLY shared-state write a pool worker makes — and it is
-    content-addressed + atomic (``put_blob`` keys by sha256, ``os.replace``), so
-    concurrent workers are safe. All ``rt.seq``/``rt.cas`` body writes stay in the
-    node's SEQUENTIAL post-processing (``_finalize_diff``)."""
-
-    def __init__(self, rt: AgentRuntime) -> None:
-        assert rt.adapter is not None
-        self._rt = rt
-        self.supports_turn_snapshots = rt.adapter.supports_turn_snapshots
-
-    def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
-        result = self._rt.adapter.run(packet, sandbox)  # type: ignore[union-attr]
-        _mirror_diff_blob(self._rt, sandbox, result)
-        return result
-
-
 def _adapter_name(rt: AgentRuntime) -> str:
-    """Stable substrate id for the ExecutionTask (only an identity component —
-    the pool's adapter_factory returns the mirroring wrapper regardless)."""
+    """Stable substrate id for the ExecutionTask (only an identity component)."""
     return str(getattr(rt.adapter, "name", type(rt.adapter).__name__))
-
-
-def _run_tasks_pooled(
-    rt: AgentRuntime,
-    tasks: Sequence[Task],
-    constraints: Sequence[PinnedConstraint],
-    state: FactoryState,
-    config: RunnableConfig,
-    *,
-    source_dir: str,
-    snapshot_store: str | None,
-    turn_budget: int,
-    cost_budget_microusd: int,
-    max_slots: int,
-    cost_cap_microusd: int | None,
-    domain_by_task: Mapping[str, str],
-    domain_area: Mapping[str, str],
-    prior_failures: tuple[str, ...] = (),
-    persona_by_task: Mapping[str, str] | None = None,
-    spans_by_task: Mapping[str, tuple[str, ...]] | None = None,
-    weight_tasks: Sequence[Task] | None = None,
-) -> dict[str, Any]:
-    """Run the ready tasks' adapter work in PARALLEL through a bounded
-    :class:`LocalWorkPool` (``max_slots`` physical slots), then post-process the
-    results SEQUENTIALLY. Only the isolated adapter run (sandbox + adapter, no
-    ``rt.seq``) executes concurrently; the diff blob is mirrored to CAS in-worker
-    by :class:`_MirroringAdapter`, and the FeatureDiff/Artifact minting runs
-    single-threaded in ready order — so the output is identical to the serial
-    loop modulo execution order.
-
-    Budget tree (Wave D): each task's ``lineage`` is its DOMAIN (owner); the global
-    cap flows down the two-level org tree — Program Manager -> per-AREA -> per-DOMAIN
-    (``allocate_budget_tree``) — so a domain that exhausts ITS share is REJECTED at
-    admit even when sibling domains in its area are idle and the global ledger has
-    room (true per-domain isolation + the noisy-neighbor guard). A rejected task
-    never runs, produces no diff, and the downstream gate fails closed. When no
-    domain mapping is available the lineage falls back to ``"default"`` (a single
-    bucket = Wave C behaviour).
-
-    Admission is in ready (merge) order, so the admitted subset under a binding cap
-    is a DETERMINISTIC function of that order — a resume re-derives the identical
-    set (the pool's content-addressed task_id also coalesces any re-submit)."""
-    from foundry.execution.work_pool import (
-        BudgetExceededError,
-        LocalWorkPool,
-        QuotaPolicy,
-        allocate_budget_tree,
-    )
-
-    if not tasks:
-        return {}
-
-    def lineage_of(task: Task) -> str:
-        return domain_by_task.get(task.id, "default")
-
-    # Per-domain task weights + each domain's area, so the global cap can flow down
-    # the PM -> area -> domain tree; Σ(domain quotas) ≤ Σ(area quotas) ≤ global cap.
-    # The weight spans the WHOLE ready set (``weight_tasks``), not just the tasks THIS
-    # node builds — so a per-lane engineer node derives the SAME per-domain quotas it
-    # would in one node (the cap is split across every area once), then meters only its
-    # own lane's tasks against them. Defaults to ``tasks`` (single-node = unchanged).
-    domain_weight: dict[str, int] = {}
-    for task in (weight_tasks if weight_tasks is not None else tasks):
-        domain_weight[lineage_of(task)] = domain_weight.get(lineage_of(task), 0) + 1
-    global_cap = 0 if cost_cap_microusd is None else cost_cap_microusd
-    lineage_quotas = allocate_budget_tree(domain_area, domain_weight, global_cap)
-
-    # base per task: the recorded base (a retry) or the fresh-clone snapshot (first
-    # run). All first-run tasks clone the SAME source_dir, and snapshot() is a
-    # content-only tree digest, so one computed base is correct for them all.
-    recorded: dict[str, str | None] = {t.id: _base_snapshot_of(t, state) for t in tasks}
-    base_first: str | None = None
-
-    def base_of(task: Task) -> str:
-        nonlocal base_first
-        if recorded[task.id] is not None:
-            return str(recorded[task.id])
-        if base_first is None:
-            probe = Sandbox(source_dir, snapshot_store=snapshot_store)
-            try:
-                base_first = probe.snapshot()
-            finally:
-                probe.destroy()
-        return base_first
-
-    def make_sandbox(etask: ExecutionTask) -> Sandbox:
-        sandbox = _sandbox_for(rt, source_dir, snapshot_store)
-        prior = recorded.get(str(etask.packet.task.get("id")))
-        if prior is not None:
-            sandbox.restore(prior)  # retry: reset to base so the diff supersedes (L4)
-        return sandbox
-
-    quota = QuotaPolicy(
-        ledger=BudgetLedger(cap_microusd=global_cap),  # 0 == unlimited global
-        lineage_quota_microusd=lineage_quotas,  # per-area sub-envelopes (Wave D)
-    )
-    adapter_name = _adapter_name(rt)
-    merged: dict[str, Any] = {}
-
-    with LocalWorkPool(
-        sandbox_factory=make_sandbox,
-        adapter_factory=lambda _name: _MirroringAdapter(rt),
-        max_slots=max_slots,
-        quota=quota,
-    ) as pool:
-        submitted: dict[str, str | None] = {}
-        for task in tasks:
-            etask = execution_task_for(
-                task,
-                constraints,
-                adapter=adapter_name,
-                worktree_path=task.branch,  # stable placeholder; adapters use sandbox.worktree
-                lineage=lineage_of(task),  # per-area budget bucket (Wave D)
-                turn_budget=turn_budget,
-                cost_budget_microusd=cost_budget_microusd,
-                prior_failures=prior_failures,
-                persona=(persona_by_task or {}).get(task.id, ""),  # area-expert voice
-                retrieved_spans=(spans_by_task or {}).get(task.id, ()),  # spec grounding
-            )
-            try:
-                submitted[task.id] = pool.submit(etask)
-            except BudgetExceededError:
-                submitted[task.id] = None  # rejected at admit (fail-closed) — never run
-
-        # Collect + finalize SEQUENTIALLY in ready order: rt.seq (a non-thread-safe
-        # epoch counter) and rt.cas body writes stay single-threaded, so the seqs
-        # and artifacts are byte-identical to the serial path. A pool.result that
-        # FAILED propagates (parity with the serial loop's adapter exception).
-        for task in tasks:
-            tid = submitted[task.id]
-            if tid is None:
-                continue  # over budget -> no diff -> downstream gate fails closed
-            result = pool.result(tid)
-            writes = _finalize_diff(rt, task, constraints, base_of(task), result, config)
-            for channel, records in writes.items():
-                merged.setdefault(channel, []).extend(records)
-    return merged
-
-
-def _engineer_note(
-    rt: AgentRuntime,
-    config: RunnableConfig,
-    tasks: Sequence[Task],
-    state: FactoryState,
-    resolve: ArtifactResolver | None,
-    lane: str | None,
-) -> JournalEntry | None:
-    """A prose "what this engineer built" journal entry for the event log / interview
-    affordance: the distinct feature DOMAINS its tasks implement (the Tech-Lead's
-    ownership decomposition names — e.g. "web-router, web-auth"), else just the task
-    count. STRICTLY ADVISORY (plan [11]) — never read by a gate."""
-    n = len(tasks)
-    if n == 0:
-        return None
-    domains: list[str] = []
-    if resolve is not None:
-        own = _read_ownership(state, resolve)
-        if own is not None:
-            dbt = _domain_by_task_id(own)
-            for t in tasks:
-                d = dbt.get(t.id)
-                if d and d not in domains:
-                    domains.append(d)
-    summary = f"Implemented {n} task{'s' if n != 1 else ''}"
-    if domains:
-        summary += ": " + ", ".join(domains[:4]) + (" …" if len(domains) > 4 else "")
-    role = f"{lane.title()} Engineer" if lane else "Junior Engineer"
-    return journal_entry(
-        node_id=NODE_ID, role=role, seq=rt.seq(config, NODE_ID, "journal"),
-        summary=summary,
-    )
-
-
-def make_junior_engineer_node(
-    rt: AgentRuntime,
-    *,
-    source_dir: str,
-    snapshot_store: str | None = None,
-    turn_budget: int = _DEFAULT_TURN_BUDGET,
-    cost_budget_microusd: int = _DEFAULT_COST_BUDGET_MICROUSD,
-    max_slots: int = 1,
-    cost_cap_microusd: int | None = None,
-    resolve: ArtifactResolver | None = None,
-    lane: str | None = None,
-) -> NodeFn:
-    """Build the Junior Engineer node.
-
-    The DATA inputs (WHICH tasks, WHICH constraints) are read from
-    ``state["tasks"]`` / ``state["pinned_constraints"]`` inside the closure
-    (LEARNINGS AR1-AR4 / IM4) — never build-time kwargs. Only the INFRA inputs
-    below stay as factory args.
-
-    Parameters
-    ----------
-    source_dir:
-        Base tree to clone into each per-task sandbox worktree.
-    snapshot_store:
-        DURABLE snapshot/blob store path (``Sandbox`` arg). A retry builds a
-        FRESH sandbox (arch §2(d): no reuse), so the base snapshot from the first
-        run only survives for the retry's ``restore`` when it was written to a
-        store that outlives ``destroy()`` — pass the SAME path on the first run
-        and the retry (LEARNINGS IM1). When None each run gets an ephemeral store
-        (fine for a first run, where the freshly-cloned worktree IS the base).
-    turn_budget / cost_budget_microusd:
-        Per-task adapter budgets carried into the ``TaskPacket``.
-    max_slots:
-        IC-pool size — how many tasks build in PARALLEL (org_fanout_design.md,
-        Wave C). ``1`` (default) keeps the original serial loop, byte-identical to
-        before. ``>1`` dispatches the per-task adapter runs through a bounded
-        :class:`~foundry.execution.work_pool.LocalWorkPool`; the physical worker
-        count is this knob (infra owns it — nothing here spawns a container).
-    cost_cap_microusd:
-        The Program Manager's GLOBAL micro-USD envelope the pool admits against
-        (fail-closed; only used when ``max_slots > 1``). ``None`` (default) =
-        unlimited. When set, it is sub-allocated across the present AREAS as
-        per-lineage quotas (Wave D), so one area cannot starve another.
-    resolve:
-        INFRA dependency (CAS in prod, an in-memory map in tests) used to
-        reconstitute the OwnershipMap so each task's budget ``lineage`` is its
-        AREA (Wave D). ``None`` keeps a single ``"default"`` lineage (Wave C
-        behaviour). DATA (which ownership) is read from ``state`` inside the node.
-    lane:
-        Discipline LANE (``frontend``/``backend``/``data``) this node builds. When set,
-        the node builds ONLY the tasks whose owning area folds into this lane
-        (:func:`lane_of_area`), but derives the per-domain budget quotas from the WHOLE
-        ready set (so the global cap is still split across every area exactly once — no
-        lane gets the full cap). Task identity, seq and ``produced_by`` stay on the
-        shared internal ``NODE_ID`` (unchanged content-addressing); the distinct per-lane
-        TELEMETRY comes from the graph node NAME the subgraph registers. Each task is
-        owned by one area in one lane, so no task is built twice. ``None`` (default) =
-        build every ready task in one node (byte-identical legacy).
-    """
-    if rt.adapter is None:
-        raise ValueError(
-            "junior_engineer requires rt.adapter (a WorkerAdapter) — the "
-            "implementation layer runs the coding substrate (LEARNINGS AR1)"
-        )
-
-    def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
-        constraints: Sequence[PinnedConstraint] = state.get("pinned_constraints") or ()
-        all_tasks = ready_tasks(state)
-        # Lane scoping: build only THIS lane's tasks, but keep the full ready set for
-        # budget weighting (below).
-        tasks = list(tasks_for_lane(state, resolve, lane))
-        # Advisory journal note: a prose "what this engineer built" line (the feature
-        # domains its tasks implement) for the event log / interview affordance.
-        jnote = _engineer_note(rt, config, tasks, state, resolve, lane)
-        # Fix loop: on a re-entry after a failed gate, feed the SPECIFIC failure back
-        # to the engineer (empty on the first pass) so it fixes that instead of re-rolling.
-        prior_failures = _prior_failures(state)
-        # SYSTEM-DECIDED parallelism. The Tech-Lead's decomposition IS the decision
-        # to parallelize: it splits the work into independently-buildable tasks. We
-        # size the IC pool to that decomposition — one worker per ready task —
-        # capped by ``max_slots`` (a safety ceiling, not a user-tuned target). So a
-        # single-task build runs serially with no pool overhead; an N-task build
-        # fans N adapter runs across the pool automatically (≤ the cap). Nobody sets
-        # a worker count: the system reads it off the lead's plan.
-        effective_slots = min(len(tasks), max_slots) if tasks else 1
-        # A lane node under a cost cap MUST meter even a lone task: the per-domain
-        # quota/ledger live only on the pooled path, so a single-task lane on the serial
-        # path would slip its budget (a data lane's one task escaping its starved
-        # sub-cap). Force the pooled path for a capped lane build; the legacy single-node
-        # run (lane is None) keeps the original serial/pooled selection untouched.
-        force_pool = lane is not None and cost_cap_microusd is not None and bool(tasks)
-        # Area-expert persona per task (option-2): a frontend task is written by a
-        # frontend specialist, etc. Empty map when no ownership/resolver is wired.
-        persona_by_task = _persona_by_task(state, resolve)
-        # Spec grounding per task (ROADMAP Phase 4): the criteria/design/unit spans
-        # this task traces to. Empty when no resolver is wired (unchanged prompt).
-        spans_by_task = {t.id: _retrieved_spans(state, resolve, t) for t in tasks}
-        # Branch-per-task: each task builds in its own fresh sandbox on its own
-        # task/<id> branch. >1 task ⇒ the adapter runs fan out across the IC pool
-        # (Wave C); a single task runs serially (the original path).
-        if effective_slots > 1 or force_pool:
-            # Per-domain budget lineage + each domain's area (Wave D), derived from
-            # the OwnershipMap when a resolver is wired; else a single "default".
-            domain_by_task: dict[str, str] = {}
-            domain_area: dict[str, str] = {}
-            if resolve is not None:
-                ownership = _read_ownership(state, resolve)
-                if ownership is not None:
-                    domain_by_task = _domain_by_task_id(ownership)
-                    domain_area = {owner: ownership.area_of(owner) for owner in ownership.leads()}
-            pooled = _run_tasks_pooled(
-                rt,
-                tasks,
-                constraints,
-                state,
-                config,
-                source_dir=source_dir,
-                snapshot_store=snapshot_store,
-                turn_budget=turn_budget,
-                cost_budget_microusd=cost_budget_microusd,
-                max_slots=effective_slots,
-                cost_cap_microusd=cost_cap_microusd,
-                domain_by_task=domain_by_task,
-                domain_area=domain_area,
-                prior_failures=prior_failures,
-                persona_by_task=persona_by_task,
-                spans_by_task=spans_by_task,
-                weight_tasks=all_tasks,  # per-domain quotas span EVERY lane, not just this one
-            )
-            if jnote is not None:
-                pooled.setdefault("agent_journal", []).append(jnote)
-            return pooled
-        merged: dict[str, Any] = {}
-        # The shared evolving tree (ROADMAP Phase 2b): each SERIAL task builds on
-        # its predecessors' slices (merge order), later-by-Seq winning exactly as
-        # at the integration boundary. The pooled path stays independent by design
-        # (parallel siblings can't see each other mid-flight).
-        overlay: dict[str, str | None] = {}
-        for task in tasks:
-            writes = _run_one_task(
-                rt,
-                task,
-                constraints,
-                _base_snapshot_of(task, state),
-                config,
-                source_dir=source_dir,
-                snapshot_store=snapshot_store,
-                turn_budget=turn_budget,
-                cost_budget_microusd=cost_budget_microusd,
-                prior_failures=prior_failures,
-                persona=persona_by_task.get(task.id, ""),
-                retrieved_spans=spans_by_task.get(task.id, ()),
-                overlay=overlay,
-            )
-            overlay.update(_slice_of(rt, writes))
-            for channel, records in writes.items():
-                merged.setdefault(channel, []).extend(records)
-        if jnote is not None:
-            merged.setdefault("agent_journal", []).append(jnote)
-        return merged
-
-    return _node
 
 
 def _task_done_marker(task: Task, diff: FeatureDiff) -> dict[str, Any]:
     """The task channel entry, updated with the produced diff handle.
 
-    Keyed by ``id`` (the tasks reducer is a keyed union). NOTE (LEARNINGS IM3 /
-    T-M1-10): in the wired subgraph the reducer is FIRST-keyed-wins for dicts, so the
-    Senior's plain Task dict survives and THIS marker is dropped on the `tasks`
-    channel — the produced `diff_uri`/`base_tree_sha` are read off the **`artifacts`**
-    channel (the FeatureDiff), not off this done-marker. The extra keys here are still
-    populated for the in-isolation node path (and any future fresh-id supersession);
-    do NOT assume a downstream node reads them off the reduced `tasks` channel."""
+    Keyed by ``id`` (the tasks reducer is a keyed union). NOTE (LEARNINGS IM3): the
+    reducer is FIRST-keyed-wins for dicts, so an earlier plain Task dict survives and
+    THIS marker is dropped on the `tasks` channel — the produced
+    `diff_uri`/`base_tree_sha` are read off the **`artifacts`** channel (the
+    FeatureDiff). Do NOT assume a downstream node reads them off the reduced `tasks`
+    channel."""
     d = task.model_dump(mode="json")
     d["status"] = TaskStatus.DONE.value
     d["diff_uri"] = diff.diff_uri
     d["base_tree_sha"] = diff.base_tree_sha
     return d
+
+
+def _fix_focus(state: FactoryState, resolve: ArtifactResolver) -> tuple[str, ...]:
+    """The built tickets' files: what the fixer is repairing. Its writes elsewhere
+    are kept but noted. Empty = no focus (a built ticket declared no scope)."""
+    from foundry.agents.implementation.tickets import (
+        _built_task_ids,
+        read_tickets,
+        task_id_for_ticket,
+    )
+
+    built = _built_task_ids(state)
+    files: list[str] = []
+    for t in read_tickets(state, resolve):
+        if task_id_for_ticket(t.id) not in built:
+            continue
+        if not t.files:
+            return ()
+        files.extend(f for f in t.files if f not in files)
+    return tuple(files)
+
+
+def make_fixer_node(
+    rt: AgentRuntime,
+    *,
+    source_dir: str,
+    resolve: ArtifactResolver,
+    resolve_blob: BlobResolver,
+    snapshot_store: str | None = None,
+    turn_budget: int = _DEFAULT_TURN_BUDGET,
+    cost_budget_microusd: int = _DEFAULT_COST_BUDGET_MICROUSD,
+) -> NodeFn:
+    """One coding session that repairs the INTEGRATED tree after a failed gate.
+
+    Re-running every task from scratch on each fix iteration rebuilt the whole
+    project (one fresh agent session per task) to repair what is usually a local
+    failure. The fixer instead seeds a single sandbox with the integrated tree, hands
+    the adapter only the latest failures, and emits one FeatureDiff whose seq is
+    lifted past every existing diff, so integration applies it on top
+    (later-by-Seq wins)."""
+    if rt.adapter is None or rt.cas is None:
+        raise ValueError("fixer requires rt.adapter and rt.cas (it rebuilds the integrated tree)")
+
+    def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        import tempfile
+
+        from foundry.graph.gate_wiring import (
+            FEATURE_DIFF_KIND,
+            GATE_INPUT_FILES,
+            MaterializationError,
+            _fix_attempts,
+            _of_kind,
+            materialize_workdir,
+        )
+
+        attempt = _fix_attempts(state, config)
+        try:
+            with tempfile.TemporaryDirectory(prefix="foundry-fix-") as tmp:
+                materialize_workdir(state, Path(tmp), resolve=resolve, resolve_blob=resolve_blob)
+                # Gate inputs (criteria.json) stay out of the agent's worktree: an agent
+                # told to "make the gates pass" must not be handed the oracle to edit.
+                overlay: dict[str, str | None] = {}
+                for f in sorted(Path(tmp).rglob("*")):
+                    rel = f.relative_to(tmp).as_posix()
+                    if not f.is_file() or rel in GATE_INPUT_FILES:
+                        continue
+                    try:
+                        overlay[rel] = f.read_text(encoding="utf-8")
+                    except UnicodeDecodeError:
+                        continue  # a base tree's binary asset: the sandbox clone has it
+
+        except MaterializationError as exc:
+            # The gate already recorded this tree as ERROR; returning no diff lets the
+            # bounded fix loop halt in order instead of crashing the run.
+            return {"agent_journal": [journal_entry(
+                node_id=FIXER_NODE_ID, role="Backend Engineer",
+                seq=rt.seq(config, FIXER_NODE_ID, f"journal:fix-{attempt}"),
+                summary="Could not rebuild the integrated tree to fix it",
+                concerns=(str(exc)[:400],),
+            )]}
+        from foundry.agents.implementation.tickets import (
+            CONTRACT_DUP_TRIAGE,
+            contract_duplicates,
+            verify_commands,
+        )
+        from foundry.graph.gate_wiring import contract_paths
+
+        # Contract-type copies type-check alone and then misfit their callers; hand
+        # any still in the integrated tree to the fixer with the gate failures.
+        duplicates = contract_duplicates(overlay, contract_paths(state, resolve))
+        from foundry.agents.implementation.tickets import group_failures_by_ticket, read_tickets
+
+        failures = group_failures_by_ticket(_prior_failures(state), read_tickets(state, resolve))
+        if duplicates:
+            failures = (*failures, f"[{CONTRACT_DUP_TRIAGE}]", *duplicates)
+        from foundry.agents.implementation.tickets import note_fix_writes, pending_wave
+
+        focus = _fix_focus(state, resolve)
+        contracts = contract_paths(state, resolve)
+        persona = _FIXER_PERSONA
+        if focus and pending_wave(state, resolve):
+            persona += (" Later waves have not been built yet: fix the files built so far ("
+                        + ", ".join(focus) + "), and never build a later ticket's files. "
+                        "A change anywhere else is kept but flagged for review.")
+        if contracts:
+            persona += (" Every ticket builds against the contract files ("
+                        + ", ".join(contracts) + "): change them only when the failure is "
+                        "in the contract itself; each change is recorded for review.")
+        # Numbered by the fixes so far, not the attempt counter: that resets per wave
+        # and on a resume, and a reused id would collide with the earlier fix's notes.
+        fixes = {a.task_id for a in _of_kind(state, FEATURE_DIFF_KIND)
+                 if a.task_id and a.task_id.startswith("fix-")}
+        task_id = f"fix-{len(fixes) + 1}"
+        task = Task(
+            id=task_id,
+            spec_uri=f"fix://{attempt}",
+            criterion_ids=(),
+            branch=f"task/{task_id}",
+            seq=rt.seq(config, FIXER_NODE_ID, f"task:{task_id}"),
+        )
+        writes = _run_one_task(
+            rt,
+            task,
+            state.get("pinned_constraints") or (),
+            config,
+            source_dir=source_dir,
+            snapshot_store=snapshot_store,
+            turn_budget=turn_budget,
+            cost_budget_microusd=cost_budget_microusd,
+            prior_failures=failures,
+            persona=persona,
+            overlay=overlay,
+            rules=_FIXER_RULES,
+            verify=verify_commands(state.get("stack")),
+            review=lambda result, sandbox: note_fix_writes(
+                result, sandbox, task_id, focus=focus, contracts=contracts),
+        )
+        # Integration orders diffs by Seq. A fresh diff key starts at epoch 1, tying
+        # with (and possibly sorting under) the diffs it repairs, so lift its epoch
+        # past every existing diff.
+        top = max(a.seq.emission_epoch for a in _of_kind(state, FEATURE_DIFF_KIND))
+        writes["artifacts"] = [
+            a.model_copy(update={"seq": a.seq._replace(emission_epoch=top + 1)})
+            for a in writes["artifacts"]
+        ]
+        writes.setdefault("agent_journal", []).append(journal_entry(
+            node_id=FIXER_NODE_ID, role="Backend Engineer",
+            seq=rt.seq(config, FIXER_NODE_ID, f"journal:{task_id}"),
+            summary=f"Fixed the failing gates (attempt {attempt})",
+        ))
+        return writes
+
+    return _node

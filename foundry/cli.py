@@ -7,7 +7,7 @@ request it assembles the FULL dev wiring with the test doubles (NO live API key,
 NO ``claude -p`` binary, NO network), compiles the factory graph, and runs the
 SPEC core path::
 
-    intake -> product -> architecture -> [spec gate] -> implementation
+    triage -> planner -> [spec gate] -> implementation
            -> quality -> [build+test gates] -> emit (PR-equivalent action)
 
 end to end, returning the emitted reviewed-artifact handle, the single ``open_pr``
@@ -40,27 +40,26 @@ proven assembly in ``tests/test_factory_graph.py`` / ``tests/test_supervisor.py`
 
 ALL model egress stays behind the proxy (L6) — this module never imports
 ``anthropic`` and never touches GitHub / the network: the PR is expressed ONLY
-as an :class:`ExternalAction` on the ``actions`` channel (FG2); the outbox relay
-is the sole component that ever touches the outside world.
+as an :class:`ExternalAction` on the ``actions`` channel (FG2).
 """
 
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
-import shutil
 import sys
 import tempfile
-from collections.abc import Callable
+import threading
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from langgraph.types import Command
-
 from foundry.agents import AgentRuntime
-from foundry.docs import write_bundle
+from foundry.agents.implementation import DEFAULT_WORKERS
+from foundry.agents.planner import TICKET_KIND
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.durability.checkpointer import FoundryCheckpointer
 from foundry.durability.persistence import (
@@ -68,48 +67,62 @@ from foundry.durability.persistence import (
     durable_backends,
     state_dir_from_env,
 )
+from foundry.execution.adapter_contract import current_packet_tier
 from foundry.execution.adapters.stub import StubAdapter
 from foundry.gates import DevGateWriteVerifier, TwoZoneGateRunner, ZoneBSigner
 from foundry.gates.signing import signing_schemes_from_env
 from foundry.graph.factory_graph import build_factory_graph, terminal_gates_pass
-from foundry.graph.supervisor import (
-    MODE_ASSISTANT,
-    MODE_AUTONOMOUS,
-    MODE_GATED,
-    normalize_checkpoints,
+from foundry.graph.gate_wiring import GATE_INPUT_FILES
+from foundry.graph.supervisor import MODE_ASSISTANT, RESUME_PHASE, resume_boundary
+from foundry.manifest import write_manifest
+from foundry.modes import (
+    DEFAULT_FIX_ATTEMPTS,
+    MODEL_MODES,
+    Level,
+    build_level_proxy,
+    local_tiers,
+    resolve_levels,
 )
 from foundry.proxy import ModelProviderProxy, build_backend
-from foundry.proxy.model_provider_proxy import DriftMode, DriftPolicy
+from foundry.proxy.local_transport import (
+    DEFAULT_LOCAL_MODEL,
+    DEFAULT_LOCAL_URL,
+    LocalOpenAITransport,
+    check_local_server,
+)
+from foundry.proxy.model_provider_proxy import DriftMode, DriftPolicy, ProviderTransport
 from foundry.proxy.test_doubles import MockTransport
+from foundry.proxy.token_meter import (
+    BuildStopped,
+    RunCapExceeded,
+    TimeCapExceeded,
+    TokenMeter,
+)
 from foundry.schemas.architecture import OwnershipMap, SystemDesign
 from foundry.schemas.base import FrozenModel
-from foundry.schemas.checkpoint import CHECKPOINT_BOUNDARIES
 from foundry.schemas.gates import GateStatus
-from foundry.schemas.implementation import FeatureDiff
+from foundry.schemas.implementation import (
+    DEFAULT_TICKET_TIERS,
+    Difficulty,
+    FeatureDiff,
+    Specialty,
+    TaskEvent,
+)
 from foundry.schemas.product import AcceptanceCriterion, Criticality
 from foundry.state.global_records import GlobalRecords
 from foundry.state.reducers import reset_gate_write_verifier, set_gate_write_verifier
+from foundry.state.seq import Seq
 
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
 
     from foundry.agents.implementation.senior_engineer import ArtifactResolver
-    from foundry.docs import DocumentationBundle
-    from foundry.domains.contract import DomainPackContract
-    from foundry.domains.registry import PackRegistry
     from foundry.graph.gate_wiring import BlobResolver
     from foundry.proxy.cli_transports import BackendName
     from foundry.schemas.base import Artifact, ExternalAction
-    from foundry.schemas.checkpoint import CheckpointBoundary
     from foundry.state.factory_state import FactoryState
 
-# A programmatic checkpoint responder (plan [10]): given the READ-ONLY inspection
-# payload surfaced at a pause, return the human decision (a verdict string, or a
-# mapping with ``verdict`` + optional ``steered_by``/``note``). Programmatic by
-# design — NO interactive stdin — so the checkpoint flow is fully testable.
-CheckpointResponder = Callable[[dict[str, Any]], "str | dict[str, Any]"]
-
-__all__ = ["MODES", "CheckpointResponder", "RunResult", "main", "run"]
+__all__ = ["MODES", "RunResult", "main", "run"]
 
 # Zone-B trust-root key material: a locally-held HMAC secret (the operator is the
 # trust boundary on a single-user LAN; see foundry.gates.signing).
@@ -122,29 +135,22 @@ _LINEAGE_REV = "lineage-rev-cli-1"
 # returns the passing unified-diff body keyed on it (SUP7).
 _DIFF_BODY_URI = "cas://cli/diff-body"
 
-# The dev-grade trusted-builder identity + deploy target the AUTONOMOUS trust-root
-# chain (build → admit → deploy) wires hands-off. They stand in for the production
-# KMS/OIDC builder + deploy target (plan §0.3); the builder shares the run's zone-B
-# key so admission re-verifies the build signature under the SAME root.
-_BUILDER_ID = "dev-trusted-builder-cli"
-_DEPLOY_TARGET = "prod"
-
-# The release modes the CLI exposes (the supervisor mode constants; assistant is the
-# DEFAULT — byte-identical to the historical request-only run).
-MODES = (MODE_ASSISTANT, MODE_GATED, MODE_AUTONOMOUS)
+# The release modes the CLI accepts. Only assistant remains; the flag is kept so
+# existing `--mode assistant` invocations still work.
+MODES = (MODE_ASSISTANT,)
 
 # The model backends selectable via ``--backend`` / run(backend=). "mock" (DEFAULT)
 # is the deterministic scripted MockTransport — keyless, no network, the historical
 # smoke behavior. The others route the factory's model egress through a REAL backend
 # via the single-egress proxy (foundry/proxy/cli_transports.build_backend): "anthropic"
 # (SDK; needs ANTHROPIC_API_KEY), "openai" (SDK chat.completions; needs OPENAI_API_KEY),
-# "claude-cli" (`claude -p`), "codex" (`codex exec`), "ollama-gemma" (local Ollama).
+# "claude-cli" (`claude -p`), "codex" (`codex exec`).
 # Picking a real backend makes real, metered model calls; the coding substrate +
 # materialization in THIS smoke CLI stay dev-grade (StubAdapter + synthetic resolver),
 # so --backend exercises the proxy/lineage/determinism/manifest path, not a real
 # code-writing adapter (that is a separate seam).
 _MOCK_BACKEND = "mock"
-BACKENDS = (_MOCK_BACKEND, "anthropic", "openai", "claude-cli", "codex", "ollama-gemma")
+BACKENDS = (_MOCK_BACKEND, "anthropic", "openai", "claude-cli", "codex")
 
 
 # Coding substrates (WorkerAdapter): the thing that actually writes the code for
@@ -158,8 +164,8 @@ ADAPTERS = ("stub", "raw-react", "claude-code", "proxy-agent")
 _DEFAULT_ADAPTER = "stub"
 
 # Scope tier selection: how much system to build. `auto` (the default) lets the
-# Scope Judge node classify the request; `demo`/`standard` PIN the tier and skip
-# the judge's model call. Pinning gives a deterministic tier for an A/B against
+# planner classify the request; `demo`/`standard` PIN the tier (the planner
+# keeps it and applies its caps). Pinning gives a deterministic tier for an A/B against
 # the judged one. Scope caps what the agents PROPOSE, never what the gates
 # require — both tiers face an identical gate set.
 SCOPES = ("auto", "demo", "standard")
@@ -213,11 +219,17 @@ def make_coding_adapter(
     proxy: ModelProviderProxy,
     thread_id: str = "cli-run",
     activity_cb: Callable[[str], None] | None = None,
+    tier_models: Mapping[str, str] | None = None,
 ) -> Any:
     """Construct the selected coding substrate (``ADAPTERS``). ``None`` ⇒ the
     deterministic ``stub`` (back-compat). ``raw-react`` drives the chosen model
     backend through the single-egress proxy (real code over any backend — `claude -p`
-    completions under ``claude-cli``, the Anthropic API under ``anthropic``)."""
+    completions under ``claude-cli``, the Anthropic API under ``anthropic``).
+
+    Each packet's ``task["tier"]`` (a ticket's difficulty, mapped) picks the model:
+    the proxy closures pass it as the call's tier, and ``claude-code`` resolves it
+    through ``tier_models`` (the proxy's tier -> model map) into ``--model``. A
+    packet with no tier runs on T1 / the CLI's default model."""
     name = (name or _DEFAULT_ADAPTER).strip().lower()
     if name == "stub":
         return StubAdapter()
@@ -228,7 +240,7 @@ def make_coding_adapter(
             return (
                 proxy.complete(
                     "junior_engineer",
-                    "T1",
+                    current_packet_tier() or "T1",
                     _RAW_REACT_SOP,
                     [{"role": "user", "content": prompt}],
                     purpose="ideation",
@@ -247,7 +259,8 @@ def make_coding_adapter(
         # `activity_cb` (optional) streams what the agent is DOING inside one step —
         # a step is a single blocking CLI call, so without it a multi-minute agentic
         # pass reports nothing until it returns.
-        return ClaudeCodeAdapter(run_id=thread_id, on_activity=activity_cb)
+        return ClaudeCodeAdapter(run_id=thread_id, on_activity=activity_cb,
+                                 tier_models=tier_models)
     if name == "proxy-agent":
         from foundry.execution.adapters.proxy_agent import ProxyAgentAdapter
 
@@ -256,7 +269,7 @@ def make_coding_adapter(
         def _agent_complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
             result = proxy.complete(
                 "junior_engineer",
-                "T1",
+                current_packet_tier() or "T1",
                 _RAW_REACT_SOP,
                 list(messages),
                 purpose="ideation",
@@ -274,12 +287,13 @@ def _resolve_coding_adapter(
     proxy: ModelProviderProxy,
     thread_id: str,
     activity_cb: Callable[[str], None] | None = None,
+    tier_models: Mapping[str, str] | None = None,
 ) -> Any:
     """A WorkerAdapter instance passes through (tests inject one); a name (or None)
     is constructed via :func:`make_coding_adapter`."""
     if adapter is None or isinstance(adapter, str):
         return make_coding_adapter(adapter, proxy=proxy, thread_id=thread_id,
-                                   activity_cb=activity_cb)
+                                   activity_cb=activity_cb, tier_models=tier_models)
     return adapter
 
 
@@ -323,7 +337,6 @@ def _default_tier_models(backend: str) -> dict[str, str]:
     override can overlay a partial set without dropping the other tiers)."""
     from foundry.proxy.cli_transports import (
         CODEX_TIER_MODELS,
-        GEMMA_TIER_MODELS,
         OPENAI_TIER_MODELS,
     )
     from foundry.proxy.model_provider_proxy import TIER_MODELS
@@ -332,8 +345,6 @@ def _default_tier_models(backend: str) -> dict[str, str]:
         return dict(OPENAI_TIER_MODELS)
     if backend == "codex":
         return dict(CODEX_TIER_MODELS)
-    if backend == "ollama-gemma":
-        return dict(GEMMA_TIER_MODELS)
     return dict(TIER_MODELS)  # anthropic / claude-cli share the Anthropic lineage
 
 
@@ -375,98 +386,58 @@ def _build_proxy(backend: str) -> ModelProviderProxy:
         tier_models=_tier_models(backend),
     )
 
-# The first-party domain packs selectable via ``--packs`` (T-M5-08). Mapped by the
-# stable pack NAME (``pack.name``); a NEW pack is added here AND via register() — but
-# the graph wiring stays open/closed (it reads the COMPOSED policy generically).
-_PACK_FACTORIES: dict[str, Callable[[], DomainPackContract]] = {}
+def _cloud_transport(backend: str) -> ProviderTransport:
+    """The egress of one cloud level ("mock" is the scripted keyless double)."""
+    if backend == _MOCK_BACKEND:
+        return MockTransport.scripted(dict(_SCRIPTS), default_verdict="approve")
+    from foundry.proxy.cli_transports import transport_for
+
+    return transport_for(cast("BackendName", backend))
 
 
-def _pack_factories() -> dict[str, Callable[[], DomainPackContract]]:
-    """The lazily-built ``name -> pack-factory`` map for ``--packs`` selection.
-
-    Imported lazily (the pack modules pull in the domain contract) so a plain
-    ``--mode assistant`` run never imports the domain layer (back-compat: no new
-    import cost / no new surface on the default path).
-    """
-    if not _PACK_FACTORIES:
-        from foundry.domains.packs.crypto import CryptoPack
-        from foundry.domains.packs.frontend import FrontendPack
-        from foundry.domains.packs.game import GamePack
-        from foundry.domains.packs.infra import InfraPack
-        from foundry.domains.packs.ml_data import MLDataPack
-        from foundry.domains.packs.regulated import RegulatedPack
-
-        for cls in (RegulatedPack, MLDataPack, FrontendPack, GamePack, CryptoPack, InfraPack):
-            _PACK_FACTORIES[cls().name] = cls
-    return _PACK_FACTORIES
+def _local_transport(base_url: str) -> ProviderTransport:
+    """The egress of the local levels: an OpenAI-compatible server, no credential."""
+    return LocalOpenAITransport(base_url)
 
 
-def _build_pack_registry(packs: list[str]) -> tuple[PackRegistry, frozenset[str]]:
-    """Build a :class:`PackRegistry` from selected pack NAMES + their capabilities.
-
-    Returns the registry (with each named pack registered) and the UNION of the
-    selected packs' declared capabilities. The capabilities are seeded onto the
-    request's ``required_capabilities`` channel so the COMPOSED policy actually
-    engages (a pack's veto / approver-of-record / HITL fires off the request
-    capabilities, not merely off registration — mirrors the supervisor-pack
-    tests). Raises :class:`ValueError` for an unknown pack name (fail-closed; a
-    typo never silently engages nothing)."""
-    from foundry.domains.registry import PackRegistry
-
-    factories = _pack_factories()
-    registry = PackRegistry()
-    capabilities: set[str] = set()
-    for name in packs:
-        factory = factories.get(name)
-        if factory is None:
-            raise ValueError(
-                f"unknown pack {name!r}; available: {', '.join(sorted(factories))}"
-            )
-        pack = factory()
-        registry.register(pack)
-        capabilities.update(pack.capabilities)
-    return registry, frozenset(capabilities)
-
-
-def _enforce_mode_veto(
-    rt: AgentRuntime,
-    config: RunnableConfig,
-    registry: PackRegistry,
-    capabilities: frozenset[str],
-    *,
-    requested_mode: str,
-) -> None:
-    """Fail-closed: refuse to run a mode an engaged domain pack VETOES (T-M5-08).
-
-    The composed ``mode_tier`` policy is a PURE function of the request's
-    capabilities; :func:`resolve_effective_mode_tier` resolves the EFFECTIVE mode
-    after the veto. If the requested mode is no longer reachable (e.g. a regulated
-    pack vetoes hands-off Autonomous, degrading it to Gated), we RAISE rather than
-    silently run the (now-vetoed) mode — the operator must re-issue with the
-    allowed mode. This mirrors the supervisor's at-triage degrade, surfaced as an
-    explicit CLI error so the trust posture the operator believes they ran is the
-    posture that actually ran."""
-    from foundry.domains.governance_hooks import resolve_effective_mode_tier
-
-    # The view carries the requested mode so mode-aware packs (game/infra/crypto
-    # relax their human-only requirements for a declared-autonomous run) compose
-    # the same policy here as at the release boundary.
-    request_view = {"required_capabilities": sorted(capabilities), "mode": requested_mode}
-    policy = registry.compose(request_view)
-    eff = resolve_effective_mode_tier(
-        policy.mode_tier,
-        requested_mode=requested_mode,
-        request=request_view,
-        capabilities=sorted(capabilities),
-        seq=rt.seq(config, "cli", "pack:mode_veto"),
+def _build_level_proxy(levels: Mapping[str, Level]) -> ModelProviderProxy:
+    """One proxy routing each tier to its level's transport (model modes)."""
+    return build_level_proxy(
+        levels,
+        cloud_transport=_cloud_transport,
+        local_transport=_local_transport,
+        signer=_zone_b_signer(),
+        drift_policy=_drift_policy(),
     )
-    if requested_mode not in eff.reachable_modes:
-        raise ValueError(
-            f"mode {requested_mode!r} is VETOED by the engaged pack(s) "
-            f"{', '.join(p.name for p in registry.packs())}; the strictest "
-            f"reachable mode is {eff.effective_mode!r} "
-            f"(re-run with --mode {eff.effective_mode})"
+
+
+def _level_adapter(
+    adapter: str | Any | None,
+    *,
+    backend: str,
+    levels: Mapping[str, Level],
+    proxy: ModelProviderProxy,
+    thread_id: str,
+    activity_cb: Callable[[str], None] | None,
+) -> Any:
+    """The coding substrate under a level table: a ticket on a cloud level runs the
+    run's cloud adapter (claude-code under claude-cli) with the cloud levels'
+    models; a ticket on a local level runs proxy-agent through the local server,
+    one session at a time."""
+    from foundry.execution.adapters.tiered import TieredAdapter
+
+    local = make_coding_adapter("proxy-agent", proxy=proxy, thread_id=thread_id)
+    cloud_models = {t: lvl.model for t, lvl in levels.items() if not lvl.local}
+    cloud = local
+    if cloud_models:
+        cloud = _resolve_coding_adapter(
+            adapter if adapter is not None else _default_adapter_for(backend),
+            proxy=proxy, thread_id=thread_id, activity_cb=activity_cb,
+            tier_models=cloud_models,
         )
+    return TieredAdapter(cloud=cloud, local=local, local_tiers=local_tiers(levels),
+                         local_slot=proxy.local_slot)
+
 
 # Spec ingestion (task [8]). A whole-run cap on the design-spec text seeded into
 # state: bounds checkpoint size + token cost on a large doc / directory; the
@@ -485,19 +456,6 @@ _PASSING_DIFF = (
     "+def test_ok():\n    assert 1 + 1 == 2\n"
 )
 
-# The Gated/Autonomous spine ADDS the assurance phase (Security/Audit/supply-chain
-# on the integrated tree). The Audit gate reads a lockfile inventory (AW2), so the
-# assurance-mode default diff carries a ``uv.lock`` alongside the passing test (no
-# hardcoded secret → Security PASS). Used as the run() default ONLY for
-# gated/autonomous (assistant stays byte-identical to the Phase-1 _PASSING_DIFF).
-_ASSURANCE_PASSING_DIFF = (
-    "--- /dev/null\n+++ b/app.py\n@@ -0,0 +1,1 @@\n+VALUE = 42\n"
-    "--- /dev/null\n+++ b/test_app.py\n@@ -0,0 +1,2 @@\n"
-    "+def test_ok():\n    assert 1 + 1 == 2\n"
-    '--- /dev/null\n+++ b/uv.lock\n@@ -0,0 +1,2 @@\n+name = "pkg"\n    license = "MIT"\n'
-)
-
-
 # ---- scripted per-node payloads (free-text completions, SOP order) ----------
 # Substring-keyed on each agent's SOP marker (count-independent, so a fix-loop
 # can re-run the implementation+quality phases without exhausting a queue; SUP7).
@@ -506,146 +464,107 @@ _ASSURANCE_PASSING_DIFF = (
 # node gets `default_text=""`, which fails structured-output parsing and dies as a
 # ProxyUnavailable after the retries. STANDARD keeps the smoke path's scope
 # unchanged; `--scope demo` still exercises the capped path deterministically.
-_SCOPE_PAYLOAD: dict[str, Any] = {
-    "tier": "standard",
-    "rationale": "the smoke request is treated as a full-scope build",
-    "signals": [],
-}
-
-_INTENT_PAYLOAD: dict[str, Any] = {
-    "intent": "Run the one-line request through the factory.",
-    "assumptions": ["single user"],
-    "unknowns": [],
-    "success_criteria": ["the requested behavior works"],
-    "must_haves": ["core feature"],
-    "nice_to_haves": [],
-}
-
-_PRD_PAYLOAD: dict[str, Any] = {
-    "title": "Requested service",
-    "prd_body": "Deliver the requested behavior.",
-    "required_capabilities": [],
-    "acceptance_criteria": [
+# The planner's ONE call authors the whole product + architecture plan.
+_PLAN_PAYLOAD: dict[str, Any] = {
+    "scope": {
+        "tier": "standard",
+        "rationale": "the smoke request is treated as a full-scope build",
+        "signals": [],
+    },
+    "intent": {
+        "intent": "Run the one-line request through the factory.",
+        "assumptions": ["single user"],
+        "unknowns": [],
+        "success_criteria": [{"id": "SC-1", "text": "the requested behavior works"}],
+        "must_haves": [{"id": "MH-1", "text": "core feature"}],
+        "nice_to_haves": [],
+        "deliverable": "cli",
+    },
+    "prd": {
+        "title": "Requested service",
+        "body": "Deliver the requested behavior.",
+        "required_capabilities": [],
+    },
+    "criteria_review": {"missing": [], "security_abuse_omissions": []},
+    "sprint_plan": {
+        "milestones": ["M1"],
+        "usd_cap_microusd": 30_000_000,
+        "risk_register": "none",
+        "done_definition": "all criteria green",
+    },
+    "design": {"title": "Requested service", "body": "api -> store", "components": ["api"]},
+    "adrs": [],
+    # Python without a bdd command: the gates keep the pinned pytest-bdd harness.
+    "stack": {
+        "language": "python", "framework": "", "package_manager": "pip", "install": "",
+        "build": "", "typecheck": "", "test": "pytest", "bdd": "",
+        "run": "python3 -c 'import app'", "notes": "", "contracts_file": "", "harness_files": [],
+    },
+    "interfaces": [],
+    # A small build: one epic, its tickets inline (no per-epic calls).
+    "epics": [
         {
-            "id": "AC-001",
-            "text": "Given the service, When invoked, Then it responds.",
-            "criticality": "normal",
-            "oracle_hint": "call it; observe the response",
-            "security_abuse": False,
-        },
-        {
-            "id": "AC-002",
-            "text": "Given an unauthenticated request, When it hits the API, Then 401.",
-            "criticality": "high-risk",
-            "oracle_hint": "no token -> 401; negative oracle",
-            "security_abuse": True,
+            "id": "E1",
+            "title": "Requested service",
+            "summary": "The whole requested behavior.",
+            "specialty_mix": ["backend", "test"],
+            "depends_on": [],
+            "provides": [],
+            "consumes": [],
         },
     ],
-}
-
-_CRITIQUE_PAYLOAD: dict[str, Any] = {"missing": [], "security_abuse_omissions": []}
-
-_SPRINT_PAYLOAD: dict[str, Any] = {
-    "milestones": ["M1"],
-    "usd_cap_microusd": 30_000_000,
-    "risk_register_body": "none",
-    "done_definition": "all criteria green",
-}
-
-_DESIGN_PAYLOAD: dict[str, Any] = {
-    "title": "Requested service",
-    "design_body": "api -> store",
-    "components": ["api"],
-    "adrs": [],
-    "interfaces": [],
-    "ownership": {"app.py": "owner-a"},  # one unit -> one task -> one diff
+    # One feature ticket (also the entrypoint) and its paired test ticket.
+    "tickets": [
+        {
+            "id": "T-001",
+            "title": "Serve the requested behavior",
+            "description": "The service answers callers and rejects anonymous ones.",
+            "specialty": "backend",
+            "difficulty": "standard",
+            "depends_on": [],
+            "files": ["app.py"],
+            "implements": [],
+            "consumes": [],
+            "entrypoint": True,
+            "scenarios": [
+                {
+                    "id": "AC-001",
+                    "given": ["the service is running"],
+                    "when": ["it is invoked"],
+                    "then": ["it responds"],
+                    "criticality": "normal",
+                    "security_abuse": False,
+                    "covers": ["MH-1", "SC-1"],
+                },
+                {
+                    "id": "AC-002",
+                    "given": ["an unauthenticated request"],
+                    "when": ["it hits the API"],
+                    "then": ["the response is 401"],
+                    "criticality": "high-risk",
+                    "security_abuse": True,
+                    "covers": [],
+                },
+            ],
+        },
+        {
+            "id": "T-002",
+            "title": "Step definitions for T-001",
+            "specialty": "test",
+            "difficulty": "trivial",
+            "depends_on": ["T-001"],
+            "files": ["tests/step_defs/test_t_001.py"],
+            "implements": [],
+            "consumes": [],
+            "entrypoint": False,
+            "scenarios": [],
+        },
+    ],
     "pinned_constraints": [],
 }
 
-_DECOMPOSITION_PAYLOAD: dict[str, Any] = {
-    "tasks": [{"unit": "app.py", "title": "build app", "criterion_ids": ["AC-001"]}]
-}
-
-_QA_PAYLOAD: dict[str, Any] = {
-    "tests": [{"test_id": "t-1", "criterion_ids": ["AC-001", "AC-002"]}],
-    "quarantined": [],
-}
-
-_SDET_PAYLOAD: dict[str, Any] = {
-    "scenarios": [{"scenario_id": "e2e-1", "criterion_ids": ["AC-001"]}],
-    "quarantined": [],
-}
-
-_RUNBOOK_PAYLOAD: dict[str, Any] = {
-    "overview": "Operational guide for deploying and running the service.",
-    "prerequisites": ["provisioned runtime", "configured secrets"],
-    "deploy_steps": ["build artifact", "run gates", "promote to prod"],
-    "rollback_steps": ["re-point to previous artifact digest", "verify health"],
-    "health_checks": ["GET /healthz returns 200"],
-    "monitoring": ["error rate", "p99 latency"],
-    "oncall_escalation": ["page primary on-call after 5m of failing health checks"],
-}
-_KNOWN_ISSUES_PAYLOAD: dict[str, Any] = {
-    "issues": [
-        {
-            "summary": "Dev-grade in-memory persistence",
-            "impact": "State is lost on restart",
-            "workaround": "Wire a durable store before production",
-            "severity": "medium",
-        }
-    ],
-    "limitations": ["single-region deployment assumed"],
-}
-_UPGRADE_PAYLOAD: dict[str, Any] = {
-    "from_version": "0.0.0",
-    "to_version": "0.1.0",
-    "breaking_changes": [],
-    "migration_steps": ["no migration required for the initial release"],
-    "rollback_notes": "Re-deploy the previous artifact digest.",
-}
-_PERF_COST_PAYLOAD: dict[str, Any] = {
-    "summary": "Build completed within the configured budget.",
-    "observations": ["most tokens were spent in the architecture and quality stages"],
-    "recommendations": ["enable prompt caching on the stable SOP prefixes"],
-}
-
-# The assurance-phase agents (Gated/Autonomous spine only). Mirrors the gated /
-# autonomous end-to-end test fixtures: a clean STRIDE model, a clean SBOM, and a
-# clean supply-chain review → Security/Audit/supply_chain PASS on the integrated
-# tree. Unused on the Assistant path (the assurance subgraph is never mounted).
-_APPSEC_PAYLOAD: dict[str, Any] = {
-    "threat_model_body": "STRIDE model",
-    "oracle_bindings": {"S1": "test_auth"},
-    "residual_item_ids": [],
-    "severity": "low",
-    "findings": [],
-}
-_AUDIT_PAYLOAD: dict[str, Any] = {"sbom_body": "sbom", "severity": "low", "findings": []}
-_SUPPLY_CHAIN_PAYLOAD: dict[str, Any] = {
-    "report_body": "supply-chain review",
-    "policy_violations": [],
-    "trust_root_touched": False,
-}
-
 _SCRIPTS: dict[str, str] = {
-    "You are the Scope Judge": json.dumps(_SCOPE_PAYLOAD),
-    "Stakeholder / Client Proxy": json.dumps(_INTENT_PAYLOAD),
-    "Product Manager": json.dumps(_PRD_PAYLOAD),
-    "Criteria-Completeness Critic": json.dumps(_CRITIQUE_PAYLOAD),
-    "Engineering / Program Manager": json.dumps(_SPRINT_PAYLOAD),
-    "Principal Architect": json.dumps(_DESIGN_PAYLOAD),
-    "Senior Engineer": json.dumps(_DECOMPOSITION_PAYLOAD),
-    "QA Engineer": json.dumps(_QA_PAYLOAD),
-    "SDET": json.dumps(_SDET_PAYLOAD),
-    # Assurance phase (Gated / Autonomous spine).
-    "You are the Security / AppSec Engineer": json.dumps(_APPSEC_PAYLOAD),
-    "You are the Audit / Compliance agent": json.dumps(_AUDIT_PAYLOAD),
-    "You are the Supply-Chain Reviewer": json.dumps(_SUPPLY_CHAIN_PAYLOAD),
-    # Technical Writer (foundry/docs) authored docs.
-    "OPERATIONAL RUNBOOK": json.dumps(_RUNBOOK_PAYLOAD),
-    "KNOWN-ISSUES": json.dumps(_KNOWN_ISSUES_PAYLOAD),
-    "UPGRADE / MIGRATION GUIDE": json.dumps(_UPGRADE_PAYLOAD),
-    "PERFORMANCE & COST": json.dumps(_PERF_COST_PAYLOAD),
+    "You are the Planner": json.dumps(_PLAN_PAYLOAD),
 }
 
 
@@ -655,7 +574,7 @@ _SCRIPTS: dict[str, str] = {
 def _synthetic_resolve(store: ArtifactStore) -> ArtifactResolver:
     """A KIND-dispatching typed resolver that falls through to the real store.
 
-    The architecture/product agents mint content-addressed HANDLES mid-run whose
+    The planner mints content-addressed HANDLES mid-run whose
     uri encodes an epoch-dependent ``content_identity()`` (so it can't be
     pre-keyed) and, with the StubAdapter, no faithful passing-test body is ever
     authored. So for the handle kinds the SPEC core path consumes we synthesize a
@@ -673,7 +592,11 @@ def _synthetic_resolve(store: ArtifactStore) -> ArtifactResolver:
                 seq=handle.seq,
             )
         if handle.kind == "ownership_map":
-            return OwnershipMap(owners={"app.py": "owner-a"}, seq=handle.seq)
+            return OwnershipMap(
+                owners={"app.py": "owner-a"},
+                unit_criteria={"app.py": ("AC-001",)},
+                seq=handle.seq,
+            )
         if handle.kind == "acceptance_criterion":
             cid = f"AC-{handle.seq.local:03d}-{handle.seq.emission_epoch}"
             return AcceptanceCriterion(
@@ -735,21 +658,14 @@ def _judgment_anchors(real_artifacts: bool) -> dict[str, str]:
     produces (the reviewer's advisory verdict binds them; byte-identical smoke).
     Real backend ⇒ pin NOTHING: the reviewer then binds the REAL newest
     FeatureDiff uri (state fallback) + the REAL integrated tree_sha (read off the
-    attested gate verdicts), and the gated sign-off anchors derive consistently
-    on both read sites. Admission/provenance/evidence already bind the real
-    verdict-carried ``run_against``, never these labels, so unpinning is safe."""
+    attested gate verdicts). The gates bind the real verdict-carried
+    ``run_against``, never these labels, so unpinning is safe."""
     if real_artifacts:
         return {}
     return {"subject_artifact_uri": _DIFF_BODY_URI, "state_sha": "integrated-sha"}
 
 
 # ---- final source-tree materialization (on a passing build) -----------------
-
-# The gate-input file the integrated tree carries for the Spec gate; it is NOT a
-# source file the user asked the factory to produce, so it is excluded from the
-# emitted output tree.
-_GATE_INPUT_FILES = frozenset({"criteria.json"})
-
 
 def _write_output_tree(
     final_state: FactoryState,
@@ -772,7 +688,7 @@ def _write_output_tree(
     from agent-influenced diff bodies; ``materialize_workdir`` already rejects an
     absolute/``..`` diff path fail-closed (D-R1-03), and we re-check each copied
     relative path against the destination root (mirrors
-    :func:`docs.assemble.write_bundle`) so a write can never escape ``output_dir``.
+    ``materialize_workdir``) so a write can never escape ``output_dir``.
     """
     from foundry.graph.gate_wiring import materialize_workdir
 
@@ -787,9 +703,9 @@ def _write_output_tree(
             if not src.is_file():
                 continue
             rel = src.relative_to(stage_root)
-            if rel.name in _GATE_INPUT_FILES and len(rel.parts) == 1:
+            if rel.name in GATE_INPUT_FILES and len(rel.parts) == 1:
                 continue
-            # Defense-in-depth (mirrors docs/assemble.write_bundle): reject an
+            # Defense-in-depth: reject an
             # absolute or '..' relative path before writing under out_root.
             if rel.is_absolute() or ".." in rel.parts:
                 raise ValueError(f"unsafe source path {str(rel)!r}")
@@ -813,7 +729,7 @@ def _write_draft_on_halt(
     plus a ``DRAFT-STATUS.md`` naming what's still failing — so a held build hands back
     a usable starting point, never empty hands. Best-effort: a tree that can't even be
     materialized (e.g. an unparseable diff) is skipped (returns ``None``), never crashes
-    the run. Clearly marked NOT shipped — admission still rejected the tree."""
+    the run. Clearly marked NOT shipped — the gates rejected the tree."""
     try:
         draft_root = _write_output_tree(
             final_state, output_dir, resolve=resolve, resolve_blob=resolve_blob
@@ -933,15 +849,6 @@ _TRUST_POSTURE: dict[str, str] = {
         "advisory review, no trust root — produces a bare open_pr a human reviews "
         "+ merges via normal CI (the reviewer's verdict is ADVISORY)"
     ),
-    MODE_GATED: (
-        "full gate set + human sign-off — a release candidate behind Spec/Build/Test "
-        "+ the tier-scaled assurance family, carrying a WORM evidence pack, gated on "
-        "a recorded Design + Release sign-off"
-    ),
-    MODE_AUTONOMOUS: (
-        "full trust root — hands-off build -> admit -> deploy; deploy-time admission "
-        "is the SOLE release gate (no human sign-off)"
-    ),
 }
 
 
@@ -961,12 +868,9 @@ class RunResult:
     passed: bool
     phase: str
     mode: str = MODE_ASSISTANT
-    """The release mode the run was driven in (assistant | gated | autonomous)."""
+    """The release mode the run was driven in (always assistant)."""
     backend: str = _MOCK_BACKEND
-    """The model backend the proxy used (mock | anthropic | openai | claude-cli | codex |
-    ollama-gemma)."""
-    packs: tuple[str, ...] = ()
-    """The domain packs engaged (by name) — empty when no ``--packs`` were given."""
+    """The model backend the proxy used (mock | anthropic | openai | claude-cli | codex)."""
     artifact_uri: str | None = None
     """The reviewed FeatureDiff handle uri the PR opens against (the PR subject)."""
     open_pr_idempotency_key: str | None = None
@@ -976,8 +880,6 @@ class RunResult:
     gate_findings: dict[str, tuple[str, ...]] = field(default_factory=dict)
     """Findings (the human-readable WHY) for the newest verdict per gate — surfaced
     in the summary for FAILING gates so a halted real build is diagnosable."""
-    doc_root: str | None = None
-    """Where the per-build documentation set was written (when ``docs_dir`` set)."""
     output_root: str | None = None
     """Where the final accepted source tree was written (when ``output_dir`` is
     set AND the build passed); ``None`` on a halted run (no PASS, no write)."""
@@ -987,13 +889,15 @@ class RunResult:
     what's still failing — so a held build hands back a usable starting point, never
     empty hands. ``None`` on a PASS (use ``output_root``) or when no draft could be
     materialized."""
-    checkpoints: tuple[str, ...] = ()
-    """The checkpoint stage boundaries the run was driven with (plan [10]); empty
-    when checkpoints were OFF (the default)."""
-    paused_at: str | None = None
-    """The stage boundary the run is PAUSED at awaiting a human decision (plan
-    [10]) — set only when checkpoints are on and no responder drove past the pause.
-    ``None`` means the run completed (or was never checkpointed)."""
+    resume_from: str | None = None
+    """The boundary a HALTED run stopped at, where a rerun picks up (``None`` on a PASS)."""
+    resumable: bool = False
+    """Whether the run's state is durable (``--state-dir``), so a rerun can resume it."""
+    model_mode: str | None = None
+    """The model mode (cloud | hybrid | local, or "custom" for an explicit level
+    table); None when the run used the single-backend routing."""
+    levels: dict[str, dict[str, Any]] | None = None
+    """The level table the run routed by (tier -> backend/model[/base_url])."""
 
     def summary(self) -> str:
         """A concise human-readable report of the run (printed by ``main``)."""
@@ -1006,15 +910,10 @@ class RunResult:
             + ("(deterministic mock — no model call)"
                if self.backend == _MOCK_BACKEND else "(real model egress)"),
         ]
-        if self.packs:
-            lines.append(f"packs:     {', '.join(self.packs)}")
-        if self.checkpoints:
-            lines.append(f"checkpoints: {', '.join(self.checkpoints)}")
-        if self.paused_at is not None:
-            lines.append(
-                f"PAUSED at the {self.paused_at!r} checkpoint awaiting a human "
-                "decision (resume with a CheckpointDecision)."
-            )
+        if self.levels:
+            lines.append(f"models:    {self.model_mode or 'custom'}")
+            lines += [f"  {tier}: {lvl['backend']} {lvl['model']}"
+                      for tier, lvl in sorted(self.levels.items())]
         lines += [
             f"phase:     {self.phase}",
             f"result:    {'PASS' if self.passed else 'HALTED (no PR)'}",
@@ -1035,6 +934,14 @@ class RunResult:
             lines.append(f"  payload_uri:     {self.open_pr_payload_uri}")
         else:
             lines.append("no open_pr action emitted (gates did not all PASS).")
+        if self.resume_from:
+            lines.append(
+                f"halted at {self.resume_from}: rerun the same command to resume from "
+                f"{self.resume_from} (each rerun gets a fresh fix budget)"
+                if self.resumable
+                else f"halted at {self.resume_from}: add --state-dir DIR to make a halted "
+                     "run resumable"
+            )
         if self.output_root:
             lines.append(f"source tree written to: {self.output_root}")
         if self.draft_root:
@@ -1042,25 +949,10 @@ class RunResult:
                 f"DRAFT written to: {self.draft_root}  (held — see DRAFT-STATUS.md "
                 "for what's failing; not shipped)"
             )
-        if self.doc_root:
-            lines.append(f"documentation set written to: {self.doc_root}")
         return "\n".join(lines)
 
 
-# ---- checkpoint pause/resume driver (plan [10]) -----------------------------
-
-
-def _pending_interrupt(result: Any) -> Any:
-    """The pending LangGraph ``Interrupt`` on a paused invoke result, or ``None``.
-
-    A checkpointed run that hits a pause returns a dict carrying ``__interrupt__``
-    (the active interrupts); we read the first one's ``value`` (our read-only
-    inspection payload) to drive the responder. ``None`` means the run completed."""
-    if isinstance(result, dict):
-        interrupts = result.get("__interrupt__")
-        if interrupts:
-            return interrupts[0]
-    return None
+# ---- graph drivers ----------------------------------------------------------
 
 
 def _progress_enabled() -> bool:
@@ -1073,13 +965,15 @@ def _progress_enabled() -> bool:
     return os.environ.get("FOUNDRY_PROGRESS", "").strip().lower() not in ("", "0", "false", "no")
 
 
-def _invoke_streaming(app: Any, seed: FactoryState, config: RunnableConfig) -> FactoryState:
+def _invoke_streaming(
+    app: Any, seed: FactoryState | None, config: RunnableConfig
+) -> FactoryState:
     """Drive the graph with ``stream`` (updates mode), printing each completed
     node + elapsed time to stderr, then return the terminal channel state."""
     import time
 
     t0 = time.monotonic()
-    # subgraphs=True surfaces the INNER stage nodes (product/architecture/…), not
+    # subgraphs=True surfaces the INNER stage nodes (planner/implementation/…), not
     # just the top-level supernode; each item is (namespace_tuple, {node: update}).
     for item in app.stream(seed, config, stream_mode="updates", subgraphs=True):
         ns, chunk = item if isinstance(item, tuple) else ((), item)
@@ -1114,31 +1008,19 @@ def _stream_segment(
     x: Any,
     config: RunnableConfig,
     progress_cb: Callable[..., None],
-) -> dict[str, Any]:
-    """Drive ONE graph segment with ``stream``, forwarding each node's START and
-    FINISH to ``progress_cb(node, scope, phase=..., result=...)`` for LIVE telemetry
-    (so the floor seats an agent the moment its node begins — through the whole model
-    call — and clears it, with a summary, when the node completes; not a single burst
-    at the pause).
+) -> None:
+    """Drive the graph with ``stream``, forwarding each node's START and FINISH to
+    ``progress_cb(node, scope, phase=..., result=...)`` for LIVE telemetry (so the
+    floor seats an agent the moment its node begins and clears it, with a summary,
+    when the node completes).
 
-    ``stream_mode=["updates", "tasks"]`` gives both edges: the ``tasks`` mode emits a
-    task event on start (no ``result``) and on finish (carries ``result``), while the
-    ``updates`` mode still surfaces ``__interrupt__`` for the pause. ``subgraphs=True``
-    surfaces the inner stage nodes; the namespace's leading scope names the stage/room.
-    Returns a dict carrying ``__interrupt__`` if the segment paused, so the caller's
-    interrupt detection (:func:`_pending_interrupt`) is byte-identical to ``invoke``.
-    (Requires langgraph's ``tasks`` stream mode — present since the pinned 1.x line.)"""
-    pending: Any = None
-    for item in app.stream(x, config, stream_mode=["updates", "tasks"], subgraphs=True):
-        ns, mode, payload = _unpack_stream_item(item)
+    The ``tasks`` stream mode emits a task event on start (no ``result``) and on
+    finish (carries ``result``). ``subgraphs=True`` surfaces the inner stage nodes;
+    the namespace's leading scope names the stage/room."""
+    for item in app.stream(x, config, stream_mode="tasks", subgraphs=True):
+        ns, _mode, payload = _unpack_stream_item(item)
         scope = ":".join(str(n).split(":")[0] for n in ns) if ns else ""
-        if mode == "updates":
-            # 'updates' is used ONLY for the pause signal now (start/finish come from
-            # 'tasks'); a segment paused iff its update carries an interrupt.
-            if isinstance(payload, dict) and "__interrupt__" in payload:
-                pending = payload["__interrupt__"]
-            continue
-        if mode == "tasks" and isinstance(payload, dict) and payload.get("name"):
+        if isinstance(payload, dict) and payload.get("name"):
             node = str(payload["name"])
             finished = ("result" in payload) or ("error" in payload)
             phase = "finish" if finished else "start"
@@ -1146,62 +1028,23 @@ def _stream_segment(
             # telemetry is advisory — never let a UI callback break the build
             with contextlib.suppress(Exception):
                 progress_cb(node, scope, phase=phase, result=result)
-    return {"__interrupt__": pending} if pending else {}
 
 
-def _invoke_with_checkpoints(
+def _invoke(
     app: Any,
-    seed: FactoryState,
+    seed: FactoryState | None,
     config: RunnableConfig,
     *,
-    checkpointed: bool,
-    responder: CheckpointResponder | None,
     progress_cb: Callable[..., None] | None = None,
-) -> tuple[FactoryState, str | None]:
-    """Drive the compiled graph, pausing/resuming at the checkpoint boundaries.
-
-    Non-checkpointed runs (the default) invoke ONCE — byte-identical to today.
-    A checkpointed run invokes, and while the result carries a pending
-    ``__interrupt__`` it asks the ``responder`` for a decision and RESUMES via
-    ``Command(resume=...)`` (the run is durable on the checkpointer). With NO
-    responder, it stops at the first pause and returns ``(state, boundary)`` so the
-    caller can resume out-of-band. The bound on the resume loop is the number of
-    checkpoint boundaries (a responder that always rejects halts immediately).
-
-    When ``progress_cb`` is given each segment is STREAMED (per-node liveness) via
-    :func:`_stream_segment` instead of a silent ``invoke`` — same control flow,
-    same interrupt handling, plus live telemetry."""
-    def _drive(x: Any) -> Any:
-        if progress_cb is not None:
-            return _stream_segment(app, x, config, progress_cb)
-        return app.invoke(x, config)
-
-    if not checkpointed:
-        # Byte-identical to the historical single-invoke path: the invoke return
-        # IS the terminal channel state (no interrupts on a non-checkpointed run).
-        # With progress on, stream per-node so a long real build shows liveness.
-        if progress_cb is not None:
-            _stream_segment(app, seed, config, progress_cb)
-            return cast("FactoryState", app.get_state(config).values), None
-        if _progress_enabled():
-            return _invoke_streaming(app, seed, config), None
-        return cast("FactoryState", app.invoke(seed, config)), None
-    result = _drive(seed)
-
-    # Bound the loop: at most one pause per stage boundary (3) + slack.
-    for _ in range(len(CHECKPOINT_BOUNDARIES) + 1):
-        interrupt = _pending_interrupt(result)
-        if interrupt is None:
-            break
-        payload = dict(interrupt.value) if isinstance(interrupt.value, dict) else {}
-        if responder is None:
-            # No responder: surface the pause and stop (caller resumes out-of-band).
-            boundary = str(payload.get("boundary") or "")
-            return cast("FactoryState", app.get_state(config).values), boundary or None
-        decision = responder(payload)
-        result = _drive(Command(resume=decision))
-    # The authoritative terminal state is the checkpointed channel view.
-    return cast("FactoryState", app.get_state(config).values), None
+) -> FactoryState:
+    """Drive the compiled graph to completion; stream per-node telemetry when a
+    ``progress_cb`` is given (or ``FOUNDRY_PROGRESS`` is set)."""
+    if progress_cb is not None:
+        _stream_segment(app, seed, config, progress_cb)
+        return cast("FactoryState", app.get_state(config).values)
+    if _progress_enabled():
+        return _invoke_streaming(app, seed, config)
+    return cast("FactoryState", app.invoke(seed, config))
 
 
 def _is_transient_proxy_failure(exc: BaseException) -> bool:
@@ -1211,24 +1054,64 @@ def _is_transient_proxy_failure(exc: BaseException) -> bool:
     return "ProxyUnavailable" in type(exc).__name__ or "pause-and-escalate" in str(exc)
 
 
+def _has_pending_run(app: Any, config: RunnableConfig) -> bool:
+    """True when this thread has a checkpoint with nodes still to run."""
+    try:
+        return bool(app.get_state(config).next)
+    except Exception:  # no checkpointer/thread: a fresh run
+        return False
+
+
+def _prior_values(app: Any, config: RunnableConfig) -> dict[str, Any]:
+    """This thread's checkpointed channel values ({} for a fresh thread)."""
+    try:
+        return dict(app.get_state(config).values or {})
+    except Exception:  # no checkpointer/thread: a fresh run
+        return {}
+
+
+def _max_epoch(values: Mapping[str, Any], run_id: str) -> int:
+    """The highest ``emission_epoch`` among this run's records on ``values``."""
+    top = 0
+    for value in values.values():
+        for item in value if isinstance(value, list) else (value,):
+            seq = getattr(item, "seq", None)
+            if isinstance(seq, Seq) and seq.run_id == run_id:
+                top = max(top, seq.emission_epoch)
+    return top
+
+
+def _resume_seed(app: Any, config: RunnableConfig, seed: FactoryState) -> FactoryState:
+    """A rerun of a HALTED thread with the same request resumes it at the boundary
+    that halted (the supervisor's triage honours ``RESUME_PHASE``) instead of
+    planning from scratch. A thread with nodes pending is continued with ``None``
+    by :func:`_invoke_with_autoresume`; a new thread, request or spec plans fresh."""
+    if _has_pending_run(app, config):
+        return seed
+    prior = _prior_values(app, config)
+    if (prior.get("phase") == "halted" and prior.get("request") == seed.get("request")
+            and prior.get("spec") == seed.get("spec")):
+        return {"request": seed["request"], "phase": RESUME_PHASE}
+    return seed
+
+
 def _invoke_with_autoresume(
     app: Any,
     seed: FactoryState,
     config: RunnableConfig,
     *,
-    checkpointed: bool,
-    responder: CheckpointResponder | None,
     progress_cb: Callable[..., None] | None,
     resumable: bool,
-) -> tuple[FactoryState, str | None]:
-    """Wrap :func:`_invoke_with_checkpoints` so a TRANSIENT provider failure does
+    cancel: threading.Event | None = None,
+) -> FactoryState:
+    """Wrap :func:`_invoke` so a TRANSIENT provider failure does
     not kill a DURABLE run. A spent Max usage/session window (or a provider blip)
     surfaces as ProxyUnavailable; the durable checkpoint is intact, so back off
     and RE-INVOKE — langgraph continues the graph from its last superstep.
 
     This mirrors the Workshop server's in-process auto-resume
-    (``webapp/server.py``) so an unattended ``foundry run``/``milestones
-    --state-dir …`` survives a window reset instead of dying and needing a manual
+    (``webapp/server.py``) so an unattended ``foundry run --state-dir …``
+    survives a window reset instead of dying and needing a manual
     restart. Bounded with a growing backoff (5,10,20,40,60,60 min). A NON-durable
     run has no checkpoint to resume from, so the budget is 0 and behaviour is
     byte-identical to a bare invoke. Tunable via ``FOUNDRY_CLI_AUTORESUME``
@@ -1244,14 +1127,11 @@ def _invoke_with_autoresume(
     used = 0
     while True:
         try:
-            return _invoke_with_checkpoints(
-                app,
-                seed,
-                config,
-                checkpointed=checkpointed,
-                responder=responder,
-                progress_cb=progress_cb,
-            )
+            # LangGraph starts a NEW run whenever it gets input, so resuming an
+            # interrupted thread (a retry here, or a rerun after a crash or token-cap
+            # stop) must pass None; otherwise it re-plans and builds a second plan.
+            inp = None if _has_pending_run(app, config) else seed
+            return _invoke(app, inp, config, progress_cb=progress_cb)
         except Exception as exc:  # noqa: BLE001 — re-raised unless transient+budget
             if used >= budget or not _is_transient_proxy_failure(exc):
                 raise
@@ -1266,17 +1146,70 @@ def _invoke_with_autoresume(
                 file=sys.stderr,
                 flush=True,
             )
-            time.sleep(wait)
+            if cancel is None:
+                time.sleep(wait)
+            elif cancel.wait(wait):  # Stop / Pause during the back-off
+                raise BuildStopped("stopped by the operator") from exc
+
+
+_DETAIL_CAP = 200
+
+
+def _detailed_artifacts(arts: Sequence[Any], cap: int = _DETAIL_CAP) -> list[Any]:
+    """The artifacts a node's telemetry details, in order: every ticket (each must
+    reach the Workshop's Tickets tab) plus the first ``cap`` of the bulk kinds."""
+    out: list[Any] = []
+    bulk = 0
+    for a in arts:
+        if getattr(a, "kind", None) == TICKET_KIND:
+            out.append(a)
+        elif bulk < cap:
+            bulk += 1
+            out.append(a)
+    return out
 
 
 # ---- the smoke run ----------------------------------------------------------
+
+
+def _change_base(
+    base_dir: str | None, request: str, thread_id: str
+) -> tuple[str | None, str]:
+    """(absolute base tree, run id) for a change build; (None, thread_id) otherwise."""
+    if base_dir is None:
+        return None, thread_id
+    from foundry.base_tree import change_thread_id, read_base
+
+    root = Path(base_dir).resolve()
+    if not root.is_dir():
+        raise ValueError(f"base {base_dir!r} is not a directory")
+    if thread_id == "cli-run":
+        thread_id = change_thread_id(root, request)
+    if thread_id == read_base(root).thread_id:
+        raise ValueError(
+            f"thread {thread_id!r} is the base build's own run; a change needs a new one"
+        )
+    return str(root), thread_id
+
+
+def _change_seed(base_root: str, *, has_stack: bool) -> FactoryState:
+    """The base tree for the planner and gates, plus the base's recorded stack
+    (a change keeps it) unless the operator pinned one."""
+    from foundry.base_tree import read_base
+
+    seed: FactoryState = {"base_dir": base_root}
+    recorded = read_base(base_root).stack
+    if not has_stack and recorded.get("language"):
+        from foundry.schemas.implementation import StackDecision
+
+        seed["stack"] = StackDecision.model_validate(recorded)
+    return seed
 
 
 def run(
     request: str,
     *,
     mode: str = MODE_ASSISTANT,
-    packs: list[str] | None = None,
     spec: str | list[str] | None = None,
     backend: str = _MOCK_BACKEND,
     thread_id: str = "cli-run",
@@ -1285,18 +1218,26 @@ def run(
     resolve_blob: BlobResolver | None = None,
     adapter: str | Any | None = None,
     diff_body: str | None = None,
-    max_fix_attempts: int = 5,
-    docs_dir: str | None = None,
+    max_fix_attempts: int | None = None,
     output_dir: str | None = None,
-    checkpoints: bool | list[str | CheckpointBoundary] | None = None,
-    checkpoint_responder: CheckpointResponder | None = None,
     progress_cb: Callable[..., None] | None = None,
     activity_cb: Callable[[str], None] | None = None,
+    task_cb: Callable[[TaskEvent], None] | None = None,
+    workers: Mapping[str, int] | None = None,
+    ticket_tiers: Mapping[Any, str] | None = None,
     max_slots: int = AUTO_SLOTS_CAP,
     cost_cap_microusd: int | None = None,
-    base_dir: str | None = None,
+    token_cap: int | None = None,
     profile: str | None = "auto",
     scope: str = "auto",
+    base_dir: str | None = None,
+    model_mode: str | None = None,
+    levels: Mapping[str, Any] | None = None,
+    local_url: str | None = None,
+    local_model: str | None = None,
+    time_cap_minutes: float | None = None,
+    cancel: threading.Event | None = None,
+    manifest_dir: str | None = None,
 ) -> RunResult:
     """Run ``request`` end-to-end through the compiled factory graph (smoke path).
 
@@ -1311,37 +1252,16 @@ def run(
     request:
         The one-line natural-language request (e.g. ``"build a URL shortener"``).
     mode:
-        The deployment-trust mode (lifecycle.md §4; default ``"assistant"`` — the
-        run is byte-identical to the historical request-only run). ``"gated"``
-        threads the Phase-2 supervisor (tiering + Design/Release sign-off +
-        assurance) and the evidence-pack-carrying, release-gated emit; the
-        reviewer's verdict is advisory in Assistant — the deterministic gates own
-        the release bit. ``"autonomous"`` (Phase-4) threads the SAME assurance
-        spine and additionally constructs the dev-grade TRUST ROOT (a hermetic
-        :class:`TrustedBuilder` + the fail-closed :class:`AdmissionController` +
-        the least-privileged :class:`Deployer` + a :class:`DevGateWriteVerifier`,
-        all sharing this run's zone-B key + cross-fork records), so the emit is
-        the hands-off build → admit → deploy chain (admission is the SOLE release
-        gate). Unknown modes are rejected fail-closed.
-    packs:
-        OPTIONAL domain packs to engage (by NAME — ``regulated`` / ``ml_data`` /
-        ``frontend``; T-M5-08). The selected packs are registered in a
-        :class:`PackRegistry` (passed to the graph) AND their declared
-        capabilities are seeded onto ``required_capabilities`` so the composed
-        policy actually engages at triage + the release boundary. A pack can only
-        TIGHTEN the release; crucially it may VETO an unsafe mode (a regulated pack
-        makes hands-off Autonomous UNREACHABLE / forces a human approver-of-record).
-        The veto is enforced FAIL-CLOSED up front: if the requested mode is vetoed
-        the run raises a clear error rather than silently running the vetoed mode.
+        Accepted for compatibility; only ``"assistant"`` is valid.
     spec:
         OPTIONAL full design-spec document (task [8]). ADDITIVE to ``request``: a
         short request summarizes intent while the spec provides the detail. May be
         a path to a ``.md``/``.txt`` FILE, a path to a DIRECTORY of such files
         (read recursively, sorted), a list of paths, or literal spec text. The
         resolved text is seeded onto the ``spec`` state channel, where the
-        Stakeholder/Client Proxy and Product Manager GROUND the IntentBrief/PRD in
-        it. It is plain input data — it INFORMS the criteria but never bypasses the
-        acceptance-criteria derivation or any signed gate.
+        planner GROUNDS the IntentBrief/PRD/design in it. It is plain input data
+        — it INFORMS the criteria but never bypasses the acceptance-criteria
+        derivation or any signed gate.
     thread_id:
         The run identity (LangGraph ``thread_id`` / ``Seq.run_id``); also seeds
         the deterministic idempotency keys (verdict nonce, PR key).
@@ -1351,13 +1271,12 @@ def run(
         SPEC core path reaches a clean Spec/Build/Test PASS with the StubAdapter.
     diff_body:
         The unified-diff body the synthetic ``resolve_blob`` returns for the
-        FeatureDiff. ``None`` (the default) selects a passing addition: the
-        Phase-1 ``_PASSING_DIFF`` for Assistant (byte-identical to today) or the
-        lockfile-bearing ``_ASSURANCE_PASSING_DIFF`` for Gated/Autonomous (the
-        assurance Audit gate reads a lockfile inventory). Pass an explicit
+        FeatureDiff. ``None`` (the default) selects the passing ``_PASSING_DIFF``. Pass an explicit
         error/failing body to exercise the halted-run path.
     max_fix_attempts:
-        Convergence bound for the gate fix-loop (default 5). On a gate FAIL/ERROR the
+        Convergence bound for the gate fix-loop (default 3 — 4 in the hybrid and 5
+        in the local model mode: two fixer passes per
+        failing boundary — each per-wave check and the final gate). On a gate FAIL/ERROR the
         run fixes FORWARD — back to the responsible layer WITH the specific failures —
         up to this many times before HALTing (escalate). The failed tree's digest stays
         permanently disqualified each round (anti-gaming); only a genuinely-passing NEW
@@ -1365,41 +1284,54 @@ def run(
     output_dir:
         When set AND the build PASSES (terminal gates pass), write a single
         **GitHub-ready repository** here: the accepted integrated source tree at
-        the root + a real ``README.md`` + the doc set under ``docs/`` + the
-        ``BUILD-MANIFEST``. Surfaced on ``RunResult.output_root``. On a HALTED run a
+        the root + the ``BUILD-MANIFEST`` (json + md, with model/token usage).
+        Surfaced on ``RunResult.output_root``. On a HALTED run a
         best-effort DRAFT (the latest attempt's tree + a ``DRAFT-STATUS.md`` naming
         what's failing) is written instead, surfaced on ``RunResult.draft_root`` — so
         a held build hands back a usable starting point, never empty hands.
-    docs_dir:
-        OPTIONAL. When set, ALSO write the documentation set to this SEPARATE
-        directory (back-compat / docs elsewhere). When only ``output_dir`` is
-        given, the docs already live inside that repo under ``docs/``.
-    checkpoints:
-        OPTIONAL checkpoint/HITL mode (plan [10]). ``None``/``False`` (the
-        DEFAULT) runs straight through with NO pauses (byte-identical to today).
-        ``True`` pauses at all three stage boundaries (after product/spec, after
-        architecture/design, after implementation+quality / before release); a
-        list of boundary names pauses at exactly those. The run is resumable on
-        the durable checkpointer. **Trust:** a checkpoint approve only lets the run
-        proceed to the (unchanged) gate boundary — it can NEVER turn a gate FAIL
-        into a release; a release reject HALTS even on a gate PASS.
-    checkpoint_responder:
-        OPTIONAL programmatic responder driving the pauses (plan [10]; NO
-        interactive stdin, so the flow is fully testable). Called with the
-        READ-ONLY inspection payload at each pause; returns the human decision (a
-        verdict string ``"approve"``/``"reject"``/``"needs_changes"``, or a mapping
-        with ``verdict`` + optional ``steered_by``/``note`` recording steering
-        authorship). When ``checkpoints`` are on but NO responder is supplied, the
-        run PAUSES at the first boundary and returns with ``RunResult.paused_at``
-        set (the caller resumes out-of-band on the same ``thread_id``).
+    manifest_dir:
+        Where to write the ``BUILD-MANIFEST`` when no tree is written to
+        ``output_dir`` (the Workshop keeps code in the store but still reports it).
+    task_cb / workers / ticket_tiers:
+        Ticket path (the planner emitted tickets). ``task_cb`` receives each
+        ticket's :class:`TaskEvent` (``{phase, ticket_id, title, specialty, tier}``,
+        phase start/done/failed) as the worker pool runs it; ``workers`` caps
+        concurrent tickets per specialty (default 4 each) under ``max_slots``;
+        ``ticket_tiers`` maps difficulty -> model tier (default
+        trivial=T3, standard=T2, complex=T1).
     scope:
-        How much system to build. ``"auto"`` (the DEFAULT) lets the Scope Judge
-        node classify the request; ``"demo"`` / ``"standard"`` PIN the tier and
-        skip the judge's model call entirely. Scope caps only what the PM and
-        architect PROPOSE (criteria count, components, interface contracts,
+        How much system to build. ``"auto"`` (the DEFAULT) lets the planner
+        node classify the request; ``"demo"`` / ``"standard"`` PIN the tier so
+        the planner echoes it instead of judging it. Scope caps only what the
+        planner PROPOSES (criteria count, components, interface contracts,
         ownership units) — every deterministic gate a build must pass is
         identical at both tiers, so this can never release a weaker build. Pin it
         for a reproducible A/B against the judged tier.
+    base_dir:
+        A shipped build's tree to CHANGE (``--base``): ``request`` is the change.
+        Every ticket sandbox and gate starts from that tree, the planner plans only
+        the delta, every gate (the base's own scenarios included) runs on base +
+        delta, and ``output_dir`` receives the full updated tree. The base's
+        recorded stack is kept. The default ``thread_id`` becomes a per-change id;
+        reusing the base build's own thread is refused.
+    model_mode / levels / local_url / local_model:
+        Where each model level runs (Phase 4b). ``model_mode`` is a preset —
+        ``"cloud"`` (today's routing, the same as None), ``"hybrid"`` (T1 on
+        ``backend``, T2/T3 local) or ``"local"`` (every tier local). ``levels`` is
+        an explicit table ``{"T1": {"backend", "model"[, "base_url"]}, ...}`` that
+        overrides the preset (omitted tiers run on ``backend``). A local level is an
+        OpenAI-compatible server at ``local_url`` (default LM Studio's
+        ``http://localhost:1234/v1``) serving ``local_model``. Local calls are
+        unmetered and serialized (one local call/session at a time); tickets on a
+        local level run the proxy-agent loop, tickets on a cloud level the run's
+        cloud adapter.
+    time_cap_minutes:
+        Stop cleanly (resumable, like ``token_cap``) once the run has used this
+        much wall-clock time, across restarts.
+    cancel:
+        Setting this event stops the run cleanly with ``BuildStopped`` before the
+        next model call, coding session or gate run (the token meter's seams). The
+        checkpoint stays resumable, as after a token-cap stop.
     """
     if mode not in MODES:
         raise ValueError(f"unknown mode {mode!r}; choose one of {', '.join(MODES)}")
@@ -1407,18 +1339,21 @@ def run(
         raise ValueError(f"unknown backend {backend!r}; choose one of {', '.join(BACKENDS)}")
     if scope not in SCOPES:
         raise ValueError(f"unknown scope {scope!r}; choose one of {', '.join(SCOPES)}")
-    # Resolve the checkpoint boundary set up front (fail-closed on a typo'd name).
-    ckpt_set = normalize_checkpoints(checkpoints)
-    ckpt_names = tuple(sorted(b.value for b in ckpt_set))
-    # The default passing diff is mode-specific: Assistant uses the Phase-1
-    # _PASSING_DIFF (byte-identical to today); Gated/Autonomous use the
-    # lockfile-bearing variant the assurance Audit gate needs. An explicit
-    # diff_body (e.g. a failing body) always wins.
     if diff_body is None:
-        diff_body = _PASSING_DIFF if mode == MODE_ASSISTANT else _ASSURANCE_PASSING_DIFF
+        diff_body = _PASSING_DIFF
+    level_table = resolve_levels(
+        model_mode=model_mode, levels=levels, backend=backend,
+        cloud_models=_tier_models(backend), cloud_backends=BACKENDS,
+        local_url=local_url, local_model=local_model,
+    )
+    if max_fix_attempts is None:
+        max_fix_attempts = DEFAULT_FIX_ATTEMPTS[model_mode or "cloud"]
+    if time_cap_minutes is not None and time_cap_minutes <= 0:
+        raise ValueError("time_cap_minutes must be > 0")
     spec_text = _load_spec(spec)
+    base_root, thread_id = _change_base(base_dir, request, thread_id)
     # Single-host durability seam (durability/persistence.py): when
-    # FOUNDRY_STATE_DIR is SET, the checkpointer (+ its outbox/WORM audit),
+    # FOUNDRY_STATE_DIR is SET, the checkpointer,
     # the GlobalRecords trust ledgers and the CAS are all file-backed under that
     # dir so the run survives a process restart. UNSET (the DEFAULT) ⇒ in-memory
     # everywhere — byte-identical to the historical request-only run.
@@ -1440,18 +1375,37 @@ def run(
         store = ArtifactStore()
         records = GlobalRecords()
         ckpt = FoundryCheckpointer()
-    proxy = _build_proxy(backend)
-    # --adapter omitted (None) ⇒ DERIVE the substrate from the backend so a real brain
-    # writes real code (mock→stub, any real backend→raw-react). An explicit adapter —
-    # a name OR an injected WorkerAdapter instance (tests) — is never None and wins.
-    if adapter is None:
-        adapter = _default_adapter_for(backend)
-    rt = AgentRuntime(
-        proxy=proxy,
-        adapter=_resolve_coding_adapter(adapter, proxy=proxy, thread_id=thread_id,
-                                        activity_cb=activity_cb),
-        cas=store,
-    )
+    if level_table is None:
+        proxy = _build_proxy(backend)
+        # --adapter omitted (None) ⇒ DERIVE the substrate from the backend so a real
+        # brain writes real code (mock→stub, any real backend→raw-react). An explicit
+        # adapter — a name OR an injected WorkerAdapter instance (tests) — wins.
+        if adapter is None:
+            adapter = _default_adapter_for(backend)
+        coding_adapter = _resolve_coding_adapter(adapter, proxy=proxy, thread_id=thread_id,
+                                                 activity_cb=activity_cb,
+                                                 tier_models=_tier_models(backend))
+    else:
+        proxy = _build_level_proxy(level_table)
+        coding_adapter = _level_adapter(adapter, backend=backend, levels=level_table,
+                                        proxy=proxy, thread_id=thread_id,
+                                        activity_cb=activity_cb)
+        if local_tiers(level_table) == frozenset(level_table):
+            max_slots = 1  # one local model: more ticket slots would only queue
+    rt = AgentRuntime(proxy=proxy, adapter=coding_adapter, cas=store)
+    run_dir: Path | None = None
+    if resolved_state_dir is not None:
+        run_key = hashlib.sha256(thread_id.encode()).hexdigest()[:16]
+        run_dir = Path(resolved_state_dir) / "calls" / run_key
+        proxy.call_cache = run_dir
+    meter: TokenMeter | None = None
+    if token_cap is not None or time_cap_minutes is not None or cancel is not None:
+        meter = TokenMeter(token_cap, run_dir / "tokens.json" if run_dir else None,
+                           cancel=cancel,
+                           time_cap_s=time_cap_minutes * 60 if time_cap_minutes else None)
+        proxy.token_meter = meter
+        if hasattr(rt.adapter, "token_meter"):  # the claude-code substrate bypasses the proxy
+            setattr(rt.adapter, "token_meter", meter)  # noqa: B010
 
     # Seal the zone-A observation channel (fail-closed forged-results hardening):
     # the gate-wiring builds each gate with `runner.seal_key`, so the observation a
@@ -1462,8 +1416,8 @@ def run(
 
     # -- materialization seam (Phase-1 2b) ------------------------------------
     # The `mock` smoke backend uses the synthetic SUP7 doubles: with the
-    # StubAdapter no faithful test body is ever authored and the architecture
-    # agents mint epoch-keyed handles, so the doubles synthesize faithful bodies
+    # StubAdapter no faithful test body is ever authored and the planner
+    # mints epoch-keyed handles, so the doubles synthesize faithful bodies
     # that guarantee the deterministic Spec/Build/Test PASS. A REAL backend means
     # the agents author real designs / criteria / ownership AND (with a real
     # coding adapter) a real FeatureDiff is written into the CAS, so we resolve
@@ -1480,18 +1434,14 @@ def run(
 
     # -- judgment-binding anchors (Phase-1 2c) --------------------------------
     # `subject_artifact_uri` / `state_sha` are pre-build RUN-INPUT LABELS the
-    # reviewer's advisory verdict + the gated sign-off bind to. For the `mock`
+    # reviewer's advisory verdict binds to. For the `mock`
     # smoke they are PINNED to the synthetic subject/label the synthetic resolver
     # produces (byte-identical to before). For a REAL backend we DON'T pin them:
     # the reviewer then binds the REAL newest FeatureDiff uri (state fallback) +
     # the REAL integrated tree_sha (read off the attested gate verdicts), so the
-    # verdict honestly cites the artifact that was actually built, and the gated
-    # sign-off anchors derive consistently on both read sites. The LOAD-BEARING
-    # trust binds — admission's expected per-gate trees, the BuildOutput
-    # provenance, the evidence pack, the stable-FAIL latch — already use the real
-    # verdict-carried `run_against`, NEVER this label (factory_graph
-    # `_attested_run_against` / `_autonomous_admission_inputs`), so unpinning is
-    # safe: admission re-verifies each gate against its own real tree.
+    # verdict honestly cites the artifact that was actually built. The gates and
+    # the stable-FAIL latch use the real verdict-carried `run_against`, never
+    # this label, so unpinning is safe.
     configurable: dict[str, Any] = {
         "thread_id": thread_id,
         "verdict_nonce": f"N-{thread_id}",
@@ -1503,61 +1453,19 @@ def run(
         "recursion_limit": 200,
     }
 
-    # -- domain packs (T-M5-08) -----------------------------------------------
-    # Build the registry from the selected pack NAMES + collect their capabilities
-    # (seeded onto required_capabilities so the composed policy engages). Then
-    # ENFORCE the mode veto fail-closed BEFORE running: a regulated pack vetoes
-    # hands-off Autonomous (and auto-approve Assistant) — we refuse rather than
-    # silently downgrade, so the operator never believes a vetoed mode ran.
-    pack_names = tuple(packs or ())
-    pack_registry: PackRegistry | None = None
-    pack_capabilities: frozenset[str] = frozenset()
-    if pack_names:
-        pack_registry, pack_capabilities = _build_pack_registry(list(pack_names))
-        _enforce_mode_veto(rt, config, pack_registry, pack_capabilities, requested_mode=mode)
-
-    # -- trust-root chain for AUTONOMOUS (lifecycle.md §4) --------------------
-    # Construct the SAME dev-grade trust-root components the autonomous tests wire,
-    # all sharing THIS run's zone-B key + cross-fork records (so admission
-    # re-verifies the runner-attested gate-state + reads the disqualification
-    # latch). For gated/assistant these stay None (ignored by build_factory_graph).
-    builder = admission = deployer = gate_verifier = None
-    if mode == MODE_AUTONOMOUS:
-        from foundry.trust_root import AdmissionController, Deployer, TrustedBuilder
-
-        builder = TrustedBuilder(_zone_b_signer(), builder_id=_BUILDER_ID)
-        admission = AdmissionController(builder_id=_BUILDER_ID)
-        deployer = Deployer(target=_DEPLOY_TARGET)
-        gate_verifier = _gate_verifier(records)
-
-    # The terminal ``docs`` graph node assembles the company-shaped documentation
-    # set + BUILD-MANIFEST IN-GRAPH (task [3]): the Technical Writer's model spend
-    # is budget-metered through the SAME proxy and the authored doc artifacts land
-    # on the checkpointed ``artifacts`` channel. The node appends the assembled
-    # bundle to this in-process sink so the CLI can WRITE the already-assembled
-    # tree to disk without re-authoring (no second round of model spend). The sink
-    # is only wired when ``--docs DIR`` was requested.
-    doc_sink: list[DocumentationBundle] = []
-
     # Install the dev gate-write verifier so the REAL merge_gates admits the
     # runner-attested verdicts (D4); reset its token in finally so it never leaks.
     token = set_gate_write_verifier(_gate_verifier(records))
     with tempfile.TemporaryDirectory(prefix="foundry-cli-src-") as source_dir:
-        # Seed the base tree with an existing codebase (the evolution / iterate
-        # path): the implementation agents clone ``source_dir`` into each sandbox
-        # worktree and produce a diff AGAINST it, so a seeded base makes the change
-        # build ON TOP of the prior code instead of greenfield. Plain input bytes —
-        # copied, never executed (the gates still decide what ships).
-        if base_dir:
-            base = Path(base_dir)
-            if base.is_dir():
-                shutil.copytree(base, source_dir, dirs_exist_ok=True)
         try:
+            if base_root is not None:
+                from foundry.base_tree import copy_base_tree
+
+                copy_base_tree(base_root, source_dir)
             # Verification profile (ROADMAP Phase 3): stack-appropriate pinned
             # gate commands. "auto" (default) infers from the request + spec;
-            # None keeps the historical python defaults (the platform
-            # orchestrator opts out — its deepening loop owns per-service
-            # verification); a profile NAME pins that profile explicitly.
+            # None keeps the historical python defaults; a profile NAME pins
+            # that profile explicitly.
             from foundry.gates.profiles import PROFILES, profile_for_request
 
             if profile == "auto":
@@ -1578,34 +1486,35 @@ def run(
                 source_dir=source_dir,
                 checkpointer=ckpt.saver,
                 max_fix_attempts=max_fix_attempts,
-                mode=mode,
-                builder=builder,
-                admission=admission,
-                deployer=deployer,
-                gate_verifier=gate_verifier,
                 profile=run_profile,
-                pack_registry=pack_registry,
-                # Author the doc set when EITHER a separate --docs dir OR an --out
-                # tree is requested (the docs land inside the --out repo, below).
-                doc_sink=doc_sink if (docs_dir is not None or output_dir is not None) else None,
-                checkpoints=sorted(ckpt_set) if ckpt_set else None,
                 max_slots=max_slots,
                 cost_cap_microusd=cost_cap_microusd,
+                workers=workers,
+                ticket_tiers=ticket_tiers,
+                on_task=task_cb,
             )
+            # The epoch counter is in-memory: a process continuing this thread's
+            # checkpoint must mint Seqs above the run's records, or a re-run gate's
+            # verdict would rank below the stale one it supersedes.
+            prior = _prior_values(app, config)
+            if prior:
+                rt.epochs.raise_floor(thread_id, _max_epoch(prior, thread_id))
             # `spec` is additive and seeded ONLY when provided (request-only runs
             # keep the historical {"request": ...} seed exactly). The product
             # nodes read it off the `spec` channel to ground the IntentBrief/PRD.
             seed: FactoryState = {"request": request}
             if spec_text:
                 seed["spec"] = spec_text
-            # Seed the selected packs' capabilities so the composed policy engages
-            # at triage + the release boundary (a pack's veto / approver-of-record
-            # / HITL fires off required_capabilities). Default run: never set.
-            if pack_capabilities:
-                seed["required_capabilities"] = sorted(pack_capabilities)
-            # An operator-pinned scope seeds the channel the Scope Judge would
-            # otherwise write; the judge sees a decision already present and
-            # returns without a model call. `auto` (the default) seeds nothing,
+            # A named profile pins the stack the planner would otherwise choose.
+            if profile is not None and profile != "auto":
+                from foundry.gates.profiles import pinned_stack
+
+                seed["stack"] = pinned_stack(profile)
+            if base_root is not None:
+                seed.update(_change_seed(base_root, has_stack="stack" in seed))
+            # An operator-pinned scope seeds the channel the planner would
+            # otherwise write; the planner sees a decision already present and
+            # keeps it. `auto` (the default) seeds nothing,
             # so the historical seed is unchanged.
             if scope != "auto":
                 from foundry.schemas.governance import ScopeDecision, ScopeTier
@@ -1624,7 +1533,7 @@ def run(
             # detail). Only wired when a progress_cb is attached.
             drive_pc = progress_cb
             if progress_cb is not None:
-                from foundry.schemas.checkpoint import _artifact_detail
+                from foundry.schemas.checkpoint import _artifact_detail, _org_section
 
                 def _feature_diff_stat(body: object) -> str | None:
                     # An engineer's "what I built": the FeatureDiff handle has no content
@@ -1683,8 +1592,9 @@ def run(
                     result: object = None, _pc: Any = progress_cb, _rv: Any = resolve,
                 ) -> None:
                     if phase == "finish" and isinstance(result, dict) and result.get("artifacts"):
+                        arts = list(result["artifacts"])
                         details: list[dict[str, str]] = []
-                        for a in list(result["artifacts"])[:24]:
+                        for a in _detailed_artifacts(arts):
                             kind = str(getattr(a, "kind", ""))
                             try:
                                 body = _rv(a)
@@ -1692,19 +1602,28 @@ def run(
                                      else _artifact_detail(kind, body, max_len=600))
                             except Exception:
                                 d = None
-                            details.append({"kind": kind, "detail": str(d or "")})
+                            details.append({
+                                "kind": kind, "detail": str(d or ""),
+                                "uri": str(getattr(a, "uri", "")),
+                                "produced_by": str(getattr(a, "produced_by", "")),
+                            })
                         if details:
                             result = {**result, "_art_details": details}
+                        org = _org_section({"artifacts": arts}, _rv)
+                        if org is not None:
+                            result = {**result, "_org": org}
                     _pc(node, scope, phase=phase, result=result)
 
-            final, paused_at = _invoke_with_autoresume(
+            start = _resume_seed(app, config, seed)
+            if meter is not None and start is seed and not _has_pending_run(app, config):
+                meter.reset()  # a fresh run, not a resumed one: its spend starts at zero
+            final = _invoke_with_autoresume(
                 app,
-                seed,
+                start,
                 config,
-                checkpointed=bool(ckpt_set),
-                responder=checkpoint_responder,
                 progress_cb=drive_pc,
                 resumable=(durable is not None),
+                cancel=cancel,
             )
         finally:
             reset_gate_write_verifier(token)
@@ -1722,10 +1641,13 @@ def run(
         final_state,
         mode=mode,
         backend=backend,
-        packs=pack_names,
-        checkpoints=ckpt_names,
-        paused_at=paused_at,
     )
+    if level_table is not None:
+        result = replace(result, model_mode="custom" if levels else model_mode,
+                         levels={t: lvl.as_dict() for t, lvl in level_table.items()})
+    if final_state.get("phase") == "halted":
+        result = replace(result, resume_from=resume_boundary(final_state, resolve),
+                         resumable=durable is not None)
     if output_dir is not None and result.passed:
         # On a PASSING build, materialize the FINAL accepted integrated tree
         # (reusing the SAME materialize_workdir + resolve/resolve_blob seams the
@@ -1735,14 +1657,6 @@ def run(
             final_state, output_dir, resolve=resolve, resolve_blob=resolve_blob
         )
         result = replace(result, output_root=output_root)
-        # GitHub-ready repo: write the doc set INTO the same tree (a real README
-        # at the root + the design/ops docs under docs/ + the BUILD-MANIFEST), so
-        # `--out` produces a single push-ready repository, not code-then-docs in
-        # two places. The bundle's RenderedDoc paths (README.md / docs/… /
-        # BUILD-MANIFEST.*) compose with the source files already at the root.
-        if doc_sink:
-            write_bundle(doc_sink[-1], output_dir)
-            result = replace(result, doc_root=output_dir)
     elif output_dir is not None and not result.passed:
         # HALTED with an output dir: still hand back a usable DRAFT (the best attempt
         # + a DRAFT-STATUS.md saying what's failing), so the run is never empty-handed.
@@ -1752,15 +1666,15 @@ def run(
         )
         if draft_root is not None:
             result = replace(result, draft_root=draft_root)
-            if doc_sink:  # docs help orient a human finishing the draft
-                write_bundle(doc_sink[-1], output_dir)
-                result = replace(result, doc_root=output_dir)
-    if docs_dir is not None and doc_sink:
-        # An EXPLICIT --docs DIR still writes the bundle to that separate location
-        # (back-compat / docs elsewhere). AUTHORING + the manifest already happened
-        # IN-GRAPH (budget-metered, checkpointed); the CLI only writes to disk.
-        write_bundle(doc_sink[-1], docs_dir)
-        result = replace(result, doc_root=docs_dir)
+    manifest_root = output_dir if (result.output_root or result.draft_root) else manifest_dir
+    if manifest_root:
+        # The manifest is a report on a finished build: failing to write it must
+        # never turn a gated result into an exception.
+        try:
+            write_manifest(manifest_root, request=request, thread_id=thread_id,
+                           state=final_state, rt=rt, passed=result.passed)
+        except Exception as exc:
+            print(f"warning: BUILD-MANIFEST not written: {exc}", file=sys.stderr)
     return result
 
 
@@ -1771,17 +1685,8 @@ def _result(
     *,
     mode: str = MODE_ASSISTANT,
     backend: str = _MOCK_BACKEND,
-    packs: tuple[str, ...] = (),
-    checkpoints: tuple[str, ...] = (),
-    paused_at: str | None = None,
 ) -> RunResult:
-    """Distill the terminal state into a :class:`RunResult` (no bodies, L4).
-
-    The release action is mode-specific: Assistant/Gated emit an ``open_pr``
-    (Gated's payload is the evidence-pack handle), Autonomous emits a ``deploy``
-    (payload is the admitting decision handle). We surface whichever was emitted
-    on the same ``open_pr_*`` fields so the summary reports the release uniformly.
-    """
+    """Distill the terminal state into a :class:`RunResult` (no bodies, L4)."""
     statuses: dict[str, GateStatus] = {}
     findings: dict[str, tuple[str, ...]] = {}
     # newest-by-Seq per gate (the verdict that gates the release; mirrors emit guard)
@@ -1795,25 +1700,18 @@ def _result(
         if getattr(g, "findings", None):
             findings[name] = tuple(g.findings)
 
-    # The mode-specific release action: open_pr (assistant/gated) or deploy
-    # (autonomous). At most one is emitted on a released run (fail-closed otherwise).
+    # The release action: at most one open_pr on a released run.
     release: ExternalAction | None = next(
-        (a for a in (final.get("actions") or ()) if a.kind in ("open_pr", "deploy")),
+        (a for a in (final.get("actions") or ()) if a.kind == "open_pr"),
         None,
     )
-    # A run "passed" only if a release action was actually emitted (gates PASS AND
-    # not halted by a checkpoint reject / pause). On a non-checkpoint PASS a
-    # release is always emitted, so this is byte-identical to the prior
-    # ``terminal_gates_pass`` semantics; a checkpoint reject (gates PASS but no
-    # PR) or a paused run reports ``passed=False`` — the gates remain the trust
-    # authority, the checkpoint only subtracts the release.
+    # A run "passed" only if the gates PASS AND a release action was emitted.
     passed = terminal_gates_pass(final) and release is not None
     return RunResult(
         request=request,
         thread_id=thread_id,
         mode=mode,
         backend=backend,
-        packs=packs,
         passed=passed,
         phase=str(final.get("phase") or "unknown"),
         artifact_uri=release.payload_uri if release is not None else None,
@@ -1821,264 +1719,25 @@ def _result(
         open_pr_payload_uri=release.payload_uri if release is not None else None,
         gate_statuses=statuses,
         gate_findings=findings,
-        checkpoints=checkpoints,
-        paused_at=paused_at,
     )
-
-
-# ---- the evolution route (task [12]) ----------------------------------------
-
-
-def _read_overlay(overlay_dir: str) -> dict[str, str | None]:
-    """Read an OVERLAY directory into a change set (relpath -> new content).
-
-    The overlay's files are the added/modified files of the maintained change;
-    they are laid over the prior tree by :func:`foundry.lifecycle.evolve.evolve`.
-    Read as UTF-8 (errors replaced) — plain input data, never executed. (Deletes
-    are expressed via the programmatic ``evolve(changes={rel: None})`` API; the
-    shell affordance overlays added/modified files, the common evolution shape.)
-    """
-    root = Path(overlay_dir)
-    if not root.is_dir():
-        raise ValueError(f"overlay path is not a directory: {overlay_dir}")
-    changes: dict[str, str | None] = {}
-    for p in sorted(root.rglob("*")):
-        if p.is_file():
-            changes[p.relative_to(root).as_posix()] = p.read_text(
-                encoding="utf-8", errors="replace"
-            )
-    if not changes:
-        raise ValueError(f"overlay directory is empty: {overlay_dir}")
-    return changes
-
-
-def _autopilot_main(args: list[str]) -> int:
-    """`foundry autopilot "<target>" --out DIR [...]` — Director + design panel.
-
-    Builds the target, then loops: the Director proposes candidate next actions,
-    a software/usability panel scores + vetoes them (deterministic tally), and
-    the winner becomes the next gated iteration. Exit 0 iff every iteration
-    released; 1 when the loop stopped (gate refusal / panel decline / budget).
-    """
-    try:
-        args, out_dir = _take_value(args, "--out", what="a directory argument")
-        args, _mode = _take_value(args, "--mode", what="a value")
-        mode = _mode if _mode is not None else MODE_ASSISTANT
-        if mode not in MODES:
-            raise _CliUsageError(f"unknown --mode {_mode!r}")
-        args, _backend = _take_value(args, "--backend", what="a value")
-        backend = _backend if _backend is not None else _MOCK_BACKEND
-        if backend not in BACKENDS:
-            raise _CliUsageError(f"unknown --backend {_backend!r}")
-        args, _adapter = _take_value(args, "--adapter", what="a value")
-        if _adapter is not None and _adapter not in ADAPTERS:
-            raise _CliUsageError(f"unknown --adapter {_adapter!r}")
-        args, state_dir = _take_value(args, "--state-dir", what="a directory argument")
-        args, _thread = _take_value(args, "--thread-id", what="a value")
-        args, _iters = _take_value(args, "--iterations", what="an integer")
-        args, _profile = _take_value(args, "--profile", what="a stack name")
-        no_git = "--no-git" in args
-        args = [a for a in args if a not in ("--git", "--no-git")]  # --git = default
-        request = " ".join(args).strip()
-        if not request or not out_dir:
-            raise _CliUsageError(
-                'usage: python -m foundry.cli autopilot "<target>" --out DIR '
-                "[--iterations N] [--backend B] [--adapter A] [--mode M] "
-                "[--state-dir DIR] [--thread-id NAME] [--no-git]"
-            )
-        iterations = int(_iters) if _iters else 3
-    except (_CliUsageError, ValueError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-
-    from foundry.lifecycle.autopilot import autopilot
-
-    stage_dir = out_dir if no_git else str(Path(out_dir) / ".stages")
-    report = autopilot(
-        request,
-        out_dir=stage_dir,
-        iterations=iterations,
-        proxy=_build_proxy(backend),
-        thread_id=_thread or "autopilot",
-        mode=mode,
-        backend=backend,
-        adapter=_adapter,
-        state_dir=state_dir,
-        profile=(_profile if _profile is not None else "auto"),
-    )
-    print(report.summary())
-    if report.released_dir:
-        print(f"released:  {report.released_dir}")
-    if not no_git and report.released_dir:
-        _export_git(out_dir, [(f"i{r.index:02d}", r.out_dir, r.request[:72])
-                              for r in report.iterations if r.passed])
-    return 0 if all(r.passed for r in report.iterations) else 1
-
-
-def _milestones_main(args: list[str]) -> int:
-    """`foundry milestones "<big target>" --out DIR [...]` — the Phase-5 loop.
-
-    Plans (or takes ``--milestones "a; b; c"`` verbatim) and runs the full
-    factory per milestone, chaining released trees. Exit 0 iff EVERY milestone
-    released; 1 when the loop stopped at a gate refusal; 2 on usage error.
-    """
-    try:
-        args, out_dir = _take_value(args, "--out", what="a directory argument")
-        args, _mode = _take_value(args, "--mode", what="a value")
-        mode = _mode if _mode is not None else MODE_ASSISTANT
-        if mode not in MODES:
-            raise _CliUsageError(f"unknown --mode {_mode!r}")
-        args, _backend = _take_value(args, "--backend", what="a value")
-        backend = _backend if _backend is not None else _MOCK_BACKEND
-        if backend not in BACKENDS:
-            raise _CliUsageError(f"unknown --backend {_backend!r}")
-        args, _adapter = _take_value(args, "--adapter", what="a value")
-        if _adapter is not None and _adapter not in ADAPTERS:
-            raise _CliUsageError(f"unknown --adapter {_adapter!r}")
-        args, plan_arg = _take_value(args, "--milestones", what="a '; '-separated list")
-        args, state_dir = _take_value(args, "--state-dir", what="a directory argument")
-        args, _thread = _take_value(args, "--thread-id", what="a value")
-        args, _max = _take_value(args, "--max-milestones", what="an integer")
-        args, _profile = _take_value(args, "--profile", what="a stack name")
-        no_git = "--no-git" in args
-        args = [a for a in args if a not in ("--git", "--no-git")]  # --git = default
-        request = " ".join(args).strip()
-        if not request or not out_dir:
-            raise _CliUsageError(
-                'usage: python -m foundry.cli milestones "<big target>" --out DIR '
-                "[--milestones 'a; b; c'] [--backend B] [--adapter A] [--mode M] "
-                "[--state-dir DIR] [--thread-id NAME] [--max-milestones N] [--no-git]"
-            )
-        max_milestones = int(_max) if _max else 8
-    except (_CliUsageError, ValueError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-
-    from foundry.lifecycle.milestones import run_milestones
-
-    explicit = [m.strip() for m in (plan_arg or "").split(";") if m.strip()] or None
-    proxy = None if explicit else _build_proxy(backend)
-    stage_dir = out_dir if no_git else str(Path(out_dir) / ".stages")
-    report = run_milestones(
-        request,
-        out_dir=stage_dir,
-        milestones=explicit,
-        proxy=proxy,
-        thread_id=_thread or "milestones",
-        max_milestones=max_milestones,
-        mode=mode,
-        backend=backend,
-        adapter=_adapter,
-        state_dir=state_dir,
-        profile=(_profile if _profile is not None else "auto"),
-    )
-    print(report.summary())
-    if report.released_dir:
-        print(f"released:  {report.released_dir}")
-    if not no_git and report.released_dir:
-        _export_git(out_dir, [(f"m{r.index:02d}", r.out_dir, r.title)
-                              for r in report.results if r.passed])
-    return 0 if report.passed else 1
-
-
-def _export_git(out_dir: str, released: list[tuple[str, str, str]]) -> None:
-    """Project the released increments into ONE git repo at <out>/repo (a VIEW —
-    the CAS/verdicts are untouched). Failure is reported, never fatal: the
-    released trees stand either way."""
-    from pathlib import Path
-
-    from foundry.lifecycle.git_export import GitExportError, ReleaseExport, export_lineage
-
-    try:
-        head = export_lineage(
-            out_dir,  # <out> IS the repo; increments stage under <out>/.stages
-            [ReleaseExport(tag=tag, tree_dir=Path(d), message=title)
-             for tag, d, title in released],
-        )
-        print(f"git repo:  {out_dir}  (HEAD {head[:12]}, "
-              f"{len(released)} tagged commit(s); increments in .stages/)")
-    except GitExportError as exc:
-        print(f"git export skipped ({exc}) — increments stand in "
-              f"{Path(out_dir) / '.stages'}", file=sys.stderr)
-
-
-def _evolve_main(args: list[str]) -> int:
-    """``foundry evolve <prior repo> "<change>" --apply OVERLAY`` (task [12]).
-
-    Re-enters an EXISTING released codebase as a MAINTAINED change: re-verify
-    change-proportionally, re-gate via the SAME runner, re-admit fail-closed, link
-    provenance to the prior version. The maintained change is RELEASED only when
-    it RE-PASSES the gates + RE-ADMITS (a failing re-gate ⇒ NOT released — no PR /
-    deploy). ``--apply OVERLAY`` supplies the changed files (overlaid on the prior
-    tree); ``--guardian-approve`` records the HITL decision for a protected
-    criterion/oracle/gate edit (which otherwise BLOCKS release, deterministic HITL).
-
-    Returns 0 iff the maintained change was RELEASED, 1 if NOT released
-    (fail-closed), 2 on a usage error.
-    """
-    from foundry.lifecycle.evolve import EvolveRefused, evolve
-
-    guardian_approval = False
-    if "--guardian-approve" in args:
-        args = [a for a in args if a != "--guardian-approve"]
-        guardian_approval = True
-    # --strict: a not-released re-gate RAISES (EvolveRefused) instead of returning a
-    # result — for scripts/CI that want a hard failure on any non-release.
-    strict = False
-    if "--strict" in args:
-        args = [a for a in args if a != "--strict"]
-        strict = True
-    overlay_dir: str | None = None
-    if "--apply" in args:
-        i = args.index("--apply")
-        if i + 1 >= len(args):
-            print("error: --apply requires a directory argument", file=sys.stderr)
-            return 2
-        overlay_dir = args[i + 1]
-        args = args[:i] + args[i + 2 :]
-    if len(args) < 2:
-        print(
-            'usage: python -m foundry.cli evolve <prior-repo-dir> "<change>" '
-            "--apply OVERLAY_DIR [--guardian-approve] [--strict]\n"
-            "  re-enter an EXISTING released repo as a maintained change: re-verify\n"
-            "  change-proportionally, re-gate (same runner), re-admit (fail-closed),\n"
-            "  link provenance to the prior version. A failing re-gate => NOT released.\n"
-            "  --apply OVERLAY_DIR: the changed/added files overlaid on the prior tree\n"
-            "  --guardian-approve: record the HITL decision for a protected\n"
-            "    criterion/oracle/gate edit (otherwise it BLOCKS release)\n"
-            "  --strict: a not-released re-gate exits non-zero (raises) instead of reporting",
-            file=sys.stderr,
-        )
-        return 2
-    prior_dir = args[0]
-    change = " ".join(args[1:]).strip()
-    if not change:
-        print("error: change request must be non-empty", file=sys.stderr)
-        return 2
-    if overlay_dir is None:
-        print("error: evolve requires --apply OVERLAY_DIR", file=sys.stderr)
-        return 2
-    if not Path(prior_dir).is_dir():
-        print(f"error: prior repo not found: {prior_dir}", file=sys.stderr)
-        return 2
-    try:
-        changes = _read_overlay(overlay_dir)
-        result = evolve(
-            prior_dir, change, changes=changes,
-            guardian_approval=guardian_approval, strict=strict,
-        )
-    except EvolveRefused as exc:
-        # --strict: the re-gate refused to release; report and exit non-zero.
-        print(f"evolve REFUSED (not released): {exc}", file=sys.stderr)
-        return 1
-    except (FileNotFoundError, ValueError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    print(result.summary())
-    return 0 if result.released else 1
 
 
 # ---- entry point ------------------------------------------------------------
+
+
+# Flags whose features were removed: reject them rather than letting the leftover
+# tokens silently become part of the build request.
+_REMOVED_FLAGS = frozenset({"--packs", "--apply", "--guardian-approve", "--strict", "--docs",
+                            "--checkpoints"})
+
+
+def _request_text(args: list[str]) -> str:
+    removed = [a.split("=", 1)[0] for a in args if a.split("=", 1)[0] in _REMOVED_FLAGS]
+    if args and args[0] in ("evolve", "milestones", "autopilot"):
+        removed.insert(0, f"the {args[0]} subcommand")
+    if removed:
+        raise _CliUsageError(f"{removed[0]} is no longer supported")
+    return " ".join(args).strip()
 
 
 class _CliUsageError(Exception):
@@ -2096,6 +1755,53 @@ def _take_value(args: list[str], flag: str, *, what: str) -> tuple[list[str], st
     if i + 1 >= len(args):
         raise _CliUsageError(f"{flag} requires {what}")
     return args[:i] + args[i + 2 :], args[i + 1]
+
+
+def _kv_pairs(text: str, what: str) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    for item in (p.strip() for p in text.split(",")):
+        if not item:
+            continue
+        key, sep, value = item.partition("=")
+        if not sep or not key.strip() or not value.strip():
+            raise ValueError(f"{what}: expected key=value, got {item!r}")
+        pairs.append((key.strip().lower(), value.strip()))
+    return pairs
+
+
+def parse_workers(text: str) -> dict[str, int]:
+    """``frontend=2,backend=3,data=1,test=2`` -> per-specialty ticket limits, over
+    :data:`DEFAULT_WORKERS`. Unknown specialty or a value below 1 is a ValueError."""
+    known = sorted(s.value for s in Specialty)
+    out = dict(DEFAULT_WORKERS)
+    for key, value in _kv_pairs(text, "workers"):
+        if key not in out:
+            raise ValueError(f"workers: unknown specialty {key!r}; choose from "
+                             f"{', '.join(known)}")
+        if not value.isdigit() or int(value) < 1:
+            raise ValueError(f"workers: {key} needs a whole number >= 1, got {value!r}")
+        out[key] = int(value)
+    return out
+
+
+def parse_ticket_tiers(text: str) -> dict[Difficulty, str]:
+    """``trivial=T3,standard=T2,complex=T1`` -> difficulty -> model tier, over the
+    defaults. Unknown difficulty or tier is a ValueError."""
+    out = dict(DEFAULT_TICKET_TIERS)
+    for key, value in _kv_pairs(text, "ticket tiers"):
+        try:
+            difficulty = Difficulty(key)
+        except ValueError:
+            raise ValueError(
+                f"ticket tiers: unknown difficulty {key!r}; choose from "
+                f"{', '.join(d.value for d in Difficulty)}"
+            ) from None
+        tier = value.upper()
+        if tier not in _TIER_ENV:
+            raise ValueError(f"ticket tiers: unknown tier {value!r}; choose from "
+                             f"{', '.join(_TIER_ENV)}")
+        out[difficulty] = tier
+    return out
 
 
 def _take_int(
@@ -2130,34 +1836,20 @@ def main(argv: list[str] | None = None) -> int:
     """``python -m foundry.cli "build a ..."`` — run the smoke path, print a report.
 
     Returns process exit code 0 on a clean Spec/Build/Test PASS (a PR action was
-    emitted), 1 on a halted/failed run, 2 on a usage error.
+    emitted), 1 on a halted/failed run, 2 on a usage error, 3 when --token-cap or
+    --time-cap stopped the run. ``--local-check`` reports the local model server
+    and exits 0 when it is reachable (and serves --local-model), else 1.
     """
     args = sys.argv[1:] if argv is None else argv
-    # The evolution route (task [12]): `foundry evolve <prior repo> "<change>"`
-    # (see the `evolve` dispatch below; `milestones` follows the same shape.)
-    # re-enters an EXISTING released codebase as a maintained change (re-gate +
-    # re-admit, fail-closed). Dispatched as a leading subcommand so the greenfield
-    # path stays byte-identical (the default — no subcommand — is unchanged).
-    if args and args[0] == "evolve":
-        return _evolve_main(args[1:])
-    # The milestone route (ROADMAP Phase 5): `foundry milestones "<big target>"
-    # --out DIR` plans an ordered milestone list and runs the FULL factory per
-    # milestone, chaining each released tree as the next milestone's base.
-    if args and args[0] == "milestones":
-        return _milestones_main(args[1:])
-    # The autopilot route: Director proposes, a software/usability panel votes,
-    # the winner becomes the next gated iteration (fail-closed on panel decline).
-    if args and args[0] == "autopilot":
-        return _autopilot_main(args[1:])
     # Simple value flags parse through `_take_value`/`_take_int` (H5: one helper
     # instead of 13 copy-pasted index/slice blocks); a usage error raises and is
     # rendered identically below. Comments mark the non-obvious semantics.
     try:
-        args, docs_dir = _take_value(args, "--docs", what="a directory argument")
         args, output_dir = _take_value(args, "--out", what="a directory argument")
+        # --base DIR: change that shipped build; the request is the change.
+        args, base_dir = _take_value(args, "--base", what="a directory argument")
 
-        # --mode {assistant|gated|autonomous} (default assistant; task [9]); the
-        # default keeps the run byte-identical to the historical request-only path.
+        # --mode assistant: the only mode; the flag is accepted for compatibility.
         args, _mode = _take_value(args, "--mode", what="a value")
         mode = _mode if _mode is not None else MODE_ASSISTANT
         if mode not in MODES:
@@ -2183,8 +1875,27 @@ def main(argv: list[str] | None = None) -> int:
         args, state_dir = _take_value(args, "--state-dir", what="a directory argument")
         args, _tid = _take_value(args, "--thread-id", what="a value")
         thread_id = _tid if _tid is not None else "cli-run"
-        args, _mfa = _take_int(args, "--max-fix-attempts", minimum=1)
-        max_fix_attempts = _mfa if _mfa is not None else 5
+        args, max_fix_attempts = _take_int(args, "--max-fix-attempts", minimum=1)
+
+        # --model-mode {cloud|hybrid|local}: where the model levels run (cloud =
+        # today's routing; hybrid = T1 on --backend, T2/T3 on the local server;
+        # local = every level local). --local-url / --local-model name the local
+        # OpenAI-compatible server (LM Studio by default) and the model it serves.
+        # --time-cap MINUTES stops the run cleanly once it has run that long.
+        args, model_mode = _take_value(args, "--model-mode", what="a value")
+        if model_mode is not None and model_mode not in MODEL_MODES:
+            raise _CliUsageError(
+                f"unknown --model-mode {model_mode!r}; choose one of {', '.join(MODEL_MODES)}"
+            )
+        args, _local_url = _take_value(args, "--local-url", what="a URL")
+        local_url = _local_url or os.environ.get("FOUNDRY_LOCAL_URL", "").strip() \
+            or DEFAULT_LOCAL_URL
+        args, _local_model = _take_value(args, "--local-model", what="a model id")
+        local_model = _local_model or os.environ.get("FOUNDRY_LOCAL_MODEL", "").strip() \
+            or DEFAULT_LOCAL_MODEL
+        args, time_cap = _take_int(args, "--time-cap", minimum=1)
+        local_check = "--local-check" in args
+        args = [a for a in args if a != "--local-check"]
 
         # Parallelism is SYSTEM-DECIDED: the Tech-Lead decomposes the work and the
         # IC pool sizes itself to that plan (min(tasks, AUTO_SLOTS_CAP)). --max-slots
@@ -2203,11 +1914,29 @@ def main(argv: list[str] | None = None) -> int:
         args, _cost = _take_int(args, "--cost-cap-microusd")
         if _cost is not None:
             cost_cap_microusd = _cost
+        # --token-cap N / FOUNDRY_TOKEN_CAP: stop the run cleanly once it has used N
+        # tokens (cache reads count at a tenth). Works on subscription backends too.
+        _tok_env = os.environ.get("FOUNDRY_TOKEN_CAP", "").strip()
+        token_cap: int | None = int(_tok_env) if _tok_env.isdigit() else None
+        args, _tok = _take_int(args, "--token-cap", minimum=1)
+        if _tok is not None:
+            token_cap = _tok
 
-        # --packs name1,name2 (task [9]): domain packs to engage. A pack may VETO the
-        # requested mode (enforced fail-closed in run()).
-        args, _packs = _take_value(args, "--packs", what="a comma-separated list")
-        packs: list[str] = [p.strip() for p in _packs.split(",") if p.strip()] if _packs else []
+        # --workers frontend=2,backend=3,data=1,test=2 (or FOUNDRY_WORKERS): tickets
+        # building at once per specialty, under the --max-slots ceiling. Default 4
+        # each. --ticket-tiers trivial=T3,standard=T2,complex=T1 (or
+        # FOUNDRY_TICKET_TIERS): the model tier each ticket difficulty runs on.
+        args, _workers = _take_value(args, "--workers", what="specialty=N pairs")
+        args, _tiers = _take_value(args, "--ticket-tiers", what="difficulty=TIER pairs")
+        try:
+            workers = parse_workers(
+                _workers if _workers is not None else os.environ.get("FOUNDRY_WORKERS", "")
+            )
+            ticket_tiers = parse_ticket_tiers(
+                _tiers if _tiers is not None else os.environ.get("FOUNDRY_TICKET_TIERS", "")
+            )
+        except ValueError as exc:
+            raise _CliUsageError(str(exc)) from None
 
         # --profile NAME: the verification stack (pinned build/test/smoke commands).
         # OMITTED ⇒ "auto" (infer the stack from the request/spec keywords). A NAME
@@ -2218,7 +1947,7 @@ def main(argv: list[str] | None = None) -> int:
         profile = _profile if _profile is not None else "auto"
 
         # --scope {auto|demo|standard}: how much system to build. OMITTED ⇒ "auto"
-        # (the Scope Judge classifies the request). A pinned tier skips the judge.
+        # (the planner classifies the request). A pinned tier is kept as-is.
         args, _scope = _take_value(args, "--scope", what="a value")
         scope = _scope if _scope is not None else "auto"
         if scope not in SCOPES:
@@ -2244,27 +1973,10 @@ def main(argv: list[str] | None = None) -> int:
     except _CliUsageError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    # --checkpoints [all|name1,name2] (plan [10]): pause at the stage boundaries
-    # for human verification. ``--checkpoints`` alone (or ``all``) enables all
-    # three; a comma list selects specific boundaries. From the shell the CLI uses
-    # an APPROVE-ALL responder (a human partner would inspect + decide via the
-    # ``run(checkpoint_responder=...)`` API — programmatic, no interactive stdin);
-    # an approve still cannot turn a gate FAIL into a release (the gates decide).
-    checkpoints: bool | list[str] | None = None
-    if "--checkpoints" in args:
-        i = args.index("--checkpoints")
-        # An optional value follows ONLY if the next token isn't the request /
-        # another flag (heuristic: contains no spaces and isn't the last arg or a
-        # known sub-token). We accept "all" or a comma list; otherwise enable all.
-        nxt = args[i + 1] if i + 1 < len(args) else None
-        if nxt is not None and (nxt == "all" or ("," in nxt) or nxt in {
-            b.value for b in CHECKPOINT_BOUNDARIES
-        }):
-            checkpoints = True if nxt == "all" else [s.strip() for s in nxt.split(",") if s.strip()]
-            args = args[:i] + args[i + 2 :]
-        else:
-            checkpoints = True
-            args = args[:i] + args[i + 1 :]
+    if local_check:
+        status = check_local_server(local_url, model=local_model)
+        print(json.dumps(status.as_dict(), indent=2))
+        return 0 if status.reachable and status.model_served is not False else 1
     # Resolve --spec paths to text FIRST: a spec can STAND IN for the one-line
     # request (run from just `--spec FILE`), so we resolve it before deciding whether
     # a positional request is required. A missing/empty path is a clean usage error
@@ -2278,74 +1990,78 @@ def main(argv: list[str] | None = None) -> int:
 
     # The one-line request is OPTIONAL when a --spec is given: with no request we
     # derive one from the spec; with NEITHER a request nor a spec, print usage.
-    request = " ".join(args).strip()
+    try:
+        request = _request_text(args)
+    except _CliUsageError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     if not request:
         if spec_text:
             request = _request_from_spec(spec_text)
         else:
             print(
                 "usage: python -m foundry.cli "
-                "[--mode {assistant|gated|autonomous}] [--packs name1,name2] "
-                "[--backend {mock|anthropic|openai|claude-cli|codex|ollama-gemma}] "
+                "[--mode assistant] "
+                "[--backend {mock|anthropic|openai|claude-cli|codex}] "
                 "[--adapter {stub|raw-react|claude-code}] "
-                "[--checkpoints [all|product,design,release]] "
                 "[--scope {auto|demo|standard}] "
-                "[--docs DIR] [--out DIR] [--spec FILE|DIR ...] "
+                "[--out DIR] [--base DIR] [--spec FILE|DIR ...] "
                 "[--state-dir DIR] [--thread-id NAME] [--max-fix-attempts N] "
+                "[--max-slots N] [--workers frontend=2,backend=2,data=2,test=2] "
+                "[--ticket-tiers trivial=T3,standard=T2,complex=T1] "
+                "[--model-mode {cloud|hybrid|local}] [--local-url URL] "
+                "[--local-model ID] [--time-cap MINUTES] [--token-cap N] [--local-check] "
                 '["<one-line request>"]   (optional when --spec is given)\n'
-                "  modes (lifecycle.md §4 deployment-trust):\n"
-                f"    assistant  {_TRUST_POSTURE[MODE_ASSISTANT]}\n"
-                f"    gated      {_TRUST_POSTURE[MODE_GATED]}\n"
-                f"    autonomous {_TRUST_POSTURE[MODE_AUTONOMOUS]}\n"
+                f"  mode: assistant — {_TRUST_POSTURE[MODE_ASSISTANT]}\n"
                 "  backend: mock (default — keyless, deterministic) | anthropic | openai | "
-                "claude-cli | codex | ollama-gemma (real model egress)\n"
+                "claude-cli | codex (real model egress)\n"
                 "  adapter (coding substrate): omitted => DERIVED from --backend "
                 "(mock=>stub no-op, claude-cli=>claude-code AGENTIC, other real "
                 "backends=>raw-react); override with stub | raw-react | claude-code\n"
-                "  packs: regulated | ml_data | frontend | game | crypto | infra "
-                "(a pack may VETO an unsafe mode — fail-closed)\n"
-                "  checkpoints (plan [10]): pause at stage boundaries for human "
-                "verification; an approve can NEVER turn a gate FAIL into a release\n"
-                "  scope: auto (default — the Scope Judge classifies the request) | "
+                "  scope: auto (default — the planner classifies the request) | "
                 "demo (small: capped criteria, 1 component, no interface contracts) | "
                 "standard. Caps what the agents PROPOSE; the gate set is identical",
                 file=sys.stderr,
             )
             return 2
 
-    # A shell --checkpoints run uses an APPROVE-ALL responder so it completes
-    # without interactive stdin (a human partner inspects + decides via the
-    # run(checkpoint_responder=...) API). The approve only proceeds to the gates;
-    # it can never make a FAILing gate release.
-    responder: CheckpointResponder | None = (
-        (lambda _payload: "approve") if checkpoints else None
-    )
-
-    # An unknown pack name OR a pack VETO of the requested mode is a fail-closed
-    # usage error (exit 2) — we never silently run a vetoed/empty configuration.
     try:
         result = run(
             request,
             mode=mode,
-            packs=packs or None,
             spec=spec_text,
             backend=backend,
             adapter=adapter,
             thread_id=thread_id,
             state_dir=state_dir,
             max_fix_attempts=max_fix_attempts,
-            docs_dir=docs_dir,
             output_dir=output_dir,
-            checkpoints=checkpoints,
-            checkpoint_responder=responder,
             max_slots=max_slots,
             cost_cap_microusd=cost_cap_microusd,
+            workers=workers,
+            ticket_tiers=ticket_tiers,
+            token_cap=token_cap,
             profile=(None if profile == "none" else profile),
             scope=scope,
+            base_dir=base_dir,
+            model_mode=model_mode,
+            local_url=local_url,
+            local_model=local_model,
+            time_cap_minutes=time_cap,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    except RunCapExceeded as exc:
+        flag = "--time-cap" if isinstance(exc, TimeCapExceeded) else "--token-cap"
+        hint = (
+            "Progress is saved: rerun the same command (same --thread-id and "
+            f"--state-dir) with a higher {flag} to continue."
+            if state_dir
+            else "Add --state-dir DIR to make a capped run resumable."
+        )
+        print(f"stopped: {exc}. {hint}", file=sys.stderr)
+        return 3
     print(result.summary())
     return 0 if result.passed else 1
 

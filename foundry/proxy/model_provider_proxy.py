@@ -28,8 +28,8 @@ T1 reasoning tier; any OpenAI/Codex id) REMOVE sampling params — sending a
 temperature is a 400 (and a CLI transport that silently drops it would leave
 the call with no determinism control at all) — so the proxy pins
 ``output_config={"effort": "high"}`` instead and records the substitution in
-the manifest. Models that honour sampling (Anthropic Sonnet/Haiku, Ollama/
-Gemma) get ``temperature 0``. Thinking is enabled (adaptive) only for
+the manifest. Models that honour sampling (Anthropic Sonnet/Haiku) get
+``temperature 0``. Thinking is enabled (adaptive) only for
 ideation-class reasoning-model calls and OMITTED for deterministic gate/judge
 calls.
 
@@ -55,29 +55,34 @@ DIFFERS by policy is whether a drift on a high-risk call ALSO fails closed:
 
 Tier-mismatch is drift even WITHIN a lineage family: when the served model
 resolves to the same family as the pin but is not the pinned tier id (e.g. a
-smaller Ollama tag ``gemma3:12b`` served against a ``gemma3:27b`` pin) the
+``claude-haiku-*`` served against a ``claude-sonnet-*`` pin) the
 served capability silently degraded. That is flagged as drift (kind
 ``tier-mismatch``) even though family resolution would otherwise pass it.
 """
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 import json
 import os
 import re
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from datetime import datetime, timedelta, timezone
-from contextlib import contextmanager, suppress
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from fnmatch import fnmatchcase
+from pathlib import Path
 from typing import Any, Literal, Protocol
 
+from foundry import progress
 from foundry.gates.attestation import ZoneBSigner
 from foundry.proxy.lineage import LineageMap
+from foundry.proxy.token_meter import TokenMeter
 from foundry.schemas.gates import GateResult, GateStatus, JudgmentProvenance, VerdictClass
 from foundry.state.seq import Seq
 
@@ -104,7 +109,7 @@ TIER_MODELS: dict[str, str] = {
 #     temperature; the Codex CLI forwards `model_reasoning_effort` instead;
 #   - the Anthropic T1 reasoning model (claude-opus-*) — sampling params are
 #     removed (existing behaviour, kept).
-# Everything else (Anthropic Sonnet/Haiku, Ollama/Gemma) honours `temperature`,
+# Everything else (Anthropic Sonnet/Haiku) honours `temperature`,
 # so a deterministic call pins temperature 0 there.
 _DEFAULT_EFFORT_MODEL_GLOBS: tuple[str, ...] = (
     "claude-opus-*",
@@ -147,14 +152,6 @@ _STATUS_BY_VERDICT = {
 # retrying thread; exceptions are swallowed — telemetry never breaks a build.
 on_rate_limit_wait: Callable[[float, float, bool], None] | None = None
 
-# Optional observer for per-call token usage (advisory, fail-soft): a host app (the
-# Workshop) sets this to meter what a run has consumed so far, so a human pausing at
-# a checkpoint can see the cost of the work behind them. Called as
-# on_call_usage(node_id, tier, usage) once per SUCCESSFUL call, from the calling
-# thread; exceptions are swallowed — telemetry never breaks a build. It observes
-# only: nothing here can influence a request, a verdict, or a budget decision.
-on_call_usage: Callable[[str, str, Mapping[str, int]], None] | None = None
-
 
 @dataclass(frozen=True, slots=True)
 class SamplingPolicy:
@@ -167,7 +164,7 @@ class SamplingPolicy:
 
     Injectable so an operator can pin the exact policy for the backend they run;
     the default (:func:`default_sampling_policy`) covers the curated backends
-    (Anthropic / OpenAI-Codex / Ollama-Gemma).
+    (Anthropic / OpenAI-Codex).
     """
 
     effort_model_globs: tuple[str, ...] = _DEFAULT_EFFORT_MODEL_GLOBS
@@ -181,7 +178,7 @@ class SamplingPolicy:
 
 def default_sampling_policy() -> SamplingPolicy:
     """The curated default policy (Anthropic opus + OpenAI/Codex => effort;
-    Anthropic sonnet/haiku + Ollama/Gemma => temperature 0)."""
+    Anthropic sonnet/haiku => temperature 0)."""
     return SamplingPolicy()
 
 
@@ -254,10 +251,6 @@ class PinnedIdDriftError(RuntimeError):
             "calibration baselines are invalidated (arch §8) — pause-and-escalate, "
             "do not trust the drifted model (fail-closed drift policy)"
         )
-
-
-class FamilyOverlapError(RuntimeError):
-    """reviewer ∩ implementer served_family is non-empty (decorrelated profile)."""
 
 
 class VerdictChannelError(RuntimeError):
@@ -618,7 +611,6 @@ class ModelProviderProxy:
         lineage_map: LineageMap | None = None,
         signer: ZoneBSigner | None = None,
         *,
-        profile: Literal["self_judge", "decorrelated"] = "self_judge",
         tier_models: Mapping[str, str] | None = None,
         sampling_policy: SamplingPolicy | None = None,
         drift_policy: DriftPolicy | None = None,
@@ -632,13 +624,23 @@ class ModelProviderProxy:
         rate_limit_backoff_base_s: float = 2.0,
         rate_limit_backoff_cap_s: float = 60.0,
         manifest_max: int | None = None,
+        tier_transports: Mapping[str, ProviderTransport] | None = None,
+        local_tiers: Iterable[str] = (),
+        local_lock: threading.RLock | None = None,
     ) -> None:
-        if profile not in ("self_judge", "decorrelated"):
-            raise ValueError(f"unknown profile: {profile!r}")
         self._transport = transport or AnthropicTransport()
+        # Per-level routing (model modes): a tier named here sends through ITS
+        # transport (e.g. a local OpenAI-compatible server) instead of the default
+        # one. Unnamed tiers — and every tier when this is empty — use `transport`.
+        self._tier_transports: dict[str, ProviderTransport] = dict(tier_transports or {})
+        # Tiers served by a local model: their tokens are free (never charged to the
+        # token meter) and one local model is loaded, so at most one thread drives it
+        # at a time. Reentrant so a coding session that holds it for its whole run
+        # (``local_slot``) can still make its own calls through here.
+        self._local_tiers: frozenset[str] = frozenset(local_tiers)
+        self._local_lock: threading.RLock = local_lock or threading.RLock()
         self._lineage = lineage_map or LineageMap()
         self._signer = signer
-        self._profile = profile
         # Backend/model-aware determinism control (arch §8): which knob a
         # deterministic gate/judge call pins (effort vs temperature 0) is a
         # property of the configured backend's model ids, not a hardcoded id.
@@ -648,8 +650,8 @@ class ModelProviderProxy:
         # makes gate/judgment drift raise PinnedIdDriftError (pause-and-escalate).
         self._drift_policy = drift_policy or default_drift_policy()
         # Tier -> pinned-model-id map. Defaults to the Anthropic lineage
-        # (TIER_MODELS) but is injectable so an alternative backend (Codex/
-        # Ollama-Gemma) can pin ITS real model ids — the flow is identical, the
+        # (TIER_MODELS) but is injectable so an alternative backend (OpenAI/
+        # Codex) can pin ITS real model ids — the flow is identical, the
         # ids the proxy pins/observes/drift-checks against just change with the
         # configured backend. Empty/unknown tiers still fail closed in complete().
         self._tier_models: dict[str, str] = (
@@ -658,6 +660,12 @@ class ModelProviderProxy:
         if not self._tier_models:
             raise ValueError("tier_models must define at least one tier")
         self._retry = _RetryPolicy(max_retries, backoff_base_s, sleeper)
+        # Per-run token cap (set by the host that owns the run); None = uncapped.
+        self.token_meter: TokenMeter | None = None
+        # Durable per-run directory of finished calls (set by the host): a node that
+        # re-runs after a crash or provider outage replays the calls it already made
+        # instead of paying for them again. None = no cache.
+        self.call_cache: Path | None = None
         # Rate-limit (429/529) handling: a separate, more generous retry budget that
         # honors Retry-After, so a long run rides out provider throttling instead of
         # failing closed on it. Defaults come from the environment (off-by-default for
@@ -695,10 +703,6 @@ class ModelProviderProxy:
     # ---- read-only views ----------------------------------------------------
 
     @property
-    def profile(self) -> str:
-        return self._profile
-
-    @property
     def lineage_map_revision(self) -> str:
         return self._lineage.revision
 
@@ -706,6 +710,16 @@ class ModelProviderProxy:
     def tier_models(self) -> dict[str, str]:
         """The configured tier -> pinned-model-id map (read-only copy)."""
         return dict(self._tier_models)
+
+    @property
+    def local_tiers(self) -> frozenset[str]:
+        """Tiers served by a local model (unmetered, one call/session at a time)."""
+        return self._local_tiers
+
+    def local_slot(self) -> threading.RLock:
+        """The run's single local-model slot: hold it (``with proxy.local_slot():``)
+        for a whole local coding session so sessions queue one at a time."""
+        return self._local_lock
 
     @property
     def sampling_policy(self) -> SamplingPolicy:
@@ -732,28 +746,6 @@ class ModelProviderProxy:
         """Pinned-ID-drift alerts (arch §8): served model != pinned request."""
         return tuple(self._drift_events)
 
-    # ---- decorrelation seam ---------------------------------------------------
-
-    def assert_disjoint(
-        self,
-        reviewer_family: frozenset[str] | set[str],
-        implementer_family: frozenset[str] | set[str],
-    ) -> None:
-        """Decorrelated profile: reviewer/implementer family sets must not
-        intersect (arch §2/§8). In the self-judge profile this check is
-        REPLACED by the recorded ``judgment_provenance="self"`` stamp
-        (plan §0.2) — same lineage is the declared operating condition, so
-        the call is a no-op there rather than a false guarantee.
-        """
-        if self._profile == "self_judge":
-            return
-        overlap = frozenset(reviewer_family) & frozenset(implementer_family)
-        if overlap:
-            raise FamilyOverlapError(
-                f"reviewer/implementer served_family overlap {sorted(overlap)} — "
-                "judgment node must not proceed in a correlated configuration"
-            )
-
     # ---- the single egress ------------------------------------------------------
 
     def complete(
@@ -779,7 +771,17 @@ class ModelProviderProxy:
             requested_model, system_sop, messages, purpose, schema
         )
 
-        response, parsed = self._send_with_retry(request, schema=schema)
+        label = f"model call: {node_id} ({tier}, {purpose})"
+        cached = self._cached(request, schema)
+        if cached is not None:
+            response, parsed = cached
+            progress.log(f"reuse {label} (finished before a restart)")
+        else:
+            progress.log(f"start {label}")
+            started = time.monotonic()
+            response, parsed = self._send_with_retry(request, schema=schema, tier=tier)
+            progress.finished(label, started, response.usage, self.token_meter)
+            self._cache_put(request, schema, response)
 
         # Lineage is resolved from the proxy-OBSERVED served model id; an
         # unknown id fails closed inside the LineageMap (never guessed).
@@ -800,6 +802,8 @@ class ModelProviderProxy:
             "sampling": sampling,
             "drift": drift,
         }
+        if tier in self._local_tiers:
+            record["local"] = True
         if drift_kind is not None:
             record["drift_kind"] = drift_kind
         if sampling_note:
@@ -807,11 +811,6 @@ class ModelProviderProxy:
         if self._manifest.maxlen is not None and len(self._manifest) == self._manifest.maxlen:
             self._manifest_dropped += 1     # this append rolls the oldest record off
         self._manifest.append(record)
-        if on_call_usage is not None:
-            # Advisory usage meter (the Workshop shows "what this stage cost" at a
-            # checkpoint). Fail-soft: a broken observer must never fail a real call.
-            with suppress(Exception):
-                on_call_usage(node_id, tier, dict(response.usage))
         if drift:
             # Pinned-ID drift (arch §8): invalidates calibration baselines. The
             # event is ALWAYS recorded (advisory or fail-closed); the policy only
@@ -885,11 +884,6 @@ class ModelProviderProxy:
             raise VerdictChannelError(
                 f"constrained verdict channel returned out-of-grammar payload: {verdict!r}"
             )
-        provenance = (
-            JudgmentProvenance.SELF
-            if self._profile == "self_judge"
-            else JudgmentProvenance.INDEPENDENT
-        )
         unstamped = GateResult(
             name=gate_name,
             status=_STATUS_BY_VERDICT[verdict["status"]],
@@ -902,7 +896,7 @@ class ModelProviderProxy:
             lineage_map_revision=self._lineage.revision,
             run_against=state_sha,
             findings=tuple(str(f) for f in verdict.get("findings", ())),
-            judgment_provenance=provenance,
+            judgment_provenance=JudgmentProvenance.SELF,
             seq=seq,
         )
         stamped = self._signer.with_judgment_binding(unstamped)
@@ -921,14 +915,14 @@ class ModelProviderProxy:
           form of it (``claude-sonnet-4-6-20250101`` against ``claude-sonnet-4-6``):
           same pinned tier, no drift.
         - ``(True, "tier-mismatch")`` — the served id is a DIFFERENT configured
-          tier's id (e.g. a smaller Ollama tag served against a larger pin). It may
+          tier's id (e.g. a haiku id served against a sonnet pin). It may
           resolve to the same lineage family, so the family check would pass it; we
           surface it as drift anyway because the served CAPABILITY silently changed.
         - ``(True, "pinned-id")`` — any other departure from the pinned id.
         """
         # Exact pin, or a version-suffixed form of it, is the trusted case. The
-        # suffix must start at a version-style boundary so e.g. a `gemma3:27b` pin
-        # is NOT matched by a `gemma3:27b-it` distinct tag silently — but a bare
+        # suffix must start at a `-` boundary so e.g. a `claude-sonnet-4-6` pin is
+        # NOT matched by a distinct `claude-sonnet-4-60` id silently — but a bare
         # date/version suffix on the same id is (the prior startswith contract).
         if served_model == requested_model or served_model.startswith(requested_model + "-"):
             return (False, None)
@@ -1000,8 +994,43 @@ class ModelProviderProxy:
             request["output_config"] = output_config
         return request, sampling, note
 
+    def _cache_path(self, request: dict[str, Any], schema: dict[str, Any] | None) -> Path:
+        assert self.call_cache is not None
+        key = hashlib.sha256(
+            json.dumps([request, schema], sort_keys=True, default=str).encode()
+        ).hexdigest()
+        return self.call_cache / f"{key}.json"
+
+    def _cached(
+        self, request: dict[str, Any], schema: dict[str, Any] | None
+    ) -> tuple[ProviderResponse, dict[str, Any] | None] | None:
+        if self.call_cache is None:
+            return None
+        try:
+            raw = json.loads(self._cache_path(request, schema).read_text(encoding="utf-8"))
+            response = ProviderResponse(**raw)
+        except (OSError, ValueError, TypeError):
+            return None
+        parsed = _extract_json_object(response.text) if schema is not None else None
+        return response, parsed
+
+    def _cache_put(
+        self, request: dict[str, Any], schema: dict[str, Any] | None, response: ProviderResponse
+    ) -> None:
+        if self.call_cache is None:
+            return
+        path = self._cache_path(request, schema)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(dataclasses.asdict(response)), encoding="utf-8")
+        tmp.replace(path)
+
     def _send_with_retry(
-        self, request: dict[str, Any], *, schema: dict[str, Any] | None = None
+        self,
+        request: dict[str, Any],
+        *,
+        schema: dict[str, Any] | None = None,
+        tier: str | None = None,
     ) -> tuple[ProviderResponse, dict[str, Any] | None]:
         """Bounded retry/backoff, then fail closed; returns (response, parsed).
 
@@ -1014,12 +1043,19 @@ class ModelProviderProxy:
         judgment nodes pause-and-escalate instead of degrading silently
         (arch §2b/§8).
         """
+        meter = self.token_meter
+        if meter is not None:
+            meter.check()
+        transport = self._tier_transports.get(tier or "", self._transport)
+        local = tier in self._local_tiers
         attempt = 0          # real transport failures (bounded, fail-closed)
         rl_attempt = 0       # provider throttling (separate, more generous budget)
         while True:
             try:
-                with self._limiter.slot():
-                    response = self._transport.send(request)
+                with self._local_lock if local else nullcontext(), self._limiter.slot():
+                    response = transport.send(request)
+                if meter is not None and not local:
+                    meter.charge(response.usage)
                 parsed = (
                     _extract_json_object(response.text) if schema is not None else None
                 )

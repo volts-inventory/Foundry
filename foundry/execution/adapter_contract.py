@@ -25,6 +25,9 @@ binding. The adapter's output gate channel is `GateTriage` only.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Protocol, runtime_checkable
 
 from pydantic import Field
@@ -39,7 +42,30 @@ __all__ = [
     "TaskPacket",
     "WorkerAdapter",
     "assemble_prompt",
+    "current_packet_tier",
+    "packet_tier_scope",
 ]
+
+# The model tier (``TaskPacket.task["tier"]``) of the packet an adapter is running
+# right now, for completion closures that only see the prompt (raw-react,
+# proxy-agent). A ContextVar so concurrent pool workers each see their own packet.
+_PACKET_TIER: ContextVar[str | None] = ContextVar("packet_tier", default=None)
+
+
+@contextmanager
+def packet_tier_scope(packet: TaskPacket) -> Iterator[None]:
+    """Expose ``packet``'s tier to :func:`current_packet_tier` for the duration."""
+    tier = packet.task.get("tier")
+    token = _PACKET_TIER.set(str(tier) if tier else None)
+    try:
+        yield
+    finally:
+        _PACKET_TIER.reset(token)
+
+
+def current_packet_tier() -> str | None:
+    """The tier of the packet being run on this thread, or None (no tier set)."""
+    return _PACKET_TIER.get()
 
 
 class AdapterUnavailableError(RuntimeError):

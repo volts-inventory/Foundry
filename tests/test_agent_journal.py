@@ -1,14 +1,9 @@
 """Per-agent work-journal (plan [11]) — ADVISORY-ONLY observability.
 
-Proves the three load-bearing properties of the journal:
-
-(a) :func:`union_journal` folds journal entries additively, order-independently,
-    and idempotently on re-fold (the same algebra the `gate_triage` channel uses);
-(b) the journal is NOT a trust input — a build with arbitrary (even ALARMING)
-    `agent_journal` content still PASSES/FAILS based ONLY on signed gates, because
-    no gate / `merge_gates` / `route_after_gates` reads the channel; and
-(c) :func:`interview` returns a proxy-generated answer over a MockTransport and
-    writes NO gate / verdict / channel (it only returns text).
+The journal is NOT a trust input — a build with arbitrary (even ALARMING)
+`agent_journal` content still PASSES/FAILS based ONLY on signed gates, because no
+gate / `merge_gates` / `route_after_gates` reads the channel. (The
+:func:`union_journal` fold algebra is property-tested in test_reducers_properties.)
 """
 
 from __future__ import annotations
@@ -17,11 +12,8 @@ import json
 
 import pytest
 
-from foundry.agents.interview import interview
 from foundry.gates.attestation import DevGateWriteVerifier, ZoneBSigner
 from foundry.graph.gate_wiring import SPEC_BOUNDARY, route_after_gates
-from foundry.proxy import ModelProviderProxy
-from foundry.proxy.test_doubles import MockTransport
 from foundry.schemas.gates import GateResult, GateStatus, VerdictClass
 from foundry.schemas.journal import JournalEntry
 from foundry.state.global_records import GlobalRecords
@@ -29,7 +21,6 @@ from foundry.state.reducers import (
     merge_gates,
     reset_gate_write_verifier,
     set_gate_write_verifier,
-    union_journal,
 )
 from foundry.state.seq import Seq
 
@@ -56,43 +47,7 @@ def _canon(entries: list[JournalEntry]) -> set[str]:
     return {json.dumps(e.model_dump(mode="json"), sort_keys=True) for e in entries}
 
 
-# ---- (a) union_journal: additive, order-independent, idempotent --------------
-
-
-def test_union_journal_is_additive_and_order_independent():
-    a = _entry("product_manager", "wrote PRD")
-    b = _entry("principal_architect", "chose architecture")
-    ab = union_journal([a], [b])
-    ba = union_journal([b], [a])
-    assert _canon(ab) == _canon(ba) == _canon([a, b])
-
-
-def test_union_journal_is_none_safe():
-    a = _entry("product_manager", "wrote PRD")
-    assert _canon(union_journal([a], None)) == _canon([a])
-    assert _canon(union_journal(None, [a])) == _canon([a])
-    assert union_journal(None, None) == []
-
-
-def test_union_journal_idempotent_on_refold():
-    # Re-folding the SAME (byte-identical) entry coalesces — a LangGraph resume
-    # re-fold must not duplicate, must not change committed state.
-    a = _entry("reviewer_critic", "approved diff")
-    once = union_journal([a], [a])
-    twice = union_journal(once, [a])
-    assert _canon(once) == _canon(twice) == _canon([a])
-
-
-def test_union_journal_distinct_seq_entries_coexist():
-    # Two genuinely distinct notes from one node (different turn / epoch) are
-    # distinct identities and BOTH retained (append-only observability log).
-    a = _entry("product_manager", "wrote PRD", epoch=1)
-    b = _entry("product_manager", "revised PRD", epoch=2)
-    folded = union_journal([a], [b])
-    assert _canon(folded) == _canon([a, b])
-
-
-# ---- (b) the journal is NOT a trust input ------------------------------------
+# ---- the journal is NOT a trust input ------------------------------------
 
 
 @pytest.fixture
@@ -156,51 +111,3 @@ def test_failing_build_does_not_pass_even_with_reassuring_journal(verifier):
     # A FAIL routes to FIX (within the convergence bound) — the reassuring
     # journal cannot promote it to ADVANCE.
     assert route_after_gates(state, _config(), boundary=SPEC_BOUNDARY, records=records) == "fix"
-
-
-def test_merge_gates_ignores_journal_channel_entirely(verifier):
-    # merge_gates takes ONLY gate lists; the journal lives on a separate channel
-    # and is structurally unreachable from the gate fold. Folding gates is
-    # byte-identical whether or not a journal exists alongside them.
-    g = merge_gates([_spec_gate(GateStatus.PASS)], None)
-    # The journal is never an argument to merge_gates — there is no parameter for
-    # it. This asserts the structural separation: a verdict fold over the same
-    # gates is invariant.
-    assert merge_gates(g, None) == g
-
-
-# ---- (c) interview(): proxy-generated, writes nothing ------------------------
-
-
-def test_interview_returns_proxy_answer_over_mock_transport():
-    proxy = ModelProviderProxy(MockTransport(default_text="It went well; one concern about scope."))
-    answer = interview(
-        proxy,
-        role="Principal Architect",
-        question="How did it go?",
-        entries=[_entry("principal_architect", "chose modular monolith")],
-        run_context={"phase": "design"},
-    )
-    assert answer == "It went well; one concern about scope."
-
-
-def test_interview_returns_string_and_writes_no_channel():
-    # interview() returns a plain str — it has NO channel write surface (cannot
-    # mint a GateResult / GateTriage / JournalEntry), so it can never enter a
-    # verdict/trust path.
-    proxy = ModelProviderProxy(MockTransport(default_text="fine"))
-    result = interview(proxy, role="Reviewer", question="ok?", entries=[])
-    assert isinstance(result, str)
-    assert not isinstance(result, (GateResult, JournalEntry))
-
-
-def test_interview_is_best_effort_on_proxy_failure():
-    class BoomTransport:
-        def send(self, request: dict) -> object:
-            raise RuntimeError("provider down")
-
-    proxy = ModelProviderProxy(BoomTransport())
-    # A proxy failure degrades to a fallback string — never raises (an interview
-    # must never be able to wedge a run).
-    answer = interview(proxy, role="QA", question="status?", entries=[])
-    assert answer.startswith("(interview unavailable")

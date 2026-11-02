@@ -90,7 +90,3 @@ class E2EReport(FrozenModel):
     flake_retry_budget: int = 2  # N=2 (governance.md §1a)
     quarantined: tuple[str, ...] = ()
     seq: Seq
-
-    def covered_criteria(self) -> frozenset[str]:
-        """All criterion_ids exercised by at least one e2e scenario."""
-        return frozenset(c for ids in self.scenario_criteria.values() for c in ids)

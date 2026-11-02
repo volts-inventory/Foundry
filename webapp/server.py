@@ -4,10 +4,9 @@ Run:  uv run python -m webapp.server   then open  http://localhost:8765
 
 A tiny stdlib HTTP + Server-Sent-Events server (no extra deps, never touches the
 trust core). ``POST /api/projects`` starts a REAL ``foundry.cli.run`` in a thread;
-the build pauses at its real stage boundaries and this server streams the real
-artifacts / agent-journal / gate verdicts to the browser as paced game events.
-The CTO (you) approves or rejects each checkpoint — driving the real run — and an
-approve can NEVER release a failing build (the gates decide; this is just the view).
+this server streams the real per-node telemetry (artifacts, agent journal, gate
+verdicts) to the browser as game events. Builds run hands-off; the gates decide
+what ships — this is just the view.
 """
 
 from __future__ import annotations
@@ -17,12 +16,12 @@ import hmac
 import json
 import os
 import re
-import sys
 import shutil
-import tempfile
+import sys
 import threading
 import time
 import traceback
+import urllib.parse
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -31,10 +30,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from foundry.schemas.architecture import CANONICAL_AREAS
+from webapp import insight
+from webapp import settings as _settings
 from webapp.events import (
-    checkpoint_actions,
-    events_for_payload,
+    STAGE_FOR_NODE,
+    event_for_task,
+    events_for_node_output,
     events_for_result,
     live_event_for_node,
 )
@@ -90,17 +91,12 @@ def _load_env_file() -> bool:
 _ENV_FILE_FOUND = _load_env_file()   # before the config constants below read os.environ
 
 _STATIC = Path(__file__).parent / "static"
-_PACE = 0.5          # seconds between paced game events
-_STAGE_PAUSE = 0.9   # extra beat when a new stage opens
-_AUTO_APPROVE_DELAY = 1.4  # auto-run: dwell on each checkpoint before approving
+_PACE = 0.5          # seconds between paced closing events
 # Live activity from inside an agentic step (each edit / command the substrate runs).
 # Bounded on BOTH axes: a floor is readable at ~1 line every 2s, and one step can't
 # flood the log (or every connected device's stream) with hundreds of tool calls.
 _ACT_MIN_GAP = 2.0          # seconds between reported activities
 _ACT_MAX_PER_STEP = 40      # then one "still working" line and silence for that step
-
-_MODES = ("assistant", "gated", "autonomous")
-
 
 def _int_env(name: str, default: int) -> int:
     """A small non-negative int from the environment (blank/garbage -> default)."""
@@ -155,7 +151,7 @@ _STATE_DIR = (
 _WRITE_DISK = (os.environ.get("WORKSHOP_WRITE_DISK", "").strip().lower()
                in ("1", "true", "yes", "on"))
 
-# State-changing routes (start a build → real model spend, drive a checkpoint) are
+# State-changing routes (start a build → real model spend) are
 # guarded. A shared token (FOUNDRY_WORKSHOP_TOKEN) gates them when the server is
 # exposed beyond localhost; an Origin/Host same-origin check blocks a malicious web
 # page from POSTing to a localhost workshop (CSRF) even with no token set.
@@ -189,141 +185,145 @@ def _authorize_mutation(headers: Any, token: str | None) -> str | None:
             return "missing or invalid workshop token"
     return None
 _MAX_VIEW_BYTES = 1_000_000  # cap a single file served to the in-page viewer
-# Uploaded-spec-zip limits (defence-in-depth for an untrusted upload).
-_MAX_ZIP_BYTES = 5_000_000
-_MAX_ZIP_MEMBER_BYTES = 1_000_000
-_MAX_ZIP_MEMBERS = 200
-_SPEC_SUFFIXES = (".md", ".markdown", ".txt", ".rst")
 
 
-def _safe_unzip_spec(b64: str, dest: Path) -> int:
-    """Decode + extract a base64 docs-zip into ``dest``, returning the file count.
-
-    Defence-in-depth for an untrusted upload: caps total/member size + member
-    count, keeps only text-doc suffixes, and fail-closes on zip-slip (a member
-    that resolves outside ``dest`` is skipped, never written)."""
-    import base64
-    import io
-    import zipfile
-
-    raw = base64.b64decode(b64, validate=False)
-    if len(raw) > _MAX_ZIP_BYTES:
-        raise ValueError("uploaded zip exceeds size cap")
-    dest.mkdir(parents=True, exist_ok=True)
-    root = str(dest.resolve())
-    written = 0
-    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-        for info in zf.infolist():
-            if info.is_dir() or info.file_size > _MAX_ZIP_MEMBER_BYTES:
-                continue
-            if Path(info.filename).suffix.lower() not in _SPEC_SUFFIXES:
-                continue
-            target = (dest / info.filename).resolve()
-            if not str(target).startswith(root + os.sep):  # zip-slip guard
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(zf.read(info))
-            written += 1
-            if written >= _MAX_ZIP_MEMBERS:
-                break
-    return written
+WORKER_SPECIALTIES = ("frontend", "backend", "data", "test")
+DEFAULT_WORKERS = 4
+MAX_WORKERS = 16
+_TICKET_DIFFICULTIES = ("trivial", "standard", "complex")
 
 
-# --- interactive spec chat with the leads (intake option 4) ----------------- #
-# Advisory authoring aid (same posture as foundry.ideation): it produces ONLY
-# text — a transcript + a running draft spec — and writes NO FactoryState / gate /
-# verdict. "Lock spec & build" just feeds the draft back as run(spec=<text>); the
-# spec gate + criteria machinery are unchanged (agents propose, gates decide).
-_CHATS: dict[str, dict[str, Any]] = {}  # session id -> {"history":[...], "spec":str}
-
-_LEADS_SOP = (
-    "You are a product leadership round-table — the Program Manager, the Principal "
-    "Architect, and 1-2 domain Tech-Leads — helping a CTO turn an idea into a "
-    "buildable spec. Each turn, reply as 2-4 of these voices (set role to the "
-    "title), each one or two concise, substantive sentences: ask the single most "
-    "important clarifying question, surface a risk, or propose a concrete "
-    "capability / acceptance criterion. Then output spec_markdown: the CURRENT best "
-    "full draft spec (goals, constraints, interfaces, acceptance criteria) "
-    "reflecting the whole conversation so far. If a prior spec and a summary of "
-    "what a previous build already produced are given, treat the spec as the "
-    "target and focus the new round on the GAPS and the requested changes — do "
-    "not re-propose what is already built. Reply with JSON only."
-)
-_CHAT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "messages": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {"role": {"type": "string"}, "text": {"type": "string"}},
-                "required": ["role", "text"],
-                "additionalProperties": False,
-            },
-        },
-        "spec_markdown": {"type": "string"},
-    },
-    "required": ["messages", "spec_markdown"],
-    "additionalProperties": False,
-}
+def parse_workers(raw: Any = None) -> dict[str, int]:
+    """Per-specialty worker limits from a request body: ints >= 1 (clamped to
+    MAX_WORKERS), default 4 each; unknown keys and non-integers fall back."""
+    src = raw if isinstance(raw, Mapping) else {}
+    out: dict[str, int] = {}
+    for spec in WORKER_SPECIALTIES:
+        try:
+            n = int(src.get(spec, DEFAULT_WORKERS))
+        except (TypeError, ValueError):
+            n = DEFAULT_WORKERS
+        # The pool needs >= 1 permit per specialty; 0 would strand that specialty's tickets.
+        out[spec] = max(1, min(MAX_WORKERS, n))
+    return out
 
 
-def _chat_proxy(backend: str) -> Any:
-    """A ModelProviderProxy for the spec chat — mock returns canned/empty, the real
-    backends actually converse. Uses the observation path (complete), no signer."""
-    from foundry.proxy.cli_transports import build_backend
-    from foundry.proxy.model_provider_proxy import ModelProviderProxy
-    from foundry.proxy.test_doubles import MockTransport
-
-    if backend == "mock":
-        return ModelProviderProxy(MockTransport(default_text="{}"))
-    return build_backend(backend)  # type: ignore[arg-type]
+_PROJECT_ROUTE = re.compile(r"/api/projects/([^/]+)")
+_INSIGHT_ROUTE = re.compile(r"/api/projects/([^/]+)/insight")
+_CONTROL_ROUTE = re.compile(r"/api/projects/([^/]+)/(stop|pause|resume)")
+MAX_FIX_ATTEMPTS = 20
 
 
-def _ideate_turn(backend: str, history: list[dict[str, str]]) -> dict[str, Any]:
-    """One round-table turn over the chosen backend; returns {messages, spec_markdown}."""
-    proxy = _chat_proxy(backend)
-    messages = [
-        {
-            "role": "user" if h["role"] == "user" else "assistant",
-            "content": h["text"] if h["role"] == "user" else f"[{h['role']}] {h['text']}",
-        }
-        for h in history
-    ]
-    result = proxy.complete(
-        "ideation_chat", "T1", _LEADS_SOP, messages, purpose="ideation", schema=_CHAT_SCHEMA
-    )
-    return result.parsed or {}
+def _whole(raw: Any, name: str) -> int:
+    """A non-negative whole number from JSON (an int, or a string of digits)."""
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+        return raw
+    if isinstance(raw, str) and raw.strip().isdigit():
+        return int(raw)
+    raise ValueError(f"{name} must be a whole number, 0 or more")
+
+
+def _resume_overrides(
+    body: Mapping[str, Any],
+) -> tuple[int | None, int | None, float | None]:
+    """(token_cap, max_fix_attempts, time_cap_minutes) from a resume body; ``None``
+    keeps the floor's current value. A token or time cap of 0 (or null) lifts that
+    cap. Raises ValueError."""
+    if not isinstance(body, Mapping):
+        raise ValueError("expected a JSON object")
+    token_cap: int | None = None
+    max_fix: int | None = None
+    time_cap: float | None = None
+    if "token_cap" in body:
+        raw = body["token_cap"]
+        token_cap = 0 if raw in (None, "") else _whole(raw, "token_cap")
+    if "max_fix_attempts" in body and body["max_fix_attempts"] not in (None, ""):
+        max_fix = _whole(body["max_fix_attempts"], "max_fix_attempts")
+        if max_fix > MAX_FIX_ATTEMPTS:
+            raise ValueError(f"max_fix_attempts must be 0 to {MAX_FIX_ATTEMPTS}")
+    if "time_cap_minutes" in body:
+        n = _settings.optional_number(body["time_cap_minutes"], "time_cap_minutes")
+        time_cap = 0.0 if n is None else n
+        if not 0 <= time_cap <= _settings.MAX_TIME_CAP_MIN:
+            raise ValueError(
+                f"time_cap_minutes must be 0 (no cap) to {_settings.MAX_TIME_CAP_MIN}")
+    return token_cap, max_fix, time_cap
+
+
+BUILD_STATUSES = ("shipped", "halted", "stopped", "running")
+BUILD_SORTS = ("newest", "oldest")
+QUERY_MAX = 200
+
+
+def build_status(p: Project) -> str:
+    """The floor's state as the build list filters it."""
+    if not p.ended or p.status != "done":
+        return "running"
+    if p.passed:
+        return "shipped"
+    return "stopped" if p.phase in ("stopped", "paused") else "halted"
+
+
+_TITLE_LEAD = re.compile(
+    r"^(please\s+)?((build|make|create|write|implement)(\s+me)?\s+)?(an?\s+|the\s+)?", re.I)
+
+
+def request_title(request: str, limit: int = 48) -> str:
+    """A short name for a floor: the request's first line or sentence, without a
+    leading "build me a…", cut at a word boundary."""
+    text = " ".join(str(request or "").split("\n", 1)[0].split())
+    text = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0].rstrip(".!? ")
+    text = _TITLE_LEAD.sub("", text) or text
+    if len(text) > limit:
+        head = text[:limit]
+        text = (head.rsplit(" ", 1)[0] if " " in head else head).rstrip(",;:- ") + "…"
+    return text[:1].upper() + text[1:] if text else "Untitled build"
+
+
+def parse_build_query(raw: str) -> dict[str, str]:
+    """``q``, ``status`` and ``sort`` from /api/builds' query string. Raises ValueError."""
+    params = urllib.parse.parse_qs(raw, keep_blank_values=True)
+    unknown = sorted(set(params) - {"q", "status", "sort"})
+    if unknown:
+        raise ValueError(f"unknown query parameter: {', '.join(unknown)}")
+    for k, v in params.items():
+        if len(v) > 1:
+            raise ValueError(f"{k} is given more than once")
+    q = params.get("q", [""])[0].strip()
+    if len(q) > QUERY_MAX:
+        raise ValueError(f"q is longer than {QUERY_MAX} characters")
+    status = params.get("status", [""])[0] or "all"
+    if status != "all" and status not in BUILD_STATUSES:
+        raise ValueError(f"status must be all or one of {', '.join(BUILD_STATUSES)}")
+    sort = params.get("sort", [""])[0] or "newest"
+    if sort not in BUILD_SORTS:
+        raise ValueError(f"sort must be one of {', '.join(BUILD_SORTS)}")
+    return {"q": q, "status": status, "sort": sort}
+
+
+def parse_ticket_tiers(raw: Any) -> dict[str, str]:
+    """difficulty -> tier overrides; entries outside trivial|standard|complex -> T1|T2|T3 drop."""
+    if not isinstance(raw, Mapping):
+        return {}
+    return {
+        str(k): str(v).upper() for k, v in raw.items()
+        if str(k) in _TICKET_DIFFICULTIES and str(v).upper() in ("T1", "T2", "T3")
+    }
 
 
 @dataclass
 class Project:
     id: str
     request: str
-    mode: str
-    supervised: bool
+    mode: str  # always "assistant" (the only release mode); kept for the catalog
     floor: int
     backend: str = "mock"
-    adapter: str = "stub"  # coding substrate (see foundry.cli.ADAPTERS)
-    packs: list[str] = field(default_factory=list)
-    spec: str | None = None  # literal spec text OR a dir of uploaded docs (run(spec=))
-    spec_text: str = ""  # the literal spec (converse/paste), cataloged so an iterate inherits + extends it
+    adapter: str = "stub"  # coding substrate, derived from the backend
     max_slots: int = 4  # IC-pool CEILING (= cli.AUTO_SLOTS_CAP); the system sizes
     # actual parallelism to the lead's decomposition (min(tasks, this)).
-    cost_cap_microusd: int | None = None  # global spend envelope (Wave D)
-    max_fix_attempts: int = 5  # auto-fix retry budget per failing gate (run() default)
-    release_seq: int = 1  # 1,2,3… within the floor; each iterate adds a release
-    parent_id: str | None = None  # lineage: the release this one iterates on
-    base_dir: str | None = None  # prior code seeded as the base tree (iterate)
-    autopilot_note: str = ""  # why the autopilot loop stopped (surfaced via the API)
-    # Autopilot (lifecycle.autopilot): remaining self-iterations AFTER this build.
-    # >0 and gates green ⇒ the Director proposes, the software/usability panel
-    # votes (deterministic tally), and the winner is spawned as the next release
-    # with budget-1. The AI drives in EVERY mode: autonomous children run with no
-    # human contact; gated/supervised children keep their checkpoints + sign-offs
-    # surfacing to the human (auto-approve timeout keeps the loop moving). A panel
-    # DECLINE stops the loop fail-closed (human steering wanted).
-    autopilot_budget: int = 0
+    token_cap: int | None = None  # stop the build cleanly after this many tokens
+    workers: dict[str, int] = field(default_factory=parse_workers)  # per-specialty limits
+    ticket_tiers: dict[str, str] = field(default_factory=dict)  # difficulty -> tier overrides
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -331,7 +331,7 @@ class Project:
     # A single shared queue would let two streams STEAL each other's events; a log
     # lets many devices each tail it at their own cursor, and a late/reconnecting
     # device replays from the start (or from its Last-Event-ID). `cond` guards
-    # `log`, `ended`, and the checkpoint-decision fields below.
+    # `log` and `ended`.
     log: list[dict[str, Any]] = field(default_factory=list)
     cond: threading.Condition = field(default_factory=threading.Condition)
     ended: bool = False
@@ -342,23 +342,7 @@ class Project:
     # from its durable checkpoint instead of dying, so an overnight run survives a
     # usage-window exhaustion / provider outage. Decrements per outer retry.
     autoresume_left: int = 6
-    # Checkpoint decisions: first decision for a checkpoint wins (idempotent);
-    # every device still watches the resolution play (it's just another log event).
-    checkpoint_seq: int = 0          # monotonic id of the LATEST checkpoint reached
-    pending_checkpoint: int | None = None  # the checkpoint awaiting a decision, if any
-    decision_for: dict[int, str] = field(default_factory=dict)  # checkpoint id -> decision
-    decision_edit: dict[int, str] = field(default_factory=dict)  # checkpoint id -> edited text
-    # (the autopilot PROPOSAL checkpoint uses id -1 so it never collides with the
-    #  in-build stage checkpoints, which index from 0)
     seen_uris: set[str] = field(default_factory=set)
-    # Checkpoint COST context (advisory): what the work behind this pause consumed, so
-    # "continue or not?" is answered against real spend, not a guess. Monotonic clocks
-    # (never wall time — a clock step must not produce a negative duration) and a
-    # snapshot of the global usage meter taken at build start and at each pause.
-    start_mono: float = field(default_factory=time.monotonic)
-    cp_mono: float | None = None            # monotonic time of the LAST checkpoint
-    usage_mark: dict[str, int] = field(default_factory=dict)   # meter at build start
-    usage_cp: dict[str, int] = field(default_factory=dict)     # meter at the last pause
     # Steps running RIGHT NOW: "who/what" -> monotonic start. Fed by the live per-node
     # telemetry so the quiet-watchdog can name what a long silence is waiting ON,
     # instead of just reporting that nothing has landed. Runtime-only (not persisted).
@@ -374,57 +358,26 @@ class Project:
     act_text: str = ""               # last phrase (collapses immediate repeats)
     status: str = "running"
     passed: bool = False  # final verdict (for elevator/reload rehydration)
-    awaiting: bool = False  # at a checkpoint right now (badge survives reload)
-    journal: list[dict[str, Any]] = field(default_factory=list)  # latest agent journal ([11])
     gates: dict[str, Any] = field(default_factory=dict)  # name -> {status,attested,advisory}
-    out_base: Path | None = None  # this floor's output dir (code/ + docs/)
-    platform_opts: dict[str, Any] = field(default_factory=dict)  # platform build knobs (advanced)
+    out_base: Path | None = None  # this floor's output dir (code/)
     profile: str = "auto"  # verification profile / stack ("auto" = infer from request)
-    # Milestone ladder (BUILD-A-FULL-GAME.md §2, in the Workshop): each rung runs as
-    # a RELEASE on this floor, chained on the prior rung's released tree. Continuation
-    # state is in-memory (same posture as autopilot_budget) — a restart mid-ladder
-    # keeps every released rung browsable but doesn't auto-spawn the next one.
-    milestones_on: bool = False
-    milestone_max: int = 10
-    milestone_explicit: list[str] = field(default_factory=list)  # human-authored plan
-    milestone_plan: list[str] | None = None   # the full ordered ladder (set at rung 1)
-    milestone_index: int = 0                  # 1-based rung THIS release implements
-    milestone_root: str = ""                  # the original target request
+    max_fix_attempts: int = 3
+    # Build control: setting `cancel` stops the run at its next checkpoint (the token
+    # meter's seams); `stop_kind` labels it "stopped" or "paused". A resume swaps in a
+    # fresh Event. `phase` is how the last run ended (passed / halted / token_cap /
+    # error / stopped / paused / interrupted), restored from the log on restart.
+    cancel: threading.Event = field(default_factory=threading.Event)
+    stop_kind: str = ""
+    closing: bool = False  # the run returned; only its closing events are left to emit
+    phase: str = ""
+    # Model mode, level table and advanced form options (webapp/settings.py); a
+    # change build also names its base floor here.
+    build: dict[str, Any] = field(default_factory=dict)
 
 
 _PROJECTS: dict[str, Project] = {}
 
-# Keyword -> area map for the "suggest N" hint (one IC per area the work touches).
-# Advisory only: the REAL area split is derived during the build (Wave A).
-_AREA_KEYWORDS: dict[str, tuple[str, ...]] = {
-    "frontend": ("ui", "page", "frontend", "react", "css", "button", "screen",
-                 "dashboard", "web", "form", "style", "client"),
-    "backend": ("api", "service", "server", "endpoint", "backend", "route",
-                "handler", "queue", "worker", "webhook", "microservice"),
-    "data": ("db", "database", "data", "sql", "schema", "store", "analytics",
-             "ml", "model", "pipeline", "etl", "report", "warehouse"),
-    "infra": ("deploy", "docker", "k8s", "kubernetes", "infra", "terraform",
-              "cloud", "scale", "ops", "ci/cd", "observability"),
-    "security": ("security", "encrypt", "compliance", "pii", "regulated", "audit",
-                 "secret", "gdpr", "hipaa", "auth", "oauth"),
-}
-_PACK_AREA: dict[str, str] = {"frontend": "frontend", "regulated": "security", "ml_data": "data"}
 
-
-def _suggest_slots(request: str, packs: list[Any]) -> tuple[int, list[str]]:
-    """N = the distinct CANONICAL_AREAS the request + packs likely touch (>=1).
-    'backend' is the baseline area for any service build."""
-    text = request.lower()
-    hit = {"backend"}
-    for area, kws in _AREA_KEYWORDS.items():
-        if any(k in text for k in kws):
-            hit.add(area)
-    for pk in packs:
-        pack_area = _PACK_AREA.get(str(pk).strip().lower())
-        if pack_area:
-            hit.add(pack_area)
-    ordered = [a for a in CANONICAL_AREAS if a in hit]
-    return max(1, min(len(ordered), len(CANONICAL_AREAS))), ordered
 _LOCK = threading.Lock()
 _FLOOR = [0]
 
@@ -437,22 +390,18 @@ _FLOOR = [0]
 # A build in flight is an in-memory thread — it can't resume; on reload it's
 # marked finished so the floor and its output stay browsable.
 _STORE = BuildStore(_OUTPUT_ROOT / "foundry.db")
-_PERSIST_ON = {"project", "gate", "files", "halt", "release", "done",
-               "await_decision", "resolved"}
+_PERSIST_ON = {"project", "gate", "files", "halt", "release", "done"}
 
 
 def _build_record(p: "Project") -> dict[str, Any]:
     """The catalog (DB) shape of a build."""
     return {
-        "id": p.id, "floor": p.floor, "release_seq": p.release_seq,
-        "parent_id": p.parent_id, "request": p.request, "mode": p.mode,
+        "id": p.id, "floor": p.floor, "request": p.request, "mode": p.mode,
         "backend": p.backend, "adapter": p.adapter,
-        "supervised": p.supervised, "slots": p.max_slots,
-        "max_fix_attempts": p.max_fix_attempts, "status": p.status,
+        "slots": p.max_slots, "status": p.status,
         "passed": p.passed, "gates": p.gates,
         "out_base": str(p.out_base) if p.out_base else None,
         "created_at": p.created_at,
-        "spec_text": p.spec_text,
     }
 
 
@@ -489,31 +438,35 @@ def _load_persisted() -> None:
                 ob = row.get("out_base")
                 p = Project(
                     id=str(row["id"]), request=str(row.get("request", "")),
-                    mode=str(row.get("mode", "assistant")),
-                    supervised=bool(row.get("supervised", True)),
+                    mode="assistant",  # gated/autonomous rows from old builds resume as assistant
                     floor=int(row.get("floor", 0)),
-                    release_seq=int(row.get("release_seq", 1) or 1),
                     backend=str(row.get("backend", "mock")),
                     adapter=str(row.get("adapter", "stub")),
                     max_slots=int(row.get("slots", 1) or 1),
-                    max_fix_attempts=int(row.get("max_fix_attempts", 5) or 5),
-                    parent_id=row.get("parent_id"),
                     out_base=Path(ob) if ob else None,
                     created_at=str(row.get("created_at") or ""),
-                    spec_text=str(row.get("spec_text") or ""),
                 )
                 try:
                     p.log = _STORE.events_of(p.id)   # the durable replay log
                 except Exception:
                     p.log = []
-                was_running = str(row.get("status", "")) == "running" and not any(
-                    e.get("type") == "_end" for e in p.log
+                # A resumed build's log keeps its earlier run's _end mid-log, so
+                # only a log that ENDS in _end is closed.
+                was_running = str(row.get("status", "")) == "running" and not (
+                    p.log and p.log[-1].get("type") == "_end"
                 )
                 p.passed = bool(row.get("passed", False))
-                p.awaiting = False
                 p.gates = dict(row.get("gates") or {})
+                _restore_controls(p)
                 _PROJECTS[p.id] = p
-                if was_running and _has_durable_checkpoint(p.id):
+                # A checkpoint written by the removed gated/autonomous graph names nodes
+                # that no longer exist, so it can't be resumed on the assistant graph.
+                # Neither can a floor paused at a removed supervision checkpoint: run()
+                # would re-enter from START, re-plan without retiring the first plan's
+                # tickets and build both — so it is closed out like a legacy floor.
+                legacy_mode = str(row.get("mode") or "assistant") != "assistant"
+                if (was_running and not legacy_mode and not _paused_at_retired_checkpoint(p.log)
+                        and _has_durable_checkpoint(p.id)):
                     # Durable state survived the restart → RESUME the build from its
                     # last checkpoint. Seed the dedup set so the resumed run doesn't
                     # re-emit the history already in the log.
@@ -535,6 +488,7 @@ def _load_persisted() -> None:
                     _emit(p, type="halt", phase="interrupted",
                           reason="server restarted mid-build")
                     _emit(p, type="done", passed=False, phase="interrupted")
+                    p.phase = "interrupted"
                     _close(p)
                 else:
                     p.status = "done"
@@ -542,6 +496,45 @@ def _load_persisted() -> None:
             except Exception:
                 continue
         _FLOOR[0] = max(_FLOOR[0], _STORE.max_floor())
+
+
+def _restore_controls(p: Project) -> None:
+    """Re-derive what a restart lost from the floor's own log: the settings its
+    latest run used (so a Resume runs it the same way) and how that run ended."""
+    for e in p.log:
+        t = e.get("type")
+        if t == "project":
+            if isinstance(e.get("workers"), Mapping):
+                p.workers = parse_workers(e["workers"])
+            p.ticket_tiers = parse_ticket_tiers(e.get("ticket_tiers"))
+            if isinstance(e.get("build"), Mapping):
+                p.build = dict(e["build"])
+            if e.get("profile"):
+                p.profile = str(e["profile"])
+        if t == "profile" and e.get("profile"):
+            p.profile = str(e["profile"])
+        if t in ("project", "resumed"):
+            if "token_cap" in e:
+                p.token_cap = e["token_cap"]
+            if "max_fix_attempts" in e:
+                p.max_fix_attempts = int(e["max_fix_attempts"])
+            if t == "resumed" and "time_cap_minutes" in e:
+                p.build = {**p.build, "time_cap_minutes": e["time_cap_minutes"]}
+            p.phase = ""
+        elif t == "done":
+            p.phase = "passed" if e.get("passed") else str(e.get("phase") or "halted")
+
+
+def _paused_at_retired_checkpoint(log: list[dict[str, Any]]) -> bool:
+    """True iff the floor's log ends paused at a supervision checkpoint (an
+    ``await_decision`` no ``resolved`` followed) — a pause the graph no longer has."""
+    paused = False
+    for e in log:
+        if e.get("type") == "await_decision":
+            paused = True
+        elif e.get("type") == "resolved":
+            paused = False
+    return paused
 
 
 def _has_durable_checkpoint(thread_id: str) -> bool:
@@ -585,13 +578,13 @@ def _read_repo_cached(pid: str) -> Repo | None:
         hit = _REPO_CACHE.get(pid)
     if hit is not None:
         return hit
+    proj = _PROJECTS.get(pid)
     try:
-        repo = read_repo(pid, _STATE_DIR)
+        repo = read_repo(pid, _STATE_DIR, backend=proj.backend if proj else None)
     except RepoUnavailable:
         return None
     except Exception:
         return None
-    proj = _PROJECTS.get(pid)
     finished = proj is None or proj.status == "done"
     if finished:
         with _REPO_CACHE_LOCK:
@@ -604,51 +597,12 @@ def _invalidate_repo(pid: str) -> None:
         _REPO_CACHE.pop(pid, None)
 
 
-def _build_summary(pid: str) -> str:
-    """A concise 'what the last build actually produced' digest — gate outcomes,
-    implemented features, and the file manifest — so an iterate knows what is
-    already DONE (vs. what the accumulated spec still calls for). Empty string when
-    there's nothing readable yet."""
-    rec = _STORE.get(pid) or {}
-    repo = _read_repo_cached(pid)
-    lines: list[str] = []
-    passed = rec.get("passed")
-    if passed is not None:
-        verdict = "passed the gates" if passed else "did NOT pass the gates"
-        lines.append(f"Release r{rec.get('release_seq', '?')} {verdict}.")
-    if repo is not None:
-        if repo.checks:
-            checks = ", ".join(f"{c.name} {'PASS' if c.ok else c.status.upper()}" for c in repo.checks)
-            lines.append(f"Gate checks: {checks}.")
-        feats = [d.summary for d in repo.diffs if d.summary and d.summary != "(feature diff)"]
-        if feats:
-            shown = "; ".join(feats[:12])
-            lines.append("Implemented: " + shown + ("…" if len(feats) > 12 else "") + ".")
-        if repo.files:
-            paths = [f.path for f in repo.files]
-            top = sorted({p.split("/")[0] for p in paths})
-            lines.append(f"{len(paths)} file(s) across: {', '.join(top[:20])}.")
-    if not lines:
-        return ""
-    return "## What the last build actually produced\n\n" + "\n".join(f"- {ln}" for ln in lines)
-
-
-def _sign_offs_payload(repo: "Repo | None") -> list[dict[str, Any]]:
-    """The repo's recorded sign-offs as JSON rows (empty for an assistant build)."""
-    return [
-        {"point": s.point, "approver": s.approver, "role": s.role,
-         "approved": s.approved, "provenance": s.provenance,
-         "state_sha": s.state_sha, "evidence_hash": s.evidence_hash, "note": s.note}
-        for s in (repo.sign_offs if repo else ())
-    ]
-
-
 def _evidence_files(pid: str) -> dict[str, bytes]:
-    """The evidence sidecar for a build's export: gate verdicts + recorded
-    sign-offs, as a machine-readable ``.foundry/evidence.json`` and a readable
-    ``EVIDENCE.md``. Returns ``{}`` when there is nothing to attest yet.
+    """The evidence sidecar for a build's export: the gate verdicts, as a
+    machine-readable ``.foundry/evidence.json`` and a readable ``EVIDENCE.md``.
+    Returns ``{}`` when there is nothing to attest yet.
 
-    This is an EXPORT-time sidecar — built from the attested gate/sign-off records
+    This is an EXPORT-time sidecar — built from the attested gate records
     as-is and added ALONGSIDE the materialized tree, never mixed into it, so the
     bytes the gates ran against are unchanged."""
     repo = _read_repo_cached(pid)
@@ -662,8 +616,7 @@ def _evidence_files(pid: str) -> dict[str, bytes]:
           "advisory": bool(g.get("advisory")), "findings": []}
          for n, g in (p.gates.items() if p else [])]
     )
-    sign_offs = _sign_offs_payload(repo)
-    if not checks and not sign_offs:
+    if not checks:
         return {}
     doc = {
         "build_id": pid,
@@ -673,7 +626,6 @@ def _evidence_files(pid: str) -> dict[str, bytes]:
         "passed": bool(p.passed) if p else None,
         "tree_sha": repo.tree_sha if repo else None,
         "gates": checks,
-        "sign_offs": sign_offs,
     }
     md = _evidence_markdown(doc)
     return {
@@ -685,7 +637,7 @@ def _evidence_files(pid: str) -> dict[str, bytes]:
 def _evidence_markdown(doc: dict[str, Any]) -> str:
     """A human-readable rendering of the evidence doc for ``EVIDENCE.md``."""
     lines = [
-        "# Evidence pack",
+        "# Evidence",
         "",
         f"- **Build**: `{doc['build_id']}`",
         f"- **Request**: {doc.get('request') or '(none)'}",
@@ -706,70 +658,65 @@ def _evidence_markdown(doc: dict[str, Any]) -> str:
                 lines.append(f"    - {f}")
     else:
         lines.append("- _(no gate verdicts recorded)_")
-    lines += ["", "## Sign-offs", ""]
-    if doc["sign_offs"]:
-        for s in doc["sign_offs"]:
-            mark = "✓" if s["approved"] else "✗"
-            who = " · ".join(x for x in (s.get("approver"), s.get("role")) if x) or "(unnamed)"
-            lines.append(f"- {mark} **{s['point']}** — {who} _(provenance: {s.get('provenance') or 'n/a'})_")
-            if s.get("evidence_hash"):
-                lines.append(f"    - evidence hash: `{s['evidence_hash']}`")
-            if s.get("note"):
-                lines.append(f"    - note: {s['note']}")
-    else:
-        lines.append("- _(no human sign-offs — assistant mode, or none recorded)_")
     lines.append("")
     return "\n".join(lines)
 
 
-def _lineage_ids(pid: str) -> list[str]:
-    """The build's ancestry oldest→newest (root … pid) via ``parent_id`` in the
-    catalog — so a release's full tree is the parent's tree + this release's diffs."""
-    chain: list[str] = []
-    seen: set[str] = set()
-    cur: str | None = pid
-    while cur and cur not in seen:
-        seen.add(cur)
-        chain.append(cur)
-        try:
-            rec = _STORE.get(cur)
-        except Exception:
-            rec = None
-        cur = (rec or {}).get("parent_id")
-    chain.reverse()
-    return chain
+def _draft_label(pid: str) -> dict[str, Any]:
+    """A finished floor that did not ship holds its latest attempt: a draft."""
+    p = _PROJECTS.get(pid)
+    draft = bool(p and p.status == "done" and p.ended and not p.passed)
+    return {"draft": draft, "phase": p.phase if p else ""}
 
 
-def _overlay_tree(pid: str) -> dict[str, bytes] | None:
-    """The FULL release tree for ``pid`` from the CAS: each ancestor's materialized
-    files overlaid oldest→newest (this release's diffs win) — mirroring the on-disk
-    'fill the unchanged files from the parent' merge. ``None`` if nothing readable."""
-    blobs: dict[str, bytes] = {}
-    found = False
-    for anc in _lineage_ids(pid):
-        repo = _read_repo_cached(anc)
-        if repo is None:
-            continue
-        found = True
-        for f in repo.files:
-            b = repo.file_bytes(f.path)
-            if b is not None:
-                blobs[f.path] = b
-    return blobs if found else None
-
-
-def _materialize_base_dir(parent_id: str, dest: Path) -> bool:
-    """Write the parent build's full CAS tree into ``dest`` (the base a release
-    iterates on). Returns True if any file was written. Used in place of an on-disk
-    parent ``code`` dir so iterate works with no output directory."""
-    tree = _overlay_tree(parent_id)
-    if not tree:
+def _resumable(p: Project, log: list[dict[str, Any]]) -> bool:
+    """Whether the floor's Resume would be accepted (mirrors Handler._resume)."""
+    if p.status != "done" or not p.ended or p.passed or p.mode != "assistant":
         return False
-    for rel, data in tree.items():
-        target = (dest / rel)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
-    return True
+    if _paused_at_retired_checkpoint(log):
+        return False
+    return p.phase in ("stopped", "paused") or _has_durable_checkpoint(p.id)
+
+
+def _floor_insight(p: Project) -> dict[str, Any]:
+    """The halt report (a floor that ended without shipping) or the run card (a
+    shipped floor), plus its meter — for the insight panel."""
+    log = _STORE.events_of(p.id) if p.log_trimmed else list(p.log)
+    meter = insight.last_meter(log)
+    out: dict[str, Any] = {"id": p.id, "status": p.status, "phase": p.phase,
+                           "passed": p.passed, "meter": meter, "halt": None, "card": None}
+    if p.status != "done" or not p.ended:
+        return out
+    state = insight.durable_state(_STATE_DIR, p.id)
+    if p.passed:
+        manifest = insight.find_manifest(
+            [p.out_base, p.out_base / "code" if p.out_base else None], p.id)
+        out["card"] = insight.run_card(
+            manifest=manifest, stack=(state or {}).get("stack"),
+            tickets=insight.tickets_from_log(log), meter=meter)
+        return out
+    halt = next((e for e in reversed(log) if e.get("type") == "halt"), {})
+    repo = _read_repo_cached(p.id)
+    out["halt"] = insight.halt_report(
+        phase=p.phase or str(halt.get("phase") or "halted"),
+        reason=str(halt.get("reason") or ""), token_cap=p.token_cap,
+        time_cap_s=_time_cap_s(p),
+        max_fix_attempts=p.max_fix_attempts, resumable=_resumable(p, log), state=state,
+        gates=p.gates, meter=meter, draft_files=len(repo.files) if repo else 0)
+    return out
+
+
+def _tree(pid: str) -> dict[str, bytes] | None:
+    """The build's files from the CAS (path -> bytes); ``None`` if nothing is readable."""
+    repo = _read_repo_cached(pid)
+    if repo is None:
+        return None
+    blobs: dict[str, bytes] = {}
+    for f in repo.files:
+        b = repo.file_bytes(f.path)
+        if b is not None:
+            blobs[f.path] = b
+    return blobs
 
 
 def take_activity(p: Project, text: str, now: float | None = None) -> str | None:
@@ -809,6 +756,9 @@ def waiting_on(p: Project, now: float | None = None, cap: int = 3) -> str:
 
 
 def _emit(p: Project, **event: Any) -> None:
+    if event.get("type") == "done" and "meter" not in event:
+        # Stops the floor's meter watcher first, so no reading lands after `done`.
+        event["meter"] = insight.finish_meter(p.id, _STATE_DIR, p.token_cap, _time_cap_s(p))
     # Capture gate verdicts as they stream so /api/projects can rehydrate the HUD
     # pills after a reload (a finished build keeps showing its signed gate row).
     if event.get("type") == "gate":
@@ -851,6 +801,8 @@ def _trim_finished_logs() -> None:
                 or now - p.ended_at < _LOG_GRACE_S):
             continue
         with p.cond:
+            if not p.ended:        # resumed since the check above
+                continue
             if len(p.log) > _LOG_TAIL:
                 p.log = p.log[-_LOG_TAIL:]
             p.log_trimmed = True   # stream now replays this build's history from the store
@@ -865,32 +817,6 @@ def _log_sweeper() -> None:
             pass
 
 
-def _record_decision(
-    p: Project, decision: str, checkpoint: int | None, *, edit: str = ""
-) -> tuple[bool, bool]:
-    """Record a checkpoint decision, FIRST-wins. Returns ``(applied, stale)``.
-
-    ``stale`` is True when the decision names no current pause (already resolved,
-    or a different checkpoint than the one awaiting) — a no-op. ``applied`` is True
-    only for the FIRST decision on the awaiting checkpoint; later/duplicate clicks
-    from any device return ``(False, False)`` and simply watch the resolution play.
-    ``edit`` carries the human's amended text for an autopilot PROPOSAL checkpoint
-    (recorded only with the winning decision — a stale edit never applies)."""
-    with p.cond:
-        cidx = p.pending_checkpoint
-        if checkpoint is not None and checkpoint != cidx:
-            return (False, True)          # a stale click for an already-passed pause
-        if cidx is None:
-            return (False, True)          # nothing is awaiting a decision
-        if cidx in p.decision_for:
-            return (False, False)         # someone already decided this one
-        p.decision_for[cidx] = decision
-        if edit.strip():
-            p.decision_edit[cidx] = edit.strip()
-        p.cond.notify_all()
-        return (True, False)
-
-
 def _resume_cursor(last_event_id: str | None) -> int:
     """The log index a stream should resume at given an SSE ``Last-Event-ID``.
 
@@ -899,26 +825,6 @@ def _resume_cursor(last_event_id: str | None) -> int:
     if last_event_id and last_event_id.isdigit():
         return int(last_event_id) + 1
     return 0
-
-
-def _await_decision(p: Project, cidx: int, timeout: float = 600.0) -> str:
-    """Block the build until SOME device decides checkpoint ``cidx`` (first wins),
-    or until ``timeout`` elapses (then auto-approve). Many devices can post; only
-    the first is recorded — the rest watch the `resolved` event play, live."""
-    deadline = time.monotonic() + timeout
-    with p.cond:
-        while cidx not in p.decision_for:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return "approve"
-            p.cond.wait(remaining)
-        return p.decision_for[cidx]
-
-
-def _emit_paced(p: Project, events: list[dict[str, Any]]) -> None:
-    for ev in events:
-        _emit(p, **ev)
-        time.sleep(_STAGE_PAUSE if ev.get("type") == "stage" else _PACE)
 
 
 _STACK_SOP = (
@@ -959,7 +865,7 @@ def _choose_stack(p: Project) -> tuple[str, str] | None:
         result = _build_proxy(p.backend).complete(
             "principal_architect", "T2", _STACK_SOP,  # one structural pick; Sonnet is ample
             [{"role": "user",
-              "content": (f"REQUEST:\n{p.request}\n\nSPEC:\n{(p.spec_text or '')[:2000]}"
+              "content": (f"REQUEST:\n{p.request}"
                           f"\n\nINSTALLED STACKS (pick one):\n{menu}")}],
             purpose="ideation", schema=schema,
         )
@@ -972,150 +878,6 @@ def _choose_stack(p: Project) -> tuple[str, str] | None:
     except Exception as exc:
         print(f"[stack] architect selection failed (keyword inference instead): {exc}")
     return None
-
-
-# One cheap T3 pass per checkpoint turns the raw artifact list into human captions: a
-# descriptive one-liner for the STAGE and for EACH agent's output. Fed into the quest-log
-# blocks (the log's per-agent headers) and the Progress tab (the stage header) so they
-# read as "what actually got done", not a repeat of the artifact-kind names.
-_SUMMARY_SOP = (
-    "You write terse, factual build-log captions for an autonomous software factory. "
-    "Given the artifacts produced at ONE stage, write ONE concise, SPECIFIC sentence for "
-    "the stage overall and ONE for each agent's output. Say WHAT was decided or built "
-    "(capabilities, key decisions, coverage) — never merely restate artifact-type names. "
-    "No preamble, no markdown, no trailing period needed; each <= 20 words."
-)
-_SUMMARY_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "stage": {"type": "string"},
-        "agents": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {"agent": {"type": "string"}, "summary": {"type": "string"}},
-                "required": ["agent", "summary"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    "required": ["stage", "agents"],
-    "additionalProperties": False,
-}
-
-
-def _summarize_stage(p: "Project", payload: dict[str, Any]) -> dict[str, Any] | None:
-    """A cheap T3 caption pass over a checkpoint's artifacts. Returns
-    ``{"stage": str, "agents": {agent_name: str}}`` or None (advisory — any failure
-    just falls back to the mechanical breakdown)."""
-    from foundry.cli import _build_proxy
-    from webapp.events import _origin
-
-    arts = payload.get("artifacts") or []
-    if not arts:
-        return None
-    by_agent: dict[str, list[str]] = {}
-    for a in arts:
-        kind = str(a.get("kind", ""))
-        agent, _room = _origin(kind, str(a.get("produced_by", "")))
-        detail = str(a.get("detail", "")).strip()
-        by_agent.setdefault(agent, []).append(f"{kind}: {detail}" if detail else kind)
-    lines = [f"{agent}: " + "; ".join(items[:10])[:1200] for agent, items in by_agent.items()]
-    prompt = (f"STAGE: {payload.get('boundary', '')}\n\nARTIFACTS BY AGENT:\n"
-              + "\n".join(lines))[:6000]
-    result = _build_proxy(p.backend).complete(
-        "stage_summarizer", "T3", _SUMMARY_SOP,
-        [{"role": "user", "content": prompt}], purpose="ideation", schema=_SUMMARY_SCHEMA,
-    )
-    parsed = result.parsed if isinstance(result.parsed, dict) else json.loads(result.text or "{}")
-    agents: dict[str, str] = {}
-    for e in (parsed.get("agents") or []):
-        nm, sm = str(e.get("agent", "")).strip(), str(e.get("summary", "")).strip()
-        if nm and sm:
-            agents[nm] = sm
-    stage = str(parsed.get("stage", "")).strip()
-    return {"stage": stage, "agents": agents} if (stage or agents) else None
-
-
-_ADVISOR_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "verdict": {"type": "string", "enum": ["approve", "request-changes"]},
-        "findings": {"type": "array", "items": {"type": "string"}, "maxItems": 4},
-    },
-    "required": ["verdict"],
-    "additionalProperties": False,
-}
-
-_ADVISOR_SOP = (
-    "You are a domain-expert reviewer advising a human release approver. You are "
-    "given a DOMAIN RUBRIC and the release evidence. Review STRICTLY against the "
-    "rubric and reply with JSON only: verdict 'approve' or 'request-changes', "
-    "plus up to 4 short findings the human should look at."
-)
-
-
-def _advisory_judgments(p: Project, payload: dict[str, Any], boundary: str) -> list[dict[str, Any]]:
-    """The gated-mode counterpart of the autonomous AI judge (ADVISORY, fail-soft).
-
-    At the RELEASE checkpoint, run each engaged pack's judgment rubric through
-    the backend and return [{domain, verdict, findings}] for the approval dialog
-    — the same expert panel that would decide an autonomous release, informing
-    (never replacing) the human's sign-off. Advisory only: any failure returns
-    what it has; the checkpoint proceeds regardless."""
-    if boundary != "release" or p.backend == "mock" or not p.packs:
-        return []
-    try:
-        from foundry.cli import _build_pack_registry, _build_proxy
-
-        registry, caps = _build_pack_registry(list(p.packs))
-        # Rubrics are declared on the AUTONOMOUS view (that's where the AI fills
-        # the judgment slot); compose that view to EXTRACT them for advisory use.
-        view = {"required_capabilities": sorted(caps), "mode": "autonomous"}
-        rubrics = dict(registry.compose(view).ai_judge.rubrics)
-        if not rubrics:
-            return []
-        _emit(p, type="narrate",
-              text="🧑‍⚖️ AI experts reviewing the release before your sign-off…")
-        proxy = _build_proxy(p.backend)
-        gates = payload.get("gates") or ()
-        gate_lines = "\n".join(
-            f"- {g.get('name', '?')}: {g.get('status', '?')}" for g in gates
-            if isinstance(g, dict)
-        ) or "(none recorded on this payload)"
-        arts = payload.get("artifacts") or ()
-        kinds: dict[str, int] = {}
-        for a in arts:
-            if isinstance(a, dict):
-                kinds[str(a.get("kind", "?"))] = kinds.get(str(a.get("kind", "?")), 0) + 1
-        evidence = (
-            f"REQUEST: {p.request[:800]}\nGATES:\n{gate_lines}\n"
-            f"ARTIFACTS: {', '.join(f'{k}×{n}' for k, n in sorted(kinds.items())) or '(none)'}"
-        )
-        out: list[dict[str, Any]] = []
-        for domain in sorted(rubrics):
-            try:
-                result = proxy.complete(
-                    "release_advisor", "T2", _ADVISOR_SOP,
-                    [{"role": "user",
-                      "content": (f"DOMAIN: {domain}\nRUBRIC:\n{rubrics[domain]}\n\n"
-                                  f"RELEASE EVIDENCE:\n{evidence}\n\nAdvise the approver.")}],
-                    purpose="ideation", schema=_ADVISOR_SCHEMA,
-                )
-                parsed = result.parsed if isinstance(result.parsed, dict) else {}
-                verdict = str(parsed.get("verdict") or "request-changes")
-                findings = [str(f)[:200] for f in (parsed.get("findings") or [])][:4]
-            except Exception as exc:
-                verdict, findings = "unavailable", [f"advisor error: {exc}"][:1]
-            out.append({"domain": domain, "verdict": verdict, "findings": findings})
-            icon = "✅" if verdict == "approve" else ("⚠️" if verdict == "request-changes" else "❔")
-            _emit(p, type="narrate",
-                  text=f"🧑‍⚖️ {domain}: {icon} {verdict.upper()}"
-                       + (f" — {findings[0]}" if findings else ""))
-        return out
-    except Exception as exc:
-        print(f"[advisors] floor {p.floor}: advisory panel failed: {exc}")
-        return []
 
 
 _RL_HOOKED = [False]
@@ -1150,120 +912,130 @@ def _hook_rate_limit_waits() -> None:
     _mpp.on_rate_limit_wait = _on_wait
 
 
-# ---- advisory usage meter (what a stage cost) --------------------------------- #
-# The proxy's usage observer is GLOBAL (one egress serves every floor), so the meter
-# it feeds is global too. A project reads it as a DELTA between two snapshots — its
-# own start, and its last checkpoint — which is exact while one build runs (the
-# localhost norm) and an upper bound when several do. `_running_builds()` tells the
-# dialog which case it is, so the number is never presented as more precise than it
-# is. Advisory only: nothing reads this back into a build.
-_USAGE: dict[str, int] = {"calls": 0, "input": 0, "output": 0, "cache_read": 0}
-_USAGE_LOCK = threading.Lock()
-_USAGE_HOOKED = [False]
-
-
-def _hook_usage_meter() -> None:
-    """Register the proxy's per-call usage observer (once, lazily). Fail-soft: if the
-    proxy can't be imported the meter simply stays at zero and the dialog omits it."""
-    if _USAGE_HOOKED[0]:
-        return
-    _USAGE_HOOKED[0] = True
-    try:
-        from foundry.proxy import model_provider_proxy as _mpp
-    except Exception:
-        return
-
-    def _on_usage(_node_id: str, _tier: str, usage: Mapping[str, int]) -> None:
-        with _USAGE_LOCK:
-            _USAGE["calls"] += 1
-            _USAGE["input"] += int(usage.get("input_tokens", 0) or 0)
-            _USAGE["output"] += int(usage.get("output_tokens", 0) or 0)
-            _USAGE["cache_read"] += int(usage.get("cache_read_input_tokens", 0) or 0)
-
-    _mpp.on_call_usage = _on_usage
-
-
-def _usage_snapshot() -> dict[str, int]:
-    with _USAGE_LOCK:
-        return dict(_USAGE)
-
-
-def _usage_since(mark: Mapping[str, int]) -> dict[str, int]:
-    """Meter delta since ``mark`` (an earlier snapshot). Clamped at zero so a meter
-    reset (a server restart between snapshots) reads as 0, never as a negative."""
-    now = _usage_snapshot()
-    return {k: max(0, now.get(k, 0) - int(mark.get(k, 0))) for k in now}
-
-
-def _running_builds() -> int:
-    with _LOCK:
-        return sum(1 for q in _PROJECTS.values() if q.status == "running")
-
-
-def _checkpoint_spend(p: Project) -> dict[str, Any]:
-    """The advisory cost/elapsed block that rides into the approval dialog.
-
-    ``stage`` covers the work since the previous pause (what the human is being asked
-    to judge); ``build`` covers this run since it started. ``shared`` marks the case
-    where other builds ran concurrently, so the token figures are an upper bound."""
-    now = time.monotonic()
-    stage_usage = _usage_since(p.usage_cp or p.usage_mark)
-    build_usage = _usage_since(p.usage_mark)
-    n_running = _running_builds()
-    spend: dict[str, Any] = {
-        "stage_s": int(max(0.0, now - (p.cp_mono or p.start_mono))),
-        "build_s": int(max(0.0, now - p.start_mono)),
-        "stage_calls": stage_usage.get("calls", 0),
-        "build_calls": build_usage.get("calls", 0),
-        "stage_tokens": stage_usage.get("input", 0) + stage_usage.get("output", 0),
-        "build_tokens": build_usage.get("input", 0) + build_usage.get("output", 0),
-        "shared": n_running > 1,
-        "builds": n_running,
-    }
-    if p.cost_cap_microusd:
-        spend["cap_usd"] = round(p.cost_cap_microusd / 1_000_000, 2)
-    return spend
-
-
-def _advisor_note(p: Project, boundary: str, advisors: list[dict[str, Any]]) -> str:
-    """Why the expert panel is absent, when it is.
-
-    An empty panel used to render as nothing at all, which reads exactly like "every
-    advisor approved". Naming the reason keeps silence from looking like consent."""
-    if advisors:
-        return ""
-    if boundary != "release":
-        return ("No expert panel at this checkpoint — the panel reviews release "
-                "evidence only.")
-    if p.backend == "mock":
-        return "No expert panel — the mock backend can't convene advisors."
-    if not p.packs:
-        return "No expert panel — no domain packs are engaged for this build."
-    return ("The expert panel returned no verdict (advisory only — the gates still "
-            "decide).")
-
-
 def _gated_runner(runner, p: Project, **kwargs: Any) -> None:
     """Run a build under the global concurrency gate.
 
     When all build slots are busy, the project is marked ``queued`` and this worker
-    thread blocks until a slot frees — so a small host never runs more heavy builds
-    at once than ``WORKSHOP_MAX_CONCURRENT_BUILDS``. The slot is always released, even
-    if the build raises, so a crash can't leak a permanently-held slot."""
+    thread waits its turn (first come, first served; each waiting floor is told its
+    position) — so a small host never runs more heavy builds at once than
+    ``WORKSHOP_MAX_CONCURRENT_BUILDS``. The slot is always released, even if the
+    build raises, so a crash can't leak a permanently-held slot."""
     if _BUILD_GATE is None:
-        runner(p, **kwargs)
+        _run_metered(runner, p, kwargs)
         return
-    if not _BUILD_GATE.acquire(blocking=False):
-        # Every slot busy → tell the user it's queued, then wait for one to free.
+    if insight.QUEUE.head() is not None or not _BUILD_GATE.acquire(blocking=False):
+        # Every slot busy (or others already waiting) → queue, then wait our turn.
         p.status = "queued"
         _persist(p)
+        insight.QUEUE.join(p.id)
         _emit(p, type="narrate",
               text="⏳ All build slots are busy — queued. Starting as soon as one frees…")
-        _BUILD_GATE.acquire()
+        _announce_queue()
+        try:
+            while True:
+                if p.cancel.is_set():          # stopped while queued: never takes a slot
+                    insight.QUEUE.leave(p.id)
+                    _finish_stopped(p)
+                    return
+                if insight.QUEUE.head() == p.id:
+                    if _BUILD_GATE.acquire(timeout=1):
+                        break
+                else:
+                    p.cancel.wait(1)
+        finally:
+            insight.QUEUE.leave(p.id)
+            _announce_queue()
+        p.status = "running"
+        _emit(p, type="queue", position=0)
+    try:
+        _run_metered(runner, p, kwargs)
+    finally:
+        _BUILD_GATE.release()
+
+
+def _announce_queue() -> None:
+    """Tell each waiting floor its place in line when it moves."""
+    for pid, pos in insight.QUEUE.changed():
+        q = _PROJECTS.get(pid)
+        if q is not None:
+            _emit(q, type="queue", position=pos, slots=_MAX_CONCURRENT_BUILDS)
+
+
+def _time_cap_s(p: Project) -> float | None:
+    minutes = p.build.get("time_cap_minutes")
+    return float(minutes) * 60 if minutes else None
+
+
+def _run_metered(runner, p: Project, kwargs: Mapping[str, Any]) -> None:
+    """Run the build with its live token/time meter streaming to the floor."""
+    insight.start_meter(p.id, insight.MeterWatch(
+        _STATE_DIR, p.id, lambda ev: _emit(p, **ev),
+        caps=lambda: (p.token_cap, _time_cap_s(p))))
     try:
         runner(p, **kwargs)
     finally:
-        _BUILD_GATE.release()
+        insight.finish_meter(p.id, _STATE_DIR, p.token_cap, _time_cap_s(p))
+
+
+def _finish_stopped(p: Project) -> None:
+    """Close out a build the operator stopped or paused; its checkpoint stays resumable."""
+    kind = p.stop_kind or "stopped"
+    verb = "Paused" if kind == "paused" else "Stopped"
+    _emit(p, type="narrate",
+          text=f"⏸ {verb} at a checkpoint — Resume picks up where it left off.")
+    _emit(p, type="halt", phase=kind, reason=f"{kind} by the operator")
+    _emit(p, type="done", passed=False, phase=kind)
+    p.phase = kind
+    p.status = "done"
+    _persist(p)
+    _close(p)
+
+
+def _inputs_dir(p: Project) -> Path | None:
+    return p.out_base / ".inputs" if p.out_base else None
+
+
+def _build_kwargs(p: Project) -> dict[str, Any]:
+    """The floor's model routing + advanced options for ``run``; the spec and the
+    base tree are server-owned files under the floor's own output dir."""
+    kw = _settings.run_kwargs(p.build)
+    inputs = _inputs_dir(p)
+    if inputs is not None and p.build.get("spec"):
+        kw["spec"] = str(inputs / "spec.md")
+    if inputs is not None and p.build.get("base_id"):
+        kw["base_dir"] = str(inputs / "base")
+    return kw
+
+
+def _settings_path() -> Path:
+    return _OUTPUT_ROOT / "settings.json"
+
+
+def _server_backend() -> str:
+    from foundry.cli import BACKENDS
+
+    backend = os.environ.get("FOUNDRY_MODEL_BACKEND", "mock").strip() or "mock"
+    return backend if backend in BACKENDS else "mock"
+
+
+def _base_tree(base: Project) -> dict[str, bytes] | None:
+    """A shipped floor's tree with its BUILD-MANIFEST (the stack and contracts a
+    change inherits): the run's own disk export when it wrote one, else the store
+    read-back with the manifest rebuilt from the same final state."""
+    code = base.out_base / "code" if base.out_base else None
+    if code is not None and (code / "BUILD-MANIFEST.json").is_file():
+        return _disk_tree(code)
+    repo = _read_repo_cached(base.id)
+    if repo is not None and repo.files:
+        tree = {f.path: b for f in repo.files if (b := repo.file_bytes(f.path)) is not None}
+        tree["BUILD-MANIFEST.json"] = json.dumps(repo.manifest, indent=2).encode()
+        return tree
+    return _disk_tree(code) if code is not None and code.is_dir() else None
+
+
+def _disk_tree(code: Path) -> dict[str, bytes]:
+    return {str(f.relative_to(code)): f.read_bytes()
+            for f in sorted(code.rglob("*")) if f.is_file() and not f.is_symlink()}
 
 
 def _run_factory(p: Project, resume: bool = False) -> None:
@@ -1277,22 +1049,20 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     from foundry.cli import run
 
     _hook_rate_limit_waits()
-    _hook_usage_meter()
-    # Baseline the cost/elapsed context for THIS session's checkpoints. A resume
-    # re-baselines (the meter is in-memory and a restart zeroed it), so the dialog
-    # reports "since the build resumed" rather than an invented total.
-    p.start_mono = time.monotonic()
-    p.cp_mono = None
-    p.usage_mark = _usage_snapshot()
-    p.usage_cp = {}
 
     if resume:
         _emit(p, type="narrate",
-              text="↻ Resuming after a restart — picking up from the last checkpoint…")
+              text="↻ Resuming — picking up from the last checkpoint…")
     else:
         _emit(p, type="project", id=p.id, request=p.request, mode=p.mode, floor=p.floor,
-              backend=p.backend, slots=p.max_slots)
-        _emit(p, type="narrate", text=f"📋 New project on Floor {p.floor}: {p.request!r}")
+              backend=p.backend, slots=p.max_slots, workers=p.workers,
+              ticket_tiers=p.ticket_tiers, token_cap=p.token_cap,
+              max_fix_attempts=p.max_fix_attempts, build=p.build, profile=p.profile)
+        if p.build.get("base_floor"):
+            _emit(p, type="narrate", text=f"✎ Change of floor {p.build['base_floor']} "
+                                          f"on Floor {p.floor}: {p.request!r}")
+        else:
+            _emit(p, type="narrate", text=f"📋 New project on Floor {p.floor}: {p.request!r}")
         _emit(p, type="narrate", text=f"🏭 Mode: {p.mode}. The crew reports for duty…")
         if p.backend != "mock":
             # Real backends: the first graph node is one long model call, and node
@@ -1303,116 +1073,34 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     # The build ALWAYS opens with product/intake work, but live node telemetry only
     # fires as nodes COMPLETE — seat the product team NOW so the floor shows the
     # work already grinding instead of an all-lounge office.
-    _emit(p, type="active", room="product", agent="", live=True)
+    _emit(p, type="active", room="plan", agent="", live=True)
     time.sleep(_PACE)
 
-    # Stack = auto on a real backend: the Principal Architect picks the stack from
+    # Stack = auto on a real backend: the Planner picks the stack from
     # the toolchains actually installed on this host; the chosen profile pins the
-    # gates for THIS build and every child (iterate / autopilot / ladder rung).
+    # gates for THIS build.
     if (p.profile or "auto") == "auto":
         chosen = _choose_stack(p)
         if chosen:
             p.profile = chosen[0]
-            _emit(p, type="active", room="architecture", agent="Principal Architect",
+            _emit(p, type="profile", profile=p.profile)   # a resume after a restart keeps it
+            _emit(p, type="active", room="plan", agent="Planner",
                   live=True)
             _emit(p, type="narrate",
-                  text=f"🏗 Principal Architect chose the stack: {chosen[0]}"
+                  text=f"🏗 Planner chose the stack: {chosen[0]}"
                        + (f" — {chosen[1]}" if chosen[1] else ""))
 
-    # ---- milestone ladder: plan once (rung 1), then run THIS rung ------------- #
-    run_request, run_spec = p.request, p.spec
-    if p.milestones_on:
-        if not p.milestone_plan:                      # rung 1 plans the ladder
-            p.milestone_root = p.milestone_root or p.request
-            plan = [m for m in p.milestone_explicit if m][: p.milestone_max]
-            if not plan and p.backend == "mock":      # mock has no planner model
-                plan = ["walking skeleton — the core loop end to end",
-                        "core features on the skeleton",
-                        "polish, docs and hardening"][: p.milestone_max]
-            if not plan:
-                _emit(p, type="narrate", text="🪜 Planning the milestone ladder…")
-                try:
-                    from foundry.cli import _build_proxy
-                    from foundry.lifecycle.milestones import plan_milestones
-                    plan = plan_milestones(p.request, _build_proxy(p.backend),
-                                           max_milestones=p.milestone_max)
-                except Exception as exc:
-                    print(f"[milestones] floor {p.floor} planning failed: {exc}")
-                    traceback.print_exc()
-                    _emit(p, type="narrate", text=f"💥 Milestone planning failed: {exc}")
-                    _emit(p, type="done", passed=False, phase="plan")
-                    p.status = "done"
-                    _persist(p)
-                    _close(p)
-                    return
-            p.milestone_plan = plan
-            p.milestone_index = 1
-            _emit(p, type="narrate",
-                  text=f"🪜 Milestone ladder ({len(plan)}):  "
-                       + "  ·  ".join(f"{k + 1}. {t}" for k, t in enumerate(plan)))
-        _emit_ladder_prog(p)
-        _emit(p, type="narrate",
-              text=f"🪜 MILESTONE {p.milestone_index}/{len(p.milestone_plan)}: "
-                   f"{p.milestone_plan[p.milestone_index - 1]}")
-        run_request, run_spec = _milestone_run_args(p)
-
-    def responder(payload: dict[str, Any]) -> str:
-        # The REAL stage payload -> paced game events, then the CTO's call. A cheap T3
-        # caption pass first, so the log/progress blocks describe what was DONE (advisory
-        # — any failure falls back to the mechanical artifact breakdown).
-        summaries = None
-        try:
-            summaries = _summarize_stage(p, payload)
-        except Exception as exc:
-            print(f"[summary] floor {p.floor} caption pass failed: {exc}")
-        _emit_paced(p, events_for_payload(payload, p.seen_uris, summaries))
-        try:                          # persist the dedup set so a resume won't replay
-            _STORE.add_seen(p.id, p.seen_uris)
-        except Exception:
-            pass
-        # Stash the agents' journal so a lead can be "interviewed" ([11], advisory).
-        jrnl = payload.get("agent_journal")
-        if isinstance(jrnl, list):
-            p.journal = jrnl
-        boundary = str(payload.get("boundary", "stage"))
-        if p.supervised:
-            # GATED gets the same AI experts autonomous does — but ADVISORY: they
-            # review the release evidence BEFORE the human's checkpoint and their
-            # verdicts ride into the approval dialog. The human stays the judge.
-            advisors = _advisory_judgments(p, payload, boundary)
-            with p.cond:
-                p.checkpoint_seq += 1
-                cidx = p.checkpoint_seq
-                p.pending_checkpoint = cidx
-            p.awaiting = True
-            # `checkpoint` lets any device's decision name WHICH pause it answers,
-            # so a stale/duplicate click can't leak into the next checkpoint.
-            _emit(p, type="await_decision", boundary=boundary, checkpoint=cidx,
-                  journal=p.journal, advisors=advisors,
-                  advisors_note=_advisor_note(p, boundary, advisors),
-                  spend=_checkpoint_spend(p))
-            decision = _await_decision(p, cidx)
-            # The next pause measures from THIS one (the stage the human just judged
-            # is closed), whichever way they decided.
-            p.cp_mono = time.monotonic()
-            p.usage_cp = _usage_snapshot()
-        else:
-            time.sleep(_AUTO_APPROVE_DELAY)
-            decision = "approve"
-        p.awaiting = False
-        with p.cond:
-            p.pending_checkpoint = None
-        _emit(p, type="resolved", boundary=boundary, decision=decision)
-        verb = {"approve": "approved", "needs_changes": "requested changes on",
-                "reject": "REJECTED"}.get(decision, "REJECTED")
-        _emit(p, type="narrate", text=f"🧑‍💼 CTO {verb} the {boundary} checkpoint.")
-        return decision
-
     # LIVE per-node telemetry: as each real graph node executes, seat its agent at
-    # the desk in real time (not the retroactive burst at the checkpoint). Emitted
-    # immediately (unpaced) so the floor reflects the build actually grinding.
+    # the desk in real time; as it finishes, surface what it produced (artifacts,
+    # tickets, org chart, journal). Emitted immediately so the floor reflects the
+    # build actually grinding.
     def progress(node: str, scope: str, *, phase: str = "finish",
                  result: object = None) -> None:
+        if phase == "start" and scope == "factory" and node in STAGE_FOR_NODE:
+            room, label = STAGE_FOR_NODE[node]
+            _emit(p, type="stage", room=room, label=label)
+        if phase == "finish" and isinstance(result, dict):
+            _emit_node_output(result)
         ev = live_event_for_node(node, scope, phase, result)
         if ev is None:
             return
@@ -1431,6 +1119,18 @@ def _run_factory(p: Project, resume: bool = False) -> None:
             p.inflight.pop(node, None)
         _emit(p, **ev)
 
+    def _emit_node_output(result: Mapping[str, Any]) -> None:
+        for out in events_for_node_output(result, p.seen_uris, p.ticket_tiers):
+            _emit(p, **out)
+        with contextlib.suppress(Exception):   # persist the dedup set so a resume won't replay
+            _STORE.add_seen(p.id, p.seen_uris)
+
+    def task_cb(ev: Mapping[str, Any]) -> None:
+        """One ticket's worker started / finished / failed (the floor's per-ticket sprites)."""
+        out = event_for_task(ev)
+        if out is not None:
+            _emit(p, **out)
+
     def activity(text: str) -> None:
         """One line of "what the agent is doing right now", from inside a step."""
         line = take_activity(p, text)
@@ -1445,18 +1145,8 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     # only write a disk tree when WORKSHOP_WRITE_DISK opts in (an export cache);
     # otherwise the Repo/OUTPUT browser materializes the tree straight from the store.
     code_dir = (p.out_base / "code") if (p.out_base and _WRITE_DISK) else None
-    # Iterate base: prefer an on-disk parent code dir (set when disk export is on);
-    # else materialize the parent's full tree from the CAS into a scratch dir, so a
-    # release still builds ON TOP of the prior code with no output directory.
-    base_stack = contextlib.ExitStack()
-    base_dir = p.base_dir
-    if not base_dir and p.parent_id:
-        scratch = Path(base_stack.enter_context(
-            tempfile.TemporaryDirectory(prefix="foundry-base-")))
-        if _materialize_base_dir(p.parent_id, scratch):
-            base_dir = str(scratch)
-    # Quiet-watchdog: on a REAL backend, if no event lands for a long stretch (and
-    # we're not paused at a checkpoint), report WHO the build is waiting on. A single
+    # Quiet-watchdog: on a REAL backend, if no event lands for a long stretch,
+    # report WHO the build is waiting on. A single
     # agentic step is legitimately minutes long, so the first tick is a status line,
     # not an alarm — the "something may be wrong" advice waits until it really drags.
     # (Without this, a hung CLI — auth prompt, wall-clock cap + silent retries — looks
@@ -1471,8 +1161,6 @@ def _run_factory(p: Project, resume: bool = False) -> None:
                 return
             if len(p.log) != last_len:
                 last_len, quiet_min = len(p.log), 0
-                continue
-            if p.awaiting:            # checkpoint pause: quiet is expected
                 continue
             quiet_min += 1
             if quiet_min in (5, 15, 30):
@@ -1496,32 +1184,39 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     try:
         try:
             result = run(
-                run_request,                  # = p.request, or this rung's milestone framing
+                p.request,
+                task_cb=task_cb,
+                workers=p.workers,
+                ticket_tiers=p.ticket_tiers or None,
                 progress_cb=progress,
                 activity_cb=activity,         # what the agent is doing INSIDE a step
                 mode=p.mode,
                 backend=p.backend,            # real backend per project (not always mock)
                 adapter=p.adapter,            # coding substrate (stub/raw-react)
-                packs=p.packs or None,        # optional domain packs (regulated/ml_data/frontend)
-                spec=run_spec,                # pasted spec text OR uploaded docs dir (additive)
                 max_slots=p.max_slots,        # IC-pool parallelism (Wave C) + budget tree (Wave D)
-                cost_cap_microusd=p.cost_cap_microusd,
+                token_cap=p.token_cap,
                 max_fix_attempts=p.max_fix_attempts,
-                base_dir=base_dir,            # iterate: prior code seeded as the base tree
+                cancel=p.cancel,              # Stop / Pause: halts at the next checkpoint
                 thread_id=p.id,               # UNIQUE per project — no cross-floor collision
                 state_dir=_STATE_DIR,         # durable: build survives + resumes past a restart
-                checkpoints=True,
-                checkpoint_responder=responder,
                 output_dir=str(code_dir) if code_dir else None,
+                # The code stays in the store, but the BUILD-MANIFEST (run/test
+                # commands, models, tokens) is the floor's run card.
+                manifest_dir=str(p.out_base) if p.out_base else None,
                 profile=p.profile or "auto",  # stack picked in the UI ("auto" = infer)
+                **_build_kwargs(p),
             )
         finally:
             wd_stop.set()
-            base_stack.close()  # run() copies base_dir into its sandbox synchronously
     except Exception as exc:
         # Print the full traceback to the SERVER terminal too — the quest-log line
         # is a one-line summary, and "no error in the terminal" must never mislead.
-        print(f"[build] floor {p.floor} r{p.release_seq} failed: {exc}")
+        from foundry.proxy.token_meter import BuildStopped
+
+        if isinstance(exc, BuildStopped):
+            _finish_stopped(p)
+            return
+        print(f"[build] floor {p.floor} failed: {exc}")
         traceback.print_exc()
         # A TRANSIENT provider failure (ProxyUnavailable — the proxy already rode
         # its bounded retry/rate-limit budget and is telling judgment nodes to
@@ -1540,34 +1235,36 @@ def _run_factory(p: Project, resume: bool = False) -> None:
                        f"checkpoint ~{resume_at} — nothing is lost.")
             _emit(p, type="limitwait", seconds=int(wait), until=int(time.time() + wait))
             _persist(p)                          # status stays "running": a restart resumes too
-            time.sleep(wait)
+            if p.cancel.wait(wait):              # Stop / Pause during the back-off
+                _finish_stopped(p)
+                return
             with _LOCK:
                 alive = _PROJECTS.get(p.id) is p  # a Clear-all during the wait removes it
             if not alive:
                 return
             return _run_factory(p, resume=True)  # re-enter from the durable checkpoint
+        if type(exc).__name__ in ("TokenCapExceeded", "TimeCapExceeded"):
+            timed = type(exc).__name__ == "TimeCapExceeded"
+            phase = "time_cap" if timed else "token_cap"
+            what = "time cap" if timed else "token cap"
+            _emit(p, type="narrate", text=f"⏹ Stopped: {exc}. Raise the {what} to go further.")
+            _emit(p, type="halt", phase=phase, reason=str(exc))
+            _emit(p, type="done", passed=False, phase=phase)
+            p.phase = phase
+            p.status = "done"
+            _persist(p)
+            _close(p)
+            return
         _emit(p, type="narrate", text=f"💥 Build error: {exc}")
         _emit(p, type="halt", phase="error", reason=str(exc))
         _emit(p, type="done", passed=False, phase="error")
+        p.phase = "error"
         p.status = "done"
         _persist(p)
         _close(p)
         return
 
-    # Disk-export mode only: the build wrote ONLY its changed/added files to
-    # code_dir; fill in every unchanged file from the parent so the on-disk tree is
-    # the prior code + the change. (The CAS Repo view does this overlay at read time.)
-    if base_dir and code_dir:
-        base = Path(base_dir)
-        if base.is_dir():
-            code_dir.mkdir(parents=True, exist_ok=True)
-            for src in base.rglob("*"):
-                if src.is_file():
-                    dst = code_dir / src.relative_to(base)
-                    if not dst.exists():
-                        dst.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(src, dst)
-
+    p.closing = True
     result_dict = {
         "passed": result.passed,
         "phase": result.phase,
@@ -1575,7 +1272,9 @@ def _run_factory(p: Project, resume: bool = False) -> None:
         "artifact_uri": result.artifact_uri,
         "gate_statuses": {k: str(v) for k, v in result.gate_statuses.items()},
     }
-    _emit_paced(p, events_for_result(result_dict))
+    for ev in events_for_result(result_dict):
+        _emit(p, **ev)
+        time.sleep(_PACE)
     if result.passed:
         _emit(p, type="narrate", text="💰 Gates all green — the vault opens. Shipped!")
     else:
@@ -1592,520 +1291,9 @@ def _run_factory(p: Project, resume: bool = False) -> None:
         _emit(p, type="narrate",
               text=f"📂 {n_files} file(s) in the repo — open REPO to browse the store.")
     p.passed = bool(result.passed)
+    p.phase = "passed" if result.passed else (result.phase or "halted")
     p.status = "done"
-    # Milestone ladder: update the rung chips, then either chain the next rung as a
-    # new release (fail-closed: only on a PASS) or close the ladder out.
-    ladder_more = False
-    if p.milestones_on and p.milestone_plan:
-        i, n = p.milestone_index, len(p.milestone_plan)
-        _emit_ladder_prog(p, current="done" if p.passed else "failed")
-        if p.passed and i < n:
-            ladder_more = True
-            _emit(p, type="narrate",
-                  text=f"🪜 Milestone {i}/{n} released — starting {i + 1}/{n}: "
-                       f"{p.milestone_plan[i]}…")
-        elif p.passed:
-            _emit(p, type="narrate",
-                  text=f"🪜 All {n} milestones released — the ladder is complete.")
-        else:
-            _emit(p, type="narrate",
-                  text=f"🪜 Ladder stopped fail-closed at milestone {i}/{n} — every "
-                       "released rung below it is still playable/browsable.")
-    if p.passed and not ladder_more and p.autopilot_budget > 0:
-        _emit(p, type="narrate",
-              text=f"🧭 Autopilot: {p.autopilot_budget} iteration(s) left — the Director "
-                   "and panel are choosing the next action…")
     _persist(p)              # catalog the FINAL status/passed (after they're set)
-    _close(p)
-    if ladder_more:
-        _spawn_milestone_next(p)     # the next rung streams as the floor's next release
-        return
-    _maybe_autopilot_next(p)
-
-
-def _maybe_autopilot_next(p: Project) -> None:
-    """Autopilot step (lifecycle.autopilot): after a GREEN build with budget left,
-    Director → panel → deterministic tally → spawn the winner as the next release.
-
-    Runs in its own thread (the build thread is done); a panel DECLINE or any
-    ideation failure stops the loop fail-closed — nothing is built that the
-    panel did not choose. The child inherits mode/supervision: autonomous keeps
-    zero human contact; gated keeps its checkpoints + sign-offs."""
-    if not (p.passed and p.autopilot_budget > 0):
-        return
-
-    def _step() -> None:
-        from foundry.cli import _build_proxy
-        from foundry.lifecycle.autopilot import propose_candidates, run_panel, tally
-
-        target = _root_request(p)
-        evidence = "\n".join(
-            f"release {i + 1}: {req}" for i, req in enumerate(_lineage_requests(p.id))
-        )
-        try:
-            proxy = _build_proxy(p.backend)
-            candidates = propose_candidates(proxy, target, evidence)
-            votes = run_panel(proxy, target, evidence, candidates)
-            decision = tally(candidates, votes)
-        except Exception as exc:  # ideation is advisory: fail-closed, never a crash-loop
-            _autopilot_stop_note(p, f"autopilot stopped: ideation failed ({exc})")
-            return
-        if decision.declined or decision.winner is None:
-            _autopilot_stop_note(
-                p, "autopilot stopped: the panel declined every candidate — "
-                   "human steering wanted (iterate manually to continue)")
-            return
-        w = decision.winner
-        request = f"{target} — NEXT ITERATION: {w.title}. {w.scope}"
-        if decision.amendments:
-            request += " PANEL AMENDMENTS (honor these): " + " | ".join(decision.amendments)
-        ballots = ", ".join(
-            f"{v.panelist}={v.scores[decision.winner_index]}" for v in decision.votes
-        )
-        proposal = None
-        if p.supervised:
-            # Gated/supervised: the IDEA itself is a checkpoint (approve /
-            # edit-then-approve / reject) BEFORE any model spend on the build.
-            proposal = {
-                "title": w.title, "rationale": w.rationale, "scope": w.scope,
-                "ballots": ballots, "request": request,
-            }
-        child = _spawn_iteration(p, request, p.autopilot_budget - 1, proposal=proposal)
-        _emit(child, type="narrate",
-              text=f"🧭 Autopilot chose “{w.title}” ({w.rationale}) — panel scores: "
-                   f"{ballots}."
-                   + (" Awaiting your proposal decision…" if proposal
-                      else f" Building release {child.release_seq}…"))
-
-    threading.Thread(target=_step, daemon=True).start()
-
-
-def _root_request(p: Project) -> str:
-    """The floor's ORIGINAL target (the root of the lineage), so every autopilot
-    iteration steers toward the same goal instead of drifting off the last title."""
-    chain = _lineage_ids(p.id)
-    root = _STORE.get(chain[0]) if chain else None
-    return str((root or {}).get("request") or p.request)
-
-
-def _lineage_requests(pid: str) -> list[str]:
-    out: list[str] = []
-    for anc in _lineage_ids(pid):
-        rec = _STORE.get(anc)
-        if rec and rec.get("request"):
-            out.append(str(rec["request"]))
-    return out
-
-
-def _autopilot_stop_note(p: Project, note: str) -> None:
-    """The build stream is already closed — record WHY the loop stopped where the
-    projects API can show it (and the server log can grep it)."""
-    print(f"[autopilot] floor {p.floor} r{p.release_seq}: {note}")
-    p.autopilot_note = note
-
-
-def _spawn_iteration(
-    parent: Project, request: str, budget: int, *, proposal: dict[str, Any] | None = None
-) -> Project:
-    """Create + start the next release on the parent's floor (the same shape the
-    POST /api/projects iterate path builds): spec inherited, base tree overlaid
-    from the parent's CAS lineage inside _run_factory, mode/supervision inherited
-    so autonomous stays hands-off and gated keeps its human checkpoints.
-
-    ``proposal`` (supervised floors): the build FIRST pauses on a PROPOSAL
-    checkpoint — the panel's chosen idea surfaces as approve / edit-then-approve
-    (the human's text becomes the request, both versions logged) / reject (the
-    loop stops, nothing is built). Uses the same first-decision-wins seam as the
-    stage checkpoints, id ``-1``, with the same auto-approve timeout so an absent
-    human never stalls the loop."""
-    with _LOCK:
-        release_seq = _STORE.max_release(parent.floor) + 1
-    pid = uuid.uuid4().hex[:12]
-    p = Project(
-        id=pid, request=request, mode=parent.mode, supervised=parent.supervised,
-        floor=parent.floor, release_seq=release_seq, backend=parent.backend,
-        adapter=parent.adapter, packs=list(parent.packs),
-        spec=parent.spec_text or None, spec_text=parent.spec_text,
-        out_base=_OUTPUT_ROOT / f"floor-{parent.floor}" / f"r{release_seq}",
-        max_slots=parent.max_slots, cost_cap_microusd=parent.cost_cap_microusd,
-        max_fix_attempts=parent.max_fix_attempts, parent_id=parent.id,
-        autopilot_budget=max(0, budget),
-    )
-    p.profile = parent.profile
-    with _LOCK:
-        _PROJECTS[pid] = p
-
-    def _runner() -> None:
-        if proposal is not None and not _proposal_approved(p, proposal):
-            return  # rejected: nothing built, the floor waits for manual steering
-        _gated_runner(_run_factory, p)
-
-    threading.Thread(target=_runner, daemon=True).start()
-    return p
-
-
-# ---- milestone ladder (Workshop): each rung = one release on the floor ------- #
-
-def _milestone_run_args(p: Project) -> tuple[str, str]:
-    """(request, spec) for THIS rung — mirrors ``foundry.lifecycle.milestones``'s
-    composition so a Workshop ladder builds the same way the CLI one does. The
-    user's own spec text (if any) rides on top of the plan framing."""
-    plan = p.milestone_plan or []
-    i, n = p.milestone_index, len(plan)
-    title = plan[i - 1]
-    plan_text = "\n".join(f"{k + 1}. {t}" for k, t in enumerate(plan))
-    req = f"{p.milestone_root} — MILESTONE {i}/{n}: {title}"
-    spec = (
-        f"OVERALL TARGET:\n{p.milestone_root}\n\nMILESTONE PLAN:\n{plan_text}\n\n"
-        f"THIS BUILD implements ONLY milestone {i}: {title}. Build on the "
-        "existing base tree; do not regress released behavior (the prior "
-        "criteria ride as the regression floor)."
-    )
-    if p.spec_text:
-        spec = f"{p.spec_text}\n\n{spec}"
-    return req, spec
-
-
-def _emit_ladder_prog(p: Project, *, current: str = "building") -> None:
-    """Ladder progress as the HUD's per-unit chips (reuses the platform chip row):
-    m01..mNN coloured done / building / failed / queued. ``current`` is THIS
-    rung's state (building while running; done/failed at its finish)."""
-    plan = p.milestone_plan or []
-    i = p.milestone_index
-    state = {
-        f"m{k:02d}": ("done" if k < i else (current if k == i else "queued"))
-        for k in range(1, len(plan) + 1)
-    }
-    _emit(p, type="platprog", services=state, total=len(state))
-
-
-def _spawn_milestone_next(parent: Project) -> Project:
-    """Start the NEXT rung as a new release on the parent's floor (the same shape
-    as _spawn_iteration): the parent's released tree is the base via the CAS
-    lineage, mode/supervision/autopilot budget carry over, and the rung's
-    request/spec are composed in _run_factory from the inherited plan."""
-    plan = list(parent.milestone_plan or [])
-    i = parent.milestone_index + 1
-    with _LOCK:
-        release_seq = _STORE.max_release(parent.floor) + 1
-    pid = uuid.uuid4().hex[:12]
-    p = Project(
-        id=pid,
-        request=f"{parent.milestone_root} — MILESTONE {i}/{len(plan)}: {plan[i - 1]}",
-        mode=parent.mode, supervised=parent.supervised,
-        floor=parent.floor, release_seq=release_seq, backend=parent.backend,
-        adapter=parent.adapter, packs=list(parent.packs),
-        spec=parent.spec_text or None, spec_text=parent.spec_text,
-        out_base=_OUTPUT_ROOT / f"floor-{parent.floor}" / f"r{release_seq}",
-        max_slots=parent.max_slots, cost_cap_microusd=parent.cost_cap_microusd,
-        max_fix_attempts=parent.max_fix_attempts, parent_id=parent.id,
-        autopilot_budget=parent.autopilot_budget,
-    )
-    p.milestones_on = True
-    p.milestone_plan = plan
-    p.milestone_index = i
-    p.milestone_root = parent.milestone_root
-    p.profile = parent.profile
-    with _LOCK:
-        _PROJECTS[pid] = p
-    threading.Thread(target=_gated_runner, args=(_run_factory, p), daemon=True).start()
-    return p
-
-
-_PROPOSAL_CHECKPOINT = -1  # never collides with the in-build stage checkpoints (0..)
-
-
-def _proposal_approved(p: Project, proposal: dict[str, Any]) -> bool:
-    """Surface the autopilot proposal as a decision; apply the human's verdict.
-
-    approve ⇒ build as proposed; needs_changes + edited text ⇒ the edit BECOMES
-    the request (both versions narrated — the audit trail keeps who chose what);
-    reject ⇒ stop (persisted halt, autopilot note). Timeout auto-approves, same
-    as every other checkpoint, so the AI keeps driving an unattended floor."""
-    with p.cond:
-        p.pending_checkpoint = _PROPOSAL_CHECKPOINT
-    _emit(p, type="checkpoint", boundary="autopilot_proposal",
-          title="AUTOPILOT PROPOSAL",
-          summary=f"{proposal['title']} — {proposal['rationale']} "
-                  f"(panel: {proposal['ballots']})",
-          actions=checkpoint_actions("autopilot_proposal"))
-    _emit(p, type="await_decision", boundary="autopilot_proposal",
-          checkpoint=_PROPOSAL_CHECKPOINT, request=proposal["request"],
-          title=proposal["title"], scope=proposal["scope"], ballots=proposal["ballots"],
-          spend=_checkpoint_spend(p))
-    decision = _await_decision(p, _PROPOSAL_CHECKPOINT)
-    edit = p.decision_edit.get(_PROPOSAL_CHECKPOINT, "").strip()
-    with p.cond:
-        p.pending_checkpoint = None
-    _emit(p, type="resolved", boundary="autopilot_proposal", decision=decision)
-    if decision == "reject":
-        _emit(p, type="narrate", text="🛑 Proposal rejected — autopilot stopped. "
-                                      "Iterate manually to continue this floor.")
-        _emit(p, type="done", passed=False, phase="proposal_rejected")
-        p.status = "done"
-        p.autopilot_note = "autopilot stopped: proposal rejected by the human"
-        _persist(p)
-        _close(p)
-        return False
-    if decision == "needs_changes" and edit:
-        _emit(p, type="narrate",
-              text=f"✏️ Human amended the proposal. Panel proposed: “{p.request}” — "
-                   f"building instead: “{edit}”")
-        p.request = edit
-    _emit(p, type="narrate", text=f"✅ Proposal approved — building release {p.release_seq}…")
-    return True
-
-
-_STAGE_ORDER = ["defining requirements", "designing the system", "implementing",
-                "testing & review", "security review", "verifying at the gate"]
-
-
-def _node_stage(node: str) -> str | None:
-    """Map a live graph node id to a readable pipeline STAGE for the platform log
-    (None for infra/non-stage nodes we don't surface)."""
-    n = (node or "").lower()
-    if any(k in n for k in ("stakeholder", "product", "criteria", "program")):
-        return "defining requirements"
-    if "architect" in n:
-        return "designing the system"
-    if "engineer" in n and ("appsec" not in n):
-        return "implementing"
-    if any(k in n for k in ("qa", "sdet", "reviewer", "writer", "tester")):
-        return "testing & review"
-    if any(k in n for k in ("appsec", "audit", "supply", "security")):
-        return "security review"
-    if "gate" in n:
-        return "verifying at the gate"
-    return None
-
-
-def _agent_for_node(node: str) -> str | None:
-    """The human agent ROLE for a graph node id (exact id, else substring for a
-    namespaced/lane-suffixed name), or None for infra/router nodes that aren't an agent
-    action worth its own log box."""
-    from webapp.events import AGENT_BY_NODE
-
-    n = node or ""
-    who = AGENT_BY_NODE.get(n)
-    if who:
-        return who[0]
-    for key, (agent, _room) in AGENT_BY_NODE.items():
-        if key in n:
-            return agent
-    return None
-
-
-def _node_verb(node: str) -> str:
-    """A short 'what this agent did' verb for a node id (exact, else substring) — the
-    generic fallback when a node recorded no specific journal summary."""
-    from webapp.events import _NODE_SUMMARY
-
-    n = node or ""
-    verb = _NODE_SUMMARY.get(n)
-    if verb:
-        return verb
-    for key, v in _NODE_SUMMARY.items():
-        if key in n:
-            return v
-    return "did its step"
-
-
-def _platform_opts(body: dict[str, Any]) -> dict[str, Any]:
-    """Advanced platform knobs from the request body (all optional; sane defaults)."""
-    def _int(key: str, default: int) -> int:
-        try:
-            return max(1, int(body.get(key, default)))
-        except (TypeError, ValueError):
-            return default
-    return {
-        "max_passes": _int("max_passes", 6),
-        "critic": not bool(body.get("no_critic")),
-        "max_parallel": _int("max_parallel", 4),
-        "max_slots_per_service": _int("max_slots_per_service", 6),
-    }
-
-
-def _infers_platform(request: str) -> bool:
-    """True when the request decomposes into MORE THAN ONE service — i.e. it reads as
-    a multi-service app/platform (web + backend + data …) rather than a single
-    component (a game, a tool, one service). Drives the auto platform/single choice."""
-    try:
-        from foundry.platform import plan_platform
-
-        return len(plan_platform(request).services) >= 2
-    except Exception:
-        return False
-
-
-def _run_platform(p: Project) -> None:
-    """A PLATFORM build on one floor: compose many services into one monorepo via
-    ``foundry.platform.build_platform`` and stream its progress to the quest log.
-    The stitched monorepo is written to ``p.out_base`` so the repo browser / Floor-0
-    hub serve it from disk (no CAS build of its own)."""
-    from foundry.platform import build_platform
-    from foundry.platform.planner import plan_platform
-
-    _hook_rate_limit_waits()
-
-    # Map a service role to a discipline ROOM the floor can light up (the platform
-    # floor has no engine stage stream of its own, so we drive it ourselves).
-    role_room = {"web": "frontend", "backend": "backend",
-                 "data": "data", "worker": "backend", "game": "frontend"}
-    plan = plan_platform(p.request)
-    # Synthetic org so the discipline rooms staff up (engineers per area); whoever
-    # isn't working the active stage waits in the lounge until their room lights up.
-    area_units: dict[str, list[str]] = {}
-    order: list[str] = []
-    for s in plan.services:
-        a = role_room.get(s.role, "backend")
-        if a not in area_units:
-            area_units[a] = []
-            order.append(a)
-        area_units[a].append(s.name)
-    areas = [{"area": a, "leads": [f"{a} lead"]} for a in order]
-    domains = [{"owner": a, "area": a, "units": area_units[a]} for a in order]
-    first_room = role_room.get(plan.services[0].role, "backend") if plan.services else "backend"
-
-    # The floor's "extra workers" pool = the user's setting (p.max_slots), so the same
-    # knob drives platform and single builds. Each discipline room still gets its one
-    # baseline worker; these extras are shared out across the rooms by demand.
-    _emit(p, type="project", request=p.request, mode=p.mode, backend=p.backend,
-          slots=p.max_slots)
-    _emit(p, type="org", areas=areas, domains=domains)
-    _emit(p, type="active", room=first_room)   # seat everyone; first discipline works
-    _emit(p, type="narrate", text=f"🏗  Platform build — {p.request}")
-
-    role_desc = {"web": "the web frontend (SPA)",
-                 "backend": "the back-end (REST API + auth + domain)",
-                 "data": "the data layer (schema + DB)",
-                 "worker": "the background worker", "game": "the game"}
-    svc_role = {s.name: s.role for s in plan.services}
-    state: dict[str, str] = {s.name: "queued" for s in plan.services}
-    svc_stage: dict[str, str] = {}   # last pipeline stage per service (show every CHANGE)
-
-    def push_prog() -> None:
-        _emit(p, type="platprog", services=dict(state), total=len(state))
-
-    push_prog()
-
-    def set_state(svc: str, st: str) -> None:
-        state[svc] = st
-        push_prog()
-
-    def cb(ev: dict[str, Any]) -> None:
-        t = ev.get("type")
-        svc = ev.get("service", "")
-        pn = ev.get("pass", 1)
-        # Each service is ONE box in the quest log: `svc` events open it (empty) at
-        # svc_start, update it in place as its pipeline advances / regresses / rebuilds,
-        # and populate its body when it finishes — instead of a growing flat list of
-        # per-stage narrate lines (which read as one event spilling across many rows).
-        if t == "plan":
-            _emit(p, type="narrate", text="📋 Services: " + ", ".join(ev.get("services") or []))
-        elif t == "svc_start":
-            role = str(ev.get("role") or "")
-            _emit(p, type="active", room=role_room.get(role, "backend"))
-            set_state(svc, "building")
-            _emit(p, type="svc", service=svc, phase="start", role=role,
-                  desc=role_desc.get(role, role))
-        elif t == "svc_node":
-            node = str(ev.get("node") or "")
-            # Canvas: the SAME per-node start/finish telemetry a single build streams, so
-            # the floor seats the agent whose node is actually running and clears them when
-            # it ends. Without this a platform build only ever announced a room per service,
-            # so every room stayed lit and the CTO had nothing to walk between. `quiet`
-            # keeps it off the quest log — the `svc` boxes below already narrate each node.
-            live = live_event_for_node(node, str(ev.get("scope") or ""),
-                                       phase=str(ev.get("phase") or "finish"))
-            if live:
-                live["quiet"] = True
-                _emit(p, **live)
-            # Canvas: pulse the service's room when its pipeline REGRESSES to an earlier
-            # stage (tests failed -> re-implement). The event log below is per-agent, but
-            # the floor animation still tracks the coarse stage.
-            stage = _node_stage(node)
-            last = svc_stage.get(svc)
-            if stage and stage != last:
-                back = (last in _STAGE_ORDER and stage in _STAGE_ORDER
-                        and _STAGE_ORDER.index(stage) < _STAGE_ORDER.index(last))
-                svc_stage[svc] = stage
-                if back:
-                    _emit(p, type="rebuild", room=role_room.get(svc_role.get(svc, ""), "backend"))
-            # Log: ONE box per AGENT action. The node opens its box on START ("▸ working")
-            # and fills it on FINISH — the agent's journal summary (else a role verb) as the
-            # box line, with its assumptions/concerns/artifacts behind the box caret. Infra
-            # / router nodes (no agent) don't get a box.
-            agent = _agent_for_node(node)
-            if agent:
-                if ev.get("phase") == "start":
-                    _emit(p, type="svc", service=svc, phase="agent_start",
-                          agent=agent, node=node)
-                else:
-                    det_raw = ev.get("detail")
-                    det = det_raw if isinstance(det_raw, dict) else {}
-                    _emit(p, type="svc", service=svc, phase="agent_done",
-                          agent=agent, node=node,
-                          summary=str(det.get("summary") or ""), did=_node_verb(node),
-                          assumptions=det.get("assumptions") or [],
-                          concerns=det.get("concerns") or [],
-                          artifacts=det.get("artifacts") or [])
-        elif t == "pass" and pn > 1:
-            svc_stage.pop(svc, None)   # a new pass re-runs the pipeline; let stages re-announce
-            set_state(svc, "rebuilding")
-            _emit(p, type="rebuild", room=role_room.get(svc_role.get(svc, ""), "backend"))
-            _emit(p, type="svc", service=svc, phase="rebuild", passno=pn)
-        elif t == "pass_result":
-            passed = bool(ev.get("passed"))
-            set_state(svc, "built" if passed else "held")
-            _emit(p, type="svc", service=svc, phase="pass_result", passed=passed, passno=pn)
-        elif t == "critic":
-            if ev.get("complete"):
-                set_state(svc, "approved")
-                _emit(p, type="svc", service=svc, phase="critic", complete=True)
-            else:
-                gaps = ev.get("gaps") or []
-                detail = "; ".join(gaps[:3]) if gaps else "more to do"
-                _emit(p, type="svc", service=svc, phase="critic", complete=False, detail=detail)
-        elif t == "svc_done":
-            passed = bool(ev.get("passed"))
-            set_state(svc, "done" if passed else "failed")
-            _emit(p, type="svc", service=svc, phase="done", passed=passed,
-                  passes=int(ev.get("passes", 1)),
-                  files=[str(f) for f in (ev.get("files") or [])[:8]])
-
-    opts = p.platform_opts or {}
-    staging = str(p.out_base.parent / f".staging-{p.id}") if p.out_base else None
-    try:
-        result = build_platform(
-            p.request, out_dir=str(p.out_base), backend=p.backend, mode=p.mode,
-            cost_cap_microusd=p.cost_cap_microusd, progress_cb=cb, work_dir=staging,
-            max_passes=int(opts.get("max_passes", 6)),
-            critic=bool(opts.get("critic", True)),
-            max_parallel=int(opts.get("max_parallel", 4)),
-            max_slots_per_service=int(opts.get("max_slots_per_service", 6)),
-        )
-    except Exception as exc:
-        _emit(p, type="narrate", text=f"💥 Platform error: {exc}")
-        _emit(p, type="done", passed=False, phase="error")
-        p.status = "done"
-        _persist(p)
-        _close(p)
-        return
-
-    # One "check" per service for the repo Checks tab (disk-fallback reads p.gates).
-    p.gates = {s.name: {"status": "PASS" if s.passed else "FAIL", "advisory": False}
-               for s in result.services}
-    n_files = sum(1 for f in p.out_base.rglob("*") if f.is_file()) if p.out_base else 0
-    _emit(p, type="narrate",
-          text=f"📦 Stitched monorepo — {len(result.services)} services, {n_files} files")
-    if n_files:
-        _emit(p, type="files", count=n_files)
-    if result.passed:   # shipped — open the vault chest + celebrate, like a single build
-        _emit(p, type="release", uri=f"monorepo · {len(result.services)} services")
-    _emit(p, type="done", passed=result.passed, phase="done")
-    p.passed = bool(result.passed)
-    p.status = "done"
-    _persist(p)
     _close(p)
 
 
@@ -2130,13 +1318,13 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _read_json(self) -> dict[str, Any]:
-        n = int(self.headers.get("Content-Length", 0) or 0)
-        if not n:
-            return {}
+        """The JSON object body; raises insight.BodyError (answered by do_POST)."""
         try:
-            return json.loads(self.rfile.read(n).decode("utf-8")) or {}
-        except (ValueError, UnicodeDecodeError):
-            return {}
+            return insight.read_json_body(self.headers, self.rfile)
+        except insight.BodyError as exc:
+            if exc.status == 413:
+                self.close_connection = True   # the unread body would desync keep-alive
+            raise
 
     # -- sign-in ---------------------------------------------------------------
 
@@ -2253,23 +1441,20 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/static/"):
             self._serve_static(path[len("/static/"):])
             return
-        if path == "/api/config":
-            self._config()
-            return
         if path == "/api/projects":
             self._list_projects()
             return
+        m = _INSIGHT_ROUTE.fullmatch(path)
+        if m:
+            self._insight(m.group(1))
+            return
         if path == "/api/builds":
-            self._list_builds()
+            self._list_builds(self.path.split("?", 1)[1] if "?" in self.path else "")
             return
-        if path.startswith("/api/releases/"):
-            self._list_releases(path.rsplit("/", 1)[-1])
-            return
-        if path.startswith("/api/repo/"):
-            self._repo_meta(path.rsplit("/", 1)[-1])
-            return
-        if path.startswith("/api/spec/"):
-            self._get_spec(path.rsplit("/", 1)[-1])
+        if path == "/api/settings":
+            backend = _server_backend()
+            self._json(200, _settings.client_view(_settings.load(_settings_path(), backend),
+                                                  backend))
             return
         if path.startswith("/api/files/"):
             self._list_files(path.rsplit("/", 1)[-1])
@@ -2280,50 +1465,12 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/zip/"):
             self._zip_output(path.rsplit("/", 1)[-1])
             return
-        if path.startswith("/api/gitzip/"):
-            self._gitzip(path.rsplit("/", 1)[-1])
-            return
         if not path.startswith("/api"):
             self._serve_static(path)  # e.g. /favicon.ico
             return
         self._json(404, {"error": "not found"})
 
-    def _config(self) -> None:
-        """UI config: the default backend (FOUNDRY_MODEL_BACKEND, else mock) so the
-        modal preselects it — a deployment sets the env to default to claude-cli."""
-        from foundry.cli import ADAPTERS, BACKENDS, _tier_models
-
-        default = os.environ.get("FOUNDRY_MODEL_BACKEND", "mock")
-        if default not in BACKENDS:
-            default = "mock"
-        default_adapter = os.environ.get("FOUNDRY_CODING_ADAPTER", "stub")
-        if default_adapter not in ADAPTERS:
-            default_adapter = "stub"
-        # The effective per-tier model ids each real backend would serve (curated
-        # default + FOUNDRY_MODEL_T{1,2,3} overrides) so the UI can SHOW what runs
-        # for whichever backend the user picks. Mock has no real models.
-        models = {} if default == "mock" else _tier_models(default)
-        models_by_backend = {
-            b: _tier_models(b) for b in BACKENDS if b != "mock"
-        }
-        try:
-            default_slots = max(1, int(os.environ.get("FOUNDRY_MAX_SLOTS", "1") or "1"))
-        except ValueError:
-            default_slots = 1
-        try:
-            from foundry.gates.profiles import PROFILES
-            profiles = sorted(PROFILES)
-        except Exception:
-            profiles = []
-        self._json(200, {
-            "default_backend": default, "backends": list(BACKENDS),
-            "default_adapter": default_adapter, "adapters": list(ADAPTERS),
-            "profiles": profiles,
-            "default_max_slots": default_slots, "models": models,
-            "models_by_backend": models_by_backend,
-        })
-
-    # -- output browsing (the build's written code + docs) ----------------------
+    # -- output browsing (the build's written code) ---------------------------------
     def _out_base(self, pid: str) -> Path | None:
         p = _PROJECTS.get(pid)
         if p is None or p.out_base is None or not p.out_base.is_dir():
@@ -2333,10 +1480,10 @@ class Handler(BaseHTTPRequestHandler):
     def _list_files(self, pid: str) -> None:
         # The code lives in the store: list the materialized CAS tree first. Fall
         # back to a disk export only for an older build with no durable checkpoint.
-        tree = _overlay_tree(pid)
+        tree = _tree(pid)
         if tree is not None:
             files = [{"path": p, "size": len(b)} for p, b in sorted(tree.items())]
-            self._json(200, {"files": files, "source": "store"})
+            self._json(200, {"files": files, "source": "store", **_draft_label(pid)})
             return
         base = self._out_base(pid)
         if base is None:
@@ -2346,47 +1493,7 @@ class Handler(BaseHTTPRequestHandler):
             {"path": str(f.relative_to(base)), "size": f.stat().st_size}
             for f in sorted(base.rglob("*")) if f.is_file()
         ]
-        self._json(200, {"files": files, "source": "disk"})
-
-    def _repo_meta(self, pid: str) -> None:
-        """The self-hosted-GitHub view of a build: tree + gate 'checks' + the
-        FeatureDiff 'pull requests', all read from the durable store."""
-        repo = _read_repo_cached(pid)
-        tree = _overlay_tree(pid)
-        if repo is None and tree is None:
-            # No durable checkpoint — degrade to a disk listing + the cached HUD gates.
-            base = self._out_base(pid)
-            p = _PROJECTS.get(pid)
-            if base is None:
-                self._json(404, {"error": "no repo yet"})
-                return
-            files = [
-                {"path": str(f.relative_to(base)), "size": f.stat().st_size}
-                for f in sorted(base.rglob("*")) if f.is_file()
-            ]
-            checks = [
-                {"name": n, "status": str(g.get("status", "")).split(".")[-1].lower(),
-                 "ok": str(g.get("status", "")).split(".")[-1].lower() == "pass",
-                 "advisory": bool(g.get("advisory")), "findings": []}
-                for n, g in (p.gates.items() if p else [])
-            ]
-            self._json(200, {"source": "disk", "tree_sha": None, "files": files,
-                             "checks": checks, "diffs": [], "sign_offs": []})
-            return
-        files = [{"path": p, "size": len(b)} for p, b in sorted((tree or {}).items())]
-        checks = [
-            {"name": c.name, "status": c.status, "ok": c.ok,
-             "advisory": c.advisory, "findings": list(c.findings)}
-            for c in (repo.checks if repo else ())
-        ]
-        diffs = [
-            {"uri": d.uri, "summary": d.summary, "text": d.text}
-            for d in (repo.diffs if repo else ())
-        ]
-        self._json(200, {"source": "store",
-                         "tree_sha": repo.tree_sha if repo else None,
-                         "files": files, "checks": checks, "diffs": diffs,
-                         "sign_offs": _sign_offs_payload(repo)})
+        self._json(200, {"files": files, "source": "disk", **_draft_label(pid)})
 
     def _resolve_within(self, base: Path, rel: str) -> Path | None:
         """Resolve ``rel`` under ``base``, fail-closed on traversal/symlink escape."""
@@ -2402,13 +1509,13 @@ class Handler(BaseHTTPRequestHandler):
         rel = (parse_qs(urlparse(self.path).query).get("path") or [""])[0]
         # Store first: the materialized tree's keys are already containment-checked
         # by materialize_workdir (D-R1-03), so an exact-key lookup needs no re-guard.
-        tree = _overlay_tree(pid)
+        tree = _tree(pid)
         if tree is not None:
             data = tree.get(rel)
             if data is None:
                 self._json(404, {"error": "not found"})
                 return
-            self._send_text(data[:_MAX_VIEW_BYTES])
+            self._send_text(data)
             return
         base = self._out_base(pid)
         if base is None:
@@ -2418,11 +1525,17 @@ class Handler(BaseHTTPRequestHandler):
         if target is None or not target.is_file():
             self._json(404, {"error": "not found"})
             return
-        self._send_text(target.read_bytes()[:_MAX_VIEW_BYTES])
+        self._send_text(target.read_bytes())
 
     def _send_text(self, data: bytes) -> None:
+        """A file for the in-page viewer, cut at the view cap; a cut file says so in
+        ``X-Foundry-Truncated`` (its full size) so the viewer can show a notice."""
+        total = len(data)
+        data = data[:_MAX_VIEW_BYTES]
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
+        if total > len(data):
+            self.send_header("X-Foundry-Truncated", str(total))
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -2433,7 +1546,7 @@ class Handler(BaseHTTPRequestHandler):
         import io
         import zipfile
 
-        tree = _overlay_tree(pid)
+        tree = _tree(pid)
         name = pid
         if tree is None:
             base = self._out_base(pid)
@@ -2445,7 +1558,7 @@ class Handler(BaseHTTPRequestHandler):
                 for f in sorted(base.rglob("*")) if f.is_file()
             }
             name = base.name
-        # Export-time sidecar: ship the attested gate verdicts + recorded sign-offs
+        # Export-time sidecar: ship the attested gate verdicts
         # alongside the tree (a sibling .foundry/evidence.json + EVIDENCE.md), never
         # mixed INTO the materialized tree the gates ran against.
         tree = {**tree, **_evidence_files(pid)}
@@ -2461,58 +1574,14 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    def _gitzip(self, pid: str) -> None:
-        """Export the FLOOR LINEAGE as one git repository, zipped: each ancestor
-        release becomes a tagged commit (r01..rNN) via the same deterministic
-        export_lineage the CLI uses — the store stays the source of truth."""
-        import io
-        import tempfile
-        import zipfile
-
-        from foundry.lifecycle.git_export import (
-            GitExportError, ReleaseExport, export_lineage,
-        )
-
-        chain = _lineage_ids(pid)
-        if not chain:
-            self._json(404, {"error": "no lineage"})
-            return
-        try:
-            with tempfile.TemporaryDirectory(prefix="foundry-gitzip-") as td:
-                releases = []
-                for i, anc in enumerate(chain, start=1):
-                    tree = _overlay_tree(anc)  # full repo AT that release
-                    if not tree:
-                        continue
-                    tdir = Path(td) / f"r{i:02d}"
-                    for rel, data in tree.items():
-                        target = tdir / rel
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        target.write_bytes(data)
-                    rec = _STORE.get(anc) or {}
-                    releases.append(ReleaseExport(
-                        tag=f"r{i:02d}", tree_dir=tdir,
-                        message=str(rec.get("request") or anc)[:200]))
-                repo = Path(td) / "repo"
-                export_lineage(repo, releases)
-                buf = io.BytesIO()
-                with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                    for f in sorted(repo.rglob("*")):
-                        if f.is_file():
-                            zf.write(f, f.relative_to(repo))
-                payload = buf.getvalue()
-        except GitExportError as exc:
-            self._json(503, {"error": f"git export unavailable: {exc}"})
-            return
-        self.send_response(200)
-        self.send_header("Content-Type", "application/zip")
-        self.send_header("Content-Disposition", f'attachment; filename="{pid}-git.zip"')
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-
     def do_POST(self) -> None:
         _p = self.path.split("?", 1)[0]
+        try:
+            self._route_post(_p)
+        except insight.BodyError as exc:
+            self._json(exc.status, {"error": exc.message})
+
+    def _route_post(self, _p: str) -> None:
         if _p == "/api/login":
             self._login()
             return
@@ -2540,358 +1609,306 @@ class Handler(BaseHTTPRequestHandler):
         if denied is not None:
             self._json(403, {"error": denied})
             return
+        m = _CONTROL_ROUTE.fullmatch(path)
         if path == "/api/projects":
             self._new_project()
         elif path == "/api/reset":
             self._reset()
-        elif path == "/api/ideate":
-            self._ideate()
-        elif path.startswith("/api/decision/"):
-            self._decision(path.rsplit("/", 1)[-1])
-        elif path == "/api/suggest-slots":
-            self._suggest_slots()
-        elif path.startswith("/api/interview/"):
-            self._interview(path.rsplit("/", 1)[-1])
+        elif path == "/api/settings":
+            self._save_settings()
+        elif path == "/api/settings/local-check":
+            code, out = _settings.check_local(self._read_json())
+            self._json(code, out)
+        elif m and m.group(2) in ("stop", "pause"):
+            self._stop(m.group(1), "paused" if m.group(2) == "pause" else "stopped")
+        elif m and m.group(2) == "resume":
+            self._resume(m.group(1))
         else:
             self._json(404, {"error": "not found"})
+
+    def do_DELETE(self) -> None:
+        path = self.path.split("?", 1)[0]
+        if not self._signed_in():
+            self._json(401, {"error": "sign in"})
+            return
+        if _auth.enabled() and _auth.must_change():
+            self._json(403, {"error": "change the default password first"})
+            return
+        denied = _authorize_mutation(self.headers, _AUTH_TOKEN)
+        if denied is not None:
+            self._json(403, {"error": denied})
+            return
+        m = _PROJECT_ROUTE.fullmatch(path)
+        if m:
+            self._delete_project(m.group(1))
+        else:
+            self._json(404, {"error": "not found"})
+
+    # -- build control ------------------------------------------------------------
+    def _stop(self, pid: str, kind: str) -> None:
+        """Stop or pause a running build at its next checkpoint (a model call, a
+        coding session or a gate run); the run then closes out as ``kind``."""
+        with _LOCK:
+            p = _PROJECTS.get(pid)
+            if p is None:
+                self._json(404, {"error": "no such project"})
+                return
+            if p.status not in ("running", "queued") or p.ended:
+                self._json(409, {"error": "this build is not running"})
+                return
+            if p.closing:
+                self._json(409, {"error": "this build is already finishing"})
+                return
+            if p.cancel.is_set():
+                self._json(409, {"error": f"already {p.stop_kind or 'stopping'}"})
+                return
+            p.stop_kind = kind
+            p.cancel.set()
+        verb = "Pause" if kind == "paused" else "Stop"
+        _emit(p, type="stopping", kind=kind)
+        _emit(p, type="narrate",
+              text=f"⏸ {verb} requested — halting at the next checkpoint…")
+        self._json(200, {"ok": True, "kind": kind})
+
+    def _resume(self, pid: str) -> None:
+        """Resume a stopped, paused, halted, token-capped, errored or interrupted
+        build from its durable checkpoint, optionally with a new token cap and fix
+        budget. Pending nodes continue; a halted run re-enters at the boundary that
+        halted it (``cli._resume_seed``) with a fresh fix budget."""
+        body = self._read_json()
+        try:
+            token_cap, max_fix, time_cap = _resume_overrides(body)
+        except ValueError as exc:
+            self._json(400, {"error": str(exc)})
+            return
+        from_checkpoint = _has_durable_checkpoint(pid)   # a DB probe: not under _LOCK
+        spent = insight.read_ledger(_STATE_DIR, pid)[1]   # the time cap counts all of it
+        with _LOCK:
+            p = _PROJECTS.get(pid)
+            if p is None:
+                self._json(404, {"error": "no such project"})
+                return
+            if p.status != "done" or not p.ended:
+                self._json(409, {"error": "this build is still running"})
+                return
+            if p.passed:
+                self._json(409, {"error": "this build already shipped"})
+                return
+            if p.mode != "assistant" or _paused_at_retired_checkpoint(p.log):
+                self._json(409, {"error": "this build predates resume and can't be resumed"})
+                return
+            # Stopped while still queued: there is no checkpoint yet, so it starts afresh.
+            if not from_checkpoint and p.phase not in ("stopped", "paused"):
+                self._json(409, {"error": "no checkpoint to resume from"})
+                return
+            if time_cap and time_cap * 60 <= spent:
+                # A cap at or under the time already spent would stop it again at once.
+                self._json(400, {"error": f"time_cap_minutes must be more than the "
+                                          f"{spent / 60:.1f} minutes already spent"})
+                return
+            if time_cap is not None:
+                p.build = {**p.build, "time_cap_minutes": time_cap or None}
+            if token_cap is not None:
+                p.token_cap = token_cap or None      # 0 lifts the cap
+            if max_fix is not None:
+                p.max_fix_attempts = max_fix
+            p.cancel = threading.Event()
+            p.stop_kind = ""
+            p.closing = False
+            p.phase = ""
+            p.passed = False
+            p.autoresume_left = 6
+            p.status = "running"
+            with p.cond:
+                if p.log_trimmed:                    # seq numbering needs the full log back
+                    p.log = _STORE.events_of(p.id)
+                    p.log_trimmed = False
+                p.ended = False
+                p.ended_at = None
+        with contextlib.suppress(Exception):
+            p.seen_uris |= _STORE.seen_of(p.id)  # don't re-emit what the floor already showed
+        minutes = p.build.get("time_cap_minutes")
+        _emit(p, type="resumed", token_cap=p.token_cap, max_fix_attempts=p.max_fix_attempts,
+              time_cap_minutes=minutes)
+        cap = f"a {p.token_cap:,}-token cap" if p.token_cap else "no token cap"
+        clock = f", a {minutes:g}-minute time cap" if minutes else ""
+        _emit(p, type="narrate",
+              text=f"▶ Resumed with {cap}{clock} and {p.max_fix_attempts} fix attempt(s).")
+        _persist(p)
+        threading.Thread(target=_gated_runner, args=(_run_factory, p),
+                         kwargs={"resume": from_checkpoint}, daemon=True).start()
+        self._json(200, {"ok": True, "from_checkpoint": from_checkpoint})
+
+    def _delete_project(self, pid: str) -> None:
+        """Delete one floor: its catalog rows, event log and output dir. Refused
+        while it runs — the build thread would keep writing it back."""
+        with _LOCK:
+            p = _PROJECTS.get(pid)
+            if p is None:
+                self._json(404, {"error": "no such project"})
+                return
+            if not p.ended:          # running, queued, or still closing out
+                self._json(409, {"error": "this build is still running — stop it first"})
+                return
+            del _PROJECTS[pid]
+        with contextlib.suppress(Exception):
+            _STORE.delete(pid)
+        _invalidate_repo(pid)
+        if p.out_base is not None:
+            base = p.out_base.resolve()
+            if base.is_dir() and base.is_relative_to(_OUTPUT_ROOT.resolve()) \
+                    and base != _OUTPUT_ROOT.resolve():
+                shutil.rmtree(base, ignore_errors=True)
+        self._json(200, {"ok": True})
 
     def _list_projects(self) -> None:
         """Every floor's live state — the browser rehydrates the elevator on reload
         (and reconnects each running floor's stream) so a refresh loses nothing."""
         with _LOCK:
-            projs = list(_PROJECTS.values())
-        # One row per FLOOR (project) = its latest release, plus the release count.
-        by_floor: dict[int, "Project"] = {}
-        counts: dict[int, int] = {}
-        for p in projs:
-            counts[p.floor] = counts.get(p.floor, 0) + 1
-            cur = by_floor.get(p.floor)
-            if cur is None or p.release_seq > cur.release_seq:
-                by_floor[p.floor] = p
+            projs = sorted(_PROJECTS.values(), key=lambda x: x.floor)
         rows = [
-            {"id": p.id, "floor": p.floor, "release": p.release_seq,
-             "releases": counts[p.floor], "request": p.request, "mode": p.mode,
-             "backend": p.backend, "adapter": p.adapter,
-             "supervised": p.supervised, "slots": p.max_slots,
-             "status": p.status, "passed": p.passed, "awaiting": p.awaiting,
-             "gates": p.gates, "parent_id": p.parent_id,
-             "autopilot_budget": p.autopilot_budget, "autopilot_note": p.autopilot_note}
-            for p in sorted(by_floor.values(), key=lambda x: x.floor)
+            {"id": p.id, "floor": p.floor, "request": p.request,
+             "title": request_title(p.request), "mode": p.mode,
+             "backend": p.backend, "slots": p.max_slots, "status": p.status,
+             "passed": p.passed, "gates": p.gates, "phase": p.phase,
+             "stopping": p.stop_kind if p.cancel.is_set() and not p.ended else "",
+             "token_cap": p.token_cap, "max_fix_attempts": p.max_fix_attempts,
+             "build": p.build,
+             "queue": insight.QUEUE.position(p.id), "meter": insight.last_meter(p.log)}
+            for p in projs
         ]
         self._json(200, {"projects": rows})
 
-    def _list_builds(self) -> None:
-        """Finished builds from the catalog — the 'iterate on…' picker reads this
-        to let a new floor start from an existing build (lineage via parent_id)."""
-        try:
-            rows = _STORE.finished()
-        except Exception:
-            rows = []
-        builds = [
-            {"id": r["id"], "floor": r.get("floor"), "release": r.get("release_seq"),
-             "request": r.get("request"), "passed": r.get("passed"),
-             "parent_id": r.get("parent_id"), "created_at": r.get("created_at"),
-             # The repo lives in the store: a finished build has one (a disk export
-             # may also exist). Either makes it a valid base to iterate on.
-             "has_repo": bool(r.get("status") == "done" or (
-                 r.get("out_base") and (Path(r["out_base"]) / "code").is_dir()))}
-            for r in rows
-        ]
-        self._json(200, {"builds": builds})
-
-    def _get_spec(self, pid: str) -> None:
-        """The saved spec + a 'what was built' digest for a build. On iterate the UI
-        pre-fills the converse draft with the parent's ``spec`` (what it SHOULD be)
-        and seeds the round-table with ``built`` (what was actually COMPLETED), so
-        the leads reason about the remaining gap."""
-        p = _PROJECTS.get(pid)
-        spec = p.spec_text if p is not None else ""
-        if not spec:
-            rec = _STORE.get(pid)
-            spec = str((rec or {}).get("spec_text") or "")
-        self._json(200, {"id": pid, "spec": spec, "built": _build_summary(pid)})
-
-    def _list_releases(self, floor_s: str) -> None:
-        """Every release of one floor (project), newest first — release history."""
-        try:
-            floor = int(floor_s)
-        except ValueError:
-            self._json(400, {"error": "bad floor"})
-            return
-        try:
-            rows = _STORE.releases_of(floor)
-        except Exception:
-            rows = []
-        rels = [
-            {"id": r["id"], "release": r.get("release_seq"), "request": r.get("request"),
-             "status": r.get("status"), "passed": r.get("passed"),
-             "created_at": r.get("created_at")}
-            for r in rows
-        ]
-        self._json(200, {"floor": floor, "releases": rels})
-
-    def _suggest_slots(self) -> None:
-        """Suggest an IC-pool size N from the request + packs — count the distinct
-        CANONICAL_AREAS the work is likely to touch (one IC per area). Advisory: the
-        real area split is derived during the build (Wave A); this just seeds the UI."""
-        body = self._read_json()
-        request = str(body.get("request", ""))
-        packs = body.get("packs") or []
-        n, areas = _suggest_slots(request, packs if isinstance(packs, list) else [])
-        self._json(200, {"slots": n, "areas": areas})
-
-    def _interview(self, pid: str) -> None:
-        """Ask a lead a question given its journal ([11]) — advisory, writes nothing.
-        Best-effort: a backend/proxy error degrades to a short string, never 500s."""
+    def _insight(self, pid: str) -> None:
         p = _PROJECTS.get(pid)
         if p is None:
-            self._json(404, {"error": "unknown project"})
+            self._json(404, {"error": "no such project"})
             return
-        body = self._read_json()
-        role = str(body.get("role", "")).strip() or "agent"
-        question = str(body.get("question", "")).strip() or "How is it going?"
-        if p.backend == "mock":
-            # The mock transport can't deliberate; answer from the real journal we have.
-            mine = [e for e in p.journal if str(e.get("role", "")) == role] or p.journal
-            bits = "; ".join(
-                str(e.get("summary", "")) for e in mine[:3] if str(e.get("summary", ""))
-            )
-            concerns = [c for e in mine for c in (e.get("concerns") or [])]
-            note = f" Concerns: {concerns[0]}." if concerns else ""
-            self._json(200, {"role": role, "answer": (
-                f"(mock — from {role}'s journal) {bits or 'Working as planned.'}{note} "
-                "Pick a real backend to actually interview the leads.")})
-            return
+        self._json(200, _floor_insight(p))
+
+    def _list_builds(self, query: str) -> None:
+        """Every floor for the Floor 0 hub: searched over the request (``q``),
+        filtered by ``status`` (shipped / halted / stopped / running) and sorted by
+        date (``sort=newest|oldest``). Bad parameters are a 400, not ignored."""
         try:
-            from foundry.agents.interview import interview
-            from foundry.cli import _build_proxy
-            from foundry.schemas.journal import JournalEntry
-            from foundry.state.seq import Seq
-
-            entries = []
-            for i, e in enumerate(p.journal):
-                conf = e.get("confidence")
-                node_id = str(e.get("node_id", "")) or f"agent-{i}"
-                entries.append(JournalEntry(
-                    node_id=node_id,
-                    role=str(e.get("role", role)),
-                    summary=str(e.get("summary", "")),
-                    assumptions=tuple(str(a) for a in (e.get("assumptions") or [])),
-                    concerns=tuple(str(c) for c in (e.get("concerns") or [])),
-                    confidence=float(conf) if isinstance(conf, (int, float)) else None,
-                    # interview() never reads seq; mint a valid synthetic one.
-                    seq=Seq(run_id=p.id, emission_epoch=0, superstep_index=0,
-                            node_id=node_id, local=i),
-                ))
-            answer = interview(
-                _build_proxy(p.backend), role=role, question=question, entries=entries,
-            )
-        except Exception as exc:  # advisory — never let an interview wedge the UI
-            answer = f"(interview unavailable: {type(exc).__name__})"
-        self._json(200, {"role": role, "answer": answer})
-
-    def _ideate(self) -> None:
-        from foundry.cli import BACKENDS
-
-        body = self._read_json()
-        session = str(body.get("session", "")).strip() or uuid.uuid4().hex[:12]
-        message = str(body.get("message", "")).strip()
-        backend = str(body.get("backend", "mock"))
-        if backend not in BACKENDS:
-            backend = "mock"
-        chat = _CHATS.setdefault(session, {"history": [], "spec": ""})
-        # Iterate seed: on a NEW session, an inherited base spec (the parent's saved
-        # spec) primes the round-table so it EXTENDS that spec instead of drafting
-        # from scratch. Recorded as prior context + the current draft.
-        base_spec = str(body.get("base_spec", "")).strip()
-        base_built = str(body.get("base_built", "")).strip()
-        if (base_spec or base_built) and not chat["history"] and not chat["spec"]:
-            if base_spec:
-                chat["spec"] = base_spec
-                chat["history"].append(
-                    {"role": "lead", "text": f"[Prior spec to extend]\n{base_spec}"}
-                )
-            if base_built:
-                chat["history"].append(
-                    {"role": "lead", "text": f"[What was already built — focus the "
-                                             f"new work on the gaps]\n{base_built}"}
-                )
-        if message:
-            chat["history"].append({"role": "user", "text": message})
-        try:
-            reply = _ideate_turn(backend, chat["history"])
-        except Exception as exc:  # advisory aid — never 500 the chat
-            self._json(200, {"session": session, "messages":
-                             [{"role": "system", "text": f"(ideation error: {exc})"}],
-                             "spec": chat["spec"]})
+            want = parse_build_query(query)
+        except ValueError as exc:
+            self._json(400, {"error": str(exc)})
             return
-        msgs = [
-            {"role": str(m.get("role", "lead")), "text": str(m.get("text", ""))}
-            for m in (reply.get("messages") or []) if str(m.get("text", "")).strip()
-        ]
-        if not msgs:
-            msgs = [{"role": "system", "text":
-                     "(no reply — on the mock backend the leads can't really converse; "
-                     "pick a real backend for an interactive spec session.)"}]
-        spec = str(reply.get("spec_markdown") or chat["spec"])
-        for m in msgs:
-            chat["history"].append(m)
-        chat["spec"] = spec
-        chat["history"] = chat["history"][-40:]  # bound the session
-        self._json(200, {"session": session, "messages": msgs, "spec": spec})
+        with _LOCK:
+            projs = list(_PROJECTS.values())
+        words = want["q"].casefold().split()
+        builds = []
+        for p in projs:
+            status = build_status(p)
+            if want["status"] != "all" and status != want["status"]:
+                continue
+            title = request_title(p.request)
+            hay = f"{p.request} {title}".casefold()
+            if not all(w in hay for w in words):
+                continue
+            builds.append({
+                "id": p.id, "floor": p.floor, "request": p.request, "title": title,
+                "status": status, "phase": p.phase, "passed": p.passed,
+                "created_at": p.created_at,
+            })
+        builds.sort(key=lambda b: (b["created_at"], b["floor"]),
+                    reverse=want["sort"] == "newest")
+        self._json(200, {"builds": builds, "total": len(projs), **want})
+
+    def _save_settings(self) -> None:
+        backend = _server_backend()
+        body = self._read_json()
+        try:
+            saved = _settings.validate(body, backend)
+        except ValueError as exc:
+            self._json(400, {"error": str(exc)})
+            return
+        _settings.save(_settings_path(), saved)
+        self._json(200, _settings.client_view(saved, backend))
 
     def _new_project(self) -> None:
-        # validate against the real backend + adapter sets
-        from foundry.cli import ADAPTERS, BACKENDS, _default_adapter_for
+        from foundry.cli import AUTO_SLOTS_CAP, _default_adapter_for
 
         body = self._read_json()
-        request = str(body.get("request", "")).strip() or "build a tiny URL-shortener service"
-        # The Workshop offers only gated / autonomous (both approve in the floor
-        # screen — no external Git merge). `assistant` stays a valid ENGINE/CLI mode
-        # for back-compat, but a UI build defaults to gated and never silently runs
-        # the advisory-PR posture.
-        mode = str(body.get("mode", "gated"))
-        if mode not in _MODES:
-            mode = "gated"
-        backend = str(body.get("backend", "mock"))
-        if backend not in BACKENDS:
-            backend = "mock"
-        # The adapter is DERIVED from the backend when not explicitly provided (CLI
-        # parity: mock→stub, any real backend→raw-react), so a real backend writes
-        # real code without a second field. An explicit valid adapter still wins.
-        adapter = str(body.get("adapter", "")).strip()
-        if adapter not in ADAPTERS:
-            adapter = _default_adapter_for(backend)
-        raw_packs = body.get("packs", [])
-        if isinstance(raw_packs, str):
-            raw_packs = raw_packs.replace(",", " ").split()
-        packs = [str(p).strip() for p in raw_packs if str(p).strip()]
-        supervised = bool(body.get("supervised", True))
-        spec_text = str(body.get("spec_text", "")).strip()
-        spec_zip_b64 = body.get("spec_zip_b64")
-        # Parallelism is system-decided (the Tech-Lead's decomposition sizes the IC
-        # pool, capped by AUTO_SLOTS_CAP). The env/body value only OVERRIDES the
-        # ceiling; absent ⇒ the automatic cap. The UI no longer asks for a count.
-        from foundry.cli import AUTO_SLOTS_CAP
-
+        request = str(body.get("request", "")).strip()
+        if not request:
+            self._json(400, {"error": "describe what to build"})
+            return
+        # The backend comes from the environment (FOUNDRY_MODEL_BACKEND / .env), as
+        # the CLI does; the adapter derives from it (mock→stub, real→raw-react).
+        backend = _server_backend()
         try:
-            default_slots = int(os.environ.get("FOUNDRY_MAX_SLOTS", "") or AUTO_SLOTS_CAP)
+            opts = _settings.parse_build_options(
+                body, _settings.load(_settings_path(), backend), backend)
+        except ValueError as exc:
+            self._json(400, {"error": str(exc)})
+            return
+        # A change builds on a shipped floor's tree, looked up here by floor id: the
+        # browser never names a path.
+        base: Project | None = None
+        base_tree: dict[str, bytes] = {}
+        if body.get("base_id") is not None:
+            with _LOCK:
+                base = _PROJECTS.get(str(body["base_id"]))
+            if base is None:
+                self._json(404, {"error": "no such floor to change"})
+                return
+            if not (base.passed and base.ended):
+                self._json(409, {"error": "only a shipped floor can be changed"})
+                return
+            base_tree = _base_tree(base) or {}
+            if not base_tree:
+                self._json(409, {"error": "that floor's code can't be read back"})
+                return
+        adapter = _default_adapter_for(backend)
+        try:
+            max_slots = max(1, int(os.environ.get("FOUNDRY_MAX_SLOTS", "") or AUTO_SLOTS_CAP))
         except ValueError:
-            default_slots = AUTO_SLOTS_CAP
+            max_slots = AUTO_SLOTS_CAP
+        tok_env = os.environ.get("FOUNDRY_TOKEN_CAP", "").strip()
+        token_cap = int(tok_env) if tok_env.isdigit() else None
         try:
-            max_slots = int(body.get("max_slots", default_slots))
-        except (TypeError, ValueError):
-            max_slots = default_slots
-        max_slots = max(1, max_slots)
-        # auto-fix retry budget (run() default = 3); optional UI override.
-        try:
-            max_fix_attempts = int(body.get("max_fix_attempts", 5))
-        except (TypeError, ValueError):
-            max_fix_attempts = 5
-        max_fix_attempts = max(0, max_fix_attempts)
-        # spend cap: UI sends dollars (cost_cap_usd); fall back to the env micro-USD.
-        cost_env = os.environ.get("FOUNDRY_COST_CAP_MICROUSD", "").strip()
-        cost_cap_microusd = int(cost_env) if cost_env.isdigit() else None
-        try:
-            usd = float(body.get("cost_cap_usd") or 0)
-            if usd > 0:
-                cost_cap_microusd = int(round(usd * 1_000_000))
+            tok = int(body.get("token_cap") or 0)
+            if tok > 0:
+                token_cap = tok
         except (TypeError, ValueError):
             pass
-        # A floor is one PROJECT. A fresh build is a NEW project (new floor, release
-        # 1). Iterating (parent_id) adds the NEXT RELEASE to the parent's floor — same
-        # project, release_seq + 1 — never a new floor.
-        parent_id = str(body.get("parent_id") or "").strip() or None
-        parent = _STORE.get(parent_id) if parent_id else None
-        if parent is None:
-            parent_id = None
-        if parent is not None:
-            floor = int(parent.get("floor", 0))
-            with _LOCK:
-                release_seq = _STORE.max_release(floor) + 1
-        else:
-            with _LOCK:
-                _FLOOR[0] += 1
-                floor = _FLOOR[0]
-            release_seq = 1
+        with _LOCK:
+            _FLOOR[0] += 1
+            floor = _FLOOR[0]
         pid = uuid.uuid4().hex[:12]
-        out_base = _OUTPUT_ROOT / f"floor-{floor}" / f"r{release_seq}"
-        # Spec text is SAVED per build and INHERITED on iterate: a new release with
-        # no fresh spec reuses the parent's saved spec; with a fresh spec (the
-        # converse draft is pre-filled from the parent, so it already carries the
-        # prior spec PLUS this round's additions) that extended draft supersedes it.
-        # Either way the release's spec_text is the cumulative spec, saved for the
-        # NEXT iterate to build on.
-        parent_spec_text = str(parent.get("spec_text") or "") if parent else ""
-        effective_spec_text = spec_text or parent_spec_text
-        # Spec input: the effective spec TEXT (literal), else an uploaded docs-zip (a
-        # dir), else the PARENT's design docs (iterate), else None (request alone).
-        spec: str | None = effective_spec_text or None
-        if spec is None and isinstance(spec_zip_b64, str) and spec_zip_b64.strip():
-            try:
-                spec_dir = out_base / "spec-in"
-                if _safe_unzip_spec(spec_zip_b64, spec_dir) > 0:
-                    spec = str(spec_dir)
-            except Exception:
-                spec = None
-        base_dir: str | None = None
-        if parent and parent.get("out_base"):
-            pbase = Path(parent["out_base"])
-            pdocs, pcode = pbase / "docs", pbase / "code"
-            if spec is None and pdocs.is_dir():
-                spec = str(pdocs)            # ground the release in the prior design
-            if pcode.is_dir():
-                base_dir = str(pcode)        # seed the base tree with the prior code
-        # Autopilot budget: how many SELF-ITERATIONS follow this build (0 = off).
-        # The AI drives in every mode; gated keeps its human checkpoints.
-        try:
-            autopilot_budget = max(0, min(20, int(body.get("autopilot", 0) or 0)))
-        except (TypeError, ValueError):
-            autopilot_budget = 0
+        build = dict(opts["view"])
+        if base is not None:
+            build.update(base_id=base.id, base_floor=base.floor)
         p = Project(
-            id=pid, request=request, mode=mode, supervised=supervised, floor=floor,
-            release_seq=release_seq, backend=backend, adapter=adapter, packs=packs, spec=spec,
-            spec_text=effective_spec_text,
-            out_base=out_base, max_slots=max_slots, cost_cap_microusd=cost_cap_microusd,
-            max_fix_attempts=max_fix_attempts, parent_id=parent_id, base_dir=base_dir,
-            autopilot_budget=autopilot_budget,
+            id=pid, request=request, mode="assistant", floor=floor,
+            backend=backend, adapter=adapter,
+            out_base=_OUTPUT_ROOT / f"floor-{floor}",
+            max_slots=max_slots, token_cap=token_cap,
+            workers=parse_workers(body.get("workers")),
+            ticket_tiers=(parse_ticket_tiers(body["ticket_tiers"]) if "ticket_tiers" in body
+                          else opts["ticket_tiers"]),
+            max_fix_attempts=opts["max_fix_attempts"], profile=opts["profile"],
+            build=build,
         )
-        # Verification profile / stack: "auto" (default) infers from the request;
-        # a named profile pins the gate commands (validated by run(), which
-        # rejects unknown names fail-closed before any model spend).
-        prof = str(body.get("profile") or "auto").strip().lower()
-        p.profile = prof or "auto"
-        # Milestone ladder (build="milestones"): plan-and-chain releasable rungs.
-        # An explicit list (one per line in the UI) skips the planner entirely.
-        if str(body.get("build") or "").strip().lower() == "milestones":
-            p.milestones_on = True
-            p.milestone_root = request
-            try:
-                p.milestone_max = max(1, min(12, int(body.get("max_milestones", 10) or 10)))
-            except (TypeError, ValueError):
-                p.milestone_max = 10
-            raw_plan = body.get("milestones")
-            if isinstance(raw_plan, list):
-                p.milestone_explicit = [str(m).strip()[:300] for m in raw_plan
-                                        if str(m).strip()][:12]
+        inputs = _OUTPUT_ROOT / f"floor-{floor}" / ".inputs"
+        try:
+            if opts["spec"] is not None:
+                _settings.write_spec(inputs, opts["spec"])
+            if base is not None:
+                _settings.write_tree(inputs / "base", base_tree)
+        except (OSError, ValueError) as exc:
+            shutil.rmtree(inputs, ignore_errors=True)
+            self._json(500, {"error": f"could not stage the build inputs: {exc}"})
+            return
         with _LOCK:
             _PROJECTS[pid] = p
         # NOTE: do NOT catalog the build here. A floor is persisted only once the
         # build ACTUALLY starts — the runner's first `project` event (in _PERSIST_ON)
-        # upserts it. So a created-but-never-run project leaves no floor to restore
-        # on restart (the response below carries the floor/release in-memory anyway).
-        # A PLATFORM build composes many services into one monorepo on this floor; a
-        # normal build is one service through the factory. INFERRED from the request
-        # (multi-service => platform), unless the caller pins it with `platform`.
-        want = body.get("platform")
-        is_platform = want if isinstance(want, bool) else _infers_platform(request)
-        if p.milestones_on:
-            is_platform = False   # a ladder chains single-service releases
-        if is_platform:
-            p.platform_opts = _platform_opts(body)
-        runner = _run_platform if is_platform else _run_factory
-        threading.Thread(target=_gated_runner, args=(runner, p), daemon=True).start()
-        self._json(200, {"id": pid, "floor": floor, "release": release_seq})
+        # upserts it, so a created-but-never-run project leaves no floor to restore.
+        threading.Thread(target=_gated_runner, args=(_run_factory, p), daemon=True).start()
+        self._json(200, {"id": pid, "floor": floor, "title": request_title(request)})
 
     def _reset(self) -> None:
         """Clear ALL floors & repos: drop the in-memory floors, reset the floor
@@ -2926,29 +1943,6 @@ class Handler(BaseHTTPRequestHandler):
             _REPO_CACHE.clear()
         self._json(200, {"ok": True})
 
-    def _decision(self, pid: str) -> None:
-        body = self._read_json()
-        decision = str(body.get("decision", "approve"))
-        if decision not in ("approve", "reject", "needs_changes"):
-            decision = "approve"
-        p = _PROJECTS.get(pid)
-        if p is None:
-            self._json(404, {"error": "no such project"})
-            return
-        # First decision for the awaiting checkpoint wins; later/duplicate clicks
-        # (from this or another device) are no-ops — but every device still sees
-        # the `resolved` event play, because it rides the shared log.
-        cp = body.get("checkpoint")
-        try:
-            checkpoint = int(cp) if cp is not None else None
-        except (TypeError, ValueError):
-            checkpoint = None
-        # `request_edit` carries the human's amended next-iteration request for an
-        # autopilot PROPOSAL checkpoint (ignored by the stage checkpoints).
-        edit = str(body.get("request_edit", "") or "")[:4000]
-        applied, stale = _record_decision(p, decision, checkpoint, edit=edit)
-        self._json(200, {"ok": not stale, "applied": applied, "stale": stale})
-
     def _stream(self, pid: str) -> None:
         p = _PROJECTS.get(pid)
         if p is None:
@@ -2958,6 +1952,11 @@ class Handler(BaseHTTPRequestHandler):
         # transient reconnect (so it tails from where it left off, no re-replay);
         # a brand-new viewer sends none and replays the whole log from 0.
         cursor = _resume_cursor(self.headers.get("Last-Event-ID"))
+        from urllib.parse import parse_qs, urlparse
+
+        start = (parse_qs(urlparse(self.path).query).get("from") or [""])[0]
+        if not self.headers.get("Last-Event-ID") and start.isdigit():
+            cursor = int(start)   # a client reattaching after a Resume tails from here
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -2971,6 +1970,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 for idx in range(cursor, len(history)):
                     ev = history[idx]
+                    if ev.get("type") == "_end" and idx + 1 < len(history):
+                        continue                 # an earlier run's end; the build resumed
                     if ev.get("type") == "_end":
                         self.wfile.write(f"id: {idx}\nevent: end\ndata: {{}}\n\n".encode())
                         self.wfile.flush()
@@ -2988,6 +1989,7 @@ class Handler(BaseHTTPRequestHandler):
                         if not p.cond.wait(timeout=15):
                             break          # idle → fall through to a keep-alive
                     batch = p.log[cursor:]
+                    total = len(p.log)
                     ended = p.ended
                 if not batch:
                     if ended:              # caught up AND the build is over
@@ -3001,6 +2003,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.flush()
                     continue
                 for idx, ev in enumerate(batch, start=cursor):
+                    if ev.get("type") == "_end" and (idx + 1 < total or not ended):
+                        continue                 # an earlier run's end; the build resumed
                     if ev.get("type") == "_end":
                         self.wfile.write(f"id: {idx}\nevent: end\ndata: {{}}\n\n".encode())
                         self.wfile.flush()

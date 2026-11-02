@@ -51,9 +51,11 @@ from __future__ import annotations
 import contextlib
 import json
 import shutil
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from foundry import progress
 from foundry.execution.adapter_contract import (
     AdapterResult,
     AdapterUnavailableError,
@@ -65,7 +67,9 @@ from foundry.schemas.gates import GateTriage
 from foundry.state.seq import Seq
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
+
+    from foundry.proxy.token_meter import TokenMeter
 
     # The injectable exec seam: (sandbox, argv, timeout_s) -> SandboxResult.
     # Default runs through Sandbox.run (the cage); tests inject a fake that
@@ -80,8 +84,9 @@ _EPILOGUE = (
     "You are working in a disposable sandbox worktree (your current working "
     "directory). IMPLEMENT the task by creating and editing files directly in "
     "this directory — write real, complete code (no placeholders, no TODOs), "
-    "plus tests where the task implies them. Run any build/test commands you "
-    "need and fix what fails. Do NOT run git commands, do NOT touch anything "
+    "plus tests where the task implies them. Run the verification commands the "
+    "task lists and fix what fails before you finish. Do NOT run git commands, "
+    "do NOT touch anything "
     "outside the current directory. When done, reply with a short summary of "
     "what you built; prefix any known risk, gap, or follow-up with 'TRIAGE: ' "
     "(one per line)."
@@ -90,6 +95,12 @@ _EPILOGUE = (
 # Worktree walk exclusions: VCS internals and the substrate's own scratch dirs
 # are never part of the authored tree slice.
 _EXCLUDED_TOP_DIRS = frozenset({".git", ".claude", "node_modules", "__pycache__"})
+# Toolchain output the agent's own install/typecheck/test runs leave anywhere in the
+# tree: environments and caches, never authored source.
+_EXCLUDED_DIRS = frozenset({
+    "__pycache__", "node_modules", ".venv", "venv", ".mypy_cache", ".pytest_cache",
+    ".ruff_cache", ".tox",
+})
 
 
 def walk_worktree(root: Path) -> dict[str, bytes]:
@@ -103,7 +114,7 @@ def walk_worktree(root: Path) -> dict[str, bytes]:
         rel = path.relative_to(root)
         if rel.parts and rel.parts[0] in _EXCLUDED_TOP_DIRS:
             continue
-        if any(part == "__pycache__" for part in rel.parts):
+        if any(part in _EXCLUDED_DIRS for part in rel.parts[:-1]):
             continue
         files[rel.as_posix()] = path.read_bytes()
     return files
@@ -288,6 +299,8 @@ class ClaudeCodeAdapter:
     # adapter DECLARES its grant; the Sandbox validates + applies it).
     credential_grant: tuple[str, ...] = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY")
     home_passthrough: bool = True
+    # The agent runs the stack's install/build/typecheck itself (self-verify).
+    toolchain_env: bool = True
 
     def __init__(
         self,
@@ -300,11 +313,15 @@ class ClaudeCodeAdapter:
         exec_fn: SandboxExec | None = None,
         extra_args: Sequence[str] = (),
         on_activity: Callable[[str], None] | None = None,
+        tier_models: Mapping[str, str] | None = None,
     ) -> None:
         self._bin = claude_bin
         self._run_id = run_id
         self._node_id = node_id
         self._model = model
+        # tier ("T1".."T3") -> model id, the same map the proxy pins; a packet's
+        # tier picks its model, falling back to ``model``.
+        self._tier_models = dict(tier_models or {})
         self._timeout_s = timeout_s
         self._exec: SandboxExec = exec_fn or _default_exec
         self._extra_args = tuple(extra_args)
@@ -312,6 +329,11 @@ class ClaudeCodeAdapter:
         # tool call can be reported while the step runs; without it the argv, the
         # parsing and the result are exactly as before.
         self._on_activity = on_activity
+        # Per-session token usage, read into the BUILD-MANIFEST: coding sessions are
+        # most of a run's spend and never pass through the proxy's per-call records.
+        self.usage: list[dict[str, int]] = []
+        # Per-run token cap shared with the proxy; None = uncapped.
+        self.token_meter: TokenMeter | None = None
 
     def _pump_activity(self, line: str) -> None:
         """One stdout line -> zero or more activity phrases -> the listener. Advisory:
@@ -346,8 +368,11 @@ class ClaudeCodeAdapter:
             # permission prompts — headless agentic runs inside the cage.
             "--dangerously-skip-permissions",
         ]
-        if self._model:
-            argv += ["--model", self._model]
+        tier = packet.task.get("tier")
+        model = self._tier_models.get(str(tier)) if tier else None
+        model = model or self._model
+        if model:
+            argv += ["--model", model]
         argv += list(self._extra_args)
         return argv
 
@@ -357,7 +382,14 @@ class ClaudeCodeAdapter:
                 f"the {self.name!r} adapter needs the {self._bin!r} binary on PATH "
                 f"(install Claude Code, or pick --adapter raw-react)"
             )
+        if self.token_meter is not None:
+            self.token_meter.check()
         before = walk_worktree(sandbox.worktree)
+        tier = packet.task.get("tier")
+        label = (f"agent session: {packet.task.get('id', 'unknown')}"
+                 f" ({self._tier_models.get(str(tier)) or self._model or 'default model'})")
+        progress.log(f"start {label}")
+        started = time.monotonic()
         if self._on_activity is not None:
             # STREAMING: each stdout line is an event; report the tool calls as they
             # happen. `on_stdout_line` is only passed in this branch, so a custom
@@ -387,6 +419,17 @@ class ClaudeCodeAdapter:
             raw = envelope.get("result")
             summary = raw if isinstance(raw, str) else ""
 
+        u = envelope.get("usage")
+        if isinstance(u, dict):
+            self.usage.append({
+                k: int(u.get(k) or 0)
+                for k in ("input_tokens", "output_tokens", "cache_read_input_tokens",
+                          "cache_creation_input_tokens")
+            })
+            if self.token_meter is not None:
+                self.token_meter.charge(self.usage[-1])
+        progress.finished(label, started, self.usage[-1] if isinstance(u, dict) else None,
+                          self.token_meter)
         authored, deleted, skipped_binary = changed_files(before, after)
         payload: dict[str, Any] = {"kind": "full-file-snapshot", "files": authored}
         if deleted:

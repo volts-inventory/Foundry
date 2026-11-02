@@ -123,7 +123,7 @@ def as_text(obj: Any) -> str:
 
 
 # --- scope tiering: the deterministic caps a ScopeDecision maps to ----------
-# The scope judge (a model call) supplies only the TIER; these caps are code, so
+# The planner (a model call) supplies only the TIER; these caps are code, so
 # a tier always means the same thing and a model cannot widen its own budget.
 # STANDARD has no caps — its directive is "", which keeps every downstream prompt
 # byte-identical to a pre-tiering run.
@@ -187,6 +187,12 @@ def scope_directive(state: FactoryState, *, architect: bool = False) -> str:
     return _DEMO_ARCHITECT_DIRECTIVE if architect else _DEMO_PM_DIRECTIVE
 
 
+def demo_directives() -> str:
+    """Both DEMO caps (criteria + architecture), for a prompt that decides the
+    scope tier in the same call that applies it."""
+    return _DEMO_PM_DIRECTIVE + _DEMO_ARCHITECT_DIRECTIVE
+
+
 def journal_entry(
     *,
     node_id: str,
@@ -201,7 +207,7 @@ def journal_entry(
 
     Reusable across every agent node: a node returns ``{"agent_journal": [entry]}``
     on its OWN channel — never on ``gates``/``gate_triage`` — to record how its turn
-    went for the "interview the agent" affordance (:mod:`foundry.agents.interview`).
+    went, for the run's event log.
 
     HARD CONSTRAINT (plan [11]): the journal is STRICTLY ADVISORY observability —
     NEVER a trust input. No gate, ``merge_gates``, ``route_after_gates``, or

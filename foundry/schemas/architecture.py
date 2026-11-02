@@ -11,6 +11,8 @@ import re
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
+from pydantic import Field
+
 from foundry.schemas.base import FrozenModel
 from foundry.state.seq import Seq
 
@@ -90,6 +92,8 @@ class InterfaceContract(FrozenModel):
 
     name: str  # the seam's stable identity (e.g. "TodoStore.add")
     spec_uri: str  # CAS handle to the full signature / contract body (DS9)
+    kind: str = ""  # function|class|type|http|cli|event
+    signature: str = ""  # written in the chosen language; compiled into wave-0 stubs
     consumers: tuple[str, ...] = ()  # component/interface ids that depend on this seam
     version: int = 1
     supersedes: str | None = None
@@ -105,6 +109,9 @@ class OwnershipMap(FrozenModel):
     state), so a LangGraph resume re-derives the identical order."""
 
     owners: dict[str, str]  # path / interface name -> owner (task or agent id)
+    # unit -> the acceptance-criterion ids it implements (the planner authors it,
+    # so lead decomposition is deterministic — no model call).
+    unit_criteria: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     version: int = 1
     supersedes: str | None = None
     seq: Seq
@@ -140,15 +147,6 @@ class OwnershipMap(FrozenModel):
     def area_of(self, owner: str) -> str:
         """Canonical area an owner's domain belongs to (``backend`` default)."""
         return classify_area(owner, self.units_of(owner))
-
-    def areas_present(self) -> tuple[str, ...]:
-        """Distinct areas that actually have ≥1 domain, in canonical order.
-
-        Areas materialize from the work: an area appears here only when some
-        owner classifies into it (so a headless service has no ``frontend``,
-        a static site no ``data`` — no idle departments)."""
-        present = {self.area_of(owner) for owner in self.leads()}
-        return tuple(area for area in CANONICAL_AREAS if area in present)
 
     def leads_by_area(self) -> dict[str, tuple[str, ...]]:
         """area -> the owners (Tech-Leads) in it, in canonical area order.

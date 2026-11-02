@@ -34,6 +34,12 @@ class IntentBrief(FrozenModel):
     success_criteria: tuple[str, ...] = ()  # success in user terms
     must_haves: tuple[str, ...] = ()
     nice_to_haves: tuple[str, ...] = ()
+    # Stable ids the plan's scenarios cite in ``covers`` (aligned by index with
+    # ``must_haves`` / ``success_criteria``), and what the build delivers
+    # (app | library | cli | service; "" when undeclared).
+    must_have_ids: tuple[str, ...] = ()
+    success_criterion_ids: tuple[str, ...] = ()
+    deliverable: str = ""
     version: int = 1
     supersedes: str | None = None
     seq: Seq
@@ -65,9 +71,25 @@ class AcceptanceCriterion(FrozenModel):
     criticality: Criticality = Criticality.NORMAL
     oracle_hint: str = ""  # testable-oracle hint: how a runner-evaluable test decides it
     security_abuse: bool = False  # security/abuse criterion (Spec-gate relevant)
+    # Structured scenario; ``text`` stays the rendered "Given … When … Then …" so
+    # every plain-text consumer keeps working.
+    given: tuple[str, ...] = ()
+    when: tuple[str, ...] = ()
+    then: tuple[str, ...] = ()
+    ticket_id: str | None = None
+    covers: tuple[str, ...] = ()  # the must-have / success-criterion ids it proves
     version: int = 1
     supersedes: str | None = None
     seq: Seq
+
+
+def render_scenario(given: tuple[str, ...], when: tuple[str, ...], then: tuple[str, ...]) -> str:
+    """The one-line ``text`` form of a scenario."""
+    parts = []
+    for word, steps in (("Given", given), ("When", when), ("Then", then)):
+        if steps:
+            parts.append(f"{word} " + " and ".join(steps))
+    return " ".join(parts)
 
 
 class CriteriaCritique(FrozenModel):
@@ -84,16 +106,31 @@ class CriteriaCritique(FrozenModel):
     security_abuse_omissions: tuple[str, ...] = ()  # omitted security/abuse cases
     judgment_provenance: JudgmentProvenance
     seq: Seq
+    # The planner's deterministic contract fit check (a consumed contract with no
+    # or several producers, a consumer not ordered after its producer, a contract
+    # signature that does not compile): computed, not judged, and blocking like an
+    # omission.
+    contract_findings: tuple[str, ...] = ()
+    # The planner's deterministic coverage check (an uncovered must-have or success
+    # criterion, a feature ticket without scenarios, no end-to-end entrypoint, no
+    # run command): computed, and blocking the same way.
+    coverage_findings: tuple[str, ...] = ()
 
     def spec_gate_blocking(self) -> bool:
         """Omission of applicable security/abuse criteria FAILS the Spec gate
-        (agents.md Layer 1 — Criteria-Completeness Critic SOP).
+        (agents.md Layer 1 — Criteria-Completeness Critic SOP), as does a
+        contract fit or coverage finding.
 
         Blank/whitespace-only entries are ignored so this predicate matches the
         Spec gate's own re-derivation byte-for-byte (``SpecGate._critique_blocks``
         requires ``o.strip()`` truthy) — the materialize decision and the gate
         decision apply the SAME rule to a degenerate omission list."""
-        return any(o.strip() for o in self.security_abuse_omissions)
+        return any(
+            o.strip() for o in (
+                *self.security_abuse_omissions, *self.contract_findings,
+                *self.coverage_findings,
+            )
+        )
 
 
 class SprintPlan(FrozenModel):

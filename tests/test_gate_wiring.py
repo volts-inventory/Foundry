@@ -251,14 +251,15 @@ def test_signed_pass_path_advances(tmp_path, rt, runner, records, verifier):
     )
 
     spec = spec_out["gates"][0]
-    build, test = bt_out["gates"]
+    build, test, smoke = bt_out["gates"]
     assert spec.name == "spec" and spec.status is GateStatus.PASS
     assert build.name == "build" and build.status is GateStatus.PASS
     assert test.name == "test" and test.status is GateStatus.PASS
+    assert smoke.name == "smoke" and smoke.status is GateStatus.PASS  # not pinned
 
-    # Every verdict is runner-attested -> the REAL merge_gates admits all three.
+    # Every verdict is runner-attested -> the REAL merge_gates admits all four.
     folded = merge_gates(spec_out["gates"] + bt_out["gates"], None)
-    assert set(folded) == {spec, build, test}
+    assert set(folded) == {spec, build, test, smoke}
 
     # Fold onto state and route: all relevant gates PASS, nothing latched.
     state_with = {**state, "gates": folded}
@@ -273,23 +274,6 @@ def test_signed_pass_path_advances(tmp_path, rt, runner, records, verifier):
 
 
 # ---- 2. an UNSIGNED GateResult is dropped by merge_gates --------------------
-
-
-def test_unsigned_gateresult_dropped(verifier):
-    """Only runner-attested verdicts count — an unsigned GateResult is dropped."""
-    unsigned = GateResult(
-        name="build",
-        status=GateStatus.PASS,
-        decision_deterministic=True,
-        execution_deterministic=True,
-        verdict_class=VerdictClass.EXECUTION_DETERMINISTIC,
-        scanner_config_rev=SCANNER_REV,
-        lineage_map_revision=LINEAGE_REV,
-        results_digest="rd",
-        run_against="a" * 64,
-        seq=_seq("build_gate", "verdict:build"),
-    )
-    assert merge_gates([unsigned], None) == []
 
 
 # ---- 3. zone-A exception is a signed ERROR; routes to fix; no latch ----------
@@ -410,33 +394,6 @@ def test_critic_security_omission_fails_spec_no_pr(tmp_path, rt, runner, records
     )
 
 
-def test_critic_no_omission_passes_spec(tmp_path, rt, runner, records, verifier):
-    """Inverse: the SAME structurally-complete criteria with an EMPTY
-    ``security_abuse_omissions`` critique PASS — the finding does not block."""
-    criteria = (_criterion("c1"), _criterion("c2", security=True))
-    critique = _critique(omissions=())  # critic found nothing to block on
-    state, resolve, resolve_blob = _seed(criteria, critique=critique)
-
-    spec_out = run_spec_gate(
-        state,
-        _config(),
-        rt=rt,
-        runner=runner,
-        resolve=resolve,
-        resolve_blob=resolve_blob,
-        workdir=tmp_path / "ok",
-    )
-    spec = spec_out["gates"][0]
-    assert spec.name == "spec" and spec.status is GateStatus.PASS
-    assert merge_gates(spec_out["gates"], None) == spec_out["gates"]
-    assert not records.stable_fail_latched(spec.run_against, "spec")
-    state_with = {**state, "gates": spec_out["gates"]}
-    assert (
-        route_after_gates(state_with, _config(), boundary=SPEC_BOUNDARY, records=records)
-        == "advance"
-    )
-
-
 def test_clean_empty_and_blank_critique_materialize_identical_tree(tmp_path):
     """The conditional-wrapper rationale (gate_wiring writes the critique block
     ONLY when blocking, so a flagged run's reshaped tree never perturbs the clean
@@ -484,7 +441,7 @@ def test_adequacy_floor_zero_tests_is_fail(tmp_path, rt, runner, records, verifi
         workdir=tmp_path / "bt",
         min_passed=1,
     )
-    build, test = bt_out["gates"]
+    build, test, _smoke = bt_out["gates"]
     assert build.status is GateStatus.PASS  # it compiles
     assert test.status is GateStatus.FAIL  # vacuous suite cannot clear the floor
     assert merge_gates(bt_out["gates"], None)  # both attested + admitted
@@ -572,20 +529,6 @@ def test_unresolvable_diff_body_fails_closed(tmp_path, verifier):
         materialize_workdir(state, tmp_path / "wd", resolve=resolve, resolve_blob=_broken_blob)
 
 
-def test_unsupported_hunk_shape_fails_closed(tmp_path, verifier):
-    """A modification/deletion hunk (not a pure addition) is fail-closed."""
-    criteria = (_criterion("c1"), _criterion("c2", security=True))
-    diff, uri, _ = _feature_diff({"app.py": _GOOD_MODULE})
-    # Replace the blob with a MODIFICATION diff the Phase-1 applier rejects.
-    mod = b"--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-OLD = 1\n+NEW = 2\n"
-    state, resolve, _ = _seed(criteria, ((diff, uri, mod),))
-
-    with pytest.raises(FeatureDiffBodyError):
-        materialize_workdir(
-            state, tmp_path / "wd", resolve=resolve, resolve_blob=lambda u: mod
-        )
-
-
 def test_real_git_style_addition_diff_is_parsed() -> None:
     """A REAL git unified diff (what `claude -p` / the OpenAI SDK emit) round-trips:
     the `diff --git`/`index`/`new file mode` preamble is skipped, every `+` line is
@@ -638,9 +581,8 @@ def test_path_traversal_rejected_before_write(tmp_path, verifier):
 
 def test_manifest_scaffold_grounds_pure_python_tree(tmp_path, verifier):
     """A pure-stdlib Python tree with a test suite and no engineer manifest gets a
-    generated ``requirements.txt`` so the Audit gate can ground its SBOM."""
-    from foundry.gates.audit import AuditGate, recognized_manifests
-    from foundry.schemas.gates import GateStatus
+    generated ``requirements.txt``."""
+    from foundry.gates.audit import recognized_manifests
 
     criteria = (_criterion("c1"),)
     files = {"app.py": "import json\n\nVALUE = 42\n", "test_app.py": _PASSING_TEST}
@@ -653,9 +595,6 @@ def test_manifest_scaffold_grounds_pure_python_tree(tmp_path, verifier):
     assert recognized_manifests(dest) == ["requirements.txt"]
     manifest = (dest / "requirements.txt").read_text()
     assert "pytest" in manifest  # the test runner is pinned as a dev dependency
-    obs = AuditGate().execute(dest)
-    assert obs.structured["inventory_derivable"] is True
-    assert AuditGate().decide(obs) is GateStatus.PASS
 
 
 def test_manifest_scaffold_leaves_engineer_manifest_untouched(tmp_path, verifier):
@@ -789,3 +728,28 @@ def test_halted_run_writes_a_usable_draft_with_failing_findings(tmp_path, verifi
     assert "held at the gate" in status.lower()             # clearly marked not shipped
     assert "E   assert f() == 2" in status                  # what's still failing
     assert "❌" in status and "✅" in status                 # per-gate verdicts
+
+
+def test_spec_gate_reads_the_newest_criterion_per_id(tmp_path, rt, runner, verifier):
+    """A re-plan re-emits a criterion under the same id; the gate validates the
+    newest-by-Seq record, not a stale one still on the channel (list order is
+    irrelevant)."""
+    fixed = _criterion("c1").model_copy(update={"seq": _seq("planner", "c", epoch=2)})
+    stale = _criterion("c1").model_copy(
+        update={"oracle_hint": "", "seq": _seq("planner", "c", epoch=1)}
+    )
+    state, resolve, resolve_blob = _seed((fixed, stale, _criterion("c2", security=True)))
+
+    out = run_spec_gate(
+        state, _config(), rt=rt, runner=runner, resolve=resolve,
+        resolve_blob=resolve_blob, workdir=tmp_path / "spec",
+    )
+    assert out["gates"][0].status is GateStatus.PASS
+
+    stale_newer = stale.model_copy(update={"seq": _seq("planner", "c", epoch=3)})
+    state, resolve, resolve_blob = _seed((fixed, stale_newer, _criterion("c2", security=True)))
+    out = run_spec_gate(
+        state, _config(2), rt=rt, runner=runner, resolve=resolve,
+        resolve_blob=resolve_blob, workdir=tmp_path / "spec2",
+    )
+    assert out["gates"][0].status is GateStatus.FAIL

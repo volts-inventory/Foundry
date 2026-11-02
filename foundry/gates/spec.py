@@ -1,7 +1,9 @@
 """Spec gate — class 1 (config-evaluable). (governance §1, plan §5.1)
 
 Evaluates the acceptance-criteria document deterministically: every criterion
-must carry an id, testable text, and an oracle hint, and **security/abuse
+must carry an id, testable text, and an oracle hint; a criterion written as a
+structured BDD scenario (any of ``given``/``when``/``then`` present) must have at
+least one step of each; and **security/abuse
 criteria coverage is mandatory where applicable — omission fails the gate**
 (governance §1b: "100% criterion-coverage" cannot be satisfied by
 under-specifying).
@@ -43,12 +45,32 @@ from .runner import ZoneAObservation, observe
 __all__ = ["SpecGate"]
 
 _REQUIRED_FIELDS = ("id", "text", "oracle")
+_SCENARIO_STEPS = ("given", "when", "then")
 
 # The critique block the materializer writes onto the criteria document from the
 # Criteria-Completeness Critic's findings. Zone A surfaces the RAW omission list;
 # zone B alone turns a non-empty list into a FAIL (the critic mints no verdict).
 _CRITIQUE_KEY = "critique"
 _OMISSIONS_KEY = "security_abuse_omissions"
+# The planner's contract fit findings ride the same block and block the same way.
+_CONTRACT_KEY = "contract_findings"
+_COVERAGE_KEY = "coverage_findings"
+
+
+def _incomplete_steps(criterion: dict[str, Any]) -> list[str]:
+    """Step kinds a structured scenario lacks; ``[]`` for a text-only criterion.
+
+    A criterion is structured once any step key carries a value; then each kind
+    needs at least one non-empty string step (a wrong type fails closed)."""
+    if not any(criterion.get(k) for k in _SCENARIO_STEPS):
+        return []
+    return [
+        k for k in _SCENARIO_STEPS
+        if not (
+            isinstance(v := criterion.get(k), list)
+            and any(isinstance(step, str) and step.strip() for step in v)
+        )
+    ]
 
 
 class SpecGate:
@@ -117,6 +139,8 @@ class SpecGate:
                 v = c.get(field)
                 if not isinstance(v, str) or not v.strip():
                     return GateStatus.FAIL
+            if _incomplete_steps(c):
+                return GateStatus.FAIL
         if self._require_security_criterion and not any(
             c.get("security_abuse") is True for c in criteria
         ):
@@ -153,6 +177,8 @@ class SpecGate:
             ]
             if missing:
                 out.append(f"criterion {cid}: missing/empty {', '.join(missing)}")
+            if steps := _incomplete_steps(c):
+                out.append(f"criterion {cid}: scenario has no {'/'.join(steps)} step")
         if self._require_security_criterion and not any(
             isinstance(c, dict) and c.get("security_abuse") is True for c in criteria
         ):
@@ -161,7 +187,13 @@ class SpecGate:
                 "is mandatory (gov §1b)"
             )
         if self._critique_blocks(doc):
-            out.append("criteria-completeness critic flagged a security/abuse omission")
+            contract = self._findings(doc, _CONTRACT_KEY)
+            coverage = self._findings(doc, _COVERAGE_KEY)
+            if not (contract or coverage) or self._critique_blocks(doc, (_OMISSIONS_KEY,)):
+                out.append("criteria-completeness critic flagged a security/abuse omission")
+            # Verbatim: the planner's revision pass is handed these findings.
+            out += [f"contract fit: {f}" for f in contract]
+            out += [f"coverage: {f}" for f in coverage]
         return tuple(out) if out else (f"{len(criteria)} criteria, all structurally complete",)
 
     @staticmethod
@@ -173,11 +205,23 @@ class SpecGate:
         return None
 
     @staticmethod
-    def _critique_blocks(doc: Any) -> bool:
-        """True iff the materialized critique block flags a security/abuse omission.
+    def _findings(doc: Any, key: str) -> list[str]:
+        critique = doc.get(_CRITIQUE_KEY) if isinstance(doc, dict) else None
+        found = critique.get(key) if isinstance(critique, dict) else None
+        if not isinstance(found, list):
+            return []
+        return [f for f in found if isinstance(f, str) and f.strip()]
+
+    @staticmethod
+    def _critique_blocks(
+        doc: Any, keys: tuple[str, ...] = (_OMISSIONS_KEY, _CONTRACT_KEY, _COVERAGE_KEY)
+    ) -> bool:
+        """True iff the materialized critique block flags a security/abuse omission,
+        a contract fit finding or a coverage finding.
 
         Mirrors ``CriteriaCritique.spec_gate_blocking()`` over the RAW findings the
-        materializer wrote: a non-empty ``security_abuse_omissions`` list blocks.
+        materializer wrote: a non-empty ``security_abuse_omissions`` or
+        ``contract_findings`` / ``coverage_findings`` list blocks.
         The block is OPTIONAL — its absence is "no flagged omission", never a PASS
         bit an agent can assert. A malformed block (wrong types) is treated as a
         present-but-uninterpretable finding and fails closed.
@@ -189,9 +233,12 @@ class SpecGate:
             return False
         if not isinstance(critique, dict):
             return True  # present but unparseable → fail closed
-        omissions = critique.get(_OMISSIONS_KEY)
-        if omissions is None:
-            return False
-        if not isinstance(omissions, list):
-            return True  # present but unparseable → fail closed
-        return any(isinstance(o, str) and o.strip() for o in omissions)
+        for key in keys:
+            found = critique.get(key)
+            if found is None:
+                continue
+            if not isinstance(found, list):
+                return True  # present but unparseable → fail closed
+            if any(isinstance(o, str) and o.strip() for o in found):
+                return True
+        return False

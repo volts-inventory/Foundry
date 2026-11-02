@@ -9,11 +9,6 @@ the interfaces that already accept a path / connection:
 * **checkpointer** — :func:`make_checkpointer` already takes a ``db_path``; we
   point it at ``<state_dir>/checkpoints.db`` (file-backed SQLite, WAL) instead
   of ``:memory:``. The LangGraph checkpoint threads resume after restart.
-* **outbox + WORM audit** — ride the checkpointer's SHARED connection
-  (:class:`FoundryCheckpointer` runs ``ensure_outbox_schema`` on ``.conn`` and
-  ``enqueue``/``append_audit`` are called on that same conn inside
-  ``superstep_txn``), so once the checkpointer is file-backed the outbox rows
-  and the append-only audit chain persist with it — no separate wiring.
 * **GlobalRecords trust ledgers** — the consumed-nonce ledger, the stable-FAIL
   latch, the negative-verdict / digest-disqualification latches and the
   class-3 alpha-look ledger are SQLite tables; we hand
@@ -115,8 +110,7 @@ def durable_backends(state_dir: str | Path) -> DurableBackends:
     call this when :data:`STATE_DIR_ENV` is set):
 
     * ``checkpointer`` — :func:`make_checkpointer` at ``<state_dir>/checkpoints.db``
-      (honors ``FOUNDRY_CHECKPOINTER`` too; the outbox + WORM audit ride its
-      shared connection, so they persist with it);
+      (honors ``FOUNDRY_CHECKPOINTER`` too);
     * ``global_records`` — :class:`GlobalRecords` on a file-backed SQLite conn at
       ``<state_dir>/global_records.db`` (the trust ledgers survive a restart);
     * ``cas`` — :class:`FilesystemArtifactStore` at ``<state_dir>/cas``.
@@ -127,7 +121,7 @@ def durable_backends(state_dir: str | Path) -> DurableBackends:
     root = Path(state_dir)
     root.mkdir(parents=True, exist_ok=True)
 
-    # Checkpointer (+ outbox + WORM audit on its shared conn), file-backed.
+    # Checkpointer, file-backed.
     checkpointer = make_checkpointer(root / _CHECKPOINTS_DB)
 
     # GlobalRecords trust ledgers on their OWN file-backed connection. WAL +

@@ -6,7 +6,7 @@ adapter provides a multi-turn agentic inner loop with the ORIGINAL trust story
 intact: every model call routes through the §2b mediating
 :class:`~foundry.proxy.model_provider_proxy.ModelProviderProxy` — the proxy
 stays the sole credential holder and the lineage observer — and works over ANY
-configured backend (Anthropic API, OpenAI, Ollama, the CLIs-as-completion).
+configured backend (Anthropic API, OpenAI, the CLIs-as-completion).
 
 The loop is a schema-constrained ReAct cycle: each turn the model returns ONE
 action as JSON — ``write_file`` / ``delete_file`` / ``read_file`` / ``run`` /
@@ -32,6 +32,7 @@ from foundry.execution.adapter_contract import (
     AdapterResult,
     TaskPacket,
     assemble_prompt,
+    packet_tier_scope,
 )
 from foundry.execution.adapters.claude_code import changed_files, walk_worktree
 from foundry.execution.sandbox import Sandbox
@@ -122,6 +123,10 @@ class ProxyAgentAdapter:
         return True  # nothing but the injected proxy seam is required
 
     def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
+        with packet_tier_scope(packet):  # the completion closure picks the packet's model tier
+            return self._run(packet, sandbox)
+
+    def _run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
         worktree = Path(sandbox.worktree)
         before = walk_worktree(worktree)
         messages: list[dict[str, Any]] = [

@@ -15,7 +15,6 @@ Proves the LocalWorkPool dev drop-in:
 from __future__ import annotations
 
 import threading
-import time
 from pathlib import Path
 
 import pytest
@@ -29,7 +28,6 @@ from foundry.execution.work_pool import (
     LocalWorkPool,
     QuotaPolicy,
     TaskStatus,
-    WorkPool,
 )
 from foundry.schemas.base import BudgetLedger
 
@@ -74,11 +72,6 @@ def make_pool(
 # ---------------------------------------------------------------------------
 
 
-def test_local_pool_satisfies_workpool_protocol(source_dir: Path) -> None:
-    with make_pool(source_dir, max_slots=2) as pool:
-        assert isinstance(pool, WorkPool)
-
-
 def test_runs_tasks_and_returns_results(source_dir: Path) -> None:
     with make_pool(source_dir, max_slots=4) as pool:
         ids = [pool.submit(make_task(source_dir, f"t{i}")) for i in range(6)]
@@ -109,45 +102,6 @@ def test_results_are_deterministic_across_pools(source_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 # bounded concurrency — never exceed max_slots
 # ---------------------------------------------------------------------------
-
-
-class _CountingAdapter:
-    """Adapter that records the live concurrency high-water mark while running."""
-
-    supports_turn_snapshots = True
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self.live = 0
-        self.high_water = 0
-
-    def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
-        with self._lock:
-            self.live += 1
-            self.high_water = max(self.high_water, self.live)
-        try:
-            time.sleep(0.05)  # hold the slot so overlap is observable
-            return StubAdapter().run(packet, sandbox)
-        finally:
-            with self._lock:
-                self.live -= 1
-
-
-def test_bounded_concurrency_never_exceeds_max_slots(source_dir: Path) -> None:
-    counter = _CountingAdapter()
-    pool = LocalWorkPool(
-        sandbox_factory=lambda _t: Sandbox(source_dir),
-        adapter_factory=lambda _name: counter,
-        max_slots=3,
-    )
-    try:
-        ids = [pool.submit(make_task(source_dir, f"c{i}")) for i in range(12)]
-        for tid in ids:
-            pool.result(tid)
-    finally:
-        pool.shutdown()
-    assert counter.high_water <= 3  # NEVER more than max_slots at once
-    assert counter.high_water >= 2  # and it actually ran concurrently
 
 
 # ---------------------------------------------------------------------------

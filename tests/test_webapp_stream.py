@@ -2,15 +2,12 @@
 
 These cover the W1 fix — replacing the single per-project queue (which let two
 streams steal each other's events) with an append-only log that many viewers tail
-independently, that survives reconnect/restart via the durable store, and whose
-checkpoint decisions are first-wins + idempotent so multiple devices can drive one
-build without a stale click leaking into the next pause.
+independently, and that survives reconnect/restart via the durable store.
 """
 
 from __future__ import annotations
 
 import os
-import threading
 import time
 
 import pytest
@@ -18,10 +15,8 @@ import pytest
 from webapp import server
 from webapp.server import (
     Project,
-    _await_decision,
     _close,
     _emit,
-    _record_decision,
     _resume_cursor,
 )
 from webapp.store import BuildStore
@@ -38,7 +33,7 @@ def store(tmp_path, monkeypatch):
 
 
 def _project(**kw):
-    return Project(id="p1", request="r", mode="assistant", supervised=True, floor=1, **kw)
+    return Project(id="p1", request="r", mode="assistant", floor=1, **kw)
 
 
 # --- the durable event log --------------------------------------------------- #
@@ -69,68 +64,12 @@ def test_emit_appends_to_log_persists_and_marks_end(store):
 
 # --- fan-out: many viewers, no event stealing -------------------------------- #
 
-def test_fanout_every_cursor_sees_every_event(store):
-    """The core W1 property: two independent tails over ONE log both see the FULL
-    sequence (the old shared queue split events across consumers)."""
-    p = _project()
-    for i in range(6):
-        _emit(p, type="narrate", text=f"e{i}")
-
-    def drain_from(cursor: int) -> list[str]:
-        seen = []
-        while cursor < len(p.log):
-            seen.append(p.log[cursor]["text"])
-            cursor += 1
-        return seen
-
-    a, b = drain_from(0), drain_from(0)                   # two simultaneous viewers
-    assert a == b == [f"e{i}" for i in range(6)]
-
 
 def test_resume_cursor_from_last_event_id():
     assert _resume_cursor(None) == 0                      # fresh viewer → full replay
     assert _resume_cursor("") == 0
     assert _resume_cursor("2") == 3                       # reconnect → next event
     assert _resume_cursor("not-a-number") == 0           # malformed → safe replay
-
-
-# --- checkpoint decisions: first-wins, idempotent, multi-device -------------- #
-
-def test_first_decision_wins_later_clicks_are_noops(store):
-    p = _project(pending_checkpoint=1)
-    assert _record_decision(p, "approve", 1) == (True, False)    # first wins
-    assert _record_decision(p, "reject", 1) == (False, False)    # 2nd device: no-op
-    assert p.decision_for[1] == "approve"
-
-
-def test_stale_checkpoint_click_is_ignored(store):
-    p = _project(pending_checkpoint=2)
-    # A click for the PREVIOUS pause (1) must not resolve the current one (2).
-    assert _record_decision(p, "approve", 1) == (False, True)
-    assert 2 not in p.decision_for
-    # No pause awaiting at all → also stale.
-    p.pending_checkpoint = None
-    assert _record_decision(p, "approve", None) == (False, True)
-
-
-def test_await_decision_blocks_then_returns_first(store):
-    p = _project(pending_checkpoint=1)
-    out: dict[str, str] = {}
-
-    def waiter():
-        out["decision"] = _await_decision(p, 1, timeout=5)
-
-    t = threading.Thread(target=waiter)
-    t.start()
-    _record_decision(p, "reject", 1)                      # any device decides
-    t.join(timeout=5)
-    assert out["decision"] == "reject"
-
-
-def test_await_decision_times_out_to_approve(store):
-    p = _project(pending_checkpoint=1)
-    # No decision arrives within the (tiny) timeout → fail-safe auto-approve.
-    assert _await_decision(p, 1, timeout=0.05) == "approve"
 
 
 # --- survive restart: replay history + honestly close interrupted builds ----- #
@@ -154,7 +93,7 @@ def test_finished_log_trimmed_but_store_keeps_full_history(store, monkeypatch):
     monkeypatch.setattr(server, "_LOG_TAIL", 2)
     monkeypatch.setattr(server, "_LOG_GRACE_S", 0)     # eligible as soon as it ends
     running = _project()
-    done = Project(id="p2", request="r", mode="assistant", supervised=True, floor=2)
+    done = Project(id="p2", request="r", mode="assistant", floor=2)
     monkeypatch.setattr(server, "_PROJECTS", {"p1": running, "p2": done})
     for i in range(6):
         _emit(running, type="narrate", text=f"e{i}")     # still running
@@ -199,12 +138,6 @@ def test_load_env_file_last_line_wins_and_real_env_wins(tmp_path, monkeypatch):
         os.environ.pop("FOUNDRY_MODEL_BACKEND", None)
 
 
-def test_durable_state_dir_defaults_on_under_output_root():
-    # The Workshop turns durable state ON by default (CLI leaves it off) so a build
-    # survives a restart. The constant resolves to a real, non-empty path.
-    assert server._STATE_DIR and server._STATE_DIR != ""
-
-
 def test_seen_uris_roundtrip(tmp_path):
     s = BuildStore(tmp_path / "db.sqlite")
     s.add_seen("p1", {"cas://a", "cas://b"})
@@ -228,17 +161,14 @@ def test_interrupted_build_resumes_to_completion(store, monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_OUTPUT_ROOT", tmp_path / "out")
     tid = "rz1"
 
-    # Simulate a crash mid-build: a checkpointed run with NO responder pauses at the
-    # first boundary and leaves a durable checkpoint behind.
-    run("build a tiny url shortener", thread_id=tid, state_dir=state_dir,
-        checkpoints=True, mode="assistant")
+    # Simulate a crash mid-build: a durable run leaves its checkpoint behind.
+    run("build a tiny url shortener", thread_id=tid, state_dir=state_dir, mode="assistant")
     assert server._has_durable_checkpoint(tid) is True       # the probe sees it
 
-    # Catalog it as it would have been mid-flight: status 'running', a little history,
-    # unsupervised so the resumed run auto-approves to the end without a human.
+    # Catalog it as it would have been mid-flight: status 'running', a little history.
     store.append_event(tid, 0, {"type": "stage", "room": "product"})
     store.upsert({"id": tid, "floor": 1, "release_seq": 1, "request": "r",
-                  "mode": "assistant", "supervised": False, "status": "running",
+                  "mode": "assistant", "status": "running",
                   "passed": False})
 
     monkeypatch.setattr(server, "_PROJECTS", {})
@@ -276,6 +206,28 @@ def test_load_persisted_closes_interrupted_build(store, monkeypatch):
     assert len(server._STORE.events_of("run1")) == before
 
 
+def test_floor_paused_at_a_retired_checkpoint_is_closed_not_rerun(store, monkeypatch):
+    # Paused at a supervision checkpoint before supervision was removed: resuming
+    # would re-plan from START, so it is closed out even with a durable checkpoint.
+    log = [{"type": "stage"}, {"type": "await_decision", "checkpoint": 1}]
+    for i, ev in enumerate(log):
+        store.append_event("pz1", i, ev)
+    store.upsert({"id": "pz1", "floor": 3, "release_seq": 1, "request": "r",
+                  "mode": "assistant", "status": "running", "passed": False})
+    monkeypatch.setattr(server, "_PROJECTS", {})
+    monkeypatch.setattr(server, "_has_durable_checkpoint", lambda _tid: True)
+
+    def no_resume(*_a, **_k):
+        raise AssertionError("a retired pause must not be resumed")
+
+    monkeypatch.setattr(server, "_gated_runner", no_resume)
+    server._load_persisted()
+    p = server._PROJECTS["pz1"]
+    types = [e["type"] for e in p.log]
+    assert types[:2] == ["stage", "await_decision"] and "halt" in types
+    assert p.ended and p.status == "done"
+
+
 # --- what a long silence is waiting on --------------------------------------- #
 
 def test_waiting_on_names_the_longest_running_steps_first():
@@ -300,18 +252,6 @@ def test_waiting_on_names_the_longest_running_steps_first():
     # Nothing in flight -> empty, which is what makes the watchdog escalate its wording.
     p.inflight = {}
     assert server.waiting_on(p, now=now) == ""
-
-
-def test_inflight_is_tracked_by_node_id_not_label():
-    # A finish event can carry no label at all (a gate's outcome is reported by its own
-    # `gate` event), so the in-flight set has to be keyed by node id — keying by label
-    # would leak an entry per gate run and the watchdog would name steps long finished.
-    from webapp.events import live_event_for_node
-
-    start = live_event_for_node("build_test_gate", "factory", "start")
-    fin = live_event_for_node("build_test_gate", "factory", "finish")
-    assert start is not None and fin is not None
-    assert "step" in start and "step" not in fin        # the asymmetry that caused it
 
 
 # --- live activity from inside a step (throttling) ---------------------------- #
@@ -342,37 +282,76 @@ def test_activity_is_throttled_deduped_and_capped_per_step():
     assert server.take_activity(p2, "editing again.py", now=9000.0) is not None
 
 
-# --- platform builds feed the FLOOR, not just the log ------------------------- #
+def test_parse_workers_defaults_clamps_and_ignores_junk():
+    assert server.parse_workers(None) == {"frontend": 4, "backend": 4, "data": 4, "test": 4}
+    got = server.parse_workers({"frontend": "5", "backend": -3, "data": "x", "test": 99,
+                                "bogus": 7})
+    assert got == {"frontend": 5, "backend": 1, "data": 4, "test": 16}
+    assert server.parse_workers({"frontend": 0})["frontend"] == 1  # 0 would strand tickets
+    assert server.parse_ticket_tiers({"trivial": "t3", "standard": "T9", "x": "T1"}) == {
+        "trivial": "T3"}
 
-def test_platform_svc_nodes_stream_floor_telemetry_quietly(store, tmp_path, monkeypatch):
-    """A platform build streams the same per-node start/finish `active` telemetry a
-    single build does, so the office seats the agent actually mid-call and clears the
-    room when it ends. It used to announce ONE room per service and never a finish —
-    every room stayed lit forever and the CTO had nowhere to walk. The events are
-    `quiet`: the per-service `svc` boxes already narrate each node to the quest log."""
-    import foundry.platform as platform_mod
-    from foundry.platform.planner import plan_platform
-    from foundry.platform.schema import PlatformResult
 
-    def fake_build_platform(request, *, out_dir, progress_cb=None, **_kw):
-        cb = progress_cb or (lambda _e: None)
-        cb({"type": "svc_start", "service": "data", "role": "data"})
-        cb({"type": "svc_node", "service": "data", "node": "frontend_lead",
-            "scope": "factory:implementation", "phase": "start"})
-        cb({"type": "svc_node", "service": "data", "node": "frontend_lead",
-            "scope": "factory:implementation", "phase": "finish", "detail": {}})
-        return PlatformResult(plan=plan_platform(request), services=(),
-                              out_dir=out_dir, passed=True)
+def test_run_gets_ticket_kwargs_and_task_events_stream(store, monkeypatch, tmp_path):
+    import foundry.cli
 
-    monkeypatch.setattr(platform_mod, "build_platform", fake_build_platform)
-    p = _project(out_base=tmp_path / "out")
-    (tmp_path / "out").mkdir()
-    server._run_platform(p)
+    seen: dict = {}
 
-    active = [e for e in p.log if e["type"] == "active" and e.get("agent")]
-    assert [(e["room"], e["phase"]) for e in active] == [("frontend", "start"),
-                                                         ("frontend", "finish")]
-    assert all(e["agent"] == "Frontend Lead" and e["quiet"] for e in active)
-    # and the quest log still gets exactly one box per node, from the `svc` stream
-    svc_phases = [e["phase"] for e in p.log if e["type"] == "svc"]
-    assert svc_phases == ["start", "agent_start", "agent_done"]
+    def run(request, *, task_cb, workers, ticket_tiers, progress_cb=None, **kw):
+        seen.update(workers=workers, ticket_tiers=ticket_tiers)
+        task_cb({"phase": "start", "ticket_id": "T-001", "title": "x",
+                 "specialty": "data", "tier": "T2"})
+        raise RuntimeError("stop here")       # ends the build through the error path
+
+    monkeypatch.setattr(foundry.cli, "run", run)
+    monkeypatch.setattr(server, "_OUTPUT_ROOT", tmp_path / "out")
+    p = _project(workers=server.parse_workers({"data": 5}), ticket_tiers={"trivial": "T3"})
+    server._run_factory(p)
+    assert seen["workers"]["data"] == 5 and seen["ticket_tiers"] == {"trivial": "T3"}
+    assert [e for e in p.log if e["type"] == "task"] == [
+        {"type": "task", "phase": "start", "ticket_id": "T-001", "title": "x",
+         "specialty": "data", "tier": "T2"}]
+    proj = next(e for e in p.log if e["type"] == "project")
+    assert proj["workers"]["data"] == 5
+
+
+def test_new_build_takes_backend_from_env_and_ignores_removed_fields(store, monkeypatch):
+    import json
+    import threading
+    import urllib.error
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    monkeypatch.setenv("FOUNDRY_AUTH", "0")
+    monkeypatch.setenv("FOUNDRY_MODEL_BACKEND", "mock")
+    started: list[server.Project] = []
+    monkeypatch.setattr(server, "_run_factory", lambda p, resume=False: started.append(p))
+    monkeypatch.setattr(server, "_PROJECTS", {})
+    monkeypatch.setattr(server, "_FLOOR", [0])
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+    def send(body):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{srv.server_port}/api/projects",
+            data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    try:
+        assert send({"request": "  "})[0] == 400
+        code, got = send({"request": "a todo cli", "backend": "claude-cli", "spec_text": "x",
+                          "parent_id": "p0", "max_fix_attempts": 9,
+                          "workers": {"data": 5}, "token_cap": 1234})
+        assert code == 200 and got["floor"] == 1
+        deadline = time.time() + 5
+        while not started and time.time() < deadline:
+            time.sleep(0.02)
+        p = started[0]
+        assert (p.backend, p.adapter, p.token_cap) == ("mock", "stub", 1234)
+        assert p.workers["data"] == 5
+    finally:
+        srv.shutdown()

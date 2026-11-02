@@ -17,6 +17,8 @@
 <meta name="apple-mobile-web-app-title" content="Foundry" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <link rel="stylesheet" href="/static/style.css" />
+<link rel="stylesheet" href="/static/settings.css" />
+<link rel="stylesheet" href="/static/insight.css" />
 </head>
 <body>
   <!-- ONE grid, two arrangements (see style.css):
@@ -26,8 +28,10 @@
   <div id="app">
     <header id="hud">
       <div class="hud-left">
-        <span class="logo">FOUNDRY</span>
+        <h1 class="logo">FOUNDRY</h1>
         <span class="elevator" id="floor-tag">FLOOR —</span>
+        <!-- tokens used / cap · elapsed (or the queue position); insight.js -->
+        <span class="meter" id="meter-tag" hidden></span>
       </div>
       <!-- The request line is a DIRECT child of the bar, not of .hud-left: portrait
            gives it a full-width row of its own, and a nested element cannot be
@@ -36,18 +40,25 @@
       <span class="mode" id="mode-tag"></span>
       <!-- stage / per-service chips: their own group so narrow screens can give
            them a single horizontally-scrolling row instead of wrapping to three -->
-      <div class="hud-mid"><span class="gates-mini" id="gates-mini"></span></div>
+      <div class="hud-mid" tabindex="0" aria-label="Gate status"><span class="gates-mini" id="gates-mini"></span></div>
+      <!-- Build control for the floor on screen: game.js draws only the actions valid
+           for its state (Stop · Pause while it runs; Resume · Retry with… · Delete
+           once it has stopped). The panel under the bar holds their forms and
+           messages, so nothing here needs alert()/confirm(). -->
+      <div class="floor-ctl" id="floor-ctl"></div>
+      <div class="ctl-panel hidden" id="ctl-panel" role="status" aria-live="polite"></div>
       <div class="hud-right">
         <!-- `.lbl-long` is dropped on narrow screens so both actions still fit on
              one line beside the floor tag (⌥ REPO · ▶ NEW). -->
+        <button id="settings-btn" title="Settings" aria-label="Settings">⚙</button>
         <button id="output-btn">⌥ REPO</button>
         <button id="new-btn">▶ NEW<span class="lbl-long"> PROJECT</span></button>
       </div>
     </header>
 
     <!-- Elevator: one button per floor (project). Click to ride to that floor. -->
-    <nav id="elevator" aria-label="floors">
-      <div class="el-head">▲<br>EL<br>▼</div>
+    <nav id="elevator" aria-label="Floors">
+      <div class="el-head" aria-hidden="true">▲<br>EL<br>▼</div>
       <div id="el-floors"></div>
     </nav>
 
@@ -56,347 +67,153 @@
     <main id="game"><div id="wipe" aria-hidden="true"></div></main>
 
     <aside id="log-panel">
-      <div class="log-title">QUEST LOG</div>
+      <div class="log-title" id="log-title">QUEST LOG</div>
       <!-- The live chip rides the tabs row (not the title) so portrait can drop the
            title row entirely without losing the stream-health indicator. -->
-      <div class="log-tabs">
-        <button class="log-tab sel" data-tab="live">● Live</button>
-        <button class="log-tab" data-tab="progress">≡ Progress</button>
+      <div class="log-tabs" role="group" aria-label="Quest log view">
+        <button class="log-tab sel" data-tab="live" aria-pressed="true">● Live</button>
+        <button class="log-tab" data-tab="progress" aria-pressed="false">≡ Progress</button>
+        <button class="log-tab" data-tab="tickets" aria-pressed="false">☰ Tickets</button>
         <span id="log-live" class="log-live"></span>
       </div>
-      <ul id="log"></ul>
-      <ul id="progress" style="display:none"></ul>
+      <!-- why a finished floor stopped, or how to run what it shipped (insight.js) -->
+      <div id="insight-card" class="insight-card hidden" aria-live="polite"></div>
+      <!-- The live feed is announced politely; an empty list shows its own help
+           (style.css, :empty). -->
+      <ul id="log" aria-live="polite" aria-relevant="additions" aria-labelledby="log-title" tabindex="0"
+          data-empty="Nothing here yet. Start a build and the crew narrates every step in this log."></ul>
+      <ul id="progress" style="display:none" aria-label="Progress" tabindex="0"
+          data-empty="No stage has finished yet. Each stage (plan, build, the gates) adds a one-line summary here when it completes."></ul>
+      <ul id="tickets" style="display:none" aria-label="Tickets" tabindex="0"
+          data-empty="No tickets yet. Once a build starts, the Planner splits the request into tickets and each one shows its owner, difficulty and status here."></ul>
       <!-- The log follows new activity only while you're already at the bottom; scroll
            up to read something and this appears instead of yanking you back down. -->
       <button id="log-jump" class="log-jump hidden" type="button">↓ NEW ACTIVITY</button>
     </aside>
   </div>
 
-  <!-- New-project dialog. Four numbered SECTIONS instead of one 20-field wall: the
-       two that carry sane defaults (③ how it runs, ④ scale) are folded shut behind a
-       summary line of their current values, so the dialog opens at "what do you want
-       built?" and everything else is one tap away. Same structure on every width. -->
-  <div id="new-modal" class="overlay hidden">
+  <!-- New-build dialog: the request, plus a collapsed settings fold that reports
+       what it is set to. The backend comes from the server's environment. -->
+  <div id="new-modal" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="new-title">
     <div class="dialog build">
       <div class="dialog-head">
-        <h2>▶ START A BUILD</h2>
-        <button id="new-close" class="icon-btn" title="close" aria-label="close">✕</button>
+        <h2 id="new-title">▶ START A BUILD</h2>
+        <button id="new-close" class="icon-btn" title="Close" aria-label="Close" data-dismiss>✕</button>
       </div>
 
-      <section class="fset">
-        <h3 class="fset-h">① The build</h3>
-        <div class="field">
-          <label for="preset-select">Preset <span class="hint">— load an example; fills every setting below</span></label>
-          <select id="preset-select"></select>
-          <p class="hint" id="preset-note"></p>
-        </div>
-        <div class="field">
-          <label for="startfrom-select">Start from <span class="hint">— a fresh build, or iterate on a finished one</span></label>
-          <select id="startfrom-select"><option value="">✦ Fresh build</option></select>
-        </div>
-        <div class="field">
-          <label id="req-label" for="req-input">What should the factory build? <span class="hint">— a sentence, or a full brief</span></label>
-          <textarea id="req-input" rows="3"
-            placeholder="e.g. a URL shortener with custom slugs, link expiry, and per-IP abuse rate-limiting">a Private Information Retrieval (PIR) system: fetch record i from a database without any server learning which record you asked for — information-theoretic 2-server PIR plus a single-server homomorphic variant, verified in-process</textarea>
+      <!-- First run only (game.js shows it while there are no floors). -->
+      <section class="fset first-run hidden" id="first-run" aria-labelledby="first-run-h">
+        <span class="fset-h" id="first-run-h">Welcome to the Workshop</span>
+        <p class="cp-note">Each build gets its own floor of a pixel office. A Planner
+          splits your request into tickets, engineers in the Frontend, Backend and Data
+          rooms write the code, and every change has to pass the gates (spec, build,
+          test, smoke, review) before the Vault opens and it ships. Watch it happen
+          live, follow the quest log on the right, and browse the code on Floor 0.</p>
+        <p class="cp-note">Try one of these:</p>
+        <div class="examples" id="examples">
+          <button type="button" class="example">a URL shortener with custom slugs and click counts</button>
+          <button type="button" class="example">a todo list API with tags, due dates and a SQLite store</button>
+          <button type="button" class="example">a markdown notes app with search and a live preview</button>
         </div>
       </section>
 
       <section class="fset">
-        <h3 class="fset-h">② The spec <span class="hint">— the request alone is enough; these add detail</span></h3>
-        <div class="intake-modes" id="intake-modes">
-          <label class="seg"><input type="radio" name="intake" value="idea" /><span>Idea only</span></label>
-          <label class="seg"><input type="radio" name="intake" value="spec" checked /><span>Paste spec</span></label>
-          <label class="seg"><input type="radio" name="intake" value="zip" /><span>Upload .zip</span></label>
-          <label class="seg"><input type="radio" name="intake" value="chat" /><span>Work it out with the leads</span></label>
+        <div class="field">
+          <label for="req-input">What should the factory build? <span class="hint">— a sentence, or a full brief</span></label>
+          <textarea id="req-input" rows="4" data-autofocus aria-describedby="req-err"
+            placeholder="e.g. a URL shortener with custom slugs, link expiry, and per-IP abuse rate-limiting"></textarea>
         </div>
-      <div class="intake-panel" data-mode="spec">
-        <label>Full spec (markdown / text) — grounds the PRD</label>
-        <textarea id="spec-text" rows="7"
-          placeholder="# Spec&#10;&#10;Goals, constraints, interfaces, acceptance criteria…">A Private Information Retrieval (PIR) system: a client fetches record i from a
-database WITHOUT any server learning which record was requested. Built and
-verified entirely IN-PROCESS (in-memory servers — no sockets), so it is fully
-deterministic and testable.
-Core — information-theoretic 2-server PIR: the database is replicated on two
-non-colluding servers. To fetch index i from an n-record DB, the client draws a
-uniformly random bit-vector r of length n, forms r' = r XOR e_i (e_i selects i),
-and sends r to server 1 and r' to server 2. Each server XORs the records whose
-bit is set in its vector and returns that block; the client XORs the two answers
-to recover record i. Each server sees only a uniformly random vector, so neither
-learns i.
-Single-server variant: an additive-homomorphic scheme (e.g. Paillier) — the
-client sends an encrypted selection vector, the server computes the homomorphic
-dot product with the records, the client decrypts record i. Use vetted crypto
-primitives; never hand-roll a cipher.
-Tests MUST assert: correctness (recovered == DB[i]) across indices and DB sizes;
-PRIVACY — each server's received query is independent of i (the 2-server share
-is uniform; the single-server ciphertext leaks nothing about i); multi-block
-records. The smoke entry privately fetches a record and exits 0 only if it
-matches the true record.</textarea>
-      </div>
-      <div class="intake-panel hidden" data-mode="zip">
-        <label>Zip of <code>.md</code> / <code>.txt</code> docs — read as the spec</label>
-        <input id="zip-file" type="file" accept=".zip,application/zip" />
-        <p class="cp-note">Docs are read as plain spec input; they inform the PRD, never bypass a gate.</p>
-      </div>
-      <div class="intake-panel hidden" data-mode="chat">
-        <div id="chat-log"></div>
-        <div class="chat-row">
-          <input id="chat-msg" type="text" placeholder="Tell the leads what you're thinking…" />
-          <button id="chat-send" type="button">send</button>
-        </div>
-        <p class="cp-note">The Program Manager, Architect &amp; Tech-Leads help shape a spec (best on a real backend; mock can't converse). “Break ground” builds from the draft below.</p>
-        <details id="chat-spec-wrap"><summary>Draft spec (updates as you talk)</summary><pre id="chat-spec">(nothing yet)</pre></details>
-      </div>
       </section>
-
-      <!-- Folded by default: every field here has a working default, and the summary
-           line reports what those defaults currently are. -->
-      <details class="fset fold" id="fold-run">
-        <summary><span class="fset-h">③ How it runs</span><span class="fset-sum" id="run-sum"></span></summary>
-        <div class="fset-body">
-          <div class="field">
-            <label for="backend-select">Backend</label>
-            <select id="backend-select">
-              <option value="mock">mock — deterministic, offline (no key)</option>
-              <option value="anthropic">anthropic — Claude API (ANTHROPIC_API_KEY)</option>
-              <option value="openai">openai — OpenAI API (OPENAI_API_KEY)</option>
-              <option value="claude-cli" selected>claude-cli — claude -p (Max subscription)</option>
-              <option value="codex">codex — codex CLI (OPENAI_API_KEY)</option>
-              <option value="ollama-gemma">ollama-gemma — local Ollama endpoint</option>
-            </select>
-            <p class="hint" id="model-note"></p>
-          </div>
-          <div class="field">
-            <label for="mode-select">Mode</label>
-            <select id="mode-select">
-              <option value="gated">gated — CTO signs off in the floor screen + evidence pack</option>
-              <option value="autonomous">autonomous — build · admit · deploy</option>
-            </select>
-          </div>
-          <div class="field">
-            <label for="build-select">Build as</label>
-            <select id="build-select">
-              <option value="milestones" selected>milestone ladder — releasable increments (best for big specs)</option>
-              <option value="single">single build — the whole spec at once</option>
-            </select>
-          </div>
-          <div id="milestones-opts">
-            <div class="field">
-              <label for="max-milestones">Max milestones <span class="hint">— ladder length cap; the planner may use fewer</span></label>
-              <input id="max-milestones" type="number" min="1" max="12" value="6" />
-            </div>
-            <div class="field">
-              <label for="milestones-text">Explicit ladder <span class="hint">— optional, one milestone per line; blank = the model plans it</span></label>
-              <textarea id="milestones-text" rows="6"
-                placeholder="record store + XOR combiner over a selection vector&#10;2-server query split: random share r and r XOR e_i">record store: fixed-size records + an XOR combiner over a selection vector
-2-server query split: a uniform random share r and r' = r XOR e_i for index i
-server answer + client reconstruct: each server XORs its selected records; client XORs both → record i
-correctness across indices, variable DB sizes, and multi-block records
-privacy tests: each server's query vector is independent of i (unlinkability)
-single-server additive-homomorphic (Paillier) variant + the demo runner</textarea>
-            </div>
-          </div>
-          <div class="field">
-            <label for="adapter-select">Coding substrate</label>
-            <select id="adapter-select">
-              <option value="stub">stub — deterministic no-op (smoke/demo)</option>
-              <option value="raw-react">raw-react — one completion per task via the chosen backend</option>
-              <option value="claude-code">claude-code — AGENTIC: claude edits/builds/tests in the sandbox (Max plan or API)</option>
-              <option value="proxy-agent">proxy-agent — agentic loop through the proxy (any backend, key stays outside)</option>
-            </select>
-          </div>
-          <div class="field">
-            <label for="profile-select">Stack</label>
-            <select id="profile-select">
-              <option value="auto" selected>auto — the Architect picks from the installed toolchains</option>
-            </select>
-            <p class="hint">The stack pins the verification gates (build/test/smoke commands).
-              Non-Python stacks need their toolchain installed on the server — a missing
-              toolchain fails the gate loudly, it never fakes a pass.</p>
-          </div>
-        </div>
-      </details>
 
       <details class="fset fold" id="fold-scale">
-        <summary><span class="fset-h">④ Scale &amp; limits</span><span class="fset-sum" id="scale-sum"></span></summary>
+        <summary><span class="fset-h">Settings</span><span class="fset-sum" id="scale-sum"></span></summary>
         <div class="fset-body">
-          <!-- short numeric fields pair up two-across once there's room for it -->
-          <div class="field-grid">
-            <div class="field">
-              <label for="extra-workers">Worker pool <span class="hint">— max parallel IC workers (blank = automatic)</span></label>
-              <input id="extra-workers" type="number" min="1" max="32" placeholder="auto" value="4" />
-            </div>
-            <div class="field">
-              <label for="fix-input">Auto-fix attempts <span class="hint">— fix-forward retries until green; the biggest token lever (default 5)</span></label>
-              <input id="fix-input" type="number" min="0" max="20" value="5" />
-            </div>
-            <div class="field">
-              <label for="cap-input">Cost cap (USD) <span class="hint">— max model spend (metered API backends only)</span></label>
-              <input id="cap-input" type="number" min="0" step="0.01" placeholder="no cap" />
-            </div>
-            <div class="field">
-              <label for="autopilot-input">Autopilot <span class="hint">— self-iterations after a green build (0 = off): a Director proposes, a panel votes</span></label>
-              <input id="autopilot-input" type="number" min="0" max="20" value="0" />
+          <div class="field worker-limits">
+            <label>Workers per specialty <span class="hint">— max tickets in flight at once for each specialist</span></label>
+            <div class="worker-grid">
+              <label class="wl" for="workers-frontend">Frontend <input id="workers-frontend" type="number" min="1" max="16" value="4" /></label>
+              <label class="wl" for="workers-backend">Backend <input id="workers-backend" type="number" min="1" max="16" value="4" /></label>
+              <label class="wl" for="workers-data">Data <input id="workers-data" type="number" min="1" max="16" value="4" /></label>
+              <label class="wl" for="workers-test">Test <input id="workers-test" type="number" min="1" max="16" value="4" /></label>
             </div>
           </div>
-          <p class="hint" id="parallel-note">The ceiling on how many implementation workers run
-            at once — the leads share this pool by demand. Effective parallelism is
-            min(tasks created, this cap); each discipline still gets at least one.</p>
           <div class="field">
-            <label for="packs-input">Domain packs (optional, comma-separated)</label>
-            <input id="packs-input" type="text" placeholder="regulated, ml_data, frontend, game, crypto, infra" />
+            <label for="token-cap-input">Token cap <span class="hint">— stop the build after this many tokens (cache reads count 1/10)</span></label>
+            <input id="token-cap-input" type="number" min="0" step="10000" placeholder="no cap" />
           </div>
-          <label class="check"><input type="checkbox" id="supervised" checked /> Supervised (CTO approves each checkpoint)</label>
-          <p class="hint" id="supervised-hint"></p>
-          <p class="hint">A multi-service request (e.g. a site with users + posts) is auto-built as a PLATFORM — split into web / backend / data services (the backend owns the REST API, auth &amp; domain logic), each auto-deepened, then stitched into one monorepo. A single thing builds as one service.</p>
-          <details class="adv-platform">
-            <summary>Advanced — platform build</summary>
-            <div class="field-grid">
-              <div class="field">
-                <label for="max-passes">Max deepening passes per service <span class="hint">— failsafe ceiling; auto stops sooner (default 6)</span></label>
-                <input type="number" id="max-passes" min="1" value="6" />
-              </div>
-              <div class="field">
-                <label for="max-parallel">Services built at once <span class="hint">— concurrency across services (default 4)</span></label>
-                <input type="number" id="max-parallel" min="1" value="4" />
-              </div>
-              <div class="field">
-                <label for="max-slots-svc">Tasks per service <span class="hint">— parallelism within each service (default 6)</span></label>
-                <input type="number" id="max-slots-svc" min="1" value="6" />
-              </div>
-            </div>
-            <label class="check"><input type="checkbox" id="critic-on" checked /> Completeness critic <span class="hint">— judges "done" each pass; off = stop on plateau only</span></label>
-          </details>
         </div>
       </details>
 
-      <!-- Sticky: the form outruns a phone screen, and BREAK GROUND must never be the
-           thing you have to scroll to find. -->
       <div class="dialog-actions build-actions">
         <button id="start-btn" class="primary">BREAK GROUND</button>
         <button id="cancel-btn">cancel</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Checkpoint dialog (NES-style) -->
-  <div id="cp-modal" class="overlay hidden">
-    <div class="dialog cp">
-      <h2 id="cp-title">CHECKPOINT</h2>
-      <p id="cp-summary"></p>
-      <!-- Evidence for the decision, most decisive first: what the gates say, what
-           the agents flagged, what actually landed, what the advisors think. -->
-      <div id="cp-meta" class="cp-meta"></div>
-      <div id="cp-gates" class="cp-gates hidden"></div>
-      <div id="cp-flags" class="cp-flags hidden"></div>
-      <details id="cp-arts-wrap" class="cp-details hidden">
-        <summary>What landed this stage <span id="cp-arts-count" class="hint"></span></summary>
-        <div id="cp-arts" class="cp-arts"></div>
-      </details>
-      <div id="cp-advisors" class="cp-advisors hidden"></div>
-      <p id="cp-adv-note" class="cp-note hidden"></p>
-      <p class="cp-note">An approve only lets the build reach the gates — it can never ship a failing build. Request changes to send the work back for another pass.</p>
-      <div id="cp-edit-wrap" class="hidden">
-        <label>Next-iteration request <span class="hint">— edit before approving; REQUEST CHANGES builds YOUR text instead of the panel's</span></label>
-        <textarea id="cp-edit" rows="3"></textarea>
-      </div>
-      <div id="cp-prov" class="cp-prov"></div>
-      <!-- Reading the diff is evidence-gathering, so it sits with the evidence —
-           above the decision, not competing with it. -->
-      <div class="dialog-actions cp-review">
-        <button id="cp-code">⌥ REVIEW THE CODE</button>
-      </div>
-      <!-- Sticky: the evidence above can outgrow a phone screen, and the decision
-           must never be the thing you have to scroll to find. -->
-      <div class="dialog-actions cp-actions">
-        <button id="cp-approve" class="primary">APPROVE<span class="btn-sub" id="cp-approve-sub"></span></button>
-        <button id="cp-changes" class="warn">REQUEST CHANGES<span class="btn-sub" id="cp-changes-sub"></span></button>
-        <button id="cp-reject" class="danger">REJECT<span class="btn-sub" id="cp-reject-sub"></span></button>
+        <span id="req-err" class="ctl-err" role="alert"></span>
       </div>
     </div>
   </div>
 
   <!-- Floor 0 — the repo hub: a self-hosted "GitHub" home listing every build's repo -->
-  <div id="repos-modal" class="overlay hidden">
+  <div id="repos-modal" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="repos-title">
     <div class="dialog repos">
       <div class="repo-head">
-        <h2>⌥ FLOOR 0 · REPOSITORIES</h2>
-        <span class="repo-src ok" id="repos-count"></span>
+        <h2 id="repos-title">⌥ FLOOR 0 · REPOSITORIES</h2>
+        <span class="repo-src ok" id="repos-count" role="status"></span>
       </div>
-      <p class="cp-note">Every build that produced code — read straight from the
-        content-addressed store. Pick a repository to browse its files, checks and
-        pull requests.</p>
-      <ul id="repos-list" class="repos-list"></ul>
+      <p class="cp-note">Every build, with the code it wrote — read straight from the
+        content-addressed store. Pick a repository to browse its files.</p>
+      <form class="repo-find" id="repo-find" role="search" onsubmit="return false">
+        <label class="sr-only" for="repo-q">Search builds</label>
+        <input id="repo-q" type="search" placeholder="Search requests…" autocomplete="off" maxlength="200" />
+        <label class="sr-only" for="repo-status">Status</label>
+        <select id="repo-status">
+          <option value="all">All</option>
+          <option value="shipped">✔ Shipped</option>
+          <option value="halted">✗ Halted</option>
+          <option value="stopped">❚❚ Stopped</option>
+          <option value="running">● Running</option>
+        </select>
+        <label class="sr-only" for="repo-sort">Sort</label>
+        <select id="repo-sort">
+          <option value="newest">Newest first</option>
+          <option value="oldest">Oldest first</option>
+        </select>
+      </form>
+      <ul id="repos-list" class="repos-list" aria-labelledby="repos-title"></ul>
       <div class="dialog-actions">
         <button id="repos-new" class="primary">＋ NEW PROJECT</button>
         <button id="repos-clear" class="danger" title="Wipe every floor and repository">⌦ Clear all</button>
-        <button id="repos-close">close</button>
+        <button id="repos-close" data-dismiss>close</button>
       </div>
     </div>
   </div>
 
-  <!-- Repo browser: a self-hosted "GitHub" over the build's store (read-only) -->
-  <div id="files-modal" class="overlay hidden">
+  <!-- File viewer: browse a build's generated code (read-only, from the store) -->
+  <div id="files-modal" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="files-title">
     <div class="dialog files">
       <div class="repo-head">
-        <h2>⌥ REPO · <span id="files-floor"></span></h2>
-        <span class="repo-sha" id="repo-sha" title="integrated tree sha"></span>
-        <span class="repo-src" id="repo-src"></span>
+        <h2 id="files-title">⌥ REPO · <span id="files-floor"></span></h2>
       </div>
-      <p class="cp-note">A self-hosted view of this build's repository — read straight
-        from the content-addressed store (the database), not a working directory.</p>
-      <div id="files-releases" class="files-releases"></div>
-      <div class="repo-tabs">
-        <button class="repo-tab sel" data-tab="code">⊞ Code</button>
-        <button class="repo-tab" data-tab="checks">✓ Checks <span id="checks-count" class="tab-count"></span></button>
-        <button class="repo-tab" data-tab="pulls">⇄ Pull requests <span id="pulls-count" class="tab-count"></span></button>
-        <button class="repo-tab" data-tab="signoffs">✍ Sign-offs <span id="signoffs-count" class="tab-count"></span></button>
+      <div class="files-find">
+        <label class="sr-only" for="files-q">Filter files by name</label>
+        <input id="files-q" type="search" placeholder="Filter files by name…" autocomplete="off" />
       </div>
-      <div class="repo-pane" data-pane="code">
-        <nav id="files-crumb" class="files-crumb"></nav>
-        <div class="files-body">
-          <ul id="files-list"></ul>
-          <pre id="files-view">Select a file…</pre>
-        </div>
-      </div>
-      <div class="repo-pane hidden" data-pane="checks">
-        <ul id="checks-list" class="checks-list"></ul>
-      </div>
-      <div class="repo-pane hidden" data-pane="pulls">
-        <div id="pulls-list" class="pulls-list"></div>
-      </div>
-      <div class="repo-pane hidden" data-pane="signoffs">
-        <p class="cp-note">Recorded CTO approvals (Design / Release), signed off right
-          here in the floor screen — never in Git. Exported with the build as
-          <code>.foundry/evidence.json</code> + <code>EVIDENCE.md</code>.</p>
-        <ul id="signoffs-list" class="checks-list"></ul>
+      <nav id="files-crumb" class="files-crumb" aria-label="Folder"></nav>
+      <div class="files-body">
+        <ul id="files-list" aria-label="Files"></ul>
+        <pre id="files-view" tabindex="0" aria-label="File contents">Select a file…</pre>
       </div>
       <div class="dialog-actions">
-        <a id="files-zip" class="btn-link" href="#" download>⭳ Export .zip</a>
-        <a id="files-gitzip" class="btn-link" href="#" title="One git repo of the whole floor: each release a tagged commit (r01..rNN)">⎇ Git repo</a>
-        <button id="files-iterate" class="primary">⎘ ITERATE</button>
-        <button id="files-close">close</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Interview a lead: their journal (advisory) + ask a question ([11]) -->
-  <div id="iv-modal" class="overlay hidden">
-    <div class="dialog">
-      <h2>INTERVIEW · <span id="iv-role"></span></h2>
-      <p class="cp-note">The agent's own work journal — advisory only, writes nothing to the build.</p>
-      <div id="iv-journal" class="iv-journal"></div>
-      <label>Ask this lead</label>
-      <input id="iv-question" type="text" placeholder="What worried you? What did you assume?" />
-      <div id="iv-answer" class="iv-answer hidden"></div>
-      <div class="dialog-actions">
-        <button id="iv-ask" class="primary">ask</button>
-        <button id="iv-close">close</button>
+        <a id="files-zip" class="btn-link" href="#" download>⭳ Download .zip</a>
+        <button id="files-close" data-dismiss>close</button>
       </div>
     </div>
   </div>
 
   <script src="/static/vendor/phaser.min.js"></script>
+  <script src="/static/a11y.js"></script>
+  <script src="/static/notify.js"></script>
+  <script src="/static/insight.js"></script>
   <script src="/static/game.js"></script>
+  <script src="/static/settings.js"></script>
 </body>
 </html>

@@ -14,21 +14,15 @@ The two materialization seams (GW1a/D-R1-02) are in-memory doubles:
   mints a content-addressed HANDLE; the body is never persisted in a test, and
   the handle uri encodes the body's epoch-dependent ``content_identity`` so it
   can't be pre-keyed). The double therefore synthesizes a faithful typed body
-  from the handle's ``kind`` + ``seq`` — sufficient for the Senior's
-  decomposition (SystemDesign / OwnershipMap) and the gates' inputs
+  from the handle's ``kind`` + ``seq`` — sufficient for the gates' inputs
   (AcceptanceCriterion / FeatureDiff).
 * ``resolve_blob`` — returns the raw unified-diff body (mirrors
   ``sandbox.get_blob``); the test controls whether that diff includes a passing
   test (Build+Test PASS) or no test (a vacuous Test FAIL).
 
-Asserts:
-
-* the FULL phase order executes (triage -> product -> architecture -> spec gate
-  -> implementation -> quality -> build+test gate);
-* advancement happens ONLY on an attested gate PASS at each boundary;
-* a forced gate FAIL routes back to the responsible layer and the run TERMINATES
-  within ``max_fix_attempts`` (no infinite loop);
-* triage sets ``route`` + seeds a per-route ``budget``.
+Asserts triage classification and that a Spec FAIL re-enters the planner with
+the gate's findings. The end-to-end pass / bounded-fix runs live in
+tests/test_factory_graph.py (the same spine, compiled with a checkpointer).
 """
 
 from __future__ import annotations
@@ -38,13 +32,12 @@ from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.graph import StateGraph
 
 from foundry.agents import AgentRuntime
+from foundry.durability.artifact_store import ArtifactStore
 from foundry.execution.adapters.stub import StubAdapter
 from foundry.gates import DevGateWriteVerifier, TwoZoneGateRunner, ZoneBSigner
 from foundry.graph.supervisor import (
-    DEFAULT_ROUTE_CAPS_MICROUSD,
     build_supervisor_graph,
     classify_request,
 )
@@ -53,7 +46,7 @@ from foundry.proxy.test_doubles import MockTransport
 from foundry.schemas.architecture import OwnershipMap, SystemDesign
 from foundry.schemas.base import Artifact, FrozenModel
 from foundry.schemas.gates import GateStatus, JudgmentProvenance
-from foundry.schemas.implementation import FeatureDiff
+from foundry.schemas.implementation import FeatureDiff, Specialty, Ticket
 from foundry.schemas.product import (
     AcceptanceCriterion,
     CriteriaCritique,
@@ -62,6 +55,7 @@ from foundry.schemas.product import (
 from foundry.state.factory_state import FactoryState
 from foundry.state.global_records import GlobalRecords
 from foundry.state.reducers import reset_gate_write_verifier, set_gate_write_verifier
+from tests.planner_payload import PLANNER_SOP_KEY, plan_payload
 
 KEY = b"dev-zone-b-supervisor-key-0123456789"
 KEY_ID = "dev-key-supervisor"
@@ -86,8 +80,8 @@ INTENT_PAYLOAD: dict[str, Any] = {
     "nice_to_haves": [],
 }
 
-# No required_capabilities -> architecture skips the conditional Layer-2 nodes
-# (one architect call), keeping the model-call script simple. One criterion is
+# No required_capabilities -> the planner skips the conditional Layer-2 nodes
+# (one planner call), keeping the model-call script simple. One criterion is
 # security_abuse=True so the Spec gate's mandatory security coverage is met.
 PRD_PAYLOAD: dict[str, Any] = {
     "title": "Todo service",
@@ -153,15 +147,16 @@ SDET_PAYLOAD: dict[str, Any] = {
 _SCRIPTS: dict[str, str] = {
     # Every node that can make a model call needs a script: an unscripted node
     # serves "" and dies as ProxyUnavailable after the retries.
-    "You are the Scope Judge": json.dumps(
-        {"tier": "standard", "rationale": "a full-scope build", "signals": []}
+    PLANNER_SOP_KEY: json.dumps(
+        plan_payload(
+            intent=INTENT_PAYLOAD,
+            prd=PRD_PAYLOAD,
+            critique=CRITIQUE_PAYLOAD,
+            sprint=SPRINT_PAYLOAD,
+            design=DESIGN_PAYLOAD,
+            decomposition=DECOMPOSITION_PAYLOAD,
+        )
     ),
-    "Stakeholder / Client Proxy": json.dumps(INTENT_PAYLOAD),
-    "Product Manager": json.dumps(PRD_PAYLOAD),
-    "Criteria-Completeness Critic": json.dumps(CRITIQUE_PAYLOAD),
-    "Engineering / Program Manager": json.dumps(SPRINT_PAYLOAD),
-    "Principal Architect": json.dumps(DESIGN_PAYLOAD),
-    "Senior Engineer": json.dumps(DECOMPOSITION_PAYLOAD),
     "QA Engineer": json.dumps(QA_PAYLOAD),
     "SDET": json.dumps(SDET_PAYLOAD),
 }
@@ -175,18 +170,27 @@ _PASSING_DIFF = (
     "--- /dev/null\n+++ b/test_app.py\n@@ -0,0 +1,2 @@\n"
     "+def test_ok():\n    assert 1 + 1 == 2\n"
 )
-# A compiling module + a test whose COLLECTION fails (imports a missing module):
-# compileall PASSes (syntactically valid), but pytest exits 2 -> a signed Test
-# ERROR (infra, not a verdict, DS7). An ERROR routes to bounded retry (`fix`) and
-# NEVER latches -> it exercises the route-back + convergence-bound path (a hard
-# FAIL on an integrated digest would instead latch + halt at once, gov §5).
-_ERROR_DIFF = (
-    "--- /dev/null\n+++ b/app.py\n@@ -0,0 +1,1 @@\n+VALUE = 42\n"
-    "--- /dev/null\n+++ b/test_app.py\n@@ -0,0 +1,3 @@\n"
-    "+import this_module_does_not_exist_xyz\n\n\ndef test_x():\n    assert True\n"
+# The passing tree plus specific pytest-bdd steps for the scenarios the planner payload
+# emits (legacy text criteria render as one ``Then <text>`` step each). Catch-all
+# steps would not do: the Test gate rejects scenarios bound only by them.
+_BDD_PASSING_DIFF = _PASSING_DIFF + (
+    "--- /dev/null\n+++ b/test_steps.py\n@@ -0,0 +1,15 @@\n"
+    "+from pytest_bdd import scenarios, then\n"
+    "+\n"
+    "+import app\n"
+    "+\n"
+    "+scenarios('features')\n"
+    "+\n"
+    "+\n"
+    "+@then('Given a user, When they add a todo, Then it appears.')\n"
+    "+def _todo_appears():\n"
+    "+    assert app.VALUE == 42\n"
+    "+\n"
+    "+\n"
+    "+@then('Given an unauthenticated request, When it hits /todos, Then 401.')\n"
+    "+def _unauthenticated_rejected():\n"
+    "+    assert app.VALUE != 401\n"
 )
-
-
 def _synthetic_resolve(handle: Artifact) -> FrozenModel:
     """KIND-dispatching typed resolver (an in-memory infra double).
 
@@ -226,6 +230,11 @@ def _synthetic_resolve(handle: Artifact) -> FrozenModel:
             judgment_provenance=JudgmentProvenance.SELF,
             seq=handle.seq,
         )
+    if handle.kind == "ticket":
+        tid = f"T-{handle.seq.local:03d}"
+        # No `files`: unrestricted write scope, so the canned diff lands whole.
+        return Ticket(id=tid, title=f"Ticket {tid}", specialty=Specialty.BACKEND,
+                      seq=handle.seq)
     if handle.kind == "feature_diff":
         return FeatureDiff(
             diff_uri=_DIFF_BODY_URI,
@@ -272,25 +281,10 @@ def _config(run_id: str, step: int = 1) -> RunnableConfig:
     }
 
 
-def _build_app(
-    records: GlobalRecords, source_dir: str, *, diff_body: str, max_fix_attempts: int = 3
-) -> Any:
-    return build_supervisor_graph(
-        _runtime(),
-        runner=_runner(records),
-        resolve=_synthetic_resolve,
-        resolve_blob=_resolve_blob_factory(diff_body),
-        source_dir=source_dir,
-        max_fix_attempts=max_fix_attempts,
-    ).compile(checkpointer=MemorySaver())
-
-
 def _gates_by_name(state: FactoryState) -> dict[str, GateStatus]:
     out: dict[str, GateStatus] = {}
     for g in state.get("gates") or ():
-        prev = out.get(g.name)
-        # (the channel may carry multiple; here one per name is fine)
-        out[g.name] = g.status if prev is None else prev
+        out.setdefault(g.name, g.status)
     return out
 
 
@@ -304,96 +298,99 @@ def test_classify_request_defaults_to_greenfield() -> None:
     assert classify_request("add pagination to the list endpoint") == "evolution"
 
 
-def test_builder_returns_uncompiled_state_graph(tmp_path: Any) -> None:
-    records = GlobalRecords()
-    g = build_supervisor_graph(
-        _runtime(),
-        runner=_runner(records),
-        resolve=_synthetic_resolve,
-        resolve_blob=_resolve_blob_factory(_PASSING_DIFF),
-        source_dir=str(tmp_path),
+# ---- spec_fix re-enters the planner with the Spec gate's findings -----------
+
+
+def _respec_app(tmp_path: Any, records: GlobalRecords, **kwargs: Any) -> tuple[Any, MockTransport]:
+    """A supervisor whose first plan FAILs the Spec gate (no security/abuse
+    criterion) and whose REVISION PASS plan passes it."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "README.md").write_text("seed\n")
+
+    no_abuse = {**PRD_PAYLOAD, "acceptance_criteria": [PRD_PAYLOAD["acceptance_criteria"][0]]}
+
+    def _plan(prd: dict[str, Any]) -> str:
+        return json.dumps(
+            plan_payload(
+                intent=INTENT_PAYLOAD,
+                prd=prd,
+                critique=CRITIQUE_PAYLOAD,
+                sprint=SPRINT_PAYLOAD,
+                design=DESIGN_PAYLOAD,
+                decomposition=DECOMPOSITION_PAYLOAD,
+            )
+        )
+
+    # First match wins: the revision prompt gets the fixed plan, the first pass
+    # a plan with no security/abuse criterion (a Spec FAIL).
+    scripts = {"REVISION PASS": _plan(PRD_PAYLOAD), **_SCRIPTS, PLANNER_SOP_KEY: _plan(no_abuse)}
+    tx = MockTransport.scripted(scripts, default_verdict="approve")
+    cas = ArtifactStore()
+    rt = AgentRuntime(
+        proxy=ModelProviderProxy(tx, signer=ZoneBSigner(KEY, KEY_ID)),
+        adapter=StubAdapter(),
+        cas=cas,
     )
-    assert isinstance(g, StateGraph)
-    assert not hasattr(g, "invoke")  # compilation is factory_graph's job (T-M1-14)
+
+    def _resolve(handle: Artifact) -> FrozenModel:
+        # Real criteria from the CAS, so the gate sees what the planner wrote.
+        if handle.kind in ("acceptance_criterion", "criteria_findings"):
+            body: FrozenModel = cas.resolve(handle)
+            return body
+        return _synthetic_resolve(handle)
+
+    app = build_supervisor_graph(
+        rt,
+        runner=_runner(records),
+        resolve=_resolve,
+        resolve_blob=_resolve_blob_factory(_BDD_PASSING_DIFF),
+        source_dir=str(src),
+        **kwargs,
+    ).compile(checkpointer=MemorySaver())
+    return app, tx
 
 
-# ---- end-to-end: full phase order + PASS-gated advancement ------------------
-
-
-def test_end_to_end_greenfield_passes_all_boundaries(tmp_path: Any) -> None:
-    """A one-line greenfield request runs the FULL phase order and advances at
-    each boundary ONLY on an attested gate PASS (spec PASS, build+test PASS)."""
-    src = tmp_path / "src"
-    src.mkdir()
-    (src / "README.md").write_text("seed\n")
+def test_spec_fail_replans_with_the_gate_findings_then_advances(tmp_path: Any) -> None:
+    """A Spec FAIL routes spec_fix -> planner; the re-entry prompt carries the
+    signed gate's findings, and the revised plan passes the gate."""
     records = GlobalRecords()
+    app, tx = _respec_app(tmp_path, records)
     token = set_gate_write_verifier(DevGateWriteVerifier(KEY, KEY_ID, records))
     try:
-        app = _build_app(records, str(src), diff_body=_PASSING_DIFF)
-        final: FactoryState = app.invoke({"request": "build a todo app"}, _config("run-pass"))
+        final: FactoryState = app.invoke({"request": "build a todo app"}, _config("run-respec"))
     finally:
         reset_gate_write_verifier(token)
 
-    # Triage seeded route + budget.
-    assert final["route"] == "greenfield"
-    assert final["budget"].cap_microusd == DEFAULT_ROUTE_CAPS_MICROUSD["greenfield"]
+    planner_prompts = [json.dumps(r) for r in tx.requests if PLANNER_SOP_KEY in json.dumps(r)]
+    assert len(planner_prompts) == 2
+    assert "REVISION PASS" not in planner_prompts[0]
+    assert "REVISION PASS" in planner_prompts[1]
+    assert "no criterion flags security_abuse=true" in planner_prompts[1]
 
-    # Every layer ran (its artifacts landed) -> the full phase order executed.
-    kinds = {a.kind for a in final.get("artifacts") or ()}
-    assert {"prd", "acceptance_criterion"} <= kinds  # product
-    assert "system_design" in kinds  # architecture
-    assert "feature_diff" in kinds  # implementation
-    assert {"test_plan", "e2e_report"} <= kinds  # quality
-
-    # The gate verdicts are runner-ATTESTED and all PASS -> the run advanced
-    # through both boundaries to END (advancement only on attested PASS).
-    statuses = _gates_by_name(final)
-    assert statuses.get("spec") is GateStatus.PASS
-    assert statuses.get("build") is GateStatus.PASS
-    assert statuses.get("test") is GateStatus.PASS
-    # The reviewer's judgment verdict also rode `gates` (admitted by merge_gates).
-    assert statuses.get("review") is GateStatus.PASS
-    # No fix iterations were needed (the convergence counter stayed at 0).
-    assert final["budget"].fix_attempts_since_all_green == 0
+    spec = [g for g in final["gates"] if g.name == "spec"]
+    assert {g.status for g in spec} == {GateStatus.FAIL, GateStatus.PASS}
+    assert max(spec, key=lambda g: g.seq).status is GateStatus.PASS
+    assert _gates_by_name(final).get("test") is GateStatus.PASS
 
 
-# ---- end-to-end: a forced gate FAIL routes back + terminates bounded --------
-
-
-def test_forced_test_error_routes_to_fix_and_terminates_bounded(tmp_path: Any) -> None:
-    """A Test ERROR at the build+test boundary routes back to the implementation
-    layer for re-verification; the convergence counter bumps each loop, and the
-    run HALTS within ``max_fix_attempts`` — no infinite loop.
-
-    An ERROR (not a hard FAIL) is the case that exercises the route-back path:
-    it never latches (infra, DS7), so it must be the bounded ``fix`` counter that
-    converges the loop. (A hard FAIL on an integrated digest latches + halts at
-    once, gov §5 — terminal, not retried.)"""
-    src = tmp_path / "src"
-    src.mkdir()
-    (src / "README.md").write_text("seed\n")
+def test_a_spec_advance_resets_the_fix_budget_for_the_build_boundary(tmp_path: Any) -> None:
+    """The re-plan a Spec FAIL cost must not eat the build/test fix budget: with
+    max_fix_attempts=2 a carried-over attempt left the first wave failure no fixer
+    pass at all (a straight halt)."""
     records = GlobalRecords()
+    app, _ = _respec_app(tmp_path, records, max_fix_attempts=2)
     token = set_gate_write_verifier(DevGateWriteVerifier(KEY, KEY_ID, records))
-    max_fix = 2
+    budgets: list[tuple[GateStatus, int]] = []
     try:
-        app = _build_app(records, str(src), diff_body=_ERROR_DIFF, max_fix_attempts=max_fix)
-        # If routing did not bound the loop this would recurse until LangGraph's
-        # recursion_limit; it instead terminates because the fix counter is
-        # bumped each loop and route_after_gates returns `halt` once it is spent.
-        final: FactoryState = app.invoke({"request": "build a todo app"}, _config("run-error"))
+        for step in app.stream({"request": "build a todo app"}, _config("run-respec-budget"),
+                               stream_mode="updates"):
+            out = step.get("spec_gate")
+            if out:
+                (verdict,) = out["gates"]
+                ledger = out.get("budget")
+                budgets.append((verdict.status, ledger.fix_attempts_since_all_green
+                                if ledger is not None else -1))
     finally:
         reset_gate_write_verifier(token)
-
-    # Spec advanced (PASS); the build compiles; the Test gate is a signed ERROR
-    # (collection import failure) — never an advance.
-    statuses = _gates_by_name(final)
-    assert statuses.get("spec") is GateStatus.PASS
-    assert statuses.get("build") is GateStatus.PASS  # the module still compiles
-    assert statuses.get("test") is GateStatus.ERROR
-
-    # The run terminated bounded: the convergence counter reached the bound and
-    # routing halted (escalate) rather than spinning forever. An ERROR never
-    # latches (infra, not a verdict).
-    assert final["budget"].fix_attempts_since_all_green >= max_fix
-    test_verdict = next(g for g in final["gates"] if g.name == "test")
-    assert not records.stable_fail_latched(test_verdict.run_against, "test")
+    assert budgets == [(GateStatus.FAIL, 1), (GateStatus.PASS, 0)]

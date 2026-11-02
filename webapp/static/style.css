@@ -51,40 +51,21 @@ body{
   overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
 .hud-mid::-webkit-scrollbar{display:none}
 .hud-right{display:flex;align-items:center;gap:12px;flex:0 0 auto}
-.logo{font-weight:bold;color:var(--gold);font-size:16px;white-space:nowrap;text-shadow:0 0 8px rgba(255,207,82,.4), 2px 2px 0 #0a0f1c}
+.logo{margin:0;font-weight:bold;color:var(--gold);font-size:16px;white-space:nowrap;text-shadow:0 0 8px rgba(255,207,82,.4), 2px 2px 0 #0a0f1c}
 .elevator{color:var(--blue);border:2px solid var(--blue);border-radius:4px;padding:2px 8px;font-weight:bold;white-space:nowrap}
 /* The cap is what actually rations the bar: the line pins to it and the leftover
    deficit falls on the chips, so 46vw here starved them once .proj became a direct
    child of the bar rather than a nested one. */
 .proj{color:var(--ink);flex:0 1 auto;min-width:0;max-width:40vw;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-/* The milestone loop appends " — MILESTONE i/n: <title>" to the request, so the raw
-   string is a prompt, not a label. updateHud() splits it into these two spans. */
-.proj-mile{color:var(--dim)}
-.proj-mile::before{content:" — "}
 .mode{color:var(--dim);white-space:nowrap}
-/* Stage / per-service chips: ONE line that scrolls sideways when a long milestone
-   ladder outgrows the bar — never wrapping (a wrapped "0/6 ✓" tally reads broken). */
+/* Stage chips: ONE line that scrolls sideways when they outgrow the bar — never wrapping. */
 .gates-mini{display:flex;gap:5px;flex-wrap:nowrap}
-/* The checkpoint dialog reuses these pills (same verdicts, same colours) — it just
-   wraps them instead of scrolling, since the dialog has the width to show them all. */
-.gates-mini .g,.cp-gate-strip .g{padding:1px 6px;border-radius:3px;border:2px solid var(--line);
+.gates-mini .g{padding:1px 6px;border-radius:3px;border:2px solid var(--line);
   font-size:11px;white-space:nowrap}
-.gates-mini .g.pass,.cp-gate-strip .g.pass{border-color:var(--green);color:var(--green)}
-.gates-mini .g.fail,.cp-gate-strip .g.fail{border-color:var(--red);color:var(--red)}
-.gates-mini .g.error,.cp-gate-strip .g.error{border-color:#d9a23a;color:#ffcf7a}
-/* platform per-service chips, coloured by lifecycle state */
-.gates-mini .g.plat{text-transform:none}
-.gates-mini .g.plat.queued{border-color:var(--line);color:var(--dim)}
-.gates-mini .g.plat.building,.gates-mini .g.plat.rebuilding{border-color:#d9a23a;color:#ffcf7a}
-.gates-mini .g.plat.built{border-color:#5db8ff;color:#9bd0ff}
-.gates-mini .g.plat.approved,.gates-mini .g.plat.done{border-color:var(--green);color:#9dffbf}
-.gates-mini .g.plat.held,.gates-mini .g.plat.failed{border-color:var(--red);color:#ffb3ba}
-.gates-mini .g.plat-count{border-color:var(--gold);color:var(--gold);font-weight:bold}
-/* advanced platform options (collapsible) in the New Project dialog */
-.adv-platform{margin-top:10px;border:2px solid var(--line);border-radius:6px;padding:6px 10px}
-.adv-platform summary{cursor:pointer;color:var(--dim);font-size:12px;font-weight:bold;text-transform:uppercase}
-.adv-platform[open] summary{color:var(--ink);margin-bottom:6px}
+.gates-mini .g.pass{border-color:var(--green);color:var(--green)}
+.gates-mini .g.fail{border-color:var(--red);color:var(--red)}
+.gates-mini .g.error{border-color:#d9a23a;color:#ffcf7a}
 button{
   font-family:inherit;text-transform:uppercase;cursor:pointer;white-space:nowrap;
   background:#24304f;color:var(--ink);border:3px solid var(--line);
@@ -94,8 +75,37 @@ button{
 button:active{transform:translateY(2px);box-shadow:0 1px 0 #0c1322}
 button.primary{background:#1f6b3a;border-color:var(--green);color:#dffce8}
 button.danger{background:#6b1f28;border-color:var(--red);color:#ffe0e3}
-button.warn{background:#5a4a18;border-color:var(--gold);color:#fff6da}
 #new-btn{background:#5a4a18;border-color:var(--gold);color:#fff6da}
+
+/* ---- build control (floor HUD) ---- */
+#hud{position:relative}
+.floor-ctl{display:flex;align-items:center;gap:8px;flex:0 0 auto}
+.floor-ctl:empty{display:none}
+.floor-ctl button{padding:5px 9px;font-size:11px}
+.ctl-state{padding:2px 7px;border-radius:3px;border:2px solid var(--gold);color:var(--gold);
+  font-size:11px;font-weight:bold;white-space:nowrap}
+.ctl-state.busy{border-color:var(--blue);color:var(--blue)}
+.ctl-state.stopped{border-color:var(--red);color:var(--red)}
+/* forms + messages hang under the bar's right edge, over the stage */
+.ctl-panel{position:absolute;top:calc(100% + 6px);right:12px;z-index:60;
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;max-width:min(560px,calc(100vw - 24px));
+  background:var(--panel);border:3px solid var(--gold);border-radius:8px;padding:9px 12px;
+  box-shadow:0 4px 0 #0c1322;font-size:12px;text-transform:none}
+.ctl-panel.hidden{display:none}
+.ctl-panel.ok{border-color:var(--green);color:#dffce8}
+.ctl-panel.bad{border-color:var(--red);color:#ffe0e3}
+.ctl-panel label{display:flex;align-items:center;gap:6px;color:var(--dim);text-transform:uppercase;font-size:11px}
+.ctl-panel input{width:130px;font-family:inherit;font-size:12px;background:#0e1424;color:var(--ink);
+  border:2px solid var(--line);border-radius:4px;padding:5px 7px}
+.ctl-panel input:focus{outline:none;border-color:var(--gold)}
+.ctl-panel button{padding:5px 10px;font-size:11px}
+.ctl-panel .ctl-err{flex-basis:100%;color:var(--red)}
+.ctl-panel .ctl-x{padding:1px 7px;min-height:0;box-shadow:none}
+.ctl-form{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.el-btn.paused{color:var(--gold);border-color:#5a4a20}
+/* a mid-width bar keeps one row: the control buttons drop to their icons (each
+   keeps its title + aria-label); portrait, with a row of its own, shows the words */
+@media (max-width:1180px){ .floor-ctl .ctl-lbl{display:none} }
 
 /* ---- Stage ---- */
 /* Zelda-style screen wipe on floor change (chunky stepped sweep). It's a child of
@@ -130,17 +140,8 @@ button.warn{background:#5a4a18;border-color:var(--gold);color:#fff6da}
 .el-btn.done{color:var(--green);border-color:#2c5a3a}
 .el-btn.failed{color:var(--red);border-color:#5a2c30}
 .el-btn .fl-no{font-size:15px;display:block}
-.el-btn .badge{
-  position:absolute;top:-6px;right:-6px;background:var(--gold);color:#000;
-  border-radius:50%;width:16px;height:16px;font-size:11px;line-height:16px;
-  animation:pulse 1s infinite;
-}
 @keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.25)}}
-/* release counter on a project's elevator button (bottom-left, distinct from the ! badge) */
-.el-btn .rel-badge{
-  position:absolute;bottom:-5px;left:-5px;background:var(--blue);color:#06121f;
-  border-radius:6px;padding:0 4px;font-size:9px;line-height:13px;font-weight:bold;
-}
+/* release counter on a project's elevator button (bottom-left) */
 /* Floor 0 — the repo hub: visually set apart from the project floors */
 .el-btn.hub{color:#cfe0ff;border-color:#2f3e63;background:#141d33}
 .el-btn.hub:hover{color:#fff;border-color:var(--blue)}
@@ -183,7 +184,7 @@ button.warn{background:#5a4a18;border-color:var(--gold);color:#fff6da}
 .log-tab:active{transform:none;box-shadow:none}
 .log-tab:hover{color:var(--ink)}
 .log-tab.sel{color:var(--gold);border-bottom-color:var(--gold)}
-#log,#progress{list-style:none;margin:0;padding:8px 10px;overflow-y:auto;flex:1 1 auto;
+#log,#progress,#tickets{list-style:none;margin:0;padding:8px 10px;overflow-y:auto;flex:1 1 auto;
   font-size:12px;line-height:1.5}
 #log li,#progress li{padding:3px 0;border-bottom:1px dashed #1f2942;color:var(--dim);
   animation:pop .25s;overflow-wrap:anywhere;word-break:break-word}
@@ -191,6 +192,22 @@ button.warn{background:#5a4a18;border-color:var(--gold);color:#fff6da}
 #log li.good,#progress li.good{color:var(--green)}
 #log li.bad,#progress li.bad{color:var(--red)}
 #log li.gold,#progress li.gold{color:var(--gold)}
+/* TICKETS tab: one row per planned ticket, status from the live task events */
+#tickets li{padding:5px 0;border-bottom:1px dashed #1f2942;color:var(--dim);
+  overflow-wrap:anywhere;display:grid;grid-template-columns:auto 1fr auto;gap:2px 8px;align-items:baseline}
+#tickets .tk-id{color:var(--ink);font-weight:bold}
+#tickets .tk-title{color:var(--ink)}
+#tickets .tk-meta{grid-column:2/4;font-size:10px;color:var(--dim)}
+#tickets .tk-st{font-size:10px;letter-spacing:1px;text-transform:uppercase;border:1px solid var(--line);
+  border-radius:3px;padding:0 5px}
+#tickets .st-in-progress .tk-st{color:var(--gold);border-color:var(--gold)}
+#tickets .st-done .tk-st{color:var(--green);border-color:var(--green)}
+#tickets .st-failed .tk-st{color:var(--red);border-color:var(--red)}
+#tickets .tk-empty{display:block;color:var(--dim)}
+/* per-specialty worker limits in the build dialog: four short inputs in a row */
+.worker-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.worker-grid .wl{display:flex;flex-direction:column;gap:4px;margin:0}
+@media (max-width:520px){ .worker-grid{grid-template-columns:repeat(2,1fr)} }
 /* collapsible entries render as BLOCKS (cards) that expand DOWN: a clickable header
    (the short "what was completed" statement, always visible) over an indented body. */
 #log li:has(details),#progress li:has(details){border-bottom:none;padding:0}
@@ -219,21 +236,6 @@ ul.row-detail li{padding:2px 0 2px 10px !important;border:none !important;color:
 #log li.agent-box.done{border-color:#2c5142}
 #log li.agent-box.held{border-color:#5a2c33}
 li.agent-box.held .agent-head{color:var(--red);background:rgba(255,93,108,.08)}
-/* event box with a caret: the summary bar is the always-visible context; a chevron on
-   the right opens the specifics (assumptions / concerns / artifacts / files). */
-#log li.ev-box{padding:0}
-#log li.ev-box details.ev-det{margin:0;border:none;border-radius:0;background:transparent}
-#log li.ev-box details.ev-det>summary.ev-head{cursor:pointer;list-style:none;position:relative;
-  padding:6px 26px 6px 9px;font-weight:bold;color:var(--ink);background:rgba(125,150,220,.10);
-  border-bottom:1px solid transparent;overflow-wrap:anywhere;word-break:break-word}
-#log li.ev-box details.ev-det[open]>summary.ev-head{border-bottom-color:#2f3c5c}
-#log li.ev-box details.ev-det>summary.ev-head:hover{background:rgba(125,150,220,.16)}
-#log li.ev-box.done details.ev-det>summary.ev-head{color:var(--green);background:rgba(93,220,122,.08)}
-#log li.ev-box.held details.ev-det>summary.ev-head{color:var(--red);background:rgba(255,93,108,.08)}
-#log li.ev-box summary.ev-head::-webkit-details-marker{display:none}
-#log li.ev-box details.ev-det>summary.ev-head::after{content:"▾";position:absolute;right:9px;top:6px;
-  color:var(--gold);opacity:.7;transition:transform .15s;transform:rotate(-90deg)}
-#log li.ev-box details.ev-det[open]>summary.ev-head::after{transform:rotate(0)}
 .agent-head{padding:6px 9px;font-weight:bold;color:var(--ink);
   background:rgba(125,150,220,.10);border-bottom:1px solid #2f3c5c;
   overflow-wrap:anywhere;word-break:break-word}
@@ -258,15 +260,13 @@ li.agent-box.done .agent-head{color:var(--green);background:rgba(93,220,122,.08)
 .overlay{position:fixed;inset:0;background:rgba(6,10,20,.78);
   display:flex;align-items:center;justify-content:center;z-index:50}
 .overlay.hidden{display:none}
-/* generic hide utility — JS toggles `hidden` on intake panels, the interview
-   answer box, etc. (not just overlays), so it must hide non-overlay elements too. */
+/* generic hide utility — JS toggles `hidden` on non-overlay elements too. */
 .hidden{display:none}
 .dialog{
   background:var(--panel);border:4px solid var(--ink);border-radius:8px;
   padding:20px 22px;width:min(520px,92vw);box-shadow:0 8px 0 #05080f;
   max-height:90vh;max-height:90dvh;overflow-y:auto;  /* never overflow the viewport (clipped buttons) */
 }
-.dialog.cp{border-color:var(--gold)}
 .dialog h2{margin:0 0 14px;color:var(--gold);text-transform:uppercase;font-size:18px}
 .dialog label{display:block;margin:10px 0 4px;color:var(--dim);font-size:12px;text-transform:uppercase}
 .dialog input[type=text],.dialog input[type=number],.dialog select,.dialog textarea{
@@ -314,10 +314,6 @@ details.fset.fold[open]>summary{border-bottom:2px solid var(--line)}
 .field:first-child{margin-top:0}
 .dialog .field>label{margin:0 0 6px;line-height:1.45}
 .dialog .field>.hint{display:block;margin:6px 0 0;line-height:1.45}
-/* short numeric fields pair up as soon as there's room; single column when there isn't */
-.field-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
-  gap:13px 14px}
-.field-grid .field{margin-top:0}
 /* BREAK GROUND is pinned: the form outruns a phone screen and the verb must not be
    the thing you have to scroll to find. */
 .build-actions{position:sticky;bottom:0;z-index:3;background:var(--panel);margin-top:6px;
@@ -325,138 +321,31 @@ details.fset.fold[open]>summary{border-bottom:2px solid var(--line)}
   box-shadow:0 -10px 12px -6px var(--panel)}
 .build-actions #start-btn{flex:1 1 auto}
 
-/* ---- intake modes (idea / paste spec / upload zip / converse) ---- */
-/* segmented cards, not bare radios — a 13px radio dot is not a phone-sized target */
-.intake-modes{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 4px}
-.intake-modes label.seg{display:flex;align-items:center;gap:7px;margin:0;flex:1 1 auto;
-  border:2px solid var(--line);border-radius:8px;padding:9px 12px;background:#0e1424;
-  text-transform:none;color:var(--dim);font-size:12px;cursor:pointer;min-height:40px}
-.intake-modes label.seg:hover{border-color:#3d4d73;color:var(--ink)}
-.intake-modes label.seg:has(input:checked){border-color:var(--gold);color:var(--ink);
-  background:#221c0c}
-.intake-modes input{width:auto;flex:none;accent-color:var(--gold)}
-.intake-panel{margin-top:10px}
-.intake-panel code{background:#0e1424;border:1px solid var(--line);border-radius:3px;padding:0 4px}
-input[type=file]{color:var(--dim);font-family:inherit;font-size:11px}
-/* style the OS chrome so it doesn't poke through the pixel skin */
-input[type=file]::file-selector-button{
-  background:var(--panel);color:var(--ink);border:2px solid var(--line);border-radius:6px;
-  padding:5px 10px;margin-right:8px;font-family:inherit;font-weight:bold;font-size:10px;
-  text-transform:uppercase;cursor:pointer;box-shadow:0 2px 0 #0c1322}
-input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff2ff}
-/* kill the native number spinner — value is typed or set via SUGGEST */
+/* kill the native number spinner — value is typed */
 .dialog input[type=number]{ -moz-appearance:textfield; appearance:textfield }
 .dialog input[type=number]::-webkit-inner-spin-button,
 .dialog input[type=number]::-webkit-outer-spin-button{ -webkit-appearance:none; margin:0 }
 
-/* ---- spec chat with the leads ---- */
-#chat-log{border:2px solid var(--line);border-radius:6px;background:#0e1424;
-  height:min(34vh,260px);overflow:auto;padding:8px;font-size:12px}
-.chat-turn{margin:0 0 9px;line-height:1.4}
-.chat-turn .who{color:var(--gold);font-weight:bold;font-size:11px;text-transform:uppercase}
-.chat-turn.user .who{color:var(--blue)}
-.chat-turn.system .who{color:var(--dim)}
-.chat-turn .txt{color:var(--ink);white-space:pre-wrap}
-.chat-row{display:flex;gap:8px;margin-top:8px}
-.chat-row input{flex:1}
-#chat-spec-wrap summary{cursor:pointer;color:var(--gold);font-size:12px;margin-top:8px}
-#chat-spec{max-height:24vh;overflow:auto;white-space:pre-wrap;background:#0e1424;
-  border:2px solid var(--line);border-radius:6px;padding:8px;font-size:11px;color:var(--dim);margin:6px 0 0}
-.dialog label.check{display:flex;align-items:center;gap:8px;text-transform:none;color:var(--ink);margin-top:14px}
-.dialog label.check input{width:auto}
 .dialog-actions{display:flex;gap:10px;margin-top:18px;align-items:center}
 .cp-note{color:var(--dim);font-size:11px;margin:6px 0 0}   /* roman: Silkscreen oblique is rough */
-/* AI expert advisors in the checkpoint modal (gated release sign-off) */
-.cp-advisors{display:flex;flex-direction:column;gap:6px;margin:8px 0 2px;max-height:32vh;overflow-y:auto}
-.cp-advisor{border:2px solid var(--line);border-radius:6px;padding:6px 9px;background:#0e1626}
-.cp-advisor.ok{border-color:#2c5a3c}
-.cp-advisor.warn{border-color:#6b5a1f}
-.cp-advisor .adv-head{font-size:11px;font-weight:bold;color:var(--ink);text-transform:uppercase}
-.cp-advisor.ok .adv-head{color:#9dffbf}
-.cp-advisor.warn .adv-head{color:#ffe6a3}
-.cp-advisor .adv-finding{font-size:11px;color:var(--dim);margin-top:3px;line-height:1.4}
-#cp-summary{color:var(--ink);font-size:14px;margin:4px 0}
 
-/* ---- checkpoint evidence: cost, gates, flags, artifacts, provenance ---- */
-/* Cost/elapsed chips */
-.cp-meta{display:flex;flex-wrap:wrap;gap:5px;margin:8px 0 2px}
-.cp-meta:empty{display:none}
-.cp-chip{border:2px solid var(--line);border-radius:5px;padding:2px 7px;
-  font-size:10px;color:var(--dim);background:#0e1626;text-transform:uppercase}
-.cp-chip.dim{border-color:transparent;background:transparent;text-transform:none}
-/* Gate verdicts so far: the strip, then the failures named in words */
-.cp-gates{margin:9px 0 2px}
-.cp-gate-strip{display:flex;flex-wrap:wrap;gap:4px}
-.cp-gate-line{font-size:11px;margin-top:5px;line-height:1.4}
-.cp-gate-line.ok{color:#9dffbf}
-.cp-gate-line.bad{color:#ff9b9b}
-/* What the crew flagged (journal concerns + low confidence) */
-.cp-flags{border:2px solid #6b5a1f;border-radius:6px;padding:6px 9px;margin:9px 0 2px;
-  background:#191506;max-height:22vh;overflow-y:auto}
-.cp-flags-head{font-size:11px;font-weight:bold;color:#ffe6a3;text-transform:uppercase}
-.cp-flag{font-size:11px;color:var(--dim);margin-top:3px;line-height:1.4}
-.cp-flag.concern{color:#ffd9a3}
-.cp-flag.dim{color:var(--dim)}
-/* What landed this stage (collapsible; auto-open when something needs a look) */
-.cp-details{margin:9px 0 2px}
-.cp-details>summary{cursor:pointer;color:var(--gold);font-size:12px;text-transform:uppercase}
-.cp-arts{max-height:26vh;overflow-y:auto;margin-top:6px;
-  border:2px solid var(--line);border-radius:6px;background:#0e1626;padding:6px 9px}
-.cp-art{font-size:11px;color:var(--dim);margin:2px 0;line-height:1.4}
-.cp-art-label{color:var(--ink)}
-.cp-art.risk .cp-art-label,.cp-art.risk .cp-art-detail{color:#ff9b9b}
-/* Provenance of the pause (phase · route · state sha) */
-.cp-prov{color:var(--dim);font-size:10px;margin-top:10px;opacity:.8;
-  word-break:break-all;text-transform:uppercase}
-.cp-prov:empty{display:none}
-/* Buttons carry what they DO, under the verb. The row is STICKY: the evidence
-   above can outgrow a phone screen, and the decision must never be the thing you
-   have to scroll to find. */
-.cp-actions{position:sticky;bottom:-20px;background:var(--panel);z-index:2;
-  padding:14px 0 6px;margin-top:8px;box-shadow:0 -10px 12px -4px var(--panel);
-  align-items:stretch}   /* equal heights: a taller button must not poke out of the band */
-.cp-actions button{display:flex;flex-direction:column;align-items:center;
-  justify-content:center;gap:2px;flex:1;min-width:0;text-align:center}
-.cp-actions .btn-sub{font-size:9px;font-weight:normal;opacity:.85;
-  text-transform:none;line-height:1.25;white-space:normal}
-.cp-review{margin-top:8px}
-#cp-code{background:#1b3a4a;border-color:var(--blue);color:#dff2ff;font-size:11px}
-
-/* ---- suggest-N row ---- */
-.slots-row{display:flex;align-items:center;gap:8px}
-.slots-row #slots-input{width:64px}
-#suggest-btn{background:#22314a;border-color:var(--blue);color:#dff2ff;
-  font-size:11px;padding:4px 8px;cursor:pointer}
-#slots-hint{flex:1;font-size:11px}
-
-/* ---- Interview a lead ---- */
-.iv-journal{max-height:34vh;overflow:auto;margin:8px 0;display:flex;flex-direction:column;gap:8px}
-.iv-entry{border:2px solid var(--line);border-radius:6px;padding:7px 9px;background:#0e1626}
-.iv-entry .role{color:var(--gold);font-weight:bold;font-size:12px}
-.iv-entry .sum{color:var(--ink);font-size:13px;margin:3px 0}
-.iv-entry .meta{color:var(--dim);font-size:11px}
-.iv-entry .concern{color:#ff9b9b}
-.iv-answer{border:2px solid var(--blue);border-radius:6px;padding:8px 10px;margin:6px 0;
-  background:#0c1c2a;color:#dff2ff;font-size:13px;white-space:pre-wrap}
-#iv-question{width:100%}
 
 /* ---- Output (files) browser ---- */
 #output-btn{background:#1b3a4a;border-color:var(--blue);color:#dff2ff}
 .dialog.files{width:min(860px,95vw)}
-.files-releases{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
-.files-releases:empty{display:none}
-.rel-chip{padding:4px 9px;font-size:11px}
-.rel-chip.sel{background:#24304f;border-color:var(--gold);color:var(--gold)}
 .files-body{display:flex;gap:10px;height:min(56vh,440px);margin-top:8px}
 #files-list{list-style:none;margin:0;padding:0;overflow:auto;flex:0 0 40%;
   border:2px solid var(--line);border-radius:6px}
-#files-list li{padding:5px 9px;font-size:12px;color:var(--dim);cursor:pointer;
+#files-list li{font-size:12px;color:var(--dim);
   border-bottom:1px dashed #1f2942;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #files-list li:hover{color:var(--ink)}
 #files-list li.sel{background:#24304f;color:var(--gold)}
-#files-list li.muted{color:var(--dim);cursor:default;white-space:normal}
+#files-list li.muted{padding:5px 9px;color:var(--dim);cursor:default;white-space:normal}
+/* each row is one real button, reset to look like a plain row */
+.row-btn{all:unset;box-sizing:border-box;display:block;width:100%;cursor:pointer;
+  font:inherit;color:inherit;text-transform:none}
 /* GitHub-style folder rows: icon · name (ellipsised) · size/count pinned right */
-#files-list li.dir,#files-list li.file{display:flex;align-items:center;gap:6px}
+#files-list .row-btn{display:flex;align-items:center;gap:6px;padding:5px 9px}
 #files-list li .ico{flex:none;width:13px;text-align:center;color:var(--dim)}
 #files-list li .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #files-list li .meta{margin-left:auto;flex:none;font-size:10px;color:var(--dim)}
@@ -467,6 +356,7 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
 /* breadcrumb trail above the tree (⌂ root / folder / subfolder) */
 .files-crumb{display:flex;flex-wrap:wrap;align-items:center;gap:1px;margin-top:8px;font-size:11px}
 .files-crumb:empty{display:none}
+button.crumb{all:unset;cursor:pointer;font:inherit;text-transform:none}
 .files-crumb .crumb{cursor:pointer;color:#9ab8ff;padding:1px 4px;border-radius:4px}
 .files-crumb .crumb:hover{color:#cfe0ff;background:#1c2540}
 .files-crumb .crumb.here{color:var(--gold);cursor:default}
@@ -476,14 +366,14 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
 .dialog.repos{width:min(720px,94vw)}
 .repos-list{list-style:none;margin:10px 0 0;padding:0;max-height:min(60vh,520px);overflow:auto}
 .repos-list li.muted{color:var(--dim);padding:10px 2px}
-.repo-item{border:2px solid var(--line);border-radius:8px;padding:11px 13px;margin-bottom:9px;
-  cursor:pointer;background:#141b2c}
+.repo-item{border:2px solid var(--line);border-radius:8px;margin-bottom:9px;
+  background:#141b2c}
+.repo-item .row-btn{padding:11px 13px;border-radius:6px}
 .repo-item:hover{border-color:var(--blue);background:#18223a}
 .repo-row1{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
 .repo-name{color:#9ab8ff;font-weight:bold;font-size:14px}
 .repo-item:hover .repo-name{color:#cfe0ff;text-decoration:underline}
 .repo-vis{font-size:10px;color:var(--dim);border:1px solid var(--line);border-radius:9px;padding:1px 8px}
-.repo-rel{font-size:10px;color:#cdbcf0;background:#2c2052;border-radius:9px;padding:1px 8px}
 .repo-pill{font-size:10px;border-radius:9px;padding:1px 8px}
 .repo-pill.ok{color:#7fe7a4;background:#1d3a26}
 .repo-pill.bad{color:#ff9a9a;background:#3a1d1d}
@@ -499,48 +389,8 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
 /* ---- Repo (self-hosted GitHub) tabs ---- */
 .repo-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .repo-head h2{margin:0}
-.repo-sha{font-size:11px;color:var(--dim);font-family:monospace}
-.repo-src{font-size:11px;color:var(--dim)}
-.repo-src.ok{color:#7fe7a4}
 /* one scrolling line: four tabs outgrow a phone, and a clipped tab is unreachable */
-.repo-tabs{display:flex;gap:6px;margin-top:10px;border-bottom:2px solid var(--line);
-  overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;scrollbar-width:none}
-.repo-tabs::-webkit-scrollbar{display:none}
-.repo-tab{background:transparent;border:none;border-bottom:3px solid transparent;color:var(--dim);
-  padding:7px 12px;font-size:12px;font-weight:bold;cursor:pointer;flex:none;white-space:nowrap}
-.repo-tab:hover{color:var(--ink)}
-.repo-tab.sel{color:var(--gold);border-bottom-color:var(--gold)}
-.tab-count{font-size:10px;color:var(--dim);background:#1f2942;border-radius:8px;padding:1px 6px;margin-left:2px}
-.repo-pane{margin-top:8px}
-.checks-list{list-style:none;margin:0;padding:0;max-height:min(56vh,440px);overflow:auto}
-.checks-list li.check{display:flex;align-items:center;gap:9px;flex-wrap:wrap;
-  padding:9px 11px;border:2px solid var(--line);border-radius:6px;margin-bottom:7px;font-size:13px}
-.check.ok{border-color:#2c5a3c}
-.check.bad{border-color:#6b2a2a}
-.ck-icon{width:20px;height:20px;display:inline-flex;align-items:center;justify-content:center;
-  border-radius:50%;font-weight:bold;font-size:12px}
-.check.ok .ck-icon{background:#1d3a26;color:#7fe7a4}
-.check.bad .ck-icon{background:#3a1d1d;color:#ff9a9a}
-.ck-name{font-weight:bold;color:var(--ink)}
-.ck-status{color:var(--dim);font-size:11px;text-transform:uppercase}
 .adv{font-size:10px;color:#d9c27a;background:#2e2814;border-radius:4px;padding:1px 5px}
-.ck-findings{flex-basis:100%;margin-top:5px;font-family:monospace;font-size:11px;color:#ffb4b4;
-  white-space:pre-wrap;word-break:break-word}
-.checks-list li.muted{color:var(--dim);list-style:none}
-.pulls-list{max-height:min(56vh,440px);overflow:auto}
-.pull{border:2px solid var(--line);border-radius:6px;margin-bottom:8px;overflow:hidden}
-.pull-head{display:flex;align-items:center;gap:8px;padding:9px 11px;cursor:pointer;background:#161d30}
-.pull-head:hover{background:#1c2540}
-.pull-no{color:var(--gold);font-weight:bold;font-size:12px}
-.pull-sum{flex:1 1 auto;font-size:12px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pull-merged{font-size:10px;color:#cdbcf0;background:#2c2052;border-radius:8px;padding:2px 8px}
-.pull-diff{display:none;margin:0;padding:10px;background:#0e1424;border-top:2px solid var(--line);
-  font-size:11px;overflow:auto;max-height:40vh;white-space:pre;color:var(--ink)}
-.pull-diff.open{display:block}
-.d-add{color:#7fe7a4}
-.d-del{color:#ff9a9a}
-.d-hunk{color:#9ab8ff}
-.d-file{color:#d9c27a}
 .muted{color:var(--dim)}
 
 /* ---- provider-limit pause banner ------------------------------------------ */
@@ -579,39 +429,40 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
 
   /* ---- the control bar: hud rows + floor pills read as ONE band ----
      row 1  FOUNDRY · FLOOR 2 · r3            [⌥] [▶ NEW]
-     row 2  the request, then the milestone   (full width — see below)
+     row 2  the request                       (full width — see below)
      row 3  stage chips (scrolls sideways)
      row 4  floor pills (scrolls sideways)                                     */
   #hud{
     display:grid;grid-template-columns:minmax(0,1fr) auto;
-    grid-template-areas:"id act" "proj proj" "chips chips";
+    grid-template-areas:"id act" "proj proj" "ctl ctl" "chips chips";
     align-items:center;gap:5px 10px;padding:7px 10px 6px;font-size:11px;
     border-bottom:none;box-shadow:none;
   }
   .hud-left{grid-area:id;gap:4px 8px}
   .hud-right{grid-area:act;justify-self:end;gap:7px}
-  /* stage / per-service chips: ONE horizontally scrolling line, so a 12-milestone
-     ladder can't grow the bar to three rows */
+  .floor-ctl{grid-area:ctl;flex-wrap:wrap;gap:6px}
+  .floor-ctl .ctl-lbl{display:inline}
+  .ctl-panel{right:8px;left:8px;max-width:none}
+  /* stage chips: ONE horizontally scrolling line, so they can't grow the bar */
   .hud-mid{grid-area:chips;-webkit-overflow-scrolling:touch}
   .hud-mid:has(.gates-mini:empty){display:none}   /* no chips -> no empty row */
   .logo{font-size:13px}
   /* The request gets a full-width row of its own. Inside .hud-left it was boxed
      into the column beside the buttons — ~220px of a 390px screen, which turned a
-     long milestone request into three visible words. Request and milestone take one
-     line each so the row height is fixed no matter how long the prompt gets. */
+     long request into three visible words. It takes one line so the row height is
+     fixed no matter how long the prompt gets. */
   .proj{grid-area:proj;flex:none;max-width:none;font-size:11px;color:var(--dim);
     white-space:normal;overflow:visible;position:relative}
-  .proj-req,.proj-mile{display:block;overflow:hidden;text-overflow:ellipsis;
+  .proj-req{display:block;overflow:hidden;text-overflow:ellipsis;
     white-space:nowrap;line-height:1.35}
-  .proj-mile::before{content:none}
-  /* tap to read the whole request / milestone; the chevron appears only when a line
+  /* tap to read the whole request; the chevron appears only when a line
      is actually cut off (game.js sets .clamped), so a short request stays a plain
      label with nothing to poke at */
   .proj.clamped{padding-right:18px;cursor:pointer}
   .proj.clamped::after{content:"⌄";position:absolute;right:0;top:-1px;
     color:var(--gold);opacity:.75;transition:transform .15s}
   .proj.open::after{transform:rotate(180deg)}
-  .proj.open .proj-req,.proj.open .proj-mile{white-space:normal;overflow:visible;
+  .proj.open .proj-req{white-space:normal;overflow:visible;
     text-overflow:clip}
   /* `· gated · mock` is static per floor and the least useful thing in the bar —
      dropping it is what keeps this to two lines instead of three. It's still on the
@@ -643,23 +494,12 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
   .log-tab{padding:8px 8px}                   /* touch target, minus the title bulk */
   #log,#progress{font-size:12px;padding:7px 10px}
 
-  /* file browser stacks: list above, viewer below */
-  .files-body{flex-direction:column;height:auto}
-  #files-list{flex:0 0 auto;max-height:22vh}
-  #files-view{min-height:30vh}
-
   /* dialogs: use (almost) the full phone width and trim the padding — the pixel
      font is chunky, so every horizontal pixel counts on a 390px screen */
   .dialog{width:96vw;padding:14px}
   .dialog h2{font-size:15px;margin-bottom:10px}
   /* action rows wrap instead of shoving no-wrap buttons past the dialog edge */
   .dialog-actions{flex-wrap:wrap}
-  /* Checkpoint verdicts: three abreast overflows at 390px (REQUEST CHANGES spills
-     onto APPROVE). APPROVE gets its own full-width row; the two "send it back"
-     verbs share the second. Sticky offset retuned to this block's 14px padding. */
-  .cp-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;bottom:-14px}
-  .cp-actions button{white-space:normal}
-  #cp-approve{grid-column:1 / -1}
 
   /* The build form is far too long for a centred card on a phone, so it becomes a
      full-height SHEET: edge to edge, header pinned to the top, BREAK GROUND pinned
@@ -673,10 +513,6 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
   details.fset.fold>summary{padding:14px 32px 14px 12px}
   details.fset.fold>summary::after{top:14px;right:11px}
   .fset-body{padding:10px 12px 12px}
-  /* one column: two 190px cells side by side on a 390px screen is the cramping */
-  .field-grid{grid-template-columns:1fr}
-  /* two intake cards per row, each a full-width touch target */
-  .intake-modes label.seg{flex:1 1 44%;min-height:44px}
   .build-actions{padding:11px 0 calc(14px + env(safe-area-inset-bottom))}
 }
 
@@ -718,5 +554,58 @@ input[type=file]::file-selector-button:hover{border-color:var(--blue);color:#dff
   /* iOS Safari auto-zooms the whole page when a focused input's font is under
      16px — keep form fields at 16px on touch so the layout stays put. */
   .dialog input[type=text],.dialog input[type=number],.dialog select,.dialog textarea,
-  #chat-msg,#iv-question{font-size:16px}
+}
+
+/* ---- Accessibility --------------------------------------------------------- */
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
+  clip:rect(0,0,0,0);white-space:nowrap;border:0}
+/* one visible ring for every keyboard-focused control (mouse clicks stay quiet) */
+:focus-visible{outline:3px solid var(--gold);outline-offset:2px}
+button:focus-visible,[role=button]:focus-visible,summary:focus-visible,a:focus-visible{
+  outline:3px solid var(--gold);outline-offset:2px}
+.dialog input:focus-visible,.dialog select:focus-visible,.dialog textarea:focus-visible,
+.ctl-panel input:focus-visible,#files-view:focus-visible{outline:2px solid var(--gold);outline-offset:1px}
+.el-btn .fl-st{display:block;font-size:11px;line-height:1.2}
+
+/* Empty lists explain themselves: the copy is the list's data-empty attribute. */
+#log:empty::before,#progress:empty::before,#tickets:empty::before{content:attr(data-empty);display:block;
+  color:var(--dim);font-size:11px;line-height:1.6;padding:6px 2px}
+
+/* first-run help + example prompts in the build dialog */
+.first-run .cp-note{font-size:12px;line-height:1.6;color:var(--ink)}
+.first-run .cp-note + .cp-note{color:var(--dim);margin-top:10px}
+.examples{display:flex;flex-direction:column;gap:7px;margin-top:8px}
+.examples .example{text-transform:none;white-space:normal;text-align:left;font-weight:normal;
+  font-size:12px;line-height:1.4;background:#1b2440;border-width:2px;padding:8px 10px}
+.examples .example::before{content:"↳ ";color:var(--gold)}
+
+/* repo hub: search · status · sort */
+.repo-find{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+.repo-find input,.repo-find select,.files-find input{background:#0e1424;color:var(--ink);
+  border:3px solid var(--line);border-radius:6px;font-family:inherit;font-size:12px;padding:7px 8px}
+.repo-find input{flex:1 1 200px;min-width:0}
+.dialog .repo-find select{flex:0 0 auto;width:auto}
+.repo-pill.warn{color:#ffe08a;background:#3a311a}
+.repo-pill.live{color:#9fd4ff;background:#1a2c3d}
+.repo-item:focus-within{border-color:var(--gold)}
+.files-find{margin-top:10px}
+.files-find input{width:100%}
+#files-list li:focus-visible{outline-offset:-3px}
+
+@media (max-width: 820px) and (orientation: portrait){
+  /* the file viewer on a phone: filter, then the list, then the file — stacked,
+     each scrolling on its own so neither pushes the other off the sheet */
+  .dialog.files{display:flex;flex-direction:column;max-height:94dvh}
+  .files-body{flex-direction:column;height:auto;min-height:0;flex:1 1 auto}
+  #files-list{flex:0 0 auto;max-height:28dvh}
+  #files-view{min-height:32dvh;flex:1 1 auto;font-size:11px}
+  .dialog .repo-find select{flex:1 1 40%}
+}
+
+/* Reduced motion: no wipes, pulses, pops or spinning chevrons. The canvas side is
+   handled in game.js (no confetti, glow pulses, shakes or hops). */
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;
+    transition-duration:.01ms !important;scroll-behavior:auto !important}
+  #wipe{display:none}
 }

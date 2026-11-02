@@ -37,57 +37,65 @@ function cellBox(c,r){ const x = GX0 + c*(CELL_W+AISLE), y = GY0 + r*(CELL_H+AIS
   return {x, y, w:CELL_W, h:CELL_H, x0:x, y0:y, x1:x+CELL_W, y1:y+CELL_H, cx:x+CELL_W/2, cy:y+CELL_H/2}; }
 // Both plans read pipeline-order left-to-right, top-to-bottom, keep the GATE directly
 // above the VAULT (the vault's only opening is a top gap punched at the gate's centre,
-// and buildGate seals the one-aisle corridor between them), and give the vault two
-// cells so the prize room spans a full row-end.
+// and buildGate seals the one-aisle corridor between them), and give the vault and
+// the review room two cells each.
 const PLANS = {
   // 4 across × 3 down — the desktop floor, unchanged.
   landscape: {
     W:1280, H:840, cols:4, rows:3,
-    grid:{ product:[0,0], architecture:[1,0], qa:[2,0], security:[3,0],
-           frontend:[0,1], backend:[1,1], data:[2,1], gate:[3,1],
-           vault:[3,2],                   // gate(3,1) sits directly above vault(3,2)
+    grid:{ plan:[0,0], frontend:[1,0], backend:[2,0], data:[3,0],
+           review:[0,1], gate:[2,1],      // review spans (0..1,1)
+           vault:[2,2],                   // gate(2,1) sits directly above vault(2..3,2)
            office:[0,2] },                // the CTO's own office (row 2, far left)
-    vaultSpan:[[2,2],[3,2]],
+    spans:{ vault:[[2,2],[3,2]], review:[[0,1],[1,1]] },
     lounge:[1,2],
   },
   // 3 across × 4 down — the portrait phone floor. Same cells, taller stack, so a
   // 390px screen draws it at ~40% instead of ~30% and the block is nearly square.
   portrait: {
     W:970, H:1070, cols:3, rows:4,
-    grid:{ product:[0,0], architecture:[1,0], office:[2,0],
+    grid:{ plan:[0,0], office:[2,0],
            frontend:[0,1], backend:[1,1], data:[2,1],
-           qa:[0,2], security:[1,2], gate:[2,2],
+           review:[0,2], gate:[2,2],      // review spans (0..1,2)
            vault:[2,3] },                 // gate(2,2) sits directly above vault(1..2,3)
-    vaultSpan:[[1,3],[2,3]],
+    spans:{ vault:[[1,3],[2,3]], review:[[0,2],[1,2]] },
     lounge:[0,3],
   },
 };
 let PLAN = null;
 let GRID, LOUNGE_CELL, ENTRANCE_CELL;
 // Pipeline ORDER (the build sequence) — drives the order numerals + the flow path.
-const PIPELINE_ORDER = ["product","architecture","frontend","backend","data","qa","security","gate","vault"];
+const PIPELINE_ORDER = ["plan","frontend","backend","data","review","gate","vault"];
 // The CTO OFFICE is a real room (see each plan's grid); the LOUNGE cell is the
 // RECEPTION. No pipeline work happens in either — and nobody is ever SENT to the
 // lounge: every agent lives at their own desk (see "presence" below), so it's the
 // entrance + a furnished break room, not a holding pen for idle staff.
 const ENG_ROOMS = ["frontend","backend","data"];               // engineering discipline rooms
+// Ticket-driven crew: each specialty's tickets seat a worker sprite in its room (test →
+// the review room). Per-specialty LIMITS cap the sprites; tickets over the cap queue.
+const SPECIALTIES = ["frontend","backend","data","test"];
+const TASK_ROOM = {frontend:"frontend", backend:"backend", data:"data", test:"review"};
+const TIER_LETTER = {T3:"H", T2:"S", T1:"O"};                  // Haiku / Sonnet / Opus
+const TIER_NAME = {T3:"Haiku", T2:"Sonnet", T1:"Opus"};
+const TIER_COLOR = {T3:0x7dffb0, T2:0xffd95e, T1:0xff9b5e};
+const DIFF_TIER = {trivial:"T3", standard:"T2", complex:"T1"};
+const DEFAULT_LIMIT = 4, MAX_LIMIT = 16;
 const ENG_AREA_ROOM = {frontend:"frontend", backend:"backend", data:"data",
                        infra:"backend", security:"backend"};   // org AREA → its discipline room
 const RBASE = {
-  product:{label:"PRODUCT",color:0x2e3b5a}, architecture:{label:"ARCHITECTURE",color:0x3a2e5a},
+  plan:{label:"PLAN",color:0x2e3b5a},
   frontend:{label:"FRONTEND",color:0x243f5a}, backend:{label:"BACKEND",color:0x5a4524},
-  data:{label:"DATA",color:0x245a42}, qa:{label:"QA · REVIEW",color:0x2e5a4a},
-  security:{label:"SECURITY",color:0x5a2e36},
+  data:{label:"DATA",color:0x245a42}, review:{label:"REVIEW",color:0x2e5a4a},
   gate:{label:"GATE",color:0x2c4a55}, vault:{label:"VAULT",color:0x5a4a18},
   office:{label:"CTO OFFICE",color:0x4a4030},   // the CTO's room (opens on the RIGHT wall)
 };
 // Build-order numeral per room (engineering's 3 rooms share stage 3 — they run in
 // parallel; support rooms have none).
-const ORDER_NO = {product:1, architecture:2, frontend:3, backend:3, data:3,
-                  qa:4, security:5, gate:6, vault:7};
+const ORDER_NO = {plan:1, frontend:2, backend:2, data:2,
+                  review:3, gate:4, vault:5};
 const ROOMS = {};
-const ROOM_ORDER = ["product","architecture","frontend","backend","data","qa","security","gate","vault"];
-const TINT = {security:[0xff6d6d,0.05], gate:[0x6aa0ff,0.05], vault:[0xffd25a,0.06]};
+const ROOM_ORDER = ["plan","frontend","backend","data","review","gate","vault"];
+const TINT = {gate:[0x6aa0ff,0.05], vault:[0xffd25a,0.06]};
 // the "#": centre-lines of the walkway aisles between columns / rows (generated).
 // corridorRoute() walks these, so the counts must match the plan's cols/rows.
 const AISLE_VX = [], AISLE_HY = [];
@@ -114,10 +122,11 @@ function applyFloorplan(force){
     const x0=Math.min(...rs.map(r=>r.x)), y0=Math.min(...rs.map(r=>r.y));
     const x1=Math.max(...rs.map(r=>r.x+r.w)), y1=Math.max(...rs.map(r=>r.y+r.h));
     ROOMS.engineering = {label:"ENGINEERING", color:0x5a3a2e, virtual:true, x:x0, y:y0, w:x1-x0, h:y1-y0}; }
-  // The VAULT is the shipped-artifact destination — give it prominence by spanning two
-  // cells (fills the row end with REAL content; it's the prize room, not filler).
-  { const [ca, cb] = PLAN.vaultSpan, a = cellBox(ca[0],ca[1]), b = cellBox(cb[0],cb[1]);
-    Object.assign(ROOMS.vault, {x:a.x, y:a.y, w:(b.x + b.w) - a.x, h:a.h}); }
+  // Two-cell rooms: the VAULT (the shipped-artifact destination) fills a row end, and
+  // REVIEW takes the cell beside it.
+  for (const [key, [ca, cb]] of Object.entries(PLAN.spans)){
+    const a = cellBox(ca[0],ca[1]), b = cellBox(cb[0],cb[1]);
+    Object.assign(ROOMS[key], {x:a.x, y:a.y, w:(b.x + b.w) - a.x, h:a.h}); }
   AISLE_VX.length = 0; AISLE_HY.length = 0;
   for (let c = 0; c < PLAN.cols-1; c++) AISLE_VX.push(GX0 + (c+1)*CELL_W + c*AISLE + AISLE/2);
   for (let r = 0; r < PLAN.rows-1; r++) AISLE_HY.push(GY0 + (r+1)*CELL_H + r*AISLE + AISLE/2);
@@ -132,33 +141,25 @@ function roomAt(x,y){ for (const k in ROOMS){ const R=ROOMS[k];
   if (x>=R.x && x<=R.x1 && y>=R.y && y<=R.y1) return k; } return null; }
 
 const COLORS = {
-  "Stakeholder Proxy":0x7fd1ff,"Product Manager":0xffd95e,"Criteria Critic":0xff8fae,
-  "Program Manager":0xb59bff,"Principal Architect":0xc79bff,"Senior Engineer":0xff9b5e,
-  "Junior Engineer":0xffc08a,"QA Engineer":0x7dffb0,"SDET":0x5ddc7a,"Reviewer":0x5db8ff,
-  "Technical Writer":0xe8e0a0,"AppSec Engineer":0xff6d6d,
-  "Audit & Compliance":0xffb38a,"Supply-chain Reviewer":0x9bb0ff,
+  "Planner":0xffd95e,"Senior Engineer":0xff9b5e,
+  "Junior Engineer":0xffc08a,"Reviewer":0x5db8ff,
 };
 const ROSTER = {
-  product:["Stakeholder Proxy","Product Manager","Criteria Critic","Program Manager"],
-  architecture:["Principal Architect"],
+  plan:["Planner"],
   // engineering is NOT a static room: its engineers are placed per-discipline
   // (frontend/backend/data) from the live org telemetry (layoutEngineering).
-  qa:["QA Engineer","SDET","Reviewer","Technical Writer"],
-  security:["AppSec Engineer","Audit & Compliance","Supply-chain Reviewer"],
+  review:["Reviewer"],
 };
-const GATE_ORDER = ["spec","build","test","smoke","review","security","audit","supply_chain","e2e"];
+const GATE_ORDER = ["spec","build","test","smoke","review"];
 const AGENT_ROOM = {}; for (const rm in ROSTER) for (const nm of ROSTER[rm]) AGENT_ROOM[nm] = rm;
 // Per-area accent (shared by the org board, the Tech-Leads, and the area-expert
 // IC pool) so frontend/backend/data/… read the same colour everywhere.
 const AREA_COLOR = {frontend:0x7fd1ff, backend:0xff9b5e, data:0x7dffb0,
-                    infra:0xb59bff, security:0xff6d6d};
+                    infra:0xb59bff, security:0xff6d6d, test:0xd9a8ff};
 const AREA_TAG = {frontend:"FE", backend:"BE", data:"DA", infra:"IN", security:"SE"};
 // short role tags for the named static-room agents (the senior roles), shown on a badge.
 const ROLE_TAG = {
-  "Stakeholder Proxy":"STAKEHLDR", "Product Manager":"PROD MGR", "Criteria Critic":"CRITIC",
-  "Program Manager":"PROG MGR", "Principal Architect":"ARCHITECT", "QA Engineer":"QA ENG",
-  "SDET":"SDET", "Reviewer":"REVIEWER", "Technical Writer":"WRITER", "AppSec Engineer":"APPSEC",
-  "Audit & Compliance":"AUDIT", "Supply-chain Reviewer":"SUPPLY",
+  "Planner":"PLANNER", "Reviewer":"REVIEWER",
 };
 
 // ---- presence: everybody lives at their own desk ---------------------------
@@ -190,7 +191,7 @@ const CTO_LINES = ["how's it looking?", "keep going, this is good", "what's bloc
 // The CTO walks a BEAT rather than being leashed to the newest event: he stands with one
 // live team for a spell, then moves on to the next room that has work. Rooms he can stand
 // in, in floor order (the gate/vault/his office aren't teams).
-const PATROL_ROOMS = ["product","architecture","frontend","backend","data","qa","security"];
+const PATROL_ROOMS = ["plan","frontend","backend","data","review"];
 const CTO_DWELL_MS = [7000, 13000];   // how long he oversees one room before moving on
 const pick = (arr)=> arr[Math.floor(Math.random()*arr.length)];
 
@@ -199,6 +200,9 @@ const pick = (arr)=> arr[Math.floor(Math.random()*arr.length)];
 // a small face, a narrow slate body with one accent colour, and two split leg stubs.
 // Character sprites come from the route1rodent sheet (see CHARACTERS / makePerson
 // below) — the old procedural pixel body + per-role hair/skin/accent kit is gone.
+// Reduced motion: the confetti, glows, shakes and decorative hops are skipped; the
+// moves that carry meaning (someone walking to a room, a door opening) still play.
+const calm = () => !!(window.A11y && A11y.reducedMotion());
 function hashStr(s){ let h=2166136261; for(let i=0;i<s.length;i++){ h^=s.charCodeAt(i); h=Math.imul(h,16777619); } return h>>>0; }
 // route1rodent CC BY-SA 4.0 sheet -> 13x6 grid of 64px frames (assets/sprites/CREDITS.md).
 // frame index = row*13 + col. 10 characters; `front` = walk frames (cycle), `back` =
@@ -217,10 +221,8 @@ const CHARACTERS = [
 ];
 // Stable, room-distinct character per role (no two leads in a room share a sprite).
 const ROLE_CHAR = {
-  "Stakeholder Proxy":4,"Product Manager":7,"Criteria Critic":2,"Program Manager":6,
-  "Principal Architect":0,"Senior Engineer":5,"Junior Engineer":9,
-  "QA Engineer":8,"SDET":1,"Reviewer":4,"Technical Writer":3,
-  "AppSec Engineer":5,"Audit & Compliance":7,"Supply-chain Reviewer":0,"CTO":3,
+  "Planner":7,"Senior Engineer":5,"Junior Engineer":9,
+  "Reviewer":4,"CTO":3,
 };
 function charFor(name, seed){
   if (ROLE_CHAR[name] != null) return ROLE_CHAR[name];
@@ -400,7 +402,7 @@ class BootScene extends Phaser.Scene {
 //  Floor scene — one workshop per project                                     //
 // =========================================================================== //
 class FloorScene extends Phaser.Scene {
-  init(data){ this.proj = data || {}; }
+  init(data){ this.proj = data || {}; this.taskGroup = []; this.taskSprites = new Map(); this.taskLabels = []; }
 
   create(){
     this.cameras.main.setBackgroundColor(PC.bg);
@@ -409,9 +411,9 @@ class FloorScene extends Phaser.Scene {
     this.gatePips = {};
     this.activeRoom = "lobby";
     this.liveRooms = new Set();      // rooms with a node in-flight (concurrent stages)
-    // agent name -> how many of its nodes are in flight. A COUNT, not a set: a platform
-    // build runs several services at once, so the same role ("Frontend Lead") can be
-    // mid-call twice — one service finishing must not unseat the other.
+    // agent name -> how many of its nodes are in flight. A COUNT, not a set: a
+    // build runs several tickets at once, so the same role ("Frontend Lead") can be
+    // mid-call twice — one ticket finishing must not unseat the other.
     this.workingAgents = new Map();
     this.roomInflight = {};          // room -> count of in-flight nodes (ref-count)
     this.ctoRoom = null;             // the room the CTO is overseeing = the active group
@@ -558,8 +560,7 @@ class FloorScene extends Phaser.Scene {
       const R = ROOMS[key]; if (R.virtual) continue;
       const cx = Math.round(R.cx);
       // Openings (no doors — plain gaps): normal rooms open at the BOTTOM centre. The
-      // GATE also has a TOP entrance (from security above) so work flows security →
-      // gate → vault. The VAULT is sealed except a single TOP opening under the gate.
+      // GATE also has a TOP entrance so work flows review → gate → vault. The VAULT is sealed except a single TOP opening under the gate.
       const topGap = key==="gate" ? cx : (key==="vault" ? Math.round(ROOMS.gate.cx) : null);
       // The CTO OFFICE opens on its RIGHT wall (onto the corridor), not the bottom —
       // everyone else opens at the bottom centre. Vault is sealed bottom (top-only).
@@ -586,16 +587,12 @@ class FloorScene extends Phaser.Scene {
     switch(key){
       case "engineering":  // gear: body + 4 teeth + hole
         M([[2,2,6,6,1],[4,0,2,2,1],[4,8,2,2,1],[0,4,2,2,1],[8,4,2,2,1],[4,4,2,2,0]]); break;
-      case "qa":           // magnifier: square lens ring + diagonal handle
+      case "review":       // magnifier: square lens ring + diagonal handle
         M([[1,0,6,1,1],[1,5,6,1,1],[0,1,1,4,1],[6,1,1,4,1],[6,6,2,2,1],[8,8,2,2,1]]); break;
       case "gate":         // shield: flat top, tapered point
         M([[2,0,6,2,1],[1,2,8,3,1],[2,5,6,1,1],[3,6,4,1,1],[4,7,2,2,1]]); break;
-      case "security":     // padlock: shackle + body + keyhole
-        M([[3,0,4,1,1],[2,1,1,3,1],[7,1,1,3,1],[1,4,8,6,1],[4,6,2,3,0]]); break;
-      case "product":      // clipboard: board + clip + two text lines
+      case "plan":         // clipboard: board + clip + two text lines
         M([[3,0,4,1,1],[1,1,8,9,1],[3,3,4,1,0],[3,5,4,1,0],[3,7,3,1,0]]); break;
-      case "architecture": // solid triangle (set-square)
-        M([[4,0,2,1,1],[3,1,4,1,1],[3,2,4,1,1],[2,3,6,1,1],[2,4,6,1,1],[1,5,8,1,1],[1,6,8,1,1],[0,7,10,1,1],[0,8,10,1,1]]); break;
       case "vault":        // key: round bow (hole) + clean straight stem + 2 teeth
         M([[1,1,4,4,1],[2,2,2,2,0],[5,2,5,1,1],[7,3,1,2,1],[9,3,1,2,1]]); break;
       case "reception":    // door: frame + dark panel + knob
@@ -619,7 +616,7 @@ class FloorScene extends Phaser.Scene {
   }
 
   drawFlowPath(){   // faint guide line through the build STAGES (engineering as one waypoint)
-    const stages = ["product","architecture","engineering","qa","security","gate","vault"];
+    const stages = ["plan","engineering","review","gate","vault"];
     const pts = stages.map(k=>ROOMS[k]).filter(Boolean).map(R=>({x:R.cx, y:R.cy}));
     const g = this.add.graphics().setDepth(0); g.lineStyle(2, 0xffcf52, 0.18);
     g.beginPath(); g.moveTo(pts[0].x, pts[0].y);
@@ -675,8 +672,8 @@ class FloorScene extends Phaser.Scene {
     // ONE themed prop per room, tucked into the same top-right corner against the wall
     // (consistent, never random). The working desks are placed per-lead by the floor.
     const props = {
-      product:"board", architecture:"shelf", frontend:"rack", backend:"rack",
-      data:"shelf", qa:"shelf", security:"rack",
+      plan:"board", frontend:"rack", backend:"rack",
+      data:"shelf", review:"shelf",
     };
     for (const key in props){
       const R = ROOMS[key]; if(!R) continue;
@@ -921,6 +918,7 @@ class FloorScene extends Phaser.Scene {
       onComplete:()=>t.destroy()});
   }
   burst(x,y,colors,n){
+    if (calm()) return;
     n = n||12;
     for (let i=0;i<n;i++){
       const ang=(Math.PI*2*i)/n + (x%6)/6, sp=44+(i%4)*22;
@@ -931,20 +929,21 @@ class FloorScene extends Phaser.Scene {
     }
   }
   ring(x,y,color){
+    if (calm()) return;
     const r=this.add.circle(x,y,8,color,0).setStrokeStyle(3,color).setDepth(41);
     this.tweens.add({targets:r, scale:{from:0.4,to:4}, alpha:{from:0.9,to:0}, duration:520,
       onComplete:()=>r.destroy()});
   }
-  shake(ms,amt){ this.cameras.main.shake(ms||300, amt||0.012); }
+  shake(ms,amt){ if (!calm()) this.cameras.main.shake(ms||300, amt||0.012); }
   hop(a, times){
-    if (!a) return; const y0=a.y; let i=0; times=times||1;
+    if (!a || calm()) return; const y0=a.y; let i=0; times=times||1;
     const up=()=>{
       if (a.bob) this.tweens.add({targets:a.bob, scaleY:0.86, duration:60, yoyo:true, ease:"Quad.out"}); // anticipation squash
       this.tweens.add({targets:a, y:y0-15, duration:130, delay:55, ease:"Quad.out", yoyo:true,
         onComplete:()=>{ a.y=y0; if (++i<times) up(); }}); };
     up();
   }
-  deskIdle(a){ if (!a || !a.bob) return; this.stopDeskIdle(a);
+  deskIdle(a){ if (!a || !a.bob || calm()) return; this.stopDeskIdle(a);
     a.breathe = this.tweens.add({targets:a.bob, y:{from:0,to:-1}, duration:1500, yoyo:true, repeat:-1, ease:"Sine.inOut"}); }
   stopDeskIdle(a){ if (a && a.breathe){ a.breathe.stop(); a.breathe=null; if (a.bob) a.bob.y=0; } }
   codeGlyph(a){
@@ -966,21 +965,6 @@ class FloorScene extends Phaser.Scene {
         this.time.delayedCall(950,()=>this.tweens.add({targets:s,alpha:0,duration:300,onComplete:()=>s.destroy()})); }});
     if (!pass) this.shake(380,0.015);
   }
-  // checkpoint spotlight + bouncing "?" over the CTO
-  spotlightCTO(on){
-    this.ctoHold = !!on;        // he's deciding, not doing his rounds — pause the patrol
-    if (this.spot){ this.spot.destroy(); this.spot=null; }
-    if (this.qmark){ this.qmark.destroy(); this.qmark=null; }
-    if (!on || !this.cto) return;
-    const x=this.cto.x;
-    const dim=this.add.rectangle(0,0,W,H,0x05080f,0.5).setOrigin(0,0);
-    const beam=this.add.triangle(x,FLOOR_TOP-70,-66,180,66,180,0,0,0xfff1c0,0.10);
-    this.spot=this.add.container(0,0).setDepth(34); this.spot.add([dim,beam]);
-    const q=this.add.text(x,this.cto.y-48,"?",{fontFamily:"'PixelFont','Courier New',monospace",
-      fontSize:"24px",fontStyle:"bold",color:"#ffd95e"}).setOrigin(0.5).setDepth(2000);
-    this.qmark=q;
-    this.tweens.add({targets:q, y:q.y-7, duration:480, yoyo:true, repeat:-1, ease:"Sine.inOut"});
-  }
   celebrate(){
     for (const a of this.agents.values()) if (a.seen) this.hop(a,3);
     this.hop(this.cto,3);
@@ -988,6 +972,7 @@ class FloorScene extends Phaser.Scene {
     this.confetti();
   }
   confetti(){
+    if (calm()) return;
     const cols=[0xff5d6c,0x5ddc7a,0x5db8ff,0xffcf52,0xff8fae,0xb59bff];
     for (let i=0;i<72;i++){
       const x=20+Math.abs((i*97)%(W-40)), c=cols[i%cols.length];
@@ -998,10 +983,19 @@ class FloorScene extends Phaser.Scene {
     }
   }
   gloom(){
+    if (this.gloomRect) return;
     const o=this.add.rectangle(0,0,W,H,0x0a0f1c,0).setOrigin(0,0).setDepth(33);
+    this.gloomRect = o;
     this.tweens.add({targets:o, fillAlpha:0.45, duration:700});
     for (const a of this.agents.values()) if (a.seen)
       this.tweens.add({targets:a.bob, angle:7, y:3, duration:500});
+  }
+  ungloom(){                       // a resumed floor gets back to work
+    const o=this.gloomRect; if (!o) return;
+    this.gloomRect = null;
+    this.tweens.add({targets:o, fillAlpha:0, duration:400, onComplete:()=>o.destroy()});
+    for (const a of this.agents.values()) if (a.seen)
+      this.tweens.add({targets:a.bob, angle:0, y:0, duration:300});
   }
   banner(txt,color){
     const b=this.add.container(W/2, FLOOR_TOP+40).setDepth(2200);
@@ -1095,7 +1089,7 @@ class FloorScene extends Phaser.Scene {
     this.add.ellipse(x, y+10, 92, 30).setStrokeStyle(1, shade(R.color,1.7)).setDepth(0).setAlpha(0.4);
     this.add.ellipse(x, y+14, 56, 16, shade(R.color,1.3), 0.5).setDepth(0);   // pedestal top
     this.chestGlow = this.add.rectangle(x,y-20,120,120,0xffd25a,0.10).setDepth(4);
-    this.tweens.add({targets:this.chestGlow, fillAlpha:{from:0.06,to:0.14}, duration:2200, yoyo:true, repeat:-1});
+    if (!calm()) this.tweens.add({targets:this.chestGlow, fillAlpha:{from:0.06,to:0.14}, duration:2200, yoyo:true, repeat:-1});
     const c = this.add.container(x,y).setDepth(5).setScale(1.3);
     c.add(this.add.ellipse(0,15,40,8,PC.shadow,0.32));
     c.add(this.add.rectangle(0,3,36,18,0x7a3b1a));
@@ -1121,7 +1115,7 @@ class FloorScene extends Phaser.Scene {
     c.on("pointerdown", ()=> this.onChestClick());
   }
   // Actionable only when this floor's build has finished (a repo exists). Locked
-  // while running/iterating, so agents-at-work never opens a half-baked tree.
+  // while running, so agents-at-work never opens a half-baked tree.
   chestActionable(){
     const F = FLOORS.get(this.proj.floor);
     return !!(F && F.status === "done");
@@ -1129,7 +1123,7 @@ class FloorScene extends Phaser.Scene {
   onChestClick(){
     const F = FLOORS.get(this.proj.floor);
     if(!F || F.status !== "done") return;   // locked / no repo yet -> do nothing
-    openFilesFor({id:F.id, floor:F.floor, release:F.release, request:F.request, status:"done"});
+    openFilesFor(F);
   }
 
   buildAgents(){
@@ -1158,11 +1152,6 @@ class FloorScene extends Phaser.Scene {
         // round to the monitor. Nobody is ever staged in the lounge.
         a.setAlpha(1); a.seen = true; a.bubble = null;
         this.standDown(a);
-        // Clickable -> interview this lead (their journal + a question), advisory.
-        a.setInteractive(new Phaser.Geom.Rectangle(-8,-15,16,22), Phaser.Geom.Rectangle.Contains);
-        a.on("pointerdown", ()=> openInterview(name));
-        a.on("pointerover", ()=>{ this.input.manager.canvas.style.cursor = "pointer"; });
-        a.on("pointerout", ()=>{ this.input.manager.canvas.style.cursor = "default"; });
         a.setScale(0); this.tweens.add({targets:a, scale:1.4, duration:400, delay:60*li, ease:"Back.out"});
         this.agents.set(name, a);
       });
@@ -1232,6 +1221,7 @@ class FloorScene extends Phaser.Scene {
     if (a.glowTween){ a.glowTween.stop(); a.glowTween = null; }
     if (!on){ a.glow.setAlpha(0).setVisible(false); return; }
     a.glow.setVisible(true).setAlpha(1);
+    if (calm()) return;                  // a steady halo still says "working"
     a.glowTween = this.tweens.add({targets:a.glow, alpha:{from:0.62,to:1},
       duration:760, yoyo:true, repeat:-1, ease:"Sine.inOut"});
   }
@@ -1257,19 +1247,6 @@ class FloorScene extends Phaser.Scene {
     if (a.sprite && a.char){ a._wf = 0; a.sprite.setFrame(a.char.front[0]); }
   }
 
-  // A discipline room is REBUILDING (a service deepening): pulse its glow + a
-  // floating "↻ rebuilding" tag so it reads at a glance, not just in the log.
-  pulseRoom(key){
-    const R = ROOMS[key]; if(!R || R.virtual) return;
-    const g = this.roomGlow[key];
-    if(g) this.tweens.add({targets:g, fillAlpha:{from:0.0,to:0.22}, duration:260,
-                           yoyo:true, repeat:2, ease:"Sine.inOut"});
-    const t = this.add.text(R.cx, R.y+20, "↻ rebuilding",
-      {fontFamily:"'PixelFont','Courier New'",fontSize:"9px",fontStyle:"bold",color:"#ffb05a"})
-      .setOrigin(0.5,0).setDepth(2000);
-    this.tweens.add({targets:t, y:t.y-14, alpha:{from:1,to:0}, duration:1400,
-                     ease:"Sine.out", onComplete:()=>t.destroy()});
-  }
   // A room "seats its crew" when it's in the LIVE set — the rooms currently producing
   // node telemetry. The real build runs stages concurrently (engineering can still be
   // heads-down while QA reviews), so this is a SET, not one active room: a room joins
@@ -1292,7 +1269,7 @@ class FloorScene extends Phaser.Scene {
     if (key) this.liveRooms.add(key);      // this room is now producing work
     // When the build advances to the NEXT phase, a worker from the finished room carries
     // the "work" over to the new room (the handoff). Only on a forward phase boundary.
-    const SEQ = ["product","architecture","engineering","qa","security","gate","vault"];
+    const SEQ = ["plan","engineering","review","gate","vault"];
     const ph = (k)=> (ENG_ROOMS.includes(k)||k==="engineering") ? "engineering" : k;
     const oi = SEQ.indexOf(ph(prev)), ni = SEQ.indexOf(ph(key));
     if (oi >= 0 && ni > oi) this.deliverWork(prev, key);
@@ -1312,7 +1289,7 @@ class FloorScene extends Phaser.Scene {
   // room. Called on a timer AND whenever the live set changes, so he reacts at once when
   // the first work lands or the room he's overseeing goes quiet.
   ctoPatrol(){
-    if (!this.cto || this._dead || this.ctoHold) return;         // held during a checkpoint
+    if (!this.cto || this._dead) return;
     if (this.cto.moveTween && this.cto.moveTween.isPlaying()) return;   // already walking
     const rooms = this.patrolRooms();
     if (!rooms.length){ if (this.ctoRoom !== null) this.sendCTO(null); return; }
@@ -1398,7 +1375,10 @@ class FloorScene extends Phaser.Scene {
   // then step into the destination. (Within-room moves stay direct — handled in walkTo.)
   corridorRoute(sx,sy,tx,ty){
     const near=(arr,v)=>arr.reduce((b,n)=>Math.abs(n-v)<Math.abs(b-v)?n:b, arr[0]);
-    const exitY=near(AISLE_HY,sy), entryY=near(AISLE_HY,ty), vx=near(AISLE_VX,(sx+tx)/2);
+    const exitY=near(AISLE_HY,sy), entryY=near(AISLE_HY,ty), 
+      lo=Math.min(exitY,entryY), hi=Math.max(exitY,entryY),
+      open=AISLE_VX.filter(v=>!Object.values(ROOMS).some(R=>!R.virtual && v>R.x && v<R.x1 && R.y<hi && R.y1>lo)),
+      vx=near(open.length?open:AISLE_VX,(sx+tx)/2);   // never switch rows through a two-cell room's walls
     const pts=[[sx,exitY]];                              // step out to the nearest horizontal aisle
     if (exitY!==entryY){ pts.push([vx,exitY],[vx,entryY],[tx,entryY]); }  // switch rows via a vertical aisle
     else { pts.push([tx,exitY]); }                       // same aisle -> straight along it
@@ -1563,7 +1543,8 @@ class FloorScene extends Phaser.Scene {
     const wa = this.workingAgents, CAP = {frontend:"Frontend", backend:"Backend", data:"Data"};
     const anyEngNamed = wa.has("Senior Engineer") || wa.has("Junior Engineer")
       || ENG_ROOMS.some(r => wa.has(CAP[r]+" Lead") || wa.has(CAP[r]+" Engineer"));
-    const leadUp = (room)=> wa.has((CAP[room]||"")+" Lead") || wa.has("Senior Engineer") || !anyEngNamed;
+    const leadUp = (room)=> wa.has((CAP[room]||"")+" Lead") || wa.has((CAP[room]||"")+" Engineer")
+      || wa.has("Senior Engineer") || !anyEngNamed;   // leads fold into their lane's Engineer
     const engUp  = (room)=> wa.has((CAP[room]||"")+" Engineer") || wa.has("Junior Engineer") || !anyEngNamed;
     const seat = (group, wants)=>{
       for (const s of (group||[])){
@@ -1574,16 +1555,15 @@ class FloorScene extends Phaser.Scene {
     };
     seat(this.techLeadGroup, leadUp);      // each lane's LEAD works while its lead node runs
     seat(this.poolGroup, engUp);           // each lane's ICs work while its engineer node runs
+    for (const w of (this.taskGroup||[]))  // a ticket worker exists only while in flight
+      if (w && w.bob && !w.working) this.deskRest(w, true, true);
     this.paintGlow();                      // and re-light the rooms for the new live set
   }
   // Every person on the floor (named leads + the engineering lanes), one iterator.
   *everyone(){
     for (const [,a] of this.agents) if (a && a.seen) yield a;
-    for (const s of [...(this.poolGroup||[]), ...(this.techLeadGroup||[])])
+    for (const s of [...(this.poolGroup||[]), ...(this.techLeadGroup||[]), ...(this.taskGroup||[])])
       if (s && s.bob && s.seen) yield s;    // the group arrays also hold workstations
-  }
-  standDownAll(){   // whole floor off the clock (checkpoints / done) — still at their desks
-    for (const a of this.everyone()) this.standDown(a);
   }
   deskSweep(){   // NOBODY roams: the sweep just walks anyone off-duty back to their own
     // desk if some animation left them adrift, and re-settles anyone with no mood.
@@ -1703,7 +1683,7 @@ class FloorScene extends Phaser.Scene {
   }
 
   spawnPickup(room, label){
-    const R = ROOMS[room] || ROOMS.product;
+    const R = ROOMS[room] || ROOMS.plan;
     const w = Math.max(64, label.length*7+18);
     const c = this.add.container(R.cx, R.floorY+24).setDepth(2000);
     c.add(this.add.rectangle(0,0,w,18,0xfffdf3).setStrokeStyle(2,PC.ink));
@@ -1752,7 +1732,7 @@ class FloorScene extends Phaser.Scene {
   flashGate(){
     this.tweens.add({targets:this.gateDoor, fillColor:{from:0x5a1820,to:0x0c1322},
       duration:520, onUpdate:(_t,o)=>this.gateDoor.setFillStyle(o.fillColor)});
-    this.cameras.main.shake(160, 0.004);
+    this.shake(160, 0.004);
   }
 
   openGateAndChest(){
@@ -1767,6 +1747,7 @@ class FloorScene extends Phaser.Scene {
       this.chestClosed.setVisible(false);
       this.chestOpen.setVisible(true).setScale(1,0);
       this.tweens.add({targets:this.chestOpen, scaleY:1, duration:300, ease:"Back.out"});
+      if (calm()){ this.chestGlow.fillAlpha = 0.3; return; }
       this.tweens.add({targets:this.chestGlow, fillAlpha:0.34, duration:400, yoyo:true,
         repeat:-1, ease:"Sine.inOut"});
       this.ring(this.chestPos.x, this.chestPos.y-12, 0xffd95e);
@@ -1794,37 +1775,18 @@ class FloorScene extends Phaser.Scene {
     this.layoutEngineering();
   }
 
-  // Per-area engineer counts: the IC pool distributed across the present areas ∝
-  // each area's unit weight (largest-remainder, ≥1 where the pool allows). null when
-  // there's no org telemetry yet.
+  // Per-area engineer counts. Without ticket telemetry every room keeps ONE baseline
+  // worker; once task events flow (taskMode) the ticket workers ARE the crew, so the
+  // baseline drops to 0. null when there's no org telemetry yet.
   engineeringLanes(){
     const list = (this.orgAreas||[]).map(a=>a&&a.area).filter(Boolean);
     if(!list.length) return null;
-    // Real per-area workload from the ownership map (units owned) = the IC demand.
-    const units={}; list.forEach(a=>units[a]=0);
-    for(const d of (this.orgDomains||[]))
-      if(d && (d.area in units)) units[d.area] += (d.units&&d.units.length)?d.units.length:0;
-    // Each role gets ONE required worker (its lead persona) — the always-on baseline.
-    // On TOP of that sits the EXTRA pool (poolN): the additional workers we can afford,
-    // which management hands out across roles by demand, deploying only as many as the
-    // work needs. So total crew = (1 per role) + min(demand, extra budget): the baseline
-    // grows on its own as the architect adds teams, and the extra number is what you set.
-    const icSlots=Math.max(0, this.poolN||0);              // extra worker budget (on top of 1/role)
-    const dem=list.map(a=>Math.max(0, units[a]));
-    const totalDem=dem.reduce((s,n)=>s+n,0);
-    const ics={}; list.forEach(a=>ics[a]=0);
-    if(icSlots>0 && totalDem>0){
-      if(totalDem<=icSlots){
-        list.forEach((a,i)=>{ ics[a]=dem[i]; });           // room to spare: one IC per owned unit
-      } else {                                              // oversubscribed: split slots by demand
-        const rem=[]; let used=0;
-        list.forEach((a,i)=>{ const raw=icSlots*dem[i]/totalDem; ics[a]=Math.floor(raw); used+=ics[a]; rem.push([a,raw-ics[a]]); });
-        rem.sort((p,q)=>q[1]-p[1]);
-        for(let k=0; used<icSlots && rem.length; k++,used++) ics[rem[k%rem.length][0]]++;
-      }
-    }
-    return list.map(a=>({area:a, ics:ics[a]||0, color:AREA_COLOR[a]||0xffc08a}));
+    const base = this.taskMode() ? 0 : 1;
+    return list.map(a=>({area:a, ics:base, color:AREA_COLOR[a]||0xffc08a}));
   }
+  taskMode(){ const F = FLOORS.get(this.proj.floor); return !!(F && F.tasks && F.tasks.seen); }
+  taskCap(spec){ const F = FLOORS.get(this.proj.floor);
+    return F ? taskState(F).limits[spec] : DEFAULT_LIMIT; }
 
   // Seat the engineers in their discipline ROOMS from current org + pool state.
   layoutEngineering(){
@@ -1855,41 +1817,19 @@ class FloorScene extends Phaser.Scene {
     for(const rk of ENG_ROOMS){
       if(perRoom[rk] && perRoom[rk].length) continue;
       const col=AREA_COLOR[rk]||0xffc08a;
-      perRoom[rk]=[{area:rk, color:col, lead:true}, {area:rk, color:col, lead:false}];
+      perRoom[rk]=[{area:rk, color:col, lead:true}, ...(this.taskMode()?[]:[{area:rk, color:col, lead:false}])];
     }
     let slot=12;
     for(const rk in perRoom){
       const R=ROOMS[rk]; if(!R) continue;
       const people=perRoom[rk];
       const lead=people.find(p=>p.lead), ics=people.filter(p=>!p.lead);
-      // create one seated worker (+desk) at (x,y); leads get the star + "<AREA> LEAD" badge.
-      const place=(p, x, y, faceUp)=>{
-        x=Math.round(x); y=Math.round(y);
-        const col6=p.color.toString(16).padStart(6,"0");
-        const tag=AREA_TAG[p.area]||p.area.slice(0,2).toUpperCase();
-        const k = p.lead ? kitFor("Tech-Lead "+p.area, hashStr((this.proj.id||'f')+"TL"+p.area)) : poolKit(slot);
-        k.accent=p.color;
-        const ws=this.makeWorkstation(x, y+16, p.color);
-        const s=this.makePerson(x, y, k); s.setScale(p.lead?1.45:1.3).setDepth(y).setAlpha(p.lead?1:0.94);
-        if (p.lead){
-          s.add(this.add.text(0,-39,"★",{fontFamily:"'PixelFont','Courier New'",fontSize:"10px",
-            color:"#ffd95e"}).setOrigin(0.5).setResolution(3));
-          this.pinBadge(s, tag+" LEAD", p.color, true);        // filled accent badge
-          if (faceUp && s.faceBack) s.faceBack();              // overseeing — faces up into the room
-        } else {
-          this.pinBadge(s, tag, p.color, false);               // every IC labelled too
-        }
-        s.home={x,y}; s.room=rk; s.idleSlot=slot++; s.seen=true; s.atDesk=true;
-        this.zzzLoop(s);
-        // Spawn AT the desk either way — heads-down if this lane is live, otherwise
-        // turned round with an idle mood.
-        if (this.roomLive(rk)) this.deskRest(s, true, true); else this.standDown(s);
-        (p.lead?this.techLeadGroup:this.poolGroup).push(s, ws);
-      };
+      const place=(p, x, y, faceUp)=>
+        this.seatWorker(rk, p, x, y, faceUp, slot++, p.lead?this.techLeadGroup:this.poolGroup);
       // ONE consistent desk grid for every room: centred columns, first row well BELOW
       // the room label so it's never covered. (PX=column pitch, SY=first-row Y, RP=row pitch.)
       const PX=84, SY=R.y+94, RP=50;
-      if (!ics.length && lead){
+      if (!ics.length && lead && !this.taskMode()){
         place(lead, R.cx, Math.round(R.y + R.h*0.52), true);   // ONLY the lead → centre the desk
       } else {
         const c2=Math.min(3, Math.max(1, ics.length));
@@ -1897,7 +1837,113 @@ class FloorScene extends Phaser.Scene {
           place(p, R.cx - bw/2 + c*PX, SY + r*RP, false); });   // centred IC grid (upper room)
         if (lead) place(lead, R.x1 - 50, R.y1 - 36, true);     // LEAD oversees from the bottom-right
       }
-      this.engLabels.push(this.bm(R.x1-8, R.y+8, "×"+people.length, 11, 0xffc08a, 1, 0).setDepth(28));
+      if (!this.taskMode())
+        this.engLabels.push(this.bm(R.x1-8, R.y+8, "×"+people.length, 11, 0xffc08a, 1, 0).setDepth(28));
+    }
+    this.rebuildTaskSprites();
+  }
+
+  // One seated worker (+desk) at (x,y): leads get the star + "<AREA> ENG" badge, ICs a
+  // tag badge, ticket workers (o.ticket) their ticket id + a model-tier pill. Returns
+  // {s, ws}; both are pushed onto `group`.
+  seatWorker(rk, p, x, y, faceUp, idleSlot, group, o){
+    o = o || {};
+    x=Math.round(x); y=Math.round(y);
+    const tag=AREA_TAG[p.area]||p.area.slice(0,2).toUpperCase();
+    const k = o.kit || (p.lead ? kitFor("Tech-Lead "+p.area, hashStr((this.proj.id||'f')+"TL"+p.area)) : poolKit(idleSlot));
+    k.accent=p.color;
+    const ws = o.desk===false ? null : this.makeWorkstation(x, y+16, p.color);
+    const s=this.makePerson(x, y, k);
+    s.setScale(o.scale || (p.lead?1.45:1.3)).setDepth(y).setAlpha(p.lead?1:0.94);
+    if (o.ticket){
+      this.pinBadge(s, o.ticket, p.color, false);                     // ticket id
+      const L = TIER_LETTER[o.tier];
+      if (L) this.pinBadge(s, L, TIER_COLOR[o.tier], true, -38);      // model: H / S / O
+    } else if (p.lead){
+      s.add(this.add.text(0,-39,"★",{fontFamily:"'PixelFont','Courier New'",fontSize:"10px",
+        color:"#ffd95e"}).setOrigin(0.5).setResolution(3));
+      this.pinBadge(s, tag+" ENG", p.color, true);        // filled accent badge
+      if (faceUp && s.faceBack) s.faceBack();              // overseeing — faces up into the room
+    } else {
+      this.pinBadge(s, tag, p.color, false);               // every IC labelled too
+    }
+    s.home={x,y}; s.room=rk; s.idleSlot=idleSlot; s.seen=true; s.atDesk=true;
+    this.zzzLoop(s);
+    // Spawn AT the desk either way — heads-down if this lane is live, otherwise
+    // turned round with an idle mood. A ticket worker exists only while in flight.
+    if (o.working || this.roomLive(rk)) this.deskRest(s, true, true); else this.standDown(s);
+    group.push(...(ws ? [s, ws] : [s]));
+    return {s, ws};
+  }
+
+  // Desk grid for a room's ticket workers, sized to the room's LIMIT so slots never move
+  // as workers come and go. Review is a double-width room whose Reviewer sits mid-room,
+  // so its workers use the right half.
+  taskGeom(room, cap){
+    const R = ROOMS[room];
+    const cx = room === "review" ? Math.round((R.cx + R.x1)/2) + 10 : R.cx;
+    let cols, px, rp, top, scale, desk = true;
+    if (cap <= 6){ cols = Math.min(3, Math.max(1, cap)); px = 84; rp = 50; top = R.y + 94; scale = 1.3; }
+    else if (cap <= 12){ cols = 4; px = 62; rp = 42; top = R.y + 70; scale = 1.05; }
+    else { cols = 5; px = 50; rp = 34; top = R.y + 56; scale = 0.85; desk = false; }
+    const at = (i)=>({ x: cx - (cols-1)*px/2 + (i%cols)*px, y: top + Math.floor(i/cols)*rp });
+    return {at, scale, desk};
+  }
+  addWorker(room, ticketId, tier, spec){
+    const R = ROOMS[room]; if (!R) return;
+    if (!this.taskSprites) this.taskSprites = new Map();
+    if (this.taskSprites.has(ticketId)) return;
+    const used = new Set([...this.taskSprites.values()].filter(w=>w.room===room).map(w=>w.slot));
+    let slot = 0; while (used.has(slot)) slot++;
+    const g = this.taskGeom(room, Math.max(this.taskCap(spec), slot+1)), pos = g.at(slot);
+    const color = AREA_COLOR[spec] || 0xffc08a;
+    const kit = poolKit(hashStr(ticketId) % 997);
+    const {s, ws} = this.seatWorker(room, {area:spec, color, lead:false}, pos.x, pos.y, false,
+      20 + slot, this.taskGroup, {scale:g.scale, desk:g.desk, working:true, kit, ticket:ticketId, tier});
+    s.setAlpha(0); this.tweens.add({targets:s, alpha:0.96, duration:240});
+    this.taskSprites.set(ticketId, {s, ws, room, slot, tier, spec});
+    this.updateTaskLabels();
+  }
+  killSprite(o){
+    if (!o) return;
+    if (o.bob) this.stopWalk(o);
+    this.setGlow(o, false); o._dead = true;
+    if (o.zzzEv){ o.zzzEv.remove(); o.zzzEv = null; }
+    if (o.chair){ o.chair.destroy(); o.chair = null; }
+    o.destroy();
+  }
+  removeWorker(ticketId){
+    const w = this.taskSprites && this.taskSprites.get(ticketId); if (!w) return;
+    this.taskSprites.delete(ticketId);
+    const done = ()=>{ this.killSprite(w.s); this.killSprite(w.ws);
+      this.taskGroup = this.taskGroup.filter(o=>o!==w.s && o!==w.ws); };
+    this.setGlow(w.s, false);
+    this.tweens.add({targets:[w.s, w.ws].filter(Boolean), alpha:0, duration:200, onComplete:done});
+    this.updateTaskLabels();
+  }
+  clearWorkers(){
+    for (const id of [...(this.taskSprites||new Map()).keys()]) this.removeWorker(id);
+  }
+  // Rebuild every ticket worker from the floor's task state (layout / rotate / restart).
+  rebuildTaskSprites(){
+    for (const w of (this.taskGroup||[])) this.killSprite(w);
+    this.taskGroup = []; this.taskSprites = new Map();
+    const F = FLOORS.get(this.proj.floor); if (!F || !F.tasks) { this.updateTaskLabels(); return; }
+    for (const sp of SPECIALTIES)
+      for (const w of F.tasks.active[sp]) this.addWorker(w.room, w.id, w.tier, sp);
+    this.updateTaskLabels();
+  }
+  // "active/limit  +N queued" in each ticket room's top-right corner.
+  updateTaskLabels(){
+    for (const o of (this.taskLabels||[])) o.destroy();
+    this.taskLabels = [];
+    const F = FLOORS.get(this.proj.floor); if (!F || !F.tasks || !F.tasks.seen) return;
+    const T = F.tasks;
+    for (const sp of SPECIALTIES){
+      const R = ROOMS[TASK_ROOM[sp]]; if (!R) continue;
+      const q = T.queue[sp].length;
+      const txt = `${T.active[sp].length}/${T.limits[sp]}` + (q ? `  +${q} queued` : "");
+      this.taskLabels.push(this.bm(R.x1-8, R.y+8, txt, 11, q ? 0xff9b5e : 0xffc08a, 1, 0).setDepth(28));
     }
   }
 
@@ -1939,8 +1985,7 @@ const GAME = new Phaser.Game({
 });
 
 // Rotating the phone swaps which floorplan fits, so re-lay the world and replay every
-// floor scene onto it. A scene restart is already how a new release redraws a floor,
-// so the floors rebuild from the state the client is holding.
+// floor scene onto it. The floors rebuild from the state the client is holding.
 window.matchMedia(PORTRAIT_MQ).addEventListener("change", ()=>{
   if (!applyFloorplan()) return;
   // setGameSize, not resize: resize() leaves displaySize's aspect ratio on the old
@@ -1976,46 +2021,31 @@ let ACTIVE = null;          // the floor currently shown
 
 function floorKey(f){ return "floor-"+f; }
 
-async function newProject(req, mode, supervised, backend, packs, extra){
+async function newProject(req, extra){
+  const mode = "assistant";
   await bootReady;  // shared textures must exist before a FloorScene builds
   let resp;
   try {
     resp = await fetch("/api/projects", {
       method:"POST", headers:postHeaders(),
-      body: JSON.stringify({request:req, mode, supervised, backend, packs, ...(extra||{})}),
+      body: JSON.stringify({request:req, ...(extra||{})}),
     }).then(r=>r.json());
   } catch(err){ appendLogDom("bad","ERR "+err); return; }
+  if (!resp || !resp.id){ appendLogDom("bad","ERR "+((resp && resp.error)||"build did not start")); return; }
 
   const floor = resp.floor;
-  const release = resp.release || 1;
-  const slots = (extra && extra.max_slots) || 1;
-  const openStream = (F) => openFloorStream(F);
-  const existing = FLOORS.get(floor);
-  if (existing){
-    // NEW RELEASE on an existing project: reset per-release state + replay the scene.
-    if (existing.es){ try{ existing.es.close(); }catch(_){} }
-    Object.assign(existing, {
-      id:resp.id, release, releases:(existing.releases||1)+1, request:req, mode, backend,
-      log:[], progress:[], gates:{}, org:null, cp:null, awaiting:false, status:"running", passed:false,
-      slots, journal:[], seenUris:new Set(), _agrp:null, _svcOpen:null,
-    });
-    const sc = GAME.scene.getScene(floorKey(floor));
-    if (sc) sc.scene.restart({floor, id:resp.id, request:req, mode, slots});
-    else GAME.scene.add(floorKey(floor), FloorScene, true, {floor, id:resp.id, request:req, mode, slots});
-    switchToFloor(floor);
-    openStream(existing);
-    return;
-  }
-  // NEW PROJECT: a fresh floor.
+  const slots = 1;
   const F = {
-    id: resp.id, floor, release, releases:1, request:req, mode, backend, scene:null,
-    log:[], progress:[], gates:{}, org:null, cp:null, awaiting:false, status:"running", passed:false,
-    slots, journal:[], seenUris:new Set(),
+    id: resp.id, floor, request:req, title:resp.title || req, mode, backend:"", scene:null,
+    log:[], progress:[], gates:{}, org:null, status:"running", passed:false,
+    slots, seenUris:new Set(), phase:"", stopping:"",
+    tokenCap:(extra && extra.token_cap) || null, maxFix:3, cursor:0,
   };
+  setTaskLimits(F, extra && extra.workers);
   FLOORS.set(floor, F);
   GAME.scene.add(floorKey(floor), FloorScene, true, {floor, id:resp.id, request:req, mode, slots});
   switchToFloor(floor);
-  openStream(F);
+  openFloorStream(F);
 }
 
 function switchToFloor(floor){
@@ -2031,40 +2061,173 @@ function switchToFloor(floor){
   const F = FLOORS.get(floor);
   rebuildLog(F);
   rebuildProgress(F);
+  refreshTickets(F);
   renderGatesMini(F.gates);
-  if (F.platprog) renderPlatProg(F.platprog);   // platform floors show service chips
   updateHud(F);
-  if (F.awaiting) showCheckpoint(F); else hideCheckpoint();
   renderElevator();
+  hideCtlPanel();
+  renderControls();
+  if (window.Insight) Insight.onFloor(F);
 }
 
 // ---- per-floor event routing ----------------------------------------------
+// Rooms and cast labels from OLD builds' stored/replayed telemetry -> the current floor
+// (product/architecture -> plan, qa/security -> review; the per-role agents -> Planner/Reviewer,
+// each lane's lead -> that lane's Engineer).
+const LEGACY_ROOM = {product:"plan", architecture:"plan", qa:"review", security:"review"};
+const LEGACY_AGENT = {
+  "Stakeholder Proxy":"Planner","Product Manager":"Planner","Criteria Critic":"Planner",
+  "Program Manager":"Planner","Principal Architect":"Planner",
+  "AppSec Engineer":"Reviewer","Audit & Compliance":"Reviewer","Supply-chain Reviewer":"Reviewer",
+  "QA Engineer":"Reviewer","SDET":"Reviewer",
+  "Frontend Lead":"Frontend Engineer","Backend Lead":"Backend Engineer","Data Lead":"Data Engineer",
+};
+// ---- ticket crew state (per floor; pure, so replay and live events share it) ----------
+function taskState(F){
+  if (!F.tasks){
+    const per = (mk)=>Object.fromEntries(SPECIALTIES.map(sp=>[sp, mk()]));
+    F.tasks = {limits:per(()=>DEFAULT_LIMIT), active:per(()=>[]), queue:per(()=>[]),
+               tickets:new Map(), seen:false};
+  }
+  return F.tasks;
+}
+function setTaskLimits(F, w){
+  const T = taskState(F);
+  for (const sp of SPECIALTIES){
+    const n = Number(w && w[sp]);
+    if (Number.isFinite(n) && n >= 0) T.limits[sp] = Math.min(MAX_LIMIT, Math.floor(n));
+  }
+}
+function ticketRow(T, id){
+  let r = T.tickets.get(id);
+  if (!r){ r = {id, title:"", specialty:"", difficulty:"", tier:"", depends_on:[], status:"todo"}; T.tickets.set(id, r); }
+  return r;
+}
+function taskClear(F){
+  if (!F.tasks) return;
+  for (const sp of SPECIALTIES){ F.tasks.active[sp] = []; F.tasks.queue[sp] = []; }
+}
+// Apply one `task` event -> {added, removed, layout}: the workers to seat / retire. A
+// start over the specialty's limit queues (no sprite) until a finished worker frees a seat.
+function taskApply(F, ev){
+  const T = taskState(F), id = ev.ticket_id, out = {added:[], removed:[], layout:false};
+  if (!id) return out;
+  const sp = SPECIALTIES.includes(ev.specialty) ? ev.specialty : "backend";
+  const row = ticketRow(T, id);
+  if (ev.title) row.title = ev.title;
+  row.specialty = sp; if (ev.tier) row.tier = ev.tier;
+  const drop = (arr)=>{ const i = arr.findIndex(w=>w.id===id); if (i < 0) return false; arr.splice(i, 1); return true; };
+  if (ev.phase === "start"){
+    row.status = "in-progress";
+    if (!T.seen){ T.seen = true; out.layout = true; }
+    if (!T.active[sp].some(w=>w.id===id) && !T.queue[sp].some(w=>w.id===id)){
+      const w = {id, tier:ev.tier || row.tier, spec:sp, room:TASK_ROOM[sp]};
+      if (T.active[sp].length < T.limits[sp]){ T.active[sp].push(w); out.added.push(w); }
+      else T.queue[sp].push(w);
+    }
+  } else {
+    row.status = ev.phase === "failed" ? "failed" : "done";
+    if (drop(T.active[sp])){
+      out.removed.push(id);
+      const nxt = T.queue[sp].shift();
+      if (nxt){ T.active[sp].push(nxt); out.added.push(nxt); }
+    } else drop(T.queue[sp]);
+  }
+  return out;
+}
+// TICKETS tab: id, title, specialty, difficulty→model letter, deps, status. Text is set
+// with textContent — ticket titles are model output.
+function renderTickets(F){
+  const ul = document.getElementById("tickets"); if (!ul) return;
+  ul.innerHTML = "";
+  const rows = F && F.tasks ? [...F.tasks.tickets.values()] : [];
+  if (!rows.length){
+    const li = document.createElement("li"); li.className = "tk-empty";
+    li.textContent = "No tickets yet. The Planner splits the request into tickets; each one shows its owner, difficulty and status here."; ul.appendChild(li); return;
+  }
+  rows.sort((a, b)=>a.id.localeCompare(b.id, undefined, {numeric:true}));
+  for (const r of rows){
+    const li = document.createElement("li"); li.className = "st-" + r.status; li.dataset.id = r.id;
+    const mk = (cls, txt)=>{ const e = document.createElement("span"); e.className = cls; e.textContent = txt; li.appendChild(e); };
+    mk("tk-id", r.id); mk("tk-title", r.title || "(untitled)"); mk("tk-st", r.status);
+    const tier = r.tier || DIFF_TIER[r.difficulty] || "";
+    const bits = [r.specialty || "?"];
+    if (r.difficulty || tier) bits.push(`${r.difficulty || "?"} → ${TIER_LETTER[tier] || "?"}`);
+    bits.push(r.depends_on && r.depends_on.length ? "deps: " + r.depends_on.join(", ") : "no deps");
+    mk("tk-meta", bits.join(" · "));
+    ul.appendChild(li);
+  }
+}
+function refreshTickets(F){
+  const sel = document.querySelector(".log-tab.sel");
+  if (sel && sel.dataset.tab === "tickets") renderTickets(F);
+}
+
+function modernEvent(ev){
+  const room = LEGACY_ROOM[ev.room], agent = LEGACY_AGENT[ev.agent];
+  if (!room && !agent) return ev;
+  return Object.assign({}, ev, room ? {room} : {}, agent ? {agent} : {});
+}
 function routeEvent(floor, ev){
   const F = FLOORS.get(floor); if (!F) return;
+  ev = modernEvent(ev);
   const S = F.scene, isActive = floor === ACTIVE;
   switch(ev.type){
     case "project":
       F.request = ev.request; F.mode = ev.mode; F.backend = ev.backend || F.backend;
       F.slots = ev.slots || 1;
+      if (ev.workers){ setTaskLimits(F, ev.workers); if (S) S.rebuildTaskSprites(); }
       if (S) S.setPool(F.slots);
+      if ("token_cap" in ev) F.tokenCap = ev.token_cap;
+      if ("max_fix_attempts" in ev) F.maxFix = ev.max_fix_attempts;
+      if (ev.build) F.build = ev.build;
       if (isActive) updateHud(F);
       break;
+    case "stopping":               // Stop / Pause requested; the build halts at its next checkpoint
+      if (F.status !== "done"){ F.stopping = ev.kind || "stopped"; if (isActive) renderControls(); }
+      break;
+    case "resumed":                // Resume / Retry with…: the floor is back at work
+      if ("token_cap" in ev) F.tokenCap = ev.token_cap;
+      if ("max_fix_attempts" in ev) F.maxFix = ev.max_fix_attempts;
+      markResumed(F);
+      logTo(F, "gold", "── RESUMED ──");
+      break;
     case "narrate": logNarrate(F, ev.text); break;
-    case "svc": logService(F, ev); break;   // platform: one box per service, updated in place
+    case "task": {                 // one ticket's worker started / finished / failed
+      const r = taskApply(F, ev);
+      if (S){
+        if (r.layout) S.layoutEngineering();            // first ticket: baseline workers give way
+        for (const id of r.removed) S.removeWorker(id);
+        for (const w of r.added) S.addWorker(w.room, w.id, w.tier, w.spec);
+        S.updateTaskLabels();
+      }
+      const lbl = `${ev.ticket_id}${ev.title ? " "+ev.title : ""}`;
+      if (ev.phase === "start") logTo(F, "hot", `▸ ${lbl} (${ev.specialty}${TIER_LETTER[ev.tier] ? ", "+TIER_NAME[ev.tier] : ""})`);
+      else logTo(F, ev.phase === "failed" ? "bad" : "good", `${ev.phase === "failed" ? "✕" : "✓"} ${lbl}`);
+      if (isActive) refreshTickets(F);
+      break;
+    }
+    case "ticket": {               // a planned ticket (Planner artifact) for the Tickets tab
+      if (ev.retired){               // a re-plan dropped it: off the board
+        taskState(F).tickets.delete(ev.id);
+        if (isActive) refreshTickets(F);
+        break;
+      }
+      const row = ticketRow(taskState(F), ev.id);
+      // A tier already observed from a task event is what the ticket really ran on.
+      Object.assign(row, {title:ev.title, specialty:ev.specialty, difficulty:ev.difficulty,
+        tier:row.tier || ev.tier || DIFF_TIER[ev.difficulty] || "", depends_on:ev.depends_on || []});
+      if (isActive) refreshTickets(F);
+      break;
+    }
     case "limitwait":              // provider usage limit: global pause banner
       showLimitToast(ev.until);
       break;
-    case "platprog":               // platform: per-service progress for the HUD
-      F.platprog = ev;
-      if (isActive) renderPlatProg(ev);
-      break;
-    case "rebuild":                // a service is deepening — pulse its room
-      if (S && ev.room) S.pulseRoom(ev.room);
-      break;
     case "stage":
       if (S) S.setActiveRoom(ev.room, true);   // new phase boundary → reset the live crew
-      resetStage(F);                            // new stage → fresh artifact/journal buckets
-      logTo(F, "gold", "── "+ev.label+" ──"); break;   // Progress gets the stage's ✓ cap at its checkpoint
+      closeStage(F);                            // the previous stage's ✓ row on Progress
+      F.stageLabel = ev.label;
+      logTo(F, "gold", "── "+ev.label+" ──"); break;
     case "agent": if (S) S.agentWork(ev.agent); break;
     case "active": {
       // LIVE per-node telemetry: a real graph node STARTED (seat its agent for the whole
@@ -2072,9 +2235,6 @@ function routeEvent(floor, ev){
       // so the office shows who is genuinely working RIGHT NOW — not the whole room.
       const phase = ev.phase || "pulse";     // legacy no-phase "active" = a room pre-seat
       if (S) S.nodeTelemetry(ev.room, ev.agent, phase);
-      // `quiet` = floor-only telemetry: a platform build already narrates every node as a
-      // per-service `svc` box, so logging it again here would double every line.
-      if (ev.quiet) break;
       if (phase === "finish"){
         if (ev.agent) agentActivity(F, ev.room, ev.agent, true, ev.summary);   // box → done
         else if (ev.step) logTo(F, "good", "✓ "+ev.step);
@@ -2123,82 +2283,50 @@ function routeEvent(floor, ev){
       break;
     case "files":
       break;   // file count is read live from the repo view, not cached on F
-    case "checkpoint": {
-      // `phase`/`route`/`state_sha` are the pause's provenance (WHERE in the pipeline,
-      // WHICH state); `actions` is the per-button consequence copy from the server.
-      F.cp = {title:ev.title, summary:ev.summary, boundary:ev.boundary,
-              phase:ev.phase||"", route:ev.route||"", state_sha:ev.state_sha||"",
-              actions:ev.actions||null};
-      // Stage outcome -> the Progress tab as a COLLAPSIBLE row: the summary states what
-      // was completed (the artifact breakdown), and expanding lists it + the agents'
-      // journal notes (what specifically each lead produced) + the raw count.
-      const bd = kindBreakdown(F.stageArts);
-      const desc = (ev.summary||"").trim();   // T3 descriptive caption of the stage
-      const head = "✓ "+(ev.title||ev.boundary||"stage")+" finished"
-        + (desc ? " — "+desc : (bd.length ? " — "+bd.join(" · ") : ""));
-      // Body: the itemised breakdown + each agent's descriptive caption (not a repeat of
-      // the header — the header is the T3 prose, the body is the specifics).
-      const lines=[];
-      if(bd.length) lines.push("Produced: "+bd.join(", "));
-      const says=F.stageSays||{};
-      for(const ag in says) lines.push(ag+" — "+says[ag]);
-      logProgress(F, "good", head, lines); break;
-    }
-    case "await_decision":
-      F.awaiting = true; F.cpIndex = ev.checkpoint;
-      // AI expert advisors (gated release checkpoint): ride into the modal. The
-      // NOTE says why the panel is absent when it is — an empty panel must not read
-      // as "everyone approved". `spend` is the advisory cost/elapsed context.
-      F.cp = Object.assign({}, F.cp, {advisors: ev.advisors || [],
-                                      advisorsNote: ev.advisors_note || "",
-                                      spend: ev.spend || null,
-                                      // the stage's artifacts are frozen at the pause
-                                      arts: (F.stageArts || []).slice()});
-      // Autopilot PROPOSAL: carry the panel's request so the modal offers an edit box.
-      if (ev.boundary === "autopilot_proposal")
-        F.cp = Object.assign({}, F.cp, {boundary: ev.boundary, request: ev.request || ""});
-      if (Array.isArray(ev.journal)) F.journal = ev.journal;
-      renderElevator();
-      if (S){ S.spotlightCTO(true); S.standDownAll(); }   // whole floor off duty while the CTO decides
-      if (isActive) showCheckpoint(F); break;
-    case "resolved": {
-      F.awaiting = false; renderElevator();
-      // three-way verdict: approve (green) · needs_changes (gold) · reject (red)
-      const ap = ev.decision === "approve", ch = ev.decision === "needs_changes";
-      const txt = ap?"APPROVED":(ch?"CHANGES":"REJECTED");
-      logProgress(F, ap?"good":(ch?"hot":"bad"), "CTO "+txt);
-      if (S){ S.spotlightCTO(false);
-        if (S.activeRoomKey) S.staffRoom(S.activeRoomKey);   // back to work
-        const col = ap?0x5ddc7a:(ch?0xffcf52:0xff5d6c);
-        const hex = ap?"#9dffbf":(ch?"#ffe6a3":"#ffb3ba");
-        S.hop(S.cto, ap?2:1); S.ring(S.cto.x, S.cto.y-10, col);
-        S.burst(S.cto.x, S.cto.y-10, [col,0xffffff], 12);
-        S.floatText(S.cto.x, S.cto.y-30, txt, hex, 13);
-        if (ev.decision === "reject") S.shake(280,0.01); }
-      if (isActive) hideCheckpoint(); break;
-    }
     case "release":
       if (S){ S.openGateAndChest(); S.stampGate(true); S.celebrate(); S.banner("SHIPPED!", 0x5ddc7a); }
       logTo(F, "gold", "RELEASED -> "+(ev.uri||"artifact"));
       logProgress(F, "good", "★ SHIPPED — "+(ev.uri||"artifact")); break;
     case "halt":
+      if (OPERATOR_STOP.has(ev.phase)){
+        logTo(F, "gold", (ev.phase === "paused" ? "PAUSED" : "STOPPED")+" at a checkpoint");
+        logProgress(F, "gold", "❚❚ "+(ev.phase === "paused" ? "PAUSED" : "STOPPED")+" — resumable");
+        break;
+      }
       if (S){ S.flashGate(); S.stampGate(false); }
       logTo(F, "bad", "HELD: "+ev.reason);
       logProgress(F, "bad", "✕ HELD — "+ev.reason); break;
-    case "done":
-      F.status = "done"; F.passed = !!ev.passed; renderElevator();
+    case "done": {
+      closeStage(F);
+      F.status = "done"; F.passed = !!ev.passed; F.stopping = "";
+      F.phase = ev.passed ? "passed" : (ev.phase || "halted");
+      renderElevator();
+      if (isActive) renderControls();
+      taskClear(F); if (S) S.clearWorkers();
+      const opStop = OPERATOR_STOP.has(ev.phase);
       // Build's over: nobody is working, so everyone heads to the LOUNGE
       // (staffRoom(null) marks no room active and routes idle folks there).
-      if (S){ S.staffRoom(null); if (!ev.passed){ S.gloom(); S.banner("HELD AT THE GATE", 0xff5d6c); } }
+      if (S){ S.staffRoom(null);
+        if (opStop) S.banner(ev.phase === "paused" ? "PAUSED" : "STOPPED", 0xffcf52);
+        else if (!ev.passed){ S.gloom(); S.banner("HELD AT THE GATE", 0xff5d6c); } }
+      if (opStop){
+        if (isActive) hideCtlPanel();     // the "pausing…" note is answered
+        logTo(F, "gold", "Build "+ev.phase+" — Resume picks up where it left off.");
+        logProgress(F, "gold", "■ Build "+ev.phase+" — resumable.");
+        break;
+      }
+      if (window.Notify) Notify.buildEnded(F, ev);
       logTo(F, ev.passed?"good":"bad",
         ev.passed?"Build complete — shipped.":"Build halted — nothing shipped.");
       logProgress(F, ev.passed?"good":"bad",
         ev.passed?"■ Build complete — shipped.":"■ Build halted — nothing shipped."); break;
+    }
   }
+  if (window.Insight) Insight.onEvent(F, ev, isActive);   // meter · queue · halt panel / run card
 }
 
 // =========================================================================== //
-//  DOM: quest log, gates-mini, HUD, elevator, checkpoint modal                //
+//  DOM: quest log, gates-mini, HUD, elevator                                  //
 // =========================================================================== //
 function logClass(t){   // classify BEFORE stripping, so server emoji still tint the row
   if(/✅|💰|green|shipped|released|complete/i.test(t)) return "good";
@@ -2218,9 +2346,10 @@ function showLimitToast(until){
   if (!until || until <= now) return;
   let t = document.getElementById("limit-toast");
   if (!t){
-    t = document.createElement("div"); t.id = "limit-toast";
+    t = document.createElement("div"); t.id = "limit-toast"; t.setAttribute("role", "status");
     const msg = document.createElement("span"); msg.id = "limit-toast-msg";
     const x = document.createElement("button"); x.textContent = "✕";
+    x.type = "button"; x.title = "Dismiss"; x.setAttribute("aria-label", "Dismiss the usage-limit notice");
     x.onclick = ()=>{ if (t._iv) clearInterval(t._iv); t.remove(); };
     t.appendChild(msg); t.appendChild(x);
     document.body.appendChild(t);
@@ -2359,7 +2488,7 @@ function kindBreakdown(items){
   return order.map(b=> b+(c[b]>1?" ×"+c[b]:""));
 }
 // EVENT LOG = one bordered BOX per agent. The box HEADER is the activity line
-// ("▸ PRODUCT · Product Manager working" → "✓ …" when done); the BODY holds that agent's
+// ("▸ PLAN · Planner working" → "✓ …" when done); the BODY holds that agent's
 // response — a descriptive caption (their T3/journal note) plus what they produced (their
 // narrate output and each artifact with its content one-liner). One border around the
 // whole thing; the response is shown, not hidden behind a disclosure.
@@ -2435,7 +2564,6 @@ function logAct(F, ev){
 function logArtifact(F, ev){
   const base=artBase(ev.label), agent=ev.agent||"(system)", detail=ev.detail||"";
   (F.stageArts=F.stageArts||[]).push({kind:ev.kind||base, base, label:ev.label, agent, detail});
-  if((ev.kind||"")==="feature_diff") F.hasCode=true;   // code exists -> the checkpoint can offer to show it
   const g=agentBox(F, agent);
   g.items.push({base, label:ev.label, detail});
   if(F.floor===ACTIVE) refreshAgentBox(g);
@@ -2447,146 +2575,28 @@ function logSay(F, ev){
   const g=(F._agrp||{})[ev.agent];
   if(g && ev.text && g.cap!==ev.text){ g.cap=ev.text; if(F.floor===ACTIVE) refreshAgentBox(g); }
 }
-// New STAGE: reset only the per-stage buckets that feed the PROGRESS summary; the agent
-// boxes are build-global (each agent appears once, filling in as its work lands).
-function resetStage(F){ F.stageArts=[]; F.stageSays={}; }
-// ---- Platform EVENT boxes: one bordered box PER pipeline event -----------------
-// A platform build streams each service's pipeline as `svc` events. Each event is its
-// OWN box (not one box per service): a stage OPENS a box when it starts (header
-// "▸ WEB · designing the system", empty body) and the box is FINALISED with what it
-// did (green "✓ …" header + a one-line body) when that stage ends. Service kickoff,
-// each pass result, rebuilds, critiques and the service's completion each land as
-// their own box too — so the log reads as a running list of started/finished events.
-// The "more details" that live behind a box's caret — the specifics the agent recorded.
-function _evExtras(g){
-  const x=[];
-  for(const a of (g.arts||[])){                 // WHAT the agent produced, content first
-    const label=String(a.kind||"").replace(/_/g," ");
-    if(a.detail) x.push("⊞ "+label+": "+a.detail);
-    else x.push("⊞ "+label+(a.n>1?" ×"+a.n:""));
+// A stage's outcome -> the Progress tab as a COLLAPSIBLE row: what it produced, and
+// each agent's note. Called when the next stage opens and when the build ends; the
+// agent boxes are build-global (each agent appears once, filling in as work lands).
+function closeStage(F){
+  if (F.stageLabel){
+    const bd = kindBreakdown(F.stageArts), lines = [];
+    if (bd.length) lines.push("Produced: "+bd.join(", "));
+    const says = F.stageSays || {};
+    for (const ag in says) lines.push(ag+" — "+says[ag]);
+    logProgress(F, "good", "✓ "+F.stageLabel+" finished"+(bd.length ? " — "+bd.join(" · ") : ""), lines);
   }
-  for(const c of (g.concerns||[])) x.push("⚠ "+c);
-  for(const a of (g.assumptions||[])) x.push("• "+a);
-  for(const b of (g.body||[])) x.push(b);
-  return x;
-}
-function renderEvBox(g){
-  const li=document.createElement("li");
-  li.className="agent-box ev-box"+(g.tone==="good"?" done":g.tone==="bad"?" held":"");
-  const live = (g.kind==="agent"||g.kind==="stage");   // ▸ while working, ✓ once done
-  const headText = live ? ((g.done?"✓ ":"▸ ")+g.title) : g.title;
-  const main = g.summary || g.did || "";     // the SPECIFIC, always-visible context line
-  const extras = _evExtras(g);               // the MORE details, revealed by the caret
-  if(extras.length){                          // collapsible: a chevron opens the specifics
-    const d=document.createElement("details"); d.className="ev-det";
-    const s=document.createElement("summary"); s.className="ev-head";
-    s.textContent=deEmoji(headText+(main?" — "+main:""));
-    d.appendChild(s);
-    const bd=document.createElement("div"); bd.className="agent-body";
-    for(const ln of extras){ const e=document.createElement("div"); e.className="agent-item";
-      e.textContent=deEmoji(ln); bd.appendChild(e); }
-    d.appendChild(bd); li.appendChild(d);
-  } else {                                     // no extra specifics → header (+ the main line)
-    const head=document.createElement("div"); head.className="agent-head";
-    head.textContent=deEmoji(headText); li.appendChild(head);
-    if(main){ const bd=document.createElement("div"); bd.className="agent-body";
-      const e=document.createElement("div"); e.className="agent-item"; e.textContent=deEmoji(main);
-      bd.appendChild(e); li.appendChild(bd); }
-  }
-  return li;
-}
-function refreshEvBox(g){
-  if(!g.el) return;
-  inLog(()=>{ const n=renderEvBox(g); g.el.replaceWith(n); g.el=n; });
-}
-// Append one event box (every event is a fresh box).
-function pushEvBox(F, g){
-  g.evbox=true; g.body=g.body||[]; g.assumptions=g.assumptions||[]; g.concerns=g.concerns||[]; g.arts=g.arts||[];
-  F.log.push(g); if(F.log.length>240) F.log.shift();
-  if(F.floor===ACTIVE) inLog((ul)=>{ if(!ul) return; g.el=renderEvBox(g); ul.appendChild(g.el); });
-  return g;
-}
-// Fold an agent's reported specifics (journal summary + assumptions/concerns/artifacts)
-// into its box.
-function _mergeNote(g, ev){
-  if(ev.summary) g.summary=ev.summary;
-  for(const c of (ev.concerns||[])) if(g.concerns.indexOf(c)<0) g.concerns.push(c);
-  for(const a of (ev.assumptions||[])) if(g.assumptions.indexOf(a)<0) g.assumptions.push(a);
-  // Each agent box gets ONE note carrying its produced artifacts (kind + content
-  // one-liner) — set them directly (the last note wins if a node re-runs).
-  if(ev.artifacts && ev.artifacts.length) g.arts=ev.artifacts.slice(0, 12);
-}
-// Finalise any of a service's still-open agent boxes (e.g. when a pass or the build ends).
-function closeOpenAgents(F, svc){
-  const o=F._svcOpen||{}, pfx=svc+"|";
-  for(const k in o){ const g=o[k];
-    if(k.indexOf(pfx)===0 && g && !g.done){ g.done=true; g.tone="good"; if(F.floor===ACTIVE) refreshEvBox(g); o[k]=null; } }
-}
-// Apply one `svc` event → a box. EACH AGENT ACTION is its own box: it opens ("▸ working")
-// when the agent's node starts and fills ("✓ …") with what it did when the node finishes —
-// its journal summary (else a role verb), with assumptions/concerns/artifacts behind the
-// caret. Service kickoff, passes, rebuilds, the critic and completion are their own boxes.
-function logService(F, ev){
-  const svc=ev.service||"service", SVC=svc.toUpperCase();
-  F._svcOpen=F._svcOpen||{};
-  switch(ev.phase){
-    case "start":
-      pushEvBox(F, {kind:"marker", tone:"", done:true,
-        title:"▶ "+SVC+" — building"+(ev.desc?" "+ev.desc:"")});
-      break;
-    case "agent_start": {                 // an agent BEGAN its step → open its box
-      const key=svc+"|"+(ev.node||ev.agent);
-      F._svcOpen[key]=pushEvBox(F, {kind:"agent", tone:"", done:false,
-        title:SVC+" · "+(ev.agent||"agent")});
-      break;
-    }
-    case "agent_done": {                  // the agent FINISHED → fill its box with what it did
-      const key=svc+"|"+(ev.node||ev.agent);
-      let g=(F._svcOpen||{})[key];
-      if(!g) g=pushEvBox(F, {kind:"agent", tone:"", done:false, title:SVC+" · "+(ev.agent||"agent")});
-      _mergeNote(g, ev);
-      if(!g.summary && ev.did) g.summary=ev.did;   // fall back to the role verb
-      g.done=true; g.tone="good";
-      if(F._svcOpen) F._svcOpen[key]=null;
-      if(F.floor===ACTIVE) refreshEvBox(g);
-      break;
-    }
-    case "rebuild":
-      closeOpenAgents(F, svc);
-      pushEvBox(F, {kind:"marker", tone:"", done:true,
-        title:"↻ "+SVC+" — rebuilding · pass "+(ev.passno||"?")});
-      break;
-    case "pass_result":
-      closeOpenAgents(F, svc);
-      pushEvBox(F, {kind:"marker", tone:ev.passed?"good":"bad", done:true,
-        title:(ev.passed?"✓ ":"✗ ")+SVC+" — pass "+(ev.passno||"?")
-          +(ev.passed?" · gates green":" · held at the gate")});
-      break;
-    case "critic":
-      pushEvBox(F, {kind:"marker", tone:ev.complete?"good":"", done:true,
-        title:ev.complete? "✦ "+SVC+" — approved: technically complete"
-          : "• "+SVC+" — needs more work",
-        did: ev.complete? "" : (ev.detail||"")});
-      break;
-    case "done":
-      closeOpenAgents(F, svc);
-      pushEvBox(F, {kind:"marker", tone:ev.passed?"good":"bad", done:true,
-        title:(ev.passed?"✓ ":"✗ ")+SVC+" — "+(ev.passed?"built":"held at the gate")
-          +" · "+(ev.passes||1)+" pass"+((ev.passes||1)>1?"es":""),
-        body:(ev.files||[]).map(f=>"⊞ "+svc+"/"+f)});
-      break;
-  }
+  F.stageLabel = null; F.stageArts = []; F.stageSays = {};
 }
 function rebuildLog(F){
   const ul=document.getElementById("log"); ul.innerHTML="";
   for (const e of F.log){
     if(e.box){ e.el=renderAgentBox(e); ul.appendChild(e.el); }
-    else if(e.evbox){ e.el=renderEvBox(e); ul.appendChild(e.el); }
     else ul.appendChild(rowNode(e.cls, e.text, e.lines||null));
   }
   scrollLogToEnd();          // a floor switch always lands you on the newest activity
 }
-// The high-level PROGRESS tab: one collapsible row per stage / milestone. The summary
+// The high-level PROGRESS tab: one collapsible row per stage. The summary
 // carries the short "what was completed" statement; expanding shows the specifics.
 function logProgress(F, cls, text, lines){
   (F.progress = F.progress || []).push({cls,text,lines:(lines&&lines.length)?lines:null});
@@ -2605,64 +2615,44 @@ function rebuildProgress(F){
 // Switch the quest-log panel between the LIVE feed and the PROGRESS skim.
 function selectLogTab(tab){
   const F = FLOORS.get(ACTIVE);
-  document.querySelectorAll(".log-tab").forEach(b=>b.classList.toggle("sel", b.dataset.tab===tab));
-  const live=document.getElementById("log"), prog=document.getElementById("progress");
-  if (live) live.style.display = tab==="progress" ? "none" : "";
-  if (prog) prog.style.display = tab==="progress" ? "" : "none";
+  document.querySelectorAll(".log-tab").forEach(b=>{
+    b.classList.toggle("sel", b.dataset.tab===tab);
+    b.setAttribute("aria-pressed", String(b.dataset.tab===tab));
+  });
+  for (const [t, id] of [["live","log"], ["progress","progress"], ["tickets","tickets"]]){
+    const el = document.getElementById(id); if (el) el.style.display = t===tab ? "" : "none";
+  }
   if (F && tab==="progress") rebuildProgress(F);
+  if (F && tab==="tickets") renderTickets(F);
   // Nothing was measurable while the live list was hidden, so restore the state the
   // tab was left in: re-pin if following, otherwise put the pill back.
-  if (tab==="progress") showLogJump(false);
+  if (tab!=="live") showLogJump(false);
   else if (logFollow) scrollLogToEnd();
   else showLogJump(true);
 }
+const GATE_MARK = {pass:"✓", fail:"✗", error:"!"};
+const GATE_WORD = {pass:"passed", fail:"failed", error:"error"};
 function renderGatesMini(gates){
   const el=document.getElementById("gates-mini"); el.innerHTML="";
   for(const n of GATE_ORDER){ const g=gates[n]; if(!g) continue;
-    const s=document.createElement("span"); s.className="g "+(g.status); s.textContent=n;
+    const s=document.createElement("span"); s.className="g "+(g.status);
+    const mark = GATE_MARK[g.status] || "…";
+    s.textContent = mark+" "+n;
+    s.title = n+": "+(GATE_WORD[g.status] || g.status || "pending");
+    s.setAttribute("aria-label", s.title);
     el.appendChild(s);}
-}
-// Platform builds: one chip per service in the HUD, coloured by lifecycle state,
-// with a "done/total" tally. Overrides the (empty) gate chips for a platform floor.
-function renderPlatProg(pp){
-  const el=document.getElementById("gates-mini"); if(!el) return;
-  if(!pp || !pp.services){ return; }
-  el.innerHTML="";
-  const names=Object.keys(pp.services); let done=0;
-  for(const name of names){
-    const st=pp.services[name];
-    if(st==="done"||st==="approved") done++;
-    const s=document.createElement("span");
-    s.className="g plat "+st; s.textContent=name; s.title=name+" — "+st;
-    el.appendChild(s);
-  }
-  const tot=document.createElement("span");
-  tot.className="g plat-count"; tot.textContent=done+"/"+names.length+" ✓";
-  el.appendChild(tot);
 }
 function updateHud(F){
   document.getElementById("floor-tag").textContent =
-    "FLOOR "+F.floor + (F.release>1 ? " · r"+F.release : "");
-  // A milestone build's request is the model's prompt — the root request with
-  // " — MILESTONE i/n: <title>" appended — so it runs to hundreds of characters.
-  // Split it back into identity + current milestone; portrait gives each its own
-  // line, desktop rejoins them with the em dash from .proj-mile::before.
+    "FLOOR "+F.floor;
   const proj = document.getElementById("proj-tag");
   const req = F.request || "—";
-  const m = req.match(/^([\s\S]*?) — MILESTONE (\d+\/\d+): ([\s\S]*)$/);
   proj.textContent = "";
   proj.title = req;
-  if (m){
-    const root = document.createElement("span");
-    root.className = "proj-req"; root.textContent = m[1];
-    const mile = document.createElement("span");
-    mile.className = "proj-mile"; mile.textContent = "M"+m[2]+" · "+m[3];
-    proj.append(root, mile);
-  } else {
-    const root = document.createElement("span");
-    root.className = "proj-req"; root.textContent = req;
-    proj.append(root);
-  }
+  const root = document.createElement("span");
+  root.className = "proj-req"; root.textContent = req;
+  proj.append(root);
+  if (window.FoundrySettings) FoundrySettings.decorateProj(F, proj);
   // Portrait clamps each line, so tapping the row unclamps it. The chevron is only
   // drawn when something really is cut off — a request short enough to fit gets no
   // affordance and no hint that there is more to see.
@@ -2672,301 +2662,65 @@ function updateHud(F){
     if (!cut) proj.classList.remove("open");
     proj.classList.toggle("clamped", cut);
   });
-  const tail = (F.mode ? "· "+F.mode : "") + (F.backend ? " · "+F.backend : "");
+  const meta = window.FoundrySettings ? FoundrySettings.hudMeta(F) : "";
+  const tail = (meta ? "· "+meta : F.mode ? "· "+F.mode : "") + (F.backend ? " · "+F.backend : "");
   document.getElementById("mode-tag").textContent = tail.trim();
+}
+// A floor's state in words and a mark, so it never rests on colour alone.
+function floorState(F){
+  if (F.status !== "done") return F.status === "queued" ? {mark:"…", word:"queued"} : {mark:"●", word:"running"};
+  if (F.passed) return {mark:"✓", word:"shipped"};
+  if (OPERATOR_STOP.has(F.phase)) return {mark:"❚❚", word:F.phase};
+  if (F.phase === "token_cap" || F.phase === "time_cap") return {mark:"■", word:F.phase.replace("_", " ")};
+  return {mark:"✗", word:"halted"};
 }
 function renderElevator(){
   const el=document.getElementById("el-floors"); el.innerHTML="";
   // Floor 0 — the GitHub home: a hub of every build's repo. Always present, even
   // before any project exists, so the repositories are always one click away.
-  const hub=document.createElement("button");
+  const hub=document.createElement("button"); hub.id="el-floor-0";
   hub.className="el-btn hub"+(REPOS_OPEN?" active":"");
   hub.title="Floor 0 — repositories (every build's code)";
-  hub.innerHTML=`<span class="fl-no">0</span>⌥`;
+  hub.setAttribute("aria-label", hub.title);
+  if (REPOS_OPEN) hub.setAttribute("aria-current", "true");
+  hub.innerHTML=`<span class="fl-no">0</span><span aria-hidden="true">⌥</span>`;
   hub.onclick=()=>openRepoHub();
   el.appendChild(hub);
   for (const f of [...FLOORS.keys()].sort((a,b)=>a-b)){
     const F=FLOORS.get(f);
-    const btn=document.createElement("button");
+    const btn=document.createElement("button"); btn.id="el-floor-"+f;
     let cls="el-btn";
     if (f===ACTIVE) cls+=" active";
-    if (F.status==="done") cls += F.passed ? " done" : " failed";
+    if (F.status==="done") cls += F.passed ? " done" : OPERATOR_STOP.has(F.phase) ? " paused" : " failed";
     btn.className=cls;
-    btn.innerHTML=`<span class="fl-no">${f}</span>FL`;
-    if (F.releases>1){ const r=document.createElement("span"); r.className="rel-badge"; r.textContent="r"+F.release; btn.appendChild(r); }
-    if (F.awaiting){ const b=document.createElement("span"); b.className="badge"; b.textContent="!"; btn.appendChild(b); }
+    const st = floorState(F);
+    btn.innerHTML=`<span class="fl-no">${f}</span><span class="fl-st" aria-hidden="true">${st.mark}</span>`;
+    const name = "Floor "+f+": "+(F.title || F.request || "untitled")+" ("+st.word+")";
+    btn.title = name; btn.setAttribute("aria-label", name);
+    if (f===ACTIVE) btn.setAttribute("aria-current", "true");
     btn.onclick=()=>switchToFloor(f);
     el.appendChild(btn);
   }
 }
 
-// ---- checkpoint modal (per active floor) -----------------------------------
-// The dialog's job is not to announce a pause — it is to hand over enough evidence
-// to answer "continue or not?" without leaving it. Everything below is already in
-// hand when the pause fires (gate verdicts, the agents' own concerns, each
-// artifact's content one-liner); the dialog used to drop all of it and show one
-// sentence. Order is by decisiveness: gates, then flags, then what landed.
-
-// "4m 12s" / "1h 06m" — an elapsed count a human reads at a glance.
-function fmtDur(s){
-  s = Math.max(0, Math.round(Number(s)||0));
-  if (s < 60) return s+"s";
-  const m = Math.floor(s/60), r = s%60;
-  if (m < 60) return m+"m "+String(r).padStart(2,"0")+"s";
-  return Math.floor(m/60)+"h "+String(m%60).padStart(2,"0")+"m";
-}
-// "12.4k" — token counts, short.
-function fmtNum(n){
-  n = Number(n)||0;
-  return n >= 1000 ? (n/1000).toFixed(n >= 10000 ? 0 : 1)+"k" : String(n);
-}
-// Does an artifact's content one-liner describe a NON-ZERO problem? The details are
-// generated strings ("3 failed", "severity high — 2 finding(s)", "0 policy
-// violation(s)"), so a zero count must not be flagged as trouble.
-function artIsRisk(detail){
-  const d = String(detail||"").toLowerCase();
-  if (/\b0 (failed|finding|policy violation|residual)/.test(d)) return false;
-  if (/\b([1-9]\d*) (failed|finding|policy violation)/.test(d)) return true;
-  return /severity (high|critical)/.test(d);
-}
-function chip(parent, text, cls){
-  const s = document.createElement("span");
-  s.className = "cp-chip" + (cls ? " "+cls : "");
-  s.textContent = text;
-  parent.appendChild(s);
-  return s;
-}
-// Cost + elapsed for the work behind THIS pause (advisory; the server meters it).
-// `shared` means other builds ran concurrently against the one global egress, so the
-// token figure is an upper bound — say so rather than quietly overstating.
-function renderCpMeta(F, cp){
-  const el = document.getElementById("cp-meta"); if(!el) return;
-  el.innerHTML = "";
-  const sp = cp.spend;
-  if (!sp){ el.classList.add("hidden"); return; }
-  el.classList.remove("hidden");
-  chip(el, "this stage " + fmtDur(sp.stage_s));
-  chip(el, "build " + fmtDur(sp.build_s));
-  if (sp.stage_calls) chip(el, sp.stage_calls + " model call" + (sp.stage_calls===1?"":"s"));
-  if (sp.stage_tokens) chip(el, fmtNum(sp.stage_tokens) + " tokens" + (sp.shared ? "*" : ""));
-  if (sp.cap_usd) chip(el, "cap $" + sp.cap_usd);
-  if (sp.shared) chip(el, "*shared with " + sp.builds + " running builds", "dim");
-}
-
-// The gate verdicts SO FAR — the single most decision-relevant thing at a pause, and
-// the one the dialog never showed. Failing gates are named in full underneath; a
-// green strip alone can hide WHICH gate is red behind a colour.
-function renderCpGates(F){
-  const el = document.getElementById("cp-gates"); if(!el) return;
-  el.innerHTML = "";
-  const gates = (F && F.gates) || {};
-  const names = GATE_ORDER.filter(n => gates[n]);
-  if (!names.length){ el.classList.add("hidden"); return; }
-  el.classList.remove("hidden");
-  const strip = document.createElement("div"); strip.className = "cp-gate-strip";
-  const bad = [];
-  for (const n of names){
-    const g = gates[n];
-    const s = document.createElement("span");
-    s.className = "g " + (g.status || "");
-    s.textContent = n;
-    if (g.run_against) s.title = "run against " + String(g.run_against).slice(0,12);
-    strip.appendChild(s);
-    if (g.status === "fail" || g.status === "error") bad.push(n);
-  }
-  el.appendChild(strip);
-  const line = document.createElement("div");
-  line.className = "cp-gate-line " + (bad.length ? "bad" : "ok");
-  line.textContent = bad.length
-    ? "✕ not green: " + bad.join(", ").toUpperCase()
-      + " — approving cannot pass these; they must go green before anything ships"
-    : "✓ " + names.length + " gate" + (names.length===1?"":"s") + " green so far";
-  el.appendChild(line);
-}
-
-// What the agents themselves flagged: `concerns` from the advisory journal, plus
-// anyone reporting low confidence. Zero extra model calls — the payload already
-// carries it, and it was previously reachable only by clicking each lead.
-function renderCpFlags(F){
-  const el = document.getElementById("cp-flags"); if(!el) return;
-  el.innerHTML = "";
-  const rows = [];
-  for (const e of ((F && F.journal) || [])){
-    const role = e.role || e.node_id || "agent";
-    for (const c of (e.concerns || [])) if (String(c).trim()) rows.push({role, text:String(c), kind:"concern"});
-    if (typeof e.confidence === "number" && e.confidence < 0.6)
-      rows.push({role, text:"low confidence ("+e.confidence.toFixed(2)+") in this step", kind:"conf"});
-  }
-  if (!rows.length){ el.classList.add("hidden"); return; }
-  el.classList.remove("hidden");
-  const head = document.createElement("div");
-  head.className = "cp-flags-head";
-  head.textContent = "⚠ " + rows.length + " thing" + (rows.length===1?"":"s") + " the crew flagged";
-  el.appendChild(head);
-  for (const r of rows.slice(0, 8)){
-    const d = document.createElement("div"); d.className = "cp-flag "+r.kind;
-    d.textContent = "· " + r.role + " — " + r.text;
-    el.appendChild(d);
-  }
-  if (rows.length > 8){
-    const more = document.createElement("div"); more.className = "cp-flag dim";
-    more.textContent = "· +" + (rows.length-8) + " more (click a lead to interview them)";
-    el.appendChild(more);
-  }
-}
-
-// What actually landed this stage, with each artifact's CONTENT one-liner ("12
-// passed / 3 failed", "severity high — 2 finding(s)") rather than a bare count.
-// Anything describing a non-zero failure sorts to the top and is coloured.
-function renderCpArts(F, cp){
-  const wrap = document.getElementById("cp-arts-wrap");
-  const el = document.getElementById("cp-arts");
-  const count = document.getElementById("cp-arts-count");
-  if (!wrap || !el) return;
-  el.innerHTML = "";
-  const arts = (cp.arts && cp.arts.length) ? cp.arts : ((F && F.stageArts) || []);
-  if (!arts.length){ wrap.classList.add("hidden"); return; }
-  wrap.classList.remove("hidden");
-  const risky = arts.filter(a => artIsRisk(a.detail));
-  if (count) count.textContent = "— " + arts.length + " artifact" + (arts.length===1?"":"s")
-    + (risky.length ? " · " + risky.length + " needing a look" : "");
-  // Risky first, original order preserved within each group.
-  wrap.open = risky.length > 0;      // auto-expand only when there is something to see
-  for (const a of risky.concat(arts.filter(x => !artIsRisk(x.detail)))){
-    const row = document.createElement("div");
-    row.className = "cp-art" + (artIsRisk(a.detail) ? " risk" : "");
-    const lab = document.createElement("span"); lab.className = "cp-art-label";
-    lab.textContent = a.label || a.base || a.kind || "artifact";
-    row.appendChild(lab);
-    if (a.detail){
-      const det = document.createElement("span"); det.className = "cp-art-detail";
-      det.textContent = " — " + a.detail;
-      row.appendChild(det);
-    }
-    el.appendChild(row);
-  }
-}
-
-// WHERE this pause is and WHICH state it decides on — provenance the payload always
-// carried and the dialog dropped.
-function renderCpProvenance(cp){
-  const el = document.getElementById("cp-prov"); if(!el) return;
-  const bits = [];
-  if (cp.phase) bits.push("phase " + cp.phase);
-  if (cp.route) bits.push("route " + cp.route);
-  if (cp.state_sha) bits.push("state " + String(cp.state_sha).slice(0, 12));
-  el.textContent = bits.join("  ·  ");
-  el.classList.toggle("hidden", !bits.length);
-}
-
-// Per-button consequence copy + the "go read the code" escape hatch.
-function renderCpActions(F, cp){
-  const acts = cp.actions || null;
-  const set = (id, text) => {
-    const el = document.getElementById(id); if(!el) return;
-    el.textContent = text || "";
-    el.classList.toggle("hidden", !text);
-  };
-  set("cp-approve-sub", acts && acts.approve);
-  set("cp-changes-sub", acts && acts.changes);
-  set("cp-reject-sub",  acts && acts.reject);
-  // Reviewing the actual diff is the strongest evidence there is — but only offer it
-  // once code exists (nothing is written at the product/design pauses).
-  const code = document.getElementById("cp-code");
-  if (code){
-    // A reloaded floor has no per-stage artifact history, so the release boundary
-    // (where code always exists by definition) counts too.
-    const has = !!(F && (F.hasCode || cp.boundary === "release"));
-    code.classList.toggle("hidden", !has);
-    code.onclick = () => { if (F) openFilesFor(F); };   // same shape openFiles() passes
-  }
-}
-
-function showCheckpoint(F){
-  const cp = (F && F.cp) || {title:"CHECKPOINT", summary:""};
-  document.getElementById("cp-title").textContent="CHECKPOINT · "+(cp.title||"");
-  document.getElementById("cp-summary").textContent=cp.summary||"";
-  renderCpMeta(F, cp);
-  renderCpGates(F);
-  renderCpFlags(F);
-  renderCpArts(F, cp);
-  renderCpProvenance(cp);
-  renderCpActions(F, cp);
-  // AI expert advisors (the same panel that judges autonomous releases, here
-  // ADVISORY): show each domain's verdict + findings above the buttons.
-  const adv = document.getElementById("cp-advisors");
-  if (adv){
-    const list = cp.advisors || [];
-    adv.classList.toggle("hidden", !list.length);
-    adv.innerHTML = "";
-    for (const a of list){
-      const row = document.createElement("div");
-      row.className = "cp-advisor " + (a.verdict==="approve" ? "ok" : (a.verdict==="request-changes" ? "warn" : "na"));
-      const head = document.createElement("div"); head.className = "adv-head";
-      head.textContent = (a.verdict==="approve" ? "✅ " : (a.verdict==="request-changes" ? "⚠ " : "❔ "))
-        + a.domain.toUpperCase() + " · " + (a.verdict||"?").toUpperCase();
-      row.appendChild(head);
-      for (const f of (a.findings||[])){
-        const li = document.createElement("div"); li.className = "adv-finding"; li.textContent = "· " + f;
-        row.appendChild(li);
-      }
-      adv.appendChild(row);
-    }
-  }
-  // No panel is NOT a clean bill of health — say which it is.
-  const advNote = document.getElementById("cp-adv-note");
-  if (advNote){
-    const note = (cp.advisors && cp.advisors.length) ? "" : (cp.advisorsNote || "");
-    advNote.textContent = note;
-    advNote.classList.toggle("hidden", !note);
-  }
-  // Autopilot proposal: surface the panel's request as an EDITABLE next-iteration
-  // request (approve = as-is; request-changes = build the edited text; reject = stop).
-  const wrap = document.getElementById("cp-edit-wrap");
-  if (wrap){
-    const isProposal = cp.boundary === "autopilot_proposal";
-    wrap.classList.toggle("hidden", !isProposal);
-    if (isProposal) document.getElementById("cp-edit").value = cp.request || "";
-  }
-  document.getElementById("cp-modal").classList.remove("hidden");
-}
-function hideCheckpoint(){ document.getElementById("cp-modal").classList.add("hidden"); }
-
-// ---- repo browser (self-hosted GitHub over the store) ----------------------
-let FILES_ID = null;   // which release's repo the browser is currently showing
-let FILES_TREE = [];   // the open repo's flat file list ({path,size}); folded into folders below
-let FILES_CWD = "";    // the folder the Code tab is currently showing (""=repo root)
-function selectTab(name){
-  for(const t of document.querySelectorAll(".repo-tab"))
-    t.classList.toggle("sel", t.dataset.tab === name);
-  for(const p of document.querySelectorAll(".repo-pane"))
-    p.classList.toggle("hidden", p.dataset.pane !== name);
-}
+// ---- file viewer (browse a build's generated code from the store) ----------
+let FILES_ID = null;   // which build the viewer is currently showing
+let FILES_TREE = [];   // the open build's flat file list ({path,size}); folded into folders below
+let FILES_CWD = "";    // the folder currently shown (""=root)
 function openFiles(){
   const F = FLOORS.get(ACTIVE);
   if(!F){ openRepoHub(); return; }   // no active build — go to the Floor 0 repo hub
   openFilesFor(F);
 }
-// Open the repo browser for any build (`meta` = {id, floor, release, request,
-// status}) — used by the active floor AND by the Floor 0 repo hub.
+// Open the file viewer for any build (`meta` = {id, floor}) — used by the active
+// floor AND by the Floor 0 repo hub.
 function openFilesFor(meta){
-  const modal = document.getElementById("files-modal");
-  const list = document.getElementById("files-list");
-  const view = document.getElementById("files-view");
-  const rels = document.getElementById("files-releases");
-  list.innerHTML = ""; view.textContent = ""; rels.innerHTML = "";
+  document.getElementById("files-q").value = "";
+  document.getElementById("files-list").innerHTML = "";
+  document.getElementById("files-view").textContent = "";
   document.getElementById("files-floor").textContent = "Floor "+meta.floor;
-  for(const t of document.querySelectorAll(".repo-tab")) t.onclick = () => selectTab(t.dataset.tab);
-  selectTab("code");
-  // ITERATE: start a new floor from this finished build (enabled once it's done).
-  const itBtn = document.getElementById("files-iterate");
-  itBtn.style.display = (meta.status === "done") ? "" : "none";
-  itBtn.onclick = () => { hideFiles(); showNewModal(meta.id); };
-  const gz = document.getElementById("files-gitzip");
-  if (gz) gz.href = "/api/gitzip/" + meta.id;   // whole-floor lineage as ONE git repo
-  renderReleases(meta);              // release history for this floor (newest first)
-  loadRepo(meta.id);                 // start on the latest release's repo
-  modal.classList.remove("hidden");
+  loadRepo(meta.id);
+  document.getElementById("files-modal").classList.remove("hidden");
 }
 // ---- Floor 0: the repo hub (a self-hosted GitHub home) ---------------------
 let REPOS_OPEN = false;
@@ -2975,81 +2729,104 @@ function repoSlug(req){
   const s = String(req||"project").toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"");
   return s.split("-").filter(Boolean).slice(0,5).join("-") || "project";
 }
-// Open the hub: list every build that produced code (newest first). The catalog
-// grows as more floors finish, so each open reflects the latest set of repos.
+// Open the hub: every floor, searched and filtered on the server (/api/builds).
+const REPO_STATUS = {
+  shipped:{mark:"✔", word:"shipped", cls:"ok"}, halted:{mark:"✗", word:"halted", cls:"bad"},
+  stopped:{mark:"❚❚", word:"stopped", cls:"warn"}, running:{mark:"●", word:"running", cls:"live"},
+};
+let REPO_FETCH = 0;
+let REPO_TIMER = null;
 function openRepoHub(){
-  const modal = document.getElementById("repos-modal");
+  document.getElementById("repos-modal").classList.remove("hidden");
+  REPOS_OPEN = true; renderElevator();
+  loadRepoList();
+}
+function repoQuery(){
+  const p = new URLSearchParams();
+  const q = document.getElementById("repo-q").value.trim();
+  const st = document.getElementById("repo-status").value;
+  const sort = document.getElementById("repo-sort").value;
+  if (q) p.set("q", q);
+  if (st !== "all") p.set("status", st);
+  if (sort !== "newest") p.set("sort", sort);
+  return p.toString();
+}
+function loadRepoList(){
   const list = document.getElementById("repos-list");
   const cnt = document.getElementById("repos-count");
-  list.innerHTML = "<li class='muted'>Loading…</li>"; cnt.textContent = "";
-  modal.classList.remove("hidden");
-  REPOS_OPEN = true; renderElevator();
-  fetch("/api/builds")
-    .then(r => r.ok ? r.json() : {builds:[]})
-    .then(({builds}) => {
-      const repos = (builds||[]).filter(b => b.has_repo)
-        .sort((a,b) => String(b.created_at||"").localeCompare(String(a.created_at||"")));
-      cnt.textContent = repos.length ? `${repos.length} ${repos.length===1?"repository":"repositories"}` : "";
+  const ticket = ++REPO_FETCH;           // a slow answer to an older query is dropped
+  if (!list.children.length) list.innerHTML = "<li class='muted'>Loading…</li>";
+  const qs = repoQuery();
+  fetch("/api/builds"+(qs ? "?"+qs : ""))
+    .then(r => r.json().then(d => { if (!r.ok) throw new Error(d.error || "HTTP "+r.status); return d; }))
+    .then(d => {
+      if (ticket !== REPO_FETCH) return;
+      const builds = d.builds || [];
+      const filtered = !!qs && qs !== "sort=oldest";
+      cnt.textContent = filtered ? `${builds.length} of ${d.total}`
+        : builds.length ? `${builds.length} ${builds.length===1?"repository":"repositories"}` : "";
       list.innerHTML = "";
-      if(!repos.length){
-        list.innerHTML = "<li class='muted'>No repositories yet — finish a build and its code lands here.</li>";
+      if (!builds.length){
+        const li = document.createElement("li"); li.className = "muted empty";
+        li.textContent = d.total
+          ? "No build matches. Try fewer words or another status."
+          : "No repositories yet. Start a build: when it finishes, its code shows up here, "+
+            "ready to browse or download as a .zip.";
+        list.appendChild(li);
         return;
       }
-      for(const b of repos) list.appendChild(repoRow(b));
+      for (const b of builds) list.appendChild(repoRow(b));
     })
-    .catch(() => { list.innerHTML = "<li class='muted'>(could not load repositories)</li>"; });
+    .catch(err => {
+      if (ticket !== REPO_FETCH) return;
+      list.innerHTML = "";
+      const li = document.createElement("li"); li.className = "muted";
+      li.textContent = "Could not load repositories ("+err.message+").";
+      list.appendChild(li);
+    });
 }
 function repoRow(b){
-  const li = document.createElement("li"); li.className = "repo-item";
-  const ok = b.passed ? "ok" : "bad";
-  const pill = b.passed ? "✓ passing" : "✗ failing";
+  const st = REPO_STATUS[b.status] || REPO_STATUS.halted;
   const when = b.created_at ? String(b.created_at).slice(0,10) : "";
-  li.innerHTML =
-    `<div class="repo-row1">`+
-      `<span class="repo-name">${escapeHtml(repoSlug(b.request))}</span>`+
-      `<span class="repo-vis">store</span>`+
-      (b.release>1 ? `<span class="repo-rel" title="${b.release} releases — this project has been iterated">↻ r${b.release}</span>` : ``)+
-      `<span class="repo-pill ${ok}">${pill}</span>`+
-    `</div>`+
-    `<div class="repo-desc">${escapeHtml(b.request||"")}</div>`+
-    `<div class="repo-meta">`+
+  const live = b.status === "running";
+  return listRow("repo-item",
+    `<span class="repo-row1">`+
+      `<span class="repo-name">${escapeHtml(b.title || repoSlug(b.request))}</span>`+
+      `<span class="repo-pill ${st.cls}">${st.mark} ${st.word}</span>`+
+    `</span>`+
+    `<span class="repo-desc">${escapeHtml(b.request||"")}</span>`+
+    `<span class="repo-meta">`+
       `<span>⌥ floor ${b.floor}</span>`+
-      (when ? `<span>updated ${when}</span>` : ``)+
-    `</div>`;
-  li.onclick = () => { closeRepoHub();
-    openFilesFor({id:b.id, floor:b.floor, release:b.release, request:b.request, status:"done"}); };
+      (when ? `<span>started ${when}</span>` : ``)+
+    `</span>`,
+    () => { closeRepoHub();
+      if (live && FLOORS.has(b.floor)) switchToFloor(b.floor); else openFilesFor(b); });
+}
+// A list row whose whole body is one real <button> (keyboard and screen readers
+// get a button; the list keeps its list semantics).
+function listRow(cls, html, onclick, title){
+  const li = document.createElement("li"); li.className = cls;
+  const b = document.createElement("button"); b.type = "button"; b.className = "row-btn";
+  b.innerHTML = html; b.onclick = onclick;
+  if (title) b.title = title;
+  li.appendChild(b);
   return li;
 }
 function closeRepoHub(){
   document.getElementById("repos-modal").classList.add("hidden");
   REPOS_OPEN = false; renderElevator();
 }
-// Load the whole repo (tree + checks + pull-request diffs) for one release id.
+// Load one build's file list.
 function loadRepo(id){
   FILES_ID = id;
   const list = document.getElementById("files-list");
   const view = document.getElementById("files-view");
   document.getElementById("files-zip").href = "/api/zip/"+id;
-  { const gz = document.getElementById("files-gitzip");
-    if (gz) gz.href = "/api/gitzip/"+id; }   // lineage repo up to THIS release
   list.innerHTML = ""; view.textContent = "Loading…";
-  document.getElementById("repo-sha").textContent = "";
-  document.getElementById("repo-src").textContent = "";
-  fetch("/api/repo/"+id)
-    .then(r => r.ok ? r.json() : {files:[],checks:[],diffs:[],sign_offs:[]})
-    .then(repo => { renderRepo(id, repo); })
-    .catch(() => { list.innerHTML = "<li class='muted'>(could not load repo)</li>"; view.textContent = ""; });
-}
-function renderRepo(id, repo){
-  const sha = document.getElementById("repo-sha");
-  if(repo.tree_sha){ sha.textContent = "sha "+repo.tree_sha.slice(0,10); }
-  const src = document.getElementById("repo-src");
-  src.textContent = repo.source === "store" ? "● from store" : "○ from disk";
-  src.className = "repo-src " + (repo.source === "store" ? "ok" : "");
-  renderTree(id, repo.files || []);
-  renderChecks(repo.checks || []);
-  renderPulls(repo.diffs || []);
-  renderSignOffs(repo.sign_offs || []);
+  fetch("/api/files/"+id)
+    .then(r => r.ok ? r.json() : {files:[]})
+    .then(d => { renderTree(id, d.files || []); if (window.Insight) Insight.filesLoaded(d); })
+    .catch(() => { list.innerHTML = "<li class='muted'>(could not load files)</li>"; view.textContent = ""; });
 }
 function renderTree(id, files){
   FILES_TREE = files || [];
@@ -3057,12 +2834,37 @@ function renderTree(id, files){
   const view = document.getElementById("files-view");
   const list = document.getElementById("files-list");
   const crumb = document.getElementById("files-crumb");
+  const q = document.getElementById("files-q");
+  q.disabled = !FILES_TREE.length;
   if(!FILES_TREE.length){
-    list.innerHTML = "<li class='muted'>No files yet — finish a build (its code lands in the store).</li>";
+    list.innerHTML = "<li class='muted'>No files yet. A build writes its code here as its tickets land; "+
+      "a build stopped before any ticket finished has nothing to show.</li>";
     crumb.innerHTML = ""; view.textContent = ""; return;
   }
   view.textContent = "Select a file…";
-  renderDir("");                     // start at the repo root, GitHub-style
+  if (q.value.trim()) renderMatches(q.value); else renderDir("");   // the repo root, GitHub-style
+}
+function fileRow(f, label){
+  const li = listRow("file",
+    `<span class='ico' aria-hidden='true'>≡</span><span class='nm'>${escapeHtml(label)}</span>`+
+    `<span class='meta'>${f.size}b</span>`, () => viewFile(FILES_ID, f.path, li), f.path);
+  return li;
+}
+// The filter box: every file whose path contains the text, shown flat by full path.
+function renderMatches(text){
+  const list = document.getElementById("files-list");
+  const crumb = document.getElementById("files-crumb");
+  const words = text.toLowerCase().split(/\s+/).filter(Boolean);
+  const hits = FILES_TREE.filter(f => words.every(w => f.path.toLowerCase().includes(w)));
+  list.innerHTML = ""; crumb.innerHTML = "";
+  const note = document.createElement("span"); note.className = "crumb here"; note.setAttribute("role", "status");
+  note.textContent = hits.length+" of "+FILES_TREE.length+" files match";
+  crumb.appendChild(note);
+  if (!hits.length){
+    list.innerHTML = "<li class='muted'>No file name matches that. Clear the filter to browse the folders.</li>";
+    return;
+  }
+  for (const f of hits.sort((a,b) => a.path.localeCompare(b.path))) list.appendChild(fileRow(f, f.path));
 }
 // Immediate children of `dir` folded out of the flat path list: subfolders
 // (with a descendant count) first, then files — each sorted alphabetically.
@@ -3092,10 +2894,11 @@ function renderDir(dir){
   list.innerHTML = ""; crumb.innerHTML = "";
   // breadcrumb: ⌂ root / a / b — every ancestor is a jump-up link.
   const crumbLink = (label, target) => {
-    const s = document.createElement("span");
+    const s = document.createElement(target === dir ? "span" : "button");
     s.className = "crumb" + (target === dir ? " here" : "");
     s.textContent = label;
-    if(target !== dir) s.onclick = () => renderDir(target);
+    if(target !== dir){ s.type = "button"; s.onclick = () => renderDir(target); }
+    else s.setAttribute("aria-current", "location");
     return s;
   };
   crumb.appendChild(crumbLink("⌂ root", ""));
@@ -3109,529 +2912,272 @@ function renderDir(dir){
   const {folders, files} = dirChildren(dir);
   // ".." row to step back up one level (absent at the root).
   if(dir){
-    const up = document.createElement("li"); up.className = "dir up";
-    up.innerHTML = "<span class='ico'>⮬</span><span class='nm'>..</span>";
     const parent = dir.includes("/") ? dir.slice(0, dir.lastIndexOf("/")) : "";
-    up.onclick = () => renderDir(parent);
-    list.appendChild(up);
+    list.appendChild(listRow("dir up",
+      "<span class='ico' aria-hidden='true'>⮬</span><span class='nm'>..</span><span class='sr-only'> up one folder</span>",
+      () => renderDir(parent), "Up one folder"));
   }
   for(const fld of folders){
-    const li = document.createElement("li"); li.className = "dir";
-    li.innerHTML = `<span class='ico'>▸</span><span class='nm'>${escapeHtml(fld.name)}/</span>`+
-                   `<span class='meta'>${fld.count}</span>`;
-    li.title = fld.name;
     const target = dir ? dir + "/" + fld.name : fld.name;
-    li.onclick = () => renderDir(target);
-    list.appendChild(li);
+    list.appendChild(listRow("dir",
+      `<span class='ico' aria-hidden='true'>▸</span><span class='nm'>${escapeHtml(fld.name)}/</span>`+
+      `<span class='meta'>${fld.count}<span class='sr-only'> files</span></span>`,
+      () => renderDir(target), fld.name));
   }
-  for(const f of files){
-    const li = document.createElement("li"); li.className = "file";
-    const name = f.path.slice(f.path.lastIndexOf("/") + 1);
-    li.innerHTML = `<span class='ico'>≡</span><span class='nm'>${escapeHtml(name)}</span>`+
-                   `<span class='meta'>${f.size}b</span>`;
-    li.title = f.path;
-    li.onclick = () => viewFile(FILES_ID, f.path, li);
-    list.appendChild(li);
-  }
-}
-function renderChecks(checks){
-  const ul = document.getElementById("checks-list");
-  const cnt = document.getElementById("checks-count");
-  ul.innerHTML = "";
-  const passed = checks.filter(c => c.ok).length;
-  cnt.textContent = checks.length ? `${passed}/${checks.length}` : "";
-  if(!checks.length){ ul.innerHTML = "<li class='muted'>No gate verdicts yet.</li>"; return; }
-  for(const c of checks){
-    const li = document.createElement("li");
-    li.className = "check " + (c.ok ? "ok" : "bad");
-    const icon = c.ok ? "✓" : (c.status === "error" ? "!" : "✕");
-    const adv = c.advisory ? " <span class='adv'>advisory</span>" : "";
-    let html = `<span class="ck-icon">${icon}</span><span class="ck-name">${c.name}</span>`+
-               `<span class="ck-status">${c.status}</span>${adv}`;
-    if(c.findings && c.findings.length){
-      html += `<div class="ck-findings">`+ c.findings.map(escapeHtml).join("<br>") +`</div>`;
-    }
-    li.innerHTML = html;
-    ul.appendChild(li);
-  }
-}
-function renderSignOffs(sign_offs){
-  const ul = document.getElementById("signoffs-list");
-  const cnt = document.getElementById("signoffs-count");
-  if(!ul) return;
-  ul.innerHTML = "";
-  cnt.textContent = sign_offs.length ? String(sign_offs.length) : "";
-  if(!sign_offs.length){
-    ul.innerHTML = "<li class='muted'>No sign-offs recorded yet — the CTO signs off at the Design &amp; Release checkpoints.</li>";
-    return;
-  }
-  for(const s of sign_offs){
-    const li = document.createElement("li");
-    li.className = "check " + (s.approved ? "ok" : "bad");
-    const icon = s.approved ? "✓" : "✕";
-    const who = [s.approver, s.role].filter(Boolean).map(escapeHtml).join(" · ") || "(unnamed)";
-    const prov = s.provenance ? ` <span class='adv'>${escapeHtml(s.provenance)}</span>` : "";
-    let html = `<span class="ck-icon">${icon}</span><span class="ck-name">${escapeHtml(s.point||"sign-off")}</span>`+
-               `<span class="ck-status">${who}</span>${prov}`;
-    const detail = [];
-    if(s.evidence_hash) detail.push("evidence "+escapeHtml(String(s.evidence_hash).slice(0,16)));
-    if(s.note) detail.push(escapeHtml(s.note));
-    if(detail.length) html += `<div class="ck-findings">`+ detail.join("<br>") +`</div>`;
-    li.innerHTML = html;
-    ul.appendChild(li);
-  }
-}
-function renderPulls(diffs){
-  const box = document.getElementById("pulls-list");
-  const cnt = document.getElementById("pulls-count");
-  box.innerHTML = "";
-  cnt.textContent = diffs.length ? String(diffs.length) : "";
-  if(!diffs.length){ box.innerHTML = "<div class='muted'>No pull requests (no FeatureDiff in this build).</div>"; return; }
-  diffs.forEach((d, i) => {
-    const card = document.createElement("div"); card.className = "pull";
-    const head = document.createElement("div"); head.className = "pull-head";
-    head.innerHTML = `<span class="pull-no">#${i+1}</span> <span class="pull-sum">${escapeHtml(d.summary||"feature diff")}</span> <span class="pull-merged">merged</span>`;
-    const pre = document.createElement("pre"); pre.className = "pull-diff";
-    pre.innerHTML = colorizeDiff(d.text || "");
-    head.onclick = () => pre.classList.toggle("open");
-    card.appendChild(head); card.appendChild(pre);
-    box.appendChild(card);
-  });
+  for(const f of files) list.appendChild(fileRow(f, f.path.slice(f.path.lastIndexOf("/") + 1)));
 }
 function escapeHtml(s){ return String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
-function colorizeDiff(text){
-  return text.split("\n").map(line => {
-    const e = escapeHtml(line);
-    if(line.startsWith("+") && !line.startsWith("+++")) return `<span class="d-add">${e}</span>`;
-    if(line.startsWith("-") && !line.startsWith("---")) return `<span class="d-del">${e}</span>`;
-    if(line.startsWith("@@")) return `<span class="d-hunk">${e}</span>`;
-    if(line.startsWith("diff ") || line.startsWith("+++") || line.startsWith("---")) return `<span class="d-file">${e}</span>`;
-    return e;
-  }).join("\n");
-}
-// Release history of the open floor — one row per release; click to browse it.
-function renderReleases(F){
-  const rels = document.getElementById("files-releases");
-  fetch("/api/releases/"+F.floor)
-    .then(r => r.ok ? r.json() : {releases:[]})
-    .then(({releases}) => {
-      rels.innerHTML = "";
-      if(!releases || releases.length <= 1) return;   // nothing to switch between
-      for(const rel of releases){
-        const b = document.createElement("button");
-        b.type = "button"; b.className = "rel-chip";
-        const ok = rel.passed ? "✓" : (rel.status === "done" ? "✗" : "…");
-        b.textContent = `r${rel.release} ${ok}`;
-        b.title = (rel.request || "") + (rel.created_at ? `  ·  ${rel.created_at}` : "");
-        b.onclick = () => { for(const c of rels.children) c.classList.remove("sel");
-                            b.classList.add("sel"); loadRepo(rel.id); };
-        rels.appendChild(b);
-      }
-    })
-    .catch(() => { rels.innerHTML = ""; });
-}
 function viewFile(id, path, li){
-  for(const c of document.getElementById("files-list").children) c.classList.remove("sel");
-  if(li) li.classList.add("sel");
+  for(const c of document.getElementById("files-list").children){ c.classList.remove("sel"); c.removeAttribute("aria-current"); }
+  if(li){ li.classList.add("sel"); li.setAttribute("aria-current", "true"); }
   const view = document.getElementById("files-view");
   view.textContent = "Loading…";
+  let cut = null;   // the file's full size when the server cut it at the view cap
   fetch("/api/file/"+id+"?path="+encodeURIComponent(path))
-    .then(r => r.text())
-    .then(t => { view.textContent = t || "(empty file)"; })
+    .then(r => { cut = r.headers.get("X-Foundry-Truncated"); return r.text(); })
+    .then(t => { view.textContent = t || "(empty file)"; if (window.Insight) Insight.fileShown(view, cut); })
     .catch(() => { view.textContent = "(could not load file)"; });
 }
 function hideFiles(){ document.getElementById("files-modal").classList.add("hidden"); }
-function sendDecision(decision){
-  const F = FLOORS.get(ACTIVE);
-  if (!F){ hideCheckpoint(); return; }
-  const body = {decision, checkpoint: F.cpIndex};
-  const wrap = document.getElementById("cp-edit-wrap");
-  if (wrap && !wrap.classList.contains("hidden")){
-    const edit = (document.getElementById("cp-edit").value || "").trim();
-    if (edit) body.request_edit = edit;   // the human's amended next-iteration request
-  }
-  fetch("/api/decision/"+F.id, {method:"POST", headers:postHeaders(),
-    body: JSON.stringify(body)});
-  F.awaiting = false; renderElevator(); hideCheckpoint();
-}
+// ---- build control: Stop · Pause · Resume · Retry with… · Delete ------------
+// Drawn for the floor on screen from its state; only the actions valid for that
+// state appear. Forms, confirmations and errors go in the panel under the bar.
+const OPERATOR_STOP = new Set(["stopped", "paused"]);
+// "interrupted" is left out: the server closes a floor that way only when it has no
+// checkpoint to resume from.
+const RESUMABLE = new Set(["stopped", "paused", "halted", "token_cap", "time_cap", "error"]);
+const MAX_FIX = 20;
+const MAX_TIME_MIN = 7 * 24 * 60;
+let CTL_TIMER = null;
 
-// ---- interview a lead (click an agent) -------------------------------------
-let IV_TARGET = null;
-function openInterview(name){
-  const F = FLOORS.get(ACTIVE); if(!F) return;
-  const journal = F.journal || [];
-  const mine = journal.filter(e=>e.role===name);
-  const entries = mine.length ? mine : journal;
-  document.getElementById("iv-role").textContent = name;
-  const jc = document.getElementById("iv-journal"); jc.innerHTML = "";
-  if(!entries.length){
-    jc.innerHTML = "<div class='cp-note'>No journal yet — reach a checkpoint first (or run supervised).</div>";
-  }
-  for(const e of entries.slice(0,6)){
-    const d = document.createElement("div"); d.className = "iv-entry";
-    const conf = (e.confidence!=null) ? ` · conf ${Math.round(e.confidence*100)}%` : "";
-    d.innerHTML = `<div class="role"></div><div class="sum"></div><div class="meta"></div>`;
-    d.querySelector(".role").textContent = (e.role||"agent")+conf;
-    d.querySelector(".sum").textContent = e.summary||"";
-    const meta = d.querySelector(".meta");
-    const assumptions = e.assumptions||[], concerns = e.concerns||[];
-    if(assumptions.length){ const a=document.createElement("div"); a.textContent="assumes: "+assumptions.join("; "); meta.appendChild(a); }
-    if(concerns.length){ const c=document.createElement("div"); c.className="concern"; c.textContent="concern: "+concerns.join("; "); meta.appendChild(c); }
-    jc.appendChild(d);
-  }
-  const ans=document.getElementById("iv-answer"); ans.classList.add("hidden"); ans.textContent="";
-  document.getElementById("iv-question").value = "";
-  IV_TARGET = {id:F.id, role:name};
-  document.getElementById("iv-modal").classList.remove("hidden");
+function ctlButton(icon, label, title, onclick, cls){
+  const b = document.createElement("button");
+  b.type = "button"; b.className = "ctl-btn" + (cls ? " "+cls : "");
+  b.title = title; b.setAttribute("aria-label", title);
+  b.append(icon+" ");
+  const t = document.createElement("span"); t.className = "ctl-lbl"; t.textContent = label;
+  b.append(t); b.onclick = onclick;
+  return b;
 }
-function askInterview(){
-  if(!IV_TARGET) return;
-  const q = document.getElementById("iv-question").value.trim();
-  const ans = document.getElementById("iv-answer");
-  ans.classList.remove("hidden"); ans.textContent = "…asking "+IV_TARGET.role+"…";
-  fetch("/api/interview/"+IV_TARGET.id,{method:"POST",headers:postHeaders(),
-    body:JSON.stringify({role:IV_TARGET.role, question:q})})
-   .then(r=>r.json()).then(d=>{ ans.textContent = d.answer || "(no answer)"; })
-   .catch(()=>{ ans.textContent = "(interview request failed)"; });
+function renderControls(){
+  const el = document.getElementById("floor-ctl"); el.innerHTML = "";
+  const F = FLOORS.get(ACTIVE); if (!F) return;
+  const chip = (cls, text) => { const s = document.createElement("span");
+    s.className = "ctl-state "+cls; s.textContent = text; el.appendChild(s); };
+  if (F.status === "running" || F.status === "queued"){
+    if (F.stopping){ chip("busy", F.stopping === "paused" ? "PAUSING…" : "STOPPING…"); return; }
+    el.append(
+      ctlButton("■", "STOP", "Stop this build at its next checkpoint", () => stopFloor(F, "stop")),
+      ctlButton("❚❚", "PAUSE", "Pause this build at its next checkpoint", () => stopFloor(F, "pause")));
+    return;
+  }
+  if (F.phase === "paused") chip("", "PAUSED");
+  else if (F.phase === "stopped") chip("stopped", "STOPPED");
+  else if (F.phase === "token_cap") chip("stopped", "TOKEN CAP");
+  else if (F.phase === "time_cap") chip("stopped", "TIME CAP");
+  if (!F.passed && RESUMABLE.has(F.phase)){
+    el.append(
+      ctlButton("▶", "RESUME", "Resume from the last checkpoint", () => resumeFloor(F, {}), "primary"),
+      ctlButton("↻", "RETRY WITH…", "Resume with a new token cap, time cap or more fix attempts", () => showRetryForm(F)));
+  }
+  if (F.passed) el.append(ctlButton("✎", "CHANGE", "Change this build — plan and build only the delta on a new floor", () => showNewModal(F)));
+  el.append(ctlButton("✕", "DELETE", "Delete this floor and its output", () => showDeleteConfirm(F), "danger"));
+}
+function ctlPanel(kind){
+  const p = document.getElementById("ctl-panel");
+  clearTimeout(CTL_TIMER); p.innerHTML = ""; p.className = "ctl-panel "+kind;
+  return p;
+}
+function hideCtlPanel(){
+  const p = document.getElementById("ctl-panel");
+  clearTimeout(CTL_TIMER); p.className = "ctl-panel hidden"; p.innerHTML = "";
+}
+function ctlMessage(text, bad){
+  const p = ctlPanel(bad ? "bad" : "ok");
+  const m = document.createElement("span"); m.textContent = text;
+  const x = document.createElement("button"); x.type = "button"; x.className = "ctl-x";
+  x.textContent = "✕"; x.title = "Dismiss"; x.setAttribute("aria-label", "Dismiss"); x.onclick = hideCtlPanel;
+  x.dataset.dismiss = "";
+  p.append(m, x);
+  CTL_TIMER = setTimeout(hideCtlPanel, bad ? 9000 : 4000);
+}
+async function ctlRequest(method, path, body){
+  try {
+    const r = await fetch(path, {method, headers:postHeaders(),
+      body: body === undefined ? undefined : JSON.stringify(body)});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok){ ctlMessage(d.error || ("Request failed ("+r.status+")."), true); return null; }
+    return d;
+  } catch(_){ ctlMessage("Could not reach the server.", true); return null; }
+}
+async function stopFloor(F, how){
+  const d = await ctlRequest("POST", "/api/projects/"+F.id+"/"+how);
+  if (!d) return;
+  if (F.status === "done") return;     // it already halted (a queued build stops at once)
+  F.stopping = d.kind;
+  if (F.floor === ACTIVE) renderControls();
+  ctlMessage(how === "pause" ? "Pausing at the next checkpoint…" : "Stopping at the next checkpoint…");
+}
+function markResumed(F){
+  F.status = "running"; F.phase = ""; F.stopping = ""; F.passed = false;
+  if (F.scene) F.scene.ungloom();
+  renderElevator();
+  if (F.floor === ACTIVE) renderControls();
+}
+async function resumeFloor(F, body){
+  const d = await ctlRequest("POST", "/api/projects/"+F.id+"/resume", body);
+  if (!d) return;
+  markResumed(F);
+  // The floor's stream ended with the last run; reattach where it left off.
+  if (!F.es || F.es.readyState === EventSource.CLOSED) openFloorStream(F, F.cursor);
+  ctlMessage(d.from_checkpoint ? "Resumed from the last checkpoint." : "Restarted — it never reached a checkpoint.");
+}
+function showRetryForm(F){
+  const p = ctlPanel("form");
+  const form = document.createElement("form"); form.className = "ctl-form";
+  form.noValidate = true;            // our inline message, not the browser bubble
+  const field = (label, attrs) => {
+    const l = document.createElement("label"); l.textContent = label;
+    const i = document.createElement("input"); i.type = "number";
+    for (const k in attrs) i.setAttribute(k, attrs[k]);
+    l.appendChild(i); form.appendChild(l); return i;
+  };
+  const cap = field("Token cap", {min:"0", step:"10000", inputmode:"numeric",
+    placeholder: F.tokenCap ? String(F.tokenCap) : "no cap"});
+  const fix = field("Fix attempts", {min:"0", max:String(MAX_FIX), inputmode:"numeric",
+    placeholder: String(F.maxFix ?? 3)});
+  const curMin = F.build && F.build.time_cap_minutes;
+  const mins = field("Time cap (min)", {min:"0", step:"any", inputmode:"decimal",
+    placeholder: curMin ? String(curMin) : "no cap"});
+  const go = document.createElement("button"); go.type = "submit"; go.className = "primary"; go.textContent = "▶ Resume";
+  const no = document.createElement("button"); no.type = "button"; no.textContent = "cancel"; no.onclick = hideCtlPanel;
+  no.dataset.dismiss = "";
+  const err = document.createElement("span"); err.className = "ctl-err"; err.setAttribute("role", "alert");
+  form.append(go, no, err);
+  form.oninput = () => { err.textContent = ""; };
+  form.onsubmit = e => {
+    e.preventDefault();
+    const body = {};
+    const c = cap.value.trim(), f = fix.value.trim();
+    if (c !== ""){
+      const n = Number(c);
+      if (!Number.isInteger(n) || n < 0){ err.textContent = "Token cap: a whole number (0 = no cap)."; return; }
+      body.token_cap = n;
+    }
+    if (f !== ""){
+      const n = Number(f);
+      if (!Number.isInteger(n) || n < 0 || n > MAX_FIX){ err.textContent = "Fix attempts: 0 to "+MAX_FIX+"."; return; }
+      body.max_fix_attempts = n;
+    }
+    const m = mins.value.trim();
+    if (m !== ""){
+      const n = Number(m);
+      if (!Number.isFinite(n) || n < 0 || n > MAX_TIME_MIN){ err.textContent = "Time cap: minutes, 0 to "+MAX_TIME_MIN+" (0 = no cap)."; return; }
+      body.time_cap_minutes = n;
+    }
+    resumeFloor(F, body);
+  };
+  p.appendChild(form);
+  cap.focus();
+}
+function showDeleteConfirm(F){
+  const p = ctlPanel("bad");
+  const m = document.createElement("span");
+  m.textContent = "Delete floor "+F.floor+" and its output? This can't be undone.";
+  const yes = document.createElement("button"); yes.type = "button"; yes.className = "danger"; yes.textContent = "✕ Delete";
+  const no = document.createElement("button"); no.type = "button"; no.textContent = "cancel"; no.onclick = hideCtlPanel;
+  no.dataset.dismiss = "";
+  yes.onclick = async () => {
+    const d = await ctlRequest("DELETE", "/api/projects/"+F.id);
+    if (!d) return;
+    removeFloor(F);
+    ctlMessage("Floor "+F.floor+" deleted.");
+  };
+  p.append(m, yes, no);
+  yes.focus();
+}
+function removeFloor(F){
+  if (F.es) F.es.close();
+  GAME.scene.remove(floorKey(F.floor));
+  FLOORS.delete(F.floor);
+  const rest = [...FLOORS.keys()].sort((a,b) => a-b);
+  if (rest.length){ switchToFloor(rest[rest.length-1]); return; }
+  ACTIVE = null;
+  document.getElementById("floor-tag").textContent = "FLOOR —";
+  document.getElementById("proj-tag").textContent = "no project";
+  document.getElementById("mode-tag").textContent = "";
+  for (const id of ["log", "progress", "tickets", "gates-mini"]) document.getElementById(id).innerHTML = "";
+  renderElevator(); renderControls();
+  if (window.Insight) Insight.onFloor(null);
 }
 
 // ---- UI wiring -------------------------------------------------------------
 const newModal=document.getElementById("new-modal");
+function showNewModal(change){
+  if (window.FoundrySettings) FoundrySettings.prepareForm(change || null);
+  document.getElementById("first-run").classList.toggle("hidden", FLOORS.size > 0 || !!change);
+  document.getElementById("req-err").textContent = "";
+  newModal.classList.remove("hidden");
+  syncSettingsSummary();
+}
+for (const ex of document.querySelectorAll("#examples .example")){
+  ex.onclick = () => {
+    const req = document.getElementById("req-input");
+    req.value = ex.textContent.trim();
+    req.dispatchEvent(new Event("input", {bubbles:true}));
+    req.focus();
+  };
+}
 document.getElementById("new-btn").onclick=()=>showNewModal();
 document.getElementById("cancel-btn").onclick=()=>newModal.classList.add("hidden");
 document.getElementById("new-close").onclick=()=>newModal.classList.add("hidden");
-// ---- folded sections report what they're set to ------------------------------
-// ③ How it runs and ④ Scale & limits stay shut on their defaults, so their summary
-// line has to name those defaults — a fold that hides the setting AND its value is
-// just a setting you can't find.
-function _selLabel(id){
-  const s=document.getElementById(id);
-  if(!s || !s.selectedOptions || !s.selectedOptions.length) return "";
-  return (s.selectedOptions[0].textContent||"").split("—")[0].trim();
-}
-function syncFoldSummaries(){
-  const val=(id)=>String((document.getElementById(id)||{}).value||"").trim();
-  const run=document.getElementById("run-sum");
-  if(run) run.textContent=[_selLabel("backend-select"), _selLabel("mode-select"),
-    _selLabel("build-select"), _selLabel("adapter-select"),
-    "stack: "+(_selLabel("profile-select")||"auto")].filter(Boolean).join(" · ");
-  const scale=document.getElementById("scale-sum");
-  if(scale){
-    const ap=parseInt(val("autopilot-input"),10);
-    const parts=[(val("extra-workers")||"auto")+" workers",
-                 (val("fix-input")||"0")+" auto-fix"];
-    if(val("cap-input")) parts.push("$"+val("cap-input")+" cap");
-    parts.push(Number.isFinite(ap)&&ap>0 ? "autopilot "+ap : "autopilot off");
-    if(val("packs-input")) parts.push(val("packs-input"));
-    const sup=document.getElementById("supervised");
-    parts.push(sup && sup.checked ? "supervised" : "unsupervised");
-    scale.textContent=parts.join(" · ");
+// Per-specialty worker limits: ints 1..16, default 4.
+function readWorkers(){
+  const w = {};
+  for (const sp of SPECIALTIES){
+    const n = parseInt((document.getElementById("workers-"+sp)||{}).value, 10);
+    w[sp] = Number.isFinite(n) && n >= 1 ? Math.min(MAX_LIMIT, n) : DEFAULT_LIMIT;
   }
+  return w;
 }
-newModal.addEventListener("change", syncFoldSummaries);
-newModal.addEventListener("input", syncFoldSummaries);
-
-// ---- Presets: one-click example builds that fill every spec-side setting -------
-// The PIR entry reuses the modal's HTML defaults (one source of truth); the rest are
-// defined inline. A preset sets the SPEC side (request/spec/mode/build/ladder/stack/
-// packs/workers/fix/autopilot) but NOT backend/adapter — those are host-dependent and
-// the server already reconciles them from /api/config.
-const _pirReq = (document.getElementById("req-input")||{}).value || "";
-const _pirSpec = (document.getElementById("spec-text")||{}).value || "";
-const _pirLadder = (document.getElementById("milestones-text")||{}).value || "";
-const MOON_SPEC =
-`A complete stardew-valley-style 2D farming/life sim, set on the moon.
-Must include: tile-based moon surface with a scrolling camera; day/night + sol
-cycle; player movement and tool use; tilling, planting, watering, and harvesting
-at least 6 crop types with growth stages; oxygen/energy management; a colony hub
-with at least 4 NPCs with daily schedules and dialog; an economy (sell crops,
-buy seeds/upgrades at a store); base-building (place/upgrade modules); save/load
-with 3 slots; a title screen, pause menu, and controls screen; sound hooks
-(procedural or silent-safe); keyboard controls documented in-game. Code-drawn
-graphics (shapes/procedural tiles) are fine — no external assets.`;
-const PRESETS = [
-  { id:"custom", label:"— Custom (blank) —",
-    note:"A blank slate — describe your own build.",
-    request:"", intake:"idea", spec:"", mode:"autonomous", build:"single",
-    maxMilestones:6, milestones:"", profile:"auto", packs:"", workers:4, fix:5, autopilot:0 },
-  { id:"pir", label:"PIR system · cryptography (complex)",
-    note:"Information-theoretic 2-server + homomorphic single-server PIR, verified in-process.",
-    request:_pirReq, intake:"spec", spec:_pirSpec, mode:"gated", build:"milestones",
-    maxMilestones:6, milestones:_pirLadder, profile:"auto", packs:"crypto",
-    workers:4, fix:5, autopilot:0 },
-  { id:"moon", label:"Moon Colony farming game · pygame (very complex)",
-    note:"The BUILD-A-FULL-GAME recipe: a complete Stardew-style sim as a milestone ladder.",
-    request:"a complete stardew-style farming game about colonizing the moon",
-    intake:"spec", spec:MOON_SPEC, mode:"gated", build:"milestones", maxMilestones:10,
-    milestones:"", profile:"pygame", packs:"game", workers:4, fix:8, autopilot:5 },
-  { id:"urlshort", label:"URL shortener · web service (simple)",
-    note:"A small single service — quick end-to-end build.",
-    request:"a URL shortener service with custom slugs, link expiry, click analytics, and per-IP abuse rate-limiting",
-    intake:"idea", spec:"", mode:"autonomous", build:"single", maxMilestones:6,
-    milestones:"", profile:"auto", packs:"", workers:4, fix:5, autopilot:0 },
-  { id:"chip8", label:"CHIP-8 emulator · systems (simple)",
-    note:"Cheap pipeline validation — objectively scoreable against public test ROMs.",
-    request:"a CHIP-8 emulator in Python with pytest tests against public test ROMs",
-    intake:"idea", spec:"", mode:"autonomous", build:"single", maxMilestones:6,
-    milestones:"", profile:"auto", packs:"", workers:4, fix:6, autopilot:0 },
-  { id:"taskmgr", label:"Team task manager · web+API+DB platform (complex)",
-    note:"Multi-service — auto-built as a platform (web / backend / data), stitched into one repo.",
-    request:"a team task manager: users sign up and log in, create projects, add tasks with assignees, due dates and labels, comment on tasks, and switch between a board and a list view — a REST API, a web UI, and a database",
-    intake:"idea", spec:"", mode:"gated", build:"single", maxMilestones:6,
-    milestones:"", profile:"auto", packs:"frontend", workers:6, fix:6, autopilot:0 },
-  { id:"ssg", label:"Static-site generator · CLI tool (simple)",
-    note:"A command-line tool + library — a different shape of software.",
-    request:"a command-line static-site generator: turn a folder of Markdown with front-matter into a linked HTML site with a table of contents, page templates, and a live-reload dev server",
-    intake:"idea", spec:"", mode:"autonomous", build:"single", maxMilestones:6,
-    milestones:"", profile:"auto", packs:"", workers:4, fix:5, autopilot:0 },
-  { id:"chat", label:"Real-time chat · WebSocket platform (complex)",
-    note:"Rooms, presence and typing over WebSockets — web client + realtime backend + DB.",
-    request:"a real-time group chat app: named rooms, user presence, typing indicators, persistent message history and search, and auth — a WebSocket backend, a web client, and a database",
-    intake:"idea", spec:"", mode:"gated", build:"single", maxMilestones:6,
-    milestones:"", profile:"auto", packs:"frontend", workers:6, fix:6, autopilot:0 },
-];
-function _setSelIfPresent(id, val){
-  const s=document.getElementById(id); if(!s) return;
-  if([...s.options].some(o=>o.value===val)){ s.value=val; s.dispatchEvent(new Event("change")); }
+// The settings fold stays shut; its summary line names what it is set to.
+function syncSettingsSummary(){
+  const w=readWorkers();
+  const tok=String((document.getElementById("token-cap-input")||{}).value||"").trim();
+  document.getElementById("scale-sum").textContent =
+    `workers FE${w.frontend} BE${w.backend} DA${w.data} TE${w.test} · `+(tok ? tok+" token cap" : "no token cap");
 }
-function applyPreset(id){
-  const p=PRESETS.find(x=>x.id===id); if(!p) return;
-  const note=document.getElementById("preset-note"); if(note) note.textContent=p.note||"";
-  const set=(elId,val)=>{ const e=document.getElementById(elId); if(e) e.value=val; };
-  set("req-input", p.request||"");
-  set("spec-text", p.spec||"");
-  set("milestones-text", p.milestones||"");
-  set("max-milestones", p.maxMilestones!=null?p.maxMilestones:6);
-  set("packs-input", p.packs||"");
-  set("extra-workers", p.workers!=null?p.workers:"");
-  set("fix-input", p.fix!=null?p.fix:5);
-  set("autopilot-input", p.autopilot!=null?p.autopilot:0);
-  _setSelIfPresent("mode-select", p.mode||"autonomous");
-  _setSelIfPresent("build-select", p.build||"single");   // change event toggles the ladder opts
-  _setSelIfPresent("profile-select", p.profile||"auto");
-  // intake radio: reveal the matching panel (idea hides the spec box, spec shows it).
-  const rb=document.querySelector(`input[name="intake"][value="${p.intake||"idea"}"]`);
-  if(rb){ rb.checked=true; rb.dispatchEvent(new Event("change")); }
-  if(typeof updateSlotHint==="function") updateSlotHint();
-  if(typeof syncMode==="function") syncMode();
-}
-{ const ps=document.getElementById("preset-select");
-  if(ps){
-    for(const p of PRESETS){ const o=document.createElement("option"); o.value=p.id; o.textContent=p.label; ps.appendChild(o); }
-    ps.value="pir";   // the modal's HTML defaults already show the PIR demo
-    const pn=document.getElementById("preset-note");
-    if(pn){ const cur=PRESETS.find(x=>x.id==="pir"); if(cur) pn.textContent=cur.note; }
-    ps.addEventListener("change", ()=>applyPreset(ps.value));
-  } }
-
-// ---- "Start from": fresh build, or iterate on a finished build -------------
-const startFromSel=document.getElementById("startfrom-select");
-const REQ_FRESH='What should the factory build? <span class="hint">— a sentence, or a full brief</span>';
-const REQ_ITER='What to change or add? <span class="hint">— the agents build on the selected floor</span>';
-const SEED_REQ='build a tiny URL-shortener service';
-async function loadStartFrom(){
-  let builds=[];
-  try{ const r=await fetch("/api/builds"); builds=((await r.json())||{}).builds||[]; }catch(_){}
-  startFromSel.innerHTML='<option value="">✦ Fresh build</option>';
-  for(const b of builds){
-    if(b.has_repo===false) continue;
-    const o=document.createElement("option");
-    o.value=b.id;
-    o.textContent=`⎘ Floor ${b.floor} ${b.passed?"✓":"✗"} · ${(b.request||"").slice(0,40)}`;
-    startFromSel.appendChild(o);
-  }
-}
-function syncStartFrom(){
-  const iterating=!!startFromSel.value;
-  document.getElementById("req-label").innerHTML=iterating?REQ_ITER:REQ_FRESH;
-  const req=document.getElementById("req-input");
-  if(iterating && (req.value.trim()===""||req.value.trim()===SEED_REQ)){
-    req.value=""; req.placeholder="e.g. add link expiry + custom slugs, and rate-limit by IP";
-  }
-  // Iterate → pre-fill the converse draft with the PARENT's saved spec, so a new
-  // conversation with the leads EXTENDS it (and the release saves it cumulatively).
-  // Guarded by !chatDraft so it never clobbers an in-progress draft.
-  if(iterating){
-    fetch("/api/spec/"+startFromSel.value).then(r=>r.ok?r.json():{spec:"",built:""})
-      .then(d=>{
-        if(typeof d.spec==="string" && d.spec.trim() && !chatDraft.trim()){
-          chatDraft=d.spec;
-          const el=document.getElementById("chat-spec"); if(el) el.textContent=chatDraft;
-        }
-        iterBuilt = (typeof d.built==="string") ? d.built : "";   // seeds the leads on iterate
-      }).catch(()=>{});
-  } else {
-    iterBuilt = "";
-  }
-}
-startFromSel.addEventListener("change", syncStartFrom);
-function showNewModal(parentId){
-  newModal.classList.remove("hidden");
-  loadStartFrom().then(()=>{
-    startFromSel.value=(parentId && [...startFromSel.options].some(o=>o.value===parentId))?parentId:"";
-    syncStartFrom();
-  });
-  updateSlotHint();
-  syncFoldSummaries();   // reconciled selects (/api/config) don't fire change events
-}
-// Advisory IC-pool sizing: ask the server (/api/suggest-slots) how many parallel
-// workers the request + packs are likely to need, and fold it into the note. The
-// real split is decided during the build — this just previews the scale.
-const PARALLEL_BASE = "Automatic — the tech-lead decomposes the work and the system runs the independent tasks in parallel.";
-let slotHintTimer = null;
-function updateSlotHint(){
-  if(slotHintTimer) clearTimeout(slotHintTimer);
-  slotHintTimer = setTimeout(()=>{
-    const note = document.getElementById("parallel-note");
-    const request = (document.getElementById("req-input").value || "").trim();
-    const packs = (document.getElementById("packs-input").value || "")
-      .split(",").map(s=>s.trim()).filter(Boolean);
-    if(!note || !request){ if(note) note.textContent = PARALLEL_BASE; return; }
-    fetch("/api/suggest-slots",{method:"POST",headers:postHeaders(),
-      body:JSON.stringify({request, packs})})
-     .then(r=>r.ok?r.json():null)
-     .then(d=>{
-       if(!d || !d.slots){ note.textContent = PARALLEL_BASE; return; }
-       const areas = (d.areas||[]).length ? ` across ${d.areas.join(", ")}` : "";
-       note.textContent = `${PARALLEL_BASE} For this request, expect ≈ ${d.slots} parallel worker${d.slots===1?"":"s"}${areas}.`;
-     })
-     .catch(()=>{ note.textContent = PARALLEL_BASE; });
-  }, 350);
-}
-// intake mode radios -> reveal the matching panel
-function intakeMode(){ return (document.querySelector('input[name="intake"]:checked')||{}).value||"idea"; }
-for(const r of document.querySelectorAll('input[name="intake"]')){
-  r.addEventListener("change", ()=>{
-    const v = intakeMode();
-    for(const p of document.querySelectorAll(".intake-panel"))
-      p.classList.toggle("hidden", p.dataset.mode !== v);
-  });
-}
-// ---- spec chat with the leads (intake mode "chat") -------------------------
-let chatSession = null, chatDraft = "", iterBuilt = "";
-function appendChatTurn(role, text){
-  const log = document.getElementById("chat-log");
-  const cls = role === "user" ? "user" : (role === "system" ? "system" : "lead");
-  const div = document.createElement("div");
-  div.className = "chat-turn "+cls;
-  div.innerHTML = `<span class="who"></span> <span class="txt"></span>`;
-  div.querySelector(".who").textContent = role === "user" ? "you" : role;
-  div.querySelector(".txt").textContent = text;
-  log.appendChild(div); log.scrollTop = log.scrollHeight;
-}
-function sendChat(){
-  const input = document.getElementById("chat-msg");
-  const msg = input.value.trim();
-  if(!msg) return;
-  input.value = "";
-  appendChatTurn("user", msg);
-  appendChatTurn("system", "…leads are thinking…");
-  const backend = document.getElementById("backend-select").value;
-  // On the FIRST turn of an iterate, seed the session with the inherited spec
-  // (what it SHOULD be) and what the last build actually produced (what's DONE),
-  // so the leads EXTEND the spec and focus the new work on the gaps.
-  const seedSpec  = (!chatSession && chatDraft.trim()) ? chatDraft : undefined;
-  const seedBuilt = (!chatSession && iterBuilt.trim()) ? iterBuilt : undefined;
-  fetch("/api/ideate", {method:"POST", headers:postHeaders(),
-    body: JSON.stringify({session:chatSession, message:msg, backend,
-                          base_spec:seedSpec, base_built:seedBuilt})})
-   .then(r=>r.json())
-   .then(d=>{
-     // drop the "thinking…" placeholder
-     const log=document.getElementById("chat-log"); if(log.lastChild) log.removeChild(log.lastChild);
-     chatSession = d.session;
-     for(const m of (d.messages||[])) appendChatTurn(m.role||"lead", m.text||"");
-     if(typeof d.spec === "string"){ chatDraft = d.spec; document.getElementById("chat-spec").textContent = chatDraft || "(nothing yet)"; }
-   })
-   .catch(()=>{ const log=document.getElementById("chat-log"); if(log.lastChild) log.removeChild(log.lastChild); appendChatTurn("system","(chat request failed)"); });
-}
-
-function fileToB64(file){
-  return new Promise((res,rej)=>{
-    const r=new FileReader();
-    r.onload=()=>res(String(r.result).split(",",2)[1]||"");  // drop the data: prefix
-    r.onerror=()=>rej(r.error);
-    r.readAsDataURL(file);
-  });
-}
-document.getElementById("start-btn").onclick=async ()=>{
-  const req=document.getElementById("req-input").value;
-  const mode=document.getElementById("mode-select").value;
-  const backend=document.getElementById("backend-select").value;
-  const packs=document.getElementById("packs-input").value;
-  const sup=document.getElementById("supervised").checked;
-  const extra={};
-  extra.adapter=document.getElementById("adapter-select").value;
-  { const ap=document.getElementById("autopilot-input");
-    const n=ap?parseInt(ap.value,10):0; if(Number.isFinite(n)&&n>0) extra.autopilot=n; }
-  // Extra workers: the pool ON TOP of one-per-team. Blank ⇒ the server's automatic
-  // cap. Each role always gets its baseline worker; these scale the busy teams.
-  const xw=parseInt((document.getElementById("extra-workers")||{}).value,10);
-  if(Number.isFinite(xw) && xw>=0) extra.max_slots=xw;
-  const fix=parseInt(document.getElementById("fix-input").value,10);
-  if(Number.isFinite(fix) && fix>=0) extra.max_fix_attempts=fix;
-  const cap=parseFloat(document.getElementById("cap-input").value);
-  if(Number.isFinite(cap) && cap>0) extra.cost_cap_usd=cap;
-  if(startFromSel.value) extra.parent_id=startFromSel.value;   // iterate on a finished build
-  // platform vs single is INFERRED server-side from the request (multi-service => platform).
-  // These advanced knobs only take effect when the request builds as a platform.
-  const mp=parseInt((document.getElementById("max-passes")||{}).value,10);
-  if(Number.isFinite(mp) && mp>=1) extra.max_passes=mp;
-  const criticEl=document.getElementById("critic-on");
-  if(criticEl && !criticEl.checked) extra.no_critic=true;
-  const mpar=parseInt((document.getElementById("max-parallel")||{}).value,10);
-  if(Number.isFinite(mpar) && mpar>=1) extra.max_parallel=mpar;
-  const mss=parseInt((document.getElementById("max-slots-svc")||{}).value,10);
-  if(Number.isFinite(mss) && mss>=1) extra.max_slots_per_service=mss;
-  // Milestone ladder: plan-and-chain releasable increments (one release per rung).
-  // Iterating on a finished build stays a single release, so the ladder select
-  // only applies to fresh builds.
-  { const bs=document.getElementById("build-select");
-    if(bs && bs.value==="milestones" && !startFromSel.value){
-      extra.build="milestones";
-      const mm=parseInt((document.getElementById("max-milestones")||{}).value,10);
-      extra.max_milestones=(Number.isFinite(mm)&&mm>=1)?Math.min(mm,12):10;
-      const lines=(document.getElementById("milestones-text").value||"")
-        .split("\n").map(s=>s.trim()).filter(Boolean);
-      if(lines.length) extra.milestones=lines;
-    } }
-  { const ps=document.getElementById("profile-select");
-    if (ps && ps.value && ps.value!=="auto") extra.profile=ps.value; }
-  const intake=intakeMode();
-  if(startFromSel.value && !req.trim()){ alert("Describe what to change or add."); return; }
-  if(intake==="spec"){
-    extra.spec_text=document.getElementById("spec-text").value;
-  } else if(intake==="zip"){
-    const f=document.getElementById("zip-file").files[0];
-    if(!f){ alert("Choose a .zip of docs first."); return; }
-    try { extra.spec_zip_b64=await fileToB64(f); }
-    catch(_){ alert("Could not read that file."); return; }
-  } else if(intake==="chat"){
-    if(!chatDraft.trim()){ alert("Chat with the leads first to draft a spec (or pick another mode)."); return; }
-    extra.spec_text=chatDraft;
-  }
+newModal.addEventListener("input", syncSettingsSummary);
+document.getElementById("start-btn").onclick=()=>{
+  const req=document.getElementById("req-input").value.trim();
+  const reqErr = document.getElementById("req-err");
+  if(!req){ reqErr.textContent = "Describe what to build first."; document.getElementById("req-input").focus(); return; }
+  reqErr.textContent = "";
+  if (window.Notify) Notify.askOnce();
+  const adv = window.FoundrySettings ? FoundrySettings.formExtra() : {};
+  if (adv === null) return;
+  const extra={workers:readWorkers(), ...adv};
+  const tokCap=parseInt(document.getElementById("token-cap-input").value,10);
+  if(Number.isFinite(tokCap) && tokCap>0) extra.token_cap=tokCap;
   newModal.classList.add("hidden");
-  newProject(req, mode, sup, backend, packs, extra);
-  // reset the chat for the next project
-  chatSession=null; chatDraft=""; iterBuilt="";
-  document.getElementById("chat-log").innerHTML="";
-  document.getElementById("chat-spec").textContent="(nothing yet)";
+  if (window.FoundrySettings) FoundrySettings.formStarted();
+  newProject(req, extra);
 };
-document.getElementById("req-input").addEventListener("input", updateSlotHint);
-document.getElementById("packs-input").addEventListener("input", updateSlotHint);
-// Build-as select: the milestone options only make sense for the ladder.
-{ const bs=document.getElementById("build-select"), mo=document.getElementById("milestones-opts");
-  if(bs && mo) bs.addEventListener("change", ()=>mo.classList.toggle("hidden", bs.value!=="milestones")); }
-document.getElementById("chat-send").onclick=sendChat;
-document.getElementById("chat-msg").addEventListener("keydown",(e)=>{ if(e.key==="Enter"){ e.preventDefault(); sendChat(); }});
-document.getElementById("cp-approve").onclick=()=>sendDecision("approve");
-document.getElementById("cp-changes").onclick=()=>sendDecision("needs_changes");
-document.getElementById("cp-reject").onclick=()=>sendDecision("reject");
 document.getElementById("output-btn").onclick=openFiles;
 for (const t of document.querySelectorAll(".log-tab")) t.onclick = () => selectLogTab(t.dataset.tab);
 document.getElementById("files-close").onclick=hideFiles;
 document.getElementById("repos-close").onclick=closeRepoHub;
 document.getElementById("repos-new").onclick=()=>{ closeRepoHub(); showNewModal(); };
+document.getElementById("repo-q").addEventListener("input", () => {
+  clearTimeout(REPO_TIMER); REPO_TIMER = setTimeout(loadRepoList, 200);
+});
+document.getElementById("repo-status").onchange = loadRepoList;
+document.getElementById("repo-sort").onchange = loadRepoList;
+document.getElementById("files-q").addEventListener("input", e => {
+  if (!FILES_TREE.length) return;
+  if (e.target.value.trim()) renderMatches(e.target.value); else renderDir(FILES_CWD);
+});
+window.Workshop = {showFloor: f => { if (FLOORS.has(f)) switchToFloor(f); }};
 document.getElementById("repos-clear").onclick=async ()=>{
   if(!confirm("Clear ALL floors and repositories? This wipes every build from the catalog and cannot be undone.")) return;
   try{
@@ -3644,127 +3190,6 @@ document.getElementById("repos-clear").onclick=async ()=>{
     location.reload();   // floors/repos are gone server-side — rebuild the empty UI
   }catch(_){ alert("Clear failed — could not reach the server."); }
 };
-// interview modal
-document.getElementById("iv-ask").onclick=askInterview;
-document.getElementById("iv-close").onclick=()=>document.getElementById("iv-modal").classList.add("hidden");
-document.getElementById("iv-question").addEventListener("keydown",(e)=>{ if(e.key==="Enter"){ e.preventDefault(); askInterview(); }});
-
-// Pull runtime config from the server: preselect the configured default backend +
-// adapter (FOUNDRY_MODEL_BACKEND/_CODING_ADAPTER; mock/stub if unset), drop any
-// option the server doesn't actually support (keeps the picker 1-1 with BACKENDS /
-// ADAPTERS), and surface the per-tier model ids each backend would serve.
-let MODELS_BY_BACKEND = {};
-function reconcileSelect(sel, supported, fallback){
-  if(!sel || !Array.isArray(supported) || !supported.length) return;
-  // drop options the server no longer supports…
-  for(const o of [...sel.options]) if(!supported.includes(o.value)) o.remove();
-  // …and add any the server supports but the static markup didn't list (the rich
-  // descriptions stay on the known ones; new ones get a plain label).
-  const have = new Set([...sel.options].map(o=>o.value));
-  for(const v of supported) if(!have.has(v)){
-    const o=document.createElement("option"); o.value=v; o.textContent=v; sel.appendChild(o);
-  }
-  if(![...sel.options].some(o=>o.value===sel.value))
-    sel.value = (fallback && supported.includes(fallback)) ? fallback : supported[0];
-}
-function updateModelNote(){
-  const note=document.getElementById("model-note");
-  if(!note) return;
-  const backend=document.getElementById("backend-select").value;
-  const m=MODELS_BY_BACKEND[backend];
-  if(!m || !Object.keys(m).length){ note.textContent = backend==="mock"
-    ? "mock runs no real model — deterministic, offline." : ""; return; }
-  note.textContent = "Models · " + Object.entries(m).map(([t,id])=>`${t}: ${id}`).join("  ·  ");
-}
-fetch("/api/config").then(r=>r.json()).then(c=>{
-  if(!c) return;
-  const sel=document.getElementById("backend-select");
-  reconcileSelect(sel, c.backends, c.default_backend);
-  if(c.default_backend && [...sel.options].some(o=>o.value===c.default_backend))
-    sel.value=c.default_backend;
-  const asel=document.getElementById("adapter-select");
-  reconcileSelect(asel, c.adapters, c.default_adapter);
-  // Stack picker: "auto" + every verification profile the server ships.
-  { const ps=document.getElementById("profile-select");
-    if (ps && Array.isArray(c.profiles)){
-      for (const name of c.profiles){
-        const o=document.createElement("option"); o.value=name; o.textContent=name;
-        ps.appendChild(o);
-      } } }
-  // The coding substrate is DERIVED from the backend (parity with the CLI:
-  // mock→stub, any real backend→raw-react), so a real backend writes real code
-  // without a second pick. syncAdapter() applies it unless the user overrode it.
-  syncAdapter();
-  MODELS_BY_BACKEND = c.models_by_backend || {};
-  updateModelNote();
-  syncCostCap();
-  syncFoldSummaries();   // these selects were set programmatically — no change event
-}).catch(()=>{});
-
-// The USD cost cap only binds *metered* API backends (real per-token charges).
-// mock is offline, ollama is local, and claude-cli bills a flat subscription —
-// so for those a per-build USD cap is meaningless: disable + annotate the field.
-const METERED_BACKENDS = ["anthropic","openai","codex"];
-function syncCostCap(){
-  const backend = document.getElementById("backend-select").value;
-  const cap = document.getElementById("cap-input");
-  if(!cap) return;
-  const metered = METERED_BACKENDS.includes(backend);
-  cap.disabled = !metered;
-  cap.placeholder = metered ? "no cap" : `${backend} isn't metered — no USD cost`;
-  if(!metered) cap.value = "";
-}
-// Coding substrate derived from the backend (CLI parity): mock→stub no-op,
-// claude-cli→claude-code (AGENTIC: claude edits/builds/tests inside the task
-// sandbox), other real backends→raw-react (one completion → one diff). A user who
-// manually picks an adapter pins it (adapterTouched), so derivation never
-// clobbers an explicit choice.
-function defaultAdapterFor(backend){
-  if(backend==="mock") return "stub";
-  return backend==="claude-cli" ? "claude-code" : "raw-react";
-}
-let adapterTouched = false;
-function syncAdapter(){
-  const asel = document.getElementById("adapter-select");
-  if(!asel || adapterTouched) return;
-  const want = defaultAdapterFor(document.getElementById("backend-select").value);
-  if([...asel.options].some(o=>o.value===want)) asel.value = want;
-}
-{ const asel = document.getElementById("adapter-select");
-  if(asel) asel.addEventListener("change", ()=>{ adapterTouched = true; }); }
-document.getElementById("backend-select").addEventListener("change", ()=>{ syncCostCap(); syncAdapter(); updateModelNote(); });
-syncCostCap();
-
-// Autonomous mode is HANDS-OFF by definition: the trust-root admission controller
-// is the sole release gate (build · admit · deploy, no human sign-off). So when
-// `autonomous` is picked, supervision (per-checkpoint human approval) is forced
-// OFF — keeping it on would pause an unattended build. gated re-enables it so the
-// CTO drives the Design/Release checkpoints in the floor screen.
-function syncMode(){
-  const mode = document.getElementById("mode-select").value;
-  const sup = document.getElementById("supervised");
-  const hint = document.getElementById("supervised-hint");
-  if(!sup) return;
-  if(mode === "autonomous"){
-    sup.checked = false;
-    sup.disabled = true;
-    if(hint) hint.textContent = "Autonomous is hands-off — admission is the sole release gate; no checkpoint approvals.";
-    // Only the REGULATED pack vetoes hands-off release (compliance sign-off needs
-    // a human). Warn HERE instead of letting the server refuse the build with a
-    // cryptic mode-veto error. Other packs (game/infra/crypto) allow autonomous —
-    // their human sign-offs simply don't bind when no human is in the loop.
-    const packs=(document.getElementById("packs-input").value||"").toLowerCase();
-    if(hint && packs.includes("regulated"))
-      hint.textContent = "⚠ The regulated pack VETOES autonomous (compliance sign-off needs "
-        + "a human) — the build will refuse to start. Switch to gated, or clear the pack.";
-  } else {
-    sup.disabled = false;
-    if(hint) hint.textContent = "Gated — the CTO approves the Design & Release checkpoints right here in the floor screen (no Git merge).";
-  }
-}
-document.getElementById("mode-select").addEventListener("change", syncMode);
-document.getElementById("packs-input").addEventListener("input", syncMode);
-syncMode();
 
 // Rehydrate on (re)load: floors run server-side independently of this tab, so a
 // refresh / reconnect from another device rebuilds every floor + reconnects the
@@ -3772,70 +3197,64 @@ syncMode();
 function adoptFloor(row){
   if (FLOORS.has(row.floor)) return;
   const F = {
-    id:row.id, floor:row.floor, release:row.release||1, releases:row.releases||1,
+    id:row.id, floor:row.floor,
     request:row.request, mode:row.mode, backend:row.backend,
-    scene:null, log:[], progress:[], gates:row.gates||{}, org:null, cp:null, awaiting:!!row.awaiting,
-    status:row.status, passed:!!row.passed, slots:row.slots||1, journal:[], seenUris:new Set(),
+    scene:null, log:[], progress:[], gates:row.gates||{}, org:null,
+    status:row.status, passed:!!row.passed, slots:row.slots||1, seenUris:new Set(),
+    phase:row.phase||"", stopping:row.stopping||"", tokenCap:row.token_cap ?? null,
+    maxFix:row.max_fix_attempts ?? 3, cursor:0, build:row.build || null,
+    title:row.title || row.request,
   };
   FLOORS.set(row.floor, F);
   GAME.scene.add(floorKey(row.floor), FloorScene, true,
     {floor:row.floor, id:row.id, request:row.request, mode:row.mode, slots:F.slots});
-  if (row.status !== "done"){          // running build: reconnect its live stream
-    openFloorStream(F);
-  }
+  openFloorStream(F);   // a running build reconnects live; a finished one replays its log and ends
 }
-// ONE live stream per floor, shared by every path (new build / rehydrate / next
-// release). When the stream ENDS, the server may immediately spawn the floor's
-// NEXT release (a milestone-ladder rung or an autopilot iteration) — follow along
-// by briefly polling for a newer release and adopting it in place, so an open tab
-// streams a whole overnight ladder without a refresh.
-function openFloorStream(F){
-  const es = new EventSource("/api/stream/"+F.id);
+// ONE live stream per floor, shared by every path (new build / rehydrate).
+// `from` reattaches a resumed floor where its stream left off (no full replay).
+function openFloorStream(F, from){
+  const es = new EventSource("/api/stream/"+F.id+(from ? "?from="+from : ""));
   F.lastBeat = Date.now();
   es.onmessage = e => { F.lastBeat = Date.now();
+    if (window.Insight) Insight.streamOk(F);
+    if (e.lastEventId) F.cursor = parseInt(e.lastEventId, 10) + 1;
     try { routeEvent(F.floor, JSON.parse(e.data)); } catch(_){} };
+  es.onopen = () => { if (window.Insight) Insight.streamOk(F); };
+  es.onerror = () => { if (window.Insight) Insight.streamError(F, es); };
   es.addEventListener("ka", ()=>{ F.lastBeat = Date.now(); updateLiveDot(); });
-  es.addEventListener("end", ()=>{ es.close(); adoptNextRelease(F); });
+  es.addEventListener("end", ()=>{ es.close(); });
   F.es = es;
-}
-async function adoptNextRelease(F){
-  // Poll for ~5 minutes (autopilot's Director/panel deliberation can take a while
-  // on a real backend; a ladder rung spawns in seconds), then give up quietly.
-  for (let tries = 0; tries < 60; tries++){
-    await new Promise(r=>setTimeout(r, 5000));
-    let rows;
-    try { rows = (await fetch("/api/projects").then(r=>r.json())).projects; }
-    catch(_){ continue; }
-    const row = (rows||[]).find(r=>r.floor===F.floor);
-    if (!row || row.id === F.id){
-      if (row && row.status === "done") return;   // floor truly finished
-      continue;
-    }
-    // A fresh release took over the floor: reset per-release state and reconnect
-    // (the same shape newProject's iterate path uses).
-    if (F.es){ try{ F.es.close(); }catch(_){} }
-    Object.assign(F, {
-      id:row.id, release:row.release||F.release+1, releases:(F.releases||1)+1,
-      request:row.request, log:[], gates:{}, org:null, cp:null, awaiting:false,
-      status:"running", passed:false, journal:[], seenUris:new Set(),
-      liveRoom:null, liveAgent:null, _agrp:null, _svcOpen:null,
-    });
-    const sc = GAME.scene.getScene(floorKey(F.floor));
-    if (sc) sc.scene.restart({floor:F.floor, id:row.id, request:row.request, mode:row.mode, slots:F.slots});
-    renderElevator();
-    if (F.floor === ACTIVE) updateHud(F);
-    openFloorStream(F);
-    return;
-  }
 }
 async function rehydrate(){
   await bootReady;  // shared textures must exist before a FloorScene builds
+  let projects;
   try {
-    const {projects} = await fetch("/api/projects").then(r=>r.json());
-    if(!projects || !projects.length){ showNewModal(); return; }
-    for(const row of projects) adoptFloor(row);
-    switchToFloor(projects[projects.length-1].floor);
-    renderElevator();
-  } catch(_){ showNewModal(); }
+    const r = await fetch("/api/projects");
+    if (!r.ok) throw Object.assign(new Error("HTTP "+r.status), {status:r.status});
+    projects = (await r.json()).projects;
+    if (!Array.isArray(projects)) throw new Error("unexpected reply");
+  } catch(err){
+    // Not "no floors": an error state with retry, never the New Project modal.
+    if (window.Insight) Insight.rehydrateFailed(err, rehydrate); else showNewModal();
+    return;
+  }
+  if (window.Insight) Insight.rehydrated();
+  if(!projects.length){ renderElevator(); showNewModal(); return; }
+  for(const row of projects) adoptFloor(row);
+  switchToFloor(projects[projects.length-1].floor);
+  renderElevator();
 }
 rehydrate();
+// A floor resumed from another tab or device: this viewer's stream ended with the
+// last run, so look again whenever the page comes back into view.
+async function resyncFloors(){
+  let rows;
+  try { rows = (await fetch("/api/projects").then(r=>r.json())).projects || []; } catch(_){ return; }
+  for (const row of rows){
+    const F = FLOORS.get(row.floor);
+    if (!F || F.id !== row.id || F.status !== "done" || row.status === "done") continue;
+    if (!F.es || F.es.readyState === EventSource.CLOSED) openFloorStream(F, F.cursor);  // replays "resumed"
+  }
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) resyncFloors(); });
+window.addEventListener("focus", resyncFloors);

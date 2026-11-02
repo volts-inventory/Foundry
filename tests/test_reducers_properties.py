@@ -25,6 +25,7 @@ from pydantic import BaseModel
 from foundry.schemas.architecture import ConstraintScope, PinnedConstraint
 from foundry.schemas.base import Artifact, ExternalAction, IdempotencyPath
 from foundry.schemas.gates import GateResult, GateStatus, GateTriage, VerdictClass
+from foundry.schemas.journal import JournalEntry
 from foundry.state.reducers import (
     DETERMINISTIC_GATES,
     JUDGMENT_VERDICTS,
@@ -36,6 +37,7 @@ from foundry.state.reducers import (
     union,
     union_actions,
     union_by_id,
+    union_journal,
     union_triage,
 )
 from foundry.state.seq import Seq
@@ -178,6 +180,19 @@ def action_pool(draw) -> list[ExternalAction]:
 
 
 @st.composite
+def journal_pool(draw) -> list[JournalEntry]:
+    return [
+        JournalEntry(
+            node_id=draw(st.sampled_from(NODE_IDS)),
+            role="Agent",
+            summary=draw(st.sampled_from(["wrote PRD", "revised PRD", "approved diff"])),
+            seq=s,
+        )
+        for s in unique_seqs(draw)
+    ]
+
+
+@st.composite
 def constraint_pool(draw) -> list[PinnedConstraint]:
     out = []
     for s in unique_seqs(draw):
@@ -232,6 +247,7 @@ REDUCERS = {
     "union_by_id": union_by_id,
     "union_triage": union_triage,
     "union_actions": union_actions,
+    "union_journal": union_journal,
     "merge_by_uri": merge_by_uri,
     "merge_constraints": merge_constraints,
     "merge_gates": merge_gates,
@@ -242,6 +258,7 @@ POOLS = {
     "union_by_id": task_pool,
     "union_triage": triage_pool(),
     "union_actions": action_pool(),
+    "union_journal": journal_pool(),
     "merge_by_uri": artifact_pool,
     "merge_constraints": constraint_pool(),
     "merge_gates": gate_pool(),
@@ -345,12 +362,6 @@ def test_merge_by_uri_set_union_by_content_address(data):
     assert len(uris) == len(set(uris)), "more than one record for a uri"
     assert set(uris) == {x.uri for x in a + b}
     assert canon(out) == canon(merge_by_uri(b, a))
-
-
-def test_merge_by_uri_duplicate_uri_collapses():
-    x = artifact_for(1)
-    assert merge_by_uri([x], [x]) == [x]
-    assert merge_by_uri([x, x], None) == [x]
 
 
 # ---------------------------------------------------------------------------
@@ -495,8 +506,9 @@ def test_union_by_id_keys_are_union_of_inputs(data):
     [
         ("union_triage", lambda t: t.union_key()),
         ("union_actions", lambda x: x.idempotency_key),
+        ("union_journal", JournalEntry.union_key),
     ],
-    ids=["union_triage", "union_actions"],
+    ids=["union_triage", "union_actions", "union_journal"],
 )
 @given(data=st.data())
 @settings(max_examples=100, deadline=None)

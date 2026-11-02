@@ -29,18 +29,17 @@ from typing import Any
 from langchain_core.runnables import RunnableConfig
 
 from foundry.agents import AgentRuntime
-from foundry.docs import DocumentationBundle
-from foundry.durability.artifact_store import ArtifactStore
 from foundry.durability.checkpointer import FoundryCheckpointer
 from foundry.execution.adapters.stub import StubAdapter
 from foundry.gates import DevGateWriteVerifier, TwoZoneGateRunner, ZoneBSigner
 from foundry.graph.factory_graph import build_factory_graph, terminal_gates_pass
+from foundry.graph.supervisor import DEFAULT_ROUTE_CAPS_MICROUSD
 from foundry.proxy import ModelProviderProxy
 from foundry.proxy.test_doubles import MockTransport
 from foundry.schemas.architecture import OwnershipMap, SystemDesign
 from foundry.schemas.base import Artifact, FrozenModel
 from foundry.schemas.gates import GateStatus, JudgmentProvenance
-from foundry.schemas.implementation import FeatureDiff
+from foundry.schemas.implementation import FeatureDiff, Specialty, Ticket
 from foundry.schemas.product import (
     AcceptanceCriterion,
     CriteriaCritique,
@@ -49,6 +48,7 @@ from foundry.schemas.product import (
 from foundry.state.factory_state import FactoryState
 from foundry.state.global_records import GlobalRecords
 from foundry.state.reducers import reset_gate_write_verifier, set_gate_write_verifier
+from tests.planner_payload import PLANNER_SOP_KEY, plan_payload
 
 KEY = b"dev-zone-b-factory-graph-key-0123456789"
 KEY_ID = "dev-key-factory-graph"
@@ -129,15 +129,16 @@ SDET_PAYLOAD: dict[str, Any] = {
 _SCRIPTS: dict[str, str] = {
     # Every node that can make a model call needs a script: an unscripted node
     # serves "" and dies as ProxyUnavailable after the retries.
-    "You are the Scope Judge": json.dumps(
-        {"tier": "standard", "rationale": "a full-scope build", "signals": []}
+    PLANNER_SOP_KEY: json.dumps(
+        plan_payload(
+            intent=INTENT_PAYLOAD,
+            prd=PRD_PAYLOAD,
+            critique=CRITIQUE_PAYLOAD,
+            sprint=SPRINT_PAYLOAD,
+            design=DESIGN_PAYLOAD,
+            decomposition=DECOMPOSITION_PAYLOAD,
+        )
     ),
-    "Stakeholder / Client Proxy": json.dumps(INTENT_PAYLOAD),
-    "Product Manager": json.dumps(PRD_PAYLOAD),
-    "Criteria-Completeness Critic": json.dumps(CRITIQUE_PAYLOAD),
-    "Engineering / Program Manager": json.dumps(SPRINT_PAYLOAD),
-    "Principal Architect": json.dumps(DESIGN_PAYLOAD),
-    "Senior Engineer": json.dumps(DECOMPOSITION_PAYLOAD),
     "QA Engineer": json.dumps(QA_PAYLOAD),
     "SDET": json.dumps(SDET_PAYLOAD),
 }
@@ -191,6 +192,11 @@ def _synthetic_resolve(handle: Artifact) -> FrozenModel:
             judgment_provenance=JudgmentProvenance.SELF,
             seq=handle.seq,
         )
+    if handle.kind == "ticket":
+        tid = f"T-{handle.seq.local:03d}"
+        # No `files`: unrestricted write scope, so the canned diff lands whole.
+        return Ticket(id=tid, title=f"Ticket {tid}", specialty=Specialty.BACKEND,
+                      seq=handle.seq)
     if handle.kind == "feature_diff":
         return FeatureDiff(
             diff_uri=_DIFF_BODY_URI,
@@ -282,17 +288,25 @@ def test_factory_graph_passes_end_to_end_and_opens_one_pr(tmp_path: Any) -> None
         reset_gate_write_verifier(token)
         ckpt.close()
 
+    # Triage seeded route + budget.
+    assert final["route"] == "greenfield"
+    assert final["budget"].cap_microusd == DEFAULT_ROUTE_CAPS_MICROUSD["greenfield"]
+
     # The full phase order ran: every layer's artifacts landed.
     kinds = {a.kind for a in final.get("artifacts") or ()}
     assert {"prd", "acceptance_criterion", "system_design", "feature_diff"} <= kinds
     assert {"test_plan", "e2e_report"} <= kinds
 
-    # Terminal gates are runner-ATTESTED and all PASS.
+    # Terminal gates are runner-ATTESTED and all PASS; advancement only on PASS.
     statuses = _gates_by_name(final)
     assert statuses.get("spec") is GateStatus.PASS
     assert statuses.get("build") is GateStatus.PASS
     assert statuses.get("test") is GateStatus.PASS
+    # The reviewer's judgment verdict also rode `gates` (admitted by merge_gates).
+    assert statuses.get("review") is GateStatus.PASS
     assert terminal_gates_pass(final) is True
+    # No fix iterations were needed (the convergence counter stayed at 0).
+    assert final["budget"].fix_attempts_since_all_green == 0
 
     # EXACTLY ONE open_pr ExternalAction, opened against the integrated FeatureDiff.
     prs = _open_pr_actions(final)
@@ -343,7 +357,10 @@ def test_kill_then_resume_does_not_duplicate_pr(tmp_path: Any) -> None:
 
 def test_halted_run_emits_no_pr(tmp_path: Any) -> None:
     """A Test ERROR routes to bounded fix and never advances to an attested PASS;
-    the emit guard therefore opens NO PR (governance §1/§5)."""
+    the emit guard therefore opens NO PR (governance §1/§5).
+
+    An ERROR (not a hard FAIL) exercises the route-back path: it never latches
+    (infra, DS7), so the bounded ``fix`` counter must converge the loop."""
     src = tmp_path / "src"
     src.mkdir()
     (src / "README.md").write_text("seed\n")
@@ -359,121 +376,16 @@ def test_halted_run_emits_no_pr(tmp_path: Any) -> None:
         reset_gate_write_verifier(token)
         ckpt.close()
 
+    # Spec advanced (PASS); the build compiles; the Test gate is a signed ERROR
+    # (collection import failure) — never an advance.
     statuses = _gates_by_name(final)
+    assert statuses.get("spec") is GateStatus.PASS
+    assert statuses.get("build") is GateStatus.PASS
     assert statuses.get("test") is GateStatus.ERROR
     assert terminal_gates_pass(final) is False
+    # Bounded: the convergence counter reached the bound and routing halted rather
+    # than spinning. An ERROR never latches (infra, not a verdict).
+    assert final["budget"].fix_attempts_since_all_green >= 2
+    test_verdict = next(g for g in final["gates"] if g.name == "test")
+    assert not records.stable_fail_latched(test_verdict.run_against, "test")
     assert _open_pr_actions(final) == []  # no PR for a failed run
-
-
-# ---- task [3]: the terminal documentation node runs IN-GRAPH ----------------
-
-# The Technical Writer's SOP markers (foundry/docs/writers) + a minimal valid
-# payload each, so the in-graph docs node authors real doc bodies (vs degrading
-# to empty docs). Layered ON TOP of the spine scripts so the upstream phases are
-# unchanged.
-_DOC_SCRIPTS: dict[str, str] = {
-    **_SCRIPTS,
-    "OPERATIONAL RUNBOOK": json.dumps({"overview": "ops", "deploy_steps": ["a"]}),
-    "KNOWN-ISSUES": json.dumps({"issues": [], "limitations": ["dev"]}),
-    "UPGRADE / MIGRATION GUIDE": json.dumps({"from_version": "0", "to_version": "1"}),
-    "PERFORMANCE & COST": json.dumps({"summary": "ok", "observations": ["x"]}),
-}
-
-_DOC_KINDS = {"runbook", "known_issues", "upgrade_guide", "perf_cost_report"}
-
-
-def _runtime_with_docs() -> AgentRuntime:
-    """Spine + Technical-Writer scripts, backed by a real content-addressed store
-    (so the in-graph docs node resolves the upstream bodies + persists the
-    authored doc bodies under their handles)."""
-    tx = MockTransport.scripted(dict(_DOC_SCRIPTS), default_verdict="approve")
-    proxy = ModelProviderProxy(tx, signer=ZoneBSigner(KEY, KEY_ID))
-    return AgentRuntime(proxy=proxy, adapter=StubAdapter(), cas=ArtifactStore())
-
-
-def test_doc_node_runs_in_graph_and_emits_doc_artifacts(tmp_path: Any) -> None:
-    """On a PASSING build the terminal docs node runs IN-GRAPH: the authored doc
-    artifacts appear on state['artifacts'] (checkpointed) and the writer's model
-    spend is metered through the SAME proxy (visible on the proxy manifest)."""
-    src = tmp_path / "src"
-    src.mkdir()
-    (src / "README.md").write_text("seed\n")
-    records = GlobalRecords()
-    rt = _runtime_with_docs()
-    sink: list[DocumentationBundle] = []
-    ckpt = FoundryCheckpointer()
-    token = set_gate_write_verifier(DevGateWriteVerifier(KEY, KEY_ID, records))
-    try:
-        app = build_factory_graph(
-            rt,
-            runner=_runner(records),
-            resolve=_synthetic_resolve,
-            resolve_blob=_resolve_blob_factory(_PASSING_DIFF),
-            source_dir=str(src),
-            checkpointer=ckpt.saver,
-            doc_sink=sink,
-        )
-        # The writer's model calls are budget-metered through the proxy: capture
-        # the manifest length before vs after — the docs node adds >= 1 call.
-        calls_before = len(rt.proxy.manifest)
-        final: FactoryState = app.invoke({"request": "build a todo app"}, _config("run-docs"))
-    finally:
-        reset_gate_write_verifier(token)
-        ckpt.close()
-
-    assert terminal_gates_pass(final) is True
-    # The authored doc artifacts entered the checkpointed artifacts channel.
-    kinds = {a.kind for a in final.get("artifacts") or ()}
-    assert kinds >= _DOC_KINDS
-    # The writer's spend was metered IN-GRAPH (more model calls after invoke).
-    assert len(rt.proxy.manifest) > calls_before
-    # The assembled bundle reached the in-process sink for on-disk writing.
-    assert len(sink) == 1
-    assert {a.kind for a in sink[0].doc_artifacts} == _DOC_KINDS
-    # The PR is still emitted exactly once — docs never alter the release bit.
-    assert len(_open_pr_actions(final)) == 1
-
-
-def test_doc_node_failure_does_not_fail_the_build(
-    tmp_path: Any, monkeypatch: Any
-) -> None:
-    """Documentation is BEST-EFFORT: if in-graph assembly raises, the docs node
-    swallows it (warning only) and the build still PASSES + opens its PR."""
-    import foundry.docs.assemble as asm
-
-    src = tmp_path / "src"
-    src.mkdir()
-    (src / "README.md").write_text("seed\n")
-    records = GlobalRecords()
-    rt = _runtime_with_docs()
-    ckpt = FoundryCheckpointer()
-    token = set_gate_write_verifier(DevGateWriteVerifier(KEY, KEY_ID, records))
-
-    # Force the in-graph assembly to blow up — the node (which wraps it fail-safe)
-    # must still not fail the build (a docs failure can never block the PR).
-    def _boom(**_kwargs: Any) -> Any:
-        raise RuntimeError("assembly exploded")
-
-    monkeypatch.setattr(asm, "assemble_documentation", _boom)
-    try:
-        app = build_factory_graph(
-            rt,
-            runner=_runner(records),
-            resolve=_synthetic_resolve,
-            resolve_blob=_resolve_blob_factory(_PASSING_DIFF),
-            source_dir=str(src),
-            checkpointer=ckpt.saver,
-        )
-        final: FactoryState = app.invoke(
-            {"request": "build a todo app"}, _config("run-docs-boom")
-        )
-    finally:
-        reset_gate_write_verifier(token)
-        ckpt.close()
-
-    # The build still PASSED and opened its PR despite the docs failure.
-    assert terminal_gates_pass(final) is True
-    assert len(_open_pr_actions(final)) == 1
-    # No doc artifacts landed (assembly never returned a bundle).
-    kinds = {a.kind for a in final.get("artifacts") or ()}
-    assert not (_DOC_KINDS & kinds)

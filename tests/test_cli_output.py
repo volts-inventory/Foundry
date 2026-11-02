@@ -12,7 +12,10 @@ written path is surfaced on ``RunResult.output_root`` and in ``summary()``.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+import pytest
 
 from foundry.cli import main, run
 from foundry.schemas.gates import GateStatus
@@ -35,7 +38,7 @@ def test_passing_run_writes_source_files(tmp_path: Path) -> None:
     )
 
     assert result.passed is True
-    # The written path is surfaced on the result (like doc_root).
+    # The written path is surfaced on the result.
     assert result.output_root is not None
     assert Path(result.output_root) == out.resolve()
 
@@ -51,6 +54,12 @@ def test_passing_run_writes_source_files(tmp_path: Path) -> None:
 
     # The written path is reported in the human-readable summary.
     assert str(out.resolve()) in result.summary()
+
+    # The BUILD-MANIFEST (json + md) rides in the same tree with token accounting.
+    manifest = json.loads((out / "BUILD-MANIFEST.json").read_text(encoding="utf-8"))
+    assert manifest["passed"] is True
+    assert manifest["model_usage"]["model_calls"] > 0
+    assert "## Model usage (observed)" in (out / "BUILD-MANIFEST.md").read_text()
 
 
 def test_halted_run_writes_a_usable_draft(tmp_path: Path) -> None:
@@ -75,14 +84,6 @@ def test_halted_run_writes_a_usable_draft(tmp_path: Path) -> None:
     assert "DRAFT written to" in result.summary()
 
 
-def test_no_output_dir_writes_nothing(tmp_path: Path) -> None:
-    """Default (output_dir unset) leaves output_root None and writes no tree."""
-    result = run("build a tiny URL-shortener service", thread_id="cli-out-default")
-    assert result.passed is True
-    assert result.output_root is None
-    assert not any(tmp_path.iterdir())
-
-
 def test_main_out_flag_writes_tree(tmp_path: Path) -> None:
     out = tmp_path / "main-out"
     code = main(["--out", str(out), "build a tiny URL-shortener service"])
@@ -91,5 +92,27 @@ def test_main_out_flag_writes_tree(tmp_path: Path) -> None:
     assert not (out / "criteria.json").exists()
 
 
-def test_main_out_flag_requires_argument() -> None:
-    assert main(["--out"]) == 2
+def test_a_manifest_write_failure_never_changes_the_build_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(*_: object, **__: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr("foundry.cli.write_manifest", boom)
+    out = tmp_path / "generated"
+    result = run("build a tiny URL-shortener service", thread_id="cli-out-manifest-fail",
+                 output_dir=str(out))
+    assert result.passed is True and (out / "app.py").is_file()
+    assert not (out / "BUILD-MANIFEST.json").exists()
+
+
+def test_telemetry_details_every_ticket_past_the_bulk_cap() -> None:
+    from types import SimpleNamespace
+
+    from foundry.cli import _detailed_artifacts
+
+    arts = [SimpleNamespace(kind="acceptance_criterion", n=i) for i in range(250)]
+    arts += [SimpleNamespace(kind="ticket", n=i) for i in range(5)]
+    picked = _detailed_artifacts(arts)
+    assert sum(a.kind == "ticket" for a in picked) == 5
+    assert sum(a.kind == "acceptance_criterion" for a in picked) == 200

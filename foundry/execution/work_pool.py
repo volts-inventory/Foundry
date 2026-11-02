@@ -78,19 +78,22 @@ only verb is ``submit``; making slots is infra's job.
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 from foundry.canonical import content_digest
+from foundry.proxy.token_meter import RunCapExceeded
 from foundry.schemas.base import BudgetLedger
 
 if TYPE_CHECKING:
     from foundry.execution.adapter_contract import AdapterResult, TaskPacket, WorkerAdapter
     from foundry.execution.sandbox import Sandbox
+    from foundry.schemas.implementation import TaskEvent
 
 __all__ = [
     "AdapterFactory",
@@ -99,25 +102,20 @@ __all__ = [
     "LocalWorkPool",
     "QuotaPolicy",
     "SandboxFactory",
+    "TaskEventHook",
     "TaskRejectedError",
     "TaskState",
     "TaskStatus",
     "WorkPool",
-    "allocate_budget_tree",
     "allocate_lineage_quotas",
 ]
 
-# Lineage bucket for work with no resolved domain/area (fallback; also the global
-# axis label). Kept in sync with ExecutionTask.lineage's default.
-_DEFAULT_LINEAGE = "default"
-
-
 def allocate_lineage_quotas(weights: Mapping[str, int], global_cap_microusd: int) -> dict[str, int]:
     """Split a global micro-USD envelope across lineages proportional to ``weights``
-    — the budget tree the org fan-out spends down (org_fanout_design.md, Wave D).
+    (the ticket path's lineage is the ticket's specialty).
 
-    The Program Manager owns one global cap; it sub-allocates a per-lineage (per-
-    AREA) quota so one area's fan-out cannot starve the others (the noisy-neighbor
+    One global cap is sub-allocated as a per-lineage quota so one lineage's fan-out
+    cannot starve the others (the noisy-neighbor
     guard, ops §6 / arch §4). FLOOR division guarantees **Σ(allocations) ≤
     global_cap** — a fail-closed invariant: the sum of the children's quotas can
     never let total committed spend exceed the parent envelope (any rounding
@@ -137,48 +135,14 @@ def allocate_lineage_quotas(weights: Mapping[str, int], global_cap_microusd: int
     }
 
 
-def allocate_budget_tree(
-    domain_area: Mapping[str, str],
-    domain_weight: Mapping[str, int],
-    global_cap_microusd: int,
-) -> dict[str, int]:
-    """The two-level org budget tree: global envelope -> per-AREA -> per-DOMAIN
-    (org_fanout_design.md, Wave D). The Program Manager splits the global cap
-    across present areas (by area task-weight), then each Area Manager splits ITS
-    area cap across the domains it owns (by domain task-weight) — both levels by
-    the floor-division :func:`allocate_lineage_quotas`.
-
-    Returns a flat ``{domain -> quota}`` (the per-domain lineage quotas the pool
-    meters against), so a domain that exhausts its share is rejected even when its
-    SIBLING domains in the same area are idle (true per-domain isolation) and even
-    when the global ledger has room. Both levels are floor-allocated, so
-    **Σ(domain quotas) ≤ Σ(area quotas) ≤ global_cap** — fail-closed at every tier.
-    ``global_cap <= 0`` (unlimited) => ``{}`` (no per-domain limit). Pure +
-    deterministic: a resume re-derives the identical tree."""
-    if global_cap_microusd <= 0:
-        return {}
-    area_weight: dict[str, int] = {}
-    for domain, weight in domain_weight.items():
-        if weight > 0:
-            area = domain_area.get(domain, _DEFAULT_LINEAGE)
-            area_weight[area] = area_weight.get(area, 0) + weight
-    area_caps = allocate_lineage_quotas(area_weight, global_cap_microusd)
-    out: dict[str, int] = {}
-    for area, area_cap in area_caps.items():
-        in_area = {
-            domain: weight
-            for domain, weight in domain_weight.items()
-            if weight > 0 and domain_area.get(domain, _DEFAULT_LINEAGE) == area
-        }
-        out.update(allocate_lineage_quotas(in_area, area_cap))
-    return out
-
 # A worker, having claimed a task, builds its OWN sandbox + adapter from the task.
 # The pool is handed FACTORIES (not live instances) precisely because a real
 # worker is a separate process/replica that constructs these itself — the seam is
 # identical whether the worker is a thread (LocalWorkPool) or a container.
 SandboxFactory = Callable[["ExecutionTask"], "Sandbox"]
 AdapterFactory = Callable[[str], "WorkerAdapter"]
+# Live per-task telemetry (start/done/failed). Advisory: a hook that raises is ignored.
+TaskEventHook = Callable[["TaskEvent"], None]
 
 
 class TaskRejectedError(RuntimeError):
@@ -372,19 +336,34 @@ class LocalWorkPool:
         adapter_factory: AdapterFactory,
         max_slots: int = 1,
         quota: QuotaPolicy | None = None,
+        limits: Mapping[str, int] | None = None,
+        on_task: TaskEventHook | None = None,
     ) -> None:
+        """``limits`` caps how many tasks of one ``lineage`` run at once, under the
+        global ``max_slots`` (a lineage with no entry is bounded by ``max_slots``
+        only). ``on_task`` receives a :class:`TaskEvent` when a task starts running,
+        finishes, or fails."""
         if max_slots < 1:
             raise ValueError("max_slots must be >= 1")
+        if any(n < 1 for n in (limits or {}).values()):
+            raise ValueError("every per-lineage limit must be >= 1")
         self.max_slots = max_slots
+        self._limits = dict(limits or {})
+        self._on_task = on_task
         self._sandbox_factory = sandbox_factory
         self._adapter_factory = adapter_factory
         self._quota = quota or QuotaPolicy()
         # Bounded PHYSICAL slots: a thread pool of exactly max_slots workers. Excess
-        # submissions queue inside the executor — the app never makes more slots.
+        # submissions wait in ``_pending`` — the app never makes more slots. A task
+        # reaches the executor only once its lineage has a free slot, so a task
+        # waiting on its lineage never holds a thread another lineage could use.
         self._executor = ThreadPoolExecutor(max_workers=max_slots)
         self._lock = threading.Lock()
         self._records: dict[str, TaskState] = {}
         self._futures: dict[str, Future[None]] = {}
+        self._pending: list[str] = []
+        self._running = 0
+        self._running_by_lineage: dict[str, int] = {}
 
     # -- admission (logical) -------------------------------------------------
 
@@ -409,8 +388,39 @@ class LocalWorkPool:
 
             self._quota.commit(task)
             self._records[tid] = TaskState(task, TaskStatus.QUEUED)
-            self._futures[tid] = self._executor.submit(self._run, tid)
+            self._futures[tid] = Future()
+            self._pending.append(tid)
+            self._dispatch()
         return tid
+
+    def _dispatch(self) -> None:
+        """Start every pending task (in submit order) whose lineage and the pool both
+        have a free slot. Call under the lock."""
+        for tid in list(self._pending):
+            if self._running >= self.max_slots:
+                return
+            lineage = self._records[tid].task.lineage
+            limit = self._limits.get(lineage)
+            if limit is not None and self._running_by_lineage.get(lineage, 0) >= limit:
+                continue
+            self._pending.remove(tid)
+            self._running += 1
+            self._running_by_lineage[lineage] = self._running_by_lineage.get(lineage, 0) + 1
+            self._executor.submit(self._worker, tid, lineage)
+
+    def _worker(self, task_id: str, lineage: str) -> None:
+        fut = self._futures[task_id]
+        try:
+            self._run(task_id)
+        except BaseException as exc:
+            fut.set_exception(exc)
+        else:
+            fut.set_result(None)
+        finally:
+            with self._lock:
+                self._running -= 1
+                self._running_by_lineage[lineage] -= 1
+                self._dispatch()
 
     # -- worker (physical slot) ----------------------------------------------
 
@@ -434,24 +444,53 @@ class LocalWorkPool:
         task = self._claim(task_id)
         if task is None:
             return  # already claimed/ran — idempotent, no double-run
+        self._run_claimed(task_id, task)
+
+    def _run_claimed(self, task_id: str, task: ExecutionTask) -> None:
         with self._lock:
             self._records[task_id].status = TaskStatus.RUNNING
-
-        sandbox = self._sandbox_factory(task)
+        self._emit(task, "start")
+        sandbox: Sandbox | None = None
         try:
+            sandbox = self._sandbox_factory(task)
             adapter = self._adapter_factory(task.adapter)
             result = adapter.run(task.packet, sandbox)
+        except RunCapExceeded as exc:
+            # A spent run budget is not a task failure: re-raise so ``result()``'s
+            # ``fut.result()`` hands it to the caller as-is and the run stops cleanly.
+            with self._lock:
+                self._records[task_id].status = TaskStatus.FAILED
+                self._records[task_id].error = repr(exc)
+            self._emit(task, "failed")
+            raise
         except Exception as exc:  # record the failure; never silently lose work
             with self._lock:
                 self._records[task_id].status = TaskStatus.FAILED
                 self._records[task_id].error = repr(exc)
+            self._emit(task, "failed")
             return
         finally:
-            sandbox.destroy()  # arch §2(d): no reuse
+            if sandbox is not None:
+                sandbox.destroy()  # arch §2(d): no reuse
         with self._lock:
             rec = self._records[task_id]
             rec.result = result
             rec.status = TaskStatus.DONE
+        self._emit(task, "done")
+
+    def _emit(self, task: ExecutionTask, phase: Literal["start", "done", "failed"]) -> None:
+        if self._on_task is None:
+            return
+        body = task.packet.task
+        event: TaskEvent = {
+            "phase": phase,
+            "ticket_id": str(body.get("ticket_id") or body.get("id") or ""),
+            "title": str(body.get("title") or ""),
+            "specialty": str(body.get("specialty") or task.lineage),
+            "tier": str(body.get("tier") or ""),
+        }
+        with contextlib.suppress(Exception):
+            self._on_task(event)
 
     # -- read-back -----------------------------------------------------------
 
@@ -482,6 +521,10 @@ class LocalWorkPool:
 
     def shutdown(self) -> None:
         """Drain and tear down the worker threads (idempotent-friendly)."""
+        with self._lock:
+            futures = list(self._futures.values())
+        for fut in futures:
+            fut.exception()  # wait; a still-pending task is dispatched by a finishing one
         self._executor.shutdown(wait=True)
 
     def __enter__(self) -> LocalWorkPool:

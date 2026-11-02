@@ -5,9 +5,8 @@ body, so every downstream resolve/resolve_blob consumer only worked against a
 SYNTHETIC resolver in tests; a real run resolved nothing. These tests pin the
 store that closes the gap:
 
-* put_body / get_body round-trip several schema types; the uri ==
-  cas://sha256/<content_identity>; unknown-uri get_body/get_blob raise (fail-
-  closed); put_blob / get_blob round-trip raw bytes.
+* the put/get store contract is pinned for BOTH backends in
+  test_fs_artifact_store.py.
 * emit_artifact WITH a store stores the body and the handle uri matches the
   stored uri; WITH store=None it mints only (no store write) — backward-compat.
 * end-to-end-ish: drive a couple of REAL agent nodes with
@@ -25,18 +24,14 @@ from langchain_core.runnables import RunnableConfig
 
 from foundry.agents import AgentRuntime
 from foundry.agents._common import emit_artifact
-from foundry.agents.product import (
-    make_product_manager_node,
-    make_stakeholder_proxy_node,
-)
+from foundry.agents.planner import make_planner_node
 from foundry.durability.artifact_store import ArtifactStore, UnknownArtifactError
 from foundry.gates.attestation import ZoneBSigner
 from foundry.proxy import ModelProviderProxy
 from foundry.proxy.test_doubles import MockTransport
-from foundry.schemas.architecture import SystemDesign
-from foundry.schemas.implementation import FeatureDiff
 from foundry.schemas.product import AcceptanceCriterion, Criticality
 from foundry.state.seq import Seq
+from tests.planner_payload import plan_payload
 
 KEY = b"dev-zone-b-artifact-store-key"
 KEY_ID = "dev-key-artifact-store"
@@ -63,75 +58,6 @@ def _criterion() -> AcceptanceCriterion:
     )
 
 
-def _system_design() -> SystemDesign:
-    return SystemDesign(
-        title="Todo service",
-        design_uri="cas://sha256/deadbeef",
-        components=("api", "store"),
-        adr_ids=("ADR-1",),
-        seq=_seq("principal_architect"),
-    )
-
-
-def _feature_diff() -> FeatureDiff:
-    return FeatureDiff(
-        diff_uri="cas://sha256/cafef00d",
-        task_id="T1",
-        branch="task/T1",
-        base_tree_sha="base-sha",
-        seq=_seq("junior_engineer"),
-    )
-
-
-# ---- put_body / get_body round-trip (several schema types) -------------------
-
-
-@pytest.mark.parametrize("body", [_criterion(), _system_design(), _feature_diff()])
-def test_put_body_get_body_round_trips_typed_bodies(body: Any) -> None:
-    store = ArtifactStore()
-    uri = store.put_body(body)
-    # uri is the body's content identity (== what emit_artifact mints).
-    assert uri == f"cas://sha256/{body.content_identity()}"
-    back = store.get_body(uri)
-    assert back == body
-    assert type(back) is type(body)
-
-
-def test_get_body_unknown_uri_raises_fail_closed() -> None:
-    store = ArtifactStore()
-    with pytest.raises(UnknownArtifactError):
-        store.get_body("cas://sha256/does-not-exist")
-
-
-def test_get_blob_unknown_uri_raises_fail_closed() -> None:
-    store = ArtifactStore()
-    with pytest.raises(UnknownArtifactError):
-        store.get_blob("cas://sha256/does-not-exist")
-
-
-# ---- put_blob / get_blob (raw bytes, sandbox-compatible digest) --------------
-
-
-def test_put_blob_get_blob_round_trips_bytes_and_str() -> None:
-    store = ArtifactStore()
-    uri = store.put_blob(b"--- /dev/null\n+++ b/x.py\n@@\n+print(1)\n")
-    assert uri.startswith("cas://sha256/")
-    assert store.get_blob(uri) == b"--- /dev/null\n+++ b/x.py\n@@\n+print(1)\n"
-    # str is encoded utf-8 and keyed by the SAME raw sha256 as the bytes.
-    assert store.put_blob("hello") == store.put_blob(b"hello")
-
-
-def test_put_blob_matches_sandbox_raw_sha256() -> None:
-    """The store keys blobs by the RAW sha256 of the bytes — EXACTLY
-    Sandbox.put_blob — so a diff blob mirrored sandbox->store keeps its uri."""
-    import hashlib
-
-    store = ArtifactStore()
-    data = b"some diff body"
-    uri = store.put_blob(data)
-    assert uri == f"cas://sha256/{hashlib.sha256(data).hexdigest()}"
-
-
 # ---- emit_artifact: store-backed vs mint-only (backward-compat) --------------
 
 
@@ -155,17 +81,6 @@ def test_emit_artifact_store_none_mints_only_no_store_write() -> None:
     # Nothing was written to the store: resolve fails closed.
     with pytest.raises(UnknownArtifactError):
         store.get_body(handle.uri)
-
-
-def test_put_body_at_explicit_uri_for_junior_feature_diff() -> None:
-    """The junior's FeatureDiff handle uri carries the idempotency KEY, not the
-    body content identity; put_body_at stores it under that exact uri so
-    resolve(feature_diff_handle) reconstitutes it."""
-    store = ArtifactStore()
-    diff = _feature_diff()
-    handle_uri = "cas://feature_diff/some-idempotency-key"
-    assert store.put_body_at(handle_uri, diff) == handle_uri
-    assert store.get_body(handle_uri) == diff
 
 
 # ---- end-to-end-ish: drive REAL agent nodes with a cas-backed runtime --------
@@ -206,7 +121,8 @@ def _config(run_id: str, step: int = 1) -> RunnableConfig:
 
 def _cas_runtime(*payloads: dict[str, Any]) -> tuple[AgentRuntime, ArtifactStore]:
     proxy = ModelProviderProxy(
-        MockTransport(completions=[json.dumps(p) for p in payloads]),
+        MockTransport(completions=[json.dumps(p) for p in payloads],
+                      default_text=json.dumps(payloads[-1])),
         signer=ZoneBSigner(KEY, KEY_ID),
     )
     cas = ArtifactStore()
@@ -214,14 +130,19 @@ def _cas_runtime(*payloads: dict[str, Any]) -> tuple[AgentRuntime, ArtifactStore
 
 
 def test_agent_nodes_emit_handles_that_resolve_back_via_store() -> None:
-    """Drive the stakeholder + product-manager nodes with a cas-backed runtime;
-    every emitted handle resolves back to an EQUAL typed body via store.resolve."""
-    rt, cas = _cas_runtime(INTENT_PAYLOAD, PRD_PAYLOAD)
+    """Drive the planner with a cas-backed runtime; every emitted handle resolves
+    back to an EQUAL typed body via store.resolve."""
+    rt, cas = _cas_runtime(
+        plan_payload(
+            intent=INTENT_PAYLOAD,
+            prd=PRD_PAYLOAD,
+            critique={"missing": [], "security_abuse_omissions": []},
+            sprint={"milestones": [], "usd_cap_microusd": 0, "done_definition": "done"},
+            design={"title": "Todo", "ownership": {"app.py": "owner-a"}},
+        )
+    )
 
-    intent_writes = make_stakeholder_proxy_node(rt)({"request": "todo app"}, _config("run-E"))
-    prd_writes = make_product_manager_node(rt)({"request": "todo app"}, _config("run-E", 2))
-
-    handles = [*intent_writes["artifacts"], *prd_writes["artifacts"]]
+    handles = make_planner_node(rt)({"request": "todo app"}, _config("run-E"))["artifacts"]
     # Every handle is content-addressed and resolves to a body of a matching kind.
     assert handles
     for handle in handles:

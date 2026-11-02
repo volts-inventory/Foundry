@@ -1,8 +1,8 @@
 """`JournalEntry` — strictly ADVISORY per-agent work journal. (plan [11])
 
 The journal is **observability only**. A node records a short, structured note
-about how its turn went (what it decided, what it assumed, what worried it) so
-an operator can later "interview" the agent (``foundry/agents/interview.py``).
+about how its turn went (what it decided, what it assumed, what worried it) for
+an operator reading the run's event log.
 
 HARD CONSTRAINT (the whole point of [11]): a ``JournalEntry`` is NEVER a trust
 input. It lives on its OWN state channel (``agent_journal``), folded by a plain

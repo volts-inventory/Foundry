@@ -6,28 +6,42 @@ build, its event log, and its seen-uri set so a restart rehydrates nothing.
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 from webapp.store import BuildStore
 
 
-def _rec(build_id: str, floor: int, *, spec_text: str = "") -> dict:
+def _rec(build_id: str, floor: int) -> dict:
     return {
-        "id": build_id, "floor": floor, "release_seq": 1, "parent_id": None,
-        "request": "build a thing", "mode": "assistant", "backend": "mock",
-        "adapter": "stub", "supervised": True, "slots": 1, "max_fix_attempts": 5,
-        "status": "done", "passed": True, "gates": {"build": {"status": "PASS"}},
-        "out_base": None, "created_at": "2026-06-30", "spec_text": spec_text,
+        "id": build_id, "floor": floor, "request": "build a thing", "mode": "assistant",
+        "backend": "mock", "adapter": "stub", "slots": 1, "status": "done",
+        "passed": True, "gates": {"build": {"status": "PASS"}},
+        "out_base": None, "created_at": "2026-06-30",
     }
 
 
-def test_spec_text_round_trips(tmp_path: Path) -> None:
-    # The saved spec is what an iterate inherits + extends, so it must persist.
-    store = BuildStore(tmp_path / "foundry.db")
-    spec = "# Spec\n\nGoals: a moon-colony farming loop.\nAcceptance: day/night cycle."
-    store.upsert(_rec("r1", 1, spec_text=spec))
-    assert store.get("r1")["spec_text"] == spec
-    assert store.latest_per_floor()[0]["spec_text"] == spec
+def test_rows_from_the_iterate_era_still_load(tmp_path: Path) -> None:
+    # A DB written before iterate/spec upload were removed carries extra columns.
+    path = tmp_path / "foundry.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE builds (id TEXT PRIMARY KEY, floor INTEGER, release_seq INTEGER, "
+        "parent_id TEXT, request TEXT, mode TEXT, backend TEXT, adapter TEXT, "
+        "supervised INTEGER, slots INTEGER, max_fix_attempts INTEGER, status TEXT, "
+        "passed INTEGER, gates TEXT, out_base TEXT, created_at TEXT, spec_text TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO builds VALUES ('old', 1, 2, 'par', 'req', 'assistant', 'mock', 'stub', "
+        "0, 1, 3, 'done', 1, '{}', NULL, '2026-01-01', 'spec')"
+    )
+    conn.commit()
+    conn.close()
+    store = BuildStore(path)
+    store.upsert(_rec("new", 2))
+    assert [r["id"] for r in store.latest_per_floor()] == ["old", "new"]
+    assert [r["id"] for r in store.finished()] == ["new", "old"]
+    assert store.get("old")["request"] == "req"
 
 
 def test_clear_all_wipes_builds_events_and_seen(tmp_path: Path) -> None:

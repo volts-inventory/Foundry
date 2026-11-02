@@ -42,7 +42,9 @@ from __future__ import annotations
 import ast
 import json
 import re
+import shlex
 import sys
+import tempfile
 from dataclasses import dataclass
 from importlib import metadata as _im
 from pathlib import Path, PurePosixPath
@@ -50,22 +52,34 @@ from typing import TYPE_CHECKING, Any
 
 from foundry.agents._common import as_text
 from foundry.agents._runtime import AgentRuntime
+from foundry.base_tree import base_features, copy_base_tree
+from foundry.canonical import content_digest
 from foundry.gates.build import BuildGate
 from foundry.gates.spec import SpecGate
 from foundry.gates.test import TestGate
-from foundry.schemas.gates import GateResult, GateStatus
-from foundry.schemas.implementation import FeatureDiff
+from foundry.schemas.base import BudgetLedger
+from foundry.schemas.gates import GateResult, GateStatus, GateTriage, VerdictClass
+from foundry.schemas.implementation import (
+    CONTRACTS_TICKET_ID,
+    FEATURE_DIR,
+    FeatureDiff,
+    StackDecision,
+    Ticket,
+    feature_path,
+    scenario_ref,
+)
 from foundry.schemas.product import AcceptanceCriterion, CriteriaCritique
+from foundry.state.reducers import merge_gates
 from foundry.state.tree_sha import tree_sha
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
     from langchain_core.runnables import RunnableConfig
 
     from foundry.gates.discriminator import DiscriminatorFactory
     from foundry.gates.profiles import VerificationProfile
-    from foundry.gates.runner import GateImpl, TwoZoneGateRunner
+    from foundry.gates.runner import GateImpl, TwoZoneGateRunner, ZoneAObservation
     from foundry.schemas.base import Artifact
     from foundry.state.factory_state import FactoryState
 
@@ -86,6 +100,7 @@ if TYPE_CHECKING:
     BlobResolver = Callable[[str], "bytes | str"]
 
 __all__ = [
+    "BUILD_BOUNDARY",
     "BUILD_TEST_SMOKE_BOUNDARY",
     "CRITERIA_CRITIQUE_KIND",
     "CRITERION_KIND",
@@ -93,16 +108,29 @@ __all__ = [
     "FeatureDiffBodyError",
     "MaterializationError",
     "PathContainmentError",
+    "UnpinnedSmokeGate",
+    "WaveBuildCheck",
+    "bump_fix_attempts",
+    "contract_paths",
+    "fix_cap",
     "flake_quarantined",
+    "gate_profile",
     "materialize_workdir",
+    "planned_paths",
+    "render_feature",
     "route_after_gates",
+    "run_build_gate",
     "run_build_test_gates",
     "run_spec_gate",
+    "settle_fix_attempts",
+    "unbuilt_manifests",
+    "wave_typecheck",
 ]
 
 # Artifact.kind tags the upstream layers stamp on their handles — the seam we
 # read the boundary's DATA inputs back off the artifacts channel by.
 CRITERION_KIND = "acceptance_criterion"  # product layer (LEARNINGS QS3)
+TICKET_KIND = "ticket"
 CRITERIA_CRITIQUE_KIND = "criteria_findings"  # Criteria-Completeness Critic output
 FEATURE_DIFF_KIND = "feature_diff"  # implementation layer (junior_engineer)
 
@@ -168,6 +196,26 @@ def _resolve_typed(
 # ---- criteria.json (the exact shape SpecGate parses) ------------------------
 
 
+def _current_criteria(
+    state: FactoryState, resolve: ArtifactResolver
+) -> dict[str, AcceptanceCriterion]:
+    """Newest record per criterion id, minus the scenarios of tickets a re-plan
+    dropped (a ticket whose newest record supersedes its own id): nothing builds
+    those tickets, so their scenarios must not be specified or executed."""
+    current: dict[str, AcceptanceCriterion] = {}
+    for a in sorted(_of_kind(state, CRITERION_KIND), key=lambda a: a.seq):
+        c = _resolve_typed(a, resolve, AcceptanceCriterion, CRITERION_KIND)
+        current[c.id] = c
+    if not any(c.ticket_id for c in current.values()):
+        return current
+    newest: dict[str, Ticket] = {}
+    for a in sorted(_of_kind(state, TICKET_KIND), key=lambda a: a.seq):
+        t = _resolve_typed(a, resolve, Ticket, TICKET_KIND)
+        newest[t.id] = t
+    retired = {tid for tid, t in newest.items() if t.supersedes == tid}
+    return {cid: c for cid, c in current.items() if c.ticket_id not in retired}
+
+
 def _criteria_list(
     state: FactoryState, resolve: ArtifactResolver
 ) -> list[dict[str, Any]]:
@@ -175,22 +223,28 @@ def _criteria_list(
 
     Each entry carries the fields SpecGate's zone-A read expects: ``id``,
     ``text``, ``oracle`` (mapped from :attr:`AcceptanceCriterion.oracle_hint`),
-    and ``security_abuse``. Ordered by criterion ``id`` so the materialized file
+    and ``security_abuse``, plus ``given``/``when``/``then`` for a structured
+    scenario (omitted for a text-only criterion, whose entry is unchanged).
+    Ordered by criterion ``id`` so the materialized file
     — and thus the integrated ``tree_sha`` — is byte-stable across folds/resume.
+
+    A re-plan re-emits criteria under the same ids; the newest-by-``Seq`` record
+    per id is the current one. Taking it cannot weaken the gate: this gate
+    re-validates exactly that newest set.
     """
-    criteria: list[AcceptanceCriterion] = [
-        _resolve_typed(a, resolve, AcceptanceCriterion, CRITERION_KIND)
-        for a in _of_kind(state, CRITERION_KIND)
-    ]
-    return [
-        {
+    current = _current_criteria(state, resolve)
+    out: list[dict[str, Any]] = []
+    for c in sorted(current.values(), key=lambda c: c.id):
+        entry: dict[str, Any] = {
             "id": c.id,
             "text": c.text,
             "oracle": c.oracle_hint,
             "security_abuse": c.security_abuse,
         }
-        for c in sorted(criteria, key=lambda c: c.id)
-    ]
+        if c.given or c.when or c.then:
+            entry.update(given=list(c.given), when=list(c.when), then=list(c.then))
+        out.append(entry)
+    return out
 
 
 def _latest_critique(
@@ -234,13 +288,15 @@ def _criteria_payload(
     critique = _latest_critique(state, resolve)
     if critique is None or not critique.spec_gate_blocking():
         return criteria
-    return {
-        "criteria": criteria,
-        "critique": {
-            # RAW findings only — sorted for byte-stable tree_sha across folds.
-            "security_abuse_omissions": sorted(critique.security_abuse_omissions),
-        },
+    block: dict[str, list[str]] = {
+        # RAW findings only — sorted for byte-stable tree_sha across folds.
+        "security_abuse_omissions": sorted(critique.security_abuse_omissions),
     }
+    if critique.contract_findings:
+        block["contract_findings"] = sorted(critique.contract_findings)
+    if critique.coverage_findings:
+        block["coverage_findings"] = sorted(critique.coverage_findings)
+    return {"criteria": criteria, "critique": block}
 
 
 # ---- code + test sources from FeatureDiff diff bodies -----------------------
@@ -662,19 +718,36 @@ def _write_sources(
     * PATCH: the target must already exist in ``dest`` (written by a prior diff
       in Seq order) and every hunk must apply EXACTLY — else fail-closed.
     """
-    diff_artifacts = sorted(_of_kind(state, FEATURE_DIFF_KIND), key=lambda a: a.seq)
-    for artifact in diff_artifacts:
+    _apply_diffs(dest, _of_kind(state, FEATURE_DIFF_KIND), resolve, resolve_blob)
+
+
+def _apply_diffs(
+    dest: Path,
+    artifacts: list[Artifact],
+    resolve: ArtifactResolver,
+    resolve_blob: BlobResolver,
+    *,
+    only: frozenset[str] | None = None,
+) -> None:
+    """Apply ``artifacts`` in Seq order; ``only`` limits it to those paths."""
+    for artifact in sorted(artifacts, key=lambda a: a.seq):
         diff = _resolve_typed(artifact, resolve, FeatureDiff, FEATURE_DIFF_KIND)
         ops = _diff_ops(diff, resolve_blob)
         for rel, content in ops.writes.items():
+            if only is not None and rel not in only:
+                continue
             target = _contained_target(dest, rel)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
         for rel in ops.deletes:
+            if only is not None and rel not in only:
+                continue
             target = _contained_target(dest, rel)
             if target.is_file():
                 target.unlink()
         for rel, hunks in ops.patches.items():
+            if only is not None and rel not in only:
+                continue
             target = _contained_target(dest, rel)
             if not target.is_file():
                 raise FeatureDiffBodyError(
@@ -686,6 +759,69 @@ def _write_sources(
                 target.read_text(encoding="utf-8"), hunks, diff_uri=diff.diff_uri, rel=rel
             )
             target.write_text(patched, encoding="utf-8")
+
+
+# ---- executable BDD: features/<ticket>.feature from the criteria -------------
+
+
+def _one_line(text: str) -> str:
+    return " ".join(text.split())
+
+
+def render_feature(ticket_id: str, criteria: list[AcceptanceCriterion]) -> str:
+    """One ticket's Gherkin feature: a ``Scenario`` per criterion, NAMED by the
+    criterion id so an executed scenario maps 1:1 back to its criterion. Ordered
+    by id so the file (and the integrated ``tree_sha``) is byte-stable."""
+    lines = [f"Feature: {_one_line(ticket_id)}", ""]
+    for c in sorted(criteria, key=lambda c: c.id):
+        lines.append(f"  Scenario: {_one_line(c.id)}")
+        steps = [("Given", c.given), ("When", c.when), ("Then", c.then)]
+        if not (c.given or c.when or c.then):
+            # An unstructured criterion still needs a step to bind — an empty
+            # scenario would pass vacuously.
+            steps = [("Then", (c.text,))]
+        for keyword, texts in steps:
+            for i, text in enumerate(texts):
+                lines.append(f"    {keyword if i == 0 else 'And'} {_one_line(text)}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _features(state: FactoryState, resolve: ArtifactResolver) -> dict[str, str]:
+    """``features/<ticket>.feature`` path -> rendered body, for the newest record
+    per criterion id that carries a ``ticket_id`` (criteria without one are skipped)."""
+    current = _current_criteria(state, resolve)
+    by_ticket: dict[str, list[AcceptanceCriterion]] = {}
+    for c in current.values():
+        if c.ticket_id:
+            by_ticket.setdefault(c.ticket_id, []).append(c)
+    out: dict[str, str] = {}
+    for ticket_id in sorted(by_ticket):
+        rel = feature_path(ticket_id)
+        # ticket_id is planner (model) output: keep the file directly under features/.
+        if PurePosixPath(rel).parent != PurePosixPath(FEATURE_DIR):
+            raise PathContainmentError(
+                f"ticket id {ticket_id!r} does not name a file directly under "
+                f"{FEATURE_DIR}/ — rejected fail-closed"
+            )
+        out[rel] = render_feature(ticket_id, by_ticket[ticket_id])
+    return out
+
+
+def _write_features(dest: Path, features: dict[str, str], *, prune: bool = False) -> None:
+    """Write the trusted feature files. With ``prune``, also drop any other
+    ``features/*.feature`` an agent diff introduced: the directory is gate-owned,
+    and the trusted copies overwrite any agent edit (agents see them, can't change them)."""
+    if not features:
+        return
+    for rel, body in features.items():
+        target = _contained_target(dest, rel)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
+    if prune:
+        for stray in (dest / FEATURE_DIR).glob("*.feature"):
+            if f"{FEATURE_DIR}/{stray.name}" not in features:
+                stray.unlink()
 
 
 # ---- dependency-manifest scaffold (audit-gate grounding) --------------------
@@ -764,16 +900,16 @@ def _python_third_party_requirements(dest: Path) -> list[str] | None:
             reqs.add(name)  # unresolved import: list the bare name, still auditable
     if _has_tests(dest):
         reqs.add(_pin("pytest"))
+    if any((dest / FEATURE_DIR).glob("*.feature")):
+        reqs.update((_pin("pytest"), _pin("pytest-bdd")))
     return sorted(reqs)
 
 
 def _scaffold_manifest(dest: Path) -> None:
-    """Ensure ``dest`` ships a recognized dependency manifest for the AUDIT gate.
+    """Ensure a Python ``dest`` ships a recognized dependency manifest.
 
-    No-op when the engineers already shipped one (audit theirs, untouched) or the
-    tree is not Python. Otherwise writes a ``requirements.txt`` derived from the
-    tree's real imports so the audit can ground its SBOM instead of fail-closing
-    to ERROR for want of a manifest.
+    No-op when the engineers already shipped one or the tree is not Python.
+    Otherwise writes a ``requirements.txt`` derived from the tree's real imports.
     """
     from foundry.gates.audit import recognized_manifests
 
@@ -789,6 +925,106 @@ def _scaffold_manifest(dest: Path) -> None:
     )
     body = "".join(f"{line}\n" for line in reqs)
     (dest / "requirements.txt").write_text(header + body, encoding="utf-8")
+
+
+# ---- gate-owned contract files (the wave-0 contracts ticket) -----------------
+
+
+def contract_paths(state: FactoryState, resolve: ArtifactResolver) -> tuple[str, ...]:
+    """The files of the live contracts ticket: gate-owned once it is built."""
+    newest: Ticket | None = None
+    for a in sorted(_of_kind(state, TICKET_KIND), key=lambda a: a.seq):
+        t = _resolve_typed(a, resolve, Ticket, TICKET_KIND)
+        if t.id == CONTRACTS_TICKET_ID:
+            newest = t
+    if newest is None or newest.supersedes == newest.id:
+        return ()
+    return newest.files
+
+
+def _wave0_ticket_ids(
+    state: FactoryState, resolve: ArtifactResolver
+) -> tuple[set[str], set[str]]:
+    """(ids of the tickets with no dependency on another ticket, every ticket id)."""
+    newest: dict[str, Ticket] = {}
+    for a in _of_kind(state, TICKET_KIND):
+        t = _resolve_typed(a, resolve, Ticket, TICKET_KIND)
+        if t.id not in newest or t.seq > newest[t.id].seq:
+            newest[t.id] = t
+    known = set(newest)
+    wave0 = {t.id for t in newest.values() if not any(d in known for d in t.depends_on)}
+    return wave0, known
+
+
+def _is_fix(task_id: str) -> bool:
+    return task_id.startswith("fix-")  # the fixer's FeatureDiffs (make_fixer_node)
+
+
+def _write_contracts(
+    dest: Path, state: FactoryState, resolve: ArtifactResolver, resolve_blob: BlobResolver
+) -> None:
+    """Rewrite the contract files as they stood at the end of wave 0 plus every
+    later FIXER edit to them, so a later ticket's edit to an agreed signature never
+    reaches the gates (the planner also keeps those paths out of every other
+    ticket's files) while a repair to the contract itself still can.
+
+    Wave 0 — the tickets with no dependencies, plus the fixes the per-wave check
+    ran on them — is every diff integrated before the first later-wave diff. After
+    it only fix diffs (``fix-*``, never a planned ticket's id) touch the contracts;
+    the fixer records each such change in triage (``note_fix_writes``)."""
+    paths = contract_paths(state, resolve)
+    if not paths:
+        return
+    diffs = [(a, _resolve_typed(a, resolve, FeatureDiff, FEATURE_DIFF_KIND))
+             for a in _of_kind(state, FEATURE_DIFF_KIND)]
+    if not any(d.task_id == CONTRACTS_TICKET_ID for _, d in diffs):
+        return  # not built yet: nothing agreed to restore
+    wave0, known = _wave0_ticket_ids(state, resolve)
+    frozen_at = min(
+        (a.seq for a, d in diffs
+         if d.task_id not in wave0 and (d.task_id in known or not _is_fix(d.task_id))),
+        default=None,
+    )
+    owned = [a for a, _ in diffs if frozen_at is None or a.seq < frozen_at]
+    fixes = [a for a, d in diffs if frozen_at is not None and a.seq >= frozen_at
+             and _is_fix(d.task_id) and d.task_id not in known]
+    with tempfile.TemporaryDirectory(prefix="foundry_contracts_") as tmp:
+        base = state.get("base_dir")
+        if base:
+            # A change extends the base's contract files: its diffs patch them.
+            for rel in paths:
+                source = _contained_target(Path(base), rel)
+                if source.is_file():
+                    target = _contained_target(Path(tmp), rel)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(source.read_bytes())
+        _apply_diffs(Path(tmp), owned, resolve, resolve_blob)
+        _apply_diffs(Path(tmp), fixes, resolve, resolve_blob, only=frozenset(paths))
+        for rel in paths:
+            source = _contained_target(Path(tmp), rel)
+            target = _contained_target(dest, rel)
+            if source.is_file():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(source.read_bytes())
+            elif target.is_file():
+                target.unlink()
+
+
+def _with_base_features(planned: dict[str, str], base: dict[str, str]) -> dict[str, str]:
+    """The base build's scenarios stay in force beside the change's. A planned
+    ticket reusing a base feature file's name would silently replace those
+    scenarios, so it is refused fail-closed (the planner checks for it too)."""
+    clash = sorted(set(planned) & set(base))
+    if clash:
+        raise MaterializationError(
+            f"planned feature file(s) {', '.join(clash)} would replace the base "
+            "build's scenarios — a change must use new ticket ids"
+        )
+    return {**base, **planned}
+
+
+# Files materialize_workdir writes for the gates themselves, not product code.
+GATE_INPUT_FILES = frozenset({"criteria.json"})
 
 
 def materialize_workdir(
@@ -820,17 +1056,39 @@ def materialize_workdir(
     ``run_against`` (the digest the FAIL latch keys on).
     """
     dest.mkdir(parents=True, exist_ok=True)
+    # A change build starts from the shipped base tree; the diffs are its delta.
+    base = state.get("base_dir")
+    if base:
+        copy_base_tree(base, dest)
     # Spec gate input: the criteria document, byte-stable across folds.
     (dest / "criteria.json").write_text(
         as_text(_criteria_payload(state, resolve)), encoding="utf-8"
     )
+    # Executable BDD: written before the sources so an agent patch against a
+    # feature applies, then again after so the trusted copy is what the gates see.
+    features = _features(state, resolve)
+    if base:
+        features = _with_base_features(features, base_features(base))
+    _write_features(dest, features)
     # Build / Test gate inputs: the integrated code + test sources.
     _write_sources(dest, state, resolve, resolve_blob)
+    _write_features(dest, features, prune=True)
+    _write_contracts(dest, state, resolve, resolve_blob)
     # Guarantee an auditable dependency manifest so the AUDIT gate can ground its
     # SBOM (no-op when the engineers already shipped one, or the tree is non-Python).
-    _scaffold_manifest(dest)
-    # prefer_git=False: dest is a fresh materialized tree, not a git worktree.
-    return tree_sha(dest, toolchain_digest=_TOOLCHAIN_DIGEST, prefer_git=False)
+    stack = state.get("stack")
+    if stack is None or stack.language == "python":
+        _scaffold_manifest(dest)
+    # The stack's commands are part of what a verdict judges, so they join the
+    # toolchain digest: the stable-FAIL latch keys on run_against, and a re-planned
+    # stack must be able to re-gate the same source. No stack keeps the old digest.
+    return tree_sha(dest, toolchain_digest=_toolchain_digest(stack))
+
+
+def _toolchain_digest(stack: StackDecision | None) -> str:
+    if stack is None:
+        return _TOOLCHAIN_DIGEST
+    return f"{_TOOLCHAIN_DIGEST}+stack:" + content_digest(stack.model_dump(mode="json"))
 
 
 # ---- gate-run helpers (verdicts ONLY from the runner) -----------------------
@@ -861,6 +1119,100 @@ def _run_gate(
     """
     seq = rt.seq(config, node_id, f"verdict:{gate.name}")
     return runner.run(gate, run_against, seq, workdir)
+
+
+def gate_profile(
+    state: FactoryState, fallback: VerificationProfile | None
+) -> VerificationProfile | None:
+    """The gate commands for this run, read at gate time from the ``stack`` channel.
+
+    A ``--profile`` pin runs that profile unchanged; a planner stack in a language
+    this host has runs its own commands; a stack in an undetected language is an
+    ``unavailable`` profile (every gate an infra ERROR naming the missing toolchain —
+    never a silent switch to another stack's commands); no stack keeps ``fallback``
+    (the profile the graph was built with)."""
+    from foundry.gates.profiles import PROFILES, VerificationProfile, stack_profile
+    from foundry.toolchains import available_languages
+
+    stack = state.get("stack")
+    if stack is None:
+        return fallback
+    if stack.profile:
+        return PROFILES.get(stack.profile, fallback)
+    available = available_languages()
+    if stack.language not in available:
+        return VerificationProfile(
+            name=f"stack:{stack.language}",
+            unavailable=(
+                f"missing toolchain: the planned stack's language {stack.language!r} "
+                f"is not installed on the gate host (detected: "
+                f"{', '.join(sorted(available)) or 'none'})"
+            ),
+        )
+    return stack_profile(stack)
+
+
+class UnavailableGate:
+    """A gate that cannot run on this host: zone A raises ``GroundingUnavailable`` so
+    the runner signs an infra ERROR (bounded retry, never latched) naming ``reason``."""
+
+    verdict_class = VerdictClass.EXECUTION_DETERMINISTIC
+    decision_deterministic = True
+    execution_deterministic = True
+    mutant_rotation_id = 0
+    scanner_rule_version = "unavailable-v1"
+
+    def __init__(self, name: str, reason: str) -> None:
+        self.name = name
+        self._reason = reason
+
+    def execute(self, workdir: Path) -> ZoneAObservation:
+        from foundry.gates.runner import GroundingUnavailable
+
+        raise GroundingUnavailable(self._reason)
+
+    def decide(self, obs: ZoneAObservation) -> GateStatus:
+        return GateStatus.ERROR
+
+
+class UnpinnedSmokeGate:
+    """The smoke verdict for a stack with no run command: a deterministic PASS that
+    says so. Nothing executes; the verdict still comes from the runner, attested,
+    so the boundary's smoke slot is never filled by an unsigned record."""
+
+    name = "smoke"
+    verdict_class = VerdictClass.CONFIG_EVALUABLE
+    decision_deterministic = True
+    execution_deterministic = False
+
+    def __init__(self, *, seal_key: bytes | None = None) -> None:
+        self._seal_key = seal_key
+
+    def execute(self, workdir: Path) -> ZoneAObservation:
+        from foundry.gates.runner import observe
+
+        return observe(
+            self.name,
+            structured={"pinned": False},
+            findings=("smoke not pinned: the stack declares no run command",),
+            seal_key=self._seal_key,
+        )
+
+    def decide(self, obs: ZoneAObservation) -> GateStatus:
+        return GateStatus.PASS if obs.structured.get("pinned") is False else GateStatus.ERROR
+
+
+def _build_gate(profile: VerificationProfile | None, runner: TwoZoneGateRunner) -> GateImpl:
+    if profile is None:
+        return BuildGate(seal_key=runner.seal_key)
+    if profile.unavailable:
+        return UnavailableGate("build", profile.unavailable)
+    return BuildGate(
+        cmd=profile.build_cmd,
+        install_cmd=profile.install_cmd,
+        seal_key=runner.seal_key,
+        profile_name=profile.name,
+    )
 
 
 def run_spec_gate(
@@ -907,7 +1259,7 @@ def run_build_test_gates(
     discriminator_factory: DiscriminatorFactory | None = None,
     profile: VerificationProfile | None = None,
 ) -> dict[str, Any]:
-    """Run the Build + Test (+ profile Smoke) gates at an implementation /
+    """Run the Build + Test + Smoke gates at an implementation /
     quality exit boundary.
 
     Materializes the integrated tree (code + test sources + criteria.json) into
@@ -915,7 +1267,8 @@ def run_build_test_gates(
     its ``tree_sha`` (the same integrated digest, so both verdicts latch/bind to
     one state). ``min_passed`` is the Test gate's adequacy floor — a vacuous
     (0-test) suite is FAIL, never PASS (governance §1c). Returns
-    ``{"gates": [<attested build>, <attested test>]}``.
+    ``{"gates": [<attested build>, <attested test>, <attested smoke>]}``; the
+    commands come from :func:`gate_profile` (the stack on state, else ``profile``).
 
     ``discriminator_factory`` is the OPTIONAL malicious-test defense seam (the
     A-M4-01 fix). When provided, it produces a
@@ -933,10 +1286,10 @@ def run_build_test_gates(
     # Profile-pinned commands (ROADMAP Phase 3): a stack-appropriate profile
     # swaps WHAT the gates execute, never the two-zone trust seam. None keeps
     # each gate's historical default — byte-identical to the pre-profile factory.
-    build_cmd = profile.build_cmd if profile is not None else None
+    profile = gate_profile(state, profile)
     test_cmd = profile.test_cmd if profile is not None else None
     build = _run_gate(
-        BuildGate(cmd=build_cmd, seal_key=runner.seal_key),
+        _build_gate(profile, runner),
         rt=rt,
         runner=runner,
         config=config,
@@ -954,13 +1307,23 @@ def run_build_test_gates(
     # pytest summary to count, so the adequacy floor drops to exit-code-only there
     # (min_passed=0; the floor is pytest-specific). The python default keeps it.
     effective_min = 0 if test_cmd is not None else min_passed
-    test = _run_gate(
-        TestGate(
+    test_gate: GateImpl
+    if profile is not None and (profile.unavailable or profile.test_unavailable):
+        test_gate = UnavailableGate("test", profile.unavailable or profile.test_unavailable)
+    else:
+        test_gate = TestGate(
             cmd=test_cmd,
             min_passed=effective_min,
             discriminator=discriminator,
             seal_key=runner.seal_key,
-        ),
+            bdd_cmd=profile.bdd_cmd if profile is not None else None,
+            # Profile commands (npm test, go test, ...) are judged by exit code, not
+            # pytest's codes; None keeps the pinned pytest harness and its semantics.
+            stack_harness=test_cmd is not None,
+            profile_name=profile.name if profile is not None else "",
+        )
+    test = _run_gate(
+        test_gate,
         rt=rt,
         runner=runner,
         config=config,
@@ -969,21 +1332,224 @@ def run_build_test_gates(
         node_id=_TEST_NODE,
     )
     gates = [build, test]
-    if profile is not None and profile.smoke_cmd is not None:
-        from foundry.gates.smoke import SmokeGate
+    out: dict[str, Any] = {"gates": gates}
+    if profile is not None and test_cmd is not None and profile.bdd_cmd is None and any(
+        (workdir / FEATURE_DIR).glob("*.feature")
+    ):
+        # Only the pytest harness executes scenarios; say so rather than pass silently.
+        out["gate_triage"] = [GateTriage(
+            name=test.name,
+            run_against=run_against,
+            explanation=(
+                "ADVISORY: features/*.feature hold the tickets' acceptance scenarios, "
+                f"but the {profile.name} test harness does not execute them — they "
+                "are not enforced as executable for this stack."
+            ),
+            produced_by=_TEST_NODE,
+            seq=rt.seq(config, _TEST_NODE, "triage:bdd"),
+        )]
+    # Every run carries a smoke verdict: the stack's own run command, else an
+    # attested "not pinned" PASS (the boundary is always build/test/smoke).
+    from foundry.gates.smoke import SmokeGate
 
-        gates.append(
-            _run_gate(
-                SmokeGate(profile.smoke_cmd, seal_key=runner.seal_key),
-                rt=rt,
-                runner=runner,
-                config=config,
-                run_against=run_against,
-                workdir=workdir,
-                node_id=_SMOKE_NODE,
-            )
+    smoke: GateImpl
+    if profile is not None and profile.unavailable:
+        smoke = UnavailableGate("smoke", profile.unavailable)
+    elif profile is not None and profile.smoke_cmd is not None:
+        smoke = SmokeGate(profile.smoke_cmd, seal_key=runner.seal_key)
+    else:
+        smoke = UnpinnedSmokeGate(seal_key=runner.seal_key)
+    gates.append(
+        _run_gate(
+            smoke,
+            rt=rt,
+            runner=runner,
+            config=config,
+            run_against=run_against,
+            workdir=workdir,
+            node_id=_SMOKE_NODE,
         )
-    return {"gates": gates}
+    )
+    return out
+
+
+def wave_scenarios(state: FactoryState, resolve: ArtifactResolver) -> frozenset[str]:
+    """The scenario refs a per-wave check can judge: those of criteria whose every
+    carrier (the owning ticket and each ticket listing it in ``scenario_ids``, i.e.
+    its paired test ticket) is built. Anything still waiting on a ticket is left to
+    a later wave or the final gate."""
+    from foundry.agents.implementation.tickets import _built_task_ids, read_tickets
+
+    built = _built_task_ids(state)
+    carriers: dict[str, set[str]] = {}
+    for t in read_tickets(state, resolve):
+        for cid in t.scenario_ids:
+            carriers.setdefault(cid, set()).add(t.id)
+    return frozenset(
+        scenario_ref(c.ticket_id, c.id)
+        for c in _current_criteria(state, resolve).values()
+        if c.ticket_id and {c.ticket_id, *carriers.get(c.id, ())} <= built
+    )
+
+
+def _wave_test_gate(
+    profile: VerificationProfile | None, runner: TwoZoneGateRunner, scope: frozenset[str]
+) -> TestGate | None:
+    """The scoped Test gate for a wave check, or ``None`` when this stack's harness
+    does not execute scenarios (a foreign test command with no ``bdd``)."""
+    if profile is not None and (
+        profile.unavailable or profile.test_unavailable
+        or (profile.test_cmd is not None and profile.bdd_cmd is None)
+    ):
+        return None
+    return TestGate(
+        cmd=profile.test_cmd if profile is not None else None,
+        seal_key=runner.seal_key,
+        bdd_cmd=profile.bdd_cmd if profile is not None else None,
+        stack_harness=profile is not None and profile.test_cmd is not None,
+        profile_name=profile.name if profile is not None else "",
+        scope=scope,
+    )
+
+
+def run_build_gate(
+    state: FactoryState,
+    config: RunnableConfig,
+    *,
+    rt: AgentRuntime,
+    runner: TwoZoneGateRunner,
+    resolve: ArtifactResolver,
+    resolve_blob: BlobResolver,
+    workdir: Path,
+    profile: VerificationProfile | None = None,
+    scenarios: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
+    """Run the Build gate on the integrated tree (the per-wave check, §2b), plus,
+    when ``scenarios`` is non-empty, the Test gate scoped to those scenarios, so an
+    unbound or failing scenario is caught in the wave that built it.
+
+    The full Test gate is left out on purpose: scenarios of tickets not yet built
+    would fail it. Keyed under the same nodes as the final gates, so the final
+    verdicts (a later epoch) supersede every intermediate one."""
+    run_against = materialize_workdir(state, workdir, resolve=resolve, resolve_blob=resolve_blob)
+    out: dict[str, Any] = {}
+    stack = state.get("stack")
+    if stack is not None and not stack.profile:
+        files = [f for a in _of_kind(state, TICKET_KIND)
+                 for f in _resolve_typed(a, resolve, Ticket, TICKET_KIND).files]
+        notes: list[tuple[str, str]] = []
+        # Python's gates never install and its build/typecheck need no manifest.
+        missing = () if stack.language == "python" else unbuilt_manifests(files, workdir)
+        if missing:
+            # No manifest, nothing to install from; the build and the type checker
+            # need the dependencies the install would have fetched.
+            skip = ("install", "build", "typecheck")
+            dropped = [f"{k} `{getattr(stack, k)}`" for k in skip if getattr(stack, k)]
+            if dropped:
+                stack = stack.model_copy(update=dict.fromkeys(skip, ""))
+                notes.append((WAVE_MANIFEST_TRIAGE, (
+                    f"this wave's check skips {', '.join(dropped)}: the planned "
+                    f"manifest {', '.join(missing)} is not built yet; the final gate "
+                    "runs every step")))
+        for step in ("build", "typecheck"):
+            full = getattr(stack, step)
+            if not full:
+                continue
+            scoped = wave_typecheck(full, planned_paths(files), workdir)
+            if scoped != full:
+                stack = stack.model_copy(update={step: scoped})
+                notes.append((WAVE_TYPECHECK_TRIAGE, (
+                    f"this wave's {step} skips planned targets no ticket has built "
+                    f"yet: `{scoped or '(skipped: none built yet)'}` instead of `{full}`")))
+        if notes:
+            # The scoped commands are what this verdict judges, so they key the digest.
+            state = {**state, "stack": stack}
+            run_against = tree_sha(workdir, toolchain_digest=_toolchain_digest(stack))
+            out["gate_triage"] = [GateTriage(
+                name=name, run_against=run_against, explanation=text[:2000],
+                produced_by=_BUILD_NODE,
+                seq=rt.seq(config, _BUILD_NODE, f"{name}:{run_against}"),
+            ) for name, text in notes]
+    profile = gate_profile(state, profile)
+    build = _run_gate(
+        _build_gate(profile, runner),
+        rt=rt,
+        runner=runner,
+        config=config,
+        run_against=run_against,
+        workdir=workdir,
+        node_id=_BUILD_NODE,
+    )
+    out["gates"] = [build]
+    test = _wave_test_gate(profile, runner, scenarios) if scenarios else None
+    if test is not None:
+        # Same tree digest as the build, so the fixer reads both verdicts as this
+        # pass's. A scoped FAIL latching the tree is safe: the final Test gate only
+        # ever runs on a later tree (a failing wave check is fixed or halts).
+        out["gates"].append(_run_gate(
+            test, rt=rt, runner=runner, config=config, run_against=run_against,
+            workdir=workdir, node_id=_TEST_NODE,
+        ))
+    return out
+
+
+WAVE_TYPECHECK_TRIAGE = "wave-typecheck-scope"
+WAVE_MANIFEST_TRIAGE = "wave-manifest-scope"
+_SHELL_OPERATORS = frozenset({"&&", "||", ";", "|", "&"})
+# The package manifests a non-Python stack's install, build and typecheck need.
+_MANIFESTS = frozenset({"package.json", "pyproject.toml", "Cargo.toml", "go.mod"})
+
+
+def unbuilt_manifests(files: Iterable[str], workdir: Path) -> tuple[str, ...]:
+    """The planned package manifests no ticket has written into ``workdir`` yet."""
+    return tuple(sorted({
+        p for p in (_norm_target(f) for f in files)
+        if PurePosixPath(p).name in _MANIFESTS and not (workdir / p).exists()
+    }))
+
+
+def planned_paths(files: Iterable[str]) -> frozenset[str]:
+    """Every path the plan will create: each ticket file and its parent dirs
+    (``app/db.py`` plans ``app`` too), normalized with no ``./`` or trailing ``/``."""
+    out: set[str] = set()
+    for f in files:
+        p = PurePosixPath(_norm_target(f))
+        if str(p) in ("", "."):
+            continue
+        out.add(str(p))
+        out.update(str(d) for d in p.parents if str(d) != ".")
+    return frozenset(out)
+
+
+def _norm_target(token: str) -> str:
+    return token.removeprefix("./").rstrip("/")
+
+
+def wave_typecheck(typecheck: str, planned: frozenset[str], workdir: Path) -> str:
+    """The stack's typecheck for an intermediate wave: arguments naming a planned
+    path that no ticket has built yet are dropped (``mypy app`` before the wave
+    that writes ``app/`` would fail on the missing target, not on the code). If
+    that leaves none of the command's planned targets, the step is skipped (``""``).
+    Anything else — a target outside the plan, a path already built — is kept, so
+    a real type error or a bad target still fails the check; the final Build gate
+    always runs the full command."""
+    try:
+        tokens = shlex.split(typecheck)
+    except ValueError:
+        return typecheck
+
+    def targeted(tok: str) -> bool:
+        return _norm_target(tok) in planned
+
+    def unbuilt(tok: str) -> bool:
+        return targeted(tok) and not (workdir / _norm_target(tok)).exists()
+
+    if not any(unbuilt(t) for t in tokens):
+        return typecheck
+    kept = [t for t in tokens if not unbuilt(t)]
+    if not any(targeted(t) for t in kept):
+        return ""
+    return " ".join(t if t in _SHELL_OPERATORS else shlex.quote(t) for t in kept)
 
 
 # ---- routing predicate (fail-closed, convergence-bounded) -------------------
@@ -991,13 +1557,15 @@ def run_build_test_gates(
 # Which gate verdicts each phase boundary is responsible for.
 SPEC_BOUNDARY = "spec"
 BUILD_TEST_BOUNDARY = "build_test"
-# Profile boundary variant (ROADMAP Phase 3): when the run's verification
-# profile pins a smoke (runtime boot) command, the boundary is also responsible
-# for the "smoke" verdict — a missing/FAILed smoke can never advance.
+# The per-wave integration check (§2b): the build verdict alone.
+BUILD_BOUNDARY = "build"
+# The final boundary: build, test and smoke (a stack without a run command gets
+# an attested "not pinned" smoke PASS), so a missing/FAILed smoke never advances.
 BUILD_TEST_SMOKE_BOUNDARY = "build_test_smoke"
 
 _BOUNDARY_GATES: dict[str, frozenset[str]] = {
     SPEC_BOUNDARY: frozenset({"spec"}),
+    BUILD_BOUNDARY: frozenset({"build"}),
     BUILD_TEST_BOUNDARY: frozenset({"build", "test"}),
     BUILD_TEST_SMOKE_BOUNDARY: frozenset({"build", "test", "smoke"}),
 }
@@ -1071,6 +1639,19 @@ def _fix_attempts(state: FactoryState, config: RunnableConfig) -> int:
     return int(configurable.get("fix_attempts", 0))
 
 
+def _fix_total(state: FactoryState) -> int:
+    budget = state.get("budget")
+    return int(budget.fix_attempts_total) if budget is not None else 0
+
+
+def fix_cap(state: FactoryState, resolve: ArtifactResolver, max_fix_attempts: int) -> int:
+    """The run's overall fix bound: ``max_fix_attempts`` per wave check plus the
+    final gate's, so per-boundary resets can never add up to an unbounded loop."""
+    from foundry.agents.implementation.tickets import plan_wave_count, read_tickets
+
+    return max_fix_attempts * (plan_wave_count(read_tickets(state, resolve)) + 1)
+
+
 def route_after_gates(
     state: FactoryState,
     config: RunnableConfig,
@@ -1078,6 +1659,7 @@ def route_after_gates(
     boundary: str,
     records: Any,
     max_fix_attempts: int = 3,
+    total_cap: int | None = None,
 ) -> str:
     """Route a phase boundary on its relevant gate verdicts. Fail-closed.
 
@@ -1089,7 +1671,9 @@ def route_after_gates(
       stable-FAIL-latched digest, WITHIN the convergence bound; route back to the
       responsible layer to fix FORWARD into a new tree.
     * :data:`HALT` — the ``max_fix_attempts`` convergence bound is exhausted (escalate
-      with the best draft); a non-fixable terminal condition.
+      with the best draft); a non-fixable terminal condition. ``total_cap`` bounds the
+      build-side fixes of the whole run (``budget.fix_attempts_total``), which the
+      per-boundary resets never clear.
 
     The stable-FAIL latch (committed cross-fork; ``records``) permanently DISQUALIFIES
     the failing digest — a later PASS on that SAME tree never clears it (governance §5,
@@ -1104,7 +1688,9 @@ def route_after_gates(
 
     latest = _relevant_latest(state, gate_names)
 
-    bound_spent = _fix_attempts(state, config) >= max_fix_attempts
+    bound_spent = _fix_attempts(state, config) >= max_fix_attempts or (
+        total_cap is not None and _fix_total(state) >= total_cap
+    )
 
     # A relevant gate needs a fix when it FAILs, ERRORs, is MISSING (never advance on
     # an absent verdict), OR its digest carries a stable-FAIL latch. A latched digest
@@ -1134,3 +1720,122 @@ def route_after_gates(
 
     # All relevant gates PASS on a non-disqualified digest.
     return ADVANCE
+
+
+def bump_fix_attempts(
+    state: FactoryState,
+    config: RunnableConfig,
+    out: dict[str, Any],
+    *,
+    boundary: str,
+    records: Any,
+    max_fix_attempts: int,
+    total_cap: int | None = None,
+) -> None:
+    """Bump ``budget.fix_attempts_since_all_green`` on ``out`` when ``boundary``
+    will route ``fix`` after ``out`` folds in — and, outside the Spec boundary, the
+    run-wide ``fix_attempts_total`` that ``total_cap`` bounds.
+
+    The gate node writing ``out`` is the sole ``budget`` writer of its superstep, and
+    the conditional edge that fires in that same superstep reads the post-fold state.
+    So the decision folds the prior ``gates`` with the node's delta through the REAL
+    reducer — never a hand-assembled subset — so it can never diverge from the edge's
+    read (E-R1-01)."""
+    ledger = state.get("budget") or BudgetLedger()
+    post: FactoryState = {
+        "gates": merge_gates(state.get("gates"), out.get("gates")),
+        "budget": ledger,
+    }
+    decision = route_after_gates(
+        post, config, boundary=boundary, records=records, max_fix_attempts=max_fix_attempts,
+        total_cap=total_cap,
+    )
+    if decision == FIX:
+        out["budget"] = ledger.model_copy(update={
+            "fix_attempts_since_all_green": ledger.fix_attempts_since_all_green + 1,
+            "fix_attempts_total": ledger.fix_attempts_total + (boundary != SPEC_BOUNDARY),
+        })
+
+
+def settle_fix_attempts(
+    state: FactoryState,
+    config: RunnableConfig,
+    out: dict[str, Any],
+    *,
+    boundary: str,
+    records: Any,
+    max_fix_attempts: int,
+    total_cap: int | None = None,
+) -> None:
+    """:func:`bump_fix_attempts`, plus a reset to 0 when ``boundary`` ADVANCEs: a
+    green boundary hands the next one the whole budget, so the attempts one
+    boundary spent (a Spec re-plan, an earlier wave's repair) never leave a later
+    failure with fewer fixes. A spent bound (HALT) keeps the ledger unchanged."""
+    bump_fix_attempts(state, config, out, boundary=boundary, records=records,
+                      max_fix_attempts=max_fix_attempts, total_cap=total_cap)
+    ledger = state.get("budget") or BudgetLedger()
+    if "budget" in out or not ledger.fix_attempts_since_all_green:
+        return
+    post: FactoryState = {
+        "gates": merge_gates(state.get("gates"), out.get("gates")), "budget": ledger,
+    }
+    if route_after_gates(post, config, boundary=boundary, records=records,
+                         max_fix_attempts=max_fix_attempts, total_cap=total_cap) == ADVANCE:
+        out["budget"] = ledger.model_copy(update={"fix_attempts_since_all_green": 0})
+
+
+@dataclass(frozen=True)
+class WaveBuildCheck:
+    """The per-wave integration check (plan §2b) the implementation subgraph runs
+    between ticket waves: the attested Build gate on the integrated tree, through
+    the SAME runner as the supervisor's gates. Each wave has its own fix budget: a
+    passing check is a green state for that boundary and resets the counter, so wave
+    repairs never eat the next wave's or the final build/test gate's budget. A wave
+    gets ``max_fix_attempts - 1`` fixer passes (the default 3 gives 2), and every
+    build-side fix also counts toward :func:`fix_cap`, the run-wide bound.
+
+    With ``check_scenarios`` the check also runs the Test gate scoped to the
+    scenarios whose tickets are all built (:func:`wave_scenarios`), so an unbound or
+    failing scenario reaches the wave's fixer instead of piling up for the final gate.
+
+    ``run`` is the node (verdict + budget bump); ``route`` returns
+    :data:`ADVANCE` / :data:`FIX` / :data:`HALT` for the :data:`BUILD_BOUNDARY`, or
+    :data:`BUILD_TEST_BOUNDARY` when the check judged scenarios."""
+
+    rt: AgentRuntime
+    runner: TwoZoneGateRunner
+    resolve: ArtifactResolver
+    resolve_blob: BlobResolver
+    max_fix_attempts: int = 3
+    profile: VerificationProfile | None = None
+    check_scenarios: bool = True
+
+    def _scenarios(self, state: FactoryState) -> frozenset[str]:
+        if not self.check_scenarios:
+            return frozenset()
+        scope = wave_scenarios(state, self.resolve)
+        if not scope or _wave_test_gate(gate_profile(state, self.profile), self.runner,
+                                        scope) is None:
+            return frozenset()
+        return scope
+
+    def _boundary(self, state: FactoryState) -> str:
+        return BUILD_TEST_BOUNDARY if self._scenarios(state) else BUILD_BOUNDARY
+
+    def run(self, state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        with tempfile.TemporaryDirectory(prefix="foundry_wave_gate_") as tmp:
+            out = run_build_gate(
+                state, config, rt=self.rt, runner=self.runner, resolve=self.resolve,
+                resolve_blob=self.resolve_blob, workdir=Path(tmp), profile=self.profile,
+                scenarios=self._scenarios(state),
+            )
+        settle_fix_attempts(state, config, out, boundary=self._boundary(state),
+                            records=self.runner.records, max_fix_attempts=self.max_fix_attempts,
+                            total_cap=fix_cap(state, self.resolve, self.max_fix_attempts))
+        return out
+
+    def route(self, state: FactoryState, config: RunnableConfig) -> str:
+        return route_after_gates(state, config, boundary=self._boundary(state),
+                                 records=self.runner.records,
+                                 max_fix_attempts=self.max_fix_attempts,
+                                 total_cap=fix_cap(state, self.resolve, self.max_fix_attempts))

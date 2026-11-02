@@ -42,10 +42,8 @@ DEFAULT_LINEAGE_ENTRIES: tuple[tuple[str, frozenset[str]], ...] = (
 
 # Curated lineage for the alternative configured backends (proxy/cli_transports).
 # Each is a DISTINCT training lineage from anthropic-claude, so swapping the
-# backend genuinely changes the served_family the proxy observes — under the
-# `decorrelated` profile that makes reviewer/implementer disjointness a REAL
-# guarantee rather than a self-judge stamp. Globs are first-match-wins; extend
-# per the exact pinned ids an operator runs.
+# backend genuinely changes the served_family the proxy observes. Globs are
+# first-match-wins; extend per the exact pinned ids an operator runs.
 OPENAI_LINEAGE_ENTRIES: tuple[tuple[str, frozenset[str]], ...] = (
     ("gpt-*", frozenset({"openai-gpt"})),
     ("o1*", frozenset({"openai-gpt"})),
@@ -53,9 +51,19 @@ OPENAI_LINEAGE_ENTRIES: tuple[tuple[str, frozenset[str]], ...] = (
     ("o4*", frozenset({"openai-gpt"})),
     ("codex-*", frozenset({"openai-gpt"})),
 )
-GEMMA_LINEAGE_ENTRIES: tuple[tuple[str, frozenset[str]], ...] = (
-    # Ollama tags carry a `:tag` suffix (e.g. ``gemma3:27b``) — the glob spans it.
-    ("gemma*", frozenset({"google-gemma"})),
+
+
+# Curated lineage for models served by a local OpenAI-compatible server (model
+# modes). Local ids carry an org/quant prefix or suffix ("mlx-community/Qwen3.6-
+# 27B-6bit", "qwen/qwen3.6-27b"), hence the surrounding wildcards.
+LOCAL_LINEAGE_ENTRIES: tuple[tuple[str, frozenset[str]], ...] = (
+    ("*[Qq]wen*", frozenset({"alibaba-qwen"})),
+    ("*[Dd]evstral*", frozenset({"mistral"})),
+    ("*[Mm]istral*", frozenset({"mistral"})),
+    ("*gpt-oss*", frozenset({"openai-gpt-oss"})),
+    ("*[Ll]lama*", frozenset({"meta-llama"})),
+    ("*[Gg]emma*", frozenset({"google-gemma"})),
+    ("*[Dd]eep[Ss]eek*", frozenset({"deepseek"})),
 )
 
 

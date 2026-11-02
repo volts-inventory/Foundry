@@ -68,6 +68,8 @@ from foundry.agents._common import (
 )
 from foundry.agents.plan_contracts import CompileResult, check_contracts
 from foundry.base_tree import BaseView, read_base, render_base_view
+from foundry.gates.spec import _REQUIRED_FIELDS as _GATE_FIELDS
+from foundry.gates.spec import _incomplete_steps
 from foundry.proxy.model_provider_proxy import ProxyUnavailable, StructuredOutputError
 from foundry.schemas.architecture import (
     ADR,
@@ -2906,25 +2908,30 @@ def _patchable(
     findings: Iterable[str], items: Sequence[dict[str, Any]], frame: _Frame,
     overflow: Sequence[str],
 ) -> bool:
-    """True when there are tickets to patch and the tickets alone reproduce every
+    """True when there are tickets to patch, none was dropped at a cap (the full
+    re-plan consolidates so no work is lost) and the tickets alone reproduce every
     finding: one the contracts or the run command cause needs a full re-plan."""
-    if not items:
+    if not items or overflow:
         return False
-    return set(findings) <= set(_assemble(items, _ticket_frame(frame), overflow).blocking)
+    fit = _assemble(items, _ticket_frame(frame))
+    return not fit.overflow and set(findings) <= set(fit.blocking)
 
 
 def _structural_findings(criteria: Sequence[AcceptanceCriterion]) -> tuple[str, ...]:
-    """What the Spec gate checks of the criteria themselves, beside the critique."""
+    """What the Spec gate checks of the criteria themselves, beside the critique,
+    run over the entries it would materialize (``gate_wiring._criteria_list``)."""
     if not criteria:
         return ("criteria set is empty",)
     out: list[str] = []
     for c in criteria:
-        if not c.text.strip():
-            out.append(f"criterion {c.id}: empty text")
-        steps = {"given": c.given, "when": c.when, "then": c.then}
-        if any(steps.values()) and not all(steps.values()):
-            out.append(f"criterion {c.id}: scenario has no "
-                       + "/".join(k for k, v in steps.items() if not v) + " step")
+        entry: dict[str, Any] = {"id": c.id, "text": c.text, "oracle": c.oracle_hint}
+        if c.given or c.when or c.then:
+            entry.update(given=list(c.given), when=list(c.when), then=list(c.then))
+        missing = [f for f in _GATE_FIELDS if not str(entry.get(f) or "").strip()]
+        if missing:
+            out.append(f"criterion {c.id}: missing/empty {', '.join(missing)}")
+        if steps := _incomplete_steps(entry):
+            out.append(f"criterion {c.id}: scenario has no {'/'.join(steps)} step")
     if not any(c.security_abuse for c in criteria):
         out.append("no criterion flags security_abuse=true")
     return tuple(out)
@@ -2934,9 +2941,10 @@ def _affected(
     findings: Iterable[str], items: Sequence[dict[str, Any]], contracts: Iterable[str]
 ) -> set[str]:
     """Ids of the tickets the findings name: by id, by a scenario they own, or by a
-    contract they implement or consume."""
+    contract they implement or consume (matched as text: a name may hold spaces)."""
+    findings = tuple(findings)
     tokens = {tok.strip(".") for f in findings for tok in _SAFE_TICKET_ID.findall(f)}
-    named = tokens.intersection(contracts)
+    named = {n for n in contracts if n and any(n in f for f in findings)}
     return {
         i["id"] for i in items
         if i["id"] in tokens
@@ -2953,16 +2961,15 @@ _INDEX_KEYS = (
 
 def _delta_text(
     request: str, findings: Sequence[str], items: Sequence[dict[str, Any]],
-    contracts: Sequence[tuple[str, str]], brief: IntentBrief | None,
+    shown: set[str], contracts: Sequence[tuple[str, str]], brief: IntentBrief | None,
     epic_ids: frozenset[str],
 ) -> str:
-    """The delta call's prompt: the findings, the tickets they name in full and
+    """The delta call's prompt: the findings, the ``shown`` tickets in full and
     only a summary of the rest, so the reply stays a fraction of the plan."""
-    named = _affected(findings, items, (n for n, _ in contracts))
-    full = [{k: v for k, v in i.items() if k != _EPIC_KEY} for i in items if i["id"] in named]
+    full = [{k: v for k, v in i.items() if k != _EPIC_KEY} for i in items if i["id"] in shown]
     index = [
         {**{k: i[k] for k in _INDEX_KEYS}, "scenario_ids": [s["id"] for s in i["scenarios"]]}
-        for i in items if i["id"] not in named
+        for i in items if i["id"] not in shown
     ]
     used = {
         *(n for n, _ in contracts if any(n in f for f in findings)),
@@ -2974,8 +2981,10 @@ def _delta_text(
         + "\n\nINTERFACE CONTRACTS (fixed):\n"
         + ("\n".join(f"- {n}: {spec}" if n in used else f"- {n}" for n, spec in contracts)
            or "(none)")
-        + "\n\nTICKETS THE FINDINGS NAME (in full):\n" + (as_text(full) if full else "(none)")
-        + "\n\nEVERY OTHER TICKET (scenarios by id only):\n"
+        + "\n\nTICKETS THE FINDINGS NAME (in full; only these may be changed):\n"
+        + (as_text(full) if full else "(none)")
+        + "\n\nEVERY OTHER TICKET (summary for reference: never change one, list its "
+        "scenarios or move one off it; you may still remove the ticket):\n"
         + (as_text(index) if index else "(none)")
         + (f"\n\nEPICS: {', '.join(sorted(epic_ids))}. Every ticket id keeps its epic "
            "prefix (E1-T01); a new ticket's id starts with the prefix of its epic, and "
@@ -2985,11 +2994,15 @@ def _delta_text(
 
 def _merge_delta(
     items: Sequence[dict[str, Any]], delta: dict[str, Any], epic_ids: frozenset[str],
+    shown: set[str],
 ) -> list[dict[str, Any]] | None:
     """``items`` with ``delta`` applied by id. A listed ticket's fields replace the
     old ones and its scenarios merge by id (one listed on another ticket moves
     there); removals drop tickets and scenarios. None for a delta that changes
-    nothing, names a ticket outside the plan's epics or leaves no ticket."""
+    nothing, names a ticket outside the plan's epics, leaves no ticket, lists one
+    scenario on two tickets, or edits a ticket the model saw only as a summary
+    (not in ``shown``): changing it, or moving or removing a scenario on it,
+    would overwrite content it never saw."""
     upserts: dict[str, dict[str, Any]] = {}
     for u in _objs(delta.get("tickets")):
         tid = _str(u.get("id")).strip()
@@ -2999,10 +3012,18 @@ def _merge_delta(
     dropped = set(_strs(delta.get("remove_scenarios")))
     if not (upserts or removed or dropped):
         return None
-    listed = {
-        sid: tid for tid, u in upserts.items() for s in _objs(u.get("scenarios"))
-        if (sid := _str(s.get("id")).strip())
-    }
+    summarized = {i["id"] for i in items} - shown
+    if summarized & set(upserts):
+        return None
+    listed: dict[str, str] = {}
+    for tid, u in upserts.items():
+        for s in _objs(u.get("scenarios")):
+            sid = _str(s.get("id")).strip()
+            if sid and listed.setdefault(sid, tid) != tid:
+                return None
+    owner = {s["id"]: i["id"] for i in items for s in i["scenarios"]}
+    if any(owner.get(sid) in summarized for sid in (*listed, *dropped)):
+        return None
     out: dict[str, dict[str, Any]] = {
         i["id"]: {**i, "scenarios": [
             s for s in i["scenarios"]
@@ -3130,32 +3151,36 @@ def make_planner_node(
 
     def _patch(
         state: FactoryState, findings: Sequence[str], items: Sequence[dict[str, Any]],
-        contracts: Sequence[tuple[str, str]], frame: _Frame, overflow: Sequence[str],
-        structural: frozenset[str],
-    ) -> tuple[list[dict[str, Any]], _Fit, dict[str, Any]] | None:
+        contracts: Sequence[tuple[str, str]], frame: _Frame, structural: frozenset[str],
+    ) -> _Fit | None:
         """One delta call closing ``findings``, merged into ``items`` and put through
-        the same assembly as a full plan. Returns the merged items, their fit and the
-        delta's criteria review; None (re-plan in full) for a delta that does not
-        merge or a merged plan still failing a check, or with a gate-checked
-        criteria problem outside ``structural``."""
+        the same assembly as a full plan; the merged plan's fit. None (re-plan in
+        full) for a delta that does not merge or flags a security/abuse omission,
+        or a merged plan still failing a check, dropping work at a cap, or with a
+        gate-checked criteria problem outside ``structural``. The caller keeps the
+        plan's own criteria review: the delta never saw it, so it cannot clear it."""
         epic_ids = frozenset(e.id for e in frame.epics)
+        shown = _affected(findings, items, (n for n, _ in contracts))
         try:
             delta = _call(DELTA_SOP, DELTA_SCHEMA, _delta_text(
-                str(state.get("request", "")), findings, items, contracts, frame.brief,
-                epic_ids,
+                str(state.get("request", "")), findings, items, shown, contracts,
+                frame.brief, epic_ids,
             ))
         except ProxyUnavailable as exc:
             # Only an unparseable reply falls back: a transport outage stays one.
             if not isinstance(exc.__cause__, StructuredOutputError):
                 raise
             return None
-        merged = _merge_delta(items, delta, epic_ids)
-        if merged is None:
+        merged = _merge_delta(items, delta, epic_ids, shown)
+        if merged is None or _strs(
+            _section(delta, "criteria_review").get("security_abuse_omissions")
+        ):
             return None
-        fit = _assemble(merged, frame, overflow)
-        if fit.blocking or not set(_structural_findings(fit.criteria)) <= structural:
+        fit = _assemble(merged, frame)
+        if (fit.blocking or fit.overflow
+                or not set(_structural_findings(fit.criteria)) <= structural):
             return None
-        return merged, fit, _section(delta, "criteria_review")
+        return fit
 
     def _draft(
         state: FactoryState, payload: dict[str, Any], seqs: dict[str, Seq],
@@ -3301,20 +3326,17 @@ def make_planner_node(
                 draft.fit.tickets, draft.fit.criteria,
                 _ticket_epics(draft.fit.tickets) if draft.per_epic else {},
             )
-            if _patchable(blocking, items, draft.frame, draft.epic_overflow):
-                patched = _patch(
+            # An open review gap needs the full re-plan: the delta never sees it.
+            if (not draft.missing and not draft.omissions
+                    and _patchable(blocking, items, draft.frame, draft.fit.overflow)):
+                fit = _patch(
                     state, notes, items,
                     [(_str(i.get("name")), _contract_text(i))
                      for i in _objs(draft.payload.get("interfaces"))],
-                    draft.frame, draft.epic_overflow,
-                    frozenset(_structural_findings(draft.fit.criteria)),
+                    draft.frame, frozenset(_structural_findings(draft.fit.criteria)),
                 )
-                if patched is not None:
-                    raw, fit, review = patched
-                    return replace(
-                        draft, raw=raw, fit=fit, missing=_strs(review.get("missing")),
-                        omissions=_strs(review.get("security_abuse_omissions")),
-                    ), _patch_note(len(blocking))
+                if fit is not None:
+                    return replace(draft, fit=fit), _patch_note(len(blocking))
             text = _revision_block(
                 notes, _criteria_text(draft.fit.criteria), _goals_text(draft.brief), _CHECK
             )
@@ -3646,23 +3668,29 @@ def make_planner_node(
         if prior is None:
             return None
         old = prior.critique
+        # The delta never sees the review: an open gap needs the full re-plan.
+        if old is not None and (old.security_abuse_omissions or old.missing):
+            return None
         checked = (*old.contract_findings, *old.coverage_findings) if old else ()
         items = _ticket_items(prior.tickets, prior.criteria.values(), prior.epic_of)
-        tickets_seq = rt.seq(config, NODE_ID, "artifact:tickets")
-        frame = _prior_frame(
-            state, prior, tickets_seq, rt.seq(config, NODE_ID, "artifact:acceptance_criteria")
-        )
+        # Placeholder Seqs until the patch is accepted: a fallback mints its own.
+        frame = _prior_frame(state, prior, prior.prd.seq, prior.prd.seq)
         if not _patchable(checked, items, frame, ()):
             return None
-        patched = _patch(state, findings, items, prior.interfaces, frame, (), frozenset())
-        if patched is None:
+        fit = _patch(state, findings, items, prior.interfaces, frame, frozenset())
+        if fit is None:
             return None
-        _, fit, review = patched
-        if _strs(review.get("security_abuse_omissions")):
-            return None
+        tickets_seq = rt.seq(config, NODE_ID, "artifact:tickets")
+        criteria_seq = rt.seq(config, NODE_ID, "artifact:acceptance_criteria")
+        fit = replace(
+            fit,
+            tickets=[t.model_copy(update={"seq": tickets_seq._replace(local=t.seq.local)})
+                     for t in fit.tickets],
+            criteria=[c.model_copy(update={"seq": criteria_seq._replace(local=c.seq.local)})
+                      for c in fit.criteria],
+        )
         return _emit_replan(
-            config, state, prior, fit, tickets_seq,
-            missing=_strs(review.get("missing")), omissions=(),
+            config, state, prior, fit, tickets_seq, missing=(), omissions=(),
             what="Patched the plan",
             note=" Patched with one delta call instead of a full re-plan.",
             concerns=[],

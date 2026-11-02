@@ -106,7 +106,7 @@ def test_default_settings_are_cloud_with_the_preset_table(env):
     assert got["presets"]["hybrid"]["T2"]["backend"] == "local"
     assert got["presets"]["local"]["T1"]["model"] == s["local_model"]
     assert "python" in got["profiles"] and got["scopes"] == ["auto", "demo", "standard"]
-    assert got["fix_defaults"] == {"cloud": 3, "hybrid": 4, "local": 5}
+    assert got["fix_defaults"] == {"cloud": 3, "hybrid": 3, "local": 3}
 
 
 def test_saved_settings_persist_and_become_the_defaults_for_new_builds(env, runs):
@@ -127,7 +127,7 @@ def test_saved_settings_persist_and_become_the_defaults_for_new_builds(env, runs
     assert kw["levels"]["T1"] == {"backend": "anthropic", "model": "claude-custom-1"}
     assert kw["local_url"] == "http://127.0.0.1:9999/v1"
     assert kw["local_model"] == "qwen/qwen3.6-27b"
-    assert kw["max_fix_attempts"] == 4                       # the hybrid default
+    assert kw["max_fix_attempts"] == 3                       # the hybrid default
     assert kw["ticket_tiers"] == {"trivial": "T2", "standard": "T2", "complex": "T1"}
     assert p.build["model_mode"] == "hybrid" and p.build["levels_custom"] is True
 
@@ -136,7 +136,7 @@ def test_an_unedited_preset_is_sent_as_the_mode_alone(env, runs):
     assert _call(env, "POST", "/api/settings", {"model_mode": "local"})[0] == 200
     _, kw = _build(env, runs)
     assert kw["model_mode"] == "local" and kw["levels"] is None
-    assert kw["max_fix_attempts"] == 5
+    assert kw["max_fix_attempts"] == 3
 
 
 @pytest.mark.parametrize("body", [

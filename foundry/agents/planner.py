@@ -47,6 +47,7 @@ from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from enum import StrEnum
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from foundry.agents._common import (
@@ -163,7 +164,12 @@ _DEFAULT_CONTRACTS_FILE: dict[str, str] = {
     "java": "src/main/java/contracts/Contracts.java",
 }
 _TICKET_RULES = (
-    "Each ticket is ONE behaviour touching roughly 1-2 files, "
+    "Prefer FEWER, LARGER tickets: each one is a separate agent session and gate "
+    "run, and splitting sequential work multiplies hand-off errors. A ticket is one "
+    "coherent slice of the product — group closely related behaviours and their files "
+    "into it; split only where work is genuinely independent or meets at an interface "
+    "contract. State what each ticket must do and why, not how to implement it. "
+    "Each ticket "
     "lists in files[] every path it may write, has a specialty (frontend | backend "
     "| data | test) and a difficulty (trivial | standard | complex — it picks the "
     "model), and depends_on the ticket ids that must land first; depends_on MUST "
@@ -173,8 +179,9 @@ _TICKET_RULES = (
     "FIT (checked; a violation FAILS the Spec gate): every contract a ticket "
     "consumes is implemented by exactly ONE ticket, which the consumer depends_on "
     "(directly or through other tickets). Every implemented contract should have a "
-    "consumer or a scenario on its implementing ticket. Every feature ticket gets a paired "
-    "specialty='test' ticket that depends_on it and writes the step definitions for "
+    "consumer or a scenario on its implementing ticket. Unless a DEMO scope cap says "
+    "otherwise, every feature ticket gets a paired specialty='test' ticket that "
+    "depends_on it and writes the step definitions for "
     "that feature's scenarios, binding the gate-written features/<feature ticket "
     "id>.feature (the gate renders one per ticket from its scenarios); the test "
     "ticket carries no scenarios of its own. Never list a .feature file in files[]: "
@@ -236,7 +243,7 @@ SOP = (
     "specialty_mix hint. The LAST epic depends (directly or through other epics) on "
     "every other epic and holds the entrypoint ticket. Work over the caps is dropped "
     "(and reported), so consolidate instead.\n"
-    "TICKETS: decompose the work into ATOMIC, Jira-style tickets. " + _TICKET_RULES
+    "TICKETS: decompose the work into Jira-style tickets. " + _TICKET_RULES
     + "When you return epics without inline tickets, criteria_review covers only "
     "plan-level gaps: each epic reviews its own scenarios.\n"
     "SPRINT PLAN: ordered milestones; usd_cap_microusd as an integer number of "
@@ -295,7 +302,7 @@ SOP = (
 EPIC_SOP = (
     "You are the Epic Planner. A lead planner has written the product spec, the "
     "architecture and the shared interface contracts, and split the work into "
-    "epics. In ONE reply, decompose YOUR epic into ATOMIC, Jira-style tickets (at "
+    "epics. In ONE reply, decompose YOUR epic into Jira-style tickets (at "
     f"most {MAX_EPIC_TICKETS}). " + _TICKET_RULES
     + "IDS: number tickets T01, T02, ... and scenarios AC01, AC02, ...; they are "
     "prefixed with your epic id for you. depends_on names only tickets of YOUR "
@@ -1410,8 +1417,10 @@ def _build_tickets(
         )
 
     tested = {d for t in tickets if t.specialty is Specialty.TEST for d in declared[t.id]}
+    # A demo feature ticket may bind its own scenarios from a test file it writes.
+    tested |= {t.id for t in tickets if any(_is_python_test(f) for f in t.files)}
     concerns += [
-        f"Ticket {t.id} has scenarios but no test ticket depends on it."
+        f"Ticket {t.id} has scenarios but neither a test ticket nor a test file of its own."
         for t in tickets
         if t.specialty is not Specialty.TEST and own[t.id] and t.id not in tested
     ]
@@ -1714,6 +1723,35 @@ def _own_stack_files(
             [*init_concerns,
              f"Ticket {entry.id}: added stack command file(s) {', '.join(orphans)} that no "
              "ticket wrote."], ())
+
+
+def _is_python_test(path: str) -> bool:
+    name = PurePosixPath(path).name
+    return path.endswith(".py") and (name.startswith("test_") or name.endswith("_test.py"))
+
+
+def _own_scenario_bindings(
+    tickets: Sequence[Ticket], stack: StackDecision | None,
+) -> tuple[list[Ticket], list[str]]:
+    """On a pytest-bdd stack, give a feature ticket that carries scenarios but has no
+    test ticket after it (the demo shape) a step module of its own to bind them from.
+    Without one its packet says a paired test ticket binds them, nobody does, and the
+    Test gate fails every scenario as not executed."""
+    if stack is not None and (stack.language != "python" or stack.bdd):
+        return list(tickets), []
+    bound = {c for t in tickets if t.specialty is Specialty.TEST for c in t.scenario_ids}
+    out: list[Ticket] = []
+    concerns: list[str] = []
+    for t in tickets:
+        if (t.specialty is Specialty.TEST or set(t.scenario_ids) <= bound
+                or any(_is_python_test(f) for f in t.files)):
+            out.append(t)
+            continue
+        path = f"tests/test_{re.sub(r'[^a-z0-9]+', '_', t.id.lower()).strip('_')}.py"
+        out.append(t.model_copy(update={"files": (*t.files, path)}))
+        concerns.append(f"Ticket {t.id}: added {path} to bind its own scenarios "
+                        "(no test ticket depends on it).")
+    return out, concerns
 
 
 def _own_package_inits(
@@ -2239,6 +2277,8 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
     tickets, more, stack_findings = _own_stack_files(
         tickets, frame.stack, frozenset(base.files) if base is not None else frozenset()
     )
+    concerns += more
+    tickets, more = _own_scenario_bindings(tickets, frame.stack)
     concerns += more
     tickets, more = _wire_entrypoint(tickets)
     concerns += more

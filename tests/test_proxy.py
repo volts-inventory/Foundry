@@ -32,7 +32,8 @@ from foundry.proxy import (
     default_drift_policy,
     default_sampling_policy,
 )
-from foundry.schemas.gates import GateStatus, JudgmentProvenance
+from foundry.proxy.model_provider_proxy import ADVISORY_PREFIX
+from foundry.schemas.gates import GateResult, GateStatus, JudgmentProvenance
 from foundry.state.global_records import GlobalRecords
 from foundry.state.reducers import merge_gates, set_gate_write_verifier
 from foundry.state.seq import Seq
@@ -190,15 +191,52 @@ def test_self_judge_profile_stamps_provenance_self():
     assert judge_once(proxy).gate_result.judgment_provenance == JudgmentProvenance.SELF
 
 
-def test_request_changes_verdict_maps_to_fail_with_findings(verifier, installed):
+def _finding(text: str, **evidence: str) -> dict[str, str]:
+    return {"finding": text, "failing_check": "", "command": "", "expected": "",
+            "actual": "", **evidence}
+
+
+def _judge_findings(findings: list[object]) -> GateResult:
     transport = FakeTransport(
-        text=json.dumps({"status": "request-changes", "findings": ["missing tests"]})
+        text=json.dumps({"status": "request-changes", "findings": findings})
     )
     proxy, _ = make_proxy(transport)
-    g = judge_once(proxy).gate_result
+    return judge_once(proxy).gate_result
+
+
+def test_request_changes_verdict_maps_to_fail_with_findings(verifier, installed):
+    g = _judge_findings([_finding("missing tests", failing_check="tests/test_a.py::test_x")])
     assert g.status == GateStatus.FAIL
-    assert g.findings == ("missing tests",)
+    assert g.findings == ("missing tests [evidence: failing tests/test_a.py::test_x]",)
     assert verifier.verify_judgment_binding(g)  # a FAIL verdict is stamped too
+
+
+def test_a_reproduction_with_differing_results_blocks(verifier, installed):
+    g = _judge_findings([
+        _finding("add() drops the title", command="python -c 'import app; app.add(\"a\")'",
+                 expected="1", actual="None"),
+        _finding("naming is unclear"),
+    ])
+    assert g.status == GateStatus.FAIL
+    assert "expected '1', got 'None'" in g.findings[0]
+    assert g.findings[1] == ADVISORY_PREFIX + "naming is unclear"  # kept, not dropped
+
+
+@pytest.mark.parametrize("findings", [
+    [_finding("this looks wrong")],
+    [_finding("off by one", command="pytest", expected="pass", actual="pass")],
+    [_finding("needs a repro", command="pytest", expected="pass")],
+    [_finding("vague", failing_check="N/A", command="none", expected="1", actual="2")],
+    ["missing tests"],  # an ungrammared plain-string finding cites nothing
+    [],
+])
+def test_an_evidence_less_rejection_is_advisory_and_passes(verifier, installed, findings):
+    g = _judge_findings(findings)
+    assert g.status == GateStatus.PASS
+    assert all(f.startswith(ADVISORY_PREFIX) for f in g.findings)
+    assert len(g.findings) == len(findings)
+    # Downgraded before stamping, so the binding still verifies.
+    assert verifier.verify_judgment_binding(g)
 
 
 def test_verdict_flip_after_stamping_fails_verification(verifier, installed):

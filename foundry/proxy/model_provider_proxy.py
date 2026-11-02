@@ -129,17 +129,70 @@ _DEFAULT_MAX_TOKENS = 16000
 Purpose = Literal["ideation", "gate", "judgment"]
 _PURPOSES = ("ideation", "gate", "judgment")
 
+# A finding's evidence: the failing gate/test it cites, or a reproducible command
+# with its expected and actual result. "" means absent (strict grammars need every
+# field present).
+_EVIDENCE_FIELDS = ("failing_check", "command", "expected", "actual")
+_FINDING_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "finding": {"type": "string"},
+        **{f: {"type": "string"} for f in _EVIDENCE_FIELDS},
+    },
+    "required": ["finding", *_EVIDENCE_FIELDS],
+    "additionalProperties": False,
+}
+
 # The grammar-constrained verdict channel (arch §2b): the proxy extracts
 # `status` from THIS schema's output, independent of adapter post-processing.
 VERDICT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "status": {"type": "string", "enum": ["approve", "request-changes"]},
-        "findings": {"type": "array", "items": {"type": "string"}},
+        "findings": {"type": "array", "items": _FINDING_SCHEMA},
     },
     "required": ["status", "findings"],
     "additionalProperties": False,
 }
+
+ADVISORY_PREFIX = "[advisory: no failing check or reproduction cited] "
+# Strict grammars make the model fill every field, so "no evidence" often arrives
+# as a placeholder rather than "". Only for the citing fields: an expected/actual of
+# "None" or "null" is a real observed value.
+_PLACEHOLDERS = frozenset({"", "n/a", "na", "none", "null", "nil", "-", "--", "unknown",
+                           "not applicable", "no", "nothing"})
+
+
+def _cited(item: dict[str, Any], field: str) -> str:
+    value = str(item.get(field, "")).strip()
+    return "" if value.lower().strip(".") in _PLACEHOLDERS else value
+
+
+def _verdict_findings(raw: object) -> tuple[tuple[str, ...], bool]:
+    """The verdict's findings as recorded, and whether any is test-backed.
+
+    LLM reviewers fail correct code (arXiv 2603.00539), so only a finding citing
+    a failing gate/test, or a command whose expected and actual results differ, may
+    block. The rest are kept, prefixed :data:`ADVISORY_PREFIX`. A plain-string
+    finding (an ungrammared backend) cites nothing."""
+    out: list[str] = []
+    backed = False
+    for item in raw if isinstance(raw, list) else ():
+        if not isinstance(item, dict):
+            out.append(ADVISORY_PREFIX + str(item))
+            continue
+        text = str(item.get("finding", "")).strip()
+        check, command = _cited(item, "failing_check"), _cited(item, "command")
+        expected, actual = (str(item.get(f, "")).strip() for f in ("expected", "actual"))
+        if check:
+            out.append(f"{text} [evidence: failing {check}]")
+        elif command and expected and actual and expected != actual:
+            out.append(f"{text} [evidence: `{command}` expected {expected!r}, got {actual!r}]")
+        else:
+            out.append(ADVISORY_PREFIX + text)
+            continue
+        backed = True
+    return tuple(out), backed
 
 _STATUS_BY_VERDICT = {
     "approve": GateStatus.PASS,
@@ -884,9 +937,15 @@ class ModelProviderProxy:
             raise VerdictChannelError(
                 f"constrained verdict channel returned out-of-grammar payload: {verdict!r}"
             )
+        findings, backed = _verdict_findings(verdict.get("findings"))
+        status = _STATUS_BY_VERDICT[verdict["status"]]
+        if not backed:
+            # Decided here, before the binding is stamped: a downgrade after signing
+            # would void the verdict.
+            status = GateStatus.PASS
         unstamped = GateResult(
             name=gate_name,
-            status=_STATUS_BY_VERDICT[verdict["status"]],
+            status=status,
             decision_deterministic=False,
             execution_deterministic=False,
             verdict_class=VerdictClass.PERCEPTUAL,
@@ -895,7 +954,7 @@ class ModelProviderProxy:
             subject_artifact_uri=subject_artifact_uri,
             lineage_map_revision=self._lineage.revision,
             run_against=state_sha,
-            findings=tuple(str(f) for f in verdict.get("findings", ())),
+            findings=findings,
             judgment_provenance=JudgmentProvenance.SELF,
             seq=seq,
         )

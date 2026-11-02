@@ -1722,6 +1722,79 @@ def route_after_gates(
     return ADVANCE
 
 
+_FAILED_TEST = re.compile(r"^(?:FAILED|ERROR) (\S+::\S+)")
+_BDD_SCENARIO = re.compile(r"^BDD criterion \S+: scenario (\S+)")
+
+
+def failing_ids(findings: Iterable[str]) -> tuple[str, ...]:
+    """The failing pytest node ids and BDD scenario refs a gate's findings name."""
+    out: list[str] = []
+    for line in findings:
+        m = _BDD_SCENARIO.match(line) or _FAILED_TEST.match(line.strip())
+        if m is not None and m.group(1) not in out:
+            out.append(m.group(1))
+    return tuple(out)
+
+
+# Run-varying bits of a raw finding line (object addresses, timings): two runs of
+# the same failure must compare equal.
+_VOLATILE = re.compile(r"0x[0-9a-fA-F]+|\b\d+(?:\.\d+)?m?s\b")
+
+
+def _failure_signature(verdicts: Iterable[GateResult]) -> frozenset[tuple[str, str]] | None:
+    """What one tree fails on: (gate, failing test/scenario id) per FAILed gate, or
+    (gate, normalized finding line) for a gate whose findings name no id. ``None``
+    when a verdict ERRORed: an infra error or a flake quarantine is never "no
+    progress"."""
+    sig: set[tuple[str, str]] = set()
+    for g in verdicts:
+        if g.status is GateStatus.ERROR:
+            return None
+        if g.status is GateStatus.FAIL:
+            ids = failing_ids(g.findings) or tuple(_VOLATILE.sub("#", f) for f in g.findings)
+            sig.update((g.name, i) for i in ids)
+    return frozenset(sig)
+
+
+def _unchanged_tree_recheck(
+    state: FactoryState, out: dict[str, Any], config: RunnableConfig, *, boundary: str
+) -> bool:
+    """True iff ``out`` re-checks a tree ``state`` already failed on, after a fix pass
+    in between: the fixer changed nothing, so the same checks fail by definition.
+    (:func:`no_fix_progress` cannot see this: the re-check replaces the earlier
+    verdicts under the same ``(name, run_against)`` key.) ERRORs never count."""
+    if _fix_attempts(state, config) < 1:
+        return False
+    names = _BOUNDARY_GATES[boundary]
+    new = [g for g in out.get("gates") or () if g.name in names]
+    if not new:
+        return False
+    tree = new[0].run_against
+    old = [g for g in state.get("gates") or () if g.name in names and g.run_against == tree]
+    prev, cur = _failure_signature(old), _failure_signature(new)
+    return bool(old) and bool(prev) and bool(cur)
+
+
+def no_fix_progress(state: FactoryState, config: RunnableConfig, *, boundary: str) -> bool:
+    """True iff the newest tree fails ``boundary`` on exactly what the tree before it
+    failed on, after a fix pass in between: the fixer made no progress.
+
+    Only once this boundary's budget window has spent a fix (two failing checks in
+    it), so a resumed run's fresh budget re-check never counts as a pass."""
+    if _fix_attempts(state, config) < 2:
+        return False
+    names = _BOUNDARY_GATES[boundary]
+    trees: dict[str, dict[str, GateResult]] = {}
+    for g in sorted((g for g in state.get("gates") or () if g.name in names),
+                    key=lambda g: g.seq):
+        trees.setdefault(g.run_against, {})[g.name] = g
+    order = sorted(trees.values(), key=lambda v: max(g.seq for g in v.values()))
+    if len(order) < 2:
+        return False
+    prev, cur = (_failure_signature(v.values()) for v in order[-2:])
+    return bool(cur) and cur == prev
+
+
 def bump_fix_attempts(
     state: FactoryState,
     config: RunnableConfig,
@@ -1829,13 +1902,54 @@ class WaveBuildCheck:
                 resolve_blob=self.resolve_blob, workdir=Path(tmp), profile=self.profile,
                 scenarios=self._scenarios(state),
             )
-        settle_fix_attempts(state, config, out, boundary=self._boundary(state),
+        boundary = self._boundary(state)
+        settle_fix_attempts(state, config, out, boundary=boundary,
                             records=self.runner.records, max_fix_attempts=self.max_fix_attempts,
                             total_cap=fix_cap(state, self.resolve, self.max_fix_attempts))
+        post: FactoryState = {
+            "gates": merge_gates(state.get("gates"), out.get("gates")),
+            "budget": out.get("budget") or state.get("budget") or BudgetLedger(),
+        }
+        if self._route(post, config, boundary) == FIX and (
+                no_fix_progress(post, config, boundary=boundary)
+                or _unchanged_tree_recheck(state, out, config, boundary=boundary)):
+            [build] = [g for g in out["gates"] if g.name == "build"]
+            out.setdefault("gate_triage", []).append(GateTriage(
+                name=NO_FIX_PROGRESS_TRIAGE, run_against=build.run_against,
+                explanation="the last fix pass left the same checks failing; the wave "
+                            "stops fixing here instead of spending the remaining attempts",
+                produced_by=_BUILD_NODE,
+                seq=self.rt.seq(config, _BUILD_NODE, f"{NO_FIX_PROGRESS_TRIAGE}:"
+                                                     f"{build.run_against}"),
+            ))
         return out
 
-    def route(self, state: FactoryState, config: RunnableConfig) -> str:
-        return route_after_gates(state, config, boundary=self._boundary(state),
+    def _route(self, state: FactoryState, config: RunnableConfig, boundary: str) -> str:
+        return route_after_gates(state, config, boundary=boundary,
                                  records=self.runner.records,
                                  max_fix_attempts=self.max_fix_attempts,
                                  total_cap=fix_cap(state, self.resolve, self.max_fix_attempts))
+
+    def route(self, state: FactoryState, config: RunnableConfig) -> str:
+        """:func:`route_after_gates`, except a fix pass that made no progress
+        (:func:`no_fix_progress`, or the :data:`NO_FIX_PROGRESS_TRIAGE` ``run``
+        recorded on this tree for a fix that changed nothing) halts as a spent bound
+        does."""
+        boundary = self._boundary(state)
+        decision = self._route(state, config, boundary)
+        if decision == FIX and (no_fix_progress(state, config, boundary=boundary)
+                                or self._stopped_on_current_tree(state, config)):
+            return HALT
+        return decision
+
+    @staticmethod
+    def _stopped_on_current_tree(state: FactoryState, config: RunnableConfig) -> bool:
+        builds = [g for g in state.get("gates") or () if g.name == "build"]
+        if _fix_attempts(state, config) < 2 or not builds:
+            return False
+        tree = max(builds, key=lambda g: g.seq).run_against
+        return any(t.name == NO_FIX_PROGRESS_TRIAGE and t.run_against == tree
+                   for t in state.get("gate_triage") or ())
+
+
+NO_FIX_PROGRESS_TRIAGE = "fix-no-progress"

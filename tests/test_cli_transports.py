@@ -228,7 +228,9 @@ def test_claude_cli_rejects_a_binary_too_old_for_one_shot_flags() -> None:
 
 
 def test_claude_cli_verdict_path_parses_and_stamps_verifiable_binding() -> None:
-    verdict = json.dumps({"status": "request-changes", "findings": ["nit"]})
+    verdict = json.dumps({"status": "request-changes", "findings": [{
+        "finding": "nit", "failing_check": "test", "command": "", "expected": "",
+        "actual": ""}]})
     runner = _claude_runner(
         {
             "subtype": "success",

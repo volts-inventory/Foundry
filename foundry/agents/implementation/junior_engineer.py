@@ -138,6 +138,16 @@ def _prior_failures(state: FactoryState) -> tuple[str, ...]:
     failures stay in state. Only the latest verdict per gate counts, and a
     deterministic gate counts only if it ran against the newest tree: a gate skipped
     on this pass (tests after a build failure) must not resurface last pass's FAIL."""
+    out: list[str] = []
+    for g in _failed_gates(state):
+        out.append(f"[{g.name} gate FAILED]")
+        out.extend(g.findings)
+    return tuple(out)
+
+
+def _failed_gates(state: FactoryState) -> list[GateResult]:
+    """The latest pass's FAILED/ERRORed gates with findings, oldest first (see
+    :func:`_prior_failures`)."""
     gates = list(state.get("gates") or ())
     latest: dict[str, GateResult] = {}
     for g in gates:
@@ -145,13 +155,59 @@ def _prior_failures(state: FactoryState) -> tuple[str, ...]:
             latest[g.name] = g
     tree_gates = [g for g in gates if g.name in DETERMINISTIC_GATES]
     current_tree = max(tree_gates, key=lambda g: g.seq).run_against if tree_gates else None
-    out: list[str] = []
-    for g in sorted(latest.values(), key=lambda g: g.seq):
-        if g.name in DETERMINISTIC_GATES and g.run_against != current_tree:
-            continue
-        if g.status in (GateStatus.FAIL, GateStatus.ERROR) and g.findings:
-            out.append(f"[{g.name} gate FAILED]")
-            out.extend(g.findings)
+    return [
+        g for g in sorted(latest.values(), key=lambda g: g.seq)
+        if not (g.name in DETERMINISTIC_GATES and g.run_against != current_tree)
+        and g.status in (GateStatus.FAIL, GateStatus.ERROR) and g.findings
+    ]
+
+
+def _fix_summary(
+    state: FactoryState,
+    resolve: ArtifactResolver,
+    resolve_blob: BlobResolver,
+    *,
+    attempt: int,
+) -> tuple[str, ...]:
+    """The head of a fixer pass's input: the failing gates and the tests/scenarios
+    they name, then what the previous pass of this fix loop touched and reported.
+    Fresh attempts from a summary of earlier rollouts beat one ever-growing repair
+    context (arXiv 2602.18998, 2604.16529). Read off state; no model call."""
+    from foundry.graph.gate_wiring import (
+        FEATURE_DIFF_KIND,
+        MaterializationError,
+        _diff_ops,
+        _of_kind,
+        _resolve_typed,
+        failing_ids,
+    )
+
+    failed = _failed_gates(state)
+    ids = [i for g in failed for i in failing_ids(g.findings)]
+    out = [
+        "[fix summary]",
+        "failed gates: " + (", ".join(g.name for g in failed) or "none recorded"),
+        "failing tests/scenarios: " + (", ".join(ids) or "none named; see the gate output"),
+    ]
+    # attempt counts the failing checks of this fix loop: from 2 on, the newest fix
+    # diff is this loop's previous pass, not an earlier wave's.
+    fixes = [a for a in _of_kind(state, FEATURE_DIFF_KIND)
+             if a.task_id and a.task_id.startswith("fix-")]
+    if attempt >= 2 and fixes:
+        prev = max(fixes, key=lambda a: a.seq)
+        try:
+            ops = _diff_ops(_resolve_typed(prev, resolve, FeatureDiff, FEATURE_DIFF_KIND),
+                            resolve_blob)
+            touched = sorted({*ops.writes, *ops.deletes, *ops.patches})
+            files = ", ".join(touched) or "no files"
+        except MaterializationError:
+            files = "an unreadable diff"
+        out.append(f"previous fix pass ({prev.task_id}) touched {files} and left the "
+                   "gates above failing: try a different approach")
+        out.extend(f"previous fix pass reported: {t.explanation[:300]}"
+                   for t in sorted(state.get("gate_triage") or (), key=lambda t: t.seq)
+                   if t.run_against == f"task/{prev.task_id}")
+    out.append("gate output (tail):")
     return tuple(out)
 
 
@@ -423,9 +479,9 @@ def make_fixer_node(
     Re-running every task from scratch on each fix iteration rebuilt the whole
     project (one fresh agent session per task) to repair what is usually a local
     failure. The fixer instead seeds a single sandbox with the integrated tree, hands
-    the adapter only the latest failures, and emits one FeatureDiff whose seq is
-    lifted past every existing diff, so integration applies it on top
-    (later-by-Seq wins)."""
+    the adapter the latest failures behind a :func:`_fix_summary`, and emits one
+    FeatureDiff whose seq is lifted past every existing diff, so integration applies
+    it on top (later-by-Seq wins)."""
     if rt.adapter is None or rt.cas is None:
         raise ValueError("fixer requires rt.adapter and rt.cas (it rebuilds the integrated tree)")
 
@@ -478,7 +534,10 @@ def make_fixer_node(
         duplicates = contract_duplicates(overlay, contract_paths(state, resolve))
         from foundry.agents.implementation.tickets import group_failures_by_ticket, read_tickets
 
-        failures = group_failures_by_ticket(_prior_failures(state), read_tickets(state, resolve))
+        failures = (
+            *_fix_summary(state, resolve, resolve_blob, attempt=attempt),
+            *group_failures_by_ticket(_prior_failures(state), read_tickets(state, resolve)),
+        )
         if duplicates:
             failures = (*failures, f"[{CONTRACT_DUP_TRIAGE}]", *duplicates)
         from foundry.agents.implementation.tickets import note_fix_writes, pending_wave

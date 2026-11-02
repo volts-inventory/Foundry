@@ -243,3 +243,5 @@ Housekeeping: `rm -rf .pytest_cache .mypy_cache .ruff_cache ./.run spec.md`
 - The Seq epoch counter is in-memory: a new process resuming a checkpoint must start above the run's highest recorded epoch (`EpochCounter.raise_floor`), or its fresh verdicts rank below stale ones.
 - The Workshop streams a floor's `done` event before it sets `status="done"` and closes the run: a client that fetches on `done` can still see it running (insight.js retries).
 - `insight.BodyError` subclasses `ValueError`: call `self._read_json()` outside any `try/except ValueError` validation block, or an oversized body (413) is answered as a 400.
+- Importing `webapp.server` loads `.env` into the whole pytest process: any FOUNDRY_* var it sets (state dir, backend, adapter) leaks into other tests unless `tests/conftest.py`'s autouse fixture pins or clears it.
+- On macOS the fast suite has 3 environment-only failures (no `unshare` sandbox, `/private/var` symlinked tmp, cucumber-js): `test_gate_sandbox::test_install_alone_…`, `test_execution::test_run_cwd_is_worktree`, `test_cucumber_bdd::test_cucumber_js_agent_edited_feature_text` — compare against main before blaming a change.

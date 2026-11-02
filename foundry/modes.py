@@ -56,8 +56,9 @@ __all__ = [
 LOCAL_BACKEND = "local"
 MODEL_MODES = ("cloud", "hybrid", "local")
 LEVEL_TIERS = ("T1", "T2", "T3")
-# Weaker/slower local models get more repair rounds by default.
-DEFAULT_FIX_ATTEMPTS: dict[str, int] = {"cloud": 3, "hybrid": 4, "local": 5}
+# Repair rounds per mode. Extra rounds plateau fast (fix loops stall after ~2-3 passes),
+# so local gets no more than cloud despite the weaker model.
+DEFAULT_FIX_ATTEMPTS: dict[str, int] = {"cloud": 3, "hybrid": 3, "local": 3}
 
 _MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$")
 

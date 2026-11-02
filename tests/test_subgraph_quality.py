@@ -189,10 +189,12 @@ def test_request_changes_is_latched_by_the_supervisor_ledger_commit(records: Any
     from the new node, so a later approve on the same key cannot override it."""
     from foundry.graph.supervisor import _commit_judgment_ledger
 
-    final, _cas = _run(MockTransport(verdicts=[verdict_json("request-changes", ["x"])]))
+    finding = {"finding": "x", "failing_check": "test", "command": "", "expected": "",
+               "actual": ""}
+    final, _cas = _run(MockTransport(verdicts=[verdict_json("request-changes", [finding])]))
     [rc] = final["gates"]
     assert rc.status is GateStatus.FAIL
-    assert rc.findings == ("x",)
+    assert rc.findings == ("x [evidence: failing test]",)
 
     _commit_judgment_ledger([], [rc], records)
     assert records.negative_verdict_latched(rc.latch_key()) is True

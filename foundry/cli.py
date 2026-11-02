@@ -211,6 +211,13 @@ _RAW_REACT_SOP = (
     "You are a senior software engineer. Implement the requested change exactly, "
     "returning your work as a single fenced ```diff block. Touch nothing outside it."
 )
+# The proxy-agent's system prompt: its user turn demands one JSON action per reply,
+# so the raw-react "single diff block" instruction would contradict it.
+_PROXY_AGENT_SOP = (
+    "You are a senior software engineer working step by step in a sandbox. Each reply "
+    "is exactly one JSON action, as the user message specifies. Touch only what the "
+    "task needs."
+)
 
 
 def make_coding_adapter(
@@ -270,7 +277,7 @@ def make_coding_adapter(
             result = proxy.complete(
                 "junior_engineer",
                 current_packet_tier() or "T1",
-                _RAW_REACT_SOP,
+                _PROXY_AGENT_SOP,
                 list(messages),
                 purpose="ideation",
                 schema=schema,
@@ -1132,7 +1139,7 @@ def _invoke_with_autoresume(
             # stop) must pass None; otherwise it re-plans and builds a second plan.
             inp = None if _has_pending_run(app, config) else seed
             return _invoke(app, inp, config, progress_cb=progress_cb)
-        except Exception as exc:  # noqa: BLE001 — re-raised unless transient+budget
+        except Exception as exc:  # re-raised unless transient+budget
             if used >= budget or not _is_transient_proxy_failure(exc):
                 raise
             wait = min(3600, 300 * (2**used))  # 5,10,20,40,60,60 min
@@ -1320,8 +1327,8 @@ def run(
         ``backend``, T2/T3 local) or ``"local"`` (every tier local). ``levels`` is
         an explicit table ``{"T1": {"backend", "model"[, "base_url"]}, ...}`` that
         overrides the preset (omitted tiers run on ``backend``). A local level is an
-        OpenAI-compatible server at ``local_url`` (default LM Studio's
-        ``http://localhost:1234/v1``) serving ``local_model``. Local calls are
+        OpenAI-compatible server at ``local_url`` (default Ollama's
+        ``http://localhost:11434/v1``) serving ``local_model``. Local calls are
         unmetered and serialized (one local call/session at a time); tickets on a
         local level run the proxy-agent loop, tickets on a cloud level the run's
         cloud adapter.
@@ -1880,7 +1887,7 @@ def main(argv: list[str] | None = None) -> int:
         # --model-mode {cloud|hybrid|local}: where the model levels run (cloud =
         # today's routing; hybrid = T1 on --backend, T2/T3 on the local server;
         # local = every level local). --local-url / --local-model name the local
-        # OpenAI-compatible server (LM Studio by default) and the model it serves.
+        # OpenAI-compatible server (Ollama by default) and the model it serves.
         # --time-cap MINUTES stops the run cleanly once it has run that long.
         args, model_mode = _take_value(args, "--model-mode", what="a value")
         if model_mode is not None and model_mode not in MODEL_MODES:

@@ -326,6 +326,7 @@ def test_an_unpaired_feature_ticket_gets_a_step_module_to_bind_its_scenarios() -
         ticket("E1-T03", Specialty.TEST, ("AC-2",), ("tests/test_t02.py",), ("E1-T02",)),
         ticket("E1-T04", Specialty.BACKEND, ("AC-4",), ("app.py", "tests/test_own.py")),
         ticket("E1-T05", Specialty.BACKEND, ()),                             # no scenarios
+        ticket("E1-T06", Specialty.BACKEND, ("AC-6",), ()),                  # acceptance-only
     ]
     python = StackDecision(language="python", test="pytest")
     out, concerns = _own_scenario_bindings(tickets, python)
@@ -333,6 +334,7 @@ def test_an_unpaired_feature_ticket_gets_a_step_module_to_bind_its_scenarios() -
     assert files["E1-T01"] == ("app.py", "tests/test_e1_t01.py")
     assert files["E1-T02"] == files["E1-T05"] == ("app.py",)
     assert files["E1-T04"] == ("app.py", "tests/test_own.py")
+    assert files["E1-T06"] == ()
     assert len(concerns) == 1
     cucumber = python.model_copy(update={"bdd": "behave"})
     assert _own_scenario_bindings(tickets, cucumber) == (tickets, [])

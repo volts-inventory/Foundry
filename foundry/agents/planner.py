@@ -1743,7 +1743,8 @@ def _own_scenario_bindings(
     out: list[Ticket] = []
     concerns: list[str] = []
     for t in tickets:
-        if (t.specialty is Specialty.TEST or set(t.scenario_ids) <= bound
+        # A file-less ticket is an acceptance-only one: a file would make it build work.
+        if (t.specialty is Specialty.TEST or not t.files or set(t.scenario_ids) <= bound
                 or any(_is_python_test(f) for f in t.files)):
             out.append(t)
             continue

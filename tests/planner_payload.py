@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 PLANNER_SOP_KEY = "You are the Planner"
+DELTA_SOP_KEY = "You are the Plan Patcher"
 
 # Python without a bdd command: the gates keep the pinned pytest-bdd harness.
 PYTHON_STACK: dict[str, Any] = {

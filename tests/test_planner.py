@@ -62,6 +62,7 @@ from foundry.state.factory_state import FactoryState
 from foundry.state.reducers import live_constraints, merge_constraints
 from foundry.state.seq import Seq
 from tests.planner_payload import (
+    DELTA_SOP_KEY,
     EPIC_PLANNER_SOP_KEY,
     PLANNER_SOP_KEY,
     PYTHON_STACK,
@@ -380,7 +381,8 @@ def test_self_review_omission_is_flagged_blocking_and_stamped_self() -> None:
 
 def test_reentry_after_spec_fail_carries_the_findings_and_prior_criteria() -> None:
     cas = ArtifactStore()
-    rt, tx = runtime_for(PLAN, PLAN, cas=cas)
+    # An empty delta: the re-entry falls back to the full re-plan.
+    rt, tx = runtime_for(PLAN, {}, PLAN, cas=cas)
     node = make_planner_node(rt)
     first = node({"request": "x"}, config_for("r"))
     assert "REVISION PASS" not in _prompt(tx)
@@ -395,7 +397,8 @@ def test_reentry_after_spec_fail_carries_the_findings_and_prior_criteria() -> No
     second = node(state, config_for("r", step=5))
 
     prompt = _prompt(tx)
-    assert len(tx.requests) == 2
+    assert len(tx.requests) == 3
+    assert DELTA_SOP_KEY in json.dumps(tx.requests[1])
     assert "REVISION PASS" in prompt
     assert "no criterion flags security_abuse=true" in prompt
     assert "id=AC-001 (ticket=T-002)" in prompt and "id=AC-002" in prompt  # keep ids
@@ -725,7 +728,7 @@ def test_replan_retires_tickets_it_no_longer_emits() -> None:
 
     cas = ArtifactStore()
     revised = _plan(tickets=[t for t in PLAN["tickets"] if t["id"] != "T-003"])
-    rt, _ = runtime_for(PLAN, revised, cas=cas)
+    rt, _ = runtime_for(PLAN, {}, revised, cas=cas)
     node = make_planner_node(rt)
     first = node({"request": "x"}, config_for("r"))
     state: FactoryState = {
@@ -769,6 +772,8 @@ def _epic_scripts(
         ResponseScript(json.dumps(plan), match=_match(PLANNER_SOP_KEY)),
         *(ResponseScript(json.dumps(r), match=_match(f"YOUR EPIC: {eid}"))
           for eid, r in replies.items()),
+        # A delta that changes nothing: the planner falls back to a full re-plan.
+        ResponseScript("{}", match=_match(DELTA_SOP_KEY)),
     ]
 
 
@@ -987,7 +992,8 @@ def test_spec_fix_with_a_plan_level_finding_reruns_everything() -> None:
     node, tx, first = _first_pass(cas)
     state = _failed(first, "no criterion flags security_abuse=true")
     node(state, config_for("r", step=5))
-    new = tx.requests[4:]
+    delta, *new = tx.requests[4:]
+    assert DELTA_SOP_KEY in json.dumps(delta)  # it changed nothing: the full re-plan runs
     assert len(new) == 4
     assert PLANNER_SOP_KEY in json.dumps(new[0]) and "REVISION PASS" in json.dumps(new[0])
     assert sorted(filter(None, map(_epic_of, new))) == ["E1", "E2", "E3"]

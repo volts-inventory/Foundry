@@ -277,12 +277,13 @@ def test_epic_mode_coverage_spans_every_epic() -> None:
 def test_coverage_findings_fail_the_spec_gate_and_reach_the_revision(tmp_path: Path) -> None:
     uncovered = _plan(tickets=_tickets_with(T_002={"scenarios": _scenarios_covering("SC-1")}))
     cas = ArtifactStore()
-    # The in-node revision returns the same plan, so the finding reaches the gate.
-    rt, tx = runtime_for(uncovered, uncovered, PLAN, cas=cas)
+    # Empty deltas fall back to full re-plans; the in-node one returns the same plan,
+    # so the finding reaches the gate.
+    rt, tx = runtime_for(uncovered, {}, uncovered, {}, PLAN, cas=cas)
     node = make_planner_node(rt)
     first = node({"request": "x"}, config_for("r"))
-    assert len(tx.requests) == 2
-    assert "Plan check findings:\\n- Must-have MH-1" in json.dumps(tx.requests[1])
+    assert len(tx.requests) == 3
+    assert "Plan check findings:\\n- Must-have MH-1" in json.dumps(tx.requests[2])
 
     doc = _criteria_payload({"artifacts": first["artifacts"]}, cas.resolve)
     assert isinstance(doc, dict)

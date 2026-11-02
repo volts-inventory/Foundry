@@ -55,7 +55,7 @@ from foundry.schemas.product import (
 from foundry.state.factory_state import FactoryState
 from foundry.state.global_records import GlobalRecords
 from foundry.state.reducers import reset_gate_write_verifier, set_gate_write_verifier
-from tests.planner_payload import PLANNER_SOP_KEY, plan_payload
+from tests.planner_payload import DELTA_SOP_KEY, PLANNER_SOP_KEY, plan_payload
 
 KEY = b"dev-zone-b-supervisor-key-0123456789"
 KEY_ID = "dev-key-supervisor"
@@ -323,8 +323,10 @@ def _respec_app(tmp_path: Any, records: GlobalRecords, **kwargs: Any) -> tuple[A
         )
 
     # First match wins: the revision prompt gets the fixed plan, the first pass
-    # a plan with no security/abuse criterion (a Spec FAIL).
-    scripts = {"REVISION PASS": _plan(PRD_PAYLOAD), **_SCRIPTS, PLANNER_SOP_KEY: _plan(no_abuse)}
+    # a plan with no security/abuse criterion (a Spec FAIL); an empty delta falls
+    # back to that full re-plan.
+    scripts = {"REVISION PASS": _plan(PRD_PAYLOAD), DELTA_SOP_KEY: "{}", **_SCRIPTS,
+               PLANNER_SOP_KEY: _plan(no_abuse)}
     tx = MockTransport.scripted(scripts, default_verdict="approve")
     cas = ArtifactStore()
     rt = AgentRuntime(

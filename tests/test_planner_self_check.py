@@ -17,21 +17,35 @@ from typing import Any
 
 import pytest
 
-from foundry.agents import plan_contracts
+from foundry.agents import AgentRuntime, plan_contracts
 from foundry.agents.plan_contracts import check_contracts
 from foundry.agents.planner import (
     SOP,
     _drop_self_consumes,
+    _merge_delta,
     _wire_entrypoint,
     make_planner_node,
 )
 from foundry.durability.artifact_store import ArtifactStore
-from foundry.proxy.test_doubles import ResponseScript
+from foundry.gates.attestation import ZoneBSigner
+from foundry.proxy import ModelProviderProxy
+from foundry.proxy.test_doubles import MockTransport, ResponseScript
+from foundry.schemas.gates import GateStatus
 from foundry.schemas.implementation import Specialty, Ticket
 from foundry.schemas.product import CriteriaCritique
+from foundry.state.factory_state import FactoryState
 from foundry.state.seq import Seq
-from tests.planner_payload import PYTHON_STACK, _scn, _ticket, multi_epic_plan
+from tests.planner_payload import (
+    DELTA_SOP_KEY,
+    PLANNER_SOP_KEY,
+    PYTHON_STACK,
+    _scn,
+    _ticket,
+    multi_epic_plan,
+)
 from tests.test_planner import (
+    KEY,
+    KEY_ID,
     PLAN,
     _bodies,
     _epic_of,
@@ -40,6 +54,7 @@ from tests.test_planner import (
     _failed,
     _first_pass,
     _match,
+    _spec_verdict,
     config_for,
     runtime_for,
 )
@@ -67,11 +82,12 @@ def _uncovered() -> dict[str, Any]:
 
 def test_the_in_node_revision_fixes_a_finding_without_a_gate_round_trip() -> None:
     cas = ArtifactStore()
-    rt, tx = runtime_for(_uncovered(), PLAN, cas=cas)
+    # An empty delta: the full re-plan runs as the fallback.
+    rt, tx = runtime_for(_uncovered(), {}, PLAN, cas=cas)
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
 
-    assert len(tx.requests) == 2
-    revision = json.dumps(tx.requests[1], ensure_ascii=False)
+    assert len(tx.requests) == 3
+    revision = json.dumps(tx.requests[2], ensure_ascii=False)
     assert "REVISION PASS — the planner's own plan check" in revision
     assert "Plan check findings:\\n- Must-have MH-1 ('add todo') has no covering" in revision
     assert "id=AC-001 (ticket=T-002)" in revision  # the criteria to keep
@@ -87,10 +103,10 @@ def test_a_worse_revision_is_discarded() -> None:
     worse = _copy(_uncovered())
     worse["tickets"][1]["scenarios"][0]["covers"] = []  # now SC-1 is uncovered too
     cas = ArtifactStore()
-    rt, tx = runtime_for(_uncovered(), worse, cas=cas)
+    rt, tx = runtime_for(_uncovered(), {}, worse, cas=cas)
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
 
-    assert len(tx.requests) == 2  # one revision, never more
+    assert len(tx.requests) == 3  # one delta, then one full revision, never more
     assert _critique(cas, writes).coverage_findings == (
         "Must-have MH-1 ('add todo') has no covering scenario; add one whose covers lists "
         "MH-1.",
@@ -148,6 +164,197 @@ def test_a_gate_replan_gets_its_own_in_node_rerun() -> None:
     assert "Plan check findings" in json.dumps(tx.requests[5])
     assert _critique(cas, second).coverage_findings == ()
     assert "Revised epic(s) E2 once in-node" in second["agent_journal"][0].summary
+
+
+# ---- patch, don't re-plan: one delta call instead of a full plan call ----------------
+
+
+def _two_implementers() -> dict[str, Any]:
+    """The local-model mistakes the delta exists for: a scenario-less ticket that
+    also implements a contract another ticket implements."""
+    plan = _copy(PLAN)
+    plan["tickets"].append({
+        "id": "contracts-1", "title": "Contract types", "specialty": "backend",
+        "difficulty": "trivial", "depends_on": [], "files": ["todo/models.py"],
+        "implements": ["TodoStore.add"], "consumes": [], "scenarios": [],
+    })
+    return plan
+
+
+def _delta(**ops: Any) -> dict[str, Any]:
+    return {"tickets": [], "remove_tickets": [], "remove_scenarios": [],
+            "criteria_review": {"missing": [], "security_abuse_omissions": []}, **ops}
+
+
+_DROP_CONTRACTS_1 = _delta(remove_tickets=["contracts-1"])
+
+
+def _is_delta(request: dict[str, Any]) -> bool:
+    blob = json.dumps(request)
+    return DELTA_SOP_KEY in blob and PLANNER_SOP_KEY not in blob
+
+
+def test_a_failed_plan_check_is_fixed_by_one_delta_call() -> None:
+    cas = ArtifactStore()
+    rt, tx = runtime_for(_two_implementers(), _DROP_CONTRACTS_1, cas=cas)
+    writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
+
+    assert len(tx.requests) == 2 and _is_delta(tx.requests[1])
+    prompt = json.dumps(tx.requests[1], ensure_ascii=False)
+    assert "Contract TodoStore.add is implemented by 2 tickets" in prompt
+    assert "Feature ticket contracts-1 has no scenarios" in prompt
+    # The slice: the named tickets in full, the rest by id only.
+    full, rest = prompt.split("EVERY OTHER TICKET")
+    assert '\\"id\\": \\"contracts-1\\"' in full and '\\"id\\": \\"T-001\\"' in full
+    assert "an empty store" in full  # T-001 implements the named contract
+    assert '\\"id\\": \\"T-003\\"' in rest and "they add a todo" not in rest
+    critique = _critique(cas, writes)
+    assert critique.contract_findings == () and critique.coverage_findings == ()
+    assert [t.id for t in _bodies(cas, writes, "ticket")] == ["T-001", "T-002", "T-003"]
+    assert "Patched the plan in-node with one delta call after its own plan check: "\
+        "2 -> 0 finding(s)." in writes["agent_journal"][0].summary
+
+
+def test_an_upsert_merges_into_the_ticket_by_id() -> None:
+    fix = _delta(tickets=[{**PLAN["tickets"][1], "scenarios": [
+        {**PLAN["tickets"][1]["scenarios"][0], "covers": ["MH-1", "SC-1"]},
+    ]}])
+    cas = ArtifactStore()
+    rt, tx = runtime_for(_uncovered(), fix, cas=cas)
+    writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
+
+    assert len(tx.requests) == 2 and _is_delta(tx.requests[1])
+    assert _critique(cas, writes).coverage_findings == ()
+    by_id = {t.id: t for t in _bodies(cas, writes, "ticket")}
+    assert by_id["T-002"].scenario_ids == ("AC-001", "AC-002")  # AC-002 kept unlisted
+
+
+def test_a_delta_leaving_a_finding_falls_back_to_the_full_replan() -> None:
+    useless = _delta(remove_scenarios=["AC-003"])  # merges, closes nothing
+    cas = ArtifactStore()
+    rt, tx = runtime_for(_two_implementers(), useless, PLAN, cas=cas)
+    writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
+
+    assert len(tx.requests) == 3 and _is_delta(tx.requests[1])
+    assert "REVISION PASS — the planner's own plan check" in json.dumps(
+        tx.requests[2], ensure_ascii=False
+    )
+    assert _critique(cas, writes).contract_findings == ()
+    assert "Revised the plan once in-node" in writes["agent_journal"][0].summary
+
+
+def test_an_unparseable_delta_falls_back_to_the_full_replan() -> None:
+    tx = MockTransport(completions=[
+        json.dumps(_two_implementers()), "no json here", json.dumps(PLAN),
+    ])
+    proxy = ModelProviderProxy(tx, signer=ZoneBSigner(KEY, KEY_ID), max_retries=0)
+    cas = ArtifactStore()
+    writes = make_planner_node(AgentRuntime(proxy=proxy, cas=cas))(
+        {"request": "x"}, config_for("r")
+    )
+    assert len(tx.requests) == 3 and _is_delta(tx.requests[1])
+    assert PLANNER_SOP_KEY in json.dumps(tx.requests[2])
+    assert _critique(cas, writes).contract_findings == ()
+
+
+def test_a_finding_the_tickets_cannot_close_skips_the_delta() -> None:
+    cli = _copy(PLAN)
+    cli["intent"]["deliverable"] = "cli"  # with stack.run empty: a stack finding
+    rt, tx = runtime_for(cli, PLAN)
+    make_planner_node(rt)({"request": "x"}, config_for("r"))
+    assert len(tx.requests) == 2 and not _is_delta(tx.requests[1])
+
+
+def test_a_spec_gate_failure_is_patched_with_one_delta_call() -> None:
+    from foundry.agents.implementation.tickets import read_tickets
+
+    cas = ArtifactStore()
+    broken = _two_implementers()
+    # The first pass keeps both findings (empty delta, unchanged full re-plan).
+    rt, tx = runtime_for(broken, {}, broken, _DROP_CONTRACTS_1, cas=cas)
+    node = make_planner_node(rt)
+    first = node({"request": "x"}, config_for("r"))
+    assert len(_critique(cas, first).contract_findings) == 1
+    findings = (
+        "contract fit: Contract TodoStore.add is implemented by 2 tickets "
+        "(T-001, contracts-1); exactly one ticket may implement it.",
+        "coverage: Feature ticket contracts-1 has no scenarios; give it at least one "
+        "(or fold it into the ticket whose behaviour it serves).",
+    )
+    state: FactoryState = {
+        "request": "x", "artifacts": first["artifacts"], "scope_tier": first["scope_tier"],
+        "gates": [_spec_verdict(GateStatus.FAIL, findings, epoch=1)],
+    }
+    second = node(state, config_for("r", step=5))
+
+    assert len(tx.requests) == 4 and _is_delta(tx.requests[3])
+    assert "(T-001, contracts-1)" in json.dumps(tx.requests[3])
+    assert {a.kind for a in second["artifacts"]} == {
+        "prd", "acceptance_criterion", "criteria_findings", "ticket", "ownership_map"
+    }
+    critique = _critique(cas, second)
+    assert not critique.spec_gate_blocking()
+    after: FactoryState = {**state, "artifacts": [*first["artifacts"], *second["artifacts"]]}
+    assert [t.id for t in read_tickets(after, cas.resolve)] == ["T-001", "T-002", "T-003"]
+    summary = second["agent_journal"][0].summary
+    assert "Revised after a Spec-gate failure. Patched with one delta call" in summary
+
+
+def test_a_gate_delta_leaving_an_omission_falls_back_to_the_full_replan() -> None:
+    cas = ArtifactStore()
+    rt, tx = runtime_for(PLAN, _delta(
+        remove_scenarios=["AC-003"],
+        criteria_review={"missing": [], "security_abuse_omissions": ["no rate limit"]},
+    ), PLAN, cas=cas)
+    node = make_planner_node(rt)
+    first = node({"request": "x"}, config_for("r"))
+    state: FactoryState = {
+        "request": "x", "artifacts": first["artifacts"], "scope_tier": first["scope_tier"],
+        "gates": [_spec_verdict(GateStatus.FAIL, ("no rate-limit scenario",), epoch=1)],
+    }
+    node(state, config_for("r", step=5))
+    assert len(tx.requests) == 3 and _is_delta(tx.requests[1])
+    assert "REVISION PASS" in json.dumps(tx.requests[2])
+
+
+def _item(tid: str, *scenarios: str, **extra: Any) -> dict[str, Any]:
+    return {"id": tid, "title": tid, "specialty": "backend", "depends_on": [],
+            "files": [f"{tid}.py"], "implements": [], "consumes": [],
+            "scenarios": [{"id": s, "given": ["g"], "when": ["w"], "then": ["t"]}
+                          for s in scenarios], **extra}
+
+
+def test_the_merge_replaces_moves_and_removes_by_id() -> None:
+    items = [_item("A", "S1", "S2"), _item("B", "S3"), _item("C")]
+    merged = _merge_delta(items, _delta(
+        tickets=[
+            {**_item("B", "S1"), "title": "B2"},  # S1 moves here from A
+            _item("D", "S4"),
+            {**_item("contracts"), "title": "never the planner's own"},
+        ],
+        remove_tickets=["C"], remove_scenarios=["S2"],
+    ), frozenset())
+    assert merged is not None
+    by_id = {i["id"]: i for i in merged}
+    assert list(by_id) == ["A", "B", "D"]
+    assert [s["id"] for s in by_id["A"]["scenarios"]] == []
+    assert [s["id"] for s in by_id["B"]["scenarios"]] == ["S3", "S1"]  # S3 kept unlisted
+    assert by_id["B"]["title"] == "B2"
+    assert items[0]["scenarios"][0]["id"] == "S1"  # the input is not mutated
+
+    assert _merge_delta(items, _delta(), frozenset()) is None  # changes nothing
+    assert _merge_delta(items, _delta(remove_tickets=["A", "B", "C"]), frozenset()) is None
+
+
+def test_an_epic_delta_keeps_tickets_inside_known_epics() -> None:
+    items = [{**_item("E1-T01"), "__epic__": "E1"}, {**_item("E2-T01"), "__epic__": "E2"}]
+    merged = _merge_delta(items, _delta(tickets=[
+        _item("E2-T02", "E2-AC09", depends_on=["E2-T01", "E1-T01"]),
+    ]), frozenset({"E1", "E2"}))
+    assert merged is not None
+    new = merged[-1]
+    assert new["__epic__"] == "E2" and new["depends_on"] == ["E2-T01"]
+    assert _merge_delta(items, _delta(tickets=[_item("T-9")]), frozenset({"E1", "E2"})) is None
 
 
 # ---- repairs ------------------------------------------------------------------------

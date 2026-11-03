@@ -16,7 +16,7 @@ import pytest
 import foundry.cli as cli
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
 from foundry.execution.adapters.claude_code import ClaudeCodeAdapter
-from foundry.execution.adapters.proxy_agent import ACTION_SCHEMA, ProxyAgentAdapter
+from foundry.execution.adapters.proxy_agent import ACTION_SCHEMA, TOOLS, ProxyAgentAdapter
 from foundry.execution.adapters.tiered import TieredAdapter
 from foundry.gates.attestation import ZoneBSigner
 from foundry.modes import (
@@ -478,6 +478,154 @@ def test_the_local_client_never_carries_the_openai_key(monkeypatch: pytest.Monke
     client = transport._cache.get()
     assert client.api_key != "sk-real-secret"
     assert str(client.base_url).rstrip("/") == "http://box:1234/v1"
+
+
+# ---- native tool calls on the local server (Phase 5) ----------------------------------
+
+
+class _ToolCompletions:
+    """Answers a `tools` call with two tool calls (one with broken arguments) and
+    any other call with the next scripted JSON action."""
+
+    def __init__(self, reject_tools: bool, actions: list[dict[str, Any]] | None = None) -> None:
+        self.reject_tools = reject_tools
+        self.actions = list(actions or [])
+        self.calls: list[dict[str, Any]] = []
+
+    def create(self, **params: Any) -> Any:
+        self.calls.append(params)
+        if "tools" in params:
+            if self.reject_tools:
+                raise RuntimeError("Error code: 400 - library/m does not support tools")
+            calls = [
+                SimpleNamespace(id="call_1", function=SimpleNamespace(
+                    name="read_file", arguments='{"path": "a.py"}')),
+                SimpleNamespace(id=None, function=SimpleNamespace(name="run", arguments="{bad")),
+            ]
+            message = SimpleNamespace(content="", tool_calls=calls)
+        else:
+            message = SimpleNamespace(content=json.dumps(self.actions.pop(0)))
+        return SimpleNamespace(
+            model=params["model"], id="cmpl-t",
+            choices=[SimpleNamespace(message=message, finish_reason="stop")],
+            usage=SimpleNamespace(prompt_tokens=5, completion_tokens=3),
+        )
+
+
+def _tool_proxy(completions: _ToolCompletions) -> tuple[ModelProviderProxy, LocalOpenAITransport]:
+    transport = LocalOpenAITransport(
+        client=SimpleNamespace(chat=SimpleNamespace(completions=completions)))
+    proxy = build_level_proxy(
+        preset_levels("local", cloud_backend="mock", cloud_models=TIER_MODELS),
+        cloud_transport=lambda _b: RecordingTransport(), local_transport=lambda _u: transport,
+        signer=SIGNER)
+    return proxy, transport
+
+
+TOOL_HISTORY = [
+    {"role": "user", "content": "task"},
+    {"role": "assistant", "content": [
+        {"type": "text", "text": "looking"},
+        {"type": "tool_use", "id": "call_0", "name": "search", "input": {"pattern": "x"}}]},
+    {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "call_0", "content": "a.py:1: x"}]},
+]
+
+
+def test_local_server_gets_native_tools_and_returns_tool_calls() -> None:
+    completions = _ToolCompletions(reject_tools=False)
+    proxy, transport = _tool_proxy(completions)
+    result = proxy.complete("node", "T2", "SOP", TOOL_HISTORY, purpose="ideation", tools=TOOLS)
+    sent = completions.calls[0]
+    assert sent["reasoning_effort"] == "none" and "response_format" not in sent
+    assert sent["tools"][0] == {"type": "function", "function": {
+        "name": "read_file", "description": TOOLS[0]["description"],
+        "parameters": TOOLS[0]["input_schema"]}}
+    assert sent["messages"] == [
+        {"role": "system", "content": "SOP"},
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "looking", "tool_calls": [{
+            "id": "call_0", "type": "function",
+            "function": {"name": "search", "arguments": '{"pattern": "x"}'}}]},
+        {"role": "tool", "tool_call_id": "call_0", "content": "a.py:1: x"},
+    ]
+    first, second = result.tool_calls
+    assert first == {"id": "call_1", "name": "read_file", "input": {"path": "a.py"}}
+    assert second["id"] == "tool_call_1" and "not a JSON object" in second["error"]
+    assert result.manifest_record["tool_calls"] == 2
+    assert transport.tools_supported is True
+
+
+def test_local_tools_rejection_falls_back_to_json_actions(tmp_path: Path) -> None:
+    from foundry.execution.sandbox import Sandbox
+    from foundry.proxy import ToolsUnsupported
+
+    completions = _ToolCompletions(reject_tools=True, actions=[
+        {"action": "write_file", "path": "m.py", "content": "X = 1\n"},
+        {"action": "done", "summary": "ok"},
+    ])
+    proxy, transport = _tool_proxy(completions)
+
+    def _json(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
+        r = proxy.complete("node", "T2", "SOP", list(messages), purpose="ideation",
+                           schema=schema)
+        return r.text, r.parsed
+
+    def _tools(messages: Any, tools: Any) -> tuple[str, Any]:
+        r = proxy.complete("node", "T2", "SOP", list(messages), purpose="ideation",
+                           tools=tools)
+        return r.text, r.tool_calls
+
+    src = tmp_path / "src"
+    src.mkdir()
+    adapter = ProxyAgentAdapter(_json, tool_complete_fn=_tools)
+    with Sandbox(src) as sb:
+        result = adapter.run(TaskPacket(task={"id": "t"}, worktree_path=str(sb.worktree),
+                                         turn_budget=6, cost_budget_microusd=1), sb)
+        body = json.loads(sb.get_blob(result.diff_uri))
+    assert body["files"] == {"m.py": "X = 1\n"}
+    assert ["tools" in c for c in completions.calls] == [True, False, False]
+    assert transport.tools_supported is False
+    # Remembered for the session: the proxy refuses before reaching the server.
+    with pytest.raises(ToolsUnsupported):
+        proxy.complete("node", "T3", "SOP", TOOL_HISTORY, purpose="ideation", tools=TOOLS)
+    assert len(completions.calls) == 3
+
+
+def test_a_backend_without_a_tool_channel_is_never_sent_tools() -> None:
+    from foundry.proxy import ToolsUnsupported
+
+    local = RecordingTransport()  # like claude-cli: no tools_supported attribute
+    proxy = build_level_proxy(
+        preset_levels("local", cloud_backend="mock", cloud_models=TIER_MODELS),
+        cloud_transport=lambda _b: RecordingTransport(), local_transport=lambda _u: local,
+        signer=SIGNER)
+    with pytest.raises(ToolsUnsupported):
+        proxy.complete("node", "T2", "SOP", TOOL_HISTORY, purpose="ideation", tools=TOOLS)
+    assert local.requests == []
+
+
+def test_anthropic_tool_use_blocks_come_back_as_tool_calls() -> None:
+    from foundry.proxy import AnthropicTransport
+
+    sent: list[dict[str, Any]] = []
+
+    def create(**request: Any) -> Any:
+        sent.append(request)
+        return SimpleNamespace(
+            model=request["model"], _request_id="req-1", stop_reason="tool_use",
+            content=[SimpleNamespace(type="text", text="ok"),
+                     SimpleNamespace(type="tool_use", id="toolu_1", name="run",
+                                     input={"cmd": "ls"})],
+            usage=SimpleNamespace(input_tokens=1, output_tokens=1, cache_read_input_tokens=0,
+                                  cache_creation_input_tokens=0))
+
+    client = SimpleNamespace(messages=SimpleNamespace(create=create))
+    proxy = ModelProviderProxy(transport=AnthropicTransport(client=client), signer=SIGNER)
+    result = proxy.complete("node", "T1", "SOP", TOOL_HISTORY, purpose="ideation", tools=TOOLS)
+    assert result.tool_calls == ({"id": "toolu_1", "name": "run", "input": {"cmd": "ls"}},)
+    assert sent[0]["tools"] == list(TOOLS) and sent[0]["messages"] == TOOL_HISTORY
+    assert "thinking" not in sent[0]  # a tool turn can't replay thinking blocks
 
 
 # ---- wall-clock cap ---------------------------------------------------------------------

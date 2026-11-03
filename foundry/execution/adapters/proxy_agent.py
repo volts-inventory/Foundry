@@ -20,6 +20,12 @@ The adapter holds NO credentials and declares NO sandbox grant — the scrubbed
 cage is unchanged. ``complete_fn(messages, schema) -> (text, parsed)`` is the
 injected proxy seam (a closure over ``proxy.complete`` in production; a fake in
 tests), mirroring raw_react's ``complete_fn`` discipline.
+
+Opt-in native tool calls (``tool_complete_fn``, wired when FOUNDRY_NATIVE_TOOLS
+is set): the same actions are offered as tools (:data:`TOOLS`), one model turn
+may request several, and each runs through exactly the guards a JSON action
+does. A backend without a tool channel raises ``ToolsUnsupported`` and the
+adapter drops to JSON actions for the rest of its life.
 """
 
 from __future__ import annotations
@@ -30,10 +36,11 @@ import os
 import re
 import sys
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
+from foundry import progress
 from foundry.execution.adapter_contract import (
     AdapterResult,
     TaskPacket,
@@ -42,6 +49,7 @@ from foundry.execution.adapter_contract import (
 )
 from foundry.execution.adapters.claude_code import changed_files, walk_worktree
 from foundry.execution.sandbox import Sandbox
+from foundry.proxy.model_provider_proxy import ToolsUnsupported
 from foundry.schemas.gates import GateTriage
 from foundry.state.seq import Seq
 
@@ -53,8 +61,14 @@ if TYPE_CHECKING:
     AgentCompleteFn = Callable[
         [Sequence[dict[str, Any]], dict[str, Any]], tuple[str, dict[str, Any] | None]
     ]
+    # (messages, tools) -> (text, tool_calls); each call {"id", "name", "input"}
+    # (+ "error"). Raises ToolsUnsupported when the backend has no tool channel.
+    AgentToolCompleteFn = Callable[
+        [Sequence[dict[str, Any]], Sequence[dict[str, Any]]],
+        tuple[str, Sequence[dict[str, Any]]],
+    ]
 
-__all__ = ["ACTION_SCHEMA", "ProxyAgentAdapter"]
+__all__ = ["ACTION_SCHEMA", "TOOLS", "ProxyAgentAdapter"]
 
 _EPILOGUE = (
     "You are an agentic engineer working in a disposable sandbox worktree. Each "
@@ -89,6 +103,44 @@ ACTION_SCHEMA: dict[str, Any] = {
     "required": ["action"],
     "additionalProperties": False,
 }
+
+_MAX_CALLS_PER_TURN = 8
+
+_NATIVE_EPILOGUE = (
+    "You are an agentic engineer working in a disposable sandbox worktree. Work by "
+    "calling the provided tools: read_file, search, write_file (the full file), "
+    "delete_file, run (build/test inside the sandbox), and done when finished. You "
+    f"may call several tools in one turn (at most {_MAX_CALLS_PER_TURN}); they run "
+    "in order. Write real, complete code (no placeholders). Run the build/tests and "
+    "fix failures before calling done."
+)
+_NUDGE = "Call a tool to make progress, or call done when the task is finished."
+
+
+def _tool(name: str, description: str, required: tuple[str, ...], **props: Any) -> dict[str, Any]:
+    return {
+        "name": name,
+        "description": description,
+        "input_schema": {"type": "object", "properties": props, "required": list(required)},
+    }
+
+
+_STR = {"type": "string"}
+_LINE = {"type": "integer", "minimum": 1}
+# Anthropic tool shape; the OpenAI-compatible transports convert it.
+TOOLS: tuple[dict[str, Any], ...] = (
+    _tool("read_file", "Read a worktree file; start_line/end_line (1-based, inclusive) "
+          "are optional: omit them to read the whole file.", ("path",),
+          path=_STR, start_line=_LINE, end_line=_LINE),
+    _tool("search", "Regex search over the worktree, optionally under a relative dir.",
+          ("pattern",), pattern=_STR, path=_STR),
+    _tool("write_file", "Write the FULL content of a worktree file.", ("path", "content"),
+          path=_STR, content=_STR),
+    _tool("delete_file", "Delete a worktree file.", ("path",), path=_STR),
+    _tool("run", "Run a shell command (build/tests) inside the sandbox.", ("cmd",), cmd=_STR),
+    _tool("done", "Declare the task finished.", ("summary",), summary=_STR,
+          triage={"type": "array", "items": _STR}),
+)
 
 _OBS_CAP = 4_000  # chars of run/search output fed back per turn (context discipline)
 # Larger than _OBS_CAP so a typical source file fits in one read: a small read cap
@@ -132,10 +184,29 @@ class _Read:
 
 @dataclass(frozen=True)
 class _Kept:
-    idx: int
+    idx: int  # message index
     what: str
     size: int
     read: _Read | None
+    block: int = -1  # tool_result index within the message; -1 = the whole message
+
+    @property
+    def key(self) -> tuple[int, int]:
+        return (self.idx, self.block)
+
+
+@dataclass
+class _Loop:
+    worktree: Path
+    tree: str
+    # action fingerprint -> (consecutive-unchanged count, tree state after it ran)
+    repeats: dict[tuple[str, ...], tuple[int, str]] = field(default_factory=dict)
+    # path -> (thrash count since it last changed, its stamp at the last read)
+    reads: dict[str, tuple[int, tuple[int, int]]] = field(default_factory=dict)
+    verbatim: list[_Kept] = field(default_factory=list)
+    triage: list[str] = field(default_factory=list)
+    summary: str = ""
+    stopped: bool = False
 
 
 def _contained(worktree: Path, rel: str) -> Path:
@@ -168,8 +239,10 @@ class ProxyAgentAdapter:
         node_id: str = "proxy-agent",
         run_timeout_s: float = 300.0,
         self_reported_model: str | None = None,
+        tool_complete_fn: AgentToolCompleteFn | None = None,
     ) -> None:
         self._complete = complete_fn
+        self._tool_complete = tool_complete_fn
         self._run_id = run_id
         self._node_id = node_id
         self._run_timeout_s = run_timeout_s
@@ -185,110 +258,28 @@ class ProxyAgentAdapter:
     def _run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
         worktree = Path(sandbox.worktree)
         before = walk_worktree(worktree)
-        messages: list[dict[str, Any]] = [
-            {"role": "user", "content": assemble_prompt(packet, epilogue=_EPILOGUE)}
-        ]
-        summary = ""
-        triage_lines: list[str] = []
+        native = self._tool_complete is not None
+        messages = _opening(packet, native=native)
+        st = _Loop(worktree, _tree_state(worktree))
         turns = 0
-        verbatim: list[_Kept] = []
-        # action fingerprint -> (consecutive-unchanged count, tree state after it ran)
-        repeats: dict[tuple[str, ...], tuple[int, str]] = {}
-        # path -> (thrash count since it last changed, its stamp at the last read)
-        reads: dict[str, tuple[int, tuple[int, int]]] = {}
-        tree = _tree_state(worktree)
-        for _ in range(max(1, packet.turn_budget)):
-            turns += 1
-            text, parsed = self._complete(messages, ACTION_SCHEMA)
-            act = parsed if isinstance(parsed, dict) else _lenient_action(text)
-            messages.append({"role": "assistant", "content": text})
-            if act is None:
-                messages.append(
-                    {"role": "user", "content": "Reply with ONE valid action JSON only."}
-                )
+        while turns < max(1, packet.turn_budget) and not st.stopped:
+            turns += 1  # one per model call, however many tool calls it makes
+            if not native:
+                self._json_turn(messages, st, sandbox)
                 continue
-            action = act.get("action")
-            if action == "done":
-                summary = str(act.get("summary", ""))
-                triage_lines = [str(t) for t in act.get("triage", []) if str(t).strip()]
-                break
-            fp = _fingerprint(act)
-            count, tree_then = repeats.get(fp, (0, tree))
-            # Any tree change since the last identical action (a write, sed -i, a
-            # formatter, pip install) makes re-running it legitimate again.
-            count = count + 1 if tree_then == tree else 1
-            if count >= _REPEAT_STOP:
-                triage_lines.append(
-                    f"stopped early: identical action repeated {_REPEAT_STOP} times "
-                    f"({_summarize(act)}) — partial work recorded"
-                )
-                break
-            key = _file_key(worktree, str(act.get("path", ""))) if action == "read_file" else None
-            if key is not None:
-                rel, stamp = key
-                n, stamp_then = reads.get(rel, (0, stamp))
-                if stamp_then != stamp or n == 0:
-                    n = 1
-                elif _overlaps_verbatim(verbatim, rel, stamp, act):
-                    n += 1
-                if n >= _THRASH_STOP:
-                    triage_lines.append(
-                        f"stopped early: read {rel} {_THRASH_STOP} times without changing "
-                        "it — partial work recorded"
-                    )
-                    break
-                reads[rel] = (n, stamp)
-            read: _Read | None = None
             try:
-                if action == "read_file":
-                    observation, read = _read_file(worktree, str(act.get("path", "")), act)
-                else:
-                    observation = self._execute(act, sandbox, worktree)
-            except (ValueError, OSError) as exc:
-                observation = f"ERROR: {exc}"
-            tree = _tree_state(worktree)
-            repeats[fp] = (count, tree)
-            if count >= _REPEAT_WARN:
-                observation = (
-                    f"WARNING: you have issued this exact action {count} times in a row "
-                    "with no change to the worktree in between. Try something different "
-                    "or declare done.\n" + observation
-                )
-            if key is not None and reads[key[0]][0] >= _THRASH_WARN:
-                observation = (
-                    f"NOTE: you have read {key[0]} {reads[key[0]][0]} times without changing "
-                    "it — its content is above; make the edit or finish.\n" + observation
-                )
-            content = f"OBSERVATION:\n{observation}"
-            messages.append({"role": "user", "content": content})
-            verbatim.append(_Kept(len(messages) - 1, _summarize(act), len(content), read))
-            pinned = _pinned(verbatim, worktree)
-            tail = {k.idx for k in verbatim[-_OBS_KEEP:]}
-            pinned_size = sum(k.size for k in verbatim if k.idx in pinned - tail)
-            if len(verbatim) - len(pinned) > _OBS_MAX or pinned_size > _PIN_CAP:
-                # Elide in batches, not one per turn: every rewrite invalidates the
-                # prompt-prefix cache from that message on, so batching moves the
-                # prefix once every 4 turns (3 kept + 4 new).
-                # A placeholder is never rewritten again.
-                keep = set(tail)
-                budget = _PIN_CAP if pinned_size <= _PIN_CAP else _PIN_CAP // 2
-                for k in reversed(verbatim):
-                    if k.idx not in pinned or k.idx in keep:
-                        continue
-                    if k.size > budget:
-                        break  # oldest go first: no older read slips into the gap
-                    keep.add(k.idx)
-                    budget -= k.size
-                for k in verbatim:
-                    if k.idx not in keep:
-                        messages[k.idx] = {
-                            "role": "user",
-                            "content": f"OBSERVATION: [output of {k.what} elided — re-run or "
-                            "re-read if needed]",
-                        }
-                verbatim = [k for k in verbatim if k.idx in keep]
-        else:
-            triage_lines.append("turn budget exhausted before 'done' — partial work recorded")
+                self._native_turn(messages, st, sandbox)
+            except ToolsUnsupported as exc:
+                # Rest of the session on JSON actions; the backend never ran a turn.
+                progress.log(f"proxy-agent: native tool calls unavailable ({exc}); "
+                             "using JSON actions")
+                self._tool_complete = None
+                native = False
+                messages = _opening(packet, native=False)
+                st.verbatim = []
+                turns -= 1
+        if not st.stopped:
+            st.triage.append("turn budget exhausted before 'done' — partial work recorded")
 
         after = walk_worktree(worktree)
         authored, deleted, skipped_binary = changed_files(before, after)
@@ -299,7 +290,7 @@ class ProxyAgentAdapter:
             json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
         )
 
-        notes = triage_lines or [summary.strip()[:500] or "run completed with no summary"]
+        notes = st.triage or [st.summary.strip()[:500] or "run completed with no summary"]
         notes += [
             f"non-UTF-8 (binary) file skipped from snapshot slice: {p}" for p in skipped_binary
         ]
@@ -321,6 +312,128 @@ class ProxyAgentAdapter:
             turns_used=turns,
             snapshot_digest=sandbox.snapshot(),
         )
+
+    def _json_turn(self, messages: list[dict[str, Any]], st: _Loop, sandbox: Sandbox) -> None:
+        text, parsed = self._complete(messages, ACTION_SCHEMA)
+        act = parsed if isinstance(parsed, dict) else _lenient_action(text)
+        messages.append({"role": "assistant", "content": text})
+        if act is None:
+            messages.append({"role": "user", "content": "Reply with ONE valid action JSON only."})
+            return
+        out = self._act(act, st, sandbox)
+        if out is None:
+            return
+        observation, read = out
+        content = f"OBSERVATION:\n{observation}"
+        messages.append({"role": "user", "content": content})
+        st.verbatim.append(_Kept(len(messages) - 1, _summarize(act), len(content), read))
+        _mask(messages, st)
+
+    def _native_turn(self, messages: list[dict[str, Any]], st: _Loop, sandbox: Sandbox) -> None:
+        assert self._tool_complete is not None
+        text, calls = self._tool_complete(messages, TOOLS)
+        if not calls:
+            messages.append({"role": "assistant", "content": text or "(no reply)"})
+            messages.append({"role": "user", "content": _NUDGE})
+            return
+        blocks: list[dict[str, Any]] = [{"type": "text", "text": text}] if text.strip() else []
+        blocks += [
+            {"type": "tool_use", "id": c["id"], "name": c["name"], "input": c.get("input") or {}}
+            for c in calls
+        ]
+        messages.append({"role": "assistant", "content": blocks})
+        idx = len(messages)  # where this turn's tool results land
+        results: list[dict[str, Any]] = []
+        for i, call in enumerate(calls):
+            act: dict[str, Any] | None = None
+            read: _Read | None = None
+            if i >= _MAX_CALLS_PER_TURN:
+                observation = (
+                    f"ERROR: not run — at most {_MAX_CALLS_PER_TURN} tool calls per turn; "
+                    "call it again next turn if it is still needed"
+                )
+            elif call.get("error"):
+                observation = f"ERROR: {call['error']}"
+            else:
+                act = {**(call.get("input") or {}), "action": call["name"]}
+                out = self._act(act, st, sandbox)
+                if out is None:
+                    return  # done, or stopped early: no later turn reads the results
+                observation, read = out
+            results.append(
+                {"type": "tool_result", "tool_use_id": call["id"], "content": observation}
+            )
+            if act is not None:
+                st.verbatim.append(
+                    _Kept(idx, _summarize(act), len(observation), read, len(results) - 1)
+                )
+        messages.append({"role": "user", "content": results})
+        _mask(messages, st)
+
+    def _act(
+        self, act: dict[str, Any], st: _Loop, sandbox: Sandbox
+    ) -> tuple[str, _Read | None] | None:
+        """Run one action through every per-action guard; None ends the loop
+        (``done``, or an early stop recorded in ``st.triage``)."""
+        worktree = st.worktree
+        action = act.get("action")
+        if action == "done":
+            raw = act.get("triage")
+            items = raw if isinstance(raw, list) else [raw] if raw else []
+            st.summary = str(act.get("summary", ""))
+            st.triage = [str(t) for t in items if str(t).strip()]
+            st.stopped = True
+            return None
+        fp = _fingerprint(act)
+        count, tree_then = st.repeats.get(fp, (0, st.tree))
+        # Any tree change since the last identical action (a write, sed -i, a
+        # formatter, pip install) makes re-running it legitimate again.
+        count = count + 1 if tree_then == st.tree else 1
+        if count >= _REPEAT_STOP:
+            st.triage.append(
+                f"stopped early: identical action repeated {_REPEAT_STOP} times "
+                f"({_summarize(act)}) — partial work recorded"
+            )
+            st.stopped = True
+            return None
+        key = _file_key(worktree, str(act.get("path", ""))) if action == "read_file" else None
+        if key is not None:
+            rel, stamp = key
+            n, stamp_then = st.reads.get(rel, (0, stamp))
+            if stamp_then != stamp or n == 0:
+                n = 1
+            elif _overlaps_verbatim(st.verbatim, rel, stamp, act):
+                n += 1
+            if n >= _THRASH_STOP:
+                st.triage.append(
+                    f"stopped early: read {rel} {_THRASH_STOP} times without changing "
+                    "it — partial work recorded"
+                )
+                st.stopped = True
+                return None
+            st.reads[rel] = (n, stamp)
+        read: _Read | None = None
+        try:
+            if action == "read_file":
+                observation, read = _read_file(worktree, str(act.get("path", "")), act)
+            else:
+                observation = self._execute(act, sandbox, worktree)
+        except (ValueError, OSError) as exc:
+            observation = f"ERROR: {exc}"
+        st.tree = _tree_state(worktree)
+        st.repeats[fp] = (count, st.tree)
+        if count >= _REPEAT_WARN:
+            observation = (
+                f"WARNING: you have issued this exact action {count} times in a row "
+                "with no change to the worktree in between. Try something different "
+                "or declare done.\n" + observation
+            )
+        if key is not None and st.reads[key[0]][0] >= _THRASH_WARN:
+            observation = (
+                f"NOTE: you have read {key[0]} {st.reads[key[0]][0]} times without changing "
+                "it — its content is above; make the edit or finish.\n" + observation
+            )
+        return observation, read
 
     def _execute(self, act: dict[str, Any], sandbox: Sandbox, worktree: Path) -> str:
         action = act.get("action")
@@ -360,6 +473,45 @@ class ProxyAgentAdapter:
         return f"ERROR: unknown action {action!r}"
 
 
+def _opening(packet: TaskPacket, *, native: bool) -> list[dict[str, Any]]:
+    epilogue = _NATIVE_EPILOGUE if native else _EPILOGUE
+    return [{"role": "user", "content": assemble_prompt(packet, epilogue=epilogue)}]
+
+
+def _mask(messages: list[dict[str, Any]], st: _Loop) -> None:
+    """Observation masking: past the verbatim budget, elide old observations
+    except the tail and reads still showing a file's current content."""
+    pinned = _pinned(st.verbatim, st.worktree)
+    tail = {k.key for k in st.verbatim[-_OBS_KEEP:]}
+    pinned_size = sum(k.size for k in st.verbatim if k.key in pinned - tail)
+    if len(st.verbatim) - len(pinned) <= _OBS_MAX and pinned_size <= _PIN_CAP:
+        return
+    # Elide in batches, not one per turn: every rewrite invalidates the
+    # prompt-prefix cache from that message on, so batching moves the
+    # prefix once every 4 turns (3 kept + 4 new).
+    # A placeholder is never rewritten again.
+    keep = set(tail)
+    budget = _PIN_CAP if pinned_size <= _PIN_CAP else _PIN_CAP // 2
+    for k in reversed(st.verbatim):
+        if k.key not in pinned or k.key in keep:
+            continue
+        if k.size > budget:
+            break  # oldest go first: no older read slips into the gap
+        keep.add(k.key)
+        budget -= k.size
+    for k in st.verbatim:
+        if k.key in keep:
+            continue
+        note = f"[output of {k.what} elided — re-run or re-read if needed]"
+        if k.block < 0:
+            messages[k.idx] = {"role": "user", "content": f"OBSERVATION: {note}"}
+        else:
+            blocks = list(messages[k.idx]["content"])
+            blocks[k.block] = {**blocks[k.block], "content": note}
+            messages[k.idx] = {**messages[k.idx], "content": blocks}
+    st.verbatim = [k for k in st.verbatim if k.key in keep]
+
+
 def _summarize(act: dict[str, Any]) -> str:
     action = str(act.get("action"))
     if action == "run":
@@ -394,8 +546,11 @@ def _file_key(worktree: Path, rel: str) -> tuple[str, tuple[int, int]] | None:
 def _overlaps_verbatim(
     kept: list[_Kept], rel: str, stamp: tuple[int, int], act: dict[str, Any]
 ) -> bool:
-    lo = int(act.get("start_line") or 1)
-    hi = int(act.get("end_line") or sys.maxsize)
+    try:
+        lo = int(act.get("start_line") or 1)
+        hi = int(act.get("end_line") or sys.maxsize)
+    except (TypeError, ValueError):
+        return False  # _read_file reports the bad range
     return any(
         k.read.path == rel and k.read.stamp == stamp and k.read.lo <= hi and lo <= k.read.hi
         for k in kept
@@ -403,10 +558,10 @@ def _overlaps_verbatim(
     )
 
 
-def _pinned(kept: list[_Kept], worktree: Path) -> set[int]:
-    """Message indexes of reads still showing a file's current content and not
+def _pinned(kept: list[_Kept], worktree: Path) -> set[tuple[int, int]]:
+    """Keys of reads still showing a file's current content and not
     covered by a newer read of the same file — masking keeps these verbatim."""
-    pinned: set[int] = set()
+    pinned: set[tuple[int, int]] = set()
     stamps: dict[str, tuple[int, int] | None] = {}
     covered: dict[str, list[tuple[int, int]]] = {}
     for k in reversed(kept):
@@ -422,7 +577,7 @@ def _pinned(kept: list[_Kept], worktree: Path) -> set[int]:
         if any(lo <= r.lo and r.hi <= hi for lo, hi in ranges):
             continue
         ranges.append((r.lo, r.hi))
-        pinned.add(k.idx)
+        pinned.add(k.key)
     return pinned
 
 

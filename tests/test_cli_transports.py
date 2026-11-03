@@ -398,6 +398,43 @@ def test_openai_transport_requires_pinned_model() -> None:
         OpenAITransport(client=_openai_client()).send({"messages": []})
 
 
+def test_openai_native_tools_round_trip_and_rejection_is_remembered() -> None:
+    from types import SimpleNamespace
+
+    from foundry.proxy import ToolsUnsupported
+
+    tools = [{"name": "run", "description": "d", "input_schema": {"type": "object"}}]
+    client = _openai_client(model="gpt-5")
+    create = client.chat.completions.create
+
+    def with_calls(**params: Any) -> Any:
+        resp = create(**params)
+        call = SimpleNamespace(id="c1", function=SimpleNamespace(name="run",
+                                                                 arguments='{"cmd": "ls"}'))
+        resp.choices[0].message.tool_calls = [call]
+        return resp
+
+    client.chat.completions.create = with_calls
+    proxy = build_backend("openai", client=client)
+    result = proxy.complete("n", "T1", "SYS", [{"role": "user", "content": "hi"}],
+                            purpose="ideation", tools=tools)
+    assert result.tool_calls == ({"id": "c1", "name": "run", "input": {"cmd": "ls"}},)
+    assert create.calls[0]["tools"] == [{"type": "function", "function": {
+        "name": "run", "description": "d", "parameters": {"type": "object"}}}]
+
+    def reject(**params: Any) -> Any:
+        create.calls.append(params)
+        raise RuntimeError("Error code: 400 - 'tools' is not supported with this model")
+
+    client.chat.completions.create = reject
+    fresh = build_backend("openai", client=client)
+    for _ in range(2):
+        with pytest.raises(ToolsUnsupported):
+            fresh.complete("n", "T1", "SYS", [{"role": "user", "content": "hi"}],
+                           purpose="ideation", tools=tools)
+    assert len(create.calls) == 2  # rejected once (no retries), then refused unsent
+
+
 # --------------------------------------------------------------------------- #
 # backend selection                                                            #
 # --------------------------------------------------------------------------- #

@@ -14,8 +14,9 @@ from pathlib import Path
 from typing import Any
 
 from foundry.execution.adapter_contract import TaskPacket
-from foundry.execution.adapters.proxy_agent import ACTION_SCHEMA, ProxyAgentAdapter
+from foundry.execution.adapters.proxy_agent import ACTION_SCHEMA, TOOLS, ProxyAgentAdapter
 from foundry.execution.sandbox import Sandbox
+from foundry.proxy import ToolsUnsupported
 
 
 def make_packet(worktree: Path, turn_budget: int = 6) -> TaskPacket:
@@ -546,3 +547,177 @@ def test_masked_prefix_is_stable_across_turns(tmp_path: Path) -> None:
         rewrites += bool(changed)
     assert 0 < rewrites <= len(actions) // 4
     assert "Y = 0" in observations(seen[-1])[0]  # the unchanged file is never masked
+
+
+# ---- native tool calls (Phase 5, opt-in) -------------------------------------------
+
+
+def tool_turns(turns: list[Any], seen: list[list[dict[str, Any]]]):
+    """A tool_complete_fn: each scripted turn is a list of (name, input) calls, or
+    a str for a plain-text reply with no tool call."""
+    it = iter(turns)
+
+    def _tools(messages: Any, tools: Any) -> tuple[str, Any]:
+        assert tools is TOOLS
+        seen.append([dict(m) for m in messages])
+        turn = next(it)
+        if isinstance(turn, str):
+            return turn, ()
+        n = len(seen)
+        return "", [{"id": f"t{n}-{i}", "name": name, "input": args}
+                    for i, (name, args) in enumerate(turn)]
+
+    return _tools
+
+
+def no_json(messages: Any, schema: Any) -> tuple[str, Any]:
+    raise AssertionError("the JSON path must not run when native tools work")
+
+
+def results_of(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    last = messages[-1]
+    assert last["role"] == "user" and isinstance(last["content"], list)
+    return list(last["content"])
+
+
+def test_native_tool_calls_in_one_turn_run_in_order_as_tool_results(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    seen: list[list[dict[str, Any]]] = []
+    adapter = ProxyAgentAdapter(no_json, tool_complete_fn=tool_turns([
+        [("write_file", {"path": "a.txt", "content": "first\n"}),
+         ("read_file", {"path": "a.txt"}),
+         ("write_file", {"path": "a.txt", "content": "second\n"}),
+         ("run", {"cmd": "cat a.txt"})],
+        [("done", {"summary": "built", "triage": ["no docs"]})],
+    ], seen))
+    with Sandbox(src) as sb:
+        result = adapter.run(make_packet(sb.worktree), sb)
+        body = json.loads(sb.get_blob(result.diff_uri))
+    assert result.turns_used == 2  # one turn per model call, not per tool call
+    assert body["files"] == {"a.txt": "second\n"}
+    assert "Work by calling the provided tools" in seen[0][0]["content"]
+    assistant = seen[1][-2]
+    assert [b["id"] for b in assistant["content"]] == ["t1-0", "t1-1", "t1-2", "t1-3"]
+    res = results_of(seen[1])
+    assert [r["tool_use_id"] for r in res] == ["t1-0", "t1-1", "t1-2", "t1-3"]
+    assert res[0]["content"].startswith("wrote a.txt")
+    assert "first" in res[1]["content"]
+    assert res[3]["content"].startswith("exit 0") and "second" in res[3]["content"]
+    assert [t.explanation for t in result.triage] == ["no docs"]
+
+
+def test_native_containment_and_lint_apply_per_tool_call(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    seen: list[list[dict[str, Any]]] = []
+    adapter = ProxyAgentAdapter(no_json, tool_complete_fn=tool_turns([
+        [("write_file", {"path": "../evil.py", "content": "x"}),
+         ("write_file", {"path": "bad.py", "content": "x = 1\ndef f(:\n"}),
+         ("read_file", {"path": "/etc/passwd"}),
+         ("search", {"pattern": "x", "path": ".."})],
+        [("done", {"summary": "ok"})],
+    ], seen))
+    with Sandbox(src) as sb:
+        result = adapter.run(make_packet(sb.worktree), sb)
+        body = json.loads(sb.get_blob(result.diff_uri))
+    escaped, bad, abs_read, escaped_search = (r["content"] for r in results_of(seen[1]))
+    assert escaped.startswith("ERROR:") and "escapes the worktree" in escaped
+    assert "LIKELY SYNTAX ERROR line 2" in bad
+    assert "escapes the worktree" in abs_read and "escapes the worktree" in escaped_search
+    assert not (tmp_path / "evil.py").exists()
+    assert set(body["files"]) == {"bad.py"}
+
+
+def test_native_tool_calls_per_turn_are_capped(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    seen: list[list[dict[str, Any]]] = []
+    adapter = ProxyAgentAdapter(no_json, tool_complete_fn=tool_turns([
+        [("write_file", {"path": f"f{i}.txt", "content": "x"}) for i in range(10)],
+        [("done", {"summary": "ok"})],
+    ], seen))
+    with Sandbox(src) as sb:
+        result = adapter.run(make_packet(sb.worktree), sb)
+        body = json.loads(sb.get_blob(result.diff_uri))
+    assert set(body["files"]) == {f"f{i}.txt" for i in range(8)}
+    res = results_of(seen[1])
+    assert len(res) == 10  # every call is answered, the excess with an error
+    assert all(r["content"].startswith("ERROR: not run") for r in res[8:])
+    assert result.turns_used == 2
+
+
+def test_native_plain_text_reply_is_a_nudge_turn(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    seen: list[list[dict[str, Any]]] = []
+    adapter = ProxyAgentAdapter(no_json, tool_complete_fn=tool_turns([
+        "I think I should write a file.",
+        [("done", {"summary": "ok"})],
+    ], seen))
+    with Sandbox(src) as sb:
+        result = adapter.run(make_packet(sb.worktree), sb)
+    assert result.turns_used == 2
+    assert seen[1][-2] == {"role": "assistant", "content": "I think I should write a file."}
+    assert "Call a tool" in seen[1][-1]["content"]
+
+
+def test_native_repeat_detector_counts_each_tool_call(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    seen: list[list[dict[str, Any]]] = []
+    adapter = ProxyAgentAdapter(no_json, tool_complete_fn=tool_turns([
+        [("run", {"cmd": "true"})] * 5,
+    ], seen))
+    with Sandbox(src) as sb:
+        result = adapter.run(make_packet(sb.worktree), sb)
+    assert result.turns_used == 1
+    assert any("identical action repeated 5 times" in t.explanation for t in result.triage)
+
+
+def test_native_masking_elides_old_tool_results(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    seen: list[list[dict[str, Any]]] = []
+    turns: list[Any] = [[("run", {"cmd": f"echo a-{i}"}), ("run", {"cmd": f"echo b-{i}"})]
+                        for i in range(5)]
+    adapter = ProxyAgentAdapter(no_json, tool_complete_fn=tool_turns(
+        [*turns, [("done", {"summary": "ok"})]], seen))
+    with Sandbox(src) as sb:
+        adapter.run(make_packet(sb.worktree, turn_budget=8), sb)
+    contents = [r["content"] for m in seen[-1] if isinstance(m["content"], list)
+                for r in m["content"] if r.get("type") == "tool_result"]
+    assert len(contents) == 10
+    assert contents[0] == "[output of run 'echo a-0' elided — re-run or re-read if needed]"
+    assert all("elided" not in c for c in contents[-3:])
+
+
+def test_native_tools_unsupported_falls_back_to_json_for_the_session(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    tool_calls = 0
+
+    def _tools(messages: Any, tools: Any) -> tuple[str, Any]:
+        nonlocal tool_calls
+        tool_calls += 1
+        raise ToolsUnsupported("no tool channel")
+
+    prompts: list[str] = []
+    actions = iter([{"action": "write_file", "path": "m.py", "content": "X = 1\n"},
+                    {"action": "done", "summary": "ok"}] * 2)
+
+    def _complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
+        prompts.append(messages[0]["content"])
+        act = next(actions)
+        return json.dumps(act), act
+
+    adapter = ProxyAgentAdapter(_complete, tool_complete_fn=_tools)
+    with Sandbox(src) as sb:
+        result = adapter.run(make_packet(sb.worktree), sb)
+        body = json.loads(sb.get_blob(result.diff_uri))
+    assert body["files"] == {"m.py": "X = 1\n"}
+    assert result.turns_used == 2  # the rejected call is not a turn
+    assert "EXACTLY ONE action as JSON" in prompts[0]
+    with Sandbox(src) as sb:
+        adapter.run(make_packet(sb.worktree), sb)
+    assert tool_calls == 1  # remembered: the next ticket goes straight to JSON

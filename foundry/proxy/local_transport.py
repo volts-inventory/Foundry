@@ -30,12 +30,14 @@ from foundry.proxy.cli_transports import (
     TransportError,
     _as_dict,
     _as_int,
-    _message_pairs,
+    _chat_messages,
+    _chat_tool_calls,
+    _chat_tools,
+    _is_tools_rejection,
     _schema_of,
-    _system_text,
     _usage,
 )
-from foundry.proxy.model_provider_proxy import ProviderResponse, _ClientCache
+from foundry.proxy.model_provider_proxy import ProviderResponse, ToolsUnsupported, _ClientCache
 
 __all__ = [
     "DEFAULT_LOCAL_MODEL",
@@ -101,6 +103,9 @@ class LocalOpenAITransport:
         # Same for `reasoning_effort` ("none" turns thinking off on Ollama; some
         # servers, e.g. vLLM, accept only low/medium/high and reject the request).
         self.reasoning_supported: bool | None = None
+        # Same for native `tools` (Ollama rejects them for a model whose template
+        # has no tool support); False makes the proxy raise ToolsUnsupported.
+        self.tools_supported: bool | None = None
 
         def _build() -> Any:
             try:
@@ -115,12 +120,7 @@ class LocalOpenAITransport:
         model = request.get("model")
         if not isinstance(model, str) or not model:
             raise TransportError("local transport requires a pinned model id on the request")
-        messages: list[dict[str, str]] = []
-        sys_text = _system_text(request)
-        if sys_text:
-            messages.append({"role": "system", "content": sys_text})
-        for role, text in _message_pairs(request):
-            messages.append({"role": role, "content": text})
+        messages = _chat_messages(request)
 
         # Thinking models (Qwen3.x) reason by default, multiplying output tokens
         # ~5x on short agent turns; Ollama's /v1 ignores `think` and honours this.
@@ -131,6 +131,17 @@ class LocalOpenAITransport:
             params["max_tokens"] = max_tokens
         if "temperature" in request:
             params["temperature"] = request["temperature"]
+        if "tools" in request:
+            try:
+                response = self._call({**params, "tools": _chat_tools(request)})
+            except Exception as exc:
+                if self.tools_supported is not None or not _is_tools_rejection(exc):
+                    raise
+                self.tools_supported = False
+                progress.log(f"local server rejected tools ({exc}); using JSON actions")
+                raise ToolsUnsupported(f"local server rejected tools: {exc}") from exc
+            self.tools_supported = True
+            return response
         schema = _schema_of(request)
         if schema is None:
             return self._call(params)
@@ -179,6 +190,7 @@ class LocalOpenAITransport:
                 output_tokens=_as_int(getattr(usage, "completion_tokens", 0)) if usage else 0,
             ),
             stop_reason=str(getattr(choice, "finish_reason", "") or "stop") if choice else "stop",
+            tool_calls=_chat_tool_calls(choice.message) if choice is not None else (),
         )
 
 

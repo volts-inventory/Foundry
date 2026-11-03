@@ -59,6 +59,7 @@ from foundry.proxy.model_provider_proxy import (
     ModelProviderProxy,
     ProviderResponse,
     ProviderTransport,
+    ToolsUnsupported,
     _ClientCache,
 )
 
@@ -126,6 +127,92 @@ def _message_pairs(request: dict[str, Any]) -> list[tuple[str, str]]:
             text = str(content)
         pairs.append((role, text))
     return pairs
+
+
+def _chat_messages(request: dict[str, Any]) -> list[dict[str, Any]]:
+    """The request as OpenAI chat messages: the system block, then each message.
+    Anthropic-shape ``tool_use`` blocks become an assistant's ``tool_calls`` and
+    ``tool_result`` blocks become ``tool`` messages; other content flattens to
+    text exactly as :func:`_message_pairs` does."""
+    out: list[dict[str, Any]] = []
+    sys_text = _system_text(request)
+    if sys_text:
+        out.append({"role": "system", "content": sys_text})
+    for msg in request.get("messages", []):
+        if not isinstance(msg, dict):
+            continue
+        role = str(msg.get("role", "user"))
+        content = msg.get("content", "")
+        if not isinstance(content, list):
+            out.append({"role": role, "content": content if isinstance(content, str)
+                        else str(content)})
+            continue
+        texts: list[str] = []
+        calls: list[dict[str, Any]] = []
+        results = False
+        for c in content:
+            kind = c.get("type") if isinstance(c, dict) else None
+            if kind == "tool_use":
+                calls.append({"id": str(c.get("id", "")), "type": "function", "function": {
+                    "name": str(c.get("name", "")),
+                    "arguments": json.dumps(c.get("input") or {}),
+                }})
+            elif kind == "tool_result":
+                results = True
+                out.append({"role": "tool", "tool_call_id": str(c.get("tool_use_id", "")),
+                            "content": str(c.get("content", ""))})
+            else:
+                texts.append(str(c.get("text", "")) if isinstance(c, dict) else str(c))
+        if calls:
+            out.append({"role": role, "content": "\n".join(texts) or None, "tool_calls": calls})
+        elif texts or not results:
+            out.append({"role": role, "content": "\n".join(texts)})
+    return out
+
+
+def _chat_tools(request: dict[str, Any]) -> list[dict[str, Any]]:
+    """Anthropic-shape tool specs as OpenAI ``function`` tools."""
+    return [
+        {"type": "function", "function": {
+            "name": str(t.get("name", "")),
+            "description": str(t.get("description", "")),
+            "parameters": t.get("input_schema") or {"type": "object", "properties": {}},
+        }}
+        for t in request.get("tools") or ()
+        if isinstance(t, dict)
+    ]
+
+
+def _chat_tool_calls(message: Any) -> tuple[dict[str, Any], ...]:
+    """An OpenAI chat message's ``tool_calls`` as ``{"id", "name", "input"}``,
+    with an ``"error"`` when the arguments are not a JSON object."""
+    calls: list[dict[str, Any]] = []
+    for i, tc in enumerate(getattr(message, "tool_calls", None) or ()):
+        fn = getattr(tc, "function", None)
+        name = str(getattr(fn, "name", "") or "")
+        raw = getattr(fn, "arguments", None)
+        call: dict[str, Any] = {"id": str(getattr(tc, "id", "") or f"tool_call_{i}"), "name": name}
+        if isinstance(raw, dict):
+            parsed: Any = raw
+        else:
+            try:
+                parsed = json.loads(raw) if isinstance(raw, str) and raw.strip() else {}
+            except ValueError:
+                parsed = None
+        if isinstance(parsed, dict):
+            call["input"] = parsed
+        else:
+            call["input"] = {}
+            call["error"] = f"the arguments for {name} were not a JSON object"
+        calls.append(call)
+    return tuple(calls)
+
+
+def _is_tools_rejection(exc: BaseException) -> bool:
+    status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+    if status in (401, 403, 429, 529):
+        return False
+    return "tool" in str(exc).lower()
 
 
 def _schema_of(request: dict[str, Any]) -> dict[str, Any] | None:
@@ -607,6 +694,10 @@ class OpenAITransport:
     """
 
     def __init__(self, client: Any | None = None) -> None:
+        # None = untested, True = tools accepted, False = rejected (JSON actions
+        # from then on; the proxy raises ToolsUnsupported without sending).
+        self.tools_supported: bool | None = None
+
         def _build() -> Any:
             try:
                 import openai
@@ -626,14 +717,7 @@ class OpenAITransport:
         if not isinstance(model, str) or not model:
             raise TransportError("openai transport requires a pinned model id on the request")
 
-        messages: list[dict[str, str]] = []
-        sys_text = _system_text(request)
-        if sys_text:
-            messages.append({"role": "system", "content": sys_text})
-        for role, text in _message_pairs(request):
-            messages.append({"role": role, "content": text})
-
-        params: dict[str, Any] = {"model": model, "messages": messages}
+        params: dict[str, Any] = {"model": model, "messages": _chat_messages(request)}
         max_tokens = request.get("max_tokens")
         if isinstance(max_tokens, int) and max_tokens > 0:
             params["max_completion_tokens"] = max_tokens  # reasoning-model-safe form
@@ -648,8 +732,18 @@ class OpenAITransport:
                 "type": "json_schema",
                 "json_schema": {"name": "verdict", "schema": schema, "strict": True},
             }
-
-        response = self._cache.run(lambda c: c.chat.completions.create(**params))
+        if "tools" in request:
+            params["tools"] = _chat_tools(request)
+            try:
+                response = self._cache.run(lambda c: c.chat.completions.create(**params))
+            except Exception as exc:
+                if self.tools_supported is not None or not _is_tools_rejection(exc):
+                    raise
+                self.tools_supported = False
+                raise ToolsUnsupported(f"openai rejected tools: {exc}") from exc
+            self.tools_supported = True
+        else:
+            response = self._cache.run(lambda c: c.chat.completions.create(**params))
         choice = response.choices[0] if getattr(response, "choices", None) else None
         text = (getattr(choice.message, "content", "") or "") if choice is not None else ""
         usage = getattr(response, "usage", None)
@@ -664,6 +758,7 @@ class OpenAITransport:
                 cache_read=_as_int(getattr(details, "cached_tokens", 0)) if details else 0,
             ),
             stop_reason=str(getattr(choice, "finish_reason", "") or "stop") if choice else "stop",
+            tool_calls=_chat_tool_calls(choice.message) if choice is not None else (),
         )
 
 

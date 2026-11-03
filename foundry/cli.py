@@ -218,6 +218,10 @@ _PROXY_AGENT_SOP = (
     "is exactly one JSON action, as the user message specifies. Touch only what the "
     "task needs."
 )
+_PROXY_AGENT_TOOLS_SOP = (
+    "You are a senior software engineer working step by step in a sandbox. Work by "
+    "calling the tools the user message describes. Touch only what the task needs."
+)
 
 
 def make_coding_adapter(
@@ -284,7 +288,23 @@ def make_coding_adapter(
             )
             return result.text or "", result.parsed
 
-        return ProxyAgentAdapter(complete_fn=_agent_complete, run_id=thread_id)
+        def _agent_tools(messages: Any, tools: Any) -> tuple[str, Any]:
+            result = proxy.complete(
+                "junior_engineer",
+                current_packet_tier() or "T1",
+                _PROXY_AGENT_TOOLS_SOP,
+                list(messages),
+                purpose="ideation",
+                tools=tools,
+            )
+            return result.text or "", result.tool_calls
+
+        # Opt-in (Phase 5): the actions as native tool calls; a backend without a
+        # tool channel (claude-cli, codex) falls back to JSON actions on its own.
+        native = os.environ.get("FOUNDRY_NATIVE_TOOLS", "").strip().lower() not in (
+            "", "0", "false", "no")
+        return ProxyAgentAdapter(complete_fn=_agent_complete, run_id=thread_id,
+                                 tool_complete_fn=_agent_tools if native else None)
     raise ValueError(f"unknown adapter {name!r}; choose one of {', '.join(ADAPTERS)}")
 
 

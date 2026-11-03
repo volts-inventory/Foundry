@@ -351,6 +351,12 @@ class VerdictChannelError(RuntimeError):
     """The structured verdict channel returned something outside the grammar."""
 
 
+class ToolsUnsupported(RuntimeError):
+    """The tier's backend has no native tool-call channel (or rejected ``tools``).
+    Raised without retry so the caller falls back to JSON actions; a transport
+    that rejects ``tools`` remembers it (``tools_supported = False``)."""
+
+
 class StructuredOutputError(RuntimeError):
     """A schema (structured-output) completion didn't yield a parseable JSON
     object. SDK structured-outputs are grammar-constrained, but the CLI backends
@@ -398,6 +404,9 @@ class ProviderResponse:
     text: str
     usage: dict[str, int]
     stop_reason: str
+    # Native tool calls, in order: {"id", "name", "input": dict} and, when the
+    # backend's arguments were not a JSON object, an "error" string.
+    tool_calls: tuple[dict[str, Any], ...] = ()
 
 
 class ProviderTransport(Protocol):
@@ -414,6 +423,8 @@ class AnthropicTransport:
     or an API key, so tests run entirely on a fake transport.
     """
 
+    tools_supported: bool | None = True
+
     def __init__(self, client: Any | None = None) -> None:
         def _build() -> Any:
             import anthropic
@@ -428,6 +439,11 @@ class AnthropicTransport:
         text = next(
             (block.text for block in response.content if block.type == "text"), ""
         )
+        tool_calls = tuple(
+            {"id": block.id, "name": block.name, "input": dict(block.input or {})}
+            for block in response.content
+            if block.type == "tool_use"
+        )
         usage = response.usage
         return ProviderResponse(
             served_model=response.model,
@@ -440,6 +456,7 @@ class AnthropicTransport:
                 "cache_creation_input_tokens": usage.cache_creation_input_tokens or 0,
             },
             stop_reason=response.stop_reason or "",
+            tool_calls=tool_calls,
         )
 
 
@@ -455,6 +472,7 @@ class CompletionResult:
     usage: dict[str, int]  # surfaced on EVERY call for the budget ledger
     stop_reason: str
     manifest_record: dict[str, Any]
+    tool_calls: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -851,9 +869,14 @@ class ModelProviderProxy:
         *,
         purpose: Purpose,
         schema: dict[str, Any] | None = None,
+        tools: Sequence[dict[str, Any]] | None = None,
     ) -> CompletionResult:
         """One credentialed model call: build → send (bounded retry) →
-        observe lineage → record manifest → return text/JSON + usage."""
+        observe lineage → record manifest → return text/JSON + usage.
+
+        ``tools`` (Anthropic shape: name/description/input_schema) offers native
+        tool calls, returned on ``CompletionResult.tool_calls``; a backend without
+        a tool channel raises :class:`ToolsUnsupported`."""
         if purpose not in _PURPOSES:
             raise ValueError(f"unknown purpose: {purpose!r}")
         if tier not in self._tier_models:
@@ -862,7 +885,7 @@ class ModelProviderProxy:
             )
         requested_model = self._tier_models[tier]
         request, sampling, sampling_note = self._build_request(
-            requested_model, system_sop, messages, purpose, schema
+            requested_model, system_sop, messages, purpose, schema, tools
         )
 
         label = f"model call: {node_id} ({tier}, {purpose})"
@@ -902,6 +925,8 @@ class ModelProviderProxy:
             record["drift_kind"] = drift_kind
         if sampling_note:
             record["sampling_note"] = sampling_note
+        if tools is not None:
+            record["tool_calls"] = len(response.tool_calls)
         if self._manifest.maxlen is not None and len(self._manifest) == self._manifest.maxlen:
             self._manifest_dropped += 1     # this append rolls the oldest record off
         self._manifest.append(record)
@@ -935,6 +960,7 @@ class ModelProviderProxy:
             usage=dict(response.usage),
             stop_reason=response.stop_reason,
             manifest_record=record,
+            tool_calls=response.tool_calls,
         )
 
     # ---- trusted judgment path ---------------------------------------------------
@@ -1050,6 +1076,7 @@ class ModelProviderProxy:
         messages: Sequence[dict[str, Any]],
         purpose: Purpose,
         schema: dict[str, Any] | None,
+        tools: Sequence[dict[str, Any]] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any], str | None]:
         """Returns (request, sampling-record, substitution-note).
 
@@ -1093,12 +1120,16 @@ class ModelProviderProxy:
                 request["temperature"] = 0
                 sampling = {"temperature": 0}
         else:  # ideation — exploration helps (arch §8)
-            if takes_effort:
+            # Not with tools: a thinking turn that calls a tool must be replayed
+            # with its thinking blocks, which the tool-result history doesn't carry.
+            if takes_effort and tools is None:
                 request["thinking"] = {"type": "adaptive"}
                 sampling = {"thinking": "adaptive"}
 
         if schema is not None:
             output_config["format"] = {"type": "json_schema", "schema": schema}
+        if tools is not None:
+            request["tools"] = [dict(t) for t in tools]
         if output_config:
             request["output_config"] = output_config
         return request, sampling, note
@@ -1117,6 +1148,7 @@ class ModelProviderProxy:
             return None
         try:
             raw = json.loads(self._cache_path(request, schema).read_text(encoding="utf-8"))
+            raw["tool_calls"] = tuple(raw.get("tool_calls") or ())
             response = ProviderResponse(**raw)
         except (OSError, ValueError, TypeError):
             return None
@@ -1156,6 +1188,8 @@ class ModelProviderProxy:
         if meter is not None:
             meter.check()
         transport = self._tier_transports.get(tier or "", self._transport)
+        if "tools" in request and getattr(transport, "tools_supported", False) is False:
+            raise ToolsUnsupported(f"{type(transport).__name__} has no native tool calls")
         local = tier in self._local_tiers
         attempt = 0          # real transport failures (bounded, fail-closed)
         rl_attempt = 0       # provider throttling (separate, more generous budget)
@@ -1169,6 +1203,8 @@ class ModelProviderProxy:
                     _extract_json_object(response.text) if schema is not None else None
                 )
                 return response, parsed
+            except ToolsUnsupported:
+                raise
             except Exception as exc:
                 is_rl, retry_after = _classify_rate_limit(exc)
                 if is_rl:

@@ -46,7 +46,6 @@ is heavier; the seam and the discriminator logic are real.
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import sys
 import tempfile
@@ -58,6 +57,7 @@ from foundry.schemas.base import FrozenModel
 from foundry.schemas.gates import VerdictClass
 
 from .sandbox import ground_untrusted
+from .test import _ISOLATED_PYTEST_BOOTSTRAP, ADD_BUILD_SITE, BUILD_SITE_ENV
 
 # Gate-owned paths outside the workdir the confined run sees (path, writable).
 Binds = tuple[tuple[Path, bool], ...]
@@ -161,8 +161,12 @@ class TestSuiteDiscriminator:
     verdict_class: VerdictClass = VerdictClass.EXECUTION_DETERMINISTIC
     mutant_rotation_id: int = 0
     kill_bar: float = default_kill_bar
+    # The Test gate's isolating bootstrap, not `-m pytest`: a build venv's packages
+    # join sys.path only after pytest is imported, so a declared `pytest` that always
+    # exits non-zero can't "kill" every mutant.
     cmd: tuple[str, ...] = field(
-        default_factory=lambda: (sys.executable, "-m", "pytest", "-q", "--tb=no")
+        default_factory=lambda: (sys.executable, "-c", _ISOLATED_PYTEST_BOOTSTRAP, "-q",
+                                 "--tb=no")
     )
     timeout_s: float = 600.0
 
@@ -171,7 +175,7 @@ class TestSuiteDiscriminator:
     def _run_suite(self, workdir: Path, site: str | None = None, binds: Binds = ()) -> int:
         """Run the agent suite under the pinned harness; return the pytest rc."""
         # The agent's suite is untrusted code: same confinement as the Test gate.
-        env = {"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", **({"PYTHONPATH": site} if site else {})}
+        env = {"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", **({BUILD_SITE_ENV: site} if site else {})}
         rc, _out, _err = ground_untrusted(
             self.cmd, workdir, extra_env=env, binds=binds, timeout_s=self.timeout_s,
         )
@@ -300,8 +304,9 @@ def _check_invariant(
         "expected": inv.expected,
     }
     script = (
-        "import importlib, json, sys\n"
-        f"P = json.loads({json.dumps(json.dumps(payload))})\n"
+        "import importlib, json, os, sys\n"
+        + ADD_BUILD_SITE
+        + f"P = json.loads({json.dumps(json.dumps(payload))})\n"
         "m = importlib.import_module(P['module'])\n"
         "fn = getattr(m, P['call'])\n"
         "got = fn(*P['args'])\n"
@@ -310,8 +315,8 @@ def _check_invariant(
     rc, _out, err = ground_untrusted(
         (sys.executable, "-c", script),
         workdir,
-        extra_env={"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
-                   "PYTHONPATH": os.pathsep.join(p for p in (str(workdir), site) if p)},
+        extra_env={"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "PYTHONPATH": str(workdir),
+                   **({BUILD_SITE_ENV: site} if site else {})},
         binds=binds,
         timeout_s=timeout_s,
     )

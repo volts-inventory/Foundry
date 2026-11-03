@@ -13,6 +13,7 @@ import importlib.util
 import json
 import site
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -20,14 +21,18 @@ from typing import Any
 import pytest
 
 import foundry.gates.pydeps as pydeps
+import foundry.python_env as python_env
 from foundry.agents._common import emit_artifact
 from foundry.gates.attestation import ZoneBSigner
 from foundry.gates.build import BuildGate
+from foundry.gates.discriminator import HeldOutMutant, TestSuiteDiscriminator
 from foundry.gates.profiles import PROFILES, stack_profile
 from foundry.gates.pydeps import (
     SCAFFOLD_HEADER,
+    PythonEnvCache,
     declared_requirements,
     install_failure_is_project,
+    manifest_digest,
     python_build_env,
 )
 from foundry.gates.runner import TwoZoneGateRunner
@@ -136,7 +141,17 @@ def test_install_failure_classification() -> None:
     ) + no_match
     assert not install_failure_is_project(offline)
     assert not install_failure_is_project("ERROR: HTTP error 503 while getting ...\n")
-    assert not install_failure_is_project("Failed to build lxml\n")
+    # A declared sdist that does not build here: the project must pick another one.
+    sdist = (
+        "  error: subprocess-exited-with-error\n"
+        "  src/lxml/etree.c:1:10: fatal error: libxml/xmlversion.h: No such file\n"
+        "  error: command 'gcc' failed with exit code 1\n"
+        "  ERROR: Failed building wheel for lxml\nFailed to build lxml\n"
+    )
+    assert install_failure_is_project(sdist)
+    assert install_failure_is_project("Failed to build lxml\n")
+    # ...unless fetching its build dependencies hit the network: infra still wins.
+    assert not install_failure_is_project(sdist + "ReadTimeoutError: read timed out\n")
 
 
 # ---- the gates over a per-build venv ---------------------------------------------
@@ -164,6 +179,9 @@ def _state(files: dict[str, str], criteria: tuple[AcceptanceCriterion, ...] = ()
 
 
 class _Rt:
+    def __init__(self) -> None:
+        self.python_envs = PythonEnvCache()
+
     def seq(self, config: Any, node: str, key: str) -> Seq:
         return _seq(node)
 
@@ -176,13 +194,14 @@ _APP = {
 }
 
 
-def _gates(tmp_path: Path, files: dict[str, str]) -> dict[str, GateStatus]:
+def _gates(tmp_path: Path, files: dict[str, str], rt: _Rt | None = None) -> dict[str, Any]:
     state, resolve, blob = _state(files)
-    out = run_build_test_gates(
-        state, {"configurable": {}}, rt=_Rt(), runner=_runner(),  # type: ignore[arg-type]
-        resolve=resolve, resolve_blob=blob, workdir=tmp_path / "wd",
-        profile=PROFILES["python-app"],
-    )
+    with tempfile.TemporaryDirectory(dir=tmp_path) as wd:
+        out = run_build_test_gates(
+            state, {"configurable": {}}, rt=rt or _Rt(),  # type: ignore[arg-type]
+            runner=_runner(), resolve=resolve, resolve_blob=blob, workdir=Path(wd),
+            profile=PROFILES["python-app"],
+        )
     return {g.name: g for g in out["gates"]}
 
 
@@ -312,3 +331,142 @@ def test_bdd_harness_runs_scenarios_against_installed_deps(
     assert gate.decide(obs) is GateStatus.PASS
     _foundry_has_no("tinydep")
     assert sys.prefix not in env.python
+
+
+# ---- the harness's sys.path order --------------------------------------------------
+
+
+def test_a_declared_module_cannot_replace_the_stdlib_but_overrides_foundrys_copy(
+    tmp_path: Path, tinydep: str, allow_install: None
+) -> None:
+    pytest.importorskip("six")  # in Foundry's environment, so the override is observable
+    host_six = im.version("six")
+    # `colorsys`: a stdlib module neither pytest nor the bootstrap imports first.
+    stdlib = _wheel(tmp_path / "wheels", "evil-stdlib",
+                    {"colorsys/__init__.py": "rgb_to_hsv = None\n"})
+    six = _wheel(tmp_path / "wheels", "six", {"six.py": "MARK = 'project'\n"}, version="99.0")
+    test = (
+        "def test_paths():\n"
+        "    import colorsys, six\n"
+        "    assert colorsys.rgb_to_hsv(1.0, 0.0, 0.0) == (0.0, 1.0, 1.0)\n"
+        "    assert six.MARK == 'project'\n"
+    )
+    reqs = f"{tinydep}\nevil-stdlib @ {stdlib.as_uri()}\nsix @ {six.as_uri()}\n"
+    gates = _gates(tmp_path, {**_APP, "test_app.py": test, "requirements.txt": reqs})
+    assert gates["test"].status is GateStatus.PASS, gates["test"].findings
+    assert im.version("six") == host_six  # Foundry's copy untouched
+
+
+def test_a_declared_pytest_cannot_kill_the_discriminators_mutants(
+    tmp_path: Path, allow_install: None
+) -> None:
+    # A `pytest` that always exits 1 would "kill" every mutant if it ran the suite.
+    evil = _wheel(tmp_path / "wheels", "evil-pytest", {
+        "pytest/__init__.py": "def console_main():\n    return 1\n",
+        "pytest/__main__.py": "raise SystemExit(1)\n",
+    })
+    wd = _write(tmp_path / "wd", {
+        "calc.py": "def add(a, b):\n    return a + b\n",
+        "test_calc.py": "def test_vacuous():\n    assert True\n",
+        "requirements.txt": f"evil-pytest @ {evil.as_uri()}\n",
+    })
+    mutant = HeldOutMutant(mutant_id="m1", target="calc.py", find="a + b", replace="a - b")
+    with python_build_env(wd, python=True) as env:
+        assert env is not None
+        assert env.install(wd, timeout_s=120)[0] == 0
+        report = TestSuiteDiscriminator(mutants=[mutant]).evaluate(
+            wd, site=env.site, binds=env.binds
+        )
+    assert report.survived == ("m1",), report.findings  # the vacuous suite killed nothing
+
+
+# ---- seeding pip into the venv ---------------------------------------------------
+
+
+def test_venv_reads_foundrys_pip_without_a_bundled_wheel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "empty").mkdir()
+    monkeypatch.setattr(python_env, "_bundled_pip_dir", lambda: tmp_path / "empty")
+    monkeypatch.setattr(python_env, "_host_has_pip", lambda: True)
+    python_env.build_python_env(tmp_path / "venv")
+    assert not (python_env.site_packages(tmp_path / "venv") / "pip").exists()
+
+
+def test_venv_falls_back_to_ensurepip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Debian/Ubuntu: ensurepip finds its wheels elsewhere, the bundled dir is empty.
+    (tmp_path / "empty").mkdir()
+    monkeypatch.setattr(python_env, "_bundled_pip_dir", lambda: tmp_path / "empty")
+    monkeypatch.setattr(python_env, "_host_has_pip", lambda: False)
+    python_env.build_python_env(tmp_path / "venv")
+    assert (python_env.site_packages(tmp_path / "venv") / "pip").is_dir()
+
+
+def test_no_pip_source_is_a_clear_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(python_env, "_bundled_pip_dir", lambda: None)  # no ensurepip
+    monkeypatch.setattr(python_env, "_host_has_pip", lambda: False)
+    with pytest.raises(RuntimeError, match="no pip for the project's Python environment"):
+        python_env.build_python_env(tmp_path / "venv")
+
+
+# ---- one install per manifest within a run ---------------------------------------
+
+
+@pytest.fixture()
+def built(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    seen: list[Path] = []
+    real = pydeps.build_python_env
+
+    def _spy(dest: Path) -> None:
+        seen.append(dest)
+        real(dest)
+
+    monkeypatch.setattr(pydeps, "build_python_env", _spy)
+    return seen
+
+
+# `pytest>=1` installs offline ("already satisfied" from Foundry's copy) and is no
+# exact pin, so it takes the install path.
+_CACHEABLE = {"app.py": "VALUE = 42\n", "test_app.py": _APP["test_app.py"],
+              "smoke.py": "import app\n", "requirements.txt": "pytest>=1\n"}
+
+
+def test_the_run_reuses_one_install_per_manifest(
+    tmp_path: Path, built: list[Path], allow_install: None
+) -> None:
+    rt = _Rt()
+    for _ in range(2):
+        gates = _gates(tmp_path, _CACHEABLE, rt)
+        assert all(g.status is GateStatus.PASS for g in gates.values()), gates
+    assert len(built) == 1
+    changed = {**_CACHEABLE, "requirements.txt": "pytest>=2\n"}
+    assert _gates(tmp_path, changed, rt)["build"].status is GateStatus.PASS
+    assert len(built) == 2 and built[0] != built[1]
+    _gates(tmp_path, _CACHEABLE, _Rt())  # another run never shares
+    assert len(built) == 3
+    root = built[0].parent.parent
+    assert root.exists()
+    rt.python_envs.close()
+    assert not root.exists()
+
+
+def test_a_failed_install_is_retried_on_the_next_check(
+    tmp_path: Path, built: list[Path], allow_install: None
+) -> None:
+    rt = _Rt()
+    files = {**_APP, "requirements.txt": "--no-index\nfoundry-no-such-package-xyz\n"}
+    for _ in range(2):
+        assert _gates(tmp_path, files, rt)["build"].status is GateStatus.FAIL
+    assert len(built) == 2
+
+
+def test_local_content_is_never_reused(
+    tmp_path: Path, tinydep: str, built: list[Path], allow_install: None
+) -> None:
+    rt = _Rt()
+    files = {**_APP, "requirements.txt": f"{tinydep}\n"}
+    for _ in range(2):
+        assert _gates(tmp_path, files, rt)["test"].status is GateStatus.PASS
+    assert len(built) == 2
+    wd = _write(tmp_path / "m", {"requirements.txt": "./vendor/pkg\n"})
+    assert manifest_digest(wd, declared_requirements(wd)) is None

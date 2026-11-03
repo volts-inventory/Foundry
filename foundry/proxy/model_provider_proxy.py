@@ -155,12 +155,13 @@ VERDICT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
-ADVISORY_PREFIX = "[advisory: no failing check or reproduction cited] "
+ADVISORY_PREFIX = "[advisory: no failing check or differing reproduction] "
 # Strict grammars make the model fill every field, so "no evidence" often arrives
 # as a placeholder rather than "". Only for the citing fields: an expected/actual of
 # "None" or "null" is a real observed value.
 _PLACEHOLDERS = frozenset({"", "n/a", "na", "none", "null", "nil", "-", "--", "unknown",
                            "not applicable", "no", "nothing"})
+_CITATION_SPLIT = re.compile(r"[\s,;'\"`()\[\]]+")
 
 
 def _cited(item: dict[str, Any], field: str) -> str:
@@ -168,13 +169,29 @@ def _cited(item: dict[str, Any], field: str) -> str:
     return "" if value.lower().strip(".") in _PLACEHOLDERS else value
 
 
-def _verdict_findings(raw: object) -> tuple[tuple[str, ...], bool]:
-    """The verdict's findings as recorded, and whether any is test-backed.
+def _cites_failing(cited: Iterable[str], failing: frozenset[str]) -> bool:
+    tokens = (t.strip(".:").casefold() for c in cited for t in _CITATION_SPLIT.split(c))
+    return any(t in failing for t in tokens if t)
 
-    LLM reviewers fail correct code (arXiv 2603.00539), so only a finding citing
-    a failing gate/test, or a command whose expected and actual results differ, may
-    block. The rest are kept, prefixed :data:`ADVISORY_PREFIX`. A plain-string
-    finding (an ungrammared backend) cites nothing."""
+
+def _norm(value: str) -> str:
+    return " ".join(value.split()).casefold()
+
+
+def _verdict_findings(
+    raw: object, failing_checks: Iterable[str] = ()
+) -> tuple[tuple[str, ...], bool]:
+    """The verdict's findings as recorded, and whether any may block.
+
+    LLM reviewers fail correct code (arXiv 2603.00539), and a model will cite a
+    passing scenario as its "failing check". So a finding blocks only if its
+    ``failing_check`` or ``command`` names one of ``failing_checks`` (the gate
+    names and test/scenario ids failing in the build's own gate results, supplied
+    by the caller from the attested ``gates`` channel), or it gives a command whose
+    expected and actual results differ. The rest are kept, prefixed
+    :data:`ADVISORY_PREFIX`. A plain-string finding (an ungrammared backend) cites
+    nothing."""
+    failing = frozenset(c.casefold() for c in failing_checks)
     out: list[str] = []
     backed = False
     for item in raw if isinstance(raw, list) else ():
@@ -184,12 +201,13 @@ def _verdict_findings(raw: object) -> tuple[tuple[str, ...], bool]:
         text = str(item.get("finding", "")).strip()
         check, command = _cited(item, "failing_check"), _cited(item, "command")
         expected, actual = (str(item.get(f, "")).strip() for f in ("expected", "actual"))
-        if check:
-            out.append(f"{text} [evidence: failing {check}]")
-        elif command and expected and actual and expected != actual:
+        if _cites_failing((check, command), failing):
+            out.append(f"{text} [evidence: failing {check or command}]")
+        elif command and expected and actual and _norm(expected) != _norm(actual):
             out.append(f"{text} [evidence: `{command}` expected {expected!r}, got {actual!r}]")
         else:
-            out.append(ADVISORY_PREFIX + text)
+            note = f" [cites {check}: not failing in this build's gates]" if check else ""
+            out.append(ADVISORY_PREFIX + text + note)
             continue
         backed = True
     return tuple(out), backed
@@ -910,6 +928,7 @@ class ModelProviderProxy:
         seq: Seq,
         tier: str = "T1",
         gate_name: str = "review",
+        failing_checks: Iterable[str] = (),
     ) -> JudgmentResult:
         """Run a judgment call and return a proxy-stamped ``GateResult``.
 
@@ -918,6 +937,10 @@ class ModelProviderProxy:
         cannot have a free-form "approve" authentically signed (arch §2b).
         The binding is stamped here, outside the adapter, by the injected
         ZoneBSigner; the adapter never holds the key.
+
+        ``failing_checks`` are the gate names and test/scenario ids failing in the
+        caller's attested gate results; a finding citing anything else blocks only
+        with a differing reproduction (:func:`_verdict_findings`).
         """
         if self._signer is None:
             raise RuntimeError(
@@ -937,7 +960,7 @@ class ModelProviderProxy:
             raise VerdictChannelError(
                 f"constrained verdict channel returned out-of-grammar payload: {verdict!r}"
             )
-        findings, backed = _verdict_findings(verdict.get("findings"))
+        findings, backed = _verdict_findings(verdict.get("findings"), failing_checks)
         status = _STATUS_BY_VERDICT[verdict["status"]]
         if not backed:
             # Decided here, before the binding is stamped: a downgrade after signing

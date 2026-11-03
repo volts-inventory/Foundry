@@ -433,6 +433,12 @@ def test_openai_native_tools_round_trip_and_rejection_is_remembered() -> None:
             fresh.complete("n", "T1", "SYS", [{"role": "user", "content": "hi"}],
                            purpose="ideation", tools=tools)
     assert len(create.calls) == 2  # rejected once (no retries), then refused unsent
+    # Support is per model: gpt-5's rejection leaves T3's gpt-5-mini its tools.
+    client.chat.completions.create = with_calls
+    mini = fresh.complete("n", "T3", "SYS", [{"role": "user", "content": "hi"}],
+                          purpose="ideation", tools=tools)
+    assert create.calls[-1]["model"] == "gpt-5-mini" and "tools" in create.calls[-1]
+    assert mini.tool_calls[0]["name"] == "run"
 
 
 # --------------------------------------------------------------------------- #

@@ -694,9 +694,9 @@ class OpenAITransport:
     """
 
     def __init__(self, client: Any | None = None) -> None:
-        # None = untested, True = tools accepted, False = rejected (JSON actions
-        # from then on; the proxy raises ToolsUnsupported without sending).
-        self.tools_supported: bool | None = None
+        # model -> tools accepted (True) / rejected (False; the proxy then raises
+        # ToolsUnsupported without sending). Support is per model, not per server.
+        self._tools_by_model: dict[str, bool] = {}
 
         def _build() -> Any:
             try:
@@ -711,6 +711,9 @@ class OpenAITransport:
 
     def _ensure_client(self) -> Any:
         return self._cache.get()
+
+    def tools_support(self, model: str) -> bool | None:
+        return self._tools_by_model.get(model)
 
     def send(self, request: dict[str, Any]) -> ProviderResponse:
         model = request.get("model")
@@ -733,15 +736,17 @@ class OpenAITransport:
                 "json_schema": {"name": "verdict", "schema": schema, "strict": True},
             }
         if "tools" in request:
+            if self._tools_by_model.get(model) is False:
+                raise ToolsUnsupported(f"openai rejected tools for {model}")
             params["tools"] = _chat_tools(request)
             try:
                 response = self._cache.run(lambda c: c.chat.completions.create(**params))
             except Exception as exc:
-                if self.tools_supported is not None or not _is_tools_rejection(exc):
+                if model in self._tools_by_model or not _is_tools_rejection(exc):
                     raise
-                self.tools_supported = False
-                raise ToolsUnsupported(f"openai rejected tools: {exc}") from exc
-            self.tools_supported = True
+                self._tools_by_model[model] = False
+                raise ToolsUnsupported(f"openai rejected tools for {model}: {exc}") from exc
+            self._tools_by_model[model] = True
         else:
             response = self._cache.run(lambda c: c.chat.completions.create(**params))
         choice = response.choices[0] if getattr(response, "choices", None) else None

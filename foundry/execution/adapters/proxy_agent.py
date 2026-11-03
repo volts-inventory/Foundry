@@ -25,7 +25,8 @@ Opt-in native tool calls (``tool_complete_fn``, wired when FOUNDRY_NATIVE_TOOLS
 is set): the same actions are offered as tools (:data:`TOOLS`), one model turn
 may request several, and each runs through exactly the guards a JSON action
 does. A backend without a tool channel raises ``ToolsUnsupported`` and the
-adapter drops to JSON actions for the rest of its life.
+adapter drops to JSON actions for that packet tier (its transport + model) from
+then on; other tiers keep their tools.
 """
 
 from __future__ import annotations
@@ -45,6 +46,7 @@ from foundry.execution.adapter_contract import (
     AdapterResult,
     TaskPacket,
     assemble_prompt,
+    current_packet_tier,
     packet_tier_scope,
 )
 from foundry.execution.adapters.claude_code import changed_files, walk_worktree
@@ -243,6 +245,10 @@ class ProxyAgentAdapter:
     ) -> None:
         self._complete = complete_fn
         self._tool_complete = tool_complete_fn
+        # Packet tiers whose backend has no tool channel. Only ever added to, and
+        # read once per session: a concurrent session's fallback never changes
+        # the mode of one already running.
+        self._json_tiers: set[str] = set()
         self._run_id = run_id
         self._node_id = node_id
         self._run_timeout_s = run_timeout_s
@@ -258,7 +264,9 @@ class ProxyAgentAdapter:
     def _run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
         worktree = Path(sandbox.worktree)
         before = walk_worktree(worktree)
-        native = self._tool_complete is not None
+        tier = current_packet_tier() or ""
+        tool_fn = None if tier in self._json_tiers else self._tool_complete
+        native = tool_fn is not None
         messages = _opening(packet, native=native)
         st = _Loop(worktree, _tree_state(worktree))
         turns = 0
@@ -267,13 +275,14 @@ class ProxyAgentAdapter:
             if not native:
                 self._json_turn(messages, st, sandbox)
                 continue
+            assert tool_fn is not None
             try:
-                self._native_turn(messages, st, sandbox)
+                self._native_turn(tool_fn, messages, st, sandbox)
             except ToolsUnsupported as exc:
-                # Rest of the session on JSON actions; the backend never ran a turn.
-                progress.log(f"proxy-agent: native tool calls unavailable ({exc}); "
-                             "using JSON actions")
-                self._tool_complete = None
+                # This tier on JSON actions from now on; the backend never ran a turn.
+                progress.log(f"proxy-agent: native tool calls unavailable on tier "
+                             f"{tier or '-'} ({exc}); using JSON actions")
+                self._json_tiers.add(tier)
                 native = False
                 messages = _opening(packet, native=False)
                 st.verbatim = []
@@ -329,9 +338,14 @@ class ProxyAgentAdapter:
         st.verbatim.append(_Kept(len(messages) - 1, _summarize(act), len(content), read))
         _mask(messages, st)
 
-    def _native_turn(self, messages: list[dict[str, Any]], st: _Loop, sandbox: Sandbox) -> None:
-        assert self._tool_complete is not None
-        text, calls = self._tool_complete(messages, TOOLS)
+    def _native_turn(
+        self,
+        tool_fn: AgentToolCompleteFn,
+        messages: list[dict[str, Any]],
+        st: _Loop,
+        sandbox: Sandbox,
+    ) -> None:
+        text, calls = tool_fn(messages, TOOLS)
         if not calls:
             messages.append({"role": "assistant", "content": text or "(no reply)"})
             messages.append({"role": "user", "content": _NUDGE})

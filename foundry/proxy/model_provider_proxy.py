@@ -353,8 +353,9 @@ class VerdictChannelError(RuntimeError):
 
 class ToolsUnsupported(RuntimeError):
     """The tier's backend has no native tool-call channel (or rejected ``tools``).
-    Raised without retry so the caller falls back to JSON actions; a transport
-    that rejects ``tools`` remembers it (``tools_supported = False``)."""
+    Raised without retry so the caller falls back to JSON actions. A transport
+    with a tool channel exposes ``tools_support(model) -> bool | None`` (None =
+    untested) and remembers a rejection per model."""
 
 
 class StructuredOutputError(RuntimeError):
@@ -423,7 +424,8 @@ class AnthropicTransport:
     or an API key, so tests run entirely on a fake transport.
     """
 
-    tools_supported: bool | None = True
+    def tools_support(self, model: str) -> bool | None:
+        return True
 
     def __init__(self, client: Any | None = None) -> None:
         def _build() -> Any:
@@ -1188,8 +1190,13 @@ class ModelProviderProxy:
         if meter is not None:
             meter.check()
         transport = self._tier_transports.get(tier or "", self._transport)
-        if "tools" in request and getattr(transport, "tools_supported", False) is False:
-            raise ToolsUnsupported(f"{type(transport).__name__} has no native tool calls")
+        if "tools" in request:
+            probe = getattr(transport, "tools_support", None)
+            if probe is None or probe(str(request.get("model", ""))) is False:
+                raise ToolsUnsupported(
+                    f"{type(transport).__name__} has no native tool calls for "
+                    f"{request.get('model')}"
+                )
         local = tier in self._local_tiers
         attempt = 0          # real transport failures (bounded, fail-closed)
         rl_attempt = 0       # provider throttling (separate, more generous budget)

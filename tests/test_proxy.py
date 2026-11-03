@@ -150,7 +150,8 @@ def test_lineage_revision_is_content_derived():
 # ---- 2. judgment path: stamped, verifiable, admitted --------------------------
 
 
-def judge_once(proxy: ModelProviderProxy, *, nonce: str = "nonce-1"):
+def judge_once(proxy: ModelProviderProxy, *, nonce: str = "nonce-1",
+               failing_checks: tuple[str, ...] = ()):
     return proxy.judge(
         "review_node",
         "cas://artifact/abc",
@@ -159,6 +160,7 @@ def judge_once(proxy: ModelProviderProxy, *, nonce: str = "nonce-1"):
         "REVIEW SOP",
         [{"role": "user", "content": "review this diff"}],
         seq=make_seq("review_node"),
+        failing_checks=failing_checks,
     )
 
 
@@ -196,19 +198,67 @@ def _finding(text: str, **evidence: str) -> dict[str, str]:
             "actual": "", **evidence}
 
 
-def _judge_findings(findings: list[object]) -> GateResult:
+def _judge_findings(findings: list[object], failing: tuple[str, ...] = ()) -> GateResult:
     transport = FakeTransport(
         text=json.dumps({"status": "request-changes", "findings": findings})
     )
     proxy, _ = make_proxy(transport)
-    return judge_once(proxy).gate_result
+    return judge_once(proxy, failing_checks=failing).gate_result
+
+
+_FAILING = ("test", "tests/test_a.py::test_x", "test_x")
 
 
 def test_request_changes_verdict_maps_to_fail_with_findings(verifier, installed):
-    g = _judge_findings([_finding("missing tests", failing_check="tests/test_a.py::test_x")])
+    g = _judge_findings([_finding("missing tests", failing_check="tests/test_a.py::test_x")],
+                        _FAILING)
     assert g.status == GateStatus.FAIL
     assert g.findings == ("missing tests [evidence: failing tests/test_a.py::test_x]",)
     assert verifier.verify_judgment_binding(g)  # a FAIL verdict is stamped too
+
+
+@pytest.mark.parametrize("evidence", [
+    {"failing_check": "test"},  # the failing gate by name
+    {"failing_check": "TEST_X"},  # the failing test by its short id
+    {"command": "pytest tests/test_a.py::test_x"},  # the command names it
+])
+def test_a_finding_citing_a_failing_check_blocks(verifier, installed, evidence):
+    g = _judge_findings([_finding("broken", **evidence)], _FAILING)
+    assert g.status == GateStatus.FAIL
+    assert g.findings[0].startswith("broken [evidence: failing ")
+
+
+def test_a_finding_citing_a_passing_scenario_is_advisory_and_passes(verifier, installed):
+    # The local-model failure: every gate passed, the reviewer cited a scenario id.
+    g = _judge_findings([_finding("total-sum check is fragile", failing_check="S001",
+                                  command="pytest -k S001", expected="", actual="")],
+                        _FAILING)
+    assert g.status == GateStatus.PASS
+    assert g.findings == (ADVISORY_PREFIX + "total-sum check is fragile"
+                          " [cites S001: not failing in this build's gates]",)
+    assert verifier.verify_judgment_binding(g)
+
+
+def test_with_no_failing_checks_a_citation_is_advisory_but_a_reproduction_blocks(
+        verifier, installed):
+    cites = _finding("fails", failing_check="tests/test_a.py::test_x")
+    assert _judge_findings([cites]).status == GateStatus.PASS
+    repro = _finding("wrong total", command="dice 2d6 --seed 1", expected="7", actual="12")
+    g = _judge_findings([cites, repro])
+    assert g.status == GateStatus.FAIL
+    assert g.findings[0].startswith(ADVISORY_PREFIX)
+    assert g.findings[1] == "wrong total [evidence: `dice 2d6 --seed 1` expected '7', got '12']"
+
+
+def test_mixed_findings_block_on_the_backed_one_and_keep_the_rest_advisory(verifier, installed):
+    g = _judge_findings([
+        _finding("doesn't assert exit code 1", failing_check="S002"),
+        _finding("mocking Popen is pointless"),
+        _finding("add() is broken", failing_check="test_x"),
+        _finding("same output", command="dice 1d6", expected="4 ", actual=" 4"),
+    ], _FAILING)
+    assert g.status == GateStatus.FAIL
+    assert [f.startswith(ADVISORY_PREFIX) for f in g.findings] == [True, True, False, True]
 
 
 def test_a_reproduction_with_differing_results_blocks(verifier, installed):

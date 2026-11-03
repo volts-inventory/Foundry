@@ -109,11 +109,11 @@ def verdict_json(
     The shape matches ``VERDICT_SCHEMA``: a ``status`` in the verdict grammar
     plus a ``findings`` array. The proxy ``json.loads`` this off the verdict
     channel, so it MUST be valid JSON. A bare ``request-changes`` gets one
-    test-backed finding, so a scripted rejection still blocks.
+    reproduction-backed finding, so a scripted rejection still blocks.
     """
     if status == "request-changes" and not findings:
-        findings = ({"finding": "scripted rejection", "failing_check": "scripted",
-                     "command": "", "expected": "", "actual": ""},)
+        findings = ({"finding": "scripted rejection", "failing_check": "",
+                     "command": "scripted", "expected": "pass", "actual": "fail"},)
     return json.dumps({"status": status, "findings": list(findings)})
 
 

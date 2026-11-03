@@ -97,6 +97,32 @@ def _attested_tree_sha(state: FactoryState) -> str | None:
             best = g
     return str(best.run_against) if best is not None else None
 
+
+def failing_checks(state: FactoryState) -> tuple[str, ...]:
+    """What a review finding may cite as failing: the latest pass's FAILed/ERRORed
+    gates (the ones the fixer is fed) by name, plus the test ids and scenario refs
+    their findings name, each also by its last ``::`` part (``S001`` for
+    ``features/T1.feature::S001``). Judgment verdicts are left out, so a reviewer
+    can never back a finding with an earlier review's own FAIL.
+
+    The reviewer runs BEFORE the final build/test/smoke gates, so on a first pass
+    this is the last wave check's result (empty: a failing wave check never reaches
+    review) and on a fix pass the failures the fix targets. Empty means a citation
+    alone cannot block; the Test gate right after judges those checks itself."""
+    from foundry.agents.implementation.junior_engineer import _failed_gates
+    from foundry.graph.gate_wiring import failing_ids
+    from foundry.state.reducers import JUDGMENT_VERDICTS
+
+    out: list[str] = []
+    for g in _failed_gates(state):
+        if g.name in JUDGMENT_VERDICTS:
+            continue
+        out.append(g.name)
+        for i in failing_ids(g.findings):
+            out.extend((i, i.rsplit("::", 1)[-1]))
+    return tuple(dict.fromkeys(out))
+
+
 # Keeps the review request inside a sane context/cost budget on large builds.
 _DIFF_CHAR_CAP = 60_000
 
@@ -146,9 +172,12 @@ _SOP = (
     "scrutinize the TEST diffs for weakened assertions. Return a verdict: "
     "approve only if the change is correct and the tests still bind the "
     "criteria; otherwise request-changes with specific, actionable findings. "
-    "A finding blocks only if it cites evidence — a failing gate or test id in "
-    "failing_check, or a reproducible command with its expected and actual "
-    "result; any other finding is recorded as advisory and does not block."
+    "A finding blocks only if it cites real evidence: a check that is failing in "
+    "this build's gate results (listed in the request) in failing_check, or a "
+    "reproducible command with an expected result and a DIFFERENT actual result "
+    "you observed. Citing a passing test or scenario does not count. Opinions on "
+    "test quality (fragile asserts, missing edge cases, needless mocks) are "
+    "advisory while every check passes: record them, they do not block."
 )
 
 
@@ -221,6 +250,10 @@ def review(
         "per ticket, rendered from the acceptance criteria above) and criteria.json "
         "into the tree before the Test gate runs. Do not flag them as missing."
     )
+    failing = failing_checks(state)
+    content += "\n\nChecks failing in this build's gate results: " + (
+        ", ".join(failing) or "none (every check that has run passes)"
+    ) + "."
     result = rt.proxy.judge(
         node_id,
         subject_uri,
@@ -231,6 +264,7 @@ def review(
         seq=seq,
         tier=_REVIEW_TIER,
         gate_name=_GATE_NAME,
+        failing_checks=failing,
     )
 
     # ADVISORY journal entry (plan [11]): it only ECHOES the proxy-stamped verdict

@@ -25,7 +25,7 @@ from langchain_core.runnables import RunnableConfig
 
 from foundry.agents import AgentRuntime
 from foundry.agents._common import emit_artifact
-from foundry.agents.quality import make_reviewer_node
+from foundry.agents.quality import make_reviewer_node, reviewer_critic
 from foundry.agents.quality._common import (
     ACCEPTANCE_CRITERION_KIND,
     MissingCriteriaResolverError,
@@ -218,31 +218,52 @@ _CITES_S001 = {"finding": "total-sum check is fragile", "failing_check": "S001",
                "command": "pytest -k S001", "expected": "", "actual": ""}
 
 
-@pytest.mark.parametrize(("test_gate", "blocks"), [
-    (_gate("test", GateStatus.PASS, local=1), False),
-    (_gate("test", GateStatus.FAIL, _S001_FAILED, local=1), True),
-])
-def test_reviewer_blocks_only_on_a_check_failing_in_the_gate_results(
-        records: Any, test_gate: GateResult, blocks: bool) -> None:
-    cas = ArtifactStore()
-    state = {**_seed(cas), "gates": [_gate("build", GateStatus.PASS), test_gate]}
+def _review(state: FactoryState, cas: ArtifactStore, tree: str | None,
+            monkeypatch: pytest.MonkeyPatch) -> tuple[GateResult, str]:
+    # Materializing a real tree is gate_wiring's job (and its tests'); pin the result.
+    monkeypatch.setattr(reviewer_critic, "_reviewed_tree", lambda *_: tree)
     transport = MockTransport(verdicts=[verdict_json("request-changes", [_CITES_S001])])
     node = make_reviewer_node(_runtime(transport, cas), resolve=cas.resolve)
     [verdict] = node(state, _config())["gates"]
+    return verdict, transport.requests[0]["messages"][0]["content"]
+
+
+@pytest.mark.parametrize(("test_gate", "tree", "blocks"), [
+    (_gate("test", GateStatus.PASS, local=1), "tree-1", False),
+    (_gate("test", GateStatus.FAIL, _S001_FAILED, local=1), "tree-1", True),
+    # A fix pass: the failure is on the pre-fix tree, not the one under review.
+    (_gate("test", GateStatus.FAIL, _S001_FAILED, local=1), "tree-2", False),
+])
+def test_reviewer_blocks_only_on_a_check_failing_on_the_reviewed_tree(
+        records: Any, monkeypatch: pytest.MonkeyPatch, test_gate: GateResult, tree: str,
+        blocks: bool) -> None:
+    cas = ArtifactStore()
+    state = {**_seed(cas), "gates": [_gate("build", GateStatus.PASS), test_gate]}
+    verdict, prompt = _review(state, cas, tree, monkeypatch)
     assert verdict.status is (GateStatus.FAIL if blocks else GateStatus.PASS)
     assert verdict.findings[0].startswith(ADVISORY_PREFIX) is not blocks
     # The judge is told which checks fail, so it can cite them.
-    prompt = transport.requests[0]["messages"][0]["content"]
-    assert ("features/T1.feature::S001, S001" in prompt) is blocks
+    assert ("test, features/T1.feature::S001" in prompt) is blocks
 
 
-def test_failing_checks_skip_judgment_verdicts_and_superseded_trees() -> None:
-    stale = _gate("test", GateStatus.FAIL, _S001_FAILED, local=1)
+def test_failing_checks_keep_findingless_gates_and_skip_reviews_and_other_trees() -> None:
+    other = _gate("test", GateStatus.FAIL, _S001_FAILED, local=1)
     review = _gate("review", GateStatus.FAIL, "FAILED tests/t.py::test_a", local=3)
-    current = _gate("build", GateStatus.FAIL, "FAILED tests/t.py::test_b", local=2)
-    current = current.model_copy(update={"run_against": "tree-2"})
-    assert failing_checks({"gates": [stale, review, current]}) == (
-        "build", "tests/t.py::test_b", "test_b")
+    build = _gate("build", GateStatus.FAIL, local=2).model_copy(update={"run_against": "tree-2"})
+    smoke = _gate("smoke", GateStatus.ERROR, "FAILED tests/t.py::test_b", local=4)
+    smoke = smoke.model_copy(update={"run_against": "tree-2"})
+    state: FactoryState = {"gates": [other, review, build, smoke]}
+    assert failing_checks(state, "tree-2") == (("build", "smoke"), ("tests/t.py::test_b",))
+    assert failing_checks(state, None) == ((), ())
+
+
+def test_reviewed_tree_is_not_built_when_nothing_failed() -> None:
+    def boom(*_: Any) -> Any:
+        raise AssertionError("materialized")
+    passing: FactoryState = {"gates": [_gate("test", GateStatus.PASS)]}
+    assert reviewer_critic._reviewed_tree(passing, boom, boom) is None
+    failed: FactoryState = {"gates": [_gate("test", GateStatus.FAIL)]}
+    assert reviewer_critic._reviewed_tree(failed, None, None) is None
 
 
 # ---- artifacts ---------------------------------------------------------------

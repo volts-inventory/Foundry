@@ -328,7 +328,7 @@ def build_supervisor_graph(
             max_fix_attempts=max_fix_attempts, profile=profile,
         ),
     ).compile()
-    quality = build_quality_subgraph(rt, resolve=resolve).compile()
+    quality = build_quality_subgraph(rt, resolve=resolve, resolve_blob=resolve_blob).compile()
 
     def planner_node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         out: dict[str, Any] = dict(planner.invoke(state, config))

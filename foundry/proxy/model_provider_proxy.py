@@ -161,7 +161,8 @@ ADVISORY_PREFIX = "[advisory: no failing check or differing reproduction] "
 # "None" or "null" is a real observed value.
 _PLACEHOLDERS = frozenset({"", "n/a", "na", "none", "null", "nil", "-", "--", "unknown",
                            "not applicable", "no", "nothing"})
-_CITATION_SPLIT = re.compile(r"[\s,;'\"`()\[\]]+")
+# Brackets stay inside a token: pytest's parametrized ids carry them.
+_CITATION_SPLIT = re.compile(r"[\s,;'\"`()]+")
 
 
 def _cited(item: dict[str, Any], field: str) -> str:
@@ -169,9 +170,32 @@ def _cited(item: dict[str, Any], field: str) -> str:
     return "" if value.lower().strip(".") in _PLACEHOLDERS else value
 
 
-def _cites_failing(cited: Iterable[str], failing: frozenset[str]) -> bool:
-    tokens = (t.strip(".:").casefold() for c in cited for t in _CITATION_SPLIT.split(c))
-    return any(t in failing for t in tokens if t)
+def _failing_match(
+    check: str, command: str, gates: Iterable[str], tests: Iterable[str]
+) -> str | None:
+    """The failing gate or test the citation names, or ``None``.
+
+    A gate name counts only as the whole ``failing_check`` ("test", not "npm test"
+    or "security concern in parser"). A test id counts as a whole token of either
+    field; its short ``::`` form only when the token is itself unqualified and no
+    other failing id shares that short form (``S001`` of two feature files names
+    neither)."""
+    for gate in gates:
+        if check.casefold() == gate.casefold():
+            return gate
+    full = {t.casefold(): t for t in tests}
+    shorts: dict[str, list[str]] = {}
+    for t in tests:
+        shorts.setdefault(t.rsplit("::", 1)[-1].casefold(), []).append(t)
+    for cited in (check, command):
+        for token in (cited, *_CITATION_SPLIT.split(cited)):
+            token = token.strip(".:").casefold()
+            if token in full:
+                return full[token]
+            only = shorts.get(token, ())
+            if "::" not in token and "/" not in token and len(only) == 1:
+                return only[0]
+    return None
 
 
 def _norm(value: str) -> str:
@@ -179,19 +203,18 @@ def _norm(value: str) -> str:
 
 
 def _verdict_findings(
-    raw: object, failing_checks: Iterable[str] = ()
+    raw: object, failing_gates: Iterable[str] = (), failing_tests: Iterable[str] = ()
 ) -> tuple[tuple[str, ...], bool]:
     """The verdict's findings as recorded, and whether any may block.
 
     LLM reviewers fail correct code (arXiv 2603.00539), and a model will cite a
-    passing scenario as its "failing check". So a finding blocks only if its
-    ``failing_check`` or ``command`` names one of ``failing_checks`` (the gate
-    names and test/scenario ids failing in the build's own gate results, supplied
-    by the caller from the attested ``gates`` channel), or it gives a command whose
-    expected and actual results differ. The rest are kept, prefixed
-    :data:`ADVISORY_PREFIX`. A plain-string finding (an ungrammared backend) cites
-    nothing."""
-    failing = frozenset(c.casefold() for c in failing_checks)
+    passing scenario as its "failing check". So a finding blocks only if it names
+    one of ``failing_gates`` / ``failing_tests`` (what failed on the reviewed tree,
+    per the caller's attested ``gates`` channel; see :func:`_failing_match`), or it
+    gives a command whose expected and actual results differ. The rest are kept,
+    prefixed :data:`ADVISORY_PREFIX`. A plain-string finding (an ungrammared
+    backend) cites nothing."""
+    gates, tests = tuple(failing_gates), tuple(failing_tests)
     out: list[str] = []
     backed = False
     for item in raw if isinstance(raw, list) else ():
@@ -201,8 +224,8 @@ def _verdict_findings(
         text = str(item.get("finding", "")).strip()
         check, command = _cited(item, "failing_check"), _cited(item, "command")
         expected, actual = (str(item.get(f, "")).strip() for f in ("expected", "actual"))
-        if _cites_failing((check, command), failing):
-            out.append(f"{text} [evidence: failing {check or command}]")
+        if (matched := _failing_match(check, command, gates, tests)) is not None:
+            out.append(f"{text} [evidence: failing {matched}]")
         elif command and expected and actual and _norm(expected) != _norm(actual):
             out.append(f"{text} [evidence: `{command}` expected {expected!r}, got {actual!r}]")
         else:
@@ -928,7 +951,8 @@ class ModelProviderProxy:
         seq: Seq,
         tier: str = "T1",
         gate_name: str = "review",
-        failing_checks: Iterable[str] = (),
+        failing_gates: Iterable[str] = (),
+        failing_tests: Iterable[str] = (),
     ) -> JudgmentResult:
         """Run a judgment call and return a proxy-stamped ``GateResult``.
 
@@ -938,9 +962,10 @@ class ModelProviderProxy:
         The binding is stamped here, outside the adapter, by the injected
         ZoneBSigner; the adapter never holds the key.
 
-        ``failing_checks`` are the gate names and test/scenario ids failing in the
-        caller's attested gate results; a finding citing anything else blocks only
-        with a differing reproduction (:func:`_verdict_findings`).
+        ``failing_gates`` / ``failing_tests`` are the gate names and test/scenario
+        ids that failed on the reviewed tree in the caller's attested gate results;
+        a finding citing anything else blocks only with a differing reproduction
+        (:func:`_verdict_findings`).
         """
         if self._signer is None:
             raise RuntimeError(
@@ -960,7 +985,9 @@ class ModelProviderProxy:
             raise VerdictChannelError(
                 f"constrained verdict channel returned out-of-grammar payload: {verdict!r}"
             )
-        findings, backed = _verdict_findings(verdict.get("findings"), failing_checks)
+        findings, backed = _verdict_findings(
+            verdict.get("findings"), failing_gates, failing_tests
+        )
         status = _STATUS_BY_VERDICT[verdict["status"]]
         if not backed:
             # Decided here, before the binding is stamped: a downgrade after signing

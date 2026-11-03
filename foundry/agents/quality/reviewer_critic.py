@@ -23,9 +23,12 @@ honored: the agent emitted a verdict it could never have signed itself.
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from foundry.agents.quality._common import (
+    ArtifactResolver,
     journal_entry,
     require_verdict_nonce,
     server_issued_nonce,
@@ -33,6 +36,7 @@ from foundry.agents.quality._common import (
     subject_artifact_uri,
 )
 from foundry.durability.artifact_store import UnknownArtifactError
+from foundry.schemas.gates import GateResult, GateStatus
 from foundry.schemas.implementation import FEATURE_DIR, FeatureDiff
 
 if TYPE_CHECKING:
@@ -41,6 +45,7 @@ if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
 
     from foundry.agents._runtime import AgentRuntime
+    from foundry.graph.gate_wiring import BlobResolver
     from foundry.proxy.model_provider_proxy import JudgmentResult
     from foundry.schemas.base import Artifact
     from foundry.schemas.journal import JournalEntry
@@ -98,29 +103,45 @@ def _attested_tree_sha(state: FactoryState) -> str | None:
     return str(best.run_against) if best is not None else None
 
 
-def failing_checks(state: FactoryState) -> tuple[str, ...]:
-    """What a review finding may cite as failing: the latest pass's FAILed/ERRORed
-    gates (the ones the fixer is fed) by name, plus the test ids and scenario refs
-    their findings name, each also by its last ``::`` part (``S001`` for
-    ``features/T1.feature::S001``). Judgment verdicts are left out, so a reviewer
-    can never back a finding with an earlier review's own FAIL.
+def failing_checks(state: FactoryState, tree: str | None) -> tuple[tuple[str, ...], ...]:
+    """What a review finding may cite as failing: ``(gate names, test ids)`` of the
+    newest verdict per gate that ran on ``tree`` (the tree under review) and
+    FAILed or ERRORed, findings or not, with the test ids and scenario refs their
+    findings name. Judgment verdicts are left out, so a reviewer can never back a
+    finding with an earlier review's own FAIL.
 
-    The reviewer runs BEFORE the final build/test/smoke gates, so on a first pass
-    this is the last wave check's result (empty: a failing wave check never reaches
-    review) and on a fix pass the failures the fix targets. Empty means a citation
-    alone cannot block; the Test gate right after judges those checks itself."""
-    from foundry.agents.implementation.junior_engineer import _failed_gates
+    The reviewer runs BEFORE the final build/test/smoke gates: on a fix pass every
+    verdict on state judged the pre-fix tree, and a failing wave check never
+    reaches review. Usually nothing has run on ``tree``, so a citation alone
+    cannot block; the Test gate right after judges those checks itself."""
     from foundry.graph.gate_wiring import failing_ids
     from foundry.state.reducers import JUDGMENT_VERDICTS
 
-    out: list[str] = []
-    for g in _failed_gates(state):
-        if g.name in JUDGMENT_VERDICTS:
-            continue
-        out.append(g.name)
-        for i in failing_ids(g.findings):
-            out.extend((i, i.rsplit("::", 1)[-1]))
-    return tuple(dict.fromkeys(out))
+    latest: dict[str, GateResult] = {}
+    for g in state.get("gates") or ():
+        if g.run_against == tree and g.name not in JUDGMENT_VERDICTS and (
+                g.name not in latest or g.seq > latest[g.name].seq):
+            latest[g.name] = g
+    failed = [g for g in sorted(latest.values(), key=lambda g: g.seq)
+              if g.status in (GateStatus.FAIL, GateStatus.ERROR)]
+    tests = dict.fromkeys(i for g in failed for i in failing_ids(g.findings))
+    return tuple(g.name for g in failed), tuple(tests)
+
+
+def _reviewed_tree(
+    state: FactoryState, resolve: ArtifactResolver | None, resolve_blob: BlobResolver | None
+) -> str | None:
+    """The ``tree_sha`` the final gates will judge for the change under review, or
+    ``None`` when it cannot matter (no gate verdict on state failed) or cannot be
+    built here (no resolvers). Materializing is the only way to know it: verdict
+    ``Seq``s are not a causal order across nodes."""
+    if resolve is None or resolve_blob is None or not any(
+            g.status in (GateStatus.FAIL, GateStatus.ERROR) for g in state.get("gates") or ()):
+        return None
+    from foundry.graph.gate_wiring import materialize_workdir
+
+    with tempfile.TemporaryDirectory(prefix="foundry_review_tree_") as tmp:
+        return materialize_workdir(state, Path(tmp), resolve=resolve, resolve_blob=resolve_blob)
 
 
 # Keeps the review request inside a sane context/cost budget on large builds.
@@ -173,7 +194,7 @@ _SOP = (
     "approve only if the change is correct and the tests still bind the "
     "criteria; otherwise request-changes with specific, actionable findings. "
     "A finding blocks only if it cites real evidence: a check that is failing in "
-    "this build's gate results (listed in the request) in failing_check, or a "
+    "this tree's gate results (listed in the request) in failing_check, or a "
     "reproducible command with an expected result and a DIFFERENT actual result "
     "you observed. Citing a passing test or scenario does not count. Opinions on "
     "test quality (fragile asserts, missing edge cases, needless mocks) are "
@@ -189,6 +210,8 @@ def review(
     node_id: str,
     role: str,
     criteria: Sequence[AcceptanceCriterion] = (),
+    resolve: ArtifactResolver | None = None,
+    resolve_blob: BlobResolver | None = None,
 ) -> tuple[JudgmentResult, JournalEntry]:
     """Issue ONE proxy-stamped review verdict for ``node_id`` and its journal note.
 
@@ -196,7 +219,9 @@ def review(
     node. ``node_id`` is signed into the binding (via ``seq.node_id``) AND into the
     per-request nonce, so two reviewers in one run must use distinct ids (H3).
     ``criteria`` (when given) are put in front of the judge so it reviews against
-    them. Returns the :class:`JudgmentResult` and the advisory journal entry.
+    them. ``resolve`` / ``resolve_blob`` rebuild the tree under review so only gate
+    verdicts on that tree can back a finding. Returns the :class:`JudgmentResult`
+    and the advisory journal entry.
     """
     # Seq.node_id MUST equal the node_id passed to judge() — the binding
     # signs seq.node_id, so judge() rejects a mismatched record (proxy L5).
@@ -250,9 +275,9 @@ def review(
         "per ticket, rendered from the acceptance criteria above) and criteria.json "
         "into the tree before the Test gate runs. Do not flag them as missing."
     )
-    failing = failing_checks(state)
-    content += "\n\nChecks failing in this build's gate results: " + (
-        ", ".join(failing) or "none (every check that has run passes)"
+    gates, tests = failing_checks(state, _reviewed_tree(state, resolve, resolve_blob))
+    content += "\n\nChecks failing on this tree in its gate results: " + (
+        ", ".join((*gates, *tests)) or "none (no gate has failed on it)"
     ) + "."
     result = rt.proxy.judge(
         node_id,
@@ -264,7 +289,8 @@ def review(
         seq=seq,
         tier=_REVIEW_TIER,
         gate_name=_GATE_NAME,
-        failing_checks=failing,
+        failing_gates=gates,
+        failing_tests=tests,
     )
 
     # ADVISORY journal entry (plan [11]): it only ECHOES the proxy-stamped verdict

@@ -103,9 +103,10 @@ class LocalOpenAITransport:
         # Same for `reasoning_effort` ("none" turns thinking off on Ollama; some
         # servers, e.g. vLLM, accept only low/medium/high and reject the request).
         self.reasoning_supported: bool | None = None
-        # Same for native `tools` (Ollama rejects them for a model whose template
-        # has no tool support); False makes the proxy raise ToolsUnsupported.
-        self.tools_supported: bool | None = None
+        # Native `tools`, per model: Ollama rejects them for a model whose template
+        # has no tool support, and one server serves several tiers' models. False
+        # makes the proxy raise ToolsUnsupported without sending.
+        self._tools_by_model: dict[str, bool] = {}
 
         def _build() -> Any:
             try:
@@ -115,6 +116,9 @@ class LocalOpenAITransport:
             return openai.OpenAI(base_url=self.base_url, api_key=_PLACEHOLDER_KEY,
                                  timeout=timeout_s, max_retries=0)
         self._cache = _ClientCache(_build, injected=client)
+
+    def tools_support(self, model: str) -> bool | None:
+        return self._tools_by_model.get(model)
 
     def send(self, request: dict[str, Any]) -> ProviderResponse:
         model = request.get("model")
@@ -132,15 +136,18 @@ class LocalOpenAITransport:
         if "temperature" in request:
             params["temperature"] = request["temperature"]
         if "tools" in request:
+            if self._tools_by_model.get(model) is False:
+                raise ToolsUnsupported(f"local server rejected tools for {model}")
             try:
                 response = self._call({**params, "tools": _chat_tools(request)})
             except Exception as exc:
-                if self.tools_supported is not None or not _is_tools_rejection(exc):
+                if model in self._tools_by_model or not _is_tools_rejection(exc):
                     raise
-                self.tools_supported = False
-                progress.log(f"local server rejected tools ({exc}); using JSON actions")
-                raise ToolsUnsupported(f"local server rejected tools: {exc}") from exc
-            self.tools_supported = True
+                self._tools_by_model[model] = False
+                progress.log(f"local server rejected tools for {model} ({exc}); "
+                             "using JSON actions")
+                raise ToolsUnsupported(f"local server rejected tools for {model}: {exc}") from exc
+            self._tools_by_model[model] = True
             return response
         schema = _schema_of(request)
         if schema is None:

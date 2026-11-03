@@ -553,7 +553,7 @@ def test_local_server_gets_native_tools_and_returns_tool_calls() -> None:
     assert first == {"id": "call_1", "name": "read_file", "input": {"path": "a.py"}}
     assert second["id"] == "tool_call_1" and "not a JSON object" in second["error"]
     assert result.manifest_record["tool_calls"] == 2
-    assert transport.tools_supported is True
+    assert transport.tools_support(sent["model"]) is True
 
 
 def test_local_tools_rejection_falls_back_to_json_actions(tmp_path: Path) -> None:
@@ -585,17 +585,48 @@ def test_local_tools_rejection_falls_back_to_json_actions(tmp_path: Path) -> Non
         body = json.loads(sb.get_blob(result.diff_uri))
     assert body["files"] == {"m.py": "X = 1\n"}
     assert ["tools" in c for c in completions.calls] == [True, False, False]
-    assert transport.tools_supported is False
+    assert transport.tools_support(completions.calls[0]["model"]) is False
     # Remembered for the session: the proxy refuses before reaching the server.
     with pytest.raises(ToolsUnsupported):
         proxy.complete("node", "T3", "SOP", TOOL_HISTORY, purpose="ideation", tools=TOOLS)
     assert len(completions.calls) == 3
 
 
+@pytest.mark.parametrize("order", [("good", "bad"), ("bad", "good")])
+def test_local_tool_support_is_tracked_per_model(order: tuple[str, str]) -> None:
+    from foundry.proxy import ToolsUnsupported
+
+    completions = _ToolCompletions(reject_tools=False)
+    accept = completions.create
+
+    def create(**params: Any) -> Any:
+        if "tools" in params and params["model"] == "bad":
+            completions.calls.append(params)
+            raise RuntimeError("Error code: 400 - library/bad does not support tools")
+        return accept(**params)
+
+    completions.create = create  # type: ignore[method-assign]
+    transport = LocalOpenAITransport(
+        client=SimpleNamespace(chat=SimpleNamespace(completions=completions)))
+    tools = [{"name": "run", "description": "d", "input_schema": {"type": "object"}}]
+    for model in (*order, *order):
+        request = {"model": model, "messages": [{"role": "user", "content": "x"}],
+                   "tools": tools}
+        if model == "bad":
+            # Rejected as unsupported every time, never a plain error, never
+            # disabling the other model's tools.
+            with pytest.raises(ToolsUnsupported):
+                transport.send(request)
+        else:
+            assert transport.send(request).tool_calls
+    assert transport.tools_support("good") is True
+    assert transport.tools_support("bad") is False
+
+
 def test_a_backend_without_a_tool_channel_is_never_sent_tools() -> None:
     from foundry.proxy import ToolsUnsupported
 
-    local = RecordingTransport()  # like claude-cli: no tools_supported attribute
+    local = RecordingTransport()  # like claude-cli: no tools_support probe
     proxy = build_level_proxy(
         preset_levels("local", cloud_backend="mock", cloud_models=TIER_MODELS),
         cloud_transport=lambda _b: RecordingTransport(), local_transport=lambda _u: local,

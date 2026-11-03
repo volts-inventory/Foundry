@@ -721,3 +721,93 @@ def test_native_tools_unsupported_falls_back_to_json_for_the_session(tmp_path: P
     with Sandbox(src) as sb:
         adapter.run(make_packet(sb.worktree), sb)
     assert tool_calls == 1  # remembered: the next ticket goes straight to JSON
+
+
+def tier_packet(worktree: Path, tier: str) -> TaskPacket:
+    return TaskPacket(
+        task={"id": f"t-{tier}", "title": "t", "branch": "task/t", "criterion_ids": [],
+              "tier": tier},
+        worktree_path=str(worktree),
+        turn_budget=6,
+        cost_budget_microusd=1_000_000,
+    )
+
+
+def json_done(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
+    act = {"action": "done", "summary": "json"}
+    return json.dumps(act), act
+
+
+def test_native_fallback_is_per_tier(tmp_path: Path) -> None:
+    from foundry.execution.adapter_contract import current_packet_tier
+
+    src = tmp_path / "src"
+    src.mkdir()
+    tool_tiers: list[str | None] = []
+
+    def _tools(messages: Any, tools: Any) -> tuple[str, Any]:
+        tier = current_packet_tier()
+        tool_tiers.append(tier)
+        if tier == "T1":  # e.g. claude-cli: no tool channel
+            raise ToolsUnsupported("no tool channel")
+        return "", [{"id": "c", "name": "done", "input": {"summary": "native"}}]
+
+    adapter = ProxyAgentAdapter(json_done, tool_complete_fn=_tools)
+    summaries = []
+    for tier in ("T1", "T2", "T1", "T2"):
+        with Sandbox(src) as sb:
+            result = adapter.run(tier_packet(sb.worktree, tier), sb)
+        summaries.append(result.triage[0].explanation)
+    assert summaries == ["json", "native", "json", "native"]
+    assert tool_tiers == ["T1", "T2", "T2"]  # T1 remembered; T2 never disabled
+
+
+def test_a_concurrent_fallback_leaves_a_running_native_session_alone(tmp_path: Path) -> None:
+    import threading
+
+    from foundry.execution.adapter_contract import current_packet_tier
+
+    src = tmp_path / "src"
+    src.mkdir()
+    b_started, a_fell_back = threading.Event(), threading.Event()
+    b_calls = 0
+
+    def _tools(messages: Any, tools: Any) -> tuple[str, Any]:
+        nonlocal b_calls
+        if current_packet_tier() == "T1":
+            assert b_started.wait(10)
+            raise ToolsUnsupported("no tool channel")
+        b_calls += 1
+        if b_calls == 1:
+            b_started.set()
+            return "", [{"id": "w", "name": "write_file",
+                         "input": {"path": "b.txt", "content": "b"}}]
+        assert a_fell_back.wait(10)  # A's fallback lands mid-session for B
+        return "", [{"id": "d", "name": "done", "input": {"summary": "native"}}]
+
+    def _json(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
+        a_fell_back.set()
+        return json_done(messages, schema)
+
+    adapter = ProxyAgentAdapter(_json, tool_complete_fn=_tools)
+    results: dict[str, Any] = {}
+    errors: list[BaseException] = []
+
+    def session(tier: str) -> None:
+        try:
+            with Sandbox(src) as sb:
+                result = adapter.run(tier_packet(sb.worktree, tier), sb)
+                results[tier] = (result, json.loads(sb.get_blob(result.diff_uri)))
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=session, args=(t,)) for t in ("T1", "T2")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert errors == []
+    assert results["T1"][0].triage[0].explanation == "json"
+    b_result, b_body = results["T2"]
+    assert b_result.triage[0].explanation == "native" and b_result.turns_used == 2
+    assert b_body["files"] == {"b.txt": "b"}

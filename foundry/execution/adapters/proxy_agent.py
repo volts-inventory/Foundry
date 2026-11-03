@@ -30,6 +30,7 @@ import os
 import re
 import sys
 import warnings
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
@@ -60,7 +61,7 @@ _EPILOGUE = (
     "turn, reply with EXACTLY ONE action as JSON conforming to the given schema:\n"
     '  {"action": "write_file", "path": "<rel>", "content": "<full file>"}\n'
     '  {"action": "read_file", "path": "<rel>", "start_line": 1, "end_line": 200}'
-    "   # line range optional (1-based, inclusive)\n"
+    "   # line range optional (1-based, inclusive); omit it to read the whole file\n"
     '  {"action": "search", "pattern": "<regex>", "path": "<optional rel dir>"}\n'
     '  {"action": "delete_file", "path": "<rel>"}\n'
     '  {"action": "run", "cmd": "<shell command>"}   # build/test inside the sandbox\n'
@@ -89,11 +90,20 @@ ACTION_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
-_OBS_CAP = 4_000  # chars of run/read output fed back per turn (context discipline)
+_OBS_CAP = 4_000  # chars of run/search output fed back per turn (context discipline)
+# Larger than _OBS_CAP so a typical source file fits in one read: a small read cap
+# is what drove the model to re-read one file in many slices.
+_READ_CAP = 12_000
 _OBS_KEEP = 3  # observations kept verbatim after an elision pass (arXiv 2508.21433)
 _OBS_MAX = 6  # verbatim observations allowed to pile up before the next pass
 _REPEAT_WARN = 3
 _REPEAT_STOP = 5
+# Reads of one unchanged file (any line ranges) before a nudge / a stop.
+_THRASH_WARN = 4
+_THRASH_STOP = 6
+# Chars of unchanged-file reads kept verbatim past masking; over it, the oldest
+# are elided down to half, so the cap doesn't move the cache prefix every turn.
+_PIN_CAP = 30_000
 _SEARCH_MAX_HITS = 50
 _SEARCH_MAX_FILE = 1_000_000
 # Lines this long are skipped: the model's regex runs in-process, and catastrophic
@@ -107,6 +117,22 @@ _SEARCH_SKIP_DIRS = frozenset(
 _TREE_SKIP_DIRS = frozenset(
     {".git", "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox"}
 )
+
+
+@dataclass(frozen=True)
+class _Read:
+    path: str  # worktree-relative posix
+    lo: int
+    hi: int  # last line actually shown
+    stamp: tuple[int, int]  # (size, mtime_ns) when read
+
+
+@dataclass(frozen=True)
+class _Kept:
+    idx: int  # message index
+    what: str
+    size: int
+    read: _Read | None
 
 
 def _contained(worktree: Path, rel: str) -> Path:
@@ -162,10 +188,11 @@ class ProxyAgentAdapter:
         summary = ""
         triage_lines: list[str] = []
         turns = 0
-        # (message index, action summary) of each still-verbatim observation.
-        verbatim: list[tuple[int, str]] = []
+        verbatim: list[_Kept] = []  # still-verbatim observations
         # action fingerprint -> (consecutive-unchanged count, tree state after it ran)
         repeats: dict[tuple[str, ...], tuple[int, str]] = {}
+        # path -> (reads since it last changed, its stamp at the last read)
+        reads: dict[str, tuple[int, tuple[int, int]]] = {}
         tree = _tree_state(worktree)
         for _ in range(max(1, packet.turn_budget)):
             turns += 1
@@ -193,8 +220,24 @@ class ProxyAgentAdapter:
                     f"({_summarize(act)}) — partial work recorded"
                 )
                 break
+            key = _file_key(worktree, str(act.get("path", ""))) if action == "read_file" else None
+            if key is not None:
+                rel, stamp = key
+                n, stamp_then = reads.get(rel, (0, stamp))
+                n = n + 1 if stamp_then == stamp else 1
+                if n >= _THRASH_STOP:
+                    triage_lines.append(
+                        f"stopped early: read {rel} {_THRASH_STOP} times without changing "
+                        "it — partial work recorded"
+                    )
+                    break
+                reads[rel] = (n, stamp)
+            read: _Read | None = None
             try:
-                observation = self._execute(act, sandbox, worktree)
+                if action == "read_file":
+                    observation, read = _read_file(worktree, str(act.get("path", "")), act)
+                else:
+                    observation = self._execute(act, sandbox, worktree)
             except (ValueError, OSError) as exc:
                 observation = f"ERROR: {exc}"
             tree = _tree_state(worktree)
@@ -205,20 +248,39 @@ class ProxyAgentAdapter:
                     "with no change to the worktree in between. Try something different "
                     "or declare done.\n" + observation
                 )
-            messages.append({"role": "user", "content": f"OBSERVATION:\n{observation}"})
-            verbatim.append((len(messages) - 1, _summarize(act)))
-            if len(verbatim) > _OBS_MAX:
+            if key is not None and reads[key[0]][0] >= _THRASH_WARN:
+                observation = (
+                    f"NOTE: you have read {key[0]} {reads[key[0]][0]} times without changing "
+                    "it — its content is above; make the edit or finish.\n" + observation
+                )
+            content = f"OBSERVATION:\n{observation}"
+            messages.append({"role": "user", "content": content})
+            verbatim.append(_Kept(len(messages) - 1, _summarize(act), len(content), read))
+            pinned = _pinned(verbatim, worktree)
+            pinned_size = sum(k.size for k in verbatim if k.idx in pinned)
+            if len(verbatim) - len(pinned) > _OBS_MAX or pinned_size > _PIN_CAP:
                 # Elide in batches, not one per turn: every rewrite invalidates the
                 # prompt-prefix cache from that message on, so batching moves the
                 # prefix once every 4 turns (3 kept + 4 new).
                 # A placeholder is never rewritten again.
-                for idx, what in verbatim[:-_OBS_KEEP]:
-                    messages[idx] = {
-                        "role": "user",
-                        "content": f"OBSERVATION: [output of {what} elided — re-run or "
-                        "re-read if needed]",
-                    }
-                verbatim = verbatim[-_OBS_KEEP:]
+                keep = {k.idx for k in verbatim[-_OBS_KEEP:]}
+                budget = _PIN_CAP if pinned_size <= _PIN_CAP else _PIN_CAP // 2
+                budget -= sum(k.size for k in verbatim[-_OBS_KEEP:] if k.idx in pinned)
+                for k in reversed(verbatim):
+                    if k.idx not in pinned or k.idx in keep:
+                        continue
+                    if k.size > budget:
+                        break  # oldest go first: no older read slips into the gap
+                    keep.add(k.idx)
+                    budget -= k.size
+                for k in verbatim:
+                    if k.idx not in keep:
+                        messages[k.idx] = {
+                            "role": "user",
+                            "content": f"OBSERVATION: [output of {k.what} elided — re-run or "
+                            "re-read if needed]",
+                        }
+                verbatim = [k for k in verbatim if k.idx in keep]
         else:
             triage_lines.append("turn budget exhausted before 'done' — partial work recorded")
 
@@ -271,16 +333,6 @@ class ProxyAgentAdapter:
                 target.unlink()
                 return f"deleted {act.get('path')}"
             return f"{act.get('path')} did not exist"
-        if action == "read_file":
-            target = _contained(worktree, str(act.get("path", "")))
-            if not target.is_file():
-                return f"{act.get('path')} does not exist"
-            return _read_range(
-                str(act.get("path")),
-                target.read_text(encoding="utf-8", errors="replace"),
-                act.get("start_line"),
-                act.get("end_line"),
-            )
         if action == "search":
             return _search(worktree, str(act.get("pattern", "")), str(act.get("path") or ""))
         if action == "run":
@@ -320,6 +372,42 @@ def _fingerprint(act: dict[str, Any]) -> tuple[str, ...]:
     return (*(str(act.get(k)) for k in keys), content)
 
 
+def _file_key(worktree: Path, rel: str) -> tuple[str, tuple[int, int]] | None:
+    """(worktree-relative path, (size, mtime_ns)) of a regular file, else None —
+    the same cheap stamp _tree_state uses."""
+    try:
+        target = _contained(worktree, rel)
+        st = target.stat()
+    except (ValueError, OSError):
+        return None
+    if not target.is_file():
+        return None
+    return target.relative_to(worktree.resolve()).as_posix(), (st.st_size, st.st_mtime_ns)
+
+
+def _pinned(kept: list[_Kept], worktree: Path) -> set[int]:
+    """Message indexes of reads still showing a file's current content and not
+    covered by a newer read of the same file — masking keeps these verbatim."""
+    pinned: set[int] = set()
+    stamps: dict[str, tuple[int, int] | None] = {}
+    covered: dict[str, list[tuple[int, int]]] = {}
+    for k in reversed(kept):
+        r = k.read
+        if r is None:
+            continue
+        if r.path not in stamps:
+            key = _file_key(worktree, r.path)
+            stamps[r.path] = key[1] if key else None
+        if stamps[r.path] != r.stamp:
+            continue
+        ranges = covered.setdefault(r.path, [])
+        if any(lo <= r.lo and r.hi <= hi for lo, hi in ranges):
+            continue
+        ranges.append((r.lo, r.hi))
+        pinned.add(k.idx)
+    return pinned
+
+
 def _tree_state(worktree: Path) -> str:
     """Cheap worktree fingerprint: (path, size, mtime) of every file, no reads."""
     h = hashlib.sha256()
@@ -351,21 +439,34 @@ def _lint_python(content: str, rel: str) -> str:
     return ""
 
 
-def _read_range(rel: str, text: str, start_line: Any, end_line: Any) -> str:
+def _read_file(worktree: Path, rel: str, act: dict[str, Any]) -> tuple[str, _Read | None]:
+    target = _contained(worktree, rel)
+    if not target.is_file():
+        return f"{rel} does not exist", None
+    key = _file_key(worktree, rel)
+    text = target.read_text(encoding="utf-8", errors="replace")
+    obs, lo, hi = _read_range(rel, text, act.get("start_line"), act.get("end_line"))
+    if key is None or hi < lo:
+        return obs, None
+    return obs, _Read(key[0], lo, hi, key[1])
+
+
+def _read_range(rel: str, text: str, start_line: Any, end_line: Any) -> tuple[str, int, int]:
+    """(observation, first line shown, last line shown)."""
     lines = text.splitlines(keepends=True)
     total = len(lines)
     start = max(1, int(start_line or 1))
     end = min(total, int(end_line or total))
     if start > total:
-        return f"{rel} has only {total} lines"
+        return f"{rel} has only {total} lines", start, start - 1
     out: list[str] = []
     size = 0
     last = start - 1
     for n in range(start, end + 1):
         line = lines[n - 1]
-        if size + len(line) > _OBS_CAP:
+        if size + len(line) > _READ_CAP:
             if not out:  # a single over-long line: show what fits
-                out.append(line[:_OBS_CAP])
+                out.append(line[:_READ_CAP])
                 last = n
             break
         out.append(line)
@@ -373,8 +474,12 @@ def _read_range(rel: str, text: str, start_line: Any, end_line: Any) -> str:
         last = n
     header = f"{rel} (lines {start}-{last} of {total})"
     if last < end:
-        header += f" — truncated at line {last} of {total}; read_file with start_line={last + 1}"
-    return header + "\n" + "".join(out)
+        rest = f"start_line={last + 1}" + (f", end_line={end}" if end < total else "")
+        header += (
+            f" — truncated at line {last} of {total} (a read shows up to {_READ_CAP} chars); "
+            f"get the rest in ONE call: read_file with {rest} — don't re-read in smaller slices"
+        )
+    return header + "\n" + "".join(out), start, last
 
 
 def _search(worktree: Path, pattern: str, rel: str) -> str:

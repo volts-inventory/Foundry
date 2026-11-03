@@ -61,7 +61,7 @@ def test_gate_in_process_when_opted_out(tmp_path: Any, monkeypatch: Any) -> None
     assert env["FOUNDRY_GATE_WORKDIR"] == str(Path(tmp_path).resolve())
 
 
-@pytest.mark.skipif(not unshare_available(), reason="no unprivileged user namespaces")
+@pytest.mark.skipif(sandbox.sandbox_backend() is None, reason="no gate sandbox on this host")
 def test_namespace_sandbox_really_runs_and_blocks_network(tmp_path: Any, monkeypatch: Any) -> None:
     """End-to-end: a generated impl under ``foundry/`` (the collision case) PASSES
     inside the real namespace sandbox, and the network is OFF (no exfiltration)."""
@@ -97,9 +97,16 @@ def _py(code: str) -> tuple[str, ...]:
     return (sys.executable, "-c", code)
 
 
+def _pin_unshare(monkeypatch: Any) -> None:
+    """Exercise the Linux backend's argv on any host (macOS has no `unshare` binary)."""
+    monkeypatch.setattr(sandbox, "sandbox_backend", lambda: "unshare")
+    which = shutil.which
+    monkeypatch.setattr(sandbox.shutil, "which", lambda name, **k: which(name, **k) or name)
+
+
 def _capture(monkeypatch: Any) -> list[list[str]]:
     monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)
-    monkeypatch.setattr(sandbox, "unshare_available", lambda: True)
+    _pin_unshare(monkeypatch)
     calls: list[list[str]] = []
 
     def fake_run(argv: Any, workdir: Any, *, env: Any = None, timeout_s: float = 600.0) -> Any:
@@ -134,14 +141,14 @@ def test_build_and_smoke_fail_closed_when_sandbox_unavailable(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)
-    monkeypatch.setattr(sandbox, "unshare_available", lambda: False)
+    monkeypatch.setattr(sandbox, "sandbox_backend", lambda: None)
     for gate in (BuildGate(), BuildGate(install_cmd="true"), SmokeGate(("true",))):
         with pytest.raises(GroundingUnavailable):
             gate.execute(tmp_path)
 
 
 def test_fence_setup_failure_is_grounding_unavailable(tmp_path: Path, monkeypatch: Any) -> None:
-    monkeypatch.setattr(sandbox, "unshare_available", lambda: True)
+    _pin_unshare(monkeypatch)
     monkeypatch.setattr(
         sandbox,
         "run_grounding_command",
@@ -644,3 +651,203 @@ def test_install_forwarder_overrides_the_plain_http_proxy_too() -> None:
     from foundry.gates import sandbox
 
     assert '"HTTP_PROXY", "http_proxy"' in sandbox._FORWARDER
+
+
+# ---- macOS: the Seatbelt backend ------------------------------------------------
+
+_SEATBELT = pytest.mark.skipif(
+    not sandbox.seatbelt_available(), reason="macOS sandbox-exec unavailable"
+)
+
+
+def _denied(path: Path) -> str:
+    """Probe source: exit non-zero unless writing ``path`` is refused with EPERM."""
+    return (
+        "import errno, sys\n"
+        f"try:\n    open({str(path)!r}, 'w').write('x')\n"
+        "except PermissionError as e:\n    assert e.errno == errno.EPERM, e\n"
+        "else:\n    sys.exit('wrote it')\n"
+    )
+
+
+def test_backend_is_seatbelt_on_darwin_and_unshare_elsewhere(monkeypatch: Any) -> None:
+    monkeypatch.setattr(sandbox, "seatbelt_available", lambda: True)
+    monkeypatch.setattr(sandbox, "unshare_available", lambda: True)
+    monkeypatch.setattr(sandbox.sys, "platform", "darwin")
+    assert sandbox.sandbox_backend() == "seatbelt"
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    assert sandbox.sandbox_backend() == "unshare"
+    monkeypatch.setattr(sandbox, "unshare_available", lambda: False)
+    assert sandbox.sandbox_backend() is None
+
+
+def test_seatbelt_profile_takes_paths_only_as_parameters(tmp_path: Path) -> None:
+    odd = '/x/we"ird) (allow default) \\ dir'
+    profile, params = sandbox.seatbelt_profile(
+        workdir=odd, private_tmp="/t", binds=[], home=None, network=False
+    )
+    assert odd not in profile and "(allow default)" not in profile
+    assert any(p.endswith(f"={odd}") for p in params)
+    with pytest.raises(GroundingUnavailable):
+        sandbox.seatbelt_profile(
+            workdir="relative/wd", private_tmp="/t", binds=[], home=None, network=False
+        )
+
+
+@_SEATBELT
+def test_seatbelt_writes_reach_only_the_workdir_tmp_and_writable_binds(tmp_path: Path) -> None:
+    wd, chan = tmp_path / "wd", tmp_path / "chan"
+    wd.mkdir()
+    chan.mkdir()
+    (chan / "ro.json").write_text("{}")
+    code = (
+        "import os\n"
+        "open('in-wd', 'w').write('ok')\n"
+        "open(os.path.join(os.environ['TMPDIR'], 't'), 'w').write('t')\n"
+        f"open({str(chan / 'report')!r}, 'w').write('r')\n"
+        f"assert open({str(chan / 'ro.json')!r}).read() == '{{}}'\n"
+        + _denied(chan / "ro.json") + _denied(tmp_path / "escaped")
+        + _denied(Path(__file__).parent / f".escaped-{os.getpid()}")
+        + _denied(Path("/tmp") / f"foundry-escaped-{os.getpid()}")
+    )
+    rc, _out, err = sandbox.run_confined(
+        _py(code), wd, binds=((chan / "report", True), (chan / "ro.json", False))
+    )
+    assert rc == 0, err
+    assert (wd / "in-wd").read_text() == "ok" and (chan / "report").read_text() == "r"
+    assert not (tmp_path / "escaped").exists()
+
+
+@_SEATBELT
+def test_seatbelt_handles_a_workdir_path_with_quotes(tmp_path: Path) -> None:
+    wd = tmp_path / 'we"ird) (allow default) \\'
+    wd.mkdir()
+    sibling = tmp_path / 'we"ird) (allow default) \\x'
+    rc, _out, err = sandbox.run_confined(
+        _py("open('f', 'w').write('ok')\n" + _denied(sibling)), wd
+    )
+    assert rc == 0, err
+    assert (wd / "f").read_text() == "ok" and not sibling.exists()
+
+
+_NET_PROBE = r"""
+import errno, socket, sys
+def refused(addr):
+    try:
+        socket.create_connection(addr, timeout=3).close()
+    except PermissionError as e:
+        return e.errno == errno.EPERM
+    return False
+assert refused(("1.1.1.1", 443)), "internet reachable"
+assert refused(("127.0.0.1", int(sys.argv[1]))), "host loopback proxy reachable"
+s = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(1)   # own loopback server works
+socket.create_connection(s.getsockname(), timeout=3).close()
+print("NET-OK")
+"""
+
+
+@_SEATBELT
+def test_seatbelt_offline_step_has_no_network_but_its_own_loopback(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    up = _FakeUpstream()
+    monkeypatch.setenv("HTTPS_PROXY", f"http://127.0.0.1:{up.port}")
+    rc, out, err = sandbox.run_confined((*_py(_NET_PROBE), str(up.port)), tmp_path)
+    assert rc == 0 and "NET-OK" in out, err
+    assert up.targets == []
+
+
+_SEATBELT_EGRESS_PROBE = r"""
+import base64, os, socket, sys, urllib.parse
+proxy = urllib.parse.urlsplit(os.environ["HTTPS_PROXY"])
+assert proxy.hostname == "127.0.0.1" and os.environ["NO_PROXY"] == "localhost,127.0.0.1,::1"
+cred = base64.b64encode(("%s:%s" % (proxy.username, proxy.password)).encode()).decode()
+def tunnel(target, auth=True):
+    s = socket.create_connection((proxy.hostname, proxy.port), timeout=5)
+    hdr = "Proxy-Authorization: Basic %s\r\n" % cred if auth else ""
+    s.sendall(("CONNECT %s HTTP/1.1\r\nHost: %s\r\n%s\r\n" % (target, target, hdr)).encode())
+    return s, s.recv(4096).split()[1]
+s, status = tunnel("registry.example.com:443")
+assert status == b"200", status
+s.sendall(b"ping"); assert s.recv(4) == b"ping"
+assert tunnel("registry.example.com:443", auth=False)[1] == b"407"
+for bad in ("169.254.169.254:80", "127.0.0.1:%s" % sys.argv[1], "localhost:22"):
+    assert tunnel(bad)[1] == b"403", bad
+for addr in (("1.1.1.1", 443), ("127.0.0.1", int(sys.argv[1]))):
+    try:
+        socket.create_connection(addr, timeout=3)
+    except PermissionError:
+        pass
+    else:
+        sys.exit("direct connection to %r allowed" % (addr,))
+print("EGRESS-OK")
+"""
+
+
+@_SEATBELT
+def test_seatbelt_install_egress_is_through_the_authenticated_relay_only(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    up = _FakeUpstream()
+    monkeypatch.setenv("HTTPS_PROXY", f"http://127.0.0.1:{up.port}")
+    rc, out, err = sandbox.run_confined(
+        (*_py(_SEATBELT_EGRESS_PROBE), str(up.port)), tmp_path, network=True
+    )
+    assert rc == 0 and "EGRESS-OK" in out, err
+    assert up.targets == ["registry.example.com:443"]
+
+
+@_SEATBELT
+def test_seatbelt_hides_credentials_and_the_state_dir(tmp_path: Path, monkeypatch: Any) -> None:
+    home, state = tmp_path / "home", tmp_path / "state"
+    for d in (home / ".ssh", home / ".aws", home / ".config" / "gh", state / "wd"):
+        d.mkdir(parents=True)
+    (home / ".ssh" / "id_ed25519").write_text("PRIVATE")
+    (home / ".aws" / "credentials").write_text("AKIA-secret")
+    (home / ".config" / "gh" / "hosts.yml").write_text("oauth_token: gho")
+    (home / ".netrc").write_text("machine x password hunter2")
+    (state / "run.db").write_text("checkpoints")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("FOUNDRY_STATE_DIR", str(state))
+    monkeypatch.setenv("GH_TOKEN", "ghp-secret")
+    probe = (
+        "import os, pathlib\n"
+        "h = pathlib.Path(os.environ['HOME'])\n"
+        "assert 'GH_TOKEN' not in os.environ\n"
+        f"for p in [h/'.ssh'/'id_ed25519', h/'.aws'/'credentials', h/'.netrc',\n"
+        f"          h/'.config'/'gh'/'hosts.yml', pathlib.Path({str(state / 'run.db')!r})]:\n"
+        "    try:\n        p.read_text()\n    except PermissionError:\n        continue\n"
+        "    raise SystemExit('read %s' % p)\n"
+        "open('out', 'w').write(open('out', 'a+').name)\n"  # a workdir under the state dir
+    )
+    rc, _out, err = sandbox.run_confined(_py(probe), state / "wd", network=True)
+    assert rc == 0, err
+
+
+@_SEATBELT
+def test_seatbelt_kills_the_process_group(tmp_path: Path) -> None:
+    spawn = (
+        "import subprocess, sys, time\n"
+        "p = subprocess.Popen(['/bin/sleep', '60'])\n"
+        "open('child.pid', 'w').write(str(p.pid))\n"
+        "time.sleep(float(sys.argv[1]))\n"
+    )
+
+    def alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    import subprocess
+    import time
+
+    start = time.monotonic()
+    rc, _out, err = sandbox.run_confined((*_py(spawn), "0"), tmp_path, timeout_s=30)
+    assert rc == 0, err
+    assert time.monotonic() - start < 20                       # did not wait on the orphan
+    assert not alive(int((tmp_path / "child.pid").read_text()))
+    with pytest.raises(subprocess.TimeoutExpired):
+        sandbox.run_confined((*_py(spawn), "60"), tmp_path, timeout_s=2)
+    assert not alive(int((tmp_path / "child.pid").read_text()))

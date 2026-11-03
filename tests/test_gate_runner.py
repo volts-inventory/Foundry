@@ -159,7 +159,7 @@ def test_build_without_sandbox_is_error_not_unsandboxed(tmp_path, runner, verifi
     from foundry.gates import sandbox
 
     monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)
-    monkeypatch.setattr(sandbox, "unshare_available", lambda: False)
+    monkeypatch.setattr(sandbox, "sandbox_backend", lambda: None)
     r = runner.run(BuildGate(), "task/1", _seq("build", "task/1"), tmp_path)
     assert r.status is GateStatus.ERROR
 

@@ -198,10 +198,10 @@ def test_gate_passes_when_every_scenario_passes(tmp_path: Path) -> None:
 def test_gate_passes_inside_namespace_sandbox(tmp_path: Path, monkeypatch: Any) -> None:
     import pytest
 
-    from foundry.gates.sandbox import unshare_available
+    from foundry.gates.sandbox import sandbox_backend
 
-    if not unshare_available():
-        pytest.skip("no unprivileged user namespaces")
+    if sandbox_backend() is None:
+        pytest.skip("no gate sandbox on this host")
     monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)
     gate = TestGate()
     obs = gate.execute(_project(tmp_path, _STEPS.replace("{expected}", "n")))

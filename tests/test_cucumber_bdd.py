@@ -386,10 +386,10 @@ def test_cucumber_js_passing_run(tmp_path: Path, cucumber_js: Path) -> None:
 def test_cucumber_js_passing_run_in_namespace_sandbox(
     tmp_path: Path, cucumber_js: Path, monkeypatch: Any
 ) -> None:
-    from foundry.gates.sandbox import unshare_available
+    from foundry.gates.sandbox import sandbox_backend
 
-    if not unshare_available():
-        pytest.skip("no unprivileged user namespaces")
+    if sandbox_backend() is None:
+        pytest.skip("no gate sandbox on this host")
     monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)
     wd = _js_project(tmp_path, cucumber_js)
     # The sandbox shadows host /tmp, so the shared install must live in the workdir —

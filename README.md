@@ -168,8 +168,12 @@ credential stores masked, env allowlist). The dependency-install step gets egres
 only through a gate-owned HTTPS `CONNECT` relay that refuses loopback, metadata and
 private destinations. If the host can't create user namespaces the gates fail
 closed; opt out to the sys.path-fenced in-process harness with
-`FOUNDRY_GATE_SANDBOX=inprocess` (required on macOS), which still refuses the
-install step unless `FOUNDRY_ALLOW_UNSANDBOXED_INSTALL=1`.
+`FOUNDRY_GATE_SANDBOX=inprocess`, which still refuses the install step unless
+`FOUNDRY_ALLOW_UNSANDBOXED_INSTALL=1`. On macOS the same gates run under Seatbelt
+(`sandbox-exec`) by default: writes fenced to the workdir, credential stores and
+Foundry's `.env`/state dir unreadable, loopback-only network with the install's
+egress through the same relay. Its loopback is the host's, though, so host services
+on 127.0.0.1 stay reachable (see `foundry/gates/sandbox.py`).
 
 ### Long-lived server
 

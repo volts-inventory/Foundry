@@ -63,6 +63,7 @@ from foundry.canonical import content_digest
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
 from foundry.execution.adapters.tiered import (
     ESCALATE_DECLINED_TRIAGE,
+    ESCALATE_FALLBACK_TRIAGE,
     ESCALATE_REQUEST_TRIAGE,
     ESCALATED_TRIAGE,
     STOPPED_TRIAGE,
@@ -116,6 +117,7 @@ __all__ = [
     "contract_duplicates",
     "escalated_task_ids",
     "escalation_candidates",
+    "escalation_pick",
     "has_tickets",
     "in_write_scope",
     "make_engineering_node",
@@ -327,18 +329,32 @@ def escalation_candidates(
     *,
     stopped_only: bool = False,
 ) -> tuple[str, ...]:
+    """The task ids :func:`escalation_pick` chooses."""
+    return escalation_pick(state, resolve, rt, ticket_tiers, stopped_only=stopped_only)[0]
+
+
+def escalation_pick(
+    state: FactoryState,
+    resolve: ArtifactResolver,
+    rt: AgentRuntime,
+    ticket_tiers: Mapping[Any, str] | None = None,
+    *,
+    stopped_only: bool = False,
+) -> tuple[tuple[str, ...], bool]:
     """The local-tier tickets of the newest wave to re-run on the cloud level after
-    the wave check failed twice: those the failing gates name (a failing scenario
-    or one of the ticket's files). With none named, every local ticket of that wave,
-    but only while nothing in the wave has escalated: the whole-wave fallback runs
-    at most once. Settled tickets (:func:`_escalation_settled`) never are again.
+    the wave check failed twice, and whether the whole-wave fallback chose them:
+    those the failing gates name (a failing scenario or one of the ticket's files).
+    With none named, every unsettled local ticket of that wave, but only if the
+    fallback has not run on that wave yet (:data:`ESCALATE_FALLBACK_TRIAGE`; named
+    and stopped-early escalations don't count). Settled tickets
+    (:func:`_escalation_settled`) never are again.
     ``ticket_tiers`` is the engineering node's difficulty -> tier table.
 
     ``stopped_only`` (the check's FIRST failure) picks only tickets whose kept
     session stopped early (:func:`stopped_tickets`): those the failures name, or
     the stopped ticket of a single-ticket wave whatever the failures say."""
     if escalation_target(rt) is None:
-        return ()
+        return (), False
     tickets = read_tickets(state, resolve)
     settled = _escalation_settled(state)
     latest = _latest_built_wave(tickets, _built_task_ids(state), _skipped_task_ids(state))
@@ -358,15 +374,18 @@ def escalation_candidates(
 
     named = [t for t in fresh
              if scenarios & set(t.scenario_ids) or any(names_file(f) for f in t.files)]
+    fell_back = {t.run_against.removeprefix("task/") for t in state.get("gate_triage") or ()
+                 if t.name == ESCALATE_FALLBACK_TRIAGE}
+    fallback = False
     if stopped_only:
         chosen = named or (fresh if len(latest) == 1 else [])
     elif named:
         chosen = named
-    elif any(task_id_for_ticket(t.id) in settled for t in wave):
+    elif any(task_id_for_ticket(t.id) in fell_back for t in wave):
         chosen = []
     else:
-        chosen = fresh
-    return tuple(task_id_for_ticket(t.id) for t in chosen)
+        chosen, fallback = fresh, bool(fresh)
+    return tuple(task_id_for_ticket(t.id) for t in chosen), fallback
 
 
 # A path-like token in a gate finding: "app.py" in "app.py:3: error" or in

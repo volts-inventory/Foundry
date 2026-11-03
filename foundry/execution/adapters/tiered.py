@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 __all__ = [
     "ESCALATED_TRIAGE",
     "ESCALATE_DECLINED_TRIAGE",
+    "ESCALATE_FALLBACK_TRIAGE",
     "ESCALATE_REQUEST_TRIAGE",
     "STOPPED_TRIAGE",
     "TieredAdapter",
@@ -47,6 +48,9 @@ ESCALATED_TRIAGE = "escalated"
 ESCALATE_REQUEST_TRIAGE = "escalate-request"
 # A request the work pool's quota refused: settled without spending the escalation.
 ESCALATE_DECLINED_TRIAGE = "escalate-declined"
+# Beside a request the whole-wave fallback made (no ticket named): the fallback
+# runs once per wave, whatever named or stopped-early escalations came before.
+ESCALATE_FALLBACK_TRIAGE = "escalate-fallback"
 # A local session that stopped early but whose partial work was kept for the wave
 # check: a failing check escalates it on its first failure instead of its second.
 STOPPED_TRIAGE = "stopped-early"

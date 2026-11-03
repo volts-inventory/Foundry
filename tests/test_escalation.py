@@ -15,6 +15,7 @@ import pytest
 from foundry.agents import AgentRuntime
 from foundry.agents.implementation.tickets import (
     escalation_candidates,
+    escalation_pick,
     make_engineering_node,
     pending_escalations,
     stopped_tickets,
@@ -22,7 +23,11 @@ from foundry.agents.implementation.tickets import (
 )
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
-from foundry.execution.adapters.tiered import ESCALATED_TRIAGE, TieredAdapter
+from foundry.execution.adapters.tiered import (
+    ESCALATE_FALLBACK_TRIAGE,
+    ESCALATED_TRIAGE,
+    TieredAdapter,
+)
 from foundry.execution.sandbox import Sandbox
 from foundry.graph.gate_wiring import BUILD_BOUNDARY, failing_streak, materialize_workdir
 from foundry.modes import escalation_tier, preset_levels
@@ -282,7 +287,7 @@ def test_without_an_escalation_tier_a_twice_failing_check_never_escalates(
 
 def _check_state(
     store: ArtifactStore, tickets: list[Ticket], *findings: str, escalated: tuple[str, ...] = (),
-    tasks: list[dict[str, Any]] | None = None,
+    tasks: list[dict[str, Any]] | None = None, fell_back: tuple[str, ...] = (),
 ) -> FactoryState:
     diffs = [Artifact(kind="feature_diff", uri=f"cas://feature_diff/{t.id}",
                       produced_by="junior_engineer", task_id=t.id, seq=Seq("run", 1, 1, "e", i))
@@ -294,6 +299,9 @@ def _check_state(
     notes = [GateTriage(name=ESCALATED_TRIAGE, run_against=f"task/{tid}", explanation="x",
                         produced_by="engineering", seq=Seq("run", 1, 1, "e", 0))
              for tid in escalated]
+    notes += [GateTriage(name=ESCALATE_FALLBACK_TRIAGE, run_against=f"task/{tid}",
+                         explanation="x", produced_by="build_gate", seq=Seq("run", 1, 1, "g", 0))
+              for tid in fell_back]
     return _state(store, tickets, artifacts=diffs, gates=[gate], gate_triage=notes,
                   tasks=tasks or [])
 
@@ -310,13 +318,32 @@ def _pair() -> list[Ticket]:
 def test_the_whole_wave_fallback_runs_at_most_once() -> None:
     store = ArtifactStore()
     unnamed = "SyntaxError: invalid syntax"
-    assert _candidates(_check_state(store, _pair(), unnamed), store) == ("T-001", "T-002")
-    # Once the named ticket has escalated, an unnamed failure escalates nobody else.
-    after = _check_state(store, _pair(), "app.py:1: error", unnamed, escalated=("T-001",))
+    rt = AgentRuntime(proxy=None, adapter=_tiered(_Session(), _Session()), cas=store)  # type: ignore[arg-type]
+    first = _check_state(store, _pair(), unnamed)
+    assert escalation_pick(first, store.resolve, rt) == (("T-001", "T-002"), True)
+    # Once the fallback has run on the wave, an unnamed failure escalates nobody else.
+    after = _check_state(store, _pair(), unnamed, escalated=("T-001",), fell_back=("T-001",))
     assert _candidates(after, store) == ()
-    # A ticket the failures name still can.
-    named = _check_state(store, _pair(), "webapp.py:3: error", escalated=("T-001",))
-    assert _candidates(named, store) == ("T-002",)
+    # A ticket the failures name still can, and that is no fallback.
+    named = _check_state(store, _pair(), "webapp.py:3: error", escalated=("T-001",),
+                         fell_back=("T-001",))
+    assert escalation_pick(named, store.resolve, rt) == (("T-002",), False)
+
+
+def test_a_named_or_stopped_escalation_leaves_the_fallback_to_the_rest_of_the_wave() -> None:
+    # Wave {T-001 stopped, T-002}: the first failure escalated T-001 (stopped early,
+    # named). A second failure that names nobody still falls back to T-002, once.
+    store = ArtifactStore()
+    rt = AgentRuntime(proxy=None, adapter=_tiered(_Session(), _Session()), cas=store)  # type: ignore[arg-type]
+    stop = GateTriage(name="stopped-early", run_against="task/T-001", explanation=TURN_CAP,
+                      produced_by="engineering", seq=Seq("run", 1, 1, "e", 1))
+    state = _check_state(store, _pair(), "SyntaxError: invalid syntax", escalated=("T-001",))
+    state = {**state, "gate_triage": [*state["gate_triage"], stop]}
+    assert escalation_pick(state, store.resolve, rt) == (("T-002",), True)
+    # The settled T-001 is never picked again, and the fallback does not repeat.
+    done = _check_state(store, _pair(), "SyntaxError", escalated=("T-001", "T-002"),
+                        fell_back=("T-002",))
+    assert _candidates(done, store) == ()
 
 
 @pytest.mark.parametrize(("finding", "named"), [

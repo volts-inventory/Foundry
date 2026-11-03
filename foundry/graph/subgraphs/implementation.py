@@ -33,7 +33,7 @@ from foundry.agents.implementation.tickets import (
     pending_wave,
     tickets_settled,
 )
-from foundry.graph.gate_wiring import ADVANCE, FIX, HALT
+from foundry.graph.gate_wiring import ADVANCE, ESCALATE, FIX, HALT
 from foundry.state.factory_state import FactoryState
 
 if TYPE_CHECKING:
@@ -156,7 +156,10 @@ def build_implementation_subgraph(
 
         def _after_check(state: FactoryState, config: RunnableConfig) -> str:
             assert check is not None
-            return {ADVANCE: eng_id, FIX: fixer_id, HALT: END}[check.route(state, config)]
+            # ESCALATE: the engineering node re-runs the requested local tickets on
+            # the cloud level, then the check runs again.
+            return {ADVANCE: eng_id, ESCALATE: eng_id, FIX: fixer_id,
+                    HALT: END}[check.route(state, config)]
 
         g.add_node(gate_id, _wave_gate)
         g.add_conditional_edges(gate_id, _after_check,

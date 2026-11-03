@@ -8,6 +8,7 @@ and the full-file-snapshot output contract shared with claude-code.
 
 from __future__ import annotations
 
+import itertools
 import json
 from pathlib import Path
 from typing import Any
@@ -158,11 +159,9 @@ def test_masking_elides_in_batches_with_stable_placeholders(tmp_path: Path) -> N
     src = tmp_path / "src"
     src.mkdir()
     n = 11
-    for i in range(n):
-        (src / f"f{i}.txt").write_text(f"body-{i}\n")
     seen: list[list[dict[str, Any]]] = []
-    reads = [{"action": "read_file", "path": f"f{i}.txt"} for i in range(n)]
-    adapter = ProxyAgentAdapter(recording([*reads, {"action": "done"}], seen))
+    runs = [{"action": "run", "cmd": f"echo body-{i}"} for i in range(n)]
+    adapter = ProxyAgentAdapter(recording([*runs, {"action": "done"}], seen))
     with Sandbox(src) as sb:
         adapter.run(make_packet(sb.worktree, turn_budget=n + 1), sb)
     for turn, msgs in enumerate(seen):
@@ -177,13 +176,13 @@ def test_masking_elides_in_batches_with_stable_placeholders(tmp_path: Path) -> N
     assert elided == [0] * 7 + [4] * 4 + [8]
     last = observations(seen[-1])
     assert last[0] == (
-        "OBSERVATION: [output of read_file f0.txt elided — re-run or re-read if needed]"
+        "OBSERVATION: [output of run 'echo body-0' elided — re-run or re-read if needed]"
     )
     # Once elided, a placeholder is byte-identical on every later turn (prefix cache).
     assert observations(seen[7])[:4] == last[:4]
     # Assistant actions are never rewritten.
     assert [m["content"] for m in seen[-1] if m["role"] == "assistant"] == [
-        json.dumps(a) for a in reads
+        json.dumps(a) for a in runs
     ]
 
 
@@ -247,7 +246,7 @@ def test_read_file_range_and_truncation_hint(tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()
     (src / "small.txt").write_text("".join(f"line{i}\n" for i in range(1, 11)))
-    (src / "big.txt").write_text("".join(f"{'x' * 99}\n" for _ in range(100)))
+    (src / "big.txt").write_text("".join(f"{'x' * 99}\n" for _ in range(200)))
     seen: list[list[dict[str, Any]]] = []
     adapter = ProxyAgentAdapter(
         recording(
@@ -263,7 +262,8 @@ def test_read_file_range_and_truncation_hint(tmp_path: Path) -> None:
         adapter.run(make_packet(sb.worktree), sb)
     ranged, big = observations(seen[-1])
     assert ranged == "OBSERVATION:\nsmall.txt (lines 3-4 of 10)\nline3\nline4\n"
-    assert "truncated at line 40 of 100; read_file with start_line=41" in big
+    assert "truncated at line 120 of 200" in big
+    assert "get the rest in ONE call: read_file with start_line=121 —" in big
 
 
 def test_search_finds_match_and_rejects_escape(tmp_path: Path) -> None:
@@ -362,3 +362,136 @@ def test_syntax_error_reported_after_writing_bad_python(tmp_path: Path) -> None:
     bad, ok = observations(seen[-1])
     assert "LIKELY SYNTAX ERROR line 2" in bad and "host Python" in bad
     assert "SYNTAX" not in ok
+
+
+def runs(n: int) -> list[dict[str, Any]]:
+    return [{"action": "run", "cmd": f"echo filler-{i}"} for i in range(n)]
+
+
+def test_unchanged_file_reads_survive_masking(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_text("".join(f"a{i}\n" for i in range(1, 7)))
+    (src / "b.txt").write_text("".join(f"b{i}\n" for i in range(1, 7)))
+    seen: list[list[dict[str, Any]]] = []
+    actions = [
+        {"action": "read_file", "path": "a.txt", "start_line": 1, "end_line": 2},
+        {"action": "read_file", "path": "a.txt", "start_line": 3, "end_line": 4},
+        {"action": "read_file", "path": "b.txt", "start_line": 1, "end_line": 2},
+        {"action": "read_file", "path": "b.txt"},
+        *runs(8),
+        {"action": "done"},
+    ]
+    adapter = ProxyAgentAdapter(recording(actions, seen))
+    with Sandbox(src) as sb:
+        adapter.run(make_packet(sb.worktree, turn_budget=len(actions)), sb)
+    obs = observations(seen[-1])
+    # Disjoint partial reads of an unchanged file both stay; a read covered by a
+    # newer one of the same file is superseded.
+    assert obs[0].endswith("a1\na2\n") and obs[1].endswith("a3\na4\n")
+    assert obs[2] == (
+        "OBSERVATION: [output of read_file b.txt lines 1-2 elided — re-run or re-read if needed]"
+    )
+    assert obs[3].endswith("b1\nb2\nb3\nb4\nb5\nb6\n")
+    assert all("elided" in o for o in obs[4:7])  # the run outputs still batch-elide
+    assert not any("elided" in o for o in obs[7:])
+
+
+def test_read_is_elided_after_the_file_is_written(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.py").write_text("X = 0\n")
+    seen: list[list[dict[str, Any]]] = []
+    actions = [
+        {"action": "read_file", "path": "a.py"},
+        {"action": "write_file", "path": "a.py", "content": "X = 1  # changed\n"},
+        *runs(6),
+        {"action": "done"},
+    ]
+    adapter = ProxyAgentAdapter(recording(actions, seen))
+    with Sandbox(src) as sb:
+        adapter.run(make_packet(sb.worktree, turn_budget=len(actions)), sb)
+    assert "X = 0" in observations(seen[2])[0]  # stale read waits for the next batch pass
+    assert observations(seen[-1])[0] == (
+        "OBSERVATION: [output of read_file a.py elided — re-run or re-read if needed]"
+    )
+
+
+def test_pinned_reads_are_capped_oldest_first(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    for i in range(5):
+        (src / f"f{i}.txt").write_text("".join(f"{i}{'y' * 98}\n" for _ in range(110)))
+    seen: list[list[dict[str, Any]]] = []
+    actions = [{"action": "read_file", "path": f"f{i}.txt"} for i in range(5)]
+    adapter = ProxyAgentAdapter(recording([*actions, {"action": "done"}], seen))
+    with Sandbox(src) as sb:
+        adapter.run(make_packet(sb.worktree, turn_budget=6), sb)
+    kept = ["elided" not in o for o in observations(seen[-1])]
+    assert kept == [False, False, True, True, True]
+
+
+def test_read_thrash_nudges_on_fourth_and_stops_on_sixth(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "test_app.py").write_text("".join(f"x{i} = {i}\n" for i in range(1, 31)))
+    seen: list[list[dict[str, Any]]] = []
+    reads = [
+        {"action": "read_file", "path": "test_app.py", "start_line": i, "end_line": i + 5}
+        for i in range(1, 11)
+    ]
+    adapter = ProxyAgentAdapter(recording(reads, seen))
+    with Sandbox(src) as sb:
+        result = adapter.run(make_packet(sb.worktree, turn_budget=10), sb)
+    assert result.turns_used == 6
+    obs = observations(seen[-1])
+    assert not any("NOTE" in o for o in obs[:3])
+    assert "read test_app.py 4 times without changing it" in obs[3]
+    assert "make the edit or finish" in obs[3] and "5 times" in obs[4]
+    notes = [t.explanation for t in result.triage]
+    assert any("stopped early: read test_app.py 6 times" in n for n in notes)
+    assert not any("turn budget exhausted" in n for n in notes)
+
+
+def test_read_thrash_count_resets_after_a_write(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "m.py").write_text("X = 0\n")
+    read = [
+        {"action": "read_file", "path": "m.py", "start_line": 1, "end_line": i} for i in (1, 2, 3)
+    ]
+    write = {"action": "write_file", "path": "m.py", "content": "X = 10\n"}
+    seen: list[list[dict[str, Any]]] = []
+    actions = [*read, write, *read, {"action": "done", "summary": "ok"}]
+    adapter = ProxyAgentAdapter(recording(actions, seen))
+    with Sandbox(src) as sb:
+        result = adapter.run(make_packet(sb.worktree, turn_budget=len(actions)), sb)
+    assert [t.explanation for t in result.triage] == ["ok"]
+    assert not any("NOTE" in o for o in observations(seen[-1]))
+
+
+def test_masked_prefix_is_stable_across_turns(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.py").write_text("X = 0\n")
+    (src / "b.py").write_text("Y = 0\n")
+    seen: list[list[dict[str, Any]]] = []
+    actions: list[dict[str, Any]] = [{"action": "read_file", "path": "b.py"}]
+    for i in range(6):
+        actions += [
+            {"action": "read_file", "path": "a.py"},
+            {"action": "write_file", "path": "a.py", "content": f"X = {i + 1}\n"},
+            {"action": "run", "cmd": f"echo step-{i}"},
+        ]
+    adapter = ProxyAgentAdapter(recording([*actions, {"action": "done"}], seen))
+    with Sandbox(src) as sb:
+        adapter.run(make_packet(sb.worktree, turn_budget=len(actions) + 1), sb)
+    rewrites = 0
+    for before, after in itertools.pairwise(seen):
+        changed = [i for i, m in enumerate(before) if after[i] != m]
+        # The only rewrite is verbatim -> placeholder; a placeholder never changes.
+        assert all("elided" in after[i]["content"] for i in changed)
+        assert not any("elided" in before[i]["content"] for i in changed)
+        rewrites += bool(changed)
+    assert 0 < rewrites <= len(actions) // 4
+    assert "Y = 0" in observations(seen[-1])[0]  # the unchanged file is never masked

@@ -2938,11 +2938,20 @@ def _structural_findings(criteria: Sequence[AcceptanceCriterion]) -> tuple[str, 
     return tuple(out)
 
 
+# A plan this small goes to the delta whole: a fix often lands in a ticket no finding
+# names ("fold contracts-2 into the ticket it serves"), and a summary-only ticket can't
+# be edited.
+_SHOW_ALL_TICKETS = 8
+
+
 def _affected(
     findings: Iterable[str], items: Sequence[dict[str, Any]], contracts: Iterable[str]
 ) -> set[str]:
-    """Ids of the tickets the findings name: by id, by a scenario they own, or by a
-    contract they implement or consume (matched as text: a name may hold spaces)."""
+    """Ids of the tickets the delta sees in full: every one in a small plan, else the
+    ones the findings name: by id, by a scenario they own, or by a contract they
+    implement or consume (matched as text: a name may hold spaces)."""
+    if len(items) <= _SHOW_ALL_TICKETS:
+        return {i["id"] for i in items}
     findings = tuple(findings)
     tokens = {tok.strip(".") for f in findings for tok in _SAFE_TICKET_ID.findall(f)}
     named = {n for n in contracts if n and any(n in f for f in findings)}

@@ -196,7 +196,12 @@ def _is_delta(request: dict[str, Any]) -> bool:
     return DELTA_SOP_KEY in blob and PLANNER_SOP_KEY not in blob
 
 
-def test_a_failed_plan_check_is_fixed_by_one_delta_call() -> None:
+def test_a_failed_plan_check_is_fixed_by_one_delta_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from foundry.agents import planner
+
+    monkeypatch.setattr(planner, "_SHOW_ALL_TICKETS", 0)  # slice as a big plan would
     cas = ArtifactStore()
     rt, tx = runtime_for(_two_implementers(), _DROP_CONTRACTS_1, cas=cas)
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
@@ -239,9 +244,12 @@ def test_an_upsert_merges_into_a_shown_ticket_by_id() -> None:
     assert by_id["contracts-1"].scenario_ids == ("AC-010",)
 
 
-def test_an_upsert_of_a_summarized_ticket_falls_back() -> None:
-    # MH-1's finding names no ticket, so T-002 was sent only as a summary:
+def test_an_upsert_of_a_summarized_ticket_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    from foundry.agents import planner
+
+    # In a big plan MH-1's finding names no ticket, so T-002 goes only as a summary:
     # replacing it would overwrite fields and scenarios the model never saw.
+    monkeypatch.setattr(planner, "_SHOW_ALL_TICKETS", 0)
     fix = _delta(tickets=[{**PLAN["tickets"][1], "scenarios": [
         {**PLAN["tickets"][1]["scenarios"][0], "covers": ["MH-1", "SC-1"]},
     ]}])
@@ -249,6 +257,15 @@ def test_an_upsert_of_a_summarized_ticket_falls_back() -> None:
     make_planner_node(rt)({"request": "x"}, config_for("r"))
     assert len(tx.requests) == 3 and _is_delta(tx.requests[1])
     assert PLANNER_SOP_KEY in json.dumps(tx.requests[2])
+
+
+def test_a_small_plan_lets_the_delta_fix_a_ticket_no_finding_names() -> None:
+    fix = _delta(tickets=[{**PLAN["tickets"][1], "scenarios": [
+        {**PLAN["tickets"][1]["scenarios"][0], "covers": ["MH-1", "SC-1"]},
+    ]}])
+    rt, tx = runtime_for(_uncovered(), fix, PLAN)
+    make_planner_node(rt)({"request": "x"}, config_for("r"))
+    assert len(tx.requests) == 2 and _is_delta(tx.requests[1])
 
 
 def _flagged(plan: dict[str, Any]) -> dict[str, Any]:
@@ -480,9 +497,15 @@ def test_an_epic_delta_keeps_tickets_inside_known_epics() -> None:
 
 def test_a_contract_name_with_spaces_marks_its_tickets_affected() -> None:
     items = [_item("A", implements=["POST /users"]), _item("B", consumes=["POST /users"]),
-             _item("C")]
+             *(_item(f"C{n}") for n in range(8))]
     finding = "Contract POST /users is implemented by 2 tickets; exactly one may."
     assert _affected([finding], items, ["POST /users"]) == {"A", "B"}
+
+
+def test_a_small_plan_goes_to_the_delta_whole() -> None:
+    items = [_item("T1", "S1"), _item("contracts-2")]
+    finding = "Feature ticket contracts-2 has no scenarios; fold it into the ticket it serves."
+    assert _affected([finding], items, []) == {"T1", "contracts-2"}
 
 
 def test_criteria_problems_mirror_the_spec_gate() -> None:

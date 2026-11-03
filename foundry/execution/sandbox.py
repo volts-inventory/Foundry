@@ -26,6 +26,14 @@ Credentials       endpoints live in namespaces the adapter   env allowlist; deny
                                                               ANTHROPIC_*/... and
                                                               HOME redirected to a
                                                               sandbox-local dir
+Python env        only writable mount is the task worktree   private venv first
+                  (Foundry's environment mounted read-only)   on PATH, Foundry's
+                                                              venv bin dropped:
+                                                              installs land in the
+                                                              sandbox, NOT Foundry
+                                                              (no fence: a command
+                                                              naming Foundry's venv
+                                                              path still reaches it)
 ================  =========================================  ====================
 
 The *logic* is correct (kill the whole process group, allowlist not denylist
@@ -49,16 +57,22 @@ turn snapshots survive `destroy()` for the rebuilt sandbox to `restore()` from.
 from __future__ import annotations
 
 import contextlib
+import ensurepip
 import hashlib
 import os
 import resource
 import shutil
 import signal
+import site
 import subprocess
+import sys
+import sysconfig
 import tempfile
 import threading
 import time
 import uuid
+import venv
+import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -144,6 +158,83 @@ def _tmp_name(digest: str) -> str:
     a uuid make the staging path unique; the final publish stays content-addressed.
     """
     return f".tmp-{digest}-{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex}"
+
+
+def _foundry_venv_bin() -> Path | None:
+    """Foundry's own virtualenv ``bin`` (None when Foundry runs on a bare interpreter).
+
+    Under ``uv run`` it heads the inherited PATH, so a sandboxed ``python -m pip`` /
+    ``uv pip`` would install into FOUNDRY'S environment."""
+    if sys.prefix == sys.base_prefix:
+        return None
+    return Path(sys.prefix) / "bin"
+
+
+def _without_dir(path_value: str, drop: Path) -> str:
+    target = os.path.realpath(drop)
+    return os.pathsep.join(
+        p for p in path_value.split(os.pathsep) if p and os.path.realpath(p) != target
+    )
+
+
+def _write_shim(path: Path, argv: Sequence[str]) -> None:
+    quoted = " ".join("'" + a.replace("'", "'\\''") + "'" for a in argv)
+    path.write_text(f'#!/bin/sh\nexec {quoted} "$@"\n', encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _is_python_script(path: Path) -> bool:
+    # Covers a plain ``#!.../python`` shebang and the ``#!/bin/sh`` + ``'''exec'``
+    # polyglot installers write when the interpreter path is too long for a shebang.
+    try:
+        with path.open("rb") as f:
+            head = f.read(512)
+    except OSError:
+        return False
+    return head.startswith(b"#!") and b"python" in b"\n".join(head.split(b"\n")[:2])
+
+
+def _build_python_env(dest: Path) -> None:
+    """A private virtualenv at ``dest`` layered READ-ONLY over Foundry's packages.
+
+    * Foundry's site-packages are appended to the venv's ``sys.path`` by a ``.pth``
+      of plain paths, so the project's tools (pytest, pytest-bdd, mypy) import from
+      the same packages the gates run on. Plain paths, not ``addsitedir``: the
+      ``.pth`` files inside (Foundry's editable install) are not processed, so
+      ``foundry`` itself stays off the path, as it does in the gate harness.
+    * Installs land in the venv and shadow those packages; pip never uninstalls a
+      distribution outside ``sys.prefix``, so Foundry's copies are left alone.
+    * pip is unpacked from the interpreter's bundled wheel (~40ms) rather than via
+      ``ensurepip`` (~1s, a pip subprocess) — every ticket builds a sandbox.
+    * Foundry's console scripts get shims that run them on the venv's python, so
+      ``pytest`` / ``mypy`` see the venv's installs; native tools are linked.
+    """
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(dest)
+    paths = {"base": str(dest), "platbase": str(dest)}
+    purelib = Path(sysconfig.get_path("purelib", vars=paths))
+    host_sites = [p for p in dict.fromkeys(site.getsitepackages()) if Path(p).is_dir()]
+    (purelib / "_foundry_host_site.pth").write_text(
+        "".join(f"{p}\n" for p in host_sites), encoding="utf-8"
+    )
+    bundled = Path(ensurepip.__file__).parent / "_bundled"
+    wheel = next(bundled.glob(f"pip-{ensurepip.version()}-*.whl"))
+    with zipfile.ZipFile(wheel) as zf:
+        zf.extractall(purelib)
+    bin_dir = dest / "bin"
+    python = str(bin_dir / "python")
+    for name in ("pip", "pip3", f"pip{sys.version_info[0]}.{sys.version_info[1]}"):
+        _write_shim(bin_dir / name, (python, "-m", "pip"))
+    host_bin = _foundry_venv_bin()
+    if host_bin is None:
+        return
+    for entry in sorted(host_bin.iterdir()):
+        target = bin_dir / entry.name
+        if target.exists() or not entry.is_file() or not os.access(entry, os.X_OK):
+            continue
+        if _is_python_script(entry):
+            _write_shim(target, (python, str(entry)))
+        else:
+            target.symlink_to(entry)
 
 
 @dataclass(frozen=True)
@@ -236,6 +327,8 @@ class Sandbox:
         self.worktree = self._root / "worktree"
         self._home = self._root / "home"  # HOME redirect: no ~/.aws, ~/.netrc, ...
         self._home.mkdir()
+        # The sandbox's own Python environment, built on first run (see run()).
+        self._pyenv = self._root / "pyenv"
         shutil.copytree(Path(source_dir), self.worktree, symlinks=True)
         if self._home_passthrough:
             self._copy_claude_session()
@@ -267,7 +360,15 @@ class Sandbox:
             from foundry.gates.sandbox import toolchain_env
 
             env.update({k: v for k, v in toolchain_env().items() if not _denied(k)})
-        env.setdefault("PATH", os.defpath)
+        path = env.get("PATH", os.defpath)
+        host_bin = _foundry_venv_bin()
+        if host_bin is not None:
+            path = _without_dir(path, host_bin)
+        env["PATH"] = os.pathsep.join(p for p in (str(self._pyenv / "bin"), path) if p)
+        env["VIRTUAL_ENV"] = str(self._pyenv)
+        # Foundry's site-packages are on the sandbox's sys.path: an import must not
+        # write __pycache__ into them.
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["HOME"] = str(self._home)
         if self.proxy_endpoint is not None:
             env[PROXY_ENV_VAR] = self.proxy_endpoint
@@ -336,6 +437,12 @@ class Sandbox:
         callback is advisory: an exception from it can't touch the run.
         """
         self._check_alive()
+        if not self._pyenv.exists():
+            try:
+                _build_python_env(self._pyenv)
+            except BaseException:
+                shutil.rmtree(self._pyenv, ignore_errors=True)  # never run on a half-built env
+                raise
         argv = ["/bin/sh", "-c", cmd] if isinstance(cmd, str) else list(cmd)
         timeout = self._wall_clock_timeout_s if timeout_s is None else timeout_s
         cpu = self._cpu_seconds if cpu_seconds is None else cpu_seconds

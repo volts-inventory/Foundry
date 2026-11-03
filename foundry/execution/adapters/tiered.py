@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ESCALATED_TRIAGE",
+    "ESCALATE_DECLINED_TRIAGE",
     "ESCALATE_REQUEST_TRIAGE",
     "TieredAdapter",
     "session_stop_reason",
@@ -42,6 +43,8 @@ __all__ = [
 # request for one.
 ESCALATED_TRIAGE = "escalated"
 ESCALATE_REQUEST_TRIAGE = "escalate-request"
+# A request the work pool's quota refused: settled without spending the escalation.
+ESCALATE_DECLINED_TRIAGE = "escalate-declined"
 # How a proxy-agent session reports that it ended without finishing.
 _STOP_MARKERS = ("stopped early:", "turn budget exhausted")
 

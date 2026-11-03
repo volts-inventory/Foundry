@@ -55,12 +55,14 @@ from foundry.agents.implementation.junior_engineer import (
     _sandbox_for,
     pinned_texts,
     ready_tasks,
+    touched_files,
 )
 from foundry.agents.implementation.personas import persona_for
 from foundry.agents.implementation.senior_engineer import NODE_ID as SENIOR_NODE_ID
 from foundry.canonical import content_digest
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
 from foundry.execution.adapters.tiered import (
+    ESCALATE_DECLINED_TRIAGE,
     ESCALATE_REQUEST_TRIAGE,
     ESCALATED_TRIAGE,
     session_stop_reason,
@@ -282,7 +284,14 @@ def pending_escalations(state: FactoryState, resolve: ArtifactResolver) -> tuple
     asked = {t.run_against.removeprefix("task/") for t in state.get("gate_triage") or ()
              if t.name == ESCALATE_REQUEST_TRIAGE}
     planned = {task_id_for_ticket(t.id) for t in read_tickets(state, resolve)}
-    return tuple(sorted((asked & planned) - escalated_task_ids(state)))
+    return tuple(sorted((asked & planned) - _escalation_settled(state)))
+
+
+def _escalation_settled(state: FactoryState) -> set[str]:
+    """Tickets whose escalation is spent, or whose request the quota declined."""
+    declined = {t.run_against.removeprefix("task/") for t in state.get("gate_triage") or ()
+                if t.name == ESCALATE_DECLINED_TRIAGE}
+    return escalated_task_ids(state) | declined
 
 
 def _latest_built_wave(
@@ -301,44 +310,48 @@ def _latest_built_wave(
 
 
 def escalation_candidates(
-    state: FactoryState, resolve: ArtifactResolver, rt: AgentRuntime
+    state: FactoryState,
+    resolve: ArtifactResolver,
+    rt: AgentRuntime,
+    ticket_tiers: Mapping[Any, str] | None = None,
 ) -> tuple[str, ...]:
     """The local-tier tickets of the newest wave to re-run on the cloud level after
     the wave check failed twice: those the failing gates name (a failing scenario
-    or one of the ticket's files), else every local ticket of that wave. Tickets
-    that already escalated never are again."""
+    or one of the ticket's files). With none named, every local ticket of that wave,
+    but only while nothing in the wave has escalated: the whole-wave fallback runs
+    at most once. Settled tickets (:func:`_escalation_settled`) never are again.
+    ``ticket_tiers`` is the engineering node's difficulty -> tier table."""
     if escalation_target(rt) is None:
         return ()
     tickets = read_tickets(state, resolve)
-    tiers = {t.id: t.tier for t in ready_tasks(state)}
-    spent = escalated_task_ids(state)
+    settled = _escalation_settled(state)
     wave = [t for t in _latest_built_wave(tickets, _built_task_ids(state),
                                           _skipped_task_ids(state))
-            if task_id_for_ticket(t.id) not in spent
-            and _is_local(rt, tiers.get(task_id_for_ticket(t.id)))]
+            if _is_local(rt, tier_for(t.difficulty, ticket_tiers))]
+    fresh = [t for t in wave if task_id_for_ticket(t.id) not in settled]
     findings = [line for g in _failed_gates(state) for line in g.findings]
     scenarios = {m.group(1) for line in findings if (m := _BDD_FINDING.match(line))}
+    tokens = {tok for line in findings for tok in _PATH_TOKEN.findall(line)}
 
-    def named(t: Ticket) -> bool:
-        return bool(scenarios & set(t.scenario_ids)) or any(
-            f.rstrip("/") in line for f in t.files for line in findings)
+    def names_file(f: str) -> bool:
+        if f.endswith("/"):
+            return any(tok.startswith(f) or f"/{f}" in tok for tok in tokens)
+        return any(tok == f or tok.endswith(f"/{f}") for tok in tokens)
 
-    chosen = [t for t in wave if named(t)] or wave
+    named = [t for t in fresh
+             if scenarios & set(t.scenario_ids) or any(names_file(f) for f in t.files)]
+    if named:
+        chosen = named
+    elif any(task_id_for_ticket(t.id) in settled for t in wave):
+        chosen = []
+    else:
+        chosen = fresh
     return tuple(task_id_for_ticket(t.id) for t in chosen)
 
 
-def _touched(diff_uri: str, task_id: str, blobs: BlobResolver | None) -> str:
-    from foundry.graph.gate_wiring import MaterializationError, _diff_ops
-
-    if blobs is None:
-        return "unknown files"
-    probe = FeatureDiff(diff_uri=diff_uri, task_id=task_id, branch=f"task/{task_id}",
-                        base_tree_sha="", seq=Seq("escalate", 0, 0, NODE_ID, 0))
-    try:
-        ops = _diff_ops(probe, blobs)
-    except (MaterializationError, KeyError, FileNotFoundError):
-        return "an unreadable diff"
-    return ", ".join(sorted({*ops.writes, *ops.deletes, *ops.patches})) or "no files"
+# A path-like token in a gate finding: "app.py" in "app.py:3: error" or in
+# "tests/test_app.py::test_x" is a whole token; "webapp.py" never matches "app.py".
+_PATH_TOKEN = re.compile(r"[\w./-]+")
 
 
 def _escalation_context(
@@ -457,7 +470,9 @@ def _is_lockfile_of(path: str, manifest: str) -> bool:
     return m_dir == p_dir and p_name in _LOCKFILES.get(m_name, ())
 
 
-def _result_ops(result: AdapterResult, sandbox: Sandbox, task_id: str) -> _DiffOps | None:
+def _result_ops(
+    result: AdapterResult, get_blob: BlobResolver, task_id: str
+) -> _DiffOps | None:
     """The adapter diff's ops, or None for an unparseable body (integration fails it)."""
     from foundry.graph.gate_wiring import MaterializationError, _diff_ops
 
@@ -466,7 +481,7 @@ def _result_ops(result: AdapterResult, sandbox: Sandbox, task_id: str) -> _DiffO
         base_tree_sha="", seq=Seq("scope", 0, 0, NODE_ID, 0),
     )
     try:
-        return _diff_ops(probe, sandbox.get_blob)
+        return _diff_ops(probe, get_blob)
     except MaterializationError:
         return None
 
@@ -482,7 +497,7 @@ def note_fix_writes(
     """Triage the fixer's kept writes: one note for the paths outside ``focus`` (the
     built tickets' files; empty = no focus, nothing is outside it) and one per
     contract file it changed. Notes only — the writes stay in the diff."""
-    ops = _result_ops(result, sandbox, task_id)
+    ops = _result_ops(result, sandbox.get_blob, task_id)
     if ops is None:
         return result
     touched = set(ops.writes) | set(ops.deletes) | set(ops.patches)
@@ -520,7 +535,7 @@ def trim_to_write_scope(
     sandbox's base file so the trimmed body is a self-contained full-file snapshot."""
     from foundry.graph.gate_wiring import MaterializationError, _apply_hunks
 
-    ops = _result_ops(result, sandbox, task_id)
+    ops = _result_ops(result, sandbox.get_blob, task_id)
     if ops is None:
         return result
     touched = set(ops.writes) | set(ops.deletes) | set(ops.patches)
@@ -1202,7 +1217,8 @@ def make_engineering_node(
         for t in tickets:
             sp = t.specialty.value
             weights[sp] = weights.get(sp, 0) + 1
-            if task_id_for_ticket(t.id) in done:
+            # A ticket rebuilt on the cloud level replaces its own estimate.
+            if task_id_for_ticket(t.id) in done and task_id_for_ticket(t.id) not in requested:
                 spent[sp] = spent.get(sp, 0) + cost_budget_microusd
         quota = QuotaPolicy(
             ledger=BudgetLedger(cap_microusd=cap),
@@ -1212,11 +1228,19 @@ def make_engineering_node(
         )
 
         bases: dict[str, str] = {}
-        escalations: dict[str, str] = {}  # task id -> why it escalated
+        escalations: dict[str, str] = {}  # task id -> why it escalated (admitted only)
+        reasons: dict[str, str] = {}
         rebuild: dict[str, tuple[str, ...]] = {}
         merged: dict[str, list[Any]] = {}
         if requested:
-            from foundry.graph.gate_wiring import FEATURE_DIFF_KIND, _fix_attempts, _of_kind
+            from foundry.graph.gate_wiring import (
+                FEATURE_DIFF_KIND,
+                MaterializationError,
+                _diff_ops,
+                _fix_attempts,
+                _of_kind,
+                _resolve_typed,
+            )
 
             fix_context = (
                 *_fix_summary(state, resolve, blobs or (lambda _u: b""),
@@ -1229,13 +1253,19 @@ def make_engineering_node(
             newest = {a.task_id: a for a in sorted(_of_kind(state, FEATURE_DIFF_KIND),
                                                    key=lambda a: a.seq)}
             for tid in requested:
-                escalations[tid] = asked.get(tid, "the wave check failed twice")
+                reasons[tid] = asked.get(tid, "the wave check failed twice")
                 diff = newest.get(tid)
+                touched = "no files"
+                if diff is not None and blobs is not None:
+                    try:
+                        touched = touched_files(_diff_ops(
+                            _resolve_typed(diff, resolve, FeatureDiff, FEATURE_DIFF_KIND),
+                            blobs))
+                    except MaterializationError:
+                        touched = "an unreadable diff"
                 rebuild[tid] = _escalation_context(
-                    tier=tasks[tid].tier if tid in tasks else None, target=str(target),
-                    reason=escalations[tid],
-                    touched=_touched(_resolve_diff_uri(diff, resolve), tid, blobs)
-                    if diff is not None else "no files",
+                    tier=tasks[tid].tier, target=str(target),
+                    reason=reasons[tid], touched=touched,
                     reported=[t.explanation for t in sorted(state.get("gate_triage") or (),
                                                             key=lambda t: t.seq)
                               if t.run_against == f"task/{tid}" and t.name == "adapter-report"],
@@ -1283,8 +1313,10 @@ def make_engineering_node(
                 )
                 if tid in rebuild:
                     packet = _escalated_packet(packet, str(target), rebuild[tid])
-                    progress.log(f"escalate {tid}: {tasks[tid].tier} -> {target} "
-                                 f"({escalations[tid][:120]})")
+                elif target and tid in already and _is_local(rt, tasks[tid].tier):
+                    # Its escalation is spent and its local attempt was discarded: a
+                    # retry stays on the cloud level rather than repeat the local stop.
+                    packet = _escalated_packet(packet, target, packet.prior_failures)
                 packets[tid] = packet
                 etask = ExecutionTask(
                     packet=packet, adapter=adapter_name, lineage=ticket.specialty.value,
@@ -1293,11 +1325,25 @@ def make_engineering_node(
                 try:
                     submitted[tid] = pool.submit(etask)
                 except BudgetExceededError as exc:
+                    if tid in rebuild:  # already built: decline the escalation, keep it
+                        progress.log(f"escalation of {tid} not admitted: {exc}")
+                        merged.setdefault("gate_triage", []).append(GateTriage(
+                            name=ESCALATE_DECLINED_TRIAGE, run_against=f"task/{tid}",
+                            explanation=f"escalation not admitted: {exc}"[:2000],
+                            produced_by=NODE_ID,
+                            seq=rt.seq(config, NODE_ID, f"declined:{tid}"),
+                        ))
+                        continue
                     merged.setdefault("gate_triage", []).append(GateTriage(
                         name=SKIP_TRIAGE, run_against=f"task/{tid}",
                         explanation=f"not built: {exc}", produced_by=NODE_ID,
                         seq=rt.seq(config, NODE_ID, f"skip:{tid}"),
                     ))
+                    continue
+                if tid in rebuild:
+                    escalations[tid] = reasons[tid]
+                    progress.log(f"escalate {tid}: {tasks[tid].tier} -> {target} "
+                                 f"({reasons[tid][:120]})")
             results: dict[str, AdapterResult | Exception] = {}
             for tid, pool_id in submitted.items():
                 try:
@@ -1320,8 +1366,7 @@ def make_engineering_node(
                         continue
                     ctx = _escalation_context(
                         tier=tasks[tid].tier, target=target, reason=reason,
-                        touched=_touched(got.diff_uri, tid, blobs)
-                        if isinstance(got, AdapterResult) else "none of its files",
+                        touched=_local_touched(got, tid, blobs),
                         reported=[t.explanation for t in got.triage]
                         if isinstance(got, AdapterResult) else [],
                         kept=False, failures=prior,
@@ -1408,6 +1453,12 @@ def _escalated_packet(packet: TaskPacket, target: str, context: tuple[str, ...])
     })
 
 
-def _resolve_diff_uri(handle: Artifact, resolve: ArtifactResolver) -> str:
-    body = resolve(handle)
-    return str(body.diff_uri) if isinstance(body, FeatureDiff) else ""
+def _local_touched(
+    got: AdapterResult | Exception, task_id: str, blobs: BlobResolver | None
+) -> str:
+    if not isinstance(got, AdapterResult):
+        return "none of its files"
+    if blobs is None:
+        return "unknown files"
+    ops = _result_ops(got, blobs, task_id)
+    return touched_files(ops) if ops is not None else "an unreadable diff"

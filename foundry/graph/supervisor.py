@@ -325,7 +325,7 @@ def build_supervisor_graph(
         workers=workers, ticket_tiers=ticket_tiers, on_task=on_task,
         wave_check=WaveBuildCheck(
             rt, runner, resolve, resolve_blob,
-            max_fix_attempts=max_fix_attempts, profile=profile,
+            max_fix_attempts=max_fix_attempts, profile=profile, ticket_tiers=ticket_tiers,
         ),
     ).compile()
     quality = build_quality_subgraph(rt, resolve=resolve, resolve_blob=resolve_blob).compile()

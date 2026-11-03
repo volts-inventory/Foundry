@@ -12,15 +12,22 @@ from typing import Any
 import pytest
 
 from foundry.agents import AgentRuntime
+from foundry.agents.implementation.tickets import (
+    escalation_candidates,
+    make_engineering_node,
+    pending_escalations,
+    task_from_ticket,
+)
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
 from foundry.execution.adapters.tiered import ESCALATED_TRIAGE, TieredAdapter
 from foundry.execution.sandbox import Sandbox
-from foundry.graph.gate_wiring import materialize_workdir
+from foundry.graph.gate_wiring import BUILD_BOUNDARY, failing_streak, materialize_workdir
 from foundry.modes import escalation_tier, preset_levels
 from foundry.proxy.model_provider_proxy import TIER_MODELS
 from foundry.proxy.token_meter import TokenMeter
-from foundry.schemas.gates import GateStatus, GateTriage
+from foundry.schemas.base import Artifact
+from foundry.schemas.gates import GateResult, GateStatus, GateTriage, VerdictClass
 from foundry.schemas.implementation import Ticket
 from foundry.state.factory_state import FactoryState
 from foundry.state.seq import Seq
@@ -142,14 +149,17 @@ def test_the_escalated_diff_is_the_one_integrated(tmp_path: Path) -> None:
     assert (tree / "a.py").read_text() == "cloud\n"
 
 
-def test_a_ticket_escalates_at_most_once(tmp_path: Path) -> None:
-    # The cloud attempt crashes; the retry runs locally, stops again, and is kept
-    # as it is rather than escalating a second time.
+def test_a_failed_escalation_retries_on_the_cloud_and_never_escalates_again(
+    tmp_path: Path,
+) -> None:
+    # The cloud attempt crashes. Its escalation is spent and the local attempt was
+    # discarded, so the retry stays on the cloud level instead of demoting to local.
     local = _Session(stop={"T-001": TURN_CAP})
     cloud = _Session(fail_on={"T-001": 1})
     out = _build(tmp_path, _tiered(cloud, local), [_ticket("T-001", 0, files=("a.py",))])
-    assert cloud.calls == ["T-001!"]
-    assert local.tiers == [("T-001", "T2"), ("T-001", "T2")]
+    assert cloud.calls == ["T-001!", "T-001"]
+    assert cloud.tiers == [("T-001", "T1"), ("T-001", "T1")]
+    assert local.tiers == [("T-001", "T2")]
     assert set(_diffs(out)) == {"T-001"}
     assert len([t for t in out["gate_triage"] if t.name == ESCALATED_TRIAGE]) == 1
 
@@ -254,3 +264,126 @@ def test_without_an_escalation_tier_a_twice_failing_check_never_escalates(
                             tickets=_two_waves())
     assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "fixer", "wave_gate"]
     assert not [t for t in out["gate_triage"] if t.name.startswith("escalate")]
+
+
+# ---- who a twice-failing wave check escalates ------------------------------------
+
+
+def _check_state(
+    store: ArtifactStore, tickets: list[Ticket], *findings: str, escalated: tuple[str, ...] = (),
+    tasks: list[dict[str, Any]] | None = None,
+) -> FactoryState:
+    diffs = [Artifact(kind="feature_diff", uri=f"cas://feature_diff/{t.id}",
+                      produced_by="junior_engineer", task_id=t.id, seq=Seq("run", 1, 1, "e", i))
+             for i, t in enumerate(tickets)]
+    gate = GateResult(name="build", status=GateStatus.FAIL, decision_deterministic=True,
+                      execution_deterministic=True,
+                      verdict_class=VerdictClass.EXECUTION_DETERMINISTIC,
+                      findings=findings, run_against="tree-2", seq=Seq("run", 1, 9, "g", 0))
+    notes = [GateTriage(name=ESCALATED_TRIAGE, run_against=f"task/{tid}", explanation="x",
+                        produced_by="engineering", seq=Seq("run", 1, 1, "e", 0))
+             for tid in escalated]
+    return _state(store, tickets, artifacts=diffs, gates=[gate], gate_triage=notes,
+                  tasks=tasks or [])
+
+
+def _candidates(state: FactoryState, store: ArtifactStore, **kw: Any) -> tuple[str, ...]:
+    rt = AgentRuntime(proxy=None, adapter=_tiered(_Session(), _Session()), cas=store)  # type: ignore[arg-type]
+    return escalation_candidates(state, store.resolve, rt, **kw)
+
+
+def _pair() -> list[Ticket]:
+    return [_ticket("T-001", 0, files=("app.py",)), _ticket("T-002", 1, files=("webapp.py",))]
+
+
+def test_the_whole_wave_fallback_runs_at_most_once() -> None:
+    store = ArtifactStore()
+    unnamed = "SyntaxError: invalid syntax"
+    assert _candidates(_check_state(store, _pair(), unnamed), store) == ("T-001", "T-002")
+    # Once the named ticket has escalated, an unnamed failure escalates nobody else.
+    after = _check_state(store, _pair(), "app.py:1: error", unnamed, escalated=("T-001",))
+    assert _candidates(after, store) == ()
+    # A ticket the failures name still can.
+    named = _check_state(store, _pair(), "webapp.py:3: error", escalated=("T-001",))
+    assert _candidates(named, store) == ("T-002",)
+
+
+@pytest.mark.parametrize(("finding", "named"), [
+    ("webapp.py:3: SyntaxError", ("T-002",)),
+    ("FAILED tests/test_app.py::test_add - assert 1 == 2", ("T-001", "T-002")),  # fallback
+    ("  File \"/tmp/w/src/app.py\", line 2", ("T-001",)),
+    ("app.py:1: error: Name 'x' is not defined", ("T-001",)),
+])
+def test_a_ticket_is_named_only_by_a_whole_path(finding: str, named: tuple[str, ...]) -> None:
+    store = ArtifactStore()
+    assert _candidates(_check_state(store, _pair(), finding), store) == named
+
+
+def test_candidates_read_the_tier_the_engineering_node_uses() -> None:
+    from foundry.schemas.implementation import Difficulty
+
+    store = ArtifactStore()
+    tickets = [_ticket("T-001", 0, files=("app.py",), difficulty=Difficulty.COMPLEX)]
+    # A stale tasks-channel record says T2; the ticket's difficulty says T1 (cloud).
+    stale = [{**task_from_ticket(tickets[0], Seq("run", 1, 1, "s", 0)).model_dump(mode="json"),
+              "tier": "T2"}]
+    state = _check_state(store, tickets, "app.py:1: error", tasks=stale)
+    assert _candidates(state, store) == ()
+    assert _candidates(state, store, ticket_tiers={"complex": "T2"}) == ("T-001",)
+
+
+def _verdict(tree: str, local: int, status: GateStatus) -> GateResult:
+    return GateResult(name="build", status=status, decision_deterministic=True,
+                      execution_deterministic=True,
+                      verdict_class=VerdictClass.EXECUTION_DETERMINISTIC,
+                      findings=("x",), run_against=tree, seq=Seq("run", 1, local, "g", 0))
+
+
+def test_only_code_failures_count_toward_the_failing_streak() -> None:
+    fail, error, ok = GateStatus.FAIL, GateStatus.ERROR, GateStatus.PASS
+    assert failing_streak({"gates": [_verdict("a", 1, fail), _verdict("b", 2, fail)]},
+                          boundary=BUILD_BOUNDARY) == 2
+    # Infra errors / flake quarantines are not code failures.
+    assert failing_streak({"gates": [_verdict("a", 1, error), _verdict("b", 2, error)]},
+                          boundary=BUILD_BOUNDARY) == 0
+    assert failing_streak({"gates": [_verdict("a", 1, fail), _verdict("b", 2, error)]},
+                          boundary=BUILD_BOUNDARY) == 0
+    # A FAIL superseded by a newer PASS on the same tree no longer counts.
+    assert failing_streak({"gates": [_verdict("a", 1, fail), _verdict("b", 2, fail),
+                                     _verdict("b", 3, ok)]}, boundary=BUILD_BOUNDARY) == 0
+
+
+# ---- a requested rebuild and the work pool's quota -------------------------------
+
+
+def _requested(tmp_path: Path, **node_kw: Any) -> tuple[FactoryState, _Session]:
+    store = ArtifactStore()
+    local, cloud = _Session(), _Session()
+    rt = _runtime(_tiered(cloud, local), store)
+    built = _graph(rt, store, tmp_path).compile().invoke(
+        _state(store, [_ticket("T-001", 0, files=("a.py",))]), _config())
+    ask = GateTriage(name="escalate-request", run_against="task/T-001",
+                     explanation="the wave check failed twice in a row (build)",
+                     produced_by="build_gate", seq=Seq("run", 1, 1, "build_gate", 0))
+    state = {**built, "gate_triage": [*built["gate_triage"], ask]}
+    node = make_engineering_node(rt, source_dir=str(tmp_path / "src"), resolve=store.resolve,
+                                 resolve_blob=store.resolve_blob, **node_kw)
+    out = node(state, _config())
+    merged: FactoryState = {**state, "gate_triage": [*state["gate_triage"],
+                                                     *out.get("gate_triage", [])]}
+    assert pending_escalations(merged, store.resolve) == ()  # settled either way
+    return out, cloud
+
+
+def test_a_rebuild_replaces_the_tickets_quota_estimate(tmp_path: Path) -> None:
+    # The cap fits one ticket: the rebuild must not be counted on top of the build.
+    out, cloud = _requested(tmp_path, cost_budget_microusd=100, cost_cap_microusd=100)
+    assert cloud.tiers == [("T-001", "T1")]
+    assert [t.name for t in out["gate_triage"]] .count(ESCALATED_TRIAGE) == 1
+
+
+def test_a_rebuild_the_quota_refuses_is_declined_not_spent(tmp_path: Path) -> None:
+    out, cloud = _requested(tmp_path, cost_budget_microusd=100, cost_cap_microusd=50)
+    assert cloud.tiers == []
+    names = {t.name for t in out.get("gate_triage", [])}
+    assert names == {"escalate-declined"}  # no ESCALATED, no SKIP for a built ticket

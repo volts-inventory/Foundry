@@ -16,8 +16,9 @@ so any caller that skips ``for_tier`` gets the scrubbed cage (fail closed).
 Escalation (hybrid only): ``escalation_tier`` names the cloud level a local ticket
 re-runs on once when the local model can't finish it. This adapter only declares
 it and recognizes a local session that stopped (:func:`session_stop_reason`); the
-engineering node owns the re-run, so it gets a fresh sandbox built for the cloud
-tier and is admitted through the work pool like any other session.
+engineering node keeps a stopped session's work (marked :data:`STOPPED_TRIAGE`
+for the next wave check) and owns any re-run, so it gets a fresh sandbox built
+for the cloud tier and is admitted through the work pool like any other session.
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ __all__ = [
     "ESCALATED_TRIAGE",
     "ESCALATE_DECLINED_TRIAGE",
     "ESCALATE_REQUEST_TRIAGE",
+    "STOPPED_TRIAGE",
     "TieredAdapter",
     "session_stop_reason",
 ]
@@ -45,6 +47,9 @@ ESCALATED_TRIAGE = "escalated"
 ESCALATE_REQUEST_TRIAGE = "escalate-request"
 # A request the work pool's quota refused: settled without spending the escalation.
 ESCALATE_DECLINED_TRIAGE = "escalate-declined"
+# A local session that stopped early but whose partial work was kept for the wave
+# check: a failing check escalates it on its first failure instead of its second.
+STOPPED_TRIAGE = "stopped-early"
 # How a proxy-agent session reports that it ended without finishing.
 _STOP_MARKERS = ("stopped early:", "turn budget exhausted")
 

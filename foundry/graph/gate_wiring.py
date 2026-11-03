@@ -1898,7 +1898,9 @@ class WaveBuildCheck:
     In hybrid mode a check that fails twice in a row asks for the newest wave's
     local tickets (those the failures name, else all of them) to re-run once on
     the cloud level (``escalate-request`` triage; :data:`ESCALATE` routes back to
-    the engineering node), before any further fixer pass or a halt.
+    the engineering node), before any further fixer pass or a halt. A ticket whose
+    kept local session stopped early (turn cap, repeat/read-thrash) is asked for on
+    the FIRST failure that names it (or, alone in its wave, on any first failure).
 
     With ``check_scenarios`` the check also runs the Test gate scoped to the
     scenarios whose tickets are all built (:func:`wave_scenarios`), so an unbound or
@@ -1946,17 +1948,28 @@ class WaveBuildCheck:
             "budget": out.get("budget") or state.get("budget") or BudgetLedger(),
         }
         decision = self._route(post, config, boundary)
-        if decision != ADVANCE and failing_streak(post, boundary=boundary) >= 2:
-            from foundry.agents.implementation.tickets import escalation_candidates
+        streak = failing_streak(post, boundary=boundary) if decision != ADVANCE else 0
+        if streak >= 1:
+            from foundry.agents.implementation.tickets import (
+                escalation_candidates,
+                stopped_tickets,
+            )
             from foundry.execution.adapters.tiered import ESCALATE_REQUEST_TRIAGE
 
-            failed = sorted({g.name for g in out.get("gates") or ()
-                             if g.status in (GateStatus.FAIL, GateStatus.ERROR)})
+            failed = ", ".join(sorted({g.name for g in out.get("gates") or ()
+                                       if g.status in (GateStatus.FAIL, GateStatus.ERROR)}))
+            # A ticket whose local session stopped early escalates on the first
+            # failure; any other waits for a second.
+            stops = stopped_tickets(state)
             for tid in escalation_candidates({**state, "gates": post["gates"]},
-                                             self.resolve, self.rt, self.ticket_tiers):
+                                             self.resolve, self.rt, self.ticket_tiers,
+                                             stopped_only=streak < 2):
+                why = (f"the wave check failed twice in a row ({failed})" if streak >= 2
+                       else f"the wave check failed ({failed}) after the local session "
+                            f"stopped early: {stops[tid]}")
                 out.setdefault("gate_triage", []).append(GateTriage(
                     name=ESCALATE_REQUEST_TRIAGE, run_against=f"task/{tid}",
-                    explanation=f"the wave check failed twice in a row ({', '.join(failed)})",
+                    explanation=why[:2000],
                     produced_by=_BUILD_NODE,
                     seq=self.rt.seq(config, _BUILD_NODE, f"{ESCALATE_REQUEST_TRIAGE}:{tid}"),
                 ))

@@ -1,7 +1,8 @@
-"""Escalation cascade (Phase 5): in hybrid mode a local ticket that can't finish —
-its session hit the turn cap, the repeat/read-thrash detector stopped it, or its
-wave check failed twice — re-runs once on the cloud level, with what was tried.
-Cloud and local modes never escalate."""
+"""Escalation cascade (Phase 5): in hybrid mode a local ticket that can't finish
+re-runs once on the cloud level, with what was tried: at once when its session
+wrote none of its files; on the first failing wave check when its session stopped
+early (turn cap, repeat/read-thrash detector) and kept its partial work; else when
+its wave check failed twice. Cloud and local modes never escalate."""
 
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ from foundry.agents.implementation.tickets import (
     escalation_candidates,
     make_engineering_node,
     pending_escalations,
+    stopped_tickets,
     task_from_ticket,
 )
 from foundry.durability.artifact_store import ArtifactStore
@@ -110,43 +112,52 @@ def test_only_a_mixed_level_table_has_an_escalation_tier() -> None:
     assert escalation_tier(table("local")) is None
 
 
-# ---- in-session triggers: turn cap, early stop ---------------------------------
+# ---- in-session triggers: turn cap, early stop, an empty session ----------------
+
+
+def _local_tree(out: FactoryState, store: ArtifactStore, tmp_path: Path) -> Path:
+    tree = tmp_path / "tree"
+    materialize_workdir(out, tree, resolve=store.resolve, resolve_blob=store.resolve_blob)
+    return tree
 
 
 @pytest.mark.parametrize("reason", [TURN_CAP, REPEAT, THRASH])
-def test_a_local_session_that_cannot_finish_reruns_once_on_the_cloud(
+def test_a_stopped_local_session_keeps_its_work_and_is_marked(
     tmp_path: Path, reason: str,
 ) -> None:
+    # No wave check follows (none configured): the stop is left to the supervisor's
+    # gates and its cloud fixer, never re-run on the cloud level here.
+    store = ArtifactStore()
     local = _Session(stop={"T-001": reason}, writes={"T-001": {"a.py": "local\n"}})
-    cloud = _Session(writes={"T-001": {"a.py": "cloud\n"}})
-    out = _build(tmp_path, _tiered(cloud, local),
-                 [_ticket("T-001", 0, files=("a.py",)), _ticket("T-002", 1, files=("b.py",))])
-    assert sorted(local.tiers) == [("T-001", "T2"), ("T-002", "T2")]
-    assert cloud.tiers == [("T-001", "T1")]  # only the stopped ticket, on the cloud level
-    context = cloud.packets["T-001"].prior_failures
-    assert context[0] == "[escalation]"
-    assert any(reason[:40] in line and "T2" in line for line in context)
-    assert any(line.startswith("the earlier attempt touched:") and "a.py" in line
-               for line in context)
-    assert any(line.startswith("the earlier attempt reported:") for line in context)
-    # The cloud attempt's diff replaces the local one.
+    cloud = _Session()
+    out = _graph(_runtime(_tiered(cloud, local), store), store, tmp_path).compile().invoke(
+        _state(store, [_ticket("T-001", 0, files=("a.py",)),
+                       _ticket("T-002", 1, files=("b.py",))]), _config())
+    assert cloud.tiers == []
+    assert _escalated(out) == {}
     assert set(_diffs(out)) == {"T-001", "T-002"}
-    assert "from T2 to T1" in _escalated(out)["task/T-001"]
-    assert set(_escalated(out)) == {"task/T-001"}
+    assert (_local_tree(out, store, tmp_path) / "a.py").read_text() == "local\n"
+    assert stopped_tickets(out) == {"T-001": reason}
     concerns = [c for j in out["agent_journal"] if j.node_id == "engineering"
                 for c in j.concerns]
-    assert any(c.startswith("T-001 escalated from T2 to T1") for c in concerns)
+    assert any(c.startswith("T-001 stopped early on T2, its partial work kept") for c in concerns)
 
 
-def test_the_escalated_diff_is_the_one_integrated(tmp_path: Path) -> None:
-    store = ArtifactStore()
-    local = _Session(stop={"T-001": TURN_CAP}, writes={"T-001": {"a.py": "local\n"}})
+def test_a_session_that_wrote_none_of_its_files_escalates_at_once(tmp_path: Path) -> None:
+    local = _Session(silent=frozenset({"T-001"}))
     cloud = _Session(writes={"T-001": {"a.py": "cloud\n"}})
+    store = ArtifactStore()
     out = _graph(_runtime(_tiered(cloud, local), store), store, tmp_path).compile().invoke(
         _state(store, [_ticket("T-001", 0, files=("a.py",))]), _config())
-    tree = tmp_path / "tree"
-    materialize_workdir(out, tree, resolve=store.resolve, resolve_blob=store.resolve_blob)
-    assert (tree / "a.py").read_text() == "cloud\n"
+    assert local.tiers == [("T-001", "T2")]
+    assert cloud.tiers == [("T-001", "T1")]
+    context = cloud.packets["T-001"].prior_failures
+    assert context[0] == "[escalation]"
+    assert any("wrote none of the ticket's files" in line and "T2" in line for line in context)
+    assert any("writes were discarded" in line for line in context)
+    assert "from T2 to T1" in _escalated(out)["task/T-001"]
+    assert stopped_tickets(out) == {}
+    assert (_local_tree(out, store, tmp_path) / "a.py").read_text() == "cloud\n"
 
 
 def test_a_failed_escalation_retries_on_the_cloud_and_never_escalates_again(
@@ -154,7 +165,7 @@ def test_a_failed_escalation_retries_on_the_cloud_and_never_escalates_again(
 ) -> None:
     # The cloud attempt crashes. Its escalation is spent and the local attempt was
     # discarded, so the retry stays on the cloud level instead of demoting to local.
-    local = _Session(stop={"T-001": TURN_CAP})
+    local = _Session(silent=frozenset({"T-001"}))
     cloud = _Session(fail_on={"T-001": 1})
     out = _build(tmp_path, _tiered(cloud, local), [_ticket("T-001", 0, files=("a.py",))])
     assert cloud.calls == ["T-001!", "T-001"]
@@ -199,7 +210,7 @@ def test_escalated_calls_are_charged_to_the_cloud_budget(tmp_path: Path) -> None
     cloud_tx, local_tx = RecordingTransport(), RecordingTransport()
     proxy = _hybrid(cloud_tx, local_tx)
     proxy.token_meter = TokenMeter(10_000)
-    local = _Session(stop={"T-001": TURN_CAP}, proxy=proxy)
+    local = _Session(silent=frozenset({"T-001"}), proxy=proxy)
     cloud = _Session(proxy=proxy)
     store = ArtifactStore()
     rt = AgentRuntime(proxy=proxy, adapter=_tiered(cloud, local), cas=store)
@@ -387,3 +398,102 @@ def test_a_rebuild_the_quota_refuses_is_declined_not_spent(tmp_path: Path) -> No
     assert cloud.tiers == []
     names = {t.name for t in out.get("gate_triage", [])}
     assert names == {"escalate-declined"}  # no ESCALATED, no SKIP for a built ticket
+
+
+# ---- a stopped session and the wave check ---------------------------------------
+
+
+def test_a_stopped_ticket_whose_wave_check_passes_never_escalates(tmp_path: Path) -> None:
+    local = _Session(stop={"T-001": TURN_CAP},
+                     writes={"T-001": {"app.py": "def one():\n    return 1\n"},
+                             "T-002": {"app.py": "def two():\n    return 2\n"}})
+    cloud = _Session()
+    out, ran, _ = _wave_run(tmp_path, _tiered(cloud, local), tickets=_two_waves())  # type: ignore[arg-type]
+    assert ran == ["engineering", "wave_gate", "engineering"]
+    assert cloud.tiers == []
+    assert _builds(out) == [GateStatus.PASS]
+    assert stopped_tickets(out) == {"T-001": TURN_CAP}
+    assert _escalated(out) == {}
+    assert not [t for t in out["gate_triage"] if t.name.startswith("escalate")]
+    # T-002 built on T-001's kept local work.
+    assert local.seen["T-002"]["app.py"] == "def one():\n    return 1\n"
+
+
+def test_a_stopped_ticket_escalates_on_the_first_failing_wave_check(tmp_path: Path) -> None:
+    local = _Session(stop={"T-001": TURN_CAP},
+                     writes={"T-001": {"app.py": "def broken(:\n"},
+                             "T-002": {"app.py": "def two():\n    return 2\n"}})
+    cloud = _Session(writes={"T-001": {"app.py": "def one():\n    return 1\n"}})
+    out, ran, _ = _wave_run(tmp_path, _tiered(cloud, local), tickets=_two_waves())  # type: ignore[arg-type]
+    # No fixer pass first: the failing check escalates straight away.
+    assert ran == ["engineering", "wave_gate", "engineering", "wave_gate", "engineering"]
+    assert cloud.tiers == [("T-001", "T1")]
+    assert _builds(out) == [GateStatus.FAIL, GateStatus.PASS]
+    context = cloud.packets["T-001"].prior_failures
+    assert context[0] == "[escalation]"
+    assert any("stopped early" in line and TURN_CAP[:30] in line for line in context)
+    assert any("holds that attempt" in line for line in context)
+    assert any(line.startswith("the earlier attempt touched:") and "app.py" in line
+               for line in context)
+    assert "failed gates: build" in context
+    assert cloud.seen["T-001"]["app.py"] == "def broken(:\n"  # built on the kept work
+    assert set(_escalated(out)) == {"task/T-001"}
+    assert len([t for t in out["gate_triage"] if t.name == "escalate-request"]) == 1
+
+
+def test_a_final_wave_stop_keeps_its_work_and_never_escalates(tmp_path: Path) -> None:
+    # No wave check runs after the last wave: the supervisor's gates (and its cloud
+    # fixer, on T1 in hybrid) judge the kept work.
+    local = _Session(stop={"T-002": TURN_CAP},
+                     writes={"T-001": {"app.py": "def one():\n    return 1\n"},
+                             "T-002": {"app.py": "def two(:\n"}})
+    cloud = _Session()
+    out, ran, store = _wave_run(tmp_path, _tiered(cloud, local), tickets=_two_waves())  # type: ignore[arg-type]
+    assert ran == ["engineering", "wave_gate", "engineering"]
+    assert cloud.tiers == []
+    assert _escalated(out) == {}
+    assert stopped_tickets(out) == {"T-002": TURN_CAP}
+    assert (_local_tree(out, store, tmp_path) / "app.py").read_text() == "def two(:\n"
+
+
+def test_the_stop_marker_survives_a_resume(tmp_path: Path) -> None:
+    # Wave 1 builds and the process ends before its check; a new process resuming
+    # the checkpoint re-runs that check, which still knows T-001 stopped early.
+    store = ArtifactStore()
+    local = _Session(stop={"T-001": TURN_CAP}, writes={"T-001": {"app.py": "def broken(:\n"}})
+    first_cloud = _Session()
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "README.md").write_text("base\n")
+    node = make_engineering_node(_runtime(_tiered(first_cloud, local), store),
+                                 source_dir=str(tmp_path / "src"), resolve=store.resolve,
+                                 resolve_blob=store.resolve_blob)
+    built = node(_state(store, _two_waves()), _config())
+    assert stopped_tickets(built) == {"T-001": TURN_CAP}  # type: ignore[arg-type]
+    assert first_cloud.tiers == []
+
+    cloud = _Session(writes={"T-001": {"app.py": "def one():\n    return 1\n"}})
+    out, ran, _ = _wave_run(
+        tmp_path, _tiered(cloud, _Session()), tickets=_two_waves(), store=store,  # type: ignore[arg-type]
+        artifacts=built["artifacts"], gate_triage=built["gate_triage"],
+        tasks=built["tasks"], phase="resume",
+    )
+    assert ran == ["wave_gate", "engineering", "wave_gate", "engineering"]
+    assert cloud.tiers == [("T-001", "T1")]
+    assert set(_escalated(out)) == {"task/T-001"}
+
+
+def test_a_first_failure_picks_only_named_stopped_tickets() -> None:
+    store = ArtifactStore()
+    stop = GateTriage(name="stopped-early", run_against="task/T-001", explanation=TURN_CAP,
+                      produced_by="engineering", seq=Seq("run", 1, 1, "e", 1))
+
+    def first(*findings: str, tickets: list[Ticket] | None = None) -> tuple[str, ...]:
+        state = _check_state(store, tickets or _pair(), *findings)
+        state = {**state, "gate_triage": [*state["gate_triage"], stop]}
+        return _candidates(state, store, stopped_only=True)
+
+    assert first("app.py:1: error") == ("T-001",)
+    assert first("webapp.py:3: error") == ()  # T-002 did not stop: it waits for a second
+    assert first("SyntaxError: invalid syntax") == ()  # unnamed, two tickets in the wave
+    # Alone in its wave, a stopped ticket escalates whatever the failure says.
+    assert first("SyntaxError", tickets=[_ticket("T-001", 0, files=("app.py",))]) == ("T-001",)

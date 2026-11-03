@@ -104,6 +104,7 @@ __all__ = [
     "BUILD_TEST_SMOKE_BOUNDARY",
     "CRITERIA_CRITIQUE_KIND",
     "CRITERION_KIND",
+    "ESCALATE",
     "FEATURE_DIFF_KIND",
     "FeatureDiffBodyError",
     "MaterializationError",
@@ -112,6 +113,7 @@ __all__ = [
     "WaveBuildCheck",
     "bump_fix_attempts",
     "contract_paths",
+    "failing_streak",
     "fix_cap",
     "flake_quarantined",
     "gate_profile",
@@ -1574,6 +1576,9 @@ _BOUNDARY_GATES: dict[str, frozenset[str]] = {
 ADVANCE = "advance"  # all relevant gates PASS — proceed to the next phase
 FIX = "fix"  # a FAIL/ERROR within the convergence bound — back to the layer
 HALT = "halt"  # bound exhausted or a stable-FAIL latch — escalate / stop
+# Hybrid only: the wave check failed twice; re-run its local tickets once on the
+# cloud level (WaveBuildCheck.route; never returned by route_after_gates).
+ESCALATE = "escalate"
 
 
 def _relevant_latest(
@@ -1775,6 +1780,22 @@ def _unchanged_tree_recheck(
     return bool(old) and bool(prev) and bool(cur)
 
 
+def failing_streak(state: FactoryState, *, boundary: str) -> int:
+    """How many of the newest trees in a row fail ``boundary`` (one verdict per tree
+    and gate; a tree with any FAIL/ERROR verdict counts)."""
+    names = _BOUNDARY_GATES[boundary]
+    trees: dict[str, list[GateResult]] = {}
+    for g in state.get("gates") or ():
+        if g.name in names:
+            trees.setdefault(g.run_against, []).append(g)
+    streak = 0
+    for verdicts in sorted(trees.values(), key=lambda v: max(g.seq for g in v), reverse=True):
+        if not any(g.status in (GateStatus.FAIL, GateStatus.ERROR) for g in verdicts):
+            break
+        streak += 1
+    return streak
+
+
 def no_fix_progress(state: FactoryState, config: RunnableConfig, *, boundary: str) -> bool:
     """True iff the newest tree fails ``boundary`` on exactly what the tree before it
     failed on, after a fix pass in between: the fixer made no progress.
@@ -1867,6 +1888,11 @@ class WaveBuildCheck:
     gets ``max_fix_attempts - 1`` fixer passes (the default 3 gives 2), and every
     build-side fix also counts toward :func:`fix_cap`, the run-wide bound.
 
+    In hybrid mode a check that fails twice in a row asks for the newest wave's
+    local tickets (those the failures name, else all of them) to re-run once on
+    the cloud level (``escalate-request`` triage; :data:`ESCALATE` routes back to
+    the engineering node), before any further fixer pass or a halt.
+
     With ``check_scenarios`` the check also runs the Test gate scoped to the
     scenarios whose tickets are all built (:func:`wave_scenarios`), so an unbound or
     failing scenario reaches the wave's fixer instead of piling up for the final gate.
@@ -1910,7 +1936,22 @@ class WaveBuildCheck:
             "gates": merge_gates(state.get("gates"), out.get("gates")),
             "budget": out.get("budget") or state.get("budget") or BudgetLedger(),
         }
-        if self._route(post, config, boundary) == FIX and (
+        decision = self._route(post, config, boundary)
+        if decision != ADVANCE and failing_streak(post, boundary=boundary) >= 2:
+            from foundry.agents.implementation.tickets import escalation_candidates
+            from foundry.execution.adapters.tiered import ESCALATE_REQUEST_TRIAGE
+
+            failed = sorted({g.name for g in out.get("gates") or ()
+                             if g.status in (GateStatus.FAIL, GateStatus.ERROR)})
+            for tid in escalation_candidates({**state, "gates": post["gates"]},
+                                             self.resolve, self.rt):
+                out.setdefault("gate_triage", []).append(GateTriage(
+                    name=ESCALATE_REQUEST_TRIAGE, run_against=f"task/{tid}",
+                    explanation=f"the wave check failed twice in a row ({', '.join(failed)})",
+                    produced_by=_BUILD_NODE,
+                    seq=self.rt.seq(config, _BUILD_NODE, f"{ESCALATE_REQUEST_TRIAGE}:{tid}"),
+                ))
+        if decision == FIX and (
                 no_fix_progress(post, config, boundary=boundary)
                 or _unchanged_tree_recheck(state, out, config, boundary=boundary)):
             [build] = [g for g in out["gates"] if g.name == "build"]
@@ -1931,12 +1972,17 @@ class WaveBuildCheck:
                                  total_cap=fix_cap(state, self.resolve, self.max_fix_attempts))
 
     def route(self, state: FactoryState, config: RunnableConfig) -> str:
-        """:func:`route_after_gates`, except a fix pass that made no progress
+        """:func:`route_after_gates`, except a pending escalation request routes
+        :data:`ESCALATE`, and a fix pass that made no progress
         (:func:`no_fix_progress`, or the :data:`NO_FIX_PROGRESS_TRIAGE` ``run``
         recorded on this tree for a fix that changed nothing) halts as a spent bound
         does."""
+        from foundry.agents.implementation.tickets import pending_escalations
+
         boundary = self._boundary(state)
         decision = self._route(state, config, boundary)
+        if decision != ADVANCE and pending_escalations(state, self.resolve):
+            return ESCALATE
         if decision == FIX and (no_fix_progress(state, config, boundary=boundary)
                                 or self._stopped_on_current_tree(state, config)):
             return HALT

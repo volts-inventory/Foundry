@@ -46,6 +46,7 @@ __all__ = [
     "MODEL_MODES",
     "Level",
     "build_level_proxy",
+    "escalation_tier",
     "level_lineage",
     "local_tiers",
     "parse_levels",
@@ -165,6 +166,16 @@ def resolve_levels(
 
 def local_tiers(levels: Mapping[str, Level]) -> frozenset[str]:
     return frozenset(t for t, lvl in levels.items() if lvl.local)
+
+
+def escalation_tier(levels: Mapping[str, Level]) -> str | None:
+    """The cloud level a local ticket escalates to once (the strongest cloud tier),
+    or None when the table is all cloud or all local: either way there is no
+    stronger level to escalate to."""
+    cloud = [t for t in LEVEL_TIERS if t in levels and not levels[t].local]
+    if not cloud or len(cloud) == len(levels):
+        return None
+    return cloud[0]
 
 
 def level_lineage(levels: Mapping[str, Level]) -> LineageMap:

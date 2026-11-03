@@ -80,6 +80,7 @@ from foundry.modes import (
     MODEL_MODES,
     Level,
     build_level_proxy,
+    escalation_tier,
     local_tiers,
     resolve_levels,
 )
@@ -430,7 +431,8 @@ def _level_adapter(
     """The coding substrate under a level table: a ticket on a cloud level runs the
     run's cloud adapter (claude-code under claude-cli) with the cloud levels'
     models; a ticket on a local level runs proxy-agent through the local server,
-    one session at a time."""
+    one session at a time. In a mixed (hybrid) table a local ticket that can't
+    finish re-runs once on the strongest cloud level."""
     from foundry.execution.adapters.tiered import TieredAdapter
 
     local = make_coding_adapter("proxy-agent", proxy=proxy, thread_id=thread_id)
@@ -443,7 +445,7 @@ def _level_adapter(
             tier_models=cloud_models,
         )
     return TieredAdapter(cloud=cloud, local=local, local_tiers=local_tiers(levels),
-                         local_slot=proxy.local_slot)
+                         local_slot=proxy.local_slot, escalation_tier=escalation_tier(levels))
 
 
 # Spec ingestion (task [8]). A whole-run cap on the design-spec text seeded into

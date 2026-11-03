@@ -151,7 +151,7 @@ def test_lineage_revision_is_content_derived():
 
 
 def judge_once(proxy: ModelProviderProxy, *, nonce: str = "nonce-1",
-               failing_checks: tuple[str, ...] = ()):
+               failing: tuple[tuple[str, ...], tuple[str, ...]] = ((), ())):
     return proxy.judge(
         "review_node",
         "cas://artifact/abc",
@@ -160,7 +160,8 @@ def judge_once(proxy: ModelProviderProxy, *, nonce: str = "nonce-1",
         "REVIEW SOP",
         [{"role": "user", "content": "review this diff"}],
         seq=make_seq("review_node"),
-        failing_checks=failing_checks,
+        failing_gates=failing[0],
+        failing_tests=failing[1],
     )
 
 
@@ -198,15 +199,16 @@ def _finding(text: str, **evidence: str) -> dict[str, str]:
             "actual": "", **evidence}
 
 
-def _judge_findings(findings: list[object], failing: tuple[str, ...] = ()) -> GateResult:
+def _judge_findings(findings: list[object],
+                    failing: tuple[tuple[str, ...], tuple[str, ...]] = ((), ())) -> GateResult:
     transport = FakeTransport(
         text=json.dumps({"status": "request-changes", "findings": findings})
     )
     proxy, _ = make_proxy(transport)
-    return judge_once(proxy, failing_checks=failing).gate_result
+    return judge_once(proxy, failing=failing).gate_result
 
 
-_FAILING = ("test", "tests/test_a.py::test_x", "test_x")
+_FAILING = (("test",), ("tests/test_a.py::test_x",))
 
 
 def test_request_changes_verdict_maps_to_fail_with_findings(verifier, installed):
@@ -219,7 +221,7 @@ def test_request_changes_verdict_maps_to_fail_with_findings(verifier, installed)
 
 @pytest.mark.parametrize("evidence", [
     {"failing_check": "test"},  # the failing gate by name
-    {"failing_check": "TEST_X"},  # the failing test by its short id
+    {"failing_check": "TEST_X"},  # the failing test by its unique short id
     {"command": "pytest tests/test_a.py::test_x"},  # the command names it
 ])
 def test_a_finding_citing_a_failing_check_blocks(verifier, installed, evidence):
@@ -259,6 +261,45 @@ def test_mixed_findings_block_on_the_backed_one_and_keep_the_rest_advisory(verif
     ], _FAILING)
     assert g.status == GateStatus.FAIL
     assert [f.startswith(ADVISORY_PREFIX) for f in g.findings] == [True, True, False, True]
+
+
+def _blocks(failing: tuple[tuple[str, ...], tuple[str, ...]], **evidence: str) -> bool:
+    return _judge_findings([_finding("f", **evidence)], failing).status == GateStatus.FAIL
+
+
+def test_a_parametrized_test_id_is_matched_whole():
+    failing: tuple[tuple[str, ...], tuple[str, ...]] = ((), ("tests/t.py::test_add[1-2]",))
+    assert _blocks(failing, failing_check="tests/t.py::test_add[1-2]")
+    assert _blocks(failing, command="pytest 'tests/t.py::test_add[1-2]' -q")
+    assert not _blocks(failing, failing_check="tests/t.py::test_add[3-4]")
+
+
+@pytest.mark.parametrize(("evidence", "blocks"), [
+    ({"failing_check": " Security "}, True),  # the whole failing_check is the gate
+    ({"failing_check": "security concern in parser"}, False),
+    ({"command": "npm test"}, False),
+    ({"command": "security"}, False),  # a gate name counts only as failing_check
+])
+def test_a_gate_name_counts_only_as_the_whole_failing_check(verifier, installed,
+                                                            evidence, blocks):
+    assert _blocks((("security", "test"), ()), **evidence) is blocks
+
+
+def test_a_short_id_matches_only_when_unique_and_the_citation_is_unqualified():
+    both = ((), ("features/T1.feature::S001", "features/T2.feature::S001"))
+    assert not _blocks(both, failing_check="S001")  # ambiguous: names neither
+    assert _blocks(both, failing_check="features/T2.feature::S001")
+    one = ((), ("features/T1.feature::S001",))
+    assert _blocks(one, failing_check="S001")
+    assert not _blocks(one, failing_check="features/T2.feature::S001")  # qualified elsewhere
+    assert not _blocks(((), ("a/test_x.py::test_add", "b/test_y.py::test_add")),
+                       command="pytest -k test_add")
+
+
+def test_the_evidence_label_names_the_id_that_matched():
+    g = _judge_findings([_finding("broken", failing_check="S009",
+                                  command="pytest tests/test_a.py::test_x")], _FAILING)
+    assert g.findings == ("broken [evidence: failing tests/test_a.py::test_x]",)
 
 
 def test_a_reproduction_with_differing_results_blocks(verifier, installed):

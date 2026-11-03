@@ -1992,20 +1992,21 @@ class WaveBuildCheck:
         decision = self._route(post, config, boundary)
         streak = failing_streak(post, boundary=boundary) if decision != ADVANCE else 0
         if streak >= 1:
-            from foundry.agents.implementation.tickets import (
-                escalation_candidates,
-                stopped_tickets,
+            from foundry.agents.implementation.tickets import escalation_pick, stopped_tickets
+            from foundry.execution.adapters.tiered import (
+                ESCALATE_FALLBACK_TRIAGE,
+                ESCALATE_REQUEST_TRIAGE,
             )
-            from foundry.execution.adapters.tiered import ESCALATE_REQUEST_TRIAGE
 
             failed = ", ".join(sorted({g.name for g in out.get("gates") or ()
                                        if g.status in (GateStatus.FAIL, GateStatus.ERROR)}))
             # A ticket whose local session stopped early escalates on the first
             # failure; any other waits for a second.
             stops = stopped_tickets(state)
-            for tid in escalation_candidates({**state, "gates": post["gates"]},
-                                             self.resolve, self.rt, self.ticket_tiers,
-                                             stopped_only=streak < 2):
+            picked, fallback = escalation_pick({**state, "gates": post["gates"]},
+                                               self.resolve, self.rt, self.ticket_tiers,
+                                               stopped_only=streak < 2)
+            for tid in picked:
                 why = (f"the wave check failed twice in a row ({failed})" if streak >= 2
                        else f"the wave check failed ({failed}) after the local session "
                             f"stopped early: {stops[tid]}")
@@ -2015,6 +2016,14 @@ class WaveBuildCheck:
                     produced_by=_BUILD_NODE,
                     seq=self.rt.seq(config, _BUILD_NODE, f"{ESCALATE_REQUEST_TRIAGE}:{tid}"),
                 ))
+                if fallback:
+                    out["gate_triage"].append(GateTriage(
+                        name=ESCALATE_FALLBACK_TRIAGE, run_against=f"task/{tid}",
+                        explanation="no failure named a ticket: the whole wave escalates",
+                        produced_by=_BUILD_NODE,
+                        seq=self.rt.seq(config, _BUILD_NODE,
+                                        f"{ESCALATE_FALLBACK_TRIAGE}:{tid}"),
+                    ))
         if decision == FIX and (
                 no_fix_progress(post, config, boundary=boundary)
                 or _unchanged_tree_recheck(state, out, config, boundary=boundary)):

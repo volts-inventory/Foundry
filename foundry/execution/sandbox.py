@@ -26,6 +26,14 @@ Credentials       endpoints live in namespaces the adapter   env allowlist; deny
                                                               ANTHROPIC_*/... and
                                                               HOME redirected to a
                                                               sandbox-local dir
+Python env        only writable mount is the task worktree   private venv first
+                  (Foundry's environment mounted read-only)   on PATH, Foundry's
+                                                              venv bin dropped:
+                                                              installs land in the
+                                                              sandbox, NOT Foundry
+                                                              (no fence: a command
+                                                              naming Foundry's venv
+                                                              path still reaches it)
 ================  =========================================  ====================
 
 The *logic* is correct (kill the whole process group, allowlist not denylist
@@ -63,6 +71,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from foundry.python_env import activation_env, build_python_env
 from foundry.state.tree_sha import normalized_source_tree
 
 __all__ = ["DEFAULT_ENV_ALLOWLIST", "GRANTABLE_MODEL_AUTH", "Sandbox", "SandboxResult"]
@@ -236,6 +245,8 @@ class Sandbox:
         self.worktree = self._root / "worktree"
         self._home = self._root / "home"  # HOME redirect: no ~/.aws, ~/.netrc, ...
         self._home.mkdir()
+        # The sandbox's own Python environment, built on first run (see run()).
+        self._pyenv = self._root / "pyenv"
         shutil.copytree(Path(source_dir), self.worktree, symlinks=True)
         if self._home_passthrough:
             self._copy_claude_session()
@@ -267,7 +278,7 @@ class Sandbox:
             from foundry.gates.sandbox import toolchain_env
 
             env.update({k: v for k, v in toolchain_env().items() if not _denied(k)})
-        env.setdefault("PATH", os.defpath)
+        env.update(activation_env(self._pyenv, env.get("PATH", os.defpath)))
         env["HOME"] = str(self._home)
         if self.proxy_endpoint is not None:
             env[PROXY_ENV_VAR] = self.proxy_endpoint
@@ -336,6 +347,12 @@ class Sandbox:
         callback is advisory: an exception from it can't touch the run.
         """
         self._check_alive()
+        if not self._pyenv.exists():
+            try:
+                build_python_env(self._pyenv)
+            except BaseException:
+                shutil.rmtree(self._pyenv, ignore_errors=True)  # never run on a half-built env
+                raise
         argv = ["/bin/sh", "-c", cmd] if isinstance(cmd, str) else list(cmd)
         timeout = self._wall_clock_timeout_s if timeout_s is None else timeout_s
         cpu = self._cpu_seconds if cpu_seconds is None else cpu_seconds

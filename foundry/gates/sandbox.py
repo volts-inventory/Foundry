@@ -126,7 +126,8 @@ _FENCE_SETUP_MARKER = "foundry-sandbox-fence: setup failed"
 _HIDDEN_HOME_PATHS: tuple[str, ...] = (
     ".ssh", ".aws", ".azure", ".config/gcloud", ".config/gh", ".config/git/credentials",
     ".docker", ".kube", ".gnupg", ".claude", ".claude.json", ".git-credentials",
-    ".netrc", ".npmrc", ".pypirc", ".cargo/credentials", ".cargo/credentials.toml",
+    ".netrc", ".npmrc", ".pypirc", ".pip", ".config/pip", ".cargo/credentials",
+    ".cargo/credentials.toml",
     ".m2/settings.xml", ".gradle/gradle.properties", ".ccr",
 )
 _HIDDEN_ABS_PATHS: tuple[str, ...] = ("/root/.ccr",)

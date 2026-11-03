@@ -16,13 +16,18 @@ toolchain is loudly not-a-verdict, never a silent PASS.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from foundry.schemas.gates import GateStatus, VerdictClass
 
 from .build import build_findings
 from .runner import ZoneAObservation, observe
 from .sandbox import ground_untrusted
+
+if TYPE_CHECKING:
+    from .pydeps import PythonBuildEnv
 
 __all__ = ["SmokeGate"]
 
@@ -41,8 +46,13 @@ class SmokeGate:
         *,
         timeout_s: float = 600.0,
         seal_key: bytes | None = None,
+        pyenv: PythonBuildEnv | None = None,
     ) -> None:
+        # A Python build with declared deps boots on its venv's python, which has them.
+        if pyenv is not None and cmd and cmd[0] == sys.executable:
+            cmd = (pyenv.python, *cmd[1:])
         self.cmd = cmd
+        self._pyenv = pyenv
         self._timeout_s = timeout_s
         self._seal_key = seal_key  # zone-A observation seal (None ⇒ unsealed channel)
         # Class-2 reuse-key bindings (§1f) — uniform key shape with Build/Test.
@@ -50,7 +60,11 @@ class SmokeGate:
         self.scanner_rule_version = "smoke-cmd-v3"  # v2 = confined sandbox; v3 = findings
 
     def execute(self, workdir: Path) -> ZoneAObservation:
-        rc, out, err = ground_untrusted(self.cmd, workdir, timeout_s=self._timeout_s)
+        rc, out, err = ground_untrusted(
+            self.cmd, workdir, timeout_s=self._timeout_s,
+            extra_env=self._pyenv.run_env() if self._pyenv is not None else None,
+            binds=self._pyenv.binds if self._pyenv is not None else (),
+        )
         return observe(
             self.name,
             exit_codes=(rc,),

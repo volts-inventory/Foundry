@@ -46,6 +46,7 @@ is heavier; the seam and the discriminator logic are real.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -57,6 +58,9 @@ from foundry.schemas.base import FrozenModel
 from foundry.schemas.gates import VerdictClass
 
 from .sandbox import ground_untrusted
+
+# Gate-owned paths outside the workdir the confined run sees (path, writable).
+Binds = tuple[tuple[Path, bool], ...]
 
 __all__ = [
     "BehavioralInvariant",
@@ -164,12 +168,12 @@ class TestSuiteDiscriminator:
 
     # ---- held-out mutants: a surviving mutant means a weak/gamed suite -------
 
-    def _run_suite(self, workdir: Path) -> int:
+    def _run_suite(self, workdir: Path, site: str | None = None, binds: Binds = ()) -> int:
         """Run the agent suite under the pinned harness; return the pytest rc."""
         # The agent's suite is untrusted code: same confinement as the Test gate.
+        env = {"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", **({"PYTHONPATH": site} if site else {})}
         rc, _out, _err = ground_untrusted(
-            self.cmd, workdir, extra_env={"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"},
-            timeout_s=self.timeout_s,
+            self.cmd, workdir, extra_env=env, binds=binds, timeout_s=self.timeout_s,
         )
         return rc
 
@@ -196,7 +200,9 @@ class TestSuiteDiscriminator:
         target.write_text(text.replace(mutant.find, mutant.replace, 1), encoding="utf-8")
         return True
 
-    def _kill_results(self, workdir: Path) -> tuple[int, int, list[str], list[str]]:
+    def _kill_results(
+        self, workdir: Path, site: str | None, binds: Binds
+    ) -> tuple[int, int, list[str], list[str]]:
         """For each held-out mutant: killed iff the suite FAILS against it."""
         killed = 0
         total = 0
@@ -213,7 +219,7 @@ class TestSuiteDiscriminator:
                     )
                     survived.append(mutant.mutant_id)
                     continue
-                rc = self._run_suite(dest)
+                rc = self._run_suite(dest, site, binds)
             # The suite KILLS the mutant iff it fails against the mutated tree.
             # A green run (or no tests collected) against mutated code means the
             # mutant survived — the suite tested nothing real.
@@ -229,14 +235,16 @@ class TestSuiteDiscriminator:
 
     # ---- behavioral invariance: the property the agent's tests didn't encode -
 
-    def _invariant_results(self, workdir: Path) -> tuple[int, list[str], list[str]]:
+    def _invariant_results(
+        self, workdir: Path, site: str | None, binds: Binds
+    ) -> tuple[int, list[str], list[str]]:
         """Check each golden input→output property against the REAL tree."""
         violated: list[str] = []
         findings: list[str] = []
         total = 0
         for inv in self.invariants:
             total += 1
-            ok, detail = _check_invariant(workdir, inv, self.timeout_s)
+            ok, detail = _check_invariant(workdir, inv, self.timeout_s, site, binds)
             if not ok:
                 violated.append(inv.invariant_id)
                 findings.append(f"invariant {inv.invariant_id!r} violated: {detail}")
@@ -244,11 +252,14 @@ class TestSuiteDiscriminator:
 
     # ---- the combined discriminator verdict (a pure observation) ------------
 
-    def evaluate(self, workdir: Path) -> DiscriminatorReport:
-        """Held-out-mutant kill score AND behavioral invariance over ``workdir``."""
+    def evaluate(
+        self, workdir: Path, *, site: str | None = None, binds: Binds = ()
+    ) -> DiscriminatorReport:
+        """Held-out-mutant kill score AND behavioral invariance over ``workdir``;
+        ``site`` / ``binds`` give the agent code the build's installed dependencies."""
         ratio = required_kill_ratio(self.verdict_class, bar=self.kill_bar)
-        killed, total, survived, kill_findings = self._kill_results(workdir)
-        inv_total, violated, inv_findings = self._invariant_results(workdir)
+        killed, total, survived, kill_findings = self._kill_results(workdir, site, binds)
+        inv_total, violated, inv_findings = self._invariant_results(workdir, site, binds)
 
         kill_score = 1.0 if total == 0 else killed / total
         kill_ok = kill_score >= ratio
@@ -267,7 +278,8 @@ class TestSuiteDiscriminator:
 
 
 def _check_invariant(
-    workdir: Path, inv: BehavioralInvariant, timeout_s: float
+    workdir: Path, inv: BehavioralInvariant, timeout_s: float,
+    site: str | None = None, binds: Binds = (),
 ) -> tuple[bool, str]:
     """Run one invariant in a child interpreter under the pinned env.
 
@@ -298,7 +310,9 @@ def _check_invariant(
     rc, _out, err = ground_untrusted(
         (sys.executable, "-c", script),
         workdir,
-        extra_env={"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "PYTHONPATH": str(workdir)},
+        extra_env={"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+                   "PYTHONPATH": os.pathsep.join(p for p in (str(workdir), site) if p)},
+        binds=binds,
         timeout_s=timeout_s,
     )
     if rc == 0:

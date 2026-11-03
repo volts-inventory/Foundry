@@ -296,7 +296,10 @@ def test_claude_code_sandboxes_get_the_toolchain_proxy_and_ca_settings(
         env = sandbox.scrubbed_env()
         assert env["HTTPS_PROXY"] == "http://proxy.example:3128"  # userinfo stripped
         assert env["NODE_EXTRA_CA_CERTS"] == "/etc/ca.pem"
-        assert "VIRTUAL_ENV" not in env and "AWS_SECRET_ACCESS_KEY" not in env
+        assert "AWS_SECRET_ACCESS_KEY" not in env
+        # The host's venv never leaks in; the sandbox's own one is the active venv.
+        assert env["VIRTUAL_ENV"] != "/host/venv"
+        assert env["PATH"].startswith(str(Path(env["VIRTUAL_ENV"]) / "bin"))
         assert env["HOME"] != str(Path.home())
         assert "HTTPS_PROXY" not in plain.scrubbed_env()  # opt-in per adapter
     finally:

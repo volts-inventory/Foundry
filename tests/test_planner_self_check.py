@@ -450,6 +450,15 @@ def test_the_merge_refuses_to_edit_a_summarized_ticket() -> None:
     assert _merge_delta(items, _delta(tickets=[_item("N", "S7")]), frozenset(), shown)
 
 
+def test_a_refused_delta_logs_why(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("FOUNDRY_PROGRESS", "1")
+    items = [_item("A", "S1"), _item("B", "S2")]
+    assert _merge_delta(items, _delta(tickets=[_item("B", "S9")]), frozenset(), {"A"}) is None
+    assert "planner delta rejected: it rewrites summary-only ticket(s) B" in capsys.readouterr().err
+
+
 def test_one_scenario_on_two_upserted_tickets_is_refused() -> None:
     items = [_item("A", "S1"), _item("B")]
     twice = _delta(tickets=[_item("A", "S5"), _item("B", "S5")])

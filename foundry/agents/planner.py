@@ -57,6 +57,7 @@ from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from foundry import progress
 from foundry.agents._common import (
     as_text,
     cas_uri,
@@ -3011,18 +3012,23 @@ def _merge_delta(
     removed = set(_strs(delta.get("remove_tickets")))
     dropped = set(_strs(delta.get("remove_scenarios")))
     if not (upserts or removed or dropped):
+        _rejected("it changes nothing")
         return None
     summarized = {i["id"] for i in items} - shown
-    if summarized & set(upserts):
+    if edited := summarized & set(upserts):
+        _rejected(f"it rewrites summary-only ticket(s) {', '.join(sorted(edited))}")
         return None
     listed: dict[str, str] = {}
     for tid, u in upserts.items():
         for s in _objs(u.get("scenarios")):
             sid = _str(s.get("id")).strip()
             if sid and listed.setdefault(sid, tid) != tid:
+                _rejected(f"it lists scenario {sid} on two tickets")
                 return None
     owner = {s["id"]: i["id"] for i in items for s in i["scenarios"]}
-    if any(owner.get(sid) in summarized for sid in (*listed, *dropped)):
+    if moved := [sid for sid in (*listed, *dropped) if owner.get(sid) in summarized]:
+        _rejected(f"it moves or removes scenario(s) {', '.join(moved)} "
+                         "of a summary-only ticket")
         return None
     out: dict[str, dict[str, Any]] = {
         i["id"]: {**i, "scenarios": [
@@ -3034,6 +3040,7 @@ def _merge_delta(
     for tid, u in upserts.items():
         epic = _EPIC_OF_TICKET.match(tid)
         if epic_ids and (epic is None or epic.group(1) not in epic_ids):
+            _rejected(f"ticket {tid} is outside the plan's epics")
             return None
         old = out.get(tid, {})
         new = _objs(u.get("scenarios"))
@@ -3050,7 +3057,15 @@ def _merge_delta(
                 d for d in _steps(entry.get("depends_on")) if d.startswith(f"{eid}-")
             ]
         out[tid] = entry
-    return list(out.values()) or None
+    if not out:
+        _rejected("it leaves no ticket")
+        return None
+    return list(out.values())
+
+
+def _rejected(why: str) -> None:
+    progress.log(f"planner delta rejected: {why}; re-planning in full")
+    return None
 
 
 def _patch_note(before: int) -> str:
@@ -3170,16 +3185,26 @@ def make_planner_node(
             # Only an unparseable reply falls back: a transport outage stays one.
             if not isinstance(exc.__cause__, StructuredOutputError):
                 raise
+            _rejected("its reply did not parse")
             return None
         merged = _merge_delta(items, delta, epic_ids, shown)
-        if merged is None or _strs(
-            _section(delta, "criteria_review").get("security_abuse_omissions")
-        ):
+        if merged is None:
+            return None
+        if _strs(_section(delta, "criteria_review").get("security_abuse_omissions")):
+            _rejected("it reports a security/abuse omission")
             return None
         fit = _assemble(merged, frame)
-        if (fit.blocking or fit.overflow
-                or not set(_structural_findings(fit.criteria)) <= structural):
+        if fit.blocking:
+            _rejected(f"{len(fit.blocking)} finding(s) still open: "
+                             + " | ".join(fit.blocking)[:400])
             return None
+        if fit.overflow:
+            _rejected("the merged plan drops work at a cap")
+            return None
+        if new := set(_structural_findings(fit.criteria)) - structural:
+            _rejected("new criteria problem(s): " + " | ".join(sorted(new))[:400])
+            return None
+        progress.log(f"planner delta accepted: {len(findings)} finding(s) closed")
         return fit
 
     def _draft(
@@ -3327,8 +3352,12 @@ def make_planner_node(
                 _ticket_epics(draft.fit.tickets) if draft.per_epic else {},
             )
             # An open review gap needs the full re-plan: the delta never sees it.
-            if (not draft.missing and not draft.omissions
-                    and _patchable(blocking, items, draft.frame, draft.fit.overflow)):
+            if draft.missing or draft.omissions:
+                progress.log("planner delta skipped: the review has an open gap")
+            elif not _patchable(blocking, items, draft.frame, draft.fit.overflow):
+                progress.log("planner delta skipped: a finding needs more than the tickets "
+                             "changed")
+            else:
                 fit = _patch(
                     state, notes, items,
                     [(_str(i.get("name")), _contract_text(i))
@@ -3670,12 +3699,14 @@ def make_planner_node(
         old = prior.critique
         # The delta never sees the review: an open gap needs the full re-plan.
         if old is not None and (old.security_abuse_omissions or old.missing):
+            progress.log("planner delta skipped: the review has an open gap")
             return None
         checked = (*old.contract_findings, *old.coverage_findings) if old else ()
         items = _ticket_items(prior.tickets, prior.criteria.values(), prior.epic_of)
         # Placeholder Seqs until the patch is accepted: a fallback mints its own.
         frame = _prior_frame(state, prior, prior.prd.seq, prior.prd.seq)
         if not _patchable(checked, items, frame, ()):
+            progress.log("planner delta skipped: a finding needs more than the tickets changed")
             return None
         fit = _patch(state, findings, items, prior.interfaces, frame, frozenset())
         if fit is None:

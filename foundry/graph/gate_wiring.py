@@ -73,7 +73,7 @@ from foundry.state.reducers import merge_gates
 from foundry.state.tree_sha import tree_sha
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Iterable, Mapping
 
     from langchain_core.runnables import RunnableConfig
 
@@ -1781,16 +1781,23 @@ def _unchanged_tree_recheck(
 
 
 def failing_streak(state: FactoryState, *, boundary: str) -> int:
-    """How many of the newest trees in a row fail ``boundary`` (one verdict per tree
-    and gate; a tree with any FAIL/ERROR verdict counts)."""
+    """How many of the newest trees in a row the code itself fails at ``boundary``:
+    a FAIL in the newest verdict per gate on the tree. ERROR (an infra error or a
+    flake quarantine, see :func:`_failure_signature`) is not a code failure and,
+    like a pass, ends the streak."""
     names = _BOUNDARY_GATES[boundary]
-    trees: dict[str, list[GateResult]] = {}
+    trees: dict[str, dict[str, GateResult]] = {}
     for g in state.get("gates") or ():
-        if g.name in names:
-            trees.setdefault(g.run_against, []).append(g)
+        if g.name not in names:
+            continue
+        newest = trees.setdefault(g.run_against, {})
+        if g.name not in newest or g.seq > newest[g.name].seq:
+            newest[g.name] = g
     streak = 0
-    for verdicts in sorted(trees.values(), key=lambda v: max(g.seq for g in v), reverse=True):
-        if not any(g.status in (GateStatus.FAIL, GateStatus.ERROR) for g in verdicts):
+    for verdicts in sorted(trees.values(), key=lambda v: max(g.seq for g in v.values()),
+                           reverse=True):
+        statuses = {g.status for g in verdicts.values()}
+        if GateStatus.FAIL not in statuses or GateStatus.ERROR in statuses:
             break
         streak += 1
     return streak
@@ -1908,6 +1915,8 @@ class WaveBuildCheck:
     max_fix_attempts: int = 3
     profile: VerificationProfile | None = None
     check_scenarios: bool = True
+    # The engineering node's difficulty -> tier table (escalation picks local tickets).
+    ticket_tiers: Mapping[Any, str] | None = None
 
     def _scenarios(self, state: FactoryState) -> frozenset[str]:
         if not self.check_scenarios:
@@ -1944,7 +1953,7 @@ class WaveBuildCheck:
             failed = sorted({g.name for g in out.get("gates") or ()
                              if g.status in (GateStatus.FAIL, GateStatus.ERROR)})
             for tid in escalation_candidates({**state, "gates": post["gates"]},
-                                             self.resolve, self.rt):
+                                             self.resolve, self.rt, self.ticket_tiers):
                 out.setdefault("gate_triage", []).append(GateTriage(
                     name=ESCALATE_REQUEST_TRIAGE, run_against=f"task/{tid}",
                     explanation=f"the wave check failed twice in a row ({', '.join(failed)})",

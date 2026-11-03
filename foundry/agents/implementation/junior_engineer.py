@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 
     from langchain_core.runnables import RunnableConfig
 
-    from foundry.graph.gate_wiring import BlobResolver
+    from foundry.graph.gate_wiring import BlobResolver, _DiffOps
     from foundry.state.factory_state import FactoryState
 
     # Reconstitutes a typed body from its content-addressed handle (the same INFRA
@@ -198,8 +198,7 @@ def _fix_summary(
         try:
             ops = _diff_ops(_resolve_typed(prev, resolve, FeatureDiff, FEATURE_DIFF_KIND),
                             resolve_blob)
-            touched = sorted({*ops.writes, *ops.deletes, *ops.patches})
-            files = ", ".join(touched) or "no files"
+            files = touched_files(ops)
         except MaterializationError:
             files = "an unreadable diff"
         out.append(f"previous fix pass ({prev.task_id}) touched {files} and left the "
@@ -209,6 +208,11 @@ def _fix_summary(
                    if t.run_against == f"task/{prev.task_id}")
     out.append("gate output (tail):")
     return tuple(out)
+
+
+def touched_files(ops: _DiffOps) -> str:
+    """The paths one diff writes, deletes or patches, for a model-facing summary."""
+    return ", ".join(sorted({*ops.writes, *ops.deletes, *ops.patches})) or "no files"
 
 
 def _build_packet(

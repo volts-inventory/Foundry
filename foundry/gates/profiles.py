@@ -51,6 +51,9 @@ class VerificationProfile:
     # Dependency install (shell line), run by BuildGate FIRST and the only gate step
     # with network; build/test/smoke then run offline. None = nothing to install.
     install_cmd: str | None = None
+    # A Python stack: its declared dependencies (requirements.txt / pyproject) are
+    # pip-installed into a per-build venv instead (``foundry.gates.pydeps``).
+    python: bool = False
     build_cmd: tuple[str, ...] | None = None
     test_cmd: tuple[str, ...] | None = None
     smoke_cmd: tuple[str, ...] | None = None  # runtime boot gate; None = no smoke gate
@@ -102,6 +105,11 @@ def lockfile_tolerant_install(install: str) -> str:
 
 
 # The pytest harness also executes the tickets' acceptance scenarios.
+_PY_INSTALL_CONTRACT = (
+    " INSTALL: the dependencies declared in requirements.txt / pyproject.toml "
+    "[project].dependencies are pip-installed into a per-build venv first (the ONLY "
+    "step with network); declare every third-party package the code imports."
+)
 _BDD_CONTRACT = (
     " BDD: every Scenario in features/<ticket>.feature (named by its criterion id) "
     "MUST be bound with pytest-bdd `scenarios(...)` and pass; the feature files "
@@ -112,19 +120,22 @@ _BDD_CONTRACT = (
 PROFILES: dict[str, VerificationProfile] = {
     "python": VerificationProfile(
         name="python",
+        python=True,
         contract_text=(
             "GATES: build = `python -m compileall -q .`; test = pytest (>=1 test "
-            "must pass)." + _BDD_CONTRACT
+            "must pass)." + _PY_INSTALL_CONTRACT + _BDD_CONTRACT
         ),
     ),
     "python-app": VerificationProfile(
         name="python-app",
+        python=True,
         smoke_cmd=(sys.executable, "smoke.py"),
         contract_text=(
             "GATES: build = compileall; test = pytest; smoke = `python smoke.py` — "
             "the repo MUST ship smoke.py that exercises the REAL app headless "
             "(start the service and hit one real endpoint in-process, or run the "
-            "CLI end-to-end on sample input) and exits 0 only on success." + _BDD_CONTRACT
+            "CLI end-to-end on sample input) and exits 0 only on success."
+            + _PY_INSTALL_CONTRACT + _BDD_CONTRACT
         ),
     ),
     "node-web": VerificationProfile(
@@ -159,12 +170,13 @@ PROFILES: dict[str, VerificationProfile] = {
     ),
     "pygame": VerificationProfile(
         name="pygame",
+        python=True,
         smoke_cmd=(sys.executable, "smoke.py"),
         contract_text=(
             "GATES: build = compileall; test = pytest; smoke = `python smoke.py` — "
             "the repo MUST ship smoke.py that sets SDL_VIDEODRIVER=dummy, boots the "
             "game, advances >=120 frames with scripted input, and exits 0 only if "
-            "no exception was raised." + _BDD_CONTRACT
+            "no exception was raised." + _PY_INSTALL_CONTRACT + _BDD_CONTRACT
         ),
     ),
     "love2d": VerificationProfile(
@@ -179,13 +191,14 @@ PROFILES: dict[str, VerificationProfile] = {
     ),
     "crypto": VerificationProfile(
         name="crypto",
+        python=True,
         contract_text=(
             "GATES: build = compileall; test = pytest — the suite MUST include "
             "known-answer tests (NIST/RFC vectors) for every primitive touched, a "
             "round-trip property (encrypt->decrypt identity), and a tamper test "
             "(modified ciphertext MUST fail authentication). Use vetted primitives "
             "(the `cryptography` package / libsodium); NEVER hand-roll ciphers, "
-            "modes, or KDFs; no ECB; no static IVs/nonces." + _BDD_CONTRACT
+            "modes, or KDFs; no ECB; no static IVs/nonces." + _PY_INSTALL_CONTRACT + _BDD_CONTRACT
         ),
     ),
     "go": VerificationProfile(
@@ -395,8 +408,8 @@ def stack_profile(stack: StackDecision) -> VerificationProfile:
     typecheck as one offline command, so a ticket that breaks an agreed contract
     fails the build with the type checker's own message. With a ``bdd`` command TEST
     runs ``test`` and the Cucumber runner; Python without one keeps the trusted
-    pinned pytest(-bdd) harness. Python never gets an install step: the gates run
-    its tests on the host interpreter, which the sandboxed install cannot write to."""
+    pinned pytest(-bdd) harness. Python's install is not a stack command: the
+    project's declared dependencies go into a per-build venv (``pydeps``)."""
     python = stack.language == "python"
     build = stack.build or (
         f"{shlex.quote(sys.executable)} -m compileall -q ." if python and stack.typecheck else ""
@@ -429,7 +442,9 @@ def stack_profile(stack: StackDecision) -> VerificationProfile:
         test_cmd=test_cmd,
         smoke_cmd=_sh(stack.run) if stack.run else None,
         contract_text="GATES: " + "; ".join(gates) + "."
+        + (_PY_INSTALL_CONTRACT if python else "")
         + (_BDD_CONTRACT if python and not stack.bdd else ""),
+        python=python,
         bdd_cmd=stack.bdd or None,
         test_unavailable=test_unavailable,
     )

@@ -49,6 +49,7 @@ from .runner import ZoneAObservation, observe
 
 if TYPE_CHECKING:
     from .discriminator import TestSuiteDiscriminator
+    from .pydeps import PythonBuildEnv
 
 __all__ = ["TestGate", "parse_pytest_summary"]
 
@@ -95,6 +96,7 @@ for _res, _lim in ((resource.RLIMIT_CPU, (300, 300)),
 """
 _ISOLATED_PYTEST_BOOTSTRAP = _BOOTSTRAP_PREAMBLE + """\
 from pytest import console_main
+sys.path[:0] = [p for p in os.environ.get("FOUNDRY_GATE_SITE", "").split(os.pathsep) if p]
 sys.path.insert(0, wd)
 sys.exit(console_main())
 """
@@ -136,6 +138,7 @@ def _probes(words):
 
 _dumps = json.dumps
 _execute_step = _bdd_scenario._execute_step_function
+sys.path[:0] = [p for p in os.environ.get("FOUNDRY_GATE_SITE", "").split(os.pathsep) if p]
 sys.path.insert(0, wd)
 
 
@@ -410,6 +413,7 @@ class TestGate:
         stack_harness: bool = False,
         profile_name: str = "",
         scope: frozenset[str] | None = None,
+        pyenv: PythonBuildEnv | None = None,
     ) -> None:
         # Default: the ISOLATED pinned harness (fences the host source off sys.path
         # so generated modules can't collide with / reach ours). An explicit cmd is
@@ -446,6 +450,8 @@ class TestGate:
         )
         self._timeout_s = timeout_s
         self._seal_key = seal_key  # zone-A observation seal (None ⇒ unsealed channel)
+        # A Python build's declared deps, installed by BuildGate into their own venv.
+        self._pyenv = pyenv
 
     def _env(self, workdir: Path, extra: dict[str, str] | None = None) -> dict[str, str]:
         # The gate-owned env, added on top of the sandbox's host-env allowlist: tell
@@ -458,6 +464,8 @@ class TestGate:
         root = _host_source_root()
         if root:
             env[_DENY_PATHS_ENV] = root
+        if self._pyenv is not None:
+            env.update(self._pyenv.run_env())
         return {**env, **(extra or {})}
 
     # ---- zone A: pinned harness execution, raw rc + summary ---------------
@@ -477,6 +485,8 @@ class TestGate:
         ours."""
         from .sandbox import ground_untrusted
 
+        if self._pyenv is not None:
+            binds = (*binds, *self._pyenv.binds)
         return ground_untrusted(
             cmd, workdir, extra_env=self._env(workdir, extra_env), binds=binds,
             timeout_s=self._timeout_s,
@@ -590,7 +600,10 @@ class TestGate:
         # FAIL/ERROR by exit code, so there is nothing to re-verify. The report
         # rides the sealed observation; zone B decides over it.
         if self._discriminator is not None and rc == 0:
-            report = self._discriminator.evaluate(workdir)
+            report = self._discriminator.evaluate(
+                workdir, site=self._pyenv.site if self._pyenv is not None else None,
+                binds=self._pyenv.binds if self._pyenv is not None else (),
+            )
             structured[DISCRIMINATOR_KEY] = report.model_dump(mode="json")
             findings = report.findings
         if bdd_dir is not None and self.bdd_cmd:

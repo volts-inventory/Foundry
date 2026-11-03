@@ -8,9 +8,10 @@ in ITS venv, never in Foundry's.
 
 from __future__ import annotations
 
-import ensurepip
+import importlib.util
 import os
 import site
+import subprocess
 import sys
 import sysconfig
 import venv
@@ -72,6 +73,55 @@ def _is_python_script(path: Path) -> bool:
     return head.startswith(b"#!") and b"python" in b"\n".join(head.split(b"\n")[:2])
 
 
+def _bundled_pip_dir() -> Path | None:
+    """``ensurepip``'s bundled-wheel directory; None when the interpreter ships no
+    ``ensurepip`` at all (Debian/Ubuntu without ``python3-venv``)."""
+    try:
+        import ensurepip
+    except ImportError:
+        return None
+    return Path(ensurepip.__file__).parent / "_bundled"
+
+
+def _host_has_pip() -> bool:
+    return importlib.util.find_spec("pip") is not None
+
+
+def _seed_pip(python: str, purelib: Path) -> None:
+    """Give the venv a pip, cheapest real source first.
+
+    1. Unpack the interpreter's bundled pip wheel (~40ms; ``ensurepip`` itself
+       takes ~1s, and every ticket builds a sandbox).
+    2. Foundry's own environment has pip: the venv already imports it through the
+       host-site ``.pth``, and pip installs into ``sys.prefix`` (the venv).
+    3. ``python -m ensurepip``: Debian/Ubuntu's patched ensurepip finds its wheels
+       in /usr/share/python-wheels, not in the (empty) bundled directory.
+
+    (uv is no option here: seeding pip through it needs the network, and ``uv pip``
+    does not take pip's flags, which both the agent and the gates use.)
+    """
+    bundled = _bundled_pip_dir()
+    wheels = sorted(bundled.glob("pip-*.whl")) if bundled is not None else []
+    if wheels:
+        with zipfile.ZipFile(wheels[-1]) as zf:
+            zf.extractall(purelib)
+        return
+    if _host_has_pip():
+        return
+    detail = "the interpreter ships no ensurepip"
+    if bundled is not None:
+        r = subprocess.run([python, "-m", "ensurepip", "--default-pip"],
+                           capture_output=True, text=True, timeout=300)
+        if r.returncode == 0:
+            return
+        detail = f"`python -m ensurepip` failed: {r.stderr.strip()[-300:]}"
+    raise RuntimeError(
+        f"no pip for the project's Python environment ({sys.executable}): no bundled "
+        f"pip wheel, no pip in Foundry's environment, and {detail}. Install pip for "
+        "this interpreter (Debian/Ubuntu: `apt install python3-venv python3-pip`)."
+    )
+
+
 def build_python_env(dest: Path) -> None:
     """A private virtualenv at ``dest`` layered READ-ONLY over Foundry's packages.
 
@@ -82,8 +132,7 @@ def build_python_env(dest: Path) -> None:
       ``foundry`` itself stays off the path, as it does in the gate harness.
     * Installs land in the venv and shadow those packages; pip never uninstalls a
       distribution outside ``sys.prefix``, so Foundry's copies are left alone.
-    * pip is unpacked from the interpreter's bundled wheel (~40ms) rather than via
-      ``ensurepip`` (~1s, a pip subprocess) — every ticket builds a sandbox.
+    * pip: see :func:`_seed_pip`.
     * Foundry's console scripts get shims that run them on the venv's python, so
       ``pytest`` / ``mypy`` see the venv's installs; native tools are linked.
     """
@@ -93,12 +142,9 @@ def build_python_env(dest: Path) -> None:
     (purelib / "_foundry_host_site.pth").write_text(
         "".join(f"{p}\n" for p in host_sites), encoding="utf-8"
     )
-    bundled = Path(ensurepip.__file__).parent / "_bundled"
-    wheel = next(bundled.glob(f"pip-{ensurepip.version()}-*.whl"))
-    with zipfile.ZipFile(wheel) as zf:
-        zf.extractall(purelib)
     bin_dir = dest / "bin"
     python = str(bin_dir / "python")
+    _seed_pip(python, purelib)
     for name in ("pip", "pip3", f"pip{sys.version_info[0]}.{sys.version_info[1]}"):
         _write_shim(bin_dir / name, (python, "-m", "pip"))
     host_bin = foundry_venv_bin()

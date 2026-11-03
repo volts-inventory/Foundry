@@ -1225,11 +1225,12 @@ def _build_gate(
 
 
 def _python_build_env(
-    profile: VerificationProfile | None, workdir: Path
+    profile: VerificationProfile | None, workdir: Path, rt: AgentRuntime
 ) -> contextlib.AbstractContextManager[PythonBuildEnv | None]:
-    """The build's own venv when it is a Python build that declares dependencies."""
+    """The build's venv when it is a Python build that declares dependencies: the
+    run's (``rt.python_envs``) for the same manifests, so checks reuse one install."""
     python = profile is None or (profile.python and not profile.unavailable)
-    return python_build_env(workdir, python=python)
+    return python_build_env(workdir, python=python, cache=rt.python_envs)
 
 
 def run_spec_gate(
@@ -1304,7 +1305,7 @@ def run_build_test_gates(
     # swaps WHAT the gates execute, never the two-zone trust seam. None keeps
     # each gate's historical default — byte-identical to the pre-profile factory.
     profile = gate_profile(state, profile)
-    with _python_build_env(profile, workdir) as pyenv:
+    with _python_build_env(profile, workdir, rt) as pyenv:
         return _build_test_smoke(
             state, config, rt=rt, runner=runner, workdir=workdir, run_against=run_against,
             min_passed=min_passed, discriminator_factory=discriminator_factory,
@@ -1514,7 +1515,7 @@ def run_build_gate(
                 seq=rt.seq(config, _BUILD_NODE, f"{name}:{run_against}"),
             ) for name, text in notes]
     profile = gate_profile(state, profile)
-    with _python_build_env(profile, workdir) as pyenv:
+    with _python_build_env(profile, workdir, rt) as pyenv:
         build = _run_gate(
             _build_gate(profile, runner, pyenv),
             rt=rt,

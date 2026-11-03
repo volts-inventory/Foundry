@@ -94,9 +94,21 @@ for _res, _lim in ((resource.RLIMIT_CPU, (300, 300)),
     except Exception:
         pass
 """
+# Env key naming a Python build's venv site-packages (``pydeps``).
+BUILD_SITE_ENV = "FOUNDRY_GATE_SITE"
+# Run only AFTER the trusted imports: the build venv's site-packages join sys.path
+# as plain paths (no .pth runs) between the stdlib and Foundry's site-packages. After
+# the stdlib, so a declared `json` can't replace the stdlib's; before Foundry's, so a
+# declared version of a package Foundry also has is the one the project imports.
+ADD_BUILD_SITE = f"""\
+import site as _site
+_sp = {{os.path.realpath(p) for p in _site.getsitepackages()}}
+_at = next((i for i, p in enumerate(sys.path) if os.path.realpath(p) in _sp), len(sys.path))
+sys.path[_at:_at] = [p for p in os.environ.get("{BUILD_SITE_ENV}", "").split(os.pathsep) if p]
+"""
 _ISOLATED_PYTEST_BOOTSTRAP = _BOOTSTRAP_PREAMBLE + """\
 from pytest import console_main
-sys.path[:0] = [p for p in os.environ.get("FOUNDRY_GATE_SITE", "").split(os.pathsep) if p]
+""" + ADD_BUILD_SITE + """\
 sys.path.insert(0, wd)
 sys.exit(console_main())
 """
@@ -138,8 +150,7 @@ def _probes(words):
 
 _dumps = json.dumps
 _execute_step = _bdd_scenario._execute_step_function
-sys.path[:0] = [p for p in os.environ.get("FOUNDRY_GATE_SITE", "").split(os.pathsep) if p]
-sys.path.insert(0, wd)
+{ADD_BUILD_SITE}sys.path.insert(0, wd)
 
 
 class _BddReport:

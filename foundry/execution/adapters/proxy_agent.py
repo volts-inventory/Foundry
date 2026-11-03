@@ -98,11 +98,14 @@ _OBS_KEEP = 3  # observations kept verbatim after an elision pass (arXiv 2508.21
 _OBS_MAX = 6  # verbatim observations allowed to pile up before the next pass
 _REPEAT_WARN = 3
 _REPEAT_STOP = 5
-# Reads of one unchanged file (any line ranges) before a nudge / a stop.
+# Reads of one unchanged file before a nudge / a stop. Only a read overlapping
+# lines still verbatim in context counts: paging forward, or re-reading what
+# masking elided, is legitimate.
 _THRASH_WARN = 4
 _THRASH_STOP = 6
-# Chars of unchanged-file reads kept verbatim past masking; over it, the oldest
-# are elided down to half, so the cap doesn't move the cache prefix every turn.
+# Chars of unchanged-file reads kept verbatim past masking, not counting the
+# always-kept tail; over it, the oldest are elided down to half, so the cap
+# moves the cache prefix once per several reads rather than every turn.
 _PIN_CAP = 30_000
 _SEARCH_MAX_HITS = 50
 _SEARCH_MAX_FILE = 1_000_000
@@ -121,15 +124,15 @@ _TREE_SKIP_DIRS = frozenset(
 
 @dataclass(frozen=True)
 class _Read:
-    path: str  # worktree-relative posix
+    path: str
     lo: int
     hi: int  # last line actually shown
-    stamp: tuple[int, int]  # (size, mtime_ns) when read
+    stamp: tuple[int, int]
 
 
 @dataclass(frozen=True)
 class _Kept:
-    idx: int  # message index
+    idx: int
     what: str
     size: int
     read: _Read | None
@@ -188,10 +191,10 @@ class ProxyAgentAdapter:
         summary = ""
         triage_lines: list[str] = []
         turns = 0
-        verbatim: list[_Kept] = []  # still-verbatim observations
+        verbatim: list[_Kept] = []
         # action fingerprint -> (consecutive-unchanged count, tree state after it ran)
         repeats: dict[tuple[str, ...], tuple[int, str]] = {}
-        # path -> (reads since it last changed, its stamp at the last read)
+        # path -> (thrash count since it last changed, its stamp at the last read)
         reads: dict[str, tuple[int, tuple[int, int]]] = {}
         tree = _tree_state(worktree)
         for _ in range(max(1, packet.turn_budget)):
@@ -224,7 +227,10 @@ class ProxyAgentAdapter:
             if key is not None:
                 rel, stamp = key
                 n, stamp_then = reads.get(rel, (0, stamp))
-                n = n + 1 if stamp_then == stamp else 1
+                if stamp_then != stamp or n == 0:
+                    n = 1
+                elif _overlaps_verbatim(verbatim, rel, stamp, act):
+                    n += 1
                 if n >= _THRASH_STOP:
                     triage_lines.append(
                         f"stopped early: read {rel} {_THRASH_STOP} times without changing "
@@ -257,15 +263,15 @@ class ProxyAgentAdapter:
             messages.append({"role": "user", "content": content})
             verbatim.append(_Kept(len(messages) - 1, _summarize(act), len(content), read))
             pinned = _pinned(verbatim, worktree)
-            pinned_size = sum(k.size for k in verbatim if k.idx in pinned)
+            tail = {k.idx for k in verbatim[-_OBS_KEEP:]}
+            pinned_size = sum(k.size for k in verbatim if k.idx in pinned - tail)
             if len(verbatim) - len(pinned) > _OBS_MAX or pinned_size > _PIN_CAP:
                 # Elide in batches, not one per turn: every rewrite invalidates the
                 # prompt-prefix cache from that message on, so batching moves the
                 # prefix once every 4 turns (3 kept + 4 new).
                 # A placeholder is never rewritten again.
-                keep = {k.idx for k in verbatim[-_OBS_KEEP:]}
+                keep = set(tail)
                 budget = _PIN_CAP if pinned_size <= _PIN_CAP else _PIN_CAP // 2
-                budget -= sum(k.size for k in verbatim[-_OBS_KEEP:] if k.idx in pinned)
                 for k in reversed(verbatim):
                     if k.idx not in pinned or k.idx in keep:
                         continue
@@ -383,6 +389,18 @@ def _file_key(worktree: Path, rel: str) -> tuple[str, tuple[int, int]] | None:
     if not target.is_file():
         return None
     return target.relative_to(worktree.resolve()).as_posix(), (st.st_size, st.st_mtime_ns)
+
+
+def _overlaps_verbatim(
+    kept: list[_Kept], rel: str, stamp: tuple[int, int], act: dict[str, Any]
+) -> bool:
+    lo = int(act.get("start_line") or 1)
+    hi = int(act.get("end_line") or sys.maxsize)
+    return any(
+        k.read.path == rel and k.read.stamp == stamp and k.read.lo <= hi and lo <= k.read.hi
+        for k in kept
+        if k.read is not None
+    )
 
 
 def _pinned(kept: list[_Kept], worktree: Path) -> set[int]:

@@ -417,18 +417,69 @@ def test_read_is_elided_after_the_file_is_written(tmp_path: Path) -> None:
     )
 
 
-def test_pinned_reads_are_capped_oldest_first(tmp_path: Path) -> None:
+def big_files(src: Path, n: int) -> None:
+    for i in range(n):  # ~12k chars each: just under the read cap
+        (src / f"f{i}.txt").write_text("".join(f"{i}{'y' * 98}\n" for _ in range(119)))
+
+
+def rewrite_passes(seen: list[list[dict[str, Any]]]) -> int:
+    return sum(
+        any(after[i] != m for i, m in enumerate(before))
+        for before, after in itertools.pairwise(seen)
+    )
+
+
+def test_pinned_reads_are_capped_oldest_first_in_few_passes(tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()
-    for i in range(5):
-        (src / f"f{i}.txt").write_text("".join(f"{i}{'y' * 98}\n" for _ in range(110)))
+    big_files(src, 8)
     seen: list[list[dict[str, Any]]] = []
-    actions = [{"action": "read_file", "path": f"f{i}.txt"} for i in range(5)]
+    actions = [{"action": "read_file", "path": f"f{i}.txt"} for i in range(8)]
     adapter = ProxyAgentAdapter(recording([*actions, {"action": "done"}], seen))
     with Sandbox(src) as sb:
-        adapter.run(make_packet(sb.worktree, turn_budget=6), sb)
+        adapter.run(make_packet(sb.worktree, turn_budget=9), sb)
     kept = ["elided" not in o for o in observations(seen[-1])]
-    assert kept == [False, False, True, True, True]
+    assert kept == [False] * 4 + [True] * 4
+    assert rewrite_passes(seen) <= 2
+
+
+def test_paging_through_a_file_is_not_thrash(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "big.py").write_text("".join(f"x{i} = {i}\n" for i in range(1, 81)))
+    seen: list[list[dict[str, Any]]] = []
+    pages = [
+        {"action": "read_file", "path": "big.py", "start_line": i, "end_line": i + 9}
+        for i in range(1, 81, 10)
+    ]
+    adapter = ProxyAgentAdapter(recording([*pages, {"action": "done", "summary": "ok"}], seen))
+    with Sandbox(src) as sb:
+        result = adapter.run(make_packet(sb.worktree, turn_budget=9), sb)
+    assert [t.explanation for t in result.triage] == ["ok"]
+    assert not any("NOTE" in o for o in observations(seen[-1]))
+
+
+def test_rereading_an_elided_read_is_not_thrash(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.py").write_text("A = 1\n")
+    big_files(src, 6)
+    seen: list[list[dict[str, Any]]] = []
+    a = {"action": "read_file", "path": "a.py"}
+    fill = [{"action": "read_file", "path": f"f{i}.txt"} for i in range(6)]
+    # 6 reads of a.py in all, but the first is elided by the pin cap before the second.
+    rereads = [
+        {**a, "start_line": 1, "end_line": n} for n in range(1, 6)
+    ]  # dodge the repeat detector
+    actions = [a, *fill, *rereads, {"action": "done", "summary": "ok"}]
+    adapter = ProxyAgentAdapter(recording(actions, seen))
+    with Sandbox(src) as sb:
+        result = adapter.run(make_packet(sb.worktree, turn_budget=len(actions)), sb)
+    assert [t.explanation for t in result.triage] == ["ok"]
+    obs = observations(seen[-1])
+    assert "elided" in obs[0]
+    assert not any("NOTE" in o for o in obs[7:10])
+    assert "read a.py 4 times" in obs[10]  # the re-read of the elided copy did not count
 
 
 def test_read_thrash_nudges_on_fourth_and_stops_on_sixth(tmp_path: Path) -> None:

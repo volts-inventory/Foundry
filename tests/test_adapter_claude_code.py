@@ -436,3 +436,16 @@ def test_without_a_listener_nothing_changes(tmp_path) -> None:
     argv = seen_argv[0]
     assert "json" in argv and "stream-json" not in argv and "--verbose" not in argv
     assert result.turns_used == 4
+
+
+def test_an_error_envelope_keeps_its_subtype_and_turns_in_the_triage(
+    source_dir: Path,
+) -> None:
+    stdout = envelope(is_error=True, subtype="error_max_turns", num_turns=40, result=None)
+    adapter = ClaudeCodeAdapter(exec_fn=fake_exec({}, stdout))
+    with Sandbox(source_dir) as sb:
+        result = adapter.run(make_packet(sb.worktree), sb)
+    notes = [t.explanation for t in result.triage]
+    assert result.turns_used == 40
+    assert "subtype=error_max_turns" in notes[0] and "num_turns=40" in notes[0]
+    assert any("total_cost_usd" in n for n in notes)

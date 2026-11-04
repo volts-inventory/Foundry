@@ -524,3 +524,23 @@ def test_a_first_failure_picks_only_named_stopped_tickets() -> None:
     assert first("SyntaxError: invalid syntax") == ()  # unnamed, two tickets in the wave
     # Alone in its wave, a stopped ticket escalates whatever the failure says.
     assert first("SyntaxError", tickets=[_ticket("T-001", 0, files=("app.py",))]) == ("T-001",)
+
+
+def test_an_empty_session_error_carries_the_adapter_report(tmp_path: Path) -> None:
+    from foundry.agents.implementation.tickets import EmptyTicketError, _require_scope_written
+
+    src = tmp_path / "src"
+    src.mkdir()
+    with Sandbox(src) as sb:
+        blob = b'{"kind": "full-file-snapshot", "files": {}}'
+        note = GateTriage(name="adapter-report", run_against="task/T-001",
+                          explanation="claude reported is_error (subtype=error_max_turns, "
+                                      "num_turns=40): None",
+                          produced_by="claude-code", seq=Seq("r", 0, 0, "n", 0))
+        result = AdapterResult(diff_uri=sb.put_blob(blob), triage=(note,), turns_used=40,
+                               snapshot_digest=sb.snapshot())
+        with pytest.raises(EmptyTicketError) as err:
+            _require_scope_written(result, sb, ("go.mod",), "T-001")
+    msg = str(err.value)
+    assert "wrote none of the ticket's files (go.mod)" in msg
+    assert "after 40 turn(s)" in msg and "subtype=error_max_turns" in msg

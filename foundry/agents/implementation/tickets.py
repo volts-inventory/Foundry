@@ -85,6 +85,7 @@ from foundry.schemas.implementation import (
     CONTRACTS_TICKET_ID,
     DEFAULT_TICKET_TIERS,
     FEATURE_DIR,
+    HARNESS_TICKET_ID,
     Difficulty,
     FeatureDiff,
     Specialty,
@@ -672,8 +673,11 @@ def _require_scope_written(
     worktree = Path(sandbox.worktree)
     if any((worktree / f.rstrip("/")).exists() for f in files):
         return
+    report = "; ".join(t.explanation for t in result.triage)
     raise EmptyTicketError(
-        f"the session wrote none of the ticket's files ({', '.join(files)})"
+        f"the session wrote none of the ticket's files ({', '.join(files)}) "
+        f"after {result.turns_used} turn(s)" + (f"; adapter report: {report[:800]}"
+                                                 if report else "")
     )
 
 
@@ -1116,7 +1120,8 @@ def _ticket_packet(
             "verify": {**verify_commands(stack),
                        **scenario_verify(ticket.files, scenarios, stack)},
         },
-        persona=persona_for(ticket.specialty.value, stack),
+        persona=persona_for(ticket.specialty.value, stack,
+                            harness=ticket.id == HARNESS_TICKET_ID),
         pinned_constraints=pinned_texts(constraints),  # VERBATIM + FIRST (arch §2)
         retrieved_spans=spans,
         prior_failures=prior_failures,

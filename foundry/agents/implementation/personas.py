@@ -95,16 +95,31 @@ def _stack_test_persona(stack: StackDecision) -> str:
     )
 
 
-def persona_for(area: str | None, stack: StackDecision | None = None) -> str:
+def _harness_persona(stack: StackDecision) -> str:
+    return (
+        "You are a SENIOR TEST / BUILD ENGINEER. Expertise: wiring the official "
+        f"Cucumber runner for {stack.language} into a project. Add the runner to the "
+        "package manifest, write its config and entry file so the project's BDD "
+        f"command `{stack.bdd}` runs and reports, and set up the project skeleton the "
+        "build and test commands need. Write no step definitions and NEVER write, "
+        "copy or edit a .feature file: the test tickets and the gate own those. If "
+        "the runner cannot be wired, report it as TRIAGE."
+    )
+
+
+def persona_for(
+    area: str | None, stack: StackDecision | None = None, *, harness: bool = False
+) -> str:
     """The expert persona for ``area`` (case-insensitive), or ``""`` if none.
 
     With the run's ``stack``, the persona names its language, and the test persona
-    its Cucumber runner (Python without a ``bdd`` command keeps pytest-bdd)."""
+    its Cucumber runner (Python without a ``bdd`` command keeps pytest-bdd). The
+    ``harness`` ticket wires that runner and writes no step definitions."""
     key = (area or "").strip().lower()
     base = AREA_PERSONAS.get(key, "")
     if not base or stack is None:
         return base
     if key == "test" and stack.bdd:
-        base = _stack_test_persona(stack)
+        base = _harness_persona(stack) if harness else _stack_test_persona(stack)
     framework = f" with {stack.framework}" if stack.framework else ""
     return f"{base} The project is written in {stack.language}{framework}."

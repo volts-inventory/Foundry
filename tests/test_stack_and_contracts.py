@@ -178,7 +178,8 @@ def test_code_contracts_and_bdd_stack_generate_wave_zero_tickets() -> None:
     assert contracts.specialty is Specialty.BACKEND and contracts.difficulty.value == "trivial"
     assert "only `interface` and `type` declarations" in contracts.description
     assert harness.id == HARNESS_TICKET_ID and harness.specialty is Specialty.TEST
-    assert harness.files == ("package.json", "tsconfig.json", "cucumber.json")
+    assert harness.files == ("package.json", "tsconfig.json", "cucumber.json",
+                             "package-lock.json")
     assert harness.depends_on == () and "$FOUNDRY_BDD_REPORT" in harness.description
     for t in rest:
         assert t.depends_on[:2] == (CONTRACTS_TICKET_ID, HARNESS_TICKET_ID)
@@ -187,6 +188,29 @@ def test_code_contracts_and_bdd_stack_generate_wave_zero_tickets() -> None:
     concerns = writes["agent_journal"][0].concerns
     assert any("T-002: dropped the gate-owned contract file(s) src/contracts.ts" in c
                for c in concerns)
+
+
+@pytest.mark.parametrize(("language", "planned", "expected"), [
+    # The planner's harness_files lacked the manifest (the failed Go build gave go.mod
+    # to a feature ticket): the harness still owns manifest, lockfile and runner.
+    ("go", ["bdd/godog_test.go"], ("bdd/godog_test.go", "go.mod", "go.sum")),
+    ("javascript", [], ("package.json", "package-lock.json", "cucumber.json")),
+    ("typescript", ["cucumber.mjs"], ("cucumber.mjs", "package.json", "package-lock.json",
+                                     "tsconfig.json", "cucumber.json")),
+    ("rust", ["Cargo.toml"], ("Cargo.toml", "Cargo.lock", "tests/cucumber.rs")),
+])
+def test_harness_ticket_owns_the_manifest_lockfile_and_runner(
+    language: str, planned: list[str], expected: tuple[str, ...],
+) -> None:
+    from foundry.agents.planner import _generated_tickets
+
+    stack = StackDecision(language=language, bdd="run-bdd")
+    tickets, _ = _generated_tickets(
+        [], {"harness_files": planned}, stack, Seq("r", 0, 0, "planner", 0)
+    )
+    [harness] = tickets
+    assert harness.id == HARNESS_TICKET_ID
+    assert harness.files == expected
 
 
 def test_contracts_carry_kind_signature_and_a_structured_body() -> None:

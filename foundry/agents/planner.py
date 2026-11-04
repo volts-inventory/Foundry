@@ -334,14 +334,17 @@ CODE_CONTRACT_KINDS = ("function", "class", "type")
 CONTRACT_KINDS = (*CODE_CONTRACT_KINDS, "http", "cli", "event")
 _GENERATED_TICKETS = frozenset({CONTRACTS_TICKET_ID, HARNESS_TICKET_ID})
 
-# What the harness ticket writes when the plan leaves it out.
+# What the harness ticket always writes, on top of the plan's harness_files: the
+# manifest and lockfile it adds the runner to, and the runner's entry file, so its
+# description never asks for a file outside its scope. A feature ticket may list
+# them too (to add its own deps): overlapping scopes run in separate waves.
 _DEFAULT_HARNESS_FILES: dict[str, tuple[str, ...]] = {
     "python": ("pyproject.toml",),
-    "typescript": ("package.json", "tsconfig.json", "cucumber.json"),
-    "javascript": ("package.json", "cucumber.json"),
-    "go": ("go.mod",),
-    "rust": ("Cargo.toml",),
-    "java": ("pom.xml",),
+    "typescript": ("package.json", "package-lock.json", "tsconfig.json", "cucumber.json"),
+    "javascript": ("package.json", "package-lock.json", "cucumber.json"),
+    "go": ("go.mod", "go.sum", "bdd/godog_test.go"),
+    "rust": ("Cargo.toml", "Cargo.lock", "tests/cucumber.rs"),
+    "java": ("pom.xml", "src/test/java/RunCucumberTest.java"),
 }
 
 _SCENARIO_SCHEMA: dict[str, Any] = {
@@ -1654,9 +1657,8 @@ def _generated_tickets(
     if stack is not None and stack.bdd and base is not None:
         concerns.append("Change build: the base tree's BDD runner is kept as wired.")
     elif stack is not None and stack.bdd:
-        files = _plan_paths(raw_stack.get("harness_files"), "harness", concerns) or (
-            _DEFAULT_HARNESS_FILES.get(language, ())
-        )
+        files = _uniq((*_plan_paths(raw_stack.get("harness_files"), "harness", concerns),
+                       *_DEFAULT_HARNESS_FILES.get(language, ())))
         commands = "; ".join(
             f"{k} `{v}`" for k, v in (
                 ("install", stack.install), ("build", stack.build),

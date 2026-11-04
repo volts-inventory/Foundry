@@ -89,6 +89,28 @@ def test_destroyed_sandbox_refuses_use(source_dir: Path):
         sb.run(["true"])
 
 
+def test_destroy_removes_a_read_only_tree(source_dir: Path, tmp_path: Path):
+    # Go's module cache is written 0555/0444: a plain rmtree(ignore_errors) leaks it.
+    sb = Sandbox(source_dir)
+    root = sb._root
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o755)
+    (outside / "keep").write_text("x")
+    cache = sb.worktree / "gopath" / "pkg" / "mod" / "example.com" / "m@v1"
+    cache.mkdir(parents=True)
+    (cache / "go.mod").write_text("module m\n")
+    (cache / "link").symlink_to(outside)
+    (cache / "go.mod").chmod(0o444)
+    for d in (cache, *cache.parents):
+        if d == sb.worktree:
+            break
+        d.chmod(0o555)
+    sb.destroy()
+    assert not root.exists()
+    assert (outside / "keep").exists()
+    assert outside.stat().st_mode & 0o777 == 0o755  # the symlink was not followed
+
+
 # ---------------------------------------------------------------------------
 # Sandbox: env scrubbing (dev-grade credential denial)
 # ---------------------------------------------------------------------------

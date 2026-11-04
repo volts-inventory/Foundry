@@ -409,7 +409,9 @@ class ClaudeCodeAdapter:
             # the gates decide whether the partial tree passes.
             summary = "claude hard-killed at the sandbox wall-clock cap"
         elif envelope.get("is_error"):
-            summary = f"claude reported is_error: {str(envelope.get('result'))[:400]}"
+            summary = (f"claude reported is_error (subtype={envelope.get('subtype')}, "
+                       f"num_turns={envelope.get('num_turns')}): "
+                       f"{str(envelope.get('result'))[:400]}")
         elif not envelope and result.returncode != 0:
             raise AdapterUnavailableError(
                 f"claude exit {result.returncode} with no parseable envelope: "
@@ -437,7 +439,8 @@ class ClaudeCodeAdapter:
         blob = json.dumps(payload, sort_keys=True, ensure_ascii=False)
         diff_uri = sandbox.put_blob(blob.encode("utf-8"))
 
-        notes = self._triage_notes(summary, sandbox, deleted, skipped_binary, envelope)
+        notes = self._triage_notes(summary, sandbox, deleted, skipped_binary, envelope,
+                                   failed=result.timed_out or bool(envelope.get("is_error")))
         run_against = f"task/{packet.task.get('id', 'unknown')}"
         triage = tuple(
             GateTriage(
@@ -467,6 +470,8 @@ class ClaudeCodeAdapter:
         deleted: list[str],
         skipped_binary: list[str],
         envelope: dict[str, Any],
+        *,
+        failed: bool = False,
     ) -> list[str]:
         """Advisory notes only (gov §1c): the agent's TRIAGE lines, plus what the
         snapshot slice could NOT carry, plus the observed cost + the credential
@@ -486,6 +491,8 @@ class ClaudeCodeAdapter:
         grant = sandbox.credential_grant_record
         if grant:
             notes.append(f"model-auth grant active in sandbox: {', '.join(grant)}")
-        if not notes:
+        if failed:
+            notes.insert(0, summary)
+        elif not notes:
             notes.append(summary.strip()[:500] or "run completed with no summary text")
         return notes

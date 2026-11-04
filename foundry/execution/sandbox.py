@@ -155,6 +155,24 @@ def _tmp_name(digest: str) -> str:
     return f".tmp-{digest}-{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex}"
 
 
+def _force_rmtree(root: Path) -> None:
+    """``rmtree`` that also removes read-only directories (Go's module cache is
+    written 0555), which a plain ``ignore_errors`` rmtree silently leaves behind.
+    Symlinks are never chmod-ed: that would follow them out of the tree."""
+    shutil.rmtree(root, ignore_errors=True)
+    if not root.exists() or root.is_symlink():
+        return
+    with contextlib.suppress(OSError):
+        os.chmod(root, 0o700)
+    for dirpath, dirnames, _ in os.walk(root):
+        for name in dirnames:
+            path = os.path.join(dirpath, name)
+            if not os.path.islink(path):
+                with contextlib.suppress(OSError):
+                    os.chmod(path, 0o700)
+    shutil.rmtree(root, ignore_errors=True)
+
+
 @dataclass(frozen=True)
 class SandboxResult:
     """Outcome of one sandboxed command. `timed_out` means the process group
@@ -535,7 +553,7 @@ class Sandbox:
         if self._destroyed:
             return
         self._destroyed = True
-        shutil.rmtree(self._root, ignore_errors=True)
+        _force_rmtree(self._root)
 
     def _check_alive(self) -> None:
         if self._destroyed:

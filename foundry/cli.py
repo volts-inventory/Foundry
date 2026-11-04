@@ -1657,6 +1657,7 @@ def run(
         finally:
             reset_gate_write_verifier(token)
             rt.python_envs.close()  # the run's gate venvs end with the run
+            rt.toolchain_cache.close()
             # Release the SQLite handles: durable mode closes the checkpointer +
             # the global-records connection together; otherwise just the ckpt.
             if durable is not None:

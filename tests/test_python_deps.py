@@ -36,6 +36,7 @@ from foundry.gates.pydeps import (
     python_build_env,
 )
 from foundry.gates.runner import TwoZoneGateRunner
+from foundry.gates.sandbox import ToolchainCache
 from foundry.gates.test import BDD_KEY, TestGate
 from foundry.graph.gate_wiring import (
     CRITERION_KIND,
@@ -181,6 +182,7 @@ def _state(files: dict[str, str], criteria: tuple[AcceptanceCriterion, ...] = ()
 class _Rt:
     def __init__(self) -> None:
         self.python_envs = PythonEnvCache()
+        self.toolchain_cache = ToolchainCache()
 
     def seq(self, config: Any, node: str, key: str) -> Seq:
         return _seq(node)

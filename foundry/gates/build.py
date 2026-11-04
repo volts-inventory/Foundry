@@ -38,7 +38,7 @@ from foundry.canonical import content_digest
 from foundry.schemas.gates import GateStatus, VerdictClass
 
 from .runner import ZoneAObservation, observe
-from .sandbox import ground_untrusted
+from .sandbox import ground_untrusted, toolchain_scope
 
 if TYPE_CHECKING:
     from .pydeps import PythonBuildEnv
@@ -137,6 +137,10 @@ class BuildGate:
     # ---- zone A: [install, then] build; observe the exit code(s) ------------
 
     def execute(self, workdir: Path) -> ZoneAObservation:
+        with toolchain_scope():  # the install's downloads reach the build step
+            return self._execute(workdir)
+
+    def _execute(self, workdir: Path) -> ZoneAObservation:
         structured: dict[str, object] = {"cmd": list(self.cmd)}
         codes: tuple[int, ...] = ()
         out = err = ""

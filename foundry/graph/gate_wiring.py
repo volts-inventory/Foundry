@@ -46,6 +46,7 @@ import re
 import shlex
 import sys
 import tempfile
+from collections.abc import Iterator
 from dataclasses import dataclass
 from importlib import metadata as _im
 from pathlib import Path, PurePosixPath
@@ -57,6 +58,7 @@ from foundry.base_tree import base_features, copy_base_tree
 from foundry.canonical import content_digest
 from foundry.gates.build import BuildGate
 from foundry.gates.pydeps import SCAFFOLD_HEADER, PythonBuildEnv, python_build_env
+from foundry.gates.sandbox import toolchain_scope
 from foundry.gates.spec import SpecGate
 from foundry.gates.test import TestGate
 from foundry.schemas.base import BudgetLedger
@@ -1224,13 +1226,19 @@ def _build_gate(
     )
 
 
-def _python_build_env(
+@contextlib.contextmanager
+def _build_env(
     profile: VerificationProfile | None, workdir: Path, rt: AgentRuntime
-) -> contextlib.AbstractContextManager[PythonBuildEnv | None]:
+) -> Iterator[PythonBuildEnv | None]:
     """The build's venv when it is a Python build that declares dependencies: the
-    run's (``rt.python_envs``) for the same manifests, so checks reuse one install."""
+    run's (``rt.python_envs``) for the same manifests, so checks reuse one install.
+    Every gate step inside shares the run's toolchain cache (``rt.toolchain_cache``):
+    what the install step downloads, the offline steps can read."""
     python = profile is None or (profile.python and not profile.unavailable)
-    return python_build_env(workdir, python=python, cache=rt.python_envs)
+    with toolchain_scope(rt.toolchain_cache), python_build_env(
+        workdir, python=python, cache=rt.python_envs
+    ) as pyenv:
+        yield pyenv
 
 
 def run_spec_gate(
@@ -1305,7 +1313,7 @@ def run_build_test_gates(
     # swaps WHAT the gates execute, never the two-zone trust seam. None keeps
     # each gate's historical default — byte-identical to the pre-profile factory.
     profile = gate_profile(state, profile)
-    with _python_build_env(profile, workdir, rt) as pyenv:
+    with _build_env(profile, workdir, rt) as pyenv:
         return _build_test_smoke(
             state, config, rt=rt, runner=runner, workdir=workdir, run_against=run_against,
             min_passed=min_passed, discriminator_factory=discriminator_factory,
@@ -1515,7 +1523,7 @@ def run_build_gate(
                 seq=rt.seq(config, _BUILD_NODE, f"{name}:{run_against}"),
             ) for name, text in notes]
     profile = gate_profile(state, profile)
-    with _python_build_env(profile, workdir, rt) as pyenv:
+    with _build_env(profile, workdir, rt) as pyenv:
         build = _run_gate(
             _build_gate(profile, runner, pyenv),
             rt=rt,

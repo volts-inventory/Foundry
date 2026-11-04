@@ -58,6 +58,7 @@ other network namespaces outside ``/run``, are not masked.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import hmac
 import ipaddress
 import json
@@ -72,7 +73,7 @@ import sys
 import tempfile
 import threading
 from base64 import b64encode
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import IO
 from urllib.parse import unquote, urlsplit, urlunsplit
@@ -81,6 +82,7 @@ from .runner import GroundingUnavailable, run_grounding_command
 
 __all__ = [
     "UNSHARE_FLAGS",
+    "ToolchainCache",
     "egress_allowed",
     "ground_untrusted",
     "run_confined",
@@ -89,6 +91,7 @@ __all__ = [
     "seatbelt_available",
     "seatbelt_profile",
     "toolchain_env",
+    "toolchain_scope",
     "unshare_available",
 ]
 
@@ -930,6 +933,73 @@ def run_confined(
     return rc, out, err
 
 
+# ---- the run's toolchain cache: dependencies the install step downloads ------------
+
+
+class ToolchainCache:
+    """Where non-Python toolchains keep downloaded dependencies (Go modules, the cargo
+    registry, NuGet, Maven, Gradle, Yarn/pnpm stores) for gate steps: a directory
+    OUTSIDE the workdir and the user's home (which the sandbox leaves read-only, and
+    whose real caches are never copied in). The install step, the only networked
+    one, writes it; the offline build/test/smoke steps read it. One per run, created
+    on first use, removed by :meth:`close`."""
+
+    def __init__(self) -> None:
+        self._root: str | None = None
+        self._lock = threading.Lock()
+
+    @property
+    def root(self) -> str:
+        with self._lock:
+            if self._root is None:
+                self._root = _real(tempfile.mkdtemp(prefix="foundry-toolchain-"))
+            return self._root
+
+    def env(self) -> dict[str, str]:
+        r = self.root
+        return {
+            "GOPATH": f"{r}/go", "GOMODCACHE": f"{r}/go/pkg/mod",
+            "CARGO_HOME": f"{r}/cargo",
+            "NUGET_PACKAGES": f"{r}/nuget", "DOTNET_CLI_HOME": f"{r}/dotnet",
+            "MAVEN_OPTS": f"-Dmaven.repo.local={r}/m2", "GRADLE_USER_HOME": f"{r}/gradle",
+            "YARN_CACHE_FOLDER": f"{r}/yarn", "npm_config_store_dir": f"{r}/pnpm",
+        }
+
+    def close(self) -> None:
+        with self._lock:
+            root, self._root = self._root, None
+        if root is None:
+            return
+        # Go extracts modules read-only: make them removable first.
+        for d, _dirs, _files in os.walk(root):
+            with contextlib.suppress(OSError):
+                os.chmod(d, 0o700)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+_TOOLCHAIN: contextvars.ContextVar[ToolchainCache | None] = contextvars.ContextVar(
+    "foundry_toolchain_cache", default=None
+)
+
+
+@contextlib.contextmanager
+def toolchain_scope(cache: ToolchainCache | None = None) -> Iterator[ToolchainCache]:
+    """Gate steps run inside share ``cache`` (the run's). Without one, the scope
+    already active is reused, else a fresh cache lives for this scope only."""
+    active = _TOOLCHAIN.get()
+    if cache is None and active is not None:
+        yield active
+        return
+    use = cache or ToolchainCache()
+    token = _TOOLCHAIN.set(use)
+    try:
+        yield use
+    finally:
+        _TOOLCHAIN.reset(token)
+        if cache is None:
+            use.close()
+
+
 def ground_untrusted(
     cmd: tuple[str, ...] | list[str],
     workdir: Path,
@@ -943,7 +1013,12 @@ def ground_untrusted(
     """The grounding seam for generated code (test, bdd, build, smoke, install):
     confined sandbox by default. The ``FOUNDRY_GATE_SANDBOX`` opt-out runs it on the
     host — still with the env allowlist — and refuses the networked install step
-    unless ``FOUNDRY_ALLOW_UNSANDBOXED_INSTALL=1`` (fail-closed ERROR)."""
+    unless ``FOUNDRY_ALLOW_UNSANDBOXED_INSTALL=1`` (fail-closed ERROR). Inside a
+    :func:`toolchain_scope` the toolchains' dependency caches point at its cache,
+    writable only by the networked step."""
+    if (cache := _TOOLCHAIN.get()) is not None:
+        extra_env = {**cache.env(), **(extra_env or {})}
+        binds = (*binds, (cache.root, network))
     if sandbox_enabled():
         return run_confined(
             cmd, workdir, network=network, env=env, extra_env=extra_env, binds=binds,

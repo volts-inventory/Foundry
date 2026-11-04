@@ -899,3 +899,142 @@ def test_seatbelt_blocks_the_workshop_port(tmp_path: Path, monkeypatch: Any) -> 
         for network in (False, True):
             rc, _out, err = sandbox.run_confined(_py(code), tmp_path, network=network)
             assert rc == 0, err
+
+
+# ---- the run's toolchain cache -------------------------------------------------
+
+
+def test_toolchain_cache_is_shared_and_writable_only_by_the_install_step(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    calls = _capture(monkeypatch)
+    envs: list[dict[str, str]] = []
+    real_fake = sandbox.run_grounding_command
+
+    def fake(argv: Any, workdir: Any, *, env: Any = None, timeout_s: float = 600.0) -> Any:
+        envs.append(env)
+        return real_fake(argv, workdir, env=env, timeout_s=timeout_s)
+
+    monkeypatch.setattr(sandbox, "run_grounding_command", fake)
+    cache = sandbox.ToolchainCache()
+    with sandbox.toolchain_scope(cache):
+        BuildGate(cmd=("true",), install_cmd="go mod download").execute(tmp_path)
+        SmokeGate(("true",)).execute(tmp_path)
+    root = cache.root
+    install, build, smoke = (_fence_cfg(a)["binds"] for a in calls)
+    assert [root, True] in install and [root, False] in build and [root, False] in smoke
+    assert all(e["GOMODCACHE"].startswith(root) and e["CARGO_HOME"].startswith(root)
+               for e in envs)
+    assert all(not e["GOPATH"].startswith(os.path.expanduser("~")) for e in envs)
+    assert os.path.isdir(root)                     # the run's cache outlives the scope...
+    cache.close()
+    assert not os.path.exists(root)                # ...until the run closes it
+    calls.clear()
+    BuildGate(cmd=("true",), install_cmd="true").execute(tmp_path)  # own scope
+    eph = next(b for b, rw in _fence_cfg(calls[0])["binds"] if rw and "toolchain" in b)
+    assert not os.path.exists(eph)
+
+
+def _go_works() -> bool:
+    go = shutil.which("go")
+    return go is not None and os.system(f"{shlex.quote(go)} version >/dev/null 2>&1") == 0
+
+
+def _go_module_proxy(root: Path) -> None:
+    """A file:// GOPROXY serving example.com/dep v1.0.0 (no network needed)."""
+    import zipfile
+
+    v = root / "example.com" / "dep" / "@v"
+    v.mkdir(parents=True)
+    (v / "list").write_text("v1.0.0\n")
+    (v / "v1.0.0.info").write_text('{"Version":"v1.0.0","Time":"2024-01-01T00:00:00Z"}')
+    mod = "module example.com/dep\n\ngo 1.21\n"
+    (v / "v1.0.0.mod").write_text(mod)
+    with zipfile.ZipFile(v / "v1.0.0.zip", "w") as z:
+        z.writestr("example.com/dep@v1.0.0/go.mod", mod)
+        z.writestr("example.com/dep@v1.0.0/dep.go",
+                   'package dep\n\nfunc Answer() int { return 42 }\n')
+
+
+@pytest.mark.skipif(sandbox.sandbox_backend() is None or not _go_works(),
+                    reason="needs the gate sandbox and the go toolchain")
+def test_real_go_install_feeds_the_offline_build(tmp_path: Path, monkeypatch: Any) -> None:
+    """`go mod download` (networked) fills the run's module cache; the offline build and
+    smoke steps then compile against it. HOME stays untouched (it is read-only)."""
+    import subprocess
+
+    wd, proxy, host = tmp_path / "wd", tmp_path / "wd" / ".proxy", tmp_path / "host"
+    wd.mkdir()
+    _go_module_proxy(proxy)
+    (wd / "go.mod").write_text(
+        "module example.com/app\n\ngo 1.21\n\nrequire example.com/dep v1.0.0\n"
+    )
+    (wd / "main.go").write_text(
+        'package main\n\nimport (\n\t"fmt"\n\n\t"example.com/dep"\n)\n\n'
+        "func main() { fmt.Println(dep.Answer()) }\n"
+    )
+    goproxy = "file://" + str(proxy)
+    # go.sum, written host-side against the same local proxy (no sumdb for it).
+    subprocess.run(
+        ["go", "mod", "tidy"], cwd=wd, check=True, capture_output=True,
+        env={**os.environ, "GOPROXY": goproxy, "GOSUMDB": "off",
+             "GOFLAGS": "-modcacherw", "GOPATH": str(host), "GOCACHE": str(host / "c")},
+    )
+    monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)
+    monkeypatch.setenv("GOPROXY", goproxy)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    for k in ("GOPATH", "GOMODCACHE", "GOFLAGS"):
+        monkeypatch.delenv(k, raising=False)
+    cache = sandbox.ToolchainCache()
+    try:
+        with sandbox.toolchain_scope(cache):
+            gate = BuildGate(cmd=("/bin/sh", "-c", "go build -o app . && ./app"),
+                             install_cmd="go mod download")
+            obs = gate.execute(wd)
+            assert gate.decide(obs) is GateStatus.PASS, obs.stderr
+            assert "42" in obs.stdout
+            smoke = SmokeGate(("/bin/sh", "-c", "go run ."))
+            sobs = smoke.execute(wd)
+            assert smoke.decide(sobs) is GateStatus.PASS and "42" in sobs.stdout, sobs.stderr
+        assert (Path(cache.root) / "go" / "pkg" / "mod" / "example.com" / "dep@v1.0.0").is_dir()
+        assert not (tmp_path / "home").exists()
+    finally:
+        cache.close()
+
+
+def _cargo_works() -> bool:
+    if shutil.which("cargo") is None or os.system("rustc -vV >/dev/null 2>&1") != 0:
+        return False  # rustup proxies exist but no usable toolchain
+    try:
+        socket.create_connection(("index.crates.io", 443), timeout=3).close()
+    except OSError:
+        return False
+    return True
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(sandbox.sandbox_backend() is None or not _cargo_works(),
+                    reason="needs the gate sandbox, a working cargo and crates.io")
+def test_real_cargo_fetch_feeds_the_offline_build(tmp_path: Path, monkeypatch: Any) -> None:
+    """Live (crates.io): `cargo fetch` fills the run's CARGO_HOME; the offline build
+    compiles against it while the rustup toolchains stay read-only."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "Cargo.toml").write_text(
+        '[package]\nname = "t"\nversion = "0.1.0"\nedition = "2021"\n\n'
+        '[dependencies]\nitoa = "1"\n'
+    )
+    (tmp_path / "src" / "main.rs").write_text(
+        'fn main() { println!("{}", itoa::Buffer::new().format(42)); }\n'
+    )
+    monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)
+    monkeypatch.delenv("CARGO_HOME", raising=False)
+    cache = sandbox.ToolchainCache()
+    try:
+        with sandbox.toolchain_scope(cache):
+            gate = BuildGate(cmd=("/bin/sh", "-c", "cargo run --quiet --offline"),
+                             install_cmd="cargo fetch")
+            obs = gate.execute(tmp_path)
+            assert gate.decide(obs) is GateStatus.PASS, obs.stderr
+            assert "42" in obs.stdout
+    finally:
+        cache.close()

@@ -20,6 +20,13 @@ CASES = {
         "a Python command-line tool that prints summary statistics "
         "for each numeric column of a CSV file"
     ),
+    "node": "a small Node.js web app (Express) for a shopping list with add, check off and clear",
+    "go": "a Go command-line tool that counts word frequencies in text files and prints the top N",
+    "rust": "a Rust command-line tool that converts temperatures between C, F and Kelvin",
+    "notes": (
+        "a Python web app for personal notes: user sign-up and login with hashed passwords, "
+        "each user can create, edit, search and delete only their own notes, stored in SQLite"
+    ),
 }
 
 START = re.compile(r"start model call: (\S+) \((\w+), ([^)]*)\)")
@@ -29,12 +36,14 @@ STAGE = re.compile(r"·\s+\S+\s+▸\s+(\w+)")
 VERDICTS = {0: "pass", 1: "fail", 3: "stopped", 2: "usage-error"}
 
 
-def run_case(mode: str, backend: str, case: str, cap: int, out_dir: Path) -> None:
+def run_case(
+    mode: str, backend: str, case: str, cap: int, out_dir: Path, scope: str = "demo"
+) -> None:
     root = out_dir / mode / case
     root.mkdir(parents=True, exist_ok=True)
     cmd = [
         sys.executable, "-m", "foundry.cli", CASES[case],
-        "--backend", backend, "--model-mode", mode, "--scope", "demo",
+        "--backend", backend, "--model-mode", mode, "--scope", scope,
         "--time-cap", str(cap), "--out", str(root / "out"), "--state-dir", str(root / "state"),
     ]  # fmt: skip
     env = {**os.environ, "FOUNDRY_PROGRESS": "1"}
@@ -129,7 +138,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--mode", choices=["local", "hybrid", "cloud"], required=True)
     ap.add_argument("--backend", default="claude-cli")
     ap.add_argument("--out-dir", type=Path, required=True)
-    ap.add_argument("--cases", default=",".join(CASES))
+    ap.add_argument("--cases", default="dice,todo,csv")
+    ap.add_argument("--scope", choices=["auto", "demo", "standard"], default="demo")
     ap.add_argument("--time-cap", type=int, default=120, help="minutes per case")
     ap.add_argument("--summarize-only", action="store_true")
     args = ap.parse_args(argv)
@@ -139,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
         ap.error(f"unknown cases: {', '.join(unknown)}")
     if not args.summarize_only:
         for case in cases:
-            run_case(args.mode, args.backend, case, args.time_cap, args.out_dir)
+            run_case(args.mode, args.backend, case, args.time_cap, args.out_dir, args.scope)
     mode_dir = args.out_dir / args.mode
     summary = {c: summarize_case(mode_dir / c) for c in cases if (mode_dir / c).is_dir()}
     mode_dir.mkdir(parents=True, exist_ok=True)

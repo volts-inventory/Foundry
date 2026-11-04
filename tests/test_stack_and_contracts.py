@@ -213,6 +213,15 @@ def test_harness_ticket_owns_the_manifest_lockfile_and_runner(
     assert harness.files == expected
 
 
+def test_harness_ticket_carries_the_stack_runner_recipe() -> None:
+    from foundry.agents.planner import _generated_tickets
+    from foundry.gates.profiles import bdd_runner_hint
+
+    stack = StackDecision(language="go", bdd="go test -count=1 ./bdd")
+    [harness], _ = _generated_tickets([], {}, stack, Seq("r", 0, 0, "planner", 0))
+    assert bdd_runner_hint("go") and bdd_runner_hint("go") in harness.description
+
+
 def test_contracts_carry_kind_signature_and_a_structured_body() -> None:
     writes, cas, _ = _plan_once(_ts_plan())
     contracts = {

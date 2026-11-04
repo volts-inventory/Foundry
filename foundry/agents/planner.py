@@ -69,6 +69,7 @@ from foundry.agents._common import (
 )
 from foundry.agents.plan_contracts import CompileResult, check_contracts
 from foundry.base_tree import BaseView, read_base, render_base_view
+from foundry.gates.profiles import bdd_runner_hint
 from foundry.gates.spec import _REQUIRED_FIELDS as _GATE_FIELDS
 from foundry.gates.spec import _incomplete_steps
 from foundry.proxy.model_provider_proxy import ProxyUnavailable, StructuredOutputError
@@ -288,7 +289,8 @@ SOP = (
     "test, bdd and run, all OFFLINE; run is REQUIRED unless the deliverable is a "
     "library (checked). bdd runs every features/*.feature scenario "
     "with the language's OFFICIAL "
-    "Cucumber runner and writes Cucumber Messages NDJSON to the file named by $"
+    "Cucumber runner and writes its report (Cucumber Messages NDJSON; godog and "
+    "cucumber-rs: their Cucumber JSON) to the file named by $"
     + BDD_REPORT_ENV + " (Python may leave bdd empty to use the built-in pytest-bdd "
     "harness); run (optional: boots the real app headless, exits 0 on success). "
     "contracts_file is the source file the code-kind contracts are written to (e.g. "
@@ -1672,10 +1674,11 @@ def _generated_tickets(
                 f"Add the official Cucumber runner for {language} as a dev dependency "
                 "in the package manifest and write its config so the BDD command "
                 f"`{stack.bdd}` runs every {FEATURE_DIR}/*.feature file and writes "
-                f"Cucumber Messages (NDJSON) to the file named by ${BDD_REPORT_ENV}. "
+                f"its report to the file named by ${BDD_REPORT_ENV}. "
                 "Set up the project skeleton so these commands work"
                 + (f": {commands}." if commands else ".")
                 + " Write no step definitions: the test tickets do."
+                + (f" {hint}" if (hint := bdd_runner_hint(language)) else "")
             ),
             specialty=Specialty.TEST,
             difficulty=Difficulty.STANDARD,

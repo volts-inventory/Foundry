@@ -33,9 +33,39 @@ OpenAI APIs — and it writes real code. Examples below use `claude-cli`.
 
 ## Quick start — run the Workshop locally
 
+**Prerequisites.** Core (every install):
+
 ```bash
-python -m venv .venv && source .venv/bin/activate    # 1. install the project (once)
-pip install -e .
+brew install uv git                      # Linux: your package manager + https://docs.astral.sh/uv/
+# Python >= 3.11 (uv fetches one if the system Python is older)
+npm install -g @anthropic-ai/claude-code # the `claude` CLI — cloud mode (claude-cli backend)
+brew install ollama && ollama serve &    # local / hybrid mode only
+ollama pull qwen3.6:27b-coding-mxfp8     # the default local model
+```
+
+Per-stack host toolchains — install only the stacks you will build. A missing one
+makes that stack's gate an ERROR (never a PASS):
+
+| Stack | macOS (Homebrew) | Linux |
+|---|---|---|
+| `python`, `python-app`, `pygame`, `crypto` | nothing extra | nothing extra |
+| `node-web`, `phaser-web` | `brew install node` (node + npm) | `apt install nodejs npm` |
+| `go` | `brew install go` | `apt install golang` |
+| `rust` | `brew install rustup && rustup-init -y` | `curl https://sh.rustup.rs -sSf \| sh` |
+| `dotnet` | `brew install --cask dotnet-sdk` | `apt install dotnet-sdk-8.0` |
+| `java-maven` | `brew install maven openjdk` | `apt install maven default-jdk` |
+| `iac-terraform` | `brew install terraform` | HashiCorp apt repo / release zip |
+| `love2d` | `brew install lua love` (needs `luac`) | `apt install lua5.4 love` |
+
+Rust "missing manifest" error: the toolchain is half-installed — run
+`rustup toolchain install stable --force`. JS BDD scenarios need a Cucumber runner
+(`cucumber-js`); the generated project installs it via `npm`, so Node is enough.
+
+Sandbox: gates run sandboxed with no flag — macOS uses the built-in
+`/usr/bin/sandbox-exec`, Linux uses `unshare` (see Sandboxed gates below).
+
+```bash
+uv sync && source .venv/bin/activate     # 1. install the project (once)
 cp foundry.mac.env.example .env          # 2. Mac preset (Linux: foundry.linux.env.example)
 
 # 3. Auth for claude-cli — pick ONE (skip if you're already logged in here):
@@ -167,8 +197,8 @@ only, read-only filesystem except the workdir, private `/tmp`, host sockets and
 credential stores masked, env allowlist). The dependency-install step gets egress
 only through a gate-owned HTTPS `CONNECT` relay that refuses loopback, metadata and
 private destinations. If the host can't create user namespaces the gates fail
-closed; opt out to the sys.path-fenced in-process harness with
-`FOUNDRY_GATE_SANDBOX=inprocess`, which still refuses the install step unless
+closed; as an escape hatch only, opt out to the unconfined sys.path-fenced
+in-process harness with `FOUNDRY_GATE_SANDBOX=inprocess`, which still refuses the install step unless
 `FOUNDRY_ALLOW_UNSANDBOXED_INSTALL=1`. On macOS the same gates run under Seatbelt
 (`sandbox-exec`) by default: writes fenced to the workdir, credential stores and
 Foundry's `.env`/state dir unreadable, loopback-only network with the install's

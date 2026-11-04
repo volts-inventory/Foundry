@@ -27,6 +27,11 @@ CASES = {
         "a Python web app for personal notes: user sign-up and login with hashed passwords, "
         "each user can create, edit, search and delete only their own notes, stored in SQLite"
     ),
+    "shop": (
+        "a Python web shop: customer accounts with login, a product catalog with search, "
+        "a cart, checkout that records orders and decrements stock, order history, "
+        "and an admin area to manage products and view orders, stored in SQLite"
+    ),
 }
 
 START = re.compile(r"start model call: (\S+) \((\w+), ([^)]*)\)")

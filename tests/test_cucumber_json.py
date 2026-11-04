@@ -133,9 +133,9 @@ def test_catch_all_pattern_in_source_is_flagged(tmp_path: Path) -> None:
         REF + "AC-1": "catch-all"}
 
 
-def test_step_with_no_literal_pattern_is_unchecked(tmp_path: Path) -> None:
-    # A pattern built at run time cannot be probed: the step it binds is a catch-all.
-    steps = GO_STEPS.replace("sc.Step(`^an empty list$`, empty)", "sc.Step(pat, empty)")
+def test_step_no_source_pattern_matches_is_unchecked(tmp_path: Path) -> None:
+    # A step registered where the scan cannot see it cannot be probed: catch-all.
+    steps = GO_STEPS.replace("sc.Step(`^an empty list$`, empty)", "")
     wd = _go_project(tmp_path, steps)
     assert _outcome(wd, _report(_scenario("AC-1", "passed", "passed", "passed"))) == {
         REF + "AC-1": "catch-all"}
@@ -162,6 +162,55 @@ def test_go_and_rust_patterns_are_read_from_source(tmp_path: Path) -> None:
         ("CUCUMBER_EXPRESSION", "I add {string}"),
         ("REGULAR_EXPRESSION", r'^the "list" has (\d+)$'),
     ]
+
+
+def test_fifo_step_source_does_not_hang_and_fails_closed(tmp_path: Path) -> None:
+    import os
+
+    wd = _go_project(tmp_path)
+    (wd / "bdd" / "steps_test.go").unlink()
+    os.mkfifo(wd / "bdd" / "steps_test.go")
+    assert source_step_patterns(wd) == []  # nothing read: every step unchecked
+    assert _outcome(wd, _report(_scenario("AC-1", "passed", "passed", "passed"))) == {
+        REF + "AC-1": "catch-all"}
+
+
+def test_symlinked_step_source_is_not_read(tmp_path: Path) -> None:
+    wd = _go_project(tmp_path)
+    outside = tmp_path / "outside.go"
+    outside.write_text("sc.Step(`^elsewhere$`, f)")
+    (wd / "bdd" / "link.go").symlink_to(outside)
+    assert ("REGULAR_EXPRESSION", "^elsewhere$") not in (source_step_patterns(wd) or [])
+
+
+def test_commented_out_registrations_are_not_read(tmp_path: Path) -> None:
+    steps = GO_STEPS + "// sc.Step(`.*`, any)\n/* sc.Step(`(.*)`, any) */\n"
+    wd = _go_project(tmp_path, steps + 'var u = "http://x" // sc.Step(`.+`, f)\n')
+    pats = [src for _, src in source_step_patterns(wd) or []]
+    assert pats == ["^an empty list$", '^I add "([^"]*)"$', r"^the list has (\d+) items?$"]
+    rs = tmp_path / "rs"
+    rs.mkdir()
+    (rs / "Cargo.toml").write_text("[package]\n")
+    (rs / "s.rs").write_text('// #[given(regex = ".*")]\n#[given("a // b")]\n')
+    assert source_step_patterns(rs) == [("REGULAR_EXPRESSION", "^a\\ //\\ b$")]
+
+
+def test_go_ignored_dirs_are_not_read(tmp_path: Path) -> None:
+    wd = _go_project(tmp_path)
+    for d in ("_old", "testdata"):
+        (wd / d).mkdir()
+        (wd / d / "x.go").write_text("sc.Step(`.*`, f)\nsc.Step(pat, f)\n")
+    assert len(source_step_patterns(wd) or []) == 3
+
+
+def test_non_literal_godog_pattern_rejects_the_report(tmp_path: Path) -> None:
+    steps = GO_STEPS.replace("sc.Step(`^an empty list$`, empty)", "sc.Step(pat, empty)")
+    wd = _go_project(tmp_path, steps)
+    with pytest.raises(ReportError, match=r"bdd/steps_test.go:4 .*not a string literal"):
+        source_step_patterns(wd)
+    # A one-argument .Step (a game loop's tick) is not a registration.
+    wd2 = _go_project(tmp_path / "b", GO_STEPS + "func tick() { sim.Step(dt) }\n")
+    assert len(source_step_patterns(wd2) or []) == 3
 
 
 def test_cucumber_rs_undefined_step_reported_skipped_is_missing(tmp_path: Path) -> None:

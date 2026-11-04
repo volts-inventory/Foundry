@@ -86,19 +86,21 @@ def create_report_file(directory: Path) -> Path:
     return path
 
 
-def _read_regular(path: Path) -> bytes:
+def _read_regular(path: Path, cap: int = _MAX_REPORT_BYTES, what: str = "report") -> bytes:
+    """``path``'s bytes, opened without following a symlink or blocking on a FIFO,
+    and only if it is a regular file of at most ``cap`` bytes."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as exc:
-        raise ReportError(f"report not readable ({exc.strerror})") from exc
+        raise ReportError(f"{what} not readable ({exc.strerror})") from exc
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
-            raise ReportError("report is not a regular file")
-        if st.st_size > _MAX_REPORT_BYTES:
-            raise ReportError(f"report exceeds {_MAX_REPORT_BYTES} bytes")
+            raise ReportError(f"{what} is not a regular file")
+        if st.st_size > cap:
+            raise ReportError(f"{what} exceeds {cap} bytes")
         chunks: list[bytes] = []
-        remaining = _MAX_REPORT_BYTES + 1
+        remaining = cap + 1
         while remaining > 0:
             chunk = os.read(fd, min(remaining, 1 << 20))
             if not chunk:
@@ -108,8 +110,8 @@ def _read_regular(path: Path) -> bytes:
     finally:
         os.close(fd)
     data = b"".join(chunks)
-    if len(data) > _MAX_REPORT_BYTES:
-        raise ReportError(f"report exceeds {_MAX_REPORT_BYTES} bytes")
+    if len(data) > cap:
+        raise ReportError(f"{what} exceeds {cap} bytes")
     return data
 
 
@@ -376,36 +378,98 @@ def _quoted(literal: str) -> str | None:
 def _source_files(workdir: Path, suffix: str) -> list[Path]:
     out: list[Path] = []
     for root, dirs, files in os.walk(workdir):
-        dirs[:] = sorted(d for d in dirs if d not in _SKIP_DIRS and not d.startswith("."))
+        # The go tool ignores _* and testdata directories: so does the scan.
+        dirs[:] = sorted(
+            d for d in dirs
+            if d not in _SKIP_DIRS and not d.startswith(".")
+            and not (suffix == ".go" and (d.startswith("_") or d == "testdata"))
+        )
         out.extend(Path(root) / f for f in sorted(files) if f.endswith(suffix))
     return out
+
+
+# String literals (kept) and comments (blanked), so a commented-out registration
+# is not read and a `//` inside a pattern is not taken for a comment.
+_GO_TOKENS = re.compile(
+    r'(?P<s>`[^`]*`|"(?:[^"\\\n]|\\.)*"|\'(?:[^\'\\\n]|\\.)*\')'
+    r"|(?P<c>//[^\n]*|/\*.*?\*/)",
+    re.DOTALL,
+)
+_RS_TOKENS = re.compile(
+    r'(?P<s>b?r(#*)".*?"\2|b?"(?:[^"\\]|\\.)*"|\'(?:[^\'\\\n]|\\.)\')'
+    r"|(?P<c>//[^\n]*|/\*.*?\*/)",
+    re.DOTALL,
+)
+_GO_CALL = re.compile(r"\.(?:Step|Given|When|Then)\(")
+_GO_LITERAL_ARG = re.compile(r'\s*(?:regexp\.MustCompile\(\s*)?(?:`|")')
+
+
+def _strip_comments(text: str, tokens: re.Pattern[str]) -> str:
+    def blank(m: re.Match[str]) -> str:
+        if m.group("s") is not None:
+            return m.group(0)
+        return re.sub(r"[^\n]", " ", m.group(0))
+
+    return tokens.sub(blank, text)
+
+
+def _two_args(text: str, start: int) -> bool:
+    """Whether the call whose ``(`` ends at ``start`` takes two or more arguments
+    (godog's registrations do; a game loop's ``sim.Step(dt)`` does not). String
+    literals are masked by the caller."""
+    depth = 0
+    for ch in text[start:]:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                return False
+            depth -= 1
+        elif ch == "," and depth == 0:
+            return True
+    return False
+
+
+def _non_literal_go_step(text: str) -> int | None:
+    """The offset of a two-argument ``.Step/.Given/.When/.Then(`` call whose pattern
+    is not a string literal (or ``regexp.MustCompile`` of one), else ``None``."""
+    masked = _GO_TOKENS.sub(lambda m: "_" * len(m.group(0)), text)
+    for m in _GO_CALL.finditer(masked):
+        if _two_args(masked, m.end()) and not _GO_LITERAL_ARG.match(text, m.end()):
+            return m.start()
+    return None
 
 
 def source_step_patterns(workdir: Path) -> list[tuple[str, str]] | None:
     """``(pattern type, source)`` of every step definition registered with a string
     literal in a Go (godog) or Rust (cucumber-rs) project, or ``None`` when the
-    workdir is neither. A step definition registered any other way is not found, so
-    the steps it binds count as unchecked — fail-closed."""
+    workdir is neither. A godog registration whose pattern is not a literal raises
+    ``ReportError`` (its catch-all check cannot run); a source file that cannot be
+    read safely is skipped, so the steps it defines count as unchecked."""
     workdir = Path(workdir)
-    kinds = [(s, rx) for marker, s, rx in (("go.mod", ".go", _GO_STEP),
-                                          ("Cargo.toml", ".rs", _RS_STEP))
-             if (workdir / marker).is_file()]
+    kinds = [(s, rx, tok) for marker, s, rx, tok in (
+        ("go.mod", ".go", _GO_STEP, _GO_TOKENS), ("Cargo.toml", ".rs", _RS_STEP, _RS_TOKENS),
+    ) if (workdir / marker).is_file()]
     if not kinds:
         return None
     found: list[tuple[str, str]] = []
     total = 0
-    for suffix, rx in kinds:
+    for suffix, rx, tokens in kinds:
         for path in _source_files(workdir, suffix):
-            if path.is_symlink():
-                continue
+            cap = min(_MAX_SOURCE_FILE, _MAX_SOURCE_TOTAL - total)
             try:
-                size = path.stat().st_size
-                if size > _MAX_SOURCE_FILE or total + size > _MAX_SOURCE_TOTAL:
-                    continue
-                text = path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
+                data = _read_regular(path, cap, "step source")
+            except ReportError:
                 continue
-            total += size
+            total += len(data)
+            text = _strip_comments(data.decode("utf-8", errors="replace"), tokens)
+            if suffix == ".go" and (at := _non_literal_go_step(text)) is not None:
+                line = text.count("\n", 0, at) + 1
+                raise ReportError(
+                    f"{path.relative_to(workdir).as_posix()}:{line} registers a godog "
+                    "step whose pattern is not a string literal, so the gate cannot "
+                    "check it for a catch-all — use sc.Step(`^...$`, fn)"
+                )
             for m in rx.finditer(text):
                 lit = m.group(1 if suffix == ".go" else 2)
                 if lit.startswith("`"):

@@ -78,7 +78,8 @@ def test_write_inside_worktree_ok_and_source_untouched(source_dir: Path, sandbox
 def test_run_cwd_is_worktree(sandbox: Sandbox):
     res = sandbox.run(["pwd"])
     assert res.ok
-    assert Path(res.stdout.strip()) == sandbox.worktree
+    # macOS tmp is /var -> /private/var: pwd prints the resolved path.
+    assert Path(res.stdout.strip()).resolve() == sandbox.worktree.resolve()
 
 
 def test_destroyed_sandbox_refuses_use(source_dir: Path):
@@ -109,6 +110,22 @@ def test_destroy_removes_a_read_only_tree(source_dir: Path, tmp_path: Path):
     assert not root.exists()
     assert (outside / "keep").exists()
     assert outside.stat().st_mode & 0o777 == 0o755  # the symlink was not followed
+
+
+def test_dir_chmod_never_follows_a_symlink(tmp_path: Path):
+    # The path is opened O_NOFOLLOW: a directory swapped for a symlink after the
+    # walk's islink check would otherwise be chmod-ed through it.
+    from foundry.execution.sandbox import _chmod_dir_nofollow
+
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o755)
+    (tmp_path / "link").symlink_to(outside)
+    _chmod_dir_nofollow(str(tmp_path / "link"))
+    assert outside.stat().st_mode & 0o777 == 0o755
+    inside = tmp_path / "ro"
+    inside.mkdir(mode=0o555)
+    _chmod_dir_nofollow(str(inside))
+    assert inside.stat().st_mode & 0o777 == 0o700
 
 
 # ---------------------------------------------------------------------------

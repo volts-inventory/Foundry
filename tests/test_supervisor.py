@@ -396,3 +396,50 @@ def test_a_spec_advance_resets_the_fix_budget_for_the_build_boundary(tmp_path: A
     finally:
         reset_gate_write_verifier(token)
     assert budgets == [(GateStatus.FAIL, 1), (GateStatus.PASS, 0)]
+
+
+# ---- a build where no ticket lands ------------------------------------------
+
+
+class _FailingAdapter(StubAdapter):
+    """Every session fails, so every ticket is retried, then skipped."""
+
+    def run(self, packet: Any, sandbox: Any) -> Any:
+        raise RuntimeError("the session wrote none of the ticket's files")
+
+
+def test_a_build_with_no_ticket_built_halts_at_the_final_gates_without_a_review(
+    tmp_path: Any,
+) -> None:
+    """Every ticket skipped leaves no feature_diff: the reviewer has nothing to judge
+    and raised (real backends pin no subject_artifact_uri). Skip the review, let the
+    final gates record why the empty tree fails, and halt — a fix pass has nothing
+    to repair."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "README.md").write_text("seed\n")
+    tx = MockTransport.scripted(dict(_SCRIPTS), default_verdict="approve")
+    rt = AgentRuntime(proxy=ModelProviderProxy(tx, signer=ZoneBSigner(KEY, KEY_ID)),
+                      adapter=_FailingAdapter())
+    records = GlobalRecords()
+    app = build_supervisor_graph(
+        rt, runner=_runner(records), resolve=_synthetic_resolve,
+        resolve_blob=_resolve_blob_factory(_PASSING_DIFF), source_dir=str(src),
+    ).compile(checkpointer=MemorySaver())
+    config = _config("run-nothing-built")
+    del config["configurable"]["subject_artifact_uri"]
+    token = set_gate_write_verifier(DevGateWriteVerifier(KEY, KEY_ID, records))
+    try:
+        nodes = [n for step in app.stream({"request": "build a todo app"}, config,
+                                          stream_mode="updates") for n in step]
+    finally:
+        reset_gate_write_verifier(token)
+
+    assert "quality" not in nodes
+    assert nodes.count("build_test_gate") == 1
+    final = app.get_state(config).values
+    assert not app.get_state(config).next
+    assert not any(a.kind == "feature_diff" for a in final["artifacts"])
+    statuses = _gates_by_name(final)
+    assert "review" not in statuses
+    assert GateStatus.FAIL in {statuses.get("build"), statuses.get("test")}

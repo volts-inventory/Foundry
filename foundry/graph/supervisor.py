@@ -70,6 +70,7 @@ from foundry.agents.implementation.tickets import cap_stopped, pending_wave
 from foundry.governance.budget_controller import BudgetCaps, BudgetController
 from foundry.graph.gate_wiring import (
     BUILD_TEST_SMOKE_BOUNDARY,
+    FEATURE_DIFF_KIND,
     SPEC_BOUNDARY,
     WaveBuildCheck,
     bump_fix_attempts,
@@ -443,6 +444,13 @@ def build_supervisor_graph(
         # Waves left unbuilt: the per-wave check spent the fix budget (halt in order).
         if pending_wave(state, resolve):
             return "halt"
+        # No ticket landed (all skipped or blocked behind a skipped one): the
+        # reviewer has no diff to judge, so the final gates record why the empty
+        # tree fails, once (only they emit a ``smoke`` verdict) — a fix pass has
+        # nothing to repair, so it halts.
+        if not any(a.kind == FEATURE_DIFF_KIND for a in state.get("artifacts") or ()):
+            judged = any(g.name == "smoke" for g in state.get("gates") or ())
+            return "halt" if judged else _BUILD_TEST_GATE
         return _QUALITY
 
     # -- conditional routers (advance / fix / halt) ---------------------------
@@ -497,7 +505,8 @@ def build_supervisor_graph(
     g.add_conditional_edges(
         _IMPLEMENTATION,
         _route_implementation,
-        {_QUALITY: _QUALITY, _TOKEN_CAP: _TOKEN_CAP, "halt": END},
+        {_QUALITY: _QUALITY, _BUILD_TEST_GATE: _BUILD_TEST_GATE,
+         _TOKEN_CAP: _TOKEN_CAP, "halt": END},
     )
     g.add_edge(_TOKEN_CAP, _IMPLEMENTATION)
     g.add_edge(_QUALITY, _BUILD_TEST_GATE)

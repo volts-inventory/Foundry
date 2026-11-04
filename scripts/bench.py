@@ -37,7 +37,7 @@ def run_case(mode: str, backend: str, case: str, cap: int, out_dir: Path) -> Non
         "--backend", backend, "--model-mode", mode, "--scope", "demo",
         "--time-cap", str(cap), "--out", str(root / "out"), "--state-dir", str(root / "state"),
     ]  # fmt: skip
-    env = {**os.environ, "FOUNDRY_PROGRESS": "1", "FOUNDRY_GATE_SANDBOX": "inprocess"}
+    env = {**os.environ, "FOUNDRY_PROGRESS": "1"}
     start = time.monotonic()
     with (root / "run.log").open("w") as log:
         code = subprocess.run(cmd, env=env, stdout=log, stderr=subprocess.STDOUT).returncode

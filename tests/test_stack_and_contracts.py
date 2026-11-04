@@ -271,6 +271,25 @@ def test_a_rust_stack_without_an_install_fetches_its_crates() -> None:
     assert stack_profile(_js(test="t")).install_cmd is None
 
 
+@pytest.mark.parametrize(("install", "ran"), [
+    # `cargo update` only resolves the lockfile: the build (no [dependencies])
+    # passed and the offline bdd step could not download cucumber's crates.
+    ("cargo update", "cargo update && cargo fetch"),
+    ("cargo generate-lockfile", "cargo generate-lockfile && cargo fetch"),
+    ("cargo fetch", "cargo fetch"),
+    ("cargo update && cargo fetch --locked", "cargo update && cargo fetch --locked"),
+    ("cargo vendor", "cargo vendor"),
+])
+def test_a_rust_install_always_downloads_the_crates(install: str, ran: str) -> None:
+    from foundry.agents.planner import _stack_decision
+
+    stack = StackDecision(language="rust", install=install, test="cargo test")
+    assert stack_profile(stack).install_cmd == ran
+    planned, _ = _stack_decision(
+        {"stack": {"language": "rust", "install": install, "test": "cargo test"}}, ["rust"])
+    assert planned is not None and planned.install == ran
+
+
 def test_contracts_carry_kind_signature_and_a_structured_body() -> None:
     writes, cas, _ = _plan_once(_ts_plan())
     contracts = {

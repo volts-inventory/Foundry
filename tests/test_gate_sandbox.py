@@ -16,6 +16,7 @@ import pytest
 
 from foundry.gates import sandbox
 from foundry.gates.build import BuildGate
+from foundry.gates.profiles import stack_profile
 from foundry.gates.runner import GroundingUnavailable
 from foundry.gates.sandbox import (
     UNSHARE_FLAGS,
@@ -25,6 +26,7 @@ from foundry.gates.sandbox import (
 from foundry.gates.smoke import SmokeGate
 from foundry.gates.test import TestGate
 from foundry.schemas.gates import GateStatus
+from foundry.schemas.implementation import StackDecision
 
 
 def test_sandbox_is_the_default_and_opt_out_disables_it(monkeypatch: Any) -> None:
@@ -1033,20 +1035,31 @@ def test_real_cargo_fetch_feeds_the_offline_build(tmp_path: Path, monkeypatch: A
     (tmp_path / "src").mkdir()
     (tmp_path / "Cargo.toml").write_text(
         '[package]\nname = "t"\nversion = "0.1.0"\nedition = "2021"\n\n'
-        '[dependencies]\nitoa = "1"\n'
+        '[dependencies]\nitoa = "1"\n\n[dev-dependencies]\nryu = "1"\n'
     )
     (tmp_path / "src" / "main.rs").write_text(
         'fn main() { println!("{}", itoa::Buffer::new().format(42)); }\n'
+    )
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "t.rs").write_text(
+        '#[test]\nfn dev_dep() { assert_eq!(ryu::Buffer::new().format(1.5), "1.5"); }\n'
     )
     monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)
     monkeypatch.delenv("CARGO_HOME", raising=False)
     cache = sandbox.ToolchainCache()
     try:
         with sandbox.toolchain_scope(cache):
-            gate = BuildGate(cmd=("/bin/sh", "-c", "cargo run --quiet --offline"),
-                             install_cmd="cargo fetch")
+            # The planner's `cargo update` downloads nothing; the stack profile
+            # adds the fetch the offline test step's dev-dependencies need.
+            install = stack_profile(StackDecision(
+                language="rust", install="cargo update", test="cargo test")).install_cmd
+            gate = BuildGate(cmd=("/bin/sh", "-c", "cargo run --quiet"),
+                             install_cmd=install)
             obs = gate.execute(tmp_path)
             assert gate.decide(obs) is GateStatus.PASS, obs.stderr
             assert "42" in obs.stdout
+            rc, _out, err = sandbox.ground_untrusted(
+                ("/bin/sh", "-c", "cargo test --quiet"), tmp_path)
+            assert rc == 0, err
     finally:
         cache.close()

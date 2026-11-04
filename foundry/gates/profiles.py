@@ -42,6 +42,7 @@ __all__ = [
     "pinned_stack",
     "profile_examples",
     "profile_for_request",
+    "stack_install",
     "stack_profile",
 ]
 
@@ -238,6 +239,18 @@ BDD_RUNNERS["typescript"] = BDD_RUNNERS["javascript"] + (
 # The install a stack gets when the planner gives none: the offline build otherwise
 # has no way to resolve the harness's dev-dependencies.
 DEFAULT_INSTALL: dict[str, str] = {"rust": "cargo fetch"}
+# A Rust install that downloads no crates (`cargo update` only resolves the lockfile)
+# passes a build with no [dependencies] and leaves the offline tests without theirs.
+_CARGO_DOWNLOADS = re.compile(r"\bcargo\s+(fetch|vendor)\b")
+
+
+def stack_install(stack: StackDecision) -> str:
+    """The install line the gates run for ``stack``: its own, with ``cargo fetch``
+    added to a Rust one that downloads nothing; the language default when empty."""
+    install = stack.install.strip() or DEFAULT_INSTALL.get(stack.language, "")
+    if stack.language == "rust" and install and not _CARGO_DOWNLOADS.search(install):
+        install = f"{install} && cargo fetch"
+    return install
 
 
 def bdd_runner_hint(language: str) -> str:
@@ -545,7 +558,7 @@ def stack_profile(stack: StackDecision) -> VerificationProfile:
     )
     steps = [s for s in (build, stack.typecheck) if s]
     build_cmd = _sh(" && ".join(steps)) if steps else None
-    install_line = stack.install or DEFAULT_INSTALL.get(stack.language, "")
+    install_line = stack_install(stack)
     install = lockfile_tolerant_install(install_line) if install_line and not python else None
     test_unavailable = ""
     if stack.bdd:

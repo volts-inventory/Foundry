@@ -69,7 +69,7 @@ from foundry.agents._common import (
 )
 from foundry.agents.plan_contracts import CompileResult, check_contracts
 from foundry.base_tree import BaseView, read_base, render_base_view
-from foundry.gates.profiles import DEFAULT_INSTALL, bdd_runner_hint
+from foundry.gates.profiles import bdd_runner_hint, stack_install
 from foundry.gates.spec import _REQUIRED_FIELDS as _GATE_FIELDS
 from foundry.gates.spec import _incomplete_steps
 from foundry.proxy.model_provider_proxy import ProxyUnavailable, StructuredOutputError
@@ -1559,10 +1559,11 @@ def _stack_decision(
             "dropped and the gates infer a profile from the request."
         ]
     concerns: list[str] = []
-    if not stack.install and (default := DEFAULT_INSTALL.get(language)):
-        stack = stack.model_copy(update={"install": default})
-        concerns.append(f"The {language} stack had no install command; it runs "
-                        f"`{default}` so the offline build has its dependencies.")
+    if (install := stack_install(stack)) != stack.install:
+        concerns.append(f"The {language} stack's install `{stack.install or '(none)'}` "
+                        f"downloads no dependencies; it runs `{install}` so the offline "
+                        "steps have them.")
+        stack = stack.model_copy(update={"install": install})
     if language != "python" and not stack.bdd:
         concerns.append(
             f"The {language} stack has no bdd command: its scenarios are not executed."

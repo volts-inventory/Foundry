@@ -32,8 +32,10 @@ from dataclasses import dataclass, field
 from foundry.schemas.implementation import StackDecision
 
 __all__ = [
+    "BDD_RUNNERS",
     "PROFILES",
     "VerificationProfile",
+    "bdd_runner_hint",
     "installed_profiles",
     "lockfile_tolerant_install",
     "pinned_stack",
@@ -115,6 +117,119 @@ _BDD_CONTRACT = (
     "MUST be bound with pytest-bdd `scenarios(...)` and pass; the feature files "
     "are read-only."
 )
+
+
+# godog has no Cucumber Messages writer: its Cucumber JSON goes to the report and
+# the gate converts it. The runner chdirs to the repo root so the report's feature
+# URIs are ``features/<ticket>.feature``, the paths the gate trusts.
+_GODOG_RUNNER = """\
+package bdd
+
+import (
+	"os"
+	"testing"
+
+	"github.com/cucumber/godog"
+)
+
+func TestFeatures(t *testing.T) {
+	if err := os.Chdir(".."); err != nil {
+		t.Fatal(err)
+	}
+	format := "pretty"
+	if p := os.Getenv("FOUNDRY_BDD_REPORT"); p != "" {
+		format = "cucumber:" + p
+	}
+	suite := godog.TestSuite{
+		ScenarioInitializer: InitializeScenario,
+		Options: &godog.Options{
+			Format: format, Paths: []string{"features"}, Strict: true, TestingT: t,
+		},
+	}
+	if suite.Run() != 0 {
+		t.Fatal("feature scenarios failed")
+	}
+}
+"""
+
+_CUCUMBER_RS_RUNNER = """\
+use cucumber::{given, then, when, writer, World as _};
+
+#[derive(Debug, Default, cucumber::World)]
+pub struct World { /* scenario state */ }
+
+// step definitions: #[given("exact text")], #[when(expr = "I add {string}")],
+// #[then(regex = r"^the list has (\\d+) items?$")] fn ...(w: &mut World, ...)
+
+#[tokio::main]
+async fn main() {
+    match std::env::var("FOUNDRY_BDD_REPORT") {
+        Ok(path) => {
+            let out = std::fs::File::create(path).expect("report file");
+            World::cucumber().with_writer(writer::Json::new(out)).run("features").await;
+        }
+        Err(_) => World::run("features").await,
+    }
+}
+"""
+
+# What each language's standard Cucumber runner needs to write the report the gate
+# reads (``foundry.gates.cucumber``), keyed by StackDecision.language. Runner paths
+# match the planner's default harness files.
+BDD_RUNNERS: dict[str, str] = {
+    "go": (
+        "godog (github.com/cucumber/godog v0.16+) has no Cucumber Messages writer; the "
+        "gate reads its Cucumber JSON instead. bdd = `go test -count=1 ./bdd`. "
+        "bdd/godog_test.go MUST be exactly:\n" + _GODOG_RUNNER
+        + "and package bdd (e.g. bdd/steps_test.go) defines "
+        "`func InitializeScenario(sc *godog.ScenarioContext)` registering every step "
+        "as sc.Step(`^...$`, fn) with a string-literal regex (the gate reads the "
+        "patterns from source to reject catch-all matchers; a pattern built at run "
+        "time counts as one). Require godog in go.mod (install fetches it)."
+    ),
+    "rust": (
+        "cucumber-rs has no Cucumber Messages writer; the gate reads its Cucumber "
+        "JSON (the crate's `output-json` feature) instead. bdd = `cargo test --quiet "
+        "--test cucumber`. Cargo.toml: [dev-dependencies] cucumber = { version = "
+        "\"0.23\", features = [\"output-json\"] }, tokio = { version = \"1\", "
+        "features = [\"macros\", \"rt-multi-thread\"] }; and [[test]] name = "
+        "\"cucumber\", harness = false. tests/cucumber.rs:\n" + _CUCUMBER_RS_RUNNER
+        + "Step attributes MUST use string literals (the gate reads the patterns from "
+        "source to reject catch-all matchers)."
+    ),
+    "javascript": (
+        "bdd = `npx cucumber-js --format \"message:$FOUNDRY_BDD_REPORT\"` (with "
+        "@cucumber/cucumber as a devDependency and cucumber.json / --import naming the "
+        "step files); `--format json:` is the legacy JSON report and is rejected. In "
+        "a Cucumber Expression a literal `/`, `(`, `)`, `{` or `}` MUST be escaped "
+        "with a backslash (`I GET \\/health`) or use a /regex/."
+    ),
+    "java": (
+        "cucumber-jvm writes Cucumber Messages natively: with cucumber-java + "
+        "cucumber-junit-platform-engine + junit-platform-suite as test dependencies "
+        "and a @Suite @IncludeEngines(\"cucumber\") class in "
+        "src/test/java/RunCucumberTest.java, bdd = `mvn -q -B test "
+        "-Dtest=RunCucumberTest -Dsurefire.failIfNoSpecifiedTests=false "
+        "-Dcucumber.features=features -Dcucumber.glue=<step package> "
+        "-Dcucumber.plugin=message:$FOUNDRY_BDD_REPORT`."
+    ),
+    "csharp": (
+        "Reqnroll 3.0+ writes Cucumber Messages (SpecFlow cannot): bdd = "
+        "`REQNROLL_FORMATTERS=\"{\\\"formatters\\\":{\\\"message\\\":"
+        "{\\\"outputFilePath\\\":\\\"$FOUNDRY_BDD_REPORT\\\"}}}\" dotnet test "
+        "<the Reqnroll test project>` with the repo-root features/*.feature files "
+        "linked into that project."
+    ),
+}
+BDD_RUNNERS["typescript"] = BDD_RUNNERS["javascript"] + (
+    " TypeScript step files need a loader: `--import tsx` (tsx as a devDependency)."
+)
+
+
+def bdd_runner_hint(language: str) -> str:
+    """How ``language``'s standard Cucumber runner writes $FOUNDRY_BDD_REPORT ("" for
+    a language with no Cucumber runner the gate reads: Python uses pytest-bdd)."""
+    return BDD_RUNNERS.get(language, "")
 
 
 PROFILES: dict[str, VerificationProfile] = {
@@ -443,7 +558,9 @@ def stack_profile(stack: StackDecision) -> VerificationProfile:
         smoke_cmd=_sh(stack.run) if stack.run else None,
         contract_text="GATES: " + "; ".join(gates) + "."
         + (_PY_INSTALL_CONTRACT if python else "")
-        + (_BDD_CONTRACT if python and not stack.bdd else ""),
+        + (_BDD_CONTRACT if python and not stack.bdd else "")
+        + (f" BDD: {bdd_runner_hint(stack.language)}"
+           if stack.bdd and bdd_runner_hint(stack.language) else ""),
         python=python,
         bdd_cmd=stack.bdd or None,
         test_unavailable=test_unavailable,
@@ -451,5 +568,34 @@ def stack_profile(stack: StackDecision) -> VerificationProfile:
 
 
 def profile_examples() -> str:
-    """The hand-written profiles as EXAMPLES of gate commands (planner prompt)."""
-    return "\n".join(f"- {name}: {p.contract_text}" for name, p in PROFILES.items())
+    """The hand-written profiles as EXAMPLES of gate commands (planner prompt), each
+    with its language's bdd command."""
+    return "\n".join(
+        f"- {name}: {p.contract_text}" + _bdd_example(_PROFILE_LANGUAGE.get(name, ""))
+        for name, p in PROFILES.items()
+    )
+
+
+# One line per language for the planner's examples; the full recipe (the godog
+# runner file, the cucumber-rs main) is the harness ticket's and the gate's.
+_BDD_EXAMPLES: dict[str, str] = {
+    "python": "leave bdd empty (the built-in pytest-bdd harness runs the scenarios)",
+    "javascript": 'bdd = `npx cucumber-js --format "message:$FOUNDRY_BDD_REPORT"`',
+    "go": "bdd = `go test -count=1 ./bdd` (bdd/godog_test.go: godog writing its "
+          "Cucumber JSON — `cucumber:$FOUNDRY_BDD_REPORT` — the gate converts it)",
+    "rust": "bdd = `cargo test --quiet --test cucumber` (tests/cucumber.rs: cucumber-rs "
+            "writer::Json to $FOUNDRY_BDD_REPORT, the gate converts it)",
+    "java": "bdd = `mvn -q -B test -Dtest=RunCucumberTest "
+            "-Dsurefire.failIfNoSpecifiedTests=false -Dcucumber.features=features "
+            "-Dcucumber.plugin=message:$FOUNDRY_BDD_REPORT`",
+    "csharp": "bdd = Reqnroll 3+ `dotnet test` with REQNROLL_FORMATTERS setting the "
+              "message formatter's outputFilePath to $FOUNDRY_BDD_REPORT",
+    "lua": "leave bdd empty (no Cucumber runner the gate reads; scenarios not executed)",
+    "terraform": "leave bdd empty (no Cucumber runner the gate reads; scenarios not "
+                 "executed)",
+}
+
+
+def _bdd_example(language: str) -> str:
+    example = _BDD_EXAMPLES.get(language)
+    return f" BDD: {example}." if example else ""

@@ -311,6 +311,12 @@ _CUCUMBER_WHY = {
 }
 
 
+def _output_tail(err: str, out: str, rc: int, lines: int = 15, chars: int = 1500) -> str:
+    text = "\n".join(t for t in (err.strip(), out.strip()) if t)
+    tail = "\n".join(text.splitlines()[-lines:])[-chars:]
+    return f"bdd command exited {rc}; its last output:\n{tail or '(none)'}"
+
+
 def bdd_findings(
     scenarios: dict[str, str], why: dict[str, str] | None = None
 ) -> tuple[str, ...]:
@@ -451,11 +457,12 @@ class TestGate:
         )
         # A stack command is judged by its exit code alone, never pytest's codes.
         self.stack_harness = stack_harness
+        self.profile_name = profile_name
         # Scenario refs a per-wave check judges (``None`` = the full gate): only
         # these scenarios run and decide the verdict; other tests are not judged.
         self.scope = scope
         # The command digest: a cached verdict never outlives a change of commands.
-        self.scanner_rule_version = "test-harness-v2:" + commands_digest(
+        self.scanner_rule_version = "test-harness-v3:" + commands_digest(
             cmd=list(self.cmd), bdd_cmd=self.bdd_cmd, stack_harness=stack_harness,
             profile=profile_name, scope=sorted(scope) if scope is not None else None,
         )
@@ -523,23 +530,27 @@ class TestGate:
             rc, out, err = self._ground(workdir, cmd, extra, binds)
             return rc, out, err, read_bdd_report(report, nonce)
 
-    @staticmethod
     def _cucumber_scenarios(
+        self,
         report: Path,
         digest: cucumber.ReportDigest | None,
         trusted: dict[str, list[tuple[str, str]]],
         workdir: Path,
     ) -> tuple[dict[str, str], tuple[str, ...]]:
-        """Outcomes from the pinned Cucumber Messages report; an absent, tampered or
+        """Outcomes from the pinned Cucumber report; an absent, tampered or
         unparseable one marks every trusted scenario "missing"."""
         try:
-            envelopes = cucumber.read_verified_report(report, digest)
+            envelopes = cucumber.read_verified_report(report, digest, workdir)
         except cucumber.ReportError as exc:
+            from .profiles import bdd_runner_hint
+
+            hint = bdd_runner_hint(self.profile_name.removeprefix("stack:")) or (
+                "e.g. cucumber-js --format \"message:$FOUNDRY_BDD_REPORT\""
+            )
             note = (
                 f"BDD report rejected: {exc} — every scenario is marked missing. The "
-                "bdd command must run the stack's Cucumber runner writing Cucumber "
-                "Messages NDJSON to $FOUNDRY_BDD_REPORT (e.g. cucumber-js "
-                '--format "message:$FOUNDRY_BDD_REPORT")'
+                "bdd command must run the stack's Cucumber runner writing its report "
+                f"to $FOUNDRY_BDD_REPORT: {hint}"
             )
             return {ref: "missing" for ref in sorted(trusted)}, (note,)
         return cucumber.scenario_outcomes(envelopes, trusted, workdir)
@@ -623,6 +634,10 @@ class TestGate:
             structured[BDD_EXIT_KEY] = bdd_rc
             structured["bdd_cmd"] = self.bdd_cmd
             bdd_failures = failure_findings(bdd_out, limit=20) if bdd_rc != 0 else ()
+            if bdd_rc != 0 and not bdd_failures:
+                # Not pytest-shaped output: the runner's own last words are the why
+                # (a step-definition load error leaves the report empty).
+                bdd_failures = (_output_tail(bdd_err, bdd_out, bdd_rc),)
             if bdd_rc in MISSING_BINARY_EXIT_CODES:
                 bdd_failures = (
                     f"bdd command exited {bdd_rc}: command not found or not executable "

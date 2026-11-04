@@ -417,7 +417,7 @@ def test_cucumber_js_missing_step_definitions(tmp_path: Path, cucumber_js: Path)
 
 def test_cucumber_js_agent_edited_feature_text(tmp_path: Path, cucumber_js: Path) -> None:
     # The bdd command rewrites the trusted feature before the runner parses it.
-    edit = "sed -i 's/the list has 1 item/the list has 1 items/' features/T1.feature && "
+    edit = "sed -i.orig 's/the list has 1 item/the list has 1 items/' features/T1.feature && "
     gate, obs = _run_js(_js_project(tmp_path, cucumber_js), edit + _RUN)
     assert set(obs.structured[BDD_KEY].values()) == {"unmatched"}
     assert gate.decide(obs) is GateStatus.FAIL

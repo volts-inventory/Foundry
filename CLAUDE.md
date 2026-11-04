@@ -244,6 +244,7 @@ Housekeeping: `rm -rf .pytest_cache .mypy_cache .ruff_cache ./.run spec.md`
 - The Workshop streams a floor's `done` event before it sets `status="done"` and closes the run: a client that fetches on `done` can still see it running (insight.js retries).
 - `insight.BodyError` subclasses `ValueError`: call `self._read_json()` outside any `try/except ValueError` validation block, or an oversized body (413) is answered as a 400.
 - Importing `webapp.server` loads `.env` into the whole pytest process: any FOUNDRY_* var it sets (state dir, backend, adapter) leaks into other tests unless `tests/conftest.py`'s autouse fixture pins or clears it.
-- On macOS the fast suite has 2 environment-only failures (`/private/var` symlinked tmp, cucumber-js): `test_execution::test_run_cwd_is_worktree`, `test_cucumber_bdd::test_cucumber_js_agent_edited_feature_text` — compare against main before blaming a change. The gate sandbox runs there under Seatbelt; the `unshare`-only tests skip.
+- On macOS the fast suite has 1 environment-only failure (`/private/var` symlinked tmp): `test_execution::test_run_cwd_is_worktree` — compare against main before blaming a change. The gate sandbox runs there under Seatbelt; the `unshare`-only tests skip.
 - Seatbelt (SBPL): a rule naming one operation (`file-read-data`) outranks a wildcard (`file-read*`) regardless of order, so a later wildcard allow does not undo an earlier specific deny — name both.
 - `Sandbox.scrubbed_env` is also asserted in `tests/test_self_verify.py` (the claude-code cage), not only `tests/test_execution.py`: run both after changing the execution sandbox env.
+- BSD (macOS) `sed -i` takes a mandatory backup suffix: write `sed -i.orig …` in test shell lines, or the edit silently fails there.

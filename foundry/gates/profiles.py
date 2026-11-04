@@ -33,6 +33,7 @@ from foundry.schemas.implementation import StackDecision
 
 __all__ = [
     "BDD_RUNNERS",
+    "DEFAULT_INSTALL",
     "PROFILES",
     "VerificationProfile",
     "bdd_runner_hint",
@@ -193,14 +194,22 @@ BDD_RUNNERS: dict[str, str] = {
         "--test cucumber`. Cargo.toml: [dev-dependencies] cucumber = { version = "
         "\"0.23\", features = [\"output-json\"] }, tokio = { version = \"1\", "
         "features = [\"macros\", \"rt-multi-thread\"] }; and [[test]] name = "
-        "\"cucumber\", harness = false. tests/cucumber.rs:\n" + _CUCUMBER_RS_RUNNER
+        "\"cucumber\", harness = false. Declare no [lib] or [[bin]] section: Cargo "
+        "finds src/lib.rs, src/main.rs and src/bin/*.rs once the feature tickets write "
+        "them, while a declared target whose file is not written yet fails every "
+        "build before them (a manifest with only the [[test]] target builds); the "
+        "default binary is named after [package] name, so match the run command's "
+        "--bin. tests/cucumber.rs:\n" + _CUCUMBER_RS_RUNNER
         + "Step attributes MUST use string literals (the gate reads the patterns from "
         "source to reject catch-all matchers)."
     ),
     "javascript": (
         "bdd = `npx cucumber-js --format \"message:$FOUNDRY_BDD_REPORT\"` (with "
         "@cucumber/cucumber as a devDependency and cucumber.json / --import naming the "
-        "step files); `--format json:` is the legacy JSON report and is rejected. In "
+        "step files); `--format json:` is the legacy JSON report and is rejected. "
+        "cucumber.json's default profile MUST set \"forceExit\": true: cucumber-js "
+        "otherwise waits for every server, socket or timer a step left open, and the "
+        "gate kills the hung run; still stop what the steps start in an AfterAll hook. In "
         "a Cucumber Expression a literal `/`, `(`, `)`, `{` or `}` MUST be escaped "
         "with a backslash (`I GET \\/health`) or use a /regex/."
     ),
@@ -224,6 +233,11 @@ BDD_RUNNERS: dict[str, str] = {
 BDD_RUNNERS["typescript"] = BDD_RUNNERS["javascript"] + (
     " TypeScript step files need a loader: `--import tsx` (tsx as a devDependency)."
 )
+
+
+# The install a stack gets when the planner gives none: the offline build otherwise
+# has no way to resolve the harness's dev-dependencies.
+DEFAULT_INSTALL: dict[str, str] = {"rust": "cargo fetch"}
 
 
 def bdd_runner_hint(language: str) -> str:
@@ -531,7 +545,8 @@ def stack_profile(stack: StackDecision) -> VerificationProfile:
     )
     steps = [s for s in (build, stack.typecheck) if s]
     build_cmd = _sh(" && ".join(steps)) if steps else None
-    install = lockfile_tolerant_install(stack.install) if stack.install and not python else None
+    install_line = stack.install or DEFAULT_INSTALL.get(stack.language, "")
+    install = lockfile_tolerant_install(install_line) if install_line and not python else None
     test_unavailable = ""
     if stack.bdd:
         # Scenarios are judged from the Cucumber report; `true` when only bdd is set.

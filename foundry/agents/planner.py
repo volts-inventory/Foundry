@@ -69,7 +69,7 @@ from foundry.agents._common import (
 )
 from foundry.agents.plan_contracts import CompileResult, check_contracts
 from foundry.base_tree import BaseView, read_base, render_base_view
-from foundry.gates.profiles import bdd_runner_hint
+from foundry.gates.profiles import DEFAULT_INSTALL, bdd_runner_hint
 from foundry.gates.spec import _REQUIRED_FIELDS as _GATE_FIELDS
 from foundry.gates.spec import _incomplete_steps
 from foundry.proxy.model_provider_proxy import ProxyUnavailable, StructuredOutputError
@@ -1559,6 +1559,10 @@ def _stack_decision(
             "dropped and the gates infer a profile from the request."
         ]
     concerns: list[str] = []
+    if not stack.install and (default := DEFAULT_INSTALL.get(language)):
+        stack = stack.model_copy(update={"install": default})
+        concerns.append(f"The {language} stack had no install command; it runs "
+                        f"`{default}` so the offline build has its dependencies.")
     if language != "python" and not stack.bdd:
         concerns.append(
             f"The {language} stack has no bdd command: its scenarios are not executed."
@@ -1664,7 +1668,7 @@ def _generated_tickets(
         commands = "; ".join(
             f"{k} `{v}`" for k, v in (
                 ("install", stack.install), ("build", stack.build),
-                ("typecheck", stack.typecheck), ("test", stack.test),
+                ("typecheck", stack.typecheck), ("test", stack.test), ("run", stack.run),
             ) if v
         )
         out.append(Ticket(
@@ -1675,8 +1679,12 @@ def _generated_tickets(
                 "in the package manifest and write its config so the BDD command "
                 f"`{stack.bdd}` runs every {FEATURE_DIR}/*.feature file and writes "
                 f"its report to the file named by ${BDD_REPORT_ENV}. "
-                "Set up the project skeleton so these commands work"
-                + (f": {commands}." if commands else ".")
+                + (f"The stack's commands, which must pass once every ticket is "
+                   f"built: {commands}. " if commands else "")
+                + "Write ONLY your files: the feature tickets write the source after "
+                "you, and this wave's build check runs on your files alone, so "
+                "declare no build target at a source file you do not write; any "
+                "file you create outside your files is discarded."
                 + " Write no step definitions: the test tickets do."
                 + (f" {hint}" if (hint := bdd_runner_hint(language)) else "")
             ),

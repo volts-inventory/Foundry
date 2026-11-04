@@ -222,6 +222,55 @@ def test_harness_ticket_carries_the_stack_runner_recipe() -> None:
     assert bdd_runner_hint("go") and bdd_runner_hint("go") in harness.description
 
 
+@pytest.mark.parametrize("language", ["rust", "go", "javascript", "typescript"])
+def test_harness_ticket_writes_only_its_files(language: str) -> None:
+    # Told to "set up the project skeleton", the rust harness declared [lib]/[[bin]]
+    # at files a later ticket owns; its stubs were dropped and wave 0 never built.
+    from foundry.agents.implementation.personas import persona_for
+    from foundry.agents.planner import _generated_tickets
+
+    stack = StackDecision(language=language, bdd="run-bdd", build="b", run="r")
+    [harness], _ = _generated_tickets([], {}, stack, Seq("r", 0, 0, "planner", 0))
+    assert "skeleton" not in harness.description
+    assert "Write ONLY your files" in harness.description
+    assert "declare no build target at a source file you do not write" in harness.description
+    assert "run `r`" in harness.description
+    persona = persona_for("test", stack, harness=True)
+    assert "skeleton" not in persona and "declare no build target" in persona
+
+
+def test_rust_harness_declares_no_lib_or_bin_target() -> None:
+    from foundry.gates.profiles import bdd_runner_hint
+
+    assert "Declare no [lib] or [[bin]] section" in bdd_runner_hint("rust")
+
+
+def test_js_harness_forces_cucumber_to_exit() -> None:
+    # A step that started the app's server and never closed it hung cucumber-js
+    # until the gate's 600s kill.
+    from foundry.gates.profiles import bdd_runner_hint
+
+    for language in ("javascript", "typescript"):
+        assert '"forceExit": true' in bdd_runner_hint(language)
+        assert "AfterAll" in bdd_runner_hint(language)
+
+
+def test_a_rust_stack_without_an_install_fetches_its_crates() -> None:
+    # No install meant nothing fetched cucumber: the offline build tried crates.io.
+    from foundry.agents.planner import _stack_decision
+
+    raw = {"language": "rust", "build": "cargo build", "bdd": "cargo test --test cucumber"}
+    stack, concerns = _stack_decision({"stack": raw}, ["rust"])
+    assert stack is not None and stack.install == "cargo fetch"
+    assert any("`cargo fetch`" in c for c in concerns)
+    pinned, _ = _stack_decision({"stack": {**raw, "install": "cargo vendor"}}, ["rust"])
+    assert pinned is not None and pinned.install == "cargo vendor"
+    # A stack already on a checkpoint (planned before the default) gets it at gate time.
+    assert stack_profile(StackDecision(language="rust", build="cargo build",
+                                       test="cargo test")).install_cmd == "cargo fetch"
+    assert stack_profile(_js(test="t")).install_cmd is None
+
+
 def test_contracts_carry_kind_signature_and_a_structured_body() -> None:
     writes, cas, _ = _plan_once(_ts_plan())
     contracts = {

@@ -935,6 +935,18 @@ def test_toolchain_cache_is_shared_and_writable_only_by_the_install_step(
     assert not os.path.exists(eph)
 
 
+def test_offline_steps_run_cargo_offline(tmp_path: Path, monkeypatch: Any) -> None:
+    # No DNS offline: cargo otherwise retries the registry and fails on a host lookup.
+    _capture(monkeypatch)
+    envs: list[dict[str, str]] = []
+    monkeypatch.setattr(sandbox, "run_grounding_command",
+                        lambda argv, wd, *, env=None, timeout_s=600.0:
+                        envs.append(env) or (0, "", ""))
+    BuildGate(cmd=("true",), install_cmd="cargo fetch").execute(tmp_path)
+    install, build = envs
+    assert "CARGO_NET_OFFLINE" not in install and build["CARGO_NET_OFFLINE"] == "true"
+
+
 def _go_works() -> bool:
     go = shutil.which("go")
     return go is not None and os.system(f"{shlex.quote(go)} version >/dev/null 2>&1") == 0

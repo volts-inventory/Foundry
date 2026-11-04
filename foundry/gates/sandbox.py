@@ -977,6 +977,8 @@ class ToolchainCache:
         shutil.rmtree(root, ignore_errors=True)
 
 
+_OFFLINE_ENV = {"CARGO_NET_OFFLINE": "true"}
+
 _TOOLCHAIN: contextvars.ContextVar[ToolchainCache | None] = contextvars.ContextVar(
     "foundry_toolchain_cache", default=None
 )
@@ -1016,6 +1018,10 @@ def ground_untrusted(
     unless ``FOUNDRY_ALLOW_UNSANDBOXED_INSTALL=1`` (fail-closed ERROR). Inside a
     :func:`toolchain_scope` the toolchains' dependency caches point at its cache,
     writable only by the networked step."""
+    if not network:
+        # Offline steps have no DNS: cargo would retry the registry and fail on a
+        # host lookup; offline mode names the missing dependency instead.
+        extra_env = {**_OFFLINE_ENV, **(extra_env or {})}
     if (cache := _TOOLCHAIN.get()) is not None:
         extra_env = {**cache.env(), **(extra_env or {})}
         binds = (*binds, (cache.root, network))

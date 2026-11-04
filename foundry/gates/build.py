@@ -68,13 +68,6 @@ def build_findings(
     (stdout then stderr), sanitized and bounded. A pure function of the observed
     output with the workdir path normalized to ``.``, so it adds nothing to
     ``results_digest`` that the raw stdout/stderr didn't already bind."""
-    text = "\n".join(t for t in (stdout, stderr) if t.strip())
-    root = str(Path(workdir).resolve())
-    text = text.replace(root + "/", "./").replace(root, ".")
-    text = _CONTROL_RE.sub("", _ANSI_RE.sub("", text))
-    lines = [ln.rstrip()[:_LINE_CHARS] for ln in text.splitlines() if ln.strip()]
-    tail: list[str] = []
-    used = 0
     head = f"{step} command exited {rc}"
     if rc in MISSING_BINARY_EXIT_CODES:
         head += " (command not found or not executable: missing toolchain — infra ERROR)"
@@ -93,12 +86,26 @@ def build_findings(
             "names a project problem such as a missing lockfile, a bad manifest or an "
             "unknown package, fix the manifest; otherwise the registry/network failed)"
         )
+    tail = output_tail(stdout, stderr, workdir)
+    return (f"{head}; last {len(tail)} output line(s):", *tail)
+
+
+def output_tail(stdout: str, stderr: str, workdir: Path) -> tuple[str, ...]:
+    """The last lines of a command's output (stdout then stderr), sanitized, bounded,
+    with the workdir path normalized to ``.``."""
+    text = "\n".join(t for t in (stdout, stderr) if t.strip())
+    root = str(Path(workdir).resolve())
+    text = text.replace(root + "/", "./").replace(root, ".")
+    text = _CONTROL_RE.sub("", _ANSI_RE.sub("", text))
+    lines = [ln.rstrip()[:_LINE_CHARS] for ln in text.splitlines() if ln.strip()]
+    tail: list[str] = []
+    used = 0
     for ln in reversed(lines[-_EXCERPT_LINES:]):
         if used + len(ln) > _EXCERPT_CHARS:
             break
         tail.append(ln)
         used += len(ln)
-    return (f"{head}; last {len(tail)} output line(s):", *reversed(tail))
+    return tuple(reversed(tail))
 
 
 class BuildGate:

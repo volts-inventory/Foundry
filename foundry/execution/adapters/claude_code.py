@@ -103,16 +103,23 @@ _EXCLUDED_DIRS = frozenset({
 })
 
 
+# Cargo and Maven build into a top-level target/: output, not source, in their projects.
+_TARGET_DIR_MANIFESTS = ("Cargo.toml", "pom.xml")
+
+
 def walk_worktree(root: Path) -> dict[str, bytes]:
     """The worktree's file map (relative POSIX path -> raw bytes), excluding
     VCS/scratch dirs. Symlinks are skipped (never followed — a link out of the
     tree must not pull external content into the authored slice)."""
     files: dict[str, bytes] = {}
+    top = _EXCLUDED_TOP_DIRS
+    if any((root / m).is_file() for m in _TARGET_DIR_MANIFESTS):
+        top = top | {"target"}
     for path in sorted(root.rglob("*")):
         if path.is_symlink() or not path.is_file():
             continue
         rel = path.relative_to(root)
-        if rel.parts and rel.parts[0] in _EXCLUDED_TOP_DIRS:
+        if rel.parts and rel.parts[0] in top:
             continue
         if any(part in _EXCLUDED_DIRS for part in rel.parts[:-1]):
             continue
@@ -481,6 +488,7 @@ class ClaudeCodeAdapter:
             for line in summary.splitlines()
             if line.strip().startswith("TRIAGE:")
         ]
+        reported = bool(notes)
         for path in deleted:
             notes.append(f"deleted from the tree slice: {path}")
         for path in skipped_binary:
@@ -493,6 +501,8 @@ class ClaudeCodeAdapter:
             notes.append(f"model-auth grant active in sandbox: {', '.join(grant)}")
         if failed:
             notes.insert(0, summary)
-        elif not notes:
-            notes.append(summary.strip()[:500] or "run completed with no summary text")
+        elif not reported:
+            # Even beside the cost / grant notes: a session that changed nothing
+            # is otherwise unexplained.
+            notes.insert(0, summary.strip()[:500] or "run completed with no summary text")
         return notes

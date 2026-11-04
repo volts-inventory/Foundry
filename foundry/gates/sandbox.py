@@ -30,15 +30,16 @@ PID / IPC / UTS namespaces and a clean process-tree teardown:
 (``/usr/bin/sandbox-exec`` with a generated SBPL profile, the approach of OpenAI's
 Codex CLI). Writes reach only the workdir, the writable binds and a private
 ``TMPDIR``; host temp dirs are unlistable outside those, and the credential stores,
-``~/Library/Keychains``, Foundry's ``.env`` and ``FOUNDRY_STATE_DIR`` are unreadable.
-The network is loopback-only (no DNS); the install step's egress is the same vetted
-relay, on a loopback port that demands a per-step credential. The process group is
-killed when the command exits or times out. What Seatbelt cannot give: loopback is
-the HOST's, so host services on 127.0.0.1 are reachable (except host proxies named
-in the env, which are denied by port); there is no PID namespace, so a process that
-calls ``setsid()`` escapes the group kill (it stays sandboxed); reads are allowed
-by default, so the credential list remains a denylist; and tools that ignore
-``TMPDIR`` for ``confstr(_CS_DARWIN_USER_TEMP_DIR)`` (BSD ``mktemp``) can't write temp.
+``~/Library/Keychains``, Foundry's ``.env``, ``.run`` and state/auth dirs are
+unreadable. The network is loopback-only (no DNS); the install step's egress is the
+same vetted relay, on a loopback port that demands a per-step credential. The
+process group is killed when the command exits or times out. What Seatbelt cannot
+give: loopback is the HOST's, so host services on 127.0.0.1 are reachable (except
+host proxies named in the env and the Workshop's ``WORKSHOP_PORT``, denied by
+port); there is no PID namespace, so a process that calls ``setsid()`` escapes the
+group kill (it stays sandboxed); reads are allowed by default, so the credential
+list remains a denylist; and tools that ignore ``TMPDIR`` for
+``confstr(_CS_DARWIN_USER_TEMP_DIR)`` (BSD ``mktemp``) can't write temp.
 
 The sandbox is the DEFAULT; opt out with ``FOUNDRY_GATE_SANDBOX=inprocess`` on hosts
 with neither backend. The opt-out still applies the env allowlist,
@@ -618,6 +619,8 @@ _SEATBELT_BIN = "/usr/bin/sandbox-exec"
 _SEATBELT_OK: bool | None = None
 _HIDDEN_HOME_PATHS_DARWIN: tuple[str, ...] = ("Library/Keychains",)
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+_STATE_DIR_VARS = ("FOUNDRY_AUTH_DIR", "WORKSHOP_STATE_DIR", "FOUNDRY_STATE_DIR",
+                   "WORKSHOP_OUTPUT_DIR")
 
 # The base profile. Every host path reaches the profile as a ``-D`` parameter, never
 # as profile text, so a build-chosen path cannot inject SBPL. Later rules win, which
@@ -687,13 +690,28 @@ def _seatbelt_hidden(home: str | None) -> list[str]:
              if h}
     paths = [os.path.join(h, n) for h in homes
              for n in (*_HIDDEN_HOME_PATHS, *_HIDDEN_HOME_PATHS_DARWIN)]
-    paths += [*_HIDDEN_ABS_PATHS, str(_REPO_ROOT / ".env"), os.path.join(os.getcwd(), ".env")]
-    if state := os.environ.get("FOUNDRY_STATE_DIR", "").strip():
-        paths.append(state)
+    paths += _HIDDEN_ABS_PATHS
+    # Foundry's own state, wherever the CLI or the Workshop puts it (mirrors the
+    # precedence in webapp/auth.py and webapp/server.py, which can't be imported
+    # here): the Workshop's auth.json holds the session-cookie HMAC key. A relative
+    # setting is resolved against the cwd and the repo root alike.
+    rel = [".env", ".run", *(v for k in _STATE_DIR_VARS
+                             if (v := os.environ.get(k, "").strip()))]
+    paths += [str(Path(root, p).expanduser())
+              for root in (os.getcwd(), _REPO_ROOT) for p in rel]
     out: set[str] = set()
     for p in paths:
-        out.update((os.path.abspath(os.path.expanduser(p)), _real(p)))
+        out.update((os.path.abspath(p), _real(p)))
     return sorted(out)
+
+
+def _workshop_port() -> int:
+    """The Workshop's HTTP port (``webapp.server`` reads the same variable): its API is
+    on the host's loopback, which a Seatbelt step shares."""
+    try:
+        return int(os.environ.get("WORKSHOP_PORT", "8765"))
+    except ValueError:
+        return 8765
 
 
 def _loopback_proxy_ports(env: Mapping[str, str]) -> set[int]:
@@ -833,7 +851,8 @@ def _run_seatbelt(
         profile, params = seatbelt_profile(
             workdir=str(wd), private_tmp=private_tmp, binds=binds,
             home=host_env.get("HOME"), network=network,
-            deny_ports=_loopback_proxy_ports(host_env) | _loopback_proxy_ports(os.environ),
+            deny_ports=(_loopback_proxy_ports(host_env) | _loopback_proxy_ports(os.environ)
+                        | {_workshop_port()}),
         )
         return _run_session(
             [_SEATBELT_BIN, *params, "-p", profile, "--", *cmd], wd, run_env, timeout_s

@@ -851,3 +851,51 @@ def test_seatbelt_kills_the_process_group(tmp_path: Path) -> None:
     with pytest.raises(subprocess.TimeoutExpired):
         sandbox.run_confined((*_py(spawn), "60"), tmp_path, timeout_s=2)
     assert not alive(int((tmp_path / "child.pid").read_text()))
+
+
+@_SEATBELT
+def test_seatbelt_hides_the_workshops_default_state_under_the_repo(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """The Workshop's default state dir (.run/web/state, holding auth.json's session
+    secret) sits under the repo root the profile trusts for reads: the deny must win."""
+    repo = tmp_path / "repo"
+    (repo / ".run" / "web" / "state").mkdir(parents=True)
+    (repo / ".run" / "web" / "state" / "auth.json").write_text('{"session_secret": "s"}')
+    (repo / "pkg.py").write_text("ok")
+    for k in sandbox._STATE_DIR_VARS:
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(sandbox, "_REPO_ROOT", repo)
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    probe = (
+        f"assert open({str(repo / 'pkg.py')!r}).read() == 'ok'\n"
+        f"try:\n    open({str(repo / '.run' / 'web' / 'state' / 'auth.json')!r}).read()\n"
+        "except PermissionError:\n    pass\n"
+        "else:\n    raise SystemExit('read auth.json')\n"
+    )
+    rc, _out, err = sandbox.run_confined(_py(probe), wd)
+    assert rc == 0, err
+    # ...and each relocation variable is hidden too.
+    for k in sandbox._STATE_DIR_VARS:
+        monkeypatch.setenv(k, str(tmp_path / k))
+        assert os.path.realpath(tmp_path / k) in sandbox._seatbelt_hidden(None)
+        monkeypatch.delenv(k)
+
+
+@_SEATBELT
+def test_seatbelt_blocks_the_workshop_port(tmp_path: Path, monkeypatch: Any) -> None:
+    with socket.socket() as srv:
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(4)
+        port = srv.getsockname()[1]
+        monkeypatch.setenv("WORKSHOP_PORT", str(port))
+        code = (
+            "import socket, sys\n"
+            f"try:\n    socket.create_connection(('127.0.0.1', {port}), timeout=3)\n"
+            "except PermissionError:\n    pass\n"
+            "else:\n    sys.exit('reached the Workshop')\n"
+        )
+        for network in (False, True):
+            rc, _out, err = sandbox.run_confined(_py(code), tmp_path, network=network)
+            assert rc == 0, err

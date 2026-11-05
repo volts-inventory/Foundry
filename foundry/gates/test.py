@@ -431,6 +431,23 @@ def failure_findings(stdout: str, *, limit: int = 50) -> tuple[str, ...]:
     return (*keep[: limit - len(summary)], *summary)
 
 
+_FIXTURE_NOT_FOUND = re.compile(r"fixture '([A-Za-z_]\w*)' not found")
+
+
+def step_argument_hints(stdout: str) -> tuple[str, ...]:
+    """One line per fixture a pytest-bdd run could not find: almost always a step
+    function parameter that no step text, ``target_fixture`` or fixture provides."""
+    return tuple(
+        f"step argument `{name}` is not provided (fixture '{name}' not found): "
+        "pytest-bdd fills a step function's parameter only from the step text via "
+        f"`parsers.parse(\"... {{{name}}} ...\")`, from `target_fixture=\"{name}\"` on "
+        f"an earlier step (`@given(\"...\", target_fixture=\"{name}\")` whose function "
+        f"returns the value), or from a pytest fixture named `{name}`; a step's plain "
+        "`return` passes nothing on"
+        for name in dict.fromkeys(_FIXTURE_NOT_FOUND.findall(stdout))
+    )
+
+
 def parse_pytest_summary(stdout: str) -> dict[str, int]:
     """Counts from the pytest tail line (raw observation, zone A side)."""
     counts: dict[str, int] = {}
@@ -662,7 +679,11 @@ class TestGate:
         # pinned harness's own stdout (zone A) so the fix loop feeds the SPECIFIC
         # failure back to the engineer (zone B still decides the verdict on rc alone).
         if rc != 0:
-            findings = failure_findings(out)
+            from .pydeps import undeclared_import_hints
+
+            findings = (*undeclared_import_hints(out + err, workdir),
+                        *(step_argument_hints(out) if trusted and not self.bdd_cmd else ()),
+                        *failure_findings(out))
         if self.stack_harness and rc in MISSING_BINARY_EXIT_CODES:
             findings = (
                 f"test command exited {rc}: command not found or not executable "

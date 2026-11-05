@@ -781,6 +781,17 @@ def _python_test_files(files: Sequence[str]) -> tuple[str, ...]:
     )
 
 
+# A local model returned a Given's value and took it as a parameter of the When:
+# pytest-bdd then looks for a fixture of that name and fails every scenario.
+_PYTEST_BDD_ARGS = (
+    "A step function's parameters come only from its step text, a pytest fixture, or "
+    "an earlier step's target_fixture, e.g. `@given(\"a registered user\", "
+    "target_fixture=\"user_email\")` returning the email, then `@when(parsers.parse("
+    "\"they log in as {name}\"))` with `def step(user_email, name)`; a step's plain "
+    "return value is passed to nothing."
+)
+
+
 def _pytest_bdd(stack: StackDecision | None) -> bool:
     """The trusted pytest-bdd harness runs the scenarios (Python with no ``bdd``)."""
     return stack is None or (stack.language == "python" and not stack.bdd)
@@ -827,7 +838,7 @@ def scenario_rules(
                 "BIND THEM with pytest-bdd, the path relative to your step module: "
                 f"{calls}. Binding any other file leaves these scenarios unexecuted, "
                 "which fails the gate. The `scenarios` command in `verify` checks the "
-                "binding and runs them: every scenario above must pass."
+                "binding and runs them: every scenario above must pass. " + _PYTEST_BDD_ARGS
             )
         elif files and not test:
             rules.append(
@@ -838,7 +849,7 @@ def scenario_rules(
             rules.append(
                 "BIND THEM with pytest-bdd from a step module, the path relative to it "
                 f'(from tests/test_x.py: scenarios("../{paths[0]}")), and implement '
-                "every Given/When/Then step."
+                "every Given/When/Then step. " + _PYTEST_BDD_ARGS
             )
     return rules
 
@@ -982,7 +993,8 @@ def _integrated_overlay(
     with tempfile.TemporaryDirectory(prefix="foundry-wave-") as tmp:
         root = Path(tmp)
         try:
-            materialize_workdir(state, root, resolve=resolve, resolve_blob=resolve_blob)
+            materialize_workdir(state, root, resolve=resolve, resolve_blob=resolve_blob,
+                                scaffold_manifest=False)
         except MaterializationError as exc:
             return {}, str(exc)
         out: dict[str, str | None] = {}

@@ -1034,7 +1034,8 @@ GATE_INPUT_FILES = frozenset({"criteria.json"})
 
 
 def materialize_workdir(
-    state: FactoryState, dest: Path, *, resolve: ArtifactResolver, resolve_blob: BlobResolver
+    state: FactoryState, dest: Path, *, resolve: ArtifactResolver, resolve_blob: BlobResolver,
+    scaffold_manifest: bool = True,
 ) -> str:
     """Write the integrated tree into ``dest`` and return its ``tree_sha``.
 
@@ -1082,8 +1083,10 @@ def materialize_workdir(
     _write_contracts(dest, state, resolve, resolve_blob)
     # Guarantee an auditable dependency manifest so the AUDIT gate can ground its
     # SBOM (no-op when the engineers already shipped one, or the tree is non-Python).
+    # An agent's worktree skips it: an engineer handed the scaffold keeps its header
+    # and all, and a scaffolded manifest is never installed.
     stack = state.get("stack")
-    if stack is None or stack.language == "python":
+    if scaffold_manifest and (stack is None or stack.language == "python"):
         _scaffold_manifest(dest)
     # The stack's commands are part of what a verdict judges, so they join the
     # toolchain digest: the stable-FAIL latch keys on run_against, and a re-planned

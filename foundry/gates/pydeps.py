@@ -60,6 +60,7 @@ __all__ = [
     "manifest_digest",
     "python_build_env",
     "unavailable_requirement_hints",
+    "undeclared_import_hints",
 ]
 
 # First line of the manifest the materializer scaffolds from the tree's imports: an
@@ -95,6 +96,15 @@ def declared_requirements(workdir: Path) -> tuple[str, ...]:
     """The ``pip install`` arguments for the project's declared dependencies
     (``requirements.txt``, ``[project].dependencies``); ``()`` when there is nothing
     Foundry's environment does not already satisfy."""
+    args, lines = _declarations(workdir)
+    if all(_satisfied(line) for line in lines):
+        return ()
+    return tuple(args)
+
+
+def _declarations(workdir: Path) -> tuple[list[str], list[str]]:
+    """The pip arguments and the requirement lines the project declares; a
+    scaffolded requirements.txt declares nothing."""
     args: list[str] = []
     lines: list[str] = []
     req = workdir / "requirements.txt"
@@ -115,9 +125,53 @@ def declared_requirements(workdir: Path) -> tuple[str, ...]:
             named = [d for d in deps if isinstance(d, str) and d.strip()]
             args += named
             lines += named
-    if all(_satisfied(line) for line in lines):
+    return args, lines
+
+
+# Import names whose PyPI distribution is named differently.
+_DIST_FOR_IMPORT = {
+    "bs4": "beautifulsoup4", "cv2": "opencv-python", "dateutil": "python-dateutil",
+    "dotenv": "python-dotenv", "jose": "python-jose", "jwt": "PyJWT",
+    "multipart": "python-multipart", "PIL": "Pillow", "sklearn": "scikit-learn",
+    "yaml": "PyYAML",
+}
+_NO_MODULE = re.compile(r"No module named '([A-Za-z_][\w.]*)'")
+
+
+def undeclared_import_hints(output: str, workdir: Path) -> tuple[str, ...]:
+    """One line per third-party module the output reports missing
+    (``ModuleNotFoundError``) while the project declares no dependency at all — no
+    manifest, or only the scaffold Foundry writes for the audit, which is never
+    installed. Local modules and the standard library are left to the traceback."""
+    if _declarations(workdir)[1]:
         return ()
-    return tuple(args)
+    root = Path(workdir)
+    scaffolded = (root / "requirements.txt").is_file() and (
+        root / "requirements.txt"
+    ).read_text(encoding="utf-8", errors="replace").startswith(SCAFFOLD_HEADER)
+    try:
+        installed = im.packages_distributions()
+    except Exception:
+        installed = {}
+    hints: list[str] = []
+    for name in dict.fromkeys(m.split(".", 1)[0] for m in _NO_MODULE.findall(output)):
+        if (name in sys.stdlib_module_names or (root / name).is_dir()
+                or (root / f"{name}.py").is_file()):
+            continue
+        dist = _DIST_FOR_IMPORT.get(name) or next(iter(installed.get(name, ())), name)
+        hint = (
+            f"the project imports `{name}` but declares no dependency on it: add "
+            f"`{dist}` to requirements.txt (the Foundry-generated manifest is never "
+            "installed)"
+        )
+        if scaffolded:
+            hint += (
+                "; requirements.txt still starts with Foundry's `"
+                + SCAFFOLD_HEADER.strip()
+                + "` header: rewrite it without that header so it is installed"
+            )
+        hints.append(hint)
+    return tuple(hints)
 
 
 # pip's words for a declaration that cannot be satisfied...

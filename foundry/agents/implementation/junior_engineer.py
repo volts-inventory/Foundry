@@ -561,7 +561,8 @@ def make_fixer_node(
             budget = max(turn_budget, _LOCAL_FIX_TURN_BUDGET)
         try:
             with tempfile.TemporaryDirectory(prefix="foundry-fix-") as tmp:
-                materialize_workdir(state, Path(tmp), resolve=resolve, resolve_blob=resolve_blob)
+                materialize_workdir(state, Path(tmp), resolve=resolve,
+                                    resolve_blob=resolve_blob, scaffold_manifest=False)
                 # Gate inputs (criteria.json) stay out of the agent's worktree: an agent
                 # told to "make the gates pass" must not be handed the oracle to edit.
                 overlay: dict[str, str | None] = {}

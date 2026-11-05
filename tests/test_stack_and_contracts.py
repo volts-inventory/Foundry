@@ -333,6 +333,17 @@ def test_python_manifest_already_in_the_first_wave_adds_no_ticket() -> None:
     assert HARNESS_TICKET_ID not in [t.id for t in _tickets(writes, cas)]
 
 
+def test_python_framework_with_no_manifest_owner_gets_a_requirements_ticket() -> None:
+    # No ticket owned a manifest: the only one was the import-derived scaffold, which
+    # is never installed, so every check after the first failed `No module named`.
+    stack = {**PYTHON_STACK, "framework": "Flask"}
+    writes, cas, _ = _plan_once({**PLAN, "stack": stack})
+    deps, *rest = _tickets(writes, cas)
+    assert deps.id == HARNESS_TICKET_ID and deps.files == ("requirements.txt",)
+    assert "Flask" in deps.description
+    assert all(HARNESS_TICKET_ID in t.depends_on for t in rest)
+
+
 def test_a_model_ticket_cannot_take_a_fixer_id() -> None:
     # A planned `fix-2` would read as built once the fixer mints its second diff.
     from foundry.agents.planner import _safe_ticket_ids
@@ -811,6 +822,16 @@ def test_no_python_manifest_is_scaffolded_for_another_stack(tmp_path: Path) -> N
     py, py_resolve, py_blob = _diff_state([("T-001", files)], StackDecision(language="python"))
     materialize_workdir(py, tmp_path / "py", resolve=py_resolve, resolve_blob=py_blob)
     assert (tmp_path / "py" / "requirements.txt").exists()
+
+
+def test_an_agent_worktree_gets_no_scaffolded_manifest(tmp_path: Path) -> None:
+    # An engineer handed the scaffold kept it, header and all, so its declaration
+    # was never installed.
+    files = {"app.py": "import flask\n"}
+    state, resolve, blob = _diff_state([("T-001", files)], StackDecision(language="python"))
+    materialize_workdir(state, tmp_path, resolve=resolve, resolve_blob=blob,
+                        scaffold_manifest=False)
+    assert not (tmp_path / "requirements.txt").exists()
 
 
 # ---- personas --------------------------------------------------------------------------

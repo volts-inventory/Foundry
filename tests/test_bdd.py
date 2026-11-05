@@ -224,6 +224,18 @@ def test_gate_fails_on_missing_step_definitions(tmp_path: Path) -> None:
     assert set(obs.structured[BDD_KEY].values()) == {"failed"}
 
 
+def test_a_step_argument_no_step_provides_gets_the_pytest_bdd_fix(tmp_path: Path) -> None:
+    # A local model returned the Given's value and took it as a When parameter, three
+    # fix passes running: pytest-bdd looked for a fixture named `items` every time.
+    steps = _STEPS.replace("{expected}", "1").replace(', target_fixture="items"', "")
+    gate = TestGate()
+    obs = gate.execute(_project(tmp_path, steps))
+    assert gate.decide(obs) is GateStatus.FAIL
+    hint = next(f for f in obs.findings if f.startswith("step argument `items`"))
+    assert 'parsers.parse("... {items} ...")' in hint
+    assert 'target_fixture="items"' in hint and "pytest fixture named `items`" in hint
+
+
 def test_gate_fails_when_scenarios_are_never_bound(tmp_path: Path) -> None:
     gate = TestGate()
     obs = gate.execute(_project(tmp_path, None))  # plain test passes; feature unbound

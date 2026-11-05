@@ -34,6 +34,7 @@ from foundry.gates.pydeps import (
     install_failure_is_project,
     manifest_digest,
     python_build_env,
+    undeclared_import_hints,
 )
 from foundry.gates.runner import TwoZoneGateRunner
 from foundry.gates.sandbox import ToolchainCache
@@ -125,6 +126,46 @@ def _write(root: Path, files: dict[str, str]) -> Path:
 )
 def test_declared_requirements(tmp_path: Path, files: dict[str, str], expected: tuple) -> None:
     assert declared_requirements(_write(tmp_path, files)) == expected
+
+
+_NO_FLASK = (
+    "ImportError while importing test module 'tests/test_t2.py'.\n"
+    "E   ModuleNotFoundError: No module named 'flask'\n"
+    "E   ModuleNotFoundError: No module named 'yaml.loader'\n"
+    "E   ModuleNotFoundError: No module named 'app'\n"
+    "E   ModuleNotFoundError: No module named 'sqlite3'\n"
+)
+
+
+@pytest.mark.parametrize(
+    "files",
+    [{}, {"requirements.txt": SCAFFOLD_HEADER + "flask==3.1.0\n"}],
+)
+def test_an_undeclared_import_names_the_dependency_to_add(
+    tmp_path: Path, files: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The notes build imported flask with only the scaffold for a manifest: nothing
+    # installed it, and the gate said only `No module named 'flask'`.
+    monkeypatch.setattr(pydeps.im, "packages_distributions", dict)
+    _write(tmp_path, {**files, "app/__init__.py": ""})
+    hints = undeclared_import_hints(_NO_FLASK, tmp_path)
+    assert hints[0] == (
+        "the project imports `flask` but declares no dependency on it: add `flask` to "
+        "requirements.txt (the Foundry-generated manifest is never installed)"
+        + ("; requirements.txt still starts with Foundry's `" + SCAFFOLD_HEADER.strip()
+           + "` header: rewrite it without that header so it is installed" if files else "")
+    )
+    assert "add `PyYAML`" in hints[1] and len(hints) == 2  # local and stdlib skipped
+
+
+def test_a_declared_manifest_gets_no_undeclared_import_hint(tmp_path: Path) -> None:
+    _write(tmp_path, {"requirements.txt": "requests==2.31.0\n"})
+    assert undeclared_import_hints(_NO_FLASK, tmp_path) == ()
+
+
+def test_the_build_finding_carries_the_undeclared_import_hint(tmp_path: Path) -> None:
+    findings = build_findings(1, _NO_FLASK, "", tmp_path, step="smoke")
+    assert any(f.startswith("the project imports `flask`") for f in findings)
 
 
 def test_install_failure_classification() -> None:

@@ -88,6 +88,10 @@ def build_findings(
             "names a project problem such as a missing lockfile, a bad manifest or an "
             "unknown package, fix the manifest; otherwise the registry/network failed)"
         )
+    elif rc != 0:
+        from .pydeps import undeclared_import_hints
+
+        hints = undeclared_import_hints(stdout + stderr, workdir)
     tail = output_tail(stdout, stderr, workdir)
     return (f"{head}; last {len(tail)} output line(s):", *tail, *hints)
 

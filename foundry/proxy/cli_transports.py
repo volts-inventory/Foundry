@@ -43,9 +43,12 @@ when the backend is not the Anthropic SDK:
 from __future__ import annotations
 
 import json
+import math
+import os
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from types import EllipsisType
 from typing import Any, Literal
 
 from foundry.canonical import content_digest
@@ -281,10 +284,25 @@ CliRunner = Callable[[Sequence[str], float | None], CliResult]
 
 
 # Default wall-clock cap for a CLI backend subprocess. Without it a hung
-# `claude`/`codex` invocation blocks its worker thread forever (the transports
-# accept timeout_s=None, but the shipped backends never set it). Override via
-# claude_cli_backend/codex_backend.
-_DEFAULT_CLI_TIMEOUT_S = 300.0
+# `claude`/`codex` invocation blocks its worker thread forever. It must be
+# generous: Opus emitting a large JSON plan in one `-p` call routinely runs past
+# 5 minutes, and a kill there throws the whole call away. Override per process
+# with FOUNDRY_CLI_TIMEOUT_S, or per backend via claude_cli_backend/codex_backend.
+_DEFAULT_CLI_TIMEOUT_S = 1800.0
+
+
+def _cli_timeout_s() -> float:
+    """FOUNDRY_CLI_TIMEOUT_S as a positive float, else the default. Read at call
+    time, not import time, so a .env loaded after import still applies."""
+    try:
+        value = float(os.environ.get("FOUNDRY_CLI_TIMEOUT_S") or _DEFAULT_CLI_TIMEOUT_S)
+    except ValueError:
+        return _DEFAULT_CLI_TIMEOUT_S
+    return value if math.isfinite(value) and value > 0 else _DEFAULT_CLI_TIMEOUT_S
+
+
+def _cap_label(timeout_s: float | None) -> str:
+    return f"{timeout_s:.0f}s" if timeout_s is not None else "wall-clock cap"
 
 
 def _default_cli_runner(argv: Sequence[str], timeout_s: float | None) -> CliResult:
@@ -420,7 +438,7 @@ class ClaudeCliTransport:
 
         result = self._run(argv, self._timeout_s)
         if result.timed_out:
-            raise TransportError("claude CLI hard-killed at wall-clock cap")
+            raise TransportError(f"claude CLI hard-killed at {_cap_label(self._timeout_s)}")
         parsed = _lenient_json_object(result.stdout)
         if not parsed and result.returncode != 0:
             raise TransportError(
@@ -546,7 +564,7 @@ class CodexCliTransport:
 
         result = self._run(argv, self._timeout_s)
         if result.timed_out:
-            raise TransportError("codex CLI hard-killed at wall-clock cap")
+            raise TransportError(f"codex CLI hard-killed at {_cap_label(self._timeout_s)}")
         served, text, usage = _extract_codex(result.stdout)
         if not text and result.returncode != 0:
             raise TransportError(
@@ -783,14 +801,17 @@ def claude_cli_backend(
     *,
     tier_models: dict[str, str] | None = None,
     runner: CliRunner | None = None,
-    timeout_s: float | None = _DEFAULT_CLI_TIMEOUT_S,
+    timeout_s: float | None | EllipsisType = ...,
     **proxy_kwargs: Any,
 ) -> ModelProviderProxy:
     """Proxy backed by ``claude -p``. Same Anthropic tier ids + lineage as the
     SDK transport, so calibration baselines carry over. ``timeout_s`` hard-caps each
-    subprocess (default 300s) so a hung CLI can't wedge the worker forever."""
+    subprocess (default FOUNDRY_CLI_TIMEOUT_S or 1800s; None = uncapped) so a hung
+    CLI can't wedge the worker forever."""
     return ModelProviderProxy(
-        transport=ClaudeCliTransport(runner=runner, timeout_s=timeout_s),
+        transport=ClaudeCliTransport(
+            runner=runner, timeout_s=_cli_timeout_s() if timeout_s is ... else timeout_s
+        ),
         lineage_map=LineageMap(DEFAULT_LINEAGE_ENTRIES),
         tier_models=tier_models,  # None ⇒ proxy default TIER_MODELS
         **proxy_kwargs,
@@ -819,14 +840,16 @@ def codex_backend(
     *,
     tier_models: dict[str, str] | None = None,
     runner: CliRunner | None = None,
-    timeout_s: float | None = _DEFAULT_CLI_TIMEOUT_S,
+    timeout_s: float | None | EllipsisType = ...,
     **proxy_kwargs: Any,
 ) -> ModelProviderProxy:
     """Proxy backed by ``codex exec``. OpenAI lineage — a genuinely different
-    served_family. ``timeout_s`` hard-caps each subprocess (default 300s) so a
-    hung CLI can't wedge the worker."""
+    served_family. ``timeout_s`` hard-caps each subprocess (default FOUNDRY_CLI_TIMEOUT_S or
+    1800s; None = uncapped) so a hung CLI can't wedge the worker."""
     return ModelProviderProxy(
-        transport=CodexCliTransport(runner=runner, timeout_s=timeout_s),
+        transport=CodexCliTransport(
+            runner=runner, timeout_s=_cli_timeout_s() if timeout_s is ... else timeout_s
+        ),
         lineage_map=LineageMap((*OPENAI_LINEAGE_ENTRIES, *DEFAULT_LINEAGE_ENTRIES)),
         tier_models=tier_models or CODEX_TIER_MODELS,
         **proxy_kwargs,
@@ -841,9 +864,9 @@ def transport_for(name: BackendName) -> ProviderTransport:
     if name == "openai":
         return OpenAITransport()
     if name == "claude-cli":
-        return ClaudeCliTransport(timeout_s=_DEFAULT_CLI_TIMEOUT_S)
+        return ClaudeCliTransport(timeout_s=_cli_timeout_s())
     if name == "codex":
-        return CodexCliTransport(timeout_s=_DEFAULT_CLI_TIMEOUT_S)
+        return CodexCliTransport(timeout_s=_cli_timeout_s())
     raise ValueError(f"unknown backend {name!r} (expected anthropic | openai | claude-cli | codex)")
 
 

@@ -129,12 +129,39 @@ def test_cli_backends_apply_a_default_subprocess_timeout() -> None:
     runner = _timeout_capturing_runner()
     proxy = build_backend("claude-cli", runner=runner)
     proxy.complete("n1", "T1", "SOP", [{"role": "user", "content": "x"}], purpose="ideation")
-    assert runner.timeouts[0] == 300.0                       # default cap applied
+    assert runner.timeouts[0] == 1800.0                      # default cap applied
 
     over = _timeout_capturing_runner()
     proxy2 = build_backend("claude-cli", runner=over, timeout_s=42.0)
     proxy2.complete("n1", "T1", "SOP", [{"role": "user", "content": "x"}], purpose="ideation")
     assert over.timeouts[0] == 42.0                          # override flows through
+
+
+@pytest.mark.parametrize("backend", ["claude-cli", "codex"])
+@pytest.mark.parametrize(("env", "expected"), [
+    ("90", 90.0), ("2.5", 2.5), ("0", 1800.0), ("-5", 1800.0), ("nope", 1800.0),
+    ("inf", 1800.0), ("", 1800.0),
+])
+def test_cli_timeout_env_override(
+    monkeypatch: pytest.MonkeyPatch, backend: str, env: str, expected: float
+) -> None:
+    from foundry.proxy.cli_transports import transport_for
+
+    monkeypatch.setenv("FOUNDRY_CLI_TIMEOUT_S", env)
+    runner = _timeout_capturing_runner()
+    assert build_backend(backend, runner=runner)._transport._timeout_s == expected  # type: ignore[arg-type,attr-defined]
+    assert transport_for(backend)._timeout_s == expected  # type: ignore[arg-type,attr-defined]
+    # An explicit timeout_s (including None = uncapped) still wins over the env.
+    assert build_backend(backend, timeout_s=None)._transport._timeout_s is None  # type: ignore[arg-type,attr-defined]
+
+
+def test_cli_hard_kill_message_names_the_cap() -> None:
+    def slow(argv: Sequence[str], timeout_s: float | None) -> CliResult:
+        return CliResult(124, "", "", timed_out=True)
+
+    with pytest.raises(TransportError, match="hard-killed at 1800s"):
+        ClaudeCliTransport(runner=slow, timeout_s=1800.0).send(
+            {"model": "claude-opus-4-8", "messages": []})
 
 
 def test_claude_cli_completion_observes_model_and_flattens_prompt() -> None:

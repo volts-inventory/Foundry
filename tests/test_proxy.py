@@ -723,14 +723,12 @@ def test_usage_limit_without_epoch_rides_backoff():
     assert is_rl is True and ra is None
 
 
-def test_cli_hang_and_timeout_ride_the_transient_budget():
-    """A spent Max window often STALLS the claude CLI instead of printing a limit,
-    so it's hard-killed at the wall-clock cap. That (and a bare timeout) must ride
-    the generous bounded budget, not fail the run after 3 quick transport attempts
-    — while a genuine non-transient error still fails closed."""
+def test_network_timeout_rides_the_transient_budget():
+    """A bare SDK/HTTP timeout rides the generous bounded budget, not fail the run
+    after 3 quick transport attempts — while a genuine non-transient error still
+    fails closed. (A CLI wall-clock hard-kill has its own budget — below.)"""
     from foundry.proxy.model_provider_proxy import _classify_rate_limit
 
-    assert _classify_rate_limit(RuntimeError("claude CLI hard-killed at wall-clock cap"))[0]
     assert _classify_rate_limit(TimeoutError("command timed out after 300s"))[0]
     assert _classify_rate_limit(RuntimeError("5-hour limit reached"))[0]
     # NOT transient: a real config/transport error still fails hard (no waiting)
@@ -873,3 +871,73 @@ def test_a_finished_call_is_replayed_from_the_call_cache(tmp_path):
     other = again.complete("planner", "T1", "SOP", [{"role": "user", "content": "y"}],
                            purpose="gate")
     assert len(transport.requests) == sent + 1 and other is not None
+
+
+class _HardKilledTransport:
+    """Fails with the CLI wall-clock hard-kill ``fails`` times, then serves."""
+
+    def __init__(self, fails: int) -> None:
+        self.fails = fails
+        self.attempts = 0
+
+    def send(self, request: dict[str, Any]) -> ProviderResponse:
+        self.attempts += 1
+        if self.attempts <= self.fails:
+            raise RuntimeError("claude CLI hard-killed at 1800s")
+        return ProviderResponse(
+            served_model=request["model"], request_id="req_hk",
+            text=APPROVE_JSON, usage=dict(USAGE), stop_reason="end_turn",
+        )
+
+
+def test_wall_clock_hard_kill_is_not_a_rate_limit_and_retries_once(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+):
+    """An identical prompt that already ran the whole CLI cap is retried ONCE on
+    its own budget, then fails closed — never ridden on the 6-wait rate-limit
+    budget (that silently burned 37+ minutes on one planner call). Every failed
+    attempt is logged with its reason and attempt count."""
+    monkeypatch.setenv("FOUNDRY_PROGRESS", "1")
+    rl_waits: list[float] = []
+    transport = _HardKilledTransport(fails=99)
+    proxy = _rl_proxy(transport, sleeper=rl_waits.append, rl_retries=6)
+    with pytest.raises(ProxyUnavailable, match="hard-killed at 1800s"):
+        proxy.complete("plan", "T1", "SOP", [{"role": "user", "content": "x"}],
+                       purpose="ideation")
+    assert transport.attempts == 2
+    err = capsys.readouterr().err
+    assert "retry model call: plan (T1, ideation) — claude CLI hard-killed at 1800s [1/2]" in err
+    assert err.count("retry model call") == 1
+
+
+def test_wall_clock_hard_kill_recovers_on_its_single_retry():
+    transport = _HardKilledTransport(fails=1)
+    proxy = _rl_proxy(transport, sleeper=lambda _s: None)
+    result = proxy.complete("n", "T2", "SOP", [{"role": "user", "content": "x"}],
+                            purpose="gate")
+    assert result.text == APPROVE_JSON
+    assert transport.attempts == 2
+
+
+def test_every_failed_rate_limit_wait_is_logged(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+):
+    monkeypatch.setenv("FOUNDRY_PROGRESS", "1")
+
+    class _Throttled:
+        attempts = 0
+
+        def send(self, request: dict[str, Any]) -> ProviderResponse:
+            self.attempts += 1
+            if self.attempts <= 2:
+                raise RuntimeError("429 too many requests")
+            return ProviderResponse(
+                served_model=request["model"], request_id="req_t",
+                text=APPROVE_JSON, usage=dict(USAGE), stop_reason="end_turn",
+            )
+
+    proxy = _rl_proxy(_Throttled(), sleeper=lambda _s: None, rl_retries=6, rl_base=2.0)
+    proxy.complete("n", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
+    err = capsys.readouterr().err
+    assert "429 too many requests [1/7], waiting 2s" in err
+    assert "429 too many requests [2/7], waiting 4s" in err

@@ -251,6 +251,7 @@ uv run pytest -n auto -q                                  # full suite (slow e2e
 | `WORKSHOP_MAX_CONCURRENT_BUILDS` | Builds running at once; extras queue | `2` |
 | `FOUNDRY_MAX_RPM` / `FOUNDRY_MAX_CONCURRENT_CALLS` | Client-side throttles (`0` = off) | `0` |
 | `FOUNDRY_RATE_LIMIT_RETRIES` | Waits to ride out a 429/529 burst | `6` |
+| `FOUNDRY_CLI_TIMEOUT_S` | Wall-clock cap per `claude`/`codex` CLI call; a hard-kill is retried once | `1800` |
 | `FOUNDRY_CLIENT_TTL_S` | Rebuild SDK client every N s (`0` = off) | `0` |
 | `FOUNDRY_MANIFEST_MAX` | Cap proxy per-call manifest (`0` = unbounded) | `100000` |
 | `WORKSHOP_LOG_TAIL` / `WORKSHOP_LOG_GRACE_S` / `WORKSHOP_LOG_SWEEP_S` | Finished-build log trim | `64` · `90` · `120` |

@@ -501,7 +501,7 @@ class _RetryPolicy:
 
 # Words/codes in a transport error that mean "the PROVIDER threw us back" — a
 # throttle (HTTP 429, Anthropic 529 overloaded, quota), a subscription-window
-# limit, OR a transient stall (a timeout / wall-clock hard-kill). None of these
+# limit, OR a transient network stall (an HTTP/SDK timeout). None of these
 # is a failure of the pinned model: they're TRANSIENT and must be waited out on a
 # SEPARATE, more generous (but still bounded) budget than a real transport failure
 # — so one hiccup can't kill a multi-hour overnight run.
@@ -509,11 +509,7 @@ _RATE_LIMIT_MARKERS = (
     "rate limit", "rate_limit", "ratelimit", "too many requests",
     "429", "529", "overloaded", "quota exceeded", "throttl",
     # Subscription-window exhaustion (Claude Max via the claude CLI): the CLI
-    # reports "Claude AI usage limit reached|<reset-epoch>", but ALSO — and this
-    # is the case that silently killed overnight runs — often just STALLS when the
-    # window is spent, so the subprocess is hard-killed at the wall-clock cap. A
-    # bare timeout/hard-kill is transient by nature (a wedged prompt still fails
-    # closed after the bounded budget), so it rides the generous budget too.
+    # reports "Claude AI usage limit reached|<reset-epoch>".
     "usage limit", "limit reached", "limit will reset",
     # Claude Max via the claude CLI also reports a spent 5-hour window as
     # "You've hit your session limit · resets 8am (UTC)" — a DIFFERENT phrase
@@ -522,8 +518,22 @@ _RATE_LIMIT_MARKERS = (
     # budget and raised). It is the same transient subscription-window
     # exhaustion, so it rides the generous rate-limit budget too.
     "session limit",
-    "hard-killed at wall-clock cap", "timed out", "timeout",
+    # SDK/HTTP request timeouts (APITimeoutError, 408, gateway 504) are short,
+    # transient network stalls — fine to wait out. A CLI wall-clock HARD-KILL is
+    # not: see _is_wall_clock_kill.
+    "timed out", "timeout",
 )
+
+# A CLI subprocess killed at its wall-clock cap (cli_transports) already spent the
+# whole cap — up to FOUNDRY_CLI_TIMEOUT_S. Re-running the identical prompt on the
+# rate-limit budget (6 tries) silently burned 30+ minutes on one planner call, so
+# it gets its own budget of one retry and then fails closed.
+_WALL_CLOCK_KILL_MARKER = "hard-killed at"
+_WALL_CLOCK_KILL_RETRIES = 1
+
+
+def _is_wall_clock_kill(exc: BaseException) -> bool:
+    return _WALL_CLOCK_KILL_MARKER in str(exc).lower()
 
 
 def _int_env(name: str, default: int) -> int:
@@ -899,7 +909,9 @@ class ModelProviderProxy:
         else:
             progress.log(f"start {label}")
             started = time.monotonic()
-            response, parsed = self._send_with_retry(request, schema=schema, tier=tier)
+            response, parsed = self._send_with_retry(
+                request, schema=schema, tier=tier, label=label
+            )
             progress.finished(label, started, response.usage, self.token_meter)
             self._cache_put(request, schema, response)
 
@@ -1175,6 +1187,7 @@ class ModelProviderProxy:
         *,
         schema: dict[str, Any] | None = None,
         tier: str | None = None,
+        label: str | None = None,
     ) -> tuple[ProviderResponse, dict[str, Any] | None]:
         """Bounded retry/backoff, then fail closed; returns (response, parsed).
 
@@ -1201,6 +1214,13 @@ class ModelProviderProxy:
         local = tier in self._local_tiers
         attempt = 0          # real transport failures (bounded, fail-closed)
         rl_attempt = 0       # provider throttling (separate, more generous budget)
+        kill_attempt = 0     # CLI wall-clock hard-kills (own small budget)
+        what = f"retry {label or f'model call ({tier})'}"
+
+        def log_retry(exc: BaseException, n: int, budget: int, wait: float) -> None:
+            reason = str(exc).splitlines()[0][:200] if str(exc) else type(exc).__name__
+            progress.log(f"{what} — {reason} [{n}/{budget + 1}], waiting {wait:.0f}s")
+
         while True:
             try:
                 with self._local_lock if local else nullcontext(), self._limiter.slot():
@@ -1214,6 +1234,17 @@ class ModelProviderProxy:
             except ToolsUnsupported:
                 raise
             except Exception as exc:
+                if _is_wall_clock_kill(exc):
+                    if kill_attempt >= _WALL_CLOCK_KILL_RETRIES:
+                        raise ProxyUnavailable(
+                            f"{exc} on {kill_attempt + 1} attempt(s); "
+                            "judgment nodes must pause-and-escalate"
+                        ) from exc
+                    wait = self._retry.backoff_base_s * (2**kill_attempt)
+                    log_retry(exc, kill_attempt + 1, _WALL_CLOCK_KILL_RETRIES, wait)
+                    self._retry.sleep_before_retry(kill_attempt)
+                    kill_attempt += 1
+                    continue
                 is_rl, retry_after = _classify_rate_limit(exc)
                 if is_rl:
                     # Provider throttled us — wait it out on the rate-limit budget,
@@ -1246,6 +1277,7 @@ class ModelProviderProxy:
                             on_rate_limit_wait(
                                 wait, time.time() + wait, retry_after is not None
                             )
+                    log_retry(exc, rl_attempt + 1, self._rl_max_retries, wait)
                     self._rl_sleeper(wait)
                     rl_attempt += 1
                     continue
@@ -1254,5 +1286,7 @@ class ModelProviderProxy:
                         f"provider transport failed after {attempt + 1} attempt(s); "
                         "judgment nodes must pause-and-escalate (no family fallback)"
                     ) from exc
+                log_retry(exc, attempt + 1, self._retry.max_retries,
+                          self._retry.backoff_base_s * (2**attempt))
                 self._retry.sleep_before_retry(attempt)
                 attempt += 1

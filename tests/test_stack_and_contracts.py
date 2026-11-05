@@ -532,8 +532,41 @@ def test_python_stack_keeps_the_trusted_harness() -> None:
     assert (plain.build_cmd, plain.test_cmd, plain.install_cmd) == (None, None, None)
     typed = stack_profile(StackDecision(language="python", typecheck="python3 -m mypy ."))
     assert typed.build_cmd is not None and typed.build_cmd[2].endswith(
-        "-m compileall -q . && python3 -m mypy ."
+        "-m compileall -q . && python3 -m mypy --ignore-missing-imports "
+        "--disable-error-code import-not-found --disable-error-code import-untyped ."
     )
+
+
+def test_python_typecheck_tolerates_an_unstubbed_library(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+
+    (tmp_path / "app.py").write_text("import flask_login_zz\nimport other_zz.sub\n")
+    # A model-written config that would otherwise make the missing stubs an error.
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.mypy]\nstrict = true\nignore_missing_imports = false\n'
+        '[[tool.mypy.overrides]]\nmodule = ["flask_login_zz", "other_zz.*"]\n'
+        "ignore_missing_imports = false\n"
+    )
+    (tmp_path / "mypy.ini").write_text(
+        "[mypy]\nignore_missing_imports = False\n"
+        "[mypy-flask_login_zz]\nignore_missing_imports = False\n"
+    )
+    typecheck = f"{sys.executable} -m mypy --cache-dir /dev/null app.py"
+    profile = stack_profile(StackDecision(language="python", build="true", typecheck=typecheck))
+    assert profile.build_cmd is not None
+    for config in ("mypy.ini", "pyproject.toml"):
+        if config == "pyproject.toml":
+            (tmp_path / "mypy.ini").unlink()
+        bare = subprocess.run(typecheck, shell=True, cwd=tmp_path, capture_output=True)
+        assert bare.returncode == 1, config
+        run = subprocess.run(profile.build_cmd, cwd=tmp_path, capture_output=True, text=True)
+        assert run.returncode == 0, (config, run.stdout, run.stderr)
+    # A non-Python stack's command, or `mypy` as part of a path, is left alone.
+    js = stack_profile(StackDecision(language="javascript", typecheck="mypy .", test="true"))
+    assert js.build_cmd is not None and js.build_cmd[2] == "mypy ."
+    own = stack_profile(StackDecision(language="python", typecheck="./bin/mypy.sh x"))
+    assert own.build_cmd is not None and own.build_cmd[2].endswith("./bin/mypy.sh x")
 
 
 def _runner_rt() -> tuple[Any, Any, Any]:

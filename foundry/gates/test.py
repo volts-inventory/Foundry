@@ -277,8 +277,10 @@ def read_bdd_report(path: Path, nonce: str) -> dict[str, str] | None:
 _BDD_WHY = {
     "missing": (
         "was not executed — bind that exact gate-owned file with pytest-bdd "
-        "`scenarios(\"<relative path from the step module to it>\")` (a copy of it or a "
-        ".feature file of your own is ignored by the gate) and implement every "
+        "`scenarios(\"<relative path from the step module to it>\")` called in a test "
+        "module pytest collects, tests/test_<name>.py (a conftest.py or a module not "
+        "named test_*.py is never collected as a test module; a copy of the feature or "
+        "a .feature file of your own is ignored by the gate), and implement every "
         "Given/When/Then step"
     ),
     "unmatched": (
@@ -348,6 +350,44 @@ def binding_modules(workdir: Path, features: set[str]) -> tuple[str, ...]:
         if any(n in text for n in names):
             out.append(rel)
     return tuple(out)
+
+
+def _unexpanded_report_paths(workdir: Path) -> list[str]:
+    """Workdir paths whose name holds ``$FOUNDRY_BDD_REPORT`` verbatim: the bdd
+    command passed the variable unexpanded (single-quoted) to its runner."""
+    root = Path(workdir)
+    marks = (f"${_BDD_REPORT_ENV}", f"${{{_BDD_REPORT_ENV}}}")
+    return sorted(
+        p.relative_to(root).as_posix()
+        for p in root.rglob("*")
+        if any(m in p.name for m in marks)
+    )
+
+
+def conftest_binding_note(workdir: Path) -> str | None:
+    """A finding naming the conftest.py files that call ``scenarios(``: pytest
+    imports a conftest for fixtures but never collects its tests, so a binding
+    there leaves every scenario unexecuted."""
+    root = Path(workdir)
+    hits: list[str] = []
+    for path in sorted(root.rglob("conftest.py")):
+        rel = path.relative_to(root).as_posix()
+        if rel.startswith(".") or "/." in rel:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if re.search(r"\bscenarios\s*\(", text):
+            hits.append(rel)
+    if not hits:
+        return None
+    return (
+        f"{', '.join(hits)} call(s) pytest-bdd `scenarios(...)`, but conftest.py is "
+        "never collected as a test module, so those scenarios never run: move the "
+        "`scenarios(...)` call into a tests/test_<name>.py module (step definitions "
+        "and fixtures may stay in conftest.py)"
+    )
 
 
 def _host_source_root() -> str | None:
@@ -536,9 +576,11 @@ class TestGate:
         digest: cucumber.ReportDigest | None,
         trusted: dict[str, list[tuple[str, str]]],
         workdir: Path,
+        run: tuple[int, str, str],
     ) -> tuple[dict[str, str], tuple[str, ...]]:
         """Outcomes from the pinned Cucumber report; an absent, tampered or
-        unparseable one marks every trusted scenario "missing"."""
+        unparseable one marks every trusted scenario "missing". ``run`` is the bdd
+        command's (exit code, stdout, stderr)."""
         try:
             envelopes = cucumber.read_verified_report(report, digest, workdir)
         except cucumber.ReportError as exc:
@@ -547,12 +589,22 @@ class TestGate:
             hint = bdd_runner_hint(self.profile_name.removeprefix("stack:")) or (
                 "e.g. cucumber-js --format \"message:$FOUNDRY_BDD_REPORT\""
             )
-            note = (
+            rc, out, err = run
+            notes = [
                 f"BDD report rejected: {exc} — every scenario is marked missing. The "
                 "bdd command must run the stack's Cucumber runner writing its report "
-                f"to $FOUNDRY_BDD_REPORT: {hint}"
-            )
-            return {ref: "missing" for ref in sorted(trusted)}, (note,)
+                f"to $FOUNDRY_BDD_REPORT: {hint}",
+                f"bdd command `{self.bdd_cmd}` — {_output_tail(err, out, rc)}",
+            ]
+            literal = _unexpanded_report_paths(workdir)
+            if literal:
+                notes.append(
+                    f"the bdd command wrote its report to {', '.join(literal)} — a path "
+                    f"literally named after ${_BDD_REPORT_ENV}: the variable was not "
+                    "expanded, most likely because it sits in single quotes; quote it "
+                    f"with double quotes (\"${_BDD_REPORT_ENV}\") so the shell expands it"
+                )
+            return {ref: "missing" for ref in sorted(trusted)}, tuple(notes)
         return cucumber.scenario_outcomes(envelopes, trusted, workdir)
 
     def execute(self, workdir: Path) -> ZoneAObservation:
@@ -629,12 +681,15 @@ class TestGate:
             structured[DISCRIMINATOR_KEY] = report.model_dump(mode="json")
             findings = report.findings
         if bdd_dir is not None and self.bdd_cmd:
-            scenarios, notes = self._cucumber_scenarios(report_path, digest, trusted, workdir)
+            scenarios, notes = self._cucumber_scenarios(
+                report_path, digest, trusted, workdir, (bdd_rc, bdd_out, bdd_err)
+            )
             structured[BDD_KEY] = scenarios
             structured[BDD_EXIT_KEY] = bdd_rc
             structured["bdd_cmd"] = self.bdd_cmd
             bdd_failures = failure_findings(bdd_out, limit=20) if bdd_rc != 0 else ()
-            if bdd_rc != 0 and not bdd_failures:
+            rejected = any(n.startswith("BDD report rejected") for n in notes)
+            if bdd_rc != 0 and not bdd_failures and not rejected:
                 # Not pytest-shaped output: the runner's own last words are the why
                 # (a step-definition load error leaves the report empty).
                 bdd_failures = (_output_tail(bdd_err, bdd_out, bdd_rc),)
@@ -660,6 +715,9 @@ class TestGate:
             scenarios = {ref: got.get(ref, "missing") for ref in sorted(trusted)}
             structured[BDD_KEY] = scenarios
             findings = bdd_findings(scenarios) + findings
+            note = conftest_binding_note(workdir) if "missing" in scenarios.values() else None
+            if note:
+                findings = (note, *findings)
             if executed is None:
                 findings = (
                     "BDD report absent or not authentic — the harness did not finish "

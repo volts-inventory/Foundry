@@ -282,6 +282,26 @@ def test_gate_without_a_usable_report_marks_all_missing(tmp_path: Path, bdd_cmd:
     assert gate.decide(obs) is GateStatus.FAIL
 
 
+def test_an_empty_report_quotes_the_command_and_names_single_quotes(tmp_path: Path) -> None:
+    wd = _workdir(tmp_path)
+    bdd_cmd = "echo ran-the-runner; echo '{}' > '$FOUNDRY_BDD_REPORT'"
+    obs = _gate_with(bdd_cmd).execute(wd)
+    assert set(obs.structured[BDD_KEY].values()) == {"missing"}
+    # Exit 0 still shows the command, its exit code and its last output.
+    assert any(
+        f.startswith(f"bdd command `{bdd_cmd}` — bdd command exited 0") and "ran-the-runner" in f
+        for f in obs.findings
+    ), obs.findings
+    assert any(
+        "$FOUNDRY_BDD_REPORT" in f and "single quotes" in f and "double quotes" in f
+        for f in obs.findings
+    ), obs.findings
+    # A plain empty report gets the command + tail but no quoting advice.
+    clean = _gate_with("true").execute(_workdir(tmp_path / "b"))
+    assert any(f.startswith("bdd command `true` — bdd command exited 0") for f in clean.findings)
+    assert not any("single quotes" in f for f in clean.findings)
+
+
 def _all_passing(dest: Path) -> None:
     """The recorded run with every step reported PASSED (a forged-looking report)."""
     out = []

@@ -1271,6 +1271,7 @@ def make_engineering_node(
         criteria = _newest_by(state, resolve, _CRITERION_KIND, AcceptanceCriterion, "id")
         contracts = _newest_by(state, resolve, CONTRACT_KIND, InterfaceContract, "name")
         prior = _prior_failures(state)
+        failures = _ticket_notes(state, FAIL_TRIAGE)
         from foundry.graph.gate_wiring import contract_paths
 
         contract_files = contract_paths(state, resolve)
@@ -1371,9 +1372,13 @@ def make_engineering_node(
             for ticket in _round_robin(wave):
                 tid = task_id_for_ticket(ticket.id)
                 spans, features = _ticket_context(rt, ticket, criteria, contracts)
+                # A retry must see why its last attempt failed: an identical packet is an
+                # identical model request, which the call cache replays turn for turn.
+                own = tuple(n.explanation for n in sorted(failures.get(tid, ()),
+                                                          key=lambda n: n.seq))
                 packet = _ticket_packet(
                     tasks[tid], ticket, constraints, spans=spans, feature_files=features,
-                    prior_failures=prior, turn_budget=turn_budget,
+                    prior_failures=(*own, *prior), turn_budget=turn_budget,
                     cost_budget_microusd=cost_budget_microusd, stack=state.get("stack"),
                     contract_files=contract_files,
                     scenarios=_ticket_scenarios(ticket, criteria),
@@ -1466,7 +1471,6 @@ def make_engineering_node(
                 ))
             # Finalize in Seq order, single-threaded: rt.seq and rt.cas body writes
             # never race. A failed ticket never takes its siblings' diffs with it.
-            failures = _ticket_notes(state, FAIL_TRIAGE)
             built: list[Ticket] = []
             for ticket in wave:
                 tid = task_id_for_ticket(ticket.id)

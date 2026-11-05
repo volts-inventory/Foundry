@@ -248,3 +248,4 @@ Housekeeping: `rm -rf .pytest_cache .mypy_cache .ruff_cache ./.run spec.md`
 - Seatbelt (SBPL): a rule naming one operation (`file-read-data`) outranks a wildcard (`file-read*`) regardless of order, so a later wildcard allow does not undo an earlier specific deny — name both.
 - `Sandbox.scrubbed_env` is also asserted in `tests/test_self_verify.py` (the claude-code cage), not only `tests/test_execution.py`: run both after changing the execution sandbox env.
 - BSD (macOS) `sed -i` takes a mandatory backup suffix: write `sed -i.orig …` in test shell lines, or the edit silently fails there.
+- The per-run call cache (`state/calls/`) keys on the full model request: a retry whose packet/prompt is byte-identical to the failed attempt replays it turn for turn instead of re-running — make every retry's prompt differ (e.g. carry the attempt's failure).

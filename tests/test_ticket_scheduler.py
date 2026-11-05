@@ -32,7 +32,7 @@ from foundry.agents.implementation.tickets import (
     tier_for,
 )
 from foundry.durability.artifact_store import ArtifactStore
-from foundry.execution.adapter_contract import AdapterResult, TaskPacket
+from foundry.execution.adapter_contract import AdapterResult, TaskPacket, assemble_prompt
 from foundry.execution.adapters.claude_code import ClaudeCodeAdapter
 from foundry.execution.sandbox import Sandbox
 from foundry.execution.work_pool import ExecutionTask, LocalWorkPool
@@ -110,6 +110,7 @@ class _Recorder:
         self.lock = threading.Lock()
         self.calls: list[str] = []
         self.packets: dict[str, TaskPacket] = {}
+        self.history: list[TaskPacket] = []
         self.seen: dict[str, dict[str, str]] = {}
         self.cap_on = cap_on
         self.delay = delay
@@ -138,6 +139,7 @@ class _Recorder:
         with self.lock:
             self.calls.append(tid)
             self.packets[tid] = packet
+            self.history.append(packet)
             self.seen[tid] = seen
         files = {f: f"# written by {tid}\n" for f in packet.task.get("files", ())
                  if tid not in self.silent}
@@ -461,6 +463,21 @@ def test_a_ticket_that_writes_none_of_its_files_is_retried_then_skipped(
              if t.run_against == "task/T-001" and t.produced_by == "engineering"}
     assert set(notes) == {"ticket-failed:1", "ticket-failed:2", "ticket-skipped"}
     assert "contracts.py" in notes["ticket-failed:1"]
+
+
+def test_a_retried_ticket_is_told_why_its_last_attempt_failed(tmp_path: Path) -> None:
+    # An identical retry packet is an identical model request, which the per-run call
+    # cache replays turn for turn: the retry repeats the failure without running.
+    store = ArtifactStore()
+    rec = _Recorder(silent=frozenset({"T-001"}))
+    tickets = [_ticket("T-001", 0, files=("contracts.py",))]
+    _graph(_runtime(rec, store), store, tmp_path).compile().invoke(
+        _state(store, tickets), _config())
+    first, second = rec.history
+    assert first.prior_failures == ()
+    assert any("wrote none of the ticket's files (contracts.py)" in f
+               for f in second.prior_failures)
+    assert assemble_prompt(first) != assemble_prompt(second)
 
 
 def test_a_ticket_with_a_diff_is_not_rebuilt(tmp_path: Path) -> None:

@@ -134,6 +134,10 @@ import (
 	"github.com/cucumber/godog"
 )
 
+var registrars []func(*godog.ScenarioContext)
+
+func register(f func(*godog.ScenarioContext)) { registrars = append(registrars, f) }
+
 func TestFeatures(t *testing.T) {
 	if err := os.Chdir(".."); err != nil {
 		t.Fatal(err)
@@ -143,7 +147,11 @@ func TestFeatures(t *testing.T) {
 		format = "cucumber:" + p
 	}
 	suite := godog.TestSuite{
-		ScenarioInitializer: InitializeScenario,
+		ScenarioInitializer: func(sc *godog.ScenarioContext) {
+			for _, f := range registrars {
+				f(sc)
+			}
+		},
 		Options: &godog.Options{
 			Format: format, Paths: []string{"features"}, Strict: true, TestingT: t,
 		},
@@ -183,9 +191,10 @@ BDD_RUNNERS: dict[str, str] = {
         "godog (github.com/cucumber/godog v0.16+) has no Cucumber Messages writer; the "
         "gate reads its Cucumber JSON instead. bdd = `go test -count=1 ./bdd`. "
         "bdd/godog_test.go MUST be exactly:\n" + _GODOG_RUNNER
-        + "and package bdd (e.g. bdd/steps_test.go) defines "
-        "`func InitializeScenario(sc *godog.ScenarioContext)` registering every step "
-        "as sc.Step(`^...$`, fn) with a string-literal regex (the gate reads the "
+        + "It compiles with no step files (the harness wave is checked alone). Each "
+        "feature ticket's step file in package bdd (e.g. bdd/<feature>_steps_test.go) "
+        "registers its steps in `func init() { register(func(sc *godog.ScenarioContext) "
+        "{ ... }) }`, each as sc.Step(`^...$`, fn) with a string-literal regex (the gate reads the "
         "patterns from source to reject catch-all matchers; a pattern built at run "
         "time counts as one). Require godog in go.mod (install fetches it)."
     ),

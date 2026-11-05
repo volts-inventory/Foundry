@@ -279,15 +279,17 @@ import (
 	"github.com/cucumber/godog"
 )
 
-func InitializeScenario(sc *godog.ScenarioContext) {
-	var items []string
-	sc.Step(`^an empty list$`, func() error { items = nil; return nil })
-	sc.Step(`^I add "([^"]*)"$`, func(x string) error { items = append(items, x); return nil })
-	sc.Step(`^the list has (\\d+) items?$`, func(n int) error {
-		if len(items) != n {
-			return fmt.Errorf("want %d got %d", n, len(items))
-		}
-		return nil
+func init() {
+	register(func(sc *godog.ScenarioContext) {
+		var items []string
+		sc.Step(`^an empty list$`, func() error { items = nil; return nil })
+		sc.Step(`^I add "([^"]*)"$`, func(x string) error { items = append(items, x); return nil })
+		sc.Step(`^the list has (\\d+) items?$`, func(n int) error {
+			if len(items) != n {
+				return fmt.Errorf("want %d got %d", n, len(items))
+			}
+			return nil
+		})
 	})
 }
 """
@@ -322,3 +324,21 @@ def test_live_godog_run_through_the_gate(tmp_path: Path, monkeypatch: Any) -> No
     obs = gate.execute(wd)
     assert obs.structured[BDD_KEY] == {REF + "AC-1": "passed"}, obs.findings
     assert gate.decide(obs) is GateStatus.PASS, obs.findings
+
+
+def test_live_godog_runner_compiles_before_any_steps(tmp_path: Path) -> None:
+    if shutil.which("go") is None:
+        pytest.skip("go not installed")
+    wd = tmp_path / "wd"
+    (wd / "bdd").mkdir(parents=True)
+    (wd / "go.mod").write_text("module example.com/shop\n")
+    (wd / "bdd" / "godog_test.go").write_text(_runner_file())
+    try:
+        got = subprocess.run(["go", "get", _GODOG], cwd=wd, capture_output=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        pytest.skip("go get godog timed out")
+    if got.returncode != 0:
+        pytest.skip(f"cannot fetch godog: {got.stderr[-300:]!r}")
+    vet = subprocess.run(["go", "vet", "./..."], cwd=wd, capture_output=True, text=True,
+                         timeout=180)
+    assert vet.returncode == 0, vet.stderr

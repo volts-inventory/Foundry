@@ -840,3 +840,71 @@ def test_a_missing_contract_edge_that_would_close_a_cycle_stays_a_finding() -> N
     out, concerns = _add_contract_deps(tickets)
     assert out == tickets and concerns == []
     assert any("does not depend on B" in f for f in _contract_findings(out, []))
+
+
+def test_a_single_quoted_bdd_report_path_is_rewritten_to_expand() -> None:
+    # cucumber-js wrote to a file literally named $FOUNDRY_BDD_REPORT.
+    from foundry.agents.planner import _stack_decision
+
+    raw = {"language": "javascript", "test": "npx jest",
+           "bdd": "npx cucumber-js --format 'message:$FOUNDRY_BDD_REPORT'"}
+    stack, concerns = _stack_decision({"stack": raw}, ["javascript"])
+    assert stack is not None
+    assert stack.bdd == 'npx cucumber-js --format "message:$FOUNDRY_BDD_REPORT"'
+    assert any("single-quotes" in c for c in concerns)
+
+
+@pytest.mark.parametrize(("bdd", "flagged"), [
+    ("npx cucumber-js --format json:report.json", "legacy `json:`"),
+    ("npx cucumber-js --import 'features/**/*.ts' --format \"message:$FOUNDRY_BDD_REPORT\"",
+     "without a loader"),
+    ('NODE_OPTIONS="--import tsx" npx cucumber-js --import features/s.ts '
+     '--format "message:$FOUNDRY_BDD_REPORT"', None),
+    ('npx cucumber-js --require-module ts-node/register --require features/s.ts '
+     '--format "message:$FOUNDRY_BDD_REPORT"', None),
+    ('npx cucumber-js --format "message:$FOUNDRY_BDD_REPORT"', None),
+])
+def test_cucumber_js_commands_the_gate_cannot_read_are_flagged(
+    bdd: str, flagged: str | None
+) -> None:
+    from foundry.agents.planner import _stack_command_findings
+
+    findings = " ".join(_stack_command_findings(_js(test="t", bdd=bdd)))
+    assert (flagged in findings) if flagged else not findings
+    # A profile pin is the operator's call.
+    assert _stack_command_findings(_js(test="t", bdd=bdd, profile="node")) == ()
+
+
+@pytest.mark.parametrize(("framework", "run", "flagged"), [
+    ("express", "node app.js", True),
+    ("express", "npm start", True),
+    ("Flask", "python3 app.py", True),
+    ("", "flask run", True),
+    ("", "uvicorn app.main:app --port 8000", True),
+    ("express", "node smoke.js", False),
+    ("commander", "node index.js", False),
+    ("express", "node src/server.js --smoke", False),
+])
+def test_a_web_stack_run_that_starts_the_bare_server_is_flagged(
+    framework: str, run: str, flagged: bool
+) -> None:
+    # `node app.js` never exited: the smoke check hung 600s three times.
+    from foundry.agents.planner import _stack_command_findings
+
+    findings = _stack_command_findings(_js(test="t", framework=framework, run=run))
+    assert bool(findings) is flagged
+    if flagged:
+        assert "port 0" in findings[0]
+
+
+def test_js_harness_recipe_fixes_the_command_and_config() -> None:
+    from foundry.gates.profiles import bdd_runner_hint
+
+    js, ts = bdd_runner_hint("javascript"), bdd_runner_hint("typescript")
+    assert 'bdd = `npx cucumber-js --format "message:$FOUNDRY_BDD_REPORT"`' in js
+    config = json.loads(js.split("MUST be exactly:\n")[1].split("\n")[0])
+    assert config == {"default": {"paths": ["features/**/*.feature"],
+                                  "import": ["features/step_definitions/**/*.js"],
+                                  "forceExit": True}}
+    assert 'NODE_OPTIONS="--import tsx" npx cucumber-js' in ts
+    assert "features/step_definitions/**/*.ts" in ts and "**/*.js" not in ts

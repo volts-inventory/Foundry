@@ -270,7 +270,9 @@ def test_one_model_call_emits_every_planning_artifact_kind() -> None:
     # Distinct ADRs get distinct handles (content_identity, not body digest).
     assert len({a.uri for a in artifacts if a.kind == "adr"}) == 2
     assert writes["scope_tier"].tier.value == "standard"
-    assert {c.id for c in writes["pinned_constraints"]} == {"PC-001", "PC-002"}
+    # PLAN persists in SQLite on Python: the planner pins the :memory: footgun itself.
+    assert {c.id for c in writes["pinned_constraints"]} == {
+        "PC-001", "PC-002", "PC-python-sqlite-memory"}
     assert "gates" not in writes  # agents triage, never bless (L5)
 
 
@@ -720,7 +722,8 @@ def test_replan_retires_constraints_it_no_longer_emits() -> None:
     second = node(state, config_for("r", step=5))
     channel = merge_constraints(channel, second["pinned_constraints"])
 
-    assert {c.id for c in live_constraints(channel)} == {"PC-001", "OP-1"}
+    assert {c.id for c in live_constraints(channel)} == {
+        "PC-001", "OP-1", "PC-python-sqlite-memory"}
 
 
 def test_replan_retires_tickets_it_no_longer_emits() -> None:

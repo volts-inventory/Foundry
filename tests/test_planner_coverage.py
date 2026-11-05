@@ -15,8 +15,12 @@ from typing import Any
 
 from foundry.agents.planner import (
     MAX_TICKETS,
+    SOP,
     _coverage_findings,
+    _offline_scenario_findings,
     _own_scenario_bindings,
+    _python_deps_rule,
+    _stack_constraints,
     make_planner_node,
 )
 from foundry.durability.artifact_store import ArtifactStore
@@ -339,3 +343,59 @@ def test_an_unpaired_feature_ticket_gets_a_step_module_to_bind_its_scenarios() -
     assert len(concerns) == 1
     cucumber = python.model_copy(update={"bdd": "behave"})
     assert _own_scenario_bindings(tickets, cucumber) == (tickets, [])
+
+
+def test_a_test_ticket_with_scenarios_but_no_test_module_gets_one() -> None:
+    # The plan's own bdd-harness, renamed bdd-harness-2, held scenario C1 as a test
+    # ticket with no test_*.py: the feature ticket counted it as the binder, so
+    # nothing bound C1.
+    feature = Ticket(id="contracts-2", title="c", specialty=Specialty.BACKEND,
+                     scenario_ids=("C1",), files=("contracts_extra.py",), seq=_SEQ)
+    harness = Ticket(id="bdd-harness-2", title="h", specialty=Specialty.TEST,
+                     scenario_ids=("C1",), files=("conftest.py",),
+                     depends_on=("contracts-2",), seq=_SEQ)
+    no_scenarios = Ticket(id="T-9", title="t", specialty=Specialty.TEST, seq=_SEQ)
+    out, concerns = _own_scenario_bindings(
+        [feature, harness, no_scenarios], StackDecision(language="python", test="pytest"))
+    files = {t.id: t.files for t in out}
+    assert files["bdd-harness-2"] == ("conftest.py", "tests/test_bdd_harness_2.py")
+    assert files["contracts-2"] == ("contracts_extra.py",)  # bound by the test ticket
+    assert files["T-9"] == ()
+    assert len(concerns) == 1
+
+
+def test_a_scenario_asserting_dependency_install_is_a_finding() -> None:
+    # The gates run offline: "installing dependencies succeeds" can never pass.
+    def c(cid: str, then: str) -> AcceptanceCriterion:
+        return AcceptanceCriterion(id=cid, text="t", given=("requirements.txt exists",),
+                                   when=("dependencies are pinned",), then=(then,),
+                                   ticket_id="T-1", seq=_SEQ)
+
+    findings = _offline_scenario_findings([
+        c("C1", "installing dependencies succeeds with no version conflicts"),
+        c("C2", "`pip install -r requirements.txt` exits 0"),
+        c("C3", "every entry in requirements.txt is pinned with =="),
+        c("C4", "the user sees the installation wizard"),
+    ])
+    assert [f.split()[1] for f in findings] == ["C1", "C2"]
+    assert "offline" in findings[0]
+
+
+def test_the_python_deps_rule_forbids_standard_library_modules() -> None:
+    # A model pinned sqlite3==2.6.0 in requirements.txt.
+    rule = _python_deps_rule(StackDecision(language="python"), "requirements.txt")
+    assert "standard-library" in rule and "sqlite3" in rule
+
+
+def test_the_sop_adds_bdd_harness_only_for_a_bdd_stack_and_reserves_its_id() -> None:
+    assert "only when stack.bdd is set" in SOP
+    assert "reserved: never plan a ticket with either" in SOP
+    assert "never that installing succeeds" in SOP
+
+
+def test_a_python_sqlite_plan_pins_the_memory_connection_constraint() -> None:
+    python = StackDecision(language="python")
+    [pc] = _stack_constraints(python, {"design": {"body": "Store notes in SQLite"}})
+    assert ":memory:" in pc["text"] and "ONE connection" in pc["text"]
+    assert _stack_constraints(python, {"design": {"body": "Store notes in Postgres"}}) == []
+    assert _stack_constraints(StackDecision(language="javascript"), {"x": "sqlite"}) == []

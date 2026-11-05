@@ -1606,6 +1606,17 @@ _CONTRACT_STUB_RULES: dict[str, str] = {
 }
 
 
+def _python_deps_rule(stack: StackDecision, where: str) -> str:
+    framework = f" ({stack.framework})" if stack.framework else ""
+    return (
+        f"Declare in {where}, one per line and pinned with ==, every third-party "
+        f"package the project's code and tests import: the stack's runtime "
+        f"framework{framework} and libraries, and the test packages. The per-wave "
+        "checks install exactly what is declared there before running anything, so "
+        "an undeclared import fails every later check with ModuleNotFoundError."
+    )
+
+
 def _generated_tickets(
     interfaces: Sequence[InterfaceContract],
     raw_stack: dict[str, Any],
@@ -1688,6 +1699,9 @@ def _generated_tickets(
                 "file you create outside your files is discarded."
                 + " Write no step definitions: the test tickets do."
                 + (f" {hint}" if (hint := bdd_runner_hint(language)) else "")
+                + (" " + _python_deps_rule(
+                    stack, "requirements.txt or pyproject.toml [project].dependencies")
+                   if language == "python" else "")
             ),
             specialty=Specialty.TEST,
             difficulty=Difficulty.STANDARD,
@@ -1695,6 +1709,45 @@ def _generated_tickets(
             seq=seq,
         ))
     return out, concerns
+
+
+_PY_MANIFESTS = ("requirements.txt", "pyproject.toml")
+
+
+def _python_deps_ticket(
+    tickets: Sequence[Ticket], generated: Sequence[Ticket], stack: StackDecision | None,
+    base: BaseView | None, seq: Seq,
+) -> list[Ticket]:
+    """A wave-0 ticket declaring a new Python build's dependencies in the manifest a
+    planned ticket owns, when no generated ticket writes one. The wave checks install
+    only what a manifest declares: left to a late ticket (often the entrypoint), every
+    earlier check runs without the framework and fails on ModuleNotFoundError, which
+    the fixer may not repair in a later wave's file. The planned owner keeps the file
+    too, so it can still extend it (overlapping scopes run in separate waves)."""
+    if (stack is None or stack.language != "python" or stack.bdd or base is not None
+            or any(t.id == HARNESS_TICKET_ID for t in generated)):
+        return []
+    manifests = tuple(m for m in _PY_MANIFESTS if any(m in t.files for t in tickets))
+    planned = {t.id for t in tickets}
+    if not manifests or any(
+        not planned.intersection(t.depends_on) for t in tickets
+        if any(m in t.files for m in manifests)
+    ):
+        return []  # none, or a first-wave ticket already writes it
+    return [Ticket(
+        id=HARNESS_TICKET_ID,
+        title="Declare the Python dependencies",
+        description=(
+            _python_deps_rule(stack, " / ".join(manifests))
+            + " Write ONLY your files: the feature tickets write the source after you; "
+            "any file you create outside your files is discarded. Write no application "
+            "code and no step definitions."
+        ),
+        specialty=Specialty.BACKEND,
+        difficulty=Difficulty.TRIVIAL,
+        files=manifests,
+        seq=seq,
+    )]
 
 
 def _attach_generated(
@@ -2328,7 +2381,9 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
         epics=frame.epics, overflow=over,
         reserved=base.feature_names if base is not None else frozenset(),
     )
-    tickets, more = _attach_generated(tickets, frame.generated, frame.tickets_seq)
+    generated = (*frame.generated, *_python_deps_ticket(
+        tickets, frame.generated, frame.stack, base, frame.tickets_seq))
+    tickets, more = _attach_generated(tickets, generated, frame.tickets_seq)
     concerns += more
     for repair in (_drop_self_consumes, _add_contract_deps):
         tickets, more = repair(tickets)

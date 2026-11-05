@@ -308,6 +308,31 @@ def test_python_stack_without_bdd_or_code_contracts_generates_nothing() -> None:
     assert [t.id for t in _tickets(writes, cas)] == ["T-001", "T-002", "T-003"]
 
 
+def test_python_manifest_on_a_late_ticket_gets_a_wave_zero_deps_ticket() -> None:
+    # A Flask build gave requirements.txt to its entrypoint (the last wave): every
+    # earlier wave check installed nothing and failed on `No module named 'werkzeug'`,
+    # and the fixer may not write a later wave's file.
+    tickets = json.loads(json.dumps(PLAN["tickets"]))
+    tickets[-1]["files"] = [*tickets[-1]["files"], "requirements.txt"]
+    assert tickets[-1]["depends_on"]
+    stack = {**PYTHON_STACK, "framework": "Flask"}
+    writes, cas, _ = _plan_once({**PLAN, "stack": stack, "tickets": tickets})
+    deps, *rest = _tickets(writes, cas)
+    assert deps.id == HARNESS_TICKET_ID and deps.depends_on == ()
+    assert deps.files == ("requirements.txt",)
+    assert "Flask" in deps.description and "pinned with ==" in deps.description
+    assert all(HARNESS_TICKET_ID in t.depends_on for t in rest)
+    assert "requirements.txt" in rest[-1].files  # the owner can still extend it
+
+
+def test_python_manifest_already_in_the_first_wave_adds_no_ticket() -> None:
+    tickets = json.loads(json.dumps(PLAN["tickets"]))
+    first = next(t for t in tickets if not t["depends_on"])
+    first["files"] = [*first["files"], "pyproject.toml"]
+    writes, cas, _ = _plan_once({**PLAN, "stack": PYTHON_STACK, "tickets": tickets})
+    assert HARNESS_TICKET_ID not in [t.id for t in _tickets(writes, cas)]
+
+
 def test_a_model_ticket_cannot_take_a_fixer_id() -> None:
     # A planned `fix-2` would read as built once the fixer mints its second diff.
     from foundry.agents.planner import _safe_ticket_ids

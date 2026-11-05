@@ -117,6 +117,31 @@ def test_a_binding_in_conftest_is_named_as_never_collected(tmp_path: Path) -> No
     assert any("module pytest collects, tests/test_<name>.py" in f for f in obs.findings)
 
 
+def test_a_conftest_import_error_is_an_error_that_says_why(tmp_path: Path) -> None:
+    root = _project(tmp_path, None)
+    (root / "tests").mkdir(exist_ok=True)
+    (root / "tests" / "conftest.py").write_text("from app.store import Repo\n")
+    gate = TestGate()
+    obs = gate.execute(root)
+    assert obs.exit_codes == (4,)
+    assert gate.decide(obs) is GateStatus.ERROR
+    why = [f for f in obs.findings if not f.startswith("BDD criterion")]
+    assert why and why[0].startswith("pytest usage error"), obs.findings
+    assert "test command exited 4" in why[0] and "app" in why[0]
+
+
+def test_no_collected_test_module_fails_with_a_hint(tmp_path: Path) -> None:
+    root = _project(tmp_path, None)
+    (root / "test_plain.py").unlink()
+    gate = TestGate()
+    obs = gate.execute(root)
+    assert obs.exit_codes == (5,)
+    assert gate.decide(obs) is GateStatus.FAIL
+    assert any(f.startswith("no test modules collected: add tests/test_<name>.py")
+               and "feature files" in f and "test command exited 5" in f
+               for f in obs.findings), obs.findings
+
+
 def test_a_scoped_scenario_absent_from_the_features_fails_closed(tmp_path: Path) -> None:
     gate = TestGate(scope=frozenset({"features/T9.feature::AC-9"}))
     obs = gate.execute(_project(tmp_path, _STEPS.replace("{expected}", "n")))

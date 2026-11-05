@@ -313,10 +313,22 @@ _CUCUMBER_WHY = {
 }
 
 
-def _output_tail(err: str, out: str, rc: int, lines: int = 15, chars: int = 1500) -> str:
+def _output_tail(
+    err: str, out: str, rc: int, lines: int = 15, chars: int = 1500, label: str = "bdd"
+) -> str:
     text = "\n".join(t for t in (err.strip(), out.strip()) if t)
     tail = "\n".join(text.splitlines()[-lines:])[-chars:]
-    return f"bdd command exited {rc}; its last output:\n{tail or '(none)'}"
+    return f"{label} command exited {rc}; its last output:\n{tail or '(none)'}"
+
+
+_PYTEST_EXIT_WHY = {
+    2: "pytest was interrupted",
+    3: "pytest hit an internal error",
+    4: "pytest usage error — a conftest.py that fails to import, a bad pytest.ini "
+       "option or an unknown command-line flag stops the run before any test",
+    5: "no test modules collected: add tests/test_<name>.py (pytest collects only "
+       "test_*.py modules, never conftest.py) holding the tests",
+}
 
 
 def bdd_findings(
@@ -684,6 +696,14 @@ class TestGate:
             findings = (*undeclared_import_hints(out + err, workdir),
                         *(step_argument_hints(out) if trusted and not self.bdd_cmd else ()),
                         *failure_findings(out))
+            why = None if self.stack_harness else _PYTEST_EXIT_WHY.get(rc)
+            if why is not None and rc == _NO_TESTS_COLLECTED and trusted:
+                why += " and binding the feature files with pytest-bdd `scenarios(...)`"
+            if why is not None or not findings:
+                # Usage errors (exit 4) print only to stderr, which failure_findings
+                # never sees: without the tail the gate ERRORs with no why at all.
+                tail = _output_tail(err, out, rc, label="test")
+                findings = (f"{why}\n{tail}" if why else tail, *findings)
         if self.stack_harness and rc in MISSING_BINARY_EXIT_CODES:
             findings = (
                 f"test command exited {rc}: command not found or not executable "

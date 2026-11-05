@@ -568,7 +568,9 @@ def pinned_stack(name: str) -> StackDecision:
 # A third-party library without stubs (flask_login) is not the project's type error.
 # The CLI flag beats a model-written global `ignore_missing_imports = false` or
 # `strict`, but a per-module override beats the flag, so the error codes go too.
-_MYPY = re.compile(r"(?<![\w./-])mypy(?=\s|$)")
+_MYPY = re.compile(
+    r"((?:^|&&|;|\|\|)\s*(?:uv\s+run\s+)?(?:(?:\S*/)?python[\d.]*\s+-m\s+)?)mypy(?=\s|$)"
+)
 _MYPY_LENIENT = (
     "mypy --ignore-missing-imports --disable-error-code import-not-found "
     "--disable-error-code import-untyped"
@@ -588,7 +590,10 @@ def stack_profile(stack: StackDecision) -> VerificationProfile:
     build = stack.build or (
         f"{shlex.quote(sys.executable)} -m compileall -q ." if python and stack.typecheck else ""
     )
-    typecheck = _MYPY.sub(_MYPY_LENIENT, stack.typecheck) if python else stack.typecheck
+    typecheck = (
+        _MYPY.sub(lambda m: m.group(1) + _MYPY_LENIENT, stack.typecheck)
+        if python else stack.typecheck
+    )
     steps = [s for s in (build, typecheck) if s]
     build_cmd = _sh(" && ".join(steps)) if steps else None
     install_line = stack_install(stack)

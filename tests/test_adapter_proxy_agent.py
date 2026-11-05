@@ -835,3 +835,11 @@ def test_a_bdd_run_gets_a_report_path_and_a_note_when_it_writes_none(tmp_path: P
     wrote, empty = str(seen[1][-1]["content"]), str(seen[2][-1]["content"])
     assert "wrote no report" not in wrote
     assert "wrote no report to $FOUNDRY_BDD_REPORT" in empty
+
+
+def test_the_empty_bdd_report_note_skips_pytest_bdd_commands() -> None:
+    from foundry.execution.adapters.proxy_agent import _BDD_CMD
+
+    assert not _BDD_CMD.search("pip install pytest-bdd")
+    assert not _BDD_CMD.search("pytest -k bdd")
+    assert _BDD_CMD.search("npx cucumber-js") and _BDD_CMD.search("go test ./bdd/...")

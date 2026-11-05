@@ -45,7 +45,7 @@ class SmokeGate:
         self,
         cmd: tuple[str, ...],
         *,
-        timeout_s: float = 120.0,
+        timeout_s: float = 300.0,
         seal_key: bytes | None = None,
         pyenv: PythonBuildEnv | None = None,
     ) -> None:

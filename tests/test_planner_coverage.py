@@ -399,3 +399,18 @@ def test_a_python_sqlite_plan_pins_the_memory_connection_constraint() -> None:
     assert ":memory:" in pc["text"] and "ONE connection" in pc["text"]
     assert _stack_constraints(python, {"design": {"body": "Store notes in Postgres"}}) == []
     assert _stack_constraints(StackDecision(language="javascript"), {"x": "sqlite"}) == []
+
+
+def test_manifest_and_app_install_scenarios_are_not_offline_findings() -> None:
+    def c(cid: str, when: str, then: str) -> AcceptanceCriterion:
+        return AcceptanceCriterion(id=cid, text="t", given=("x",), when=(when,), then=(then,),
+                                   ticket_id="T-1", seq=_SEQ)
+
+    findings = _offline_scenario_findings([
+        c("C1", "requirements.txt is read",
+          "every package in requirements.txt is pinned to an exact version "
+          "for a reproducible install"),
+        c("C2", "the admin installs the analytics plugin package", "the plugin is listed"),
+        c("C3", "I run pip install -r requirements.txt", "it succeeds"),
+    ])
+    assert [f.split()[1] for f in findings] == ["C3"]

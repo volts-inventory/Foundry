@@ -941,3 +941,25 @@ def test_js_harness_recipe_fixes_the_command_and_config() -> None:
                                   "forceExit": True}}
     assert 'NODE_OPTIONS="--import tsx" npx cucumber-js' in ts
     assert "features/step_definitions/**/*.ts" in ts and "**/*.js" not in ts
+
+
+def test_bdd_quoting_rewrites_only_the_word_holding_the_report_variable() -> None:
+    from foundry.agents.planner import _bdd_quoting
+
+    unquoted = "npx cucumber-js --tags '@smoke' --format message:$FOUNDRY_BDD_REPORT --name 'login'"
+    assert _bdd_quoting(unquoted) == unquoted
+    assert _bdd_quoting("npx cucumber-js --tags '@smoke' --format 'message:$FOUNDRY_BDD_REPORT'"
+                        " --name 'login'") == (
+        "npx cucumber-js --tags '@smoke' --format \"message:$FOUNDRY_BDD_REPORT\""
+        " --name 'login'")
+
+
+def test_stack_profile_adds_mypy_flags_only_to_a_mypy_invocation() -> None:
+    from foundry.gates.profiles import _MYPY, _MYPY_LENIENT
+
+    def fix(cmd: str) -> str:
+        return _MYPY.sub(lambda m: m.group(1) + _MYPY_LENIENT, cmd)
+
+    assert fix("pip install mypy && mypy .") == f"pip install mypy && {_MYPY_LENIENT} ."
+    assert fix("uv run mypy .") == f"uv run {_MYPY_LENIENT} ."
+    assert fix("mypy .") == f"{_MYPY_LENIENT} ."

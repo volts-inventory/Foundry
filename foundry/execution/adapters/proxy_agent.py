@@ -148,7 +148,7 @@ TOOLS: tuple[dict[str, Any], ...] = (
 # agent's sandbox does not, so a runner there wrote to "" and the agent never saw
 # that the gate would find no report.
 _BDD_REPORT_ENV = "FOUNDRY_BDD_REPORT"
-_BDD_CMD = re.compile(r"cucumber|godog|\bbdd\b", re.IGNORECASE)
+_BDD_CMD = re.compile(r"cucumber|godog|\bgo\s+test\b[^|;&]*\bbdd\b", re.IGNORECASE)
 _OBS_CAP = 4_000  # chars of run/search output fed back per turn (context discipline)
 # Larger than _OBS_CAP so a typical source file fits in one read: a small read cap
 # is what drove the model to re-read one file in many slices.

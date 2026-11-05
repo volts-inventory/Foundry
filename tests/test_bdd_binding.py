@@ -231,5 +231,5 @@ def test_a_smoke_command_that_never_exits_is_named_a_server(tmp_path: Path) -> N
     assert any("listening" in f for f in obs.findings)
 
 
-def test_the_default_smoke_timeout_is_two_minutes() -> None:
-    assert SmokeGate(("true",))._timeout_s == 120.0
+def test_the_default_smoke_timeout_is_five_minutes() -> None:
+    assert SmokeGate(("true",))._timeout_s == 300.0

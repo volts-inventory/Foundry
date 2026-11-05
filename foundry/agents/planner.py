@@ -2351,9 +2351,11 @@ def _coverage_findings(
     return tuple(out)
 
 
-_INSTALL_WORD = re.compile(r"\binstall(s|ed|ing|ation)?\b", re.I)
-_DEP_WORD = re.compile(
-    r"\b(dependenc\w*|packages?|requirements?|lockfile|pip|npm|yarn|pnpm|uv|poetry|cargo)\b",
+_INSTALL_ASSERTION = re.compile(
+    r"\b(pip3?\s+install|npm\s+(install|ci)|yarn\s+install|pnpm\s+install|"
+    r"uv\s+(pip\s+install|sync)|poetry\s+install|cargo\s+fetch|go\s+mod\s+download)\b"
+    r"|\binstall(s|ed|ing|ation)?\s+(of\s+)?(\w+\s+){0,2}"
+    r"(succeed|succeeds|work|works|complete|completes|without\s+error)\b",
     re.I,
 )
 
@@ -2366,7 +2368,7 @@ def _offline_scenario_findings(criteria: Sequence[AcceptanceCriterion]) -> tuple
         "run offline: check the manifest itself (it exists, every entry is pinned) "
         "instead."
         for c in criteria
-        if any(_INSTALL_WORD.search(s) and _DEP_WORD.search(s) for s in (*c.when, *c.then))
+        if any(_INSTALL_ASSERTION.search(s) for s in (*c.when, *c.then))
     )
 
 
@@ -2403,7 +2405,9 @@ def _run_findings(stack: StackDecision) -> tuple[str, ...]:
     )
 
 
-_BDD_REPORT_SINGLE_QUOTED = re.compile(r"'([^'\"]*\$\{?" + BDD_REPORT_ENV + r"\}?[^'\"]*)'")
+_BDD_REPORT_SINGLE_QUOTED = re.compile(
+    r"(?<![^\s=:])'([^'\"]*\$\{?" + BDD_REPORT_ENV + r"\}?[^'\"]*)'"
+)
 _CUCUMBER_JS = re.compile(r"\bcucumber-js\b")
 _TS_LOADER = re.compile(r"--(import|require|require-module|loader)[\s=]+(tsx|ts-node)\b")
 

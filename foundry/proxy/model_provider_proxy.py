@@ -62,6 +62,7 @@ served capability silently degraded. That is flagged as drift (kind
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -73,7 +74,7 @@ from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from fnmatch import fnmatchcase
 from pathlib import Path
@@ -619,7 +620,7 @@ def _seconds_until_clock_reset(text: str) -> float | None:
         hour = 0
     if not (0 <= hour <= 23 and 0 <= minute <= 59):
         return None
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if target <= now:
         target += timedelta(days=1)
@@ -1241,12 +1242,10 @@ class ModelProviderProxy:
                               f"{wait / 60:.0f} min (resuming ~{resume_at}) "
                               f"[wait {rl_attempt + 1}/{self._rl_max_retries}]")
                     if on_rate_limit_wait is not None:
-                        try:
+                        with contextlib.suppress(Exception):  # advisory telemetry only
                             on_rate_limit_wait(
                                 wait, time.time() + wait, retry_after is not None
                             )
-                        except Exception:  # noqa: S110 — advisory telemetry only
-                            pass
                     self._rl_sleeper(wait)
                     rl_attempt += 1
                     continue

@@ -175,7 +175,8 @@ def _artifact_detail(kind: str, body: object, *, max_len: int = 200) -> str | No
         out = (f"{getattr(body, 'scenarios_passed', 0)} scenarios passed / "
                f"{getattr(body, 'scenarios_failed', 0)} failed")
     elif kind == "threat_model":
-        out = f"{count('oracle_bindings')} oracle bindings, {count('residual_item_ids')} residual items"
+        out = (f"{count('oracle_bindings')} oracle bindings, "
+               f"{count('residual_item_ids')} residual items")
     elif kind == "audit_finding":
         out = f"severity {getattr(body, 'severity', '?')} — {count('findings')} finding(s)"
     elif kind == "supply_chain_report":

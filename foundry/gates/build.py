@@ -69,14 +69,16 @@ def build_findings(
     output with the workdir path normalized to ``.``, so it adds nothing to
     ``results_digest`` that the raw stdout/stderr didn't already bind."""
     head = f"{step} command exited {rc}"
+    hints: tuple[str, ...] = ()
     if rc in MISSING_BINARY_EXIT_CODES:
         head += " (command not found or not executable: missing toolchain — infra ERROR)"
     elif step == "pip install":
-        from .pydeps import install_failure_is_project
+        from .pydeps import install_failure_is_project, unavailable_requirement_hints
 
         if install_failure_is_project(stdout + stderr):
             head += (" (the project's declared dependencies cannot be installed — FAIL: "
                      "fix requirements.txt / pyproject.toml)")
+            hints = unavailable_requirement_hints(stdout + stderr, workdir)
         else:
             head += (" (dependency install failed on the network, the index or the host "
                      "— an ERROR, never latched)")
@@ -87,7 +89,7 @@ def build_findings(
             "unknown package, fix the manifest; otherwise the registry/network failed)"
         )
     tail = output_tail(stdout, stderr, workdir)
-    return (f"{head}; last {len(tail)} output line(s):", *tail)
+    return (f"{head}; last {len(tail)} output line(s):", *tail, *hints)
 
 
 def output_tail(stdout: str, stderr: str, workdir: Path) -> tuple[str, ...]:

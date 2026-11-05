@@ -59,6 +59,7 @@ __all__ = [
     "install_failure_is_project",
     "manifest_digest",
     "python_build_env",
+    "unavailable_requirement_hints",
 ]
 
 # First line of the manifest the materializer scaffolds from the tree's imports: an
@@ -167,6 +168,53 @@ def install_failure_is_project(output: str) -> bool:
     if any(s in output for s in _INFRA) or _HTTP_5XX.search(output):
         return False
     return any(s in output for s in _PROJECT_FAULT)
+
+
+_UNAVAILABLE = re.compile(
+    r"(?:No matching distribution found for|"
+    r"Could not find a version that satisfies the requirement)\s+(\S+)"
+)
+
+
+def unavailable_requirement_hints(output: str, workdir: Path) -> tuple[str, ...]:
+    """One line per requirement pip found no distribution for, naming the manifest
+    line that declares it. Only explains a failure pip already reported: a stdlib
+    name is never rejected up front, since some of them also exist on PyPI."""
+    req_file = workdir / "requirements.txt"
+    req_lines = (
+        req_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        if req_file.is_file()
+        else []
+    )
+    hints: list[str] = []
+    for requirement in dict.fromkeys(_UNAVAILABLE.findall(output)):
+        m = _PIN.match(requirement)
+        name = m.group(1) if m else requirement
+        found = next(
+            (
+                (n, raw.strip())
+                for n, raw in enumerate(req_lines, 1)
+                if (pm := _PIN.match(re.sub(r"(^|\s)#.*$", "", raw).strip()))
+                and pm.group(1).lower() == name.lower()
+            ),
+            None,
+        )
+        if name in sys.stdlib_module_names:
+            fix = (
+                f"delete the line `{found[1]}` (line {found[0]}) from requirements.txt"
+                if found
+                else f"remove `{requirement}` from the declared dependencies"
+            )
+            hints.append(
+                f"`{name}` is part of Python's standard library, not a PyPI package: {fix}"
+            )
+        else:
+            where = f" (requirements.txt line {found[0]}: `{found[1]}`)" if found else ""
+            hints.append(
+                f"no PyPI distribution matches `{requirement}`{where}: fix the name or "
+                "the version, or remove it if the code does not import it"
+            )
+    return tuple(hints)
 
 
 _NESTED = frozenset({"-r", "--requirement", "-c", "--constraint", "-e", "--editable"})

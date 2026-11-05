@@ -24,7 +24,7 @@ import foundry.gates.pydeps as pydeps
 import foundry.python_env as python_env
 from foundry.agents._common import emit_artifact
 from foundry.gates.attestation import ZoneBSigner
-from foundry.gates.build import BuildGate
+from foundry.gates.build import BuildGate, build_findings
 from foundry.gates.discriminator import HeldOutMutant, TestSuiteDiscriminator
 from foundry.gates.profiles import PROFILES, stack_profile
 from foundry.gates.pydeps import (
@@ -153,6 +153,27 @@ def test_install_failure_classification() -> None:
     assert install_failure_is_project("Failed to build lxml\n")
     # ...unless fetching its build dependencies hit the network: infra still wins.
     assert not install_failure_is_project(sdist + "ReadTimeoutError: read timed out\n")
+
+
+def test_unavailable_requirement_names_the_line_and_the_stdlib(tmp_path: Path) -> None:
+    _write(tmp_path, {"requirements.txt": "Flask==3.0.0\nsqlite3==2.6.0\nnopepkg>=1\n"})
+    out = (
+        "ERROR: Could not find a version that satisfies the requirement sqlite3==2.6.0 "
+        "(from versions: none)\nERROR: No matching distribution found for sqlite3==2.6.0\n"
+        "ERROR: No matching distribution found for nopepkg>=1\n"
+    )
+    findings = build_findings(1, out, "", tmp_path, step="pip install")
+    assert findings[0].startswith("pip install command exited 1")
+    assert (
+        "`sqlite3` is part of Python's standard library, not a PyPI package: delete the "
+        "line `sqlite3==2.6.0` (line 2) from requirements.txt"
+    ) in findings
+    assert any(
+        "`nopepkg>=1` (requirements.txt line 3" in f and "standard library" not in f
+        for f in findings
+    )
+    # Explanation only: the stdlib name stays declared until pip itself rejects it.
+    assert declared_requirements(tmp_path) == ("-r", "requirements.txt")
 
 
 # ---- the gates over a per-build venv ---------------------------------------------

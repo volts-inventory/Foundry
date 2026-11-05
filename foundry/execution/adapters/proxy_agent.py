@@ -144,6 +144,11 @@ TOOLS: tuple[dict[str, Any], ...] = (
           triage={"type": "array", "items": _STR}),
 )
 
+# The bdd command writes its report to $FOUNDRY_BDD_REPORT; the gate sets it, the
+# agent's sandbox does not, so a runner there wrote to "" and the agent never saw
+# that the gate would find no report.
+_BDD_REPORT_ENV = "FOUNDRY_BDD_REPORT"
+_BDD_CMD = re.compile(r"cucumber|godog|\bbdd\b", re.IGNORECASE)
 _OBS_CAP = 4_000  # chars of run/search output fed back per turn (context discipline)
 # Larger than _OBS_CAP so a typical source file fits in one read: a small read cap
 # is what drove the model to re-read one file in many slices.
@@ -472,7 +477,14 @@ class ProxyAgentAdapter:
             cmd = str(act.get("cmd", "")).strip()
             if not cmd:
                 return "ERROR: empty cmd"
-            result = sandbox.run(cmd, timeout_s=self._run_timeout_s)
+            extra: dict[str, str] = {}
+            report: Path | None = None
+            if _BDD_REPORT_ENV not in sandbox.scrubbed_env():
+                # Beside the worktree, so the report never lands in the diff.
+                report = worktree.parent / "bdd-report.ndjson"
+                report.unlink(missing_ok=True)
+                extra[_BDD_REPORT_ENV] = str(report)
+            result = sandbox.run(cmd, timeout_s=self._run_timeout_s, extra_env=extra)
             out = result.stdout + "\n" + result.stderr
             tail = out[-_OBS_CAP:]
             if result.timed_out:
@@ -483,7 +495,13 @@ class ProxyAgentAdapter:
                 status = "exit 0"
             if len(out) > _OBS_CAP:
                 status += f" (output truncated; last {_OBS_CAP} chars shown)"
-            return f"{status}\n{tail}"
+            obs = f"{status}\n{tail}"
+            if (report is not None and _BDD_CMD.search(cmd)
+                    and (not report.is_file() or report.stat().st_size == 0)):
+                obs += (f"\nNOTE: this run wrote no report to ${_BDD_REPORT_ENV}: the gate "
+                        "would see no scenario results. Make the bdd runner write its "
+                        f"report to ${_BDD_REPORT_ENV}.")
+            return obs
         return f"ERROR: unknown action {action!r}"
 
 

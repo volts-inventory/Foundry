@@ -811,3 +811,27 @@ def test_a_concurrent_fallback_leaves_a_running_native_session_alone(tmp_path: P
     b_result, b_body = results["T2"]
     assert b_result.triage[0].explanation == "native" and b_result.turns_used == 2
     assert b_body["files"] == {"b.txt": "b"}
+
+
+def test_a_bdd_run_gets_a_report_path_and_a_note_when_it_writes_none(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    seen: list[list[dict[str, Any]]] = []
+    actions = iter([
+        {"action": "run", "cmd": 'echo cucumber > "$FOUNDRY_BDD_REPORT"'},
+        {"action": "run", "cmd": "echo cucumber"},
+        {"action": "done", "summary": "ok"},
+    ])
+
+    def _complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
+        seen.append(list(messages))
+        act = next(actions)
+        return json.dumps(act), act
+
+    with Sandbox(src) as sb:
+        result = ProxyAgentAdapter(_complete).run(make_packet(sb.worktree), sb)
+        body = json.loads(sb.get_blob(result.diff_uri))
+    assert body["files"] == {}  # the report lives outside the worktree
+    wrote, empty = str(seen[1][-1]["content"]), str(seen[2][-1]["content"])
+    assert "wrote no report" not in wrote
+    assert "wrote no report to $FOUNDRY_BDD_REPORT" in empty

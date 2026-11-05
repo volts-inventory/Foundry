@@ -1792,6 +1792,46 @@ def failing_ids(findings: Iterable[str]) -> tuple[str, ...]:
     return tuple(out)
 
 
+# foundry/gates/build.py's head for a pip install that failed on the project's own
+# manifest (not the network): the fix is a manifest edit, never a re-run.
+_PIP_MANIFEST_FAIL = "declared dependencies cannot be installed"
+PIP_MANIFESTS = ("requirements.txt", "pyproject.toml")
+# A relative source path with a line number: mypy/pyright/tsc/go/rustc/javac errors.
+_SOURCE_LINE = re.compile(
+    r"(?<![\w./-])(?:\./)?((?:[\w-][\w.-]*/)*[\w-][\w.-]*\."
+    r"(?:py|pyi|ts|tsx|js|jsx|mjs|cjs|go|rs|java|kt|cs|c|cc|cpp|h|hpp|rb))[:(]\d+"
+)
+# A Python compile error / traceback frame: File "./app.py", line 3.
+_PY_FRAME = re.compile(r'File "(?:\./)?([^"/][^"]*\.pyi?)", line \d+')
+_VENDORED = ("node_modules", "site-packages", ".venv", "venv", "vendor")
+
+
+def pip_manifest_failure(gates: Iterable[GateResult]) -> bool:
+    """True iff a FAILed gate says pip could not install the project's declared
+    dependencies (a bad pin or a package that does not exist)."""
+    return any(g.status is GateStatus.FAIL and any(_PIP_MANIFEST_FAIL in f for f in g.findings)
+               for g in gates)
+
+
+def failure_files(gates: Iterable[GateResult]) -> tuple[str, ...]:
+    """The files a failure names, in order: the pip manifests for a manifest FAIL,
+    then the sources a build gate's compile/type errors point at. Test-gate
+    tracebacks are left out: they name the test file, rarely where the fix goes."""
+    gates = list(gates)
+    out: list[str] = list(PIP_MANIFESTS) if pip_manifest_failure(gates) else []
+    for g in gates:
+        if g.name != "build" or g.status not in (GateStatus.FAIL, GateStatus.ERROR):
+            continue
+        for line in g.findings:
+            for m in (*_SOURCE_LINE.finditer(line), *_PY_FRAME.finditer(line)):
+                path = m.group(1)
+                parts = path.split("/")
+                if ".." in parts or any(p in _VENDORED for p in parts) or path in out:
+                    continue
+                out.append(path)
+    return tuple(out)
+
+
 # Run-varying bits of a raw finding line (object addresses, timings): two runs of
 # the same failure must compare equal.
 _VOLATILE = re.compile(r"0x[0-9a-fA-F]+|\b\d+(?:\.\d+)?m?s\b")
@@ -2039,7 +2079,7 @@ class WaveBuildCheck:
             # This check routes ESCALATE, not FIX: the rebuild is the ticket's extra
             # attempt and must leave the wave's fixer passes unspent.
             out.pop("budget", None)
-        elif decision == FIX and (
+        elif decision == FIX and not self.capped_off_target({**state, "gates": post["gates"]}) and (
                 no_fix_progress(post, config, boundary=boundary)
                 or _unchanged_tree_recheck(state, out, config, boundary=boundary)):
             [build] = [g for g in out["gates"] if g.name == "build"]
@@ -2071,10 +2111,39 @@ class WaveBuildCheck:
         decision = self._route(state, config, boundary)
         if decision != ADVANCE and pending_escalations(state, self.resolve):
             return ESCALATE
-        if decision == FIX and (no_fix_progress(state, config, boundary=boundary)
-                                or self._stopped_on_current_tree(state, config)):
+        if decision == FIX and not self.capped_off_target(state) and (
+                no_fix_progress(state, config, boundary=boundary)
+                or self._stopped_on_current_tree(state, config)):
             return HALT
         return decision
+
+    def capped_off_target(self, state: FactoryState) -> bool:
+        """True iff the newest fix pass ran out of turns without editing any file
+        the current failure names (:func:`failure_files`): it never reached the
+        fix, so an unchanged failure is not "no progress" and the next pass runs,
+        told to edit those files first. Still bounded: that pass spends a fix
+        attempt like any other."""
+        fixes = [a for a in _of_kind(state, FEATURE_DIFF_KIND)
+                 if a.task_id and a.task_id.startswith("fix-")]
+        if not fixes:
+            return False
+        prev = max(fixes, key=lambda a: a.seq)
+        # proxy_agent's note for a session that hit packet.turn_budget.
+        if not any(t.run_against == f"task/{prev.task_id}"
+                   and t.explanation.startswith("turn budget exhausted")
+                   for t in state.get("gate_triage") or ()):
+            return False
+        from foundry.agents.implementation.junior_engineer import _failed_gates
+
+        named = set(failure_files(_failed_gates(state)))
+        if not named:
+            return False
+        try:
+            ops = _diff_ops(_resolve_typed(prev, self.resolve, FeatureDiff, FEATURE_DIFF_KIND),
+                            self.resolve_blob)
+        except MaterializationError:
+            return False
+        return not named & {*ops.writes, *ops.deletes, *ops.patches}
 
     @staticmethod
     def _stopped_on_current_tree(state: FactoryState, config: RunnableConfig) -> bool:

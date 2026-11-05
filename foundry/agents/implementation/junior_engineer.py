@@ -65,7 +65,8 @@ _FIXER_PERSONA = (
 )
 _FIXER_RULES = (
     "The failures below are the tail of each gate's output: re-run the failing "
-    "command yourself (see `verify`) to read the whole output before you edit.",
+    "command yourself (see `verify`) to read the whole output before you edit, unless "
+    "the summary says it cannot run here.",
     "After each fix re-run the commands in `verify` (install only once its package "
     "manifest exists; then build and typecheck; then the tests) and keep going until "
     "they all pass or you run out of turns. If one cannot run here (missing tool, no "
@@ -79,6 +80,11 @@ _FIXER_RULES = (
 
 # Claude Code needs several turns to read, write and verify; 8 left contract stubs empty.
 _DEFAULT_TURN_BUDGET = 25
+# A local model spends ~10 of a fix pass's turns re-reading files before its first edit.
+_LOCAL_FIX_TURN_BUDGET = 40
+# The files a failure names are inlined in the fix packet, so they cost no read turns.
+_INLINE_FILES = 3
+_INLINE_CHARS = 8_000
 _DEFAULT_COST_BUDGET_MICROUSD = 1_000_000  # integer micro-USD, never floats
 
 
@@ -168,9 +174,12 @@ def _fix_summary(
     resolve_blob: BlobResolver,
     *,
     attempt: int,
+    tree: Mapping[str, str | None] | None = None,
 ) -> tuple[str, ...]:
     """The head of a fixer pass's input: the failing gates and the tests/scenarios
-    they name, then what the previous pass of this fix loop touched and reported.
+    they name, the files to edit first (with their content from ``tree``, the
+    integrated tree), then what the previous pass of this fix loop touched and
+    reported.
     Fresh attempts from a summary of earlier rollouts beat one ever-growing repair
     context (arXiv 2602.18998, 2604.16529). Read off state; no model call."""
     from foundry.graph.gate_wiring import (
@@ -180,15 +189,26 @@ def _fix_summary(
         _of_kind,
         _resolve_typed,
         failing_ids,
+        pip_manifest_failure,
     )
 
     failed = _failed_gates(state)
     ids = [i for g in failed for i in failing_ids(g.findings)]
+    named = _named_files(failed, tree)
     out = [
         "[fix summary]",
         "failed gates: " + (", ".join(g.name for g in failed) or "none recorded"),
         "failing tests/scenarios: " + (", ".join(ids) or "none named; see the gate output"),
     ]
+    if named:
+        out.append("Edit these files first: " + ", ".join(named)
+                   + " (the failure names them)")
+    if pip_manifest_failure(failed):
+        out.append("pip could not install a dependency the manifest declares. The install "
+                   "cannot be re-run in this sandbox (no network), so do not try: edit the "
+                   "manifest line the gate output names (a package that does not exist on "
+                   "PyPI, e.g. a standard-library module, or a version that was never "
+                   "released) and remove or correct it.")
     # attempt counts the failing checks of this fix loop: from 2 on, the newest fix
     # diff is this loop's previous pass, not an earlier wave's.
     fixes = [a for a in _of_kind(state, FEATURE_DIFF_KIND)
@@ -199,15 +219,47 @@ def _fix_summary(
             ops = _diff_ops(_resolve_typed(prev, resolve, FeatureDiff, FEATURE_DIFF_KIND),
                             resolve_blob)
             files = touched_files(ops)
+            touched: set[str] | None = {*ops.writes, *ops.deletes, *ops.patches}
         except MaterializationError:
-            files = "an unreadable diff"
+            files, touched = "an unreadable diff", None
         out.append(f"previous fix pass ({prev.task_id}) touched {files} and left the "
                    "gates above failing: try a different approach")
+        if named and touched is not None and not touched & set(named):
+            out.append(f"previous fix pass never edited {', '.join(named)}, the file(s) the "
+                       "failure names: edit them before anything else")
         out.extend(f"previous fix pass reported: {t.explanation[:300]}"
                    for t in sorted(state.get("gate_triage") or (), key=lambda t: t.seq)
                    if t.run_against == f"task/{prev.task_id}")
+    out.extend(_inline(named, tree))
     out.append("gate output (tail):")
     return tuple(out)
+
+
+def _named_files(
+    failed: Sequence[GateResult], tree: Mapping[str, str | None] | None
+) -> tuple[str, ...]:
+    """The files the failure names, kept to those in ``tree`` when one is given
+    (both pip manifests are candidates; a project usually has one)."""
+    from foundry.graph.gate_wiring import failure_files
+
+    files = failure_files(failed)
+    if tree is None:
+        return files
+    return tuple(f for f in files if tree.get(f) is not None)
+
+
+def _inline(named: Sequence[str], tree: Mapping[str, str | None] | None) -> list[str]:
+    """The current content of the first few named files, within a size cap; a file
+    that does not fit is left for the agent to read."""
+    out: list[str] = []
+    room = _INLINE_CHARS
+    for rel in named[:_INLINE_FILES]:
+        content = (tree or {}).get(rel)
+        if content is None or len(content) > room:
+            continue
+        room -= len(content)
+        out.append(f"current content of {rel}:\n{content}")
+    return out
 
 
 def touched_files(ops: _DiffOps) -> str:
@@ -502,6 +554,11 @@ def make_fixer_node(
         )
 
         attempt = _fix_attempts(state, config)
+        budget = turn_budget
+        # The fixer's packet carries no tier, so it runs on the default level.
+        is_local = getattr(rt.adapter, "is_local", None)
+        if callable(is_local) and is_local(None):
+            budget = max(turn_budget, _LOCAL_FIX_TURN_BUDGET)
         try:
             with tempfile.TemporaryDirectory(prefix="foundry-fix-") as tmp:
                 materialize_workdir(state, Path(tmp), resolve=resolve, resolve_blob=resolve_blob)
@@ -539,7 +596,7 @@ def make_fixer_node(
         from foundry.agents.implementation.tickets import group_failures_by_ticket, read_tickets
 
         failures = (
-            *_fix_summary(state, resolve, resolve_blob, attempt=attempt),
+            *_fix_summary(state, resolve, resolve_blob, attempt=attempt, tree=overlay),
             *group_failures_by_ticket(_prior_failures(state), read_tickets(state, resolve)),
         )
         if duplicates:
@@ -576,7 +633,7 @@ def make_fixer_node(
             config,
             source_dir=source_dir,
             snapshot_store=snapshot_store,
-            turn_budget=turn_budget,
+            turn_budget=budget,
             cost_budget_microusd=cost_budget_microusd,
             prior_failures=failures,
             persona=persona,

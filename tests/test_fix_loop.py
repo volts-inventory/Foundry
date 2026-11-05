@@ -10,17 +10,21 @@ from langchain_core.runnables import RunnableConfig
 
 from foundry.agents.implementation.junior_engineer import _fix_summary
 from foundry.agents.implementation.tickets import pending_wave
+from foundry.execution.adapter_contract import AdapterResult, TaskPacket
+from foundry.execution.sandbox import Sandbox
 from foundry.gates.test import failure_findings
 from foundry.graph.gate_wiring import (
     BUILD_BOUNDARY,
     BUILD_TEST_BOUNDARY,
     NO_FIX_PROGRESS_TRIAGE,
+    PIP_MANIFESTS,
     _unchanged_tree_recheck,
     failing_ids,
+    failure_files,
     no_fix_progress,
 )
 from foundry.schemas.base import BudgetLedger
-from foundry.schemas.gates import GateResult, GateStatus, VerdictClass
+from foundry.schemas.gates import GateResult, GateStatus, GateTriage, VerdictClass
 from foundry.state.factory_state import FactoryState
 from foundry.state.seq import Seq
 from tests.test_ticket_scheduler import _Recorder, _ticket, _wave_run
@@ -168,3 +172,81 @@ def test_the_failing_test_summary_survives_the_findings_cap() -> None:
     assert len(findings) == 50
     assert findings[0] == "E   assert 0 == 1"
     assert failing_ids(findings) == tuple(f"tests/test_app.py::test_{i}" for i in range(5))
+
+
+_PIP = ("pip install command exited 1 (the project's declared dependencies cannot be "
+        "installed — FAIL: fix requirements.txt / pyproject.toml); last 2 output line(s):",
+        "ERROR: Could not find a version that satisfies the requirement sqlite3==2.6.0",
+        "ERROR: No matching distribution found for sqlite3==2.6.0")
+
+
+def test_failure_files_names_the_manifest_and_the_erroring_sources() -> None:
+    assert failure_files([_gate("build", "t1", 1, _RED, *_PIP)]) == PIP_MANIFESTS
+    build = _gate("build", "t1", 1, _RED, "app/models.py:12: error: bad type",
+                  "./main.go:3:2: undefined: x", "src/a.ts(4,5): error TS2322",
+                  '  File "./app.py", line 1', ".venv/lib/x.py:9: note",
+                  "/usr/lib/python3/y.py:2: oops", "../out.py:1: no")
+    assert failure_files([build]) == ("app/models.py", "main.go", "src/a.ts", "app.py")
+    # A test traceback names the test file, not where the fix goes.
+    assert failure_files([_gate("test", "t1", 1, _RED, "tests/test_a.py:3: AssertionError")]) == ()
+
+
+def test_a_pip_manifest_failure_leads_with_the_manifest_inlined() -> None:
+    state = _state(_gate("build", "t1", 1, _RED, *_PIP))
+    tree = {"requirements.txt": "Flask==3.0.0\nsqlite3==2.6.0\n", "app.py": "x = 1\n"}
+    summary = _fix_summary(state, lambda a: None, lambda u: b"", attempt=1, tree=tree)
+    assert summary[3] == "Edit these files first: requirements.txt (the failure names them)"
+    assert "cannot be re-run in this sandbox" in summary[4]
+    assert "current content of requirements.txt:\nFlask==3.0.0\nsqlite3==2.6.0\n" in summary
+    assert summary[-1] == "gate output (tail):"
+
+
+def test_inlined_files_are_capped() -> None:
+    lines = [f"m{i}.py:1: error: e" for i in range(5)]
+    state = _state(_gate("build", "t1", 1, _RED, *lines))
+    tree: dict[str, str | None] = {f"m{i}.py": f"# {i}\n" for i in range(5)}
+    tree["m0.py"] = "x" * 9_000  # over the cap: left for the agent to read
+    summary = _fix_summary(state, lambda a: None, lambda u: b"", attempt=1, tree=tree)
+    inlined = [line.split(":")[0] for line in summary if line.startswith("current content")]
+    assert inlined == ["current content of m1.py", "current content of m2.py"]
+
+
+class _CappedFixer(_Recorder):
+    """A fixer session that runs out of turns without editing app.py."""
+
+    def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
+        result = super().run(packet, sandbox)
+        tid = str(packet.task["id"])
+        if not tid.startswith("fix-"):
+            return result
+        note = GateTriage(name="adapter-report", run_against=f"task/{tid}",
+                          explanation="turn budget exhausted before 'done' — partial work",
+                          produced_by="recorder", seq=Seq("run", 0, 0, "recorder", 0))
+        return result.model_copy(update={"triage": (note,)})
+
+
+def test_a_capped_pass_that_missed_the_failing_file_does_not_halt(tmp_path: Path) -> None:
+    rec = _CappedFixer(writes={"T-001": {"app.py": "def broken(:\n"}})
+    out, ran, _ = _wave_run(tmp_path, rec, max_fix_attempts=4)
+    # Every pass is allowed, but the wave's fix budget (3 passes) still bounds it.
+    assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "fixer", "wave_gate",
+                   "fixer", "wave_gate"]
+    assert not any(t.name == NO_FIX_PROGRESS_TRIAGE for t in out["gate_triage"])
+    assert ("previous fix pass never edited app.py, the file(s) the failure names: edit "
+            "them before anything else") in rec.packets["fix-2"].prior_failures
+
+
+class _LocalRecorder(_Recorder):
+    def is_local(self, tier: str | None) -> bool:
+        return True
+
+
+def test_a_local_fixer_gets_a_larger_turn_budget(tmp_path: Path) -> None:
+    rec = _LocalRecorder(writes={"T-001": {"app.py": "def broken(:\n"}})
+    _wave_run(tmp_path, rec)
+    assert rec.packets["T-001"].turn_budget == 25
+    assert rec.packets["fix-1"].turn_budget == 40
+    plain = _Recorder(writes={"T-001": {"app.py": "def broken(:\n"}})
+    (tmp_path / "cloud").mkdir()
+    _wave_run(tmp_path / "cloud", plain)
+    assert plain.packets["fix-1"].turn_budget == 25

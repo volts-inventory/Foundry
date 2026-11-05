@@ -222,7 +222,9 @@ _TICKET_RULES = (
     "security_abuse=true. ALWAYS author one scenario requiring a pinned dependency "
     "manifest for the stack at the repo root (requirements.txt / uv.lock / "
     "package-lock.json / go.sum / Cargo.lock; pin dev/test deps if there are no "
-    "runtime deps), on the ticket that writes that manifest.\n"
+    "runtime deps), on the ticket that writes that manifest; it checks the manifest "
+    "itself (present, every entry pinned), never that installing succeeds: the gates "
+    "run offline (checked).\n"
     "CRITERIA REVIEW: then review your own scenarios against the request. Under "
     "criteria_review list only REAL, in-scope gaps you could not close: missing / "
     "under-specified scenarios, and applicable security/abuse cases no scenario "
@@ -292,13 +294,21 @@ SOP = (
     "Cucumber runner and writes its report (Cucumber Messages NDJSON; godog and "
     "cucumber-rs: their Cucumber JSON) to the file named by $"
     + BDD_REPORT_ENV + " (Python may leave bdd empty to use the built-in pytest-bdd "
-    "harness); run (optional: boots the real app headless, exits 0 on success). "
+    "harness); run (optional: boots the real app headless, exits 0 on success; for "
+    "a web server it is a smoke script, e.g. `node smoke.js` / `python3 smoke.py`, "
+    "that starts the app on port 0, makes one request, stops it and exits 0 — never "
+    "the bare server entry such as `node app.js`, `npm start`, `flask run` or "
+    "`uvicorn ...`, which never exits; checked). "
     "contracts_file is the source file the code-kind contracts are written to (e.g. "
     "src/contracts.ts, contracts.py); harness_files are the package manifest and "
-    "build/runner config (e.g. package.json, tsconfig.json, cucumber.json). Two "
-    f"tickets are added for you: '{CONTRACTS_TICKET_ID}' writes contracts_file first "
-    f"and '{HARNESS_TICKET_ID}' wires the Cucumber runner into harness_files; every "
-    "ticket you write depends on them, and none may list contracts_file in files. "
+    "build/runner config (e.g. package.json, tsconfig.json, cucumber.json); "
+    "cucumber-js step files go under features/step_definitions/. The ids "
+    f"'{CONTRACTS_TICKET_ID}' and '{HARNESS_TICKET_ID}' are reserved: never plan a "
+    f"ticket with either. '{CONTRACTS_TICKET_ID}' is added for you and writes "
+    "contracts_file first; only when stack.bdd is set, "
+    f"'{HARNESS_TICKET_ID}' is added too and wires the Cucumber runner into "
+    "harness_files. Every ticket you write depends on them, and none may list "
+    "contracts_file in files. "
     "Default contracts_file per language: "
     + ", ".join(f"{lang} {path}" for lang, path in _DEFAULT_CONTRACTS_FILE.items())
     + ". The code-kind contract signatures are compiled together as that file at plan "
@@ -1564,6 +1574,10 @@ def _stack_decision(
                         f"downloads no dependencies; it runs `{install}` so the offline "
                         "steps have them.")
         stack = stack.model_copy(update={"install": install})
+    if (bdd := _bdd_quoting(stack.bdd)) != stack.bdd:
+        concerns.append(f"The bdd command `{stack.bdd}` single-quotes ${BDD_REPORT_ENV}, "
+                        f"which stops its expansion; it runs `{bdd}`.")
+        stack = stack.model_copy(update={"bdd": bdd})
     if language != "python" and not stack.bdd:
         concerns.append(
             f"The {language} stack has no bdd command: its scenarios are not executed."
@@ -1613,7 +1627,9 @@ def _python_deps_rule(stack: StackDecision, where: str) -> str:
         f"package the project's code and tests import: the stack's runtime "
         f"framework{framework} and libraries, and the test packages. The per-wave "
         "checks install exactly what is declared there before running anything, so "
-        "an undeclared import fails every later check with ModuleNotFoundError."
+        "an undeclared import fails every later check with ModuleNotFoundError. "
+        "Never list a standard-library module (sqlite3, json, os, ...): pip cannot "
+        "install it."
     )
 
 
@@ -1847,22 +1863,27 @@ def _own_scenario_bindings(
     """On a pytest-bdd stack, give a feature ticket that carries scenarios but has no
     test ticket after it (the demo shape) a step module of its own to bind them from.
     Without one its packet says a paired test ticket binds them, nobody does, and the
-    Test gate fails every scenario as not executed."""
+    Test gate fails every scenario as not executed. A test ticket carrying scenarios
+    but no test module (e.g. the plan's own ``bdd-harness``, renamed) gets one too:
+    the feature tickets count it as their binder, so without one nobody binds."""
     if stack is not None and (stack.language != "python" or stack.bdd):
         return list(tickets), []
     bound = {c for t in tickets if t.specialty is Specialty.TEST for c in t.scenario_ids}
     out: list[Ticket] = []
     concerns: list[str] = []
     for t in tickets:
-        # A file-less ticket is an acceptance-only one: a file would make it build work.
-        if (t.specialty is Specialty.TEST or not t.files or set(t.scenario_ids) <= bound
-                or any(_is_python_test(f) for f in t.files)):
+        test = t.specialty is Specialty.TEST
+        # A file-less feature ticket is an acceptance-only one: a file would make it
+        # build work.
+        if (not t.scenario_ids or any(_is_python_test(f) for f in t.files)
+                or (not test and (not t.files or set(t.scenario_ids) <= bound))):
             out.append(t)
             continue
         path = f"tests/test_{re.sub(r'[^a-z0-9]+', '_', t.id.lower()).strip('_')}.py"
         out.append(t.model_copy(update={"files": (*t.files, path)}))
         concerns.append(f"Ticket {t.id}: added {path} to bind its own scenarios "
-                        "(no test ticket depends on it).")
+                        + ("(a test ticket with no test module)." if test
+                           else "(no test ticket depends on it)."))
     return out, concerns
 
 
@@ -2330,6 +2351,96 @@ def _coverage_findings(
     return tuple(out)
 
 
+_INSTALL_WORD = re.compile(r"\binstall(s|ed|ing|ation)?\b", re.I)
+_DEP_WORD = re.compile(
+    r"\b(dependenc\w*|packages?|requirements?|lockfile|pip|npm|yarn|pnpm|uv|poetry|cargo)\b",
+    re.I,
+)
+
+
+def _offline_scenario_findings(criteria: Sequence[AcceptanceCriterion]) -> tuple[str, ...]:
+    """A scenario whose When/Then asserts that installing dependencies works can
+    never pass: every gate after install runs offline."""
+    return tuple(
+        f"Scenario {c.id} asserts that installing dependencies succeeds, but the gates "
+        "run offline: check the manifest itself (it exists, every entry is pinned) "
+        "instead."
+        for c in criteria
+        if any(_INSTALL_WORD.search(s) and _DEP_WORD.search(s) for s in (*c.when, *c.then))
+    )
+
+
+# Web frameworks whose app entry serves until killed.
+_WEB_FRAMEWORK = re.compile(
+    r"\b(express|fastify|koa|hapi|nest(js)?|next(\.js)?|hono|flask|fastapi|django|"
+    r"starlette|aiohttp|sanic|bottle|tornado|quart|litestar)\b", re.I,
+)
+# Commands that always start a server.
+_SERVER_COMMAND = re.compile(
+    r"^((python3?\s+-m\s+)?(flask\s+run|uvicorn|gunicorn|hypercorn|fastapi\s+(run|dev))\b"
+    r"|python3?\s+manage\.py\s+runserver\b)"
+)
+# A bare app entry: an interpreter on a server-named file, or the package's start.
+_APP_ENTRY = re.compile(
+    r"^((node|nodejs|bun|deno\s+run|npx\s+(tsx|ts-node)|tsx|ts-node|python3?)\s+"
+    r"(\S+/)?(app|server|index|main|wsgi|asgi)\.(js|mjs|cjs|ts|py)"
+    r"|npm\s+(start|run\s+(start|dev|serve))|yarn\s+(start|dev)|pnpm\s+(start|dev))$"
+)
+
+
+def _run_findings(stack: StackDecision) -> tuple[str, ...]:
+    """A web stack whose run command is the bare server entry: the smoke gate waits
+    for it to exit, and a server never does."""
+    run = " ".join(stack.run.split())
+    if not (_SERVER_COMMAND.match(run)
+            or (_APP_ENTRY.match(run) and _WEB_FRAMEWORK.search(stack.framework))):
+        return ()
+    return (
+        f"stack.run `{stack.run}` starts the server, which never exits, so the smoke "
+        "check hangs: make run a smoke script (e.g. `node smoke.js`, `python3 smoke.py`, "
+        "in the entrypoint ticket's files) that starts the app on port 0, makes one "
+        "request, stops it and exits 0.",
+    )
+
+
+_BDD_REPORT_SINGLE_QUOTED = re.compile(r"'([^'\"]*\$\{?" + BDD_REPORT_ENV + r"\}?[^'\"]*)'")
+_CUCUMBER_JS = re.compile(r"\bcucumber-js\b")
+_TS_LOADER = re.compile(r"--(import|require|require-module|loader)[\s=]+(tsx|ts-node)\b")
+
+
+def _bdd_quoting(bdd: str) -> str:
+    """Single quotes keep the shell from expanding $FOUNDRY_BDD_REPORT: the runner
+    then writes to a file literally named so and the gate finds no report."""
+    return _BDD_REPORT_SINGLE_QUOTED.sub(r'"\1"', bdd)
+
+
+def _bdd_findings(stack: StackDecision) -> tuple[str, ...]:
+    """cucumber-js bdd commands the gate cannot read a report from."""
+    if not _CUCUMBER_JS.search(stack.bdd):
+        return ()
+    out: list[str] = []
+    if re.search(r"(--format|-f)[\s=]+[\"']?json:", stack.bdd):
+        out.append(
+            f"stack.bdd `{stack.bdd}` writes the legacy `json:` report; the gate reads "
+            f'Cucumber Messages: use `--format "message:${BDD_REPORT_ENV}"`.'
+        )
+    if re.search(r"\.ts\b", stack.bdd) and not _TS_LOADER.search(stack.bdd):
+        out.append(
+            f"stack.bdd `{stack.bdd}` loads TypeScript step files without a loader: add "
+            "`--import tsx` (tsx as a devDependency) or `--require-module "
+            "ts-node/register`."
+        )
+    return tuple(out)
+
+
+def _stack_command_findings(stack: StackDecision | None) -> tuple[str, ...]:
+    """Plan-time checks of a stack the planner chose this pass (a pinned one cannot
+    be re-chosen, so flagging it would never close)."""
+    if stack is None or stack.profile:
+        return ()
+    return (*_run_findings(stack), *_bdd_findings(stack))
+
+
 # ---- repair, then check: what the Spec gate would reject, fixed in the node ------
 
 
@@ -2352,6 +2463,7 @@ class _Frame:
     tickets_seq: Seq
     criteria_seq: Seq
     base: BaseView | None = None  # a change build's base tree
+    stack_findings: tuple[str, ...] = ()  # of a stack chosen this pass
 
 
 @dataclass(frozen=True)
@@ -2410,7 +2522,7 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
     concerns += [*_unused_contracts(tickets, criteria), *frame.compiled.concerns, *over]
     coverage = (*stack_findings, *_coverage_findings(
         tickets, criteria, frame.brief, run=frame.run, change=base is not None
-    ))
+    ), *_offline_scenario_findings(criteria), *frame.stack_findings)
     return _Fit(tickets, criteria, concerns, contract, coverage, tuple(over))
 
 
@@ -2461,6 +2573,27 @@ def _build_constraints(raw: Any, seq: Seq) -> list[PinnedConstraint]:
         )
         for i, item in enumerate(_objs(raw))
     ]
+
+
+_SQLITE_MEMORY_CONSTRAINT = {
+    "id": "PC-python-sqlite-memory",
+    "text": (
+        "Python SQLite: every sqlite3.connect(':memory:') opens a NEW, empty database, "
+        "so an in-memory store must open ONE connection and reuse it for its whole "
+        "life (schema, writes and reads), never connect per call."
+    ),
+    "scope": "global",
+    "source": NODE_ID,
+}
+
+
+def _stack_constraints(
+    stack: StackDecision | None, payload: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Pinned constraints the planner adds itself for a known stack footgun."""
+    if stack is not None and stack.language == "python" and "sqlite" in str(payload).lower():
+        return [_SQLITE_MEMORY_CONSTRAINT]
+    return []
 
 
 def ticket_owner(ticket: Ticket) -> str:
@@ -2971,7 +3104,8 @@ def _revision_note(what: str, before: int, after: int, kept: bool) -> str:
 def _ticket_frame(frame: _Frame) -> _Frame:
     """``frame`` checking only what a ticket delta can change: the contracts, their
     compile and the run command are held as they are."""
-    return replace(frame, interfaces=(), language="", compiled=CompileResult(), run=None)
+    return replace(frame, interfaces=(), language="", compiled=CompileResult(), run=None,
+                   stack_findings=())
 
 
 def _patchable(
@@ -3389,6 +3523,7 @@ def make_planner_node(
             tickets_seq=seqs["tickets"],
             criteria_seq=seqs["criteria"],
             base=base,
+            stack_findings=_stack_command_findings(decided),
         )
         return _Draft(
             payload=payload, brief=brief, interfaces=interfaces, epics=epics,
@@ -3558,7 +3693,11 @@ def make_planner_node(
             seq=design_seq,
         )
         constraints_seq = seq("pinned_constraints")
-        constraints = _build_constraints(payload.get("pinned_constraints"), constraints_seq)
+        constraints = _build_constraints(
+            [*_objs(payload.get("pinned_constraints")),
+             *_stack_constraints(draft.frame.stack, payload)],
+            constraints_seq,
+        )
         retired = _retired_constraints(state, constraints, constraints_seq)
 
         epics_seq = seq("artifact:epics")

@@ -183,6 +183,12 @@ async fn main() {
 }
 """
 
+# cucumber-js config: `import` loads CommonJS and ESM step files alike.
+_CUCUMBER_JSON = (
+    '{{"default": {{"paths": ["features/**/*.feature"], '
+    '"import": ["features/step_definitions/**/*.{steps}"], "forceExit": true}}}}'
+)
+
 # What each language's standard Cucumber runner needs to write the report the gate
 # reads (``foundry.gates.cucumber``), keyed by StackDecision.language. Runner paths
 # match the planner's default harness files.
@@ -214,10 +220,13 @@ BDD_RUNNERS: dict[str, str] = {
         "source to reject catch-all matchers)."
     ),
     "javascript": (
-        "bdd = `npx cucumber-js --format \"message:$FOUNDRY_BDD_REPORT\"` (with "
-        "@cucumber/cucumber as a devDependency and cucumber.json / --import naming the "
-        "step files); `--format json:` is the legacy JSON report and is rejected. "
-        "cucumber.json's default profile MUST set \"forceExit\": true: cucumber-js "
+        "bdd = `npx cucumber-js --format \"message:$FOUNDRY_BDD_REPORT\"` exactly (double "
+        "quotes: single quotes stop $FOUNDRY_BDD_REPORT expanding), with "
+        "@cucumber/cucumber as a devDependency; `--format json:` is the legacy JSON "
+        "report and is rejected. cucumber.json MUST be exactly:\n"
+        + _CUCUMBER_JSON.format(steps="js") +
+        "\nStep files go under features/step_definitions/. \"forceExit\": true is "
+        "required: cucumber-js "
         "otherwise waits for every server, socket or timer a step left open, and the "
         "gate kills the hung run; still stop what the steps start in an AfterAll hook. In "
         "a Cucumber Expression a literal `/`, `(`, `)`, `{` or `}` MUST be escaped "
@@ -240,8 +249,12 @@ BDD_RUNNERS: dict[str, str] = {
         "linked into that project."
     ),
 }
-BDD_RUNNERS["typescript"] = BDD_RUNNERS["javascript"] + (
-    " TypeScript step files need a loader: `--import tsx` (tsx as a devDependency)."
+BDD_RUNNERS["typescript"] = (
+    BDD_RUNNERS["javascript"]
+    .replace("bdd = `npx cucumber-js", "bdd = `NODE_OPTIONS=\"--import tsx\" npx cucumber-js")
+    .replace(_CUCUMBER_JSON.format(steps="js"), _CUCUMBER_JSON.format(steps="ts"))
+    + " TypeScript step files need the tsx loader (tsx as a devDependency): node's "
+    "`--import tsx` registers it before cucumber-js imports any step file."
 )
 
 

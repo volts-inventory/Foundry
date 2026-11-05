@@ -61,6 +61,16 @@ def test_cucumber_tickets_run_their_scenarios_through_the_bdd_command() -> None:
                            stack) == {}
 
 
+def test_a_test_ticket_is_never_told_a_paired_test_ticket_binds_its_scenarios() -> None:
+    python = StackDecision(language="python", test="pytest")
+    scenarios = {"features/T1.feature": ["AC-1"]}
+    feature = " ".join(scenario_rules(("app.py",), scenarios, python))
+    assert "A paired test ticket binds" in feature
+    test = " ".join(scenario_rules(("conftest.py",), scenarios, python, test=True))
+    assert "paired test ticket" not in test
+    assert 'scenarios("../features/T1.feature")' in test
+
+
 def test_a_ticket_without_scenarios_gets_no_scenario_rules() -> None:
     assert scenario_rules(("app.py",), {}, None) == []
 

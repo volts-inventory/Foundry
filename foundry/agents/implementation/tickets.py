@@ -790,10 +790,13 @@ def scenario_rules(
     files: Sequence[str],
     scenarios: Mapping[str, Sequence[str]],
     stack: StackDecision | None,
+    *,
+    test: bool = False,
 ) -> list[str]:
     """The packet rules that tie a ticket to its gate-owned scenarios: the exact
     feature file(s) and scenario names, how to bind them on this stack, and never
-    to author a feature file. ``scenarios`` maps feature path -> scenario names."""
+    to author a feature file. ``scenarios`` maps feature path -> scenario names.
+    A ``test`` ticket is the binder itself, so it is never told another one binds."""
     if not scenarios:
         return []
     listing = "; ".join(f"{path} (Scenario: {', '.join(ids)})" for path, ids in scenarios.items())
@@ -826,7 +829,7 @@ def scenario_rules(
                 "which fails the gate. The `scenarios` command in `verify` checks the "
                 "binding and runs them: every scenario above must pass."
             )
-        elif files:
+        elif files and not test:
             rules.append(
                 "A paired test ticket binds these scenarios with pytest-bdd; the code "
                 "you write must make them pass."
@@ -1094,7 +1097,8 @@ def _ticket_packet(
         "You can read the whole project in the working directory: it holds everything "
         "the earlier tickets built.",
         f"Never edit {FEATURE_DIR}/*.feature files: they are the executable spec.",
-        *scenario_rules(ticket.files, scenarios, stack),
+        *scenario_rules(ticket.files, scenarios, stack,
+                        test=ticket.specialty is Specialty.TEST),
         *verify_rules(stack, ticket_id=task.id, contract_files=contract_files),
     ]
     if ticket.files:

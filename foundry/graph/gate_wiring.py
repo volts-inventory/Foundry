@@ -1949,7 +1949,8 @@ class WaveBuildCheck:
     In hybrid mode a check that fails twice in a row asks for the newest wave's
     local tickets (those the failures name, else all of them) to re-run once on
     the cloud level (``escalate-request`` triage; :data:`ESCALATE` routes back to
-    the engineering node), before any further fixer pass or a halt. A ticket whose
+    the engineering node), before any further fixer pass or a halt. An
+    escalation spends none of the wave's fix attempts. A ticket whose
     kept local session stopped early (turn cap, repeat/read-thrash) is asked for on
     the FIRST failure that names it (or, alone in its wave, on any first failure).
 
@@ -2000,6 +2001,7 @@ class WaveBuildCheck:
         }
         decision = self._route(post, config, boundary)
         streak = failing_streak(post, boundary=boundary) if decision != ADVANCE else 0
+        picked: tuple[str, ...] = ()
         if streak >= 1:
             from foundry.agents.implementation.tickets import escalation_pick, stopped_tickets
             from foundry.execution.adapters.tiered import (
@@ -2033,7 +2035,11 @@ class WaveBuildCheck:
                         seq=self.rt.seq(config, _BUILD_NODE,
                                         f"{ESCALATE_FALLBACK_TRIAGE}:{tid}"),
                     ))
-        if decision == FIX and (
+        if picked:
+            # This check routes ESCALATE, not FIX: the rebuild is the ticket's extra
+            # attempt and must leave the wave's fixer passes unspent.
+            out.pop("budget", None)
+        elif decision == FIX and (
                 no_fix_progress(post, config, boundary=boundary)
                 or _unchanged_tree_recheck(state, out, config, boundary=boundary)):
             [build] = [g for g in out["gates"] if g.name == "build"]

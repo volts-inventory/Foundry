@@ -265,8 +265,11 @@ def test_a_wave_check_escalation_happens_once(tmp_path: Path) -> None:
     out, ran, _ = _wave_run(tmp_path, _tiered(cloud, local), tickets=_two_waves())  # type: ignore[arg-type]
     assert [t for t, _ in cloud.tiers].count("T-001") == 1
     assert len([t for t in out["gate_triage"] if t.name == "escalate-request"]) == 1
-    # The rebuild spent the wave's last fix attempt: the third failing check halts.
-    assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "engineering", "wave_gate"]
+    # The rebuild is an extra attempt, not a fix pass: the wave keeps its second fixer
+    # pass, and only the check after that halts.
+    assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "engineering", "wave_gate",
+                   "fixer", "wave_gate"]
+    assert [t for t, _ in cloud.tiers] == ["fix-1", "T-001", "fix-2"]
     assert "T-002" not in [t for t, _ in local.tiers]
 
 

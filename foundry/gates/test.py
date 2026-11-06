@@ -38,6 +38,9 @@ import re
 import secrets
 import sys
 import tempfile
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from difflib import get_close_matches
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -531,17 +534,139 @@ def failure_findings(stdout: str, *, limit: int = 50) -> tuple[str, ...]:
 _FIXTURE_NOT_FOUND = re.compile(r"fixture '([A-Za-z_]\w*)' not found")
 
 
-def step_argument_hints(stdout: str) -> tuple[str, ...]:
+_STEP_KINDS = ("given", "when", "then")
+_FEATURE_STEP = re.compile(r"^\s*(?:Given|When|Then|And|But|\*)\s+(.+?)\s*$")
+
+
+@dataclass(frozen=True)
+class _StepDef:
+    module: str
+    kind: str
+    text: str
+    literal: bool  # matches only its own text (no parse fields, not a regex)
+    target: str | None
+    line: int
+
+
+def _step_def(module: str, d: ast.expr) -> _StepDef | None:
+    """The pytest-bdd step a decorator registers, when its text is a string literal
+    (plain or ``parsers.parse``)."""
+    if not isinstance(d, ast.Call) or not d.args:
+        return None
+    f = d.func
+    kind = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
+    if kind not in _STEP_KINDS:
+        return None
+    arg, literal = d.args[0], True
+    if isinstance(arg, ast.Call) and arg.args:
+        p = arg.func
+        name = p.id if isinstance(p, ast.Name) else p.attr if isinstance(p, ast.Attribute) else ""
+        literal = name == "parse"
+        arg = arg.args[0]
+    if not isinstance(arg, ast.Constant) or not isinstance(arg.value, str):
+        return None
+    target = next((k.value.value for k in d.keywords if k.arg == "target_fixture"
+                   and isinstance(k.value, ast.Constant) and isinstance(k.value.value, str)),
+                  None)
+    return _StepDef(module, kind, arg.value, literal and "{" not in arg.value, target,
+                    d.lineno)
+
+
+def _step_defs(root: Path, modules: Iterable[str]) -> list[_StepDef]:
+    out: list[_StepDef] = []
+    for rel in modules:
+        try:
+            tree = ast.parse((root / rel).read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                out.extend(s for d in node.decorator_list if (s := _step_def(rel, d)))
+    return sorted(out, key=lambda s: (s.module, s.line))
+
+
+def _feature_steps(root: Path, features: Iterable[str]) -> set[str] | None:
+    """Every step line's text in ``features``; ``None`` when one cannot be read or
+    holds an outline placeholder (its steps' text is only known per example)."""
+    out: set[str] = set()
+    for rel in features:
+        try:
+            lines = (root / rel).read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError):
+            return None
+        for line in lines:
+            m = _FEATURE_STEP.match(line)
+            if m is None:
+                continue
+            if re.search(r"<[^<>]+>", m.group(1)):
+                return None
+            out.add(m.group(1))
+    return out
+
+
+def _unset_target_note(name: str, defs: list[_StepDef], steps: set[str] | None,
+                       features: Sequence[str]) -> str | None:
+    """Why the step that names ``target_fixture=name`` never ran: a later definition
+    with the same text replaces it, or no feature step line reads its text."""
+    setters = [d for d in defs if d.target == name]
+    for s in setters:
+        same = [d for d in defs if (d.module, d.kind, d.text) == (s.module, s.kind, s.text)]
+        if same[-1] is not s:
+            targets = ", ".join(f"`{d.target}`" if d.target else "none" for d in same)
+            return (
+                f"step argument `{name}` is never set: `@{s.kind}(\"{s.text}\")` is defined "
+                f"{len(same)} times ({s.module}; target_fixture {targets}) and pytest-bdd "
+                "runs only the LAST definition of a step text, so the step that sets "
+                f"`{name}` never runs — scenarios that share a step line share one step "
+                "definition: define it once, with one target_fixture name, and take that "
+                "name as the parameter in every later step that needs the value"
+            )
+    if steps is None or not setters or not all(s.literal for s in setters):
+        return None
+    if any(s.text in steps for s in setters):
+        return None
+    s = setters[0]
+    close = get_close_matches(s.text, sorted(steps), n=1, cutoff=0.6)
+    shared = next((d.target for d in reversed(defs) if close and d.kind == s.kind
+                   and d.text == close[0] and d.module == s.module and d.target), None)
+    return (
+        f"step argument `{name}` is never set: only `@{s.kind}(\"{s.text}\")` in "
+        f"{s.module} sets it (target_fixture=\"{name}\"), and no step line in "
+        f"{', '.join(features)} reads \"{s.text}\", so that step definition never runs — "
+        "a step definition's text must equal the feature's step line exactly (the "
+        ".feature file is gate-owned: change the step definition, never the feature)"
+        + (f"; the nearest step line is \"{close[0]}\"" if close else "")
+        + (f", whose step definition sets `{shared}`: scenarios that share a step line "
+           f"share its one step definition, so take `{shared}` as the parameter instead"
+           if shared else "")
+    )
+
+
+def step_argument_hints(
+    stdout: str, workdir: Path | None = None, features: Iterable[str] = ()
+) -> tuple[str, ...]:
     """One line per fixture a pytest-bdd run could not find: almost always a step
-    function parameter that no step text, ``target_fixture`` or fixture provides."""
+    function parameter that no step text, ``target_fixture`` or fixture provides.
+    With the ``workdir`` and the bound ``features``, a parameter some step's
+    ``target_fixture`` names is explained by why that step never ran."""
+    names = dict.fromkeys(_FIXTURE_NOT_FOUND.findall(stdout))
+    feats = sorted(features)
+    defs: list[_StepDef] = []
+    steps: set[str] | None = None
+    if names and workdir is not None and feats:
+        root = Path(workdir)
+        defs = _step_defs(root, binding_modules(root, set(feats)))
+        steps = _feature_steps(root, feats)
     return tuple(
-        f"step argument `{name}` is not provided (fixture '{name}' not found): "
-        "pytest-bdd fills a step function's parameter only from the step text via "
-        f"`parsers.parse(\"... {{{name}}} ...\")`, from `target_fixture=\"{name}\"` on "
-        f"an earlier step (`@given(\"...\", target_fixture=\"{name}\")` whose function "
-        f"returns the value), or from a pytest fixture named `{name}`; a step's plain "
-        "`return` passes nothing on"
-        for name in dict.fromkeys(_FIXTURE_NOT_FOUND.findall(stdout))
+        _unset_target_note(name, defs, steps, feats) or (
+            f"step argument `{name}` is not provided (fixture '{name}' not found): "
+            "pytest-bdd fills a step function's parameter only from the step text via "
+            f"`parsers.parse(\"... {{{name}}} ...\")`, from `target_fixture=\"{name}\"` on "
+            f"an earlier step (`@given(\"...\", target_fixture=\"{name}\")` whose function "
+            f"returns the value), or from a pytest fixture named `{name}`; a step's plain "
+            "`return` passes nothing on"
+        )
+        for name in names
     )
 
 
@@ -779,7 +904,9 @@ class TestGate:
             from .pydeps import undeclared_import_hints
 
             findings = (*undeclared_import_hints(out + err, workdir),
-                        *(step_argument_hints(out) if trusted and not self.bdd_cmd else ()),
+                        *(step_argument_hints(out, workdir, {r.split("::", 1)[0]
+                                                             for r in trusted})
+                          if trusted and not self.bdd_cmd else ()),
                         *failure_findings(out))
             why = None if self.stack_harness else _PYTEST_EXIT_WHY.get(rc)
             if why is not None and rc == _NO_TESTS_COLLECTED and trusted:

@@ -1807,6 +1807,9 @@ _SOURCE_LINE = re.compile(
 # A Python compile error / traceback frame: File "./app.py", line 3.
 _PY_FRAME = re.compile(r'File "(?:\./)?([^"/][^"]*\.pyi?)", line \d+')
 _VENDORED = ("node_modules", "site-packages", ".venv", "venv", "vendor")
+# pytest-bdd's errors for a step its test module cannot run: a step argument nothing
+# provides, a step line no definition matches.
+_STEP_BINDING_ERROR = re.compile(r"fixture '\w+' not found|StepDefinitionNotFoundError")
 
 
 def pip_manifest_failure(gates: Iterable[GateResult]) -> bool:
@@ -1818,12 +1821,22 @@ def pip_manifest_failure(gates: Iterable[GateResult]) -> bool:
 
 def failure_files(gates: Iterable[GateResult]) -> tuple[str, ...]:
     """The files a failure names, in order: the pip manifests for a manifest FAIL,
-    then the sources a build gate's compile/type errors point at. Test-gate
-    tracebacks are left out: they name the test file, rarely where the fix goes."""
+    then the sources a build gate's compile/type errors point at, then the test
+    modules of a test gate's step-binding errors. Other test-gate tracebacks are
+    left out: they name the test file, rarely where the fix goes; a step a test
+    module cannot bind is fixed in that module."""
     gates = list(gates)
     out: list[str] = list(PIP_MANIFESTS) if pip_manifest_failure(gates) else []
     for g in gates:
-        if g.name != "build" or g.status not in (GateStatus.FAIL, GateStatus.ERROR):
+        if g.status not in (GateStatus.FAIL, GateStatus.ERROR):
+            continue
+        if g.name == "test":
+            if any(_STEP_BINDING_ERROR.search(f) for f in g.findings):
+                out.extend(dict.fromkeys(
+                    p for p in (i.split("::", 1)[0] for i in failing_ids(g.findings))
+                    if p.endswith(".py") and p not in out))
+            continue
+        if g.name != "build":
             continue
         for line in g.findings:
             for m in (*_SOURCE_LINE.finditer(line), *_PY_FRAME.finditer(line)):

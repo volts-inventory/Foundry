@@ -229,9 +229,14 @@ class _Loop:
 def _contained(worktree: Path, rel: str) -> Path:
     """Fail-closed containment for model-named paths (same posture as the
     integration boundary, D-R1-03)."""
+    if not rel:
+        # A local model sometimes drops "path" from a full-file write: say so, not
+        # "escapes the worktree", so the next turn resends it with the path.
+        raise ValueError('no "path" given — nothing done; repeat the action with "path" '
+                         "set to the worktree-relative file")
     pure = PurePosixPath(rel)
     root = worktree.resolve()
-    if not rel or pure.is_absolute() or ".." in pure.parts:
+    if pure.is_absolute() or ".." in pure.parts:
         raise ValueError(f"path {rel!r} escapes the worktree")
     target = (root / pure).resolve()
     if not target.is_relative_to(root):  # not a string prefix: /wt2 is not under /wt
@@ -527,7 +532,7 @@ class ProxyAgentAdapter:
                 status = "exit 0"
             if len(out) > _OBS_CAP:
                 status += f" (output truncated; last {_OBS_CAP} chars shown)"
-            obs = f"{status}\n{tail}"
+            obs = f"{status}\n{tail}" + _step_hints(out, worktree)
             if (report is not None and _BDD_CMD.search(cmd)
                     and (not report.is_file() or report.stat().st_size == 0)):
                 obs += (f"\nNOTE: this run wrote no report to ${_BDD_REPORT_ENV}: the gate "
@@ -535,6 +540,23 @@ class ProxyAgentAdapter:
                         f"report to ${_BDD_REPORT_ENV}.")
             return obs
         return f"ERROR: unknown action {action!r}"
+
+
+def _step_hints(out: str, worktree: Path) -> str:
+    """The Test gate's explanation of each step argument a pytest-bdd run in the
+    session could not find, so a session that runs the scenarios itself reads the
+    same why the gate would report (a local fixer once spent its whole budget on
+    one such error, rewriting the same step definitions)."""
+    if "not found" not in out:
+        return ""
+    from foundry.gates.test import step_argument_hints
+    from foundry.schemas.implementation import FEATURE_DIR
+
+    root = worktree.resolve()
+    features = [p.relative_to(root).as_posix()
+                for p in sorted((root / FEATURE_DIR).rglob("*.feature"))]
+    hints = step_argument_hints(out, root, features)
+    return "".join(f"\nNOTE: {h}" for h in hints)
 
 
 def _opening(packet: TaskPacket, *, native: bool, listing: str = "") -> list[dict[str, Any]]:

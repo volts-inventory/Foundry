@@ -290,6 +290,42 @@ def test_search_finds_match_and_rejects_escape(tmp_path: Path) -> None:
     assert escaped.startswith("OBSERVATION:\nERROR:") and "escapes the worktree" in escaped
 
 
+def test_a_write_without_a_path_says_the_path_is_missing(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    seen: list[list[dict[str, Any]]] = []
+    adapter = ProxyAgentAdapter(recording(
+        [{"action": "write_file", "content": "x = 1\n"}, {"action": "done"}], seen))
+    with Sandbox(src) as sb:
+        adapter.run(make_packet(sb.worktree), sb)
+    (obs,) = observations(seen[-1])
+    assert obs.startswith('OBSERVATION:\nERROR: no "path" given — nothing done')
+    assert "escapes" not in obs
+
+
+def test_a_session_run_that_misses_a_step_argument_gets_the_gates_why(tmp_path: Path) -> None:
+    # A local fixer ran the scenarios itself 15 times and read only pytest's
+    # "fixture not found", never the gate's explanation of it.
+    src = tmp_path / "src"
+    (src / "features").mkdir(parents=True)
+    (src / "tests").mkdir()
+    (src / "features" / "T1.feature").write_text(
+        "Feature: T1\n  Scenario: A\n    Given a note\n    When it is read\n")
+    (src / "tests" / "test_t1.py").write_text(
+        'scenarios("../features/T1.feature")\n\n'
+        '@given("a note", target_fixture="note_a")\ndef _a():\n    return 1\n\n'
+        '@given("a note", target_fixture="note_b")\ndef _b():\n    return 2\n')
+    seen: list[list[dict[str, Any]]] = []
+    adapter = ProxyAgentAdapter(recording(
+        [{"action": "run", "cmd": "echo \"E  fixture 'note_a' not found\""},
+         {"action": "run", "cmd": "echo fine"}, {"action": "done"}], seen))
+    with Sandbox(src) as sb:
+        adapter.run(make_packet(sb.worktree), sb)
+    hit, plain = observations(seen[-1])
+    assert '\nNOTE: step argument `note_a` is never set: `@given("a note")` is defined 2 ' in hit
+    assert "NOTE:" not in plain
+
+
 def test_search_skips_env_dirs_big_files_and_long_lines(tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()

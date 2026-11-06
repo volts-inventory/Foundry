@@ -236,6 +236,42 @@ def test_a_step_argument_no_step_provides_gets_the_pytest_bdd_fix(tmp_path: Path
     assert 'target_fixture="items"' in hint and "pytest fixture named `items`" in hint
 
 
+def test_a_step_text_defined_twice_is_named_as_the_unset_argument(tmp_path: Path) -> None:
+    # A local fixer gave each scenario its own `@given` of one shared step line, each
+    # with its own target_fixture: pytest-bdd ran only the last, and two fix passes
+    # read "add target_fixture" while every definition already had one.
+    steps = _STEPS.replace("{expected}", "n").replace(
+        "def _empty():\n    return []\n",
+        'def _empty():\n    return []\n\n\n@given("an empty list", target_fixture="basket")\n'
+        "def _empty_basket():\n    return []\n",
+    )
+    gate = TestGate()
+    obs = gate.execute(_project(tmp_path, steps))
+    assert gate.decide(obs) is GateStatus.FAIL
+    hint = next(f for f in obs.findings if f.startswith("step argument `items`"))
+    assert '`@given("an empty list")` is defined 2 times (tests/test_t1.py; ' in hint
+    assert "target_fixture `items`, `basket`" in hint
+    assert "runs only the LAST definition" in hint and "define it once" in hint
+
+
+def test_a_target_fixture_on_a_step_no_feature_line_reads_is_named(tmp_path: Path) -> None:
+    # The second fix pass then renamed the step texts apart: no feature line read them.
+    steps = _STEPS.replace("{expected}", "n").replace(
+        '@given("an empty list", target_fixture="items")',
+        '@given("an empty list", target_fixture="basket")\ndef _basket():\n    return []\n\n\n'
+        '@given("an empty list for AC-1", target_fixture="items")',
+    )
+    gate = TestGate()
+    obs = gate.execute(_project(tmp_path, steps))
+    assert gate.decide(obs) is GateStatus.FAIL
+    hint = next(f for f in obs.findings if f.startswith("step argument `items`"))
+    assert 'only `@given("an empty list for AC-1")` in tests/test_t1.py sets it' in hint
+    assert 'no step line in features/T1.feature reads "an empty list for AC-1"' in hint
+    assert hint.endswith('the nearest step line is "an empty list", whose step definition '
+                         "sets `basket`: scenarios that share a step line share its one step "
+                         "definition, so take `basket` as the parameter instead")
+
+
 def test_gate_fails_when_scenarios_are_never_bound(tmp_path: Path) -> None:
     gate = TestGate()
     obs = gate.execute(_project(tmp_path, None))  # plain test passes; feature unbound

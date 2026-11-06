@@ -250,6 +250,23 @@ def test_failure_files_names_the_manifest_and_the_erroring_sources() -> None:
     assert failure_files([_gate("test", "t1", 1, _RED, "tests/test_a.py:3: AssertionError")]) == ()
 
 
+def test_a_step_binding_error_names_the_step_module_to_edit_first() -> None:
+    # pytest-bdd's error names the generated test, not a file:line: two local fix
+    # passes got no "Edit these files first" for the step module they had to fix.
+    test = _gate("test", "t1", 1, _RED,
+                 "BDD criterion S-4: scenario features/T3.feature::S-4 failed",
+                 "E       fixture 'note_for_delete' not found",
+                 "FAILED tests/test_t3.py::test_s4", "FAILED tests/test_t3.py::test_s5")
+    assert failure_files([test]) == ("tests/test_t3.py",)
+    missing = _gate("test", "t1", 1, _RED, "E   pytest_bdd.exceptions.StepDefinitionNotFoundError:"
+                    ' Step definition is not found: Given "x"', "FAILED tests/test_t1.py::test_a")
+    assert failure_files([missing]) == ("tests/test_t1.py",)
+    tree = {"tests/test_t3.py": "from pytest_bdd import given\n"}
+    summary = _fix_summary(_state(test), lambda a: None, lambda u: b"", attempt=1, tree=tree)
+    assert "Edit these files first: tests/test_t3.py (the failure names them)" in summary
+    assert "current content of tests/test_t3.py:\nfrom pytest_bdd import given\n" in summary
+
+
 def test_a_pip_manifest_failure_leads_with_the_manifest_inlined() -> None:
     state = _state(_gate("build", "t1", 1, _RED, *_PIP))
     tree = {"requirements.txt": "Flask==3.0.0\nsqlite3==2.6.0\n", "app.py": "x = 1\n"}

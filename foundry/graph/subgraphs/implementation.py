@@ -27,6 +27,7 @@ from langgraph.graph import END, START, StateGraph
 
 from foundry.agents.implementation import make_fixer_node, ready_tasks
 from foundry.agents.implementation.tickets import (
+    built_task_ids,
     cap_stopped,
     has_tickets,
     make_engineering_node,
@@ -169,7 +170,12 @@ def build_implementation_subgraph(
         # A spent token cap exits so the supervisor commits this wave, then stops.
         if cap_stopped(state) or not pending_wave(state, resolve):
             return END
-        return gate_id if check is not None else eng_id
+        # Nothing built yet (every ticket so far failed): the check would fail on the
+        # bare scaffold and send a fixer with nothing to repair ahead of the retry.
+        # Bounded: each failed pass spends an attempt until the ticket is skipped.
+        if check is None or not built_task_ids(state):
+            return eng_id
+        return gate_id
 
     g.add_conditional_edges(eng_id, _after_wave,
                             {eng_id: eng_id, END: END,

@@ -843,3 +843,49 @@ def test_the_empty_bdd_report_note_skips_pytest_bdd_commands() -> None:
     assert not _BDD_CMD.search("pip install pytest-bdd")
     assert not _BDD_CMD.search("pytest -k bdd")
     assert _BDD_CMD.search("npx cucumber-js") and _BDD_CMD.search("go test ./bdd/...")
+
+
+def test_a_write_outside_the_tickets_files_is_refused_in_the_loop(tmp_path: Path) -> None:
+    # The local notes run: the contracts ticket wrote contract.py for contracts.py, saw
+    # "wrote", and spent its turns on a file the scope trim then discarded.
+    src = tmp_path / "src"
+    src.mkdir()
+    seen: list[str] = []
+    actions = iter([
+        {"action": "write_file", "path": "contract.py", "content": "X = 1\n"},
+        {"action": "delete_file", "path": "features/a.feature"},
+        {"action": "write_file", "path": "./contracts.py", "content": "X = 1\n"},
+        {"action": "write_file", "path": "lib/db.py", "content": "Y = 2\n"},
+        {"action": "done", "summary": "ok"},
+    ])
+
+    def _complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
+        seen.append(str(messages[-1]["content"]))
+        act = next(actions)
+        return json.dumps(act), act
+
+    packet = make_packet(tmp_path).model_copy(update={"task": {
+        "id": "t-1", "title": "t-1", "branch": "task/t-1", "criterion_ids": [],
+        "files": ["contracts.py", "lib/"],
+    }})
+    with Sandbox(src) as sb:
+        result = ProxyAgentAdapter(_complete).run(packet, sb)
+        body = json.loads(sb.get_blob(result.diff_uri))
+    assert body["files"] == {"contracts.py": "X = 1\n", "lib/db.py": "Y = 2\n"}
+    assert seen[1].startswith("OBSERVATION:\nERROR: not written — contract.py is outside")
+    assert "Write only: contracts.py, lib/." in seen[1]
+    assert "ERROR: not written — features/a.feature" in seen[2]
+    assert "wrote ./contracts.py" in seen[3]
+
+
+def test_a_packet_without_files_writes_anywhere(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    adapter = ProxyAgentAdapter(scripted([
+        {"action": "write_file", "path": "anything.py", "content": "Z = 3\n"},
+        {"action": "done", "summary": "ok"},
+    ]))
+    with Sandbox(src) as sb:
+        result = adapter.run(make_packet(sb.worktree), sb)
+        body = json.loads(sb.get_blob(result.diff_uri))
+    assert body["files"] == {"anything.py": "Z = 3\n"}

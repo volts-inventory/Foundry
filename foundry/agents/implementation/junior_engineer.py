@@ -504,12 +504,12 @@ def _fix_focus(state: FactoryState, resolve: ArtifactResolver) -> tuple[str, ...
     """The built tickets' files: what the fixer is repairing. Its writes elsewhere
     are kept but noted. Empty = no focus (a built ticket declared no scope)."""
     from foundry.agents.implementation.tickets import (
-        _built_task_ids,
+        built_task_ids,
         read_tickets,
         task_id_for_ticket,
     )
 
-    built = _built_task_ids(state)
+    built = built_task_ids(state)
     files: list[str] = []
     for t in read_tickets(state, resolve):
         if task_id_for_ticket(t.id) not in built:

@@ -1429,9 +1429,9 @@ def wave_scenarios(state: FactoryState, resolve: ArtifactResolver) -> frozenset[
     carrier (the owning ticket and each ticket listing it in ``scenario_ids``, i.e.
     its paired test ticket) is built. Anything still waiting on a ticket is left to
     a later wave or the final gate."""
-    from foundry.agents.implementation.tickets import _built_task_ids, read_tickets
+    from foundry.agents.implementation.tickets import built_task_ids, read_tickets
 
-    built = _built_task_ids(state)
+    built = built_task_ids(state)
     carriers: dict[str, set[str]] = {}
     for t in read_tickets(state, resolve):
         for cid in t.scenario_ids:

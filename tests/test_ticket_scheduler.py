@@ -1140,3 +1140,19 @@ def test_a_test_ticket_packet_names_its_feature_binding_and_verify_command(
     assert "features/T-001.feature (Scenario: AC-1)" in impl
     assert "A paired test ticket binds these scenarios" in impl
     assert "scenarios" not in rec.packets["T-001"].task["verify"]
+
+
+def test_a_first_wave_that_built_nothing_retries_before_any_check(tmp_path: Path) -> None:
+    # The check would fail on the bare scaffold and send a fixer with nothing to
+    # repair ahead of the retry (the local notes run: contracts failed, fixer ran).
+    out, ran, _ = _wave_run(tmp_path, _Recorder(fail_on={"T-001": 1}))
+    assert ran == ["engineering", "engineering", "wave_gate", "engineering"]
+    assert _builds(out) == [GateStatus.PASS]
+    assert set(_diffs(out)) == {"T-001", "T-002"}
+
+
+def test_a_first_wave_that_never_builds_ends_without_a_check(tmp_path: Path) -> None:
+    out, ran, _ = _wave_run(tmp_path, _Recorder(fail_on={"T-001": 2}))
+    assert ran == ["engineering", "engineering"]
+    assert _builds(out) == []
+    assert not _diffs(out)

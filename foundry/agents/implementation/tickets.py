@@ -114,6 +114,7 @@ __all__ = [
     "DEFAULT_WORKERS",
     "NODE_ID",
     "TICKET_KIND",
+    "built_task_ids",
     "cap_stopped",
     "contract_duplicates",
     "escalated_task_ids",
@@ -228,7 +229,7 @@ def task_from_ticket(
     )
 
 
-def _built_task_ids(state: FactoryState) -> set[str]:
+def built_task_ids(state: FactoryState) -> set[str]:
     return {
         a.task_id
         for a in (state.get("artifacts") or ())
@@ -256,7 +257,7 @@ def cap_stopped(state: FactoryState) -> tuple[GateTriage, ...]:
     """The token-cap notes of tickets still unbuilt and unskipped: non-empty means the
     last pass stopped on a spent cap and the run must stop. A resumed pass that builds
     those tickets clears it."""
-    settled = _built_task_ids(state) | _skipped_task_ids(state)
+    settled = built_task_ids(state) | _skipped_task_ids(state)
     return tuple(
         note for tid, notes in sorted(_ticket_notes(state, CAP_TRIAGE).items())
         if tid not in settled for note in notes
@@ -358,7 +359,7 @@ def escalation_pick(
         return (), False
     tickets = read_tickets(state, resolve)
     settled = _escalation_settled(state)
-    latest = _latest_built_wave(tickets, _built_task_ids(state), _skipped_task_ids(state))
+    latest = _latest_built_wave(tickets, built_task_ids(state), _skipped_task_ids(state))
     wave = [t for t in latest if _is_local(rt, tier_for(t.difficulty, ticket_tiers))]
     fresh = [t for t in wave if task_id_for_ticket(t.id) not in settled]
     if stopped_only:
@@ -445,14 +446,14 @@ def _scopes_overlap(a: Sequence[str], b: Sequence[str]) -> bool:
 
 def pending_wave(state: FactoryState, resolve: ArtifactResolver) -> tuple[Ticket, ...]:
     """The wave the engineering node would build now (empty ⇒ nothing left to run)."""
-    return next_wave(read_tickets(state, resolve), _built_task_ids(state), _skipped_task_ids(state))
+    return next_wave(read_tickets(state, resolve), built_task_ids(state), _skipped_task_ids(state))
 
 
 def tickets_settled(state: FactoryState, resolve: ArtifactResolver) -> bool:
     """No ticket is left to build (the rest are built, skipped, or blocked behind a
     skipped one) and at least one was built — the fix loop may repair the
     integrated tree instead of building tickets."""
-    return bool(_built_task_ids(state)) and not pending_wave(state, resolve)
+    return bool(built_task_ids(state)) and not pending_wave(state, resolve)
 
 
 def plan_wave_count(tickets: Sequence[Ticket]) -> int:
@@ -1249,7 +1250,7 @@ def make_engineering_node(
                 new_tasks.append(tasks[tid].model_dump(mode="json"))
         writes: dict[str, Any] = {"tasks": new_tasks} if new_tasks else {}
 
-        done = _built_task_ids(state)
+        done = built_task_ids(state)
         target = escalation_target(rt)
         already = escalated_task_ids(state)
         # A wave check that failed twice asked for its local tickets to re-run on the

@@ -214,6 +214,8 @@ class _Loop:
     triage: list[str] = field(default_factory=list)
     summary: str = ""
     stopped: bool = False
+    # The ticket's write scope (packet.task["files"]); None = the packet names none.
+    files: tuple[str, ...] | None = None
 
 
 def _contained(worktree: Path, rel: str) -> Path:
@@ -273,7 +275,9 @@ class ProxyAgentAdapter:
         tool_fn = None if tier in self._json_tiers else self._tool_complete
         native = tool_fn is not None
         messages = _opening(packet, native=native)
-        st = _Loop(worktree, _tree_state(worktree))
+        files = packet.task.get("files")
+        st = _Loop(worktree, _tree_state(worktree),
+                   files=tuple(str(f) for f in files) if isinstance(files, list) else None)
         turns = 0
         while turns < max(1, packet.turn_budget) and not st.stopped:
             turns += 1  # one per model call, however many tool calls it makes
@@ -436,7 +440,7 @@ class ProxyAgentAdapter:
             if action == "read_file":
                 observation, read = _read_file(worktree, str(act.get("path", "")), act)
             else:
-                observation = self._execute(act, sandbox, worktree)
+                observation = self._execute(act, sandbox, worktree, st.files)
         except (ValueError, OSError) as exc:
             observation = f"ERROR: {exc}"
         st.tree = _tree_state(worktree)
@@ -454,8 +458,23 @@ class ProxyAgentAdapter:
             )
         return observation, read
 
-    def _execute(self, act: dict[str, Any], sandbox: Sandbox, worktree: Path) -> str:
+    def _execute(
+        self, act: dict[str, Any], sandbox: Sandbox, worktree: Path,
+        files: tuple[str, ...] | None = None,
+    ) -> str:
         action = act.get("action")
+        if action in ("write_file", "delete_file") and files is not None:
+            # The ticket's diff is cut back to its files after the session; refusing
+            # here lets the model correct a stray path (contract.py for contracts.py)
+            # instead of building on a write that will be discarded.
+            from foundry.agents.implementation.tickets import in_write_scope
+
+            raw = str(act.get("path", ""))
+            rel = PurePosixPath(raw).as_posix() if raw else raw
+            if rel and not in_write_scope(rel, files):
+                return (f"ERROR: not written — {rel} is outside this ticket's files, "
+                        "and changes there are discarded. Write only: "
+                        + (", ".join(files) or "files other than the spec inputs") + ".")
         if action == "write_file":
             target = _contained(worktree, str(act.get("path", "")))
             target.parent.mkdir(parents=True, exist_ok=True)

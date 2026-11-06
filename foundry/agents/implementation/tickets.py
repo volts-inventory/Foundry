@@ -157,6 +157,8 @@ CAP_TRIAGE = "token-cap"
 OVERLAY_TRIAGE = "wave-overlay"
 # A ticket declared a type the contracts file already defines (a parallel copy).
 CONTRACT_DUP_TRIAGE = "contract-duplicate"
+# The contracts ticket's last attempt still left out names its planned contracts declare.
+CONTRACT_DRIFT_TRIAGE = "contract-drift"
 # Attempts a ticket gets before it is skipped; bounds the loop on a ticket that
 # keeps erroring.
 MAX_TICKET_ATTEMPTS = 2
@@ -620,11 +622,14 @@ class _ScopedAdapter:
         rt: AgentRuntime,
         scopes: Mapping[str, tuple[str, ...]],
         contracts: Mapping[str, str] | None = None,
+        names: Mapping[str, tuple[Mapping[str, Sequence[str]], bool]] | None = None,
     ) -> None:
         assert rt.adapter is not None
         self._rt = rt
         self._scopes = scopes
         self._contracts = dict(contracts or {})
+        # Task id -> (planned contract -> the names it declares, fail the attempt?).
+        self._names = dict(names or {})
         self.supports_turn_snapshots = rt.adapter.supports_turn_snapshots
         # Task id -> why its session counted as empty. The work pool records a
         # worker's exception only as text, so the type is kept here.
@@ -640,6 +645,10 @@ class _ScopedAdapter:
         except EmptyTicketError as exc:
             self.empty[tid] = str(exc)
             raise
+        if tid in self._names:
+            required, strict = self._names[tid]
+            result = _check_contract_names(result, sandbox, files, tid, required,
+                                           strict=strict)
         result = _flag_contract_duplicates(result, sandbox, self._contracts, tid)
         _mirror_diff_blob(self._rt, sandbox, result)
         return result
@@ -647,6 +656,79 @@ class _ScopedAdapter:
 
 class EmptyTicketError(RuntimeError):
     """A ticket's session ended without any of its ``files`` in the tree."""
+
+
+class ContractDriftError(RuntimeError):
+    """The contracts ticket's files leave out names its planned contracts declare."""
+
+
+# A declared name in a contract signature: a capitalized type, or a function/method
+# followed by its parameter list (a Go method after its receiver). The shapes are
+# code-only so a prose signature ("the type of an order") yields no names.
+_MEMBER_DECL = re.compile(
+    r"\b(?:(?:class|interface|type|struct|enum|trait|record)\s+([A-Z]\w*)"
+    r"|(?:def|function|fn|func(?:\s*\([^)]*\))?)\s+([A-Za-z_]\w*)\s*[(<])"
+)
+
+
+def contract_members(signature: str) -> tuple[str, ...]:
+    """The types and functions/methods a planned contract signature declares."""
+    out: list[str] = []
+    for groups in _MEMBER_DECL.findall(signature):
+        name = groups[0] or groups[1]
+        if not name.startswith("__") and name not in out:
+            out.append(name)
+    return tuple(out)
+
+
+def contract_drift(
+    files: Mapping[str, str | None], required: Mapping[str, Sequence[str]]
+) -> tuple[str, ...]:
+    """One finding per planned contract (name -> its declared names) whose names
+    ``files`` (the written contract files) never mention."""
+    text = "\n".join(t for t in files.values() if t)
+    out: list[str] = []
+    for contract, names in sorted(required.items()):
+        missing = [n for n in names if not re.search(rf"\b{re.escape(n)}\b", text)]
+        if missing:
+            out.append(f"contract {contract} declares {', '.join(missing)}, which "
+                       f"{', '.join(sorted(files)) or 'the contract files'} never "
+                       "declare(s)")
+    return tuple(out)
+
+
+def _check_contract_names(
+    result: AdapterResult, sandbox: Sandbox, files: Sequence[str], task_id: str,
+    required: Mapping[str, Sequence[str]], *, strict: bool,
+) -> AdapterResult:
+    """Every later ticket is handed the planned contract text and told to match it,
+    while it imports the contract files: a name the contracts ticket renamed or
+    dropped splits the tickets between the two. ``strict`` fails the attempt (the
+    retry sees the findings); on the last attempt the files are kept and noted."""
+    worktree = Path(sandbox.worktree)
+    diff = _written_sources(result, sandbox, task_id)
+    written: dict[str, str | None] = {}
+    for f in files:
+        if f in diff:
+            written[f] = diff[f]
+            continue
+        path = worktree / f
+        try:
+            written[f] = path.read_text(encoding="utf-8") if path.is_file() else None
+        except (OSError, UnicodeDecodeError):
+            written[f] = None
+    findings = contract_drift(written, required)
+    if not findings:
+        return result
+    why = ("; ".join(findings) + ". Every other ticket codes against these exact names: "
+           "declare each one exactly as its contract gives it (never rename one)")
+    if strict:
+        raise ContractDriftError(why)
+    note = GateTriage(
+        name=CONTRACT_DRIFT_TRIAGE, run_against=f"task/{task_id}", explanation=why[:2000],
+        produced_by=NODE_ID, seq=Seq("scope", 0, 0, NODE_ID, len(result.triage)),
+    )
+    return result.model_copy(update={"triage": (*result.triage, note)})
 
 
 def _require_scope_written(
@@ -720,7 +802,10 @@ def contract_duplicates(
             out.append(
                 f"{path} redeclares contract type(s) {', '.join(dup)} already defined in "
                 f"{', '.join(contract_files)}: delete the copy and import the contract's "
-                "type instead"
+                "type instead (a class implementing a contract interface takes its own "
+                "name and subclasses or implements the interface, e.g. "
+                "`class SqlStore(Store)`, so the type checker holds it to the contract's "
+                "methods)"
             )
     return tuple(out)
 
@@ -1349,8 +1434,17 @@ def make_engineering_node(
             bases[str(etask.packet.task["id"])] = sandbox.snapshot()
             return sandbox
 
+        names: dict[str, tuple[Mapping[str, Sequence[str]], bool]] = {}
+        for t in wave:
+            if t.id != CONTRACTS_TICKET_ID or not t.files:
+                continue
+            required = {n: m for n in t.implements if (c := contracts.get(n)) is not None
+                        and (m := contract_members(c.signature))}
+            if required:
+                tid = task_id_for_ticket(t.id)
+                names[tid] = (required, len(failures.get(tid, ())) + 1 < MAX_TICKET_ATTEMPTS)
         scoped = _ScopedAdapter(rt, {task_id_for_ticket(t.id): t.files for t in wave},
-                                built_contracts)
+                                built_contracts, names)
         adapter_name = _adapter_name(rt)
         submitted: dict[str, str] = {}
         packets: dict[str, TaskPacket] = {}

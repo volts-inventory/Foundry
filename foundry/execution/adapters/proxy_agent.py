@@ -179,6 +179,12 @@ _SEARCH_SKIP_DIRS = frozenset(
 _TREE_SKIP_DIRS = frozenset(
     {".git", "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox"}
 )
+# The opening lists the worktree's files: without it a session spends turns on
+# find/ls and on reads of files that do not exist.
+_LIST_MAX = 200
+# With this many turns left the observation says so: a session that never learns
+# its budget is cut off mid-change, before it re-runs the checks on its edits.
+_LOW_TURNS = 5
 
 
 @dataclass(frozen=True)
@@ -214,6 +220,8 @@ class _Loop:
     triage: list[str] = field(default_factory=list)
     summary: str = ""
     stopped: bool = False
+    budget: int = 0
+    left: int = 0  # turns left after the current one
     # The ticket's write scope (packet.task["files"]); None = the packet names none.
     files: tuple[str, ...] | None = None
 
@@ -274,13 +282,16 @@ class ProxyAgentAdapter:
         tier = current_packet_tier() or ""
         tool_fn = None if tier in self._json_tiers else self._tool_complete
         native = tool_fn is not None
-        messages = _opening(packet, native=native)
+        listing = _listing(before)
+        messages = _opening(packet, native=native, listing=listing)
         files = packet.task.get("files")
         st = _Loop(worktree, _tree_state(worktree),
-                   files=tuple(str(f) for f in files) if isinstance(files, list) else None)
+                   files=tuple(str(f) for f in files) if isinstance(files, list) else None,
+                   budget=max(1, packet.turn_budget))
         turns = 0
-        while turns < max(1, packet.turn_budget) and not st.stopped:
+        while turns < st.budget and not st.stopped:
             turns += 1  # one per model call, however many tool calls it makes
+            st.left = st.budget - turns
             if not native:
                 self._json_turn(messages, st, sandbox)
                 continue
@@ -293,7 +304,7 @@ class ProxyAgentAdapter:
                              f"{tier or '-'} ({exc}); using JSON actions")
                 self._json_tiers.add(tier)
                 native = False
-                messages = _opening(packet, native=False)
+                messages = _opening(packet, native=False, listing=listing)
                 st.verbatim = []
                 turns -= 1
         if not st.stopped:
@@ -342,7 +353,7 @@ class ProxyAgentAdapter:
         if out is None:
             return
         observation, read = out
-        content = f"OBSERVATION:\n{observation}"
+        content = f"OBSERVATION:\n{observation}{_countdown(st)}"
         messages.append({"role": "user", "content": content})
         st.verbatim.append(_Kept(len(messages) - 1, _summarize(act), len(content), read))
         _mask(messages, st)
@@ -390,6 +401,8 @@ class ProxyAgentAdapter:
                 st.verbatim.append(
                     _Kept(idx, _summarize(act), len(observation), read, len(results) - 1)
                 )
+        if note := _countdown(st):
+            results[-1] = {**results[-1], "content": f"{results[-1]['content']}{note}"}
         messages.append({"role": "user", "content": results})
         _mask(messages, st)
 
@@ -524,9 +537,36 @@ class ProxyAgentAdapter:
         return f"ERROR: unknown action {action!r}"
 
 
-def _opening(packet: TaskPacket, *, native: bool) -> list[dict[str, Any]]:
+def _opening(packet: TaskPacket, *, native: bool, listing: str = "") -> list[dict[str, Any]]:
     epilogue = _NATIVE_EPILOGUE if native else _EPILOGUE
+    if listing:
+        epilogue = f"{listing}\n\n{epilogue}"
     return [{"role": "user", "content": assemble_prompt(packet, epilogue=epilogue)}]
+
+
+def _listing(tree: dict[str, bytes]) -> str:
+    """The worktree's files as the session starts, capped; empty for an empty tree."""
+    skip = _SEARCH_SKIP_DIRS | _TREE_SKIP_DIRS
+    paths = [p for p in sorted(tree) if not skip & set(PurePosixPath(p).parts[:-1])]
+    if not paths:
+        return ""
+    more = f"\n... and {len(paths) - _LIST_MAX} more" if len(paths) > _LIST_MAX else ""
+    return (f"FILES IN THE WORKTREE ({len(paths)}):\n" + "\n".join(paths[:_LIST_MAX]) + more)
+
+
+def _countdown(st: _Loop) -> str:
+    """The remaining-turns note on a long session's last few turns (none after the
+    last: no model call reads it)."""
+    if st.budget <= 2 * _LOW_TURNS or not 0 < st.left <= _LOW_TURNS:
+        return ""
+    if st.left == 1:
+        return ("\nTURN BUDGET: 1 turn left. Use it to declare done: say what you changed and "
+                "list in triage what is unfinished or still failing, so the next session can "
+                "continue from it.")
+    return (f"\nTURN BUDGET: {st.left} turns left. Stop exploring: finish the edit "
+            "in progress (update every caller of anything you renamed or moved), re-run the "
+            "build/typecheck and the tests on it, then declare done, listing in triage what "
+            "is still unfinished.")
 
 
 def _mask(messages: list[dict[str, Any]], st: _Loop) -> None:

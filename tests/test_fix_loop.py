@@ -84,6 +84,63 @@ def test_an_error_or_a_fresh_budget_is_never_no_progress() -> None:
                                boundary=BUILD_TEST_BOUNDARY)
 
 
+def _fix_diff_state(*gates: GateResult, cut_off: bool) -> tuple[FactoryState, ArtifactStore]:
+    import json
+
+    from foundry.agents._common import emit_artifact
+    from foundry.schemas.implementation import FeatureDiff
+
+    store = ArtifactStore()
+    blob = store.put_blob(json.dumps({"kind": "full-file-snapshot",
+                                      "files": {"services/_db.py": "X = 1\n"}}).encode())
+    seq = Seq("run", 1, 9, "fixer", 0)
+    diff = FeatureDiff(diff_uri=blob, task_id="fix-1", branch="task/fix-1",
+                       base_tree_sha="b", seq=seq)
+    art = emit_artifact(diff, "feature_diff", "fixer", seq, store=store).model_copy(
+        update={"task_id": "fix-1"})
+    report = ("turn budget exhausted before 'done' — partial work recorded" if cut_off
+              else "moved the connection to services/_db.py")
+    note = GateTriage(name="adapter-report", run_against="task/fix-1", explanation=report,
+                      produced_by="proxy-agent", seq=Seq("run", 0, 0, "proxy-agent", 0))
+    return {**_state(*gates), "artifacts": [art], "gate_triage": [note]}, store
+
+
+_MYPY = 'tests/test_t3.py:6: error: Module "services.product" has no attribute "reset"'
+
+
+def test_a_cut_off_pass_that_broke_a_passing_gate_is_named_unfinished() -> None:
+    # The local shop run: fix-6 moved the DB helpers to services/_db.py, ran out of
+    # turns before it updated the tests importing them, and broke a passing build.
+    state, store = _fix_diff_state(
+        _gate("build", "t1", 1, _OK), _gate("test", "t1", 2, _RED, _FAIL_A),
+        _gate("build", "t2", 3, _RED, _MYPY), cut_off=True)
+    summary = _fix_summary(state, store.resolve, store.resolve_blob, attempt=2)
+    assert ("previous fix pass (fix-1) touched services/_db.py and broke the build gate(s), "
+            "which passed before it (it ran out of turns before it finished): its change is "
+            "incomplete. Finish it first — update every caller and test of what it renamed, "
+            "moved or removed — or undo it") in summary
+    assert not any("try a different approach" in line for line in summary)
+
+
+def test_a_cut_off_pass_without_a_regression_is_checked_before_a_new_approach() -> None:
+    state, store = _fix_diff_state(
+        _gate("build", "t1", 1, _OK), _gate("test", "t1", 2, _RED, _FAIL_A),
+        _gate("build", "t2", 3, _OK), _gate("test", "t2", 4, _RED, _FAIL_B), cut_off=True)
+    summary = _fix_summary(state, store.resolve, store.resolve_blob, attempt=2)
+    assert ("previous fix pass (fix-1) touched services/_db.py and ran out of turns before "
+            "it finished, leaving the gates above failing: check whether its edits are "
+            "complete before trying a different approach") in summary
+
+
+def test_a_finished_pass_that_failed_still_tries_a_different_approach() -> None:
+    state, store = _fix_diff_state(
+        _gate("build", "t1", 1, _OK), _gate("test", "t1", 2, _RED, _FAIL_A),
+        _gate("build", "t2", 3, _OK), _gate("test", "t2", 4, _RED, _FAIL_B), cut_off=False)
+    summary = _fix_summary(state, store.resolve, store.resolve_blob, attempt=2)
+    assert ("previous fix pass (fix-1) touched services/_db.py and left the gates above "
+            "failing: try a different approach") in summary
+
+
 def test_the_summary_names_the_failing_gates_and_tests() -> None:
     state = _state(_gate("build", "t1", 1, _OK), _gate("test", "t1", 2, _RED, _FAIL_A, _BDD))
     summary = _fix_summary(state, lambda a: None, lambda u: b"", attempt=1)

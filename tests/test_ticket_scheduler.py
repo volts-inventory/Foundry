@@ -1156,3 +1156,68 @@ def test_a_first_wave_that_never_builds_ends_without_a_check(tmp_path: Path) -> 
     assert ran == ["engineering", "engineering"]
     assert _builds(out) == []
     assert not _diffs(out)
+
+
+def _drift_state(store: ArtifactStore) -> tuple[list[Ticket], list[Any]]:
+    signature = ("class ProductService:\n"
+                 "    def list_products(self, search: str | None = None) -> list[Product]\n"
+                 "    def get_product(self, product_id: int) -> Product | None")
+    contract = InterfaceContract(name="ProductServiceInterface",
+                                 spec_uri=persist_prose(signature, store=store),
+                                 kind="class", signature=signature, seq=_seq(20))
+    extra = [emit_artifact(contract, "interface_contract", "planner", contract.seq,
+                           store=store)]
+    return [_ticket("contracts", 0, files=("contracts.py",),
+                    implements=("ProductServiceInterface",))], extra
+
+
+def test_a_contracts_file_that_renames_a_planned_name_is_retried_then_noted(
+    tmp_path: Path,
+) -> None:
+    # The local shop run: contracts.py declared list_all_products where the plan said
+    # list_products, the catalog ticket coded against the plan, and mypy split them.
+    store = ArtifactStore()
+    tickets, extra = _drift_state(store)
+    drifted = ("class ProductService(Protocol):\n"
+               "    def list_all_products(self) -> list[Product]: ...\n"
+               "    def get_product(self, product_id: int) -> Product | None: ...\n")
+    rec = _Recorder(writes={"contracts": {"contracts.py": drifted}})
+    out = _graph(_runtime(rec, store), store, tmp_path).compile().invoke(
+        _state(store, tickets, artifacts=extra), _config())
+    assert rec.calls == ["contracts", "contracts"]
+    first, second = rec.history
+    assert first.prior_failures == ()
+    assert any("contract ProductServiceInterface declares list_products" in f
+               for f in second.prior_failures)
+    # The last attempt is kept (later tickets need the file), with the drift noted.
+    assert set(_diffs(out)) == {"contracts"}
+    notes = {t.name: t.explanation for t in out["gate_triage"]
+             if t.run_against == "task/contracts"}
+    assert "ticket-skipped" not in notes
+    assert "list_products" in notes["contract-drift"]
+
+
+def test_a_contracts_file_with_every_planned_name_builds_first_time(tmp_path: Path) -> None:
+    store = ArtifactStore()
+    tickets, extra = _drift_state(store)
+    exact = ("class ProductService(Protocol):\n"
+             "    def list_products(self, search: str | None = None) -> list[Product]: ...\n"
+             "    def get_product(self, product_id: int) -> Product | None: ...\n")
+    rec = _Recorder(writes={"contracts": {"contracts.py": exact}})
+    out = _graph(_runtime(rec, store), store, tmp_path).compile().invoke(
+        _state(store, tickets, artifacts=extra), _config())
+    assert rec.calls == ["contracts"]
+    assert set(_diffs(out)) == {"contracts"}
+    assert not any(t.name == "contract-drift" for t in out.get("gate_triage") or ())
+
+
+def test_contract_members_reads_types_functions_and_go_methods() -> None:
+    from foundry.agents.implementation.tickets import contract_members
+
+    assert contract_members("class Store(Protocol):\n    def add(self, t: str) -> int\n"
+                            "    def __init__(self) -> None") == ("Store", "add")
+    assert contract_members("type Store interface { Add(t string) int }\n"
+                            "func (s *Store) Add(t string) int") == ("Store", "Add")
+    assert contract_members("export interface Todo { id: number }") == ("Todo",)
+    # Prose is not code: no names, so no drift finding to chase.
+    assert contract_members("a function that returns the type of an order") == ()

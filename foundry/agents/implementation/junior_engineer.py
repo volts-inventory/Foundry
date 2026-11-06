@@ -222,8 +222,25 @@ def _fix_summary(
             touched: set[str] | None = {*ops.writes, *ops.deletes, *ops.patches}
         except MaterializationError:
             files, touched = "an unreadable diff", None
-        out.append(f"previous fix pass ({prev.task_id}) touched {files} and left the "
-                   "gates above failing: try a different approach")
+        cut_off = any(t.run_against == f"task/{prev.task_id}"
+                      and t.explanation.startswith(TURN_CAP_NOTE)
+                      for t in state.get("gate_triage") or ())
+        broke = regressed_gates(state)
+        if broke:
+            # A pass cut off mid-refactor leaves callers of what it renamed or moved
+            # broken; "a different approach" would pile a second change on the first.
+            out.append(f"previous fix pass ({prev.task_id}) touched {files} and broke the "
+                       f"{', '.join(broke)} gate(s), which passed before it"
+                       + (" (it ran out of turns before it finished)" if cut_off else "")
+                       + ": its change is incomplete. Finish it first — update every caller "
+                       "and test of what it renamed, moved or removed — or undo it")
+        elif cut_off:
+            out.append(f"previous fix pass ({prev.task_id}) touched {files} and ran out of "
+                       "turns before it finished, leaving the gates above failing: check "
+                       "whether its edits are complete before trying a different approach")
+        else:
+            out.append(f"previous fix pass ({prev.task_id}) touched {files} and left the "
+                       "gates above failing: try a different approach")
         if named and touched is not None and not touched & set(named):
             out.append(f"previous fix pass never edited {', '.join(named)}, the file(s) the "
                        "failure names: edit them before anything else")
@@ -233,6 +250,25 @@ def _fix_summary(
     out.extend(_inline(named, tree))
     out.append("gate output (tail):")
     return tuple(out)
+
+
+# proxy_agent's note for a session that hit packet.turn_budget.
+TURN_CAP_NOTE = "turn budget exhausted"
+
+
+def regressed_gates(state: FactoryState) -> tuple[str, ...]:
+    """The tree gates that FAIL on the newest tree and PASSed on the tree checked
+    before it: what the change between the two broke."""
+    trees: dict[str, dict[str, GateResult]] = {}
+    for g in sorted(state.get("gates") or (), key=lambda g: g.seq):
+        if g.name in DETERMINISTIC_GATES and g.name != "spec":
+            trees.setdefault(g.run_against, {})[g.name] = g
+    order = sorted(trees.values(), key=lambda v: max(g.seq for g in v.values()))
+    if len(order) < 2:
+        return ()
+    prev, cur = order[-2:]
+    return tuple(sorted(n for n, g in cur.items() if g.status is GateStatus.FAIL
+                        and n in prev and prev[n].status is GateStatus.PASS))
 
 
 def _named_files(

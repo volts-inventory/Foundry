@@ -889,3 +889,81 @@ def test_a_packet_without_files_writes_anywhere(tmp_path: Path) -> None:
         result = adapter.run(make_packet(sb.worktree), sb)
         body = json.loads(sb.get_blob(result.diff_uri))
     assert body["files"] == {"anything.py": "Z = 3\n"}
+
+
+def test_the_opening_lists_the_worktree_files(tmp_path: Path) -> None:
+    # The local shop fixer spent turns on `find`, a regex search for files and two
+    # reads of an app.py that never existed.
+    src = tmp_path / "src"
+    (src / "services").mkdir(parents=True)
+    (src / "services" / "cart.py").write_text("X = 1\n")
+    (src / "contracts.py").write_text("Y = 2\n")
+    (src / "__pycache__").mkdir()
+    (src / "__pycache__" / "c.pyc").write_bytes(b"\0")
+    prompts: list[str] = []
+
+    def _complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
+        prompts.append(str(messages[0]["content"]))
+        return '{"action": "done", "summary": "ok"}', {"action": "done", "summary": "ok"}
+
+    with Sandbox(src) as sb:
+        ProxyAgentAdapter(_complete).run(make_packet(sb.worktree), sb)
+    assert "FILES IN THE WORKTREE (2):\ncontracts.py\nservices/cart.py\n" in prompts[0]
+    assert "c.pyc" not in prompts[0]
+
+
+def test_a_long_session_is_told_its_last_turns(tmp_path: Path) -> None:
+    # The local shop fixer rewrote four modules, ran out of turns before it re-ran
+    # mypy, and left 7 attr-defined errors in callers it never updated.
+    src = tmp_path / "src"
+    src.mkdir()
+    seen: list[str] = []
+    n = 0
+
+    def _complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
+        nonlocal n
+        n += 1
+        seen.append(str(messages[-1]["content"]))
+        act = {"action": "run", "cmd": f"echo {n}"}  # distinct: no repeat stop
+        return json.dumps(act), act
+
+    with Sandbox(src) as sb:
+        result = ProxyAgentAdapter(_complete).run(make_packet(sb.worktree, turn_budget=12), sb)
+    assert result.turns_used == 12
+    # seen[i] is the observation of turn i (turn i+1's prompt); turn 7 leaves 5.
+    assert not any("TURN BUDGET" in s for s in seen[1:7])
+    assert "TURN BUDGET: 5 turns left. Stop exploring" in seen[7]
+    assert "TURN BUDGET: 2 turns left" in seen[10]
+    assert "TURN BUDGET: 1 turn left. Use it to declare done" in seen[11]
+
+
+def test_a_short_session_gets_no_countdown(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    seen: list[str] = []
+    n = 0
+
+    def _complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
+        nonlocal n
+        n += 1
+        seen.append(str(messages[-1]["content"]))
+        act = {"action": "run", "cmd": f"echo {n}"}
+        return json.dumps(act), act
+
+    with Sandbox(src) as sb:
+        ProxyAgentAdapter(_complete).run(make_packet(sb.worktree, turn_budget=6), sb)
+    assert not any("TURN BUDGET" in s for s in seen)
+
+
+def test_native_tool_results_carry_the_countdown(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    seen: list[list[dict[str, Any]]] = []
+    turns = [[("run", {"cmd": f"echo {i}"}), ("run", {"cmd": f"echo x{i}"})] for i in range(11)]
+    adapter = ProxyAgentAdapter(no_json, tool_complete_fn=tool_turns(
+        [*turns, [("done", {"summary": "ok"})]], seen))
+    with Sandbox(src) as sb:
+        adapter.run(make_packet(sb.worktree, turn_budget=12), sb)
+    last = results_of(seen[11])
+    assert "TURN BUDGET: 1 turn left" in last[-1]["content"]
+    assert "TURN BUDGET" not in last[0]["content"]

@@ -101,6 +101,49 @@ def test_turn_budget_bounds_the_loop(tmp_path: Path) -> None:
     assert any("turn budget exhausted" in t.explanation for t in result.triage)
 
 
+def _repair_packet(worktree: Path, turn_budget: int = 6) -> TaskPacket:
+    return make_packet(worktree, turn_budget).model_copy(
+        update={"prior_failures": ("[build gate FAILED]", "app.py:1: error: bad")})
+
+
+def test_a_repair_sessions_first_done_without_an_edit_is_refused(tmp_path: Path) -> None:
+    # A local fixer named every fix in its done summary and changed no file: the
+    # empty diff halted the wave as no progress.
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "app.py").write_text("x = (\n")
+    seen: list[list[dict[str, Any]]] = []
+    adapter = ProxyAgentAdapter(recording([
+        {"action": "read_file", "path": "app.py"},
+        {"action": "done", "summary": "Let me fix these one at a time",
+         "triage": ["Need to fix app.py"]},
+        {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
+        {"action": "done", "summary": "fixed app.py"},
+    ], seen))
+    with Sandbox(src) as sb:
+        result = adapter.run(_repair_packet(sb.worktree), sb)
+        body = json.loads(sb.get_blob(result.diff_uri))
+    assert body["files"] == {"app.py": "x = 1\n"}
+    assert result.turns_used == 4
+    refusal = str(seen[2][-1]["content"])
+    assert "ERROR: not done — no file in the worktree has changed yet" in refusal
+    assert refusal.endswith("Your triage names this unfinished work:\n- Need to fix app.py")
+
+
+def test_a_repair_session_that_insists_on_done_ends(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    done = {"action": "done", "summary": "the failure is in the gate, not the code"}
+    with Sandbox(src) as sb:
+        result = ProxyAgentAdapter(scripted([done, done])).run(_repair_packet(sb.worktree), sb)
+    assert result.turns_used == 2
+    assert [t.explanation for t in result.triage] == [done["summary"]]
+    # On the last turn there is none left to edit in: done ends the session.
+    with Sandbox(src) as sb:
+        result = ProxyAgentAdapter(scripted([done])).run(_repair_packet(sb.worktree, 1), sb)
+    assert result.turns_used == 1
+
+
 def test_path_escape_is_an_observation_error_not_a_write(tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()

@@ -21,6 +21,7 @@ from foundry.agents import AgentRuntime, plan_contracts
 from foundry.agents.plan_contracts import check_contracts
 from foundry.agents.planner import (
     SOP,
+    _add_read_deps,
     _affected,
     _drop_self_consumes,
     _merge_delta,
@@ -560,6 +561,35 @@ def test_the_entrypoint_is_wired_to_every_feature_unless_that_closes_a_cycle() -
     cyclic = [_t("A", "APP"), _t("APP", entry=True)]
     out, concerns = _wire_entrypoint(cyclic)
     assert out == cyclic and concerns == []  # left for the coverage check
+
+
+def test_a_reader_is_ordered_after_the_one_ticket_writing_the_file_it_reads() -> None:
+    # A local shop run built the repositories beside the models ticket they read:
+    # one imported a ProductModel the models ticket never defined.
+    def t(tid: str, *deps: str, files: tuple[str, ...] = (),
+          reads: tuple[str, ...] = ()) -> Ticket:
+        return _t(tid, *deps).model_copy(update={"files": files, "reads": reads})
+
+    tickets = [
+        t("contracts", files=("contracts.py",)),
+        t("E1-T01", "contracts", files=("app/database.py",)),
+        t("E1-T02", "contracts", "E1-T01", files=("app/models.py",)),
+        t("E2-T01", "contracts", "E1-T01", files=("app/repo.py",),
+          reads=("app/models.py", "contracts.py", "app/repo.py", "README.md")),
+        t("E2-T02", "contracts", "E2-T01", files=("app/svc.py",), reads=("app/models.py",)),
+        t("E3-T01", "contracts", files=("a.py", "b.py"), reads=("b.py", "shared.py")),
+        t("E3-T02", files=("shared.py",)), t("E3-T03", files=("shared.py",)),
+        t("E4-T01", "E4-T02", files=("x.py",)), t("E4-T02", files=("y.py",), reads=("x.py",)),
+    ]
+    out, concerns = _add_read_deps(tickets)
+    deps = {o.id: o.depends_on for o in out}
+    assert deps["E2-T01"] == ("contracts", "E1-T01", "E1-T02")
+    assert deps["E2-T02"] == ("contracts", "E2-T01")  # already after it, through E2-T01
+    assert deps["E3-T01"] == ("contracts",)  # its own file; a file with two writers
+    assert deps["E4-T02"] == ()  # the edge would close a cycle
+    assert concerns == ["Ticket E2-T01: added a dependency on E1-T02, which writes "
+                        "app/models.py it reads."]
+    assert [o for o in out if o.id != "E2-T01"] == [o for o in tickets if o.id != "E2-T01"]
 
 
 def test_a_self_consumed_contract_is_dropped_from_consumes() -> None:

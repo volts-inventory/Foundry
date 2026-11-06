@@ -1971,6 +1971,34 @@ def _add_contract_deps(tickets: Sequence[Ticket]) -> tuple[list[Ticket], list[st
     return [out[t.id] for t in tickets], concerns
 
 
+def _add_read_deps(tickets: Sequence[Ticket]) -> tuple[list[Ticket], list[str]]:
+    """Order each ticket after the one ticket that writes a file it reads[] when the
+    plan forgot the edge: built in the same wave, the reader never sees the file and
+    codes against names it guesses (a repository importing a model class the models
+    ticket, running beside it, named differently). Skips files with several writers
+    or a generated writer (every ticket already follows the contracts ticket), and
+    an edge that would close a cycle."""
+    deps = {t.id: t.depends_on for t in tickets}
+    writers: dict[str, list[str]] = {}
+    for t in tickets:
+        for path in t.files:
+            writers.setdefault(path, []).append(t.id)
+    concerns: list[str] = []
+    for t in tickets:
+        for path in t.reads:
+            ids = writers.get(path, [])
+            if len(ids) != 1 or ids[0] == t.id or ids[0] in _GENERATED_TICKETS:
+                continue
+            dep = ids[0]
+            if dep in _ancestors(deps, t.id) or t.id in _ancestors(deps, dep):
+                continue
+            deps[t.id] = (*deps[t.id], dep)
+            concerns.append(f"Ticket {t.id}: added a dependency on {dep}, which writes "
+                            f"{path} it reads.")
+    return [t.model_copy(update={"depends_on": deps[t.id]}) if deps[t.id] != t.depends_on
+            else t for t in tickets], concerns
+
+
 def _ancestors(deps: dict[str, tuple[str, ...]], tid: str) -> set[str]:
     seen: set[str] = set()
     todo = list(deps.get(tid, ()))
@@ -2515,6 +2543,8 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
     concerns += more
     tickets, more = _own_scenario_bindings(tickets, frame.stack)
     concerns += more
+    tickets, more = _add_read_deps(tickets)
+    concerns += more
     tickets, more = _wire_entrypoint(tickets)
     concerns += more
     criteria, more = _drop_orphan_scenarios(tickets, criteria)
@@ -2596,13 +2626,30 @@ _SQLITE_MEMORY_CONSTRAINT = {
 }
 
 
+_SQLALCHEMY_TYPED_CONSTRAINT = {
+    "id": "PC-python-sqlalchemy-typed",
+    "text": (
+        "Python SQLAlchemy: declare ORM models in the SQLAlchemy 2.0 typed style — a "
+        "`class Base(DeclarativeBase)` and columns as `id: Mapped[int] = "
+        "mapped_column(primary_key=True)` — never a bare `id = Column(Integer)`: the "
+        "type checker reads a bare Column attribute as Column[int], not int, so every "
+        "caller that passes it on as a plain value fails the typecheck. Pin "
+        "SQLAlchemy>=2.0."
+    ),
+    "scope": "global",
+    "source": NODE_ID,
+}
+
+
 def _stack_constraints(
     stack: StackDecision | None, payload: dict[str, Any]
 ) -> list[dict[str, Any]]:
     """Pinned constraints the planner adds itself for a known stack footgun."""
-    if stack is not None and stack.language == "python" and "sqlite" in str(payload).lower():
-        return [_SQLITE_MEMORY_CONSTRAINT]
-    return []
+    if stack is None or stack.language != "python":
+        return []
+    text = str(payload).lower()
+    return [c for c, word in ((_SQLITE_MEMORY_CONSTRAINT, "sqlite"),
+                              (_SQLALCHEMY_TYPED_CONSTRAINT, "sqlalchemy")) if word in text]
 
 
 def ticket_owner(ticket: Ticket) -> str:

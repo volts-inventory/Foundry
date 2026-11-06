@@ -224,6 +224,10 @@ class _Loop:
     left: int = 0  # turns left after the current one
     # The ticket's write scope (packet.task["files"]); None = the packet names none.
     files: tuple[str, ...] | None = None
+    # A repair session's starting worktree (walk_worktree), for the no-change done
+    # check; None = the packet carries no failures to fix.
+    start: dict[str, bytes] | None = None
+    done_refused: bool = False
 
 
 def _contained(worktree: Path, rel: str) -> Path:
@@ -292,7 +296,8 @@ class ProxyAgentAdapter:
         files = packet.task.get("files")
         st = _Loop(worktree, _tree_state(worktree),
                    files=tuple(str(f) for f in files) if isinstance(files, list) else None,
-                   budget=max(1, packet.turn_budget))
+                   budget=max(1, packet.turn_budget),
+                   start=before if packet.prior_failures else None)
         turns = 0
         while turns < st.budget and not st.stopped:
             turns += 1  # one per model call, however many tool calls it makes
@@ -421,6 +426,8 @@ class ProxyAgentAdapter:
         if action == "done":
             raw = act.get("triage")
             items = raw if isinstance(raw, list) else [raw] if raw else []
+            if refusal := _unchanged_done(st, [str(t) for t in items if str(t).strip()]):
+                return refusal, None
             st.summary = str(act.get("summary", ""))
             st.triage = [str(t) for t in items if str(t).strip()]
             st.stopped = True
@@ -540,6 +547,26 @@ class ProxyAgentAdapter:
                         f"report to ${_BDD_REPORT_ENV}.")
             return obs
         return f"ERROR: unknown action {action!r}"
+
+
+def _unchanged_done(st: _Loop, triage: list[str]) -> str | None:
+    """The refusal of a repair session's first ``done`` while no file has changed and
+    a turn remains, else None. A local fixer once read every failing file, named each
+    fix in its done summary ("Let me fix these issues one at a time") and ended with an
+    empty diff, which halted the wave as no progress. A second ``done`` always ends
+    it: a failure the session cannot fix by editing is reported, not looped on."""
+    if st.done_refused or st.left < 1 or st.start is None:
+        return None
+    authored, deleted, _ = changed_files(st.start, walk_worktree(st.worktree))
+    if authored or deleted:
+        return None
+    st.done_refused = True
+    todo = "".join(f"\n- {t}" for t in triage[:8])
+    return ("ERROR: not done — no file in the worktree has changed yet, and done ends the "
+            "session: only file edits are kept, a summary or plan of what to change is "
+            "discarded. Make the changes now (write_file), re-run the build/typecheck and "
+            "the tests, then declare done. If the task truly needs no change, call done "
+            "again." + (f"\nYour triage names this unfinished work:{todo}" if todo else ""))
 
 
 def _step_hints(out: str, worktree: Path) -> str:

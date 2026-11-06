@@ -401,6 +401,16 @@ def test_a_python_sqlite_plan_pins_the_memory_connection_constraint() -> None:
     assert _stack_constraints(StackDecision(language="javascript"), {"x": "sqlite"}) == []
 
 
+def test_a_python_sqlalchemy_plan_pins_the_typed_model_constraint() -> None:
+    # Column(Integer) attributes typed as Column[int] failed 12 mypy checks in a run.
+    python = StackDecision(language="python")
+    pcs = _stack_constraints(python, {"design": {"body": "SQLAlchemy models over SQLite"}})
+    assert [pc["id"] for pc in pcs] == ["PC-python-sqlite-memory", "PC-python-sqlalchemy-typed"]
+    assert "Mapped[int] = mapped_column(" in pcs[1]["text"]
+    assert _stack_constraints(python, {"design": {"body": "SQLAlchemy on Postgres"}}) == [pcs[1]]
+    assert _stack_constraints(StackDecision(language="go"), {"x": "sqlalchemy"}) == []
+
+
 def test_manifest_and_app_install_scenarios_are_not_offline_findings() -> None:
     def c(cid: str, when: str, then: str) -> AcceptanceCriterion:
         return AcceptanceCriterion(id=cid, text="t", given=("x",), when=(when,), then=(then,),

@@ -126,6 +126,8 @@ _DEFAULT_EFFORT_MODEL_GLOBS: tuple[str, ...] = (
 _DEFAULT_EFFORT = "high"
 
 _DEFAULT_MAX_TOKENS = 16000
+# Leaves room for a local model whose server will not turn its reasoning off.
+_LOCAL_JUDGMENT_MAX_TOKENS = 8192
 
 Purpose = Literal["ideation", "gate", "judgment"]
 _PURPOSES = ("ideation", "gate", "judgment")
@@ -395,6 +397,39 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     raise StructuredOutputError(
         f"schema completion returned no parseable JSON object ({len(s)} chars)"
     )
+
+
+def is_transient_failure(exc: BaseException) -> bool:
+    """True when a durable run may sleep and re-invoke after ``exc``: a
+    ProxyUnavailable / pause-and-escalate, not a real build failure. An
+    unparseable structured reply is not transient: the re-invoked node sends the
+    same prompt and a deterministic (temperature 0, local) model answers the same."""
+    if isinstance(exc.__cause__, StructuredOutputError):
+        return False
+    return "ProxyUnavailable" in type(exc).__name__ or "pause-and-escalate" in str(exc)
+
+
+def _with_parse_correction(
+    request: dict[str, Any], miss: ProviderResponse, attempt: int
+) -> dict[str, Any]:
+    """``request`` with the previous unparseable reply named in its last user turn,
+    so the re-roll is a different prompt: a temperature-0 call resent unchanged
+    returns the same reply (and the call cache would replay it)."""
+    note = (
+        f"\n\n[Retry {attempt}: your previous reply ({len(miss.text)} chars, stop reason "
+        f"{miss.stop_reason!r}) was not one complete JSON object. Reply with ONLY that "
+        "JSON object. If it was cut off it ran past the output limit: be concise, with "
+        "short strings and no repeated or near-duplicate entries.]"
+    )
+    messages = [dict(m) for m in request.get("messages") or ()]
+    last = messages[-1] if messages else None
+    if last is not None and last.get("role") == "user" and isinstance(last.get("content"), str):
+        last["content"] += note
+    elif last is not None and last.get("role") == "user" and isinstance(last.get("content"), list):
+        last["content"] = [*last["content"], {"type": "text", "text": note.strip()}]
+    else:
+        messages.append({"role": "user", "content": note.strip()})
+    return {**request, "messages": messages}
 
 
 @dataclass(frozen=True, slots=True)
@@ -900,6 +935,10 @@ class ModelProviderProxy:
         request, sampling, sampling_note = self._build_request(
             requested_model, system_sop, messages, purpose, schema, tools
         )
+        if purpose == "judgment" and tier in self._local_tiers:
+            # A verdict is ~1k tokens; a local model stuck repeating findings runs to
+            # the cap at ~12 tok/s, so each such attempt would cost ~20 minutes.
+            request["max_tokens"] = min(int(request["max_tokens"]), _LOCAL_JUDGMENT_MAX_TOKENS)
 
         label = f"model call: {node_id} ({tier}, {purpose})"
         cached = self._cached(request, schema)
@@ -1201,8 +1240,6 @@ class ModelProviderProxy:
         (arch §2b/§8).
         """
         meter = self.token_meter
-        if meter is not None:
-            meter.check()
         transport = self._tier_transports.get(tier or "", self._transport)
         if "tools" in request:
             probe = getattr(transport, "tools_support", None)
@@ -1221,15 +1258,26 @@ class ModelProviderProxy:
             reason = str(exc).splitlines()[0][:200] if str(exc) else type(exc).__name__
             progress.log(f"{what} — {reason} [{n}/{budget + 1}], waiting {wait:.0f}s")
 
+        sent = request
         while True:
+            # Every attempt, not only the first: a local call can run many minutes,
+            # and its retries must not carry a run far past its caps.
+            if meter is not None:
+                meter.check()
             try:
                 with self._local_lock if local else nullcontext(), self._limiter.slot():
-                    response = transport.send(request)
+                    response = transport.send(sent)
                 if meter is not None and not local:
                     meter.charge(response.usage)
-                parsed = (
-                    _extract_json_object(response.text) if schema is not None else None
-                )
+                parsed = None
+                if schema is not None:
+                    try:
+                        parsed = _extract_json_object(response.text)
+                    except StructuredOutputError as miss:
+                        sent = _with_parse_correction(request, response, attempt + 1)
+                        raise StructuredOutputError(
+                            f"{miss} (stop reason {response.stop_reason!r})"
+                        ) from None
                 return response, parsed
             except ToolsUnsupported:
                 raise
@@ -1282,6 +1330,10 @@ class ModelProviderProxy:
                     rl_attempt += 1
                     continue
                 if attempt >= self._retry.max_retries:
+                    if isinstance(exc, StructuredOutputError):
+                        raise ProxyUnavailable(
+                            f"no parseable structured reply in {attempt + 1} attempt(s): {exc}"
+                        ) from exc
                     raise ProxyUnavailable(
                         f"provider transport failed after {attempt + 1} attempt(s); "
                         "judgment nodes must pause-and-escalate (no family fallback)"

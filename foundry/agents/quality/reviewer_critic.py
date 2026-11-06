@@ -198,7 +198,9 @@ _SOP = (
     "reproducible command with an expected result and a DIFFERENT actual result "
     "you observed. Citing a passing test or scenario does not count. Opinions on "
     "test quality (fragile asserts, missing edge cases, needless mocks) are "
-    "advisory while every check passes: record them, they do not block."
+    "advisory while every check passes: record them, they do not block. "
+    "Report at most 10 findings, most important first, each in a sentence or two; "
+    "never repeat a finding."
 )
 
 

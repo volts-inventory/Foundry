@@ -1224,7 +1224,9 @@ def _run_factory(p: Project, resume: bool = False) -> None:
         # intact, so back off and RESUME from it rather than losing an overnight
         # run. Bounded (autoresume_left) with growing backoff so a spent Max
         # window / provider outage is ridden out, not hammered.
-        transient = "ProxyUnavailable" in type(exc).__name__ or "pause-and-escalate" in str(exc)
+        from foundry.proxy.model_provider_proxy import is_transient_failure
+
+        transient = is_transient_failure(exc)
         if transient and p.autoresume_left > 0 and _has_durable_checkpoint(p.id):
             idx = 6 - p.autoresume_left
             p.autoresume_left -= 1

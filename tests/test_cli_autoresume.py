@@ -135,3 +135,37 @@ def test_a_stop_during_the_backoff_ends_the_wait_at_once(monkeypatch: Any) -> No
     with pytest.raises(BuildStopped):
         _call(resumable=True, cancel=stop)
     assert calls["n"] == 1 and waited == []
+
+
+def test_an_unparseable_reply_is_not_resumed(monkeypatch: Any) -> None:
+    """A re-invoked node resends the same prompt: a deterministic model returns the
+    same unparseable reply, so sleeping and retrying only burns the run's time."""
+    from foundry.proxy.model_provider_proxy import ProxyUnavailable as RealUnavailable
+    from foundry.proxy.model_provider_proxy import StructuredOutputError
+
+    waited = _no_sleep(monkeypatch)
+    calls = {"n": 0}
+
+    def _fake(*_a: Any, **_k: Any) -> Any:
+        calls["n"] += 1
+        raise RealUnavailable("no parseable structured reply") from StructuredOutputError("x")
+
+    monkeypatch.setattr(cli, "_invoke", _fake)
+    with pytest.raises(RealUnavailable):
+        _call(resumable=True)
+    assert calls["n"] == 1 and waited == []
+
+
+def test_a_backoff_past_the_time_cap_stops_the_run_now(monkeypatch: Any) -> None:
+    from foundry.proxy.token_meter import TimeCapExceeded, TokenMeter
+
+    waited = _no_sleep(monkeypatch)
+
+    def _fake(*_a: Any, **_k: Any) -> Any:
+        raise ProxyUnavailable("pause-and-escalate")
+
+    monkeypatch.setattr(cli, "_invoke", _fake)
+    meter = TokenMeter(None, time_cap_s=600)  # a 5 min back-off fits once, 10 min does not
+    with pytest.raises(TimeCapExceeded, match="time cap reached"):
+        _call(resumable=True, meter=meter)
+    assert waited == [300.0]

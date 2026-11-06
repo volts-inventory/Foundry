@@ -91,7 +91,12 @@ from foundry.proxy.local_transport import (
     LocalOpenAITransport,
     check_local_server,
 )
-from foundry.proxy.model_provider_proxy import DriftMode, DriftPolicy, ProviderTransport
+from foundry.proxy.model_provider_proxy import (
+    DriftMode,
+    DriftPolicy,
+    ProviderTransport,
+    is_transient_failure,
+)
 from foundry.proxy.test_doubles import MockTransport
 from foundry.proxy.token_meter import (
     BuildStopped,
@@ -753,6 +758,7 @@ def _write_draft_on_halt(
     gate_findings: dict[str, tuple[str, ...]],
     resolve: ArtifactResolver,
     resolve_blob: BlobResolver,
+    stopped: str | None = None,
 ) -> str | None:
     """Write a best-effort DRAFT on a HALTED run: the latest attempt's source tree
     plus a ``DRAFT-STATUS.md`` naming what's still failing — so a held build hands back
@@ -771,8 +777,10 @@ def _write_draft_on_halt(
         "# DRAFT — held at the gate (NOT shipped)\n\n",
         "This build did not pass every gate, so it was **not admitted/released**. The\n",
         "source below is the best attempt — fix what's failing, then re-run.\n\n",
-        "## Gate verdicts\n\n",
     ]
+    if stopped:
+        lines.append(f"The run stopped before its gates finished: {stopped}\n\n")
+    lines.append("## Gate verdicts\n\n")
     for name, status in statuses.items():
         mark = "✅" if status is GateStatus.PASS else "❌"
         lines.append(f"- {mark} **{name}**: {str(status).split('.')[-1]}\n")
@@ -789,6 +797,40 @@ def _write_draft_on_halt(
                 lines.append(f"\n### {name}\n\n```\n{body}\n```\n")
     (Path(draft_root) / "DRAFT-STATUS.md").write_text("".join(lines), encoding="utf-8")
     return draft_root
+
+
+def _latest_values(app: Any, config: RunnableConfig) -> FactoryState:
+    """The newest checkpointed state that carries artifacts: the deepest in-flight
+    stage subgraph's, since a stage holds its work until it returns."""
+    snap = app.get_state(config, subgraphs=True)
+    best = dict(snap.values or {})
+    while True:
+        inner = next((t.state for t in snap.tasks if hasattr(t.state, "values")), None)
+        if inner is None:
+            return cast("FactoryState", best)
+        snap = inner
+        if (snap.values or {}).get("artifacts"):
+            best = dict(snap.values)
+
+
+def _draft_on_stop(
+    app: Any, config: RunnableConfig, exc: BaseException, *, request: str, thread_id: str,
+    output_dir: str, resolve: ArtifactResolver, resolve_blob: BlobResolver,
+) -> None:
+    """Write the stopped run's latest tree as a DRAFT and note where on ``exc``.
+    Best-effort: it runs while ``exc`` propagates and must never replace it."""
+    try:
+        state = _latest_values(app, config)
+        if not any(a.kind == "feature_diff" for a in state.get("artifacts") or ()):
+            return
+        draft = _write_draft_on_halt(
+            state, output_dir, gate_findings=_result(request, thread_id, state).gate_findings,
+            resolve=resolve, resolve_blob=resolve_blob, stopped=str(exc).splitlines()[0][:300],
+        )
+    except Exception:
+        return
+    if draft is not None:
+        exc.add_note(f"DRAFT written to: {draft}  (held — see DRAFT-STATUS.md)")
 
 
 # ---- design-spec ingestion (task [8]) ---------------------------------------
@@ -1076,13 +1118,6 @@ def _invoke(
     return cast("FactoryState", app.invoke(seed, config))
 
 
-def _is_transient_proxy_failure(exc: BaseException) -> bool:
-    """True for a ProxyUnavailable / pause-and-escalate — the proxy already rode
-    its bounded retry + rate-limit budget and is telling judgment nodes to pause,
-    NOT a real build failure. Same predicate the Workshop server uses."""
-    return "ProxyUnavailable" in type(exc).__name__ or "pause-and-escalate" in str(exc)
-
-
 def _has_pending_run(app: Any, config: RunnableConfig) -> bool:
     """True when this thread has a checkpoint with nodes still to run."""
     try:
@@ -1136,6 +1171,7 @@ def _invoke_with_autoresume(
     progress_cb: Callable[..., None] | None,
     resumable: bool,
     cancel: threading.Event | None = None,
+    meter: TokenMeter | None = None,
 ) -> FactoryState:
     """Wrap :func:`_invoke` so a TRANSIENT provider failure does
     not kill a DURABLE run. A spent Max usage/session window (or a provider blip)
@@ -1148,7 +1184,8 @@ def _invoke_with_autoresume(
     restart. Bounded with a growing backoff (5,10,20,40,60,60 min). A NON-durable
     run has no checkpoint to resume from, so the budget is 0 and behaviour is
     byte-identical to a bare invoke. Tunable via ``FOUNDRY_CLI_AUTORESUME``
-    (default 6; 0 disables)."""
+    (default 6; 0 disables). A back-off that would end past ``meter``'s time cap
+    stops the run now instead of sleeping into it."""
     import time
 
     budget = 0
@@ -1166,9 +1203,15 @@ def _invoke_with_autoresume(
             inp = None if _has_pending_run(app, config) else seed
             return _invoke(app, inp, config, progress_cb=progress_cb)
         except Exception as exc:  # re-raised unless transient+budget
-            if used >= budget or not _is_transient_proxy_failure(exc):
+            if used >= budget or not is_transient_failure(exc):
                 raise
             wait = min(3600, 300 * (2**used))  # 5,10,20,40,60,60 min
+            cap = meter.time_cap_s if meter is not None else None
+            if meter is not None and cap is not None and meter.elapsed_s + wait >= cap:
+                raise TimeCapExceeded(
+                    f"time cap reached: a {wait // 60} min back-off after "
+                    f"{type(exc).__name__} would end past the {cap / 60:.1f} minute cap"
+                ) from exc
             used += 1
             resume_at = time.strftime("%H:%M", time.localtime(time.time() + wait))
             print(
@@ -1658,11 +1701,19 @@ def run(
                     progress_cb=drive_pc,
                     resumable=(durable is not None),
                     cancel=cancel,
+                    meter=meter,
                 )
             except ValueError as exc:
                 # main() reports a ValueError as a usage error (exit 2, no traceback);
                 # one raised inside the graph is a crash and must show where.
                 raise RunCrashed(f"the run crashed: {exc!r}") from exc
+            except Exception as exc:
+                # A capped, stopped or unavailable run still hands back its best tree.
+                if output_dir is not None:
+                    _draft_on_stop(app, config, exc, request=request, thread_id=thread_id,
+                                   output_dir=output_dir, resolve=resolve,
+                                   resolve_blob=resolve_blob)
+                raise
         finally:
             reset_gate_write_verifier(token)
             rt.python_envs.close()  # the run's gate venvs end with the run
@@ -2101,6 +2152,8 @@ def main(argv: list[str] | None = None) -> int:
             else "Add --state-dir DIR to make a capped run resumable."
         )
         print(f"stopped: {exc}. {hint}", file=sys.stderr)
+        for note in getattr(exc, "__notes__", ()):
+            print(note, file=sys.stderr)
         return 3
     print(result.summary())
     return 0 if result.passed else 1

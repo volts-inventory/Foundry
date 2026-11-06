@@ -1124,6 +1124,10 @@ def _resume_seed(app: Any, config: RunnableConfig, seed: FactoryState) -> Factor
     return seed
 
 
+class RunCrashed(RuntimeError):
+    """A ValueError from inside the graph: a bug, not a bad argument."""
+
+
 def _invoke_with_autoresume(
     app: Any,
     seed: FactoryState,
@@ -1646,14 +1650,19 @@ def run(
             start = _resume_seed(app, config, seed)
             if meter is not None and start is seed and not _has_pending_run(app, config):
                 meter.reset()  # a fresh run, not a resumed one: its spend starts at zero
-            final = _invoke_with_autoresume(
-                app,
-                start,
-                config,
-                progress_cb=drive_pc,
-                resumable=(durable is not None),
-                cancel=cancel,
-            )
+            try:
+                final = _invoke_with_autoresume(
+                    app,
+                    start,
+                    config,
+                    progress_cb=drive_pc,
+                    resumable=(durable is not None),
+                    cancel=cancel,
+                )
+            except ValueError as exc:
+                # main() reports a ValueError as a usage error (exit 2, no traceback);
+                # one raised inside the graph is a crash and must show where.
+                raise RunCrashed(f"the run crashed: {exc!r}") from exc
         finally:
             reset_gate_write_verifier(token)
             rt.python_envs.close()  # the run's gate venvs end with the run

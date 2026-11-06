@@ -646,8 +646,9 @@ def make_fixer_node(
         )
         # Integration orders diffs by Seq. A fresh diff key starts at epoch 1, tying
         # with (and possibly sorting under) the diffs it repairs, so lift its epoch
-        # past every existing diff.
-        top = max(a.seq.emission_epoch for a in _of_kind(state, FEATURE_DIFF_KIND))
+        # past every existing diff. With every ticket failed there is none yet.
+        top = max((a.seq.emission_epoch for a in _of_kind(state, FEATURE_DIFF_KIND)),
+                  default=0)
         writes["artifacts"] = [
             a.model_copy(update={"seq": a.seq._replace(emission_epoch=top + 1)})
             for a in writes["artifacts"]

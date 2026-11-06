@@ -8,8 +8,9 @@ from pathlib import Path
 
 from langchain_core.runnables import RunnableConfig
 
-from foundry.agents.implementation.junior_engineer import _fix_summary
+from foundry.agents.implementation.junior_engineer import _fix_summary, make_fixer_node
 from foundry.agents.implementation.tickets import pending_wave
+from foundry.durability.artifact_store import ArtifactStore
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
 from foundry.execution.sandbox import Sandbox
 from foundry.gates.test import failure_findings
@@ -27,7 +28,8 @@ from foundry.schemas.base import BudgetLedger
 from foundry.schemas.gates import GateResult, GateStatus, GateTriage, VerdictClass
 from foundry.state.factory_state import FactoryState
 from foundry.state.seq import Seq
-from tests.test_ticket_scheduler import _Recorder, _ticket, _wave_run
+from tests.test_ticket_scheduler import _config, _Recorder, _runtime, _ticket, _wave_run
+from tests.test_ticket_scheduler import _state as _ticket_state
 
 _CFG: RunnableConfig = {"configurable": {}}
 
@@ -250,3 +252,17 @@ def test_a_local_fixer_gets_a_larger_turn_budget(tmp_path: Path) -> None:
     (tmp_path / "cloud").mkdir()
     _wave_run(tmp_path / "cloud", plain)
     assert plain.packets["fix-1"].turn_budget == 25
+
+
+def test_a_fix_pass_with_no_ticket_diff_yet_starts_the_epochs(tmp_path: Path) -> None:
+    # Every ticket failed, so the build failed on the scaffold alone: the fixer's diff
+    # is the first one and has no epoch to lift past.
+    store = ArtifactStore()
+    rec = _Recorder(writes={"fix-1": {"app.py": "def fixed():\n    return 1\n"}})
+    fixer = make_fixer_node(_runtime(rec, store), source_dir=str(tmp_path),
+                            resolve=store.resolve, resolve_blob=store.resolve_blob)
+    state = _ticket_state(store, [_ticket("T-001", 0, files=("app.py",))])
+    state["gates"] = [_gate("build", "t1", 1, _RED, "SyntaxError in app.py")]
+    out = fixer(state, _config())
+    diffs = [a for a in out["artifacts"] if a.kind == "feature_diff"]
+    assert [(d.task_id, d.seq.emission_epoch) for d in diffs] == [("fix-1", 1)]

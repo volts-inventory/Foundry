@@ -117,6 +117,22 @@ def test_a_binding_in_conftest_is_named_as_never_collected(tmp_path: Path) -> No
     assert any("module pytest collects, tests/test_<name>.py" in f for f in obs.findings)
 
 
+def test_a_conftest_that_only_mentions_scenarios_is_not_named(tmp_path: Path) -> None:
+    # A local fixer's conftest said `scenarios(...)` in a comment; the gate read it as
+    # a binding and told it to move a call that did not exist.
+    from foundry.gates.test import conftest_binding_note
+
+    (tmp_path / "conftest.py").write_text(
+        '"""Fixtures; test modules call scenarios(...)."""\n'
+        "# Individual test modules will use scenarios(...) to bind steps.\n"
+    )
+    assert conftest_binding_note(tmp_path) is None
+    (tmp_path / "conftest.py").write_text(
+        "import pytest_bdd\n\npytest_bdd.scenarios('features/T1.feature')\n"
+    )
+    assert conftest_binding_note(tmp_path) is not None
+
+
 def test_a_test_function_named_like_the_generated_one_is_named_as_shadowing(
     tmp_path: Path,
 ) -> None:

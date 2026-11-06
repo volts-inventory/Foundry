@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING, Any
 from foundry.agents._common import emit_artifact, journal_entry
 from foundry.canonical import content_digest
 from foundry.schemas.base import Artifact, FrozenModel
-from foundry.schemas.product import AcceptanceCriterion
+from foundry.schemas.product import PRD, AcceptanceCriterion
 
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
@@ -55,6 +55,7 @@ __all__ = [
     "MissingVerdictNonceError",
     "emit_artifact",
     "journal_entry",
+    "live_criterion_ids",
     "read_criteria",
     "require_verdict_nonce",
     "server_issued_nonce",
@@ -161,6 +162,24 @@ class MissingCriteriaResolverError(RuntimeError):
     gate pass."""
 
 
+def live_criterion_ids(
+    state: FactoryState, resolve: ArtifactResolver
+) -> frozenset[str] | None:
+    """The criterion ids the newest PRD declares, or ``None`` when no PRD lists any.
+
+    Criteria are never tombstoned: a re-plan that keeps a ticket id but drops one
+    of its scenarios leaves the older record the newest under that id. Every plan
+    pass re-emits the PRD with its full criterion list, so that list is what is
+    still live."""
+    prds = [h for h in state.get("artifacts") or () if getattr(h, "kind", None) == "prd"]
+    if not prds:
+        return None
+    prd = resolve(max(prds, key=lambda h: h.seq))
+    if not isinstance(prd, PRD) or not prd.criterion_ids:
+        return None
+    return frozenset(prd.criterion_ids)
+
+
 def read_criteria(
     state: FactoryState, resolve: ArtifactResolver | None
 ) -> tuple[AcceptanceCriterion, ...]:
@@ -192,4 +211,7 @@ def read_criteria(
             body = resolve(handle)
             if isinstance(body, AcceptanceCriterion):
                 by_id[body.id] = body
+        live = live_criterion_ids(state, resolve)
+        if live is not None:
+            by_id = {cid: c for cid, c in by_id.items() if cid in live}
     return tuple(sorted(by_id.values(), key=lambda c: c.id))

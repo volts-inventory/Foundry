@@ -206,12 +206,18 @@ def _current_criteria(
     state: FactoryState, resolve: ArtifactResolver
 ) -> dict[str, AcceptanceCriterion]:
     """Newest record per criterion id, minus the scenarios of tickets a re-plan
-    dropped (a ticket whose newest record supersedes its own id): nothing builds
-    those tickets, so their scenarios must not be specified or executed."""
+    dropped (a ticket whose newest record supersedes its own id) and the ones a
+    re-plan dropped from a ticket it kept (absent from the newest PRD's list):
+    nothing builds those, so they must not be specified or executed."""
+    from foundry.agents.quality._common import live_criterion_ids
+
     current: dict[str, AcceptanceCriterion] = {}
     for a in sorted(_of_kind(state, CRITERION_KIND), key=lambda a: a.seq):
         c = _resolve_typed(a, resolve, AcceptanceCriterion, CRITERION_KIND)
         current[c.id] = c
+    live = live_criterion_ids(state, resolve)
+    if live is not None:
+        current = {cid: c for cid, c in current.items() if cid in live}
     if not any(c.ticket_id for c in current.values()):
         return current
     newest: dict[str, Ticket] = {}

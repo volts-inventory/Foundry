@@ -389,6 +389,12 @@ def _unexpanded_report_paths(workdir: Path) -> list[str]:
     )
 
 
+def _called_name(func: ast.expr) -> str | None:
+    if isinstance(func, ast.Name):
+        return func.id
+    return func.attr if isinstance(func, ast.Attribute) else None
+
+
 def conftest_binding_note(workdir: Path) -> str | None:
     """A finding naming the conftest.py files that call ``scenarios(``: pytest
     imports a conftest for fixtures but never collects its tests, so a binding
@@ -400,10 +406,12 @@ def conftest_binding_note(workdir: Path) -> str | None:
         if rel.startswith(".") or "/." in rel:
             continue
         try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
             continue
-        if re.search(r"\bscenarios\s*\(", text):
+        # A real call only: a comment or docstring naming `scenarios(...)` binds nothing.
+        if any(isinstance(n, ast.Call) and _called_name(n.func) == "scenarios"
+               for n in ast.walk(tree)):
             hits.append(rel)
     if not hits:
         return None

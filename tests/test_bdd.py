@@ -515,3 +515,39 @@ def test_a_dropped_tickets_scenarios_are_neither_specified_nor_executed(tmp_path
     assert [c["id"] for c in _criteria_list(state, resolve2)] == ["AC-1"]
     materialize_workdir(state, tmp_path, resolve=resolve2, resolve_blob=blob)
     assert sorted(p.name for p in (tmp_path / "features").iterdir()) == ["T1.feature"]
+
+
+def test_a_scenario_a_replan_dropped_from_a_kept_ticket_is_neither_specified_nor_run(
+    tmp_path: Path,
+) -> None:
+    # Local shop run: the third plan kept ticket E1-T01 but dropped its E1-AC02, whose
+    # older record stayed newest under that id. The wave check then demanded a scenario
+    # no ticket carried, and the fixer could not bind it without a later ticket's file.
+    from foundry.agents.quality._common import read_criteria
+    from foundry.graph.gate_wiring import _criteria_list, wave_scenarios
+    from foundry.schemas.implementation import Specialty, Ticket
+    from foundry.schemas.product import PRD
+
+    state, resolve, blob = _state((_ac("AC-1"), _ac("AC-2")), {"app.py": "X = 1\n"})
+    by_uri: dict[str, Any] = {}
+    replan = _seq("planner", 9)._replace(emission_epoch=2)
+    for kind, body in (
+        ("prd", PRD(title="p", prd_uri="cas://p", criterion_ids=("AC-1", "AC-2"),
+                    seq=_seq("planner"))),
+        ("ticket", Ticket(id="T1", title="t", specialty=Specialty.BACKEND,
+                          scenario_ids=("AC-1",), seq=replan)),
+        ("acceptance_criterion", _ac("AC-1").model_copy(update={"seq": replan})),
+        ("prd", PRD(title="p", prd_uri="cas://p", criterion_ids=("AC-1",), seq=replan)),
+    ):
+        h = emit_artifact(body, kind, "planner", body.seq)
+        state["artifacts"].append(h)
+        by_uri[h.uri] = body
+
+    def resolve2(a: Artifact) -> Any:
+        return by_uri[a.uri] if a.uri in by_uri else resolve(a)
+
+    assert [c["id"] for c in _criteria_list(state, resolve2)] == ["AC-1"]
+    assert [c.id for c in read_criteria(state, resolve2)] == ["AC-1"]
+    materialize_workdir(state, tmp_path, resolve=resolve2, resolve_blob=blob)
+    assert "AC-2" not in (tmp_path / "features" / "T1.feature").read_text()
+    assert wave_scenarios(state, resolve2) == {"features/T1.feature::AC-1"}

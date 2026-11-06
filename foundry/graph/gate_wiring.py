@@ -2057,7 +2057,13 @@ class WaveBuildCheck:
         settle_fix_attempts(state, config, out, boundary=boundary,
                             records=self.runner.records, max_fix_attempts=self.max_fix_attempts,
                             total_cap=fix_cap(state, self.resolve, self.max_fix_attempts))
+        # The whole state, not just gates + budget: _route's fix_cap counts the
+        # plan's waves off its tickets, and with none it read as a cap of
+        # max_fix_attempts, so after that many fixes run-wide this check routed HALT
+        # here (while route() saw FIX) and never recorded a fix pass that changed
+        # nothing — the wave spent its last pass on the unchanged tree.
         post: FactoryState = {
+            **state,
             "gates": merge_gates(state.get("gates"), out.get("gates")),
             "budget": out.get("budget") or state.get("budget") or BudgetLedger(),
         }

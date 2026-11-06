@@ -877,7 +877,9 @@ _PYTEST_BDD_ARGS = (
     "an earlier step's target_fixture, e.g. `@given(\"a registered user\", "
     "target_fixture=\"user_email\")` returning the email, then `@when(parsers.parse("
     "\"they log in as {name}\"))` with `def step(user_email, name)`; a step's plain "
-    "return value is passed to nothing."
+    "return value is passed to nothing. Scenarios that share a step line share ONE "
+    "step definition: pytest-bdd runs only the last definition of a step text, so "
+    "never define the same step text twice in a module."
 )
 
 

@@ -217,6 +217,22 @@ def test_an_empty_fix_diff_halts_the_wave(tmp_path: Path) -> None:
     assert any(t.name == NO_FIX_PROGRESS_TRIAGE for t in out["gate_triage"])
 
 
+def test_an_empty_fix_diff_halts_the_wave_after_earlier_waves_spent_fixes(
+    tmp_path: Path,
+) -> None:
+    # The local shop run: earlier fixes had spent max_fix_attempts run-wide, the
+    # check judged its run-wide cap off a state without the plan's tickets, saw HALT,
+    # skipped the no-progress note, and the wave spent its last pass on the same tree.
+    broken = {"app.py": "def broken(:\n"}
+    rec = _Recorder(writes={"T-001": broken, "fix-1": broken})
+    tickets = [_ticket("T-001", 0, files=("app.py", "rogue.txt")),
+               _ticket("T-002", 1, files=("app.py",), deps=("T-001",))]
+    out, ran, _ = _wave_run(tmp_path, rec, max_fix_attempts=4, tickets=tickets,
+                            budget=BudgetLedger(fix_attempts_total=4))
+    assert ran == ["engineering", "wave_gate", "fixer", "wave_gate"]
+    assert any(t.name == NO_FIX_PROGRESS_TRIAGE for t in out["gate_triage"])
+
+
 def test_raw_findings_compare_without_addresses_or_timings() -> None:
     first = _state(_gate("build", "t1", 1, _RED, "<Obj at 0x7f3a1c> broke in 1.23s"),
                    attempts=2)

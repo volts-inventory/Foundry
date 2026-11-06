@@ -370,6 +370,28 @@ def test_a_session_run_that_misses_a_step_argument_gets_the_gates_why(tmp_path: 
     assert "NOTE:" not in plain
 
 
+def test_a_failing_session_run_names_a_step_text_defined_twice(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    (src / "features").mkdir(parents=True)
+    (src / "tests").mkdir()
+    (src / "features" / "T1.feature").write_text(
+        "Feature: T1\n  Scenario: A\n    Given a user\n    Then the user is returned\n")
+    (src / "tests" / "test_t1.py").write_text(
+        'scenarios("../features/T1.feature")\n\n'
+        '@then("the user is returned")\ndef _a(context):\n    assert context.user\n\n'
+        '@then("the user is returned")\ndef _b(context):\n    assert context.login\n')
+    seen: list[list[dict[str, Any]]] = []
+    adapter = ProxyAgentAdapter(recording(
+        [{"action": "run", "cmd": "echo 'FAILED tests/test_t1.py::test_a'"},
+         {"action": "run", "cmd": "echo fine"}, {"action": "done"}], seen))
+    with Sandbox(src) as sb:
+        adapter.run(make_packet(sb.worktree), sb)
+    hit, plain = observations(seen[-1])
+    assert ('\nNOTE: `@then("the user is returned")` is defined 2 times in tests/test_t1.py '
+            "(lines 3, 7)") in hit
+    assert "NOTE:" not in plain
+
+
 def test_search_skips_env_dirs_big_files_and_long_lines(tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()
@@ -536,6 +558,24 @@ def test_paging_through_a_file_is_not_thrash(tmp_path: Path) -> None:
     adapter = ProxyAgentAdapter(recording([*pages, {"action": "done", "summary": "ok"}], seen))
     with Sandbox(src) as sb:
         result = adapter.run(make_packet(sb.worktree, turn_budget=9), sb)
+    assert [t.explanation for t in result.triage] == ["ok"]
+    assert not any("NOTE" in o for o in observations(seen[-1]))
+
+
+def test_paging_with_shared_boundary_lines_is_not_thrash(tmp_path: Path) -> None:
+    # A local fixer paged a 614-line module as 1-100, 100-200, ...: each read shares
+    # one line with the one before, and it was stopped before its first edit.
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "big.py").write_text("".join(f"x{i} = {i}\n" for i in range(1, 61)))
+    seen: list[list[dict[str, Any]]] = []
+    pages = [
+        {"action": "read_file", "path": "big.py", "start_line": i, "end_line": i + 10}
+        for i in (1, 10, 20, 30, 40, 50)
+    ]
+    adapter = ProxyAgentAdapter(recording([*pages, {"action": "done", "summary": "ok"}], seen))
+    with Sandbox(src) as sb:
+        result = adapter.run(make_packet(sb.worktree, turn_budget=7), sb)
     assert [t.explanation for t in result.triage] == ["ok"]
     assert not any("NOTE" in o for o in observations(seen[-1]))
 

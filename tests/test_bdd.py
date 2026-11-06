@@ -254,6 +254,23 @@ def test_a_step_text_defined_twice_is_named_as_the_unset_argument(tmp_path: Path
     assert "runs only the LAST definition" in hint and "define it once" in hint
 
 
+def test_a_step_text_defined_twice_is_named_on_any_failure(tmp_path: Path) -> None:
+    # The local shop run: two scenarios each defined `@then("the user dictionary is
+    # returned")`; the last read an attribute only its own scenario set, so the other
+    # failed with "'Context' object has no attribute" and the gate never said why.
+    steps = _STEPS.replace("{expected}", "n") + (
+        '\n\n@then(parsers.parse("the list has {n:d} item"))\n'
+        "def _count_again(items, n):\n    assert items.total == n\n"
+    )
+    gate = TestGate()
+    obs = gate.execute(_project(tmp_path, steps))
+    assert gate.decide(obs) is GateStatus.FAIL
+    hint = next(f for f in obs.findings if f.startswith("`@then("))
+    assert hint.startswith('`@then("the list has {n:d} item")` is defined 2 times in '
+                           "tests/test_t1.py (lines 16, 21): pytest-bdd runs only the LAST")
+    assert "define each step text once" in hint
+
+
 def test_a_target_fixture_on_a_step_no_feature_line_reads_is_named(tmp_path: Path) -> None:
     # The second fix pass then renamed the step texts apart: no feature line read them.
     steps = _STEPS.replace("{expected}", "n").replace(

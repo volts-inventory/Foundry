@@ -678,6 +678,36 @@ def step_argument_hints(
     )
 
 
+_DUPLICATE_NOTES_MAX = 8
+
+
+def duplicate_step_notes(workdir: Path, features: Iterable[str]) -> tuple[str, ...]:
+    """One line per step text a step module that binds ``features`` defines more than
+    once with the same keyword. pytest-bdd runs only the last of them for every
+    scenario whose step line reads that text, so a scenario written against an
+    earlier one fails on what the last one does or leaves unset (the local shop run:
+    two scenarios' ``@then("the user dictionary is returned")``, and one read
+    ``context.login_result`` that only the other scenario's When step set)."""
+    feats = set(features)
+    if not feats:
+        return ()
+    root = Path(workdir)
+    groups: dict[tuple[str, str, str], list[_StepDef]] = {}
+    for d in _step_defs(root, binding_modules(root, feats)):
+        groups.setdefault((d.module, d.kind, d.text), []).append(d)
+    out = [
+        f"`@{kind}(\"{text}\")` is defined {len(same)} times in {module} (lines "
+        f"{', '.join(str(d.line) for d in same)}): pytest-bdd runs only the LAST "
+        "definition of a step text, for every scenario whose step line reads it, so "
+        "the earlier ones never run and a scenario written against one of them gets "
+        "the last one's behaviour (an attribute it never set, an exception it does "
+        "not catch) — define each step text once, in a form right for every scenario "
+        "that uses the line"
+        for (module, kind, text), same in groups.items() if len(same) > 1
+    ]
+    return tuple(out[:_DUPLICATE_NOTES_MAX])
+
+
 def parse_pytest_summary(stdout: str) -> dict[str, int]:
     """Counts from the pytest tail line (raw observation, zone A side)."""
     counts: dict[str, int] = {}
@@ -911,9 +941,11 @@ class TestGate:
         if rc != 0:
             from .pydeps import undeclared_import_hints
 
+            bound = {r.split("::", 1)[0] for r in trusted}
             findings = (*undeclared_import_hints(out + err, workdir),
-                        *(step_argument_hints(out, workdir, {r.split("::", 1)[0]
-                                                             for r in trusted})
+                        *(step_argument_hints(out, workdir, bound)
+                          if trusted and not self.bdd_cmd else ()),
+                        *(duplicate_step_notes(workdir, bound)
                           if trusted and not self.bdd_cmd else ()),
                         *failure_findings(out))
             why = None if self.stack_harness else _PYTEST_EXIT_WHY.get(rc)

@@ -450,7 +450,7 @@ class ProxyAgentAdapter:
             n, stamp_then = st.reads.get(rel, (0, stamp))
             if stamp_then != stamp or n == 0:
                 n = 1
-            elif _overlaps_verbatim(st.verbatim, rel, stamp, act):
+            elif _rereads_verbatim(st.verbatim, worktree, rel, stamp, act):
                 n += 1
             if n >= _THRASH_STOP:
                 st.triage.append(
@@ -575,16 +575,19 @@ def _step_hints(out: str, worktree: Path) -> str:
     """The Test gate's explanation of each step argument a pytest-bdd run in the
     session could not find, so a session that runs the scenarios itself reads the
     same why the gate would report (a local fixer once spent its whole budget on
-    one such error, rewriting the same step definitions)."""
-    if "not found" not in out:
+    one such error, rewriting the same step definitions), and of each step text a
+    step module defines twice, on any failing run."""
+    missing, failed = "not found" in out, "FAILED" in out
+    if not missing and not failed:
         return ""
-    from foundry.gates.test import step_argument_hints
+    from foundry.gates.test import duplicate_step_notes, step_argument_hints
     from foundry.schemas.implementation import FEATURE_DIR
 
     root = worktree.resolve()
     features = [p.relative_to(root).as_posix()
                 for p in sorted((root / FEATURE_DIR).rglob("*.feature"))]
-    hints = step_argument_hints(out, root, features)
+    hints = (*(step_argument_hints(out, root, features) if missing else ()),
+             *(duplicate_step_notes(root, features) if failed else ()))
     return "".join(f"\nNOTE: {h}" for h in hints)
 
 
@@ -685,19 +688,32 @@ def _file_key(worktree: Path, rel: str) -> tuple[str, tuple[int, int]] | None:
     return target.relative_to(worktree.resolve()).as_posix(), (st.st_size, st.st_mtime_ns)
 
 
-def _overlaps_verbatim(
-    kept: list[_Kept], rel: str, stamp: tuple[int, int], act: dict[str, Any]
+def _rereads_verbatim(
+    kept: list[_Kept], worktree: Path, rel: str, stamp: tuple[int, int], act: dict[str, Any]
 ) -> bool:
+    """True iff at least two thirds of the lines a read asks for are still verbatim in
+    context from earlier reads of the unchanged file. Any overlap used to count: a
+    local fixer paging a 614-line test module in ranges that shared their boundary
+    line (1-100, 100-200, ...) was stopped as thrashing twice, before its first edit."""
     try:
-        lo = int(act.get("start_line") or 1)
+        lo = max(1, int(act.get("start_line") or 1))
         hi = int(act.get("end_line") or sys.maxsize)
-    except (TypeError, ValueError):
-        return False  # _read_file reports the bad range
-    return any(
-        k.read.path == rel and k.read.stamp == stamp and k.read.lo <= hi and lo <= k.read.hi
-        for k in kept
-        if k.read is not None
-    )
+        total = len(_contained(worktree, rel).read_text(encoding="utf-8",
+                                                        errors="replace").splitlines())
+    except (TypeError, ValueError, OSError):
+        return False  # _read_file reports the bad range or path
+    hi = min(hi, total)
+    if hi < lo:
+        return False
+    spans = sorted((max(lo, k.read.lo), min(hi, k.read.hi)) for k in kept
+                   if k.read is not None and k.read.path == rel and k.read.stamp == stamp)
+    covered, upto = 0, lo - 1
+    for a, b in spans:
+        a = max(a, upto + 1)
+        if b >= a:
+            covered += b - a + 1
+            upto = b
+    return 3 * covered >= 2 * (hi - lo + 1)
 
 
 def _pinned(kept: list[_Kept], worktree: Path) -> set[tuple[int, int]]:

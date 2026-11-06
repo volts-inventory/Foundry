@@ -314,7 +314,7 @@ def test_a_hybrid_run_routes_tickets_and_calls_by_level(
     result = cli.run("build a thing", model_mode="hybrid", local_url="http://box:1234/v1",
                      local_model="qwen/qwen3.6-27b", ticket_tiers={"standard": "T1"})
 
-    assert result.passed
+    assert result.passed, result.summary()
     assert result.model_mode == "hybrid"
     assert result.levels is not None and result.levels["T2"]["backend"] == "local"
     assert seen["max_fix_attempts"] == 3

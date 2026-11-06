@@ -48,6 +48,7 @@ from foundry.schemas.base import Artifact, FrozenModel
 from foundry.schemas.gates import GateStatus, JudgmentProvenance
 from foundry.schemas.implementation import FeatureDiff, Specialty, Ticket
 from foundry.schemas.product import (
+    PRD,
     AcceptanceCriterion,
     CriteriaCritique,
     Criticality,
@@ -221,6 +222,9 @@ def _synthetic_resolve(handle: Artifact) -> FrozenModel:
             security_abuse=True,  # guarantees Spec-gate security coverage
             seq=handle.seq,
         )
+    if handle.kind == "prd":
+        # No criterion ids: the synthetic criteria ids above are never filtered.
+        return PRD(title="Requested service", prd_uri="cas://design/prd", seq=handle.seq)
     if handle.kind == "criteria_findings":
         # The Criteria-Completeness Critic finding the Spec gate now consumes.
         # No security/abuse omission here -> does not block the clean run.

@@ -641,6 +641,11 @@ def _synthetic_resolve(store: ArtifactStore) -> ArtifactResolver:
                 security_abuse=True,  # guarantees Spec-gate security coverage
                 seq=handle.seq,
             )
+        if handle.kind == "prd":
+            # The criteria above get synthetic ids the PRD never lists: an empty
+            # list keeps the gates from filtering them all out as dropped.
+            prd = store.resolve(handle)
+            return prd.model_copy(update={"criterion_ids": ()})
         if handle.kind == "feature_diff":
             return FeatureDiff(
                 diff_uri=_DIFF_BODY_URI,

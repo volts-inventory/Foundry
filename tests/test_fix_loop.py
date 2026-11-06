@@ -317,15 +317,87 @@ class _LocalRecorder(_Recorder):
         return True
 
 
-def test_a_local_fixer_gets_a_larger_turn_budget(tmp_path: Path) -> None:
+def test_local_sessions_get_a_larger_turn_budget(tmp_path: Path) -> None:
+    # A local ticket session takes one action per turn: on the local notes build 8
+    # of 14 tickets hit 25 turns, one before it wrote the module binding its scenarios.
     rec = _LocalRecorder(writes={"T-001": {"app.py": "def broken(:\n"}})
     _wave_run(tmp_path, rec)
-    assert rec.packets["T-001"].turn_budget == 25
+    assert rec.packets["T-001"].turn_budget == 40
     assert rec.packets["fix-1"].turn_budget == 40
     plain = _Recorder(writes={"T-001": {"app.py": "def broken(:\n"}})
     (tmp_path / "cloud").mkdir()
     _wave_run(tmp_path / "cloud", plain)
+    assert plain.packets["T-001"].turn_budget == 25
     assert plain.packets["fix-1"].turn_budget == 25
+
+
+def _unbound_state(store: ArtifactStore) -> FactoryState:
+    import json
+
+    from foundry.agents._common import emit_artifact
+    from foundry.schemas.implementation import FeatureDiff
+
+    # The local notes run: E4-T04 ran out of turns after writing only its routes
+    # module, so its scenarios were never bound and its step module never existed.
+    ticket = _ticket("E4-T04", 0, files=("routes/notes.py", "templates/notes.html",
+                                         "tests/test_e4_t04.py"),
+                     scenario_ids=("E4-AC10", "E4-AC11"))
+    other = _ticket("E4-T05", 1, files=("smoke.py",), scenario_ids=("E4-AC16",))
+    seq = Seq("run", 1, 9, "junior_engineer", 0)
+    blob = store.put_blob(json.dumps({"kind": "full-file-snapshot",
+                                      "files": {"routes/notes.py": "x = 1\n"}}).encode())
+    diff = emit_artifact(
+        FeatureDiff(diff_uri=blob, task_id="E4-T04", branch="task/E4-T04",
+                    base_tree_sha="b", seq=seq),
+        "feature_diff", "junior_engineer", seq, store=store,
+    ).model_copy(update={"task_id": "E4-T04"})
+    unbound = [f"BDD criterion E4-AC1{i}: scenario features/E4-T04.feature::E4-AC1{i} was "
+               "not executed — bind that exact gate-owned file" for i in (0, 1)]
+    return {**_ticket_state(store, [ticket, other], artifacts=[diff]),
+            **_state(_gate("build", "t1", 1, _OK), _gate("test", "t1", 2, _RED, *unbound),
+                     attempts=1)}
+
+
+def test_a_fix_pass_is_told_to_create_the_files_an_unfinished_ticket_never_wrote() -> None:
+    store = ArtifactStore()
+    tree: dict[str, str | None] = {"routes/notes.py": "x = 1\n", "smoke.py": None}
+    summary = _fix_summary(_unbound_state(store), store.resolve, store.resolve_blob,
+                           attempt=1, tree=tree)
+    assert ("Create these files first: templates/notes.html, tests/test_e4_t04.py. Ticket "
+            "E4-T04 owns them and its failing scenarios need them, but its session ended "
+            "before it wrote them: writing them is this fix, not a later ticket's work "
+            '(bind the scenarios in tests/test_e4_t04.py: '
+            'scenarios("../features/E4-T04.feature"))') in summary
+    # E4-T05 is not built and fails nothing: its missing files are a later wave's.
+    assert not any("smoke.py" in line for line in summary)
+
+
+def test_an_empty_fix_pass_is_not_blamed_for_the_wave_that_broke_a_gate() -> None:
+    import json
+
+    from foundry.agents._common import emit_artifact
+    from foundry.schemas.implementation import FeatureDiff
+
+    # The test gate passed on the previous wave's tree and failed on the new wave's;
+    # fix-1 changed nothing, so the tree it left is the one the wave built.
+    store = ArtifactStore()
+    blob = store.put_blob(json.dumps({"kind": "full-file-snapshot", "files": {}}).encode())
+    seq = Seq("run", 1, 9, "fixer", 0)
+    art = emit_artifact(FeatureDiff(diff_uri=blob, task_id="fix-1", branch="task/fix-1",
+                                    base_tree_sha="b", seq=seq),
+                        "feature_diff", "fixer", seq, store=store
+                        ).model_copy(update={"task_id": "fix-1"})
+    note = GateTriage(name="adapter-report", run_against="task/fix-1",
+                      explanation="turn budget exhausted before 'done' — partial work recorded",
+                      produced_by="proxy-agent", seq=Seq("run", 0, 0, "proxy-agent", 0))
+    state: FactoryState = {
+        **_state(_gate("build", "t1", 1, _OK), _gate("test", "t1", 2, _OK),
+                 _gate("build", "t2", 3, _OK), _gate("test", "t2", 4, _RED, _BDD)),
+        "artifacts": [art], "gate_triage": [note]}
+    summary = _fix_summary(state, store.resolve, store.resolve_blob, attempt=2)
+    assert ("previous fix pass (fix-1) changed no file (it ran out of turns before its first "
+            "edit): reading files changes nothing; make the edits this time") in summary
+    assert not any("broke" in line or "different approach" in line for line in summary)
 
 
 def test_a_fix_pass_with_no_ticket_diff_yet_starts_the_epochs(tmp_path: Path) -> None:

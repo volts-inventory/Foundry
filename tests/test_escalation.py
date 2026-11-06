@@ -156,6 +156,8 @@ def test_a_session_that_wrote_none_of_its_files_escalates_at_once(tmp_path: Path
         _state(store, [_ticket("T-001", 0, files=("a.py",))]), _config())
     assert local.tiers == [("T-001", "T2")]
     assert cloud.tiers == [("T-001", "T1")]
+    # The local level's larger turn budget never carries over to the cloud re-run.
+    assert (local.packets["T-001"].turn_budget, cloud.packets["T-001"].turn_budget) == (40, 25)
     context = cloud.packets["T-001"].prior_failures
     assert context[0] == "[escalation]"
     assert any("wrote none of the ticket's files" in line and "T2" in line for line in context)

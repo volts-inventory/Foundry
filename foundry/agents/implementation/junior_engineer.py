@@ -203,6 +203,16 @@ def _fix_summary(
     if named:
         out.append("Edit these files first: " + ", ".join(named)
                    + " (the failure names them)")
+    if tree is not None:
+        from foundry.agents.implementation.tickets import (
+            built_task_ids,
+            read_tickets,
+            unwritten_ticket_files,
+        )
+
+        out.extend(unwritten_ticket_files(
+            [line for g in failed for line in g.findings], read_tickets(state, resolve),
+            built_task_ids(state), tree, state.get("stack")))
     if pip_manifest_failure(failed):
         out.append("pip could not install a dependency the manifest declares. The install "
                    "cannot be re-run in this sandbox (no network), so do not try: edit the "
@@ -226,7 +236,13 @@ def _fix_summary(
                       and t.explanation.startswith(TURN_CAP_NOTE)
                       for t in state.get("gate_triage") or ())
         broke = regressed_gates(state)
-        if broke:
+        # A pass that changed nothing left the tree the wave built: a gate that broke
+        # since the tree before was broken by the wave, not by this pass.
+        if touched == set():
+            out.append(f"previous fix pass ({prev.task_id}) changed no file"
+                       + (" (it ran out of turns before its first edit)" if cut_off else "")
+                       + ": reading files changes nothing; make the edits this time")
+        elif broke:
             # A pass cut off mid-refactor leaves callers of what it renamed or moved
             # broken; "a different approach" would pile a second change on the first.
             out.append(f"previous fix pass ({prev.task_id}) touched {files} and broke the "

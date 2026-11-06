@@ -168,6 +168,9 @@ DEFAULT_WORKERS: dict[str, int] = {s.value: 4 for s in Specialty}
 
 # Claude Code needs several turns to read, write and verify; 8 left contract stubs empty.
 _DEFAULT_TURN_BUDGET = 25
+# A local session takes one action per turn and re-reads what masking elided: on a
+# local notes build 8 of 14 tickets hit 25 turns, one before it wrote its step module.
+_LOCAL_TURN_BUDGET = 40
 _DEFAULT_COST_BUDGET_MICROUSD = 1_000_000
 
 
@@ -1024,6 +1027,46 @@ def verify_rules(
 _BDD_FINDING = re.compile(r"^BDD criterion (\S+): scenario (\S+?)::\S+ (.*)$")
 
 
+def unwritten_ticket_files(
+    findings: Sequence[str],
+    tickets: Sequence[Ticket],
+    built: set[str],
+    tree: Mapping[str, str | None],
+    stack: StackDecision | None,
+) -> tuple[str, ...]:
+    """One line per built ticket whose failing scenarios ``findings`` name while some
+    of its own files are absent from ``tree``: its session ended before it wrote
+    them (a turn cap), so the fix is to create them. A fixer told only that the
+    scenarios "were not executed" read the whole project twice without writing the
+    missing step module. A missing pytest-bdd test module gets its binding call."""
+    failing: dict[str, dict[str, None]] = {}  # ticket id -> its failing feature paths
+    carriers = {cid: t for t in tickets for cid in t.scenario_ids}
+    for line in findings:
+        m = _BDD_FINDING.match(line)
+        if m is not None and (t := carriers.get(m.group(1))) is not None:
+            failing.setdefault(t.id, {})[m.group(2)] = None
+    out: list[str] = []
+    for t in tickets:
+        if t.id not in failing or task_id_for_ticket(t.id) not in built:
+            continue
+        missing = [f for f in t.files if not f.endswith("/") and tree.get(f) is None]
+        if not missing:
+            continue
+        binds = [
+            f"in {f}: " + " ".join(
+                f'scenarios("{posixpath.relpath(p, posixpath.dirname(f) or ".")}")'
+                for p in failing[t.id])
+            for f in (_python_test_files(missing) if _pytest_bdd(stack) else ())
+        ]
+        out.append(
+            f"Create these files first: {', '.join(missing)}. Ticket {t.id} owns them and "
+            "its failing scenarios need them, but its session ended before it wrote them: "
+            "writing them is this fix, not a later ticket's work"
+            + (f" (bind the scenarios {'; '.join(binds)})" if binds else "")
+        )
+    return tuple(out)
+
+
 def group_failures_by_ticket(
     failures: Sequence[str], tickets: Sequence[Ticket]
 ) -> tuple[str, ...]:
@@ -1473,17 +1516,20 @@ def make_engineering_node(
                                                           key=lambda n: n.seq))
                 packet = _ticket_packet(
                     tasks[tid], ticket, constraints, spans=spans, feature_files=features,
-                    prior_failures=(*own, *prior), turn_budget=turn_budget,
+                    prior_failures=(*own, *prior),
+                    turn_budget=(max(turn_budget, _LOCAL_TURN_BUDGET)
+                                 if _is_local(rt, tasks[tid].tier) else turn_budget),
                     cost_budget_microusd=cost_budget_microusd, stack=state.get("stack"),
                     contract_files=contract_files,
                     scenarios=_ticket_scenarios(ticket, criteria),
                 )
                 if tid in rebuild:
-                    packet = _escalated_packet(packet, str(target), rebuild[tid])
+                    packet = _escalated_packet(packet, str(target), rebuild[tid], turn_budget)
                 elif target and tid in already and _is_local(rt, tasks[tid].tier):
                     # Its escalation is spent and its local attempt was discarded: a
                     # retry stays on the cloud level rather than repeat the local stop.
-                    packet = _escalated_packet(packet, target, packet.prior_failures)
+                    packet = _escalated_packet(packet, target, packet.prior_failures,
+                                               turn_budget)
                 packets[tid] = packet
                 etask = ExecutionTask(
                     packet=packet, adapter=adapter_name, lineage=ticket.specialty.value,
@@ -1539,7 +1585,7 @@ def make_engineering_node(
                         touched="none of its files", reported=[],
                         kept=False, failures=prior,
                     )
-                    epacket = _escalated_packet(packets[tid], target, ctx)
+                    epacket = _escalated_packet(packets[tid], target, ctx, turn_budget)
                     try:
                         retry[tid] = pool.submit(ExecutionTask(
                             packet=epacket, adapter=adapter_name,
@@ -1622,8 +1668,13 @@ def make_engineering_node(
     return _node
 
 
-def _escalated_packet(packet: TaskPacket, target: str, context: tuple[str, ...]) -> TaskPacket:
+def _escalated_packet(
+    packet: TaskPacket, target: str, context: tuple[str, ...], turn_budget: int
+) -> TaskPacket:
+    """``packet`` re-aimed at the cloud ``target``, on the cloud turn budget (a local
+    packet carries :data:`_LOCAL_TURN_BUDGET`)."""
     return packet.model_copy(update={
         "task": {**packet.task, "tier": target, "escalated": True},
         "prior_failures": context,
+        "turn_budget": turn_budget,
     })

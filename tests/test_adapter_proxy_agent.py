@@ -127,6 +127,7 @@ def test_a_repair_sessions_first_done_without_an_edit_is_refused(tmp_path: Path)
     assert result.turns_used == 4
     refusal = str(seen[2][-1]["content"])
     assert "ERROR: not done — no file in the worktree has changed yet" in refusal
+    assert "package installed in this sandbox" in refusal
     assert refusal.endswith("Your triage names this unfinished work:\n- Need to fix app.py")
 
 

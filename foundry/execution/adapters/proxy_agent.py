@@ -564,7 +564,9 @@ def _unchanged_done(st: _Loop, triage: list[str]) -> str | None:
     todo = "".join(f"\n- {t}" for t in triage[:8])
     return ("ERROR: not done — no file in the worktree has changed yet, and done ends the "
             "session: only file edits are kept, a summary or plan of what to change is "
-            "discarded. Make the changes now (write_file), re-run the build/typecheck and "
+            "discarded, and so is a package installed in this sandbox (declare it, e.g. a "
+            "types-* stub, in the project's dependency manifest). "
+            "Make the changes now (write_file), re-run the build/typecheck and "
             "the tests, then declare done. If the task truly needs no change, call done "
             "again." + (f"\nYour triage names this unfinished work:{todo}" if todo else ""))
 

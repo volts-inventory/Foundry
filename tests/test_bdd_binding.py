@@ -117,6 +117,48 @@ def test_a_binding_in_conftest_is_named_as_never_collected(tmp_path: Path) -> No
     assert any("module pytest collects, tests/test_<name>.py" in f for f in obs.findings)
 
 
+def test_a_test_function_named_like_the_generated_one_is_named_as_shadowing(
+    tmp_path: Path,
+) -> None:
+    # A local fixer read `FAILED ...::test_sccart1` as a missing test and wrote one
+    # after scenarios(): it replaced the scenario's test, pytest stayed green, and the
+    # gate's only finding said to bind a file that was already bound.
+    steps = _STEPS.replace("{expected}", "n") + (
+        "\n\ndef test_ac1():\n    assert True\n"
+        "\n\nfrom pytest_bdd import scenario\n"
+        '\n\n@scenario("../features/T1.feature", "AC-2")\ndef test_ac2():\n    pass\n'
+    )
+    for scope in (None, frozenset({"features/T1.feature::AC-1"})):
+        gate = TestGate(scope=scope)
+        obs = gate.execute(_project(tmp_path / str(bool(scope)), steps))
+        assert obs.structured[BDD_KEY]["features/T1.feature::AC-1"] == "missing"
+        assert gate.decide(obs) is GateStatus.FAIL
+        assert obs.findings[0].startswith(
+            "tests/test_t1.py defines `test_ac1` after its `scenarios(...)` call"
+        ), obs.findings
+        assert "features/T1.feature::AC-1: the later definition replaces it" in obs.findings[0]
+        # An explicit @scenario test of that name binds the scenario: not shadowing.
+        assert not any("`test_ac2`" in f for f in obs.findings)
+    assert obs.structured[BDD_KEY] == {"features/T1.feature::AC-1": "missing"}
+
+
+def test_a_same_named_test_before_the_binding_is_not_flagged(tmp_path: Path) -> None:
+    # Defined first, pytest-bdd generates test_ac1_1 instead: the scenario still runs.
+    steps = "def test_ac1():\n    assert True\n\n\n" + _STEPS.replace("{expected}", "n")
+    gate = TestGate()
+    obs = gate.execute(_project(tmp_path, steps))
+    assert set(obs.structured[BDD_KEY].values()) == {"passed"}
+    assert gate.decide(obs) is GateStatus.PASS
+
+
+def test_a_failed_scenario_says_not_to_write_its_generated_test(tmp_path: Path) -> None:
+    gate = TestGate()
+    obs = gate.execute(_project(tmp_path, _STEPS.replace("{expected}", "99")))
+    hit = next(f for f in obs.findings if f.startswith("BDD criterion AC-1"))
+    assert "failed — its pytest test is the one `scenarios(...)` generates" in hit
+    assert "never write a test function of that name yourself" in hit
+
+
 def test_a_conftest_import_error_is_an_error_that_says_why(tmp_path: Path) -> None:
     root = _project(tmp_path, None)
     (root / "tests").mkdir(exist_ok=True)

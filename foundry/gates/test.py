@@ -30,6 +30,7 @@ definition actually asserts anything.
 
 from __future__ import annotations
 
+import ast
 import hmac
 import json
 import os
@@ -294,6 +295,14 @@ _BDD_WHY = {
         "that accept arbitrary text; it cannot verify that a specific step asserts "
         "anything, so a no-op step still defeats it — that is on review.)"
     ),
+    # A local model read the FAILED line's generated name (test_sccart1) as a test it
+    # had to write, and its plain function replaced the scenario's test.
+    "failed": (
+        "failed — its pytest test is the one `scenarios(...)` generates (the "
+        "test_<scenario name> in the FAILED line): fix the step definitions or the code "
+        "under test, and never write a test function of that name yourself (it replaces "
+        "the scenario's test, which then never runs)"
+    ),
 }
 
 
@@ -310,6 +319,7 @@ _CUCUMBER_WHY = {
         "ran steps that do not match the trusted feature file's scenario — do not "
         "edit or regenerate features/*.feature; run it as written"
     ),
+    "failed": "failed",
 }
 
 
@@ -400,6 +410,81 @@ def conftest_binding_note(workdir: Path) -> str | None:
         "`scenarios(...)` call into a tests/test_<name>.py module (step definitions "
         "and fixtures may stay in conftest.py)"
     )
+
+
+def bdd_test_name(scenario: str) -> str:
+    """The test name pytest-bdd's ``scenarios(...)`` first tries for ``scenario``
+    (``pytest_bdd.scenario.get_python_name_generator``)."""
+    name = re.sub(r"\W", "", scenario.replace(" ", "_"))
+    return "test_" + re.sub(r"^\d+_*", "", name).lower()
+
+
+def _calls_scenarios(node: ast.stmt) -> bool:
+    if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
+        return False
+    f = node.value.func
+    return (isinstance(f, ast.Name) and f.id == "scenarios") or (
+        isinstance(f, ast.Attribute) and f.attr == "scenarios"
+    )
+
+
+def _is_scenario_decorator(d: ast.expr) -> bool:
+    f = d.func if isinstance(d, ast.Call) else d
+    return (isinstance(f, ast.Name) and f.id == "scenario") or (
+        isinstance(f, ast.Attribute) and f.attr == "scenario"
+    )
+
+
+def _rebound_names(node: ast.stmt) -> set[str]:
+    """Module-level names ``node`` binds, other than an explicit ``@scenario`` test."""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return set() if any(map(_is_scenario_decorator, node.decorator_list)) else {node.name}
+    if isinstance(node, ast.ClassDef):
+        return {node.name}
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        return {(a.asname or a.name).split(".")[0] for a in node.names}
+    targets: list[ast.expr] = []
+    if isinstance(node, ast.Assign):
+        targets = list(node.targets)
+    elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+        targets = [node.target]
+    return {n.id for t in targets for n in ast.walk(t) if isinstance(n, ast.Name)}
+
+
+def shadowed_scenario_notes(workdir: Path, refs: list[str]) -> tuple[str, ...]:
+    """A finding per bound-but-unexecuted scenario whose generated test a later
+    module-level definition replaces: ``scenarios(...)`` puts the scenario's test in
+    the module as ``test_<name>``, so a ``def test_<name>`` after the call overwrites
+    it and the scenario never runs while pytest stays green."""
+    by_feature: dict[str, list[str]] = {}
+    for ref in refs:
+        feature, _, scenario = ref.partition("::")
+        by_feature.setdefault(feature, []).append(scenario)
+    out: list[str] = []
+    root = Path(workdir)
+    for feature, names in sorted(by_feature.items()):
+        wanted = {bdd_test_name(n): n for n in names}
+        for rel in binding_modules(root, {feature}):
+            try:
+                tree = ast.parse((root / rel).read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
+                continue
+            body = tree.body
+            start = next((i for i, n in enumerate(body) if _calls_scenarios(n)), None)
+            if start is None:
+                continue
+            hits = sorted({name for n in body[start + 1:] for name in _rebound_names(n)}
+                          & set(wanted))
+            for name in hits:
+                out.append(
+                    f"{rel} defines `{name}` after its `scenarios(...)` call, but "
+                    f"`{name}` is the test pytest-bdd generates for scenario "
+                    f"{feature}::{wanted[name]}: the later definition replaces it, so the "
+                    f"scenario never runs — delete or rename `{name}` (the binding and "
+                    "the step definitions are what run the scenario; never write its "
+                    "test function yourself)"
+                )
+    return tuple(out)
 
 
 def _host_source_root() -> str | None:
@@ -755,8 +840,10 @@ class TestGate:
             got = executed or {}
             scenarios = {ref: got.get(ref, "missing") for ref in sorted(trusted)}
             structured[BDD_KEY] = scenarios
-            findings = bdd_findings(scenarios) + findings
-            note = conftest_binding_note(workdir) if "missing" in scenarios.values() else None
+            missing = [ref for ref, o in scenarios.items() if o == "missing"]
+            findings = (*shadowed_scenario_notes(workdir, missing),
+                        *bdd_findings(scenarios), *findings)
+            note = conftest_binding_note(workdir) if missing else None
             if note:
                 findings = (note, *findings)
             if executed is None:

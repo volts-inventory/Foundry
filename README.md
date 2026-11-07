@@ -202,6 +202,16 @@ final gates pass rather than on every fix pass. `--no-fix-until-cap` or
 `FOUNDRY_FIX_UNTIL_CAP=0` restores the attempts bound; `--fix-until-cap` /
 `FOUNDRY_FIX_UNTIL_CAP=1` turns it on for any mode.
 
+In hybrid mode, **the cloud diagnoses and the local model edits**: before a repair
+attempt that runs on a local tier (a fix pass, or a local ticket's retry), one
+structured call on the strongest cloud tier reads the failure and the files it names
+(up to 20k chars) and returns a root cause, the files to edit and up to 6 concrete
+edits; paths not in the tree are dropped, and the diagnosis heads the local
+attempt's packet and the run's journal. Feedback from a stronger model is what makes
+self-repair work (Olausson et al., arXiv 2306.09896). It is one short cloud call per
+local attempt, on the subscription under `claude-cli` or metered on an API backend;
+if it fails the attempt runs without it. `FOUNDRY_HYBRID_DIAGNOSE=0` turns it off.
+
 ---
 
 ## Workshop UI
@@ -270,6 +280,7 @@ uv run pytest -n auto -q                                  # full suite (slow e2e
 | `CLAUDE_CODE_OAUTH_TOKEN` | `claude-cli` token (via `claude setup-token`) | — |
 | `FOUNDRY_MODEL_T1/T2/T3` | Pin exact model id per tier | curated map |
 | `FOUNDRY_LOCAL_URL` / `FOUNDRY_LOCAL_MODEL` | Local server + model (hybrid/local modes) | Ollama `/v1` · `qwen3.6:27b-coding-mxfp8` |
+| `FOUNDRY_HYBRID_DIAGNOSE` | `0` skips the cloud diagnosis before a local repair attempt (hybrid) | on |
 | `FOUNDRY_LOCAL_SAMPLING` | Local sampling: `key=value,...` override or `off` (greedy) | per-model profile |
 | `FOUNDRY_MAX_SLOTS` | Parallelism ceiling | auto |
 | `FOUNDRY_COST_CAP_MICROUSD` / `FOUNDRY_TOKEN_CAP` | Spend / token envelope | — |

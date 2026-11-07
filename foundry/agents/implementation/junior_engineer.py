@@ -760,8 +760,9 @@ def make_fixer_node(
         attempt = _fix_attempts(state, config)
         budget = turn_budget
         # The fixer's packet carries no tier, so it runs on the default level.
+        fix_tier: str | None = None
         is_local = getattr(rt.adapter, "is_local", None)
-        if callable(is_local) and is_local(None):
+        if callable(is_local) and is_local(fix_tier):
             budget = max(turn_budget, _LOCAL_FIX_TURN_BUDGET)
         try:
             overlay: dict[str, str | None] = dict(
@@ -793,6 +794,15 @@ def make_fixer_node(
         )
         if duplicates:
             failures = (*failures, f"[{CONTRACT_DUP_TRIAGE}]", *duplicates)
+        from foundry.agents.implementation.diagnosis import diagnose, diagnosis_tier
+
+        diagnosis = None
+        if (cloud := diagnosis_tier(rt, fix_tier)) is not None:
+            diagnosis = diagnose(rt, cloud, label=f"fix attempt {attempt}", summary=failures,
+                                 files=_named_files(_failed_gates(state), overlay),
+                                 tree=overlay)
+            if diagnosis is not None:
+                failures = (*diagnosis.packet_lines(), *failures)
         from foundry.agents.implementation.tickets import note_fix_writes, pending_wave
 
         focus = _fix_focus(state, resolve)
@@ -843,6 +853,8 @@ def make_fixer_node(
             node_id=FIXER_NODE_ID, role="Backend Engineer",
             seq=rt.seq(config, FIXER_NODE_ID, f"journal:{task_id}"),
             summary=f"Fixed the failing gates (attempt {attempt})",
+            concerns=((f"diagnosis from {cloud}: {diagnosis.summary()}",)
+                      if diagnosis is not None else ()),
         ))
         return writes
 

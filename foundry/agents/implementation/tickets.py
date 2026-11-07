@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Any
 from foundry import progress
 from foundry.agents._common import journal_entry
 from foundry.agents._runtime import AgentRuntime, NodeFn
+from foundry.agents.implementation.diagnosis import diagnose, diagnosis_tier
 from foundry.agents.implementation.interface_map import signature_map
 from foundry.agents.implementation.junior_engineer import (
     FIXER_NODE_ID,
@@ -1726,6 +1727,7 @@ def make_engineering_node(
         adapter_name = _adapter_name(rt)
         submitted: dict[str, str] = {}
         packets: dict[str, TaskPacket] = {}
+        diagnosed: dict[str, str] = {}  # task id -> the cloud diagnosis its retry got
         if overlay_error is not None:
             # This wave builds on the bare base, not on the earlier waves: say so.
             merged["gate_triage"] = [GateTriage(
@@ -1776,6 +1778,14 @@ def make_engineering_node(
                     # retry stays on the cloud level rather than repeat the local stop.
                     packet = _escalated_packet(packet, target, packet.prior_failures,
                                                turn_budget)
+                elif own and (cloud := diagnosis_tier(rt, tasks[tid].tier)) is not None:
+                    found = diagnose(rt, cloud, label=f"{tid} retry", summary=own,
+                                     files=(*ticket.files, *ticket.reads), tree=overlay,
+                                     allowed=ticket.files)
+                    if found is not None:
+                        diagnosed[tid] = f"{cloud}: {found.summary()}"
+                        packet = packet.model_copy(update={"prior_failures": (
+                            *found.packet_lines(), *packet.prior_failures)})
                 packets[tid] = packet
                 etask = ExecutionTask(
                     packet=packet, adapter=adapter_name, lineage=ticket.specialty.value,
@@ -1927,6 +1937,7 @@ def make_engineering_node(
                   f"{why[:300]}" for tid, why in sorted(stopped.items())
                   if any(task_id_for_ticket(t.id) == tid for t in built)),
                 *skeleton_concerns,
+                *(f"{tid} retry diagnosed on {why}" for tid, why in sorted(diagnosed.items())),
             ),
         ))
         return writes

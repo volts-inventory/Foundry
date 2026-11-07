@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 __all__ = [
     "MISSING_BINARY_EXIT_CODES",
     "TYPECHECK_ONLY",
+    "UNDECLARED_IMPORTS",
     "BuildGate",
     "build_findings",
     "commands_digest",
@@ -70,6 +71,8 @@ _CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 # The head of a build whose compile steps passed and whose type checker alone
 # failed: the fix loop's score still counts the test gate on that tree.
 TYPECHECK_ONLY = "only the static typecheck failed"
+# The head of a build that passed but imports what its manifest does not declare.
+UNDECLARED_IMPORTS = "the build passed, but the project imports modules it does not declare"
 # mypy's closing line when it checked the tree and found type errors. A stack's build
 # line runs `build && typecheck`, so mypy reporting at all means the steps before it
 # passed; "errors prevented further checking" (a syntax error) never matches.
@@ -193,10 +196,16 @@ class BuildGate:
         seal_key: bytes | None = None,
         profile_name: str = "",
         pyenv: PythonBuildEnv | None = None,
+        python: bool = False,
+        first_party: frozenset[str] = frozenset(),
     ) -> None:
         self.cmd = cmd or (sys.executable, "-m", "compileall", "-q", ".")
         self.install_cmd = install_cmd or None  # shell line, e.g. the stack's `npm ci`
         self._pyenv = pyenv  # a Python build's declared deps: pip into its own venv
+        # A Python build also checks that every unconditional import is declared;
+        # ``first_party`` names the modules later tickets will add to the tree.
+        self._python = python
+        self._first_party = first_party
         self._timeout_s = timeout_s
         self._seal_key = seal_key  # zone-A observation seal (None ⇒ unsealed channel)
         # Class-2 reuse-key bindings (§1f). Build has no held-out mutant
@@ -204,9 +213,10 @@ class BuildGate:
         self.mutant_rotation_id = 0
         # v2 = commands run in the confined sandbox: never reuse a pre-sandbox verdict.
         # The command digest: a cached verdict never outlives a change of commands.
-        self.scanner_rule_version = "build-cmd-v3:" + commands_digest(
+        self.scanner_rule_version = "build-cmd-v4:" + commands_digest(
             cmd=list(self.cmd), install_cmd=self.install_cmd, profile=profile_name,
             pip_install=list(pyenv.requirements) if pyenv is not None else None,
+            import_scan=sorted(first_party) if python else None,
         )
 
     # ---- zone A: [install, then] build; observe the exit code(s) ------------
@@ -259,12 +269,31 @@ class BuildGate:
             extra_env=self._pyenv.run_env() if self._pyenv is not None else None,
             binds=self._pyenv.binds if self._pyenv is not None else (),
         )
+        findings = build_findings(rc, b_out, b_err, workdir) if rc != 0 else ()
+        if self._python:
+            from .pydeps import _NO_MODULE, undeclared_import_findings, undeclared_imports
+
+            missing = undeclared_imports(
+                workdir, first_party=self._first_party,
+                site=Path(self._pyenv.site) if self._pyenv is not None else None,
+            )
+            if missing:
+                structured["undeclared_imports"] = sorted(missing)
+                # The build's own ModuleNotFoundError already got its hint.
+                named = {m.split(".", 1)[0] for m in _NO_MODULE.findall(b_out + b_err)}
+                scan = undeclared_import_findings(
+                    {k: v for k, v in missing.items() if rc == 0 or k not in named}, workdir)
+                if rc == 0:
+                    findings = (f"{UNDECLARED_IMPORTS} — FAIL: the gates install only the "
+                                "declared dependencies, so these imports fail there:", *scan)
+                else:
+                    findings = (*findings, *scan)
         return observe(
             self.name,
             exit_codes=(*codes, rc),
             stdout=out + b_out,
             stderr=err + b_err,
-            findings=build_findings(rc, b_out, b_err, workdir) if rc != 0 else (),
+            findings=findings,
             structured=structured,
             seal_key=self._seal_key,
         )
@@ -288,6 +317,6 @@ class BuildGate:
             return GateStatus.ERROR
         if self.install_cmd is not None and codes[0] != 0:
             return GateStatus.ERROR  # failed install (network/registry): retriable
-        if any(c != 0 for c in codes):
+        if any(c != 0 for c in codes) or obs.structured.get("undeclared_imports"):
             return GateStatus.FAIL
         return GateStatus.PASS if len(codes) == expected else GateStatus.ERROR

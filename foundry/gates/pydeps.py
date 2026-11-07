@@ -30,11 +30,13 @@ only ever be the project's own mistake.
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import importlib.metadata as im
 import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 import threading
@@ -60,8 +62,12 @@ __all__ = [
     "install_failure_is_project",
     "manifest_digest",
     "python_build_env",
+    "requirement_name",
     "unavailable_requirement_hints",
+    "undeclared_distributions",
+    "undeclared_import_findings",
     "undeclared_import_hints",
+    "undeclared_imports",
 ]
 
 # First line of the manifest the materializer scaffolds from the tree's imports: an
@@ -159,6 +165,172 @@ def _declared_names(lines: list[str]) -> set[str] | None:
     return names
 
 
+def _host_distributions() -> dict[str, list[str]]:
+    """Foundry's own environment: top-level import name -> distributions providing it."""
+    try:
+        return dict(im.packages_distributions())
+    except Exception:
+        return {}
+
+
+def _dist_for(name: str, installed: dict[str, list[str]]) -> str:
+    return _DIST_FOR_IMPORT.get(name) or next(iter(installed.get(name, ())), name)
+
+
+def _import_declared(name: str, declared: set[str], installed: dict[str, list[str]]) -> bool:
+    dist = _dist_for(name, installed)
+    return bool(declared & {_normalized(n) for n in (name, dist, *installed.get(name, ()))})
+
+
+def requirement_name(spec: str) -> str | None:
+    """The distribution a plain requirement (``bcrypt``, ``Flask[async]>=3``) names."""
+    m = _REQ_NAME.match(spec.strip())
+    return m.group(1) if m else None
+
+
+def undeclared_distributions(dists: list[str], workdir: Path) -> tuple[str, ...]:
+    """The distributions in ``dists`` the project's manifest does not declare and
+    Foundry's environment (which the gates see) does not already have, so a gate
+    importing them fails. ``()`` when a manifest line is not a plain requirement
+    (``-e .``, a path, a VCS URL), which may provide anything."""
+    lines = _declarations(workdir)[1]
+    declared = _declared_names(lines) if lines else set()
+    if declared is None:
+        return ()
+    out: list[str] = []
+    for dist in dict.fromkeys(dists):
+        if (_normalized(dist) in declared | _TOOLING
+                or _normalized(dist) in {_normalized(d) for d in out}):
+            continue
+        try:
+            im.distribution(dist)
+            continue  # Foundry's own environment has it: so do the gates
+        except im.PackageNotFoundError:
+            pass
+        out.append(dist)
+    return tuple(out)
+
+
+# What the gates' environment provides beyond the declared dependencies: Foundry's
+# own packages (the pinned pytest / pytest-bdd harness among them, which the build
+# venv sees read-only) and the packaging tools a setup.py imports.
+_TOOLING = frozenset({"setuptools", "pkg_resources", "distutils", "pip", "wheel"})
+_PRUNE = frozenset({"node_modules", "__pycache__", "site-packages"})
+_MAX_SCAN_BYTES = 1_000_000
+
+
+def _tree_modules(root: Path) -> tuple[set[str], list[Path]]:
+    """Every module name the tree itself provides (any package dir, ``.py`` stem or
+    extension module at any depth: a test runner or a ``sys.path`` insert can make
+    any of them importable) and its ``.py`` files, outside venvs and hidden dirs."""
+    names: set[str] = set()
+    files: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [
+            d for d in dirnames
+            if not d.startswith(".") and d not in _PRUNE
+            and not (Path(dirpath, d) / "pyvenv.cfg").is_file()
+        ]
+        names.update(dirnames)
+        for f in filenames:
+            stem = f.split(".", 1)[0]
+            if f.endswith(".py"):
+                names.add(f[:-3])
+                files.append(Path(dirpath, f))
+            elif f.endswith((".so", ".pyd")):
+                names.add(stem)
+    return names, files
+
+
+def _site_modules(site: Path | None) -> set[str]:
+    """The top-level modules the build venv's site-packages provides (what pip
+    installed: the declared dependencies and everything they pulled in)."""
+    if site is None or not site.is_dir():
+        return set()
+    names: set[str] = set()
+    for entry in site.iterdir():
+        n = entry.name
+        if entry.is_dir() and not n.endswith((".dist-info", ".egg-info")):
+            names.add(n)
+        elif n.endswith((".py", ".so", ".pyd")):
+            names.add(n.split(".", 1)[0])
+    return names
+
+
+def _unconditional_imports(source: str) -> set[str]:
+    """The top-level modules a module imports unconditionally: plain ``import`` /
+    ``from`` statements in its body. Anything under ``try`` (``except
+    ImportError``), ``if`` (``TYPE_CHECKING``, a platform), a function or a class
+    may never run, so it is never reported."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return set()  # the build itself reports a module that does not compile
+    out: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            out.update(a.name.split(".", 1)[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            out.add(node.module.split(".", 1)[0])
+    return out
+
+
+def undeclared_imports(
+    workdir: Path, *, site: Path | None = None, first_party: frozenset[str] = frozenset()
+) -> dict[str, tuple[str, ...]]:
+    """Third-party modules the tree's ``.py`` files import unconditionally that no
+    gate can import: not stdlib, not in the tree (or ``first_party``, the modules a
+    later ticket will build), not declared by the manifest, and provided neither by
+    the build venv (``site``) nor by Foundry's environment. Maps each to the files
+    importing it. Empty when nothing is declared (no manifest, or only Foundry's
+    scaffold) or a manifest line is not a plain requirement, as
+    :func:`undeclared_import_hints`."""
+    root = Path(workdir)
+    lines = _declarations(root)[1]
+    declared = _declared_names(lines) if lines else None
+    if not declared:
+        return {}
+    local, files = _tree_modules(root)
+    installed = _host_distributions()
+    available = (local | first_party | _site_modules(site) | set(installed) | _TOOLING
+                 | set(sys.stdlib_module_names))
+    found: dict[str, list[str]] = {}
+    for path in sorted(files):
+        try:
+            st = path.lstat()  # never a symlink out of the tree, nor a FIFO that blocks
+            if not stat.S_ISREG(st.st_mode) or st.st_size > _MAX_SCAN_BYTES:
+                continue
+            source = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for name in sorted(_unconditional_imports(source)):
+            if name in available or _import_declared(name, declared, installed):
+                continue
+            found.setdefault(name, []).append(path.relative_to(root).as_posix())
+    return {name: tuple(where) for name, where in found.items()}
+
+
+def undeclared_import_findings(
+    missing: dict[str, tuple[str, ...]], workdir: Path
+) -> tuple[str, ...]:
+    """The fixer's line for each module :func:`undeclared_imports` reports."""
+    req = Path(workdir) / "requirements.txt"
+    scaffolded = req.is_file() and req.read_text(
+        encoding="utf-8", errors="replace").startswith(SCAFFOLD_HEADER)
+    manifest = ("requirements.txt" if req.is_file() and not scaffolded
+                else "pyproject.toml's [project].dependencies")
+    out = []
+    for name, where in sorted(missing.items()):
+        shown = ", ".join(where[:3]) + (f" and {len(where) - 3} more" if len(where) > 3 else "")
+        out.append(
+            f"{shown} import(s) `{name}`, which no declared dependency provides: add "
+            f"`{_DIST_FOR_IMPORT.get(name, name)}` to {manifest} (a `pip install` run in "
+            "the agent sandbox is not installed for the gates — only the declared "
+            "dependencies are)"
+        )
+    return tuple(out)
+
+
 def undeclared_import_hints(output: str, workdir: Path) -> tuple[str, ...]:
     """One line per third-party module the output reports missing
     (``ModuleNotFoundError``) that the project does not declare — no manifest, only
@@ -175,17 +347,14 @@ def undeclared_import_hints(output: str, workdir: Path) -> tuple[str, ...]:
     ).read_text(encoding="utf-8", errors="replace").startswith(SCAFFOLD_HEADER)
     manifest = ("requirements.txt" if (root / "requirements.txt").is_file() and not scaffolded
                 else "pyproject.toml's [project].dependencies")
-    try:
-        installed = im.packages_distributions()
-    except Exception:
-        installed = {}
+    installed = _host_distributions()
     hints: list[str] = []
     for name in dict.fromkeys(m.split(".", 1)[0] for m in _NO_MODULE.findall(output)):
         if (name in sys.stdlib_module_names or (root / name).is_dir()
                 or (root / f"{name}.py").is_file()):
             continue
-        dist = _DIST_FOR_IMPORT.get(name) or next(iter(installed.get(name, ())), name)
-        if declared & {_normalized(n) for n in (name, dist, *installed.get(name, ()))}:
+        dist = _dist_for(name, installed)
+        if _import_declared(name, declared, installed):
             continue  # declared: the install or the import itself is the problem
         if lines:
             # A local model `pip install`ed it in its sandbox, so its own run passed,

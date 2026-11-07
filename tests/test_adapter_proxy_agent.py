@@ -1163,3 +1163,72 @@ def test_native_tool_results_carry_the_countdown(tmp_path: Path) -> None:
     last = results_of(seen[11])
     assert "TURN BUDGET: 1 turn left" in last[-1]["content"]
     assert "TURN BUDGET" not in last[0]["content"]
+
+
+# A stand-in pip, so the session's install needs no network.
+_FAKE_PIP = "pip() { echo Successfully installed bcrypt-4.1.0; }; pip install bcrypt"
+_BCRYPT_NOTE = (
+    "`bcrypt` is installed only in this sandbox; the gates install only what "
+    "requirements.txt / pyproject [project].dependencies declares, so add it there "
+    "(or a types-* stub for typing)"
+)
+
+
+def test_an_undeclared_sandbox_install_is_noted_and_refuses_done_once(tmp_path: Path) -> None:
+    # A local engineer pip-installed bcrypt, so its own runs passed; it never
+    # declared it, and every gate module importing it failed to collect.
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "requirements.txt").write_text("flask\n")
+    seen: list[list[dict[str, Any]]] = []
+    adapter = ProxyAgentAdapter(recording([
+        {"action": "run", "cmd": _FAKE_PIP},
+        {"action": "run", "cmd": "pip() { echo ok; }; pip install -r requirements.txt -e ."},
+        {"action": "done", "summary": "built"},
+        {"action": "write_file", "path": "requirements.txt", "content": "flask\nbcrypt\n"},
+        {"action": "done", "summary": "declared bcrypt"},
+    ], seen))
+    with Sandbox(src) as sb:
+        result = adapter.run(make_packet(sb.worktree), sb)
+    assert result.turns_used == 5
+    assert f"NOTE: {_BCRYPT_NOTE}" in observations(seen[1])[0]
+    assert "NOTE:" not in observations(seen[2])[1]
+    refusal = observations(seen[3])[2]
+    assert refusal.startswith(f"OBSERVATION:\nERROR: not done —\n- {_BCRYPT_NOTE}")
+
+
+def test_a_declared_or_insisted_install_ends_the_session(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "requirements.txt").write_text("bcrypt==4.1.0\n")
+    seen: list[list[dict[str, Any]]] = []
+    adapter = ProxyAgentAdapter(recording([
+        {"action": "run", "cmd": _FAKE_PIP},
+        {"action": "done", "summary": "built"},
+    ], seen))
+    with Sandbox(src) as sb:
+        assert adapter.run(make_packet(sb.worktree), sb).turns_used == 2
+    assert "NOTE:" not in observations(seen[1])[0]
+    (src / "requirements.txt").unlink()
+    adapter = ProxyAgentAdapter(recording([
+        {"action": "run", "cmd": _FAKE_PIP},
+        {"action": "done", "summary": "built"},
+        {"action": "done", "summary": "it is not imported"},
+    ], seen))
+    with Sandbox(src) as sb:
+        assert adapter.run(make_packet(sb.worktree), sb).turns_used == 3
+
+
+def test_native_sessions_get_the_install_note_and_done_refusal(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    seen: list[list[dict[str, Any]]] = []
+    adapter = ProxyAgentAdapter(no_json, tool_complete_fn=tool_turns([
+        [("run", {"cmd": _FAKE_PIP})],
+        [("done", {"summary": "built"})],
+        [("done", {"summary": "built"})],
+    ], seen))
+    with Sandbox(src) as sb:
+        assert adapter.run(make_packet(sb.worktree), sb).turns_used == 3
+    assert f"NOTE: {_BCRYPT_NOTE}" in results_of(seen[1])[0]["content"]
+    assert results_of(seen[2])[0]["content"].startswith("ERROR: not done —")

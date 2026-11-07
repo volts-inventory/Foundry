@@ -1267,9 +1267,16 @@ def _build_gate(
     profile: VerificationProfile | None,
     runner: TwoZoneGateRunner,
     pyenv: PythonBuildEnv | None = None,
+    planned: Iterable[str] = (),
 ) -> GateImpl:
+    """``planned``: the ticket files a wave check's tree may not hold yet, whose
+    modules the build's import check counts as the project's own."""
+    first_party = frozenset(
+        PurePosixPath(p).name.split(".", 1)[0] for p in planned_paths(planned)
+    )
     if profile is None:
-        return BuildGate(seal_key=runner.seal_key, pyenv=pyenv)
+        return BuildGate(seal_key=runner.seal_key, pyenv=pyenv, python=True,
+                         first_party=first_party)
     if profile.unavailable:
         return UnavailableGate("build", profile.unavailable)
     return BuildGate(
@@ -1278,6 +1285,8 @@ def _build_gate(
         seal_key=runner.seal_key,
         profile_name=profile.name,
         pyenv=pyenv,
+        python=profile.python,
+        first_party=first_party if profile.python else frozenset(),
     )
 
 
@@ -1541,9 +1550,9 @@ def run_build_gate(
     run_against = materialize_workdir(state, workdir, resolve=resolve, resolve_blob=resolve_blob)
     out: dict[str, Any] = {}
     stack = state.get("stack")
+    files = [f for a in _of_kind(state, TICKET_KIND)
+             for f in _resolve_typed(a, resolve, Ticket, TICKET_KIND).files]
     if stack is not None and not stack.profile:
-        files = [f for a in _of_kind(state, TICKET_KIND)
-                 for f in _resolve_typed(a, resolve, Ticket, TICKET_KIND).files]
         notes: list[tuple[str, str]] = []
         # Python installs only what a built manifest declares; its build needs none.
         missing = () if stack.language == "python" else unbuilt_manifests(files, workdir)
@@ -1580,7 +1589,7 @@ def run_build_gate(
     profile = gate_profile(state, profile)
     with _build_env(profile, workdir, rt) as pyenv:
         build = _run_gate(
-            _build_gate(profile, runner, pyenv),
+            _build_gate(profile, runner, pyenv, planned=files),
             rt=rt,
             runner=runner,
             config=config,

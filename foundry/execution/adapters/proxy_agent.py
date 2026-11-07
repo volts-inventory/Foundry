@@ -35,6 +35,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -231,6 +232,9 @@ class _Loop:
     # check; None = the packet carries no failures to fix.
     start: dict[str, bytes] | None = None
     done_refused: bool = False
+    # Distributions a `run` pip-installed into this sandbox, for the done check.
+    installed: list[str] = field(default_factory=list)
+    install_refused: bool = False
 
 
 def _contained(worktree: Path, rel: str) -> Path:
@@ -431,6 +435,8 @@ class ProxyAgentAdapter:
             items = raw if isinstance(raw, list) else [raw] if raw else []
             if refusal := _unchanged_done(st, [str(t) for t in items if str(t).strip()]):
                 return refusal, None
+            if refusal := _undeclared_done(st):
+                return refusal, None
             st.summary = str(act.get("summary", ""))
             st.triage = [str(t) for t in items if str(t).strip()]
             st.stopped = True
@@ -471,6 +477,8 @@ class ProxyAgentAdapter:
                 observation = self._execute(act, sandbox, worktree, st.files)
         except (ValueError, OSError) as exc:
             observation = f"ERROR: {exc}"
+        if action == "run":
+            observation += _install_notes(st, str(act.get("cmd", "")), observation)
         st.tree = _tree_state(worktree)
         st.repeats[fp] = (count, st.tree)
         if count >= _REPEAT_WARN:
@@ -582,6 +590,102 @@ def _unchanged_done(st: _Loop, triage: list[str]) -> str | None:
             "Make the changes now (write_file), re-run the build/typecheck and "
             "the tests, then declare done. If the task truly needs no change, call done "
             "again." + (f"\nYour triage names this unfinished work:{todo}" if todo else ""))
+
+
+def _undeclared_done(st: _Loop) -> str | None:
+    """The refusal of the first ``done`` while a package this session pip-installed
+    is still undeclared and a turn remains, else None. A local engineer installed
+    bcrypt in its sandbox, so its own runs passed; the gates install only the
+    manifest, so every module importing it failed to collect and the run was lost."""
+    if st.install_refused or st.left < 1 or not st.installed:
+        return None
+    from foundry.gates.pydeps import undeclared_distributions
+
+    missing = undeclared_distributions(st.installed, st.worktree)
+    if not missing:
+        return None
+    st.install_refused = True
+    return ("ERROR: not done —" + "".join(f"\n- {_install_note(d)}" for d in missing)
+            + "\nDeclare them now (write_file), then declare done. If the project does not "
+            "import them, call done again.")
+
+
+_PIP = re.compile(r"(?:.*/)?pip[\d.]*")
+_PYTHON = re.compile(r"(?:.*/)?python[\d.]*")
+_ENV_ASSIGN = re.compile(r"[A-Za-z_]\w*=.*")
+_SHELL_SEP = re.compile(r"&&|\|\||[;|\n]")
+_REDIRECT = re.compile(r"\d*[<>]")
+# pip / uv pip install options whose value is the next argument.
+_PIP_VALUE_OPTS = frozenset({
+    "-r", "--requirement", "-c", "--constraint", "-e", "--editable", "-i", "--index-url",
+    "--extra-index-url", "-f", "--find-links", "-t", "--target", "--prefix", "--root",
+    "--src", "-p", "--python", "--platform", "--python-version", "--implementation",
+    "--abi", "--upgrade-strategy", "--progress-bar", "--no-binary", "--only-binary",
+    "--trusted-host", "--cache-dir", "--log", "--proxy", "--retries", "--timeout",
+    "--exists-action", "--cert", "--client-cert", "-C", "--config-settings",
+    "--global-option", "--index-strategy", "--extra",
+})
+
+
+def _pip_installs(cmd: str) -> list[str]:
+    """The distributions a shell line's ``pip install`` / ``python -m pip install`` /
+    ``uv pip install`` names; requirement files (``-r``), editables (``-e .``), paths,
+    URLs and archives are left out: they install nothing by a plain name."""
+    from foundry.gates.pydeps import requirement_name
+
+    names: list[str] = []
+    for part in _SHELL_SEP.split(cmd):
+        try:
+            toks = shlex.split(part)
+        except ValueError:
+            continue
+        while toks and _ENV_ASSIGN.fullmatch(toks[0]):
+            toks = toks[1:]
+        at = next((i for i, t in enumerate(toks)
+                   if t == "install" and i > 0 and _PIP.fullmatch(toks[i - 1])), None)
+        if at is None or not _pip_launcher(toks[:at - 1]):
+            continue
+        skip = False
+        for tok in toks[at + 1:]:
+            if skip:
+                skip = False
+            elif _REDIRECT.match(tok):
+                skip = _REDIRECT.fullmatch(tok) is not None  # `> log`: its target too
+            elif tok.startswith("-"):
+                skip = tok in _PIP_VALUE_OPTS
+            elif not (tok.startswith((".", "/", "~")) or "://" in tok
+                      or tok.endswith((".whl", ".tar.gz", ".zip"))) and (
+                    name := requirement_name(tok)):
+                names.append(name)
+    return names
+
+
+def _pip_launcher(prefix: list[str]) -> bool:
+    """``pip`` itself, ``python -m pip`` or ``uv pip`` (not ``echo pip install x``)."""
+    return (not prefix or prefix == ["uv"]
+            or (len(prefix) == 2 and _PYTHON.fullmatch(prefix[0]) is not None
+                and prefix[1] == "-m"))
+
+
+def _install_note(dist: str) -> str:
+    return (f"`{dist}` is installed only in this sandbox; the gates install only what "
+            "requirements.txt / pyproject [project].dependencies declares, so add it there "
+            "(or a types-* stub for typing)")
+
+
+def _install_notes(st: _Loop, cmd: str, observation: str) -> str:
+    """A note per distribution a successful ``run`` pip-installed that the project's
+    manifest does not declare; each is remembered for the done check."""
+    dists = _pip_installs(cmd)
+    if not dists or not (observation.startswith("exit 0")
+                         or "Successfully installed" in observation
+                         or "already satisfied" in observation):
+        return ""
+    from foundry.gates.pydeps import undeclared_distributions
+
+    st.installed.extend(d for d in dists if d not in st.installed)
+    return "".join(f"\nNOTE: {_install_note(d)}"
+                   for d in undeclared_distributions(dists, st.worktree))
 
 
 def _step_hints(out: str, worktree: Path) -> str:

@@ -24,7 +24,7 @@ import foundry.gates.pydeps as pydeps
 import foundry.python_env as python_env
 from foundry.agents._common import emit_artifact
 from foundry.gates.attestation import ZoneBSigner
-from foundry.gates.build import BuildGate, build_findings
+from foundry.gates.build import UNDECLARED_IMPORTS, BuildGate, build_findings
 from foundry.gates.discriminator import HeldOutMutant, TestSuiteDiscriminator
 from foundry.gates.profiles import PROFILES, stack_profile
 from foundry.gates.pydeps import (
@@ -185,6 +185,63 @@ def test_a_manifest_line_that_is_not_a_plain_requirement_gets_no_hint(
 def test_the_build_finding_carries_the_undeclared_import_hint(tmp_path: Path) -> None:
     findings = build_findings(1, _NO_FLASK, "", tmp_path, step="smoke")
     assert any(f.startswith("the project imports `flask`") for f in findings)
+
+
+_IMPORTS = (
+    "from __future__ import annotations\n"
+    "import os, json\n"
+    "import flask\n"
+    "import bcrypt\n"
+    "import yaml\n"
+    "from app.models import User\n"
+    "from . import sibling\n"
+    "import helpers\n"
+    "import later\n"
+    "try:\n    import ujson\nexcept ImportError:\n    ujson = None\n"
+    "if TYPE_CHECKING:\n    import stubonly\n"
+    "def f():\n    import lazydep\n"
+)
+
+
+def test_the_tree_scan_names_only_unconditional_undeclared_imports(tmp_path: Path) -> None:
+    # The notes build: Flask declared, bcrypt only `pip install`ed in the sandbox.
+    _write(tmp_path, {"requirements.txt": "Flask==3.0.0\nPyYAML==6.0.1\n",
+                      "app/__init__.py": "", "app/models.py": "", "app/views.py": _IMPORTS,
+                      "lib/helpers.py": "", "tests/test_x.py": "import bcrypt\n"})
+    missing = pydeps.undeclared_imports(tmp_path, first_party=frozenset({"later"}))
+    assert missing == {"bcrypt": ("app/views.py", "tests/test_x.py")}
+    assert pydeps.undeclared_import_findings(missing, tmp_path) == (
+        "app/views.py, tests/test_x.py import(s) `bcrypt`, which no declared dependency "
+        "provides: add `bcrypt` to requirements.txt (a `pip install` run in the agent "
+        "sandbox is not installed for the gates — only the declared dependencies are)",
+    )
+    # What the build venv installed (a declared dependency's own dependency) is there.
+    (tmp_path.parent / "site" / "bcrypt").mkdir(parents=True)
+    assert pydeps.undeclared_imports(tmp_path, site=tmp_path.parent / "site",
+                                     first_party=frozenset({"later"})) == {}
+
+
+@pytest.mark.parametrize("manifest", [
+    {}, {"requirements.txt": SCAFFOLD_HEADER + "flask\n"},
+    {"requirements.txt": "flask\n-e .\n"},
+])
+def test_the_tree_scan_is_silent_without_a_plain_manifest(
+    tmp_path: Path, manifest: dict[str, str]
+) -> None:
+    _write(tmp_path, {**manifest, "app.py": "import bcrypt\n"})
+    assert pydeps.undeclared_imports(tmp_path) == {}
+
+
+def test_an_undeclared_import_fails_a_python_build(tmp_path: Path) -> None:
+    _write(tmp_path, {"requirements.txt": "pytest\n", "app.py": "import bcrypt\n"})
+    obs = BuildGate(python=True).execute(tmp_path)
+    assert BuildGate(python=True).decide(obs) is GateStatus.FAIL
+    assert obs.findings[0].startswith(UNDECLARED_IMPORTS)
+    assert "add `bcrypt` to requirements.txt" in obs.findings[1]
+    assert BuildGate().decide(BuildGate().execute(tmp_path)) is GateStatus.PASS  # not Python
+    _write(tmp_path, {"requirements.txt": "pytest\nbcrypt\n"})
+    assert BuildGate(python=True).decide(BuildGate(python=True).execute(tmp_path)) \
+        is GateStatus.PASS
 
 
 def test_install_failure_classification() -> None:

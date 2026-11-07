@@ -88,6 +88,7 @@ from foundry.schemas.implementation import (
     CONTRACTS_TICKET_ID,
     FEATURE_DIR,
     HARNESS_TICKET_ID,
+    SKELETON_TASK_ID,
     Difficulty,
     Epic,
     Specialty,
@@ -344,7 +345,7 @@ _STR_ARRAY: dict[str, Any] = {"type": "array", "items": {"type": "string"}}
 # Contract kinds; the code kinds are written as real code by the contracts ticket.
 CODE_CONTRACT_KINDS = ("function", "class", "type")
 CONTRACT_KINDS = (*CODE_CONTRACT_KINDS, "http", "cli", "event")
-_GENERATED_TICKETS = frozenset({CONTRACTS_TICKET_ID, HARNESS_TICKET_ID})
+_GENERATED_TICKETS = frozenset({CONTRACTS_TICKET_ID, HARNESS_TICKET_ID, SKELETON_TASK_ID})
 
 # What the harness ticket always writes, on top of the plan's harness_files: the
 # manifest and lockfile it adds the runner to, and the runner's entry file, so its

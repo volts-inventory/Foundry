@@ -73,6 +73,7 @@ from foundry.schemas.gates import (
 from foundry.schemas.implementation import (
     CONTRACTS_TICKET_ID,
     FEATURE_DIR,
+    SKELETON_TASK_ID,
     FeatureDiff,
     StackDecision,
     Ticket,
@@ -1003,7 +1004,8 @@ def _write_contracts(
     wave0, known = _wave0_ticket_ids(state, resolve)
     frozen_at = min(
         (a.seq for a, d in diffs
-         if d.task_id not in wave0 and (d.task_id in known or not _is_fix(d.task_id))),
+         if d.task_id not in wave0 and d.task_id != SKELETON_TASK_ID
+         and (d.task_id in known or not _is_fix(d.task_id))),
         default=None,
     )
     owned = [a for a, _ in diffs if frozen_at is None or a.seq < frozen_at]

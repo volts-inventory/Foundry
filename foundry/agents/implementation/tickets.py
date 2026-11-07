@@ -59,6 +59,12 @@ from foundry.agents.implementation.junior_engineer import (
 )
 from foundry.agents.implementation.personas import persona_for
 from foundry.agents.implementation.senior_engineer import NODE_ID as SENIOR_NODE_ID
+from foundry.agents.implementation.stubs import (
+    IMPL_SUFFIX,
+    python_skeleton,
+    signature_changes,
+    stub_signatures,
+)
 from foundry.canonical import content_digest
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
 from foundry.execution.adapters.tiered import (
@@ -87,6 +93,7 @@ from foundry.schemas.implementation import (
     DEFAULT_TICKET_TIERS,
     FEATURE_DIR,
     HARNESS_TICKET_ID,
+    SKELETON_TASK_ID,
     Difficulty,
     FeatureDiff,
     Specialty,
@@ -160,6 +167,9 @@ OVERLAY_TRIAGE = "wave-overlay"
 CONTRACT_DUP_TRIAGE = "contract-duplicate"
 # The contracts ticket's last attempt still left out names its planned contracts declare.
 CONTRACT_DRIFT_TRIAGE = "contract-drift"
+# An implementation ticket's last attempt still changed a stubbed public signature.
+SIGNATURE_CHANGE_TRIAGE = "signature-change"
+SKELETON_TRIAGE = "skeleton"
 # Attempts a ticket gets before it is skipped; bounds the loop on a ticket that
 # keeps erroring.
 MAX_TICKET_ATTEMPTS = 2
@@ -627,6 +637,8 @@ class _ScopedAdapter:
         scopes: Mapping[str, tuple[str, ...]],
         contracts: Mapping[str, str] | None = None,
         names: Mapping[str, tuple[Mapping[str, Sequence[str]], bool]] | None = None,
+        stubs: Mapping[str, tuple[Mapping[str, str], bool]] | None = None,
+        skeleton: Mapping[str, str] | None = None,
     ) -> None:
         assert rt.adapter is not None
         self._rt = rt
@@ -634,6 +646,9 @@ class _ScopedAdapter:
         self._contracts = dict(contracts or {})
         # Task id -> (planned contract -> the names it declares, fail the attempt?).
         self._names = dict(names or {})
+        # Task id -> (its typed stub files: path -> stub text, fail the attempt?).
+        self._stubs = dict(stubs or {})
+        self._skeleton = dict(skeleton or {})
         self.supports_turn_snapshots = rt.adapter.supports_turn_snapshots
         # Task id -> why its session counted as empty. The work pool records a
         # worker's exception only as text, so the type is kept here.
@@ -645,7 +660,7 @@ class _ScopedAdapter:
         files = self._scopes.get(tid, ())
         result = trim_to_write_scope(result, sandbox, files, tid)
         try:
-            _require_scope_written(result, sandbox, files, tid)
+            _require_scope_written(result, sandbox, files, tid, self._skeleton)
         except EmptyTicketError as exc:
             self.empty[tid] = str(exc)
             raise
@@ -653,6 +668,9 @@ class _ScopedAdapter:
             required, strict = self._names[tid]
             result = _check_contract_names(result, sandbox, files, tid, required,
                                            strict=strict)
+        if tid in self._stubs:
+            stubs, strict = self._stubs[tid]
+            result = _check_stub_signatures(result, sandbox, tid, stubs, strict=strict)
         result = _flag_contract_duplicates(result, sandbox, self._contracts, tid)
         _mirror_diff_blob(self._rt, sandbox, result)
         return result
@@ -735,13 +753,163 @@ def _check_contract_names(
     return result.model_copy(update={"triage": (*result.triage, note)})
 
 
+class SignatureChangeError(ContractDriftError):
+    """An implementation ticket changed a public signature its typed stub planned."""
+
+
+def _check_stub_signatures(
+    result: AdapterResult, sandbox: Sandbox, task_id: str, stubs: Mapping[str, str],
+    *, strict: bool,
+) -> AdapterResult:
+    """The ticket's stub files must keep every stubbed name, parameter list and
+    return annotation: the other tickets code against them. ``strict`` fails the
+    attempt (the retry sees the findings); on the last attempt the files are kept
+    and noted, as for contract drift."""
+    worktree = Path(sandbox.worktree)
+    diff = _written_sources(result, sandbox, task_id)
+    findings: list[str] = []
+    for path, stub in sorted(stubs.items()):
+        if path in diff:
+            text = diff[path]
+        else:
+            try:
+                target = worktree / path
+                text = target.read_text(encoding="utf-8") if target.is_file() else None
+            except (OSError, UnicodeDecodeError):
+                continue
+        findings += [f"{path}: {f}" for f in signature_changes(stub, text)]
+    if not findings:
+        return result
+    why = ("; ".join(findings) + ". These are the planned public signatures every other "
+           "ticket codes against: keep each exactly as the typed stub gives it and only "
+           "fill in the bodies")
+    if strict:
+        raise SignatureChangeError(why)
+    note = GateTriage(
+        name=SIGNATURE_CHANGE_TRIAGE, run_against=f"task/{task_id}",
+        explanation=why[:2000], produced_by=NODE_ID,
+        seq=Seq("scope", 0, 0, NODE_ID, len(result.triage)),
+    )
+    return result.model_copy(update={"triage": (*result.triage, note)})
+
+
+def skeleton_files(
+    state: FactoryState, resolve: ArtifactResolver, resolve_blob: BlobResolver | None
+) -> dict[str, str]:
+    """The typed stub files the skeleton diff wrote (path -> stub text)."""
+    from foundry.graph.gate_wiring import MaterializationError, _diff_ops, _resolve_typed
+
+    handles = [a for a in state.get("artifacts") or ()
+               if a.kind == _FEATURE_DIFF_KIND and a.task_id == SKELETON_TASK_ID]
+    if not handles or resolve_blob is None:
+        return {}
+    try:
+        diff = _resolve_typed(max(handles, key=lambda a: a.seq), resolve, FeatureDiff,
+                              _FEATURE_DIFF_KIND)
+        return dict(_diff_ops(diff, resolve_blob).writes)
+    except MaterializationError:
+        return {}
+
+
+def stub_rules(
+    ticket: Ticket, skeleton: Mapping[str, str], contracts: Mapping[str, InterfaceContract]
+) -> list[str]:
+    """The packet rules for a ticket that owns typed stubs or calls a contract the
+    skeleton implements: fill the bodies, keep the signatures, construct the
+    ``<Class>Impl`` by its name."""
+    rules: list[str] = []
+    own = [p for p in ticket.files if skeleton.get(p)]
+    if own:
+        rules.append(
+            f"TYPED STUBS: {', '.join(own)} already exist as typed stubs generated from "
+            "the planned contracts: each planned function and method with its exact "
+            "signature and a `raise NotImplementedError` body (a contract class X is "
+            f"implemented by X{IMPL_SUFFIX}, a subclass of the contract type). Fill in "
+            "every body and add whatever private helpers you need; never rename or "
+            "remove a stubbed class, function or method, and never change its "
+            "parameters or return annotation (checked: a changed public signature "
+            "fails the attempt)."
+        )
+    impls: dict[str, str] = {}  # contract class -> "XImpl in path"
+    for path, text in skeleton.items():
+        if path in ticket.files:
+            continue
+        for name, sig in (stub_signatures(text) or {}).items():
+            base = sig.removeprefix("class ").strip()
+            if sig.startswith("class ") and name == f"{base}{IMPL_SUFFIX}":
+                impls[base] = f"{name} in {path}"
+    wanted = {n for c in ticket.consumes
+              for n in (c, c.rpartition(".")[0],
+                        *(contract_members(contracts[c].signature) if c in contracts else ()))}
+    named = [f"{cls} is implemented by {where}" for cls, where in sorted(impls.items())
+             if cls in wanted]
+    if named:
+        rules.append("IMPLEMENTATIONS: " + "; ".join(named) + ". Construct those classes "
+                     "by these names and annotate with the contract types.")
+    return rules
+
+
+def _skeleton_diff(
+    rt: AgentRuntime, config: RunnableConfig, tickets: Sequence[Ticket],
+    contracts: Mapping[str, InterfaceContract], contract_files: Sequence[str],
+    overlay: Mapping[str, str | None], built: Sequence[AdapterResult],
+    blobs: BlobResolver, base: str,
+) -> tuple[dict[str, list[Any]], tuple[str, ...]]:
+    """The skeleton FeatureDiff on top of ``overlay`` plus this wave's ``built``
+    diffs (the contracts file as just built), with the generator's concerns."""
+    from foundry.graph.gate_wiring import MaterializationError, _apply_hunks, _diff_ops
+
+    tree = dict(overlay)
+    try:
+        for got in built:
+            probe = FeatureDiff(diff_uri=got.diff_uri, task_id="probe", branch="task/probe",
+                                base_tree_sha="", seq=Seq("scope", 0, 0, NODE_ID, 0))
+            ops = _diff_ops(probe, blobs)
+            tree.update(ops.writes)
+            tree.update(dict.fromkeys(ops.deletes))
+            for rel, hunks in ops.patches.items():
+                if isinstance(old := tree.get(rel), str):
+                    tree[rel] = _apply_hunks(old, hunks, diff_uri=got.diff_uri, rel=rel)
+    except MaterializationError as exc:
+        return {}, (f"No typed skeleton: the contracts could not be read ({exc}).",)
+    texts = {f: t for f in contract_files if isinstance(t := tree.get(f), str)}
+    sk = python_skeleton(list(contracts.values()), tickets, texts,
+                         exists=(p for p, t in tree.items() if t is not None))
+    if not sk.files or rt.cas is None:
+        return {}, tuple(sk.concerns)
+    blob = json.dumps({"kind": "full-file-snapshot", "files": sk.files}, sort_keys=True,
+                      ensure_ascii=False).encode("utf-8")
+    key = content_digest({"skeleton": sk.files})
+    diff = FeatureDiff(
+        diff_uri=rt.cas.put_blob(blob), task_id=SKELETON_TASK_ID,
+        branch=f"task/{SKELETON_TASK_ID}", base_tree_sha=base,
+        seq=rt.seq(config, NODE_ID, f"diff:{SKELETON_TASK_ID}"),
+    )
+    artifact = Artifact(
+        kind=_FEATURE_DIFF_KIND, uri=f"cas://feature_diff/{SKELETON_TASK_ID}-{key}",
+        produced_by=NODE_ID, task_id=SKELETON_TASK_ID,
+        seq=rt.seq(config, NODE_ID, f"artifact:{SKELETON_TASK_ID}"),
+    )
+    rt.cas.put_body_at(artifact.uri, diff)
+    note = GateTriage(
+        name=SKELETON_TRIAGE, run_against=f"task/{SKELETON_TASK_ID}",
+        explanation=("typed stubs: " + ", ".join(
+            f"{p} ({sk.owners[p]})" for p in sorted(sk.files))
+            + "".join(f"; {c}" for c in sk.concerns))[:2000],
+        produced_by=NODE_ID, seq=rt.seq(config, NODE_ID, SKELETON_TRIAGE),
+    )
+    return {"artifacts": [artifact], "gate_triage": [note]}, tuple(sk.concerns)
+
+
 def _require_scope_written(
-    result: AdapterResult, sandbox: Sandbox, files: Sequence[str], task_id: str
+    result: AdapterResult, sandbox: Sandbox, files: Sequence[str], task_id: str,
+    skeleton: Mapping[str, str] | None = None,
 ) -> None:
     """Fail a ticket whose diff touches none of its ``files`` while none of them
     exists yet: recording that empty diff as built would unblock its dependents on
     a tree without the work (a session that ran out of turns before writing). It
-    becomes an ordinary failed attempt — retried, then skipped. An unrestricted
+    becomes an ordinary failed attempt — retried, then skipped. A file still
+    exactly as the typed skeleton wrote it counts as unwritten. An unrestricted
     scope or an unparseable body is left to integration."""
     from foundry.graph.gate_wiring import MaterializationError, _diff_ops
 
@@ -758,7 +926,18 @@ def _require_scope_written(
     if set(ops.writes) | set(ops.deletes) | set(ops.patches):
         return
     worktree = Path(sandbox.worktree)
-    if any((worktree / f.rstrip("/")).exists() for f in files):
+    skeleton = skeleton or {}
+
+    def written(f: str) -> bool:
+        path = worktree / f.rstrip("/")
+        if f not in skeleton or not path.is_file():
+            return path.exists()
+        try:
+            return path.read_text(encoding="utf-8") != skeleton[f]
+        except (OSError, UnicodeDecodeError):
+            return True
+
+    if any(written(f) for f in files):
         return
     report = "; ".join(t.explanation for t in result.triage)
     raise EmptyTicketError(
@@ -1454,6 +1633,7 @@ def make_engineering_node(
 
         contract_files = contract_paths(state, resolve)
         built_contracts = {f: c for f in contract_files if isinstance(c := overlay.get(f), str)}
+        skeleton = skeleton_files(state, resolve, blobs)
 
         # The run's envelope, split across specialties by ticket count; spend of
         # tickets built in earlier waves stays committed so the cap spans the run.
@@ -1535,8 +1715,14 @@ def make_engineering_node(
             if required:
                 tid = task_id_for_ticket(t.id)
                 names[tid] = (required, len(failures.get(tid, ())) + 1 < MAX_TICKET_ATTEMPTS)
+        stubs: dict[str, tuple[Mapping[str, str], bool]] = {}
+        for t in wave:
+            stubbed = {p: text for p, text in skeleton.items() if p in t.files and text}
+            if stubbed:
+                tid = task_id_for_ticket(t.id)
+                stubs[tid] = (stubbed, len(failures.get(tid, ())) + 1 < MAX_TICKET_ATTEMPTS)
         scoped = _ScopedAdapter(rt, {task_id_for_ticket(t.id): t.files for t in wave},
-                                built_contracts, names)
+                                built_contracts, names, stubs, skeleton)
         adapter_name = _adapter_name(rt)
         submitted: dict[str, str] = {}
         packets: dict[str, TaskPacket] = {}
@@ -1580,6 +1766,9 @@ def make_engineering_node(
                     contract_files=contract_files,
                     scenarios=owned,
                 )
+                if extra := stub_rules(ticket, skeleton, contracts):
+                    packet = packet.model_copy(update={"task": {
+                        **packet.task, "rules": [*packet.task["rules"], *extra]}})
                 if tid in rebuild:
                     packet = _escalated_packet(packet, str(target), rebuild[tid], turn_budget)
                 elif target and tid in already and _is_local(rt, tasks[tid].tier):
@@ -1700,6 +1889,25 @@ def make_engineering_node(
                         seq=rt.seq(config, NODE_ID, f"{STOPPED_TRIAGE}:{tid}"),
                     ))
 
+        stack = state.get("stack")
+        built_ids = {t.id for t in built}
+        if (CONTRACTS_TICKET_ID in built_ids and not skeleton and blobs is not None
+                and (stack is None or stack.language == "python")
+                and not any(a.kind == _FEATURE_DIFF_KIND and a.task_id == SKELETON_TASK_ID
+                            for a in state.get("artifacts") or ())):
+            # Right after the contracts build, in the same wave, so this wave's check
+            # type-checks the stubs against the contracts before any ticket fills them.
+            sk_writes, sk_concerns = _skeleton_diff(
+                rt, config, tickets, contracts, contract_files, overlay,
+                [r for t in built if isinstance(r := results.get(task_id_for_ticket(t.id)),
+                                                AdapterResult)],
+                blobs, bases.get(task_id_for_ticket(CONTRACTS_TICKET_ID), ""),
+            )
+            for channel, records in sk_writes.items():
+                merged.setdefault(channel, []).extend(records)
+            skeleton_concerns = sk_concerns
+        else:
+            skeleton_concerns = ()
         _order_after_integrated(state, merged)
         for channel, records in merged.items():
             writes.setdefault(channel, []).extend(records)
@@ -1718,6 +1926,7 @@ def make_engineering_node(
                 *(f"{tid} stopped early on {tasks[tid].tier}, its partial work kept: "
                   f"{why[:300]}" for tid, why in sorted(stopped.items())
                   if any(task_id_for_ticket(t.id) == tid for t in built)),
+                *skeleton_concerns,
             ),
         ))
         return writes

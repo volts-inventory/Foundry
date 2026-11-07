@@ -31,7 +31,11 @@ the call with no determinism control at all) — so the proxy pins
 the manifest. Models that honour sampling (Anthropic Sonnet/Haiku) get
 ``temperature 0``. Thinking is enabled (adaptive) only for
 ideation-class reasoning-model calls and OMITTED for deterministic gate/judge
-calls.
+calls. Local tiers are the exception: a local model with a vendor sampling
+profile (Qwen: "DO NOT use greedy decoding") gets that profile on every call,
+gates and judges included, plus a request-derived ``seed`` — determinism for a
+verdict comes from the structured channel, the gates and attestation, and
+replayability from the seed (see ``_LOCAL_SAMPLING_PROFILES``).
 
 Degraded-mode rule (fail-closed): on transport failure the proxy retries
 with bounded backoff and then raises :class:`ProxyUnavailable`. It NEVER
@@ -111,7 +115,8 @@ TIER_MODELS: dict[str, str] = {
 #   - the Anthropic T1 reasoning model (claude-opus-*) — sampling params are
 #     removed (existing behaviour, kept).
 # Everything else (Anthropic Sonnet/Haiku) honours `temperature`,
-# so a deterministic call pins temperature 0 there.
+# so a deterministic call pins temperature 0 there — except a local tier whose
+# model has a sampling profile (below), where greedy decoding is what degrades it.
 _DEFAULT_EFFORT_MODEL_GLOBS: tuple[str, ...] = (
     "claude-opus-*",
     "gpt-*",
@@ -279,6 +284,85 @@ def default_sampling_policy() -> SamplingPolicy:
     return SamplingPolicy()
 
 
+# ---- Local sampling profiles (local tiers only) --------------------------------
+#
+# Local tiers do NOT take the temperature-0 determinism control above. Qwen's
+# model cards say "DO NOT use greedy decoding, as it can lead to performance
+# degradation and endless repetitions" — exactly the runaway/repeating JSON and
+# fix passes repeating one move seen on local runs. Every local-tier call
+# (ideation, gate, judgment, agent turns) whose model matches a glob below is sent
+# the vendor's recommended non-thinking sampling instead. That costs nothing the
+# factory relies on: a verdict's trustworthiness comes from the structured-output
+# channel, the gates' own execution and the Zone-B attestation, not from greedy
+# decoding; and replayability comes from a fixed per-request `seed` (same request
+# => same seed => same sample on a seeded server), so the call cache and a
+# crash-resume still see the reply they would have, while a retry — whose prompt
+# already differs — draws a fresh sample. First match wins.
+_LOCAL_SAMPLING_PROFILES: tuple[tuple[str, dict[str, float]], ...] = (
+    # Qwen3-Coder generation_config.json.
+    ("*qwen*coder*", {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "repeat_penalty": 1.05}),
+    # Qwen3 / 3.5 / 3.6 non-thinking ("instruct") mode. The card allows a presence
+    # penalty of 0-2; the low end, because it also taxes JSON's structural tokens.
+    ("*qwen3*", {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0.0,
+                 "presence_penalty": 1.0}),
+)
+LOCAL_SAMPLING_KEYS: frozenset[str] = frozenset({
+    "temperature", "top_p", "top_k", "min_p",
+    "presence_penalty", "frequency_penalty", "repeat_penalty",
+})
+LOCAL_SAMPLING_ENV = "FOUNDRY_LOCAL_SAMPLING"
+
+
+def parse_local_sampling(value: str) -> dict[str, float] | Literal["off"] | None:
+    """``FOUNDRY_LOCAL_SAMPLING``: unset/blank = the built-in profile table;
+    ``off`` = greedy (temperature 0 on gates/judges, as on cloud); otherwise
+    ``key=value,...`` over :data:`LOCAL_SAMPLING_KEYS`, applied to every local
+    model. ValueError on anything else."""
+    value = value.strip()
+    if not value:
+        return None
+    if value.lower() == "off":
+        return "off"
+    profile: dict[str, float] = {}
+    for item in value.split(","):
+        key, sep, raw = item.partition("=")
+        key = key.strip()
+        if not sep or key not in LOCAL_SAMPLING_KEYS:
+            raise ValueError(
+                f"{LOCAL_SAMPLING_ENV}: bad entry {item.strip()!r}; expected 'off' or "
+                f"key=value with key in {', '.join(sorted(LOCAL_SAMPLING_KEYS))}"
+            )
+        try:
+            profile[key] = int(raw) if key == "top_k" else float(raw)
+        except ValueError:
+            raise ValueError(
+                f"{LOCAL_SAMPLING_ENV}: {key} needs a number, got {raw.strip()!r}"
+            ) from None
+    return profile
+
+
+def local_sampling_for(
+    model_id: str, override: dict[str, float] | Literal["off"] | None = None
+) -> dict[str, float] | None:
+    """The sampling profile for a local model, or None to keep the greedy default."""
+    if override == "off":
+        return None
+    if override is not None:
+        return dict(override)
+    name = model_id.lower()
+    for glob, profile in _LOCAL_SAMPLING_PROFILES:
+        if fnmatchcase(name, glob):
+            return dict(profile)
+    return None
+
+
+def _seeded(request: dict[str, Any], profile: Mapping[str, Any]) -> dict[str, Any]:
+    """``profile`` plus a seed derived from the rest of ``request``."""
+    body = {k: v for k, v in request.items() if k != "local_sampling"}
+    digest = hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode()).digest()
+    return {**profile, "seed": int.from_bytes(digest[:4], "big") & 0x7FFFFFFF}
+
+
 # ---- Pinned-ID-drift policy (arch §8, ops §5) ---------------------------------
 #
 # Drift is ALWAYS recorded (manifest + drift_events) — the policy only decides
@@ -403,7 +487,8 @@ def is_transient_failure(exc: BaseException) -> bool:
     """True when a durable run may sleep and re-invoke after ``exc``: a
     ProxyUnavailable / pause-and-escalate, not a real build failure. An
     unparseable structured reply is not transient: the re-invoked node sends the
-    same prompt and a deterministic (temperature 0, local) model answers the same."""
+    same prompt and a deterministic model (temperature 0, or a local model's
+    request-derived seed) answers the same."""
     if isinstance(exc.__cause__, StructuredOutputError):
         return False
     return "ProxyUnavailable" in type(exc).__name__ or "pause-and-escalate" in str(exc)
@@ -413,8 +498,8 @@ def _with_parse_correction(
     request: dict[str, Any], miss: ProviderResponse, attempt: int
 ) -> dict[str, Any]:
     """``request`` with the previous unparseable reply named in its last user turn,
-    so the re-roll is a different prompt: a temperature-0 call resent unchanged
-    returns the same reply (and the call cache would replay it)."""
+    so the re-roll is a different prompt: a temperature-0 (or seeded) call resent
+    unchanged returns the same reply (and the call cache would replay it)."""
     note = (
         f"\n\n[Retry {attempt}: your previous reply ({len(miss.text)} chars, stop reason "
         f"{miss.stop_reason!r}) was not one complete JSON object. Reply with ONLY that "
@@ -429,7 +514,10 @@ def _with_parse_correction(
         last["content"] = [*last["content"], {"type": "text", "text": note.strip()}]
     else:
         messages.append({"role": "user", "content": note.strip()})
-    return {**request, "messages": messages}
+    corrected = {**request, "messages": messages}
+    if "local_sampling" in request:
+        corrected["local_sampling"] = _seeded(corrected, request["local_sampling"])
+    return corrected
 
 
 @dataclass(frozen=True, slots=True)
@@ -799,6 +887,9 @@ class ModelProviderProxy:
         # (``local_slot``) can still make its own calls through here.
         self._local_tiers: frozenset[str] = frozenset(local_tiers)
         self._local_lock: threading.RLock = local_lock or threading.RLock()
+        # Local tiers' sampling override (FOUNDRY_LOCAL_SAMPLING), parsed now so a
+        # typo fails at startup rather than on the first local call.
+        self._local_sampling = parse_local_sampling(os.environ.get(LOCAL_SAMPLING_ENV, ""))
         self._lineage = lineage_map or LineageMap()
         self._signer = signer
         # Backend/model-aware determinism control (arch §8): which knob a
@@ -939,6 +1030,18 @@ class ModelProviderProxy:
             # A verdict is ~1k tokens; a local model stuck repeating findings runs to
             # the cap at ~12 tok/s, so each such attempt would cost ~20 minutes.
             request["max_tokens"] = min(int(request["max_tokens"]), _LOCAL_JUDGMENT_MAX_TOKENS)
+        if tier in self._local_tiers:
+            profile = local_sampling_for(requested_model, self._local_sampling)
+            if profile is not None:
+                # Vendor sampling replaces greedy on local tiers (see
+                # _LOCAL_SAMPLING_PROFILES); the seed keeps the call replayable.
+                request.pop("temperature", None)
+                request["local_sampling"] = _seeded(request, profile)
+                sampling = dict(request["local_sampling"])
+                sampling_note = (
+                    f"local sampling profile for {requested_model} in lieu of "
+                    "greedy decoding (vendor: greedy degrades this model); seeded per request"
+                )
 
         label = f"model call: {node_id} ({tier}, {purpose})"
         cached = self._cached(request, schema)

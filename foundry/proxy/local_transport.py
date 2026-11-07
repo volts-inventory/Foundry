@@ -12,6 +12,9 @@ Structured output: a schema call first asks the server for a grammar-constrained
 later schema call falls back to prompt-and-parse (a json-only instruction, then
 the proxy's lenient JSON extraction) — the same fail-closed channel the CLI
 backends use.
+
+Sampling: the proxy's per-model local profile arrives as ``local_sampling``;
+OpenAI fields go as such, the rest as extra body fields (see ``_OPENAI_SAMPLING``).
 """
 
 from __future__ import annotations
@@ -61,6 +64,12 @@ DEFAULT_LOCAL_TIMEOUT_S = 1800.0
 _PLACEHOLDER_KEY = "local-no-key"
 
 _THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL)
+# The sampling fields Ollama's /v1/chat/completions maps onto its options. Its Go
+# decoder silently drops the rest (top_k, min_p, repeat_penalty), so those ride as
+# extra body fields: honoured by llama.cpp / vLLM / LM Studio, while on Ollama the
+# model's Modelfile PARAMETERs supply them (Qwen tags ship top_k 20, min_p 0).
+_OPENAI_SAMPLING = frozenset({"temperature", "top_p", "presence_penalty",
+                              "frequency_penalty", "seed"})
 _SCHEMA_REJECTION_MARKERS = ("response_format", "json_schema", "schema", "structured", "grammar")
 
 
@@ -135,6 +144,12 @@ class LocalOpenAITransport:
             params["max_tokens"] = max_tokens
         if "temperature" in request:
             params["temperature"] = request["temperature"]
+        sampling = request.get("local_sampling")
+        if isinstance(sampling, dict):
+            params.update({k: v for k, v in sampling.items() if k in _OPENAI_SAMPLING})
+            extra = {k: v for k, v in sampling.items() if k not in _OPENAI_SAMPLING}
+            if extra:
+                params["extra_body"] = extra
         if "tools" in request:
             if self._tools_by_model.get(model) is False:
                 raise ToolsUnsupported(f"local server rejected tools for {model}")

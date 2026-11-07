@@ -56,3 +56,5 @@ def _in_process_test_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     # dir, where every test's thread-id "cli-run" shares one model-call replay cache
     # — so a later test replays an earlier test's responses instead of calling.
     monkeypatch.delenv("FOUNDRY_STATE_DIR", raising=False)
+    # And a developer's local sampling override would change every local request.
+    monkeypatch.delenv("FOUNDRY_LOCAL_SAMPLING", raising=False)

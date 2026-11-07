@@ -2235,7 +2235,48 @@ def keep_best(
     runner-signed newest verdicts are the restored tree's), both kept only if the
     re-run's digest is the best tree's. Returns True iff the tree was restored.
 
+    The new entries are stamped with the run clock once the check (and any
+    restore) is done, the pass's own entry with its cost since the window's
+    previous check: the fixer session, the check and the restore.
+
     Call before the budget is settled, on ``out``'s own verdicts."""
+    known = len(out.get("fix_passes") or ())
+    window = fix_window(state, boundary, scope)
+    prior = [p for p in state.get("fix_passes") or () if p.window == window]
+    restored = _keep_best(state, config, out, boundary=boundary, scope=scope, rt=rt,
+                          resolve=resolve, resolve_blob=resolve_blob, rerun=rerun)
+    new = list((out.get("fix_passes") or [])[known:])
+    if not new:
+        return restored
+    clock = _run_clock(rt)
+    last = max(prior, key=_pass_order).clock_s if prior else None
+    elapsed = (clock - last if clock is not None and last is not None and clock >= last
+               else None)
+    out["fix_passes"][known:] = [
+        p.model_copy(update={"clock_s": clock, "elapsed_s": elapsed if i == 0 else None})
+        for i, p in enumerate(new)]
+    return restored
+
+
+def _run_clock(rt: AgentRuntime) -> float | None:
+    """The run's elapsed seconds off its token meter: unlike a process clock it
+    survives a resume and leaves out the time the run was stopped."""
+    meter = getattr(rt.proxy, "token_meter", None)
+    return float(meter.elapsed_s) if meter is not None else None
+
+
+def _keep_best(
+    state: FactoryState,
+    config: RunnableConfig,
+    out: dict[str, Any],
+    *,
+    boundary: str,
+    scope: frozenset[str],
+    rt: AgentRuntime,
+    resolve: ArtifactResolver,
+    resolve_blob: BlobResolver,
+    rerun: Callable[[FactoryState], dict[str, Any]],
+) -> bool:
     names = _BOUNDARY_GATES[boundary]
     verdicts = _newest_per_name(g for g in out.get("gates") or () if g.name in names)
     if not verdicts:

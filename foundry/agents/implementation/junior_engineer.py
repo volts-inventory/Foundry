@@ -32,12 +32,12 @@ from foundry.execution.adapter_contract import AdapterResult, TaskPacket
 from foundry.execution.sandbox import Sandbox
 from foundry.schemas.architecture import PinnedConstraint
 from foundry.schemas.base import Artifact
-from foundry.schemas.gates import GateResult, GateStatus
+from foundry.schemas.gates import FixPass, GateResult, GateStatus
 from foundry.schemas.implementation import FeatureDiff, Task, TaskStatus
 from foundry.state.reducers import DETERMINISTIC_GATES, live_constraints
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
     from langchain_core.runnables import RunnableConfig
 
@@ -219,11 +219,25 @@ def _fix_summary(
                    "manifest line the gate output names (a package that does not exist on "
                    "PyPI, e.g. a standard-library module, or a version that was never "
                    "released) and remove or correct it.")
-    # attempt counts the failing checks of this fix loop: from 2 on, the newest fix
-    # diff is this loop's previous pass, not an earlier wave's.
+    from foundry.graph.gate_wiring import window_passes
+
     fixes = [a for a in _of_kind(state, FEATURE_DIFF_KIND)
              if a.task_id and a.task_id.startswith("fix-")]
-    if attempt >= 2 and fixes:
+    passes = window_passes(state, resolve)
+    if any(p.outcome not in ("initial", "restored") for p in passes):
+        out.extend(_pass_log(state, passes, resolve, resolve_blob))
+        newest = next((p for p in reversed(passes) if p.fix_task
+                       and p.fix_task.startswith("fix-")), None)
+        # A reverted pass's edits are no longer on the tree: the log says so.
+        if (named and newest is not None and passes[-1].outcome != "restored"
+                and not set(newest.touched) & set(named)):
+            out.append(f"the last fix pass ({newest.fix_task}) never edited "
+                       f"{', '.join(named)}, the file(s) the failure names: edit them "
+                       "before anything else")
+    # attempt counts the failing checks of this fix loop: from 2 on, the newest fix
+    # diff is this loop's previous pass, not an earlier wave's. (A run from before the
+    # pass ledger existed.)
+    elif attempt >= 2 and fixes:
         prev = max(fixes, key=lambda a: a.seq)
         try:
             ops = _diff_ops(_resolve_typed(prev, resolve, FeatureDiff, FEATURE_DIFF_KIND),
@@ -235,20 +249,10 @@ def _fix_summary(
         cut_off = any(t.run_against == f"task/{prev.task_id}"
                       and t.explanation.startswith(TURN_CAP_NOTE)
                       for t in state.get("gate_triage") or ())
-        from foundry.graph.gate_wiring import window_passes
-
-        passes = window_passes(state, resolve)
-        # The gates above judged the restored tree, not prev's: what prev broke or
-        # left unedited is no longer on it.
-        reverted = bool(passes) and passes[-1].outcome == "restored"
-        broke = () if reverted else regressed_gates(state)
-        if reverted:
-            out.append(f"previous fix pass ({prev.task_id}) touched {files} and made the "
-                       "tree worse, so it was reverted: the tree above is the best one so "
-                       "far. Try a different approach")
+        broke = regressed_gates(state)
         # A pass that changed nothing left the tree the wave built: a gate that broke
         # since the tree before was broken by the wave, not by this pass.
-        elif touched == set():
+        if touched == set():
             out.append(f"previous fix pass ({prev.task_id}) changed no file"
                        + (" (it ran out of turns before its first edit)" if cut_off else "")
                        + ": reading files changes nothing; make the edits this time")
@@ -267,7 +271,7 @@ def _fix_summary(
         else:
             out.append(f"previous fix pass ({prev.task_id}) touched {files} and left the "
                        "gates above failing: try a different approach")
-        if not reverted and named and touched is not None and not touched & set(named):
+        if named and touched is not None and not touched & set(named):
             out.append(f"previous fix pass never edited {', '.join(named)}, the file(s) the "
                        "failure names: edit them before anything else")
         out.extend(f"previous fix pass reported: {t.explanation[:300]}"
@@ -280,6 +284,146 @@ def _fix_summary(
 
 # proxy_agent's note for a session that hit packet.turn_budget.
 TURN_CAP_NOTE = "turn budget exhausted"
+
+_LOG_ENTRIES = 8
+_LOG_CHARS = 1_500
+_LOG_REPORT_CHARS = 150
+_LOG_PATCH_CHARS = 1_200
+_LOG_IDS = 4
+
+
+def _norm(failing: Iterable[str]) -> set[str]:
+    """A tree's failures with the build's compiler lines folded into one: whether
+    the build broke, not which lines changed."""
+    return {"build:" if f.startswith("build:") else f for f in failing}
+
+
+def _what(failing: Iterable[str]) -> str:
+    """Ledger failures (``gate:id``) for the log: a build failure as "the build"
+    (its signature is compiler lines, not ids), tests as ``test_a``, a few of them."""
+    failing = set(failing)
+    ids = sorted({f.split(":", 1)[-1].rsplit("::", 1)[-1][:60] for f in failing
+                  if not f.startswith("build:")})
+    more = len(ids) - _LOG_IDS
+    parts = ["the build"] if any(f.startswith("build:") for f in failing) else []
+    if ids:
+        parts.append(",".join(ids[:_LOG_IDS]) + (f" +{more} more" if more > 0 else ""))
+    return ", ".join(parts)
+
+
+def _pass_line(entry: FixPass, base: FixPass | None, reverted: bool, report: str) -> str:
+    head = f"pass {entry.pass_no} ({entry.fix_task or 'no diff'}): "
+    if not entry.touched:
+        line = head + "no file edited"
+    elif entry.outcome == "error":
+        line = head + f"edited {', '.join(entry.touched)} — the gates ERRORed (not judged)"
+    elif entry.outcome == "no-change":
+        line = head + f"edited {', '.join(entry.touched)} — no change to the tree"
+    else:
+        was = _norm(base.failing) if base is not None else set()
+        now = _norm(entry.failing)
+        fixed, broke = was - now, now - was
+        build = "build broken" if any(f.startswith("build:") for f in now) else "build ok"
+        line = head + f"edited {', '.join(entry.touched)} — "
+        if entry.outcome == "lateral":
+            n_was = base.score[2] if base is not None and base.score else len(was)
+            n_now = entry.score[2] if entry.score else len(now)
+            line += f"lateral: {n_was}→{n_now}"
+            if broke:
+                line += f", now failing {_what(broke)}"
+                if fixed:
+                    line += f" instead of {_what(fixed)}"
+        else:
+            line += entry.outcome.upper() + (", reverted" if reverted else "")
+            parts = ([f"fixed {_what(fixed)}"] if fixed else []) + (
+                [f"broke {_what(broke)}"] if broke else [])
+            if parts:
+                line += ": " + "; ".join(parts)
+        line += f" ({build})"
+    return line + (f" — reported: {report}" if report else "")
+
+
+def _patch_text(
+    state: FactoryState, task_id: str, resolve: ArtifactResolver, resolve_blob: BlobResolver,
+) -> str | None:
+    from foundry.graph.gate_wiring import (
+        FEATURE_DIFF_KIND,
+        MaterializationError,
+        _maybe_snapshot_files,
+        _of_kind,
+        _resolve_typed,
+    )
+
+    art = next((a for a in _of_kind(state, FEATURE_DIFF_KIND) if a.task_id == task_id), None)
+    if art is None:
+        return None
+    try:
+        diff = _resolve_typed(art, resolve, FeatureDiff, FEATURE_DIFF_KIND)
+        body = resolve_blob(diff.diff_uri)
+        text = body.decode("utf-8") if isinstance(body, bytes) else body
+        files = _maybe_snapshot_files(diff.diff_uri, text)
+    except (MaterializationError, KeyError, UnicodeDecodeError):
+        return None
+    if files is not None:
+        text = "\n".join(f"--- {rel}\n{content}" for rel, content in sorted(files.items()))
+    return text[:_LOG_PATCH_CHARS]
+
+
+def _pass_log(
+    state: FactoryState, passes: Sequence[FixPass], resolve: ArtifactResolver,
+    resolve_blob: BlobResolver,
+) -> list[str]:
+    """What this fix loop's passes tried, newest last, from its ledger: the files each
+    edited, how the tree came out against the best before it (the tests it fixed
+    and broke), whether it was reverted, and what the pass itself reported. A
+    worse pass that fixed something hands its patch on, to reapply without the
+    breakage. Fixer passes that each start from a summary of the earlier ones
+    instead of only the last stop repeating a reverted approach."""
+    notes: dict[str, list[str]] = {}
+    for t in sorted(state.get("gate_triage") or (), key=lambda t: t.seq):
+        task = t.run_against.removeprefix("task/")
+        if task != t.run_against:
+            notes.setdefault(task, []).append(" ".join(t.explanation.split()))
+    reports = {task: "; ".join(n)[:_LOG_REPORT_CHARS] for task, n in notes.items()}
+    lines: list[str] = []
+    salvage: tuple[FixPass, set[str], set[str]] | None = None
+    for i, entry in enumerate(passes):
+        if entry.outcome in ("initial", "restored"):
+            continue
+        base = _best_before(passes[:i])
+        reverted = i + 1 < len(passes) and passes[i + 1].outcome == "restored"
+        lines.append(_pass_line(entry, base, reverted,
+                                reports.get(entry.fix_task or "", "")))
+        if entry.outcome == "worse" and base is not None and entry.fix_task:
+            fixed = _norm(base.failing) - _norm(entry.failing)
+            if fixed:
+                salvage = (entry, fixed, _norm(entry.failing) - _norm(base.failing))
+    shown: list[str] = []
+    room = _LOG_CHARS
+    for line in reversed(lines[-_LOG_ENTRIES:]):
+        if len(line) > room and shown:
+            break
+        shown.insert(0, line[:room])
+        room -= len(line)
+    out = ["[fix passes so far in this loop]"]
+    if len(lines) > len(shown):
+        out.append(f"({len(lines) - len(shown)} earlier pass(es) not shown)")
+    out.extend(shown)
+    if salvage is not None:
+        entry, fixed, broke = salvage
+        patch = _patch_text(state, entry.fix_task or "", resolve, resolve_blob)
+        if patch:
+            out.append(f"{entry.fix_task}'s change fixed {_what(fixed)} but was worse "
+                       f"overall: reapply this part without breaking "
+                       f"{_what(broke) or 'the build'}:\n{patch}")
+    out.append("do not repeat an approach marked WORSE or no-change from this tree.")
+    return out
+
+
+def _best_before(passes: Sequence[FixPass]) -> FixPass | None:
+    from foundry.graph.gate_wiring import best_entry
+
+    return best_entry(passes, passes[0].window) if passes else None
 
 
 def regressed_gates(state: FactoryState) -> tuple[str, ...]:

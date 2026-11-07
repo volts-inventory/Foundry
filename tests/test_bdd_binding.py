@@ -331,3 +331,59 @@ def test_a_smoke_command_that_never_exits_is_named_a_server(tmp_path: Path) -> N
 
 def test_the_default_smoke_timeout_is_five_minutes() -> None:
     assert SmokeGate(("true",))._timeout_s == 300.0
+
+
+# ---- a database shared across test modules ----------------------------------------
+
+_DB = (
+    "import sqlite3\n"
+    "conn = sqlite3.connect(':memory:')\n"
+    "conn.execute('CREATE TABLE users (username TEXT UNIQUE)')\n"
+)
+_INSERT = (
+    "from db import conn\n\n\n"
+    "def test_{name}():\n"
+    "    conn.execute(\"INSERT INTO users VALUES ('testuser')\")\n"
+)
+
+# The local shop bench's wave check: SQLAlchemy's echo of the colliding insert.
+_SQLALCHEMY_UNIQUE = """\
+__________________________________ test_scdb1 __________________________________
+E   sqlite3.IntegrityError: UNIQUE constraint failed: users.username
+E   sqlalchemy.exc.IntegrityError: (sqlite3.IntegrityError) UNIQUE constraint failed: \
+users.username
+E   [SQL: INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)]
+E   [parameters: ('testuser', 'hashed_secret', 'customer')]
+FAILED tests/test_t2.py::test_scdb1 - sqlalchemy.exc.IntegrityError: (sqlite3...
+"""
+
+
+def test_a_unique_collision_between_test_modules_says_the_database_is_shared(
+    tmp_path: Path,
+) -> None:
+    # Each module passes alone; run together the second insert collides, so a fixer
+    # that reruns the failing module by itself sees nothing to fix.
+    (tmp_path / "db.py").write_text(_DB)
+    for name in ("a", "b"):
+        (tmp_path / f"test_{name}.py").write_text(_INSERT.format(name=name))
+    gate = TestGate()
+    obs = gate.execute(tmp_path)
+    assert gate.decide(obs) is GateStatus.FAIL
+    hit = next(f for f in obs.findings if "unique key users.username" in f)
+    assert "passes when its module runs alone" in hit
+    assert "autouse fixture in conftest.py" in hit
+
+
+def test_the_shared_state_hint_names_the_other_modules_writing_the_value(
+    tmp_path: Path,
+) -> None:
+    from foundry.gates.test import shared_state_hints
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_t2.py").write_text('UserModel(username="testuser")\n')
+    (tmp_path / "tests" / "test_auth.py").write_text('username = "testuser"\n')
+    (tmp_path / "auth.py").write_text('DEFAULT = "testuser"\n')  # not a test module
+    (hint,) = shared_state_hints(_SQLALCHEMY_UNIQUE, tmp_path)
+    assert "'testuser' (tests/test_auth.py, tests/test_t2.py)" in hint
+    assert "(auth.py" not in hint and " auth.py" not in hint and "hashed_secret" not in hint
+    assert shared_state_hints("E   AssertionError: assert 1 == 2\n", tmp_path) == ()

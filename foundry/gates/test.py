@@ -385,6 +385,65 @@ def binding_modules(workdir: Path, features: set[str]) -> tuple[str, ...]:
     return tuple(out)
 
 
+# SQLite, PostgreSQL and MySQL's words for an insert that hit a unique key.
+_UNIQUE_VIOLATION = re.compile(
+    r"UNIQUE constraint failed: (\S+)|duplicate key value violates unique constraint"
+    r" \"?([^\"\s]+)|Duplicate entry '[^']*' for key '?([^'\s]+)"
+)
+# SQLAlchemy's echo of the failing statement's bound values.
+_SQL_PARAMETERS = re.compile(r"\[parameters: (.*)\]")
+_QUOTED = re.compile(r"'([^'\\\n]{3,80})'")
+
+
+def _is_test_module(name: str) -> bool:
+    return name == "conftest.py" or (name.endswith(".py") and (
+        name.startswith("test_") or name.endswith("_test.py")))
+
+
+def shared_state_hints(output: str, workdir: Path) -> tuple[str, ...]:
+    """One line per unique key a test's insert collided on. Tests in one pytest
+    process share a module-level database (an in-memory SQLite engine lives as long
+    as the process), so the test passes when its module runs alone and fails after
+    another test wrote the same row: rerunning it alone shows nothing to fix. The
+    line names the test modules that write the colliding statement's values."""
+    keys = list(dict.fromkeys(next(g for g in m.groups() if g)
+                              for m in _UNIQUE_VIOLATION.finditer(output)))
+    if not keys:
+        return ()
+    values = list(dict.fromkeys(v for m in _SQL_PARAMETERS.finditer(output)
+                                for v in _QUOTED.findall(m.group(1))))
+    root = Path(workdir)
+    writers: dict[str, list[str]] = {}
+    for path in sorted(root.rglob("*.py")) if values else ():
+        rel = path.relative_to(root).as_posix()
+        if rel.startswith(".") or "/." in rel or not _is_test_module(path.name):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for v in values:
+            if f"'{v}'" in text or f'"{v}"' in text:
+                writers.setdefault(v, []).append(rel)
+    shared = [f"'{v}' ({', '.join(mods)})" for v, mods in writers.items() if len(mods) > 1]
+    out: list[str] = []
+    for key in keys:
+        line = (
+            f"an insert hit the unique key {key} on a row that was already there: the "
+            "suite runs every test module in ONE process, so a database that lives at "
+            "module level (an in-memory SQLite engine lives as long as the process) "
+            "keeps the rows each earlier test wrote — the test passes when its module "
+            "runs alone, and fails after another test inserted the same value"
+        )
+        if shared:
+            line += (". The colliding insert's values are also written by other test "
+                     "modules: " + "; ".join(shared[:3]))
+        out.append(line + ". Fix the isolation, not the value alone: an autouse fixture "
+                   "in conftest.py that gives every test an empty database (drop and "
+                   "re-create the schema, or delete every row, before each test)")
+    return tuple(out)
+
+
 def _unexpanded_report_paths(workdir: Path) -> list[str]:
     """Workdir paths whose name holds ``$FOUNDRY_BDD_REPORT`` verbatim: the bdd
     command passed the variable unexpanded (single-quoted) to its runner."""
@@ -1141,6 +1200,7 @@ class TestGate:
 
             bound = {r.split("::", 1)[0] for r in trusted}
             findings = (*undeclared_import_hints(out + err, workdir),
+                        *shared_state_hints(out, workdir),
                         *(step_argument_hints(out, workdir, bound)
                           if trusted and not self.bdd_cmd else ()),
                         *(static_step_notes(workdir, bound, params=False)

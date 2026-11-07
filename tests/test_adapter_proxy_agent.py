@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import itertools
 import json
+import shutil
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from foundry.execution.adapter_contract import TaskPacket
 from foundry.execution.adapters.proxy_agent import ACTION_SCHEMA, TOOLS, ProxyAgentAdapter
@@ -442,29 +445,102 @@ def test_lint_on_write_never_crashes_and_ignores_warnings(tmp_path: Path, monkey
         adapter.run(make_packet(sb.worktree), sb)
     warn, deep = observations(seen[-1])
     assert "SYNTAX" not in warn
-    assert "LIKELY SYNTAX ERROR" in deep and "RecursionError" in deep
+    assert deep.startswith("OBSERVATION:\nwrote deep.py") and "RecursionError" in deep
     assert "compile check" in deep
 
 
-def test_syntax_error_reported_after_writing_bad_python(tmp_path: Path) -> None:
+def write_session(
+    tmp_path: Path, writes: list[dict[str, Any]], seed: dict[str, str] | None = None
+) -> tuple[list[str], dict[str, str]]:
+    """Run ``writes`` then done; the observations and the worktree's files after."""
     src = tmp_path / "src"
     src.mkdir()
+    for rel, text in (seed or {}).items():
+        (src / rel).parent.mkdir(parents=True, exist_ok=True)
+        (src / rel).write_text(text)
     seen: list[list[dict[str, Any]]] = []
-    adapter = ProxyAgentAdapter(
-        recording(
-            [
-                {"action": "write_file", "path": "bad.py", "content": "x = 1\ndef f(:\n"},
-                {"action": "write_file", "path": "ok.py", "content": "x = 1\n"},
-                {"action": "done"},
-            ],
-            seen,
-        )
-    )
+    adapter = ProxyAgentAdapter(recording([*writes, {"action": "done"}], seen))
     with Sandbox(src) as sb:
-        adapter.run(make_packet(sb.worktree), sb)
-    bad, ok = observations(seen[-1])
-    assert "LIKELY SYNTAX ERROR line 2" in bad and "host Python" in bad
-    assert "SYNTAX" not in ok
+        adapter.run(make_packet(sb.worktree, turn_budget=len(writes) + 1), sb)
+        tree = {p.relative_to(sb.worktree).as_posix(): p.read_text()
+                for p in sb.worktree.rglob("*") if p.is_file()}
+    return observations(seen[-1]), tree
+
+
+def test_rejected_python_write_keeps_old_content_and_drops_new_file(tmp_path: Path) -> None:
+    obs, tree = write_session(tmp_path, [
+        {"action": "write_file", "path": "old.py", "content": "x = 1\ndef f(:\n    pass\n"},
+        {"action": "write_file", "path": "pkg/new.py", "content": "if True\n"},
+    ], seed={"old.py": "X = 0\n"})
+    old, new = obs
+    assert "ERROR: write rejected — old.py has a Python syntax error at line 2" in old
+    assert "previous content is kept" in old and "    2 | def f(:" in old and "^" in old
+    assert "pkg/new.py" in new and "it was not created" in new
+    assert tree == {"old.py": "X = 0\n"}
+
+
+def test_rejected_json_and_toml_writes(tmp_path: Path) -> None:
+    obs, tree = write_session(tmp_path, [
+        {"action": "write_file", "path": "a.json", "content": '{"a": 1,\n "b": }\n'},
+        {"action": "write_file", "path": "pyproject.toml", "content": "[project\nname = 1\n"},
+        {"action": "write_file", "path": "tsconfig.json", "content": "{ // jsonc\n}\n"},
+        {"action": "write_file", "path": "ok.json", "content": '{"a": [1]}'},
+    ])
+    bad_json, bad_toml, jsonc, ok = obs
+    assert "invalid JSON at line 2, column 7" in bad_json and '    2 |  "b": }' in bad_json
+    assert "invalid TOML at line 1" in bad_toml and "not created" in bad_toml
+    assert "wrote tsconfig.json" in jsonc and "wrote ok.json" in ok
+    assert set(tree) == {"tsconfig.json", "ok.json"}
+
+
+def test_rejected_yaml_write_but_custom_tags_and_templates_pass(tmp_path: Path) -> None:
+    obs, tree = write_session(tmp_path, [
+        {"action": "write_file", "path": "a.yaml", "content": "a: [1, 2\nb: 3\n"},
+        {"action": "write_file", "path": "cf.yml", "content": "Value: !Ref Bucket\n"},
+        {"action": "write_file", "path": "t.yaml", "content": "a: {{ .Values.x }\n"},
+    ])
+    assert "invalid YAML at line 2" in obs[0]
+    assert set(tree) == {"cf.yml", "t.yaml"}
+
+
+def test_rejected_feature_write(tmp_path: Path) -> None:
+    good = "Feature: cart\n  Scenario: add\n    Given an empty cart\n"
+    obs, tree = write_session(tmp_path, [
+        {"action": "write_file", "path": "cart.feature",
+         "content": ("Feature: cart\n  Scenario: add\n    Given x\n"
+                     "  Examples:\n  | a |\n  stray text\n")},
+        {"action": "write_file", "path": "cart.feature", "content": good},
+    ])
+    assert "malformed Gherkin at line 6" in obs[0] and "stray text" in obs[0]
+    assert obs[1].startswith("OBSERVATION:\nwrote cart.feature")
+    assert tree == {"cart.feature": good}
+
+
+@pytest.mark.skipif(not (shutil.which("gofmt") and shutil.which("node")),
+                    reason="needs gofmt and node")
+def test_rejected_go_and_module_js_writes(tmp_path: Path) -> None:
+    obs, tree = write_session(tmp_path, [
+        {"action": "write_file", "path": "main.go", "content": "package main\nfunc main() {\n"},
+        {"action": "write_file", "path": "a.mjs", "content": "export const a = ;\n"},
+        {"action": "write_file", "path": "ok.mjs", "content": 'import x from "y";\n'},
+        {"action": "write_file", "path": "app.js", "content": "const a = <div/>;\n"},
+    ])
+    assert "Go syntax error at line 2, column 15" in obs[0]
+    assert "JavaScript syntax error at line 1" in obs[1] and "SyntaxError" in obs[1]
+    assert set(tree) == {"ok.mjs", "app.js"}
+
+
+def test_accepted_write_is_unchanged_and_gets_mypy_advice(tmp_path: Path) -> None:
+    obs, tree = write_session(tmp_path, [
+        {"action": "write_file", "path": "ok.py", "content": "x = 1\n"},
+        {"action": "write_file", "path": "typed.py",
+         "content": "def f(x: int) -> str:\n    return x\n"},
+    ])
+    assert obs[0] == "OBSERVATION:\nwrote ok.py (6 chars)"
+    assert "wrote typed.py" in obs[1] and "ADVISORY (mypy" in obs[1]
+    assert "typed.py:2: error: Incompatible return value type" in obs[1]
+    assert tree["typed.py"] == "def f(x: int) -> str:\n    return x\n"
+    assert not any(".mypy_cache" in p for p in tree)
 
 
 def runs(n: int) -> list[dict[str, Any]]:
@@ -743,10 +819,10 @@ def test_native_containment_and_lint_apply_per_tool_call(tmp_path: Path) -> None
         body = json.loads(sb.get_blob(result.diff_uri))
     escaped, bad, abs_read, escaped_search = (r["content"] for r in results_of(seen[1]))
     assert escaped.startswith("ERROR:") and "escapes the worktree" in escaped
-    assert "LIKELY SYNTAX ERROR line 2" in bad
+    assert "write rejected — bad.py has a Python syntax error at line 2" in bad
     assert "escapes the worktree" in abs_read and "escapes the worktree" in escaped_search
     assert not (tmp_path / "evil.py").exists()
-    assert set(body["files"]) == {"bad.py"}
+    assert body["files"] == {}
 
 
 def test_native_tool_calls_per_turn_are_capped(tmp_path: Path) -> None:

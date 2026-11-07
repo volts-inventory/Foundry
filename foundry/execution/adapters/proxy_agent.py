@@ -35,7 +35,10 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tomllib
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -501,13 +504,23 @@ class ProxyAgentAdapter:
                         "and changes there are discarded. Write only: "
                         + (", ".join(files) or "files other than the spec inputs") + ".")
         if action == "write_file":
-            target = _contained(worktree, str(act.get("path", "")))
-            target.parent.mkdir(parents=True, exist_ok=True)
+            rel = str(act.get("path", ""))
+            target = _contained(worktree, rel)
             content = str(act.get("content", ""))
+            # Checked before the write, so a rejected one leaves the file (and the
+            # tree fingerprint) exactly as it was: a broken write the model keeps
+            # building on costs more turns than one it must redo now.
+            error, note = _syntax_check(rel, content)
+            if error is not None:
+                state = ("its previous content is kept" if target.is_file()
+                         else "it was not created")
+                return (f"ERROR: write rejected — {rel} {error}\nThe file is unchanged "
+                        f"({state}). Fix the error and write the full file again.")
+            target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
-            obs = f"wrote {act.get('path')} ({len(content)} chars)"
+            obs = f"wrote {rel} ({len(content)} chars){note}"
             if target.suffix == ".py":
-                obs += _lint_python(content, str(act.get("path")))
+                obs += _mypy_advisory(sandbox, PurePosixPath(rel).as_posix())
             return obs
         if action == "delete_file":
             target = _contained(worktree, str(act.get("path", "")))
@@ -754,20 +767,152 @@ def _tree_state(worktree: Path) -> str:
     return h.hexdigest()
 
 
-def _lint_python(content: str, rel: str) -> str:
-    """Best-effort compile check; never raises (the host Python may not match the
-    target interpreter, so it is reported as a likely error for the model to judge)."""
-    host = f"{sys.version_info.major}.{sys.version_info.minor}"
-    note = f"(host Python {host} compile check; the project's Python may differ)"
+def _syntax_check(rel: str, content: str) -> tuple[str | None, str]:
+    """``(error, note)`` for content about to be written to ``rel``: an error
+    rejects the write; a note (a checker that crashed rather than found an error)
+    is appended to the accepted write's observation. Types without a cheap,
+    build-free checker pass unchecked."""
+    name = PurePosixPath(rel).name
+    suffix = PurePosixPath(rel).suffix
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            compile(content, rel, "exec")
+        if suffix == ".py":
+            # Host Python is also what the gate's compileall and pytest run on.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                compile(content, rel, "exec")
+        elif suffix == ".json" and not _jsonc(rel, name):
+            json.loads(content)
+        elif suffix == ".toml":
+            tomllib.loads(content)
+        elif suffix in (".yaml", ".yml") and "{{" not in content and "{%" not in content:
+            import yaml
+
+            # compose, not load: a custom tag (CloudFormation's !Ref) is valid YAML.
+            for _ in yaml.compose_all(content, Loader=yaml.SafeLoader):
+                pass
+        elif suffix == ".feature":
+            from gherkin.parser import Parser
+
+            Parser().parse(content)
+        elif suffix in _CLI_CHECKERS:
+            return _cli_check(rel, content, _CLI_CHECKERS[suffix]), ""
     except SyntaxError as exc:
-        return f"\nLIKELY SYNTAX ERROR line {exc.lineno}: {exc.msg} {note}"
+        return _located(content, exc.lineno, exc.offset, str(exc.msg), "Python syntax error"), ""
+    except json.JSONDecodeError as exc:
+        return _located(content, exc.lineno, exc.colno, exc.msg, "invalid JSON"), ""
+    except tomllib.TOMLDecodeError as exc:
+        m = re.search(r"at line (\d+), column (\d+)", str(exc))
+        line, col = (int(m[1]), int(m[2])) if m else (None, None)
+        return _located(content, line, col, str(exc), "invalid TOML"), ""
+    except ImportError:
+        return None, ""  # yaml / gherkin absent from this install: unchecked
     except Exception as exc:
-        return f"\nLIKELY SYNTAX ERROR: compile failed with {type(exc).__name__}: {exc} {note}"
-    return ""
+        yaml_error = sys.modules.get("yaml")
+        if yaml_error is not None and isinstance(exc, yaml_error.MarkedYAMLError):
+            mark = exc.problem_mark
+            line, col = (mark.line + 1, mark.column + 1) if mark is not None else (None, None)
+            msg = " ".join(str(p) for p in (exc.context, exc.problem) if p)
+            return _located(content, line, col, msg, "invalid YAML"), ""
+        errors = getattr(exc, "errors", None)
+        if suffix == ".feature" and type(exc).__module__.startswith("gherkin"):
+            first = errors[0] if errors else exc
+            loc = getattr(first, "location", None) or {}
+            return _located(content, loc.get("line"), loc.get("column"), str(first),
+                            "malformed Gherkin"), ""
+        if suffix == ".py":
+            host = f"{sys.version_info.major}.{sys.version_info.minor}"
+            return None, (f"\nNOTE: the Python {host} compile check failed with "
+                          f"{type(exc).__name__}: {exc} — not a verdict on the file")
+        return None, ""
+    return None, ""
+
+
+# Comment-tolerant JSON dialects that json.loads would wrongly reject.
+_JSONC_NAMES = ("tsconfig", "jsconfig", ".eslintrc", ".babelrc", "devcontainer")
+
+
+def _jsonc(rel: str, name: str) -> bool:
+    return name.startswith(_JSONC_NAMES) or ".vscode/" in f"/{rel}"
+
+
+# Parse-only checkers on the host toolchain (no build, no execution). Plain .js is
+# left out: JSX in .js is common and node rejects it.
+_CLI_CHECKERS: dict[str, tuple[str, ...]] = {
+    ".go": ("gofmt", "-e"),
+    ".mjs": ("node", "--check", "--input-type=module", "-"),
+    ".cjs": ("node", "--check", "--input-type=commonjs", "-"),
+}
+_CLI_CHECK_TIMEOUT_S = 10
+
+
+def _cli_check(rel: str, content: str, argv: tuple[str, ...]) -> str | None:
+    exe = shutil.which(argv[0])
+    if exe is None:
+        return None
+    try:
+        proc = subprocess.run([exe, *argv[1:]], input=content, capture_output=True,
+                              text=True, timeout=_CLI_CHECK_TIMEOUT_S)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode == 0:
+        return None
+    err = proc.stderr.strip()
+    if argv[0] == "gofmt":
+        m = re.match(r"<standard input>:(\d+):(\d+): (.*)", err)
+        if m:
+            return _located(content, int(m[1]), int(m[2]), m[3], "Go syntax error")
+    elif "SyntaxError" in err:
+        m = re.match(r"\[stdin\]:(\d+)", err)
+        msg = next((ln for ln in err.splitlines() if ln.startswith("SyntaxError")), err)
+        return _located(content, int(m[1]) if m else None, None, msg, "JavaScript syntax error")
+    return None  # the checker failed for some other reason: not a verdict
+
+
+def _located(content: str, line: int | None, col: int | None, msg: str, kind: str) -> str:
+    """``kind`` at line/col with a few numbered lines of context and a caret."""
+    where = f" at line {line}" + (f", column {col}" if col else "") if line else ""
+    out = f"has a {kind}{where}: {msg}"
+    lines = content.splitlines()
+    if not line or not lines:
+        return out
+    at = min(line, len(lines))
+    ctx = []
+    for n in range(max(1, at - 2), min(len(lines), at + 2) + 1):
+        ctx.append(f"{n:>5} | {lines[n - 1]}")
+        if n == at and col:
+            ctx.append("      | " + " " * (col - 1) + "^")
+    return out + "\n" + "\n".join(ctx)
+
+
+# Fast advisory type feedback: --follow-imports=silent checks only the written file
+# (~0.3s); the gate's lenient import flags; no cache written into the worktree.
+_MYPY_ADVISORY = (
+    "python", "-m", "mypy", "--follow-imports=silent", "--cache-dir=/dev/null",
+    "--no-error-summary", "--ignore-missing-imports",
+    "--disable-error-code", "import-not-found", "--disable-error-code", "import-untyped",
+)
+_MYPY_TIMEOUT_S = 5
+_MYPY_MAX_LINES = 10
+
+
+def _mypy_advisory(sandbox: Sandbox, rel: str) -> str:
+    """mypy's errors in just-written ``rel``, as advice (a ticket's modules are
+    expected to be partial mid-session, so a type error never rejects a write).
+    Empty when mypy is absent, slow or crashes."""
+    try:
+        result = sandbox.run([*_MYPY_ADVISORY, rel], timeout_s=_MYPY_TIMEOUT_S)
+    except OSError:
+        return ""
+    if result.timed_out or result.returncode not in (0, 1):
+        return ""
+    errors = [ln for ln in result.stdout.splitlines()
+              if ln.startswith(f"{rel}:") and ": error:" in ln]
+    if not errors:
+        return ""
+    shown = errors[:_MYPY_MAX_LINES]
+    more = f"\n  ... {len(errors) - len(shown)} more" if len(errors) > len(shown) else ""
+    return ("\nADVISORY (mypy on this file only; the write was kept — fix what is real, "
+            "ignore what an unfinished module explains):\n  " + "\n  ".join(shown) + more)
 
 
 def _read_file(worktree: Path, rel: str, act: dict[str, Any]) -> tuple[str, _Read | None]:

@@ -1613,8 +1613,14 @@ def make_engineering_node(
         # A wave check that failed twice asked for its local tickets to re-run on the
         # cloud level: this pass rebuilds just those, then the check runs again.
         requested = pending_escalations(state, resolve) if target else ()
+        from foundry.graph.gate_wiring import RESTART_PREFIX, pending_restarts
+
+        # A fix loop planned to rebuild these tickets from scratch (a restart).
+        restarts = () if requested else pending_restarts(state, resolve)
         if requested:
             wave = tuple(t for t in tickets if task_id_for_ticket(t.id) in requested)
+        elif restarts:
+            wave = tuple(t for t in tickets if task_id_for_ticket(t.id) in restarts)
         else:
             wave = next_wave(tickets, done, _skipped_task_ids(state))
         if not wave:
@@ -1626,6 +1632,16 @@ def make_engineering_node(
         overlay_error: str | None = None
         if blobs is not None:
             overlay, overlay_error = _integrated_overlay(state, resolve, blobs)
+        reset: tuple[dict[str, str], tuple[str, ...]] = ({}, ())
+        restart_memo: dict[str, tuple[str, ...]] = {}
+        merged: dict[str, list[Any]] = {}
+        if restarts:
+            reset, restart_memo, notes = _restart_prep(rt, config, state, resolve, blobs, wave)
+            merged["gate_triage"] = notes
+            # The rebuilt tickets start from the tree before them, not their old code.
+            overlay.update(reset[0])
+            for rel in reset[1]:
+                overlay.pop(rel, None)
         criteria = _newest_by(state, resolve, _CRITERION_KIND, AcceptanceCriterion, "id")
         contracts = _newest_by(state, resolve, CONTRACT_KIND, InterfaceContract, "name")
         prior = _prior_failures(state)
@@ -1644,8 +1660,10 @@ def make_engineering_node(
         for t in tickets:
             sp = t.specialty.value
             weights[sp] = weights.get(sp, 0) + 1
-            # A ticket rebuilt on the cloud level replaces its own estimate.
-            if task_id_for_ticket(t.id) in done and task_id_for_ticket(t.id) not in requested:
+            # A ticket rebuilt (on the cloud level, or restarted) replaces its own
+            # estimate.
+            tid = task_id_for_ticket(t.id)
+            if tid in done and tid not in requested and tid not in restarts:
                 spent[sp] = spent.get(sp, 0) + cost_budget_microusd
         quota = QuotaPolicy(
             ledger=BudgetLedger(cap_microusd=cap),
@@ -1658,7 +1676,6 @@ def make_engineering_node(
         escalations: dict[str, str] = {}  # task id -> why it escalated (admitted only)
         reasons: dict[str, str] = {}
         rebuild: dict[str, tuple[str, ...]] = {}
-        merged: dict[str, list[Any]] = {}
         if requested:
             from foundry.graph.gate_wiring import (
                 FEATURE_DIFF_KIND,
@@ -1671,7 +1688,7 @@ def make_engineering_node(
 
             fix_context = (
                 *_fix_summary(state, resolve, blobs or (lambda _u: b""),
-                              attempt=_fix_attempts(state, config)),
+                              attempt=_fix_attempts(state, config), scoped=False),
                 *group_failures_by_ticket(prior, tickets),
             )
             asked = {t.run_against.removeprefix("task/"): t.explanation
@@ -1730,12 +1747,12 @@ def make_engineering_node(
         diagnosed: dict[str, str] = {}  # task id -> the cloud diagnosis its retry got
         if overlay_error is not None:
             # This wave builds on the bare base, not on the earlier waves: say so.
-            merged["gate_triage"] = [GateTriage(
+            merged.setdefault("gate_triage", []).append(GateTriage(
                 name=OVERLAY_TRIAGE, run_against=f"wave/{wave[0].id}",
                 explanation="the integrated tree could not be materialized, so this wave "
                 f"builds on the bare base without the earlier waves' work: {overlay_error}"[:2000],
                 produced_by=NODE_ID, seq=rt.seq(config, NODE_ID, f"overlay:{wave[0].id}"),
-            )]
+            ))
         with LocalWorkPool(
             sandbox_factory=make_sandbox,
             adapter_factory=lambda _name: scoped,
@@ -1771,6 +1788,8 @@ def make_engineering_node(
                 if extra := stub_rules(ticket, skeleton, contracts):
                     packet = packet.model_copy(update={"task": {
                         **packet.task, "rules": [*packet.task["rules"], *extra]}})
+                if tid in restart_memo:
+                    packet = packet.model_copy(update={"prior_failures": restart_memo[tid]})
                 if tid in rebuild:
                     packet = _escalated_packet(packet, str(target), rebuild[tid], turn_budget)
                 elif target and tid in already and _is_local(rt, tasks[tid].tier):
@@ -1794,6 +1813,9 @@ def make_engineering_node(
                 try:
                     submitted[tid] = pool.submit(etask)
                 except BudgetExceededError as exc:
+                    if tid in restart_memo:  # already built: keep it as it is
+                        progress.log(f"restart of {tid} not admitted: {exc}")
+                        continue
                     if tid in rebuild:  # already built: decline the escalation, keep it
                         progress.log(f"escalation of {tid} not admitted: {exc}")
                         merged.setdefault("gate_triage", []).append(GateTriage(
@@ -1820,7 +1842,7 @@ def make_engineering_node(
                 except Exception as exc:
                     results[tid] = exc
             stopped: dict[str, str] = {}
-            if target and not requested:
+            if target and not requested and not restarts:
                 # A local session that hit its turn cap or was stopped early keeps its
                 # partial work: the next wave check escalates it on a first failure
                 # (a final wave's is left to the supervisor's gates and cloud fixer).
@@ -1877,7 +1899,15 @@ def make_engineering_node(
                     got = results[tid]
                     if isinstance(got, Exception):
                         raise got
-                    out = _finalize_diff(rt, tasks[tid], constraints, bases[tid], got, config)
+                    task = tasks[tid]
+                    if tid in restart_memo:
+                        # Its own id would open a new fix loop (fix_window): the rebuild
+                        # is a pass of the loop that planned it.
+                        rid = f"{RESTART_PREFIX}{tid}"
+                        task = task.model_copy(update={"id": rid, "branch": f"task/{rid}"})
+                    out = _finalize_diff(rt, task, constraints, bases[tid], got, config)
+                    if tid in restart_memo:
+                        out.pop("tasks", None)
                 except RunCapExceeded as exc:
                     merged.setdefault("gate_triage", []).append(GateTriage(
                         name=CAP_TRIAGE, run_against=f"task/{tid}", explanation=str(exc),
@@ -1885,6 +1915,9 @@ def make_engineering_node(
                     ))
                     continue
                 except Exception as exc:
+                    if tid in restart_memo:  # its earlier build stays integrated
+                        progress.log(f"restart of {tid} failed: {exc}")
+                        continue
                     merged.setdefault("gate_triage", []).extend(
                         _failure_notes(rt, config, tid, len(failures.get(tid, ())) + 1, exc)
                     )
@@ -1919,6 +1952,13 @@ def make_engineering_node(
         else:
             skeleton_concerns = ()
         _order_after_integrated(state, merged)
+        if restarts and len(built) < len(wave):
+            # The reset covers every restarted ticket's files: landing it without each
+            # rebuild would delete the code of a ticket whose rebuild failed.
+            merged["artifacts"] = [a for a in merged.get("artifacts") or ()
+                                   if not (a.task_id or "").startswith(RESTART_PREFIX)]
+        elif restarts and (reset[0] or reset[1]):
+            _land_reset(rt, config, state, resolve, merged, reset, wave)
         for channel, records in merged.items():
             writes.setdefault(channel, []).extend(records)
         writes.setdefault("agent_journal", []).append(journal_entry(
@@ -1955,3 +1995,83 @@ def _escalated_packet(
         "prior_failures": context,
         "turn_budget": turn_budget,
     })
+
+
+# ---- a fix loop's ticket restart ------------------------------------------------
+
+_RESTART_FAILURE_LINES = 30
+
+
+def _restart_prep(
+    rt: AgentRuntime, config: RunnableConfig, state: FactoryState, resolve: ArtifactResolver,
+    blobs: BlobResolver | None, wave: Sequence[Ticket],
+) -> tuple[tuple[dict[str, str], tuple[str, ...]], dict[str, tuple[str, ...]],
+           list[GateTriage]]:
+    """For a planned restart of ``wave``: the reset of its files to the tree before
+    it (:func:`~foundry.graph.gate_wiring.ticket_reset`), each ticket's memo of what
+    the fix loop tried (its pass log and the failures left), and the notes that
+    spend each ticket's one restart."""
+    from foundry.agents.implementation.junior_engineer import _pass_log, fix_failures
+    from foundry.graph.gate_wiring import (
+        RESTARTED_TRIAGE,
+        MaterializationError,
+        ticket_reset,
+        window_passes,
+    )
+
+    reset: tuple[dict[str, str], tuple[str, ...]] = ({}, ())
+    why = ""
+    if blobs is not None:
+        try:
+            reset = ticket_reset(state, wave, resolve=resolve, resolve_blob=blobs)
+        except MaterializationError as exc:
+            why = (" (the tree before it could not be built, so it starts from the current "
+                   f"one: {exc})")
+    passes = window_passes(state, resolve)
+    tried = sum(p.outcome not in ("initial", "restored") for p in passes)
+    log = _pass_log(state, passes, resolve, blobs) if blobs is not None and tried else []
+    failing = fix_failures(state, resolve)[:_RESTART_FAILURE_LINES]
+    paths = sorted({*reset[0], *reset[1]})
+    memo: dict[str, tuple[str, ...]] = {}
+    notes: list[GateTriage] = []
+    for t in wave:
+        tid = task_id_for_ticket(t.id)
+        files = ", ".join(p for p in paths if in_write_scope(p, t.files)) or ", ".join(t.files)
+        memo[tid] = (
+            "[fresh restart]",
+            f"repairing ticket {t.id} did not converge, so it is built again from scratch: "
+            f"its files ({files}) were reset to the tree before it was first built{why}. "
+            "Write them again from the ticket's spec and criteria.",
+            *log,
+            "the failures the earlier attempts left (the rebuild must not repeat them):",
+            *failing,
+        )
+        notes.append(GateTriage(
+            name=RESTARTED_TRIAGE, run_against=f"task/{tid}",
+            explanation=(f"rebuilt from scratch after {tried} fix pass(es) did not "
+                         f"converge; files reset: {files or 'none'}")[:2000],
+            produced_by=NODE_ID, seq=rt.seq(config, NODE_ID, f"{RESTARTED_TRIAGE}:{tid}"),
+        ))
+        progress.log(f"restart {tid} from scratch (reset {files or 'nothing'})")
+    return reset, memo, notes
+
+
+def _land_reset(
+    rt: AgentRuntime, config: RunnableConfig, state: FactoryState, resolve: ArtifactResolver,
+    merged: dict[str, list[Any]], reset: tuple[dict[str, str], tuple[str, ...]],
+    wave: Sequence[Ticket],
+) -> None:
+    """Put the restart's reset diff on ``merged``, ordered between the diffs it
+    resets and the rebuilt tickets' diffs (which were built on the reset tree)."""
+    from foundry.graph.gate_wiring import RESET_PREFIX, snapshot_diff, window_passes
+
+    passes = window_passes(state, resolve)
+    ids = "+".join(sorted(task_id_for_ticket(t.id) for t in wave))
+    art = snapshot_diff(state, config, reset[0], reset[1], task_id=f"{RESET_PREFIX}{ids}",
+                        base_tree=passes[-1].tree if passes else "", salt=ids, rt=rt,
+                        node_id=NODE_ID)
+    top = art.seq.emission_epoch
+    merged["artifacts"] = [art, *(
+        a.model_copy(update={"seq": a.seq._replace(emission_epoch=top + 1)})
+        if a.kind == _FEATURE_DIFF_KIND and a.seq.emission_epoch <= top else a
+        for a in merged.get("artifacts") or ())]

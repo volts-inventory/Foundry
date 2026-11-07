@@ -5,7 +5,7 @@ of the time, or (without a time cap) on the window ceiling."""
 from __future__ import annotations
 
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -205,7 +205,7 @@ def test_a_dead_end_halts_the_wave_with_its_rule_named(tmp_path: Path) -> None:
     tickets = [_ticket("T-001", 0, files=("app.py", "rogue.txt")),
                _ticket("T-002", 1, files=("app.py",), deps=("T-001",))]
     out, ran, _ = _wave_run(tmp_path, rec, max_fix_attempts=9, tickets=tickets,
-                            fix_policy=_UNTIL_CAP)
+                            fix_policy=replace(_UNTIL_CAP, restarts=False))
     assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "fixer", "wave_gate"]
     newest = max(out["fix_passes"], key=lambda p: p.seq)
     assert newest.stop == "revisit"
@@ -301,3 +301,67 @@ def test_the_final_gate_ignores_the_attempt_bound_until_its_loop_stops() -> None
     # A check that recorded no pass still stops past the ceiling without a time cap.
     state["budget"] = BudgetLedger(fix_attempts_since_all_green=21)
     assert route_after_gates(state, cfg, **args, fix_policy=_UNTIL_CAP) == "halt"
+
+
+# ---- ticket restarts ------------------------------------------------------------
+
+
+def test_fixing_until_the_cap_restarts_a_ticket_after_two_passes_without_progress(
+    tmp_path: Path,
+) -> None:
+    from tests.test_fix_loop import _RESTART_TICKETS, _RestartRecorder
+
+    rec = _RestartRecorder(
+        writes={"T-001": {"a.py": "def a(:\n"}, "fix-1": {"a.py": "def a_1(:\n"},
+                "fix-2": {"a.py": "def a_2(:\n"}},
+        again={"T-001": {"a.py": "def a():\n    return 1\n"}})
+    out, ran, _ = _wave_run(tmp_path, rec, tickets=_RESTART_TICKETS, fix_policy=_UNTIL_CAP)
+    assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "fixer", "wave_gate",
+                   "engineering", "wave_gate", "engineering"]
+    assert rec.calls == ["T-001", "fix-1", "fix-2", "T-001", "T-002"]
+    passes = sorted(out["fix_passes"], key=lambda p: p.seq)
+    assert [p.restart_tickets for p in passes] == [(), (), ("T-001",), ()]
+    assert passes[-1].fix_task == "restart-T-001" and passes[-1].outcome == "improved"
+    # Every pass, the restart included, prompted differently (the call cache).
+    prompts = [p.prior_failures for p in rec.history if p.prior_failures]
+    assert len(set(prompts)) == len(prompts)
+
+
+def test_a_dead_end_tries_the_restart_before_it_stops(tmp_path: Path) -> None:
+    # The fixer writes only what the tree already holds; so does the restart.
+    broken = {"app.py": "def broken(:\n"}
+    rec = _Recorder(writes={"T-001": broken, "fix-1": broken, "fix-2": broken})
+    tickets = [_ticket("T-001", 0, files=("app.py", "rogue.txt")),
+               _ticket("T-002", 1, files=("app.py",), deps=("T-001",))]
+    out, ran, _ = _wave_run(tmp_path, rec, max_fix_attempts=9, tickets=tickets,
+                            fix_policy=_UNTIL_CAP)
+    assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "fixer", "wave_gate",
+                   "engineering", "wave_gate"]
+    assert rec.calls == ["T-001", "fix-1", "fix-2", "T-001"]
+    newest = max(out["fix_passes"], key=lambda p: p.seq)
+    assert newest.stop == "revisit" and newest.fix_task == "restart-T-001"
+
+
+def test_the_final_gate_restart_runs_the_engineering_node_not_the_fixer(
+    tmp_path: Path,
+) -> None:
+    from foundry.graph.gate_wiring import fix_window
+    from tests.test_fix_loop import _RestartRecorder
+    from tests.test_ticket_scheduler import _config, _graph, _state
+
+    store = ArtifactStore()
+    rec = _RestartRecorder(writes={"T-001": {"a.py": "def a(:\n"}},
+                           again={"T-001": {"a.py": "A = 1\n"}})
+    rt = _runtime(rec, store)
+    built = _graph(rt, store, tmp_path).compile().invoke(
+        _state(store, [_ticket("T-001", 0, files=("a.py",))]), _config())
+    entry = FixPass(window=fix_window(built, BUILD_TEST_SMOKE_BOUNDARY, frozenset()),
+                    boundary=BUILD_TEST_SMOKE_BOUNDARY, pass_no=0, tree="t0",
+                    score=(0, 1, 1), outcome="initial", target="build",
+                    restart_tickets=("T-001",), seq=Seq("run", 99, 0, "fix_pass", 0))
+    out = _graph(rt, store, tmp_path).compile().invoke(
+        {**built, "fix_passes": [entry], "phase": "build_test_fix"}, _config())
+    assert rec.calls == ["T-001", "T-001"]
+    diffs = {a.task_id for a in out["artifacts"] if a.kind == "feature_diff"}
+    assert {"reset-T-001", "restart-T-001"} <= diffs and not any(
+        d and d.startswith("fix-") for d in diffs)

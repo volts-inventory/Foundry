@@ -22,6 +22,7 @@ What these helpers are careful about (LEARNINGS L4/L5/L7, arch §2/§2b):
 
 from __future__ import annotations
 
+import re
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
@@ -41,7 +42,7 @@ if TYPE_CHECKING:
 
     from langchain_core.runnables import RunnableConfig
 
-    from foundry.graph.gate_wiring import BlobResolver, _DiffOps
+    from foundry.graph.gate_wiring import BlobResolver, FailureCluster, _DiffOps
     from foundry.state.factory_state import FactoryState
 
     # Reconstitutes a typed body from its content-addressed handle (the same INFRA
@@ -168,6 +169,92 @@ def _failed_gates(state: FactoryState) -> list[GateResult]:
     ]
 
 
+# pytest's per-test detail header: ``____ test_name ____`` (or Class.test_name).
+_TEST_HEADER = re.compile(r"^_{3,} (\S+) _{3,}$")
+
+
+def fix_target(
+    state: FactoryState, resolve: ArtifactResolver, failed: Sequence[GateResult],
+) -> tuple[FailureCluster | None, int]:
+    """The failure cluster the fix loop's newest check aimed the next pass at
+    (``FixPass.target``), among ``failed``'s clusters, and how many failures the
+    other clusters hold. ``(None, 0)`` before a plan, or when the plan's cluster is
+    no longer failing."""
+    from foundry.agents.implementation.tickets import built_task_ids, read_tickets
+    from foundry.graph.gate_wiring import failure_clusters, window_passes
+
+    passes = window_passes(state, resolve)
+    if not passes or passes[-1].target is None:
+        return None, 0
+    clusters = failure_clusters(failed, read_tickets(state, resolve), built_task_ids(state))
+    aimed = next((c for c in clusters if c.key == passes[-1].target), None)
+    if aimed is None or len(clusters) < 2:
+        return None, 0
+    return aimed, sum(len(c.items) for c in clusters if c is not aimed)
+
+
+def scope_gates(
+    failed: Sequence[GateResult], cluster: FailureCluster,
+) -> list[GateResult]:
+    """``failed`` cut down to ``cluster``: the gates it has failures in, and from a
+    gate whose failures name ids, only the lines (and pytest's ``___ test ___``
+    detail blocks) of the cluster's ids — lines naming no id are kept as context."""
+    from foundry.graph.gate_wiring import failing_ids
+
+    gates = {i.partition(":")[0] for i in cluster.items}
+    mine = {i.partition(":")[2] for i in cluster.items}
+    out: list[GateResult] = []
+    for g in failed:
+        if g.name not in gates:
+            continue
+        if not failing_ids(g.findings):
+            out.append(g)
+            continue
+        names = {i.rsplit("::", 1)[-1] for i in mine}
+        kept: list[str] = []
+        skipping = False
+        for line in g.findings:
+            header = _TEST_HEADER.match(line.strip())
+            if header is not None:
+                test = header.group(1).rsplit(".", 1)[-1]
+                skipping = test not in names
+            ids = failing_ids([line])
+            if ids:
+                if set(ids) & mine:
+                    kept.append(line)
+            elif not skipping:
+                kept.append(line)
+        out.append(g.model_copy(update={"findings": tuple(kept)}))
+    return out
+
+
+def _cluster_gates(
+    state: FactoryState, resolve: ArtifactResolver, *, scoped: bool = True,
+) -> tuple[list[GateResult], tuple[str, ...]]:
+    """The failed gates a fixer pass is shown — scoped to the planned cluster — and
+    the summary lines that say so."""
+    failed = _failed_gates(state)
+    if not scoped:
+        return failed, ()
+    cluster, others = fix_target(state, resolve, failed)
+    if cluster is None:
+        return failed, ()
+    return scope_gates(failed, cluster), (
+        f"this pass fixes ONE failure cluster: {cluster.key} ({len(cluster.items)} "
+        "failure(s), listed below)",
+        f"{others} other failure(s) are handled separately — don't touch them",
+    )
+
+
+def fix_failures(state: FactoryState, resolve: ArtifactResolver) -> tuple[str, ...]:
+    """:func:`_prior_failures` scoped to the fix pass's planned cluster."""
+    out: list[str] = []
+    for g in _cluster_gates(state, resolve)[0]:
+        out.append(f"[{g.name} gate FAILED]")
+        out.extend(g.findings)
+    return tuple(out)
+
+
 def _fix_summary(
     state: FactoryState,
     resolve: ArtifactResolver,
@@ -175,11 +262,13 @@ def _fix_summary(
     *,
     attempt: int,
     tree: Mapping[str, str | None] | None = None,
+    scoped: bool = True,
 ) -> tuple[str, ...]:
     """The head of a fixer pass's input: the failing gates and the tests/scenarios
     they name, the files to edit first (with their content from ``tree``, the
     integrated tree), then what the previous pass of this fix loop touched and
-    reported.
+    reported. With ``scoped`` (a fixer pass) only the planned failure cluster's
+    failures are listed (:func:`fix_target`).
     Fresh attempts from a summary of earlier rollouts beat one ever-growing repair
     context (arXiv 2602.18998, 2604.16529). Read off state; no model call."""
     from foundry.graph.gate_wiring import (
@@ -192,11 +281,12 @@ def _fix_summary(
         pip_manifest_failure,
     )
 
-    failed = _failed_gates(state)
+    failed, scope = _cluster_gates(state, resolve, scoped=scoped)
     ids = [i for g in failed for i in failing_ids(g.findings)]
     named = _named_files(failed, tree)
     out = [
         "[fix summary]",
+        *scope,
         "failed gates: " + (", ".join(g.name for g in failed) or "none recorded"),
         "failing tests/scenarios: " + (", ".join(ids) or "none named; see the gate output"),
     ]
@@ -790,7 +880,7 @@ def make_fixer_node(
 
         failures = (
             *_fix_summary(state, resolve, resolve_blob, attempt=attempt, tree=overlay),
-            *group_failures_by_ticket(_prior_failures(state), read_tickets(state, resolve)),
+            *group_failures_by_ticket(fix_failures(state, resolve), read_tickets(state, resolve)),
         )
         if duplicates:
             failures = (*failures, f"[{CONTRACT_DUP_TRIAGE}]", *duplicates)

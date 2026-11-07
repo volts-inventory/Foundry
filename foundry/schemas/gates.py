@@ -117,7 +117,11 @@ class FixPass(FrozenModel):
     ``clock_s`` is the run clock (the token meter's elapsed seconds, which survive a
     restart) once the check was done, ``elapsed_s`` the pass's cost since the
     window's previous check; both ``None`` without a meter. ``stop`` names the rule
-    that ended a fix-until-cap loop on this check (see ``gate_wiring.FixPolicy``)."""
+    that ended a fix-until-cap loop on this check (see ``gate_wiring.FixPolicy``).
+    ``cluster`` is the failure cluster the pass that made this tree was aimed at,
+    ``target`` the one the next pass is aimed at (``gate_wiring.FailureCluster``),
+    and ``restart_tickets`` the tickets the next pass rebuilds from scratch instead
+    of a fixer session (``gate_wiring.plan_next_pass``)."""
 
     window: str
     boundary: str
@@ -133,9 +137,12 @@ class FixPass(FrozenModel):
     clock_s: float | None = None
     stop: str | None = None
     restart: bool = False
+    cluster: str | None = None
+    target: str | None = None
+    restart_tickets: tuple[str, ...] = ()
     seq: Seq
 
-    @field_validator("score", "failing", "touched", mode="before")
+    @field_validator("score", "failing", "touched", "restart_tickets", mode="before")
     @classmethod
     def _coerce_tuples(cls, v: object) -> object:
         return tuple(v) if isinstance(v, list) else v

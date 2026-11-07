@@ -34,7 +34,7 @@ from foundry.agents.implementation.tickets import (
     pending_wave,
     tickets_settled,
 )
-from foundry.graph.gate_wiring import ADVANCE, ESCALATE, FIX, HALT
+from foundry.graph.gate_wiring import ADVANCE, ESCALATE, FIX, HALT, RESTART, pending_restarts
 from foundry.state.factory_state import FactoryState
 
 if TYPE_CHECKING:
@@ -158,8 +158,9 @@ def build_implementation_subgraph(
         def _after_check(state: FactoryState, config: RunnableConfig) -> str:
             assert check is not None
             # ESCALATE: the engineering node re-runs the requested local tickets on
-            # the cloud level, then the check runs again.
-            return {ADVANCE: eng_id, ESCALATE: eng_id, FIX: fixer_id,
+            # the cloud level, then the check runs again; RESTART: it rebuilds the
+            # planned tickets from scratch on their own tier.
+            return {ADVANCE: eng_id, ESCALATE: eng_id, RESTART: eng_id, FIX: fixer_id,
                     HALT: END}[check.route(state, config)]
 
         g.add_node(gate_id, _wave_gate)
@@ -186,7 +187,8 @@ def build_implementation_subgraph(
             return END
         if (can_fix and state.get("phase") == "build_test_fix"
                 and tickets_settled(state, resolve)):
-            return fixer_id
+            # The final gate planned a ticket restart instead of a fixer pass.
+            return eng_id if pending_restarts(state, resolve) else fixer_id
         # Resuming a run the per-wave check halted: re-run that check (fresh budget)
         # on the waves already built before building the next one.
         if (check is not None and state.get("phase") == "resume"

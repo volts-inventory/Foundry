@@ -548,7 +548,8 @@ _PLAN_PAYLOAD: dict[str, Any] = {
             "consumes": [],
         },
     ],
-    # One feature ticket (also the entrypoint) and its paired test ticket.
+    # One feature ticket (also the entrypoint, binding its own scenarios) after a
+    # trivial test-fixtures ticket.
     "tickets": [
         {
             "id": "T-001",
@@ -556,8 +557,8 @@ _PLAN_PAYLOAD: dict[str, Any] = {
             "description": "The service answers callers and rejects anonymous ones.",
             "specialty": "backend",
             "difficulty": "standard",
-            "depends_on": [],
-            "files": ["app.py"],
+            "depends_on": ["T-002"],
+            "files": ["app.py", "tests/step_defs/test_t_001.py"],
             "implements": [],
             "consumes": [],
             "entrypoint": True,
@@ -584,11 +585,11 @@ _PLAN_PAYLOAD: dict[str, Any] = {
         },
         {
             "id": "T-002",
-            "title": "Step definitions for T-001",
+            "title": "Shared test fixtures",
             "specialty": "test",
             "difficulty": "trivial",
-            "depends_on": ["T-001"],
-            "files": ["tests/step_defs/test_t_001.py"],
+            "depends_on": [],
+            "files": ["tests/conftest.py"],
             "implements": [],
             "consumes": [],
             "entrypoint": False,

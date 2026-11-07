@@ -71,6 +71,25 @@ def test_a_test_ticket_is_never_told_a_paired_test_ticket_binds_its_scenarios() 
     assert 'scenarios("../features/T1.feature")' in test
 
 
+def test_each_feature_file_is_bound_from_exactly_one_step_module() -> None:
+    # Told to bind from each of four modules, a model wrote one step module four
+    # times and every scenario ran 4x.
+    python = StackDecision(language="python", test="pytest")
+    scenarios = {"features/T1.feature": ["AC-1"], "features/T2.feature": ["AC-2"]}
+    files = ("tests/test_routes.py", "tests/test_t1.py", "tests/test_helpers.py")
+    rules = " ".join(scenario_rules(files, scenarios, python, test=True, ticket_id="T1"))
+    assert ('in tests/test_t1.py ONLY, the path relative to it: '
+            'scenarios("../features/T1.feature") scenarios("../features/T2.feature")') in rules
+    assert "tests/test_routes.py, tests/test_helpers.py must not call scenarios()" in rules
+    verify = scenario_verify(files, scenarios, python, "T1")["scenarios"]
+    assert verify.endswith("pytest -rA tests/test_t1.py")
+    assert "test_routes.py" not in verify
+    # Without a ticket-named module, the first one that is not a helper.
+    first = scenario_verify(("tests/test_helpers.py", "tests/test_a.py", "tests/test_b.py"),
+                            scenarios, python)["scenarios"]
+    assert first.endswith("-rA tests/test_a.py")
+
+
 def test_a_ticket_without_scenarios_gets_no_scenario_rules() -> None:
     assert scenario_rules(("app.py",), {}, None) == []
 

@@ -584,6 +584,7 @@ _SUMMARY_HEADER = re.compile(r"^=+ short test summary info =+$")
 # Lines the fix loop reads as structured (failing ids, BDD outcomes): any copy of
 # one outside pytest's summary is test output and is quoted so it never parses.
 _ID_SHAPED = re.compile(r"^(?:FAILED|ERROR|BDD criterion)\b")
+_DETAIL_FLOOR = 8
 
 
 def failure_findings(stdout: str, *, limit: int = 50, summary_ids: bool = True) -> tuple[str, ...]:
@@ -592,7 +593,9 @@ def failure_findings(stdout: str, *, limit: int = 50, summary_ids: bool = True) 
     instead of re-rolling blind. Bounded; lines are truncated. (Zone A: pure parse.)
 
     The ``FAILED``/``ERROR`` summary lines come last but name every failing test, so
-    they keep their room under ``limit``; the detail lines fill what is left. Only
+    they keep their room under ``limit``; the detail lines (each kept once) fill what
+    is left, but never fewer than ``_DETAIL_FLOOR``, the exception (``E``) lines
+    first when they do not all fit. Only
     the lines of pytest's LAST short-summary section count as summary lines (a test
     can print a header of its own, never after pytest's): an id-shaped line anywhere
     else — a test's captured output — is quoted (``| ``), so a test cannot choose
@@ -618,7 +621,15 @@ def failure_findings(stdout: str, *, limit: int = 50, summary_ids: bool = True) 
         ):
             keep.append(f"| {s}"[:300] if _ID_SHAPED.match(st) else s[:300])
     summary = summary[:limit]
-    return (*keep[: limit - len(summary)], *summary)
+    detail = list(dict.fromkeys(keep))
+    room = max(limit - len(summary), _DETAIL_FLOOR)
+    if len(detail) > room:
+        # When one cause fails most of the suite, the summary alone fills the
+        # limit: keep its exception messages, which name that cause.
+        errors = [d for d in detail if d.startswith(("E ", "E\t"))][:room]
+        chosen = {*errors, *[d for d in detail if d not in errors][: room - len(errors)]}
+        detail = [d for d in detail if d in chosen]
+    return (*detail, *summary)
 
 
 _FIXTURE_NOT_FOUND = re.compile(r"fixture '([A-Za-z_]\w*)' not found")

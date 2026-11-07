@@ -41,6 +41,7 @@ from foundry.proxy.model_provider_proxy import ModelProviderProxy, ProviderTrans
 
 __all__ = [
     "DEFAULT_FIX_ATTEMPTS",
+    "DEFAULT_FIX_UNTIL_CAP",
     "LEVEL_TIERS",
     "LOCAL_BACKEND",
     "MODEL_MODES",
@@ -60,6 +61,10 @@ LEVEL_TIERS = ("T1", "T2", "T3")
 # Repair rounds per mode. Extra rounds plateau fast (fix loops stall after ~2-3 passes),
 # so local gets no more than cloud despite the weaker model.
 DEFAULT_FIX_ATTEMPTS: dict[str, int] = {"cloud": 3, "hybrid": 3, "local": 3}
+# Whether the build-side fix loops run until the time cap (a dead-end rule or too
+# little time left stops them) instead of max_fix_attempts. On by default where the
+# model time is free: a local pass costs only wall-clock time.
+DEFAULT_FIX_UNTIL_CAP: dict[str, bool] = {"cloud": False, "hybrid": False, "local": True}
 
 _MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$")
 

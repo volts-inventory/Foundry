@@ -72,11 +72,12 @@ from foundry.execution.adapters.stub import StubAdapter
 from foundry.gates import DevGateWriteVerifier, TwoZoneGateRunner, ZoneBSigner
 from foundry.gates.signing import signing_schemes_from_env
 from foundry.graph.factory_graph import build_factory_graph, terminal_gates_pass
-from foundry.graph.gate_wiring import GATE_INPUT_FILES
+from foundry.graph.gate_wiring import GATE_INPUT_FILES, FixPolicy
 from foundry.graph.supervisor import MODE_ASSISTANT, RESUME_PHASE, resume_boundary
 from foundry.manifest import write_manifest
 from foundry.modes import (
     DEFAULT_FIX_ATTEMPTS,
+    DEFAULT_FIX_UNTIL_CAP,
     MODEL_MODES,
     Level,
     build_level_proxy,
@@ -1311,6 +1312,25 @@ def _change_seed(base_root: str, *, has_stack: bool) -> FactoryState:
     return seed
 
 
+def fix_until_cap_for(
+    explicit: bool | None, *, model_mode: str | None, levels: Mapping[str, Any] | None,
+    level_table: Mapping[str, Level] | None,
+) -> bool:
+    """Whether the run fixes until its time cap: ``explicit`` (the flag) wins, then
+    ``FOUNDRY_FIX_UNTIL_CAP=0/1``, then the mode's default — for custom levels, on
+    iff every level is local."""
+    if explicit is not None:
+        return explicit
+    env = os.environ.get("FOUNDRY_FIX_UNTIL_CAP", "").strip()
+    if env:
+        if env not in ("0", "1"):
+            raise ValueError(f"FOUNDRY_FIX_UNTIL_CAP must be 0 or 1, not {env!r}")
+        return env == "1"
+    if levels is not None and level_table is not None:
+        return local_tiers(level_table) == frozenset(level_table)
+    return DEFAULT_FIX_UNTIL_CAP[model_mode or "cloud"]
+
+
 def run(
     request: str,
     *,
@@ -1343,6 +1363,7 @@ def run(
     time_cap_minutes: float | None = None,
     cancel: threading.Event | None = None,
     manifest_dir: str | None = None,
+    fix_until_cap: bool | None = None,
 ) -> RunResult:
     """Run ``request`` end-to-end through the compiled factory graph (smoke path).
 
@@ -1437,6 +1458,11 @@ def run(
         Setting this event stops the run cleanly with ``BuildStopped`` before the
         next model call, coding session or gate run (the token meter's seams). The
         checkpoint stays resumable, as after a token-cap stop.
+    fix_until_cap:
+        Run each build-side fix loop until a dead-end rule or the time cap stops
+        it, instead of ``max_fix_attempts`` passes (see
+        :class:`~foundry.graph.gate_wiring.FixPolicy`). ``None``: see
+        :func:`fix_until_cap_for` (on for local runs).
     """
     if mode not in MODES:
         raise ValueError(f"unknown mode {mode!r}; choose one of {', '.join(MODES)}")
@@ -1455,6 +1481,12 @@ def run(
         max_fix_attempts = DEFAULT_FIX_ATTEMPTS[model_mode or "cloud"]
     if time_cap_minutes is not None and time_cap_minutes <= 0:
         raise ValueError("time_cap_minutes must be > 0")
+    fix_policy = FixPolicy(until_cap=fix_until_cap_for(
+        fix_until_cap, model_mode=model_mode, levels=levels, level_table=level_table))
+    if fix_policy.until_cap and time_cap_minutes is None:
+        print(f"note: fixing until the time cap without one: each fix loop stops after "
+              f"{fix_policy.window_ceiling} passes (set --time-cap to fix for longer)",
+              file=sys.stderr)
     spec_text = _load_spec(spec)
     base_root, thread_id = _change_base(base_dir, request, thread_id)
     # Single-host durability seam (durability/persistence.py): when
@@ -1597,6 +1629,7 @@ def run(
                 workers=workers,
                 ticket_tiers=ticket_tiers,
                 on_task=task_cb,
+                fix_policy=fix_policy,
             )
             # The epoch counter is in-memory: a process continuing this thread's
             # checkpoint must mint Seqs above the run's records, or a re-run gate's
@@ -2014,6 +2047,13 @@ def main(argv: list[str] | None = None) -> int:
         local_model = _local_model or os.environ.get("FOUNDRY_LOCAL_MODEL", "").strip() \
             or DEFAULT_LOCAL_MODEL
         args, time_cap = _take_int(args, "--time-cap", minimum=1)
+        # --fix-until-cap / --no-fix-until-cap override FOUNDRY_FIX_UNTIL_CAP and the
+        # mode's default (on for local).
+        fix_until_cap: bool | None = None
+        for flag, value in (("--fix-until-cap", True), ("--no-fix-until-cap", False)):
+            if flag in args:
+                fix_until_cap = value
+                args = [a for a in args if a != flag]
         local_check = "--local-check" in args
         args = [a for a in args if a != "--local-check"]
 
@@ -2131,6 +2171,7 @@ def main(argv: list[str] | None = None) -> int:
                 "[--ticket-tiers trivial=T3,standard=T2,complex=T1] "
                 "[--model-mode {cloud|hybrid|local}] [--local-url URL] "
                 "[--local-model ID] [--time-cap MINUTES] [--token-cap N] [--local-check] "
+                "[--fix-until-cap|--no-fix-until-cap] "
                 '["<one-line request>"]   (optional when --spec is given)\n'
                 f"  mode: assistant — {_TRUST_POSTURE[MODE_ASSISTANT]}\n"
                 "  backend: mock (default — keyless, deterministic) | anthropic | openai | "
@@ -2168,6 +2209,7 @@ def main(argv: list[str] | None = None) -> int:
             local_url=local_url,
             local_model=local_model,
             time_cap_minutes=time_cap,
+            fix_until_cap=fix_until_cap,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)

@@ -81,7 +81,7 @@ from foundry.schemas.implementation import (
     scenario_ref,
 )
 from foundry.schemas.product import AcceptanceCriterion, CriteriaCritique
-from foundry.state.reducers import merge_gates
+from foundry.state.reducers import merge_gates, union_fix_passes
 from foundry.state.seq import Seq
 from foundry.state.tree_sha import tree_sha
 
@@ -1770,6 +1770,7 @@ def route_after_gates(
     records: Any,
     max_fix_attempts: int = 3,
     total_cap: int | None = None,
+    fix_policy: FixPolicy | None = None,
 ) -> str:
     """Route a phase boundary on its relevant gate verdicts. Fail-closed.
 
@@ -1798,9 +1799,12 @@ def route_after_gates(
 
     latest = _relevant_latest(state, gate_names)
 
-    bound_spent = _fix_attempts(state, config) >= max_fix_attempts or (
-        total_cap is not None and _fix_total(state) >= total_cap
-    )
+    if fix_policy is not None and fix_policy.until_cap:
+        bound_spent = _until_cap_spent(state, config, boundary, fix_policy)
+    else:
+        bound_spent = _fix_attempts(state, config) >= max_fix_attempts or (
+            total_cap is not None and _fix_total(state) >= total_cap
+        )
 
     # A relevant gate needs a fix when it FAILs, ERRORs, is MISSING (never advance on
     # an absent verdict), OR its digest carries a stable-FAIL latch. A latched digest
@@ -1830,6 +1834,19 @@ def route_after_gates(
 
     # All relevant gates PASS on a non-disqualified digest.
     return ADVANCE
+
+
+def _until_cap_spent(
+    state: FactoryState, config: RunnableConfig, boundary: str, policy: FixPolicy,
+) -> bool:
+    """A fix-until-cap loop's bound: the stop its gate node recorded on the newest
+    check (:func:`keep_best`). A check that recorded no pass (no verdict to judge)
+    still stops past the window ceiling when there is no time cap to end it."""
+    passes = [p for p in state.get("fix_passes") or () if p.boundary == boundary]
+    if passes and max(passes, key=lambda p: p.seq).stop is not None:
+        return True
+    return (policy.remaining_s() is None
+            and _fix_attempts(state, config) > policy.window_ceiling)
 
 
 _FAILED_TEST = re.compile(r"^(?:FAILED|ERROR) (\S+::\S+)")
@@ -1990,6 +2007,7 @@ def bump_fix_attempts(
     records: Any,
     max_fix_attempts: int,
     total_cap: int | None = None,
+    fix_policy: FixPolicy | None = None,
 ) -> None:
     """Bump ``budget.fix_attempts_since_all_green`` on ``out`` when ``boundary``
     will route ``fix`` after ``out`` folds in — and, outside the Spec boundary, the
@@ -2003,11 +2021,12 @@ def bump_fix_attempts(
     ledger = state.get("budget") or BudgetLedger()
     post: FactoryState = {
         "gates": merge_gates(state.get("gates"), out.get("gates")),
+        "fix_passes": union_fix_passes(state.get("fix_passes"), out.get("fix_passes")),
         "budget": ledger,
     }
     decision = route_after_gates(
         post, config, boundary=boundary, records=records, max_fix_attempts=max_fix_attempts,
-        total_cap=total_cap,
+        total_cap=total_cap, fix_policy=fix_policy,
     )
     if decision == FIX:
         out["budget"] = ledger.model_copy(update={
@@ -2025,13 +2044,15 @@ def settle_fix_attempts(
     records: Any,
     max_fix_attempts: int,
     total_cap: int | None = None,
+    fix_policy: FixPolicy | None = None,
 ) -> None:
     """:func:`bump_fix_attempts`, plus a reset to 0 when ``boundary`` ADVANCEs: a
     green boundary hands the next one the whole budget, so the attempts one
     boundary spent (a Spec re-plan, an earlier wave's repair) never leave a later
     failure with fewer fixes. A spent bound (HALT) keeps the ledger unchanged."""
     bump_fix_attempts(state, config, out, boundary=boundary, records=records,
-                      max_fix_attempts=max_fix_attempts, total_cap=total_cap)
+                      max_fix_attempts=max_fix_attempts, total_cap=total_cap,
+                      fix_policy=fix_policy)
     ledger = state.get("budget") or BudgetLedger()
     if "budget" in out or not ledger.fix_attempts_since_all_green:
         return
@@ -2055,6 +2076,137 @@ REVERT_SKIPPED_TRIAGE = "fix-revert-skipped"
 _FIX_PASS_NODE = "fix_pass"
 _STAGES = ("build", "test", "smoke")
 _FAILING_CAP = 40
+# One epoch stream for every pass of the run: each entry's epoch is above the last
+# (and raise_floor keeps it so across a resume). A per-pass key gave every entry
+# the same epoch, leaving the order to langgraph_step, which does not order a wave
+# subgraph's steps against the supervisor's.
+_PASS_KEY = "pass"
+
+
+def _pass_order(p: FixPass) -> tuple[int, Seq]:
+    """Order within one window: ``pass_no`` counts up there whatever the Seqs say
+    (a checkpoint from before ``_PASS_KEY`` holds equal-epoch entries)."""
+    return (p.pass_no, p.seq)
+
+
+# ---- fix until the time cap ---------------------------------------------------
+#
+# Instead of a fixed number of passes, a fix loop runs until a dead-end rule says
+# the next pass would only repeat what failed, or until the run's time cap leaves
+# too little for another pass. The gate node decides (FixPass.stop) and the routing
+# edge reads that decision, so both agree and a resume re-decides on its own check.
+
+FIX_STOP_TRIAGE = "fix-stop"
+_PASS_HEADROOM = 1.3
+
+
+@dataclass(frozen=True)
+class FixPolicy:
+    """How a fix loop is bounded. ``until_cap=False`` is the legacy bound
+    (``max_fix_attempts`` per boundary plus :func:`fix_cap` run-wide). With
+    ``until_cap`` those counters are still bumped but never halt; the loop halts on
+    the first dead-end rule (counted from the window's latest restart):
+    ``no_edit_limit`` passes in a row edited no file, ``revisit_limit`` passes
+    landed on a tree the window already checked, one failure signature came back
+    ``same_sig_limit`` times from one base tree, ``plateau`` passes went by since
+    the best score last improved (a lateral move is not one), ``error_limit``
+    passes in a row ERRORed; or when the time cap leaves less than
+    ``_PASS_HEADROOM`` x the window's median pass (``default_pass_s`` before any)
+    — with ``wave_share``, a wave's loop gets only its share of the time left
+    when it started, ``1 / (unbuilt waves + 2)``. Without a time cap a window stops
+    after ``window_ceiling`` passes. ``meter`` returns the run's token meter."""
+
+    until_cap: bool = False
+    no_edit_limit: int = 2
+    revisit_limit: int = 2
+    same_sig_limit: int = 3
+    plateau: int = 6
+    error_limit: int = 3
+    window_ceiling: int = 20
+    wave_share: bool = True
+    default_pass_s: float = 600.0
+    meter: Callable[[], Any] | None = None
+
+    def bound(self, rt: AgentRuntime) -> FixPolicy:
+        """This policy reading ``rt``'s token meter, unless it names its own."""
+        if self.meter is not None:
+            return self
+        from dataclasses import replace
+
+        return replace(self, meter=lambda: getattr(rt.proxy, "token_meter", None))
+
+    def _meter(self) -> Any:
+        return self.meter() if self.meter is not None else None
+
+    def remaining_s(self) -> float | None:
+        meter = self._meter()
+        return None if meter is None else meter.remaining_s
+
+
+def _median(values: list[float]) -> float:
+    values = sorted(values)
+    mid = len(values) // 2
+    return values[mid] if len(values) % 2 else (values[mid - 1] + values[mid]) / 2
+
+
+def fix_stop(
+    passes: list[FixPass], policy: FixPolicy, *, unbuilt_waves: int | None = None,
+) -> tuple[str, str] | None:
+    """``(rule, why)`` when a fix-until-cap loop must not start another pass after
+    the newest of ``passes`` (one window, in pass order), else ``None``."""
+    start = max((i for i, p in enumerate(passes) if p.restart), default=0)
+    run = passes[start:]
+    judged = [(start + 1 + i, p) for i, p in enumerate(run[1:]) if p.outcome != "restored"]
+    tail = [p for _, p in judged]
+
+    def streak(pred: Callable[[FixPass], bool]) -> int:
+        n = 0
+        for p in reversed(tail):
+            if not pred(p):
+                break
+            n += 1
+        return n
+
+    if streak(lambda p: not p.touched) >= policy.no_edit_limit:
+        return ("no-edit", f"the last {policy.no_edit_limit} fix passes edited no file")
+    revisits = sum(any(q.tree == p.tree for q in passes[:i]) for i, p in judged)
+    if revisits >= policy.revisit_limit:
+        return ("revisit", f"{revisits} fix passes landed on a tree this loop had already "
+                           "checked")
+    sigs: dict[tuple[str, tuple[str, ...]], int] = {}
+    for i, p in judged:
+        key = (passes[i - 1].tree, p.failing)
+        sigs[key] = sigs.get(key, 0) + 1
+        if p.failing and sigs[key] >= policy.same_sig_limit:
+            return ("same-signature", f"{sigs[key]} fix passes from one tree left the same "
+                                      "checks failing")
+    since = streak(lambda p: p.outcome != "improved")
+    if since >= policy.plateau:
+        return ("plateau", f"{since} fix passes went by without improving on the best tree")
+    if streak(lambda p: p.outcome == "error") >= policy.error_limit:
+        return ("errors", f"the last {policy.error_limit} checks ERRORed")
+    meter = policy._meter()
+    remaining = None if meter is None else meter.remaining_s
+    if remaining is None:
+        if len(tail) >= policy.window_ceiling:
+            return ("window-ceiling", f"{len(tail)} fix passes without a time cap (the "
+                                      f"ceiling is {policy.window_ceiling})")
+        return None
+    spent = [p.elapsed_s for p in passes if p.elapsed_s is not None]
+    need = _PASS_HEADROOM * (_median(spent) if spent else policy.default_pass_s)
+    left, rule = float(remaining), "time"
+    first = run[0]
+    if (policy.wave_share and unbuilt_waves is not None and first.clock_s is not None
+            and meter.time_cap_s is not None):
+        share = (meter.time_cap_s - first.clock_s) / (unbuilt_waves + 2)
+        wave_left = first.clock_s + share - meter.elapsed_s
+        if wave_left < left:
+            left, rule = wave_left, "wave-share"
+    if left < need:
+        what = "this wave's share of the time cap" if rule == "wave-share" else "the time cap"
+        return (rule, f"{max(left, 0) / 60:.1f} min left of {what}, under the "
+                      f"{need / 60:.1f} min another pass takes")
+    return None
 
 
 def fix_window(state: FactoryState, boundary: str, scope: frozenset[str]) -> str:
@@ -2093,7 +2245,7 @@ def best_entry(passes: Iterable[FixPass], window: str) -> FixPass | None:
     """The window's best scored pass; a tie goes to the newest."""
     best: FixPass | None = None
     for p in sorted((p for p in passes if p.window == window and p.score is not None),
-                    key=lambda p: p.seq):
+                    key=_pass_order):
         if best is None or tuple(p.score or ()) <= tuple(best.score or ()):
             best = p
     return best
@@ -2219,6 +2371,8 @@ def keep_best(
     resolve: ArtifactResolver,
     resolve_blob: BlobResolver,
     rerun: Callable[[FactoryState], dict[str, Any]],
+    policy: FixPolicy | None = None,
+    unbuilt_waves: int | None = None,
 ) -> bool:
     """Record the check ``out`` holds in the fix-pass ledger and, when its tree is
     worse than the window's best, restore the best tree: a ``revert-<n>`` diff on
@@ -2226,7 +2380,61 @@ def keep_best(
     runner-signed newest verdicts are the restored tree's), both kept only if the
     re-run's digest is the best tree's. Returns True iff the tree was restored.
 
+    The new entries are stamped with the run clock once the check (and any
+    restore) is done, the pass's own entry with its cost since the window's
+    previous check: the fixer session, the check and the restore. Under a
+    fix-until-cap ``policy`` a failing check whose loop must stop (:func:`fix_stop`;
+    ``unbuilt_waves`` set for a wave check) gets the rule on its newest entry and a
+    :data:`FIX_STOP_TRIAGE` note naming it.
+
     Call before the budget is settled, on ``out``'s own verdicts."""
+    known = len(out.get("fix_passes") or ())
+    window = fix_window(state, boundary, scope)
+    prior = [p for p in state.get("fix_passes") or () if p.window == window]
+    restored = _keep_best(state, config, out, boundary=boundary, scope=scope, rt=rt,
+                          resolve=resolve, resolve_blob=resolve_blob, rerun=rerun)
+    new = list((out.get("fix_passes") or [])[known:])
+    if not new:
+        return restored
+    # The meter's clock, unlike a process clock, survives a resume and leaves out
+    # the time the run was stopped.
+    meter = policy._meter() if policy is not None else getattr(rt.proxy, "token_meter", None)
+    clock = float(meter.elapsed_s) if meter is not None else None
+    last = max(prior, key=_pass_order).clock_s if prior else None
+    elapsed = (clock - last if clock is not None and last is not None and clock >= last
+               else None)
+    new = [p.model_copy(update={"clock_s": clock, "elapsed_s": elapsed if i == 0 else None})
+           for i, p in enumerate(new)]
+    newest = new[-1]
+    stop = None
+    if policy is not None and policy.until_cap and (newest.score is None or newest.score[1]):
+        stop = fix_stop(sorted([*prior, *new], key=_pass_order), policy,
+                        unbuilt_waves=unbuilt_waves)
+    if stop is not None:
+        rule, why = stop
+        new[-1] = newest.model_copy(update={"stop": rule})
+        out.setdefault("gate_triage", []).append(GateTriage(
+            name=FIX_STOP_TRIAGE, run_against=newest.tree,
+            explanation=f"the fix loop stops ({rule}): {why}"[:2000],
+            produced_by=_FIX_PASS_NODE,
+            seq=rt.seq(config, _FIX_PASS_NODE, FIX_STOP_TRIAGE),
+        ))
+    out["fix_passes"][known:] = new
+    return restored
+
+
+def _keep_best(
+    state: FactoryState,
+    config: RunnableConfig,
+    out: dict[str, Any],
+    *,
+    boundary: str,
+    scope: frozenset[str],
+    rt: AgentRuntime,
+    resolve: ArtifactResolver,
+    resolve_blob: BlobResolver,
+    rerun: Callable[[FactoryState], dict[str, Any]],
+) -> bool:
     names = _BOUNDARY_GATES[boundary]
     verdicts = _newest_per_name(g for g in out.get("gates") or () if g.name in names)
     if not verdicts:
@@ -2234,7 +2442,7 @@ def keep_best(
     tree = next(iter(verdicts.values())).run_against
     window = fix_window(state, boundary, scope)
     prior = sorted((p for p in state.get("fix_passes") or () if p.window == window),
-                   key=lambda p: p.seq)
+                   key=_pass_order)
     score = fix_score(verdicts, names)
     best = best_entry(prior, window)
     outcome = _outcome(prior, tree, score, best)
@@ -2249,7 +2457,7 @@ def keep_best(
         window=window, boundary=boundary, pass_no=pass_no, tree=tree, fix_task=fix_task,
         score=score, failing=_failing(verdicts), outcome=outcome, touched=touched,
         snapshot_uri=snapshot, restart=_fix_attempts(state, config) == 0,
-        seq=rt.seq(config, _FIX_PASS_NODE, f"pass:{window}:{pass_no}"),
+        seq=rt.seq(config, _FIX_PASS_NODE, _PASS_KEY),
     )]
     out.setdefault("fix_passes", []).extend(passes)
     # A tree worse than a failing best is never all-PASS, so it never advances.
@@ -2282,7 +2490,7 @@ def keep_best(
         window=window, boundary=boundary, pass_no=pass_no + 1, tree=best.tree,
         fix_task=revert.task_id, score=fix_score(restored, names),
         failing=_failing(restored), outcome="restored", snapshot_uri=best.snapshot_uri,
-        seq=rt.seq(config, _FIX_PASS_NODE, f"pass:{window}:{pass_no + 1}"),
+        seq=rt.seq(config, _FIX_PASS_NODE, _PASS_KEY),
     ))
     return True
 
@@ -2291,16 +2499,34 @@ def draft_best(state: FactoryState, resolve: ArtifactResolver) -> FixPass | None
     """The best tree of the fix loop ``state`` is still in, if any: what a halted
     or stopped run hands back instead of its newest, possibly worse or ungated, tree.
     ``None`` once a ticket diff landed after the loop's last check."""
+    passes = window_passes(state, resolve)
+    best = best_entry(passes, passes[0].window) if passes else None
+    return best if best is not None and best.snapshot_uri is not None else None
+
+
+def window_passes(state: FactoryState, resolve: ArtifactResolver) -> list[FixPass]:
+    """The ledger of the fix loop ``state`` is still in, in pass order; empty once a
+    ticket diff landed after the loop's last check."""
     passes = state.get("fix_passes") or ()
     if not passes:
-        return None
+        return []
     newest = max(passes, key=lambda p: p.seq)
     scope = (wave_scenarios(state, resolve) if newest.boundary == BUILD_TEST_BOUNDARY
              else frozenset())
     if fix_window(state, newest.boundary, scope) != newest.window:
-        return None
-    best = best_entry(passes, newest.window)
-    return best if best is not None and best.snapshot_uri is not None else None
+        return []
+    return sorted((p for p in passes if p.window == newest.window), key=_pass_order)
+
+
+def revisited_tree(state: FactoryState, out: Mapping[str, Any]) -> bool:
+    """True iff the check ``out`` holds landed on a tree its window's ledger already
+    holds: a fix pass that reproduced an earlier (say, reverted) tree made no
+    progress, though the restore left the newest tree a different one."""
+    new = out.get("fix_passes") or ()
+    if not new or new[0].outcome == "initial":
+        return False
+    return any(p.window == new[0].window and p.tree == new[0].tree
+               for p in state.get("fix_passes") or ())
 
 
 def materialize_best(
@@ -2360,6 +2586,27 @@ class WaveBuildCheck:
     check_scenarios: bool = True
     # The engineering node's difficulty -> tier table (escalation picks local tickets).
     ticket_tiers: Mapping[Any, str] | None = None
+    fix_policy: FixPolicy = FixPolicy()
+
+    @property
+    def _policy(self) -> FixPolicy:
+        return self.fix_policy.bound(self.rt)
+
+    def _unbuilt_waves(self, state: FactoryState) -> int:
+        from foundry.agents.implementation.tickets import (
+            built_task_ids,
+            next_wave,
+            read_tickets,
+            task_id_for_ticket,
+        )
+
+        tickets = read_tickets(state, self.resolve)
+        done = set(built_task_ids(state))
+        waves = 0
+        while wave := next_wave(tickets, done):
+            done.update(task_id_for_ticket(t.id) for t in wave)
+            waves += 1
+        return waves
 
     def _scenarios(self, state: FactoryState) -> frozenset[str]:
         if not self.check_scenarios:
@@ -2390,10 +2637,12 @@ class WaveBuildCheck:
         own: list[GateResult] = list(out.get("gates") or ())
         reverted = keep_best(state, config, out, boundary=boundary, scope=scenarios,
                              rt=self.rt, resolve=self.resolve, resolve_blob=self.resolve_blob,
-                             rerun=lambda s: self._check(s, config, scenarios))
+                             rerun=lambda s: self._check(s, config, scenarios),
+                             policy=self._policy, unbuilt_waves=self._unbuilt_waves(state))
         settle_fix_attempts(state, config, out, boundary=boundary,
                             records=self.runner.records, max_fix_attempts=self.max_fix_attempts,
-                            total_cap=fix_cap(state, self.resolve, self.max_fix_attempts))
+                            total_cap=fix_cap(state, self.resolve, self.max_fix_attempts),
+                            fix_policy=self._policy)
         # The whole state, not just gates + budget: _route's fix_cap counts the
         # plan's waves off its tickets, and with none it read as a cap of
         # max_fix_attempts, so after that many fixes run-wide this check routed HALT
@@ -2402,6 +2651,7 @@ class WaveBuildCheck:
         post: FactoryState = {
             **state,
             "gates": merge_gates(state.get("gates"), out.get("gates")),
+            "fix_passes": union_fix_passes(state.get("fix_passes"), out.get("fix_passes")),
             "budget": out.get("budget") or state.get("budget") or BudgetLedger(),
         }
         decision = self._route(post, config, boundary)
@@ -2445,11 +2695,16 @@ class WaveBuildCheck:
             # This check routes ESCALATE, not FIX: the rebuild is the ticket's extra
             # attempt and must leave the wave's fixer passes unspent.
             out.pop("budget", None)
-        elif (decision == FIX and not reverted
+        # Fixing until the cap, a pass that made no progress counts toward the
+        # dead-end rules (fix_stop) instead of halting the wave on its own.
+        elif (decision == FIX and not self.fix_policy.until_cap
               and not self.capped_off_target({**state, "gates": post["gates"]}) and (
-                no_fix_progress(post, config, boundary=boundary)
-                or _unchanged_tree_recheck(state, out, config, boundary=boundary))):
-            [build] = [g for g in out["gates"] if g.name == "build"]
+                revisited_tree(state, out) or (not reverted and (
+                    no_fix_progress(post, config, boundary=boundary)
+                    or _unchanged_tree_recheck(state, out, config, boundary=boundary))))):
+            # After a restore the newest build is the restored tree's: route() reads
+            # the note off the current tree.
+            build = max((g for g in out["gates"] if g.name == "build"), key=lambda g: g.seq)
             out.setdefault("gate_triage", []).append(GateTriage(
                 name=NO_FIX_PROGRESS_TRIAGE, run_against=build.run_against,
                 explanation="the last fix pass left the same checks failing; the wave "
@@ -2464,21 +2719,23 @@ class WaveBuildCheck:
         return route_after_gates(state, config, boundary=boundary,
                                  records=self.runner.records,
                                  max_fix_attempts=self.max_fix_attempts,
-                                 total_cap=fix_cap(state, self.resolve, self.max_fix_attempts))
+                                 total_cap=fix_cap(state, self.resolve, self.max_fix_attempts),
+                                 fix_policy=self._policy)
 
     def route(self, state: FactoryState, config: RunnableConfig) -> str:
         """:func:`route_after_gates`, except a pending escalation request routes
         :data:`ESCALATE`, and a fix pass that made no progress
         (:func:`no_fix_progress`, or the :data:`NO_FIX_PROGRESS_TRIAGE` ``run``
         recorded on this tree for a fix that changed nothing) halts as a spent bound
-        does."""
+        does — unless fixing until the cap, where the dead-end rules decide."""
         from foundry.agents.implementation.tickets import pending_escalations
 
         boundary = self._boundary(state)
         decision = self._route(state, config, boundary)
         if decision != ADVANCE and pending_escalations(state, self.resolve):
             return ESCALATE
-        if decision == FIX and not self.capped_off_target(state) and (
+        if decision == FIX and not self.fix_policy.until_cap and not self.capped_off_target(
+                state) and (
                 no_fix_progress(state, config, boundary=boundary)
                 or self._stopped_on_current_tree(state, config)):
             return HALT

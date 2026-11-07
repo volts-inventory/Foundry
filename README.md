@@ -128,6 +128,10 @@ python -m foundry.cli [OPTIONS] "<one-line request>"
   --state-dir <DIR>          # durable, restart-survivable state (FOUNDRY_STATE_DIR)
   --thread-id <NAME>         # run identity; seeds idempotency keys + resume (default: cli-run)
   --max-fix-attempts <N>     # fix-forward retries per failing gate        (default: 3)
+  --fix-until-cap / --no-fix-until-cap
+                             # fix until a dead end or the --time-cap instead of
+                             #   --max-fix-attempts (default: on for --model-mode local;
+                             #   env FOUNDRY_FIX_UNTIL_CAP=0/1)
   --max-slots <N>            # parallelism ceiling                         (default: auto)
   --workers frontend=2,backend=2,data=2,test=2   # tickets in flight per specialty
   --ticket-tiers trivial=T3,standard=T2,complex=T1
@@ -183,6 +187,20 @@ same sample. Ollama's `/v1` honours `temperature`, `top_p`, `presence_penalty`,
 model's Modelfile there (other servers take them from the request).
 `FOUNDRY_LOCAL_SAMPLING=temperature=0.6,top_p=0.95` overrides the profile for every
 local model; `FOUNDRY_LOCAL_SAMPLING=off` restores greedy decoding.
+
+A local pass costs only wall-clock time, so in local mode (and custom levels that
+are all local) the build-side fix loops **fix until the time cap**: each wave
+check and the final gate keep running fixer passes past `--max-fix-attempts`,
+keeping the best tree, until a dead end — 2 passes in a row that edit nothing, 2
+landings on a tree the loop already checked, one failure 3 times from one tree, 6
+passes without beating the best tree, 3 ERRORs in a row — or until `--time-cap`
+leaves less than 1.3x the loop's median pass (10 min before one is timed). A wave's
+loop gets only its share of the time left when it started (1 / (waves left + 2)).
+Without `--time-cap` a loop stops after 20 passes. The halt names the rule
+(`fix-stop` triage) and the draft is the best tree. The LLM review runs once the
+final gates pass rather than on every fix pass. `--no-fix-until-cap` or
+`FOUNDRY_FIX_UNTIL_CAP=0` restores the attempts bound; `--fix-until-cap` /
+`FOUNDRY_FIX_UNTIL_CAP=1` turns it on for any mode.
 
 ---
 

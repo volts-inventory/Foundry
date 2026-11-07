@@ -39,6 +39,7 @@ from foundry.execution.work_pool import ExecutionTask, LocalWorkPool
 from foundry.gates import DevGateWriteVerifier, TwoZoneGateRunner
 from foundry.gates.attestation import ZoneBSigner
 from foundry.graph.gate_wiring import (
+    FixPolicy,
     WaveBuildCheck,
     materialize_workdir,
     planned_paths,
@@ -551,7 +552,8 @@ _WAVE_KEY = b"dev-zone-b-wave-key-0123456789abcdef"
 
 def _wave_run(
     tmp_path: Path, rec: _Recorder, *, max_fix_attempts: int = 3,
-    tickets: list[Ticket] | None = None, store: ArtifactStore | None = None, **extra: Any,
+    tickets: list[Ticket] | None = None, store: ArtifactStore | None = None,
+    fix_policy: FixPolicy | None = None, **extra: Any,
 ) -> tuple[FactoryState, list[str], ArtifactStore]:
     """Two waves (T-002 depends on T-001) with the REAL runner's build gate between."""
     store = store or ArtifactStore()
@@ -559,7 +561,7 @@ def _wave_run(
     records = GlobalRecords()
     runner = TwoZoneGateRunner(ZoneBSigner(_WAVE_KEY, "wave-kid"), records, "s1", "l1")
     check = WaveBuildCheck(rt, runner, store.resolve, store.resolve_blob,
-                           max_fix_attempts=max_fix_attempts)
+                           max_fix_attempts=max_fix_attempts, fix_policy=fix_policy or FixPolicy())
     tickets = tickets or [
         _ticket("T-001", 0, files=("app.py",)),
         _ticket("T-002", 1, files=("app.py",), deps=("T-001",)),

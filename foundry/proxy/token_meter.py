@@ -95,6 +95,13 @@ class TokenMeter:
         """Wall-clock seconds this run has spent, across every process it took."""
         return self._elapsed_base + (_now() - self._started)
 
+    @property
+    def remaining_s(self) -> float | None:
+        """Wall-clock seconds left under the time cap; ``None`` without one."""
+        if self.time_cap_s is None:
+            return None
+        return max(0.0, self.time_cap_s - self.elapsed_s)
+
     def reset(self) -> None:
         with self._lock:
             self.used = 0

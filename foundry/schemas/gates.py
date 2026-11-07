@@ -113,7 +113,11 @@ class FixPass(FrozenModel):
     ``(-stages passed in order, failing gates, failure signature size)``, lower is
     better, ``None`` when a verdict ERRORed (never best, never reverted from).
     ``snapshot_uri`` is the blob of the tree's files, recorded when it became the
-    window's best; ``restored`` marks the re-check of a best tree put back."""
+    window's best; ``restored`` marks the re-check of a best tree put back.
+    ``clock_s`` is the run clock (the token meter's elapsed seconds, which survive a
+    restart) once the check was done, ``elapsed_s`` the pass's cost since the
+    window's previous check; both ``None`` without a meter. ``stop`` names the rule
+    that ended a fix-until-cap loop on this check (see ``gate_wiring.FixPolicy``)."""
 
     window: str
     boundary: str
@@ -126,6 +130,8 @@ class FixPass(FrozenModel):
     touched: tuple[str, ...] = ()
     snapshot_uri: str | None = None
     elapsed_s: float | None = None
+    clock_s: float | None = None
+    stop: str | None = None
     restart: bool = False
     seq: Seq
 

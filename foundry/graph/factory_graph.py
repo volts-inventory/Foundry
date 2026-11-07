@@ -64,7 +64,7 @@ if TYPE_CHECKING:
     from foundry.gates.discriminator import DiscriminatorFactory
     from foundry.gates.profiles import VerificationProfile
     from foundry.gates.runner import TwoZoneGateRunner
-    from foundry.graph.gate_wiring import BlobResolver
+    from foundry.graph.gate_wiring import BlobResolver, FixPolicy
     from foundry.schemas.base import Artifact
 
 __all__ = [
@@ -160,6 +160,7 @@ def build_factory_graph(
     workers: Mapping[str, int] | None = None,
     ticket_tiers: Mapping[Any, str] | None = None,
     on_task: TaskEventHook | None = None,
+    fix_policy: FixPolicy | None = None,
 ) -> CompiledStateGraph[FactoryState]:
     """Compile the full factory graph.
 
@@ -204,6 +205,8 @@ def build_factory_graph(
         The held-out mutant SET is a dev-grade CURATED set (a real mutation engine
         is heavier; plan §0.3). ``None`` (the default) keeps the adequacy-floor-only
         behavior byte-for-byte (back-compat for every existing caller).
+    fix_policy:
+        How the build-side fix loops are bounded, forwarded to the supervisor.
     Returns the COMPILED top-level graph.
     """
     supervisor = build_supervisor_graph(
@@ -221,6 +224,7 @@ def build_factory_graph(
         workers=workers,
         ticket_tiers=ticket_tiers,
         on_task=on_task,
+        fix_policy=fix_policy,
     ).compile()
 
     def emit(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:

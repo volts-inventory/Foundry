@@ -173,10 +173,12 @@ def test_each_fix_pass_gets_the_failure_and_the_previous_pass_summarized(
     assert first[2].startswith("failing tests/scenarios: none named")
     assert not any(line.startswith("previous fix pass") for line in first)
     second = list(rec.packets["fix-2"].prior_failures)
-    assert ("previous fix pass (fix-1) touched app.py, rogue.txt and left the gates above "
-            "failing: try a different approach") in second
-    assert any(line.startswith("previous fix pass reported: the fixer wrote outside")
-               and "rogue.txt" in line for line in second)
+    [line] = [x for x in second if x.startswith("pass 1 (fix-1): ")]
+    assert line.startswith("pass 1 (fix-1): edited app.py, rogue.txt — lateral: ")
+    assert "(build broken)" in line
+    assert "the fixer wrote outside" in line and "rogue.txt" in line.split("reported: ")[1]
+    assert second[second.index(line) + 1] == (
+        "do not repeat an approach marked WORSE or no-change from this tree.")
     tail = second.index("gate output (tail):")
     assert second[tail + 1] == "[build gate FAILED]"
     assert any("broken_1" in line for line in second[tail:])  # this pass's output
@@ -329,8 +331,8 @@ def test_a_capped_pass_that_missed_the_failing_file_does_not_halt(tmp_path: Path
     assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "fixer", "wave_gate",
                    "fixer", "wave_gate"]
     assert not any(t.name == NO_FIX_PROGRESS_TRIAGE for t in out["gate_triage"])
-    assert ("previous fix pass never edited app.py, the file(s) the failure names: edit "
-            "them before anything else") in rec.packets["fix-2"].prior_failures
+    assert ("the last fix pass (fix-1) never edited app.py, the file(s) the failure names: "
+            "edit them before anything else") in rec.packets["fix-2"].prior_failures
 
 
 class _LocalRecorder(_Recorder):
@@ -628,12 +630,73 @@ def test_a_pass_that_makes_the_tree_worse_is_reverted_to_the_best_tree(
     assert "c.py" not in seen and "d.py" not in seen
     assert seen["a.py"] == _ONE_BROKEN["a.py"]
     assert not any(t.name == NO_FIX_PROGRESS_TRIAGE for t in out["gate_triage"])
-    # The restore is the fix loop's diff, not the fixer's: the next summary is fix-2's.
+    # The restore is the fix loop's diff, not the fixer's: the log names fix-2 reverted.
     summary = rec.packets["fix-3"].prior_failures
-    assert any(line.startswith("previous fix pass (fix-2)") for line in summary)
+    assert any(line.startswith("pass 2 (fix-2): edited c.py, d.py, rogue.txt — WORSE, "
+                               "reverted (build broken)") for line in summary)
     assert not any("revert-1" in line for line in summary)
+    # The gates judged the restored tree: fix-2 was undone, so nothing it left
+    # unedited is on the tree any more.
+    assert not any("never edited" in line for line in summary)
+    # A worse pass and its restore are told apart by Seq, not by insertion order.
+    assert len({p.seq.emission_epoch for p in passes}) == len(passes)
     assert {"T-001", "fix-1", "fix-2", "revert-1", "fix-3", "T-002"} <= {
         a.task_id for a in out["artifacts"] if a.kind == "feature_diff"}
+
+
+def test_a_fix_pass_that_rebuilds_a_reverted_tree_is_no_progress(tmp_path: Path) -> None:
+    # fix-3 makes fix-2's worse tree again: reverted again, and the wave stops.
+    rec = _Recorder(writes={"T-001": _BROKEN, "fix-1": _ONE_BROKEN, "fix-2": _WORSE,
+                            "fix-3": _WORSE})
+    out, ran, _ = _wave_run(tmp_path, rec, max_fix_attempts=6, tickets=_FIX_TICKETS)
+    assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "fixer", "wave_gate",
+                   "fixer", "wave_gate"]
+    passes = sorted(out["fix_passes"], key=lambda p: p.seq)
+    assert [p.outcome for p in passes][-2:] == ["worse", "restored"]
+    assert passes[-2].tree == passes[2].tree
+    [note] = [t for t in out["gate_triage"] if t.name == NO_FIX_PROGRESS_TRIAGE]
+    assert note.run_against == passes[-1].tree  # the restored, current tree
+
+
+def test_the_draft_is_the_final_loops_best_after_many_waves() -> None:
+    # Wave checks run inside the implementation subgraph, whose langgraph_step runs
+    # far ahead of the supervisor's: the ledger must still order the final gate's
+    # passes after every wave's.
+    from foundry.graph.gate_wiring import draft_best, keep_best
+
+    store = ArtifactStore()
+    rt = _runtime(None, store)
+    state: FactoryState = {"artifacts": [], "fix_passes": []}
+    local = iter(range(1, 1000))
+
+    def check(state: FactoryState, boundary: str, step: int, tree: str,
+              *gates: tuple[str, GateStatus, tuple[str, ...]]) -> FactoryState:
+        cfg: RunnableConfig = {"configurable": {"thread_id": "run"},
+                               "metadata": {"langgraph_step": step}}
+        out: dict[str, Any] = {"gates": [_gate(n, tree, next(local), s, *f)
+                                         for n, s, f in gates]}
+        keep_best(state, cfg, out, boundary=boundary, scope=frozenset(), rt=rt,
+                  resolve=store.resolve, resolve_blob=store.resolve_blob,
+                  rerun=lambda s: {})
+        return {**state, "fix_passes": [*state["fix_passes"], *out["fix_passes"]]}
+
+    for wave in range(5):
+        state["artifacts"] = [*state["artifacts"], _diff_art(
+            store, f"T-00{wave}", wave + 1, {f"w{wave}.py": "x = 1\n"})]
+        state = check(state, BUILD_BOUNDARY, 40 + 4 * wave, f"w{wave}a",
+                      ("build", _RED, ("SyntaxError",)))
+        state = check(state, BUILD_BOUNDARY, 42 + 4 * wave, f"w{wave}b", ("build", _OK, ()))
+    final = BUILD_TEST_SMOKE_BOUNDARY
+    state = check(state, final, 6, "f0", ("build", _OK, ()),
+                  ("test", _RED, (_FAIL_A, _FAIL_B)), ("smoke", _OK, ()))
+    state["artifacts"] = [*state["artifacts"], _diff_art(store, "fix-1", 10, {"a.py": "1\n"})]
+    state = check(state, final, 9, "f1", ("build", _OK, ()), ("test", _RED, (_FAIL_A,)),
+                  ("smoke", _OK, ()))
+    state["artifacts"] = [*state["artifacts"], _diff_art(store, "fix-2", 11, {"a.py": "(\n"})]
+    state = check(state, final, 12, "f2", ("build", _RED, ("SyntaxError",)),
+                  ("test", _RED, ()), ("smoke", _RED, ()))
+    best = draft_best(state, store.resolve)
+    assert best is not None and (best.boundary, best.tree) == (final, "f1")
 
 
 def test_the_restored_tree_is_the_newest_checked_and_the_draft(tmp_path: Path) -> None:
@@ -734,3 +797,115 @@ def test_fix_passes_round_trip_the_checkpoint_serde() -> None:
     # A checkpoint saved before the ledger existed reads as an empty one.
     old = serde.loads_typed(serde.dumps_typed({"gates": []}))
     assert best_entry(old.get("fix_passes") or (), "w") is None
+
+
+# ---- the attempt-memory log ---------------------------------------------------
+
+_T = "test:tests/test_app.py::"
+
+
+def _log_state(store: ArtifactStore, upto: int) -> FactoryState:
+    """A window's ledger: the built tree (a,b,c failing); fix-1 fixes a,b but breaks
+    d,e,f and is reverted; fix-2 edits nothing; fix-3 trades c for d."""
+    ticket = _diff_art(store, "T-001", 1, {"app.py": "x = 1\n"})
+    fix1 = _diff_art(store, "fix-1", 2, {"models.py": "class Model:\n    pass\n"})
+    state: FactoryState = {"artifacts": [ticket, fix1]}
+    window = fix_window(state, BUILD_BOUNDARY, frozenset())
+
+    def entry(n: int, tree: str, outcome: Any, failing: tuple[str, ...],
+              fix: str | None = None, touched: tuple[str, ...] = ()) -> FixPass:
+        return FixPass(window=window, boundary=BUILD_BOUNDARY, pass_no=n, tree=tree,
+                       fix_task=fix, score=(-1, 1, len(failing)),
+                       failing=tuple(_T + f for f in failing), outcome=outcome,
+                       touched=touched, seq=Seq("run", n + 1, 0, "fix_pass", 0))
+
+    passes = [
+        entry(0, "t0", "initial", ("test_a", "test_b", "test_c")),
+        entry(1, "t1", "worse", ("test_c", "test_d", "test_e", "test_f"), "fix-1",
+              ("api.py", "models.py")),
+        entry(2, "t0", "restored", ("test_a", "test_b", "test_c"), "revert-1"),
+        entry(3, "t0", "no-change", ("test_a", "test_b", "test_c"), "fix-2"),
+        entry(4, "t3", "lateral", ("test_a", "test_b", "test_d"), "fix-3", ("app.py",)),
+    ][:upto]
+    tree = passes[-1].tree
+    note = GateTriage(name="adapter-report", run_against="task/fix-1",
+                      explanation="renamed  Model\nto Item", produced_by="recorder",
+                      seq=Seq("run", 1, 0, "recorder", 0))
+    return {**state, "fix_passes": passes, "gate_triage": [note],
+            "gates": [_gate("build", tree, 1, _OK),
+                      _gate("test", tree, 2, _RED, _FAIL_A)],
+            "budget": BudgetLedger(fix_attempts_since_all_green=1)}
+
+
+def _log(state: FactoryState, store: ArtifactStore) -> list[str]:
+    summary = _fix_summary(state, store.resolve, store.resolve_blob, attempt=1)
+    start = summary.index("[fix passes so far in this loop]")
+    return list(summary[start + 1:summary.index("gate output (tail):")])
+
+
+def test_the_fix_log_names_what_each_pass_fixed_broke_and_whether_it_was_reverted() -> None:
+    store = ArtifactStore()
+    log = _log(_log_state(store, 5), store)
+    assert log[0] == ("pass 1 (fix-1): edited api.py, models.py — WORSE, reverted: fixed "
+                      "test_a,test_b; broke test_d,test_e,test_f (build ok) — reported: "
+                      "renamed Model to Item")
+    assert log[1] == "pass 3 (fix-2): no file edited"
+    assert log[2] == ("pass 4 (fix-3): edited app.py — lateral: 3→3, now failing test_d "
+                      "instead of test_c (build ok)")
+    # The worse pass fixed two tests: its patch rides along to reapply that part.
+    assert log[3].startswith("fix-1's change fixed test_a,test_b but was worse overall: "
+                             "reapply this part without breaking test_d,test_e,test_f:\n"
+                             "--- models.py\nclass Model:")
+    assert log[4] == "do not repeat an approach marked WORSE or no-change from this tree."
+    assert not any(line.startswith("previous fix pass") for line in log)
+
+
+def test_two_passes_from_the_same_best_tree_get_different_prompts() -> None:
+    store = ArtifactStore()
+    after_revert = _fix_summary(_log_state(store, 3), store.resolve, store.resolve_blob,
+                                attempt=2)
+    after_no_edit = _fix_summary(_log_state(store, 4), store.resolve, store.resolve_blob,
+                                 attempt=3)
+    assert after_revert != after_no_edit
+    assert "pass 3 (fix-2): no file edited" in after_no_edit
+    assert "pass 3 (fix-2): no file edited" not in after_revert
+
+
+def test_the_fix_log_is_capped_and_counts_the_passes_it_leaves_out() -> None:
+    store = ArtifactStore()
+    state = _log_state(store, 2)
+    [initial, worse] = state["fix_passes"]
+    many = [initial, *(worse.model_copy(update={
+        "pass_no": n, "fix_task": f"fix-{n}", "outcome": "lateral",
+        "touched": tuple(f"pkg/module_{n}_{i}.py" for i in range(12)),
+        "seq": Seq("run", n + 1, 0, "fix_pass", 0)}) for n in range(1, 13))]
+    log = _log({**state, "fix_passes": many}, store)
+    assert log[0].startswith("(") and log[0].endswith("earlier pass(es) not shown)")
+    shown = [line for line in log if line.startswith("pass ")]
+    assert shown[-1].startswith("pass 12 (fix-12)") and len(shown) <= 8
+    assert sum(len(line) for line in shown) <= 1_500
+
+
+def test_a_fix_pass_records_its_wall_time_off_the_run_meter() -> None:
+    from foundry.graph.gate_wiring import keep_best
+    from foundry.proxy.token_meter import TokenMeter
+
+    store = ArtifactStore()
+    rt = _runtime(None, store)
+    meter = TokenMeter(None)
+    rt.proxy.token_meter = meter
+    state: FactoryState = {"artifacts": [_diff_art(store, "T-001", 1, {"app.py": "x\n"})]}
+
+    def check(state: FactoryState, tree: str, at: float) -> FactoryState:
+        meter._elapsed_base = at - (meter.elapsed_s - meter._elapsed_base)
+        out: dict[str, Any] = {"gates": [_gate("build", tree, 1, _RED, "SyntaxError")]}
+        keep_best(state, _config(), out, boundary=BUILD_BOUNDARY, scope=frozenset(), rt=rt,
+                  resolve=store.resolve, resolve_blob=store.resolve_blob,
+                  rerun=lambda s: {})
+        return {**state, "fix_passes": [*(state.get("fix_passes") or ()), *out["fix_passes"]]}
+
+    state = check(state, "t0", 100.0)
+    state = check(state, "t1", 400.0)
+    first, second = sorted(state["fix_passes"], key=lambda p: p.seq)
+    assert first.elapsed_s is None and first.clock_s is not None
+    assert second.elapsed_s is not None and abs(second.elapsed_s - 300.0) < 1.0

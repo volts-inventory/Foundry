@@ -61,8 +61,15 @@ from foundry.gates.pydeps import SCAFFOLD_HEADER, PythonBuildEnv, python_build_e
 from foundry.gates.sandbox import toolchain_scope
 from foundry.gates.spec import SpecGate
 from foundry.gates.test import TestGate
-from foundry.schemas.base import BudgetLedger
-from foundry.schemas.gates import GateResult, GateStatus, GateTriage, VerdictClass
+from foundry.schemas.base import Artifact, BudgetLedger
+from foundry.schemas.gates import (
+    FixOutcome,
+    FixPass,
+    GateResult,
+    GateStatus,
+    GateTriage,
+    VerdictClass,
+)
 from foundry.schemas.implementation import (
     CONTRACTS_TICKET_ID,
     FEATURE_DIR,
@@ -74,6 +81,7 @@ from foundry.schemas.implementation import (
 )
 from foundry.schemas.product import AcceptanceCriterion, CriteriaCritique
 from foundry.state.reducers import merge_gates
+from foundry.state.seq import Seq
 from foundry.state.tree_sha import tree_sha
 
 if TYPE_CHECKING:
@@ -84,7 +92,6 @@ if TYPE_CHECKING:
     from foundry.gates.discriminator import DiscriminatorFactory
     from foundry.gates.profiles import VerificationProfile
     from foundry.gates.runner import GateImpl, TwoZoneGateRunner, ZoneAObservation
-    from foundry.schemas.base import Artifact
     from foundry.state.factory_state import FactoryState
 
     # The SAME resolver seam senior_engineer uses (LEARNINGS QS3 / IM4):
@@ -969,7 +976,9 @@ def _wave0_ticket_ids(
 
 
 def _is_fix(task_id: str) -> bool:
-    return task_id.startswith("fix-")  # the fixer's FeatureDiffs (make_fixer_node)
+    # The fixer's FeatureDiffs (make_fixer_node), and the restores of a fix loop's
+    # best tree (keep_best): both repair the tree, neither is a later wave's ticket.
+    return task_id.startswith(("fix-", REVERT_PREFIX))
 
 
 def _write_contracts(
@@ -1098,6 +1107,40 @@ def materialize_workdir(
     # toolchain digest: the stable-FAIL latch keys on run_against, and a re-planned
     # stack must be able to re-gate the same source. No stack keeps the old digest.
     return tree_sha(dest, toolchain_digest=_toolchain_digest(stack))
+
+
+def _text_files(root: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for f in sorted(root.rglob("*")):
+        rel = f.relative_to(root).as_posix()
+        if not f.is_file() or rel in GATE_INPUT_FILES:
+            continue
+        try:
+            out[rel] = f.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue  # a base tree's binary asset: the sandbox clone has it
+    return out
+
+
+def integrated_files(
+    state: FactoryState, *, resolve: ArtifactResolver, resolve_blob: BlobResolver
+) -> dict[str, str]:
+    """The integrated tree's text files, scaffold-free and without the gate inputs
+    (an agent told to "make the gates pass" must not be handed the oracle to edit):
+    what an agent's worktree is seeded with, and what a fix pass's snapshot keeps.
+    Raises :class:`MaterializationError` when the tree cannot be built."""
+    with tempfile.TemporaryDirectory(prefix="foundry-tree-") as tmp:
+        materialize_workdir(state, Path(tmp), resolve=resolve, resolve_blob=resolve_blob,
+                            scaffold_manifest=False)
+        return _text_files(Path(tmp))
+
+
+def lift_epoch(state: FactoryState, seq: Seq) -> Seq:
+    """``seq`` with its epoch past every FeatureDiff on ``state``: integration orders
+    diffs by Seq, and a fresh diff key starts at epoch 1, tying with (and possibly
+    sorting under) the diffs it repairs."""
+    top = max((a.seq.emission_epoch for a in _of_kind(state, FEATURE_DIFF_KIND)), default=0)
+    return seq._replace(emission_epoch=top + 1)
 
 
 def _toolchain_digest(stack: StackDecision | None) -> str:
@@ -1998,6 +2041,288 @@ def settle_fix_attempts(
         out["budget"] = ledger.model_copy(update={"fix_attempts_since_all_green": 0})
 
 
+# ---- the fix loop's best tree -----------------------------------------------
+#
+# Each check of a fix loop scores its tree; a pass that leaves the tree worse than
+# the loop's best is undone by a restore diff back to the best tree, so the next
+# fixer pass (and a halted run's draft) starts from the best tree rather than the
+# newest. The pass ledger rides ``fix_passes``, written by the gate nodes alone.
+
+REVERT_PREFIX = "revert-"
+REVERT_SKIPPED_TRIAGE = "fix-revert-skipped"
+_FIX_PASS_NODE = "fix_pass"
+_STAGES = ("build", "test", "smoke")
+_FAILING_CAP = 40
+
+
+def fix_window(state: FactoryState, boundary: str, scope: frozenset[str]) -> str:
+    """One fix loop's identity: the boundary, the scenarios it judges, and the ticket
+    diffs it repairs (fix and restore diffs excluded). A new wave, an escalation
+    rebuild or the final gate starts a new window; a resumed loop keeps its own."""
+    diffs = sorted(a.uri for a in _of_kind(state, FEATURE_DIFF_KIND)
+                   if not (a.task_id and _is_fix(a.task_id)))
+    return content_digest({"boundary": boundary, "scope": sorted(scope), "diffs": diffs})
+
+
+def fix_score(
+    verdicts: Mapping[str, GateResult], names: frozenset[str]
+) -> tuple[int, int, int] | None:
+    """``(-stages passed in order, failing gates, failure signature size)`` for one
+    tree's verdicts, lower is better; ``None`` when a verdict is missing or ERRORed
+    (an infra error says nothing about the tree). A build that breaks scores worse
+    than any number of failing tests on a tree that builds."""
+    if set(verdicts) != names:
+        return None
+    signature = _failure_signature(verdicts.values())
+    if signature is None:
+        return None
+    reached = 0
+    for stage in _STAGES:
+        if stage not in names:
+            continue
+        if verdicts[stage].status is not GateStatus.PASS:
+            break
+        reached += 1
+    failing = sum(g.status is GateStatus.FAIL for g in verdicts.values())
+    return (-reached, failing, len(signature))
+
+
+def best_entry(passes: Iterable[FixPass], window: str) -> FixPass | None:
+    """The window's best scored pass; a tie goes to the newest."""
+    best: FixPass | None = None
+    for p in sorted((p for p in passes if p.window == window and p.score is not None),
+                    key=lambda p: p.seq):
+        if best is None or tuple(p.score or ()) <= tuple(best.score or ()):
+            best = p
+    return best
+
+
+def _newest_per_name(gates: Iterable[GateResult]) -> dict[str, GateResult]:
+    out: dict[str, GateResult] = {}
+    for g in gates:
+        if g.name not in out or g.seq > out[g.name].seq:
+            out[g.name] = g
+    return out
+
+
+def _failing(verdicts: Mapping[str, GateResult]) -> tuple[str, ...]:
+    signature = _failure_signature(verdicts.values()) or frozenset()
+    return tuple(sorted(f"{gate}:{ident}" for gate, ident in signature))[:_FAILING_CAP]
+
+
+def _outcome(prior: list[FixPass], tree: str, score: tuple[int, int, int] | None,
+             best: FixPass | None) -> FixOutcome:
+    if not prior:
+        return "initial"
+    if score is None:
+        return "error"
+    if tree == prior[-1].tree:
+        return "no-change"
+    if best is None or best.score is None or score < tuple(best.score):
+        return "improved"
+    return "worse" if score > tuple(best.score) else "lateral"
+
+
+def _pass_fix(
+    state: FactoryState, prior: list[FixPass], resolve: ArtifactResolver,
+    resolve_blob: BlobResolver,
+) -> tuple[str | None, tuple[str, ...]]:
+    """The fix diff this check is the first to judge, and the files it touched."""
+    fixes = [a for a in _of_kind(state, FEATURE_DIFF_KIND)
+             if a.task_id and a.task_id.startswith("fix-")]
+    if not prior or not fixes:
+        return None, ()
+    newest = max(fixes, key=lambda a: a.seq)
+    if any(p.fix_task == newest.task_id for p in state.get("fix_passes") or ()):
+        return None, ()
+    try:
+        ops = _diff_ops(_resolve_typed(newest, resolve, FeatureDiff, FEATURE_DIFF_KIND),
+                        resolve_blob)
+    except MaterializationError:
+        return newest.task_id, ()
+    return newest.task_id, tuple(sorted({*ops.writes, *ops.deletes, *ops.patches}))
+
+
+def _snapshot_blob(files: Mapping[str, str], deleted: Iterable[str] = ()) -> bytes:
+    body: dict[str, Any] = {"kind": "full-file-snapshot", "files": dict(files)}
+    if deleted:
+        body["deleted"] = sorted(deleted)
+    return json.dumps(body, sort_keys=True).encode("utf-8")
+
+
+def _snapshot(
+    state: FactoryState, prior: list[FixPass], tree: str, *, rt: AgentRuntime,
+    resolve: ArtifactResolver, resolve_blob: BlobResolver,
+) -> str | None:
+    """The blob of the tree ``state`` integrates (the one just gated), scaffold-free."""
+    known = next((p.snapshot_uri for p in prior if p.tree == tree and p.snapshot_uri), None)
+    if known is not None or rt.cas is None:
+        return known
+    try:
+        files = integrated_files(state, resolve=resolve, resolve_blob=resolve_blob)
+    except MaterializationError:
+        return None
+    return rt.cas.put_blob(_snapshot_blob(files))
+
+
+def _snapshot_files(uri: str, resolve_blob: BlobResolver) -> dict[str, str]:
+    body = resolve_blob(uri)
+    text = body.decode("utf-8") if isinstance(body, bytes) else body
+    files = _maybe_snapshot_files(uri, text)
+    if files is None:
+        raise FeatureDiffBodyError(f"fix-pass snapshot {uri!r} is not a full-file snapshot")
+    return files
+
+
+def restore_diff(
+    state: FactoryState, best: FixPass, config: RunnableConfig, *, tree: str,
+    rt: AgentRuntime, resolve: ArtifactResolver, resolve_blob: BlobResolver,
+) -> Artifact | None:
+    """A FeatureDiff (``revert-<n>``) that turns ``tree``, the tree ``state``
+    integrates, back into ``best``'s: every file that differs written whole, every
+    file ``best`` lacks deleted, its epoch lifted past every diff so it applies last.
+    ``None`` when the files already match or there is no store to write it to."""
+    if rt.cas is None or best.snapshot_uri is None:
+        return None
+    current = integrated_files(state, resolve=resolve, resolve_blob=resolve_blob)
+    target = _snapshot_files(best.snapshot_uri, resolve_blob)
+    writes = {p: c for p, c in target.items() if current.get(p) != c}
+    deleted = set(current) - set(target)
+    if not writes and not deleted:
+        return None
+    diffs = _of_kind(state, FEATURE_DIFF_KIND)
+    n = 1 + len({a.task_id for a in diffs if a.task_id and a.task_id.startswith(REVERT_PREFIX)})
+    task_id = f"{REVERT_PREFIX}{n}"
+    blob = rt.cas.put_blob(_snapshot_blob(writes, deleted))
+    seq = lift_epoch(state, rt.seq(config, _FIX_PASS_NODE, f"diff:{task_id}"))
+    diff = FeatureDiff(diff_uri=blob, task_id=task_id, branch=f"task/{task_id}",
+                       base_tree_sha=tree, seq=seq)
+    artifact = Artifact(
+        kind=FEATURE_DIFF_KIND,
+        uri=f"cas://feature_diff/{task_id}-{content_digest([best.tree, blob])[:32]}",
+        produced_by=_FIX_PASS_NODE, task_id=task_id, seq=seq,
+    )
+    rt.cas.put_body_at(artifact.uri, diff)
+    return artifact
+
+
+def keep_best(
+    state: FactoryState,
+    config: RunnableConfig,
+    out: dict[str, Any],
+    *,
+    boundary: str,
+    scope: frozenset[str],
+    rt: AgentRuntime,
+    resolve: ArtifactResolver,
+    resolve_blob: BlobResolver,
+    rerun: Callable[[FactoryState], dict[str, Any]],
+) -> bool:
+    """Record the check ``out`` holds in the fix-pass ledger and, when its tree is
+    worse than the window's best, restore the best tree: a ``revert-<n>`` diff on
+    ``out``, the gates re-run on the restored tree through ``rerun`` (so the
+    runner-signed newest verdicts are the restored tree's), both kept only if the
+    re-run's digest is the best tree's. Returns True iff the tree was restored.
+
+    Call before the budget is settled, on ``out``'s own verdicts."""
+    names = _BOUNDARY_GATES[boundary]
+    verdicts = _newest_per_name(g for g in out.get("gates") or () if g.name in names)
+    if not verdicts:
+        return False
+    tree = next(iter(verdicts.values())).run_against
+    window = fix_window(state, boundary, scope)
+    prior = sorted((p for p in state.get("fix_passes") or () if p.window == window),
+                   key=lambda p: p.seq)
+    score = fix_score(verdicts, names)
+    best = best_entry(prior, window)
+    outcome = _outcome(prior, tree, score, best)
+    fix_task, touched = _pass_fix(state, prior, resolve, resolve_blob)
+    pass_no = max((p.pass_no for p in prior), default=-1) + 1
+    snapshot = None
+    # An all-PASS tree ends the loop (it advances), so it never needs restoring.
+    if score is not None and score[1] and (best is None or score <= tuple(best.score or ())):
+        snapshot = _snapshot(state, prior, tree, rt=rt, resolve=resolve,
+                             resolve_blob=resolve_blob)
+    passes = [FixPass(
+        window=window, boundary=boundary, pass_no=pass_no, tree=tree, fix_task=fix_task,
+        score=score, failing=_failing(verdicts), outcome=outcome, touched=touched,
+        snapshot_uri=snapshot, restart=_fix_attempts(state, config) == 0,
+        seq=rt.seq(config, _FIX_PASS_NODE, f"pass:{window}:{pass_no}"),
+    )]
+    out.setdefault("fix_passes", []).extend(passes)
+    # A tree worse than a failing best is never all-PASS, so it never advances.
+    if outcome != "worse" or best is None or best.snapshot_uri is None:
+        return False
+    try:
+        revert = restore_diff(state, best, config, tree=tree, rt=rt, resolve=resolve,
+                              resolve_blob=resolve_blob)
+        if revert is None:
+            return False
+        again = rerun({**state, "artifacts": [*(state.get("artifacts") or ()), revert]})
+    except MaterializationError:
+        return False
+    restored = _newest_per_name(g for g in again.get("gates") or () if g.name in names)
+    if not restored or any(g.run_against != best.tree for g in restored.values()):
+        got = next(iter(restored.values())).run_against if restored else "no verdict"
+        out.setdefault("gate_triage", []).append(GateTriage(
+            name=REVERT_SKIPPED_TRIAGE, run_against=tree,
+            explanation=(f"this pass left the tree worse than the best one ({best.tree}), but "
+                         f"restoring it built {got}: the newer tree is kept")[:2000],
+            produced_by=_FIX_PASS_NODE,
+            seq=rt.seq(config, _FIX_PASS_NODE, f"{REVERT_SKIPPED_TRIAGE}:{tree}"),
+        ))
+        return False
+    out["artifacts"] = [*(out.get("artifacts") or ()), revert]
+    out["gates"] = [*(out.get("gates") or ()), *(again.get("gates") or ())]
+    if again.get("gate_triage"):
+        out.setdefault("gate_triage", []).extend(again["gate_triage"])
+    out["fix_passes"].append(FixPass(
+        window=window, boundary=boundary, pass_no=pass_no + 1, tree=best.tree,
+        fix_task=revert.task_id, score=fix_score(restored, names),
+        failing=_failing(restored), outcome="restored", snapshot_uri=best.snapshot_uri,
+        seq=rt.seq(config, _FIX_PASS_NODE, f"pass:{window}:{pass_no + 1}"),
+    ))
+    return True
+
+
+def draft_best(state: FactoryState, resolve: ArtifactResolver) -> FixPass | None:
+    """The best tree of the fix loop ``state`` is still in, if any: what a halted
+    or stopped run hands back instead of its newest, possibly worse or ungated, tree.
+    ``None`` once a ticket diff landed after the loop's last check."""
+    passes = state.get("fix_passes") or ()
+    if not passes:
+        return None
+    newest = max(passes, key=lambda p: p.seq)
+    scope = (wave_scenarios(state, resolve) if newest.boundary == BUILD_TEST_BOUNDARY
+             else frozenset())
+    if fix_window(state, newest.boundary, scope) != newest.window:
+        return None
+    best = best_entry(passes, newest.window)
+    return best if best is not None and best.snapshot_uri is not None else None
+
+
+def materialize_best(
+    state: FactoryState, dest: Path, best: FixPass, *, resolve: ArtifactResolver,
+    resolve_blob: BlobResolver,
+) -> None:
+    """Write ``best``'s tree into ``dest``: the integrated tree with the snapshot laid
+    over it (binary files the snapshot leaves out stay as integrated), then the
+    dependency manifest scaffolded as for the gates."""
+    assert best.snapshot_uri is not None
+    materialize_workdir(state, dest, resolve=resolve, resolve_blob=resolve_blob,
+                        scaffold_manifest=False)
+    files = _snapshot_files(best.snapshot_uri, resolve_blob)
+    for rel in set(_text_files(dest)) - set(files):
+        _contained_target(dest, rel).unlink()
+    for rel, content in files.items():
+        target = _contained_target(dest, rel)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    stack = state.get("stack")
+    if stack is None or stack.language == "python":
+        _scaffold_manifest(dest)
+
+
 @dataclass(frozen=True)
 class WaveBuildCheck:
     """The per-wave integration check (plan §2b) the implementation subgraph runs
@@ -2046,14 +2371,24 @@ class WaveBuildCheck:
     def _boundary(self, state: FactoryState) -> str:
         return BUILD_TEST_BOUNDARY if self._scenarios(state) else BUILD_BOUNDARY
 
-    def run(self, state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+    def _check(self, state: FactoryState, config: RunnableConfig,
+               scenarios: frozenset[str]) -> dict[str, Any]:
         with tempfile.TemporaryDirectory(prefix="foundry_wave_gate_") as tmp:
-            out = run_build_gate(
+            return run_build_gate(
                 state, config, rt=self.rt, runner=self.runner, resolve=self.resolve,
                 resolve_blob=self.resolve_blob, workdir=Path(tmp), profile=self.profile,
-                scenarios=self._scenarios(state),
+                scenarios=scenarios,
             )
-        boundary = self._boundary(state)
+
+    def run(self, state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        scenarios = self._scenarios(state)
+        out = self._check(state, config, scenarios)
+        boundary = BUILD_TEST_BOUNDARY if scenarios else BUILD_BOUNDARY
+        # Escalation and the no-progress note judge this pass, not a restored tree.
+        own: list[GateResult] = list(out.get("gates") or ())
+        reverted = keep_best(state, config, out, boundary=boundary, scope=scenarios,
+                             rt=self.rt, resolve=self.resolve, resolve_blob=self.resolve_blob,
+                             rerun=lambda s: self._check(s, config, scenarios))
         settle_fix_attempts(state, config, out, boundary=boundary,
                             records=self.runner.records, max_fix_attempts=self.max_fix_attempts,
                             total_cap=fix_cap(state, self.resolve, self.max_fix_attempts))
@@ -2068,7 +2403,8 @@ class WaveBuildCheck:
             "budget": out.get("budget") or state.get("budget") or BudgetLedger(),
         }
         decision = self._route(post, config, boundary)
-        streak = failing_streak(post, boundary=boundary) if decision != ADVANCE else 0
+        judged: FactoryState = {**post, "gates": merge_gates(state.get("gates"), own)}
+        streak = failing_streak(judged, boundary=boundary) if decision != ADVANCE else 0
         picked: tuple[str, ...] = ()
         if streak >= 1:
             from foundry.agents.implementation.tickets import escalation_pick, stopped_tickets
@@ -2077,12 +2413,12 @@ class WaveBuildCheck:
                 ESCALATE_REQUEST_TRIAGE,
             )
 
-            failed = ", ".join(sorted({g.name for g in out.get("gates") or ()
+            failed = ", ".join(sorted({g.name for g in own
                                        if g.status in (GateStatus.FAIL, GateStatus.ERROR)}))
             # A ticket whose local session stopped early escalates on the first
             # failure; any other waits for a second.
             stops = stopped_tickets(state)
-            picked, fallback = escalation_pick({**state, "gates": post["gates"]},
+            picked, fallback = escalation_pick({**state, "gates": judged["gates"]},
                                                self.resolve, self.rt, self.ticket_tiers,
                                                stopped_only=streak < 2)
             for tid in picked:
@@ -2107,9 +2443,10 @@ class WaveBuildCheck:
             # This check routes ESCALATE, not FIX: the rebuild is the ticket's extra
             # attempt and must leave the wave's fixer passes unspent.
             out.pop("budget", None)
-        elif decision == FIX and not self.capped_off_target({**state, "gates": post["gates"]}) and (
+        elif (decision == FIX and not reverted
+              and not self.capped_off_target({**state, "gates": post["gates"]}) and (
                 no_fix_progress(post, config, boundary=boundary)
-                or _unchanged_tree_recheck(state, out, config, boundary=boundary)):
+                or _unchanged_tree_recheck(state, out, config, boundary=boundary))):
             [build] = [g for g in out["gates"] if g.name == "build"]
             out.setdefault("gate_triage", []).append(GateTriage(
                 name=NO_FIX_PROGRESS_TRIAGE, run_against=build.run_against,

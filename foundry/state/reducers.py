@@ -33,7 +33,7 @@ from typing import Protocol, TypeVar
 
 from foundry.schemas.architecture import PinnedConstraint
 from foundry.schemas.base import ExternalAction
-from foundry.schemas.gates import GateResult, GateTriage
+from foundry.schemas.gates import FixPass, GateResult, GateTriage
 from foundry.schemas.governance import SignOffRecord
 from foundry.schemas.journal import JournalEntry
 
@@ -173,6 +173,7 @@ def _sign_off_key(s: SignOffRecord) -> object:
 
 union_by_id = make_union_by_key(_task_key)
 union_triage = make_union_by_key(GateTriage.union_key)
+union_fix_passes = make_union_by_key(FixPass.union_key)
 union_actions = make_union_by_key(_action_key)
 union_sign_offs = make_union_by_key(_sign_off_key)
 

@@ -21,6 +21,7 @@ FOUNDRY_MSGPACK_MODULES: list[tuple[str, str]] = [
     ("foundry.schemas.base", "BudgetLedger"),
     ("foundry.schemas.gates", "GateResult"),
     ("foundry.schemas.gates", "GateTriage"),
+    ("foundry.schemas.gates", "FixPass"),
     ("foundry.schemas.gates", "GateStatus"),
     ("foundry.schemas.gates", "VerdictClass"),
     ("foundry.schemas.gates", "JudgmentProvenance"),

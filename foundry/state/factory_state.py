@@ -12,7 +12,7 @@ from typing import Annotated, TypedDict
 
 from foundry.schemas.architecture import PinnedConstraint
 from foundry.schemas.base import Artifact, BudgetLedger, ExternalAction, LogRef
-from foundry.schemas.gates import GateResult, GateTriage
+from foundry.schemas.gates import FixPass, GateResult, GateTriage
 from foundry.schemas.governance import ScopeDecision, SignOffRecord, TierDecision
 from foundry.schemas.implementation import StackDecision
 from foundry.schemas.journal import JournalEntry
@@ -51,6 +51,9 @@ class FactoryState(TypedDict, total=False):
     artifacts: Annotated[list[Artifact], reducers.merge_by_uri]
     gates: Annotated[list[GateResult], reducers.merge_gates]
     gate_triage: Annotated[list[GateTriage], reducers.union_triage]
+    # The fix loops' pass ledger (gate_wiring.keep_best): one entry per check, keyed
+    # (window, pass_no). Written only by the gate nodes, never by an agent.
+    fix_passes: Annotated[list[FixPass], reducers.union_fix_passes]
     # ADVISORY observability ONLY (plan [11]). A SEPARATE channel from gates: an
     # agent's work-journal note, folded additively by `union_journal`. NEVER read
     # by any gate, by `merge_gates`, by `route_after_gates`, or by `admission` —

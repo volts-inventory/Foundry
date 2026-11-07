@@ -967,6 +967,9 @@ def _break_cycles(deps: dict[str, list[str]]) -> list[str]:
     return concerns
 
 
+_FIX_DIFF_PREFIXES = ("fix-", "revert-")
+
+
 def _safe_ticket_ids(ids: list[str], reserved: frozenset[str] = frozenset()) -> dict[str, str]:
     """Raw id -> an id safe as a file name (``features/<id>.feature``, ``task/<id>``):
     other characters become ``-``; a collision gets the first free ``-<n>`` suffix,
@@ -976,8 +979,9 @@ def _safe_ticket_ids(ids: list[str], reserved: frozenset[str] = frozenset()) -> 
     safe = {
         tid for tid in ids
         if _SAFE_TICKET_ID.fullmatch(tid) and tid not in (".", "..", *_GENERATED_TICKETS)
-        # `fix-<n>` is the fixer's diff namespace: a ticket there would read as built.
-        and not tid.startswith("fix-") and tid not in reserved
+        # `fix-<n>` / `revert-<n>` are the fix loop's diff namespaces: a ticket there
+        # would read as built.
+        and not tid.startswith(_FIX_DIFF_PREFIXES) and tid not in reserved
     }
     taken = safe | _GENERATED_TICKETS | reserved
     for tid in ids:
@@ -985,7 +989,7 @@ def _safe_ticket_ids(ids: list[str], reserved: frozenset[str] = frozenset()) -> 
             out[tid] = tid
             continue
         base = re.sub(r"[^A-Za-z0-9._-]", "-", tid).strip(".") or "T"
-        if base.startswith("fix-"):
+        if base.startswith(_FIX_DIFF_PREFIXES):
             base = f"T-{base}"
         new, n = base, 2
         while new in taken:

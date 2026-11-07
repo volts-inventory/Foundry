@@ -475,6 +475,114 @@ def test_a_broken_build_scores_worse_than_any_number_of_failing_tests() -> None:
     assert _score(_gate("build", "t5", 1, _OK)) is None  # a verdict missing: not judged
 
 
+# Real mypy output (a stack build line `python -m compileall -q . && mypy app`).
+_MYPY_OUT = (
+    'app/models/user.py:19: error: Name "CartItem" is not defined  [name-defined]\n'
+    'app/models/user.py:20: error: Name "Order" is not defined  [name-defined]\n'
+    "Found 2 errors in 1 file (checked 9 source files)\n"
+)
+_USER_PY = (
+    "from __future__ import annotations\n\n"
+    "from sqlalchemy.orm import Mapped, relationship\n\n"
+    "from app.models import Base\n\n\n"
+    "class User(Base):\n"
+    '    """ORM model for a user."""\n\n'
+    '    __tablename__ = "user"\n\n'
+    "    id: Mapped[int]\n"
+    "    username: Mapped[str]\n"
+    "    role: Mapped[str]\n"
+    "    password_hash: Mapped[str]\n"
+    "    email: Mapped[str]\n\n"
+    '    cart_items: Mapped[list["CartItem"]] = relationship("CartItem", back_populates="user")\n'
+    "    orders: Mapped[list[Order]] = relationship(Order.user)\n"
+)
+
+
+def _typecheck_build(tree: str, tmp: Path) -> GateResult:
+    from foundry.gates.build import build_findings
+
+    (tmp / "app" / "models").mkdir(parents=True, exist_ok=True)
+    (tmp / "app" / "models" / "user.py").write_text(_USER_PY)
+    return _gate("build", tree, 1, _RED, *build_findings(1, _MYPY_OUT, "", tmp))
+
+
+def test_a_quoted_annotation_name_defined_error_gets_the_type_checking_hint(
+    tmp_path: Path,
+) -> None:
+    from foundry.gates.build import TYPECHECK_ONLY, build_findings
+    from foundry.graph.gate_wiring import typecheck_only
+
+    build = _typecheck_build("t", tmp_path)
+    assert TYPECHECK_ONLY in build.findings[0] and typecheck_only(build)
+    hints = [f for f in build.findings if "TYPE_CHECKING" in f]
+    # Order is used unquoted (a runtime use): a type-checking-only import would not do.
+    assert hints == [
+        "app/models/user.py:19: `CartItem` is used only in a quoted annotation: import it "
+        "under `if TYPE_CHECKING:` (from typing import TYPE_CHECKING) in that module"]
+    # A compile error stops the `&&` chain before mypy: not a typecheck-only build.
+    compile_err = build_findings(1, "SyntaxError: invalid syntax\n", "", tmp_path)
+    assert not typecheck_only(_gate("build", "t", 1, _RED, *compile_err))
+
+
+def test_a_typecheck_only_build_is_scored_by_how_far_the_tests_got(tmp_path: Path) -> None:
+    def tests(tree: str, n: int) -> GateResult:
+        return _gate("test", tree, 2, _RED,
+                     *(f"FAILED tests/test_cart.py::test_{i} - assert" for i in range(n)))
+
+    start = _score(_gate("build", "t0", 1, _OK), tests("t0", 82))
+    fixed = _score(_typecheck_build("t1", tmp_path), tests("t1", 40))
+    clean = _score(_gate("build", "t2", 1, _OK), tests("t2", 40))
+    broken = _score(_gate("build", "t3", 1, _RED, "SyntaxError"), tests("t3", 1))
+    assert start is not None and fixed is not None and clean is not None
+    assert broken is not None
+    # Fewer failing tests plus a type error beat many more failing tests; equal tests
+    # plus a type error lose; a build that does not compile still loses to both.
+    assert clean < fixed < start < broken
+    green = _score(_typecheck_build("t4", tmp_path), _gate("test", "t4", 2, _OK))
+    assert green is not None and any(green[1:])  # a type error is never all-PASS
+
+
+def test_a_type_error_alone_does_not_revert_a_pass_that_fixed_tests(tmp_path: Path) -> None:
+    import json
+
+    from foundry.graph.gate_wiring import keep_best
+
+    def run(n: int) -> tuple[list[FixPass], list[FactoryState]]:
+        store = ArtifactStore()
+        ticket = _diff_art(store, "T-001", 1, {"app.py": "x = 1\n"})
+        state: FactoryState = {"artifacts": [ticket]}
+        window = fix_window(state, BUILD_TEST_BOUNDARY, frozenset())
+        snap = store.put_blob(json.dumps({"kind": "full-file-snapshot",
+                                          "files": {"app.py": "x = 0\n"}}).encode())
+        failing = tuple(f"test:tests/test_cart.py::test_{i}" for i in range(3))
+        best = FixPass(window=window, boundary=BUILD_TEST_BOUNDARY, pass_no=0,
+                       tree="t-best", score=(-1, 1, 3), failing=failing, outcome="initial",
+                       snapshot_uri=snap, seq=Seq("run", 1, 0, "fix_pass", 0))
+        state = {**state, "fix_passes": [best],
+                 "budget": BudgetLedger(fix_attempts_since_all_green=1)}
+        out: dict[str, Any] = {"gates": [
+            _typecheck_build("t-new", tmp_path),
+            _gate("test", "t-new", 6, _RED,
+                  *(f"FAILED tests/test_cart.py::test_{i} - assert" for i in range(n)))]}
+        reran: list[FactoryState] = []
+
+        def rerun(s: FactoryState) -> dict[str, Any]:
+            reran.append(s)
+            return {}
+
+        keep_best(state, _config(), out, boundary=BUILD_TEST_BOUNDARY, scope=frozenset(),
+                  rt=_runtime(None, store), resolve=store.resolve,
+                  resolve_blob=store.resolve_blob, rerun=rerun)
+        return out["fix_passes"], reran
+
+    # Two of three failing tests fixed, one new type error: the new best, kept.
+    [entry], reran = run(1)
+    assert entry.outcome == "improved" and not reran and entry.snapshot_uri is not None
+    # The same failing tests plus a new type error: worse, so the best tree is restored.
+    [entry], reran = run(3)
+    assert entry.outcome == "worse" and reran
+
+
 def _entry(window: str, pass_no: int, tree: str, score: tuple[int, int, int] | None,
            epoch: int) -> FixPass:
     return FixPass(window=window, boundary=BUILD_BOUNDARY, pass_no=pass_no, tree=tree,

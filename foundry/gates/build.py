@@ -29,8 +29,10 @@ Fail-closed: a missing build tool — or an unavailable sandbox — raises
 
 from __future__ import annotations
 
+import io
 import re
 import sys
+import tokenize
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -43,7 +45,13 @@ from .sandbox import ground_untrusted, toolchain_scope
 if TYPE_CHECKING:
     from .pydeps import PythonBuildEnv
 
-__all__ = ["MISSING_BINARY_EXIT_CODES", "BuildGate", "build_findings", "commands_digest"]
+__all__ = [
+    "MISSING_BINARY_EXIT_CODES",
+    "TYPECHECK_ONLY",
+    "BuildGate",
+    "build_findings",
+    "commands_digest",
+]
 
 # POSIX shell: 126 = found but not executable, 127 = command not found.
 MISSING_BINARY_EXIT_CODES = frozenset({126, 127})
@@ -59,6 +67,19 @@ _EXCERPT_CHARS = 4000
 # ANSI escape sequences, then any remaining control char except tab.
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-_]")
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+# The head of a build whose compile steps passed and whose type checker alone
+# failed: the fix loop's score still counts the test gate on that tree.
+TYPECHECK_ONLY = "only the static typecheck failed"
+# mypy's closing line when it checked the tree and found type errors. A stack's build
+# line runs `build && typecheck`, so mypy reporting at all means the steps before it
+# passed; "errors prevented further checking" (a syntax error) never matches.
+_MYPY_FOUND = re.compile(
+    r"^Found \d+ errors? in \d+ files? \(checked \d+ source files?\)$", re.MULTILINE
+)
+_MYPY_NAME_DEFINED = re.compile(
+    r"^(?P<path>[^\s:]+\.pyi?):(?P<line>\d+)(?::\d+)?: error: "
+    r'Name "(?P<name>\w+)" is not defined\s+\[name-defined\]', re.MULTILINE
+)
 
 
 def build_findings(
@@ -91,9 +112,50 @@ def build_findings(
     elif rc != 0:
         from .pydeps import undeclared_import_hints
 
-        hints = undeclared_import_hints(stdout + stderr, workdir)
+        if _MYPY_FOUND.search(stdout + stderr):
+            head += f" ({TYPECHECK_ONLY}: the compile steps before mypy passed)"
+        hints = (*undeclared_import_hints(stdout + stderr, workdir),
+                 *forward_annotation_hints(stdout + stderr, workdir))
     tail = output_tail(stdout, stderr, workdir)
     return (f"{head}; last {len(tail)} output line(s):", *tail, *hints)
+
+
+def forward_annotation_hints(output: str, workdir: Path) -> tuple[str, ...]:
+    """One line per mypy ``name-defined`` error on a name its module uses only inside
+    string literals (a quoted / forward annotation such as ``Mapped[list["CartItem"]]``):
+    the name needs a type-checking-only import, not a runtime one (which would often
+    be circular)."""
+    root = Path(workdir).resolve()
+    hints: list[str] = []
+    for m in _MYPY_NAME_DEFINED.finditer(output):
+        name = m.group("name")
+        src = (root / m.group("path")).resolve()
+        if not src.is_relative_to(root) or not src.is_file():
+            continue
+        rel = src.relative_to(root).as_posix()
+        if _quoted_only(src.read_text(encoding="utf-8", errors="replace"), name,
+                        int(m.group("line"))):
+            hint = (f"{rel}:{m.group('line')}: `{name}` is used only in a quoted annotation: "
+                    "import it under `if TYPE_CHECKING:` (from typing import TYPE_CHECKING) "
+                    "in that module")
+            if hint not in hints:
+                hints.append(hint)
+    return tuple(hints)
+
+
+def _quoted_only(source: str, name: str, line: int) -> bool:
+    word = re.compile(rf"\b{re.escape(name)}\b")
+    quoted_here = False
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(source).readline):
+            if tok.type == tokenize.NAME and tok.string == name:
+                return False
+            if (tok.type == tokenize.STRING and tok.start[0] <= line <= tok.end[0]
+                    and word.search(tok.string)):
+                quoted_here = True
+    except (tokenize.TokenError, SyntaxError):
+        return False
+    return quoted_here
 
 
 def output_tail(stdout: str, stderr: str, workdir: Path) -> tuple[str, ...]:

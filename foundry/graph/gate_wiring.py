@@ -2244,27 +2244,43 @@ def fix_window(state: FactoryState, boundary: str, scope: frozenset[str]) -> str
     return content_digest({"boundary": boundary, "scope": sorted(scope), "diffs": diffs})
 
 
+def typecheck_only(g: GateResult | None) -> bool:
+    """True iff ``g`` is a build FAIL whose compile steps passed and whose static
+    typecheck alone failed (``foundry.gates.build.TYPECHECK_ONLY``)."""
+    from foundry.gates.build import TYPECHECK_ONLY
+
+    return (g is not None and g.name == "build" and g.status is GateStatus.FAIL
+            and bool(g.findings) and TYPECHECK_ONLY in g.findings[0])
+
+
 def fix_score(
     verdicts: Mapping[str, GateResult], names: frozenset[str]
 ) -> tuple[int, int, int] | None:
     """``(-stages passed in order, failing gates, failure signature size)`` for one
     tree's verdicts, lower is better; ``None`` when a verdict is missing or ERRORed
     (an infra error says nothing about the tree). A build that breaks scores worse
-    than any number of failing tests on a tree that builds."""
+    than any number of failing tests on a tree that builds — except a build whose
+    static typecheck alone failed: the test gate still ran on that tree, so it is
+    scored by how far the tests got, the type errors one more signature entry. Fewer
+    failing tests plus a type error beat more failing tests; equal tests plus a type
+    error lose. A tree is all-PASS iff ``score[1:]`` is all zero."""
     if set(verdicts) != names:
         return None
     signature = _failure_signature(verdicts.values())
     if signature is None:
         return None
+    typed = typecheck_only(verdicts.get("build"))
+    if typed:
+        signature = frozenset(s for s in signature if s[0] != "build")
     reached = 0
     for stage in _STAGES:
         if stage not in names:
             continue
-        if verdicts[stage].status is not GateStatus.PASS:
+        if verdicts[stage].status is not GateStatus.PASS and not (stage == "build" and typed):
             break
         reached += 1
-    failing = sum(g.status is GateStatus.FAIL for g in verdicts.values())
-    return (-reached, failing, len(signature))
+    failing = sum(g.status is GateStatus.FAIL for g in verdicts.values()) - typed
+    return (-reached, failing, len(signature) + typed)
 
 
 def best_entry(passes: Iterable[FixPass], window: str) -> FixPass | None:
@@ -2512,10 +2528,10 @@ def keep_best(
     until_cap = policy is not None and policy.until_cap
     passes = sorted([*prior, *new], key=_pass_order)
     stop = None
-    if until_cap and (newest.score is None or newest.score[1]):
+    if until_cap and (newest.score is None or any(newest.score[1:])):
         assert policy is not None
         stop = fix_stop(passes, policy, unbuilt_waves=unbuilt_waves)
-    if newest.score is not None and newest.score[1]:
+    if newest.score is not None and any(newest.score[1:]):
         from foundry.agents.implementation.tickets import built_task_ids, read_tickets
 
         names = _BOUNDARY_GATES[boundary]
@@ -2578,12 +2594,16 @@ def _keep_best(
     score = fix_score(verdicts, names)
     best = best_entry(prior, window)
     failing = _failing(verdicts)
-    outcome = _outcome(prior, tree, score, best, failing)
+    # A type error alone is not a broken check that reverts the pass: the score
+    # already counts it, and the final gates still require the build green.
+    judged = (tuple(f for f in failing if not f.startswith("build:"))
+              if typecheck_only(verdicts.get("build")) else failing)
+    outcome = _outcome(prior, tree, score, best, judged)
     fix_task, touched = _pass_fix(state, prior, resolve, resolve_blob)
     pass_no = max((p.pass_no for p in prior), default=-1) + 1
     snapshot = None
     # An all-PASS tree ends the loop (it advances), so it never needs restoring.
-    if (score is not None and score[1] and outcome != "worse"
+    if (score is not None and any(score[1:]) and outcome != "worse"
             and (best is None or score <= tuple(best.score or ()))):
         snapshot = _snapshot(state, prior, tree, rt=rt, resolve=resolve,
                              resolve_blob=resolve_blob)

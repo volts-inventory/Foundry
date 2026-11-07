@@ -2053,6 +2053,17 @@ REVERT_SKIPPED_TRIAGE = "fix-revert-skipped"
 _FIX_PASS_NODE = "fix_pass"
 _STAGES = ("build", "test", "smoke")
 _FAILING_CAP = 40
+# One epoch stream for every pass of the run: each entry's epoch is above the last
+# (and raise_floor keeps it so across a resume). A per-pass key gave every entry
+# the same epoch, leaving the order to langgraph_step, which does not order a wave
+# subgraph's steps against the supervisor's.
+_PASS_KEY = "pass"
+
+
+def _pass_order(p: FixPass) -> tuple[int, Seq]:
+    """Order within one window: ``pass_no`` counts up there whatever the Seqs say
+    (a checkpoint from before ``_PASS_KEY`` holds equal-epoch entries)."""
+    return (p.pass_no, p.seq)
 
 
 def fix_window(state: FactoryState, boundary: str, scope: frozenset[str]) -> str:
@@ -2091,7 +2102,7 @@ def best_entry(passes: Iterable[FixPass], window: str) -> FixPass | None:
     """The window's best scored pass; a tie goes to the newest."""
     best: FixPass | None = None
     for p in sorted((p for p in passes if p.window == window and p.score is not None),
-                    key=lambda p: p.seq):
+                    key=_pass_order):
         if best is None or tuple(p.score or ()) <= tuple(best.score or ()):
             best = p
     return best
@@ -2232,7 +2243,7 @@ def keep_best(
     tree = next(iter(verdicts.values())).run_against
     window = fix_window(state, boundary, scope)
     prior = sorted((p for p in state.get("fix_passes") or () if p.window == window),
-                   key=lambda p: p.seq)
+                   key=_pass_order)
     score = fix_score(verdicts, names)
     best = best_entry(prior, window)
     outcome = _outcome(prior, tree, score, best)
@@ -2247,7 +2258,7 @@ def keep_best(
         window=window, boundary=boundary, pass_no=pass_no, tree=tree, fix_task=fix_task,
         score=score, failing=_failing(verdicts), outcome=outcome, touched=touched,
         snapshot_uri=snapshot, restart=_fix_attempts(state, config) == 0,
-        seq=rt.seq(config, _FIX_PASS_NODE, f"pass:{window}:{pass_no}"),
+        seq=rt.seq(config, _FIX_PASS_NODE, _PASS_KEY),
     )]
     out.setdefault("fix_passes", []).extend(passes)
     # A tree worse than a failing best is never all-PASS, so it never advances.
@@ -2280,7 +2291,7 @@ def keep_best(
         window=window, boundary=boundary, pass_no=pass_no + 1, tree=best.tree,
         fix_task=revert.task_id, score=fix_score(restored, names),
         failing=_failing(restored), outcome="restored", snapshot_uri=best.snapshot_uri,
-        seq=rt.seq(config, _FIX_PASS_NODE, f"pass:{window}:{pass_no + 1}"),
+        seq=rt.seq(config, _FIX_PASS_NODE, _PASS_KEY),
     ))
     return True
 
@@ -2289,16 +2300,34 @@ def draft_best(state: FactoryState, resolve: ArtifactResolver) -> FixPass | None
     """The best tree of the fix loop ``state`` is still in, if any: what a halted
     or stopped run hands back instead of its newest, possibly worse or ungated, tree.
     ``None`` once a ticket diff landed after the loop's last check."""
+    passes = window_passes(state, resolve)
+    best = best_entry(passes, passes[0].window) if passes else None
+    return best if best is not None and best.snapshot_uri is not None else None
+
+
+def window_passes(state: FactoryState, resolve: ArtifactResolver) -> list[FixPass]:
+    """The ledger of the fix loop ``state`` is still in, in pass order; empty once a
+    ticket diff landed after the loop's last check."""
     passes = state.get("fix_passes") or ()
     if not passes:
-        return None
+        return []
     newest = max(passes, key=lambda p: p.seq)
     scope = (wave_scenarios(state, resolve) if newest.boundary == BUILD_TEST_BOUNDARY
              else frozenset())
     if fix_window(state, newest.boundary, scope) != newest.window:
-        return None
-    best = best_entry(passes, newest.window)
-    return best if best is not None and best.snapshot_uri is not None else None
+        return []
+    return sorted((p for p in passes if p.window == newest.window), key=_pass_order)
+
+
+def revisited_tree(state: FactoryState, out: Mapping[str, Any]) -> bool:
+    """True iff the check ``out`` holds landed on a tree its window's ledger already
+    holds: a fix pass that reproduced an earlier (say, reverted) tree made no
+    progress, though the restore left the newest tree a different one."""
+    new = out.get("fix_passes") or ()
+    if not new or new[0].outcome == "initial":
+        return False
+    return any(p.window == new[0].window and p.tree == new[0].tree
+               for p in state.get("fix_passes") or ())
 
 
 def materialize_best(
@@ -2443,11 +2472,14 @@ class WaveBuildCheck:
             # This check routes ESCALATE, not FIX: the rebuild is the ticket's extra
             # attempt and must leave the wave's fixer passes unspent.
             out.pop("budget", None)
-        elif (decision == FIX and not reverted
+        elif (decision == FIX
               and not self.capped_off_target({**state, "gates": post["gates"]}) and (
-                no_fix_progress(post, config, boundary=boundary)
-                or _unchanged_tree_recheck(state, out, config, boundary=boundary))):
-            [build] = [g for g in out["gates"] if g.name == "build"]
+                revisited_tree(state, out) or (not reverted and (
+                    no_fix_progress(post, config, boundary=boundary)
+                    or _unchanged_tree_recheck(state, out, config, boundary=boundary))))):
+            # After a restore the newest build is the restored tree's: route() reads
+            # the note off the current tree.
+            build = max((g for g in out["gates"] if g.name == "build"), key=lambda g: g.seq)
             out.setdefault("gate_triage", []).append(GateTriage(
                 name=NO_FIX_PROGRESS_TRIAGE, run_against=build.run_against,
                 explanation="the last fix pass left the same checks failing; the wave "

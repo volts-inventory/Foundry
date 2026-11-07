@@ -235,10 +235,20 @@ def _fix_summary(
         cut_off = any(t.run_against == f"task/{prev.task_id}"
                       and t.explanation.startswith(TURN_CAP_NOTE)
                       for t in state.get("gate_triage") or ())
-        broke = regressed_gates(state)
+        from foundry.graph.gate_wiring import window_passes
+
+        passes = window_passes(state, resolve)
+        # The gates above judged the restored tree, not prev's: what prev broke or
+        # left unedited is no longer on it.
+        reverted = bool(passes) and passes[-1].outcome == "restored"
+        broke = () if reverted else regressed_gates(state)
+        if reverted:
+            out.append(f"previous fix pass ({prev.task_id}) touched {files} and made the "
+                       "tree worse, so it was reverted: the tree above is the best one so "
+                       "far. Try a different approach")
         # A pass that changed nothing left the tree the wave built: a gate that broke
         # since the tree before was broken by the wave, not by this pass.
-        if touched == set():
+        elif touched == set():
             out.append(f"previous fix pass ({prev.task_id}) changed no file"
                        + (" (it ran out of turns before its first edit)" if cut_off else "")
                        + ": reading files changes nothing; make the edits this time")
@@ -257,7 +267,7 @@ def _fix_summary(
         else:
             out.append(f"previous fix pass ({prev.task_id}) touched {files} and left the "
                        "gates above failing: try a different approach")
-        if named and touched is not None and not touched & set(named):
+        if not reverted and named and touched is not None and not touched & set(named):
             out.append(f"previous fix pass never edited {', '.join(named)}, the file(s) the "
                        "failure names: edit them before anything else")
         out.extend(f"previous fix pass reported: {t.explanation[:300]}"

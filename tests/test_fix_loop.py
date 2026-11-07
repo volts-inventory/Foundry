@@ -632,8 +632,69 @@ def test_a_pass_that_makes_the_tree_worse_is_reverted_to_the_best_tree(
     summary = rec.packets["fix-3"].prior_failures
     assert any(line.startswith("previous fix pass (fix-2)") for line in summary)
     assert not any("revert-1" in line for line in summary)
+    # The gates judged the restored tree: fix-2 was undone, so nothing it broke or
+    # left unedited is on the tree any more.
+    assert any("fix-2" in line and "reverted" in line for line in summary)
+    assert not any(" broke " in line or "never edited" in line for line in summary)
+    # A worse pass and its restore are told apart by Seq, not by insertion order.
+    assert len({p.seq.emission_epoch for p in passes}) == len(passes)
     assert {"T-001", "fix-1", "fix-2", "revert-1", "fix-3", "T-002"} <= {
         a.task_id for a in out["artifacts"] if a.kind == "feature_diff"}
+
+
+def test_a_fix_pass_that_rebuilds_a_reverted_tree_is_no_progress(tmp_path: Path) -> None:
+    # fix-3 makes fix-2's worse tree again: reverted again, and the wave stops.
+    rec = _Recorder(writes={"T-001": _BROKEN, "fix-1": _ONE_BROKEN, "fix-2": _WORSE,
+                            "fix-3": _WORSE})
+    out, ran, _ = _wave_run(tmp_path, rec, max_fix_attempts=6, tickets=_FIX_TICKETS)
+    assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "fixer", "wave_gate",
+                   "fixer", "wave_gate"]
+    passes = sorted(out["fix_passes"], key=lambda p: p.seq)
+    assert [p.outcome for p in passes][-2:] == ["worse", "restored"]
+    assert passes[-2].tree == passes[2].tree
+    [note] = [t for t in out["gate_triage"] if t.name == NO_FIX_PROGRESS_TRIAGE]
+    assert note.run_against == passes[-1].tree  # the restored, current tree
+
+
+def test_the_draft_is_the_final_loops_best_after_many_waves() -> None:
+    # Wave checks run inside the implementation subgraph, whose langgraph_step runs
+    # far ahead of the supervisor's: the ledger must still order the final gate's
+    # passes after every wave's.
+    from foundry.graph.gate_wiring import draft_best, keep_best
+
+    store = ArtifactStore()
+    rt = _runtime(None, store)
+    state: FactoryState = {"artifacts": [], "fix_passes": []}
+    local = iter(range(1, 1000))
+
+    def check(state: FactoryState, boundary: str, step: int, tree: str,
+              *gates: tuple[str, GateStatus, tuple[str, ...]]) -> FactoryState:
+        cfg: RunnableConfig = {"configurable": {"thread_id": "run"},
+                               "metadata": {"langgraph_step": step}}
+        out: dict[str, Any] = {"gates": [_gate(n, tree, next(local), s, *f)
+                                         for n, s, f in gates]}
+        keep_best(state, cfg, out, boundary=boundary, scope=frozenset(), rt=rt,
+                  resolve=store.resolve, resolve_blob=store.resolve_blob,
+                  rerun=lambda s: {})
+        return {**state, "fix_passes": [*state["fix_passes"], *out["fix_passes"]]}
+
+    for wave in range(5):
+        state["artifacts"] = [*state["artifacts"], _diff_art(
+            store, f"T-00{wave}", wave + 1, {f"w{wave}.py": "x = 1\n"})]
+        state = check(state, BUILD_BOUNDARY, 40 + 4 * wave, f"w{wave}a",
+                      ("build", _RED, ("SyntaxError",)))
+        state = check(state, BUILD_BOUNDARY, 42 + 4 * wave, f"w{wave}b", ("build", _OK, ()))
+    final = BUILD_TEST_SMOKE_BOUNDARY
+    state = check(state, final, 6, "f0", ("build", _OK, ()),
+                  ("test", _RED, (_FAIL_A, _FAIL_B)), ("smoke", _OK, ()))
+    state["artifacts"] = [*state["artifacts"], _diff_art(store, "fix-1", 10, {"a.py": "1\n"})]
+    state = check(state, final, 9, "f1", ("build", _OK, ()), ("test", _RED, (_FAIL_A,)),
+                  ("smoke", _OK, ()))
+    state["artifacts"] = [*state["artifacts"], _diff_art(store, "fix-2", 11, {"a.py": "(\n"})]
+    state = check(state, final, 12, "f2", ("build", _RED, ("SyntaxError",)),
+                  ("test", _RED, ()), ("smoke", _RED, ()))
+    best = draft_best(state, store.resolve)
+    assert best is not None and (best.boundary, best.tree) == (final, "f1")
 
 
 def test_the_restored_tree_is_the_newest_checked_and_the_draft(tmp_path: Path) -> None:

@@ -343,6 +343,26 @@ def test_packet_carries_ticket_scenarios_contracts_and_persona(tmp_path: Path) -
     assert "pytest-bdd" in p3.persona and p3.task["feature_files"] == ["features/T-001.feature"]
 
 
+def test_packet_carries_the_built_interfaces_and_the_step_scaffold(tmp_path: Path) -> None:
+    store = ArtifactStore()
+    built = "class TodoStore:\n    def add(self, title: str) -> int:\n        return 1\n"
+    rec = _Recorder(writes={"T-001": {"todo/store.py": built}})
+    tickets, extra = _three_tickets(store)
+    _graph(_runtime(rec, store), store, tmp_path).compile().invoke(
+        _state(store, tickets, artifacts=extra), _config())
+
+    assert not any("INTERFACES ALREADY BUILT" in s for s in rec.packets["T-001"].retrieved_spans)
+    [sigmap] = [s for s in rec.packets["T-002"].retrieved_spans
+                if s.startswith("INTERFACES ALREADY BUILT")]
+    assert "## todo/store.py\nclass TodoStore:\n    def add(self, title: str) -> int" in sigmap
+    assert "return 1" not in sigmap
+    [scaffold] = [s for s in rec.packets["T-003"].retrieved_spans
+                  if s.startswith("PYTEST-BDD STEP SCAFFOLD for tests/steps/test_t001.py")]
+    assert 'scenarios("../../features/T-001.feature")' in scaffold
+    assert '@given("an empty store")' in scaffold and "@when(\"I add 'milk'\")" in scaffold
+    assert not any(s.startswith("PYTEST-BDD") for s in rec.packets["T-001"].retrieved_spans)
+
+
 def test_writes_outside_the_ticket_files_are_dropped_and_noted(tmp_path: Path) -> None:
     store = ArtifactStore()
     tickets = [_ticket("T-001", 0, files=("todo/store.py",))]

@@ -2854,9 +2854,15 @@ def restart_set(
             for tid in ids):
         return ()
     others = [t for tid, t in planned.items() if tid in built and tid not in ids]
-    if any(_scopes_overlap(p.files, o.files) for p in picks for o in others):
+
+    def own(t: Ticket) -> tuple[str, ...]:
+        # A shared manifest doesn't block a restart: the reset never touches one, and
+        # the rebuilt session edits it as the tree now has it.
+        return tuple(f for f in t.files if not _is_manifest(f))
+
+    if any(_scopes_overlap(own(p), own(o)) for p in picks for o in others):
         return ()
-    if len(picks) == 2 and _scopes_overlap(picks[0].files, picks[1].files):
+    if len(picks) == 2 and _scopes_overlap(own(picks[0]), own(picks[1])):
         return ()
     return ids
 

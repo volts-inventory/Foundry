@@ -1269,6 +1269,18 @@ def test_a_restart_needs_a_scope_no_other_built_ticket_shares_and_code_to_rebuil
     assert restart_set(state, store.resolve, ["T-003"], tests_ok=True) == ("T-003",)
 
 
+def test_a_shared_manifest_does_not_block_a_restart() -> None:
+    from foundry.graph.gate_wiring import restart_set
+
+    store = ArtifactStore()
+    tickets = [_ticket("T-001", 0, files=("app/a.py", "requirements.txt")),
+               _ticket("T-002", 1, files=("app/b.py", "requirements.txt"), deps=("T-001",))]
+    state = _ticket_state(store, tickets, artifacts=[
+        _diff_art(store, "T-001", 1, {"app/a.py": "a\n", "requirements.txt": "a\n"}),
+        _diff_art(store, "T-002", 2, {"app/b.py": "b\n", "requirements.txt": "a\nb\n"})])
+    assert restart_set(state, store.resolve, ["T-001"]) == ("T-001",)
+
+
 def test_a_gate_that_stops_naming_its_failing_tests_regressed() -> None:
     from foundry.graph.gate_wiring import _outcome, regressions
 

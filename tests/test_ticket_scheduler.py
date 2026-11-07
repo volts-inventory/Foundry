@@ -618,7 +618,8 @@ def test_a_spent_fix_budget_halts_the_waves_in_order(tmp_path: Path) -> None:
     rec = _Recorder(writes={"T-001": {"app.py": "def broken(:\n"},
                             "fix-1": {"app.py": "def broken_1(:\n"},
                             "fix-2": {"app.py": "def broken_2(:\n"}})
-    out, ran, store = _wave_run(tmp_path, rec, max_fix_attempts=3)
+    out, ran, store = _wave_run(tmp_path, rec, max_fix_attempts=3,
+                                fix_policy=FixPolicy(restarts=False))
     assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "fixer", "wave_gate"]
     assert rec.calls == ["T-001", "fix-1", "fix-2"]  # wave 2 never started
     assert set(_builds(out)) == {GateStatus.FAIL}

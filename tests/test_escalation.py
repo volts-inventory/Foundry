@@ -29,7 +29,12 @@ from foundry.execution.adapters.tiered import (
     TieredAdapter,
 )
 from foundry.execution.sandbox import Sandbox
-from foundry.graph.gate_wiring import BUILD_BOUNDARY, failing_streak, materialize_workdir
+from foundry.graph.gate_wiring import (
+    BUILD_BOUNDARY,
+    FixPolicy,
+    failing_streak,
+    materialize_workdir,
+)
 from foundry.modes import escalation_tier, preset_levels
 from foundry.proxy.model_provider_proxy import TIER_MODELS
 from foundry.proxy.token_meter import TokenMeter
@@ -244,10 +249,16 @@ def test_a_wave_check_that_fails_twice_reruns_its_local_ticket_on_the_cloud(
     cloud = _Session(writes={"fix-1": {"app.py": "def broken_1(:\n"},
                              "T-001": {"app.py": "def one():\n    return 1\n"}})
     out, ran, _ = _wave_run(tmp_path, _tiered(cloud, local), tickets=_two_waves())  # type: ignore[arg-type]
-    assert ran == ["engineering", "wave_gate", "fixer", "wave_gate",
+    # Restart once on its own tier first, then escalate: the restart rebuilt it
+    # (still broken) locally, and only then the cloud level rebuilt it.
+    assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "engineering", "wave_gate",
                    "engineering", "wave_gate", "engineering"]
+    assert [t for t, _ in local.tiers] == ["T-001", "T-001", "T-002"]
+    assert local.packets["T-001"].prior_failures[0] == "[fresh restart]"
     assert cloud.tiers == [("fix-1", None), ("T-001", "T1")]
-    assert _builds(out) == [GateStatus.FAIL, GateStatus.FAIL, GateStatus.PASS]
+    assert _builds(out) == [GateStatus.FAIL, GateStatus.FAIL, GateStatus.FAIL, GateStatus.PASS]
+    assert {t.run_against for t in out["gate_triage"] if t.name == "ticket-restarted"} == {
+        "task/T-001"}
     context = cloud.packets["T-001"].prior_failures
     assert context[0] == "[escalation]"
     assert "[fix summary]" in context and "failed gates: build" in context
@@ -255,7 +266,7 @@ def test_a_wave_check_that_fails_twice_reruns_its_local_ticket_on_the_cloud(
     assert any(line.startswith("the earlier attempt touched:") and "app.py" in line
                for line in context)
     assert set(_escalated(out)) == {"task/T-001"}
-    assert cloud.seen["T-001"]["app.py"] == "def broken_1(:\n"  # built on the fix
+    assert cloud.seen["T-001"]["app.py"] == "def broken(:\n"  # built on the restart
 
 
 def test_a_wave_check_escalation_happens_once(tmp_path: Path) -> None:
@@ -264,7 +275,8 @@ def test_a_wave_check_escalation_happens_once(tmp_path: Path) -> None:
     cloud = _Session(writes={"fix-1": {"app.py": "def broken_1(:\n"},
                              "T-001": {"app.py": "def broken_2(:\n"},
                              "fix-2": {"app.py": "def broken_3(:\n"}})
-    out, ran, _ = _wave_run(tmp_path, _tiered(cloud, local), tickets=_two_waves())  # type: ignore[arg-type]
+    out, ran, _ = _wave_run(tmp_path, _tiered(cloud, local), tickets=_two_waves(),  # type: ignore[arg-type]
+                            fix_policy=FixPolicy(restarts=False))
     assert [t for t, _ in cloud.tiers].count("T-001") == 1
     assert len([t for t in out["gate_triage"] if t.name == "escalate-request"]) == 1
     # The rebuild is an extra attempt, not a fix pass: the wave keeps its second fixer
@@ -282,7 +294,7 @@ def test_without_an_escalation_tier_a_twice_failing_check_never_escalates(
     cloud = _Session(writes={"fix-1": {"app.py": "def broken_1(:\n"},
                              "fix-2": {"app.py": "def broken_2(:\n"}})
     out, ran, _ = _wave_run(tmp_path, _tiered(cloud, local, target=None),  # type: ignore[arg-type]
-                            tickets=_two_waves())
+                            tickets=_two_waves(), fix_policy=FixPolicy(restarts=False))
     assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "fixer", "wave_gate"]
     assert not [t for t in out["gate_triage"] if t.name.startswith("escalate")]
 

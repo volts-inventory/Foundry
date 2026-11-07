@@ -86,7 +86,7 @@ from foundry.state.seq import Seq
 from foundry.state.tree_sha import tree_sha
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
     from langchain_core.runnables import RunnableConfig
 
@@ -977,9 +977,10 @@ def _wave0_ticket_ids(
 
 
 def _is_fix(task_id: str) -> bool:
-    # The fixer's FeatureDiffs (make_fixer_node), and the restores of a fix loop's
-    # best tree (keep_best): both repair the tree, neither is a later wave's ticket.
-    return task_id.startswith(("fix-", REVERT_PREFIX))
+    # The fixer's FeatureDiffs (make_fixer_node), the restores of a fix loop's best
+    # tree (keep_best), and a ticket restart's reset and rebuild: all repair the
+    # tree within one fix loop, none is a later wave's ticket.
+    return task_id.startswith(("fix-", REVERT_PREFIX, RESTART_PREFIX, RESET_PREFIX))
 
 
 def _write_contracts(
@@ -1684,6 +1685,10 @@ HALT = "halt"  # bound exhausted or a stable-FAIL latch — escalate / stop
 # Hybrid only: the wave check failed twice; re-run its local tickets once on the
 # cloud level (WaveBuildCheck.route; never returned by route_after_gates).
 ESCALATE = "escalate"
+# A fix loop's ticket restart (plan_next_pass): the engineering node rebuilds the
+# planned tickets from scratch on their own tier (WaveBuildCheck.route; at the final
+# gate a FIX re-entry reaches the engineering node instead of the fixer).
+RESTART = "restart"
 
 
 def _relevant_latest(
@@ -2072,6 +2077,11 @@ def settle_fix_attempts(
 # newest. The pass ledger rides ``fix_passes``, written by the gate nodes alone.
 
 REVERT_PREFIX = "revert-"
+# A ticket restart (plan_next_pass): the reset of the tickets' files to the tree
+# before they were built, then each ticket's rebuild, both inside the fix loop.
+RESTART_PREFIX = "restart-"
+RESET_PREFIX = "reset-"
+RESTARTED_TRIAGE = "ticket-restarted"
 REVERT_SKIPPED_TRIAGE = "fix-revert-skipped"
 _FIX_PASS_NODE = "fix_pass"
 _STAGES = ("build", "test", "smoke")
@@ -2114,9 +2124,12 @@ class FixPolicy:
     ``_PASS_HEADROOM`` x the window's median pass (``default_pass_s`` before any)
     — with ``wave_share``, a wave's loop gets only its share of the time left
     when it started, ``1 / (unbuilt waves + 2)``. Without a time cap a window stops
-    after ``window_ceiling`` passes. ``meter`` returns the run's token meter."""
+    after ``window_ceiling`` passes. ``meter`` returns the run's token meter.
+    ``restarts`` lets a loop rebuild a stuck cluster's tickets from scratch once
+    (:func:`plan_next_pass`), in every mode."""
 
     until_cap: bool = False
+    restarts: bool = True
     no_edit_limit: int = 2
     revisit_limit: int = 2
     same_sig_limit: int = 3
@@ -2242,10 +2255,11 @@ def fix_score(
 
 
 def best_entry(passes: Iterable[FixPass], window: str) -> FixPass | None:
-    """The window's best scored pass; a tie goes to the newest."""
+    """The window's best scored pass; a tie goes to the newest. A pass judged worse
+    (it broke a check the best tree passed) never is, whatever its score."""
     best: FixPass | None = None
-    for p in sorted((p for p in passes if p.window == window and p.score is not None),
-                    key=_pass_order):
+    for p in sorted((p for p in passes if p.window == window and p.score is not None
+                     and p.outcome != "worse"), key=_pass_order):
         if best is None or tuple(p.score or ()) <= tuple(best.score or ()):
             best = p
     return best
@@ -2264,37 +2278,81 @@ def _failing(verdicts: Mapping[str, GateResult]) -> tuple[str, ...]:
     return tuple(sorted(f"{gate}:{ident}" for gate, ident in signature))[:_FAILING_CAP]
 
 
+def regressions(best_failing: Iterable[str], failing: Iterable[str]) -> tuple[str, ...]:
+    """The ledger failures (``gate:ident``) of a tree that the best tree passed: a
+    gate the best tree did not fail, or a test/scenario id the best tree's same gate
+    did not name. A gate whose findings name no id (a compiler line, a raw output
+    line) is compared gate by gate only: its lines shift with every edit. A best
+    list cut at the ledger cap is not compared (what it left out is unknown)."""
+    best_failing = tuple(best_failing)
+    if len(best_failing) >= _FAILING_CAP:
+        return ()
+    by_gate: dict[str, set[str]] = {}
+    for f in best_failing:
+        gate, _, ident = f.partition(":")
+        by_gate.setdefault(gate, set()).add(ident)
+    out: list[str] = []
+    for f in failing:
+        gate, _, ident = f.partition(":")
+        was = by_gate.get(gate)
+        if was is None or ("::" in ident and ident not in was
+                           and all("::" in w for w in was)):
+            out.append(f)
+    return tuple(out)
+
+
 def _outcome(prior: list[FixPass], tree: str, score: tuple[int, int, int] | None,
-             best: FixPass | None) -> FixOutcome:
+             best: FixPass | None, failing: tuple[str, ...] = ()) -> FixOutcome:
+    """How a check compares with the window's best. Superset acceptance (Agentless
+    keeps the patch with the fewest regressions, arXiv 2407.01489): a tree that
+    breaks a check the best tree passed is worse even when its score is lower."""
     if not prior:
         return "initial"
     if score is None:
         return "error"
     if tree == prior[-1].tree:
         return "no-change"
-    if best is None or best.score is None or score < tuple(best.score):
+    if best is None or best.score is None:
         return "improved"
-    return "worse" if score > tuple(best.score) else "lateral"
+    if score > tuple(best.score) or regressions(best.failing, failing):
+        return "worse"
+    return "improved" if score < tuple(best.score) else "lateral"
 
 
 def _pass_fix(
     state: FactoryState, prior: list[FixPass], resolve: ArtifactResolver,
     resolve_blob: BlobResolver,
 ) -> tuple[str | None, tuple[str, ...]]:
-    """The fix diff this check is the first to judge, and the files it touched."""
+    """The fix diff this check is the first to judge, and the files it touched. A
+    ticket restart's pass is its rebuilt tickets' diffs and their reset together."""
     fixes = [a for a in _of_kind(state, FEATURE_DIFF_KIND)
-             if a.task_id and a.task_id.startswith("fix-")]
+             if a.task_id and a.task_id.startswith(("fix-", RESTART_PREFIX))]
     if not prior or not fixes:
         return None, ()
     newest = max(fixes, key=lambda a: a.seq)
     if any(p.fix_task == newest.task_id for p in state.get("fix_passes") or ()):
         return None, ()
-    try:
-        ops = _diff_ops(_resolve_typed(newest, resolve, FeatureDiff, FEATURE_DIFF_KIND),
-                        resolve_blob)
-    except MaterializationError:
-        return newest.task_id, ()
-    return newest.task_id, tuple(sorted({*ops.writes, *ops.deletes, *ops.patches}))
+    group = [newest]
+    if newest.task_id and newest.task_id.startswith(RESTART_PREFIX):
+        restarted = set(max(prior, key=_pass_order).restart_tickets)
+
+        def ours(task_id: str) -> bool:
+            if task_id.startswith(RESTART_PREFIX):
+                return task_id.removeprefix(RESTART_PREFIX) in restarted
+            return (task_id.startswith(RESET_PREFIX)
+                    and set(task_id.removeprefix(RESET_PREFIX).split("+")) == restarted)
+
+        group = [a for a in _of_kind(state, FEATURE_DIFF_KIND)
+                 if a.task_id and ours(a.task_id)] or group
+    touched: set[str] = set()
+    for art in group:
+        try:
+            ops = _diff_ops(_resolve_typed(art, resolve, FeatureDiff, FEATURE_DIFF_KIND),
+                            resolve_blob)
+        except MaterializationError:
+            continue
+        touched |= {*ops.writes, *ops.deletes, *ops.patches}
+    return newest.task_id, tuple(sorted(touched))
 
 
 def _snapshot_blob(files: Mapping[str, str], deleted: Iterable[str] = ()) -> bytes:
@@ -2346,15 +2404,26 @@ def restore_diff(
         return None
     diffs = _of_kind(state, FEATURE_DIFF_KIND)
     n = 1 + len({a.task_id for a in diffs if a.task_id and a.task_id.startswith(REVERT_PREFIX)})
-    task_id = f"{REVERT_PREFIX}{n}"
+    return snapshot_diff(state, config, writes, deleted, task_id=f"{REVERT_PREFIX}{n}",
+                         base_tree=tree, salt=best.tree, rt=rt)
+
+
+def snapshot_diff(
+    state: FactoryState, config: RunnableConfig, writes: Mapping[str, str],
+    deleted: Iterable[str], *, task_id: str, base_tree: str, salt: str, rt: AgentRuntime,
+    node_id: str = _FIX_PASS_NODE,
+) -> Artifact:
+    """A FeatureDiff ``task_id`` writing ``writes`` whole and deleting ``deleted``,
+    its epoch lifted past every diff on ``state`` so it applies last."""
+    assert rt.cas is not None
     blob = rt.cas.put_blob(_snapshot_blob(writes, deleted))
-    seq = lift_epoch(state, rt.seq(config, _FIX_PASS_NODE, f"diff:{task_id}"))
+    seq = lift_epoch(state, rt.seq(config, node_id, f"diff:{task_id}"))
     diff = FeatureDiff(diff_uri=blob, task_id=task_id, branch=f"task/{task_id}",
-                       base_tree_sha=tree, seq=seq)
+                       base_tree_sha=base_tree, seq=seq)
     artifact = Artifact(
         kind=FEATURE_DIFF_KIND,
-        uri=f"cas://feature_diff/{task_id}-{content_digest([best.tree, blob])[:32]}",
-        produced_by=_FIX_PASS_NODE, task_id=task_id, seq=seq,
+        uri=f"cas://feature_diff/{task_id}-{content_digest([salt, blob])[:32]}",
+        produced_by=node_id, task_id=task_id, seq=seq,
     )
     rt.cas.put_body_at(artifact.uri, diff)
     return artifact
@@ -2403,13 +2472,40 @@ def keep_best(
     last = max(prior, key=_pass_order).clock_s if prior else None
     elapsed = (clock - last if clock is not None and last is not None and clock >= last
                else None)
-    new = [p.model_copy(update={"clock_s": clock, "elapsed_s": elapsed if i == 0 else None})
+    # The pass this check judges was aimed at the cluster the last check planned; a
+    # fresh budget's first check (a resume) judges no pass.
+    aimed = max(prior, key=_pass_order).target if prior else None
+    new = [p.model_copy(update={"clock_s": clock, "elapsed_s": elapsed if i == 0 else None,
+                                "cluster": aimed if i == 0 and not p.restart else None})
            for i, p in enumerate(new)]
     newest = new[-1]
+    until_cap = policy is not None and policy.until_cap
+    passes = sorted([*prior, *new], key=_pass_order)
     stop = None
-    if policy is not None and policy.until_cap and (newest.score is None or newest.score[1]):
-        stop = fix_stop(sorted([*prior, *new], key=_pass_order), policy,
-                        unbuilt_waves=unbuilt_waves)
+    if until_cap and (newest.score is None or newest.score[1]):
+        assert policy is not None
+        stop = fix_stop(passes, policy, unbuilt_waves=unbuilt_waves)
+    if newest.score is not None and newest.score[1]:
+        from foundry.agents.implementation.tickets import built_task_ids, read_tickets
+
+        names = _BOUNDARY_GATES[boundary]
+        verdicts = _newest_per_name(g for g in out.get("gates") or () if g.name in names)
+        clusters = failure_clusters(verdicts.values(), read_tickets(state, resolve),
+                                    built_task_ids(state))
+        dead_end = stop is not None and stop[0] in _DEAD_ENDS
+        # Fixing until the cap a cluster gets two repairs before its restart. The
+        # legacy budget gives a loop two passes: the restart takes the second when
+        # the first did not improve the tree.
+        target, restart = plan_next_pass(
+            passes, clusters, restart_after=2 if until_cap else 1, dead_end=dead_end,
+            restartable=lambda c: (restart_set(state, resolve, c.tickets)
+                                   if policy is None or policy.restarts else ()),
+            unimproved_only=not until_cap)
+        if restart and dead_end:
+            stop = None
+        newest = newest.model_copy(update={"target": target,
+                                           "restart_tickets": () if stop else restart})
+        new[-1] = newest
     if stop is not None:
         rule, why = stop
         new[-1] = newest.model_copy(update={"stop": rule})
@@ -2445,17 +2541,19 @@ def _keep_best(
                    key=_pass_order)
     score = fix_score(verdicts, names)
     best = best_entry(prior, window)
-    outcome = _outcome(prior, tree, score, best)
+    failing = _failing(verdicts)
+    outcome = _outcome(prior, tree, score, best, failing)
     fix_task, touched = _pass_fix(state, prior, resolve, resolve_blob)
     pass_no = max((p.pass_no for p in prior), default=-1) + 1
     snapshot = None
     # An all-PASS tree ends the loop (it advances), so it never needs restoring.
-    if score is not None and score[1] and (best is None or score <= tuple(best.score or ())):
+    if (score is not None and score[1] and outcome != "worse"
+            and (best is None or score <= tuple(best.score or ()))):
         snapshot = _snapshot(state, prior, tree, rt=rt, resolve=resolve,
                              resolve_blob=resolve_blob)
     passes = [FixPass(
         window=window, boundary=boundary, pass_no=pass_no, tree=tree, fix_task=fix_task,
-        score=score, failing=_failing(verdicts), outcome=outcome, touched=touched,
+        score=score, failing=failing, outcome=outcome, touched=touched,
         snapshot_uri=snapshot, restart=_fix_attempts(state, config) == 0,
         seq=rt.seq(config, _FIX_PASS_NODE, _PASS_KEY),
     )]
@@ -2529,6 +2627,234 @@ def revisited_tree(state: FactoryState, out: Mapping[str, Any]) -> bool:
                for p in state.get("fix_passes") or ())
 
 
+# ---- one failure cluster per fix pass, and ticket restarts --------------------
+#
+# Each fixer pass is aimed at ONE cluster of the failures (Ralph's "one item per
+# loop"): the build before the tests, then the cluster with the most failures. A
+# cluster tried twice without the tree improving gives way to the next. Repairing
+# the same code again decays fast (arXiv 2506.18403): a cluster that maps to one or
+# two tickets is, once, rebuilt from scratch instead — the tickets' files reset to
+# the tree before them, each ticket re-run on its own tier with a memo of what the
+# repairs tried. The gate node plans each pass on the newest ledger entry
+# (``target``, ``restart_tickets``), so the fixer, the engineering node and a
+# resumed run all read the same plan.
+
+_ROTATE_AFTER = 2  # passes on a cluster without the tree improving
+_RESTART_TICKETS = 2  # the most tickets one restart rebuilds
+# fix_stop rules that mean the fixer is stuck, not out of time: a restart that is
+# still available is tried before the loop stops on one.
+_DEAD_ENDS = frozenset({"no-edit", "revisit", "same-signature", "plateau"})
+_BDD_LINE = re.compile(r"^BDD criterion (\S+): scenario (\S+)")
+
+
+@dataclass(frozen=True)
+class FailureCluster:
+    """Failures one fix pass repairs together. ``key`` is ``build`` / a gate name,
+    ``ticket:<ids>`` (the built tickets owning the failing scenarios or test
+    modules), or ``feature:<path>`` / ``file:<path>`` when no ticket owns them;
+    ``items`` are the ledger's ``gate:ident`` failures; ``tickets`` the task ids
+    the cluster maps to."""
+
+    key: str
+    stage: int
+    items: tuple[str, ...]
+    tickets: tuple[str, ...] = ()
+
+
+def _owners(tickets: Iterable[Ticket], built: set[str], path: str) -> list[str]:
+    from foundry.agents.implementation.tickets import in_write_scope, task_id_for_ticket
+
+    return sorted({task_id_for_ticket(t.id) for t in tickets
+                   if task_id_for_ticket(t.id) in built and t.files
+                   and in_write_scope(path, t.files)})
+
+
+def failure_clusters(
+    gates: Iterable[GateResult], tickets: Sequence[Ticket], built: Iterable[str],
+) -> tuple[FailureCluster, ...]:
+    """The FAILed gates' failures in clusters, highest priority first: earlier stages
+    (build, test, smoke) first, then the most failures. Empty when a gate ERRORed
+    (an infra error is no failure to aim a pass at)."""
+    from foundry.agents.implementation.tickets import task_id_for_ticket
+
+    gates = [g for g in gates if g.status in (GateStatus.FAIL, GateStatus.ERROR)]
+    if any(g.status is GateStatus.ERROR for g in gates):
+        return ()
+    built = set(built)
+    carriers: dict[str, set[str]] = {}
+    for t in tickets:
+        if task_id_for_ticket(t.id) in built:
+            for cid in t.scenario_ids:
+                carriers.setdefault(cid, set()).add(task_id_for_ticket(t.id))
+    stage = {name: i for i, name in enumerate(_STAGES)}
+    groups: dict[str, tuple[int, list[str], set[str]]] = {}
+
+    def add(key: str, rank: int, item: str, owners: Iterable[str]) -> None:
+        _, items, own = groups.setdefault(key, (rank, [], set()))
+        if item not in items:
+            items.append(item)
+        own.update(owners)
+
+    for g in gates:
+        rank = stage.get(g.name, len(_STAGES))
+        ids = failing_ids(g.findings)
+        if g.name == "test" and ids:
+            criteria = {m.group(2): m.group(1) for line in g.findings
+                        if (m := _BDD_LINE.match(line))}
+            for ident in ids:
+                path = ident.split("::", 1)[0]
+                owners = (sorted(carriers.get(criteria[ident], ()))
+                          if ident in criteria else _owners(tickets, built, path))
+                kind = "feature" if ident in criteria else "file"
+                key = "ticket:" + "+".join(owners) if owners else f"{kind}:{path}"
+                add(key, rank, f"{g.name}:{ident}", owners)
+            continue
+        signature = _failure_signature([g]) or frozenset()
+        named = failure_files([g]) if g.name == "build" else ()
+        owners = sorted({o for f in named for o in _owners(tickets, built, f)})
+        for _, ident in sorted(signature):
+            add(g.name, rank, f"{g.name}:{ident}", owners)
+        if not signature:
+            add(g.name, rank, f"{g.name}:", owners)
+    return tuple(
+        FailureCluster(key=key, stage=rank, items=tuple(items), tickets=tuple(sorted(own)))
+        for key, (rank, items, own) in sorted(
+            groups.items(), key=lambda kv: (kv[1][0], -len(kv[1][1]), kv[0]))
+    )
+
+
+def _stuck(passes: Sequence[FixPass], key: str) -> int:
+    """How many passes aimed at ``key`` in a row, newest back, left the tree no
+    better than the window's best."""
+    n = 0
+    for p in reversed(passes):
+        if p.cluster != key or p.outcome in ("initial", "restored"):
+            continue
+        if p.outcome == "improved":
+            break
+        n += 1
+    return n
+
+
+def plan_next_pass(
+    passes: Sequence[FixPass], clusters: Sequence[FailureCluster], *, restart_after: int,
+    restartable: Callable[[FailureCluster], tuple[str, ...]], dead_end: bool = False,
+    unimproved_only: bool = False,
+) -> tuple[str | None, tuple[str, ...]]:
+    """``(cluster key, tickets to restart)`` for the pass after ``passes`` (one
+    window, in pass order): the first cluster by priority not yet tried
+    :data:`_ROTATE_AFTER` times in a row without progress — restarted instead once
+    it has been tried ``restart_after`` times and its tickets can be. With every
+    cluster spent, the least-tried one. ``dead_end`` (the loop would stop here)
+    restarts the first cluster that still can be. ``unimproved_only`` restarts only
+    a cluster no pass of the window has improved."""
+    if not clusters:
+        return None, ()
+    target: FailureCluster | None = None
+    for c in clusters:
+        stuck = _stuck(passes, c.key)
+        fresh = not unimproved_only or not any(
+            p.cluster == c.key and p.outcome == "improved" for p in passes)
+        if stuck >= restart_after and fresh and (tickets := restartable(c)):
+            return c.key, tickets
+        if stuck < _ROTATE_AFTER:
+            target = c
+            break
+    if dead_end:
+        for c in clusters:
+            if tickets := restartable(c):
+                return c.key, tickets
+    if target is None:
+        target = min(clusters, key=lambda c: _stuck(passes, c.key))
+    return target.key, ()
+
+
+def restarted_task_ids(state: FactoryState) -> set[str]:
+    """Tickets that spent their one restart this run (whatever its outcome)."""
+    return {t.run_against.removeprefix("task/") for t in state.get("gate_triage") or ()
+            if t.name == RESTARTED_TRIAGE}
+
+
+def restart_set(
+    state: FactoryState, resolve: ArtifactResolver, task_ids: Iterable[str],
+) -> tuple[str, ...]:
+    """``task_ids`` if they can be restarted together, else ``()``: one or two built
+    planned tickets with declared, disjoint files, neither restarted before nor the
+    contracts ticket or the skeleton (every other ticket builds against those)."""
+    from foundry.agents.implementation.tickets import (
+        _scopes_overlap,
+        built_task_ids,
+        read_tickets,
+        task_id_for_ticket,
+    )
+
+    ids = tuple(sorted(set(task_ids)))
+    if not 1 <= len(ids) <= _RESTART_TICKETS:
+        return ()
+    planned = {task_id_for_ticket(t.id): t for t in read_tickets(state, resolve)}
+    spent = restarted_task_ids(state)
+    built = built_task_ids(state)
+    picks = [planned[tid] for tid in ids if tid in planned]
+    if len(picks) != len(ids) or any(not t.files for t in picks) or any(
+            tid in spent or tid not in built or tid in (CONTRACTS_TICKET_ID, SKELETON_TASK_ID)
+            for tid in ids):
+        return ()
+    if len(picks) == 2 and _scopes_overlap(picks[0].files, picks[1].files):
+        return ()
+    return ids
+
+
+def pending_restarts(state: FactoryState, resolve: ArtifactResolver) -> tuple[str, ...]:
+    """The tickets the newest check of the current fix loop planned to restart, not
+    yet restarted."""
+    passes = window_passes(state, resolve)
+    if not passes:
+        return ()
+    spent = restarted_task_ids(state)
+    return tuple(t for t in passes[-1].restart_tickets if t not in spent)
+
+
+def ticket_reset(
+    state: FactoryState, tickets: Sequence[Ticket], *, resolve: ArtifactResolver,
+    resolve_blob: BlobResolver,
+) -> tuple[dict[str, str], tuple[str, ...]]:
+    """``(writes, deletes)`` that put ``tickets``' files (their write scope and every
+    file their diffs touched) back as they were before the first of them was built:
+    the integrated tree of the diffs that came before it. Contract files and gate
+    inputs stay as they are. Raises :class:`MaterializationError` like the gates."""
+    from foundry.agents.implementation.tickets import (
+        _is_gate_input,
+        in_write_scope,
+        task_id_for_ticket,
+    )
+
+    ids = {task_id_for_ticket(t.id) for t in tickets}
+    own = [a for a in _of_kind(state, FEATURE_DIFF_KIND) if a.task_id in ids]
+    if not own:
+        return {}, ()
+    first = min(a.seq for a in own)
+    earlier: FactoryState = {**state, "artifacts": [
+        a for a in state.get("artifacts") or ()
+        if a.kind != FEATURE_DIFF_KIND or a.seq < first]}
+    before = integrated_files(earlier, resolve=resolve, resolve_blob=resolve_blob)
+    current = integrated_files(state, resolve=resolve, resolve_blob=resolve_blob)
+    touched: set[str] = set()
+    for art in own:
+        ops = _diff_ops(_resolve_typed(art, resolve, FeatureDiff, FEATURE_DIFF_KIND),
+                        resolve_blob)
+        touched |= {*ops.writes, *ops.deletes, *ops.patches}
+    declared = [f for t in tickets for f in t.files]
+    frozen = set(contract_paths(state, resolve))
+
+    def owned(path: str) -> bool:
+        return (path not in frozen and not _is_gate_input(path)
+                and (path in touched or (bool(declared) and in_write_scope(path, declared))))
+
+    writes = {p: c for p, c in before.items() if owned(p) and current.get(p) != c}
+    deleted = tuple(sorted(p for p in current if owned(p) and p not in before))
+    return writes, deleted
+
+
 def materialize_best(
     state: FactoryState, dest: Path, best: FixPass, *, resolve: ArtifactResolver,
     resolve_blob: BlobResolver,
@@ -2565,7 +2891,10 @@ class WaveBuildCheck:
     local tickets (those the failures name, else all of them) to re-run once on
     the cloud level (``escalate-request`` triage; :data:`ESCALATE` routes back to
     the engineering node), before any further fixer pass or a halt. An
-    escalation spends none of the wave's fix attempts. A ticket whose
+    escalation spends none of the wave's fix attempts. A ticket that can still be
+    restarted (:func:`restart_set`) is first rebuilt once on its own tier instead
+    (:data:`RESTART`, a fix pass like any other); it escalates if that fails too. A
+    ticket whose
     kept local session stopped early (turn cap, repeat/read-thrash) is asked for on
     the FIRST failure that names it (or, alone in its wave, on any first failure).
 
@@ -2658,7 +2987,9 @@ class WaveBuildCheck:
         judged: FactoryState = {**post, "gates": merge_gates(state.get("gates"), own)}
         streak = failing_streak(judged, boundary=boundary) if decision != ADVANCE else 0
         picked: tuple[str, ...] = ()
-        if streak >= 1:
+        newest = (out.get("fix_passes") or [None])[-1]
+        restarting = decision == FIX and newest is not None and bool(newest.restart_tickets)
+        if streak >= 1 and not restarting:
             from foundry.agents.implementation.tickets import escalation_pick, stopped_tickets
             from foundry.execution.adapters.tiered import (
                 ESCALATE_FALLBACK_TRIAGE,
@@ -2673,6 +3004,13 @@ class WaveBuildCheck:
             picked, fallback = escalation_pick({**state, "gates": judged["gates"]},
                                                self.resolve, self.rt, self.ticket_tiers,
                                                stopped_only=streak < 2)
+            # Restart once on the ticket's own tier before moving it up a tier (a
+            # stopped-early session escalates at once: its tier ran out of turns).
+            if (streak >= 2 and picked and not fallback and decision == FIX
+                    and self.fix_policy.restarts and newest is not None
+                    and (again := restart_set(state, self.resolve, picked))):
+                out["fix_passes"][-1] = newest.model_copy(update={"restart_tickets": again})
+                picked, restarting = (), True
             for tid in picked:
                 why = (f"the wave check failed twice in a row ({failed})" if streak >= 2
                        else f"the wave check failed ({failed}) after the local session "
@@ -2697,7 +3035,7 @@ class WaveBuildCheck:
             out.pop("budget", None)
         # Fixing until the cap, a pass that made no progress counts toward the
         # dead-end rules (fix_stop) instead of halting the wave on its own.
-        elif (decision == FIX and not self.fix_policy.until_cap
+        elif (decision == FIX and not self.fix_policy.until_cap and not restarting
               and not self.capped_off_target({**state, "gates": post["gates"]}) and (
                 revisited_tree(state, out) or (not reverted and (
                     no_fix_progress(post, config, boundary=boundary)
@@ -2724,7 +3062,8 @@ class WaveBuildCheck:
 
     def route(self, state: FactoryState, config: RunnableConfig) -> str:
         """:func:`route_after_gates`, except a pending escalation request routes
-        :data:`ESCALATE`, and a fix pass that made no progress
+        :data:`ESCALATE`, a planned ticket restart (:func:`pending_restarts`)
+        routes :data:`RESTART`, and a fix pass that made no progress
         (:func:`no_fix_progress`, or the :data:`NO_FIX_PROGRESS_TRIAGE` ``run``
         recorded on this tree for a fix that changed nothing) halts as a spent bound
         does — unless fixing until the cap, where the dead-end rules decide."""
@@ -2734,6 +3073,8 @@ class WaveBuildCheck:
         decision = self._route(state, config, boundary)
         if decision != ADVANCE and pending_escalations(state, self.resolve):
             return ESCALATE
+        if decision == FIX and pending_restarts(state, self.resolve):
+            return RESTART
         if decision == FIX and not self.fix_policy.until_cap and not self.capped_off_target(
                 state) and (
                 no_fix_progress(state, config, boundary=boundary)

@@ -2624,7 +2624,10 @@ _SQLITE_MEMORY_CONSTRAINT = {
     "text": (
         "Python SQLite: every sqlite3.connect(':memory:') opens a NEW, empty database, "
         "so an in-memory store must open ONE connection and reuse it for its whole "
-        "life (schema, writes and reads), never connect per call."
+        "life (schema, writes and reads), never connect per call. That database then "
+        "outlives each test, and pytest runs every test module in one process: a "
+        "conftest.py autouse fixture must give each test an empty database (drop and "
+        "re-create the schema, or delete every row), or one test's rows break the next."
     ),
     "scope": "global",
     "source": NODE_ID,

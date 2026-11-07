@@ -397,6 +397,8 @@ def test_a_python_sqlite_plan_pins_the_memory_connection_constraint() -> None:
     python = StackDecision(language="python")
     [pc] = _stack_constraints(python, {"design": {"body": "Store notes in SQLite"}})
     assert ":memory:" in pc["text"] and "ONE connection" in pc["text"]
+    # That one database outlives each test: two modules inserting one username collided.
+    assert "autouse fixture must give each test an empty database" in pc["text"]
     assert _stack_constraints(python, {"design": {"body": "Store notes in Postgres"}}) == []
     assert _stack_constraints(StackDecision(language="javascript"), {"x": "sqlite"}) == []
 

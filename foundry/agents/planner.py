@@ -194,12 +194,19 @@ _TICKET_RULES = (
     "FIT (checked; a violation FAILS the Spec gate): every contract a ticket "
     "consumes is implemented by exactly ONE ticket, which the consumer depends_on "
     "(directly or through other tickets). Every implemented contract should have a "
-    "consumer or a scenario on its implementing ticket. Unless a DEMO scope cap says "
-    "otherwise, every feature ticket gets a paired specialty='test' ticket that "
-    "depends_on it and writes the step definitions for "
-    "that feature's scenarios, binding the gate-written features/<feature ticket "
-    "id>.feature (the gate renders one per ticket from its scenarios); the test "
-    "ticket carries no scenarios of its own. Never list a .feature file in files[]: "
+    "consumer or a scenario on its implementing ticket. STEP DEFINITIONS bind the "
+    "gate-written features/<feature ticket id>.feature (the gate renders one per "
+    "ticket from its scenarios). On a Python stack with no bdd command (pytest-bdd), "
+    "the feature ticket that builds the behaviour lists ONE step module "
+    "tests/test_<ticket id>.py in its own files[] and binds its own scenarios there, "
+    "so each wave's check runs them as soon as it lands: never a trailing test-only "
+    "ticket that binds several feature tickets' scenarios (checked and repaired). "
+    "Otherwise, unless a DEMO scope cap says so, every feature ticket gets a paired "
+    "specialty='test' ticket that depends_on it and writes the step definitions for "
+    "that feature's scenarios; the test ticket carries no scenarios of its own. ONE "
+    "step module per feature file: never split one feature's steps across modules "
+    "by layer (test_x_routes.py + test_x_service.py): each module binds and runs "
+    "every scenario of the file again (checked). Never list a .feature file in files[]: "
     "feature files are gate-owned. Every repo file a stack command names (e.g. "
     "smoke.py in `python3 smoke.py`) must be in some ticket's files[]. "
     "Where a scope cap speaks of ownership units, it means the files across your "
@@ -1897,6 +1904,90 @@ def _own_scenario_bindings(
     return out, concerns
 
 
+def _fold_test_bindings(
+    tickets: Sequence[Ticket], stack: StackDecision | None,
+) -> tuple[list[Ticket], list[str]]:
+    """On a pytest-bdd stack, the feature ticket binds its own scenarios. A test ticket
+    binding them instead lands after it (often after several), so the per-wave check
+    cannot run that code's scenarios until the last one lands and bugs pile up. Strip
+    other tickets' scenarios off each test ticket (:func:`_own_scenario_bindings` then
+    gives each feature ticket a step module) and drop a test ticket left with only
+    step modules to write. A test ticket keeps its own scenarios (a criterion no code
+    ticket owns) and those of a file-less acceptance-only ticket, which has nowhere
+    to bind them."""
+    if stack is not None and (stack.language != "python" or stack.bdd):
+        return list(tickets), []
+    owner = {c: t.id for t in tickets
+             if t.specialty is not Specialty.TEST and t.files for c in t.scenario_ids}
+    by_id = {t.id: t for t in tickets}
+    out: list[Ticket] = []
+    dropped: dict[str, tuple[str, ...]] = {}
+    concerns: list[str] = []
+    for t in tickets:
+        moved = [c for c in t.scenario_ids if c in owner]
+        if t.specialty is not Specialty.TEST or t.id in _GENERATED_TICKETS or not moved:
+            out.append(t)
+            continue
+        kept = tuple(c for c in t.scenario_ids if c not in owner)
+        files = t.files if kept else tuple(f for f in t.files if not _is_python_test(f))
+        homes = _uniq(owner[c] for c in moved)
+        note = (f"Test ticket {t.id}: moved the binding of scenario(s) {', '.join(moved)} "
+                f"to the ticket(s) that build them ({', '.join(homes)}), so each wave's "
+                "check runs them")
+        if not files and not t.implements:
+            dropped[t.id] = t.depends_on
+            concerns.append(note + "; dropped the ticket, which had nothing else to write.")
+            continue
+        out.append(t.model_copy(update={"scenario_ids": kept, "files": files}))
+        # Inheriting its dependencies' scenarios is _build_tickets' bookkeeping: say
+        # nothing when the plan already bound them on the feature tickets.
+        bound = all(any(_is_python_test(f) for f in by_id[h].files) for h in homes)
+        if files != t.files or not bound:
+            concerns.append(note + ".")
+    if not dropped:
+        return out, concerns
+
+    def resolve(dep: str) -> tuple[str, ...]:
+        return tuple(d for up in dropped[dep] for d in resolve(up)) if dep in dropped else (dep,)
+
+    return [
+        t.model_copy(update={"depends_on": _uniq(
+            d for dep in t.depends_on for d in resolve(dep) if d != t.id)})
+        if set(t.depends_on) & set(dropped) else t
+        for t in out
+    ], concerns
+
+
+def _one_step_module_per_feature(
+    tickets: Sequence[Ticket], criteria: Sequence[AcceptanceCriterion],
+    stack: StackDecision | None,
+) -> tuple[list[Ticket], list[str]]:
+    """On a pytest-bdd stack, keep at most one step module per feature file a ticket
+    binds. Its packet tells every test module it lists to bind every feature file it
+    carries, so four modules split by layer (test_cart_routes.py,
+    test_cart_service.py, ...) for three feature files each bound and ran every
+    scenario: the same 29k-char module written four times, each scenario run 4x."""
+    if stack is not None and (stack.language != "python" or stack.bdd):
+        return list(tickets), []
+    owner = {c.id: c.ticket_id for c in criteria}
+    out: list[Ticket] = []
+    concerns: list[str] = []
+    for t in tickets:
+        modules = [f for f in t.files if _is_python_test(f)]
+        features = len(_uniq(owner.get(c) or t.id for c in t.scenario_ids))
+        if not t.scenario_ids or len(modules) <= features:
+            out.append(t)
+            continue
+        extra = modules[features:]
+        out.append(t.model_copy(update={"files": tuple(f for f in t.files if f not in extra)}))
+        concerns.append(
+            f"Ticket {t.id}: dropped step module(s) {', '.join(extra)}: it binds "
+            f"{features} feature file(s), and every extra module would bind and run "
+            "each scenario again."
+        )
+    return out, concerns
+
+
 def _own_package_inits(
     tickets: Sequence[Ticket], stack: StackDecision, existing: frozenset[str] = frozenset(),
 ) -> tuple[list[Ticket], list[str]]:
@@ -2546,7 +2637,10 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
         tickets, frame.stack, frozenset(base.files) if base is not None else frozenset()
     )
     concerns += more
-    tickets, more = _own_scenario_bindings(tickets, frame.stack)
+    for bind in (_fold_test_bindings, _own_scenario_bindings):
+        tickets, more = bind(tickets, frame.stack)
+        concerns += more
+    tickets, more = _one_step_module_per_feature(tickets, criteria, frame.stack)
     concerns += more
     tickets, more = _add_read_deps(tickets)
     concerns += more
@@ -2649,6 +2743,22 @@ _SQLALCHEMY_TYPED_CONSTRAINT = {
 }
 
 
+_SQLALCHEMY_RELATIONSHIP_CONSTRAINT = {
+    "id": "PC-python-sqlalchemy-relationships",
+    "text": (
+        "Python SQLAlchemy relationships: write `back_populates=` or `backref=` only "
+        "when BOTH mapped classes are in this ticket's files, or the other class "
+        "already exists (written by a ticket this one depends on) in a file this "
+        "ticket also lists in its files and so can add the matching side. Otherwise "
+        "declare a one-sided `relationship()` with neither: SQLAlchemy configures "
+        "every mapper together on first use, so a back_populates naming an attribute "
+        "the other class lacks fails every model, every query and every test."
+    ),
+    "scope": "global",
+    "source": NODE_ID,
+}
+
+
 def _stack_constraints(
     stack: StackDecision | None, payload: dict[str, Any]
 ) -> list[dict[str, Any]]:
@@ -2657,7 +2767,9 @@ def _stack_constraints(
         return []
     text = str(payload).lower()
     return [c for c, word in ((_SQLITE_MEMORY_CONSTRAINT, "sqlite"),
-                              (_SQLALCHEMY_TYPED_CONSTRAINT, "sqlalchemy")) if word in text]
+                              (_SQLALCHEMY_TYPED_CONSTRAINT, "sqlalchemy"),
+                              (_SQLALCHEMY_RELATIONSHIP_CONSTRAINT, "sqlalchemy"))
+            if word in text]
 
 
 def ticket_owner(ticket: Ticket) -> str:

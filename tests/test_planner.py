@@ -125,7 +125,7 @@ PLAN: dict[str, Any] = {
             "specialty": "data",
             "difficulty": "standard",
             "depends_on": [],
-            "files": ["todo/__init__.py", "todo/store.py"],
+            "files": ["todo/__init__.py", "todo/store.py", "tests/test_store.py"],
             "implements": ["TodoStore.add", "TodoStore.list"],
             "consumes": [],
             "scenarios": [
@@ -147,7 +147,7 @@ PLAN: dict[str, Any] = {
             "specialty": "backend",
             "difficulty": "complex",
             "depends_on": ["T-001"],
-            "files": ["todo/api.py"],
+            "files": ["todo/api.py", "tests/test_api.py"],
             "implements": [],
             "consumes": ["TodoStore.add"],
             "entrypoint": True,
@@ -173,11 +173,11 @@ PLAN: dict[str, Any] = {
         },
         {
             "id": "T-003",
-            "title": "Step definitions for the todo features",
+            "title": "Shared test fixtures",
             "specialty": "test",
             "difficulty": "trivial",
             "depends_on": ["T-001", "T-002"],
-            "files": ["tests/step_defs/test_todo.py"],
+            "files": ["tests/conftest.py"],
             "implements": [],
             "consumes": [],
             "scenarios": [],
@@ -300,13 +300,16 @@ def test_bodies_resolve_back_and_ownership_carries_unit_criteria() -> None:
         "todo/__init__.py": "data-T-001",
         "todo/store.py": "data-T-001",
         "todo/api.py": "backend-T-002",
-        "tests/step_defs/test_todo.py": "test-T-003",
+        "tests/test_store.py": "data-T-001",
+        "tests/test_api.py": "backend-T-002",
+        "tests/conftest.py": "test-T-003",
     }
     assert ownership.unit_criteria == {
         "todo/__init__.py": ("AC-003",),
         "todo/store.py": ("AC-003",),
+        "tests/test_store.py": ("AC-003",),
         "todo/api.py": ("AC-001", "AC-002"),
-        "tests/step_defs/test_todo.py": ("AC-003", "AC-001", "AC-002"),
+        "tests/test_api.py": ("AC-001", "AC-002"),
     }
     # The current scheduler's lanes still follow the specialty; test files -> backend.
     lanes = {o: lane_of_area(ownership.area_of(o)) for o in ownership.leads()}
@@ -646,7 +649,8 @@ def test_emitted_tickets_and_criteria_resolve_with_their_fields() -> None:
         Specialty.BACKEND, Difficulty.COMPLEX, ("T-001",)
     )
     assert t2.consumes == ("TodoStore.add",) and t2.scenario_ids == ("AC-001", "AC-002")
-    assert tickets["T-003"].scenario_ids == ("AC-003", "AC-001", "AC-002")
+    # Each feature ticket binds its own scenarios; the fixtures ticket binds none.
+    assert tickets["T-003"].scenario_ids == ()
     criteria = {
         c.id: c
         for c in (cas.resolve(a) for a in writes["artifacts"] if a.kind == "acceptance_criterion")

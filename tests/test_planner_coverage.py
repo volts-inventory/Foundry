@@ -17,7 +17,9 @@ from foundry.agents.planner import (
     MAX_TICKETS,
     SOP,
     _coverage_findings,
+    _fold_test_bindings,
     _offline_scenario_findings,
+    _one_step_module_per_feature,
     _own_scenario_bindings,
     _python_deps_rule,
     _stack_constraints,
@@ -364,6 +366,88 @@ def test_a_test_ticket_with_scenarios_but_no_test_module_gets_one() -> None:
     assert len(concerns) == 1
 
 
+def _t(tid: str, specialty: Specialty, scenarios: tuple[str, ...] = (),
+       files: tuple[str, ...] = ("app.py",), deps: tuple[str, ...] = ()) -> Ticket:
+    return Ticket(id=tid, title=tid, specialty=specialty, scenario_ids=scenarios,
+                  files=files, depends_on=deps, seq=_SEQ)
+
+
+def test_a_trailing_test_ticket_hands_each_feature_ticket_its_own_binding() -> None:
+    # The local shop bench: E2-T04 bound all 30 scenarios of E2-T01..T03 from four
+    # layer-named modules, so no wave check ran their code until the last wave.
+    tickets = [
+        _t("E2-T01", Specialty.BACKEND, ("A1",), ("app/models/product.py",)),
+        _t("E2-T02", Specialty.BACKEND, ("A2",), ("app/models/cart.py",), ("E2-T01",)),
+        _t("E2-T03", Specialty.FRONTEND, ("A3",), ("app/routes/cart.py",), ("E2-T02",)),
+        _t("E2-T04", Specialty.TEST, ("A1", "A2", "A3"),
+           ("tests/test_cart_routes.py", "tests/test_cart_service.py"),
+           ("E2-T01", "E2-T02", "E2-T03")),
+        _t("E2-T05", Specialty.BACKEND, ("A5",), ("app/main.py",), ("E2-T04", "E2-T03")),
+    ]
+    python = StackDecision(language="python", test="pytest")
+    folded, concerns = _fold_test_bindings(tickets, python)
+    by_id = {t.id: t for t in folded}
+    assert "E2-T04" not in by_id
+    assert by_id["E2-T05"].depends_on == ("E2-T01", "E2-T02", "E2-T03")
+    assert len(concerns) == 1 and "dropped the ticket" in concerns[0]
+    bound, _ = _own_scenario_bindings(folded, python)
+    files = {t.id: t.files for t in bound}
+    assert files["E2-T01"] == ("app/models/product.py", "tests/test_e2_t01.py")
+    assert files["E2-T03"] == ("app/routes/cart.py", "tests/test_e2_t03.py")
+    # A Cucumber stack keeps its paired test tickets.
+    cucumber = python.model_copy(update={"bdd": "behave"})
+    assert _fold_test_bindings(tickets, cucumber) == (tickets, [])
+
+
+def test_a_test_ticket_keeps_scenarios_no_code_ticket_can_bind() -> None:
+    tickets = [
+        _t("T1", Specialty.BACKEND, ("A1",)),
+        _t("T2", Specialty.BACKEND, ("A2",), ()),  # acceptance-only: nowhere to bind
+        # Its own A9 (a criterion no code ticket owns) plus T1's and T2's.
+        _t("T3", Specialty.TEST, ("A9", "A1", "A2"), ("tests/test_t3.py",), ("T1", "T2")),
+        # Fixtures only once the binding moves: kept, without its step module.
+        _t("T4", Specialty.TEST, ("A1",), ("tests/conftest.py", "tests/test_t4.py"), ("T1",)),
+    ]
+    out, concerns = _fold_test_bindings(tickets, StackDecision(language="python"))
+    by_id = {t.id: t for t in out}
+    assert by_id["T3"].scenario_ids == ("A9", "A2")
+    assert by_id["T3"].files == ("tests/test_t3.py",)
+    assert by_id["T4"].scenario_ids == () and by_id["T4"].files == ("tests/conftest.py",)
+    assert len(concerns) == 2
+
+
+def test_a_ticket_keeps_one_step_module_per_feature_file_it_binds() -> None:
+    def c(cid: str, owner: str) -> AcceptanceCriterion:
+        return AcceptanceCriterion(id=cid, text="t", given=("g",), when=("w",),
+                                   then=("t",), ticket_id=owner, seq=_SEQ)
+
+    tickets = [
+        _t("F1", Specialty.BACKEND, ("A1", "A2"),
+           ("app/cart.py", "tests/test_cart_routes.py", "tests/test_cart_service.py")),
+        _t("F2", Specialty.BACKEND, ("A3",), (), ()),
+        _t("T3", Specialty.TEST, ("A9", "A3"),
+           ("tests/a/test_x.py", "tests/conftest.py", "tests/test_y.py", "tests/test_z.py")),
+        _t("F4", Specialty.BACKEND, (), ("app/x.py", "tests/test_u1.py", "tests/test_u2.py")),
+    ]
+    criteria = [c("A1", "F1"), c("A2", "F1"), c("A3", "F2"), c("A9", "T3")]
+    python = StackDecision(language="python")
+    out, concerns = _one_step_module_per_feature(tickets, criteria, python)
+    files = {t.id: t.files for t in out}
+    assert files["F1"] == ("app/cart.py", "tests/test_cart_routes.py")
+    # T3 binds two feature files (its own and F2's): two step modules stay.
+    assert files["T3"] == ("tests/a/test_x.py", "tests/conftest.py", "tests/test_y.py")
+    # No scenarios: its test modules are plain unit tests, not step modules.
+    assert files["F4"] == tickets[3].files
+    assert len(concerns) == 2 and "test_cart_service.py" in concerns[0]
+    js = StackDecision(language="javascript", bdd="npx cucumber-js")
+    assert _one_step_module_per_feature(tickets, criteria, js) == (tickets, [])
+
+
+def test_the_ticket_rules_put_step_modules_with_the_feature_ticket() -> None:
+    assert "lists ONE step module tests/test_<ticket id>.py in its own files[]" in SOP
+    assert "ONE step module per feature file" in SOP
+
+
 def test_a_scenario_asserting_dependency_install_is_a_finding() -> None:
     # The gates run offline: "installing dependencies succeeds" can never pass.
     def c(cid: str, then: str) -> AcceptanceCriterion:
@@ -407,10 +491,23 @@ def test_a_python_sqlalchemy_plan_pins_the_typed_model_constraint() -> None:
     # Column(Integer) attributes typed as Column[int] failed 12 mypy checks in a run.
     python = StackDecision(language="python")
     pcs = _stack_constraints(python, {"design": {"body": "SQLAlchemy models over SQLite"}})
-    assert [pc["id"] for pc in pcs] == ["PC-python-sqlite-memory", "PC-python-sqlalchemy-typed"]
+    assert [pc["id"] for pc in pcs] == [
+        "PC-python-sqlite-memory", "PC-python-sqlalchemy-typed",
+        "PC-python-sqlalchemy-relationships",
+    ]
     assert "Mapped[int] = mapped_column(" in pcs[1]["text"]
-    assert _stack_constraints(python, {"design": {"body": "SQLAlchemy on Postgres"}}) == [pcs[1]]
+    assert _stack_constraints(python, {"design": {"body": "SQLAlchemy on Postgres"}}) == pcs[1:]
     assert _stack_constraints(StackDecision(language="go"), {"x": "sqlalchemy"}) == []
+
+
+def test_a_python_sqlalchemy_plan_pins_one_sided_relationships_across_tickets() -> None:
+    # cart.py wrote relationship("User", back_populates="cart_items") but user.py was
+    # another ticket's: no User.cart_items, so no mapper configured and every test failed.
+    pcs = _stack_constraints(StackDecision(language="python"), {"x": "sqlalchemy"})
+    [rel] = [pc for pc in pcs if pc["id"] == "PC-python-sqlalchemy-relationships"]
+    assert "`back_populates=` or `backref=` only" in rel["text"]
+    assert "BOTH mapped classes are in this ticket's files" in rel["text"]
+    assert "one-sided `relationship()`" in rel["text"]
 
 
 def test_manifest_and_app_install_scenarios_are_not_offline_findings() -> None:

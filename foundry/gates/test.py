@@ -513,29 +513,44 @@ def _host_source_root() -> str | None:
     return str(root) if (root / "pyproject.toml").is_file() else None
 
 
-def failure_findings(stdout: str, *, limit: int = 50) -> tuple[str, ...]:
+# pytest's own summary section: the only place its FAILED/ERROR lines are its own.
+_SUMMARY_HEADER = re.compile(r"^=+ short test summary info =+$")
+# Lines the fix loop reads as structured (failing ids, BDD outcomes): any copy of
+# one outside pytest's summary is test output and is quoted so it never parses.
+_ID_SHAPED = re.compile(r"^(?:FAILED|ERROR|BDD criterion)\b")
+
+
+def failure_findings(stdout: str, *, limit: int = 50, summary_ids: bool = True) -> tuple[str, ...]:
     """Human-readable failure lines from pytest output — the failing tests + the
     assertion (expected vs got) — so the fix loop can target the SPECIFIC failure
     instead of re-rolling blind. Bounded; lines are truncated. (Zone A: pure parse.)
 
     The ``FAILED``/``ERROR`` summary lines come last but name every failing test, so
-    they keep their room under ``limit``; the detail lines fill what is left."""
+    they keep their room under ``limit``; the detail lines fill what is left. Only
+    the lines of pytest's LAST short-summary section count as summary lines (a test
+    can print a header of its own, never after pytest's): an id-shaped line anywhere
+    else — a test's captured output — is quoted (``| ``), so a test cannot choose
+    which ids the fix loop sees failing, nor which ticket it blames. Without
+    ``summary_ids`` (another runner's output) every id-shaped line is quoted."""
+    lines = stdout.splitlines()
+    start = max((i for i, raw in enumerate(lines) if _SUMMARY_HEADER.match(raw.strip())),
+                default=None) if summary_ids else None
     keep: list[str] = []
     summary: list[str] = []
-    for raw in stdout.splitlines():
+    for i, raw in enumerate(lines):
         s = raw.rstrip()
         st = s.strip()
         if not st:
             continue
-        if st.startswith(("FAILED ", "ERROR ")):
+        if start is not None and i > start and st.startswith(("FAILED ", "ERROR ")):
             summary.append(s[:300])
         elif (
-            st.startswith(("E ", "E\t", ">", "FAILED", "ERROR", "_____"))
+            st.startswith(("E ", "E\t", ">", "FAILED", "ERROR", "_____", "BDD criterion"))
             or "assert" in st
             or "Error" in st
             or st.startswith("def test")
         ):
-            keep.append(s[:300])
+            keep.append(f"| {s}"[:300] if _ID_SHAPED.match(st) else s[:300])
     summary = summary[:limit]
     return (*keep[: limit - len(summary)], *summary)
 
@@ -1156,7 +1171,8 @@ class TestGate:
             structured[BDD_KEY] = scenarios
             structured[BDD_EXIT_KEY] = bdd_rc
             structured["bdd_cmd"] = self.bdd_cmd
-            bdd_failures = failure_findings(bdd_out, limit=20) if bdd_rc != 0 else ()
+            bdd_failures = (failure_findings(bdd_out, limit=20, summary_ids=False)
+                            if bdd_rc != 0 else ())
             rejected = any(n.startswith("BDD report rejected") for n in notes)
             if bdd_rc != 0 and not bdd_failures and not rejected:
                 # Not pytest-shaped output: the runner's own last words are the why

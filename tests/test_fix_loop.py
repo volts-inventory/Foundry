@@ -1211,3 +1211,177 @@ def test_a_build_fix_that_newly_fails_a_test_is_improved_and_targets_it() -> Non
     assert entry.outcome == "improved" and entry.snapshot_uri is not None  # kept as best
     # The newly failing test goes first, before the bigger cluster.
     assert entry.target == "ticket:T-002"
+
+
+# ---- review fixes: restart scope, superset blind spot, gate-output trust --------
+
+
+def _restart_ledger_state(store: ArtifactStore) -> FactoryState:
+    """T-001 owns ``lib/`` and requirements.txt; after it, T-002 (a later wave)
+    added lib/b.py and a requirement, fix-1 (another cluster) lib/c.py, fix-2 (the
+    restarted cluster's) rewrote lib/a.py and added lib/d.py."""
+    tickets = [_ticket("T-001", 0, files=("lib/", "requirements.txt")),
+               _ticket("T-002", 1, files=("lib/b.py", "requirements.txt"), deps=("T-001",)),
+               _ticket("T-003", 2, files=("tests/test_x.py",))]
+    state = _ticket_state(store, tickets, artifacts=[
+        _diff_art(store, "T-001", 1, {"lib/a.py": "a\n", "requirements.txt": "a\n"}),
+        _diff_art(store, "T-002", 2, {"lib/b.py": "b\n", "requirements.txt": "a\nb\n"}),
+        _diff_art(store, "T-003", 3, {"tests/test_x.py": "x\n"}),
+        _diff_art(store, "fix-1", 4, {"lib/c.py": "c\n"}),
+        _diff_art(store, "fix-2", 5, {"lib/a.py": "a2\n", "lib/d.py": "d\n"})])
+    window = fix_window(state, BUILD_BOUNDARY, frozenset())
+
+    def entry(n: int, **kw: Any) -> FixPass:
+        return FixPass(window=window, boundary=BUILD_BOUNDARY, pass_no=n, tree=f"t{n}",
+                       score=(0, 1, 1), outcome="lateral" if n else "initial",
+                       seq=Seq("run", 10 + n, 0, "fix_pass", 0), **kw)
+
+    return {**state, "fix_passes": [
+        entry(0, target="other"),
+        entry(1, fix_task="fix-1", cluster="other", target="ticket:T-001"),
+        entry(2, fix_task="fix-2", cluster="ticket:T-001", target="ticket:T-001",
+              restart_tickets=("T-001",))]}
+
+
+def test_a_restart_resets_only_what_its_ticket_and_its_cluster_wrote() -> None:
+    from foundry.agents.implementation.tickets import read_tickets
+    from foundry.graph.gate_wiring import ticket_reset
+
+    store = ArtifactStore()
+    state = _restart_ledger_state(store)
+    [t1] = [t for t in read_tickets(state, store.resolve) if t.id == "T-001"]
+    writes, deleted = ticket_reset(state, [t1], resolve=store.resolve,
+                                   resolve_blob=store.resolve_blob)
+    # Its own file and its cluster's repair go; another ticket's file in its
+    # directory, another cluster's fix and the shared manifest stay.
+    assert writes == {}
+    assert deleted == ("lib/a.py", "lib/d.py")
+
+
+def test_a_restart_needs_a_scope_no_other_built_ticket_shares_and_code_to_rebuild() -> None:
+    from foundry.graph.gate_wiring import restart_set
+
+    store = ArtifactStore()
+    state = _restart_ledger_state(store)
+    assert restart_set(state, store.resolve, ["T-001"]) == ()  # T-002 shares lib/
+    # A ticket of tests only is rebuilt only for a failure in the test module itself.
+    assert restart_set(state, store.resolve, ["T-003"]) == ()
+    assert restart_set(state, store.resolve, ["T-003"], tests_ok=True) == ("T-003",)
+
+
+def test_a_gate_that_stops_naming_its_failing_tests_regressed() -> None:
+    from foundry.graph.gate_wiring import _outcome, regressions
+
+    best = _entry("w", 0, "t0", (-1, 1, 3), 1).model_copy(
+        update={"failing": (_T + "test_a", _T + "test_b", _T + "test_c")})
+    # The tests no longer collect: one raw line, a "smaller" signature, hides all.
+    raw = ("test:ImportError while loading conftest 'tests/conftest.py'.",)
+    assert regressions(best.failing, raw) == raw
+    assert _outcome([best], "t1", (-1, 1, 1), best, raw) == "worse"
+    # A module that fails to collect is a new failure; the same one is not.
+    collect = ("test:tests/test_b.py",)
+    assert regressions(best.failing, collect) == collect
+    assert regressions(collect, collect) == ()
+    # Raw lines on both trees still compare gate by gate.
+    assert regressions(("build:x.py:1: error",), ("build:x.py:2: error",)) == ()
+
+
+def test_failing_ids_come_only_from_pytests_own_summary() -> None:
+    out = "\n".join([
+        "____ test_add ____",
+        "FAILED tests/test_other.py::test_z - planted in captured stdout",
+        "BDD criterion AC-9: scenario features/x.feature::AC-9 Error planted",
+        "=== short test summary info ===",  # a test printing a header of its own
+        "FAILED tests/test_fake.py::test_f - planted",
+        "E   assert 1 == 2",
+        "=========================== short test summary info ===========================",
+        "FAILED tests/test_app.py::test_add - assert 1 == 2",
+        "ERROR tests/test_y.py - ImportError: no module named y",
+        "==== 1 failed, 1 error in 0.1s ====",
+    ])
+    findings = failure_findings(out)
+    assert failing_ids(findings) == ("tests/test_app.py::test_add", "tests/test_y.py")
+    assert "| FAILED tests/test_other.py::test_z - planted in captured stdout" in findings
+    # Without pytest's summary (another runner's output) nothing is an id.
+    assert failing_ids(failure_findings(out, summary_ids=False)) == ()
+    assert failing_ids(failure_findings("FAILED tests/a.py::t - x\n")) == ()
+
+
+def test_a_module_that_fails_to_collect_is_its_own_cluster_and_goes_first() -> None:
+    from foundry.agents.implementation.junior_engineer import scope_gates
+    from foundry.graph.gate_wiring import failure_clusters
+
+    collect = "ERROR tests/test_b.py - ImportError: cannot import name 'x'"
+    gate = _gate("test", "t", 2, _RED, "____ test_alpha ____", "E   assert 0",
+                 "_____ ERROR collecting tests/test_b.py _____", "E   ImportError: x",
+                 "=== short test summary info ===", _A1, _C9, collect)
+    clusters = failure_clusters([gate], _CLUSTER_TICKETS, {"T-001", "T-002"})
+    assert (clusters[0].key, clusters[0].items, clusters[0].in_tests) == (
+        "ticket:T-002", ("test:tests/test_b.py",), True)
+    assert not clusters[1].in_tests
+    [scoped] = scope_gates([gate], clusters[0])
+    assert collect in scoped.findings and "E   ImportError: x" in scoped.findings
+    assert "E   assert 0" not in scoped.findings and _A1 not in scoped.findings
+    assert "=== short test summary info ===" in scoped.findings
+
+
+def test_a_restart_standing_in_for_an_escalation_is_credited_to_its_cluster() -> None:
+    from foundry.graph.gate_wiring import restart_cluster
+
+    store = ArtifactStore()
+    state = _ticket_state(store, _CLUSTER_TICKETS, artifacts=[
+        _diff_art(store, "T-001", 1, {"a.py": "x\n"}),
+        _diff_art(store, "T-002", 2, {"tests/test_b.py": "y\n"})])
+    gates = [_gate("build", "t", 1, _OK), _gate("test", "t", 2, _RED, _B1, _B2, _A1)]
+    assert restart_cluster(state, store.resolve, gates, BUILD_TEST_BOUNDARY,
+                           ("T-001",)) == "ticket:T-001"
+    assert restart_cluster(state, store.resolve, gates, BUILD_TEST_BOUNDARY,
+                           ("T-009",)) == "ticket:T-009"
+
+
+class _ScriptedRestart(_Recorder):
+    """A ``_Recorder`` whose n-th session on a ticket writes ``script[tid][n]`` (None:
+    none of the ticket's files, an empty session)."""
+
+    def __init__(self, *, script: dict[str, list[dict[str, str] | None]], **kw: Any) -> None:
+        super().__init__(**kw)
+        self.script = script
+
+    def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
+        tid = str(packet.task["id"])
+        steps = self.script.get(tid, [])
+        n = self.calls.count(tid)
+        if n < len(steps):
+            step = steps[n]
+            self.writes[tid] = step or {}
+            self.silent = self.silent | {tid} if step is None else self.silent - {tid}
+        return super().run(packet, sandbox)
+
+
+def test_a_restart_whose_first_session_fails_retries_once_in_the_same_pass(
+    tmp_path: Path,
+) -> None:
+    rec = _ScriptedRestart(
+        writes={"fix-1": {"a.py": "def a_1(:\n"}},
+        script={"T-001": [{"a.py": "def a(:\n"}, None, {"a.py": "def a():\n    return 1\n"}]})
+    out, ran, _ = _wave_run(tmp_path, rec, tickets=_RESTART_TICKETS)
+    assert rec.calls == ["T-001", "fix-1", "T-001", "T-001", "T-002"]
+    assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "engineering",
+                   "wave_gate", "engineering"]
+    retry = rec.history[3].prior_failures
+    assert retry[0] == "[fresh restart]"
+    assert retry[-1].startswith("the restart's first attempt failed (fix this first)")
+    passes = sorted(out["fix_passes"], key=lambda p: p.seq)
+    assert (passes[2].outcome, passes[2].fix_task) == ("improved", "restart-T-001")
+
+
+def test_a_restart_that_never_lands_does_not_halt_the_loop_as_no_progress(
+    tmp_path: Path,
+) -> None:
+    rec = _ScriptedRestart(
+        writes={"fix-1": {"a.py": "def a_1(:\n"}, "fix-2": {"a.py": "def a():\n    pass\n"}},
+        script={"T-001": [{"a.py": "def a(:\n"}, None, None]})
+    out, _ran, _ = _wave_run(tmp_path, rec, max_fix_attempts=6, tickets=_RESTART_TICKETS)
+    assert rec.calls[:5] == ["T-001", "fix-1", "T-001", "T-001", "fix-2"]
+    assert not any(a.task_id == "restart-T-001" for a in out["artifacts"])
+    assert not any(t.name == NO_FIX_PROGRESS_TRIAGE for t in out.get("gate_triage") or ())

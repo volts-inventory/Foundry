@@ -90,6 +90,21 @@ def test_a_scoped_gate_judges_only_its_scenarios(tmp_path: Path) -> None:
     assert gate.decide(obs) is GateStatus.PASS
 
 
+def test_a_scoped_gate_runs_a_step_module_under_the_features_dir(tmp_path: Path) -> None:
+    # A cloud plan put the steps in features/step_definitions/: the scoped run skipped
+    # them and reported every scenario "not executed" though plain pytest passed them.
+    root = _project(tmp_path, None)
+    steps = root / "features" / "step_definitions" / "test_t1_steps.py"
+    steps.parent.mkdir()
+    steps.write_text(_STEPS.replace("{expected}", "n").replace(
+        "../features/T1.feature", "../T1.feature"))
+    gate = TestGate(scope=frozenset({"features/T1.feature::AC-1"}))
+    obs = gate.execute(root)
+    assert "features/step_definitions/test_t1_steps.py" in obs.structured["cmd"]
+    assert obs.structured[BDD_KEY] == {"features/T1.feature::AC-1": "passed"}, obs.stdout
+    assert gate.decide(obs) is GateStatus.PASS
+
+
 def test_a_scoped_gate_fails_an_unbound_scenario_without_running_anything(
     tmp_path: Path,
 ) -> None:

@@ -360,14 +360,15 @@ def bdd_findings(
 
 
 def binding_modules(workdir: Path, features: set[str]) -> tuple[str, ...]:
-    """The ``.py`` files under ``workdir`` (outside ``features/``) whose text names
-    one of ``features`` by file name — the step modules that bind them."""
+    """The ``.py`` files under ``workdir`` whose text names one of ``features`` by
+    file name — the step modules that bind them. ``features/step_definitions/`` is a
+    common pytest-bdd layout: skipping ``features/`` left such a binding unrun."""
     names = {PurePosixPath(f).name for f in features}
     root = Path(workdir)
     out: list[str] = []
     for path in sorted(root.rglob("*.py")):
         rel = path.relative_to(root).as_posix()
-        if rel.startswith((f"{FEATURE_DIR}/", ".")) or "/." in rel:
+        if rel.startswith(".") or "/." in rel:
             continue
         try:
             text = path.read_text(encoding="utf-8")

@@ -61,7 +61,7 @@ from foundry.agents.implementation.junior_engineer import (
 from foundry.agents.implementation.personas import persona_for
 from foundry.agents.implementation.senior_engineer import NODE_ID as SENIOR_NODE_ID
 from foundry.agents.implementation.stubs import (
-    IMPL_SUFFIX,
+    is_stub,
     python_skeleton,
     signature_changes,
     stub_signatures,
@@ -824,8 +824,8 @@ def stub_rules(
         rules.append(
             f"TYPED STUBS: {', '.join(own)} already exist as typed stubs generated from "
             "the planned contracts: each planned function and method with its exact "
-            "signature and a `raise NotImplementedError` body (a contract class X is "
-            f"implemented by X{IMPL_SUFFIX}, a subclass of the contract type). Fill in "
+            "signature and a `raise NotImplementedError` body (a contract class is "
+            "implemented by the concrete subclass of it the stub declares). Fill in "
             "every body and add whatever private helpers you need; never rename or "
             "remove a stubbed class, function or method, and never change its "
             "parameters or return annotation (checked: a changed public signature "
@@ -837,7 +837,7 @@ def stub_rules(
             continue
         for name, sig in (stub_signatures(text) or {}).items():
             base = sig.removeprefix("class ").strip()
-            if sig.startswith("class ") and name == f"{base}{IMPL_SUFFIX}":
+            if sig.startswith("class ") and base.isidentifier():
                 impls[base] = f"{name} in {path}"
     wanted = {n for c in ticket.consumes
               for n in (c, c.rpartition(".")[0],
@@ -909,9 +909,10 @@ def _require_scope_written(
     """Fail a ticket whose diff touches none of its ``files`` while none of them
     exists yet: recording that empty diff as built would unblock its dependents on
     a tree without the work (a session that ran out of turns before writing). It
-    becomes an ordinary failed attempt — retried, then skipped. A file still
-    exactly as the typed skeleton wrote it counts as unwritten. An unrestricted
-    scope or an unparseable body is left to integration."""
+    becomes an ordinary failed attempt — retried, then skipped. A typed-skeleton
+    file whose every body is still a stub counts as unwritten; an empty package
+    marker the skeleton wrote is not the ticket's work and is not counted. An
+    unrestricted scope or an unparseable body is left to integration."""
     from foundry.graph.gate_wiring import MaterializationError, _diff_ops
 
     if not files:
@@ -928,17 +929,20 @@ def _require_scope_written(
         return
     worktree = Path(sandbox.worktree)
     skeleton = skeleton or {}
+    counted = [f for f in files if skeleton.get(f) != ""]
+    if not counted:
+        return
 
     def written(f: str) -> bool:
         path = worktree / f.rstrip("/")
         if f not in skeleton or not path.is_file():
             return path.exists()
         try:
-            return path.read_text(encoding="utf-8") != skeleton[f]
+            return not is_stub(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError):
             return True
 
-    if any(written(f) for f in files):
+    if any(written(f) for f in counted):
         return
     report = "; ".join(t.explanation for t in result.triage)
     raise EmptyTicketError(
@@ -1735,7 +1739,10 @@ def make_engineering_node(
                 names[tid] = (required, len(failures.get(tid, ())) + 1 < MAX_TICKET_ATTEMPTS)
         stubs: dict[str, tuple[Mapping[str, str], bool]] = {}
         for t in wave:
-            stubbed = {p: text for p, text in skeleton.items() if p in t.files and text}
+            # Judged against the stub as the ticket finds it (a wave-0 fixer may have
+            # re-signed it to satisfy the type checker), unless that is no longer a stub.
+            stubbed = {p: cur if isinstance(cur := overlay.get(p), str) and is_stub(cur)
+                       else text for p, text in skeleton.items() if p in t.files and text}
             if stubbed:
                 tid = task_id_for_ticket(t.id)
                 stubs[tid] = (stubbed, len(failures.get(tid, ())) + 1 < MAX_TICKET_ATTEMPTS)

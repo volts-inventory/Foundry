@@ -7,10 +7,13 @@ with its exact planned signature and a ``raise NotImplementedError`` body — so
 wave-0 check type-checks the whole interface before any implementation exists, and
 an implementation ticket fills in bodies rather than inventing signatures.
 
-A class contract (``TodoStore``, or method contracts ``TodoStore.add``) is the
-contracts file's own declaration; its implementation is a concrete subclass named
-``<Class>Impl``, so the type checker holds every override to the contract and the
-contract type is never redeclared. Only signatures that parse as fully annotated
+An interface-like class contract (``TodoStore``, or method contracts
+``TodoStore.add``) is the contracts file's own declaration; its implementation is a
+concrete subclass (``ProductService`` for ``ProductServiceInterface``/``IProductService``,
+else ``<Class>Impl``), so the type checker holds every override to the contract and the
+contract type is never redeclared. A data type (an Enum, dataclass, NamedTuple, a
+``@final`` or ``type``-kind class) is defined in full by the contracts file: never
+subclassed. Only signatures that parse as fully annotated
 Python whose every name resolves (the contracts file, the standard prelude,
 builtins) are stubbed; anything else is left to the ticket.
 """
@@ -34,6 +37,7 @@ __all__ = [
     "IMPL_SUFFIX",
     "Skeleton",
     "impl_name",
+    "is_stub",
     "python_skeleton",
     "signature_changes",
     "stub_signatures",
@@ -45,8 +49,75 @@ _FuncDef = ast.FunctionDef | ast.AsyncFunctionDef
 _FUNCS = (ast.FunctionDef, ast.AsyncFunctionDef)
 
 
-def impl_name(cls: str) -> str:
+_IFACE_AFFIX = re.compile(
+    r"^(?:I(?=[A-Z][a-z])|Abstract(?=[A-Z]))|(?<=[a-z0-9])(?:Interface|Protocol|ABC)$")
+
+
+def impl_name(cls: str, taken: Iterable[str] = ()) -> str:
+    """The implementation class of contract ``cls``: its name without an interface
+    prefix/suffix (``IProductService``, ``ProductServiceProtocol`` -> ``ProductService``)
+    when that is free, else ``<cls>Impl``."""
+    natural = _IFACE_AFFIX.sub("", cls)
+    if natural != cls and natural.isidentifier() and natural not in set(taken):
+        return natural
     return f"{cls}{IMPL_SUFFIX}"
+
+
+# Bases and decorators of a class the contracts file defines in full: subclassing an
+# Enum with members is a TypeError, a @final class cannot be subclassed, and moving
+# a data type's method bodies into an unused subclass changes what the type does.
+_DATA_BASES = frozenset({"Enum", "IntEnum", "StrEnum", "Flag", "IntFlag", "ReprEnum",
+                         "NamedTuple", "TypedDict", "BaseModel", "Struct"})
+_DATA_DECORATORS = frozenset({"dataclass", "final", "define", "frozen", "mutable", "attrs",
+                              "s", "dataclass_json"})
+
+
+def _tail(expr: ast.expr) -> str:
+    """The last name of ``a.b.C``, ``C[...]`` or ``C(...)``."""
+    while isinstance(expr, (ast.Call, ast.Subscript)):
+        expr = expr.func if isinstance(expr, ast.Call) else expr.value
+    if isinstance(expr, ast.Attribute):
+        return expr.attr
+    return expr.id if isinstance(expr, ast.Name) else ""
+
+
+def _data_classes(text: str) -> set[str]:
+    """The classes of a contracts module that are data types, not interfaces."""
+    try:
+        nodes = [n for n in ast.parse(text).body if isinstance(n, ast.ClassDef)]
+    except SyntaxError:
+        return set()
+    out: set[str] = set()
+    grew = True
+    while grew:
+        grew = False
+        for n in nodes:
+            if n.name in out:
+                continue
+            if ({_tail(d) for d in n.decorator_list} & _DATA_DECORATORS
+                    or {_tail(b) for b in n.bases} & (_DATA_BASES | out)):
+                out.add(n.name)
+                grew = True
+    return out
+
+
+def is_stub(text: str) -> bool:
+    """``text`` defines at least one function and every function body is still
+    ``raise NotImplementedError`` (a generated stub, perhaps re-signed by a fixer)."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return False
+    fns = [n for n in ast.walk(tree) if isinstance(n, _FUNCS)]
+
+    def raises(fn: _FuncDef) -> bool:
+        body = list(fn.body)
+        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+            body = body[1:]
+        return (len(body) == 1 and isinstance(body[0], ast.Raise) and body[0].exc is not None
+                and _tail(body[0].exc) == "NotImplementedError")
+
+    return bool(fns) and all(raises(f) for f in fns)
 
 
 def _prelude_imports() -> dict[str, str]:
@@ -200,16 +271,16 @@ class _Module:
 
 
 def _members(
-    node: ast.stmt, owner: str, classes: set[str]
+    node: ast.stmt, owner: str, classes: set[str], data: set[str]
 ) -> tuple[str, list[_FuncDef]] | None:
     """(the contract class it implements or "" for a module function, its defs),
     or None when ``node`` is nothing to stub."""
     if isinstance(node, ast.ClassDef):
         defs = [m for m in node.body if isinstance(m, _FUNCS)]
         # A class the contracts file lacks has nothing to subclass; one with no
-        # methods is a declaration the contracts file holds in full.
-        return (node.name, defs) if node.name in classes and defs else None
-    if not isinstance(node, _FUNCS):
+        # methods, or a data type, is a declaration the contracts file holds in full.
+        return (node.name, defs) if node.name in classes - data and defs else None
+    if not isinstance(node, _FUNCS) or owner in data:
         return None
     receiver = bool(node.args.args) and node.args.args[0].arg in ("self", "cls")
     if owner in classes:
@@ -230,15 +301,25 @@ def python_skeleton(
     present = set(exists)
     declared: dict[str, str] = {}  # name -> its contracts module
     contract_classes: set[str] = set()
+    data: set[str] = set()
     for path, text in contract_texts.items():
         if path.endswith(".py"):
             names, classes = _top_names(text)
             for n in names:
                 declared.setdefault(n, _module_of(path))
             contract_classes |= classes
+            data |= _data_classes(text)
     if not declared:
         return out
     by_name = {c.name: c for c in contracts}
+    data |= {c.name for c in contracts if c.kind == "type"} & contract_classes
+    impls: dict[str, str] = {}  # contract class -> its implementation's name
+
+    def impl_of(cls: str) -> str:
+        if cls not in impls:
+            impls[cls] = impl_name(cls, {*declared, *impls.values()})
+        return impls[cls]
+
     modules: dict[str, _Module] = {}
     for ticket in tickets:
         if ticket.id == CONTRACTS_TICKET_ID:
@@ -256,9 +337,17 @@ def python_skeleton(
                        for n in body if isinstance(n, (ast.Import, ast.ImportFrom))
                        for a in n.names}
             known = set(declared) | set(carried) | set(_PRELUDE) | _BUILTINS
+            of_class = cname.rpartition(".")[0]
             for node in body:
-                got = _members(node, cname.rpartition(".")[0], contract_classes)
+                got = _members(node, of_class, contract_classes, data)
                 if got is None:
+                    held = node.name if isinstance(node, ast.ClassDef) else of_class
+                    if held in data and (isinstance(node, _FUNCS) or (
+                            isinstance(node, ast.ClassDef)
+                            and any(isinstance(m, _FUNCS) for m in node.body))):
+                        out.concerns.append(
+                            f"Contract {cname}: {held} is a data type the contracts file "
+                            f"defines in full; not stubbed.")
                     continue
                 cls, defs = got
                 target_path = _target_file(ticket, cls or defs[0].name, contract_texts)
@@ -276,7 +365,7 @@ def python_skeleton(
                     stub = _stub_def(d, method=bool(cls))
                     names = set() if stub is None else _signature_names(stub).union(
                         *(_names_in(x) for x in stub.decorator_list))
-                    if stub is None or not names <= known | {impl_name(cls)}:
+                    if stub is None or not names <= known | ({impl_of(cls)} if cls else set()):
                         why = ("is not fully annotated" if stub is None else
                                "uses " + ", ".join(sorted(names - known))
                                + ", which neither the contracts file nor the standard "
@@ -293,12 +382,12 @@ def python_skeleton(
                 target.extend(s for s in kept if s.name not in have)
                 if cls:
                     mod.names.add(cls)
-                    out.impls.setdefault(cname, (impl_name(cls), target_path))
+                    out.impls.setdefault(cname, (impl_of(cls), target_path))
 
     for path, mod in sorted(modules.items()):
         if not mod.functions and not any(mod.classes.values()):
             continue
-        defined = {impl_name(c) for c in mod.classes} | {f.name for f in mod.functions}
+        defined = {impl_of(c) for c in mod.classes} | {f.name for f in mod.functions}
         plain = set(mod.imports)
         froms: dict[str, list[str]] = {}
         for name in sorted(mod.names - defined):
@@ -310,7 +399,7 @@ def python_skeleton(
                 *(f"from {m} import {', '.join(ns)}" for m, ns in sorted(froms.items()))]
         chunks: list[str] = []
         for cls, methods in mod.classes.items():
-            node = ast.parse(f"class {impl_name(cls)}({cls}):\n    pass").body[0]
+            node = ast.parse(f"class {impl_of(cls)}({cls}):\n    pass").body[0]
             assert isinstance(node, ast.ClassDef)
             node.body = list(methods) or node.body
             chunks.append(ast.unparse(node))

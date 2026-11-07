@@ -13,11 +13,20 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from foundry.agents._common import emit_artifact, persist_prose
 from foundry.agents.implementation.stubs import python_skeleton, signature_changes
-from foundry.agents.implementation.tickets import skeleton_files
+from foundry.agents.implementation.tickets import (
+    EmptyTicketError,
+    _require_scope_written,
+    skeleton_files,
+    stub_rules,
+)
 from foundry.agents.planner import _safe_ticket_ids
 from foundry.durability.artifact_store import ArtifactStore
+from foundry.execution.adapter_contract import AdapterResult
+from foundry.execution.sandbox import Sandbox
 from foundry.graph.gate_wiring import materialize_workdir
 from foundry.schemas.architecture import InterfaceContract
 from foundry.schemas.gates import GateStatus
@@ -301,3 +310,174 @@ def test_prose_only_contracts_get_no_skeleton(tmp_path: Path) -> None:
     assert SKELETON_TASK_ID not in _diffs(out)
     assert skeleton_files(out, store.resolve, store.resolve_blob) == {}
     assert not any("TYPED STUBS" in r for r in rec.packets["T-001"].task["rules"])
+
+
+_DATA_CONTRACTS_PY = '''\
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from typing import NamedTuple, Protocol, final
+
+
+class Status(Enum):
+    A = "a"
+
+    def label(self) -> str:
+        return str(self.value)
+
+
+@dataclass
+class User:
+    name: str
+
+    def greeting(self) -> str:
+        return "hi " + self.name
+
+
+@final
+class Money:
+    def cents(self) -> int:
+        return 0
+
+
+class Point(NamedTuple):
+    x: int
+
+    def norm(self) -> int:
+        return abs(self.x)
+
+
+class ProductServiceInterface(Protocol):
+    def price(self, sku: str) -> int: ...
+
+
+class IOrderRepo(Protocol):
+    def count(self) -> int: ...
+
+
+class CartProtocol(Protocol):
+    def total(self) -> int: ...
+
+
+class Cart:
+    pass
+'''
+
+
+def test_data_types_are_never_subclassed_and_interfaces_get_natural_names(
+    tmp_path: Path,
+) -> None:
+    contracts = [
+        _contract("Status", "class", 'class Status(Enum):\n    A = "a"\n'
+                                     "    def label(self) -> str"),
+        _contract("User", "type", "class User:\n    name: str\n    def greeting(self) -> str"),
+        _contract("User.greeting", "function", "def greeting(self) -> str"),
+        _contract("Money", "class", "class Money:\n    def cents(self) -> int"),
+        _contract("Point", "class", "class Point(NamedTuple):\n    x: int\n"
+                                    "    def norm(self) -> int"),
+        _contract("ProductServiceInterface", "class",
+                  "class ProductServiceInterface(Protocol):\n    def price(self, sku: str) -> int"),
+        _contract("IOrderRepo", "class", "class IOrderRepo(Protocol):\n    def count(self) -> int"),
+        _contract("CartProtocol", "class", "class CartProtocol(Protocol):\n"
+                                           "    def total(self) -> int"),
+    ]
+    tickets = [
+        _tk("T-001", ("app/status.py",), ("Status",)),
+        _tk("T-002", ("app/user.py",), ("User", "User.greeting")),
+        _tk("T-003", ("app/money.py",), ("Money",)),
+        _tk("T-004", ("app/point.py",), ("Point",)),
+        _tk("T-005", ("app/product.py",), ("ProductServiceInterface",)),
+        _tk("T-006", ("app/orders.py",), ("IOrderRepo",)),
+        _tk("T-007", ("app/cart.py",), ("CartProtocol",)),
+    ]
+    sk = python_skeleton(contracts, tickets, {"app/contracts.py": _DATA_CONTRACTS_PY})
+    # An Enum (a TypeError to extend), a type-kind dataclass, a @final class and a
+    # NamedTuple are defined in full by the contracts file: no Impl subclass.
+    assert set(sk.files) == {"app/product.py", "app/orders.py", "app/cart.py"}
+    concerns = "\n".join(sk.concerns)
+    for name in ("Status", "User", "Money", "Point"):
+        assert f"{name} is a data type the contracts file defines in full" in concerns
+    assert "class ProductService(ProductServiceInterface):" in sk.files["app/product.py"]
+    assert "class OrderRepo(IOrderRepo):" in sk.files["app/orders.py"]
+    # The natural name is taken by the contracts file: the Impl suffix instead.
+    assert "class CartProtocolImpl(CartProtocol):" in sk.files["app/cart.py"]
+    assert sk.impls["ProductServiceInterface"] == ("ProductService", "app/product.py")
+
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app/__init__.py").write_text("")
+    (tmp_path / "app/contracts.py").write_text(_DATA_CONTRACTS_PY)
+    for rel, text in sk.files.items():
+        (tmp_path / rel).write_text(text)
+    done = _mypy_strict(tmp_path)
+    assert done.returncode == 0, done.stdout
+
+
+def test_a_caller_is_told_the_natural_implementation_name() -> None:
+    skeleton = {"svc.py": "from contracts import ProductServiceInterface\n\n\n"
+                          "class ProductService(ProductServiceInterface):\n"
+                          "    def price(self, sku: str) -> int:\n"
+                          "        raise NotImplementedError\n"}
+    caller = Ticket(id="T-2", title="t", specialty=Specialty.BACKEND, files=("main.py",),
+                    consumes=("ProductServiceInterface",), seq=_SEQ)
+    assert any("ProductServiceInterface is implemented by ProductService in svc.py" in r
+               for r in stub_rules(caller, skeleton, {}))
+
+
+def test_an_empty_package_marker_is_not_an_unwritten_stub(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    (src / "pkg").mkdir(parents=True)
+    (src / "pkg/__init__.py").write_text("")
+    stub = "def f() -> int:\n    raise NotImplementedError\n"
+    (src / "pkg/mod.py").write_text(stub)
+    skeleton = {"pkg/__init__.py": "", "pkg/mod.py": stub}
+    with Sandbox(src) as sb:
+        blob = b'{"kind": "full-file-snapshot", "files": {}}'
+        result = AdapterResult(diff_uri=sb.put_blob(blob), snapshot_digest=sb.snapshot())
+        # A ticket whose only scoped file is the marker the skeleton wrote: nothing to do.
+        _require_scope_written(result, sb, ("pkg/__init__.py",), "T-001", skeleton)
+        # The marker does not stand in for the stub the ticket left untouched.
+        with pytest.raises(EmptyTicketError):
+            _require_scope_written(result, sb, ("pkg/mod.py", "pkg/__init__.py"), "T-001",
+                                   skeleton)
+
+
+_FIXED_STUB = ("from contracts import TodoStore\n\n\n"
+               "class TodoStoreImpl(TodoStore):\n\n"
+               "    def add(self, title: str) -> str:\n"
+               "        raise NotImplementedError\n\n"
+               "    def count(self) -> int:\n"
+               "        raise NotImplementedError\n")
+_DRIFTED_PY = _GRAPH_CONTRACTS_PY.replace("def add(self, title: str) -> int",
+                                          "def add(self, title: str) -> str")
+
+
+def test_a_ticket_is_held_to_the_stub_as_the_wave_zero_fixer_left_it(tmp_path: Path) -> None:
+    # The contracts file returns str where the plan says int; the fixer re-signs the
+    # stub to match, and the owning ticket that keeps the fixer's signature passes.
+    impl = _GOOD_IMPL.replace("def add(self, title: str) -> int:\n"
+                              "        self.items.append(title)\n"
+                              "        return len(self.items)",
+                              "def add(self, title: str) -> str:\n"
+                              "        self.items.append(title)\n"
+                              "        return title")
+    rec = _Recorder(writes={"contracts": {"contracts.py": _DRIFTED_PY},
+                            "fix-1": {"store.py": _FIXED_STUB},
+                            "T-001": {"store.py": impl}})
+    out, _, _ = _graph_case(tmp_path, rec)
+    assert rec.seen["T-001"]["store.py"] == _FIXED_STUB
+    assert rec.calls.count("T-001") == 1
+    assert not any(t.name == "signature-change" for t in out["gate_triage"])
+
+
+def test_a_ticket_that_leaves_the_fixed_stub_untouched_counts_as_unwritten(
+    tmp_path: Path,
+) -> None:
+    rec = _Recorder(writes={"contracts": {"contracts.py": _DRIFTED_PY},
+                            "fix-1": {"store.py": _FIXED_STUB}},
+                    silent=frozenset({"T-001"}))
+    out, _, _ = _graph_case(tmp_path, rec)
+    assert rec.seen["T-001"]["store.py"] == _FIXED_STUB
+    assert rec.calls.count("T-001") == 2
+    assert "ticket-skipped" in {t.name for t in out["gate_triage"]
+                                if t.run_against == "task/T-001"}

@@ -1,5 +1,5 @@
-"""Namespace sandbox for running untrusted generated code — the project-wide
-isolation primitive (no Docker daemon, no image; just Linux user namespaces).
+"""Sandbox for running untrusted generated code — the project-wide isolation
+primitive (no Docker daemon, no image; Linux user namespaces, or Seatbelt on macOS).
 
 Every gate that runs generated code over a workdir (test, bdd, build, smoke,
 install) goes through ONE seam, ``ground_untrusted``, which runs it CONFINED
@@ -26,8 +26,23 @@ PID / IPC / UTS namespaces and a clean process-tree teardown:
   Host loopback services and abstract unix sockets live in the host netns, so
   they are unreachable by construction.
 
+**macOS** has no namespaces: there the same seam runs the command under Seatbelt
+(``/usr/bin/sandbox-exec`` with a generated SBPL profile, the approach of OpenAI's
+Codex CLI). Writes reach only the workdir, the writable binds and a private
+``TMPDIR``; host temp dirs are unlistable outside those, and the credential stores,
+``~/Library/Keychains``, Foundry's ``.env``, ``.run`` and state/auth dirs are
+unreadable. The network is loopback-only (no DNS); the install step's egress is the
+same vetted relay, on a loopback port that demands a per-step credential. The
+process group is killed when the command exits or times out. What Seatbelt cannot
+give: loopback is the HOST's, so host services on 127.0.0.1 are reachable (except
+host proxies named in the env and the Workshop's ``WORKSHOP_PORT``, denied by
+port); there is no PID namespace, so a process that calls ``setsid()`` escapes the
+group kill (it stays sandboxed); reads are allowed by default, so the credential
+list remains a denylist; and tools that ignore ``TMPDIR`` for
+``confstr(_CS_DARWIN_USER_TEMP_DIR)`` (BSD ``mktemp``) can't write temp.
+
 The sandbox is the DEFAULT; opt out with ``FOUNDRY_GATE_SANDBOX=inprocess`` on hosts
-without unprivileged user namespaces. The opt-out still applies the env allowlist,
+with neither backend. The opt-out still applies the env allowlist,
 and REFUSES the networked install step (ERROR) unless
 ``FOUNDRY_ALLOW_UNSANDBOXED_INSTALL=1`` explicitly accepts running it on the host.
 If the sandbox is selected but unavailable, grounding fails CLOSED (ERROR) — never
@@ -43,29 +58,40 @@ other network namespaces outside ``/run``, are not masked.
 from __future__ import annotations
 
 import contextlib
+import contextvars
+import hmac
 import ipaddress
 import json
 import os
+import pwd
 import re
 import shutil
+import signal
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
 from base64 import b64encode
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
+from typing import IO
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 from .runner import GroundingUnavailable, run_grounding_command
 
 __all__ = [
     "UNSHARE_FLAGS",
+    "ToolchainCache",
     "egress_allowed",
     "ground_untrusted",
     "run_confined",
+    "sandbox_backend",
     "sandbox_enabled",
+    "seatbelt_available",
+    "seatbelt_profile",
     "toolchain_env",
+    "toolchain_scope",
     "unshare_available",
 ]
 
@@ -126,7 +152,8 @@ _FENCE_SETUP_MARKER = "foundry-sandbox-fence: setup failed"
 _HIDDEN_HOME_PATHS: tuple[str, ...] = (
     ".ssh", ".aws", ".azure", ".config/gcloud", ".config/gh", ".config/git/credentials",
     ".docker", ".kube", ".gnupg", ".claude", ".claude.json", ".git-credentials",
-    ".netrc", ".npmrc", ".pypirc", ".cargo/credentials", ".cargo/credentials.toml",
+    ".netrc", ".npmrc", ".pypirc", ".pip", ".config/pip", ".cargo/credentials",
+    ".cargo/credentials.toml",
     ".m2/settings.xml", ".gradle/gradle.properties", ".ccr",
 )
 _HIDDEN_ABS_PATHS: tuple[str, ...] = ("/root/.ccr",)
@@ -469,17 +496,30 @@ def _upstream_from(env: Mapping[str, str]) -> _Upstream | None:
         return None
 
 
+def _proxy_auth_ok(header: bytes, token: str) -> bool:
+    want = b"basic " + b64encode(f"foundry:{token}".encode())
+    for line in header.split(b"\r\n")[1:]:
+        name, _, value = line.partition(b":")
+        if name.strip().lower() == b"proxy-authorization":
+            return hmac.compare_digest(value.strip().lower()[:6] + value.strip()[6:], want)
+    return False
+
+
 class _EgressRelay:
     """Host-side end of the install step's only egress: an HTTP ``CONNECT`` relay on
     a private unix socket. Vets every destination with :func:`egress_allowed`, then
     chains to the upstream proxy or (no proxy) connects to a vetted resolved address."""
 
-    def __init__(self, upstream: _Upstream | None) -> None:
+    def __init__(self, upstream: _Upstream | None, *, tcp: bool = False) -> None:
         self._upstream = upstream
         self._dir = tempfile.mkdtemp(prefix="foundry-egress-")
         self.path = os.path.join(self._dir, "relay.sock")
-        self._srv = socket.socket(socket.AF_UNIX)
-        self._srv.bind(self.path)
+        self._srv = socket.socket(socket.AF_INET if tcp else socket.AF_UNIX)
+        self._srv.bind(("127.0.0.1", 0) if tcp else self.path)
+        self.port: int = self._srv.getsockname()[1] if tcp else 0
+        # A loopback TCP relay is reachable by every local process (other gates' offline
+        # steps included), so it serves only the step holding this credential.
+        self.token = os.urandom(16).hex() if tcp else ""
         self._srv.listen(64)
         self._srv.settimeout(0.2)
         self._stop = threading.Event()
@@ -514,6 +554,11 @@ class _EgressRelay:
                 parts = header.split(b"\r\n", 1)[0].decode("latin-1").split()
                 if len(parts) != 3 or parts[0] != "CONNECT":
                     conn.sendall(b"HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\n\r\n")
+                    return
+                if self.token and not _proxy_auth_ok(header, self.token):
+                    conn.sendall(b"HTTP/1.1 407 Proxy Authentication Required\r\n"
+                                 b"Proxy-Authenticate: Basic realm=\"foundry\"\r\n"
+                                 b"Connection: close\r\n\r\n")
                     return
                 target = _split_target(parts[1])
                 if target is None or not egress_allowed(target[0]):
@@ -571,6 +616,256 @@ def _require_binary(
         raise GroundingUnavailable(f"grounding tool not available: {exe!r}")
 
 
+# ---- macOS: the Seatbelt (sandbox-exec) backend -------------------------------------
+
+_SEATBELT_BIN = "/usr/bin/sandbox-exec"
+_SEATBELT_OK: bool | None = None
+_HIDDEN_HOME_PATHS_DARWIN: tuple[str, ...] = ("Library/Keychains",)
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_STATE_DIR_VARS = ("FOUNDRY_AUTH_DIR", "WORKSHOP_STATE_DIR", "FOUNDRY_STATE_DIR",
+                   "WORKSHOP_OUTPUT_DIR")
+
+# The base profile. Every host path reaches the profile as a ``-D`` parameter, never
+# as profile text, so a build-chosen path cannot inject SBPL. Later rules win, which
+# is what lets the workdir be re-allowed under a denied tree, but a rule naming one
+# operation (``file-read-data``) outranks a wildcard (``file-read*``) wherever it
+# sits: every read rule after the base names both.
+_SEATBELT_BASE = """(version 1)
+(deny default)
+(allow process-exec process-fork)
+(allow signal (target same-sandbox))
+(allow process-info* (target same-sandbox))
+(allow sysctl-read)
+(allow ipc-posix-sem)
+(allow ipc-posix-shm-read* (ipc-posix-name-prefix "apple.cfprefs."))
+(allow user-preference-read)
+(allow mach-lookup
+  (global-name "com.apple.system.opendirectoryd.libinfo")
+  (global-name "com.apple.bsd.dirhelper")
+  (global-name "com.apple.cfprefsd.daemon")
+  (global-name "com.apple.cfprefsd.agent")
+  (local-name "com.apple.cfprefsd.agent"))
+(allow file-write-data file-ioctl
+  (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper")
+  (regex #"^/dev/fd/[0-9]+$"))
+(allow file-read*)
+(allow network-bind network-inbound (local ip "localhost:*"))
+(allow network-outbound (remote ip "localhost:*"))
+"""
+# Install step only: TLS trust evaluation (Security.framework clients such as Go).
+_SEATBELT_NETWORK = """(allow mach-lookup
+  (global-name "com.apple.trustd.agent") (global-name "com.apple.ocspd"))
+"""
+
+
+def seatbelt_available() -> bool:
+    """True iff this is macOS and ``sandbox-exec`` can apply a profile here (memoized;
+    a process that is itself already sandboxed cannot)."""
+    global _SEATBELT_OK
+    if _SEATBELT_OK is None:
+        _SEATBELT_OK = False
+        if sys.platform == "darwin" and os.access(_SEATBELT_BIN, os.X_OK):
+            with contextlib.suppress(GroundingUnavailable):
+                rc, _out, _err = run_grounding_command(
+                    (_SEATBELT_BIN, "-p", "(version 1)(allow default)", "/usr/bin/true"),
+                    Path("."), env=None, timeout_s=30.0,
+                )
+                _SEATBELT_OK = rc == 0
+    return _SEATBELT_OK
+
+
+def sandbox_backend() -> str | None:
+    """The confinement this host supports: ``"seatbelt"`` on macOS, ``"unshare"``
+    elsewhere; ``None`` when it is unavailable (grounding then fails closed)."""
+    if sys.platform == "darwin":
+        return "seatbelt" if seatbelt_available() else None
+    return "unshare" if unshare_available() else None
+
+
+def _real(p: str | Path) -> str:
+    return os.path.realpath(os.path.abspath(os.path.expanduser(p)))
+
+
+def _seatbelt_hidden(home: str | None) -> list[str]:
+    """Credential stores, Foundry's own ``.env`` and state dir, at both their lexical
+    and resolved paths (SBPL matches the resolved one)."""
+    homes = {h for h in (home, os.path.expanduser("~"), pwd.getpwuid(os.getuid()).pw_dir)
+             if h}
+    paths = [os.path.join(h, n) for h in homes
+             for n in (*_HIDDEN_HOME_PATHS, *_HIDDEN_HOME_PATHS_DARWIN)]
+    paths += _HIDDEN_ABS_PATHS
+    # Foundry's own state, wherever the CLI or the Workshop puts it (mirrors the
+    # precedence in webapp/auth.py and webapp/server.py, which can't be imported
+    # here): the Workshop's auth.json holds the session-cookie HMAC key. A relative
+    # setting is resolved against the cwd and the repo root alike.
+    rel = [".env", ".run", *(v for k in _STATE_DIR_VARS
+                             if (v := os.environ.get(k, "").strip()))]
+    paths += [str(Path(root, p).expanduser())
+              for root in (os.getcwd(), _REPO_ROOT) for p in rel]
+    out: set[str] = set()
+    for p in paths:
+        out.update((os.path.abspath(p), _real(p)))
+    return sorted(out)
+
+
+def _workshop_port() -> int:
+    """The Workshop's HTTP port (``webapp.server`` reads the same variable): its API is
+    on the host's loopback, which a Seatbelt step shares."""
+    try:
+        return int(os.environ.get("WORKSHOP_PORT", "8765"))
+    except ValueError:
+        return 8765
+
+
+def _loopback_proxy_ports(env: Mapping[str, str]) -> set[int]:
+    """Host proxies listening on loopback: the sandbox shares the host's loopback, so
+    each is denied to it explicitly (the relay chains to them from the host side)."""
+    ports: set[int] = set()
+    for k in _PROXY_VARS:
+        with contextlib.suppress(ValueError):
+            parts = urlsplit(env.get(k, ""))
+            if parts.hostname in ("localhost", "127.0.0.1", "::1"):
+                ports.add(parts.port or 80)
+    return ports
+
+
+def seatbelt_profile(
+    *,
+    workdir: str,
+    private_tmp: str,
+    binds: list[tuple[str, bool]],
+    home: str | None,
+    network: bool,
+    deny_ports: Iterable[int] = (),
+) -> tuple[str, list[str]]:
+    """The SBPL profile and its ``-D NAME=path`` arguments for one confined step."""
+    params: list[str] = []
+
+    def refs(paths: Iterable[str], kind: str = "(subpath {})") -> str:
+        out = []
+        for path in paths:
+            if "\0" in path or not path.startswith("/"):
+                raise GroundingUnavailable(f"refusing sandbox path {path!r}")
+            name = f"P{len(params) // 2}"
+            params.extend(("-D", f"{name}={path}"))
+            out.append(kind.format(f'(param "{name}")'))
+        return " ".join(out)
+
+    tmp_roots = sorted({_real(p) for p in ("/tmp", "/var/tmp", tempfile.gettempdir())})
+    trusted = sorted({_real(p) for p in (_REPO_ROOT, sys.prefix, sys.base_prefix,
+                                         os.path.dirname(sys.executable))})
+    hidden = _seatbelt_hidden(home)
+    kept = [os.path.join(h, k) for h in hidden
+            for k in _KEEP_IN_MASKED.get(os.path.basename(h), ())]
+    writable = [workdir, private_tmp, *(p for p, rw in binds if rw)]
+    readable = [workdir, private_tmp, *(p for p, _ in binds)]
+    # getcwd() and realpath() list each ancestor directory: those stay listable.
+    ancestors = sorted({str(a) for p in readable for a in Path(p).parents})
+    rules = [
+        _SEATBELT_BASE,
+        _SEATBELT_NETWORK if network else "",
+        # Host temp dirs hold other runs' workdirs and relays (Linux shadows /tmp): no
+        # listing or reading them, while path lookups through them keep working.
+        f"(deny file-read-data {refs(tmp_roots)})\n",
+        f"(allow file-read* file-read-data {refs(trusted)})\n",
+        f"(deny file-read* file-read-data file-write* {refs(hidden)})\n",
+        f"(allow file-read* file-read-data {refs(kept)})\n" if kept else "",
+        f"(allow file-read-data {refs(ancestors, '(literal {})')})\n",
+        f"(allow file-read* file-read-data {refs(readable)})\n",
+        f"(allow file-write* {refs(writable)})\n",
+        "(allow network-bind network-inbound "
+        f"{refs(writable, '(local unix-socket (subpath {}))')})\n",
+        f"(allow network-outbound {refs(writable, '(remote unix-socket (subpath {}))')})\n",
+    ]
+    rules += [f'(deny network-outbound (remote ip "localhost:{int(port)}"))\n'
+              for port in sorted(set(deny_ports))]
+    return "".join(rules), params
+
+
+def _run_session(
+    argv: list[str], workdir: Path, env: dict[str, str], timeout_s: float
+) -> tuple[int, str, str]:
+    """``run_grounding_command`` in its own session, the whole process group killed
+    when the command exits or times out (``--kill-child`` on Linux)."""
+    try:
+        proc = subprocess.Popen(
+            argv, cwd=workdir, env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+        )
+    except FileNotFoundError as exc:
+        raise GroundingUnavailable(f"grounding tool not available: {argv[0]!r}") from exc
+    bufs: tuple[list[bytes], list[bytes]] = ([], [])
+
+    def drain(f: IO[bytes], buf: list[bytes]) -> None:
+        with contextlib.suppress(OSError, ValueError):
+            while chunk := f.read1(65536):  # type: ignore[attr-defined]
+                buf.append(chunk)
+
+    assert proc.stdout is not None and proc.stderr is not None
+    readers = [threading.Thread(target=drain, args=(f, b), daemon=True)
+               for f, b in zip((proc.stdout, proc.stderr), bufs, strict=True)]
+    for t in readers:
+        t.start()
+    rc: int | None = None
+    try:
+        rc = proc.wait(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        pass
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+    for t in readers:
+        t.join(5)  # a process that left the group may still hold the pipes
+    out, err = b"".join(bufs[0]), b"".join(bufs[1])
+    if rc is None:
+        raise subprocess.TimeoutExpired(argv, timeout_s, out, err)
+    return rc, out.decode("utf-8", errors="replace"), err.decode("utf-8", errors="replace")
+
+
+def _run_seatbelt(
+    cmd: tuple[str, ...] | list[str],
+    wd: Path,
+    *,
+    network: bool,
+    env: dict[str, str] | None,
+    extra_env: dict[str, str] | None,
+    binds: list[tuple[str, bool]],
+    timeout_s: float,
+) -> tuple[int, str, str]:
+    host_env = os.environ if env is None else env
+    run_env = _confined_env(env, extra_env)
+    private_tmp = _real(tempfile.mkdtemp(prefix="foundry-sbx-"))
+    upstream = _upstream_from(host_env) if network else None
+    relay = _EgressRelay(upstream, tcp=True) if network else None
+    try:
+        run_env.update(TMPDIR=private_tmp, XDG_CACHE_HOME=f"{private_tmp}/.cache",
+                       npm_config_cache=f"{private_tmp}/.npm",
+                       GOCACHE=f"{private_tmp}/.cache/go-build")
+        if relay is not None:
+            url = f"http://foundry:{relay.token}@127.0.0.1:{relay.port}"
+            for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
+                      "npm_config_https_proxy", "npm_config_proxy", "YARN_HTTPS_PROXY"):
+                run_env[k] = url
+            for k in ("NO_PROXY", "no_proxy", "npm_config_noproxy"):
+                run_env[k] = "localhost,127.0.0.1,::1"
+            for k in ("ALL_PROXY", "all_proxy"):
+                run_env.pop(k, None)
+        profile, params = seatbelt_profile(
+            workdir=str(wd), private_tmp=private_tmp, binds=binds,
+            home=host_env.get("HOME"), network=network,
+            deny_ports=(_loopback_proxy_ports(host_env) | _loopback_proxy_ports(os.environ)
+                        | {_workshop_port()}),
+        )
+        return _run_session(
+            [_SEATBELT_BIN, *params, "-p", profile, "--", *cmd], wd, run_env, timeout_s
+        )
+    finally:
+        if relay is not None:
+            relay.close()
+        shutil.rmtree(private_tmp, ignore_errors=True)
+
+
 def run_confined(
     cmd: tuple[str, ...] | list[str],
     workdir: Path | str,
@@ -591,14 +886,21 @@ def run_confined(
         raise GroundingUnavailable("empty grounding command")
     wd = Path(workdir).resolve()
     _require_binary(cmd, wd, env)
-    mount_bin, unshare_bin = shutil.which("mount"), shutil.which(_UNSHARE_BIN)
-    if not unshare_available() or mount_bin is None or unshare_bin is None:
-        raise GroundingUnavailable(
-            "namespace sandbox unavailable (no `unshare`/`mount`, or unprivileged user "
-            "namespaces are kernel-disabled); set FOUNDRY_GATE_SANDBOX=inprocess to "
-            "accept running generated code unsandboxed"
-        )
     bind_list = [[str(Path(p).resolve()), bool(rw)] for p, rw in binds]
+    backend = sandbox_backend()
+    if backend == "seatbelt":
+        return _run_seatbelt(
+            cmd, wd, network=network, env=env, extra_env=extra_env,
+            binds=[(str(p), bool(rw)) for p, rw in bind_list], timeout_s=timeout_s,
+        )
+    mount_bin, unshare_bin = shutil.which("mount"), shutil.which(_UNSHARE_BIN)
+    if backend != "unshare" or mount_bin is None or unshare_bin is None:
+        raise GroundingUnavailable(
+            "gate sandbox unavailable (Linux: no `unshare`/`mount`, or unprivileged user "
+            "namespaces are kernel-disabled; macOS: `sandbox-exec` missing or cannot "
+            "apply a profile here); set FOUNDRY_GATE_SANDBOX=inprocess to accept running "
+            "generated code unsandboxed"
+        )
     upstream = _upstream_from(os.environ if env is None else env) if network else None
     relay = _EgressRelay(upstream) if network else None
     try:
@@ -631,6 +933,75 @@ def run_confined(
     return rc, out, err
 
 
+# ---- the run's toolchain cache: dependencies the install step downloads ------------
+
+
+class ToolchainCache:
+    """Where non-Python toolchains keep downloaded dependencies (Go modules, the cargo
+    registry, NuGet, Maven, Gradle, Yarn/pnpm stores) for gate steps: a directory
+    OUTSIDE the workdir and the user's home (which the sandbox leaves read-only, and
+    whose real caches are never copied in). The install step, the only networked
+    one, writes it; the offline build/test/smoke steps read it. One per run, created
+    on first use, removed by :meth:`close`."""
+
+    def __init__(self) -> None:
+        self._root: str | None = None
+        self._lock = threading.Lock()
+
+    @property
+    def root(self) -> str:
+        with self._lock:
+            if self._root is None:
+                self._root = _real(tempfile.mkdtemp(prefix="foundry-toolchain-"))
+            return self._root
+
+    def env(self) -> dict[str, str]:
+        r = self.root
+        return {
+            "GOPATH": f"{r}/go", "GOMODCACHE": f"{r}/go/pkg/mod",
+            "CARGO_HOME": f"{r}/cargo",
+            "NUGET_PACKAGES": f"{r}/nuget", "DOTNET_CLI_HOME": f"{r}/dotnet",
+            "MAVEN_OPTS": f"-Dmaven.repo.local={r}/m2", "GRADLE_USER_HOME": f"{r}/gradle",
+            "YARN_CACHE_FOLDER": f"{r}/yarn", "npm_config_store_dir": f"{r}/pnpm",
+        }
+
+    def close(self) -> None:
+        with self._lock:
+            root, self._root = self._root, None
+        if root is None:
+            return
+        # Go extracts modules read-only: make them removable first.
+        for d, _dirs, _files in os.walk(root):
+            with contextlib.suppress(OSError):
+                os.chmod(d, 0o700)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+_OFFLINE_ENV = {"CARGO_NET_OFFLINE": "true"}
+
+_TOOLCHAIN: contextvars.ContextVar[ToolchainCache | None] = contextvars.ContextVar(
+    "foundry_toolchain_cache", default=None
+)
+
+
+@contextlib.contextmanager
+def toolchain_scope(cache: ToolchainCache | None = None) -> Iterator[ToolchainCache]:
+    """Gate steps run inside share ``cache`` (the run's). Without one, the scope
+    already active is reused, else a fresh cache lives for this scope only."""
+    active = _TOOLCHAIN.get()
+    if cache is None and active is not None:
+        yield active
+        return
+    use = cache or ToolchainCache()
+    token = _TOOLCHAIN.set(use)
+    try:
+        yield use
+    finally:
+        _TOOLCHAIN.reset(token)
+        if cache is None:
+            use.close()
+
+
 def ground_untrusted(
     cmd: tuple[str, ...] | list[str],
     workdir: Path,
@@ -644,7 +1015,16 @@ def ground_untrusted(
     """The grounding seam for generated code (test, bdd, build, smoke, install):
     confined sandbox by default. The ``FOUNDRY_GATE_SANDBOX`` opt-out runs it on the
     host — still with the env allowlist — and refuses the networked install step
-    unless ``FOUNDRY_ALLOW_UNSANDBOXED_INSTALL=1`` (fail-closed ERROR)."""
+    unless ``FOUNDRY_ALLOW_UNSANDBOXED_INSTALL=1`` (fail-closed ERROR). Inside a
+    :func:`toolchain_scope` the toolchains' dependency caches point at its cache,
+    writable only by the networked step."""
+    if not network:
+        # Offline steps have no DNS: cargo would retry the registry and fail on a
+        # host lookup; offline mode names the missing dependency instead.
+        extra_env = {**_OFFLINE_ENV, **(extra_env or {})}
+    if (cache := _TOOLCHAIN.get()) is not None:
+        extra_env = {**cache.env(), **(extra_env or {})}
+        binds = (*binds, (cache.root, network))
     if sandbox_enabled():
         return run_confined(
             cmd, workdir, network=network, env=env, extra_env=extra_env, binds=binds,

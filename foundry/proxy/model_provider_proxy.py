@@ -31,7 +31,11 @@ the call with no determinism control at all) — so the proxy pins
 the manifest. Models that honour sampling (Anthropic Sonnet/Haiku) get
 ``temperature 0``. Thinking is enabled (adaptive) only for
 ideation-class reasoning-model calls and OMITTED for deterministic gate/judge
-calls.
+calls. Local tiers are the exception: a local model with a vendor sampling
+profile (Qwen: "DO NOT use greedy decoding") gets that profile on every call,
+gates and judges included, plus a request-derived ``seed`` — determinism for a
+verdict comes from the structured channel, the gates and attestation, and
+replayability from the seed (see ``_LOCAL_SAMPLING_PROFILES``).
 
 Degraded-mode rule (fail-closed): on transport failure the proxy retries
 with bounded backoff and then raises :class:`ProxyUnavailable`. It NEVER
@@ -62,6 +66,7 @@ served capability silently degraded. That is flagged as drift (kind
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -73,7 +78,7 @@ from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from fnmatch import fnmatchcase
 from pathlib import Path
@@ -110,7 +115,8 @@ TIER_MODELS: dict[str, str] = {
 #   - the Anthropic T1 reasoning model (claude-opus-*) — sampling params are
 #     removed (existing behaviour, kept).
 # Everything else (Anthropic Sonnet/Haiku) honours `temperature`,
-# so a deterministic call pins temperature 0 there.
+# so a deterministic call pins temperature 0 there — except a local tier whose
+# model has a sampling profile (below), where greedy decoding is what degrades it.
 _DEFAULT_EFFORT_MODEL_GLOBS: tuple[str, ...] = (
     "claude-opus-*",
     "gpt-*",
@@ -125,6 +131,8 @@ _DEFAULT_EFFORT_MODEL_GLOBS: tuple[str, ...] = (
 _DEFAULT_EFFORT = "high"
 
 _DEFAULT_MAX_TOKENS = 16000
+# Leaves room for a local model whose server will not turn its reasoning off.
+_LOCAL_JUDGMENT_MAX_TOKENS = 8192
 
 Purpose = Literal["ideation", "gate", "judgment"]
 _PURPOSES = ("ideation", "gate", "judgment")
@@ -155,12 +163,14 @@ VERDICT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
-ADVISORY_PREFIX = "[advisory: no failing check or reproduction cited] "
+ADVISORY_PREFIX = "[advisory: no failing check or differing reproduction] "
 # Strict grammars make the model fill every field, so "no evidence" often arrives
 # as a placeholder rather than "". Only for the citing fields: an expected/actual of
 # "None" or "null" is a real observed value.
 _PLACEHOLDERS = frozenset({"", "n/a", "na", "none", "null", "nil", "-", "--", "unknown",
                            "not applicable", "no", "nothing"})
+# Brackets stay inside a token: pytest's parametrized ids carry them.
+_CITATION_SPLIT = re.compile(r"[\s,;'\"`()]+")
 
 
 def _cited(item: dict[str, Any], field: str) -> str:
@@ -168,13 +178,51 @@ def _cited(item: dict[str, Any], field: str) -> str:
     return "" if value.lower().strip(".") in _PLACEHOLDERS else value
 
 
-def _verdict_findings(raw: object) -> tuple[tuple[str, ...], bool]:
-    """The verdict's findings as recorded, and whether any is test-backed.
+def _failing_match(
+    check: str, command: str, gates: Iterable[str], tests: Iterable[str]
+) -> str | None:
+    """The failing gate or test the citation names, or ``None``.
 
-    LLM reviewers fail correct code (arXiv 2603.00539), so only a finding citing
-    a failing gate/test, or a command whose expected and actual results differ, may
-    block. The rest are kept, prefixed :data:`ADVISORY_PREFIX`. A plain-string
-    finding (an ungrammared backend) cites nothing."""
+    A gate name counts only as the whole ``failing_check`` ("test", not "npm test"
+    or "security concern in parser"). A test id counts as a whole token of either
+    field; its short ``::`` form only when the token is itself unqualified and no
+    other failing id shares that short form (``S001`` of two feature files names
+    neither)."""
+    for gate in gates:
+        if check.casefold() == gate.casefold():
+            return gate
+    full = {t.casefold(): t for t in tests}
+    shorts: dict[str, list[str]] = {}
+    for t in tests:
+        shorts.setdefault(t.rsplit("::", 1)[-1].casefold(), []).append(t)
+    for cited in (check, command):
+        for token in (cited, *_CITATION_SPLIT.split(cited)):
+            token = token.strip(".:").casefold()
+            if token in full:
+                return full[token]
+            only = shorts.get(token, ())
+            if "::" not in token and "/" not in token and len(only) == 1:
+                return only[0]
+    return None
+
+
+def _norm(value: str) -> str:
+    return " ".join(value.split()).casefold()
+
+
+def _verdict_findings(
+    raw: object, failing_gates: Iterable[str] = (), failing_tests: Iterable[str] = ()
+) -> tuple[tuple[str, ...], bool]:
+    """The verdict's findings as recorded, and whether any may block.
+
+    LLM reviewers fail correct code (arXiv 2603.00539), and a model will cite a
+    passing scenario as its "failing check". So a finding blocks only if it names
+    one of ``failing_gates`` / ``failing_tests`` (what failed on the reviewed tree,
+    per the caller's attested ``gates`` channel; see :func:`_failing_match`), or it
+    gives a command whose expected and actual results differ. The rest are kept,
+    prefixed :data:`ADVISORY_PREFIX`. A plain-string finding (an ungrammared
+    backend) cites nothing."""
+    gates, tests = tuple(failing_gates), tuple(failing_tests)
     out: list[str] = []
     backed = False
     for item in raw if isinstance(raw, list) else ():
@@ -184,12 +232,13 @@ def _verdict_findings(raw: object) -> tuple[tuple[str, ...], bool]:
         text = str(item.get("finding", "")).strip()
         check, command = _cited(item, "failing_check"), _cited(item, "command")
         expected, actual = (str(item.get(f, "")).strip() for f in ("expected", "actual"))
-        if check:
-            out.append(f"{text} [evidence: failing {check}]")
-        elif command and expected and actual and expected != actual:
+        if (matched := _failing_match(check, command, gates, tests)) is not None:
+            out.append(f"{text} [evidence: failing {matched}]")
+        elif command and expected and actual and _norm(expected) != _norm(actual):
             out.append(f"{text} [evidence: `{command}` expected {expected!r}, got {actual!r}]")
         else:
-            out.append(ADVISORY_PREFIX + text)
+            note = f" [cites {check}: not failing in this build's gates]" if check else ""
+            out.append(ADVISORY_PREFIX + text + note)
             continue
         backed = True
     return tuple(out), backed
@@ -233,6 +282,85 @@ def default_sampling_policy() -> SamplingPolicy:
     """The curated default policy (Anthropic opus + OpenAI/Codex => effort;
     Anthropic sonnet/haiku => temperature 0)."""
     return SamplingPolicy()
+
+
+# ---- Local sampling profiles (local tiers only) --------------------------------
+#
+# Local tiers do NOT take the temperature-0 determinism control above. Qwen's
+# model cards say "DO NOT use greedy decoding, as it can lead to performance
+# degradation and endless repetitions" — exactly the runaway/repeating JSON and
+# fix passes repeating one move seen on local runs. Every local-tier call
+# (ideation, gate, judgment, agent turns) whose model matches a glob below is sent
+# the vendor's recommended non-thinking sampling instead. That costs nothing the
+# factory relies on: a verdict's trustworthiness comes from the structured-output
+# channel, the gates' own execution and the Zone-B attestation, not from greedy
+# decoding; and replayability comes from a fixed per-request `seed` (same request
+# => same seed => same sample on a seeded server), so the call cache and a
+# crash-resume still see the reply they would have, while a retry — whose prompt
+# already differs — draws a fresh sample. First match wins.
+_LOCAL_SAMPLING_PROFILES: tuple[tuple[str, dict[str, float]], ...] = (
+    # Qwen3-Coder generation_config.json.
+    ("*qwen*coder*", {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "repeat_penalty": 1.05}),
+    # Qwen3 / 3.5 / 3.6 non-thinking ("instruct") mode. The card allows a presence
+    # penalty of 0-2; the low end, because it also taxes JSON's structural tokens.
+    ("*qwen3*", {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0.0,
+                 "presence_penalty": 1.0}),
+)
+LOCAL_SAMPLING_KEYS: frozenset[str] = frozenset({
+    "temperature", "top_p", "top_k", "min_p",
+    "presence_penalty", "frequency_penalty", "repeat_penalty",
+})
+LOCAL_SAMPLING_ENV = "FOUNDRY_LOCAL_SAMPLING"
+
+
+def parse_local_sampling(value: str) -> dict[str, float] | Literal["off"] | None:
+    """``FOUNDRY_LOCAL_SAMPLING``: unset/blank = the built-in profile table;
+    ``off`` = greedy (temperature 0 on gates/judges, as on cloud); otherwise
+    ``key=value,...`` over :data:`LOCAL_SAMPLING_KEYS`, applied to every local
+    model. ValueError on anything else."""
+    value = value.strip()
+    if not value:
+        return None
+    if value.lower() == "off":
+        return "off"
+    profile: dict[str, float] = {}
+    for item in value.split(","):
+        key, sep, raw = item.partition("=")
+        key = key.strip()
+        if not sep or key not in LOCAL_SAMPLING_KEYS:
+            raise ValueError(
+                f"{LOCAL_SAMPLING_ENV}: bad entry {item.strip()!r}; expected 'off' or "
+                f"key=value with key in {', '.join(sorted(LOCAL_SAMPLING_KEYS))}"
+            )
+        try:
+            profile[key] = int(raw) if key == "top_k" else float(raw)
+        except ValueError:
+            raise ValueError(
+                f"{LOCAL_SAMPLING_ENV}: {key} needs a number, got {raw.strip()!r}"
+            ) from None
+    return profile
+
+
+def local_sampling_for(
+    model_id: str, override: dict[str, float] | Literal["off"] | None = None
+) -> dict[str, float] | None:
+    """The sampling profile for a local model, or None to keep the greedy default."""
+    if override == "off":
+        return None
+    if override is not None:
+        return dict(override)
+    name = model_id.lower()
+    for glob, profile in _LOCAL_SAMPLING_PROFILES:
+        if fnmatchcase(name, glob):
+            return dict(profile)
+    return None
+
+
+def _seeded(request: dict[str, Any], profile: Mapping[str, Any]) -> dict[str, Any]:
+    """``profile`` plus a seed derived from the rest of ``request``."""
+    body = {k: v for k, v in request.items() if k != "local_sampling"}
+    digest = hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode()).digest()
+    return {**profile, "seed": int.from_bytes(digest[:4], "big") & 0x7FFFFFFF}
 
 
 # ---- Pinned-ID-drift policy (arch §8, ops §5) ---------------------------------
@@ -310,6 +438,13 @@ class VerdictChannelError(RuntimeError):
     """The structured verdict channel returned something outside the grammar."""
 
 
+class ToolsUnsupported(RuntimeError):
+    """The tier's backend has no native tool-call channel (or rejected ``tools``).
+    Raised without retry so the caller falls back to JSON actions. A transport
+    with a tool channel exposes ``tools_support(model) -> bool | None`` (None =
+    untested) and remembers a rejection per model."""
+
+
 class StructuredOutputError(RuntimeError):
     """A schema (structured-output) completion didn't yield a parseable JSON
     object. SDK structured-outputs are grammar-constrained, but the CLI backends
@@ -348,6 +483,43 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     )
 
 
+def is_transient_failure(exc: BaseException) -> bool:
+    """True when a durable run may sleep and re-invoke after ``exc``: a
+    ProxyUnavailable / pause-and-escalate, not a real build failure. An
+    unparseable structured reply is not transient: the re-invoked node sends the
+    same prompt and a deterministic model (temperature 0, or a local model's
+    request-derived seed) answers the same."""
+    if isinstance(exc.__cause__, StructuredOutputError):
+        return False
+    return "ProxyUnavailable" in type(exc).__name__ or "pause-and-escalate" in str(exc)
+
+
+def _with_parse_correction(
+    request: dict[str, Any], miss: ProviderResponse, attempt: int
+) -> dict[str, Any]:
+    """``request`` with the previous unparseable reply named in its last user turn,
+    so the re-roll is a different prompt: a temperature-0 (or seeded) call resent
+    unchanged returns the same reply (and the call cache would replay it)."""
+    note = (
+        f"\n\n[Retry {attempt}: your previous reply ({len(miss.text)} chars, stop reason "
+        f"{miss.stop_reason!r}) was not one complete JSON object. Reply with ONLY that "
+        "JSON object. If it was cut off it ran past the output limit: be concise, with "
+        "short strings and no repeated or near-duplicate entries.]"
+    )
+    messages = [dict(m) for m in request.get("messages") or ()]
+    last = messages[-1] if messages else None
+    if last is not None and last.get("role") == "user" and isinstance(last.get("content"), str):
+        last["content"] += note
+    elif last is not None and last.get("role") == "user" and isinstance(last.get("content"), list):
+        last["content"] = [*last["content"], {"type": "text", "text": note.strip()}]
+    else:
+        messages.append({"role": "user", "content": note.strip()})
+    corrected = {**request, "messages": messages}
+    if "local_sampling" in request:
+        corrected["local_sampling"] = _seeded(corrected, request["local_sampling"])
+    return corrected
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderResponse:
     """The proxy-observed provider response (the trusted observation)."""
@@ -357,6 +529,9 @@ class ProviderResponse:
     text: str
     usage: dict[str, int]
     stop_reason: str
+    # Native tool calls, in order: {"id", "name", "input": dict} and, when the
+    # backend's arguments were not a JSON object, an "error" string.
+    tool_calls: tuple[dict[str, Any], ...] = ()
 
 
 class ProviderTransport(Protocol):
@@ -373,6 +548,9 @@ class AnthropicTransport:
     or an API key, so tests run entirely on a fake transport.
     """
 
+    def tools_support(self, model: str) -> bool | None:
+        return True
+
     def __init__(self, client: Any | None = None) -> None:
         def _build() -> Any:
             import anthropic
@@ -387,6 +565,11 @@ class AnthropicTransport:
         text = next(
             (block.text for block in response.content if block.type == "text"), ""
         )
+        tool_calls = tuple(
+            {"id": block.id, "name": block.name, "input": dict(block.input or {})}
+            for block in response.content
+            if block.type == "tool_use"
+        )
         usage = response.usage
         return ProviderResponse(
             served_model=response.model,
@@ -399,6 +582,7 @@ class AnthropicTransport:
                 "cache_creation_input_tokens": usage.cache_creation_input_tokens or 0,
             },
             stop_reason=response.stop_reason or "",
+            tool_calls=tool_calls,
         )
 
 
@@ -414,6 +598,7 @@ class CompletionResult:
     usage: dict[str, int]  # surfaced on EVERY call for the budget ledger
     stop_reason: str
     manifest_record: dict[str, Any]
+    tool_calls: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -439,7 +624,7 @@ class _RetryPolicy:
 
 # Words/codes in a transport error that mean "the PROVIDER threw us back" — a
 # throttle (HTTP 429, Anthropic 529 overloaded, quota), a subscription-window
-# limit, OR a transient stall (a timeout / wall-clock hard-kill). None of these
+# limit, OR a transient network stall (an HTTP/SDK timeout). None of these
 # is a failure of the pinned model: they're TRANSIENT and must be waited out on a
 # SEPARATE, more generous (but still bounded) budget than a real transport failure
 # — so one hiccup can't kill a multi-hour overnight run.
@@ -447,11 +632,7 @@ _RATE_LIMIT_MARKERS = (
     "rate limit", "rate_limit", "ratelimit", "too many requests",
     "429", "529", "overloaded", "quota exceeded", "throttl",
     # Subscription-window exhaustion (Claude Max via the claude CLI): the CLI
-    # reports "Claude AI usage limit reached|<reset-epoch>", but ALSO — and this
-    # is the case that silently killed overnight runs — often just STALLS when the
-    # window is spent, so the subprocess is hard-killed at the wall-clock cap. A
-    # bare timeout/hard-kill is transient by nature (a wedged prompt still fails
-    # closed after the bounded budget), so it rides the generous budget too.
+    # reports "Claude AI usage limit reached|<reset-epoch>".
     "usage limit", "limit reached", "limit will reset",
     # Claude Max via the claude CLI also reports a spent 5-hour window as
     # "You've hit your session limit · resets 8am (UTC)" — a DIFFERENT phrase
@@ -460,8 +641,22 @@ _RATE_LIMIT_MARKERS = (
     # budget and raised). It is the same transient subscription-window
     # exhaustion, so it rides the generous rate-limit budget too.
     "session limit",
-    "hard-killed at wall-clock cap", "timed out", "timeout",
+    # SDK/HTTP request timeouts (APITimeoutError, 408, gateway 504) are short,
+    # transient network stalls — fine to wait out. A CLI wall-clock HARD-KILL is
+    # not: see _is_wall_clock_kill.
+    "timed out", "timeout",
 )
+
+# A CLI subprocess killed at its wall-clock cap (cli_transports) already spent the
+# whole cap — up to FOUNDRY_CLI_TIMEOUT_S. Re-running the identical prompt on the
+# rate-limit budget (6 tries) silently burned 30+ minutes on one planner call, so
+# it gets its own budget of one retry and then fails closed.
+_WALL_CLOCK_KILL_MARKER = "hard-killed at"
+_WALL_CLOCK_KILL_RETRIES = 1
+
+
+def _is_wall_clock_kill(exc: BaseException) -> bool:
+    return _WALL_CLOCK_KILL_MARKER in str(exc).lower()
 
 
 def _int_env(name: str, default: int) -> int:
@@ -558,7 +753,7 @@ def _seconds_until_clock_reset(text: str) -> float | None:
         hour = 0
     if not (0 <= hour <= 23 and 0 <= minute <= 59):
         return None
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if target <= now:
         target += timedelta(days=1)
@@ -692,6 +887,9 @@ class ModelProviderProxy:
         # (``local_slot``) can still make its own calls through here.
         self._local_tiers: frozenset[str] = frozenset(local_tiers)
         self._local_lock: threading.RLock = local_lock or threading.RLock()
+        # Local tiers' sampling override (FOUNDRY_LOCAL_SAMPLING), parsed now so a
+        # typo fails at startup rather than on the first local call.
+        self._local_sampling = parse_local_sampling(os.environ.get(LOCAL_SAMPLING_ENV, ""))
         self._lineage = lineage_map or LineageMap()
         self._signer = signer
         # Backend/model-aware determinism control (arch §8): which knob a
@@ -810,9 +1008,14 @@ class ModelProviderProxy:
         *,
         purpose: Purpose,
         schema: dict[str, Any] | None = None,
+        tools: Sequence[dict[str, Any]] | None = None,
     ) -> CompletionResult:
         """One credentialed model call: build → send (bounded retry) →
-        observe lineage → record manifest → return text/JSON + usage."""
+        observe lineage → record manifest → return text/JSON + usage.
+
+        ``tools`` (Anthropic shape: name/description/input_schema) offers native
+        tool calls, returned on ``CompletionResult.tool_calls``; a backend without
+        a tool channel raises :class:`ToolsUnsupported`."""
         if purpose not in _PURPOSES:
             raise ValueError(f"unknown purpose: {purpose!r}")
         if tier not in self._tier_models:
@@ -821,8 +1024,24 @@ class ModelProviderProxy:
             )
         requested_model = self._tier_models[tier]
         request, sampling, sampling_note = self._build_request(
-            requested_model, system_sop, messages, purpose, schema
+            requested_model, system_sop, messages, purpose, schema, tools
         )
+        if purpose == "judgment" and tier in self._local_tiers:
+            # A verdict is ~1k tokens; a local model stuck repeating findings runs to
+            # the cap at ~12 tok/s, so each such attempt would cost ~20 minutes.
+            request["max_tokens"] = min(int(request["max_tokens"]), _LOCAL_JUDGMENT_MAX_TOKENS)
+        if tier in self._local_tiers:
+            profile = local_sampling_for(requested_model, self._local_sampling)
+            if profile is not None:
+                # Vendor sampling replaces greedy on local tiers (see
+                # _LOCAL_SAMPLING_PROFILES); the seed keeps the call replayable.
+                request.pop("temperature", None)
+                request["local_sampling"] = _seeded(request, profile)
+                sampling = dict(request["local_sampling"])
+                sampling_note = (
+                    f"local sampling profile for {requested_model} in lieu of "
+                    "greedy decoding (vendor: greedy degrades this model); seeded per request"
+                )
 
         label = f"model call: {node_id} ({tier}, {purpose})"
         cached = self._cached(request, schema)
@@ -832,7 +1051,9 @@ class ModelProviderProxy:
         else:
             progress.log(f"start {label}")
             started = time.monotonic()
-            response, parsed = self._send_with_retry(request, schema=schema, tier=tier)
+            response, parsed = self._send_with_retry(
+                request, schema=schema, tier=tier, label=label
+            )
             progress.finished(label, started, response.usage, self.token_meter)
             self._cache_put(request, schema, response)
 
@@ -861,6 +1082,8 @@ class ModelProviderProxy:
             record["drift_kind"] = drift_kind
         if sampling_note:
             record["sampling_note"] = sampling_note
+        if tools is not None:
+            record["tool_calls"] = len(response.tool_calls)
         if self._manifest.maxlen is not None and len(self._manifest) == self._manifest.maxlen:
             self._manifest_dropped += 1     # this append rolls the oldest record off
         self._manifest.append(record)
@@ -894,6 +1117,7 @@ class ModelProviderProxy:
             usage=dict(response.usage),
             stop_reason=response.stop_reason,
             manifest_record=record,
+            tool_calls=response.tool_calls,
         )
 
     # ---- trusted judgment path ---------------------------------------------------
@@ -910,6 +1134,8 @@ class ModelProviderProxy:
         seq: Seq,
         tier: str = "T1",
         gate_name: str = "review",
+        failing_gates: Iterable[str] = (),
+        failing_tests: Iterable[str] = (),
     ) -> JudgmentResult:
         """Run a judgment call and return a proxy-stamped ``GateResult``.
 
@@ -918,6 +1144,11 @@ class ModelProviderProxy:
         cannot have a free-form "approve" authentically signed (arch §2b).
         The binding is stamped here, outside the adapter, by the injected
         ZoneBSigner; the adapter never holds the key.
+
+        ``failing_gates`` / ``failing_tests`` are the gate names and test/scenario
+        ids that failed on the reviewed tree in the caller's attested gate results;
+        a finding citing anything else blocks only with a differing reproduction
+        (:func:`_verdict_findings`).
         """
         if self._signer is None:
             raise RuntimeError(
@@ -937,7 +1168,9 @@ class ModelProviderProxy:
             raise VerdictChannelError(
                 f"constrained verdict channel returned out-of-grammar payload: {verdict!r}"
             )
-        findings, backed = _verdict_findings(verdict.get("findings"))
+        findings, backed = _verdict_findings(
+            verdict.get("findings"), failing_gates, failing_tests
+        )
         status = _STATUS_BY_VERDICT[verdict["status"]]
         if not backed:
             # Decided here, before the binding is stamped: a downgrade after signing
@@ -1000,6 +1233,7 @@ class ModelProviderProxy:
         messages: Sequence[dict[str, Any]],
         purpose: Purpose,
         schema: dict[str, Any] | None,
+        tools: Sequence[dict[str, Any]] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any], str | None]:
         """Returns (request, sampling-record, substitution-note).
 
@@ -1043,12 +1277,16 @@ class ModelProviderProxy:
                 request["temperature"] = 0
                 sampling = {"temperature": 0}
         else:  # ideation — exploration helps (arch §8)
-            if takes_effort:
+            # Not with tools: a thinking turn that calls a tool must be replayed
+            # with its thinking blocks, which the tool-result history doesn't carry.
+            if takes_effort and tools is None:
                 request["thinking"] = {"type": "adaptive"}
                 sampling = {"thinking": "adaptive"}
 
         if schema is not None:
             output_config["format"] = {"type": "json_schema", "schema": schema}
+        if tools is not None:
+            request["tools"] = [dict(t) for t in tools]
         if output_config:
             request["output_config"] = output_config
         return request, sampling, note
@@ -1067,6 +1305,7 @@ class ModelProviderProxy:
             return None
         try:
             raw = json.loads(self._cache_path(request, schema).read_text(encoding="utf-8"))
+            raw["tool_calls"] = tuple(raw.get("tool_calls") or ())
             response = ProviderResponse(**raw)
         except (OSError, ValueError, TypeError):
             return None
@@ -1090,6 +1329,7 @@ class ModelProviderProxy:
         *,
         schema: dict[str, Any] | None = None,
         tier: str | None = None,
+        label: str | None = None,
     ) -> tuple[ProviderResponse, dict[str, Any] | None]:
         """Bounded retry/backoff, then fail closed; returns (response, parsed).
 
@@ -1103,23 +1343,59 @@ class ModelProviderProxy:
         (arch §2b/§8).
         """
         meter = self.token_meter
-        if meter is not None:
-            meter.check()
         transport = self._tier_transports.get(tier or "", self._transport)
+        if "tools" in request:
+            probe = getattr(transport, "tools_support", None)
+            if probe is None or probe(str(request.get("model", ""))) is False:
+                raise ToolsUnsupported(
+                    f"{type(transport).__name__} has no native tool calls for "
+                    f"{request.get('model')}"
+                )
         local = tier in self._local_tiers
         attempt = 0          # real transport failures (bounded, fail-closed)
         rl_attempt = 0       # provider throttling (separate, more generous budget)
+        kill_attempt = 0     # CLI wall-clock hard-kills (own small budget)
+        what = f"retry {label or f'model call ({tier})'}"
+
+        def log_retry(exc: BaseException, n: int, budget: int, wait: float) -> None:
+            reason = str(exc).splitlines()[0][:200] if str(exc) else type(exc).__name__
+            progress.log(f"{what} — {reason} [{n}/{budget + 1}], waiting {wait:.0f}s")
+
+        sent = request
         while True:
+            # Every attempt, not only the first: a local call can run many minutes,
+            # and its retries must not carry a run far past its caps.
+            if meter is not None:
+                meter.check()
             try:
                 with self._local_lock if local else nullcontext(), self._limiter.slot():
-                    response = transport.send(request)
+                    response = transport.send(sent)
                 if meter is not None and not local:
                     meter.charge(response.usage)
-                parsed = (
-                    _extract_json_object(response.text) if schema is not None else None
-                )
+                parsed = None
+                if schema is not None:
+                    try:
+                        parsed = _extract_json_object(response.text)
+                    except StructuredOutputError as miss:
+                        sent = _with_parse_correction(request, response, attempt + 1)
+                        raise StructuredOutputError(
+                            f"{miss} (stop reason {response.stop_reason!r})"
+                        ) from None
                 return response, parsed
+            except ToolsUnsupported:
+                raise
             except Exception as exc:
+                if _is_wall_clock_kill(exc):
+                    if kill_attempt >= _WALL_CLOCK_KILL_RETRIES:
+                        raise ProxyUnavailable(
+                            f"{exc} on {kill_attempt + 1} attempt(s); "
+                            "judgment nodes must pause-and-escalate"
+                        ) from exc
+                    wait = self._retry.backoff_base_s * (2**kill_attempt)
+                    log_retry(exc, kill_attempt + 1, _WALL_CLOCK_KILL_RETRIES, wait)
+                    self._retry.sleep_before_retry(kill_attempt)
+                    kill_attempt += 1
+                    continue
                 is_rl, retry_after = _classify_rate_limit(exc)
                 if is_rl:
                     # Provider throttled us — wait it out on the rate-limit budget,
@@ -1148,19 +1424,24 @@ class ModelProviderProxy:
                               f"{wait / 60:.0f} min (resuming ~{resume_at}) "
                               f"[wait {rl_attempt + 1}/{self._rl_max_retries}]")
                     if on_rate_limit_wait is not None:
-                        try:
+                        with contextlib.suppress(Exception):  # advisory telemetry only
                             on_rate_limit_wait(
                                 wait, time.time() + wait, retry_after is not None
                             )
-                        except Exception:  # noqa: S110 — advisory telemetry only
-                            pass
+                    log_retry(exc, rl_attempt + 1, self._rl_max_retries, wait)
                     self._rl_sleeper(wait)
                     rl_attempt += 1
                     continue
                 if attempt >= self._retry.max_retries:
+                    if isinstance(exc, StructuredOutputError):
+                        raise ProxyUnavailable(
+                            f"no parseable structured reply in {attempt + 1} attempt(s): {exc}"
+                        ) from exc
                     raise ProxyUnavailable(
                         f"provider transport failed after {attempt + 1} attempt(s); "
                         "judgment nodes must pause-and-escalate (no family fallback)"
                     ) from exc
+                log_retry(exc, attempt + 1, self._retry.max_retries,
+                          self._retry.backoff_base_s * (2**attempt))
                 self._retry.sleep_before_retry(attempt)
                 attempt += 1

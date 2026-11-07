@@ -53,6 +53,13 @@ def test_unknown_adapter_name_raises(proxy: Any) -> None:
         make_coding_adapter("nope", proxy=proxy)
 
 
+def test_native_tools_are_opt_in(proxy: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("FOUNDRY_NATIVE_TOOLS", raising=False)
+    assert make_coding_adapter("proxy-agent", proxy=proxy)._tool_complete is None
+    monkeypatch.setenv("FOUNDRY_NATIVE_TOOLS", "1")
+    assert make_coding_adapter("proxy-agent", proxy=proxy)._tool_complete is not None
+
+
 # ---- derived default: --adapter omitted ⇒ substrate follows --backend --------
 
 

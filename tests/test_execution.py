@@ -5,7 +5,14 @@ No network required — the raw-react substrate drives an injected fake proxy se
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import importlib.util
+import os
+import site
+import sys
 import time
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -71,7 +78,8 @@ def test_write_inside_worktree_ok_and_source_untouched(source_dir: Path, sandbox
 def test_run_cwd_is_worktree(sandbox: Sandbox):
     res = sandbox.run(["pwd"])
     assert res.ok
-    assert Path(res.stdout.strip()) == sandbox.worktree
+    # macOS tmp is /var -> /private/var: pwd prints the resolved path.
+    assert Path(res.stdout.strip()).resolve() == sandbox.worktree.resolve()
 
 
 def test_destroyed_sandbox_refuses_use(source_dir: Path):
@@ -80,6 +88,44 @@ def test_destroyed_sandbox_refuses_use(source_dir: Path):
     sb.destroy()  # idempotent
     with pytest.raises(RuntimeError, match="destroyed"):
         sb.run(["true"])
+
+
+def test_destroy_removes_a_read_only_tree(source_dir: Path, tmp_path: Path):
+    # Go's module cache is written 0555/0444: a plain rmtree(ignore_errors) leaks it.
+    sb = Sandbox(source_dir)
+    root = sb._root
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o755)
+    (outside / "keep").write_text("x")
+    cache = sb.worktree / "gopath" / "pkg" / "mod" / "example.com" / "m@v1"
+    cache.mkdir(parents=True)
+    (cache / "go.mod").write_text("module m\n")
+    (cache / "link").symlink_to(outside)
+    (cache / "go.mod").chmod(0o444)
+    for d in (cache, *cache.parents):
+        if d == sb.worktree:
+            break
+        d.chmod(0o555)
+    sb.destroy()
+    assert not root.exists()
+    assert (outside / "keep").exists()
+    assert outside.stat().st_mode & 0o777 == 0o755  # the symlink was not followed
+
+
+def test_dir_chmod_never_follows_a_symlink(tmp_path: Path):
+    # The path is opened O_NOFOLLOW: a directory swapped for a symlink after the
+    # walk's islink check would otherwise be chmod-ed through it.
+    from foundry.execution.sandbox import _chmod_dir_nofollow
+
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o755)
+    (tmp_path / "link").symlink_to(outside)
+    _chmod_dir_nofollow(str(tmp_path / "link"))
+    assert outside.stat().st_mode & 0o777 == 0o755
+    inside = tmp_path / "ro"
+    inside.mkdir(mode=0o555)
+    _chmod_dir_nofollow(str(inside))
+    assert inside.stat().st_mode & 0o777 == 0o700
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +169,112 @@ def test_proxy_endpoint_is_the_only_egress_told(source_dir: Path):
         assert "FOUNDRY_PROXY_ENDPOINT" not in no_proxy.scrubbed_env()
     with Sandbox(source_dir, proxy_endpoint="http://127.0.0.1:9999") as with_proxy:
         assert with_proxy.scrubbed_env()["FOUNDRY_PROXY_ENDPOINT"] == "http://127.0.0.1:9999"
+
+
+# ---------------------------------------------------------------------------
+# Sandbox: Python environment (installs never reach Foundry's own venv)
+# ---------------------------------------------------------------------------
+
+
+def _dist_files(name: str, version: str, body: str) -> dict[str, str]:
+    info = f"{name}-{version}.dist-info"
+    return {
+        f"{name}/__init__.py": body,
+        f"{info}/METADATA": f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n",
+        f"{info}/WHEEL": "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\n"
+        "Tag: py3-none-any\n",
+    }
+
+
+def _record(files: dict[str, str], record_path: str) -> str:
+    lines = []
+    for path, text in files.items():
+        data = text.encode()
+        digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=")
+        lines.append(f"{path},sha256={digest.decode()},{len(data)}")
+    return "\n".join([*lines, f"{record_path},,"]) + "\n"
+
+
+def _wheel(dest: Path, name: str, version: str, body: str) -> Path:
+    """A minimal pure-Python wheel, built offline (pip installs it with --no-index)."""
+    files = _dist_files(name, version, body)
+    record = f"{name}-{version}.dist-info/RECORD"
+    files[record] = _record(files, record)
+    whl = dest / f"{name}-{version}-py3-none-any.whl"
+    with zipfile.ZipFile(whl, "w") as zf:
+        for path, text in files.items():
+            zf.writestr(path, text)
+    return whl
+
+
+def _tree(root: Path) -> dict[str, bytes]:
+    return {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+
+def test_scrubbed_env_drops_foundry_venv_bin_and_points_at_the_sandbox_venv(
+    source_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    host_venv = tmp_path / "foundry-venv"
+    monkeypatch.setattr(sys, "prefix", str(host_venv))
+    monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "base"))
+    monkeypatch.setenv("PATH", os.pathsep.join([str(host_venv / "bin"), "/usr/bin", "/bin"]))
+    monkeypatch.setenv("VIRTUAL_ENV", str(host_venv))
+    with Sandbox(source_dir) as sb:
+        env = sb.scrubbed_env()
+    entries = env["PATH"].split(os.pathsep)
+    assert str(host_venv / "bin") not in entries
+    assert entries[1:] == ["/usr/bin", "/bin"]
+    assert env["VIRTUAL_ENV"] != str(host_venv)
+    assert entries[0] == str(Path(env["VIRTUAL_ENV"]) / "bin")
+
+
+def test_pip_install_lands_in_the_sandbox_never_in_foundrys_environment(
+    source_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # Stand-in for Foundry's site-packages holding probe_pkg 1.0: the sandbox reads
+    # it, an install of 2.0 shadows it, and pip must leave the host copy untouched.
+    host_site = tmp_path / "host-site"
+    host_site.mkdir()
+    host_files = _dist_files("probe_pkg", "1.0", "WHERE = 'host'\n")
+    host_files["probe_pkg-1.0.dist-info/RECORD"] = _record(
+        host_files, "probe_pkg-1.0.dist-info/RECORD"
+    )
+    for rel, text in host_files.items():
+        (host_site / rel).parent.mkdir(parents=True, exist_ok=True)
+        (host_site / rel).write_text(text)
+    monkeypatch.setattr(site, "getsitepackages", lambda: [str(host_site)])
+    before = _tree(host_site)
+
+    wheels = tmp_path / "wheels"
+    wheels.mkdir()
+    fresh = _wheel(wheels, "sandbox_only_pkg", "0.1", "WHERE = 'sandbox'\n")
+    shadow = _wheel(wheels, "probe_pkg", "2.0", "WHERE = 'sandbox'\n")
+
+    with Sandbox(source_dir) as sb:
+        assert sb.run("python -c 'import probe_pkg; print(probe_pkg.WHERE)'").stdout == "host\n"
+        res = sb.run(["pip", "install", "-q", "--no-index", "--no-deps", str(fresh), str(shadow)])
+        assert res.ok, res.stderr
+        probe = sb.run(
+            "python -c 'import sys, probe_pkg, sandbox_only_pkg as s;"
+            " print(probe_pkg.WHERE, s.WHERE, s.__file__.startswith(sys.prefix))'"
+        )
+        assert probe.stdout == "sandbox sandbox True\n", probe.stderr
+
+    assert _tree(host_site) == before
+    for root in {*site.getsitepackages(), sys.prefix}:
+        assert not list(Path(root).rglob("sandbox_only_pkg*"))
+    assert importlib.util.find_spec("sandbox_only_pkg") is None
+
+
+def test_project_tools_run_inside_the_sandbox(source_dir: Path):
+    (source_dir / "test_smoke.py").write_text("def test_ok():\n    assert True\n")
+    with Sandbox(source_dir) as sb:
+        tests = sb.run(["pytest", "-q", "-p", "no:cacheprovider", "test_smoke.py"])
+        assert tests.ok and "1 passed" in tests.stdout, tests.stdout + tests.stderr
+        tools = sb.run("python -c 'import pytest_bdd' && mypy --version")
+        assert tools.ok, tools.stderr
+        foundry = sb.run(["python", "-c", "import foundry"])
+        assert not foundry.ok  # Foundry's own source stays off the sandbox's path
 
 
 # ---------------------------------------------------------------------------

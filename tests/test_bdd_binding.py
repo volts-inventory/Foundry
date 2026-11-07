@@ -61,6 +61,16 @@ def test_cucumber_tickets_run_their_scenarios_through_the_bdd_command() -> None:
                            stack) == {}
 
 
+def test_a_test_ticket_is_never_told_a_paired_test_ticket_binds_its_scenarios() -> None:
+    python = StackDecision(language="python", test="pytest")
+    scenarios = {"features/T1.feature": ["AC-1"]}
+    feature = " ".join(scenario_rules(("app.py",), scenarios, python))
+    assert "A paired test ticket binds" in feature
+    test = " ".join(scenario_rules(("conftest.py",), scenarios, python, test=True))
+    assert "paired test ticket" not in test
+    assert 'scenarios("../features/T1.feature")' in test
+
+
 def test_a_ticket_without_scenarios_gets_no_scenario_rules() -> None:
     assert scenario_rules(("app.py",), {}, None) == []
 
@@ -80,6 +90,21 @@ def test_a_scoped_gate_judges_only_its_scenarios(tmp_path: Path) -> None:
     assert gate.decide(obs) is GateStatus.PASS
 
 
+def test_a_scoped_gate_runs_a_step_module_under_the_features_dir(tmp_path: Path) -> None:
+    # A cloud plan put the steps in features/step_definitions/: the scoped run skipped
+    # them and reported every scenario "not executed" though plain pytest passed them.
+    root = _project(tmp_path, None)
+    steps = root / "features" / "step_definitions" / "test_t1_steps.py"
+    steps.parent.mkdir()
+    steps.write_text(_STEPS.replace("{expected}", "n").replace(
+        "../features/T1.feature", "../T1.feature"))
+    gate = TestGate(scope=frozenset({"features/T1.feature::AC-1"}))
+    obs = gate.execute(root)
+    assert "features/step_definitions/test_t1_steps.py" in obs.structured["cmd"]
+    assert obs.structured[BDD_KEY] == {"features/T1.feature::AC-1": "passed"}, obs.stdout
+    assert gate.decide(obs) is GateStatus.PASS
+
+
 def test_a_scoped_gate_fails_an_unbound_scenario_without_running_anything(
     tmp_path: Path,
 ) -> None:
@@ -89,6 +114,105 @@ def test_a_scoped_gate_fails_an_unbound_scenario_without_running_anything(
     assert obs.structured[BDD_KEY] == {"features/T1.feature::AC-2": "missing"}
     assert gate.decide(obs) is GateStatus.FAIL
     assert any("features/T1.feature::AC-2 was not executed" in f for f in obs.findings)
+
+
+def test_a_binding_in_conftest_is_named_as_never_collected(tmp_path: Path) -> None:
+    root = _project(tmp_path, None)
+    (root / "tests").mkdir(exist_ok=True)
+    (root / "tests" / "conftest.py").write_text(_STEPS.replace("{expected}", "n"))
+    gate = TestGate()
+    obs = gate.execute(root)
+    # (pytest-bdd may also fail to import the conftest: either way nothing ran.)
+    assert set(obs.structured[BDD_KEY].values()) == {"missing"}
+    assert any(
+        f.startswith("tests/conftest.py call(s) pytest-bdd `scenarios(...)`")
+        and "never collected as a test module" in f
+        for f in obs.findings
+    ), obs.findings
+    assert any("module pytest collects, tests/test_<name>.py" in f for f in obs.findings)
+
+
+def test_a_conftest_that_only_mentions_scenarios_is_not_named(tmp_path: Path) -> None:
+    # A local fixer's conftest said `scenarios(...)` in a comment; the gate read it as
+    # a binding and told it to move a call that did not exist.
+    from foundry.gates.test import conftest_binding_note
+
+    (tmp_path / "conftest.py").write_text(
+        '"""Fixtures; test modules call scenarios(...)."""\n'
+        "# Individual test modules will use scenarios(...) to bind steps.\n"
+    )
+    assert conftest_binding_note(tmp_path) is None
+    (tmp_path / "conftest.py").write_text(
+        "import pytest_bdd\n\npytest_bdd.scenarios('features/T1.feature')\n"
+    )
+    assert conftest_binding_note(tmp_path) is not None
+
+
+def test_a_test_function_named_like_the_generated_one_is_named_as_shadowing(
+    tmp_path: Path,
+) -> None:
+    # A local fixer read `FAILED ...::test_sccart1` as a missing test and wrote one
+    # after scenarios(): it replaced the scenario's test, pytest stayed green, and the
+    # gate's only finding said to bind a file that was already bound.
+    steps = _STEPS.replace("{expected}", "n") + (
+        "\n\ndef test_ac1():\n    assert True\n"
+        "\n\nfrom pytest_bdd import scenario\n"
+        '\n\n@scenario("../features/T1.feature", "AC-2")\ndef test_ac2():\n    pass\n'
+    )
+    for scope in (None, frozenset({"features/T1.feature::AC-1"})):
+        gate = TestGate(scope=scope)
+        obs = gate.execute(_project(tmp_path / str(bool(scope)), steps))
+        assert obs.structured[BDD_KEY]["features/T1.feature::AC-1"] == "missing"
+        assert gate.decide(obs) is GateStatus.FAIL
+        assert obs.findings[0].startswith(
+            "tests/test_t1.py defines `test_ac1` after its `scenarios(...)` call"
+        ), obs.findings
+        assert "features/T1.feature::AC-1: the later definition replaces it" in obs.findings[0]
+        # An explicit @scenario test of that name binds the scenario: not shadowing.
+        assert not any("`test_ac2`" in f for f in obs.findings)
+    assert obs.structured[BDD_KEY] == {"features/T1.feature::AC-1": "missing"}
+
+
+def test_a_same_named_test_before_the_binding_is_not_flagged(tmp_path: Path) -> None:
+    # Defined first, pytest-bdd generates test_ac1_1 instead: the scenario still runs.
+    steps = "def test_ac1():\n    assert True\n\n\n" + _STEPS.replace("{expected}", "n")
+    gate = TestGate()
+    obs = gate.execute(_project(tmp_path, steps))
+    assert set(obs.structured[BDD_KEY].values()) == {"passed"}
+    assert gate.decide(obs) is GateStatus.PASS
+
+
+def test_a_failed_scenario_says_not_to_write_its_generated_test(tmp_path: Path) -> None:
+    gate = TestGate()
+    obs = gate.execute(_project(tmp_path, _STEPS.replace("{expected}", "99")))
+    hit = next(f for f in obs.findings if f.startswith("BDD criterion AC-1"))
+    assert "failed — its pytest test is the one `scenarios(...)` generates" in hit
+    assert "never write a test function of that name yourself" in hit
+
+
+def test_a_conftest_import_error_is_an_error_that_says_why(tmp_path: Path) -> None:
+    root = _project(tmp_path, None)
+    (root / "tests").mkdir(exist_ok=True)
+    (root / "tests" / "conftest.py").write_text("from app.store import Repo\n")
+    gate = TestGate()
+    obs = gate.execute(root)
+    assert obs.exit_codes == (4,)
+    assert gate.decide(obs) is GateStatus.ERROR
+    why = [f for f in obs.findings if not f.startswith("BDD criterion")]
+    assert why and why[0].startswith("pytest usage error"), obs.findings
+    assert "test command exited 4" in why[0] and "app" in why[0]
+
+
+def test_no_collected_test_module_fails_with_a_hint(tmp_path: Path) -> None:
+    root = _project(tmp_path, None)
+    (root / "test_plain.py").unlink()
+    gate = TestGate()
+    obs = gate.execute(root)
+    assert obs.exit_codes == (5,)
+    assert gate.decide(obs) is GateStatus.FAIL
+    assert any(f.startswith("no test modules collected: add tests/test_<name>.py")
+               and "feature files" in f and "test command exited 5" in f
+               for f in obs.findings), obs.findings
 
 
 def test_a_scoped_scenario_absent_from_the_features_fails_closed(tmp_path: Path) -> None:
@@ -192,3 +316,18 @@ def test_a_failed_smoke_run_names_the_exit_code_and_error(tmp_path: Path) -> Non
     assert gate.decide(obs) is GateStatus.FAIL
     assert obs.findings[0].startswith("smoke command exited 2")
     assert any("smoke.py" in f and "No such file" in f for f in obs.findings)
+
+
+def test_a_smoke_command_that_never_exits_is_named_a_server(tmp_path: Path) -> None:
+    (tmp_path / "serve.py").write_text("import time\nprint('listening', flush=True)\n"
+                                       "time.sleep(60)\n")
+    gate = SmokeGate((sys.executable, "serve.py"), timeout_s=2)
+    obs = gate.execute(tmp_path)
+    assert gate.decide(obs) is GateStatus.ERROR
+    assert "long-running server" in obs.findings[0]
+    assert "port 0" in obs.findings[0] and "exits 0" in obs.findings[0]
+    assert any("listening" in f for f in obs.findings)
+
+
+def test_the_default_smoke_timeout_is_five_minutes() -> None:
+    assert SmokeGate(("true",))._timeout_s == 300.0

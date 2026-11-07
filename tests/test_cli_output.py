@@ -84,6 +84,27 @@ def test_halted_run_writes_a_usable_draft(tmp_path: Path) -> None:
     assert "DRAFT written to" in result.summary()
 
 
+def test_a_run_stopped_at_its_cap_still_writes_its_latest_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from foundry.proxy.token_meter import TimeCapExceeded
+
+    def capped(*_: object, **__: object) -> None:
+        raise TimeCapExceeded("time cap reached: 301.0 of 300.0 minutes used")
+
+    # Stop inside the quality stage, after implementation produced its diffs.
+    monkeypatch.setattr("foundry.agents.quality.reviewer.review", capped)
+    out = tmp_path / "generated"
+    with pytest.raises(TimeCapExceeded) as caught:
+        run("build a tiny URL-shortener service", thread_id="cli-out-capped",
+            output_dir=str(out))
+
+    assert "VALUE = 42" in (out / "app.py").read_text(encoding="utf-8")
+    status = (out / "DRAFT-STATUS.md").read_text(encoding="utf-8")
+    assert "stopped before its gates finished: time cap reached" in status
+    assert any(str(out.resolve()) in n for n in getattr(caught.value, "__notes__", ()))
+
+
 def test_main_out_flag_writes_tree(tmp_path: Path) -> None:
     out = tmp_path / "main-out"
     code = main(["--out", str(out), "build a tiny URL-shortener service"])

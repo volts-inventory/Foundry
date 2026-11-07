@@ -15,7 +15,6 @@ import contextvars
 
 import pytest
 
-from foundry.gates import attestation
 from foundry.gates.attestation import DevGateWriteVerifier, ZoneBSigner
 from foundry.schemas.gates import GateResult, GateStatus, VerdictClass
 from foundry.state.global_records import GlobalRecords

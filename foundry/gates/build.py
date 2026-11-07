@@ -13,6 +13,10 @@ optional ``install_cmd`` (the stack's dependency install, e.g. ``npm ci``) runs
 FIRST in its own confined invocation, the only one that keeps network access; the
 build then runs offline over what the install wrote into the workdir.
 
+A Python build that declares dependencies installs them with pip into a per-build
+venv instead (``pydeps``): same single networked step, and a failed pip install is a
+FAIL when pip blames the project's declaration, else ERROR.
+
 Infra vs. verdict: an install that exits non-zero (registry 5xx, network flake) and
 any command exiting 126/127 (the shell could not find or run a binary — a missing
 toolchain) are ERROR, never FAIL: the runner latches a FAIL on the tree digest
@@ -28,12 +32,16 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from foundry.canonical import content_digest
 from foundry.schemas.gates import GateStatus, VerdictClass
 
 from .runner import ZoneAObservation, observe
-from .sandbox import ground_untrusted
+from .sandbox import ground_untrusted, toolchain_scope
+
+if TYPE_CHECKING:
+    from .pydeps import PythonBuildEnv
 
 __all__ = ["MISSING_BINARY_EXIT_CODES", "BuildGate", "build_findings", "commands_digest"]
 
@@ -60,6 +68,37 @@ def build_findings(
     (stdout then stderr), sanitized and bounded. A pure function of the observed
     output with the workdir path normalized to ``.``, so it adds nothing to
     ``results_digest`` that the raw stdout/stderr didn't already bind."""
+    head = f"{step} command exited {rc}"
+    hints: tuple[str, ...] = ()
+    if rc in MISSING_BINARY_EXIT_CODES:
+        head += " (command not found or not executable: missing toolchain — infra ERROR)"
+    elif step == "pip install":
+        from .pydeps import install_failure_is_project, unavailable_requirement_hints
+
+        if install_failure_is_project(stdout + stderr):
+            head += (" (the project's declared dependencies cannot be installed — FAIL: "
+                     "fix requirements.txt / pyproject.toml)")
+            hints = unavailable_requirement_hints(stdout + stderr, workdir)
+        else:
+            head += (" (dependency install failed on the network, the index or the host "
+                     "— an ERROR, never latched)")
+    elif step == "install":
+        head += (
+            " (dependency install failed — an ERROR, never latched: if the output "
+            "names a project problem such as a missing lockfile, a bad manifest or an "
+            "unknown package, fix the manifest; otherwise the registry/network failed)"
+        )
+    elif rc != 0:
+        from .pydeps import undeclared_import_hints
+
+        hints = undeclared_import_hints(stdout + stderr, workdir)
+    tail = output_tail(stdout, stderr, workdir)
+    return (f"{head}; last {len(tail)} output line(s):", *tail, *hints)
+
+
+def output_tail(stdout: str, stderr: str, workdir: Path) -> tuple[str, ...]:
+    """The last lines of a command's output (stdout then stderr), sanitized, bounded,
+    with the workdir path normalized to ``.``."""
     text = "\n".join(t for t in (stdout, stderr) if t.strip())
     root = str(Path(workdir).resolve())
     text = text.replace(root + "/", "./").replace(root, ".")
@@ -67,21 +106,12 @@ def build_findings(
     lines = [ln.rstrip()[:_LINE_CHARS] for ln in text.splitlines() if ln.strip()]
     tail: list[str] = []
     used = 0
-    head = f"{step} command exited {rc}"
-    if rc in MISSING_BINARY_EXIT_CODES:
-        head += " (command not found or not executable: missing toolchain — infra ERROR)"
-    elif step == "install":
-        head += (
-            " (dependency install failed — an ERROR, never latched: if the output "
-            "names a project problem such as a missing lockfile, a bad manifest or an "
-            "unknown package, fix the manifest; otherwise the registry/network failed)"
-        )
     for ln in reversed(lines[-_EXCERPT_LINES:]):
         if used + len(ln) > _EXCERPT_CHARS:
             break
         tail.append(ln)
         used += len(ln)
-    return (f"{head}; last {len(tail)} output line(s):", *reversed(tail))
+    return tuple(reversed(tail))
 
 
 class BuildGate:
@@ -100,9 +130,11 @@ class BuildGate:
         timeout_s: float = 600.0,
         seal_key: bytes | None = None,
         profile_name: str = "",
+        pyenv: PythonBuildEnv | None = None,
     ) -> None:
         self.cmd = cmd or (sys.executable, "-m", "compileall", "-q", ".")
         self.install_cmd = install_cmd or None  # shell line, e.g. the stack's `npm ci`
+        self._pyenv = pyenv  # a Python build's declared deps: pip into its own venv
         self._timeout_s = timeout_s
         self._seal_key = seal_key  # zone-A observation seal (None ⇒ unsealed channel)
         # Class-2 reuse-key bindings (§1f). Build has no held-out mutant
@@ -111,16 +143,37 @@ class BuildGate:
         # v2 = commands run in the confined sandbox: never reuse a pre-sandbox verdict.
         # The command digest: a cached verdict never outlives a change of commands.
         self.scanner_rule_version = "build-cmd-v3:" + commands_digest(
-            cmd=list(self.cmd), install_cmd=self.install_cmd, profile=profile_name
+            cmd=list(self.cmd), install_cmd=self.install_cmd, profile=profile_name,
+            pip_install=list(pyenv.requirements) if pyenv is not None else None,
         )
 
     # ---- zone A: [install, then] build; observe the exit code(s) ------------
 
     def execute(self, workdir: Path) -> ZoneAObservation:
+        with toolchain_scope():  # the install's downloads reach the build step
+            return self._execute(workdir)
+
+    def _execute(self, workdir: Path) -> ZoneAObservation:
         structured: dict[str, object] = {"cmd": list(self.cmd)}
         codes: tuple[int, ...] = ()
         out = err = ""
-        if self.install_cmd is not None:
+        if self._pyenv is not None:
+            structured["pip_install"] = list(self._pyenv.requirements)
+            rc, out, err = self._pyenv.install(workdir, timeout_s=self._timeout_s)
+            codes = (rc,)
+            if rc != 0:
+                return observe(
+                    self.name,
+                    exit_codes=codes,
+                    stdout=out,
+                    stderr=err,
+                    findings=build_findings(
+                        rc, out, err, self._pyenv.scratch, step="pip install"
+                    ),
+                    structured=structured,
+                    seal_key=self._seal_key,
+                )
+        elif self.install_cmd is not None:
             structured["install_cmd"] = self.install_cmd
             rc, out, err = ground_untrusted(
                 ("/bin/sh", "-c", self.install_cmd),
@@ -139,7 +192,11 @@ class BuildGate:
                     structured=structured,
                     seal_key=self._seal_key,
                 )
-        rc, b_out, b_err = ground_untrusted(self.cmd, workdir, timeout_s=self._timeout_s)
+        rc, b_out, b_err = ground_untrusted(
+            self.cmd, workdir, timeout_s=self._timeout_s,
+            extra_env=self._pyenv.run_env() if self._pyenv is not None else None,
+            binds=self._pyenv.binds if self._pyenv is not None else (),
+        )
         return observe(
             self.name,
             exit_codes=(*codes, rc),
@@ -153,12 +210,20 @@ class BuildGate:
     # ---- zone B: pure decision over the observed exit code(s) ---------------
 
     def decide(self, obs: ZoneAObservation) -> GateStatus:
-        expected = 1 if self.install_cmd is None else 2
+        installs = self.install_cmd is not None or self._pyenv is not None
+        expected = 2 if installs else 1
         codes = obs.exit_codes
         if not codes or len(codes) > expected:
             return GateStatus.ERROR  # no / malformed observation -> not a verdict
         if any(c in MISSING_BINARY_EXIT_CODES for c in codes):
             return GateStatus.ERROR  # missing toolchain: infra, never latched
+        if self._pyenv is not None and codes[0] != 0:
+            from .pydeps import install_failure_is_project
+
+            # The project's own bad declaration latches; the network's failure never.
+            if install_failure_is_project(obs.stdout + obs.stderr):
+                return GateStatus.FAIL
+            return GateStatus.ERROR
         if self.install_cmd is not None and codes[0] != 0:
             return GateStatus.ERROR  # failed install (network/registry): retriable
         if any(c != 0 for c in codes):

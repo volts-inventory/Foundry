@@ -16,7 +16,7 @@ import pytest
 import foundry.cli as cli
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
 from foundry.execution.adapters.claude_code import ClaudeCodeAdapter
-from foundry.execution.adapters.proxy_agent import ACTION_SCHEMA, ProxyAgentAdapter
+from foundry.execution.adapters.proxy_agent import ACTION_SCHEMA, TOOLS, ProxyAgentAdapter
 from foundry.execution.adapters.tiered import TieredAdapter
 from foundry.gates.attestation import ZoneBSigner
 from foundry.modes import (
@@ -34,7 +34,12 @@ from foundry.proxy.local_transport import (
     LocalOpenAITransport,
     check_local_server,
 )
-from foundry.proxy.model_provider_proxy import TIER_MODELS
+from foundry.proxy.model_provider_proxy import (
+    TIER_MODELS,
+    _with_parse_correction,
+    local_sampling_for,
+    parse_local_sampling,
+)
 from foundry.proxy.test_doubles import MockTransport
 from foundry.proxy.token_meter import TimeCapExceeded, TokenMeter
 
@@ -314,7 +319,7 @@ def test_a_hybrid_run_routes_tickets_and_calls_by_level(
     result = cli.run("build a thing", model_mode="hybrid", local_url="http://box:1234/v1",
                      local_model="qwen/qwen3.6-27b", ticket_tiers={"standard": "T1"})
 
-    assert result.passed
+    assert result.passed, result.summary()
     assert result.model_mode == "hybrid"
     assert result.levels is not None and result.levels["T2"]["backend"] == "local"
     assert seen["max_fix_attempts"] == 3
@@ -472,12 +477,292 @@ def test_local_schema_rejection_falls_back_to_prompt_and_parse() -> None:
     assert transport.schema_supported is False
 
 
+# ---- local sampling profiles ---------------------------------------------------
+
+
+@pytest.mark.parametrize(("model", "expected"), [
+    (DEFAULT_LOCAL_MODEL, {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0.0,
+                           "presence_penalty": 1.0}),
+    ("hf.co/unsloth/Qwen3-32B-GGUF:Q4_K_M", {"temperature": 0.7, "top_p": 0.8, "top_k": 20,
+                                             "min_p": 0.0, "presence_penalty": 1.0}),
+    ("qwen3-coder:30b", {"temperature": 0.7, "top_p": 0.8, "top_k": 20,
+                         "repeat_penalty": 1.05}),
+    ("acme-coder-7b", None),
+])
+def test_local_sampling_profile_is_picked_by_model_glob(
+    model: str, expected: dict[str, float] | None
+) -> None:
+    assert local_sampling_for(model) == expected
+
+
+def test_local_sampling_env_parses_off_and_overrides() -> None:
+    assert parse_local_sampling("") is None
+    assert parse_local_sampling(" OFF ") == "off"
+    assert parse_local_sampling("temperature=0.5, top_k=40") == {"temperature": 0.5, "top_k": 40}
+    assert local_sampling_for(DEFAULT_LOCAL_MODEL, "off") is None
+    assert local_sampling_for("acme-coder-7b", {"top_p": 0.9}) == {"top_p": 0.9}
+    for bad in ("temperature", "seed=1", "top_p=high"):
+        with pytest.raises(ValueError, match="FOUNDRY_LOCAL_SAMPLING"):
+            parse_local_sampling(bad)
+
+
+def test_a_bad_local_sampling_env_fails_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FOUNDRY_LOCAL_SAMPLING", "temp=1")
+    with pytest.raises(ValueError, match="FOUNDRY_LOCAL_SAMPLING"):
+        _hybrid(RecordingTransport(), RecordingTransport())
+
+
+def test_local_tiers_sample_while_cloud_gates_stay_greedy() -> None:
+    cloud, local = RecordingTransport(), RecordingTransport()
+    proxy = _hybrid(cloud, local)
+    single = RecordingTransport()
+    ModelProviderProxy(single, signer=SIGNER).complete(CALL[0], "T2", *CALL[1:], purpose="gate")
+    proxy.complete(CALL[0], "T1", *CALL[1:], purpose="gate")
+    proxy.complete(CALL[0], "T2", *CALL[1:], purpose="gate")
+    proxy.complete(CALL[0], "T2", *CALL[1:], purpose="judgment")
+    proxy.complete(CALL[0], "T3", *CALL[1:], purpose="ideation")
+    assert single.requests[0]["temperature"] == 0
+    assert "local_sampling" not in single.requests[0]
+    assert "local_sampling" not in cloud.requests[0]
+    assert len(local.requests) == 3
+    for req in local.requests:
+        assert "temperature" not in req
+        assert req["local_sampling"]["temperature"] == 0.7
+        assert isinstance(req["local_sampling"]["seed"], int)
+    assert proxy.manifest[1]["sampling"] == local.requests[0]["local_sampling"]
+    assert "greedy" in proxy.manifest[1]["sampling_note"]
+
+
+def test_local_sampling_off_restores_greedy(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FOUNDRY_LOCAL_SAMPLING", "off")
+    local = RecordingTransport()
+    _hybrid(RecordingTransport(), local).complete(CALL[0], "T2", *CALL[1:], purpose="gate")
+    assert local.requests[0]["temperature"] == 0
+    assert "local_sampling" not in local.requests[0]
+
+
+def test_the_local_seed_is_fixed_per_request_and_moves_with_the_prompt() -> None:
+    local = RecordingTransport()
+    proxy = _hybrid(RecordingTransport(), local)
+    other = [{"role": "user", "content": "y"}]
+    proxy.complete(CALL[0], "T2", *CALL[1:], purpose="gate")
+    proxy.complete(CALL[0], "T2", *CALL[1:], purpose="gate")
+    proxy.complete(CALL[0], "T2", CALL[1], other, purpose="gate")
+    seeds = [r["local_sampling"]["seed"] for r in local.requests]
+    assert seeds[0] == seeds[1] != seeds[2]
+    miss = ProviderResponse(served_model="m", request_id="r", text="{", usage={},
+                            stop_reason="length")
+    retry = _with_parse_correction(local.requests[0], miss, 1)
+    assert retry["local_sampling"]["seed"] != seeds[0]
+    assert {k: v for k, v in retry["local_sampling"].items() if k != "seed"} == {
+        k: v for k, v in local.requests[0]["local_sampling"].items() if k != "seed"}
+
+
+def test_the_local_request_carries_the_sampling_params() -> None:
+    client = _local_client(False, '{"answer": "42"}')
+    transport = LocalOpenAITransport(client=client)
+    proxy = build_level_proxy(
+        preset_levels("local", cloud_backend="mock", cloud_models=TIER_MODELS),
+        cloud_transport=lambda _b: RecordingTransport(), local_transport=lambda _u: transport,
+        signer=SIGNER)
+    proxy.complete(CALL[0], "T2", *CALL[1:], purpose="judgment", schema=SCHEMA)
+    sent = client.chat.completions.calls[0]
+    # Ollama's /v1 maps these OpenAI fields onto its options ...
+    assert sent["temperature"] == 0.7
+    assert sent["top_p"] == 0.8
+    assert sent["presence_penalty"] == 1.0
+    assert isinstance(sent["seed"], int)
+    # ... and drops the rest, so they ride as extra body fields for other servers.
+    assert sent["extra_body"] == {"top_k": 20, "min_p": 0.0}
+    assert "local_sampling" not in sent
+    assert sent["response_format"]["type"] == "json_schema"
+
+
 def test_the_local_client_never_carries_the_openai_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-real-secret")
     transport = LocalOpenAITransport("http://box:1234/v1")
     client = transport._cache.get()
     assert client.api_key != "sk-real-secret"
     assert str(client.base_url).rstrip("/") == "http://box:1234/v1"
+
+
+# ---- native tool calls on the local server (Phase 5) ----------------------------------
+
+
+class _ToolCompletions:
+    """Answers a `tools` call with two tool calls (one with broken arguments) and
+    any other call with the next scripted JSON action."""
+
+    def __init__(self, reject_tools: bool, actions: list[dict[str, Any]] | None = None) -> None:
+        self.reject_tools = reject_tools
+        self.actions = list(actions or [])
+        self.calls: list[dict[str, Any]] = []
+
+    def create(self, **params: Any) -> Any:
+        self.calls.append(params)
+        if "tools" in params:
+            if self.reject_tools:
+                raise RuntimeError("Error code: 400 - library/m does not support tools")
+            calls = [
+                SimpleNamespace(id="call_1", function=SimpleNamespace(
+                    name="read_file", arguments='{"path": "a.py"}')),
+                SimpleNamespace(id=None, function=SimpleNamespace(name="run", arguments="{bad")),
+            ]
+            message = SimpleNamespace(content="", tool_calls=calls)
+        else:
+            message = SimpleNamespace(content=json.dumps(self.actions.pop(0)))
+        return SimpleNamespace(
+            model=params["model"], id="cmpl-t",
+            choices=[SimpleNamespace(message=message, finish_reason="stop")],
+            usage=SimpleNamespace(prompt_tokens=5, completion_tokens=3),
+        )
+
+
+def _tool_proxy(completions: _ToolCompletions) -> tuple[ModelProviderProxy, LocalOpenAITransport]:
+    transport = LocalOpenAITransport(
+        client=SimpleNamespace(chat=SimpleNamespace(completions=completions)))
+    proxy = build_level_proxy(
+        preset_levels("local", cloud_backend="mock", cloud_models=TIER_MODELS),
+        cloud_transport=lambda _b: RecordingTransport(), local_transport=lambda _u: transport,
+        signer=SIGNER)
+    return proxy, transport
+
+
+TOOL_HISTORY = [
+    {"role": "user", "content": "task"},
+    {"role": "assistant", "content": [
+        {"type": "text", "text": "looking"},
+        {"type": "tool_use", "id": "call_0", "name": "search", "input": {"pattern": "x"}}]},
+    {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "call_0", "content": "a.py:1: x"}]},
+]
+
+
+def test_local_server_gets_native_tools_and_returns_tool_calls() -> None:
+    completions = _ToolCompletions(reject_tools=False)
+    proxy, transport = _tool_proxy(completions)
+    result = proxy.complete("node", "T2", "SOP", TOOL_HISTORY, purpose="ideation", tools=TOOLS)
+    sent = completions.calls[0]
+    assert sent["reasoning_effort"] == "none" and "response_format" not in sent
+    assert sent["tools"][0] == {"type": "function", "function": {
+        "name": "read_file", "description": TOOLS[0]["description"],
+        "parameters": TOOLS[0]["input_schema"]}}
+    assert sent["messages"] == [
+        {"role": "system", "content": "SOP"},
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "looking", "tool_calls": [{
+            "id": "call_0", "type": "function",
+            "function": {"name": "search", "arguments": '{"pattern": "x"}'}}]},
+        {"role": "tool", "tool_call_id": "call_0", "content": "a.py:1: x"},
+    ]
+    first, second = result.tool_calls
+    assert first == {"id": "call_1", "name": "read_file", "input": {"path": "a.py"}}
+    assert second["id"] == "tool_call_1" and "not a JSON object" in second["error"]
+    assert result.manifest_record["tool_calls"] == 2
+    assert transport.tools_support(sent["model"]) is True
+
+
+def test_local_tools_rejection_falls_back_to_json_actions(tmp_path: Path) -> None:
+    from foundry.execution.sandbox import Sandbox
+    from foundry.proxy import ToolsUnsupported
+
+    completions = _ToolCompletions(reject_tools=True, actions=[
+        {"action": "write_file", "path": "m.py", "content": "X = 1\n"},
+        {"action": "done", "summary": "ok"},
+    ])
+    proxy, transport = _tool_proxy(completions)
+
+    def _json(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
+        r = proxy.complete("node", "T2", "SOP", list(messages), purpose="ideation",
+                           schema=schema)
+        return r.text, r.parsed
+
+    def _tools(messages: Any, tools: Any) -> tuple[str, Any]:
+        r = proxy.complete("node", "T2", "SOP", list(messages), purpose="ideation",
+                           tools=tools)
+        return r.text, r.tool_calls
+
+    src = tmp_path / "src"
+    src.mkdir()
+    adapter = ProxyAgentAdapter(_json, tool_complete_fn=_tools)
+    with Sandbox(src) as sb:
+        result = adapter.run(TaskPacket(task={"id": "t"}, worktree_path=str(sb.worktree),
+                                         turn_budget=6, cost_budget_microusd=1), sb)
+        body = json.loads(sb.get_blob(result.diff_uri))
+    assert body["files"] == {"m.py": "X = 1\n"}
+    assert ["tools" in c for c in completions.calls] == [True, False, False]
+    assert transport.tools_support(completions.calls[0]["model"]) is False
+    # Remembered for the session: the proxy refuses before reaching the server.
+    with pytest.raises(ToolsUnsupported):
+        proxy.complete("node", "T3", "SOP", TOOL_HISTORY, purpose="ideation", tools=TOOLS)
+    assert len(completions.calls) == 3
+
+
+@pytest.mark.parametrize("order", [("good", "bad"), ("bad", "good")])
+def test_local_tool_support_is_tracked_per_model(order: tuple[str, str]) -> None:
+    from foundry.proxy import ToolsUnsupported
+
+    completions = _ToolCompletions(reject_tools=False)
+    accept = completions.create
+
+    def create(**params: Any) -> Any:
+        if "tools" in params and params["model"] == "bad":
+            completions.calls.append(params)
+            raise RuntimeError("Error code: 400 - library/bad does not support tools")
+        return accept(**params)
+
+    completions.create = create  # type: ignore[method-assign]
+    transport = LocalOpenAITransport(
+        client=SimpleNamespace(chat=SimpleNamespace(completions=completions)))
+    tools = [{"name": "run", "description": "d", "input_schema": {"type": "object"}}]
+    for model in (*order, *order):
+        request = {"model": model, "messages": [{"role": "user", "content": "x"}],
+                   "tools": tools}
+        if model == "bad":
+            # Rejected as unsupported every time, never a plain error, never
+            # disabling the other model's tools.
+            with pytest.raises(ToolsUnsupported):
+                transport.send(request)
+        else:
+            assert transport.send(request).tool_calls
+    assert transport.tools_support("good") is True
+    assert transport.tools_support("bad") is False
+
+
+def test_a_backend_without_a_tool_channel_is_never_sent_tools() -> None:
+    from foundry.proxy import ToolsUnsupported
+
+    local = RecordingTransport()  # like claude-cli: no tools_support probe
+    proxy = build_level_proxy(
+        preset_levels("local", cloud_backend="mock", cloud_models=TIER_MODELS),
+        cloud_transport=lambda _b: RecordingTransport(), local_transport=lambda _u: local,
+        signer=SIGNER)
+    with pytest.raises(ToolsUnsupported):
+        proxy.complete("node", "T2", "SOP", TOOL_HISTORY, purpose="ideation", tools=TOOLS)
+    assert local.requests == []
+
+
+def test_anthropic_tool_use_blocks_come_back_as_tool_calls() -> None:
+    from foundry.proxy import AnthropicTransport
+
+    sent: list[dict[str, Any]] = []
+
+    def create(**request: Any) -> Any:
+        sent.append(request)
+        return SimpleNamespace(
+            model=request["model"], _request_id="req-1", stop_reason="tool_use",
+            content=[SimpleNamespace(type="text", text="ok"),
+                     SimpleNamespace(type="tool_use", id="toolu_1", name="run",
+                                     input={"cmd": "ls"})],
+            usage=SimpleNamespace(input_tokens=1, output_tokens=1, cache_read_input_tokens=0,
+                                  cache_creation_input_tokens=0))
+
+    client = SimpleNamespace(messages=SimpleNamespace(create=create))
+    proxy = ModelProviderProxy(transport=AnthropicTransport(client=client), signer=SIGNER)
+    result = proxy.complete("node", "T1", "SOP", TOOL_HISTORY, purpose="ideation", tools=TOOLS)
+    assert result.tool_calls == ({"id": "toolu_1", "name": "run", "input": {"cmd": "ls"}},)
+    assert sent[0]["tools"] == list(TOOLS) and sent[0]["messages"] == TOOL_HISTORY
+    assert "thinking" not in sent[0]  # a tool turn can't replay thinking blocks
 
 
 # ---- wall-clock cap ---------------------------------------------------------------------

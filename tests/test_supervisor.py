@@ -48,6 +48,7 @@ from foundry.schemas.base import Artifact, FrozenModel
 from foundry.schemas.gates import GateStatus, JudgmentProvenance
 from foundry.schemas.implementation import FeatureDiff, Specialty, Ticket
 from foundry.schemas.product import (
+    PRD,
     AcceptanceCriterion,
     CriteriaCritique,
     Criticality,
@@ -55,7 +56,7 @@ from foundry.schemas.product import (
 from foundry.state.factory_state import FactoryState
 from foundry.state.global_records import GlobalRecords
 from foundry.state.reducers import reset_gate_write_verifier, set_gate_write_verifier
-from tests.planner_payload import PLANNER_SOP_KEY, plan_payload
+from tests.planner_payload import DELTA_SOP_KEY, PLANNER_SOP_KEY, plan_payload
 
 KEY = b"dev-zone-b-supervisor-key-0123456789"
 KEY_ID = "dev-key-supervisor"
@@ -221,6 +222,9 @@ def _synthetic_resolve(handle: Artifact) -> FrozenModel:
             security_abuse=True,  # guarantees Spec-gate security coverage
             seq=handle.seq,
         )
+    if handle.kind == "prd":
+        # No criterion ids: the synthetic criteria ids above are never filtered.
+        return PRD(title="Requested service", prd_uri="cas://design/prd", seq=handle.seq)
     if handle.kind == "criteria_findings":
         # The Criteria-Completeness Critic finding the Spec gate now consumes.
         # No security/abuse omission here -> does not block the clean run.
@@ -323,8 +327,10 @@ def _respec_app(tmp_path: Any, records: GlobalRecords, **kwargs: Any) -> tuple[A
         )
 
     # First match wins: the revision prompt gets the fixed plan, the first pass
-    # a plan with no security/abuse criterion (a Spec FAIL).
-    scripts = {"REVISION PASS": _plan(PRD_PAYLOAD), **_SCRIPTS, PLANNER_SOP_KEY: _plan(no_abuse)}
+    # a plan with no security/abuse criterion (a Spec FAIL); an empty delta falls
+    # back to that full re-plan.
+    scripts = {"REVISION PASS": _plan(PRD_PAYLOAD), DELTA_SOP_KEY: "{}", **_SCRIPTS,
+               PLANNER_SOP_KEY: _plan(no_abuse)}
     tx = MockTransport.scripted(scripts, default_verdict="approve")
     cas = ArtifactStore()
     rt = AgentRuntime(
@@ -394,3 +400,50 @@ def test_a_spec_advance_resets_the_fix_budget_for_the_build_boundary(tmp_path: A
     finally:
         reset_gate_write_verifier(token)
     assert budgets == [(GateStatus.FAIL, 1), (GateStatus.PASS, 0)]
+
+
+# ---- a build where no ticket lands ------------------------------------------
+
+
+class _FailingAdapter(StubAdapter):
+    """Every session fails, so every ticket is retried, then skipped."""
+
+    def run(self, packet: Any, sandbox: Any) -> Any:
+        raise RuntimeError("the session wrote none of the ticket's files")
+
+
+def test_a_build_with_no_ticket_built_halts_at_the_final_gates_without_a_review(
+    tmp_path: Any,
+) -> None:
+    """Every ticket skipped leaves no feature_diff: the reviewer has nothing to judge
+    and raised (real backends pin no subject_artifact_uri). Skip the review, let the
+    final gates record why the empty tree fails, and halt — a fix pass has nothing
+    to repair."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "README.md").write_text("seed\n")
+    tx = MockTransport.scripted(dict(_SCRIPTS), default_verdict="approve")
+    rt = AgentRuntime(proxy=ModelProviderProxy(tx, signer=ZoneBSigner(KEY, KEY_ID)),
+                      adapter=_FailingAdapter())
+    records = GlobalRecords()
+    app = build_supervisor_graph(
+        rt, runner=_runner(records), resolve=_synthetic_resolve,
+        resolve_blob=_resolve_blob_factory(_PASSING_DIFF), source_dir=str(src),
+    ).compile(checkpointer=MemorySaver())
+    config = _config("run-nothing-built")
+    del config["configurable"]["subject_artifact_uri"]
+    token = set_gate_write_verifier(DevGateWriteVerifier(KEY, KEY_ID, records))
+    try:
+        nodes = [n for step in app.stream({"request": "build a todo app"}, config,
+                                          stream_mode="updates") for n in step]
+    finally:
+        reset_gate_write_verifier(token)
+
+    assert "quality" not in nodes
+    assert nodes.count("build_test_gate") == 1
+    final = app.get_state(config).values
+    assert not app.get_state(config).next
+    assert not any(a.kind == "feature_diff" for a in final["artifacts"])
+    statuses = _gates_by_name(final)
+    assert "review" not in statuses
+    assert GateStatus.FAIL in {statuses.get("build"), statuses.get("test")}

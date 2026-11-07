@@ -99,3 +99,16 @@ def test_removed_flags_and_subcommands_are_rejected(argv: list[str]) -> None:
 def test_value_flag_missing_value_is_usage_error(argv: list[str]) -> None:
     # A value flag at the end with no following token is a clean exit-2 usage error.
     assert main(argv) == 2
+
+
+def test_a_value_error_inside_the_run_is_a_crash_not_a_usage_error(monkeypatch) -> None:
+    import foundry.cli as cli
+
+    def _bug(*_a, **_k):
+        raise ValueError("max() iterable argument is empty")
+
+    monkeypatch.setattr(cli, "_invoke", _bug)
+    with pytest.raises(cli.RunCrashed) as info:
+        main(["build a thing"])
+    assert isinstance(info.value.__cause__, ValueError)
+    assert main(["--scope", "bogus", "build a thing"]) == 2

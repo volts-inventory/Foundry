@@ -32,13 +32,17 @@ from dataclasses import dataclass, field
 from foundry.schemas.implementation import StackDecision
 
 __all__ = [
+    "BDD_RUNNERS",
+    "DEFAULT_INSTALL",
     "PROFILES",
     "VerificationProfile",
+    "bdd_runner_hint",
     "installed_profiles",
     "lockfile_tolerant_install",
     "pinned_stack",
     "profile_examples",
     "profile_for_request",
+    "stack_install",
     "stack_profile",
 ]
 
@@ -51,6 +55,9 @@ class VerificationProfile:
     # Dependency install (shell line), run by BuildGate FIRST and the only gate step
     # with network; build/test/smoke then run offline. None = nothing to install.
     install_cmd: str | None = None
+    # A Python stack: its declared dependencies (requirements.txt / pyproject) are
+    # pip-installed into a per-build venv instead (``foundry.gates.pydeps``).
+    python: bool = False
     build_cmd: tuple[str, ...] | None = None
     test_cmd: tuple[str, ...] | None = None
     smoke_cmd: tuple[str, ...] | None = None  # runtime boot gate; None = no smoke gate
@@ -102,6 +109,11 @@ def lockfile_tolerant_install(install: str) -> str:
 
 
 # The pytest harness also executes the tickets' acceptance scenarios.
+_PY_INSTALL_CONTRACT = (
+    " INSTALL: the dependencies declared in requirements.txt / pyproject.toml "
+    "[project].dependencies are pip-installed into a per-build venv first (the ONLY "
+    "step with network); declare every third-party package the code imports."
+)
 _BDD_CONTRACT = (
     " BDD: every Scenario in features/<ticket>.feature (named by its criterion id) "
     "MUST be bound with pytest-bdd `scenarios(...)` and pass; the feature files "
@@ -109,22 +121,185 @@ _BDD_CONTRACT = (
 )
 
 
+# godog has no Cucumber Messages writer: its Cucumber JSON goes to the report and
+# the gate converts it. The runner chdirs to the repo root so the report's feature
+# URIs are ``features/<ticket>.feature``, the paths the gate trusts.
+_GODOG_RUNNER = """\
+package bdd
+
+import (
+	"os"
+	"testing"
+
+	"github.com/cucumber/godog"
+)
+
+var registrars []func(*godog.ScenarioContext)
+
+func register(f func(*godog.ScenarioContext)) { registrars = append(registrars, f) }
+
+func TestFeatures(t *testing.T) {
+	if err := os.Chdir(".."); err != nil {
+		t.Fatal(err)
+	}
+	format := "pretty"
+	if p := os.Getenv("FOUNDRY_BDD_REPORT"); p != "" {
+		format = "cucumber:" + p
+	}
+	suite := godog.TestSuite{
+		ScenarioInitializer: func(sc *godog.ScenarioContext) {
+			for _, f := range registrars {
+				f(sc)
+			}
+		},
+		Options: &godog.Options{
+			Format: format, Paths: []string{"features"}, Strict: true, TestingT: t,
+		},
+	}
+	if suite.Run() != 0 {
+		t.Fatal("feature scenarios failed")
+	}
+}
+"""
+
+_CUCUMBER_RS_RUNNER = """\
+use cucumber::{given, then, when, writer, World as _};
+
+#[derive(Debug, Default, cucumber::World)]
+pub struct World { /* scenario state */ }
+
+// step definitions: #[given("exact text")], #[when(expr = "I add {string}")],
+// #[then(regex = r"^the list has (\\d+) items?$")] fn ...(w: &mut World, ...)
+
+#[tokio::main]
+async fn main() {
+    match std::env::var("FOUNDRY_BDD_REPORT") {
+        Ok(path) => {
+            let out = std::fs::File::create(path).expect("report file");
+            World::cucumber().with_writer(writer::Json::new(out)).run("features").await;
+        }
+        Err(_) => World::run("features").await,
+    }
+}
+"""
+
+# cucumber-js config: `import` loads CommonJS and ESM step files alike.
+_CUCUMBER_JSON = (
+    '{{"default": {{"paths": ["features/**/*.feature"], '
+    '"import": ["features/step_definitions/**/*.{steps}"], "forceExit": true}}}}'
+)
+
+# What each language's standard Cucumber runner needs to write the report the gate
+# reads (``foundry.gates.cucumber``), keyed by StackDecision.language. Runner paths
+# match the planner's default harness files.
+BDD_RUNNERS: dict[str, str] = {
+    "go": (
+        "godog (github.com/cucumber/godog v0.16+) has no Cucumber Messages writer; the "
+        "gate reads its Cucumber JSON instead. bdd = `go test -count=1 ./bdd`. "
+        "bdd/godog_test.go MUST be exactly:\n" + _GODOG_RUNNER
+        + "It compiles with no step files (the harness wave is checked alone). Each "
+        "feature ticket's step file in package bdd (e.g. bdd/<feature>_steps_test.go) "
+        "registers its steps in `func init() { register(func(sc *godog.ScenarioContext) "
+        "{ ... }) }`, each as sc.Step(`^...$`, fn) with a string-literal regex (the gate reads the "
+        "patterns from source to reject catch-all matchers; a pattern built at run "
+        "time counts as one). Require godog in go.mod (install fetches it)."
+    ),
+    "rust": (
+        "cucumber-rs has no Cucumber Messages writer; the gate reads its Cucumber "
+        "JSON (the crate's `output-json` feature) instead. bdd = `cargo test --quiet "
+        "--test cucumber`. Cargo.toml: [dev-dependencies] cucumber = { version = "
+        "\"0.23\", features = [\"output-json\"] }, tokio = { version = \"1\", "
+        "features = [\"macros\", \"rt-multi-thread\"] }; and [[test]] name = "
+        "\"cucumber\", harness = false. Declare no [lib] or [[bin]] section: Cargo "
+        "finds src/lib.rs, src/main.rs and src/bin/*.rs once the feature tickets write "
+        "them, while a declared target whose file is not written yet fails every "
+        "build before them (a manifest with only the [[test]] target builds); the "
+        "default binary is named after [package] name, so match the run command's "
+        "--bin. tests/cucumber.rs:\n" + _CUCUMBER_RS_RUNNER
+        + "Step attributes MUST use string literals (the gate reads the patterns from "
+        "source to reject catch-all matchers)."
+    ),
+    "javascript": (
+        "bdd = `npx cucumber-js --format \"message:$FOUNDRY_BDD_REPORT\"` exactly (double "
+        "quotes: single quotes stop $FOUNDRY_BDD_REPORT expanding), with "
+        "@cucumber/cucumber as a devDependency; `--format json:` is the legacy JSON "
+        "report and is rejected. cucumber.json MUST be exactly:\n"
+        + _CUCUMBER_JSON.format(steps="js") +
+        "\nStep files go under features/step_definitions/. \"forceExit\": true is "
+        "required: cucumber-js "
+        "otherwise waits for every server, socket or timer a step left open, and the "
+        "gate kills the hung run; still stop what the steps start in an AfterAll hook. In "
+        "a Cucumber Expression a literal `/`, `(`, `)`, `{` or `}` MUST be escaped "
+        "with a backslash (`I GET \\/health`) or use a /regex/."
+    ),
+    "java": (
+        "cucumber-jvm writes Cucumber Messages natively: with cucumber-java + "
+        "cucumber-junit-platform-engine + junit-platform-suite as test dependencies "
+        "and a @Suite @IncludeEngines(\"cucumber\") class in "
+        "src/test/java/RunCucumberTest.java, bdd = `mvn -q -B test "
+        "-Dtest=RunCucumberTest -Dsurefire.failIfNoSpecifiedTests=false "
+        "-Dcucumber.features=features -Dcucumber.glue=<step package> "
+        "-Dcucumber.plugin=message:$FOUNDRY_BDD_REPORT`."
+    ),
+    "csharp": (
+        "Reqnroll 3.0+ writes Cucumber Messages (SpecFlow cannot): bdd = "
+        "`REQNROLL_FORMATTERS=\"{\\\"formatters\\\":{\\\"message\\\":"
+        "{\\\"outputFilePath\\\":\\\"$FOUNDRY_BDD_REPORT\\\"}}}\" dotnet test "
+        "<the Reqnroll test project>` with the repo-root features/*.feature files "
+        "linked into that project."
+    ),
+}
+BDD_RUNNERS["typescript"] = (
+    BDD_RUNNERS["javascript"]
+    .replace("bdd = `npx cucumber-js", "bdd = `NODE_OPTIONS=\"--import tsx\" npx cucumber-js")
+    .replace(_CUCUMBER_JSON.format(steps="js"), _CUCUMBER_JSON.format(steps="ts"))
+    + " TypeScript step files need the tsx loader (tsx as a devDependency): node's "
+    "`--import tsx` registers it before cucumber-js imports any step file."
+)
+
+
+# The install a stack gets when the planner gives none: the offline build otherwise
+# has no way to resolve the harness's dev-dependencies.
+DEFAULT_INSTALL: dict[str, str] = {"rust": "cargo fetch"}
+# A Rust install that downloads no crates (`cargo update` only resolves the lockfile)
+# passes a build with no [dependencies] and leaves the offline tests without theirs.
+_CARGO_DOWNLOADS = re.compile(r"\bcargo\s+(fetch|vendor)\b")
+
+
+def stack_install(stack: StackDecision) -> str:
+    """The install line the gates run for ``stack``: its own, with ``cargo fetch``
+    added to a Rust one that downloads nothing; the language default when empty."""
+    install = stack.install.strip() or DEFAULT_INSTALL.get(stack.language, "")
+    if stack.language == "rust" and install and not _CARGO_DOWNLOADS.search(install):
+        install = f"{install} && cargo fetch"
+    return install
+
+
+def bdd_runner_hint(language: str) -> str:
+    """How ``language``'s standard Cucumber runner writes $FOUNDRY_BDD_REPORT ("" for
+    a language with no Cucumber runner the gate reads: Python uses pytest-bdd)."""
+    return BDD_RUNNERS.get(language, "")
+
+
 PROFILES: dict[str, VerificationProfile] = {
     "python": VerificationProfile(
         name="python",
+        python=True,
         contract_text=(
             "GATES: build = `python -m compileall -q .`; test = pytest (>=1 test "
-            "must pass)." + _BDD_CONTRACT
+            "must pass)." + _PY_INSTALL_CONTRACT + _BDD_CONTRACT
         ),
     ),
     "python-app": VerificationProfile(
         name="python-app",
+        python=True,
         smoke_cmd=(sys.executable, "smoke.py"),
         contract_text=(
             "GATES: build = compileall; test = pytest; smoke = `python smoke.py` — "
             "the repo MUST ship smoke.py that exercises the REAL app headless "
             "(start the service and hit one real endpoint in-process, or run the "
-            "CLI end-to-end on sample input) and exits 0 only on success." + _BDD_CONTRACT
+            "CLI end-to-end on sample input) and exits 0 only on success."
+            + _PY_INSTALL_CONTRACT + _BDD_CONTRACT
         ),
     ),
     "node-web": VerificationProfile(
@@ -159,12 +334,13 @@ PROFILES: dict[str, VerificationProfile] = {
     ),
     "pygame": VerificationProfile(
         name="pygame",
+        python=True,
         smoke_cmd=(sys.executable, "smoke.py"),
         contract_text=(
             "GATES: build = compileall; test = pytest; smoke = `python smoke.py` — "
             "the repo MUST ship smoke.py that sets SDL_VIDEODRIVER=dummy, boots the "
             "game, advances >=120 frames with scripted input, and exits 0 only if "
-            "no exception was raised." + _BDD_CONTRACT
+            "no exception was raised." + _PY_INSTALL_CONTRACT + _BDD_CONTRACT
         ),
     ),
     "love2d": VerificationProfile(
@@ -179,13 +355,14 @@ PROFILES: dict[str, VerificationProfile] = {
     ),
     "crypto": VerificationProfile(
         name="crypto",
+        python=True,
         contract_text=(
             "GATES: build = compileall; test = pytest — the suite MUST include "
             "known-answer tests (NIST/RFC vectors) for every primitive touched, a "
             "round-trip property (encrypt->decrypt identity), and a tamper test "
             "(modified ciphertext MUST fail authentication). Use vetted primitives "
             "(the `cryptography` package / libsodium); NEVER hand-roll ciphers, "
-            "modes, or KDFs; no ECB; no static IVs/nonces." + _BDD_CONTRACT
+            "modes, or KDFs; no ECB; no static IVs/nonces." + _PY_INSTALL_CONTRACT + _BDD_CONTRACT
         ),
     ),
     "go": VerificationProfile(
@@ -388,6 +565,18 @@ def pinned_stack(name: str) -> StackDecision:
     )
 
 
+# A third-party library without stubs (flask_login) is not the project's type error.
+# The CLI flag beats a model-written global `ignore_missing_imports = false` or
+# `strict`, but a per-module override beats the flag, so the error codes go too.
+_MYPY = re.compile(
+    r"((?:^|&&|;|\|\|)\s*(?:uv\s+run\s+)?(?:(?:\S*/)?python[\d.]*\s+-m\s+)?)mypy(?=\s|$)"
+)
+_MYPY_LENIENT = (
+    "mypy --ignore-missing-imports --disable-error-code import-not-found "
+    "--disable-error-code import-untyped"
+)
+
+
 def stack_profile(stack: StackDecision) -> VerificationProfile:
     """The gate commands for a planner-chosen stack.
 
@@ -395,15 +584,20 @@ def stack_profile(stack: StackDecision) -> VerificationProfile:
     typecheck as one offline command, so a ticket that breaks an agreed contract
     fails the build with the type checker's own message. With a ``bdd`` command TEST
     runs ``test`` and the Cucumber runner; Python without one keeps the trusted
-    pinned pytest(-bdd) harness. Python never gets an install step: the gates run
-    its tests on the host interpreter, which the sandboxed install cannot write to."""
+    pinned pytest(-bdd) harness. Python's install is not a stack command: the
+    project's declared dependencies go into a per-build venv (``pydeps``)."""
     python = stack.language == "python"
     build = stack.build or (
         f"{shlex.quote(sys.executable)} -m compileall -q ." if python and stack.typecheck else ""
     )
-    steps = [s for s in (build, stack.typecheck) if s]
+    typecheck = (
+        _MYPY.sub(lambda m: m.group(1) + _MYPY_LENIENT, stack.typecheck)
+        if python else stack.typecheck
+    )
+    steps = [s for s in (build, typecheck) if s]
     build_cmd = _sh(" && ".join(steps)) if steps else None
-    install = lockfile_tolerant_install(stack.install) if stack.install and not python else None
+    install_line = stack_install(stack)
+    install = lockfile_tolerant_install(install_line) if install_line and not python else None
     test_unavailable = ""
     if stack.bdd:
         # Scenarios are judged from the Cucumber report; `true` when only bdd is set.
@@ -429,12 +623,45 @@ def stack_profile(stack: StackDecision) -> VerificationProfile:
         test_cmd=test_cmd,
         smoke_cmd=_sh(stack.run) if stack.run else None,
         contract_text="GATES: " + "; ".join(gates) + "."
-        + (_BDD_CONTRACT if python and not stack.bdd else ""),
+        + (_PY_INSTALL_CONTRACT if python else "")
+        + (_BDD_CONTRACT if python and not stack.bdd else "")
+        + (f" BDD: {bdd_runner_hint(stack.language)}"
+           if stack.bdd and bdd_runner_hint(stack.language) else ""),
+        python=python,
         bdd_cmd=stack.bdd or None,
         test_unavailable=test_unavailable,
     )
 
 
 def profile_examples() -> str:
-    """The hand-written profiles as EXAMPLES of gate commands (planner prompt)."""
-    return "\n".join(f"- {name}: {p.contract_text}" for name, p in PROFILES.items())
+    """The hand-written profiles as EXAMPLES of gate commands (planner prompt), each
+    with its language's bdd command."""
+    return "\n".join(
+        f"- {name}: {p.contract_text}" + _bdd_example(_PROFILE_LANGUAGE.get(name, ""))
+        for name, p in PROFILES.items()
+    )
+
+
+# One line per language for the planner's examples; the full recipe (the godog
+# runner file, the cucumber-rs main) is the harness ticket's and the gate's.
+_BDD_EXAMPLES: dict[str, str] = {
+    "python": "leave bdd empty (the built-in pytest-bdd harness runs the scenarios)",
+    "javascript": 'bdd = `npx cucumber-js --format "message:$FOUNDRY_BDD_REPORT"`',
+    "go": "bdd = `go test -count=1 ./bdd` (bdd/godog_test.go: godog writing its "
+          "Cucumber JSON — `cucumber:$FOUNDRY_BDD_REPORT` — the gate converts it)",
+    "rust": "bdd = `cargo test --quiet --test cucumber` (tests/cucumber.rs: cucumber-rs "
+            "writer::Json to $FOUNDRY_BDD_REPORT, the gate converts it)",
+    "java": "bdd = `mvn -q -B test -Dtest=RunCucumberTest "
+            "-Dsurefire.failIfNoSpecifiedTests=false -Dcucumber.features=features "
+            "-Dcucumber.plugin=message:$FOUNDRY_BDD_REPORT`",
+    "csharp": "bdd = Reqnroll 3+ `dotnet test` with REQNROLL_FORMATTERS setting the "
+              "message formatter's outputFilePath to $FOUNDRY_BDD_REPORT",
+    "lua": "leave bdd empty (no Cucumber runner the gate reads; scenarios not executed)",
+    "terraform": "leave bdd empty (no Cucumber runner the gate reads; scenarios not "
+                 "executed)",
+}
+
+
+def _bdd_example(language: str) -> str:
+    example = _BDD_EXAMPLES.get(language)
+    return f" BDD: {example}." if example else ""

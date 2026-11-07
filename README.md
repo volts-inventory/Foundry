@@ -33,9 +33,39 @@ OpenAI APIs — and it writes real code. Examples below use `claude-cli`.
 
 ## Quick start — run the Workshop locally
 
+**Prerequisites.** Core (every install):
+
 ```bash
-python -m venv .venv && source .venv/bin/activate    # 1. install the project (once)
-pip install -e .
+brew install uv git                      # Linux: your package manager + https://docs.astral.sh/uv/
+# Python >= 3.11 (uv fetches one if the system Python is older)
+npm install -g @anthropic-ai/claude-code # the `claude` CLI — cloud mode (claude-cli backend)
+brew install ollama && ollama serve &    # local / hybrid mode only
+ollama pull qwen3.6:27b-coding-mxfp8     # the default local model
+```
+
+Per-stack host toolchains — install only the stacks you will build. A missing one
+makes that stack's gate an ERROR (never a PASS):
+
+| Stack | macOS (Homebrew) | Linux |
+|---|---|---|
+| `python`, `python-app`, `pygame`, `crypto` | nothing extra | nothing extra |
+| `node-web`, `phaser-web` | `brew install node` (node + npm) | `apt install nodejs npm` |
+| `go` | `brew install go` | `apt install golang` |
+| `rust` | `brew install rustup && rustup-init -y` | `curl https://sh.rustup.rs -sSf \| sh` |
+| `dotnet` | `brew install --cask dotnet-sdk` | `apt install dotnet-sdk-8.0` |
+| `java-maven` | `brew install maven openjdk` | `apt install maven default-jdk` |
+| `iac-terraform` | `brew install terraform` | HashiCorp apt repo / release zip |
+| `love2d` | `brew install lua love` (needs `luac`) | `apt install lua5.4 love` |
+
+Rust "missing manifest" error: the toolchain is half-installed — run
+`rustup toolchain install stable --force`. JS BDD scenarios need a Cucumber runner
+(`cucumber-js`); the generated project installs it via `npm`, so Node is enough.
+
+Sandbox: gates run sandboxed with no flag — macOS uses the built-in
+`/usr/bin/sandbox-exec`, Linux uses `unshare` (see Sandboxed gates below).
+
+```bash
+uv sync && source .venv/bin/activate     # 1. install the project (once)
 cp foundry.mac.env.example .env          # 2. Mac preset (Linux: foundry.linux.env.example)
 
 # 3. Auth for claude-cli — pick ONE (skip if you're already logged in here):
@@ -98,6 +128,10 @@ python -m foundry.cli [OPTIONS] "<one-line request>"
   --state-dir <DIR>          # durable, restart-survivable state (FOUNDRY_STATE_DIR)
   --thread-id <NAME>         # run identity; seeds idempotency keys + resume (default: cli-run)
   --max-fix-attempts <N>     # fix-forward retries per failing gate        (default: 3)
+  --fix-until-cap / --no-fix-until-cap
+                             # fix until a dead end or the --time-cap instead of
+                             #   --max-fix-attempts (default: on for --model-mode local;
+                             #   env FOUNDRY_FIX_UNTIL_CAP=0/1)
   --max-slots <N>            # parallelism ceiling                         (default: auto)
   --workers frontend=2,backend=2,data=2,test=2   # tickets in flight per specialty
   --ticket-tiers trivial=T3,standard=T2,complex=T1
@@ -141,6 +175,43 @@ degrade it to fail-closed JSON parsing. Pin exact model ids per tier with
 > Don't set both `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` — the key
 > outranks the token and bills the API.
 
+**Local models** (`--model-mode hybrid|local`) run on an OpenAI-compatible server —
+Ollama's `/v1` by default (`--local-url` / `FOUNDRY_LOCAL_URL`, `--local-model` /
+`FOUNDRY_LOCAL_MODEL`). Local calls do not decode greedily: Qwen's cards warn greedy
+decoding degrades the model into endless repetition, so every local call to a Qwen3
+model gets the vendor's non-thinking sampling (`temperature 0.7, top_p 0.8, top_k 20,
+min_p 0, presence_penalty 1.0`; Qwen3-Coder: `repeat_penalty 1.05` instead of the
+presence penalty) and a seed derived from the request, so a replayed call gets the
+same sample. Ollama's `/v1` honours `temperature`, `top_p`, `presence_penalty`,
+`frequency_penalty` and `seed`; `top_k` / `min_p` / `repeat_penalty` come from the
+model's Modelfile there (other servers take them from the request).
+`FOUNDRY_LOCAL_SAMPLING=temperature=0.6,top_p=0.95` overrides the profile for every
+local model; `FOUNDRY_LOCAL_SAMPLING=off` restores greedy decoding.
+
+A local pass costs only wall-clock time, so in local mode (and custom levels that
+are all local) the build-side fix loops **fix until the time cap**: each wave
+check and the final gate keep running fixer passes past `--max-fix-attempts`,
+keeping the best tree, until a dead end — 2 passes in a row that edit nothing, 2
+landings on a tree the loop already checked, one failure 3 times from one tree, 6
+passes without beating the best tree, 3 ERRORs in a row — or until `--time-cap`
+leaves less than 1.3x the loop's median pass (10 min before one is timed). A wave's
+loop gets only its share of the time left when it started (1 / (waves left + 2)).
+Without `--time-cap` a loop stops after 20 passes. The halt names the rule
+(`fix-stop` triage) and the draft is the best tree. The LLM review runs once the
+final gates pass rather than on every fix pass. `--no-fix-until-cap` or
+`FOUNDRY_FIX_UNTIL_CAP=0` restores the attempts bound; `--fix-until-cap` /
+`FOUNDRY_FIX_UNTIL_CAP=1` turns it on for any mode.
+
+In hybrid mode, **the cloud diagnoses and the local model edits**: before a repair
+attempt that runs on a local tier (a fix pass, or a local ticket's retry), one
+structured call on the strongest cloud tier reads the failure and the files it names
+(up to 20k chars) and returns a root cause, the files to edit and up to 6 concrete
+edits; paths not in the tree are dropped, and the diagnosis heads the local
+attempt's packet and the run's journal. Feedback from a stronger model is what makes
+self-repair work (Olausson et al., arXiv 2306.09896). It is one short cloud call per
+local attempt, on the subscription under `claude-cli` or metered on an API backend;
+if it fails the attempt runs without it. `FOUNDRY_HYBRID_DIAGNOSE=0` turns it off.
+
 ---
 
 ## Workshop UI
@@ -167,9 +238,13 @@ only, read-only filesystem except the workdir, private `/tmp`, host sockets and
 credential stores masked, env allowlist). The dependency-install step gets egress
 only through a gate-owned HTTPS `CONNECT` relay that refuses loopback, metadata and
 private destinations. If the host can't create user namespaces the gates fail
-closed; opt out to the sys.path-fenced in-process harness with
-`FOUNDRY_GATE_SANDBOX=inprocess` (required on macOS), which still refuses the
-install step unless `FOUNDRY_ALLOW_UNSANDBOXED_INSTALL=1`.
+closed; as an escape hatch only, opt out to the unconfined sys.path-fenced
+in-process harness with `FOUNDRY_GATE_SANDBOX=inprocess`, which still refuses the install step unless
+`FOUNDRY_ALLOW_UNSANDBOXED_INSTALL=1`. On macOS the same gates run under Seatbelt
+(`sandbox-exec`) by default: writes fenced to the workdir, credential stores and
+Foundry's `.env`/state dir unreadable, loopback-only network with the install's
+egress through the same relay. Its loopback is the host's, though, so host services
+on 127.0.0.1 stay reachable (see `foundry/gates/sandbox.py`).
 
 ### Long-lived server
 
@@ -204,6 +279,9 @@ uv run pytest -n auto -q                                  # full suite (slow e2e
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | API keys | — |
 | `CLAUDE_CODE_OAUTH_TOKEN` | `claude-cli` token (via `claude setup-token`) | — |
 | `FOUNDRY_MODEL_T1/T2/T3` | Pin exact model id per tier | curated map |
+| `FOUNDRY_LOCAL_URL` / `FOUNDRY_LOCAL_MODEL` | Local server + model (hybrid/local modes) | Ollama `/v1` · `qwen3.6:27b-coding-mxfp8` |
+| `FOUNDRY_HYBRID_DIAGNOSE` | `0` skips the cloud diagnosis before a local repair attempt (hybrid) | on |
+| `FOUNDRY_LOCAL_SAMPLING` | Local sampling: `key=value,...` override or `off` (greedy) | per-model profile |
 | `FOUNDRY_MAX_SLOTS` | Parallelism ceiling | auto |
 | `FOUNDRY_COST_CAP_MICROUSD` / `FOUNDRY_TOKEN_CAP` | Spend / token envelope | — |
 | `FOUNDRY_STATE_DIR` | Durable state dir | in-memory |
@@ -217,6 +295,7 @@ uv run pytest -n auto -q                                  # full suite (slow e2e
 | `WORKSHOP_MAX_CONCURRENT_BUILDS` | Builds running at once; extras queue | `2` |
 | `FOUNDRY_MAX_RPM` / `FOUNDRY_MAX_CONCURRENT_CALLS` | Client-side throttles (`0` = off) | `0` |
 | `FOUNDRY_RATE_LIMIT_RETRIES` | Waits to ride out a 429/529 burst | `6` |
+| `FOUNDRY_CLI_TIMEOUT_S` | Wall-clock cap per `claude`/`codex` CLI call; a hard-kill is retried once | `1800` |
 | `FOUNDRY_CLIENT_TTL_S` | Rebuild SDK client every N s (`0` = off) | `0` |
 | `FOUNDRY_MANIFEST_MAX` | Cap proxy per-call manifest (`0` = unbounded) | `100000` |
 | `WORKSHOP_LOG_TAIL` / `WORKSHOP_LOG_GRACE_S` / `WORKSHOP_LOG_SWEEP_S` | Finished-build log trim | `64` · `90` · `120` |

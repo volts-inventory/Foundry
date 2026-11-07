@@ -72,14 +72,16 @@ from foundry.execution.adapters.stub import StubAdapter
 from foundry.gates import DevGateWriteVerifier, TwoZoneGateRunner, ZoneBSigner
 from foundry.gates.signing import signing_schemes_from_env
 from foundry.graph.factory_graph import build_factory_graph, terminal_gates_pass
-from foundry.graph.gate_wiring import GATE_INPUT_FILES
+from foundry.graph.gate_wiring import GATE_INPUT_FILES, FixPolicy
 from foundry.graph.supervisor import MODE_ASSISTANT, RESUME_PHASE, resume_boundary
 from foundry.manifest import write_manifest
 from foundry.modes import (
     DEFAULT_FIX_ATTEMPTS,
+    DEFAULT_FIX_UNTIL_CAP,
     MODEL_MODES,
     Level,
     build_level_proxy,
+    escalation_tier,
     local_tiers,
     resolve_levels,
 )
@@ -90,7 +92,12 @@ from foundry.proxy.local_transport import (
     LocalOpenAITransport,
     check_local_server,
 )
-from foundry.proxy.model_provider_proxy import DriftMode, DriftPolicy, ProviderTransport
+from foundry.proxy.model_provider_proxy import (
+    DriftMode,
+    DriftPolicy,
+    ProviderTransport,
+    is_transient_failure,
+)
 from foundry.proxy.test_doubles import MockTransport
 from foundry.proxy.token_meter import (
     BuildStopped,
@@ -100,7 +107,7 @@ from foundry.proxy.token_meter import (
 )
 from foundry.schemas.architecture import OwnershipMap, SystemDesign
 from foundry.schemas.base import FrozenModel
-from foundry.schemas.gates import GateStatus
+from foundry.schemas.gates import FixPass, GateResult, GateStatus
 from foundry.schemas.implementation import (
     DEFAULT_TICKET_TIERS,
     Difficulty,
@@ -218,6 +225,10 @@ _PROXY_AGENT_SOP = (
     "is exactly one JSON action, as the user message specifies. Touch only what the "
     "task needs."
 )
+_PROXY_AGENT_TOOLS_SOP = (
+    "You are a senior software engineer working step by step in a sandbox. Work by "
+    "calling the tools the user message describes. Touch only what the task needs."
+)
 
 
 def make_coding_adapter(
@@ -284,7 +295,23 @@ def make_coding_adapter(
             )
             return result.text or "", result.parsed
 
-        return ProxyAgentAdapter(complete_fn=_agent_complete, run_id=thread_id)
+        def _agent_tools(messages: Any, tools: Any) -> tuple[str, Any]:
+            result = proxy.complete(
+                "junior_engineer",
+                current_packet_tier() or "T1",
+                _PROXY_AGENT_TOOLS_SOP,
+                list(messages),
+                purpose="ideation",
+                tools=tools,
+            )
+            return result.text or "", result.tool_calls
+
+        # Opt-in (Phase 5): the actions as native tool calls; a backend without a
+        # tool channel (claude-cli, codex) falls back to JSON actions on its own.
+        native = os.environ.get("FOUNDRY_NATIVE_TOOLS", "").strip().lower() not in (
+            "", "0", "false", "no")
+        return ProxyAgentAdapter(complete_fn=_agent_complete, run_id=thread_id,
+                                 tool_complete_fn=_agent_tools if native else None)
     raise ValueError(f"unknown adapter {name!r}; choose one of {', '.join(ADAPTERS)}")
 
 
@@ -430,7 +457,8 @@ def _level_adapter(
     """The coding substrate under a level table: a ticket on a cloud level runs the
     run's cloud adapter (claude-code under claude-cli) with the cloud levels'
     models; a ticket on a local level runs proxy-agent through the local server,
-    one session at a time."""
+    one session at a time. In a mixed (hybrid) table a local ticket that can't
+    finish re-runs once on the strongest cloud level."""
     from foundry.execution.adapters.tiered import TieredAdapter
 
     local = make_coding_adapter("proxy-agent", proxy=proxy, thread_id=thread_id)
@@ -443,7 +471,7 @@ def _level_adapter(
             tier_models=cloud_models,
         )
     return TieredAdapter(cloud=cloud, local=local, local_tiers=local_tiers(levels),
-                         local_slot=proxy.local_slot)
+                         local_slot=proxy.local_slot, escalation_tier=escalation_tier(levels))
 
 
 # Spec ingestion (task [8]). A whole-run cap on the design-spec text seeded into
@@ -614,6 +642,11 @@ def _synthetic_resolve(store: ArtifactStore) -> ArtifactResolver:
                 security_abuse=True,  # guarantees Spec-gate security coverage
                 seq=handle.seq,
             )
+        if handle.kind == "prd":
+            # The criteria above get synthetic ids the PRD never lists: an empty
+            # list keeps the gates from filtering them all out as dropped.
+            prd = store.resolve(handle)
+            return prd.model_copy(update={"criterion_ids": ()})
         if handle.kind == "feature_diff":
             return FeatureDiff(
                 diff_uri=_DIFF_BODY_URI,
@@ -680,8 +713,10 @@ def _write_output_tree(
     *,
     resolve: ArtifactResolver,
     resolve_blob: BlobResolver,
+    best: FixPass | None = None,
 ) -> str:
     """Materialize the FINAL accepted integrated tree and write the source files.
+    With ``best`` (a halted run's draft), write that fix pass's tree instead.
 
     Reuses :func:`graph.gate_wiring.materialize_workdir` over the reviewed
     FeatureDiff handles + the same ``resolve`` / ``resolve_blob`` seams the run
@@ -697,15 +732,19 @@ def _write_output_tree(
     relative path against the destination root (mirrors
     ``materialize_workdir``) so a write can never escape ``output_dir``.
     """
-    from foundry.graph.gate_wiring import materialize_workdir
+    from foundry.graph.gate_wiring import materialize_best, materialize_workdir
 
     out_root = Path(output_dir).resolve()
     out_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="foundry-cli-out-") as staging:
         stage_root = Path(staging)
-        materialize_workdir(
-            final_state, stage_root, resolve=resolve, resolve_blob=resolve_blob
-        )
+        if best is not None:
+            materialize_best(final_state, stage_root, best, resolve=resolve,
+                             resolve_blob=resolve_blob)
+        else:
+            materialize_workdir(
+                final_state, stage_root, resolve=resolve, resolve_blob=resolve_blob
+            )
         for src in sorted(stage_root.rglob("*")):
             if not src.is_file():
                 continue
@@ -731,26 +770,47 @@ def _write_draft_on_halt(
     gate_findings: dict[str, tuple[str, ...]],
     resolve: ArtifactResolver,
     resolve_blob: BlobResolver,
+    stopped: str | None = None,
 ) -> str | None:
-    """Write a best-effort DRAFT on a HALTED run: the latest attempt's source tree
-    plus a ``DRAFT-STATUS.md`` naming what's still failing — so a held build hands back
-    a usable starting point, never empty hands. Best-effort: a tree that can't even be
-    materialized (e.g. an unparseable diff) is skipped (returns ``None``), never crashes
-    the run. Clearly marked NOT shipped — the gates rejected the tree."""
+    """Write a best-effort DRAFT on a HALTED run: the best tree of the fix loop the
+    run ended in (:func:`~foundry.graph.gate_wiring.draft_best`), else the latest
+    attempt's source tree, plus a ``DRAFT-STATUS.md`` naming what's still failing on
+    it — so a held build hands back a usable starting point, never empty hands.
+    Best-effort: a tree that can't even be materialized (e.g. an unparseable diff) is
+    skipped (returns ``None``), never crashes the run. Clearly marked NOT shipped —
+    the gates rejected the tree."""
+    from foundry.graph.gate_wiring import draft_best
+
     try:
+        best = draft_best(final_state, resolve)
         draft_root = _write_output_tree(
-            final_state, output_dir, resolve=resolve, resolve_blob=resolve_blob
+            final_state, output_dir, resolve=resolve, resolve_blob=resolve_blob, best=best
         )
     except Exception:
-        return None
+        best = None
+        try:
+            draft_root = _write_output_tree(
+                final_state, output_dir, resolve=resolve, resolve_blob=resolve_blob
+            )
+        except Exception:
+            return None
     gates = final_state.get("gates") or ()
     statuses = {g.name: g.status for g in gates}
+    if best is not None:
+        newest: dict[str, GateResult] = {}
+        for g in gates:
+            if g.run_against == best.tree and (g.name not in newest or g.seq > newest[g.name].seq):
+                newest[g.name] = g
+        statuses = {name: g.status for name, g in newest.items()}
+        gate_findings = {name: tuple(g.findings) for name, g in newest.items()}
     lines = [
         "# DRAFT — held at the gate (NOT shipped)\n\n",
         "This build did not pass every gate, so it was **not admitted/released**. The\n",
         "source below is the best attempt — fix what's failing, then re-run.\n\n",
-        "## Gate verdicts\n\n",
     ]
+    if stopped:
+        lines.append(f"The run stopped before its gates finished: {stopped}\n\n")
+    lines.append("## Gate verdicts\n\n")
     for name, status in statuses.items():
         mark = "✅" if status is GateStatus.PASS else "❌"
         lines.append(f"- {mark} **{name}**: {str(status).split('.')[-1]}\n")
@@ -767,6 +827,40 @@ def _write_draft_on_halt(
                 lines.append(f"\n### {name}\n\n```\n{body}\n```\n")
     (Path(draft_root) / "DRAFT-STATUS.md").write_text("".join(lines), encoding="utf-8")
     return draft_root
+
+
+def _latest_values(app: Any, config: RunnableConfig) -> FactoryState:
+    """The newest checkpointed state that carries artifacts: the deepest in-flight
+    stage subgraph's, since a stage holds its work until it returns."""
+    snap = app.get_state(config, subgraphs=True)
+    best = dict(snap.values or {})
+    while True:
+        inner = next((t.state for t in snap.tasks if hasattr(t.state, "values")), None)
+        if inner is None:
+            return cast("FactoryState", best)
+        snap = inner
+        if (snap.values or {}).get("artifacts"):
+            best = dict(snap.values)
+
+
+def _draft_on_stop(
+    app: Any, config: RunnableConfig, exc: BaseException, *, request: str, thread_id: str,
+    output_dir: str, resolve: ArtifactResolver, resolve_blob: BlobResolver,
+) -> None:
+    """Write the stopped run's latest tree as a DRAFT and note where on ``exc``.
+    Best-effort: it runs while ``exc`` propagates and must never replace it."""
+    try:
+        state = _latest_values(app, config)
+        if not any(a.kind == "feature_diff" for a in state.get("artifacts") or ()):
+            return
+        draft = _write_draft_on_halt(
+            state, output_dir, gate_findings=_result(request, thread_id, state).gate_findings,
+            resolve=resolve, resolve_blob=resolve_blob, stopped=str(exc).splitlines()[0][:300],
+        )
+    except Exception:
+        return
+    if draft is not None:
+        exc.add_note(f"DRAFT written to: {draft}  (held — see DRAFT-STATUS.md)")
 
 
 # ---- design-spec ingestion (task [8]) ---------------------------------------
@@ -1054,13 +1148,6 @@ def _invoke(
     return cast("FactoryState", app.invoke(seed, config))
 
 
-def _is_transient_proxy_failure(exc: BaseException) -> bool:
-    """True for a ProxyUnavailable / pause-and-escalate — the proxy already rode
-    its bounded retry + rate-limit budget and is telling judgment nodes to pause,
-    NOT a real build failure. Same predicate the Workshop server uses."""
-    return "ProxyUnavailable" in type(exc).__name__ or "pause-and-escalate" in str(exc)
-
-
 def _has_pending_run(app: Any, config: RunnableConfig) -> bool:
     """True when this thread has a checkpoint with nodes still to run."""
     try:
@@ -1102,6 +1189,10 @@ def _resume_seed(app: Any, config: RunnableConfig, seed: FactoryState) -> Factor
     return seed
 
 
+class RunCrashed(RuntimeError):
+    """A ValueError from inside the graph: a bug, not a bad argument."""
+
+
 def _invoke_with_autoresume(
     app: Any,
     seed: FactoryState,
@@ -1110,6 +1201,7 @@ def _invoke_with_autoresume(
     progress_cb: Callable[..., None] | None,
     resumable: bool,
     cancel: threading.Event | None = None,
+    meter: TokenMeter | None = None,
 ) -> FactoryState:
     """Wrap :func:`_invoke` so a TRANSIENT provider failure does
     not kill a DURABLE run. A spent Max usage/session window (or a provider blip)
@@ -1122,7 +1214,8 @@ def _invoke_with_autoresume(
     restart. Bounded with a growing backoff (5,10,20,40,60,60 min). A NON-durable
     run has no checkpoint to resume from, so the budget is 0 and behaviour is
     byte-identical to a bare invoke. Tunable via ``FOUNDRY_CLI_AUTORESUME``
-    (default 6; 0 disables)."""
+    (default 6; 0 disables). A back-off that would end past ``meter``'s time cap
+    stops the run now instead of sleeping into it."""
     import time
 
     budget = 0
@@ -1140,9 +1233,15 @@ def _invoke_with_autoresume(
             inp = None if _has_pending_run(app, config) else seed
             return _invoke(app, inp, config, progress_cb=progress_cb)
         except Exception as exc:  # re-raised unless transient+budget
-            if used >= budget or not _is_transient_proxy_failure(exc):
+            if used >= budget or not is_transient_failure(exc):
                 raise
             wait = min(3600, 300 * (2**used))  # 5,10,20,40,60,60 min
+            cap = meter.time_cap_s if meter is not None else None
+            if meter is not None and cap is not None and meter.elapsed_s + wait >= cap:
+                raise TimeCapExceeded(
+                    f"time cap reached: a {wait // 60} min back-off after "
+                    f"{type(exc).__name__} would end past the {cap / 60:.1f} minute cap"
+                ) from exc
             used += 1
             resume_at = time.strftime("%H:%M", time.localtime(time.time() + wait))
             print(
@@ -1213,6 +1312,25 @@ def _change_seed(base_root: str, *, has_stack: bool) -> FactoryState:
     return seed
 
 
+def fix_until_cap_for(
+    explicit: bool | None, *, model_mode: str | None, levels: Mapping[str, Any] | None,
+    level_table: Mapping[str, Level] | None,
+) -> bool:
+    """Whether the run fixes until its time cap: ``explicit`` (the flag) wins, then
+    ``FOUNDRY_FIX_UNTIL_CAP=0/1``, then the mode's default — for custom levels, on
+    iff every level is local."""
+    if explicit is not None:
+        return explicit
+    env = os.environ.get("FOUNDRY_FIX_UNTIL_CAP", "").strip()
+    if env:
+        if env not in ("0", "1"):
+            raise ValueError(f"FOUNDRY_FIX_UNTIL_CAP must be 0 or 1, not {env!r}")
+        return env == "1"
+    if levels is not None and level_table is not None:
+        return local_tiers(level_table) == frozenset(level_table)
+    return DEFAULT_FIX_UNTIL_CAP[model_mode or "cloud"]
+
+
 def run(
     request: str,
     *,
@@ -1245,6 +1363,7 @@ def run(
     time_cap_minutes: float | None = None,
     cancel: threading.Event | None = None,
     manifest_dir: str | None = None,
+    fix_until_cap: bool | None = None,
 ) -> RunResult:
     """Run ``request`` end-to-end through the compiled factory graph (smoke path).
 
@@ -1339,6 +1458,11 @@ def run(
         Setting this event stops the run cleanly with ``BuildStopped`` before the
         next model call, coding session or gate run (the token meter's seams). The
         checkpoint stays resumable, as after a token-cap stop.
+    fix_until_cap:
+        Run each build-side fix loop until a dead-end rule or the time cap stops
+        it, instead of ``max_fix_attempts`` passes (see
+        :class:`~foundry.graph.gate_wiring.FixPolicy`). ``None``: see
+        :func:`fix_until_cap_for` (on for local runs).
     """
     if mode not in MODES:
         raise ValueError(f"unknown mode {mode!r}; choose one of {', '.join(MODES)}")
@@ -1357,6 +1481,12 @@ def run(
         max_fix_attempts = DEFAULT_FIX_ATTEMPTS[model_mode or "cloud"]
     if time_cap_minutes is not None and time_cap_minutes <= 0:
         raise ValueError("time_cap_minutes must be > 0")
+    fix_policy = FixPolicy(until_cap=fix_until_cap_for(
+        fix_until_cap, model_mode=model_mode, levels=levels, level_table=level_table))
+    if fix_policy.until_cap and time_cap_minutes is None:
+        print(f"note: fixing until the time cap without one: each fix loop stops after "
+              f"{fix_policy.window_ceiling} passes (set --time-cap to fix for longer)",
+              file=sys.stderr)
     spec_text = _load_spec(spec)
     base_root, thread_id = _change_base(base_dir, request, thread_id)
     # Single-host durability seam (durability/persistence.py): when
@@ -1499,6 +1629,7 @@ def run(
                 workers=workers,
                 ticket_tiers=ticket_tiers,
                 on_task=task_cb,
+                fix_policy=fix_policy,
             )
             # The epoch counter is in-memory: a process continuing this thread's
             # checkpoint must mint Seqs above the run's records, or a re-run gate's
@@ -1624,16 +1755,31 @@ def run(
             start = _resume_seed(app, config, seed)
             if meter is not None and start is seed and not _has_pending_run(app, config):
                 meter.reset()  # a fresh run, not a resumed one: its spend starts at zero
-            final = _invoke_with_autoresume(
-                app,
-                start,
-                config,
-                progress_cb=drive_pc,
-                resumable=(durable is not None),
-                cancel=cancel,
-            )
+            try:
+                final = _invoke_with_autoresume(
+                    app,
+                    start,
+                    config,
+                    progress_cb=drive_pc,
+                    resumable=(durable is not None),
+                    cancel=cancel,
+                    meter=meter,
+                )
+            except ValueError as exc:
+                # main() reports a ValueError as a usage error (exit 2, no traceback);
+                # one raised inside the graph is a crash and must show where.
+                raise RunCrashed(f"the run crashed: {exc!r}") from exc
+            except Exception as exc:
+                # A capped, stopped or unavailable run still hands back its best tree.
+                if output_dir is not None:
+                    _draft_on_stop(app, config, exc, request=request, thread_id=thread_id,
+                                   output_dir=output_dir, resolve=resolve,
+                                   resolve_blob=resolve_blob)
+                raise
         finally:
             reset_gate_write_verifier(token)
+            rt.python_envs.close()  # the run's gate venvs end with the run
+            rt.toolchain_cache.close()
             # Release the SQLite handles: durable mode closes the checkpointer +
             # the global-records connection together; otherwise just the ckpt.
             if durable is not None:
@@ -1901,6 +2047,13 @@ def main(argv: list[str] | None = None) -> int:
         local_model = _local_model or os.environ.get("FOUNDRY_LOCAL_MODEL", "").strip() \
             or DEFAULT_LOCAL_MODEL
         args, time_cap = _take_int(args, "--time-cap", minimum=1)
+        # --fix-until-cap / --no-fix-until-cap override FOUNDRY_FIX_UNTIL_CAP and the
+        # mode's default (on for local).
+        fix_until_cap: bool | None = None
+        for flag, value in (("--fix-until-cap", True), ("--no-fix-until-cap", False)):
+            if flag in args:
+                fix_until_cap = value
+                args = [a for a in args if a != flag]
         local_check = "--local-check" in args
         args = [a for a in args if a != "--local-check"]
 
@@ -2018,6 +2171,7 @@ def main(argv: list[str] | None = None) -> int:
                 "[--ticket-tiers trivial=T3,standard=T2,complex=T1] "
                 "[--model-mode {cloud|hybrid|local}] [--local-url URL] "
                 "[--local-model ID] [--time-cap MINUTES] [--token-cap N] [--local-check] "
+                "[--fix-until-cap|--no-fix-until-cap] "
                 '["<one-line request>"]   (optional when --spec is given)\n'
                 f"  mode: assistant — {_TRUST_POSTURE[MODE_ASSISTANT]}\n"
                 "  backend: mock (default — keyless, deterministic) | anthropic | openai | "
@@ -2055,6 +2209,7 @@ def main(argv: list[str] | None = None) -> int:
             local_url=local_url,
             local_model=local_model,
             time_cap_minutes=time_cap,
+            fix_until_cap=fix_until_cap,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -2068,6 +2223,8 @@ def main(argv: list[str] | None = None) -> int:
             else "Add --state-dir DIR to make a capped run resumable."
         )
         print(f"stopped: {exc}. {hint}", file=sys.stderr)
+        for note in getattr(exc, "__notes__", ()):
+            print(note, file=sys.stderr)
         return 3
     print(result.summary())
     return 0 if result.passed else 1

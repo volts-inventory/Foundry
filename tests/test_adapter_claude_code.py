@@ -31,7 +31,6 @@ from foundry.execution.adapters.claude_code import (
 )
 from foundry.execution.sandbox import GRANTABLE_MODEL_AUTH, Sandbox, SandboxResult
 
-
 # ---- helpers -----------------------------------------------------------------
 
 
@@ -150,6 +149,18 @@ def test_turns_model_and_triage_are_observed(source_dir: Path) -> None:
     assert any("total_cost_usd=0.0" in n for n in notes)
 
 
+def test_the_summary_is_kept_beside_the_cost_note_when_there_is_no_triage(
+    source_dir: Path,
+) -> None:
+    # A fix session that changed nothing in 2s left only the cost / grant notes:
+    # its own account of why was dropped.
+    adapter = ClaudeCodeAdapter(exec_fn=fake_exec({}, envelope(result="Nothing to fix.")))
+    with Sandbox(source_dir) as sb:
+        result = adapter.run(make_packet(sb.worktree), sb)
+    notes = [t.explanation for t in result.triage]
+    assert notes[0] == "Nothing to fix." and any("total_cost_usd" in n for n in notes)
+
+
 def test_session_token_usage_is_recorded_for_the_manifest(source_dir: Path) -> None:
     usage = {"input_tokens": 7, "output_tokens": 3, "cache_read_input_tokens": 900,
              "cache_creation_input_tokens": 40}
@@ -204,7 +215,7 @@ def test_argv_carries_turn_budget_and_skip_permissions(source_dir: Path) -> None
     argv = seen["argv"]
     assert argv[:2] == ["claude", "-p"]
     assert "CONSTRAINT-A: use stdlib only." in argv[2]  # pinned VERBATIM in prompt
-    assert ["--max-turns", "7"] == argv[argv.index("--max-turns") : argv.index("--max-turns") + 2]
+    assert argv[argv.index("--max-turns") : argv.index("--max-turns") + 2] == ["--max-turns", "7"]
     assert "--dangerously-skip-permissions" in argv  # the SANDBOX is the boundary
 
 
@@ -316,6 +327,23 @@ def test_walk_worktree_excludes_scratch_dirs(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "m.py").write_text("M = 1\n")
     assert set(walk_worktree(tmp_path)) == {"src/m.py"}
+
+
+@pytest.mark.parametrize(("manifest", "kept"), [
+    ("Cargo.toml", {"Cargo.toml", "src/target/m.rs"}),
+    ("pom.xml", {"pom.xml", "src/target/m.rs"}),
+    ("package.json", {"package.json", "src/target/m.rs", "target/debug/app",
+                      "target/CACHEDIR.TAG"}),
+])
+def test_walk_worktree_drops_a_cargo_or_maven_target_dir(
+    tmp_path: Path, manifest: str, kept: set[str]
+) -> None:
+    # A cargo build in the agent's session left 700+ target/ files in the delivery.
+    (tmp_path / manifest).write_text("")
+    for rel in ("target/debug/app", "target/CACHEDIR.TAG", "src/target/m.rs"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("x")
+    assert set(walk_worktree(tmp_path)) == kept
 
 
 def test_changed_files_partitions_correctly() -> None:
@@ -436,3 +464,16 @@ def test_without_a_listener_nothing_changes(tmp_path) -> None:
     argv = seen_argv[0]
     assert "json" in argv and "stream-json" not in argv and "--verbose" not in argv
     assert result.turns_used == 4
+
+
+def test_an_error_envelope_keeps_its_subtype_and_turns_in_the_triage(
+    source_dir: Path,
+) -> None:
+    stdout = envelope(is_error=True, subtype="error_max_turns", num_turns=40, result=None)
+    adapter = ClaudeCodeAdapter(exec_fn=fake_exec({}, stdout))
+    with Sandbox(source_dir) as sb:
+        result = adapter.run(make_packet(sb.worktree), sb)
+    notes = [t.explanation for t in result.triage]
+    assert result.turns_used == 40
+    assert "subtype=error_max_turns" in notes[0] and "num_turns=40" in notes[0]
+    assert any("total_cost_usd" in n for n in notes)

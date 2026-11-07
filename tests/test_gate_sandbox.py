@@ -16,6 +16,7 @@ import pytest
 
 from foundry.gates import sandbox
 from foundry.gates.build import BuildGate
+from foundry.gates.profiles import stack_profile
 from foundry.gates.runner import GroundingUnavailable
 from foundry.gates.sandbox import (
     UNSHARE_FLAGS,
@@ -25,6 +26,7 @@ from foundry.gates.sandbox import (
 from foundry.gates.smoke import SmokeGate
 from foundry.gates.test import TestGate
 from foundry.schemas.gates import GateStatus
+from foundry.schemas.implementation import StackDecision
 
 
 def test_sandbox_is_the_default_and_opt_out_disables_it(monkeypatch: Any) -> None:
@@ -61,7 +63,7 @@ def test_gate_in_process_when_opted_out(tmp_path: Any, monkeypatch: Any) -> None
     assert env["FOUNDRY_GATE_WORKDIR"] == str(Path(tmp_path).resolve())
 
 
-@pytest.mark.skipif(not unshare_available(), reason="no unprivileged user namespaces")
+@pytest.mark.skipif(sandbox.sandbox_backend() is None, reason="no gate sandbox on this host")
 def test_namespace_sandbox_really_runs_and_blocks_network(tmp_path: Any, monkeypatch: Any) -> None:
     """End-to-end: a generated impl under ``foundry/`` (the collision case) PASSES
     inside the real namespace sandbox, and the network is OFF (no exfiltration)."""
@@ -97,9 +99,16 @@ def _py(code: str) -> tuple[str, ...]:
     return (sys.executable, "-c", code)
 
 
+def _pin_unshare(monkeypatch: Any) -> None:
+    """Exercise the Linux backend's argv on any host (macOS has no `unshare` binary)."""
+    monkeypatch.setattr(sandbox, "sandbox_backend", lambda: "unshare")
+    which = shutil.which
+    monkeypatch.setattr(sandbox.shutil, "which", lambda name, **k: which(name, **k) or name)
+
+
 def _capture(monkeypatch: Any) -> list[list[str]]:
     monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)
-    monkeypatch.setattr(sandbox, "unshare_available", lambda: True)
+    _pin_unshare(monkeypatch)
     calls: list[list[str]] = []
 
     def fake_run(argv: Any, workdir: Any, *, env: Any = None, timeout_s: float = 600.0) -> Any:
@@ -134,14 +143,14 @@ def test_build_and_smoke_fail_closed_when_sandbox_unavailable(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)
-    monkeypatch.setattr(sandbox, "unshare_available", lambda: False)
+    monkeypatch.setattr(sandbox, "sandbox_backend", lambda: None)
     for gate in (BuildGate(), BuildGate(install_cmd="true"), SmokeGate(("true",))):
         with pytest.raises(GroundingUnavailable):
             gate.execute(tmp_path)
 
 
 def test_fence_setup_failure_is_grounding_unavailable(tmp_path: Path, monkeypatch: Any) -> None:
-    monkeypatch.setattr(sandbox, "unshare_available", lambda: True)
+    _pin_unshare(monkeypatch)
     monkeypatch.setattr(
         sandbox,
         "run_grounding_command",
@@ -644,3 +653,413 @@ def test_install_forwarder_overrides_the_plain_http_proxy_too() -> None:
     from foundry.gates import sandbox
 
     assert '"HTTP_PROXY", "http_proxy"' in sandbox._FORWARDER
+
+
+# ---- macOS: the Seatbelt backend ------------------------------------------------
+
+_SEATBELT = pytest.mark.skipif(
+    not sandbox.seatbelt_available(), reason="macOS sandbox-exec unavailable"
+)
+
+
+def _denied(path: Path) -> str:
+    """Probe source: exit non-zero unless writing ``path`` is refused with EPERM."""
+    return (
+        "import errno, sys\n"
+        f"try:\n    open({str(path)!r}, 'w').write('x')\n"
+        "except PermissionError as e:\n    assert e.errno == errno.EPERM, e\n"
+        "else:\n    sys.exit('wrote it')\n"
+    )
+
+
+def test_backend_is_seatbelt_on_darwin_and_unshare_elsewhere(monkeypatch: Any) -> None:
+    monkeypatch.setattr(sandbox, "seatbelt_available", lambda: True)
+    monkeypatch.setattr(sandbox, "unshare_available", lambda: True)
+    monkeypatch.setattr(sandbox.sys, "platform", "darwin")
+    assert sandbox.sandbox_backend() == "seatbelt"
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    assert sandbox.sandbox_backend() == "unshare"
+    monkeypatch.setattr(sandbox, "unshare_available", lambda: False)
+    assert sandbox.sandbox_backend() is None
+
+
+def test_seatbelt_profile_takes_paths_only_as_parameters(tmp_path: Path) -> None:
+    odd = '/x/we"ird) (allow default) \\ dir'
+    profile, params = sandbox.seatbelt_profile(
+        workdir=odd, private_tmp="/t", binds=[], home=None, network=False
+    )
+    assert odd not in profile and "(allow default)" not in profile
+    assert any(p.endswith(f"={odd}") for p in params)
+    with pytest.raises(GroundingUnavailable):
+        sandbox.seatbelt_profile(
+            workdir="relative/wd", private_tmp="/t", binds=[], home=None, network=False
+        )
+
+
+@_SEATBELT
+def test_seatbelt_writes_reach_only_the_workdir_tmp_and_writable_binds(tmp_path: Path) -> None:
+    wd, chan = tmp_path / "wd", tmp_path / "chan"
+    wd.mkdir()
+    chan.mkdir()
+    (chan / "ro.json").write_text("{}")
+    code = (
+        "import os\n"
+        "open('in-wd', 'w').write('ok')\n"
+        "open(os.path.join(os.environ['TMPDIR'], 't'), 'w').write('t')\n"
+        f"open({str(chan / 'report')!r}, 'w').write('r')\n"
+        f"assert open({str(chan / 'ro.json')!r}).read() == '{{}}'\n"
+        + _denied(chan / "ro.json") + _denied(tmp_path / "escaped")
+        + _denied(Path(__file__).parent / f".escaped-{os.getpid()}")
+        + _denied(Path("/tmp") / f"foundry-escaped-{os.getpid()}")
+    )
+    rc, _out, err = sandbox.run_confined(
+        _py(code), wd, binds=((chan / "report", True), (chan / "ro.json", False))
+    )
+    assert rc == 0, err
+    assert (wd / "in-wd").read_text() == "ok" and (chan / "report").read_text() == "r"
+    assert not (tmp_path / "escaped").exists()
+
+
+@_SEATBELT
+def test_seatbelt_handles_a_workdir_path_with_quotes(tmp_path: Path) -> None:
+    wd = tmp_path / 'we"ird) (allow default) \\'
+    wd.mkdir()
+    sibling = tmp_path / 'we"ird) (allow default) \\x'
+    rc, _out, err = sandbox.run_confined(
+        _py("open('f', 'w').write('ok')\n" + _denied(sibling)), wd
+    )
+    assert rc == 0, err
+    assert (wd / "f").read_text() == "ok" and not sibling.exists()
+
+
+_NET_PROBE = r"""
+import errno, socket, sys
+def refused(addr):
+    try:
+        socket.create_connection(addr, timeout=3).close()
+    except PermissionError as e:
+        return e.errno == errno.EPERM
+    return False
+assert refused(("1.1.1.1", 443)), "internet reachable"
+assert refused(("127.0.0.1", int(sys.argv[1]))), "host loopback proxy reachable"
+s = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(1)   # own loopback server works
+socket.create_connection(s.getsockname(), timeout=3).close()
+print("NET-OK")
+"""
+
+
+@_SEATBELT
+def test_seatbelt_offline_step_has_no_network_but_its_own_loopback(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    up = _FakeUpstream()
+    monkeypatch.setenv("HTTPS_PROXY", f"http://127.0.0.1:{up.port}")
+    rc, out, err = sandbox.run_confined((*_py(_NET_PROBE), str(up.port)), tmp_path)
+    assert rc == 0 and "NET-OK" in out, err
+    assert up.targets == []
+
+
+_SEATBELT_EGRESS_PROBE = r"""
+import base64, os, socket, sys, urllib.parse
+proxy = urllib.parse.urlsplit(os.environ["HTTPS_PROXY"])
+assert proxy.hostname == "127.0.0.1" and os.environ["NO_PROXY"] == "localhost,127.0.0.1,::1"
+cred = base64.b64encode(("%s:%s" % (proxy.username, proxy.password)).encode()).decode()
+def tunnel(target, auth=True):
+    s = socket.create_connection((proxy.hostname, proxy.port), timeout=5)
+    hdr = "Proxy-Authorization: Basic %s\r\n" % cred if auth else ""
+    s.sendall(("CONNECT %s HTTP/1.1\r\nHost: %s\r\n%s\r\n" % (target, target, hdr)).encode())
+    return s, s.recv(4096).split()[1]
+s, status = tunnel("registry.example.com:443")
+assert status == b"200", status
+s.sendall(b"ping"); assert s.recv(4) == b"ping"
+assert tunnel("registry.example.com:443", auth=False)[1] == b"407"
+for bad in ("169.254.169.254:80", "127.0.0.1:%s" % sys.argv[1], "localhost:22"):
+    assert tunnel(bad)[1] == b"403", bad
+for addr in (("1.1.1.1", 443), ("127.0.0.1", int(sys.argv[1]))):
+    try:
+        socket.create_connection(addr, timeout=3)
+    except PermissionError:
+        pass
+    else:
+        sys.exit("direct connection to %r allowed" % (addr,))
+print("EGRESS-OK")
+"""
+
+
+@_SEATBELT
+def test_seatbelt_install_egress_is_through_the_authenticated_relay_only(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    up = _FakeUpstream()
+    monkeypatch.setenv("HTTPS_PROXY", f"http://127.0.0.1:{up.port}")
+    rc, out, err = sandbox.run_confined(
+        (*_py(_SEATBELT_EGRESS_PROBE), str(up.port)), tmp_path, network=True
+    )
+    assert rc == 0 and "EGRESS-OK" in out, err
+    assert up.targets == ["registry.example.com:443"]
+
+
+@_SEATBELT
+def test_seatbelt_hides_credentials_and_the_state_dir(tmp_path: Path, monkeypatch: Any) -> None:
+    home, state = tmp_path / "home", tmp_path / "state"
+    for d in (home / ".ssh", home / ".aws", home / ".config" / "gh", state / "wd"):
+        d.mkdir(parents=True)
+    (home / ".ssh" / "id_ed25519").write_text("PRIVATE")
+    (home / ".aws" / "credentials").write_text("AKIA-secret")
+    (home / ".config" / "gh" / "hosts.yml").write_text("oauth_token: gho")
+    (home / ".netrc").write_text("machine x password hunter2")
+    (state / "run.db").write_text("checkpoints")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("FOUNDRY_STATE_DIR", str(state))
+    monkeypatch.setenv("GH_TOKEN", "ghp-secret")
+    probe = (
+        "import os, pathlib\n"
+        "h = pathlib.Path(os.environ['HOME'])\n"
+        "assert 'GH_TOKEN' not in os.environ\n"
+        f"for p in [h/'.ssh'/'id_ed25519', h/'.aws'/'credentials', h/'.netrc',\n"
+        f"          h/'.config'/'gh'/'hosts.yml', pathlib.Path({str(state / 'run.db')!r})]:\n"
+        "    try:\n        p.read_text()\n    except PermissionError:\n        continue\n"
+        "    raise SystemExit('read %s' % p)\n"
+        "open('out', 'w').write(open('out', 'a+').name)\n"  # a workdir under the state dir
+    )
+    rc, _out, err = sandbox.run_confined(_py(probe), state / "wd", network=True)
+    assert rc == 0, err
+
+
+@_SEATBELT
+def test_seatbelt_kills_the_process_group(tmp_path: Path) -> None:
+    spawn = (
+        "import subprocess, sys, time\n"
+        "p = subprocess.Popen(['/bin/sleep', '60'])\n"
+        "open('child.pid', 'w').write(str(p.pid))\n"
+        "time.sleep(float(sys.argv[1]))\n"
+    )
+
+    def alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    import subprocess
+    import time
+
+    start = time.monotonic()
+    rc, _out, err = sandbox.run_confined((*_py(spawn), "0"), tmp_path, timeout_s=30)
+    assert rc == 0, err
+    assert time.monotonic() - start < 20                       # did not wait on the orphan
+    assert not alive(int((tmp_path / "child.pid").read_text()))
+    with pytest.raises(subprocess.TimeoutExpired):
+        sandbox.run_confined((*_py(spawn), "60"), tmp_path, timeout_s=2)
+    assert not alive(int((tmp_path / "child.pid").read_text()))
+
+
+@_SEATBELT
+def test_seatbelt_hides_the_workshops_default_state_under_the_repo(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """The Workshop's default state dir (.run/web/state, holding auth.json's session
+    secret) sits under the repo root the profile trusts for reads: the deny must win."""
+    repo = tmp_path / "repo"
+    (repo / ".run" / "web" / "state").mkdir(parents=True)
+    (repo / ".run" / "web" / "state" / "auth.json").write_text('{"session_secret": "s"}')
+    (repo / "pkg.py").write_text("ok")
+    for k in sandbox._STATE_DIR_VARS:
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(sandbox, "_REPO_ROOT", repo)
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    probe = (
+        f"assert open({str(repo / 'pkg.py')!r}).read() == 'ok'\n"
+        f"try:\n    open({str(repo / '.run' / 'web' / 'state' / 'auth.json')!r}).read()\n"
+        "except PermissionError:\n    pass\n"
+        "else:\n    raise SystemExit('read auth.json')\n"
+    )
+    rc, _out, err = sandbox.run_confined(_py(probe), wd)
+    assert rc == 0, err
+    # ...and each relocation variable is hidden too.
+    for k in sandbox._STATE_DIR_VARS:
+        monkeypatch.setenv(k, str(tmp_path / k))
+        assert os.path.realpath(tmp_path / k) in sandbox._seatbelt_hidden(None)
+        monkeypatch.delenv(k)
+
+
+@_SEATBELT
+def test_seatbelt_blocks_the_workshop_port(tmp_path: Path, monkeypatch: Any) -> None:
+    with socket.socket() as srv:
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(4)
+        port = srv.getsockname()[1]
+        monkeypatch.setenv("WORKSHOP_PORT", str(port))
+        code = (
+            "import socket, sys\n"
+            f"try:\n    socket.create_connection(('127.0.0.1', {port}), timeout=3)\n"
+            "except PermissionError:\n    pass\n"
+            "else:\n    sys.exit('reached the Workshop')\n"
+        )
+        for network in (False, True):
+            rc, _out, err = sandbox.run_confined(_py(code), tmp_path, network=network)
+            assert rc == 0, err
+
+
+# ---- the run's toolchain cache -------------------------------------------------
+
+
+def test_toolchain_cache_is_shared_and_writable_only_by_the_install_step(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    calls = _capture(monkeypatch)
+    envs: list[dict[str, str]] = []
+    real_fake = sandbox.run_grounding_command
+
+    def fake(argv: Any, workdir: Any, *, env: Any = None, timeout_s: float = 600.0) -> Any:
+        envs.append(env)
+        return real_fake(argv, workdir, env=env, timeout_s=timeout_s)
+
+    monkeypatch.setattr(sandbox, "run_grounding_command", fake)
+    cache = sandbox.ToolchainCache()
+    with sandbox.toolchain_scope(cache):
+        BuildGate(cmd=("true",), install_cmd="go mod download").execute(tmp_path)
+        SmokeGate(("true",)).execute(tmp_path)
+    root = cache.root
+    install, build, smoke = (_fence_cfg(a)["binds"] for a in calls)
+    assert [root, True] in install and [root, False] in build and [root, False] in smoke
+    assert all(e["GOMODCACHE"].startswith(root) and e["CARGO_HOME"].startswith(root)
+               for e in envs)
+    assert all(not e["GOPATH"].startswith(os.path.expanduser("~")) for e in envs)
+    assert os.path.isdir(root)                     # the run's cache outlives the scope...
+    cache.close()
+    assert not os.path.exists(root)                # ...until the run closes it
+    calls.clear()
+    BuildGate(cmd=("true",), install_cmd="true").execute(tmp_path)  # own scope
+    eph = next(b for b, rw in _fence_cfg(calls[0])["binds"] if rw and "toolchain" in b)
+    assert not os.path.exists(eph)
+
+
+def test_offline_steps_run_cargo_offline(tmp_path: Path, monkeypatch: Any) -> None:
+    # No DNS offline: cargo otherwise retries the registry and fails on a host lookup.
+    _capture(monkeypatch)
+    envs: list[dict[str, str]] = []
+    monkeypatch.setattr(sandbox, "run_grounding_command",
+                        lambda argv, wd, *, env=None, timeout_s=600.0:
+                        envs.append(env) or (0, "", ""))
+    BuildGate(cmd=("true",), install_cmd="cargo fetch").execute(tmp_path)
+    install, build = envs
+    assert "CARGO_NET_OFFLINE" not in install and build["CARGO_NET_OFFLINE"] == "true"
+
+
+def _go_works() -> bool:
+    go = shutil.which("go")
+    return go is not None and os.system(f"{shlex.quote(go)} version >/dev/null 2>&1") == 0
+
+
+def _go_module_proxy(root: Path) -> None:
+    """A file:// GOPROXY serving example.com/dep v1.0.0 (no network needed)."""
+    import zipfile
+
+    v = root / "example.com" / "dep" / "@v"
+    v.mkdir(parents=True)
+    (v / "list").write_text("v1.0.0\n")
+    (v / "v1.0.0.info").write_text('{"Version":"v1.0.0","Time":"2024-01-01T00:00:00Z"}')
+    mod = "module example.com/dep\n\ngo 1.21\n"
+    (v / "v1.0.0.mod").write_text(mod)
+    with zipfile.ZipFile(v / "v1.0.0.zip", "w") as z:
+        z.writestr("example.com/dep@v1.0.0/go.mod", mod)
+        z.writestr("example.com/dep@v1.0.0/dep.go",
+                   'package dep\n\nfunc Answer() int { return 42 }\n')
+
+
+@pytest.mark.skipif(sandbox.sandbox_backend() is None or not _go_works(),
+                    reason="needs the gate sandbox and the go toolchain")
+def test_real_go_install_feeds_the_offline_build(tmp_path: Path, monkeypatch: Any) -> None:
+    """`go mod download` (networked) fills the run's module cache; the offline build and
+    smoke steps then compile against it. HOME stays untouched (it is read-only)."""
+    import subprocess
+
+    wd, proxy, host = tmp_path / "wd", tmp_path / "wd" / ".proxy", tmp_path / "host"
+    wd.mkdir()
+    _go_module_proxy(proxy)
+    (wd / "go.mod").write_text(
+        "module example.com/app\n\ngo 1.21\n\nrequire example.com/dep v1.0.0\n"
+    )
+    (wd / "main.go").write_text(
+        'package main\n\nimport (\n\t"fmt"\n\n\t"example.com/dep"\n)\n\n'
+        "func main() { fmt.Println(dep.Answer()) }\n"
+    )
+    goproxy = "file://" + str(proxy)
+    # go.sum, written host-side against the same local proxy (no sumdb for it).
+    subprocess.run(
+        ["go", "mod", "tidy"], cwd=wd, check=True, capture_output=True,
+        env={**os.environ, "GOPROXY": goproxy, "GOSUMDB": "off",
+             "GOFLAGS": "-modcacherw", "GOPATH": str(host), "GOCACHE": str(host / "c")},
+    )
+    monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)
+    monkeypatch.setenv("GOPROXY", goproxy)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    for k in ("GOPATH", "GOMODCACHE", "GOFLAGS"):
+        monkeypatch.delenv(k, raising=False)
+    cache = sandbox.ToolchainCache()
+    try:
+        with sandbox.toolchain_scope(cache):
+            gate = BuildGate(cmd=("/bin/sh", "-c", "go build -o app . && ./app"),
+                             install_cmd="go mod download")
+            obs = gate.execute(wd)
+            assert gate.decide(obs) is GateStatus.PASS, obs.stderr
+            assert "42" in obs.stdout
+            smoke = SmokeGate(("/bin/sh", "-c", "go run ."))
+            sobs = smoke.execute(wd)
+            assert smoke.decide(sobs) is GateStatus.PASS and "42" in sobs.stdout, sobs.stderr
+        assert (Path(cache.root) / "go" / "pkg" / "mod" / "example.com" / "dep@v1.0.0").is_dir()
+        assert not (tmp_path / "home").exists()
+    finally:
+        cache.close()
+
+
+def _cargo_works() -> bool:
+    if shutil.which("cargo") is None or os.system("rustc -vV >/dev/null 2>&1") != 0:
+        return False  # rustup proxies exist but no usable toolchain
+    try:
+        socket.create_connection(("index.crates.io", 443), timeout=3).close()
+    except OSError:
+        return False
+    return True
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(sandbox.sandbox_backend() is None or not _cargo_works(),
+                    reason="needs the gate sandbox, a working cargo and crates.io")
+def test_real_cargo_fetch_feeds_the_offline_build(tmp_path: Path, monkeypatch: Any) -> None:
+    """Live (crates.io): `cargo fetch` fills the run's CARGO_HOME; the offline build
+    compiles against it while the rustup toolchains stay read-only."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "Cargo.toml").write_text(
+        '[package]\nname = "t"\nversion = "0.1.0"\nedition = "2021"\n\n'
+        '[dependencies]\nitoa = "1"\n\n[dev-dependencies]\nryu = "1"\n'
+    )
+    (tmp_path / "src" / "main.rs").write_text(
+        'fn main() { println!("{}", itoa::Buffer::new().format(42)); }\n'
+    )
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "t.rs").write_text(
+        '#[test]\nfn dev_dep() { assert_eq!(ryu::Buffer::new().format(1.5), "1.5"); }\n'
+    )
+    monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)
+    monkeypatch.delenv("CARGO_HOME", raising=False)
+    cache = sandbox.ToolchainCache()
+    try:
+        with sandbox.toolchain_scope(cache):
+            # The planner's `cargo update` downloads nothing; the stack profile
+            # adds the fetch the offline test step's dev-dependencies need.
+            install = stack_profile(StackDecision(
+                language="rust", install="cargo update", test="cargo test")).install_cmd
+            gate = BuildGate(cmd=("/bin/sh", "-c", "cargo run --quiet"),
+                             install_cmd=install)
+            obs = gate.execute(tmp_path)
+            assert gate.decide(obs) is GateStatus.PASS, obs.stderr
+            assert "42" in obs.stdout
+            rc, _out, err = sandbox.ground_untrusted(
+                ("/bin/sh", "-c", "cargo test --quiet"), tmp_path)
+            assert rc == 0, err
+    finally:
+        cache.close()

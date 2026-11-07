@@ -15,8 +15,12 @@ from typing import Any
 
 from foundry.agents.planner import (
     MAX_TICKETS,
+    SOP,
     _coverage_findings,
+    _offline_scenario_findings,
     _own_scenario_bindings,
+    _python_deps_rule,
+    _stack_constraints,
     make_planner_node,
 )
 from foundry.durability.artifact_store import ArtifactStore
@@ -277,12 +281,13 @@ def test_epic_mode_coverage_spans_every_epic() -> None:
 def test_coverage_findings_fail_the_spec_gate_and_reach_the_revision(tmp_path: Path) -> None:
     uncovered = _plan(tickets=_tickets_with(T_002={"scenarios": _scenarios_covering("SC-1")}))
     cas = ArtifactStore()
-    # The in-node revision returns the same plan, so the finding reaches the gate.
-    rt, tx = runtime_for(uncovered, uncovered, PLAN, cas=cas)
+    # Empty deltas fall back to full re-plans; the in-node one returns the same plan,
+    # so the finding reaches the gate.
+    rt, tx = runtime_for(uncovered, {}, uncovered, {}, PLAN, cas=cas)
     node = make_planner_node(rt)
     first = node({"request": "x"}, config_for("r"))
-    assert len(tx.requests) == 2
-    assert "Plan check findings:\\n- Must-have MH-1" in json.dumps(tx.requests[1])
+    assert len(tx.requests) == 3
+    assert "Plan check findings:\\n- Must-have MH-1" in json.dumps(tx.requests[2])
 
     doc = _criteria_payload({"artifacts": first["artifacts"]}, cas.resolve)
     assert isinstance(doc, dict)
@@ -326,6 +331,7 @@ def test_an_unpaired_feature_ticket_gets_a_step_module_to_bind_its_scenarios() -
         ticket("E1-T03", Specialty.TEST, ("AC-2",), ("tests/test_t02.py",), ("E1-T02",)),
         ticket("E1-T04", Specialty.BACKEND, ("AC-4",), ("app.py", "tests/test_own.py")),
         ticket("E1-T05", Specialty.BACKEND, ()),                             # no scenarios
+        ticket("E1-T06", Specialty.BACKEND, ("AC-6",), ()),                  # acceptance-only
     ]
     python = StackDecision(language="python", test="pytest")
     out, concerns = _own_scenario_bindings(tickets, python)
@@ -333,6 +339,88 @@ def test_an_unpaired_feature_ticket_gets_a_step_module_to_bind_its_scenarios() -
     assert files["E1-T01"] == ("app.py", "tests/test_e1_t01.py")
     assert files["E1-T02"] == files["E1-T05"] == ("app.py",)
     assert files["E1-T04"] == ("app.py", "tests/test_own.py")
+    assert files["E1-T06"] == ()
     assert len(concerns) == 1
     cucumber = python.model_copy(update={"bdd": "behave"})
     assert _own_scenario_bindings(tickets, cucumber) == (tickets, [])
+
+
+def test_a_test_ticket_with_scenarios_but_no_test_module_gets_one() -> None:
+    # The plan's own bdd-harness, renamed bdd-harness-2, held scenario C1 as a test
+    # ticket with no test_*.py: the feature ticket counted it as the binder, so
+    # nothing bound C1.
+    feature = Ticket(id="contracts-2", title="c", specialty=Specialty.BACKEND,
+                     scenario_ids=("C1",), files=("contracts_extra.py",), seq=_SEQ)
+    harness = Ticket(id="bdd-harness-2", title="h", specialty=Specialty.TEST,
+                     scenario_ids=("C1",), files=("conftest.py",),
+                     depends_on=("contracts-2",), seq=_SEQ)
+    no_scenarios = Ticket(id="T-9", title="t", specialty=Specialty.TEST, seq=_SEQ)
+    out, concerns = _own_scenario_bindings(
+        [feature, harness, no_scenarios], StackDecision(language="python", test="pytest"))
+    files = {t.id: t.files for t in out}
+    assert files["bdd-harness-2"] == ("conftest.py", "tests/test_bdd_harness_2.py")
+    assert files["contracts-2"] == ("contracts_extra.py",)  # bound by the test ticket
+    assert files["T-9"] == ()
+    assert len(concerns) == 1
+
+
+def test_a_scenario_asserting_dependency_install_is_a_finding() -> None:
+    # The gates run offline: "installing dependencies succeeds" can never pass.
+    def c(cid: str, then: str) -> AcceptanceCriterion:
+        return AcceptanceCriterion(id=cid, text="t", given=("requirements.txt exists",),
+                                   when=("dependencies are pinned",), then=(then,),
+                                   ticket_id="T-1", seq=_SEQ)
+
+    findings = _offline_scenario_findings([
+        c("C1", "installing dependencies succeeds with no version conflicts"),
+        c("C2", "`pip install -r requirements.txt` exits 0"),
+        c("C3", "every entry in requirements.txt is pinned with =="),
+        c("C4", "the user sees the installation wizard"),
+    ])
+    assert [f.split()[1] for f in findings] == ["C1", "C2"]
+    assert "offline" in findings[0]
+
+
+def test_the_python_deps_rule_forbids_standard_library_modules() -> None:
+    # A model pinned sqlite3==2.6.0 in requirements.txt.
+    rule = _python_deps_rule(StackDecision(language="python"), "requirements.txt")
+    assert "standard-library" in rule and "sqlite3" in rule
+
+
+def test_the_sop_adds_bdd_harness_only_for_a_bdd_stack_and_reserves_its_id() -> None:
+    assert "only when stack.bdd is set" in SOP
+    assert "reserved: never plan a ticket with either" in SOP
+    assert "never that installing succeeds" in SOP
+
+
+def test_a_python_sqlite_plan_pins_the_memory_connection_constraint() -> None:
+    python = StackDecision(language="python")
+    [pc] = _stack_constraints(python, {"design": {"body": "Store notes in SQLite"}})
+    assert ":memory:" in pc["text"] and "ONE connection" in pc["text"]
+    assert _stack_constraints(python, {"design": {"body": "Store notes in Postgres"}}) == []
+    assert _stack_constraints(StackDecision(language="javascript"), {"x": "sqlite"}) == []
+
+
+def test_a_python_sqlalchemy_plan_pins_the_typed_model_constraint() -> None:
+    # Column(Integer) attributes typed as Column[int] failed 12 mypy checks in a run.
+    python = StackDecision(language="python")
+    pcs = _stack_constraints(python, {"design": {"body": "SQLAlchemy models over SQLite"}})
+    assert [pc["id"] for pc in pcs] == ["PC-python-sqlite-memory", "PC-python-sqlalchemy-typed"]
+    assert "Mapped[int] = mapped_column(" in pcs[1]["text"]
+    assert _stack_constraints(python, {"design": {"body": "SQLAlchemy on Postgres"}}) == [pcs[1]]
+    assert _stack_constraints(StackDecision(language="go"), {"x": "sqlalchemy"}) == []
+
+
+def test_manifest_and_app_install_scenarios_are_not_offline_findings() -> None:
+    def c(cid: str, when: str, then: str) -> AcceptanceCriterion:
+        return AcceptanceCriterion(id=cid, text="t", given=("x",), when=(when,), then=(then,),
+                                   ticket_id="T-1", seq=_SEQ)
+
+    findings = _offline_scenario_findings([
+        c("C1", "requirements.txt is read",
+          "every package in requirements.txt is pinned to an exact version "
+          "for a reproducible install"),
+        c("C2", "the admin installs the analytics plugin package", "the plugin is listed"),
+        c("C3", "I run pip install -r requirements.txt", "it succeeds"),
+    ])
+    assert [f.split()[1] for f in findings] == ["C3"]

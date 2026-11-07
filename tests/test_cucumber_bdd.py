@@ -282,6 +282,26 @@ def test_gate_without_a_usable_report_marks_all_missing(tmp_path: Path, bdd_cmd:
     assert gate.decide(obs) is GateStatus.FAIL
 
 
+def test_an_empty_report_quotes_the_command_and_names_single_quotes(tmp_path: Path) -> None:
+    wd = _workdir(tmp_path)
+    bdd_cmd = "echo ran-the-runner; echo '{}' > '$FOUNDRY_BDD_REPORT'"
+    obs = _gate_with(bdd_cmd).execute(wd)
+    assert set(obs.structured[BDD_KEY].values()) == {"missing"}
+    # Exit 0 still shows the command, its exit code and its last output.
+    assert any(
+        f.startswith(f"bdd command `{bdd_cmd}` — bdd command exited 0") and "ran-the-runner" in f
+        for f in obs.findings
+    ), obs.findings
+    assert any(
+        "$FOUNDRY_BDD_REPORT" in f and "single quotes" in f and "double quotes" in f
+        for f in obs.findings
+    ), obs.findings
+    # A plain empty report gets the command + tail but no quoting advice.
+    clean = _gate_with("true").execute(_workdir(tmp_path / "b"))
+    assert any(f.startswith("bdd command `true` — bdd command exited 0") for f in clean.findings)
+    assert not any("single quotes" in f for f in clean.findings)
+
+
 def _all_passing(dest: Path) -> None:
     """The recorded run with every step reported PASSED (a forged-looking report)."""
     out = []
@@ -386,10 +406,10 @@ def test_cucumber_js_passing_run(tmp_path: Path, cucumber_js: Path) -> None:
 def test_cucumber_js_passing_run_in_namespace_sandbox(
     tmp_path: Path, cucumber_js: Path, monkeypatch: Any
 ) -> None:
-    from foundry.gates.sandbox import unshare_available
+    from foundry.gates.sandbox import sandbox_backend
 
-    if not unshare_available():
-        pytest.skip("no unprivileged user namespaces")
+    if sandbox_backend() is None:
+        pytest.skip("no gate sandbox on this host")
     monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)
     wd = _js_project(tmp_path, cucumber_js)
     # The sandbox shadows host /tmp, so the shared install must live in the workdir —
@@ -417,7 +437,7 @@ def test_cucumber_js_missing_step_definitions(tmp_path: Path, cucumber_js: Path)
 
 def test_cucumber_js_agent_edited_feature_text(tmp_path: Path, cucumber_js: Path) -> None:
     # The bdd command rewrites the trusted feature before the runner parses it.
-    edit = "sed -i 's/the list has 1 item/the list has 1 items/' features/T1.feature && "
+    edit = "sed -i.orig 's/the list has 1 item/the list has 1 items/' features/T1.feature && "
     gate, obs = _run_js(_js_project(tmp_path, cucumber_js), edit + _RUN)
     assert set(obs.structured[BDD_KEY].values()) == {"unmatched"}
     assert gate.decide(obs) is GateStatus.FAIL

@@ -78,4 +78,6 @@ def test_capabilities_route_the_conditionals(
     assert not absent & kinds
     assert len(tx.requests) == 1
     if not caps:
-        assert {c.id for c in final["pinned_constraints"]} == {"PC-001", "PC-002"}
+        ids = {c.id for c in final["pinned_constraints"]}
+        # Plus the planner's own stack-footgun constraints (the payload names sqlite).
+        assert ids - {"PC-001", "PC-002"} == {"PC-python-sqlite-memory"}

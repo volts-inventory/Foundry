@@ -171,6 +171,19 @@ degrade it to fail-closed JSON parsing. Pin exact model ids per tier with
 > Don't set both `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` — the key
 > outranks the token and bills the API.
 
+**Local models** (`--model-mode hybrid|local`) run on an OpenAI-compatible server —
+Ollama's `/v1` by default (`--local-url` / `FOUNDRY_LOCAL_URL`, `--local-model` /
+`FOUNDRY_LOCAL_MODEL`). Local calls do not decode greedily: Qwen's cards warn greedy
+decoding degrades the model into endless repetition, so every local call to a Qwen3
+model gets the vendor's non-thinking sampling (`temperature 0.7, top_p 0.8, top_k 20,
+min_p 0, presence_penalty 1.0`; Qwen3-Coder: `repeat_penalty 1.05` instead of the
+presence penalty) and a seed derived from the request, so a replayed call gets the
+same sample. Ollama's `/v1` honours `temperature`, `top_p`, `presence_penalty`,
+`frequency_penalty` and `seed`; `top_k` / `min_p` / `repeat_penalty` come from the
+model's Modelfile there (other servers take them from the request).
+`FOUNDRY_LOCAL_SAMPLING=temperature=0.6,top_p=0.95` overrides the profile for every
+local model; `FOUNDRY_LOCAL_SAMPLING=off` restores greedy decoding.
+
 ---
 
 ## Workshop UI
@@ -238,6 +251,8 @@ uv run pytest -n auto -q                                  # full suite (slow e2e
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | API keys | — |
 | `CLAUDE_CODE_OAUTH_TOKEN` | `claude-cli` token (via `claude setup-token`) | — |
 | `FOUNDRY_MODEL_T1/T2/T3` | Pin exact model id per tier | curated map |
+| `FOUNDRY_LOCAL_URL` / `FOUNDRY_LOCAL_MODEL` | Local server + model (hybrid/local modes) | Ollama `/v1` · `qwen3.6:27b-coding-mxfp8` |
+| `FOUNDRY_LOCAL_SAMPLING` | Local sampling: `key=value,...` override or `off` (greedy) | per-model profile |
 | `FOUNDRY_MAX_SLOTS` | Parallelism ceiling | auto |
 | `FOUNDRY_COST_CAP_MICROUSD` / `FOUNDRY_TOKEN_CAP` | Spend / token envelope | — |
 | `FOUNDRY_STATE_DIR` | Durable state dir | in-memory |

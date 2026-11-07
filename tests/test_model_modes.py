@@ -34,7 +34,12 @@ from foundry.proxy.local_transport import (
     LocalOpenAITransport,
     check_local_server,
 )
-from foundry.proxy.model_provider_proxy import TIER_MODELS
+from foundry.proxy.model_provider_proxy import (
+    TIER_MODELS,
+    _with_parse_correction,
+    local_sampling_for,
+    parse_local_sampling,
+)
 from foundry.proxy.test_doubles import MockTransport
 from foundry.proxy.token_meter import TimeCapExceeded, TokenMeter
 
@@ -470,6 +475,107 @@ def test_local_schema_rejection_falls_back_to_prompt_and_parse() -> None:
     assert ["response_format" in c for c in sent] == [True, False, False]
     assert "JSON Schema" in sent[1]["messages"][-1]["content"]
     assert transport.schema_supported is False
+
+
+# ---- local sampling profiles ---------------------------------------------------
+
+
+@pytest.mark.parametrize(("model", "expected"), [
+    (DEFAULT_LOCAL_MODEL, {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0.0,
+                           "presence_penalty": 1.0}),
+    ("hf.co/unsloth/Qwen3-32B-GGUF:Q4_K_M", {"temperature": 0.7, "top_p": 0.8, "top_k": 20,
+                                             "min_p": 0.0, "presence_penalty": 1.0}),
+    ("qwen3-coder:30b", {"temperature": 0.7, "top_p": 0.8, "top_k": 20,
+                         "repeat_penalty": 1.05}),
+    ("acme-coder-7b", None),
+])
+def test_local_sampling_profile_is_picked_by_model_glob(
+    model: str, expected: dict[str, float] | None
+) -> None:
+    assert local_sampling_for(model) == expected
+
+
+def test_local_sampling_env_parses_off_and_overrides() -> None:
+    assert parse_local_sampling("") is None
+    assert parse_local_sampling(" OFF ") == "off"
+    assert parse_local_sampling("temperature=0.5, top_k=40") == {"temperature": 0.5, "top_k": 40}
+    assert local_sampling_for(DEFAULT_LOCAL_MODEL, "off") is None
+    assert local_sampling_for("acme-coder-7b", {"top_p": 0.9}) == {"top_p": 0.9}
+    for bad in ("temperature", "seed=1", "top_p=high"):
+        with pytest.raises(ValueError, match="FOUNDRY_LOCAL_SAMPLING"):
+            parse_local_sampling(bad)
+
+
+def test_a_bad_local_sampling_env_fails_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FOUNDRY_LOCAL_SAMPLING", "temp=1")
+    with pytest.raises(ValueError, match="FOUNDRY_LOCAL_SAMPLING"):
+        _hybrid(RecordingTransport(), RecordingTransport())
+
+
+def test_local_tiers_sample_while_cloud_gates_stay_greedy() -> None:
+    cloud, local = RecordingTransport(), RecordingTransport()
+    proxy = _hybrid(cloud, local)
+    single = RecordingTransport()
+    ModelProviderProxy(single, signer=SIGNER).complete(CALL[0], "T2", *CALL[1:], purpose="gate")
+    proxy.complete(CALL[0], "T1", *CALL[1:], purpose="gate")
+    proxy.complete(CALL[0], "T2", *CALL[1:], purpose="gate")
+    proxy.complete(CALL[0], "T2", *CALL[1:], purpose="judgment")
+    proxy.complete(CALL[0], "T3", *CALL[1:], purpose="ideation")
+    assert single.requests[0]["temperature"] == 0
+    assert "local_sampling" not in single.requests[0]
+    assert "local_sampling" not in cloud.requests[0]
+    assert len(local.requests) == 3
+    for req in local.requests:
+        assert "temperature" not in req
+        assert req["local_sampling"]["temperature"] == 0.7
+        assert isinstance(req["local_sampling"]["seed"], int)
+    assert proxy.manifest[1]["sampling"] == local.requests[0]["local_sampling"]
+    assert "greedy" in proxy.manifest[1]["sampling_note"]
+
+
+def test_local_sampling_off_restores_greedy(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FOUNDRY_LOCAL_SAMPLING", "off")
+    local = RecordingTransport()
+    _hybrid(RecordingTransport(), local).complete(CALL[0], "T2", *CALL[1:], purpose="gate")
+    assert local.requests[0]["temperature"] == 0
+    assert "local_sampling" not in local.requests[0]
+
+
+def test_the_local_seed_is_fixed_per_request_and_moves_with_the_prompt() -> None:
+    local = RecordingTransport()
+    proxy = _hybrid(RecordingTransport(), local)
+    other = [{"role": "user", "content": "y"}]
+    proxy.complete(CALL[0], "T2", *CALL[1:], purpose="gate")
+    proxy.complete(CALL[0], "T2", *CALL[1:], purpose="gate")
+    proxy.complete(CALL[0], "T2", CALL[1], other, purpose="gate")
+    seeds = [r["local_sampling"]["seed"] for r in local.requests]
+    assert seeds[0] == seeds[1] != seeds[2]
+    miss = ProviderResponse(served_model="m", request_id="r", text="{", usage={},
+                            stop_reason="length")
+    retry = _with_parse_correction(local.requests[0], miss, 1)
+    assert retry["local_sampling"]["seed"] != seeds[0]
+    assert {k: v for k, v in retry["local_sampling"].items() if k != "seed"} == {
+        k: v for k, v in local.requests[0]["local_sampling"].items() if k != "seed"}
+
+
+def test_the_local_request_carries_the_sampling_params() -> None:
+    client = _local_client(False, '{"answer": "42"}')
+    transport = LocalOpenAITransport(client=client)
+    proxy = build_level_proxy(
+        preset_levels("local", cloud_backend="mock", cloud_models=TIER_MODELS),
+        cloud_transport=lambda _b: RecordingTransport(), local_transport=lambda _u: transport,
+        signer=SIGNER)
+    proxy.complete(CALL[0], "T2", *CALL[1:], purpose="judgment", schema=SCHEMA)
+    sent = client.chat.completions.calls[0]
+    # Ollama's /v1 maps these OpenAI fields onto its options ...
+    assert sent["temperature"] == 0.7
+    assert sent["top_p"] == 0.8
+    assert sent["presence_penalty"] == 1.0
+    assert isinstance(sent["seed"], int)
+    # ... and drops the rest, so they ride as extra body fields for other servers.
+    assert sent["extra_body"] == {"top_k": 20, "min_p": 0.0}
+    assert "local_sampling" not in sent
+    assert sent["response_format"]["type"] == "json_schema"
 
 
 def test_the_local_client_never_carries_the_openai_key(monkeypatch: pytest.MonkeyPatch) -> None:

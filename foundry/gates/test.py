@@ -352,17 +352,55 @@ _PYTEST_EXIT_WHY = {
 
 
 def bdd_findings(
-    scenarios: dict[str, str], why: dict[str, str] | None = None
+    scenarios: dict[str, str],
+    why: dict[str, str] | None = None,
+    why_ref: Mapping[str, str] | None = None,
 ) -> tuple[str, ...]:
-    """One finding per criterion whose scenario did not pass."""
+    """One finding per criterion whose scenario did not pass; ``why_ref`` overrides
+    the status's wording for one scenario ref."""
     why = why or _BDD_WHY
     out: list[str] = []
     for ref, status in sorted(scenarios.items()):
         if status == "passed":
             continue
         criterion = ref.rsplit("::", 1)[-1]
-        out.append(f"BDD criterion {criterion}: scenario {ref} {why.get(status, status)}")
+        reason = (why_ref or {}).get(ref) or why.get(status, status)
+        out.append(f"BDD criterion {criterion}: scenario {ref} {reason}")
     return tuple(out)
+
+
+_COLLECT_ERROR = re.compile(r"^(?:_+ )?ERROR (?:collecting )?(\S+?\.py)\b", re.MULTILINE)
+
+
+def uncollected_binding_reasons(
+    output: str, workdir: Path, refs: list[str]
+) -> dict[str, str]:
+    """Scenario ref -> why it never ran, for each of ``refs`` whose feature file a
+    step module binds that pytest failed to import (``ERROR collecting <module>``).
+    The generic "bind that file" advice sent a fixer rewriting a binding that was in
+    place while the module died on an undeclared import."""
+    errored = set(_COLLECT_ERROR.findall(output))
+    if not errored:
+        return {}
+    out: dict[str, str] = {}
+    binders: dict[str, list[str]] = {}
+    for ref in refs:
+        feature = ref.split("::", 1)[0]
+        if feature not in binders:
+            binders[feature] = [m for m in binding_modules(workdir, {feature}) if m in errored]
+        if binders[feature]:
+            mods = binders[feature]
+            one = len(mods) == 1
+            out[ref] = (
+                f"was not executed — {', '.join(mods)} {'binds' if one else 'bind'} it, "
+                f"but pytest failed to import {'that module' if one else 'those modules'} "
+                f"(`ERROR collecting {mods[0]}` in the output), so none of "
+                f"{'its' if one else 'their'} scenarios ran: fix the import error the "
+                "traceback shows "
+                "(a missing module, a name the code under test does not define); the "
+                "`scenarios(...)` binding is already in place, keep it"
+            )
+    return out
 
 
 def binding_modules(workdir: Path, features: set[str]) -> tuple[str, ...]:
@@ -1279,7 +1317,9 @@ class TestGate:
             structured[BDD_KEY] = scenarios
             missing = [ref for ref, o in scenarios.items() if o == "missing"]
             findings = (*shadowed_scenario_notes(workdir, missing),
-                        *bdd_findings(scenarios), *findings)
+                        *bdd_findings(scenarios, why_ref=uncollected_binding_reasons(
+                            out, workdir, missing)),
+                        *findings)
             note = conftest_binding_note(workdir) if missing else None
             if note:
                 findings = (note, *findings)

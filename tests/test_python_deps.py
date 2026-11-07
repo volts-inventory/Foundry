@@ -158,8 +158,27 @@ def test_an_undeclared_import_names_the_dependency_to_add(
     assert "add `PyYAML`" in hints[1] and len(hints) == 2  # local and stdlib skipped
 
 
-def test_a_declared_manifest_gets_no_undeclared_import_hint(tmp_path: Path) -> None:
-    _write(tmp_path, {"requirements.txt": "requests==2.31.0\n"})
+def test_a_manifest_missing_the_import_names_the_dependency_to_add(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The notes build declared Flask & co. but imported bcrypt, which the engineers
+    # had only `pip install`ed in their sandbox: the gate's venv lacked it, the step
+    # modules failed to import, and no finding said to declare it.
+    monkeypatch.setattr(pydeps.im, "packages_distributions", dict)
+    _write(tmp_path, {"requirements.txt": "Flask==3.0.0\nPyYAML==6.0.1\n",
+                      "app/__init__.py": ""})
+    output = _NO_FLASK + "E   ModuleNotFoundError: No module named 'bcrypt'\n"
+    assert undeclared_import_hints(output, tmp_path) == (
+        "the project imports `bcrypt` but its declared dependencies do not include it: "
+        "add `bcrypt` to requirements.txt (a `pip install` you ran in your sandbox is "
+        "not installed for the gates — only the declared dependencies are)",
+    )  # flask and yaml (as PyYAML) are declared: their failure is something else
+
+
+def test_a_manifest_line_that_is_not_a_plain_requirement_gets_no_hint(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, {"requirements.txt": "requests==2.31.0\n-e ./vendor/flask\n"})
     assert undeclared_import_hints(_NO_FLASK, tmp_path) == ()
 
 

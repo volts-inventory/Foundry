@@ -135,6 +135,26 @@ def test_a_scoped_gate_fails_an_unbound_scenario_without_running_anything(
     assert any("features/T1.feature::AC-2 was not executed" in f for f in obs.findings)
 
 
+def test_a_binding_module_that_fails_to_import_is_named_not_rebound(
+    tmp_path: Path,
+) -> None:
+    # The notes build's step module bound the feature but imported bcrypt, which was
+    # never declared: the gate said "bind that exact file", and the fixer rewrote the
+    # binding that was already there instead of declaring the dependency.
+    steps = "import bcrypt_not_installed_here\n" + _STEPS.replace("{expected}", "n")
+    root = _project(tmp_path, steps)
+    (root / "requirements.txt").write_text("pytest-bdd\n")
+    for gate in (TestGate(), TestGate(scope=frozenset({"features/T1.feature::AC-1"}))):
+        obs = gate.execute(root)
+        assert set(obs.structured[BDD_KEY].values()) == {"missing"}
+        ac1 = next(f for f in obs.findings if f.startswith("BDD criterion AC-1:"))
+        assert "tests/test_t1.py binds it, but pytest failed to import that module" in ac1
+        assert "binding is already in place" in ac1
+        assert "bind that exact gate-owned file" not in ac1
+        assert any("imports `bcrypt_not_installed_here` but its declared dependencies "
+                   "do not include it" in f for f in obs.findings), obs.findings
+
+
 def test_a_binding_in_conftest_is_named_as_never_collected(tmp_path: Path) -> None:
     root = _project(tmp_path, None)
     (root / "tests").mkdir(exist_ok=True)

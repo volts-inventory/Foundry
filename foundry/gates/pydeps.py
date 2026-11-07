@@ -139,17 +139,42 @@ _DIST_FOR_IMPORT = {
 _NO_MODULE = re.compile(r"No module named '([A-Za-z_][\w.]*)'")
 
 
+_REQ_NAME = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*(?:[<>=!~;@]|$)")
+
+
+def _normalized(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _declared_names(lines: list[str]) -> set[str] | None:
+    """The normalized distribution names ``lines`` declare; ``None`` when a line is
+    not a plain requirement (``-e .``, a path, a VCS URL, ``-r``), which may provide
+    any module."""
+    names: set[str] = set()
+    for line in lines:
+        m = _REQ_NAME.match(line)
+        if m is None:
+            return None
+        names.add(_normalized(m.group(1)))
+    return names
+
+
 def undeclared_import_hints(output: str, workdir: Path) -> tuple[str, ...]:
     """One line per third-party module the output reports missing
-    (``ModuleNotFoundError``) while the project declares no dependency at all — no
-    manifest, or only the scaffold Foundry writes for the audit, which is never
-    installed. Local modules and the standard library are left to the traceback."""
-    if _declarations(workdir)[1]:
+    (``ModuleNotFoundError``) that the project does not declare — no manifest, only
+    the scaffold Foundry writes for the audit (never installed), or a manifest that
+    names no distribution for it. Local modules and the standard library are left to
+    the traceback."""
+    lines = _declarations(workdir)[1]
+    declared = _declared_names(lines) if lines else set()
+    if declared is None:
         return ()
     root = Path(workdir)
     scaffolded = (root / "requirements.txt").is_file() and (
         root / "requirements.txt"
     ).read_text(encoding="utf-8", errors="replace").startswith(SCAFFOLD_HEADER)
+    manifest = ("requirements.txt" if (root / "requirements.txt").is_file() and not scaffolded
+                else "pyproject.toml's [project].dependencies")
     try:
         installed = im.packages_distributions()
     except Exception:
@@ -160,6 +185,18 @@ def undeclared_import_hints(output: str, workdir: Path) -> tuple[str, ...]:
                 or (root / f"{name}.py").is_file()):
             continue
         dist = _DIST_FOR_IMPORT.get(name) or next(iter(installed.get(name, ())), name)
+        if declared & {_normalized(n) for n in (name, dist, *installed.get(name, ()))}:
+            continue  # declared: the install or the import itself is the problem
+        if lines:
+            # A local model `pip install`ed it in its sandbox, so its own run passed,
+            # and never declared it: the gates install requirements.txt alone.
+            hints.append(
+                f"the project imports `{name}` but its declared dependencies do not "
+                f"include it: add `{dist}` to {manifest} (a `pip install` you ran in your "
+                "sandbox is not installed for the gates — only the declared "
+                "dependencies are)"
+            )
+            continue
         hint = (
             f"the project imports `{name}` but declares no dependency on it: add "
             f"`{dist}` to requirements.txt (the Foundry-generated manifest is never "

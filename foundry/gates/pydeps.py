@@ -48,6 +48,7 @@ from foundry.python_env import activation_env, build_python_env, site_packages
 
 from .runner import GroundingUnavailable
 from .sandbox import ground_untrusted
+from .test import BUILD_PYTHON_ENV as PYTHON_ENV
 from .test import BUILD_SITE_ENV as SITE_ENV
 
 __all__ = [
@@ -345,10 +346,10 @@ class PythonBuildEnv:
 
     def run_env(self) -> dict[str, str]:
         """Env for a gate command over this build: the venv first on PATH, and its
-        site-packages for the pinned harness."""
+        site-packages and python for the pinned harness."""
         self._require_install()
         return {**activation_env(self.venv, os.environ.get("PATH", os.defpath)),
-                SITE_ENV: self.site}
+                SITE_ENV: self.site, PYTHON_ENV: self.python}
 
     @property
     def binds(self) -> tuple[tuple[Path, bool], ...]:

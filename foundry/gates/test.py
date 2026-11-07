@@ -99,17 +99,23 @@ for _res, _lim in ((resource.RLIMIT_CPU, (300, 300)),
     except Exception:
         pass
 """
-# Env key naming a Python build's venv site-packages (``pydeps``).
+# Env keys naming a Python build's venv site-packages and its python (``pydeps``).
 BUILD_SITE_ENV = "FOUNDRY_GATE_SITE"
+BUILD_PYTHON_ENV = "FOUNDRY_GATE_PYTHON"
 # Run only AFTER the trusted imports: the build venv's site-packages join sys.path
 # as plain paths (no .pth runs) between the stdlib and Foundry's site-packages. After
 # the stdlib, so a declared `json` can't replace the stdlib's; before Foundry's, so a
 # declared version of a package Foundry also has is the one the project imports.
+# The harness runs on Foundry's interpreter, which has none of the project's deps:
+# a test that spawns `sys.executable smoke.py` must get the build venv's python (as
+# it does in the agent's sandbox, and as `python` on PATH already is), or every
+# child process dies on `No module named ...` that no edit to the tree can fix.
 ADD_BUILD_SITE = f"""\
 import site as _site
 _sp = {{os.path.realpath(p) for p in _site.getsitepackages()}}
 _at = next((i for i, p in enumerate(sys.path) if os.path.realpath(p) in _sp), len(sys.path))
 sys.path[_at:_at] = [p for p in os.environ.get("{BUILD_SITE_ENV}", "").split(os.pathsep) if p]
+sys.executable = os.environ.get("{BUILD_PYTHON_ENV}") or sys.executable
 """
 _ISOLATED_PYTEST_BOOTSTRAP = _BOOTSTRAP_PREAMBLE + """\
 from pytest import console_main

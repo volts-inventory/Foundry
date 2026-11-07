@@ -279,6 +279,22 @@ def test_declared_dependency_installs_into_the_build_venv_only(
     _foundry_has_no("tinydep")
 
 
+def test_a_test_spawning_sys_executable_runs_on_the_build_venv(
+    tmp_path: Path, tinydep: str, allow_install: None
+) -> None:
+    # The local notes bench: SC-601 ran `[sys.executable, "smoke.py"]`, got Foundry's
+    # interpreter (no flask), and failed with `No module named 'flask'` through six fix
+    # passes that each saw it pass in the agent's own sandbox.
+    test = (
+        "import subprocess, sys\n\n\n"
+        "def test_smoke():\n"
+        "    r = subprocess.run([sys.executable, 'smoke.py'], capture_output=True, text=True)\n"
+        "    assert r.returncode == 0, r.stderr\n"
+    )
+    gates = _gates(tmp_path, {**_APP, "test_app.py": test, "requirements.txt": f"{tinydep}\n"})
+    assert gates["test"].status is GateStatus.PASS, gates["test"].findings
+
+
 def test_without_the_dependency_the_same_tree_fails(tmp_path: Path) -> None:
     gates = _gates(tmp_path, _APP)  # no requirements.txt: nothing installed
     assert gates["build"].status is GateStatus.PASS

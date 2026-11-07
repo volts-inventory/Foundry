@@ -58,3 +58,5 @@ def _in_process_test_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("FOUNDRY_STATE_DIR", raising=False)
     # And a developer's local sampling override would change every local request.
     monkeypatch.delenv("FOUNDRY_LOCAL_SAMPLING", raising=False)
+    # And a fix-until-cap override would change every run's fix bound.
+    monkeypatch.delenv("FOUNDRY_FIX_UNTIL_CAP", raising=False)

@@ -38,8 +38,8 @@ import re
 import secrets
 import sys
 import tempfile
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from difflib import get_close_matches
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
@@ -48,6 +48,7 @@ from foundry.schemas.gates import GateStatus, VerdictClass
 from foundry.schemas.implementation import BDD_REPORT_ENV, FEATURE_DIR
 
 from . import cucumber
+from .bdd_scaffold import parse_feature, parse_fields, step_matches
 from .build import MISSING_BINARY_EXIT_CODES, commands_digest
 from .runner import ZoneAObservation, observe
 
@@ -554,6 +555,9 @@ class _StepDef:
     literal: bool  # matches only its own text (no parse fields, not a regex)
     target: str | None
     line: int
+    parser: str = ""  # "" (plain text), "parse", "cfparse", "re", ...
+    function: str = ""
+    params: tuple[str, ...] = ()  # parameters without a default (pytest fills them)
 
 
 def _step_def(module: str, d: ast.expr) -> _StepDef | None:
@@ -565,11 +569,11 @@ def _step_def(module: str, d: ast.expr) -> _StepDef | None:
     kind = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
     if kind not in _STEP_KINDS:
         return None
-    arg, literal = d.args[0], True
+    arg, literal, parser = d.args[0], True, ""
     if isinstance(arg, ast.Call) and arg.args:
         p = arg.func
         name = p.id if isinstance(p, ast.Name) else p.attr if isinstance(p, ast.Attribute) else ""
-        literal = name == "parse"
+        literal, parser = name == "parse", name or "?"
         arg = arg.args[0]
     if not isinstance(arg, ast.Constant) or not isinstance(arg.value, str):
         return None
@@ -577,19 +581,40 @@ def _step_def(module: str, d: ast.expr) -> _StepDef | None:
                    and isinstance(k.value, ast.Constant) and isinstance(k.value.value, str)),
                   None)
     return _StepDef(module, kind, arg.value, literal and "{" not in arg.value, target,
-                    d.lineno)
+                    d.lineno, parser)
+
+
+def _required_params(node: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[str, ...]:
+    a = node.args
+    positional = [*a.posonlyargs, *a.args]
+    required = positional[:len(positional) - len(a.defaults)]
+    return (*(p.arg for p in required),
+            *(p.arg for p, dflt in zip(a.kwonlyargs, a.kw_defaults, strict=True)
+              if dflt is None))
+
+
+def _parse_module(root: Path, rel: str) -> ast.Module | None:
+    try:
+        return ast.parse((root / rel).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
+        return None
+
+
+def _module_step_defs(rel: str, tree: ast.Module) -> list[_StepDef]:
+    out: list[_StepDef] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            params = _required_params(node)
+            out.extend(replace(s, function=node.name, params=params)
+                       for d in node.decorator_list if (s := _step_def(rel, d)))
+    return out
 
 
 def _step_defs(root: Path, modules: Iterable[str]) -> list[_StepDef]:
     out: list[_StepDef] = []
     for rel in modules:
-        try:
-            tree = ast.parse((root / rel).read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
-            continue
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                out.extend(s for d in node.decorator_list if (s := _step_def(rel, d)))
+        if (tree := _parse_module(root, rel)) is not None:
+            out.extend(_module_step_defs(rel, tree))
     return sorted(out, key=lambda s: (s.module, s.line))
 
 
@@ -692,8 +717,12 @@ def duplicate_step_notes(workdir: Path, features: Iterable[str]) -> tuple[str, .
     if not feats:
         return ()
     root = Path(workdir)
+    return _duplicate_notes(_step_defs(root, binding_modules(root, feats)))
+
+
+def _duplicate_notes(defs: Iterable[_StepDef]) -> tuple[str, ...]:
     groups: dict[tuple[str, str, str], list[_StepDef]] = {}
-    for d in _step_defs(root, binding_modules(root, feats)):
+    for d in defs:
         groups.setdefault((d.module, d.kind, d.text), []).append(d)
     out = [
         f"`@{kind}(\"{text}\")` is defined {len(same)} times in {module} (lines "
@@ -706,6 +735,153 @@ def duplicate_step_notes(workdir: Path, features: Iterable[str]) -> tuple[str, .
         for (module, kind, text), same in groups.items() if len(same) > 1
     ]
     return tuple(out[:_DUPLICATE_NOTES_MAX])
+
+
+# Fixtures pytest (and pytest-bdd) provide without a definition in the project.
+_BUILTIN_FIXTURES = frozenset({
+    "request", "pytestconfig", "cache", "capsys", "capsysbinary", "capfd", "capfdbinary",
+    "caplog", "monkeypatch", "recwarn", "tmp_path", "tmp_path_factory", "tmpdir",
+    "tmpdir_factory", "record_property", "record_xml_attribute",
+    "record_testsuite_property", "doctest_namespace", "pytester", "testdir",
+    "datatable", "docstring", "mocker",
+})
+_FEATURE_NAME = re.compile(r"[\w.-]+\.feature\b")
+
+
+def _module_features(root: Path, source: str) -> dict[str, str]:
+    """``features/<name>`` -> text, for each feature file under ``root`` the module
+    source names."""
+    out: dict[str, str] = {}
+    for name in dict.fromkeys(_FEATURE_NAME.findall(source)):
+        path = root / FEATURE_DIR / name
+        try:
+            out[f"{FEATURE_DIR}/{name}"] = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+    return out
+
+
+def _fixture_names(tree: ast.Module) -> tuple[set[str], bool]:
+    """(the fixtures a module defines or imports, whether it star-imports)."""
+    names: set[str] = set()
+    star = False
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for d in node.decorator_list:
+                call = d.func if isinstance(d, ast.Call) else d
+                if (call.id if isinstance(call, ast.Name)
+                        else call.attr if isinstance(call, ast.Attribute) else "") != "fixture":
+                    continue
+                alias = next((k.value.value for k in getattr(d, "keywords", ())
+                              if k.arg == "name" and isinstance(k.value, ast.Constant)
+                              and isinstance(k.value.value, str)), None)
+                names.add(alias or node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for a in node.names:
+                star = star or a.name == "*"
+                names.add((a.asname or a.name).split(".")[0])
+    return names, star
+
+
+def _unmatched_notes(defs: Iterable[_StepDef], features: Mapping[str, str]) -> list[str]:
+    lines: dict[str, set[str]] = {}
+    for text in features.values():
+        for sc in parse_feature(text):
+            for steps in sc.rendered():
+                for s in steps:
+                    lines.setdefault(s.kind, set()).add(s.text)
+    out: list[str] = []
+    for d in defs:
+        candidates = lines.get(d.kind, set())
+        verdicts = [step_matches(d.parser, d.text, line) for line in candidates]
+        if any(v is None for v in verdicts) or any(verdicts):
+            continue
+        close = get_close_matches(d.text, sorted(candidates), n=1, cutoff=0.6)
+        out.append(
+            f"`@{d.kind}(\"{d.text}\")` ({d.module}:{d.line}) matches no {d.kind.title()} "
+            f"step line of {', '.join(features)}, so it never runs — a step definition's "
+            "text must equal the feature's step line exactly (a `parsers.parse` field "
+            "stands for the varying part; the .feature file is gate-owned: change the "
+            "step definition, never the feature)"
+            + (f"; the nearest {d.kind.title()} line is \"{close[0]}\"" if close else "")
+        )
+    return out
+
+
+def _unprovided_notes(defs: Sequence[_StepDef], provided: set[str]) -> list[str]:
+    targets = {d.target for d in defs if d.target}
+    out: list[str] = []
+    for d in defs:
+        own = set(parse_fields(d.text)) if d.parser in ("parse", "cfparse") else (
+            set(re.findall(r"\(\?P<(\w+)>", d.text)) if d.parser == "re" else set())
+        if d.parser not in ("", "parse", "cfparse", "re"):
+            continue
+        for p in d.params:
+            if p in own or p in targets or p in provided or p in _BUILTIN_FIXTURES:
+                continue
+            out.append(
+                f"step argument `{p}` of {d.function} (`@{d.kind}(\"{d.text}\")`, "
+                f"{d.module}:{d.line}) is provided by nothing: it is not a `{{{p}}}` field "
+                "of the step text, no step sets `target_fixture=\"" + p + "\"`, and no "
+                f"fixture named `{p}` exists — pytest-bdd fails every scenario that runs "
+                "this step; a step's plain `return` passes nothing on"
+            )
+    return out
+
+
+def _conftest_fixtures(root: Path) -> tuple[set[str], list[_StepDef]]:
+    names: set[str] = set()
+    defs: list[_StepDef] = []
+    for path in sorted(root.rglob("conftest.py")):
+        rel = path.relative_to(root).as_posix()
+        if rel.startswith(".") or "/." in rel or (tree := _parse_module(root, rel)) is None:
+            continue
+        names |= _fixture_names(tree)[0]
+        defs.extend(_module_step_defs(rel, tree))
+    return names, defs
+
+
+def step_module_notes(
+    workdir: Path, module: str, *, params: bool = True,
+    conftest: tuple[set[str], list[_StepDef]] | None = None,
+) -> tuple[str, ...]:
+    """Static (AST-only, nothing runs) findings on one pytest-bdd step module under
+    ``workdir``: a step text it defines twice, a step whose text matches no step line
+    of the feature files it names, and (with ``params``) a step parameter that is
+    neither a field of its step text, a fixture, nor any step's ``target_fixture``
+    (any step of the module or a conftest.py: scenario order is not checked). The
+    hook for an agent loop to call after it writes a step module."""
+    root = Path(workdir)
+    tree = _parse_module(root, module)
+    if tree is None:
+        return ()
+    try:
+        features = _module_features(root, (root / module).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return ()
+    defs = sorted(_module_step_defs(module, tree), key=lambda s: s.line)
+    out = [*_duplicate_notes(defs), *(_unmatched_notes(defs, features) if features else ())]
+    if params:
+        fixtures, star = _fixture_names(tree)
+        names, shared = conftest if conftest is not None else _conftest_fixtures(root)
+        if not star:
+            out += _unprovided_notes(
+                defs, fixtures | names | {d.target for d in shared if d.target})
+    return tuple(out)
+
+
+def static_step_notes(
+    workdir: Path, features: Iterable[str], *, params: bool = True
+) -> tuple[str, ...]:
+    """:func:`step_module_notes` over every step module that binds ``features``."""
+    feats = set(features)
+    if not feats:
+        return ()
+    root = Path(workdir)
+    shared = _conftest_fixtures(root) if params else None
+    out = [n for m in binding_modules(root, feats)
+           for n in step_module_notes(root, m, params=params, conftest=shared)]
+    return tuple(out[:_DUPLICATE_NOTES_MAX * 2])
 
 
 def parse_pytest_summary(stdout: str) -> dict[str, int]:
@@ -945,7 +1121,7 @@ class TestGate:
             findings = (*undeclared_import_hints(out + err, workdir),
                         *(step_argument_hints(out, workdir, bound)
                           if trusted and not self.bdd_cmd else ()),
-                        *(duplicate_step_notes(workdir, bound)
+                        *(static_step_notes(workdir, bound, params=False)
                           if trusted and not self.bdd_cmd else ()),
                         *failure_findings(out))
             why = None if self.stack_harness else _PYTEST_EXIT_WHY.get(rc)

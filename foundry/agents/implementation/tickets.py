@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Any
 from foundry import progress
 from foundry.agents._common import journal_entry
 from foundry.agents._runtime import AgentRuntime, NodeFn
+from foundry.agents.implementation.interface_map import signature_map
 from foundry.agents.implementation.junior_engineer import (
     FIXER_NODE_ID,
     _adapter_name,
@@ -76,6 +77,7 @@ from foundry.execution.work_pool import (
     TaskEventHook,
     allocate_lineage_quotas,
 )
+from foundry.gates.bdd_scaffold import step_scaffold
 from foundry.proxy.token_meter import RunCapExceeded
 from foundry.schemas.architecture import InterfaceContract
 from foundry.schemas.base import Artifact, BudgetLedger
@@ -1203,6 +1205,69 @@ def _ticket_context(
     return tuple(spans), tuple(sorted(features))
 
 
+def ticket_signature_map(
+    ticket: Ticket,
+    tickets: Sequence[Ticket],
+    tree: Mapping[str, str | None],
+    contract_files: Sequence[str],
+) -> str:
+    """The signature map of the integrated ``tree`` a ticket builds on: its contracts
+    files, its ``reads``, then its dependency tickets' files (see
+    :func:`~foundry.agents.implementation.interface_map.signature_map`)."""
+    by_id = {t.id: t for t in tickets}
+    deps = [f for d in ticket.depends_on if (t := by_id.get(d)) is not None for f in t.files]
+    mention = "\n".join([
+        ticket.title, ticket.description, *ticket.files, *ticket.reads,
+        *ticket.implements, *ticket.consumes,
+        *(text for f in ticket.files if isinstance(text := tree.get(f), str)),
+    ])
+    return signature_map(tree, contract_files=contract_files, reads=ticket.reads,
+                         dependency_files=deps, exclude=ticket.files, mention_text=mention)
+
+
+def _feature_texts(
+    paths: Iterable[str],
+    tree: Mapping[str, str | None],
+    criteria: Mapping[str, AcceptanceCriterion],
+) -> dict[str, str]:
+    """feature path -> Gherkin: the integrated tree's copy, else rendered from the
+    criteria exactly as the gate writes it."""
+    from foundry.graph.gate_wiring import render_feature
+
+    out: dict[str, str] = {}
+    for p in paths:
+        text = tree.get(p)
+        if not isinstance(text, str):
+            owned = [c for c in criteria.values() if c.ticket_id and feature_path(c.ticket_id) == p]
+            text = render_feature(owned[0].ticket_id or "", owned) if owned else None
+        if text:
+            out[p] = text
+    return out
+
+
+def bdd_scaffold_spans(
+    files: Sequence[str],
+    features: Mapping[str, str],
+    stack: StackDecision | None,
+) -> tuple[str, ...]:
+    """One span per pytest-bdd step module in ``files``: the exact step scaffold that
+    binds ``features`` (path -> Gherkin text) — a local model that wrote the steps
+    freehand bound the wrong path, defined a step text twice and passed values by
+    ``return``."""
+    tests = _python_test_files(files)
+    if not features or not tests or not _pytest_bdd(stack):
+        return ()
+    return tuple(
+        f"PYTEST-BDD STEP SCAFFOLD for {t} — the exact skeleton of this step module: "
+        f"the scenarios() binding and one function per distinct step text of "
+        f"{', '.join(features)}. Start from it: fill in the bodies, keep every decorator "
+        "and its text exactly as written (each matches the feature's step lines), pass "
+        "values between steps through `context` (or target_fixture), and add no other "
+        f"step definitions.\n```python\n{step_scaffold(t, features)}```"
+        for t in tests
+    )
+
+
 def _ticket_packet(
     task: Task,
     ticket: Ticket,
@@ -1494,6 +1559,14 @@ def make_engineering_node(
             for ticket in _round_robin(wave):
                 tid = task_id_for_ticket(ticket.id)
                 spans, features = _ticket_context(rt, ticket, criteria, contracts)
+                owned = _ticket_scenarios(ticket, criteria)
+                sigmap = ticket_signature_map(ticket, tickets, overlay, contract_files)
+                spans = (
+                    *spans,
+                    *((sigmap,) if sigmap else ()),
+                    *bdd_scaffold_spans(ticket.files, _feature_texts(owned, overlay, criteria),
+                                        state.get("stack")),
+                )
                 # A retry must see why its last attempt failed: an identical packet is an
                 # identical model request, which the call cache replays turn for turn.
                 own = tuple(n.explanation for n in sorted(failures.get(tid, ()),
@@ -1505,7 +1578,7 @@ def make_engineering_node(
                                  if _is_local(rt, tasks[tid].tier) else turn_budget),
                     cost_budget_microusd=cost_budget_microusd, stack=state.get("stack"),
                     contract_files=contract_files,
-                    scenarios=_ticket_scenarios(ticket, criteria),
+                    scenarios=owned,
                 )
                 if tid in rebuild:
                     packet = _escalated_packet(packet, str(target), rebuild[tid], turn_budget)

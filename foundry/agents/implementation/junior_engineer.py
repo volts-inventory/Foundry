@@ -171,6 +171,8 @@ def _failed_gates(state: FactoryState) -> list[GateResult]:
 
 # pytest's per-test detail header: ``____ test_name ____`` (or Class.test_name).
 _TEST_HEADER = re.compile(r"^_{3,} (\S+) _{3,}$")
+# ... and for a module that failed to collect: ``____ ERROR collecting tests/x.py ____``.
+_COLLECT_HEADER = re.compile(r"^_{3,} ERROR collecting (\S+) _{3,}$")
 
 
 def fix_target(
@@ -214,10 +216,16 @@ def scope_gates(
         kept: list[str] = []
         skipping = False
         for line in g.findings:
-            header = _TEST_HEADER.match(line.strip())
-            if header is not None:
+            st = line.strip()
+            header = _TEST_HEADER.match(st)
+            collecting = _COLLECT_HEADER.match(st)
+            if collecting is not None:
+                skipping = collecting.group(1) not in mine
+            elif header is not None:
                 test = header.group(1).rsplit(".", 1)[-1]
                 skipping = test not in names
+            elif st.startswith("="):  # a section line ends the detail block
+                skipping = False
             ids = failing_ids([line])
             if ids:
                 if set(ids) & mine:

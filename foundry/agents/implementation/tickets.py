@@ -1739,6 +1739,10 @@ def make_engineering_node(
             if stubbed:
                 tid = task_id_for_ticket(t.id)
                 stubs[tid] = (stubbed, len(failures.get(tid, ())) + 1 < MAX_TICKET_ATTEMPTS)
+        for table in (names, stubs):
+            for tid in restarts:
+                if tid in table:  # a restart's first attempt is strict, its retry lenient
+                    table[tid] = (table[tid][0], True)  # type: ignore[assignment]
         scoped = _ScopedAdapter(rt, {task_id_for_ticket(t.id): t.files for t in wave},
                                 built_contracts, names, stubs, skeleton)
         adapter_name = _adapter_name(rt)
@@ -1841,6 +1845,9 @@ def make_engineering_node(
                     results[tid] = pool.result(pool_id)
                 except Exception as exc:
                     results[tid] = exc
+            if restart_memo:
+                _retry_restarts(pool, scoped, results, packets, restart_memo,
+                                adapter_name, cost_budget_microusd)
             stopped: dict[str, str] = {}
             if target and not requested and not restarts:
                 # A local session that hit its turn cap or was stopped early keeps its
@@ -2054,6 +2061,40 @@ def _restart_prep(
         ))
         progress.log(f"restart {tid} from scratch (reset {files or 'nothing'})")
     return reset, memo, notes
+
+
+def _retry_restarts(
+    pool: LocalWorkPool, scoped: _ScopedAdapter,
+    results: dict[str, AdapterResult | Exception], packets: Mapping[str, TaskPacket],
+    restart_memo: Mapping[str, tuple[str, ...]], adapter_name: str, est_cost: int,
+) -> None:
+    """A restart whose session failed (an empty session, a changed planned
+    signature, contract drift) gets one more attempt in the same pass, told why,
+    with the signature and contract checks lenient (they note instead of failing):
+    the restart is spent once planned, so a failed first attempt must not throw the
+    rebuild away. Both attempts failing leaves the earlier build integrated."""
+    again: dict[str, str] = {}
+    for tid, got in results.items():
+        if tid not in restart_memo or not isinstance(got, Exception):
+            continue
+        progress.log(f"restart of {tid} failed, retrying once: {got}")
+        for table in (scoped._names, scoped._stubs):
+            if tid in table:
+                table[tid] = (table[tid][0], False)  # type: ignore[assignment]
+        packet = packets[tid].model_copy(update={"prior_failures": (
+            *packets[tid].prior_failures,
+            f"the restart's first attempt failed (fix this first): {str(got)[:1500]}")})
+        try:
+            again[tid] = pool.submit(ExecutionTask(
+                packet=packet, adapter=adapter_name, lineage=packet.task["specialty"],
+                est_cost_microusd=est_cost))
+        except BudgetExceededError as exc:
+            progress.log(f"restart retry of {tid} not admitted: {exc}")
+    for tid, pool_id in again.items():
+        try:
+            results[tid] = pool.result(pool_id)
+        except Exception as exc:
+            results[tid] = exc
 
 
 def _land_reset(

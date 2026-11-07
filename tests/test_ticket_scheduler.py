@@ -1152,7 +1152,8 @@ def test_a_test_ticket_packet_names_its_feature_binding_and_verify_command(
 
     rules = " ".join(rec.packets["T-002"].task["rules"])
     assert "features/T-001.feature (Scenario: AC-1)" in rules
-    assert 'in tests/steps/test_app.py: scenarios("../../features/T-001.feature")' in rules
+    assert ('in tests/steps/test_app.py ONLY, the path relative to it: '
+            'scenarios("../../features/T-001.feature")') in rules
     assert "Never write, copy or regenerate a .feature file" in rules
     assert rec.packets["T-002"].task["verify"]["scenarios"] == (
         "grep -q features/T-001.feature tests/steps/test_app.py && "

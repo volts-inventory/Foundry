@@ -13,7 +13,7 @@ import json
 import keyword
 import posixpath
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 _HEADER = re.compile(
@@ -238,3 +238,38 @@ def step_scaffold(module: str, features: Mapping[str, str]) -> str:
                          '(or add target_fixture="name" and return it)')
         lines.append("    raise NotImplementedError")
     return "\n".join(lines) + "\n"
+
+
+# A test-named module a step module imports from, never a binder itself.
+_HELPER_MODULE = re.compile(
+    r"(^|_)(helpers?|utils?|common|fixtures?|support|shared|base|factories|mocks?)$"
+)
+_STEPISH = re.compile(r"(^|_)(steps?|bdd|features?|scenarios?|acceptance)(_|$)")
+
+
+def is_python_test(path: str) -> bool:
+    name = posixpath.basename(path)
+    return path.endswith(".py") and (name.startswith("test_") or name.endswith("_test.py"))
+
+
+def is_helper_module(path: str) -> bool:
+    stem = posixpath.basename(path).removesuffix(".py")
+    return bool(_HELPER_MODULE.search(stem.removeprefix("test_").removesuffix("_test")))
+
+
+def ticket_step_module(ticket_id: str) -> str:
+    """The step module named for a ticket: tests/test_<id>.py."""
+    return f"tests/test_{re.sub(r'[^a-z0-9]+', '_', ticket_id.lower()).strip('_')}.py"
+
+
+def step_module(files: Sequence[str], ticket_id: str = "") -> str | None:
+    """The ONE module of ``files`` that binds a ticket's feature files with pytest-bdd:
+    its ticket-named tests/test_<id>.py, else a module named for steps / bdd /
+    features, else the first test module that is not a helper. Each further module
+    binding them too would run every scenario again."""
+    tests = [f for f in files if is_python_test(f) and not is_helper_module(f)]
+    named = ticket_step_module(ticket_id) if ticket_id else None
+    return next((f for f in tests if f == named), None) or next(
+        (f for f in tests
+         if _STEPISH.search(posixpath.basename(f).removesuffix(".py").removeprefix("test_"))),
+        tests[0] if tests else None)

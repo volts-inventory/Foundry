@@ -84,7 +84,7 @@ from foundry.execution.work_pool import (
     TaskEventHook,
     allocate_lineage_quotas,
 )
-from foundry.gates.bdd_scaffold import step_scaffold
+from foundry.gates.bdd_scaffold import step_module, step_scaffold
 from foundry.proxy.token_meter import RunCapExceeded
 from foundry.schemas.architecture import InterfaceContract
 from foundry.schemas.base import Artifact, BudgetLedger
@@ -1079,11 +1079,15 @@ def scenario_rules(
     stack: StackDecision | None,
     *,
     test: bool = False,
+    ticket_id: str = "",
 ) -> list[str]:
     """The packet rules that tie a ticket to its gate-owned scenarios: the exact
     feature file(s) and scenario names, how to bind them on this stack, and never
     to author a feature file. ``scenarios`` maps feature path -> scenario names.
-    A ``test`` ticket is the binder itself, so it is never told another one binds."""
+    A ``test`` ticket is the binder itself, so it is never told another one binds.
+    On pytest-bdd exactly one module binds them (:func:`step_module`): told to bind
+    from each of four modules, a model wrote one step module four times and every
+    scenario ran 4x."""
     if not scenarios:
         return []
     listing = "; ".join(f"{path} (Scenario: {', '.join(ids)})" for path, ids in scenarios.items())
@@ -1102,19 +1106,20 @@ def scenario_rules(
             "gate). Run the bdd command and confirm each of these scenarios passed."
         )
     elif _pytest_bdd(stack):
-        tests = _python_test_files(files)
-        if tests:
-            calls = "; ".join(
-                f"in {t}: " + " ".join(
-                    f'scenarios("{posixpath.relpath(p, posixpath.dirname(t) or ".")}")'
-                    for p in paths)
-                for t in tests
-            )
+        binder = step_module(files, ticket_id)
+        if binder is not None:
+            calls = " ".join(
+                f'scenarios("{posixpath.relpath(p, posixpath.dirname(binder) or ".")}")'
+                for p in paths)
+            others = [f for f in _python_test_files(files) if f != binder]
             rules.append(
-                "BIND THEM with pytest-bdd, the path relative to your step module: "
+                f"BIND THEM with pytest-bdd in {binder} ONLY, the path relative to it: "
                 f"{calls}. Binding any other file leaves these scenarios unexecuted, "
-                "which fails the gate. The `scenarios` command in `verify` checks the "
-                "binding and runs them: every scenario above must pass. " + _PYTEST_BDD_ARGS
+                "which fails the gate"
+                + (f"; {', '.join(others)} must not call scenarios() on them, or every "
+                   "scenario runs again" if others else "")
+                + ". The `scenarios` command in `verify` checks the binding and runs "
+                "them: every scenario above must pass. " + _PYTEST_BDD_ARGS
             )
         elif files and not test:
             rules.append(
@@ -1131,15 +1136,16 @@ def scenario_rules(
 
 
 def scenario_verify(
-    files: Sequence[str], scenarios: Mapping[str, Sequence[str]], stack: StackDecision | None
+    files: Sequence[str], scenarios: Mapping[str, Sequence[str]], stack: StackDecision | None,
+    ticket_id: str = "",
 ) -> dict[str, str]:
     """The ``verify`` entry that runs a pytest-bdd ticket's own scenarios: check its
-    step modules name its feature file(s), then run them."""
-    tests = _python_test_files(files)
-    if not scenarios or not tests or not _pytest_bdd(stack):
+    step module (:func:`step_module`) names its feature file(s), then run it."""
+    binder = step_module(files, ticket_id)
+    if not scenarios or binder is None or not _pytest_bdd(stack):
         return {}
     test = stack.test if stack is not None and "pytest" in stack.test else "python -m pytest -q"
-    targets = " ".join(shlex.quote(t) for t in tests)
+    targets = shlex.quote(binder)
     checks = [f"grep -q {shlex.quote(p)} {targets}" for p in scenarios]
     return {"scenarios": " && ".join([*checks, f"{test} -rA {targets}"])}
 
@@ -1239,11 +1245,13 @@ def unwritten_ticket_files(
         missing = [f for f in t.files if not f.endswith("/") and tree.get(f) is None]
         if not missing:
             continue
+        binder = step_module(t.files, t.id)
         binds = [
             f"in {f}: " + " ".join(
                 f'scenarios("{posixpath.relpath(p, posixpath.dirname(f) or ".")}")'
                 for p in failing[t.id])
-            for f in (_python_test_files(missing) if _pytest_bdd(stack) else ())
+            for f in ((binder,) if binder is not None and _pytest_bdd(stack)
+                      and binder in missing else ())
         ]
         out.append(
             f"Create these files first: {', '.join(missing)}. Ticket {t.id} owns them and "
@@ -1433,12 +1441,14 @@ def bdd_scaffold_spans(
     files: Sequence[str],
     features: Mapping[str, str],
     stack: StackDecision | None,
+    ticket_id: str = "",
 ) -> tuple[str, ...]:
-    """One span per pytest-bdd step module in ``files``: the exact step scaffold that
-    binds ``features`` (path -> Gherkin text) — a local model that wrote the steps
-    freehand bound the wrong path, defined a step text twice and passed values by
-    ``return``."""
-    tests = _python_test_files(files)
+    """A span for the pytest-bdd step module of ``files`` (:func:`step_module`): the
+    exact step scaffold that binds ``features`` (path -> Gherkin text) — a local
+    model that wrote the steps freehand bound the wrong path, defined a step text
+    twice and passed values by ``return``."""
+    binder = step_module(files, ticket_id)
+    tests = (binder,) if binder is not None else ()
     if not features or not tests or not _pytest_bdd(stack):
         return ()
     return tuple(
@@ -1472,7 +1482,7 @@ def _ticket_packet(
         "the earlier tickets built.",
         f"Never edit {FEATURE_DIR}/*.feature files: they are the executable spec.",
         *scenario_rules(ticket.files, scenarios, stack,
-                        test=ticket.specialty is Specialty.TEST),
+                        test=ticket.specialty is Specialty.TEST, ticket_id=ticket.id),
         *verify_rules(stack, ticket_id=task.id, contract_files=contract_files),
     ]
     if ticket.files:
@@ -1496,7 +1506,7 @@ def _ticket_packet(
             "feature_files": list(feature_files),
             "rules": rules,
             "verify": {**verify_commands(stack),
-                       **scenario_verify(ticket.files, scenarios, stack)},
+                       **scenario_verify(ticket.files, scenarios, stack, ticket.id)},
         },
         persona=persona_for(ticket.specialty.value, stack,
                             harness=ticket.id == HARNESS_TICKET_ID),
@@ -1781,7 +1791,7 @@ def make_engineering_node(
                     *spans,
                     *((sigmap,) if sigmap else ()),
                     *bdd_scaffold_spans(ticket.files, _feature_texts(owned, overlay, criteria),
-                                        state.get("stack")),
+                                        state.get("stack"), ticket.id),
                 )
                 # A retry must see why its last attempt failed: an identical packet is an
                 # identical model request, which the call cache replays turn for turn.

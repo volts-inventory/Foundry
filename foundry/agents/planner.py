@@ -69,6 +69,7 @@ from foundry.agents._common import (
 )
 from foundry.agents.plan_contracts import CompileResult, check_contracts
 from foundry.base_tree import BaseView, read_base, render_base_view
+from foundry.gates.bdd_scaffold import is_helper_module, step_module, ticket_step_module
 from foundry.gates.profiles import bdd_runner_hint, stack_install
 from foundry.gates.spec import _REQUIRED_FIELDS as _GATE_FIELDS
 from foundry.gates.spec import _incomplete_steps
@@ -201,12 +202,15 @@ _TICKET_RULES = (
     "tests/test_<ticket id>.py in its own files[] and binds its own scenarios there, "
     "so each wave's check runs them as soon as it lands: never a trailing test-only "
     "ticket that binds several feature tickets' scenarios (checked and repaired). "
+    "So give each ticket only scenarios its own code and its dependencies can pass "
+    "the moment it lands: a user-level scenario (an HTTP request, a CLI run) belongs "
+    "on the ticket that exposes that surface, never on a models-only ticket. "
     "Otherwise, unless a DEMO scope cap says so, every feature ticket gets a paired "
     "specialty='test' ticket that depends_on it and writes the step definitions for "
     "that feature's scenarios; the test ticket carries no scenarios of its own. ONE "
-    "step module per feature file: never split one feature's steps across modules "
-    "by layer (test_x_routes.py + test_x_service.py): each module binds and runs "
-    "every scenario of the file again (checked). Never list a .feature file in files[]: "
+    "step module per ticket: never split its steps across modules by layer "
+    "(test_x_routes.py + test_x_service.py): only one binds the scenarios and the "
+    "rest are dropped (checked). Never list a .feature file in files[]: "
     "feature files are gate-owned. Every repo file a stack command names (e.g. "
     "smoke.py in `python3 smoke.py`) must be in some ticket's files[]. "
     "Where a scope cap speaks of ownership units, it means the files across your "
@@ -1883,7 +1887,7 @@ def _own_scenario_bindings(
     Test gate fails every scenario as not executed. A test ticket carrying scenarios
     but no test module (e.g. the plan's own ``bdd-harness``, renamed) gets one too:
     the feature tickets count it as their binder, so without one nobody binds."""
-    if stack is not None and (stack.language != "python" or stack.bdd):
+    if not _pytest_bdd(stack):
         return list(tickets), []
     bound = {c for t in tickets if t.specialty is Specialty.TEST for c in t.scenario_ids}
     out: list[Ticket] = []
@@ -1892,11 +1896,11 @@ def _own_scenario_bindings(
         test = t.specialty is Specialty.TEST
         # A file-less feature ticket is an acceptance-only one: a file would make it
         # build work.
-        if (not t.scenario_ids or any(_is_python_test(f) for f in t.files)
+        if (not t.scenario_ids or step_module(t.files, t.id) is not None
                 or (not test and (not t.files or set(t.scenario_ids) <= bound))):
             out.append(t)
             continue
-        path = f"tests/test_{re.sub(r'[^a-z0-9]+', '_', t.id.lower()).strip('_')}.py"
+        path = ticket_step_module(t.id)
         out.append(t.model_copy(update={"files": (*t.files, path)}))
         concerns.append(f"Ticket {t.id}: added {path} to bind its own scenarios "
                         + ("(a test ticket with no test module)." if test
@@ -1904,46 +1908,76 @@ def _own_scenario_bindings(
     return out, concerns
 
 
+def _pytest_bdd(stack: StackDecision | None) -> bool:
+    return stack is None or (stack.language == "python" and not stack.bdd)
+
+
 def _fold_test_bindings(
     tickets: Sequence[Ticket], stack: StackDecision | None,
 ) -> tuple[list[Ticket], list[str]]:
-    """On a pytest-bdd stack, the feature ticket binds its own scenarios. A test ticket
-    binding them instead lands after it (often after several), so the per-wave check
-    cannot run that code's scenarios until the last one lands and bugs pile up. Strip
-    other tickets' scenarios off each test ticket (:func:`_own_scenario_bindings` then
-    gives each feature ticket a step module) and drop a test ticket left with only
-    step modules to write. A test ticket keeps its own scenarios (a criterion no code
-    ticket owns) and those of a file-less acceptance-only ticket, which has nowhere
-    to bind them."""
-    if stack is not None and (stack.language != "python" or stack.bdd):
+    """On a pytest-bdd stack, move a scenario's binding off a test ticket that writes
+    only step modules onto the feature ticket that builds it, when that changes
+    nothing about when it is judged. ``wave_scenarios`` judges a scenario once its
+    every carrier is built, and a trailing test ticket binding all of an epic's
+    tickets made it the last carrier of every scenario: no wave check ran their code
+    until the last wave, and bugs piled up.
+
+    A scenario of feature ticket F moves only when every other feature ticket the
+    test ticket follows is already upstream of F: a models ticket's "When I GET
+    /products" stays late, on the test ticket after the routes ticket (run after
+    :func:`_wire_entrypoint`, so the entrypoint's order counts). A scenario F
+    already binds from a step module of its own moves anyway: binding it twice
+    runs it twice. Left alone: a test ticket that writes fixtures or helpers
+    (conftest.py, tests/steps/*.py, a stack-command file) — the step modules lean
+    on those, and moving them before their users would import app code not yet
+    built — one that implements a contract (flagged), its own scenarios (a
+    criterion no code ticket owns) and a file-less acceptance-only ticket's. A test
+    ticket left with no scenarios is dropped, its dependents rewired to its
+    dependencies."""
+    if not _pytest_bdd(stack):
         return list(tickets), []
+    protected = set(stack_files(stack)) if stack is not None else set()
+    deps = {t.id: t.depends_on for t in tickets}
+    by_id = {t.id: t for t in tickets}
     owner = {c: t.id for t in tickets
              if t.specialty is not Specialty.TEST and t.files for c in t.scenario_ids}
-    by_id = {t.id: t for t in tickets}
+    # A file-less acceptance-only ticket builds nothing a scenario could wait for.
+    features = {t.id for t in _features(tickets) if t.files}
     out: list[Ticket] = []
     dropped: dict[str, tuple[str, ...]] = {}
     concerns: list[str] = []
     for t in tickets:
-        moved = [c for c in t.scenario_ids if c in owner]
-        if t.specialty is not Specialty.TEST or t.id in _GENERATED_TICKETS or not moved:
+        borrowed = [c for c in t.scenario_ids if c in owner]
+        if t.specialty is not Specialty.TEST or t.id in _GENERATED_TICKETS or not borrowed:
             out.append(t)
             continue
-        kept = tuple(c for c in t.scenario_ids if c not in owner)
-        files = t.files if kept else tuple(f for f in t.files if not _is_python_test(f))
-        homes = _uniq(owner[c] for c in moved)
+        steps_only = all(_is_python_test(f) and not is_helper_module(f)
+                         and f not in protected for f in t.files)
+        if t.implements:
+            concerns.append(f"Test ticket {t.id} implements contract(s) "
+                            f"{', '.join(t.implements)}: left it binding its scenarios.")
+        if t.implements or not t.files:
+            out.append(t)
+            continue
+        upstream = _ancestors(deps, t.id) & features
+        moved = [
+            c for c in borrowed
+            if step_module(by_id[owner[c]].files, owner[c]) is not None
+            or (steps_only and upstream - {owner[c]} <= _ancestors(deps, owner[c]))
+        ]
+        if not moved:
+            out.append(t)
+            continue
+        kept = tuple(c for c in t.scenario_ids if c not in moved)
         note = (f"Test ticket {t.id}: moved the binding of scenario(s) {', '.join(moved)} "
-                f"to the ticket(s) that build them ({', '.join(homes)}), so each wave's "
-                "check runs them")
-        if not files and not t.implements:
+                f"to the ticket(s) that build them "
+                f"({', '.join(_uniq(owner[c] for c in moved))})")
+        if not kept and steps_only:
             dropped[t.id] = t.depends_on
             concerns.append(note + "; dropped the ticket, which had nothing else to write.")
             continue
-        out.append(t.model_copy(update={"scenario_ids": kept, "files": files}))
-        # Inheriting its dependencies' scenarios is _build_tickets' bookkeeping: say
-        # nothing when the plan already bound them on the feature tickets.
-        bound = all(any(_is_python_test(f) for f in by_id[h].files) for h in homes)
-        if files != t.files or not bound:
-            concerns.append(note + ".")
+        out.append(t.model_copy(update={"scenario_ids": kept}))
+        concerns.append(note + ".")
     if not dropped:
         return out, concerns
 
@@ -1958,32 +1992,30 @@ def _fold_test_bindings(
     ], concerns
 
 
-def _one_step_module_per_feature(
-    tickets: Sequence[Ticket], criteria: Sequence[AcceptanceCriterion],
-    stack: StackDecision | None,
+def _one_step_module_per_ticket(
+    tickets: Sequence[Ticket], stack: StackDecision | None,
 ) -> tuple[list[Ticket], list[str]]:
-    """On a pytest-bdd stack, keep at most one step module per feature file a ticket
-    binds. Its packet tells every test module it lists to bind every feature file it
-    carries, so four modules split by layer (test_cart_routes.py,
-    test_cart_service.py, ...) for three feature files each bound and ran every
-    scenario: the same 29k-char module written four times, each scenario run 4x."""
-    if stack is not None and (stack.language != "python" or stack.bdd):
+    """On a pytest-bdd stack, a ticket carrying scenarios writes ONE step module, the
+    one its packet binds them from (:func:`step_module`): four modules split by layer
+    (test_cart_routes.py, test_cart_service.py, ...) were each written as the same
+    29k-char step module, every scenario run 4x. Helper modules a step module
+    imports (test_helpers.py, ...) and stack-command files stay."""
+    if not _pytest_bdd(stack):
         return list(tickets), []
-    owner = {c.id: c.ticket_id for c in criteria}
+    protected = set(stack_files(stack)) if stack is not None else set()
     out: list[Ticket] = []
     concerns: list[str] = []
     for t in tickets:
-        modules = [f for f in t.files if _is_python_test(f)]
-        features = len(_uniq(owner.get(c) or t.id for c in t.scenario_ids))
-        if not t.scenario_ids or len(modules) <= features:
+        binder = step_module(t.files, t.id)
+        extra = [f for f in t.files if _is_python_test(f) and f != binder
+                 and not is_helper_module(f) and f not in protected]
+        if not t.scenario_ids or not extra:
             out.append(t)
             continue
-        extra = modules[features:]
         out.append(t.model_copy(update={"files": tuple(f for f in t.files if f not in extra)}))
         concerns.append(
-            f"Ticket {t.id}: dropped step module(s) {', '.join(extra)}: it binds "
-            f"{features} feature file(s), and every extra module would bind and run "
-            "each scenario again."
+            f"Ticket {t.id}: dropped test module(s) {', '.join(extra)}: {binder} binds its "
+            "scenarios, and every further module would bind and run them again."
         )
     return out, concerns
 
@@ -2637,15 +2669,14 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
         tickets, frame.stack, frozenset(base.files) if base is not None else frozenset()
     )
     concerns += more
-    for bind in (_fold_test_bindings, _own_scenario_bindings):
+    for repair in (_add_read_deps, _wire_entrypoint):
+        tickets, more = repair(tickets)
+        concerns += more
+    # After the order repairs: the fold reads the final order to judge a scenario
+    # no earlier than before.
+    for bind in (_fold_test_bindings, _own_scenario_bindings, _one_step_module_per_ticket):
         tickets, more = bind(tickets, frame.stack)
         concerns += more
-    tickets, more = _one_step_module_per_feature(tickets, criteria, frame.stack)
-    concerns += more
-    tickets, more = _add_read_deps(tickets)
-    concerns += more
-    tickets, more = _wire_entrypoint(tickets)
-    concerns += more
     criteria, more = _drop_orphan_scenarios(tickets, criteria)
     concerns += more
     criteria, more = _fix_covers(criteria, frame.brief)

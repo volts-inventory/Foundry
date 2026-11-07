@@ -124,7 +124,7 @@ PLAN: dict[str, Any] = {
             "title": "Persist todos",
             "specialty": "data",
             "difficulty": "standard",
-            "depends_on": [],
+            "depends_on": ["T-003"],
             "files": ["todo/__init__.py", "todo/store.py", "tests/test_store.py"],
             "implements": ["TodoStore.add", "TodoStore.list"],
             "consumes": [],
@@ -176,7 +176,7 @@ PLAN: dict[str, Any] = {
             "title": "Shared test fixtures",
             "specialty": "test",
             "difficulty": "trivial",
-            "depends_on": ["T-001", "T-002"],
+            "depends_on": [],
             "files": ["tests/conftest.py"],
             "implements": [],
             "consumes": [],
@@ -198,6 +198,24 @@ PLAN: dict[str, Any] = {
         },
     ],
 }
+
+def _paired_tickets() -> list[dict[str, Any]]:
+    """PLAN's tickets in the older paired shape: no feature ticket writes a step
+    module; one trailing test ticket binds both feature tickets' scenarios."""
+    t1, t2, _ = (json.loads(json.dumps(t)) for t in PLAN["tickets"])
+    t1["depends_on"] = []
+    t1["files"] = ["todo/__init__.py", "todo/store.py"]
+    t2["files"] = ["todo/api.py"]
+    t3 = {
+        "id": "T-003", "title": "Step definitions for the todo features",
+        "specialty": "test", "difficulty": "trivial", "depends_on": ["T-001", "T-002"],
+        "files": ["tests/step_defs/test_todo.py"], "implements": [], "consumes": [],
+        "scenarios": [],
+    }
+    return [t1, t2, t3]
+
+
+PAIRED_PLAN: dict[str, Any] = {**PLAN, "tickets": _paired_tickets()}
 
 EXPECTED_KINDS = {
     "intent_brief",
@@ -659,6 +677,55 @@ def test_emitted_tickets_and_criteria_resolve_with_their_fields() -> None:
     assert ac1.ticket_id == "T-002" and ac1.then == ("it appears", "the count is 1")
     assert ac1.text == "Given a user When they add a todo Then it appears and the count is 1"
     assert ac1.oracle_hint == "features/T-002.feature::AC-001"
+
+
+def _emitted(plan: dict[str, Any]) -> tuple[dict[str, Ticket], OwnershipMap]:
+    cas = ArtifactStore()
+    rt, _ = runtime_for(plan, cas=cas)
+    writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
+    by_kind = {a.kind: a for a in writes["artifacts"]}
+    ownership = cas.resolve(by_kind["ownership_map"])
+    assert isinstance(ownership, OwnershipMap)
+    return {t.id: t for t in _bodies(cas, writes, "ticket")}, ownership
+
+
+def test_a_trailing_test_ticket_keeps_the_scenarios_it_would_judge_later() -> None:
+    # T-003 binds T-001's and T-002's scenarios after both. T-002's lose nothing by
+    # moving to T-002 (T-001 is upstream of it); T-001's would be judged before the
+    # endpoint (T-002) exists, so AC-003 stays on T-003.
+    tickets, ownership = _emitted(PAIRED_PLAN)
+    assert tickets["T-003"].scenario_ids == ("AC-003",)
+    assert tickets["T-003"].files == ("tests/step_defs/test_todo.py",)
+    assert tickets["T-002"].scenario_ids == ("AC-001", "AC-002")
+    assert tickets["T-002"].files == ("todo/api.py", "tests/test_t_002.py")
+    assert tickets["T-001"].files == ("todo/__init__.py", "todo/store.py")
+    assert ownership.owners["tests/test_t_002.py"] == "backend-T-002"
+    assert ownership.unit_criteria["tests/test_t_002.py"] == ("AC-001", "AC-002")
+    assert ownership.unit_criteria["tests/step_defs/test_todo.py"] == ("AC-003",)
+
+
+def test_one_to_one_test_tickets_fold_into_their_features_end_to_end() -> None:
+    # Each feature with a test ticket of its own, the entrypoint after T-001's: both
+    # test tickets fold away and T-002 follows T-001 instead of its test ticket.
+    t1, t2, _ = _paired_tickets()
+    t2["depends_on"] = ["T-001", "T-003"]
+    pair = {"specialty": "test", "difficulty": "trivial", "implements": [],
+            "consumes": [], "scenarios": []}
+    plan = {**PAIRED_PLAN, "tickets": [
+        t1, t2,
+        {**pair, "id": "T-003", "title": "steps 1", "depends_on": ["T-001"],
+         "files": ["tests/test_store_steps.py"]},
+        {**pair, "id": "T-004", "title": "steps 2", "depends_on": ["T-002"],
+         "files": ["tests/test_api_steps.py"]},
+    ]}
+    tickets, ownership = _emitted(plan)
+    assert set(tickets) == {"T-001", "T-002"}
+    assert tickets["T-002"].depends_on == ("T-001",)
+    assert tickets["T-001"].files == ("todo/__init__.py", "todo/store.py", "tests/test_t_001.py")
+    assert ownership.owners["tests/test_t_001.py"] == "data-T-001"
+    assert ownership.unit_criteria["tests/test_t_001.py"] == ("AC-003",)
+    assert ownership.unit_criteria["tests/test_t_002.py"] == ("AC-001", "AC-002")
+    assert not any(o.startswith("test-") for o in ownership.owners.values())
 
 
 # ---- self-review: at most one in-node revision ----------------------------------

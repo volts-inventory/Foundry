@@ -313,8 +313,9 @@ def test_python_manifest_on_a_late_ticket_gets_a_wave_zero_deps_ticket() -> None
     # earlier wave check installed nothing and failed on `No module named 'werkzeug'`,
     # and the fixer may not write a later wave's file.
     tickets = json.loads(json.dumps(PLAN["tickets"]))
-    tickets[-1]["files"] = [*tickets[-1]["files"], "requirements.txt"]
-    assert tickets[-1]["depends_on"]
+    entry = next(t for t in tickets if t.get("entrypoint"))
+    entry["files"] = [*entry["files"], "requirements.txt"]
+    assert entry["depends_on"]
     stack = {**PYTHON_STACK, "framework": "Flask"}
     writes, cas, _ = _plan_once({**PLAN, "stack": stack, "tickets": tickets})
     deps, *rest = _tickets(writes, cas)
@@ -322,7 +323,8 @@ def test_python_manifest_on_a_late_ticket_gets_a_wave_zero_deps_ticket() -> None
     assert deps.files == ("requirements.txt",)
     assert "Flask" in deps.description and "pinned with ==" in deps.description
     assert all(HARNESS_TICKET_ID in t.depends_on for t in rest)
-    assert "requirements.txt" in rest[-1].files  # the owner can still extend it
+    # The owner can still extend it.
+    assert "requirements.txt" in next(t for t in rest if t.id == entry["id"]).files
 
 
 def test_python_manifest_already_in_the_first_wave_adds_no_ticket() -> None:

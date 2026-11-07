@@ -54,6 +54,9 @@ FEATURE_DIR = "features"
 # and the one that wires the stack's Cucumber runner.
 CONTRACTS_TICKET_ID = "contracts"
 HARNESS_TICKET_ID = "bdd-harness"
+# The engineering node's own diff, never a ticket: the typed stub modules of the
+# planned contracts, written right after the contracts ticket builds.
+SKELETON_TASK_ID = "skeleton"
 
 # Env var the gate sets to a path it owns; the planned BDD command must write its
 # Cucumber Messages (NDJSON) report there.

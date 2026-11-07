@@ -75,6 +75,7 @@ from foundry.graph.gate_wiring import (
     WaveBuildCheck,
     bump_fix_attempts,
     fix_cap,
+    keep_best,
     route_after_gates,
     run_build_test_gates,
     run_spec_gate,
@@ -398,9 +399,8 @@ def build_supervisor_graph(
     # command records an attested "not pinned" smoke PASS.
     bt_boundary = BUILD_TEST_SMOKE_BOUNDARY
 
-    def build_test_gate(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
-        _stop_if_cancelled()
-        out = run_build_test_gates(
+    def _final_gates(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        return run_build_test_gates(
             state,
             config,
             rt=rt,
@@ -411,6 +411,13 @@ def build_supervisor_graph(
             discriminator_factory=discriminator_factory,
             profile=profile,
         )
+
+    def build_test_gate(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        _stop_if_cancelled()
+        out = _final_gates(state, config)
+        keep_best(state, config, out, boundary=bt_boundary, scope=frozenset(), rt=rt,
+                  resolve=resolve, resolve_blob=resolve_blob,
+                  rerun=lambda s: _final_gates(s, config))
         out["phase"] = _BUILD_TEST_GATE
         _bump_on_non_advance(state, config, out, boundary=bt_boundary)
         return out

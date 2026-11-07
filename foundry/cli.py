@@ -106,7 +106,7 @@ from foundry.proxy.token_meter import (
 )
 from foundry.schemas.architecture import OwnershipMap, SystemDesign
 from foundry.schemas.base import FrozenModel
-from foundry.schemas.gates import GateStatus
+from foundry.schemas.gates import FixPass, GateResult, GateStatus
 from foundry.schemas.implementation import (
     DEFAULT_TICKET_TIERS,
     Difficulty,
@@ -712,8 +712,10 @@ def _write_output_tree(
     *,
     resolve: ArtifactResolver,
     resolve_blob: BlobResolver,
+    best: FixPass | None = None,
 ) -> str:
     """Materialize the FINAL accepted integrated tree and write the source files.
+    With ``best`` (a halted run's draft), write that fix pass's tree instead.
 
     Reuses :func:`graph.gate_wiring.materialize_workdir` over the reviewed
     FeatureDiff handles + the same ``resolve`` / ``resolve_blob`` seams the run
@@ -729,15 +731,19 @@ def _write_output_tree(
     relative path against the destination root (mirrors
     ``materialize_workdir``) so a write can never escape ``output_dir``.
     """
-    from foundry.graph.gate_wiring import materialize_workdir
+    from foundry.graph.gate_wiring import materialize_best, materialize_workdir
 
     out_root = Path(output_dir).resolve()
     out_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="foundry-cli-out-") as staging:
         stage_root = Path(staging)
-        materialize_workdir(
-            final_state, stage_root, resolve=resolve, resolve_blob=resolve_blob
-        )
+        if best is not None:
+            materialize_best(final_state, stage_root, best, resolve=resolve,
+                             resolve_blob=resolve_blob)
+        else:
+            materialize_workdir(
+                final_state, stage_root, resolve=resolve, resolve_blob=resolve_blob
+            )
         for src in sorted(stage_root.rglob("*")):
             if not src.is_file():
                 continue
@@ -765,19 +771,37 @@ def _write_draft_on_halt(
     resolve_blob: BlobResolver,
     stopped: str | None = None,
 ) -> str | None:
-    """Write a best-effort DRAFT on a HALTED run: the latest attempt's source tree
-    plus a ``DRAFT-STATUS.md`` naming what's still failing — so a held build hands back
-    a usable starting point, never empty hands. Best-effort: a tree that can't even be
-    materialized (e.g. an unparseable diff) is skipped (returns ``None``), never crashes
-    the run. Clearly marked NOT shipped — the gates rejected the tree."""
+    """Write a best-effort DRAFT on a HALTED run: the best tree of the fix loop the
+    run ended in (:func:`~foundry.graph.gate_wiring.draft_best`), else the latest
+    attempt's source tree, plus a ``DRAFT-STATUS.md`` naming what's still failing on
+    it — so a held build hands back a usable starting point, never empty hands.
+    Best-effort: a tree that can't even be materialized (e.g. an unparseable diff) is
+    skipped (returns ``None``), never crashes the run. Clearly marked NOT shipped —
+    the gates rejected the tree."""
+    from foundry.graph.gate_wiring import draft_best
+
     try:
+        best = draft_best(final_state, resolve)
         draft_root = _write_output_tree(
-            final_state, output_dir, resolve=resolve, resolve_blob=resolve_blob
+            final_state, output_dir, resolve=resolve, resolve_blob=resolve_blob, best=best
         )
     except Exception:
-        return None
+        best = None
+        try:
+            draft_root = _write_output_tree(
+                final_state, output_dir, resolve=resolve, resolve_blob=resolve_blob
+            )
+        except Exception:
+            return None
     gates = final_state.get("gates") or ()
     statuses = {g.name: g.status for g in gates}
+    if best is not None:
+        newest: dict[str, GateResult] = {}
+        for g in gates:
+            if g.run_against == best.tree and (g.name not in newest or g.seq > newest[g.name].seq):
+                newest[g.name] = g
+        statuses = {name: g.status for name, g in newest.items()}
+        gate_findings = {name: tuple(g.findings) for name, g in newest.items()}
     lines = [
         "# DRAFT — held at the gate (NOT shipped)\n\n",
         "This build did not pass every gate, so it was **not admitted/released**. The\n",

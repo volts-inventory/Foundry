@@ -35,7 +35,6 @@ import json
 import posixpath
 import re
 import shlex
-import tempfile
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -1115,29 +1114,12 @@ def _integrated_overlay(
     """The integrated tree after the previous waves (feature files included, other
     gate inputs excluded), as an overlay for each ticket's fresh sandbox — plus the
     materialization error when the tree could not be built (overlay then empty)."""
-    from foundry.graph.gate_wiring import (
-        GATE_INPUT_FILES,
-        MaterializationError,
-        materialize_workdir,
-    )
+    from foundry.graph.gate_wiring import MaterializationError, integrated_files
 
-    with tempfile.TemporaryDirectory(prefix="foundry-wave-") as tmp:
-        root = Path(tmp)
-        try:
-            materialize_workdir(state, root, resolve=resolve, resolve_blob=resolve_blob,
-                                scaffold_manifest=False)
-        except MaterializationError as exc:
-            return {}, str(exc)
-        out: dict[str, str | None] = {}
-        for f in sorted(root.rglob("*")):
-            rel = f.relative_to(root).as_posix()
-            if not f.is_file() or rel in GATE_INPUT_FILES:
-                continue
-            try:
-                out[rel] = f.read_text(encoding="utf-8")
-            except UnicodeDecodeError:
-                continue
-        return out, None
+    try:
+        return dict(integrated_files(state, resolve=resolve, resolve_blob=resolve_blob)), None
+    except MaterializationError as exc:
+        return {}, str(exc)
 
 
 def _newest_by(

@@ -594,15 +594,13 @@ def make_fixer_node(
         raise ValueError("fixer requires rt.adapter and rt.cas (it rebuilds the integrated tree)")
 
     def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
-        import tempfile
-
         from foundry.graph.gate_wiring import (
             FEATURE_DIFF_KIND,
-            GATE_INPUT_FILES,
             MaterializationError,
             _fix_attempts,
             _of_kind,
-            materialize_workdir,
+            integrated_files,
+            lift_epoch,
         )
 
         attempt = _fix_attempts(state, config)
@@ -612,21 +610,8 @@ def make_fixer_node(
         if callable(is_local) and is_local(None):
             budget = max(turn_budget, _LOCAL_FIX_TURN_BUDGET)
         try:
-            with tempfile.TemporaryDirectory(prefix="foundry-fix-") as tmp:
-                materialize_workdir(state, Path(tmp), resolve=resolve,
-                                    resolve_blob=resolve_blob, scaffold_manifest=False)
-                # Gate inputs (criteria.json) stay out of the agent's worktree: an agent
-                # told to "make the gates pass" must not be handed the oracle to edit.
-                overlay: dict[str, str | None] = {}
-                for f in sorted(Path(tmp).rglob("*")):
-                    rel = f.relative_to(tmp).as_posix()
-                    if not f.is_file() or rel in GATE_INPUT_FILES:
-                        continue
-                    try:
-                        overlay[rel] = f.read_text(encoding="utf-8")
-                    except UnicodeDecodeError:
-                        continue  # a base tree's binary asset: the sandbox clone has it
-
+            overlay: dict[str, str | None] = dict(
+                integrated_files(state, resolve=resolve, resolve_blob=resolve_blob))
         except MaterializationError as exc:
             # The gate already recorded this tree as ERROR; returning no diff lets the
             # bounded fix loop halt in order instead of crashing the run.
@@ -696,15 +681,10 @@ def make_fixer_node(
             review=lambda result, sandbox: note_fix_writes(
                 result, sandbox, task_id, focus=focus, contracts=contracts),
         )
-        # Integration orders diffs by Seq. A fresh diff key starts at epoch 1, tying
-        # with (and possibly sorting under) the diffs it repairs, so lift its epoch
-        # past every existing diff. With every ticket failed there is none yet.
-        top = max((a.seq.emission_epoch for a in _of_kind(state, FEATURE_DIFF_KIND)),
-                  default=0)
-        writes["artifacts"] = [
-            a.model_copy(update={"seq": a.seq._replace(emission_epoch=top + 1)})
-            for a in writes["artifacts"]
-        ]
+        # Integration applies it on top of the diffs it repairs (none yet when every
+        # ticket failed).
+        writes["artifacts"] = [a.model_copy(update={"seq": lift_epoch(state, a.seq)})
+                               for a in writes["artifacts"]]
         writes.setdefault("agent_journal", []).append(journal_entry(
             node_id=FIXER_NODE_ID, role="Backend Engineer",
             seq=rt.seq(config, FIXER_NODE_ID, f"journal:{task_id}"),

@@ -5,6 +5,7 @@ wave instead of spending the remaining attempts."""
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 
@@ -17,15 +18,19 @@ from foundry.gates.test import failure_findings
 from foundry.graph.gate_wiring import (
     BUILD_BOUNDARY,
     BUILD_TEST_BOUNDARY,
+    BUILD_TEST_SMOKE_BOUNDARY,
     NO_FIX_PROGRESS_TRIAGE,
     PIP_MANIFESTS,
+    WaveBuildCheck,
     _unchanged_tree_recheck,
+    best_entry,
     failing_ids,
     failure_files,
+    fix_window,
     no_fix_progress,
 )
-from foundry.schemas.base import BudgetLedger
-from foundry.schemas.gates import GateResult, GateStatus, GateTriage, VerdictClass
+from foundry.schemas.base import Artifact, BudgetLedger
+from foundry.schemas.gates import FixPass, GateResult, GateStatus, GateTriage, VerdictClass
 from foundry.state.factory_state import FactoryState
 from foundry.state.seq import Seq
 from tests.test_ticket_scheduler import _config, _Recorder, _runtime, _ticket, _wave_run
@@ -428,3 +433,304 @@ def test_a_fix_pass_with_no_ticket_diff_yet_starts_the_epochs(tmp_path: Path) ->
     out = fixer(state, _config())
     diffs = [a for a in out["artifacts"] if a.kind == "feature_diff"]
     assert [(d.task_id, d.seq.emission_epoch) for d in diffs] == [("fix-1", 1)]
+
+
+# ---- keeping the fix loop's best tree -------------------------------------------
+
+
+def _score(*gates: GateResult, names: frozenset[str] = frozenset({"build", "test"})
+           ) -> tuple[int, int, int] | None:
+    from foundry.graph.gate_wiring import fix_score
+
+    return fix_score({g.name: g for g in gates}, names)
+
+
+def test_a_broken_build_scores_worse_than_any_number_of_failing_tests() -> None:
+    nine = [f"FAILED tests/test_app.py::test_{i} - assert" for i in range(9)]
+    builds = _score(_gate("build", "t1", 1, _OK), _gate("test", "t1", 2, _RED, *nine))
+    broken = _score(_gate("build", "t2", 1, _RED, "SyntaxError"), _gate("test", "t2", 2, _RED))
+    six = _score(_gate("build", "t3", 1, _OK), _gate("test", "t3", 2, _RED, *nine[:6]))
+    assert builds is not None and broken is not None and six is not None
+    assert six < builds < broken
+    assert _score(_gate("build", "t4", 1, _OK), _gate("test", "t4", 2, GateStatus.ERROR)) is None
+    assert _score(_gate("build", "t5", 1, _OK)) is None  # a verdict missing: not judged
+
+
+def _entry(window: str, pass_no: int, tree: str, score: tuple[int, int, int] | None,
+           epoch: int) -> FixPass:
+    return FixPass(window=window, boundary=BUILD_BOUNDARY, pass_no=pass_no, tree=tree,
+                   score=score, outcome="initial", seq=Seq("run", epoch, 0, "fix_pass", 0))
+
+
+def test_the_best_pass_is_the_lowest_score_and_a_tie_goes_to_the_newest() -> None:
+    passes = [_entry("w", 0, "t1", (0, 1, 5), 1), _entry("w", 1, "t2", (0, 1, 3), 2),
+              _entry("w", 2, "t3", None, 3), _entry("w", 3, "t4", (0, 1, 3), 4),
+              _entry("other", 0, "t5", (-1, 0, 0), 5)]
+    best = best_entry(passes, "w")
+    assert best is not None and best.tree == "t4"
+    assert best_entry([], "w") is None
+
+
+def _diff_art(store: ArtifactStore, task_id: str, epoch: int, files: dict[str, str],
+              deleted: tuple[str, ...] = ()) -> Artifact:
+    import json
+
+    from foundry.agents._common import emit_artifact
+    from foundry.schemas.implementation import FeatureDiff
+
+    body: dict[str, object] = {"kind": "full-file-snapshot", "files": files}
+    if deleted:
+        body["deleted"] = list(deleted)
+    blob = store.put_blob(json.dumps(body).encode())
+    seq = Seq("run", epoch, 0, "junior_engineer", 0)
+    return emit_artifact(
+        FeatureDiff(diff_uri=blob, task_id=task_id, branch=f"task/{task_id}",
+                    base_tree_sha="b", seq=seq),
+        "feature_diff", "junior_engineer", seq, store=store,
+    ).model_copy(update={"task_id": task_id})
+
+
+def test_the_window_is_one_boundary_over_one_set_of_ticket_diffs() -> None:
+    store = ArtifactStore()
+    ticket = _diff_art(store, "T-001", 1, {"app.py": "x = 1\n"})
+    state: FactoryState = {"artifacts": [ticket]}
+    window = fix_window(state, BUILD_BOUNDARY, frozenset())
+    assert fix_window(dict(state), BUILD_BOUNDARY, frozenset()) == window  # a resume
+    fixed: FactoryState = {"artifacts": [
+        ticket, _diff_art(store, "fix-1", 2, {"app.py": "x = 2\n"}),
+        _diff_art(store, "revert-1", 3, {"app.py": "x = 1\n"})]}
+    assert fix_window(fixed, BUILD_BOUNDARY, frozenset()) == window
+    rebuilt: FactoryState = {"artifacts": [ticket, _diff_art(store, "T-001", 4,
+                                                             {"app.py": "x = 3\n"})]}
+    assert fix_window(rebuilt, BUILD_BOUNDARY, frozenset()) != window  # escalation
+    wave: FactoryState = {"artifacts": [ticket, _diff_art(store, "T-002", 5, {"b.py": "y\n"})]}
+    assert fix_window(wave, BUILD_BOUNDARY, frozenset()) != window
+    assert fix_window(state, BUILD_TEST_SMOKE_BOUNDARY, frozenset()) != window  # final gate
+    assert fix_window(state, BUILD_TEST_BOUNDARY, frozenset({"s"})) != window
+
+
+def test_a_restore_diff_rebuilds_the_best_tree_exactly(tmp_path: Path) -> None:
+    from foundry.graph.gate_wiring import (
+        _snapshot_blob,
+        integrated_files,
+        materialize_workdir,
+        restore_diff,
+    )
+
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "README.md").write_text("base readme\n")
+    (base / "keep.py").write_text("KEEP = 1\n")
+    store = ArtifactStore()
+    tickets = [_ticket("contracts", 0, files=("api.py",)),
+               _ticket("T-001", 1, files=("app.py",), deps=("contracts",))]
+    best_diffs = [
+        _diff_art(store, "contracts", 1, {"api.py": "API = 1\n"}),
+        # A later ticket's edit to the contract never reaches the tree.
+        _diff_art(store, "T-001", 2, {"app.py": "a = 1\n", "api.py": "API = 'ticket'\n"}),
+        _diff_art(store, "fix-1", 3, {"api.py": "API = 2\n", "app.py": "a = 2\n"}),
+    ]
+    good: FactoryState = {**_ticket_state(store, tickets, artifacts=best_diffs),
+                          "base_dir": str(base)}
+    worse: FactoryState = {**good, "artifacts": [*good["artifacts"], _diff_art(
+        store, "fix-2", 4, {"api.py": "API = 3\n", "app.py": "a = 3\n", "new.py": "n = 1\n"},
+        deleted=("README.md",))]}
+
+    def digest(state: FactoryState, name: str) -> str:
+        return materialize_workdir(state, tmp_path / name, resolve=store.resolve,
+                                   resolve_blob=store.resolve_blob)
+
+    snapshot = store.put_blob(_snapshot_blob(integrated_files(
+        good, resolve=store.resolve, resolve_blob=store.resolve_blob)))
+    best = _entry("w", 0, digest(good, "good"), (0, 1, 1), 1).model_copy(
+        update={"snapshot_uri": snapshot})
+    assert digest(worse, "worse") != best.tree
+    revert = restore_diff(worse, best, _config(), tree="t-worse", rt=_runtime(None, store),
+                          resolve=store.resolve, resolve_blob=store.resolve_blob)
+    assert revert is not None and revert.task_id == "revert-1"
+    assert revert.seq.emission_epoch == 5  # applied after every diff
+    restored: FactoryState = {**worse, "artifacts": [*worse["artifacts"], revert]}
+    assert digest(restored, "restored") == best.tree
+    assert (tmp_path / "restored" / "README.md").read_text() == "base readme\n"
+    assert not (tmp_path / "restored" / "new.py").exists()
+    assert (tmp_path / "restored" / "api.py").read_text() == "API = 2\n"
+
+
+def _keep_best_state(store: ArtifactStore) -> FactoryState:
+    import json
+
+    ticket = _diff_art(store, "T-001", 1, {"app.py": "x = 1\n"})
+    state: FactoryState = {"artifacts": [ticket]}
+    window = fix_window(state, BUILD_BOUNDARY, frozenset())
+    snap = store.put_blob(json.dumps({"kind": "full-file-snapshot",
+                                      "files": {"app.py": "x = 0\n"}}).encode())
+    best = _entry(window, 0, "t-best", (0, 1, 1), 1).model_copy(update={"snapshot_uri": snap})
+    return {**state, "fix_passes": [best],
+            "budget": BudgetLedger(fix_attempts_since_all_green=1)}
+
+
+def test_a_restore_whose_digest_is_not_the_best_tree_is_dropped() -> None:
+    from foundry.graph.gate_wiring import REVERT_SKIPPED_TRIAGE, keep_best
+
+    store = ArtifactStore()
+    out: dict[str, Any] = {"gates": [_gate("build", "t-new", 5, _RED, "a", "b", "c")]}
+    reverted = keep_best(_keep_best_state(store), _config(), out, boundary=BUILD_BOUNDARY,
+                         scope=frozenset(), rt=_runtime(None, store), resolve=store.resolve,
+                         resolve_blob=store.resolve_blob,
+                         rerun=lambda s: {"gates": [_gate("build", "t-other", 6, _RED, "a")]})
+    assert not reverted
+    assert "artifacts" not in out and [g.run_against for g in out["gates"]] == ["t-new"]
+    assert [t.name for t in out["gate_triage"]] == [REVERT_SKIPPED_TRIAGE]
+    [entry] = out["fix_passes"]
+    assert (entry.outcome, entry.pass_no, entry.tree) == ("worse", 1, "t-new")
+
+
+def test_an_errored_check_is_never_reverted_from() -> None:
+    from foundry.graph.gate_wiring import keep_best
+
+    store = ArtifactStore()
+    out: dict[str, Any] = {"gates": [_gate("build", "t-new", 5, GateStatus.ERROR, "infra")]}
+    reran: list[FactoryState] = []
+
+    def rerun(s: FactoryState) -> dict[str, Any]:
+        reran.append(s)
+        return {}
+
+    assert not keep_best(_keep_best_state(store), _config(), out, boundary=BUILD_BOUNDARY,
+                         scope=frozenset(), rt=_runtime(None, store), resolve=store.resolve,
+                         resolve_blob=store.resolve_blob, rerun=rerun)
+    assert not reran and [p.outcome for p in out["fix_passes"]] == ["error"]
+
+
+_BROKEN = {"a.py": "def a(:\n", "b.py": "def b(:\n"}
+_ONE_BROKEN = {"a.py": "def a():\n    return 1\n"}  # b.py still broken
+_WORSE = {"c.py": "def c(:\n", "d.py": "def d(:\n"}  # b, c and d broken
+_FIX_TICKETS = [_ticket("T-001", 0, files=("a.py", "b.py")),
+                _ticket("T-002", 1, files=("app.py",), deps=("T-001",))]
+
+
+def test_a_pass_that_makes_the_tree_worse_is_reverted_to_the_best_tree(
+    tmp_path: Path,
+) -> None:
+    rec = _Recorder(writes={"T-001": _BROKEN, "fix-1": _ONE_BROKEN, "fix-2": _WORSE,
+                            "fix-3": {"b.py": "def b():\n    return 2\n"}})
+    out, ran, _ = _wave_run(tmp_path, rec, max_fix_attempts=4, tickets=_FIX_TICKETS)
+    assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "fixer", "wave_gate",
+                   "fixer", "wave_gate", "engineering"]
+    passes = sorted(out["fix_passes"], key=lambda p: p.seq)
+    assert [(p.outcome, p.fix_task) for p in passes] == [
+        ("initial", None), ("improved", "fix-1"), ("worse", "fix-2"),
+        ("restored", "revert-1"), ("improved", "fix-3")]
+    assert passes[3].tree == passes[1].tree
+    assert passes[2].touched == ("c.py", "d.py", "rogue.txt")
+    # The next fixer worked on fix-1's tree, not fix-2's.
+    seen = rec.seen["fix-3"]
+    assert "c.py" not in seen and "d.py" not in seen
+    assert seen["a.py"] == _ONE_BROKEN["a.py"]
+    assert not any(t.name == NO_FIX_PROGRESS_TRIAGE for t in out["gate_triage"])
+    # The restore is the fix loop's diff, not the fixer's: the next summary is fix-2's.
+    summary = rec.packets["fix-3"].prior_failures
+    assert any(line.startswith("previous fix pass (fix-2)") for line in summary)
+    assert not any("revert-1" in line for line in summary)
+    assert {"T-001", "fix-1", "fix-2", "revert-1", "fix-3", "T-002"} <= {
+        a.task_id for a in out["artifacts"] if a.kind == "feature_diff"}
+
+
+def test_the_restored_tree_is_the_newest_checked_and_the_draft(tmp_path: Path) -> None:
+    rec = _Recorder(writes={"T-001": _BROKEN, "fix-1": _ONE_BROKEN, "fix-2": _WORSE})
+    # The budget runs out on the reverted pass.
+    out, ran, store = _wave_run(tmp_path, rec, tickets=_FIX_TICKETS)
+    assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "fixer", "wave_gate"]
+    best = sorted(out["fix_passes"], key=lambda p: p.seq)[1]
+    builds = sorted((g for g in out["gates"] if g.name == "build"), key=lambda g: g.seq)
+    assert builds[-1].run_against == best.tree
+    check = WaveBuildCheck(_runtime(rec, store), None,  # type: ignore[arg-type]
+                           store.resolve, store.resolve_blob)
+    assert not check.capped_off_target(out)
+
+    # A stop with an ungated fix diff on top still hands back the best tree.
+    from foundry import cli
+
+    ungated: FactoryState = {**out, "artifacts": [*out["artifacts"], _diff_art(
+        store, "fix-3", 99, {"e.py": "def e(:\n"})]}
+    draft = cli._write_draft_on_halt(ungated, str(tmp_path / "draft"), gate_findings={},
+                                     resolve=store.resolve, resolve_blob=store.resolve_blob,
+                                     stopped="token cap")
+    assert draft is not None
+    root = Path(draft)
+    assert sorted(p.name for p in root.glob("*.py")) == ["a.py", "b.py"]
+    assert (root / "a.py").read_text() == _ONE_BROKEN["a.py"]
+    status = (root / "DRAFT-STATUS.md").read_text()
+    assert "**build**: fail" in status
+    assert "b.py" in status and "c.py" not in status
+
+
+def test_a_pass_that_changes_nothing_after_a_restore_halts(tmp_path: Path) -> None:
+    rec = _Recorder(writes={"T-001": _BROKEN, "fix-1": _ONE_BROKEN, "fix-2": _WORSE})
+    out, ran, _ = _wave_run(tmp_path, rec, max_fix_attempts=5, tickets=_FIX_TICKETS)
+    # fix-3 writes only what fix-1's tree already holds: the restored tree, unchanged.
+    assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "fixer", "wave_gate",
+                   "fixer", "wave_gate"]
+    assert sorted(out["fix_passes"], key=lambda p: p.seq)[-1].outcome == "no-change"
+    assert any(t.name == NO_FIX_PROGRESS_TRIAGE for t in out["gate_triage"])
+
+
+def test_the_final_gate_reverts_a_pass_that_breaks_the_build(tmp_path: Path) -> None:
+    from foundry.gates import DevGateWriteVerifier
+    from foundry.graph.supervisor import build_supervisor_graph
+    from foundry.state.global_records import GlobalRecords
+    from foundry.state.reducers import (
+        merge_gates,
+        reset_gate_write_verifier,
+        set_gate_write_verifier,
+        union_fix_passes,
+    )
+    from tests.test_supervisor import KEY, KEY_ID, _runner
+
+    store = ArtifactStore()
+    records = GlobalRecords()
+    (tmp_path / "src").mkdir()
+    graph = build_supervisor_graph(
+        _runtime(_Recorder(), store), runner=_runner(records), resolve=store.resolve,
+        resolve_blob=store.resolve_blob, source_dir=str(tmp_path / "src"))
+    gate = graph.nodes["build_test_gate"].runnable
+    tests = ("def test_a():\n    assert False\n\n\ndef test_b():\n    assert {}\n\n\n"
+             "def test_c():\n    assert True\n").format
+    state: FactoryState = _ticket_state(store, [_ticket("T-001", 0)], artifacts=[_diff_art(
+        store, "T-001", 1, {"app.py": "X = 1\n", "test_app.py": tests("False")})])
+
+    def check(state: FactoryState, *diffs: Artifact) -> tuple[FactoryState, dict[str, Any]]:
+        state = {**state, "artifacts": [*state["artifacts"], *diffs]}
+        out = gate.invoke(state, _config())
+        return {**state, "artifacts": [*state["artifacts"], *out.get("artifacts", [])],
+                "gates": merge_gates(state.get("gates"), out["gates"]),
+                "fix_passes": union_fix_passes(state.get("fix_passes"), out["fix_passes"]),
+                "budget": out.get("budget") or state.get("budget")}, out
+
+    token = set_gate_write_verifier(DevGateWriteVerifier(KEY, KEY_ID, records))
+    try:
+        state, _ = check(state)
+        state, _ = check(state, _diff_art(store, "fix-1", 2, {"test_app.py": tests("True")}))
+        state, out = check(state, _diff_art(store, "fix-2", 3, {"app.py": "X = (\n"}))
+    finally:
+        reset_gate_write_verifier(token)
+    passes = sorted(state["fix_passes"], key=lambda p: p.seq)
+    assert [p.outcome for p in passes] == ["initial", "improved", "worse", "restored"]
+    assert {p.boundary for p in passes} == {BUILD_TEST_SMOKE_BOUNDARY}
+    assert [a.task_id for a in out["artifacts"]] == ["revert-1"]
+    newest = {g.name: g for g in sorted(state["gates"], key=lambda g: g.seq)}
+    assert {g.run_against for g in newest.values()} == {passes[1].tree}
+    assert newest["build"].status is GateStatus.PASS
+    assert state["budget"].fix_attempts_since_all_green == 3  # one per pass, not per run
+
+
+def test_fix_passes_round_trip_the_checkpoint_serde() -> None:
+    from foundry.durability.serde import foundry_serde
+
+    serde = foundry_serde()
+    entry = _entry("w", 0, "t1", (0, 1, 2), 1).model_copy(update={"failing": ("build:x",)})
+    state = {"fix_passes": [entry]}
+    assert serde.loads_typed(serde.dumps_typed(state)) == state
+    # A checkpoint saved before the ledger existed reads as an empty one.
+    old = serde.loads_typed(serde.dumps_typed({"gates": []}))
+    assert best_entry(old.get("fix_passes") or (), "w") is None

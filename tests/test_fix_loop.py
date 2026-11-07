@@ -1172,3 +1172,42 @@ def test_a_ticket_restarts_once_and_a_worse_restart_is_reverted(tmp_path: Path) 
     assert passes[3].tree == passes[1].tree  # back on fix-1's tree
     assert not any(p.restart_tickets for p in passes[2:])
     assert "fix-2" in rec.calls  # the loop goes on with the fixer
+
+
+def test_a_build_fix_that_newly_fails_a_test_is_improved_and_targets_it() -> None:
+    from foundry.graph.gate_wiring import _outcome, keep_best
+
+    best = _entry("w", 0, "t0", (0, 2, 2), 1).model_copy(
+        update={"failing": ("build:a.py:1: error", _T + "test_a")})
+    newly = (_T + "test_a", _T + "test_new")
+    # The build now passes: a stage further, whatever the tests did.
+    assert _outcome([best], "t1", (-1, 1, 2), best, newly) == "improved"
+    # Reaching as far, the superset rule still applies; reaching less is worse.
+    assert _outcome([best], "t1", (0, 2, 2), best,
+                    ("build:a.py:2: error", _T + "test_new")) == "worse"
+    built = best.model_copy(update={"score": (-1, 1, 1)})
+    assert _outcome([built], "t1", (0, 2, 2), built, ()) == "worse"
+
+    store = ArtifactStore()
+    tickets = [_ticket("T-001", 0, files=("tests/test_app.py",)),
+               _ticket("T-002", 1, files=("tests/test_new.py",))]
+    state = _ticket_state(store, tickets, artifacts=[
+        _diff_art(store, "T-001", 1, {"tests/test_app.py": "x\n"}),
+        _diff_art(store, "T-002", 2, {"tests/test_new.py": "y\n"})])
+    window = fix_window(state, BUILD_TEST_BOUNDARY, frozenset())
+    first = _entry(window, 0, "t0", (0, 2, 3), 1).model_copy(update={"failing": (
+        "build:a.py:1: error", "test:tests/test_app.py::test_a",
+        "test:tests/test_app.py::test_b")})
+    state = {**state, "fix_passes": [first],
+             "budget": BudgetLedger(fix_attempts_since_all_green=1)}
+    out: dict[str, Any] = {"gates": [
+        _gate("build", "t1", 5, _OK),
+        _gate("test", "t1", 6, _RED, "FAILED tests/test_app.py::test_a - x",
+              "FAILED tests/test_app.py::test_b - x", "FAILED tests/test_new.py::test_n - y")]}
+    keep_best(state, _config(), out, boundary=BUILD_TEST_BOUNDARY, scope=frozenset(),
+              rt=_runtime(None, store), resolve=store.resolve,
+              resolve_blob=store.resolve_blob, rerun=lambda s: {})
+    [entry] = out["fix_passes"]
+    assert entry.outcome == "improved" and entry.snapshot_uri is not None  # kept as best
+    # The newly failing test goes first, before the bigger cluster.
+    assert entry.target == "ticket:T-002"

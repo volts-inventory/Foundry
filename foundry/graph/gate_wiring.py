@@ -2314,6 +2314,11 @@ def _outcome(prior: list[FixPass], tree: str, score: tuple[int, int, int] | None
         return "no-change"
     if best is None or best.score is None:
         return "improved"
+    # More stages passing in a row (the build now passes) is progress whatever the
+    # later stage's ids did: a test that "passed" on a tree that does not build is
+    # not a check to keep. The superset rule judges trees that reach as far.
+    if score[0] < best.score[0]:
+        return "improved"
     if score > tuple(best.score) or regressions(best.failing, failing):
         return "worse"
     return "improved" if score < tuple(best.score) else "lateral"
@@ -2492,6 +2497,12 @@ def keep_best(
         verdicts = _newest_per_name(g for g in out.get("gates") or () if g.name in names)
         clusters = failure_clusters(verdicts.values(), read_tickets(state, resolve),
                                     built_task_ids(state))
+        # A pass that got a stage further may have broken ids the best tree passed:
+        # the next pass goes after those first.
+        before = best_entry(prior, new[0].window)
+        if new[0].outcome == "improved" and before is not None:
+            broke = set(regressions(before.failing, new[0].failing))
+            clusters = tuple(sorted(clusters, key=lambda c: not broke & set(c.items)))
         dead_end = stop is not None and stop[0] in _DEAD_ENDS
         # Fixing until the cap a cluster gets two repairs before its restart. The
         # legacy budget gives a loop two passes: the restart takes the second when

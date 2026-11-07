@@ -23,13 +23,12 @@ from foundry.cli import (
 )
 from foundry.durability.artifact_store import ArtifactStore
 
-
 # ---- 2b: materialization seam -----------------------------------------------
 
 
 def test_mock_uses_synthetic_doubles() -> None:
     store = ArtifactStore()
-    resolve, resolve_blob = _materialization_seam(False, store=store, diff_body="X")
+    _resolve, resolve_blob = _materialization_seam(False, store=store, diff_body="X")
     # The synthetic resolve_blob returns the diff_body for the synthetic uri.
     assert resolve_blob(_DIFF_BODY_URI) == b"X"
     # And it is NOT the store's own bound method (a real-store call would KeyError).

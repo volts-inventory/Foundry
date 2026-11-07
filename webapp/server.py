@@ -25,7 +25,7 @@ import urllib.parse
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -161,7 +161,8 @@ _AUTH_TOKEN = os.environ.get("FOUNDRY_WORKSHOP_TOKEN") or None
 # this door spends real money and executes generated code, so an open default
 # was the wrong way round. The token above still works for scripts and now
 # satisfies the session check too, so automation needs no cookie jar.
-from webapp import auth as _auth
+# auth reads FOUNDRY_* env at import, so it must follow the .env load above.
+from webapp import auth as _auth  # noqa: E402
 
 
 def _authorize_mutation(headers: Any, token: str | None) -> str | None:
@@ -325,7 +326,7 @@ class Project:
     workers: dict[str, int] = field(default_factory=parse_workers)  # per-specialty limits
     ticket_tiers: dict[str, str] = field(default_factory=dict)  # difficulty -> tier overrides
     created_at: str = field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+        default_factory=lambda: datetime.now(UTC).isoformat()
     )
     # The retained, append-only event log + a Condition every viewer waits on.
     # A single shared queue would let two streams STEAL each other's events; a log
@@ -393,7 +394,7 @@ _STORE = BuildStore(_OUTPUT_ROOT / "foundry.db")
 _PERSIST_ON = {"project", "gate", "files", "halt", "release", "done"}
 
 
-def _build_record(p: "Project") -> dict[str, Any]:
+def _build_record(p: Project) -> dict[str, Any]:
     """The catalog (DB) shape of a build."""
     return {
         "id": p.id, "floor": p.floor, "request": p.request, "mode": p.mode,
@@ -405,7 +406,7 @@ def _build_record(p: "Project") -> dict[str, Any]:
     }
 
 
-def _persist(p: "Project | None" = None) -> None:
+def _persist(p: Project | None = None) -> None:
     """Upsert build(s) into the catalog on a state change (best-effort, never raises)."""
     try:
         if p is not None:
@@ -775,10 +776,8 @@ def _emit(p: Project, **event: Any) -> None:
             p.ended_at = time.monotonic()   # start the grace clock for log trimming
         p.cond.notify_all()       # wake EVERY connected stream (not just one)
     # Durably back the log so a reconnect/restart can replay the whole story.
-    try:
+    with contextlib.suppress(Exception):
         _STORE.append_event(p.id, seq, event)
-    except Exception:
-        pass
     if event.get("type") in _PERSIST_ON:
         _persist(p)   # catalog the build's metadata on each state change
 
@@ -811,10 +810,8 @@ def _trim_finished_logs() -> None:
 def _log_sweeper() -> None:
     while True:
         time.sleep(_LOG_SWEEP_S)
-        try:
+        with contextlib.suppress(Exception):
             _trim_finished_logs()
-        except Exception:
-            pass
 
 
 def _resume_cursor(last_event_id: str | None) -> int:
@@ -1937,10 +1934,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             _PROJECTS.clear()
             _FLOOR[0] = 0
-        try:
+        with contextlib.suppress(Exception):
             _STORE.clear_all()
-        except Exception:
-            pass
         with _REPO_CACHE_LOCK:
             _REPO_CACHE.clear()
         self._json(200, {"ok": True})
@@ -2056,7 +2051,7 @@ def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
     if _LOG_SWEEP_S > 0:   # bound RAM on a long-lived server: trim finished logs
         threading.Thread(target=_log_sweeper, daemon=True).start()
     class _QuietServer(ThreadingHTTPServer):
-        def handle_error(self, request, client_address):  # noqa: N802 (stdlib API)
+        def handle_error(self, request, client_address):
             # Phones/tabs drop SSE streams constantly (backgrounding, reload) —
             # stdlib prints a full traceback per dropped socket, which reads like
             # a server crash. Swallow disconnects; real errors still print.

@@ -778,7 +778,7 @@ def test_client_cache_rebuilds_after_auth_error():
 
     cache = _ClientCache(factory)      # TTL off by default
     first = cache.get()
-    with pytest.raises(Exception):
+    with pytest.raises(Exception, match="401 Unauthorized"):
         cache.run(lambda _c: (_ for _ in ()).throw(Exception("401 Unauthorized")))
     second = cache.get()
     assert second is not first and len(built) == 2   # auth error dropped the client
@@ -803,7 +803,7 @@ def test_client_cache_keeps_injected_client_on_transient_error():
                          clock=lambda: 1e9)
     # An injected client is never proactively refreshed, and a NON-auth error
     # (a transient blip) leaves it in place for the retry layer to re-drive.
-    with pytest.raises(Exception):
+    with pytest.raises(ConnectionError, match="blip"):
         cache.run(lambda _c: (_ for _ in ()).throw(ConnectionError("blip")))
     assert cache.get() is sentinel
 

@@ -261,6 +261,18 @@ def test_the_failing_test_summary_survives_the_findings_cap() -> None:
     assert failing_ids(findings) == tuple(f"tests/test_app.py::test_{i}" for i in range(5))
 
 
+def test_a_mass_failure_keeps_its_exception_message() -> None:
+    cause = ("E   sqlalchemy.exc.InvalidRequestError: Mapper 'Mapper[User(user)]' has "
+             "no property 'cart_items'")
+    detail = "\n".join(f"_____ test_{i} _____\n>   session.query(User)\n{cause}"
+                       for i in range(80))
+    tail = "\n".join(f"FAILED tests/test_app.py::test_{i} - sqlalchemy.exc.Inv..."
+                     for i in range(80))
+    findings = failure_findings(f"{detail}\n=== short test summary info ===\n{tail}\n")
+    assert findings.count(cause) == 1
+    assert len(failing_ids(findings)) == 50
+
+
 _PIP = ("pip install command exited 1 (the project's declared dependencies cannot be "
         "installed — FAIL: fix requirements.txt / pyproject.toml); last 2 output line(s):",
         "ERROR: Could not find a version that satisfies the requirement sqlite3==2.6.0",

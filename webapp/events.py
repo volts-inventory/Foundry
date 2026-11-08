@@ -520,9 +520,9 @@ def _norm_status(status: Any) -> str:
 # --- progress lines (foundry.progress) -> `log` events ------------------------- #
 
 LOG_TEXT_MAX = 240
-# Model-call start/done lines (and unrecognized ones) are the chatty kinds: the
-# server throttles them. The rest are rare and always reported.
-LOG_CHATTY = frozenset({"call", "info"})
+# Model-call start/done lines are the chatty kind: the server throttles them. The
+# rest (restarts, diagnoses, gate checks, ...) are rare and always reported.
+LOG_CHATTY = frozenset({"call"})
 _LOG_STAMP = re.compile(r"^\[\d{1,2}:\d{2}(?::\d{2})?\]\s*")
 _LOG_TAG = re.compile(r"^\[autoresume\]\s*", re.I)
 _SELF_CHECK = re.compile(r"^self-check\s+(?P<ticket>\S+?):\s+(?P<verdict>\w+)", re.I)

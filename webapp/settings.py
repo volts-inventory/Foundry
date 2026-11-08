@@ -86,28 +86,27 @@ def presets(backend: str, local_url: str, local_model: str) -> dict[str, dict[st
 
 
 def _env_local() -> tuple[str, str]:
-    """The local server and model the CLI would use: FOUNDRY_LOCAL_URL /
-    FOUNDRY_LOCAL_MODEL when set (and valid), else the built-in defaults."""
-    url = os.environ.get("FOUNDRY_LOCAL_URL", "").strip()
+    """The local server and model the CLI would use (``cli.env_local_url`` /
+    ``env_local_model``); a value that isn't valid falls back to the built-in
+    default rather than failing every settings read."""
+    from foundry.cli import env_local_model, env_local_url
+
     try:
-        url = _local_url(url) if url else DEFAULT_LOCAL_URL
+        url = _local_url(env_local_url())
     except ValueError:
         url = DEFAULT_LOCAL_URL
-    model = os.environ.get("FOUNDRY_LOCAL_MODEL", "").strip()
-    if not (model and _MODEL_ID.match(model)):
+    model = env_local_model()
+    if not _MODEL_ID.match(model):
         model = DEFAULT_LOCAL_MODEL
     return url, model
 
 
 def default_slots() -> int:
-    """The IC-pool ceiling when the settings leave it blank: FOUNDRY_MAX_SLOTS, else
-    the CLI's cap."""
-    from foundry.cli import AUTO_SLOTS_CAP
+    """The IC-pool ceiling when the settings leave it blank: the CLI's
+    (``cli.env_max_slots``), at least 1."""
+    from foundry.cli import env_max_slots
 
-    try:
-        return max(1, int(os.environ.get("FOUNDRY_MAX_SLOTS", "") or AUTO_SLOTS_CAP))
-    except ValueError:
-        return AUTO_SLOTS_CAP
+    return max(1, env_max_slots())
 
 
 def defaults(backend: str) -> dict[str, Any]:
@@ -347,10 +346,11 @@ def resume_view(view: Mapping[str, Any], body: Mapping[str, Any], backend: str) 
     out = dict(view)
     if any(k in body for k in MODEL_KEYS):
         mode = body.get("model_mode", view.get("model_mode") or "cloud")
+        env_url, env_model = _env_local()
         raw: dict[str, Any] = {
             "model_mode": mode,
-            "local_url": body.get("local_url", view.get("local_url") or DEFAULT_LOCAL_URL),
-            "local_model": body.get("local_model", view.get("local_model") or DEFAULT_LOCAL_MODEL),
+            "local_url": body.get("local_url", view.get("local_url") or env_url),
+            "local_model": body.get("local_model", view.get("local_model") or env_model),
         }
         if "levels" in body:
             raw["levels"] = body["levels"]

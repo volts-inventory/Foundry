@@ -99,6 +99,9 @@ _PACE = 0.5  # seconds between paced closing events
 # flood the log (or every connected device's stream) with hundreds of tool calls.
 _ACT_MIN_GAP = 2.0  # seconds between reported activities
 _ACT_MAX_PER_STEP = 40  # then one "still working" line and silence for that step
+# activity_cb fires from parallel proxy-agent sessions. One counter per floor, not
+# per session: the callback carries no session identity to key it by.
+_ACT_LOCK = threading.Lock()
 # Progress lines (`log` events): model-call start/done lines arrive per call, from
 # every worker at once, so they are coalesced to one per gap; the rest always land.
 _LOG_CHATTY_GAP = 5.0
@@ -374,9 +377,11 @@ class Project:
     act_count: int = 0  # emitted this step (capped; reset on each start)
     act_text: str = ""  # last phrase (collapses immediate repeats)
     # Progress-line (`log`) throttle: last chatty line's time, how many chatty
-    # lines were held back since, and the last line (collapses immediate repeats).
+    # lines were held back since (the newest kept to flush), and the last line
+    # (collapses immediate repeats). Reset at each run start / resume.
     log_last: float = 0.0
     log_more: int = 0
+    log_held: dict[str, Any] | None = None
     log_text: str = ""
     # DRAFT-STATUS.md of the latest run that did not ship ("" when none); restored
     # from the floor's `draft_status` event after a restart.
@@ -821,39 +826,64 @@ def take_activity(p: Project, text: str, now: float | None = None) -> str | None
     if not line:
         return None
     t = time.monotonic() if now is None else now
-    if line == p.act_text or p.act_count >= _ACT_MAX_PER_STEP:
-        return None  # an immediate repeat, or this step said enough
-    if p.act_last and (t - p.act_last) < _ACT_MIN_GAP:
-        return None  # too soon after the last one
-    p.act_last, p.act_count, p.act_text = t, p.act_count + 1, line
+    with _ACT_LOCK:
+        if line == p.act_text or p.act_count >= _ACT_MAX_PER_STEP:
+            return None  # an immediate repeat, or this step said enough
+        if p.act_last and (t - p.act_last) < _ACT_MIN_GAP:
+            return None  # too soon after the last one
+        p.act_last, p.act_count, p.act_text = t, p.act_count + 1, line
     return line
 
 
-def take_log(p: Project, line: str, now: float | None = None) -> dict[str, Any] | None:
-    """The ``log`` event to emit for one progress line, or ``None`` to hold it back.
+def take_log(p: Project, line: str, now: float | None = None) -> list[dict[str, Any]]:
+    """The ``log`` events to emit for one progress line (none to hold it back).
 
-    Self-check verdicts, retries, warnings, escalations and waits always land (an
-    immediate repeat aside). Model-call start/done lines (and unrecognized ones)
-    come per call from every worker, so at most one lands per
-    :data:`_LOG_CHATTY_GAP`; the next one that lands says how many were held
-    back (``more``)."""
+    Everything but a model-call start/done line lands (an immediate repeat aside).
+    Those come per call from every worker, so at most one lands per
+    :data:`_LOG_CHATTY_GAP`; the next one that lands says how many were held back
+    (``more``). A line that always lands first flushes the newest held-back call
+    line, so the feed shows the latest call before what followed it."""
     ev = event_for_log_line(line)
     if ev is None:
-        return None
+        return []
     t = time.monotonic() if now is None else now
     with _LOG_LOCK:
         if ev["text"] == p.log_text:
-            return None
+            return []
         if ev["kind"] in LOG_CHATTY:
             if p.log_last and (t - p.log_last) < _LOG_CHATTY_GAP:
                 p.log_more += 1
-                return None
+                p.log_held = ev
+                return []
             p.log_last = t
             if p.log_more:
                 ev["more"] = p.log_more
-            p.log_more = 0
+            p.log_more, p.log_held = 0, None
+            out = [ev]
+        else:
+            out = [*_flush_held(p), ev]
         p.log_text = ev["text"]
-    return ev
+    return out
+
+
+def _flush_held(p: Project) -> list[dict[str, Any]]:
+    held, more = p.log_held, p.log_more - 1
+    p.log_more, p.log_held = 0, None
+    if held is None:
+        return []
+    p.log_text = held["text"]
+    return [{**held, "more": more} if more else held]
+
+
+def flush_log(p: Project) -> list[dict[str, Any]]:
+    """The newest held-back model-call line, for when the run ends."""
+    with _LOG_LOCK:
+        return _flush_held(p)
+
+
+def reset_log(p: Project) -> None:
+    with _LOG_LOCK:
+        p.log_last, p.log_more, p.log_held, p.log_text = 0.0, 0, None, ""
 
 
 def waiting_on(p: Project, now: float | None = None, cap: int = 3) -> str:
@@ -1179,6 +1209,7 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     from foundry.cli import run
 
     _hook_rate_limit_waits()
+    reset_log(p)
 
     if resume:
         _emit(p, type="narrate", text="↻ Resuming — picking up from the last checkpoint…")
@@ -1262,7 +1293,8 @@ def _run_factory(p: Project, resume: bool = False) -> None:
             # fresh per-step budget
             p.act_room = str(ev.get("room") or "")
             p.act_agent = str(ev.get("agent") or "")
-            p.act_count, p.act_text = 0, ""
+            with _ACT_LOCK:
+                p.act_count, p.act_text = 0, ""
         else:
             p.inflight.pop(node, None)
         _emit(p, **ev)
@@ -1296,8 +1328,7 @@ def _run_factory(p: Project, resume: bool = False) -> None:
 
     def log_line(line: str) -> None:
         """One progress line from the run (model calls, self-checks, retries, waits)."""
-        ev = take_log(p, line)
-        if ev is not None:
+        for ev in take_log(p, line):
             _emit(p, **ev)
 
     # The code lives in the durable CAS — the build needs NO output directory. We
@@ -1354,7 +1385,7 @@ def _run_factory(p: Project, resume: bool = False) -> None:
                 ticket_tiers=p.ticket_tiers or None,
                 progress_cb=progress,
                 activity_cb=activity,  # what the agent is doing INSIDE a step
-                log_cb=log_line,  # the run's progress lines, as `log` events
+                log_cb=log_line,
                 mode=p.mode,
                 backend=p.backend,  # real backend per project (not always mock)
                 adapter=p.adapter,  # coding substrate (stub/raw-react)
@@ -1373,6 +1404,8 @@ def _run_factory(p: Project, resume: bool = False) -> None:
             )
         finally:
             wd_stop.set()
+            for ev in flush_log(p):
+                _emit(p, **ev)
     except Exception as exc:
         # Print the full traceback to the SERVER terminal too — the quest-log line
         # is a one-line summary, and "no error in the terminal" must never mislead.
@@ -1882,7 +1915,7 @@ class Handler(BaseHTTPRequestHandler):
             known = _PROJECTS.get(pid)
         try:
             token_cap, max_fix, time_cap, view = _resume_overrides(
-                body, known.build if known else {}, _server_backend()
+                body, known.build if known else {}, known.backend if known else _server_backend()
             )
         except ValueError as exc:
             self._json(400, {"error": str(exc)})
@@ -2114,7 +2147,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(409, {"error": "that floor's code can't be read back"})
                 return
         adapter = _default_adapter_for(backend)
-        max_slots = opts["max_slots"]  # the settings' value, else FOUNDRY_MAX_SLOTS
+        max_slots = opts["max_slots"]
         tok_env = os.environ.get("FOUNDRY_TOKEN_CAP", "").strip()
         token_cap = int(tok_env) if tok_env.isdigit() else None
         try:

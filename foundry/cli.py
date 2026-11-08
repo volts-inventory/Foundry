@@ -214,6 +214,29 @@ def _default_adapter_for(backend: str) -> str:
 # via FOUNDRY_SLOTS_CAP (default 8) so a complex, many-task build can fan out wider
 # without per-call flags.
 AUTO_SLOTS_CAP = max(1, int(os.environ.get("FOUNDRY_SLOTS_CAP") or 8))
+
+
+def env_max_slots() -> int:
+    """The IC-pool ceiling when no --max-slots is given: FOUNDRY_MAX_SLOTS, else
+    :data:`AUTO_SLOTS_CAP` (also when it isn't a number)."""
+    try:
+        return int(os.environ.get("FOUNDRY_MAX_SLOTS", "") or AUTO_SLOTS_CAP)
+    except ValueError:
+        return AUTO_SLOTS_CAP
+
+
+def env_local_url() -> str:
+    """The local server when no --local-url is given: FOUNDRY_LOCAL_URL, else
+    :data:`DEFAULT_LOCAL_URL`. Not validated here."""
+    return os.environ.get("FOUNDRY_LOCAL_URL", "").strip() or DEFAULT_LOCAL_URL
+
+
+def env_local_model() -> str:
+    """The local model when no --local-model is given: FOUNDRY_LOCAL_MODEL, else
+    :data:`DEFAULT_LOCAL_MODEL`. Not validated here."""
+    return os.environ.get("FOUNDRY_LOCAL_MODEL", "").strip() or DEFAULT_LOCAL_MODEL
+
+
 # Minimal system prompt for the raw-react substrate (the full task prompt — pinned
 # constraints, task, spans, "emit a unified diff" — is built by the adapter itself).
 _RAW_REACT_SOP = (
@@ -312,12 +335,7 @@ def make_coding_adapter(
         # tool channel (claude-cli, codex) falls back to JSON actions on its own.
         native = native_tools
         if native is None:
-            native = os.environ.get("FOUNDRY_NATIVE_TOOLS", "").strip().lower() not in (
-                "",
-                "0",
-                "false",
-                "no",
-            )
+            native = progress.env_flag("FOUNDRY_NATIVE_TOOLS")
         return ProxyAgentAdapter(
             complete_fn=_agent_complete,
             run_id=thread_id,
@@ -882,23 +900,26 @@ def _write_draft_on_halt(
     skipped (root ``None``), never crashes the run. Clearly marked NOT shipped —
     the gates rejected the tree. Returns the draft root and the status text."""
     best = _draft_best(final_state, resolve)
-    draft_root: str | None
+    draft_root: str | None = None
     try:
         draft_root = _write_output_tree(
             final_state, output_dir, resolve=resolve, resolve_blob=resolve_blob, best=best
         )
     except Exception:
-        best = None
-        try:
-            draft_root = _write_output_tree(
-                final_state, output_dir, resolve=resolve, resolve_blob=resolve_blob
-            )
-        except Exception:
-            draft_root = None
+        if best is not None:
+            best = None
+            with contextlib.suppress(Exception):
+                draft_root = _write_output_tree(
+                    final_state, output_dir, resolve=resolve, resolve_blob=resolve_blob
+                )
     text = _draft_status(final_state, gate_findings=gate_findings, best=best, stopped=stopped)
     if draft_root is not None:
         (Path(draft_root) / "DRAFT-STATUS.md").write_text(text, encoding="utf-8")
     return draft_root, text
+
+
+def _has_draft_tree(state: FactoryState) -> bool:
+    return any(a.kind == "feature_diff" for a in state.get("artifacts") or ())
 
 
 def _latest_values(app: Any, config: RunnableConfig) -> FactoryState:
@@ -930,7 +951,7 @@ def _draft_on_stop(
     Best-effort: it runs while ``exc`` propagates and must never replace it."""
     try:
         state = _latest_values(app, config)
-        if not any(a.kind == "feature_diff" for a in state.get("artifacts") or ()):
+        if not _has_draft_tree(state):
             return
         draft, _ = _write_draft_on_halt(
             state,
@@ -1073,7 +1094,8 @@ class RunResult:
     materialized."""
     draft_status: str | None = None
     """The ``DRAFT-STATUS.md`` text of a held run (gate verdicts + what's failing),
-    with or without ``output_dir``; ``None`` on a PASS."""
+    with or without ``output_dir``; ``None`` on a PASS or when the run left no
+    draft tree (e.g. it halted in planning)."""
     resume_from: str | None = None
     """The boundary a HALTED run stopped at, where a rerun picks up (``None`` on a PASS)."""
     resumable: bool = False
@@ -1152,7 +1174,7 @@ def _progress_enabled() -> bool:
     minutes with NO output (the summary prints only at the end) — on a Pi /
     over the LAN that looks hung. This surfaces each node as it completes so the
     operator can SEE the build advancing. Off by default (byte-identical)."""
-    return os.environ.get("FOUNDRY_PROGRESS", "").strip().lower() not in ("", "0", "false", "no")
+    return progress.enabled()
 
 
 def _invoke_streaming(app: Any, seed: FactoryState | None, config: RunnableConfig) -> FactoryState:
@@ -1975,8 +1997,8 @@ def run(
             resolve=resolve,
             resolve_blob=resolve_blob,
         )
-        result = replace(result, draft_root=draft_root, draft_status=status)
-    elif not result.passed:
+        result = replace(result, draft_root=draft_root, draft_status=status if draft_root else None)
+    elif not result.passed and _has_draft_tree(final_state):
         status = _draft_status(
             final_state,
             gate_findings=result.gate_findings,
@@ -2212,13 +2234,9 @@ def main(argv: list[str] | None = None) -> int:
                 f"unknown --model-mode {model_mode!r}; choose one of {', '.join(MODEL_MODES)}"
             )
         args, _local_url = _take_value(args, "--local-url", what="a URL")
-        local_url = (
-            _local_url or os.environ.get("FOUNDRY_LOCAL_URL", "").strip() or DEFAULT_LOCAL_URL
-        )
+        local_url = _local_url or env_local_url()
         args, _local_model = _take_value(args, "--local-model", what="a model id")
-        local_model = (
-            _local_model or os.environ.get("FOUNDRY_LOCAL_MODEL", "").strip() or DEFAULT_LOCAL_MODEL
-        )
+        local_model = _local_model or env_local_model()
         args, time_cap = _take_int(args, "--time-cap", minimum=1)
         # --fix-until-cap / --no-fix-until-cap override FOUNDRY_FIX_UNTIL_CAP and the
         # mode's default (on for local).
@@ -2235,12 +2253,8 @@ def main(argv: list[str] | None = None) -> int:
         # / FOUNDRY_MAX_SLOTS only OVERRIDE the safety ceiling (e.g. lower it on a
         # constrained box); neither is required. --cost-cap-microusd N: the global
         # spend envelope the pool sub-allocates (default FOUNDRY_COST_CAP_MICROUSD).
-        try:
-            _slots_default = int(os.environ.get("FOUNDRY_MAX_SLOTS", "") or AUTO_SLOTS_CAP)
-        except ValueError:
-            _slots_default = AUTO_SLOTS_CAP
         args, _slots = _take_int(args, "--max-slots", minimum=1)
-        max_slots = _slots if _slots is not None else _slots_default
+        max_slots = _slots if _slots is not None else env_max_slots()
 
         _cost_env = os.environ.get("FOUNDRY_COST_CAP_MICROUSD", "").strip()
         cost_cap_microusd: int | None = int(_cost_env) if _cost_env.isdigit() else None

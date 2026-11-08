@@ -623,26 +623,79 @@ def test_progress_lines_stream_as_log_events_with_model_calls_coalesced(env, mon
     logs = [e for e in p.log if e["type"] == "log"]
     assert [(e["kind"], e.get("verdict")) for e in logs] == [
         ("call", None),  # the first model call; the next two are held back
+        ("call", None),  # the newest held one, flushed ahead of the self-check
         ("self-check", "red"),  # an immediate repeat collapses
         ("warning", None),
         ("retry", None),
         ("self-check", "green"),
     ]
     assert logs[0]["text"] == "start model call: planner (T1, ideation)"
+    assert logs[1]["text"] == "start model call: coder (T2)" and logs[1]["more"] == 1
     assert all(not e["text"].startswith("[") for e in logs)
     # durable: a viewer after a restart replays them too
     assert [e["type"] for e in env.store.events_of(p.id)].count("log") == len(logs)
 
 
+def _texts(evs: list[dict[str, Any]]) -> list[tuple[str, int | None]]:
+    return [(e["text"], e.get("more")) for e in evs]
+
+
 def test_held_back_model_calls_are_counted_on_the_next_one():
     p = Project(id="t", request="r", mode="assistant", floor=1)
-    assert server.take_log(p, "start model call: a", now=100.0) is not None
-    assert server.take_log(p, "done model call: a in 1s", now=101.0) is None
-    assert server.take_log(p, "start model call: b", now=102.0) is None
-    assert server.take_log(p, "WARNING b: context truncated", now=102.5) is not None
+    assert _texts(server.take_log(p, "start model call: a", now=100.0)) == [
+        ("start model call: a", None)
+    ]
+    assert server.take_log(p, "done model call: a in 1s", now=101.0) == []
+    assert server.take_log(p, "start model call: b", now=102.0) == []
+    assert server.take_log(p, "done model call: b in 1s", now=103.0) == []
     ev = server.take_log(p, "start model call: c", now=100.0 + server._LOG_CHATTY_GAP)
-    assert ev is not None and ev["more"] == 2
-    assert "more" not in (server.take_log(p, "x", now=200.0) or {})
+    assert _texts(ev) == [("start model call: c", 3)]
+    assert server.take_log(p, "done model call: c in 1s", now=200.0)[0].get("more") is None
+
+
+def test_info_lines_always_land_and_flush_the_held_call_first():
+    p = Project(id="t", request="r", mode="assistant", floor=1)
+    server.take_log(p, "start model call: a", now=100.0)
+    assert server.take_log(p, "done model call: a in 1s", now=100.5) == []
+    assert server.take_log(p, "start model call: b", now=101.0) == []
+    got = server.take_log(p, "restarting the local server", now=101.5)
+    assert _texts(got) == [("start model call: b", 1), ("restarting the local server", None)]
+    assert got[1]["kind"] == "info"
+    assert _texts(server.take_log(p, "planner delta: 2 tickets", now=101.6)) == [
+        ("planner delta: 2 tickets", None)
+    ]
+    assert server.take_log(p, "planner delta: 2 tickets", now=101.7) == []  # exact repeat
+
+
+def test_the_last_held_call_is_flushed_when_the_run_ends(env, monkeypatch):
+    monkeypatch.setattr(server, "_LOG_CHATTY_GAP", 3600.0)
+    _fake_run(
+        monkeypatch,
+        [
+            "start model call: planner (T1)",
+            "done  model call: planner in 9s (T1)",
+            "start model call: coder (T2)",
+            "done  model call: coder in 4s (T2)",
+        ],
+    )
+    _, got = _call(env, "POST", "/api/projects", {"request": "build a thing"})
+    p = server._PROJECTS[got["id"]]
+    _wait_ended(p)
+    logs = [e for e in p.log if e["type"] == "log"]
+    assert _texts(logs) == [
+        ("start model call: planner (T1)", None),
+        ("done model call: coder in 4s (T2)", 2),
+    ]
+
+
+def test_a_resume_starts_the_log_throttle_afresh(env, runs, monkeypatch):
+    p = _halted(env, monkeypatch, runs)
+    p.log_last, p.log_more, p.log_text = time.monotonic(), 4, "start model call: x"
+    p.log_held = {"type": "log", "kind": "call", "text": "start model call: x"}
+    assert _call(env, "POST", f"/api/projects/{p.id}/resume", {})[0] == 200
+    _wait_ended(p)
+    assert (p.log_last, p.log_more, p.log_held, p.log_text) == (0.0, 0, None, "")
+    assert server.take_log(p, "start model call: x", now=1.0) != []
 
 
 # --- DRAFT-STATUS for a floor that did not ship ------------------------------------------ #
@@ -758,3 +811,50 @@ def test_resume_refuses_plan_changes_and_bad_settings(env, runs, monkeypatch, bo
     code, got = _call(env, "POST", f"/api/projects/{p.id}/resume", body)
     assert code == 400 and why in got["error"], got
     assert p.build == before and p.status == "done" and len(runs) == 1
+
+
+def test_resume_checks_the_new_model_setup_against_the_floors_backend(env, runs, monkeypatch):
+    p = _halted(env, monkeypatch, runs)
+    assert p.backend == "mock"
+    monkeypatch.setenv("FOUNDRY_MODEL_BACKEND", "claude-cli")  # the server's now, not the floor's
+    code, got = _call(env, "POST", f"/api/projects/{p.id}/resume", {"model_mode": "hybrid"})
+    assert code == 200, got
+    _wait_ended(p)
+    cloud = [lv for lv in p.build["levels"].values() if lv["backend"] != "local"]
+    assert cloud and all(lv["backend"] == "mock" for lv in cloud)
+    assert runs[-1]["backend"] == "mock"
+
+
+def test_resume_view_falls_back_to_the_env_local_server(monkeypatch):
+    monkeypatch.setenv("FOUNDRY_LOCAL_URL", "http://10.0.0.5:1234/v1")
+    monkeypatch.setenv("FOUNDRY_LOCAL_MODEL", "qwen/qwen3-coder-30b")
+    view = ws.resume_view({"model_mode": "cloud"}, {"model_mode": "local"}, "mock")
+    assert view["local_url"] == "http://10.0.0.5:1234/v1"
+    assert view["local_model"] == "qwen/qwen3-coder-30b"
+    assert view["levels"]["T1"]["model"] == "qwen/qwen3-coder-30b"
+
+
+def test_activity_throttle_holds_under_parallel_sessions():
+    import sys
+
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)  # switch threads often, so an unlocked counter overshoots
+    try:
+        p = Project(id="t", request="r", mode="assistant", floor=1)
+        taken: list[str] = []
+        clock = iter(range(10_000_000))
+
+        def session(n: int) -> None:
+            for i in range(300):
+                line = server.take_activity(p, f"editing s{n}-{i}.py", now=float(next(clock) * 10))
+                if line is not None:
+                    taken.append(line)
+
+        threads = [threading.Thread(target=session, args=(n,)) for n in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    finally:
+        sys.setswitchinterval(interval)
+    assert len(taken) == p.act_count == server._ACT_MAX_PER_STEP

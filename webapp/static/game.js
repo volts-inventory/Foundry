@@ -2196,7 +2196,7 @@ function routeEvent(floor, ev){
       logTo(F, "gold", "── RESUMED ──");
       break;
     case "narrate": logNarrate(F, ev.text); break;
-    case "log": logRunLine(F, ev); break;   // the run's own progress lines
+    case "log": logRunLine(F, ev); break;
     case "task": {                 // one ticket's worker started / finished / failed
       const r = taskApply(F, ev);
       if (S){
@@ -2463,8 +2463,32 @@ function appendLogDom(cls, text, lines){
 }
 function logTo(F, cls, text, lines){
   F.log.push({cls, text, lines:(lines&&lines.length)?lines:null});
-  if (F.log.length > 240) F.log.shift();
+  if (F.log.length > 240 && F.log.shift().run) F.runLines--;
   if (F.floor === ACTIVE) appendLogDom(cls, text, lines);
+}
+// Run progress lines can arrive every few seconds for hours: past this many the
+// oldest one goes, not the head of the log, so narration, gate verdicts and the
+// RESUMED markers outlive them.
+const RUN_LINE_MAX = 80;
+function logRunEntry(F, cls, text){
+  const e = {cls, text, lines:null, run:true};
+  F.log.push(e);
+  F.runLines = (F.runLines || 0) + 1;
+  if (F.runLines > RUN_LINE_MAX){
+    const i = F.log.findIndex(x => x.run);
+    const old = F.log.splice(i, 1)[0]; F.runLines--;
+    if (old.el && F.floor === ACTIVE) inLog((ul)=>{
+      if(!ul) return;
+      const before=ul.scrollHeight; old.el.remove();
+      if(!logFollow) ul.scrollTop=Math.max(0, ul.scrollTop-(before-ul.scrollHeight));
+    });
+  }
+  if (F.log.length > 240 && F.log.shift().run) F.runLines--;
+  if (F.floor === ACTIVE) inLog((ul)=>{
+    if(!ul) return;
+    e.el = rowNode(cls, text, null); ul.appendChild(e.el);
+    while(ul.children.length>240) ul.removeChild(ul.firstChild);
+  });
 }
 // A narrate line. If an agent is CURRENTLY working (and this isn't a system/status
 // message), it's that agent's output — fold it into their box body. Otherwise it's a
@@ -2531,7 +2555,7 @@ function agentBox(F, agent){
   let g=F._agrp[agent];
   if(!g){
     g={box:true, agent, room:"", done:false, cap:"", fallback:"", narrates:[], items:[]};
-    F._agrp[agent]=g; F.log.push(g); if(F.log.length>240) F.log.shift();
+    F._agrp[agent]=g; F.log.push(g); if(F.log.length>240 && F.log.shift().run) F.runLines--;
     if(F.floor===ACTIVE) inLog((ul)=>{ if(!ul) return; g.el=renderAgentBox(g); ul.appendChild(g.el); });
   }
   return g;
@@ -2564,16 +2588,14 @@ function logAct(F, ev){
   }
   logTo(F, "", "· "+t);
 }
-// A run progress line (the server's `log` event): model calls, self-checks, retries,
-// warnings, escalations, waits. Self-check verdicts and warnings stand out; model
-// calls stay dim. `more` = model-call lines the server coalesced away before this one.
+// `more` = model-call lines the server coalesced away before this one.
 const RUN_LINE_CLASS = {warning:"run warn", escalate:"run gold", wait:"run gold", retry:"run retry"};
 function logRunLine(F, ev){
   const t = String(ev.text || "").trim(); if(!t) return;
   let cls = RUN_LINE_CLASS[ev.kind] || "run";
   if (ev.kind === "self-check") cls = ev.verdict === "green" ? "run good" : ev.verdict === "red" ? "run bad" : "run";
   const mark = ev.kind === "warning" ? "⚠ " : ev.kind === "self-check" ? (ev.verdict === "green" ? "✓ " : ev.verdict === "red" ? "✕ " : "◦ ") : "› ";
-  logTo(F, cls, mark+t+(ev.more ? "  (+"+ev.more+" more)" : ""));
+  logRunEntry(F, cls, mark+t+(ev.more ? "  (+"+ev.more+" more)" : ""));
 }
 // An artifact: fold its CONTENT into its producing agent's box body.
 function logArtifact(F, ev){
@@ -2607,6 +2629,7 @@ function rebuildLog(F){
   const ul=document.getElementById("log"); ul.innerHTML="";
   for (const e of F.log){
     if(e.box){ e.el=renderAgentBox(e); ul.appendChild(e.el); }
+    else if(e.run){ e.el=rowNode(e.cls, e.text, null); ul.appendChild(e.el); }
     else ul.appendChild(rowNode(e.cls, e.text, e.lines||null));
   }
   scrollLogToEnd();          // a floor switch always lands you on the newest activity
@@ -3064,8 +3087,8 @@ function showRetryForm(F){
   const curMin = F.build && F.build.time_cap_minutes;
   const mins = field("Time cap (min)", {min:"0", step:"any", inputmode:"decimal",
     placeholder: curMin ? String(curMin) : "no cap"});
-  // Model mode: the run's own, preset. A different one resumes on that mode's levels;
-  // the plan in the checkpoint (scope, spec, stack) stays as it is.
+  // Only the model setup can change: the plan in the checkpoint (scope, spec, stack)
+  // is what resumes.
   const curMode = (F.build && F.build.model_mode) || "cloud";
   const ml = document.createElement("label"); ml.textContent = "Model mode";
   const mode = document.createElement("select");

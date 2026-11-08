@@ -21,8 +21,13 @@ from typing import Any
 _SINK: ContextVar[Callable[[str], None] | None] = ContextVar("foundry_progress_sink", default=None)
 
 
+def env_flag(name: str) -> bool:
+    """An opt-in env switch: on unless unset, empty, 0, false or no."""
+    return os.environ.get(name, "").strip().lower() not in ("", "0", "false", "no")
+
+
 def enabled() -> bool:
-    return os.environ.get("FOUNDRY_PROGRESS", "").strip().lower() not in ("", "0", "false", "no")
+    return env_flag("FOUNDRY_PROGRESS")
 
 
 @contextlib.contextmanager

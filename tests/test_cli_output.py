@@ -153,3 +153,38 @@ def test_telemetry_details_every_ticket_past_the_bulk_cap() -> None:
     picked = _detailed_artifacts(arts)
     assert sum(a.kind == "ticket" for a in picked) == 5
     assert sum(a.kind == "acceptance_criterion" for a in picked) == 200
+
+
+def test_a_run_halted_in_planning_has_no_draft_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    import foundry.cli as cli
+
+    # An empty plan fails the Spec gate before any ticket is built.
+    monkeypatch.setattr(cli, "_SCRIPTS", {"You are the Planner": "{}"})
+    result = run("build a tiny service", thread_id="cli-status-plan-halt", max_fix_attempts=1)
+
+    assert result.passed is False and result.gate_statuses.get("spec") is GateStatus.FAIL
+    assert result.draft_status is None
+
+
+def test_a_draft_tree_that_cannot_be_written_is_tried_once_without_a_best(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import foundry.cli as cli
+
+    calls: list[object] = []
+
+    def boom(*_: object, **kw: object) -> str:
+        calls.append(kw.get("best"))
+        raise ValueError("unparseable diff")
+
+    monkeypatch.setattr(cli, "_draft_best", lambda *_: None)
+    monkeypatch.setattr(cli, "_write_output_tree", boom)
+    root, text = cli._write_draft_on_halt(
+        {"gates": []},
+        str(tmp_path),
+        gate_findings={},
+        resolve=lambda h: None,
+        resolve_blob=lambda h: None,
+    )
+    assert root is None and "held at the gate" in text.lower()
+    assert calls == [None]

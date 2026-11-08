@@ -271,7 +271,6 @@ _LIST_MAX = 200
 # With this many turns left the observation says so: a session that never learns
 # its budget is cut off mid-change, before it re-runs the checks on its edits.
 _LOW_TURNS = 5
-# One activity line per action, in the claude-code adapter's style.
 _ACTIVITY: dict[str, tuple[str, str | None]] = {
     "write_file": ("writing", "path"),
     "read_file": ("reading", "path"),

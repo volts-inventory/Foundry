@@ -380,6 +380,8 @@ _AGENT_NODE_IDS = frozenset({"junior_engineer"})
 # A thinking turn spends its reasoning out of the answer's budget: at xhigh a hard
 # ticket, a verdict or the planner's plan JSON can think for 20K+ tokens first.
 _LOCAL_THINKING_MAX_TOKENS = 40960
+# One-shot xhigh calls (plan, verdict): what a 64K context leaves after the prompt.
+_LOCAL_DEEP_THINKING_MAX_TOKENS = 57344
 # A prompt the server saw as under this share of our estimate was cut to fit its
 # context window (Ollama truncates silently). Chars/4 under-counts code and JSON,
 # so a healthy call reads at or above 1.
@@ -576,8 +578,12 @@ def _with_parse_correction(
         messages.append({"role": "user", "content": note.strip()})
     corrected = {**request, "messages": messages}
     if miss.stop_reason == "length" and corrected.get("local_thinking") is True:
-        # The reasoning ran out the budget; a second thinking attempt would too.
-        corrected["local_thinking"] = False
+        # The reasoning ran out the budget; a second attempt at the same effort would
+        # too, so step down a level (xhigh -> medium -> off).
+        if corrected.get("local_effort") == "xhigh":
+            corrected["local_effort"] = "medium"
+        else:
+            corrected["local_thinking"] = False
     if "local_sampling" in request:
         corrected["local_sampling"] = _seeded(corrected, request["local_sampling"])
     return corrected
@@ -1098,12 +1104,14 @@ class ModelProviderProxy:
             requested_model, self._local_thinking, agent=node_id in _AGENT_NODE_IDS)
         if local:
             request["local_thinking"] = thinking
-        if thinking and node_id not in _AGENT_NODE_IDS and not tools:
-            # xhigh on a planner's plan JSON thought past 40K tokens without answering
-            # (twice, ~55 min each at ~11 tok/s); xhigh stays for agent turns only.
-            request["local_effort"] = "medium"
         if thinking:
-            request["max_tokens"] = max(int(request["max_tokens"]), _LOCAL_THINKING_MAX_TOKENS)
+            # Qwen3.8 guidance: xhigh for planning and hard one-shot calls, medium in
+            # agent loops (one turn of many). xhigh on the plan JSON thought past a 40K
+            # cap without answering, so one-shot calls get the room the context leaves.
+            agent_turn = node_id in _AGENT_NODE_IDS or bool(tools)
+            request["local_effort"] = "medium" if agent_turn else "xhigh"
+            cap = _LOCAL_THINKING_MAX_TOKENS if agent_turn else _LOCAL_DEEP_THINKING_MAX_TOKENS
+            request["max_tokens"] = max(int(request["max_tokens"]), cap)
         elif purpose == "judgment" and local:
             # A verdict is ~1k tokens; a local model stuck repeating findings runs to
             # the cap at ~12 tok/s, so each such attempt would cost ~20 minutes.

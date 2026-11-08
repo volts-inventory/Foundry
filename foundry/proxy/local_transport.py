@@ -18,7 +18,7 @@ OpenAI fields go as such, the rest as extra body fields (see ``_OPENAI_SAMPLING`
 
 Thinking: the proxy's ``local_thinking`` flag picks ``reasoning_effort`` — ``xhigh``
 (Qwen3.8's level for agentic loops; ``local_effort`` overrides it, e.g. ``medium``
-for planner/judgment calls; Ollama maps any effort to plain "on" for a
+for agent turns; Ollama maps any effort to plain "on" for a
 model with only on/off) or ``none``. The reasoning comes back in the message's
 ``reasoning`` field (or inline ``<think>``), never in the parsed text, and is
 replayed as the ``reasoning`` of that assistant turn on the session's next call —

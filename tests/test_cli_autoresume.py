@@ -58,7 +58,7 @@ def test_transient_failure_is_retried_from_checkpoint(monkeypatch: Any) -> None:
             raise ProxyUnavailable("provider ...; judgment nodes must pause-and-escalate")
         return {"done": "yes"}
 
-    monkeypatch.setattr(cli, "_invoke", _fake)
+    monkeypatch.setattr(cli.invoke, "_invoke", _fake)
     final = _call(resumable=True)
 
     assert final == {"done": "yes"}
@@ -75,7 +75,7 @@ def test_non_durable_run_does_not_retry(monkeypatch: Any) -> None:
         calls["n"] += 1
         raise ProxyUnavailable("pause-and-escalate")
 
-    monkeypatch.setattr(cli, "_invoke", _fake)
+    monkeypatch.setattr(cli.invoke, "_invoke", _fake)
     try:
         _call(resumable=False)
         raise AssertionError("expected the transient failure to propagate")
@@ -91,7 +91,7 @@ def test_non_transient_error_always_reraises(monkeypatch: Any) -> None:
     def _fake(*_a: Any, **_k: Any) -> Any:
         raise ValueError("a genuine bug")
 
-    monkeypatch.setattr(cli, "_invoke", _fake)
+    monkeypatch.setattr(cli.invoke, "_invoke", _fake)
     try:
         _call(resumable=True)
         raise AssertionError("expected the real error to propagate")
@@ -110,7 +110,7 @@ def test_budget_is_bounded(monkeypatch: Any) -> None:
         calls["n"] += 1
         raise ProxyUnavailable("pause-and-escalate")
 
-    monkeypatch.setattr(cli, "_invoke", _fake)
+    monkeypatch.setattr(cli.invoke, "_invoke", _fake)
     try:
         _call(resumable=True)
         raise AssertionError("expected exhaustion to re-raise")
@@ -129,7 +129,7 @@ def test_a_stop_during_the_backoff_ends_the_wait_at_once(monkeypatch: Any) -> No
         calls["n"] += 1
         raise ProxyUnavailable("pause-and-escalate")
 
-    monkeypatch.setattr(cli, "_invoke", _fake)
+    monkeypatch.setattr(cli.invoke, "_invoke", _fake)
     stop = threading.Event()
     stop.set()
     with pytest.raises(BuildStopped):
@@ -150,7 +150,7 @@ def test_an_unparseable_reply_is_not_resumed(monkeypatch: Any) -> None:
         calls["n"] += 1
         raise RealUnavailable("no parseable structured reply") from StructuredOutputError("x")
 
-    monkeypatch.setattr(cli, "_invoke", _fake)
+    monkeypatch.setattr(cli.invoke, "_invoke", _fake)
     with pytest.raises(RealUnavailable):
         _call(resumable=True)
     assert calls["n"] == 1 and waited == []
@@ -164,7 +164,7 @@ def test_a_backoff_past_the_time_cap_stops_the_run_now(monkeypatch: Any) -> None
     def _fake(*_a: Any, **_k: Any) -> Any:
         raise ProxyUnavailable("pause-and-escalate")
 
-    monkeypatch.setattr(cli, "_invoke", _fake)
+    monkeypatch.setattr(cli.invoke, "_invoke", _fake)
     meter = TokenMeter(None, time_cap_s=600)  # a 5 min back-off fits once, 10 min does not
     with pytest.raises(TimeCapExceeded, match="time cap reached"):
         _call(resumable=True, meter=meter)

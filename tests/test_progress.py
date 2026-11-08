@@ -122,9 +122,9 @@ def test_run_settings_override_the_env_and_log_cb_gets_the_runs_lines(
         seen["self_check_mode"] = kw.get("self_check_mode")
         return real_graph(*args, **kw)
 
-    monkeypatch.setattr(cli, "_build_proxy", build_proxy)
-    monkeypatch.setattr(cli, "_resolve_coding_adapter", resolve_adapter)
-    monkeypatch.setattr(cli, "build_factory_graph", build_graph)
+    monkeypatch.setattr(cli.runner, "_build_proxy", build_proxy)
+    monkeypatch.setattr(cli.runner, "_resolve_coding_adapter", resolve_adapter)
+    monkeypatch.setattr(cli.runner, "build_factory_graph", build_graph)
     lines: list[str] = []
     result = cli.run(
         "build a tiny URL-shortener service",

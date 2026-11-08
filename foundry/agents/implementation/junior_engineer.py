@@ -1,6 +1,6 @@
 """Shared per-task build helpers for the implementation layer (agents.md Layer 3).
 
-The ticket scheduler (``tickets.py``) and the build/test :func:`make_fixer_node`
+The ticket scheduler (``tickets/``) and the build/test :func:`make_fixer_node`
 run the swappable coding substrate (``rt.adapter``) inside a scoped
 :class:`~foundry.execution.sandbox.Sandbox` and emit a content-addressed
 :class:`~foundry.schemas.implementation.FeatureDiff` through the helpers here.

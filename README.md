@@ -40,7 +40,8 @@ brew install uv git                      # Linux: your package manager + https:/
 # Python >= 3.11 (uv fetches one if the system Python is older)
 npm install -g @anthropic-ai/claude-code # the `claude` CLI — cloud mode (claude-cli backend)
 brew install ollama && ollama serve &    # local / hybrid mode only
-ollama pull qwen3.6:27b-coding-mxfp8     # the default local model
+ollama pull qwen3.8:27b-nvfp4            # the default local model (fallback: qwen3.6:27b-coding-mxfp8)
+launchctl setenv OLLAMA_CONTEXT_LENGTH 131072  # then restart Ollama: a running server keeps its old value
 ```
 
 Per-stack host toolchains — install only the stacks you will build. A missing one
@@ -177,16 +178,34 @@ degrade it to fail-closed JSON parsing. Pin exact model ids per tier with
 
 **Local models** (`--model-mode hybrid|local`) run on an OpenAI-compatible server —
 Ollama's `/v1` by default (`--local-url` / `FOUNDRY_LOCAL_URL`, `--local-model` /
-`FOUNDRY_LOCAL_MODEL`). Local calls do not decode greedily: Qwen's cards warn greedy
-decoding degrades the model into endless repetition, so every local call to a Qwen3
-model gets the vendor's non-thinking sampling (`temperature 0.7, top_p 0.8, top_k 20,
-min_p 0, presence_penalty 1.0`; Qwen3-Coder: `repeat_penalty 1.05` instead of the
-presence penalty) and a seed derived from the request, so a replayed call gets the
-same sample. Ollama's `/v1` honours `temperature`, `top_p`, `presence_penalty`,
-`frequency_penalty` and `seed`; `top_k` / `min_p` / `repeat_penalty` come from the
-model's Modelfile there (other servers take them from the request).
+`FOUNDRY_LOCAL_MODEL`). The default is `qwen3.8:27b-nvfp4` at a 128K context
+(`OLLAMA_CONTEXT_LENGTH=131072`): its 4-bit weights are ~18 GB and the 128K KV cache
+~9 GB, which fits a 48 GB Mac. `qwen3.6:27b-coding-mxfp8` (8-bit, fits 64K) is the
+fallback if tool calls or JSON actions break on 3.8. Every local call whose prompt
+the server saw as far shorter than what was sent logs `context truncated: sent ~N,
+model saw M` (and records it on the call), the sign the server's context is smaller
+than you think.
+
+Local calls do not decode greedily: Qwen's cards warn greedy decoding degrades the
+model into endless repetition, so each local call gets the vendor's sampling, picked
+by model name (most specific first) — Qwen3.8: `temperature 1.0, top_p 0.95, top_k
+20, min_p 0, presence_penalty 0, repeat_penalty 1.0`; other Qwen3.x: `temperature
+0.6, top_p 0.95, top_k 20, min_p 0, presence_penalty 0`; Qwen3-Coder: `0.7 / 0.8 /
+20, repeat_penalty 1.05` — and a seed derived from the request, so a replayed call
+gets the same sample. Ollama's `/v1` honours `temperature`, `top_p`,
+`presence_penalty`, `frequency_penalty` and `seed`; `top_k` / `min_p` /
+`repeat_penalty` come from the model's Modelfile there (the Qwen tags ship the
+card's values; other servers take them from the request).
 `FOUNDRY_LOCAL_SAMPLING=temperature=0.6,top_p=0.95` overrides the profile for every
 local model; `FOUNDRY_LOCAL_SAMPLING=off` restores greedy decoding.
+
+Local Qwen3.x models think (`reasoning_effort: xhigh`) on every call by default —
+the cards say thinking on for agentic work, and Qwen3.8 warns low effort causes
+retries. Each turn's reasoning is sent back with that turn on the next call
+(Qwen's "preserve thinking"), never parsed as the answer, and a thinking call gets
+up to 40960 output tokens. `FOUNDRY_LOCAL_THINKING=off` turns it off, `agent`
+keeps it only for the coding sessions (planner and judgment calls answer directly),
+`on` forces it for any local model.
 
 A local pass costs only wall-clock time, so in local mode (and custom levels that
 are all local) the build-side fix loops **fix until the time cap**: each wave
@@ -279,9 +298,10 @@ uv run pytest -n auto -q                                  # full suite (slow e2e
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | API keys | — |
 | `CLAUDE_CODE_OAUTH_TOKEN` | `claude-cli` token (via `claude setup-token`) | — |
 | `FOUNDRY_MODEL_T1/T2/T3` | Pin exact model id per tier | curated map |
-| `FOUNDRY_LOCAL_URL` / `FOUNDRY_LOCAL_MODEL` | Local server + model (hybrid/local modes) | Ollama `/v1` · `qwen3.6:27b-coding-mxfp8` |
+| `FOUNDRY_LOCAL_URL` / `FOUNDRY_LOCAL_MODEL` | Local server + model (hybrid/local modes) | Ollama `/v1` · `qwen3.8:27b-nvfp4` |
 | `FOUNDRY_HYBRID_DIAGNOSE` | `0` skips the cloud diagnosis before a local repair attempt (hybrid) | on |
 | `FOUNDRY_LOCAL_SAMPLING` | Local sampling: `key=value,...` override or `off` (greedy) | per-model profile |
+| `FOUNDRY_LOCAL_THINKING` | Local thinking: `on`, `off`, or `agent` (coding sessions only) | on for Qwen3.x |
 | `FOUNDRY_MAX_SLOTS` | Parallelism ceiling | auto |
 | `FOUNDRY_COST_CAP_MICROUSD` / `FOUNDRY_TOKEN_CAP` | Spend / token envelope | — |
 | `FOUNDRY_STATE_DIR` | Durable state dir | in-memory |

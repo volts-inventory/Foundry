@@ -437,7 +437,7 @@ def test_local_server_gets_a_json_schema_request_when_it_supports_one() -> None:
     sent = client.chat.completions.calls
     assert len(sent) == 1
     assert sent[0]["response_format"]["json_schema"]["schema"] == SCHEMA
-    assert sent[0]["reasoning_effort"] == "none"
+    assert sent[0]["reasoning_effort"] == "xhigh"  # Qwen3.8 thinks by default
     assert transport.schema_supported is True
 
 
@@ -486,11 +486,16 @@ def test_local_schema_rejection_falls_back_to_prompt_and_parse() -> None:
 # ---- local sampling profiles ---------------------------------------------------
 
 
+QWEN38 = {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0,
+          "presence_penalty": 0.0, "repeat_penalty": 1.0}
+QWEN3 = {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0}
+
+
 @pytest.mark.parametrize(("model", "expected"), [
-    (DEFAULT_LOCAL_MODEL, {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0.0,
-                           "presence_penalty": 1.0}),
-    ("hf.co/unsloth/Qwen3-32B-GGUF:Q4_K_M", {"temperature": 0.7, "top_p": 0.8, "top_k": 20,
-                                             "min_p": 0.0, "presence_penalty": 1.0}),
+    (DEFAULT_LOCAL_MODEL, QWEN38),
+    ("qwen/qwen3.8-27b", QWEN38),
+    ("qwen3.6:27b-coding-mxfp8", QWEN3),
+    ("hf.co/unsloth/Qwen3-32B-GGUF:Q4_K_M", QWEN3),
     ("qwen3-coder:30b", {"temperature": 0.7, "top_p": 0.8, "top_k": 20,
                          "repeat_penalty": 1.05}),
     ("acme-coder-7b", None),
@@ -533,7 +538,7 @@ def test_local_tiers_sample_while_cloud_gates_stay_greedy() -> None:
     assert len(local.requests) == 3
     for req in local.requests:
         assert "temperature" not in req
-        assert req["local_sampling"]["temperature"] == 0.7
+        assert req["local_sampling"]["temperature"] == 1.0
         assert isinstance(req["local_sampling"]["seed"], int)
     assert proxy.manifest[1]["sampling"] == local.requests[0]["local_sampling"]
     assert "greedy" in proxy.manifest[1]["sampling_note"]
@@ -574,12 +579,13 @@ def test_the_local_request_carries_the_sampling_params() -> None:
     proxy.complete(CALL[0], "T2", *CALL[1:], purpose="judgment", schema=SCHEMA)
     sent = client.chat.completions.calls[0]
     # Ollama's /v1 maps these OpenAI fields onto its options ...
-    assert sent["temperature"] == 0.7
-    assert sent["top_p"] == 0.8
-    assert sent["presence_penalty"] == 1.0
+    assert sent["temperature"] == 1.0
+    assert sent["top_p"] == 0.95
+    assert sent["presence_penalty"] == 0.0
     assert isinstance(sent["seed"], int)
     # ... and drops the rest, so they ride as extra body fields for other servers.
-    assert sent["extra_body"] == {"top_k": 20, "min_p": 0.0}
+    assert sent["extra_body"] == {"top_k": 20, "min_p": 0.0, "repeat_penalty": 1.0}
+    assert "local_thinking" not in sent and "local_thinking" not in sent["extra_body"]
     assert "local_sampling" not in sent
     assert sent["response_format"]["type"] == "json_schema"
 
@@ -590,6 +596,169 @@ def test_the_local_client_never_carries_the_openai_key(monkeypatch: pytest.Monke
     client = transport._cache.get()
     assert client.api_key != "sk-real-secret"
     assert str(client.base_url).rstrip("/") == "http://box:1234/v1"
+
+
+# ---- local thinking, roles and truncation ----------------------------------------
+
+
+def _local_proxy(transport: Any, model: str = DEFAULT_LOCAL_MODEL) -> ModelProviderProxy:
+    levels = preset_levels("local", cloud_backend="mock", cloud_models=TIER_MODELS,
+                           local_model=model)
+    return build_level_proxy(levels, cloud_transport=lambda _b: RecordingTransport(),
+                             local_transport=lambda _u: transport, signer=SIGNER)
+
+
+def _thinking_by_node(proxy: ModelProviderProxy, local: RecordingTransport) -> dict[str, bool]:
+    for node in ("planner", "junior_engineer"):
+        proxy.complete(node, "T2", "SOP", [{"role": "user", "content": node}],
+                       purpose="ideation")
+    proxy.complete("reviewer", "T2", "SOP", [{"role": "user", "content": "r"}],
+                   purpose="judgment")
+    nodes = ("planner", "junior_engineer", "reviewer")
+    return {n: r["local_thinking"] for n, r in zip(nodes, local.requests[-3:], strict=True)}
+
+
+@pytest.mark.parametrize(("setting", "model", "expected"), [
+    (None, DEFAULT_LOCAL_MODEL, (True, True, True)),
+    (None, "qwen3.6:27b-coding-mxfp8", (True, True, True)),
+    (None, "qwen3-coder:30b", (False, False, False)),
+    (None, "acme-7b", (False, False, False)),
+    ("off", DEFAULT_LOCAL_MODEL, (False, False, False)),
+    ("agent", DEFAULT_LOCAL_MODEL, (False, True, False)),
+    ("on", "acme-7b", (True, True, True)),
+])
+def test_local_thinking_is_routed_per_call_kind(
+    monkeypatch: pytest.MonkeyPatch, setting: str | None, model: str,
+    expected: tuple[bool, bool, bool],
+) -> None:
+    if setting is not None:
+        monkeypatch.setenv("FOUNDRY_LOCAL_THINKING", setting)
+    local = RecordingTransport()
+    proxy = _local_proxy(local, model)
+    got = _thinking_by_node(proxy, local)
+    assert (got["planner"], got["junior_engineer"], got["reviewer"]) == expected
+    for req, thinks in zip(local.requests, expected, strict=True):
+        # Thinking spends the answer's budget, so it lifts the cap (judgment too).
+        assert req["max_tokens"] == (40960 if thinks else
+                                     8192 if req is local.requests[2] else 16000)
+    assert proxy.manifest[1]["thinking"] is expected[1]
+
+
+def test_cloud_tiers_never_carry_the_thinking_flag_and_a_bad_setting_fails_early(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cloud, local = RecordingTransport(), RecordingTransport()
+    _hybrid(cloud, local).complete("junior_engineer", "T1", *CALL[1:], purpose="ideation")
+    assert "local_thinking" not in cloud.requests[0]
+    monkeypatch.setenv("FOUNDRY_LOCAL_THINKING", "sometimes")
+    with pytest.raises(ValueError, match="FOUNDRY_LOCAL_THINKING"):
+        _hybrid(cloud, local)
+
+
+class _ThinkingCompletions:
+    """Replies with JSON content plus reasoning (in the `reasoning` field, or
+    inline as Qwen's `<think>` block when ``inline``)."""
+
+    def __init__(self, inline: bool = False) -> None:
+        self.inline = inline
+        self.calls: list[dict[str, Any]] = []
+
+    def create(self, **params: Any) -> Any:
+        self.calls.append(params)
+        n = len(self.calls)
+        thought = f'turn {n}: maybe {{"answer": "wrong"}}'
+        answer = json.dumps({"answer": str(n)})
+        message = (SimpleNamespace(content=f"<think>{thought}</think>{answer}")
+                   if self.inline else SimpleNamespace(content=answer, reasoning=thought))
+        return SimpleNamespace(
+            model=params["model"], id=f"cmpl-{n}",
+            choices=[SimpleNamespace(message=message, finish_reason="stop")],
+            usage=SimpleNamespace(prompt_tokens=5, completion_tokens=3),
+        )
+
+
+@pytest.mark.parametrize("inline", [False, True])
+def test_reasoning_never_reaches_the_answer_and_is_replayed_next_turn(inline: bool) -> None:
+    completions = _ThinkingCompletions(inline)
+    transport = LocalOpenAITransport(
+        client=SimpleNamespace(chat=SimpleNamespace(completions=completions)))
+    proxy = _local_proxy(transport)
+    history: list[dict[str, Any]] = [{"role": "user", "content": "task"}]
+    first = proxy.complete("junior_engineer", "T2", "SOP", history, purpose="ideation",
+                           schema=SCHEMA)
+    assert first.parsed == {"answer": "1"} and "think" not in first.text
+    history += [{"role": "assistant", "content": first.text},
+                {"role": "user", "content": "OBSERVATION: ok"}]
+    proxy.complete("junior_engineer", "T2", "SOP", history, purpose="ideation", schema=SCHEMA)
+    sent = completions.calls[1]["messages"]
+    assert sent[2] == {"role": "assistant", "content": first.text,
+                       "reasoning": 'turn 1: maybe {"answer": "wrong"}'}
+    assert "reasoning" not in sent[1] and "reasoning" not in sent[3]
+
+
+def test_reasoning_is_not_replayed_when_thinking_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FOUNDRY_LOCAL_THINKING", "off")
+    completions = _ThinkingCompletions()
+    transport = LocalOpenAITransport(
+        client=SimpleNamespace(chat=SimpleNamespace(completions=completions)))
+    proxy = _local_proxy(transport)
+    first = proxy.complete("junior_engineer", "T2", *CALL[1:], purpose="ideation")
+    history = [*CALL[2], {"role": "assistant", "content": first.text},
+               {"role": "user", "content": "go on"}]
+    proxy.complete("junior_engineer", "T2", "SOP", history, purpose="ideation")
+    assert completions.calls[0]["reasoning_effort"] == "none"
+    assert all("reasoning" not in m for m in completions.calls[1]["messages"])
+
+
+def test_the_developer_role_goes_to_a_local_server_as_system() -> None:
+    client = _local_client(False, "ok")
+    LocalOpenAITransport(client=client).send({
+        "model": "m", "system": "SOP",
+        "messages": [{"role": "developer", "content": "Use Go."},
+                     {"role": "user", "content": "hi"}]})
+    sent = client.chat.completions.calls[0]["messages"]
+    assert [m["role"] for m in sent] == ["system", "system", "user"]
+    assert sent[1]["content"] == "Use Go."
+
+
+class _SeenTransport(RecordingTransport):
+    """A local server that reports seeing ``seen`` prompt tokens."""
+
+    def __init__(self, seen: int) -> None:
+        super().__init__()
+        self.seen = seen
+
+    def send(self, request: dict[str, Any]) -> ProviderResponse:
+        self.requests.append(request)
+        return ProviderResponse(served_model=request["model"], request_id="r", text="ok",
+                                usage={"input_tokens": self.seen, "output_tokens": 1},
+                                stop_reason="stop")
+
+
+@pytest.mark.parametrize(("seen", "warned"), [(9000, False), (2000, True)])
+def test_a_local_prompt_the_server_cut_short_is_flagged(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], seen: int,
+    warned: bool,
+) -> None:
+    monkeypatch.setenv("FOUNDRY_PROGRESS", "1")
+    proxy = _local_proxy(_SeenTransport(seen))
+    big = [{"role": "user", "content": "word " * 8000}]  # ~10K tokens by chars/4
+    proxy.complete("junior_engineer", "T2", "SOP", big, purpose="ideation")
+    record = proxy.manifest[0]
+    err = capsys.readouterr().err
+    if warned:
+        assert record["context_truncated"].startswith("context truncated: sent ~")
+        assert record["context_truncated"].endswith(", model saw 2000")
+        assert "WARNING" in err and "context truncated" in err
+    else:
+        assert "context_truncated" not in record and "context truncated" not in err
+
+
+def test_cloud_calls_are_never_checked_for_truncation() -> None:
+    proxy = _hybrid(_SeenTransport(10), RecordingTransport())
+    proxy.complete("node", "T1", "SOP", [{"role": "user", "content": "word " * 8000}],
+                   purpose="ideation")
+    assert "context_truncated" not in proxy.manifest[0]
 
 
 # ---- native tool calls on the local server (Phase 5) ----------------------------------
@@ -649,7 +818,7 @@ def test_local_server_gets_native_tools_and_returns_tool_calls() -> None:
     proxy, transport = _tool_proxy(completions)
     result = proxy.complete("node", "T2", "SOP", TOOL_HISTORY, purpose="ideation", tools=TOOLS)
     sent = completions.calls[0]
-    assert sent["reasoning_effort"] == "none" and "response_format" not in sent
+    assert sent["reasoning_effort"] == "xhigh" and "response_format" not in sent
     assert sent["tools"][0] == {"type": "function", "function": {
         "name": "read_file", "description": TOOLS[0]["description"],
         "parameters": TOOLS[0]["input_schema"]}}

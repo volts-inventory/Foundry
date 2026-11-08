@@ -15,6 +15,16 @@ backends use.
 
 Sampling: the proxy's per-model local profile arrives as ``local_sampling``;
 OpenAI fields go as such, the rest as extra body fields (see ``_OPENAI_SAMPLING``).
+
+Thinking: the proxy's ``local_thinking`` flag picks ``reasoning_effort`` — ``xhigh``
+(Qwen3.8's level for agentic loops; Ollama maps any effort to plain "on" for a
+model with only on/off) or ``none``. The reasoning comes back in the message's
+``reasoning`` field (or inline ``<think>``), never in the parsed text, and is
+replayed as the ``reasoning`` of that assistant turn on the session's next call —
+how Ollama's /v1 carries Qwen's "preserve thinking": it maps an assistant
+message's ``reasoning`` onto the turn's thinking, which the Qwen3.8 renderer
+always renders (and the Qwen3.5/3.6 one renders for turns after the last user
+query).
 """
 
 from __future__ import annotations
@@ -24,6 +34,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
@@ -53,17 +64,22 @@ __all__ = [
 ]
 
 DEFAULT_LOCAL_URL = "http://localhost:11434/v1"  # Ollama's OpenAI-compatible endpoint
-# Qwen 3.6-27B (dense), Ollama's 8-bit MLX coding tag — the plan's default local model. The exact
+# Qwen3.8-27B (dense), Ollama's 4-bit NVFP4 tag: ~18 GB of weights leave room for
+# a 128K context in 48 GB. The fallback is `qwen3.6:27b-coding-mxfp8`. The exact
 # id depends on how the model was pulled; `--local-check` lists what the server
 # actually serves, and --local-model / FOUNDRY_LOCAL_MODEL override this.
-DEFAULT_LOCAL_MODEL = "qwen3.6:27b-coding-mxfp8"
-# A dense 27B on a laptop can take many minutes for one long completion.
-DEFAULT_LOCAL_TIMEOUT_S = 1800.0
+DEFAULT_LOCAL_MODEL = "qwen3.8:27b-nvfp4"
+# One thinking call on a ~128K prompt is minutes of prefill plus up to 40K tokens
+# of output at ~10-15 tok/s; this only catches a server that hung.
+DEFAULT_LOCAL_TIMEOUT_S = 4 * 3600.0
 
 # The SDK insists on a key; a local server ignores it. Never the real OpenAI key.
 _PLACEHOLDER_KEY = "local-no-key"
 
-_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL)
+_THINK_BLOCK = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+# Chat roles some local chat templates reject (Qwen3.8 has no developer turn).
+_LOCAL_ROLES = {"developer": "system"}
+_REASONING_MEMORY = 1024
 # The sampling fields Ollama's /v1/chat/completions maps onto its options. Its Go
 # decoder silently drops the rest (top_k, min_p, repeat_penalty), so those ride as
 # extra body fields: honoured by llama.cpp / vLLM / LM Studio, while on Ollama the
@@ -82,10 +98,28 @@ def validate_local_url(url: str) -> str:
     return url.strip().rstrip("/")
 
 
-def _strip_thinking(text: str) -> str:
-    """Drop reasoning blocks some local models (Qwen) emit inline: their braces
-    would otherwise derail the JSON extraction."""
-    return _THINK_BLOCK.sub("", text).strip() if "<think>" in text else text
+def _split_thinking(text: str) -> tuple[str, str]:
+    """``(reasoning, answer)``: reasoning some local models (Qwen) emit inline is
+    split off, or its braces would derail the JSON extraction. A bare leading
+    ``...</think>`` is reasoning whose opening tag the chat template wrote."""
+    if "</think>" not in text:
+        return "", text
+    parts = [m.strip() for m in _THINK_BLOCK.findall(text)]
+    rest = _THINK_BLOCK.sub("", text)
+    if "</think>" in rest:
+        head, _, rest = rest.rpartition("</think>")
+        parts.insert(0, head.replace("<think>", "").strip())
+    return "\n\n".join(p for p in parts if p), rest.strip()
+
+
+def _turn_key(content: Any, call_ids: tuple[str, ...]) -> tuple[str, ...] | None:
+    """What identifies an assistant turn when the session sends it back: its tool
+    call ids, else its text."""
+    if call_ids:
+        return ("calls", *call_ids)
+    if isinstance(content, str) and content.strip():
+        return ("text", content)
+    return None
 
 
 def _is_schema_rejection(exc: BaseException) -> bool:
@@ -116,6 +150,9 @@ class LocalOpenAITransport:
         # has no tool support, and one server serves several tiers' models. False
         # makes the proxy raise ToolsUnsupported without sending.
         self._tools_by_model: dict[str, bool] = {}
+        # Each recent assistant turn's reasoning, by _turn_key, replayed when the
+        # session sends that turn back (bounded: sessions end, keys go stale).
+        self._reasoning: OrderedDict[tuple[str, ...], str] = OrderedDict()
 
         def _build() -> Any:
             try:
@@ -129,16 +166,39 @@ class LocalOpenAITransport:
     def tools_support(self, model: str) -> bool | None:
         return self._tools_by_model.get(model)
 
+    def remember(self, response: ProviderResponse) -> None:
+        """Keep ``response``'s reasoning for when its turn comes back."""
+        key = _turn_key(response.text, tuple(str(c.get("id", "")) for c in response.tool_calls))
+        if key is None or not response.reasoning:
+            return
+        self._reasoning[key] = response.reasoning
+        self._reasoning.move_to_end(key)
+        while len(self._reasoning) > _REASONING_MEMORY:
+            self._reasoning.popitem(last=False)
+
+    def _messages(self, request: dict[str, Any], thinking: bool) -> list[dict[str, Any]]:
+        messages = []
+        for msg in _chat_messages(request):
+            msg = {**msg, "role": _LOCAL_ROLES.get(msg["role"], msg["role"])}
+            if thinking and msg["role"] == "assistant":
+                ids = tuple(str(c.get("id", "")) for c in msg.get("tool_calls") or ())
+                key = _turn_key(msg.get("content"), ids)
+                if key is not None and key in self._reasoning:
+                    msg["reasoning"] = self._reasoning[key]
+            messages.append(msg)
+        return messages
+
     def send(self, request: dict[str, Any]) -> ProviderResponse:
         model = request.get("model")
         if not isinstance(model, str) or not model:
             raise TransportError("local transport requires a pinned model id on the request")
-        messages = _chat_messages(request)
+        thinking = request.get("local_thinking") is True
+        messages = self._messages(request, thinking)
 
-        # Thinking models (Qwen3.x) reason by default, multiplying output tokens
-        # ~5x on short agent turns; Ollama's /v1 ignores `think` and honours this.
+        # Ollama's /v1 ignores `think` and honours this; "none" turns a Qwen3.x
+        # model's default thinking off.
         params: dict[str, Any] = {"model": model, "messages": messages,
-                                  "reasoning_effort": "none"}
+                                  "reasoning_effort": "xhigh" if thinking else "none"}
         max_tokens = request.get("max_tokens")
         if isinstance(max_tokens, int) and max_tokens > 0:
             params["max_tokens"] = max_tokens
@@ -201,19 +261,27 @@ class LocalOpenAITransport:
         if "reasoning_effort" in params:
             self.reasoning_supported = True
         choice = response.choices[0] if getattr(response, "choices", None) else None
-        text = (getattr(choice.message, "content", "") or "") if choice is not None else ""
+        message = choice.message if choice is not None else None
+        text = (getattr(message, "content", "") or "") if message is not None else ""
+        inline, text = _split_thinking(text if isinstance(text, str) else str(text))
+        # Ollama names it `reasoning`; llama.cpp / vLLM `reasoning_content`.
+        field = getattr(message, "reasoning", None) or getattr(message, "reasoning_content", None)
+        reasoning = "\n\n".join(r for r in (field if isinstance(field, str) else "", inline) if r)
         usage = getattr(response, "usage", None)
-        return ProviderResponse(
+        out = ProviderResponse(
             served_model=str(getattr(response, "model", "") or ""),
             request_id=str(getattr(response, "id", "") or ""),
-            text=_strip_thinking(text if isinstance(text, str) else str(text)),
+            text=text,
             usage=_usage(
                 input_tokens=_as_int(getattr(usage, "prompt_tokens", 0)) if usage else 0,
                 output_tokens=_as_int(getattr(usage, "completion_tokens", 0)) if usage else 0,
             ),
             stop_reason=str(getattr(choice, "finish_reason", "") or "stop") if choice else "stop",
-            tool_calls=_chat_tool_calls(choice.message) if choice is not None else (),
+            tool_calls=_chat_tool_calls(message) if message is not None else (),
+            reasoning=reasoning,
         )
+        self.remember(out)
+        return out
 
 
 @dataclass(frozen=True)

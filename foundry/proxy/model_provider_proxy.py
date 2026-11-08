@@ -291,20 +291,23 @@ def default_sampling_policy() -> SamplingPolicy:
 # degradation and endless repetitions" — exactly the runaway/repeating JSON and
 # fix passes repeating one move seen on local runs. Every local-tier call
 # (ideation, gate, judgment, agent turns) whose model matches a glob below is sent
-# the vendor's recommended non-thinking sampling instead. That costs nothing the
+# the vendor's recommended sampling instead. That costs nothing the
 # factory relies on: a verdict's trustworthiness comes from the structured-output
 # channel, the gates' own execution and the Zone-B attestation, not from greedy
 # decoding; and replayability comes from a fixed per-request `seed` (same request
 # => same seed => same sample on a seeded server), so the call cache and a
 # crash-resume still see the reply they would have, while a retry — whose prompt
-# already differs — draws a fresh sample. First match wins.
+# already differs — draws a fresh sample. First match wins, so the most specific
+# glob comes first.
 _LOCAL_SAMPLING_PROFILES: tuple[tuple[str, dict[str, float]], ...] = (
+    # Qwen3.8 card (thinking mode).
+    ("*qwen3.8*", {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0,
+                   "presence_penalty": 0.0, "repeat_penalty": 1.0}),
     # Qwen3-Coder generation_config.json.
     ("*qwen*coder*", {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "repeat_penalty": 1.05}),
-    # Qwen3 / 3.5 / 3.6 non-thinking ("instruct") mode. The card allows a presence
-    # penalty of 0-2; the low end, because it also taxes JSON's structural tokens.
-    ("*qwen3*", {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0.0,
-                 "presence_penalty": 1.0}),
+    # Qwen3 / 3.5 / 3.6 thinking mode (the Qwen3.6 card).
+    ("*qwen3*", {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0,
+                 "presence_penalty": 0.0}),
 )
 LOCAL_SAMPLING_KEYS: frozenset[str] = frozenset({
     "temperature", "top_p", "top_k", "min_p",
@@ -361,6 +364,63 @@ def _seeded(request: dict[str, Any], profile: Mapping[str, Any]) -> dict[str, An
     body = {k: v for k, v in request.items() if k != "local_sampling"}
     digest = hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode()).digest()
     return {**profile, "seed": int.from_bytes(digest[:4], "big") & 0x7FFFFFFF}
+
+
+# ---- Local thinking (local tiers only) -------------------------------------------
+#
+# FOUNDRY_LOCAL_THINKING: off | on | agent. `agent` thinks only in coding-agent
+# sessions (the proxy-agent / raw-react closures in cli.py, node "junior_engineer")
+# and answers planner/judgment calls directly. Unset: on for Qwen3.x thinking
+# models (their cards say thinking on for agentic work; Qwen3.8 warns that low
+# effort in agentic loops causes retries), off for every other model.
+LOCAL_THINKING_ENV = "FOUNDRY_LOCAL_THINKING"
+LocalThinking = Literal["off", "on", "agent"]
+_LOCAL_THINKING_MODES: tuple[LocalThinking, ...] = ("off", "on", "agent")
+_AGENT_NODE_IDS = frozenset({"junior_engineer"})
+# A thinking turn spends its reasoning out of the answer's budget: at xhigh a hard
+# ticket, a verdict or the planner's plan JSON can think for 20K+ tokens first.
+_LOCAL_THINKING_MAX_TOKENS = 40960
+# A prompt the server saw as under this share of our estimate was cut to fit its
+# context window (Ollama truncates silently). Chars/4 under-counts code and JSON,
+# so a healthy call reads at or above 1.
+_TRUNCATION_RATIO = 0.75
+_TRUNCATION_MIN_TOKENS = 1024
+
+
+def parse_local_thinking(value: str) -> LocalThinking | None:
+    """``FOUNDRY_LOCAL_THINKING``: unset/blank = the per-model default; else one of
+    off/on/agent. ValueError on anything else."""
+    value = value.strip().lower()
+    for mode in _LOCAL_THINKING_MODES:
+        if value == mode:
+            return mode
+    if value:
+        raise ValueError(f"{LOCAL_THINKING_ENV}: expected off, on or agent, got {value!r}")
+    return None
+
+
+def local_thinking_for(model_id: str, setting: LocalThinking | None, *, agent: bool) -> bool:
+    """Whether a local call on ``model_id`` thinks (``agent``: a coding-agent turn)."""
+    if setting is None:
+        name = model_id.lower()
+        return fnmatchcase(name, "*qwen3*") and "coder" not in name
+    return setting == "on" or (setting == "agent" and agent)
+
+
+def _estimated_prompt_tokens(request: Mapping[str, Any]) -> int:
+    """A rough token count of what ``request`` sends (chars / 4)."""
+    sent = [request.get("system"), request.get("messages"), request.get("tools")]
+    return len(json.dumps(sent, default=str)) // 4
+
+
+def truncation_warning(request: Mapping[str, Any], usage: Mapping[str, int]) -> str | None:
+    """The warning for a local call whose server saw far fewer prompt tokens than
+    were sent (``usage.input_tokens`` is Ollama's ``prompt_eval_count``), else None."""
+    seen = int(usage.get("input_tokens", 0) or 0)
+    sent = _estimated_prompt_tokens(request)
+    if seen <= 0 or sent < _TRUNCATION_MIN_TOKENS or seen >= sent * _TRUNCATION_RATIO:
+        return None
+    return f"context truncated: sent ~{sent}, model saw {seen}"
 
 
 # ---- Pinned-ID-drift policy (arch §8, ops §5) ---------------------------------
@@ -532,6 +592,9 @@ class ProviderResponse:
     # Native tool calls, in order: {"id", "name", "input": dict} and, when the
     # backend's arguments were not a JSON object, an "error" string.
     tool_calls: tuple[dict[str, Any], ...] = ()
+    # A local thinking model's reasoning, kept out of ``text`` so it never reaches
+    # the JSON parse; the local transport replays it on the session's next turn.
+    reasoning: str = ""
 
 
 class ProviderTransport(Protocol):
@@ -890,6 +953,7 @@ class ModelProviderProxy:
         # Local tiers' sampling override (FOUNDRY_LOCAL_SAMPLING), parsed now so a
         # typo fails at startup rather than on the first local call.
         self._local_sampling = parse_local_sampling(os.environ.get(LOCAL_SAMPLING_ENV, ""))
+        self._local_thinking = parse_local_thinking(os.environ.get(LOCAL_THINKING_ENV, ""))
         self._lineage = lineage_map or LineageMap()
         self._signer = signer
         # Backend/model-aware determinism control (arch §8): which knob a
@@ -1026,11 +1090,18 @@ class ModelProviderProxy:
         request, sampling, sampling_note = self._build_request(
             requested_model, system_sop, messages, purpose, schema, tools
         )
-        if purpose == "judgment" and tier in self._local_tiers:
+        local = tier in self._local_tiers
+        thinking = local and local_thinking_for(
+            requested_model, self._local_thinking, agent=node_id in _AGENT_NODE_IDS)
+        if local:
+            request["local_thinking"] = thinking
+        if thinking:
+            request["max_tokens"] = max(int(request["max_tokens"]), _LOCAL_THINKING_MAX_TOKENS)
+        elif purpose == "judgment" and local:
             # A verdict is ~1k tokens; a local model stuck repeating findings runs to
             # the cap at ~12 tok/s, so each such attempt would cost ~20 minutes.
             request["max_tokens"] = min(int(request["max_tokens"]), _LOCAL_JUDGMENT_MAX_TOKENS)
-        if tier in self._local_tiers:
+        if local:
             profile = local_sampling_for(requested_model, self._local_sampling)
             if profile is not None:
                 # Vendor sampling replaces greedy on local tiers (see
@@ -1045,9 +1116,14 @@ class ModelProviderProxy:
 
         label = f"model call: {node_id} ({tier}, {purpose})"
         cached = self._cached(request, schema)
+        truncated: str | None = None
         if cached is not None:
             response, parsed = cached
             progress.log(f"reuse {label} (finished before a restart)")
+            remember = getattr(self._tier_transports.get(tier, self._transport),
+                               "remember", None)
+            if local and remember is not None:
+                remember(response)  # so the next turn still replays this turn's reasoning
         else:
             progress.log(f"start {label}")
             started = time.monotonic()
@@ -1056,6 +1132,11 @@ class ModelProviderProxy:
             )
             progress.finished(label, started, response.usage, self.token_meter)
             self._cache_put(request, schema, response)
+            if local:
+                truncated = truncation_warning(request, response.usage)
+                if truncated:
+                    progress.log(f"WARNING {label}: {truncated} (raise the server's "
+                                 "context length, e.g. OLLAMA_CONTEXT_LENGTH)")
 
         # Lineage is resolved from the proxy-OBSERVED served model id; an
         # unknown id fails closed inside the LineageMap (never guessed).
@@ -1076,8 +1157,11 @@ class ModelProviderProxy:
             "sampling": sampling,
             "drift": drift,
         }
-        if tier in self._local_tiers:
+        if local:
             record["local"] = True
+            record["thinking"] = thinking
+        if truncated:
+            record["context_truncated"] = truncated
         if drift_kind is not None:
             record["drift_kind"] = drift_kind
         if sampling_note:

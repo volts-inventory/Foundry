@@ -546,10 +546,13 @@ def test_a_python_sqlalchemy_plan_pins_the_typed_model_constraint() -> None:
     pcs = _stack_constraints(python, {"design": {"body": "SQLAlchemy models over SQLite"}})
     assert [pc["id"] for pc in pcs] == [
         "PC-python-sqlite-memory", "PC-python-sqlalchemy-typed",
-        "PC-python-sqlalchemy-relationships",
+        "PC-python-sqlalchemy-relationships", "PC-python-sqlalchemy-sqlite",
     ]
     assert "Mapped[int] = mapped_column(" in pcs[1]["text"]
-    assert _stack_constraints(python, {"design": {"body": "SQLAlchemy on Postgres"}}) == pcs[1:]
+    # The local shop bench: the memory-connection constraint led auth.py to a raw
+    # sqlite3.connect(':memory:') handed to Base.metadata.create_all.
+    assert "StaticPool" in pcs[3]["text"] and "never through sqlite3.connect()" in pcs[3]["text"]
+    assert _stack_constraints(python, {"design": {"body": "SQLAlchemy on Postgres"}}) == pcs[1:3]
     assert _stack_constraints(StackDecision(language="go"), {"x": "sqlalchemy"}) == []
 
 

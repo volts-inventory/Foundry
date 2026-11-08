@@ -2030,6 +2030,7 @@ def _own_package_inits(
     directories are left to pytest's own rootdir handling."""
     if stack.language != "python":
         return list(tickets), []
+    tickets, concerns = _merge_shadowed_modules(tickets, existing)
     owned = {f for t in tickets for f in t.files} | existing
     dirs: dict[str, str] = {}  # missing __init__.py -> first ticket writing below it
     for t in tickets:
@@ -2044,7 +2045,7 @@ def _own_package_inits(
                 if init not in owned:
                     dirs.setdefault(init, t.id)
     if not dirs:
-        return list(tickets), []
+        return list(tickets), concerns
     holder = CONTRACTS_TICKET_ID if any(t.id == CONTRACTS_TICKET_ID for t in tickets) else None
     added: dict[str, list[str]] = {}
     for init, first in dirs.items():
@@ -2057,8 +2058,50 @@ def _own_package_inits(
         }) if t.id in added else t
         for t in tickets
     ]
-    return out, [f"Ticket {tid}: added package marker(s) {', '.join(inits)} that no "
-                 "ticket wrote." for tid, inits in added.items()]
+    return out, [*concerns, *(f"Ticket {tid}: added package marker(s) {', '.join(inits)} "
+                              "that no ticket wrote." for tid, inits in added.items())]
+
+
+def _merge_shadowed_modules(
+    tickets: Sequence[Ticket], existing: frozenset[str] = frozenset(),
+) -> tuple[list[Ticket], list[str]]:
+    """Plan a module ``x.py`` as ``x/__init__.py`` when the plan (or the base tree)
+    also writes files under ``x/``: a package directory shadows the sibling module,
+    so ``import x`` loads the package — an empty marker — and every ``from x import``
+    of the module's names fails. Epic planners split the layout this way (one writes
+    models.py, another models/cart.py). ``import x`` and ``x.y`` stay as planned.
+    A base-tree module or a generated ticket's file is left as it is."""
+    planned = {f for t in tickets for f in t.files}
+    dirs = {f.rsplit("/", 1)[0] for f in planned | existing if "/" in f}
+    dirs |= {"/".join(d.split("/")[:i]) for d in tuple(dirs)
+             for i in range(1, d.count("/") + 1)}
+    frozen = {f for t in tickets if t.id in _GENERATED_TICKETS for f in t.files}
+    moves = {f: f.removesuffix(".py") + "/__init__.py" for f in planned
+             if f.endswith(".py") and f.removesuffix(".py") in dirs
+             and f not in existing and f not in frozen
+             and not any(p.startswith("test") for p in f.split("/"))}
+    if not moves:
+        return list(tickets), []
+    out: list[Ticket] = []
+    concerns: list[str] = []
+    for t in tickets:
+        mine = [f for f in t.files if f in moves]
+        files = _uniq(tuple(moves.get(f, f) for f in t.files))
+        reads = _uniq(tuple(moves.get(f, f) for f in t.reads))
+        if files == t.files and reads == t.reads:
+            out.append(t)
+            continue
+        note = "".join(
+            f" Write {f}'s code as {moves[f]}: the plan also has a {f.removesuffix('.py')}/ "
+            f"package, which would shadow a {f} module (`import "
+            f"{f.removesuffix('.py').replace('/', '.')}` is unchanged)." for f in mine)
+        out.append(t.model_copy(update={"files": files, "reads": reads,
+                                        "description": t.description + note}))
+        if mine:
+            concerns.append(f"Ticket {t.id}: planned {', '.join(mine)} as "
+                            f"{', '.join(moves[f] for f in mine)}: a package of that "
+                            "name shadows the module.")
+    return out, concerns
 
 
 def _add_contract_deps(tickets: Sequence[Ticket]) -> tuple[list[Ticket], list[str]]:
@@ -2790,6 +2833,22 @@ _SQLALCHEMY_RELATIONSHIP_CONSTRAINT = {
 }
 
 
+_SQLALCHEMY_SQLITE_CONSTRAINT = {
+    "id": "PC-python-sqlalchemy-sqlite",
+    "text": (
+        "Python SQLAlchemy over SQLite: every module reaches the database through "
+        "SQLAlchemy, never through sqlite3.connect(). An in-memory database is ONE "
+        "shared engine, `create_engine('sqlite://', poolclass=StaticPool, "
+        "connect_args={'check_same_thread': False})`; `Base.metadata.create_all`, "
+        "`drop_all` and `Session` take that engine, never a sqlite3 connection, which "
+        "has none of the methods they call (AttributeError: 'sqlite3.Connection' "
+        "object has no attribute '_run_ddl_visitor')."
+    ),
+    "scope": "global",
+    "source": NODE_ID,
+}
+
+
 def _stack_constraints(
     stack: StackDecision | None, payload: dict[str, Any]
 ) -> list[dict[str, Any]]:
@@ -2797,10 +2856,11 @@ def _stack_constraints(
     if stack is None or stack.language != "python":
         return []
     text = str(payload).lower()
-    return [c for c, word in ((_SQLITE_MEMORY_CONSTRAINT, "sqlite"),
-                              (_SQLALCHEMY_TYPED_CONSTRAINT, "sqlalchemy"),
-                              (_SQLALCHEMY_RELATIONSHIP_CONSTRAINT, "sqlalchemy"))
-            if word in text]
+    return [c for c, words in ((_SQLITE_MEMORY_CONSTRAINT, ("sqlite",)),
+                               (_SQLALCHEMY_TYPED_CONSTRAINT, ("sqlalchemy",)),
+                               (_SQLALCHEMY_RELATIONSHIP_CONSTRAINT, ("sqlalchemy",)),
+                               (_SQLALCHEMY_SQLITE_CONSTRAINT, ("sqlite", "sqlalchemy")))
+            if all(w in text for w in words)]
 
 
 def ticket_owner(ticket: Ticket) -> str:

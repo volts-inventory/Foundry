@@ -346,6 +346,33 @@ def test_unowned_python_package_markers_get_an_owner() -> None:
     assert _own_stack_files(ts, StackDecision(language="typescript"))[0] == ts
 
 
+def test_a_module_a_planned_package_would_shadow_becomes_the_package() -> None:
+    # The local shop bench: E1 planned models.py, E4 models/cart.py, and the contracts
+    # ticket got an empty models/__init__.py in wave 0 — `from models import Base`
+    # loaded the empty package in every later ticket.
+    stack = StackDecision(language="python")
+    tickets = [_ticket("contracts", ("contracts.py",)),
+               _ticket("E1-T02", ("models.py", "tests/test_e1_t02.py")),
+               _ticket("E2-T01", ("auth.py",), reads=("models.py",)),
+               _ticket("E4-T01", ("models/cart.py", "services/cart_service.py"))]
+    out, concerns, _ = _own_stack_files(tickets, stack)
+    by_id = {t.id: t for t in out}
+    assert by_id["E1-T02"].files == ("models/__init__.py", "tests/test_e1_t02.py")
+    assert "models/__init__.py" in by_id["E1-T02"].description
+    assert by_id["E2-T01"].reads == ("models/__init__.py",)
+    assert by_id["contracts"].files == ("contracts.py", "services/__init__.py")
+    assert by_id["E4-T01"] == tickets[3]
+    assert any("shadows the module" in c for c in concerns)
+    # A base-tree module stays; so does a plan with no clashing directory.
+    out, _, _ = _own_stack_files(tickets[1:2], stack, frozenset({"models/cart.py"}))
+    assert out[0].files[0] == "models/__init__.py"
+    out, _, _ = _own_stack_files(tickets[3:], stack, frozenset({"models.py"}))
+    assert "models/__init__.py" in out[0].files
+    plain = [_ticket("T1", ("models.py", "app/models.py"))]
+    assert _own_stack_files(plain, stack)[0][0].files == ("models.py", "app/models.py",
+                                                          "app/__init__.py")
+
+
 # ---- a failed smoke run carries its reason ----------------------------------------
 
 

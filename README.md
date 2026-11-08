@@ -42,6 +42,8 @@ npm install -g @anthropic-ai/claude-code # the `claude` CLI — cloud mode (clau
 brew install ollama && ollama serve &    # local / hybrid mode only
 ollama pull qwen3.8:27b-nvfp4            # the default local model (fallback: qwen3.6:27b-coding-mxfp8)
 launchctl setenv OLLAMA_CONTEXT_LENGTH 131072  # then restart Ollama: a running server keeps its old value
+# Ollama as a LaunchDaemon instead: set the var in its plist's EnvironmentVariables, then
+# `launchctl bootout` + `bootstrap` it (`kickstart -k` restarts with the old env)
 ```
 
 Per-stack host toolchains — install only the stacks you will build. A missing one

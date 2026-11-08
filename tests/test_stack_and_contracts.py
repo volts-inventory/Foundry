@@ -752,7 +752,7 @@ def _constructed_gates(
     profile: Any = None,
 ) -> dict[str, Any]:
     """The Build/Test gates run_build_test_gates constructs (they still run)."""
-    import foundry.graph.gate_wiring.materialize as gw
+    import foundry.graph.gate_wiring.runs as gw
 
     made: dict[str, Any] = {}
 

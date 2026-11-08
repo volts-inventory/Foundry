@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import contextlib
 import re
-from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from foundry.agents._common import journal_entry
@@ -32,6 +31,7 @@ from foundry.agents._runtime import AgentRuntime, NodeFn
 from foundry.canonical import content_digest
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
 from foundry.execution.sandbox import Sandbox
+from foundry.graph.gate_wiring import apply_overlay
 from foundry.schemas.architecture import PinnedConstraint
 from foundry.schemas.base import Artifact
 from foundry.schemas.gates import FixPass, GateResult, GateStatus
@@ -682,26 +682,6 @@ def _build_packet(
     )
 
 
-def _apply_overlay(worktree: Path, overlay: Mapping[str, str | None]) -> None:
-    """Write predecessor slices onto a fresh clone (content ⇒ write, None ⇒
-    delete). Paths are containment-checked defensively even though they come
-    from our own CAS (same posture as the integration boundary, D-R1-03)."""
-    root = worktree.resolve()
-    for rel, content in sorted(overlay.items()):
-        pure = PurePosixPath(rel)
-        if pure.is_absolute() or ".." in pure.parts:
-            raise ValueError(f"overlay path {rel!r} escapes the worktree")
-        target = (root / pure).resolve()
-        if not str(target).startswith(str(root)):
-            raise ValueError(f"overlay path {rel!r} escapes the worktree")
-        if content is None:
-            if target.is_file():
-                target.unlink()
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
-
-
 def _sandbox_for(
     rt: AgentRuntime, source_dir: str, snapshot_store: str | None, tier: str | None = None
 ) -> Sandbox:
@@ -763,7 +743,7 @@ def _run_one_task(
     sandbox = _sandbox_for(rt, source_dir, snapshot_store)
     try:
         if overlay:
-            _apply_overlay(sandbox.worktree, overlay)
+            apply_overlay(sandbox.worktree, overlay)
         base = sandbox.snapshot()
         packet = _build_packet(
             task,

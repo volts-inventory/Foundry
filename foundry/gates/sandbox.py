@@ -78,7 +78,7 @@ from pathlib import Path
 from typing import IO
 from urllib.parse import unquote, urlsplit, urlunsplit
 
-from foundry.execution.sandbox import _force_rmtree
+from foundry.fs import force_rmtree
 
 from .runner import GroundingUnavailable, run_grounding_command
 
@@ -1093,7 +1093,7 @@ class ToolchainCache:
             root, self._root = self._root, None
         if root is None:
             return
-        _force_rmtree(Path(root))
+        force_rmtree(Path(root))
 
 
 _OFFLINE_ENV = {"CARGO_NET_OFFLINE": "true"}

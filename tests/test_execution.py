@@ -115,7 +115,7 @@ def test_destroy_removes_a_read_only_tree(source_dir: Path, tmp_path: Path):
 def test_dir_chmod_never_follows_a_symlink(tmp_path: Path):
     # The path is opened O_NOFOLLOW: a directory swapped for a symlink after the
     # walk's islink check would otherwise be chmod-ed through it.
-    from foundry.execution.sandbox import _chmod_dir_nofollow
+    from foundry.fs import _chmod_dir_nofollow
 
     outside = tmp_path / "outside"
     outside.mkdir(mode=0o755)

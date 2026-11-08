@@ -152,7 +152,7 @@ class CheckBase:
         """(the materialized tree, every ticket's planned files). Raises
         :class:`~foundry.graph.gate_wiring.MaterializationError` when the tree
         cannot be built."""
-        from foundry.graph.gate_wiring import materialize_workdir, planned_files
+        from foundry.graph.gate_wiring import apply_overlay, materialize_workdir, planned_files
 
         with self._lock:
             if self._built is None:
@@ -167,10 +167,8 @@ class CheckBase:
                 )
                 files, deleted = self._reset
                 if files or deleted:
-                    from foundry.agents.implementation.junior_engineer import _apply_overlay
-
                     overlay: dict[str, str | None] = {**files, **dict.fromkeys(deleted)}
-                    _apply_overlay(root, overlay)
+                    apply_overlay(root, overlay)
                 self._built = (root, tuple(planned_files(self.state, self._resolve)))
             return self._built
 
